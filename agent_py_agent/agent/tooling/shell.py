@@ -91,7 +91,12 @@ from .process_registry import (
     renice_process_tree,
     terminate_process_tree,
 )
-from .process_scope import ProcessAccessScope, ProcessExecutionScope, process_access_scope
+from .process_scope import (
+    ProcessAccessScope,
+    ProcessExecutionScope,
+    exact_process_read_scope,
+    process_access_scope,
+)
 from .process_session_store import process_session_store_root
 from .sandbox import SandboxUnavailable, prune_transient_bwrap_sidecar_mounts
 from .shell_syntax import contains_unmanaged_background_operator
@@ -179,6 +184,7 @@ class _ShellArtifactExecutionRequest:
     operation_managed: bool
     # H3：registry 给的本任务核验记录保护状态（protected / no_task_root），原样进回执；没经 registry 时为空、回执不加这一项。
     task_records: str = ""
+    artifact_registry_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -221,7 +227,14 @@ def _is_dangerous_command(command: str) -> bool:
 
 
 class CommandInterruptedError(RuntimeError):
-    """Foreground command was cancelled by the owning conversation request."""
+    """保留原命令的物理清理证据；取消不代表外部业务效果已回滚。"""
+
+    def __init__(self, command: str, *, termination: ProcessTerminationReceipt | None = None,
+                 pid: int = 0, birth_token: str = "") -> None:
+        super().__init__(command)
+        self.termination = termination
+        self.pid = pid
+        self.birth_token = birth_token
 
 
 # LLM: 仅本地进程执行器构造该异常；普通 TimeoutExpired 不含终止证明，不能降级 UNKNOWN。
@@ -256,7 +269,8 @@ def parse_shell_command(tool_name: str, raw_command: object) -> str | ToolHandle
     try:
         return _validate_command(str(raw_command or ""))
     except ValueError as exc:
-        return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS",
+                                  effect_outcome="not_started")
 
 
 # LLM: shell 不能成为读取子代理内部状态的旁路；命中时只返回事件等待与交付
@@ -366,6 +380,7 @@ def _working_dir_from_params(
             False,
             f"COMMAND_ACCESS_DENIED: {field} does not exist or is not a directory: {target}",
             error_code="PATH_NOT_FOUND",
+            effect_outcome="not_started",
         )
     mode = _normalize_access_mode(access_mode)
     # owner wall is stronger than both a model-provided working_dir and a per-turn workspace
@@ -386,8 +401,10 @@ def _working_dir_from_params(
             return ToolHandlerOutcome(
                 "run_command",
                 False,
-                "COMMAND_ACCESS_DENIED: 当前 owner 只能在自己的 WorkspaceOnly 范围内执行命令。",
+                "COMMAND_ACCESS_DENIED: working_dir 超出当前 owner 的 WorkspaceOnly 范围；命令尚未启动。"
+                "请改用当前工作区目录，不要原样重试越界目录。",
                 error_code=decision.code or "PATH_OUTSIDE_WORKSPACE",
+                effect_outcome="not_started",
             )
         return target
     if mode == "full-access":
@@ -405,6 +422,7 @@ def _working_dir_from_params(
             False,
             f"COMMAND_ACCESS_DENIED: {decision.message}",
             error_code=decision.code or "PATH_ACCESS_DENIED",
+            effect_outcome="not_started",
         )
     return ToolHandlerOutcome(
         "run_command",
@@ -414,6 +432,7 @@ def _working_dir_from_params(
             " 如确实需要访问系统其他目录，请把 access_mode 显式改为 full-access。"
         ),
         error_code="PATH_OUTSIDE_WORKSPACE",
+        effect_outcome="not_started",
     )
 
 
@@ -595,13 +614,30 @@ def _communicate_process(
     next_exit_probe = 0.0
     probe_interval = _FOREGROUND_EXIT_PROBE_INITIAL_SECONDS
     demotions = 0
-    with register_cancellation_callback(lambda: _cancel_foreground_wait(proc, birth_token, capture)):
+    stop_lock = threading.Lock()
+    stop_receipt = None
+
+    def cancel_process():
+        nonlocal stop_receipt
+        # 回调和等待线程可能同时取消；保留首次原树快照，不能用后来的already_gone覆盖它。
+        with stop_lock:
+            if stop_receipt is None:
+                stop_receipt = _kill_process_group(proc, birth_token)
+            return stop_receipt
+
+    def cancel_wait():
+        try:
+            cancel_process()
+        finally:
+            capture.wake()
+
+    with register_cancellation_callback(cancel_wait):
         while True:
             generation = getattr(capture, "generation", 0)
             if is_interrupted() or cancellation_requested():
-                _kill_process_group(proc, birth_token)
+                termination = cancel_process()
                 capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
-                raise CommandInterruptedError(command)
+                raise CommandInterruptedError(command, termination=termination, pid=proc.pid, birth_token=birth_token or "")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 termination = _kill_process_group(proc, birth_token)
@@ -619,7 +655,7 @@ def _communicate_process(
             if code is not None:
                 out, err, facts = capture.result()
                 if cancellation_requested():
-                    raise CommandInterruptedError(command)
+                    raise CommandInterruptedError(command, termination=stop_receipt or termination, pid=proc.pid, birth_token=birth_token or "")
                 result = subprocess.CompletedProcess(command, code, out, err)
                 result.capture = facts
                 result.termination = termination
@@ -663,15 +699,6 @@ def _close_foreground_pipes(proc) -> None:
                 stream.close()
             except (OSError, ValueError):
                 logger.warning("foreground pipe cleanup failed", exc_info=True)
-
-
-# LLM: 取消只唤醒等待，不提前停止排空；始终转调原身份核验的终止入口，finally也能打断等待。
-# 函数用途: 取消前台进程并让等待线程立即复核结果。
-def _cancel_foreground_wait(proc, birth_token: str | None, capture: ProcessOutputCapture) -> None:
-    try:
-        _kill_process_group(proc, birth_token)
-    finally:
-        capture.wake()
 
 
 # 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。
@@ -1133,6 +1160,7 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
                 "__sandbox_task_records",
                 "__access_mode",
                 "__run_scope",
+                "__artifact_registry_root",
                 "__process_completion_target",
                 "__tool_call_id",
                 "__operation_id",
@@ -1288,6 +1316,7 @@ class ShellTool(BaseTool):
                     f"codes={','.join(command_policy.finding_codes)} command={command[:80]}..."
                 ),
                 error_code="COMMAND_POLICY_BLOCKED",
+                effect_outcome="not_started",
             )
         if contains_unmanaged_background_operator(command):
             return _unmanaged_background_result(self.model_spec.name)
@@ -1345,6 +1374,8 @@ class ShellTool(BaseTool):
                     self.access_mode,
                     params.get("__access_mode"),
                 ),
+                artifact_registry_root=(Path(params["__artifact_registry_root"])
+                    if params.get("__artifact_registry_root") else self.workspace_root),
                 run_scope=params.get("__run_scope"),
                 tool_call_id=str(params.get("__tool_call_id") or ""),
                 operation_id=str(params.get("__operation_id") or ""),
@@ -1488,17 +1519,26 @@ class ShellTool(BaseTool):
                                             **({"sandbox_factory": self.sandbox_factory} if self.sandbox_factory is not None else {}))
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
-            log_path = jobs_dir / f"job-{time.time_ns()}.log"
+            session_root = process_session_store_root(self.workspace_root, access_scope.owner_home)
+            # 日志与持久执行身份同属宿主权威目录，外部工作区不能使只读观察越过 owner 边界。
+            log_dir = session_root / ".background_jobs"
+            ensure_private_dir(log_dir)
+            log_path = log_dir / f"job-{time.time_ns()}.log"
             log_path.touch(exist_ok=False)
             request = BackgroundLaunchRequest(
                 argv=argv, command=command, cwd=target, log_path=log_path,
                 env=_subprocess_text_env(self.path_access_policy.owner_scope_root, hidden_roots=self.host_private_roots,
                                          sandboxed=True, host_credential_env_names=self.host_credential_env_names),
                 max_log_bytes=_MAX_BG_LOG_BYTES,
-                store_root=process_session_store_root(self.workspace_root, access_scope.owner_home),
+                store_root=session_root,
                 access_scope=access_scope, execution_scope=execution_scope or ProcessExecutionScope(owner_home=access_scope.owner_home),
                 completion_target=dict(completion_target or {}), authority_check=context.execution_authority_check if context else None,
                 listen_scope=listen_scope, listen_scope_enforce=self.listen_scope_enforce,
+                exact_read_scope=(exact_process_read_scope(context.workspace_read_context, tuple(sandbox_roots[1]))
+                    if getattr(self, '_sandbox_exact_read_scope', False) and context is not None
+                    and context.workspace_read_context is not None and sandbox_roots[1] is not None
+                    and all((execution_scope.owner_home, execution_scope.thread_id, execution_scope.root_task_id,
+                             execution_scope.run_id, execution_scope.attempt_id)) else None),
             )
             hosted = start_background_process(request, **({"launcher": self.launcher} if self.launcher is not None else {}))
         except BackgroundLaunchError as exc:
@@ -1642,7 +1682,7 @@ def _prepare_shell_artifact_execution(
     selection_counts: dict[str, int] = {}
     try:
         artifact_snapshots = snapshot_ready_artifacts(
-            tool.workspace_root,
+            request.artifact_registry_root or tool.workspace_root,
             tool.artifact_backup_root,
             source_roots=source_roots,
             run_scope=request.run_scope,
@@ -1709,7 +1749,7 @@ def _postcheck_shell_artifacts(
             if request.tool.artifact_backup_root is None:
                 raise OSError("canonical owner artifact backup root is unavailable")
             summary = reconcile_shell_artifact_operation_items(
-                request.tool.workspace_root,
+                request.artifact_registry_root or request.tool.workspace_root,
                 prepared.snapshots,
                 backup_store_root=request.tool.artifact_backup_root,
                 source_roots=prepared.source_roots,
@@ -2194,12 +2234,17 @@ def _run_shell_process_text(
                        '请改用 search_text / find_files 并缩小 path，或显式排除 runs、compact 等归档目录；不要原样重试。'
                        '\nsearch_backoff=' + json.dumps(search_backoff, ensure_ascii=False))
         return output, False, "TOOL_TIMEOUT", facts
-    except CommandInterruptedError:
+    except CommandInterruptedError as exc:
+        termination = exc.termination
+        confirmed = termination is not None and termination.confirmed
         return (
-            "CANCELLED: 当前任务已停止，前台命令及其子进程已终止。",
+            ("CANCELLED: 当前任务已停止，前台命令及其子进程已终止。" if confirmed else
+             "CANCELLED: 当前任务已停止；前台命令进程树退出尚未确认，请核对原执行清理回执，禁止原样重跑。"),
             False,
             "CANCELLED",
-            {"status": "cancelled"},
+            {"status": "cancelled", "cleanup_confirmed": confirmed,
+             **({"cleanup_schema": "foreground-process-cleanup.v1", "termination": asdict(termination), "pid": exc.pid, "birth_token": exc.birth_token}
+                if termination is not None else {})},
         )
     except SandboxUnavailable as exc:
         return (

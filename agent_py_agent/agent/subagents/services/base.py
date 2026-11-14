@@ -616,6 +616,7 @@ class SubAgentBaseService:
             **_session_identity_fields(run_id, parent_task),
             allowed_skills=params.allowed_skills or [],
             allowed_tools=params.allowed_tools or [],
+            base_allowed_tools=list(params.allowed_tools or []),
             acceptance_checks=prepared["acceptance_checks"],
             quality_contract=_normalize_quality_contract(params.quality_contract),
             context_manifest=_normalize_context_manifest(params.context_manifest),

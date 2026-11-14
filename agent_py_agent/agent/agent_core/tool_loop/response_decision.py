@@ -1187,7 +1187,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
                 runtime_source="tool_loop",
             )
         # 完成协议必须在原副作用/产物/截断守卫之后消费，不能借内部成功声明绕过原安全事实。
-        receipt_action, receipt_response = prepare_background_public_receipt(request.params, final_response)
+        receipt_action, receipt_response = prepare_background_public_receipt(request.params, final_response, agent=request.agent)
         if receipt_action != "normal":
             return ToolLoopResponseDecision(
                 "continue" if receipt_action == "repair" else "break",

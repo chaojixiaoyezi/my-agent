@@ -176,6 +176,7 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_task_run ON agent_runs(task_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_parent ON agent_runs(parent_agent_run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_parent_task_status ON agent_runs(parent_agent_run_id, task_run_id, status, agent_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_run_id ON agent_runs(run_id, created_at DESC)",
     """
     CREATE TABLE IF NOT EXISTS agent_attempts (

@@ -65,8 +65,9 @@ def workflow_artifact_run_ids(owner_home: Path, run_key: str) -> tuple[str, ...]
 class RunOutError(ValueError):
     # LLM: 不在错误消息中回显文件内容或凭据。
     # 函数用途: 构造明确的文件归档拒绝。
-    def __init__(self, error_code):
+    def __init__(self, error_code, *, archive_phase='', path_role=''):
         self.error_code = error_code
+        self.archive_phase, self.path_role = archive_phase, path_role
         super().__init__(error_code)
 
     # LLM: 最多投影八层显式cause，仅类型、整数errno和回滚标记；不持久化原始路径、内容、异常文案或notes。
@@ -84,7 +85,9 @@ class RunOutError(ValueError):
             rollback_incomplete |= any(isinstance(note, str) and note.startswith('归档回滚未完成: ')
                                        for note in getattr(current, '__notes__', ()))
             current = current.__cause__
-        return {'cause_chain': causes, 'rollback_incomplete': rollback_incomplete}
+        return {'cause_chain': causes, 'rollback_incomplete': rollback_incomplete,
+                **({'archive_phase': self.archive_phase, 'path_role': self.path_role}
+                   if self.archive_phase else {})}
 
 
 # LLM: 目标身份只在本次调用栈有效，不从业务inputs或脚本环境读取。
@@ -228,7 +231,14 @@ class RunArtifactBatch:
         try:
             if Path(self.quota.owner_root).resolve(strict=False) != self.target.owner_home.resolve(strict=False):
                 raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED')
-            manifest = _manifest(scratch, max_files, max_bytes)
+            try:
+                manifest = _manifest(scratch, max_files, max_bytes)
+            except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as error:
+                failure = _run_out_error(error)
+                failure.archive_phase, failure.path_role = 'manifest_read', 'run_out_dir'
+                if failure is error:
+                    raise
+                raise failure from error
             if not manifest:
                 return False
             with self.quota.admission() as admission:
@@ -262,7 +272,10 @@ class RunArtifactBatch:
                     raise
             return True
         except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as error:
-            raise self._rollback(error) from error
+            failure = self._rollback(error)
+            if failure is error:
+                raise
+            raise failure from error
 
     # LLM: 原子rename只在进程/数据源清理成功后执行；迁移同时申报暂存删除与正式增加，不能漏记或双计。
     # 函数用途: 发布完整文件集合，任何普通失败都移除尚未确认的结果。
@@ -296,7 +309,10 @@ class RunArtifactBatch:
             self.published = True
             return str(self.target.owner_home.joinpath(*self.parent_parts, self.target.attempt_id)), self.artifacts
         except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as error:
-            raise self._rollback(error) from error
+            failure = self._rollback(error)
+            if failure is error:
+                raise
+            raise failure from error
 
     # LLM: 不确认发布的暂存必须删除；quota不可用也尝试物理清理，失败会显式传播而不伪报成功。
     # 函数用途: 在脚本清理或后续终结失败时丢弃本次暂存集合。
@@ -311,4 +327,7 @@ class RunArtifactBatch:
                 finally:
                     self._remove_owned()
         except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as error:
-            raise self._rollback(error) from error
+            failure = self._rollback(error)
+            if failure is error:
+                raise
+            raise failure from error

@@ -1825,7 +1825,16 @@ def handle_client_agent_permission(handler, server) -> None:
         return
     try:
         owner_agent, scope = _agent_control_context(handler, server, body)
-        result = _resolve_foreground_tool_permission(server, scope, body)
+        if body.get('background_view') is not None:
+            from ..conversation.business_access import BusinessError
+            from .background_approval_view import resolve_view_permission
+            try:
+                result = resolve_view_permission(owner_agent, scope, body)
+            except (ValueError, PermissionError, BusinessError) as error:
+                raise AgentControlError(403 if isinstance(error, PermissionError) else 409, str(getattr(error, 'code', '') or error),
+                    '后台会话审批引用已失效或未授权；决定未写入，请重新进入原会话读取当前审批。') from error
+        else:
+            result = _resolve_foreground_tool_permission(server, scope, body)
         if result is None:
             result = resolve_agent_permission(
                 owner_agent,

@@ -311,13 +311,30 @@ def _business_scope_decision(request: ActionPolicyRequest, runtime: ToolRuntime)
             handler.authorize_invocation(request.call.arguments)
         if request.business_context is not None or request.business_actor is not None:
             actor = request.business_actor if request.business_actor is not None else handler.actor if native else None
-            revalidate_business_context(actor=actor, context=request.business_context)
+            # 仅实际包范围读取才重验该包，不因A换代封死B、取消/状态查询或普通Skill。
+            package = (request.call.arguments.get('package_id')
+                       if runtime.model_spec.name == 'skill_search' else None)
+            source = request.call.arguments.get('source_ref')
+            if isinstance(source, dict) and source.get('kind') == 'capability_package':
+                package = source.get('package_id')
+            revalidate_business_context(actor=actor, context=request.business_context,
+                                        package_ref=package.strip() if isinstance(package, str) and package.strip() else None)
             if native:
                 sid = request.call.arguments.get('params', {}).get('space_id')
                 if sid is not None and sid != request.business_context.space_id:
                     raise BusinessError('SPACE_SCOPE_MISMATCH')
     except BusinessError as error:
-        return _deny(error.code, stage='authorization', evidence={'business_scope_checked': True})
+        # 只发表当前已授权scope的有限定位事实；异常正文/路径/其它Owner信息不进入模型回执。
+        public = {'business_scope_checked': True}
+        for key in ('package_ref', 'expected_version_ref', 'actual_version_ref', 'expected_activation_id',
+                    'actual_activation_id', 'actual_state', 'source_error_code', 'field', 'next_action'):
+            value = error.details.get(key)
+            if isinstance(value, str) and len(value) <= 512:
+                public[key] = value
+        if error.code in {'PACKAGE_VERSION_MISMATCH', 'PACKAGE_VERSION_UNAVAILABLE'}:
+            public['reported_error_code'] = error.code
+            return _deny('TOOL_EXECUTION_DENIED', stage='authorization', evidence=public)
+        return _deny(error.code, stage='authorization', evidence=public)
     except (OSError, ValueError, TypeError):
         return _deny('HOST_NOT_READY', stage='authorization', evidence={'business_scope_checked': False})
     return None

@@ -13,6 +13,7 @@ from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.local_storage import fts_upgrade as upgrade
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+from agent_py_agent.tests.test_r8_fts_automatic_upgrade import fts_slice_clock  # noqa: F401
 
 
 def _seed(home, count=4):
@@ -45,6 +46,7 @@ def _fake_step(calls, status='partial', progressed=True, advance=None):
     return step
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_owner_step_cap_and_nested_global_budget_are_not_reset(tmp_path, monkeypatch):
     home, _, _ = _home(tmp_path)
     calls = []
@@ -64,6 +66,7 @@ def test_owner_step_cap_and_nested_global_budget_are_not_reset(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('status', ['partial', 'deferred', 'unsupported_document', 'unknown'])
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_no_progress_and_deferred_stop_the_burst(tmp_path, monkeypatch, status):
     home, _, _ = _home(tmp_path)
     calls = []
@@ -96,6 +99,7 @@ def test_owner_and_global_deadlines_are_shared_without_restarting_clock(tmp_path
         assert upgrade.advance_upgrade(home.owner_home_dir, {}, 1000) is None
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_business_writer_progresses_between_real_slices(tmp_path, monkeypatch):
     home, store, items = _home(tmp_path, 400)
     original, calls = upgrade._advance_upgrade_slice, []
@@ -155,6 +159,42 @@ def test_business_writer_progresses_between_real_slices(tmp_path, monkeypatch):
             item.id for item in items if item.id != items[1].id}
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
+def test_elapsed_slice_keeps_partial_job_and_resumes_under_fresh_budget(tmp_path, monkeypatch, request):
+    clock = request.getfixturevalue('fts_slice_clock')
+    home, store, items = _home(tmp_path)
+    original = upgrade._advance_upgrade_slice
+
+    def expire_after_real_slice(*args, **kwargs):
+        result = original(*args, **kwargs)
+        clock.now += .030
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(upgrade, '_advance_upgrade_slice', expire_after_real_slice)
+        with upgrade.fts_upgrade_tick_scope(deadline=clock.now + .025, max_steps=10) as budget:
+            partial = upgrade.advance_upgrade(home.owner_home_dir, {}, 1000)
+            assert partial['status'] == 'partial' and partial['complete'] is False
+            assert partial['cursor']['pending'] == ['data/local_store/local.db']
+            assert budget.remaining_steps == 9 and clock.now > budget.deadline
+            assert upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': partial}, 1061) is None
+    with store._connection() as conn:
+        job_id = conn.execute('SELECT job_id FROM maintenance_fts_job').fetchone()[0]
+        assert conn.execute("SELECT value FROM metadata WHERE key='records_fts_rowid_aligned'").fetchone()[0] == 'false'
+    report = partial
+    for turn in range(20):
+        with upgrade.fts_upgrade_tick_scope(deadline=clock.now + .025, max_steps=1):
+            report = upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': report}, 1061 + turn * 61)
+        if report['complete']:
+            break
+    assert report['complete']
+    with store._connection() as conn:
+        assert conn.execute('SELECT job_id FROM maintenance_fts_job').fetchone()[0] == job_id
+        assert conn.execute("SELECT value FROM metadata WHERE key='records_fts_rowid_aligned'").fetchone()[0] == 'true'
+    assert {row.id for row in store.search('catchupneedle')} == {item.id for item in items}
+
+
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_exhausted_index_budget_does_not_consume_ttl_permission_or_work(tmp_path):
     homes = [_home(tmp_path / name)[0] for name in ('one', 'two')]
     for home in homes:
@@ -186,6 +226,7 @@ def test_exhausted_index_budget_does_not_consume_ttl_permission_or_work(tmp_path
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_job'").fetchone() is None
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_controller_retains_unserved_owner_and_future_hint(tmp_path):
     from agent_py_agent.agent.user_space.owner_resolver import (
         OwnerIdentity,
@@ -305,7 +346,8 @@ def test_closed_copied_budget_cannot_restart_catchup(tmp_path, monkeypatch):
     assert captured.run(lambda: upgrade.advance_upgrade(home.owner_home_dir, {}, 1000)) is None
 
 
-def test_current_receipt_also_discharges_manifest_delta_and_map(tmp_path):
+@pytest.mark.usefixtures('fts_slice_clock')
+def test_current_receipt_also_discharges_manifest_delta_and_map(tmp_path, monkeypatch):
     home, store, _ = _home(tmp_path, 130)
     report = None
     for turn in range(20):
@@ -331,6 +373,7 @@ def _workspace_legacy(home, name):
     return store, item
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_recent_legacy_store_precedes_cold_workspace_discovery(tmp_path, monkeypatch):
     home = ensure_my_agent_home(tmp_path)
     cold, _ = _workspace_legacy(home, 'cold-first')
@@ -351,6 +394,7 @@ def test_recent_legacy_store_precedes_cold_workspace_discovery(tmp_path, monkeyp
     assert upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': report}, 1001) is None
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_hot_hint_turn_keeps_cold_discovery_and_original_shared_budget(tmp_path, monkeypatch):
     home = ensure_my_agent_home(tmp_path)
     cold, _ = _workspace_legacy(home, 'cold')
@@ -377,6 +421,7 @@ def test_hot_hint_turn_keeps_cold_discovery_and_original_shared_budget(tmp_path,
     assert len(pages) == 2
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_hot_hint_cannot_select_other_owner_or_bypass_revoked_commit(tmp_path, monkeypatch):
     first = ensure_my_agent_home(tmp_path / 'first')
     other = ensure_my_agent_home(tmp_path / 'other')
@@ -508,10 +553,17 @@ def test_consumed_hot_hint_keeps_selected_store_when_slice_expires(tmp_path, mon
     assert upgrade._take_active_store(home.owner_home_dir, ()) is None
     with hot._connection() as connection:
         assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_job'").fetchone() is None
-    for turn in range(3):
-        report = upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': report}, 1061 + turn * 61)
-        if report['complete']:
-            break
+    # 上段已确定性证明真实耗尽不丢候选；续作只核原job完整性，不靠3轮实时磁盘延迟签完成。
+    resumed_clock = SimpleNamespace(**vars(upgrade.time))
+    resumed_at = time.monotonic()
+    resumed_clock.monotonic = lambda: resumed_at
+    with monkeypatch.context() as patch:
+        patch.setattr(upgrade, 'time', resumed_clock)
+        patch.setattr(maintenance, 'time', resumed_clock)
+        for turn in range(3):
+            report = upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': report}, 1061 + turn * 61)
+            if report['complete']:
+                break
     assert report['complete']
     with hot._connection() as connection:
         assert connection.execute("SELECT value FROM metadata WHERE key='records_fts_rowid_aligned'").fetchone()[0] == 'true'

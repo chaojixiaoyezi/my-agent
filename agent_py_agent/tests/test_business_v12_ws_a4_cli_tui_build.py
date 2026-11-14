@@ -217,6 +217,7 @@ def test_format_workflow_detail():
             "coverage": "complete",
         },
         "run_refs": ["run-001", "run-002"],
+        "allowed_actions": ["workflows.update", "workflows.vendor_future"],
     }
     rendered = format_workflow_detail(data)
     assert "报表汇总" in rendered
@@ -226,6 +227,19 @@ def test_format_workflow_detail():
     assert "week_id" in rendered
     assert "拉取数据" in rendered
     assert "run-001" in rendered
+    assert '编辑内容 [workflows.update]' in rendered
+    assert 'workflows.vendor_future' in rendered
+    assert 'workflows.run' not in rendered
+
+
+def test_workflow_detail_distinguishes_empty_missing_and_invalid_action_facts():
+    empty = format_workflow_detail({'allowed_actions': []})
+    missing = format_workflow_detail({})
+    invalid = format_workflow_detail({'allowed_actions': 'workflows.update'})
+    assert '可用操作: 无（宿主未授予' in empty
+    assert '可用操作: 未知（宿主未返回' in missing
+    assert '可用操作: 未知（宿主动作清单格式不正确' in invalid
+    assert '编辑内容' not in empty + missing + invalid
 
 
 # LLM: 验证统一 CLI 与 Slash /space, /team, /workflow 命令及参数转发、幂等键与期望版本。
@@ -330,7 +344,7 @@ def test_g3_v1301_v1302_tui_footer_and_blockers():
     runtime = TuiRuntime("thread-footer-ws-a4")
     snapshot = runtime.store.snapshot()
 
-    # 1. 验证底栏段严格顺序: 现有控制 -> 后台Agent -> 后台驻留
+    # 1. 保留已公布驻留入口紧随原控制栏；团队徽标不插入两者之间。
     context = TuiRenderContext(
         width=240,
         background_process_count=3,
@@ -339,8 +353,8 @@ def test_g3_v1301_v1302_tui_footer_and_blockers():
     )
     rendered = _render_footer(snapshot, context)
     text = "".join(part[1] for part in rendered)
-    assert text.index("F4") < text.index("后台Agent：运行 2 / 总 5") < text.index("后台驻留 3")
-    assert text.endswith(" · 后台Agent：运行 2 / 总 5 · ⚡ 后台驻留 3 项")
+    assert text.index("F4") < text.index("F6 原生模式") < text.index("后台驻留 3") < text.index("后台Agent：运行 2 / 总 5")
+    assert text.endswith(" · ⚡ 后台驻留 3 项 · 后台Agent：运行 2 / 总 5")
 
     # 2. 验证业务列表与会话底栏保持非取消 Ctrl+G 返回引导
     list_ctx = TuiRenderContext(width=200, business_list_active=True)
@@ -526,3 +540,27 @@ def test_positional_cli_slash_commands_cas_resolution_roundtrip(tmp_path, monkey
         assert res_retire["data"]["agent"]["identity_state"] == "retired"
     finally:
         server.stop()
+
+
+def test_workflow_detail_keeps_definition_and_each_canonical_run_state():
+    data = {'workflow': {'lifecycle': 'active'}, 'run_refs': ['paused', 'failed', 'unknown'],
+            'run_views': [
+                {'run': {'workflow_run_id': 'paused', 'status': 'paused_for_resume', 'effect_outcome': 'unknown'},
+                 'steps': [{'step_id': 'first', 'status': 'succeeded'}, {'step_id': 'second', 'status': 'paused_for_resume'}, {'step_id': 'last', 'status': 'pending'}],
+                 'breakpoint': {'reason_code': 'WORKFLOW_PAUSED', 'required_action': 'resume'}},
+                {'run': {'workflow_run_id': 'failed', 'status': 'failed', 'effect_outcome': 'unknown'}},
+                {'run': {'workflow_run_id': 'unknown'}, 'observation_error': {'code': 'BUSINESS_ACCESS_DENIED'}}]}
+    text = format_workflow_detail(data)
+    assert '状态: active' in text and '已暂停／待恢复 [paused_for_resume]' in text
+    assert '[first]: succeeded' in text and '[second]: paused_for_resume' in text and '[last]: pending' in text
+    assert '下一步: resume' in text and 'failed [failed]' in text and 'BUSINESS_ACCESS_DENIED' in text
+
+
+def test_workflow_tool_display_only_calls_canonical_paused_pending():
+    from agent_py_agent.agent.tooling.result_display import workflow_result_display
+    paused = workflow_result_display('run', {'status': 'paused_for_resume', 'workflow_run_id': 'original',
+        'next_action': 'inspect_run', 'effect_outcome': 'unknown'}, ok=False, error_code='WORKFLOW_PAUSED')['summary']
+    assert '已暂停／待恢复' in paused and 'original' in paused and 'inspect_run' in paused
+    for status in ('failed', 'unknown'):
+        text = workflow_result_display('run', {'status': status}, ok=False, error_code='REAL_FAILURE')['summary']
+        assert '：失败' in text and '已暂停' not in text and 'REAL_FAILURE' in text

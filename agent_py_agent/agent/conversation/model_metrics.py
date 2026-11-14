@@ -141,6 +141,11 @@ def public_model_metrics(value: object) -> dict[str, object]:
         "cache_percent": min(100.0, _number(value.get("cache_percent"))) if _number(value.get("cache_percent")) is not None else None,
         # 会话累计命中率 = 累计缓存命中输入 ÷ 累计供应商输入（DeepSeek Harness 页脚同一口径）；没有输入时为 None。
         "cache_percent_session": _session_cache_percent(value),
+        "cache_usage_coverage": _cache_usage_coverage(value),
+        **{key: int(_number(value[key])) for key in ("provider_usage_calls", "input_reported_calls")
+           if key in value and _number(value[key]) is not None},
+        **({"cache_coverage_known": value["cache_coverage_known"]}
+           if isinstance(value.get("cache_coverage_known"), bool) else {}),
         "output_tps": _number(value.get("output_tps")),
         **({"decision_mode": value.get("decision_mode")} if value.get("decision_mode") in DECISION_DISPLAY_MODES else {}),
         "pending": value.get("pending") is True,
@@ -165,6 +170,17 @@ def _session_cache_percent(value: Mapping[str, object]) -> float | None:
     if not total_input or total_input <= 0 or cached is None or not reported:
         return None
     return min(100.0, 100.0 * cached / total_input)
+
+def _cache_usage_coverage(value: Mapping[str, object]) -> str:
+    """只核对供应商用量字段覆盖；不能据调用覆盖率推算 token 缺失量。"""
+    if value.get("totals_known") is not True or value.get("cache_coverage_known") is not True:
+        return "unknown"
+    counts = [_number(value.get(key)) for key in
+              ("provider_usage_calls", "input_reported_calls", "cache_read_reported_calls")]
+    if any(count is None for count in counts) or not counts[0]:
+        return "unknown"
+    return "complete" if counts[0] == counts[1] == counts[2] else "partial"
+
 
 
 # LLM: 迟到的后台轮询和流重放只能保留较新的采样；时间戳只用于显示，不拥有调度或计费权限。
@@ -236,6 +252,7 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
         return dict(cached[1])
     totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_read_reported_calls": 0,
               "estimated_tokens": 0, "totals_known": True,
+              "provider_usage_calls": 0, "input_reported_calls": 0, "cache_coverage_known": True,
               "failure_count": 0, "unfinished_calls": 0, "unfinished_tokens": 0, "unknown_failures": 0,
               "decision_call_count": 0, "decision_input_tokens": None, **dict.fromkeys(_DECISION_COUNTS, 0)}
     reader = getattr(usage_store, "events_report", None)
@@ -287,6 +304,12 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
     provider, estimated = breakdown.get("provider", {}), breakdown.get("estimated", {})
     for key in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
         totals[key] += int(provider.get(key) or 0)
+    for target, source in (("provider_usage_calls", "call_count"),
+                           ("input_reported_calls", "input_tokens_reported_call_count")):
+        totals[target] = int(totals.get(target) or 0) + int(provider.get(source) or 0)
+    if provider and any(key not in provider for key in
+                        ("call_count", "input_tokens_reported_call_count", "cache_read_input_tokens_reported_call_count")):
+        totals["cache_coverage_known"] = False
     totals["cache_read_reported_calls"] += int(provider.get("cache_read_input_tokens_reported_call_count") or 0)
     totals["estimated_tokens"] += sum(int(estimated.get(key) or 0) for key in ("input_tokens", "output_tokens"))
     overall = unfinished_usage_facts(summary)
@@ -305,6 +328,12 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
         totals[key] = max(0, int(totals[key]) - int(usage.get(key) or 0))
     totals["cache_read_reported_calls"] = max(0, int(totals["cache_read_reported_calls"])
                                              - int(usage.get("cache_read_input_tokens_reported_call_count") or 0))
+    for target, source in (("provider_usage_calls", "call_count"),
+                           ("input_reported_calls", "input_tokens_reported_call_count")):
+        totals[target] = max(0, int(totals[target]) - int(usage.get(source) or 0))
+    if usage and any(key not in usage for key in
+                     ("call_count", "input_tokens_reported_call_count", "cache_read_input_tokens_reported_call_count")):
+        totals["cache_coverage_known"] = False
     outcomes, facts = decision.get("status_counts") or {}, unfinished_usage_facts(decision)
     totals["decision_call_count"] += int(decision.get("physical_model_attempt_count") or 0)
     totals["decision_input_reported_calls"] += reported

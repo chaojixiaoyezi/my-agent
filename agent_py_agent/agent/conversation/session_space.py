@@ -23,19 +23,21 @@ def read_session_space(home, thread, *, actor_id=''):
     row = state['actors'].get(key)
     if row is None:
         return {'space_id': None, 'revision': 0, 'source': 'default'}
-    if (not isinstance(row, dict) or not isinstance(row.get('space_id'), str)
-            or not row['space_id'] or type(row.get('revision')) is not int or row['revision'] < 1):
+    if (not isinstance(row, dict) or 'space_id' not in row
+            or row['space_id'] is not None and (not isinstance(row['space_id'], str) or not row['space_id'])
+            or type(row.get('revision')) is not int or row['revision'] < 1):
         raise DataCorruptionError('会话空间选择记录格式无效')
-    return {'space_id': row['space_id'], 'revision': row['revision'], 'source': 'thread'}
+    return {'space_id': row['space_id'], 'revision': row['revision'],
+            'source': 'default' if row['space_id'] is None else 'thread'}
 
 
 def set_session_space(home, threads, thread, *, actor_id, space_id, expected_revision,
                       idempotency_key, authorize):
     """锁内重核权限与选择版本；并发写保留其它元数据，仅末次操作支持无副作用重放。"""
     _setting_key(home, thread, actor_id)
-    if (not isinstance(space_id, str) or not space_id or not isinstance(idempotency_key, str)
+    if (space_id is not None and (not isinstance(space_id, str) or not space_id) or not isinstance(idempotency_key, str)
             or not idempotency_key or type(expected_revision) is not int or expected_revision < 0):
-        raise ValueError('会话空间选择要求空间标识与幂等键')
+        raise ValueError('会话空间选择要求非空空间标识或显式null、幂等键与非负原版本')
     from ..plugin_host.errors import HostAPIError
 
     def update(current):

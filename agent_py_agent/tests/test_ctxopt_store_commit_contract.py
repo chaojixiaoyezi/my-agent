@@ -68,15 +68,22 @@ def test_post_commit_tool_outcome_is_unknown(tmp_path, monkeypatch, kind):
     monkeypatch.setattr(store, "_get", get)
     assert get("demo") is not None
     assert not result.ok
-    # 宿主保留原错误码；未登记taxonomy的业务码规范为UNKNOWN_ERROR。
-    assert result.error_code == "UNKNOWN_ERROR"
-    assert result.reported_error_code == "TOOL_POST_COMMIT_READBACK_FAILED"
+    # 工作流需要先核验原已提交效果；恢复分类不能覆盖最初读回失败的精确原因。
+    if kind == "workflow":
+        assert result.error_code == "WORKFLOW_RECONCILIATION_REQUIRED"
+        assert result.reported_error_code == "TOOL_POST_COMMIT_READBACK_FAILED"
+        assert result.failure_stage == "effect_reconciliation"
+    else:
+        assert result.error_code == "UNKNOWN_ERROR"
+        assert result.reported_error_code == "TOOL_POST_COMMIT_READBACK_FAILED"
+        assert result.failure_stage == "execution"
     assert result.effect_outcome == "unknown"
-    # 宿主阶段枚举只认execution；业务回执仍必须保留准确阶段。
-    assert result.failure_stage == "execution"
+    assert result.retryable is False
     data = json.loads(result.output)
     assert data["failure_stage"] == "post_commit_readback"
     assert data["committed"] is True
+    if kind == "workflow":
+        assert data["reported_error_code"] == "TOOL_POST_COMMIT_READBACK_FAILED"
 
 
 # LLM: 预检失败不能触发Store，也不能被已提交异常分类覆盖。

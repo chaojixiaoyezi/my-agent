@@ -16,7 +16,9 @@ _FILENAME = 'workflow_reference_index.sqlite3'
 # 最多保留32个正在分页的目录游标；空闲回收与容量淘汰都立即close。
 _SCANS = OrderedDict()
 _SCAN_LOCK = threading.Lock()
-_MAX_SCANS = 32
+# 同时保留的工作流引用目录扫描游标上限。
+_MAX_OPEN_CURSORS = 32
+# 超过此空闲秒数的未借出游标可回收。
 _SCAN_IDLE_SECONDS = 60
 
 
@@ -49,11 +51,11 @@ def _borrow_cursor(store, stamp, epoch):
         elif cursor is not None:
             cursor.busy = True
         else:
-            if len(_SCANS) >= _MAX_SCANS:
+            if len(_SCANS) >= _MAX_OPEN_CURSORS:
                 idle = next((name for name, entry in _SCANS.items() if not entry.busy), None)
                 if idle is not None:
                     closing.append(_SCANS.pop(idle).iterator)
-            if len(_SCANS) < _MAX_SCANS:
+            if len(_SCANS) < _MAX_OPEN_CURSORS:
                 cursor = _ScanCursor(stamp, epoch)
                 _SCANS[key] = cursor
     for iterator in closing:

@@ -443,3 +443,55 @@ def _append_optional_filter(
     if value:
         clauses.append(f"{field} = ?")
         values.append(value)
+
+
+
+def search_records_with_authority(store, *, query, source_type, limit, authorize, anchor=None, after=False):
+    """canonical来源裁决在结果LIMIT前执行；数据库工作量和核源量分别受固定预算保护。"""
+    use_fts = bool(query and store.fts_available and store._fts_query(query))
+    selected, incomplete, ticks = [], False, 0
+    with store._connection() as conn:
+        conn.create_function('history_source_allowed', 2, authorize)
+        def progress():
+            nonlocal ticks
+            ticks += 1
+            return int(ticks > 200)
+        conn.set_progress_handler(progress, 1000)
+        cursor = None
+        try:
+            for _ in range(2):
+                if use_fts and not _fts_active_complete(conn):
+                    use_fts = False
+                if use_fts:
+                    clauses, values = _record_fts_filters(store._fts_query(query), source_type, None)
+                elif query:
+                    clauses, values = _record_like_filters(query, source_type, None)
+                else:
+                    clauses, values = (['records.source_type=?'], [source_type]) if source_type else ([], [])
+                if anchor:
+                    compare = '>' if after else '<'
+                    clauses.append(f'(records.updated_at {compare} ? OR (records.updated_at=? AND records.id {compare} ?))')
+                    values.extend(anchor)
+                clauses.append('history_source_allowed(records.source_type,records.source_id)=1')
+                origin = 'records_fts JOIN records ON records_fts.id=records.id' if use_fts else 'records'
+                order = 'ASC' if after else 'DESC'
+                cursor = conn.execute(f"SELECT records.id,records.source_type,records.source_id,records.created_at,records.updated_at "
+                    f"FROM {origin} WHERE {' AND '.join(clauses)} ORDER BY records.updated_at {order},records.id {order} LIMIT ?",
+                    [*values, limit])
+                while row := cursor.fetchone():
+                    selected.append(dict(row))
+                cursor.close()
+                cursor = None
+                if selected or not use_fts:
+                    break
+                use_fts = False  # 沿原短词/FTS无命中的LIKE合同，缓存不重复核同一来源。
+        except sqlite3.OperationalError as error:
+            if 'interrupted' not in str(error) and 'user-defined function' not in str(error):
+                raise
+            incomplete = True
+        finally:
+            if cursor is not None:
+                cursor.close()
+            conn.set_progress_handler(None, 0)
+            conn.create_function('history_source_allowed', 2, None)
+    return selected, incomplete

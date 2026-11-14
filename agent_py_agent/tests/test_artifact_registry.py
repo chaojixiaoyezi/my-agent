@@ -467,3 +467,105 @@ def test_attachment_boundary_points_to_the_registry_that_received_the_write(tmp_
     assert "artifact_registry_root" not in ordinary_boundary and "artifact_gateway_root" not in ordinary_boundary
     records = list(latest_artifact_records(boundary["artifact_registry_root"]).values())
     assert len(records) == 1 and records[0].path == str(task / name) and records[0].status == "ready"
+
+
+def _business_registry_fixture(tmp_path):
+    import json
+
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_artifact,
+        registry_path,
+    )
+
+    owner = tmp_path / 'owner'
+    owner.mkdir(mode=0o700)
+    root = owner
+    for part in ('artifacts', 'business'):
+        root = root / part
+        root.mkdir(mode=0o700)
+    target = root / ('artifact-' + '1' * 40 + '.blob')
+    target.write_bytes(b'original')
+    record = register_artifact(ArtifactRegistration(root, target, artifact_id='artifact-' + '1' * 40,
+        source='business_upload', status='ready', metadata={'owner_id': 'qa', 'display_name': 'old'}))
+    ledger = registry_path(root)
+    return owner, ledger, record.to_dict(), json
+
+
+def test_business_registry_large_history_and_page_proof_are_bounded(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import business_upload_registry as module
+
+    owner, ledger, original, json = _business_registry_fixture(tmp_path)
+    rows = [original]
+    for index in range(2200):
+        row = {**original, 'artifact_id': 'artifact-' + f'{index + 2:040x}',
+               'metadata': {**original['metadata'], 'history': 'x' * 900}}
+        rows.append(row)
+    rows.append({**original, 'metadata': {**original['metadata'], 'display_name': 'new'}})
+    ledger.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    assert ledger.stat().st_size > 2 * 1024 * 1024
+    found = module.lookup_business_upload(owner, original['artifact_id'])
+    assert found.record.metadata['display_name'] == 'new'
+    # 相同updated_at按最后物理行胜出；页证明只读原行，不重扫大簿。
+    assert found.record.updated_at == original['updated_at']
+    reads = []
+    read = module._read
+    def observe(fd, offset, count):
+        reads.append(count)
+        return read(fd, offset, count)
+    monkeypatch.setattr(module, '_read', observe)
+    assert module.verify_record_proof(owner, found.proof).metadata['display_name'] == 'new'
+    assert reads == [found.proof.length] and sum(reads) < 2048
+
+
+def test_business_registry_same_stamp_other_row_cannot_impersonate_cached_id(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import business_upload_registry as module
+
+    owner, ledger, original, json = _business_registry_fixture(tmp_path)
+    other = {**original, 'artifact_id': 'artifact-' + '2' * 40,
+             'metadata': {**original['metadata'], 'display_name': 'new'}}
+    before = json.dumps(original) + '\n' + json.dumps(other) + '\n'
+    ledger.write_text(before)
+    first = module.lookup_business_upload(owner, original['artifact_id'])
+    assert first.record.metadata['display_name'] == 'old'
+    stamp = first.proof.source_stamp
+    # 固定全部可见元数据，另一行同长度改成目标ID，不能靠mtime/size或旧行抽样签latest。
+    monkeypatch.setattr(module, '_stamp', lambda _fd: stamp)
+    other['artifact_id'] = original['artifact_id']
+    ledger.write_text(json.dumps(original) + '\n' + json.dumps(other) + '\n')
+    assert ledger.stat().st_size == len(before.encode())
+    second = module.lookup_business_upload(owner, original['artifact_id'])
+    assert second.record.metadata['display_name'] == 'new'
+
+
+def test_business_registry_progress_recovers_and_bad_rows_are_not_ignored(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import business_upload_registry as module
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    owner, ledger, original, json = _business_registry_fixture(tmp_path)
+    rows = [original] * 20
+    ledger.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    with pytest.raises(HostAPIError, match='本次推进'):
+        module.lookup_business_upload(owner, original['artifact_id'], max_bytes=1024)
+    found = None
+    for _attempt in range(12):
+        try:
+            found = module.lookup_business_upload(owner, original['artifact_id'], max_bytes=1024)
+            break
+        except HostAPIError as error:
+            assert error.code == 'HOST_NOT_READY' and '本次推进' in str(error)
+    assert found is not None and found.record.artifact_id == original['artifact_id']
+    monkeypatch.setattr(module, '_KEY', b'new-process-key-for-test-only')
+    assert module.lookup_business_upload(owner, original['artifact_id']).record.artifact_id == original['artifact_id']
+    with ledger.open('a') as file:
+        file.write('{broken\n')
+    with pytest.raises(HostAPIError, match='无效或未完成JSON行'):
+        module.lookup_business_upload(owner, original['artifact_id'])
+
+
+def test_business_registry_absent_owner_lookup_does_not_create_canonical_dirs(tmp_path):
+    from agent_py_agent.agent.gateway_parts.business_upload_registry import lookup_business_upload
+
+    owner = tmp_path / 'not-created'
+    result = lookup_business_upload(owner, 'artifact-' + '0' * 40)
+    assert result.record is None and result.registry_size == 0 and not owner.exists()

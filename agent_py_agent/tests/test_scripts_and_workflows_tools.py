@@ -282,6 +282,8 @@ def test_workflow_run_inspect_and_resume(api, tmp_path, monkeypatch):
     first = json.loads(outcome.output)
     assert not outcome.ok and first['status'] == 'failed'
     assert [s['status'] for s in first['steps']] == ['succeeded', 'failed']
+    assert first['steps'][1]['error_code'] == 'ANALYZER_UNAVAILABLE'
+    assert not first['steps'][1]['escalation_result'].get('effect_started', False)
     run_id = first['workflow_run_id']
     assert call(workflows(tmp_path), 'inspect_run', workflow_run_id=run_id)['steps'] == first['steps']
     engine = importlib.import_module('agent_py_agent.agent.workflows').WorkflowEngine(
@@ -531,6 +533,8 @@ def test_default_workflow_skill_analysis(api, tmp_path, mode, match):
         spec['skill_tags'] = ['日志异常' if match == 'summary' else 'safety']
     data = definition()
     data['steps'] = [spec]
+    # 本例验证Skill解析与上下文，最终分析产物是decision；采集脚本自己的value合同保持不变。
+    data['descriptor']['io_contract']['outputs'] = ['decision']
     tool = api[1](tmp_path)
     call(tool, 'save', workflow_id='daily', definition=data)
     refused = tool.execute({'action': 'run', 'workflow_id': 'daily', 'inputs': {'task': 'review'}})
@@ -597,6 +601,7 @@ def test_default_resolver_does_not_match_reference_keys(api, tmp_path):
     (root / 'SKILL.md').write_text('---\nname: audit\ndescription: 日志分析\n---\n正文')
     data = definition()
     data['steps'] = [{'step_id': 'judge', 'name': '分析', 'mode': 'llm_skill_analysis', 'skill_tags': ['scripts']}]
+    data['descriptor']['io_contract']['outputs'] = ['done']
     tool = api[1](tmp_path, analysis_handler=lambda *args: {'done': True})
     call(tool, 'save', workflow_id='daily', definition=data)
     run = call(tool, 'run', workflow_id='daily')
@@ -608,13 +613,21 @@ def test_default_resolver_does_not_match_reference_keys(api, tmp_path):
 # 函数用途: 验证工具补丁恢复、摘要回写及全流程修复标记清除。
 def test_tool_patched_resume_and_workflow_summary(api, tmp_path):
     scripts, workflows = api
-    register(scripts(tmp_path), code='raise SystemExit(4)')
+    missing = [{'source_id': 'missing', 'system': 'logs', 'query_scope': {}, 'evaluated_candidates': []}]
+    script = descriptor()
+    script['data_sources'] = missing
+    call(scripts(tmp_path), 'register', script_id='collect', descriptor=script,
+         code='raise AssertionError("preflight must prevent execution")')
     tool = workflows(tmp_path)
     data = definition()
+    data['descriptor']['data_sources'] = missing
     data['steps'] = data['steps'][:1]
     call(tool, 'save', workflow_id='daily', definition=data)
     paused = json.loads(tool.execute({'action': 'run', 'workflow_id': 'daily'}).output)
     assert paused['status'] == 'paused_for_resume'
+    assert paused['steps'][0]['error_code'] == 'DATASOURCE_MISSING'
+    assert paused['steps'][0]['escalation_result']['effect_started'] is False
+    assert paused['steps'][0]['escalation_result']['effect_outcome'] == 'not_started'
     assert 'patched_step_output' in tool.model_spec.input_schema['properties']
     bad = tool.execute({'action': 'resume', 'workflow_run_id': paused['workflow_run_id'], 'patched_step_output': {}})
     assert not bad.ok and bad.error_code == 'TOOL_INVALID_ARGUMENTS'
@@ -622,6 +635,53 @@ def test_tool_patched_resume_and_workflow_summary(api, tmp_path):
     assert final['status'] == 'succeeded' and final['steps'][0]['status'] == 'escalated_recovered'
     summary = call(tool, 'get', workflow_id='daily')['descriptor']['runtime_summary']
     assert summary['run_count'] == 2 and summary['last_status'] == 'succeeded'
+
+
+@pytest.mark.parametrize('patch', [None, {}, {'value': 12}])
+def test_executed_script_failure_requires_proof_before_patch_or_retry(api, tmp_path, monkeypatch, patch):
+    scripts, workflows = api
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+    calls = []
+    original = ScriptRunner.run_script
+    def observe(runner, *args, **kwargs):
+        calls.append(args[0])
+        return original(runner, *args, **kwargs)
+    monkeypatch.setattr(ScriptRunner, 'run_script', observe)
+    register(scripts(tmp_path), code='raise SystemExit(4)')
+    tool = workflows(tmp_path)
+    data = definition()
+    data['steps'] = data['steps'][:1]
+    call(tool, 'save', workflow_id='daily', definition=data)
+    paused = json.loads(tool.execute({'action': 'run', 'workflow_id': 'daily'}).output)
+    assert paused['status'] == 'paused_for_resume'
+    assert paused['steps'][0]['escalation_result']['script_execution']['exit_code'] == 4
+    assert paused['steps'][0]['escalation_result']['effect_outcome'] == 'unknown'
+    before = tool._engine().store.load_run(paused['workflow_run_id']).to_dict()
+    options = {} if patch is None else {'patched_step_output': patch}
+    outcome = workflows(tmp_path).execute({'action': 'resume', 'workflow_run_id': paused['workflow_run_id'], **options})
+    assert not outcome.ok and outcome.error_code == 'WORKFLOW_RECONCILIATION_REQUIRED'
+    assert 'operation_binding_unavailable_or_mismatched' in outcome.output
+    assert calls == ['collect']
+    assert tool._engine().store.load_run(paused['workflow_run_id']).to_dict() == before
+
+
+def test_invoked_analysis_failure_remains_unknown_on_raw_resume(api, tmp_path):
+    from agent_py_agent.agent.workflows import WorkflowEngine
+
+    readable_skill(tmp_path, 'skill-A')
+    calls = []
+    def analyze(*_):
+        calls.append('called')
+        raise TimeoutError('analysis completed external effect but receipt lost')
+    tool = api[1](tmp_path, engine=WorkflowEngine(tmp_path, analysis_handler=analyze))
+    data = definition()
+    data['steps'] = data['steps'][1:]
+    call(tool, 'save', workflow_id='daily', definition=data)
+    failed = json.loads(tool.execute({'action': 'run', 'workflow_id': 'daily'}).output)
+    assert failed['steps'][0]['escalation_result']['effect_started'] is True
+    outcome = tool.execute({'action': 'resume', 'workflow_run_id': failed['workflow_run_id']})
+    assert not outcome.ok and outcome.error_code == 'WORKFLOW_RECONCILIATION_REQUIRED'
+    assert calls == ['called']
 
 
 # LLM: 显式预览脱敏截断，实际分析器仍须取得完整正文和输入，不能互相冒充。
@@ -632,6 +692,7 @@ def test_default_analysis_loads_real_skill_summaries(api, tmp_path):
     (root / 'SKILL.md').write_text('---\nid: audit-id\nname: audit\ndescription: 诊断步骤\n---\n先查错误\npassword="test-only-secret"\n' + '继续只读核验。' * 100)
     tool, data = api[1](tmp_path), definition()
     data['steps'] = [{'step_id': 'judge', 'name': '分析', 'mode': 'llm_skill_analysis', 'skill_tags': ['诊断']}]
+    data['descriptor']['io_contract']['outputs'] = ['diagnosis']
     call(tool, 'save', workflow_id='daily', definition=data)
     preview = call(tool, 'preview', workflow_id='daily')
     row, = preview['skill_summaries']
@@ -651,7 +712,7 @@ def test_default_analysis_loads_real_skill_summaries(api, tmp_path):
     assert run['final_output'] == {'diagnosis': '核验完成'} and run['steps'][0]['llm_involved']
 
 
-# LLM: Full Access下run/resume不应反复弹审批，确定性脚本失败标failed而非unknown，仅进程清理未验证保unknown。
+# LLM: Full Access下run/resume不应反复弹审批，已启动脚本退出失败保留业务效果unknown，未启动拒绝保持not_started。
 # 函数用途: 回归本地TUI创建脚本与工作流时的审批模式、确定性失败终态与无错暂停契约。
 def test_full_access_approval_and_deterministic_effect_outcomes(api, tmp_path):
     from agent_py_agent.agent.local_storage import TOOL_OPERATION_FAILED, TOOL_OPERATION_UNKNOWN
@@ -676,13 +737,13 @@ def test_full_access_approval_and_deterministic_effect_outcomes(api, tmp_path):
             call=inv, runtime_snapshot=snapshot, workspace_root=tmp_path, approval_mode='ask', require_model_visibility=False))
         assert ask_decision.status == 'ask'
 
-    # descriptor 缺省自动补齐 id/kind，且确定性退出返回 effect_outcome='failed' 而非 unknown
+    # descriptor 缺省自动补齐 id/kind，且退出码失败不能证明业务未写，返回 effect_outcome='unknown'
     desc_without_id_kind = {k: v for k, v in descriptor('collect', 'script').items() if k not in ('id', 'kind')}
     assert scripts.execute({'action': 'register', 'script_id': 'collect', 'descriptor': desc_without_id_kind, 'code': 'import sys; sys.exit(9)'}).ok
     failed = scripts.execute({'action': 'run', 'script_id': 'collect'})
-    assert not failed.ok and failed.effect_outcome == 'failed'
+    assert not failed.ok and failed.effect_outcome == 'unknown'
     failed.handler_executed = True
-    assert _operation_status_for_result(failed) == TOOL_OPERATION_FAILED
+    assert _operation_status_for_result(failed) == TOOL_OPERATION_UNKNOWN
 
     invalid = scripts.execute({'action': 'register', 'script_id': 'bad', 'descriptor': {'name': 'x'}, 'code': 'pass'})
     assert not invalid.ok and invalid.effect_outcome == 'not_started'
@@ -1222,3 +1283,304 @@ exec(sys.stdin.read())
         env=env, input=script_runner._PYTHON_GUARD_CODE, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [denied, [] if denied else [True]]
+
+
+def test_workflow_model_definition_types_reject_strings_then_accept_corrected_save(tmp_path):
+    from agent_py_agent.agent.tooling.input_schema import validate_tool_input
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+
+    tool = WorkflowsTool(tmp_path)
+    definition = {'descriptor': {'name': '类型修正', 'access_targets': [], 'data_sources': [],
+                                'credential_refs': [], 'io_contract': {}}, 'steps': []}
+    request = {'action': 'save', 'workflow_id': 'typed-definition', 'definition': definition}
+    schema = tool.model_spec.input_schema
+    from agent_py_agent.agent.backends.tool_schema import tool_model_spec_to_anthropic_tool
+
+    wire = tool_model_spec_to_anthropic_tool(tool.model_spec)
+    visible = wire['input_schema']['properties']['definition']
+    assert visible['type'] == 'object'
+    descriptor_fields = visible['properties']['descriptor']['properties']
+    for key in ('access_targets', 'data_sources', 'credential_refs'):
+        assert descriptor_fields[key]['type'] == 'array'
+    assert visible['properties']['steps']['items']['properties']['inputs_map']['type'] == 'object'
+    assert len(json.dumps(wire).encode()) < 65536
+    assert validate_tool_input(request, json.loads(json.dumps(wire))['input_schema']).ok
+    for field, original in [('steps', []), ('io_contract', {}), ('access_targets', [])]:
+        target = definition if field == 'steps' else definition['descriptor']
+        target[field] = ''
+        invalid = validate_tool_input(request, schema)
+        assert not invalid.ok
+        assert any(issue.path.endswith('.' + field) and issue.keyword == 'type' for issue in invalid.issues)
+        assert tool._store().get_workflow('typed-definition') is None
+        target[field] = original
+    assert validate_tool_input(request, schema).ok
+    saved = tool.execute(request)
+    assert saved.ok, saved.output
+    assert tool._store().get_workflow('typed-definition') is not None
+    assert definition['descriptor']['io_contract'] == {}, '禁止修改模型原输入或把字符串隐式转换成对象'
+
+
+def test_scripts_descriptor_schema_rejects_bad_nested_type_then_corrected_register_runs(tmp_path):
+    from copy import deepcopy
+
+    from agent_py_agent.agent.tooling.input_schema import validate_tool_input
+    from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
+
+    tool = ScriptsTool(tmp_path)
+    body = {'name': '脚本类型校验', 'access_targets': [], 'data_sources': [], 'credential_refs': [],
+            'io_contract': {'inputs': ['value'], 'outputs': ['result']}}
+    request = {'action': 'register', 'script_id': 'typed-script', 'descriptor': body,
+               'code': 'import json,sys\nx=json.load(sys.stdin)\nprint(json.dumps({"result":x["value"]}))\n'}
+    wrong = deepcopy(request)
+    wrong['descriptor']['access_targets'] = ''
+    rejected = validate_tool_input(wrong, tool.model_spec.input_schema)
+    assert not rejected.ok
+    assert any(issue.path == '$.descriptor.access_targets' and issue.keyword == 'type'
+               for issue in rejected.issues)
+    outcome = tool.execute(wrong)
+    assert not outcome.ok and outcome.effect_outcome == 'not_started'
+    assert tool._store().get_script('typed-script') is None
+    assert wrong['descriptor']['access_targets'] == '', '不转换或修改模型原始空串'
+    assert validate_tool_input(request, tool.model_spec.input_schema).ok
+    visible = tool.model_spec.input_schema['properties']['descriptor']
+    assert visible['type'] == 'object'
+    assert visible['properties']['access_targets']['type'] == 'array'
+    assert visible['properties']['io_contract']['properties']['outputs']['items']['type'] == 'string'
+    saved = tool.execute(request)
+    assert saved.ok, saved.output
+    run = tool.execute({'action': 'run', 'script_id': 'typed-script', 'inputs': {'value': [1, {'nested': [2, 3]}]}})
+    assert run.ok, run.output
+    assert json.loads(run.output)['output_data'] == {'result': [1, {'nested': [2, 3]}]}
+
+
+def test_scripts_descriptor_schema_preserves_complex_json_and_rejects_undeclared_fields(tmp_path):
+    from copy import deepcopy
+
+    from agent_py_agent.agent.tooling.input_schema import validate_tool_input
+    from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
+
+    tool = ScriptsTool(tmp_path)
+    descriptor_value = {'name': '复杂结构', 'access_targets': [], 'credential_refs': [],
+        'data_sources': [{'source_id': 'local-source', 'system': 'future-system',
+                         'query_scope': {'groups': [{'keys': ['a', 'b'], 'limit': 3}]}}],
+        'io_contract': {'inputs': [{'name': 'values', 'type': 'array'}], 'outputs': ['result'],
+                        'output_types': {'result': 'array'}},
+        'metadata': {'examples': [{'values': [1, None, True, '中文'], 'mime': 'application/x-future-test'}]}}
+    args = {'action': 'register', 'script_id': 'complex-script', 'descriptor': descriptor_value,
+            'code': 'import json\nprint(json.dumps({"result": [1,2]}))\n'}
+    assert validate_tool_input(args, tool.model_spec.input_schema).ok
+    saved = tool.execute(args)
+    assert saved.ok, saved.output
+    stored = tool._store().get_script('complex-script')
+    assert stored['metadata']['examples'] == descriptor_value['metadata']['examples']
+    for field in ('surprise', '__proto__'):
+        bad = deepcopy(args)
+        bad['script_id'] = 'injected-script'
+        bad['descriptor'][field] = {'write_roots': ['/'], 'run_as_owner': 'other-owner'}
+        invalid = validate_tool_input(bad, tool.model_spec.input_schema)
+        assert not invalid.ok and any(i.keyword == 'additionalProperties' for i in invalid.issues)
+        rejected = tool.execute(bad)
+        assert not rejected.ok and rejected.effect_outcome == 'not_started'
+    assert tool._store().get_script('injected-script') is None
+    bad_output = deepcopy(args)
+    bad_output['descriptor']['io_contract']['outputs'] = [{'name': 'result'}]
+    invalid_output = validate_tool_input(bad_output, tool.model_spec.input_schema)
+    assert not invalid_output.ok
+    assert any(i.path == '$.descriptor.io_contract.outputs[0]' and i.keyword == 'type'
+               for i in invalid_output.issues)
+
+
+def test_workflow_step_progress_uses_real_run_params_and_independent_execution_bindings(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStepSpec
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+
+    class Sink:
+        def __init__(self):
+            self.events = []
+        def write_workflow_step_progress(self, event):
+            self.events.append(event)
+
+    sinks = [Sink(), Sink()]
+    active = [RunParams(request_id='first', on_chunk=sinks[0])]
+    barrier = Barrier(2)
+    def analyze(*args, **kwargs):
+        barrier.wait(timeout=5)
+        return {'value': 1}
+    tool = WorkflowsTool(tmp_path, run_params_provider=lambda: active[0], analysis_handler=analyze)
+    first = tool._execution_engine()
+    active[0] = RunParams(request_id='second', on_chunk=sinks[1])
+    second = tool._execution_engine()
+    workflows = [WorkflowDefinition(AssetDescriptor(id=f'progress-{i}', name=f'进度{i}', kind='workflow'),
+        (WorkflowStepSpec('analysis', '分析', 'llm_skill_analysis'),)) for i in range(2)]
+    with ThreadPoolExecutor(2) as pool:
+        futures = [pool.submit(engine.run_workflow, definition)
+            for engine, definition in zip((first, second), workflows)]
+        runs = [future.result(timeout=10) for future in futures]
+    assert all(run.status == 'succeeded' for run in runs)
+    for sink, run in zip(sinks, runs):
+        assert sink.events
+        assert {event['workflow_run_id'] for event in sink.events} == {run.workflow_run_id}
+        assert [event['status'] for event in sink.events] == ['pending', 'running', 'succeeded']
+        assert [event['seq'] for event in sink.events] == sorted({event['seq'] for event in sink.events})
+    active[0] = RunParams(request_id='silent', on_chunk=None)
+    assert tool._execution_engine().step_observer is None
+    assert tool._engine().step_observer is None, '共享惰性engine不能保留上一执行的进度出口'
+
+
+def test_script_cancellation_before_launch_has_no_process_side_effect(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common.cancellation import (
+        CancellationToken,
+        ToolCancelled,
+        bind_cancellation_token,
+    )
+    from agent_py_agent.agent.workflows import script_runner
+
+    token = CancellationToken()
+    token.cancel('user_stop')
+    def forbidden(*args, **kwargs):
+        pytest.fail('取消在启动前已接受，不能再创建进程')
+    monkeypatch.setattr(script_runner.subprocess, 'Popen', forbidden)
+    capture = {}
+    with bind_cancellation_token(token), pytest.raises(ToolCancelled, match='user_stop'):
+        script_runner._execute(['unused'], tmp_path, {}, '{}', 30, capture)
+    assert capture.get('started') is not True
+
+
+def test_script_cancellation_reaps_own_process_group_and_preserves_other_run(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from agent_py_agent.agent.common.cancellation import (
+        CancellationToken,
+        ToolCancelled,
+        bind_cancellation_token,
+    )
+    from agent_py_agent.agent.tooling.process_registry import (
+        _process_instance_terminated,
+        capture_process_birth_token,
+    )
+    from agent_py_agent.agent.workflows import script_runner
+
+    if os.name != 'posix':
+        pytest.skip('POSIX进程组证明；Windows沿现有脚本回收测试')
+    protected = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'], start_new_session=True)
+    protected_birth = capture_process_birth_token(protected.pid)
+    original = subprocess.Popen
+    launched = Event()
+    processes = []
+    def observed(*args, **kwargs):
+        process = original(*args, **kwargs)
+        processes.append(process)
+        launched.set()
+        return process
+    monkeypatch.setattr(script_runner.subprocess, 'Popen', observed)
+    token, capture = CancellationToken(), {}
+    code = ('import subprocess,sys,time,json,os;from pathlib import Path;'
+        'child=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"]);'
+        'Path("group.json").write_text(json.dumps({"root":os.getpid(),"pgid":os.getpgrp(),"child":child.pid}));'
+        'time.sleep(60)')
+    def execute():
+        with bind_cancellation_token(token):
+            script_runner._execute([sys.executable, '-c', code], tmp_path, dict(os.environ), '{}', 90, capture)
+    try:
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(execute)
+            assert launched.wait(5)
+            deadline = time.monotonic() + 5
+            while not (tmp_path / 'group.json').exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            group = json.loads((tmp_path / 'group.json').read_text())
+            child_birth = capture_process_birth_token(group['child'])
+            process = processes[0]
+            birth = capture_process_birth_token(process.pid)
+            assert group['root'] == process.pid == group['pgid']
+            assert birth and child_birth and protected_birth
+            assert group['pgid'] != os.getpgid(protected.pid)
+            stopped_at = time.monotonic()
+            token.cancel('user_stop')
+            with pytest.raises(ToolCancelled, match='user_stop'):
+                future.result(timeout=5)
+            assert time.monotonic() - stopped_at < 3
+            assert process.returncode is not None and not capture['cleanup_error']
+            assert _process_instance_terminated(process.pid, birth)
+            assert _process_instance_terminated(group['child'], child_birth)
+            assert protected.poll() is None and capture_process_birth_token(protected.pid) == protected_birth
+    finally:
+        token.cancel('test_cleanup')
+        protected.terminate()
+        protected.wait(timeout=5)
+
+
+@pytest.mark.parametrize('defect', ['wrong_field', 'missing_key', 'missing_revision', 'wrong_definition_type', 'wrong_protocol'])
+def test_business_preclaim_reports_exact_fields_without_alias_or_side_effects(api, tmp_path, defect):
+    home = tmp_path / 'no-write-on-refusal'
+    tool = api[1](home)
+    definition = {'descriptor': {'id': 'clock-edit', 'kind': 'workflow', 'name': 'clock-edit',
+        'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}}, 'steps': []}
+    params = {'action': 'workflows.update', 'workflow_ref': 'clock-edit', 'definition': definition,
+              'expected_revision': 1, 'idempotency_key': 'corrected-update-key'}
+    if defect == 'wrong_field':
+        params['workflow_id'] = params.pop('workflow_ref')
+    elif defect == 'missing_key':
+        params.pop('idempotency_key')
+    elif defect == 'missing_revision':
+        params.pop('expected_revision')
+    elif defect == 'wrong_protocol':
+        params['definition']['descriptor']['schema_version'] = '1'
+    else:
+        params['definition'] = 'private-input-not-an-object'
+    result = tool.validate_invocation(params, None)
+    assert result is not None and not result.ok and result.effect_outcome == 'not_started'
+    body = json.loads(result.output)
+    assert not home.exists() and 'private-input-not-an-object' not in result.output
+    if defect == 'wrong_protocol':
+        assert body['error_code'] == 'INVALID_SCHEMA'
+        assert body['details']['field'] == 'definition.descriptor.schema_version'
+        assert body['details']['expected'] == 'asset_descriptor.v1'
+    elif defect == 'wrong_definition_type':
+        assert body['error_code'] == 'WORKFLOW_SCHEMA_INVALID'
+        assert any(issue['path'] == '$.definition' and issue['actual_type'] == 'string' for issue in body['issues'])
+    else:
+        details = body['details']
+        assert details['action'] == 'workflows.update'
+        assert details['idempotency_required'] and details['expected_revision_required']
+        assert 'workflow_ref' in details['call_example'] and 'workflow_id' not in details['call_example']
+        if defect == 'wrong_field':
+            assert details['missing_fields'] == ['workflow_ref']
+            assert details['unsupported_fields'] == ['workflow_id']
+        else:
+            assert details['field'] == ('idempotency_key' if defect == 'missing_key' else 'expected_revision')
+    assert tool.validate_invocation({'action': 'run', 'workflow_id': 'clock-edit'}, None) is None
+    assert not home.exists()
+
+
+def test_workflow_pause_emits_canonical_step_progress(api, tmp_path):
+    from agent_py_agent.agent.conversation.background_transcript import public_workflow_step_display
+    from agent_py_agent.agent.gateway_parts.stream_events import workflow_step_event
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    scripts_cls, workflows_cls = api
+    scripts = scripts_cls(tmp_path)
+    call(scripts, 'register', script_id='pause-checkpoint', descriptor={'name': '暂停核对',
+         'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {'outputs': ['value']}},
+         code='import json; print(json.dumps({"value":42,"_pause_for_resume":True}))')
+    events = []
+    workflow = workflows_cls(tmp_path, engine=WorkflowEngine(tmp_path, step_observer=events.append))
+    call(workflow, 'save', workflow_id='pause-progress', definition={'descriptor': {'name': '暂停步骤流',
+        'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}},
+        'steps': [{'step_id': 'pause', 'name': '暂停核对', 'mode': 'deterministic_script', 'script_id': 'pause-checkpoint'}]})
+    result = call(workflow, 'run', workflow_id='pause-progress')
+    assert result['status'] == 'paused_for_resume'
+    assert [row['status'] for row in events] == ['pending', 'running', 'paused_for_resume']
+    assert {row['workflow_run_id'] for row in events} == {result['workflow_run_id']}
+    assert workflow_step_event(events[-1])['status'] == 'paused_for_resume'
+    assert '已暂停／待恢复' in public_workflow_step_display(events[-1])['text']
+    assert not workflow_step_event({**events[-1], 'status': 'made-up-paused'})

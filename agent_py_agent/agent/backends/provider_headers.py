@@ -22,13 +22,15 @@ _PROBE_ACCOUNTING: ContextVar[object | None] = ContextVar("probe_accounting", de
 
 
 # LLM: ledger 是唯一模型调用账本；request_id/run_id 决定探测用量归到哪个请求的累计 scope，
-#   与主请求收尾的快照同一身份，快照才能把探测一并算进去。纯身份容器，不含密钥与正文。
-# 类用途: 一次工具能力探测要记入的账本与请求归属。
+#   与主请求收尾的快照同一身份；思考选项只承接同run设置，不授予身份、权限或模型切换。
+# 类用途: 保存工具能力探测的账本归属及同一主设置解析出的请求级思考选项，不含密钥或正文。
 @dataclass(frozen=True)
 class ProbeAccountingScope:
     ledger: object
     request_id: str = ""
     run_id: str = ""
+    thinking_disabled: bool = False
+    reasoning_effort: str = ""
 
 
 # LLM: 嵌套探测不可能发生（单线程内 select_tool_protocol 同步调用）；scope 退出必须恢复原值，防止串到相邻请求。

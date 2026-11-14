@@ -90,9 +90,9 @@ def test_timed_runner_interrupts_blocking_transport_after_attempt_is_fenced():
     worker = SimpleNamespace(
         run_subagent=_run_subagent,
         subagents=SimpleNamespace(
-            runtime_db=None,
+            runtime_db=None, workspace="timeout-runner-test",
             load=lambda _run_id: SimpleNamespace(
-                status="RUNNING", runner_active_attempt_id="attempt-timeout", runner_abandoned_attempt_ids=[],
+                id=_run_id, status="RUNNING", runner_active_attempt_id="attempt-timeout", runner_abandoned_attempt_ids=[],
             ),
             lifecycle=SimpleNamespace(
                 prepare_runner_attempt=lambda *_args, **_kwargs: SimpleNamespace(
@@ -149,9 +149,9 @@ def test_non_timed_runner_registers_exact_attempt_interrupt_token():
     worker = SimpleNamespace(
         run_subagent=_run_subagent,
         subagents=SimpleNamespace(
-            runtime_db=None,
+            runtime_db=None, workspace="normal-runner-test",
             load=lambda _run_id: SimpleNamespace(
-                status="RUNNING", runner_active_attempt_id="attempt-normal", runner_abandoned_attempt_ids=[],
+                id=_run_id, status="RUNNING", runner_active_attempt_id="attempt-normal", runner_abandoned_attempt_ids=[],
             ),
             lifecycle=SimpleNamespace(
                 prepare_runner_attempt=lambda *_args, **_kwargs: SimpleNamespace(
@@ -273,7 +273,7 @@ def test_audit_runner_uses_stream_inactivity_not_total_wall_time():
         _model_call_ledger=ledger,
         run_subagent=run_subagent,
         subagents=SimpleNamespace(
-            runtime_db=None,
+            runtime_db=None, workspace="audit-runner-test",
             load=lambda _run_id: task,
             lifecycle=SimpleNamespace(
                 prepare_runner_attempt=lambda *_args, **_kwargs: SimpleNamespace(

@@ -97,7 +97,11 @@ def _main_scope(agent: object, link: object, thread: object) -> ToolApprovalScop
     if foreground:
         active = active and _foreground_main_is_current(agent, link, thread, claim_id, current, writer)
     else:
-        active = active and claim.get("task_id") == link.task_id
+        # 原消息唤醒领取时还没有任务；core 随后在同一 claim 发布准确任务/attempt。
+        # 非空旧任务冲突仍拒，空任务只能继续进入下方完整原发布与 RuntimeDB 核验。
+        claimed_task = str(claim.get('task_id') or '')
+        active = active and (claimed_task == link.task_id
+            or (not claimed_task and 'runtime_authority' in claim))
     attempt_id = str(getattr(current, "attempt_id", "") or "") if foreground and active else ""
     if not foreground and active:
         attempt_id = _background_main_attempt(agent, link, thread, claim, current)

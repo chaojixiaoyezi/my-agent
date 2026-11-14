@@ -122,3 +122,102 @@ def test_committed_cleanup_recovers_original_evidence_after_install_failure(tmp_
     monkeypatch.setattr(cleanup_module, "_terminate_frozen_instances", lambda *_: ())
     assert stop_process_session(store, fresh).confirmed
     assert not (store.root / ".process-sessions.redo.json").exists()
+
+
+def test_stop_allows_original_host_to_publish_before_fallback_signals(tmp_path, monkeypatch):
+    """Event交错证明短事务已释放，原host能提交子树凭证后才进入fallback。"""
+    import time
+    from threading import Event, Thread
+
+    store, record = _bound_record(tmp_path)
+    observed, published = Event(), Event()
+    original_load = store.load
+    def observe(session_id):
+        report = original_load(session_id)
+        if report.record.get("stop_requested"):
+            observed.set()
+        return report
+    monkeypatch.setattr(store, "load", observe)
+    monkeypatch.setattr(cleanup_module, "capture_process_birth_token",
+                        lambda pid: "" if published.is_set() else record["pid_birth_token"])
+    monkeypatch.setattr(cleanup_module, "_process_instance_terminated", lambda *_: published.is_set())
+    def publish():
+        assert observed.wait(2)
+        with store.transaction() as tx:
+            current = tx.load(record["session_id"])
+            tx.write({**current, "status": "killed", "finished_at": time.time(), "exit_code": -15,
+                      "termination": {"method": "original_host_child_tree", "confirmed": True,
+                                      "return_code": -15, "observed_processes": 2, "unresolved_pids": []}})
+        published.set()
+    def fallback(*_):
+        assert published.is_set(), "不得先杀host而让原凭证丢失"
+        return ()
+    monkeypatch.setattr(cleanup_module, "_terminate_frozen_instances", fallback)
+    worker = Thread(target=publish)
+    worker.start()
+    try:
+        result = stop_process_session(store, record)
+    finally:
+        observed.set()
+        worker.join(timeout=3)
+    assert not worker.is_alive()
+    assert result.confirmed
+    assert result.record["termination"]["method"] == "original_host_child_tree"
+    assert result.record["termination"]["cleanup"]["confirmed"]
+
+
+def test_dead_host_without_original_receipt_stays_unknown(tmp_path, monkeypatch):
+    store, record = _bound_record(tmp_path)
+    monkeypatch.setattr(cleanup_module, "capture_process_birth_token", lambda _: "")
+    monkeypatch.setattr(cleanup_module, "_process_instance_terminated", lambda *_: True)
+    monkeypatch.setattr(cleanup_module, "_terminate_frozen_instances", lambda *_: ())
+    result = stop_process_session(store, record)
+    assert not result.confirmed and result.record["status"] == "unknown"
+    assert result.record["termination"] == {"cleanup": {"confirmed": False, "instances": []}}
+
+
+def test_real_stop_retains_host_owned_child_tree_exit_proof(tmp_path):
+    """真实独立host收束child及其孙进程并落原凭证；不以PID消失或returncode替代。"""
+    import json
+    import time
+
+    code = ("import subprocess,sys,time,json; "
+            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+            "open('grandchild.json','w').write(json.dumps({'pid':p.pid})); time.sleep(30)")
+    hosted = start_background_process(managed_request(tmp_path, code))
+    store = ProcessSessionStore(hosted.store_root)
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "grandchild.json").exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert json.loads((tmp_path / "grandchild.json").read_text())["pid"] > 1
+        before = store.load(hosted.record["session_id"]).record
+        result = stop_process_session(store, before, host_process=hosted.process)
+        assert result.confirmed
+        proof = result.record["termination"]
+        assert proof["confirmed"] is True
+        assert proof["observed_processes"] >= 2
+        assert proof["return_code"] is not None and proof["unresolved_pids"] == []
+        assert proof["cleanup"]["confirmed"] is True
+        hosted.process.wait(timeout=5)
+    finally:
+        if hosted.process.poll() is None:
+            stop_process_session(store, store.load(hosted.record["session_id"]).record, host_process=hosted.process)
+            hosted.process.wait(timeout=5)
+
+
+def test_host_cleanup_observation_fault_retains_precise_authority_report(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.process_session_store import ProcessSessionLoadReport
+
+    store, record = _bound_record(tmp_path)
+    monkeypatch.setattr(cleanup_module, "capture_process_birth_token", lambda _: record["pid_birth_token"])
+    monkeypatch.setattr(cleanup_module, "_process_instance_terminated", lambda *_: False)
+    monkeypatch.setattr(store, "load", lambda _: ProcessSessionLoadReport({}, {
+        "error_type": "PermissionError", "context": "process_session_store.load", "reason": "synthetic denied"}))
+    monkeypatch.setattr(cleanup_module, "_terminate_frozen_instances",
+                        lambda *_: pytest.fail("权威不可读时不得继续发信号"))
+    with pytest.raises(ProcessSessionCleanupError) as failure:
+        stop_process_session(store, record)
+    assert failure.value.report["committed"] is True
+    assert failure.value.report["authority_error"]["error_type"] == "PermissionError"
+    assert failure.value.report["termination_receipts"] == []

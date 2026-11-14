@@ -352,10 +352,12 @@ def test_failed_tail_quarantine_does_not_advance_head(compact_case, monkeypatch)
     damaged = path.read_bytes() + b'{'
     path.write_bytes(damaged)
     original = OSError('injected quarantine failure')
+    accepted = []
 
     # LLM: Inject only at the local quarantine boundary, not the shared filesystem helpers or real CAS.
     # 函数用途: Keep the production read and candidate assembly paths real while refusing the destructive seal.
     def fail(_path, _tail):
+        accepted.append(case.store.threads.require(case.thread_id))
         raise original
 
     monkeypatch.setattr(checkpoints, '_save_torn_ledger_tail', fail)
@@ -364,9 +366,11 @@ def test_failed_tail_quarantine_does_not_advance_head(compact_case, monkeypatch)
     assert caught.value is original
     assert path.read_bytes() == damaged
     current = case.store.threads.require(case.thread_id)
-    # The real source-message append updates activity, but no compact state or other thread field may move.
+    # 正式来源消息已追加；封尾失败不能回退用户指针，也不能推进任何压缩权威字段。
     assert current.updated_at == case.clock[0]
-    assert replace(current, updated_at=head.updated_at) == head
+    assert len(accepted) == 1 and current == accepted[0]
+    assert current.last_user_message_id != head.last_user_message_id
+    assert replace(current, updated_at=head.updated_at, last_user_message_id=head.last_user_message_id) == head
 
 
 # LLM: Equal-millisecond sidecar collisions must fail closed rather than overwrite earlier evidence.
@@ -574,18 +578,21 @@ def test_portable_seal_failure_preserves_head_and_closes_resources(compact_case,
     path.write_bytes(damaged)
     original = OSError(errno.EIO, 'simulated evidence sync error')
     calls = []
+    accepted = []
     with _portable_checkpoint_io(monkeypatch) as portable:
         def fail_evidence_sync(descriptor):
             target = portable.opened_paths[descriptor]
             if target.name.startswith(f'.{path.name}.torn-'):
                 assert target.read_bytes() == tail and path.read_bytes() == damaged
                 calls.append(target)
+                accepted.append(case.store.threads.require(case.thread_id))
                 raise original
             return os.fsync(descriptor)
 
         def fail_parent_sync(sidecar):
             assert sidecar.read_bytes() == tail and path.read_bytes() == damaged
             calls.append(sidecar)
+            accepted.append(case.store.threads.require(case.thread_id))
             if os.name == 'nt':
                 # Windows 原 helper 没有目录 FD；仍验证调用边界的原异常透传。
                 raise original
@@ -603,7 +610,10 @@ def test_portable_seal_failure_preserves_head_and_closes_resources(compact_case,
             _commit_portable_writer(case, writer, 'uncommitted')
         assert caught.value is original and len(calls) == 1
         current = case.store.threads.require(case.thread_id)
-        assert replace(current, updated_at=head.updated_at) == head
+        # 精确比较失败前的完整宿主快照；只有transcript writer先合法追加了一条用户消息。
+        assert len(accepted) == 1 and current == accepted[0]
+        assert (current.last_user_message_id != head.last_user_message_id) is (writer == 'transcript')
+        assert replace(current, updated_at=head.updated_at, last_user_message_id=head.last_user_message_id) == head
         assert [row['checkpoint_id'] for row in checkpoints.committed_compact_checkpoint_chain(case.agent, current)] == [head.compact_checkpoint_id]
     assert path.read_bytes() == damaged
     sidecars = list(path.parent.glob(f'.{path.name}.torn-*'))

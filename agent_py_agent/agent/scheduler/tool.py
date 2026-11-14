@@ -42,6 +42,7 @@ from .execution_policy import (
     EXECUTION_SCHEMA,
     EXECUTION_TARGET_SCHEMA,
     PRECHECK_SCHEMA,
+    capture_business_context,
     normalize_execution,
     normalize_precheck,
     resolve_execution_target,
@@ -445,6 +446,7 @@ class ScheduleTool(BaseTool):
         source_thread_id = schedule_source_thread_id(self.agent, thread_id)
         creator = _creator_identity(self.agent, thread_id)
         source_request_id = _source_request_id(self.agent, params)
+        business_context = capture_business_context(self.agent)
         thread_id = schedule_execution_thread(self.agent, thread_id, source_request_id)
         job, deduped = repository.create_job(
             SchedulerJobCreateRequest(
@@ -452,6 +454,7 @@ class ScheduleTool(BaseTool):
                 prompt=prompt,
                 thread_id=thread_id,
                 source_task_id=source_task_id,
+                business_context=business_context,
                 schedule=schedule,
                 misfire_grace_seconds=_optional_int(params.get("misfire_grace_seconds")),
                 skill_refs=skill_refs,

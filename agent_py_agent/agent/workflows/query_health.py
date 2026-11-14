@@ -30,7 +30,7 @@ def _field_counts(known, unknown):
             'coverage': 'complete' if not unknown else 'partial' if known else 'unknown'}
 
 
-def _merge_coverage(*values):
+def _merge_coverage(values: tuple[str, ...]) -> str:
     return 'unknown' if 'unknown' in values else 'partial' if 'partial' in values else 'complete'
 
 
@@ -501,7 +501,7 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
     result = {
         'schema_version': 'workflow_health.v1',
         'workflow_id': workflow_id,
-        'coverage': _merge_coverage(coverage, field_status),
+        'coverage': _merge_coverage((coverage, field_status)),
         'source_coverage': source_coverage,
         'field_coverage': field_coverage,
         'truncated': truncated,

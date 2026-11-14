@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import socket
 import sqlite3
 import stat
+import tempfile
 import threading
 import time
 import uuid
@@ -19,9 +21,26 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from agent_py_agent.agent.common.json_io import write_private_json_file_atomic_unlocked
+from agent_py_agent.agent.common.nofollow_fs import NoFollowPathError, _snapshot_stat_fields_match
 from agent_py_agent.agent.owner_change_journal import OwnerChangeJournal
 from agent_py_agent.agent.owner_snapshot_cache import OwnerSnapshotIndex
-from agent_py_agent.agent.owner_snapshot_index import OwnerStatIndex, stage_and_hash
+from agent_py_agent.agent.owner_snapshot_files import (
+    DownloadedObjects,
+    SnapshotParent,
+    downloaded_object,
+    file_signature,
+    lexical_path,
+    tree_snapshot,
+    validate_relative,
+)
+from agent_py_agent.agent.owner_snapshot_index import (
+    OWNER_SNAPSHOT_RACY_MTIME_SECONDS,
+    OwnerStagedFile,
+    OwnerStatIndex,
+    descriptor_digest,
+    stage_and_hash,
+    stage_open_file,
+)
 from agent_py_agent.agent.pg_rls import tenant_session
 from agent_py_agent.agent.scale_runtime import ScaleRuntimeConfig
 from agent_py_agent.agent.storage_backend import StorageBackend
@@ -206,15 +225,29 @@ class OwnerSnapshotStore:
             raise RuntimeError("owner 快照缺少租约 SQL 助手")
         if not lease_ttl_seconds > 0:
             raise ValueError("owner 快照租约 TTL 必须大于零")
-        warm_dir = warm_dir.resolve()
+        warm_dir = lexical_path(warm_dir)
         home_root = warm_dir / "home"
-        if not owner_home.resolve().is_relative_to(home_root.resolve()):
+        owner_home = lexical_path(owner_home)
+        if not owner_home.is_relative_to(home_root):
             raise ValueError("owner_home 必须位于 warm_dir/home 内")
-        owner_home = owner_home.resolve()
         incarnation = uuid.uuid4().hex
         holder = f"{socket.gethostname()}:{os.getpid()}"
         renew_interval = lease_ttl_seconds / 3
         with ExitStack() as stack:
+            warm_guard = stack.enter_context(SnapshotParent(warm_dir, create=True))
+            home_guard = stack.enter_context(SnapshotParent(warm_dir, ('home',), create=True,
+                                                           expected_root=warm_guard.root_identity))
+            owner_parts = owner_home.relative_to(home_root).parts
+            try:
+                with SnapshotParent(home_root, owner_parts, expected_root=home_guard.identity) as before_owner:
+                    original_owner_identity = before_owner.identity
+            except FileNotFoundError:
+                original_owner_identity = None
+            owner_guard = stack.enter_context(SnapshotParent(home_root, owner_parts, create=True,
+                                                            expected_root=home_guard.identity))
+            if original_owner_identity is not None and owner_guard.identity != original_owner_identity:
+                raise NoFollowPathError('owner snapshot lexical owner binding changed')
+            owner_identity, home_identity = owner_guard.identity, home_guard.identity
             if hold_advisory_lock:
                 stack.enter_context(self._owner_lock(tenant, owner_kind, owner_id))
             version = None
@@ -273,11 +306,18 @@ class OwnerSnapshotStore:
             home_root.mkdir(parents=True, exist_ok=True)
 
             def observe(clock):
-                return journal.query(home_root, clock, control_root=warm_dir)
+                warm_guard.verify()
+                home_guard.verify()
+                owner_guard.verify()
+                result = journal.query(home_root, clock, control_root=warm_dir)
+                warm_guard.verify()
+                home_guard.verify()
+                owner_guard.verify()
+                return result
 
             batch = observe(str(metadata.get('clock') or ''))
             valid = (clean and type(metadata.get('version')) is int and 0 <= metadata['version'] <= version
-                     and metadata.get('identity') == identity and owner_home.is_dir() and batch.complete)
+                     and metadata.get('identity') == identity and original_owner_identity is not None and batch.complete)
             reason = ''
             remote_paths = set()
             if valid and metadata['version'] != version:
@@ -298,18 +338,18 @@ class OwnerSnapshotStore:
                     reason = 'cache_identity_changed'
                 elif type(metadata.get('version')) is not int or metadata['version'] != version:
                     reason = reason or 'remote_version_changed'
-                elif not owner_home.is_dir():
+                elif original_owner_identity is None:
                     reason = 'owner_home_missing'
                 else:
                     reason = batch.reason or 'observer_coverage_unconfirmed'
                 rows = self._read_manifest(tenant, owner_kind, owner_id)
-                self._prune_warm_home(home_root, owner_home)
-                restored = (not clean or not owner_home.is_dir()
+                self._prune_warm_home(home_root, owner_home, expected_root=home_identity)
+                restored = (not clean or original_owner_identity is None
                             or any(path.is_symlink() for path in self._warm_paths(owner_home)))
                 if restored:
                     if owner_home.exists() and not owner_home.is_dir():
-                        owner_home.unlink()
-                    self.restore(tenant, owner_kind, owner_id, owner_home)
+                        raise NoFollowPathError('owner snapshot root is not a directory; original entry preserved')
+                    self.restore(tenant, owner_kind, owner_id, owner_home, expected_root=owner_identity)
                     index.reset(rows)
                     for row in rows:
                         index.record(row.relative_path, (owner_home / _safe_relative(row.relative_path)).lstat(),
@@ -322,31 +362,33 @@ class OwnerSnapshotStore:
                         index.set_manifest(row)
                 # 完整校对是显式恢复边界；先装watch再扫描，期间变化必须在cookie之后再次校对。
                 batch = observe(batch.clock)
-                self._reconcile_warm(owner_home, rows, index, verified_restore=restored)
+                self._reconcile_warm(owner_home, rows, index, expected_root=owner_identity)
                 for _ in range(3):
                     after = observe(batch.clock)
                     if not after.complete:
                         batch = after
                         break
-                    pending, foreign = self._observed_paths(home_root, owner_home, after.paths, index)
+                    pending, foreign = self._observed_paths(home_root, owner_home, after.paths, index, expected_root=owner_identity)
                     if not pending and not foreign:
                         batch = after
                         break
-                    self._reconcile_observed(home_root, owner_home, pending, foreign, index)
+                    self._reconcile_observed(home_root, owner_home, pending, foreign, index,
+                                             expected_root=owner_identity, expected_home=home_identity)
                     batch = after
                 else:
                     raise RuntimeError('owner 缓存校对期间持续变动，保留 DIRTY 等待重试')
             else:
                 for _ in range(3):
-                    pending, foreign = self._observed_paths(home_root, owner_home, batch.paths, index)
+                    pending, foreign = self._observed_paths(home_root, owner_home, batch.paths, index, expected_root=owner_identity)
                     pending.update(remote_paths)
                     remote_paths.clear()
-                    self._reconcile_observed(home_root, owner_home, pending, foreign, index)
+                    self._reconcile_observed(home_root, owner_home, pending, foreign, index,
+                                             expected_root=owner_identity, expected_home=home_identity)
                     after = observe(batch.clock)
                     if not after.complete:
                         raise RuntimeError('owner 观察器在温缓存校对中丢失覆盖，保留 DIRTY')
                     batch = after
-                    pending, foreign = self._observed_paths(home_root, owner_home, batch.paths, index)
+                    pending, foreign = self._observed_paths(home_root, owner_home, batch.paths, index, expected_root=owner_identity)
                     if not pending and not foreign:
                         break
                 else:
@@ -355,31 +397,40 @@ class OwnerSnapshotStore:
             yield owner_home
             changed_batch = observe(start_clock)
             if changed_batch.complete:
-                pending, foreign = self._observed_paths(home_root, owner_home, changed_batch.paths, index)
+                pending, foreign = self._observed_paths(home_root, owner_home, changed_batch.paths, index, expected_root=owner_identity)
                 if foreign:
-                    self._prune_warm_home(home_root, owner_home)
+                    self._prune_warm_home(home_root, owner_home, expected_root=home_identity)
                 for _ in range(3):
-                    removed, changed = self._snapshot_observed(tenant, owner_home, warm_dir, pending, index)
+                    removed, changed = self._snapshot_observed(tenant, owner_home, warm_dir, pending, index,
+                                                              expected_root=owner_identity)
                     after = observe(changed_batch.clock)
                     if not after.complete:
                         changed_batch = after
                         break
-                    more, foreign = self._observed_paths(home_root, owner_home, after.paths, index)
+                    more, foreign = self._observed_paths(home_root, owner_home, after.paths, index, expected_root=owner_identity)
                     changed_batch = after
                     if foreign:
-                        self._prune_warm_home(home_root, owner_home)
+                        self._prune_warm_home(home_root, owner_home, expected_root=home_identity)
                     if not more:
                         break
                     pending.update(more)
                 else:
                     raise RuntimeError('owner 快照期间持续变动，保留 DIRTY 等待重试')
             if not changed_batch.complete:
-                reason = changed_batch.reason or 'observer_coverage_lost'
+                reason = reason or changed_batch.reason or 'observer_coverage_lost'
                 rows = [OwnerFile(**row) for row in index.manifest().values()]
-                removed, changed = self._snapshot_delta(tenant, owner_home, warm_dir, rows, index)
+                removed, changed, verified = self._snapshot_delta(tenant, owner_home, warm_dir, rows, index,
+                                                                  expected_root=owner_identity)
                 changed_batch = observe(changed_batch.clock)
+                _validate_verified_files(verified)
+            warm_guard.verify()
+            home_guard.verify()
+            owner_guard.verify()
             committed = head.commit(tenant, owner_kind, owner_id, incarnation=incarnation, removed=removed, changed=changed,
                                     expected_version=version)
+            warm_guard.verify()
+            home_guard.verify()
+            owner_guard.verify()
             for relative in removed:
                 index.forget(relative)
             for row in changed:
@@ -389,8 +440,13 @@ class OwnerSnapshotStore:
                                 'recovered_index': recovered_index})
             index.conn.commit()
             write_private_json_file_atomic_unlocked(state_path, {"state": "CLEAN"})
-            (warm_dir / 'stat-index.json').unlink(missing_ok=True)
-            shutil.rmtree(warm_dir / "staging", ignore_errors=True)
+            with SnapshotParent(warm_dir) as control:
+                for name in ('stat-index.json', 'staging'):
+                    try:
+                        info = control.info(name)
+                    except FileNotFoundError:
+                        continue
+                    control.remove(name, info)
 
     def _journal(self):
         journal = getattr(self, '_changes', None)
@@ -411,7 +467,9 @@ class OwnerSnapshotStore:
         if journal is not None:
             journal.close()
 
-    def _observed_paths(self, home_root, owner_home, events, index):
+    def _observed_paths(self, home_root, owner_home, events, index, *, expected_root=None):
+        with SnapshotParent(owner_home, expected_root=expected_root) as owner:
+            root_identity = owner.root_identity
         prefix = owner_home.relative_to(home_root).as_posix()
         paths, subtrees, foreign, whole_root = set(), set(), False, False
         for event in events:
@@ -447,43 +505,65 @@ class OwnerSnapshotStore:
             paths.update(index.subtree(relative))
             target = owner_home / _safe_relative(relative)
             if target.is_dir() and not target.is_symlink():
-                paths.update(path.relative_to(owner_home).as_posix() for path in self._warm_paths(target))
+                with SnapshotParent(owner_home, _safe_relative(relative).parts,
+                                    expected_root=root_identity) as selected:
+                    paths.update(path.relative_to(owner_home).as_posix() for path in
+                        self._warm_paths(target, expected_root=selected.identity))
         return paths, foreign
 
-    def _reconcile_observed(self, home_root, owner_home, paths, foreign, index):
+    def _reconcile_observed(self, home_root, owner_home, paths, foreign, index, *, expected_root=None, expected_home=None):
         if foreign:
-            self._prune_warm_home(home_root, owner_home)
+            self._prune_warm_home(home_root, owner_home, expected_root=expected_home)
         previous = index.manifest(paths)
+        with SnapshotParent(owner_home, expected_root=expected_root) as owner:
+            root_identity = owner.root_identity
         for relative in sorted(paths, key=lambda value: (value.count('/'), value), reverse=True):
-            target = owner_home / _safe_relative(relative)
-            row = previous.get(relative)
-            if row is None:
-                if target.is_symlink() or target.exists() and not target.is_dir():
-                    target.unlink()
-                elif target.is_dir():
-                    try:
-                        target.rmdir()
-                    except OSError:
-                        pass
+            selected = _safe_relative(relative)
+            if relative not in previous:
+                try:
+                    with SnapshotParent(owner_home, selected.parts[:-1], expected_root=root_identity) as parent:
+                        try:
+                            info = parent.info(selected.name)
+                        except FileNotFoundError:
+                            info = None
+                        if info is not None:
+                            try:
+                                parent.remove(selected.name, info, recursive=False)
+                            except OSError as exc:
+                                # 仍有被索引后代的目录可保留；权限、换链等其它错误不能吞成已删。
+                                import errno
+
+                                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                                    raise
+                except FileNotFoundError:
+                    pass
                 index.forget(relative)
         for relative, value in previous.items():
             row = OwnerFile(**value)
-            target = owner_home / _safe_relative(relative)
+            selected = _safe_relative(relative)
+            target = owner_home / selected
+            valid = False
             try:
-                info = target.lstat()
+                with SnapshotParent(owner_home, selected.parts[:-1], expected_root=root_identity) as parent:
+                    try:
+                        info = parent.info(selected.name)
+                    except FileNotFoundError:
+                        info = None
+                    valid = (info is not None and stat.S_ISREG(info.st_mode) and info.st_size == row.size_bytes
+                             and stat.S_IMODE(info.st_mode) == row.file_mode
+                             and _stable_file_digest(target, expected_stat=info, owner_root=owner_home,
+                                expected_root=root_identity)[0] == row.content_sha256)
+                    parent.verify()
             except FileNotFoundError:
-                info = None
-            valid = (info is not None and stat.S_ISREG(info.st_mode) and info.st_size == row.size_bytes
-                     and stat.S_IMODE(info.st_mode) == row.file_mode and _file_digest(target)[0] == row.content_sha256)
+                pass
             if not valid:
-                if target.is_dir() and not target.is_symlink():
-                    shutil.rmtree(target)
-                elif target.is_symlink():
-                    target.unlink()
-                self._download_row(owner_home, row)
-            index.record(relative, target.lstat(), row.content_sha256, time.time())
+                self._download_row(owner_home, row, expected_root=root_identity)
+            with SnapshotParent(owner_home, selected.parts[:-1], expected_root=root_identity) as parent:
+                index.record(relative, parent.info(selected.name), row.content_sha256, time.time())
 
-    def _snapshot_observed(self, tenant, owner_home, warm_dir, paths, index):
+    def _snapshot_observed(self, tenant, owner_home, warm_dir, paths, index, *, expected_root=None):
+        with SnapshotParent(owner_home, expected_root=expected_root) as owner:
+            root_identity = owner.root_identity
         previous = index.manifest(paths)
         removed, changed = [], []
         for relative in sorted(paths):
@@ -502,14 +582,14 @@ class OwnerSnapshotStore:
                 continue
             if Path(relative).parts[0] in self._EPHEMERAL_ROOTS:
                 continue
-            staged, digest, size = stage_and_hash(target, warm_dir / 'staging')
-            after = target.lstat()
-            fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode', 'st_nlink')
-            if any(getattr(info, field) != getattr(after, field) for field in fields):
-                staged.unlink(missing_ok=True)
-                raise RuntimeError(f'owner 文件在快照时仍被写入: {target}')
-            key = self._object_key(tenant, digest)
+            staged, digest, size = stage_and_hash(target, warm_dir / 'staging',
+                owner_root=owner_home, expected_stat=info, expected_root=root_identity)
             try:
+                after = target.lstat()
+                fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode', 'st_nlink')
+                if any(getattr(info, field) != getattr(after, field) for field in fields):
+                    raise RuntimeError(f'owner 文件在快照时仍被写入: {target}')
+                key = self._object_key(tenant, digest)
                 old = previous.get(relative)
                 row = OwnerFile(relative, key, digest, size, stat.S_IMODE(info.st_mode))
                 if old is None or row != OwnerFile(**old):
@@ -522,81 +602,129 @@ class OwnerSnapshotStore:
 
     # LLM: 显式扫描不吞权限等枚举错误，不能将漏读路径解释为删除；符号链接只列出而不跟随。
     # 函数用途: 完整列举温缓存子树，任何不可读目录都使本轮失败。
-    def _warm_paths(self, owner_home: Path) -> list[Path]:
-        pending = [owner_home]
-        paths: list[Path] = []
-        while pending:
-            with os.scandir(pending.pop()) as entries:
-                for entry in entries:
-                    path = Path(entry.path)
-                    paths.append(path)
-                    if stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode):
-                        pending.append(path)
-        return sorted(paths)
+    def _warm_paths(self, owner_home: Path, *, expected_root=None) -> list[Path]:
+        with SnapshotParent(owner_home, expected_root=expected_root) as parent:
+            return sorted(owner_home.joinpath(*parts) for parts in tree_snapshot(parent))
 
     # LLM: 只遍历 owner 祖先链的兄弟节点；不跟随兄弟符号链接，不扫描其它子树。
     # 函数用途: 清除温缓存家根中不属于当前 owner 的路径。
-    def _prune_warm_home(self, home_root: Path, owner_home: Path) -> None:
-        current = home_root
-        for part in owner_home.relative_to(home_root).parts:
-            if not current.exists():
-                break
-            for sibling in current.iterdir():
-                if sibling.name != part:
-                    if sibling.is_symlink() or not sibling.is_dir():
-                        sibling.unlink()
-                    else:
-                        shutil.rmtree(sibling)
-            current = current / part
+    def _prune_warm_home(self, home_root: Path, owner_home: Path, *, expected_root=None) -> None:
+        try:
+            with SnapshotParent(home_root, expected_root=expected_root) as root:
+                root_identity = root.root_identity
+        except FileNotFoundError:
+            return
+        parts = owner_home.relative_to(home_root).parts
+        for position, selected in enumerate(parts):
+            with SnapshotParent(home_root, parts[:position], expected_root=root_identity) as parent:
+                try:
+                    kept = parent.info(selected)
+                except FileNotFoundError:
+                    kept = None
+                if kept is not None and (not stat.S_ISDIR(kept.st_mode) or stat.S_ISLNK(kept.st_mode)
+                        or getattr(kept, 'st_file_attributes', 0) & 0x400):
+                    raise NoFollowPathError('owner snapshot selected ancestor changed type')
+                for name in parent.names():
+                    if name != selected:
+                        parent.remove(name, parent.info(name))
+                if kept is None:
+                    return
+                if _identity_pair(parent.info(selected)) != _identity_pair(kept):
+                    raise NoFollowPathError('owner snapshot selected ancestor changed')
 
     # LLM: 与 full restore 的单行下载和摘要检查一致；调用方先消除路径类型冲突。
     # 函数用途: 下载并校验一行清单对应的文件。
-    def _download_row(self, owner_home: Path, row: OwnerFile) -> None:
-        target = owner_home / _safe_relative(row.relative_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.restore")
-        self._client.download_file(self._bucket, row.object_key, str(temporary))
-        digest, size = _file_digest(temporary)
-        if digest != row.content_sha256 or size != row.size_bytes:
-            temporary.unlink(missing_ok=True)
-            raise RuntimeError(f"owner object 校验失败: {row.relative_path}")
-        os.chmod(temporary, row.file_mode & 0o777)
-        temporary.replace(target)
+    def _download_row(self, owner_home: Path, row: OwnerFile, *, expected_root=None) -> None:
+        relative = _safe_relative(row.relative_path)
+        with SnapshotParent(owner_home, relative.parts[:-1], create=True, expected_root=expected_root) as original:
+            root_identity, parent_identity = original.root_identity, original.identity
+            try:
+                leaf_signature = original.entry_signature(relative.name)
+            except FileNotFoundError:
+                leaf_signature = None
+        # 网络下载期间不持owner目录门；私有下载区不在可变workspace中，发表再绑定同一原父目录。
+        with downloaded_object(self._client, self._bucket, row) as source:
+            with SnapshotParent(owner_home, relative.parts[:-1], expected_root=root_identity) as parent:
+                if parent.identity != parent_identity:
+                    raise NoFollowPathError('owner snapshot download parent changed')
+                try:
+                    current = parent.entry_signature(relative.name)
+                except FileNotFoundError:
+                    current = None
+                if current != leaf_signature:
+                    raise NoFollowPathError('owner snapshot destination changed while downloading')
+                if current is not None and stat.S_ISDIR(parent.info(relative.name).st_mode):
+                    parent.remove(relative.name, parent.info(relative.name))
+                parent.publish(relative.name, source, row)
 
     # LLM: 每行对照权威摘要和完整文件状态，不信任版本号；先删除阻挡新目录的旧文件及所有额外路径。
     # 函数用途: 将 CLEAN 缓存逐行校对成与完整恢复相同的文件树。
-    def _reconcile_warm(self, owner_home: Path, rows: list[OwnerFile], index: OwnerStatIndex,
-                        *, verified_restore: bool = False) -> None:
+    def _reconcile_warm(self, owner_home: Path, rows: list[OwnerFile], index: OwnerStatIndex, *, expected_root=None) -> None:
         files = {_safe_relative(row.relative_path) for row in rows}
         directories = {parent for path in files for parent in path.parents if parent != Path(".")}
-        for path in reversed(self._warm_paths(owner_home)):
+        with SnapshotParent(owner_home, expected_root=expected_root) as owner:
+            root_identity = owner.root_identity
+            paths = self._warm_paths(owner_home, expected_root=root_identity)
+            owner.verify()
+        for path in reversed(paths):
             rel = path.relative_to(owner_home)
-            if path.is_dir() and not path.is_symlink():
-                if rel not in directories:
-                    shutil.rmtree(path)
-            elif rel not in files:
-                path.unlink()
+            try:
+                with SnapshotParent(owner_home, rel.parts[:-1], expected_root=root_identity) as parent:
+                    info = parent.info(rel.name)
+                    if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                        if rel not in directories:
+                            parent.remove(rel.name, info)
+                    elif rel not in files:
+                        parent.remove(rel.name, info)
+            except FileNotFoundError:
+                pass
         for rel in index.paths() - {row.relative_path for row in rows}:
             index.forget(rel)
+        verified = []
         for row in rows:
-            target = owner_home / _safe_relative(row.relative_path)
-            st = target.lstat() if target.exists() else None
-            if (st is not None and stat.S_ISREG(st.st_mode) and st.st_size == row.size_bytes
-                    and stat.S_IMODE(st.st_mode) == row.file_mode
-                    and (index.lookup(row.relative_path, st) == row.content_sha256
-                         or verified_restore and _file_digest(target)[0] == row.content_sha256)):
-                continue
-            self._download_row(owner_home, row)
-            index.record(row.relative_path, target.lstat(), row.content_sha256, time.time())
+            relative = _safe_relative(row.relative_path)
+            target = owner_home / relative
+            valid = False
+            try:
+                with SnapshotParent(owner_home, relative.parts[:-1], expected_root=root_identity) as parent:
+                    try:
+                        info = parent.info(relative.name)
+                    except FileNotFoundError:
+                        info = None
+                    if (info is not None and stat.S_ISREG(info.st_mode) and info.st_size == row.size_bytes
+                            and stat.S_IMODE(info.st_mode) == row.file_mode):
+                        digest = _cached_file_digest(index, row.relative_path, info)
+                        refreshed = digest is None
+                        signature = _owner_file_signature(info)
+                        if refreshed:
+                            # racy只拒绝复用旧摘要；同一可信父锚点和FD重算，不等同必须重下对象。
+                            digest, _size, signature = _stable_file_digest(target, expected_stat=info,
+                                owner_root=owner_home, expected_root=root_identity)
+                        if digest == row.content_sha256:
+                            verified.append((target, signature, owner_home, root_identity, digest))
+                            if refreshed:
+                                index.record(row.relative_path, info, digest, time.time())
+                            valid = True
+                    parent.verify()
+            except FileNotFoundError:
+                pass
+            if not valid:
+                self._download_row(owner_home, row, expected_root=root_identity)
+                with SnapshotParent(owner_home, relative.parts[:-1], expected_root=root_identity) as parent:
+                    index.record(row.relative_path, parent.info(relative.name), row.content_sha256, time.time())
+        _validate_verified_files(verified)
 
     # LLM: 只上传独立暂存副本，先上传后围栏提交；symlink 与临时根过滤保持 full 的遍历语义。
     # 函数用途: 计算本轮移除路径和变化清单行并更新本地签名。
     def _snapshot_delta(self, tenant: str, owner_home: Path, warm_dir: Path, rows: list[OwnerFile],
-                        index: OwnerStatIndex) -> tuple[list[str], list[OwnerFile]]:
+                        index: OwnerStatIndex, *, expected_root=None):
+        with SnapshotParent(owner_home, expected_root=expected_root) as owner:
+            root_identity = owner.root_identity
         previous = {row.relative_path: row for row in rows}
         seen: set[str] = set()
         changed: list[OwnerFile] = []
-        for path in self._warm_paths(owner_home):
+        verified = []
+        for path in self._warm_paths(owner_home, expected_root=root_identity):
             st = path.lstat()
             if stat.S_ISLNK(st.st_mode):
                 raise RuntimeError(f"owner 快照拒绝符号链接: {path.relative_to(owner_home)}")
@@ -608,22 +736,35 @@ class OwnerSnapshotStore:
             rel = relative.as_posix()
             seen.add(rel)
             old = previous.get(rel)
-            if (old is not None and index.lookup(rel, st) == old.content_sha256
-                    and st.st_size == old.size_bytes and stat.S_IMODE(st.st_mode) == old.file_mode):
-                continue
-            staged, digest, size = stage_and_hash(path, warm_dir / "staging")
-            key = self._object_key(tenant, digest)
+            if old is not None and st.st_size == old.size_bytes and stat.S_IMODE(st.st_mode) == old.file_mode:
+                digest = _cached_file_digest(index, rel, st)
+                refreshed = digest is None
+                signature = _owner_file_signature(st)
+                if digest is None:
+                    digest, _size, signature = _stable_file_digest(path, expected_stat=st,
+                        owner_root=owner_home, expected_root=root_identity)
+                if digest == old.content_sha256:
+                    # 未变文件不暂存或远端HEAD；近期mtime仍为racy，下轮必须重新核验正文。
+                    verified.append((path, signature, owner_home, root_identity, digest))
+                    if refreshed:
+                        index.record(rel, st, digest, time.time())
+                    continue
+            staged, digest, size = stage_and_hash(path, warm_dir / "staging",
+                owner_root=owner_home, expected_stat=st, expected_root=root_identity)
             try:
-                self._upload(staged, key)
+                key = self._object_key(tenant, digest)
+                row = OwnerFile(rel, key, digest, size, stat.S_IMODE(st.st_mode))
+                if row != old:
+                    if old is None or old.object_key != key:
+                        self._upload(staged, key)
+                    changed.append(row)
             finally:
                 staged.unlink(missing_ok=True)
-            row = OwnerFile(rel, key, digest, size, stat.S_IMODE(st.st_mode))
-            if row != old:
-                changed.append(row)
             index.record(rel, st, digest, time.time())
+        _validate_verified_files(verified)
         for rel in index.paths() - seen:
             index.forget(rel)
-        return sorted(previous.keys() - seen), changed
+        return sorted(previous.keys() - seen), changed, verified
 
     def require_ready(self) -> None:
         """启动硬门：bucket 可达且已开版本控制，灾难恢复不能靠覆盖后的单一对象。"""
@@ -661,46 +802,72 @@ class OwnerSnapshotStore:
             raise
         raise RuntimeError("owner object bucket 保留的 missing probe key 不应存在")
 
-    def restore(self, tenant: str, owner_kind: str, owner_id: str, owner_home: Path) -> int:
+    def restore(self, tenant: str, owner_kind: str, owner_id: str, owner_home: Path, *, expected_root=None) -> int:
         rows = self._read_manifest(tenant, owner_kind, owner_id)
-        shutil.rmtree(owner_home, ignore_errors=True)
-        owner_home.mkdir(parents=True, exist_ok=True)
         for row in rows:
-            target = owner_home / _safe_relative(row.relative_path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.restore")
-            self._client.download_file(self._bucket, row.object_key, str(temporary))
-            digest, size = _file_digest(temporary)
-            if digest != row.content_sha256 or size != row.size_bytes:
-                temporary.unlink(missing_ok=True)
-                raise RuntimeError(f"owner object 校验失败: {row.relative_path}")
-            os.chmod(temporary, row.file_mode & 0o777)
-            temporary.replace(target)
+            _safe_relative(row.relative_path)
+        with SnapshotParent(owner_home, create=True, expected_root=expected_root) as original:
+            root_identity = original.root_identity
+            before = tree_snapshot(original)
+        with DownloadedObjects(self._client, self._bucket) as batch:
+            ready = [(row, batch.fetch(row)) for row in rows]
+            # 所有远端hash通过后才清理；下载期间目录/文件变动则保留原树和替换者，交DIRTY恢复。
+            with SnapshotParent(owner_home, expected_root=root_identity) as parent:
+                if tree_snapshot(parent) != before:
+                    raise NoFollowPathError('owner snapshot restore source tree changed')
+                for name in parent.names():
+                    parent.remove(name, parent.info(name))
+            for row, name in ready:
+                relative = _safe_relative(row.relative_path)
+                with batch.open(name, row) as source:
+                    with SnapshotParent(owner_home, relative.parts[:-1], create=True,
+                                        expected_root=root_identity) as parent:
+                        parent.publish(relative.name, source, row)
         return len(rows)
 
     def commit(self, tenant: str, owner_kind: str, owner_id: str, owner_home: Path) -> int:
         rows: list[OwnerFile] = []
-        for path in sorted(owner_home.rglob("*")):
-            if path.is_symlink():
-                raise RuntimeError(f"owner 快照拒绝符号链接: {path.relative_to(owner_home)}")
-            if not path.is_file():
-                continue
-            relative = path.relative_to(owner_home)
-            if relative.parts and relative.parts[0] in self._EPHEMERAL_ROOTS:
-                continue
-            digest, size = _stable_file_digest(path)
-            key = self._object_key(tenant, digest)
-            self._upload(path, key)
-            rows.append(
-                OwnerFile(
-                    relative.as_posix(),
-                    key,
-                    digest,
-                    size,
-                    stat.S_IMODE(path.stat().st_mode),
-                )
-            )
-        self._replace_manifest(tenant, owner_kind, owner_id, rows)
+        verified = []
+        with SnapshotParent(owner_home) as parent:
+            owner_identity = parent.root_identity
+        # stage不在可写owner树内；一次只保留一个文件，上传不会重新读取已换名的业务路径。
+        with tempfile.TemporaryDirectory(prefix='my-agent-owner-upload-') as temporary:
+            stage_root = Path(temporary).resolve()
+            if stage_root.is_relative_to(owner_home.resolve()):
+                raise RuntimeError('owner 上传暂存目录位于可写owner内；清单尚未提交，请将宿主临时目录配置到owner外')
+            for path in sorted(owner_home.rglob("*")):
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    raise RuntimeError(f"owner 快照拒绝符号链接: {path.relative_to(owner_home)}")
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                relative = path.relative_to(owner_home)
+                if relative.parts and relative.parts[0] in self._EPHEMERAL_ROOTS:
+                    continue
+                staged, digest, size, signature = _stage_full_owner_file(owner_home, relative.parts,
+                    stage_root, expected_stat=info, expected_root=owner_identity)
+                try:
+                    key = self._object_key(tenant, digest)
+                    self._upload(staged, key)
+                finally:
+                    staged.unlink(missing_ok=True)
+                verified.append((path, signature, digest, size))
+                rows.append(OwnerFile(relative.as_posix(), key, digest, size, stat.S_IMODE(info.st_mode)))
+            for source, signature, digest, size in verified:
+                relative = source.relative_to(owner_home).parts
+                with SnapshotParent(owner_home, relative[:-1], expected_root=owner_identity) as parent:
+                    descriptor = parent.open_read(relative[-1])
+                    try:
+                        if file_signature(descriptor) != signature:
+                            raise RuntimeError(f'owner 文件在快照时仍被写入: {source}')
+                        current_digest, current_size = descriptor_digest(descriptor, size)
+                        if (current_digest != digest or current_size != size
+                                or file_signature(descriptor) != signature):
+                            raise RuntimeError(f'owner 文件在快照时仍被写入: {source}')
+                        parent.verify()
+                    finally:
+                        os.close(descriptor)
+            self._replace_manifest(tenant, owner_kind, owner_id, rows)
         return len(rows)
 
     @contextmanager
@@ -803,17 +970,54 @@ class OwnerSnapshotStore:
         parts = [part for part in (self._prefix, "owners", tenant_ref, digest[:2], digest) if part]
         return "/".join(parts)
 
-    def _upload(self, path: Path, key: str) -> None:
+    def _upload(self, path: OwnerStagedFile, key: str) -> None:
+        if not isinstance(path, OwnerStagedFile):
+            raise RuntimeError('OWNER_SNAPSHOT_STAGE_REQUIRED: 上传只接受原受管stage FD；未上传，请经stage_and_hash重建')
+        expected_digest = key.rsplit('/', 1)[-1]
+        expected_size = path.stat().st_size
         try:
-            self._client.head_object(Bucket=self._bucket, Key=key)
-            return
-        except Exception as exc:  # boto 的 ClientError 在 scale extra 内，模块本身保持可选导入
+            response = self._client.head_object(Bucket=self._bucket, Key=key)
+        except Exception as exc:  # boto ClientError是可选依赖；只有原不存在码允许上传。
             response = getattr(exc, "response", {})
             code = str((response.get("Error") or {}).get("Code") or "")
             if code not in {"404", "NoSuchKey", "NotFound"}:
                 raise
+        else:
+            # 只信服务端完整对象校验和，用户metadata与multipart ETag均不作正文证明。
+            checksum = response.get('ChecksumSHA256') if isinstance(response, dict) else None
+            if checksum and response.get('ChecksumType') == 'FULL_OBJECT':
+                if (checksum != base64.b64encode(bytes.fromhex(expected_digest)).decode('ascii')
+                        or response.get('ContentLength') != expected_size):
+                    raise RuntimeError('owner 已存在对象摘要或大小不符；清单尚未提交，须核实对象存储完整性')
+                return
+            body = self._client.get_object(Bucket=self._bucket, Key=key)['Body']
+            digest, size = hashlib.sha256(), 0
+            primary = None
+            try:
+                while True:
+                    chunk = body.read(min(65536, expected_size - size + 1))
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > expected_size:
+                        raise RuntimeError('owner 已存在对象大小不符；清单尚未提交，须核实对象存储完整性')
+                    digest.update(chunk)
+                if size != expected_size or digest.hexdigest() != expected_digest:
+                    raise RuntimeError('owner 已存在对象摘要或大小不符；清单尚未提交，须核实对象存储完整性')
+            except BaseException as error:
+                primary = error
+                raise
+            finally:
+                try:
+                    body.close()
+                except BaseException as error:
+                    if primary is None:
+                        raise
+                    primary.add_note(f'owner object stream close failed: {type(error).__name__}')
+            return
         extra = _encryption_args(self._sse, self._kms_key)
-        self._client.upload_file(str(path), self._bucket, key, ExtraArgs=extra)
+        with path.open_reader() as reader:
+            self._client.upload_fileobj(reader, self._bucket, key, ExtraArgs=extra)
 
 
 def owner_store_from_runtime(runtime: ScaleRuntimeConfig, backend: StorageBackend) -> OwnerSnapshotStore:
@@ -850,10 +1054,14 @@ def require_owner_store_ready(runtime: ScaleRuntimeConfig, backend: StorageBacke
 
 
 def _safe_relative(value: str) -> Path:
-    pure = PurePosixPath(value)
-    if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
-        raise RuntimeError(f"owner manifest 路径越界: {value!r}")
-    return Path(*pure.parts)
+    try:
+        return Path(*validate_relative(value))
+    except NoFollowPathError as exc:
+        raise RuntimeError(f"owner manifest 路径越界: {value!r}") from exc
+
+
+def _identity_pair(info):
+    return info.st_dev, info.st_ino
 
 
 def _encryption_args(sse: str, kms_key: str) -> dict[str, str]:
@@ -875,13 +1083,78 @@ def _file_digest(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def _stable_file_digest(path: Path) -> tuple[str, int]:
-    before = path.stat()
-    digest, size = _file_digest(path)
-    after = path.stat()
-    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-        raise RuntimeError(f"owner 文件在快照时仍被写入: {path}")
-    return digest, size
+def _owner_file_signature(info):
+    return tuple(getattr(info, name) for name in
+        ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode', 'st_nlink'))
+
+
+def _validate_verified_files(verified):
+    for path, signature, owner_root, expected_root, expected_digest in verified:
+        digest, _size, current = _stable_file_digest(path, owner_root=owner_root, expected_root=expected_root)
+        if current != signature or digest != expected_digest:
+            raise RuntimeError(f"owner 文件在快照时仍被写入: {path}")
+
+
+def _cached_file_digest(index, relative, info):
+    # 回填旧mtime不能把同kernel tick的ctime碰撞变成缓存命中；未来时间同样不授予稳定性。
+    now = time.time()
+    if (os.name == 'nt' or now - info.st_mtime < OWNER_SNAPSHOT_RACY_MTIME_SECONDS
+            or now - info.st_ctime < OWNER_SNAPSHOT_RACY_MTIME_SECONDS):
+        return None
+    return index.lookup(relative, info)
+
+
+def _stage_full_owner_file(owner_home, parts, staging, *, expected_stat, expected_root=None):
+    """源与下载目标共用跨平台父锚点，FD复制同批字节并计算上传内容键。"""
+    staged = None
+    try:
+        with SnapshotParent(owner_home, tuple(parts[:-1]), expected_root=expected_root) as parent:
+            descriptor = parent.open_read(parts[-1])
+            with os.fdopen(descriptor, 'rb') as source:
+                opened = os.fstat(source.fileno())
+                if not _snapshot_stat_fields_match(expected_stat, opened, cross_windows=os.name == 'nt'):
+                    raise RuntimeError('owner 文件在快照时仍被写入；上传尚未开始')
+                signature = file_signature(source.fileno())
+                staged, digest, size = stage_open_file(source.fileno(), staging)
+                parent.verify()
+                current = parent.open_read(parts[-1])
+                try:
+                    if file_signature(current) != signature:
+                        raise RuntimeError('owner 文件在快照时仍被写入；上传尚未开始')
+                finally:
+                    os.close(current)
+        return staged, digest, size, signature
+    except BaseException as error:
+        if staged is not None:
+            try:
+                staged.unlink(missing_ok=True)
+            except BaseException as cleanup:
+                error.add_note(f'owner stage cleanup failed: {type(cleanup).__name__}')
+        raise
+
+
+def _stable_file_digest(path: Path, *, expected_stat=None, owner_root=None,
+                        expected_root=None) -> tuple[str, int, tuple[int, ...]]:
+    before = expected_stat if expected_stat is not None else path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimeError(f"owner 快照来源不是常规文件: {path}")
+    owner_root = path.parent if owner_root is None else owner_root
+    relative = path.relative_to(owner_root)
+    with SnapshotParent(owner_root, relative.parts[:-1], expected_root=expected_root) as parent:
+        descriptor = parent.open_read(relative.name)
+        with os.fdopen(descriptor, 'rb') as source:
+            opened = os.fstat(source.fileno())
+            if not _snapshot_stat_fields_match(before, opened, cross_windows=os.name == 'nt'):
+                raise RuntimeError(f"owner 文件在快照时仍被写入: {path}")
+            signature = file_signature(source.fileno())
+            digest, size = descriptor_digest(source.fileno(), opened.st_size)
+            repeated, repeated_size = descriptor_digest(source.fileno(), opened.st_size)
+            if (size != opened.st_size or repeated_size != opened.st_size
+                    or digest != repeated or file_signature(source.fileno()) != signature
+                    or parent.entry_signature(path.name) != signature):
+                raise RuntimeError(f"owner 文件在快照时仍被写入: {path}")
+            parent.verify()
+    return digest, opened.st_size, signature
 
 
 __all__ = [

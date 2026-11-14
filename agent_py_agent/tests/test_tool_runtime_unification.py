@@ -1030,3 +1030,87 @@ def test_scoped_authority_recheck_freezes_original_call_without_repeating_gate(t
     assert {row.task_id for row in authorities} == {"task-original"}
     assert {row.run_id for row in authorities} == {"run-1"}
     assert {row.attempt_id for row in authorities} == {"attempt-1"}
+
+
+@pytest.mark.parametrize('keyword,limit,value,actual,unit', [
+    ('minLength', 3, '合成', 2, '个字符'),
+    ('maxLength', 120, '合成敏感值' * 24 + '中', 121, '个字符'),
+    ('minItems', 2, ['synthetic-private'], 1, '项'),
+    ('maxItems', 2, ['synthetic-private'] * 3, 3, '项'),
+    ('minProperties', 2, {'first': 'synthetic-private'}, 1, '个字段'),
+    ('maxProperties', 1, {'first': 'synthetic-private', 'second': 'synthetic-private'}, 2, '个字段'),
+])
+def test_executor_size_denial_explains_safe_counts_and_keeps_original_input(
+        tmp_path, keyword, limit, value, actual, unit):
+    kind = 'string' if keyword.endswith('Length') else 'array' if keyword.endswith('Items') else 'object'
+    tool = _CountingTool()
+    schema = {'type': 'object', 'properties': {'value': {'type': kind, keyword: limit}},
+              'required': ['value'], 'additionalProperties': False}
+    tool.model_spec = ToolModelSpec('echo_tool', '边界校验', schema)
+    call = _call(tool, {'value': value})
+    before = json.dumps(call.arguments, ensure_ascii=False)
+    execution = _execute(tmp_path, tool, call)
+    assert execution.decision.status == 'deny'
+    assert execution.result.error_code == 'TOOL_INVALID_ARGUMENTS'
+    assert execution.result.failure_stage == 'validation'
+    assert execution.result.effect_outcome == 'not_started'
+    assert execution.result.handler_executed is False and tool.executions == 0
+    issue = execution.decision.evidence['issues'][0]
+    assert issue['keyword'] == keyword and issue['expected'] == limit
+    assert issue['details']['actual_length'] == actual
+    output = execution.result.output
+    relation = '至少' if keyword.startswith('min') else '最多'
+    assert f'{keyword} 要求' in output and f'{relation} {limit} {unit}' in output
+    assert f'实际 {actual} {unit}' in output
+    assert '$.value' in output and '在原输入上' in output
+    assert '本次未执行，勿原样重试' in output
+    assert 'synthetic-private' not in output and '合成敏感值' not in output
+    assert json.dumps(call.arguments, ensure_ascii=False) == before
+    # 模型自行按边界修正后沿同一真实Executor放行，不由宿主截断或补造。
+    corrected = ('合成' if keyword == 'maxLength' else '合成值' if keyword == 'minLength' else
+                 ['ok'] * limit if keyword.endswith('Items') else {f'f{i}': 'ok' for i in range(limit)})
+    second = _execute(tmp_path, tool, replace(_call(tool, {'value': corrected}), call_id='corrected-call'))
+    assert second.result.ok and second.result.handler_executed and tool.executions == 1
+
+
+@pytest.mark.parametrize('keyword,limit,value,requirement', [
+    ('minimum', 1, 0, '数值必须 >= 1'),
+    ('maximum', 2, 3, '数值必须 <= 2'),
+    ('exclusiveMinimum', 2, 2, '数值必须 > 2'),
+    ('exclusiveMaximum', 2, 2, '数值必须 < 2'),
+    ('multipleOf', 2, 3, '数值必须是 2 的整数倍'),
+])
+def test_executor_numeric_denial_uses_structured_bound_without_inventing_actual_value(
+        tmp_path, keyword, limit, value, requirement):
+    tool = _CountingTool()
+    tool.model_spec = ToolModelSpec('echo_tool', '数值校验', {
+        'type': 'object', 'properties': {'value': {'type': 'number', keyword: limit}},
+        'required': ['value'], 'additionalProperties': False})
+    execution = _execute(tmp_path, tool, _call(tool, {'value': value}))
+    assert execution.result.error_code == 'TOOL_INVALID_ARGUMENTS'
+    assert execution.result.failure_stage == 'validation'
+    assert execution.result.effect_outcome == 'not_started'
+    assert not execution.result.handler_executed and tool.executions == 0
+    assert requirement in execution.result.output
+    assert '在原输入上按该数值关系修正此字段' in execution.result.output
+    assert '实际数值' not in execution.result.output
+
+
+def test_executor_business_native_name_length_reports_nested_field_before_write(tmp_path):
+    from agent_py_agent.agent.gateway_parts.business_api import _model_business_schema
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+
+    tool = _CountingTool()
+    tool.model_spec = ToolModelSpec('business_spaces_create', '原生业务参数边界',
+        _model_business_schema(business_action_spec('spaces.create').native_request_schema))
+    value = '合成敏感值' * 24 + '中'
+    params = {'action': 'spaces.create', 'request_id': 'synthetic-length-request',
+              'idempotency_key': 'synthetic-length-operation-0001', 'params': {'name': value}}
+    execution = _execute(tmp_path, tool, _call(tool, params))
+    assert execution.result.error_code == 'TOOL_INVALID_ARGUMENTS'
+    assert not execution.result.handler_executed and tool.executions == 0
+    assert execution.result.failure_stage == 'validation' and execution.result.effect_outcome == 'not_started'
+    assert '$.params.name' in execution.result.output
+    assert 'maxLength 要求字符串最多 120 个字符；实际 121 个字符' in execution.result.output
+    assert value not in execution.result.output
+    assert params['params']['name'] == value

@@ -3,6 +3,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -161,3 +162,27 @@ def test_explicit_and_registry_calls_use_same_host_context_chain(tmp_path):
         registry.close_mcp_clients()
         result = service.command("/plugins disable sample-peek", revision=service.catalog().revision, request_id="disable")
         assert result["state"] == "succeeded", result
+
+
+def test_business_aggregate_scope_crosses_original_mcp_transport(tmp_path):
+    from agent_py_agent.agent.path_access_policy import PathAccessPolicy, business_aggregate_paths
+    from agent_py_agent.agent.tooling.workspace_read_scope import build_workspace_read_context
+    from agent_py_agent.agent.workspace_read_context import WorkspaceReadContext
+    owner = (tmp_path / 'home/owners/local/main').resolve()
+    owner.mkdir(parents=True)
+    policy = PathAccessPolicy.from_values(owner_scope_root=owner, business_aggregate_roots=business_aggregate_paths(owner))
+    scope = build_workspace_read_context(cwd=owner, write_boundary=None, path_policy=policy, granted_external_roots=())
+    capability = {"tools": {}, "experimental": {WORKSPACE_READ_EXTENSION: {"versions": ["1"]}}}
+    client = MCPStdioClient(_config(context_server(capability), cwd=str(owner)))
+    try:
+        transport = client.start()
+        proxy = echo_proxy(client, transport)
+        result = proxy.execute_scoped({'text': 'ordinary-workspace'}, ToolInvocationContext(None, workspace_read_context=scope))
+        assert result.ok, result
+        observed = json.loads(json.loads(result.output)['result'])['meta'][WORKSPACE_READ_EXTENSION]
+        assert observed['path_policy']['business_aggregate_roots'] == [str(p) for p in policy.business_aggregate_roots]
+        restored = WorkspaceReadContext.from_payload(observed)
+        assert not restored.check(Path('memory/long_term/memory.jsonl')).allowed
+        assert restored.check(Path('workspace/project/memory/input.txt')).allowed
+    finally:
+        client.stop()

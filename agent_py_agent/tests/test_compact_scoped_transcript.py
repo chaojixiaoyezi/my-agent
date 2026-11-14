@@ -197,6 +197,8 @@ def test_scoped_preflight_noop_uses_local_summary_without_publishing(scoped_case
     case.clock[0] = 20.0
     local, _row, _seen = _compact(case, task, "A-1")
     pending = _message(case, "A-pending")
+    # 接收新消息会合法推进宿主last_user指针；no-op不得改的是接收后的canonical状态。
+    accepted_thread = case.store.threads.require(case.thread_id)
     seen = []
 
     def under_threshold(view):
@@ -214,7 +216,8 @@ def test_scoped_preflight_noop_uses_local_summary_without_publishing(scoped_case
     assert seen == [("|thread-1|A-1", resolve_compact_summary_view(
         case.agent, local.thread, task,
     ).operation_evidence, False)]
-    assert case.store.threads.require(case.thread_id) == local.thread
+    assert case.store.threads.require(case.thread_id) == accepted_thread
+    assert accepted_thread.last_user_message_id == pending.message_id
     assert local.thread.summary == first.thread.summary
 
 

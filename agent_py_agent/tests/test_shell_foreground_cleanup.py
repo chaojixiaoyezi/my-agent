@@ -292,3 +292,118 @@ def test_closed_pipes_live_parent_has_bounded_exit_probes(monkeypatch):
         if proc.poll() is None:
             proc.kill()
         proc.wait(timeout=3)
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_cancelled_shell_retains_physical_receipt_without_claiming_business_result(tmp_path, monkeypatch, confirmed):
+    receipt = registry.ProcessTerminationReceipt("SIGTERM", confirmed, -15, 2, () if confirmed else (4101,))
+    tool = shell.ShellTool(tmp_path)
+
+    def cancelled(*args):
+        raise shell.CommandInterruptedError("generic", termination=receipt, pid=4100, birth_token="original-birth")
+
+    monkeypatch.setattr(tool, "_run_command", cancelled)
+    result = tool.execute({"command": "generic"})
+    process = result.result_envelope["process"]
+    assert not result.ok and result.error_code == "CANCELLED"
+    assert process["cleanup_confirmed"] is confirmed
+    assert process["termination"] == shell.asdict(receipt)
+    assert (process["pid"], process["birth_token"]) == (4100, "original-birth")
+    assert result.effect_outcome != "committed"
+    if not confirmed:
+        assert "退出尚未确认" in result.output and "禁止原样重跑" in result.output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 原生父子进程组取消；Windows不推导confirmed")
+def test_native_cancel_carries_original_parent_and_descendant_exit_receipt(tmp_path):
+    import threading
+
+    from agent_py_agent.agent.concurrency.interrupt import interrupt_by_name, register_interruptible
+
+    ready = tmp_path / "native-ready"
+    child_pidfile = tmp_path / "native-child"
+    parent = tmp_path / "native-parent.py"
+    parent.write_text("import subprocess,sys,pathlib,time\n"
+                      "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\n"
+                      f"pathlib.Path({str(child_pidfile)!r}).write_text(str(p.pid))\n"
+                      f"pathlib.Path({str(ready)!r}).touch()\n"
+                      "time.sleep(30)\n")
+    proc = subprocess.Popen([sys.executable, str(parent)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    original_birth = registry.capture_process_birth_token(proc.pid)
+    caught, started = [], threading.Event()
+
+    def wait():
+        with register_interruptible("native-cancel-receipt"):
+            started.set()
+            try:
+                shell._communicate_process(proc, command="native-parent", timeout=20)
+            except shell.CommandInterruptedError as error:
+                caught.append(error)
+
+    worker = threading.Thread(target=wait)
+    child_pid, child_birth = 0, ""
+    try:
+        worker.start()
+        assert started.wait(3)
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert ready.exists()
+        child_pid = int(child_pidfile.read_text())
+        child_birth = registry.capture_process_birth_token(child_pid)
+        assert interrupt_by_name("native-cancel-receipt")
+        worker.join(10)
+        assert not worker.is_alive() and len(caught) == 1
+        error = caught[0]
+        assert (error.pid, error.birth_token) == (proc.pid, original_birth)
+        assert error.termination.confirmed is True
+        assert error.termination.observed_processes >= 2
+        assert not error.termination.unresolved_pids
+        assert registry._process_instance_terminated(child_pid, child_birth)
+    finally:
+        if proc.poll() is None:
+            shell._kill_process_group(proc, original_birth)
+        proc.wait(timeout=3)
+        worker.join(3)
+        _cleanup_test_child(child_pid, child_birth)
+
+
+def test_cancel_without_original_cleanup_receipt_is_explicitly_unconfirmed(tmp_path, monkeypatch):
+    tool = shell.ShellTool(tmp_path)
+
+    def cancelled(*args):
+        raise shell.CommandInterruptedError("custom-executor")
+
+    monkeypatch.setattr(tool, "_run_command", cancelled)
+    result = tool.execute({"command": "generic"})
+    assert result.result_envelope["process"] == {"status": "cancelled", "cleanup_confirmed": False}
+    assert "退出尚未确认" in result.output
+    assert "termination" not in result.result_envelope["process"]
+
+
+@pytest.mark.parametrize('confirmed', [False, True])
+def test_callback_and_waiter_keep_first_tree_receipt_without_second_cleanup(monkeypatch, confirmed):
+    from contextlib import contextmanager
+
+    receipt = registry.ProcessTerminationReceipt('SIGTERM', confirmed, -15, 3, () if confirmed else (4201,))
+    proc = Mock(pid=4200)
+    capture = Mock()
+    kill = Mock(return_value=receipt)
+    monkeypatch.setattr(shell, 'capture_process_birth_token', lambda _: 'original-birth')
+    monkeypatch.setattr(shell, '_start_foreground_capture', lambda *_: capture)
+    monkeypatch.setattr(shell, '_kill_process_group', kill)
+    monkeypatch.setattr(shell, 'is_interrupted', lambda: True)
+
+    @contextmanager
+    def cancellation(callback):
+        callback()  # 精确制造回调先清理、等待者后观察取消的交错。
+        yield
+
+    monkeypatch.setattr(shell, 'register_cancellation_callback', cancellation)
+    with pytest.raises(shell.CommandInterruptedError) as error:
+        shell._communicate_process(proc, command='native-command', timeout=10)
+    kill.assert_called_once_with(proc, 'original-birth')
+    assert error.value.termination is receipt
+    assert error.value.termination.confirmed is confirmed
+    assert error.value.termination.observed_processes == 3

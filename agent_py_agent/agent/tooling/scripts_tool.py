@@ -16,7 +16,12 @@ from ..assets.asset_dependents import (
     model_metadata,
     require_revision,
 )
-from ..assets.descriptor import AssetDescriptor, asset_descriptor_from_definition, clean_json
+from ..assets.descriptor import (
+    REQUIRED_DEFINITION_KEYS,
+    AssetDescriptor,
+    asset_descriptor_from_definition,
+    clean_json,
+)
 from ..assets.revision_history import get_version, list_versions, materialize_script
 from ..assets.script_store import ScriptStore
 from ..assets.version_diff import diff_versions, load_snapshot
@@ -72,9 +77,14 @@ def _owner(home, backend):
 # 函数用途: 共用Schema及按动作必填项，防止错误参数先创建Owner或留下未知操作。
 def _validate(tool, params):
     name = tool.model_spec.name
-    valid = validate_tool_input(params, tool.model_spec.input_schema).ok
-    if not valid:
-        return _outcome(name, {'error': '参数不符合工具Schema'}, False, 'TOOL_INVALID_ARGUMENTS')
+    validation = validate_tool_input(params, tool.model_spec.input_schema)
+    if not validation.ok:
+        return _outcome(name, {'error': '参数不符合工具Schema',
+            'issues': [issue.to_dict() for issue in validation.issues[:8]],
+            'issues_truncated': len(validation.issues) > 8, 'effect_outcome': 'not_started',
+            'next_action': '按issues[].path修正对应字段；object用真实对象如{}、array用真实数组如[]，'
+                           '删除未声明字段，不要原样重试或传序列化JSON字符串。'},
+                        False, 'TOOL_INVALID_ARGUMENTS')
     if 'skill_id' in params:
         try:
             valid_skill_reference(params['skill_id'])
@@ -101,7 +111,7 @@ def _validate(tool, params):
     if action == 'register':
         required += ['descriptor', 'code']
     if action in ('save', 'draft'):
-        required += ['definition']
+        required += ['source_ref' if name == 'workflows' and action == 'save' and 'source_ref' in params else 'definition']
     if action in ('update_sources', 'record_candidate'):
         required += ['source_id'] + (['candidate'] if action == 'record_candidate' else [])
     if action in ('bind_skill', 'unbind_skill'):
@@ -170,6 +180,35 @@ def _policy(name, reads, dangerous):
         resource_scopes=ResourceScopePolicy(mode='none'))
 
 
+def _typed_descriptor_spec(spec):
+    """脚本描述符复用公开资产字段；这里只展示类型，不接管运行权限或生成默认内容。"""
+    from copy import deepcopy
+
+    from ..plugin_host.business_action_specs import standalone_schema
+    from .business_spaces_tool import _model_projection
+
+    schema = deepcopy(spec.input_schema)
+    public = _model_projection(standalone_schema({'$ref': '#/$defs/AssetDescriptor'}))
+    definitions = public.pop('$defs')
+    descriptor = definitions['AssetDescriptor']
+    # register以script_id固定id/kind；其余标准Key与原构造器必填项保持一致。
+    descriptor['required'] = sorted(REQUIRED_DEFINITION_KEYS)
+    descriptor['properties']['kind'] = {'const': 'script'}
+    definitions['IOContract']['properties']['outputs']['items'] = {'type': 'string', 'minLength': 1}
+    schema['properties']['descriptor'] = {'$ref': '#/$defs/AssetDescriptor',
+        'description': '真实JSON描述符对象。access_targets/data_sources/credential_refs必须是数组（无项目传[]），'
+                       'io_contract必须是对象（无输入输出要求可传{}）；不可传空串或序列化JSON文本。'
+                       'io_contract.inputs是输入声明数组，outputs是非空字符串字段名数组（无输出要求可省略outputs）；'
+                       '例如 {"name":"汇总","access_targets":[],"data_sources":[],"credential_refs":[], '
+                       '"io_contract":{"inputs":["value"],"outputs":["result"]}}。'
+                       '可选id/kind由script_id与script推导；仅接受已声明字段，metadata内可保存扩展JSON。'}
+    schema['$defs'] = definitions
+    from .input_schema import inline_local_schema_refs
+
+    schema['properties']['descriptor'] = inline_local_schema_refs(schema, schema['properties']['descriptor'])
+    return replace(spec, input_schema=schema, schema_hash='')
+
+
 # LLM: Store与runner均绑定同一个可信Owner；纯schema/descriptor沿共享构造器，execute不接收执行身份或任意命令。
 # 类用途: 为Agent提供脚本目录、管理、源评估和受控运行工具。
 class ScriptsTool(BaseTool):
@@ -192,6 +231,7 @@ class ScriptsTool(BaseTool):
             **{key: {'type': 'array', 'items': {'type': 'string'}} for key in ('add', 'remove')},
             'override_data_sources': {'type': ['object', 'array'], 'description': '仅本次传给runner，绝不写回资产'},
             'timeout_seconds': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 3600}})
+    model_spec = _typed_descriptor_spec(model_spec)
     runtime_policy = _policy('scripts', ('list', 'get', 'check_sources', 'versions', 'diff'), ('run', 'delete'))
 
     # LLM: Store/runner和项目范围只由宿主注入；动态provider每次读取，模型参数不授予路径权限。

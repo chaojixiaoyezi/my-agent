@@ -553,13 +553,13 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             for member in members:
                 yield member.name, member.stat(follow_symlinks=False)
 
-    def _walk(self, root):
+    def _walk(self, root, *, recursive=True):
         with closing(self._entries(root)) as stream:
             for path, directory in stream:
                 yield None
-                if directory:
+                if directory and recursive:
                     yield from self._walk(path)
-                else:
+                elif not directory:
                     yield path
 
     def _verify_source(self, path):
@@ -864,7 +864,8 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                         yield from pins.collect_steps(row, path)
                     yield 0
         for root in self.roots:
-            with closing(self._walk(root / "threads")) as stream:
+            # canonical线程仅为直接<id>.json；任务历史等子目录由其原合同读取，不能当成线程正文。
+            with closing(self._walk(root / "threads", recursive=False)) as stream:
                 for path in stream:
                     if path is None:
                         yield 0
@@ -2873,7 +2874,7 @@ def paths_fingerprint(paths: tuple[Path, ...]) -> str:
 
 # LLM: os.walk错误显式传播；记录发现目录与缺失根，变化使阶段pin视图失效，不跟随链接。
 # 函数用途: 严格枚举目录，供指纹和pin来源扫描复用。
-def _walk_files(root: Path, *, include_dirs: bool = False):
+def _walk_files(root: Path, *, include_dirs: bool = False, recursive: bool = True):
     watch_pin_source(root)
     try:
         info = root.stat(follow_symlinks=False)
@@ -2899,6 +2900,8 @@ def _walk_files(root: Path, *, include_dirs: bool = False):
             if child.is_symlink():
                 raise OSError("retention never follows symbolic links")
             yield child
+        if not recursive:
+            dirs.clear()
 
 
 # LLM: pin为单次扫描临时投影，不是第二份权威；仅解析结构化引用字段，绝不解析正文。
@@ -3245,7 +3248,7 @@ def _task_reference_pins(home: object, policy: MemoryRetentionPolicy, pins: _Ret
 # 函数用途: 收集线程、活跃任务以及摘要基础引用，缺失检查点按来源损坏拒绝。
 def _conversation_reference_pins(home: object, roots: tuple[Path, ...], pins: _RetentionPins) -> None:
     for root in roots:
-        for path in _walk_files(root / "threads"):
+        for path in _walk_files(root / "threads", recursive=False):
             if path.suffix != ".json":
                 continue
             row = _pin_object(path)

@@ -325,7 +325,9 @@ def test_cancel_cleanup_event_preserves_terminal_exit_and_other_scopes(tmp_path,
             agent.subagents.save(stale)
             current = agent.subagents.load(child.id)
             assert current.status == "CANCELLED" and not current.runner_active_attempt_id
-            assert current.attributes["runner_session"]["status"] == "cancelled"
+            # 取消先使canonical终态单调；锁外cleanup尚未返回，不得伪签runner退出。
+            assert current.attributes["runner_session"]["status"] == "running"
+            assert current.attributes["runner_session"].get("ended_at", 0) == 0
             assert not _is_dispatch_runner_candidate(current, policy=RunnerCandidatePolicy(runner_retry_limit=1))
         finally:
             release.set()

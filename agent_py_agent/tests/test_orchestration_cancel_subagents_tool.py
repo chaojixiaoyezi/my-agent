@@ -730,9 +730,16 @@ def test_cancel_subagents_tool_reports_corrupt_locator_without_private_recovery(
 
 
 def test_cancel_subagents_never_signals_gateway_pid_for_in_process_runner(tmp_path, monkeypatch):
+    import os
+    import threading
+
+    from agent_py_agent.agent.agent_core.runner.session_pool import (
+        RunnerSessionPoolLease,
+        runner_session_lease,
+    )
+    from agent_py_agent.agent.concurrency.interrupt import is_interrupted, register_interruptible
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
-    from agent_py_agent.agent.subagents import cancellation_hosts as cancel
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
@@ -740,25 +747,58 @@ def test_cancel_subagents_never_signals_gateway_pid_for_in_process_runner(tmp_pa
         params=CreateRunParams(goal="进程内任务", thought="取消测试", plan=["运行"], allowed_tools=["read_file"])
     )
     task.status = "RUNNING"
-    task.attributes = {
-        **dict(task.attributes or {}),
-        "pid": 4242,
-        "runner_session": _fresh_runner_session(worker_pid=4242, in_process=True),
-    }
+    task.runner_active_attempt_id = agent.subagents.runtime_db.agent_run_for_run_id(task.id)["current_attempt_id"]
     agent.subagents.save(task)
+    ready, release = threading.Event(), threading.Event()
+    observations, failures = [], []
+
+    def worker():
+        try:
+            with register_interruptible(f"subagent-runner-attempt:{task.id}:{task.runner_active_attempt_id}"):
+                with runner_session_lease(RunnerSessionPoolLease(
+                    manager=agent.subagents, run_id=task.id, attempt_id=task.runner_active_attempt_id,
+                )):
+                    ready.set()
+                    assert release.wait(5.0)
+                    observations.append(is_interrupted())
+        except BaseException as exc:
+            failures.append(exc)
+            ready.set()
+
+    thread = threading.Thread(target=worker)
     signalled: list[int] = []
     monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
-
-    result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止进程内任务"})
-    payload = json.loads(result.output)
-
-    assert result.ok is True
+    thread.start()
+    try:
+        assert ready.wait(5.0)
+        assert failures == []
+        running = agent.subagents.load(task.id).attributes["runner_session"]
+        assert running["worker_pid"] == os.getpid()
+        assert running["in_process"] is True
+        result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止进程内任务"})
+        payload = json.loads(result.output)
+        assert result.ok is True
+        assert signalled == []
+        report = payload["cancelled"][0]["pid_report"]
+        assert report["status"] == "no_pid"
+        assert report["thread_interrupt"] == "attempt_signaled"
+        loaded = agent.subagents.load(task.id)
+        assert loaded.status == "CANCELLED"
+        # 撤权不是物理退出；原线程尚未离开时不能提前签发结束回执。
+        assert thread.is_alive()
+        assert loaded.attributes["runner_session"]["status"] == "running"
+        assert loaded.attributes["runner_session"]["ended_at"] == 0.0
+    finally:
+        release.set()
+        thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    assert failures == []
+    assert observations == [True]
     assert signalled == []
-    assert payload["cancelled"][0]["pid_report"]["status"] == "no_pid"
-    assert "thread_interrupt" in payload["cancelled"][0]["pid_report"]
     loaded = agent.subagents.load(task.id)
     assert loaded.status == "CANCELLED"
-    assert loaded.attributes["runner_session"]["status"] == "cancelled"
+    assert loaded.attributes["runner_session"]["session_id"] == running["session_id"]
+    assert loaded.attributes["runner_session"]["status"] == "completed"
     assert loaded.attributes["runner_session"]["ended_at"] > 0
 
 

@@ -673,3 +673,150 @@ def test_incremental_turn_compared_on_full_input_reports_append_with_full_shared
     assert result["shared_message_prefix"] == 32 and result["comparable"] is True
     delta_only = request_surface({"model": "a", "input": tail, "previous_response_id": "resp_1"}, "endpoint")
     assert compare_request_surfaces(before, delta_only)["shared_message_prefix"] == 0
+
+
+@pytest.mark.parametrize('mutation', [False, True])
+def test_anthropic_marker_migration_preserves_wire_and_separates_content_prefix(mutation):
+    from agent_py_agent.agent.backends.anthropic_prompt_cache import (
+        anthropic_messages_with_optional_cache,
+    )
+
+    history = [{'role': 'user' if i % 2 == 0 else 'assistant',
+                'content': [{'type': 'text', 'text': f'fixture-{i}'}]} for i in range(32)]
+    extended = copy.deepcopy(history) + [{'role': 'user', 'content': [{'type': 'text', 'text': 'new'}]}]
+    if mutation:
+        extended[3]['content'][0]['text'] = 'changed body'
+
+    def surface(rows):
+        messages, _ = anthropic_messages_with_optional_cache(prompt='', messages=rows, tools=[], cache_enabled=True,
+            stable_system_cache_active=True, structured_native_layout_active=True)
+        return request_surface({'messages': messages}, 'local')
+
+    previous, current = surface(history), surface(extended)
+    result = compare_request_surfaces(previous, current)
+    assert result['changes'] == ['history_prefix_changed']  # 精确运输变化不得抹掉。
+    assert result['shared_message_prefix'] == 0 and result['changed_block_index'] == 32
+    assert result['content_prefix_comparable'] is True
+    assert result['content_prefix_changed'] is mutation
+    assert result['cache_control_only_prefix_changed'] is (not mutation)
+    assert result['content_shared_message_prefix'] == (0 if mutation else 32)
+    assert result['server_cache_state'] == 'unknown'
+    assert public_cache_diagnostic(result) == result
+    assert not any('cache_control' in block for row in history for block in row['content'])
+
+
+def test_cache_control_inside_tool_body_remains_content_and_old_surface_is_unknown():
+    previous = request_surface({'messages': [{'role': 'user', 'content': [
+        {'type': 'tool_result', 'tool_use_id': 'call', 'content': {'cache_control': 'business-value'}}]}]}, 'local')
+    current = request_surface({'messages': [{'role': 'user', 'content': [
+        {'type': 'tool_result', 'tool_use_id': 'call', 'content': {'cache_control': 'changed-business-value'}}]}]}, 'local')
+    result = compare_request_surfaces(previous, current)
+    assert result['content_prefix_changed'] is True and not result['cache_control_only_prefix_changed']
+    previous.pop('content_chain_schema')
+    previous.pop('content_chain_checkpoints')
+    legacy = compare_request_surfaces(previous, current)
+    assert 'content_prefix_changed' not in legacy
+    assert legacy['changes'] == ['history_prefix_changed'] and legacy['server_cache_state'] == 'unknown'
+
+
+def test_marker_content_partial_window_cannot_claim_no_rewrite():
+    old = request_surface({'messages': [{'content': str(i)} for i in range(33)]}, 'local')
+    new = request_surface({'messages': [{'content': str(i)} for i in range(34)]}, 'local')
+    result = compare_request_surfaces(old, new)
+    assert result['content_prefix_comparable'] is False
+    assert result['content_prefix_changed'] is None and not result['cache_control_only_prefix_changed']
+
+
+def test_public_partial_content_comparison_cannot_assert_marker_only_change():
+    result = public_cache_diagnostic({'baseline_available': True, 'changes': ['history_prefix_changed'],
+        'content_prefix_comparable': False, 'content_prefix_changed': False,
+        'cache_control_only_prefix_changed': True})
+    assert result['content_prefix_changed'] is None
+    assert result['cache_control_only_prefix_changed'] is False and result['server_cache_state'] == 'unknown'
+
+
+def test_marker_dual_chains_share_unchanged_row_digest_in_one_pass(digest_cache, monkeypatch):
+    rows = [{'role': 'user', 'content': [{'type': 'text', 'text': str(i)}]} for i in range(320)]
+    rows[40]['content'][0]['cache_control'] = {'type': 'ephemeral'}
+    original, calls = digest_cache._row_digest, []
+
+    def counted(row):
+        calls.append(row)
+        return original(row)
+
+    monkeypatch.setattr(digest_cache, '_row_digest', counted)
+    surface = digest_cache.request_surface({'messages': rows}, 'local')
+    assert len(calls) == len(rows) + 1
+    assert surface['chain_checkpoints'] == _uncached_checkpoints(rows)
+    content = [digest_cache._without_message_cache_control(row) for row in rows]
+    assert surface['content_chain_checkpoints'] == _uncached_checkpoints(content)
+    assert 'cache_control' in rows[40]['content'][0]
+
+
+@pytest.mark.parametrize('bad', [None, {}, 'private corrupted text', [],
+    [{'index': 32, 'chain': 'private corrupted text'}],
+    [{'index': True, 'chain': 'a' * 64}],
+    [{'index': 33, 'chain': 'a' * 64}],
+    [{'index': 32, 'chain': 'a' * 64}, {'index': 32, 'chain': 'a' * 64}],
+    [{'index': 32, 'chain': 'a' * 64}] * 129])
+@pytest.mark.parametrize('side', ['previous', 'current'])
+def test_broken_content_snapshot_keeps_wire_diagnosis_and_content_unknown(bad, side):
+    old = request_surface(_messages(32), 'local')
+    current = copy.deepcopy(old)
+    current['system'] = 'a' * 64
+    (old if side == 'previous' else current)['content_chain_checkpoints'] = bad
+    result = compare_request_surfaces(old, current)
+    assert result['changes'] == ['system_changed']
+    assert result['comparable'] is True and result['shared_message_prefix'] == 32
+    assert result['content_prefix_comparable'] is False and result['content_prefix_changed'] is None
+    assert result['cache_control_only_prefix_changed'] is False
+    assert 'private' not in json.dumps(public_cache_diagnostic(result))
+
+
+def test_missing_content_checkpoint_field_does_not_raise_or_erase_wire_changes():
+    old = request_surface(_messages(32), 'local')
+    current = request_surface(_messages(32), 'other-endpoint')
+    del old['content_chain_checkpoints']
+    result = compare_request_surfaces(old, current)
+    assert result['changes'] == ['endpoint_changed']
+    assert result['content_prefix_comparable'] is False
+    assert result['content_prefix_changed'] is None
+
+
+def test_marker_checkpoint_accumulation_uses_bounded_tail_windows(digest_cache, monkeypatch):
+    from collections import deque
+
+    buffers = []
+
+    class ObservedDeque(deque):
+        def append(self, value):
+            super().append(value)
+            assert len(self) <= digest_cache._CHAIN_CHECKPOINT_LIMIT_COUNT
+
+    def observed_deque(*args, **kwargs):
+        result = ObservedDeque(*args, **kwargs)
+        buffers.append(result)
+        return result
+
+    monkeypatch.setattr(digest_cache, 'deque', observed_deque)
+    rows = [{'content': str(i)} for i in range(4097)]
+    rows[0] = {'content': [{'type': 'text', 'text': 'start', 'cache_control': {'type': 'ephemeral'}}]}
+    surface = digest_cache.request_surface({'messages': rows}, 'local')
+    assert len(buffers) == 2 and all(buffer.maxlen == 128 for buffer in buffers)
+    assert all(len(surface[key]) == 128 for key in ['chain_checkpoints', 'content_chain_checkpoints'])
+    assert surface['chain_checkpoints'] == _uncached_checkpoints(rows)
+    assert surface['partial'] is True
+
+
+def test_nested_tool_input_cache_control_is_business_content_with_transport_marker():
+    rows = [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'call-1', 'name': 'example',
+        'input': {'nested': {'cache_control': {'type': 'business-value'}}},
+        'cache_control': {'type': 'ephemeral'}}]}]
+    old = request_surface({'messages': rows}, 'local')
+    changed = copy.deepcopy(rows)
+    changed[0]['content'][0]['input']['nested']['cache_control']['type'] = 'changed-business-value'
+    current = request_surface({'messages': changed}, 'local')
+    result = compare_request_surfaces(old, current)
+    assert result['content_prefix_changed'] is True
+    assert result['cache_control_only_prefix_changed'] is False
+    assert rows[0]['content'][0]['input']['nested']['cache_control']['type'] == 'business-value'

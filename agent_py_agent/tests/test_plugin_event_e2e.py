@@ -228,7 +228,7 @@ def _wait_for(predicate, timeout=10):
         pause.wait(min(0.01, remaining))
 
 
-# LLM: 探针原样转交claim及受理/worker共用的真实owner叶子，只记返回事实；原两次身份复核断言保持，不手工搬队列或伪造终态。
+# LLM: 探针原样转交claim和实际执行owner解析；入站元数据不再以构造Agent次数证明身份。
 # 函数用途: 保留真实请求 worker 的认领和 owner 证据，供 HTTP 组合断言核对。
 def _observe_http_worker(monkeypatch):
     claims, resolved = [], []
@@ -241,7 +241,7 @@ def _observe_http_worker(monkeypatch):
         return result
     def resolve_probe(agent, owner, *args, **kwargs):
         result = original_resolve(agent, owner, *args, **kwargs)
-        resolved.append(owner_identity_from_config(result.config))
+        resolved.append((threading.current_thread().name, owner_identity_from_config(result.config)))
         return result
     monkeypatch.setattr(request_worker, 'claim_request', claim_probe)
     monkeypatch.setattr(request_worker, '_resolve_request_agent_for_owner', resolve_probe)
@@ -250,6 +250,17 @@ def _observe_http_worker(monkeypatch):
 
 @pytest.fixture
 def http_gateway(tmp_path, monkeypatch):
+    from agent_py_agent.agent.concurrency.daemon_executor import DeferredCall
+    from agent_py_agent.agent.conversation.run_claim import _CLAIM_TICKS
+    from agent_py_agent.agent.plugin_channel.pool import _IDLE_CLOSE_TICKS
+    from agent_py_agent.agent.tooling.registry import _ensure_registry_borrow_worker
+
+    # 进程级共享执行器按合同常驻；先完成无业务副作用的懒启动，再严格核对本fixture新生线程退出。
+    _ensure_registry_borrow_worker()
+    for scheduler in (_CLAIM_TICKS, _IDLE_CLOSE_TICKS):
+        ready = threading.Event()
+        scheduler.start(DeferredCall(ready.set), 0)
+        assert ready.wait(5)
     baseline_threads = set(threading.enumerate())
     # B7 起 plugin_events_enabled 是正式配置字段，类属性会被实例默认值 False 盖住；按真实配置入口打开总开关。
     agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'),
@@ -322,6 +333,10 @@ def test_real_http_worker_claim_and_prompt_owner_isolation(http_gateway, monkeyp
         'metadata': {'user_id': 'local-agent', 'channel': 'chat'}}, identity=identity)
     assert status == 202 and receipt['status'] == 'queued'
     request_id = receipt['request_id']
+    from agent_py_agent.agent.gateway_parts.request_owner_binding import frozen_request_owner
+
+    prepared = json.loads((paths.inbox / f'{request_id}.json').read_text())
+    assert frozen_request_owner(prepared) == owner
     # 请求已由真实 HTTP 持久排队；随后启动真实扫描 worker，不直接调用回合处理或编辑队列记录。
     worker = threading.Thread(target=request_worker._process_gateway_requests,
         args=(agent, paths), kwargs={'worker_id': 'm1b4-http-worker'}, name='m1b4-http-worker')
@@ -332,8 +347,10 @@ def test_real_http_worker_claim_and_prompt_owner_isolation(http_gateway, monkeyp
     assert status == 200 and result['ok'] and result['status'] == 'done', result
     assert len(claims) == 1 and claims[0].request_id == request_id
     assert claims[0].execution_attempt_id and claims[0].lease_epoch == 1
-    # IM 受理和执行各按可信身份复核 owner，所有解析均必须相同；新委派入口不减少原 worker 的身份检查。
-    assert resolved == [owner] * (2 if identity[1] == "feishu" else 1)
+    # 受理依据原冻结owner；实际worker仍重新解析，插件预检的额外解析也不得串Owner。
+    executed = [identity for name, identity in resolved if name == 'm1b4-http-worker']
+    assert executed and all(identity == owner for identity in executed)
+    assert all(identity == owner for _name, identity in resolved)
     assert not (paths.inbox / f'{request_id}.json').exists()
     assert not (paths.processing / f'{request_id}.json').exists()
     assert (paths.terminal / f'{request_id}.json').exists()

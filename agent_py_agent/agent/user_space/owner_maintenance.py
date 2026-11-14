@@ -354,12 +354,13 @@ def run_owner_workflow_maintenance(home, previous, *, now, safe_to_delete, servi
     import json
 
     from ..conversation.business_access import BusinessActor
-    from ..workflows.business_scope import WorkflowScopeService
     from ..workflows.orphan_maintenance import maintain_owner_workflows
+    from ..workflows.reference_sources import WorkflowManagementService
     actor = BusinessActor(home.owner_id, 'owner-maintenance', service or object(),
         lambda action, facts: action in {'workflows.cleanup.run', 'workflows.recycle'})
     tick = now.timestamp() if isinstance(now, datetime) else float(now)
-    service = service or WorkflowScopeService(home.owner_home_dir, owner_id=home.owner_id,
+    # 默认维护与业务入口共用真实有界引用读口；基础ScopeService没有reader，会把每个候选永远判为unknown。
+    service = service or WorkflowManagementService(home.owner_home_dir, owner_id=home.owner_id,
         authorize=lambda current, action, ref: current is actor and actor.authorize(action, {'workflow_ref': ref}),
         clock=lambda: tick)
     if service.owner_id != home.owner_id:
@@ -378,8 +379,22 @@ def run_owner_workflow_maintenance(home, previous, *, now, safe_to_delete, servi
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
         raise
-    except (OSError, ValueError, RuntimeError):
-        return {'executed': False, 'reason': 'workflow_maintenance_unavailable', 'coverage': 'unknown'}
+    except (OSError, ValueError, RuntimeError) as exc:
+        # 异常可能发生在正文提交之后；不回显异常正文/filename，也不把缺收据当作未执行。
+        import os
+
+        error = {'error_type': type(exc).__name__,
+                 'summary': '工作流维护状态校验或持久化未完成；执行结果需要对账。'}
+        if isinstance(exc, OSError) and type(exc.errno) is int:
+            error.update(errno=exc.errno, summary=os.strerror(exc.errno))
+        return {'executed': False, 'reason': 'workflow_maintenance_unavailable',
+                'error_code': 'WORKFLOW_MAINTENANCE_UNAVAILABLE', 'error': error,
+                'coverage': 'unknown', 'effect_outcome': 'unknown', 'partial': True,
+                'maintenance_request_key': key,
+                'reconciliation_source': 'data/workflow_maintenance.json',
+                'next_action': '先核对原维护账本的 inflight、cursor、operations 与对应工作流修订；'
+                    '保留原状态，由下一次可信宿主维护沿原 inflight 身份恢复。'
+                    '不要清空账本、改用新操作身份或原样手动重派回收。'}
 
 
 def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_transition=None, cursor=None) -> dict[str, Any]:
@@ -1024,11 +1039,9 @@ def _run_quota_continuation_slice(state_path, home, previous, current, *, coordi
     from types import SimpleNamespace
 
     from .home_retention import maintenance_fence, require_maintenance_fence
-    from .owner_quota import owner_quota_enabled, refresh_owner_quota_host_rows
+    from .owner_quota import refresh_owner_quota_host_rows
 
     raw_entries, raw_ms = quota_max_entries, quota_max_ms
-    explicit_quota_budget = raw_entries is not None or raw_ms is not None
-    track_quota = explicit_quota_budget or owner_quota_enabled(home.owner_home_dir)
     storage = deepcopy(previous.get('storage_maintenance', {}))
     require_schema_generation(previous)
     require_schema_generation(storage)
@@ -1064,7 +1077,7 @@ def _run_quota_continuation_slice(state_path, home, previous, current, *, coordi
             home, coordinator=coordinator, commit_transition=commit_transition,
             state_locked=not coordinator, max_entries=quota_max_entries, max_ms=quota_max_ms,
             include_cursor=not storage.get('deferred_reason'))
-        continuation = (track_quota and report['complete'] is False
+        continuation = (report['complete'] is False
                         and report.get('deferred_reason') not in (
                             'coordinator_adapter_protocol_required', 'retention_not_safe'))
         if storage.get('deferred_reason'):
@@ -1138,7 +1151,6 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     )
     from .owner_quota import (
         OwnerQuotaLockContention,
-        owner_quota_enabled,
         reconcile_owner_quota_slice,
     )
     from .runtime_paths import runtime_paths_for_agent
@@ -1177,7 +1189,6 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         return step
 
     raw_entries, raw_ms = quota_max_entries, quota_max_ms
-    track_quota = raw_entries is not None or raw_ms is not None or owner_quota_enabled(home.owner_home_dir)
     quota_max_entries, quota_max_ms = _quota_maintenance_budget(home, quota_max_entries, quota_max_ms)
     original = previous.get('storage_maintenance', {})
     require_schema_generation(original)
@@ -1186,7 +1197,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         reconciliation = _deferred_quota_reconciliation(
             home, coordinator=coordinator, commit_transition=commit_transition,
             state_locked=state_locked, max_entries=quota_max_entries, max_ms=quota_max_ms)
-        state.update(continuation_pending=track_quota and reconciliation['complete'] is False and reconciliation.get(
+        state.update(continuation_pending=reconciliation['complete'] is False and reconciliation.get(
                          'deferred_reason') not in ('coordinator_adapter_protocol_required', 'retention_not_safe'),
                      deletion_enabled=False, quota_reconciliation=reconciliation,
                      deferred_reason='coordinator_adapter_protocol_required' if coordinator else 'retention_not_safe')
@@ -1316,8 +1327,9 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     state['lane_reports'] = lane_reports
     state['pressure'] = pressure
     state['coordinator_deferred'] = ['global_indexes']
+    # 无上限owner仍发布观察用量；一旦启动扫描，欠账须续到完成，不能遗留目录流至次日。
     state['continuation_pending'] = bool(state['errors']) or any(
-        key != 'global_indexes' and (key != 'cache_tmp_trash' or track_quota)
+        key != 'global_indexes'
         for key in state['pending_kinds'])
     state['deletion_enabled'] = False
     return state

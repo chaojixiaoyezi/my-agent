@@ -243,7 +243,7 @@ class DeliveryService:
             )
         if context.mode == "proactive" and raw_content.strip() and leads_with_internal_signal(raw_content):
             return replace(receipt, delivery_status="suppressed")
-        projection = project_user_reply(raw_content)
+        projection = project_user_reply(raw_content, finalized=True)
         content = redact_delivery_context_identifiers(
             (project_host_paths_for_channel if progress else project_message_paths_for_channel)(projection.content, channel),
             context,

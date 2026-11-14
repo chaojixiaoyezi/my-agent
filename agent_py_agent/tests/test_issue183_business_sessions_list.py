@@ -214,12 +214,12 @@ def test_sessions_list_schema_and_cursor_errors(background_http):
 # LLM: 用当前其它显式分片重载作为 base，比较动作全集、别名及 W11 handler 身份。
 # 函数用途: 确认 sessions 分片仍只增加一个无别名动作，没有重定义 conversations.list。
 def test_conversations_list_contract_unchanged():
-    base_modules = tuple('agent_py_agent.agent.gateway_parts.business_api_v13_w' + str(wave)
-        for wave in range(7, 13))
-    gap_modules = tuple('agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w' + str(wave)
-        for wave in range(1, 10))
+    session_module = 'agent_py_agent.agent.gateway_parts.business_api_v13_sessions'
+    assert session_module in v13.V13_SLICE_MODULES
+    # 其它明确注册分片可继续扩展；这里只比较会话目录分片本身的增量与原动作身份。
+    base_modules = tuple(name for name in v13.V13_SLICE_MODULES if name != session_module)
     base_actions, base_aliases, base_defs, base_jobs, base_collections = v13._load_registry(
-        (*base_modules, *gap_modules))
+        base_modules)
     actions, aliases, definitions, jobs, collections = v13._load_registry()
     assert set(actions) == set(base_actions) | {'sessions.list'}
     assert aliases == base_aliases
@@ -233,8 +233,13 @@ def test_conversations_list_contract_unchanged():
     assert actions['sessions.list'].effect == 'read'
     assert actions['sessions.list'].admin is False
     assert actions['sessions.list'].idempotency_required is False
-    expected_modules = (*base_modules, 'agent_py_agent.agent.gateway_parts.business_api_v13_sessions',
-                        *gap_modules)
+    wave_modules = tuple('agent_py_agent.agent.gateway_parts.business_api_v13_w' + str(wave)
+        for wave in range(7, 13))
+    gap_modules = tuple('agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w' + str(wave)
+        for wave in range(1, 10))
+    expected_modules = ('agent_py_agent.agent.gateway_parts.business_api_v13_workflow_health',
+        *wave_modules, session_module, 'agent_py_agent.agent.gateway_parts.business_api_v13_session_space',
+        *gap_modules)
     assert expected_modules == v13.V13_SLICE_MODULES
 
 

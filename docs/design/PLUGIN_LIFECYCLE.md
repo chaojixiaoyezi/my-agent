@@ -316,6 +316,7 @@ composer `slash_input.rs` 和分派局部保留 slash 后自由正文；Hermes `
 
 - `/client/plugins` 提供显式 `catalog` 与 `command` 操作，复用原可信来源检查、通道身份及 owner 解析。
   只读帮助不创建会话、任务或 owner Agent，不读取模型配置、加载插件或探测外部服务。
+- 普通插件命令与交互命令都通过心跳流等待原操作结束。`stream` 选择传输方式，`interactive` 独立决定能否显示人工审批。普通命令遇到确需审批的工具会收到 `APPROVAL_UNAVAILABLE`。命令已提交且客户端断线时，保留执行结果未知和原操作 ID，使用原 ID 查询进度，以免重复执行。
 - 宿主从既有 `OwnerIdentity` 和已认证通道/会话绑定生成不含路径的 `scope_ref`，不接受正文中的 owner/run/attempt 替换它。
   canonical thread/run/attempt 仅在后续真实业务执行链产生，目录读取不捏造执行身份。
   这里不重做认证：无中间件时的原可信本机 body 身份、适配器的群聊 metadata 路由仍沿原规则；

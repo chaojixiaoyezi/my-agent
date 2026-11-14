@@ -392,3 +392,149 @@ def test_result_report_charges_the_pair_once_across_replay_and_concurrency(tmp_p
         assert not errors and len(rows) == 1
         assert store.session_pair_rate.count(task.target_thread_id, sender.thread_id) == 1
         assert len(store.wakes.pending(limit=0)) == (sender_kind == 'controller')
+
+
+def test_child_execution_is_waiting_child_on_real_business_wire(native, monkeypatch):
+    _, host = native
+    add_echo_profile(host)
+    assistant, task_id = assigned_task(native, 'child-running-view')
+    repo = host.subagents.runtime_db
+    root = repo.record_run_creation(owner_id=host.home_paths.owner_id, conversation_task_id=task_id,
+        thread_id=assistant['agent_id'], run_id=task_id, role='main')
+    child = repo.record_run_creation(owner_id=host.home_paths.owner_id, conversation_task_id=task_id,
+        thread_id=assistant['agent_id'], run_id='child-view-running', role='assistant', parent_run_id=task_id)
+    wake_id, = ok(native, 'background_agents.get', {'agent_id': assistant['agent_id']})['scheduling']['wake_signal_ids']
+    host.conversation_store.wakes.mark_handled(wake_id)
+    for action, params in [('tasks.get', {'task_id': task_id}),
+                           ('background_agents.get', {'agent_id': assistant['agent_id']})]:
+        view = ok(native, action, params)['scheduling']
+        assert view['state'] == 'waiting_child' and view['reason_code'] == 'CHILD_RUNNING'
+    from agent_py_agent.agent.conversation import background_execution_view
+    def unavailable_root(*args, **kwargs):
+        raise background_execution_view.ExecutionViewError('CLAIM_UNREADABLE')
+    with monkeypatch.context() as patch:
+        patch.setattr(background_execution_view, 'thread_execution_view', unavailable_root)
+        for action, params in [('tasks.get', {'task_id': task_id}),
+                               ('background_agents.get', {'agent_id': assistant['agent_id']})]:
+            view = ok(native, action, params)['scheduling']
+            assert view['state'] == 'waiting_child' and view['reason_code'] == 'CLAIM_UNREADABLE'
+            assert view['coverage'] == 'partial'
+    assert repo.settle_agent_attempt(agent_run_id=child['agent_run_id'], attempt_id=child['attempt_id'])['settled']
+    # 旧running attempt不能覆盖当轮已结案事实；父没有claim、孩子已结束才可报确切无唤醒。
+    assert ok(native, 'tasks.get', {'task_id': task_id})['scheduling']['state'] == 'stalled'
+    assert root['agent_run_id']
+
+
+def test_child_scheduling_canonical_scope_current_attempt_and_bounded_page(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.background_scheduling_view import _child_activity
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / 'runtime.db')
+    task = SimpleNamespace(task_id='task-view')
+    repo.record_run_creation(owner_id='local/main', conversation_task_id=task.task_id,
+        thread_id='thread-view', run_id='actual-parent-run', role='main')
+    child = repo.record_run_creation(owner_id='local/main', conversation_task_id=task.task_id,
+        thread_id='thread-view', run_id='actual-child-run', role='assistant', parent_run_id='actual-parent-run')
+    assert _child_activity(repo, task, owner_id='local/main', thread_id='thread-view') == (True, True)
+    assert _child_activity(repo, task, owner_id='local/other', thread_id='thread-view') == (False, True)
+    assert _child_activity(repo, task, owner_id='local/main', thread_id='other-thread') == (False, True)
+    repo.settle_agent_attempt(agent_run_id=child['agent_run_id'], attempt_id=child['attempt_id'])
+    assert _child_activity(repo, task, owner_id='local/main', thread_id='thread-view') == (False, True)
+    for index in range(3):
+        repo.record_run_creation(owner_id='local/main', conversation_task_id=task.task_id,
+            thread_id='thread-view', run_id=f'bounded-child-{index}', role='assistant',
+            parent_run_id='actual-parent-run', attempt_status='pending')
+    assert _child_activity(repo, task, owner_id='local/main', thread_id='thread-view', limit=2) == (False, False)
+    assert _child_activity(None, task, owner_id='local/main', thread_id='thread-view') == (False, False)
+
+
+@pytest.mark.parametrize('variant', ['valid', 'handler_entered', 'old_attempt', 'other_task', 'missing_index', 'child'])
+def test_closed_failed_turn_uses_canonical_no_handler_proof(native, variant):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        attach_run_task_workspace_context,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation.background_failed_task import (
+        closed_failure_without_handlers,
+    )
+    from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundExecutionResult,
+        BackgroundRunRequest,
+        _close_out_session_task_turn,
+    )
+    from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
+        ExternalizeToolOutputRequest,
+        externalize_tool_output_record,
+    )
+
+    _, host = native
+    add_echo_profile(host)
+    assistant, task_id = assigned_task(native, 'terminal-failure-' + variant)
+    store, repo = host.conversation_store, host.subagents.runtime_db
+    task = store.session_tasks.require(task_id)
+    root = repo.record_run_creation(owner_id=host.home_paths.owner_id, conversation_task_id=task_id,
+        thread_id=assistant['agent_id'], run_id=task_id, role='main',
+        task_run_metadata={'business_context': task.metadata['business_context'], 'session_task_ref': task_id})
+    store.session_tasks.bind_execution(task_id, task_run_id=root['task_run_id'], target_thread_id=assistant['agent_id'])
+    store.session_tasks.bind_turn(task_id, turn_id=task_id)
+    task = store.session_tasks.require(task_id)
+    params = RunParams(source='background_main_agent', task_id=task_id, run_id=task_id, request_id=task_id,
+        attempt_id=root['attempt_id'], business_context=BusinessExecutionContext.from_dict(task.metadata['business_context']),
+        task_attributes={'conversation_task_id': task_id, 'conversation_session_task_id': task_id,
+                         'conversation_thread_id': assistant['agent_id']})
+    prepared = attach_run_task_workspace_context(host, params, task.goal)
+    work = __import__('pathlib').Path(prepared.task_attributes['run_workspace']['work_dir'])
+    if variant != 'missing_index':
+        externalize_tool_output_record(ExternalizeToolOutputRequest(root=work, tool='send_session_message',
+            call_id='rejected-before-handler', output='authorization rejected', ok=False, error_code='CAPABILITY_DENIED',
+            run_id=task_id, task_id=task_id, request_id=task_id, attempt_id=root['attempt_id'],
+            result_envelope={'tool_execution': {'handler_executed': variant == 'handler_entered',
+                                               'failure_stage': 'authorization', 'duration_ms': 1}}))
+    if variant == 'child':
+        child = repo.record_run_creation(owner_id=host.home_paths.owner_id, conversation_task_id=task_id,
+            thread_id=assistant['agent_id'], run_id='failure-proof-child', role='assistant', parent_run_id=task_id)
+        repo.settle_agent_run(agent_run_id=child['agent_run_id'], status='done', attempt_id=child['attempt_id'])
+    repo.settle_agent_run(agent_run_id=root['agent_run_id'], status='failed', attempt_id=root['attempt_id'])
+    repo.settle_task_run_if_agent_tree_terminal(task_run_id=root['task_run_id'])
+    identity = {'run_id': task_id, 'task_id': task_id, 'request_id': task_id, 'attempt_id': root['attempt_id']}
+    if variant == 'old_attempt':
+        identity['attempt_id'] = 'old-attempt'
+    elif variant == 'other_task':
+        identity['task_id'] = 'other-task'
+    assert closed_failure_without_handlers(host, task, identity) is (variant == 'valid')
+    if variant == 'valid':
+        from agent_py_agent.agent.conversation.background_failed_task import (
+            recover_failed_task_result,
+        )
+        from agent_py_agent.agent.conversation.claim_execution_binding import (
+            ClaimExecutionBinding,
+            bind_claim_execution,
+        )
+
+        message = store.messages.append({'thread_id': assistant['agent_id'], 'role': 'assistant',
+            'content': '合法结果42；回传未开始，外发没有成功证明。',
+            'metadata': {'task_id': task_id, 'operation_verification': {'status': 'uncertain'}}})
+        store.session_tasks.record_turn_reply_linkage(task_id, reply_message_id=message.message_id)
+        claim = store.claims.acquire({'thread_id': assistant['agent_id'], 'reason': 'session_task', 'lease_seconds': 300})
+        binding = ClaimExecutionBinding(store.claims, assistant['agent_id'], claim['claim_id'], assistant['agent_id'])
+        try:
+            with bind_claim_execution(binding):
+                recovered = recover_failed_task_result(host, assistant['agent_id'], task_id)
+            assert recovered is not None and recovered.runtime_status == 'failed'
+            assert recovered.operation_verification == {'status': 'uncertain'}
+            assert store.session_tasks.require(task_id).status == 'failed'
+        finally:
+            store.claims.finish({'thread_id': assistant['agent_id'], 'claim_id': claim['claim_id'], 'status': 'failed'})
+    execution = BackgroundExecutionResult(response='合法结果42；回传未开始，外发没有成功证明。', tool_call_count=1,
+        tool_success_count=0, material_progress_count=0, delivery_artifacts=(), message_tool_deliveries=(),
+        operation_verification={'status': 'uncertain'}, assistant_commentaries=(), display_snapshot={},
+        runtime_status='blocked', execution_identity=identity)
+    _close_out_session_task_turn(host, BackgroundRunRequest(thread_id=assistant['agent_id'], task_id=task_id,
+        reason='session_task'), execution, turn_id=task_id)
+    current = store.session_tasks.require(task_id)
+    assert current.status == ('failed' if variant == 'valid' else 'accepted')
+    if variant == 'valid':
+        assert current.summary == execution.response and current.result_refs == ()

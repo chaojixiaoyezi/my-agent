@@ -103,6 +103,60 @@ def test_zero_scheduler_serial_uses_original_worker_once(monkeypatch):
     assert seen == [True]
 
 
+def test_zero_scheduler_serial_interrupt_reaches_only_owned_worker(monkeypatch):
+    from threading import Thread
+
+    from agent_py_agent.agent.agent_core.tool_loop import round_execution as rounds
+    from agent_py_agent.agent.common.cancellation import CancellationToken
+    from agent_py_agent.agent.concurrency.interrupt import interrupt_by_name, register_interruptible
+
+    running = {name: Event() for name in ('a', 'b')}
+    released, finished, results = Event(), Event(), {}
+    tokens = {name: CancellationToken() for name in running}
+    monkeypatch.setattr(rounds, 'scheduler_for_agent', lambda agent: None)
+    monkeypatch.setattr(rounds, '_capture_parallel_thread_context', lambda agent: None)
+    monkeypatch.setattr(wait_input, 'reply_to_pending_input', lambda req: None)
+
+    def worker(req, *args):
+        name = req.name
+        running[name].set()
+        while not released.wait(.01):
+            if req.params.cancellation_token.cancelled:
+                return 'cancelled-' + name
+        return 'completed-' + name
+
+    monkeypatch.setattr(rounds, '_owned_serial_call', worker)
+
+    def run(name):
+        req = request(token=tokens[name])
+        req.name = name
+        req.agent.tools = None
+        req.params.tool_runtime_snapshot = None
+        req.params.tool_protocol_snapshot = None
+        work = SimpleNamespace(call=SimpleNamespace(call_id=name, tool_name='run_command', arguments={}))
+        with register_interruptible('serial-wait-' + name):
+            results[name] = rounds._execute_owned_serial(req, work)
+        if name == 'a':
+            finished.set()
+
+    threads = [Thread(target=run, args=(name,)) for name in running]
+    for thread in threads:
+        thread.start()
+    try:
+        assert all(event.wait(2) for event in running.values())
+        interrupt_by_name('serial-wait-a')
+        assert finished.wait(2)
+        assert results['a'] == 'cancelled-a'
+        assert not tokens['b'].cancelled
+        assert 'b' not in results
+    finally:
+        released.set()
+        for thread in threads:
+            thread.join(3)
+    assert results['b'] == 'completed-b'
+    assert all(not thread.is_alive() for thread in threads)
+
+
 @pytest.mark.parametrize('failure', ['', 'display', 'append_after_commit', 'media', 'external', 'text_order'])
 def test_original_guidance_ack_reply_once_and_ir_unchanged(tmp_path, monkeypatch, failure):
     from agent_py_agent.agent.backends import ModelResponse

@@ -323,3 +323,197 @@ def test_agent_recovery_writes_always_declare_explicit_resume():
     for call in calls:
         assert any(keyword.arg == 'resuming' and isinstance(keyword.value, ast.Constant)
                    and keyword.value.value is True for keyword in call.keywords)
+
+
+@pytest.mark.parametrize(('query', 'expected'), [
+    ('probe-', {'probe-one', 'probe-three'}),
+    ('中文巡检', {'probe-one', 'other-two'}),
+    ('other-', {'other-two'}),
+    ('不存在', set()),
+    ('', {'probe-one', 'other-two', 'probe-three'}),
+])
+def test_native_and_business_workflow_query_share_name_or_id_matching(tmp_path, query, expected):
+    import json
+
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+
+    api, actor, _ = service(tmp_path)
+    for identifier, display in [('probe-one', '中文巡检'), ('other-two', '中文巡检'), ('probe-three', '其它日报')]:
+        body = definition(identifier)
+        body['descriptor']['name'] = display
+        api.execute('workflows.create', {'definition': body}, actor=actor, idempotency_key=identifier)
+    tool = WorkflowsTool(tmp_path, store=api.store)
+    result = tool.execute({'action': 'list', 'query': query})
+    assert result.ok, result.output
+    native = {item['descriptor']['id'] for item in json.loads(result.output)['workflows']}
+    request = {'query': query, 'limit': 1}
+    business = set()
+    while True:
+        page = api.execute('workflows.list', request, actor=actor)
+        business.update(item['workflow_ref'] for item in page['items'])
+        if not page['next_cursor']:
+            break
+        request = {**request, 'cursor': page['next_cursor']}
+    assert native == business == expected
+    assert len(api.store.list_workflows()) == 3, '既有无参Store接口保持兼容'
+
+
+def test_workflow_query_keeps_native_hidden_and_business_authorization_filters(tmp_path):
+    import json
+
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+
+    api, actor, _ = service(tmp_path)
+    for identifier, hidden in [('probe-visible', False), ('probe-hidden', True)]:
+        body = definition(identifier)
+        body['descriptor'].update(name='中文巡检', metadata={'hidden': hidden})
+        api.execute('workflows.create', {'definition': body}, actor=actor, idempotency_key=identifier)
+    result = WorkflowsTool(tmp_path, store=api.store).execute({'action': 'list', 'query': 'probe-'})
+    assert result.ok, result.output
+    assert [item['descriptor']['id'] for item in json.loads(result.output)['workflows']] == ['probe-visible']
+    api.authorize = lambda current, action, ref: current is actor and ref != 'probe-hidden'
+    page = api.execute('workflows.list', {'query': 'probe-', 'limit': 1}, actor=actor)
+    assert [item['workflow_ref'] for item in page['items']] == ['probe-visible']
+    assert page['next_cursor'] is None
+
+
+@pytest.mark.parametrize(('filters', 'expected'), [
+    ({}, {'active-space', 'recycled-space', 'legacy'}),
+    ({'lifecycle': 'active'}, {'active-space', 'legacy'}),
+    ({'lifecycle': 'recycled'}, {'recycled-space'}),
+    ({'lifecycle': 'all'}, {'active-space', 'recycled-space', 'legacy'}),
+    ({'scope_mode': 'spaces'}, {'active-space', 'recycled-space'}),
+    ({'scope_mode': 'owner_global'}, {'legacy'}),
+    ({'space_id': 's1'}, {'active-space', 'legacy'}),
+    ({'space_id': 's2', 'lifecycle': 'recycled'}, {'recycled-space'}),
+    ({'space_id': 'other'}, {'legacy'}),
+])
+def test_native_list_explicit_state_filters_keep_legacy_hidden_and_default_semantics(tmp_path, filters, expected):
+    import json
+
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+
+    api, actor, _ = service(tmp_path, references=lambda _ref: {'coverage': 'complete', 'blockers': []})
+    for identifier, lifecycle, space, hidden in [('active-space', 'active', 's1', False),
+            ('recycled-space', 'recycled', 's2', False), ('hidden-recycled', 'recycled', 's2', True)]:
+        body = definition(identifier)
+        body['descriptor'].update(name='中文流程', metadata={'hidden': hidden})
+        api.execute('workflows.create', {'definition': body,
+            'scope': {'scope_mode': 'spaces', 'space_ids': [space]}}, actor=actor, idempotency_key=identifier)
+        if lifecycle == 'recycled':
+            api.execute('workflows.recycle', {'workflow_ref': identifier}, actor=actor,
+                        expected_revision=1, idempotency_key='recycle-' + identifier)
+    api.store.save_workflow(definition('legacy'))
+    result = WorkflowsTool(tmp_path, store=api.store).execute({'action': 'list', **filters})
+    assert result.ok, result.output
+    assert {row['descriptor']['id'] for row in json.loads(result.output)['workflows']} == expected
+    assert {row['workflow_ref'] for row in api.execute('workflows.list', {}, actor=actor)['items']} == {'active-space', 'legacy'}
+
+
+def test_business_list_parses_workflow_state_once_per_authorized_definition(tmp_path, monkeypatch):
+    from agent_py_agent.agent.workflows import business_scope
+
+    api, actor, _ = service(tmp_path)
+    api.execute('workflows.create', {'definition': definition('one')}, actor=actor, idempotency_key='one')
+    actual, calls = business_scope.workflow_state, []
+    def observed(value):
+        calls.append(value.descriptor.id)
+        return actual(value)
+    monkeypatch.setattr(business_scope, 'workflow_state', observed)
+    assert api.execute('workflows.list', {}, actor=actor)['items'][0]['workflow_ref'] == 'one'
+    assert calls == ['one']
+
+
+def test_create_definition_decode_error_is_not_started_but_store_error_remains_unknown(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+    from agent_py_agent.agent.gateway_parts.business_api import _error_code
+
+    api, actor, _ = service(tmp_path)
+    bad = definition('schema-version-probe')
+    bad['descriptor']['schema_version'] = 'v1'
+    called = []
+    original = api.store.apply_business_operation
+    monkeypatch.setattr(api.store, 'apply_business_operation', lambda *a, **k: called.append(True))
+    with pytest.raises(BusinessError) as rejected:
+        api.execute('workflows.create', {'definition': bad}, actor=actor, idempotency_key='version-probe')
+    assert _error_code(rejected.value) == ('INVALID_SCHEMA', 400, 'not_started')
+    assert rejected.value.details['field'] == 'definition.descriptor.schema_version'
+    assert rejected.value.details['actual'] == 'v1'
+    assert rejected.value.details['expected'] == 'asset_descriptor.v1'
+    assert rejected.value.details['reason'] == '不支持的资产协议版本'
+    assert rejected.value.details['effect_outcome'] == 'not_started' and not called
+    assert api.store.get_workflow('schema-version-probe') is None
+    monkeypatch.setattr(api.store, 'apply_business_operation', original)
+
+    def write_unknown(*args, **kwargs):
+        raise ValueError('write boundary failure')
+
+    monkeypatch.setattr(api.store, 'apply_business_operation', write_unknown)
+    with pytest.raises(ValueError, match='write boundary failure') as unknown:
+        api.execute('workflows.create', {'definition': definition('write-probe')},
+                    actor=actor, idempotency_key='write-probe')
+    assert not isinstance(unknown.value, BusinessError), '写入边界异常不得误标为未执行'
+
+
+def test_scope_set_empty_command_atomically_orphans_and_replays(tmp_path):
+    api, actor, authorized = service(tmp_path)
+    api.clock = lambda: 101.0
+    api.execute('workflows.create', {'definition': definition(),
+        'scope': {'scope_mode': 'spaces', 'space_ids': ['a', 'b']}}, actor=actor, idempotency_key='create')
+    api.execute('workflows.scope.set', {'workflow_ref': 'daily',
+        'scope': {'scope_mode': 'spaces', 'space_ids': ['b']}}, actor=actor,
+        expected_revision=1, idempotency_key='remove-a')
+    before = api.store.get_workflow('daily')
+    request = {'workflow_ref': 'daily', 'scope': {'scope_mode': 'spaces', 'space_ids': []}}
+    authorized['value'] = False
+    with pytest.raises(PermissionError):
+        api.execute('workflows.scope.set', request, actor=actor, expected_revision=2, idempotency_key='denied')
+    authorized['value'] = True
+    with pytest.raises(ValueError):
+        api.execute('workflows.scope.set', request, actor=actor, expected_revision=1, idempotency_key='stale')
+    assert api.store.get_workflow('daily').to_dict() == before.to_dict()
+    api.clock = lambda: 202.0
+    result = api.execute('workflows.scope.set', request, actor=actor,
+        expected_revision=2, idempotency_key='remove-last')
+    saved = api.store.get_workflow('daily')
+    state = saved.descriptor.metadata['business_workflow']
+    assert result['scope'] == {'scope_mode': 'unassigned', 'space_ids': []}
+    assert result['scope_revision'] == 3
+    assert state['orphan_since'] == 202.0
+    assert state['scope']['scope_mode'] == 'unassigned' and state['scope']['space_ids'] == []
+    assert saved.execution_definition_ref == before.execution_definition_ref
+    authorized['value'] = False
+    with pytest.raises(PermissionError):
+        api.execute('workflows.scope.set', request, actor=actor,
+            expected_revision=2, idempotency_key='remove-last')
+    authorized['value'] = True
+    assert api.execute('workflows.scope.set', request, actor=actor,
+        expected_revision=2, idempotency_key='remove-last') == result
+    assert api.store.get_workflow('daily').to_dict() == saved.to_dict()
+    with pytest.raises(PermissionError, match='WORKFLOW_UNASSIGNED'):
+        api.execute('workflows.run', {'workflow_ref': 'daily'}, actor=actor, idempotency_key='cannot-run')
+
+
+@pytest.mark.parametrize('old_mode', ['owner_global', 'unassigned'])
+def test_empty_remove_command_requires_previously_bound_spaces(tmp_path, old_mode):
+    api, actor, _ = service(tmp_path)
+    api.execute('workflows.create', {'definition': definition(),
+        'scope': {'scope_mode': old_mode, 'space_ids': []}}, actor=actor, idempotency_key='create')
+    before = api.store.get_workflow('daily').to_dict()
+    with pytest.raises(PermissionError, match='WORKFLOW_SCOPE_REMOVE_REQUIRES_BOUND_SPACES'):
+        api.execute('workflows.scope.set', {'workflow_ref': 'daily',
+            'scope': {'scope_mode': 'spaces', 'space_ids': []}}, actor=actor,
+            expected_revision=1, idempotency_key='invalid-remove')
+    assert api.store.get_workflow('daily').to_dict() == before
+
+
+@pytest.mark.parametrize('action', ['workflows.create', 'workflows.restore'])
+def test_empty_spaces_remains_invalid_outside_scope_set(tmp_path, action):
+    from agent_py_agent.agent.workflows.business_scope import validate_business_request
+
+    request = {'scope': {'scope_mode': 'spaces', 'space_ids': []},
+               **({'definition': definition()} if action == 'workflows.create' else {'workflow_ref': 'daily'})}
+    with pytest.raises(ValueError):
+        validate_business_request(action, request, expected_revision=1, idempotency_key='unchanged')
+    with pytest.raises(ValueError):
+        WorkflowScope('spaces', (), 1)

@@ -1626,7 +1626,7 @@ def test_s3_budget_unproven_views_short_circuit_with_zero_task_loads(agent_and_c
 
     with monkeypatch.context() as patch:
         patch.setattr(agent.subagents, "load", tracked_load)
-        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n: {})
+        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n, *, deadline=None: {})
         patch.setattr(git, "validate_repo", tracked_validate)
         patch.setattr(git, "observe", forbidden_observe)
         for snap in (subtree_snapshot, warned_snapshot, scope_warned_snapshot, oversized_snapshot):
@@ -1648,7 +1648,7 @@ def test_s3_budget_unproven_views_short_circuit_with_zero_task_loads(agent_and_c
 
     with monkeypatch.context() as patch:
         patch.setattr(agent.subagents, "load", fail_first_load)
-        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n: {})
+        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n, *, deadline=None: {})
         patch.setattr(git, "observe", forbidden_observe)
         broken_ctx = list_agents_mod.progress_read_context(agent, root_snapshot)
 
@@ -1789,7 +1789,7 @@ def test_s3_budget_exhaustion_across_snapshot_setup_and_loads_keeps_unproven(age
     root_snap = agent_tree_status_payload(agent, {"run_id": "task-T", "scope": "own_subtree"})
     with monkeypatch.context() as patch:
         patch.setattr(git, "GIT_OBSERVATION_BUDGET_SECONDS", 0.01)
-        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n: {})
+        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n, *, deadline=None: {})
         patch.setattr(agent.subagents, "load", slow_first_load)
         patch.setattr(git, "observe", never_observe)
         after_slow_load = list_agents_mod.progress_read_context(agent, root_snap)
@@ -1809,7 +1809,7 @@ def test_s3_budget_exhaustion_across_snapshot_setup_and_loads_keeps_unproven(age
 
     with monkeypatch.context() as patch:
         patch.setattr(git, "GIT_OBSERVATION_BUDGET_SECONDS", 0.01)
-        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n: {})
+        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n, *, deadline=None: {})
         patch.setattr(git, "associate_repos", slow_assoc)
         patch.setattr(git, "observe", never_observe)
         after_slow_assoc = list_agents_mod.progress_read_context(agent, root_snap)
@@ -1840,3 +1840,176 @@ def test_s3_lower_bound_preserved_in_node_rendering_current_attempt_streak(agent
     assert capped_streak["consecutive_failures"] == _PROGRESS_TOOL_EVENT_WINDOW_COUNT
     assert capped_streak["ongoing"] is True
     assert capped_streak["count_is_lower_bound"] is True
+
+
+# 同一已脏文件再次改正文，HEAD/路径数/邮箱均不变；内容证据必须来自原允许范围内实际字节。
+def test_same_dirty_path_content_change_is_observed_with_scoped_read_authority(agent_and_child, repo, monkeypatch):
+    from agent_py_agent.agent.path_access_policy import PathAccessPolicy
+    from agent_py_agent.agent.workspace_read_context import WorkspaceReadContext
+
+    agent, _, _ = agent_and_child
+    _register(monkeypatch, [str(repo)])
+    policy = PathAccessPolicy.from_values(mode='normal')
+    scope = WorkspaceReadContext(repo, (repo,), policy, (), policy)
+    source = repo / 'a.txt'
+    source.write_text('dirty-one')
+    first = git.observe_registered(agent, str(repo), read_context=scope)
+    source.write_text('dirty-two')
+    second = git.observe_registered(agent, str(repo), read_context=scope)
+    assert first['head'] == second['head'] and first['dirty_paths_count'] == second['dirty_paths_count'] == 1
+    assert first['dirty_content']['coverage'] == second['dirty_content']['coverage'] == 'complete'
+    assert first['dirty_content']['fingerprint'] != second['dirty_content']['fingerprint']
+    base = classify_node_progress(_node(last_progress_at=NOW - PROGRESS_STALE_AFTER_SECONDS - 1), now=NOW)
+    assert merge_git_observation(base, second, first)['state'] == 'working'
+    os.utime(source, None)
+    touched = git.observe_registered(agent, str(repo), read_context=scope)
+    assert touched['dirty_content']['fingerprint'] == second['dirty_content']['fingerprint']
+    assert merge_git_observation(base, touched, second)['state'] == 'no_progress'
+
+
+@pytest.mark.parametrize('blocked', ['scope', 'symlink', 'hardlink', 'large', 'many', 'deadline', 'depth', 'unsafe', 'invalid'])
+def test_dirty_content_missing_coverage_is_unknown_without_reading_outside_scope(agent_and_child, repo, monkeypatch, tmp_path, blocked):
+    from agent_py_agent.agent.path_access_policy import PathAccessPolicy
+    from agent_py_agent.agent.workspace_read_context import WorkspaceReadContext
+
+    _agent, _, _ = agent_and_child
+    policy = PathAccessPolicy.from_values(mode='normal')
+    scope = WorkspaceReadContext(repo, (repo,), policy, (), policy)
+    target = repo / 'a.txt'
+    payload = b' M a.txt\0'
+    deadline = time.monotonic() + 10
+    if blocked == 'scope':
+        scope = WorkspaceReadContext(repo, (), policy, (), policy)
+    elif blocked in {'symlink', 'hardlink'}:
+        outside = tmp_path / 'private-sentinel'
+        outside.write_text('synthetic private bytes')
+        target.unlink()
+        if blocked == 'symlink':
+            target.symlink_to(outside)
+        else:
+            os.link(outside, target)
+    elif blocked == 'large':
+        target.write_bytes(b'x' * (git.MAX_GIT_OUTPUT_BYTES + 1))
+    elif blocked == 'many':
+        payload = b''.join(b' M file-' + str(i).encode() + b'\0' for i in range(git.MAX_GIT_CONTENT_PATHS + 1))
+    elif blocked == 'depth':
+        payload = b' M ' + b'/'.join([b'one'] * git.GIT_CONTENT_MAX_COMPONENT_COUNT) + b'\0'
+    elif blocked == 'unsafe':
+        payload = b' M ../private-sentinel\0'
+    elif blocked == 'invalid':
+        payload = b' M cut-status'
+    else:
+        deadline = time.monotonic() - 1
+    result = git._dirty_content(repo, payload, False, deadline, scope)
+    assert result['coverage'] == 'partial' and result['fingerprint'] == '' and result['reason']
+    base = classify_node_progress(_node(last_progress_at=NOW - PROGRESS_STALE_AFTER_SECONDS - 1), now=NOW)
+    before = {'head': 'a' * 40, 'dirty_paths_count': 1, 'error_code': ''}
+    merged = merge_git_observation(base, {**before, 'dirty_content': result}, before)
+    assert (merged['state'], merged['reason'], merged['coverage']) == ('unknown', 'GIT_CONTENT_COVERAGE_INCOMPLETE', 'partial')
+    assert merge_git_observation(base, {**before, 'dirty_content': result}, None)['state'] == 'unknown'
+    for node in (_node(status='DONE'), _node(tool_contract={'open_request_count': 1}), _node(status='BLOCKED')):
+        classified = classify_node_progress(node, now=NOW)
+        assert merge_git_observation(classified, {**before, 'dirty_content': result}, before)['state'] == classified['state']
+
+
+def test_list_agents_passes_original_scoped_read_context_to_opt_in_adapter(agent_and_child, repo, monkeypatch):
+    from agent_py_agent.agent.path_access_policy import PathAccessPolicy
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+    from agent_py_agent.agent.workspace_read_context import WorkspaceReadContext
+
+    agent, child, _ = agent_and_child
+    _write_repo(agent, [child], [str(repo)])
+    _register(monkeypatch, [str(repo)])
+    policy = PathAccessPolicy.from_values(mode='normal')
+    read_scope = WorkspaceReadContext(repo, (repo,), policy, (), policy)
+    (repo / 'a.txt').write_text('dirty')
+    context = ToolInvocationContext(agent.tools.runtime_snapshot(allowed_tools=['list_agents']), workspace_read_context=read_scope)
+    payload = json.loads(ListAgentsTool(agent).execute_scoped({'run_id': 'task-T'}, context).output)
+    node = next(row for row in payload['nodes'] if row['run_id'] == child)
+    assert node['progress']['sources']['git']['dirty_content']['coverage'] == 'complete'
+    assert node['progress']['sources']['git']['dirty_content']['bytes_sampled'] == 5
+
+
+# 原启动/精确attempt/工具事件往返，不拿旧attempt展示失败段冒充当前正在重试。
+def test_exact_running_attempt_retry_streak_reaches_original_list_and_settles(agent_and_child):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import persist_tool_runtime_ledger
+    from agent_py_agent.agent.subagents.manager_runner_result_payload import (
+        RecordRunnerResultParams,
+    )
+
+    agent, child, _ = agent_and_child
+    started = agent.subagents.lifecycle.prepare_runner_attempt(child)
+    attempt = started.runner_active_attempt_id
+    assert attempt
+
+    def call(number, ok):
+        persist_tool_runtime_ledger(SimpleNamespace(subagents=agent.subagents, local_store=None), {
+            'run_id': child, 'task_id': started.root_id, 'attempt_id': attempt,
+            'operation_id': f'exact-retry-{number}', 'handler_executed': ok,
+            'idempotency_key': f'exact-retry-{number}', 'tool': 'read_file', 'ok': ok,
+            'error_code': '' if ok else 'TOOL_PERMISSION_DENIED',
+            'failure_stage': '' if ok else 'authorization'})
+
+    try:
+        call(1, False)
+        assert _child_node(agent, child)['progress']['state'] != 'retrying'
+        call(2, False)
+        retrying = _child_node(agent, child)['progress']
+        assert (retrying['state'], retrying['reason']) == ('retrying', 'REPEATED_TOOL_FAILURE')
+        source = retrying['sources']['required']['tool_failures']
+        assert source['attempt_id'] == attempt and source['current_attempt_streak']['ongoing'] is True
+        call(3, True)
+        settled = _child_node(agent, child)['progress']
+        assert settled['state'] != 'retrying'
+        assert settled['sources']['required']['tool_failures']['current_attempt_streak']['ongoing'] is False
+    finally:
+        agent.subagents.runner_result.record_runner_result(RecordRunnerResultParams(
+            run_id=child, attempt_id=attempt, dry_run=False, ok=True,
+            message='合成事件验证结束', response='合成事件验证结束', turn_end_reason='completed', actual_tools=[]))
+
+
+def test_registry_roundtrip_keeps_exact_read_scope_for_git_content(agent_and_child, repo, monkeypatch):
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+    agent, child, _ = agent_and_child
+    _write_repo(agent, [child], [str(repo)])
+    _register(monkeypatch, [str(repo)])
+    (repo / 'a.txt').write_text('dirty')
+    # 有界合成时钟：真实attempt活跃、真实进展时间过旧，不等待十分钟或伪造模型动作。
+    started = agent.subagents.lifecycle.prepare_runner_attempt(child)
+    def old_progress(task):
+        task.heartbeat_at = time.time()
+        task.last_progress_at = time.time() - PROGRESS_STALE_AFTER_SECONDS - 1
+    agent.subagents.mutate(child, old_progress)
+
+    boundary = {'execution_cwd': str(repo), 'execution_workspace_roots': [str(repo)],
+                'allowed_write_roots': [str(repo)], 'read_scope_mode': 'exact', 'allowed_read_roots': [str(repo)], 'task_id': 'task-T'}
+
+    def read(value):
+        outcome = execute_registry_test_call(agent.tools, 'list_agents', {'run_id': 'task-T'},
+            run_id='gwreq-1', allowed_tools=['list_agents'], write_boundary=value, register_with=agent)
+        assert outcome.ok, outcome.output
+        payload = json.loads(outcome.output)
+        node = next(item for item in payload['nodes'] if item['run_id'] == child)
+        return node['progress']['sources']['git']['dirty_content'], node['progress']['state']
+
+    try:
+        permitted, first_state = read(boundary)
+        (repo / 'a.txt').write_text('other')
+        changed, changed_state = read(boundary)
+        blocked, blocked_state = read({**boundary, 'allowed_read_roots': []})
+    finally:
+        from agent_py_agent.agent.subagents.manager_runner_result_payload import (
+            RecordRunnerResultParams,
+        )
+
+        agent.subagents.runner_result.record_runner_result(RecordRunnerResultParams(
+            run_id=child, attempt_id=started.runner_active_attempt_id, dry_run=False, ok=True,
+            message='合成时钟观察结束', response='合成时钟观察结束', turn_end_reason='completed', actual_tools=[]))
+    assert first_state == 'no_progress' and changed_state == 'working' and blocked_state == 'unknown'
+    assert permitted['fingerprint'] != changed['fingerprint']
+    assert permitted['coverage'] == 'complete' and permitted['bytes_sampled'] == 5
+    assert blocked['coverage'] == 'partial' and blocked['reason'] == 'CONTENT_READ_SCOPE_BLOCKED'
+    assert blocked['bytes_sampled'] == 0

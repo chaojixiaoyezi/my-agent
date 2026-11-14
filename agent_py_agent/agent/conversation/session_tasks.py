@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -476,10 +477,34 @@ class SessionTaskUpdate:
     # 结果交付项的稳定身份（path/artifact_id/sha256/size_bytes），只来自本回合已持久的交付项；
     #   仅在推进到终态时随同一原子更新写入 metadata，内部 result_refs 路径保持不变。
     result_artifacts: tuple[dict[str, Any], ...] = ()
+    delivery_artifact_diagnostics: tuple[dict[str, Any], ...] = ()
 
 
 # 交付项身份在 SessionTask.metadata 中的键；公开投影据此把内部路径换成产物登记 ID。
 SESSION_TASK_RESULT_ARTIFACTS_KEY = "result_artifacts"
+
+
+DELIVERY_ARTIFACT_DIAGNOSTICS_KEY = "delivery_artifact_diagnostics"
+
+
+def public_delivery_artifact_diagnostics(raw):
+    """交付观察诊断仅投影有界宿主错误码与安全run ref；不携路径、正文或授权。"""
+    rows = []
+    for item in (raw[:8] if isinstance(raw, (list, tuple)) else ()):
+        code = item.get('error_code') if isinstance(item, dict) else None
+        if not isinstance(code, str) or not re.fullmatch(r'CHILD_DELIVERY_[A-Z_]{1,80}', code):
+            continue
+        row = {'error_code': code, 'coverage': 'partial', 'stage': 'delivery_observation',
+               'effect_outcome': 'not_started', 'source_effect_outcome': 'unknown',
+               'next_action': '调用tasks.get核对原任务，再对其原artifact_id调用artifacts.get；保持partial，禁止扫描目录补权。'}
+        run_id = item.get('run_id')
+        if isinstance(run_id, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', run_id):
+            row['run_id'] = run_id
+        exception_type = item.get('exception_type')
+        if isinstance(exception_type, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,63}', exception_type):
+            row['exception_type'] = exception_type
+        rows.append(row)
+    return rows
 
 
 # LLM: 只保留四个稳定字段；路径或 ID 不是非空字符串的项丢弃（投影再计为未解析），不截断、不补造 ID。
@@ -492,7 +517,9 @@ def _result_artifact_item(item: object) -> dict[str, Any] | None:
         return None
     size = item.get("size_bytes")
     return {"path": path, "artifact_id": artifact_id, "sha256": str(item.get("sha256") or ""),
-            "size_bytes": size if type(size) is int and size >= 0 else None}
+            "size_bytes": size if type(size) is int and size >= 0 else None,
+            **{key: item[key] for key in ('task_id', 'run_id')
+               if isinstance(item.get(key), str) and item[key].strip()}}
 
 
 # LLM: 幂等判定只比结构化身份字段（发送方/目标/正文），不比对时间戳等派生值。
@@ -1146,6 +1173,10 @@ class SessionTaskStore:
                     and SESSION_TASK_RESULT_ARTIFACTS_KEY not in latest.metadata):
                 # 映射一次写定：新终态迁移写入；旧终态缺键只接受一次回填；已有映射后相同或不同重放都保留原值。
                 metadata = {**latest.metadata, SESSION_TASK_RESULT_ARTIFACTS_KEY: artifacts}
+            diagnostics = public_delivery_artifact_diagnostics(update.delivery_artifact_diagnostics)
+            if (diagnostics and target_status in SESSION_TASK_TERMINAL_STATUSES
+                    and DELIVERY_ARTIFACT_DIAGNOSTICS_KEY not in latest.metadata):
+                metadata = {**metadata, DELIVERY_ARTIFACT_DIAGNOSTICS_KEY: diagnostics}
             updated = replace(
                 latest,
                 status=target_status,

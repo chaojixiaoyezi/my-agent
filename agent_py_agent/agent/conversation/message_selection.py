@@ -471,3 +471,14 @@ def _surviving_source_digest(reader, gaps, interrupt_check):
             digest.update(reader.read(min(65536, start - reader.tell())))
         reader.seek(end)
     return digest.digest()
+
+
+def cached_message_address(path, message_id):
+    """只取原位置缓存线索，不建索引；调用者须重读同原行并核hash/身份，缓存不授予读取权。"""
+    info = path.stat()
+    with _POSITION_CACHE_LOCK:
+        index = _POSITION_CACHE.get((info.st_dev, info.st_ino))
+        position = index.by_id.get(message_id) if index is not None else None
+        if position is None or any(line <= position.line_number and not model for line, _, model in index.errors):
+            return None
+        return position.address

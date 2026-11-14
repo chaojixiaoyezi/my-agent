@@ -9,6 +9,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.runner.dispatch import _is_dispatch_runner_candidate
 from agent_py_agent.agent.agent_core.runner.prompt_context_summary import (
@@ -710,3 +712,88 @@ def _root_done_signal(wake_signal_id: str, root_task_id: str) -> WakeSignal:
         created_at=1.0,
         metadata={"status": "DONE"},
     )
+
+
+def test_running_child_open_request_wakes_once_and_next_request_wakes_again(tmp_path):
+    from agent_py_agent.agent.subagents.direct_parent_lifecycle import direct_child_capability_facts
+
+    manager, parent, children = _parent_and_children(tmp_path)
+    child = children[0]
+    mark_parent_waiting_for_direct_children(manager, parent.id)
+    child.capability_requests = [CapabilityRequest(id='cap-one', from_run_id=child.id,
+        problem='test', needed_capability='tool', requested_tools=['web_search'])]
+    manager.save(child)
+    decision = reconcile_parent_wait_for_child(manager, child.id)
+    assert decision.should_resume and decision.attention_run_ids == (child.id,)
+    assert manager.load(child.id).status == 'RUNNING'
+    assert manager.load(child.id).capability_requests[0].status == 'OPEN'
+    assert not reconcile_parent_wait_for_child(manager, child.id).should_resume
+    observed = {child.id: {'status': 'RUNNING', **direct_child_capability_facts(child)}}
+    mark_parent_waiting_for_direct_children(manager, parent.id, observed_children=observed)
+    assert not reconcile_parent_wait_for_child(manager, child.id).should_resume
+    child.capability_requests.append(CapabilityRequest(id='cap-two', from_run_id=child.id,
+        problem='another', needed_capability='other tool'))
+    manager.save(child)
+    assert reconcile_parent_wait_for_child(manager, child.id).should_resume
+
+
+def test_request_arriving_after_parent_snapshot_before_wait_is_unseen(tmp_path):
+    manager, parent, children = _parent_and_children(tmp_path)
+    child = children[0]
+    observed = {child.id: {'status': 'RUNNING', 'capability_notice_key': ''}}
+    child.capability_requests = [CapabilityRequest(id='arriving', from_run_id=child.id,
+        problem='test', needed_capability='tool')]
+    manager.save(child)
+    mark_parent_waiting_for_direct_children(manager, parent.id, observed_children=observed)
+    assert reconcile_parent_wait_for_child(manager, child.id).should_resume
+
+
+def test_concurrent_running_child_requests_release_only_one_parent(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.subagents import direct_parent_lifecycle as lifecycle
+
+    manager, parent, children = _parent_and_children(tmp_path, ('RUNNING', 'RUNNING'))
+    mark_parent_waiting_for_direct_children(manager, parent.id)
+    for child in children:
+        child.capability_requests = [CapabilityRequest(id='request-' + child.id, from_run_id=child.id,
+            problem='test', needed_capability='tool')]
+        manager.save(child)
+    ready = [threading.Event(), threading.Event()]
+    release = threading.Event()
+    local = threading.local()
+    original = lifecycle._wait_record
+    def frozen_read(current):
+        marker = original(current)
+        if current.id == parent.id and marker and not getattr(local, 'sampled', False):
+            local.sampled = True
+            ready[local.index].set()
+            assert release.wait(2)
+        return marker
+    monkeypatch.setattr(lifecycle, '_wait_record', frozen_read)
+    def reconcile(index):
+        local.index = index
+        return reconcile_parent_wait_for_child(manager, children[index].id)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(reconcile, i) for i in range(2)]
+        try:
+            assert all(event.wait(2) for event in ready)
+        finally:
+            release.set()
+        decisions = [future.result() for future in futures]
+    assert sum(d.should_resume for d in decisions) == 1
+
+
+@pytest.mark.parametrize('field', ['owner', 'root_id'])
+def test_cross_scope_child_request_cannot_release_parent_wait(tmp_path, field):
+    manager, parent, children = _parent_and_children(tmp_path)
+    child = children[0]
+    mark_parent_waiting_for_direct_children(manager, parent.id)
+    setattr(child, field, 'other-scope')
+    child.capability_requests = [CapabilityRequest(id='foreign', from_run_id=child.id,
+        problem='test', needed_capability='tool')]
+    manager.save(child)
+    decision = reconcile_parent_wait_for_child(manager, child.id)
+    assert not decision.should_resume and decision.reason == 'child_scope_mismatch'
+    assert parent_wait_blocks_dispatch(manager.load(parent.id))

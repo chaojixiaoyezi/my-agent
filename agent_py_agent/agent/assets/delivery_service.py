@@ -340,16 +340,25 @@ class AssetDeliveryService(_DeliveryStorage):
 
     # LLM: 复用发送同一原始字节冻结/扫描入口；只返回清单与需求，不创建锁或暴露源代码。
     # 函数用途: 预览一个资产及其完整依赖包裹。
-    def preview_bundle(self, sender_owner_id, root_asset_kind, root_asset_id, include_dependencies=True):
+    def preview_bundle(self, sender_owner_id, root_asset_kind, root_asset_id, include_dependencies=True, *, allow_secret_placeholder_replace=False):
         home = self._home(sender_owner_id)
-        items = snapshot_delivery_bundle(home, root_asset_kind, root_asset_id, include_dependencies=include_dependencies)
+        items = snapshot_delivery_bundle(home, root_asset_kind, root_asset_id, include_dependencies=include_dependencies,
+            allow_secret_placeholder_replace=allow_secret_placeholder_replace)
+        manifest = [delivery_item_manifest(item, f'{root_asset_kind}:{root_asset_id}') for item in items]
         return {'ok': True, 'root_asset': {'kind': root_asset_kind, 'id': root_asset_id},
-            'bundled_assets': [delivery_item_manifest(item, f'{root_asset_kind}:{root_asset_id}') for item in items],
+            'bundled_assets': manifest, 'bundle_sha256': sha256(delivery_json(manifest)).hexdigest(),
             'closure_summary': _bundle_summary(items), 'required_capabilities_summary': required_delivery_capabilities(items)}
 
     # LLM: 原发送参数及管理员边界保持；备注和原文件先核已配置秘密，完成持久入队才报告queued，不声称外部送达。
     # 函数用途: 发布包裹、发件回执及接收方可消费通知，管理预置仍可显式接受。
-    def send_bundle(self, sender_owner_id, recipient_owner_id, root_asset_kind, root_asset_id, note='', *, include_dependencies=True, allow_secret_placeholder_replace=False, auto_accept=False, auto_enable=False, sender_role='user', options=None):
+    def send_bundle(self, sender_owner_id, recipient_owner_id, root_asset_kind, root_asset_id, note='', *, include_dependencies=True, allow_secret_placeholder_replace=False, auto_accept=False, auto_enable=False, sender_role='user', options=None, expected_bundle_sha256=None):
+        if expected_bundle_sha256 is not None and (not isinstance(expected_bundle_sha256, str)
+                or re.fullmatch('[0-9a-f]{64}', expected_bundle_sha256) is None):
+            raise AssetDeliveryError('ASSET_DELIVERY_BUNDLE_PRECONDITION_INVALID',
+                'expected_bundle_sha256 必须为64位小写十六进制SHA256；本次未开始投递。', options={
+                    'field': 'expected_bundle_sha256', 'expected': '64 lowercase hexadecimal characters',
+                    'actual_type': type(expected_bundle_sha256).__name__, 'effect_outcome': 'not_started',
+                    'side_effect_state': 'not_started', 'next_action': '先调用asset_delivery preview读取bundle_sha256，再原样作为expected_bundle_sha256发送。'})
         note, include_dependencies, allow_secret_placeholder_replace, auto_accept, auto_enable, sender_role = astuple(
             DeliverySendOptions.resolve(note, include_dependencies=include_dependencies, allow_secret_placeholder_replace=allow_secret_placeholder_replace, auto_accept=auto_accept, auto_enable=auto_enable, sender_role=sender_role, options=options))
         sender, recipient = self._home(sender_owner_id), self._home(recipient_owner_id)
@@ -370,8 +379,18 @@ class AssetDeliveryService(_DeliveryStorage):
             allow_secret_placeholder_replace=allow_secret_placeholder_replace)['note.txt'].decode()
         items = snapshot_delivery_bundle(sender, root_asset_kind, root_asset_id,
             include_dependencies=include_dependencies, allow_secret_placeholder_replace=allow_secret_placeholder_replace)
+        # 准入和最终入箱共用这份清单，每个文件只计算一次内容摘要。
+        manifest = [delivery_item_manifest(item, f'{root_asset_kind}:{root_asset_id}') for item in items]
+        if expected_bundle_sha256 is not None:
+            actual_bundle_sha256 = sha256(delivery_json(manifest)).hexdigest()
+            if expected_bundle_sha256 != actual_bundle_sha256:
+                raise AssetDeliveryError('ASSET_DELIVERY_BUNDLE_CHANGED',
+                    '实际投递包裹与预期摘要不符；尚未创建包裹、发件回执或通知。', options={
+                        'expected_bundle_sha256': expected_bundle_sha256, 'actual_bundle_sha256': actual_bundle_sha256,
+                        'effect_outcome': 'not_started', 'side_effect_state': 'not_started',
+                        'next_action': '重新调用asset_delivery preview读取当前bundle_sha256；受审步骤须先重新审核新内容，确认后用新摘要发送，禁止原样盲重试。'})
         identifier = 'dlv_' + uuid.uuid4().hex
-        envelope = self._new_envelope(identifier, sender_owner_id, recipient_owner_id, root_asset_kind, root_asset_id, safe_note, items)
+        envelope = self._new_envelope(identifier, sender_owner_id, recipient_owner_id, root_asset_kind, root_asset_id, safe_note, items, manifest)
         with self._write_scope((sender, recipient)) as admissions:
             self._home(sender_owner_id)
             self._home(recipient_owner_id)
@@ -563,12 +582,12 @@ class AssetDeliveryService(_DeliveryStorage):
 
     # LLM: 通知绑定包裹及两端Owner，幂等键稳定；queued仅表示待消费，不新建会话或声称外部已送达。
     # 函数用途: 为本地和通道接收方生成包裹及耐久通知事件。
-    def _new_envelope(self, identifier, sender, recipient, kind, asset_id, note, items):
+    def _new_envelope(self, identifier, sender, recipient, kind, asset_id, note, items, manifest):
         value = {'schema_version': ENVELOPE_SCHEMA, 'delivery_id': identifier, 'sender_owner_id': sender,
             'recipient_owner_id': recipient, 'root_asset': {'kind': kind, 'id': asset_id}, 'note': note,
             'created_at': _timestamp(), 'updated_at': _timestamp(), 'status': 'pending',
             'closure_summary': _bundle_summary(items), 'required_capabilities_summary': required_delivery_capabilities(items),
-            'bundled_assets': [delivery_item_manifest(item, f'{kind}:{asset_id}') for item in items]}
+            'bundled_assets': manifest}
         value['notification_event'] = _delivery_notification(value)
         return value
 

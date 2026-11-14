@@ -946,6 +946,10 @@ def _persist_task_inside_guard(
         previous = None
         existing_revision = 0
     _update_recovery_counters(task, previous, service.manager)
+    from ...capability_updates import capability_authority_fields
+    prior_capability_revision = previous.capability_revision if previous is not None else 0
+    authority_changed = previous is None or capability_authority_fields(previous) != capability_authority_fields(task)
+    task.capability_revision = prior_capability_revision + int(authority_changed)
     task.state_revision = max(existing_revision, int(task.state_revision or 0)) + 1
     task_dir, owner_projection = _prepare_and_write_state(service, task)
     sync_derived_projections(service.manager, task, task_dir, owner_projection)
@@ -1088,6 +1092,11 @@ def _runner_session_write_is_stale(
     if task_status not in SUBAGENT_RECOVERY_CLOSED_STATUSES:
         return False
     session_status = str(session.get("status") or "").strip().lower()
+    if task_status == TaskStatus.CANCELLED.value and session_status in {'completed', 'failed'}:
+        from ...runner_session_liveness import runner_session_matches_stop
+
+        if runner_session_matches_stop(payload, session):
+            return False
     return not (
         task_status == TaskStatus.DONE.value
         and session_status == "completed"
@@ -1149,6 +1158,8 @@ def _prepare_and_write_state(
         state.payload.update(copy.deepcopy({key: value for key, value in extra.items() if key not in state.payload}))
     service.run_index.mark_pending(task.id, task=task)
     write_agent_run_state(state)
+    from ...capability_updates import observe_capability_updates
+    observe_capability_updates(service.manager, task)
     locator_payload = build_agent_state_locator(task, state)
     locator_dir = service.workspace / _directory_id_for_task(service, task)
     # locator 目录缺失时由首次私有写按 0700 建；已存在的目录一律不动。
@@ -1460,6 +1471,8 @@ def _merge_concurrent_capability_and_runner_state(
         existing.capability_gaps,
         incoming_gaps,
     )
+    if existing.base_allowed_tools is not None:
+        task.base_allowed_tools = copy.deepcopy(existing.base_allowed_tools)
     task.allowed_skills = _unique_strings(
         [*existing.allowed_skills, *incoming_allowed_skills]
     )

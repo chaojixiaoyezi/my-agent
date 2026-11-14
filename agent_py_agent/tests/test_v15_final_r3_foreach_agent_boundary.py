@@ -1,8 +1,6 @@
 """P1-03：真实业务往返拒绝异步foreach，不丢原任务或取消责任。"""
 from __future__ import annotations
 
-import ast
-import copy
 import json
 import os
 import threading
@@ -524,54 +522,36 @@ def test_resource_delta_is_zero_at_all_boundary_exits(business, outcome, record_
         assert run_store(case).load_run(original.workflow_run_id).workflow_run_id == original.workflow_run_id
 
 
-# LLM: 静态门检查调用先后而非仅查字符串存在；只读本切片源码，不新增脚本写权。
-# 函数用途: 阻止删除准入门或将其移到执行/控制写之后。
-def assert_guard_precedes_effects(node, guard, effects):
-    calls = [part for part in ast.walk(node) if isinstance(part, ast.Call)]
+# 运行时观察真实scope入口：无效定义不得先发表宿主attempt；有效对照必须能抵达相同入口。
+@pytest.mark.parametrize('eligible', [False, True])
+def test_execution_eligibility_precedes_host_execution_scope(business, eligible, tmp_path):
+    from contextlib import contextmanager
 
-    def name(call):
-        return call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, 'attr', '')
+    case = business
+    value = WorkflowDefinition.from_any(definition(foreach=not eligible)).to_dict()
+    step = StepExecutionRecord('agent', '原任务', 'agent_task', 'running', 0, 0, 0, False)
+    run = WorkflowRunRecord('scope-boundary', 'boundary-flow', case.actor.owner_id,
+        'manual', 'running', 0, 0, 0, steps=(step,), inputs={'rows': [1]})
+    before = run.to_dict()
+    marker = tmp_path / 'host-attempt-started'
 
-    positions = [call.lineno for call in calls if name(call) == guard]
-    assert positions, f'{node.name}: missing {guard}'
-    effect_positions = [call.lineno for call in calls if name(call) in effects]
-    assert effect_positions, f'{node.name}: no effect observation point'
-    assert min(positions) < min(effect_positions), f'{node.name}: eligibility follows effect'
+    @contextmanager
+    def execution_scope(engine, record):
+        marker.write_text('scope-entered')
+        raise RuntimeError('QA_SCOPE_ENTERED')
+        yield engine
 
-
-# LLM: 资格门须保护每个可新增执行的入口；删除任意门的AST副本必须使静态规则失败。
-# 函数用途: 给本类P1留下秒级回归，并自证不是只测存在的空断言。
-@pytest.mark.parametrize('module,method,guard,effects', [
-    ('assets.workflow_store', 'save_workflow', 'validate_definition_eligibility', ('_save',)),
-    ('assets.workflow_store', 'apply_business_operation', 'validate_definition_eligibility', ('_save',)),
-    ('workflows.engine', 'run_workflow', 'validate_definition_eligibility', ('create_run', 'dispatch')),
-    ('workflows.engine', 'resume_workflow_run', 'validate_definition_eligibility', ('dispatch',)),
-    ('workflows.engine', '_resume_workflow_run', 'validate_definition_eligibility',
-        ('begin_control', '_requires_native_agent_resume', '_resume_agent', 'save_run')),
-    ('workflows.engine', '_resume_agent', 'validate_definition_eligibility', ('_admit_effect', 'submit')),
-    ('workflows.engine', '_drive', 'validate_definition_eligibility', ('_drive_steps',)),
-    ('workflows.engine', '_perform', 'validate_step_eligibility', ('_admit_effect', 'submit', '_foreach_step')),
-    ('workflows.engine', '_foreach_step', 'validate_step_eligibility', ('pack_items', 'persist', 'dispatch_batches')),
-])
-def test_ast_eligibility_gate_precedes_every_execution_write(module, method, guard, effects):
-    source = Path(__file__).resolve().parents[1] / 'agent' / (module.replace('.', '/') + '.py')
-    tree = ast.parse(source.read_text())
-    matches = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == method]
-    assert len(matches) == 1
-    node, = matches
-    assert_guard_precedes_effects(node, guard, effects)
-    mutant = copy.deepcopy(node)
-    for call_node in ast.walk(mutant):
-        if isinstance(call_node, ast.Call) and isinstance(call_node.func, ast.Name) and call_node.func.id == guard:
-            call_node.func.id = 'removed_eligibility_gate'
-    with pytest.raises(AssertionError, match='missing'):
-        assert_guard_precedes_effects(mutant, guard, effects)
-    late = copy.deepcopy(node)
-    for call_node in ast.walk(late):
-        if isinstance(call_node, ast.Call) and isinstance(call_node.func, ast.Name) and call_node.func.id == guard:
-            call_node.lineno = node.end_lineno + 1
-    with pytest.raises(AssertionError, match='eligibility follows effect'):
-        assert_guard_precedes_effects(late, guard, effects)
+    engine = WorkflowEngine(case.home, agent_steps=case.agents, execution_scope=execution_scope)
+    if eligible:
+        with pytest.raises(RuntimeError, match='QA_SCOPE_ENTERED'):
+            engine._drive(run, value, 0)
+        assert marker.read_text() == 'scope-entered'
+    else:
+        with pytest.raises(ValueError) as error:
+            engine._drive(run, value, 0)
+        assert error.value.error_code == REFUSAL
+        assert not marker.exists()
+    assert run.to_dict() == before and tasks(case) == []
 
 
 # LLM: 工具与HTTP保留同一结构化资格拒绝码；写前拒绝不能新增执行或丢失原任务责任。
@@ -592,7 +572,8 @@ def test_native_tool_refuses_without_claiming_new_execution(business, action, re
         if action == 'save':
             params['definition'] = definition()
     task_ids = [task.task_id for task in tasks(case)]
-    tool = WorkflowsTool(case.home, engine=case.services.workflows._engine(case.scope_actor))
+    tool = WorkflowsTool(case.home, engine=case.services.workflows._engine(case.scope_actor),
+        business_binding_provider=lambda: (case.services.workflows, case.scope_actor))
     receipt = tool.execute(params)
     assert receipt.ok is False and receipt.error_code == REFUSAL
     assert receipt.reported_error_code == REFUSAL

@@ -286,8 +286,10 @@ def test_outer_lifecycle_reroute_does_not_confirm_candidate_prefix(monkeypatch, 
     def configure(agent, params):
         if route == "children":
             params = replace(params, context_scope="task_local")
-            parent = SimpleNamespace(id=params.run_id, status="RUNNING", attributes={}, child_ids=["child"])
-            child = SimpleNamespace(id="child", status="RUNNING", parent_id=params.run_id, attributes={})
+            parent = SimpleNamespace(id=params.run_id, status="RUNNING", owner="synthetic-owner",
+                root_id=params.run_id, attributes={}, child_ids=["child"])
+            child = SimpleNamespace(id="child", status="RUNNING", owner="synthetic-owner",
+                root_id=params.run_id, parent_id=params.run_id, attributes={})
             class Manager:
                 def load(self, run_id):
                     return {params.run_id: parent, "child": child}[run_id]

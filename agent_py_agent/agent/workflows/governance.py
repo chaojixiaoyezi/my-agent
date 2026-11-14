@@ -13,9 +13,17 @@ class WorkflowReconciliationRequired(WorkflowPolicyRefusal):
     """核验缺失是未执行恢复的确定性拒绝，不是本次恢复结果未知。"""
     error_code = code = 'WORKFLOW_RECONCILIATION_REQUIRED'
 
-    def __init__(self, reason, **details):
+    def __init__(self, reason: str, *, workflow_run_id: str | None = None,
+                 step_id: str | None = None, resolution_available: bool | None = None,
+                 prior_effect_outcome: str | None = None, diagnostic: str | None = None) -> None:
+        details = {key: value for key, value in (
+            ('workflow_run_id', workflow_run_id), ('step_id', step_id),
+            ('resolution_available', resolution_available), ('prior_effect_outcome', prior_effect_outcome),
+            ('diagnostic', diagnostic),
+        ) if value is not None}
         super().__init__(self.error_code, details={'reason': reason,
-            'recommended_action': '核对原操作和目标结果，提供同运行、同步骤、同版本的可信核验。', **details})
+            'recommended_action': 'change_strategy',
+            'recovery_hint': '核对原操作和目标结果，提供同运行、同步骤、同版本的可信核验。', **details})
 
 
 # LLM: 继承str保持外部run_authorizer(record, phase)字符串回调100%向后兼容，同时以显式类型与preflight/resume/cancel控制阶段严格分离。
@@ -39,11 +47,19 @@ def workflow_candidate_hash(definition):
                                       separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
+def _step_effect_unknown(step):
+    facts = step.escalation_result
+    receipt = facts.get('tool_receipt')
+    return facts.get('effect_outcome') == 'unknown' or (
+        isinstance(receipt, dict) and receipt.get('effect_outcome') == 'unknown')
+
+
 def pending_review_not_started(record, step):
     """只消费原运行/步骤/尝试的未启动审核门事实，不把旧派发未知推成未执行。"""
     pending = step.escalation_result.get('pending_review')
     return (isinstance(pending, dict) and pending.get('schema') == 'workflow.pending-review.v1'
         and step.escalation_result.get('effect_started') is False
+        and not _step_effect_unknown(step)
         and pending.get('owner_id') == record.owner_id
         and pending.get('workflow_run_id') == record.workflow_run_id
         and pending.get('step_id') == step.step_id and bool(pending.get('attempt_id'))
@@ -68,10 +84,19 @@ def _pending_review_resume(record):
         if item.status == 'pending' and not result:
             continue
         receipt = result.get('tool_receipt', {})
-        if (item.status not in ('succeeded', 'escalated_recovered', 'skipped') or item.needs_repair
+        if (_step_effect_unknown(item) or item.status not in ('succeeded', 'escalated_recovered', 'skipped') or item.needs_repair
                 or not isinstance(receipt, dict) or receipt.get('effect_outcome') == 'unknown'):
             return False
     return True
+
+
+def workflow_effect_unresolved(record):
+    """显式unknown优先于丢失的started位；原运行与步骤回执是唯一效果事实。"""
+    return record.effect_outcome == 'unknown' or any(
+        _step_effect_unknown(item)
+        or (item.escalation_result.get('effect_started') and (item.needs_repair or item.status == 'running'))
+        or ('pending_review' in item.escalation_result and not pending_review_not_started(record, item))
+        for item in record.steps)
 
 
 class WorkflowGovernance:
@@ -95,10 +120,7 @@ class WorkflowGovernance:
                 # 原步骤已全部确认、只差原 run 终态发表：不选择或伪造当前步骤，也不进入通用对账。
                 return None
             # 创建头记录/取消本身不启动业务；等待恢复只读原完成链，尾部新副作用仍逐步审核。
-            unresolved = any((item.escalation_result.get('effect_started') and
-                             (item.needs_repair or item.status == 'running')) or
-                             ('pending_review' in item.escalation_result and not pending_review_not_started(record, item))
-                             for item in record.steps)
+            unresolved = workflow_effect_unresolved(record)
             if (phase == 'resume' and not _requires_native_agent_resume(record)
                     and not _pending_review_resume(record) and (record.effect_outcome == 'unknown' or unresolved)):
                 step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
@@ -148,14 +170,28 @@ class WorkflowGovernance:
         return self._reconcile(record, step, reference)
 
 
-def bind_workflow_tool_operation(store, run, step, call, operation, *, task_id):
+def bind_workflow_tool_operation(store, run, step, call, operation, *, task_id, business_effect=None, source_operation=None):
     """只在原 dispatcher 中把真实操作归属固定到当前步骤，不接纳工具正文中的身份。"""
     if operation is None:
         return
     from ..local_storage.tool_operations import ToolOperationStateError
+    source_run, source_attempt, expected_key = call.run_id, call.attempt_id, call.idempotency_key
+    if business_effect is not None:
+        from ..contracts.idempotency import BusinessEffectIdentity
+        if (not isinstance(business_effect, BusinessEffectIdentity)
+                or business_effect.owner_id != run.owner_id or business_effect.task_id != task_id
+                or operation.operation_id != business_effect.operation_id
+                or not isinstance(source_operation, dict) or source_operation.get('idempotency_scope') != 'business'
+                or source_operation.get('operation_id') != operation.operation_id
+                or source_operation.get('task_id') != task_id):
+            raise WorkflowReconciliationRequired('business_operation_binding_mismatch')
+        source_run, source_attempt = source_operation.get('run_id'), source_operation.get('attempt_id')
+        expected_key = business_effect.key
+        if not source_run or not source_attempt:
+            raise WorkflowReconciliationRequired('business_operation_source_missing')
     try:
-        original = store.get_tool_operation(owner_id=run.owner_id, run_id=call.run_id,
-            task_id=task_id, attempt_id=call.attempt_id, operation_id=operation.operation_id,
+        original = store.get_tool_operation(owner_id=run.owner_id, run_id=source_run,
+            task_id=task_id, attempt_id=source_attempt, operation_id=operation.operation_id,
             tool_name=call.tool_name, args_hash=operation.args_hash)
     except (ToolOperationStateError, OSError) as error:
         # 业务体可能已经完成；绑定读取失败不能改签成可重试业务失败。旧结果保留且不授恢复权。
@@ -163,7 +199,7 @@ def bind_workflow_tool_operation(store, run, step, call, operation, *, task_id):
         return
     if original is None:
         return
-    if (original.idempotency_key != call.idempotency_key
+    if (original.idempotency_key != expected_key
             or original.operation_id != operation.operation_id):
         raise WorkflowReconciliationRequired('operation_binding_mismatch')
     step.escalation_result['tool_operation_binding'] = {
@@ -185,19 +221,21 @@ class WorkflowOperationRecovery:
         self.operation_store = operation_store
 
     @staticmethod
-    def _required(record, reason, **details):
+    def _required(record, reason: str, *, diagnostic: str | None = None):
         step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
         receipt = step.escalation_result.get('tool_receipt', {}) if step is not None else {}
         return WorkflowReconciliationRequired(reason, workflow_run_id=record.workflow_run_id,
             step_id=record.current_step_id, resolution_available=False,
-            prior_effect_outcome=receipt.get('effect_outcome', record.effect_outcome), **details)
+            prior_effect_outcome=('unknown' if step is not None and _step_effect_unknown(step)
+                                  else receipt.get('effect_outcome', record.effect_outcome)), diagnostic=diagnostic)
 
     def require_resolution(self, record, reference):
         step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
         receipt = step.escalation_result.get('tool_receipt', {}) if step is not None else {}
         raise WorkflowPolicyRefusal('WORKFLOW_RESOLUTION_UNAVAILABLE', details={
             'resolution_available': False, 'prior_effect_outcome': receipt.get('effect_outcome', record.effect_outcome),
-            'recommended_action': '本宿主只自动核验原工具操作账本；外部核验引用须由可信宿主另行接入。'})
+            'recommended_action': 'manual_review',
+            'recovery_hint': '本宿主只自动核验原工具操作账本；外部核验引用须由可信宿主另行接入。'})
 
     def require_effect(self, record, phase):
         from .engine import _requires_native_agent_resume, _requires_terminal_publication_resume
@@ -205,10 +243,7 @@ class WorkflowOperationRecovery:
             return None
         if _requires_native_agent_resume(record) or _requires_terminal_publication_resume(record):
             return None
-        unresolved = record.effect_outcome == 'unknown' or any(
-            (item.escalation_result.get('effect_started') and (item.needs_repair or item.status == 'running'))
-            or ('pending_review' in item.escalation_result and not pending_review_not_started(record, item))
-            for item in record.steps)
+        unresolved = workflow_effect_unresolved(record)
         if not unresolved or _pending_review_resume(record):
             return None
         step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
@@ -236,6 +271,8 @@ class WorkflowOperationRecovery:
             raise self._required(record, 'operation_binding_unavailable_or_mismatched')
         from ..local_storage.tool_operations import ToolOperationStateError
         from ..runtime_errors import compact_error_message
+        if not callable(getattr(self.operation_store, 'get_tool_operation', None)):
+            raise self._required(record, 'original_operation_store_unavailable')
         try:
             original = self.operation_store.get_tool_operation(owner_id=record.owner_id,
                 **{key: binding[key] for key in ('run_id', 'task_id', 'attempt_id', 'operation_id', 'args_hash')},

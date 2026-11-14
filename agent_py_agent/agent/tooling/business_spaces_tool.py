@@ -133,7 +133,7 @@ class BusinessSpacesTool(BaseTool):
             return outcome
         except BusinessError as error:
             # 已进入领域/原后端后，不能仅凭错误码推断未提交；包括提交后的CAS类错误。
-            effect = getattr(error, 'effect_outcome', getattr(error, 'effect', 'unknown'))
+            effect = error.effect_outcome if error.effect_outcome_declared else 'unknown'
             return self._failure(error.code, effect=effect)
         except (OSError, ValueError, TypeError):
             # 原子rename后fsync/结算也可能报错；保留unknown，不自动重放或泄露原异常。

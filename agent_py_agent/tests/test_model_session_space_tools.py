@@ -74,7 +74,9 @@ def test_forged_actor_is_not_a_session_selection_source(agent):
     foreground(agent)
     agent._current_run_params.host_channel_actor = {'owner_id': agent.home_paths.owner_id}
     outcome, result = _call(agent, 'sessions.space.get')
-    assert not outcome.ok and result['error']['code'] == 'CAPABILITY_DENIED'
+    assert not outcome.ok and result['error']['code'] == 'CHANNEL_ACTOR_IDENTITY_INVALID'
+    assert '身份记录' in result['error']['message'] and '原会话' in result['error']['message']
+    assert result['effect_outcome'] == 'not_started'
 
 
 def test_session_space_rejects_issued_context_without_model_source(agent):
@@ -96,3 +98,55 @@ def test_session_space_rejects_issued_context_without_model_source(agent):
         assert payload['effect_outcome'] == 'not_started'
     status, payload = execute_business(request, real, services)
     assert status == 200 and payload['data']['space_id'] is None
+
+
+def test_registered_model_tool_clears_same_actor_without_reauthorizing_old_space(agent, monkeypatch):
+    foreground(agent)
+    outcome, created = _call(agent, 'spaces.create', {'name': 'clear-model-space'}, idempotency_key='clear-create')
+    assert outcome.ok, outcome.output
+    space = created['data']['space_id']
+    outcome, _ = _call(agent, 'sessions.space.set', {'space_id': space}, expected_revision=0,
+        idempotency_key='clear-model-select')
+    assert outcome.ok, outcome.output
+    service = _local_business_services(agent).spaces
+    monkeypatch.setattr(service, 'authorize_call', lambda *_args, **_kwargs:
+        pytest.fail('清除自己的选择不能依赖旧空间仍可读取'))
+    outcome, cleared = _call(agent, 'sessions.space.set', {'space_id': None}, expected_revision=1,
+        idempotency_key='clear-model-reset')
+    assert outcome.ok and cleared['data'] == {'space_id': None, 'revision': 2, 'source': 'default'}, outcome.output
+    outcome, replay = _call(agent, 'sessions.space.set', {'space_id': None}, expected_revision=1,
+        idempotency_key='clear-model-reset')
+    assert outcome.ok and replay['data'] == cleared['data'], outcome.output
+    outcome, read = _call(agent, 'sessions.space.get')
+    assert outcome.ok and read['data'] == cleared['data'], outcome.output
+
+
+@pytest.mark.parametrize('source', ['subagent_run_model_turn', 'run'])
+def test_child_and_unbound_host_cannot_clear_session_selection(agent, source):
+    foreground(agent)
+    agent._current_run_params = replace(agent._current_run_params, source=source)
+    outcome, result = _call(agent, 'sessions.space.set', {'space_id': None}, expected_revision=0,
+        idempotency_key='denied-clear')
+    assert not outcome.ok and result['error']['code'] == 'CAPABILITY_DENIED'
+
+
+def test_native_business_error_keeps_control_separate_from_host_display(agent):
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    foreground(agent)
+    first, _ = _call(agent, 'spaces.create', {'name': 'host-error-display'},
+                     idempotency_key='host-error-first')
+    assert first.ok
+    outcome, result = _call(agent, 'spaces.create', {'name': 'HOST-ERROR-DISPLAY'},
+                            idempotency_key='host-error-conflict')
+    assert not outcome.ok and result['error']['code'] == 'SPACE_NAME_CONFLICT'
+    assert result['effect_outcome'] == 'not_started'
+    assert outcome.error_code == error_contract('SPACE_NAME_CONFLICT').code
+    host = outcome.metadata['host_error']
+    assert host['http_status'] == 409 and host['code'] == 'SPACE_NAME_CONFLICT'
+    assert host['source'] == 'business_host' and host['next_action']
+    header = outcome.render_for_prompt().splitlines()[0]
+    assert '; error_code=SPACE_NAME_CONFLICT;' in header
+    assert f'control_error_code={outcome.error_code}' in header and 'http_status=409' in header
+    assert '[host-business-recovery]' in outcome.render_for_prompt()
+    assert not outcome.retryable

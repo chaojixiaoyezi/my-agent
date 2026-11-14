@@ -88,17 +88,21 @@ class GatewayHistoryLedger:
                                    (reader.manifest or {}).get('chain_sha256', '')])
             return identity, reader.end, json.dumps([stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns])
 
-    def catch_up(self, conn, thread):
+    def catch_up(self, conn, thread, *, progress=None):
         identity, end, stamp = self._snapshot(thread)
+        removed = 0
         previous = conn.execute('SELECT identity,cursor,stamp FROM coverage WHERE thread=?', (thread,)).fetchone()
         valid = bool(previous and previous[0] == identity and previous[1] <= end
                      and (previous[1] != end or previous[2] == stamp))
         cursor = previous[1] if valid else 0
         if not valid:
-            conn.execute('DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts WHERE thread=? LIMIT 500)', (thread,))
+            removed = conn.execute('DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts WHERE thread=? LIMIT 500)', (thread,)).rowcount
             if conn.execute('SELECT 1 FROM facts WHERE thread=? LIMIT 1', (thread,)).fetchone():
                 conn.execute('INSERT OR REPLACE INTO coverage VALUES(?,?,?,?)', (thread, 'reset', 0, ''))
+                if progress is not None:
+                    progress.update(cursor_before=0, cursor_after=0, source_end=end, reset_removed=removed)
                 return False
+        cursor_before = cursor
         if cursor < end:
             rows = []
             start = cursor
@@ -144,6 +148,8 @@ class GatewayHistoryLedger:
         if identity != current_identity or current_end < end or (current_end == end and current_stamp != stamp):
             raise DataCorruptionError('GATEWAY_HISTORY_SOURCE_CHANGED: canonical changed during indexing')
         conn.execute('INSERT OR REPLACE INTO coverage VALUES(?,?,?,?)', (thread, identity, cursor, current_stamp))
+        if progress is not None:
+            progress.update(cursor_before=cursor_before, cursor_after=cursor, source_end=current_end, reset_removed=removed)
         return cursor == current_end
 
     def matches(self, conn, thread, *, role, request_id, channel_message_id,

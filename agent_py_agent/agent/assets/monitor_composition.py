@@ -16,6 +16,7 @@ from .workflow_store import (
     WorkflowDefinition,
     WorkflowStepSpec,
     WorkflowStore,
+    register_workflow_output_contract,
     with_workflow_step_refs,
 )
 
@@ -69,6 +70,7 @@ def save_monitor_composition(owner_home, monitor_id, base_workflow_id, base_vers
                 or old.descriptor.metadata['composition'].get('monitor_id') != monitor_id):
             raise ValueError('MONITOR_COMPOSITION_ID_CONFLICT')
         next_asset_revision(old.descriptor.to_dict() if old else None, old.descriptor.revision if old else 0)
+        definition = register_workflow_output_contract(definition, old)
         fingerprint = asset_fingerprint(payload=definition.to_dict(),
             side_files={'WORKFLOW.md': definition.body_markdown or None})
         latest = latest_version(owner_home, 'workflow', identifier)

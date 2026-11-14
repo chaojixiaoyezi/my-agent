@@ -115,3 +115,36 @@ def test_cold_owner_model_menu_does_not_initialize_agent(tmp_path, monkeypatch):
     assert handler.reply[1]["thread_id"].startswith("thread-")
     assert handler.reply[1]["default_selected"] == "default"
     assert not list((tmp_path / "owners").rglob("model_usage/*.jsonl"))
+
+
+def test_model_metadata_busy_roundtrip_only_marks_list_retryable(tmp_path, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts.http_service import (
+        GatewayHTTPServer,
+        GatewayHTTPServerParams,
+    )
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths
+    from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", auth_enabled=False,
+        gateway_per_user_owner_scoping=False, enable_plugins=False, enable_subagents=False,
+        my_agent_home=str(tmp_path / "home")), tmp_path / "workspace")
+    server = GatewayHTTPServer(0, gateway_paths(agent), params=GatewayHTTPServerParams(agent=agent))
+
+    def busy(*args, **kwargs):
+        raise BlockingIOError("original_file_transition_busy")
+
+    monkeypatch.setattr(model_profile_service, "_scoped_model_host", busy)
+    server.start()
+    try:
+        agent.config.gateway_port = server.server.server_address[1]
+        client = GatewayChatClientAgent(None, agent.config, tmp_path, [tmp_path / "workspace"], agent.home_paths)
+        for operation in ("list", "select"):
+            result = client.request_models(session_id="wire-busy", operation=operation)
+            assert result["ok"] is False
+            assert result["error_code"] == "MODEL_METADATA_BUSY"
+            assert result["error_type"] == "BlockingIOError"
+            assert result["retryable"] is (operation == "list")
+            assert result["effect_outcome"] == "unknown" and result["next_action"]
+    finally:
+        server.stop()

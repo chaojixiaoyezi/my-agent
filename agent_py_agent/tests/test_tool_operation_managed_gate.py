@@ -1593,3 +1593,84 @@ def test_claim_conflict_retries_exhausted_returns_busy(tmp_path):
     assert calls["claim"] == 4, calls  # 初始 1 次 + 3 次重试
     assert outcome.error_code == "TOOL_OPERATION_BUSY_CONFLICT"
     assert outcome.handler_executed is False
+
+@pytest.mark.parametrize('prior_status', ['succeeded', 'unknown'])
+def test_explicit_business_item_keeps_original_identity_across_same_task_runs(tmp_path, prior_status):
+    import time
+    from dataclasses import replace
+
+    from agent_py_agent.agent.local_storage.tool_operations import (
+        ToolOperationClaimRequest,
+        ToolOperationCompletionRequest,
+        ToolOperationOwnershipError,
+        new_tool_operation_holder,
+    )
+    from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
+
+    repo = _repo(tmp_path)
+    _, first_attempt = _direct_register_chain(repo, 'business-first', task_id='shared-task')
+    _, next_attempt = _direct_register_chain(repo, 'business-next', task_id='shared-task')
+    _, foreign_attempt = _direct_register_chain(repo, 'business-foreign', task_id='other-task')
+    store = ManagedOperationStore(repo)
+    request = ToolOperationClaimRequest(owner_id='owner-a', run_id='business-first', task_id='shared-task',
+        operation_id='op:business-item:shared', tool='write_file', args_hash='original-args',
+        idempotency_key='same-item', idempotency_scope='business', idempotency_namespace='write_file',
+        holder=new_tool_operation_holder(), lease_expires_at=time.time()+3600, attempt_id=first_attempt)
+    first = store.claim_tool_operation(request)
+    store.finish_tool_operation(ToolOperationCompletionRequest(owner_id='owner-a', run_id=request.run_id,
+        operation_id=request.operation_id, holder_id=first.record.holder_id, generation=first.record.generation,
+        status=prior_status, result={'schema_version': 'tool_execution_result.v1', 'ok': prior_status == 'succeeded'}))
+    next_request = replace(request, run_id='business-next', attempt_id=next_attempt, holder=new_tool_operation_holder())
+    replay = store.claim_tool_operation(next_request)
+    assert replay.action == ('replay' if prior_status == 'succeeded' else 'unknown')
+    assert replay.record.run_id == request.run_id and replay.record.attempt_id == first_attempt
+    assert replay.record.task_id == 'shared-task'
+    changed = store.claim_tool_operation(replace(next_request, args_hash='changed'))
+    assert changed.action == 'conflict' and 'args_hash' in changed.reason
+    with pytest.raises(ToolOperationOwnershipError, match='owner/task'):
+        store.claim_tool_operation(replace(next_request, run_id='business-foreign', task_id='other-task', attempt_id=foreign_attempt))
+    independent = store.claim_tool_operation(replace(next_request, operation_id='op:business-item:other-scope', idempotency_key='other-scope'))
+    assert independent.action == 'execute'
+
+
+def test_business_item_concurrent_claim_and_expired_claim_never_dispatch_twice(tmp_path):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+    from threading import Event
+
+    from agent_py_agent.agent.local_storage.tool_operations import (
+        ToolOperationClaimRequest,
+        new_tool_operation_holder,
+    )
+    from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
+
+    repo = _repo(tmp_path)
+    _, attempt_a = _direct_register_chain(repo, 'item-a', task_id='item-task')
+    _, attempt_b = _direct_register_chain(repo, 'item-b', task_id='item-task')
+    store = ManagedOperationStore(repo)
+    now = time.time()
+    request = ToolOperationClaimRequest(owner_id='owner-a', run_id='item-a', task_id='item-task',
+        operation_id='op:business-item:concurrent', tool='write_file', args_hash='same',
+        idempotency_key='same', idempotency_scope='business', idempotency_namespace='write_file',
+        holder=new_tool_operation_holder(), now=now, lease_expires_at=now+100, attempt_id=attempt_a)
+    claimed, release = Event(), Event()
+    def first():
+        result = store.claim_tool_operation(request)
+        claimed.set()
+        assert release.wait(5)
+        return result
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(first)
+        try:
+            assert claimed.wait(5)
+            next_request = replace(request, run_id='item-b', attempt_id=attempt_b, holder=new_tool_operation_holder())
+            assert store.claim_tool_operation(next_request).action == 'in_flight'
+        finally:
+            release.set()
+        assert pending.result(5).action == 'execute'
+    expired = store.claim_tool_operation(replace(next_request, now=now+200, lease_expires_at=now+300))
+    assert expired.action == 'unknown' and expired.record.run_id == 'item-a'
+    assert expired.record.owner_id == 'owner-a' and expired.record.attempt_id == attempt_a
+    repeated = store.claim_tool_operation(replace(next_request, now=now+201, lease_expires_at=now+301))
+    assert repeated.action == 'unknown' and repeated.record.operation_id == request.operation_id

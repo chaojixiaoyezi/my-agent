@@ -79,9 +79,44 @@ class ProviderLease:
             _finalize_ticket(self.key, self.ticket)
 
 
+class _CombinedProviderLease(ProviderLease):
+    """原进程额度与Gateway树额度共享同一响应关闭生命周期。"""
+    def __init__(self, local, shared):
+        self.local, self.shared = local, shared
+
+    def release(self):
+        try:
+            if self.local is not None:
+                self.local.release()
+        finally:
+            self.shared.release()
+
+    def __del__(self):
+        # local沿原延迟GC释放协议，不能在原队列锁内重入_drop_ticket。
+        self.shared.release()
+
+
+def acquire_provider_request(request: object, notify=None) -> ProviderLease | None:
+    from ..llm_scale import gateway_transport_admission as shared
+
+    if not shared.configured():
+        return _acquire_endpoint_request(request, notify)
+    deadlines = (time.monotonic() + PROVIDER_QUEUE_TIMEOUT_SECONDS,
+                 _DEADLINE.get(), getattr(request, 'deadline', None))
+    deadline = min(value for value in deadlines if value is not None)
+    local = _acquire_endpoint_request(request, notify)
+    try:
+        lease = shared.acquire(deadline, notify)
+        return _CombinedProviderLease(local, lease) if lease is not None else local
+    except BaseException:
+        if local is not None:
+            local.release()
+        raise
+
+
 # LLM: 默认零在任何锁/身份/等待操作前返回；申请失败只撤本票据，授予与取消交错也不能丢名额。
 # 函数用途: 为一次物理请求申请可停止的公平名额，排队到期抛暂时性错误。
-def acquire_provider_request(request: object, notify=None) -> ProviderLease | None:
+def _acquire_endpoint_request(request: object, notify=None) -> ProviderLease | None:
     limit = max(0, int(getattr(request, "provider_max_concurrent_requests", 0)))
     if limit == 0:
         return None

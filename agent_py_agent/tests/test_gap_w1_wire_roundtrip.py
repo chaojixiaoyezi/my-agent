@@ -131,7 +131,11 @@ def test_actual_auth_errors_and_credential_alias_conflict(wire, path):
 def test_bearer_does_not_expand_existing_client_business_protocol(wire):
     status, _, raw = request(wire, '/client/business',
         {'action': 'llm_records.list', 'request_id': 'read', 'params': {}})
-    assert status == 403 and json.loads(raw)['error'] == 'forbidden'
+    assert status == 403
+    failure = json.loads(raw)
+    assert failure['error']['code'] == 'LOCAL_CREDENTIAL_REQUIRED'
+    assert failure['effect_outcome'] == 'not_started'
+    assert failure['error']['retryable'] is False
     assert not wire[2]
 
 

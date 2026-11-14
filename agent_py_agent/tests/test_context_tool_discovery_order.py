@@ -382,3 +382,60 @@ def test_tool_discovery_micro_schema_budget_skips_oversized_newest_row(tmp_path,
     prepare_conversation_method_carry(agent, params, budget_cap=200)
     assert len(params.tool_ir_history) == 1
     assert "read_file" in params.tool_ir_history[0].text and "manage_models" not in params.tool_ir_history[0].text
+
+
+@pytest.mark.parametrize("state", [None, {}])
+def test_compact_and_main_native_tool_surface_keep_explicit_discovery_order(tmp_path, state):
+    """真实注册表的旧快照不能重排当前有序加载表，授权收缩仍生效。"""
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.tool_discovery import seed_loop_discovery_order
+    from agent_py_agent.tests.test_tool_default_deferral import _agent
+
+    agent = _agent(tmp_path)
+    names = ("manage_models", "workflows")
+    allowed = ["tool_search", *names]
+    snapshot = replace(agent.tools.runtime_snapshot(allowed_tools=allowed),
+                       loaded_tool_names=tuple(reversed(names)), preloaded_tool_names=("tool_search",))
+    params = SimpleNamespace(loaded_tool_names=names, tool_runtime_snapshot=snapshot,
+                             live_archive_state=state)
+    seed_loop_discovery_order(agent, params)
+    ordered = tool_search_state.ordered_loop_loaded_tool_names(params)
+    specs = agent.tools.model_visible_specs(allowed_tools=allowed, loaded_tool_names=ordered,
+                                            runtime_snapshot=snapshot)
+    assert [spec.name for spec in specs if spec.name in names] == list(names)
+    restricted = replace(snapshot, allowed_tools=("tool_search", "workflows"))
+    specs = agent.tools.model_visible_specs(allowed_tools=["tool_search", "workflows"],
+                                            loaded_tool_names=ordered, runtime_snapshot=restricted)
+    assert "manage_models" not in {spec.name for spec in specs}
+    assert params.loaded_tool_names == names
+
+
+@pytest.mark.parametrize("state", [None, (), "invalid"])
+def test_native_discovery_seed_bounds_duplicate_surface_and_keeps_permission_filter(tmp_path, state):
+    """辅助无状态、大量重复发现名不重排工具，也不能恢复已撤回权限。"""
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.tool_discovery import seed_loop_discovery_order
+    from agent_py_agent.tests.test_tool_default_deferral import _agent
+
+    agent = _agent(tmp_path)
+    names = ("workflows", "manage_models")
+    snapshot = replace(agent.tools.runtime_snapshot(allowed_tools=["tool_search", *names]),
+                       loaded_tool_names=tuple(reversed(names)), preloaded_tool_names=("tool_search",))
+    params = SimpleNamespace(loaded_tool_names=names * 1000, tool_runtime_snapshot=snapshot,
+                             live_archive_state=state)
+    seed_loop_discovery_order(agent, params)
+    assert params.live_archive_state["loaded_tool_order"] == list(names)
+    original = params.live_archive_state
+    seed_loop_discovery_order(agent, params)
+    assert params.live_archive_state is original
+    ordered = tool_search_state.ordered_loop_loaded_tool_names(params)
+    assert ordered == names
+    allowed = ["tool_search", "workflows"]
+    restricted = replace(snapshot, allowed_tools=tuple(allowed))
+    specs = agent.tools.model_visible_specs(allowed_tools=allowed, loaded_tool_names=ordered,
+                                            runtime_snapshot=restricted)
+    assert [spec.name for spec in specs] == allowed
+    assert snapshot.allowed_tools != restricted.allowed_tools
+    assert params.loaded_tool_names == names * 1000

@@ -580,12 +580,18 @@ def bounded_output(value):
 
 # LLM: 公共运行视图不包含参数或内部摘要，也不从空结果推测成功。
 # 函数用途: 投影 script_runs 的公开字段和当前覆盖范围。
+def _has_run_result(row):
+    # 已核原操作的unknown也是耐久执行事实；不能退回accepted或被坏来源覆盖。
+    return row['state'] in ('completed', 'failed') or (
+        row['state'] == 'unknown' and isinstance(row.get('execution_result_ref'), dict))
+
+
 def _run_view(row, *, approval_ids=None, coverage='complete'):
     names = ('execution_id', 'script_id', 'state', 'requires_approval', 'task_id', 'ok',
              'output', 'error', 'duration_ms', 'started_at', 'finished_at')
     result = {key: row[key] for key in names}
-    if row['state'] in ('completed', 'failed'):
-        coverage = row.get('terminal_coverage', coverage)
+    if _has_run_result(row):
+        coverage = 'unknown' if row['state'] == 'unknown' else row.get('terminal_coverage', coverage)
         approval_ids = []
     result.update(approval_ids=list(approval_ids or []), coverage=coverage)
     return result
@@ -603,7 +609,7 @@ def _patch_run(call, execution_id, changes):
         if row is None:
             raise HostAPIError('RESOURCE_NOT_FOUND', 404)
         _foundation().v13_require_access(call, row)
-        if row['state'] in ('completed', 'failed'):
+        if _has_run_result(row):
             return row
         row.update(changes, revision=row['revision'] + 1, updated_at=timestamp(call.clock()))
         return row
@@ -742,11 +748,11 @@ def run_script(call):
             params_digest=digest([call.action, call.params, call.expected_revision]))
         row = business.get('script_runs', execution_id)
         _foundation().v13_require_access(call, row)
-        if row['state'] in ('completed', 'failed'):
+        if _has_run_result(row):
             return {'run': _run_view(row)}
         if row['task_id'] is not None:
             observed = get_run(replace(call, params={'execution_id': execution_id}))
-            if observed['run']['state'] in ('completed', 'failed'):
+            if observed['run']['state'] in ('completed', 'failed', 'unknown'):
                 return observed
             return _run_accepted_replay(call, row)
         if row['state'] != 'accepted':
@@ -795,7 +801,11 @@ def _task_observations(call, action, task_id):
 # LLM: 工具名称或 SUCCEEDED 状态不能证明 run；冻结详情核任务来源，原操作库核身份与准入时的规范参数摘要。
 # 函数用途: 从当前任务的原生 scripts.run 操作提取真实脚本结果。
 def _task_script_result(call, row, tools):
-    from ..local_storage import TOOL_OPERATION_FAILED, TOOL_OPERATION_SUCCEEDED
+    from ..local_storage import (
+        TOOL_OPERATION_FAILED,
+        TOOL_OPERATION_SUCCEEDED,
+        TOOL_OPERATION_UNKNOWN,
+    )
     from ..runtime_db.managed_operation_store import ManagedOperationStore
     from ..runtime_db.repository import RuntimeRepository
     from ..runtime_db.schema import runtime_db_path
@@ -812,7 +822,7 @@ def _task_script_result(call, row, tools):
             continue
         record = operations.get_tool_operation(owner_id=call.owner_id, run_id=tool['run_id'],
             operation_id=tool['operation_id'], attempt_id=tool['attempt_id'], tool_name='scripts')
-        if record is None or record.status not in (TOOL_OPERATION_SUCCEEDED, TOOL_OPERATION_FAILED):
+        if record is None or record.status not in (TOOL_OPERATION_SUCCEEDED, TOOL_OPERATION_FAILED, TOOL_OPERATION_UNKNOWN):
             continue
         if not record.args_hash or record.args_hash not in row.get('tool_args_hashes', ()):
             continue
@@ -827,11 +837,14 @@ def _task_script_result(call, row, tools):
                 or type(result.get('ok')) is not bool or not isinstance(result.get('output_data'), dict)):
             continue
         unknown = result.get('effect_outcome') == 'unknown'
+        if record.status == TOOL_OPERATION_UNKNOWN and not unknown:
+            continue
         return {'state': 'unknown' if unknown else 'completed' if result['ok'] else 'failed',
             'ok': None if unknown else result['ok'], 'output': bounded_output(result['output_data']),
             'error': str(redact_sensitive_value(result.get('error_code') or ''))[:2048] or None,
             'duration_ms': max(0, round(result.get('duration_ms') or 0)),
-            'started_at': timestamp(result.get('started_at')), 'finished_at': timestamp(result.get('ended_at'))}
+            'started_at': timestamp(result.get('started_at')), 'finished_at': timestamp(result.get('ended_at')),
+            'execution_result_ref': {key: tool[key] for key in ('operation_id', 'run_id', 'attempt_id')}}
     return None
 
 
@@ -843,7 +856,7 @@ def get_run(call):
     if row is None:
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     _foundation().v13_require_access(call, row)
-    if row['state'] in ('completed', 'failed') or row['task_id'] is None:
+    if _has_run_result(row) or row['task_id'] is None:
         coverage = 'unknown' if row['state'] == 'unknown' else 'complete'
         return {'run': _run_view(row, coverage=coverage)}
     try:
@@ -875,14 +888,14 @@ def get_run(call):
         else:
             changes['state'] = 'unknown'
             coverage = 'unknown'
-        if changes and changes.get('state') in ('completed', 'failed'):
+        if changes and (changes.get('state') in ('completed', 'failed') or changes.get('execution_result_ref')):
             changes['terminal_coverage'] = coverage
         if changes and any(row.get(key) != value for key, value in changes.items()):
             row = _patch_run(call, row['execution_id'], changes)
         return {'run': _run_view(row, approval_ids=pending[:20], coverage=coverage)}
     except (HostAPIError, BusinessError, OSError, ValueError, RuntimeError, sqlite3.Error):
         current = business.get('script_runs', row['execution_id'])
-        if current is not None and current['state'] in ('completed', 'failed'):
+        if current is not None and _has_run_result(current):
             _foundation().v13_require_access(call, current)
             return {'run': _run_view(current)}
         unknown = {**row, 'state': 'unknown', 'ok': None}

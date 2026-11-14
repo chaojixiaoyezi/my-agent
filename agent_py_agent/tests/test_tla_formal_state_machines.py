@@ -985,3 +985,56 @@ def test_r8_thread_history_projection_bfs_never_resurrects_terminal(tmp_path):
             assert tuple(store.tasks.iter_task_ids(thread.thread_id)) == ('task',)
         if len(actions) < 3:
             pending.extend((*actions, action) for action in ('finish', 'late_bind', 'late_projection'))
+
+
+def test_workflow_unknown_effect_retry_finite_state_space():
+    """穷举真实重试器的有限事实域；未知效果不因定义自报幂等而产生第二次执行。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.workflows.step_retry import run_step_with_retry
+
+    pending = deque((started, outcome, declared) for started in (False, True)
+                    for outcome in ('unknown', 'not_started', 'running', None)
+                    for declared in (False, True))
+    visited = set()
+    while pending:
+        started, outcome, declared = pending.popleft()
+        key = (started, outcome, declared)
+        assert key not in visited
+        visited.add(key)
+        step = SimpleNamespace(step_id='effect', mode='tool_call', status='running', error_code='',
+            error_message='', needs_repair=False,
+            escalation_result={'effect_started': started, 'effect_outcome': outcome})
+        calls = []
+
+        def execute():
+            calls.append(len(calls))
+            step.status, step.error_code = 'failed', 'NETWORK_TIMEOUT'
+
+        run_step_with_retry(engine=None, step=step, spec={'retry_policy': {
+            'max_attempts': 2, 'idempotent': declared}}, outputs={}, definition={}, run=None,
+            execute_fn=execute)
+        blocked = outcome == 'unknown' or started and outcome != 'not_started'
+        assert len(calls) == (1 if blocked else 2)
+    assert len(visited) == 16
+
+
+def test_workflow_declared_review_missing_host_blocks_all_execution_phases(tmp_path):
+    """枚举原控制/步骤边界：缺审核服务只能取消，不能借恢复或DAG步骤执行。"""
+    from agent_py_agent.agent.workflows.business_scope import WorkflowPolicyRefusal
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.governance import WorkflowEffectPhase
+    from agent_py_agent.agent.workflows.models import WorkflowRunRecord
+
+    engine = WorkflowEngine(tmp_path)
+    for declared in (False, True):
+        for phase in ('preflight', 'resume', WorkflowEffectPhase('effect'), 'cancel'):
+            run = WorkflowRunRecord('qa-review', 'qa-flow', '', 'manual', 'running', 1, 0, 0)
+            definition = {'descriptor': {'metadata': {'workflow_review_policy': {'steps': ['effect']}} if declared else {}}}
+            try:
+                engine._authorize_run(run, phase, definition=definition)
+            except WorkflowPolicyRefusal as error:
+                assert declared and phase != 'cancel'
+                assert error.error_code == 'WORKFLOW_REVIEW_SERVICE_UNAVAILABLE'
+            else:
+                assert not declared or phase == 'cancel'

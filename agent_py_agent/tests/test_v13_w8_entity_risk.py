@@ -72,7 +72,7 @@ def test_envelopes(native):
     second = completed(invoke(native, 'entity_risk.queue', {'limit': 1, 'cursor': first['next_cursor']}))
     assert second['items'][0]['entity_value'] != first['items'][0]['entity_value']
     rejected(invoke(native, 'entity_risk.queue', {'entity_type': 'user', 'cursor': first['next_cursor']}),
-             503, 'CURSOR_EXPIRED')
+             410, 'CURSOR_EXPIRED')
     rejected(invoke(native, 'entity_risk.stats', {'extra': True}), 400, 'INVALID_SCHEMA')
 
 

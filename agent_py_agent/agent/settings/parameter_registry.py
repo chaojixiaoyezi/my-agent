@@ -81,7 +81,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "conversation_workspace", "background_claim_ttl_seconds", "collaboration_workspace",
     "collaboration_auto_dispatch_max_runners", "audit_enabled", "audit_log_path", "daemon_mutate_state",
     "daemon_start_runners", "daemon_runner_instruction", "lease_stale_without_heartbeat_seconds", "log_level",
-    "extension_plugins", "provider_max_concurrent_requests", "responses_ws_idle_ttl_seconds",
+    "extension_plugins", "provider_max_concurrent_requests", "gateway_llm_inflight_limit", "responses_ws_idle_ttl_seconds",
     "responses_ws_max_idle_connections", "plugin_process_sandbox", "plugin_tool_gate_timeout_ms",
     "max_parallel_tool_calls_per_owner", "pty_session_idle_timeout_minutes", "owner_default_permission_mode",
     "tool_shell_demote_after_seconds", "tool_shell_demoted_nice",
@@ -122,7 +122,7 @@ _BOUNDARY_NAMES = _HOST_CAPACITY_KEYS | frozenset({
     "api_base", "api_key", "model_backend", "computer_use_enabled", "computer_use_observation_enabled", "execution_mode",
     "user_id", "system_prompt",
     # 物理请求资源上限由部署者设置；模型不能把0当作绕过共享并发额度的开关。
-    "provider_max_concurrent_requests",
+    "provider_max_concurrent_requests", "gateway_llm_inflight_limit",
     "gateway_user_inflight_limit",
     "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "enable_self_map", "gateway_restart_cooldown_seconds",
     "daemon_mutate_state", "daemon_start_runners",

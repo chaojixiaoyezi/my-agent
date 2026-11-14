@@ -31,11 +31,12 @@ OLD = NOW.timestamp() - 31 * DAY
 FRESH = NOW.timestamp() - 29 * DAY
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def complete_slice_clock(monkeypatch):
     from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
 
-    # TOCTOU资格用例须先获得完整动作，不能把25ms内的机器吞吐当成竞态前置条件。
+    # 本文件验证引用资格/TOCTOU；不能把25ms内机器吞吐当成全量清理前提。
+    # 专门的预算暂停用例会再次显式替换此时钟，继续验证生产25ms有界语义。
     monkeypatch.setattr(budgets, 'time', SimpleNamespace(monotonic=lambda: 0.0))
 
 
@@ -149,6 +150,7 @@ def test_manifest_referenced_by_remaining_snapshot_survives_unreferenced_goes(tm
     applied = service.apply(now=NOW)
 
     assert applied.ok is True
+    assert not applied.scan_partial, "本用例先证明完整扫描，再验证剩余快照引用资格"
     assert kept_manifest.exists(), "被保留快照引用的旧清单不能删"
     assert not orphan_manifest.exists(), "没有任何剩余快照引用的旧清单要回收"
     assert fresh_manifest.exists(), "没超过 30 天的清单不动"

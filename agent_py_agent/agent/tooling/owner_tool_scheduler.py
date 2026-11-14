@@ -398,7 +398,7 @@ def submit_owner_tool_call(scheduler, item, *, cancellation_token: object | None
 
 # LLM: 只在已获准独立批次内先提交控制项，结果仍按原索引；部分失败等本批在途项后传播，不等其它轮。
 # 函数用途: 避免普通背压阻挡同批控制调用，并按provider顺序收集结果。
-def execute_work_items(items, submit):
+def execute_work_items(items, submit, *, await_futures=None):
     futures = {}
     ordered = sorted(enumerate(items), key=lambda pair: getattr(pair[1], 'priority', 'normal') != 'control')
     try:
@@ -407,7 +407,9 @@ def execute_work_items(items, submit):
     except BaseException:
         _settle_futures([future for _, future in sorted(futures.items())], ignore_errors=True)
         raise
-    return _settle_futures([future for _, future in sorted(futures.items())])
+    ordered_futures = [future for _, future in sorted(futures.items())]
+    return (await_futures(ordered_futures) if await_futures is not None
+            else _settle_futures(ordered_futures))
 
 
 # LLM: 必须在队列锁外执行Future回调；排队已取消项不重复完成，系统线程启动异常不得伪装成功。

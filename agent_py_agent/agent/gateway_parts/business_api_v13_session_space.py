@@ -2,7 +2,8 @@
 from .business_api_v13_contracts import V13Action
 
 _PARAMS = {'type': 'object', 'properties': {}, 'additionalProperties': False}
-_SET_PARAMS = {'type': 'object', 'properties': {'space_id': {'type': 'string', 'minLength': 1}},
+_SET_PARAMS = {'type': 'object', 'properties': {'space_id': {'type': ['string', 'null'], 'minLength': 1,
+    'description': '空间ID；显式null清除当前发送者的选择并恢复默认，不改变已受理任务。'}},
                'required': ['space_id'], 'additionalProperties': False}
 _RESULT = {'type': 'object', 'properties': {
     'space_id': {'type': ['string', 'null']}, 'revision': {'type': 'integer', 'minimum': 0},
@@ -39,7 +40,7 @@ def _invoke(call):
 
 V13_ACTIONS = (
     V13Action('sessions.space.get', 'read', _PARAMS, _RESULT, _invoke, ready=_ready),
-    V13Action('sessions.space.set', 'write', _SET_PARAMS, _RESULT, _invoke, ready=_ready,
+    V13Action('sessions.space.set', 'config', _SET_PARAMS, _RESULT, _invoke, ready=_ready,
               expected_revision_required=True),
 )
 
@@ -61,6 +62,8 @@ def session_space_operation(home, threads, thread, *, actor_id, action, params, 
 
     def authorize():
         context.check(action, {'owner_id': home.owner_id, 'space_id': space_id})
+        if space_id is None:
+            return
         state = services.spaces.authorize_call('spaces.get', {'space_id': space_id}, actor=actor)
         if state['spaces'][space_id]['state'] != 'active':
             raise BusinessError('SPACE_ARCHIVED')

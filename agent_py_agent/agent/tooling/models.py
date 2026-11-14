@@ -701,6 +701,43 @@ def resource_scopes_for_runtime_policy(
     return tuple(dict.fromkeys(scopes))
 
 
+def host_error_facts(value: object) -> dict[str, Any]:
+    """校验宿主公开错误的独立展示事实；不接收权限、重试或副作用控制字段。"""
+    if not isinstance(value, dict) or not value:
+        return {}
+    code, status = value.get('code'), value.get('http_status')
+    if (set(value) - {'source', 'code', 'http_status', 'next_action'}
+            or value.get('source') != 'business_host'
+            or not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code)
+            or type(status) is not int or not 400 <= status <= 599
+            or 'next_action' in value and (not isinstance(value['next_action'], str)
+                or len(value['next_action']) > 2048)):
+        return {}
+    return dict(value)
+
+
+def source_effect_facts(value: object) -> dict[str, Any]:
+    """受信宿主回执的有界展示旁证；不授予执行、重试或副作用收敛权限。"""
+    if not isinstance(value, dict) or not value:
+        return {}
+    try:
+        valid_ids = (isinstance(value.get('request_id'), str)
+                     and 0 < len(value['request_id'].encode('utf-8')) <= 128
+                     and (value.get('operation_id') is None or (isinstance(value['operation_id'], str)
+                          and 0 < len(value['operation_id'].encode('utf-8')) <= 128)))
+    except UnicodeError:
+        return {}
+    if (set(value) != {'source', 'action', 'request_id', 'operation_id', 'effect_outcome'}
+            or value.get('source') != 'business_host'
+            or not isinstance(value.get('effect_outcome'), str)
+            or value['effect_outcome'] not in {'committed', 'running'}
+            or not isinstance(value.get('action'), str)
+            or not re.fullmatch(r'[a-z][a-z0-9_.]{0,127}', value['action'])
+            or not valid_ids):
+        return {}
+    return dict(value)
+
+
 @dataclass
 class ToolHandlerOutcome:
     tool: str
@@ -733,8 +770,13 @@ class ToolHandlerOutcome:
     phase: str = field(default="", kw_only=True)
     component_receipts: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
     diagnostic_ref: str = field(default="", kw_only=True)
+    # 仅由宿主实现显式提供公开错误事实；不参与权限、重试与调度，不从工具正文解析。
+    host_error: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    source_effect: dict[str, Any] = field(default_factory=dict, kw_only=True)
 
     def __post_init__(self) -> None:
+        self.host_error = host_error_facts(self.host_error)
+        self.source_effect = source_effect_facts(self.source_effect)
         if not isinstance(self.result_envelope, dict):
             object.__setattr__(self, "result_envelope", {})
         else:
@@ -1327,6 +1369,7 @@ class ToolInvocationContext:
     tool_dispatch: object | None = field(default=None, repr=False, compare=False)
     human_approval_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     pending_input_probe: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
+    exact_process_state_only: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass

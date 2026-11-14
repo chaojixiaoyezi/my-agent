@@ -25,6 +25,7 @@ from ...conversation.active_turn_input import (
 from ...conversation.authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
 )
+from ...conversation.host_actor import checked_foreground_memory_scope
 from ...conversation.tool_discovery import thread_loaded_tools
 from ...memory_archive import build_auto_resume_context
 from ...memory_archive.compact_tool_output_refs import (
@@ -289,6 +290,8 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     task_local = is_isolated_recall_context(request.context_scope)
     recall_suppressed = formal_recall_suppressed(request.context_scope, getattr(agent, "owner_policy", None))
     memory_top_k = max(1, int(agent.config.memory_top_k or 1))
+    current = getattr(agent, "_current_run_params", None)
+    selected_scope = None if recall_suppressed else checked_foreground_memory_scope(agent, current)
     routed_context = _routed_memory_context_for_request(
         agent, request, skip_formal_recall=recall_suppressed,
     )
@@ -302,7 +305,8 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         if recall_suppressed
         else runtime_long_term_scope(
             agent.memory, task_id=request.task_id, task_attributes=request.task_attributes,
-            business_context=getattr(getattr(agent, "_current_run_params", None), "business_context", None),
+            business_context=getattr(current, "business_context", None),
+            memory_recall_scope=selected_scope,
         )
     )
 
@@ -974,6 +978,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         canonical_native_messages=_completed_turn_native_messages(
             loop_params,
             final_response,
+            agent=agent,
         ),
     )
 
@@ -1021,7 +1026,7 @@ def _persist_partial_native_turn(
     if not callable(callback):
         _clear_unpersisted_first_turn_usage(agent, params)
         return
-    native = _completed_turn_native_messages(params, None)
+    native = _completed_turn_native_messages(params, None, agent=agent)
     if not native:
         _clear_unpersisted_first_turn_usage(agent, params)
         return
@@ -1460,6 +1465,8 @@ def _with_input_media_manifest(agent: object, history: list[object]) -> list[obj
 def _completed_turn_native_messages(
     params: ToolLoopExecuteParams,
     final_response: object,
+    *,
+    agent: object = None,
 ) -> list[dict[str, object]]:
     from dataclasses import replace as dc_replace
 
@@ -1473,11 +1480,15 @@ def _completed_turn_native_messages(
 
     if not native_tool_use_active(params):
         return []
+    from ...backends.tool_ir import UserTurn
+
+    unsubmitted = _unsubmitted_guidance_history_ids(agent, params)
     history = [
         dc_replace(item, provider_compaction="") if isinstance(item, CompactionSummary) and item.provider_compaction else item
         for item in _replayable_turn_history(
             list(getattr(params, "tool_ir_history", None) or []), getattr(params, "turn_trigger", None),
         )
+        if not (isinstance(item, UserTurn) and unsubmitted.intersection(item.input_ids))
         if not is_applied_compact_summary(item)
     ]
     blocks = [
@@ -1490,6 +1501,40 @@ def _completed_turn_native_messages(
     if not has_tool_use and (final_text or blocks):
         history.append(AssistantTurn(text=final_text, content_blocks=blocks))
     return strip_orphaned_tool_blocks(AnthropicMessageAdapter().to_provider_messages(history))
+
+
+def _unsubmitted_guidance_history_ids(agent: object, params: object) -> set[str]:
+    """只投影本轮准确提交过的耐久输入；私有预留正文不能借异常快照进入其它回合。"""
+    from .task_identity import durable_task_id
+
+    state = getattr(params, "live_archive_state", None)
+    entries = state.get("_guidance_ack_entries", {}) if isinstance(state, dict) else {}
+    if not isinstance(entries, dict):
+        return set()
+    store = getattr(agent, "conversation_store", None)
+    turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(params)
+    attempt_id = str(getattr(params, "attempt_id", "") or getattr(params, "run_id", "") or turn_id).strip()
+    blocked = set()
+    for guidance_id, entry in entries.items():
+        metadata = getattr(entry, "metadata", None)
+        key = str(metadata.get("dedupe_key") or "").strip() if isinstance(metadata, dict) else ""
+        if not key:
+            continue  # 原无耐久回执的直接guidance沿既有路径，不伪造提交证明。
+        try:
+            receipt = store.guidance.receipt(key) if store is not None else None
+            canonical = receipt.entry if receipt is not None else None
+            facts = getattr(canonical, "metadata", None)
+            submitted = (receipt is not None and canonical.guidance_id == guidance_id
+                and (canonical.target_type, canonical.target_id) == (entry.target_type, entry.target_id)
+                and isinstance(facts, dict) and str(facts.get("expected_turn_id") or "").strip() == turn_id
+                and receipt.attempt_id == attempt_id and receipt.status in {"submitted", "consumed"}
+                and bool(receipt.submission_id))
+        except Exception as exc:  # 只省去不可证明的正文，不覆盖原工具事实或异常首因。
+            logger.warning("规范历史省去未证明提交的guidance：error_type=%s", type(exc).__name__)
+            submitted = False
+        if not submitted:
+            blocked.add(str(guidance_id))
+    return blocked
 
 
 # LLM: 生命周期唤醒片的后台上下文注入只服务本片，按 IR 类型与宿主来源家族

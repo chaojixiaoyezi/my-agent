@@ -281,7 +281,7 @@ def test_unusable_prefix_is_released_before_surface_publication(
             calibration=None,
         )
         result, selected = recovery._transcript_summary_surface(host, object(), tool_source)
-        assert selected is (tool_source if exceeded else None), "拒用优化必须恢复完整原工具来源"
+        assert selected is tool_source, "缓存优化不得撤掉已证明完整的工具来源"
     else:
         monkeypatch.setattr(prefixes, "capture_preflight_prefix", capture)
         monkeypatch.setattr(
@@ -298,9 +298,10 @@ def test_unusable_prefix_is_released_before_surface_publication(
             calibration=None,
         )
         result = compact._resolved_provider_surface(request)
-    assert (result is original) is exceeded
-    assert (result.transcript_prefix is None) is exceeded
-    assert (refs[0]() is None) is exceeded, "原调用栈不能额外强留已拒用前缀"
+    released = exceeded
+    assert (result is original) is released
+    assert (result.transcript_prefix is None) is released
+    assert (refs[0]() is None) is released, "原调用栈不能额外强留已拒用前缀"
 
 
 @pytest.mark.parametrize("host", ["gateway", "child", "background"])
@@ -356,7 +357,20 @@ def test_unsupported_media_does_not_keep_unusable_full_history(tmp_path, monkeyp
                 },
             }
         )
-        return ids + [row.message_id]
+        ids = ids + [row.message_id]
+        if host == "gateway":
+            # 本夹具绕过正常 Gateway writer 灌入大历史；先按真实有界游标建索引，
+            # 再测媒体压缩边界，避免把另一个冷索引调度缺口混入本用例。
+            from agent_py_agent.agent.gateway_parts.history_ledger import GatewayHistoryLedger
+
+            ledger = GatewayHistoryLedger(store)
+            for _ in range(len(ids) + 1):
+                with ledger.connection() as conn:
+                    if ledger.catch_up(conn, thread_id):
+                        break
+            else:
+                pytest.fail("媒体夹具的固定历史未能完成有界 Gateway 索引准备")
+        return ids
 
     monkeypatch.setitem(lifetime._HOSTS, host, media_host)
     monkeypatch.setattr(lifetime, "_seed_history", seed)
@@ -376,3 +390,59 @@ def test_unsupported_media_does_not_keep_unusable_full_history(tmp_path, monkeyp
     assert chain[0]["media_policy_reason"] == "COMPACT_PREFIX_MEDIA_UNSUPPORTED"
     assert chain[0]["media_blocks_archived"] == 1 and chain[0]["media_refs"]
     assert facts["business"] == 1 and facts["task_in_payload"]
+
+
+def test_120_item_ir_after_protected_facts_keeps_complete_tool_summary_source(isolated_agent, monkeypatch):
+    """保护事实阻止连续前缀时，33组完整调用仍进入同一次摘要，54条事实原样保留。"""
+    from agent_py_agent.agent.agent_core.compact_tool_partition import (
+        partition_recovery_tool_source,
+    )
+    from agent_py_agent.agent.backends.base import ModelResponse
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn
+    from agent_py_agent.agent.conversation.compact_tool_summary import compact_tool_summary_text
+    from agent_py_agent.agent.memory_archive import estimate_tokens
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolCall, ToolResult
+
+    facts = [RuntimeFactsTurn(f"必须保留的事实-{index}", source=f"required-{index}") for index in range(54)]
+    history = list(facts)
+    records = []
+    for index in range(33):
+        call = ToolCall(f"call-{index}", "write_file", {"path": f"output-{index}.txt"},
+                        "native", "sha256:fixture", "run", f"turn-{index}", "attempt")
+        history.extend((AssistantTurn(tool_calls=[call]), ToolResult.succeeded(call, "已完成写入；原始结果" * 1600)))
+        records.append({"run_id": "run", "turn_id": call.turn_id, "attempt_id": "attempt",
+                        "call_id": call.call_id, "tool": call.tool_name, "ok": True,
+                        "output_preview": "写入已完成"})
+    assert len(history) == 120
+    source = partition_recovery_tool_source(records, history)
+    assert len(source.source_ir_history) == 66
+    assert source.retained_ir_history == tuple(facts)
+    prefix = _prefix()
+    monkeypatch.setattr(recovery, "_summary_surface", lambda *_: ConversationCompactProviderSurface("stable", None, ""))
+    monkeypatch.setattr(prefixes, "capture_transcript_prefix", lambda *_: prefix)
+    monkeypatch.setattr(prefixes, "transcript_prefix_exceeds_capacity", lambda *_: False)
+    host = SimpleNamespace(agent=isolated_agent, source=SimpleNamespace(messages=prefix.rows),
+                           render_params=object(), calibration=None)
+    surface, selected = recovery._transcript_summary_surface(host, object(), source)
+    assert selected is source and surface.transcript_prefix is prefix and not prefix.joint_end
+    captured = []
+
+    def generate(_request, **kwargs):
+        captured.extend(kwargs["message_source"])
+        return ModelResponse(text="33次写入已完成；保留输出引用，不重复执行。", backend="fake")
+
+    monkeypatch.setattr(budgets, "generate_bounded_compact_response", generate)
+    isolated_agent.config.model_context_window_tokens = 2_000_000
+    summary = compact._summarize(isolated_agent, "", {}, prefix.rows, call=compact._CompactSummaryCall(
+        provider_surface=surface, tool_source_records=selected.source_records,
+        tool_source_ir_history=selected.source_ir_history,
+    ))
+    blocks = [block for message in captured for block in message.get("content", []) if isinstance(block, dict)]
+    assert sum(block.get("type") == "tool_use" for block in blocks) == 33
+    assert sum(block.get("type") == "tool_result" for block in blocks) == 33
+    assert not any("必须保留的事实" in str(message) for message in captured)
+    before = 73_616 + estimate_tokens(compact_tool_summary_text(history))
+    after = 73_616 + estimate_tokens(compact_tool_summary_text(selected.retained_ir_history)) + estimate_tokens(summary)
+    assert before > 153_600 > after, (before, after)
+    print(f"synthetic_120_ir before={before} after={after} ceiling=153600")
+    assert history[:54] == facts and len(history) == 120

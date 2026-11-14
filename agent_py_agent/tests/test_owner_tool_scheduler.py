@@ -811,7 +811,8 @@ def test_normal_slot_reused_while_reserved_control_is_running(tmp_path):
 
 # LLM: 同一独立并发段内后续控制项不能被前面的正常提交背压挡住，结果顺序仍与provider一致。
 # 函数用途: 在实际并行段入口复现同步提交循环的队头阻塞。
-def test_parallel_batch_submits_control_before_normal_backpressure(tmp_path):
+@pytest.mark.parametrize('wait_input_reply', [False, True])
+def test_parallel_batch_submits_control_before_normal_backpressure(tmp_path, wait_input_reply):
     Scheduler, Item = scheduler_api()
     scheduler = Scheduler.for_owner(tmp_path, 1)
     active, release, control_ran = Event(), Event(), Event()
@@ -826,7 +827,8 @@ def test_parallel_batch_submits_control_before_normal_backpressure(tmp_path):
             release.set()
         return _success(work, 'ok')
 
-    agent = SimpleNamespace(root=tmp_path, config=SimpleNamespace(max_parallel_tool_calls_per_owner=1))
+    agent = SimpleNamespace(root=tmp_path, config=SimpleNamespace(
+        max_parallel_tool_calls_per_owner=1, tool_wait_input_reply_enabled=wait_input_reply))
     request = _round_request(agent=agent, params=SimpleNamespace(tool_context=[]), tool_rounds=1,
         response=None, calls=[{'tool': 'read'} for _ in range(3)] + [{'tool': 'list_tools'}],
         execute_one=execute, record_one=lambda _: None)

@@ -479,3 +479,60 @@ def test_input_refusal_settles_operation_failed_not_unknown(tmp_path):
     assert result.effect_outcome == "not_started"
     assert record.status == "failed" and not record.unknown_reason
     assert manager.load(task.id).capability_requests == []
+
+
+def test_nested_capability_submission_resumes_waiting_direct_parent_without_grant(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep
+    from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
+        mark_parent_waiting_for_direct_children,
+        parent_wait_blocks_dispatch,
+    )
+
+    agent, manager, child = _agent_with_current_run(tmp_path)
+    parent = manager.load(child.parent_id)
+    parent.status = 'PENDING'
+    manager.save(parent)
+    child.status = 'RUNNING'
+    manager.save(child)
+    mark_parent_waiting_for_direct_children(manager, parent.id, [child.id])
+    started = []
+    monkeypatch.setattr(capability_auto_sweep, 'auto_start_orphan_run',
+        lambda host, run_id: started.append(run_id) or {'started': 1})
+    outcome = CapabilityRequestTool(agent).execute({'problem': 'missing external capability',
+        'needed_capability': 'future_test_tool', 'capability_type': 'tool',
+        'requested_tools': ['future_test_tool']})
+    assert outcome.ok
+    assert started == [parent.id]
+    assert not parent_wait_blocks_dispatch(manager.load(parent.id))
+    assert manager.load(child.id).capability_requests[0].status == 'OPEN'
+    assert manager.load(child.id).capability_grants == []
+
+
+def test_duplicate_nested_request_already_seen_does_not_restart_parent(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep
+    from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
+        direct_child_capability_facts,
+        mark_parent_waiting_for_direct_children,
+    )
+
+    agent, manager, child = _agent_with_current_run(tmp_path)
+    parent = manager.load(child.parent_id)
+    parent.status = 'PENDING'
+    manager.save(parent)
+    child.status = 'RUNNING'
+    manager.save(child)
+    mark_parent_waiting_for_direct_children(manager, parent.id, [child.id])
+    started = []
+    monkeypatch.setattr(capability_auto_sweep, 'auto_start_orphan_run',
+        lambda host, run_id: started.append(run_id) or {'started': 1})
+    args = {'problem': 'same missing external capability', 'needed_capability': 'future_test_tool',
+        'capability_type': 'tool', 'requested_tools': ['future_test_tool']}
+    first = CapabilityRequestTool(agent).execute(args)
+    seen = manager.load(child.id)
+    mark_parent_waiting_for_direct_children(manager, parent.id, [child.id],
+        observed_children={child.id: {'status': 'RUNNING', **direct_child_capability_facts(seen)}})
+    second = CapabilityRequestTool(agent).execute(args)
+    assert first.ok and second.ok
+    assert json.loads(first.output)['request_id'] == json.loads(second.output)['request_id']
+    assert started == [parent.id]
+    assert len(manager.load(child.id).capability_requests) == 1

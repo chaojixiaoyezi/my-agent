@@ -116,18 +116,28 @@ def test_business_targets_remain_pinned_when_read_is_denied(monkeypatch, limit):
     assert nav.move_selection(1) and nav.enter_selected()
     assert nav.snapshot().active_thread_id == "business-agent"
     runtime = nav.active_runtime()
-    assert nav.back() and nav.back()
+    # 当前显示的业务页是pin；离开后不能把所有历史业务会话永久钉住，突破容量上限。
     for number in range(6):
         run_id = f"other-{number}"
         assert nav.apply_agent_view(run_id, _view(run_id))
         assert nav._runtimes["business:business-agent"] is runtime
-        assert len(nav._runtimes) <= max(limit, 2)
+        assert len(nav._runtimes) <= max(limit, 3)  # 两级当前业务路径与本次返回页。
     generation = runtime.conversation_reset_generation
     client.denied = True
     projection.refresh()
     nav.update_business_agents(projection)
     assert runtime.conversation_reset_generation == generation + 1
     assert nav._runtimes["business:business-agent"] is runtime
+    assert nav.back() and nav.back()
+    for number in range(6, 12):
+        run_id = f"other-{number}"
+        assert nav.apply_agent_view(run_id, _view(run_id))
+        assert len(nav._runtimes) <= limit
+    assert "business:business-agent" not in nav._runtimes
+    assert "business:business-agent" not in nav._business_targets
+    assert "business-agent" not in nav._business_messages
+    assert "business-agent" not in nav._business_history
+    assert "business-agent" not in nav._business_tools
     assert not nav._business_messages and not nav._business_history
 
 

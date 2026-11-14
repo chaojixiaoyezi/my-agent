@@ -136,6 +136,17 @@ def test_queue_failure_retains_original_pending_obligation(completed_host, monke
     assert retry_completed_task_learning(host, task.task_id)["status"] == "enqueued"
 
 
+def _native_learning_threads(agent):
+    """仿真原本地入口身份，执行核权不能只靠owner_id或业务正文补造来源。"""
+    def create(name):
+        return agent.conversation_store.threads.get_or_create({
+            "channel": "chat", "channel_conversation_id": name, "channel_user_id": "local-agent",
+            "canonical_user_id": "local-agent", "owner_id": agent.home_paths.owner_id,
+            "owner_home": str(agent.home_paths.owner_home_dir),
+        })
+    return create("learning-source"), create("learning-target")
+
+
 @pytest.mark.parametrize("include_background", [True, False])
 def test_real_scheduler_six_native_tool_rounds_produce_one_frozen_completion(tmp_path, monkeypatch, include_background):
     """W2真实Scheduler/core/原工具/收口；未交付W6端口为contract fake，不代表跨片集成通过。"""
@@ -155,7 +166,8 @@ def test_real_scheduler_six_native_tool_rounds_produce_one_frozen_completion(tmp
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), enable_tools=True), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), enable_tools=True,
+        business_spaces_enabled=True), tmp_path)
     home = agent.home_paths.owner_home_dir
     for n in range(6):
         (home / f"input-{n}.txt").write_text(f"verified input {n}")
@@ -170,17 +182,22 @@ def test_real_scheduler_six_native_tool_rounds_produce_one_frozen_completion(tmp
             self.calls += 1
             if self.calls <= 6:
                 return ModelResponse(text="", backend=self.name, tool_use_blocks=[{"id": f"step-{self.calls}",
-                    "name": "read_file", "input": {"path": f"input-{self.calls - 1}.txt"}}])
+                    "name": "read_file", "input": {"path": str(home / f"input-{self.calls - 1}.txt")}}])
             return ModelResponse(text="六份资料已逐一核对。", backend=self.name)
 
     agent.backend = Backend()
     store = agent.conversation_store
     owner = agent.home_paths.owner_id
-    source = store.threads.create(owner_id=owner, canonical_user_id="local-agent")
-    target = store.threads.create(owner_id=owner, canonical_user_id="local-agent")
+    source, target = _native_learning_threads(agent)
+    from agent_py_agent.agent.conversation.business_access import BusinessActor
+    from agent_py_agent.agent.conversation.business_spaces import BusinessSpaceService
+    spaces = BusinessSpaceService(home, owner_id=owner, enabled=True)
+    actor = BusinessActor(owner, "local-agent", spaces, lambda action, facts: True)
+    sid = spaces.create({"name": "原任务方法空间"}, actor=actor,
+                        idempotency_key="six-tools-original-space")["space_id"]
     outcome = dispatch_session_task(agent, SessionTaskDispatchPlan(source.thread_id, target.thread_id, "核对六份资料"),
-        target, CapabilityConfig(), business_context_intent=BusinessContextIntent(owner, "space-A", None, None),
-        business_context_factory=lambda identifier: BusinessExecutionContext(owner, "space-A", None, identifier, 1, None, (), (), "business-context.v1"))
+        target, CapabilityConfig(), business_context_intent=BusinessContextIntent(owner, sid, None, None),
+        business_context_factory=lambda identifier: BusinessExecutionContext(owner, sid, None, identifier, 1, None, (), (), "business-context.v1"))
     assert outcome.ok
     task_id = json.loads(outcome.output)["task_id"]
     calls, queued = [], []
@@ -284,15 +301,14 @@ def _real_learning_background(tmp_path, *, rounds=6, enabled=True, include=True)
             self.calls += 1
             if self.calls <= rounds:
                 return ModelResponse(text="", backend=self.name, tool_use_blocks=[{"id": f"step-{self.calls}",
-                    "name": "read_file", "input": {"path": f"input-{self.calls - 1}.txt"}}])
+                    "name": "read_file", "input": {"path": str(home / f"input-{self.calls - 1}.txt")}}])
             return ModelResponse(text="六份资料已逐一核对。" + "核验结论" * 800, backend=self.name)
 
     agent.backend = Backend()
     spaces = BusinessSpaceService(home, owner_id=owner, enabled=config.business_spaces_enabled)
     actor = BusinessActor(owner, "local-agent", spaces, lambda action, facts: True)
     sid = spaces.create({"name": "原任务方法空间"}, actor=actor, idempotency_key="r3-original-space")["space_id"]
-    source = agent.conversation_store.threads.create(owner_id=owner, canonical_user_id="local-agent")
-    target = agent.conversation_store.threads.create(owner_id=owner, canonical_user_id="local-agent")
+    source, target = _native_learning_threads(agent)
     outcome = dispatch_session_task(agent, SessionTaskDispatchPlan(source.thread_id, target.thread_id,
         "核对六份资料。" + "任务说明" * 800), target, CapabilityConfig(),
         business_context_intent=BusinessContextIntent(owner, sid, None, None),
@@ -331,7 +347,9 @@ def test_r3_real_background_completion_restarts_with_original_fifo(tmp_path):
     assert request["final_response"].startswith("六份资料已逐一核对。") and len(request["final_response"]) == 3000
     assert len(request["tool_trace"]) == 6
     assert all(row["tool"] == "read_file" and row["ok"] is True for row in request["tool_trace"])
-    assert [row["args"] for row in request["tool_trace"]] == [f'{{"path": "input-{n}.txt"}}' for n in range(6)]
+    import json
+    assert [row["args"] for row in request["tool_trace"]] == [
+        json.dumps({"path": str(agent.home_paths.owner_home_dir / f"input-{n}.txt")}) for n in range(6)]
     assert "RAW_TOOL_OUTPUT_NOT_PERSISTED" not in str(material)
     assert request["created_at"] == material["created_at"]
     assert request["trajectory_digest"] == completion.trajectory_digest
@@ -458,3 +476,22 @@ def test_r3_real_background_policy_ineligibility_is_terminal(tmp_path, enabled, 
     assert agent.conversation_store.wakes.pending_one(task.metadata["task_learning_wake_id"]) is None
     assert agent.skill_learning is None or agent.skill_learning.store.pending_requests() == []
     assert agent.backend.calls == rounds + 1
+
+
+def test_staged_tool_activity_cannot_replace_terminal_runtime_proof(completed_host):
+    """六轮候选与活跃claim只证明执行中，不可签发可信完成或进入学习FIFO。"""
+    from agent_py_agent.agent.conversation.session_tasks import (
+        confirm_background_task_completion,
+        stage_background_learning_candidate,
+    )
+    host, task, params, candidate, binding, authority, calls = completed_host
+    host.conversation_store.session_tasks.bind_turn(task.task_id, turn_id="input-turn")
+    with bind_claim_execution(binding):
+        publish_claim_runtime_authority(authority)
+        stage_background_learning_candidate(host, params=params, candidate=candidate)
+        assert confirm_background_task_completion(host, run_id=params.run_id, attempt_id=params.attempt_id) is None
+    saved = host.conversation_store.session_tasks.require(task.task_id)
+    assert saved.status == "accepted"
+    assert "trusted_task_completion" not in saved.metadata
+    assert "task_learning_enqueue" not in saved.metadata
+    assert calls == []

@@ -120,6 +120,17 @@ def test_raw_resume_missing_run_keeps_explicit_missing_error(tmp_path):
     assert '不存在' in result.output or 'not found' in result.output.lower()
 
 
+@pytest.mark.parametrize('existing', ['', 'data', 'data/workflow_runs'])
+def test_missing_resume_parent_has_same_domain_error_and_creates_no_run(tmp_path, existing):
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+
+    if existing:
+        (tmp_path / existing).mkdir(parents=True)
+    result = WorkflowsTool(tmp_path).execute({'action': 'resume', 'workflow_run_id': 'missing-run'})
+    assert not result.ok and '工作流运行记录不存在' in result.output
+    assert not (tmp_path / 'data/workflow_runs/missing-run').exists()
+
+
 def test_local_isolated_source_keeps_frozen_binding_without_creating_im_actor(tmp_path):
     from dataclasses import asdict
     from types import SimpleNamespace
@@ -169,9 +180,11 @@ def test_workflow_host_denial_retains_reason_and_effect(tmp_path, outcome):
     with patch('agent_py_agent.agent.tooling.workflows_tool._dispatch', side_effect=error):
         result = WorkflowsTool(tmp_path).execute({'action': 'list'})
     assert not result.ok
-    assert result.error_code == 'TOOL_PERMISSION_DENIED'
+    assert result.error_code == ('CAPABILITY_DENIED' if outcome == 'not_started' else 'TOOL_PERMISSION_DENIED')
+    assert result.reported_error_code == 'CAPABILITY_DENIED'
     assert result.effect_outcome == ('not_started' if outcome == 'not_started' else 'unknown')
     data = json.loads(result.output)
     assert data['error_code'] == 'CAPABILITY_DENIED'
     assert data['error'] == error.message
     assert data['host_error']['outcome'] == outcome
+    assert list(tmp_path.iterdir()) == []

@@ -308,7 +308,8 @@ def _try_cached_compact_requests(
         return _CompactAttemptResult(None, rejected_response, attempt.budget)
 
 
-# LLM: EMPTY 原样补一次，TOOL_CALL 只在最后指令追加纠正；两者共用单次修复预算，计量沿冻结校准。
+# EMPTY、TOOL_CALL 与严格摘要 TRUNCATED 共用一次修复，不提高配置输出上限；完整前缀与工具保持原样。
+# 首次已截断的正文不回灌，追加精简要求后重新计量，仍不完整就交原严格错误。
 # 函数用途: 不改工具、system 和历史前缀，给不可用摘要一次有界恢复机会。
 def _generate_cached_summary_response(request, attempt):
     response = _generate_materialized_response(request, attempt.message_source, calibration=attempt.calibration)
@@ -316,10 +317,10 @@ def _generate_cached_summary_response(request, attempt):
     if getattr(response, "text", None) is None:
         return response
     _text, reason, _shape = _compact_summary_response_facts(response, reject_truncated=True)
-    if reason in {"EMPTY", "TOOL_CALL"}:
+    if reason in {"EMPTY", "TOOL_CALL"} or (reason == "TRUNCATED" and attempt.preserve_complete_fallback):
         compact_summary_response_outcome(response, request=request)
         raise_if_compact_interrupted(attempt.interrupt_check)
-        retry = _none_tool_compact_retry_request(request) if reason == 'TOOL_CALL' else request
+        retry = _cached_compact_repair_request(request, reason) if reason != 'EMPTY' else request
         budget = _SurfaceBudget(attempt.budget, attempt.calibration)
         if budget.measure(_request_tokens(retry, attempt.message_source)) > budget.tokens:
             return response
@@ -335,11 +336,14 @@ def _raise_if_preserved_compact_truncation(
     request: AuxiliaryModelCallRequest,
     attempt: _CompactAttemptContext,
 ) -> None:
-    if not attempt.preserve_complete_fallback or not getattr(response, "truncated", False):
+    if not attempt.preserve_complete_fallback or _compact_summary_response_facts(response, reject_truncated=True)[1] != "TRUNCATED":
         return
     compact_summary_response_outcome(response, request=request)
     message = "无工具摘要重试被截断" if attempt.retry else "摘要回复被截断"
-    raise ConversationCompactError(f"{message}，保留原始来源", code="COMPACT_SUMMARY_TRUNCATED")
+    raise ConversationCompactError(
+        f"{message}；原始来源保留，未执行摘要中的工具。请检查 memory_compact_summary_max_output_tokens 与模型输出上限，"
+        "提高可用输出预算或缩小待摘要来源后再继续，勿原样反复重试", code="COMPACT_SUMMARY_TRUNCATED"
+    )
 
 
 # LLM: Only TOOL_CALL failures can fall back to the rejected response; other segment failures remain visible.
@@ -374,10 +378,9 @@ def _response_has_tool_calls(response: object) -> bool:
     )
 
 
-# LLM: 保留原工具、tool_choice、system 和消息；只向末尾追加无工具摘要指令，不破坏缓存前缀。
-# 函数用途: 用缓存安全的最终指令纠正工具响应，函数名保留供既有内部调用使用。
-def _none_tool_compact_retry_request(request: AuxiliaryModelCallRequest) -> AuxiliaryModelCallRequest:
-    instruction = _SEGMENT_REPAIR_INSTRUCTION['TOOL_CALL']
+# 保留原工具、tool_choice、system 和消息；只向动态末尾追加已分类的纠正要求，不破坏缓存前缀。
+def _cached_compact_repair_request(request: AuxiliaryModelCallRequest, reason: str) -> AuxiliaryModelCallRequest:
+    instruction = _SEGMENT_REPAIR_INSTRUCTION[reason]
     layout = prompt_cache_layout(request.prompt)
     prompt = (CacheStructuredPrompt(layout.stable_prefix, f'{layout.volatile_suffix}\n\n{instruction}')
               if layout is not None else f'{request.prompt}\n\n{instruction}')
@@ -399,7 +402,7 @@ def _generate_vision_summary_response(request, source, budget, interrupt_check, 
     raise_if_compact_interrupted(interrupt_check)
     if _response_has_tool_calls(response):
         compact_summary_response_outcome(response, request=request)
-        no_tools = _none_tool_compact_retry_request(request)
+        no_tools = _cached_compact_repair_request(request, 'TOOL_CALL')
         if calibrated_compact_request_tokens(_request_tokens(no_tools, source), calibration) + max(0, int(media_reserve_tokens)) > budget:
             raise ConversationCompactError("随图无工具重试超出摘要预算", code=COMPACT_VISION_SUMMARY_FAILED)
         try:

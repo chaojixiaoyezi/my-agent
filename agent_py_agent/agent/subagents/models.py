@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from ..contracts.protocol_status import SUBAGENT_ENDED_STATUSES
 from .execution.executor import TestExecutor
 from .execution.records import TestExecutionRecord
 from .model_capabilities import (
@@ -201,16 +202,6 @@ SUBAGENT_FAILED_RESULT_STATUSES = frozenset({
 SUBAGENT_DEAD_STATUSES = frozenset({
     TaskStatus.CHANNEL_ERROR.value,
     TaskStatus.TIMEOUT.value,
-})
-SUBAGENT_ENDED_STATUSES = frozenset({
-    TaskStatus.DONE.value,
-    TaskStatus.FAILED.value,
-    TaskStatus.BLOCKED.value,
-    TaskStatus.CHANNEL_ERROR.value,
-    TaskStatus.TIMEOUT.value,
-    TaskStatus.CANCELLED.value,
-    TaskStatus.ABANDONED.value,
-    TaskStatus.TAKEN_OVER.value,
 })
 SUBAGENT_HANDLED_TERMINAL_STATUSES = frozenset({
     # "主代理已处理的终态":ABANDONED(崩溃调和)、CANCELLED(主代理主动取消收尾)、TAKEN_OVER(被接管)。

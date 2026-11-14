@@ -1428,6 +1428,29 @@ def _process_claimed_gateway_request_path(
             )
 
 
+def _requeue_history_preparation(context, paths, pending):
+    """只接收业务前的有进展索引准备；沿原代次短事务回队，不改变优先级或归属。"""
+    from .queue_service import GatewayClaim
+    from .recovery import requeue_current_processing_request
+    from .request_binding import GatewayActiveTurnTransition
+    from .request_errors import GatewayHistoryPreparationPending
+
+    payload = context.request_payload
+    expected = (context.request_id, payload.get('execution_attempt_id'), payload.get('lease_epoch'))
+    if (type(pending) is not GatewayHistoryPreparationPending or not pending.progressed
+            or (pending.request_id, pending.execution_attempt_id, pending.lease_epoch) != expected
+            or payload.get('kind') != 'ask'):
+        raise DataCorruptionError('GATEWAY_HISTORY_PREPARATION_IDENTITY_MISMATCH: original unstarted claim required')
+    claim = GatewayClaim(context.processing_path, context.request_id, pending.execution_attempt_id,
+                         pending.lease_epoch, str(payload.get('lease_owner') or context.worker_id))
+    transition = GatewayActiveTurnTransition(claim.path, claim.request_id, claim.execution_attempt_id)
+    requeued = requeue_current_processing_request(paths, claim, transition, not_before_at=time.time() + 0.1,
+        preserve_priority=True, deferred_reason=pending.error_code, conversation_store=context.agent.conversation_store)
+    if requeued:
+        _release_claimed_gateway_actor(paths, context.processing_path, payload, claim.execution_attempt_id)
+    return requeued
+
+
 # LLM: Only pre-business acquisition calls this; original T/P5 gate plus JSON lease/fingerprint CAS retain identity and reject pending/terminal collisions.
 # 函数用途: 将尚未开始业务的同一claim回到inbox，成功退出原transition后释放内存actor，不生成终态或释放持久P3。
 def _requeue_owner_capacity(paths: GatewayPaths, processing_path: Path, request_payload: dict) -> bool:
@@ -1465,6 +1488,7 @@ def _requeue_owner_capacity(paths: GatewayPaths, processing_path: Path, request_
 # 函数用途: 在已固定的owner租用内执行和收尾，保留审批债务、未知结果与SQLite作用域的原边界。
 def _execute_claimed_gateway_request(context: _ClaimedGatewayRequestContext, paths: GatewayPaths, timing: dict, expected: tuple) -> bool:
     from .request_binding import record_gateway_request_stage
+    from .request_errors import GatewayHistoryPreparationPending
     from .request_transactions import request_transaction_ports_scope
 
     request_agent, processing_path = context.agent, context.processing_path
@@ -1487,6 +1511,29 @@ def _execute_claimed_gateway_request(context: _ClaimedGatewayRequestContext, pat
         try:
             try:
                 response = _process_claimed_gateway_request(context)
+            except GatewayHistoryPreparationPending as pending:
+                if retirement_observation.pending_error is not None:
+                    _raise_with_pending_approval_retirement(pending, retirement_observation)
+                try:
+                    return _requeue_history_preparation(context, paths, pending)
+                except InterruptedError:
+                    # stop 可在准备完成与回队间到达；只有仍是原代次的明确取消才走既有取消收尾。
+                    fresh = read_json_file_report(processing_path, context='gateway.history_preparation.cancel').payload
+                    if (fresh.get('cancel_requested') is not True
+                            or any(fresh.get(key) != request_payload.get(key)
+                                   for key in ('id', 'execution_attempt_id', 'lease_epoch', 'lease_owner'))):
+                        raise
+                    from .request_execution import (
+                        _apply_cancelled_gateway_response,
+                        _build_gateway_response_base,
+                        _GatewayResponseBaseContext,
+                    )
+                    now = time.time()
+                    response = _build_gateway_response_base(_GatewayResponseBaseContext(
+                        request_payload, processing_path, request_id, 'ask', now))
+                    _apply_cancelled_gateway_response(response)
+                    response.update(ended_at=now, updated_at=now)
+                    # 不重入handler。唯一终态提交仍核原attempt/epoch，检查后换代也不能收掉新执行。
             except Exception as error:
                 _raise_with_pending_approval_retirement(error, retirement_observation)
             try:

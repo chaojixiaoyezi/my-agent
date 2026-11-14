@@ -158,6 +158,8 @@ def test_submission_receipt_acceptance_state_machine(
         reviewer_principal="coordinator_pro",
         reason="Missing edge test",
         now=106.0,
+        frozen_input_version=submitted.frozen_input_version,
+        submission_digest=submitted.metadata["submission_digest"],
     )
     assert rejected.state == "changes_requested"
     assert rejected.acceptance_verdict["verdict"] == "changes_requested"
@@ -180,6 +182,8 @@ def test_submission_receipt_acceptance_state_machine(
         reviewer_principal="coordinator_pro",
         reason="Looks great",
         now=108.0,
+        frozen_input_version=resubmitted.frozen_input_version,
+        submission_digest=resubmitted.metadata["submission_digest"],
     )
     assert accepted.state == "accepted"
     assert accepted.acceptance_verdict["verdict"] == "accepted"
@@ -461,7 +465,7 @@ def test_manage_handoff_board_tool_scoped_gate_and_actions(
     assert parsed_unproven["reason"] == "REQUESTER_IDENTITY_UNPROVEN"
 
     # 证明身份后放行
-    agent._current_run_params = SimpleNamespace(run_id="run-proven-001")
+    agent._current_run_params = SimpleNamespace(run_id="worker-tool")
     proven_ctx = ToolInvocationContext(runtime_snapshot=MagicMock())
 
     # 2. 动作：publish_item
@@ -511,6 +515,8 @@ def test_manage_handoff_board_tool_scoped_gate_and_actions(
         "item_id": "item-tool-1",
         "verdict": "accepted",
         "reason": "Passed all gates",
+        "frozen_input_version": "v4.0.0",
+        "submission_digest": sub_res.result_envelope["item"]["metadata"]["submission_digest"],
     }, proven_ctx)
     assert dec_res.ok
     assert dec_res.result_envelope["item"]["state"] == "accepted"
@@ -610,7 +616,9 @@ def test_tool_error_handling_and_input_validation(
     assert not res_missing_param.ok
     assert res_missing_param.error_code == "TOOL_INVALID_ARGUMENTS"
 
+    # 状态机替身用各自已证明的main-self身份接收；未知别名拒绝由独立身份测试覆盖。
     # 4. publish_item 发生写入集重叠
+    agent._current_run_params = SimpleNamespace(run_id="act1")
     tool.execute_scoped({
         "action": "publish_item",
         "case_id": case_id,
@@ -621,6 +629,7 @@ def test_tool_error_handling_and_input_validation(
         "item_id": "item-overlap-1",
     }, ctx)
 
+    agent._current_run_params = SimpleNamespace(run_id="act2")
     res_overlap = tool.execute_scoped({
         "action": "publish_item",
         "case_id": case_id,
@@ -943,6 +952,10 @@ def test_scenario_d_self_review_forbidden_and_subagent_reviewer_override(
         collaboration_store=collab_store,
         workspace_root=tmp_path / "workspace",
         _current_run_params=SimpleNamespace(run_id=subagent_run_id),
+        subagents=SimpleNamespace(load=lambda run_id: SimpleNamespace(
+            id=run_id, root_id="review-root", role="worker",
+            attributes={"role_template": {"id": "explicit-acceptor", "can_accept": True,
+                                           "can_spawn_children": False}})),
     )
     monkeypatch.setattr(
         "agent_py_agent.agent.agent_core.orchestration.tools.handoff_board_tool.current_subagent_run_id",
@@ -962,6 +975,8 @@ def test_scenario_d_self_review_forbidden_and_subagent_reviewer_override(
         "item_id": item.item_id,
         "verdict": "accepted",
         "reviewer_principal": "conflicting-reviewer-name",
+        "frozen_input_version": "v1.0",
+        "submission_digest": collab_store.load_handoff_item(case_id, item.item_id).metadata["submission_digest"],
     }, ctx)
     assert dec_res.ok
     envelope = dec_res.result_envelope
@@ -1113,3 +1128,92 @@ def test_scenario_g_unmocked_simple_agent_workspace_resolution(tmp_path: Path) -
     assert sync_fail.result_envelope["error_code"] == "PATH_TRAVERSAL_FORBIDDEN"
     assert sync_fail.effect_outcome == "not_started"
     assert not outside_dir.exists()
+
+
+@pytest.mark.parametrize("claimed_actor", ["actor-B", None, 42, {"actor_id": "actor-A"}])
+@pytest.mark.parametrize("action", ["ack", "submit"])
+def test_mailbox_payload_actor_cannot_forge_writer(
+    tmp_path: Path, collab_store: CollaborationStore,
+    handoff_service: HandoffBoardService, claimed_actor: Any, action: str,
+) -> None:
+    case = collab_store.open_case({"thread_id": "t1"})
+    handoff_service.publish_item(
+        case_id=case.case_id, request_id="req-identity", responsible_actor="actor-A",
+        frozen_input_version="v1", item_id="identity-item",
+    )
+    root = tmp_path / "mailbox"
+    root.mkdir()
+    layout = create_external_mailbox_layout(root, "actor-A")
+    adapter = ExternalMailboxAdapter(allowed_roots=[root])
+    adapter.sync_external_mailbox(handoff_service, layout)
+    if action == "submit":
+        handoff_service.record_ack(
+            case_id=case.case_id, item_id="identity-item",
+            recipient_ack={"actor_id": "actor-A"}, frozen_input_version="v1", ack_id="original-ack",
+        )
+    before = collab_store.load_handoff_item(case.case_id, "identity-item")
+    payload_field = "recipient_ack" if action == "ack" else "payload"
+    message = {"action": action, "case_id": case.case_id, "item_id": "identity-item",
+               "frozen_input_version": "v1", payload_field: {"actor_id": claimed_actor}}
+    layout.actor_inbox_path.write_text(json.dumps(message) + "\n", encoding="utf-8")
+    report = adapter.sync_external_mailbox(handoff_service, layout)
+    assert report["errors"][0]["error_code"] == "MAILBOX_ACTOR_MISMATCH"
+    assert report["errors"][0]["effect_outcome"] == "not_started"
+    assert collab_store.load_handoff_item(case.case_id, "identity-item") == before
+    message[payload_field] = {}
+    with layout.actor_inbox_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(message) + "\n")
+    report = adapter.sync_external_mailbox(handoff_service, layout)
+    assert report["errors"] == []
+    after = collab_store.load_handoff_item(case.case_id, "identity-item")
+    if action == "ack":
+        assert after.recipient_ack["actor_id"] == "actor-A"
+    else:
+        assert after.metadata["submission_payload"]["actor_id"] == "actor-A"
+
+
+@pytest.mark.parametrize("mode", ["root", "child", "unbound", "foreign", "conflicting_input"])
+def test_open_case_uses_canonical_run_origin_without_guessing(tmp_path: Path, mode: str) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"),
+                                    enable_subagents=True), tmp_path)
+    owner = agent.home_paths.owner_id
+    thread = agent.conversation_store.threads.get_or_create({
+        "canonical_user_id": "qa", "channel": "local", "channel_conversation_id": "case-origin",
+        "channel_user_id": "qa", "owner_id": owner, "owner_home": str(agent.home_paths.owner_home_dir),
+    })
+    root_id = "case-origin-root"
+    agent.conversation_store.tasks.bind({"thread_id": thread.thread_id, "task_id": root_id,
+                                         "goal": "origin", "status": "active"})
+    repo = agent.subagents.runtime_db
+    task = repo.create_task(owner_id="foreign-owner" if mode == "foreign" else owner,
+                            thread_id="" if mode == "unbound" else thread.thread_id,
+                            conversation_task_id="" if mode == "unbound" else root_id)
+    run = repo.create_task_run(task_id=task["task_id"])
+    repo.create_agent_run(task_run_id=run["task_run_id"], run_id=root_id, role="main")
+    child = (agent.subagents.create_run(goal="child", thought="", plan=["p"], parent_id=root_id,
+                                       root_id=root_id, depth=1) if mode != "foreign" else None)
+    agent._current_run_params = SimpleNamespace(run_id=root_id, task_id=root_id, task_attributes={
+        "conversation_task_id": root_id, "conversation_thread_id": thread.thread_id})
+    if mode == "child":
+        agent._current_subagent_run_id = child.id
+    tool = ManageHandoffBoardTool(agent=agent)
+    service = tool._resolve_service()
+    params: dict[str, object] = {"title": "scope-test"}
+    if mode == "conflicting_input":
+        params["thread_id"] = "another-thread"
+    if mode == "foreign":
+        with pytest.raises(HandoffError, match="CASE_OWNER_MISMATCH"):
+            tool._native_case_context()
+        assert service.store.list_cases() == []
+        return
+    outcome = tool._handle_open_case(service, params)
+    if mode == "conflicting_input":
+        assert not outcome.ok
+        assert outcome.error_code == "CASE_SCOPE_MISMATCH"
+        assert service.store.list_cases() == []
+        return
+    assert outcome.ok, outcome.output
+    payload = json.loads(outcome.output)
+    assert payload["case"]["thread_id"] == ("" if mode == "unbound" else thread.thread_id)
+    assert payload["case"]["task_id"] == ("" if mode == "unbound" else root_id)
+    assert payload["scope_resolution"]["case_context"] == ("unbound" if mode == "unbound" else "canonical_task")

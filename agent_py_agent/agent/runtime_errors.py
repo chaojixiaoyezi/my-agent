@@ -346,7 +346,42 @@ def _report(
         context=str(context or "").strip(),
     ).to_dict()
     report.update(_provider_diagnostic_fields(exc, template.category))
+    compact = _compact_diagnostic_fields(exc)
+    report.update(compact)
+    if compact:
+        report["message"] = redact_diagnostic_text(report["message"])
+        report["model_message"] = report["message"]
     return report
+
+
+def _compact_diagnostic_fields(exc: BaseException) -> dict[str, Any]:
+    """只投影本次压缩已经确认的typed标量；不遍历异常正文或重新估算另一套容量。"""
+    from dataclasses import fields
+
+    from .conversation.compact_guard import (
+        CompactCapacityFacts,
+        CompactRecoveryFacts,
+        ConversationCompactError,
+    )
+
+    if not isinstance(exc, ConversationCompactError):
+        return {}
+    output: dict[str, Any] = {}
+    boolean_fields = {"pressure_forced", "compact_committed", "next_request_sent", "prior_tools_replayed"}
+    for name, value, schema in (("compact_capacity", exc.capacity, CompactCapacityFacts),
+                                ("compact_recovery", exc.recovery_facts, CompactRecoveryFacts)):
+        if not isinstance(value, schema):
+            continue
+        safe = {}
+        for item in fields(schema):
+            raw = getattr(value, item.name)
+            if item.name in boolean_fields:
+                if type(raw) is bool:
+                    safe[item.name] = raw
+            elif type(raw) is int and raw >= 0:
+                safe[item.name] = raw
+        output[name] = safe
+    return output
 
 
 def _provider_diagnostic_fields(exc: BaseException, category: str) -> dict[str, Any]:

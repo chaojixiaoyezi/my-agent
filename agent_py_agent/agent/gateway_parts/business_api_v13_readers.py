@@ -511,14 +511,16 @@ def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, op
 
 # LLM: 注册只核schema与来源存在性，不能读取历史正文或计算资源快照；坏源在实际读取时保持unknown。
 # 函数用途: 廉价装配同owner默认reader，不接受请求选择owner或文件路径。
-def default_observation_readers(owner_home, owner_id, store, runtime, *, resource_provider=None) -> dict:
+def default_observation_readers(owner_home, owner_id, store, runtime, *, resource_provider=None,
+                                workspace_task_path_template=None) -> dict:
     home = Path(owner_home).resolve()
     if store is not None and not Path(store.storage.root).resolve().is_relative_to(home):
         return {}
     repo = None
     if runtime is not None and Path(runtime.db_path).resolve().is_relative_to(home):
         repo = RuntimeRepository(runtime.db_path, read_only=True)
-    source = _OwnerReaders(home, owner_id, store, repo, resource_provider=resource_provider)
+    source = _OwnerReaders(home, owner_id, store, repo, resource_provider=resource_provider,
+        workspace_task_path_template=workspace_task_path_template)
     readers = {}
     resource_available = source.resource_exists()
     if source.opens_table('tool_operations'):
@@ -561,9 +563,10 @@ class _OwnerReaders:
     _cursor_secret = os.urandom(32)
 
     # 函数用途: 绑定来源并派生隔离的日志游标签名，不创建执行器或持久账本。
-    def __init__(self, home, owner, store, repo, *, resource_provider=None):
+    def __init__(self, home, owner, store, repo, *, resource_provider=None, workspace_task_path_template=None):
         self.home, self.owner, self.store, self.repo = home, owner, store, repo
         self.resource_provider = resource_provider
+        self.workspace_task_path_template = workspace_task_path_template
         namespace = (str(Path(store.storage.root)) if store is not None else '', str(home), owner)
         self.key = hmac.digest(self._cursor_secret,
             json.dumps(namespace, ensure_ascii=False, separators=(',', ':')).encode(), 'sha256')
@@ -984,6 +987,7 @@ class _OwnerReaders:
         request = source_page or ObservationSourcePage(limit=params.get('limit', 50))
         position = request.position or {'phase': 'registered', 'after': ''}
         phase, after = position.get('phase'), position.get('after')
+        source_coverage = position.get('source_coverage', 'unknown')
         if phase not in {'discovery', 'registered', 'runtime', 'media'} or not isinstance(after, (str, int)):
             raise BusinessError('CURSOR_EXPIRED')
         records, next_position = [], None
@@ -996,6 +1000,7 @@ class _OwnerReaders:
                 if discovery['coverage'] == 'partial':
                     return ObservationPage((), 'partial', source_paged=True,
                         next_position={'phase': 'discovery', 'after': discovery.get('after', 0)})
+                source_coverage = discovery['coverage']
                 revision = registry_locator.revision(self.home)
                 after = ''
             rows, next_after = registry_locator.page(self.home, after=str(after),
@@ -1006,6 +1011,7 @@ class _OwnerReaders:
                     found = registered_artifact(self, artifact_id, discover=False, with_content=False)
                 except ObservationSourceError:
                     incomplete = True
+                    source_coverage = 'unknown'
                     continue
                 if found is not None:
                     records.append(found[0])
@@ -1013,7 +1019,7 @@ class _OwnerReaders:
                 next_position = ({'phase': 'registered', 'after': next_after} if next_after
                     else {'phase': 'runtime', 'after': 0})
                 return ObservationPage(tuple(records), 'unknown' if incomplete else 'partial', source_paged=True,
-                    next_position={**next_position, 'revision': revision})
+                    next_position={**next_position, 'revision': revision, 'source_coverage': source_coverage})
             phase, after = 'runtime', 0
         if phase == 'runtime':
             if self.runtime_artifacts:
@@ -1031,12 +1037,15 @@ class _OwnerReaders:
                 if records or len(ids) > request.limit:
                     next_position = ({'phase': 'runtime', 'after': ids[request.limit - 1]} if len(ids) > request.limit
                         else {'phase': 'media', 'after': ''})
-                    return ObservationPage(tuple(records), 'partial', source_paged=True, next_position={**next_position, 'revision': revision})
+                    return ObservationPage(tuple(records), 'partial', source_paged=True, next_position={**next_position, 'revision': revision, 'source_coverage': source_coverage})
             phase, after = 'media', ''
         from ..conversation.task_artifact_observation import _read_source
 
         parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
         raw = _read_source(self.home, parts, 2 * 1024 * 1024, 'ARTIFACT_REGISTRY_UNREADABLE')
+        media_revision = hashlib.sha256(raw).hexdigest() if raw is not None else 'missing'
+        if position.get('media_revision') is not None and position['media_revision'] != media_revision:
+            raise BusinessError('CURSOR_EXPIRED')
         if raw is not None:
             if len(raw) > 2 * 1024 * 1024:
                 raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_MEDIA_REGISTRY_READ_BUDGET',
@@ -1054,10 +1063,11 @@ class _OwnerReaders:
                     'task_id': item.task_id or None, 'space_id': meta['space_id'], 'available': item.status == 'ready'}
                 records.append(ObservationRecord(value, self.owner, meta['space_id'], task_id=item.task_id or None))
             if len(selected) > request.limit:
-                next_position = {'phase': 'media', 'after': selected[request.limit - 1].artifact_id}
-        # 原run发现是渐进的；没有覆盖证明不能把旧registry的漏项宣称为完整空集。
-        return ObservationPage(tuple(records), 'unknown', source_paged=True,
-            next_position={**next_position, 'revision': revision} if next_position else None)
+                next_position = {'phase': 'media', 'after': selected[request.limit - 1].artifact_id,
+                    'media_revision': media_revision}
+        # 末页沿所有已核验来源的覆盖证明；旧源未知或前页坏登记不能被媒体空页抹平。
+        return ObservationPage(tuple(records), 'partial' if next_position else source_coverage, source_paged=True,
+            next_position={**next_position, 'revision': revision, 'source_coverage': source_coverage} if next_position else None)
 
     # LLM: 指定旧版本不回退latest，无安全内容运输口的runtime快照不暴露路径。
     # 函数用途: 返回精确产物版本和原业务媒体读取引用。
@@ -1187,9 +1197,20 @@ class _OwnerReaders:
     def logs(self, params):
         source = params['source_ref']
         if source.startswith('tool-operation://'):
+            run_id, separator, operation_id = source.removeprefix('tool-operation://').partition('/')
+            if not separator or not run_id or not operation_id or '/' in operation_id:
+                raise ObservationSourceError('INVALID_SCHEMA', details={
+                    'field_path': '$.params.source_ref',
+                    'reason': '工具日志引用必须是原回执的完整结果引用，不能添加日志路径后缀。',
+                    'next_action': '先以 tool_calls.list 返回的 operation_id 调 tool_calls.get，再原样使用 data.result_ref 调 logs.read；不要拼接 /logs。',
+                    'example': 'tool-operation://<run_id>/<operation_id>', 'retry_same_request': False})
             return self.operation_logs(params)
         if not re.fullmatch('[0-9a-f]{32}', source):
-            return ObservationPage()
+            raise ObservationSourceError('INVALID_SCHEMA', details={
+                'field_path': '$.params.source_ref',
+                'reason': '不是完整工具结果引用或有效的展示归档编号。',
+                'next_action': '先调用 tool_calls.get，原样使用其 data.result_ref；不要将 operation_id、审计编号或宿主路径当 source_ref。',
+                'example': 'tool-operation://<run_id>/<operation_id>', 'retry_same_request': False})
         root = Path(self.store.storage.root) / 'display_archives'
         if root.is_symlink():
             raise ValueError('archive root changed')
@@ -1252,7 +1273,7 @@ class _OwnerReaders:
                     'from_cursor': params.get('cursor'), 'to_cursor': None,
                     'reset_required': False}}, facts),))
         header = {'operation_id': operation_id, 'return_code': display.get('return_code'),
-            'redacted_input': facts.value['_input']}
+            'redacted_input': redact_sensitive_value(facts.value['_input'])}
         streams = [('host', json.dumps(header, ensure_ascii=False, sort_keys=True))]
         complete = display.get('capture_complete') is True
         truncated = False
@@ -1477,9 +1498,21 @@ class _OwnerReaders:
     @observation_request()
     def resources(self, params):
         value = self.current_resources()
-        if value is None or params.get('filter'):
+        if value is None:
             raise ValueError('owner resource meter unavailable')
-        return ObservationPage((ObservationRecord(value, self.owner),))
+        filters = params.get('filter', {})
+        if not filters:
+            return ObservationPage((ObservationRecord(value, self.owner),))
+        # 首个模型回合尚无账本时也可观察真实资源；已有坏账不能借此降级掩盖。
+        if self.usage_exists():
+            raise ValueError('filtered usage ledger unavailable')
+        since = datetime.fromisoformat(filters['since'].replace('Z', '+00:00')).timestamp() if filters.get('since') else 0
+        until = datetime.fromisoformat(filters['until'].replace('Z', '+00:00')).timestamp() if filters.get('until') else float('inf')
+        if until < since:
+            raise ValueError('usage window reversed')
+        common = self.empty_usage_scope(filters)
+        return ObservationPage((_ScopedUsageRecord(value, self.owner, **common,
+            filter_digest=_digest(filters)),))
 
     # LLM: decision_audit只有已报输入和未结束估算输入，其余字段null，决策子集不宣称完整。
     # 函数用途: 惰性读取原决策用量与同请求资源快照并明确未知范围。
@@ -1494,6 +1527,37 @@ class _OwnerReaders:
     # LLM: 空组只能由同owner的规范任务、Agent或catalog证明范围；不以filter自证、不缓存授权。
     # 函数用途: 为合法无事件范围取准确身份，缺源、跨owner及未知范围仍失败关闭。
     def empty_usage_scope(self, filters):
+        if filters.get('attempt_id') or filters.get('workflow_run_id'):
+            raise ValueError('empty usage scope not witnessed')
+        if filters.get('run_id'):
+            with self.repo._runtime_connection() as conn:
+                rows = conn.execute('SELECT t.thread_id,t.task_id,tr.metadata_json FROM agent_runs ar '
+                    'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id '
+                    'JOIN tasks t ON t.task_id=tr.task_id WHERE ar.run_id=? AND t.owner_id=? LIMIT 2',
+                    (filters['run_id'], self.owner)).fetchall()
+            if len(rows) != 1:
+                raise ValueError('usage run source unavailable')
+            row = rows[0]
+            thread = _observation_thread(self.store, row['thread_id'])
+            if thread.owner_id != self.owner:
+                raise ValueError('usage run thread owner mismatch')
+            metadata = json.loads(row['metadata_json'])
+            raw = metadata.get('business_context')
+            context = BusinessExecutionContext.from_dict(raw) if raw else None
+            if context:
+                if context.owner_id != self.owner or metadata.get('session_task_ref') != context.task_id:
+                    raise ValueError('usage run context mismatch')
+                task = _observation_task(self.store, context.task_id)
+                if task is None or task.target_thread_id != thread.thread_id:
+                    raise ValueError('usage run task mismatch')
+                sender = _observation_thread(self.store, task.sender_thread_id)
+                if sender.owner_id != self.owner:
+                    raise ValueError('usage run sender owner mismatch')
+            identity = background_identity(thread)
+            return {'run_id': filters['run_id'], 'thread_id': thread.thread_id,
+                'task_id': context.task_id if context else row['task_id'],
+                'space_id': context.space_id if context else identity.space_id if identity else None,
+                'project_ref': context.project_ref if context else identity.project_ref if identity else None}
         if filters.get('task_id'):
             task = _observation_task(self.store, filters['task_id'])
             if task is None:

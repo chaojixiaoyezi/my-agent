@@ -334,6 +334,8 @@ class FinalizationService:
         final_text = accepted_final_text(ctx, ctx.final_response, project=lambda text: text).rstrip()
         if honest_text and not final_text and runtime_status == "ok" and commentary_only_response(ctx.final_response):
             runtime_status, runtime_reason, runtime_source = "user_reply_unavailable", "USER_REPLY_UNAVAILABLE", "tool_loop"
+        delivery_artifacts = _structured_delivery_artifacts(ctx, agent=self._agent)
+        delivery_diagnostics = (ctx.task_attributes or {}).get('child_delivery_diagnostics', [])
         return AgentRunResult(
             prompt=ctx.final_prompt,
             response=redact_executed_operation_labels(
@@ -379,7 +381,8 @@ class FinalizationService:
             runtime_source=runtime_source,
             turn_end_reason=turn_end_reason,
             conversation_task_completed=conversation_task_completed(ctx.task_attributes),
-            delivery_artifacts=_structured_delivery_artifacts(ctx),
+            delivery_artifacts=delivery_artifacts,
+            delivery_artifact_diagnostics=list(delivery_diagnostics) if isinstance(delivery_diagnostics, list) else [],
             message_tool_deliveries=_message_tool_deliveries(ctx, agent=self._agent),
             operation_verification=operation_verification,
             tool_runtime_evidence=_finalization_learning_evidence(self._agent, ctx),
@@ -691,28 +694,91 @@ def _pack_verification_facts(agent: object, ctx: FinalizeContext) -> dict[str, o
 
 # LLM: Channel attachments come only from ready artifact-registry records for declared output targets.
 # 函数用途: 从本轮结构化工具记录提取可发送产物，不遍历 output/，也不从模型正文猜路径。
-def _structured_delivery_artifacts(ctx: FinalizeContext) -> list[dict[str, object]]:
+def _structured_delivery_artifacts(ctx: FinalizeContext, *, agent=None) -> list[dict[str, object]]:
     roots, exact_paths = _declared_delivery_targets(ctx.task_attributes, getattr(ctx, "delivery_contract", None))
     if not roots and not exact_paths:
         return []
-    selected: list[dict[str, object]] = []
-    seen: set[tuple[str, str]] = set()
-    for record in list(ctx.archive_tool_calls or []):
+    selected: dict[tuple[str, str], list[dict[str, object]]] = {}
+    run_id, task_id, attempt_id = (str(getattr(ctx, key, '') or '') for key in ('run_id', 'task_id', 'attempt_id'))
+    owner = str(getattr(getattr(agent, 'home_paths', None), 'owner_id', '') or '')
+    from .child_delivery_artifacts import completed_child_artifact_refs
+    child_refs = completed_child_artifact_refs(agent, ctx)
+
+    def diagnostic(code):
+        attrs = ctx.task_attributes
+        if isinstance(attrs, dict):
+            rows = attrs.setdefault('child_delivery_diagnostics', [])
+            if isinstance(rows, list) and len(rows) < 8:
+                rows.append({'error_code': code, 'coverage': 'partial', 'stage': 'delivery_observation',
+                    'effect_outcome': 'not_started', 'run_id': run_id,
+                    'next_action': '沿原产物ID和版本核对当前登记；不要盲重写、采用未登记字节或用旧版补交。'})
+
+    for record in ctx.archive_tool_calls or []:
         if not isinstance(record, dict):
+            continue
+        if attempt_id and record.get('attempt_id') and record['attempt_id'] != attempt_id:
+            if record.get('artifact_registry_refs'):
+                diagnostic('DELIVERY_ARTIFACT_ATTEMPT_MISMATCH')
             continue
         refs = record.get("artifact_registry_refs")
         if not isinstance(refs, list):
             continue
         for ref in refs:
-            item = _delivery_artifact_from_registry_ref(ref, roots, exact_paths)
-            if item is None:
+            if not isinstance(ref, dict):
                 continue
-            key = (str(item.get("artifact_id") or ""), str(item.get("path") or ""))
-            if key in seen:
+            origin = tuple(str(ref.get(key) or '') for key in ('run_id', 'task_id', 'agent_id'))
+            if (run_id and origin[0] != run_id or task_id and origin[1] != task_id
+                    or owner and origin[2] not in ('', owner, run_id)):
+                diagnostic('DELIVERY_ARTIFACT_IDENTITY_MISMATCH')
                 continue
-            seen.add(key)
-            selected.append(item)
-    return selected
+            text = str(ref.get('path') or '')
+            if not text:
+                continue
+            path = Path(text).expanduser().resolve(strict=False)
+            if path not in exact_paths and not any(_path_is_within(path, root) for root in roots):
+                continue
+            key = (str(ref.get('artifact_id') or ''), str(path))
+            previous = selected.get(key)
+            if previous and tuple(str(previous[0].get(field) or '') for field in ('run_id', 'task_id', 'agent_id')) != origin:
+                diagnostic('DELIVERY_ARTIFACT_IDENTITY_MISMATCH')
+                continue
+            selected.setdefault(key, []).append(ref)
+
+    if selected and agent is not None:
+        from ..artifacts.registry import latest_artifact_records_report
+        from .run_task_workspace_writer import current_run_artifact_registry_root
+
+        try:
+            # 仅当前运行的一本原登记簿；超限明确partial，不扫描Owner或产物目录。
+            report = latest_artifact_records_report(current_run_artifact_registry_root(agent, ctx), max_bytes=4 * 1024 * 1024)
+            if report.errors:
+                diagnostic('DELIVERY_ARTIFACT_REGISTRY_UNREADABLE_OR_PARTIAL')
+                selected.clear()
+            else:
+                for key, candidates in list(selected.items()):
+                    canonical = report.records.get(key[0])
+                    # 原登记物理顺序/当代canonical才是版本权威；不按墙钟、归档晚到或旧摘要决定。
+                    matched = next((ref for ref in reversed(candidates) if canonical is not None and all(
+                        getattr(canonical, field) == ref.get(field) for field in
+                        ('artifact_id', 'run_id', 'task_id', 'agent_id', 'path', 'sha256', 'size_bytes', 'status'))), None)
+                    if matched is None:
+                        diagnostic('DELIVERY_ARTIFACT_VERSION_MISMATCH')
+                        selected.pop(key)
+                    else:
+                        selected[key] = [matched]
+        except (OSError, ValueError, TypeError, RuntimeError):
+            diagnostic('DELIVERY_ARTIFACT_REGISTRY_UNAVAILABLE')
+            selected.clear()
+    result = [item for candidates in selected.values()
+              if (item := _delivery_artifact_from_registry_ref(candidates[-1], roots, exact_paths)) is not None]
+    # 子代仍只沿既有精确父谱系核验通道，不拿父登记簿或同名路径收养其它执行体。
+    seen = {(item['artifact_id'], item['path']) for item in result}
+    for ref in child_refs:
+        item = _delivery_artifact_from_registry_ref(ref, roots, exact_paths)
+        if item is not None and (item['artifact_id'], item['path']) not in seen:
+            result.append(item)
+            seen.add((item['artifact_id'], item['path']))
+    return result
 
 
 # LLM: 实际Agent输出须复读原canonical操作与本ctx；不从模型/MCP字典或正文认领回复槽，纯投影调用不授执行权。
@@ -833,6 +899,8 @@ def _delivery_artifact_from_registry_ref(
         "kind": str(ref.get("kind") or "file"),
         "sha256": str(ref.get("sha256") or ""),
         "size_bytes": _nonnegative_int(ref.get("size_bytes")),
+        **{key: ref[key] for key in ('task_id', 'run_id')
+           if isinstance(ref.get(key), str) and ref[key].strip()},
         "ok": True,
     }
 

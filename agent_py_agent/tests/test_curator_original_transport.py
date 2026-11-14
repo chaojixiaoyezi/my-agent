@@ -437,3 +437,37 @@ def test_schema_shaped_canonical_error_keeps_identity_at_final_wrapper(kind):
     else:
         assert error.reason == "worker_exit_unconfirmed" and error.automatic_replay is False
         assert not hasattr(error, "operation_entered") and not isinstance(error, TimeoutError)
+
+
+@pytest.mark.parametrize("level,thinking,effort", [("off", {"type": "disabled"}, None), ("max", None, "max")])
+def test_curator_serializes_authorized_profile_reasoning(level, thinking, effort):
+    """策展与同族Skill学习请求不丢弃所选模型的off/effort。"""
+    from agent_py_agent.agent.backends import get_backend
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    config = AgentConfig(model_backend="openai_compatible", model_name="deepseek-v4-flash",
+                         api_base="https://api.deepseek.com", api_key="fake",
+                         model_reasoning_effort=level, stream_enabled=False)
+    backend = get_backend("openai_compatible", config)
+    payloads = []
+    def transport(_path, payload, _headers, **_options):
+        payloads.append(payload)
+        return {"choices": [{"message": {"content": '{"marker":"synthetic"}'}, "finish_reason": "stop"}]}
+    backend.request_json = transport
+    curator_backend.call_backend_with_timeout(backend, prompt="合成材料",
+        response_schema={"type": "object"}, timeout_seconds=2)
+    assert len(payloads) == 1
+    assert payloads[0].get("thinking") == thinking
+    assert payloads[0].get("reasoning_effort") == effort
+
+
+def test_curator_legacy_backend_preserves_keyword_shape_when_reasoning_unsupported():
+    calls = []
+    def generate(prompt, *, response_schema):
+        calls.append((prompt, response_schema))
+        return "legacy"
+    backend = SimpleNamespace(generate_structured=generate,
+                              config=SimpleNamespace(model_reasoning_effort="off"))
+    assert curator_backend.call_backend_with_timeout(backend, prompt="合成材料",
+        response_schema={"type": "object"}, timeout_seconds=2) == "legacy"
+    assert calls == [("合成材料", {"type": "object"})]

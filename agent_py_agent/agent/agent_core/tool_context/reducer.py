@@ -50,8 +50,8 @@ def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[
         )
         if (archive_record.get("output_externalized") and not _preserve_prompt_output(result)
                 and archive_record.get("preserve_prompt_output") is not True):
-            rendered = (_without_own_archive_refs(projected, archive_record).render_for_prompt()
-                        + "\n" + compact_archive_pointer(archive_record))
+            rendered = (_without_own_archive_refs(projected, archive_record).render_for_prompt(project_text=lambda text: _redact_component(result, text))
+                        + "\n" + _redact_component(result, compact_archive_pointer(archive_record)))
         else:
             rendered = _inline_result_with_archive_anchor(projected, archive_record)
     elif _preserve_prompt_output(result) or not archive_record.get(
@@ -62,14 +62,15 @@ def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[
             archive_record,
         )
     else:
-        rendered = _externalized_result_summary(result, archive_record)
+        rendered = _redact_component(result, _externalized_result_summary(result, archive_record))
     facts = render_tool_runtime_facts(_handler_details(result))
     if facts:
-        rendered = f"{rendered}\n{facts}"
-    return redact_tool_output_text(
-        rendered,
-        redaction=_output_redaction(result),
-    )
+        rendered = f"{rendered}\n{_redact_component(result, facts)}"
+    return rendered
+
+
+def _redact_component(result: ToolResult, text: str) -> str:
+    return redact_tool_output_text(text, redaction=_output_redaction(result))
 
 
 # LLM: 仅精确匹配本次归档的typed tool_output引用；source_artifact_ref可能是reader的来源逻辑ref，不能滤掉。
@@ -178,7 +179,9 @@ def _output_redaction(result: ToolResult) -> str:
 # LLM: 只在直接展示副本省略本次物理自归档ref，外置摘要选择不受影响；read_artifact继续原source ref，不能自读包装结果。
 # 函数用途: 给普通内联结果保留唯一逻辑续读锚点；artifact读取直接保留自己的分页合同，不改变原refs。
 def _inline_result_with_archive_anchor(result: ToolResult, archive_record: dict[str, object]) -> str:
-    rendered = _without_own_archive_refs(result, archive_record).render_for_prompt()
+    rendered = _without_own_archive_refs(result, archive_record).render_for_prompt(
+        project_text=lambda text: _redact_component(result, text),
+    )
     if result.tool_name == "read_artifact":
         return rendered
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("source_artifact_ref") or "").strip()
@@ -193,7 +196,7 @@ def _inline_result_with_archive_anchor(result: ToolResult, archive_record: dict[
     ]
     if scoped_call_id:
         lines.append(f"- read_artifact_hint: {_read_artifact_hint(scoped_call_id, archive_record)}")
-    return "\n".join(lines)
+    return "\n".join((lines[0], _redact_component(result, "\n".join(lines[1:]))))
 
 
 # LLM: Model calls carry only the logical ref; run/task/request identity is host-injected and must

@@ -698,3 +698,96 @@ def test_workflow_preserves_publish_cause_and_rollback_diagnostics(tmp_path, mon
     assert remaining and all(path.name.startswith('.staging-') for path in remaining)
     for path in remaining:
         original_shutil.rmtree(path)
+
+
+@pytest.mark.parametrize('phase,path_role', [
+    ('run_out_prepare', 'run_out_dir'),
+    ('manifest_read', 'run_out_dir'),
+    ('data_source_close', 'datasource_manifest'),
+    ('scratch_cleanup', 'staging_root'),
+])
+def test_archive_missing_leaf_reports_safe_exact_phase(tmp_path, monkeypatch, phase, path_role):
+    """同一errno须定位到宿主实际阶段；不回显路径，也不把执行后故障说成未启动。"""
+    from agent_py_agent.agent.workflows import datasource_runtime, run_artifacts
+
+    home, _, engine = setup(tmp_path, 'import json\nprint(json.dumps({"value":7}))')
+    WorkflowStore(home).save_workflow(definition())
+
+    def missing():
+        return FileNotFoundError(2, 'private customer secret', '/private/customer/token-secret')
+
+    if phase == 'run_out_prepare':
+        original = runner_module.open_directory_beneath
+
+        def open_directory(root, parts, **options):
+            if parts == ('run_out',) and options.get('create'):
+                raise missing()
+            return original(root, parts, **options)
+
+        monkeypatch.setattr(runner_module, 'open_directory_beneath', open_directory)
+    elif phase == 'manifest_read':
+        def manifest(*_args):
+            raise missing()
+
+        monkeypatch.setattr(run_artifacts, '_manifest', manifest)
+    elif phase == 'data_source_close':
+        original = datasource_runtime.ScriptDatasourceRuntime.close
+
+        def close(runtime):
+            original(runtime)
+            raise missing()
+
+        monkeypatch.setattr(datasource_runtime.ScriptDatasourceRuntime, 'close', close)
+    else:
+        original = runner_module.shutil.rmtree
+
+        def remove(path, *args, **options):
+            result = original(path, *args, **options)
+            if Path(path).name.startswith('produce_'):
+                raise missing()
+            return result
+
+        monkeypatch.setattr(runner_module.shutil, 'rmtree', remove)
+    record = engine.run_workflow(definition(), owner_id='local/main')
+    step = record.steps[0]
+    assert record.status == 'failed' and step.error_code == 'SCRIPT_RUN_OUT_HARVEST_FAILED'
+    facts = step.escalation_result['execution_error']
+    assert facts['archive_phase'] == phase and facts['path_role'] == path_role
+    assert {'exception_type': 'FileNotFoundError', 'errno': 2} in facts['cause_chain']
+    expected = 'not_started' if phase == 'run_out_prepare' else 'unknown'
+    assert step.escalation_result['effect_outcome'] == expected
+    assert 'customer' not in json.dumps(record.to_dict()) and 'token-secret' not in json.dumps(record.to_dict())
+
+
+@pytest.mark.parametrize('operation', ['publish', 'discard'])
+def test_archive_rethrow_keeps_original_io_cause(tmp_path, monkeypatch, operation):
+    """回滚重复遇同一RunOutError时不能用自身覆盖__cause__，丢掉原errno。"""
+    from agent_py_agent.agent.workflows.run_artifacts import (
+        RunArtifactBatch,
+        RunOutError,
+        RunOutTarget,
+    )
+
+    home, scratch = tmp_path / 'owner', tmp_path / 'scratch'
+    home.mkdir()
+    (scratch / 'run_out').mkdir(parents=True)
+    (scratch / 'run_out/item.txt').write_text('synthetic')
+    batch = RunArtifactBatch(RunOutTarget(home, 'new-diagnostic', 'produce', 'a' * 32),
+                             OwnerQuotaEnforcer(home, max_bytes=0))
+    assert batch.stage(scratch, max_files=64, max_bytes=1024)
+    original = batch._parent
+    cause = FileNotFoundError(2, 'private path', '/private/customer/secret')
+    failure = RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED')
+    failure.__cause__ = cause
+
+    def missing_parent(**_options):
+        raise failure
+
+    with monkeypatch.context() as patch:
+        patch.setattr(batch, '_parent', missing_parent)
+        with pytest.raises(RunOutError) as caught:
+            getattr(batch, operation)()
+        assert caught.value is failure and failure.__cause__ is cause
+        assert {'exception_type': 'FileNotFoundError', 'errno': 2} in failure.diagnostics()['cause_chain']
+    assert batch._parent == original
+    batch.discard()

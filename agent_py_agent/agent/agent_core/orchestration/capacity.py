@@ -29,11 +29,12 @@ def checked_creation_capacity(
 ) -> tuple[int, dict[str, int]] | ToolHandlerOutcome:
     try:
         slots, limits = available_creation_slots(agent)
-    except SubagentCapacityStateError:
+    except SubagentCapacityStateError as exc:
         return ToolHandlerOutcome(
             "create_subagents",
             False,
-            "当前无法读取权威子代理容量状态；本批没有创建任何子代理。",
+            f"当前无法读取权威子代理容量状态（{exc}）；本批没有创建任何子代理。"
+            "请核实容量账本可读、父代理记录完整后再重试，不要原样盲目重试。",
             error_code="SUBAGENT_CAPACITY_UNAVAILABLE",
             effect_outcome="not_started",
         )
@@ -160,8 +161,11 @@ def cumulative_created_child_count(agent: object, parent_run_id: str | None = No
                 ).fetchone()
                 if row and row[0] is not None:
                     db_count = int(row[0])
-        except Exception:
-            pass
+        except Exception as exc:
+            # 累计计数是权限上界；读取失败不能伪装成零历史释放额度。
+            raise SubagentCapacityStateError(
+                f"cumulative.delegations 读取失败: {type(exc).__name__}"
+            ) from exc
 
     lineage_count = 0
     manager = getattr(agent, "subagents", None)
@@ -172,8 +176,10 @@ def cumulative_created_child_count(agent: object, parent_run_id: str | None = No
                 child_ids = getattr(parent_task, "child_ids", None)
                 if isinstance(child_ids, (list, tuple)):
                     lineage_count = len(child_ids)
-        except Exception:
-            pass
+        except Exception as exc:
+            raise SubagentCapacityStateError(
+                f"cumulative.parent.child_ids 读取失败: {type(exc).__name__}"
+            ) from exc
 
     return max(db_count, lineage_count)
 

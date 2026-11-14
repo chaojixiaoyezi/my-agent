@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -162,6 +163,7 @@ class HandoffBoardService:
         metadata: dict[str, Any] | None = None,
         allow_serialized_overlap: bool = False,
         now: float | None = None,
+        recipient_validator: Callable[[], None] | None = None,
     ) -> HandoffBoardItem:
         self._require_existing_case(case_id)
         with self.store.handoff_case_lock(case_id):
@@ -207,6 +209,10 @@ class HandoffBoardService:
                             "attempted_digest": current_digest,
                         },
                     )
+
+            # 原回执去重在先；仅新发布核宿主收件身份，终态不应使已成功回执失效。
+            if recipient_validator is not None:
+                recipient_validator()
 
             # 独占写入集重叠检查（同 case 内其他处于活跃状态的交接项）
             if norm_write_set and not allow_serialized_overlap:
@@ -513,6 +519,8 @@ class HandoffBoardService:
         reason: str = "",
         metadata: dict[str, object] | None = None,
         now: float | None = None,
+        frozen_input_version: str = "",
+        submission_digest: str = "",
     ) -> HandoffBoardItem:
         self._require_existing_case(case_id)
         with self.store.handoff_case_lock(case_id):
@@ -531,10 +539,39 @@ class HandoffBoardService:
             if verdict not in {"accepted", "changes_requested"}:
                 raise HandoffError(f"Invalid acceptance verdict: {verdict!r}")
 
+            # 旧调用只能读回同一主体已签的原票，不能因省略绑定字段生成新票。
+            prior = item.acceptance_verdict or {}
+            same_vote = (item.state == verdict and prior.get("verdict") == verdict
+                         and prior.get("reviewer_principal") == reviewer_principal)
+            bound_recheck = (bool(frozen_input_version and submission_digest)
+                             and frozen_input_version == prior.get("frozen_input_version") == item.frozen_input_version
+                             and submission_digest == prior.get("submission_digest") == item.metadata.get("submission_digest"))
+            if same_vote and ((not frozen_input_version and not submission_digest) or bound_recheck):
+                return item
             if item.state != "submitted":
                 raise InvalidStateTransitionError(
                     f"Cannot decide acceptance on item {item_id} in state {item.state}; must be submitted first",
                     details={"item_id": item_id, "current_state": item.state},
+                )
+
+            if not frozen_input_version or not submission_digest:
+                raise HandoffError(
+                    "新验收票必须带已读的 frozen_input_version 和 metadata.submission_digest；"
+                    "本次未签票。先用 list_items 读取指定 case_id/item_id，再调用 "
+                    "decide_acceptance(case_id=原值,item_id=原值,frozen_input_version=原版本,"
+                    "submission_digest=原摘要,verdict=accepted)。不要猜值或原样重试。",
+                    error_code="TOOL_INVALID_ARGUMENTS",
+                    details={"reason": "HANDOFF_REVIEW_BINDING_REQUIRED", "effect_outcome": "not_started"},
+                )
+            if frozen_input_version != item.frozen_input_version:
+                raise FrozenInputVersionMismatchError(
+                    "验收所读 frozen_input_version 已不匹配；未签票，请重新读取原交接项。",
+                    details={"item_id": item_id, "field": "frozen_input_version"},
+                )
+            if submission_digest != str(item.metadata.get("submission_digest") or ""):
+                raise IdempotencyConflictError(
+                    "验收所读 submission_digest 已过期；未签票，请读取并重新核对当前提交后再决定。",
+                    details={"item_id": item_id, "field": "submission_digest"},
                 )
 
             verdict_record = {
@@ -543,6 +580,8 @@ class HandoffBoardService:
                 "reason": reason,
                 "decided_at": current_time_val,
                 "metadata": metadata or {},
+                "frozen_input_version": item.frozen_input_version,
+                "submission_digest": submission_digest,
             }
 
             meta = copy.deepcopy(item.metadata)
@@ -731,6 +770,8 @@ class HandoffBoardService:
         reason: str = "blocked",
         metadata: dict[str, object] | None = None,
         now: float | None = None,
+        frozen_input_version: str = "",
+        submission_digest: str = "",
     ) -> HandoffBoardItem:
         return self.decide_acceptance(
             case_id=case_id,
@@ -740,6 +781,8 @@ class HandoffBoardService:
             reason=reason,
             metadata=metadata,
             now=now,
+            frozen_input_version=frozen_input_version,
+            submission_digest=submission_digest,
         )
 
     publish = publish_item

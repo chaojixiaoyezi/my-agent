@@ -32,10 +32,25 @@ def _space_enabled(config):
 def capture_gateway_input_context(base_agent, scope) -> tuple[dict | None, dict | None]:
     if base_agent is None:
         return None, None
-    from .control_service import _request_agent_for_scope
+    from .control_service import resolve_gateway_scope_owner, resolve_loaded_gateway_scope_agent
 
     local_transcript = supports_transcript_delivery(scope.channel)
-    agent = _request_agent_for_scope(base_agent, scope)
+    agent = resolve_loaded_gateway_scope_agent(base_agent, scope)
+    if agent is None:
+        from dataclasses import replace
+
+        from ..owner_scoped_pool import _config_with_owner
+        from .request_worker import _config_without_runtime_paths
+
+        # 受理只读快照不应构造完整Owner Agent；冷/热共用原线程、策略和空间事实。
+        # 配置仍沿原pool个性化规则，不能继承基础Owner已解析的绝对运行目录。
+        owner = resolve_gateway_scope_owner(base_agent, scope)
+        home = home_paths_with_owner(resolve_home_paths(base_agent.home_paths.root),
+                                     resolve_owner_home(base_agent.home_paths.root, owner))
+        config = _config_with_owner(_config_without_runtime_paths(base_agent), owner)
+        return capture_gateway_input_context_for_owner(home_paths=home, config=config,
+            scope=replace(scope, resolved_owner=owner), capability_root=base_agent.root,
+            capability_config_path=getattr(base_agent, 'capability_config_path', None))
     if local_transcript and not _space_enabled(agent.config):
         return None, None
     store = getattr(agent, "conversation_store", None)

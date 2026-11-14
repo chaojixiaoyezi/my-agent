@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -18,9 +19,51 @@ from ..assets.workflow_store import (
     WorkflowDefinition,
     WorkflowOperationConflict,
     WorkflowStore,
+    register_workflow_output_contract,
+    workflow_content_changed,
 )
+from ..common.log_redaction import redact_sensitive_value
 from ..conversation.business_access import BusinessError
 from ..conversation.business_contracts import BusinessExecutionContext, WorkflowScope
+
+
+def _public_step_retry(step):
+    """只投影本步骤原重试账；不把步骤尝试拼成父代理的执行尝试。"""
+    source = step.escalation_result.get('retry_history', [])
+    if not source and step.attempt_count <= 1:
+        return {}
+    history, partial = [], not isinstance(source, list)
+    source = source if isinstance(source, list) else []
+    for row in source[-20:]:
+        if not isinstance(row, dict):
+            partial = True
+            continue
+        attempt, identity = row.get('attempt'), row.get('attempt_id')
+        delay, timestamp = row.get('next_delay_seconds'), row.get('timestamp')
+        code = row.get('error_code')
+        if (type(attempt) is not int or attempt < 1 or not isinstance(identity, str)
+                or not 0 < len(identity) <= 128 or not isinstance(code, str) or len(code) > 4096
+                or type(delay) not in (int, float) or not 0 <= delay <= 1e300 or not math.isfinite(delay)
+                or type(timestamp) not in (int, float) or not -1e300 <= timestamp <= 1e300
+                or not math.isfinite(timestamp)):
+            partial = True
+            continue
+        try:
+            occurred_at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            partial = True
+            continue
+        history.append({'attempt': attempt, 'attempt_id': identity,
+            'error_code': str(redact_sensitive_value(code))[:4096],
+            'next_delay_seconds': delay, 'occurred_at': occurred_at})
+    count = step.attempt_count
+    partial = partial or len(source) > 20 or count > len(history) + 1
+    current = step.escalation_result.get('attempt_id')
+    current_available = isinstance(current, str) and 0 < len(current) <= 128
+    partial = partial or not current_available
+    return {'retry_observation': {'attempt_count': count, 'max_attempts': step.max_attempts,
+        'current_attempt_id': current if current_available else None,
+        'history': history, 'coverage': 'partial' if partial else 'complete'}}
 
 
 def _public_step_effect(step):
@@ -53,6 +96,28 @@ def _public_step_effect(step):
     if step.mode == 'condition' and step.status == 'succeeded':
         return 'none'
     return 'unknown'
+
+
+def _public_output_contract_warning(step):
+    """只投影真实落账的旧合同警告；无警告的旧运行不制造新消息。"""
+    from ..common.log_redaction import redact_sensitive_text
+
+    warning = step.escalation_result.get('output_contract_warning')
+    if (not isinstance(warning, dict)
+            or warning.get('code') != 'WORKFLOW_LEGACY_OUTPUT_CONTRACT_UNVERIFIED'
+            or warning.get('contract_version') != 1
+            or not isinstance(warning.get('missing_keys'), list)
+            or not isinstance(warning.get('null_keys', []), list)
+            or type(warning.get('executed_step_count')) is not int
+            or warning['executed_step_count'] < 0):
+        return {}
+    clean = {key: redact_sensitive_text(str(warning.get(key, '')))[:4096]
+             for key in ('code', 'validation_error', 'next_action')}
+    clean.update(contract_version=1, executed_step_count=warning['executed_step_count'])
+    for key in ('missing_keys', 'null_keys'):
+        clean[key] = [redact_sensitive_text(value)[:512] for value in warning.get(key, [])[:100]
+                      if isinstance(value, str)]
+    return {'output_contract_warning': clean}
 
 
 def _public_run_effect(record):
@@ -108,24 +173,80 @@ WORKFLOW_NO_CAS_ACTIONS = (*WORKFLOW_READ_ACTIONS, 'workflows.create', 'workflow
 
 
 def validate_business_request(action, request, *, expected_revision=None, idempotency_key=''):
+    def reject(code: str, *, actual_type: str | None = None,
+               missing_fields: list[str] | None = None, unsupported_fields: list[str] | None = None,
+               allowed_fields: list[str] | None = None, field: str | None = None,
+               expected: str | None = None) -> None:
+        facts = {key: value for key, value in (
+            ('actual_type', actual_type), ('missing_fields', missing_fields),
+            ('unsupported_fields', unsupported_fields), ('allowed_fields', allowed_fields),
+            ('field', field), ('expected', expected),
+        ) if value is not None}
+        error = ValueError(code)
+        required = WORKFLOW_ACTION_FIELDS.get(action, ((), ()))[0]
+        example = {'action': action, **dict.fromkeys(required, 'example-workflow')}
+        if 'definition' in example:
+            example['definition'] = {'descriptor': {'id': 'example-workflow', 'kind': 'workflow',
+                'name': '示例名称', 'access_targets': [], 'data_sources': [],
+                'credential_refs': [], 'io_contract': {}}, 'steps': []}
+        if 'scope' in example:
+            example['scope'] = {'scope_mode': 'unassigned', 'space_ids': []}
+        if 'policy' in example:
+            example['policy'] = {'enabled': False, 'orphan_after_days': 30, 'mode': 'recycle'}
+        if action not in WORKFLOW_READ_ACTIONS:
+            example['idempotency_key'] = 'new-corrected-request-0001'
+        if action not in WORKFLOW_NO_CAS_ACTIONS:
+            example['expected_revision'] = 0
+        error.details = {'action': action, 'effect_outcome': 'not_started',
+            'required_fields': list(required), 'idempotency_required': action not in WORKFLOW_READ_ACTIONS,
+            'expected_revision_required': action not in WORKFLOW_NO_CAS_ACTIONS,
+            'call_example': example,
+            'next_action': '按本action的required_fields修正缺失、多余或类型错误字段；不混用其它action的字段名。'
+                '修改定义时definition须为完整原定义对象；先用workflows.get读取准确workflow_ref及当前revision，'
+                '修正后用新幂等键及当前expected_revision提交。示例revision=0仅示意类型，不能代替实际版本。', **facts}
+        raise error
+
     if action not in WORKFLOW_ACTION_FIELDS or not isinstance(request, dict):
-        raise ValueError('INVALID_WORKFLOW_ACTION')
+        reject('INVALID_WORKFLOW_ACTION', actual_type=type(request).__name__)
     required, optional = WORKFLOW_ACTION_FIELDS[action]
     if set(required) - request.keys() or set(request) - set(required + optional):
-        raise ValueError('INVALID_WORKFLOW_PARAMETERS')
+        reject('INVALID_WORKFLOW_PARAMETERS', missing_fields=sorted(set(required) - request.keys()),
+            unsupported_fields=sorted(str(key)[:128] for key in set(request) - set(required + optional)),
+            allowed_fields=list(required + optional))
     if action not in WORKFLOW_READ_ACTIONS and (not isinstance(idempotency_key, str)
             or not 0 < len(idempotency_key.encode()) <= 256):
-        raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
+        reject('IDEMPOTENCY_KEY_REQUIRED', field='idempotency_key', actual_type=type(idempotency_key).__name__,
+            expected='非空字符串，UTF8长度1至256字节')
     if action not in WORKFLOW_NO_CAS_ACTIONS and (type(expected_revision) is not int or expected_revision < 0):
-        raise ValueError('EXPECTED_REVISION_REQUIRED')
+        reject('EXPECTED_REVISION_REQUIRED', field='expected_revision', actual_type=type(expected_revision).__name__,
+            expected='当前原记录的非负整数revision，不接受bool')
     if 'scope' in request and (not isinstance(request['scope'], dict)
             or set(request['scope']) != {'scope_mode', 'space_ids'}):
-        raise ValueError('INVALID_WORKFLOW_SCOPE')
-    if 'scope' in request:
+        reject('INVALID_WORKFLOW_SCOPE', field='scope', actual_type=type(request['scope']).__name__,
+            expected='仅含scope_mode与space_ids的JSON对象')
+    remove_last_bindings = (action == 'workflows.scope.set' and request.get('scope') ==
+                            {'scope_mode': 'spaces', 'space_ids': []})
+    if 'scope' in request and not remove_last_bindings:
         WorkflowScope.from_dict({**request['scope'], 'scope_revision': 0})
     for key in ('workflow_ref', 'workflow_run_id', 'space_id', 'project_ref', 'resolution_ref'):
         if key in request and (not isinstance(request[key], str) or not 0 < len(request[key].encode()) <= 128):
-            raise ValueError('INVALID_WORKFLOW_REFERENCE')
+            reject('INVALID_WORKFLOW_REFERENCE', field=key, actual_type=type(request[key]).__name__,
+                expected='UTF8长度1至128字节的字符串')
+    definition = request.get('definition')
+    descriptor = definition.get('descriptor') if isinstance(definition, dict) else None
+    if isinstance(descriptor, dict):
+        from ..assets.descriptor import SCHEMA_VERSION
+
+        if descriptor.get('schema_version', SCHEMA_VERSION) != SCHEMA_VERSION:
+            from ..common.log_redaction import redact_sensitive_text
+
+            raise BusinessError('INVALID_SCHEMA', details={
+                'field': 'definition.descriptor.schema_version', 'expected': SCHEMA_VERSION,
+                'actual': redact_sensitive_text(str(descriptor['schema_version']))[:128],
+                'reason': '不支持的资产协议版本',
+                'actual_type': type(descriptor['schema_version']).__name__, 'effect_outcome': 'not_started',
+                'next_action': 'schema_version是资产协议标识，不是任务编号或内容版本。删除此可选字段或使用expected值；'
+                    '仅保留原定义字段并修改目标正文，以当前revision和新幂等键提交，本次未执行写入。'})
 
 
 def workflow_state(definition):
@@ -136,6 +257,25 @@ def workflow_state(definition):
     return {'lifecycle': 'active', 'protected': False, 'orphan_since': None,
             'last_content_edit_at': None, 'last_run_at': None, 'last_restore_at': None,
             **state, 'scope': scope.to_dict()}
+
+
+def workflow_list_matches(definition, request, *, state=None, default_lifecycle='active'):
+    """两列表共用显式过滤；调用方保留各自默认生命周期、可见性与权限。"""
+    query = request.get('query', '')
+    if query and query not in definition.descriptor.name and query not in definition.descriptor.id:
+        return False
+    lifecycle = request.get('lifecycle', default_lifecycle)
+    mode, space_id = request.get('scope_mode', 'all'), request.get('space_id')
+    if lifecycle != 'all' or mode != 'all' or space_id:
+        state = workflow_state(definition) if state is None else state
+        if lifecycle not in ('all', state['lifecycle']):
+            return False
+        scope = state['scope']
+        if mode not in ('all', scope['scope_mode']):
+            return False
+        if space_id and scope['scope_mode'] != 'owner_global' and space_id not in scope['space_ids']:
+            return False
+    return True
 
 
 def scope_view(scope):
@@ -345,9 +485,31 @@ class WorkflowScopeService:
         return self._mutate(action, request, actor, expected_revision, idempotency_key)
 
     def _create(self, request, key, actor):
-        definition = self._definition(request['definition'])
-        scope = WorkflowScope.from_dict({**request.get('scope', {'scope_mode': 'owner_global', 'space_ids': []}),
-                                         'scope_revision': 1})
+        field = 'definition'
+        try:
+            # 这里只构造纯值；尚未进入 Store/锁/幂等账，失败可以准确证明没有写入。
+            definition = self._definition(request['definition'])
+            field = 'scope'
+            scope = WorkflowScope.from_dict({**request.get('scope', {'scope_mode': 'owner_global', 'space_ids': []}),
+                                             'scope_revision': 1})
+        except (ValueError, TypeError, KeyError) as error:
+            from ..assets.descriptor import SCHEMA_VERSION
+            from ..common.log_redaction import redact_sensitive_text
+            body = request.get('definition')
+            descriptor = body.get('descriptor') if isinstance(body, dict) else None
+            descriptor = descriptor if isinstance(descriptor, dict) else {}
+            if field == 'definition' and descriptor.get('schema_version', SCHEMA_VERSION) != SCHEMA_VERSION:
+                field = 'definition.descriptor.schema_version'
+            raise BusinessError('INVALID_SCHEMA', details={
+                'field': getattr(error, 'field', field),
+                'exception_type': type(error).__name__,
+                'reason': redact_sensitive_text(str(error))[:500],
+                'effect_outcome': 'not_started',
+                **({'expected': SCHEMA_VERSION,
+                    'actual': redact_sensitive_text(str(descriptor.get('schema_version')))[:128]}
+                   if field == 'definition.descriptor.schema_version' else {}),
+                'next_action': f'按公开工作流定义修正字段；schema_version应省略或使用{SCHEMA_VERSION}，'
+                               '数组和对象须传真实JSON值，再重新创建。'}) from None
 
         def transform(previous):
             self._authorize(actor, 'workflows.create', definition.descriptor.id)
@@ -357,7 +519,8 @@ class WorkflowScopeService:
             state = {'scope': scope.to_dict(), 'lifecycle': 'active', 'protected': False,
                 'orphan_since': now if scope.scope_mode == 'unassigned' else None,
                 'last_content_edit_at': now, 'last_run_at': None, 'last_restore_at': None}
-            return with_state(definition, state), {'workflow_ref': definition.descriptor.id,
+            registered = register_workflow_output_contract(definition)
+            return with_state(registered, state), {'workflow_ref': definition.descriptor.id,
                 'definition_revision': 1, 'scope_revision': 1, 'scope': scope_view(scope.to_dict())}
 
         try:
@@ -379,15 +542,9 @@ class WorkflowScopeService:
             if self.authorize(actor, 'workflows.get', definition.descriptor.id) is not True:
                 continue
             state = workflow_state(definition)
-            if request.get('lifecycle', 'active') not in ('all', state['lifecycle']):
+            if not workflow_list_matches(definition, request, state=state):
                 continue
-            if request.get('scope_mode', 'all') not in ('all', state['scope']['scope_mode']):
-                continue
-            if request.get('space_id') and state['scope']['scope_mode'] != 'owner_global' and request['space_id'] not in state['scope']['space_ids']:
-                continue
-            if request.get('query', '') not in definition.descriptor.name:
-                continue
-            rows.append(workflow_view(definition))
+            rows.append(workflow_view(definition, state))
         return self._page(rows, request)
 
     def _page(self, rows, request):
@@ -434,6 +591,15 @@ class WorkflowScopeService:
                 mode = request.get('scope', {'scope_mode': 'unassigned', 'space_ids': []})
                 if set(mode) != {'scope_mode', 'space_ids'}:
                     raise ValueError('INVALID_WORKFLOW_SCOPE')
+                # 空集合只属于解绑命令；持久化DTO仍严格禁止spaces空，不能隐式回落全局。
+                if action == 'workflows.scope.set' and mode == {'scope_mode': 'spaces', 'space_ids': []}:
+                    if state['scope']['scope_mode'] != 'spaces' or not state['scope']['space_ids']:
+                        raise WorkflowPolicyRefusal('WORKFLOW_SCOPE_REMOVE_REQUIRES_BOUND_SPACES', details={
+                            'field': 'scope.space_ids', 'actual_scope_mode': state['scope']['scope_mode'],
+                            'expected_scope_mode': 'spaces', 'effect_outcome': 'not_started',
+                            'recommended_action': 'repair_tool_arguments',
+                            'recovery_hint': '仅对已有空间绑定的工作流清空绑定；显式孤立请提交scope_mode=unassigned、space_ids=[]。'})
+                    mode = {'scope_mode': 'unassigned', 'space_ids': []}
                 scope = WorkflowScope.from_dict({**mode, 'scope_revision': state['scope']['scope_revision'] + 1})
                 old_mode = state['scope']['scope_mode']
                 state['scope'] = scope.to_dict()
@@ -444,13 +610,12 @@ class WorkflowScopeService:
                 if action == 'workflows.restore':
                     state.update(lifecycle='active', last_restore_at=now)
             elif action == 'workflows.update':
-                if (replacement.execution_definition_ref != previous.execution_definition_ref
-                        or replacement.body_markdown != previous.body_markdown
-                        or replacement.descriptor.name != previous.descriptor.name):
+                registered = register_workflow_output_contract(replacement, previous)
+                if workflow_content_changed(registered, previous):
                     state['last_content_edit_at'] = now
                     if state['scope']['scope_mode'] == 'unassigned':
                         state['orphan_since'] = now
-                current = replacement
+                current = registered
             elif action in ('workflows.enable', 'workflows.disable'):
                 enabled = action == 'workflows.enable'
                 if enabled and state['lifecycle'] != 'active':
@@ -542,7 +707,7 @@ class WorkflowScopeService:
     # 函数用途: 为公共运行入口绑定当前 actor、生命周期和原恢复准入门。
     def execution_authorizer(self, actor, *, resolution_ref=None):
         from .engine import _requires_native_agent_resume, _requires_terminal_publication_resume
-        from .governance import WorkflowEffectPhase
+        from .governance import WorkflowEffectPhase, workflow_effect_unresolved
 
         # LLM: 每次运行预检、续跑、取消及步骤副作用前校验当前Actor权限、工作流活跃态、冻结空间范围与冻结业务上下文（G5a-R1）；
         #   仅非WorkflowEffectPhase的控制阶段享有cancel收回豁免与resume对账路由，同名步骤一律按真实执行副作用校验（FLAG-5）。
@@ -572,6 +737,19 @@ class WorkflowScopeService:
                 if is_resume_control and resolution_ref is not None:
                     return self.governance.require_resolution(record, resolution_ref)
                 return self.governance.require_effect(record, phase)
+            if not is_cancel_control:
+                required_review = getattr(record, '_declared_review_required', None)
+                if required_review is None:
+                    frozen = self._run_store().load_workflow_snapshot(record.workflow_run_id)
+                    from .native_governance import validated_workflow_review_policy
+                    policy = validated_workflow_review_policy(frozen.get('descriptor', {}).get('metadata', {}))
+                    required_review = bool(policy and policy['steps'])
+                if required_review:
+                    raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_SERVICE_UNAVAILABLE', details={
+                        'workflow_run_id': record.workflow_run_id, 'effect_outcome': 'not_started',
+                        'reason': 'declared_review_policy_without_host_governance',
+                        'recommended_action': 'change_strategy',
+                        'recovery_hint': '未执行；请在原Owner和任务中装配原审核服务，不要移除审核策略或新建无关业务空间。'})
             if is_resume_control or resolution_ref is not None:
                 step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
                 receipt = step.escalation_result.get('tool_receipt', {}) if step is not None else {}
@@ -581,19 +759,19 @@ class WorkflowScopeService:
                     'workflow_run_id': record.workflow_run_id,
                     'prior_effect_outcome': prior_effect,
                     'resolution_available': False,
-                    'recommended_action': '当前宿主未配置可信核验入口；保留原操作并核对目标结果，禁止用新幂等键重做。',
+                    'recommended_action': 'manual_review',
+                    'recovery_hint': '当前宿主未配置可信核验入口；保留原操作并核对目标结果，禁止用新幂等键重做。',
                 })
             if (is_resume_control and not _requires_native_agent_resume(record)
-                    and not _requires_terminal_publication_resume(record) and (record.effect_outcome == 'unknown'
-                    or any(step.escalation_result.get('effect_started') and
-                           (step.needs_repair or step.status == 'running') for step in record.steps))):
+                    and not _requires_terminal_publication_resume(record) and workflow_effect_unresolved(record)):
                 raise WorkflowPolicyRefusal('WORKFLOW_RECONCILIATION_REQUIRED', details={
                     'workflow_run_id': record.workflow_run_id,
                     'step_id': record.current_step_id,
                     'operation_id': receipt.get('operation_id', '') if isinstance(receipt, dict) else '',
                     'prior_effect_outcome': prior_effect,
                     'resolution_available': False,
-                    'recommended_action': '原步骤副作用尚未核实；先核对原操作和目标结果，由可信宿主提交核验，禁止原样盲目重试。',
+                    'recommended_action': 'change_strategy',
+                    'recovery_hint': '原步骤副作用尚未核实；先核对原操作和目标结果，由可信宿主提交核验，禁止原样盲目重试。',
                 })
             return None
 
@@ -832,7 +1010,8 @@ class WorkflowScopeService:
             raise PermissionError('WORKFLOW_OWNER_MISMATCH')
         self._authorize(actor, action, record.workflow_id)
         if action == 'workflow_runs.get':
-            return {'run': self._run_view(record), 'steps': [{**_public_output_artifacts(step), 'step_id': step.step_id, 'mode': step.mode,
+            return {'run': self._run_view(record), 'steps': [{**_public_output_artifacts(step), **_public_step_retry(step),
+                **_public_output_contract_warning(step), 'step_id': step.step_id, 'mode': step.mode,
                 'status': step.status, 'assignment_ref': step.escalation_result.get('assignment_ref'),
                 'run_id': step.escalation_result.get('run_id'), 'result_ref': step.escalation_result.get('result_ref'),
                 'error': {'code': step.error_code, 'message': step.error_message, 'retryable': False,

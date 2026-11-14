@@ -50,6 +50,16 @@ def _observe(monkeypatch):
         return result
 
     monkeypatch.setattr(run_store, 'read_text_beneath', counted)
+    read_bytes = run_store.read_bytes_beneath
+
+    def counted_bytes(root, parts, *args, **kwargs):
+        result = read_bytes(root, parts, *args, **kwargs)
+        if len(parts) >= 4 and parts[:2] == ('data', 'workflow_runs'):
+            observations['run_files' if parts[-1] == 'run.json' else 'step_files'] += 1
+            observations['bytes'] += len(result) if result is not None else 0
+        return result
+
+    monkeypatch.setattr(run_store, 'read_bytes_beneath', counted_bytes)
     module = 'agent_py_agent.agent.workflows.run_list_index'
     if importlib.util.find_spec(module) is not None:
         from agent_py_agent.agent.workflows import run_list_index
@@ -410,3 +420,97 @@ def test_pending_window_does_not_starve_formal_records(tmp_path, monkeypatch, po
     assert index.pending_names(tmp_path, parts, 1) == [filename]
     assert len(os.listdir(fd_dir)) == before
     assert len(list(parent.iterdir())) == 36
+
+
+@pytest.mark.parametrize('existing_index', [False, True])
+def test_legacy_system_leaves_and_old_polluted_index_self_heal(tmp_path, existing_index):
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+    from agent_py_agent.agent.workflows.run_list_index import RunListIndex
+
+    _seed(tmp_path, 2, indexed=False)
+    folder = tmp_path / 'data/workflow_runs'
+    noise = folder / '.DS_Store'
+    noise.write_bytes(b'finder metadata')
+    (folder / 'ordinary-file').write_text('not a run directory')
+    (folder / 'alias-run').symlink_to(folder / 'run-00000', target_is_directory=True)
+    index = RunListIndex(tmp_path)
+    if existing_index:
+        with index.connection() as db:
+            db.executemany('INSERT OR IGNORE INTO legacy VALUES(?)',
+                [(name,) for name in ('.DS_Store', 'ordinary-file', 'alias-run')])
+    store = run_store.WorkflowRunStore(tmp_path)
+    status = WorkflowsTool(tmp_path).execute({'action': 'status', 'workflow_id': 'flow-1'})
+    assert status.ok, status.result_envelope
+    assert [r.workflow_run_id for r in store.list_runs()] == ['run-00000', 'run-00001']
+    assert [r.workflow_run_id for r in store.list_runs(workflow_id='flow-1')] == ['run-00001']
+    assert index.legacy_ids() == []
+    assert noise.read_bytes() == b'finder metadata'
+    assert (folder / 'ordinary-file').is_file() and (folder / 'alias-run').is_symlink()
+    with index.connection() as db:
+        assert db.execute('SELECT count(*) FROM legacy').fetchone()[0] == 0
+
+
+def test_legacy_valid_corrupt_run_is_not_silently_discarded(tmp_path):
+    _seed(tmp_path, 1, indexed=False)
+    path = tmp_path / 'data/workflow_runs/run-00000/run.json'
+    path.write_text('{broken')
+    with pytest.raises(json.JSONDecodeError, match='property name'):
+        run_store.WorkflowRunStore(tmp_path).list_runs()
+    assert path.read_text() == '{broken'
+
+
+def test_legacy_pollution_over_one_batch_does_not_break_remaining_union(tmp_path, monkeypatch):
+    from agent_py_agent.agent.workflows import run_list_index
+    from agent_py_agent.agent.workflows.run_list_index import RunListIndex
+
+    _seed(tmp_path, 1, indexed=False)
+    index = RunListIndex(tmp_path)
+    with index.connection() as db:
+        db.executemany('INSERT INTO legacy VALUES(?)', [(f'.noise-{n:03}',) for n in range(40)])
+    calls = []
+    original = run_list_index._legacy_run_directory
+    monkeypatch.setattr(run_list_index, '_legacy_run_directory', lambda home, name:
+        (calls.append(name), original(home, name))[1])
+    store = run_store.WorkflowRunStore(tmp_path)
+    assert len(store.list_runs()) == 1
+    assert len(calls) == 32
+    with index.connection() as db:
+        assert db.execute('SELECT count(*) FROM legacy').fetchone()[0] == 9
+    assert len(store.list_runs()) == 1
+    with index.connection() as db:
+        assert db.execute('SELECT count(*) FROM legacy').fetchone()[0] == 0
+
+
+def test_index_initialization_does_not_stat_each_legacy_directory(tmp_path, monkeypatch):
+    from agent_py_agent.agent.workflows.run_list_index import RunListIndex
+
+    _seed(tmp_path, 100, indexed=False)
+    folder = tmp_path / 'data/workflow_runs'
+    original = os.lstat
+    examined = []
+
+    def observed(path, *args, **kwargs):
+        if isinstance(path, (str, os.PathLike)) and os.path.dirname(os.fspath(path)) == str(folder):
+            examined.append(os.fspath(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'lstat', observed)
+    index = RunListIndex(tmp_path)
+    with index.connection():
+        pass
+    assert len(index.legacy_ids()) == 100
+    assert examined == []
+
+
+def test_legacy_name_and_runtime_path_share_underscore_id_semantics(tmp_path):
+    from agent_py_agent.agent.workflows.models import safe_path, safe_path_part
+    from agent_py_agent.agent.workflows.run_list_index import _legacy_run_name
+
+    for name in ('_legacy-run', 'run.1', 'run-1', '7', '_' * 128):
+        assert safe_path_part(name) == name
+        assert safe_path(tmp_path, name).name == name
+        assert _legacy_run_name(name)
+    for name in ('.DS_Store', '..', 'a/b', '', 'x' * 129, None):
+        with pytest.raises(ValueError, match='无效的资产或步骤编号'):
+            safe_path_part(name)
+        assert not _legacy_run_name(name)

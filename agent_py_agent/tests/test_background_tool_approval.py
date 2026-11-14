@@ -329,3 +329,95 @@ def test_main_session_approval_cannot_cross_claim_or_cancellation(background):
                              decision=ToolApprovalDecision(ctx.request.permission_id, "denied").to_dict())
     ctx.waiter.join(timeout=2)
     assert ctx.response["decision"] == "denied"
+
+
+def test_production_child_sink_discovers_live_tui_consumer_and_waits_for_exact_decision(tmp_path):
+    from agent_py_agent.agent.conversation import agent_tool_approval as bridge
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+    from agent_py_agent.tests.test_gateway_agent_control_service import (
+        _bound_agent_tree,
+        _child_approval_request,
+    )
+
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    link, error = agent.conversation_store.tasks.load_report(child.root_id)
+    assert error is None and link is not None
+    agent.conversation_store.threads.update_atomic(link.thread_id,
+        lambda current: replace(current, owner_id=agent.home_paths.owner_id))
+    request = _child_approval_request(child.id)
+    sink = BackgroundTranscriptSink(agent, thread_id=child.agent_thread_id, task_id=child.id,
+        event_writer=lambda *_args, **_kwargs: None)
+    # 生产构造没有显式交互标记；原 notices 入口续租只允许发布，不能产生批准。
+    read_gateway_client_notices(agent, scope=scope, after=0, interactive_approvals=True)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(sink.request_permission(request.to_dict())))
+    waiter.start()
+    try:
+        deadline = time.monotonic() + 2
+        rows = []
+        while time.monotonic() < deadline:
+            rows = bridge.list_pending_agent_tool_approvals(agent, root_task_id=child.root_id)
+            if rows:
+                break
+            time.sleep(.01)
+        assert rows and waiter.is_alive() and result == {}
+        assert rows[0]['run_id'] == child.id and rows[0]['agent_kind'] == 'subagent'
+        decision = ToolApprovalDecision(request.permission_id, 'approved').to_dict()
+        assert resolve_agent_permission(agent, scope=scope, run_id=child.id,
+            request=request.to_dict(), decision=decision)['ok'] is True
+        waiter.join(2)
+        assert not waiter.is_alive() and result['decision'] == 'approved'
+    finally:
+        if waiter.is_alive():
+            bridge.resolve_agent_tool_approval(agent, run_id=child.id, request_value=request.to_dict(),
+                decision_value=ToolApprovalDecision(request.permission_id, 'denied').to_dict())
+            waiter.join(2)
+
+
+@pytest.mark.parametrize('case', ['missing', 'expired', 'future', 'other_root', 'other_owner',
+    'old_selected_root', 'im_channel', 'explicit_noninteractive', 'group', 'malformed'])
+def test_consumer_discovery_never_opens_unavailable_or_wrong_scope(tmp_path, case):
+    import json
+
+    from agent_py_agent.agent.conversation import agent_tool_approval as bridge
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+    from agent_py_agent.tests.test_gateway_agent_control_service import (
+        _bound_agent_tree,
+        _child_approval_request,
+    )
+
+    agent, _scope, child = _bound_agent_tree(tmp_path)
+    link, error = agent.conversation_store.tasks.load_report(child.root_id)
+    assert error is None and link is not None
+    agent.conversation_store.threads.update_atomic(link.thread_id,
+        lambda current: replace(current, owner_id=agent.home_paths.owner_id))
+    request = _child_approval_request(child.id)
+    sink = BackgroundTranscriptSink(agent, thread_id=child.agent_thread_id, task_id=child.id,
+        event_writer=lambda *_args, **_kwargs: None)
+    path = bridge.renew_agent_tool_approval_consumer(agent, root_task_id=child.root_id)
+    if case == 'missing':
+        path.unlink()
+    elif case in {'expired', 'future', 'other_root'}:
+        row = json.loads(path.read_text())
+        if case == 'other_root':
+            row['root_task_id'] = 'other-root'
+        else:
+            row['seen_at'] += -30 if case == 'expired' else 30
+        path.write_text(json.dumps(row))
+    elif case == 'explicit_noninteractive':
+        sink.approval_interactive = False
+    elif case == 'group':
+        agent.home_paths = replace(agent.home_paths, owner_kind='group')
+        sink.approval_interactive = True
+    elif case == 'malformed':
+        path.write_text('{broken')
+    else:
+        link, error = agent.conversation_store.tasks.load_report(child.root_id)
+        assert error is None and link is not None
+        change = {'other_owner': {'owner_id': 'local/other'},
+            'old_selected_root': {'workspace_task_id': 'other-root'},
+            'im_channel': {'channel_bindings': []}}[case]
+        agent.conversation_store.threads.update_atomic(link.thread_id, lambda current: replace(current, **change))
+    result = sink.request_permission(request.to_dict())
+    assert result['decision'] == 'denied' and result['reason_code'] == 'APPROVAL_NONINTERACTIVE'
+    assert bridge.list_pending_agent_tool_approvals(agent, root_task_id=child.root_id) == []

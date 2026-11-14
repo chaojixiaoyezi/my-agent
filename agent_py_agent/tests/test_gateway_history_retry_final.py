@@ -337,3 +337,136 @@ def test_success_projection_does_not_hide_unrelated_or_unproven_rows(variation):
     else:
         metadata.pop("gateway_request_id")
     assert not superseded_gateway_final(failed, completed_gateway_final_attempts([failed, completed]))
+
+
+@pytest.mark.parametrize(('historical_same_request', 'cancel_before_requeue', 'named_audit'),
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)])
+def test_cold_gateway_index_defers_same_request_then_executes_once(tmp_path, monkeypatch, historical_same_request, cancel_before_requeue, named_audit):
+    import json
+    import time
+
+    from agent_py_agent.agent.backends import get_backend
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts import (
+        GatewayAskParams,
+        _process_gateway_requests,
+        gateway_paths,
+        submit_gateway_ask,
+    )
+    from agent_py_agent.agent.gateway_parts.history_ledger import GatewayHistoryLedger
+    from agent_py_agent.agent.gateway_parts.request_worker import (
+        _pending_request_entry_sort_key,
+        _PendingGatewayRequest,
+    )
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    monkeypatch.setenv('MY_AGENT_HOME', str(tmp_path / 'home'))
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'), prompt_files=[],
+                                   gateway_per_user_owner_scoping=False), tmp_path / 'workspace')
+    agent.backend = get_backend('echo', agent.config)
+    paths = gateway_paths(agent)
+    for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        path.mkdir(parents=True, exist_ok=True)
+    params = GatewayAskParams(prompt='开头', save=False, chat_session_id='cold-index', agent=agent)
+    _, _, response = submit_gateway_ask(paths, params=params)
+    _process_gateway_requests(agent, paths)
+    assert json.loads(response.read_text())['ok']
+    store = agent.conversation_store
+    thread = store.threads.resolve(channel='chat', channel_conversation_id='cold-index', channel_user_id='local-agent')
+    system_task = {'kind': 'audit_prepare', 'attributes': {'conversation_audit_prepare': True,
+        'conversation_cancellation_scope': 'foreground', 'conversation_work_kind': 'audit',
+        'conversation_work_name': '冷索引准备'}} if named_audit else None
+    request_id, request_path, response = submit_gateway_ask(paths, params=GatewayAskParams(
+        prompt='只回复一次', save=False, chat_session_id='cold-index', agent=agent, system_task=system_task))
+    if named_audit:
+        from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
+        update_json_file_atomic(request_path, lambda value: {**value, 'conversation_audit_scope': {'audit_id': 'forged'}},
+                                require_existing=True)
+    for index in range(1200):
+        store.messages.append({'thread_id': thread.thread_id, 'role': 'user', 'content': f'旧消息 {index}',
+            'metadata': {'gateway_request_id': request_id if historical_same_request and index == 1199 else f'old-{index}'}})
+    ledger = GatewayHistoryLedger(store)
+    for suffix in ('', '-wal', '-shm'):
+        type(ledger.path)(str(ledger.path) + suffix).unlink(missing_ok=True)
+    calls = []
+    original = agent.run
+    def observed(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(agent, 'run', observed)
+    steps = []
+    actual_catch_up = GatewayHistoryLedger.catch_up
+    def measured_catch_up(*args, **kwargs):
+        steps.append(bool(calls))
+        return actual_catch_up(*args, **kwargs)
+    monkeypatch.setattr(GatewayHistoryLedger, 'catch_up', measured_catch_up)
+    if cancel_before_requeue:
+        from agent_py_agent.agent.gateway_parts import request_worker
+        from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
+        actual_requeue = request_worker._requeue_history_preparation
+        def stop_then_requeue(context, paths, pending):
+            update_json_file_atomic(context.processing_path,
+                lambda value: {**value, 'cancel_requested': True, 'turn_phase': 'closing'}, require_existing=True)
+            return actual_requeue(context, paths, pending)
+        monkeypatch.setattr(request_worker, '_requeue_history_preparation', stop_then_requeue)
+    deferred = 0
+    for _ in range(6):
+        step_start = len(steps)
+        _process_gateway_requests(agent, paths)
+        if response.exists():
+            break
+        assert steps[step_start:] == [False], '每个准备片只准一次索引事务'
+        pending = json.loads((paths.inbox / (request_id + '.json')).read_text())
+        assert pending['status'] == 'pending' and pending['id'] == request_id
+        assert pending['deferred_reason'] == 'GATEWAY_HISTORY_INDEX_PENDING'
+        assert _pending_request_entry_sort_key(_PendingGatewayRequest(paths.inbox / (request_id + '.json'), pending))[0] == 1
+        assert not calls and not (paths.failed / (request_id + '.json')).exists()
+        if named_audit:
+            assert not [link for link in store.tasks.list(thread.thread_id) if link.work_name == '冷索引准备']
+        deferred += 1
+        time.sleep(0.11)
+    result = json.loads(response.read_text())
+    if cancel_before_requeue:
+        assert result['status'] == 'interrupted', result
+        assert not calls and not (paths.processing / (request_id + '.json')).exists()
+        return
+    assert result['ok'], result
+    assert deferred >= 2 and len(calls) == 1
+    assert steps[step_start:].count(False) == (2 if named_audit else 1), '仅命名任务写入前允许额外隔离预检'
+    _process_gateway_requests(agent, paths)
+    assert len(calls) == 1
+    rows = [json.loads(line) for line in store.storage.message_path(thread.thread_id).read_text().splitlines()]
+    matched = [row for row in rows if row['role'] == 'user' and row.get('metadata', {}).get('gateway_request_id') == request_id]
+    assert len(matched) == 1
+    if named_audit:
+        links = [link for link in store.tasks.list(thread.thread_id) if link.work_name == '冷索引准备']
+        assert len(links) == 1
+        assert matched[0]['metadata']['conversation_task_id'] == links[0].task_id != 'forged'
+
+
+@pytest.mark.parametrize('failure', ['truncated', 'oversized', 'io', 'stalled'])
+def test_index_preparation_never_defers_real_failure_or_no_progress(runtime, monkeypatch, failure):
+    from agent_py_agent.agent.gateway_parts.history_ledger import (
+        GatewayHistoryLedger,
+        HistoryIndexPending,
+    )
+    from agent_py_agent.agent.gateway_parts.request_errors import GatewayHistoryPreparationPending
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+    agent, conversation = runtime
+    if failure in ('truncated', 'oversized'):
+        def damaged(*args, **kwargs):
+            if failure == 'truncated':
+                raise DataCorruptionError('GATEWAY_HISTORY_TRUNCATED: no complete canonical row')
+            raise HistoryIndexPending('GATEWAY_HISTORY_ROW_EXCEEDS_BUDGET: unchanged cursor, no append')
+        monkeypatch.setattr(GatewayHistoryLedger, 'catch_up', damaged)
+    elif failure == 'io':
+        def broken(*args):
+            raise OSError('synthetic I/O failure')
+        monkeypatch.setattr(GatewayHistoryLedger, '_snapshot', broken)
+    else:
+        monkeypatch.setattr(GatewayHistoryLedger, 'catch_up', lambda *a, **k: False)
+    with pytest.raises((DataCorruptionError, OSError, HistoryIndexPending)) as caught:
+        history.append_gateway_conversation_message(agent, {'id': 'request', 'execution_attempt_id': 'attempt', 'lease_epoch': 1},
+            conversation, request_id='request', role='user', content='尚未执行', defer_index_pending=True)
+    assert type(caught.value) is not GatewayHistoryPreparationPending

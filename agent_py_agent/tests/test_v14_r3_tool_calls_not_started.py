@@ -73,8 +73,8 @@ def test_not_started_cancellation_receipt_is_readable_as_not_executed(background
     expected = {'operation_id': operation_id, 'run_id': 'observed-' + task.task_id, 'attempt_id': run['attempt_id'],
         'task_id': task.task_id, 'tool_name': 'write_file', 'status': 'CANCELLED', 'executed': False,
         'effect_outcome': 'not_started', 'duration_ms': None,
-        'error': {'code': 'TOOL_OPERATION_CANCELLED_NOT_STARTED', 'message': 'TOOL_OPERATION_CANCELLED_NOT_STARTED',
-            'retryable': False, 'details': []},
+        'error': {'code': 'TOOL_OPERATION_CANCELLED_NOT_STARTED', 'message': '操作从未启动(not_started, G.5 CANCELLED)，无副作用；任务层面可继续/重发。',
+            'retryable': False, 'details': [{'key': 'recommended_action', 'value': 'continue'}]},
         'result_ref': operation_id}
     status, listed = observation.background_call(background_http, 'tool_calls.list')
     assert status == 200, listed

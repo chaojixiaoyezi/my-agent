@@ -132,8 +132,8 @@ def test_cases_list_filters(native):
     assert page['next_cursor']
     following = completed(wire(native, 'soc.cases.list', {'severity': 'critical', 'limit': 1, 'cursor': page['next_cursor']}))
     assert following['items'][0]['case_id'] != page['items'][0]['case_id']
-    rejected(wire(native, 'soc.cases.list', {'severity': 'medium', 'cursor': page['next_cursor']}), 503, 'CURSOR_EXPIRED')
-    rejected(wire(native, 'soc.cases.list', {'cursor': page['next_cursor'] + 'x'}), 503, 'CURSOR_EXPIRED')
+    rejected(wire(native, 'soc.cases.list', {'severity': 'medium', 'cursor': page['next_cursor']}), 410, 'CURSOR_EXPIRED')
+    rejected(wire(native, 'soc.cases.list', {'cursor': page['next_cursor'] + 'x'}), 410, 'CURSOR_EXPIRED')
     create(native, severity='critical')
     rejected(wire(native, 'soc.cases.list', {'severity': 'critical', 'cursor': page['next_cursor']}), 503, 'CURSOR_EXPIRED')
     filtered = completed(wire(native, 'soc.cases.list', {'severity': 'medium', 'status': 'open'}))

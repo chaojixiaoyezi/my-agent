@@ -260,8 +260,8 @@ def test_footer_route_counts_and_cache_key():
     snapshot = runtime.store.snapshot()
     text = ''.join(part[1] for part in _render_footer(snapshot, first))
     assert '/route' not in text and '简洁' not in text
-    assert text.index('F4') < text.index('后台Agent：运行 1 / 总 3') < text.index('后台驻留 7')
-    assert text.endswith(' · 后台Agent：运行 1 / 总 3 · ⚡ 后台驻留 7 项')
+    assert text.index('F4') < text.index('F6') < text.index('后台驻留 7') < text.index('后台Agent：运行 1 / 总 3')
+    assert text.endswith(' · ⚡ 后台驻留 7 项 · 后台Agent：运行 1 / 总 3')
     assert _render_footer(snapshot, first) == _render_footer(snapshot, second)
     assert tui_render_context_key(snapshot, first) != tui_render_context_key(snapshot, second)
     for count in (None, 0):

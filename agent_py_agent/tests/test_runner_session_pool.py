@@ -90,6 +90,35 @@ def test_runner_session_heartbeat_stops_at_cancelled_canonical_state(tmp_path) -
     assert manager.load(task.id).attributes["runner_session"]["status"] == "cancelled"
 
 
+def test_cancelled_run_accepts_only_original_worker_exit_receipt(tmp_path):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.subagents.runner_session_liveness import runner_session_matches_stop
+
+    manager = SubAgentManager(tmp_path / 'subagents')
+    task = manager.create_run(goal='取消后核原worker退出', thought='保留精确身份', plan=['执行', '取消'])
+    task.runner_active_attempt_id = 'attempt-original'
+    manager.save(task)
+    session = {'session_id': 'session-original', 'run_id': task.id, 'attempt_id': 'attempt-original',
+               'launch_id': 'launch-original', 'worker_pid': 12345, 'worker_birth_token': 'birth-original',
+               'process_epoch': 'epoch-original', 'status': 'running', 'heartbeat_at': time.time()}
+    assert manager.save_runner_session(task.id, session, now=time.time())
+    task = manager.load(task.id)
+    task.status = 'CANCELLED'
+    task.runner_active_attempt_id = ''
+    task.attributes['cancel_subagents'] = {'stop_receipt': {
+        'schema': 'runner-stop.v1', 'run_id': task.id, 'attempt_id': 'attempt-original'}}
+    manager.save(task)
+    assert runner_session_matches_stop(task, session)
+    assert not runner_session_matches_stop(replace(task, runner_active_attempt_id='attempt-next'), session)
+    assert not runner_session_matches_stop(task, {**session, 'worker_birth_token': 'birth-reused'})
+    assert manager.save_runner_session(task.id, {**session, 'status': 'failed', 'ended_at': time.time()}, now=time.time())
+    final = manager.load(task.id)
+    assert final.status == 'CANCELLED'
+    assert final.attributes['runner_session']['status'] == 'failed'
+    assert not manager.save_runner_session(task.id, session, now=time.time() + 100)
+
+
 def test_activity_observer_failure_never_stops_heartbeat(monkeypatch, caplog):
     from types import SimpleNamespace
 

@@ -173,3 +173,33 @@ OPEN 请求优先于普通 completed 收尾，child 保持 `BLOCKED`。grant/den
 - `action` 只接受 `read` / `update`。`create`、`init`、`begin`、`write` 等旧别名不再自动兜底成写入。
 - `items` 和 `coverage` 都是开放结构，不限定项目、论文、API、日志、文件等对象类型。
 - 把条目标成完成时，建议带文件、来源、产物路径或工具结果引用；缺证据时只提醒，不阻断。
+
+## manage_handoff_board
+
+交接参与与管理直属下级是两种权限。普通 leaf 可以显式继承或申请本工具，不能因此获得
+`create_subagents`、派发交接项或管理其它代理的权限。原根代理/协调者的管理权限保持原合同。
+
+- 当 `actor_kind=internal_run` 时，`publish_item.responsible_actor` 填实际接收者的 `run_id`。派发给新建子代理时，从 `create_subagents` 的 `created_run_ids` 取值。发布成功后，将回执 `handoff_reference` 中的 `case_id`、`item_id` 和冻结版本交给接收者，供其读取和签收。外部协作者使用 `actor_kind=external_assistant` 和约定的外部助手标识。
+- 末级读取必须同时提供 `case_id`、`item_id`，只返回与当前执行者处于同一规范 root 的原生交接项；
+  不支持末级枚举整个 owner 的 case 或同步外部邮箱。
+- `record_ack` / `submit_handoff` 只能由交接项的实际 `responsible_actor` 执行，须携带本人读取的
+  `frozen_input_version`。模型传入的演员名字或回执中的 `actor_id` 不能冒充另一个执行者。
+- 末级 `decide_acceptance` / `release` / `block` 还须宿主角色快照的 `can_accept=true`。
+  内置 `reviewer` 负责独立审核、默认不能签终审票；不能用目标正文中的“你是验收员”代替角色授权。
+  责任人即使具有验收角色，也不能验收自己的提交。
+- 所有新验收票都必须显式绑定原读取的冻结版本与提交摘要。`list_items` 返回
+  `item.frozen_input_version`、`item.metadata.submission_digest`；先核对证据，再原样带入：
+
+```json
+{"action":"decide_acceptance","case_id":"case-…","item_id":"item-…","frozen_input_version":"读取到的原值","submission_digest":"读取到的原摘要","verdict":"accepted"}
+```
+
+宿主在原 case 锁内比对两字段后才签票，票中保留 `frozen_input_version` 与 `submission_digest`。
+读后若发生返工和重新提交，旧摘要即被拒绝，原票不能转用于新提交。缺字段的新签同样拒绝，不能
+静默读当前版本替模型补签。旧调用仅能安全读回同主体、同结论已存在的票，不追加历史；工具回显
+`existing_vote_reused_without_new_signature=true`，历史票未保留绑定时还会明确
+`existing_vote_binding_known=false`，不补造历史绑定。
+
+### 独立审核字段纠错
+
+绑定审核派工调用 `manage_requirement_provenance` 时必须显式传入原 `requirement_id`；遗漏时返回 `REVIEW_REQUIREMENT_REQUIRED`，回执 `details.query_example` 只指向该派工已有的候选。先查询并审阅返回材料，再使用原 `input_version` 作为 `reviewed_input_version`。工作流待审候选的 `review_scope` 固定为 `workflow_effect.v1`，不能填中文评审说明；错值回执包含字段实际值、要求值和绑定候选的调用示例。示例不是审核结论，不能替代本人核验或签票；缺字段不会被宿主自动补齐，也不会产生审核记录。

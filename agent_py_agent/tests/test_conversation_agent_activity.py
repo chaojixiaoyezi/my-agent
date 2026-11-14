@@ -4,6 +4,85 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+def test_background_workflow_progress_uses_original_engine_and_separate_turns(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStepSpec
+    from agent_py_agent.agent.conversation.agent_activity import BackgroundMainActivitySink
+    from agent_py_agent.agent.conversation.background_transcript import (
+        read_background_transcript_events,
+    )
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+
+    agents = [SimpleNamespace(), SimpleNamespace()]
+    sinks = [BackgroundMainActivitySink(agent, thread_id=f'thread-{i}', task_id=f'task-{i}')
+             for i, agent in enumerate(agents)]
+    for i, sink in enumerate(sinks):
+        params = RunParams(request_id=f'request-{i}', on_chunk=sink)
+        tool = WorkflowsTool(tmp_path / str(i), run_params_provider=lambda: params,
+                             analysis_handler=lambda *_a, **_k: {'value': 42})
+        definition = WorkflowDefinition(AssetDescriptor(id=f'flow-{i}', name='只读核对', kind='workflow'),
+            (WorkflowStepSpec('check', '核对', 'llm_skill_analysis'),))
+        run = tool._execution_engine().run_workflow(definition)
+        assert run.status == 'succeeded'
+        rows = read_background_transcript_events(agents[i], thread_id=f'thread-{i}', after=0)['events']
+        steps = [row for row in rows if row.get('payload', {}).get('workflow_step')]
+        assert len(steps) == 3
+        assert {row['task_id'] for row in steps} == {f'task-{i}'}
+        assert {row['payload']['workflow_step']['workflow_run_id'] for row in steps} == {run.workflow_run_id}
+        assert [row['payload']['workflow_step']['status'] for row in steps] == ['pending', 'running', 'succeeded']
+        assert len({row['block_id'] for row in steps}) == 3
+
+
+def test_background_workflow_progress_is_bounded_deduplicated_and_closed():
+    import json
+
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+        read_background_transcript_events,
+    )
+
+    agent = SimpleNamespace()
+    sink = BackgroundTranscriptSink(agent, thread_id='thread', task_id='task')
+    event = {'workflow_run_id': 'run', 'workflow_id': 'flow', 'step_id': 'step', 'name': '核对',
+             'description': '', 'status': 'running', 'duration_ms': 0, 'next_step_ids': [], 'seq': 1,
+             'private_input': {'secret': 'synthetic-private-marker'}}
+    assert sink.write_workflow_step_progress(event)
+    assert not sink.write_workflow_step_progress(event)
+    for i in range(1, 64):
+        assert sink.write_workflow_step_progress({**event, 'workflow_run_id': f'run-{i}'})
+    assert not sink.write_workflow_step_progress({**event, 'workflow_run_id': 'overflow'})
+    assert len(sink._workflow_sequences) == 64
+    rows = read_background_transcript_events(agent, thread_id='thread', after=0)['events']
+    assert len(rows) == 64
+    assert 'synthetic-private-marker' not in json.dumps(rows)
+    sink.finish()
+    assert not sink.write_workflow_step_progress({**event, 'seq': 2, 'status': 'succeeded'})
+
+
+def test_finished_background_workflow_steps_survive_lost_live_ring(tmp_path):
+    from agent_py_agent.agent.conversation.agent_activity import BackgroundMainActivitySink
+    from agent_py_agent.agent.conversation.display_checkpoint import display_checkpoint_event
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / 'conversations')
+    thread = store.threads.get_or_create({'canonical_user_id': 'owner'})
+    agent = SimpleNamespace(conversation_store=store)
+    sink = BackgroundMainActivitySink(agent, thread_id=thread.thread_id, task_id='task')
+    event = {'workflow_run_id': 'run', 'workflow_id': 'flow', 'step_id': 'step', 'name': '核对',
+             'description': '', 'duration_ms': 0, 'next_step_ids': []}
+    for seq, status in enumerate(['pending', 'running', 'succeeded'], 1):
+        assert sink.write_workflow_step_progress({**event, 'seq': seq, 'status': status})
+    sink.finish()
+    # 客户端重连只读canonical历史，不能靠仍持有原agent的易失事件环通过。
+    reopened = ConversationStore(store.storage.root, initialize=False)
+    rows = reopened.messages.history_page_report(thread.thread_id, limit=50).rows
+    checkpoints = [v for row in rows if (v := display_checkpoint_event(row))]
+    steps = [v['payload']['workflow_step'] for v in checkpoints if 'workflow_step' in v['payload']]
+    assert [step['status'] for step in steps] == ['pending', 'running', 'succeeded']
+    assert {v['task_id'] for v in checkpoints} == {'task'}
+
+
 def _run(run_id: str, **overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "id": run_id,

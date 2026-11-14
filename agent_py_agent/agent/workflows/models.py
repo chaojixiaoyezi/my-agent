@@ -340,15 +340,20 @@ def redact_bearer_values(value):
 
 # LLM: 资产和账本路径只接受最多三段稳定标识，不跟随 Owner 根以下的符号链接。
 # 函数用途: 校验编号并生成受限路径；不创建目录。
+def safe_path_part(value):
+    """运行、资产和步骤的路径段共用纯语法校验，不为名称筛选访问文件系统。"""
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', value):
+        raise ValueError('无效的资产或步骤编号')
+    return value
+
+
 def safe_path(root, part, part2=None, part3=None):
     path = Path(root).absolute()
     if path.is_symlink():
         raise ValueError('Owner 根不能是符号链接')
     parts = (part, *(item for item in (part2, part3) if item is not None))
     for seg in parts:
-        if not isinstance(seg, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', seg):
-            raise ValueError('无效的资产或步骤编号')
-        path /= seg
+        path /= safe_path_part(seg)
         if path.is_symlink():
             raise ValueError('资产路径不能包含符号链接')
     return path

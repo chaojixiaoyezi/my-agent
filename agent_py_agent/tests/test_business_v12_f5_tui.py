@@ -319,7 +319,8 @@ def test_footer_orders_team_and_watch_after_existing_controls():
     text = ''.join(x[1] for x in _render_footer(runtime.store.snapshot(), context))
     assert '/route' not in text and '简洁' not in text and '详细' not in text
     assert text.index('F4') < text.index('F6 原生模式') < text.index('后台Agent：运行 未知 / 总 4')
-    assert text.endswith(' · 后台Agent：运行 未知 / 总 4 · ⚡ 后台驻留 1 项')
+    assert text.index('F6 原生模式') < text.index('后台驻留 1') < text.index('后台Agent：运行 未知 / 总 4')
+    assert text.endswith(' · ⚡ 后台驻留 1 项 · 后台Agent：运行 未知 / 总 4')
 
 
 def run_web(script, **fixtures):
@@ -444,12 +445,27 @@ def test_deferred_input_does_not_follow_navigation_back():
     pending = []
     assert nav.snapshot().business_space_id == 'sp_1'
     assert nav.move_selection(1) and nav.enter_selected()
+    prepared_inputs = []
+    prepare_input = agents.prepare_input
+
+    def record_prepared_input(agent_id, text):
+        prepared = prepare_input(agent_id, text)
+        prepared_inputs.append(prepared)
+        return prepared
+
+    agents.prepare_input = record_prepared_input
     event = SimpleNamespace(app=SimpleNamespace(create_background_task=pending.append, invalidate=lambda: None))
     params = SimpleNamespace(agent_navigation=nav, input_area=SimpleNamespace(buffer=Buffer()))
     assert background.submit_business_input(event, params, '精确原目标')
+    assert len(prepared_inputs) == 1
+    assert isinstance(prepared_inputs[0], module('space_commands').PreparedBusinessCall)
+    frozen_payload = prepared_inputs[0].payload()
+    assert frozen_payload['params']['agent_id'] == 'ag_A'
     assert nav.back() and nav.back() and nav.back()
     asyncio.run(pending[0])
-    assert transport.calls[-1]['params']['agent_id'] == 'ag_A'
+    # 返回触发只读刷新；末次运输可能是列表，投递必须核对原不可变写请求。
+    sent_inputs = [call for call in transport.calls if call['action'] == 'background_agents.messages.send']
+    assert sent_inputs == [frozen_payload]
     assert nav.snapshot().active_thread_id == ''
 
 
@@ -617,3 +633,15 @@ const assert=require('node:assert/strict');
 ''', PAGES=pages, FILTERED=events_page(next_cursor='filtered-scan', coverage='complete'),
         END=events_page(coverage='complete'),
         RESET=events_page(next_cursor='reset-scan', coverage='expired', reset_required=True))
+
+
+def test_cached_background_scheduling_is_labeled_as_previous_observation():
+    background = module('chat_parts.tui_background_agents')
+    agents = background.TuiBackgroundAgents(NavigationClient())
+    row = agent_row('ag_A')
+    agents._pages['unassigned'] = {'items': (row,), 'coverage': 'complete', 'next_cursor': None}
+    agents._scheduling_cache['ag_A'] = {'state': 'running', 'reason_code': ''}
+    assert '上次查看调度：running' in '\n'.join(agents.lines())
+    agents._pages['unassigned']['items'] = ({**row, 'scheduling': {'state': 'idle'}},)
+    text = '\n'.join(agents.lines())
+    assert '调度：idle' in text and '上次查看调度' not in text

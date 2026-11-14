@@ -12,6 +12,12 @@ must NOT be used for state-machine decisions; only these protocol values are val
 
 from __future__ import annotations
 
+# 子代理结束态是服务端和只读客户端共用的线协议；集合不赋予管理或恢复权限。
+SUBAGENT_ENDED_STATUSES = frozenset({
+    "DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT", "CANCELLED", "ABANDONED", "TAKEN_OVER",
+})
+
+
 # ── Tool execution statuses ──────────────────────────────────────────────
 
 TOOL_STATUS_DONE = "done"
@@ -80,6 +86,7 @@ GUIDANCE_TARGET_TYPES = frozenset({"agent_run", "thread", "task", "case"})
 
 
 __all__ = [
+    "SUBAGENT_ENDED_STATUSES",
     "CLAIM_FINISH_STATUSES",
     "CLAIM_STATUS_CANCELLED",
     "CLAIM_STATUS_FAILED",

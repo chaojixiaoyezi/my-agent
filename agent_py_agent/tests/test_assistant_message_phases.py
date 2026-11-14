@@ -160,3 +160,24 @@ def test_tool_interleaved_sources_survive_canonical_reload_and_pair_reclamation(
     assert input_items("", list(restored), "", "model") == input_items("", rewritten, "", "model")
     assert [(block["assistant_message"]["message_id"], block["assistant_message"]["phase"]) for block in rewritten[0]["content"]] == [
         ("m1", "commentary"), ("m2", "Future_Phase")]
+
+
+def test_unclosed_credential_notice_is_terminal_only_and_repeat_safe():
+    from agent_py_agent.agent.conversation.channels import project_user_reply
+
+    text = 'BEGIN fake --token "synthetic-secret\n|PRIVATE_TAIL|must hide|'
+    stream = project_user_reply(text)
+    assert 'PRIVATE_TAIL' not in stream.content and 'synthetic-secret' not in stream.content
+    assert '凭据引号未闭合' not in stream.content
+    terminal = project_user_reply(text, finalized=True)
+    assert terminal.projection_status == 'credential_argument_unclosed'
+    assert terminal.content.count('凭据引号未闭合') == 1
+    assert 'PRIVATE_TAIL' not in terminal.content and 'synthetic-secret' not in terminal.content
+    assert project_user_reply(terminal.content, finalized=True).content == terminal.content
+    for value in ('"synthetic-secret"', '"<redacted>"', '"<redacted>synthetic-secret"',
+                  '\\"synthetic-secret\\"'):
+        raw = 'fake --token ' + value + '\n|SAFE_TAIL|kept|'
+        result = project_user_reply(raw, finalized=True)
+        assert 'synthetic-secret' not in result.content and '|SAFE_TAIL|kept|' in result.content
+        assert '凭据引号未闭合' not in result.content
+        assert project_user_reply(result.content, finalized=True).content == result.content

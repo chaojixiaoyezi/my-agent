@@ -44,12 +44,28 @@ def test_real_leaf_query_reads_frozen_inputs_upstream_and_hash_checked_script(le
     assert result.ok, result.output
     material = json.loads(result.output)['workflow_review_material']
     assert material['binding'] == binding
+    assert material['review_gate'] == {'scope': 'workflow_effect.v1', 'step_id': 'release',
+                                       'minimum_independent_reviews': 1, 'effect_started': False}
     assert material['step']['input_snapshot']['value'] == 7
     assert material['upstream_outputs'][0]['output_snapshot']['value'] == 7
     assert 'do-not-disclose' not in result.output
     assert 'different-current' not in material['script']['code']
     assert 'json.dumps' in material['script']['code'] and material['script']['coverage'] == 'complete'
     assert store.load_run(run.workflow_run_id).revision == run.revision
+    assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id=binding['requirement_id']) == []
+
+
+def test_bound_reviewer_can_use_returned_query_after_wrong_root(leaf):  # noqa: F811
+    _, _, binding = pending(leaf)
+    result = invoke(leaf, {'action': 'query_provenance', 'requirement_id': binding['requirement_id'],
+                           'root': 'an-unrelated-workspace'})
+    assert not result.ok and result.effect_outcome == 'not_started'
+    error = json.loads(result.output)
+    assert error['reason'] == 'REVIEW_ROOT_MISMATCH' and 'workflow_review_material' not in error
+    example = error['details']['query_example']
+    assert example == {'action': 'query_provenance', 'requirement_id': binding['requirement_id']}
+    corrected = invoke(leaf, example)
+    assert corrected.ok and json.loads(corrected.output)['workflow_review_material']['binding'] == binding
     assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id=binding['requirement_id']) == []
 
 
@@ -105,3 +121,117 @@ def test_other_business_task_cannot_read_frozen_material(leaf):  # noqa: F811
     result = query(leaf, binding)
     assert not result.ok and 'workflow_review_material' not in result.output
     assert 'REVIEW_TASK_SCOPE_MISMATCH' in result.output
+
+
+def test_leaf_material_pages_roundtrip_through_real_archive_and_model_reducer(leaf):  # noqa: F811
+    import hashlib
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import (
+        archive_tool_output_projection,
+    )
+    from agent_py_agent.agent.agent_core.tool_context.reducer import (
+        render_tool_result_for_live_prompt,
+    )
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+    from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
+    from agent_py_agent.tests.test_tool_output_externalizer import _tool_loop_params
+
+    _, _, binding = pending(leaf)
+    first = query(leaf, binding)
+    original = json.loads(first.output)['workflow_review_material']
+    manifest = json.loads(first.metadata['handler_details']['tool_output_policy']['live_prompt_output'])
+    assert first.metadata['handler_details']['tool_output_policy']['live_prompt_output'] in render_tool_result_for_live_prompt(
+        first, {'output_externalized': True, 'output_preview': 'unreadable old head'})
+    assert manifest['input_version'] == binding['input_version']
+    assert manifest['gate']['effect_started'] is False
+    assert manifest['read_example']['requirement_id'] == binding['requirement_id']
+    cursor = manifest['read_example']['material_cursor']
+    content, offsets = [], []
+    count = 0
+    while cursor is not None:
+        result = invoke(leaf, {'action': 'query_provenance', 'requirement_id': binding['requirement_id'],
+                               'material_cursor': cursor})
+        assert result.ok, result.output
+        view = result.metadata['handler_details']['tool_output_policy']['live_prompt_output']
+        assert len(json.dumps(view, ensure_ascii=False).encode()) <= 4000
+        page = json.loads(view)
+        assert page['sha256'] == manifest['sha256']
+        assert page['source_coverage'] == original['coverage']
+        offsets.append(page['offset'])
+        assert page['offset'] == len(''.join(content))
+        content.append(page['content'])
+        call = canonical_history_call('manage_requirement_provenance', {}, call_id='page-' + str(count), run_id='review-run')
+        projection = archive_tool_output_projection(
+            SimpleNamespace(root=leaf.agent.root, config=AgentConfig(tool_output_externalize_min_chars=1)),
+            _tool_loop_params(request_id='review-request', run_id='review-run', task_id='review-task'), call, ToolHandlerOutcome('manage_requirement_provenance', True, result.output,
+                result_envelope=result.metadata['handler_details']))
+        archive = projection.metadata['archive_output_record']
+        assert archive['output_externalized'] is True
+        assert json.loads(result.output) == page
+        assert 'workflow_review_material' not in json.loads(result.output)
+        rendered = render_tool_result_for_live_prompt(
+            result, archive)
+        assert view in rendered  # 强制外置仍看到本页，不能再用1200日志预览盖掉。
+        cursor = page['next_cursor']
+        count += 1
+        assert count < 100
+    joined = ''.join(content)
+    assert hashlib.sha256(joined.encode()).hexdigest() == manifest['sha256']
+    assert json.loads(joined) == original
+    assert 1 <= count <= 4 and len(offsets) == len(set(offsets))
+    assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id=binding['requirement_id']) == []
+
+
+def test_material_cursor_rejects_changed_source_and_wrong_requirement_without_leak(leaf):  # noqa: F811
+    store, run, binding = pending(leaf)
+    first = json.loads(query(leaf, binding).metadata['handler_details']['tool_output_policy']['live_prompt_output'])
+    args = first['read_example']
+    denied = invoke(leaf, {**args, 'requirement_id': 'another-private-requirement'})
+    assert not denied.ok and 'content' not in json.loads(denied.output)
+    run.steps[0].output_snapshot = {'changed': 'new frozen fact'}
+    store.save_run(run)
+    changed = invoke(leaf, args)
+    assert not changed.ok and 'REVIEW_MATERIAL_CHANGED' in changed.output
+    assert 'new frozen fact' not in changed.output
+    assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id=binding['requirement_id']) == []
+
+
+@pytest.mark.parametrize('cursor', ['not-a-cursor', '0' * 64 + ':99999999', '0' * 64 + ':-1'])
+def test_material_cursor_is_structural_and_bounded(leaf, cursor):  # noqa: F811
+    _, _, binding = pending(leaf)
+    result = invoke(leaf, {'action': 'query_provenance', 'requirement_id': binding['requirement_id'],
+                           'material_cursor': cursor})
+    assert not result.ok and result.effect_outcome == 'not_started'
+    assert 'material_page' not in json.loads(result.output)
+
+
+def test_material_page_errors_give_distinct_safe_recovery(leaf, monkeypatch):  # noqa: F811
+    from agent_py_agent.agent.agent_core.orchestration.tools import (
+        requirement_review_material as material,
+    )
+
+    _, _, binding = pending(leaf)
+    expected = {
+        'REVIEW_MATERIAL_CURSOR_INVALID': ('格式错误', 'read_example'),
+        'REVIEW_MATERIAL_CHANGED': ('旧材料摘要', '丢弃全部旧页'),
+        'REVIEW_MATERIAL_OFFSET_INVALID': ('偏移越界', 'next_cursor'),
+        'REVIEW_MATERIAL_PAGE_BUDGET_TOO_SMALL': ('内部传输预算不足', '停止原样重试'),
+    }
+    for reason, words in expected.items():
+        def reject(*args, _reason=reason, **kwargs):
+            raise material.ReviewMaterialError(_reason)
+        monkeypatch.setattr(material, 'review_material_page', reject)
+        result = invoke(leaf, {'action': 'query_provenance', 'requirement_id': binding['requirement_id'],
+                               'material_cursor': 'private-untrusted-cursor-body'})
+        assert not result.ok and result.effect_outcome == 'not_started'
+        payload = json.loads(result.output)
+        assert payload['reason'] == reason
+        assert all(word in payload['message'] for word in (*words, '未写入'))
+        assert 'private-untrusted-cursor-body' not in result.output
+        assert payload['details']['actual_type'] == 'str'
+        assert payload['details']['actual_chars'] == 29
+        if reason == 'REVIEW_MATERIAL_OFFSET_INVALID':
+            assert payload['details']['total_chars'] > 0
+    assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id=binding['requirement_id']) == []

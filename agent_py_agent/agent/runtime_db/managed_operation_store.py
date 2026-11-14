@@ -243,17 +243,20 @@ class ManagedOperationStore:
                 SELECT ar.agent_run_id, ar.current_attempt_id,
                        ar.current_attempt_generation, ar.workspace_epoch,
                        ar.status AS agent_run_status,
-                       at.status AS attempt_status, tr.task_id
+                       at.status AS attempt_status, tr.task_id, t.owner_id
                 FROM agent_runs ar
                 JOIN agent_attempts at
                   ON at.attempt_id = ? AND at.agent_run_id = ar.agent_run_id
                 JOIN task_runs tr ON tr.task_run_id = ar.task_run_id
+                LEFT JOIN tasks t ON t.task_id = tr.task_id
                 WHERE ar.run_id = ?
                 """,
                 (attempt_id, request.run_id),
             ).fetchone()
             if run is None:
                 raise AuthorityContextMissing(f"run 未登记权威链: {request.run_id}")
+            if request.idempotency_scope == 'business' and run['owner_id'] != request.owner_id:
+                raise AuthorityContextMissing('调用者owner与原任务权威链不符')
             task_id = str(request.task_id or "").strip()
             if task_id and task_id != str(run["task_id"] or ""):
                 raise AuthorityContextMissing(
@@ -1311,12 +1314,25 @@ def _existing_operation_decision(
     连接写会撞外层写锁（SQLITE_BUSY，seq 245 P3）。
     """
     from .operation_reconciliation_authority import assert_operation_request_identity
-    assert_operation_request_identity(conn, row, request)
-    record = _record_from_row(row, owner_id=request.owner_id, run_id=request.run_id, task_id=request.task_id)
+    business = request.idempotency_scope == 'business'
+    if business:
+        # 当前调用者已在claim事务核验活跃attempt；旧行只借同任务业务身份，绝不改签原执行轮。
+        actual = conn.execute(
+            'SELECT ar.run_id, t.owner_id, t.task_id FROM agent_runs ar '
+            'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+            'WHERE ar.agent_run_id=?', (row['agent_run_id'],)).fetchone()
+        if (actual is None or actual['owner_id'] != request.owner_id
+                or not request.task_id or actual['task_id'] != request.task_id):
+            from ..local_storage.tool_operations import ToolOperationOwnershipError
+            raise ToolOperationOwnershipError('业务幂等操作owner/task与当前调用者不匹配')
+        record = _record_from_row(row, owner_id=actual['owner_id'], run_id=actual['run_id'], task_id=actual['task_id'])
+    else:
+        assert_operation_request_identity(conn, row, request)
+        record = _record_from_row(row, owner_id=request.owner_id, run_id=request.run_id, task_id=request.task_id)
     mismatch = _claim_mismatch_reason(record, request, reconciliation_only=str(row['status']) == OP_UNKNOWN and request.idempotency_scope == 'operation')
     if mismatch:
         return ToolOperationClaim("conflict", record, mismatch)
-    if str(row['status']) == OP_UNKNOWN:
+    if str(row['status']) == OP_UNKNOWN and not business:
         from .operation_reconciliation_authority import load_reconciliation_authority
         load_reconciliation_authority(conn, ToolOperationReconciliationClaimRequest(
             owner_id=request.owner_id, run_id=request.run_id, operation_id=str(row['operation_id']),
@@ -1346,7 +1362,8 @@ def _existing_operation_decision(
     )
     updated = _mark_managed_unknown(conn, row, reason=reason)
     return ToolOperationClaim(
-        "unknown", updated if updated is not None else record, reason
+        "unknown", replace(updated, owner_id=record.owner_id, run_id=record.run_id,
+                           task_id=record.task_id) if updated is not None else record, reason
     )
 
 

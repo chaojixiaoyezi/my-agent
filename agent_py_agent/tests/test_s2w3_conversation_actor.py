@@ -72,7 +72,7 @@ def test_gateway_stop_stale_decision_does_not_write(tmp_path, monkeypatch):
     scheduler.sequencer.decide(actor.Admit("owner", key, "r1", "a1", 1))
     record = control._GatewayRequestRecord(paths.processing / "r1.json", {"id": "r1"})
     writes = []
-    monkeypatch.setattr(control, "_mark_request_stopping_locked", lambda *_: writes.append(True) or (True, ""))
+    monkeypatch.setattr(control, "_mark_request_stopping_locked", lambda *_: writes.append(True) or (True, "", {}))
 
     @contextmanager
     def race(*args):

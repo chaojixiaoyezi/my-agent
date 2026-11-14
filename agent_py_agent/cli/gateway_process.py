@@ -1446,7 +1446,10 @@ def cmd_gateway_run(args) -> int:
             _heal_runtime_db_before_agent(args)
             with gateway_memory_tracing(getattr(args, "_gateway_frozen_config", None)) as memory_tracing:
                 args._gateway_memory_trace = memory_tracing
-                return _run_standalone_gateway(args, lifecycle)
+                from ..agent.llm_scale.gateway_transport_admission import gateway_transport_binding
+                frozen = args._gateway_frozen_config
+                with gateway_transport_binding(paths.root, getattr(frozen, 'gateway_llm_inflight_limit', 0)):
+                    return _run_standalone_gateway(args, lifecycle)
     except StandaloneLifecycleUnavailable as exc:
         return coordinated_refusal(exc.error_code, reason=str(exc))
 

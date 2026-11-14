@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Protocol
 
@@ -147,12 +147,21 @@ class ChannelAttachment:
 
 # LLM: 所有用户通道在路径投影、裁剪与投递前共用凭据/协议净化；不从正文产生路由或授权。
 # 函数用途: 遮蔽回复中的标注凭据并移除内部协议，防止模型复述聊天明文进入群或最终消息。
-def project_user_reply(content: str) -> UserReplyProjection:
-    from ..common.log_redaction import redact_sensitive_text
+def project_user_reply(content: str, *, finalized: bool = False) -> UserReplyProjection:
+    from ..common.log_redaction import redact_sensitive_output_text
 
-    text = redact_sensitive_text(str(content or ""), redacted_marker="[REDACTED]", redact_assignment_labels=True).strip()
+    redaction_events = []
+    text = redact_sensitive_output_text(str(content or ""), redacted_marker="[REDACTED]", redact_assignment_labels=True,
+                                 redaction_events=redaction_events).strip()
     if not leads_with_internal_signal(text):
-        return _plain_user_reply_projection(text)
+        projection = _plain_user_reply_projection(text)
+        if finalized and not projection.internal_signal and any(
+                event.get('hidden_through') == 'end_of_text' for event in redaction_events):
+            # 只有宿主终态入口解释已隐藏的范围；流式暂未闭合时不提前给永久诊断，也不恢复秘密尾文。
+            projection = replace(projection, content=projection.content +
+                "\n\n（凭据引号未闭合，已隐藏敏感参数至本段末尾。请将命令片段补全后重新输出后续内容。）",
+                projection_status="credential_argument_unclosed")
+        return projection
     return UserReplyProjection(
         content="",
         internal_signal=True,

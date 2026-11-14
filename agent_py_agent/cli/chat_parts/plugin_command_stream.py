@@ -1,5 +1,5 @@
 # LLM: 薄客户端沿原身份头带 G3 凭据消费消息；读取失败按 G2b 开关降级或拒绝，路径来自可信本地连接而非 HTTP 正文。
-# 模块用途: 让长插件命令持续显示审批，同时在断连后保留原编号供查询。
+# 模块用途: 让插件命令以心跳承运任意执行时长；仅显式交互有审批消费者，断连保留原编号。
 
 from __future__ import annotations
 
@@ -28,12 +28,12 @@ from .command_interaction import CommandInteraction
 class _PermissionConsumer:
     # LLM: 连接路径在提交前冻结，规范 owner 只接受本连接首帧；无跨命令缓存，也不持有业务执行状态。
     # 函数用途: 保存本次审批等待的界面引用、原服务路径和结束信号。
-    def __init__(self, interaction: CommandInteraction) -> None:
+    def __init__(self, interaction: CommandInteraction | None) -> None:
         self.interaction = interaction
         self.chunk_path = None
         self.finished = threading.Event()
         self.token = CancellationToken(_external_check=lambda: self.finished.is_set()
-                                       or interaction.cancellation_token.cancelled)
+                                       or (interaction is not None and interaction.cancellation_token.cancelled))
         self.worker: threading.Thread | None = None
         self.error: Exception | None = None
 
@@ -41,7 +41,7 @@ class _PermissionConsumer:
     # 函数用途: 启动一次独立的面板等待，让网络线程继续接收心跳和结果。
     def open(self, value: dict) -> None:
         request = ToolApprovalRequest.from_mapping(value)
-        if self.chunk_path is None or request.request_id != self.interaction.request_id or self.worker is not None:
+        if self.interaction is None or self.chunk_path is None or request.request_id != self.interaction.request_id or self.worker is not None:
             raise ValueError("命令审批身份或次序无效")
         self.worker = threading.Thread(target=self._wait, args=(request,), name="host-command-permission", daemon=True)
         self.worker.start()
@@ -66,14 +66,14 @@ class _PermissionConsumer:
 
 
 # LLM: 地址及身份取原宿主，G3 凭据在原 header builder 添加且先于 urlopen；开关开时取不到明确拒绝，开关关时降级，不重放命令。
-# 函数用途: 持续读取单次命令消息，返回原最终回执，期间把审批交给当前 TUI。
-def post_plugin_command_stream(agent: object, payload: dict, interaction: CommandInteraction) -> dict:
-    if interaction.gateway_paths is None:
+# 函数用途: 持续读取单次命令；有交互引用才开放原审批，普通命令不受目录三秒预算限制。
+def post_plugin_command_stream(agent: object, payload: dict, interaction: CommandInteraction | None) -> dict:
+    if interaction is not None and interaction.gateway_paths is None:
         raise ValueError("交互命令缺少本地 Gateway 连接路径")
     port = int(agent.config.gateway_port)
     owner = getattr(agent, "owner_identity", None) or owner_identity_from_config(agent.config)
     consumer = _PermissionConsumer(interaction)
-    body = _with_client_identity(owner, {**payload, "interactive": True})
+    body = _with_client_identity(owner, {**payload, "stream": True, "interactive": interaction is not None})
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/client/plugins", data=json.dumps(body).encode(),
         headers=_gateway_headers(owner, json_body=True, conversation_id=payload["conversation_id"],
@@ -83,7 +83,7 @@ def post_plugin_command_stream(agent: object, payload: dict, interaction: Comman
         with urllib.request.urlopen(request, timeout=10.0) as response:
             if response.headers.get_content_type() != COMMAND_STREAM_MEDIA_TYPE:
                 raise ValueError("宿主未提供命令消息流")
-            return _read_command_frames(response, interaction.request_id, consumer)
+            return _read_command_frames(response, payload["plugin_request_id"], consumer)
     finally:
         consumer.close()
 
@@ -94,7 +94,9 @@ def _read_command_frames(response, request_id: str, consumer: _PermissionConsume
     first = CommandStreamFrame.decode(response.readline(COMMAND_STREAM_MAX_BYTES + 1), request_id=request_id)
     if first.kind != "connected":
         raise ValueError("命令流缺少连接身份")
-    consumer.chunk_path = command_approval_path(consumer.interaction.gateway_paths, command_stream_owner(first.payload), request_id)
+    owner = command_stream_owner(first.payload)
+    if consumer.interaction is not None:
+        consumer.chunk_path = command_approval_path(consumer.interaction.gateway_paths, owner, request_id)
     while True:
         if consumer.token.cancelled or consumer.error is not None:
             raise OSError("命令交互已关闭")

@@ -385,6 +385,9 @@ def execute_create_subagents_service(
 ) -> ToolHandlerOutcome:
     """Create audit/runtime children without pretending an internal service call is a model tool call."""
 
+    from ..subagents.services.persistence.run_index import SubagentRunIndexUnavailable
+
+    materialization_started = False
     try:
         with _create_subagents_transaction(agent):
             prepared = _prepare_create_subagents(agent, params)
@@ -392,6 +395,7 @@ def execute_create_subagents_service(
                 return prepared
             decision = prepare_subagent_model_decision(agent, params, lambda: _decision_children(agent, prepared))
             if decision is None:
+                materialization_started = True
                 return _materialize_create_subagents(agent, prepared)
         outcome = decide_subagent_models(agent, decision)
         with _create_subagents_transaction(agent):
@@ -403,6 +407,7 @@ def execute_create_subagents_service(
             advice = apply_subagent_model_decision(agent, decision, outcome, _decision_children(agent, prepared))
             for index, proposal in advice.items():
                 prepared.prepared_runs[index] = replace(prepared.prepared_runs[index], model_advice=proposal)
+            materialization_started = True
             return _materialize_create_subagents(agent, prepared)
     except (ToolCancelled, InterruptedError):
         raise
@@ -411,6 +416,20 @@ def execute_create_subagents_service(
         import traceback as _tb
 
         from ..common.log_redaction import redact_sensitive_text
+
+        # 预检只准备内存规格；索引未就绪时尚未创建孩子，不能把该工具操作永久记成未知写入。
+        # 进入物化以后仍可能已有 canonical，保留原 unknown，禁止靠同类异常猜测未写。
+        if isinstance(exc, SubagentRunIndexUnavailable) and not materialization_started:
+            reason = redact_sensitive_text(str(exc))
+            return ToolHandlerOutcome(
+                "create_subagents", False,
+                f"子代理创建预检未通过：{type(exc).__name__}: {reason}。本次尚未创建子代理。"
+                "先用 list_agents 核实运行账本；若仍报索引未就绪，请等待原提交或恢复完成后，"
+                "再提交同一派工请求；不要更换任务身份或重复派工。",
+                error_code=exc.error_code, effect_outcome="not_started",
+                result_envelope={"error_type": type(exc).__name__, "reason": reason,
+                                 "failure_stage": "preflight", "partial_creation_possible": False},
+            )
 
         logging.getLogger(__name__).error(
             "create_subagents crashed: %s\n%s",

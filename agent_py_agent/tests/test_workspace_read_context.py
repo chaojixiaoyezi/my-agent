@@ -146,3 +146,147 @@ def test_payload_is_independent_and_policy_values_are_not_normalized_again(tmp_p
     invalid = replace(context, external_policy=replace(context.external_policy, owner_scope_root=tmp_path))
     with pytest.raises(ValueError):
         WorkspaceReadContext.from_payload(invalid.to_payload())
+
+
+def test_business_aggregate_policy_transport_keeps_workspace_memory_and_maintenance(tmp_path):
+    from agent_py_agent.agent.path_access_policy import business_aggregate_paths
+    owner = (tmp_path / 'home/owners/local/main').resolve()
+    roots = business_aggregate_paths(owner)
+    policy = PathAccessPolicy.from_values(mode='full', owner_scope_root=owner,
+                                         business_aggregate_roots=roots)
+    context = build_workspace_read_context(cwd=owner, write_boundary=None, path_policy=policy,
+                                           granted_external_roots=())
+    restored = WorkspaceReadContext.from_payload(context.to_payload())
+    for relative in ('memory/long_term/memory.jsonl', 'memory.md', 'data/telemetry/tool_calls.jsonl',
+                     'workspace/runtime/workspaces/a/conversations/messages/a.jsonl', 'sessions/s.json', 'runtime.db-wal',
+                     'artifacts/business/artifact-private.blob', 'artifacts/business/data/artifacts/registry.jsonl',
+                     'data/business/catalog.json'):
+        assert restored.check(Path(relative)).code == 'PATH_HOST_MANAGED_STORE_BLOCKED'
+    for relative in ('workspace/project/memory/notes.txt', 'data/uploads/input.txt', 'workspace/input.md'):
+        assert restored.check(Path(relative)).allowed
+    maintenance = PathAccessPolicy.from_values(mode='full', owner_scope_root=owner)
+    assert maintenance.check(owner / 'memory/long_term/memory.jsonl').allowed
+
+
+@pytest.mark.parametrize('backend', ['rg', 'python'])
+def test_canonical_business_file_reads_and_search_do_not_open_raw_aggregate(tmp_path, monkeypatch, backend):
+    from agent_py_agent.agent.tooling._filesystem_list import ListFilesTool
+    from agent_py_agent.agent.tooling._filesystem_read import FileSystemAccessOptions, ReadFileTool
+    from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+    owner = (tmp_path / 'home/owners/local/main').resolve()
+    raw = owner / 'memory/long_term/memory.jsonl'
+    raw.parent.mkdir(parents=True)
+    raw.write_text('RAW_A731\nRAW_B842')
+    blob = owner / 'artifacts/business/private.blob'
+    blob.parent.mkdir(parents=True)
+    blob.write_text('RAW_B842')
+    public = owner / 'workspace/project/memory/notes.txt'
+    public.parent.mkdir(parents=True)
+    public.write_text('PUBLIC_ONLY_914')
+    upload = owner / 'data/uploads/input.txt'
+    upload.parent.mkdir(parents=True)
+    upload.write_text('LEGAL_UPLOAD_916')
+    options = FileSystemAccessOptions(owner_scope_root=str(owner))
+    tools = {'search_text': SearchTextTool(owner, 20, access_options=options),
+             'read_file': ReadFileTool(owner, 10000, access_options=options),
+             'list_files': ListFilesTool(owner, 100, access_options=options)}
+    boundary = {'canonical_owner_home_root': str(owner), 'business_aggregate_owner_root': str(owner)}
+    if backend == 'python':
+        monkeypatch.setattr('agent_py_agent.agent.tooling._filesystem_search.shutil.which', lambda *args: None)
+    def invoke(name, args, *, scope=boundary):
+        return execute_canonical_test_call(owner, tools=tools, tool_name=name, arguments=args,
+            write_boundary=scope, owner_scope_root=str(owner)).result
+    for name, denied_path in ((name, path) for name in ('read_file', 'list_files', 'search_text') for path in (raw, blob)):
+        args = {'path': str(denied_path)}
+        if name == 'search_text':
+            args['query'] = 'RAW_'
+        denied = invoke(name, args)
+        assert denied.status != 'succeeded', repr(denied)
+        assert 'PATH_HOST_MANAGED_STORE_BLOCKED' in repr(denied)
+        assert 'RAW_A731' not in repr(denied) and 'RAW_B842' not in repr(denied)
+    searched = invoke('search_text', {'path': str(owner), 'query': 'RAW_|PUBLIC_ONLY|LEGAL_UPLOAD', 'include_ignored': True})
+    assert searched.status == 'succeeded', repr(searched)
+    assert 'RAW_A731' not in repr(searched) and 'RAW_B842' not in repr(searched)
+    assert 'PUBLIC_ONLY_914' in repr(searched) and 'LEGAL_UPLOAD_916' in repr(searched)
+    assert invoke('read_file', {'path': str(public)}).status == 'succeeded'
+    assert 'RAW_A731' in repr(invoke('read_file', {'path': str(raw)}, scope=None))
+    # Exact输入只是路径上界，不能被模型自报用来绕过宿主聚合保护。
+    exact = {**boundary, 'read_scope_mode': 'exact', 'allowed_read_roots': [str(raw)]}
+    assert invoke('read_file', {'path': str(raw)}, scope=exact).status != 'succeeded'
+
+
+def test_host_freeze_covers_foreground_space_and_child_without_widening(tmp_path):
+    from types import SimpleNamespace as S
+
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import create_task_attributes
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+        business_aggregate_owner_root,
+        write_boundary_with_runtime_ledger,
+    )
+    from agent_py_agent.agent.memory_store.recall import MemoryRecallScope
+    owner = (tmp_path / 'home/owners/local/main').resolve()
+    agent = S(home_paths=S(owner_home_dir=owner), root=owner, config=S(), tools=S(owner_scope_root=str(owner)))
+    params = S(memory_recall_scope=MemoryRecallScope((('global', 'global'), ('project', 'project:a'))),
+               host_session_space={'space_id': 'space-a'}, host_channel_actor=None, request_id='req-a',
+               business_context=None, task_attributes={}, write_boundary=None, context_scope='default', run_id='')
+    assert business_aggregate_owner_root(agent, params) == owner
+    assert write_boundary_with_runtime_ledger(agent, params)['business_aggregate_owner_root'] == str(owner)
+    # 继承只取宿主当前scope，模型提供同名空值不能关闭；无绑定也不能凭模型字符串扩大。
+    agent._current_run_params = params
+    attrs = create_task_attributes({'attributes': {'host_business_aggregate_owner_root': ''}}, agent)
+    assert attrs['host_business_aggregate_owner_root'] == str(owner)
+    child = S(task_attributes=attrs)
+    assert business_aggregate_owner_root(agent, child) == owner
+    agent._current_run_params = S()
+    attrs = create_task_attributes({'attributes': {'host_business_aggregate_owner_root': str(owner)}}, agent)
+    assert 'host_business_aggregate_owner_root' not in attrs
+    assert business_aggregate_owner_root(agent, S()) is None
+
+
+@pytest.mark.sandbox_capability('nested_sandbox_exec' if __import__('sys').platform == 'darwin' else 'linux_bwrap')
+@pytest.mark.parametrize('raw_kind', ['memory', 'upload'])
+def test_business_raw_aggregate_is_hidden_by_original_shell_sandbox(tmp_path, raw_kind):
+    from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+    owner = (tmp_path / 'home/owners/local/main').resolve()
+    raw = owner / ('memory/long_term/memory.jsonl' if raw_kind == 'memory' else 'artifacts/business/private.blob')
+    raw.parent.mkdir(parents=True)
+    raw.write_text('RAW_B842')
+    public = owner / 'workspace/project/memory/input.txt'
+    public.parent.mkdir(parents=True)
+    public.write_text('ORDINARY_MEMORY_913')
+    shell = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner)))
+    args = {'command': f'cat {raw}; cat {public}', 'timeout': 10}
+    boundary = {'canonical_owner_home_root': str(owner), 'business_aggregate_owner_root': str(owner),
+                'allowed_write_roots': [str(public.parent)]}
+    def invoke(bound):
+        return execute_canonical_test_call(owner, tools={'run_command': shell}, tool_name='run_command',
+            arguments=args, write_boundary=bound, owner_scope_root=str(owner), run_id='shell-business').result
+    result = invoke(boundary)
+    if result.status == 'approval_required':
+        binding = {**result.metadata['action_decision']['approval_request'], 'status': 'APPROVED', 'approval_id': 'qa-approved'}
+        result = invoke({**boundary, 'approved_actions': [binding]})
+    assert 'RAW_B842' not in repr(result), repr(result)
+    assert 'ORDINARY_MEMORY_913' in repr(result), repr(result)
+    assert not shell.host_private_roots  # 本次副本不能污染下一个无空间维护调用。
+
+
+def test_business_aggregate_case_alias_follows_real_volume_identity(tmp_path):
+    from agent_py_agent.agent.path_access_policy import business_aggregate_paths
+    owner = (tmp_path / 'home/owners/local/main').resolve()
+    source = owner / 'memory'
+    source.mkdir(parents=True)
+    (source / 'input.txt').write_text('PRIVATE_B842')
+    alias = owner / 'MeMoRy'
+    policy = PathAccessPolicy.from_values(owner_scope_root=owner,
+                                         business_aggregate_roots=business_aggregate_paths(owner))
+    if alias.exists() and alias.samefile(source):
+        assert not policy.check(alias / 'input.txt').allowed
+        assert policy.host_managed_store(alias / 'input.txt') == source
+    else:
+        alias.mkdir()
+        (alias / 'input.txt').write_text('ORDINARY_CASE_DISTINCT')
+        assert policy.check(alias / 'input.txt').allowed
+        assert policy.host_managed_store(alias / 'input.txt') is None
+    assert policy.check(source / 'input.txt').code == 'PATH_HOST_MANAGED_STORE_BLOCKED'

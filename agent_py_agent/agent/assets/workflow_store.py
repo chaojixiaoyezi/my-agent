@@ -21,8 +21,17 @@ from . import (
     safe_asset_id,
     valid_skill_reference,
 )
-from .descriptor import AssetDescriptor, _Record
+from .descriptor import (
+    WORKFLOW_OUTPUT_CONTRACT_VERSION_KEY,
+    AssetDescriptor,
+    _Record,
+    workflow_output_contract_version,
+)
 from .descriptor import execution_definition_ref as _asset_execution_definition_ref
+from .workflow_package_template import (
+    PackageWorkflowSource,
+    WorkflowTemplateError,
+)
 
 WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid",
                        "http_request", "script_transform", "condition", "tool_call", "llm_prompt", "subworkflow",
@@ -91,6 +100,25 @@ def execution_definition_ref(value, *, kind=None):
                           if key not in ('description', 'ui_position', 'next_step_ids')}
                          for step in value.get('steps', ())]
     return _asset_execution_definition_ref(projected, kind=kind)
+
+
+def workflow_content_changed(definition, previous):
+    """内容计时忽略启停门；执行指纹本身仍保留 enabled，继续约束冻结和恢复。"""
+    content = replace(definition, enabled=previous.enabled,
+        descriptor=replace(definition.descriptor, enabled=previous.descriptor.enabled))
+    return (content.execution_definition_ref != previous.execution_definition_ref
+            or definition.body_markdown != previous.body_markdown
+            or definition.descriptor.name != previous.descriptor.name)
+
+
+def register_workflow_output_contract(definition, previous=None):
+    """只在正式登记/正文修订调用；输入不能降级已发表或本次显式必填的合同。"""
+    metadata = dict(definition.descriptor.metadata)
+    metadata.pop(WORKFLOW_OUTPUT_CONTRACT_VERSION_KEY, None)
+    if (definition.descriptor.io_contract.outputs
+            or previous is not None and workflow_output_contract_version(previous.descriptor.metadata) == 2):
+        metadata[WORKFLOW_OUTPUT_CONTRACT_VERSION_KEY] = 2
+    return replace(definition, descriptor=replace(definition.descriptor, metadata=metadata))
 
 
 # LLM: 旧模式及调试别名/控制节点共用原值对象；config仅有限JSON，不承载回调、审批或执行授权。
@@ -208,6 +236,7 @@ class WorkflowDefinition(_Record):
     def __post_init__(self):
         super().__post_init__()
         enabled = self.enabled and self.descriptor.enabled
+        workflow_output_contract_version(self.descriptor.metadata)
         object.__setattr__(self, 'enabled', enabled)
         object.__setattr__(self, 'descriptor', replace(self.descriptor, enabled=enabled))
         if self.descriptor.kind != "workflow" or len({step.step_id for step in self.steps}) != len(self.steps):
@@ -339,6 +368,12 @@ class WorkflowStore(_AssetStore):
     # 函数用途: 写入已经校验的工作流，供多个写入口共用。
     def _save(self, definition):
         previous = self._get(definition.descriptor.id)
+        if previous is not None:
+            owner = previous.descriptor.owner_id
+            if owner and definition.descriptor.owner_id and definition.descriptor.owner_id != owner:
+                raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+            # 更新、回滚、绑定和完成计时共用此锁内写口；空旧凭据也不能被一次正文保存冒领。
+            definition = replace(definition, descriptor=replace(definition.descriptor, owner_id=owner))
         metadata = dict(definition.descriptor.metadata)
         # 创建时的派生出处不是可编辑正文；所有写入口都沿锁内原记录保留它。
         if previous is not None and 'derived_from' in previous.descriptor.metadata:
@@ -357,9 +392,7 @@ class WorkflowStore(_AssetStore):
             if previous is not None:
                 old_state = previous.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA, {})
                 if (business.get('last_content_edit_at') == old_state.get('last_content_edit_at')
-                        and (definition.execution_definition_ref != previous.execution_definition_ref
-                             or definition.body_markdown != previous.body_markdown
-                             or definition.descriptor.name != previous.descriptor.name)):
+                        and workflow_content_changed(definition, previous)):
                     business = json.loads(json.dumps(business))
                     business['last_content_edit_at'] = time.time()
                     if business['scope']['scope_mode'] == 'unassigned':
@@ -382,13 +415,28 @@ class WorkflowStore(_AssetStore):
 
     # LLM: 输入共用严格from_any，显式scope选写根；锁内CAS及宿主归属保护，普通metadata不能认领或撤销隐藏组合。
     # 函数用途: 创建或替换Owner/项目工作流，汇总引用并返回递增revision。
-    def save_workflow(self, definition, *, target_scope='owner', expected_revision=None):
+    def save_workflow(self, definition, *, target_scope='owner', expected_revision=None, package_template_source=None):
         definition = WorkflowDefinition.from_any(definition)
         target = self._target_store(target_scope)
+        if package_template_source is not None:
+            if target_scope != 'owner' or type(package_template_source) is not PackageWorkflowSource:
+                raise WorkflowTemplateError('WORKFLOW_TEMPLATE_SOURCE_HOST_ONLY')
+            package_template_source.require(self.owner_home, definition)
         with target._locked():
             old = target._get(definition.descriptor.id)
+            if package_template_source is not None and old is not None:
+                raise WorkflowTemplateError('WORKFLOW_TEMPLATE_TARGET_EXISTS',
+                    next_action='目标Owner工作流已存在，未覆盖；选择独立的新workflow_id后重新派生。')
+            derived = definition.descriptor.metadata.get('derived_from')
+            if isinstance(derived, dict) and package_template_source is None and (
+                    old is None or old.descriptor.metadata.get('derived_from') != derived):
+                raise WorkflowTemplateError('WORKFLOW_TEMPLATE_SOURCE_HOST_ONLY')
+            if package_template_source is not None:
+                definition = replace(definition, descriptor=replace(definition.descriptor, metadata={
+                    **definition.descriptor.metadata, 'derived_from': package_template_source.provenance()}))
             next_asset_revision(old.descriptor.to_dict() if old else None, expected_revision)
             validate_definition_eligibility(definition)
+            definition = register_workflow_output_contract(definition, old)
             # 普通正文编辑不能借 metadata 改宿主范围、治理或操作回执。
             metadata = dict(definition.descriptor.metadata)
             for key in ('hidden', 'composition'):
@@ -407,9 +455,7 @@ class WorkflowStore(_AssetStore):
             metadata.pop(BUSINESS_WORKFLOW_METADATA, None)
             if old and BUSINESS_WORKFLOW_METADATA in old.descriptor.metadata:
                 state = json.loads(json.dumps(old.descriptor.metadata[BUSINESS_WORKFLOW_METADATA]))
-                if (definition.execution_definition_ref != old.execution_definition_ref
-                        or definition.body_markdown != old.body_markdown
-                        or definition.descriptor.name != old.descriptor.name):
+                if workflow_content_changed(definition, old):
                     state['last_content_edit_at'] = time.time()
                     if state['scope']['scope_mode'] == 'unassigned':
                         state['orphan_since'] = state['last_content_edit_at']
@@ -537,7 +583,7 @@ class WorkflowStore(_AssetStore):
                 return definition
             steps = tuple(replace(step, skill_ids=skills)
                           if step.step_id == step_id else step for step in definition.steps)
-            return self._save(replace(definition, steps=steps))
+            return self._save(register_workflow_output_contract(replace(definition, steps=steps), definition))
 
     # LLM: 覆盖读取复用原来源顺序、批量检查和只读锁，不经会丢画布字段的描述符清单投影。
     # 函数用途: 在不改共享overlay格式的前提下返回完整工作流值对象。

@@ -31,6 +31,11 @@ from agent_py_agent.tests.test_orch01_management_continuity import (
 
 def test_scheduled_management_recipient_ack_and_evidence_identity_chain(case):  # noqa: F811
     agent = case.agent
+    # 此接收者还要绑定自己承担的需求/证据，故原宿主明确指派协调角色；普通worker不得因此获得该动作。
+    recipient = agent.subagents.create_run(goal="接收并登记自身证据", thought="test", plan=["ack", "verify"],
+        parent_id=case.parent_task_id, root_id=case.parent_task_id, depth=1, role="coordinator",
+        allowed_tools=["read_file", "manage_handoff_board", "manage_requirement_provenance"])
+    case.child_id = recipient.id
     ctx = ToolInvocationContext(runtime_snapshot=agent.tools.runtime_snapshot())
     _foreground(agent, case.thread, case.parent_task_id)
     direct = SendGuidanceTool(agent).execute_scoped({'target': case.child_id, 'message': 'first'}, ctx)
@@ -45,14 +50,21 @@ def test_scheduled_management_recipient_ack_and_evidence_identity_chain(case):  
         board = ManageHandoffBoardTool(agent)
         service = board._resolve_service()
         collab = service.store.open_case({'thread_id': case.thread.thread_id})
-        pub = board.execute_scoped({'action': 'publish_item', 'case_id': collab.case_id,
+        arguments = {'action': 'publish_item', 'case_id': collab.case_id,
             'request_id': 'short-chain', 'responsible_actor': case.child_id,
-            'frozen_input_version': 'fixture-v1'}, ctx)
-        assert pub.ok
-        item_id = json.loads(pub.output)['result']['item']['item_id']
-        ack_params = {'action': 'record_ack', 'case_id': collab.case_id, 'item_id': item_id,
-                      'frozen_input_version': 'fixture-v1'}
-        assert not board.execute_scoped(ack_params, ctx).ok
+            'frozen_input_version': 'fixture-v1'}
+        denied_publication = board.execute_scoped(arguments, ctx)
+        assert not denied_publication.ok and denied_publication.effect_outcome == 'not_started'
+        assert 'HANDOFF_RECIPIENT_NOT_IN_SCOPE' in denied_publication.output
+
+    # 定时管理连续性仅用于原管理入口；不能把独立scheduler TaskRun当作原交接发布作者。
+    _foreground(agent, case.thread, case.parent_task_id)
+    pub = board.execute_scoped(arguments, ctx)
+    assert pub.ok, pub.output
+    item_id = json.loads(pub.output)['result']['item']['item_id']
+    ack_params = {'action': 'record_ack', 'case_id': collab.case_id, 'item_id': item_id,
+                  'frozen_input_version': 'fixture-v1'}
+    assert not board.execute_scoped(ack_params, ctx).ok
 
     agent._current_run_params = RunParams(run_id=case.child_id, task_id=case.child_id, request_id=case.child_id)
     previous = set_current_subagent_context(agent, run_id=case.child_id)

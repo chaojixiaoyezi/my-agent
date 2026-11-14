@@ -247,10 +247,15 @@ def test_symlink_and_corrupt_records_fail_closed(case, monkeypatch):
 @pytest.mark.parametrize('admin', [True, False])
 def test_bootstrap_registers_only_admin_governance(case, admin):
     from agent_py_agent.agent.agent_core.self_map_bootstrap import register_self_map
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+    identity = OwnerIdentity.local_main() if admin else OwnerIdentity.provider_user("feishu", "external")
+    owner_id = resolve_owner_home(case.root, identity).owner_id
     registered = []
     agent = NS(root=case.root, config=NS(enable_self_map=False),
-               tools=NS(owner_type='main_agent', owner_id='local' if admin else 'external', register=registered.append),
-               home_paths=NS(owner_home_dir=case.root, owner_provider='local' if admin else 'feishu', owner_kind='main' if admin else 'user'))
+               tools=NS(owner_type='main_agent', owner_id=owner_id, register=registered.append,
+                        _construction_params=NS(file_source_resolver=None)),
+               home_paths=NS(owner_home_dir=case.root, owner_id=owner_id, owner_provider='local' if admin else 'feishu', owner_kind='main' if admin else 'user'))
     register_self_map(agent)
     names = {item.model_spec.name for item in registered}
     assert {'scripts', 'workflows'} <= names

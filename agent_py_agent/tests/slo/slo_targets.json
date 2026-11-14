@@ -435,12 +435,24 @@
         "changed_files": 1
       },
       "targets": {
-        "downloads_per_turn": 20,
-        "uploads_per_turn": 1
+        "uploads_per_turn": 1,
+        "downloads_warm_max": 0
       }
     },
     {
       "id": "snapshot_delta",
+      "load_profile": {
+        "files": 20,
+        "turns": 2,
+        "changed_files": 1
+      },
+      "targets": {
+        "downloads_warm_max": 0,
+        "uploads_per_turn": 1
+      }
+    },
+    {
+      "id": "snapshot_delta_compat",
       "load_profile": {
         "files": 20,
         "turns": 2,

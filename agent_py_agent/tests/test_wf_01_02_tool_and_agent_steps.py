@@ -841,3 +841,122 @@ def test_make_session_task_completion_reader_resolves_owner_from_threads_load(tm
     res_legacy = reader_legacy(run_alice, step)
     assert res_legacy is not None
     assert res_legacy["status"] == "completed"
+
+
+@pytest.mark.parametrize('closed,explicit,extra_explicit,expected_status', [
+    (True, True, False, 'succeeded'),
+    (True, False, False, 'failed'),
+    (False, True, False, 'succeeded'),
+    (True, True, True, 'failed'),
+])
+def test_tool_step_filters_only_unrelated_inherited_fields_for_closed_explicit_call(
+        closed, explicit, extra_explicit, expected_status):
+    captured = {}
+    schema = {'type': 'object', 'properties': {'path': {'type': 'string'}, 'optional': {'type': 'integer'}},
+              'required': ['path'], 'additionalProperties': not closed}
+    tool = MockTool('read', lambda args, **kw: captured.update(args) or {'ok': True}, parameters=schema)
+    engine = SimpleNamespace(tool_registry=MockToolRegistry({'read': tool}))
+    run, step = _make_run(inputs={'control': 7}), _make_step()
+    step.input_snapshot = {'path': 'inherited', 'optional': 3, 'control': 'x' * 100000}
+    tool_spec = {'tool_name': 'read'}
+    if explicit:
+        tool_spec['arguments'] = {'path': 'explicit'}
+    if extra_explicit:
+        tool_spec['arguments']['bad'] = 'explicit-invalid'
+    execute_tool_step(engine=engine, run=run, workflow={}, step=step,
+                      spec={'tool_spec': tool_spec}, context=None, outputs={})
+    assert step.status == expected_status
+    if expected_status == 'succeeded':
+        assert captured['path'] == ('explicit' if explicit else 'inherited')
+        assert captured['optional'] == 3
+        assert ('control' in captured) is (not closed)
+    else:
+        assert not captured and step.error_code == 'WORKFLOW_TOOL_SCHEMA_INVALID'
+
+
+def test_tool_step_uses_frozen_dispatcher_schema_before_authorization():
+    captured = {}
+    frozen = {'type': 'object', 'properties': {'path': {'type': 'string'}},
+              'required': ['path'], 'additionalProperties': False}
+    runtime = SimpleNamespace(model_spec=SimpleNamespace(input_schema=frozen))
+    dispatcher = SimpleNamespace(snapshot=SimpleNamespace(runtime=lambda name: runtime),
+        execute_scoped=lambda name, arguments, **kwargs: captured.update(arguments) or {'ok': True})
+    authorized = []
+    engine = SimpleNamespace(tool_dispatcher=dispatcher,
+        tool_authorizer=lambda name, arguments, **kw: authorized.append(dict(arguments)) or True)
+    run, step = _make_run(), _make_step()
+    step.input_snapshot = {'control': 2}
+    execute_tool_step(engine=engine, run=run, workflow={}, step=step,
+        spec={'tool_spec': {'tool_name': 'read', 'arguments_map': {'path': 'literal-path'},
+                            'parameters_schema': {'additionalProperties': True}}}, context=None, outputs={})
+    assert step.status == 'succeeded' and captured == {'path': 'literal-path'}
+    assert authorized == [captured], '模型parameters_schema不得覆盖冻结schema或改变授权与执行参数'
+
+
+@pytest.mark.parametrize('schema_extra', [
+    {'additionalProperties': {'type': 'string'}}, {},
+    {'additionalProperties': False, 'patternProperties': {'^control$': {'type': 'string'}}},
+    {'additionalProperties': False, 'allOf': [{'properties': {'control': {'type': 'string'}}}]},
+    {'additionalProperties': False, 'anyOf': [{'properties': {'control': {'type': 'string'}}}]},
+])
+def test_tool_step_does_not_clip_open_or_composite_schema_inheritance(schema_extra):
+    authorized = []
+    schema = {'type': 'object', 'properties': {'path': {'type': 'string'}}, **schema_extra}
+    tool = MockTool('read', lambda args, **kw: {'ok': True}, parameters=schema)
+    engine = SimpleNamespace(tool_registry=MockToolRegistry({'read': tool}),
+        tool_authorizer=lambda name, args, **kw: authorized.append(dict(args)) or True)
+    step = _make_step()
+    step.input_snapshot = {'control': 'preserved'}
+    execute_tool_step(engine=engine, run=_make_run(), workflow={}, step=step,
+        spec={'tool_spec': {'tool_name': 'read', 'arguments': {'path': 'file'}}}, context=None, outputs={})
+    assert authorized == [{'control': 'preserved', 'path': 'file'}]
+
+
+@pytest.mark.parametrize('mutation', ['', 'old_unknown', 'old_binding', 'changed_attempt', 'wrong_call', 'missing_handler', 'unknown'])
+def test_prehandler_refusal_settles_only_current_proven_unstarted_attempt(mutation):
+    from agent_py_agent.agent.workflows.run_store import _concurrency_settled
+
+    run, step = _make_run(), _make_step()
+    run.steps = (step,)
+    step.escalation_result['effect_started'] = True  # 原引擎的准入，不等于进入业务handler。
+    if mutation == 'old_unknown':
+        step.escalation_result.update(effect_outcome='unknown', tool_receipt={'effect_outcome': 'unknown'})
+    if mutation == 'old_binding':
+        step.escalation_result['tool_operation_binding'] = {'operation_id': 'original-unresolved-operation'}
+    def dispatch(tool_name, arguments, **kwargs):
+        proof = {'ok': False, 'error_code': 'TOOL_NOT_ALLOWED', 'effect_outcome': 'not_started',
+            'handler_executed': False, 'call_id': 'workflow-step:run-101:step_tool', 'tool_name': tool_name}
+        if mutation == 'changed_attempt':
+            step.escalation_result['attempt_id'] = 'later-attempt'
+        elif mutation == 'wrong_call':
+            proof['call_id'] = 'workflow-step:other-run:step_tool'
+        elif mutation == 'missing_handler':
+            proof.pop('handler_executed')
+        elif mutation == 'unknown':
+            proof['effect_outcome'] = 'unknown'
+        return proof
+    execute_tool_step(engine=SimpleNamespace(tool_dispatcher=dispatch), run=run, workflow={}, step=step,
+        spec={'tool_spec': {'tool_name': 'echo_tool', 'arguments': {}}}, context=None, outputs={})
+    run.status = 'failed'
+    assert _concurrency_settled(run) is (not mutation)
+    assert step.escalation_result['effect_started'] is bool(mutation)
+    if mutation == 'old_unknown':
+        assert step.escalation_result['effect_outcome'] == 'unknown'
+
+
+def test_canonical_tool_result_unstarted_fact_settles_current_attempt():
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
+    from agent_py_agent.agent.workflows.run_store import _concurrency_settled
+
+    run, step = _make_run(), _make_step()
+    run.steps = (step,)
+    step.escalation_result['effect_started'] = True
+    result = ToolResult(call_id='workflow-step:run-101:step_tool', tool_name='echo_tool',
+        status='failed', error_code='TOOL_NOT_ALLOWED', handler_executed=False,
+        failure_stage='authorization', effect_outcome='not_started')
+    execute_tool_step(engine=SimpleNamespace(tool_dispatcher=lambda *args, **kwargs: result),
+        run=run, workflow={}, step=step, spec={'tool_spec': {'tool_name': 'echo_tool'}},
+        context=None, outputs={})
+    run.status = 'failed'
+    assert _concurrency_settled(run)
+    assert step.escalation_result['effect_started'] is False

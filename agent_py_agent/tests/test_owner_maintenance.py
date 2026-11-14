@@ -235,6 +235,14 @@ def test_perf_e_cli_maintenance_runs_once_and_skips_subagent(tmp_path):
         restore_current_subagent_context(agent, previous)
     result = wrapper(agent, now=200_000)
     assert result.ran and not cache.exists()
+    # 同一日的原配额观察可续片，但不能再次执行保留清理。
+    for _ in range(64):
+        continuation = wrapper(agent, now=200_001)
+        if continuation is None:
+            break
+        assert continuation.retention is None
+    else:
+        pytest.fail("CLI maintenance observation did not settle")
     assert wrapper(agent, now=200_001) is None
     assert wrapper(SimpleNamespace(home_paths=home.owner_home_dir), now=200_000) is None
 
@@ -620,3 +628,70 @@ def test_r8_maint_01_gateway_discovery_and_daily_jitter_converge(tmp_path, monke
         assert result.ran
     ledger = json.loads((home.owner_home_dir / ".owner-quota-ledger.json").read_text())
     assert ledger["reconcile_cursor"]["complete"] is True and ledger["dirty_since"] is None
+
+
+@pytest.mark.parametrize("disk_limit", [0, 100])
+def test_started_quota_observation_continues_and_releases_directory_stream(tmp_path, monkeypatch, disk_limit):
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+    from agent_py_agent.agent.user_space import owner_quota as quota
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    policy = json.loads(home.owner_retention_json.read_text())
+    policy["maintenance_interval_seconds"] = 86400
+    home.owner_retention_json.write_text(json.dumps(policy))
+    home.owner_quota_json.write_text(json.dumps({"max_disk_mb": disk_limit}))
+    for number in range(24):
+        (home.owner_cache_dir / f"keep-{number}").write_text("synthetic")
+    # 只缩小原扫描预算，不显式请求quota；0上限也须完成原观察账义务。
+    monkeypatch.setattr(maintenance, "_quota_maintenance_budget", lambda *_: (8, 10))
+    descriptor_root = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+
+    def owner_descriptors():
+        found = []
+        if descriptor_root.is_dir():
+            for entry in descriptor_root.iterdir():
+                try:
+                    target = Path(os.readlink(entry))
+                except OSError:
+                    import sys
+
+                    if sys.platform != "darwin":
+                        continue
+                    import fcntl
+
+                    try:
+                        target = Path(fcntl.fcntl(int(entry.name), 50, bytes(1024)).split(b"\0", 1)[0].decode())
+                    except (OSError, ValueError):
+                        continue
+                if target.is_absolute() and target.is_relative_to(home.owner_home_dir.resolve()):
+                    found.append(str(target))
+        return found
+
+    saw_partial = False
+    saw_owned_descriptor = False
+    for tick in range(256):
+        now = 200_000 + tick / 1000
+        result = maintenance.run_owner_retention_if_due(home, now=now, include_global_indexes=False)
+        assert result.ran
+        marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+        storage = marker.get("storage_maintenance", {})
+        reconciliation = storage.get("quota_reconciliation", {})
+        pending = "cache_tmp_trash" in storage.get("pending_kinds", []) or reconciliation.get("complete") is False
+        if pending:
+            saw_partial = True
+            saw_owned_descriptor = saw_owned_descriptor or bool(owner_descriptors())
+            assert marker["maintenance_partial"] is True
+            assert maintenance.owner_maintenance_due(home.owner_home_dir, now=now + 0.0001)
+        if not marker.get("maintenance_partial") and tick > 0:
+            break
+    else:
+        pytest.fail("started quota observation did not settle within bounded original maintenance slices")
+    assert saw_partial
+    if descriptor_root.is_dir():
+        assert saw_owned_descriptor
+        assert owner_descriptors() == []
+    assert (os.getpid(), str(home.owner_home_dir.resolve())) not in quota._QUOTA_SCANS
+    ledger = quota._read_quota_ledger(home.owner_home_dir)
+    assert ledger["reconcile_cursor"]["complete"] is True
+    assert all((home.owner_cache_dir / f"keep-{number}").read_text() == "synthetic" for number in range(24))

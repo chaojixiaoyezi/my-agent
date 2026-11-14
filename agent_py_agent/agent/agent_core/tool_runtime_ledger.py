@@ -161,20 +161,24 @@ def _nonnegative_int(value: object) -> int:
 # LLM: 合并顺序必须保留调用方已有 boundary，再追加宿主账本和当前 run 的精确审批；任何临时批准都不能覆盖原安全范围。
 #   正在运行的安装目录保护最后写入独立键 runtime_install_roots（见 runtime_write_guards），不改原有写入范围。
 # 函数用途: 生成一次工具执行使用的完整结构化边界。
-def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_attachment_lookup: bool = False) -> dict[str, object] | None:
+def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_attachment_lookup: bool = False, for_artifact_reconciliation: bool = False) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_canonical_owner_home_root(merged, agent)
-    # 登记根只由宿主产生；普通工具不为附件多做路径解析。
+    protected_owner = business_aggregate_owner_root(agent, params)
+    if protected_owner is not None:
+        merged["business_aggregate_owner_root"] = str(protected_owner)
+    # 登记根只由宿主产生；shell对账与附件查找复用正式登记根，不授予执行/读取权限。
     merged.pop("artifact_registry_root", None)
     merged.pop("artifact_gateway_root", None)
-    if for_attachment_lookup and (merged.get("canonical_owner_home_root") or _text(getattr(agent, "root", ""))):
+    if (for_attachment_lookup or for_artifact_reconciliation) and (merged.get("canonical_owner_home_root") or _text(getattr(agent, "root", ""))):
         from ..artifacts.registry_provenance import gateway_root_from_host_params
 
         merged["artifact_registry_root"] = str(current_run_artifact_registry_root(agent, params))
-        gateway_root = gateway_root_from_host_params(agent, params)
-        if gateway_root is not None:
-            merged["artifact_gateway_root"] = str(gateway_root)
+        if for_attachment_lookup:
+            gateway_root = gateway_root_from_host_params(agent, params)
+            if gateway_root is not None:
+                merged["artifact_gateway_root"] = str(gateway_root)
     _attach_effective_owner_scope(merged, agent, params)
     _attach_owner_network_scope(merged, agent)
     _attach_runtime_approved_actions(merged, params)
@@ -573,6 +577,40 @@ def _attach_owner_task_write_scope(
         return
 
     task_root_text = _text(boundary.get("task_root"))
+    # 精确读取不是审计写权限：普通子代理保留创建门已经冻结的自身/产品窄写根，
+    # 但缺少宿主身份、跨 owner、控制面或严格审计仍沿原来的失败关闭分支。
+    attrs = getattr(params, "task_attributes", None)
+    constraints = attrs.get("delegation_constraints") if isinstance(attrs, dict) else None
+    own = _resolved_path(attrs.get("agent_run_workspace_dir") if isinstance(attrs, dict) else None)
+    if scope == "task_local" and isinstance(constraints, dict):
+        from ..common.audit_activation import structured_audit_supervised_worker_attributes
+
+        if (constraints.get("actor_runtime", "native") == "native"
+                and not structured_audit_supervised_worker_attributes(attrs)
+                and own is not None and own != owner_root
+                and _is_relative_to(own, owner_root)
+                and own == _resolved_path(boundary.get("task_dir"))
+                and (not task_root_text or (
+                    (declared_root := _resolved_path(_run_workspace(params).get("task_root"))) is not None
+                    and declared_root == _resolved_path(task_root_text)
+                    and declared_root != owner_root
+                    and _is_relative_to(declared_root, owner_root)
+                    and _is_relative_to(own, declared_root)
+                ))):
+            source_roots = [own]
+            for key in ("product_write_roots", "capability_write_roots"):
+                source_roots.extend(
+                    root for raw in _string_list(boundary.get(key))
+                    if (root := _resolved_path(raw)) is not None
+                    and root != owner_root and _is_relative_to(root, owner_root)
+                )
+            boundary["allowed_write_roots"] = list(dict.fromkeys(
+                str(root) for raw in _string_list(boundary.get("allowed_write_roots"))
+                if (root := _resolved_path(raw)) is not None
+                and any(_is_relative_to(root, source) for source in source_roots)
+            ))
+            boundary["execution_workspace_roots"] = list(boundary["allowed_write_roots"])
+            return
     if not task_root_text:
         boundary["allowed_write_roots"] = []
         return
@@ -1017,3 +1055,27 @@ __all__ = [
     "runtime_gate_ledger_record_from_archive",
     "write_boundary_with_runtime_ledger",
 ]
+
+
+def business_aggregate_owner_root(agent, params):
+    """复用已受理typed scope；逐工具不查空间/项目库，不从模型路径签发读取权限。"""
+    from ..conversation.business_contracts import BusinessExecutionContext
+    from ..conversation.host_actor import checked_foreground_memory_scope
+    from ..memory_store.recall import MemoryRecallScope
+    owner = _resolved_path(getattr(getattr(agent, "home_paths", None), "owner_home_dir", None))
+    if owner is None:
+        return None
+    context = getattr(params, "business_context", None)
+    if isinstance(context, BusinessExecutionContext) and (context.space_id or context.project_ref):
+        return owner
+    scope = checked_foreground_memory_scope(agent, params)
+    snapshot = getattr(params, "host_session_space", None)
+    if type(scope) is MemoryRecallScope and (
+            (isinstance(snapshot, dict) and snapshot.get("space_id"))
+            or any(kind == "project" for kind, _key in scope.keys)):
+        return owner
+    attrs = getattr(params, "task_attributes", None)
+    if (isinstance(attrs, dict)
+            and _resolved_path(attrs.get("host_business_aggregate_owner_root")) == owner):
+        return owner
+    return None

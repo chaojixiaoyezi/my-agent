@@ -37,7 +37,7 @@ class CommandSpec:
 
 
 COMMAND_CATALOG = (
-    CommandSpec("space", "/space [list|get <编号>|create <名称>|call <JSON>]", "查看或管理本人业务空间",
+    CommandSpec("space", "/space [list|get <编号>|use <空间ID>|clear|create <名称>|call <JSON>]", "查看或管理本人业务空间",
         submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),
     CommandSpec("team", "/team [list|get <编号>|call <JSON>]", "查看或管理本人后台团队",
         submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),

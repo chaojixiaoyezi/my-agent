@@ -100,7 +100,7 @@ def test_runtime_usage_bounded_pages_advance_empty_filters_without_missing_or_du
     assert all(row["task_id"] == context.task_id for row in seen)
 
 
-def test_usage_cursor_expires_on_legacy_version_scope_or_source_change(tmp_path, registry):
+def test_usage_cursor_expires_on_legacy_scope_but_status_updates_keep_window(tmp_path, registry):
     host, context, _calls, repo = _setup(tmp_path, registry)
     _operations(repo, context, 3)
     service = BusinessCapabilityService(host)
@@ -123,10 +123,11 @@ def test_usage_cursor_expires_on_legacy_version_scope_or_source_change(tmp_path,
             0
         ]["operation_id"]
     )
-    with pytest.raises(BusinessError, match="CURSOR_EXPIRED"):
-        service.execute(
-            "spaces.usage.list", {**request, "cursor": page["next_cursor"]}, context=context
-        )
+    continued = service.execute(
+        "spaces.usage.list", {**request, "cursor": page["next_cursor"]}, context=context
+    )
+    assert continued["items"]  # 当前行状态可以推进；游标固定截止而非整个WAL。
+
 
 
 def test_runtime_usage_bad_database_returns_specific_error(tmp_path, registry):
@@ -192,3 +193,12 @@ def test_skill_source_incomplete_coverage_is_not_an_empty_success(tmp_path, regi
     assert caught.value.details["reason"] == "SKILL_USAGE_SOURCE_UNREADABLE"
     assert caught.value.details["source_coverage"]["status"] != "complete"
     assert caught.value.details["source_coverage"]["reason"]
+    from agent_py_agent.agent.gateway_parts.business_api import _error_details
+
+    public = {item["key"]: item["value"] for item in _error_details(caught.value)}
+    assert public["source_coverage.reason"] == "invalid_json"
+    assert public["source_coverage.status"] != "complete"
+    assert public["source_coverage.through"] == 0
+    assert public["source_coverage.source_size"] == len(b"{broken}\n")
+    assert all(key.removeprefix("source_coverage.") in ("reason", "status", "through", "source_size")
+               for key in public if key.startswith("source_coverage."))

@@ -9,6 +9,9 @@ from __future__ import annotations
 以后命令行、后台进程、测试都从这里拿路径，不需要到处手写目录名。
 """
 
+import os
+import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -95,7 +98,7 @@ def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
 # LLM: Gateway 的 owner 代理可能处理基础网关领取的请求；已有权威队列路径时须沿该队列 root 构造，不能改用代理 home 另猜归属。
 # 函数用途: 根据已经确认的 Gateway 根目录构造完整路径合同。
 def gateway_paths_from_root(root: Path) -> GatewayPaths:
-    root = Path(root)
+    root = _canonical_gateway_root(Path(root))
     return GatewayPaths(
         root=root,
         pid=root / "gateway.pid",
@@ -111,6 +114,35 @@ def gateway_paths_from_root(root: Path) -> GatewayPaths:
         responses=root / "responses",
         history=root / "gateway_requests.jsonl",
     )
+
+
+def _canonical_gateway_root(root: Path) -> Path:
+    """仅规范 macOS 受系统保护的根别名；其余组件保留给原 no-follow 校验。"""
+    if sys.platform != "darwin" or len(root.parts) < 2 or root.parts[0] != "/":
+        return root
+    name = root.parts[1]
+    if name not in {"var", "tmp"}:
+        return root
+    # 不解析用户可替换的链接，也不把配置根以下的链接转换成已授权路径。
+    for parent in (Path("/"), Path("/private")):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise PermissionError(
+                "GATEWAY_OS_ALIAS_PARENT_UNTRUSTED: gateway_workspace 的系统别名父目录 "
+                f"{parent} 必须是 root 所有且无组/其他用户写权限的普通目录；"
+                f"实际 uid={info.st_uid}, mode={oct(info.st_mode)}；side_effects=not_started。"
+                "请核实系统目录权限，或配置不含符号链接的实际 Gateway 根目录；不要原样重试。"
+            )
+    alias = Path("/") / name
+    info = alias.lstat()
+    if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or os.readlink(alias) != f"private/{name}":
+        raise PermissionError(
+            "GATEWAY_OS_ALIAS_UNTRUSTED: gateway_workspace 的系统别名 "
+            f"{alias} 必须是 root 所有且目标恰为 private/{name} 的符号链接；"
+            f"实际 uid={info.st_uid}, mode={oct(info.st_mode)}；side_effects=not_started。"
+            "请核实系统别名，或配置不含符号链接的实际 Gateway 根目录；不要原样重试。"
+        )
+    return Path("/private") / name / Path(*root.parts[2:])
 
 
 # LLM: 路径跟随已认领的权威队列记录，不能按执行 Agent 的 owner root 重新派生；同步恢复/轮询测试。

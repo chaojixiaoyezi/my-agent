@@ -1,6 +1,5 @@
 """W0参考消费者：Node真实fetch经Gateway读取规范运行事件，不手写响应。"""
 import re
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +8,7 @@ from agent_py_agent.cli.space_commands import business_client_for_agent
 from agent_py_agent.tests.test_mega_business_api_actions import seed_observed_runtime
 from agent_py_agent.tests.test_rework_r8_business_wire_contract import (
     ALICE,
+    APP,
     MAIN,
     run_node,
     thin_client,
@@ -150,7 +150,7 @@ def test_filtered_empty_page_then_match_is_found(gateway):
 # LLM: 不透明游标只允许原样传递及null检测，禁止解释内容或字符串推尾。
 # 函数用途: 静态复核recover没有解码、游标等值推断或空事件早退。
 def test_consumer_never_decodes_or_compares_cursor():
-    source = (Path(__file__).resolve().parents[2] / 'examples/business_space_ui/app.js').read_text()
+    source = APP.read_text()
     recover = source.split('async recover(expired = false)', 1)[1].split('async accept(item)', 1)[0]
     assert 'atob' not in recover and 'JSON.parse' not in recover
     assert not re.search(r'(?:this\.cursor|data\.next_cursor)\s*(?:===?|!==?)\s*(?:this\.cursor|data\.next_cursor)', recover)

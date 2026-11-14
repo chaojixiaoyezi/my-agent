@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -337,10 +338,22 @@ class TuiAgentNavigationState:
 
             # 原checkpoint事件沿同一renderer/block ID恢复；工具继续由唯一操作账显示。
             for event in result.get('display_events', [])[:100]:
-                if not isinstance(event, dict) or event.get('kind') != 'assistant_completed':
+                if not isinstance(event, dict):
                     continue
                 payload = event.get('payload')
                 if not isinstance(payload, dict):
+                    continue
+                if event.get('kind') == 'system_message':
+                    from ...agent.conversation.background_transcript import (
+                        public_workflow_step_display,
+                    )
+
+                    step = public_workflow_step_display(payload.get('workflow_step'))
+                    if (step is None or event.get('thread_id') != thread_id
+                            or event.get('phase') != 'completed'):
+                        continue
+                    event, payload = {**event, 'payload': step}, step
+                elif event.get('kind') != 'assistant_completed':
                     continue
                 canonical = payload.get('canonical_message_id')
                 if canonical and canonical in seen:
@@ -368,17 +381,34 @@ class TuiAgentNavigationState:
             if result.get('coverage') == 'unknown':
                 err = result.get('error') if isinstance(result.get('error'), dict) else {}
                 err_code = result.get('error_code') or err.get('code') or 'LOAD_FAILED'
-                runtime.set_notice(
-                    f'完整会话读取失败（{err_code}），coverage=unknown；可执行 /history 重试或按 Ctrl+G 返回主会话',
+                history = self._business_history.setdefault(thread_id, {'next_cursor': None})
+                diagnostic = json.dumps({'code': err_code, 'details': err.get('details', []),
+                    'effect_outcome': result.get('effect_outcome', 'unknown')}, ensure_ascii=False, sort_keys=True)
+                if len(diagnostic) > 8192:
+                    diagnostic = diagnostic[:8192] + '…（诊断预览已截断，请保留原错误码核查服务回执）'
+                if history.get('read_error_signature') != diagnostic:
+                    runtime.write_console('历史读取失败（只读） · request_id='
+                        + str(result.get('request_id') or 'unknown')[:128] + '：' + diagnostic
+                        + '；核查后可 /history 重试；游标过期请 Ctrl+G 返回再进入以读取新续点。')
+                history.update(read_error_code=err_code, read_error_signature=diagnostic)
+                runtime.set_notice(f'历史不可读（coverage=unknown）：{err_code} · 详细原因见本页诊断；/history 重试',
                     duration_seconds=8.0, notice_kind='warning')
                 return
 
             # 正常刷新不消费旧续点；跨页缺口只重建更近的历史入口，更老未读页仍在其后方可达。
-            if result.get('coverage') != 'unknown' and (more or history_gap or thread_id not in self._business_history):
+            if result.get('coverage') != 'unknown' and (more or history_gap or thread_id not in self._business_history
+                    or not more and self._business_history.get(thread_id, {}).get('read_error_code') == 'CURSOR_EXPIRED'):
                 self._business_history[thread_id] = {'next_cursor': result.get('next_cursor')}
+            self._business_history.get(thread_id, {}).pop('read_error_code', None)
+            self._business_history.get(thread_id, {}).pop('read_error_signature', None)
             next_cursor = self._business_history.get(thread_id, {}).get('next_cursor')
             continuation = ' · /history 加载下一页' if next_cursor else ''
-            runtime.set_notice('会话覆盖：' + str(result.get('coverage', 'unknown')) + continuation + ' · Ctrl+G 返回', duration_seconds=4)
+            boundary = result.get('history_boundary')
+            reason = boundary.get('reason_code') if isinstance(boundary, dict) else None
+            label = {'CANONICAL_HISTORY_NOT_RECORDED': '未记录', 'CANONICAL_HISTORY_EMPTY': '已记录空历史',
+                     'CANONICAL_HISTORY_UNREADABLE': '历史不可读', 'NO_PUBLIC_MESSAGES_IN_PAGE': '本页无公开消息'}.get(reason, reason or '边界未知')
+            runtime.set_notice('会话覆盖：' + str(result.get('coverage', 'unknown')) + ' · ' + str(label)
+                + continuation + ' · /help 命令 · Ctrl+G 返回', duration_seconds=6)
 
         # LLM: I/O在导航锁外；成功/失败显示均绑定原reset代次，finally始终释放本thread的加载标记。
         # 函数用途: 读取一个有界页，再通过原runtime合同发表或丢弃迟到结果。
@@ -449,7 +479,8 @@ class TuiAgentNavigationState:
             while len(seen) > 256:
                 seen.pop(next(iter(seen)))
         children = activity.get('children', ())[:50]
-        lines = ['执行过程 · 覆盖 ' + str(activity.get('coverage', 'partial'))]
+        lines = ['执行过程 · 覆盖 ' + str(activity.get('coverage', 'partial')),
+                 '/details 按需查看调度阻拦、直属子代理与用量费用']
         current = activity.get('current_execution')
         if isinstance(current, dict):
             lines.append('当前执行 ' + str(current.get('run_id')) + ' · 尝试 ' + str(current.get('attempt_id')))
@@ -475,7 +506,9 @@ class TuiAgentNavigationState:
                 return False
             thread_id = target['thread_id']
             runtime = self._active_runtime_locked()
-        self._load_business_conversation(thread_id, runtime, more=True)
+            history = self._business_history.get(thread_id, {})
+            retry_current = bool(history.get('read_error_code') and not history.get('next_cursor'))
+        self._load_business_conversation(thread_id, runtime, more=not retry_current)
         return True
 
     # LLM: 只更新有界显示行，不发信号、不改变运行；旧选择按准确 session 身份保留。
@@ -680,8 +713,11 @@ class TuiAgentNavigationState:
             elif not self._path:
                 return False
             else:
-                self._path.pop()
+                exited_page = self._path.pop()
                 parent = self._active_run_id_locked()
+                # 返回主输入时结束观察入口的高亮，避免空输入上键继续被旧选择截走。
+                if exited_page == "bg:watch" and self._selected_by_parent.get(parent) == exited_page:
+                    self._selected_by_parent.pop(parent, None)
                 reconcile_rows = _reconcile_parent_rows(
                     self._rows_by_parent.get(parent, ()),
                     self._rows_by_run,

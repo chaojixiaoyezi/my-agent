@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict, dataclass
 
 from .process_registry import (
+    ProcessSessionAuthorityError,
     ProcessTerminationReceipt,
     _process_instance_terminated,
     capture_process_birth_token,
@@ -67,6 +68,8 @@ class ProcessSessionCleanupError(RuntimeError):
             "session_ids": [record["session_id"]],
             "termination_receipts": [asdict(receipt) for receipt in receipts],
         }
+        if isinstance(cause, ProcessSessionAuthorityError):
+            self.report["authority_error"] = dict(cause.report)
         if pending:
             self.report["recovery_transaction_id"] = cause.receipt.transaction_id
             if pending_record is not None:
@@ -95,6 +98,7 @@ def stop_process_session(
             merge_process_record(selected, current)
             frozen = transaction.write({**current, "stop_requested": True})
             committed = True
+        _await_original_host_cleanup(store, frozen)
         receipts = _terminate_frozen_instances(frozen, host_process)
         with store.transaction() as transaction:
             current = transaction.load(str(frozen["session_id"]))
@@ -149,6 +153,26 @@ def stop_process_session(
             return ProcessSessionCleanup(current, confirmed, settled)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ProcessSessionCleanupError(exc, frozen, receipts, committed) from exc
+
+
+# LLM: stop意图已耐久提交，host仍持有原child Popen与出生身份，应先让它收树、wait并发表原凭证。
+#   只等当前精确session，锁外最多覆盖常态1秒观察+0.5秒TERM宽限；无凭证/身份变化仍走原清理，不推断成功。
+# 函数用途: 给托管host有界协作收尾窗口，避免先杀host而丢失其直接子树退出证明。
+def _await_original_host_cleanup(store: ProcessSessionStore, frozen: dict[str, object]) -> None:
+    if (frozen["status"] in PROCESS_TERMINAL_STATUSES or not frozen["pid"]
+            or not frozen["child_launch_started"] or not frozen["child_pid"]):
+        return
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        # 这里只决定是否继续等；实例消失或身份漂移绝不在此签发清理确认。
+        if (capture_process_birth_token(frozen["pid"]) != frozen["pid_birth_token"]
+                or _process_instance_terminated(frozen["pid"], frozen["pid_birth_token"])):
+            return
+        report = store.load(str(frozen["session_id"]))
+        if report.load_error or not report.record:
+            raise ProcessSessionAuthorityError(report.load_error or {"error_type": "authority_missing"})
+        merge_process_record(frozen, report.record)
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
 
 # host 在本次停止期间自行退出：由终止原语的 identity_changed 回执加两条独立事实推出（见下方函数），不是原语自己的观测。

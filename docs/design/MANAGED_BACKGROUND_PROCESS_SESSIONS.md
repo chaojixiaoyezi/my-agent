@@ -425,3 +425,9 @@ submitted/consumed/rejected/reserved 不触发网络重试预留，响应使用�
 但端口冲突在首个工具结果中直接成为 `COMMAND_FAILED/exit_code=1`，MiniMax-M2.7 明确回复
 `Address already in use`，没有再说第二个服务已经启动。测试结束后用各自 TUI 的 `process_session stop`
 清理 18474--18478，宿主核对已无监听。
+
+### 精确读取范围中的自有状态观察（2026-11-13）
+
+`run_command(run_in_background=true)` 在实际沙箱命令已构建后，可把本次宿主的读取上下文与实际沙箱读根冻结到原 v4 session 的可选 `exact_read_scope`。它是原私有 Store 中的不可变启动事实，不是模型声明或无密钥签名；旧记录不补建、不借 Gateway 重启升级权限。
+
+精确范围下的 `process_session(status/wait)` 必须同时匹配原 owner、thread、root task、run、attempt 和读取上下文。通过后走独立的状态读取路径，只返回 session ID、规范状态、已存在的退出码及有界等待事实，不打开输出日志，不返回 command、PID、路径或输出。冷启动仍从原 session Store 验证同一事实；记录缺失、损坏或身份不匹配不能转为成功。旧句柄、父级、其它运行或下一 attempt 不能借此读取；`list/network_status`、PTY 与原停止权限不扩大。

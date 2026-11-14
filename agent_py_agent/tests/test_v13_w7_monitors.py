@@ -256,7 +256,7 @@ def test_rules_list_example_params_and_filters(v13_native):
     for changed in [{'space_id': sid, 'limit': 1, 'tag': 'host', 'cursor': cursor},
                     {'space_id': sid, 'limit': 1, 'cursor': 'invalid'}]:
         status, error = _wire(v13_native, 'monitors.rules.list', changed)
-        assert status == 503 and error['error']['code'] == 'CURSOR_EXPIRED', error
+        assert status == 410 and error['error']['code'] == 'CURSOR_EXPIRED', error
 
 
 # LLM: 其它 owner 的 ID 不泄露存在信息，必须与缺记录一致。

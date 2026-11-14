@@ -8,11 +8,72 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from ..common.directory_lock import locked_private_directory
 from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 
 _PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z0-9_.$]+)\}")
+
+
+def _notification_receipt_path(run, dedupe_key):
+    # 原运行时间是稳定分桶事实；午夜后的重复事件不能换桶绕过原通知收据。
+    date_str = datetime.fromtimestamp(run.started_at, timezone.utc).strftime('%Y-%m-%d')
+    key_hash = hashlib.sha256(dedupe_key.encode('utf-8')).hexdigest()[:24]
+    return ('data', 'workflow_notifications', date_str, f'{key_hash}.json')
+
+
+def _claim_notification(owner_home, rel_path, dedupe_key, run):
+    """原收据内先原子认领再锁外投递；崩溃遗留认领不能当作未发送而重放。"""
+    stage = 'claim_read'
+    try:
+        with locked_private_directory(owner_home, relative_parts=rel_path[:-1], lock_name=rel_path[-1] + '.lock'):
+            candidates = [rel_path]
+            # 只按原失败时间与当前时间核对旧日期桶，不扫历史目录，也不改写旧收据。
+            for timestamp in (getattr(run, 'ended_at', 0), datetime.now(timezone.utc).timestamp()):
+                if timestamp:
+                    day = datetime.fromtimestamp(timestamp, timezone.utc).strftime('%Y-%m-%d')
+                    candidate = (*rel_path[:-2], day, rel_path[-1])
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+            for candidate in candidates:
+                raw = read_text_beneath(owner_home, candidate)
+                if not raw:
+                    continue
+                existing = json.loads(raw)
+                if not isinstance(existing, dict) or existing.get('dedupe_key') != dedupe_key:
+                    raise ValueError('notification receipt identity mismatch')
+                return '', existing
+            claim_id = uuid4().hex
+            pending = {'dedupe_key': dedupe_key, 'claim_id': claim_id, 'status': 'dispatching',
+                'effect_outcome': 'unknown', 'retry_same_request': False,
+                'next_action': '原通知正在投递或投递结果尚未核实；读取此去重键的原收据，确认前禁止再次发送。'}
+            stage = 'claim_write'
+            write_text_atomic_beneath(owner_home, rel_path, json.dumps(pending, ensure_ascii=False))
+            return claim_id, None
+    except Exception as error:
+        return '', {'dedupe_key': dedupe_key, 'status': 'notification_failed',
+            'error_code': 'WORKFLOW_NOTIFICATION_RECEIPT_STORE_UNAVAILABLE',
+            'exception_type': type(error).__name__, 'stage': stage,
+            'effect_outcome': 'not_started' if stage == 'claim_write' else 'unknown',
+            'retry_same_request': False,
+            'next_action': '本次未调用发送端；原去重状态尚需核实。先核对收据和修复通知存储，再决定是否重新触发，不能更换去重键绕过。'}
+
+
+def _settle_notification(owner_home, rel_path, claim_id, receipt):
+    # 锁只护短暂收据 CAS，发送、入队与外部 I/O 始终在锁外；原认领丢失不能覆盖别人的状态。
+    try:
+        with locked_private_directory(owner_home, relative_parts=rel_path[:-1], lock_name=rel_path[-1] + '.lock'):
+            current = json.loads(read_text_beneath(owner_home, rel_path))
+            if current.get('claim_id') != claim_id or current.get('status') != 'dispatching':
+                raise ValueError('notification claim changed')
+            write_text_atomic_beneath(owner_home, rel_path, json.dumps(receipt, ensure_ascii=False, indent=2))
+    except Exception as error:
+        receipt['receipt_persistence_error'] = {'code': 'WORKFLOW_NOTIFICATION_RECEIPT_STORE_UNAVAILABLE',
+            'error_type': type(error).__name__,
+            'recommended_action': 'manual_review',
+            'recovery_hint': '保留原投递事实并核对去重收据；认领未确认前禁止重新发送。'}
 
 
 def _safe_render_template(template_str: str, lookup: dict[str, Any]) -> str:
@@ -154,29 +215,31 @@ def execute_notification_step(
         dedupe_key = f"wf-step-notify:{run.workflow_run_id}:{step.step_id}:{attempt_id}"
 
     owner_home = Path(getattr(engine, "owner_home", None) or getattr(run, "owner_home", None) or Path.cwd()).absolute()
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    key_hash = hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
-    rel_path = ("data", "workflow_notifications", date_str, f"{key_hash}.json")
+    rel_path = _notification_receipt_path(run, dedupe_key)
 
     # 原步骤输出也是框架恢复依据；本地辅助收据失败不能抹掉已经入队的事实。
     previous = getattr(step, "output_snapshot", None)
+    if isinstance(previous, dict) and previous.get('effect_outcome') == 'unknown':
+        step.status, step.needs_repair = 'failed', True
+        step.error_code = 'WORKFLOW_NOTIFICATION_DELIVERY_FAILED'
+        step.error_message = '原通知投递结果未知；先核对原去重收据，不能通过增加尝试次数重新发送。'
+        return
     if (isinstance(previous, dict) and previous.get("dedupe_key") == dedupe_key
             and previous.get("status") in {"delivered", "queued"}):
         step.status = "succeeded"
         step.effect_id = dedupe_key
         return
-    # Check for existing delivery
-    try:
-        existing_text = read_text_beneath(owner_home, rel_path)
-        if existing_text:
-            existing_receipt = json.loads(existing_text)
-            if existing_receipt.get("dedupe_key") == dedupe_key and existing_receipt.get("status") in {"delivered", "queued"}:
-                step.status = "succeeded"
-                step.output_snapshot = existing_receipt
-                step.effect_id = dedupe_key
-                return
-    except Exception:
-        pass
+    claim_id, existing_receipt = _claim_notification(owner_home, rel_path, dedupe_key, run)
+    if existing_receipt is not None:
+        step.output_snapshot = existing_receipt
+        if existing_receipt.get('status') in {'delivered', 'queued'}:
+            step.status, step.effect_id = 'succeeded', dedupe_key
+        else:
+            step.status = 'failed'
+            step.error_code = existing_receipt.get('error_code') or 'WORKFLOW_NOTIFICATION_DELIVERY_FAILED'
+            step.error_message = existing_receipt.get('next_action') or '原通知尚待核实，禁止重复发送。'
+            step.needs_repair = True
+        return
 
     receipt = {
         "dedupe_key": dedupe_key,
@@ -246,20 +309,12 @@ def execute_notification_step(
         step.error_code = "WORKFLOW_NOTIFICATION_DELIVERY_FAILED"
         step.error_message = f"notification delivery failed: {delivery_error}"
         step.needs_repair = True
+        receipt['effect_outcome'] = 'not_started' if (receipt.get('delivery_result') or {}).get('delivery_status') == 'no_channel' else 'unknown'
+        _settle_notification(owner_home, rel_path, claim_id, receipt)
         step.output_snapshot = receipt
         return
 
-    # Persist date-bucketed receipt atomically
-    try:
-        write_text_atomic_beneath(
-            owner_home,
-            rel_path,
-            json.dumps(receipt, ensure_ascii=False, indent=2),
-        )
-    except Exception as exc:
-        receipt["receipt_persistence_error"] = {
-            "code": "WORKFLOW_NOTIFICATION_RECEIPT_STORE_UNAVAILABLE", "error_type": type(exc).__name__,
-            "recommended_action": "保留原步骤投递回执修复存储；通知已受理，禁止重新发送。"}
+    _settle_notification(owner_home, rel_path, claim_id, receipt)
 
     step.status = "succeeded"
     step.output_snapshot = receipt
@@ -295,24 +350,19 @@ def notify_unattended_run_failure(*, engine: Any, run: Any) -> dict[str, Any]:
 
     dedupe_key = f"wf-run-fail:{run.workflow_run_id}"
     owner_home = Path(getattr(engine, "owner_home", None) or getattr(run, "owner_home", None) or Path.cwd()).absolute()
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    key_hash = hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
-    rel_path = ("data", "workflow_notifications", date_str, f"{key_hash}.json")
+    rel_path = _notification_receipt_path(run, dedupe_key)
 
-    # Check deduplication
-    try:
-        existing = read_text_beneath(owner_home, rel_path)
-        if existing:
-            cached = json.loads(existing)
-            if cached.get("dedupe_key") == dedupe_key:
-                return cached
-    except Exception:
-        pass
+    claim_id, cached = _claim_notification(owner_home, rel_path, dedupe_key, run)
+    if cached is not None:
+        return cached
 
     title = f"Workflow Failure Alert: {getattr(run, 'workflow_name', '') or getattr(run, 'workflow_id', '') or run.workflow_run_id}"
     failed_step = getattr(run, "failed_step_id", "") or "unknown"
     message = f"Workflow run {run.workflow_run_id} failed at step {failed_step}."
-    error_msg = getattr(run, "error_message", None)
+    failed_record = (steps.get(failed_step) if isinstance(steps, dict) else
+        next((item for item in step_list if getattr(item, 'step_id', None) == failed_step), None))
+    error_msg = getattr(failed_record, 'error_message', '') or getattr(run, "error_message", None)
+    error_code = getattr(failed_record, 'error_code', '') or getattr(run, 'error_code', '')
     if error_msg:
         message += f" Reason: {error_msg}"
 
@@ -324,7 +374,7 @@ def notify_unattended_run_failure(*, engine: Any, run: Any) -> dict[str, Any]:
         "workflow_run_id": getattr(run, "workflow_run_id", ""),
         "workflow_id": getattr(run, "workflow_id", ""),
         "failed_step_id": failed_step,
-        "error_code": getattr(run, "error_code", ""),
+        "error_code": error_code,
         "title": clean_title,
         "message": clean_message,
         "notified_at": datetime.now(timezone.utc).isoformat(),
@@ -358,28 +408,27 @@ def notify_unattended_run_failure(*, engine: Any, run: Any) -> dict[str, Any]:
                 payload=receipt,
             )
             if delivery.get("delivery_status") != "queued":
-                return {"status": "notification_failed", "dedupe_key": dedupe_key,
+                failure = {"status": "notification_failed", "dedupe_key": dedupe_key,
                     "error_code": (delivery.get("record_error") or "NOTIFICATION_RECORD_FAILED")
                         if delivery.get("recorded") is False else
                         "WORKFLOW_NOTIFICATION_NO_CHANNEL" if delivery.get("delivery_status") == "no_channel" else "WORKFLOW_NOTIFICATION_CHANNEL_UNAVAILABLE",
                     "delivery_result": delivery}
+                failure['effect_outcome'] = 'not_started' if delivery.get('delivery_status') == 'no_channel' else 'unknown'
+                failure['retry_same_request'] = False
+                _settle_notification(owner_home, rel_path, claim_id, failure)
+                return failure
             receipt["status"] = "queued"
             receipt["queued_at"] = receipt.pop("notified_at")
             receipt["delivery_result"] = delivery
     except Exception as exc:
-        return {
-            "status": "notification_failed",
-            "error_code": "WORKFLOW_FAILURE_NOTIFICATION_ERROR",
-            "error": str(exc),
-            "dedupe_key": dedupe_key,
-        }
+        failure = {'status': 'notification_failed', 'error_code': 'WORKFLOW_FAILURE_NOTIFICATION_ERROR',
+            'exception_type': type(exc).__name__, 'error': redact_sensitive_value(str(exc)),
+            'dedupe_key': dedupe_key, 'effect_outcome': 'unknown', 'retry_same_request': False,
+            'next_action': '发送端已进入但结果无法确认；核对原通知和去重收据，禁止原样重发。'}
+        _settle_notification(owner_home, rel_path, claim_id, failure)
+        return failure
 
-    try:
-        write_text_atomic_beneath(owner_home, rel_path, json.dumps(receipt, ensure_ascii=False, indent=2))
-    except Exception as exc:
-        receipt["receipt_persistence_error"] = {
-            "code": "WORKFLOW_NOTIFICATION_RECEIPT_STORE_UNAVAILABLE", "error_type": type(exc).__name__,
-            "recommended_action": "保留原运行投递回执修复存储；通知已受理，禁止重新发送。"}
+    _settle_notification(owner_home, rel_path, claim_id, receipt)
 
     run.failure_notification = receipt
     return receipt

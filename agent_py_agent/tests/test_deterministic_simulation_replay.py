@@ -691,3 +691,57 @@ def test_r8_thread_history_seeded_terminal_projection_replay(tmp_path):
         assert not set(current.active_task_ids).intersection(terminals)
         assert store.tasks.contains_task(thread.thread_id, identifier)
     assert len(tuple(store.tasks.iter_task_ids(thread.thread_id))) == 12
+
+
+def test_unknown_workflow_effect_retry_fixed_seed_trace():
+    """固定种子穿插模式与自报幂等，实际重试入口始终保留一次执行边界。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.workflows.step_retry import run_step_with_retry
+
+    rng = random.Random(20261113)
+    trace = []
+    for number in range(64):
+        mode = rng.choice(('tool_call', 'deterministic_script', 'script', 'hybrid', 'script_transform'))
+        declared = rng.choice((False, True))
+        step = SimpleNamespace(step_id='effect', mode=mode, status='running', error_code='',
+            error_message='', needs_repair=False,
+            escalation_result={'effect_started': True, 'effect_outcome': 'unknown'})
+        calls = []
+
+        def execute():
+            calls.append(number)
+            step.status, step.error_code = 'failed', 'NETWORK_TIMEOUT'
+
+        run_step_with_retry(engine=None, step=step, spec={'script_id': 'frozen-script', 'retry_policy': {
+            'max_attempts': 3, 'idempotent': declared}}, outputs={}, definition={}, run=None,
+            execute_fn=execute)
+        assert calls == [number]
+        trace.append(step.escalation_result['retry_suppressed_reason'])
+    assert trace == ['UNCERTAIN_EFFECT_REPLAY_FORBIDDEN'] * 64
+
+
+def test_workflow_review_outage_preserves_frozen_requirement_seeded(tmp_path):
+    """有界确定性服务故障交错；审核服务消失不能让原冻结策略丢失。"""
+    import random
+
+    from agent_py_agent.agent.workflows.business_scope import WorkflowPolicyRefusal
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.governance import WorkflowEffectPhase
+    from agent_py_agent.agent.workflows.models import WorkflowRunRecord
+
+    rng = random.Random(2026111307)
+    for index in range(32):
+        engine = WorkflowEngine(tmp_path)
+        run = WorkflowRunRecord(f'qa-{index}', 'qa-flow', '', 'manual', 'running', 1, 0, 0)
+        declared = rng.choice((False, True))
+        definition = {'descriptor': {'metadata': {'workflow_review_policy': {'steps': ['effect']}} if declared else {}}}
+        engine.run_authorizer = lambda record, phase: None
+        engine._authorize_run(run, 'preflight', definition=definition)
+        engine.run_authorizer = None
+        try:
+            engine._authorize_run(run, WorkflowEffectPhase('effect'))
+        except WorkflowPolicyRefusal as error:
+            assert declared and error.details['effect_outcome'] == 'not_started'
+        else:
+            assert not declared

@@ -30,19 +30,21 @@ class _PluginRequest:
 
 
 # LLM: Gateway 目录、命令和流继续走原运输，身份头共用 G3，不重试或降级；工作目录仍由原权限规则决定。
-# 函数用途: 在原请求正文上附工作目录，选择普通或交互传输，不保存秘密。
+# 函数用途: 在原请求正文上附工作目录；目录走短请求，命令共用原心跳流但不自动开放审批。
 def _request_gateway_plugins(agent, payload: dict, interaction: CommandInteraction | None) -> dict:
     from .gateway_client import _gateway_submit_workspace
 
     value = _gateway_submit_workspace(agent, workspace_root=None, workspace_roots=None)
     if value.get("cwd"):
         payload["workspace"] = value
-    if interaction is not None and payload["operation"] == "command":
+    if payload["operation"] == "command":
         from .plugin_command_stream import post_plugin_command_stream
 
         return post_plugin_command_stream(agent, payload, interaction)
     status, result = post_gateway_json(agent, "/client/plugins", payload, timeout=3.0)
     if status != 200:
+        if isinstance(result, dict) and result.get('ok') is False and isinstance(result.get('error_code'), str):
+            return result
         raise ValueError("目录请求未成功")
     return result
 
@@ -52,6 +54,8 @@ def _request_gateway_plugins(agent, payload: dict, interaction: CommandInteracti
 def _plugin_response_snapshot(operation: str, result: dict) -> PluginCommandCatalog | None:
     if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
         raise ValueError("插件响应无效")
+    if result['ok'] is False and 'catalog' not in result:
+        return None
     try:
         return PluginCommandCatalog.from_payload(result["catalog"])
     except (KeyError, TypeError, ValueError):
@@ -129,9 +133,9 @@ class PluginCommandClient:
             snapshot = None
             result = {"ok": False, "state": "rejected", "error_code": exc.reason_code,
                       "message": str(exc), "request_id": request_id}
-        except Exception:  # noqa: BLE001 不重试命令、不改本地执行，不从传输错误猜未发生
+        except Exception as error:  # noqa: BLE001 不重试命令、不改本地执行，不从传输错误猜未发生
             snapshot = None
-            result = plugin_command_unknown(request_id) if request_id else plugin_catalog_unavailable()
+            result = plugin_command_unknown(request_id) if request_id else plugin_catalog_unavailable(error, phase='client_transport_or_decode')
         with self._lock:
             if sequence == self._sequence:
                 self._snapshot = snapshot

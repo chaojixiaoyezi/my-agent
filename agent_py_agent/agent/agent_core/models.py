@@ -97,6 +97,7 @@ class AgentRunResult:
     turn_end_reason: str = ""
     conversation_task_completed: bool = False
     delivery_artifacts: list[dict[str, object]] | None = None
+    delivery_artifact_diagnostics: list[dict[str, object]] | None = None
     # Successful current-owner sends committed by send_message in this exact run.
     # Background/source-reply delivery consumes this typed evidence instead of
     # guessing from assistant prose or provider logs.

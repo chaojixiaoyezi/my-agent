@@ -52,7 +52,7 @@ def test_list_projects_native_store_without_secrets(datasource_http):
     assert listed["next_cursor"] and len(listed["items"]) == 1
     second = _completed(_call(datasource_http, "datasources.list", {"limit": 1, "cursor": listed["next_cursor"]}))
     assert listed["items"][0]["datasource_id"] != second["items"][0]["datasource_id"]
-    _error(_call(datasource_http, "datasources.list", {"cursor": listed["next_cursor"], "kind": "postgres"}), 503, "CURSOR_EXPIRED")
+    _error(_call(datasource_http, "datasources.list", {"cursor": listed["next_cursor"], "kind": "postgres"}), 410, "CURSOR_EXPIRED")
     assert "synthetic-datasource-secret" not in json.dumps(listed)
     assert store.resolve_secret(spec.credential_ref)["access_token"] == "synthetic-datasource-secret"
     empty = _completed(_call(datasource_http, "datasources.list", {"kind": "postgres"}))

@@ -375,15 +375,22 @@ class BackgroundAgentService:
         identifier = self._controller_id(actor)
         thread = self.store.threads.load(identifier)
         if thread is not None and (thread.owner_id != actor.owner_id or thread.metadata.get("business_controller") is not True):
-            raise PermissionError("CONTROLLER_IDENTITY_CONFLICT")
+            raise BusinessError("CONTROLLER_IDENTITY_CONFLICT", details={
+                "reason": "CONTROLLER_RECORD_IDENTITY_CONFLICT", "side_effect_state": "not_started",
+                "next_action": "原总控记录未通过当前Owner与总控标记核验；请让宿主检查原记录，不覆盖或改用其它Owner。"})
         return {"agent_id": identifier, "thread_id": identifier, "available": thread is not None and thread.status == "active"}
 
-    def ensure_controller(self, *, actor):
+    def ensure_controller(self, *, actor, expected_controller_id=None):
         source = self._actor(actor)
         identifier = self._controller_id(actor)
         with locked_file_transition(self.store.storage.threads_dir / ("." + identifier)):
             # inactive只是不可接单，不是不存在；仍按原校验拒绝身份冲突，不重写安装出处。
-            self.get_controller(actor=actor)
+            current_controller = self.get_controller(actor=actor)
+            if expected_controller_id is not None and (current_controller["agent_id"] != expected_controller_id
+                    or current_controller["thread_id"] != identifier):
+                raise BusinessError("CONTROLLER_IDENTITY_CONFLICT", details={
+                    "reason": "CONTROLLER_IDENTITY_DRIFT", "side_effect_state": "not_started",
+                    "next_action": "原Owner总控身份在提交前复核不一致；重新调用controllers.get核对，禁止按旧编号派发。"})
             if self.store.threads.load(identifier) is not None:
                 return {"agent_id": identifier, "thread_id": identifier, "created": False}
             current = time.time()
@@ -472,11 +479,12 @@ class BackgroundAgentService:
         complete = not page["load_errors"] and page["coverage"] == "complete" and page["next_cursor"] is None
         scheduling = scheduling_view(self.store, thread_id=thread.thread_id, tasks=open_tasks,
             identity_state=background_identity(thread).identity_state, running=execution is not None,
-            model_ready=ready, model_reason=reason, pending_inputs=pending_inputs, tasks_complete=complete)
+            model_ready=ready, model_reason=reason, pending_inputs=pending_inputs, tasks_complete=complete, runtime=getattr(getattr(self.host, "subagents", None), "runtime_db", None),
+            owner_id=thread.owner_id)
         if execution_error and scheduling["state"] not in {"paused", "retiring", "retired"}:
             # 执行身份读失败不能冒充 no_work；保留失败码，不领取或消费任何工作。
             scheduling.update(reason_code=execution_error, coverage="partial")
-            if execution is None:
+            if execution is None and scheduling["state"] != "waiting_child":
                 scheduling["state"] = "unknown"
         return {"agent": self._agent_view(thread, guidance=guidance, task_page=page,
                                           execution_state=(execution, known_running, execution_error)), "current_execution": execution,
@@ -759,6 +767,35 @@ class BackgroundAgentService:
             return self._dispatch_locked(request, target, actor=actor, idempotency_key=idempotency_key,
                                          origin_task_id=origin_task_id)
 
+    def _validate_dispatch_project(self, request, actor):
+        """仅只读核显式项目；执行工厂仍须重核，不能以预检代替提交时权限。"""
+        from .business_access import BusinessActor
+
+        project = request.get("project_ref")
+        if project is None:
+            return
+        self._actor(actor)
+        self._space(request.get("space_id"), actor)
+        catalog = getattr(self, "spaces", None) or getattr(self.host, "business_spaces_catalog", None)
+        if catalog is None:
+            from .business_spaces import BusinessSpaceService
+
+            catalog = BusinessSpaceService(self.host.home_paths.owner_home_dir,
+                owner_id=actor.owner_id,
+                enabled=bool(getattr(self.host.config, "business_spaces_enabled", False)),
+                reference_resolver=getattr(self.host, "business_space_reference_resolver", None))
+        business_actor = getattr(self, "business_actor", None) or BusinessActor(
+            actor.owner_id, actor.source_thread_id, catalog, lambda _a, _f: True)
+        try:
+            catalog.reference("project", project, actor=business_actor, space_id=request.get("space_id"))
+        except BusinessError as error:
+            raise BusinessError(error.code, details={**error.details,
+                "field_path": "$.params.project_ref", "reference_kind": "project",
+                "side_effect_state": "not_started", "task_created": False,
+                "next_action": "project_ref只能填写本Owner预先存在的项目标识，不能填写workflow ID。"
+                    "没有项目时省略project_ref；工作流编号放在任务instruction中。"
+                    "修正后使用新request_id与幂等键提交一次，禁止重放此前未知的旧投递。"}) from error
+
     # LLM: 调用方_dispatch已持目标身份锁；复核Actor/空间及新任务接单和配对额度，沿原SessionTask派发写入冻结上下文、正文与唤醒，失败保留原outcome而不重派。
     # 函数用途: 将派活或后续请求幂等送入原任务通道，无归属任务不借用默认空间。
     def _dispatch_locked(self, request, target, *, actor, idempotency_key, origin_task_id):
@@ -773,6 +810,8 @@ class BackgroundAgentService:
                                        origin_task_id, self._operation_key(actor, idempotency_key))
         from .session_task_dispatch import _task_dedupe_key
         previous = self.store.session_tasks.find_by_dedupe_key(_task_dedupe_key(plan))
+        if previous is None:
+            self._validate_dispatch_project(request, actor)
         if previous is None and not background_identity_allows_work(target):
             raise BusinessError("AGENT_NOT_AVAILABLE")
         if previous is None and (failure := session_task_pair_limit_error(self.host, plan.sender_thread_id, plan.target_thread_id, config)):
@@ -802,15 +841,20 @@ class BackgroundAgentService:
                         owner_home = getattr(getattr(self.host, "home_paths", None), "owner_home_dir", None)
                         owner_id = str(getattr(getattr(self.host, "home_paths", None), "owner_id", "") or "")
                         enabled = bool(getattr(getattr(self.host, "agent_config", None), "business_spaces_enabled", False))
-                        catalog = BusinessSpaceService(owner_home, owner_id=owner_id, enabled=enabled)
+                        catalog = BusinessSpaceService(owner_home, owner_id=owner_id, enabled=enabled,
+                            reference_resolver=getattr(self.host, "business_space_reference_resolver", None))
                 biz_actor = BusinessActor(actor.owner_id, getattr(actor, "source_thread_id", str(actor)), catalog, lambda _a, _f: True)
                 return resolve_business_context(actor=biz_actor, task_id=task_id, requested_space_id=intent.requested_space_id,
                     project_ref=intent.project_ref, binding_id=intent.binding_id,
                     requested_method_refs=intent.requested_method_refs, requested_asset_version_refs=intent.requested_asset_version_refs,
                     unassigned=intent.requested_space_id is None, host=self.host)
 
+        from .execution_threads import EXECUTION_ORIGIN_KEY
+
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
-                                        business_context_intent=intent, business_context_factory=factory)
+            host_channel_actor=(actor if isinstance(target.metadata.get(EXECUTION_ORIGIN_KEY), dict)
+                                and target.metadata[EXECUTION_ORIGIN_KEY].get('kind') == 'delegated' else None),
+            business_context_intent=intent, business_context_factory=factory)
         if not outcome.ok:
             raise SessionTaskDispatchError(outcome)
         return json.loads(outcome.output)
@@ -819,8 +863,21 @@ class BackgroundAgentService:
         request = _params("tasks.assign", request)
         target = self._thread(request["agent_id"], actor)
         identity = background_identity(target)
-        if identity.space_id != request["space_id"] or identity.project_ref != request.get("project_ref"):
-            raise BusinessError("SPACE_MISMATCH")
+        # 先由_thread核验目标Owner和空间访问，再公开该已授权身份的绑定；不拿参数猜归属。
+        for field, expected in (("space_id", identity.space_id), ("project_ref", identity.project_ref)):
+            actual = request.get(field)
+            if expected != actual:
+                correction = ("省略project_ref（或传null）" if field == "project_ref" and expected is None
+                              else f"使用background_agents.get返回的{field}")
+                raise BusinessError("SPACE_MISMATCH", details={
+                    "reason": "BACKGROUND_ASSIGNMENT_SCOPE_CONFLICT", "field_path": f"$.params.{field}",
+                    "actual": actual, "expected": expected, "side_effect_state": "not_started",
+                    "task_created": False, "retry_same_arguments": False,
+                    "next_action": f"目标后台身份已绑定范围，不能用任务标记替代；{correction}，保留其它绑定字段。"
+                        "修正后用新request_id和新幂等键提交一次；不要重建身份或更换目标。",
+                    "read_example": '{"action":"background_agents.get","params":{"agent_id":"<已选后台编号>"},'
+                        '"request_id":"check-selected-background"}',
+                })
         if not background_identity_allows_work(target):
             raise BusinessError("AGENT_NOT_AVAILABLE")
         if request.get("origin_task_id"):
@@ -833,7 +890,24 @@ class BackgroundAgentService:
     # 函数用途: 向总控提交空间任务，并冻结经核验的资产接受版本。
     def submit(self, request: dict, *, actor: object, idempotency_key: str) -> dict:
         request = _params("tasks.submit", request)
-        self._actor(actor)
+        try:
+            self._actor(actor)
+            self._space(request["space_id"], actor)
+        except PermissionError as error:
+            raise BusinessError("BUSINESS_ACCESS_DENIED", details={
+                "reason": "SUBMISSION_SCOPE_DENIED", "side_effect_state": "not_started",
+                "next_action": "当前Owner、来源会话或空间未获准；从原已授权会话核对空间，不改写身份或跨Owner重试。"}) from error
+        controller = self.get_controller(actor=actor)
+        expected_id = controller["agent_id"]
+        if request.get("controller_agent_id", expected_id) != expected_id:
+            raise BusinessError("CONTROLLER_IDENTITY_CONFLICT", details={
+                "field_path": "$.params.controller_agent_id", "actual": request["controller_agent_id"],
+                "expected": expected_id, "reason": "CONTROLLER_AGENT_ID_MISMATCH",
+                "side_effect_state": "not_started", "controller_created": False, "task_created": False,
+                "retry_same_arguments": False,
+                "next_action": "在原已授权会话调用controllers.get，取data.agent_id；不要传普通后台助手编号。"
+                    "也可省略controller_agent_id，由宿主选择本Owner总控。修正后用新request_id和新幂等键提交一次。",
+                "read_example": '{"action":"controllers.get","params":{},"request_id":"check-controller"}'})
         frozen_version_refs = []
         if request.get("asset_refs"):
             catalog = getattr(self.host, "business_spaces_catalog", None)
@@ -865,33 +939,145 @@ class BackgroundAgentService:
                 if isinstance(ref, dict) and ref.get("version_ref") and ref["version_ref"] != accepted_ver:
                     raise BusinessError("STATE_CONFLICT")
                 frozen_version_refs.append(str(accepted_ver))
-        identifier = self.ensure_controller(actor=actor)["thread_id"]
-        if request.get("controller_agent_id", identifier) != identifier:
-            raise PermissionError("CONTROLLER_IDENTITY_CONFLICT")
+        # 已受理任务必须沿原冻结context重放，不能因当前项目变化重选上下文。
+        from .session_task_dispatch import _task_dedupe_key
+        replay_plan = SessionTaskDispatchPlan(actor.source_thread_id, expected_id, request["instruction"],
+            "", self._operation_key(actor, idempotency_key))
+        if self.store.session_tasks.find_by_dedupe_key(_task_dedupe_key(replay_plan)) is None:
+            self._validate_dispatch_project(request, actor)
+        prepared = self.ensure_controller(actor=actor, expected_controller_id=expected_id)
+        identifier = prepared["thread_id"]
         dispatch_req = dict(request)
         if frozen_version_refs:
             dispatch_req["asset_version_refs"] = tuple(frozen_version_refs)
-        result = self._dispatch(dispatch_req, self.store.threads.require(identifier), actor=actor, idempotency_key=idempotency_key)
+        try:
+            result = self._dispatch(dispatch_req, self.store.threads.require(identifier), actor=actor, idempotency_key=idempotency_key)
+        except BusinessError as error:
+            if not prepared["created"]:
+                raise
+            if error.effect_outcome != "not_started":
+                error.details = {**error.details, "controller_created": True,
+                    "task_dispatch_outcome": error.effect_outcome,
+                    "next_action": "总控已创建，原任务提交已发生或结果未知；仅按原请求与幂等键核对原账，禁止换键重派。"}
+                raise
+            # 此类型的not_started仅来自派发调用前检查；canonical创建后的异常由原派发口包装为unknown。
+            raise BusinessError(error.code, effect_outcome="committed", details={**error.details,
+                "controller_created": True, "task_created": False,
+                "side_effect_state": "controller_created_task_not_started",
+                "next_action": "总控已创建，但任务未创建。按原错误核对空间、身份或配额；原总控不需重建，"
+                    "修正后以新的request_id与幂等键提交一次。"}) from error
+        except SessionTaskDispatchError as error:
+            if prepared["created"]:
+                if error.effect_outcome == "not_started":
+                    raise BusinessError(error.error_code, effect_outcome="committed", details={
+                        "controller_created": True, "task_created": False,
+                        "task_dispatch_outcome": "not_started", "side_effect_state": "controller_created_task_not_started",
+                        "next_action": "总控已创建，原派发口确认任务未创建；核对原派发限制后以新请求和幂等键提交，勿重建总控。"}) from error
+                error.details = {**getattr(error, "details", {}), "controller_created": True, "task_dispatch_outcome": "unknown",
+                    "side_effect_state": "controller_created_task_unknown",
+                    "next_action": "总控已创建，任务是否入队未知；仅用原request_id和幂等键核对原操作与任务，禁止改参数或换键重派。"}
+            raise
         return {"task_id": result["task_id"], "request_id": result["task_id"],
                 "operation_id": result["task_id"], "state": "accepted"}
 
     def _owned_task(self, task_id, actor):
         self._actor(actor)
-        task = self.store.session_tasks.require(task_id)
-        for identifier in (task.sender_thread_id, task.target_thread_id):
-            if self.store.threads.require(identifier).owner_id != actor.owner_id:
-                raise PermissionError("OWNER_MISMATCH")
-        context = BusinessExecutionContext.from_dict(task.metadata["business_context"])
+        try:
+            task = self.store.session_tasks.require(task_id)
+            threads = [self.store.threads.require(identifier)
+                       for identifier in (task.sender_thread_id, task.target_thread_id)]
+        except (FileNotFoundError, KeyError, ValueError, DataCorruptionError) as error:
+            raise BusinessError("RESOURCE_NOT_FOUND", effect_outcome="not_started", details={
+                "reason": "TASK_OR_THREAD_SOURCE_UNAVAILABLE", "exception_type": type(error).__name__,
+                "side_effect_state": "not_started", "task_created": False,
+                "next_action": "调用tasks.list核对当前Owner可见的原任务，不猜测他人的任务编号。"}) from None
+        if any(thread.owner_id != actor.owner_id for thread in threads):
+            raise BusinessError("RESOURCE_NOT_FOUND", effect_outcome="not_started", details={
+                "reason": "TASK_THREAD_OWNER_MISMATCH", "side_effect_state": "not_started", "task_created": False,
+                "next_action": "仅从当前Owner的原发送会话跟进其可见任务。"})
+        raw_context = task.metadata.get("business_context")
+        if raw_context is None:
+            self._owned_unassigned_task(task, actor)
+            return task, None
+        context = BusinessExecutionContext.from_dict(raw_context)
         if context.owner_id != actor.owner_id or context.task_id != task.task_id:
             raise PermissionError("OWNER_MISMATCH")
+        if context.space_id is None and getattr(getattr(self, 'call_context', None), 'selected_space_id', None) is not None:
+            raise BusinessError("SPACE_SCOPE_MISMATCH", effect_outcome="not_started", details={
+                "reason": "UNASSIGNED_TASK_SPACE_CONFLICT", "side_effect_state": "not_started", "task_created": False,
+                "next_action": "该原任务无空间；保持无空间跟进，不选择其它业务空间。"})
         self._space(context.space_id, actor)
         return task, context
+
+    def _owned_unassigned_task(self, task, actor):
+        """历史普通SessionTask只沿原Owner/来源/任务谱系授权，不补业务空间。"""
+        from pathlib import Path
+
+        from .channels import supports_transcript_delivery
+        from .execution_threads import EXECUTION_ORIGIN_KEY
+        from .host_actor import HostActorError, _validate_scope
+
+        def reject(reason, code="RESOURCE_NOT_FOUND"):
+            raise BusinessError(code, effect_outcome="not_started", details={
+                "reason": reason, "side_effect_state": "not_started", "task_created": False,
+                "next_action": "从原任务发送会话调用tasks.get核对原任务及来源；无空间任务不得指定空间，未核清前不要重派。"})
+
+        if getattr(getattr(self, 'call_context', None), 'selected_space_id', None) is not None:
+            reject("UNASSIGNED_TASK_SPACE_CONFLICT", "SPACE_SCOPE_MISMATCH")
+        if actor.source_thread_id != task.sender_thread_id:
+            reject("UNASSIGNED_TASK_SOURCE_MISMATCH", "CAPABILITY_DENIED")
+        home = Path(self.host.home_paths.owner_home_dir).resolve()
+        current, seen = task, set()
+        for _ in range(64):
+            if current.task_id in seen:
+                reject("UNASSIGNED_TASK_LINEAGE_CYCLE")
+            seen.add(current.task_id)
+            if (current.sender_thread_id != task.sender_thread_id
+                    or current.target_thread_id != task.target_thread_id):
+                reject("UNASSIGNED_TASK_LINEAGE_MISMATCH")
+            for identifier in (current.sender_thread_id, current.target_thread_id):
+                thread = self.store.threads.require(identifier)
+                if thread.owner_id != actor.owner_id or Path(thread.owner_home).resolve() != home:
+                    reject("UNASSIGNED_TASK_OWNER_HOME_MISMATCH")
+            context = current.metadata.get('business_context')
+            if context is not None:
+                try:
+                    frozen = BusinessExecutionContext.from_dict(context)
+                except (ValueError, TypeError, KeyError):
+                    reject("UNASSIGNED_TASK_LINEAGE_CONTEXT_INVALID")
+                if frozen.owner_id != actor.owner_id or frozen.task_id != current.task_id or frozen.space_id is not None:
+                    reject("UNASSIGNED_TASK_LINEAGE_SPACE_MISMATCH", "SPACE_SCOPE_MISMATCH")
+            if not current.origin_task_id:
+                break
+            current = self.store.session_tasks.load(current.origin_task_id)
+            if current is None:
+                reject("UNASSIGNED_TASK_LINEAGE_NOT_FOUND")
+        else:
+            reject("UNASSIGNED_TASK_LINEAGE_LIMIT")
+        target = self.store.threads.require(task.target_thread_id)
+        identity = background_identity(target)
+        if identity is not None and (identity.space_id is not None or identity.project_ref is not None):
+            reject("UNASSIGNED_TASK_TARGET_SPACE_MISMATCH", "SPACE_SCOPE_MISMATCH")
+        if EXECUTION_ORIGIN_KEY in target.metadata or not supports_transcript_delivery(actor.channel):
+            try:
+                _validate_scope(self.host, target.thread_id, actor)
+            except (HostActorError, DataCorruptionError, KeyError, ValueError) as error:
+                reject(getattr(error, 'error_code', 'UNASSIGNED_TASK_ORIGIN_INVALID'), "CAPABILITY_DENIED")
 
     def follow_up(self, request: dict, *, actor, idempotency_key):
         request = _params("tasks.follow_up", request)
         task, context = self._owned_task(request["task_id"], actor)
-        result = self._dispatch({"space_id": context.space_id, "project_ref": context.project_ref,
-                                 "instruction": request["instruction"]}, self.store.threads.require(task.target_thread_id),
+        target = self.store.threads.require(task.target_thread_id)
+        from .execution_threads import IM_TASK_EXECUTION_KEY, ensure_execution_thread
+
+        if context is None and IM_TASK_EXECUTION_KEY in target.metadata:
+            # 原自动委派线程只绑定原task；追问是新普通工作，不改绑原线程也不自动再派孩子。
+            target = ensure_execution_thread(self.host, task.sender_thread_id,
+                "task-follow-up:" + self._operation_key(actor, idempotency_key), kind="delegated",
+                source_binding=actor.binding())
+        result = self._dispatch({"space_id": context.space_id if context is not None else None,
+                                 "project_ref": context.project_ref if context is not None else None,
+                                 "instruction": request["instruction"]}, target,
                                 actor=actor, idempotency_key=idempotency_key, origin_task_id=task.task_id)
         return {"new_task_id": result["task_id"], "prior_task_ref": task.task_id, "operation_id": result["task_id"]}
 

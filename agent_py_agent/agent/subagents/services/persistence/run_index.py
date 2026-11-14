@@ -369,12 +369,14 @@ class SubagentRunIndex:
 
     # LLM: 生产 prepare/init 接线负责调度维护；当前读只核覆盖，不同步库存或列表回退。
     # 函数用途: 阻止部分迁移或中断提交被当作健康容量。
+    def _require_coverage(self, db) -> None:
+        if db.execute("SELECT value FROM meta WHERE key='complete'").fetchone() != (1,):
+            raise SubagentRunIndexUnavailable("subagent run index coverage is partial")
+
     def _require_complete(self, db) -> None:
-        partial = db.execute("SELECT value FROM meta WHERE key='complete'").fetchone() != (1,)
-        pending = bool(db.execute("SELECT 1 FROM runs WHERE pending=1 LIMIT 1").fetchone())
-        if partial or pending:
-            reason = "coverage is partial" if partial else "has pending canonical commits"
-            raise SubagentRunIndexUnavailable(f"subagent run index {reason}")
+        self._require_coverage(db)
+        if db.execute("SELECT 1 FROM runs WHERE pending=1 LIMIT 1").fetchone():
+            raise SubagentRunIndexUnavailable("subagent run index has pending canonical commits")
 
     def readiness(self) -> dict[str, object]:
         """热准入只核固定元数据和 pending 存在性，不统计历史 backfill 库存。"""
@@ -503,13 +505,14 @@ class SubagentRunIndex:
                              (text_value(parent_id), int(depth))).fetchone()
             return int(row[0]) + 1 if row else 1
 
-    # LLM: 存在性只针对调用方明确给定的 ID；分块参数不是全历史 SELECT，不为 miss 读取 task 文件。
-    # 函数用途: 返回给定候选中已登记的精确 run_id 集合。
+    # pending 在 canonical 写前已耐久预留 ID；精确存在性必须保留它，不能因其它 run 正在提交而失败。
+    # 只免去状态投影的 pending 门，未完成历史覆盖仍拒绝，且不为 miss 扫描文件或恢复写入。
+    # 函数用途: 返回给定候选中已登记或预留的精确 run_id 集合，不代表 canonical 已发表或可执行。
     def known_ids(self, candidate_ids) -> set[str]:
         candidates = list(dict.fromkeys(text_value(item) for item in candidate_ids if text_value(item)))
         with self.connect() as db:
             db.execute("BEGIN")
-            self._require_complete(db)
+            self._require_coverage(db)
             known = set()
             for start in range(0, len(candidates), 256):
                 batch = candidates[start:start + 256]

@@ -69,9 +69,9 @@ def test_overrides_list_filters(native):
     assert len(completed(invoke(native, 'feedback.overrides.list', {'alert_id': 'first'}))['items']) == 1
     assert completed(invoke(native, 'feedback.overrides.list', {'analyst': 'not-reviewer'}))['items'] == []
     rejected(invoke(native, 'feedback.overrides.list', {'alert_id': 'first', 'cursor': page['next_cursor']}),
-             503, 'CURSOR_EXPIRED')
+             410, 'CURSOR_EXPIRED')
     rejected(invoke(native, 'feedback.overrides.list', {'cursor': page['next_cursor'] + 'x'}),
-             503, 'CURSOR_EXPIRED')
+             410, 'CURSOR_EXPIRED')
 
 
 # LLM: 未知 AI 预测分母必须为空，不能用零冒充已观察的一致率。

@@ -26,6 +26,7 @@ def test_permission_catalog_is_frozen_plus_v13_action_names(tmp_path):
     assert [row['permission'] for row in result['permissions']] == names
     assert result['catalog_revision'] == hashlib.sha256(json.dumps(names, separators=(',', ':')).encode()).hexdigest()
     assert {row['source'] for row in result['permissions']} == {'frozen', 'v13'}
+    assert next(row for row in result['permissions'] if row['permission'] == 'sessions.space.set')['effect'] == 'config'
 
 
 # LLM: 创建/更新均经过真实锁内记录、幂等回执与CAS。
@@ -80,7 +81,7 @@ def test_admin_users_list_get_projection(tmp_path):
     assert first['next_cursor'] is not None
     second = success(invoke('admin.users.list', {'limit': 1, 'cursor': first['next_cursor']}))
     assert first['items'][0]['user_id'] != second['items'][0]['user_id']
-    failure(invoke('admin.users.list', {'limit': 2, 'cursor': first['next_cursor']}), 503, 'CURSOR_EXPIRED')
+    failure(invoke('admin.users.list', {'limit': 2, 'cursor': first['next_cursor']}), 410, 'CURSOR_EXPIRED')
     user = success(invoke('admin.users.get', {'user_id': 'alice'}))['user']
     assert user['has_password'] is True and user['is_admin'] is False
     assert 'password_hash' not in json.dumps(user)

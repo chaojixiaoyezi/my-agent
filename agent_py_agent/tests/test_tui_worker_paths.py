@@ -427,3 +427,26 @@ def test_gateway_worker_does_not_duplicate_client_history_context() -> None:
     assert _worker_history_context(gateway_cfg) == ""
     assert _worker_history_context(direct_cfg) == "旧历史"
     assert calls == ["direct"]
+
+
+@pytest.mark.parametrize("code,detail", [
+    ("COMPACT_RECOVERY_EXHAUSTED", "连续 8 次上下文恢复没有确认的新工具执行进展"),
+    ("COMPACT_SOURCE_EMPTY", "没有可压缩的新来源"),
+    ("COMPACT_CANDIDATE_TOO_LARGE", "候选未提交"),
+])
+def test_compact_failure_public_response_reaches_tui_with_safe_action(code, detail):
+    from agent_py_agent.agent.gateway_parts.http_handlers import _public_result
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_client_error_message
+
+    ctx, runtime = _context()
+    public = _public_result({"ok": False, "status": "failed", "error_code": code,
+                             "error": "private internal trace", "user_error": gateway_client_error_message(code)})
+    text, recorded, summary = _gateway_outcome(ctx, public)
+    assert public["error_code"] == code and detail in summary.error
+    assert "已有工具操作可能已产生副作用" in summary.error or "此前工具操作可能已产生副作用" in summary.error
+    assert "不要原样重发或重放已执行操作" in summary.error
+    assert "private" not in summary.error and "会话记录当前不可用" not in summary.error
+    assert not summary.ok and not text and not recorded
+    adapter = runtime.begin_turn("compact-failed")
+    adapter.finalize(summary)
+    assert any(detail in block.text for block in runtime.store.snapshot().stable_blocks)

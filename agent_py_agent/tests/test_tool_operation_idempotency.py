@@ -1366,3 +1366,34 @@ def test_dispatch_checkpoint_and_in_flight_label_do_not_create_deferred_authorit
     assert record.status == 'unknown'
     assert record.component_receipts[0]['purpose'] == 'diagnostic_only'
     assert record.component_receipts[0]['phase'] == 'awaiting_exit'
+
+
+def test_host_business_error_survives_durable_replay_without_second_execution(tmp_path):
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _complete_terminal_result,
+        _result_from_record,
+    )
+
+    facts = {'source': 'business_host', 'code': 'SPACE_NAME_CONFLICT', 'http_status': 409,
+             'next_action': '改用不同名称；不要原样重试。'}
+    store = LocalStore(tmp_path / 'local.db', enable_fts=False)
+    tool = _CountingTool(result=ToolHandlerOutcome('counting_write', False, 'rejected before write',
+        error_code='SPACE_NAME_CONFLICT', effect_outcome='not_started', host_error=facts))
+    registry = _registry(tmp_path, store, tool)
+    call = _call('run-1', 'call-host-error', 7)
+    first = _execute(registry, call)
+    record = store.get_tool_operation(owner_id='owner-a', run_id='run-1', operation_id=call.operation_id)
+    assert record.result['host_error'] == facts and _complete_terminal_result(record)
+    reopened = LocalStore(tmp_path / 'local.db', enable_fts=False)
+    replay_tool = _CountingTool()
+    replay = _execute(_registry(tmp_path, reopened, replay_tool), call)
+    assert replay.metadata['host_error'] == first.metadata['host_error'] == facts
+    assert replay.error_code == first.error_code and replay.effect_outcome == 'not_started'
+    assert not replay.retryable and replay_tool.calls == 0 and tool.calls == 1
+    assert '; error_code=SPACE_NAME_CONFLICT;' in replay.render_for_prompt().splitlines()[0]
+    old = replace(record, result={key: value for key, value in record.result.items() if key != 'host_error'})
+    assert _complete_terminal_result(old) and _result_from_record(old).host_error == {}
+    for bad in ({**facts, 'source': 'provider'}, {**facts, 'retryable': True},
+                {**facts, 'http_status': True}, {**facts, 'code': 'FAKE; injected=true'}):
+        corrupt = replace(record, result={**record.result, 'host_error': bad})
+        assert not _complete_terminal_result(corrupt)

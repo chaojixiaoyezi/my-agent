@@ -2519,16 +2519,14 @@ def _stop_live_window_request(
         with execution_scope_guard(paths, store, scope) as matches:
             if not matches:
                 return _execution_changed_result("stop", request_id)
-            marked, failure_message = _mark_request_stopping_locked(live_request, scope)
+            marked, failure_message, committed = _mark_request_stopping_locked(live_request, scope)
         if marked:
             try:
                 from .request_binding import gateway_runtime_authority
 
-                report = read_json_file_report(live_request.path)
-                if report.load_error or not report.payload:
-                    raise ValueError("停止后的请求身份不可读")
-                live_request = replace(live_request, payload=report.payload)
-                binding = gateway_runtime_authority(report.payload, request_id)
+                # 原T内复用原子写返回的独立快照；绑定写者也持同T，不再重开刚提交的文件。
+                live_request = replace(live_request, payload=committed)
+                binding = gateway_runtime_authority(committed, request_id)
                 if store is not None:
                     store.guidance.recovery.reject_pending(request_id, target=("request", request_id))
             except (OSError, RuntimeError, TypeError, ValueError):
@@ -2659,7 +2657,8 @@ def _mark_request_stopping(
     with gateway_turn_transition(paths, _record_id(active)):
         if not _control_decision_current(decision):
             return False, "当前任务刚刚结束，无需停止。"
-        return _mark_request_stopping_locked(active, scope)
+        marked, failure, _committed = _mark_request_stopping_locked(active, scope)
+        return marked, failure
 
 
 # LLM: 在T内核同请求/attempt/scope并原子保存取消后才发布Stop；内存try-lock竞争不撤销耐久取消，拒绝/错误不发布。
@@ -2667,7 +2666,7 @@ def _mark_request_stopping(
 def _mark_request_stopping_locked(
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, dict]:
     request_id = _record_id(active)
     updated_ref = [False]
 
@@ -2699,17 +2698,17 @@ def _mark_request_stopping_locked(
     try:
         if active.path is None:
             raise FileNotFoundError(request_id)
-        update_json_file_atomic(active.path, mark_cancel, require_existing=True)
+        committed = update_json_file_atomic(active.path, mark_cancel, require_existing=True)
     except FileNotFoundError:
-        return False, "当前任务刚刚结束，无需停止。"
+        return False, "当前任务刚刚结束，无需停止。", {}
     except OSError:
-        return False, "停止请求暂时无法保存，请稍后重试。"
+        return False, "停止请求暂时无法保存，请稍后重试。", {}
     if not updated_ref[0]:
-        return False, "当前任务刚刚结束，无需停止。"
+        return False, "当前任务刚刚结束，无需停止。", {}
     request_root = active.path.parent.parent
     paths = gateway_paths_from_root(request_root.parent if request_root.name == "requests" else request_root)
     _control_command_decision(paths, scope, "stop_committed", request_id)
-    return True, ""
+    return True, "", committed
 
 
 # LLM: interrupt 不改变任何 Goal/任务状态或资源；仅已中断的 active Goal 可沿同一 wake/claim 续跑。

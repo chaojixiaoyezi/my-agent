@@ -124,7 +124,7 @@ def test_joint_boundary_never_crosses_protected_facts(protected_before_tools):
 
 @pytest.mark.parametrize('backend', ['anthropic_compatible', 'openai_compatible'])
 # LLM: 在模型安全点提供保护事实位于工具之前的合法IR，主请求与冻结都读同一参数；两次HTTP和checkpoint守同一边界。
-# 函数用途: 证明不能跳过中间保护事实再覆盖后面的工具，工具原文仍在恢复请求中。
+# 函数用途: 连续前缀不能跨保护事实时，独立摘要仍消费完整工具来源，事实留在恢复请求。
 def test_real_recovery_keeps_tools_after_protected_middle_fact(tmp_path, monkeypatch, backend):
     agent, store, thread, request, execution, sink, _ = _mixed_background(
         tmp_path, backend=backend, detached=False,
@@ -175,15 +175,15 @@ def test_real_recovery_keeps_tools_after_protected_middle_fact(tmp_path, monkeyp
     assert len(summary) == 1 and len(main) == 2
     source = _blocks(summary[0])[:-1]
     assert len(frozen_wires) == 1
-    assert source == _blocks(frozen_wires[0])[:len(source)]
-    assert source and source == _blocks(main[0])[:len(source)]
+    assert source
     assert 'PROTECTED_MIDDLE_FACT' not in str(summary[0])
-    assert 'MIXED_SOURCE_MARKER' not in str(summary[0])
+    assert 'MIXED_SOURCE_MARKER' in str(summary[0])
     assert 'PROTECTED_MIDDLE_FACT' in str(main[0])
-    assert 'MIXED_SOURCE_MARKER' in str(main[0]) and 'MIXED_SOURCE_MARKER' in str(main[-1])
+    assert 'PROTECTED_MIDDLE_FACT' in str(main[-1])
+    assert 'MIXED_SOURCE_MARKER' in str(main[0]) and 'MIXED_SOURCE_MARKER' not in str(main[-1])
     checkpoint = committed_compact_checkpoint_chain(agent, store.threads.require(thread.thread_id))[-1]
     assert checkpoint['source_message_ids'] == prior_ids
-    assert checkpoint['source_tool_refs'] == []
+    assert checkpoint['source_tool_refs']
 
 
 @pytest.mark.parametrize('overflow', [False, True])

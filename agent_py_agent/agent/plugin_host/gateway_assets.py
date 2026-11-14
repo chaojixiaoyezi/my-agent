@@ -238,6 +238,8 @@ def execute_registered_asset(
     deadline = time.monotonic() + max_timeout
     runner = ScriptRunner(
         home, extra_write_roots=policy.write_roots, public_read_roots=policy.read_roots, restrict_to_roots=True,
+        read_scope_mode='exact',
+        owner_scope_root=home, agent_home_root=context.owner_home.root,
         host_credential_env_names=host_credential_env_names, host_path_protection=host_path_protection,
     )
     if plan.action == "execute.script":

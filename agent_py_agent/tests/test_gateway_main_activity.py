@@ -12,6 +12,18 @@ from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 
 
+def test_failed_background_activity_explains_recovery_and_redacts_credentials():
+    from agent_py_agent.agent.runtime_db.operations import RuntimeRecoveryRequiredError
+
+    agent = SimpleNamespace()
+    sink = BackgroundMainActivitySink(agent, thread_id="thread-a", task_id="task-a")
+    sink.fail(RuntimeRecoveryRequiredError("上个工具结果待核对，token=private-value-abcdef"))
+    activity = background_main_activity(agent, "thread-a", {"task-a"})
+    assert activity["phase"] == "failed"
+    assert all(word in activity["activity"] for word in ("RUN_RECOVERY_REQUIRED", "上个工具结果待核对", "/recover"))
+    assert "private-value-abcdef" not in activity["activity"]
+
+
 def test_foreground_writer_replaces_stale_background_activity(tmp_path):
     agent = SimpleNamespace()
     background = BackgroundMainActivitySink(agent, thread_id="thread-a", task_id="task-a")

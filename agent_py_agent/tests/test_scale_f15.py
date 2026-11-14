@@ -113,9 +113,11 @@ def test_registration_reads_no_artifact_body_and_disabled_registers_nothing(back
 
     # LLM: 保留冻结工厂的完整参数，不引入替代观察实现。
     # 函数用途: 记录真实默认注册调用。
-    def factory(owner_home, owner_id, store, runtime, *, resource_provider=None):
+    def factory(owner_home, owner_id, store, runtime, *, resource_provider=None,
+                workspace_task_path_template=None):
         counts['factory'] += 1
-        return original_factory(owner_home, owner_id, store, runtime, resource_provider=resource_provider)
+        return original_factory(owner_home, owner_id, store, runtime, resource_provider=resource_provider,
+                                workspace_task_path_template=workspace_task_path_template)
 
     # LLM: 只计量原审批来源的廉价探测。
     # 函数用途: 记录审批注册调用。

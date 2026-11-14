@@ -34,31 +34,25 @@ def delegated_session_task(store, thread_id):
     return task
 
 
-def lifecycle_session_task_origin(store, thread_id, task_id, wake, *, reason):
-    """只读核实原SessionTask子事件来源；正文来自已消费的原guidance，不伪造user消息。"""
-    from .models import SUBAGENT_LIFECYCLE_WAKE_REASONS
-
-    if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS or not task_id or not isinstance(wake, dict):
-        return None
-    tasks = getattr(store, 'session_tasks', None)
-    task = tasks.load(task_id) if tasks is not None else None
-    if task is None:
-        return None  # 普通用户请求、Goal和scheduler仍沿各自的原始来源。
-    receiver = store.threads.require(thread_id)
-    sender = store.threads.require(task.sender_thread_id)
-    link, error = store.tasks.link_report(thread_id, task_id)
-    if (error or link is None or link.status != 'active' or task.status in {'cancelled', 'failed'}
-            or task.target_thread_id != thread_id or task.conversation_request_id != task.task_id
-            or receiver.owner_id != sender.owner_id or receiver.owner_home != sender.owner_home
-            or wake.get('root_task_id') != task.task_id):
-        raise DataCorruptionError('SESSION_TASK_LIFECYCLE_SCOPE_INVALID')
+def _verify_lifecycle_children(store, receiver, thread_id, root_task_id, request_id, wake):
+    """同一原根的每个生命周期来源都复读canonical child；不采信completion正文或路径提示。"""
     metadata = wake.get('metadata') or {}
     if not isinstance(metadata, dict) or not isinstance(metadata.get('events', []), list):
         raise DataCorruptionError('SESSION_TASK_LIFECYCLE_SOURCE_INVALID')
     envelopes = [wake, *metadata.get('events', [])]
+    for item in envelopes:
+        if (isinstance(item, dict) and item.get('source_agent_id')
+                and item.get('root_task_id') == root_task_id
+                and isinstance(item.get('metadata'), dict)
+                and item['metadata'].get('conversation_request_id') not in (None, '', root_task_id)):
+            raise DataCorruptionError('SESSION_TASK_LIFECYCLE_REQUEST_CONFLICT')
     selected = [item for item in envelopes if isinstance(item, dict)
         and isinstance(item.get('metadata'), dict)
-        and item['metadata'].get('conversation_request_id') == task.task_id]
+        and (item['metadata'].get('conversation_request_id') == root_task_id
+             or (item.get('reason') == 'subagent_capability_request_open'
+                 and not item['metadata'].get('conversation_request_id')
+                 and item.get('parent_agent_id') == root_task_id
+                 and item.get('root_task_id') == root_task_id))]
     if not selected:
         raise DataCorruptionError('SESSION_TASK_LIFECYCLE_SOURCE_MISSING')
     import json
@@ -68,8 +62,8 @@ def lifecycle_session_task_origin(store, thread_id, task_id, wake, *, reason):
     home = Path(receiver.owner_home).absolute()
     for envelope in selected:
         child_id = envelope.get('source_agent_id')
-        if (not child_id or envelope.get('parent_agent_id') != task.task_id
-                or envelope.get('root_task_id') != task.task_id):
+        if (not child_id or envelope.get('parent_agent_id') != root_task_id
+                or envelope.get('root_task_id') != root_task_id):
             raise DataCorruptionError('SESSION_TASK_LIFECYCLE_CHILD_MISMATCH')
         child_link, error = store.tasks.link_report(thread_id, child_id)
         if error or child_link is None or not child_link.task_path:
@@ -88,14 +82,88 @@ def lifecycle_session_task_origin(store, thread_id, task_id, wake, *, reason):
             canonical = Path(state['canonical_state_ref'])
             canonical.relative_to(root)  # 原locator只能指向这个孩子自己的规范状态。
             state = read_object(canonical)
+        if envelope.get('reason') == 'subagent_capability_request_open':
+            capability_id = envelope['metadata'].get('request_id')
+            requests = state.get('capability_requests') or []
+            if not capability_id or not any(isinstance(row, dict) and row.get('id') == capability_id
+                    and row.get('from_run_id') == child_id for row in requests):
+                raise DataCorruptionError('SESSION_TASK_LIFECYCLE_CAPABILITY_INVALID')
         attrs = state.get('attributes') or {}
         if not isinstance(attrs, dict):
             raise DataCorruptionError('SESSION_TASK_LIFECYCLE_CHILD_INVALID')
         if (state.get('id') != child_id or state.get('owner') != receiver.owner_id
-                or state.get('parent_id') != task.task_id or state.get('root_id') != task.task_id
+                or state.get('parent_id') != root_task_id or state.get('root_id') != root_task_id
                 or attrs.get('conversation_thread_id') != thread_id
-                or attrs.get('conversation_request_id') != task.conversation_request_id):
+                or attrs.get('conversation_request_id') != request_id):
             raise DataCorruptionError('SESSION_TASK_LIFECYCLE_CHILD_IDENTITY_INVALID')
+    if any(isinstance(item, dict) and item.get('source_agent_id') and (
+            item.get('root_task_id') != root_task_id or item.get('parent_agent_id') != root_task_id)
+           for item in envelopes):
+        raise DataCorruptionError('LIFECYCLE_SOURCE_GROUP_MISMATCH')
+
+
+def lifecycle_session_message_origin(store, thread_id, task_id, wake, *, reason):
+    """普通后台消息续片按原handled wake及consumed guidance恢复，不借聊天user行或邻近任务。"""
+    import json
+
+    from ..common.nofollow_fs import read_bytes_beneath
+    from .models import SUBAGENT_LIFECYCLE_WAKE_REASONS
+
+    if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS or not task_id or not isinstance(wake, dict):
+        return None
+    receiver = store.threads.require(thread_id)
+    link, error = store.tasks.link_report(thread_id, task_id)
+    if error or link is None or link.status != 'active' or wake.get('root_task_id') != task_id:
+        return None
+    home = Path(receiver.owner_home).absolute()
+    path = store.storage.wake_handled_dir / f'{task_id}.json'
+    raw = read_bytes_beneath(home, path.absolute().relative_to(home).parts, max_bytes=1024 * 1024)
+    if raw is None:
+        return None  # 其它类型根仍沿Goal/scheduler/真实对话各自的原合同。
+    original = json.loads(raw)
+    if original.get('reason') != 'session_message':
+        return None
+    metadata = original.get('metadata') or {}
+    sender_id = metadata.get('origin_thread_id')
+    key = metadata.get('message_dedupe_key')
+    if (original.get('wake_signal_id') != task_id or original.get('thread_id') != thread_id
+            or original.get('status') != 'handled' or metadata.get('origin_kind') != 'session_message'
+            or not isinstance(key, str) or original.get('dedupe_key') != key or not sender_id):
+        raise DataCorruptionError('SESSION_MESSAGE_LIFECYCLE_ORIGIN_INVALID: 原来源不可读；未执行，核原wake/guidance后恢复。')
+    sender = store.threads.require(sender_id)
+    if sender.owner_id != receiver.owner_id or sender.owner_home != receiver.owner_home:
+        raise DataCorruptionError('SESSION_MESSAGE_LIFECYCLE_OWNER_MISMATCH')
+    _verify_lifecycle_children(store, receiver, thread_id, task_id, task_id, wake)
+    receipt = store.guidance.ledger.read_receipt(store.storage.guidance_dedupe_path(key))
+    entry = receipt.entry if receipt is not None else None
+    facts = entry.metadata if entry is not None else {}
+    if (receipt is None or receipt.status != 'consumed' or receipt.dedupe_key != key
+            or entry.target_type != 'thread' or entry.target_id != thread_id or entry.sender != sender_id
+            or facts.get('origin_kind') != 'session_message' or facts.get('origin_thread_id') != sender_id
+            or facts.get('message_dedupe_key') != key or not entry.message.strip()):
+        raise DataCorruptionError('SESSION_MESSAGE_LIFECYCLE_BODY_NOT_CONSUMED: 原正文未确认；未执行，不借其它任务正文。')
+    return task_id, entry.message
+
+
+def lifecycle_session_task_origin(store, thread_id, task_id, wake, *, reason):
+    """只读核实原SessionTask子事件来源；正文来自已消费的原guidance，不伪造user消息。"""
+    from .models import SUBAGENT_LIFECYCLE_WAKE_REASONS
+
+    if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS or not task_id or not isinstance(wake, dict):
+        return None
+    tasks = getattr(store, 'session_tasks', None)
+    task = tasks.load(task_id) if tasks is not None else None
+    if task is None:
+        return None  # 普通用户请求、Goal和scheduler仍沿各自的原始来源。
+    receiver = store.threads.require(thread_id)
+    sender = store.threads.require(task.sender_thread_id)
+    link, error = store.tasks.link_report(thread_id, task_id)
+    if (error or link is None or link.status != 'active' or task.status in {'cancelled', 'failed'}
+            or task.target_thread_id != thread_id or task.conversation_request_id != task.task_id
+            or receiver.owner_id != sender.owner_id or receiver.owner_home != sender.owner_home
+            or wake.get('root_task_id') != task.task_id):
+        raise DataCorruptionError('SESSION_TASK_LIFECYCLE_SCOPE_INVALID')
+    _verify_lifecycle_children(store, receiver, thread_id, task.task_id, task.conversation_request_id, wake)
     receipt = (store.guidance.ledger.read_receipt(store.storage.guidance_dedupe_path(task.body_dedupe_key))
         if task.body_dedupe_key else None)
     entry = receipt.entry if receipt is not None else None

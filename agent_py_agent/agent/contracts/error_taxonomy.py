@@ -68,6 +68,192 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "WORKFLOW_RUN_BUSY": ErrorContract(
+        code="WORKFLOW_RUN_BUSY", category="resource", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="原运行仍被执行者持有，本次控制未开始；先读原快照，需停止时只用原会话/stop或已绑定取消入口，等待终态证明，不重开同一运行。",
+    ),
+    "WORKFLOW_REVIEW_PATCH_FORBIDDEN": ErrorContract(
+        code="WORKFLOW_REVIEW_PATCH_FORBIDDEN", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
+        recovery_hint="原待审步骤尚未执行，不能用修复输出冒充审核通过；按原候选版本完成独立审核后再恢复，不补造执行结果。",
+    ),
+    "WORKFLOW_NOTIFICATION_RECEIPT_STORE_UNAVAILABLE": ErrorContract(
+        code="WORKFLOW_NOTIFICATION_RECEIPT_STORE_UNAVAILABLE", category="execution", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="通知去重收据读写未获确认；核对原认领与实际投递回执，保留queued/dispatching/unknown事实，未核实前不能重新发送。",
+    ),
+    "WORKFLOW_SCOPE_REMOVE_REQUIRES_BOUND_SPACES": ErrorContract(
+        code="WORKFLOW_SCOPE_REMOVE_REQUIRES_BOUND_SPACES", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="清空空间绑定要求工作流当前确有spaces绑定；核对原scope，显式孤立应提交unassigned及空space_ids，不把空数组解释为全局授权。",
+    ),
+    "WORKFLOW_RESOLUTION_UNAVAILABLE": ErrorContract(
+        code="WORKFLOW_RESOLUTION_UNAVAILABLE", category="capability", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="宿主没有可信核验入口；保留原operation及prior_effect_outcome并核对目标结果，不生成新键重做或由模型补签核验。",
+    ),
+    "WORKFLOW_TOOL_PRECONDITION_UNAVAILABLE": ErrorContract(
+        code="WORKFLOW_TOOL_PRECONDITION_UNAVAILABLE", category="capability", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原执行宿主缺少审核资源只读器；在同一Owner和原任务恢复可信调度器后重新审核，不能用无内容钉子的旧票执行。",
+    ),
+    "WORKFLOW_REVIEW_PRECONDITION_MISSING": ErrorContract(
+        code="WORKFLOW_REVIEW_PRECONDITION_MISSING", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_AGAINST_ACCEPTANCE_FINDINGS.value,
+        recovery_hint="旧待审记录缺少资源钉子；不补签旧票，由原任务显式返工修订实际候选、绑定新版本并重新独立审核。",
+    ),
+    "WORKFLOW_REVIEW_PRECONDITION_CHANGED": ErrorContract(
+        code="WORKFLOW_REVIEW_PRECONDITION_CHANGED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_AGAINST_ACCEPTANCE_FINDINGS.value,
+        recovery_hint="资源内容或实参与受审钉子已不一致；保留原候选和票据，显式修订候选后重新审核，不覆盖旧摘要或原样恢复。",
+    ),
+    "WORKFLOW_REVIEW_HISTORY_INCOMPLETE": ErrorContract(
+        code="WORKFLOW_REVIEW_HISTORY_INCOMPLETE", category="resource", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_AGAINST_ACCEPTANCE_FINDINGS.value,
+        recovery_hint="同候选审核历史覆盖不完整，不能据截断窗口声称全部通过；由原任务绑定新候选版本重新独立审核，不追加替票或盲目恢复。",
+    ),
+    # 索引、计时和审核准备各保留真实阶段；分类不证明副作用，也不签发重放或跨Owner权限。
+    "CASE_OWNER_MISMATCH": ErrorContract(
+        code="CASE_OWNER_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前运行来源不属于本Owner，本次未创建协作单。改在本人实际已授权的原任务中操作，或联系原主处理；不能改owner参数、借ticket或替换来源绕过。",
+    ),
+    "CASE_SCOPE_MISMATCH": ErrorContract(
+        code="CASE_SCOPE_MISMATCH", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="显式thread_id/task_id与当前宿主canonical绑定不一致，本次未创建协作单。省略这两个可选字段并沿原运行绑定，不要填写其它线程或任务冒充来源；保留原协作需求。",
+    ),
+    "CURSOR_EXPIRED": ErrorContract(
+        code="CURSOR_EXPIRED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原游标已失效；丢弃该cursor，在同一已授权space/project及原asset/version范围重新请求第一页取得新快照。不要切到latest、原样重试旧游标、把失效解释成数据为空或扩大范围。",
+    ),
+    "ARTIFACT_CHANGED": ErrorContract(
+        code="ARTIFACT_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原产物与固定版本或摘要已不一致；保留确切version/hash核对原登记，必要时由有权人重新正式上传。不要盲重试、切换到新版本或把新字节冒充旧版本。",
+    ),
+    "BINARY_CONTENT": ErrorContract(
+        code="BINARY_CONTENT", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该确切业务资产版本不是可按UTF-8读取的文本；沿原授权下载入口取得同一固定版本，使用支持其MIME的读取方式。不要读取物理path、丢弃版本钉、强制解码或把空文本当成功。",
+    ),
+    "VERSION_SCOPE_MISMATCH": ErrorContract(
+        code="VERSION_SCOPE_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="请求的asset/version超出本轮冻结范围；使用本次已经授权并固定的准确asset_id与version_ref。不能修改冻结版本、扩大pins或用新版本替代旧版本。",
+    ),
+    "ASSET_SCOPE_MISMATCH": ErrorContract(
+        code="ASSET_SCOPE_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该业务资产不属于当前绑定的space/project范围；只读取当前已授权范围内的资产，必要时由本人在已授权且范围合适的会话查询。不能改owner、声明ticket或扩大scope绕过。",
+    ),
+    "HISTORY_STORAGE_BUSY": ErrorContract(
+        code="HISTORY_STORAGE_BUSY", category="storage", retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="历史纯读遇到宿主明确SQLite BUSY/LOCKED；保持原owner与scope，短暂等待后有限重试同一只读查询。不要重放写操作或根据异常文字猜测数据库忙。",
+    ),
+    "HISTORY_SOURCE_CORRUPT": ErrorContract(
+        code="HISTORY_SOURCE_CORRUPT", category="storage", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原历史来源被宿主确认为损坏或非有效数据库；保留原来源和待恢复工作，由宿主核对完整性并恢复后再查。不要循环重试、删除原库、改scope或把损坏当空历史。",
+    ),
+    "HISTORY_QUERY_UNAVAILABLE": ErrorContract(
+        code="HISTORY_QUERY_UNAVAILABLE", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前历史查询接口或系统依赖不可用；按原request核对安全exception_type与history_query阶段，恢复原接口后在相同授权范围查询。不要猜测异常正文、循环重试或改用其它Owner来源。",
+    ),
+    "HISTORY_SCOPE_NOT_VISIBLE": ErrorContract(
+        code="HISTORY_SCOPE_NOT_VISIBLE", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前历史范围无法核验所请求记录；只使用当前范围检索返回的引用。需要其它记录时，由本人在已授权且范围合适的会话中查询。不能换ID、声明ticket、扩大scope或冒充owner绕过，不能据此判断记录是否存在。",
+    ),
+    "GATEWAY_HISTORY_INDEX_PENDING": ErrorContract(
+        code="GATEWAY_HISTORY_INDEX_PENDING", category="resource", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_LOCAL_PROGRESS.value,
+        recovery_hint="历史去重索引尚未追平；保留原request/message ID等待宿主有界恢复，不另投新消息或重做工具。是否已写入正文以原回执为准。",
+    ),
+    "WORKFLOW_ARTIFACT_RUN_LOCATOR_INCOMPLETE": ErrorContract(
+        code="WORKFLOW_ARTIFACT_RUN_LOCATOR_INCOMPLETE", category="resource", retryable=False,
+        recommended_action=RecoveryAction.READ_ARTIFACT_REF.value,
+        recovery_hint="产物运行定位索引尚未覆盖完整；使用已有精确run_id读取原归档，不能据缺定位宣称无产物。无法确认时保留partial，勿重新执行工作流。",
+    ),
+    "WORKFLOW_RUN_INDEX_RECOVERY_PENDING": ErrorContract(
+        code="WORKFLOW_RUN_INDEX_RECOVERY_PENDING", category="resource", retryable=True,
+        recommended_action=RecoveryAction.WAIT_FOR_LOCAL_PROGRESS.value,
+        recovery_hint="运行列表投影仍在恢复，可能已推进部分索引；稍后重新读取列表或按精确run_id读取规范记录，不重启或重做工作流。",
+    ),
+    "WORKFLOW_COMPLETION_CLOCK_FAILED": ErrorContract(
+        code="WORKFLOW_COMPLETION_CLOCK_FAILED", category="execution", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="工作流完成计时失败；先核原终态及terminal_committed，仅沿原运行和原幂等键修复完成计时，不重新执行节点或发送产物。",
+    ),
+    "WORKFLOW_ISOLATION_UNAVAILABLE": ErrorContract(
+        code="WORKFLOW_ISOLATION_UNAVAILABLE", category="capability", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前没有具备只读效果核验和真实期限的研判执行器；改用原无状态stateless_skill，取数放在有权限的前置tool_call，不把任意callable或模型声明当隔离证明。",
+    ),
+    "WORKFLOW_REPLAN_READY": ErrorContract(
+        code="WORKFLOW_REPLAN_READY", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_AGAINST_ACCEPTANCE_FINDINGS.value,
+        recovery_hint="已完成一轮重新规划，计划仅供修订；修改真实候选并重新独立审核，原待审步骤未执行，不能把规划完成当作批准或重播已成功步骤。",
+    ),
+    "WORKFLOW_REWORK_LIMIT_REACHED": ErrorContract(
+        code="WORKFLOW_REWORK_LIMIT_REACHED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="重新规划达到冻结策略上限；保留原运行、计数和审核门，修订候选或请用户调整后续计划，不清零计数、放宽策略或原样自动重试。",
+    ),
+    "WORKFLOW_REWORK_NO_PROGRESS": ErrorContract(
+        code="WORKFLOW_REWORK_NO_PROGRESS", category="state", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="重新规划连续没有进展，已到冻结策略边界；保留原计数与候选，请用户确认实质修订或后续计划，不换键重复相同规划。",
+    ),
+    "WORKFLOW_REPLAN_FAILED": ErrorContract(
+        code="WORKFLOW_REPLAN_FAILED", category="execution", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="本轮重新规划失败；核对原rework_state的error_code、error_type和analysis_attempts，保留已消耗轮数及审核门，不重播原业务步骤或把失败规划当候选批准。",
+    ),
+    "WORKFLOW_OWNER_MISMATCH": ErrorContract(
+        code="WORKFLOW_OWNER_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value,
+        recovery_hint="工作流Owner与当前宿主不一致；回到原Owner及原运行核对身份，不能改actor、Owner参数或临时属性冒认。",
+    ),
+    "WORKFLOW_TOOL_PRECONDITION_PERMISSION_DENIED": ErrorContract(
+        code="WORKFLOW_TOOL_PRECONDITION_PERMISSION_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="审核资源尚未读取；原副作用入口必须非拒绝，对应只读入口必须明确许可。核对原工具、业务及路径授权后重新审核，不绕过审核门。",
+    ),
+    "WORKFLOW_TOOL_PRECONDITION_READ_FAILED": ErrorContract(
+        code="WORKFLOW_TOOL_PRECONDITION_READ_FAILED", category="execution", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_EVIDENCE_REFS.value,
+        recovery_hint="审核资源读取未成功；按原source_error_code和exception_type核对权限及资源状态，取得受审版本证据后重新审核，不沿旧票盲重试。",
+    ),
+    "WORKFLOW_TOOL_PRECONDITION_ARGUMENTS_INVALID": ErrorContract(
+        code="WORKFLOW_TOOL_PRECONDITION_ARGUMENTS_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="原工具调用参数未通过审核前校验；按原工具Schema修正候选参数并重新审核，不能跳过校验执行。",
+    ),
+    "WORKFLOW_TOOL_PRECONDITION_CONFLICT": ErrorContract(
+        code="WORKFLOW_TOOL_PRECONDITION_CONFLICT", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="显式参数与当前资源摘要冲突；核对preview后修订候选并重新审核，不覆盖宿主约束钉子或复用旧票。",
+    ),
+    "WORKFLOW_TOOL_PRECONDITION_INVALID": ErrorContract(
+        code="WORKFLOW_TOOL_PRECONDITION_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主审核钩子返回了无效约束；保留原候选并由宿主修复该工具的约束适配，不能由模型补造钉子或继续执行。",
+    ),
+    "WORKFLOW_TOOL_PRECONDITION_READ_ACTION_MISSING": ErrorContract(
+        code="WORKFLOW_TOOL_PRECONDITION_READ_ACTION_MISSING", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="该工具缺少审核所需的只读动作投影；由宿主补齐原工具适配或选择已支持的合法工具，不改用副作用动作读取材料。",
+    ),
+    "WORKFLOW_TOOL_PRECONDITION_READ_ACTION_INVALID": ErrorContract(
+        code="WORKFLOW_TOOL_PRECONDITION_READ_ACTION_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主只读动作投影不是有效参数对象；修复原工具适配后重新审核，不执行原副作用动作或猜造权限。",
+    ),
     # LLM: 预算不足不能原样重放；保留原输入和冻结事实，沿既有容量恢复或修正配置。
     # 配置用途: 登记请求输出预算不可用的准确分类与安全恢复建议。
     "REQUEST_OUTPUT_BUDGET_UNAVAILABLE": ErrorContract(
@@ -901,6 +1087,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="确认卡未成功送达；本次操作已拒绝，未执行。",
     ),
+    "APPROVAL_SCOPE_INVALID": ErrorContract(
+        code="APPROVAL_SCOPE_INVALID", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原执行、线程或审批绑定缺失/失效，工具未执行；请刷新当前执行与审批状态，不得复用旧请求。",
+    ),
+    "APPROVAL_STORAGE_UNAVAILABLE": ErrorContract(
+        code="APPROVAL_STORAGE_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原审批账本读取或写入失败，工具未执行；请检查原账本状态，不得盲重试该工具调用。",
+    ),
     "APPROVAL_BINDING_MISMATCH": ErrorContract(
         code="APPROVAL_BINDING_MISMATCH",
         category="permission",
@@ -983,6 +1179,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_EVIDENCE_REFS.value,
         recovery_hint="tool_verified 只能引用本轮成功工具记录中的结构化 ref；读取成功记录后重填 evidence_refs。",
+    ),
+    "MEMORY_AUTHORITY_UNREADABLE": ErrorContract(
+        code="MEMORY_AUTHORITY_UNREADABLE",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="核对本人长期记忆库的读取权限与完整性，恢复后重新列出条目，再按可见编号操作。",
     ),
     "MEMORY_CANDIDATE_STORE_UNAVAILABLE": ErrorContract(
         code="MEMORY_CANDIDATE_STORE_UNAVAILABLE",
@@ -4984,6 +5187,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="原步骤执行结果尚未得到可信核验。请核对原操作与目标结果，取得同运行、步骤、版本和尝试的核验；不要原样重试或重做副作用。",
     ),
+    "WORKFLOW_REVIEW_SERVICE_UNAVAILABLE": ErrorContract(
+        code="WORKFLOW_REVIEW_SERVICE_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="本次未执行：冻结工作流声明审核策略，但宿主审核服务不可用。请由原Owner和任务恢复原审核服务；不要删除策略、新建无关空间或原样重试副作用。",
+    ),
     "WORKFLOW_REVIEW_REQUIRED": ErrorContract(
         code="WORKFLOW_REVIEW_REQUIRED", category="permission", retryable=False,
         recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
@@ -5044,4 +5252,77 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="工作流工具步骤定义不合法或引用了未知工具名；请核对步骤规格与可用工具目录。",
     ),
+})
+
+
+# 原业务服务明确签发的写前拒绝；未知或已提交副作用由调用边界使用原unknown合同。
+ERROR_CONTRACTS.update({
+    "CAPABILITY_DENIED": ErrorContract(
+        code="CAPABILITY_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="当前宿主能力或原操作者来源未获授权；核对原执行来源、会话与有效权限，不能替换owner、目标或工具绕过。副作用事实以原执行阶段和回执为准，未确认时不要重放。"),
+    "SPACE_MISMATCH": ErrorContract(
+        code="SPACE_MISMATCH", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="请求的空间与原目标或受理范围不一致，本次未开始；先用 spaces.get 与 background_agents.get 核对准确 space_id，再修正原调用，不创建替身身份或跨空间重投。"),
+    "AGENT_NOT_AVAILABLE": ErrorContract(
+        code="AGENT_NOT_AVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="目标后台身份当前状态不接受此操作，本次未开始；先以 background_agents.get 读取 identity_state/work_state，按原授权恢复或选择可用身份，不向退役目标盲重发。"),
+    "BUSINESS_ACCESS_DENIED": ErrorContract(
+        code="BUSINESS_ACCESS_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="当前操作者对该业务动作或准确目标没有有效授权，本次未开始；核对原登录身份、目标与授权状态，请原操作者授权后再调用，不能改 owner_id 或借其它客户端绕过。"),
+    "ACTOR_REQUIRED": ErrorContract(
+        code="ACTOR_REQUIRED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="此操作缺少当前宿主签发的有效操作者身份，本次未开始；请在原已认证会话重新发起，客户端自报 owner_id、角色或令牌正文不构成授权。"),
+    "SPACE_SCOPE_MISMATCH": ErrorContract(
+        code="SPACE_SCOPE_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="操作者或目标不属于本次已授权业务范围，本次未开始；使用原会话查询当前空间及准确目标，核对授权后再调用，不扩大owner或空间范围。"),
+})
+
+# 原业务宿主已签发的领域码沿唯一工具分类表保留；不解析工具正文或按码后缀推断权限。
+ERROR_CONTRACTS.update({
+    "SPACE_NOT_FOUND": ErrorContract(
+        code="SPACE_NOT_FOUND", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前已授权范围无法读取该空间；不能据此区分不存在或无权。使用当前身份的 spaces.list 返回ID核对，不换owner、不扫描其它用户目录，也不原样重试。"),
+    "SPACE_NAME_CONFLICT": ErrorContract(
+        code="SPACE_NAME_CONFLICT", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="空间规范名称与当前范围已有对象冲突；先用 spaces.list 核对，选择不同名称并为新意图使用新幂等键，不覆盖旧对象或盲重发。"),
+    "SPACE_ARCHIVED": ErrorContract(
+        code="SPACE_ARCHIVED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="目标空间已归档，当前动作要求活动空间；先读原空间状态，选择活动空间，或由有权用户明确还原后再操作，不能自动还原绕过状态。"),
+    "BUSINESS_NOT_ENABLED": ErrorContract(
+        code="BUSINESS_NOT_ENABLED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前宿主未启用业务空间能力；停止重试，请宿主核对原功能配置后重新发起，不改身份或绕到其它入口写入。"),
+    "REFERENCE_NOT_FOUND": ErrorContract(
+        code="REFERENCE_NOT_FOUND", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前授权范围无法解析原结构化引用；从当前范围公开目录重新读取准确引用，不猜ID、不搜索其它用户路径或扩大范围。"),
+    "OBSERVATION_NOT_FOUND": ErrorContract(
+        code="OBSERVATION_NOT_FOUND", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前范围没有可用的目标观察记录；核对当前空间和原目标引用，从当前授权目录选择已有记录，不创建假观察记录或换身份。"),
+    "HUMAN_RESPONSE_REQUIRED": ErrorContract(
+        code="HUMAN_RESPONSE_REQUIRED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="此准确动作与参数尚无有效人工确认；在原宿主审批入口等待有权用户确认，模型声明、其它动作的票据或换参数不能代替原批准。"),
+    "DOMAIN_RESULT_INVALID": ErrorContract(
+        code="DOMAIN_RESULT_INVALID", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="领域返回不符合动作结果合同；按原request_id与effect_outcome核对实际操作，由结果生产方修复所列字段，不把结果校验失败当作未写入或自动重放。"),
+    "RESULT_LIMIT_EXCEEDED": ErrorContract(
+        code="RESULT_LIMIT_EXCEEDED", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前结果超出该动作的有界返回限制；缩小当前授权范围的查询或使用原分页/引用入口继续，不重复全量读取或认定截断部分不存在。"),
+    "UNSUPPORTED_ACTION": ErrorContract(
+        code="UNSUPPORTED_ACTION", category="validation", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前宿主未提供该结构化动作；通过原工具发现或公开目录查询实际可用动作及schema，不能换名称猜调、绕过原权限或假称已经执行。"),
 })

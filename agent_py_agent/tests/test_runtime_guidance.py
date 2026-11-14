@@ -3232,3 +3232,46 @@ def test_legacy_prompt_delivery_is_retired_on_plain_receipt_lookup(tmp_path) -> 
         "attempt-terminal"
     )
     assert store.guidance.pending("agent_run", "child-1") == []
+
+
+def test_busy_recursive_parent_sees_open_request_before_child_finishes():
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+
+    child = _direct_child('requesting-child', 'waiting-parent', 'RUNNING')
+    agent = SimpleNamespace(subagents=_MutableSubagentManager([child]))
+    params = _tool_loop_params(task_id='root-task', context_scope='task_local')
+    previous = set_current_subagent_context(agent, run_id='waiting-parent')
+    try:
+        refresh_runtime_direct_children_snapshot(agent, params)
+        assert not has_pending_turn_input(agent, params)
+        child.capability_requests = [CapabilityRequest(id='request-live', from_run_id=child.id,
+            problem='missing', needed_capability='search', requested_tools=['web_search'])]
+        assert has_pending_turn_input(agent, params)
+        assert inject_pending_turn_input(agent, params)
+        assert 'request-live' in params.runtime_injections[0].text
+        assert 'web_search' in params.runtime_injections[0].text
+        assert child.status == 'RUNNING'
+        assert not has_pending_turn_input(agent, params)
+    finally:
+        restore_current_subagent_context(agent, previous)
+
+
+def test_live_recursive_request_projection_rejects_cross_owner_or_root():
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+
+    parent = SimpleNamespace(id='parent', owner='owner-one', root_id='root-one')
+    for owner, root in [('owner-two', 'root-one'), ('owner-one', 'root-two')]:
+        child = _direct_child('foreign-child', 'parent', 'RUNNING')
+        child.owner, child.root_id = owner, root
+        child.capability_requests = [CapabilityRequest(id='private-request', from_run_id=child.id,
+            problem='private', needed_capability='secret-tool')]
+        manager = SimpleNamespace(load=lambda _run: parent,
+            list_runs_for_root_report=lambda _root: _MutableSubagentReport([child]))
+        agent = SimpleNamespace(subagents=manager)
+        params = _tool_loop_params(task_id='root-one', context_scope='task_local')
+        previous = set_current_subagent_context(agent, run_id='parent')
+        try:
+            refresh_runtime_direct_children_snapshot(agent, params)
+            assert all('private-request' not in str(item.text) for item in params.runtime_injections)
+        finally:
+            restore_current_subagent_context(agent, previous)

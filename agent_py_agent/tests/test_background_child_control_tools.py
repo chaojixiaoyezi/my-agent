@@ -69,7 +69,7 @@ def test_child_facing_profiles_carry_every_direct_child_control(profile, tmp_pat
 ])
 def test_profiles_keep_their_order_and_only_append_missing_controls(profile, base) -> None:
     assert profile[:len(base)] == base
-    assert set(profile[len(base):]) == set(DIRECT_CHILD_CONTROL_TOOLS) - set(base)
+    assert set(profile[len(base):]) == (set(DIRECT_CHILD_CONTROL_TOOLS) | {"manage_handoff_board"}) - set(base)
     assert "list_agents" in profile[len(base):]
 
 

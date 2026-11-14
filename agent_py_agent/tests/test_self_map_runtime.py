@@ -87,13 +87,14 @@ def test_tools_loading_matches_current_thread_and_does_not_mutate_discovery(make
     agent.tools.catalog_deferred_categories = ['filesystem']
     thread = agent.conversation_store.threads.get_or_create({'channel': 'local', 'channel_conversation_id': 'own'})
     agent._current_run_params = RunParams(task_attributes={'conversation_thread_id': thread.thread_id})
-    before = _read(agent, 'tools')
-    assert next(row for row in before['items'] if row['id'] == 'read_file')['state'] == 'deferred'
+    # 工具目录已超过一页，按原公开item引用核状态，不假定read_file恰在第一页。
+    before = _read(agent, 'tools', item='read_file')['item']
+    assert before['state'] == 'deferred'
     persist_discovered_tools(agent, agent._current_run_params, {'tool_result_envelope': {
         'tool_search': {'loaded_tool_names': ['read_file']}}})
     saved = agent.conversation_store.threads.load(thread.thread_id)
-    after = _read(agent, 'tools')
-    assert next(row for row in after['items'] if row['id'] == 'read_file')['state'] == 'ready'
+    after = _read(agent, 'tools', item='read_file')['item']
+    assert after['state'] == 'ready'
     assert agent.conversation_store.threads.load(thread.thread_id) == saved
 
 

@@ -112,10 +112,12 @@ def test_uncommitted_recovery_never_sends_business_request(tmp_path, monkeypatch
     agent = fixture.agent
     original_project = recovery._project_recovery_candidate
     hosts = []
+    summaries = []
     waits = []
     monkeypatch.setattr(provider_transient_auto_resume, "_wait_before_retry", lambda *_: waits.append(True))
     if failure.startswith("summary_"):
         def summary(*args, **kwargs):
+            summaries.append(True)
             if failure == "summary_transient":
                 raise ProviderTransientError("503 temporary overload")
             raise ProviderTimeoutError("first event timeout", stage="first_event")
@@ -157,6 +159,7 @@ def test_uncommitted_recovery_never_sends_business_request(tmp_path, monkeypatch
         request_execution._run_gateway_ask(fixture.context)
     assert seen == (["overflow"] if failure.startswith("summary_") else ["overflow", "summary"])
     assert waits == []
+    assert summaries == ([True] if failure.startswith("summary_") else [])
     assert hosts[0].compact_recovery.committed is False
     assert hosts[0].compact_recovery.host_state.compact_generation == 0
     thread = agent.conversation_store.threads.require(fixture.thread_id)
@@ -261,7 +264,8 @@ def test_initial_without_compactable_source_can_adopt_larger_model(tmp_path, mon
 # 不在旧参数上重建、共享预算回收或注入插话；摘要与 CAS 各一次，代次保持 1，重试耗尽也不会再恢复一次。
 # 成功后下一工具轮沿候选参数正常重建，不再命中该记录。
 @pytest.mark.parametrize("outcome", ["recovers", "exhausted"])
-def test_transient_retry_after_commit_resends_committed_candidate(tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize("provider_failure", ["transient", "first_event"])
+def test_transient_retry_after_commit_resends_committed_candidate(tmp_path, monkeypatch, outcome, provider_failure):
     fixture = _history_request(tmp_path, tools=outcome == "recovers")
     agent = fixture.agent
     material_path = agent.root / "material.txt"
@@ -308,6 +312,8 @@ def test_transient_retry_after_commit_resends_committed_candidate(tmp_path, monk
         marks.append((len(builds), len(fits)))
         wires.append(wire)
         if outcome == "exhausted" or seen.count("candidate") == 1:
+            if provider_failure == "first_event":
+                raise ProviderTimeoutError("first event timeout", stage="first_event")
             raise ProviderTransientError("503 after commit")
 
     fake_http(monkeypatch, fixture, on_business=on_business)
@@ -326,7 +332,7 @@ def test_transient_retry_after_commit_resends_committed_candidate(tmp_path, monk
     if outcome == "recovers":
         request_execution._run_gateway_ask(fixture.context)
     else:
-        with pytest.raises(ProviderTransientError):
+        with pytest.raises((ProviderTransientError, ProviderTimeoutError)):
             request_execution._run_gateway_ask(fixture.context)
 
     sends = seen[2:]
@@ -344,3 +350,61 @@ def test_transient_retry_after_commit_resends_committed_candidate(tmp_path, monk
     checkpoints = agent.home_paths.owner_compact_dir / "conversations" / f"{fixture.thread_id}.jsonl"
     rows = [json.loads(line) for line in checkpoints.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert [row["generation"] for row in rows if row.get("schema") == "conversation_compact_checkpoint.v3"] == [1]
+
+
+def test_gateway_bounded_overflow_exhaustion_keeps_compact_classification_and_carry(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime_mixin import RunParams
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_provider_error_projection
+    from agent_py_agent.agent.runtime_errors import fallback_error_code
+
+    record = {"run_id": "run", "attempt_id": "attempt", "turn_id": "turn", "call_id": "write",
+              "tool": "write_file", "ok": True, "output_preview": "已执行的写操作"}
+    seen = []
+    params_seen = []
+
+    def run(_prompt, *, params):
+        seen.append(tuple(params.carried_archive_tool_calls))
+        return SimpleNamespace(runtime_status="context_overflow", runtime_source="provider_error",
+                               archive_tool_calls=[record], active_turn_user_inputs=[])
+
+    context = SimpleNamespace(request={}, request_id="request", stages={}, agent=SimpleNamespace(run=run))
+    conversation = SimpleNamespace(compact_generation=3)
+    monkeypatch.setattr(request_execution, "_gateway_recovered_active_turn_tool_calls", lambda _: [])
+    monkeypatch.setattr(request_execution, "_recover_gateway_active_turn_authority", lambda *_: None)
+
+    def parameters(inputs):
+        result = RunParams(carried_archive_tool_calls=list(inputs.carried_archive_tool_calls))
+        params_seen.append(result)
+        return result
+
+    monkeypatch.setattr(request_execution, "_gateway_run_params", parameters)
+    monkeypatch.setattr(request_execution, "_gateway_compact_overflowing_turn", lambda *_args, **_kwargs: conversation)
+    with pytest.raises(ConversationCompactError) as failure:
+        request_execution._run_gateway_turn_with_conversation_compact(context, "继续原任务", conversation)
+    assert fallback_error_code(failure.value) == "COMPACT_RECOVERY_EXHAUSTED"
+    assert gateway_provider_error_projection(failure.value)["error_code"] == "COMPACT_RECOVERY_EXHAUSTED"
+    assert len(seen) == len(params_seen) == 8 and seen[0] == ()
+    assert all(carry == (record,) for carry in seen[1:])
+    assert record["call_id"] == "write" and "不得原样重发或重放" in str(failure.value)
+
+
+@pytest.mark.parametrize("load_errors,expected", [([], "COMPACT_SOURCE_EMPTY"), ([{"error": "unreadable"}], "CONVERSATION_PERSISTENCE_UNAVAILABLE")])
+def test_gateway_no_compact_source_does_not_mask_real_storage_failure(monkeypatch, load_errors, expected):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.request_errors import ConversationPersistenceError
+    from agent_py_agent.agent.runtime_errors import fallback_error_code
+
+    current = SimpleNamespace(compact_generation=3)
+    refreshed = SimpleNamespace(compact_generation=3, compact_source=None, thread_id="thread", load_errors=load_errors)
+    context = SimpleNamespace(request={"conversation": {}}, request_id="request")
+    # dataclasses.replace需要真实load request；此处只冻结本测试无需其它宿主准备的两个字段。
+    from dataclasses import make_dataclass
+    load_type = make_dataclass("Load", [("defer_compact", bool)])
+    monkeypatch.setattr(request_execution, "build_gateway_compact_load_request", lambda *_: load_type(False))
+    monkeypatch.setattr(request_context, "gateway_conversation_context", lambda *_args, **_kwargs: refreshed)
+    with pytest.raises((ConversationCompactError, ConversationPersistenceError)) as failure:
+        request_execution._gateway_compact_overflowing_turn(context, "继续", current, SimpleNamespace(native_compact_carry=None), [])
+    assert fallback_error_code(failure.value) == expected

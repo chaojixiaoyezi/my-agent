@@ -18,6 +18,7 @@ from ..common.nofollow_fs import (
 )
 from ..local_storage.owner_read_index import (
     _INT64_MAX,
+    USAGE_EVENTS,
     OwnerReadIndex,
     OwnerReadUnavailable,
     require_complete,
@@ -25,7 +26,6 @@ from ..local_storage.owner_read_index import (
 from ..user_space.owner_quota import OwnerQuotaChange
 from .skill_learning_store import SkillLearningStore
 
-USAGE_EVENTS = ("manual_search", "manual_get", "host_injected", "adopted")
 MAX_USAGE_LEDGER_EVENTS = 2000
 KEEP_USAGE_LEDGER_EVENTS = 1000
 _CONTEXT_DEFAULTS = {"request_id": "", "thread_id": "", "task_id": "", "chars": 0}
@@ -68,13 +68,23 @@ def _record_usage_rows(store, events: list[dict]) -> None:
     with store.state_lock() as admission:
         rows = _ledger_rows(store)
         summary = _read_summary(store, rows)
+        # 去重只覆盖原有界明细窗口，不另建终身增长索引；重复投递连文件也不重写。
+        seen = {row['source_key'] for row in rows if row.get('source_key')}
+        added = False
         for row in events:
+            key = row.get('source_key')
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            added = True
             row["sequence"] = summary["last_sequence"] + 1
             _add_event(summary, row)
             rows.append(row)
             if len(rows) > MAX_USAGE_LEDGER_EVENTS:
                 rows = rows[-KEEP_USAGE_LEDGER_EVENTS:]
-        _save_usage(store, admission, rows, summary)
+        if added:
+            _save_usage(store, admission, rows, summary)
 
 
 # LLM: 生命周期权威仍是原summary；未知不能转成空计数，原writer不依赖此读取口。
@@ -207,6 +217,13 @@ def _usage_row(agent, params: dict) -> dict:
             or not isinstance(kind, str) or kind not in {"skill", "capability_package"} or not skill_id):
         raise ValueError("invalid usage identity")
     context = {key: value for key, value in params.items() if key not in {"event", "skill_id", "source", "kind"}}
+    evidence = {key: context.pop(key) for key in ('source_key', 'version_ref', 'activation_id', 'receipt_ref', 'producer') if key in context}
+    if any(type(value) is not str or len(value) > 512 for value in evidence.values()):
+        raise ValueError('invalid usage evidence')
+    if evidence and (len(evidence.get('source_key', '')) != 64 or not evidence.get('version_ref') or not evidence.get('receipt_ref')):
+        raise ValueError('incomplete usage evidence')
+    if event in {'visible', 'selected', 'executed'} and not evidence:
+        raise ValueError('method stage requires original source evidence')
     if set(context) - set(_CONTEXT_DEFAULTS):
         raise ValueError("invalid usage context")
     params = getattr(agent, "_current_run_params", None)
@@ -220,7 +237,7 @@ def _usage_row(agent, params: dict) -> dict:
     at = datetime.now(timezone.utc).isoformat()
     return {"at": at, "date": at[:10], "event": event, "skill_id": str(skill_id)[:512],
             "kind": kind, "source": str(source)[:128], "chars": chars,
-            **{key: str(value or "")[:512] for key, value in values.items()}}
+            **{key: str(value or "")[:512] for key, value in values.items()}, **evidence}
 
 
 # LLM: 文件路径固定在原 Store 目录内，读写统一 no-follow；坏 JSON 不按空账覆盖。
@@ -255,7 +272,7 @@ def _ledger_rows(store) -> list[dict]:
 # LLM: 四类事实分别计数；有效使用只算正文读取与实际宿主投递，不把检索/采用混进去。
 # 函数用途: 返回新的空计数，避免跨 owner 共享可变对象。
 def _empty_counts() -> dict:
-    return {**dict.fromkeys(USAGE_EVENTS, 0), "effective_uses": 0}
+    return {**dict.fromkeys(USAGE_EVENTS[:4], 0), "effective_uses": 0}
 
 
 # LLM: 日期映射与生命周期计数附带同一事件水位，明细裁剪不能重置累计总数；构造不落盘。
@@ -302,7 +319,8 @@ def _normalize_by_skill(summary: dict) -> None:
             value = counts.get(event, 0)
             if type(value) is not int or value < 0:
                 raise ValueError("invalid usage count")
-            target[event] += value
+            if event in USAGE_EVENTS[:4] or event in counts or value:
+                target[event] = target.get(event, 0) + value
         target["effective_uses"] = target["manual_get"] + target["host_injected"]
         if counts.get("last_used_at", "") >= target.get("last_used_at", ""):
             target.update({key: counts[key] for key in ("last_used_at", "last_source", "kind") if key in counts})
@@ -353,10 +371,12 @@ def _replay_usage_rows(summary: dict, rows: list[dict]) -> None:
 # 函数用途: 为指定事件增加计数并更新有效使用总数。
 def _increment(counts: dict, event: str) -> None:
     for key in USAGE_EVENTS:
-        value = counts.setdefault(key, 0)
+        value = counts.get(key, 0)
         if type(value) is not int or value < 0:
             raise ValueError("invalid usage count")
-    counts[event] += 1
+        if key in USAGE_EVENTS[:4]:
+            counts.setdefault(key, 0)
+    counts[event] = counts.get(event, 0) + 1
     counts["effective_uses"] = counts["manual_get"] + counts["host_injected"]
 
 
@@ -380,8 +400,8 @@ def _add_event(summary: dict, row: dict) -> None:
     skill = summary["by_skill"].setdefault(skill_id, _empty_counts())
     _increment(skill, event)
     skill.update(last_used_at=row["at"], last_source=row["source"], kind=row["kind"])
-    daily = summary["daily_history"].setdefault(row["date"], dict.fromkeys(USAGE_EVENTS, 0))
-    daily[event] += 1
+    daily = summary["daily_history"].setdefault(row["date"], dict.fromkeys(USAGE_EVENTS[:4], 0))
+    daily[event] = daily.get(event, 0) + 1
     summary["last_sequence"] = row["sequence"]
     _prune_daily(summary)
 

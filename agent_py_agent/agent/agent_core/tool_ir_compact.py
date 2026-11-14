@@ -119,7 +119,9 @@ def stub_old_native_tool_results(params: object, *, target_tokens: int, estimate
             }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             if len(content.encode("utf-8")) >= len(raw_bytes):
                 continue
-            stubs[source] = replace(result, content_blocks=(ToolContentBlock("text", text=content),))
+            stub = replace(result, content_blocks=(ToolContentBlock("text", text=content),))
+            # 真实结果已有宿主模型投影；只换正文会继续发送旧投影，使折叠计量永远没有进展。
+            stubs[source] = stub.with_live_prompt_projection(stub.render_for_prompt())
             if estimate_tokens() >= before_tokens:
                 stubs.pop(source)
                 continue

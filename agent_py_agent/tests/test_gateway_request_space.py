@@ -122,3 +122,14 @@ def test_real_chat_space_switch_freezes_accepted_request(space_http, monkeypatch
             assert headers['X-conversation-id'] == session_id
         elif path == 'ask':
             assert body['conversation_id'] == session_id
+
+
+def test_cleared_current_selection_does_not_erase_accepted_snapshot(tmp_path):
+    home, thread = selected_thread(ConversationStore(tmp_path), 'owner', 'actor', 'original-space')
+    frozen = capture_request_space(home, thread, actor_id='actor')
+    key = _setting_key(home, thread, 'actor')
+    cleared = replace(thread, metadata={'session_space.v1': {'owner_id': 'owner', 'actors': {
+        key: {'space_id': None, 'revision': 2, 'operation_key': 'clear'}}}})
+    assert capture_request_space(home, cleared, actor_id='actor') is None
+    assert request_space_for_execution({REQUEST_SPACE_KEY: frozen}, owner_id='owner',
+        thread_id=thread.thread_id, actor_id='actor') == frozen

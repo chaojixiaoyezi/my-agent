@@ -357,7 +357,7 @@ class ImmutableJsonIndex:
 
     # LLM: 根及子引用原封印不变；缺字节用专用FileNotFoundError区分，路径、长度及hash错误仍拒绝。
     # 函数用途: 从私有no-follow目录读取一个有界不可变节点。
-    def _load(self, reference):
+    def _load(self, reference, *, read_budget=None):
         from ..common.nofollow_fs import read_bytes_beneath
 
         if type(reference) is not dict or set(reference) != {'ref', 'maximum'}:
@@ -371,8 +371,18 @@ class ImmutableJsonIndex:
             raise OSError('immutable index reference is invalid')
         from .immutable_node_store import ImmutableNodeStore
 
-        raw = ImmutableNodeStore(self.root, self.parts).read(ref['ref'])
+        if read_budget is not None:
+            from .message_scan import MessageReadDeferred
+            if size > read_budget.max_bytes - read_budget.size:
+                raise MessageReadDeferred('message index read budget exhausted')
+            read_budget.charge(size=size)
+        nodes = ImmutableNodeStore(self.root, self.parts)
+        raw = nodes.read(ref['ref']) if read_budget is None else nodes.read(ref['ref'], max_bytes=size)
         if raw is None:
+            if read_budget is not None:
+                if read_budget.exhausted():
+                    raise MessageReadDeferred('message index sentinel exceeds read budget')
+                read_budget.charge(size=1)
             raw = read_bytes_beneath(self.root, (*self.parts, ref['ref']), max_bytes=size)
         if raw is None:
             raise ImmutableIndexNodeMissing('immutable index node is missing')
@@ -490,12 +500,12 @@ class ImmutableJsonIndex:
 
     # LLM: 每次至多访问64个分支加一叶，缺键返回None；坏节点不能当作缺键。
     # 函数用途: 不枚举历史地查询一个准确键。
-    def get(self, reference, key: str):
+    def get(self, reference, key: str, *, read_budget=None):
         route = self._route(key)
         for depth in range(65):
             if reference is None:
                 return None
-            node = self._load(reference)
+            node = self._load(reference) if read_budget is None else self._load(reference, read_budget=read_budget)
             if 'entries' in node:
                 return node['entries'].get(key)
             if depth == 64:

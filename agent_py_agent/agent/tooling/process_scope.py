@@ -6,6 +6,30 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..workspace_read_context import WorkspaceReadContext
+
+
+def exact_process_read_scope(context: WorkspaceReadContext, roots: tuple[Path, ...]) -> dict:
+    """仅宿主启动器冻结已用于沙箱的读取合同，不接受模型参数中的声明。"""
+    if not isinstance(context, WorkspaceReadContext):
+        raise ValueError('managed process read context unavailable')
+    return validate_exact_process_read_scope({'version': 1, 'read_context': context.to_payload(),
+        'sandbox_read_roots': sorted({str(Path(root).resolve()) for root in roots})})
+
+
+def validate_exact_process_read_scope(value: object) -> dict:
+    """原私有session记录内的不可变启动事实；旧记录不补建此证明。"""
+    if (not isinstance(value, dict) or set(value) != {'version', 'read_context', 'sandbox_read_roots'}
+            or type(value['version']) is not int or value['version'] != 1):
+        raise ValueError('invalid managed process read scope')
+    context = WorkspaceReadContext.from_payload(value['read_context'])
+    roots = value['sandbox_read_roots']
+    if (not isinstance(roots, list)
+            or any(not isinstance(root, str) or not Path(root).is_absolute() for root in roots)
+            or roots != sorted(set(roots))):
+        raise ValueError('invalid managed process sandbox read roots')
+    return {'version': 1, 'read_context': context.to_payload(), 'sandbox_read_roots': list(roots)}
+
 
 # LLM: 本引用只定位原安装表的一代，不授予运行权限；必须与资源记录的 owner 一致且不带业务任务身份。
 # 类用途: 为多个会话共享的插件进程保存不可变归属，供原 Store 精确冻结和保留清理证据。

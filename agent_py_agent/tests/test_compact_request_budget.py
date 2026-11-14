@@ -232,9 +232,9 @@ def test_strict_fitting_summary_rejects_truncated_provider_reply(monkeypatch, ca
     with pytest.raises(ConversationCompactError) as error:
         budget_module.generate_bounded_compact_response(_request("短历史"), preserve_complete_fallback=True)
     assert error.value.code == "COMPACT_SUMMARY_TRUNCATED"
-    assert len(calls) == 1
+    assert len(calls) == 2
     diagnostics = [record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape")]
-    assert len(diagnostics) == 1 and diagnostics[0]["reason"] == "TRUNCATED"
+    assert len(diagnostics) == 2 and diagnostics[0]["reason"] == "TRUNCATED"
     assert diagnostics[0]["truncated"] is True and "看似可用的前半段" not in caplog.text
 
 
@@ -725,3 +725,37 @@ def test_legacy_no_input_capacity_is_zero_without_fabricating_a_budget():
                             config=SimpleNamespace(model_context_window_tokens=1))
     assert budget_module.compact_summary_budget(agent) == 0
     assert budget_module.compact_cache_surface_budget(agent) == 0
+
+
+@pytest.mark.parametrize("second_reason", ["ok", "truncated", "stop_only", "tool"])
+def test_strict_truncation_has_one_shared_repair_and_preserves_request(monkeypatch, second_reason):
+    request = _request("完整历史，只能摘要不可执行")
+    request = replace(request, prompt=CacheStructuredPrompt("固定前缀", "摘要动态规则"))
+    original_messages = deepcopy(request.messages)
+    original_tools = deepcopy(request.tools)
+    calls = []
+
+    def generate(value):
+        calls.append(value)
+        if len(calls) == 1 or second_reason in {"truncated", "stop_only"}:
+            return ModelResponse(text="不完整正文", backend="fake", truncated=second_reason != "stop_only", stop_reason="max_tokens")
+        if second_reason == "tool":
+            return ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "write_file"}])
+        return ModelResponse(text="完整精简摘要", backend="fake")
+
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
+    if second_reason in {"truncated", "stop_only"}:
+        with pytest.raises(ConversationCompactError) as error:
+            budget_module.generate_bounded_compact_response(request, preserve_complete_fallback=True)
+        assert error.value.code == "COMPACT_SUMMARY_TRUNCATED"
+    else:
+        result = budget_module.generate_bounded_compact_response(request, preserve_complete_fallback=True)
+        assert result.text == ("完整精简摘要" if second_reason == "ok" else "")
+    assert len(calls) == 2
+    assert request.messages == original_messages and request.tools == original_tools
+    assert calls[1].messages == calls[0].messages
+    assert calls[1].system_instruction == calls[0].system_instruction
+    assert calls[1].tools == calls[0].tools and calls[1].tool_choice == calls[0].tool_choice
+    assert calls[1].agent.backend.max_tokens == 128
+    assert str(calls[1].prompt).startswith("固定前缀")
+    assert "更精炼" in str(calls[1].prompt) and "不完整正文" not in str(calls[1].prompt)

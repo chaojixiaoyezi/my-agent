@@ -313,7 +313,11 @@ def test_model_first_thread_lock_is_nonblocking_and_original_retry_works(tmp_pat
         with locked_file_transition(lock):
             started = time.monotonic()
             status, result = post_model(server, model_body())
-            assert status == 500 and result['ok'] is False
+            assert status == 503 and result['ok'] is False
+            assert result['error_code'] == 'MODEL_METADATA_BUSY'
+            assert result['error_type'] == 'BlockingIOError' and result['error_stage'] == 'metadata_lock'
+            assert result['retryable'] is True and result['effect_outcome'] == 'unknown'
+            assert result['next_action']
             assert time.monotonic() - started < 1.5
             assert not list(store.storage.threads_dir.glob('*.json'))
         assert post_model(server, model_body())[0] == 200

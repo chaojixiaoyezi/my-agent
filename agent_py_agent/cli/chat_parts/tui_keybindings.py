@@ -157,6 +157,10 @@ def _register_permission_bindings(
     filters: _TuiBindingFilters,
 ) -> None:
     active = filters.permission_active
+    # 后台会话的返回只结束观看兴趣，不替原任务表决；普通前台审批仍须明确处理。
+    from prompt_toolkit.filters import Condition
+    background_view = Condition(lambda: bool(getattr(_agent_navigation_snapshot(params), 'active_agent_id', '')))
+    kb.add("c-g", filter=active & background_view)(lambda e: _handle_agent_back_keybinding(e, params))
     kb.add("up", filter=active)(lambda e: _move_permission_selection(e, params, -1))
     kb.add("down", filter=active)(lambda e: _move_permission_selection(e, params, 1))
     kb.add("c-p", filter=active)(lambda e: _move_permission_selection(e, params, -1))

@@ -1071,3 +1071,49 @@ def test_extended_descriptor_validates_its_own_fields():
     assert Extended("entry", "skill", "test", attempts=3).attempts == 3
     with pytest.raises(ValueError):
         Extended("entry", "skill", "test", attempts=True)
+
+
+@pytest.mark.parametrize(('change', 'field', 'expected', 'example'), [
+    ({'name': []}, 'descriptor.name', 'string', '示例资产'),
+    ({'io_contract': 'synthetic-secret'}, 'descriptor.io_contract', 'object', '{}'),
+    ({'access_targets': {}}, 'descriptor.access_targets', 'array', '[]'),
+    ({'access_targets': [{'target_id': 'test', 'type': [], 'endpoint': 'example'}]},
+     'descriptor.access_targets[0].type', 'string', '示例'),
+])
+def test_definition_errors_identify_field_type_and_safe_example(api, change, field, expected, example):
+    data = {'name': '示例', 'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}, **change}
+    with pytest.raises(api.AssetDescriptorValidationError) as caught:
+        api.asset_descriptor_from_definition(data, 'test', 'script')
+    text = str(caught.value)
+    assert field in text and expected in text and example in text
+    assert 'synthetic-secret' not in text
+    assert '修正此字段' in text
+
+
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_shared_definition_gate_keeps_same_actionable_errors_for_both_asset_kinds(api, kind):
+    with pytest.raises(api.AssetDescriptorValidationError) as caught:
+        api.asset_descriptor_from_definition({'name': '示例'}, 'test', kind)
+    assert caught.value.field == 'descriptor.access_targets'
+    assert 'array' in str(caught.value) and '[]' in str(caught.value)
+
+
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_descriptor_diagnostic_reaches_actual_asset_tool_result(tmp_path, kind):
+    from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+
+    descriptor = {'name': '示例', 'access_targets': [], 'data_sources': [],
+                  'credential_refs': [], 'io_contract': 'synthetic-private-value'}
+    home = tmp_path / kind
+    if kind == 'script':
+        tool = ScriptsTool(home)
+        params = {'action': 'register', 'script_id': 'test', 'descriptor': descriptor, 'code': 'print("{}")'}
+    else:
+        tool = WorkflowsTool(home)
+        params = {'action': 'save', 'workflow_id': 'test',
+                  'definition': {'descriptor': descriptor, 'steps': [], 'body_markdown': ''}}
+    result = tool.execute(params)
+    assert not result.ok and result.error_code == 'TOOL_INVALID_ARGUMENTS', result.output
+    assert 'descriptor.io_contract' in result.output and 'object' in result.output and '{}' in result.output
+    assert 'synthetic-private-value' not in result.output

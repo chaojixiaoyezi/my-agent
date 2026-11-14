@@ -219,7 +219,7 @@ def test_list_filters_and_pages_wire(gateway):
         ({"cursor": cursor, "source": "other"}, None),
         ({"cursor": cursor}, OwnerIdentity.provider_user("feishu", "business-bob"))):
         failure = wire_call(gateway, "threat_intel.indicators.list", params, identity)
-        assert (failure["http_status"], failure["error"]["code"]) == (503, "CURSOR_EXPIRED"), failure
+        assert (failure["http_status"], failure["error"]["code"]) == (410, "CURSOR_EXPIRED"), failure
     filtered = wire_call(gateway, "threat_intel.indicators.list",
         {"type": "ip", "source": "feed-a", "min_confidence": 80, "query": "198.51.100.2"})
     assert [row["value"] for row in filtered["data"]["items"]] == ["198.51.100.2"]

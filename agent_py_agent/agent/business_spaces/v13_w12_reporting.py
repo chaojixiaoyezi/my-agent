@@ -405,25 +405,17 @@ def _export_identity(call):
     return key, 'artifact-' + identity[:40]
 
 
-# LLM: 首次上传仅刷新轻量服务发现；规范观察口的完整缺记录与资源不存在均代表首次导出，拒绝或未知源仍透传。
-# 函数用途: 通过冻结 artifacts.get 查询真实登记，缺记录返回空值。
+# LLM: 身份已声明来自原业务上传主账，不能借其它来源的未知定位覆盖该主账已有记录。
+# 函数用途: 按准确ID及有界读取核验业务上传记录，缺失只代表该来源无记录。
 def _export_artifact(call, artifact_id):
-    from ..gateway_parts.business_api_v13 import v13_call_frozen
+    from ..gateway_parts.business_artifacts_http import business_upload_artifact
 
-    if not call.services.ready('artifacts.get'):
-        from ..gateway_parts.business_api import BusinessServices
-        call = replace(call, services=BusinessServices(call.services.host))
-    if not call.services.ready('artifacts.get'):
+    artifact = business_upload_artifact(artifact_id, call.context, call.services)
+    if artifact is None:
         return None
-    try:
-        result = v13_call_frozen(call, 'artifacts.get', {'artifact_id': artifact_id})
-    except (HostAPIError, BusinessError) as error:
-        if error.code in {'RESOURCE_NOT_FOUND', 'OBSERVATION_NOT_FOUND'}:
-            return None
-        raise
-    if not result['available']:
+    if not artifact['available']:
         raise HostAPIError('HOST_NOT_READY', 503)
-    return result['artifact']
+    return artifact
 
 
 # LLM: 原登记的不可变名称绑定参数摘要和行数，重放直接读原产物，不重新取变化中的审计快照。
@@ -474,11 +466,20 @@ def audit_export(call: V13Call) -> dict:
         uploaded = _export_artifact(call, artifact_id)
         if uploaded is None:
             raise
-    _export_result(call, uploaded)
-    artifact = _export_artifact(call, artifact_id)
-    if artifact is None:
-        raise HostAPIError('HOST_NOT_READY', 503)
-    return _export_result(call, artifact)
+    try:
+        _export_result(call, uploaded)
+        artifact = _export_artifact(call, artifact_id)
+        if artifact is None:
+            raise HostAPIError('HOST_NOT_READY', 503)
+        return _export_result(call, artifact)
+    except HostAPIError as error:
+        if error.outcome != 'not_started':
+            raise
+        from ..common.log_redaction import redact_sensitive_output_text
+        reason = redact_sensitive_output_text(error.message)[:64]
+        # 原上传已返回，后置权限/内容/登记读回失败不代表未写入；保原明确committed/unknown，不补签完整性。
+        raise HostAPIError(error.code, error.status, 'unknown', message=(
+            f'原上传已返回，后置核验未完成（{reason}）。请用原request_id和幂等键核对原产物主账；勿自动重传或换键覆盖。')) from error
 
 
 # LLM: 默认前一完整 UTC 周一周，不把滚动七天或当前未完成周伪装周报。

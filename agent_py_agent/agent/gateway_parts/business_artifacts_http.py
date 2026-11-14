@@ -57,14 +57,24 @@ def select_range(value, if_range, etag, size):
     return 206, start, end
 
 
-def _registry(services):
-    return _registry_at(services.owner_home, _ROOT)
+def _registry(services, *, max_bytes=None):
+    return _registry_at(services.owner_home, _ROOT, max_bytes=max_bytes)
 
 
-def _registry_at(owner_home, relative_root):
+def _registry_at(owner_home, relative_root, *, max_bytes=None):
     root = owner_home.joinpath(*relative_root)
     parts = (*relative_root, *REGISTRY_RELATIVE_PATH.parts)
-    raw = read_bytes_beneath(owner_home, parts) or b''
+    if max_bytes is None:
+        raw = read_bytes_beneath(owner_home, parts) or b''
+    else:
+        try:
+            raw = read_bytes_beneath(owner_home, parts, max_bytes=max_bytes + 1) or b''
+        except ValueError as error:
+            raise HostAPIError('HOST_NOT_READY', 503, message=(
+                f'业务媒体原登记簿无法在{max_bytes}字节预算内核验；请检查原登记源，不得当作不存在覆盖。')) from error
+        if len(raw) > max_bytes:
+            raise HostAPIError('HOST_NOT_READY', 503, message=(
+                f'业务媒体原登记簿超过{max_bytes}字节读取预算；请检查原登记源，不得当作不存在覆盖。'))
     try:
         lines = raw.decode('utf-8').split('\n')
     except UnicodeDecodeError:
@@ -76,12 +86,15 @@ def _registry_at(owner_home, relative_root):
     return records, len(raw)
 
 
-def _verified_blob(owner_home, parts, record, *, start=0, end=-1, max_bytes=None):
+def _verified_blob(owner_home, parts, record, *, start=0, end=-1, max_bytes=None, page_proof=None):
     """只读取原登记路径的nofollow FD；登记与运输共用字节、尺寸及读取前后身份核验。"""
     if (record.path != str(owner_home.joinpath(*parts)) or record.status != 'ready'
             or not re.fullmatch(r'[0-9a-f]{64}', record.sha256)
             or record.size_bytes < 0 or max_bytes is not None and record.size_bytes > max_bytes):
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+    if page_proof is not None:
+        from .business_artifact_pages import read_verified_content_page
+        return read_verified_content_page(owner_home, parts, record, page_proof, start=start, end=end)
     fd = open_readonly_file_beneath(owner_home, parts)
     try:
         before, digest, size, chunks = os.fstat(fd), hashlib.sha256(), 0, []
@@ -153,6 +166,26 @@ def _view(record):
     return validate_object(data, standalone_schema({'$ref': '#/$defs/ArtifactView'}))
 
 
+def business_upload_artifact(artifact_id, context, services):
+    """在已声明的原上传主账准确查ID；空只证明此来源无记录，不证明其它产物来源为空。"""
+    if not isinstance(artifact_id, str) or not re.fullmatch(r'artifact-[0-9a-f]{40}', artifact_id):
+        raise HostAPIError('INVALID_SCHEMA', 400)
+    if (type(context) is not BusinessCallContext or context.owner_id != services.owner_id
+            or Path(context.host.home_paths.owner_home_dir).resolve() != services.owner_home.resolve()):
+        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+    context.check('artifacts.get', {'owner_id': services.owner_id, 'artifact_id': artifact_id})
+    from .business_upload_registry import lookup_business_upload
+
+    record = lookup_business_upload(services.owner_home, artifact_id).record
+    if record is None:
+        return None
+    if record.source != 'business_upload' or record.metadata.get('owner_id') != services.owner_id:
+        raise HostAPIError('HOST_NOT_READY', 503, message=(
+            '该ID在业务媒体原主账已有其它来源或归属不符的记录；请核对原记录，不能按缺失覆盖。'))
+    _check(context, services, record.metadata.get('space_id'), record.task_id or None)
+    return _view(record)
+
+
 def _mime(data):
     for prefix, mime in ((b'\x89PNG\r\n\x1a\n', 'image/png'), (b'\xff\xd8\xff', 'image/jpeg'),
                          (b'GIF8', 'image/gif'), (b'%PDF-', 'application/pdf')):
@@ -221,7 +254,8 @@ def upload_artifact(source, fields, filename, context, services):
             return _view(record)
 
 
-def _native_registry_content(artifact_id, version_ref, context, services, *, range_header, if_range):
+def _native_registry_content(artifact_id, version_ref, context, services, *, range_header, if_range,
+                             page_proof=None, expected_space_id=None):
     from ..artifacts import registry_locator
     from ..conversation.registered_artifact_observation import registered_artifact
     from ..conversation.task_artifact_observation import (
@@ -234,7 +268,8 @@ def _native_registry_content(artifact_id, version_ref, context, services, *, ran
     if store is None:
         return None
     observation = services.observation
-    source = _OwnerReaders(services.owner_home, services.owner_id, store, observation.runtime)
+    source = _OwnerReaders(services.owner_home, services.owner_id, store, observation.runtime,
+        workspace_task_path_template=getattr(services.host.config, 'workspace_task_path_template', None))
     authority = (observation, services.observation_actor(context), 'artifacts.get')
     workflow_source = artifact_id.startswith('wfart-')
     if workflow_source:
@@ -277,25 +312,39 @@ def _native_registry_content(artifact_id, version_ref, context, services, *, ran
         require_access(actor, 'artifacts.get', service=observation, owner_id=facts.owner_id,
             space_id=facts.space_id, project_ref=facts.project_ref, task_id=facts.task_id,
             thread_id=facts.thread_id, run_id=facts.run_id, attempt_id=facts.attempt_id)
-        _check(context, services, space_id, task_id)
+        if space_id is not None:
+            _check(context, services, space_id, task_id)
+        else:
+            # 无空间主会话沿已核验的原run/TaskLink与逐记录授权；不能误借后台SessionTask读口。
+            if (type(context) is not BusinessCallContext or context.owner_id != services.owner_id
+                    or context.host.home_paths.owner_home_dir != services.host.home_paths.owner_home_dir):
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+            context.check('spaces.get', {'owner_id': services.owner_id, 'space_id': None})
         if workflow_source:
             latest, pinned, _ = workflow_artifact(source, artifact_id, version_ref, with_content=False, authority=authority)
             if (latest.owner_id, latest.task_id, latest.thread_id, pinned.path, pinned.sha256, pinned.size_bytes) != (
                     facts.owner_id, facts.task_id, facts.thread_id, record.path, record.sha256, record.size_bytes):
                 raise HostAPIError('ARTIFACT_CHANGED', 409)
     check_visible()
+    if expected_space_id is not None and space_id != expected_space_id:
+        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     if record.status != 'ready':
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     etag = '"' + record.sha256 + '"'
     status, start, end = select_range(range_header, if_range, etag, record.size_bytes)
     parts = Path(record.path).relative_to(services.owner_home).parts
-    if workflow_source:
+    if workflow_source and page_proof is not None:
+        from .business_artifact_pages import read_verified_content_page
+        content = read_verified_content_page(services.owner_home, parts, record, page_proof, start=start, end=end)
+        check_visible()
+        content_length = len(content)
+    elif workflow_source:
         content = verified_workflow_stream(services.owner_home, parts, record,
             start=start, end=end, check_visible=check_visible)
         content_length = content.length
     else:
         guard_artifact_content_budget(services.owner_home, Path(record.path), record.size_bytes, UPLOAD_MAX_BYTES)
-        content = _verified_blob(services.owner_home, parts, record, start=start, end=end, max_bytes=UPLOAD_MAX_BYTES)
+        content = _verified_blob(services.owner_home, parts, record, start=start, end=end, max_bytes=UPLOAD_MAX_BYTES, page_proof=page_proof)
         check_visible()
         content_length = len(content)
     headers = {'Content-Type': record.mime_type or 'application/octet-stream', 'Content-Length': str(content_length),
@@ -305,20 +354,34 @@ def _native_registry_content(artifact_id, version_ref, context, services, *, ran
     return status, headers, content
 
 
-def artifact_content(artifact_id, version_ref, context, services, *, range_header=None, if_range=''):
+class _UploadContentHeaders(dict):
+    """原HTTP头只序列化dict项；原登记证明仅传给同次正文页工厂。"""
+
+    registry_proof = None
+
+
+def artifact_content(artifact_id, version_ref, context, services, *, range_header=None, if_range='',
+                     page_proof=None, expected_space_id=None, registry_max_bytes=None):
     validate_object({'artifact_id': artifact_id}, standalone_schema(business_api()['media_routes'][1]['request_path']))
     validate_object({'version_ref': version_ref}, standalone_schema(business_api()['media_routes'][1]['request_query']))
     try:
         native = _native_registry_content(artifact_id, version_ref, context, services,
-            range_header=range_header, if_range=if_range)
+            range_header=range_header, if_range=if_range, page_proof=page_proof, expected_space_id=expected_space_id)
     except BusinessError as error:
         status = 404 if error.code in {'OBSERVATION_NOT_FOUND', 'BUSINESS_ACCESS_DENIED', 'SPACE_SCOPE_MISMATCH'} else 409 if error.code == 'STATE_CONFLICT' else 503
         reason = str(error.details.get('reason') or error.code)
         raise HostAPIError(error.code, status, message=(reason + '；未读取对外内容，请核验原登记或授权后重试。')[:256]) from error
     if native is not None:
         return native
-    records, _ = _registry(services)
-    record = records.get(artifact_id)
+    from .business_upload_registry import lookup_business_upload, verify_record_proof
+
+    registry_proof = getattr(page_proof, 'registry_proof', None)
+    if registry_proof is not None:
+        record = verify_record_proof(services.owner_home, registry_proof)
+    else:
+        lookup = lookup_business_upload(services.owner_home, artifact_id,
+            max_bytes=registry_max_bytes or 2 * 1024 * 1024)
+        record, registry_proof = lookup.record, lookup.proof
     if record is None and getattr(services.host, 'conversation_store', None) is not None:
         # 正式详情读口决定未发现是否确已完整；旧来源未覆盖时不能伪装确定404。
         try:
@@ -329,6 +392,8 @@ def artifact_content(artifact_id, version_ref, context, services, *, range_heade
             raise HostAPIError(error.code, status, message=str(error.details.get('reason') or error.code)[:256]) from error
     if (record is None or record.status != 'ready' or record.metadata.get('owner_id') != services.owner_id
             or record.metadata.get('version_ref') != version_ref or record.source != 'business_upload'):
+        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+    if expected_space_id is not None and record.metadata.get('space_id') != expected_space_id:
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     try:
         _check(context, services, record.metadata['space_id'], record.task_id or None)
@@ -341,12 +406,15 @@ def artifact_content(artifact_id, version_ref, context, services, *, range_heade
     status, start, end = select_range(range_header, if_range, etag, record.size_bytes)
     try:
         content = _verified_blob(services.owner_home, (*_ROOT, expected.name), record,
-                                 start=start, end=end, max_bytes=UPLOAD_MAX_BYTES)
+                                 start=start, end=end, max_bytes=UPLOAD_MAX_BYTES, page_proof=page_proof)
+    except HostAPIError:
+        raise
     except (OSError, ValueError):
         raise HostAPIError('RESOURCE_NOT_FOUND', 404) from None
     _check(context, services, record.metadata['space_id'], record.task_id or None)
-    headers = {'Content-Type': record.mime_type, 'Content-Length': str(len(content)), 'ETag': etag,
-        'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'attachment'}
+    headers = _UploadContentHeaders({'Content-Type': record.mime_type, 'Content-Length': str(len(content)), 'ETag': etag,
+        'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'attachment'})
+    headers.registry_proof = registry_proof
     if status == 206:
         headers['Content-Range'] = f'bytes {start}-{end}/{record.size_bytes}'
     return status, headers, content

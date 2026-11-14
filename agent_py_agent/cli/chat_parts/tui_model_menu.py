@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 
 from prompt_toolkit.filters import has_focus
 from prompt_toolkit.key_binding import KeyBindings
@@ -143,12 +145,36 @@ def _publish_selection(runtime, result: dict) -> bool:
 # LLM: 启动读取在 Gateway readiness 后的后台执行；退出后的迟到结果不发布，也不阻止正常历史恢复。
 # 函数用途: 新开或恢复 TUI 时读取已保存模型名；失败明确提示，不凭启动默认值声称同步成功。
 def refresh_model_selection(agent, session_id: str, runtime, stop_event=None) -> None:
-    result = _request_data_sync(agent, session_id, "list", {})
+    generation = runtime.conversation_reset_generation
+    deadline = time.monotonic() + 5.0
+    for attempt in range(8):
+        if runtime.conversation_reset_generation != generation:
+            return
+        if stop_event is not None and stop_event.is_set():
+            return
+        result = _request_data_sync(agent, session_id, "list", {})
+        if not (result.get("error_code") == "MODEL_METADATA_BUSY" and result.get("retryable") is True):
+            break
+        remaining = deadline - time.monotonic()
+        if attempt == 7 or remaining <= 0:
+            break
+        delay = min(remaining, min(.4, .05 * 2 ** attempt) * random.uniform(.7, 1.3))
+        if stop_event is not None:
+            if stop_event.wait(delay):
+                return
+        else:
+            time.sleep(delay)
     if stop_event is not None and stop_event.is_set():
         return
-    _publish_selection(runtime, result)
-    if not result.get("ok"):
-        runtime.set_notice("当前模型名称尚未同步，可打开 /model 重新确认。", duration_seconds=6)
+    def publish():
+        _publish_selection(runtime, result)
+        if not result.get("ok"):
+            message = ("MODEL_METADATA_BUSY: 模型元数据仍忙，已停止本次有界重读；可打开 /model 读取最新选择。"
+                       if result.get("error_code") == "MODEL_METADATA_BUSY" else
+                       "当前模型名称尚未同步，可打开 /model 重新确认。")
+            runtime.set_notice(message, duration_seconds=6)
+
+    runtime.apply_conversation_snapshot(generation, publish)
 
 
 # LLM: 只选接口协议；登录账号走「新增模型 → 登录账号」，decision 仅在明确支持用途的表单开放，编辑原值不可隐式降为生成协议。

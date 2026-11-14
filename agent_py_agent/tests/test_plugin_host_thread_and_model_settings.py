@@ -764,23 +764,33 @@ def test_r3_legacy_titles_share_one_revision(case, title):
         assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
 
 
-# LLM: 同时间戳使原Store的插件计数不变，消息账增长仍必须逐次改版本；设置再写不能重置字节锚。
+# LLM: 同时间戳消息仍改变canonical消息计数，插件修订与消息字节共同前进；设置写不能重置字节锚。
 # 函数用途: 验证已迁移线程的连续同tick追加、拒旧CAS和新CAS可提交。
 def test_r3_migrated_same_tick_appends_keep_advancing_and_settings_anchor(case):
+    from agent_py_agent.agent.plugin_host.conversations import message_ledger_fingerprint
+
     tid = case.thread.thread_id
     old = case.service.update_thread_settings({"thread_id": tid, "pack_ids": ["one"]})["revision"]
     row = case.store.threads.require(tid)
     native = row.metadata["plugin_host_v2"]["revision"]
+    anchor = row.metadata["plugin_host_v2"]["msg_bytes"]
+    previous_bytes = message_ledger_fingerprint(row)[0]
     for content in ("first", "second"):
         case.store.messages.append({"thread_id": tid, "role": "user", "content": content, "now": row.updated_at})
         latest = case.store.threads.require(tid)
-        assert latest.metadata["plugin_host_v2"]["revision"] == native
+        assert latest.metadata["plugin_host_v2"]["revision"] == native + 1
+        assert latest.metadata["plugin_host_v2"]["msg_bytes"] == anchor
+        assert latest.updated_at == row.updated_at
+        current_bytes = message_ledger_fingerprint(latest)[0]
         current = case.service.get_thread_settings({"thread_id": tid})["revision"]
         assert current == thread_summary(latest, case.authorized)["revision"] > old
+        assert current == old + 1 + current_bytes - previous_bytes
+        before = case.store.storage.thread_path(tid).read_bytes()
         with pytest.raises(HostAPIError) as error:
             case.service.update_thread_settings({"thread_id": tid, "expected_revision": old, "pack_ids": []})
         assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
-        old = current
+        assert case.store.storage.thread_path(tid).read_bytes() == before
+        old, native, previous_bytes = current, native + 1, current_bytes
     updated = case.service.update_thread_settings({"thread_id": tid, "expected_revision": old, "pack_ids": ["two"]})
     assert updated["revision"] == old + 1
     with pytest.raises(HostAPIError) as error:

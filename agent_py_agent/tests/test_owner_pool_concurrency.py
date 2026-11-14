@@ -83,3 +83,62 @@ def test_same_owner_initialization_runs_once_under_contention(tmp_path):
     assert len(built) == 1
     assert all(item is built[0] for item in results)
     assert not pool._building
+
+
+def test_cold_construction_slot_preserves_hot_access_and_releases_on_error(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    import pytest
+
+    from agent_py_agent.agent import core
+    from agent_py_agent.agent import owner_scoped_pool as module
+
+    entered, contended, release = (threading.Event() for _ in range(3))
+    original = threading.BoundedSemaphore(1)
+
+    class ObservedSlot:
+        def __enter__(self):
+            if not original.acquire(blocking=False):
+                contended.set()
+                assert original.acquire(timeout=10)
+
+        def __exit__(self, *_args):
+            original.release()
+
+    monkeypatch.setattr(module, '_OWNER_CONSTRUCTION_SLOTS', ObservedSlot())
+    calls = []
+
+    def construct(config, *_args, **_kwargs):
+        calls.append(config.my_agent_owner_id)
+        if config.my_agent_owner_id == 'first':
+            entered.set()
+            assert release.wait(10)
+            raise ValueError('synthetic local construction failure')
+        return SimpleNamespace(config=config)
+
+    monkeypatch.setattr(core, 'SimpleAgent', construct)
+    config = AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'))
+    pool = OwnerScopedAgentPool(config, tmp_path)
+    hot = OwnerIdentity.provider_user('web', 'hot')
+    pool._builder = lambda *_args: object()
+    cached = pool.get(hot)
+    def owner(name):
+        return OwnerIdentity.provider_user('web', name)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(module.build_owner_scoped_agent, config, tmp_path, owner('first'), None)
+        assert entered.wait(10)
+        second = executor.submit(module.build_owner_scoped_agent, config, tmp_path, owner('second'), None)
+        try:
+            assert contended.wait(10)
+            assert calls == ['first']
+            assert pool.get(hot) is cached
+            assert not second.done()
+        finally:
+            release.set()
+        with pytest.raises(ValueError, match='synthetic local construction failure'):
+            first.result(timeout=10)
+        assert second.result(timeout=10).config.my_agent_owner_id == 'second'
+    assert calls == ['first', 'second']
+    assert original.acquire(blocking=False)
+    original.release()

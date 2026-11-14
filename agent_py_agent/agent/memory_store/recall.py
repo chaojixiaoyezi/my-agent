@@ -88,6 +88,7 @@ def runtime_long_term_scope(
     task_id: str = "",
     task_attributes: Mapping[str, object] | None = None,
     business_context: object | None = None,
+    memory_recall_scope: MemoryRecallScope | None = None,
 ) -> MemoryRecallScope:
     from ..conversation.business_contracts import BusinessExecutionContext
 
@@ -97,6 +98,10 @@ def runtime_long_term_scope(
         _append_runtime_identity(pairs, "project", business_context.task_id)
         _append_runtime_identity(pairs, "project", business_context.project_ref)
         return MemoryRecallScope(tuple(dict.fromkeys(pairs)))
+    if memory_recall_scope is not None:
+        if type(memory_recall_scope) is not MemoryRecallScope:
+            raise TypeError('memory_recall_scope 必须是宿主 MemoryRecallScope')
+        return memory_recall_scope
     scope = MemoryRecallScope.from_runtime(task_id=task_id, task_attributes=task_attributes)
     try:
         project_pairs = _existing_project_pairs(memory)

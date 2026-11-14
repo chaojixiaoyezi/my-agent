@@ -13,11 +13,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,8 @@ class ArtifactRegistryReadReport:
 
     records: dict[str, ArtifactRegistryRecord] = field(default_factory=dict)
     errors: list[dict[str, Any]] = field(default_factory=list)
+    bytes_read: int = 0
+    rows_read: int = 0
 
 
 @dataclass(frozen=True)
@@ -299,13 +302,35 @@ def latest_artifact_records(workspace_root: str | Path) -> dict[str, ArtifactReg
 
 # LLM: 每次仍读取完整raw并验证可信根，缓存命中仅省split/loads；IO拒绝必须返回当次诊断。
 # 函数用途: 安全读取最新产物记录与坏行报告，返回独立副本。
-def latest_artifact_records_report(workspace_root: str | Path) -> ArtifactRegistryReadReport:
+def latest_artifact_records_report(workspace_root: str | Path, *, max_bytes: int | None = None,
+                                   max_rows: int | None = None, max_diagnostics: int | None = None) -> ArtifactRegistryReadReport:
     """Read latest records and keep malformed rows as diagnostics."""
 
     root = _workspace_root_path(workspace_root)
     path = registry_path(root)
+    if max_bytes is None and (max_rows is not None or max_diagnostics is not None):
+        raise ValueError("bounded registry parsing requires a byte budget")
+    if max_bytes is not None:
+        max_rows = 1024 if max_rows is None else max_rows
+        max_diagnostics = 8 if max_diagnostics is None else max_diagnostics
+        if any(type(value) is not int or value < 1 for value in (max_rows, max_diagnostics)):
+            raise ValueError("registry row and diagnostic budgets must be positive integers")
     try:
-        text = read_text_beneath(root, tuple(REGISTRY_RELATIVE_PATH.parts))
+        if max_bytes is None:
+            text = read_text_beneath(root, tuple(REGISTRY_RELATIVE_PATH.parts))
+        else:
+            if type(max_bytes) is not int or max_bytes < 1:
+                raise ValueError("artifact registry read budget must be a positive byte count")
+            try:
+                # 固定合法相对路径/正字节预算；底层超过预算时只读预算+1哨兵并抛ValueError。
+                raw = read_bytes_beneath(root, tuple(REGISTRY_RELATIVE_PATH.parts), max_bytes=max_bytes)
+            except ValueError:
+                return ArtifactRegistryReadReport(bytes_read=max_bytes + 1, errors=[{
+                    "error_code": "ARTIFACT_REGISTRY_READ_BUDGET_EXCEEDED", "max_bytes": max_bytes,
+                    "coverage": "partial", "effect_outcome": "not_started",
+                    "next_action": "原登记簿超出本次读取字节预算；核验原受限精确引用，不得当作空登记簿。",
+                }])
+            text = raw.decode("utf-8") if raw is not None else None
         identity = trusted_root_identity(root) if text is not None else None
     except (NoFollowPathError, OSError, UnicodeError) as exc:
         error = runtime_error_report(exc, context="artifact_registry.read")
@@ -313,7 +338,61 @@ def latest_artifact_records_report(workspace_root: str | Path) -> ArtifactRegist
         return ArtifactRegistryReadReport(errors=[error])
     if text is None:
         return ArtifactRegistryReadReport()
+    if max_bytes is not None:
+        return _bounded_registry_report(text, len(raw), max_rows, max_diagnostics)
     return _projection_report(path, registry_projection(identity, text))
+
+
+def bounded_registry_report(raw: bytes, *, max_rows: int = 1024, max_diagnostics: int = 8) -> ArtifactRegistryReadReport:
+    """只解析原句柄已经限额取得的快照；不重开路径，不截断后伪造latest记录。"""
+    if not isinstance(raw, bytes) or any(type(value) is not int or value < 1 for value in (max_rows, max_diagnostics)):
+        raise ValueError('bounded registry snapshot and budgets are invalid')
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeError as error:
+        return ArtifactRegistryReadReport(bytes_read=len(raw), errors=[{
+            'error_code': 'ARTIFACT_REGISTRY_ENCODING_INVALID', 'exception_type': type(error).__name__,
+            'coverage': 'partial', 'effect_outcome': 'not_started'}])
+    return _bounded_registry_report(text, len(raw), max_rows, max_diagnostics)
+
+
+# 先数物理行，再解析；兼容splitlines的CRLF/Unicode换行，不先构造无限错误对象树。
+_REGISTRY_LINE_END = re.compile(r'\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]')
+
+
+def _bounded_registry_report(text, byte_count, max_rows, max_diagnostics):
+    def budget_error(code, rows):
+        return ArtifactRegistryReadReport(bytes_read=byte_count, rows_read=rows, errors=[{
+            'error_code': code, 'coverage': 'partial', 'effect_outcome': 'not_started',
+            'next_action': '登记读取或解析达到预算，未覆盖内容仍未知；核验原精确引用，不把截断当空或不存在。'}])
+
+    rows, end = 0, 0
+    for match in _REGISTRY_LINE_END.finditer(text):
+        rows, end = rows + 1, match.end()
+        if rows > max_rows:
+            return budget_error('ARTIFACT_REGISTRY_ROW_BUDGET_EXCEEDED', rows)
+    rows += int(end < len(text))
+    if rows > max_rows:
+        return budget_error('ARTIFACT_REGISTRY_ROW_BUDGET_EXCEEDED', rows)
+    records, errors = {}, []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            record = _record_from_payload(json.loads(line))
+            if record is None:
+                raise ValueError('invalid registry record')
+            if record.artifact_id:
+                records[record.artifact_id] = record
+        except (ValueError, TypeError, OverflowError, RecursionError) as error:
+            errors.append({'error_code': 'ARTIFACT_REGISTRY_ROW_INVALID', 'exception_type': type(error).__name__,
+                           'line': number, 'coverage': 'partial', 'effect_outcome': 'not_started'})
+            if len(errors) >= max_diagnostics and number < rows:
+                # 达到上限即停，末条诊断明确未覆盖；不能把此前记录当作当前latest。
+                errors[-1] = budget_error('ARTIFACT_REGISTRY_DIAGNOSTIC_BUDGET_EXCEEDED', number).errors[0]
+                return ArtifactRegistryReadReport(errors=errors, bytes_read=byte_count, rows_read=rows)
+    return ArtifactRegistryReadReport(records=records if not errors else {}, errors=errors,
+                                      bytes_read=byte_count, rows_read=rows)
 
 
 # LLM: 原JSON容器上的record转换已随投影完成；只解冻预聚合的最新记录并转换坏行诊断，不重复克隆已被覆盖的历史行。

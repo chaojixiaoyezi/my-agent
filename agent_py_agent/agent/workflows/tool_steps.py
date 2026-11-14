@@ -135,6 +135,50 @@ def _extract_tool_schema(tool_obj: Any, tool_spec: dict[str, Any]) -> dict[str, 
     return None
 
 
+def resolve_tool_arguments(engine, step, run, spec, outputs):
+    """同一冻结步骤的实参解析；审核摘要与最终执行不得各自猜动态引用。"""
+    tool_spec = spec.get('tool_spec', spec.get('config'))
+    if not isinstance(tool_spec, dict) or not isinstance(tool_spec.get('tool_name'), str):
+        raise ValueError('tool_spec.tool_name must be a string')
+    tool_name = tool_spec['tool_name'].strip()
+    raw_arguments, raw_arguments_map = tool_spec.get('arguments'), tool_spec.get('arguments_map')
+    if not tool_name or any(value is not None and not isinstance(value, dict)
+                            for value in (raw_arguments, raw_arguments_map)):
+        raise ValueError('tool arguments and arguments_map must be dictionaries')
+    resolved_arguments = payload(step.input_snapshot) if isinstance(step.input_snapshot, dict) else {}
+    resolved_arguments.update(payload(raw_arguments or {}))
+    for key, reference in (raw_arguments_map or {}).items():
+        resolved_arguments[key] = _resolve_argument_reference(reference, step, run, outputs)
+    dispatcher, registry = getattr(engine, 'tool_dispatcher', None), getattr(engine, 'tool_registry', None)
+    # 显式参数模式下，控制输入不能污染封闭工具参数；只读本次冻结工具声明，不从模型schema授予过滤权。
+    inherited_schema = None
+    snapshot = getattr(dispatcher, 'snapshot', None)
+    if snapshot is not None and callable(getattr(snapshot, 'runtime', None)):
+        runtime = snapshot.runtime(tool_name)
+        if runtime is not None:
+            inherited_schema = runtime.model_spec.input_schema
+    else:
+        source_registry = registry if registry is not None else getattr(dispatcher, 'registry', None)
+        source_tool = None
+        if callable(getattr(source_registry, 'get_tool', None)):
+            source_tool = source_registry.get_tool(tool_name)
+        elif isinstance(getattr(source_registry, 'tools', None), dict):
+            source_tool = source_registry.tools.get(tool_name)
+        inherited_schema = _extract_tool_schema(source_tool, {})
+    if ((raw_arguments is not None or raw_arguments_map is not None)
+            and isinstance(inherited_schema, dict) and inherited_schema.get('additionalProperties') is False
+            and isinstance(inherited_schema.get('properties'), dict)
+            and not any(key in inherited_schema for key in
+                        ('patternProperties', 'allOf', 'anyOf', 'oneOf', '$ref', 'if', 'then', 'else',
+                         'dependentSchemas', 'unevaluatedProperties'))):
+        explicit_keys = set(raw_arguments or {}) | set(raw_arguments_map or {})
+        properties = inherited_schema['properties']
+        resolved_arguments = {key: value for key, value in resolved_arguments.items()
+                              if key in properties or key in explicit_keys}
+
+    return tool_name, resolved_arguments
+
+
 # 函数用途: 执行正式 Typed Direct-Tool 单步调用 (WF-01)。
 def execute_tool_step(
     *,
@@ -149,6 +193,53 @@ def execute_tool_step(
     if not isinstance(getattr(step, "escalation_result", None), dict):
         step.escalation_result = {}
 
+    effect_attempt = step.escalation_result.get('attempt_id')
+    previous_receipt = step.escalation_result.get('tool_receipt')
+    previous_binding = step.escalation_result.get('tool_operation_binding')
+    previous_unsettled = (step.escalation_result.get('effect_outcome') == 'unknown'
+        or bool(previous_binding) or bool(previous_receipt) and not (
+            isinstance(previous_receipt, dict) and previous_receipt.get('effect_outcome') == 'not_started'
+            and previous_receipt.get('handler_executed') is False))
+
+    def not_started(proof=None):
+        # admission只是准入，不是物理执行；仅同一当前attempt的确定预拒绝可结清。
+        # 旧unknown或既有操作绑定绝不因后来同step的早拒而被覆盖。
+        if (not isinstance(effect_attempt, str) or not effect_attempt or previous_unsettled
+                or step.escalation_result.get('attempt_id') != effect_attempt):
+            return
+        if proof is not None:
+            if not isinstance(proof, dict):
+                proof = {key: getattr(proof, key, None) for key in (
+                    'handler_executed', 'effect_outcome', 'call_id', 'tool_name', 'operation', 'operation_id')}
+            expected_call = f'workflow-step:{run.workflow_run_id}:{step.step_id}'
+            if (not isinstance(proof, dict) or proof.get('handler_executed') is not False
+                    or proof.get('effect_outcome') != 'not_started'
+                    or proof.get('call_id') != expected_call or proof.get('tool_name') != tool_name):
+                return
+            operation = proof.get('operation')
+            operation_id = proof.get('operation_id') or ''
+            binding = step.escalation_result.get('tool_operation_binding')
+            if operation_id:
+                if (not isinstance(operation, dict) or not isinstance(binding, dict)
+                        or binding.get('workflow_run_id') != run.workflow_run_id
+                        or binding.get('step_id') != step.step_id
+                        or binding.get('effect_attempt_id') != effect_attempt
+                        or binding.get('call_id') != expected_call
+                        or binding.get('tool_name') != tool_name
+                        or binding.get('owner_id') != run.owner_id
+                        or any(not isinstance(binding.get(key), str) or not binding[key]
+                               for key in ('args_hash', 'run_id', 'task_id', 'attempt_id', 'idempotency_key'))
+                        or binding.get('operation_id') != operation_id
+                        or operation.get('operation_id') != operation_id
+                        or operation.get('args_hash') != binding.get('args_hash')
+                        or operation.get('idempotency_key') != binding.get('idempotency_key')
+                        or operation.get('handler_executed') is not False
+                        or operation.get('effect_outcome') != 'not_started'):
+                    return
+            elif operation is not None or binding:
+                return
+        step.escalation_result.update(effect_started=False, effect_outcome='not_started')
+
     # 1. 提取并校验 tool_spec
     tool_spec = spec.get("tool_spec")
     if tool_spec is None:
@@ -158,6 +249,7 @@ def execute_tool_step(
         step.error_code = "WORKFLOW_TOOL_SPEC_INVALID"
         step.error_message = "tool_spec or config must be a dictionary"
         step.needs_repair = True
+        not_started()
         return
 
     raw_tool_name = tool_spec.get("tool_name")
@@ -166,6 +258,7 @@ def execute_tool_step(
         step.error_code = "WORKFLOW_TOOL_SPEC_INVALID"
         step.error_message = "tool_name must be a non-empty string"
         step.needs_repair = True
+        not_started()
         return
     tool_name = raw_tool_name.strip()
 
@@ -176,41 +269,30 @@ def execute_tool_step(
         step.error_code = "WORKFLOW_TOOL_SPEC_INVALID"
         step.error_message = "tool arguments must be a dictionary"
         step.needs_repair = True
+        not_started()
         return
     if raw_arguments_map is not None and not isinstance(raw_arguments_map, dict):
         step.status = "failed"
         step.error_code = "WORKFLOW_TOOL_SPEC_INVALID"
         step.error_message = "tool arguments_map must be a dictionary"
         step.needs_repair = True
+        not_started()
         return
 
-    # 2. 合并实参与映射参数
-    resolved_arguments: dict[str, Any] = {}
-    if isinstance(step.input_snapshot, dict):
-        resolved_arguments.update(payload(step.input_snapshot))
-    if isinstance(raw_arguments, dict):
-        resolved_arguments.update(payload(raw_arguments))
-    if isinstance(raw_arguments_map, dict):
-        try:
-            for arg_key, arg_ref in raw_arguments_map.items():
-                resolved_arguments[arg_key] = _resolve_argument_reference(arg_ref, step, run, outputs)
-        except Exception as exc:
-            step.status = "failed"
-            step.error_code = "WORKFLOW_TOOL_SPEC_INVALID"
-            step.error_message = f"Failed to resolve arguments_map reference: {exc}"
-            step.needs_repair = True
-            return
-
-    # 3. 检查调度器/注册表可用性 (严格禁止 eval 或任意全局函数调用)
-    dispatcher = getattr(engine, "tool_dispatcher", None)
-    registry = getattr(engine, "tool_registry", None)
-    coord_dispatcher = getattr(engine, "tool_operation_coordinator", None)
-
+    dispatcher = getattr(engine, 'tool_dispatcher', None)
+    registry = getattr(engine, 'tool_registry', None)
+    coord_dispatcher = getattr(engine, 'tool_operation_coordinator', None)
     if dispatcher is None and registry is None and coord_dispatcher is None:
-        step.status = "failed"
-        step.error_code = "WORKFLOW_TOOL_EXECUTOR_UNAVAILABLE"
-        step.error_message = "No tool dispatcher, registry, or coordinator wired on workflow engine"
-        step.needs_repair = True
+        step.status, step.error_code = 'failed', 'WORKFLOW_TOOL_EXECUTOR_UNAVAILABLE'
+        step.error_message, step.needs_repair = 'No tool executor wired on workflow engine', True
+        not_started()
+        return
+    try:
+        tool_name, resolved_arguments = resolve_tool_arguments(engine, step, run, spec, outputs)
+    except (ValueError, KeyError, TypeError) as exc:
+        step.status, step.error_code = 'failed', 'WORKFLOW_TOOL_SPEC_INVALID'
+        step.error_message, step.needs_repair = str(exc), True
+        not_started()
         return
 
     # 4. 权限与安全策略检查 (黑白名单、递归防护、破坏性工具防护)
@@ -222,6 +304,7 @@ def execute_tool_step(
             step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
             step.error_message = f"Recursive workflow execution via tool '{tool_name}' is forbidden"
             step.needs_repair = True
+            not_started()
             return
 
     # (b) 显式黑名单检查
@@ -235,6 +318,7 @@ def execute_tool_step(
         step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
         step.error_message = f"Tool '{tool_name}' is in the forbidden tool denylist"
         step.needs_repair = True
+        not_started()
         return
 
     # (c) 显式白名单检查
@@ -251,6 +335,7 @@ def execute_tool_step(
         step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
         step.error_message = f"Tool '{tool_name}' is not in the authorized tool allowlist"
         step.needs_repair = True
+        not_started()
         return
 
     # (d) 破坏性/特权工具策略检查
@@ -262,6 +347,7 @@ def execute_tool_step(
         step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
         step.error_message = f"Destructive tool '{tool_name}' is not permitted under current workflow policy"
         step.needs_repair = True
+        not_started()
         return
 
     # (e) 外部自定义授权钩子检查
@@ -274,12 +360,14 @@ def execute_tool_step(
                 step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
                 step.error_message = f"Tool '{tool_name}' authorization rejected by tool authorizer"
                 step.needs_repair = True
+                not_started()
                 return
         except Exception as exc:
             step.status = "failed"
             step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
             step.error_message = f"Tool authorization error: {exc}"
             step.needs_repair = True
+            not_started()
             return
 
     # 5. 查找工具实例并进行参数 Schema 校验
@@ -295,6 +383,7 @@ def execute_tool_step(
         step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
         step.error_message = f"Tool '{tool_name}' is not registered in the tool registry"
         step.needs_repair = True
+        not_started()
         return
 
     schema = _extract_tool_schema(tool_obj, tool_spec)
@@ -305,6 +394,7 @@ def execute_tool_step(
             step.error_code = "WORKFLOW_TOOL_SCHEMA_INVALID"
             step.error_message = schema_err
             step.needs_repair = True
+            not_started()
             return
 
     # 6. 生成确定性幂等身份
@@ -314,6 +404,27 @@ def execute_tool_step(
 
     owner_id = getattr(run, "owner_id", "")
     space_id = b_context.get("space_id", "")
+
+    # 显式合同先校验，任何形状错误均是确定未执行，不能留下未知副作用占位。
+    effect_request = None
+    effect_config = spec.get('config', {}).get('business_effect') if isinstance(spec.get('config'), dict) else None
+    if effect_config is not None:
+        try:
+            method = getattr(dispatcher, 'execute_scoped', None)
+            if not callable(method) or 'business_effect' not in inspect.signature(method).parameters:
+                raise ValueError('当前宿主不支持业务项幂等；请使用正式原生工作流宿主')
+            if (not isinstance(effect_config, dict) or set(effect_config) != {'item_key', 'configuration_key'}
+                    or not isinstance(effect_config['configuration_key'], str) or not effect_config['configuration_key'].strip()):
+                raise ValueError('config.business_effect要求item_key及非空configuration_key')
+            item = _resolve_argument_reference(effect_config['item_key'], step, run, outputs)
+            if not isinstance(item, str) or not item.strip() or len(item) > 4096:
+                raise ValueError('config.business_effect.item_key须解析为非空有界字符串')
+            effect_request = {'item_key': item, 'configuration_key': effect_config['configuration_key']}
+        except (ValueError, KeyError, TypeError) as exc:
+            step.status, step.needs_repair = 'failed', True
+            step.error_code, step.error_message = 'WORKFLOW_BUSINESS_EFFECT_INVALID', str(exc)
+            not_started()
+            return
 
     # 7. 调用执行分派
     raw_result = None
@@ -328,11 +439,16 @@ def execute_tool_step(
                 "run": run,
                 "step": step,
             }
+            if effect_request is not None:
+                scoped_kwargs['business_effect'] = effect_request
             if hasattr(dispatcher, "execute_scoped") and callable(dispatcher.execute_scoped):
-                try:
+                if effect_config is not None:
                     raw_result = dispatcher.execute_scoped(tool_name, resolved_arguments, **scoped_kwargs)
-                except TypeError:
-                    raw_result = dispatcher.execute_scoped(tool_name, resolved_arguments)
+                else:
+                    try:
+                        raw_result = dispatcher.execute_scoped(tool_name, resolved_arguments, **scoped_kwargs)
+                    except TypeError:
+                        raw_result = dispatcher.execute_scoped(tool_name, resolved_arguments)
             elif hasattr(dispatcher, "execute") and callable(dispatcher.execute):
                 try:
                     raw_result = dispatcher.execute(tool_name, resolved_arguments, **scoped_kwargs)
@@ -446,6 +562,9 @@ def execute_tool_step(
             operation_id = str(raw_result.get("operation_id") or "")
             effect_outcome = str(raw_result.get("effect_outcome") or "succeeded")
 
+    if not is_success:
+        not_started(raw_result)
+
     # 9. 状态与回执落地
     step.effect_id = effect_id
     if is_success:
@@ -475,6 +594,7 @@ def execute_tool_step(
             "effect_id": effect_id,
             "operation_id": operation_id,
             "effect_outcome": effect_outcome or "failed",
+            "handler_executed": raw_result.get("handler_executed") if isinstance(raw_result, dict) else getattr(raw_result, "handler_executed", None),
             "status": "failed",
             "error_code": step.error_code,
             "output_summary": summary,

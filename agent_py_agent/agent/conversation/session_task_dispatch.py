@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from ..runtime_errors import runtime_error_report
+from ..runtime_errors import DataCorruptionError, is_structured_error_code, runtime_error_report
 from ..tooling.models import ToolHandlerOutcome
 from .session_messaging import (
     SESSION_IDENTITY_UNAVAILABLE,
@@ -27,6 +27,13 @@ class SessionTaskDispatchError(RuntimeError):
         self.outcome = outcome
         self.error_code = outcome.error_code
         self.effect_outcome = outcome.effect_outcome
+        # 仅运输派发口显式的安全标量，不把原参数或内部路径带到业务错误。
+        try:
+            details = json.loads(outcome.output).get("details", {})
+        except (ValueError, TypeError, AttributeError):
+            details = {}
+        self.details = {key: details[key] for key in ("exception_type", "cause_code", "stage")
+            if isinstance(details, dict) and isinstance(details.get(key), str)}
         super().__init__(outcome.error_code)
 
 
@@ -206,10 +213,48 @@ def dispatch_session_task(
     plan: SessionTaskDispatchPlan,
     target_thread: object,
     config: object,
-    *, count_pair: bool = True, host_message_context=None,
+    *, count_pair: bool = True, host_message_context=None, host_channel_actor=None,
     business_context_intent=None, business_context_factory=None,
 ) -> ToolHandlerOutcome:
     store = agent.conversation_store
+    if host_channel_actor is not None:
+        from .business_access import BusinessError
+        from .host_actor import HostActorError, HostChannelActor, _validate_scope
+
+        try:
+            from pathlib import Path
+
+            home = Path(agent.home_paths.owner_home_dir).resolve()
+            for identifier in (plan.sender_thread_id, plan.target_thread_id):
+                thread = store.threads.require(identifier)
+                if thread.owner_id != str(agent.home_paths.owner_id) or Path(thread.owner_home).resolve() != home:
+                    raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+            if (not isinstance(host_channel_actor, HostChannelActor)
+                    or host_channel_actor.owner_id != str(agent.home_paths.owner_id)
+                    or host_channel_actor.source_thread_id != plan.sender_thread_id
+                    or target_thread.thread_id != plan.target_thread_id):
+                raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+            _validate_scope(agent, plan.target_thread_id, host_channel_actor)
+            previous = store.session_tasks.find_by_dedupe_key(_task_dedupe_key(plan))
+            if previous is not None:
+                link, error = store.tasks.load_report(previous.task_id)
+                if error and error.get('error_type') != 'FileNotFoundError':
+                    raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+                if link is not None:
+                    if link.thread_id != plan.target_thread_id:
+                        raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+                    if link.host_channel_actor is not None:
+                        frozen = HostChannelActor.from_record(link.host_channel_actor)
+                        if (frozen.owner_id != host_channel_actor.owner_id
+                                or frozen.source_thread_id != host_channel_actor.source_thread_id
+                                or frozen.binding() != host_channel_actor.binding()):
+                            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+                        _validate_scope(agent, plan.target_thread_id, frozen)
+        except (HostActorError, DataCorruptionError, KeyError, TypeError, ValueError) as error:
+            raise BusinessError("CAPABILITY_DENIED", effect_outcome="not_started", details={
+                "reason": getattr(error, 'error_code', 'CHANNEL_ACTOR_IDENTITY_INVALID'),
+                "side_effect_state": "not_started", "task_created": False,
+                "next_action": "从原发送会话核对当前发起人与目标的可信绑定；不得通过模型参数提供宿主身份。"}) from None
     if limit_error := _chain_limit_error(store, plan.origin_task_id, config):
         return limit_error
 
@@ -233,16 +278,36 @@ def dispatch_session_task(
                 "business_context_factory": business_context_factory}
                if business_context_intent is not None or business_context_factory is not None else {}),
         )
+        from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
+
+        # 终态重放不补actor、改策略或发布正文；原失败/取消保持原对象，不因修复而复活。
+        if task.status in SESSION_TASK_TERMINAL_STATUSES:
+            return ToolHandlerOutcome(SESSION_TASK_TOOL_NAME, True, json.dumps({
+                "task_id": task.task_id, "status": task.status, "target_thread_id": task.target_thread_id}))
+        if host_channel_actor is not None:
+            # canonical任务已成交，正文/wake尚未发布；原TaskLink冻结宿主actor，重放只保留原entry身份。
+            from .host_actor import HostActorError, HostChannelActor
+
+            link, error = store.tasks.load_report(task.task_id)
+            if error and error.get('error_type') != 'FileNotFoundError':
+                raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+            frozen_actor = host_channel_actor
+            if link is not None:
+                if link.thread_id != plan.target_thread_id:
+                    raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+                if link.host_channel_actor is not None:
+                    frozen_actor = HostChannelActor.from_record(link.host_channel_actor)
+                    if (frozen_actor.owner_id != host_channel_actor.owner_id
+                            or frozen_actor.source_thread_id != host_channel_actor.source_thread_id
+                            or frozen_actor.binding() != host_channel_actor.binding()):
+                        raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+            store.tasks.bind({'task_id': task.task_id, 'thread_id': plan.target_thread_id, 'goal': plan.goal},
+                             host_channel_actor=frozen_actor)
         from .execution_threads import IM_TASK_EXECUTION_KEY, bind_delegated_task
 
         # 普通会话没有宿主委派策略，不需要线程策略写入；模型派活仍沿原正文/唤醒流程。
         if IM_TASK_EXECUTION_KEY in (getattr(target_thread, "metadata", None) or {}):
             bind_delegated_task(store, plan.target_thread_id, task.task_id)
-        from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
-
-        if task.status in SESSION_TASK_TERMINAL_STATUSES:
-            return ToolHandlerOutcome(SESSION_TASK_TOOL_NAME, True, json.dumps({
-                "task_id": task.task_id, "status": task.status, "target_thread_id": task.target_thread_id}))
         body = _queue_body(store, plan, body_dedupe_key, task.task_id)
         bound = store.session_tasks.bind_body(task.task_id, body.guidance_id)
         if bound is not None:
@@ -254,6 +319,7 @@ def dispatch_session_task(
         else:
             wake_id = _maybe_wake(store, target_thread, plan.sender_thread_id, task.task_id)
     except Exception as exc:  # noqa: BLE001
+        cause_code = getattr(exc, "code", "") or getattr(exc, "error_code", "")
         identity = {"sender_thread_id": plan.sender_thread_id, "target_thread_id": plan.target_thread_id,
                     "dedupe_key": dedupe_key}
         if task is not None:
@@ -261,7 +327,10 @@ def dispatch_session_task(
         return session_task_dispatch_error(
             "派发回执未知；可能已耐久受理，须按原身份对账。",
             error_code="TOOL_EXECUTION_FAILED",
-            details=runtime_error_report(exc, context="create_session_task.dispatch"),
+            details={**runtime_error_report(exc, context="create_session_task.dispatch"),
+                "exception_type": type(exc).__name__,
+                "cause_code": cause_code if is_structured_error_code(cause_code) else "",
+                "stage": "create_task" if task is None else "queue_body_bind_or_wake"},
             effect_outcome="unknown",
             session_task_dispatch=identity,
         )

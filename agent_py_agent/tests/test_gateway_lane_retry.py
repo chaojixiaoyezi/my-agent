@@ -121,6 +121,7 @@ def test_planner_skips_unconfigured_lane_and_resumes_exact_thread(tmp_path, monk
 
 @pytest.mark.parametrize("error,expected", [
     (ModelNotConfiguredError(), "active"), (ModelProfileError("已撤销"), "active"),
+    (gateway_lane_retry.BackgroundCompactPreflightDeferred("首次请求未发送", code="COMPACT_CANDIDATE_TOO_LARGE"), "active"),
     (RuntimeError("bug"), "blocked"), (ProviderRequestRejectedError("400"), "blocked"),
 ])
 def test_goal_configuration_failure_preserves_original_wake(tmp_path, error, expected):

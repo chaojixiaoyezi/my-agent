@@ -41,6 +41,7 @@ class _ExternalPermissionEntry:
     run_id: str
     request: ToolApprovalRequest
     controller: object
+    interest_id: str = ""
 
 
 # LLM: 每个 root TuiRuntime 仅一个协调器，负责控制器排队和外部请求显示去重，不创建或批准 binding。
@@ -143,14 +144,17 @@ class TuiPermissionCoordinator:
         *,
         decision_writer: Callable[[str, ToolApprovalRequest, ToolApprovalDecision], object],
         controller_factory: Callable[[ExternalTuiPermissionOwner], object],
+        interest_id: str = "",
     ) -> bool:
         rows = _external_rows(value)
+        if interest_id:
+            rows = [(interest_id + ":" + key, run_id, label, request) for key, run_id, label, request in rows]
         incoming = {row[0] for row in rows}
         with self.runtime._lock:
             vanished = [
                 entry.controller
                 for key, entry in self._external.items()
-                if key not in incoming
+                if entry.interest_id == interest_id and key not in incoming
             ]
         changed = bool(vanished)
         for controller in vanished:
@@ -184,7 +188,7 @@ class TuiPermissionCoordinator:
                     raise OSError("agent approval decision was not confirmed")
 
             configure(write_decision)
-            entry = _ExternalPermissionEntry(key, run_id, request, controller)
+            entry = _ExternalPermissionEntry(key, run_id, request, controller, interest_id)
             with self.runtime._lock:
                 self._external[key] = entry
             try:

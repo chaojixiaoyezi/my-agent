@@ -130,6 +130,13 @@ class GatewayBusinessDomain:
             if len(self._services) >= 64:
                 self._services.pop(next(iter(self._services)))
             self._services[key] = services
+        # 原生与插件共读原owner审批事实；仅补只读reader，不引入main的审批权或执行器。
+        from ..conversation.business_observability import BusinessObservationService
+        from ..gateway_parts.business_api_v13_readers import native_approval_readers
+        projection = services.observation if services._default_projection else None
+        if isinstance(projection, BusinessObservationService):
+            projection.readers.update(native_approval_readers(
+                base, getattr(self.resources.server, 'paths', None), scoped_home.owner_id, host.conversation_store))
 
         def check(action, facts):
             current = read_context(authorized)

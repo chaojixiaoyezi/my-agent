@@ -191,9 +191,9 @@ def test_handoffs_create_snapshot_and_list_newest_first(host):
     assert older['items'] == [first] and older['next_cursor'] is None
     assert older['items'][0]['open_cases'][0]['title'] == '待交接案件'
     failed(invoke(host, 'shifts.handoffs.list', {'shift_id': 'day', 'limit': 1, 'cursor': cursor}),
-        503, 'CURSOR_EXPIRED')
+        410, 'CURSOR_EXPIRED')
     failed(invoke(host, 'shifts.handoffs.list', {'shift_id': 'night', 'limit': 1, 'cursor': cursor + 'x'}),
-        503, 'CURSOR_EXPIRED')
+        410, 'CURSOR_EXPIRED')
     failed(invoke(host, 'shifts.handoffs.create', {'shift_id': 'missing', 'summary': ''}, key=idem()),
         404, 'RESOURCE_NOT_FOUND')
 

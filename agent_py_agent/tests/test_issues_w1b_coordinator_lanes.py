@@ -251,6 +251,18 @@ def test_original_entry_retries_lane_on_next_tick(lane_home, monkeypatch, coordi
     assert second['storage_maintenance']['cursors'][kind] == {'after': 'done'}
     assert kind not in second['storage_maintenance']['pending_kinds']
     assert not second['storage_maintenance']['errors']
+    # 两拍绑定车道已完成，不等于其它真实保留/配额分片同时完成；保留原预算继续履行欠账。
+    for tick in range(2, 130):
+        if second['maintenance_partial'] is False:
+            break
+        assert owner_maintenance.owner_maintenance_due(lane_home.owner_home_dir, now=2_000_000 + tick)
+        assert owner_maintenance.run_owner_retention_if_due(
+            lane_home, now=2_000_000 + tick, **options).ran
+        second = json.loads(path.read_text())
+    assert received[:2] == [{}, {} if first_result == 'error' else {'after': 'page-1'}]
+    assert all(cursor == {'after': 'done'} for cursor in received[2:])
+    assert second['storage_maintenance']['cursors'][kind] == {'after': 'done'}
+    assert not second['storage_maintenance']['errors']
     assert not second['storage_maintenance']['continuation_pending']
     assert second['maintenance_partial'] is False
 

@@ -172,6 +172,7 @@ class ToolApprovalDecision:
     feedback: str = ""
     decided_at: float = field(default_factory=time.time)
     reason_code: str = ""
+    diagnostic: str = ""
 
     # LLM: 决定必须精确绑定 permission_id 并落在有限安全枚举；未知字符串 fail-closed。
     # 函数用途: 规范一条审批答复。
@@ -183,11 +184,12 @@ class ToolApprovalDecision:
         if decision not in _DECISION_VALUES:
             raise ValueError(f"invalid tool approval decision: {decision}")
         reason = str(self.reason_code or "")
-        if reason not in {"", "APPROVAL_TIMEOUT", "APPROVAL_NONINTERACTIVE", "APPROVAL_UNAVAILABLE", "APPROVAL_TRANSPORT_FAILED"}:
+        if reason not in {"", "APPROVAL_TIMEOUT", "APPROVAL_NONINTERACTIVE", "APPROVAL_UNAVAILABLE", "APPROVAL_TRANSPORT_FAILED", "APPROVAL_SCOPE_INVALID", "APPROVAL_STORAGE_UNAVAILABLE"}:
             raise ValueError("invalid tool approval reason")
         if reason and decision in {"approved", "approved_session", "approved_owner"}:
             raise ValueError("a failed approval cannot approve execution")
         object.__setattr__(self, "reason_code", reason)
+        object.__setattr__(self, "diagnostic", str(self.diagnostic or '')[:512])
         object.__setattr__(self, "permission_id", permission_id)
         object.__setattr__(self, "decision", decision)
         object.__setattr__(self, "feedback", str(self.feedback or "").strip())
@@ -212,6 +214,7 @@ class ToolApprovalDecision:
             "feedback": self.feedback,
             "decided_at": self.decided_at,
             **({"reason_code": self.reason_code} if self.reason_code else {}),
+            **({"diagnostic": self.diagnostic} if self.diagnostic else {}),
         }
 
     # LLM: 外部 payload 必须重新验证枚举和 id；缺失值不得默认批准。
@@ -224,6 +227,7 @@ class ToolApprovalDecision:
             feedback=str(value.get("feedback") or ""),
             decided_at=float(value.get("decided_at") or 0.0),
             reason_code=str(value.get("reason_code") or ""),
+            diagnostic=str(value.get("diagnostic") or ""),
         )
 
 

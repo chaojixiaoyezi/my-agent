@@ -587,12 +587,14 @@ class TestTaskProgressRegistryTool:
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
         assert result.failure_stage == "validation"
         assert result.handler_executed is False
+        assert result.effect_outcome == "not_started"
         assert result.metadata["action_decision"]["evidence"]["issues"] == [
             {
                 "path": "$.task_progress",
                 "keyword": "additionalProperties",
                 "expected": False,
                 "actual_type": "object",
+                "details": {"allowed_fields": ["action", "run_id", "summary", "next_action", "items", "coverage"]},
             }
         ]
 

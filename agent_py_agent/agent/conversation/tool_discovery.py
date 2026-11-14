@@ -144,9 +144,16 @@ def mount_thread_asset_tools(agent: object, params: object, *, runtime_snapshot:
 # 函数用途: 防止跨回合重建的旧集合把持久发现顺序重新按字母排列。
 def seed_loop_discovery_order(agent: object, params: object) -> None:
     state = getattr(params, "live_archive_state", None)
-    if isinstance(state, dict) and "loaded_tool_order" not in state:
+    if not isinstance(state, dict):
+        state = {}
+        params.live_archive_state = state
+    if "loaded_tool_order" not in state:
+        current = getattr(params, "loaded_tool_names", ())
+        # Compact 的有序 surface 已表达当前顺序；旧快照只为无序集合补序。
+        current_order = (ordered_tool_names(current) if isinstance(current, (list, tuple))
+                         else ordered_loop_loaded_tool_names(params))
         state["loaded_tool_order"] = list(ordered_tool_names([
-            *ordered_thread_loaded_tools(agent, params), *ordered_loop_loaded_tool_names(params),
+            *ordered_thread_loaded_tools(agent, params), *current_order,
         ]))
 
 

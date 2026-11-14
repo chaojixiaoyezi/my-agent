@@ -276,6 +276,9 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
         task_attributes=_background_task_attributes(thread.thread_id, _run_request(kwargs), agent, thread=thread),
         write_boundary={'task_id': claim.run_id})
     try:
+        from .execution_policy import scheduled_business_context
+
+        params = replace(params, business_context=scheduled_business_context(agent, claim.run))
         from ..agent_core.runtime_mixin import current_prompt_scope
         if is_interrupted():
             raise InterruptedError('定时资产执行已中断')

@@ -373,11 +373,11 @@ def test_side_effecting_uncertain_write_suppressed_without_idempotent():
 
         assert call_count == 1
         assert step.status == "failed"
-        assert step.escalation_result.get("retry_suppressed_reason") == "UNCERTAIN_WRITE_NOT_IDEMPOTENT"
+        assert step.escalation_result.get("retry_suppressed_reason") == "UNCERTAIN_EFFECT_REPLAY_FORBIDDEN"
 
 
-def test_side_effecting_uncertain_write_allowed_when_idempotent():
-    """副作用模式若显式声明 idempotent=True，允许重试。"""
+def test_self_declared_idempotent_does_not_authorize_unknown_write():
+    """定义自报幂等不证明未知写可重放。"""
     step = _make_step(mode="tool_call")
     step.escalation_result = {"effect_started": True, "effect_outcome": "unknown"}
     call_count = 0
@@ -403,8 +403,9 @@ def test_side_effecting_uncertain_write_allowed_when_idempotent():
         sleep_fn=lambda s: None,
     )
 
-    assert call_count == 2
-    assert step.status == "succeeded"
+    assert call_count == 1
+    assert step.status == "failed"
+    assert step.escalation_result["retry_suppressed_reason"] == "UNCERTAIN_EFFECT_REPLAY_FORBIDDEN"
 
 
 def test_side_effecting_allowed_when_effect_not_started():
@@ -641,6 +642,7 @@ def test_engine_full_integration_retry_and_watermarks(tmp_path):
             step.status = "failed"
             step.error_code = "HTTP_504_GATEWAY_TIMEOUT"
             step.error_message = "transient upstream timeout"
+            step.escalation_result["effect_outcome"] = "not_started"
         else:
             step.status = "succeeded"
             step.output_snapshot = {"processed_rows": 88, "last_id": "id_9999"}
@@ -793,4 +795,137 @@ def test_uncertain_write_suppressed_via_tool_receipt():
 
     assert call_count == 1
     assert step.status == "failed"
-    assert step.escalation_result.get("retry_suppressed_reason") == "UNCERTAIN_WRITE_NOT_IDEMPOTENT"
+    assert step.escalation_result.get("retry_suppressed_reason") == "UNCERTAIN_EFFECT_REPLAY_FORBIDDEN"
+
+
+@pytest.mark.parametrize('mode', ['deterministic_script', 'hybrid'])
+@pytest.mark.parametrize('declared_idempotent', [False, True])
+def test_started_script_timeout_never_replays_real_write(tmp_path, mode, declared_idempotent):
+    """真实脚本先落业务日志再超时；进程被回收不能证明业务没有发生。"""
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+
+    home, workspace = tmp_path / 'home/owners/local/main', tmp_path / 'workspace'
+    workspace.mkdir()
+    marker = workspace / 'issued.log'
+    code = ("import os,time\n"
+            f"with open({str(marker)!r}, 'a') as output:\n"
+            " output.write('issued\\n');output.flush();os.fsync(output.fileno())\n"
+            "time.sleep(5)\nprint('{\"result\":1}')\n")
+    ScriptStore(home, workspace_root=workspace).save_script(
+        AssetDescriptor(id='timeout-effect', kind='script', name='超时副作用'), code)
+    spec = WorkflowStepSpec(step_id='effect', name='effect', mode=mode, script_id='timeout-effect',
+        on_error='fail', timeout_seconds=1,
+        retry_policy={'max_attempts': 2, 'retryable_codes': ['SCRIPT_TIMEOUT'],
+                      'idempotent': declared_idempotent})
+    workflow = WorkflowDefinition(_descriptor('timeout-effect'), (spec,))
+    WorkflowStore(home, workspace_root=workspace).save_workflow(workflow)
+    engine = WorkflowEngine(home, workspace_root=workspace)
+    engine.runner = ScriptRunner(home, workspace_root=workspace, extra_write_roots=(workspace,))
+    result = engine.run_workflow(workflow)
+    step = result.steps[0]
+    assert marker.read_text().splitlines() == ['issued']
+    assert step.attempt_count == 1 and step.error_code == 'SCRIPT_TIMEOUT'
+    assert step.escalation_result['effect_outcome'] == 'unknown'
+    assert step.escalation_result['script_execution']['phase'] == 'started'
+    assert step.escalation_result['script_execution']['runner_effect_outcome'] == 'unknown'
+    assert step.escalation_result['script_execution']['exit_code'] is not None
+    assert step.escalation_result['retry_suppressed_reason'] == 'UNCERTAIN_EFFECT_REPLAY_FORBIDDEN'
+    assert 'inspect_run' in step.error_message
+
+
+def test_preflight_script_refusal_carries_not_started_fact():
+    from agent_py_agent.agent.workflows.datasource_runtime import _preflight_failure
+
+    result = _preflight_failure('not-launched', {}, 'NETWORK_TIMEOUT', {})
+    assert result.phase == 'preflight' and result.effect_outcome == 'not_started'
+    assert result.exit_code is None
+
+
+@pytest.mark.parametrize('provider', ['absent', 'native'])
+@pytest.mark.parametrize('started_flag', ['present', 'missing', 'false'])
+def test_raw_resume_never_reexecutes_original_unknown_script(tmp_path, provider, started_flag):
+    """真实写后超时的原run经raw恢复；缺服务/旧started位不能重做原副作用。"""
+    import hashlib
+
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+    from agent_py_agent.agent.workflows.native_governance import NativeWorkflowGovernance
+    from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
+
+    home, ws = tmp_path / 'owner', tmp_path / 'workspace'
+    ws.mkdir()
+    target = ws / 'issued.log'
+    code = (f"import os,time\nwith open({str(target)!r},'a') as f:\n"
+            " f.write('once'+chr(10));f.flush();os.fsync(f.fileno())\n"
+            "time.sleep(5)\nprint('{\"result\":1}')")
+    ScriptStore(home, workspace_root=ws).save_script(
+        AssetDescriptor(id='raw-unknown', kind='script', name='原超时写'), code, timeout_seconds=1)
+    flow = WorkflowDefinition(_descriptor('raw-unknown'), (WorkflowStepSpec(step_id='issue', name='issue',
+        mode='deterministic_script', script_id='raw-unknown', on_error='fail', timeout_seconds=1),))
+    WorkflowStore(home, workspace_root=ws).save_workflow(flow)
+    store = WorkflowRunStore(home)
+    gov = NativeWorkflowGovernance(None, store, owner_home=home, owner_id='owner_test', author_provider=lambda: 'author')
+    tool = WorkflowsTool(home, workspace_root=ws, owner_id='owner_test',
+        review_governance_provider=(lambda: gov) if provider == 'native' else None,
+        runner_options_provider=lambda: {'extra_write_roots': (ws,)})
+    original = tool.execute({'action': 'run', 'workflow_id': 'raw-unknown'})
+    assert 'workflow_run_id' in original.result_envelope, original.output
+    run_id = original.result_envelope['workflow_run_id']
+    run = store.load_run(run_id)
+    assert run.steps[0].escalation_result['effect_outcome'] == 'unknown'
+    assert target.read_text().splitlines() == ['once']
+    if started_flag == 'missing':
+        run.steps[0].escalation_result.pop('effect_started')
+        store.save_run(run)
+    elif started_flag == 'false':
+        run.steps[0].escalation_result['effect_started'] = False
+        store.save_run(run)
+    before = store.load_run(run_id).to_dict()
+    resumed = tool.execute({'action': 'resume', 'workflow_run_id': run_id})
+    assert not resumed.ok and resumed.error_code == 'WORKFLOW_RECONCILIATION_REQUIRED', resumed.output
+    assert resumed.result_envelope['details']['prior_effect_outcome'] == 'unknown'
+    assert target.read_text().splitlines() == ['once']
+    assert store.load_run(run_id).to_dict() == before
+    assert hashlib.sha256(target.read_bytes()).digest() == hashlib.sha256(b'once\n').digest()
+
+
+def test_raw_resume_allows_actual_datasource_preflight_not_started(tmp_path):
+    import sqlite3
+
+    from agent_py_agent.agent.assets.datasource_store import DatasourceStore
+    from agent_py_agent.agent.assets.descriptor import DataSourceSpec
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+    from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
+
+    home, ws = tmp_path / 'owner', tmp_path / 'workspace'
+    ws.mkdir()
+    db, offline, target = ws / 'input.sqlite', ws / 'input.offline', ws / 'issued.log'
+    with sqlite3.connect(db) as conn:
+        conn.executescript('CREATE TABLE inputs(value INTEGER);INSERT INTO inputs VALUES(41)')
+    DatasourceStore(home).save_datasource({'datasource_id': 'inputs', 'kind': 'sqlite', 'title': '合成只读输入',
+        'database_path': str(db), 'read_only': True, 'allowed_tables': ['inputs']}, workspace_root=ws)
+    code = ("from agent_py_agent.runtime_sdk import query_sql\nimport json\nfrom pathlib import Path\n"
+            "rows=query_sql('inputs','SELECT value FROM inputs')\n"
+            f"Path({str(target)!r}).write_text('once')\nprint(json.dumps({{'result':rows[0]['value']}}))")
+    ScriptStore(home, workspace_root=ws).save_script(AssetDescriptor(id='preflight', kind='script', name='只读源准备后执行',
+        data_sources=(DataSourceSpec('inputs', 'sqlite', {'access': 'read', 'query': 'SELECT value FROM inputs'}),)), code)
+    wf = WorkflowDefinition(_descriptor('preflight'), (WorkflowStepSpec(step_id='issue', name='issue',
+        mode='deterministic_script', script_id='preflight', on_error='fail'),))
+    WorkflowStore(home, workspace_root=ws).save_workflow(wf)
+    os.rename(db, offline)
+    tool = WorkflowsTool(home, workspace_root=ws, owner_id='owner_test',
+        runner_options_provider=lambda: {'extra_write_roots': (ws,)})
+    first = tool.execute({'action': 'run', 'workflow_id': 'preflight'})
+    assert not first.ok and not target.exists(), first.output
+    rid = first.result_envelope['workflow_run_id']
+    failed = WorkflowRunStore(home).load_run(rid)
+    assert failed.steps[0].escalation_result['effect_outcome'] == 'not_started'
+    assert failed.steps[0].escalation_result['effect_started'] is False
+    os.rename(offline, db)
+    resumed = tool.execute({'action': 'resume', 'workflow_run_id': rid})
+    assert resumed.ok, resumed.output
+    assert target.read_text() == 'once'
+    final = WorkflowRunStore(home).load_run(rid)
+    assert final.status == 'succeeded' and final.steps[0].output_snapshot == {'result': 41}

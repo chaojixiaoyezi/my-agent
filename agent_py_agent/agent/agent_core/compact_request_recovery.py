@@ -15,6 +15,8 @@ from ..conversation.compact_calibration import (
     calibrated_compact_request_tokens,
 )
 from ..conversation.compact_guard import (
+    CompactCapacityFacts,
+    CompactRecoveryFacts,
     ConversationCompactError,
     compact_circuit_is_open,
     compact_exception_code,
@@ -86,6 +88,10 @@ class PreparedCompactRecovery:
     prompt_input: PromptRenderInput | None = field(default=None, repr=False)
     render_params: object | None = field(default=None, repr=False)
     committed: bool = False
+    # 只表示同次请求经既有临时工具桩确实收敛，不推进任何canonical压缩代次。
+    degraded: bool = False
+    degraded_capacity: CompactCapacityFacts | None = field(default=None, repr=False)
+    degraded_recovery_facts: CompactRecoveryFacts | None = field(default=None, repr=False)
     committed_thread: object | None = field(default=None, repr=False)
     # LLM: 已提交候选的（参数, prompt）；只供仍拿着渲染时原参数对象的后续尝试（瞬断重试）复用，换参数对象或回合结束即失效。
     # 字段用途: 让重试发送与首次尝试相同的已提交恢复请求，而不是压缩前的旧请求。
@@ -170,14 +176,16 @@ class PreparedCompactRecovery:
             self.resolved_input = frozen
             return params, prompt
         # 已决定摘要：旧请求不会再发送，候选按新种子重建历史。解绑原参数和冻结输入持有的完整原生历史，
-        # 摘要期间不再驻留旧请求；只解绑这一对象，经 replace 共享同一列表的其它参数对象不受影响。
+        # 摘要期间不再驻留旧请求；仅同步解绑同请求登记的能力刷新别名，任意replace视图与其它请求不受影响。
         # 解绑前先按自动判定同一口径量一次完整旧请求，作为 checkpoint 与进度里的“压缩前”大小：解绑后的冻结输入
         # 已不含历史，再量只剩系统提示和工具（2026-09-26 真机记成 35,915，实际约 31.3 万）。
         before_tokens = _full_request_tokens(agent, frozen)
         summary_surface, tool_source = _transcript_summary_surface(self, frozen, tool_source)
         self.active_cache_fork = None if source.messages else _active_turn_cache_fork(prompt, frozen)
         frozen = replace(frozen, provider_history_messages=())
-        object.__setattr__(params, "provider_history_messages", [])
+        from .runtime.capability_refresh import release_compact_provider_history
+
+        release_compact_provider_history(params)
         backend = agent.backend
         config = agent.config
         from ..memory_archive.compact_semantic_summary import semantic_summary_config
@@ -232,7 +240,7 @@ class PreparedCompactRecovery:
             if _restore_optional_preflight(self, params, frozen, before_tokens, exc):
                 return params, prompt
             # 强制恢复、结构错误或仍超窗不得进入普通业务模型重试。
-            raise ConversationCompactError("上下文压缩未完成，原始会话记录保留不变", code=compact_exception_code(exc)) from exc
+            raise _recovery_failure(self, params, before_tokens, exc) from exc
         raise_if_compact_interrupted(interrupted)
         material = result.request_projection.material if result.request_projection is not None else None
         if (not result.compacted or not isinstance(material, CompactRecoveryMaterial)
@@ -345,11 +353,21 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
     from ..backends.tool_ir import ToolResult
     from .tool_request_projection import text_request_capacity_known
 
-    allowed, reason = compact_failure_is_degradable(exc)
+    capacity_failure = (isinstance(exc, ConversationCompactError)
+                        and exc.code == "COMPACT_CANDIDATE_TOO_LARGE"
+                        and isinstance(exc.capacity, CompactCapacityFacts)
+                        and exc.capacity.input_ceiling_tokens > 0
+                        and (exc.capacity.fixed_tokens is None
+                             or exc.capacity.fixed_tokens < exc.capacity.input_ceiling_tokens))
+    allowed, reason = compact_failure_is_degradable(exc, degrade_eligible=capacity_failure)
     if not allowed:
         return False
+    seed = getattr(params, "conversation_history_seed", None)
+    source_messages = getattr(recovery.source, "messages", None)
+    active_source_known = (seed is None and source_messages is not None and not source_messages
+                           and getattr(recovery.source, "compact_context", None) is not None)
     if (type(params.__dict__.get("provider_history_messages")) is not list
-            or getattr(params, "conversation_history_seed", None) is None):
+            or (seed is None and not active_source_known)):
         return False
     restored = _native_provider_history_messages(params, include_compact_summary=False)
     previous = params.provider_history_messages
@@ -357,7 +375,7 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
     ceiling = model_request_input_ceiling(recovery.agent, recovery.source.policy.context_window_tokens)
     before = calibrated_compact_request_tokens(before_tokens, recovery.calibration)
     has_tool_results = any(isinstance(item, ToolResult) for item in params.tool_ir_history)
-    if has_tool_results and (recovery.force or before > int(ceiling * 0.92)
+    if has_tool_results and (capacity_failure or recovery.force or before > int(ceiling * 0.92)
             or (frozen.prompt_input is not None and text_request_capacity_known(params))):
         from ._tool_loop_service import _continue_after_compact_failure
         from .model.context_pressure import model_visible_context_snapshot
@@ -374,14 +392,18 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
             return calibrated_compact_request_tokens(raw, recovery.calibration)
 
         try:
-            _continue_after_compact_failure(recovery.agent, params, estimate, reason=reason, force=recovery.force,
-                                           calibration=recovery.calibration, prompt=prompt)
+            # 容量软错只接受真正缩小且低于原用户门的临时视图；不能借物理余量原样跨过低阈值。
+            extra = ({"input_ceiling_tokens": min(recovery.source.policy.trigger_tokens,
+                                                   exc.capacity.input_ceiling_tokens)} if capacity_failure else {})
+            _continue_after_compact_failure(recovery.agent, params, estimate, reason=reason,
+                                           force=recovery.force or capacity_failure,
+                                           calibration=recovery.calibration, prompt=prompt, **extra)
         except BaseException as failure:
             object.__setattr__(params, "provider_history_messages", previous)
             if isinstance(failure, ConversationCompactError) and failure.code == "COMPACT_BUDGET_EXCEEDED":
                 return False
             raise
-    elif not recovery.force and 0 <= before < ceiling:
+    elif not capacity_failure and not recovery.force and 0 <= before < ceiling:
         object.__setattr__(params, "compact_degradation_latched", True)
         object.__setattr__(params, "compact_degradation_reason", reason)
         object.__setattr__(params, "compact_degraded_baseline_tokens", before)
@@ -394,9 +416,53 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
     else:
         object.__setattr__(params, "provider_history_messages", previous)
         return False
+    recovery.degraded = True
+    recovery.degraded_capacity = exc.capacity if capacity_failure else None
+    recovery.degraded_recovery_facts = (_recovery_failure(recovery, params, before_tokens, exc).recovery_facts
+                                      if capacity_failure else None)
     recovery.resolved_input = replace(frozen, provider_history_messages=tuple(restored),
         compact_degradation_stubs=tuple((getattr(params, "compact_degradation_stubs", None) or {}).items()))
     return True
+
+
+
+def _recovery_failure(recovery, params, before_tokens: int, exc: Exception) -> ConversationCompactError:
+    """结构化预算沿原异常报告传播；只描述本次未发送，不抹掉已经发生的工具执行。"""
+    from ..backends.tool_ir import ToolResult
+
+    code = compact_exception_code(exc)
+    capacity = exc.capacity if isinstance(exc, ConversationCompactError) else None
+    policy = recovery.source.policy
+    window = policy.context_window_tokens
+    physical = model_request_input_ceiling(recovery.agent, window)
+    requested_output = getattr(recovery.agent.backend, "max_tokens", None)
+    facts = CompactRecoveryFacts(
+        current_tokens=calibrated_compact_request_tokens(before_tokens, recovery.calibration),
+        trigger_tokens=policy.trigger_tokens, recovery_target_tokens=policy.recovery_target_tokens,
+        context_window_tokens=window, physical_input_ceiling_tokens=physical,
+        known_output_reserve_tokens=window - physical,
+        requested_output_tokens=requested_output if type(requested_output) is int and requested_output >= 0 else None,
+        prior_tool_results=sum(isinstance(item, ToolResult) for item in params.tool_ir_history),
+        pressure_forced=bool(recovery.force),
+    )
+    if code == "COMPACT_CANDIDATE_TOO_LARGE":
+        candidate = str(capacity.candidate_tokens) if isinstance(capacity, CompactCapacityFacts) else "未知"
+        if not isinstance(capacity, CompactCapacityFacts):
+            action = "下一步：先核实完整候选计量，禁止原样重试。"
+        elif capacity.candidate_tokens >= physical:
+            action = ("下一步：候选也超物理输入门，拆小后续工作片或选择确实更大窗口的模型；"
+                      "不要虚增 model_context_window_tokens，也不能仅提高触发线。")
+        else:
+            action = ("下一步：管理员调整 memory_compact_auto_trigger_max_tokens 与 memory_compact_trigger_percent，"
+                      f"使生效门>{candidate}且不超过物理输入上限；禁止原样重试。")
+        message = (f"{code}：候选{candidate}未低于输入门；本次未提交/未发送，旧工具不重放。"
+                   f"{action}tokens 当前{facts.current_tokens}/触发{facts.trigger_tokens}/恢复{facts.recovery_target_tokens}，"
+                   f"窗口{window}/已知输出预留{facts.known_output_reserve_tokens}/输入上限{physical}；"
+                   "物理余量不覆盖用户阈值。")
+    else:
+        message = (f"压缩未提交：{code}（{type(exc).__name__}）；"
+                   "本次业务请求未发送，已消费工具保留且不重放；请按具体原因修正后再继续")
+    return ConversationCompactError(message, code=code, capacity=capacity, recovery_facts=facts)
 
 
 # LLM: 宿主边界唯一的观测冻结点：按冻结请求的完整投影算稳定表面指纹（与预检 request_projection_surface_fingerprint
@@ -652,4 +718,6 @@ def _transcript_summary_surface(recovery, frozen, tool_source):
         return replace(surface, media_decision=media_decision), tool_source
     if transcript_prefix_exceeds_capacity(recovery.agent, surface, prefix, recovery.calibration):
         return surface, tool_source
-    return replace(surface, transcript_prefix=prefix), tool_source if prefix.joint_end else None
+    # 连续缓存前缀不能越过保留事实，但不能因此撤掉完整工具来源；
+    # 非联合前缀由摘要器在缓存前缀之后附加同次已证明的工具材料。
+    return replace(surface, transcript_prefix=prefix), tool_source

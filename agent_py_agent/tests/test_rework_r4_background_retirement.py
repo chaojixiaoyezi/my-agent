@@ -429,3 +429,6 @@ def test_owned_background_input_survives_as_host_history_after_ack(queued_busine
                                actor=reader)
     visible = [row for row in result["items"] if row["text"] == "follow-up body"]
     assert len(visible) == 1 and visible[0]["role"] == "host"
+    assert visible[0]['execution_refs'] == [] and visible[0]['input_ref'] is None
+    assert visible[0]['association_coverage'] == 'unknown'
+    assert visible[0]['association_reason'] == 'RUNTIME_EXECUTION_SOURCE_UNAVAILABLE:NOT_BOUND'

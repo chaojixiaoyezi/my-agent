@@ -226,3 +226,62 @@ def test_tui_parses_the_gateway_breakdown_with_bounds():
     assert status is not None
     assert status.subagent_other_labels == (("宿主停机中断", 2), ("失败", 1))
     assert "异常 3：宿主停机中断 2，失败 1" in render_conversation_task_status(status)
+
+
+@pytest.mark.parametrize('status,ended_at,label', [
+    ('BLOCKED', 0.0, '已结束 · 受阻'),
+    ('BLOCKED', 19.0, '已结束 · 受阻'),
+    ('PAUSED', 19.0, '已结束 · 暂停'),
+    ('RUNNING', 19.0, '已结束'),
+])
+def test_ended_child_projection_survives_runtime_reducer_and_render(status, ended_at, label):
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import _active_subagent_count
+    from agent_py_agent.tests.test_conversation_agent_activity import _run
+
+    task = _run('historical-child', status=status, ended_at=ended_at, current_tool='stale-tool')
+    row = _subagent_row(SimpleNamespace(), task)
+    assert row['run_id'] == task.id and row['status'] == status
+    assert row['lifecycle_phase'] == 'terminal'
+    if status in {'BLOCKED', 'PAUSED'}:
+        assert _subagent_current_activity(task) == label
+    if status == 'RUNNING':
+        assert _subagent_current_activity(task) == '已结束'
+    # 走真实runtime/reducer两级白名单，不能只验证renderer私有函数。
+    runtime = TuiRuntime('ended-panel')
+    runtime.update_background_activity(1, {'subagents': [row], 'main_activity': {
+        'task_id': 'live-main', 'phase': 'running', 'activity': '正在使用 read_file'}})
+    snapshot = runtime.store.snapshot()
+    block = next(block for block in snapshot.active_blocks if block.role == 'background')
+    assert block.metadata['subagents'][0]['run_id'] == task.id
+    assert _active_subagent_count(list(block.metadata['subagents'])) == 0
+    frame = render_tui_snapshot(snapshot, TuiRenderContext(width=160))
+    lines = [fragments_text(line) for line in (*frame.transcript_lines, *frame.agent_lines)]
+    assert any(label in line for line in lines), lines
+    assert any('正在使用 read_file' in line for line in lines), lines
+    assert not any('等待 1 个子代理' in line for line in lines), lines
+    focused = TuiRuntime('ended-focused')
+    focused.update_background_activity(1, {'main_activity': {
+        'task_id': task.id, 'phase': 'completed', 'ended_at': ended_at,
+        'activity': _subagent_current_activity(task)}})
+    frame = render_tui_snapshot(focused.store.snapshot(), TuiRenderContext(width=160,
+        focused_agent_run_id=task.id, focused_agent_status=status))
+    assert any(label in fragments_text(line) for line in frame.transcript_lines)
+
+
+def test_current_permission_keeps_real_main_state_and_deduplicates_live_children():
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import _active_subagent_count
+    from agent_py_agent.tests.test_conversation_agent_activity import _run
+
+    row = _subagent_row(SimpleNamespace(), _run('current-child', status='RUNNING'))
+    assert row['lifecycle_phase'] == 'running'
+    assert _active_subagent_count([row, dict(row)]) == 1
+    paused = _subagent_row(SimpleNamespace(), _run('paused-child', status='PAUSED'))
+    assert paused['lifecycle_phase'] == 'paused'
+    assert _subagent_current_activity(_run('paused-child', status='PAUSED')) == '已暂停'
+    runtime = TuiRuntime('permission-panel')
+    runtime.update_background_activity(1, {'subagents': [row], 'main_activity': {
+        'task_id': 'live-main', 'phase': 'waiting_permission', 'activity': '等待工具审批'}})
+    frame = render_tui_snapshot(runtime.store.snapshot(), TuiRenderContext(width=160))
+    lines = [fragments_text(line) for line in (*frame.transcript_lines, *frame.agent_lines)]
+    assert any('等待审批' in line and '等待工具审批' in line for line in lines), lines
+    assert not any('等待 1 个子代理' in line for line in lines), lines

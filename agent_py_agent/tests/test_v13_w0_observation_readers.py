@@ -90,7 +90,8 @@ def seeded(background):
 # 函数用途: seed后重绑定来源以覆盖运行过程中才出现的账本。
 def wire(services, runtime):
     readers = default_observation_readers(services.owner_home, services.owner_id,
-        services.host.conversation_store, runtime)
+        services.host.conversation_store, runtime,
+        workspace_task_path_template=services.host.config.workspace_task_path_template)
     services.observation.readers = readers
     return readers
 
@@ -369,11 +370,19 @@ def test_business_media_registry_version_and_content(background_http):
     bob, bob_task = observed_task(background_http, user='business-bob')
     seed_observed_runtime(bob, bob_task)
     status, denied = background_call(background_http, 'artifacts.get', {'artifact_id': 'media-record'}, user='business-bob')
-    # Bob原媒体来源未就绪，不能用Alice来源证明不存在；明确unknown且零内容。
+    # Bob 没有媒体登记文件，旧主任务的登记覆盖尚未证明；已有媒体流损坏是另一种原因。
     assert status == 503 and denied['data'] == {}, denied
     reasons = {item['key']: item['value'] for item in denied['error']['details']}
-    assert reasons['reason'] == 'ARTIFACT_REGISTRY_UNREADABLE'
+    assert reasons['reason'] == 'ARTIFACT_REGISTRY_DISCOVERY_INCOMPLETE'
     assert 'canonical media bytes' not in json.dumps(denied)
+    from agent_py_agent.agent.artifacts.registry import REGISTRY_RELATIVE_PATH
+
+    registry = bob.owner_home / 'artifacts' / 'business' / REGISTRY_RELATIVE_PATH
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_bytes(b'broken-json\n')
+    status, broken = background_call(background_http, 'artifacts.get', {'artifact_id': 'media-record'}, user='business-bob')
+    assert status == 503 and broken['data'] == {}, broken
+    assert {item['key']: item['value'] for item in broken['error']['details']}['reason'] == 'ARTIFACT_REGISTRY_UNREADABLE'
     status, old = background_call(background_http, 'artifacts.get', {'artifact_id': 'media-record', 'version_ref': 'stale-version'})
     assert status == 404 and old['data'] == {}, old
 

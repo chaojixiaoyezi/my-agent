@@ -212,8 +212,14 @@ def test_python_projection_keeps_real_receipt_facts(gateway):
     assert (conflict['ok'], conflict['http_status'], conflict['state'], conflict['effect_outcome']) == (False, 409, 'failed', 'not_started')
     assert conflict['error']['code'] == 'REVISION_CONFLICT'
     forged = business_client_for_agent(thin_client(gateway, ALICE, token='not-the-gateway-credential')).call('spaces.list', {})
-    assert (forged['ok'], forged['http_status'], forged['state'], forged['effect_outcome']) == (False, 403, 'unknown', 'unknown')
-    assert forged['error'] == {'code': 'BUSINESS_RESPONSE_INVALID'} and forged['body']['error'] == 'forbidden'
+    assert (forged['ok'], forged['http_status'], forged['state'], forged['effect_outcome']) == (False, 403, 'failed', 'not_started')
+    assert forged['error']['code'] == 'LOCAL_CREDENTIAL_REQUIRED'
+    assert forged['error']['retryable'] is False
+    facts = {row['key']: row['value'] for row in forged['error']['details']}
+    assert facts['reason'] == 'business_transport_authentication_rejected'
+    assert facts['retry_same_request'] is False
+    assert facts['next_action']
+    assert sorted(forged) == sorted(RECEIPT_FIELDS + ['ok', 'http_status', 'idempotency_key'])
     offline = business_client_for_agent(thin_client(gateway, ALICE, port=closed_port()))
     lost = offline.prepare('spaces.create', {'name': '离线空间'})
     result = offline.send(lost)
@@ -233,7 +239,7 @@ def test_node_consumes_real_200_202_and_error_envelopes(gateway):
  assert.equal(created.state, 'completed'); assert.equal(created.effect_outcome, 'committed');
  const rejected = async (promise, status, code) => {
    const error = await promise.then(() => null, e => e);
-   assert.ok(error, code + ' 被当成功'); assert.equal(error.status, status); assert.ok(error.message.includes('拒绝'));
+   assert.ok(error, code + ' 被当成功'); assert.equal(error.status, status); assert.ok(error.message.includes(code)); assert.ok(error.message.includes('not_started')); assert.ok(error.message.includes('请'));
    assert.deepEqual(Object.keys(error.body).sort(), FIELDS, 'HTTP 错误正文仍可读');
    assert.equal(error.body.state, 'failed'); assert.equal(error.body.error.code, code);
    assert.equal(error.body.effect_outcome, 'not_started');
@@ -246,7 +252,13 @@ def test_node_consumes_real_200_202_and_error_envelopes(gateway):
  const forged = new ui.BusinessClient((path, options) => fetch(GATEWAY + path,
    {...options, headers: {...options.headers, ...AUTH, 'X-Gateway-Token': 'not-the-gateway-credential'}}));
  const denied = await forged.call('spaces.list', {}).then(() => null, e => e);
- assert.equal(denied.status, 403); assert.equal(denied.body.error, 'forbidden');
+ assert.equal(denied.status, 403);
+ assert.deepEqual(Object.keys(denied.body).sort(), FIELDS);
+ assert.equal(denied.body.state, 'failed'); assert.equal(denied.body.effect_outcome, 'not_started');
+ assert.equal(denied.body.error.code, 'LOCAL_CREDENTIAL_REQUIRED'); assert.equal(denied.body.error.retryable, false);
+ const facts = Object.fromEntries(denied.body.error.details.map(row => [row.key, row.value]));
+ assert.equal(facts.reason, 'business_transport_authentication_rejected');
+ assert.equal(facts.retry_same_request, false); assert.ok(facts.next_action);
 ''')
     run_node(gateway, r'''
  const api = new ui.BusinessClient(live);
@@ -424,3 +436,87 @@ def test_web_recovery_reads_real_events_with_bounded_canonical_continuation(gate
  assert.equal(observation.cursor, served[served.length - 1].data.next_cursor);
  assert.deepEqual(ids(updates.slice(before)), [], '重扫已见事件按 event_id 去重');
 ''', SPACE=space['space_id'], OTHER=other['space_id'], EVENT_IDS=event_ids)
+
+
+@pytest.mark.parametrize('wrong_target', [False, True])
+def test_tui_followup_uses_original_task_wire_and_freezes_selected_target(gateway, wire, wrong_target):
+    import asyncio
+
+    from prompt_toolkit.buffer import Buffer
+
+    from agent_py_agent.cli.chat_parts.tui_background_agents import submit_business_input
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    # 本用例使用原W2服务，不使用该文件其它运输用例的202端口替身。
+    del gateway.agent.business_background
+    client = business_client_for_agent(thin_client(gateway, MAIN))
+    space = client.call('spaces.create', {'name': 'follow-up-wire'})['data']['space_id']
+    created = client.call('background_agents.create', {'space_id': space, 'name': '原目标'})
+    agent_id = created['data']['agent']['agent_id']
+    prior = client.call('tasks.assign', {'space_id': space, 'agent_id': agent_id, 'instruction': '原任务'})['data']['task_id']
+    runtime, pending = TuiRuntime('follow-up-ui'), []
+    frozen = SimpleNamespace(active_agent_id=agent_id, active_thread_id='other-thread' if wrong_target else agent_id,
+                             business_space_id=space)
+    navigation = SimpleNamespace(snapshot=lambda: frozen, active_runtime=lambda: runtime,
+                                 business_agents=TuiBackgroundAgents(client))
+    params = SimpleNamespace(agent_navigation=navigation, input_area=SimpleNamespace(buffer=Buffer()))
+    event = SimpleNamespace(app=SimpleNamespace(create_background_task=pending.append, invalidate=lambda: None))
+    assert submit_business_input(event, params, f'/followup {prior} 请复核原结果')
+    # 导航已变；协程只能使用提交时冻结的原观察对象，不重新取当前目标。
+    navigation.snapshot = lambda: SimpleNamespace(active_agent_id='later-target', active_thread_id='later-target')
+    before = len(wire)
+    asyncio.run(pending.pop())
+    sent = [row['body'] for row in wire[before:]]
+    assert [row['action'] for row in sent] == (['tasks.get'] if wrong_target else ['tasks.get', 'tasks.follow_up', 'tasks.get'])
+    tasks = client.call('tasks.list', {'filter': {'agent_id': agent_id}})['data']['items']
+    assert len(tasks) == (1 if wrong_target else 2)
+    if not wrong_target:
+        follow_up = sent[1]
+        assert follow_up['params'] == {'task_id': prior, 'instruction': '请复核原结果'}
+        assert follow_up['idempotency_key']
+        assert sent[-1]['params']['task_id'] != prior
+        new_task = gateway.agent.conversation_store.session_tasks.require(next(row['task_id'] for row in tasks if row['task_id'] != prior))
+        assert (new_task.origin_task_id, new_task.target_thread_id) == (prior, agent_id)
+    else:
+        assert any('FOLLOW_UP_TARGET_MISMATCH' in block.text for block in (*runtime.store.snapshot().stable_blocks, *runtime.store.snapshot().active_blocks))
+
+
+def test_tui_background_help_model_and_invalid_followup_are_explicit_and_readonly(gateway, wire):
+    import asyncio
+
+    from prompt_toolkit.buffer import Buffer
+
+    from agent_py_agent.cli.chat_parts.tui_background_agents import submit_business_input
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    del gateway.agent.business_background
+    client = business_client_for_agent(thin_client(gateway, MAIN))
+    space = client.call('spaces.create', {'name': 'model-read-wire'})['data']['space_id']
+    created = client.call('background_agents.create', {'space_id': space, 'name': '模型状态'})
+    agent_id = created['data']['agent']['agent_id']
+    runtime, pending = TuiRuntime('model-read-ui'), []
+    snapshot = SimpleNamespace(active_agent_id=agent_id, active_thread_id=agent_id, business_space_id=space)
+    navigation = SimpleNamespace(snapshot=lambda: snapshot, active_runtime=lambda: runtime,
+                                 business_agents=TuiBackgroundAgents(client))
+    buffer = Buffer()
+    params = SimpleNamespace(agent_navigation=navigation, input_area=SimpleNamespace(buffer=buffer))
+    event = SimpleNamespace(app=SimpleNamespace(create_background_task=pending.append, invalidate=lambda: None))
+    before = len(wire)
+    assert submit_business_input(event, params, '/help')
+    buffer.text = '/followup stask-only'
+    assert submit_business_input(event, params, buffer.text)
+    assert buffer.text == '/followup stask-only'
+    assert len(wire) == before and pending == []
+    buffer.text = '/followup ' + 'x' * 129 + ' 非空正文'
+    assert submit_business_input(event, params, buffer.text)
+    assert buffer.text == '/followup ' + 'x' * 129 + ' 非空正文'
+    assert len(wire) == before and pending == []
+    assert submit_business_input(event, params, '/model')
+    asyncio.run(pending.pop())
+    assert [row['body']['action'] for row in wire[before:]] == ['background_agents.model.get']
+    assert wire[-1]['body']['params'] == {'agent_id': agent_id}
+    text = '\n'.join(block.text for block in (*runtime.store.snapshot().stable_blocks, *runtime.store.snapshot().active_blocks))
+    assert '/followup <原task_id> <正文>' in text and '/model' in text
+    assert 'INVALID_SCHEMA' in text and 'not_started' in text and '$.params.task_id' in text
+    assert '后台模型状态（只读）' in text and 'effective_at' in text and 'selection_revision' in text
+    assert client.call('tasks.list', {'filter': {'agent_id': agent_id}})['data']['items'] == []

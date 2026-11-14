@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from types import UnionType
 from typing import get_args, get_origin, get_type_hints
 
@@ -56,26 +56,63 @@ def clean_json(value):
     raise ValueError("资产字段必须是有限JSON值")
 
 
+class AssetDescriptorValidationError(ValueError):
+    """资产纯值校验错误；只报告字段与结构，不回显输入正文。"""
+
+    def __init__(self, path, expected, actual_type, example):
+        self.field = path
+        self.expected = expected
+        self.actual_type = actual_type
+        self.example = example
+        super().__init__(f'ASSET_DESCRIPTOR_INVALID: {path} 期望 {expected}，实际 {actual_type}；'
+                         f'示例 {example}；此校验不写入资产，请修正此字段后重新调用')
+
+
+def _annotation_description(annotation):
+    origin, args = get_origin(annotation), get_args(annotation)
+    if origin is UnionType:
+        return ' | '.join(_annotation_description(item) for item in args)
+    if origin is tuple:
+        return 'array[' + _annotation_description(args[0]) + ']'
+    if origin is dict:
+        return 'object'
+    if annotation is object:
+        return 'JSON value'
+    return {str: 'string', int: 'integer', float: 'number', bool: 'boolean', type(None): 'null'}.get(
+        annotation, getattr(annotation, '__name__', 'object'))
+
+
+def _descriptor_type_error(path, annotation, value):
+    expected = _annotation_description(annotation)
+    example = '[]' if get_origin(annotation) is tuple else '{}' if get_origin(annotation) is dict else (
+        '"示例"' if annotation is str else 'true' if annotation is bool else '0')
+    return AssetDescriptorValidationError(path, expected, type(value).__name__, example)
+
+
 # LLM: dataclass注解是类型权威，不接受bool冒充计数或字符串冒充列表；嵌套对象复制后归一。
 # 函数用途: 把JSON列表和嵌套对象恢复为严格契约值。
-def _convert(value, annotation):
+def _convert(value, annotation, path="descriptor"):
     origin, args = get_origin(annotation), get_args(annotation)
     if origin is UnionType:
         for option in args:
             try:
-                return _convert(value, option)
+                return _convert(value, option, path)
             except (ValueError, TypeError):
                 continue
-        raise ValueError("资产字段类型不匹配")
+        raise _descriptor_type_error(path, annotation, value)
     if origin is tuple and isinstance(value, (list, tuple)):
-        return tuple(_convert(item, args[0]) for item in value)
+        return tuple(_convert(item, args[0], f"{path}[{index}]") for index, item in enumerate(value))
     if origin is dict and isinstance(value, dict) or annotation is object:
         return clean_json(value)
     if isinstance(annotation, type) and issubclass(annotation, _Record):
-        return annotation.from_dict(value.to_dict() if isinstance(value, annotation) else value)
+        try:
+            return annotation.from_dict(value.to_dict() if isinstance(value, annotation) else value)
+        except AssetDescriptorValidationError as error:
+            raise AssetDescriptorValidationError(path + error.field.removeprefix('descriptor'),
+                error.expected, error.actual_type, error.example) from None
     if type(value) is annotation or annotation is float and type(value) in (int, float):
         return clean_json(value)
-    raise ValueError("资产字段类型不匹配")
+    raise _descriptor_type_error(path, annotation, value)
 
 
 # LLM: 字段表、类型与枚举统一在构造和from_dict执行；实例只携带脱敏副本，不进行IO。
@@ -89,7 +126,7 @@ class _Record:
         if hints is None:
             hints = get_type_hints(record_type)
         for item in fields(self):
-            value = _convert(getattr(self, item.name), hints[item.name])
+            value = _convert(getattr(self, item.name), hints[item.name], "descriptor." + item.name)
             if item.name in {"id", "source_id", "target_id", "candidate_id", "step_id"}:
                 safe_asset_id(value)
             if item.name in {"name", "credential_ref"} and not value.strip():
@@ -121,12 +158,21 @@ class _Record:
     @classmethod
     def from_dict(cls, payload):
         if not isinstance(payload, dict):
-            raise ValueError("资产记录必须是对象")
+            raise AssetDescriptorValidationError("descriptor", "object", type(payload).__name__, "{}")
         values = clean_json(payload)
         if cls is AssetDescriptor and values.pop("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION:
             raise ValueError("不支持的资产协议版本")
-        if values.keys() - {item.name for item in fields(cls)}:
-            raise ValueError("资产记录包含未知字段")
+        declared = {item.name: item for item in fields(cls)}
+        unknown = values.keys() - declared.keys()
+        if unknown:
+            name = next(iter(unknown))
+            name = name if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', name) else '<unknown>'
+            raise AssetDescriptorValidationError('descriptor.' + name, 'declared field', 'unknown field',
+                '允许字段: ' + ', '.join(list(declared)[:16]))
+        for name, item in declared.items():
+            if name not in values and item.default is MISSING and item.default_factory is MISSING:
+                raise AssetDescriptorValidationError('descriptor.' + name,
+                    _annotation_description(get_type_hints(cls)[name]), 'missing', '按字段类型补齐必填值')
         return cls(**values)
 
 
@@ -241,6 +287,19 @@ def output_contract_fields(contract):
     return expected, nullable, types
 
 
+WORKFLOW_OUTPUT_CONTRACT_VERSION_KEY = 'workflow_output_contract_version'
+
+
+def workflow_output_contract_version(metadata):
+    """缺省仅表示历史v1；读取/冻结不升级，正式登记边界负责写入新版本。"""
+    version = metadata.get(WORKFLOW_OUTPUT_CONTRACT_VERSION_KEY, 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError('WORKFLOW_OUTPUT_CONTRACT_VERSION_INVALID: '
+            'descriptor.metadata.workflow_output_contract_version须为整数1或2；'
+            '未产生写入，请修正该字段或省略后重新登记')
+    return version
+
+
 # LLM: CAS、统计、展示、来源路径及候选观察不决定执行语义；代码与权威IO/访问/执行参数/依赖必须全部进入规范hash。
 # 函数用途: 为脚本和工作流生成与存储修订分离的执行内容身份，不读取文件或使用调用者提供的旧指纹。
 def execution_definition_ref(value, *, kind=None):
@@ -257,6 +316,9 @@ def execution_definition_ref(value, *, kind=None):
     elif selected['kind'] == 'workflow':
         selected['steps'] = [{key: item for key, item in step.items() if key != 'name'} for step in value.get('steps', ())]
         selected['enabled'] = value.get('enabled', descriptor.get('enabled', True))
+        version = workflow_output_contract_version(descriptor.get('metadata', {}))
+        if version != 1:
+            selected[WORKFLOW_OUTPUT_CONTRACT_VERSION_KEY] = version
     else:
         raise ValueError('执行内容身份只适用于脚本与工作流')
     raw = json.dumps(selected, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
@@ -346,15 +408,24 @@ class AssetDescriptor(_Record):
 # 函数用途: 为脚本与工作流从完整输入构造既有资产值对象，不写入或执行资产。
 def asset_descriptor_from_definition(data, asset_id, kind) -> AssetDescriptor:
     if not isinstance(data, dict):
-        raise ValueError('descriptor必须为对象')
+        raise AssetDescriptorValidationError('descriptor', 'object', type(data).__name__, '{}')
     data = {'id': asset_id, 'kind': kind, **data}
-    missing = REQUIRED_DEFINITION_KEYS - data.keys()
-    if missing or data.get('id') != asset_id or data.get('kind') != kind:
-        raise ValueError(f"必须提供标准提取Key（缺少: {', '.join(sorted(missing))}）且id/kind与目标一致")
-    if not isinstance(data['name'], str) or not data['name'].strip() or not isinstance(data['io_contract'], dict):
-        raise ValueError('name或io_contract类型无效')
-    if any(not isinstance(data[key], list) for key in ('access_targets', 'data_sources', 'credential_refs')):
-        raise ValueError('目标、数据源和凭据引用必须为列表')
+    for name in sorted(REQUIRED_DEFINITION_KEYS):
+        if name not in data:
+            expected = 'string' if name == 'name' else 'object' if name == 'io_contract' else 'array'
+            example = '"示例资产"' if name == 'name' else '{}' if name == 'io_contract' else '[]'
+            raise AssetDescriptorValidationError('descriptor.' + name, expected, 'missing', example)
+    for name, target in (('id', asset_id), ('kind', kind)):
+        if data[name] != target:
+            raise AssetDescriptorValidationError('descriptor.' + name, 'same as target ' + name,
+                                                 type(data[name]).__name__, '使用当前目标的 ' + name)
+    if not isinstance(data['name'], str) or not data['name'].strip():
+        raise AssetDescriptorValidationError('descriptor.name', 'non-empty string', type(data['name']).__name__, '"示例资产"')
+    if not isinstance(data['io_contract'], dict):
+        raise AssetDescriptorValidationError('descriptor.io_contract', 'object', type(data['io_contract']).__name__, '{}')
+    for name in ('access_targets', 'data_sources', 'credential_refs'):
+        if not isinstance(data[name], list):
+            raise AssetDescriptorValidationError('descriptor.' + name, 'array', type(data[name]).__name__, '[]')
     return AssetDescriptor.from_dict(data)
 
 

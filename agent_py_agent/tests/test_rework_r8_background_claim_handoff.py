@@ -100,8 +100,36 @@ def _cleanup(case):
     case.original_tick.join(timeout=15)
 
 
+@pytest.fixture(autouse=True)
+def _observe_successor_turn_identity(monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+
+    original = SimpleAgent.run
+
+    def run(agent, prompt, *, params):
+        backend = agent.backend
+        if hasattr(backend, "task_calls"):
+            attrs = params.task_attributes or {}
+            session_task = attrs.get("conversation_session_task_id")
+            if session_task:
+                assert params.run_id == params.task_id == params.request_id == session_task
+                backend.task_calls.append(session_task)
+            else:
+                key = attrs.get("host_session_message_key")
+                assert isinstance(key, str) and key
+                backend.message_calls.append(key)
+        return original(agent, prompt, params=params)
+
+    monkeypatch.setattr(SimpleAgent, "run", run)
+
+
 def _successor_backend(original):
     class SuccessorBackend(type(original)):
+        def __init__(self):
+            super().__init__()
+            self.task_calls = []
+            self.message_calls = []
+
         def generate(self, prompt, on_chunk=None, **kwargs):
             self.calls += 1
             return ModelResponse(text=f"successor result {self.calls}", backend=self.name)
@@ -122,7 +150,10 @@ def _run_successors(case, count):
         successor_ids.append(_assign_successor(case, index))
         case.scheduler.tick()
         assert case.store.session_tasks.require(successor_ids[-1]).status == "done"
-    assert backend.calls == count
+    assert backend.task_calls == successor_ids
+    # 每个已结束任务还会唤醒原sender；本拍新生成的末条结果留到下拍，不能算成executor重跑。
+    assert backend.message_calls == [f"session_task_result:{identifier}:done" for identifier in successor_ids[:-1]]
+    assert backend.calls == count + max(0, count - 1)
     if count:
         claim = case.store.claims.load(case.target)
         assert claim["claim_id"] != case.original_claim["claim_id"] and claim["status"] == "finished"
@@ -175,7 +206,7 @@ def test_original_cancellation_and_retirement_converge_after_healthy_successors(
         assert _identity(case.store.session_tasks.require(case.task_id)) == _identity(before)
         assert [case.store.session_tasks.require(identifier).to_dict() for identifier in successor_ids] == successor_rows
         assert case.claim_path.read_bytes() == current_claim
-        assert successor_backend.calls == successors and case.backend.calls == 2
+        assert successor_backend.calls == successors + max(0, successors - 1) and case.backend.calls == 2
         assert case.repo.get_agent_run_exec_lock(case.authority["agent_run_id"]) is None
         assert not (case.agent.home_paths.owner_home_dir / "after-cancel-result.txt").exists()
     finally:
@@ -440,8 +471,11 @@ def test_available_reuse_checkpoint_has_no_history_scan_or_predecessor_chain(tmp
         def observed(self, claim):
             active.append(claim.get("claim_id"))
             try:
-                checkpoints.append(original_helper(self, claim))
-                return checkpoints[-1]
+                result = original_helper(self, claim)
+                if "thread_id" not in claim:
+                    assert claim == {} and result is False
+                checkpoints.append((claim.get("thread_id"), result))
+                return result
             finally:
                 active.pop()
 
@@ -466,7 +500,14 @@ def test_available_reuse_checkpoint_has_no_history_scan_or_predecessor_chain(tmp
             assert set(claim) == claim_keys and "previous_claim" not in claim["previous_claim"]
             sizes.append(len(str(claim["previous_claim"])))
         # 只有第一次替换原claim时保存证明；之后普通后继的旧claim没有相关未结取消。
-        assert checkpoints == [True, False, False, False]
+        assert [result for thread, result in checkpoints if thread == case.target] == [True, False, False, False]
+        sender = case.store.session_tasks.require(case.task_id).sender_thread_id
+        assert [item for item in checkpoints if item[0] != case.target] == [
+            (None, False), (sender, False), (sender, False),
+        ]
+        assert len(checkpoints) == 7
+        assert len(case.agent.backend.task_calls) == 4
+        assert len(case.agent.backend.message_calls) == 3
         assert max(sizes) - min(sizes) < 64
         assert set(_control(case)) == control_keys | {"claim_finished"}
     finally:

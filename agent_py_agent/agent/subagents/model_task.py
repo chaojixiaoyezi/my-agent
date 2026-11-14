@@ -231,6 +231,9 @@ class SubAgentTask:
     root_subagent_session_id: str = ""
     allowed_skills: list[str] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=list)
+    # 创建时独立授予的工具；None表示旧记录未分开基础权限和临时grant来源。
+    base_allowed_tools: list[str] | None = None
+    capability_revision: int = 0
     used_skills: list[str] = field(default_factory=list)
     used_tools: list[str] = field(default_factory=list)
     capability_requests: list[CapabilityRequest] = field(default_factory=list)

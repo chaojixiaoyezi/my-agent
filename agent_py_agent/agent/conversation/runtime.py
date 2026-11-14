@@ -78,6 +78,7 @@ from .background_delivery import (
 )
 from .background_execution import (
     BackgroundCapacityDeferred,
+    BackgroundCompactPreflightDeferred,
     BackgroundCompactSliceYield,
     BackgroundExecutionDependencies,
     BackgroundExecutionResult,
@@ -555,6 +556,14 @@ def _goal_runtime_context(
             raise DataCorruptionError('SESSION_TASK_LIFECYCLE_ORIGIN_CONFLICT')
         origin_task_id, origin_objective = session_task.task_id, session_objective
         task_objective = session_objective
+    if session_origin is None and not origin_task_id:
+        from .execution_threads import lifecycle_session_message_origin
+
+        message_origin = lifecycle_session_message_origin(store, request.thread_id, task_id, request.wake_signal,
+            reason=request.reason)
+        if message_origin is not None:
+            origin_task_id, origin_objective = message_origin
+            task_objective = origin_objective
     if not link_error and _is_active_turn_lifecycle_continuation(request, task_objective):
         task_objective = _background_request_objective(
             store, request, durable_task_id=origin_task_id, session_origin=session_origin, origin_resolved=True,
@@ -1299,6 +1308,11 @@ class BackgroundMainAgentRuntime:
         recovered = recover_delegated_result(self.agent, thread.thread_id, task_id=request.task_id)
         if recovered is not None:
             return recovered
+        from .background_failed_task import recover_failed_task_result
+
+        recovered = recover_failed_task_result(self.agent, thread.thread_id, _session_task_run_id(request) or request.task_id)
+        if recovered is not None:
+            return recovered
         resolved_goal_context = goal_context or _goal_runtime_context(
             self.agent,
             self.store,
@@ -1324,7 +1338,7 @@ class BackgroundMainAgentRuntime:
         except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
                 RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
             raise
-        except (BackgroundCompactSliceYield, BackgroundCapacityDeferred):
+        except (BackgroundCompactSliceYield, BackgroundCapacityDeferred, BackgroundCompactPreflightDeferred):
             raise
         except Exception as exc:
             _settle_unconsumed_background_turn_input(self.agent, request, exc)
@@ -1481,16 +1495,24 @@ def _close_out_session_task_turn(
     from .im_delegation_delivery import delegated_delivery_task
 
     delegated = delegated_delivery_task(agent, request.thread_id, task_id=request.task_id)
+    from .background_failed_task import closed_failure_without_handlers
+
+    identity = execution.execution_identity or {}
+    original_task = agent.conversation_store.session_tasks.load(identity.get('task_id', '')) if identity.get('task_id') else None
+    failed_without_handlers = bool(original_task is not None and original_task.target_thread_id == request.thread_id
+        and closed_failure_without_handlers(agent, original_task, identity))
     try:
         closed = close_out_turn(
             agent,
             resolved_turn_id,
             TaskTurnOutcome(
-                ok=not bool(getattr(execution, "error", None)) and execution.runtime_status not in {"failed", "error"},
+                ok=not failed_without_handlers and not bool(getattr(execution, "error", None))
+                   and execution.runtime_status not in {"failed", "error"},
                 summary=str(getattr(execution, "response", "") or "").strip(),
                 result_refs=tuple(str(item['path']) for item in getattr(execution, 'delivery_artifacts', ())
                                   if isinstance(item.get('path'), str)),
                 result_artifacts=delivery_result_artifacts(execution),
+                delivery_artifact_diagnostics=tuple(getattr(execution, 'delivery_artifact_diagnostics', ()) or ()),
             ),
         )
         if closed is not None:
@@ -1671,8 +1693,13 @@ def _is_active_turn_lifecycle_continuation(
 # 能力控制片完成根任务后允许原模型回复进入交付；旧失败遇到已接续的源 run 也读当前子树和邮箱。
 # 这里只读结构化状态，正文/附件过滤与幂等仍归交付层；同步当前失败、能力完成和旧信封交错回归。
 # 函数用途: 决定后台模型回复是否进入用户会话；原开始快照不能吞掉长工作片已吸收结果后的最终汇报。
-def _background_delivery_decision(agent, request, *, store=None, user_reply_accepted=False, **route):
-    deliver, reason = _base_background_delivery_decision(agent, request, store=store, **route)
+def _background_delivery_decision(agent: object, request: BackgroundRunRequest, *,
+        store: ConversationStore | None = None, user_reply_accepted: bool = False,
+        resolved_channel: str | None = None, resolved_route_supports_proactive: bool | None = None,
+        resolved_route_supports_transcript: bool | None = None) -> tuple[bool, str]:
+    deliver, reason = _base_background_delivery_decision(agent, request, store=store,
+        resolved_channel=resolved_channel, resolved_route_supports_proactive=resolved_route_supports_proactive,
+        resolved_route_supports_transcript=resolved_route_supports_transcript)
     # /btw、审计和取消保持原合同；仅用户回复被子代理等待抑制时才覆盖。
     if not deliver and user_reply_accepted and reason in {
         "thread_goal_lifecycle_internal", "partial_subagent_success",
@@ -2472,8 +2499,14 @@ def _run_params(
 
 def _business_context_from_wake(agent, thread_id: str, request: BackgroundRunRequest, *,
                                 session_origin=None, origin_resolved=False):
+    from ..scheduler.execution import execution_run
+    from ..scheduler.execution_policy import scheduled_business_context
     from .business_contracts import BusinessExecutionContext
 
+    if agent is not None and str(getattr(request, 'task_id', '') or '').startswith('srun_'):
+        scheduled = execution_run(agent, request)
+        if scheduled is not None:
+            return scheduled_business_context(agent, scheduled)
     session_task_id = _session_task_id_from_wake(request)
     if agent is None:
         return None
@@ -4769,11 +4802,7 @@ def _execute_wake_signal(
     redelivery = _redeliver_frozen_wake(scheduler, signal, now=now)
     if redelivery is not None:
         return redelivery
-    from ..scheduler.execution import scheduled_target_outcome
-    saved_target = scheduled_target_outcome(scheduler.runtime.agent, BackgroundRunRequest(
-        thread_id=signal.thread_id, reason=signal.reason,
-        task_id=signal.root_task_id, wake_signal=signal.to_dict(),
-    )) if claim is not None else None
+    saved_target = _saved_scheduler_target(scheduler, signal) if claim is not None else None
     if saved_target is None and _wake_signal_should_skip(
         scheduler.runtime.agent,
         scheduler.store,
@@ -4920,9 +4949,28 @@ def _quota_wake_report_after_error(
     return report
 
 
-# LLM: 未配置模型保留原 wake/Goal 等配置；失效档案也先保留来源，由外层 track_wake_attempt 计数并在阈值结案，不能提前吃掉。
-#   Gateway 对失效档案走定时冷却，只有 ModelNotConfiguredError 走配置依赖等待；不替换任务原模型。
-# 函数用途: 已外发补账失败保留原冻结wake并释放claim，其余关闭或释放失败的调度claim；不能把暂缺模型配置误作任务已受阻并吃掉恢复事件。
+def _saved_scheduler_target(scheduler: BackgroundMainAgentScheduler, signal: WakeSignal):
+    """只有绑定原定时执行的唤醒才读取其目标账，冻结通知可直接按原件重投。"""
+    from ..scheduler.execution import scheduled_target_outcome
+
+    if (
+        signal.reason != "scheduled_job_due"
+        or not signal.root_task_id
+        or signal.metadata.get("scheduler_run_id") != signal.root_task_id
+    ):
+        return None
+    return scheduled_target_outcome(
+        scheduler.runtime.agent,
+        BackgroundRunRequest(
+            thread_id=signal.thread_id,
+            reason=signal.reason,
+            task_id=signal.root_task_id,
+            wake_signal=signal.to_dict(),
+        ),
+    )
+
+
+# 已冻结的外发回执保留在原 wake；模型配置等待与调度失败分别由原记录结算。
 def _handle_nonquota_wake_error(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -4932,18 +4980,13 @@ def _handle_nonquota_wake_error(
     error: BaseException,
 ) -> None:
     observed_at = time.time()
-    if is_model_configuration_unavailable(error):
+    if is_model_configuration_unavailable(error) or isinstance(error, BackgroundCompactPreflightDeferred):
         if claim is not None:
             scheduler.scheduler_service.release(claim, now=observed_at)
         return
     pending = scheduler.store.wakes.pending_one(signal.wake_signal_id)
     cached = cached_owner_delivery(pending) if pending is not None else None
-    from ..scheduler.execution import scheduled_target_outcome
-    saved_target = scheduled_target_outcome(scheduler.runtime.agent, BackgroundRunRequest(
-        thread_id=signal.thread_id, reason=signal.reason,
-        task_id=signal.root_task_id, wake_signal=signal.to_dict(),
-    )) if claim is not None else None
-    if cached is not None or saved_target is not None:
+    if cached is not None or (claim is not None and _saved_scheduler_target(scheduler, signal) is not None):
         # 已保存目标结果或冻结通知只释放原 claim；异常仍由原 attempt 记录并退避，禁止重执行。
         if claim is not None:
             scheduler.scheduler_service.release(claim, now=observed_at)
@@ -6335,6 +6378,8 @@ def resume_prompt_for(*, continuation_reason: str, continuation_seq: int, user_t
 # 函数用途: 从执行结果的交付项提取随任务终态冻结的产物身份。
 def delivery_result_artifacts(execution: object) -> tuple[dict, ...]:
     return tuple({"path": str(item["path"]), "artifact_id": str(item.get("artifact_id") or ""),
-                  "sha256": str(item.get("sha256") or ""), "size_bytes": item.get("size_bytes")}
+                  "sha256": str(item.get("sha256") or ""), "size_bytes": item.get("size_bytes"),
+                  **{key: item[key] for key in ('task_id', 'run_id')
+                     if isinstance(item.get(key), str) and item[key].strip()}}
                  for item in getattr(execution, "delivery_artifacts", ()) or ()
                  if isinstance(item, dict) and isinstance(item.get("path"), str) and item.get("artifact_id"))

@@ -6,6 +6,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred
 from ..runtime_errors import DataCorruptionError
 from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
 
@@ -15,7 +16,7 @@ _LIFECYCLE_STATES = {
     "retiring": ("retiring", "IDENTITY_RETIRING"),
     "retired": ("retired", "IDENTITY_RETIRED"),
 }
-_READ_ERRORS = (OSError, ValueError, TypeError, KeyError, sqlite3.Error, DataCorruptionError)
+_READ_ERRORS = (OSError, ValueError, TypeError, KeyError, sqlite3.Error, DataCorruptionError, RuntimeDatabaseDeferred)
 
 
 # 函数用途: 把秒级时间戳转成 UTC ISO 字符串；0 或缺失返回 None。
@@ -46,21 +47,57 @@ def model_readiness(host: object, thread: object) -> tuple[bool | None, str]:
     return True, ""
 
 
+def _child_activity(runtime, task, *, owner_id, thread_id, limit=20):
+    """仅读准确父运行的有界孩子页；未看完或无权威库不能证明整项失活。"""
+    if runtime is None:
+        return False, False
+    try:
+        parent = runtime.main_agent_run_for_task(task.task_id)
+        parent_id = parent["run_id"] if parent is not None else task.task_id
+        # 不排序历史孩子；父索引读取至limit+1立即停止，超页就保留partial而不声称整树失活。
+        with runtime._runtime_connection() as conn:
+            rows = conn.execute(
+                'SELECT ar.status,aa.status AS attempt_status FROM agent_runs pa '
+                'JOIN task_runs ptr ON ptr.task_run_id=pa.task_run_id '
+                'JOIN tasks pt ON pt.task_id=ptr.task_id '
+                'JOIN agent_runs ar ON ar.parent_agent_run_id=pa.agent_run_id '
+                'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id '
+                'JOIN tasks t ON t.task_id=tr.task_id '
+                'LEFT JOIN agent_attempts aa ON aa.attempt_id=ar.current_attempt_id AND aa.agent_run_id=ar.agent_run_id '
+                'WHERE pa.run_id=? AND pt.task_id=? AND pt.owner_id=? AND pt.thread_id=? '
+                'AND t.task_id=? AND t.owner_id=? AND t.thread_id=? LIMIT ?',
+                (parent_id, task.task_id, owner_id, thread_id, task.task_id, owner_id, thread_id, limit + 1)).fetchall()
+        running = any(row['status'] in {'created', 'running'} and row['attempt_status'] == 'running'
+                      for row in rows[:limit])
+        complete = len(rows) <= limit and all(
+            row['attempt_status'] in {'running', 'done', 'failed', 'cancelled'}
+            and row['status'] in {'created', 'running', 'done', 'failed', 'cancelled'} for row in rows)
+        return running, complete
+    except _READ_ERRORS:
+        return False, False
+
+
 # LLM: tasks 必须是调用方已读出的同线程非终态 canonical 任务（有界页）；只按准确 task 主键读唤醒定位与尝试账，
 #   不 glob 队列或历史。running 只能来自调用方已复核的准确执行，不能由身份 available 推断。支持准入饱和阻塞报告。
 # 函数用途: 生成一个后台会话或单个任务的结构化调度视图（状态、原因码、唤醒引用、失败计数、下次重试时间）。
 def scheduling_view(store: object, *, thread_id: str, tasks: list, identity_state: str = "", running: bool = False,
                     model_ready: bool | None = None, model_reason: str = "", pending_inputs: bool | None = None,
                     tasks_complete: bool = True, probe_limit: int = 20,
-                    admission_limit_reached: bool = False) -> dict:
+                    admission_limit_reached: bool = False, runtime=None, owner_id="") -> dict:
     view = {"state": "unknown", "reason_code": "", "pending_task_count": len(tasks), "wake_signal_ids": [],
             "failure_count": 0, "uncounted_count": 0, "last_failure_at": None, "next_attempt_at": None,
             "model_ready": model_ready, "coverage": "complete" if tasks_complete else "partial"}
     probed = tasks[:probe_limit]
     if len(tasks) > len(probed):
         view["coverage"] = "partial"
+    child_running, children_complete = False, True
     last_failed, next_attempt, counted_reason, uncounted_reason = 0.0, 0.0, "", ""
     for task in probed:
+        active, complete = _child_activity(runtime, task, owner_id=owner_id, thread_id=thread_id)
+        child_running = child_running or active
+        children_complete = children_complete and complete
+        if not complete:
+            view["coverage"] = "partial"
         try:
             refs, error = store.wakes.task_responsibility_report(thread_id, task.task_id)
         except _READ_ERRORS:
@@ -96,6 +133,8 @@ def scheduling_view(store: object, *, thread_id: str, tasks: list, identity_stat
         view["state"], view["reason_code"] = lifecycle
     elif running:
         view["state"] = "running"
+    elif child_running:
+        view["state"], view["reason_code"] = "waiting_child", "CHILD_RUNNING"
     elif not tasks:
         if pending_inputs is None:
             view["coverage"] = "partial" if view["coverage"] == "complete" else view["coverage"]
@@ -109,6 +148,8 @@ def scheduling_view(store: object, *, thread_id: str, tasks: list, identity_stat
         view["state"], view["reason_code"] = "wake_backoff", counted_reason or uncounted_reason
     elif view["wake_signal_ids"]:
         view["state"] = "queued"
+    elif not children_complete:
+        view["reason_code"] = "CHILD_EXECUTION_UNCONFIRMED"
     elif view["coverage"] == "complete":
         # 非终态任务却没有任何待处理唤醒：受理没变成可调度工作，必须显式暴露而不是显示成普通等待。
         view["state"], view["reason_code"] = "stalled", "NO_PENDING_WAKE"
@@ -119,13 +160,13 @@ def scheduling_view(store: object, *, thread_id: str, tasks: list, identity_stat
 #   本入口没有宿主模型目录，model_ready 留 None，不猜。支持准入饱和阻塞报告。
 # 函数用途: 为单个 canonical 会话任务生成调度视图。
 def task_scheduling_view(store: object, task: object, *, running: bool = False,
-                         admission_limit_reached: bool = False) -> dict:
+                         admission_limit_reached: bool = False, runtime=None, owner_id="") -> dict:
     if task.status in SESSION_TASK_TERMINAL_STATUSES:
         view = scheduling_view(store, thread_id=task.target_thread_id, tasks=[], pending_inputs=False)
         view.update(state="terminal", reason_code=str(task.failure_code or "")[:128], pending_task_count=0)
         return view
     return scheduling_view(store, thread_id=task.target_thread_id, tasks=[task], running=running,
-                           admission_limit_reached=admission_limit_reached)
+                           admission_limit_reached=admission_limit_reached, runtime=runtime, owner_id=owner_id)
 
 
 # 已结束任务摘要在业务投影里的最大字符数（与 TaskResultView.summary 的 maxLength 一致）。

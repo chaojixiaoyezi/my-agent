@@ -34,7 +34,9 @@ from ..attempt.sandbox import (
     AttemptSandboxSpec,
     SandboxUnavailableError,
     gateway_bound_ports,
+    system_read_roots_for_platform,
 )
+from ..common.cancellation import raise_if_cancelled
 from ..common.log_redaction import redact_sensitive_value
 from ..common.managed_owner_generation import (
     ManagedOwnerGenerationError,
@@ -54,7 +56,11 @@ from ..path_access_policy import (
 from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling._subprocess_env_scrub import scrub_subprocess_env
 from ..tooling.write_boundary import SandboxWriteProtection, ordered_write_scope_roots
-from .datasource_runtime import ScriptDatasourceRuntime, script_history_record
+from .datasource_runtime import (
+    ScriptDatasourceRuntime,
+    script_history_record,
+    sdk_preload_bootstrap,
+)
 from .models import ScriptExecutionResult, payload, safe_path
 from .run_artifacts import RunArtifactBatch, RunOutError, current_run_out_target
 
@@ -91,6 +97,7 @@ def _init_guard():
     denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
     exclusive_roots = tuple(Path(p) for p in cfg.get("host_exclusive_paths", ()))
     owner_scope = Path(cfg["owner_scope_root"]) if cfg.get("owner_scope_root") else None
+    exact_read_scope = cfg.get("read_scope_mode") == "exact"
     app_home = Path(cfg["agent_home_root"]) if owner_scope is not None else None
     protected_nodes = frozenset(tuple(part.casefold() for part in parent.parts)
         for root in (*protected_paths, *exclusive_roots) for parent in root.parents)
@@ -178,6 +185,8 @@ def _init_guard():
             raise perm_err(eacces, "Permission denied", str(raw))
         if _under(target, denied_roots) and not _under(target, (*read_roots, *runtime_roots)):
             raise perm_err(eacces, "Permission denied", str(raw))
+        if exact_read_scope and not _under(target, (*read_roots, *runtime_roots)):
+            raise perm_err(eacces, "script exact read scope denied", str(raw))
 
     # LLM: 文件内容读取沿用真实目标边界，不能由符号链接逃出获准根。
     # 函数用途: 检查一次普通文件读取。
@@ -637,6 +646,7 @@ def _execute(command, folder, environment, input_json, timeout, capture):
     with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         stdin.write(input_json.encode('utf-8'))
         stdin.seek(0)
+        raise_if_cancelled()
         launching = time.monotonic()
         process = subprocess.Popen(command, cwd=folder, env=environment, stdin=stdin,
                                    stdout=stdout, stderr=stderr, start_new_session=os.name == 'posix')
@@ -647,6 +657,7 @@ def _execute(command, folder, environment, input_json, timeout, capture):
         deadline, error = time.monotonic() + timeout, ''
         try:
             while process.poll() is None:
+                raise_if_cancelled()
                 if os.fstat(stdout.fileno()).st_size + os.fstat(stderr.fileno()).st_size > MAX_OUTPUT_BYTES:
                     error = 'SCRIPT_OUTPUT_LIMIT'
                     break
@@ -773,6 +784,59 @@ def _interpreter_runtime(interpreter: str) -> tuple[str | None, tuple[Path, ...]
     return executable, roots
 
 
+@lru_cache(maxsize=1)
+def _sdk_native_read_files(executable: str) -> tuple[Path, ...]:
+    """只在新鲜隔离解释器内预载可信SDK，冻结其实际原生依赖叶，绝不枚举长驻宿主插件。"""
+    if sys.platform != 'darwin':
+        return ()
+    probe = sdk_preload_bootstrap() + '''
+import ctypes,json,os
+from pathlib import Path
+dyld=ctypes.CDLL(None)
+dyld._dyld_image_count.restype=ctypes.c_uint32
+dyld._dyld_get_image_name.argtypes=[ctypes.c_uint32]
+dyld._dyld_get_image_name.restype=ctypes.c_char_p
+count=dyld._dyld_image_count()
+if count>1024: raise RuntimeError('SDK_NATIVE_IMAGE_BUDGET_EXCEEDED')
+paths=[]
+for index in range(count):
+    raw=dyld._dyld_get_image_name(index)
+    if raw:
+        path=Path(os.fsdecode(raw))
+        if path.is_absolute() and path.is_file(): paths.append(str(path.resolve()))
+body=json.dumps(list(dict.fromkeys(paths)))
+if len(body)>65536: raise RuntimeError('SDK_NATIVE_PATH_BUDGET_EXCEEDED')
+print(body)
+'''
+    result = subprocess.run([executable, '-I', '-B', '-S', '-c', probe, str(Path(__file__).resolve().parents[3])],
+        env={'PATH': os.defpath}, capture_output=True, timeout=10, check=False)
+    if result.returncode or len(result.stdout) > 65536:
+        summary = redact_sensitive_value(result.stderr.decode('utf-8', errors='replace')[-512:])
+        raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: SDK_NATIVE_DEPENDENCIES_UNAVAILABLE '
+            f'returncode={result.returncode} stdout_bytes={len(result.stdout)} stderr={summary}; '
+            '脚本未启动，请核实隔离Python解释器可导入当前SDK，禁止扩大读取根后盲目重试')
+    values = json.loads(result.stdout)
+    if not isinstance(values, list) or any(not isinstance(value, str) or not Path(value).is_absolute()
+                                          or not Path(value).is_file() for value in values):
+        raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: SDK_NATIVE_DEPENDENCIES_INVALID')
+    # dyld返回规范镜像名，而load command可使用opt等软链接别名；仅补解析到已加载叶的原拼写，避免扩父目录。
+    links = subprocess.run(['/usr/bin/otool', '-L', *values], env={'PATH': os.defpath},
+        capture_output=True, timeout=10, check=False)
+    if links.returncode or len(links.stdout) > 262144:
+        raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: SDK_NATIVE_LINKS_UNAVAILABLE '
+            f'returncode={links.returncode} stdout_bytes={len(links.stdout)}; '
+            '脚本未启动，请核实otool可读取当前SDK的原生依赖文件，禁止扩大读取根后重试')
+    loaded = set(values)
+    aliases = []
+    for line in links.stdout.decode('utf-8').splitlines():
+        if not line.startswith('\t'):
+            continue
+        path = Path(line.strip().split(' (compatibility version', 1)[0])
+        if path.is_absolute() and str(path.resolve(strict=False)) in loaded:
+            aliases.append(path)
+    return tuple(dict.fromkeys([*(Path(value) for value in values), *aliases]))
+
+
 # LLM: 容器祖先不是私有目录；macOS的/home数据卷别名仍是宽根，拒绝home严格祖先，不授予读写。
 # 函数用途: 判断一个候选是否是不能当作私有目录挂载的宽容器根。
 def _is_broad_container_root(path: Path, home_dir: Path) -> bool:
@@ -814,6 +878,19 @@ def _owner_read_boundary(owner_scope_root, agent_home_root):
     return scope, home
 
 
+def _validate_exact_owner_roots(roots, owner_scope, app_home):
+    """exact原生读根须先与owner墙相交；不能把宽正根交给子进程后只依赖Python拒绝。"""
+    if owner_scope is None:
+        return
+    for root in roots:
+        target = Path(root).resolve(strict=False)
+        if app_home.is_relative_to(target) or (target.is_relative_to(app_home)
+                and not any(target.is_relative_to(allowed) for allowed in (owner_scope, app_home / 'shared'))):
+            raise ValueError('SCRIPT_EXACT_READ_ROOT_OWNER_DENIED: '
+                f'root={target}; owner={owner_scope}; 脚本未启动，请移除跨owner、控制目录或覆盖app home的宽读取根，'
+                '改为当前owner/shared或已授权外部业务的具体路径')
+
+
 # LLM: 固化脚本仅接收 JSON；宿主必须在调用前完成 Owner、审批和工具权限检查。
 # 类用途: 按 Owner 的脚本配置执行 Python、bash 或 sh，且不调用任何模型。
 class ScriptRunner:
@@ -831,6 +908,7 @@ class ScriptRunner:
         extra_write_roots: tuple[str | Path, ...] = (),
         public_read_roots: tuple[str | Path, ...] = (),
         restrict_to_roots: bool = False,
+        read_scope_mode: str = 'policy',
         workspace_root: str | Path | None = None,
         work_context=None,
         host_credential_env_names: frozenset[str] = frozenset(),
@@ -849,6 +927,12 @@ class ScriptRunner:
         self.extra_write_roots = tuple(Path(p).expanduser().resolve(strict=False) for p in extra_write_roots)
         self.public_read_roots = tuple(Path(p).expanduser().resolve(strict=False) for p in public_read_roots)
         self.restrict_to_roots = bool(restrict_to_roots)
+        if read_scope_mode not in ('policy', 'exact'):
+            raise ValueError('SCRIPT_READ_SCOPE_MODE_INVALID: read_scope_mode 必须为 policy 或 exact')
+        self.read_scope_mode = read_scope_mode
+        if read_scope_mode == 'exact':
+            _validate_exact_owner_roots((*self.public_read_roots, *self.extra_write_roots),
+                                       self.owner_scope_root, self.agent_home_root)
         self.workspace_root = Path(workspace_root).absolute() if workspace_root is not None else None
         self.work_context = payload(work_context) if work_context is not None else None
         self.host_credential_env_names = frozenset(host_credential_env_names)
@@ -981,7 +1065,11 @@ class ScriptRunner:
             context = self._work_context(folder)
             target = current_run_out_target(self.owner_home) if self.run_out_quota is not None else None
             if target is not None:
-                descriptor = open_directory_beneath(folder, ('run_out',), create=True, require_dir_fd=True)
+                try:
+                    descriptor = open_directory_beneath(folder, ('run_out',), create=True, require_dir_fd=True)
+                except OSError as exc:
+                    raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='run_out_prepare',
+                                      path_role='run_out_dir') from exc
                 os.close(descriptor)
                 capture['run_out_target'] = target
                 if context is not None:
@@ -1002,6 +1090,13 @@ class ScriptRunner:
             hidden_paths = tuple(dict.fromkeys((*host.hidden, *self.host_exclusive_paths)))
             command = [executable, '-I', '-B', str(entrypoint)] if interpreter == 'python3' else [executable, str(entrypoint)]
             applied_sandbox = False
+            exact_read_scope = self.read_scope_mode == 'exact'
+            system_read_roots = system_read_roots_for_platform() if exact_read_scope and sys.platform in ('darwin', 'linux') else ()
+            if exact_read_scope and interpreter == 'python3':
+                runtime_read_roots = (*runtime_read_roots, *_sdk_native_read_files(executable))
+            if exact_read_scope:
+                _validate_exact_owner_roots((*runtime_read_roots, *ds_runtime.read_roots),
+                                           self.owner_scope_root, self.agent_home_root)
             if self.use_sandbox:
                 shared_root = folder if self.restrict_to_roots else self.owner_home
                 sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
@@ -1016,11 +1111,14 @@ class ScriptRunner:
                     protected_write_patterns=host.patterns,
                     protected_directory_write_patterns=host.directory_write_patterns,
                     protected_directory_unlink_patterns=host.directory_unlink_patterns,
-                    implicit_attempt_write_roots=True,
+                    implicit_attempt_write_roots=not exact_read_scope,
+                    read_only_root=exact_read_scope,
+                    read_mode='allowlist' if exact_read_scope else None,
+                    system_read_roots=system_read_roots,
                     network_access=net_allowed, deny_gateway_ports=denied_ports if net_allowed else ()))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
                     applied_sandbox = True
-            enforces_scope = self.restrict_to_roots or bool(self.owner_scope_root or hidden_paths or protected_paths
+            enforces_scope = exact_read_scope or self.restrict_to_roots or bool(self.owner_scope_root or hidden_paths or protected_paths
                 or denied_write_roots or host.patterns or host.directory_write_patterns or host.directory_unlink_patterns)
             guarded = enforces_scope and interpreter == 'python3'
             if guarded:
@@ -1031,8 +1129,9 @@ class ScriptRunner:
                 write_roots = (resolved_folder, *self.extra_write_roots, *ds_runtime.write_roots, Path('/dev'))
                 persona_paths = tuple(path.resolve(strict=False) for path in persona_process_protected_paths(self.owner_home))
                 env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps({
+                    'read_scope_mode': self.read_scope_mode,
                     'read_roots': [str(p) for p in (resolved_folder, *self.public_read_roots, *self.extra_write_roots, *ds_runtime.read_roots)],
-                    'runtime_read_roots': [str(p) for p in runtime_read_roots],
+                    'runtime_read_roots': [str(p) for p in (*runtime_read_roots, *system_read_roots)],
                     'owner_scope_root': str(self.owner_scope_root or ''),
                     'agent_home_root': str(self.agent_home_root or ''),
                     'write_roots': [str(p) for p in write_roots],
@@ -1064,7 +1163,8 @@ class ScriptRunner:
                         ds_runtime.close()
                     except Exception as exc:
                         if capture.get('run_out_target') is not None:
-                            raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED') from exc
+                            raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='data_source_close',
+                                              path_role='datasource_manifest') from exc
                         raise
             finally:
                 if capture.get('run_out_target') is None:
@@ -1073,7 +1173,8 @@ class ScriptRunner:
                     try:
                         shutil.rmtree(staging_root)
                     except OSError as exc:
-                        raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED') from exc
+                        raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='scratch_cleanup',
+                                          path_role='staging_root') from exc
 
     # LLM: 原摘要/超时/沙箱链不变；run-out清理前暂存、清理后发表；归档异常硬失败并透传有界脱敏首因。
     # 函数用途: 执行脚本并返回结构化结果，单步调试可显式禁止资产摘要写入。
@@ -1156,7 +1257,8 @@ class ScriptRunner:
                                        output, stdout[:PREVIEW_CHARS], stderr[:PREVIEW_CHARS], error,
                                        bool(error), redact_sensitive_value(context) if error else {})
         result.phase = capture['phase'] if error else 'terminal'
-        result.effect_outcome = ('unknown' if cleanup or delivery_receipts else 'failed') if capture.get('started') and error else (
+        # 原进程退出只证明执行结束，不能证明写入、扣费或发命令未发生。
+        result.effect_outcome = 'unknown' if capture.get('started') and error else (
             'confirmed' if not error else 'not_started')
         result.execution_definition_ref = capture.get('definition_ref', '')
         result.output_dir, result.output_artifacts = output_dir, output_artifacts

@@ -46,7 +46,7 @@ _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
             "actor_runtime": {"type": "string", "enum": ["native", "external_instruction_only"]},
             "max_cumulative_children": {"type": "integer", "minimum": 0},
             "allow_descendants": {"type": "boolean"},
-            "max_descendant_depth": {"type": "integer", "minimum": 0},
+            "max_descendant_depth": {"type": "integer", "minimum": 0, "description": "交给该子代理的剩余后代代数（非根树绝对深度）：0 禁止它再派子代，1 允许再派一代；每次派工继承时减1，子代显式值必须小于父级原剩余值。省略表示继承父级剩余值减1；无父级限制时省略表示不加此限。"},
             "exact_write_set": {"type": "array", "items": {"type": "string"}},
             "allowed_read_inputs": {"type": "array", "items": {"type": "string"}},
             "allowed_output_dirs": {"type": "array", "items": {"type": "string"}},

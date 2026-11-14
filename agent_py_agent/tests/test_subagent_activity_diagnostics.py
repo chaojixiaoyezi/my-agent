@@ -151,6 +151,7 @@ def test_recursive_wait_released_by_one_new_notice_not_every_heartbeat(tmp_path,
     parent.status = "PENDING"
     worker.subagents.save(parent)
     task.parent_id = parent.id
+    task.root_id = parent.root_id or parent.id
     worker.subagents.save(task)
     worker.subagents.add_child(parent.id, task.id)
     mark_parent_waiting_for_direct_children(worker.subagents, parent.id)
@@ -248,3 +249,19 @@ def test_retry_after_notification_write_failure_keeps_original_dedupe_key(tmp_pa
     diagnostics.observe_runner_activity(worker, task.id)
     assert len(worker.conversation_store.wakes.pending()) == 1
     assert current_activity_diagnostic(worker.subagents.load(task.id))["notice_key"] == notice_key
+
+
+def test_recursive_wait_rejects_diagnostic_from_another_root(tmp_path, monkeypatch):
+    worker, task, records, _clock = _environment(tmp_path, monkeypatch)
+    parent = worker.subagents.create_run(goal="本树父代理", thought="等待", plan=["整合"], role="coordinator")
+    parent.status = "PENDING"
+    worker.subagents.save(parent)
+    task.parent_id, task.root_id = parent.id, "foreign-root"
+    worker.subagents.save(task)
+    worker.subagents.add_child(parent.id, task.id)
+    mark_parent_waiting_for_direct_children(worker.subagents, parent.id)
+    records.append(_model_record(task))
+    diagnostics.observe_runner_activity(worker, task.id)
+    decision = reconcile_parent_wait_for_child(worker.subagents, task.id)
+    assert not decision.should_resume and decision.reason == "child_scope_mismatch"
+    assert worker.subagents.load(parent.id).status == "PENDING"

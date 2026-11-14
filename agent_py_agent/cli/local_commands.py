@@ -105,6 +105,7 @@ def cmd_status(args) -> int:
         surviving_background_sessions=state_counts["surviving_background_sessions"],
     )
     payload = build_status_payload(payload_ctx)
+    payload['gateway']['build_identity'] = _read_gateway_build_identity(agent, pid, alive)
     payload["suggestions"] = build_status_suggestions(agent, payload)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -115,9 +116,48 @@ def cmd_status(args) -> int:
         request_counts, archive_request_counts, payload["suggestions"], state_load_error, heartbeat_load_error,
         unidentified_stale_attempts=state_counts["unidentified_stale_attempts"],
         surviving_background_sessions=state_counts["surviving_background_sessions"],
+        gateway_build_identity=payload['gateway']['build_identity'],
     )
     print_status_human(print_ctx)
     return 0
+
+
+def _read_gateway_build_identity(agent, pid, alive):
+    """有界只读正在回答的服务；不以本地CLI版本替代Gateway构建身份。"""
+    unknown = {'version': 'unknown', 'git_sha': 'unknown', 'runtime_prefix': 'unknown'}
+    if not alive or type(pid) is not int:
+        return {**unknown, 'status': 'unavailable', 'reason': 'gateway_not_running'}
+    import urllib.request
+    from urllib.error import HTTPError
+
+    from ..agent.common.authenticated_http import open_authenticated_request
+
+    try:
+        port = int(agent.config.gateway_port)
+        if not 0 < port < 65536:
+            raise ValueError('gateway port unavailable')
+        request = urllib.request.Request(f'http://127.0.0.1:{port}/status')
+        with open_authenticated_request(request, timeout=2) as response:
+            raw = response.read(1048577)
+        if len(raw) > 1048576:
+            raise ValueError('gateway status exceeds bounded response')
+        body = json.loads(raw)
+        if not isinstance(body, dict) or body.get('pid') != pid:
+            return {**unknown, 'status': 'unavailable', 'reason': 'gateway_pid_mismatch'}
+        identity = body.get('build_identity')
+        if not isinstance(identity, dict):
+            return {**unknown, 'status': 'unknown', 'reason': 'server_build_identity_unavailable'}
+        values = {key: value if isinstance(value := identity.get(key), str) and 0 < len(value) <= 4096 else 'unknown'
+                  for key in unknown}
+        return {**values, 'status': 'available', 'source': 'gateway_status'}
+    except HTTPError as exc:
+        status = exc.code
+        exc.close()
+        return {**unknown, 'status': 'unavailable', 'reason': 'gateway_status_http_error',
+                'error_type': 'HTTPError', 'http_status': status}
+    except (OSError, ValueError, TypeError) as exc:
+        return {**unknown, 'status': 'unavailable', 'reason': 'gateway_status_unavailable',
+                'error_type': type(exc).__name__}
 
 
 # LLM: status 的 Gateway 事实只来自 state.json/heartbeat.json 与进程存活；第五项是 state 里两个计数的投影：

@@ -61,12 +61,13 @@ class BusinessSpaceService:
     reference_resolver(kind, ref, actor)只返回已核Owner/范围的原对象元数据，不返回正文。
     """
     def __init__(self, owner_root, *, owner_id, reference_resolver=None, active_references=None,
-                 governance=None, enabled=False):
+                 governance=None, enabled=False, package_reference_resolver=None):
         if type(owner_id) is not str or not owner_id or type(enabled) is not bool:
             raise BusinessError('ACTOR_REQUIRED')
         self.owner_root = Path(os.path.abspath(owner_root))
         self.owner_id, self.enabled = owner_id, enabled
         self.reference_resolver, self.active_references = reference_resolver, active_references
+        self.package_reference_resolver = package_reference_resolver
         self.governance = governance
         self.state_parts = ('data', 'business', 'catalog.json')
         self.state_path = self.owner_root.joinpath(*self.state_parts)
@@ -197,9 +198,12 @@ class BusinessSpaceService:
     def reference(self, kind, ref, *, actor, space_id=None, project_ref=None):
         require_actor(actor, self)
         _identifier(ref)
-        if not callable(self.reference_resolver):
+        resolver = self.reference_resolver
+        if kind == 'package' and not callable(resolver):
+            resolver = self.package_reference_resolver
+        if not callable(resolver):
             raise BusinessError('HOST_NOT_READY')
-        row = self.reference_resolver(kind, ref, actor)
+        row = resolver(kind, ref, actor)
         if row is None:
             raise BusinessError('REFERENCE_NOT_FOUND')
         if type(row) is not dict or row.get('owner_id') != self.owner_id or row.get('ref') != ref:
@@ -211,15 +215,15 @@ class BusinessSpaceService:
             raise BusinessError('REFERENCE_NOT_FOUND')
         # 仅取定位字段，绝不复制path、Base64或插件任意metadata到业务账。
         projection = {key: row[key] for key in ('owner_id', 'space_id', 'project_ref', 'state', 'ref',
-            'version_ref', 'artifact_id', 'content_sha256', 'package_ref') if key in row}
+            'version_ref', 'artifact_id', 'content_sha256', 'package_ref', 'activation_id') if key in row}
         name = row.get('name')
         if kind == 'package' and isinstance(name, str) and 0 < len(name) <= 160:
             projection['name'] = name
         return projection
 
     # LLM: 原末核、CAS 和指纹不变；小快照与逐键回执沿同一日志提交，重放不解析旧回执历史。
-    # 函数用途: 在原 quota→目录锁内执行目录变更或返回准确的永久幂等结果。
-    def _transaction(self, action, params, *, actor, expected_revision=None, idempotency_key=None, mutate, commit_guard=None):
+    # 原写口与只读对账共用同一规范化、主体键及实参指纹；后者绝不调用mutate/recover。
+    def _receipt_identity(self, action, params, actor, expected_revision, idempotency_key):
         spec = business_action_spec(action)
         params = validate_params(action, params)
         if 'name' in params:
@@ -232,6 +236,58 @@ class BusinessSpaceService:
         fingerprint = hashlib.sha256(json.dumps([action, params, expected_revision], ensure_ascii=False,
             sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         key = hashlib.sha256(json.dumps([actor.subject_id, idempotency_key], ensure_ascii=False).encode()).hexdigest()
+        return params, fingerprint, key
+
+    def inspect_receipt(self, action, params, *, actor, expected_revision=None, idempotency_key=None):
+        """只核已存在的同主体原回执；未知、撤权及变参不能成为成功或重放许可。"""
+        params, fingerprint, key = self._receipt_identity(action, params, actor, expected_revision, idempotency_key)
+        rows = ReceiptRows(self)
+        for _ in range(3):
+            before = rows.pending()
+            state = self.authorize_call(action, params, actor=actor)
+            receipt = rows.get(key) or state['receipts'].get(key)
+            pending = before is not None and before['key'] == key
+            if receipt is None and pending:
+                receipt = before['receipt']
+            if rows.pending() != before:
+                continue
+            if receipt is None:
+                return None
+            rows.validate_receipt(receipt)
+            if receipt['fingerprint'] != fingerprint:
+                raise BusinessError('IDEMPOTENCY_CONFLICT')
+            result = validate_result(action, _copy(receipt['result']))
+            # 只消费已验证DTO中的资源ID；再按当前读权过滤确切对象，不泄漏历史回执目标。
+            targets = set()
+            def check_targets(value):
+                if isinstance(value, dict):
+                    for name, collection, read_action in (('space_id', 'spaces', 'spaces.get'),
+                            ('binding_id', 'bindings', 'interfaces.get'), ('asset_id', 'assets', 'assets.get')):
+                        selected = value.get(name)
+                        if selected is not None:
+                            target = state[collection].get(selected)
+                            if target is None:
+                                raise BusinessError('OBSERVATION_NOT_FOUND')
+                            self.authorize_call(read_action, {name: selected}, actor=actor)
+                            targets.add(selected)
+                    for nested in value.values():
+                        if isinstance(nested, (dict, list)):
+                            check_targets(nested)
+                elif isinstance(value, list):
+                    for nested in value:
+                        check_targets(nested)
+            check_targets({k: params[k] for k in ('space_id', 'binding_id', 'asset_id') if k in params})
+            check_targets(result)
+            self.authorize_call(action, params, actor=actor)
+            if rows.pending() != before:
+                continue
+            return {'operation_id': key, 'state': 'pending' if pending else 'completed',
+                    'target_refs': sorted(targets), 'error': None}
+        raise BusinessError('HOST_NOT_READY')
+
+    # 函数用途: 在原 quota→目录锁内执行目录变更或返回准确的永久幂等结果。
+    def _transaction(self, action, params, *, actor, expected_revision=None, idempotency_key=None, mutate, commit_guard=None):
+        params, fingerprint, key = self._receipt_identity(action, params, actor, expected_revision, idempotency_key)
         gate = owner_quota_enforcer_from_policy(self.owner_root)
         rows = ReceiptRows(self)
         with gate.admission() as admission:
@@ -299,7 +355,13 @@ class BusinessSpaceService:
     def _unique_name(self, state, name, *, excluding=None):
         if any(row['space_id'] != excluding and row['state'] == 'active' and _name(row['name']).casefold() == name.casefold()
                for row in state['spaces'].values()):
-            raise BusinessError('SPACE_NAME_CONFLICT')
+            raise BusinessError('SPACE_NAME_CONFLICT', details={
+                'field_path': '$.params.name',
+                'reason': '已有活跃空间使用相同的规范名称；本次未创建或覆盖空间。',
+                'normalization': 'NFKC+strip+casefold',
+                'retry_same_request': False,
+                'next_action': '请改用不同名称，或从 spaces.list 选择已有空间；不要原样重试。',
+            })
 
     def create(self, request: dict, *, actor: object, idempotency_key: str) -> dict:
         def mutate(state, params):

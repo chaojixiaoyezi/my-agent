@@ -22,6 +22,106 @@ from ..runtime_errors import DataCorruptionError
 from .schedule import ScheduleValidationError
 
 EXECUTION_DEFAULTS = {"mode": "followup", "model_policy": "inherit", "profile_id": ""}
+
+
+class ScheduledBusinessContextError(ScheduleValidationError):
+    """冻结来源校验失败仅拒绝本次未开始工作，保留精确结构码。"""
+
+    def __init__(self, code, message):
+        self.error_code = code
+        self.side_effect_state = 'not_started'
+        self.effect_outcome = 'not_started'
+        self.reason = message
+        super().__init__(code + '：' + message)
+
+
+def normalize_business_context(value, owner_id):
+    """只读校验原快照，旧无业务计划保持None，不从当前空间补造。"""
+    if value is None:
+        return None
+    from ..conversation.business_contracts import BusinessExecutionContext
+
+    try:
+        context = BusinessExecutionContext.from_dict(value)
+    except (ValueError, TypeError) as error:
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_SOURCE_INVALID',
+            '冻结业务记录格式不可读；本次尚未执行，请核对原计划快照，不要改用当前空间补造。') from error
+    if context.owner_id != owner_id:
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_OWNER_MISMATCH', '业务快照不属于当前owner；尚未执行，请核对原计划。')
+    return context.to_dict()
+
+
+def capture_business_context(agent):
+    """只接受当前runner与原执行库一致的typed事实，不接模型参数或attributes。"""
+    from ..conversation.business_contracts import BusinessExecutionContext
+
+    current = getattr(agent, '_current_run_params', None)
+    context = getattr(current, 'business_context', None)
+    if context is None:
+        return None
+    repository = getattr(getattr(agent, 'subagents', None), 'runtime_db', None)
+    if type(context) is not BusinessExecutionContext or repository is None:
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_SOURCE_INVALID', '缺少宿主原执行来源；计划尚未创建，请在原业务任务重新创建。')
+    try:
+        canonical = repository.business_context_for_execution(owner_id=agent.home_paths.owner_id,
+            run_id=getattr(current, 'run_id', ''), attempt_id=getattr(current, 'attempt_id', ''))
+    except (ValueError, TypeError) as error:
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_SOURCE_INVALID',
+            '原执行/attempt/owner无法核实；计划尚未创建，请在原业务任务重新创建。') from error
+    if context != canonical:
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_SOURCE_CONFLICT', '当前快照与原执行来源冲突；计划尚未创建，请核对原任务。')
+    return normalize_business_context(context.to_dict(), agent.home_paths.owner_id)
+
+
+def scheduled_business_context(agent, run):
+    """恢复原job/run冻结事实并复核当前权限，不能用后来的默认项目/安装版本替换。"""
+    from ..conversation.business_context import revalidate_business_context
+    from ..conversation.business_contracts import BusinessExecutionContext
+    from ..gateway_parts.business_api import local_business_context
+
+    if run.get('owner') != agent.scheduler_repository.owner:
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_OWNER_MISMATCH', '原定时运行不属于当前owner；尚未执行，请核对原计划。')
+    value = normalize_business_context(run.get('business_context'), agent.home_paths.owner_id)
+    job = agent.scheduler_repository.get_job(str(run['job_id']), include_deleted=True)
+    if value != normalize_business_context(job.get('business_context'), agent.home_paths.owner_id):
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_SOURCE_CONFLICT', '计划与运行的冻结范围不一致；尚未执行，请核对原计划，禁止改用当前空间重试。')
+    if value is None:
+        return None
+    context = BusinessExecutionContext.from_dict(value)
+    authority, services = local_business_context(agent)
+    from ..conversation.business_access import BusinessError
+
+    try:
+        revalidate_business_context(actor=services.actor(authority), context=context)
+    except BusinessError as error:
+        raise ScheduledBusinessContextError(error.code,
+            '原计划业务范围当前不可用；本次模型和工具尚未执行，请核对原空间启用状态、项目资料与当前owner权限；'
+            '不要替换为当前空间或新版本重试。') from error
+    return context
+
+
+def verified_scheduled_business_metadata(agent, params, owner_id):
+    """新执行线程只凭当前已领取的原srun恢复业务身份，不冒充原SessionTask执行体。"""
+    if (params.source not in {'scheduler_tool', 'background_main_agent'}
+            or not str(params.task_id).startswith('srun_')):
+        return None
+    run = agent.scheduler_repository.get_active_run(params.task_id)
+    thread_id = (params.task_attributes or {}).get('conversation_thread_id')
+    if (run is None or run.get('status') not in {'claimed', 'running'} or not run.get('claim_id')
+            or run.get('thread_id') != thread_id or run.get('owner', {}).get('id') != owner_id):
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_RUN_UNCLAIMED',
+            '原定时运行未被当前线程合法领取；模型和工具尚未开始，请核对原计划运行状态，禁止借其它线程继续。')
+    thread = agent.conversation_store.threads.require(thread_id)
+    if thread.owner_id != owner_id:
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_OWNER_MISMATCH',
+            '定时执行线程不属于原owner；模型和工具尚未开始，请核对原计划执行线程。')
+    context = scheduled_business_context(agent, run)
+    if context is None or context != params.business_context:
+        raise ScheduledBusinessContextError('SCHEDULER_BUSINESS_SOURCE_CONFLICT',
+            '当前执行与原定时快照不一致；模型和工具尚未开始，请核对原计划。')
+    return {'business_context': context.to_dict(), 'session_task_ref': context.task_id}
+
+
 EXECUTION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "description": "followup 沿计划执行会话（新 IM 已是后台）；isolated 每次新建独立上下文。inherit 跟随原来源聊天模型；fixed 固定档案 ID。IM 结果通知原布置者。",

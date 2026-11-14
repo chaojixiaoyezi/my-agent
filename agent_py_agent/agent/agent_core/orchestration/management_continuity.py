@@ -318,7 +318,8 @@ def _route_request(
         "target_type": target_type,
         "target_id": parent_id,
         "message": _route_message(requester, sender_thread, child_run_id, message),
-        "sender": requester.run_id or "unknown",
+        # guidance来源协议以线程标识sender；实际并发run在下方requester_run_id保留，不能互相冒充。
+        "sender": sender_thread,
         "priority": "normal",
         "delivery": "next_turn",
         "metadata": {

@@ -314,7 +314,10 @@ class TuiQueuedPlaceholderProcessor(Processor):
         show = (
             ti.lineno == 0
             and ti.document.text == ""
-            and bool(self.runtime.store.snapshot().queued_inputs)
+            and any(
+                self.runtime.has_queued_prompt(item.queue_id.removeprefix("queue:"))
+                for item in self.runtime.store.snapshot().queued_inputs
+            )
         )
         suffix = QUEUE_EDIT_PLACEHOLDER if show else ""
         return Transformation(

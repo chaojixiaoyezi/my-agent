@@ -219,12 +219,17 @@ def projection_file_stamp(path: Path) -> str:
 class RecoveryPendingIndex:
     # LLM: 每根独立，连接不跨调用保存；表中绝无请求正文或owner/执行能力。
     # 函数用途: 创建私有恢复投影与仅覆盖pending的查询索引。
-    def __init__(self, root: Path, *, blocking: bool = True, deadline: float | None = None) -> None:
+    def __init__(self, root: Path, *, blocking: bool = True, deadline: float | None = None,
+                 _initial_change: tuple[str, str] | None = None) -> None:
         self.root = Path(root)
         self.blocking, self.deadline = blocking, deadline
         self.path = self.root / "projection_state" / "recovery_pending.sqlite3"
         with self.connect() as db:
-            db.executescript("""
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version not in {0, 1}:
+                raise ValueError(f"unsupported recovery projection schema version: {version}")
+            if version == 0:
+                db.executescript("""
                 CREATE TABLE IF NOT EXISTS entries (
                     kind TEXT NOT NULL, request_id TEXT NOT NULL, version INTEGER NOT NULL,
                     pending INTEGER NOT NULL, stamp TEXT NOT NULL,
@@ -233,7 +238,11 @@ class RecoveryPendingIndex:
                     WHERE pending=1;
                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 INSERT OR IGNORE INTO meta VALUES ('sequence', '0');
+                PRAGMA user_version=1;
             """)
+            # 写前责任与schema准备共用原一次FULL事务/锁，不为同一变更重新排队。
+            if _initial_change is not None:
+                self._begin(db, *_initial_change)
 
     # LLM: 原文件锁序为canonical→投影；此连接中的审计只stat，不取canonical锁，不倒置锁序。
     # 函数用途: 返回短事务私有连接。
@@ -262,14 +271,18 @@ class RecoveryPendingIndex:
     # LLM: 调用者必须先持原canonical路径锁；登记成功后即使写入/进程失败，也保留可重读责任。
     # 函数用途: 在规范提交之前登记一次可重放变更。
     def begin(self, kind: str, request_id: str) -> int:
+        with self.connect() as db:
+            return self._begin(db, kind, request_id)
+
+    # 单调责任只能在原可信连接内登记；构造和显式begin复用同一正文。
+    def _begin(self, db, kind: str, request_id: str) -> int:
         request_id = projection_key(request_id)
         if kind not in {"terminal", "receipt"}:
             raise ValueError("invalid recovery projection kind")
-        with self.connect() as db:
-            version = self._next(db)
-            db.execute("INSERT INTO entries VALUES (?,?,?,1,'') ON CONFLICT(kind,request_id) "
-                       "DO UPDATE SET version=excluded.version,pending=1", (kind, request_id, version))
-            return version
+        version = self._next(db)
+        db.execute("INSERT INTO entries VALUES (?,?,?,1,'') ON CONFLICT(kind,request_id) "
+                   "DO UPDATE SET version=excluded.version,pending=1", (kind, request_id, version))
+        return version
 
     # LLM: 审计观察只唤醒变化行；相同stat不能反复制造新版本而饿死原恢复页。
     # 函数用途: 登记一条新发现或结构版本变化的文件。
@@ -397,4 +410,4 @@ def record_canonical_change(path: Path, *, blocking: bool = True, deadline: floa
         root, kind = path.parents[2], "terminal"
     else:
         return
-    RecoveryPendingIndex(root, blocking=blocking, deadline=deadline).begin(kind, path.stem)
+    RecoveryPendingIndex(root, blocking=blocking, deadline=deadline, _initial_change=(kind, path.stem))

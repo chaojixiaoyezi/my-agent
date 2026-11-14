@@ -250,11 +250,14 @@ class SubAgentRunnerContextService:
     # LLM: 本入口接受原准备对象或 canonical task，但不把它保存；先在副本投影原 canonical 路径，再读取直属孩子/协作，不触发 ensure 或把路径计算当容量完整。
     # 函数用途: 收集一次执行上下文的只读材料，调用结果可多次纯投影，调用方任务和已有文件保持不变。
     def prepare_execution_context(self, task: SubAgentTask, *, max_cards: int = 0) -> ExecutionContextBuildRequest:
+        from ..capability_authority import task_tool_authority, valid_task_grants
         task = project_task_workspace_fields(self.manager.workspace, task)
+        authority_tools, _ = task_tool_authority(task)
+        task.capability_grants = valid_task_grants(task)
         _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
-        allowed_tools = _runner_allowed_tools(task, _merge_list(task.allowed_tools, granted_tools))
+        allowed_tools = _runner_allowed_tools(task, authority_tools)
         context_bundle = execution_context_bundle(task)
         from ..direct_parent_lifecycle import direct_children_context_payload
 

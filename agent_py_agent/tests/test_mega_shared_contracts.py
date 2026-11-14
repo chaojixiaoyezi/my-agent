@@ -57,6 +57,11 @@ def test_frozen_dto_fields_defaults_and_real_json_roundtrip(name):
         expected.update(('requested_method_refs', 'requested_asset_version_refs', 'schema_version'))
         assert value.requested_method_refs == value.requested_asset_version_refs == ()
         assert value.schema_version == 'business-context-intent.v1'
+    if name == 'BusinessExecutionContext':
+        expected.update(('package_versions', 'package_versions_state'))
+        assert value.package_versions == () and value.package_versions_state == 'legacy_unproven'
+        assert all(signature(cls).parameters[key].kind == Parameter.KEYWORD_ONLY
+                   for key in ('package_versions', 'package_versions_state'))
     assert {item.name for item in fields(value)} == expected
     assert cls.from_dict(json.loads(json.dumps(value.to_dict()))) == value
     assert cls.from_dict(asdict(value)) == value
@@ -298,7 +303,11 @@ def test_workflow_existing_run_store_persists_and_restores_new_snapshots(tmp_pat
     run = WorkflowRunRecord('wf-run', 'workflow', 'owner', 'manual', 'running', 1, 0, 0,
         business_context=context.to_dict(), scope_snapshot=scope.to_dict(), scope_revision=11,
         revision=4, execution_definition_ref='sha256:execution')
-    store.create_run(run, workflow_snapshot={'steps': [], 'definition': 'original'})
+    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition
+
+    snapshot = WorkflowDefinition.from_any({'descriptor': {'id': 'workflow', 'name': 'original',
+        'kind': 'workflow'}, 'steps': [], 'body_markdown': 'original'}).to_dict()
+    store.create_run(run, workflow_snapshot=snapshot)
     # W3 已接入原 Store 的 CAS：新运行不继承 DTO 修订，真实保存后才推进版本。
     assert run.revision == 1
     stale = replace(run)
@@ -314,7 +323,39 @@ def test_workflow_existing_run_store_persists_and_restores_new_snapshots(tmp_pat
     assert restored.business_context['task_id'] == 'stask-canonical'
     assert (restored.business_context['space_revision'], restored.scope_revision,
             restored.revision, restored.execution_definition_ref) == (7, 11, 4, 'sha256:execution')
-    assert store.load_workflow_snapshot(run.workflow_run_id) == {'steps': [], 'definition': 'original'}
+    assert store.load_workflow_snapshot(run.workflow_run_id) == snapshot
     assert restored.business_context is not run.business_context
     # 原值 4 的持久化断言不变；现在由真实的四次 CAS 写入产生，不绕过版本门。
     assert restored.revision == 4
+    other = replace(run, workflow_run_id='other-run', workflow_id='other-workflow')
+    store.create_run(other, workflow_snapshot=snapshot)
+    with pytest.raises(ValueError, match='冻结定义身份与运行不匹配'):
+        store.load_workflow_snapshot(other.workflow_run_id)
+
+
+def test_business_context_old_positional_dto_stays_unproven_without_version_lookup():
+    from agent_py_agent.agent.conversation.business_contracts import BusinessPackageVersion
+
+    cls = dto('BusinessExecutionContext')
+    old = dto_values()['BusinessExecutionContext']
+    legacy = cls(*old.values())
+    assert legacy == cls.from_dict(json.loads(json.dumps(old)))
+    assert legacy.package_versions == () and legacy.package_versions_state == 'legacy_unproven'
+    version = BusinessPackageVersion('method:1', 'sha256:version')
+    supplied = [version]
+    frozen = cls(**old, package_versions=supplied, package_versions_state='frozen')
+    supplied.clear()
+    assert frozen.package_versions == (version,)
+    assert cls.from_dict(json.loads(json.dumps(frozen.to_dict()))) == frozen
+    assert legacy.package_versions == ()
+    with pytest.raises(ValueError, match='旧任务未证明'):
+        cls(**old, package_versions=[version])
+    with pytest.raises(ValueError, match='重复包引用'):
+        cls(**old, package_versions=[version, version], package_versions_state='frozen')
+    with pytest.raises(TypeError):
+        cls(**old, package_versions=['method:1'], package_versions_state='frozen')
+    with pytest.raises(ValueError):
+        cls(**old, package_versions_state='latest')
+    with pytest.raises(ValueError, match='原selected_method_refs'):
+        cls(**old, package_versions=[BusinessPackageVersion('other-method', 'sha256:version')],
+            package_versions_state='frozen')

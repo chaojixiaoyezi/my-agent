@@ -589,9 +589,8 @@ def test_tool_producer_runs_after_primary_and_only_committed_receipts(world, mon
 
 
 def test_llm_producer_preserves_primary_return_and_notification_faults(world, monkeypatch):
-    from dataclasses import dataclass
-
     from agent_py_agent.agent.conversation import required_user_action
+    from agent_py_agent.agent.conversation.background_claim import BackgroundClaimDependencies
     from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
     from agent_py_agent.agent.scheduler import execution, precheck
 
@@ -599,10 +598,6 @@ def test_llm_producer_preserves_primary_return_and_notification_faults(world, mo
     report = BackgroundMainAgentReport(thread_id='thread', task_id='run', reason='scheduled_job',
         response='never parsed', route_channel='internal', route_target='thread', created_at=1,
         delivery_status='sent', wake_handled=True, message_id='message', commit_kind='external_delivery')
-
-    @dataclass(frozen=True)
-    class Dependencies:
-        run_once: object
 
     def primary(_kwargs):
         order.append('primary')
@@ -618,9 +613,19 @@ def test_llm_producer_preserves_primary_return_and_notification_faults(world, mo
     service = SimpleNamespace(repository=SimpleNamespace(mark_run_running=lambda *_a, **_k: None))
     claim = SimpleNamespace(run_id='run', claim_id='claim',
         run={'job_id': 'job', 'run_id': 'run', 'thread_id': 'thread'})
-    bound = execution.with_scheduled_work(Dependencies(primary), world.agent, service, claim, None, now=1)
+    # 使用宿主真实依赖合同，确保调度包装同时保留执行与终态判定能力。
+    dependencies = BackgroundClaimDependencies(
+        claims=None, claim_scope_id=lambda *_: "scope", child_owns_task=lambda _: False,
+        terminal_task=lambda _: False, recovery_block=lambda _: None,
+        source_admission=lambda _: "", retire_source=lambda _: None, run_once=primary,
+        runtime_facts=lambda: {}, record_policy_failure=lambda _: None,
+        lease_seconds=30, heartbeat_interval_seconds=10,
+    )
+    bound = execution.with_scheduled_work(dependencies, world.agent, service, claim, None, now=1)
     kwargs = {'thread_id': 'thread', 'task_id': 'run', 'wake_signal': {'wake_signal_id': 'wake'},
         'reason': 'scheduled_job', 'now': 1}
+    assert isinstance(bound, BackgroundClaimDependencies)
+    assert bound.terminal_task(kwargs) is False
     assert bound.run_once(kwargs) is report
     assert order == ['primary', 'notify']
     world.config.notify_delivery_enabled = False

@@ -490,7 +490,10 @@ def test_executor_reference_reaches_real_gateway_confirmation(tmp_path, monkeypa
     agent = SimpleNamespace(home_paths=home_paths(tmp_path / "home"))
     request = SimpleNamespace(agent=agent, params=params, tool_rounds=1, actor="model")
     monkeypatch.setattr(round_execution, "_closed_admission_execution", lambda *_args: None)
-    monkeypatch.setattr(round_execution, "_approval_description", lambda *_args: "gate_probe")
+    def approval_description(*_args, require_human=False):
+        assert require_human is (execution.decision.evidence.get("human_confirmation_required") is True)
+        return "gate_probe"
+    monkeypatch.setattr(round_execution, "_approval_description", approval_description)
     monkeypatch.setattr(round_execution, "_owner_grant_key", lambda *_args: "gate_probe:mode=write")
     resolved = round_execution._resolve_tool_approval(request, 1, call, execution)
     assert resolved.result.error_code == "APPROVAL_REJECTED"

@@ -187,7 +187,7 @@ def test_envelopes_and_pages_wire(gateway):
     for params, identity in (({"cursor": cursor + "x"}, main), ({"cursor": cursor, "kind": "mcp_server"}, main),
         ({"cursor": cursor}, OwnerIdentity.provider_user("feishu", "business-bob"))):
         invalid = wire_call(gateway, "ai_assets.list", params, identity)
-        assert (invalid["http_status"], invalid["error"]["code"]) == (503, "CURSOR_EXPIRED"), invalid
+        assert (invalid["http_status"], invalid["error"]["code"]) == (410, "CURSOR_EXPIRED"), invalid
     wire_call(gateway, "ai_assets.sanction", {"asset_id": "ai-asset-01", "sanctioned": True}, main, "w9-page-sanction-key")
     stale = wire_call(gateway, "ai_assets.list", {"cursor": cursor}, main)
     assert stale["error"]["code"] == "CURSOR_EXPIRED"

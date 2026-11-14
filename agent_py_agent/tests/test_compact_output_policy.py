@@ -190,17 +190,19 @@ def test_zero_summary_cap_inherits_normal_ceiling(monkeypatch, normal):
     assert agent.backend.max_tokens == min(normal, 68000)
 
 
-def test_noncompact_auxiliary_is_unchanged(monkeypatch):
+@pytest.mark.parametrize("reasoning_effort,expected_reasoning", [("max", {"effort": "max"}), ("off", None)])
+def test_noncompact_auxiliary_is_unchanged(monkeypatch, reasoning_effort, expected_reasoning):
     from agent_py_agent.agent.conversation.auxiliary_model_call import (
         generate_auxiliary_model_response,
     )
 
-    agent, sent = _responses_agent(monkeypatch)
+    agent, sent = _responses_agent(monkeypatch, model_reasoning_effort=reasoning_effort)
     request = replace(_summary_request(agent), purpose="auxiliary")
     before = deepcopy(request.messages)
     result = generate_auxiliary_model_response(request)
     assert sent[0]["max_output_tokens"] == 68000
-    assert "reasoning" not in sent[0]
+    # 普通辅助调用沿线程真实档位；不能套用 Compact 的 low 降档或尾部更新。
+    assert sent[0].get("reasoning") == expected_reasoning
     assert not any(item.get("type") == "configuration_update" for item in sent[0]["input"])
     assert request.messages == before and request.token_budget is None
     assert result.request_token_budget is None
@@ -276,7 +278,7 @@ def test_strict_truncation_preserves_source_and_checkpoint(tmp_path, monkeypatch
     with pytest.raises(ConversationCompactError) as error:
         prepare_conversation_context(agent, store, thread, options=ConversationCompactOptions(force=True,
             request_projector=lambda view: ConversationCompactProjection(50000 if view.is_candidate else 100000, object())))
-    assert error.value.code == "COMPACT_SUMMARY_TRUNCATED" and len(calls) == 1
+    assert error.value.code == "COMPACT_SUMMARY_TRUNCATED" and len(calls) == 2
     assert source_path.read_bytes() == source_bytes
     assert store.threads.load(thread.thread_id).compact_generation == checkpoint == 0
     assert not store.threads.load(thread.thread_id).summary

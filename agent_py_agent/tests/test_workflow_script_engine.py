@@ -548,8 +548,10 @@ def test_dataclass_and_missing_store_fallback_entrypoints(tmp_path, monkeypatch)
     engine = WorkflowEngine(tmp_path)
     assert engine.run_workflow(definition, owner_id='alice').final_output == {'value': 1}
     assert engine.run_workflow('daily', owner_id='alice').status == 'succeeded'
-    with pytest.raises(ValueError):
+    before = [row.to_dict() for row in engine.store.list_runs()]
+    with pytest.raises(PermissionError, match='WORKFLOW_OWNER_MISMATCH'):
         engine.run_workflow('daily', owner_id='bob')
+    assert [row.to_dict() for row in engine.store.list_runs()] == before
 
 
 # LLM: 预览截断不能导致完整 JSON 被错误截断后再解析；字符串里的括号不增加结构深度。

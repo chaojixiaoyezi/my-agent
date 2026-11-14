@@ -452,7 +452,7 @@ def test_mixed_recovery_failure_sends_no_second_business(tmp_path, monkeypatch, 
         pytest.fail("联合来源未提交时发送了恢复业务请求")
 
     all_wires, _ = _http(monkeypatch, backend="anthropic_compatible", on_business=on_http)
-    with pytest.raises((ConversationCompactError, InterruptedError)):
+    with pytest.raises((ConversationCompactError, InterruptedError)) as stopped:
         background_execution.run_background_turn_with_compact(
             execution, thread, request, user_prompt="继续联合核对", continuation_injection=[],
             proactive_delivery_available=False, activity_sink=sink,
@@ -460,5 +460,6 @@ def test_mixed_recovery_failure_sends_no_second_business(tmp_path, monkeypatch, 
     assert len(business) == 1
     assert len(summaries) == (0 if failure == "summary_failure" else 1)
     assert len(all_wires) == 1 + len(summaries)
+    assert not isinstance(stopped.value, background_execution.BackgroundCompactPreflightDeferred)
     committed = store.threads.require(thread.thread_id)
     assert committed.compact_generation == (1 if failure == "generation_race" else 0)

@@ -503,6 +503,9 @@ def test_navigation_background_entry_precedes_goal_and_children():
     watch = render_tui_snapshot(nav.active_runtime().store.snapshot(), TuiRenderContext(width=180))
     assert any("latest" in fragments_text(line) for line in watch.transcript_lines)
     assert nav.back() and nav.active_runtime() is root
+    assert nav.snapshot().selected_run_id == ""
+    nav.move_selection(1)
+    assert nav.snapshot().selected_run_id == "bg:watch"
     nav.move_selection(1)
     assert nav.snapshot().selected_run_id == "goal:goal-one"
 
@@ -736,8 +739,8 @@ def test_prompt_toolkit_keys_open_readonly_watch_and_return_with_ctrl_g(tmp_path
 
             try:
                 await wait_app(app, lambda: app.is_running and app.render_counter > 0, "观察页测试启动")
-                pipe.send_bytes(b"\x1b[A")
-                await wait_app(app, lambda: nav.snapshot().selected_run_id == "bg:watch", "上键选中后台徽标")
+                pipe.send_bytes(b"\x1b[B")
+                await wait_app(app, lambda: nav.snapshot().selected_run_id == "bg:watch", "下键选中后台徽标")
                 pipe.send_bytes(b"\r")
                 await wait_app(app, lambda: nav.snapshot().background_watch_active, "进入观察页")
                 await wait_app(app, lambda: "后台驻留监控" in rendered_screen(), "后台观察页正文实际显示")
@@ -750,6 +753,13 @@ def test_prompt_toolkit_keys_open_readonly_watch_and_return_with_ctrl_g(tmp_path
                 pipe.send_bytes(b"\x07")
                 await wait_app(app, lambda: not nav.snapshot().background_watch_active, "CtrlG返回主对话")
                 assert not app.current_buffer.read_only()
+                assert nav.snapshot().selected_run_id == ""
+                app.current_buffer.history.append_string("last sent message")
+                app.current_buffer.reset()
+                await asyncio.sleep(.05)
+                pipe.send_bytes(b"\x1b[A")
+                await wait_app(app, lambda: app.current_buffer.text == "last sent message", "返回后上键取回历史")
+                app.current_buffer.reset()
                 pipe.send_text("returned draft")
                 await wait_app(app, lambda: app.current_buffer.text == "returned draft", "回读主对话草稿")
                 assert params.jobs.empty()
@@ -806,6 +816,13 @@ def test_inspection_rejects_unsafe_log_files(tmp_path, monkeypatch, kind):
         bg.inspect_background_process(home, "bg-example")
     if kind == "hardlink":
         assert isinstance(failure.value, NoFollowPathError) and "not a regular file" in str(failure.value)
+    detail = bg.inspect_background_process(home, "bg-example", include_log_errors=True)
+    assert detail["status"] == "running" and detail["log_tail"] == []
+    error = detail["log_error"]
+    assert error["code"] == ("PROCESS_LOG_SCOPE_DENIED" if kind == "outside" else "PROCESS_LOG_READ_FAILED")
+    assert error["error_type"] == type(failure.value).__name__
+    assert error["effect_outcome"] == "not_started" and error["next_action"]
+    assert "never disclose" not in str(detail)
     assert output.read_bytes() == before and secret.read_text() == "never disclose"
 
 
@@ -2543,3 +2560,31 @@ def test_b1r5_activation_rejects_empty_owner_id(tmp_path, version):
     assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
     with pytest.raises(ValueError, match="^invalid_session_attribution$"):
         bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+def test_external_legacy_log_denial_preserves_watch_process_state(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    home = tmp_path / "owner"
+    record_root, _ = _session(home, thread_id="thread-one")
+    record = record_root / "bg-example.json"
+    payload = json.loads(record.read_text())
+    outside = tmp_path / "old-workspace.log"
+    outside.write_text("do not expose historical content")
+    payload["output_path"] = str(outside)
+    record.write_text(json.dumps(payload))
+    root = TuiRuntime("legacy-log")
+    nav = TuiAgentNavigationState(root)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home), thread_id="thread-one")
+    _consume_background_notices(agent, "session", root, [None], set(), [0], nav)
+    nav.move_selection(1)
+    assert nav.enter_selected()
+    _consume_background_notices(agent, "session", root, [None], set(), [0], nav)
+    frame = render_tui_snapshot(nav.active_runtime().store.snapshot(), TuiRenderContext(width=180))
+    text = "\n".join(fragments_text(line) for line in frame.transcript_lines)
+    assert "PROCESS_LOG_SCOPE_DENIED" in text
+    assert "do not expose historical content" not in text
+    assert nav.snapshot().background_process_count == 1
+    assert "观察刷新失败" not in nav.active_runtime().notice()

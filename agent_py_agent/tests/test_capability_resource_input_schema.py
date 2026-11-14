@@ -69,7 +69,7 @@ def test_missing_reference_field_is_rejected_before_handler_with_exact_schema_is
     assert calls == {"handler": 0, "resolver": 0}
     assert execution.decision.evidence["issues"] == [{
         "keyword": "required", "path": f"$.source_ref.{missing}",
-        "expected": True, "actual_type": "missing",
+        "expected": True, "actual_type": "missing", "details": {"expected_type": "string"},
     }]
     assert not (agent.tools.workspace_root / "copied-resource.bin").exists()
 

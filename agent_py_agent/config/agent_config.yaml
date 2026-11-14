@@ -903,6 +903,10 @@ extension_plugins:
 # 每个Python进程、每个HTTP origin（协议/主机/端口）的物理请求上限，0关闭。
 # 开启按可信owner公平排队；同origin共用，不跨进程/代理别名计额，不保证消除RPM/TPM限制。
 provider_max_concurrent_requests: 0
+# 同一Gateway及其子进程全部实际LLM HTTP/WebSocket运输共享额度，0关闭；最大4096。
+# 前台/后台/普通子代理/工作流模型/学习共用；不计业务身份，不限制CPU或脚本任务。
+# 容量须实测后显式设置；容量变化必须先排空旧运输再重启，锁槽跨重启复用。
+gateway_llm_inflight_limit: 0
 # 仅用于Responses会话WebSocket：空闲连接不占用供应商请求并发名额。
 # 空闲存活时间（秒）与空闲池容量；任一值设为0即关闭连接复用。
 responses_ws_idle_ttl_seconds: 300

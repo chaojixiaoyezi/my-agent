@@ -278,6 +278,24 @@ def _local_reference_target(
     return current if isinstance(current, dict) else None
 
 
+def inline_local_schema_refs(root_schema: dict[str, Any], value: Any) -> Any:
+    """向模型直接展示字段类型；仅按当前引用路径断环，不改变原验证器或开放字段。"""
+    def project(node: Any, active: frozenset[str]) -> Any:
+        if isinstance(node, list):
+            return [project(item, active) for item in node]
+        if not isinstance(node, dict):
+            return node
+        reference = node.get('$ref')
+        if isinstance(reference, str) and reference not in active:
+            target = _local_reference_target(root_schema, reference)
+            if target is not None:
+                combined = {**target, **{key: item for key, item in node.items() if key != '$ref'}}
+                return project(combined, active | {reference})
+        return {key: project(item, active) for key, item in node.items()}
+
+    return project(value, frozenset())
+
+
 def _validate_constraint_shapes(schema: dict[str, Any], path: str) -> None:
     enum = schema.get("enum")
     if enum is not None and (not isinstance(enum, list) or not enum):

@@ -13,9 +13,9 @@ import os
 import sqlite3
 import time
 from collections import deque
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from ..common.log_redaction import redact_sensitive_value
 from ..plugin_host.business_action_specs import business_defs
 from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES, RuntimeRepository
+from ..runtime_errors import DataCorruptionError
 from .artifact_access import artifact_query_access
 from .background_scheduling_view import task_result_view, task_scheduling_view
 from .background_team_lifecycle import background_identity
@@ -45,6 +46,57 @@ OBSERVATION_ACTIONS = frozenset({
 
 _observation_request_data = ContextVar('business_observation_request_data', default=None)
 
+# 状态页只核验既有引用；单个登记簿最多读取 256 KiB，超限保留引用并报告部分覆盖。
+_RESULT_REGISTRY_MAX_BYTES = 256 * 1024
+# 同一观察请求的所有任务共享 4 MiB（包括超限检测的一个字节），避免大页读放大。
+_RESULT_REGISTRY_TOTAL_MAX_BYTES = 4 * 1024 * 1024
+# 解析对象与坏行诊断也限额，不能只限制raw字节后再生成成千上万错误对象。
+_RESULT_REGISTRY_MAX_ROWS = 1024
+_RESULT_REGISTRY_TOTAL_MAX_ROWS = 16384
+_RESULT_REGISTRY_MAX_DIAGNOSTICS = 8
+_RESULT_REGISTRY_TOTAL_MAX_DIAGNOSTICS = 32
+
+
+@dataclass
+class _ResultRegistryBudget:
+    remaining: int = _RESULT_REGISTRY_TOTAL_MAX_BYTES
+    remaining_rows: int = _RESULT_REGISTRY_TOTAL_MAX_ROWS
+    remaining_diagnostics: int = _RESULT_REGISTRY_TOTAL_MAX_DIAGNOSTICS
+    exhausted_reason: str = ''
+
+    def limits(self, max_bytes, max_rows, max_diagnostics):
+        for exhausted, code in ((self.remaining <= 1, 'ARTIFACT_REGISTRY_READ_BUDGET_EXCEEDED'),
+                (self.remaining_rows <= 1, 'ARTIFACT_REGISTRY_ROW_BUDGET_EXCEEDED'),
+                (self.remaining_diagnostics <= 0, 'ARTIFACT_REGISTRY_DIAGNOSTIC_BUDGET_EXCEEDED')):
+            if exhausted and not self.exhausted_reason:
+                self.exhausted_reason = code
+        if self.exhausted_reason:
+            return None
+        return (min(max_bytes, self.remaining - 1), min(max_rows, self.remaining_rows - 1),
+                min(max_diagnostics, self.remaining_diagnostics))
+
+    def observe(self, report):
+        self.remaining_rows -= report.rows_read or int(bool(report.errors))
+        self.remaining_diagnostics -= len(report.errors)
+
+    def read(self, workspace):
+        from ..artifacts.registry import latest_artifact_records_report
+
+        limits = self.limits(_RESULT_REGISTRY_MAX_BYTES, _RESULT_REGISTRY_MAX_ROWS, _RESULT_REGISTRY_MAX_DIAGNOSTICS)
+        if limits is None:
+            return None
+        limit, rows, diagnostics = limits
+        report = latest_artifact_records_report(workspace, max_bytes=limit, max_rows=rows, max_diagnostics=diagnostics)
+        self.remaining -= report.bytes_read or (limit + 1 if report.errors else 0)
+        self.observe(report)
+        return report
+
+
+@dataclass
+class _ObservationRequestData:
+    values: dict = field(default_factory=dict)
+    registry_budget: _ResultRegistryBudget = field(default_factory=_ResultRegistryBudget)
+
 
 class ObservationSourceError(BusinessError):
     """可信只读来源的脱敏固定错误；保留原因和恢复指引，不扩大授权。"""
@@ -57,7 +109,7 @@ def observation_request():
     if _observation_request_data.get() is not None:
         yield
         return
-    token = _observation_request_data.set({})
+    token = _observation_request_data.set(_ObservationRequestData())
     try:
         yield
     finally:
@@ -67,9 +119,10 @@ def observation_request():
 # LLM: None和读失败也在本请求复用；无作用域时不缓存，下一请求必须重新读事实。
 # 函数用途: 在当前请求内复用一次规范读取。
 def _observation_cached(key, read):
-    cache = _observation_request_data.get()
-    if cache is None:
+    request = _observation_request_data.get()
+    if request is None:
         return read()
+    cache = request.values
     if key not in cache:
         if len(cache) >= 1024:
             cache.pop(next(iter(cache)))
@@ -91,6 +144,132 @@ def _observation_thread(store, thread_id):
 
 # LLM: 缺失任务同样只读一次，但不能跨请求保存缺失或身份事实。
 # 函数用途: 对当前请求的distinct任务只执行一次load。
+def _public_history_text(value, *, label):
+    """预览与公开过程共用字节预算；先有界脱敏，再在UTF-8完整码点处收束。"""
+    from ..plugin_host.schemas import REQUEST_MAX_BYTES
+
+    # maxLength 是字符上限；未声明x-max-bytes时沿原Schema默认字节门，不扩大响应额度。
+    limit = min(262144, REQUEST_MAX_BYTES)
+    original = str(value or '')
+    # 原脱敏器支持终态截断的秘密字段/PEM；只解析有界头部，超长原文仍留在canonical。
+    preview = original[:limit + 512]
+    encoded = str(redact_sensitive_value(preview)).encode('utf-8', errors='replace')
+    if len(preview) == len(original) and len(encoded) <= limit:
+        return encoded.decode('utf-8')
+    suffix = f"\n...[{label}过长已截断预览，原长度 {len(original)} 字符]..."
+    head = encoded[:limit - len(suffix.encode('utf-8'))].decode('utf-8', errors='ignore')
+    return head + suffix
+
+
+def _message_execution_links(service, messages, thread, actor):
+    """本页显式ID按原索引定位；关联是执行上下文，不推断单个工具的语义归属。"""
+    from ..common.nofollow_fs import read_bytes_beneath
+    from ..io.sqlite_scope import connect_projection_sqlite
+    from ..runtime_errors import DataCorruptionError
+    from .store_guidance_records import GuidanceOnceReceipt
+
+    output = {row.message_id: {'input_ref': None, 'execution_refs': [],
+              'association_coverage': 'unknown', 'association_reason': 'MESSAGE_EXECUTION_ID_NOT_VERIFIED'} for row in messages}
+    runtime = getattr(service, 'runtime', None)
+    if runtime is None or not callable(getattr(runtime, '_runtime_connection', None)):
+        for link in output.values():
+            link['association_reason'] = 'RUNTIME_EXECUTION_SOURCE_UNAVAILABLE:NOT_BOUND'
+        return output
+    inputs = {row.message_id: row.metadata['guidance_id'] for row in messages
+              if row.role in {'user', 'host'} and isinstance(row.metadata.get('guidance_id'), str)}
+    receipts = {}
+    storage = service.store.storage
+    index = storage.root / '.guidance-pending.sqlite3'
+    if inputs and index.is_file():
+        try:
+            with closing(connect_projection_sqlite(index, read_only=True, timeout=0.1)) as conn:
+                conn.row_factory = sqlite3.Row
+                marks = ','.join('?' for _ in inputs)
+                indexed = conn.execute('SELECT id,dedupe AS dedupe_key FROM entries WHERE id IN (' + marks + ')',
+                                       tuple(inputs.values())).fetchall()
+        except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, DataCorruptionError, RuntimeDatabaseDeferred):
+            indexed = []
+        for ref in indexed:
+            try:
+                path = storage.guidance_dedupe_path(ref['dedupe_key'])
+                raw = read_bytes_beneath(storage.root, path.relative_to(storage.root).parts, max_bytes=262144)
+                if raw is None:
+                    continue
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    continue
+                receipt = GuidanceOnceReceipt.from_dict(payload)
+                metadata = receipt.entry.metadata
+                if (receipt.entry.guidance_id == ref['id'] and receipt.dedupe_key == ref['dedupe_key']
+                        and metadata.get('thread_id') == thread.thread_id
+                        and receipt.status in {'submitted', 'consumed'} and receipt.attempt_id):
+                    receipts[ref['id']] = receipt
+            except (OSError, ValueError, TypeError, KeyError, DataCorruptionError):
+                # 坏回执只影响自己；观察不修投递账，不按正文或时间补关联。
+                continue
+    attempts = tuple(dict.fromkeys(receipt.attempt_id for receipt in receipts.values()))
+    message_runs = {}
+    for row in messages:
+        if row.role not in {'user', 'assistant'}:
+            continue
+        # 原后台最终投递的机器幂等引用编码wake身份；背景显示turn不是执行run。
+        # 解码只提供查询键，后续仍须同owner/thread及规范执行权限核验。
+        key = row.metadata.get('dedupe_key')
+        prefix = 'owner_delivery:background-wake:'
+        identity = (key[len(prefix):] if isinstance(key, str) and key.startswith(prefix)
+                    else row.metadata.get('conversation_request_id'))
+        if isinstance(identity, str) and identity:
+            message_runs[row.message_id] = identity
+    runs = tuple(dict.fromkeys(message_runs.values()))
+    clauses, values = [], []
+    for column, identifiers in (('aa.attempt_id', attempts), ('ar.run_id', runs)):
+        if identifiers:
+            marks = ','.join('?' for _ in identifiers)
+            clauses.append(('aa.attempt_id IN (SELECT r.current_attempt_id FROM agent_runs r WHERE r.run_id IN ('
+                            + marks + ') AND NOT EXISTS (SELECT 1 FROM agent_attempts other '
+                            'WHERE other.agent_run_id=r.agent_run_id AND other.attempt_id!=r.current_attempt_id))')
+                           if column == 'ar.run_id' else column + ' IN (' + marks + ')')
+            values.extend(identifiers)
+    if not clauses:
+        return output
+    try:
+        with runtime._runtime_connection() as conn:
+            raw = conn.execute('SELECT NOT EXISTS (SELECT 1 FROM agent_attempts other '
+                'WHERE other.agent_run_id=ar.agent_run_id AND other.attempt_id!=aa.attempt_id) AS _single_attempt,'
+                'ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
+                't.thread_id,t.task_id AS runtime_task_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,'
+                'aa.metadata_json AS attempt_metadata FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
+                'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+                'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE t.owner_id=? AND t.thread_id=? AND ('
+                + ' OR '.join(clauses) + ') ORDER BY aa.rowid LIMIT 101', [service.owner_id, thread.thread_id, *values]).fetchall()
+    except (OSError, sqlite3.Error, RuntimeDatabaseDeferred) as error:
+        for link in output.values():
+            link['association_reason'] = 'RUNTIME_EXECUTION_SOURCE_UNAVAILABLE:' + type(error).__name__
+        return output
+    single_attempt_runs = {row['run_id'] for row in raw[:100] if row['_single_attempt']}
+    records = service._execution_page(raw[:100]).records
+    by_attempt, by_run = {}, {}
+    for record in records:
+        if service._visible(record, 'executions.get', {}, actor):
+            by_attempt[record.attempt_id] = record
+            by_run.setdefault(record.run_id, []).append(record)
+    for message in messages:
+        receipt = receipts.get(inputs.get(message.message_id))
+        execution = by_attempt.get(receipt.attempt_id) if receipt else None
+        candidates = by_run.get(message_runs.get(message.message_id), [])
+        refs = ([execution] if execution and execution.run_id == receipt.entry.metadata.get('expected_turn_id')
+                else candidates if message.role in {'user', 'assistant'}
+                and message_runs.get(message.message_id) in single_attempt_runs else [])
+        if message.message_id in message_runs and not refs:
+            output[message.message_id]['association_reason'] = 'RUN_EXECUTION_ATTEMPT_NOT_UNIQUE_OR_UNAVAILABLE'
+        if refs:
+            output[message.message_id] = {'input_ref': (receipt.entry.guidance_id if receipt else message.message_id if message.role == 'user' else None),
+                'execution_refs': [{'run_id': record.run_id, 'attempt_id': record.attempt_id} for record in refs],
+                'association_coverage': 'partial' if len(raw) > 100 else 'complete',
+                'association_reason': 'ATTEMPT_CONTEXT_NOT_EXCLUSIVE_TOOL_OWNERSHIP'}
+    return output
+
+
 def _observation_task(store, task_id):
     return _observation_cached((store.session_tasks, 'record', task_id), lambda: store.session_tasks.load(task_id))
 
@@ -131,13 +310,56 @@ def _valid_sha256_pin(value: object) -> str | None:
 
 # LLM: 按父目录有界回溯最近的工作区产物登记簿，复用请求级只读缓存避免重复IO；无登记簿时不报错，有可读登记簿且当前记录缺失、损坏或sha256已变时如实报告漂移。
 # 函数用途: 检测可读本地产物登记簿上当前记录是否已偏离任务终态冻结的sha256版本摘要。
-def _registry_pin_drifted(path: str, artifact_id: str, pinned_sha: str, dir_cache: dict[str, Path | None],
-                          registry_root: Path | None = None) -> bool:
-    from ..artifacts.registry import REGISTRY_RELATIVE_PATH, latest_artifact_records_report
+def _result_source_link_root(task, store, owner_root, identifier):
+    """精确TaskLink只印证同目标线程/Owner内的原登记根，不按同目录推任务归属。"""
+    if store is None or owner_root is None or task is None or not identifier:
+        return None
+
+    def read():
+        try:
+            owner = Path(owner_root).resolve(strict=False)
+            thread = _observation_thread(store, task.target_thread_id)
+            sender = _observation_thread(store, task.sender_thread_id)
+            if (not thread.owner_id or sender.owner_id != thread.owner_id
+                    or any(Path(row.owner_home).resolve(strict=False) != owner for row in (thread, sender))):
+                return None
+            context = (getattr(task, 'metadata', None) or {}).get('business_context')
+            if context is not None and (not isinstance(context, dict) or context.get('owner_id') != thread.owner_id):
+                return None
+            link, error = store.tasks.link_report(task.target_thread_id, identifier)
+            if error or link is None or link.task_id != identifier or not link.task_path:
+                return None
+            actor = getattr(link, 'host_channel_actor', None)
+            if actor is not None and (not isinstance(actor, dict) or actor.get('owner_id') != thread.owner_id):
+                return None
+            root = Path(link.task_path).resolve(strict=False)
+            return root if root != owner and root.is_relative_to(owner) else None
+        except (OSError, ValueError, TypeError, AttributeError, KeyError, sqlite3.Error,
+                DataCorruptionError, RuntimeDatabaseDeferred):
+            return None
+
+    return _observation_cached((store.tasks, 'result_source_root', task.target_thread_id, identifier, str(owner_root)), read)
+
+
+def _result_scope_ref(value):
+    return value if (isinstance(value, str) and value and value == value.strip()
+                     and len(value.encode('utf-8')) <= 128 and '/' not in value and '\\' not in value) else None
+
+
+def _registry_pin_issue(path: str, artifact_id: str, pinned_sha: str, dir_cache: dict[str, Path | None],
+                        registry_root: Path | None = None, *, task=None, store=None, owner_root=None,
+                        source_task_id=None, source_run_id=None) -> str | None:
+    from ..artifacts.registry import REGISTRY_RELATIVE_PATH
 
     candidate = Path(path)
     if not candidate.is_absolute():
-        return False
+        return 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
+    allowed_roots = {value for value in (getattr(task, 'task_id', None),
+                                       getattr(task, 'conversation_request_id', None)) if _result_scope_ref(value)}
+    if source_task_id is not None and source_task_id not in allowed_roots:
+        return 'RESULT_ARTIFACT_SCOPE_MISMATCH'
+    if source_run_id is not None and source_run_id not in allowed_roots and source_task_id is None:
+        return 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
     parent = str(candidate.parent)
     if registry_root is not None:
         workspace = registry_root
@@ -163,21 +385,78 @@ def _registry_pin_drifted(path: str, artifact_id: str, pinned_sha: str, dir_cach
                 break
         for anc_str in visited:
             dir_cache[anc_str] = workspace
+    # 新收口保留原host registry的source IDs，child可读自己的canonical登记根。
+    # task_id可以是宿主bind_turn的根run；不能把它强行改成SessionTask编号。
+    if source_task_id is not None and source_run_id is not None:
+        task_root = _result_source_link_root(task, store, owner_root, source_task_id)
+        if task_root is None:
+            return 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
+        run_root = _result_source_link_root(task, store, owner_root, source_run_id)
+        if run_root is not None:
+            if not run_root.is_relative_to(task_root):
+                return 'RESULT_ARTIFACT_SCOPE_MISMATCH'
+            workspace = run_root
+        elif source_run_id in allowed_roots:
+            workspace = task_root
+        else:
+            # 显式child身份必须有原TaskLink正向印证；根登记里的同名字符串不是运行证明。
+            return 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
     if workspace is None:
-        return False
-    report = _observation_cached(('artifact_registry', str(workspace)),
-                                 lambda: latest_artifact_records_report(workspace))
+        return 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
+    budget = _observation_request_data.get().registry_budget
+    report = _observation_cached(('bounded_result_registry', str(workspace)), lambda: budget.read(workspace))
+    if report is None:
+        return budget.exhausted_reason or 'ARTIFACT_REGISTRY_READ_BUDGET_EXCEEDED'
+    for row in report.errors:
+        code = row.get('error_code')
+        if code in {'ARTIFACT_REGISTRY_READ_BUDGET_EXCEEDED', 'ARTIFACT_REGISTRY_ROW_BUDGET_EXCEEDED',
+                    'ARTIFACT_REGISTRY_DIAGNOSTIC_BUDGET_EXCEEDED'}:
+            return code
     if report.errors:
-        return True
+        return 'ARTIFACT_REGISTRY_UNREADABLE'
     record = report.records.get(artifact_id)
-    return record is None or str(record.sha256 or '').lower() != pinned_sha
+    if record is None:
+        return ('ARTIFACT_REGISTRY_RECORD_UNAVAILABLE' if source_task_id is not None or source_run_id is not None
+                else 'RESULT_ARTIFACT_SOURCE_UNPROVEN')
+    if record.path != path:
+        return 'RESULT_ARTIFACT_PIN_MISMATCH'
+    if record.status != 'ready':
+        return 'RESULT_ARTIFACT_NOT_READY'
+    if str(record.sha256 or '').lower() != pinned_sha:
+        return 'RESULT_ARTIFACT_PIN_MISMATCH'
+    if ((source_task_id is not None and record.task_id != source_task_id)
+            or (source_run_id is not None and record.run_id != source_run_id)):
+        return 'RESULT_ARTIFACT_SCOPE_MISMATCH'
+    # 旧四字段不丢ID：原登记task或root-run须能由原TaskLink/显式接单turn印证。
+    identifier = record.task_id or record.run_id
+    if identifier not in allowed_roots:
+        return 'RESULT_ARTIFACT_SCOPE_MISMATCH' if identifier else 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
+    task_root = _result_source_link_root(task, store, owner_root, identifier)
+    if task_root is None:
+        return 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
+    if source_run_id is None and record.run_id and record.run_id not in allowed_roots:
+        # 四字段旧快照未固定child run；目录相邻不能补造原执行归属。
+        return 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
+    if workspace != task_root and (source_run_id is None or not workspace.is_relative_to(task_root)):
+        return 'RESULT_ARTIFACT_SCOPE_MISMATCH'
+    # 仅在原Owner内检查正规文件存在；不为状态页读取大产物或重算payload摘要。
+    from ..common.nofollow_fs import regular_file_exists_beneath
+
+    try:
+        owner = Path(owner_root).resolve(strict=False)
+        parts = candidate.relative_to(owner).parts
+    except (ValueError, TypeError):
+        return 'RESULT_ARTIFACT_BODY_UNAVAILABLE'
+    if not regular_file_exists_beneath(owner, parts):
+        return 'RESULT_ARTIFACT_BODY_UNAVAILABLE'
+    return None
 
 
 # LLM: 公开引用只给交付项自带的 owner 内产物登记 ID（最多前100个唯一ID，保持交付路径顺序），绝不回退为绝对路径、截断内部账本或补造 ID；
 #   unresolved_count与omitted_count均不设人为上限100，任一为正、版本摘要未知或可读登记簿已发生sha256漂移均记 partial，绝不把漂移/未知冒充 complete。
 # 函数用途: 把任务内部结果路径有界投影成公开 result_refs（<=100）与诚实覆盖说明；无结果时覆盖说明为 None。
 def _task_artifact_registry_root(task, store, owner_root) -> tuple[Path | None, bool]:
-    # 登记簿属于原运行工作区；合法旧记录无link可沿旧路径，坏link不得拿其他登记簿证明完整。
+    # 登记簿属于原运行工作区；缺失/坏link都不能借目录邻居替任务签完整。旧ID仍保留。
     if store is None or owner_root is None:
         return None, False
     try:
@@ -185,7 +464,7 @@ def _task_artifact_registry_root(task, store, owner_root) -> tuple[Path | None, 
         if error:
             return None, True
         if link is None:
-            return None, False
+            return None, True
         if not link.task_path:
             return None, True
         root = Path(link.task_path).resolve(strict=False)
@@ -195,51 +474,107 @@ def _task_artifact_registry_root(task, store, owner_root) -> tuple[Path | None, 
         return None, True
 
 
+@observation_request()
 def public_result_refs(task, *, store=None, owner_root=None):
-    from .session_tasks import SESSION_TASK_RESULT_ARTIFACTS_KEY
+    from .session_tasks import (
+        DELIVERY_ARTIFACT_DIAGNOSTICS_KEY,
+        SESSION_TASK_RESULT_ARTIFACTS_KEY,
+        public_delivery_artifact_diagnostics,
+    )
 
-    paths = [str(item) for item in task.result_refs]
+    diagnostics = public_delivery_artifact_diagnostics((task.metadata or {}).get(DELIVERY_ARTIFACT_DIAGNOSTICS_KEY))
+    paths = task.result_refs
     if not paths:
-        return [], None
+        return [], ({'state': 'partial', 'unresolved_count': 0, 'omitted_count': 0, 'diagnostics': diagnostics}
+                    if diagnostics else None)
     raw = (task.metadata or {}).get(SESSION_TASK_RESULT_ARTIFACTS_KEY)
     if raw is None:
-        return [], {'state': 'legacy_unresolved', 'unresolved_count': len(paths), 'omitted_count': 0}
+        return [], {'state': 'legacy_unresolved', 'unresolved_count': len(paths), 'omitted_count': 0,
+                    **({'diagnostics': diagnostics} if diagnostics else {})}
     if not isinstance(raw, list):
-        return [], {'state': 'unreadable', 'unresolved_count': len(paths), 'omitted_count': 0}
+        return [], {'state': 'unreadable', 'unresolved_count': len(paths), 'omitted_count': 0,
+                    **({'diagnostics': diagnostics} if diagnostics else {})}
     known: dict[str, set[str]] = {}
     pins: dict[tuple[str, str], set[str | None]] = {}
+    sources, invalid_sources = {}, set()
     for item in raw:
         artifact = item.get('artifact_id') if isinstance(item, dict) else None
         if (isinstance(item, dict) and isinstance(item.get('path'), str) and isinstance(artifact, str)
                 and 0 < len(artifact) <= 128 and len(artifact.encode('utf-8')) <= 128
                 and '/' not in artifact and '\\' not in artifact):
             known.setdefault(item['path'], set()).add(artifact)
-            pins.setdefault((item['path'], artifact), set()).add(_valid_sha256_pin(item.get('sha256')))
-    refs, unresolved, pin_incomplete = [], 0, False
+            key = (item['path'], artifact)
+            pins.setdefault(key, set()).add(_valid_sha256_pin(item.get('sha256')))
+            source = tuple(_result_scope_ref(item.get(field)) for field in ('task_id', 'run_id'))
+            sources.setdefault(key, set()).add(source)
+            if any(field in item and item[field] not in (None, '') and _result_scope_ref(item[field]) is None
+                   for field in ('task_id', 'run_id')):
+                invalid_sources.add(key)
+    refs, seen, unresolved = [], set(), 0
+    checked = set()
+    budget_exceeded = set()
+    source_issues = set()
     dir_cache: dict[str, Path | None] = {}
     registry_root, registry_unavailable = _task_artifact_registry_root(task, store, owner_root)
     pin_incomplete = registry_unavailable
     for path in paths:
+        path = str(path)
         # 同一路径对应多个不同登记ID即身份不明：如实记未解析，不按元数据顺序挑选（G7-R1）；完全相同的重复项已由集合去重。
         ids = known.get(path, set())
         if len(ids) != 1:
             unresolved += 1
             continue
         artifact = next(iter(ids))
+        if artifact not in seen:
+            seen.add(artifact)
+            if len(refs) < 100:
+                refs.append(artifact)
         pin_set = pins.get((path, artifact), set())
         if registry_unavailable or len(pin_set) != 1 or None in pin_set:
             pin_incomplete = True
-        else:
-            pinned_sha = next(iter(pin_set))
-            if pinned_sha is None or _registry_pin_drifted(path, artifact, pinned_sha, dir_cache, registry_root):
+        elif (path, artifact) not in checked:
+            if len(checked) >= 100:
                 pin_incomplete = True
-        if artifact not in refs:
-            refs.append(artifact)
+                continue
+            checked.add((path, artifact))
+            source_set = sources.get((path, artifact), set())
+            if len(source_set) != 1 or (path, artifact) in invalid_sources:
+                pin_incomplete = True
+                source_issues.add('RESULT_ARTIFACT_SOURCE_UNPROVEN')
+                continue
+            source_task, source_run = next(iter(source_set))
+            issue = _registry_pin_issue(path, artifact, next(iter(pin_set)), dir_cache, registry_root,
+                task=task, store=store, owner_root=owner_root, source_task_id=source_task, source_run_id=source_run)
+            if issue:
+                pin_incomplete = True
+                if issue in {'ARTIFACT_REGISTRY_READ_BUDGET_EXCEEDED', 'ARTIFACT_REGISTRY_ROW_BUDGET_EXCEEDED',
+                             'ARTIFACT_REGISTRY_DIAGNOSTIC_BUDGET_EXCEEDED'}:
+                    budget_exceeded.add(issue)
+                if issue in {'RESULT_ARTIFACT_SOURCE_UNPROVEN', 'RESULT_ARTIFACT_SCOPE_MISMATCH',
+                             'RESULT_ARTIFACT_NOT_READY', 'ARTIFACT_REGISTRY_UNREADABLE',
+                             'RESULT_ARTIFACT_BODY_UNAVAILABLE', 'ARTIFACT_REGISTRY_RECORD_UNAVAILABLE'}:
+                    source_issues.add(issue)
     # FLAG-7 B（MSG-029）：公开投影最多给前100个唯一ID（按交付路径稳定顺序），其余已解析ID计omitted_count；
     #   内部路径与映射完整保留；任一计数为正或版本摘要未知/漂移即记partial，不将未知或漂移混同为完整无遗漏。
-    omitted = max(0, len(refs) - 100)
-    state = 'partial' if (unresolved or omitted or pin_incomplete) else 'complete'
-    return refs[:100], {'state': state, 'unresolved_count': unresolved, 'omitted_count': omitted}
+    omitted = len(seen) - len(refs)
+    state = 'partial' if (unresolved or omitted or pin_incomplete or diagnostics) else 'complete'
+    coverage = {'state': state, 'unresolved_count': unresolved, 'omitted_count': omitted}
+    for code in sorted(budget_exceeded):
+        if len(diagnostics) >= 8:
+            break
+        diagnostics.append({'error_code': code, 'coverage': 'partial',
+                            'stage': 'delivery_observation', 'effect_outcome': 'not_started',
+                            'source_effect_outcome': 'unknown',
+                            'next_action': '本次观察的登记读取或解析达到预算；未覆盖内容仍未知。用artifacts.get核验原精确ID与版本。'})
+    for code in sorted(source_issues):
+        if len(diagnostics) >= 8:
+            break
+        diagnostics.append({'error_code': code, 'coverage': 'partial', 'stage': 'delivery_observation',
+            'effect_outcome': 'not_started', 'source_effect_outcome': 'unknown',
+            'next_action': '保留原产物ID；用artifacts.get核验原任务归属、ready状态和版本，未核清前不声明完整交付。'})
+    if diagnostics:
+        coverage['diagnostics'] = diagnostics
+    return refs, coverage
 
 
 def _coverage(values):
@@ -514,7 +849,13 @@ class BusinessObservationService:
         page = self._source(action, params)
         rows = [row for row in page.records if self._visible(row, action, params, actor)]
         if len(rows) != 1:
-            raise BusinessError('OBSERVATION_NOT_FOUND' if page.coverage == 'complete' else 'HOST_NOT_READY')
+            details = {}
+            if action in {'logs.read', 'tool_calls.get'}:
+                details = {'field_path': '$.params.source_ref' if action == 'logs.read' else '$.params.operation_id',
+                    'reason': '当前授权范围没有此观察记录，缺记录不能证明调用成功、失败或尚未执行。',
+                    'next_action': '先在当前授权范围调用 tool_calls.list，使用其原 operation_id 读取 tool_calls.get；日志再使用详情的 data.result_ref，不猜编号或追加后缀。',
+                    'retry_same_request': False}
+            raise BusinessError('OBSERVATION_NOT_FOUND' if page.coverage == 'complete' else 'HOST_NOT_READY', details=details)
         result = redact_sensitive_value(_copy(rows[0].value))
         if page.coverage != 'complete':
             if 'coverage' not in result:
@@ -540,9 +881,9 @@ class BusinessObservationService:
             'target_thread_id': task.target_thread_id, 'status': task.status, 'result_refs': list(refs)}],
             'workflow_ref': workflow, 'result_refs': list(refs), 'allowed_actions': [],
             'scheduling': task_scheduling_view(self.store, task,
-                running=bool(rows[0].value.get('current_run_id')))}
+                running=bool(rows[0].value.get('current_run_id')), runtime=self.runtime, owner_id=self.owner_id)}
         if rows[0].value.get('_execution_error') and task.status not in SESSION_TASK_TERMINAL_STATUSES:
-            detail['scheduling'].update(state='unknown', coverage='partial',
+            detail['scheduling'].update(state=('waiting_child' if detail['scheduling']['state'] == 'waiting_child' else 'unknown'), coverage='partial',
                                         reason_code=rows[0].value['_execution_error'])
         if ref_coverage is not None:
             detail['result_ref_coverage'] = ref_coverage
@@ -595,7 +936,11 @@ class BusinessObservationService:
         before, offset, bound_limit = None, 0, params.get('limit', 50)
         if position is not None:
             before, offset, bound_limit = position.get('before'), position.get('offset'), position.get('bound_limit')
-            if (type(before) is not int or before < 0 or type(offset) is not int or offset < 0
+            if position.get('order') != 'older_pages_v2':
+                raise BusinessError('CURSOR_EXPIRED', details={'reason': 'MESSAGE_CURSOR_ORDER_CHANGED',
+                    'side_effect_state': 'none', 'next_action': '此游标来自旧分页方向；不再续用它，重新读取当前目标的首个历史页。'})
+            if (type(before) is not int or before < 0
+                    or type(offset) is not int or offset < 0
                     or type(bound_limit) is not int or not 1 <= bound_limit <= 100):
                 raise BusinessError('CURSOR_EXPIRED')
         page = self.store.messages.history_page_report(thread.thread_id, before=before, limit=bound_limit)
@@ -604,11 +949,19 @@ class BusinessObservationService:
                 return {'items': [], 'next_cursor': None, 'coverage': 'unknown', 'history_boundary': {
                     'first_message_id': None, 'last_message_id': None, 'coverage': 'unknown',
                     'reason_code': 'SUBAGENT_TRANSCRIPT_UNREADABLE'}}
-            raise BusinessError('CURSOR_EXPIRED' if position else 'HOST_NOT_READY')
+            raise BusinessError('CURSOR_EXPIRED' if position else 'HOST_NOT_READY', details={
+                'reason': 'CANONICAL_HISTORY_UNREADABLE', 'side_effect_state': 'none',
+                'error_code': page.errors[0].get('error_code', 'CLIENT_HISTORY_LOAD_FAILED'),
+                'error_type': page.errors[0].get('error_type', 'UNKNOWN_SOURCE_ERROR'),
+                'error_count': len(page.errors),
+                'next_action': '保留原历史记录，核对或修复源记录/存储可读性后重新读取；不要将此故障当作空历史。'})
         if offset > len(page.rows):
             raise BusinessError('CURSOR_EXPIRED')
-        selected = page.rows[offset:offset + params.get('limit', 50)]
+        # next_cursor 始终表示更早记录；合页工作片内部也从尾向前切，页内保原canonical顺序。
+        end = len(page.rows) - offset
+        selected = page.rows[max(0, end - params.get('limit', 50)):end]
         items, display_events = [], []
+        execution_links = _message_execution_links(self, selected, thread, actor)
         filtered = False
         for row in selected:
             if child and row.metadata.get('agent_run_id') != child.run_id:
@@ -632,45 +985,35 @@ class BusinessObservationService:
                 continue
             if row.role == 'display':
                 if params.get('include_display') is True:
+                    from .background_transcript import public_workflow_step_display
                     from .display_checkpoint import display_checkpoint_event
 
                     event = display_checkpoint_event(row)
-                    if event and event['kind'] == 'assistant_completed' and event['phase'] == 'completed':
+                    step_display = (public_workflow_step_display(event['payload'].get('workflow_step'))
+                        if event and event['kind'] == 'system_message' and event['phase'] == 'completed' else None)
+                    if event and event['phase'] == 'completed' and (event['kind'] == 'assistant_completed' or step_display):
                         payload = event['payload']
-                        text = str(redact_sensitive_value(payload.get('text') or ''))
-                        if len(text) > 262144:
-                            raise ObservationSourceError('HOST_NOT_READY', details={
-                                'reason': 'PUBLIC_DISPLAY_TEXT_READ_BUDGET', 'side_effect_state': 'none',
-                                'next_action': '公开过程块超过本次读取预算；保留原记录，使用原文分页读取。'})
-                        public = {'text': text}
+                        text = _public_history_text(step_display['text'] if step_display else payload.get('text'),
+                                                    label='公开过程块')
+                        public = {**step_display, 'text': text} if step_display else {'text': text}
                         canonical = payload.get('canonical_message_id')
-                        if isinstance(canonical, str) and 0 < len(canonical.encode('utf-8')) <= 128:
+                        if not step_display and isinstance(canonical, str) and 0 < len(canonical.encode('utf-8')) <= 128:
                             public['canonical_message_id'] = canonical
                         display_events.append({key: event[key] for key in ('schema', 'kind', 'phase', 'request_id', 'block_id')}
-                            | {'payload': public, 'source_message_id': row.message_id, 'occurred_at': _timestamp(row.created_at)})
+                            | {'payload': public, 'source_message_id': row.message_id, 'occurred_at': _timestamp(row.created_at)}
+                            | ({'thread_id': event['thread_id'], 'task_id': event['task_id'] or None} if step_display else {}))
                 continue
-            _MAX_MESSAGE_VIEW_CHARS = 262144
-            original_len = len(row.content)
-            if original_len > _MAX_MESSAGE_VIEW_CHARS:
-                suffix = f"\n...[单条历史消息过长已截断预览，原长度 {original_len} 字符]..."
-                raw_text = row.content[: _MAX_MESSAGE_VIEW_CHARS - len(suffix) - 256] + suffix
-                text = str(redact_sensitive_value(raw_text))
-                if len(text) > _MAX_MESSAGE_VIEW_CHARS:
-                    text = text[: _MAX_MESSAGE_VIEW_CHARS - len(suffix)] + suffix
-            else:
-                text = str(redact_sensitive_value(row.content))
-                if len(text) > _MAX_MESSAGE_VIEW_CHARS:
-                    suffix = f"\n...[单条历史消息过长已截断预览，原长度 {original_len} 字符]..."
-                    text = text[: _MAX_MESSAGE_VIEW_CHARS - len(suffix)] + suffix
+            text = _public_history_text(row.content, label='单条历史消息')
             items.append({'message_id': row.message_id, 'thread_id': thread.thread_id,
                 'task_id': message_facts.task_id, 'space_id': message_facts.space_id, 'role': row.role,
                 'text': text, 'occurred_at': _timestamp(row.created_at),
-                'source': public_message_origin(self, row, actor), 'artifact_refs': []})
+                'source': public_message_origin(self, row, actor), 'artifact_refs': [],
+                **execution_links[row.message_id]})
         offset += len(selected)
         next_position = ({'before': page.after, 'offset': offset, 'bound_limit': bound_limit} if offset < len(page.rows)
             else {'before': page.before, 'offset': 0, 'bound_limit': bound_limit} if page.before else None)
         if next_position is not None:
-            next_position['generation'] = generation
+            next_position.update(generation=generation, order='older_pages_v2')
         coverage = 'unknown' if child and info is None else 'partial' if next_position or filtered else 'complete'
         return {**({'display_events': display_events} if params.get('include_display') is True else {}),
             'items': items, 'next_cursor': self.cursor(scope, next_position) if next_position else None,
@@ -678,7 +1021,10 @@ class BusinessObservationService:
                 'first_message_id': items[0]['message_id'] if items else None,
                 'last_message_id': items[-1]['message_id'] if items else None,
                 'coverage': coverage, 'reason_code': ('SUBAGENT_TRANSCRIPT_NOT_RECORDED' if child and info is None
-                    else 'PUBLIC_ONLY_FILTERED' if filtered else 'CANONICAL_PAGE')}}
+                    else 'CANONICAL_HISTORY_NOT_RECORDED' if info is None
+                    else 'CANONICAL_HISTORY_EMPTY' if not page.rows
+                    else 'PUBLIC_ONLY_FILTERED' if filtered
+                    else 'NO_PUBLIC_MESSAGES_IN_PAGE' if not items else 'CANONICAL_PAGE')}}
 
     def _subagents(self, action, params, actor):
         page = self._paged_source('executions', action, params, actor)

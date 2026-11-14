@@ -2,11 +2,10 @@ from __future__ import annotations
 
 """Single model-facing projection policy for tool output bodies."""
 
-import json
 import re
 from typing import Any
 
-from ..common.log_redaction import redact_sensitive_text, redact_sensitive_value
+from ..common.log_redaction import redact_sensitive_output_text
 
 _UNTRUSTED_DELIMITER_RE = re.compile(r"untrusted_tool_result", re.IGNORECASE)
 _VALID_TRUST = frozenset({"runtime", "external_data"})
@@ -32,17 +31,7 @@ def tool_output_projection_policy(
 
 
 def redact_tool_output_text(output: object, *, redaction: str) -> str:
-    text = str(output)
-    if redaction != "source_code":
-        try:
-            parsed = json.loads(text)
-        except (TypeError, ValueError):
-            parsed = None
-        if isinstance(parsed, dict | list):
-            safe = redact_sensitive_value(parsed)
-            if safe != parsed:
-                return json.dumps(safe, ensure_ascii=False)
-    return redact_sensitive_text(text, code_file=redaction == "source_code")
+    return redact_sensitive_output_text(output, code_file=redaction == "source_code")
 
 
 def project_tool_output_body(

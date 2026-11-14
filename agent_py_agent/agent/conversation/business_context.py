@@ -4,7 +4,7 @@ from __future__ import annotations
 from .business_access import BusinessError, require_access, require_actor
 from .business_assets import BusinessAssetService
 from .business_bindings import InterfaceBindingService
-from .business_contracts import BusinessExecutionContext
+from .business_contracts import BusinessExecutionContext, BusinessPackageVersion
 from .business_spaces import _identifier
 
 
@@ -83,7 +83,7 @@ def _resolve_selection(*, actor, task_id, requested_space_id, project_ref, bindi
     project = row['default_project_ref'] if project_ref is None else project_ref
     if project is not None:
         service.reference('project', project, actor=actor, space_id=chosen)
-    methods = []
+    methods, packages = [], []
     if requested_method_refs:
         for ref in requested_method_refs:
             resolved = service.reference('method', ref, actor=actor, space_id=chosen)
@@ -97,6 +97,7 @@ def _resolve_selection(*, actor, task_id, requested_space_id, project_ref, bindi
             resolved = service.reference('package', mount['package_ref'], actor=actor, space_id=chosen)
             if resolved['state'] == 'available':
                 methods.append(mount['package_ref'])
+                packages.append(_package_version(mount['package_ref'], resolved))
     versions = BusinessAssetService(service).selected_versions(state, actor=actor, space_id=chosen,
         project_ref=project, requested=requested_asset_version_refs)
     require_access(actor, 'spaces.get', service=service, record=row)
@@ -104,7 +105,8 @@ def _resolve_selection(*, actor, task_id, requested_space_id, project_ref, bindi
         raise BusinessError('REVISION_CONFLICT')
     return BusinessExecutionContext(owner_id=actor.owner_id, space_id=chosen, project_ref=project,
         task_id=task_id, space_revision=row['revision'], binding_id=binding_id,
-        selected_method_refs=tuple(methods), asset_version_refs=versions, schema_version='business-context.v1')
+        selected_method_refs=tuple(methods), asset_version_refs=versions, schema_version='business-context.v1',
+        package_versions=tuple(packages), package_versions_state='frozen')
 
 
 # LLM: 无归属显式选择只冻结Owner任务，不借唯一默认空间或空间资产扩大权限；仍过原执行/工具门。
@@ -124,12 +126,12 @@ def _unassigned_context(*, actor, task_id, project_ref, requested_method_refs, r
         require_access(actor, 'tasks.assign', service=actor.service, space_id=None)
     return BusinessExecutionContext(owner_id=actor.owner_id, space_id=None, project_ref=None, task_id=task_id,
         space_revision=None, binding_id=None, selected_method_refs=(), asset_version_refs=(),
-        schema_version='business-context.v1')
+        schema_version='business-context.v1', package_versions_state='frozen')
 
 
 # LLM: 供原执行器在使用canonical上下文时复核当前业务授权；只读校验Owner、空间或无归属约束及绑定/项目，不重算冻结选择，也不授予工具执行权限。
 # 函数用途: 确认旧任务保存的业务归属在当前权限下仍然允许使用。
-def revalidate_business_context(*, actor, context):
+def revalidate_business_context(*, actor, context, package_ref=None):
     """只复核当前权限，不按新默认值迁移或重算旧任务的冻结选择。
 
     W5/原executor须从canonical任务把两项显式注入ActionPolicyRequest；这里不读模型字典、run_id或latest。
@@ -159,3 +161,59 @@ def revalidate_business_context(*, actor, context):
         project = service.reference('project', context.project_ref, actor=actor, space_id=context.space_id)
         if project['state'] != 'available':
             raise BusinessError('REFERENCE_NOT_FOUND')
+    if package_ref is not None:
+        _revalidate_package_versions(service, actor, context, package_ref)
+
+
+def _package_version(ref, row):
+    version = row.get('version_ref')
+    if not isinstance(version, str) or not version:
+        raise BusinessError('PACKAGE_VERSION_UNAVAILABLE', details={
+            'package_ref': ref, 'field': 'version_ref', 'effect_outcome': 'not_started',
+            'next_action': '核对原Owner包引用解析器的版本来源；取得原版本后创建新任务，不按最新包补旧任务。'})
+    return BusinessPackageVersion(ref, version, row.get('activation_id'))
+
+
+def _revalidate_package_versions(service, actor, context, package_ref):
+    # 旧记录无法证明包版本，但不能据此拒绝取消、查旧产物或无关方法；沿原权限门，
+    # 不补读最新版本、不提升工具权限，也不把原记录投影为已冻结。
+    if context.package_versions_state == 'legacy_unproven':
+        return
+    for frozen in context.package_versions:
+        if frozen.package_ref not in (package_ref, 'capability:' + package_ref):
+            continue
+        try:
+            current = service.reference('package', frozen.package_ref, actor=actor, space_id=context.space_id)
+        except BusinessError as error:
+            raise BusinessError('PACKAGE_VERSION_UNAVAILABLE', details={
+                'package_ref': frozen.package_ref, 'source_error_code': error.code,
+                'expected_version_ref': frozen.version_ref, 'effect_outcome': 'not_started',
+                'next_action': '核对原Owner该包的安装与授权；不支持读历史代次，需采用当前版本请创建新任务，勿原样重试。'}) from error
+        if current.get('state') != 'available':
+            raise BusinessError('PACKAGE_VERSION_UNAVAILABLE', details={
+                'package_ref': frozen.package_ref, 'actual_state': current.get('state'),
+                'expected_version_ref': frozen.version_ref, 'effect_outcome': 'not_started',
+                'next_action': '原包已停用或不可用；先核对撤销原因，不补读最新包；需采用新安装时创建新任务。'})
+        if (current.get('version_ref') != frozen.version_ref or frozen.activation_id is not None
+                and current.get('activation_id') != frozen.activation_id):
+            raise BusinessError('PACKAGE_VERSION_MISMATCH', details={
+                'package_ref': frozen.package_ref, 'expected_version_ref': frozen.version_ref,
+                'actual_version_ref': current.get('version_ref'),
+                'expected_activation_id': frozen.activation_id,
+                'actual_activation_id': current.get('activation_id'),
+                'effect_outcome': 'not_started',
+                'next_action': '当前包版本或激活身份已变，且读取服务不支持历史代次；保留旧任务，核对需求后创建绑定当前版本的新任务，勿原样重试。'})
+
+
+def business_execution_policy_scope(host):
+    """只运送当前runner已采用的typed上下文和原宿主Actor；不从ToolCall或历史正文重建权限。"""
+    current = getattr(host, '_current_run_params', None)
+    frozen = getattr(current, 'business_context', None)
+    if frozen is None:
+        return {}
+    if type(frozen) is not BusinessExecutionContext:
+        raise BusinessError('CONTEXT_REQUIRED')
+    from ..gateway_parts.business_api import local_business_context
+
+    authority, services = local_business_context(host, model=True)
+    return {'business_context': frozen, 'business_actor': services.actor(authority)}

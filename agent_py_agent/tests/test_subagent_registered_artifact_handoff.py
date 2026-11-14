@@ -118,7 +118,7 @@ def test_natural_result_persists_registered_file_into_parent_handoff(tmp_path):
 
     manager = SubAgentManager(workspace=tmp_path / "state", workspace_root=tmp_path)
     parent = manager.create_run(goal="统筹", thought="", plan=[], role="coordinator")
-    child = manager.create_run(goal="整理数据", thought="", plan=[], parent_id=parent.id)
+    child = manager.create_run(goal="整理数据", thought="", plan=[], parent_id=parent.id, root_id=parent.id)
     product = tmp_path / "用户文件.md"
     product.write_text("真实文件", encoding="utf-8")
     _register(child, product)

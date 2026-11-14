@@ -50,6 +50,30 @@ def has_fresh_runner_session(task: object, *, now: float | None = None) -> bool:
     return (moment - heartbeat_at) <= _fresh_window_seconds(session)
 
 
+def runner_session_matches_stop(task: object, session: dict) -> bool:
+    """只认原停止回执绑定的同一attempt/会话实例，不让迟到退出覆盖后继。"""
+    attrs = task.get('attributes', {}) if isinstance(task, dict) else getattr(task, 'attributes', {})
+    if not isinstance(attrs, dict) or not isinstance(session, dict):
+        return False
+    run_id = task.get('id', '') if isinstance(task, dict) else getattr(task, 'id', '')
+    active = task.get('runner_active_attempt_id', '') if isinstance(task, dict) else getattr(task, 'runner_active_attempt_id', '')
+    previous = attrs.get('runner_session') or {}
+    control = attrs.get('cancel_subagents') or {}
+    if not isinstance(control, dict):
+        return False
+    receipt = control.get('stop_receipt') or {}
+    if not isinstance(previous, dict) or not isinstance(receipt, dict):
+        return False
+    attempt = session.get('attempt_id')
+    fields = ('session_id', 'run_id', 'attempt_id', 'launch_id', 'worker_pid', 'worker_birth_token', 'process_epoch')
+    return (bool(attempt) and bool(session.get('session_id')) and active in ('', attempt)
+            and receipt.get('schema') == 'runner-stop.v1' and receipt.get('run_id') == run_id
+            and receipt.get('attempt_id') == attempt and session.get('run_id') == run_id
+            # 控制方的cancelled不是宿主退出证明；只有原宿主最终回执才封口。
+            and previous.get('status') not in {'completed', 'failed'}
+            and all(previous.get(key) == session.get(key) for key in fields))
+
+
 def _fresh_window_seconds(session: dict) -> float:
     try:
         interval = float(session.get("interval_seconds") or 0.0)

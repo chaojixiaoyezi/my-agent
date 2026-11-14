@@ -15,6 +15,9 @@ from typing import Any
 
 from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..common.request_execution_ports import raise_if_transport_uncertain
+from ..contracts.diagnostics import redact_diagnostic_text
+from ..contracts.error_taxonomy import error_contract
+from ..runtime_errors import fallback_error_code, is_structured_error_code
 from ..subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
 from ..subagents.kernel import replaced_by_view
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
@@ -177,6 +180,13 @@ class BackgroundMainActivitySink:
             activity = "正在处理工具结果"
         self._publish("tool", activity)
 
+    def write_workflow_step_progress(self, event: dict[str, object]) -> bool:
+        """沿当前后台工作片公开原步骤进度；显示不推进工作流或改变工具授权。"""
+        published = self._transcript.write_workflow_step_progress(event)
+        if published:
+            self._publish('tool', '正在处理工作流步骤')
+        return published
+
     # LLM: 排队事实只经原白名单构造展示；沿 _publish 更新同一 main 行和原 IM pulse，不创建模型调用、投递或状态权威。
     # 函数用途: 显示后台主代理正在排队或已解除等待，保留原请求的短状态窗口。
     def write_provider_queue(self, value: object) -> bool:
@@ -271,9 +281,27 @@ class BackgroundMainActivitySink:
     # LLM: Fail is a liveness hint only. The real exception/retry/task state is
     # still owned by the background runtime and structured lifecycle stores.
     # 函数用途: 后台主代理轮异常退出时让 main 行显示真实失败阶段。
-    def fail(self) -> None:
+    def fail(self, error: Exception) -> None:
         self._transcript.fail()
-        self._publish("failed", "本轮处理失败，等待底层恢复")
+        from .background_execution import BackgroundCompactPreflightDeferred
+
+        code = fallback_error_code(error)
+        code = code if is_structured_error_code(code) else "UNKNOWN_ERROR"
+        if isinstance(error, BackgroundCompactPreflightDeferred):
+            capacity = error.capacity
+            detail = (f"候选 {capacity.candidate_tokens} tokens，上限 {capacity.input_ceiling_tokens}"
+                      if capacity is not None else "上下文压缩尚未就绪")
+            self._publish("failed", f"{code} · {detail}。本次业务请求尚未发送。请在原任务查看退避重试进度。")
+            return
+        # 展示异常须和公共诊断使用同一脱敏器；权限与是否可重试均不由此显示字符串决定。
+        detail = _public_agent_text(redact_diagnostic_text(str(error)), limit=88)
+        if code.startswith("COMPACT_"):
+            from ..gateway_parts.request_errors import gateway_client_error_message
+
+            hint = gateway_client_error_message(code)
+        else:
+            hint = error_contract(code).recovery_hint
+        self._publish("failed", f"{code} · {type(error).__name__} · {detail}。{hint}")
 
     # LLM: 前后台只写同一 owner Agent 的线程级快照；不得为后台另设状态源。
     # 函数用途: 将后台真实阶段交给共用的 main 显示发布入口。
@@ -1464,6 +1492,12 @@ def _subagent_current_activity(
     lifecycle_phase: str = "",
 ) -> str:
     status = str(getattr(task, "status", "") or "").strip().upper()
+    ended = task_status_in(status, SUBAGENT_ENDED_STATUSES) or _safe_float(getattr(task, "ended_at", 0.0)) > 0
+    if ended and status in {"BLOCKED", "PAUSED"}:
+        reason = runner_failure_label(status, getattr(task, "failure_type", ""), capability_resolution=capability_request_resolution(task))
+        return f"已结束 · {reason or ('受阻' if status == 'BLOCKED' else '暂停')}"
+    if ended and status in {"PLANNING", "PENDING", "RUNNING"}:
+        return "已结束"
     terminal_activity = {
         "DONE": "已完成",
         "FAILED": "执行失败",
@@ -1512,6 +1546,8 @@ def _subagent_lifecycle_phase(
     *,
     status: str,
 ) -> str:
+    if task_status_in(status, SUBAGENT_ENDED_STATUSES) or _safe_float(getattr(task, "ended_at", 0.0)) > 0:
+        return "terminal"
     if status == "PLANNING":
         return "queued"
     if status == "PENDING":
@@ -1532,12 +1568,8 @@ def _subagent_lifecycle_phase(
             except (OSError, RuntimeError, TypeError, ValueError):
                 return "waiting_first_event"
         return "running"
-    if status == "BLOCKED":
-        return "waiting_input"
     if status == "PAUSED":
         return "paused"
-    if task_status_in(status, SUBAGENT_ENDED_STATUSES):
-        return "terminal"
     return "unknown"
 
 

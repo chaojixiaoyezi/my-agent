@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 from threading import RLock
 from weakref import WeakSet
 
 from ..conversation.background_agents import BackgroundAgentService
-from ..conversation.business_access import BusinessActor, BusinessError
+from ..conversation.business_access import BusinessActor, BusinessError, validate_result
 from ..conversation.business_observability import (
     OBSERVATION_ACTIONS,
     BusinessObservationService,
@@ -129,7 +131,8 @@ class _BusinessBackgroundService(BackgroundAgentService):
 
     # LLM: 上下文只保留本次发行身份，不写共享服务或扩张原Actor权限；完整宿主只属本次控制，调用结束即丢弃。
     # 函数用途: 为当前业务调用装配原后台服务和同一实时授权口。
-    def __init__(self, services, context, host=None):
+    def __init__(self, services, context, host=None, *, binding_id=None):
+        self.binding_id = binding_id
         super().__init__(services.host if host is None else host)
         self.services = services
         self.complete_host = host
@@ -225,16 +228,23 @@ class _BusinessBackgroundService(BackgroundAgentService):
         plan = SessionTaskDispatchPlan(actor.source_thread_id, target.thread_id, request['instruction'],
             origin_task_id, self._operation_key(actor, idempotency_key))
         previous = self.store.session_tasks.find_by_dedupe_key(_task_dedupe_key(plan))
+        if previous is None:
+            self._validate_dispatch_project(request, actor)
         if not origin_task_id:
             context = getattr(getattr(self.host, '_current_run_params', None), 'business_context', None)
             plan = replace(plan, origin_task_id=previous.origin_task_id if previous is not None
                            else context.task_id if context is not None else '')
         if previous is None and not background_identity_allows_work(target):
-            raise ValueError('AGENT_NOT_AVAILABLE')
+            raise BusinessError('AGENT_NOT_AVAILABLE', details={
+                'field': 'params.agent_id', 'reason': '目标身份不接受新任务，任务尚未派发',
+                'retry_same_arguments': False,
+                'next_action': '调用 background_agents.list 选择可用目标后重新派发'})
         if previous is None and (failure := session_task_pair_limit_error(
                 self.host, plan.sender_thread_id, plan.target_thread_id, config)):
-            raise ValueError(failure.error_code)
-        intent = BusinessContextIntent(actor.owner_id, request['space_id'], request.get('project_ref'), None)
+            raise BusinessError(failure.error_code, details={
+                'reason': '会话对配额已达上限，任务尚未派发', 'retry_same_arguments': False,
+                'next_action': '等待配额窗口恢复后再派发；不要立即重复调用'})
+        intent = BusinessContextIntent(actor.owner_id, request['space_id'], request.get('project_ref'), self.binding_id)
 
         # LLM: 由原SessionTask派发器仅在首次创建时调用；以本次业务Actor只读解析准确task_id的上下文，None显式无归属，不把通道DTO当业务授权或重算重放选择。
         # 函数用途: 为Gateway派活提供与原任务同次冻结的业务上下文。
@@ -245,7 +255,11 @@ class _BusinessBackgroundService(BackgroundAgentService):
                 requested_asset_version_refs=intent.requested_asset_version_refs,
                 unassigned=intent.requested_space_id is None)
 
+        from ..conversation.execution_threads import EXECUTION_ORIGIN_KEY
+
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
+            host_channel_actor=(actor if isinstance(target.metadata.get(EXECUTION_ORIGIN_KEY), dict)
+                                and target.metadata[EXECUTION_ORIGIN_KEY].get('kind') == 'delegated' else None),
             business_context_intent=intent, business_context_factory=factory)
         if not outcome.ok:
             raise SessionTaskDispatchError(outcome)
@@ -275,8 +289,13 @@ class _BackgroundPort:
             if callable(context.actor_factory):
                 actor = context.actor_factory(action)
             service = _BusinessBackgroundService(self.services, context, host=host)
+            call_entered = False
             try:
                 service._actor(actor)
+                if 'agent_id' in params:
+                    # 仅在明确只读的身份/目标预检边界将拒绝归为未执行。
+                    service._thread(params['agent_id'], actor)
+                call_entered = True
                 result = self._call(service, action, params, actor, expected_revision, idempotency_key)
                 if action == 'background_agents.list':
                     result = {**result, 'items': [row for row in result['items']
@@ -289,9 +308,19 @@ class _BackgroundPort:
                         result = {**result, 'current_execution': None}
                 return result
             except (KeyError, FileNotFoundError) as error:
-                raise BusinessError('RESOURCE_NOT_FOUND') from error
+                if call_entered and business_action_specs()[action].metadata['effect'] != 'read':
+                    raise
+                raise BusinessError('RESOURCE_NOT_FOUND', details={
+                    'reason': '当前授权范围内未找到目标，业务变更尚未开始',
+                    'retry_same_arguments': False,
+                    'next_action': '在原会话调用对应 list 动作取得当前可见目标编号后再调用'}) from error
             except PermissionError as error:
-                raise BusinessError('BUSINESS_ACCESS_DENIED') from error
+                if call_entered and business_action_specs()[action].metadata['effect'] != 'read':
+                    raise
+                raise BusinessError('BUSINESS_ACCESS_DENIED', details={
+                    'reason': '发送者或目标未通过当前用户、目标类型或空间授权核验，业务变更尚未开始',
+                    'retry_same_arguments': False,
+                    'next_action': '在原会话调用 background_agents.list 选择可见的后台身份；不要改写身份或重试无权目标'}) from error
 
     # LLM: 无提供者表示可信组合根直接给出的就是owner自身宿主；提供者只能给出同owner、同home、同规范Store的实例。
     #   只有配置投影而无自有Store的组合对象没有独立运行时，沿原规范组合执行；未接线或归属漂移在变更前拒绝。
@@ -367,6 +396,9 @@ class _BackgroundPort:
 def workflow_run_ports(host, source=None):
     source = workflow_port_source(host) if source is None else source
     if source[0] == 'explicit':
+        if not callable(source[1]) or not callable(source[2]):
+            # 显式接线缺一不是匿名运行许可；保留explicit来源，不能借登记回退补另一半。
+            return None, None
         return source[1], source[2]
     if source[0] == 'registry':
         from ..workflows.business_scope import WorkflowRunContextFactory
@@ -386,7 +418,8 @@ def workflow_port_source(host):
     registry = getattr(getattr(host, 'tools', None), 'tools', None)
     tool = registry.get('workflows') if isinstance(registry, dict) else None
     home = getattr(host, 'home_paths', None)
-    if not isinstance(tool, WorkflowsTool) or home is None or tool.owner_home != Path(home.owner_home_dir).absolute():
+    if (not isinstance(tool, WorkflowsTool) or home is None
+            or tool.owner_home.resolve() != Path(home.owner_home_dir).resolve()):
         return ('none',)
     return ('registry', tool)
 
@@ -419,6 +452,10 @@ class BusinessServices:
                     from .business_host_ports import _inspect_callable_arity
                     if _inspect_callable_arity(legacy_reader) == 1:
                         wf_reader = legacy_reader
+            if wf_reader is None:
+                # 默认宿主也读取原引用事实源；未知覆盖仍由回收门拒绝。
+                from .business_host_ports import build_default_business_workflow_reference_reader
+                wf_reader = build_default_business_workflow_reference_reader(host)
             agent_steps_port = getattr(host, 'workflow_agent_steps', None)
             if agent_steps_port is None and getattr(host, '_business_host_ports_wired', False):
                 from .business_host_ports import build_default_workflow_agent_steps
@@ -436,14 +473,8 @@ class BusinessServices:
                 engine_factory=engine_factory)
         self.workflows = workflows
         self.background = background if background is not None else getattr(host, 'business_background', None)
-        if capabilities is None:
-            capabilities = getattr(host, 'business_capabilities', None)
-            if capabilities is None:
-                from .business_host_ports import is_business_host_ports_enabled
-                if is_business_host_ports_enabled(host):
-                    from ..capability.business_capabilities import BusinessCapabilityService
-                    capabilities = BusinessCapabilityService(host)
-        self.capabilities = capabilities
+        self._capabilities = capabilities if capabilities is not None else getattr(host, 'business_capabilities', None)
+        self._default_capabilities = self._capabilities is None
         self.projection = projection if projection is not None else getattr(host, 'business_projection', None)
         self._default_projection = self.projection is None
         self.approvals = getattr(host, 'business_approval_decider', None)
@@ -465,8 +496,10 @@ class BusinessServices:
                         from .business_host_ports import _inspect_callable_arity
                         if _inspect_callable_arity(legacy_reader) >= 3:
                             space_resolver = legacy_reader
+                from .business_host_ports import build_default_business_package_reference_resolver
                 self._spaces = BusinessSpaceService(self.owner_home, owner_id=self.owner_id, enabled=enabled,
                     reference_resolver=space_resolver,
+                    package_reference_resolver=build_default_business_package_reference_resolver(self.host),
                     active_references=getattr(self.host, 'business_active_references', None),
                     governance=getattr(self.host, 'business_governance', None))
             else:
@@ -476,6 +509,21 @@ class BusinessServices:
     @spaces.setter
     def spaces(self, value):
         self._spaces, self._default_spaces = value, False
+
+    @property
+    def capabilities(self):
+        """默认只读端口随当前开关懒接线；关闭不探测，重开复用，显式端口不替换。"""
+        if self._default_capabilities:
+            if not bool(getattr(self.host.config, 'business_spaces_enabled', False)):
+                return None
+            if self._capabilities is None:
+                from ..capability.business_capabilities import BusinessCapabilityService
+                self._capabilities = BusinessCapabilityService(self.host)
+        return self._capabilities
+
+    @capabilities.setter
+    def capabilities(self, value):
+        self._capabilities, self._default_capabilities = value, False
 
     @property
     def subscriptions(self):
@@ -488,7 +536,10 @@ class BusinessServices:
             if factory is None:
                 catalog = self.spaces
                 if self._default_subscriptions is None or self._default_subscriptions.catalog is not catalog:
-                    self._default_subscriptions = ManagedSubscriptionService(catalog)
+                    from .native_subscription_source import native_subscription_service
+
+                    self._default_subscriptions = (native_subscription_service(self.host, catalog, workflows=self.workflows)
+                        if callable(catalog.reference_resolver) else ManagedSubscriptionService(catalog))
                 service = self._default_subscriptions
             elif callable(factory):
                 service = factory(self.owner_id)
@@ -521,7 +572,8 @@ class BusinessServices:
             self.projection = DefaultBusinessObservationService(self.owner_home, owner_id=self.owner_id,
                 store=self.host.conversation_store, runtime=runtime,
                 readers=default_observation_readers(self.owner_home, self.owner_id, self.host.conversation_store, runtime,
-                    resource_provider=resource_provider))
+                    resource_provider=resource_provider,
+                    workspace_task_path_template=getattr(self.host.config, 'workspace_task_path_template', None)))
 
     # LLM: 功能关闭不探测来源；显式端口不替换，刷新不建立快照或缓存授权。
     # 函数用途: 在下一请求识别首次创建或已消失的规范来源。
@@ -537,7 +589,8 @@ class BusinessServices:
             if resource_provider is None:
                 resource_provider = owner_model_activity_provider(self.owner_home, self.owner_id)
             projection.readers = default_observation_readers(self.owner_home, self.owner_id,
-                projection.store, projection.runtime, resource_provider=resource_provider)
+                projection.store, projection.runtime, resource_provider=resource_provider,
+                workspace_task_path_template=getattr(self.host.config, 'workspace_task_path_template', None))
 
     @property
     def observation(self):
@@ -593,8 +646,11 @@ class BusinessServices:
             return self.spaces.action_ready(action)
         if implementer == 'W3':
             if spec.metadata['effect'] == 'execute':
-                return (self.complete_host_wired or
-                    (callable(self.workflows.context_provider) and callable(self.workflows.engine_factory)))
+                ports_ready = callable(self.workflows.context_provider) and callable(self.workflows.engine_factory)
+                source = getattr(self, 'workflow_port_source', None) or workflow_port_source(self.host)
+                if source[0] == 'explicit':
+                    return ports_ready
+                return self.complete_host_wired or ports_ready
             return self.workflows is not None
         if implementer == 'W2':
             if action in _COMPLETE_HOST_ACTIONS and not self.complete_host_wired:
@@ -696,7 +752,8 @@ class BusinessServices:
                 host = _BackgroundPort(self)._complete_host(context, stack)
                 context.check(action, facts)
                 if host is not None:
-                    local = BusinessServices(host)
+                    # 完整宿主也沿原显式接线及缓存入口，不能丢掉已启用的后台执行端口。
+                    local = _local_business_services(host)
                     local_context = replace(context, host_provider=None)
                     _ISSUED.add(local_context)
                     return local.invoke(action, params, local_context,
@@ -716,8 +773,34 @@ class BusinessServices:
                     'next_action': '绑定同一owner的原订阅服务后重试；未执行订阅操作。',
                 })
             # 只更换同owner同根catalog对象绑定；当前subject及逐调用授权函数原样保留。
-            return service.execute(action, params, actor=replace(actor, service=service.catalog),
+            result = service.execute(action, params, actor=replace(actor, service=service.catalog),
                 expected_revision=expected_revision, idempotency_key=idempotency_key)
+            if action in {'subscriptions.pause', 'subscriptions.remove'}:
+                # 原控制已提交后只核这份订阅的精确目标；不在读取入口修状态或扫描其它Owner。
+                from ..conversation.background_team_lifecycle import (
+                    bound_subscription_controller,
+                    reconcile_background_identity,
+                )
+                try:
+                    snapshot = service.catalog._read()
+                    row = snapshot.get('subscriptions', {}).get(result['subscription']['subscription_id'], {})
+                    target = bound_subscription_controller(snapshot, row, actor.owner_id)
+                    if target:
+                        target_thread = self.host.conversation_store.threads.require(target)
+                        if target_thread.owner_id != actor.owner_id:
+                            raise BusinessError('BUSINESS_ACCESS_DENIED', effect_outcome='committed', details={
+                                'reason': 'subscription_target_owner_mismatch',
+                                'next_action': '订阅控制已提交；原目标Owner冲突，保留退休责任并由原Owner核实绑定，不更改目标身份。',
+                            })
+                        reconcile_background_identity(self.host, target)
+                except BusinessError:
+                    raise
+                except (OSError, ValueError, TypeError, KeyError) as error:
+                    raise BusinessError('STORE_UNAVAILABLE', effect_outcome='committed', details={
+                        'phase': 'subscription_target_retirement_reconcile', 'exception_type': type(error).__name__,
+                        'next_action': '订阅暂停或移除已提交；不要新建订阅。沿原幂等键重试本控制以重核原目标退休义务。',
+                    }) from error
+            return result
         kwargs = {'expected_revision': expected_revision, 'idempotency_key': idempotency_key}
         if action == 'approvals.decide' and callable(self.approvals):
             return self.approvals(params, context, **kwargs)
@@ -828,9 +911,12 @@ def _error_code(error):
     code = getattr(error, 'error_code', None) or getattr(error, 'code', None)
     if not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
         code = 'HOST_NOT_READY'
-    status = (409 if code in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT', 'BACKGROUND_AGENT_LIMIT_REACHED',
-                              'SPACE_MISMATCH', 'AGENT_NOT_AVAILABLE', 'IDENTITY_TRANSITION_CONFLICT',
-                              'MODEL_PROFILE_UNAVAILABLE', 'WORKFLOW_ALREADY_EXISTS', 'WORKFLOW_READ_ONLY',
+    status = (409 if code in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT', 'SPACE_NAME_CONFLICT',
+                              'ASSET_VERSION_CONFLICT', 'BINDING_CONFLICT', 'SOURCE_INTENT_CONFLICT',
+                              'BACKGROUND_AGENT_LIMIT_REACHED',
+                              'SPACE_MISMATCH', 'AGENT_NOT_AVAILABLE', 'IDENTITY_TRANSITION_CONFLICT', 'CONTROLLER_IDENTITY_CONFLICT',
+                              'MODEL_PROFILE_UNAVAILABLE', 'SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING', 'SESSION_TASK_RATE_LIMIT',
+                              'WORKFLOW_ALREADY_EXISTS', 'WORKFLOW_READ_ONLY',
                               'WORKFLOW_REFERENCE_MISMATCH', 'WORKFLOW_RECYCLED', 'WORKFLOW_NOT_ACTIVE',
                               'WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN', 'WORKFLOW_UNASSIGNED',
                               'WORKFLOW_RECONCILIATION_REQUIRED', 'WORKFLOW_RESOLUTION_UNAVAILABLE',
@@ -841,7 +927,7 @@ def _error_code(error):
               410 if code == 'CURSOR_EXPIRED' else
               400 if code == 'INVALID_SCHEMA' else 503)
     status = v13_error_status(code) or status
-    effect = 'not_started'
+    effect = error.effect_outcome if isinstance(error, BusinessError) else 'not_started'
     if isinstance(error, SessionTaskDispatchError):
         effect = error.effect_outcome if error.effect_outcome in {'not_started', 'unknown'} else 'unknown'
     return code, status, effect
@@ -862,6 +948,11 @@ def _error_details(error):
     if not details:
         return []
     if isinstance(details, dict):
+        # 宿主索引的签名视图还含 owner、路径与签名；公开错误只保留解释覆盖不足所需的四个标量。
+        coverage = details.get('source_coverage')
+        if type(coverage) is dict:
+            details = {**details, **{f'source_coverage.{key}': coverage[key]
+                for key in ('status', 'reason', 'through', 'source_size') if key in coverage}}
         details = [{'key': key, 'value': value} for key, value in details.items()
             if isinstance(key, str) and (value is None or type(value) in (str, int, float, bool))]
     try:
@@ -873,6 +964,13 @@ def _error_details(error):
         return []
 
 
+def _public_host_error_message(error):
+    from ..contracts.diagnostics import redact_diagnostic_text
+    from ..conversation.channels import redact_host_absolute_paths
+
+    return redact_host_absolute_paths(redact_diagnostic_text(error.message))
+
+
 # LLM: 服务可按宿主寿命复用，调用身份仍须本次发行且匹配真实owner与canonical home。
 # 函数用途: 经冻结schema、当前授权和领域端口执行一次业务调用。
 def execute_business(request, context, services):
@@ -882,6 +980,8 @@ def execute_business(request, context, services):
     completed_effect = None
     spec = None
     details = []
+    message = ''
+    stage = 'validate_request'
     try:
         if type(request) is not dict or type(request.get('action')) is not str:
             raise HostAPIError('INVALID_SCHEMA')
@@ -902,10 +1002,14 @@ def execute_business(request, context, services):
                 or Path(context.host.home_paths.owner_home_dir).resolve() != services.owner_home):
             raise HostAPIError('RESOURCE_NOT_FOUND', 404)
         facts = {'owner_id': services.owner_id, **request['params']}
+        stage = 'check_access'
         context.check(spec.action, facts)
+        stage = 'check_readiness'
         if not services.ready(spec.action):
-            raise HostAPIError('HOST_NOT_READY', 503)
+            raise HostAPIError('HOST_NOT_READY', 503, message=(
+                f'{spec.action} 的宿主能力当前不可用，本次未执行。请用 system.capabilities 核对该动作是否已启用并可用。'))
         entered = True
+        stage = 'invoke'
         if submit_alias:
             from .business_api_v13 import v13_submit_alias
             raw = v13_submit_alias(request, context, services)
@@ -918,7 +1022,9 @@ def execute_business(request, context, services):
         from ..plugin_host.contracts import DomainResult
         accepted = isinstance(raw, DomainResult) and raw.http_status == 202
         completed_effect = 'none' if spec.metadata['effect'] == 'read' else ('running' if accepted else 'committed')
+        stage = 'validate_result'
         data = spec.validate_result(thaw(raw.data) if isinstance(raw, DomainResult) else raw, accepted=accepted)
+        stage = 'recheck_access'
         context.check(spec.action, facts)
         # 领域显式给出的 allowed_actions 才是可调用动作；没有该字段的动作保持空，不从目录推断。
         allowed = data.get('allowed_actions') if isinstance(data, dict) else None
@@ -927,13 +1033,43 @@ def execute_business(request, context, services):
     except (HostAPIError, BusinessError, SessionTaskDispatchError) as error:
         code, status, effect = _error_code(error)
         details = _error_details(error)
-    except (OSError, ValueError, TypeError, RuntimeError, PermissionError):
+        if isinstance(error, HostAPIError):
+            message = _public_host_error_message(error)
+    except (OSError, ValueError, TypeError, RuntimeError, KeyError) as error:
+        # 未声明可公开的异常可能带参数原文。发布已知动作、失败阶段、异常类型和系统原因，
+        # 领域端口返回以后出错时保留它已经产生的效果，不能把一次提交解释成可重试的写失败。
         mutating = entered and spec is not None and spec.metadata['effect'] != 'read'
         code, status, effect = ('OUTCOME_UNKNOWN', 503, 'unknown') if mutating else ('HOST_NOT_READY', 503, 'not_started')
+        action = spec.action if spec is not None else 'business'
+        message = f'{action} 在 {stage} 阶段发生 {type(error).__name__}'
+        details = [{'key': 'stage', 'value': stage}, {'key': 'exception_type', 'value': type(error).__name__}]
+        if isinstance(error, OSError) and type(error.errno) is int and 0 < error.errno < 4096:
+            details.append({'key': 'errno', 'value': error.errno})
+            message += f'（errno {error.errno}，{os.strerror(error.errno)}）'
+        if mutating:
+            hint = '用原 request_id 和幂等键核对原对象或操作记录，再决定下一步。请勿重新发起写操作。'
+        else:
+            hint = '按原 request_id 查看 Gateway 诊断，核实该动作依赖的数据源或服务后再重新查询。'
+        details.append({'key': 'next_action', 'value': hint})
+        message += '。' + hint
+        effect = completed_effect or effect
     if completed_effect is not None and effect == 'not_started':
         # 末核撤权只隐藏返回数据，不把原端口已经完成的提交谎报成未执行。
         effect = completed_effect
-    error = {'code': code, 'message': code, 'retryable': status == 503, 'details': details}
+    if stage == 'validate_result' and completed_effect is not None:
+        # validate_object 同时校验输入和返回值，其原始提示按输入失败措辞，不能让模型再次提交。
+        message = f'{spec.action} 的原执行已返回，结果未通过宿主响应校验。请按原 request_id 核对结果。'
+        details = [item for item in details if item['key'] != 'next_action']
+        details.append({'key': 'next_action', 'value': '核对原执行结果及字段约束，勿重新发起写操作。'})
+    if status == 503 and effect in {'unknown', 'committed', 'running'}:
+        # 历史业务协议的 retryable 表示 503 可以恢复，不给当前写请求重放权。
+        details = [item for item in details if item['key'] != 'retry_same_request']
+        if len(details) > 62:
+            details = details[:61] + [{'key': 'details_truncated', 'value': True}]
+        details.append({'key': 'retry_same_request', 'value': False})
+        if not any(item['key'] == 'next_action' for item in details):
+            details.append({'key': 'next_action', 'value': '用原 request_id、幂等键和目标记录核对已发生的操作，勿重发原写请求。'})
+    error = {'code': code, 'message': message or code, 'retryable': status == 503, 'details': details}
     return status, _response(request_id, error=error, effect=effect)
 
 
@@ -1132,15 +1268,52 @@ def native_business_context(handler, server):
     return context, cache[key]
 
 
-def _native_source(handler):
-    from urllib.parse import urlsplit
-
+def _require_business_transport(handler):
     from ..auth.middleware import require_trusted_source
     headers = getattr(handler, 'headers', None)
     if headers is None:
         raise HostAPIError('CAPABILITY_DENIED', 403)
-    if require_trusted_source(handler):
-        return False
+    denial = {}
+
+    class SourceResponse:
+        # 原运输门仍是唯一裁决；仅截获其拒绝响应，交业务路由投影正式Envelope。
+        def __getattr__(self, name):
+            return getattr(handler, name)
+
+        def _send_json(self, status, body):
+            denial.update(status=status, body=body)
+
+    if require_trusted_source(SourceResponse()):
+        body = denial.get('body', {})
+        code = body.get('error_code', 'CAPABILITY_DENIED') if isinstance(body, dict) else 'CAPABILITY_DENIED'
+        if not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
+            code = 'CAPABILITY_DENIED'
+        error = HostAPIError(code, denial.get('status', 403))
+        error.details = {
+            'reason': 'business_transport_authentication_rejected',
+            'next_action': '当前客户端凭据或边缘身份已无效；在原宿主重新连接以刷新凭据，核对登录身份后重新发起。不要修改 owner_id 或借其它客户端绕过。',
+            'retry_same_request': False}
+        raise error
+
+
+def reject_untrusted_business_source(handler):
+    """前置认证门仍由原middleware裁决，只将拒绝投影为业务冻结信封。"""
+    try:
+        _require_business_transport(handler)
+    except HostAPIError as error:
+        code, status, effect = _error_code(error)
+        response = _response('invalid-request', error={'code': code, 'message': code,
+            'retryable': False, 'details': _error_details(error)}, effect=effect)
+        handler._send_json(status, response)
+        return True
+    return False
+
+
+def _native_source(handler):
+    from urllib.parse import urlsplit
+
+    _require_business_transport(handler)
+    headers = handler.headers
     origin = headers.get('Origin')
     if origin is not None:
         parsed = urlsplit(origin)
@@ -1417,15 +1590,53 @@ def _model_request_binding(host):
 def local_business_context(host, *, model=False):
     from ..conversation.channels import LOCAL_PRIVATE_CHANNELS
     from ..conversation.host_actor import HostActorError
+    from ..runtime_errors import DataCorruptionError
     actor = None
     current_run = getattr(host, '_current_run_params', None)
+    from ..conversation.business_contracts import BusinessExecutionContext
+    frozen_business = getattr(current_run, 'business_context', None) if model else None
+    if frozen_business is not None:
+        if not isinstance(frozen_business, BusinessExecutionContext):
+            raise HostAPIError('CAPABILITY_DENIED', 403, message='BUSINESS_CONTEXT_INVALID。当前业务范围不是宿主typed快照，操作尚未开始。')
+        if frozen_business.owner_id != host.home_paths.owner_id:
+            raise HostAPIError('CAPABILITY_DENIED', 403, message='BUSINESS_CONTEXT_OWNER_MISMATCH。当前宿主与冻结Owner不符，操作尚未开始。')
+    repository = getattr(getattr(host, 'subagents', None), 'runtime_db', None)
+    run_id, attempt_id = getattr(current_run, 'run_id', ''), getattr(current_run, 'attempt_id', '')
+    if model and (frozen_business is not None or run_id and attempt_id):
+        # 不信source标签，也不允许丢掉params快照后逃回Owner全域；原执行库仍须与当轮参数精确相等。
+        try:
+            canonical = repository.business_context_for_execution(owner_id=host.home_paths.owner_id,
+                run_id=run_id, attempt_id=attempt_id)
+            if canonical != frozen_business:
+                raise ValueError('canonical_context_mismatch')
+            if canonical is None:
+                # None仅表示原始来源确无业务范围；运行副本丢字段不能覆盖原SessionTask的已冻结范围。
+                with repository._runtime_connection() as connection:
+                    row = connection.execute('SELECT tr.metadata_json FROM agent_runs ar '
+                        'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id '
+                        'WHERE ar.run_id=? AND ar.current_attempt_id=?', (run_id, attempt_id)).fetchone()
+                metadata = json.loads(row['metadata_json'])
+                source_ref = metadata.get('session_task_ref')
+                if source_ref is not None:
+                    source_task = host.conversation_store.session_tasks.require(source_ref)
+                    for source_thread in (source_task.sender_thread_id, source_task.target_thread_id):
+                        if host.conversation_store.threads.require(source_thread).owner_id != host.home_paths.owner_id:
+                            raise ValueError('source_task_owner_mismatch')
+                    if source_task.metadata.get('business_context') is not None:
+                        raise ValueError('source_task_business_context_missing_in_execution')
+        except (AttributeError, OSError, ValueError, TypeError, KeyError, sqlite3.Error, DataCorruptionError) as error:
+            raise HostAPIError('CAPABILITY_DENIED', 403, message=(
+                'BUSINESS_CONTEXT_EXECUTION_MISMATCH。原执行run/attempt/Owner的业务范围无法核实（'
+                + type(error).__name__ + '）；操作尚未开始，请回原任务核对，不能改source标签、丢弃快照或切当前空间绕过。')) from error
+    # 当前物理执行task可以不同于继承的逻辑业务Task；上面的canonical session_task_ref才是该关系的权威。
     if model:
         try:
             actor = _model_business_actor(host)
         except HostAPIError:
             raise
         except HostActorError as error:
-            raise HostAPIError(error.error_code, 403, message=str(error)) from error
+            raise HostAPIError(error.error_code, 403, message=(
+                f'{error} 请在原会话重新发起，让宿主绑定发送者身份。')) from error
         except (ValueError, KeyError, OSError) as error:
             raise HostAPIError('CAPABILITY_DENIED', 403, message=(
                 f'BUSINESS_ACTOR_SOURCE_UNREADABLE。原执行来源读取失败（{type(error).__name__}）。'
@@ -1481,6 +1692,14 @@ def local_business_context(host, *, model=False):
                 return False
             if current is None and (host.home_paths.owner_provider != 'local' or host.home_paths.owner_kind != 'main'):
                 return False
+        if frozen_business is not None and frozen_business.space_id is not None:
+            for field, expected in (('space_id', frozen_business.space_id), ('project_ref', frozen_business.project_ref)):
+                if field in facts and expected is not None and facts[field] != expected:
+                    raise BusinessError('BUSINESS_ACCESS_DENIED', effect_outcome='not_started', details={
+                        'reason': 'frozen_task_business_scope_mismatch', 'field_path': '$.params.' + field,
+                        'expected': expected, 'actual': facts[field], 'task_id': frozen_business.task_id,
+                        'next_action': '当前执行只获原任务冻结范围。继续处理原空间；跨空间工作应由原用户或已授权管理入口另行派活，不能修改当前任务范围重试。',
+                    })
         return facts.get('owner_id', host.home_paths.owner_id) == host.home_paths.owner_id
 
     def session_space_source(action):
@@ -1491,7 +1710,7 @@ def local_business_context(host, *, model=False):
         return host.conversation_store.threads.require(actor.source_thread_id), actor.actor_id
 
     context = bind_business_context(host, authorize=check, actor=actor,
-        subject_id=actor.actor_id if actor is not None else 'host',
+        subject_id=actor.actor_id if actor is not None else 'host', business_context=frozen_business,
         selected_space_id=selected_space['space_id'] if selected_space is not None else None)
     if model:
         context = replace(context, session_space_source=session_space_source)
@@ -1550,8 +1769,137 @@ def _model_business_schema(schema):
     return result
 
 
+def _business_tool_source_effect(action, status, result, expected_request_id):
+    """只在原宿主出口验证完整业务信封后签出源效果旁证，不解析工具或错误正文。"""
+    from ..plugin_host.business_action_specs import business_schema_bundle, standalone_schema
+    from ..tooling.models import source_effect_facts
+
+    if (status < 400 or not isinstance(result, dict)
+            or result.get('effect_outcome') not in {'committed', 'running'}
+            or result.get('request_id') != expected_request_id
+            or result.get('state') != 'failed' or not isinstance(result.get('error'), dict)):
+        return {}
+    try:
+        validate_object(result, standalone_schema(business_schema_bundle()['response_envelope_schema']))
+    except HostAPIError:
+        return {}
+    return source_effect_facts({'source': 'business_host', 'action': action,
+        'request_id': result['request_id'], 'operation_id': result['operation_id'],
+        'effect_outcome': result['effect_outcome']})
+
+
+def _business_tool_control_code(code, effect):
+    """原业务原因与工具控制分列；只有明确写前拒绝才能沿拒绝恢复合同。"""
+    if effect not in {'none', 'not_started'}:
+        return 'TOOL_OPERATION_OUTCOME_UNKNOWN'
+    # 只接受宿主给出的原码；未知码仍交原taxonomy拒绝，不按文本或后缀猜权限。
+    return code
+
+
+def _build_business_model_spec(spec):
+    """只装配静态模型合同，不读取owner、就绪状态或授权。"""
+    from ..tooling.models import ToolModelHints, ToolModelSpec
+
+    family = spec.action.split('.')[0]
+    title, keywords = {
+        'spaces': ('业务空间', ('业务空间', '空间', 'space', 'spaces', '/space')),
+        'background_agents': ('后台代理', ('后台代理', '常驻代理', 'background_agents', 'team', '/team')),
+        'tasks': ('后台任务', ('后台任务', '派活', '派任务', '分配任务', '布置任务', '交给后台代理', 'tasks')),
+        'sessions': ('会话空间', ('当前空间', '选择空间', '切换空间', '恢复默认空间', '/space use', '/space clear', 'sessions.space')),
+    }.get(family, ('业务动作', (spec.action,)))
+    verbs = {
+        'list': ('列出', '列表', '查询'), 'get': ('查看', '详情', '查询'),
+        'create': ('创建', '新建'), 'update': ('修改', '更新'),
+        'messages.send': ('发送消息', '发消息', 'send_message'),
+        'suspend': ('暂停', '挂起'), 'resume': ('恢复', '继续'),
+        'retire': ('退役', '停用'), 'restore': ('还原', '复原'),
+        'assign': ('派给', '分配', '执行'), 'submit': ('交给总控', '提交'),
+        'follow_up': ('追问', '补充要求', '继续'), 'cancel': ('取消', '停止'),
+    }.get(spec.action.partition('.')[2], ()) if family in {'spaces', 'background_agents', 'tasks'} else ()
+    purpose = (verbs[0] if verbs else '') + title + '：' + spec.action
+    if spec.action in {'sessions.space.get', 'sessions.space.set'}:
+        purpose = ('查看' if spec.action.endswith('.get') else '切换') + '当前会话空间：' + spec.action
+    if family == 'tasks' and spec.metadata['effect'] == 'execute':
+        purpose += '（异步执行；结束后结果自动回报本会话）'
+    model_schema = _model_business_schema(spec.native_request_schema)
+    description = purpose
+    examples = ()
+    if spec.action == 'background_agents.messages.send':
+        description += ('；向params.agent_id投递params.text，params.input_kind为message或guidance。'
+            '可能唤醒接收者，但不新建SessionTask，也不为新工作冻结空间/项目业务上下文；'
+            '需要正式派活、资产业务写入或任务终态跟踪时用business_tasks_assign，不能把消息受理当成任务已执行。'
+            '成功data.request_id与target_thread_id是消息凭据，不是新task_id。')
+        examples = (json.dumps({'action': spec.action, 'request_id': 'message-request-0001',
+            'idempotency_key': 'message-key-00000001', 'params': {'agent_id': 'thread-bg-example',
+                'input_kind': 'message', 'text': '补充说明；已有任务继续按原范围处理。'}}, ensure_ascii=False),)
+    if spec.action == 'sessions.space.set':
+        description += '；params.space_id显式null恢复默认；先get取得原revision，再带expected_revision与幂等键set；不改变已受理任务'
+    if spec.action == 'tasks.assign':
+        params_schema = model_schema['properties']['params']
+        params_schema['required'] = [key for key in params_schema['required'] if key != 'space_id']
+        description += '；省略 space_id 使用本次消息受理时选中的空间，显式 null 表示未归属空间'
+        description += ('；正式派给指定后台身份：params.agent_id填background_agents.create/get返回的agent_id，'
+            'params.instruction填任务正文，可用params.project_ref指定该Owner已有项目。'
+            '宿主创建原SessionTask并冻结其业务上下文；成功data.task_id/assignment_ref只证明已受理，'
+            '随后用business_tasks_get的params.task_id核终态，或等待原会话自动回报；勿重复派发。'
+            'background_agents.messages.send只是消息/指导，不代替本派活入口。')
+        examples = (json.dumps({'action': spec.action, 'request_id': 'assign-request-0001',
+            'idempotency_key': 'assign-key-00000001', 'params': {'agent_id': 'thread-bg-example',
+                'space_id': 'space-example', 'instruction': '在所派空间内完成任务并回报原task_id。'}},
+            ensure_ascii=False),)
+    return ToolModelSpec('business_' + spec.action.replace('.', '_'),
+        description + '；直接调用内置工具，状态和权限由当前宿主复核。',
+        model_schema,
+        hints=ToolModelHints(category=family if family in {'spaces', 'background_agents', 'tasks'} else 'business',
+            keywords=(*keywords, *verbs), use_cases=(purpose,),
+            examples=examples,
+            default_deferred=True, deferred_summary=purpose))
+
+
+@lru_cache(maxsize=128)
+def _cached_business_model_spec(spec):
+    # 原BusinessActionSpec只含不可变字段及完整合同JSON；缓存不会接收可变扩展定义。
+    return _build_business_model_spec(spec)
+
+
+def _business_model_spec(spec):
+    from copy import deepcopy
+
+    from ..plugin_host.business_action_specs import BusinessActionSpec
+
+    if type(spec) is BusinessActionSpec:
+        # 原型从不外泄；各Owner/调用者可变schema独立，改一个不能污染下一次装配。
+        return deepcopy(_cached_business_model_spec(spec))
+    return _build_business_model_spec(spec)
+
+
 # LLM: 注册与执行共用原宿主服务寿命；注册只看就绪状态，不把它缓存成调用授权。
 # 函数用途: 将当前就绪业务动作注册到原模型工具目录。
+def _inspect_business_tool_receipt(tool, request):
+    """原快照中的宿主方法只查原主体/原实参永久回执，不执行原写动作。"""
+    if not isinstance(request, dict) or request.get('action') != tool.action:
+        raise HostAPIError('INVALID_SCHEMA')
+    spec = resolve_business_action_spec(tool.action)
+    if (spec.metadata['implementer'] != 'W1' or not spec.requires_idempotency
+            or spec.metadata.get('human_authorization_required')):
+        return None
+    validate_object(request, spec.native_request_schema)
+    context, services = local_business_context(tool._business_host, model=True)
+    context.check(tool.action, {'owner_id': services.owner_id, **request['params']})
+    result = services.spaces.inspect_receipt(tool.action, request['params'], actor=services.actor(context),
+        expected_revision=request.get('expected_revision'), idempotency_key=request['idempotency_key'])
+    context.check(tool.action, {'owner_id': services.owner_id, **request['params']})
+    return validate_result('operations.get', result) if result is not None else None
+
+
+def inspect_registered_business_receipt(runtime, request):
+    """只认原快照handler的准确宿主方法，不按工具名或模型自报来源接受查账能力。"""
+    method = getattr(getattr(runtime, 'handler', None), 'inspect_operation_receipt', None)
+    if getattr(method, '__func__', None) is not _inspect_business_tool_receipt:
+        return None
+    return method(request)
+
+
 def register_business_tools(agent):
     """只向原Registry登记已接通动作；原执行、审批、归档和W9诊断链保持唯一。"""
     if not bool(getattr(agent.config, 'business_spaces_enabled', False)):
@@ -1566,48 +1914,17 @@ def register_business_tools(agent):
         ResourceScopePolicy,
         SandboxPolicy,
         ToolHandlerOutcome,
-        ToolModelHints,
-        ToolModelSpec,
         ToolRuntimePolicy,
     )
 
     class BusinessTool(BaseTool):
+        inspect_operation_receipt = _inspect_business_tool_receipt
+
         def __init__(self, spec):
+            self._business_host = agent
             self.action = spec.action
             self.content_authorization_required = spec.metadata.get("content_authorization_required") is True
-            family = spec.action.split('.')[0]
-            title, keywords = {
-                'spaces': ('业务空间', ('业务空间', '空间', 'space', 'spaces', '/space')),
-                'background_agents': ('后台代理', ('后台代理', '常驻代理', 'background_agents', 'team', '/team')),
-                'tasks': ('后台任务', ('后台任务', '派活', '派任务', '分配任务', '布置任务', '交给后台代理', 'tasks')),
-                'sessions': ('会话空间', ('当前空间', '选择空间', '切换空间', '/space use', 'sessions.space')),
-            }.get(family, ('业务动作', (spec.action,)))
-            verbs = {
-                'list': ('列出', '列表', '查询'), 'get': ('查看', '详情', '查询'),
-                'create': ('创建', '新建'), 'update': ('修改', '更新'),
-                'messages.send': ('发送消息', '发消息', 'send_message'),
-                'suspend': ('暂停', '挂起'), 'resume': ('恢复', '继续'),
-                'retire': ('退役', '停用'), 'restore': ('还原', '复原'),
-                'assign': ('派给', '分配', '执行'), 'submit': ('交给总控', '提交'),
-                'follow_up': ('追问', '补充要求', '继续'), 'cancel': ('取消', '停止'),
-            }.get(spec.action.partition('.')[2], ()) if family in {'spaces', 'background_agents', 'tasks'} else ()
-            purpose = (verbs[0] if verbs else '') + title + '：' + spec.action
-            if spec.action in {'sessions.space.get', 'sessions.space.set'}:
-                purpose = ('查看' if spec.action.endswith('.get') else '切换') + '当前会话空间：' + spec.action
-            if family == 'tasks' and spec.metadata['effect'] == 'execute':
-                purpose += '（异步执行；结束后结果自动回报本会话）'
-            model_schema = _model_business_schema(spec.native_request_schema)
-            description = purpose
-            if spec.action == 'tasks.assign':
-                params_schema = model_schema['properties']['params']
-                params_schema['required'] = [key for key in params_schema['required'] if key != 'space_id']
-                description += '；省略 space_id 使用本次消息受理时选中的空间，显式 null 表示未归属空间'
-            self.model_spec = ToolModelSpec('business_' + spec.action.replace('.', '_'),
-                description + '；直接调用内置工具，状态和权限由当前宿主复核。',
-                model_schema,
-                hints=ToolModelHints(category=family if family in {'spaces', 'background_agents', 'tasks'} else 'business',
-                    keywords=(*keywords, *verbs), use_cases=(purpose,),
-                    default_deferred=True, deferred_summary=purpose))
+            self.model_spec = _business_model_spec(spec)
             effect = {'read': 'read_only', 'configure': 'mutating', 'execute': 'dangerous'}.get(spec.metadata['effect'], 'mutating')
             self.runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy(default_effect=effect),
                 approval_policy=ApprovalPolicy("always", require_human=True) if self.content_authorization_required else ApprovalPolicy(),
@@ -1626,7 +1943,8 @@ def register_business_tools(agent):
         def _execute(self, params, invocation=None):
             try:
                 if params.get('action') != self.action:
-                    raise HostAPIError('INVALID_SCHEMA')
+                    raise HostAPIError('INVALID_SCHEMA', message=(
+                        f'当前工具要求 action 为 {self.action}。请修正该字段后调用，业务动作尚未执行。'))
                 context, services = local_business_context(agent, model=True)
                 if self.content_authorization_required:
                     from ..conversation.business_access import content_authorization_facts
@@ -1646,21 +1964,42 @@ def register_business_tools(agent):
                     params = {**params, 'params': {**params['params'], 'space_id': context.selected_space_id}}
                 status, result = execute_business(params, context, services)
             except HostAPIError as error:
-                status, result = error.status, {'error': {'code': error.code}, 'effect_outcome': error.outcome}
+                # 当前上下文认证可以在进入领域前拒绝；将原宿主的原因和纠正步骤连同效果交回模型。
+                status, result = error.status, {'error': {'code': error.code,
+                    'message': _public_host_error_message(error), 'details': _error_details(error)},
+                    'effect_outcome': error.outcome}
             code = (result.get('error') or {}).get('code', '')
             # 业务none表示只读无副作用；工具合同用not_started表达同一事实。
             # 已提交/运行的业务结果不得误报未执行；JSON原值保留，工具层保守标unknown。
             effect = result.get('effect_outcome', 'not_started')
             tool_effect = 'not_started' if effect == 'none' else effect if effect in {'not_started', 'unknown'} else 'unknown'
+            # HTTP状态与领域原因取原宿主业务结果，独立于归一化控制码；模型或子提供方正文不能签发此字段。
+            host_error = {}
+            if status >= 400 and isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
+                details = (result.get('error') or {}).get('details') or []
+                next_action = next((item.get('value') for item in details
+                    if isinstance(item, dict) and item.get('key') == 'next_action'
+                    and isinstance(item.get('value'), str)), '')
+                host_error = {'source': 'business_host', 'code': code, 'http_status': status,
+                              'next_action': next_action[:2048]}
             return ToolHandlerOutcome(self.model_spec.name, status < 400, json.dumps(result, ensure_ascii=False),
                 result_envelope=result,
-                error_code=code, reported_error_code=code,
+                error_code=_business_tool_control_code(code, tool_effect) if status >= 400 else code,
+                reported_error_code=code, host_error=host_error,
+                source_effect=_business_tool_source_effect(self.action, status, result, params.get('request_id')),
                 effect_outcome=tool_effect if status >= 400 else '')
 
     services = _local_business_services(agent)
+    from .business_asset_read import ReadBusinessAssetTool
+    registered = getattr(agent.tools, 'tools', {})
+    present = isinstance(registered, dict) and 'read_business_asset' in registered
+    if services.ready('assets.get') and not present:
+        agent.tools.register(ReadBusinessAssetTool(agent))
     from .business_api_v13 import v13_action_spec
 
-    specs = [*business_action_specs().values(), *(v13_action_spec(name) for name in ('sessions.space.get', 'sessions.space.set'))]
+    # 原生扩展只宣告已经接通的明确入口；健康读取复用原有有界服务，不全开V13。
+    native_model_actions = ('sessions.space.get', 'sessions.space.set', 'workflows.health.get')
+    specs = [*business_action_specs().values(), *(v13_action_spec(name) for name in native_model_actions)]
     for spec in specs:
         if services.ready(spec.action):
             tool = BusinessTool(spec)

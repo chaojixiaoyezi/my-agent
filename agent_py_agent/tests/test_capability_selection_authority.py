@@ -397,11 +397,13 @@ def test_entry_policy_uses_frozen_boundary_not_registry_scope(bound_execution, t
     tools = agent.tools.runtime_snapshot(allowed_tools=["skill_search"], run_id=params.run_id)
     monkeypatch.setattr(ToolExecutor, "execute", _unexpected)
     monkeypatch.setattr(agent.tools.tools["skill_search"], "execute", _unexpected)
-    monkeypatch.setattr(authority_module, "write_boundary_with_runtime_ledger", lambda *_: {
+    from agent_py_agent.agent.agent_core import tool_runtime_ledger
+    from agent_py_agent.agent.tooling import host_read_policy
+    monkeypatch.setattr(tool_runtime_ledger, "write_boundary_with_runtime_ledger", lambda *_: {
         "execution_workspace_roots": [str(frozen_root)],
         "effective_owner_scope_root": frozen_scope,
     })
-    captured = _capture_policy_request(monkeypatch, authority_module)
+    captured = _capture_policy_request(monkeypatch, host_read_policy)
 
     package_entry_policy(agent, params, tools, {"action": "get", "package_id": "authority-package"}, claim_id="claim")
 

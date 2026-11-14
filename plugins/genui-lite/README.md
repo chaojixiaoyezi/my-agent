@@ -15,13 +15,13 @@ python scripts/build_plugin_api.py --wheel-dir /tmp/plugin-build/wheels
 python scripts/build_plugin_package.py \
   --project plugins/genui-lite \
   --declaration genui_lite/declaration.json \
-  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.2.0-py3-none-any.whl \
+  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.3.0-py3-none-any.whl \
   --output /tmp/plugin-build/genui-lite.zip
 ```
 
 `skills/genui-table/SKILL.md` 经 `pyproject.toml` 的 package-data 打进 wheel；构建脚本会校验 wheel 内
 Skill 目录与声明 `"skills": ["genui-table"]` 完全一致，不一致时构建失败。
-插件只依赖精确版本 SDK `my-agent-plugin-api==0.2.0`，不需要在插件环境安装完整 my-agent。
+插件只依赖精确版本 SDK `my-agent-plugin-api==0.3.0`，不需要在插件环境安装完整 my-agent。
 
 ## 使用
 

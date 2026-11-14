@@ -41,8 +41,14 @@ def select_tool_protocol(agent: object, *, run_id: str, request_id: str = "") ->
     if callable(probe):
         from ..agent_core.model.call_runtime import model_call_ledger
         from ..backends.provider_headers import ProbeAccountingScope, probe_accounting_scope
+        from ..settings.reasoning_effort import request_reasoning_options
 
-        scope = ProbeAccountingScope(model_call_ledger(agent), request_id=str(request_id or ""), run_id=str(run_id or ""))
+        params = getattr(agent, '_current_run_params', None)
+        if params is not None and str(getattr(params, 'run_id', '') or '') != str(run_id):
+            params = None
+        disabled, effort = request_reasoning_options(agent, params, backend, forced=False)
+        scope = ProbeAccountingScope(model_call_ledger(agent), request_id=str(request_id or ""), run_id=str(run_id or ""),
+                                     thinking_disabled=disabled, reasoning_effort=effort)
         with probe_accounting_scope(scope):
             capability = probe()
     else:

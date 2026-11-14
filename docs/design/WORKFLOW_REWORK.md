@@ -40,6 +40,16 @@
 
 审核候选和最低要求取自冻结定义。候选、范围或 attempt 变化后须重新审核。工具权限和生产凭证沿原授权入口核验。程序修改、DAG 编排和发布通过各自已有资产与工具入口执行。
 
+独立审核员在派给自己的 `requirement_id` 上调用 `query_provenance`，可省略 `root`。返回的 `workflow_review_material.review_gate` 显示当前受审步骤、最低独立审核数，以及副作用尚未启动的事实。上游步骤的输出只出现在 `upstream_outputs`。审核员据现有材料独立登记通过或返工，执行权由原工具在执行时核验。
+
+长材料归档后，审核员可用原工具读取同一候选的分页。首次查询提供材料摘要和 `read_example`，续页使用 `material_cursor`。读取时每页重新核实原派工、版本及材料摘要。页已读完只表示到达投影末尾，`source_coverage` 保留原始材料的完整程度。
+
+受审工具步骤若引用可变资源，宿主按原只读权限取得内容摘要，并将解析后的参数与摘要绑定进审核版本。审核员可从 `binding.tool_precondition` 核对工具、参数摘要和资源约束。资产投递的 `expected_bundle_sha256` 覆盖本次选择的资产、依赖及附件。发送方在写收发箱前，用本次实际要发送的同一批字节核对摘要。旧票缺少所需摘要或内容已经变化时，原任务需提交新候选重审。
+
+## 查看工作流健康情况
+
+模型可通过 `tool_search` 查找 `business_workflows_health_get`，在原业务工具上调用 `workflows.health.get`。`params.workflow_ref` 是工作流定义标识，`params.limit` 可取 1 至 100。响应中的 `sampled_runs` 是实际读取的运行数。`coverage`、`field_coverage` 和 `source_coverage` 给出统计范围及字段缺失情况。需要导出时，可用已授权的写文件工具保存原始 JSON，保留 `null` 和操作引用。
+
 ## 验证范围
 
 确定性测试覆盖总轮数与无进展上限、成功写入前缀只执行一次、控制幂等重放、取消、未知副作用核验、启用状态、策略校验、补丁绕审拒绝以及冻结审核策略。

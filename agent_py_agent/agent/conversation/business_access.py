@@ -12,13 +12,32 @@ from ..plugin_host.business_action_specs import business_action_spec
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.schemas import validate_object
 
+_UNDECLARED_EFFECT = object()
+
 
 class BusinessError(ValueError):
-    def __init__(self, code: str, *, details: dict | None = None):
+    def __init__(self, code: str, *, details: dict | None = None, effect_outcome: str | object = _UNDECLARED_EFFECT):
+        declared = effect_outcome is not _UNDECLARED_EFFECT
+        effect_outcome = effect_outcome if declared else 'not_started'
+        if effect_outcome not in {'not_started', 'committed', 'unknown'}:
+            raise ValueError('业务拒绝必须声明not_started、committed或unknown副作用事实')
+        self.effect_outcome = effect_outcome
+        self.effect_outcome_declared = declared
         self.error_code = self.code = code
         self.details = details or {}
         # 不把原参数、路径、票据或外部异常正文带入公开说明。
         super().__init__(code)
+
+
+    @property
+    def effect_outcome(self):
+        return self._effect_outcome
+
+    @effect_outcome.setter
+    def effect_outcome(self, value):
+        # 后端可在真实提交边界补充效果证明；默认拒绝不能冒充这份显式证明。
+        self._effect_outcome = value
+        self.effect_outcome_declared = True
 
 
 @dataclass(frozen=True)
@@ -82,7 +101,12 @@ def validate_result(action: str, result: object) -> dict:
     try:
         return business_action_spec(action).validate_result(result)
     except HostAPIError as error:
-        raise BusinessError('DOMAIN_RESULT_INVALID') from error
+        details = dict(getattr(error, 'details', {}) or {})
+        details['validation_stage'] = 'domain_result'
+        details['next_action'] = ('该动作的领域结果不满足所列字段约束；按原 request_id 核对结果，'
+            '由结果生产方修正类型、协议枚举或长度，读取长内容使用原分页/引用入口。'
+            '本错误不证明原写操作未执行，不要重新发起写操作。')
+        raise BusinessError('DOMAIN_RESULT_INVALID', details=details) from error
 
 
 def require_revision(expected: object, actual: int) -> None:

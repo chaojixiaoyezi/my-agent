@@ -252,7 +252,7 @@ def test_run_validates_inputs_redacts_and_bounds_output(world):
     status, body = invoke(world, 'scripts.run', {'script_id': 'nonzero'}, key='nonzero-run-key-0001')
     assert status == 200, body
     failed = body['data']['run']
-    assert failed['state'] == 'failed' and failed['ok'] is False and failed['error'] == 'SCRIPT_EXIT_NONZERO'
+    assert failed['state'] == 'unknown' and failed['ok'] is None and failed['error'] == 'SCRIPT_EXIT_NONZERO'
 
 
 # LLM: 两个服务实例并发使用同一回执；这是真实文件锁而非替换事务实现。
@@ -1122,7 +1122,7 @@ def test_script_delete_same_key_interleaving_retains_proof(v13_native, delete_re
 
 # LLM: 经真实 HTTP 准入高风险运行，任务和 operation 仍由原 writer 产生；不签审批票或模拟展示输入。
 # 函数用途: 保存批准路径的关联并通过规范 managed 写口发布真实 runner 输出。
-def _150_approved_roundtrip(native, *, inputs=None, arguments=None, ok=True):
+def _150_approved_roundtrip(native, *, inputs=None, arguments=None, ok=True, effect_path=None):
     from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
     from agent_py_agent.agent.workflows.script_runner import ScriptRunner
     from agent_py_agent.tests.test_v13_w0_observation_readers import managed_roundtrip_operation
@@ -1130,7 +1130,9 @@ def _150_approved_roundtrip(native, *, inputs=None, arguments=None, ok=True):
     space = v13_space(native)
     schema = {'type': 'object', 'properties': {'number': {'type': 'integer'}}, 'additionalProperties': False}
     status, created = v13_call(native, 'scripts.create', {'script_id': 'roundtrip-script',
-        'space_id': space, 'name': '原生结算往返', 'code': 'print(\'{"value": 7}\')' if ok else 'raise SystemExit(9)',
+        'space_id': space, 'name': '原生结算往返', 'code': (
+            f"import os\nwith open({str(effect_path)!r}, 'a') as f:\n f.write('issued\\n');f.flush();os.fsync(f.fileno())\nraise SystemExit(9)"
+            if effect_path else 'print(\'{"value": 7}\')' if ok else 'raise SystemExit(9)'),
         'risk_level': 'high', 'requires_approval': True, 'input_schema': schema},
         user='business-alice', idempotency_key='150-create-roundtrip')
     assert status == 200, created
@@ -1153,7 +1155,8 @@ def _150_approved_roundtrip(native, *, inputs=None, arguments=None, ok=True):
     actual_inputs = inputs or {}
     # 这里只运行隔离测试资产，验证结果运输与恢复；不声称覆盖真实人工批准链。
     result = ScriptRunner(services.owner_home, owner_scope_root=services.owner_home,
-        agent_home_root=services.host.home_paths.root).run_script('roundtrip-script', actual_inputs)
+        agent_home_root=services.host.home_paths.root,
+        extra_write_roots=(effect_path.parent,) if effect_path else ()).run_script('roundtrip-script', actual_inputs)
     assert result.ok is ok
     raw = {**vars(result), 'script_id': 'roundtrip-script'}
     args = arguments if arguments is not None else {
@@ -1185,10 +1188,10 @@ def test_150_approved_managed_http_terminal(v13_native, inputs, omit_tool_inputs
     status, body = v13_call(v13_native, 'scripts.runs.get', {'execution_id': accepted['execution_id']}, user='business-alice')
     assert status == 200, body
     terminal = body['data']['run']
-    assert terminal['state'] == ('completed' if ok else 'failed') and terminal['ok'] is ok, terminal
+    assert terminal['state'] == ('completed' if ok else 'unknown') and terminal['ok'] is (True if ok else None), terminal
     assert terminal['output'] == ({'value': 7} if ok else {})
     assert terminal['task_id'] == task.task_id
-    assert terminal['coverage'] == services.observation.readers['approvals']({}).coverage
+    assert terminal['coverage'] == (services.observation.readers['approvals']({}).coverage if ok else 'unknown')
     status, replay = v13_call(v13_native, 'scripts.run', params, user='business-alice', idempotency_key=key)
     assert status == 200 and replay['data']['run'] == terminal, replay
     # 精确来源此时损坏；已保存终态不依赖再次观察才能继续返回。
@@ -1265,7 +1268,7 @@ def test_150_native_consumer_without_dispatch(background_http, case):
         {'script_id': 'consumer-script', 'inputs': inputs}, idempotency_key='150-consumer-native-run')
     assert status == 200, executed
     actual = executed['data']['run']
-    assert actual['state'] == ('failed' if case == 'failed' else 'completed'), actual
+    assert actual['state'] == ('unknown' if case == 'failed' else 'completed'), actual
     admitted = V13Store(services.owner_home).get('script_runs', actual['execution_id'])
     args = {'action': 'run', 'script_id': 'consumer-script', 'inputs': inputs}
     hashes = [tool_arguments_hash(args)]
@@ -1273,7 +1276,7 @@ def test_150_native_consumer_without_dispatch(background_http, case):
         hashes.append(tool_arguments_hash({'action': 'run', 'script_id': 'consumer-script'}))
     raw = {'script_id': 'consumer-script', 'ok': actual['ok'], 'output_data': actual['output'],
         'duration_ms': actual['duration_ms'], 'started_at': 1, 'ended_at': 2,
-        'error_code': actual['error'], 'effect_outcome': 'confirmed' if actual['ok'] else 'failed'}
+        'error_code': actual['error'], 'effect_outcome': 'confirmed' if actual['ok'] else 'unknown'}
     if case == 'omitted_empty':
         args.pop('inputs')
     elif case == 'wrong_input':
@@ -1290,7 +1293,7 @@ def test_150_native_consumer_without_dispatch(background_http, case):
     status, body = observation_roundtrip.background_call(background_http, 'scripts.runs.get', {'execution_id': 'consumer-approved'})
     assert status == 200, body
     result = body['data']['run']
-    expected = 'unknown' if case == 'wrong_input' else 'failed' if case == 'failed' else 'completed'
+    expected = 'unknown' if case in ('wrong_input', 'failed') else 'completed'
     assert result['state'] == expected, result
     if expected != 'unknown':
         assert result['output'] == actual['output'] and result['ok'] is actual['ok']
@@ -1301,3 +1304,33 @@ def test_150_native_consumer_without_dispatch(background_http, case):
             conn.commit()
         status, again = observation_roundtrip.background_call(background_http, 'scripts.runs.get', {'execution_id': 'consumer-approved'})
         assert status == 200 and again['data']['run'] == result, again
+
+
+def test_approved_unknown_script_same_key_never_dispatches_or_repeats_effect(v13_native, tmp_path):
+    marker = tmp_path / 'business-issued.log'
+    services, task, runtime, _, operation_id, params, key, accepted = _150_approved_roundtrip(
+        v13_native, ok=False, effect_path=marker)
+    assert marker.read_text().splitlines() == ['issued']
+    original = None
+    for _ in range(3):
+        status, body = v13_call(v13_native, 'scripts.runs.get', {
+            'execution_id': accepted['execution_id']}, user='business-alice')
+        assert status == 200 and body['data']['run']['state'] == 'unknown'
+        observed = body['data']['run']
+        assert observed['task_id'] == task.task_id and observed['error'] == 'SCRIPT_EXIT_NONZERO'
+        original = original or observed
+        assert observed == original
+        status, replay = v13_call(v13_native, 'scripts.run', params,
+            user='business-alice', idempotency_key=key)
+        assert status == 200 and replay['data']['run'] == original
+        assert marker.read_text().splitlines() == ['issued']
+    saved = V13Store(services.owner_home).get('script_runs', accepted['execution_id'])
+    assert saved['execution_result_ref']['operation_id'] == operation_id
+    # 原证明已冻结，观察源损坏不能抹去原错误或制造新受理责任。
+    with runtime._runtime_connection() as conn:
+        conn.execute('UPDATE tool_operations SET outcome_json=? WHERE operation_id=?', ('{broken', operation_id))
+        conn.commit()
+    status, replay = v13_call(v13_native, 'scripts.run', params,
+        user='business-alice', idempotency_key=key)
+    assert status == 200 and replay['data']['run'] == original
+    assert marker.read_text().splitlines() == ['issued']

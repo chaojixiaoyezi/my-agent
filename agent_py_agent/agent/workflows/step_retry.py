@@ -101,7 +101,6 @@ def run_step_with_retry(
     backoff_factor = max(1.0, float(policy.get('backoff_factor', 1.0)))
     raw_codes = policy.get('retryable_codes')
     retryable_codes = tuple(raw_codes) if raw_codes else ()
-    idempotent = bool(policy.get('idempotent', False))
 
     step.max_attempts = max_attempts
     step.attempt_count = 1
@@ -170,16 +169,22 @@ def run_step_with_retry(
                 step.escalation_result['retry_suppressed_reason'] = 'NON_TRANSIENT_ERROR'
                 return
 
-        # 安全防线 2：有副作用模式且非幂等的已启动写入禁止重放
-        if step.mode in _SIDE_EFFECTING_MODES:
-            effect_started = bool(step.escalation_result.get('effect_started'))
-            effect_outcome = step.escalation_result.get('effect_outcome')
-            if not effect_outcome and isinstance(step.escalation_result.get('tool_receipt'), dict):
-                effect_outcome = step.escalation_result['tool_receipt'].get('effect_outcome')
-            if effect_started and effect_outcome != 'not_started':
-                if not idempotent:
-                    step.escalation_result['retry_suppressed_reason'] = 'UNCERTAIN_WRITE_NOT_IDEMPOTENT'
-                    return
+        # 进程退出不等于业务未写；unknown必须先沿上面的受信水位对账，定义自报幂等不授予重放权。
+        effect_started = step.escalation_result.get('effect_started') is True
+        effect_outcome = step.escalation_result.get('effect_outcome')
+        if not effect_outcome and isinstance(step.escalation_result.get('tool_receipt'), dict):
+            effect_outcome = step.escalation_result['tool_receipt'].get('effect_outcome')
+        has_effect_executor = step.mode in _SIDE_EFFECTING_MODES or bool(_get_spec_val(spec, 'script_id'))
+        uncertain = effect_outcome == 'unknown' or (
+            effect_started and has_effect_executor and effect_outcome != 'not_started')
+        if uncertain:
+            step.escalation_result['retry_suppressed_reason'] = 'UNCERTAIN_EFFECT_REPLAY_FORBIDDEN'
+            step.escalation_result['retry_recovery_action'] = 'reconcile_original_effect'
+            step.error_message = (step.error_message or step.error_code) + (
+                '；本步骤已启动或无法确认未启动，当前失败不能证明业务副作用未发生，禁止自动重放。'
+                '请用workflows的inspect_run读取原workflow_run_id并核对原操作回执，'
+                '完成受信对账或提交经验证的步骤输出后再恢复；勿原样重试。')
+            return
 
         # 计算退避延迟
         next_delay_seconds = min(delay_seconds * (backoff_factor ** (attempt - 1)), 60.0)

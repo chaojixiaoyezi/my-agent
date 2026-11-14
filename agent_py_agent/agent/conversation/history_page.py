@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from ..runtime_errors import DataCorruptionError
-from .message_scan import TranscriptReader, transcript_manifest
+from .message_scan import MessageReadDeferred, TranscriptReader, transcript_manifest
 from .models import MessageLogEntry
 from .store_io import complete_jsonl_end
 
@@ -47,12 +47,12 @@ class ConversationHistoryPage:
 # LLM: 目标窗口保留普通工作片；800 条/8MiB 到达后必须按 canonical 行边界续页，不改变消息身份或状态。
 # 函数用途: 倒读有界历史页；忽略未完成尾行，单条记录完整读取，超长工作片下次上翻继续。
 def read_conversation_history_page(
-    path: Path, thread_id: str, *, before: int | None = None, limit: int = 80,
+    path: Path, thread_id: str, *, before: int | None = None, limit: int = 80, read_budget=None,
 ) -> ConversationHistoryPage:
     try:
         if not path.exists() and before in (None, 0) and transcript_manifest(path) is None:
             return ConversationHistoryPage()
-        with TranscriptReader(path) as handle:
+        with TranscriptReader(path, read_budget=read_budget) as handle:
             size = handle.seek(0, 2)
             end = complete_jsonl_end(handle, size) if before is None else int(before)
             if end < 0 or end > size:
@@ -78,7 +78,7 @@ def read_conversation_history_page(
                 selected.append(row)
                 start, oldest_group = offset, group
         return ConversationHistoryPage(tuple(reversed(selected)), start, end)
-    except (OSError, ValueError, TypeError, UnicodeError, DataCorruptionError) as exc:
+    except (OSError, ValueError, TypeError, UnicodeError, DataCorruptionError, MessageReadDeferred) as exc:
         return ConversationHistoryPage(errors=({
             "error_code": "CLIENT_HISTORY_LOAD_FAILED", "error_type": type(exc).__name__,
         },))

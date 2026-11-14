@@ -111,7 +111,10 @@ def test_real_run_usage_event_reaches_default_http_usage_and_costs(tmp_path, mon
         assert status == 200, usage
         assert usage['state'] == 'completed' and usage['error'] is None
         assert usage['data']['resource_usage']['active_model_calls'] == 0
-        assert 'decision_usage_only' in usage['data']['unknown']
+        assert usage['data']['actual']['input_tokens'] == 37
+        assert usage['data']['actual']['output_tokens'] == 5
+        assert 'decision_usage_only' not in usage['data']['unknown']
+        assert 'call_purpose_unavailable' not in usage['data']['unknown']
         status, costs = v13_call(server, 'costs.dashboard', {}, user='business-alice')
         assert status == 200, json.dumps(costs, ensure_ascii=False)
         assert costs['state'] == 'completed' and costs['error'] is None

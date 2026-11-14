@@ -182,9 +182,19 @@ def test_owner_retention_trashes_only_structured_terminal_task(tmp_path: Path) -
     fresh_done = _task_workspace(home.owner_tasks_dir, "fresh", "DONE", "2026-05-30T00:00:00+00:00")
     _set_retention(home.owner_retention_json, completed_task_days=30)
 
-    applied = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
+    # 原维护现在按有界片推进持久游标；完成扫描后再判断候选，不把首个空片当最终计划。
+    actions = []
+    for _ in range(64):
+        applied = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
+        actions.extend(applied.actions)
+        if not applied.scan_partial:
+            break
+    else:
+        raise AssertionError("retention did not finish within bounded continuation")
 
-    task_action = next(action for action in applied.actions if action.category == "completed_task")
+    terminal_actions = [action for action in actions if action.category == "completed_task"]
+    assert len(terminal_actions) == 1
+    task_action = terminal_actions[0]
     assert task_action.status == "trashed"
     assert not old_done.exists()
     assert old_active.exists()
@@ -196,9 +206,17 @@ def test_owner_retention_trashes_only_structured_terminal_task(tmp_path: Path) -
     assert tombstone["authority_status"] == "DONE"
 
     _set_retention(home.owner_retention_json, completed_task_days=10_000, trash_days=30)
-    purged = apply_owner_retention(home, now=datetime(2026, 7, 1, tzinfo=timezone.utc))
-
-    purge_action = next(action for action in purged.actions if action.operation == "delete_tree")
+    # 新策略和次日会先续完配额/扫描阶段；以真实trash消失核验purge，不把空片当最终清扫。
+    purge_actions = []
+    for _ in range(64):
+        purged = apply_owner_retention(home, now=datetime(2026, 7, 1, tzinfo=timezone.utc))
+        purge_actions.extend(action for action in purged.actions if action.operation == "delete_tree")
+        if not task_action.destination.exists():
+            break
+    else:
+        raise AssertionError("trash purge did not finish within bounded continuation")
+    assert len(purge_actions) == 1
+    purge_action = purge_actions[0]
     assert purge_action.status == "deleted"
     assert not task_action.destination.exists()
 
@@ -238,9 +256,15 @@ def test_owner_retention_moves_only_terminal_subagent_scratch(tmp_path: Path) ->
     active_run = _subagent_workspace(task, "active-run", "RUNNING", 1_735_689_600.0)
     _set_retention(home.owner_retention_json, subagent_scratch_days=30)
 
-    result = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
-
-    scratch_actions = [action for action in result.actions if action.category == "subagent_scratch"]
+    scratch_actions = []
+    for _ in range(64):
+        result = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
+        scratch_actions.extend(action for action in result.actions if action.category == "subagent_scratch")
+        if all(not (done_run / part).exists()
+               for part in ("inbox", "outbox", "compactions", "artifacts/tool_outputs")):
+            break
+    else:
+        raise AssertionError("terminal scratch cleanup did not finish within bounded continuation")
     assert len(scratch_actions) == 4
     assert all(action.status == "trashed" for action in scratch_actions)
     assert (done_run / "canonical_state.json").is_file()

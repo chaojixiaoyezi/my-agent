@@ -12,6 +12,7 @@ from typing import Any
 
 from ..assets.descriptor import execution_definition_ref
 from ..assets.workflow_store import (
+    BUSINESS_WORKFLOW_METADATA,
     WorkflowDefinition,
     WorkflowStore,
     normalize_workflow_asset_id,
@@ -180,6 +181,22 @@ def execute_subworkflow_step(
         step.needs_repair = True
         return step
 
+    # 固定版本只冻结执行内容；当前Owner资产仍是范围、生命周期与启停的权威来源。
+    try:
+        current_child = store.get_workflow(child_workflow_id)
+    except Exception as exc:
+        step.status = 'failed'
+        step.error_code = 'SUBWORKFLOW_REF_INVALID'
+        step.error_message = f'Error loading current child authority: {exc}'
+        step.needs_repair = True
+        return step
+    if current_child is None:
+        step.status = 'failed'
+        step.error_code = 'SUBWORKFLOW_REF_INVALID'
+        step.error_message = f'Current child workflow not found: {child_workflow_id}'
+        step.needs_repair = True
+        return step
+
     child_exec_ref = (
         getattr(child_def, 'execution_definition_ref', '')
         or execution_definition_ref(child_def.to_dict(), kind='workflow')
@@ -212,7 +229,9 @@ def execute_subworkflow_step(
             step.needs_repair = True
             return step
 
-    if not child_def.enabled or not child_def.descriptor.enabled:
+    if (not child_def.enabled or not child_def.descriptor.enabled
+            or not current_child.enabled or not current_child.descriptor.enabled
+            or workflow_state(current_child)['lifecycle'] != 'active'):
         step.status = 'failed'
         step.error_code = 'SUBWORKFLOW_DISABLED'
         step.error_message = f'Child workflow {child_workflow_id} is disabled'
@@ -220,7 +239,7 @@ def execute_subworkflow_step(
         return step
 
     parent_owner = getattr(run, 'owner_id', '')
-    child_owner = getattr(child_def.descriptor, 'owner_id', '')
+    child_owner = getattr(current_child.descriptor, 'owner_id', '')
     if parent_owner and child_owner and parent_owner != child_owner:
         step.status = 'failed'
         step.error_code = 'SUBWORKFLOW_SCOPE_DENIED'
@@ -239,7 +258,7 @@ def execute_subworkflow_step(
         and (parent_business_context.get('strict_space_governance') is True or parent_business_context.get('space_id'))
     ) or bool(getattr(run, 'scope_snapshot', {}))
 
-    child_state = workflow_state(child_def)
+    child_state = workflow_state(current_child)
     child_scope = child_state.get('scope', {})
     child_scope_mode = child_scope.get('scope_mode', 'owner_global')
     child_space_ids = tuple(child_scope.get('space_ids', ()))
@@ -292,6 +311,8 @@ def execute_subworkflow_step(
             trigger_kind='subworkflow',
             owner_id=run.owner_id or child_def.descriptor.owner_id,
             business_context=child_bc,
+            scope_snapshot=(child_scope if strict_space or current_child.descriptor.metadata.get(
+                BUSINESS_WORKFLOW_METADATA) else {}),
             workflow_run_id=child_run_id,
             definition_version=definition_version,
         )

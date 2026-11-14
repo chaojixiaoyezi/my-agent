@@ -33,7 +33,12 @@ def test_actual_space_store_create_read_idempotency_and_revision(host):
     assert data["name"] == "测试空间" and data["revision"] == 0
     assert api.execute_business(request, context, services)[1]["data"] == data
     get = invoke(host, "spaces.get", {"space_id": data["space_id"]})
-    assert {key: get[1]["data"]["space"][key] for key in data} == data
+    assert get[0] == 200
+    detail = get[1]['data']
+    for key in ('space_id', 'name', 'purpose', 'revision', 'state', 'mounts'):
+        assert detail['space'][key] == data[key]
+    assert data['allowed_actions'] and data['allowed_actions'] == detail['allowed_actions']
+    assert data['controller_ref'] is None and data['controller_state'] == 'not_bound'
     conflict = invoke(host, "spaces.update", {"space_id": data["space_id"], "name": "改名"},
         idempotency_key="update-space-key-0001", expected_revision=999)
     assert conflict[0] == 409 and conflict[1]["error"]["code"] == "REVISION_CONFLICT"
@@ -227,7 +232,8 @@ def test_native_cache_follows_live_feature_enable(native_http):
     assert status == 200, raw
 
 
-def test_owner_maintenance_uses_real_w3_index_and_preserves_unknown_references(host):
+@pytest.mark.parametrize('reference', ['none', 'real_subworkflow', 'unreadable_source'])
+def test_owner_maintenance_uses_real_w3_index_and_preserves_unknown_references(host, reference):
     from datetime import datetime, timezone
 
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_workflow_maintenance
@@ -238,13 +244,24 @@ def test_owner_maintenance_uses_real_w3_index_and_preserves_unknown_references(h
     actor = services.actor(context)
     services.workflows.execute('workflows.create', {'definition': definition(),
         'scope': {'scope_mode': 'unassigned', 'space_ids': []}}, actor=actor, idempotency_key='seed-orphan')
+    # 未登记引用的空工作流应回收；真实父定义才是引用权威，缺reader不是引用夹具。
+    if reference != 'none':
+        services.workflows.execute('workflows.create', {'definition': definition('real-parent', steps=[{
+            'step_id': 'child', 'name': '真实引用', 'mode': 'subworkflow', 'subworkflow_ref': 'workflow:daily'}]),
+            'scope': {'scope_mode': 'owner_global', 'space_ids': []}}, actor=actor,
+            idempotency_key='seed-real-parent')
+    if reference == 'unreadable_source':
+        (host.home_paths.owner_home_dir / 'workflows/real-parent/workflow.json').write_text('{broken source')
     now = datetime.fromtimestamp(40 * 86400, timezone.utc)
     result = run_owner_workflow_maintenance(host.home_paths, {}, now=now, safe_to_delete=True)
     assert result['executed'] is True
-    assert result['counts'] == {'recycled': 0, 'skipped': 0, 'failed': 0, 'unknown': 1}
+    expected = {'recycled': 0, 'skipped': 0, 'failed': 0, 'unknown': 0}
+    expected[{'none': 'recycled', 'real_subworkflow': 'skipped', 'unreadable_source': 'unknown'}[reference]] = 1
+    assert result['counts'] == expected
     assert run_owner_workflow_maintenance(host.home_paths, {}, now=now, safe_to_delete=True) == result
     current = services.workflows.execute('workflows.get', {'workflow_ref': 'daily'}, actor=actor)
-    assert current['workflow']['lifecycle'] == 'active'
+    assert current['workflow']['lifecycle'] == ('recycled' if reference == 'none' else 'active')
+    assert services.workflows.store.get_workflow('daily').descriptor.revision == (2 if reference == 'none' else 1)
 
 
 def test_actual_core_registry_reaches_shared_business_api_and_rejects_alias(tmp_path):
@@ -677,3 +694,378 @@ def test_business_dispatch_error_projection_keeps_structured_effect_and_closed_s
     assert result['request_id'] == actor.entry_request_id and result['data'] == {}
     assert set(result['error']) == {'code', 'message', 'retryable', 'details'}
     assert 'session_task_dispatch' not in str(result)
+
+
+@pytest.mark.parametrize('state', ['retiring', 'retired'])
+def test_retired_background_message_rejected_before_enqueue_and_followup_read_continues(dispatch_case, monkeypatch, state):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.background_team_lifecycle import background_identity
+
+    services, context, actor, target, _ = dispatch_case
+    identity = background_identity(target)
+    services.host.conversation_store.threads.update_atomic(target.thread_id, lambda current:
+        replace(current, metadata={**current.metadata, 'background_agent': replace(identity, identity_state=state).to_dict()}))
+    def no_enqueue(*args, **kwargs):
+        pytest.fail('retired target reached message enqueue')
+    monkeypatch.setattr(services.host.conversation_store.guidance, 'append_once', no_enqueue)
+    status, result = api.execute_business({'request_id': 'retired-message', 'action': 'background_agents.messages.send',
+        'params': {'agent_id': target.thread_id, 'text': '不应发送', 'input_kind': 'message'},
+        'idempotency_key': 'retired-message-key'}, context, services)
+    assert status == 409, result
+    assert result['effect_outcome'] == 'not_started' and result['error']['code'] == 'AGENT_NOT_AVAILABLE'
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['identity_state'] == state and details['next_action']
+    status, read = api.execute_business({'request_id': 'after-rejection', 'action': 'background_agents.list',
+        'params': {}}, context, services)
+    assert status == 200, read
+
+
+def test_background_message_post_enqueue_failure_stays_unknown(dispatch_case, monkeypatch):
+    services, context, actor, target, _ = dispatch_case
+    def fail_wake(*args, **kwargs):
+        raise OSError('synthetic private detail')
+    monkeypatch.setattr(services.host.conversation_store.wakes, 'raise_signal', fail_wake)
+    status, result = api.execute_business({'request_id': 'uncertain-message', 'action': 'background_agents.messages.send',
+        'params': {'agent_id': target.thread_id, 'text': '已入队后异常', 'input_kind': 'message'},
+        'idempotency_key': 'uncertain-message-key'}, context, services)
+    assert status == 503 and result['effect_outcome'] == 'unknown', result
+    assert result['error']['code'] == 'OUTCOME_UNKNOWN'
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['stage'] == 'invoke' and details['exception_type'] == 'OSError'
+    assert details['retry_same_request'] is False
+    assert 'request_id' in details['next_action'] and '勿重新' in result['error']['message']
+    assert 'synthetic private detail' not in str(result)
+
+
+def test_business_input_rejection_returns_correct_nested_path_on_wire(background_http):
+    status, result = background_call(background_http, 'tasks.list', {'include_completed': 'true'})
+    assert status == 400 and result['effect_outcome'] == 'not_started', result
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['field_path'] == '$.params.include_completed'
+    assert details['suggested_path'] == '$.params.filter.include_completed'
+    assert details['actual_type'] == 'string' and details['expected_type'] == 'boolean'
+    assert 'true' in details['next_action']
+    status, result = background_call(background_http, 'tasks.list', {'filter': {'include_completed': True}})
+    assert status == 200 and result['state'] == 'completed', result
+
+
+def test_business_response_validation_preserves_published_effect(host, monkeypatch):
+    context = api.bind_business_context(host, authorize=lambda action, facts: True)
+    services = api.BusinessServices(host)
+    invoke_action = services.invoke
+
+    def malformed_receipt(*args, **kwargs):
+        invoke_action(*args, **kwargs)
+        return {'unknown_field': 'synthetic-private-value'}
+
+    monkeypatch.setattr(services, 'invoke', malformed_receipt)
+    status, result = api.execute_business({'action': 'spaces.create', 'request_id': 'original-request',
+        'idempotency_key': 'original-result-key', 'params': {'name': '已写入的空间'}}, context, services)
+    assert status == 400 and result['effect_outcome'] == 'committed', result
+    assert '结果未通过' in result['error']['message']
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert '勿重新' in details['next_action'] and '未开始执行' not in str(result)
+    assert 'synthetic-private-value' not in str(result)
+
+
+@pytest.mark.parametrize("owner_field", ["actor", "target", "source"])
+def test_background_message_owner_denial_is_prewrite(dispatch_case, monkeypatch, owner_field):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+    from agent_py_agent.agent.conversation.session_messaging import (
+        _queue_owned_background_message_locked,
+    )
+
+    services, _context, actor, target, _space = dispatch_case
+    if owner_field == "actor":
+        actor = replace(actor, owner_id="local/other")
+    elif owner_field == "target":
+        target = replace(target, owner_id="local/other")
+    else:
+        services.host.conversation_store.threads.update_atomic(actor.source_thread_id,
+            lambda current: replace(current, owner_id="local/other"))
+    monkeypatch.setattr(services.host.conversation_store.guidance, "append_once",
+        lambda *a, **kw: pytest.fail("authorization denial reached enqueue"))
+    with pytest.raises(BusinessError) as denied:
+        _queue_owned_background_message_locked(services.host, actor=actor, target=target,
+            text="not delivered", operation_key="denied-owner", input_kind="message")
+    assert api._error_code(denied.value) == ("BUSINESS_ACCESS_DENIED", 403, "not_started")
+    assert denied.value.details["next_action"]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_business_child_authorization_denial_is_prewrite(dispatch_case, monkeypatch, missing):
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+    from agent_py_agent.agent.conversation.session_messaging import authorize_business_child
+    from agent_py_agent.agent.subagents import authorization_gate
+
+    services, _context, actor, _target, _space = dispatch_case
+    services.host.subagents = object()
+    def denied(*args, **kwargs):
+        if missing:
+            raise FileNotFoundError("private child path")
+        raise authorization_gate.AuthorizationError("private foreign owner")
+    monkeypatch.setattr(authorization_gate, "authorize_direct_child_operation", denied)
+    with pytest.raises(BusinessError) as failure:
+        authorize_business_child(services.host, "foreign-child", actor, "send_guidance")
+    assert api._error_code(failure.value) == (("RESOURCE_NOT_FOUND", 404, "not_started") if missing else
+        ("BUSINESS_ACCESS_DENIED", 403, "not_started"))
+    assert "private foreign owner" not in str(failure.value.details)
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, KeyError, FileNotFoundError])
+def test_post_enqueue_authorization_exception_remains_unknown(dispatch_case, monkeypatch, error_type):
+    services, context, _actor, target, _space = dispatch_case
+    def failed_wake(*args, **kwargs):
+        raise error_type("private post-enqueue failure")
+    monkeypatch.setattr(services.host.conversation_store.wakes, "raise_signal", failed_wake)
+    status, result = api.execute_business({"request_id": "late-auth-failure",
+        "action": "background_agents.messages.send",
+        "params": {"agent_id": target.thread_id, "text": "already queued", "input_kind": "message"},
+        "idempotency_key": "late-auth-failure"}, context, services)
+    assert status == 503 and result["effect_outcome"] == "unknown"
+    assert result["error"]["code"] == "OUTCOME_UNKNOWN"
+    assert {row["key"]: row["value"] for row in result["error"]["details"]}["retry_same_request"] is False
+
+
+def test_submit_wrong_controller_rejected_before_creation_then_correct_id_is_unique_on_wire(background_http):
+    params, agent = create_background(background_http)
+    server, _ = background_http
+    services = next(item for item in server._business_services.values() if item.owner_id.endswith('/business-alice'))
+    store = services.host.conversation_store
+    status, read = background_call(background_http, 'controllers.get')
+    assert status == 200 and not read['data']['available'], read
+    expected = read['data']['agent_id']
+    assert expected == read['data']['thread_id'] and store.threads.load(expected) is None
+    status, refused = background_call(background_http, 'tasks.submit', {
+        'space_id': params['space_id'], 'controller_agent_id': agent['thread_id'], 'instruction': '一次测试任务'},
+        idempotency_key='wrong-controller')
+    assert status == 409 and refused['effect_outcome'] == 'not_started', refused
+    assert refused['error']['code'] == 'CONTROLLER_IDENTITY_CONFLICT'
+    details = {row['key']: row['value'] for row in refused['error']['details']}
+    assert details['field_path'] == '$.params.controller_agent_id'
+    assert details['actual'] == agent['thread_id'] and details['expected'] == expected
+    assert details['controller_created'] is False and details['task_created'] is False
+    assert 'controllers.get' in details['next_action']
+    assert store.threads.load(expected) is None
+    assert store.session_tasks.list_page()['items'] == []
+    request = {'space_id': params['space_id'], 'controller_agent_id': expected, 'instruction': '一次测试任务'}
+    status, accepted = background_call(background_http, 'tasks.submit', request, idempotency_key='correct-controller')
+    assert status == 200, accepted
+    replay_status, replay = background_call(background_http, 'tasks.submit', request, idempotency_key='correct-controller')
+    assert replay_status == 200 and replay['data']['task_id'] == accepted['data']['task_id'], replay
+    tasks = store.session_tasks.list_page()['items']
+    assert len(tasks) == 1 and tasks[0].target_thread_id == expected
+    assert store.threads.require(expected).metadata['business_controller'] is True
+
+
+def test_submit_controller_preparation_then_known_refusal_exposes_committed_controller(background_http, monkeypatch):
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+
+    params, _agent = create_background(background_http)
+    def refuse(*args, **kwargs):
+        raise BusinessError('SESSION_TASK_RATE_LIMIT')
+    monkeypatch.setattr(BackgroundAgentService, '_dispatch', refuse)
+    status, result = background_call(background_http, 'tasks.submit',
+        {'space_id': params['space_id'], 'instruction': '不能派发'}, idempotency_key='post-prepare-refusal')
+    assert status == 409 and result['effect_outcome'] == 'committed', result
+    assert not result['error']['retryable']
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['controller_created'] is True and details['task_created'] is False
+    assert details['side_effect_state'] == 'controller_created_task_not_started'
+
+
+def test_submit_controller_preparation_then_dispatch_unknown_never_claims_no_task(background_http, monkeypatch):
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.conversation.session_task_dispatch import (
+        SessionTaskDispatchError,
+        session_task_dispatch_error,
+    )
+
+    params, _agent = create_background(background_http)
+    def unknown(*args, **kwargs):
+        raise SessionTaskDispatchError(session_task_dispatch_error('原派发待核对',
+            error_code='TOOL_EXECUTION_FAILED', effect_outcome='unknown'))
+    monkeypatch.setattr(BackgroundAgentService, '_dispatch', unknown)
+    status, result = background_call(background_http, 'tasks.submit',
+        {'space_id': params['space_id'], 'instruction': '原账待核实'}, idempotency_key='post-prepare-unknown')
+    assert status == 503 and result['effect_outcome'] == 'unknown', result
+    assert result['error']['retryable'] is True  # 冻结协议仅表示503可恢复，重放权由下面显式字段拒绝。
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['retry_same_request'] is False
+    assert details['controller_created'] is True and details['task_dispatch_outcome'] == 'unknown'
+    assert 'task_created' not in details and '禁止' in details['next_action']
+
+
+def test_submit_controller_rechecks_identity_under_original_lock_and_denies_foreign_actor(dispatch_case, monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+
+    services, _context, actor, _target, space = dispatch_case
+    services.host.business_spaces_catalog = services.spaces
+    service = BackgroundAgentService(services.host)
+    expected = service.get_controller(actor=actor)['agent_id']
+    count = 0
+    original = service.get_controller
+    def drift(*, actor):
+        nonlocal count
+        count += 1
+        value = original(actor=actor)
+        return {**value, 'agent_id': 'changed-controller'} if count == 2 else value
+    monkeypatch.setattr(service, 'get_controller', drift)
+    with pytest.raises(BusinessError) as caught:
+        service.submit({'space_id': space, 'controller_agent_id': expected, 'instruction': '一次'},
+            actor=actor, idempotency_key='identity-drift')
+    assert caught.value.code == 'CONTROLLER_IDENTITY_CONFLICT'
+    assert caught.value.details['reason'] == 'CONTROLLER_IDENTITY_DRIFT'
+    assert services.host.conversation_store.threads.load(expected) is None
+    with pytest.raises(BusinessError) as caught:
+        service.submit({'space_id': space, 'instruction': '不允许'}, actor=replace(actor, owner_id='local/foreign'),
+            idempotency_key='foreign-submit')
+    assert caught.value.code == 'BUSINESS_ACCESS_DENIED'
+    assert expected not in str(caught.value.details) and 'expected' not in caught.value.details
+
+
+@pytest.mark.parametrize('effect', ['not_started', 'committed', 'unknown'])
+def test_business_error_explicit_effect_uses_frozen_http_envelope_without_opaque_masking(effect):
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+    from agent_py_agent.agent.gateway_parts.business_api import _error_code
+
+    assert _error_code(BusinessError('STATE_CONFLICT', effect_outcome=effect)) == ('STATE_CONFLICT', 409, effect)
+    assert _error_code(BusinessError('STATE_CONFLICT')) == ('STATE_CONFLICT', 409, 'not_started')
+    with pytest.raises(ValueError):
+        BusinessError('STATE_CONFLICT', effect_outcome='succeeded')
+
+
+def test_submit_real_post_creation_wake_failure_keeps_existing_task_unknown(background_http, monkeypatch):
+    from agent_py_agent.agent.conversation import session_task_dispatch
+
+    params, _agent = create_background(background_http)
+    def failed_wake(*args, **kwargs):
+        raise OSError('post-canonical wake failure')
+    monkeypatch.setattr(session_task_dispatch, '_maybe_wake', failed_wake)
+    status, result = background_call(background_http, 'tasks.submit',
+        {'space_id': params['space_id'], 'instruction': '原task已创建'}, idempotency_key='actual-canonical-unknown')
+    assert status == 503 and result['effect_outcome'] == 'unknown', result
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['controller_created'] is True and 'task_created' not in details
+    assert details['retry_same_request'] is False
+    services = next(item for item in background_http[0]._business_services.values()
+        if item.owner_id.endswith('/business-alice'))
+    tasks = services.host.conversation_store.session_tasks.list_page()['items']
+    assert len(tasks) == 1 and tasks[0].body_guidance_id
+
+
+def test_submit_existing_controller_refusal_has_no_new_controller_mutation(background_http, monkeypatch):
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+
+    params, _agent = create_background(background_http)
+    status, prepared = background_call(background_http, 'controllers.ensure', idempotency_key='existing-controller')
+    assert status == 200 and prepared['data']['created'], prepared
+    def refuse(*args, **kwargs):
+        raise BusinessError('SESSION_TASK_RATE_LIMIT')
+    monkeypatch.setattr(BackgroundAgentService, '_dispatch', refuse)
+    status, result = background_call(background_http, 'tasks.submit',
+        {'space_id': params['space_id'], 'instruction': '已有总控仍未派任务'}, idempotency_key='existing-refusal')
+    assert status == 409 and result['effect_outcome'] == 'not_started', result
+    assert not any(row['key'] == 'controller_created' and row['value'] is True
+        for row in result['error']['details'])
+
+
+@pytest.mark.parametrize('project', ['workflow-is-not-project', '../other-owner', '/private/other-owner'])
+def test_submit_project_ref_is_readonly_preflight_before_controller_or_task(background_http, project):
+    params, _agent = create_background(background_http)
+    server, _ = background_http
+    services = next(item for item in server._business_services.values() if item.owner_id.endswith('/business-alice'))
+    from agent_py_agent.agent.gateway_parts.business_host_ports import wire_business_host_ports
+
+    wire_business_host_ports(services.host)
+    services.spaces.reference_resolver = services.host.business_space_reference_resolver
+    services.host.business_spaces_catalog = services.spaces
+    _, view = background_call(background_http, 'controllers.get')
+    controller = view['data']['agent_id']
+    assert services.host.conversation_store.threads.load(controller) is None
+    status, result = background_call(background_http, 'tasks.submit', {
+        'space_id': params['space_id'], 'instruction': '项目引用核验', 'project_ref': project},
+        idempotency_key='invalid-project-preflight')
+    assert status in (400, 404), result
+    assert result['effect_outcome'] == 'not_started'
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['field_path'] == '$.params.project_ref' and details['task_created'] is False
+    assert '省略project_ref' in details['next_action']
+    assert project not in str(result)
+    assert services.host.conversation_store.threads.load(controller) is None
+    assert not list(services.host.conversation_store.session_tasks._dedupe_path('unused').parent.glob('*.json'))
+
+
+def test_submit_real_project_and_original_frozen_replay(background_http):
+    params, _agent = create_background(background_http)
+    server, _ = background_http
+    services = next(item for item in server._business_services.values() if item.owner_id.endswith('/business-alice'))
+    from agent_py_agent.agent.gateway_parts.business_host_ports import wire_business_host_ports
+
+    wire_business_host_ports(services.host)
+    services.spaces.reference_resolver = services.host.business_space_reference_resolver
+    services.host.business_spaces_catalog = services.spaces
+    project = services.owner_home / 'projects' / 'real-project'
+    project.mkdir(parents=True)
+    body = {'space_id': params['space_id'], 'instruction': '合法项目派活', 'project_ref': 'real-project'}
+    status, first = background_call(background_http, 'tasks.submit', body, idempotency_key='real-project-submit')
+    assert status == 200, first
+    task = services.host.conversation_store.session_tasks.require(first['data']['task_id'])
+    assert task.metadata['business_context']['project_ref'] == 'real-project'
+    project.rmdir()
+    status, replay = background_call(background_http, 'tasks.submit', body, idempotency_key='real-project-submit')
+    assert status == 200 and replay['data']['task_id'] == task.task_id, replay
+
+
+def test_project_permission_change_at_canonical_factory_preserves_partial_unknown(background_http, monkeypatch):
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+    from agent_py_agent.agent.gateway_parts.business_host_ports import wire_business_host_ports
+
+    params, _agent = create_background(background_http)
+    server, _ = background_http
+    services = next(item for item in server._business_services.values() if item.owner_id.endswith('/business-alice'))
+    wire_business_host_ports(services.host)
+    services.spaces.reference_resolver = services.host.business_space_reference_resolver
+    (services.owner_home / 'projects' / 'real-project').mkdir(parents=True)
+    original = services.spaces.reference
+    calls = []
+    def revoked(kind, ref, **kwargs):
+        calls.append((kind, ref))
+        if len(calls) == 3:
+            raise BusinessError('BUSINESS_ACCESS_DENIED')
+        return original(kind, ref, **kwargs)
+    monkeypatch.setattr(services.spaces, 'reference', revoked)
+    status, result = background_call(background_http, 'tasks.submit', {
+        'space_id': params['space_id'], 'instruction': '执行前撤权', 'project_ref': 'real-project'},
+        idempotency_key='project-revoke-at-factory')
+    assert status == 503 and result['effect_outcome'] == 'unknown', result
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['controller_created'] is True and 'task_created' not in details
+    assert details['exception_type'] == 'BusinessError'
+    assert details['cause_code'] == 'BUSINESS_ACCESS_DENIED' and details['stage'] == 'create_task'
+    assert details['retry_same_request'] is False
+    assert list(services.host.conversation_store.session_tasks._dedupe_path('unused').parent.glob('*.json'))
+
+
+def test_workflow_descriptor_protocol_rejected_before_canonical_creation_on_wire(background_http):
+    params, _agent = create_background(background_http)
+    server, _ = background_http
+    services = next(item for item in server._business_services.values() if item.owner_id.endswith('/business-alice'))
+    status, result = background_call(background_http, 'workflows.create', {
+        'definition': {'descriptor': {'id': 'bad-protocol', 'kind': 'workflow', 'name': '坏协议输入',
+            'schema_version': '1', 'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}},
+            'steps': []}, 'scope': {'scope_mode': 'owner_global', 'space_ids': []}},
+        idempotency_key='bad-workflow-protocol')
+    assert status == 400 and result['effect_outcome'] == 'not_started', result
+    assert result['error']['code'] == 'INVALID_SCHEMA'
+    details = {row['key']: row['value'] for row in result['error']['details']}
+    assert details['field'] == 'definition.descriptor.schema_version' and details['expected'] == 'asset_descriptor.v1'
+    assert not (services.owner_home / 'workflows' / 'bad-protocol').exists()

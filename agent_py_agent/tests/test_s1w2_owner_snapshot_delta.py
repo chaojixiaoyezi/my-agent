@@ -10,6 +10,7 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,22 +60,28 @@ def test_stage_hash_uses_copy_after_live_rewrite(tmp_path):
     source = tmp_path / "source"
     source.write_bytes(b"before")
     staged, digest, size = stage_and_hash(source, tmp_path / "staging")
-    source.write_bytes(b"after")
-    assert staged.read_bytes() == b"before"
-    assert digest == hashlib.sha256(staged.read_bytes()).hexdigest()
-    assert size == len(b"before")
+    try:
+        source.write_bytes(b"after")
+        assert staged.read_bytes() == b"before"
+        assert digest == hashlib.sha256(staged.read_bytes()).hexdigest()
+        assert size == len(b"before")
+    finally:
+        staged.unlink()
 
 
 def test_stage_hash_rejects_write_during_copy(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.write_bytes(b"before")
-    copy = shutil.copyfile
+    from agent_py_agent.agent import owner_snapshot_index
 
-    def rewriting_copy(src, dst):
-        copy(src, dst)
-        src.write_bytes(b"changed during copy")
+    copy = owner_snapshot_index.stage_open_file
 
-    monkeypatch.setattr("agent_py_agent.agent.owner_snapshot_index.shutil.copyfile", rewriting_copy)
+    def rewriting_copy(descriptor, directory):
+        result = copy(descriptor, directory)
+        source.write_bytes(b"changed during copy")
+        return result
+
+    monkeypatch.setattr(owner_snapshot_index, 'stage_open_file', rewriting_copy)
     with pytest.raises(RuntimeError, match=f"owner 文件在快照时仍被写入: {source}"):
         stage_and_hash(source, tmp_path / "staging")
     assert list((tmp_path / "staging").iterdir()) == []
@@ -119,9 +126,16 @@ class _Objects:
         self.uploads.append((Path(source), key))
         self.values[key] = Path(source).read_bytes()
 
+    def upload_fileobj(self, source, bucket, key, *, ExtraArgs):
+        self.uploads.append((source, key))
+        self.values[key] = source.read()
+
     def download_file(self, bucket, key, target):
         self.downloads.append(key)
         Path(target).write_bytes(self.values[key])
+
+    def get_object(self, *, Bucket, Key):
+        return {'Body': BytesIO(self.values[Key])}
 
 
 class _FakeHead:
@@ -216,10 +230,10 @@ def test_delta_first_restore_and_clean_unchanged_modified_removed(tmp_path):
     restores = []
     restore = store.restore
 
-    def observed_restore(*args):
+    def observed_restore(*args, **kwargs):
         assert json.loads((warm / "state.json").read_text()) == {"state": "DIRTY"}
         restores.append(True)
-        return restore(*args)
+        return restore(*args, **kwargs)
 
     store.restore = observed_restore
     with _checkout(store, warm, home):
@@ -295,8 +309,8 @@ def test_commit_unknown_keeps_dirty_and_staged_upload_matches_hash(tmp_path, mon
     assert hasattr(snapshots, "OwnerSnapshotCommitUnknown")
     stage = snapshots.stage_and_hash
 
-    def rewrite_after_stage(source, staging):
-        result = stage(source, staging)
+    def rewrite_after_stage(source, staging, **kwargs):
+        result = stage(source, staging, **kwargs)
         source.write_bytes(b"later live bytes")
         return result
 
@@ -307,8 +321,7 @@ def test_commit_unknown_keeps_dirty_and_staged_upload_matches_hash(tmp_path, mon
             _write_old(home / "data", b"staged bytes")
     assert list(store._client.values.values()) == [b"staged bytes"]
     assert hashlib.sha256(b"staged bytes").hexdigest() in store._client.uploads[0][1]
-    assert store._client.uploads[0][0].suffix == ".stage"
-    assert not store._client.uploads[0][0].exists()
+    assert store._client.uploads[0][0].closed is True
     assert json.loads((warm / "state.json").read_text())["state"] == "DIRTY"
 
 
@@ -644,16 +657,25 @@ def test_unreadable_directory_never_commits_false_deletions(tmp_path, monkeypatc
         directory.chmod(0o700)
 
 
-# LLM: 两秒 racy 是冻结的保守规则，未命中必须逐行下载；本例记录其代价，不冒称所有空回合都零 IO。
+# LLM: 两秒racy仍拒绝复用旧摘要；新hash核对权威清单后可以避免重复对象传输。
 # 函数用途: 验证近期 mtime 不会绕过清单摘要校验。
-def test_racy_restored_file_is_conservatively_redownloaded(tmp_path):
+def test_racy_restored_file_is_freshly_hashed_without_redownloading(tmp_path, monkeypatch):
     store, warm, home = _delta_store(tmp_path)
     _seed(store, "data", b"fresh")
     with _checkout(store, warm, home):
         pass
+    hashes = []
+    original = snapshots._stable_file_digest
+
+    def hashed(path, **kwargs):
+        hashes.append(path)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(snapshots, '_stable_file_digest', hashed)
     with _checkout(store, warm, home):
         assert (home / "data").read_bytes() == b"fresh"
-    assert len(store._client.downloads) == 2
+    assert hashes and all(path == home / 'data' for path in hashes)
+    assert len(store._client.downloads) == 1
 
 
 @pytest.mark.parametrize("state", ["{", "[]", '{"state":"DIRTY"}', '{"state":"unknown"}'])
@@ -683,3 +705,180 @@ def test_successful_commit_but_index_save_failure_never_marks_clean(tmp_path, mo
     assert len(store._head.commits) == 1
     assert store._head.rows["data"].content_sha256 == hashlib.sha256(b"committed").hexdigest()
     assert json.loads((warm / "state.json").read_text())["state"] == "DIRTY"
+
+
+@pytest.mark.parametrize('rewrite', ['same_mtime', 'inode'])
+def test_stable_digest_rejects_same_timestamp_rewrite_and_replacement_and_closes_fd(tmp_path, monkeypatch, rewrite):
+    source = tmp_path / 'source'
+    source.write_bytes(b'content')
+    before = source.stat()
+    original = snapshots.descriptor_digest
+    descriptors = []
+
+    def change_after_read(descriptor, expected_size):
+        descriptors.append(descriptor)
+        result = original(descriptor, expected_size)
+        if rewrite == 'inode':
+            replacement = tmp_path / 'replacement'
+            replacement.write_bytes(b'tamper!')
+            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            replacement.replace(source)
+        else:
+            source.write_bytes(b'tamper!')
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return result
+
+    monkeypatch.setattr(snapshots, 'descriptor_digest', change_after_read)
+    with pytest.raises(RuntimeError, match='仍被写入'):
+        snapshots._stable_file_digest(source)
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_immediate_racy_warm_turn_only_stages_heads_and_uploads_changed_file(tmp_path, monkeypatch):
+    store, warm, home = _delta_store(tmp_path)
+    for index in range(20):
+        _seed(store, f'file-{index}.txt', f'initial-{index}'.encode())
+    with _checkout(store, warm, home):
+        (home / 'file-0.txt').write_bytes(b'turn-1')
+    store._client.downloads.clear()
+    store._client.uploads.clear()
+    store._client.heads.clear()
+    staged = []
+    original = snapshots.stage_and_hash
+
+    def stage(source, directory, **kwargs):
+        staged.append(source.name)
+        return original(source, directory, **kwargs)
+
+    monkeypatch.setattr(snapshots, 'stage_and_hash', stage)
+    with _checkout(store, warm, home):
+        assert store._client.downloads == []
+        (home / 'file-0.txt').write_bytes(b'turn-2')
+    assert staged == ['file-0.txt']
+    assert len(store._client.heads) == len(store._client.uploads) == 1
+    assert store._client.downloads == []
+    assert [row.relative_path for row in store._head.commits[-1][1]] == ['file-0.txt']
+
+
+def test_racy_warm_same_mtime_tamper_is_replaced_from_verified_remote(tmp_path):
+    store, warm, home = _delta_store(tmp_path)
+    _seed(store, 'data', b'safe')
+    with _checkout(store, warm, home):
+        pass
+    source = home / 'data'
+    before = source.stat()
+    source.write_bytes(b'evil')
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    store._client.downloads.clear()
+    with _checkout(store, warm, home):
+        assert source.read_bytes() == b'safe'
+    assert len(store._client.downloads) == 1
+
+
+def test_dirty_after_unchanged_hash_keeps_dirty_and_never_commits_old_content(tmp_path, monkeypatch):
+    store, warm, home = _delta_store(tmp_path)
+    _seed(store, 'data', b'safe')
+    with _checkout(store, warm, home):
+        pass
+    version = store._head.version
+    original = snapshots._stable_file_digest
+    armed = False
+
+    def dirty_after_hash(path, **kwargs):
+        result = original(path, **kwargs)
+        if armed and path == home / 'data':
+            before = path.stat()
+            path.write_bytes(b'evil')
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return result
+
+    monkeypatch.setattr(snapshots, '_stable_file_digest', dirty_after_hash)
+    with pytest.raises(RuntimeError, match='仍被写入'):
+        with _checkout(store, warm, home):
+            armed = True
+    assert store._head.version == version
+    assert json.loads((warm / 'state.json').read_text()) == {'state': 'DIRTY'}
+    assert store._head.rows['data'].content_sha256 == hashlib.sha256(b'safe').hexdigest()
+
+
+def test_stable_digest_open_race_rejects_foreign_inode_before_read(tmp_path, monkeypatch):
+    source = tmp_path / 'source'
+    source.write_bytes(b'content')
+    before = source.stat()
+    from agent_py_agent.agent.owner_snapshot_files import SnapshotParent
+
+    original_open = SnapshotParent.open_read
+    original_digest = snapshots.descriptor_digest
+    reads = []
+
+    def swapped(parent, name):
+        if parent.path == source.parent and name == source.name:
+            replacement = tmp_path / 'replacement'
+            replacement.write_bytes(b'tamper!')
+            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            replacement.replace(source)
+        return original_open(parent, name)
+
+    def digest(*args, **kwargs):
+        reads.append(True)
+        return original_digest(*args, **kwargs)
+
+    monkeypatch.setattr(SnapshotParent, 'open_read', swapped)
+    monkeypatch.setattr(snapshots, 'descriptor_digest', digest)
+    with pytest.raises(RuntimeError, match='仍被写入'):
+        snapshots._stable_file_digest(source, expected_stat=before)
+    assert reads == []
+
+
+def test_racy_warm_repair_rejects_corrupt_remote_without_committing(tmp_path):
+    store, warm, home = _delta_store(tmp_path)
+    _seed(store, 'data', b'safe')
+    with _checkout(store, warm, home):
+        pass
+    version = store._head.version
+    (home / 'data').write_bytes(b'evil')
+    store._client.values[store._head.rows['data'].object_key] = b'bad!'
+    entered = False
+    with pytest.raises(RuntimeError, match='object 校验失败'):
+        with _checkout(store, warm, home):
+            entered = True
+    assert entered is False and store._head.version == version
+    assert json.loads((warm / 'state.json').read_text()) == {'state': 'DIRTY'}
+    assert not list(home.glob('*.restore'))
+
+
+def test_dirty_after_hash_in_observer_callback_cannot_publish_clean(tmp_path, monkeypatch):
+    store, warm, home = _delta_store(tmp_path)
+    _seed(store, 'data', b'safe')
+    with _checkout(store, warm, home):
+        pass
+    version = store._head.version
+    digest = snapshots._stable_file_digest
+    journal = store._journal()
+    query = journal.query
+    armed, hashed = False, False
+
+    def record_hash(path, **kwargs):
+        nonlocal hashed
+        result = digest(path, **kwargs)
+        if armed and path == home / 'data':
+            hashed = True
+        return result
+
+    def dirty_observation(*args, **kwargs):
+        nonlocal hashed
+        result = query(*args, **kwargs)
+        if armed and hashed:
+            (home / 'data').write_bytes(b'evil')
+            hashed = False
+        return result
+
+    monkeypatch.setattr(snapshots, '_stable_file_digest', record_hash)
+    monkeypatch.setattr(journal, 'query', dirty_observation)
+    with pytest.raises(RuntimeError, match='仍被写入'):
+        with _checkout(store, warm, home):
+            armed = True
+    assert store._head.version == version
+    assert json.loads((warm / 'state.json').read_text()) == {'state': 'DIRTY'}

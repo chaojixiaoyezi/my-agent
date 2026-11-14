@@ -15,7 +15,15 @@ from ..workflows.run_store import WorkflowRunStore
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
 
-def _receipt(state, code, next_action, **facts):
+def _receipt(state: str, code: str, next_action: str, *, operation_id: str | None = None,
+             child_run_ids: list[str] | None = None, start_status: str | None = None,
+             missing_tools: list[str] | None = None, effect_outcome: str | None = None,
+             reason: str | None = None, error_type: str | None = None) -> dict[str, object]:
+    facts = {key: value for key, value in (
+        ('operation_id', operation_id), ('child_run_ids', child_run_ids), ('start_status', start_status),
+        ('missing_tools', missing_tools), ('effect_outcome', effect_outcome),
+        ('reason', reason), ('error_type', error_type),
+    ) if value is not None}
     return {'state': state, 'code': code, 'next_action': next_action, **facts}
 
 
@@ -33,7 +41,7 @@ def _recorded_dispatch(result, key):
 def dispatch_pending_review(agent, workflow_run_id, invocation):
     params = getattr(agent, '_current_run_params', None)
     frozen = getattr(params, 'business_context', None)
-    if not isinstance(frozen, BusinessExecutionContext):
+    if frozen is not None and not isinstance(frozen, BusinessExecutionContext):
         return None
     home = agent.home_paths.owner_home_dir
     store = WorkflowRunStore(home)
@@ -43,7 +51,9 @@ def dispatch_pending_review(agent, workflow_run_id, invocation):
         if (run.status != 'failed' or step is None or step.error_code != 'WORKFLOW_REVIEW_REQUIRED'
                 or not pending_review_not_started(run, step)):
             return None
-        if run.owner_id != agent.home_paths.owner_id or run.business_context != frozen.to_dict():
+        expected_context = frozen.to_dict() if frozen is not None else {}
+        if (run.owner_id != agent.home_paths.owner_id or run.business_context != expected_context
+                or frozen is None and run.scope_snapshot):
             return _receipt('not_started', 'REVIEW_TASK_SCOPE_MISMATCH', 'ask_original_task_to_dispatch')
         snapshot = store.load_workflow_snapshot(workflow_run_id)
         binding = step.escalation_result['pending_review']
@@ -88,7 +98,10 @@ def dispatch_pending_review(agent, workflow_run_id, invocation):
         if type(count) is not int or not 1 <= count <= policy.get('minimum_reviews', 1) <= 32:
             return _receipt('not_started', 'REVIEW_PENDING_BINDING_STALE', 'inspect_current_candidate')
         goal = (f"请独立审核候选 {requirement.requirement_id}。先通过 manage_requirement_provenance 的 "
-                "query_provenance 读取冻结材料、版本和上游输入输出，独立核验，再用 record_independent_review "
+                "query_provenance 提交原 requirement_id，省略 root。若返回材料分页，照 read_example 继续查询，"
+                "后续用 next_cursor 作为同一查询的 material_cursor。核对冻结步骤、版本、上游输入输出和目标。"
+                "review_gate 是当前正在征求你意见的独立审核，工具执行时宿主还会另行检查执行权限。"
+                "如需核实可变资源版本，依据 binding.tool_precondition 中的摘要。再用 record_independent_review "
                 "登记真实结论（review_scope=workflow_effect.v1，reviewed_input_version 取原绑定）。"
                 "证据不足或需要修改时说明原因；不要执行候选。向原父任务返回审核编号和结论。")
         # 审核材料来自原候选的冻结读口。即使管理员定制 reviewer 模板，自动派工也只授本次核验所需工具。

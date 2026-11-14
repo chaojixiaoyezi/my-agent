@@ -142,6 +142,31 @@ def _audit_source_worker_tool_scope_result(
     )
 
 
+def _business_scope_preflight(runtime_request):
+    """授权装配尚未进入工具；显式写前拒绝送回原executor，不让外层猜副作用。"""
+    from ..common.log_redaction import redact_sensitive_value
+    from ..conversation.business_access import BusinessError
+    from ..conversation.business_context import business_execution_policy_scope
+    from ..plugin_host.errors import HostAPIError
+
+    try:
+        return business_execution_policy_scope(runtime_request.agent), None
+    except (HostAPIError, BusinessError) as error:
+        effect = error.outcome if isinstance(error, HostAPIError) else error.effect_outcome
+        if effect != 'not_started':
+            raise
+        code = error.code
+        message = redact_sensitive_value(getattr(error, 'message', code))
+        next_action = '核对原执行来源与已认证会话；取得原宿主授权后再调用，不替换owner或目标来绕过。'
+        status = error.status if isinstance(error, HostAPIError) else 403
+        return {}, ToolHandlerOutcome(runtime_request.call.tool_name, False,
+            json.dumps({'error_code': code, 'reason': message, 'next_action': next_action,
+                'effect_outcome': 'not_started', 'stage': 'authorization'}, ensure_ascii=False),
+            error_code=code, reported_error_code=code, effect_outcome='not_started',
+            handler_executed=False, failure_stage=ToolFailureStage.AUTHORIZATION.value,
+            host_error={'source': 'business_host', 'code': code, 'http_status': status, 'next_action': next_action})
+
+
 # LLM: 最终 Tool Gateway 携带同一 run 快照、宿主审批消费者存在事实和事件身份；interactive/actor 不从模型参数读，不能扩大工具宇宙。
 # 首个工作工具在权限快照前登记运行身份，供归档与停止查询使用；晋升前后 cwd 和 owner 文件范围不变。
 # 函数用途: 执行并审计一个已追踪工具调用，连接可选 IM 展示心跳，归档后把完整正文交给可选宿主观察者，再生成模型投影。
@@ -154,7 +179,11 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request
     )
 
+    business_scope, business_scope_denial = _business_scope_preflight(runtime_request)
+
     def pre_handler_gate(call):
+        if business_scope_denial is not None:
+            return business_scope_denial
         # B 切片：外层 fence 已删除（authority_context 懒建/open/close 写路径
         # 由 OperationStore selector + ManagedOperationStore 权威门取代，见
         # tooling/executor._require_operation_authority 与
@@ -181,14 +210,17 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
 
     one_shot_keys = _one_shot_tool_call_keys(runtime_request.payload)
     run_scope = runtime_run_scope(runtime_request.agent, runtime_request.request.params)
+
     execution = runtime_request.agent.tools.execute_tool(
         runtime_request.call,
         write_boundary=write_boundary_with_runtime_ledger(
             runtime_request.agent, runtime_request.request.params,
+            for_artifact_reconciliation=runtime_request.call.tool_name == "run_command",
             for_attachment_lookup=(runtime_request.call.tool_name == "send_message"
                                    and bool(runtime_request.call.arguments.get("attachments"))),
         ),
         runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
+        **business_scope,
         trusted_run_context={
             "interactive": _interactive_approvals(runtime_request),
             **_tool_program_context(runtime_request),

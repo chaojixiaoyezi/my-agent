@@ -21,12 +21,13 @@
 #   未确认”；但单个同步系统调用（读 /proc、libproc 查询、waitpid）本身不可打断，所以这是“超时后不给出结论”的保证，
 #   不是硬性的墙钟上限。
 #   已知限制：组为空只证明“本组”没有成员；自己另开会话/进程组逃出去的后代不在组里，看不到也杀不到。
-# 模块用途: 给进展分类提供一份可核验的 HEAD/改动数观察，不代表进展本身。
+# 模块用途: 给进展分类提供HEAD/改动数与原读范围内的有界正文指纹，缺覆盖不猜进展。
 
 from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import os
 import re
 import select
@@ -38,6 +39,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from ...common.nofollow_fs import read_bytes_snapshot_beneath
+from ...workspace_read_context import WorkspaceReadContext
+
 # LLM: 单条 git 命令的超时上限；一次观察最多三条命令，整体再受总预算约束。
 # 常量用途: 限制单条 git 命令的运行时长。
 GIT_COMMAND_TIMEOUT_SECONDS = 5
@@ -47,6 +51,10 @@ GIT_OBSERVATION_BUDGET_SECONDS = 10
 # LLM: 每条命令最多读取这么多输出字节，超出即停止进程，改动数标成下限。
 # 常量用途: 限制一次 git 命令读取的输出量。
 MAX_GIT_OUTPUT_BYTES = 64 * 1024
+# 内容观察只读本页已脏普通文件；总字节沿用输出上限，不递归或跟随链接。
+MAX_GIT_CONTENT_PATHS = 32
+# 常量用途: 限制一次strict快照的绝对路径分量数，避免深目录验证超过单拍预算。
+GIT_CONTENT_MAX_COMPONENT_COUNT = 24
 # LLM: 读取最晚在总截止前这么多秒结束，留给最后一条命令的组清理与确认；清理本身也受同一绝对截止约束。
 # 常量用途: 为 git 进程组清理与确认预留的时长。
 GIT_CLEANUP_RESERVE_SECONDS = 2
@@ -86,7 +94,8 @@ _GROUP_PROBE_INTERVAL_SECONDS = 0.02
 
 # LLM: 只认配置里的登记列表；登记项本身也要满足同样的路径校验，不能借登记绕过允许根。
 # 函数用途: 从 agent 的能力配置与工作区根观察一个已登记仓库。
-def observe_registered(agent: Any, repo: str, *, baseline: str = "") -> dict[str, object]:
+def observe_registered(agent: Any, repo: str, *, baseline: str = "", deadline: float | None = None,
+                       read_context: WorkspaceReadContext | None = None) -> dict[str, object]:
     from ...capability import runtime_config_reload
 
     config = runtime_config_reload.capability_config_for_agent(agent)
@@ -102,7 +111,9 @@ def observe_registered(agent: Any, repo: str, *, baseline: str = "") -> dict[str
     checked = validate_repo(Path(repo), roots)
     if isinstance(checked, str):
         return _error(checked)
-    return observe(checked, baseline=baseline)
+    if read_context is None:
+        return observe(checked, baseline=baseline, deadline=deadline)
+    return observe(checked, baseline=baseline, deadline=deadline, read_context=read_context)
 
 
 # LLM: ORCH03-R2：关联只来自子代理任务记录里的 allowed_write_roots（权威写入范围），不看 workspace_refs 投影或模型
@@ -178,7 +189,8 @@ def validate_repo(repo: Path, allowed_roots: list[Path]) -> Path | str:
 
 # LLM: 已校验路径上的只读观察；baseline 只接受十六进制提交号，不接受分支名或任何选项样式输入。
 # 函数用途: 读取 HEAD、相对基线的提交数与改动文件数。
-def observe(repo: Path, *, baseline: str = "", deadline: float | None = None) -> dict[str, object]:
+def observe(repo: Path, *, baseline: str = "", deadline: float | None = None,
+            read_context: WorkspaceReadContext | None = None) -> dict[str, object]:
     if baseline and not _BASELINE.fullmatch(baseline):
         return _error("BASELINE_INVALID")
     if not _PLATFORM_SUPPORTED or (_IS_DARWIN and _libproc() is None):
@@ -210,6 +222,8 @@ def observe(repo: Path, *, baseline: str = "", deadline: float | None = None) ->
         "head": head_text,
         "dirty_paths_count": len(entries),
         "dirty_count_is_lower_bound": bool(status["truncated"]),
+        "dirty_status_fingerprint": hashlib.sha256(bytes(status["stdout"])).hexdigest() if not status["truncated"] else "",
+        "dirty_content": _dirty_content(repo, bytes(status["stdout"]), bool(status["truncated"]), deadline, read_context),
         "ahead_of_baseline": None,
         "observed_at": round(time.time(), 3),
         "error_code": "",
@@ -224,6 +238,92 @@ def observe(repo: Path, *, baseline: str = "", deadline: float | None = None) ->
             text = bytes(ahead["stdout"]).decode("ascii", "replace").strip()
             result["ahead_of_baseline"] = int(text) if text.isdigit() else None
     return result
+
+
+# 只消费git本页状态，不枚举工作树；绝对根逐段nofollow，同一次FD快照验证替换/追加竞态。
+def _dirty_content(repo, payload, truncated, deadline, read_context):
+    result = {"coverage": "partial", "fingerprint": "", "files_sampled": 0, "bytes_sampled": 0,
+              "reason": "GIT_STATUS_TRUNCATED" if truncated else "READ_SCOPE_UNAVAILABLE",
+              "next_action": "先核本次Get读取范围与覆盖原因，改用已有工具/产物事件核对；不要扩大权限、跟随链接或原样忙轮询。"}
+    if truncated:
+        return result
+    paths = _dirty_paths(payload)
+    if paths is None:
+        result["reason"] = "GIT_STATUS_INVALID"
+        return result
+    if not paths:
+        return {**result, "coverage": "complete", "fingerprint": hashlib.sha256(b"").hexdigest(), "reason": "", "next_action": ""}
+    if not isinstance(read_context, WorkspaceReadContext):
+        return result
+    if len(paths) > MAX_GIT_CONTENT_PATHS:
+        result["reason"] = "CONTENT_PATH_LIMIT"
+        return result
+    digest = hashlib.sha256()
+    for raw in sorted(paths):
+        relative = Path(os.fsdecode(raw))
+        parts = (*repo.parts[1:], *relative.parts)
+        if relative.is_absolute() or not relative.parts or any(
+                part in {".", ".."} or "\\" in part or part.casefold() == ".git" for part in relative.parts):
+            result["reason"] = "CONTENT_PATH_UNSAFE"
+            return result
+        if len(parts) > GIT_CONTENT_MAX_COMPONENT_COUNT:
+            result["reason"] = "CONTENT_DEPTH_LIMIT"
+            return result
+        if time.monotonic() >= deadline:
+            result["reason"] = "CONTENT_DEADLINE"
+            return result
+        if not read_context.check(repo / relative).allowed:
+            result["reason"] = "CONTENT_READ_SCOPE_BLOCKED"
+            return result
+        if time.monotonic() >= deadline:
+            result["reason"] = "CONTENT_DEADLINE"
+            return result
+        try:
+            snapshot = read_bytes_snapshot_beneath(Path(repo.anchor), parts,
+                max_bytes=MAX_GIT_OUTPUT_BYTES - result["bytes_sampled"], require_dir_fd=True)
+        except ValueError as exc:
+            result.update(reason="CONTENT_BYTE_LIMIT", error_type=type(exc).__name__, max_bytes=MAX_GIT_OUTPUT_BYTES)
+            return result
+        except (OSError, RuntimeError) as exc:
+            number = getattr(exc, "errno", None)
+            result.update(reason="CONTENT_SNAPSHOT_UNAVAILABLE", error_type=type(exc).__name__,
+                          error_errno=number if isinstance(number, int) else None,
+                          error_summary=os.strerror(number) if isinstance(number, int) and number > 0
+                          else "无法确认稳定普通单链接文件与父目录身份；未采纳正文")
+            return result
+        if time.monotonic() >= deadline:
+            result["reason"] = "CONTENT_DEADLINE"
+            return result
+        content = snapshot.content if snapshot is not None else b""
+        # 路径仅进摘要，不返回正文/私有文件名；缺失与空文件使用不同域，避免删除被当成未变化。
+        digest.update(len(raw).to_bytes(4, "big") + raw)
+        digest.update(b"present" if snapshot is not None else b"missing")
+        digest.update(hashlib.sha256(content).digest())
+        result["files_sampled"] += 1
+        result["bytes_sampled"] += len(content)
+    return {**result, "coverage": "complete", "fingerprint": digest.hexdigest(), "reason": "", "next_action": ""}
+
+
+def _dirty_paths(payload):
+    if payload and not payload.endswith(b"\0"):
+        return None
+    entries = payload.split(b"\0")
+    paths = set()
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
+            continue
+        if len(entry) < 4 or entry[2:3] != b" ":
+            return None
+        paths.add(entry[3:])
+        if b"R" in entry[:2] or b"C" in entry[:2]:
+            if index >= len(entries) or not entries[index]:
+                return None
+            paths.add(entries[index])
+            index += 1
+    return paths
 
 
 # LLM: 固定参数列表 + 清洁环境 + 输出上限；git-dir/工作树钉在已校验路径，路径型配置改成空设备。读取最晚在

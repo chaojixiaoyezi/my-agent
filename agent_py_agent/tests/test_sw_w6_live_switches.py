@@ -62,7 +62,8 @@ def test_refresh_updates_all_registered_copies_but_not_host_numeric_or_secret_fi
 @pytest.mark.parametrize("key", [
     "acp_bridge_enabled", "custom_tools_enabled", "llm_call_records_enabled",
     "notify_delivery_enabled", "openai_compat_gateway_enabled", "ops_remote_update_enabled",
-    "side_questions_enabled", "web_terminal_enabled",
+    "side_questions_enabled", "web_terminal_enabled", "technical_cutoff_continuation_enabled",
+    "tool_wait_input_reply_enabled",
 ])
 def test_gap_switches_refresh_registered_config_copies_in_both_directions(tmp_path, key):
     path, config = _config(tmp_path, f"{key}: false\n")
@@ -245,6 +246,7 @@ def test_registration_does_not_retain_dead_config(tmp_path):
 
 @pytest.mark.parametrize("key", [
     "tool_program_enabled", "command_approval_filter_enabled", "target_scope_policy_enabled",
+    "workflow_auto_dispatch_reviewers",
 ])
 def test_capability_switch_and_router_see_file_edit_without_restart(tmp_path, key):
     assert key in live.LIVE_SWITCH_KEYS

@@ -540,11 +540,15 @@ def test_management_transports_host_selection(tmp_path, monkeypatch, interactive
         return {"ok": True}
     manager = SimpleNamespace(command=command, context=SimpleNamespace(owner=resolve_owner_home(tmp_path)))
     monkeypatch.setattr(service, "_management", lambda *args: manager)
-    monkeypatch.setattr(command_stream, "serve_command_stream", lambda handler, paths, owner, request, execute: execute(None, None))
+    def serve(handler, paths, owner, request, execute, **options):
+        assert options.get('interactive') is True
+        return execute(None, None)
+    monkeypatch.setattr(command_stream, "serve_command_stream", serve)
     handler = SimpleNamespace(client_address=("127.0.0.1", 32100), _send_json=lambda *args: None)
     server = SimpleNamespace(agent=object(), paths=object())
     body = {"plugin_request_id": "selection-test", "catalog_revision": "revision", "host_api_selection": choice}
     if interactive:
+        body.update(stream=True, interactive=True)
         service._interactive_command(handler, server, body, "/plugins enable fixture")
     else:
         service.plugin_http_response(handler, server, body, text="/plugins enable fixture")

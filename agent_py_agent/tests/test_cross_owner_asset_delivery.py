@@ -2169,3 +2169,180 @@ def test_h01_h02_secret_shapes_blocked_in_delivery_and_safe_projection(sample, t
     projected = public_value({"message": f"leak={sample}"})
     assert sample not in projected["message"]
     assert "PRIVATE_BODY_PAYLOAD_XYZ987" not in projected["message"]
+
+
+def test_unconditional_delivery_reads_current_dependency_after_preview(kit):
+    """未提供前置摘要的旧发送语义确实读取当前内容，不能当审核快照。"""
+    import json
+    from hashlib import sha256
+
+    from agent_py_agent.agent.assets.script_store_support import delivery_json
+    from agent_py_agent.agent.workflows.governance import workflow_candidate_hash
+
+    seed_delivery_bundle(kit)
+    frozen_release = WorkflowDefinition(AssetDescriptor('release', 'workflow', '发布'), ()).to_dict()
+    frozen_release['steps'] = [{'step_id': 'send', 'mode': 'tool_call', 'tool_spec': {
+        'tool_name': 'asset_delivery', 'arguments': {
+            'action': 'send', 'asset_kind': 'workflow', 'asset_id': 'flow',
+            'recipient_owner_id': 'local/alice'}}}]
+    reviewed_hash = workflow_candidate_hash(frozen_release)
+    preview = kit.service.preview_bundle('local/main', 'workflow', 'flow')
+    reviewed_bundle = sha256(delivery_json(preview['bundled_assets'])).hexdigest()
+    (kit.main / 'skills/guide/references/rules.txt').write_text('审核后改变的合成规则。')
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow')
+    assert workflow_candidate_hash(frozen_release) == reviewed_hash
+    receipt = json.loads((kit.main / 'data/asset_delivery/outbox' / (sent['delivery_id'] + '.json')).read_text())
+    assert receipt['bundle_sha256'] != reviewed_bundle
+    payload = kit.alice / 'data/asset_delivery/inbox' / sent['delivery_id'] / 'payload/skill/guide/references/rules.txt'
+    assert payload.read_text() == '审核后改变的合成规则。'
+
+
+@pytest.mark.parametrize('changed', ['root', 'dependency', 'attachment'])
+def test_delivery_expected_bundle_rejects_changed_closure_before_any_publish(kit, changed, monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    seed_delivery_bundle(kit)
+    expected = kit.service.preview_bundle('local/main', 'workflow', 'flow')['bundle_sha256']
+    if changed == 'root':
+        store = WorkflowStore(kit.main)
+        store.save_workflow(replace(store.get_workflow('flow'), body_markdown='更改后的根内容。'))
+    elif changed == 'dependency':
+        ScriptStore(kit.main).save_script(AssetDescriptor('collect', 'script', '采集'), 'print("changed")\n')
+    else:
+        (kit.main / 'skills/guide/references/rules.txt').write_text('更改后的附件。')
+    actual = kit.service.preview_bundle('local/main', 'workflow', 'flow')['bundle_sha256']
+    assert actual != expected
+
+    def no_write_scope(*args):
+        pytest.fail('摘要不符不得进入任何投递写事务')
+
+    monkeypatch.setattr(kit.service, '_write_scope', no_write_scope)
+    with pytest.raises(AssetDeliveryError) as raised:
+        kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow', expected_bundle_sha256=expected)
+    error = raised.value.to_dict()
+    assert error['error_code'] == 'ASSET_DELIVERY_BUNDLE_CHANGED'
+    assert error['expected_bundle_sha256'] == expected and error['actual_bundle_sha256'] == actual
+    assert error['effect_outcome'] == error['side_effect_state'] == 'not_started'
+    assert '重新审核' in error['next_action']
+    assert not (kit.main / 'data/asset_delivery').exists()
+    assert not (kit.alice / 'data/asset_delivery').exists()
+
+
+def test_delivery_preview_digest_is_deterministic_and_matches_published_receipt(kit):
+    import json
+    from hashlib import sha256
+
+    from agent_py_agent.agent.assets.script_store_support import delivery_json
+
+    seed_delivery_bundle(kit)
+    first = kit.service.preview_bundle('local/main', 'workflow', 'flow')
+    second = kit.service.preview_bundle('local/main', 'workflow', 'flow')
+    assert first['bundle_sha256'] == second['bundle_sha256']
+    assert first['bundle_sha256'] == sha256(delivery_json(first['bundled_assets'])).hexdigest()
+    assert first['closure_summary']['total_assets_count'] == 3
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow',
+        expected_bundle_sha256=first['bundle_sha256'])
+    receipt = json.loads((kit.main / 'data/asset_delivery/outbox' / (sent['delivery_id'] + '.json')).read_text())
+    assert receipt['bundle_sha256'] == first['bundle_sha256']
+
+
+def test_delivery_precondition_checks_exact_snapshot_that_is_published(kit, monkeypatch):
+    from agent_py_agent.agent.assets import delivery_service
+
+    seed_delivery_bundle(kit)
+    expected = kit.service.preview_bundle('local/main', 'workflow', 'flow')['bundle_sha256']
+    original = delivery_service.snapshot_delivery_bundle
+    calls = []
+
+    def snapshot_then_mutate(*args, **kwargs):
+        calls.append(1)
+        items = original(*args, **kwargs)
+        (kit.main / 'skills/guide/references/rules.txt').write_text('读取快照后发生的修改。')
+        return items
+
+    monkeypatch.setattr(delivery_service, 'snapshot_delivery_bundle', snapshot_then_mutate)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow', expected_bundle_sha256=expected)
+    assert len(calls) == 1
+    payload = kit.alice / 'data/asset_delivery/inbox' / sent['delivery_id'] / 'payload/skill/guide/references/rules.txt'
+    assert payload.read_text() == '合成规则。'
+
+
+def test_delivery_tool_runtime_hook_uses_bound_owner_once_and_reports_stale_digest(kit, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.tooling.asset_delivery_tool import AssetDeliveryTool
+
+    seed_delivery_bundle(kit)
+    tool = AssetDeliveryTool(kit.root, 'local/main')
+    params = {'action': 'send', 'asset_kind': 'workflow', 'asset_id': 'flow', 'recipient_owner_id': 'local/alice'}
+    calls, original = [], tool.service.preview_bundle
+
+    def preview(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tool.service, 'preview_bundle', preview)
+    assert tool.workflow_review_precondition_action({'action': 'inbox'}) is None
+    read_action = tool.workflow_review_precondition_action({**params, 'owner_id': 'local/bob',
+        'expected_bundle_sha256': '0' * 64, 'note': '此字段不得变成读取授权'})
+    assert read_action == {'action': 'preview', 'asset_kind': 'workflow', 'asset_id': 'flow',
+        'include_dependencies': True, 'allow_secret_placeholder_replace': False}
+    assert not calls
+    assert tool.workflow_review_precondition({'action': 'inbox'}) is None
+    assert not calls
+    constraint = tool.workflow_review_precondition({**params, 'owner_id': 'local/bob'})
+    assert len(calls) == 1 and calls[0][0][0] == 'local/main'
+    (kit.main / 'skills/guide/references/rules.txt').write_text('审核之后改变。')
+    result = tool.execute({**params, **constraint})
+    assert result.ok is False and result.error_code == 'STALE_VERSION'
+    assert result.reported_error_code == 'ASSET_DELIVERY_BUNDLE_CHANGED'
+    assert result.effect_outcome == 'not_started'
+    details = json.loads(result.output)
+    assert details['expected_bundle_sha256'] == constraint['expected_bundle_sha256']
+    assert details['actual_bundle_sha256'] != details['expected_bundle_sha256']
+    assert not (kit.alice / 'data/asset_delivery').exists()
+
+
+def test_delivery_digest_precondition_uses_same_redacted_bytes_as_send(kit):
+    import json
+
+    seed_delivery_bundle(kit)
+    (kit.main / 'skills/guide/references/config.json').write_text('{"api_key":"synthetic-sensitive-value"}')
+    preview = kit.service.preview_bundle('local/main', 'workflow', 'flow', allow_secret_placeholder_replace=True)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow',
+        expected_bundle_sha256=preview['bundle_sha256'], allow_secret_placeholder_replace=True)
+    receipt = json.loads((kit.main / 'data/asset_delivery/outbox' / (sent['delivery_id'] + '.json')).read_text())
+    assert receipt['bundle_sha256'] == preview['bundle_sha256']
+
+
+def test_delivery_review_hook_preserves_specific_source_failure(kit):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+    from agent_py_agent.agent.tooling.asset_delivery_tool import AssetDeliveryTool
+
+    tool = AssetDeliveryTool(kit.root, 'local/main')
+    with pytest.raises(AssetDeliveryError) as raised:
+        tool.workflow_review_precondition({'action': 'send', 'asset_kind': 'workflow', 'asset_id': 'missing'})
+    assert raised.value.error_code == 'ASSET_NOT_FOUND'
+
+
+@pytest.mark.parametrize('expected', ['', 'X' * 64, '0' * 63, 123])
+def test_delivery_service_rejects_malformed_expected_digest_without_delivery_writes(kit, expected):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    with pytest.raises(AssetDeliveryError) as raised:
+        kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'missing', expected_bundle_sha256=expected)
+    assert raised.value.error_code == 'ASSET_DELIVERY_BUNDLE_PRECONDITION_INVALID'
+    assert raised.value.to_dict()['effect_outcome'] == 'not_started'
+    assert not (kit.main / 'data/asset_delivery').exists()
+    assert not (kit.alice / 'data/asset_delivery').exists()
+
+
+def test_delivery_explicitly_excluded_dependencies_do_not_change_bundle_digest(kit):
+    seed_delivery_bundle(kit)
+    first = kit.service.preview_bundle('local/main', 'workflow', 'flow', include_dependencies=False)
+    (kit.main / 'skills/guide/references/rules.txt').write_text('本次明确不连带的依赖修改。')
+    second = kit.service.preview_bundle('local/main', 'workflow', 'flow', include_dependencies=False)
+    assert first['bundle_sha256'] == second['bundle_sha256']
+    assert first['closure_summary']['total_assets_count'] == 1

@@ -10,11 +10,13 @@ keep this module responsible for wait markers and direct-parent wake decisions.
 交接正文复用只读投影，本模块只负责等待和唤醒状态。
 """
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
 
-from .model_capabilities import capability_request_counts_as_open
+from .model_capabilities import CAPABILITY_REQUEST_OPEN_STATUS
 from .models import (
     SUBAGENT_ENDED_STATUSES,
     SUBAGENT_FAILURE_STATUSES,
@@ -95,8 +97,9 @@ def _mark_parent_wait_state(
     )
     active_ids: list[str] = []
     notice_keys: dict[str, str] = {}
+    capability_keys: dict[str, str] = {}
     for child_id in candidate_ids:
-        child = _load_exact_direct_child(manager, parent_id, child_id)
+        child = _load_exact_direct_child(manager, parent_id, child_id, parent=parent)
         if child is None:
             continue
         status = str(getattr(child, "status", ""))
@@ -111,6 +114,9 @@ def _mark_parent_wait_state(
         # 模型尚未见到的终态/提醒必须留在这次等待里，由下一事件片处理，不能被登记动作吞掉。
         notice = observed.get("activity_diagnostic", {}) if observed is not None else current_activity_diagnostic(child)
         notice_keys[child_id] = str(notice.get("notice_key") or "") if isinstance(notice, dict) else ""
+        capability_keys[child_id] = str(
+            observed.get("capability_notice_key") or "" if observed is not None
+            else direct_child_capability_facts(child)["capability_notice_key"])
     if not active_ids:
         if attrs.pop(DIRECT_CHILD_WAIT_ATTR, None) is not None:
             parent.attributes = attrs
@@ -123,6 +129,7 @@ def _mark_parent_wait_state(
         "created_at": float(previous.get("created_at") or now),
         "updated_at": now,
         "activity_notice_keys": notice_keys,
+        "capability_notice_keys": capability_keys,
     }
     parent.attributes = attrs
     return tuple(active_ids)
@@ -190,6 +197,12 @@ def reconcile_parent_wait_for_child(
     parent_id = str(getattr(child, "parent_id", "") or "").strip()
     if not parent_id:
         return DirectParentResumeDecision(reason="root_parent")
+    try:
+        parent = manager.load(parent_id)
+    except (FileNotFoundError, TypeError, ValueError):
+        return DirectParentResumeDecision(parent_run_id=parent_id, reason="parent_not_found")
+    if _load_exact_direct_child(manager, parent_id, child_id, parent=parent) is None:
+        return DirectParentResumeDecision(parent_run_id=parent_id, reason="child_scope_mismatch")
     return _reconcile_parent_wait(manager, parent_id)
 
 
@@ -242,7 +255,7 @@ def direct_children_context_payload(manager: Any, parent_run_id: str) -> dict[st
         return {}
     children = []
     for child_id in _unique_ids(getattr(parent, "child_ids", []) or []):
-        child = _load_exact_direct_child(manager, parent_id, child_id)
+        child = _load_exact_direct_child(manager, parent_id, child_id, parent=parent)
         if child is not None:
             children.append(child)
     children.sort(
@@ -300,7 +313,7 @@ def _reconcile_parent_wait(
     attention: list[str] = []
     missing: list[str] = []
     for child_id in run_ids:
-        child = _load_exact_direct_child(manager, parent_id, child_id)
+        child = _load_exact_direct_child(manager, parent_id, child_id, parent=parent)
         if child is None:
             missing.append(child_id)
             attention.append(child_id)
@@ -315,6 +328,9 @@ def _reconcile_parent_wait(
                 completed.append(child_id)
         else:
             active.append(child_id)
+            capability_key = direct_child_capability_facts(child)["capability_notice_key"]
+            if capability_key and capability_key != (marker.get("capability_notice_keys") or {}).get(child_id):
+                attention.append(child_id)
             notice = current_activity_diagnostic(child)
             seen_notices = marker.get("activity_notice_keys") or {}
             if (
@@ -322,7 +338,8 @@ def _reconcile_parent_wait(
                 and notice.get("notice_key")
                 and notice["notice_key"] != seen_notices.get(child_id)
             ):
-                attention.append(child_id)
+                if child_id not in attention:
+                    attention.append(child_id)
     parent_terminal = task_has_ended_status(parent)
     should_resume = not parent_terminal and (bool(attention or completed) or not active)
     reason = (
@@ -391,22 +408,7 @@ def _child_requires_immediate_parent_attention(child: object, status: str) -> bo
 # unrestricted response bodies.
 # 函数用途: 把单个直属孩子整理成父级可读的小型事实包。
 def _direct_child_context_row(task: object) -> dict[str, object]:
-    requests = []
-    for request in list(getattr(task, "capability_requests", []) or []):
-        if not capability_request_counts_as_open(getattr(request, "status", "OPEN")):
-            continue
-        requests.append(
-            {
-                "request_id": str(getattr(request, "id", "") or ""),
-                "capability_type": str(getattr(request, "capability_type", "") or ""),
-                "needed_capability": str(getattr(request, "needed_capability", "") or "")[:300],
-                "tools": list(getattr(request, "requested_tools", []) or [])[:8],
-                "skills": list(getattr(request, "requested_skills", []) or [])[:8],
-                "path_scope": list(getattr(request, "path_scope", []) or [])[:8],
-            }
-        )
-        if len(requests) >= _CONTEXT_REQUEST_COUNT:
-            break
+    capability = direct_child_capability_facts(task)
     handoff = completion_handoff_payload(task)
     return {
         "run_id": str(getattr(task, "id", "") or ""),
@@ -421,6 +423,38 @@ def _direct_child_context_row(task: object) -> dict[str, object]:
         "evidence_refs": list(getattr(task, "evidence_refs", []) or [])[:8],
         **handoff,
         "activity_diagnostic": current_activity_diagnostic(task),
+        **capability,
+    }
+
+
+def direct_child_capability_facts(task: object) -> dict[str, object]:
+    """从当前执行的原申请账投影未决事实；指纹只用于已见去重，不授予能力。"""
+    requests = []
+    request_ids = []
+    for request in list(getattr(task, "capability_requests", []) or []):
+        if (getattr(request, "status", None) != CAPABILITY_REQUEST_OPEN_STATUS
+                or str(getattr(request, "from_run_id", "")) != str(getattr(task, "id", ""))):
+            continue
+        request_id = str(getattr(request, "id", "") or "")
+        if not request_id:
+            continue
+        request_ids.append(request_id)
+        if len(requests) >= _CONTEXT_REQUEST_COUNT:
+            continue
+        requests.append(
+            {
+                "request_id": request_id,
+                "capability_type": str(getattr(request, "capability_type", "") or ""),
+                "needed_capability": str(getattr(request, "needed_capability", "") or "")[:300],
+                "tools": list(getattr(request, "requested_tools", []) or [])[:8],
+                "skills": list(getattr(request, "requested_skills", []) or [])[:8],
+                "path_scope": list(getattr(request, "path_scope", []) or [])[:8],
+            }
+        )
+    key = (hashlib.sha256(json.dumps(sorted(set(request_ids)), separators=(",", ":")).encode()).hexdigest() if request_ids else "")
+    return {
+        "capability_notice_key": key,
+        "open_capability_request_count": len(set(request_ids)),
         "open_capability_requests": requests,
     }
 
@@ -440,16 +474,20 @@ def current_activity_diagnostic(task: object) -> dict[str, object]:
 
 # LLM: A direct child must match both opaque id and canonical parent_id.
 # 函数用途: 读取一个直属孩子，拒绝跨树或跨层误绑。
-def _load_exact_direct_child(manager: Any, parent_run_id: str, child_run_id: str) -> object | None:
+def _load_exact_direct_child(manager: Any, parent_run_id: str, child_run_id: str, *, parent: object) -> object | None:
     try:
         child = manager.load(str(child_run_id or "").strip())
     except (FileNotFoundError, TypeError, ValueError):
         return None
-    return (
-        child
-        if str(getattr(child, "parent_id", "") or "").strip() == parent_run_id
-        else None
-    )
+    return child if str(getattr(parent, "id", "")) == parent_run_id and direct_child_scope_matches(parent, child) else None
+
+
+def direct_child_scope_matches(parent: object, child: object) -> bool:
+    """等待与运行时投影共用原直属身份，不让跨用户或跨树记录成为提醒来源。"""
+    parent_id = str(getattr(parent, "id", "") or "").strip()
+    return bool(parent_id and str(getattr(child, "parent_id", "") or "").strip() == parent_id
+        and str(getattr(child, "owner", "")) == str(getattr(parent, "owner", ""))
+        and str(getattr(child, "root_id", "")) == str(getattr(parent, "root_id", "") or parent_id))
 
 
 # LLM: Read only the current schema marker; malformed or legacy values fail
@@ -484,6 +522,8 @@ __all__ = [
     "DirectParentResumeDecision",
     "current_activity_diagnostic",
     "direct_children_context_payload",
+    "direct_child_capability_facts",
+    "direct_child_scope_matches",
     "mark_parent_waiting_for_direct_children",
     "parent_wait_blocks_dispatch",
     "release_parent_wait_for_user_guidance",

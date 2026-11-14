@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from ...subagents.models import TaskStatus
@@ -64,12 +65,54 @@ class ProgressReadContext:
 def classify_node_progress(node: dict[str, Any], *, now: float,
                            sources: Mapping[str, Mapping[str, object]] | None = None) -> dict[str, object]:
     result = _classify(node, now=now, sources=sources)
+    # 只给已证实存活且原运行进展过时的节点补充原账中的正面事件；等待、重试、未知和终态不受影响。
+    if result["state"] == "no_progress" and sources is not None:
+        at = _coordination_progress_at(sources, now)
+        if at is not None and now - at <= PROGRESS_STALE_AFTER_SECONDS:
+            result = _result("working", "RECENT_COORDINATION_EVENT", now,
+                             {**dict(result.get("sources") or {}), "coordination_progress_at": at})
     result["coverage"] = "full" if sources is not None and _all_sources_ok(sources) else "partial"
     if sources is not None:
         result["sources"] = {**dict(result.get("sources") or {}),
                              "required": {name: dict(sources.get(name) or {"state": "missing"})
                                           for name in REQUIRED_PROGRESS_SOURCES}}
+    if sources is not None:
+        result["sources"].update({name: dict(sources[name]) for name in ("verification", "coordination")
+                                  if name in sources})
     return result
+
+
+def _coordination_progress_at(sources, now):
+    """只取已核精确引用的结构化时间；未来/非法时间和缺失引用不能成为进展。"""
+    values = []
+    verification = sources.get("verification", {})
+    if verification.get("state") == "read":
+        values.extend(row.get("created_at") for row in verification.get("tests", []))
+        review = verification.get("review", {})
+        if review.get("state") == "read":
+            values.extend(row.get("created_at") for row in review.get("records", []))
+    coordination = sources.get("coordination", {})
+    if coordination.get("state") == "read":
+        values.extend(row.get("updated_at") for row in coordination.get("handoffs", []))
+        for case in coordination.get("case_decisions", []):
+            values.extend(row.get("created_at") for row in case.get("records", []))
+    valid = []
+    for value in values:
+        try:
+            if isinstance(value, str):
+                date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if date.tzinfo is None:
+                    continue
+                parsed = date.timestamp()
+            elif isinstance(value, bool):
+                continue
+            else:
+                parsed = float(value)
+            if 0 < parsed <= now:
+                valid.append(parsed)
+        except (ValueError, TypeError, OverflowError):
+            continue
+    return max(valid) if valid else None
 
 
 # LLM: 规则顺序：状态门（完成/暂停/终态/未知）→ 能力申请 → 工具审批 → 阻塞 → 必需来源可读性 → 未开始 → 当前 attempt
@@ -180,10 +223,23 @@ def merge_git_observation(result: dict[str, object], observation: dict[str, obje
     if not observation:
         return result
     merged = {**result, "sources": {**dict(result.get("sources") or {}), "git": dict(observation)}}
-    if result.get("state") != "no_progress" or observation.get("error_code") or not previous or previous.get("error_code"):
+    if result.get("state") != "no_progress" or observation.get("error_code"):
+        return merged
+    content = observation.get("dirty_content")
+    if isinstance(content, dict) and content.get("coverage") != "complete":
+        merged.update(state="unknown", reason="GIT_CONTENT_COVERAGE_INCOMPLETE", coverage="partial")
+    if not previous or previous.get("error_code"):
         return merged
     changed = (observation.get("head") != previous.get("head")
                or observation.get("dirty_paths_count") != previous.get("dirty_paths_count"))
+    status = observation.get("dirty_status_fingerprint")
+    previous_status = previous.get("dirty_status_fingerprint")
+    changed = changed or bool(status and previous_status and status != previous_status)
+    prior_content = previous.get("dirty_content")
+    if (isinstance(content, dict) and isinstance(prior_content, dict)
+            and content.get("coverage") == prior_content.get("coverage") == "complete"
+            and content.get("fingerprint") and prior_content.get("fingerprint")):
+        changed = changed or content["fingerprint"] != prior_content["fingerprint"]
     if changed:
         merged.update(state="working", reason="GIT_CHANGED_SINCE_PREVIOUS")
     return merged

@@ -52,7 +52,8 @@ _MAX_MEMO_ENTRIES = 128
 _MAX_MEMO_BYTES = 32 * 1024 * 1024
 # 单次投影推进最多跟踪的源身份数量。
 _MAX_TRACKED_SOURCES = 128
-_EVENTS = ("manual_search", "manual_get", "host_injected", "adopted")
+USAGE_EVENTS = ("manual_search", "manual_get", "host_injected", "adopted", "visible", "selected", "executed")
+_EVENTS = USAGE_EVENTS
 # SQLite 有符号六十四位整数的最大值，属于类型边界而非可调配额。
 _INT64_MAX = 2**63 - 1
 # 投影追加见证按此字节数划分前缀摘要锚点。
@@ -1577,6 +1578,9 @@ class OwnerReadIndex:
         try:
             parts = _parts(relative_parts)
             validation = self._validator_tag(validator)
+            if domain == 'usage' and validator is None:
+                # 使用账新增阶段只重验该领域派生投影，不沿用旧校验器的invalid_schema缓存。
+                validation += ':method-stages-v2'
         except ValueError:
             return self._view(
                 domain, (), "", None, "unavailable", "invalid_source",

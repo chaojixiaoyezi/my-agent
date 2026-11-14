@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -28,6 +30,12 @@ from .settings.config import AgentConfig
 from .settings.defaults import register_resident_owner_capacity
 
 logger = logging.getLogger(__name__)
+
+
+# 原构造是本地CPU/私有目录装配，不含模型请求；GIL构建并发只会争用受理线程。
+# 有界槽位独立于池锁/运行中Agent租约，热命中和原并发执行不等待此槽位。
+_OWNER_CONSTRUCTION_SLOTS = threading.BoundedSemaphore(
+    1 if getattr(sys, "_is_gil_enabled", lambda: True)() else max(1, min(4, os.cpu_count() or 1)))
 
 # 池的总实例容量沿唯一配置默认；显式max_agents及运行时config仍按原优先级覆盖。
 _DEFAULT_MAX_AGENT_COUNT = AgentConfig.owner_agent_pool_max_agents
@@ -196,14 +204,15 @@ def build_owner_scoped_agent(
     from .core import SimpleAgent
 
     worker_options = {} if worker_bootstrap is None else {"worker_bootstrap": worker_bootstrap}
-    agent = SimpleAgent(
-        _config_with_owner(base_config, owner),
-        root,
-        workspace_roots=workspace_roots,
-        channel_runtime_health_provider=channel_runtime_health_provider,
-        defer_mcp_connect=True,
-        **worker_options,
-    )
+    with _OWNER_CONSTRUCTION_SLOTS:
+        agent = SimpleAgent(
+            _config_with_owner(base_config, owner),
+            root,
+            workspace_roots=workspace_roots,
+            channel_runtime_health_provider=channel_runtime_health_provider,
+            defer_mcp_connect=True,
+            **worker_options,
+        )
     if worker_bootstrap is not None:
         from .gateway_parts.multiprocess_agent_contract import require_agent_home
 

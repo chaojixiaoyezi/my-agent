@@ -87,6 +87,22 @@ BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
 BACKGROUND_TRANSCRIPT_EVENT_PHASES = frozenset(
     {"started", "delta", "updated", "completed", "failed", "interrupted"}
 )
+
+
+def public_workflow_step_display(event: object) -> dict[str, object] | None:
+    """复用步骤流白名单生成公开显示；不信任旁带text、工具输入或任意元数据。"""
+    from ..gateway_parts.stream_events import workflow_step_event
+
+    public = workflow_step_event(event)
+    if not public:
+        return None
+    labels = {'pending': '待执行', 'running': '执行中', 'succeeded': '已成功',
+              'failed': '已失败', 'skipped': '已跳过', 'paused_for_resume': '已暂停／待恢复'}
+    return {'workflow_step': public,
+            'text': f"工作流 {public['workflow_id']} · 步骤 {public['step_id']} · "
+                f"{labels[public['status']]} · {public['duration_ms']}ms"}
+
+
 _TOOL_PAYLOAD_FIELDS = frozenset(
     {
         "tool",
@@ -249,6 +265,9 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         self._terminal_model_call = ""
         self._published_model_final = ""
         self._tool_blocks: set[str] = set()
+        self._workflow_sequences: dict[str, int] = {}
+        self._workflow_progress_lock = threading.Lock()
+        self._workflow_progress_closed = False
         self._tool_attempt = 0
         self._retry_index = 0
         self._active_input_index = 0
@@ -398,6 +417,26 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         elif phase != "started":
             self._event("tool_progress", "updated", block_id, public)
 
+    def write_workflow_step_progress(self, event: dict[str, object]) -> bool:
+        """将步骤白名单写入原显示检查点，短步骤结束和重连后仍可读。"""
+        payload = public_workflow_step_display(event)
+        if payload is None:
+            return False
+        public = payload['workflow_step']
+        with self._workflow_progress_lock:
+            if self._workflow_progress_closed:
+                return False
+            run_id, seq = public['workflow_run_id'], public['seq']
+            if seq <= self._workflow_sequences.get(run_id, -1):
+                return False
+            if len(self._workflow_sequences) >= 64 and run_id not in self._workflow_sequences:
+                return False
+            self._workflow_sequences[run_id] = seq
+            # completed是这条显示记录已收齐，不是把pending/running步骤签成业务成功。
+            self._event('system_message', 'completed',
+                f"{self.request_id}:workflow:{run_id}:{public['step_id']}:{seq}", payload)
+        return True
+
     # LLM: Retry display contains typed counters only and first clears any
     # incomplete provider-parameter row. Raw exception, endpoint, credential,
     # and provider response never enter this public event. params 是可选收口参数包
@@ -481,6 +520,8 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         publish_final: bool = False,
         end_reason: str = "",
     ) -> None:
+        with self._workflow_progress_lock:
+            self._workflow_progress_closed = True
         close_background_progress(self._im_progress)
         self._clear_tool_input_progress()
         if self._thinking_active:

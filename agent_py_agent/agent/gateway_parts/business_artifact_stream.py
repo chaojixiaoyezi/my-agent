@@ -10,8 +10,10 @@ from ..common.nofollow_fs import open_readonly_file_beneath
 from ..plugin_host.artifacts import _fingerprint
 from ..plugin_host.errors import HostAPIError
 
+# 单个正式工作流产物可以下载的最大字节数。
 WORKFLOW_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024
-CHUNK_BYTES = 65536
+# 下载校验和发送每次读取的字节数，用于限制单连接缓冲。
+WORKFLOW_DOWNLOAD_CHUNK_BYTES = 65536
 
 
 class VerifiedArtifactStream:
@@ -24,7 +26,7 @@ class VerifiedArtifactStream:
 
     def chunks(self):
         self._stream.seek(0)
-        while chunk := self._stream.read(CHUNK_BYTES):
+        while chunk := self._stream.read(WORKFLOW_DOWNLOAD_CHUNK_BYTES):
             yield chunk
 
     def close(self):
@@ -48,7 +50,7 @@ def verified_workflow_stream(owner_home, parts, record, *, start, end, check_vis
             before, digest, size, selected = os.fstat(descriptor), hashlib.sha256(), 0, 0
             if before.st_size != record.size_bytes:
                 raise HostAPIError('ARTIFACT_CHANGED', 409)
-            while chunk := os.read(descriptor, CHUNK_BYTES):
+            while chunk := os.read(descriptor, WORKFLOW_DOWNLOAD_CHUNK_BYTES):
                 if size + len(chunk) > record.size_bytes:
                     raise HostAPIError('ARTIFACT_CHANGED', 409)
                 digest.update(chunk)

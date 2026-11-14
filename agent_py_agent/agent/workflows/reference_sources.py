@@ -226,6 +226,20 @@ class WorkflowReferenceReader:
         return {"coverage": coverage, "blockers": unique_blockers[:_max_blockers_page]}
 
     def _check_scheduler(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
+        # 宿主先于首个调度装配时不能把当时的空目录永久缓存为空引用。
+        if self.scheduler_repo is None and self.owner_home is not None:
+            try:
+                from ..scheduler.repository import SchedulerRepository
+
+                for sub in ('data/scheduler', 'scheduler'):
+                    candidate = self.owner_home / sub
+                    if candidate.exists() and any(candidate.iterdir()):
+                        self.scheduler_repo = SchedulerRepository(
+                            candidate, owner_provider='local', owner_kind='main', owner_id='local/main',
+                        )
+                        break
+            except (OSError, ValueError, TypeError):
+                return False
         if self.scheduler_repo is None:
             return True
         try:

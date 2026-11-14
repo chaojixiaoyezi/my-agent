@@ -274,7 +274,7 @@ def test_every_parent_consumer_keeps_the_structured_halt():
     event = SimpleNamespace(
         event_type="subagent_runner_finished", root_task_id="root-1", parent_agent_id="root-1",
         source_agent_id="child-1", observed_at=1.0, metadata=metadata,
-        wake_signal_id="w1", reason="subagent_runner_finished", created_at=1.0,
+        wake_signal_id="w1", reason="subagent_runner_finished", created_at=1.0, urgency="normal",
     )
     # 前台活动回合事件、后台完成清单、递归父级直属孩子行都经同一合同投影保留收口事实。
     assert _task_event_payload(event)["tool_failure_halt"] == halt

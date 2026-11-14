@@ -1845,3 +1845,114 @@ def test_shell_perf_registry_empty_missing_and_symlink(tmp_path: Path) -> None:
     (tmp_path / "data").symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError, match="cannot be scanned safely"):
         registry.artifact_operation_recorded_ids(tmp_path, operation_key="op", expected_backup_refs={"a": "r"})
+
+
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("case,expected", [("other-owner", "PATH_CROSS_OWNER_BLOCKED"), ("outside-owner", "PATH_OWNER_SCOPE_BLOCKED"),
+    ("missing", "PATH_NOT_FOUND"), ("empty-command", "TOOL_INVALID_ARGUMENTS"),
+    ("command-policy", "COMMAND_POLICY_BLOCKED")])
+def test_shell_pre_spawn_refusal_is_not_started(tmp_path, monkeypatch, background, case, expected):
+    owner = tmp_path / "home" / "owners" / "local" / "owner-a"
+    workspace = owner / "workspace"
+    other = tmp_path / "home" / "owners" / "local" / "owner-b" / "workspace"
+    workspace.mkdir(parents=True)
+    other.mkdir(parents=True)
+    tool = ShellTool(workspace, options=ShellToolOptions(owner_scope_root=str(owner)))
+    def must_not_spawn(*args, **kwargs):
+        pytest.fail("写前拒绝不得派生任何进程")
+    monkeypatch.setattr(subprocess, "Popen", must_not_spawn)
+    params = {"command": "printf synthetic", "run_in_background": background}
+    if case == "other-owner":
+        params["working_dir"] = str(other)
+    elif case == "outside-owner":
+        params["working_dir"] = str(tmp_path)
+    elif case == "missing":
+        params["working_dir"] = str(workspace / "missing")
+    elif case == "empty-command":
+        params["command"] = " "
+    else:
+        params["command"] = "rm -rf /"
+    result = tool.execute(params)
+    assert not result.ok and result.error_code == expected
+    assert result.effect_outcome == "not_started"
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_shell_default_cwd_owner_refusal_keeps_exact_code_through_executor(tmp_path, monkeypatch, background):
+    """复现ORCH95：参数无cwd，原handler默认cwd被owner墙拒绝后不得升级UNKNOWN。"""
+    owner = tmp_path / "owner-a"
+    outside = tmp_path / "project"
+    owner.mkdir()
+    outside.mkdir()
+    tool = ShellTool(outside, options=ShellToolOptions(owner_scope_root=str(owner)))
+    def must_not_spawn(*args, **kwargs):
+        pytest.fail("默认cwd被拒绝时不得派生进程")
+    monkeypatch.setattr(subprocess, "Popen", must_not_spawn)
+    arguments = {"command": "printf synthetic > denied.txt", "run_in_background": background}
+    direct = tool.execute(arguments)
+    assert direct.error_code == "PATH_OWNER_SCOPE_BLOCKED" and direct.effect_outcome == "not_started"
+    execution = execute_canonical_test_call(outside, tools={"run_command": tool}, tool_name="run_command",
+        arguments=arguments)
+    # 原入口若已把默认cwd补为可信字段，可更早拒绝；两层不得将确定未执行报UNKNOWN。
+    assert execution.result.error_code == ("APPROVAL_REQUIRED" if background else "PATH_OWNER_SCOPE_BLOCKED")
+    assert execution.result.effect_outcome == "not_started"
+    assert not (outside / "denied.txt").exists()
+
+
+def test_managed_task_shell_last_write_updates_canonical_task_registry(tmp_path):
+    import hashlib
+
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records,
+        register_artifact,
+    )
+
+    task = tmp_path / 'task'
+    work = task / 'work'
+    work.mkdir(parents=True)
+    artifact = work / 'result.txt'
+    artifact.write_text('before')
+    register_artifact(ArtifactRegistration(workspace_root=task, path=artifact,
+        artifact_id='result', run_id='run-1', task_id='task-1', agent_id='agent-1',
+        kind='txt', status='ready', source='test'))
+    tool = ShellTool(work, options=ShellToolOptions(
+        artifact_backup_root=tmp_path / 'backups', default_timeout=30))
+    script = "from pathlib import Path; Path('result.txt').write_text('after')"
+    result = tool.execute({'command': f'{shlex.quote(sys.executable)} -c {shlex.quote(script)}',
+        '__artifact_registry_root': str(task),
+        '__run_scope': {'run_id': 'run-1', 'task_id': 'task-1', 'agent_id': 'agent-1'}})
+    assert result.ok, result.output
+    latest = latest_artifact_records(task)['result']
+    assert latest.sha256 == hashlib.sha256(b'after').hexdigest()
+    assert latest.status == 'ready'
+    assert artifact.read_bytes() == b'after'
+    assert not latest_artifact_records(work)
+
+
+@pytest.mark.parametrize('boundary', [None, {}])
+def test_shell_registry_root_model_field_cannot_survive_host_projection(tmp_path, boundary):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.registry_invoke import _tool_params_with_runtime_boundary
+
+    request = SimpleNamespace(tool_name='run_command',
+        tool_params={'__artifact_registry_root': str(tmp_path / 'foreign')},
+        write_boundary=boundary, sandbox_read_roots=(), tool=None)
+    assert '__artifact_registry_root' not in _tool_params_with_runtime_boundary(request)
+
+
+def test_shell_registry_root_host_projection_preserves_execution_scope(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.registry_invoke import _tool_params_with_runtime_boundary
+
+    task = tmp_path / 'task'
+    request = SimpleNamespace(tool_name='run_command',
+        tool_params={'__artifact_registry_root': str(tmp_path / 'foreign')},
+        write_boundary={'artifact_registry_root': str(task)},
+        sandbox_read_roots=(tmp_path / 'read',), tool=None)
+    projected = _tool_params_with_runtime_boundary(request)
+    assert projected['__artifact_registry_root'] == str(task)
+    assert projected['__sandbox_read_roots'] == [str(tmp_path / 'read')]
+    assert '__sandbox_write_roots' not in projected

@@ -251,6 +251,57 @@ def test_taskless_background_overflow_keeps_first_resolved_request_id(tmp_path, 
     assert store.threads.require(thread.thread_id).compact_generation == 1
 
 
+def test_oversized_first_candidate_retries_without_new_input_or_replaying_business(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core import compact_request_recovery
+    from agent_py_agent.cli.gateway_lane_retry import BackgroundLaneRetry
+
+    agent, store, thread, request, execution, sink = _background(
+        tmp_path, backend="openai_compatible", detached=False, window=19_500)
+    agent.config.max_tokens = agent.backend.max_tokens = 1024
+    for role in ("user", "assistant"):
+        store.messages.append({"thread_id": thread.thread_id, "role": role, "content": "归档长记录" * 500,
+                               "metadata": {"conversation_request_id": f"old-{role}", "task_id": request.task_id}})
+    # 第一次尝试只让真实候选容量门拒绝。捕获正常业务模型调用，拒绝时不允许发出业务请求。
+    original_ceiling = compact._compact_request_input_ceiling
+    monkeypatch.setattr(compact, "_compact_request_input_ceiling", lambda *args: 1)
+    monkeypatch.setattr(compact_request_recovery, "_automatic_recovery_noop", lambda *args: False)
+    original_summary = compact._summarize
+    summaries, business = [], []
+    in_summary = False
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
+    monkeypatch.setattr(compact, "_summarize", summary)
+    _http(monkeypatch, backend="openai_compatible",
+          on_business=lambda wire, _: (summaries if in_summary else business).append(wire))
+
+    def run():
+        return background_execution.run_background_turn_with_compact(
+            execution, thread, request, user_prompt="继续原任务", continuation_injection=[],
+            proactive_delivery_available=False, activity_sink=sink)
+
+    with pytest.raises(background_execution.BackgroundCompactPreflightDeferred) as caught:
+        run()
+    assert caught.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
+    assert caught.value.capacity and caught.value.capacity.candidate_tokens > caught.value.capacity.input_ceiling_tokens
+    assert summaries and not business
+    assert store.threads.require(thread.thread_id).compact_generation == 0
+
+    lane = BackgroundLaneRetry()
+    lane.failed("owner", thread.thread_id, caught.value, delay=0, wait_for_inbound_marker="unchanged")
+    assert lane.ready("owner", thread.thread_id, model_ready=lambda: True, inbound_marker=lambda: "unchanged")
+    monkeypatch.setattr(compact, "_compact_request_input_ceiling", original_ceiling)
+    result = run()
+    assert result.runtime_status != "context_overflow" and len(business) == 1
+    assert store.threads.require(thread.thread_id).compact_generation == 1
+
+
 @pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
 def test_background_first_request_compacts_after_complete_prepare(tmp_path, monkeypatch, backend):
     # 窗口只校准测试输入：工具目录随 manage_models（f7029f54c）变长后，15500 装不下压缩后的候选。实测 16000–23000 都能

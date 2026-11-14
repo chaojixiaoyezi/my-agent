@@ -333,3 +333,20 @@ def test_steer_cancel_and_next_task_keep_lineage_and_context_scope(agent, delega
     _background_turn(agent, case.second, None, request_id='sequence-new-empty-turn')
     outcome, denied = _call(agent, 'spaces.get', {'space_id': case.sid})
     assert not outcome.ok and denied['error']['code'] == 'CAPABILITY_DENIED'
+
+
+def test_message_and_task_model_help_distinguish_receipt_and_execution(agent):
+    from agent_py_agent.agent.tooling.input_schema import validate_tool_input
+
+    message = agent.tools.tools['business_background_agents_messages_send'].model_spec
+    assignment = agent.tools.tools['business_tasks_assign'].model_spec
+    assert '不新建SessionTask' in message.description and '不为新工作冻结' in message.description
+    assert 'business_tasks_assign' in message.description and '不是新task_id' in message.description
+    assert 'params.instruction' in assignment.description and '冻结其业务上下文' in assignment.description
+    assert 'business_tasks_get' in assignment.description and '只证明已受理' in assignment.description
+    for spec in (message, assignment):
+        assert len(spec.hints.examples) == 1
+        example = json.loads(spec.hints.examples[0])
+        assert validate_tool_input(example, spec.input_schema).ok
+        assert example['action'] == spec.input_schema['properties']['action']['const']
+        assert 'idempotency_key' in example and 'request_id' in example

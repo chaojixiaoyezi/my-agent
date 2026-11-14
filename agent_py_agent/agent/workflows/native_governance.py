@@ -20,16 +20,48 @@ _WORKFLOW_AUTHOR = ContextVar('native_workflow_review_author', default=None)
 
 
 @contextmanager
-def workflow_review_author_scope(host, turn):
+def workflow_review_author_scope(host, turn, *, authorize=None, workflow_run_id=""):
     """原宿主轮只在本调用栈传递作者身份，退出即撤销，不扩大caller授权。"""
     turn.require(host, turn.params)
+    if authorize is not None and (not callable(authorize) or not workflow_run_id
+            or workflow_run_id != turn.params.run_id):
+        raise ValueError('WORKFLOW_REVIEW_AUTHORIZER_SCOPE_INVALID')
     entry = [host, turn.params, os.getpid(), threading.get_ident(), True]
-    token = _WORKFLOW_AUTHOR.set(entry)
+    token = _WORKFLOW_AUTHOR.set(entry) if authorize is None else None
+    def invoke(record, phase):
+        # 仅原栈签出的闭包运输同一轮事实；worker不复用线程绑定HostTurn句柄，
+        # 不复制Context，且每次仍由原操作库核真实run/attempt是否存活。
+        if (not entry[4] or entry[2] != os.getpid() or not turn.active
+                or turn.params is not entry[1]):
+            raise ValueError('原宿主执行轮已退出或被替换')
+        if (getattr(record, 'workflow_run_id', None) != workflow_run_id
+                or getattr(record, 'owner_id', None) != host.home_paths.owner_id):
+            # 子流程原生预检发生在自身host scope建立前；只复用父业务权限，
+            # 不运送审核作者。副作用阶段及任意其它run仍不能借用父闭包。
+            from .subworkflow_steps import _ACTIVE_SUBWORKFLOW_RUN_CHAIN
+            if (getattr(record, 'owner_id', None) == host.home_paths.owner_id
+                    and type(phase) is str and phase == 'preflight'
+                    and getattr(record, 'trigger_kind', None) == 'subworkflow'
+                    and getattr(record, 'parent_workflow_run_id', None) == workflow_run_id
+                    and _ACTIVE_SUBWORKFLOW_RUN_CHAIN.get()[-1:] == (workflow_run_id,)):
+                return authorize(record, phase)
+            raise PermissionError('WORKFLOW_REVIEW_AUTHORIZER_RUN_MISMATCH')
+        local = [host, entry[1], os.getpid(), threading.get_ident(), True, entry]
+        local_token = _WORKFLOW_AUTHOR.set(local)
+        try:
+            if not current_workflow_author(host):
+                raise PermissionError('WORKFLOW_REVIEW_AUTHOR_UNAVAILABLE')
+            return authorize(record, phase)
+        finally:
+            local[4] = False
+            _WORKFLOW_AUTHOR.reset(local_token)
+
     try:
-        yield
+        yield invoke if authorize is not None else None
     finally:
         entry[4] = False
-        _WORKFLOW_AUTHOR.reset(token)
+        if token is not None:
+            _WORKFLOW_AUTHOR.reset(token)
 
 
 class WorkflowReviewPending(WorkflowPolicyRefusal):
@@ -37,18 +69,44 @@ class WorkflowReviewPending(WorkflowPolicyRefusal):
         self.binding = binding
         self.reviewers_needed = reviewers_needed
         super().__init__(reason, details={**binding,
-            'recommended_action': '由另一受权执行者用 manage_requirement_provenance 对该 requirement_id 和 input_version 登记独立审核，再恢复原运行。'})
+            'recommended_action': 'request_approval',
+            'recovery_hint': '由另一受权执行者用 manage_requirement_provenance 对该 requirement_id 和 input_version 登记独立审核，再恢复原运行。'})
 
 
-def review_binding(record, step, snapshot):
+def review_binding(record, step, snapshot, *, tool_precondition=None):
     facts = {'schema': 'workflow.pending-review.v1', 'owner_id': record.owner_id,
         'workflow_run_id': record.workflow_run_id, 'step_id': step.step_id,
         'attempt_id': step.escalation_result['attempt_id'],
         'candidate_hash': workflow_candidate_hash(snapshot), 'scope_snapshot': record.scope_snapshot,
         'business_context': record.business_context}
+    prior = step.escalation_result.get('pending_review')
+    precondition = tool_precondition if tool_precondition is not None else (
+        prior.get('tool_precondition') if isinstance(prior, dict) else None)
+    if precondition is not None:
+        facts['tool_precondition'] = precondition
+        facts['candidate_hash'] = hashlib.sha256(json.dumps({'workflow_candidate_hash': facts['candidate_hash'],
+            'tool_precondition': precondition}, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode()).hexdigest()
     digest = hashlib.sha256(json.dumps(facts, ensure_ascii=False, sort_keys=True,
         separators=(',', ':'), allow_nan=False).encode()).hexdigest()
     return {**facts, 'requirement_id': 'workflow-review-' + digest[:40], 'input_version': digest}
+
+
+def validated_workflow_review_policy(metadata):
+    """唯一审核策略schema：省略代表无策略，空steps有效且无需审核服务。"""
+    policy = metadata.get('workflow_review_policy')
+    if policy is None:
+        return None
+    if (not isinstance(policy, dict) or set(policy) - {'steps', 'minimum_reviews', 'ttl_seconds', 'auto_dispatch', 'reviewer_model'}
+            or not isinstance(policy.get('steps'), list)
+            or not all(isinstance(item, str) and item for item in policy['steps'])
+            or type(policy.get('auto_dispatch', True)) is not bool
+            or ('reviewer_model' in policy and (not isinstance(policy['reviewer_model'], str)
+                or not 1 <= len(policy['reviewer_model'].strip()) <= 128))
+            or type(policy.get('minimum_reviews', 1)) is not int or not 1 <= policy.get('minimum_reviews', 1) <= 32
+            or type(policy.get('ttl_seconds', 86400)) is not int or not 1 <= policy.get('ttl_seconds', 86400) <= 86400):
+        raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_POLICY_INVALID')
+    return policy
 
 
 class NativeWorkflowGovernance(WorkflowOperationRecovery):
@@ -64,22 +122,32 @@ class NativeWorkflowGovernance(WorkflowOperationRecovery):
         if not isinstance(phase, WorkflowEffectPhase):
             return super().require_effect(record, phase)
         snapshot = self.workflow_store.load_workflow_snapshot(record.workflow_run_id)
-        policy = snapshot.get('descriptor', {}).get('metadata', {}).get('workflow_review_policy')
+        policy = validated_workflow_review_policy(snapshot.get('descriptor', {}).get('metadata', {}))
         if policy is None:
             return None
-        if (not isinstance(policy, dict) or set(policy) - {'steps', 'minimum_reviews', 'ttl_seconds', 'auto_dispatch', 'reviewer_model'}
-                or not isinstance(policy.get('steps'), list)
-                or not all(isinstance(item, str) and item for item in policy['steps'])
-                or type(policy.get('auto_dispatch', True)) is not bool
-                or ('reviewer_model' in policy and (not isinstance(policy['reviewer_model'], str)
-                    or not 1 <= len(policy['reviewer_model'].strip()) <= 128))
-                or type(policy.get('minimum_reviews', 1)) is not int or not 1 <= policy.get('minimum_reviews', 1) <= 32
-                or type(policy.get('ttl_seconds', 86400)) is not int or not 1 <= policy.get('ttl_seconds', 86400) <= 86400):
-            raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_POLICY_INVALID')
         if phase.step_id not in policy['steps']:
             return None
         step = next(item for item in record.steps if item.step_id == phase.step_id)
-        binding = review_binding(record, step, snapshot)
+        current = None
+        spec = next(item for item in snapshot['steps'] if item['step_id'] == phase.step_id)
+        if spec.get('mode') == 'tool_call':
+            reader = getattr(phase, 'review_precondition_reader', None)
+            if not callable(reader):
+                raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PRECONDITION_UNAVAILABLE', details={
+                    'recommended_action': 'report_blocker',
+                    'recovery_hint': '未执行；请由原工具宿主重建当轮授权调度器后重审，不能据缺失内容钉子的旧票执行。'})
+            # 原业务authorizer已核space/scope；此处才按当轮工具宿主原权读取可变资源。
+            current = reader(snapshot, step)
+            prior = step.escalation_result.get('pending_review')
+            previous = prior.get('tool_precondition') if isinstance(prior, dict) else None
+            if prior is not None and previous != current:
+                reason = 'WORKFLOW_REVIEW_PRECONDITION_MISSING' if previous is None else 'WORKFLOW_REVIEW_PRECONDITION_CHANGED'
+                error = WorkflowReviewPending(prior, reason=reason)
+                error.details['recommended_action'] = 'repair_against_acceptance_findings'
+                error.details['recovery_hint'] = ('旧待审缺少资源钉子或资源/实参已变；本次未执行，旧票未补签。'
+                    '请由原任务通过显式返工修订并创建新候选后重新独立审核，不要原样恢复或覆盖旧摘要。')
+                raise error
+        binding = review_binding(record, step, snapshot, tool_precondition=current)
         prior = step.escalation_result.get('pending_review')
         if prior is not None and prior != binding:
             raise WorkflowReviewPending(binding, reason='WORKFLOW_REVIEW_STALE')
@@ -103,7 +171,8 @@ class NativeWorkflowGovernance(WorkflowOperationRecovery):
             self.owner_id, requirement_id=binding['requirement_id'], limit=200, candidate=requirement)
         if has_more:
             error = WorkflowReviewPending(binding, reason='WORKFLOW_REVIEW_HISTORY_INCOMPLETE')
-            error.details['recommended_action'] = ('同候选审核历史超过200条，不能据截断窗口证明所有审核者已通过；'
+            error.details['recommended_action'] = 'repair_against_acceptance_findings'
+            error.details['recovery_hint'] = ('同候选审核历史超过200条，不能据截断窗口证明所有审核者已通过；'
                 '本次未执行。请由原任务修订候选并绑定新版本重新审核，不要继续给原候选追加替票或盲目恢复。')
             raise error
         receipts = {}
@@ -150,7 +219,8 @@ def current_workflow_author(host):
     from ..runtime_db.managed_operation_store import ToolOperationAuthorityRequest
     bound = _WORKFLOW_AUTHOR.get()
     if bound is not None and (bound[0] is not host or bound[2] != os.getpid()
-            or bound[3] != threading.get_ident() or not bound[4]):
+            or bound[3] != threading.get_ident() or not bound[4]
+            or len(bound) > 5 and not bound[5][4]):
         return ''
     params = bound[1] if bound is not None else getattr(host, '_current_run_params', None)
     store = getattr(getattr(host, 'tools', None), 'operation_store', None)

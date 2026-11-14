@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -61,7 +62,7 @@ from ..conversation.learning_source import LEARNING_SOURCE_KEY, thread_source_pr
 from ..conversation.turn_resume_notice import PROVIDER_RESUME_LIMIT_NOTICE, turn_resumed_notice_text
 from ..gateway_compact_context import build_gateway_compact_load_request
 from ..local_storage.diagnostics import local_store_stage_timing_scope
-from ..runtime_errors import fallback_error_code
+from ..runtime_errors import DataCorruptionError, fallback_error_code
 from ..tooling.mcp_client import sanitize_credentials
 from ..tooling.operation_verification import public_operation_verification
 from . import (
@@ -490,15 +491,30 @@ def _execute_gateway_conversation_turn(
     if system_slash_command_name(prompt):
         raise SystemCommandRoutingError("系统命令必须在控制入口处理，不能进入模型执行队列")
     _register_named_system_task(context, conversation, prompt)
-    if not request_history.append_gateway_conversation_message(
-        context.agent,
-        request,
-        conversation,
-        request_id=context.request_id,
-        role="user",
-        content=prompt,
-    ):
-        raise ConversationPersistenceError("当前消息无法可靠写入会话记录，请稍后重试")
+    try:
+        persisted = request_history.append_gateway_conversation_message(
+            context.agent,
+            request,
+            conversation,
+            request_id=context.request_id,
+            role="user",
+            content=prompt,
+            defer_index_pending=True,
+        )
+    except (OSError, sqlite3.Error, DataCorruptionError) as exc:
+        # 索引在正常推进时有专用准备中信号；真正的读写故障保持旧调用方可识别的会话错误。
+        # OSError 的完整文本可能包含个人文件路径，优先展示系统原因并在截取前脱敏。
+        reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+        summary = sanitize_credentials(reason)[:160] or type(exc).__name__
+        raise ConversationPersistenceError(
+            f"首次模型调用前写入会话历史失败（{type(exc).__name__}，{summary}）。"
+            "没有启动本轮模型或工具。请核对原请求的消息记录并修复存储后继续。"
+        ) from exc
+    if not persisted:
+        raise ConversationPersistenceError(
+            "首次模型调用前未确认会话消息写入，本轮模型和工具均未启动。"
+            "请核对原请求的会话记录及存储状态后继续。"
+        )
     reset_goal_progress_fuse(getattr(context.agent, "conversation_store", None), conversation.thread_id)
     notices = _publish_gateway_host_notices(context, conversation)
     from .im_task_routing import prepare_im_task_dispatch
@@ -642,6 +658,7 @@ def _register_named_system_task(
     store = getattr(context.agent, "conversation_store", None)
     if store is None or not conversation.thread_id:
         raise ConversationPersistenceError("命名任务当前无法登记，请稍后重试")
+    request_history.prepare_gateway_history_index(context.agent, context.request, conversation)
     try:
         link = prepare_named_audit(
             context.agent,
@@ -663,9 +680,55 @@ def _register_named_system_task(
     )
 
 
-# LLM: One Gateway request may cross several provider slices, but every overflow must advance the
-# same canonical Compact generation before retry. Full carried archives remain effect authority;
-# the same active request retains exact host rejection memory without inheriting approval grants.
+@dataclass
+class _GatewayCompactProgressCursor:
+    """只观察本请求工具账新增后缀；旧投影、重放和未知副作用不能给恢复计数续命。"""
+    archive_count: int = 0
+    boundary: tuple[str, ...] | None = None
+    attempt_id: str = ''
+
+    def advance(self, records, *, authority, request_id):
+        from ..conversation.compact_tool_identity import compact_tool_ref_key
+
+        attempt = str(authority.get('attempt_id') or '')
+        fresh_attempt = bool(attempt and attempt != self.attempt_id)
+        self.attempt_id = attempt
+        if not isinstance(records, (list, tuple)) or not records:
+            return False
+        prior_count = self.archive_count
+        stable_prefix = (not prior_count or
+            (len(records) >= prior_count and self.boundary is not None
+             and compact_tool_ref_key(records[prior_count - 1]) == self.boundary))
+        self.archive_count = len(records)
+        self.boundary = compact_tool_ref_key(records[-1])
+        if not stable_prefix or not fresh_attempt:
+            return False
+        run_id = str(authority.get('run_id') or '')
+        progressed = False
+        unsafe_outcome = False
+        for index in range(prior_count, len(records)):
+            record = records[index]
+            if not isinstance(record, dict):
+                continue
+            key = compact_tool_ref_key(record)
+            if key is None or key[:2] != (run_id, attempt) or not run_id:
+                continue
+            if (record.get('conversation_request_id') != request_id
+                    or record.get('request_id') not in (None, '', request_id)):
+                continue
+            if (record.get('effect_outcome') == 'unknown' or record.get('tool_operation_status') == 'unknown'):
+                unsafe_outcome = True
+            if (record.get('ok') is not True or record.get('handler_executed') is not True
+                    or record.get('tool_operation_replayed') is True
+                    or record.get('effect_outcome') in ('unknown', 'running')
+                    or record.get('tool_operation_status', 'succeeded') != 'succeeded'):
+                continue
+            progressed = True
+        return progressed and not unsafe_outcome
+
+
+# 同一Gateway请求可跨多个provider切片；恢复仍沿原Compact链与容量门，已收敛的临时视图若再次溢出立即停止。
+# 只限制连续无确认工具进展的恢复，不把健康任务的总切片数当失败；完整归档仍掌握副作用事实，原拒绝记忆保留，审批不继承。
 # 与后台共用携带 reducer；真实工具循环已按原身份释放 mailbox，这里只按释放ID排除插话并携带原IR。
 # 展示callback同步更新本turn局部值及当前宿主参数；新请求重置，失效None与已评估事实阻止额外决策。
 # 能力推荐的结构化观测另走 observer，只追加到本请求记录，不改展示回调的语义；实验对照记录由同一出口拆出另写。
@@ -698,7 +761,14 @@ def _run_gateway_turn_with_conversation_compact(
         run_params.capability_presentation = value
         run_params.capability_presentation_evaluated = True
 
-    for _attempt in range(8):
+    from ..conversation.compact_tool_identity import compact_tool_ref_key
+    from ..memory_archive.compact_tool_output_refs import CARRIED_RUNTIME_ONLY_FIELD
+
+    baseline = [row for row in carried_archive_tool_calls if not row.get(CARRIED_RUNTIME_ONLY_FIELD)]
+    progress = _GatewayCompactProgressCursor(len(baseline), compact_tool_ref_key(baseline[-1]) if baseline else None)
+    consecutive_no_progress = 0
+    last_trigger_source = ''
+    while consecutive_no_progress < 8:
         run_params = _gateway_run_params(
             _GatewayRunParamsRequest(
                 request,
@@ -745,6 +815,14 @@ def _run_gateway_turn_with_conversation_compact(
         _record_gateway_stage(context.stages, "run_ms", _run_started)
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != "context_overflow":
             return result, current
+        recovery = getattr(observer, 'compact_recovery', None) if observer is not None else None
+        if recovery is not None and getattr(recovery, 'degraded', False):
+            from ..conversation.compact_guard import local_compact_recovery_exhausted
+            raise local_compact_recovery_exhausted(
+                capacity=recovery.degraded_capacity, recovery_facts=recovery.degraded_recovery_facts)
+        made_progress = progress.advance(getattr(result, 'archive_tool_calls', None),
+            authority=request_binding.gateway_runtime_authority(context.request, context.request_id),
+            request_id=context.request_id)
         from ..conversation.compact_carry import native_compact_carry_from_result
 
         native_compact_carry = native_compact_carry_from_result(result)
@@ -759,6 +837,7 @@ def _run_gateway_turn_with_conversation_compact(
         )
         # 溢出结果的 runtime_source 就是结构化触发来源（preflight / provider_error / tool_context_overflow）。
         run_params.compact_trigger_source = str(getattr(result, "runtime_source", "") or "")
+        last_trigger_source = run_params.compact_trigger_source
         try:
             current = _gateway_compact_overflowing_turn(
                 context,
@@ -774,7 +853,15 @@ def _run_gateway_turn_with_conversation_compact(
                 logging.getLogger(__name__).warning("Preflight compact circuit open during overflow, proceeding with degrade_without_compact: %s", circuit_err)
                 return result, current
             raise
-    raise ConversationPersistenceError("当前会话压缩后仍超过模型上下文上限")
+        consecutive_no_progress = 0 if made_progress else consecutive_no_progress + 1
+    from ..conversation.compact_guard import ConversationCompactError
+
+    raise ConversationCompactError(
+        f"同一请求连续{consecutive_no_progress}次上下文恢复没有确认的新工具执行进展，仍无法安全继续；"
+        f"最后触发来源={last_trigger_source or 'unknown'}。原历史、已提交检查点与工具记录保留。"
+        "此前工具操作可能已产生副作用，不得原样重发或重放；先核对原请求与工具结果，再调整模型容量并继续原任务。",
+        code="COMPACT_RECOVERY_EXHAUSTED",
+    )
 
 
 # LLM: 有宿主时transcript或活动工具都只刷新来源，下一真实render/select才计量和CAS；无宿主不能粗估压活动归档。
@@ -825,7 +912,13 @@ def _gateway_compact_overflowing_turn(
     if refreshed.compact_generation > current.compact_generation:
         _publish_gateway_compact_boundary(context.on_chunk, refreshed.compact_generation)
         return refreshed
-    raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
+    from ..conversation.compact_guard import ConversationCompactError
+
+    raise ConversationCompactError(
+        "上下文恢复没有可提交的新摘要来源或推进的检查点；当前容量未获释放，原记录保留。"
+        "先核对原请求的已执行工具结果与压缩诊断，再调整模型容量继续原任务，不得原样重放。",
+        code="COMPACT_SOURCE_EMPTY",
+    )
 
 
 # LLM: A reclaimed Gateway request is the same active turn, not a new turn. Restore only exact
@@ -1042,7 +1135,11 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         if link is not None:
             attrs = {**(attrs or {}), "conversation_task_id": task_id}
     actor = _gateway_host_actor(context.agent, conversation, context.request_id)
-    from .request_space import REQUEST_SPACE_KEY, request_space_for_execution
+    from .request_space import (
+        REQUEST_SPACE_KEY,
+        gateway_memory_recall_scope,
+        request_space_for_execution,
+    )
 
     space = None
     if REQUEST_SPACE_KEY in request:
@@ -1096,6 +1193,8 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         task_attributes=attrs,
         host_channel_actor=actor,
         host_session_space=space,
+        memory_recall_scope=gateway_memory_recall_scope(context.agent, space,
+            channel_actor=actor, request_id=context.request_id),
         host_message_references=references,
         host_message_context=host_input,
         context_scope="conversation" if conversation.thread_id else "default",
@@ -1518,6 +1617,26 @@ def _apply_gateway_request_failure(agent, context, response, error):
     # （原因码 + 请求编号 + 已清洗的服务端说明）；投影键集合不变，只在文案后追加。
     response["user_error"] = provider_rejection_user_notice(
         response.get("user_error"), projection)
+    if isinstance(error, ConversationPersistenceError) and isinstance(
+        error.__cause__, (OSError, sqlite3.Error, DataCorruptionError)
+    ):
+        response["user_error"] = sanitize_credentials(str(error))
+    from .request_space import GatewayMemoryScopeError
+
+    if isinstance(error, GatewayMemoryScopeError):
+        response["user_error"] = str(error)
+        response["side_effect_state"] = error.side_effect_state
+    from ..conversation.compact_guard import ConversationCompactError
+    from ..runtime_errors import runtime_error_report
+
+    if isinstance(error, ConversationCompactError):
+        compact = runtime_error_report(error)
+        for field in ("compact_capacity", "compact_recovery"):
+            if field in compact:
+                response[field] = compact[field]
+        if "compact_recovery" in compact:
+            # 通配符文案只能兜未知错误，不能覆盖本次已经确认的预算、未提交证明及配置动作。
+            response["user_error"] = sanitize_credentials(compact["message"])
 
 
 
@@ -1581,8 +1700,10 @@ def _handle_gateway_request(
                                      thread_id_of=lambda: _gateway_turn_thread_id(agent, context, chunk_writer))
     failure: Exception | None = None
     uncertain = False
+    history_preparation_pending = False
     from ..conversation.agent_tool_approval import approval_retirement_request_observation
     from .io import gateway_request_fingerprint
+    from .request_errors import GatewayHistoryPreparationPending
 
     # 原body与catch共用只读原对象；core Params已恢复也不重挂，观察绝不授执行权。
     with approval_retirement_request_observation(agent, request_path, context["request"],
@@ -1593,6 +1714,9 @@ def _handle_gateway_request(
                 _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
         except Exception as exc:
             failure = exc
+            if type(exc) is GatewayHistoryPreparationPending and exc.progressed:
+                history_preparation_pending = True
+                raise
             with _measure_gateway_stage(stage_timings, "execution_error_ms"):
                 uncertain = _observe_gateway_execution_failure(agent, context, response, exc)
             if uncertain:
@@ -1613,7 +1737,7 @@ def _handle_gateway_request(
             # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
             # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
             # 留给重启/续跑的回合不收口：和进程消失一样，由恢复按死掉的 attempt 释放预留，续跑回合再认领。
-            if resume_marker is None and not uncertain:
+            if resume_marker is None and not uncertain and not history_preparation_pending:
                 with _measure_gateway_stage(stage_timings, "guidance_close_ms"):
                     _settle_pending_gateway_guidance(
                         agent, context["request_id"], failure, request_kind=context["kind"]

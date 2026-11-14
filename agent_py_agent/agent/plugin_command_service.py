@@ -24,16 +24,35 @@ def read_plugin_catalog(
     return PluginCommandCatalog(scope_ref)
 
 
-# LLM: 网络故障和未知状态只返回固定说明，不能泄露宿主异常路径、凭证，或降级到普通聊天执行。
-# 函数用途: 返回目录不可用的明确回执，调用方可以展示错误但不能自动重试业务。
-def plugin_catalog_unavailable() -> dict[str, object]:
+# 目录只读失败保留异常类型、结构化原因和恢复动作；未知异常正文不进入公开回执。
+def plugin_catalog_unavailable(error: Exception | None = None, *, phase: str = 'catalog_read') -> dict[str, object]:
+    """目录读取无执行副作用；仅暴露类型及结构化原因，不回显未知异常中的路径或密钥。"""
+    code = str(getattr(error, 'error_code', '') or 'PLUGIN_CATALOG_UNAVAILABLE')
+    reason = str(getattr(error, 'reason', '') or 'catalog_unavailable')
+    if reason == 'invalid_state':
+        code = 'PLUGIN_INSTALLATION_STATE_INVALID'
+    details = {'phase': phase, 'exception_type': type(error).__name__ if error else 'GatewayUnavailable',
+               'source_reason': reason}
+    if error is not None and error.__cause__ is not None:
+        details['cause_type'] = type(error.__cause__).__name__
+    if code == 'GATEWAY_WORKSPACE_INVALID':
+        explanation = str(error)
+        next_action = '用 /dir 切换到本人可访问的现存目录后重新执行原插件命令；普通用户不能使用家目录外路径。'
+    elif reason == 'invalid_state':
+        explanation = '插件安装登记表损坏或格式不合法，原记录未被覆盖。'
+        next_action = '请管理员检查本人用户目录内 data/plugins/installations.json 及其备份，修复后重新读取；不要删除有效安装记录。'
+    else:
+        explanation = f'插件目录在 {phase} 阶段不可读（{details["exception_type"]}）。'
+        next_action = '核对 Gateway 是否就绪及当前身份的插件目录读取权限，再用 /plugins list 重新查询；未提交安装或启停。'
     return {
         "kind": "plugin_command",
         "ok": False,
         "request_id": "",
-        "error_code": "PLUGIN_CATALOG_UNAVAILABLE",
-        "reason": "catalog_unavailable",
-        "message": "无法读取当前插件目录，请稍后重新查看。",
+        "error_code": code,
+        "reason": reason,
+        "state": "rejected", "effect_outcome": "not_started", "details": details,
+        "message": f'{code}：{explanation} 原因类型：{details["exception_type"]}。'
+                   f'未执行安装或启停。下一步：{next_action}',
     }
 
 

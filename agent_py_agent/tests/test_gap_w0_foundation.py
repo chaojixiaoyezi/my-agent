@@ -39,7 +39,10 @@ def isolated_home(tmp_path, monkeypatch):
 def test_slice_modules_preregistered_and_missing_slices_skip(monkeypatch):
     expected = tuple(_EXPECTED["slices"])
     assert v13.V13_SLICE_MODULES[-len(expected):] == expected
-    assert v13.V13_SLICE_MODULES[-len(expected) - 1].endswith("business_api_v13_sessions")
+    assert v13.V13_SLICE_MODULES[-len(expected) - 2:-len(expected)] == (
+        "agent_py_agent.agent.gateway_parts.business_api_v13_sessions",
+        "agent_py_agent.agent.gateway_parts.business_api_v13_session_space",
+    )
     actual_import = importlib.import_module
     seen = []
 

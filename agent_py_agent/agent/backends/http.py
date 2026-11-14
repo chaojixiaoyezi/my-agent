@@ -376,34 +376,45 @@ class HttpBackend(BaseBackend):
                 "Call my_agent_capability_probe exactly once with nonce "
                 f"{nonce}. Do not answer in prose."
             )
-            scope = current_probe_accounting()
-            call_id = _start_probe_call(scope, self, prompt)
-            if scope is None:
-                # LLM: 真实探测尝试发生但没有记账范围（测试直调或旧路径）：留结构化计数，
-                #   不静默；宿主绑定 scope 的探测不计数。
-                _count_unaccounted_probe_attempt()
-            try:
-                response = self.generate(
-                    prompt,
-                    tools=[probe_tool],
-                    tool_choice=ToolChoice.auto("native_capability_probe"),
-                    request_options=ProviderRequestOptions(is_probe=True),
-                )
-            except InterruptedError as exc:
-                _fail_probe_call(scope, call_id, exc)
-                raise
-            except (ProviderRecoverableError, ProviderConfigurationError) as exc:
-                _fail_probe_call(scope, call_id, exc)
-                # 保留供应商失败分类，让调用方处理配置、额度和网络，不能改成能力不足。
-                raise
-            except Exception as exc:
-                _fail_probe_call(scope, call_id, exc)
-                # 本地确定性异常(解析/配置错)重试无意义, 立即落 evidence。
-                code = str(getattr(exc, "error_code", "") or "").strip().upper()
-                suffix = f":{code}" if code else ""
-                evidence = f"live_probe_failed:{type(exc).__name__}{suffix}"
-                break
-            _finish_probe_call(scope, call_id, response)
+            from ..llm_scale.hot_path import global_llm_admission_slot
+            from .request_scope import provider_request_timeout
+
+            # 探针在协议准备阶段调用，不在普通generate的持槽区；仅真实运输领同一进程名额。
+            # 缓存/单飞仍归外层，等待不冒充供应商尝试，拿槽后重核原停止与剩余预算。
+            with global_llm_admission_slot(wait_timeout=provider_request_timeout(30)):
+                wait_interruptibly(0)
+                provider_request_timeout(30)
+                scope = current_probe_accounting()
+                call_id = _start_probe_call(scope, self, prompt)
+                if scope is None:
+                    # 未绑定账本的真实探测仍保留原诊断计数，排队失败不增加它。
+                    _count_unaccounted_probe_attempt()
+                try:
+                    response = self.generate(
+                        prompt,
+                        tools=[probe_tool],
+                        tool_choice=ToolChoice.auto("native_capability_probe"),
+                        request_options=ProviderRequestOptions(
+                            is_probe=True,
+                            thinking_disabled=getattr(scope, 'thinking_disabled', False),
+                            reasoning_effort=getattr(scope, 'reasoning_effort', ''),
+                        ),
+                    )
+                except InterruptedError as exc:
+                    _fail_probe_call(scope, call_id, exc)
+                    raise
+                except (ProviderRecoverableError, ProviderConfigurationError) as exc:
+                    _fail_probe_call(scope, call_id, exc)
+                    # 保留供应商失败分类，让调用方处理配置、额度和网络，不能改成能力不足。
+                    raise
+                except Exception as exc:
+                    _fail_probe_call(scope, call_id, exc)
+                    # 本地确定性异常(解析/配置错)重试无意义, 立即落 evidence。
+                    code = str(getattr(exc, "error_code", "") or "").strip().upper()
+                    suffix = f":{code}" if code else ""
+                    evidence = f"live_probe_failed:{type(exc).__name__}{suffix}"
+                    break
+                _finish_probe_call(scope, call_id, response)
             blocks = list(getattr(response, "tool_use_blocks", None) or ())
             supported = any(
                 isinstance(block, dict)

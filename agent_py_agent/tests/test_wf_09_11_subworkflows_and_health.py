@@ -699,3 +699,78 @@ def test_subworkflow_parallel_dag_siblings_no_deadlock_and_depth(tmp_path):
     persisted_top = engine.store.load_run(top_leaf_run.workflow_run_id)
     assert persisted_top.parent_workflow_run_id == ''
     assert persisted_top.subworkflow_depth == 0
+
+
+@pytest.mark.parametrize('current_scope,allowed', [('space_a', True), ('space_b', False), ('unassigned', False)])
+def test_pinned_child_uses_current_scope_and_preserves_old_execution(tmp_path, current_scope, allowed):
+    """旧版本创建时未分配不否定后来授权；旧授权也不能对抗当前移出范围。"""
+    from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+
+    _setup_script(tmp_path, 'pinned_scope_script', {'value': 7})
+    store = WorkflowStore(tmp_path)
+    child = WorkflowDefinition(_descriptor('pinned_scope_child'),
+        (WorkflowStepSpec('calc', '原版本计算', 'deterministic_script', script_id='pinned_scope_script'),))
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.workflows.business_scope import WorkflowScopeService
+    actor = SimpleNamespace(owner_id='local_owner')
+    service = WorkflowScopeService(tmp_path, owner_id='local_owner', authorize=lambda *args: True)
+    service.execute('workflows.create', {'definition': {'descriptor': {
+        'id': child.descriptor.id, 'kind': 'workflow', 'name': '固定原版本',
+        'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}},
+        'steps': [{'step_id': 'calc', 'name': '原版本计算', 'mode': 'deterministic_script',
+                   'script_id': 'pinned_scope_script'}]},
+        'scope': {'scope_mode': 'unassigned', 'space_ids': []}}, actor=actor,
+        idempotency_key='pinned-scope-create')
+    scope = (WorkflowScope('unassigned', (), 2) if current_scope == 'unassigned'
+             else WorkflowScope('spaces', (current_scope,), 2))
+    service.execute('workflows.scope.set', {'workflow_ref': 'pinned_scope_child',
+        'scope': {'scope_mode': scope.scope_mode, 'space_ids': list(scope.space_ids)}},
+        actor=actor, idempotency_key='pinned-scope-set', expected_revision=1)
+    live = store.get_workflow('pinned_scope_child')
+    store.save_workflow(replace(live, descriptor=replace(live.descriptor, summary='当前正文已编辑')))
+    parent = WorkflowDefinition(_descriptor('pinned_scope_parent'),
+        (WorkflowStepSpec('child', '固定旧版本', 'subworkflow',
+            subworkflow_ref='workflow:pinned_scope_child', config={'definition_version': 1}),))
+    context = BusinessExecutionContext('local_owner', 'space_a', None, 'parent-task', 1,
+        None, (), (), 'business-context.v1')
+    authorizations = []
+    engine = WorkflowEngine(tmp_path, owner_id='local_owner',
+        run_authorizer=lambda record, phase: authorizations.append((record.workflow_id, str(phase))))
+    run = engine.run_workflow(parent, business_context=context,
+        scope_snapshot=WorkflowScope('spaces', ('space_a',), 1).to_dict())
+    children = engine.store.list_runs(workflow_id='pinned_scope_child', limit=10)
+    if allowed:
+        assert run.status == 'succeeded', run.to_dict()
+        assert len(children) == 1 and children[0].scope_snapshot == scope.to_dict()
+        assert children[0].final_output == {'value': 7}
+        snapshot = engine.store.load_workflow_snapshot(children[0].workflow_run_id)
+        assert snapshot['descriptor']['summary'] != '当前正文已编辑'
+        assert ('pinned_scope_child', 'preflight') in authorizations
+        assert ('pinned_scope_child', 'calc') in authorizations
+    else:
+        assert run.steps[0].error_code == 'SUBWORKFLOW_SCOPE_DENIED'
+        assert children == []
+
+
+def test_pinned_child_still_requires_original_child_authorizer(tmp_path):
+    from agent_py_agent.agent.workflows.business_scope import WorkflowPolicyRefusal
+
+    _setup_script(tmp_path, 'review_child_script', {'value': 7})
+    store = WorkflowStore(tmp_path)
+    child = WorkflowDefinition(_descriptor('review_child'),
+        (WorkflowStepSpec('calc', '需原宿主审核', 'deterministic_script', script_id='review_child_script'),))
+    store.save_workflow(child)
+    parent = WorkflowDefinition(_descriptor('review_parent'),
+        (WorkflowStepSpec('child', '固定子流', 'subworkflow', subworkflow_ref='workflow:review_child',
+            config={'definition_version': 1}),))
+    checked = []
+    def authorize(record, phase):
+        checked.append((record.workflow_id, str(phase)))
+        if record.workflow_id == 'review_child':
+            raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_REQUIRED')
+    engine = WorkflowEngine(tmp_path, run_authorizer=authorize)
+    run = engine.run_workflow(parent)
+    assert ('review_child', 'preflight') in checked
+    assert run.steps[0].error_code == 'WORKFLOW_REVIEW_REQUIRED'
+    assert engine.store.list_runs(workflow_id='review_child', limit=10) == []

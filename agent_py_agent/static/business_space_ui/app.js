@@ -9,6 +9,30 @@
   const RECEIPT_FIELDS = ['request_id', 'operation_id', 'state', 'data', 'error', 'allowed_actions', 'warnings', 'effect_outcome'];
   const CONFIRMED_STATES = {200: 'completed', 202: 'accepted'};
   const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  function parseAssetReference(value) {
+    let ref = value;
+    if (typeof ref === 'string') {
+      try { ref = JSON.parse(ref); } catch { throw new Error('产物引用必须是 JSON 对象，复制上传回执中的 artifact_id 与 version_ref。'); }
+    }
+    if (!isRecord(ref) || !['artifact_id', 'version_ref'].every(key => typeof ref[key] === 'string' && ref[key].trim())
+        || Object.keys(ref).some(key => !['artifact_id', 'version_ref', 'content_sha256'].includes(key))
+        || (Object.hasOwn(ref, 'content_sha256') && !/^[a-fA-F0-9]{64}$/.test(ref.content_sha256)))
+      throw new Error('产物引用须包含非空 artifact_id、version_ref；可选 content_sha256 必须为64位哈希。请复制同一上传回执的准确版本，未提交登记。');
+    return {...ref};
+  }
+  function failureNotice(body, confirmed = false) {
+    // 仅展示封套机器字段，不回显服务端任意异常正文或秘密。
+    const machine = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : 'unknown';
+    const code = machine(body?.error?.code), effect = machine(body?.effect_outcome);
+    const next = code === 'ACTOR_REQUIRED' ? '请从已有本人会话打开工作台，再读取团队。'
+      : code === 'INVALID_SCHEMA' ? '请按字段说明核对参数类型与准确引用后重新提交。'
+      : ['RESOURCE_NOT_FOUND', 'REFERENCE_NOT_FOUND', 'BINDING_NOT_FOUND', 'ASSET_NOT_FOUND'].includes(code) ? '请重新读取当前空间的资源列表，复制准确引用后再查询。'
+      : code === 'REVISION_CONFLICT' ? '请重新读取该对象详情，核对当前 revision 后再提交。'
+      : ['CAPABILITY_DENIED', 'BUSINESS_ACCESS_DENIED'].includes(code) ? '请核对当前认证主体和空间授权，不要原样重试。'
+      : confirmed ? '请按此错误码核对参数或宿主状态，不要原样盲目重试。'
+      : '请核对原 request_id 的回执，勿新建请求重发。';
+    return `${confirmed ? '业务请求已拒绝' : '业务回执未确认'} ${code}；副作用 ${effect}；request_id ${machine(body?.request_id)}。${next}`;
+  }
   // 冻结回执封套是闭合对象且没有 ok 字段；缺字段、多字段或类型不符都不是可采信的回执。
   function receiptEnvelope(body) {
     if (!isRecord(body) || Object.keys(body).length !== RECEIPT_FIELDS.length
@@ -59,9 +83,9 @@
         return envelope;
       }
       if (!response.ok && (!envelope || ['none', 'not_started'].includes(envelope.effect_outcome)))
-        throw new BusinessError('业务请求被拒绝或尚未连接', response.status, body);
+        throw new BusinessError(failureNotice(body, true), response.status, body);
       // 结果未知、已提交但不可见、未完成或回执不可采信：保留原准备对象，不换 ID 重发。
-      throw new BusinessError('业务回执未确认；请核对原 request_id，勿新建重发', response.status, body);
+      throw new BusinessError(failureNotice(body), response.status, body);
     }
     call(action, params, options = {}) { return this.send(this.prepare(action, params, options), options.signal); }
     async uploadArtifact(file, spaceId, idempotencyKey, taskId) {
@@ -200,7 +224,7 @@
       materials: {
         listAssets: (spaceId, options = {}) => client.call('assets.list', {space_id: spaceId, ...options}),
         getAsset: (spaceId, assetId) => client.call('assets.get', {space_id: spaceId, asset_id: assetId}),
-        registerAsset: (spaceId, name, kind, artifactRef, extra = {}) => client.call('assets.register', {space_id: spaceId, name, kind, artifact_ref: artifactRef, ...extra}, {mutating: true}),
+        registerAsset: (spaceId, name, kind, artifactRef, extra = {}) => client.call('assets.register', {space_id: spaceId, name, kind, ...extra, artifact_ref: parseAssetReference(artifactRef)}, {mutating: true}),
         listVersions: (spaceId, assetId, options = {}) => client.call('assets.versions.list', {space_id: spaceId, asset_id: assetId, ...options}),
         uploadArtifact: (file, spaceId, key, taskId) => client.uploadArtifact(file, spaceId, key, taskId),
         readArtifact: (artifactId, versionRef, range) => client.readArtifact(artifactId, versionRef, range),
@@ -251,7 +275,7 @@
     };
   }
 
-  const exported = {BusinessClient, BusinessObservation, NDJSONDecoder, BusinessError, displayUnknown, createReferenceSurface};
+  const exported = {BusinessClient, BusinessObservation, NDJSONDecoder, BusinessError, displayUnknown, createReferenceSurface, parseAssetReference};
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   root.BusinessUI = exported;
   root.createReferenceSurface = createReferenceSurface;
@@ -391,7 +415,7 @@
   wire('asset-register', async () => {
     const name = $('asset-reg-name').value.trim();
     const kind = $('asset-reg-kind').value.trim() || 'document';
-    const artifactRef = $('asset-reg-artifact-ref').value.trim();
+    const artifactRef = parseAssetReference($('asset-reg-artifact-ref').value.trim());
     if (!name || !artifactRef) throw new Error('请提供资料名称与产物引用');
     show('asset-reg-result', await call('assets.register', {space_id: space(), name, kind, artifact_ref: artifactRef}, {mutating: true}));
   });

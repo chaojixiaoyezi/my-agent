@@ -13,12 +13,17 @@ from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import business_api as api
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.tests.test_mega_background_lifecycle_controls import ready_index
 
 
 # LLM: 使用真实注册、canonical线程和任务；不注入观察reader或替换cursor验证。
 # 函数用途: 为两条本地入口提供隔离的live Agent与101条规范任务。
 @pytest.fixture
 def live_agent(tmp_path, monkeypatch):
+    return _live_agent(tmp_path, monkeypatch, ready=True)
+
+
+def _live_agent(tmp_path, monkeypatch, *, ready):
     monkeypatch.setenv('MY_AGENT_HOME', str(tmp_path / 'home'))
     agent = SimpleAgent(AgentConfig(model_backend='echo', enable_tools=True,
         business_spaces_enabled=True, memory_path='memory.jsonl'), tmp_path / 'workspace')
@@ -28,7 +33,30 @@ def live_agent(tmp_path, monkeypatch):
     tasks = [store.session_tasks.create(SessionTaskDraft(threads[0].thread_id,
         threads[1].thread_id, f'canonical task {number}')) for number in range(101)]
     assert len({task.task_id for task in tasks}) == 101
+    # 此组核稳定快照的服务寿命；先让原有界冷回填追平，不能把跨批revision变化当缓存失效。
+    if ready:
+        ready_index(store)
     return agent, tasks
+
+
+@pytest.mark.parametrize('entrypoint', ['command', 'model_tool'])
+def test_cold_index_reports_partial_then_requires_fresh_snapshot(tmp_path, monkeypatch, entrypoint):
+    agent, tasks = _live_agent(tmp_path, monkeypatch, ready=False)
+    first = call_tasks(agent, entrypoint)
+    assert first['error'] is None and first['data']['coverage'] == 'partial', first
+    if first['data']['next_cursor']:
+        assert_rejected(call_tasks(agent, entrypoint, cursor=first['data']['next_cursor']))
+    # 回填不固定旧cursor；从真实入口请求新快照，不能把首次partial写成完整结果。
+    ready_index(agent.conversation_store)
+    result = call_tasks(agent, entrypoint, limit=100)
+    assert result['error'] is None and result['data']['coverage'] == 'partial', result
+    assert len(result['data']['items']) == 100 and result['data']['next_cursor']
+    last = call_tasks(agent, entrypoint, cursor=result['data']['next_cursor'], limit=100)
+    identifiers = [row['task_id'] for row in result['data']['items'] + last['data']['items']]
+    assert last['error'] is None and last['data']['next_cursor'] is None
+    assert last['data']['coverage'] == 'complete'
+    assert len(identifiers) == len(set(identifiers)) == 101
+    assert set(identifiers) == {task.task_id for task in tasks}
 
 
 # LLM: 直接调用生产命令入口或原Registry中已注册工具；不手工持有服务来绕过寿命缺陷。
@@ -267,7 +295,7 @@ def test_model_tool_uses_fresh_actor_and_current_canonical_authority(live_agent,
     assert denied.value.code == 'CAPABILITY_DENIED'
     agent.conversation_store.threads.update_atomic(source,
         lambda thread: replace(thread, channel_bindings=[]))
-    assert_rejected(call_tasks(agent, 'model_tool', cursor=second['data']['next_cursor']), 'CAPABILITY_DENIED')
+    assert_rejected(call_tasks(agent, 'model_tool', cursor=second['data']['next_cursor']), 'CHANNEL_ACTOR_SCOPE_MISMATCH')
     with pytest.raises(api.HostAPIError) as denied:
         issued_two.check('tasks.list', {})
     assert denied.value.code == 'CAPABILITY_DENIED'

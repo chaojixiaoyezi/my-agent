@@ -19,6 +19,10 @@ class _Objects:
         self.values[(bucket, key)] = Path(source).read_bytes()
         self.extra = dict(ExtraArgs)
 
+    def upload_fileobj(self, source, bucket: str, key: str, *, ExtraArgs: dict[str, str]) -> None:
+        self.values[(bucket, key)] = source.read()
+        self.extra = dict(ExtraArgs)
+
     def download_file(self, bucket: str, key: str, target: str) -> None:
         Path(target).write_bytes(self.values[(bucket, key)])
 

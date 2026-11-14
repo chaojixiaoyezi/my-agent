@@ -138,6 +138,18 @@ def _run_host(tmp_path, monkeypatch, host: str):
     # 构造后才缩窗口与输出上限：按同一公式重算后端的实际发送值，与生产中按该配置构造的后端一致。
     agent.backend.max_tokens = effective_max_output_tokens(agent.config)
     ids = _seed_history(agent.conversation_store, thread_id)
+    if host == "gateway":
+        from agent_py_agent.agent.gateway_parts.history_ledger import GatewayHistoryLedger
+
+        # 直接写canonical的夹具须先经原有界投影追平；此处不属于摘要驻留测量窗口。
+        ledger = GatewayHistoryLedger(agent.conversation_store)
+        for _ in range(128):
+            with ledger.connection() as connection:
+                ready = ledger.catch_up(connection, thread_id)
+            if ready:
+                break
+        else:
+            pytest.fail("Gateway history projection did not catch up within bounded fixture preparation")
     facts = _instrument(monkeypatch, host)
     gc.collect()
     tracemalloc.start()

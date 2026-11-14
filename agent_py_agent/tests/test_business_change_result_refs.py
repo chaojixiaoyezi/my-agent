@@ -1,8 +1,11 @@
 """变更观察经真实客户端保留原产物身份、版本和覆盖状态。"""
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
 from agent_py_agent.agent.conversation.session_task_report import TaskTurnOutcome, close_out_turn
 from agent_py_agent.cli.space_commands import BusinessClient
 from agent_py_agent.tests.test_mega_business_api_actions import (
@@ -14,10 +17,23 @@ from agent_py_agent.tests.test_mega_business_api_actions import native_request, 
 def change_source(native, *, legacy=False, count=1, metadata=None):
     services, task = observed_native_task(native)
     paths = [str(services.owner_home / ('长期项目' * 16) / f'report-{index}.md') for index in range(count)]
-    artifacts = [{'path': path, 'artifact_id': f'art_result_{index}', 'sha256': 'a' * 64, 'size_bytes': 1}
-                 for index, path in enumerate(paths)]
+    root = services.owner_home / 'runs' / task.task_id
+    root.mkdir(parents=True)
+    artifacts = []
+    if not legacy:
+        for index, path in enumerate(paths):
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b'A')
+            record = register_artifact(ArtifactRegistration(workspace_root=root, path=target, task_id=task.task_id,
+                artifact_id=f'art_result_{index}'))
+            artifacts.append(record.to_dict())
     turn = 'change-test-' + task.task_id
     services.host.conversation_store.session_tasks.bind_turn(task.task_id, turn_id=turn)
+    selected = services.host.conversation_store.session_tasks.require(task.task_id)
+    services.host.conversation_store.tasks.bind({'thread_id': selected.target_thread_id, 'task_id': task.task_id,
+        'task_path': str(root), 'goal': '投影用例'})
+    services.host.conversation_store.tasks.update_status({'task_id': task.task_id, 'status': 'completed'})
     result = close_out_turn(services.host, turn, TaskTurnOutcome(ok=True, summary='done',
         result_refs=tuple(paths), result_artifacts=() if legacy else tuple(artifacts)))
     assert result is not None and result.status == 'done'
@@ -42,7 +58,7 @@ def test_changes_resolve_long_unicode_result_paths_to_original_artifact_ids(back
     assert data['evidence_refs'] == detail['data']['result_refs'] == ['art_result_0']
     assert data['coverage'] == 'complete'
     assert data['changes'] == [{'target_ref': 'art_result_0', 'field': 'content_digest',
-                               'before': None, 'after': 'a' * 64}]
+                               'before': None, 'after': hashlib.sha256(b'A').hexdigest()}]
     assert paths[0] not in json.dumps(data, ensure_ascii=False)
     assert client.call('changes.get', {'task_id': task.task_id, 'candidate_ref': 'art_result_0'})['ok']
     invented = client.call('changes.get', {'task_id': task.task_id, 'candidate_ref': 'invented'})

@@ -323,7 +323,7 @@ def test_decisions_page_and_mismatch_filter(boundary):
                             ({**call.params, 'cursor': 'invalid-cursor'}, 'analyst')):
         with pytest.raises(BusinessError) as error:
             replay.decisions(replace(call, params=params, subject_id=subject))
-        assert _error_code(error.value)[:2] == ('CURSOR_EXPIRED', 503)
+        assert _error_code(error.value)[:2] == ('CURSOR_EXPIRED', 410)
 
 
 # LLM: 单项不存在、其它 owner 与实时撤权须分别保留其边界错误。
@@ -434,7 +434,7 @@ def test_list_and_get(boundary):
     assert replay.list_evaluations(replace(call, params={'state': 'completed'}))['items'] == []
     with pytest.raises(BusinessError) as error:
         replay.list_evaluations(replace(call, params={**call.params, 'state': 'running', 'cursor': page['next_cursor']}))
-    assert _error_code(error.value)[:2] == ('CURSOR_EXPIRED', 503)
+    assert _error_code(error.value)[:2] == ('CURSOR_EXPIRED', 410)
 
 
 # LLM: 初次回执固定标签；后续反馈或样本删除不能改变同键派工输入。

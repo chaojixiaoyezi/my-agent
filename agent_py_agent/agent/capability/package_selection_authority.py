@@ -9,19 +9,13 @@ from dataclasses import dataclass, field
 from ..agent_core.model.call_runtime import max_output_tokens, model_name
 from ..agent_core.model.context_window import resolve_model_context_window_tokens
 from ..agent_core.tool_loop.recovery import runtime_run_scope
-from ..agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
 from ..common.cancellation import ToolCancelled
-from ..path_access_policy import effective_owner_scope_root
 from ..runtime_context import current_subagent_run_id
 from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
     ToolOperationAuthorityRequest,
 )
 from ..runtime_db.operation_store_selector import select_operation_store
-from ..tooling.action_policy import ActionPolicy, ActionPolicyRequest
-from ..tooling.registry import _execution_workspace_roots
-from ..tooling.registry_workspace import effective_registry_cwd
-from ..tooling.runtime_contracts import ToolCall
 
 
 # LLM: 会话链接和执行权分别冻结，后者复用原 runtime_run_scope；锁内 check 不回读 TaskStore，事务顺序是活动回合 T 后任务锁。
@@ -101,25 +95,14 @@ class PackageSelectionAuthority:
 # LLM: 评估值只送原 ActionPolicy，不是模型调用，不进入 history/operation/handler；ask 与 deny 均不给宿主自动读取权。
 # 函数用途: 用原工具的 schema、运行边界、owner 模式和守卫检查即将读取的准确入口参数。
 def package_entry_policy(agent: object, params: object, tools: object, arguments: dict, *, claim_id: str):
-    registry = agent.tools
-    runtime = tools.runtime("skill_search")
-    if runtime is None:
-        raise ValueError("CAPABILITY_SELECTION_READ_UNAVAILABLE")
-    call = ToolCall(
-        call_id=f"host-read-policy:{claim_id}", tool_name="skill_search", arguments=arguments,
-        source_protocol="native", schema_hash=runtime.model_spec.schema_hash,
-        run_id=params.run_id, turn_id=params.conversation_turn_id or params.request_id, attempt_id=params.attempt_id,
-    )
-    boundary = write_boundary_with_runtime_ledger(agent, params)
-    root = effective_registry_cwd(registry.workspace_root, boundary)
-    mode = registry.approval_mode_reader() if registry.approval_mode_reader else "ask"
-    return ActionPolicy().decide(ActionPolicyRequest(
-        call=call, runtime_snapshot=tools, workspace_root=root,
-        workspace_roots=_execution_workspace_roots(root, registry.workspace_roots, boundary),
-        path_access_mode=registry.path_access_mode, path_dangerous_roots=tuple(registry.path_dangerous_roots),
-        owner_scope_root=effective_owner_scope_root(write_boundary=boundary, registry_scope=registry.owner_scope_root),
-        write_boundary=boundary, runtime_guard_policy=registry.runtime_guard_policy, approval_mode=mode,
-    ))
+    from ..agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+    from ..tooling.host_read_policy import host_tool_entry_policy
+
+    if tools.runtime('skill_search') is None:
+        raise ValueError('CAPABILITY_SELECTION_READ_UNAVAILABLE')
+    return host_tool_entry_policy(agent, params, tools, 'skill_search', arguments, claim_id=claim_id,
+        boundary=write_boundary_with_runtime_ledger(agent, params))
+
 
 
 # LLM: 摘要仅观察准备时实际绑定的公开生成字段，不充当 profile/凭据版本或模型采用权；原辅助账仍记录实际调用。

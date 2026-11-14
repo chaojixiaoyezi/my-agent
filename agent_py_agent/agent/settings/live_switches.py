@@ -54,10 +54,11 @@ LIVE_SWITCH_KEYS = frozenset({
     "side_questions_enabled", "skill_transfers_enabled", "stream_enabled", "subagent_activity_notices_enabled",
     "subagent_failure_auto_split_enabled", "subagent_input_media_enabled",
     "subagent_stream_activity_projection_enabled", "subagent_takeover_hint_enabled",
-    "target_scope_policy_enabled", "task_progress_closeout_guidance_enabled", "tool_catalog_include_examples",
+    "target_scope_policy_enabled", "task_progress_closeout_guidance_enabled", "technical_cutoff_continuation_enabled",
+    "tool_catalog_include_examples", "tool_wait_input_reply_enabled",
     "tool_discovery_cache_pin_enabled",
     "tool_output_externalize_on_low_headroom", "tool_program_enabled", "tool_vector_search_enabled",
-    "tui_follow_gateway_upgrade", "tui_mouse_capture_default", "web_terminal_enabled",
+    "tui_follow_gateway_upgrade", "tui_mouse_capture_default", "web_terminal_enabled", "workflow_auto_dispatch_reviewers",
 }) | DEPLOY_LIVE_SWITCH_KEYS
 
 _AUTH_KEYS = frozenset({"auth_enabled", "gateway_per_user_owner_scoping", "admin_channel_identity_enabled",

@@ -209,6 +209,43 @@ def test_validator_distinguishes_missing_and_type_errors() -> None:
     assert wrong.primary_error_code == "TOOL_PARAMETER_TYPE_INVALID"
 
 
+@pytest.mark.parametrize('fields, keyword, actual_type', [({'space_ids': ''}, 'type', 'string'), ({}, 'required', 'missing')])
+def test_restore_scope_diagnostic_reports_selected_nested_field(fields, keyword, actual_type):
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+    from agent_py_agent.agent.tooling.executor import _render_validation_issues
+
+    spec = business_action_spec('workflows.restore').native_request_schema
+    request = {'action': 'workflows.restore', 'request_id': 'scope-issue-request', 'expected_revision': 2,
+               'idempotency_key': 'scope-issue-original', 'params': {'workflow_ref': 'test-flow',
+               'scope': {'scope_mode': 'owner_global', **fields}}}
+    issues = validate_tool_input(request, spec).issues
+    assert [(i.path, i.keyword, i.actual_type) for i in issues] == [('$.params.scope.space_ids', keyword, actual_type)]
+    assert 'JSON 空数组 []' in _render_validation_issues([i.to_dict() for i in issues])
+    request['params']['scope']['space_ids'] = []
+    assert validate_tool_input(request, spec).ok
+
+
+def test_composed_diagnostic_does_not_choose_ambiguous_or_unmatched_selector():
+    branch = {'type': 'object', 'properties': {'kind': {'const': 'read'}, 'value': {'type': 'array'}},
+              'required': ['kind', 'value']}
+    schema = {'$defs': {'first': branch}, 'oneOf': [{'$ref': '#/$defs/first'}, branch]}
+    for value in ({'kind': 'read', 'value': []}, {'kind': 'read', 'value': 'private-sentinel'},
+                  {'kind': 'private-sentinel', 'value': []}):
+        issues = validate_tool_input(value, schema).issues
+        assert [(i.path, i.keyword) for i in issues] == [('$', 'oneOf')]
+        assert 'private-sentinel' not in str(issues)
+
+
+@pytest.mark.parametrize("properties", [None, []])
+def test_union_diagnostic_handles_a_branch_without_a_property_mapping(properties) -> None:
+    schema = {"oneOf": [
+        {"type": "object", "properties": properties, "required": ["item"]},
+        {"type": "string"},
+    ]}
+    issues = validate_tool_input({}, schema).issues
+    assert [(issue.path, issue.keyword) for issue in issues] == [("$", "oneOf")]
+
+
 def test_exclusive_argument_group_declaration_is_canonical_and_validated() -> None:
     schema = {
         "type": "object",
@@ -404,3 +441,22 @@ def test_local_reference_alias_chain_is_fully_resolved() -> None:
     assert normalized.value == {"count": 2}
     assert validate_tool_input(normalized.value, canonical).ok is True
     assert validate_tool_input({"count": 1}, canonical).ok is False
+
+
+def test_local_ref_visibility_preserves_cycles_siblings_and_independent_fields():
+    from agent_py_agent.agent.tooling.input_schema import inline_local_schema_refs
+
+    root = {'$defs': {'Node': {'type': 'object', 'additionalProperties': False,
+        'properties': {'children': {'type': 'array', 'items': {'$ref': '#/$defs/Node'}}}}}}
+    value = {'left': {'$ref': '#/$defs/Node', 'description': '左'},
+        'right': {'$ref': '#/$defs/Node', 'description': '右'}}
+    result = inline_local_schema_refs(root, value)
+    for side in ('left', 'right'):
+        assert result[side]['type'] == 'object'
+        assert result[side]['additionalProperties'] is False
+        assert result[side]['properties']['children']['items'] == {'$ref': '#/$defs/Node'}
+    assert result['left']['description'] == '左' and result['right']['description'] == '右'
+    result['left']['properties']['children']['type'] = 'string'
+    assert result['right']['properties']['children']['type'] == 'array'
+    assert value['left'] == {'$ref': '#/$defs/Node', 'description': '左'}
+    assert root['$defs']['Node']['properties']['children']['type'] == 'array'

@@ -134,7 +134,7 @@ def test_physical_empty_response_cannot_declare_internal_success():
 
 def test_attachment_obligation_cannot_be_cancelled_and_internal_result_survives(monkeypatch):
     params = _params()
-    monkeypatch.setattr(receipt, '_has_pending_delivery_artifacts', lambda _params: True)
+    monkeypatch.setattr(receipt, '_has_pending_delivery_artifacts', lambda _params, *, agent=None: True)
     response, _ = _response(params, _body('internal_only', ''))
     action, final = receipt.prepare_background_public_receipt(params, response)
     assert action == 'finish' and final.runtime_reason == 'BACKGROUND_RECEIPT_PUBLIC_OBLIGATION'

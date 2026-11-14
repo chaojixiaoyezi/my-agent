@@ -144,7 +144,12 @@ def native_cancellation_case(tmp_path, *, controller=False, request_timeout=0):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "native-home"),
         business_spaces_enabled=True, enable_tools=True, request_timeout=request_timeout, prompt_files=[]), tmp_path / "workspace")
     store, owner = agent.conversation_store, str(agent.home_paths.owner_id)
-    source = store.threads.create(owner_id=owner, canonical_user_id="local-agent")
+    # 与本地真实入口一致保留原通道绑定，后台工具才能核验派发来源。
+    source = store.threads.get_or_create({
+        "owner_id": owner, "owner_home": str(agent.home_paths.owner_home_dir),
+        "canonical_user_id": "local-agent", "channel": "local",
+        "channel_conversation_id": "local", "channel_user_id": "local-agent",
+    })
     actor = HostChannelActor(owner, source.thread_id, "native-cancel", "local", "local", "local-agent")
     context = bind_business_context(agent, authorize=lambda action, facts: True, actor=actor)
     services = BusinessServices(agent)
@@ -196,6 +201,20 @@ def native_cancellation_case(tmp_path, *, controller=False, request_timeout=0):
     return agent, backend, scheduler, call, task_id, view
 
 
+def native_task_work_file(agent, task_id, name):
+    """按原任务出生时间与已配置模板核对工作文件，不假定写在 owner 根。"""
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.user_space.home_layout import task_workspace_path
+
+    task = agent.conversation_store.session_tasks.require(task_id)
+    root = task_workspace_path(agent.home_paths.owner_home_dir,
+        agent.config.workspace_task_path_template,
+        date=datetime.fromtimestamp(task.created_at, timezone.utc).date().isoformat(),
+        task_name=task.task_id)
+    return root / "work" / name
+
+
 @pytest.mark.parametrize("controller,execution_only", [(False, False), (True, False), (False, True), (True, True)])
 def test_native_cancel_stops_original_authority_and_converges_after_real_exit(tmp_path, controller, execution_only):
     from concurrent.futures import ThreadPoolExecutor
@@ -206,8 +225,8 @@ def test_native_cancel_stops_original_authority_and_converges_after_real_exit(tm
     future = pool.submit(scheduler.tick)
     try:
         assert backend.waiting.wait(15), "native Scheduler did not reach second model call"
-        original_result = agent.home_paths.owner_home_dir / "before-cancel-result.txt"
-        forbidden_result = agent.home_paths.owner_home_dir / "after-cancel-result.txt"
+        original_result = native_task_work_file(agent, task_id, "before-cancel-result.txt")
+        forbidden_result = native_task_work_file(agent, task_id, "after-cancel-result.txt")
         assert original_result.read_text() == "harmless original result"
         assert not forbidden_result.exists()
         task = store.session_tasks.require(task_id)
@@ -480,7 +499,7 @@ def test_native_wall_guard_keeps_unobserved_physical_worker_exit_pending(tmp_pat
                 backend.waiting_worker.join(timeout=15)
                 assert not backend.waiting_worker.is_alive()
             future.result(timeout=15)
-    assert not (agent.home_paths.owner_home_dir / "after-cancel-result.txt").exists()
+    assert not (native_task_work_file(agent, task_id, "after-cancel-result.txt")).exists()
     assert call("tasks.cancel", {"task_id": task_id, "include_descendants": True})["state"] == "completed"
 
 
@@ -523,7 +542,7 @@ def test_native_cancellation_leaves_unrelated_active_execution_untouched(tmp_pat
             agent.backend = unrelated_backend
             unrelated_future = pool.submit(scheduler.tick)
             assert unrelated_backend.waiting.wait(15)
-            assert (agent.home_paths.owner_home_dir / "unrelated-active-result.txt").read_text() == "unrelated successful tool"
+            assert (native_task_work_file(agent, unrelated_id, "unrelated-active-result.txt")).read_text() == "unrelated successful tool"
             unrelated_task = store.session_tasks.require(unrelated_id)
             unrelated_claim = store.claims.load(unrelated_task.target_thread_id)
             unrelated_authority = unrelated_claim["runtime_authority"]
@@ -548,7 +567,7 @@ def test_native_cancellation_leaves_unrelated_active_execution_untouched(tmp_pat
             assert unrelated_backend.finished.is_set()
             assert store.session_tasks.require(unrelated_id).status == "done"
             assert repo.get_agent_run(unrelated_authority["agent_run_id"])["status"] == "done"
-            assert not (agent.home_paths.owner_home_dir / "after-cancel-result.txt").exists()
+            assert not (native_task_work_file(agent, task_id, "after-cancel-result.txt")).exists()
         finally:
             original_backend.release.set()
             unrelated_backend.release.set()

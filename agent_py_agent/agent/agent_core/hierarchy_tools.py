@@ -73,33 +73,37 @@ class ScheduleLifecyclePayload:
 def _check_descendant_forbidden(agent: object, *, tool_name: str = "create_subagents") -> ToolHandlerOutcome | None:
     from .orchestration.delegation_constraints import extract_delegation_constraints
 
-    parent_run_id = current_subagent_run_id(agent)
-    manager = getattr(agent, "subagents", None)
-    parent_task = None
-    if manager is not None and parent_run_id:
-        try:
-            parent_task = manager.load(parent_run_id)
-        except Exception:
-            parent_task = None
-
     constraints = extract_delegation_constraints(None, agent=agent)
     if constraints is not None:
-        depth = getattr(parent_task, "depth", 0) if parent_task is not None else 0
-        depth_exceeded = (
-            constraints.max_descendant_depth is not None
-            and (depth + 1) > constraints.max_descendant_depth
-        )
+        # 该字段是父交给本代理的剩余代数，创建时已逐代递减；不能再扣绝对树深度。
+        depth_exceeded = constraints.max_descendant_depth == 0
         if (
             not constraints.allow_descendants
             or constraints.max_cumulative_children == 0
             or depth_exceeded
             or "spawn_children" in constraints.prohibited_actions
         ):
+            reasons = []
+            if not constraints.allow_descendants:
+                reasons.append("allow_descendants=false")
+            if constraints.max_cumulative_children == 0:
+                reasons.append("max_cumulative_children=0")
+            if depth_exceeded:
+                reasons.append("max_descendant_depth=0 (remaining generations exhausted)")
+            if "spawn_children" in constraints.prohibited_actions:
+                reasons.append("prohibited_actions contains spawn_children")
             payload = {
                 "ok": False,
                 "error_code": "SUBAGENT_DESCENDANTS_FORBIDDEN",
-                "error": "当前子代理策略禁止创建后代（allow_descendants=False, max_cumulative_children=0 或深度超限）；本批没有创建任何子代理。",
+                "error": "当前代理禁止创建后代：" + "; ".join(reasons) + "；本批没有创建任何子代理。",
+                "reasons": reasons,
+                "constraints": {
+                    "allow_descendants": constraints.allow_descendants,
+                    "max_cumulative_children": constraints.max_cumulative_children,
+                    "remaining_descendant_depth": constraints.max_descendant_depth,
+                },
                 "effect_outcome": "not_started",
+                "how_to_fix": "在当前代理内完成任务；不得重试同一派工或自行扩大原委托约束。若需要额外层级，请由有权父级按原合同重新派工。",
             }
             return ToolHandlerOutcome(
                 tool_name,

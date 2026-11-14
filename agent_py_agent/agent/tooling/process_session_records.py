@@ -40,6 +40,12 @@ def validate_process_record(record: object) -> dict[str, object]:
     payload = dict(record)
     validate_session_id(payload.get("session_id"))
     _validate_v2_scope(payload)
+    if payload.get('exact_read_scope') is not None:
+        from .process_scope import validate_exact_process_read_scope
+        payload['exact_read_scope'] = validate_exact_process_read_scope(payload['exact_read_scope'])
+        if (payload['schema'] != PROCESS_SESSION_SCHEMA or payload.get('activation_scope') is not None
+                or not all(payload['execution_scope'].values())):
+            raise ValueError('managed process exact read scope requires full task identity')
     _validate_activation_scope(payload)
     if schema == PROCESS_SESSION_SCHEMA:
         if type(payload.get("retain_until_consumed")) is not bool:
@@ -292,6 +298,7 @@ def merge_process_record(
 # 函数用途: 核对各托管版本的不可变字段与实例绑定，拒绝句柄换代或提前解除证据保留。
 def _assert_v2_authority(existing: dict[str, object], incoming: dict[str, object]) -> None:
     keys = (
+        "exact_read_scope",
         "retain_until_consumed",
         "execution_scope",
         "activation_scope",

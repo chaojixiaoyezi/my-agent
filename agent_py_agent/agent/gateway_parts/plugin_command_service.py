@@ -42,7 +42,10 @@ def plugin_http_response(handler, server, body: dict, *, text: str | None = None
     try:
         if server is None or server.agent is None:
             return plugin_catalog_unavailable()
-        manager = _management(handler, server, body)
+        try:
+            manager = _management(handler, server, body)
+        except Exception as error:
+            return {**plugin_catalog_unavailable(error, phase='scope_resolution'), 'request_id': request_id}
         if text is None:
             return {"ok": True, "catalog": manager.catalog().to_payload()}
         revision = body.get("catalog_revision", "")
@@ -53,8 +56,16 @@ def plugin_http_response(handler, server, body: dict, *, text: str | None = None
         with host_grant_selection(body.get("host_api_selection")):
             result = manager.command(text, revision=revision, request_id=request_id)
         return _log_rejection(result, text, request_id)
-    except Exception:  # noqa: BLE001 回包失败不能推断已接受命令未执行，也不能泄露私有路径
-        return plugin_catalog_unavailable() if text is None else plugin_command_unknown(request_id)
+    except Exception as error:  # noqa: BLE001 命令提交后仍保留未知，目录只读故障保留具体结构原因。
+        return _plugin_failure(error, text, request_id)
+
+
+def _plugin_failure(error: Exception, text: str | None, request_id: str) -> dict:
+    """目录/静态查询无执行体；写命令或插件业务调用的异常仍保持原请求待核对。"""
+    if text is None or _action_name(text) in {'list', 'info', 'help'}:
+        return {**plugin_catalog_unavailable(error, phase='catalog_read' if text is None else 'plugin_read_command'),
+                'request_id': request_id}
+    return plugin_command_unknown(request_id)
 
 
 # LLM: 非成功回执的错误码同时保留在结构字段和纯文本；原 rejected 回执已由管理层带码，不重复追加。
@@ -144,8 +155,14 @@ def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManage
     context = replace(context, live_registry=getattr(loaded, "tools", None),
                       event_hub=getattr(scope, "event_hub", None))
     if scope.workspace is not None:
+        from ..user_space.approval_mode import permission_config
+
+        effective = permission_config(base.config, home)
         narrow_host = SimpleNamespace(
-            config=SimpleNamespace(my_agent_owner_provider=owner.identity.provider),
+            config=SimpleNamespace(my_agent_owner_provider=owner.identity.provider,
+                                   my_agent_owner_kind=owner.identity.owner_kind,
+                                   access_mode=effective.access_mode),
+            home_paths=home,
             tools=SimpleNamespace(owner_scope_root=str(context.path_policy.owner_scope_root or "")),
         )
         cwd, _roots = gateway_request_workspace_scope(narrow_host, {"workspace": scope.workspace})
@@ -191,6 +208,8 @@ def handle_client_plugins(handler, server) -> None:
             raise ValueError("请求操作无效")
         if "interactive" in body and type(body["interactive"]) is not bool:
             raise ValueError("交互能力必须是布尔值")
+        if "stream" in body and type(body["stream"]) is not bool:
+            raise ValueError("流式运输能力必须是布尔值")
         text = body.get("command") if body["operation"] == "command" else None
         if body["operation"] == "command" and (
             not isinstance(text, str) or plugin_namespace(text) is None
@@ -206,17 +225,17 @@ def handle_client_plugins(handler, server) -> None:
             },
         )
         return
-    if text is not None and body.get("interactive") is True:
+    if text is not None and (body.get("interactive") is True or body.get("stream") is True):
         _interactive_command(handler, server, body, text)
         return
     result = plugin_http_response(handler, server, body, text=text)
     handler._send_json(
-        503 if result.get("error_code") == "PLUGIN_CATALOG_UNAVAILABLE" else 200, result
+        503 if text is None and not result.get('ok') else 200, result
     )
 
 
 # LLM: 认证后的 manager 和 server.paths 是唯一身份与地址来源；错误不暴露私有配置，HTTP 不能指定审批路径。
-# 函数用途: 为一次本机命令连接原审批运输，仍由原服务完成授权与执行。
+# 函数用途: 为一次本机命令连接持续运输；只有显式交互才传原审批消费者，不改变授权。
 def _interactive_command(handler, server, body: dict, text: str) -> None:
     from ..auth.middleware import _handler_peer_ip, _is_loopback_peer
     from ..common.opaque_id import validate_opaque_id
@@ -233,9 +252,9 @@ def _interactive_command(handler, server, body: dict, text: str) -> None:
             raise ValueError("目录版本必须是字符串")
         manager = _management(handler, server, body)
         paths = server.paths
-    except Exception:  # noqa: BLE001 准备失败不能暴露路径、认证详情或创建旁路执行
-        handler._send_json(400, {"ok": False, "error_code": "INVALID_COMMAND_ARGUMENTS",
-                                 "message": "插件交互请求或连接无效。"})
+    except Exception as error:  # noqa: BLE001 尚未提交命令，保留准备失败原因且不创建旁路执行。
+        handler._send_json(400, {**plugin_catalog_unavailable(error, phase='command_preparation'),
+                                 'request_id': request_id})
         return
 
     # LLM: 在执行线程承运显式宿主授权选择，仍由原服务确认；异常保持原请求可查，不重试或另建执行。
@@ -248,7 +267,8 @@ def _interactive_command(handler, server, body: dict, text: str) -> None:
                 return _log_rejection(manager.command(text, revision=revision, request_id=request_id,
                                                       request_permission=request_permission,
                                                       cancellation_token=cancellation_token), text, request_id)
-        except Exception:  # noqa: BLE001 已执行与清理状态只由原账本裁决
-            return plugin_command_unknown(request_id)
+        except Exception as error:  # noqa: BLE001 静态查询无副作用，写命令仍由原账本核对。
+            return _plugin_failure(error, text, request_id)
 
-    serve_command_stream(handler, paths, manager.context.owner.identity, request_id, execute)
+    serve_command_stream(handler, paths, manager.context.owner.identity, request_id, execute,
+                         interactive=body.get("interactive") is True)

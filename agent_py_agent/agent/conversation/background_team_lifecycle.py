@@ -64,6 +64,18 @@ def session_task_pages(task_store, *, target_thread_id=None):
 
 # LLM: 终态历史逐页释放，只保留真实未结任务；分页失效仍显式保留未知责任。
 # 函数用途: 汇总身份在原任务、执行、唤醒和交付存储里的当前义务。
+def bound_subscription_controller(state, row, owner_id):
+    """仅从同一catalog当前快照的正式来源绑定解析控制器。"""
+    binding = state.get('bindings', {}).get(row.get('source_ref'))
+    if (row.get('owner_id') == owner_id and isinstance(binding, dict)
+            and binding.get('owner_id') == owner_id and binding.get('state') == 'bound'
+            and binding.get('default_space_id') == row.get('space_id')
+            and row.get('space_id') in binding.get('space_ids', [])
+            and binding.get('controller', {}).get('mode') == 'agent'):
+        return binding['controller'].get('agent_id')
+    return None
+
+
 def identity_outstanding(host, thread) -> tuple[list[str], list]:
     """原存储的当前义务；partial/坏账/未知副作用都阻止retired，不拿PID/TTL猜已结束。"""
     store = host.conversation_store
@@ -167,23 +179,30 @@ def identity_outstanding(host, thread) -> tuple[list[str], list]:
             for sub_id, sub in subs.items():
                 if isinstance(sub, dict) and sub.get("state") == "active":
                     target_id = sub.get("agent_id") or sub.get("target_agent_id") or sub.get("thread_id")
+                    # 正式订阅只保存source_ref；复用已读catalog的精确绑定，不扫描线程或历史补猜控制器。
+                    target_id = bound_subscription_controller(cstate, sub, thread.owner_id) or target_id
                     if target_id == thread.thread_id:
                         refs.append(f"subscription:{sub_id}")
         except Exception:
             refs.append("subscriptions:unreadable")
-    # 待处理人工审批核验：读口只接受 root_task_id（没有 thread_id 参数），预算零会直接跳过整轮扫描；
-    # 未扫完或读失败都必须留成"未结义务"，不能当作"没有审批"而放行退休。
+    # 根任务来自同线程已读取的active TaskLink，不把thread_id当root，也不扫描历史补找。
+    # 各根共用一次50ms/128条预算；不完整仍保留未知义务，不签空。
     try:
-        from .agent_tool_approval import list_pending_agent_tool_approvals
-        approval_progress: dict = {}
-        pending_appr = list_pending_agent_tool_approvals(
-            host, root_task_id=thread.thread_id, deadline=time.monotonic() + 0.05,
-            scan_progress=approval_progress)
-        for appr in pending_appr:
-            appr_id = getattr(appr, "id", None) or (appr.get("approval_id") if isinstance(appr, dict) else str(appr))
-            refs.append(f"approval:{appr_id}")
-        if not approval_progress.get("complete", False):
-            refs.append("approvals:incomplete")
+        from .agent_tool_approval import list_pending_agent_tool_approvals_report
+        deadline, budget = time.monotonic() + 0.05, 128
+        roots = {link.task_id for link in links if link.thread_id == thread.thread_id}
+        for root in sorted(roots):
+            if time.monotonic() >= deadline or budget <= 0:
+                refs.append("approvals:incomplete")
+                break
+            progress: dict = {}
+            pending, complete = list_pending_agent_tool_approvals_report(
+                host, root_task_id=root, deadline=deadline, scan_limit=budget, scan_progress=progress)
+            budget -= max(int(progress.get("entries", 0)), len(pending))
+            for approval in pending:
+                refs.append(f"approval:{approval['request']['permission_id']}")
+            if not complete:
+                refs.append("approvals:incomplete")
     except Exception:
         refs.append("approvals:unreadable")
     # 委派任务未投递的结果回报与未结唤醒核验

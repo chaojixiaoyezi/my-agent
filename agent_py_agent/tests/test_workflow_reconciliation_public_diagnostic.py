@@ -19,7 +19,7 @@ from agent_py_agent.tests.test_acceptance_workflow_native_ports import (  # noqa
 )
 
 
-@pytest.mark.parametrize('resolution', ['missing', 'unavailable', 'untrusted', 'trusted'])
+@pytest.mark.parametrize('resolution', ['missing', 'unavailable', 'untrusted', 'trusted', 'foreign_task', 'foreign_version'])
 def test_native_http_unknown_write_requires_host_verification_without_reexecution(wire, tmp_path, resolution):  # noqa: F811
     agent, client = wire
     output = tmp_path / 'target.txt'
@@ -35,7 +35,7 @@ def test_native_http_unknown_write_requires_host_verification_without_reexecutio
     counter.execute = execute
     agent.tools.register(counter)
     store = WorkflowRunStore(agent.home_paths.owner_home_dir)
-    if resolution in ('trusted', 'untrusted'):
+    if resolution in ('trusted', 'untrusted', 'foreign_task', 'foreign_version'):
         def identity(record, step):
             return {'owner_id': record.owner_id, 'workflow_run_id': record.workflow_run_id,
                     'task_id': record.business_context.get('task_id', ''), 'step_id': step.step_id,
@@ -50,8 +50,13 @@ def test_native_http_unknown_write_requires_host_verification_without_reexecutio
                 return None
             # 目标自身可核验结果是依据，用户传入的ref不是成功证明。
             assert output.read_text() == 'applied\n'
-            return {**identity(record, step), 'resolution_ref': reference,
-                    'state': 'committed', 'output': {'value': 7}}
+            proof = {**identity(record, step), 'resolution_ref': reference,
+                     'state': 'committed', 'output': {'value': 7}}
+            if resolution == 'foreign_task':
+                proof['task_id'] = 'other-task'
+            if resolution == 'foreign_version':
+                proof['candidate_hash'] = 'other-candidate-version'
+            return proof
         agent.business_governance = WorkflowGovernance(store,
             policy_provider=lambda _record, _step: {'minimum_reviews': 1, 'review_refs': ['review'], 'author_id': 'author'},
             receipt_reader=review, resolution_reader=verified,
@@ -78,7 +83,7 @@ def test_native_http_unknown_write_requires_host_verification_without_reexecutio
         assert result['http_status'] == 409 and result['error']['code'] == expected, result
         assert result['effect_outcome'] == 'not_started'
         details = {row['key']: row['value'] for row in result['error']['details']}
-        if resolution != 'untrusted':
+        if resolution in ('missing', 'unavailable'):
             assert details['prior_effect_outcome'] == 'unknown'
             assert details['resolution_available'] is False
         assert details['recommended_action']

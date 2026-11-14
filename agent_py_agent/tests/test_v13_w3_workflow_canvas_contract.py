@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor
 from agent_py_agent.agent.assets.workflow_store import (
     WorkflowDefinition,
@@ -17,6 +18,7 @@ from agent_py_agent.agent.plugin_host.business_action_specs import business_defs
 from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
 from agent_py_agent.agent.workflows.engine import WorkflowEngine
 from agent_py_agent.agent.workflows.models import StepExecutionRecord
+from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
 
 
 def golden():
@@ -224,15 +226,19 @@ def test_tool_connects_current_run_sink_without_text_fallback(tmp_path):
         def __call__(self, value):
             text.append(value)
 
-    current = SimpleNamespace(effective_on_chunk=Sink())
+    current = RunParams(on_chunk=Sink())
     tool = WorkflowsTool(
         tmp_path, analysis_handler=lambda *args: {"value": 1}, run_params_provider=lambda: current
     )
     assert tool.execute({"action": "run", "workflow_id": "golden"}).ok
     assert len(events) == 6 and not text
-    current.effective_on_chunk = lambda value: text.append(value)
+    for step_id in ('a', 'b'):
+        assert [event['status'] for event in events if event['step_id'] == step_id] == ['pending', 'running', 'succeeded']
+    current.on_chunk = lambda value: text.append(value)
     assert tool.execute({"action": "run", "workflow_id": "golden"}).ok
     assert len(events) == 6 and not text
+    records = WorkflowRunStore(tmp_path).list_runs(limit=10)
+    assert len(records) == 2 and all(record.status == 'succeeded' for record in records)
 
 
 def test_tool_save_aggregates_real_script_bindings_and_schedule_listing(tmp_path):

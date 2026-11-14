@@ -12,7 +12,7 @@
 
 ## 依赖准备
 
-插件本身只依赖精确版本 SDK `my-agent-plugin-api==0.2.0`，不打包任何 OCR 库或模型；OCR 用系统里的 `tesseract` 可执行文件：
+插件本身只依赖精确版本 SDK `my-agent-plugin-api==0.3.0`，不打包任何 OCR 库或模型；OCR 用系统里的 `tesseract` 可执行文件：
 
 - macOS：`brew install tesseract`（自带 `eng`；其他语言 `brew install tesseract-lang`）
 - Debian/Ubuntu：`sudo apt install tesseract-ocr`，中文再装 `tesseract-ocr-chi-sim`
@@ -31,7 +31,7 @@ python scripts/build_plugin_api.py --wheel-dir /tmp/plugin-build/wheels
 python scripts/build_plugin_package.py \
   --project plugins/image-text \
   --declaration image_text/declaration.json \
-  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.2.0-py3-none-any.whl \
+  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.3.0-py3-none-any.whl \
   --output /tmp/plugin-build/image-text.zip
 ```
 

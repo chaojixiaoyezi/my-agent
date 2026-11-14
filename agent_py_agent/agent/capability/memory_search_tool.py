@@ -10,10 +10,10 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ..conversation.host_actor import HostActorError, model_long_term_scope
 from ..memory_store.recall import (
     formal_recall_suppressed,
     long_term_record_matches_scope,
-    runtime_long_term_scope,
 )
 from ..tooling.models import (
     BaseTool,
@@ -105,6 +105,8 @@ class MemorySearchTool(BaseTool):
     #   无副作用：不写访问信号、不改正式条目；检索失败给结构化错误码，不逃逸。
     # 函数用途: 按查询文本在当前 owner 的适用范围内检索正式长期记忆，返回有界摘录和检索方式。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+        if not self.availability().available:
+            return _error("本轮的宿主记忆策略禁止读取正式长期记忆。请在有权的普通会话中检索。", "TOOL_UNAVAILABLE")
         memory = getattr(self.agent, "memory", None)
         search = getattr(memory, "search_scoped_candidates_report", None)
         if not callable(search):
@@ -112,7 +114,10 @@ class MemorySearchTool(BaseTool):
         query = str(params.get("query") or "").strip()
         if not query:
             return _error("query 不能为空", "TOOL_INVALID_ARGUMENTS")
-        predicate = _scope_predicate(self.agent, memory, str(params.get("kind") or "").strip())
+        try:
+            predicate = _scope_predicate(self.agent, memory, str(params.get("kind") or "").strip())
+        except HostActorError as exc:
+            return _error(f"{exc} 本次未读取记忆。请在原聊天核对绑定后重新发起检索。", exc.error_code)
         try:
             records, retrieval = search(query, _bounded_limit(params.get("limit")), predicate)
         except (OSError, ValueError, RuntimeError) as exc:
@@ -132,14 +137,7 @@ class MemorySearchTool(BaseTool):
 # LLM: 范围与自动召回同一规则（runtime_long_term_scope）；kind 非空时只留 kind 完全相同的条目，不认别名。
 # 函数用途: 生成本次检索的过滤条件（当前 owner 记忆 + 本轮适用范围 + 可选类型）。
 def _scope_predicate(agent: object, memory: object, kind: str):
-    current = getattr(agent, "_current_run_params", None)
-    attributes = getattr(current, "task_attributes", None)
-    scope = runtime_long_term_scope(
-        memory,
-        task_id=str(getattr(current, "task_id", "") or ""),
-        task_attributes=attributes if isinstance(attributes, dict) else {},
-        business_context=getattr(current, "business_context", None),
-    )
+    scope = model_long_term_scope(agent, memory)
     return lambda record: long_term_record_matches_scope(record, scope) and (not kind or record.kind == kind)
 
 

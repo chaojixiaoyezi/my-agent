@@ -80,16 +80,11 @@ def test_biz_003_packages_and_v03_executed_phase(native, monkeypatch):  # noqa: 
     if hasattr(server, '_business_services'):
         server._business_services.clear()
 
-    # 模拟已安装包
-    from agent_py_agent.agent.capability import package_provider
-    fake_pkg = SimpleNamespace(
-        package_id='pkg.data.cleaner',
-        package_ref='pkg.data.cleaner',
-        name='data cleaner',
-        enabled=True,
-        digest='sha256-fake123'
-    )
-    monkeypatch.setattr(package_provider, 'list_installed_capability_packages', lambda home: [fake_pkg])
+    # 安装与激活均走原Owner安装表；挂载只能消费已确认内容，不能靠替换目录投影造权限。
+    from agent_py_agent.tests.test_business_installed_package_mount_wire import install_content
+
+    installed = install_content(agent, 'pkg.data.cleaner')
+    assert installed.enabled and installed.activation_id
 
     space = ok(native, 'spaces.create', {'name': 'pkg-space'}, idempotency_key='pkg-space-create-00001')
     sid = space['space_id']
@@ -102,7 +97,8 @@ def test_biz_003_packages_and_v03_executed_phase(native, monkeypatch):  # noqa: 
     # 2. 验证 spaces.packages.attach
     attached = ok(native, 'spaces.packages.attach', {'space_id': sid, 'package_refs': ['pkg.data.cleaner']},
                   idempotency_key='pkg-attach-create-00001', expected_revision=space['revision'])
-    assert any(m['package_ref'] == 'pkg.data.cleaner' for m in attached['mounts'])
+    assert any(m['package_ref'] == 'pkg.data.cleaner' and m['version_ref'] == installed.package_sha256
+               for m in attached['mounts'])
 
     # 3. 验证 spaces.usage.list 包含 executed 阶段 (V03-06) 与 mounted_first 证明 (V03-04)
     # 创建模拟 runtime_db tool operation
@@ -125,10 +121,12 @@ def test_biz_003_packages_and_v03_executed_phase(native, monkeypatch):  # noqa: 
     repo.mark_operation_executing(operation['operation_id'])
 
     # 注入该 task_id 对应的 business_context
-    stask = SimpleNamespace(
-        task_id=task_id,
-        metadata={'business_context': {'space_id': sid, 'owner_id': agent.home_paths.owner_id}}
-    )
+    from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+
+    context = BusinessExecutionContext(owner_id=agent.home_paths.owner_id, space_id=sid,
+        project_ref=None, task_id=task_id, space_revision=attached['revision'], binding_id=None,
+        selected_method_refs=(), asset_version_refs=(), schema_version='business-context.v1')
+    stask = SimpleNamespace(task_id=task_id, metadata={'business_context': context.to_dict()})
     if agent.conversation_store is not None and hasattr(agent.conversation_store, 'session_tasks'):
         monkeypatch.setattr(agent.conversation_store.session_tasks, 'load', lambda tid: stask if tid == task_id else None)
 
@@ -360,48 +358,37 @@ def test_business_host_ports_wiring_order_and_production_default(native, monkeyp
 
 # LLM: 验证真实能力包 dict 记录、ConversationStore 代理身份与 WorkflowStore 定义引用解析。
 # 函数用途: 验证 space_reference_resolver 对 package dict、agent 线程与 workflow 定义的标准合约支持。
-def test_space_reference_resolver_canonical_store_contracts(native, monkeypatch):  # noqa: F811
+def test_space_reference_resolver_canonical_store_contracts(native):  # noqa: F811
     server, agent = native
     wire_business_host_ports(agent)
     resolver = build_default_business_space_reference_resolver(agent)
 
-    # 1. package: 支持真实 list_installed_capability_packages 返回的 dict 项与 capability: 前缀
-    from agent_py_agent.agent.capability import package_provider
+    # 1. package: 原安装表确认的启用/未激活内容包，目录与详情读取同一份身份。
+    from agent_py_agent.tests.test_business_installed_package_mount_wire import install_content
 
-    dict_pkg = {
-        'package_id': 'pkg.finance.ledger',
-        'name': 'pkg.finance.ledger',
-        'package_ref': 'pkg.finance.ledger',
-        'version': '1.0.0',
-        'digest': 'sha256-digest-abc12345',
-        'enabled': True,
-    }
-    disabled_pkg = {
-        'package_id': 'pkg.legacy.tool',
-        'name': 'pkg.legacy.tool',
-        'package_ref': 'pkg.legacy.tool',
-        'digest': 'sha256-legacy-999',
-        'enabled': False,
-    }
-    monkeypatch.setattr(package_provider, 'list_installed_capability_packages', lambda home: [dict_pkg, disabled_pkg])
+    installed = install_content(agent, 'pkg.finance.ledger')
+    disabled = install_content(agent, 'pkg.legacy.tool', enabled=False)
+    assert installed.enabled and installed.activation_id
+    assert not disabled.enabled
 
     # 通过 package_id 匹配
     res1 = resolver('package', 'pkg.finance.ledger', None)
     assert res1 is not None
     assert res1['state'] == 'available'
-    assert res1['version_ref'] == 'sha256-digest-abc12345'
+    assert res1['version_ref'] == installed.package_sha256
     assert res1['package_ref'] == 'pkg.finance.ledger'
 
     # 通过 capability: 前缀匹配 (emitted by spaces.packages.catalog)
     res2 = resolver('package', 'capability:pkg.finance.ledger', None)
     assert res2 is not None
     assert res2['state'] == 'available'
-    assert res2['version_ref'] == 'sha256-digest-abc12345'
+    assert res2['version_ref'] == installed.package_sha256
 
     # 禁用包状态投影为 disabled
     res_dis = resolver('package', 'pkg.legacy.tool', None)
     assert res_dis is not None
     assert res_dis['state'] == 'disabled'
+    assert res_dis['version_ref'] == disabled.package_sha256
 
     # 2. agent: 真实 store.threads.load 与 list_threads/list_report 查找
     th = agent.conversation_store.threads.create(

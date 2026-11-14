@@ -245,3 +245,27 @@ def test_head_tail_budget_counts_final_json_encoding(unit):
     assert len(json.dumps(excerpt, ensure_ascii=False)) <= 1200
     assert excerpt.startswith('FIRST-LINE') and excerpt.endswith('FINAL-ERROR')
     assert 'omitted' in excerpt
+
+
+def test_inline_structured_body_survives_protocol_prefix_redaction():
+    body = {'data': {'tool_call': {'command': 'fake --token "CANARY_RENDER_35"',
+                                 'return_code': 7},
+                     'result_ref': 'tool-operation://run/op'}, 'status': 'failed'}
+    result = _result('business_tool_calls_get', True, json.dumps(body))
+    before = result.to_dict()
+    rendered = render_tool_result_for_live_prompt(result, {})
+    projected = json.JSONDecoder().raw_decode(rendered[rendered.index('{'):])[0]
+    assert projected['data']['tool_call']['return_code'] == 7
+    assert projected['data']['result_ref'] == 'tool-operation://run/op'
+    assert 'CANARY_RENDER_35' not in rendered
+    assert result.to_dict() == before
+
+
+def test_inline_unclosed_text_remains_conservative_with_independent_host_anchor():
+    result = _result('business_tool_calls_get', True,
+                     'fake --password "CANARY_UNCLOSED_35\nUNTRUSTED_TAIL_35')
+    rendered = render_tool_result_for_live_prompt(result, _record(output_externalized=False))
+    assert 'CANARY_UNCLOSED_35' not in rendered
+    assert 'UNTRUSTED_TAIL_35' not in rendered
+    assert '[tool-output-archive-anchor]' in rendered
+    assert 'run:call' in rendered

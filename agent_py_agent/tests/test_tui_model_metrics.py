@@ -534,3 +534,60 @@ def test_broken_telemetry_cannot_fail_model_call(tmp_path, monkeypatch):
     monkeypatch.setattr(agent.conversation_store.model_usage, "update_metrics", broken)
     assert publish_model_metrics(agent, params, pending=False) == {}
     assert agent._model_call_ledger.records()[-1].status == "finished"
+
+
+def test_cache_partial_reporting_keeps_denominator_and_marks_unknown_gap(tmp_path):
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+    response = settled(agent, params, clock)
+    publish_model_metrics(agent, params, pending=False, response=response, call_id="call-1")
+    response = settled(agent, params, clock, call_id="call-2", usage={"prompt_tokens": 1000, "completion_tokens": 10})
+    metrics = publish_model_metrics(agent, params, pending=False, response=response, call_id="call-2")
+    assert metrics["input_tokens"] == 2000
+    assert metrics["cache_percent_session"] == 37.5
+    assert metrics["cache_usage_coverage"] == "partial"
+    assert "总缓存 37.50%（部分回报）" in str(render_model_metrics(metrics, 400))
+    assert model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id) == metrics
+
+
+def test_cache_legacy_snapshot_has_unknown_coverage_even_with_numeric_ratio():
+    metrics = public_model_metrics({"schema": "model_runtime_metrics.v1", "input_tokens": 1000,
+        "cache_read_input_tokens": 750, "cache_read_reported_calls": 1, "totals_known": True})
+    assert metrics["cache_percent_session"] == 75
+    assert metrics["cache_usage_coverage"] == "unknown"
+    assert "总缓存 75.00%（覆盖未知）" in str(render_model_metrics(metrics, 400))
+
+
+def test_cache_reported_zero_is_complete_not_missing(tmp_path):
+    agent, params, clock, _runtime, _thread = fixture(tmp_path)
+    response = settled(agent, params, clock, usage={"prompt_tokens": 1000, "completion_tokens": 1,
+                                                  "prompt_tokens_details": {"cached_tokens": 0}})
+    metrics = publish_model_metrics(agent, params, pending=False, response=response, call_id="call-1")
+    assert metrics["cache_usage_coverage"] == "complete"
+    assert "总缓存 0.00% ·" in str(render_model_metrics(metrics, 400))
+
+
+def test_cache_coverage_excludes_decision_call_with_missing_cache(tmp_path):
+    agent, params, clock, _runtime, _thread = fixture(tmp_path)
+    response = settled(agent, params, clock)
+    publish_model_metrics(agent, params, pending=False, response=response, call_id="call-1")
+    agent._model_call_ledger.started(ModelCallStartedParams("decision-1", "fixture", "fixture-model", 1000,
+        request_id=params.request_id, run_id=params.run_id, metadata={"purpose": "decision"}))
+    record_model_call_finished(agent._model_call_ledger, "decision-1", SimpleNamespace(text="决策", usage={
+        "prompt_tokens": 500, "completion_tokens": 1}))
+    metrics = publish_model_metrics(agent, params, pending=False)
+    assert metrics["cache_percent_session"] == 75
+    assert metrics["provider_usage_calls"] == metrics["input_reported_calls"] == 1
+    assert metrics["cache_usage_coverage"] == "complete"
+
+
+@pytest.mark.parametrize("field,value", [("provider_usage_calls", None), ("provider_usage_calls", True),
+    ("input_reported_calls", float("nan")), ("input_reported_calls", -1),
+    ("cache_coverage_known", "true"), ("totals_known", False)])
+def test_cache_invalid_coverage_facts_remain_unknown(field, value):
+    source = {"schema": "model_runtime_metrics.v1", "input_tokens": 1000,
+        "cache_read_input_tokens": 750, "cache_read_reported_calls": 1, "provider_usage_calls": 1,
+        "input_reported_calls": 1, "cache_coverage_known": True, "totals_known": True}
+    source[field] = value
+    metrics = public_model_metrics(source)
+    assert metrics["cache_usage_coverage"] == "unknown"
+    assert metrics["cache_percent_session"] == 75

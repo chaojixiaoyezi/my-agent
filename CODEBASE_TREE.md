@@ -1,3 +1,60 @@
+## 2026-11-13 子代理派工、空间挂包与后台详情回归
+
+```text
+agent_py_agent/agent/
+|-- agent_core/child_delivery_artifacts.py         # 按原父任务和当前成功尝试有界读取子代产物登记，标记未覆盖结果
+|-- agent_core/runtime/capability_refresh.py       # 在原执行轮的安全点更新已批准的工具与路径
+|-- assets/workflow_package_template.py             # 核验包成员模板和派生工作流的来源
+|-- capability/method_usage.py                      # 用原候选、选择和执行回执说明业务方法使用阶段
+|-- capability/session_search_scope.py              # 在已绑定业务范围时核对历史消息、记忆及技能的原始来源
+|-- conversation/background_failed_task.py           # 按原认领、执行和副作用证据收口失败的后台任务
+|-- gateway_parts/business_artifact_pages.py         # 用正式版本的分块摘要核验后续正文页
+|-- gateway_parts/business_asset_read.py             # 根据调用者的业务权限与任务冻结版本分页读素材正文
+|-- gateway_parts/business_upload_registry.py        # 分段核验正式上传登记簿，按原记录取得素材版本与读取凭证
+|-- gateway_parts/native_subscription_source.py    # 核验原生订阅的来源、工作流政策及事件授权
+|-- owner_snapshot_files.py                         # 绑定原目录和文件句柄，核验快照下载、发布和清理的归属
+|-- subagents/capability_authority.py               # 按任务的独立权限与尚有效的授予计算可用工具
+`-- subagents/capability_updates.py                 # 唤醒原执行轮的弱订阅，授权仍以任务记录为准
+agent_py_agent/tests/
+|-- test_background_retirement_approval_scope.py   # 退役时核对原主任务及子任务的待决审批
+|-- test_business_capability_default_wiring.py     # 开启业务空间时的只读推荐入口及所用冻结上下文
+|-- test_business_asset_content_read.py            # 核验素材正文的版本、授权、分页游标和实际读取量
+|-- test_business_effect_provenance.py             # 区分宿主业务回执与外部同名字段
+|-- test_business_scope_preflight.py               # 越界业务请求在写入前拒绝
+|-- test_business_managed_scope_projection.py      # 核对受管任务读取原空间时的可见字段和控制器的多空间管理
+|-- test_business_source_effect.py                 # 写后投影失败时保留原宿主已确认的副作用
+|-- test_business_unknown_receipt_inspection.py    # 模拟丢回执后核对原写入，检查授权、幂等键和参数指纹
+|-- test_child_delivery_diagnostics_wire.py        # 子代交付覆盖与诊断在真实客户端之间往返
+|-- test_method_usage_stages.py                    # 推荐、搜索、选择、读取与执行的原始使用记录
+|-- test_unassigned_session_registered_artifacts.py # 核对原会话任务的产物身份及可读边界
+|-- test_unassigned_task_follow_up.py              # 核对无绑定空间的后续任务和原投递归属
+|-- fixtures/business_schema_compatible_extensions.json # 冻结公开业务接口相对原协议的兼容扩展
+|-- test_orch03_coordination_sources.py            # 从原执行树与原协作单核对进展、等待与覆盖边界
+|-- test_public_result_registry_scope.py           # 已交付产物的原任务、版本、可读性和有界登记校验
+|-- test_session_search_frozen_scope.py            # 选中业务空间后的查史边界、旧索引及未绑定会话对照
+|-- test_owner_object_upload_snapshot.py           # 上传内容与摘要在文件替换、重复提交时仍一致
+|-- test_owner_snapshot_download_races.py          # 在目录并发改名或下载损坏时保护原用户和其他用户的数据
+|-- test_parent_child_delivery_registry.py         # 子代产物归属、查询预算及不完整登记的交付义务
+|-- test_business_installed_package_mount_wire.py   # 已安装包的预览与批量挂载经实际业务客户端往返
+|-- test_business_package_version_freeze.py        # 包版本、激活身份与旧任务兼容性的冻结和复核
+|-- test_business_space_name_conflicts.py          # 空间名称冲突的原始原因、效果和下一步
+|-- test_gateway_compact_progress_slices.py        # 同一请求跨多次压缩时累计执行进展，防止无进展重试
+|-- test_live_capability_snapshot_refresh.py       # 原子代理在获批、过期和撤权后的工具可见性
+|-- test_orch04_leaf_receipt_authority.py          # 末级接收方与独立验收者核对原版本和提交摘要
+|-- test_orch04_publish_recipient_identity.py      # 交接发布核对实际接收者、同根可见性和原回执重放
+|-- test_orch06_capacity_read_failures.py           # 父执行累计计数缺失时拒绝派工并报告原因
+|-- test_plugin_catalog_workspace_diagnostics.py    # 插件目录在原用户和工作区下读取，损坏的安装记录返回明确原因
+|-- test_probe_llm_admission.py                    # 供应商冷探测的模型并发名额及缓存复用
+|-- test_retention_canonical_thread_scope.py       # 留存检查区分原会话记录与索引叶，损坏时保持保护
+|-- test_script_exact_read_scope.py                # 脚本精确读范围、宿主运行文件与跨目录隔离
+|-- test_subagent_index_pending_creation.py        # 子代索引发表中与并发重派时防止重复创建
+|-- test_tui_background_details.py                 # 指定后台助手的调度、用量与失败详情
+|-- test_workflow_default_maintenance_references.py # 定期清理使用真实引用来源，无法核实时保留流程
+|-- test_workflow_package_template_derivation.py    # 模板来源鉴权、独立派生及编辑回滚时的来源保留
+|-- test_workflow_output_contract_versions.py      # 新登记工作流的必填输出及旧冻结版本兼容
+`-- test_workflow_run_read_concurrency.py          # 长步骤执行时可并发读取，控制仍需原执行权
+```
+
 ## 2026-11-12 连续交互复核返工
 
 ```text
@@ -13,6 +70,7 @@ agent_py_agent/tests/
 |-- test_tool_operation_result_ref_wire.py                       # 完整工具结果 URI 经业务列表和详情往返
 |-- test_workflow_artifact_delivery_edges.py                      # 文件读取、响应码、范围和完整性
 |-- test_workflow_review_changes_requested_gate.py                # 独立审核退票、撤回和完整性
+|-- test_workflow_review_tool_preconditions.py                    # 受审资源冻结、预览权限、执行前版本冲突和旧票拒绝
 `-- test_workflow_run_out_resume_batches.py                       # 恢复尝试、批次文件与业务客户端查询
 ```
 
@@ -210,6 +268,7 @@ agent_py_agent/
 |   |       |-- git_progress_adapter.py            # ORCH-03 Git 进度适配器与事件流发射
 |   |       |-- management_continuity.py           # ORCH-01 任务连续性管理与跨代次交接
 |   |       |-- pending_inbox.py                   # ORCH-02 待处理收件箱与幂等投递
+|   |       |-- coordination_progress.py           # 在授权执行树中读取关联测试、决定和交接的原始进展
 |   |       |-- progress_watch.py                  # ORCH-03 进度观察器与生命周期心跳
 |   |       `-- tools/
 |   |           |-- handoff_board_tool.py          # ORCH-04 交接板查询与状态管理工具
@@ -880,6 +939,8 @@ agent_py_agent/
 
 ### 关键文件说明
 
+- 模型传输额度和后台压缩分别沿真实请求的启闭及原任务唤醒收口。空间记忆读口只接收宿主保存的范围。对应入口和回归见本页“运行中发现的缺陷与回归”。
+
 - `test_r8_candidate_pin_stream.py`：只读候选流保持原正文校验和全量覆盖，验证候选对象及时释放及 closed 投影不可继续使用。
 
 ### R8 历史审计补修（2026-11-08）
@@ -1330,6 +1391,30 @@ agent_py_agent/
 # Codebase Tree
 
 ## Tree
+
+### 2026-11-13 运行中发现的缺陷与回归
+
+```text
+agent_py_agent/agent/
+|-- conversation/background_approval_views.py      # 仅向正在观察原会话的授权席位展示待决请求
+|-- gateway_parts/background_approval_view.py      # 从已认证的会话核验当前后台任务及席位
+|-- llm_scale/gateway_transport_admission.py       # Gateway 及子进程共享的模型传输额度
+`-- tooling/host_read_policy.py                    # 使用原工具权限核验宿主读取的确切范围
+agent_py_agent/cli/
+|-- chat_parts/tui_background_approvals.py         # 在当前后台页展示审批，离开时撤销该席位
+`-- gateway_compact_retry.py                      # 判断导致后台压缩容量不足的输入是否已改变
+agent_py_agent/tests/
+|-- test_background_approval_views.py              # 选择、退出、过期和多个席位并行时的审批归属
+|-- test_background_compact_retry_change.py        # 同一坏输入停重试，输入或冷却变化后接续原任务
+|-- test_build_identity_install_metadata.py        # 实际安装来源和 Gateway 原生状态一致
+|-- test_business_physical_cleanup_unknown.py      # 回收已证退出的进程，保留命令的未知业务结果
+|-- test_business_rejection_control.py             # 写前、写后及撤去凭据时原客户端收到的结果
+|-- test_business_usage_live_cursor_window.py      # 业务使用记录持续追加时仍可读完先前分页
+|-- test_gateway_memory_space_scope.py             # 空间切换后的项目记忆范围及原有个人记忆权限
+|-- test_gateway_transport_admission.py            # 跨进程传输峰值、取消、崩溃及切换额度
+|-- test_scheduler_business_context_freeze.py      # 定时任务按受理时的空间及选定版本执行
+`-- test_usage_first_active_snapshot.py            # 首次模型计量尚未返回时的已知资源和未知 token
+```
 
 ### 2026-11-08 R8 审计补修文件
 
@@ -3398,6 +3483,7 @@ agent_py_agent/
 |   |   |-- tool_search_state.py      # 主/子/Gateway 共用的纯工具发现归档投影，不导入执行循环
 |   |   |-- input_schema.py           # 唯一 input_schema 规范化、强类型纠正和完整执行前校验
 |   |   |-- action_policy.py          # 副作用前唯一 allow/ask/deny 聚合决策
+|   |   |-- host_read_policy.py       # 工作流送审和能力包读取共用当前工具、空间与用户的原授权检查
 |   |   |-- executor.py               # approval、sandbox、handler、账本、核对、持久化与投影状态机
 |   |   |-- event_observation.py      # B4 单次工具真实 handler 观察状态；拒绝/重放不发，重试只发一对
 |   |   |-- liveness.py               # 真实 handler 的单调运行时间心跳；不调用模型，不拥有执行权

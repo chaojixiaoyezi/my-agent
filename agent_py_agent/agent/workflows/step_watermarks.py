@@ -30,10 +30,19 @@ def _get_spec_val(spec: Any, key: str, default: Any = None) -> Any:
     return getattr(spec, key, default)
 
 
+def _watermark_parts(workflow_id, step_id, scope_key):
+    if not scope_key:
+        return ('data', 'workflow_watermarks', workflow_id, f'{step_id}.json')
+    import hashlib
+    digest = hashlib.sha256(scope_key.encode()).hexdigest()
+    return ('data', 'workflow_watermarks', workflow_id, step_id, digest[:2], f'{digest}.json')
+
+
 def load_workflow_step_watermark(
     owner_home: str | Path,
     workflow_id: str,
     step_id: str,
+    *, scope_key: str = '',
 ) -> dict[str, Any] | None:
     """加载特定工作流特定步骤的持久化水位检查点 (WF-10)。
 
@@ -45,7 +54,7 @@ def load_workflow_step_watermark(
     safe_asset_id(str(step_id))
     if '..' in str(workflow_id) or '..' in str(step_id):
         raise ValueError('ID不能包含点穿越')
-    relative_parts = ('data', 'workflow_watermarks', workflow_id, f'{step_id}.json')
+    relative_parts = _watermark_parts(workflow_id, step_id, scope_key)
     raw = read_text_beneath(owner_home, relative_parts)
     if raw is None:
         return None
@@ -65,6 +74,8 @@ def save_workflow_step_watermark(
     run_id: str = '',
     step_attempt_id: str = '',
     effect_id: str = '',
+    scope_key: str = '',
+    operation_id: str = '',
 ) -> dict[str, Any]:
     """保存特定工作流特定步骤的持久化水位检查点 (WF-10)。
 
@@ -78,8 +89,8 @@ def save_workflow_step_watermark(
     if not isinstance(watermark, dict):
         raise TypeError('watermark 必须是字典')
 
-    relative_parts = ('data', 'workflow_watermarks', workflow_id, f'{step_id}.json')
-    target_path = Path(owner_home) / 'data' / 'workflow_watermarks' / workflow_id / f'{step_id}.json'
+    relative_parts = _watermark_parts(workflow_id, step_id, scope_key)
+    target_path = Path(owner_home).joinpath(*relative_parts)
     ensure_private_dir(target_path.parent, canonical_root=owner_home)
 
     with locked_json_path(target_path):
@@ -89,6 +100,8 @@ def save_workflow_step_watermark(
             try:
                 existing = json.loads(raw)
                 if isinstance(existing, dict):
+                    if scope_key and existing.get('operation_id') == operation_id and existing.get('watermark') == payload(watermark):
+                        return existing
                     prev_rev = int(existing.get('revision', 0))
             except Exception:
                 prev_rev = 0
@@ -104,6 +117,8 @@ def save_workflow_step_watermark(
             'updated_at': time.time(),
             'revision': prev_rev + 1,
         }
+        if scope_key:
+            checkpoint.update(scope_key=scope_key, operation_id=operation_id)
         write_text_atomic_beneath(
             owner_home,
             relative_parts,
@@ -200,6 +215,7 @@ def commit_verified_watermark(
         effect_id = step.escalation_result.get('effect_id', '')
 
     if owner_home and workflow_id:
+        business_effect = step.escalation_result.get('business_effect', {})
         return save_workflow_step_watermark(
             owner_home,
             workflow_id,
@@ -208,5 +224,7 @@ def commit_verified_watermark(
             run_id=run_id,
             step_attempt_id=step_attempt_id,
             effect_id=effect_id,
+            scope_key=business_effect.get('scope_key', ''),
+            operation_id=business_effect.get('operation_id', ''),
         )
     return None

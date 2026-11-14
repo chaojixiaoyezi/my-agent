@@ -23,9 +23,10 @@ from agent_py_agent.agent.user_space.owner_resolver import (
     ensure_owner_home,
     home_paths_with_owner,
 )
+from agent_py_agent.tests.test_mega_business_api_actions import native_http
 from agent_py_agent.tests.test_tool_registry import registry
 
-_FIXTURES = (registry,)
+_FIXTURES = (registry, native_http)
 
 
 def _package(name, letter):
@@ -168,8 +169,53 @@ def test_package_catalog_uses_original_install_records_and_scope_bound_cursor(re
     second = service.execute('spaces.packages.catalog', {'limit': 2, 'cursor': first['next_cursor']})
     assert [row['package_ref'] for row in second['items']] == ['capability:2'] and second['next_cursor'] is None
     records[0]['enabled'] = False
-    with pytest.raises(ValueError):
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+    with pytest.raises(BusinessError) as caught:
         service.execute('spaces.packages.catalog', {'cursor': first['next_cursor']})
+    assert caught.value.code == 'CURSOR_EXPIRED'
+    assert caught.value.details['reason'] == 'CURSOR_SCOPE_OR_SOURCE_CHANGED'
+
+
+def test_catalog_cursor_errors_roundtrip_without_becoming_host_outage(native_http, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.capability import business_capabilities as business
+    from agent_py_agent.cli.space_commands import BusinessClient
+    from agent_py_agent.tests.test_mega_business_api_actions import native_request
+
+    records = [{'package_id': str(index), 'name': str(index), 'summary': 'batch',
+        'digest': 'a'*64, 'enabled': True} for index in range(3)]
+    monkeypatch.setattr(business, 'list_installed_capability_packages', lambda owner: records)
+
+    def transport(path, body, timeout):
+        status, _, raw = native_request(native_http, 'POST', path, body, user='local-agent',
+            headers={'X-Channel': 'chat', 'X-Conversation-Id': 'catalog-cursor'})
+        return status, json.loads(raw)
+
+    client = BusinessClient(transport)
+    first = client.call('spaces.packages.catalog', {'limit': 2, 'query': 'batch'})
+    assert first['ok'], first
+    cursor = first['data']['next_cursor']
+    for params, reason in [({'cursor': cursor}, 'CURSOR_SCOPE_OR_SOURCE_CHANGED'),
+                           ({'cursor': 'not-a-private-cursor!'}, 'CURSOR_FORMAT_INVALID')]:
+        rejected = client.call('spaces.packages.catalog', params)
+        assert rejected['http_status'] == 410 and rejected['error']['code'] == 'CURSOR_EXPIRED', rejected
+        assert rejected['effect_outcome'] == 'not_started'
+        details = {item['key']: item['value'] for item in rejected['error']['details']}
+        assert details['reason'] == reason and details['field'] == 'cursor'
+        assert 'query' in details['pagination_recovery'] and '1至100' in details['pagination_recovery']
+        assert cursor not in json.dumps(rejected) and 'not-a-private-cursor!' not in json.dumps(rejected)
+    last = client.call('spaces.packages.catalog', {'query': 'batch', 'limit': 1, 'cursor': cursor})
+    assert last['ok'] and [row['package_ref'] for row in last['data']['items']] == ['capability:2']
+    assert last['data']['next_cursor'] is None
+
+    def source_unavailable(owner):
+        raise OSError('synthetic unavailable source')
+
+    monkeypatch.setattr(business, 'list_installed_capability_packages', source_unavailable)
+    unavailable = client.call('spaces.packages.catalog', {'query': 'batch', 'cursor': cursor})
+    assert unavailable['http_status'] == 503 and unavailable['error']['code'] == 'HOST_NOT_READY'
+    assert unavailable['effect_outcome'] == 'not_started'
 
 
 def test_fresh_model_visibility_cannot_be_reauthorized_by_old_frozen_view(registry, tmp_path, monkeypatch):

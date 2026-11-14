@@ -450,11 +450,12 @@ class MessageStore:
 
     # LLM: 历史页只从当前 store 的 canonical 路径倒读；不修改消息、Compact、模型上下文或实时消费位置。
     # 函数用途: 提供独立向前游标，让客户端按需补更早记录，而不是固定截断或全量载入会话。
-    def history_page_report(self, thread_id: str, *, before: int | None = None, limit: int = 80):
+    def history_page_report(self, thread_id: str, *, before: int | None = None, limit: int = 80, read_budget=None):
         from .history_page import read_conversation_history_page
 
         return read_conversation_history_page(
-            self.storage.message_path(thread_id), thread_id, before=before, limit=limit
+            self.storage.message_path(thread_id), thread_id, before=before, limit=limit,
+            **({"read_budget": read_budget} if read_budget is not None else {})
         )
 
     # LLM: 会话记录锁内先恢复布局并封口坏尾；追加后活动投影合并到最新线程，不回写旧快照。
@@ -833,6 +834,7 @@ class MessageStore:
         self,
         thread_id: str,
         message_id: str,
+        *, read_budget=None,
     ) -> tuple[MessageLogEntry | None, list[dict[str, Any]]]:
         path = self.storage.message_path(thread_id)
         target = str(message_id or "").strip()
@@ -840,13 +842,17 @@ class MessageStore:
             return None, []
         try:
             for _attempt in range(4):
-                with TranscriptReader(path) as reader:
-                    cold = cold_message_lookup(path, f'id:{target}', reader=reader)
+                reader_scope = (TranscriptReader(path) if read_budget is None else
+                    TranscriptReader(path, root=self.storage.root, read_budget=read_budget))
+                with reader_scope as reader:
+                    cold = (cold_message_lookup(path, f'id:{target}', reader=reader) if read_budget is None else
+                            cold_message_lookup(path, f'id:{target}', reader=reader, read_budget=read_budget))
                     if cold is not None:
                         return cold[0], []
                     if not _reader_layout_is_current(reader):
                         continue
-                    result = _message_entry_by_id_in_path(path, target)
+                    result = (_message_entry_by_id_in_path(path, target) if read_budget is None else
+                              _bounded_message_entry(reader, target, read_budget))
                     if _reader_layout_is_current(reader):
                         return result
             raise DataCorruptionError('canonical transcript layout changed during message lookup')
@@ -911,3 +917,42 @@ class MessageStore:
         """Return the byte position immediately after a message in the raw ledger."""
         path = self.storage.message_path(thread_id)
         return locate_message_cursor(path, message_id).end
+
+
+def _bounded_message_entry(reader, target, budget):
+    """原exact读口的预算分支；优先缓存原地址，不为一次scope查询重建全文件位置表。"""
+    from .message_scan import MessageReadDeferred, _message_from_line
+    from .message_selection import cached_message_address
+    path = reader.path
+    address = cached_message_address(path, target)
+    if address is not None:
+        if address.length > budget.max_bytes - budget.size:
+            raise MessageReadDeferred('message row exceeds read budget')
+        reader.seek(reader.base + address.offset)
+        raw = reader.read(address.length)
+        if hashlib.sha256(raw).digest() != address.digest:
+            raise DataCorruptionError('canonical message changed at cached address')
+        row = _message_from_line(raw, path.stem)
+        if row.message_id != target:
+            raise DataCorruptionError('canonical message id differs from cached locator')
+        return row, []
+    # 没有可信地址时仅在剩余预算内读热段；大源回partial，由显式原单条读口另行处理。
+    size = os.fstat(reader.hot.fileno()).st_size
+    if size > budget.max_bytes - budget.size:
+        raise MessageReadDeferred('message locator unavailable within read budget')
+    reader.hot.seek(0)
+    while True:
+        remaining = budget.max_bytes - budget.size
+        if remaining <= 0:
+            raise MessageReadDeferred('message source read budget exhausted')
+        raw = reader.hot.readline(remaining)
+        budget.charge(size=len(raw))
+        if not raw:
+            return None, []
+        if not raw.endswith(b'\n'):
+            raise MessageReadDeferred('message row incomplete within read budget')
+        if not raw.strip():
+            continue
+        row = _message_from_line(raw, path.stem)
+        if row.message_id == target:
+            return row, []

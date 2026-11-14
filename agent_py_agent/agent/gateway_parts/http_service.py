@@ -211,7 +211,12 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             if route.access_tier in {"credential", "admin"}:
                 from ..auth.middleware import require_trusted_source
 
-                if (reject_untrusted(self, middleware) if compatible else require_trusted_source(self)):
+                if route.handler_module == ".business_api":
+                    from .business_api import reject_untrusted_business_source
+                    rejected = reject_untrusted_business_source(self)
+                else:
+                    rejected = reject_untrusted(self, middleware) if compatible else require_trusted_source(self)
+                if rejected:
                     return
         if (route.access_tier == "credential"
                 and (route.template.startswith("/client/") or route.template in {"/control", "/control-status/*"})

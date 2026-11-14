@@ -61,14 +61,22 @@ def parse_background_result(text: str) -> tuple[dict[str, str] | None, str]:
 
 # LLM: 待投附件来自已声明目标和本 run 原工具产物引用；只复用finalization提取器，不解析正文路径或扫描目录。
 # 函数用途: 在静默收口前核对是否仍有实际附件必须交付。
-def _has_pending_delivery_artifacts(params: object) -> bool:
+def _has_pending_delivery_artifacts(params: object, *, agent=None) -> bool:
     from types import SimpleNamespace
 
     from .._finalization_service import _structured_delivery_artifacts
 
     context = SimpleNamespace(task_attributes=getattr(params, 'task_attributes', None),
-                              archive_tool_calls=getattr(params, 'archive_tool_calls', None))
-    return bool(_structured_delivery_artifacts(context))
+                              archive_tool_calls=getattr(params, 'archive_tool_calls', None),
+                              delivery_contract=getattr(params, 'delivery_contract', None),
+                              run_id=getattr(params, 'run_id', ''), task_id=getattr(params, 'task_id', ''),
+                              attempt_id=getattr(params, 'attempt_id', ''))
+    artifacts = _structured_delivery_artifacts(context, agent=agent)
+    attrs = context.task_attributes if isinstance(context.task_attributes, dict) else {}
+    diagnostics = attrs.get('child_delivery_diagnostics')
+    # partial是尚未核清的原附件义务，不能因预算拒读而被internal_only静默取消。
+    return bool(artifacts) or any(isinstance(row, dict) and row.get('coverage') == 'partial'
+                                  for row in (diagnostics if isinstance(diagnostics, list) else ()))
 
 
 # LLM: 合同错误只拒绝错误协议或来源，不裁决报告深度；不能把错误正文或空供应商响应降级成成功静默。
@@ -95,7 +103,7 @@ def _tool_receipt_facts(params: object) -> list[dict[str, object]]:
 
 # LLM: 公开意图只由本次主调用的合法 schema 声明，宿主来源覆盖模型字段；用户插话和附件义务不允许被静默声明取消。
 # 函数用途: 消费主轮完成信封，返回可公开内容或登记至多一次现有零工具表达修复。
-def prepare_background_public_receipt(params: object, response: object) -> tuple[str, object]:
+def prepare_background_public_receipt(params: object, response: object, *, agent=None) -> tuple[str, object]:
     if not explicit_public_receipt_active(params):
         return 'normal', response
     if str(getattr(response, 'runtime_status', 'ok') or 'ok') != 'ok' or getattr(response, 'truncated', False):
@@ -109,7 +117,7 @@ def prepare_background_public_receipt(params: object, response: object) -> tuple
     if error:
         return 'finish', _invalid_receipt(response, error)
     reply_required = active_turn_user_reply_required(params)
-    attachments_required = _has_pending_delivery_artifacts(params)
+    attachments_required = _has_pending_delivery_artifacts(params, agent=agent)
     source = response_provenance_projection(response)
     receipt = {'schema': RESULT_SCHEMA, 'notification_intent': payload['notification_intent'],
                'execution_source': source, 'public_source': source}

@@ -141,6 +141,11 @@ def read_conversation_message(agent: object, message_id: str, params: dict[str, 
         return {"mode": "read", "found": False, "thread_id": thread_id, "message_id": message_id,
                 "scope_resolution": resolution,
                 "hint": '该会话里没有这条消息；可用 session_search {"mode":"thread_browse"} 浏览当前会话拿到正确的 message_id。'}
+    return render_conversation_message(entry, thread_id, resolution, params)
+
+
+def render_conversation_message(entry, thread_id, resolution, params):
+    """呈现同一次已核验的原记录；范围消费者不得为呈现重开可变正文。"""
     text = message_text(entry)
     offset = _bounded_int(params.get("offset"), 0, 0, len(text))
     size = _bounded_int(params.get("max_chars"), READ_DEFAULT_CHARS, READ_MIN_CHARS, READ_MAX_CHARS)

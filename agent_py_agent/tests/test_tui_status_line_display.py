@@ -42,7 +42,7 @@ def _line(**fields) -> str:
 def test_line_order_cache_two_decimals_session_input_and_output():
     text = _line(model_rounds=34, tool_count=1, input_tokens=796_640, cache_read_input_tokens=684_160,
                  cache_read_reported_calls=21, output_tokens=6_118, decision_mode="observe", output_tps=33.25)
-    assert text == "  ▤ 本轮模型轮 34 · 当轮工具 1 · 总缓存 85.88% · 累计会话 796.6k · 决策（观察） · 输出 6.1k · 速度 33.2 tok/s"
+    assert text == "  ▤ 本轮模型轮 34 · 当轮工具 1 · 总缓存 85.88%（覆盖未知） · 累计会话 796.6k · 决策（观察） · 输出 6.1k · 速度 33.2 tok/s"
 
 
 def test_session_total_counts_input_only_and_marks_local_estimates():

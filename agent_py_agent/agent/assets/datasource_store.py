@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import MISSING, asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
@@ -170,7 +170,8 @@ def _secret_key(key):
 # 函数用途: 无歧义收集一个认证值，类型或表示冲突时不回显正文。
 def _capture_secret(secrets, key, value):
     if key in secrets and _json(secrets[key]) != _json(value):
-        raise ValueError('DATASOURCE_SECRET_CONFLICT')
+        raise DatasourceSpecValidationError('spec_payload', 'consistent credential values', 'conflicting values',
+            '同一凭据字段出现冲突；统一规格内联凭据与显式凭据参数', code='DATASOURCE_SECRET_CONFLICT')
     secrets[key] = value
 
 
@@ -296,6 +297,80 @@ class DatasourceConnectionSpec:
             raise ValueError('DATASOURCE_INVALID_SPEC')
         object.__setattr__(self, 'options', json.loads(_json(self.options)))
         object.__setattr__(self, 'allowed_tables', tuple(self.allowed_tables))
+
+
+class DatasourceSpecValidationError(ValueError):
+    """纯规格准入失败；不带输入值，保证尚未创建目录或写入凭据。"""
+
+    def __init__(self, field_path, expected, actual_type, reason, *, code='DATASOURCE_INVALID_SPEC'):
+        self.error_code = code
+        self.details = {'field': field_path, 'expected_type': expected,
+                        'actual_type': actual_type, 'reason': reason}
+        super().__init__(code)
+
+
+def prepare_datasource_spec(spec_payload, scope='owner', *, known_secrets=()):
+    """共用无 I/O 规格准入；先拆凭据再校验，保留开放 kind/options。"""
+    def reject(name, expected, value, reason, *, code='DATASOURCE_INVALID_SPEC'):
+        raise DatasourceSpecValidationError('spec_payload' + ('.' + name if name else ''),
+                                           expected, value, reason, code=code)
+
+    secrets = {}
+    try:
+        data = json.loads(_json(spec_payload))
+    except (ValueError, TypeError, OverflowError):
+        reject('', 'object containing finite JSON values', type(spec_payload).__name__, '规格必须是合法 JSON 对象')
+    try:
+        data = _extract(data, secrets)
+    except DatasourceSpecValidationError:
+        raise
+    except (ValueError, TypeError):
+        reject('', 'valid connection values', 'invalid', '连接或内联凭据格式无效；检查连接 URL 和凭据字段')
+    if not isinstance(data, dict):
+        reject('', 'object', type(data).__name__, '规格必须是对象')
+    definitions = {item.name: item for item in fields(DatasourceConnectionSpec)}
+    for key in data:
+        if key not in definitions:
+            name = key if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', key) else '<unknown>'
+            reject(name, 'declared connection field; extensions belong in options',
+                   type(data[key]).__name__, '未知连接字段；扩展参数请放到 options 对象')
+    for name, item in definitions.items():
+        if name not in data:
+            if item.default is MISSING and item.default_factory is MISSING:
+                reject(name, 'non-empty string', 'missing', '缺少必填字段')
+            continue
+        value = data[name]
+        expected = ('object' if name == 'options' else 'array of non-empty strings' if name == 'allowed_tables'
+                    else 'boolean' if type(item.default) is bool else 'integer' if type(item.default) is int else 'string')
+        valid = (isinstance(value, dict) if name == 'options' else
+                 isinstance(value, (list, tuple)) and all(isinstance(v, str) and v for v in value) if name == 'allowed_tables' else
+                 type(value) is bool if expected == 'boolean' else type(value) is int if expected == 'integer' else isinstance(value, str))
+        if not valid:
+            reject(name, expected, type(value).__name__, '字段类型不符合连接规格')
+    for name in ('datasource_id', 'credential_ref'):
+        if name in data and (name == 'datasource_id' or data[name]):
+            try:
+                safe_asset_id(data[name])
+            except ValueError:
+                reject(name, 'safe asset identifier', type(data[name]).__name__, '代号格式无效；使用字母、数字、连字符或下划线')
+    for name in ('kind', 'title'):
+        if not data[name]:
+            reject(name, 'non-empty string', 'str', '必填字符串不能为空')
+    if 'scope' in data and data['scope'] != scope:
+        reject('scope', scope, type(data['scope']).__name__, '规格 scope 必须与动作 scope 一致', code='DATASOURCE_SCOPE_MISMATCH')
+    if scope not in ('owner', 'workspace'):
+        reject('scope', 'owner or workspace', type(scope).__name__, '不支持的保存范围')
+    for name, minimum, maximum in (('port', 0, 65535), ('revision', 1, None)):
+        if name in data and (data[name] < minimum or maximum is not None and data[name] > maximum):
+            reject(name, f'integer >= {minimum}' + (f' and <= {maximum}' if maximum else ''), 'int', '数值超出允许范围',
+                   code='DATASOURCE_INVALID_REVISION' if name == 'revision' else 'DATASOURCE_INVALID_SPEC')
+    data['scope'] = scope
+    data = _redact_spec_fields(data, (*secret_values(secrets), *known_secrets))
+    try:
+        return DatasourceConnectionSpec(**data), secrets
+    except (ValueError, TypeError):
+        reject('', 'valid redacted connection specification', 'invalid',
+               '脱敏后连接规格无效；请勿让凭据值与数据源代号、类型或范围字段相同')
 
 
 # LLM: 公开投影重新去掉内联认证；凭据清单仅接收顶层键名，默认无钥匙串上下文时为空。
@@ -899,13 +974,7 @@ class DatasourceStore(_DatasourceMigration):
     # LLM: 先提取再使用新值及调用方已知秘密脱敏，避免迁移丢失新认证；路径仍只在原可信根内。
     # 函数用途: 归一化安全连接，可创建数据库父目录但不写规格、秘密或数据库正文。
     def _normalize(self, spec_payload, scope, workspace_root, *, known_secrets=()):
-        secrets = {}
-        data = _extract(json.loads(_json(spec_payload)), secrets)
-        if 'scope' in data and data['scope'] != scope:
-            raise ValueError('DATASOURCE_SCOPE_MISMATCH')
-        data['scope'] = scope
-        data = _redact_spec_fields(data, (*secret_values(secrets), *known_secrets))
-        spec = DatasourceConnectionSpec(**data)
+        spec, secrets = prepare_datasource_spec(spec_payload, scope, known_secrets=known_secrets)
         self._location(scope, workspace_root)
         if spec.kind == 'sqlite' and spec.database_path != ':memory:':
             path = spec.database_path or str(self.owner_home / 'data/datasources' / (spec.datasource_id + '.sqlite'))

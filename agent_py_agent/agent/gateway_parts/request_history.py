@@ -123,7 +123,7 @@ def persist_gateway_assistant_result(
         persist_gateway_partial_result(context, conversation, result)
         result.channel_delivery = silent_user_stop_delivery()
         return result
-    delivery_projection = project_user_reply(str(getattr(result, "response", "") or ""))
+    delivery_projection = project_user_reply(str(getattr(result, "response", "") or ""), finalized=True)
     if delivery_projection.internal_signal:
         raise _unavailable_reply_error(context, conversation, result, "任务只返回了运行时内部信号，没有生成可交付给用户的回复")
     if not delivery_projection.content and not gateway_model_response_error_projection(result):
@@ -564,6 +564,21 @@ def _metadata_artifact_refs(value: object) -> list[dict[str, object]]:
     return refs
 
 
+def prepare_gateway_history_index(agent, request, conversation):
+    """罕见命名任务写入前的隔离预检；普通ask不调用此额外事务。"""
+    from .request_errors import GatewayHistoryPreparationPending
+
+    ledger = GatewayHistoryLedger(agent.conversation_store)
+    progress = {}
+    with ledger.connection() as conn:
+        ready = ledger.catch_up(conn, conversation.thread_id, progress=progress)
+    if not ready:
+        pending = GatewayHistoryPreparationPending(request, conversation.thread_id, progress)
+        if pending.progressed:
+            raise pending
+        raise HistoryIndexPending('GATEWAY_HISTORY_INDEX_STALLED: no proven progress; no task registration')
+
+
 # LLM: 助手正文、工具事实与来源metadata分别持久；公开正文不被投影改写，宿主学习来源不采信模型summary。
 # persisted in separate fields. The public body must stay unchanged while later model turns may
 # consume the bounded fold from metadata.
@@ -583,7 +598,10 @@ def append_gateway_conversation_message(
     terminal_tool_fold: object = None,
     assistant_turn: GatewayAssistantTurn | None = None,
     assistant_part_id: str = "final",
+    defer_index_pending: bool = False,
 ) -> bool:
+    from .request_errors import GatewayHistoryPreparationPending
+
     empty_terminal = (
         role == "assistant" and assistant_part_id == "final"
         and assistant_turn is not None and assistant_turn.end_reason in {"max-tokens", "error", "aborted", "interrupted"}
@@ -596,55 +614,64 @@ def append_gateway_conversation_message(
     channel_message_id = str(metadata.get("message_id") or "") if role == "user" else ""
     try:
         ledger = GatewayHistoryLedger(store)
+        progress = {}
         with ledger.connection() as ledger_conn:
-            if not ledger.catch_up(ledger_conn, conversation.thread_id):
-                logger.warning("GATEWAY_HISTORY_INDEX_PENDING thread=%s; append not_started, retry repair", conversation.thread_id)
-                return False
-            normalized_part_id = (
-                str(assistant_part_id or "final").strip() or "final" if role == "assistant" else ""
-            )
-            if ledger.matches(
-                ledger_conn, conversation.thread_id, role=role, request_id=request_id,
-                channel_message_id=channel_message_id, assistant_part_id=normalized_part_id,
-                execution_attempt_id=str(request.get("execution_attempt_id") or ""),
-                turn_end_reason=assistant_turn.end_reason if assistant_turn else "",
-            ):
-                return True
-            entry_metadata: dict[str, object] = {
-                "conversation_request_id": request_id,
-                "gateway_request_id": request_id,
-                "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
-            }
-            entry_metadata.update(request_binding.gateway_message_work_scope(request))
-            if role == "user":
-                # 当前用户消息的消息级来源=回合冻结事实（显式不可学原样保留）；旧线程上下文无来源时
-                # 只给本条补用户对话来源，不追认历史；后台/派活唤醒不经过本入口。
-                frozen = thread_source_projection(getattr(conversation, "learning_source", None))
-                entry_metadata[LEARNING_SOURCE_KEY] = frozen or user_dialogue_projection()
-            if role == "assistant":
-                entry_metadata["assistant_part_id"] = normalized_part_id
-                if request.get("execution_attempt_id"):
-                    entry_metadata["gateway_execution_attempt_id"] = str(request["execution_attempt_id"])
-            if role == "assistant" and operation_verification is not None:
-                entry_metadata["operation_verification"] = public_operation_verification(
-                    operation_verification
+            ready = ledger.catch_up(ledger_conn, conversation.thread_id, progress=progress)
+            if ready:
+                normalized_part_id = (
+                    str(assistant_part_id or "final").strip() or "final" if role == "assistant" else ""
                 )
-            if role == "assistant" and isinstance(terminal_tool_fold, dict):
-                fold = dict(terminal_tool_fold)
-                if fold:
-                    entry_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
-            if role == "assistant" and normalized_part_id == "final" and assistant_turn is not None:
-                entry_metadata.update(assistant_turn.metadata())
-            entry = store.messages.append(
-                {
-                    "thread_id": conversation.thread_id,
-                    "role": role,
-                    "content": content,
-                    "channel": gateway_request_channel(request) or thread_channel(store, conversation.thread_id),
-                    "channel_message_id": channel_message_id,
-                    "metadata": entry_metadata,
+                if ledger.matches(
+                    ledger_conn, conversation.thread_id, role=role, request_id=request_id,
+                    channel_message_id=channel_message_id, assistant_part_id=normalized_part_id,
+                    execution_attempt_id=str(request.get("execution_attempt_id") or ""),
+                    turn_end_reason=assistant_turn.end_reason if assistant_turn else "",
+                ):
+                    return True
+                entry_metadata: dict[str, object] = {
+                    "conversation_request_id": request_id,
+                    "gateway_request_id": request_id,
+                    "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
                 }
-            )
+                entry_metadata.update(request_binding.gateway_message_work_scope(request))
+                if role == "user":
+                    # 当前用户消息的消息级来源=回合冻结事实（显式不可学原样保留）；旧线程上下文无来源时
+                    # 只给本条补用户对话来源，不追认历史；后台/派活唤醒不经过本入口。
+                    frozen = thread_source_projection(getattr(conversation, "learning_source", None))
+                    entry_metadata[LEARNING_SOURCE_KEY] = frozen or user_dialogue_projection()
+                if role == "assistant":
+                    entry_metadata["assistant_part_id"] = normalized_part_id
+                    if request.get("execution_attempt_id"):
+                        entry_metadata["gateway_execution_attempt_id"] = str(request["execution_attempt_id"])
+                if role == "assistant" and operation_verification is not None:
+                    entry_metadata["operation_verification"] = public_operation_verification(
+                        operation_verification
+                    )
+                if role == "assistant" and isinstance(terminal_tool_fold, dict):
+                    fold = dict(terminal_tool_fold)
+                    if fold:
+                        entry_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
+                if role == "assistant" and normalized_part_id == "final" and assistant_turn is not None:
+                    entry_metadata.update(assistant_turn.metadata())
+                entry = store.messages.append(
+                    {
+                        "thread_id": conversation.thread_id,
+                        "role": role,
+                        "content": content,
+                        "channel": gateway_request_channel(request) or thread_channel(store, conversation.thread_id),
+                        "channel_message_id": channel_message_id,
+                        "metadata": entry_metadata,
+                    }
+                )
+        if not ready:
+            # 正常退出原事务后才抛准备中，避免回滚刚推进的有界水位；正文尚未追加。
+            if defer_index_pending and role == 'user':
+                pending = GatewayHistoryPreparationPending(request, conversation.thread_id, progress)
+                if pending.progressed:
+                    raise pending
+                raise HistoryIndexPending('GATEWAY_HISTORY_INDEX_STALLED: no proven progress; no append or automatic replay')
+            logger.warning('GATEWAY_HISTORY_INDEX_PENDING thread=%s; append not_started, retry repair', conversation.thread_id)
+            return False
         try:
             index_conversation_message(agent, store, entry)
         except Exception as exc:
@@ -658,6 +685,9 @@ def append_gateway_conversation_message(
             indexed = getattr(agent, "_conversation_indexed_threads", set())
             indexed.discard(conversation.thread_id)
         return True
+    except GatewayHistoryPreparationPending:
+        logger.info('GATEWAY_HISTORY_INDEX_PENDING thread=%s; append not_started, same request deferred', conversation.thread_id)
+        raise
     except Exception as exc:
         logger.error(
             "会话消息持久化失败(thread=%s, role=%s): %s: %s",
@@ -666,6 +696,8 @@ def append_gateway_conversation_message(
             type(exc).__name__,
             exc,
         )
+        if defer_index_pending:
+            raise
         return False
 
 

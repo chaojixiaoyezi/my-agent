@@ -584,7 +584,10 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
         authority_run_id = str(row["run_id"] or "")
     if not attempt_id:
         return params
-    if business_metadata:
+    # 定时srun继承的是来源范围，不是原SessionTask的执行体；其独立TaskRun不能回绑覆盖原任务。
+    scheduled_business = (params.source in {'scheduler_tool', 'background_main_agent'}
+                          and str(params.task_id).startswith('srun_'))
+    if business_metadata and not scheduled_business:
         try:
             row = repo.agent_run_for_run_id(authority_run_id)
             agent.conversation_store.session_tasks.bind_execution(
@@ -624,6 +627,11 @@ def _verified_business_task_metadata(agent, params: RunParams, owner_id: str) ->
     context = params.business_context
     if context is None:
         return {}
+    from ..scheduler.execution_policy import verified_scheduled_business_metadata
+
+    scheduled = verified_scheduled_business_metadata(agent, params, owner_id)
+    if scheduled is not None:
+        return scheduled
     store = getattr(agent, "conversation_store", None)
     task = store.session_tasks.load(context.task_id) if store is not None else None
     thread_id = (params.task_attributes or {}).get("conversation_thread_id")

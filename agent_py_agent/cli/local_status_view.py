@@ -44,6 +44,7 @@ class StatusPrintContext:
     gateway_heartbeat_load_error: dict | None = None
     unidentified_stale_attempts: int = 0
     surviving_background_sessions: int = 0
+    gateway_build_identity: dict | None = None
 
 
 @dataclass
@@ -80,6 +81,8 @@ def print_status_human(ctx: StatusPrintContext):
         ctx.request_counts,
         ctx.archive_request_counts,
     )
+    if ctx.gateway_build_identity is not None:
+        print('- build_identity=' + json.dumps(ctx.gateway_build_identity, ensure_ascii=False, sort_keys=True))
     print("")
     print("Local Store")
     print(f"- records={ctx.local_stats['record_count']} events={ctx.local_stats['event_count']} fts5={ctx.local_stats['fts5_enabled']}")

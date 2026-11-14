@@ -425,10 +425,14 @@ def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | No
     return bool(threads or owners and str(home.resolve()) not in owners)
 
 
+class ProcessLogScopeDeniedError(ValueError):
+    """进程身份有效，但其日志路径不在本 owner 的只读授权范围。"""
+
+
 # LLM: 显式owner每次先回验；详情不借缓存，随后严格同线程匹配，在存活探针/日志读取前拒绝跨范围记录。
-# 函数用途: 在可选当前会话范围内只读查看后台进程，日志仍限制路径和字节数。
+# 函数用途: 在可选当前会话范围内只读查看后台进程；可选返回独立日志失败，不改变身份校验及拒读边界。
 def inspect_background_process(owner_home: Path, session_id: str, *, thread_id: str | None = None, tail_lines: int = 80,
-                               expected_owner_id: str | None = None) -> dict[str, object]:
+                               expected_owner_id: str | None = None, include_log_errors: bool = False) -> dict[str, object]:
     selected = validate_session_id(session_id)
     home = Path(owner_home).expanduser().absolute()
     if expected_owner_id is not None and (type(expected_owner_id) is not str or not expected_owner_id
@@ -444,7 +448,19 @@ def inspect_background_process(owner_home: Path, session_id: str, *, thread_id: 
         summary = _summary(root, payload)
         detail = summary.to_dict()
         log_root = root.parent if root == process_session_store_root(home, home) / "finished" else root
-        detail["log_tail"] = _log_tail(home, log_root, selected, payload, tail_lines)
+        try:
+            detail["log_tail"] = _log_tail(home, log_root, selected, payload, tail_lines)
+        except (OSError, ValueError) as exc:
+            if not include_log_errors:
+                raise
+            # 身份与状态已通过原校验；日志独立失败不能伪造进程失败或丢掉其它有效行。
+            code = "PROCESS_LOG_SCOPE_DENIED" if isinstance(exc, ProcessLogScopeDeniedError) else "PROCESS_LOG_READ_FAILED"
+            detail["log_tail"] = []
+            detail["log_error"] = {
+                "code": code, "error_type": type(exc).__name__, "summary": str(exc),
+                "effect_outcome": "not_started",
+                "next_action": "请在原授权工作区核查日志，或重新启动任务使用宿主日志目录。",
+            }
         return detail
     return {"session_id": selected, "status": "not_found", "log_tail": [], "error_code": "PROCESS_SESSION_NOT_FOUND"}
 
@@ -625,7 +641,7 @@ def _log_tail(home: Path, root: Path, session_id: str, payload: dict, tail_lines
         path = path if path.is_absolute() else root / path
         anchor = home if path.is_relative_to(home) else root if path.is_relative_to(root) else None
         if anchor is None:
-            raise ValueError("process log outside owner boundary")
+            raise ProcessLogScopeDeniedError("process log outside owner boundary")
         try:
             fd = open_readonly_file_beneath(anchor, path.relative_to(anchor).parts)
         except FileNotFoundError:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -117,7 +118,8 @@ def prepare_subagent_stops(
         stops = []
         for run_id, authority in closed.items():
             request = selected[run_id]
-            runner = freeze_runner_stop(request.task, tasks, set(closed), kill_process=request.kill_process)
+            runner = freeze_runner_stop(request.task, tasks, set(closed), kill_process=request.kill_process,
+                tools_exit_confirmed=_runner_never_started_handler(manager, authority))
             report = {"run_id": run_id, "runtime_authority": authority, "thread_interrupt": signals[run_id],
                       "stop_receipt": {"schema": "runner-stop.v1", "run_id": run_id,
                           "attempt_id": str(authority.get("attempt_id") or request.task.runner_active_attempt_id or ""),
@@ -206,6 +208,9 @@ def cleanup_subagent_stops(batch: FrozenSubagentStops) -> dict[str, object]:
                             pid_report.get("host_exited") is False and pid_report.get("identity_confirmed") is True
                         ) else "RUNNER_WORKER_EXIT_UNCONFIRMED",
                     })
+                elif stop.runner.cleanup_unconfirmed and pid_report.get('tools_exit_confirmed') is not True:
+                    failed.append({'run_id': report['run_id'], 'cancellation_attempted': True,
+                                   'error_code': 'RUNNER_TOOL_EXIT_UNCONFIRMED'})
             elif runner_status == "identity_unavailable":
                 failed.append({
                     "run_id": report["run_id"], "cancellation_attempted": True,
@@ -225,6 +230,23 @@ def cleanup_subagent_stops(batch: FrozenSubagentStops) -> dict[str, object]:
     if failed:
         logging.getLogger(__name__).warning("子代理停止存在未确认项: %s", failed)
     return {"ok": not failed and not batch.unconfirmed, "cancelled": reports, "failed": failed, "skipped": []}
+
+
+def _runner_never_started_handler(manager, authority) -> bool:
+    """撤权后按原attempt索引证明没有handler启动；无需安装日志，缺权威不能当空闲。"""
+    repo = getattr(manager, 'runtime_db', None)
+    attempt_id = authority.get('attempt_id')
+    if repo is None or not attempt_id or not callable(getattr(repo, '_runtime_connection', None)):
+        return False
+    try:
+        with repo._runtime_connection() as conn:
+            attempt = conn.execute('SELECT attempt_id FROM agent_attempts WHERE attempt_id = ?', (attempt_id,)).fetchone()
+            if attempt is None:
+                return False
+            return conn.execute('SELECT 1 FROM tool_operations WHERE attempt_id = ? AND handler_started_at > 0 LIMIT 1',
+                                (attempt_id,)).fetchone() is None
+    except (OSError, ValueError, TypeError, RuntimeError, sqlite3.Error):
+        return False
 
 
 # LLM: 单点宿主控制不扩大到后代；仍使用同一准备/清理边界，未托管模式不伪造数据库权限。
@@ -325,7 +347,8 @@ def _close_projection(agent: object, request: CancelSubagentTaskRequest, authori
             }
             session = attrs.get("runner_session")
             if isinstance(session, dict):
-                attrs["runner_session"] = {**session, "status": "cancelled", "heartbeat_at": now, "ended_at": now}
+                # 逻辑取消不证明宿主或前台命令已退出；原会话由同attempt宿主收尾。
+                attrs["runner_session"] = dict(session)
             current.failure_type, current.ended_at = FailureType.CANCELLED.value, now
         else:
             if projection == TaskStatus.ABANDONED.value:

@@ -58,6 +58,8 @@ from .models import (
     ToolOperationReconciliation,
     ToolOperationSettlementContext,
     apply_tool_execution_facts,
+    host_error_facts,
+    source_effect_facts,
 )
 
 _RESULT_SCHEMA = "tool_execution_result.v1"
@@ -378,7 +380,8 @@ def _resolve_claim(
             )
         _attach_operation_facts(
             result,
-            request,
+            replace(request, run_id=claim.record.run_id, task_id=claim.record.task_id,
+                    operation_attempt_id=claim.record.attempt_id, operation_id=claim.record.operation_id),
             status=claim.record.status,
             action="replay",
             replayed=True,
@@ -393,6 +396,13 @@ def _resolve_claim(
     if claim.action == "execute":
         return claim
     if claim.action == "unknown":
+        if (request.idempotency_scope == 'business' and claim.record.run_id != request.run_id
+                and request.reconcile is None):
+            # 新执行轮没有原unknown的结算权；仅保留原操作引用，禁止借新attempt重开。
+            return _unknown_claim_result(replace(request, run_id=claim.record.run_id,
+                task_id=claim.record.task_id, operation_attempt_id=claim.record.attempt_id,
+                operation_id=claim.record.operation_id, reconcile=None), claim,
+                diagnostic='business_item_original_outcome_unknown')
         return _reconcile_unknown_operation(request, attempt)
     code, message, action = _claim_block_contract(claim.action)
     result = _operation_error(request.tool_name, code, message)
@@ -777,6 +787,7 @@ def _unknown_claim_result(
     result.effect_outcome = "not_started"
     if not isinstance(getattr(result, "result_envelope", None), dict):
         object.__setattr__(result, "result_envelope", {})
+    result.source_effect = source_effect_facts(prior.source_effect)
     result.result_envelope["reported_tool_result"] = _reported_tool_result_facts(prior)
     result.result_envelope.update(first_dispatch_at=claim.record.first_dispatch_at,
         component_receipts=deepcopy(claim.record.component_receipts))
@@ -1017,6 +1028,7 @@ def _completion_persistence_unknown_result(
         reported_error_code=reported.reported_error_code or reported.error_code,
         effect_outcome="unknown",
         effect_source_ref=reported.effect_source_ref,
+        source_effect=reported.source_effect,
         handler_executed=reported.handler_executed,
         failure_stage=ToolFailureStage.PERSISTENCE.value,
         duration_ms=reported.duration_ms,
@@ -1196,6 +1208,7 @@ def _unknown_outcome_result(
         reported_error_code=reported_code,
         effect_outcome="unknown",
         effect_source_ref=reported.effect_source_ref,
+        source_effect=reported.source_effect,
         handler_executed=reported.handler_executed,
         failure_stage=ToolFailureStage.EFFECT_RECONCILIATION.value,
         duration_ms=reported.duration_ms,
@@ -1209,6 +1222,7 @@ def _reported_tool_result_facts(
 ) -> dict[str, object]:
     return {
         "ok": reported.ok,
+        **({"source_effect": source_effect_facts(reported.source_effect)} if reported.source_effect else {}),
         "error_code": reported.error_code,
         "reported_error_code": reported.reported_error_code,
         "effect_outcome": reported.effect_outcome,
@@ -1255,6 +1269,8 @@ def _result_payload(
         "result_envelope": dict(result.result_envelope or {}),
         "error_code": result.error_code,
         "reported_error_code": result.reported_error_code,
+        "host_error": host_error_facts(result.host_error),
+        **({"source_effect": source_effect_facts(result.source_effect)} if result.source_effect else {}),
         "error_category": result.error_category,
         "retryable": result.retryable,
         "recommended_action": result.recommended_action,
@@ -1306,6 +1322,8 @@ def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
             ),
             error_code=str(payload.get("error_code") or ""),
             reported_error_code=str(payload.get("reported_error_code") or ""),
+            host_error=host_error_facts(payload.get("host_error")),
+            source_effect=source_effect_facts(payload.get("source_effect")),
             effect_outcome=runtime_effect,
             effect_source_ref=str(payload.get("effect_source_ref") or ""),
             handler_executed=payload.get("handler_executed") is True,
@@ -1381,6 +1399,12 @@ def _complete_terminal_result(record: ToolOperationRecord) -> bool:
     if any(key in payload and not isinstance(payload[key], str) for key in strings):
         return False
     if "result_envelope" in payload and not isinstance(payload["result_envelope"], dict):
+        return False
+    if "source_effect" in payload and (not isinstance(payload["source_effect"], dict)
+            or source_effect_facts(payload["source_effect"]) != payload["source_effect"]):
+        return False
+    if "host_error" in payload and (not isinstance(payload["host_error"], dict)
+            or host_error_facts(payload["host_error"]) != payload["host_error"]):
         return False
     if "retryable" in payload and type(payload["retryable"]) is not bool:
         return False

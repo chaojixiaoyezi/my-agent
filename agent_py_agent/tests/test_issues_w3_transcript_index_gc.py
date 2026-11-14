@@ -148,11 +148,19 @@ def test_broken_thread_does_not_block_later_healthy_thread(compact_case, monkeyp
     messages = case.root / "conversations/messages"
     (messages / "archive/aaa-broken/index").mkdir(parents=True)
     (messages / "aaa-broken.manifest.json").write_text("{")
-    result = maintain_transcript_index_lane(
-        request_for(home_for(case), kind="conversation_messages")
-    )
-    assert any(error["code"] == "transcript_index_incomplete" for error in result["errors"])
+    request = request_for(home_for(case), kind="conversation_messages")
+    errors = []
+    for _ in range(64):
+        result = maintain_transcript_index_lane(request)
+        errors.extend(result["errors"])
+        if any(entry["tid"] == case.thread_id for entry in result["cursor"].get("pending", [])):
+            break
+        request = replace(request, cursor=result["cursor"])
+    else:
+        pytest.fail("healthy thread did not progress within bounded maintenance slices")
+    assert any(error["code"] == "transcript_index_incomplete" for error in errors)
     assert [entry["tid"] for entry in result["cursor"]["pending"]] == [case.thread_id]
+    assert (messages / "aaa-broken.manifest.json").read_text() == "{"
 
 
 def test_missing_earlier_message_root_does_not_block_runtime_root(compact_case, monkeypatch):

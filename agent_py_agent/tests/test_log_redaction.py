@@ -407,3 +407,240 @@ def test_batch_truncated_redaction_retains_linear_budget(shape) -> None:
 def test_batch_unrelated_pem_and_port_urls_remain_unchanged() -> None:
     for text in ("-----BEGIN PUBLIC KEY-----\nordinary-public-material", "-----BEGIN CERTIFICATE-----\nordinary-certificate", "https://host:8420/path", "postgres://host:5432/db"):
         assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize('flag', ['token', 'password', 'api-key', 'db-password', 'authorization'])
+@pytest.mark.parametrize('value', ['syntheticCLI123', '"synthetic CLI 123"', "'synthetic CLI 123'",
+    '"synthetic\nCLI 123"', '"synthetic\\\" CLI123"', 'synthetic\\ CLI123',
+    '"synthetic CLI123', '\\"synthetic CLI 123\\"'])
+def test_cli_space_separated_credentials_mask_complete_argument(flag, value):
+    text = f'command --{flag} {value}'
+    safe = redact_sensitive_text(text)
+    assert 'synthetic' not in safe and 'CLI' not in safe and '123' not in safe
+    assert safe == f'command --{flag} <redacted>'
+
+
+@pytest.mark.parametrize('value', ['$TOKEN', '${TOKEN}', '"$TOKEN"', "'${TOKEN}'", '\\"$TOKEN\\"'])
+def test_cli_pure_environment_reference_preserves_original_bytes(value):
+    text = 'curl --token ' + value + ' --verbose'
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize('text', ['curl --max-tokens 4096 --password-hint ordinary --verbose',
+    'command --token-count 4 --secretary ordinary', '/synthetic/private/--token ordinary',
+    'cwd=/synthetic/private/work command --output result.txt', 'command --token\nnext-command'])
+def test_cli_non_secret_commands_paths_and_arguments_stay_visible(text):
+    assert redact_sensitive_text(text) == text
+
+
+def test_cli_quotes_concatenation_line_continuation_and_custom_marker():
+    text = 'command --password "synthetic one"suffix --token \\\nsyntheticTwo --output kept'
+    safe = redact_sensitive_text(text, redacted_marker='HIDDEN')
+    assert safe == 'command --password HIDDEN --token \\\nHIDDEN --output kept'
+    assert redact_sensitive_text('command --password ordinary', code_file=True) == 'command --password ordinary'
+    assert 'ordinary' not in redact_sensitive_text('command --password ordinary', redact_assignment_labels=True)
+
+
+def test_cli_json_encoded_escaped_quote_cannot_end_secret_early():
+    import json
+
+    encoded = json.dumps({'command': 'command --token "synthetic\\" CLI 123" --output kept'})
+    safe = redact_sensitive_text(encoded)
+    assert 'synthetic' not in safe and 'CLI' not in safe and '123' not in safe
+    assert '--output kept' in safe
+
+
+@pytest.mark.parametrize('text', ['--token "' + 'x ' * 20000,
+    '--' + 'x' * 20000 + '-password ' + 'y' * 20000,
+    '--password-hint ordinary ' * 2000, '--token "' + '\\"' * 20000])
+def test_cli_adversarial_long_text_retains_linear_budget(text):
+    from agent_py_agent.tests.test_log_redaction_variable_refs import _assert_redacts_within_budget
+
+    _assert_redacts_within_budget('cli-secret-arguments', text)
+
+
+def test_cli_unclosed_boundary_reports_only_structure_without_releasing_tail():
+    events = []
+    raw = 'HEAD fake --token "synthetic-secret\nTAIL_MUST_STAY_HIDDEN'
+    safe = redact_sensitive_text(raw, redaction_events=events)
+    assert safe == 'HEAD fake --token <redacted>'
+    assert events == [{'code': 'UNCLOSED_CREDENTIAL_ARGUMENT', 'start': 10,
+        'end': len(raw), 'hidden_through': 'end_of_text'}]
+    assert 'synthetic' not in repr(events) and 'TAIL' not in repr(events)
+    for value in ('"<redacted>"', '"<redacted>synthetic-secret"', '"synthetic-secret"',
+                  '\\"synthetic-secret\\"'):
+        events = []
+        safe = redact_sensitive_text('fake --token ' + value + '\nCLOSED_TAIL', redaction_events=events)
+        assert 'synthetic-secret' not in safe and safe.endswith('CLOSED_TAIL')
+        assert events == []
+
+
+@pytest.mark.parametrize('value', ['<redacted>synthetic-suffix',
+    '<redacted><redacted>synthetic-suffix', '[REDACTED]synthetic-suffix',
+    '"<redacted>"synthetic-suffix'])
+def test_cli_untrusted_redaction_marker_cannot_release_adjacent_literal(value):
+    text = 'fake --token ' + value + ' --output kept'
+    safe = redact_sensitive_text(text)
+    assert safe == 'fake --token <redacted> --output kept'
+    assert redact_sensitive_text(safe) == safe
+
+
+def test_cli_marker_hardening_keeps_empty_redirection_and_single_marker_contract():
+    for raw in ('fake --token < input.txt', 'fake --token <input.txt',
+                'fake --token >output.txt', 'fake --token\nnext-command',
+                'fake --token <redacted> --output kept'):
+        assert redact_sensitive_text(raw) == raw
+
+
+def test_complete_json_remains_parseable_across_model_display_and_final_projection():
+    import json
+
+    from agent_py_agent.agent.conversation.channels import project_user_reply
+    from agent_py_agent.agent.tooling.mcp_client import sanitize_credentials
+    from agent_py_agent.agent.tooling.output_projection import redact_tool_output_text
+
+    ref = 'tool-operation://synthetic-run/tool_operation:synthetic-op'
+    raw = {'redacted_input': {'command': 'python -c \'print("fake --token <redacted> --password <redacted>\')'},
+           'result_ref': ref, 'tool_call': {'duration_ms': 7, 'executed': True,
+               'effect_outcome': 'failed', 'error': {'code': 'COMMAND_FAILED'}},
+           'model_cached_input_tokens': 128, 'api_key': 'synthetic-private-value'}
+    text = json.dumps(raw, ensure_ascii=False)
+    for project in (lambda x: redact_tool_output_text(x, redaction='default'), sanitize_credentials,
+                    lambda x: project_user_reply(x).content,
+                    lambda x: project_user_reply(x, finalized=True).content,
+                    lambda x: redact_tool_output_text(x, redaction='default')):
+        text = project(text)
+        value = json.loads(text)
+        assert value['result_ref'] == ref and value['tool_call']['duration_ms'] == 7
+        assert value['tool_call']['executed'] is True and value['model_cached_input_tokens'] == 128
+        assert 'synthetic-private-value' not in text
+        assert '凭据引号未闭合' not in text
+    assert json.loads(redact_tool_output_text(text, redaction='default')) == value
+
+
+def test_unclosed_secret_is_limited_to_declared_json_string_field():
+    import json
+
+    from agent_py_agent.agent.conversation.channels import project_user_reply
+
+    text = json.dumps({'command': 'fake --token "synthetic-hidden\nprivate tail',
+                       'result_ref': 'tool-operation://synthetic/operation', 'safe_tail': 'KEPT'})
+    final = project_user_reply(text, finalized=True)
+    value = json.loads(final.content)
+    assert 'synthetic-hidden' not in final.content and 'private tail' not in final.content
+    assert value['result_ref'] == 'tool-operation://synthetic/operation' and value['safe_tail'] == 'KEPT'
+    assert final.projection_status == 'plain_text'
+
+
+def test_nested_json_log_chunk_keeps_closed_host_header_and_result_reference():
+    import json
+
+    from agent_py_agent.agent.conversation.channels import project_user_reply
+    from agent_py_agent.agent.tooling.mcp_client import sanitize_credentials
+    from agent_py_agent.agent.tooling.output_projection import redact_tool_output_text
+
+    header = {'redacted_input': {'command': 'python -c \'print("fake --token <redacted> --password <redacted>\')'},
+              'return_code': 7, 'operation_id': 'synthetic-operation'}
+    text = json.dumps({'chunks': [{'stream': 'host', 'text': json.dumps(header)}],
+                       'result_ref': 'tool-operation://synthetic/operation', 'coverage': 'complete'})
+    for project in (lambda x: redact_tool_output_text(x, redaction='default'), sanitize_credentials,
+                    lambda x: project_user_reply(x).content,
+                    lambda x: project_user_reply(x).content):
+        text = project(text)
+        outer = json.loads(text)
+        inner = json.loads(outer['chunks'][0]['text'])
+        assert inner['return_code'] == 7 and inner['operation_id'] == 'synthetic-operation'
+        assert outer['result_ref'] == 'tool-operation://synthetic/operation'
+
+
+@pytest.mark.parametrize("flag", ["token", "secret", "api-key", "apikey", "access-key", "auth-token"])
+def test_closed_cli_marker_stays_idempotent_inside_generic_python_repr(flag):
+    import ast
+
+    command = redact_sensitive_text("tool --" + flag + " 'synthetic secret 719'")
+    source = "evidence = " + repr([command]) + "\n"
+    assert "synthetic" not in command
+    assert redact_sensitive_text(source) == source
+    assert redact_sensitive_text(redact_sensitive_text(source)) == source
+    assert ast.literal_eval(ast.parse(source).body[0].value) == [command]
+
+
+@pytest.mark.parametrize("tail", ["syntheticSuffix", "'syntheticSuffix'", '"syntheticSuffix"'])
+def test_cli_marker_embedded_in_host_text_cannot_release_adjacent_literal(tail):
+    text = "evidence = ['tool --token <redacted>" + tail + "']"
+    assert "syntheticSuffix" not in redact_sensitive_text(text)
+
+
+def test_empty_custom_cli_marker_never_becomes_a_trusted_empty_boundary():
+    text = "log = ['tool --token 'synthetic secret 719']"
+    assert "synthetic" not in redact_sensitive_text(text, redacted_marker="")
+
+
+def test_structured_redaction_bounds_depth_and_cycles_without_masking_normal_siblings():
+    normal = {'public': ['ordinary', {'value': 7}], 'password': 'synthetic-boundary-secret'}
+    assert redact_sensitive_value(normal) == {'public': ['ordinary', {'value': 7}], 'password': '<redacted>'}
+    repeated = {'value': 7}
+    assert redact_sensitive_value([repeated, repeated]) == [{'value': 7}, {'value': 7}]
+    cycle = {'public': 'preserved'}
+    cycle['next'] = cycle
+    assert redact_sensitive_value(cycle) == {'public': 'preserved', 'next': '<redacted>'}
+    deep = {'password': 'synthetic-deep-secret'}
+    for _ in range(2000):
+        deep = [deep]
+    safe = redact_sensitive_value({'deep': deep, 'public': normal['public']})
+    assert safe['public'] == normal['public']
+    encoded = json.dumps(safe)
+    assert '<redacted>' in encoded and 'synthetic-deep-secret' not in encoded
+
+
+def test_embedded_json_redaction_shares_depth_budget_and_fails_closed_on_decoder_recursion():
+    from agent_py_agent.agent.common.log_redaction import redact_sensitive_output_text
+    text = '{"password":"synthetic-encoded-secret"}'
+    for _ in range(8):
+        text = json.dumps({'nested': text})
+    cleaned = redact_sensitive_output_text(text)
+    assert 'synthetic-encoded-secret' not in cleaned and '<redacted>' in cleaned
+    nested = text
+    for _ in range(55):
+        nested = [nested]
+    cleaned = json.dumps(redact_sensitive_value({'nested': nested, 'public': 7}))
+    assert 'synthetic-encoded-secret' not in cleaned and '<redacted>' in cleaned
+    deep = '{"public":' + '[' * 3000 + '"synthetic-untrusted-deep"' + ']' * 3000 + '}'
+    cleaned = redact_sensitive_output_text(deep)
+    assert 'synthetic-untrusted-deep' not in cleaned and '<redacted>' in cleaned
+
+
+def test_bounded_redaction_preserves_public_keyword_signatures_and_custom_marker():
+    import inspect
+
+    from agent_py_agent.agent.common.log_redaction import redact_sensitive_output_text
+
+    for function in (redact_sensitive_value, redact_sensitive_output_text):
+        assert inspect.signature(function) == inspect.signature(function.__wrapped__)
+        with pytest.raises(TypeError):
+            function('public', 'extra-positional')
+        with pytest.raises(TypeError):
+            function('public', unsupported_option=True)
+    with pytest.raises(TypeError):
+        redact_sensitive_output_text('public', field_name='password')
+    assert redact_sensitive_value('synthetic-secret', field_name='password', redacted_marker='[hidden]') == '[hidden]'
+    cycle = []
+    cycle.append(cycle)
+    assert redact_sensitive_value(cycle, redacted_marker='[hidden]') == ['[hidden]']
+
+
+def test_bounded_redaction_only_suppresses_recursion_and_restores_context():
+    from agent_py_agent.agent.common.log_redaction import redact_sensitive_output_text
+
+    class BrokenValue:
+        def __str__(self):
+            raise RuntimeError('synthetic-render-failure')
+
+    class RecursiveValue:
+        def __str__(self):
+            raise RecursionError('synthetic-recursion')
+
+    with pytest.raises(RuntimeError, match='synthetic-render-failure'):
+        redact_sensitive_output_text(BrokenValue())
+    assert redact_sensitive_output_text(RecursiveValue(), redacted_marker='[hidden]') == '[hidden]'
+    assert redact_sensitive_value({'public': 7, 'password': 'synthetic-secret'}) == {'public': 7, 'password': '<redacted>'}

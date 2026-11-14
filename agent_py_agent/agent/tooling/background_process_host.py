@@ -38,7 +38,7 @@ from .process_session_store import ProcessSessionStore
 
 # 后台进程启动首秒保持50ms观察；之后由退避函数降低空闲唤醒，仍不提前回收组长。
 _HOST_POLL_SECONDS = 0.05
-# 托管进程运行满一分钟后的常态观察间隔（秒）：长驻服务的 host 不再每秒4次读记录；停止由清理方直接终止，不依赖此间隔。
+# 托管进程运行满一分钟后的常态观察间隔（秒）；停止方先给原host有界协作窗口，超时才沿原精确实例清理。
 _HOST_STEADY_POLL_SECONDS = 1.0
 
 

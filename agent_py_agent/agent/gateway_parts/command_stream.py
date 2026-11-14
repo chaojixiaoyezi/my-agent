@@ -62,7 +62,7 @@ class _CommandStream:
 # LLM: execute 在当前 HTTP 线程调用一次；原 StreamApproval 使用完整绑定和空缓存，退出只关闭本连接的辅助线程。
 # 函数用途: 建立命令消息流，等待真实审批并运输原执行结果。
 def serve_command_stream(handler, paths: GatewayPaths, owner: OwnerIdentity, request_id: str,
-                         execute: Callable) -> None:
+                         execute: Callable, *, interactive: bool = True) -> None:
     chunk_path = command_approval_path(paths, owner, request_id)
     stream = _CommandStream(handler, request_id)
     token = CancellationToken(_external_check=stream.disconnected.is_set)
@@ -90,7 +90,8 @@ def serve_command_stream(handler, paths: GatewayPaths, owner: OwnerIdentity, req
     try:
         stream.publish("connected", {"owner": asdict(owner)})
         heartbeat.start()
-        result = execute(request_permission, token)
+        # 心跳运输不代表存在人工审批；普通命令继续由原授权链裁决无人审批。
+        result = execute(request_permission if interactive else None, token)
         stream.publish("result", result)
     except OSError:
         stream.disconnected.set()

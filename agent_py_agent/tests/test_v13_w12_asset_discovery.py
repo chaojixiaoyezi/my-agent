@@ -289,13 +289,13 @@ def test_assets_sort_filter_and_cursor_negative_cases(host, provider):
     assert cursor and first['coverage'] == 'partial'
     second = ok(host, 'easm.assets.list', {'risk': 'high', 'limit': 1, 'cursor': cursor})
     assert second['items'][0]['value'] == 'earlier.example.test' and second['next_cursor'] is None
-    failed(invoke(host, 'easm.assets.list', {'risk': 'low', 'limit': 1, 'cursor': cursor}), 503, 'CURSOR_EXPIRED')
+    failed(invoke(host, 'easm.assets.list', {'risk': 'low', 'limit': 1, 'cursor': cursor}), 410, 'CURSOR_EXPIRED')
     failed(invoke(host, 'easm.assets.list', {'risk': 'high', 'limit': 1, 'cursor': cursor}, subject='bob'),
-        503, 'CURSOR_EXPIRED')
+        410, 'CURSOR_EXPIRED')
     failed(invoke(host, 'easm.assets.list', {'risk': 'high', 'limit': 1, 'cursor': cursor + 'x'}),
-        503, 'CURSOR_EXPIRED')
+        410, 'CURSOR_EXPIRED')
     ok(host, 'easm.scan.run', {'targets': ['example.test']}, key=idem())
-    failed(invoke(host, 'easm.assets.list', {'risk': 'high', 'limit': 1, 'cursor': cursor}), 503, 'CURSOR_EXPIRED')
+    failed(invoke(host, 'easm.assets.list', {'risk': 'high', 'limit': 1, 'cursor': cursor}), 410, 'CURSOR_EXPIRED')
 
 
 # LLM: ready 的 context 可为空，只读宿主绑定，权限在 invoke 中实时执行。

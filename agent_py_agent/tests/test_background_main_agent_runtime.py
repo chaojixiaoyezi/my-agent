@@ -22,6 +22,7 @@ from agent_py_agent.agent.conversation import background_execution as execution_
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
     CONVERSATION_EXECUTION_CWD_ATTR,
+    CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
@@ -256,6 +257,7 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     assert params.task_attributes == {
         "conversation_thread_id": "thread-1",
         "conversation_task_id": "task-1",
+        CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR: False,
         CONVERSATION_REQUEST_ID_ATTR: "task-1",
         CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
         CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,

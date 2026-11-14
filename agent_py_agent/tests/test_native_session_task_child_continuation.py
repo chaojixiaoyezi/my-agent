@@ -1,5 +1,6 @@
 """原BusinessClient→SessionTask→消耗正文→真实child通知，恢复不假造用户历史或重报结果。"""
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -70,7 +71,8 @@ def test_native_controller_child_reuses_original_consumed_task_and_context_witho
         TaskTurnOutcome,
         close_out_turn,
     )
-    assert close_out_turn(agent, task.task_id, TaskTurnOutcome(ok=True, summary='original cycle')) is not None
+    # 子事件恢复必须在原TaskLink仍active时读取；成功文本不能提前发布订单终态。
+    assert close_out_turn(agent, task.task_id, TaskTurnOutcome(ok=True, summary='premature cycle')) is None
     before = store.session_tasks.require(task.task_id).to_dict()
     context = _goal_runtime_context(agent, store, request)
     assert context.task_objective == task.goal
@@ -83,9 +85,13 @@ def test_native_controller_child_reuses_original_consumed_task_and_context_witho
     assert not any(row.role == 'user' for row in store.messages.recent(request.thread_id, limit=20))
     # 恢复读取不消费第二次正文，也不复活/覆盖已结案的SessionTask或重发同状态结果。
     assert store.guidance.receipt(task.body_dedupe_key).status == 'consumed'
+    assert store.session_tasks.require(task.task_id).to_dict() == before
+    # 本单元用例未运行模型执行体；显式补其原TaskLink完成事实，而不是靠close_out猜完成。
+    store.tasks.update_status({'task_id': task.task_id, 'status': 'completed'})
+    assert close_out_turn(agent, task.task_id, TaskTurnOutcome(ok=True, summary='original cycle')) is not None
+    completed = store.session_tasks.require(task.task_id).to_dict()
     assert close_out_turn(agent, task.task_id, TaskTurnOutcome(ok=True, summary='must not overwrite')) is None
-    after = store.session_tasks.require(task.task_id).to_dict()
-    assert after == before
+    assert store.session_tasks.require(task.task_id).to_dict() == completed
     assert request.wake_signal['source_agent_id'] == child.id
 
 
@@ -147,7 +153,11 @@ def test_native_submit_main_cycle_then_real_child_event_continues_without_repeat
     from agent_py_agent.agent.backends import ModelResponse
     from agent_py_agent.agent.backends.base import EchoBackend
     from agent_py_agent.agent.conversation import FakeDeliveryService
-    from agent_py_agent.agent.conversation.session_task_report import result_report_key
+    from agent_py_agent.agent.conversation.session_task_report import (
+        TaskTurnOutcome,
+        close_out_turn,
+        result_report_key,
+    )
     from agent_py_agent.cli.gateway_loops import _build_background_scheduler
     from agent_py_agent.tests.test_business_v12_background_scheduling import add_echo_profile
     add_echo_profile(native[1])
@@ -166,9 +176,10 @@ def test_native_submit_main_cycle_then_real_child_event_continues_without_repeat
     scheduler = _build_background_scheduler(agent, FakeDeliveryService())
     scheduler.tick_thread(task.target_thread_id)
     saved = store.session_tasks.require(task.task_id)
-    assert saved.status == 'done'
+    assert saved.status == 'accepted'
     assert store.tasks.load_report(task.task_id)[0].status == 'active'
-    original_report = store.guidance.receipt(result_report_key(saved)).entry.guidance_id
+    result_key = result_report_key(replace(saved, status='done'))
+    assert store.guidance.receipt(result_key) is None
     agent.subagents.lifecycle.set_status(child.id, 'DONE')
     child = agent.subagents.load(child.id)
     request = _publish(agent, task, child)
@@ -179,5 +190,111 @@ def test_native_submit_main_cycle_then_real_child_event_continues_without_repeat
     assert len(seen) == 2
     assert contexts[-1].to_dict() == task.metadata['business_context']
     assert task.goal in seen[-1]
-    assert store.session_tasks.require(task.task_id).status == 'done'
-    assert store.guidance.receipt(result_report_key(saved)).entry.guidance_id == original_report
+    completed = store.session_tasks.require(task.task_id)
+    assert completed.status == 'done'
+    # 真实第二轮finalizer完成原link，不在此测试手工补账。
+    assert store.tasks.load_report(task.task_id)[0].status == 'completed'
+    receipt = store.guidance.receipt(result_key)
+    assert receipt is not None
+    assert close_out_turn(agent, task.task_id, TaskTurnOutcome(ok=True, summary='must not repeat')) is None
+    assert store.guidance.receipt(result_key).entry.guidance_id == receipt.entry.guidance_id
+
+
+def _raw_message_case(native):
+    from agent_py_agent.tests.test_business_v12_background_scheduling import add_echo_profile
+
+    _, agent = native
+    add_echo_profile(agent)
+    store = agent.conversation_store
+    space = ok(native, 'spaces.create', {'name': 'raw-message-origin'}, idempotency_key='raw-origin-space')['space_id']
+    target = ok(native, 'background_agents.create', {'space_id': space, 'name': 'raw-message-worker'},
+                idempotency_key='raw-origin-worker')['agent']['agent_id']
+    ok(native, 'background_agents.messages.send', {'agent_id': target, 'text': '原后台消息正文A', 'input_kind': 'message'},
+       idempotency_key='raw-origin-message')
+    original, = [item for item in store.wakes.pending(limit=20) if item.thread_id == target]
+    root = original.wake_signal_id
+    store.tasks.bind({'thread_id': target, 'task_id': root, 'goal': 'Structured session_message event', 'status': 'active'})
+    params = _run_params(target, BackgroundRunRequest(thread_id=target, reason='session_message',
+        wake_signal=original.to_dict()), agent)
+    params.tool_protocol_snapshot = make_test_protocol_snapshot(run_id=root)
+    params.live_archive_state, params.tool_context, params.runtime_injections = {}, [], []
+    assert inject_pending_guidance(agent, params)
+    assert mark_injected_turn_input_submitted(agent, params, provider_call_id='raw-original-provider') == 1
+    assert acknowledge_injected_turn_input(agent, params) == 1
+    store.wakes.mark_handled(root)
+    child = agent.subagents.create_run(goal='核对', thought='', plan=['核对'], owner=agent.home_paths.owner_id,
+        parent_id=root, root_id=root, attributes={'conversation_thread_id': target,
+            'conversation_request_id': root, 'conversation_task_id': root})
+    agent.subagents.lifecycle.set_status(child.id, 'DONE')
+    child = agent.subagents.load(child.id)
+    store.tasks.bind({'thread_id': target, 'task_id': child.id, 'goal': child.goal,
+                      'task_path': child.agent_run_workspace_dir})
+    task = SimpleNamespace(task_id=root, target_thread_id=target)
+    return agent, original, child, _publish(agent, task, child)
+
+
+def test_raw_background_message_child_restores_only_original_consumed_body(native):
+    agent, original, child, request = _raw_message_case(native)
+    store = agent.conversation_store
+    ok(native, 'background_agents.messages.send', {'agent_id': request.thread_id, 'text': '同线程另一条后继正文B', 'input_kind': 'message'},
+       idempotency_key='raw-next-message')
+    before = [(item.wake_signal_id, item.to_dict()) for item in store.wakes.pending(limit=20)]
+    context = _goal_runtime_context(agent, store, request)
+    assert context.task_objective == '原后台消息正文A'
+    assert context.durable_task_id == original.wake_signal_id
+    assert not any(row.role == 'user' for row in store.messages.recent(request.thread_id, limit=20))
+    assert [(item.wake_signal_id, item.to_dict()) for item in store.wakes.pending(limit=20)] == before
+    assert child.root_id == original.wake_signal_id
+
+
+@pytest.mark.parametrize('fault', ['other_root', 'other_child', 'source_owner', 'unconsumed', 'missing_origin'])
+def test_raw_message_origin_refuses_cross_task_or_unreadable_original(native, fault):
+    from agent_py_agent.agent.conversation.execution_threads import lifecycle_session_message_origin
+
+    agent, original, child, request = _raw_message_case(native)
+    store = agent.conversation_store
+    if fault == 'other_root':
+        request.wake_signal['metadata']['events'] = [{**request.wake_signal, 'root_task_id': 'other-root'}]
+    elif fault == 'other_child':
+        request.wake_signal['source_agent_id'] = 'another-child'
+    elif fault == 'source_owner':
+        sender = store.threads.require(original.metadata['origin_thread_id'])
+        store.threads.update_atomic(sender.thread_id, lambda current: replace(current, owner_id='local/other'))
+    elif fault == 'unconsumed':
+        path = store.storage.guidance_dedupe_path(original.metadata['message_dedupe_key'])
+        receipt = store.guidance.ledger.read_receipt(path)
+        store.guidance.ledger.write_receipt(path, replace(receipt, status='submitted').to_dict())
+    else:
+        (store.storage.wake_handled_dir / (original.wake_signal_id + '.json')).unlink()
+        assert lifecycle_session_message_origin(store, request.thread_id, request.task_id, request.wake_signal,
+            reason=request.reason) is None
+        with pytest.raises(DataCorruptionError, match='background request input is missing'):
+            _goal_runtime_context(agent, store, request)
+        return
+    with pytest.raises(DataCorruptionError):
+        lifecycle_session_message_origin(store, request.thread_id, request.task_id, request.wake_signal, reason=request.reason)
+
+
+@pytest.mark.parametrize('fault', ['', 'conflicting_request', 'coalesced_conflict', 'wrong_capability'])
+def test_legacy_capability_wake_requires_exact_canonical_child_request(native, fault):
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+    agent, original, child, request = _raw_message_case(native)
+    current = agent.subagents.load(child.id)
+    current.capability_requests.append(CapabilityRequest('original-capability', child.id, 'test', 'read'))
+    agent.subagents.save(current)
+    wake = request.wake_signal
+    wake['reason'] = 'subagent_capability_request_open'
+    wake['metadata'] = {'request_id': 'original-capability'}
+    if fault == 'conflicting_request':
+        wake['metadata']['conversation_request_id'] = 'another-request'
+    elif fault == 'coalesced_conflict':
+        wake['metadata']['events'] = [{**wake, 'metadata': {'conversation_request_id': 'another-request'}}]
+    elif fault == 'wrong_capability':
+        wake['metadata']['request_id'] = 'another-capability'
+    if fault:
+        with pytest.raises(DataCorruptionError):
+            _goal_runtime_context(agent, agent.conversation_store, request)
+    else:
+        context = _goal_runtime_context(agent, agent.conversation_store, request)
+        assert context.task_objective == '原后台消息正文A'
+        assert context.durable_task_id == original.wake_signal_id

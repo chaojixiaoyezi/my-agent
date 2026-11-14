@@ -476,3 +476,61 @@ def test_fixture_controls_finish_and_restore_undo_when_nested(fail_second_finish
         assert patch.undo == original_undo
     finally:
         original_undo()
+
+
+@pytest.mark.parametrize('internal', ['capability_request', 'record_lesson'])
+def test_explicit_child_only_delegation_uses_ready_owner_authority(tmp_path, monkeypatch, internal):
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+    from agent_py_agent.agent.agent_core.orchestration.delegation_constraints import (
+        ToolPermissionDeniedError,
+    )
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'),
+                                   enable_subagents=True), workspace)
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+
+    agent._current_run_params = RunParams(allowed_tools=['create_subagents', 'read_file'], task_attributes={})
+    raw = {'role': 'reader', 'allowed_tools': ['read_file', internal],
+           'delegation_constraints': {'permitted_tools': ['read_file', internal]}}
+    parent_snapshot = agent.tools.runtime_snapshot()
+    assert internal not in parent_snapshot.available_tool_names
+    created = create_run_params(agent, raw, '读取合成材料', ['read_file', internal])
+    assert set(created.allowed_tools) == {'read_file', internal}
+    assert internal not in agent.tools.runtime_snapshot().available_tool_names
+    outside = {'role': 'reader', 'delegation_constraints': {'permitted_tools': ['read_file', 'write_file']}}
+    with pytest.raises(ToolPermissionDeniedError):
+        create_run_params(agent, outside, '读取合成材料', ['read_file', 'write_file'])
+    assert agent.subagents.list_runs() == []
+    agent.tools.disabled_tool_names.add(internal)
+    with pytest.raises(ToolPermissionDeniedError):
+        create_run_params(agent, raw, '读取合成材料', ['read_file', internal])
+
+
+def test_nested_child_only_delegation_cannot_revive_parent_disabled_entry(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import (
+        _parent_tool_authority_names,
+        _within_parent_tool_authority,
+    )
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'),
+                                   enable_subagents=True), workspace)
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+
+    agent._current_run_params = RunParams(allowed_tools=['create_subagents', 'read_file'], task_attributes={})
+    parent = agent.subagents.create_run(goal='合成父级', allowed_tools=['read_file', 'capability_request'])
+    parent.effective_permissions['disabled_tools'] = ['capability_request']
+    agent.subagents.save(parent)
+    previous = set_current_subagent_context(agent, run_id=parent.id)
+    try:
+        assert 'capability_request' not in _parent_tool_authority_names(agent)
+        assert 'capability_request' not in _within_parent_tool_authority(agent, ['read_file', 'capability_request'])
+    finally:
+        restore_current_subagent_context(agent, previous)

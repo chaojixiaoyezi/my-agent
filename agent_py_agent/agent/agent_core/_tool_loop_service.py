@@ -543,7 +543,7 @@ def _fit_native_ir_to_shared_budget(
 # 不写模型/Store/pin，不改变全局缩减观测失效规则；native与共享恢复调用方须传同次校准和prompt。
 # 函数用途: 局部折叠后同步本轮计量基线；旧锁存不重复裁剪或移动失败压力基线。
 def _continue_after_compact_failure(agent, params, estimator, *, reason: str, force: bool, fresh_failure: bool = True,
-                                  calibration=None, prompt: object = "") -> int:
+                                  calibration=None, prompt: object = "", input_ceiling_tokens: int | None = None) -> int:
     from ..conversation.compact_calibration import calibrated_compact_request_tokens
     from ..conversation.compact_guard import ConversationCompactError
     from .model.context_pressure import (
@@ -559,6 +559,11 @@ def _continue_after_compact_failure(agent, params, estimator, *, reason: str, fo
         raise ConversationCompactError("降级请求的完整容量未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     policy = _native_compact_policy(agent, params)
     ceiling = model_request_input_ceiling(agent, policy.context_window_tokens)
+    if reason == "COMPACT_CANDIDATE_TOO_LARGE":
+        # 后续同回合的锁存续跑也守原用户门；不能首轮收敛后又退回较宽物理线。
+        ceiling = min(ceiling, policy.trigger_tokens)
+    if input_ceiling_tokens is not None:
+        ceiling = min(ceiling, input_ceiling_tokens)
     if ceiling <= 0:
         raise ConversationCompactError("模型输入容量未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     before = estimator()
@@ -1870,6 +1875,8 @@ def _ptl_reclaim_oldest(
 # LLM: 执行期间暂存本轮参数，并在finally恢复先前值；实际调用沿原追踪及权限链执行。
 # 函数用途: 在正确工具轮上下文中运行一条工具调用。
 def execute_one_tool_call(agent, request: ToolCallExecuteParams):
+    from .runtime.capability_refresh import refresh_subagent_capabilities
+    request = replace(request, params=refresh_subagent_capabilities(agent, request.params, tool_name=request.call.tool_name))
     sentinel = object()
     previous = getattr(agent, "_current_tool_loop_params", sentinel)
     agent._current_tool_loop_params = request.params
@@ -2118,6 +2125,8 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
         from .tool_loop.response_decision import _discard_output_limit_segments
 
         _discard_output_limit_segments(params, final_response)
+        from ..subagents.capability_updates import release_capability_updates
+        release_capability_updates(params._capability_update_source)
         params.live_archive_state.pop("_defer_assistant_delivery_confirmation", None)
 
 
@@ -2198,13 +2207,30 @@ def _model_turn_or_retry(
             "", ModelResponse(text=stale_message, backend=backend), True, False,
             provider_response_repairs, loop_params,
         )
+
+    # 已收口的attempt先走原停止回执，不能让能力刷新抢先把正常收口变成身份异常。
+    from .runtime.capability_refresh import refresh_subagent_capabilities
+
+    loop_params = refresh_subagent_capabilities(agent, loop_params)
+
+    def retry_allowed():
+        from ..model_request_selection import _HOST
+
+        host = _HOST.get()
+        recovery = getattr(host, "compact_recovery", None)
+        # 摘要内部负责自身退避；已消费但未提交的恢复载体不能再采样旧业务输入。
+        if (recovery is not None and getattr(recovery, "consumed", False)
+                and not getattr(recovery, "committed", False)
+                and getattr(recovery, "resolved_input", None) is None):
+            return False
+        return not active_turn_input_has_unconfirmed_delivery(
+            getattr(loop_params, "live_archive_state", None))
+
     try:
         begin_goal_model_turn(agent, loop_params)
         turn = sample_and_accept_model_response(
             lambda: next_tool_loop_model_response(agent, loop_params, tool_rounds),
-            retry_allowed=lambda: not active_turn_input_has_unconfirmed_delivery(
-                getattr(loop_params, "live_archive_state", None)
-            ),
+            retry_allowed=retry_allowed,
             account_response=partial(account_goal_model_response, agent),
             restore_rejected_input=partial(restore_injected_turn_input_for_provider_retry, agent),
             acknowledge_input=partial(acknowledge_injected_turn_input, agent),
@@ -2662,6 +2688,57 @@ def _final_response_after_repeated_failure(
 # LLM: 与持久 tool_operations 的 UNKNOWN 恢复规则一致，只读取 effect_outcome；
 # 不能凭调用次数或 TOOL_TIMEOUT 声称副作用已确定。已证实退出的超时由 shell 返回 failed。
 # 函数用途: 首次遇到真实未知执行结果时记录收口状态并追加一次说明，防止运行中放行、重启却失败。
+def _inspect_unknown_original_operation(agent, record):
+    """当前快照与原工具账交叉核身份；只点查一次，不重放、结算或授权其它工具。"""
+    from ..tooling.models import ToolRuntimeSnapshot
+    from ..tooling.runtime_contracts import ToolResult
+    from .tool_loop.recovery import runtime_run_scope
+
+    if not isinstance(record.result, ToolResult) or record.result.operation is None:
+        return None
+    try:
+        scope = runtime_run_scope(agent, record.params)
+        snapshot = getattr(record.params, 'tool_runtime_snapshot', None)
+        operation, call = record.result.operation, record.call
+        if (not isinstance(snapshot, ToolRuntimeSnapshot) or snapshot.run_id != scope.run_id
+                or scope.owner_id != getattr(getattr(agent, 'home_paths', None), 'owner_id', None)
+                or call.run_id != scope.run_id or call.attempt_id != scope.attempt_id
+                or operation.operation_id != call.operation_id or operation.args_hash != call.args_hash):
+            return {'lookup': 'unavailable', 'reason': 'original_operation_scope_mismatch'}
+        runtime = snapshot.runtime(call.tool_name)
+        if runtime is None:
+            return {'lookup': 'unavailable', 'reason': 'original_handler_not_in_snapshot'}
+        store = getattr(getattr(agent, 'tools', None), 'operation_store', None)
+        get = getattr(store, 'get_tool_operation', None)
+        if not callable(get):
+            return {'lookup': 'unavailable', 'reason': 'original_operation_store_unavailable'}
+        saved = get(owner_id=scope.owner_id, run_id=scope.run_id, operation_id=operation.operation_id)
+        if (saved is None or saved.owner_id != scope.owner_id or saved.run_id != scope.run_id
+                or saved.task_id != scope.task_id or saved.attempt_id != scope.attempt_id
+                or saved.operation_id != call.operation_id or saved.tool != call.tool_name
+                or saved.args_hash != call.args_hash):
+            return {'lookup': 'unavailable', 'reason': 'original_operation_record_mismatch'}
+        facts = {'lookup': 'owner_bound_tool_operation_store.get_tool_operation', 'read_only': True,
+            'operation_id': saved.operation_id, 'run_id': saved.run_id, 'task_id': saved.task_id,
+            'attempt_id': saved.attempt_id, 'canonical_status': saved.status,
+            'tool_effect_outcome': 'unknown', 'replay_permitted': False}
+        from ..gateway_parts.business_api import inspect_registered_business_receipt
+        try:
+            business = inspect_registered_business_receipt(runtime, call.arguments)
+            if business is not None:
+                facts['business_receipt'] = business
+                facts['business_query'] = {'action': 'operations.get',
+                    'params': {'operation_id': business['operation_id']}}
+        except Exception as error:  # noqa: BLE001 查账不能推翻已发生的unknown或让缺源变成功。
+            facts['business_query_unavailable'] = {'error_type': type(error).__name__,
+                'code': str(getattr(error, 'code', '') or ''),
+                'next_action': '核对当前读取权限及原来源记录；原工具仍未知，禁止重新发起原写。'}
+        return facts
+    except Exception as error:  # noqa: BLE001 仅返回脱敏类型，不泄露原参数、路径或异常正文。
+        return {'lookup': 'unavailable', 'error_type': type(error).__name__,
+            'reason': 'original_operation_read_unavailable', 'replay_permitted': False}
+
+
 def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     if record.params.repeated_failure_halt is not None:
         return
@@ -2684,13 +2761,19 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
             bool(getattr(record.result, "handler_executed", False)),
         ),
     )
+    inspection = _inspect_unknown_original_operation(agent, record)
+    if inspection is not None:
+        record.params.tool_context.append('[host-original-operation-inspection]\n' +
+            json.dumps(inspection, ensure_ascii=False))
     record.params.tool_context.append(
         "[tool-system]\n"
         f"工具 {record.call.tool_name} 出现副作用结果不确定"
         "(TOOL_OPERATION_OUTCOME_UNKNOWN)，系统无法确认操作是否生效。"
         "按错误合同该结果不可重试、需人工核对。本轮停止发起任何新的工具调用，"
-        "按未完成状态如实汇报：只说明已经执行的操作与不确定的事项，"
-        "不要继续尝试、重做或验证。"
+        "按未完成状态如实汇报：给出宿主已经只读查询的原operation_id与事实；"
+        "若business_receipt已确认completed/pending及target_refs，分别说明业务已接受/仍待决，"
+        "但不能把它升级为原工具unknown已结算。没有确证的部分仍未知。"
+        "不要继续尝试、重做或调用其它工具验证。"
     )
 
 

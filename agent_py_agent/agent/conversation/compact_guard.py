@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, TypeAlias
 
 from ..runtime_errors import RecoverableRuntimeError
@@ -41,6 +41,23 @@ class CompactCapacityFacts:
     candidates_tried: int
 
 
+@dataclass(frozen=True)
+class CompactRecoveryFacts:
+    """同次失败恢复预算与未提交证明；原工具可能已执行，不能把整个任务说成未执行。"""
+    current_tokens: int
+    trigger_tokens: int
+    recovery_target_tokens: int
+    context_window_tokens: int
+    physical_input_ceiling_tokens: int
+    known_output_reserve_tokens: int
+    requested_output_tokens: int | None
+    prior_tool_results: int
+    pressure_forced: bool
+    compact_committed: bool = False
+    next_request_sent: bool | None = False
+    prior_tools_replayed: bool = False
+
+
 # LLM: 压缩失败是类型化运行时事实，调用方不得从文字推断重试分类。
 #   capacity 只是失败时的诊断计量，不参与重试、熔断或错误码判定。
 # 类用途: 表示摘要候选或 checkpoint 未通过，Gateway 会按可恢复运行时错误如实上报。
@@ -49,11 +66,25 @@ class ConversationCompactError(RecoverableRuntimeError):
 
     # LLM: 压缩专用code与通用运行时error_code必须一致，供Gateway原样传播。
     # 函数用途: 保留具体压缩失败原因，避免外围把窗口越界误报成会话文件损坏；容量类失败可附带候选计量。
-    def __init__(self, message: str, *, code: str, capacity: CompactCapacityFacts | None = None) -> None:
+    def __init__(self, message: str, *, code: str, capacity: CompactCapacityFacts | None = None,
+                 recovery_facts: CompactRecoveryFacts | None = None) -> None:
         super().__init__(message)
         self.code = str(code)
         self.error_code = self.code
         self.capacity = capacity
+        self.recovery_facts = recovery_facts
+
+
+def local_compact_recovery_exhausted(*, capacity: CompactCapacityFacts | None = None,
+                                     recovery_facts: CompactRecoveryFacts | None = None) -> ConversationCompactError:
+    """宿主共同的局部收敛后再溢出终点；保留原预算，后续是否真的发送必须重新核实。"""
+    facts = replace(recovery_facts, next_request_sent=None) if recovery_facts is not None else None
+    return ConversationCompactError(
+        "COMPACT_LOCAL_RECOVERY_EXHAUSTED：临时工具视图已收敛一次但仍要求容量恢复，禁止重复相同候选。"
+        "原记录保留，旧工具不重放；附带的是该次恢复原预算，后续请求发送状态待核实。"
+        "下一步：调整 memory_compact_auto_trigger_max_tokens 或 memory_compact_summary_max_output_tokens 后继续。",
+        code="COMPACT_LOCAL_RECOVERY_EXHAUSTED", capacity=capacity, recovery_facts=facts,
+    )
 
 
 # LLM: 此类型化失败在持久线程熔断冷却期间阻止重复调用模型。
@@ -425,6 +456,7 @@ def compact_failure_progress_fields(exc: BaseException) -> dict[str, object]:
 
 __all__ = [
     "CompactCapacityFacts",
+    "CompactRecoveryFacts",
     "CompactInterruptCheck",
     "ConversationCompactCircuitOpenError",
     "ConversationCompactError",
@@ -436,6 +468,7 @@ __all__ = [
     "compact_partitions",
     "is_compact_transient_provider_failure",
     "is_provider_quota_failure",
+    "local_compact_recovery_exhausted",
     "raise_if_compact_interrupted",
     "record_compact_failure",
     "record_compact_vision_failure",

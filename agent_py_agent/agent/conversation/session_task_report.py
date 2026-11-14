@@ -54,6 +54,17 @@ def task_for_turn(agent: object, turn_id: str, *, include_terminal: bool = False
     tasks = getattr(store, "session_tasks", None)
     if tasks is None:
         return None
+    # 原生派活以canonical TaskID作turnID；先按精确主键读，不为每次结果补账扫描Owner历史。
+    load = getattr(tasks, 'load', None)
+    if callable(load):
+        try:
+            direct = load(bound_turn)
+        except (OSError, ValueError, TypeError):
+            return None
+        if direct is not None and direct.conversation_request_id == bound_turn:
+            if not include_terminal and direct.status in SESSION_TASK_TERMINAL_STATUSES:
+                return None
+            return direct
     try:
         loaded, load_errors = tasks.list_report(limit=0)
     except (OSError, ValueError, TypeError):
@@ -79,6 +90,7 @@ class TaskTurnOutcome:
     result_refs: tuple[str, ...] = ()
     # 与 result_refs 同一批交付项的稳定身份（path/artifact_id/sha256/size_bytes）；公开投影用它，不用路径。
     result_artifacts: tuple[dict, ...] = ()
+    delivery_artifact_diagnostics: tuple[dict, ...] = ()
 
 
 # LLM: 只在任务已经绑到某个回合时才推进；status 只允许 done/failed（状态机保证 accepted → 二者之一）。
@@ -108,6 +120,7 @@ def finish_task_for_turn(
                 summary=str(outcome.summary or ""),
                 result_refs=tuple(outcome.result_refs or ()),
                 result_artifacts=tuple(outcome.result_artifacts or ()),
+                delivery_artifact_diagnostics=tuple(outcome.delivery_artifact_diagnostics or ()),
             ),
         )
     except (OSError, ValueError, TypeError):

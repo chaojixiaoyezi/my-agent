@@ -170,7 +170,8 @@ def test_handoff_board_single_agent_rejection_and_list_cases(tmp_path: Path) -> 
 
     # 3.1 Spec description check
     spec = build_manage_handoff_board_model_spec()
-    assert "单代理独立执行时严禁调用本工具" in spec.description
+    assert "仅用于多代理协作" in spec.description
+    assert "单代理进度请用 Todo" in spec.description
 
     # 3.2 Foreground single agent with zero subagents
     subagents_mock = MagicMock()

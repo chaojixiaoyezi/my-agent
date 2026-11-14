@@ -18,7 +18,7 @@ from typing import Literal
 
 from ..assets import canonical_skill_name
 from ..assets.delivery_contracts import AssetDisabledError
-from ..assets.descriptor import execution_definition_ref
+from ..assets.descriptor import execution_definition_ref, workflow_output_contract_version
 from ..assets.script_store import ScriptStore
 from ..assets.skill_adapter import get_owner_skill_descriptor
 from ..assets.workflow_store import (
@@ -175,8 +175,10 @@ class _WorkflowRunLifecycle:
                  step_retry_runner=None,
                  watermark_committer=None,
                  dag_scheduler=None,
-                 unattended_failure_notifier=None, execution_scope=None):
+                 unattended_failure_notifier=None, execution_scope=None, owner_id=''):
         self.owner_home = Path(owner_home).absolute()
+        # 身份只由构造宿主绑定；匿名通用执行器保持匿名，不从定义正文认证Owner。
+        self.owner_id = owner_id
         self.workspace_root = workspace_root
         self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home, workspace_root=workspace_root)
         self.escalation_handler, self.analysis_handler = escalation_handler, analysis_handler
@@ -217,12 +219,17 @@ class _WorkflowRunLifecycle:
             descriptor = definition['descriptor']
         self._require_workflow_enabled(definition)
         validate_definition_eligibility(definition)
+        if self.owner_id and owner_id and owner_id != self.owner_id:
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+        owner_id = self.owner_id or owner_id
         if owner_id and descriptor.get('owner_id') and owner_id != descriptor['owner_id']:
-            raise ValueError('工作流 Owner 不匹配')
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
         from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
         from ..conversation.business_contracts import BusinessExecutionContext, WorkflowScope
         if business_context is not None and not isinstance(business_context, BusinessExecutionContext):
             raise TypeError('business_context必须由可信宿主提供DTO')
+        if business_context is not None and owner_id and business_context.owner_id != owner_id:
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
         frozen_scope = scope_snapshot if scope_snapshot is not None else descriptor.get('metadata', {}).get(
             BUSINESS_WORKFLOW_METADATA, {}).get('scope', {})
         if frozen_scope:
@@ -254,7 +261,7 @@ class _WorkflowRunLifecycle:
         record = replace_run_record(record, dict(workflow_name=descriptor['name'], total_steps=len(definition['steps'])))
         execution_receipt(record, phase='preflight', effect_outcome='not_started',
                           definition_ref=workflow_definition_ref(definition, kind='workflow'))
-        self._authorize_run(record, 'preflight')
+        self._authorize_run(record, 'preflight', definition=definition)
         if concurrency_policy != 'allow':
             record.status = 'queued'
         self.store.create_run(record, definition)
@@ -337,7 +344,7 @@ class _WorkflowRunLifecycle:
                 try:
                     return self._resume_workflow_run(workflow_run_id, from_step_id, **options)
                 except _RunBusy as exc:
-                    if concurrency_policy == 'allow' or '不能重复续跑' in str(exc) or attempt == 39:
+                    if concurrency_policy == 'allow' or exc.reason_code == 'WORKFLOW_EXECUTION_REENTRANT' or attempt == 39:
                         raise
                     proof = (self.store._read(workflow_run_id, 'run.json').get('concurrency_claim') or {})
                     if proof.get('phase') != 'executing' or proof.get('callback_identity') != _self_identity():
@@ -452,7 +459,8 @@ class _WorkflowRunLifecycle:
                     and not step.escalation_result.get('effect_started') for step in record.steps):
                 from .business_scope import WorkflowPolicyRefusal
                 raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_PATCH_FORBIDDEN', details={
-                    'recommended_action': '原待审步骤尚未执行，不能用修复输出替代审核；请完成原候选的独立审核后恢复。'})
+                    'recommended_action': 'request_approval',
+                    'recovery_hint': '原待审步骤尚未执行，不能用修复输出替代审核；请完成原候选的独立审核后恢复。'})
             if _requires_native_agent_resume(record):
                 if from_step_id is not None or patched_step_output is not None or updated_data_sources is not None:
                     raise ValueError('WORKFLOW_AGENT_COMPLETION_HOST_ONLY')
@@ -505,8 +513,27 @@ class _WorkflowRunLifecycle:
 
     resume_workflow = resume_workflow_run
 
-    def _authorize_run(self, record, phase):
+    def _authorize_run(self, record, phase, *, definition=None):
         """冻结选择不等于执行许可；新业务入口每次副作用都消费当前宿主授权。"""
+        # 恢复只核原持久身份，空Owner的旧run也不能由当前宿主补签。
+        if self.owner_id and record.owner_id != self.owner_id:
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+        if phase != 'cancel':
+            required = getattr(record, '_declared_review_required', None)
+            if required is None:
+                frozen = definition if definition is not None else self.store.load_workflow_snapshot(record.workflow_run_id)
+                from .native_governance import validated_workflow_review_policy
+                policy = validated_workflow_review_policy(frozen.get('descriptor', {}).get('metadata', {}))
+                required = bool(policy and policy['steps'])
+                # 单个不可变运行的临时缓存，不创建第二个持久策略源或逐步骤重复读大快照。
+                record._declared_review_required = required
+            if required and not callable(self.run_authorizer):
+                from .business_scope import WorkflowPolicyRefusal
+                raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_SERVICE_UNAVAILABLE', details={
+                    'workflow_run_id': record.workflow_run_id, 'effect_outcome': 'not_started',
+                    'reason': 'declared_review_policy_without_host_governance',
+                    'recommended_action': 'change_strategy',
+                    'recovery_hint': '未执行；请在原Owner和任务中装配原审核服务后继续，不要删除策略、另建空间或重做副作用。'})
         if record.scope_snapshot or record.business_context:
             if not callable(self.run_authorizer):
                 raise PermissionError('WORKFLOW_BUSINESS_AUTHORIZATION_UNAVAILABLE')
@@ -601,7 +628,7 @@ class _WorkflowRunLifecycle:
                     return self._cancel_workflow_run(workflow_run_id, expected_revision=expected_revision,
                                                      operation_key=operation_key)
                 except _RunBusy as exc:
-                    if not restricted or '不能重复续跑' in str(exc) or attempt == 39:
+                    if not restricted or exc.reason_code == 'WORKFLOW_EXECUTION_REENTRANT' or attempt == 39:
                         raise
                     proof = (self.store._read(workflow_run_id, 'run.json').get('concurrency_claim') or {})
                     if proof.get('phase') != 'retained':
@@ -722,7 +749,7 @@ class _WorkflowRunLifecycle:
             payload={'workflow_run_id': record.workflow_run_id, 'workflow_id': record.workflow_id,
                      'total_steps': record.total_steps, 'completed_steps': record.completed_steps, 'breakpoint': record.breakpoint})
 
-    # LLM: 显式类型合同或完全空输出按成功步骤合并值校验，不采纳失败/跳过输出；旧非空无类型合同保持兼容。
+    # LLM: 正式登记v2的必填输出与类型合同沿原parser验证；旧v1兼容但留结构化警告，不升级冻结定义。
     # 函数用途: 更新进度、构造断点并核工作流合同，保留末步真实final_output。
     def _finalize_record(self, record, definition):
         record = replace_run_record(record, dict(workflow_name=definition['descriptor']['name'], total_steps=len(record.steps),
@@ -736,10 +763,26 @@ class _WorkflowRunLifecycle:
             if isinstance(record.final_output, dict):
                 merged_outputs.update(record.final_output)
             contract = definition['descriptor'].get('io_contract', {})
+            version = workflow_output_contract_version(definition['descriptor'].get('metadata', {}))
             if isinstance(record.final_output, list) and not contract.get('outputs') and not contract.get('output_types'):
                 pass
-            elif contract.get('output_types') or not merged_outputs:
+            elif contract.get('output_types') or not merged_outputs or version == 2 and contract.get('outputs'):
                 _, error = parse_script_output(json.dumps(merged_outputs), contract)
+            elif contract.get('outputs'):
+                _, legacy_error = parse_script_output(json.dumps(merged_outputs), contract)
+                if legacy_error and record.steps:
+                    last = record.steps[-1]
+                    warning = {'code': 'WORKFLOW_LEGACY_OUTPUT_CONTRACT_UNVERIFIED',
+                        'contract_version': 1, 'validation_error': legacy_error,
+                        'missing_keys': [key for key in contract['outputs'] if key not in merged_outputs][:100],
+                        'null_keys': [key for key in contract['outputs']
+                            if key in merged_outputs and merged_outputs[key] is None
+                            and key not in contract.get('nullable_outputs', ())][:100],
+                        'executed_step_count': len(record.steps),
+                        'next_action': '旧冻结合同保留兼容；如需强制必填校验，请正式重新登记或修订工作流后开启新运行，勿盲目重试旧运行'}
+                    details = {**last.escalation_result, 'output_contract_warning': warning}
+                    record = replace_run_record(record, dict(steps=(*record.steps[:-1],
+                        replace(last, escalation_result=details))))
         if error:
             record = replace_run_record(record, dict(status='failed', needs_repair=True,
                 current_step_id=record.steps[-1].step_id if record.steps else '',
@@ -750,7 +793,18 @@ class _WorkflowRunLifecycle:
         step = record.steps[index] if record.steps else StepExecutionRecord('', '工作流输出', '', 'failed', 0, record.ended_at, 0, False)
         if error:
             step = replace(step, needs_repair=True, error_code='WORKFLOW_OUTPUT_CONTRACT_VIOLATION', error_message=error)
-        return replace_run_record(record, dict(breakpoint=self._breakpoint(step, index)))
+        breakpoint = self._breakpoint(step, index)
+        if error:
+            breakpoint['output_contract_validation'] = {
+                'contract_version': version, 'validation_error': error,
+                'missing_keys': [key for key in contract.get('outputs', ()) if key not in merged_outputs][:100],
+                'null_keys': [key for key in contract.get('outputs', ())
+                    if key in merged_outputs and merged_outputs[key] is None
+                    and key not in contract.get('nullable_outputs', ())][:100],
+                'executed_step_count': len(record.steps),
+                'next_action': '步骤已执行；请补齐声明的必填输出并沿原断点修复，不要把工作流当作成功或盲目重跑有副作用步骤',
+            }
+        return replace_run_record(record, dict(breakpoint=breakpoint))
 
 # LLM: 复用原执行链；debug显式副作用许可与内存标志由调用方传入，不能从config/mock授予权限。
 # 类用途: 执行正式工作流，或默认只预览一个节点而不改变正式运行、资产修订及外部业务。
@@ -781,6 +835,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         run = WorkflowRunRecord(f'debug-{uuid.uuid4().hex[:12]}', descriptor['id'],
             descriptor.get('owner_id', ''), 'debug', 'running', time.time(), 0, 0,
             inputs=inputs, ephemeral_debug=True)
+        from .native_governance import validated_workflow_review_policy
+        policy = validated_workflow_review_policy(definition.get('descriptor', {}).get('metadata', {}))
+        run._declared_review_required = bool(policy and policy['steps'])
         record = replace(_pending(spec), status='running', input_snapshot=payload(inputs), started_at=time.time())
         timer = time.monotonic()
         try:
@@ -867,6 +924,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # LLM: 失败保存若确认原run已经终结则返回耐久记录；支持DAG并行波次调度委托与顺序执行回退。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
     def _drive(self, record, definition, start):
+        # 宿主scope可能发表真实attempt；资格拒绝必须先于进入scope，不能只靠scope内的校验。
+        validate_definition_eligibility(definition)
         # scope只包真正取得原run执行锁后的执行，不包准入/排队；回放终态不创建宿主attempt。
         if self.execution_scope is not None:
             with self.execution_scope(self, record) as engine:
@@ -1058,7 +1117,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # LLM: 只投影已发表步骤；序号属于本次执行栈，观察器失败不能改业务或回落文本通道。
     # 函数用途: 向可选XC-1类型端口发送一次节点状态变化。
     def _step_progress(self, run, step, progress):
-        if not callable(self.step_observer) or step.status not in ('pending', 'running', 'succeeded', 'failed', 'skipped', 'escalated_recovered'):
+        if not callable(self.step_observer) or step.status not in ('pending', 'running', 'succeeded', 'failed', 'skipped', 'escalated_recovered', 'paused_for_resume'):
             return
         try:
             run.progress_seq, run.revision = self.store.reserve_progress_seq(run.workflow_run_id)
@@ -1207,6 +1266,10 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # 函数用途: 复用旧脚本执行链并安全分派单节点，不能从mode别名/config或分析器属性取得新权限。
     def _perform(self, record, spec, outputs, definition, run, *, record_summary=True, allow_side_effects=True):
         from .debug_nodes import analysis_preview
+        if getattr(run, '_declared_review_required', None) is None:
+            from .native_governance import validated_workflow_review_policy
+            policy = validated_workflow_review_policy(definition.get('descriptor', {}).get('metadata', {}))
+            run._declared_review_required = bool(policy and policy['steps'])
         validate_step_eligibility(spec)
         self._require_step_enabled(spec)
         if spec.get('foreach') is not None and not run.ephemeral_debug:
@@ -1215,7 +1278,22 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         if not run.ephemeral_debug and record.mode not in ('deterministic_script', 'llm_skill_analysis', 'llm_prompt', 'hybrid', 'agent_task'):
             if not self._has_formal_step_executor(record.mode, spec):
                 record.status, record.error_code = 'failed', 'NODE_EXECUTOR_UNAVAILABLE'
-                record.error_message = '通用节点当前仅支持单节点调试，不支持正式DAG执行'
+                record.error_message = (
+                    f'步骤 {record.step_id!r} 的 mode={record.mode!r} 未安装正式执行器；'
+                    '本步骤 not_started，未执行处理器。保存成功只证明定义可保存/调试，不证明可正式运行。'
+                    '请将结构化 condition 放到已有正式执行器的步骤上（例如 tool_call），'
+                    '或用 debug_step 且 allow_side_effects=false 单步零副作用演练；'
+                    '不要仅更换工作流ID后原样 run。示例见 escalation_result.execution_support。')
+                record.escalation_result['execution_support'] = {
+                    'step_id': record.step_id, 'mode': record.mode, 'formal_executor_available': False,
+                    'effect_outcome': 'not_started', 'recommended_action': 'repair_tool_arguments',
+                    'formal_step_example': {'step_id': 'check', 'name': '条件成立后读取当前代理状态',
+                        'mode': 'tool_call', 'condition': {'op': 'gt',
+                            'ref': {'step_id': '$inputs', 'key': 'n'}, 'value': 3},
+                        'tool_spec': {'tool_name': 'list_agents', 'arguments': {}}},
+                    'debug_example': {'action': 'debug_step', 'workflow_id': run.workflow_id,
+                        'step_id': record.step_id, 'mock_inputs': dict(run.inputs), 'allow_side_effects': False},
+                    'permission_note': '示例仍须通过当前工具发现、Owner权限和原正式执行授权；不授予额外能力。'}
                 record.needs_repair = True
                 return
         for key, reference in spec.get('inputs_map', {}).items():
@@ -1242,7 +1320,10 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.status = 'succeeded'
                 record.escalation_result['debug_logs'] = ['仅预览：未执行脚本、外部分析器、网络、工具或子工作流']
                 return
-        if self._admit_effect(run, record) is False:
+        # 纯分析在解析技能和宿主 preflight 之后、真实调用之前准入；缺回调不产生未知效果。
+        # hybrid 的脚本仍必须先准入，不能把前段脚本产生的义务误记为未执行。
+        analysis_only = record.mode in ('llm_skill_analysis', 'llm_prompt')
+        if not analysis_only and self._admit_effect(run, record, outputs=outputs) is False:
             return
         if record.mode == 'agent_task':
             if run.ephemeral_debug or self.agent_steps is None:
@@ -1270,12 +1351,17 @@ class WorkflowEngine(_WorkflowRunLifecycle):
 
     # LLM: 批执行体不能竞争原run写锁；步骤副作用以WorkflowEffectPhase显式标记与控制阶段严格区分（FLAG-5），原账本由协调线程发表。
     # 函数用途: 记录真实步骤副作用准入，不允许worker独自覆盖父步骤或运行快照。
-    def _admit_effect(self, run, record):
+    def _admit_effect(self, run, record, *, outputs=None):
         from .governance import WorkflowEffectPhase
         from .native_governance import WorkflowReviewPending
         from .release_gate import WorkflowEffectAdmission
         try:
-            admission = self._authorize_run(run, WorkflowEffectPhase(record.step_id))
+            phase = WorkflowEffectPhase(record.step_id)
+            prepare = getattr(getattr(self, 'tool_dispatcher', None), 'workflow_review_precondition', None)
+            if callable(prepare):
+                phase.review_precondition_reader = lambda snapshot, step: prepare(
+                    run=run, step=record, definition=snapshot, engine=self, outputs=outputs or {})
+            admission = self._authorize_run(run, phase)
         except WorkflowReviewPending as error:
             record.escalation_result['pending_review'] = error.binding
             record.escalation_result['reviewers_needed'] = error.reviewers_needed
@@ -1513,6 +1599,18 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 result = run_script_with_datasources(self.owner_home, record.script_id, record.input_snapshot,
                     runner=self.runner, workspace_root=self.workspace_root, timeout_seconds=spec.get('timeout_seconds'),
                     expected_script_pin=frozen if frozen is not None else current, **options)
+        # 只消费runner的启动事实；退出码/超时仅说明进程终止，不能证明外部写入没有发生。
+        outcome = getattr(result, 'effect_outcome', '')
+        phase = getattr(result, 'phase', '')
+        if outcome == 'not_started':
+            record.escalation_result.update(effect_started=False, effect_outcome='not_started')
+        elif result.ok:
+            record.escalation_result.update(effect_started=True, effect_outcome='confirmed')
+        else:
+            record.escalation_result['effect_outcome'] = 'unknown'
+        record.escalation_result['script_execution'] = {
+            'phase': phase, 'runner_effect_outcome': outcome, 'exit_code': result.exit_code,
+            'business_effect_outcome': record.escalation_result['effect_outcome']}
         if not record_summary:
             record.escalation_result['debug_logs'] = [text for text in
                 (result.stdout_preview, result.stderr_preview) if text]
@@ -1539,7 +1637,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         debug_metadata = {key: record.escalation_result[key] for key in
                           ('condition_branch', 'dry_run', 'side_effects_blocked') if key in record.escalation_result}
         identity = {key: value for key, value in record.escalation_result.items()
-                    if key in ('attempt_id', 'review_refs', 'effect_started', 'query_health')}
+                    if key in ('attempt_id', 'review_refs', 'effect_started', 'effect_outcome', 'script_execution',
+                               'retry_history', 'query_health')}
         record.escalation_result = {**redact_sensitive_value(payload(result.escalation_context or {})), **identity}
         if not record_summary:
             record.escalation_result.update(debug_logs=debug_logs, **debug_metadata)
@@ -1617,8 +1716,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.escalation_result['analysis_isolation'] = dict(error.details)
                 return
         record.llm_involved = record.llm_involved or getattr(self.analysis_handler, 'llm_involved', True) is not False
-        if run is not None:
-            self._admit_effect(run, record)
+        if run is not None and self._admit_effect(run, record, outputs=context.prior_outputs) is False:
+            return
         _check_stop()
         try:
             output = self.analysis_handler(payload(spec), context, resolved)

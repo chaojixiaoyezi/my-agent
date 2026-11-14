@@ -9,6 +9,7 @@ import json
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1075,7 +1076,8 @@ def test_dynamic_compact_boundary_is_rechecked_before_admitting_the_next_reader(
     real_describe = round_module.describe_tool_concurrency
 
     def defer(round_request, tool_name):
-        assert round_request is request
+        assert round_request == request
+        assert round_request.params is request.params
         trace.append(("compact", tool_name, compact_due))
         return compact_due
 
@@ -1108,7 +1110,8 @@ def test_segment_compact_query_error_propagates_before_any_handler_or_record(mon
     request = _planning_reader_request(executed.append, records.append)
 
     def defer(round_request, tool_name):
-        assert round_request is request
+        assert round_request == request
+        assert round_request.params is request.params
         queried.append(tool_name)
         if len(queried) == 2:
             raise failure
@@ -1959,12 +1962,23 @@ def test_tool_round_allows_checkpoint_writes_at_compact_budget():
 
 
 def test_tool_round_treats_bundled_output_json_as_ordinary_write(tmp_path):
-    output_json = tmp_path / "output.json"
-    task = SimpleNamespace(output_json=str(output_json))
-    agent = SimpleNamespace(
-        _current_subagent_run_id="run-1",
-        subagents=SimpleNamespace(load=lambda run_id: task),
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
     )
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.tests.test_tool_model_generation import _tool_loop_params
+
+    agent = SimpleAgent(AgentConfig(model_backend='echo'), tmp_path)
+    task = agent.subagents.create_run(goal='写普通JSON文件', thought='', plan=[], allowed_tools=['write_file'])
+    task = agent.subagents.lifecycle.prepare_runner_attempt(task.id)
+    output_json = Path(task.output_json)
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=['write_file'], run_id=task.id)
+    params = replace(_tool_loop_params(), run_id=task.id, task_id=task.id,
+        request_id=task.runner_active_attempt_id, attempt_id=task.runner_active_attempt_id,
+        task_attributes={}, allowed_tools=['write_file'], tool_runtime_snapshot=snapshot,
+        tool_protocol_snapshot=replace(_text_protocol_snapshot(), run_id=task.id))
     payload = {"tool": "write_file", "filesystem": {"path": str(output_json), "content": "{}"}}
     records: list[str] = []
 
@@ -1975,20 +1989,26 @@ def test_tool_round_treats_bundled_output_json_as_ordinary_write(tmp_path):
     def record_one(record):
         records.append(record.result.tool_name)
 
-    completed = execute_tool_round(
-        _round_request(
+    request = _round_request(
             agent=agent,
-            params=SimpleNamespace(tool_context=[]),
+            params=params,
             tool_rounds=1,
             response=ModelResponse(text="", backend="test"),
             calls=[payload],
             execute_one=execute_one,
             record_one=record_one,
         )
-    )
+    request = replace(request, calls=[replace(call, run_id=task.id, attempt_id=task.runner_active_attempt_id)
+        for call in request.calls])
+    previous = set_current_subagent_context(agent, run_id=task.id, attempt_id=task.runner_active_attempt_id)
+    try:
+        completed = execute_tool_round(request)
+    finally:
+        restore_current_subagent_context(agent, previous)
 
     assert completed is False
     assert records == ["write_file"]
+    assert agent.subagents.load(task.id).status == 'RUNNING'
 
 
 def test_task_progress_items_attached_to_structured_progress() -> None:

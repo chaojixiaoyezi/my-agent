@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,11 +27,39 @@ def _item(path, artifact_id=ART_A):
     return {'path': path, 'artifact_id': artifact_id, 'sha256': 'c' * 64, 'size_bytes': 12}
 
 
-def _finish(native, name, refs, artifacts=()):  # noqa: F811
+def _finish(native, name, refs, artifacts=(), *, registry_root=None):  # noqa: F811
     _, host = native
     _, task_id = assigned_task(native, name=name)
     turn = 'g7-turn-' + task_id
     host.conversation_store.session_tasks.bind_turn(task_id, turn_id=turn)
+    selected = host.conversation_store.session_tasks.require(task_id)
+    link = {'thread_id': selected.target_thread_id, 'task_id': task_id, 'goal': '投影用例'}
+    if registry_root is not None:
+        link['task_path'] = str(registry_root)
+    host.conversation_store.tasks.bind(link)
+    host.conversation_store.tasks.update_status({'task_id': task_id, 'status': 'completed'})
+    if registry_root is not None:
+        from agent_py_agent.agent.artifacts.registry import (
+            ArtifactRegistration,
+            latest_artifact_records,
+            register_artifact,
+        )
+
+        current = latest_artifact_records(registry_root)
+        bound = []
+        for item in artifacts:
+            row = dict(item)
+            record = current.get(row.get('artifact_id'))
+            if record is not None and record.path == row.get('path'):
+                # task受理后才有真实ID；夹具沿原登记口绑定本次真实归属，不用占位run/task签complete。
+                register_artifact(ArtifactRegistration(workspace_root=registry_root, path=record.path,
+                    artifact_id=record.artifact_id, task_id=task_id, run_id=task_id, status=record.status,
+                    kind=record.kind, mime_type=record.mime_type, metadata=record.metadata))
+                for field in ('task_id', 'run_id'):
+                    if field in row:
+                        row[field] = task_id
+            bound.append(row)
+        artifacts = tuple(bound)
     closed = close_out_turn(host, turn, TaskTurnOutcome(ok=True, summary='done', result_refs=tuple(refs),
                                                         result_artifacts=tuple(artifacts)))
     assert closed is not None and closed.status == 'done'
@@ -41,13 +70,22 @@ def _finish(native, name, refs, artifacts=()):  # noqa: F811
 # 函数用途: 校验公开tasks.get/tasks.list的结果引用投影与内部路径保留合同。
 @pytest.mark.parametrize('kind', list(PATHS))
 def test_public_result_refs_are_registry_ids_and_internal_paths_stay(native, kind):  # noqa: F811
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
     _, host = native
-    path = PATHS[kind]
-    chars, size = len(path), len(path.encode('utf-8'))
-    # 字符数与字节数分别成立：长 ASCII 超字符上限；多字节字符数合规但字节数超 128。
+    name = Path(PATHS[kind]).name
+    chars, size = len(name), len(name.encode('utf-8'))
+    # pytest 临时目录长度因平台而异；文件名自身跨过相应阈值，完整内部路径也逐字检查。
     assert {'short': chars <= 128 and size <= 128, 'long_ascii': chars > 128,
             'multibyte': chars <= 128 < size}[kind]
-    task_id = _finish(native, 'g7-' + kind.replace('_', '-'), [path], [_item(path)])
+    root = host.home_paths.owner_home_dir / 'runs' / 'g7' / kind
+    target = root / name
+    root.mkdir(parents=True)
+    target.write_bytes(b'hello result')
+    record = register_artifact(ArtifactRegistration(workspace_root=root, path=target, artifact_id=ART_A))
+    path = record.path
+    expected = {'artifact_id': ART_A, 'path': path, 'sha256': record.sha256, 'size_bytes': 12}
+    task_id = _finish(native, 'g7-' + kind.replace('_', '-'), [path], [expected], registry_root=root)
     detail = ok(native, 'tasks.get', {'task_id': task_id})
     assert detail['result_refs'] == detail['task']['result_refs'] == detail['assignments'][0]['result_refs'] == [ART_A]
     assert detail['result_ref_coverage'] == detail['task']['result_ref_coverage'] == {
@@ -56,7 +94,7 @@ def test_public_result_refs_are_registry_ids_and_internal_paths_stay(native, kin
     listed = [row for row in ok(native, 'tasks.list', {})['items'] if row['task_id'] == task_id]
     assert [row['result_refs'] for row in listed] == [[ART_A]]
     stored = host.conversation_store.session_tasks.require(task_id)
-    assert stored.result_refs == (path,) and stored.metadata['result_artifacts'] == [_item(path)]
+    assert stored.result_refs == (path,) and stored.metadata['result_artifacts'] == [expected]
     reports = [entry for entry in host.conversation_store.guidance.pending('thread', stored.sender_thread_id, limit=0)
                if entry.metadata.get('session_task_id') == task_id]
     assert len(reports) == 1 and path in reports[0].message
@@ -105,7 +143,11 @@ def test_conflicting_ids_for_one_path_stay_unresolved_in_either_order(order):
     conflict = [_item(one, ART_A), _item(one, ART_B)]
     items = (conflict if order == 'a_first' else conflict[::-1]) + [_item(two, art_c), _item(two, art_c)]
     task = SimpleNamespace(result_refs=(one, two), metadata={'result_artifacts': items})
-    assert public_result_refs(task) == ([art_c], {'state': 'partial', 'unresolved_count': 1, 'omitted_count': 0})
+    refs, coverage = public_result_refs(task)
+    assert refs == [art_c]
+    assert {key: coverage[key] for key in ('state', 'unresolved_count', 'omitted_count')} == {
+        'state': 'partial', 'unresolved_count': 1, 'omitted_count': 0}
+    assert coverage['diagnostics'][0]['error_code'] == 'RESULT_ARTIFACT_SOURCE_UNPROVEN'
     only = SimpleNamespace(result_refs=(one,), metadata={'result_artifacts': items})
     assert public_result_refs(only) == ([], {'state': 'partial', 'unresolved_count': 1, 'omitted_count': 0})
 
@@ -250,7 +292,7 @@ def test_unknown_or_conflicting_pin_marks_coverage_partial():
 
 # LLM: 验证真实本地产物登记簿往返投影稳定ID，且同路径重登记导致sha256漂移后覆盖状态如实变为partial而不声称complete。
 # 函数用途: 校验真实登记簿往返、稳定ID投影及sha256版本漂移后的partial覆盖检测。
-def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins(native, tmp_path):  # noqa: F811
+def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins(native):  # noqa: F811
     # MSG-024 / MSG-029 证据：真实本地登记簿→原交付投影→运行时提取→终态→公开ID→按ID回读；登记ID按(run,task,agent,path)稳定，
     #   同路径重登记不换ID但sha256变，故公开ID不是版本钉；可读登记簿发生sha256漂移后coverage降为partial，不冒充complete。
     from agent_py_agent.agent.agent_core._finalization_service import (
@@ -263,7 +305,7 @@ def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins
     )
 
     _, host = native
-    workspace = tmp_path / 'delivery-ws'
+    workspace = host.home_paths.owner_home_dir / 'runs' / 'g7' / 'delivery-ws'
     target = workspace / 'out' / '季度报告.md'
     target.parent.mkdir(parents=True)
     target.write_text('v1', encoding='utf-8')
@@ -272,7 +314,7 @@ def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins
     record = register_artifact(registration)
     item = _delivery_artifact_from_registry_ref(record.to_dict(), (workspace.resolve(),), frozenset())
     artifacts = delivery_result_artifacts(SimpleNamespace(delivery_artifacts=[item]))
-    task_id = _finish(native, 'g7-real-registry', [item['path']], artifacts)
+    task_id = _finish(native, 'g7-real-registry', [item['path']], artifacts, registry_root=workspace)
     detail = ok(native, 'tasks.get', {'task_id': task_id})
     assert detail['result_refs'] == [record.artifact_id] and record.artifact_id.startswith('art_')
     assert detail['result_ref_coverage'] == {'state': 'complete', 'unresolved_count': 0, 'omitted_count': 0}
@@ -305,10 +347,7 @@ def test_external_delivery_checks_original_task_registry_not_nearest_owner_regis
     register_artifact(ArtifactRegistration(workspace_root=owner, path=unrelated))
     record = register_artifact(ArtifactRegistration(workspace_root=archive, path=output,
                                                     task_id='registered-task', run_id='registered-run'))
-    task_id = _finish(native, 'external-delivery', [str(output)], [record.to_dict()])
-    task = host.conversation_store.session_tasks.require(task_id)
-    host.conversation_store.tasks.bind({'thread_id': task.target_thread_id, 'task_id': task_id,
-                                       'task_path': str(archive), 'status': 'completed'})
+    task_id = _finish(native, 'external-delivery', [str(output)], [record.to_dict()], registry_root=archive)
     detail = ok(native, 'tasks.get', {'task_id': task_id})
     assert detail['result_refs'] == [record.artifact_id]
     assert detail['result_ref_coverage']['state'] == 'complete'
@@ -326,9 +365,69 @@ def test_corrupt_task_link_cannot_borrow_matching_owner_registry(native, monkeyp
     output = owner / 'matching.json'
     output.write_text('{"total":4200}')
     record = register_artifact(ArtifactRegistration(workspace_root=owner, path=output))
-    tid = _finish(native, 'broken-registry-link', [str(output)], [record.to_dict()])
+    # 保留 owner 根中相同的记录。破坏任务链接后不能借它给任务签发完整覆盖。
+    workspace = owner / 'runs' / 'g7' / 'broken'
+    workspace.mkdir(parents=True)
+    register_artifact(ArtifactRegistration(workspace_root=workspace, path=output, artifact_id=record.artifact_id))
+    tid = _finish(native, 'broken-registry-link', [str(output)], [record.to_dict()], registry_root=workspace)
     assert ok(native, 'tasks.get', {'task_id': tid})['result_ref_coverage']['state'] == 'complete'
     monkeypatch.setattr(host.conversation_store.tasks, 'link_report', lambda *_: (None, {'code': 'CORRUPT'}))
     result = ok(native, 'tasks.get', {'task_id': tid})
     assert result['result_refs'] == [record.artifact_id]
     assert result['result_ref_coverage']['state'] == 'partial'
+
+
+def test_large_registry_read_is_bounded_once_and_keeps_frozen_refs(native, monkeypatch):  # noqa: F811
+    from agent_py_agent.agent.artifacts import registry
+    from agent_py_agent.agent.conversation import business_observability as observation
+
+    _, host = native
+    workspace = host.home_paths.owner_home_dir / 'runs' / 'bounded-refs'
+    workspace.mkdir(parents=True)
+    items = []
+    for name in ('alpha', 'beta'):
+        target = workspace / name
+        target.write_text(name)
+        items.append(registry.register_artifact(registry.ArtifactRegistration(
+            workspace_root=workspace, path=target)).to_dict())
+    task_id = _finish(native, 'bounded-results', [row['path'] for row in items], items, registry_root=workspace)
+    with registry.registry_path(workspace).open('ab') as ledger:
+        ledger.write(b' ' * observation._RESULT_REGISTRY_MAX_BYTES)
+    read = registry.latest_artifact_records_report
+    calls = []
+
+    def counted(root, *, max_bytes, max_rows=None, max_diagnostics=None):
+        result = read(root, max_bytes=max_bytes, max_rows=max_rows, max_diagnostics=max_diagnostics)
+        calls.append((root, max_bytes, result.bytes_read))
+        return result
+
+    monkeypatch.setattr(registry, 'latest_artifact_records_report', counted)
+    result = ok(native, 'tasks.get', {'task_id': task_id})
+    coverage = result['result_ref_coverage']
+    assert result['result_refs'] == [row['artifact_id'] for row in items]
+    assert (coverage['state'], coverage['unresolved_count'], coverage['omitted_count']) == ('partial', 0, 0)
+    assert [issue['error_code'] for issue in coverage['diagnostics']] == ['ARTIFACT_REGISTRY_READ_BUDGET_EXCEEDED']
+    assert calls == [(workspace, observation._RESULT_REGISTRY_MAX_BYTES, observation._RESULT_REGISTRY_MAX_BYTES + 1)]
+
+
+def test_registry_budget_survives_observation_cache_eviction(tmp_path):
+    from agent_py_agent.agent.artifacts import registry
+    from agent_py_agent.agent.conversation import business_observability as observation
+    from agent_py_agent.tests.test_public_result_registry_scope import delivered
+
+    setups = [delivered(tmp_path / name, legacy=True) for name in ('first', 'second')]
+    first = setups[0][4]
+    def read(item):
+        return public_result_refs(item[1], store=item[0].store, owner_root=item[0].source.home)
+
+    # 恰好够读第一本登记簿和一个哨兵，缓存替换不能重置同一请求的剩余字节。
+    first_size = registry.registry_path(first).stat().st_size
+    with observation.observation_request():
+        observation._observation_request_data.get().registry_budget.remaining = first_size + 1
+        assert read(setups[0])[1]['state'] == 'complete'
+        for key in range(1100):
+            observation._observation_cached(('eviction', key), lambda: None)
+        second_coverage = read(setups[1])[1]
+        assert second_coverage['state'] == 'partial'
+        assert second_coverage['diagnostics'][0]['error_code'] == 'ARTIFACT_REGISTRY_READ_BUDGET_EXCEEDED'
+    assert read(setups[1])[1]['state'] == 'complete'

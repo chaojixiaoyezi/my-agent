@@ -203,3 +203,41 @@ def test_runtime_lookup_keeps_new_runs_and_old_task_archives(tmp_path):
     home = SimpleNamespace(owner_runs_dir=tmp_path / "runs", owner_tasks_dir=tmp_path / "tasks")
     assert set(_task_state_files(home, None)) == set(expected_states)
     assert set(tool_output_roots_for_lookup(tmp_path)) == set(expected_indexes)
+
+
+@pytest.mark.parametrize("identity", ["valid", "foreign", "mismatch", "control_plane"])
+def test_exact_read_child_keeps_only_host_product_write_intersection(tmp_path, identity):
+    registry, _, owner, first, _, _ = _home_case(tmp_path, "task_local")
+    own = owner / "runs" / "2026-11-13" / "root-key" / "work" / "agents" / "child"
+    own.mkdir(parents=True)
+    product = first / "exact.txt"
+    other = tmp_path / "owners" / "bob" / "foreign.txt"
+    params = SimpleNamespace(
+        context_scope="control_plane" if identity == "control_plane" else "task_local",
+        source="gateway", run_id="child", task_attributes={
+            "agent_run_workspace_dir": str(own if identity != "foreign" else other.parent),
+            "run_workspace": {"task_root": str(own.parents[2])},
+            "delegation_constraints": {"actor_runtime": "native", "allowed_read_inputs": [str(first / "input.txt")]},
+        },
+        write_boundary={
+            "task_dir": str(own if identity != "mismatch" else own / "wrong"),
+            "execution_cwd": str(first), "read_scope_mode": "exact",
+            "allowed_read_roots": [str(first / "input.txt")],
+            "allowed_write_roots": [str(own), str(product), str(other), str(first / "unconfirmed.txt")],
+            "product_write_roots": [str(product), str(other)],
+        },
+    )
+    agent = SimpleNamespace(tools=registry, subagents=SimpleNamespace(owner_scope_root=str(owner)),
+                            home_paths=SimpleNamespace(owner_home_dir=owner, owner_runs_dir=owner / "runs"))
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+    assert boundary["read_scope_mode"] == "exact"
+    if identity != "valid":
+        assert boundary["allowed_write_roots"] == []
+        return
+    assert set(boundary["allowed_write_roots"]) == {str(own), str(product)}
+    result = _execute(registry, "write_file", {"path": str(product), "content": "allowed"}, write_boundary=boundary)
+    assert result.ok, result.output
+    assert product.read_text() == "allowed"
+    denied = _execute(registry, "write_file", {"path": str(first / "outside.txt"), "content": "no"}, write_boundary=boundary)
+    assert not denied.ok
+    assert not (first / "outside.txt").exists()

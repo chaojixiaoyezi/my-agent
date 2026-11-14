@@ -175,7 +175,14 @@ def test_script_kind_defaults_but_explicit_conflict_is_structured(tmp_path):
     conflict = tool.execute({'action': 'register', 'script_id': 'sample', 'descriptor': {**descriptor, 'kind': 'workflow'}, 'code': 'pass'})
     assert not conflict.ok and conflict.effect_outcome == 'not_started'
     data = json.loads(conflict.output)
-    assert data.get('expected_kind') == 'script' and data.get('provided_kind') == 'workflow'
+    assert conflict.error_code == 'TOOL_INVALID_ARGUMENTS'
+    assert data['issues'] == [{'keyword': 'const', 'path': '$.descriptor.kind',
+                              'expected': 'script', 'actual_type': 'string'}]
+    assert data['effect_outcome'] == 'not_started' and data['next_action']
+    assert data['issues_truncated'] is False
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+
+    assert ScriptStore(tmp_path).get_script('sample') is None
     saved = tool.execute({'action': 'register', 'script_id': 'sample', 'descriptor': descriptor, 'code': 'print("{}")'})
     assert saved.ok and json.loads(saved.output)['kind'] == 'script'
 

@@ -32,7 +32,17 @@ from ..assets.revision_history import (
 from ..assets.skill_adapter import get_owner_skill_descriptor, list_owner_skill_descriptors
 from ..assets.version_diff import diff_versions, field_changes, load_snapshot
 from ..assets.version_hook import _VERSION_OPERATION
-from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
+from ..assets.workflow_package_template import (
+    WorkflowTemplateError,
+    decode_package_workflow,
+    issue_package_workflow_source,
+)
+from ..assets.workflow_store import (
+    WorkflowDefinition,
+    WorkflowStore,
+    validate_definition_eligibility,
+    with_workflow_step_refs,
+)
 from ..capability.skills import split_skill_frontmatter
 from ..plugin_host.errors import HostAPIError
 from ..workflows.business_scope import (
@@ -40,6 +50,7 @@ from ..workflows.business_scope import (
     WORKFLOW_READ_ACTIONS,
     WorkflowPolicyRefusal,
     validate_business_request,
+    workflow_list_matches,
 )
 from ..workflows.models import redact_bearer_values
 from ..workflows.review_receipts import pending_review_error
@@ -126,6 +137,74 @@ def _analysis_summary(step, resolved_skills, context, *, owner_home, workspace_r
             'llm_involved': False, 'skill_summaries': summaries}
 
 
+def _typed_definition_spec(spec):
+    """复用公开定义字段向模型说明真实 JSON 类型；Owner 旧字段仍由原构造器裁决。"""
+    from ..plugin_host.business_action_specs import standalone_schema
+    from .business_spaces_tool import _model_projection
+
+    schema = copy.deepcopy(spec.input_schema)
+    public = _model_projection(standalone_schema({'$ref': '#/$defs/WorkflowDefinition'}))
+    definitions = public.pop('$defs')
+    definition = definitions['WorkflowDefinition']
+    descriptor = definitions['WorkflowDescriptorInput']
+    # 原生 save 的 id/kind 来自 workflow_id；不能把业务创建入口的必填条件扩大到旧入口。
+    descriptor['required'] = [key for key in descriptor['required'] if key not in ('id', 'kind')]
+    descriptor['additionalProperties'] = True
+    definition['additionalProperties'] = True
+    definitions['WorkflowStepDefinition']['properties']['condition']['description'] = (
+        '结构化条件优先：{"op":"gte","ref":{"step_id":"$inputs","key":"count"},"value":2}；'
+        '支持eq/neq/gt/gte/lt/lte/in/not_in/exists/not_exists/regex，数值须传JSON数值。'
+        '组合使用{"op":"and","conditions":[条件对象,...]}或op=or；'
+        'regex的value是正则文本。兼容旧{step_id,key,equals}对象；不要猜字符串表达式语法。')
+    step_fields = definitions['WorkflowStepDefinition']['properties']
+    step_fields['mode']['description'] = ('save成功只证明定义可保存，不保证宿主有该mode的正式执行器。'
+        'condition/condition_branch/script_transform/script/approval_wait默认仅供debug_step，'
+        '除非宿主明确安装对应正式执行器。条件分支正式运行时，把结构化condition直接放到已有正式步骤'
+        '（如tool_call、deterministic_script、llm_skill_analysis）上；不要创建独立condition节点再run。'
+        '无文件写入的正式例：{"step_id":"check","name":"条件读取当前代理状态","mode":"tool_call",'
+        '"condition":{"op":"gt","ref":{"step_id":"$inputs","key":"n"},"value":3},'
+        '"tool_spec":{"tool_name":"list_agents","arguments":{}}}；须先核当前工具权限。'
+        '纯节点演练用debug_step并明确allow_side_effects=false。subworkflow调用已保存子流程。')
+    step_fields['subworkflow_ref']['description'] = ('子流程稳定ID，如item-amount或workflow:item-amount；'
+        '不要把@版本拼入ID。固定历史版本用config.definition_version。')
+    step_fields['config']['description'] = (step_fields['config'].get('description', '') +
+        ' mode=subworkflow时，可用definition_version指定workflows(action=versions)返回的整数version，'
+        '如{"definition_version":2}；也可用pinned_definition_ref核对完整64位摘要，'
+        '摘要必须取实际版本回执，格式示意如{"pinned_definition_ref":"' + 'a' * 64 + '"}。'
+        '两者同时给出时，摘要须匹配该历史版本；仅给摘要时核对当前子流程。'
+        '这些键放在当前步骤config内，不放步骤根或ID内；其它模式的config仍按原执行器扩展。')
+    schema['properties']['definition'] = {'$ref': '#/$defs/WorkflowDefinition',
+        'description': '真实JSON对象；steps/access_targets/data_sources/credential_refs必须是数组，'
+                       'io_contract/inputs_map/config/tool_spec必须是对象，不能填字符串或序列化JSON。'
+                       '例如 {"descriptor":{"name":"巡检","access_targets":[],"data_sources":[], '
+                       '"credential_refs":[],"io_contract":{}},"steps":[]}。'
+                       '步骤字段和类型沿公开工作流定义；扩展配置由原运行时校验。'}
+    schema['$defs'] = definitions
+    from .input_schema import inline_local_schema_refs
+
+    schema['properties']['definition'] = inline_local_schema_refs(schema, schema['properties']['definition'])
+    return replace(spec, input_schema=schema, schema_hash='')
+
+
+def _schema_save_source(spec):
+    from ..capability.package_resources import package_resource_reference_schema
+    from ..contracts.tool_input_schema import EXCLUSIVE_ARGUMENT_GROUPS_KEY
+
+    schema = copy.deepcopy(spec.input_schema)
+    schema['properties']['source_ref'] = package_resource_reference_schema()
+    schema[EXCLUSIVE_ARGUMENT_GROUPS_KEY] = [['definition', 'source_ref']]
+    schema['oneOf'] = [
+        {'properties': {'action': {'const': 'save'}}, 'required': ['workflow_id'],
+         'oneOf': [{'required': ['definition']}, {'required': ['source_ref']}]},
+        {'properties': {'action': {'enum': [action for action in schema['properties']['action']['enum']
+                                          if action != 'save']}}}]
+    schema['properties']['source_ref']['description'] = (
+        '仅action=save：从已授权包的严格JSON工作流模板派生到独立新Owner workflow_id；'
+        '与definition互斥。原样使用skill_search的完整九字段source_ref。'
+        '不覆盖现有工作流、不安装、不执行包脚本；来源及成员摘要由宿主固定，不能手填metadata伪造。')
+    return replace(spec, input_schema=schema, schema_hash='')
+
+
 # LLM: 路径由构造器Owner固定；纯schema沿tool_spec，运行/恢复/删除仍保持原危险动作分类。
 # 类用途: 对Agent暴露可管理和恢复的工作流工具。
 class WorkflowsTool(BaseTool):
@@ -144,9 +223,9 @@ class WorkflowsTool(BaseTool):
                for key in ('workflow_ref', 'space_id', 'project_ref', 'resolution_ref')},
             'cursor': {'type': 'string', 'minLength': 1, 'maxLength': 2048},
             'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
-            'query': {'type': 'string', 'maxLength': 256},
-            'scope_mode': {'type': 'string', 'enum': ['owner_global', 'spaces', 'unassigned', 'all']},
-            'lifecycle': {'type': 'string', 'enum': ['active', 'recycled', 'all']},
+            'query': {'type': 'string', 'maxLength': 256, 'description': '列表按工作流显示名或ID做区分大小写的包含匹配；空串不过滤'},
+            'scope_mode': {'type': 'string', 'enum': ['owner_global', 'spaces', 'unassigned', 'all'], 'description': '列表范围过滤；省略或all不过滤'},
+            'lifecycle': {'type': 'string', 'enum': ['active', 'recycled', 'all'], 'description': '显式过滤工作流生命周期；原生list省略时全部，业务workflows.list省略时active'},
             'protected': {'type': 'boolean'},
             'policy': {'type': 'object'},
             'concurrency_policy': {'type': 'string', 'enum': ['allow', 'skip_if_running', 'queue'],
@@ -167,6 +246,7 @@ class WorkflowsTool(BaseTool):
             'resolution_origin': {'type': 'string', 'enum': ['user', 'agent', 'system']},
             'updated_data_sources': {'type': ['object', 'array'], 'description': '断点续跑时更新的数据源配置'},
             'inputs': {'type': 'object', 'description': '工作流运行输入参数字典（可在step的condition或inputs_map中用step_id="$inputs"引用）'}})
+    model_spec = _schema_save_source(_typed_definition_spec(model_spec))
     runtime_policy = _policy('workflows', READ_ONLY_ACTIONS, ('run', 'resume', 'delete', 'workflows.run',
         'workflow_runs.resume', 'workflow_runs.cancel', 'workflows.recycle', 'workflows.cleanup.run'))
 
@@ -177,12 +257,14 @@ class WorkflowsTool(BaseTool):
                  runner_options_provider=None, business_service=None, business_actor_provider=None,
                  business_binding_provider=None,
                  run_params_provider=None, schedule_ids_provider=None, runtime_ports_provider=None,
-                 execution_scope_provider=None, review_dispatch=None):
+                 execution_scope_provider=None, review_dispatch=None, review_governance_provider=None,
+                 package_resource_resolver=None, owner_id=''):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, engine)
         self.store, self.engine, self.im_notifier = store, engine, im_notifier
         self.analysis_handler = analysis_handler
+        self.owner_id = owner_id
         self.workspace_root_provider = workspace_root_provider
         self.skill_snapshot_provider = skill_snapshot_provider
         self.workspace_root = workspace_root
@@ -193,6 +275,8 @@ class WorkflowsTool(BaseTool):
         self.runtime_ports_provider = runtime_ports_provider
         self.execution_scope_provider = execution_scope_provider
         self.review_dispatch = review_dispatch
+        self.review_governance_provider = review_governance_provider
+        self.package_resource_resolver = package_resource_resolver
         _owner(self.owner_home, getattr(business_service, 'store', None))
 
     # LLM: 每次run/resume冻结当前宿主上下文到本次浅拷贝engine，整次调用只用它；缓存engine仅共享RunStore/回调/解析器，
@@ -209,7 +293,7 @@ class WorkflowsTool(BaseTool):
             engine.skill_resolver = lambda step, context: _resolve_owner_skills(self.owner_home, step, context, **options)
             engine.skill_details_resolver = lambda ids: [_skill_descriptor(self.owner_home, reference, **options) for reference in ids]
         if self.run_params_provider is not None:
-            on_chunk = getattr(params, 'effective_on_chunk', None)
+            on_chunk = getattr(params, 'on_chunk', None)
             sink = getattr(on_chunk, 'write_workflow_step_progress', None)
             engine.step_observer = sink if callable(sink) else None
             bind = getattr(engine.analysis_handler, 'bind_run_params', None)
@@ -284,18 +368,32 @@ class WorkflowsTool(BaseTool):
     # LLM: 与直接execute共用无副作用预检，避免缺参动作先进入写操作账。
     # 函数用途: 按动作验证条件必填和参数Schema。
     def validate_invocation(self, params, context):
+        if isinstance(params, dict) and 'source_ref' in params and params.get('action') != 'save':
+            return _outcome('workflows', {'error_code': 'WORKFLOW_TEMPLATE_SAVE_ONLY',
+                'effect_outcome': 'not_started', 'next_action': 'source_ref仅用于save；其它动作删除该字段。'},
+                False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
         if isinstance(params, dict) and 'concurrency_policy' in params and params['concurrency_policy'] not in (
                 'allow', 'skip_if_running', 'queue'):
             return _outcome('workflows', {'error_code': 'INVALID_CONCURRENCY_POLICY'}, False, 'TOOL_INVALID_ARGUMENTS')
         if isinstance(params, dict) and params.get('action') in WORKFLOW_ACTION_FIELDS:
+            from ..conversation.business_access import BusinessError
             from .input_schema import validate_tool_input
-            if not validate_tool_input(params, self.model_spec.input_schema).ok:
-                return _outcome('workflows', {'error': '参数不符合工具Schema'}, False, 'TOOL_INVALID_ARGUMENTS')
+            validation = validate_tool_input(params, self.model_spec.input_schema)
+            if not validation.ok:
+                return _outcome('workflows', {'error_code': 'WORKFLOW_SCHEMA_INVALID',
+                    'error': '参数不符合当前action的Schema；工具尚未执行。按issues中的字段路径与类型修正，不要把JSON对象或数组发送为字符串。',
+                    'issues': [issue.to_dict() for issue in validation.issues[:8]],
+                    'effect_outcome': 'not_started'}, False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
             try:
                 validate_business_request(params['action'], self._business_request(params),
                     expected_revision=params.get('expected_revision'), idempotency_key=params.get('idempotency_key', ''))
+            except BusinessError as exc:
+                return _outcome('workflows', {'error_code': exc.code, 'details': exc.details,
+                    'effect_outcome': 'not_started'}, False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
             except (ValueError, TypeError) as exc:
-                return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
+                return _outcome('workflows', {'error_code': str(exc), 'error': str(exc),
+                    'details': getattr(exc, 'details', {}), 'effect_outcome': 'not_started'},
+                    False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
             return None
         return _validate(self, params)
 
@@ -316,19 +414,50 @@ class WorkflowsTool(BaseTool):
     def _authorized_execution_engine(self, *, definition=None, record=None, business_binding=None):
         """固定定义仍用原执行器，只从当前业务服务复用授权闭包，不重新挑选版本。"""
         from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
-        required = business_binding is not None or (bool(record.scope_snapshot or record.business_context)
+        from ..workflows.native_governance import validated_workflow_review_policy
+        business_required = business_binding is not None or (bool(record.scope_snapshot or record.business_context)
             if record is not None else bool(definition.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA)))
+        metadata = (self._engine().store.load_workflow_snapshot(record.workflow_run_id)['descriptor'].get('metadata', {})
+                    if record is not None else definition.descriptor.metadata)
+        # 审核策略属于冻结工作流，与是否选择业务空间无关；复用原宿主治理，不走裸执行器。
+        policy = validated_workflow_review_policy(metadata)
+        review_required = bool(policy and policy['steps'])
         engine = self._execution_engine()
-        if not required:
+        if not business_required and not review_required and record is None:
             return engine
-        service, actor = business_binding if business_binding is not None else self._execution_business_binding()
-        _owner(self.owner_home, service.store)
-        authorize = service.execution_authorizer(actor)
+        recovery_without_store = False
+        if business_required:
+            service, actor = business_binding if business_binding is not None else self._execution_business_binding()
+            _owner(self.owner_home, service.store)
+            authorize = service.execution_authorizer(actor)
+        else:
+            # 原无空间入口只需要原宿主审核器，不借业务功能开关签出或剥夺Owner执行身份。
+            governance = self.review_governance_provider() if callable(self.review_governance_provider) else None
+            authorize = getattr(governance, 'require_effect', None)
+            if not callable(authorize):
+                if record is not None:
+                    from ..workflows.governance import WorkflowOperationRecovery
+                    # 缺审核依赖不授予重做未知写入的权利；原恢复服务只读核验、缺证明明确拒绝。
+                    governance = WorkflowOperationRecovery(None)
+                    authorize = governance.require_effect
+                    recovery_without_store = True
+                if review_required:
+                    raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_SERVICE_UNAVAILABLE', details={
+                        'effect_outcome': 'not_started', 'reason': 'declared_review_policy_without_host_governance',
+                        'recommended_action': 'change_strategy',
+                        'recovery_hint': '未执行；请在原Owner和任务中恢复原审核服务，不要启用无关空间功能、移除策略或重做副作用。'})
+            _owner(self.owner_home, governance)
         bound = copy.copy(engine)
         previous = engine.run_authorizer
 
         def check(current, phase):
             prior = previous(current, phase) if callable(previous) else None
+            if recovery_without_store:
+                from ..workflows.governance import WorkflowEffectPhase
+                from ..workflows.release_gate import WorkflowEffectAdmission
+                if (not isinstance(phase, WorkflowEffectPhase) and phase == 'resume'
+                        and isinstance(prior, WorkflowEffectAdmission) and prior.reconciled_output is not None):
+                    return prior
             result = authorize(current, phase)
             return prior if result is None else result
 
@@ -344,7 +473,7 @@ class WorkflowsTool(BaseTool):
         context = getattr(current, 'business_context', None)
         requested = {key: params[key] for key in ('space_id', 'project_ref') if key in params}
         if context is None and not requested:
-            return {}, None
+            return ({'owner_id': self.owner_id} if self.owner_id else {}), None
         binding = self._execution_business_binding()
         service, actor = binding
         import uuid
@@ -437,7 +566,7 @@ class WorkflowsTool(BaseTool):
         cached = getattr(self, '_lazy_engine', None)
         if cached is None or getattr(self, '_lazy_engine_ws', None) != ws:
             from ..workflows.engine import WorkflowEngine
-            cached = WorkflowEngine(self.owner_home, workspace_root=ws,
+            cached = WorkflowEngine(self.owner_home, workspace_root=ws, owner_id=self.owner_id,
                 skill_resolver=lambda step, context: _resolve_owner_skills(
                     self.owner_home, step, context, **options),
                 skill_details_resolver=lambda references: [
@@ -455,10 +584,36 @@ class WorkflowsTool(BaseTool):
         return self.execute_scoped(params, None)
 
     def execute_scoped(self, params, context):
+        from ..capability.method_usage import method_usage_scope, record_workflow_receipts
         from .result_display import workflow_result_display
-
-        outcome = self._execute(params)
-        if (self.review_dispatch and context is not None and not outcome.ok and isinstance(params, dict)
+        usage_params = self.run_params_provider() if callable(self.run_params_provider) else None
+        with method_usage_scope(usage_params):
+            outcome = self._execute(params)
+            record_workflow_receipts(self, params, outcome)
+        data = outcome.result_envelope
+        steps = data.get('steps', [])
+        # 消费原执行器的结构化效果事实；未知副作用不能被通用错误回执诱导重放。
+        unknown_step = any(
+            isinstance(step, dict) and isinstance(step.get('escalation_result'), dict)
+            and step['escalation_result'].get('effect_outcome') == 'unknown'
+            for step in steps) if isinstance(steps, list) else False
+        if not outcome.ok and (data.get('effect_outcome') == 'unknown' or unknown_step):
+            reported_code = outcome.reported_error_code or outcome.error_code
+            data = {**data, 'effect_outcome': 'unknown',
+                'reported_error_code': reported_code}
+            original_run_id = data.get('workflow_run_id')
+            if isinstance(original_run_id, str) and original_run_id:
+                data['recovery_query'] = {
+                    'requires_new_user_message': True, 'read_only': True, 'tool': 'workflows',
+                    'parameters': {'action': 'inspect_run', 'workflow_run_id': original_run_id},
+                    'resume_permitted': False,
+                    'instruction': '本轮已因未知副作用停止。请另发一条消息，仅只读查询此原运行；'
+                                   '使用parameters中的完整参数，不要resume、重跑或更换幂等键。'}
+            outcome = _outcome('workflows', data, False,
+                'WORKFLOW_RECONCILIATION_REQUIRED', effect_outcome='unknown',
+                failure_stage='effect_reconciliation')
+            outcome.reported_error_code = reported_code
+        if (outcome.error_code != 'WORKFLOW_RECONCILIATION_REQUIRED' and self.review_dispatch and context is not None and not outcome.ok and isinstance(params, dict)
                 and params.get('action') in ('run', 'resume', 'workflows.run', 'workflow_runs.resume')
                 and outcome.result_envelope.get('workflow_run_id')
                 and (outcome.error_code == 'WORKFLOW_REVIEW_REQUIRED'
@@ -490,21 +645,37 @@ class WorkflowsTool(BaseTool):
                 ok = False
             code = ''
             if not ok:
-                code = pending_review_error(data) or 'TOOL_EXECUTION_FAILED'
+                if data.get('status') == 'paused_for_resume':
+                    code = 'WORKFLOW_PAUSED'
+                    data = {**data, 'next_action': 'inspect_run'}
+                else:
+                    code = pending_review_error(data) or 'TOOL_EXECUTION_FAILED'
             return _outcome('workflows', data, ok, code)
+        except WorkflowTemplateError as exc:
+            return _outcome('workflows', exc.details, False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('workflows', exc)
         except AssetActionError as exc:
             return _outcome('workflows', exc.data, False, exc.code, effect_outcome='not_started')
         except WorkflowExecutionError as exc:
-            return _outcome('workflows', exc.receipt, False, 'TOOL_EXECUTION_FAILED',
+            outcome = _outcome('workflows', exc.receipt, False, 'TOOL_EXECUTION_FAILED',
                             effect_outcome=exc.receipt['effect_outcome'], failure_stage=(
                                 'effect_reconciliation' if exc.failure_stage == 'completion_clock' else 'execution'))
+            # 提交后异常的精确宿主码只作原因展示，不能把原unknown控制改成未执行或重新开始。
+            outcome.reported_error_code = exc.error_code
+            return outcome
         except HostAPIError as exc:
-            return _outcome('workflows', {'error_code': exc.code, 'error': exc.message,
+            from ..contracts.error_taxonomy import error_contract
+
+            # 只认宿主类型的结构化码和未执行证明；未知/已提交结果仍沿原保守控制，不解析正文猜状态。
+            code = (exc.code if exc.outcome == 'not_started' and error_contract(exc.code).code == exc.code
+                    else 'TOOL_PERMISSION_DENIED' if exc.status == 403 else 'TOOL_EXECUTION_FAILED')
+            outcome = _outcome('workflows', {'error_code': exc.code, 'error': exc.message,
                             'host_error': exc.to_payload()}, False,
-                            'TOOL_PERMISSION_DENIED' if exc.status == 403 else 'TOOL_EXECUTION_FAILED',
+                            code,
                             effect_outcome='not_started' if exc.outcome == 'not_started' else 'unknown')
+            outcome.reported_error_code = exc.code
+            return outcome
         except WorkflowPolicyRefusal as exc:
             return _outcome('workflows', {'error_code': exc.code, 'error': str(exc),
                 'details': exc.details}, False, exc.code, effect_outcome='not_started')
@@ -537,7 +708,8 @@ class WorkflowsTool(BaseTool):
         store = self._store()
         if action == 'list':
             return {'workflows': [_plain(item) for item in store.list_workflows()
-                                  if item.descriptor.metadata.get('hidden') is not True]}
+                                  if item.descriptor.metadata.get('hidden') is not True
+                                  and workflow_list_matches(item, params, default_lifecycle='all')]}
         workflow_id = params['workflow_id']
         if action == 'versions':
             return {'versions': list_versions(self.owner_home, 'workflow', workflow_id, limit=params.get('limit', 20))}
@@ -580,6 +752,8 @@ class WorkflowsTool(BaseTool):
             with restoring_snapshot(self.owner_home, record):
                 return self._save_definition(self._from_flat(payload).to_dict(), workflow_id, params['expected_revision'])
         if action == 'save':
+            if 'source_ref' in params:
+                return self._save_package_template(params['source_ref'], workflow_id, params.get('expected_revision'))
             return self._save_definition(params['definition'], workflow_id, params.get('expected_revision'))
         definition = store.get_workflow(workflow_id)
         if definition is None:
@@ -606,8 +780,20 @@ class WorkflowsTool(BaseTool):
     # 函数用途: 规范工作流保存请求并记录剥离键。
     def _clean_definition(self, value, workflow_id):
         definition = _definition(value, workflow_id)
+        previous = self._store().get_workflow(workflow_id)
+        if (previous is not None and previous.descriptor.owner_id and self.owner_id
+                and previous.descriptor.owner_id != self.owner_id):
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+        source = definition.descriptor.metadata.get('derived_from')
+        if isinstance(source, dict):
+            if previous is None or previous.descriptor.metadata.get('derived_from') != source:
+                raise WorkflowTemplateError('WORKFLOW_TEMPLATE_SOURCE_HOST_ONLY')
         metadata, stripped = model_metadata(definition.descriptor.metadata)
-        return replace(definition, descriptor=replace(definition.descriptor, metadata=metadata)), stripped
+        if definition.descriptor.owner_id:
+            stripped = [*stripped, 'descriptor.owner_id']
+        # owner由注册工具的宿主提供，不信模型即使填写同值；旧记录仍由Store锁内保留原凭据。
+        return replace(definition, descriptor=replace(definition.descriptor, metadata=metadata,
+            owner_id=self.owner_id)), stripped
 
     # LLM: G1只预检是否显式提供CAS，具体revision匹配仍在原Store的同一锁内判断。
     # 函数用途: 统一save、publish和rollback的正式保存路径。
@@ -619,6 +805,42 @@ class WorkflowsTool(BaseTool):
                              expected_revision, **self._skill_options())
         definition, stripped = self._clean_definition(value, workflow_id)
         saved = store.save_workflow(self._topology_refs(definition), expected_revision=expected_revision)
+        return _plain(saved) | {'stripped_metadata_keys': stripped}
+
+    def _save_package_template(self, source_ref, workflow_id, expected_revision):
+        store = self._store()
+        if store.get_workflow(workflow_id) is not None:
+            raise WorkflowTemplateError('WORKFLOW_TEMPLATE_TARGET_EXISTS',
+                next_action='目标工作流已存在，未覆盖；请使用独立的新workflow_id。')
+        if not callable(self.package_resource_resolver):
+            raise WorkflowTemplateError('WORKFLOW_TEMPLATE_SOURCE_UNAVAILABLE',
+                next_action='当前宿主未绑定原包资源读取器；请在已授权Owner会话使用此入口，不要手抄来源冒充验证。')
+        try:
+            content = self.package_resource_resolver(source_ref)
+        except (OSError, ValueError, TypeError) as error:
+            from ..runtime_errors import is_structured_error_code
+
+            reason = getattr(error, 'error_code', '') or getattr(error.__cause__, 'error_code', '')
+            raise WorkflowTemplateError('WORKFLOW_TEMPLATE_SOURCE_UNAVAILABLE', field_path='$.source_ref',
+                details={'source_exception_type': type(error).__name__,
+                         'source_error_code': reason if is_structured_error_code(reason) else 'SOURCE_REFERENCE_INVALID'},
+                next_action='原包来源已过期、不可用或摘要不符；用skill_search从当前已授权快照重取完整source_ref，核对版本后再派生，勿盲重试。') from error
+        value = decode_package_workflow(content, source_ref, workflow_id)
+        try:
+            definition, stripped = self._clean_definition(value, workflow_id)
+            definition = self._topology_refs(definition)
+            validate_definition_eligibility(definition)
+        except (ValueError, TypeError, KeyError) as error:
+            from ..common.log_redaction import redact_sensitive_text
+
+            raise WorkflowTemplateError('WORKFLOW_TEMPLATE_DEFINITION_INVALID',
+                field_path=getattr(error, 'field', '$.steps'), details={
+                    'validation_exception_type': type(error).__name__,
+                    'validation_reason': redact_sensitive_text(str(error))[:256]}) from error
+        proof = issue_package_workflow_source(self.owner_home, definition, dict(content.source_ref))
+        saved = store.save_workflow(definition, expected_revision=expected_revision, package_template_source=proof)
+        from ..capability.method_usage import record_template_selection
+        record_template_selection(self, saved, dict(content.source_ref), chars=len(content.data.decode("utf-8")))
         return _plain(saved) | {'stripped_metadata_keys': stripped}
 
     # LLM: W1历史payload使用与原Store相同的平铺格式，不保存工具展示字段。

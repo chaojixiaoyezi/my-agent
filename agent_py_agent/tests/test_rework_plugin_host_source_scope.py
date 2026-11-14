@@ -276,9 +276,9 @@ def test_native_launch_boundary_keeps_environment_and_path_projection(asset_case
         assert set(guard["host_exclusive_paths"]) == set(map(str, host.hidden))
         assert not guard["network_access"] and guard["block_subprocess"] is False
         if system == "Linux":
-            # 产品在完整 bwrap 之前仍保留独立资源启动器，不能为测试移除这层生产包装。
-            prefix = tooling.wrap_resource_command(["/fixture/bwrap"])
-            assert command[:len(prefix)] == prefix
+            # 只读插件形态按原SandboxSpec合同不额外套资源限制；bwrap本身仍是不可去掉的安全外层。
+            assert command[0] == "/fixture/bwrap"
+            assert {"--die-with-parent", "--new-session", "--unshare-net"}.issubset(command)
             masks = [command[index + 2] for index in range(len(command) - 2)
                      if command[index:index + 2] == ["--ro-bind", tooling.HIDDEN_FILE_MASK_SOURCE]]
             assert str(case.source) in masks and str(case.sibling) not in masks

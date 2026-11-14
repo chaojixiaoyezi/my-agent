@@ -290,7 +290,7 @@ def _preflight_failure(script_id, record, code, check):
     stamp = time.time()
     return ScriptExecutionResult(script_id, False, None, 0, stamp, stamp, {}, '', code, code, True,
         {'script_id': script_id, 'error_code': code, 'io_contract': record.get('io_contract', {}),
-         'source_check': check}, source_check=check)
+         'source_check': check}, source_check=check, phase='preflight', effect_outcome='not_started')
 
 
 # LLM: 求交前复用原SDK严格校验；冲突身份、重复行或非法等级不能在重建时被洗成授权。
@@ -702,6 +702,15 @@ def current_datasource_bindings():
 
 # LLM: 根和文件由宿主冻结目录给定；仅解析声明连接，捕获秘密值先于其它可能失败的准备步骤。
 # 类用途: 保存本次脚本的manifest生命周期、沙箱根与SDK启动包装。
+def sdk_preload_bootstrap():
+    """只读宿主指定的SDK包，不为Python包定位开放其父目录。"""
+    return ('import runpy,sys,importlib.util as u;'
+        'p=sys.argv.pop(1)+"/agent_py_agent";'
+        's=u.spec_from_file_location("agent_py_agent",p+"/__init__.py",submodule_search_locations=[p]);'
+        'm=u.module_from_spec(s);sys.modules["agent_py_agent"]=m;s.loader.exec_module(m);'
+        'import agent_py_agent.runtime_sdk;')
+
+
 class ScriptDatasourceRuntime:
     # LLM: SDK连接只支持可信预载Python；shell已登记连接在解密前拒绝，旧被动来源保留但不投递签名环境。
     # 函数用途: 为Python创建独立签名快照，普通shell及旧查询来源不接收重签能力。
@@ -760,8 +769,9 @@ class ScriptDatasourceRuntime:
             if self.parts is not None:
                 raise PermissionError('DATASOURCE_PYTHON_RUNTIME_REQUIRED')
             return command
-        preload = 'import agent_py_agent.runtime_sdk;'
-        bootstrap = 'import runpy,sys;sys.path.insert(0,sys.argv.pop(1));' + preload + 'runpy.run_path(sys.argv.pop(1),run_name="__main__")'
+        # SDK包子树已在只读运行根内；显式加载包身份，避免FileFinder为定位包而列出未授权的仓库父目录。
+        # 后续相对导入仍走原package.__path__，不把整个安装根增加为业务读取权限。
+        bootstrap = sdk_preload_bootstrap() + 'runpy.run_path(sys.argv.pop(1),run_name="__main__")'
         return [*command[:3], '-c', bootstrap, str(Path(__file__).resolve().parents[3]), *command[3:]]
 
     # LLM: 只清理本对象创建的manifest，无绑定shell没有清单；nofollow失败明确报告，不悄悄保留秘密文件。

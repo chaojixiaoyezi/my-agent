@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
+from itertools import islice
 from typing import Any
 
 _MAX_SCHEMA_DEPTH = 32
@@ -344,6 +345,7 @@ def _validate_node(
                 path,
                 list(expected_types) if len(expected_types) > 1 else expected_types[0],
                 _json_type(value),
+                _field_type_details(resolved),
             )
         )
         return
@@ -361,7 +363,7 @@ def _validate_node(
         _validate_number(value, resolved, path, issues)
 
 
-# LLM: oneOf 要求恰好一支、anyOf 至少一支、allOf 每支都通过；只返回组合级问题避免分支噪声。
+# 只在唯一匹配了 schema 判别字段时解释该分支的错误，不把诊断当成校验通过。
 # 函数用途: 校验联合或叠加结构，并告诉递归主流程是否应继续检查当前节点。
 def _validate_compositions(
     value: Any,
@@ -376,14 +378,30 @@ def _validate_compositions(
         branches = schema.get(keyword)
         if not isinstance(branches, list) or not branches:
             continue
-        matches = sum(
-            1
-            for branch in branches
-            if _branch_is_valid(value, branch, root_schema, path, depth + 1)
-        )
+        matches = 0
+        identified = 0
+        selected_issues = []
+        for branch in branches:
+            branch_issues = []
+            _validate_node(value, branch, root_schema=root_schema, path=path, depth=depth + 1, issues=branch_issues)
+            if not branch_issues:
+                matches += 1
+                if keyword == 'anyOf' or matches > 1:
+                    break
+            elif isinstance(value, dict) and not matches:
+                selector = _matching_schema_constants(value, branch, root_schema)
+                if selector:
+                    identified += 1
+                    if identified == 1:
+                        selected_issues = [replace(issue, details={
+                            'schema_selector': selector, **(issue.details or {})}) for issue in branch_issues]
         valid = matches >= 1 if keyword == "anyOf" else matches == 1
         if not valid:
-            issues.append(ToolInputIssue(keyword, path, keyword, _json_type(value)))
+            if not matches and identified == 1:
+                issues.extend(selected_issues[:_MAX_ISSUE_COUNT - len(issues)])
+            else:
+                issues.append(ToolInputIssue(keyword, path, keyword, _json_type(value),
+                    {'multiple_matches': matches > 1, 'branch_count': len(branches)}))
             return False
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
@@ -397,6 +415,37 @@ def _validate_compositions(
                 issues=issues,
             )
     return True
+
+
+def _matching_schema_constants(value: dict, branch: object, root_schema: dict) -> dict:
+    if not isinstance(branch, dict):
+        return {}
+    properties = _resolved_schema(branch, root_schema).get('properties')
+    if not isinstance(properties, dict):
+        return {}
+    selector = {}
+    for name, prop in properties.items():
+        if not isinstance(prop, dict):
+            continue
+        if '$ref' in prop:
+            prop = _resolved_schema(prop, root_schema)
+        if 'const' in prop:
+            if name not in value or not _json_equal(value[name], prop['const']):
+                return {}
+            # 只记录公开 schema 声明的标量，不把调用正文写进回执。
+            if isinstance(prop['const'], (str, bool, int, float)) and len(selector) < 4:
+                selector[name[:128]] = prop['const'][:128] if isinstance(prop['const'], str) else prop['const']
+    return selector
+
+
+def _field_type_details(schema):
+    types = _schema_types(schema)
+    if len(types) != 1:
+        return None
+    details = {'expected_type': types[0]}
+    if types[0] == 'array' and schema.get('maxItems') == 0:
+        details['requires_empty_array'] = True
+    return details
 
 
 # LLM: 分支探测使用独立有界问题列表，不能把未选分支的错误泄露到主结果。
@@ -437,7 +486,9 @@ def _validate_object(
         for raw_name in required:
             name = str(raw_name)
             if name not in value:
-                issues.append(ToolInputIssue("required", _child_path(path, name), True, "missing"))
+                field = properties.get(name)
+                details = _field_type_details(_resolved_schema(field, root_schema)) if isinstance(field, dict) else None
+                issues.append(ToolInputIssue("required", _child_path(path, name), True, "missing", details))
     _validate_exclusive_arguments(value, schema, path, issues)
     additional = schema.get("additionalProperties", True)
     for raw_key, child in value.items():
@@ -454,7 +505,8 @@ def _validate_object(
                 issues=issues,
             )
         elif additional is False:
-            issues.append(ToolInputIssue("additionalProperties", child_path, False, _json_type(child)))
+            issues.append(ToolInputIssue("additionalProperties", child_path, False, _json_type(child),
+                _unknown_property_details(key, properties, root_schema, path)))
         elif isinstance(additional, dict):
             _validate_node(
                 child,
@@ -465,6 +517,32 @@ def _validate_object(
                 issues=issues,
             )
     _length_issue(len(value), schema, path, issues, "minProperties", "maxProperties", "object")
+
+
+def _unknown_property_details(key, properties, root_schema, path):
+    """只给有界完整搜索中唯一的已声明后代路径；歧义或超额时不猜。"""
+    details = {'allowed_fields': list(islice(properties, 16))}
+    pending, matches, budget = [(properties, path, 0)], [], 128
+    while pending:
+        children, parent, depth = pending.pop()
+        for name, raw in children.items():
+            budget -= 1
+            if budget < 0:
+                return details
+            if not isinstance(raw, dict):
+                continue
+            resolved = _resolved_schema(raw, root_schema)
+            child_path = _child_path(parent, name)
+            if depth and name == key:
+                matches.append((child_path, _schema_types(resolved)))
+            nested = resolved.get('properties')
+            if isinstance(nested, dict) and nested:
+                if depth >= 4:
+                    return details
+                pending.append((nested, child_path, depth + 1))
+    if len(matches) == 1 and len(matches[0][1]) == 1:
+        details.update(suggested_path=matches[0][0], expected_type=matches[0][1][0])
+    return details
 
 
 # LLM: 互斥判断只看调用中是否实际出现字段名，并按冻结声明顺序报告；不能按真假值替模型丢掉空串、null 或任选一个来源。
@@ -592,9 +670,9 @@ def _length_issue(
     minimum = schema.get(minimum_key)
     maximum = schema.get(maximum_key)
     if isinstance(minimum, int) and not isinstance(minimum, bool) and length < minimum:
-        issues.append(ToolInputIssue(minimum_key, path, minimum, actual_type))
+        issues.append(ToolInputIssue(minimum_key, path, minimum, actual_type, {"actual_length": length}))
     if isinstance(maximum, int) and not isinstance(maximum, bool) and length > maximum:
-        issues.append(ToolInputIssue(maximum_key, path, maximum, actual_type))
+        issues.append(ToolInputIssue(maximum_key, path, maximum, actual_type, {"actual_length": length}))
 
 
 # LLM: 只解析当前根内的 JSON Pointer $ref，外部 URL ref 不会触发网络或文件读取。

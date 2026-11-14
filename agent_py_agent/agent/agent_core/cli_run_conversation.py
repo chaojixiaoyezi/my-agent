@@ -163,7 +163,7 @@ def persist_cli_run_assistant(agent: object, params: object, result: object) -> 
     thread_id = str(attributes.get("conversation_thread_id") or "").strip()
     request_id = str(getattr(params, "request_id", "") or "").strip()
     store = getattr(agent, "conversation_store", None)
-    projection = project_user_reply(str(getattr(result, "response", "") or ""))
+    projection = project_user_reply(str(getattr(result, "response", "") or ""), finalized=True)
     native = canonical_native_messages_envelope(getattr(result, "canonical_native_messages", None))
     if projection.internal_signal or (not projection.content and not native):
         return True

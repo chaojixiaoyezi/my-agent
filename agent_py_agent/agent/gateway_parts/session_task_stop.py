@@ -233,6 +233,35 @@ def _business_resource_references(frozen, scope):
     return refs
 
 
+def _attempt_physical_operations_exited(repo, attempt_id, agent_run_id):
+    """业务UNKNOWN不等于物理执行仍活跃；只消费原host已落账的准确进程清理回执。"""
+    import json
+
+    for operation in repo.unsettled_attempt_operations(attempt_id):
+        if operation["status"] != "UNKNOWN":
+            return False
+        row = repo.get_operation(operation["operation_id"])
+        if (row is None or row["attempt_id"] != attempt_id or row["agent_run_id"] != agent_run_id
+                or row["status"] != "UNKNOWN"):
+            return False
+        try:
+            result = json.loads(row["outcome_json"])["result"]
+            process = result["result_envelope"]["process"]
+            termination = process["termination"]
+            if (result.get("handler_executed") is not True
+                    or process.get("cleanup_schema") != "foreground-process-cleanup.v1"
+                    or process.get("status") != "cancelled" or process.get("cleanup_confirmed") is not True
+                    or type(process.get("pid")) is not int or process["pid"] <= 0
+                    or not isinstance(process.get("birth_token"), str) or not process["birth_token"]
+                    or termination.get("confirmed") is not True or termination.get("unresolved_pids") != []
+                    or type(termination.get("observed_processes")) is not int
+                    or termination["observed_processes"] < 1):
+                return False
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return False
+    return True
+
+
 def _business_resources_exited(agent, repo, task):
     # 零等待读取原资源；已请求、父进程poll、children.ok或租约到期都不是完整退出证明。
     from dataclasses import asdict
@@ -286,7 +315,7 @@ def _business_resources_exited(agent, repo, task):
                     or run["current_attempt_id"] != binding["attempt_id"]
                     or attempt["status"] not in {"done", "failed", "cancelled", "stopped"} or not attempt["ended_at"]
                     or repo.get_agent_run_exec_lock(binding["agent_run_id"]) is not None
-                    or repo.unsettled_attempt_operations(binding["attempt_id"])
+                    or not _attempt_physical_operations_exited(repo, binding["attempt_id"], binding["agent_run_id"])
                     or is_interruptible_registered(f'subagent-runner-attempt:{binding["run_id"]}:{binding["attempt_id"]}')
                     or any(record.run_id == binding["run_id"] and record.metadata.get("attempt_id") == binding["attempt_id"]
                            for _ledger, record, _retained in model_call_drain_snapshot())):
@@ -399,7 +428,13 @@ def reconcile_business_session_task_cancellation(agent, task):
         repo, current, ref, _root, claim, _claim_ref, matches = _business_stop_target(agent, task)
         if _retry_cleanup_proof_checkpoints(current):
             repo, current, ref, _root, claim, _claim_ref, matches = _business_stop_target(agent, task)
-        if (_business_resources_exited(agent, repo, current)
+        resources_exited = _business_resources_exited(agent, repo, current)
+        if resources_exited and not control.get("resources_confirmed"):
+            # 只更新物理退出事实；外部业务UNKNOWN仍保留原outstanding与禁止重放账。
+            current = agent.conversation_store.session_tasks.record_execution_cancellation_control(task.task_id,
+                execution_ref=ref, outstanding_refs=control.get("execution_outstanding_refs", control["outstanding_refs"]),
+                resources_confirmed=True)
+        if (resources_exited
                 and _business_execution_exited(agent, repo, current, ref, claim, matches)):
             agent.conversation_store.session_tasks.record_execution_cancellation_control(task.task_id,
                 execution_ref=ref, outstanding_refs=[], resources_confirmed=True, claim_finished=True)

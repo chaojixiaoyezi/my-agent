@@ -313,3 +313,145 @@ def test_exact_handle_control_receipts_withhold_content_and_preserve_outcome(tmp
     assert json.loads(outcome.output)['session_id'] == 'old-handle'
     assert outcome.effect_outcome == ('' if ok else 'unknown')
     assert outcome.error_code == ('' if ok else 'TOOL_OPERATION_OUTCOME_UNKNOWN')
+
+
+def test_exact_self_process_state_is_content_free_and_attempt_bound(tmp_path, monkeypatch):
+    """真实管理进程的原启动事实经canonical入口核验；禁止状态查询打开任何输出。"""
+    import json
+    from dataclasses import replace
+
+    from agent_py_agent.agent.path_access_policy import PathAccessPolicy
+    from agent_py_agent.agent.tooling.background_process_launch import start_background_process
+    from agent_py_agent.agent.tooling.process_registry import ProcessRegistry, process_registry
+    from agent_py_agent.agent.tooling.process_scope import (
+        ProcessAccessScope,
+        ProcessExecutionScope,
+        exact_process_read_scope,
+    )
+    from agent_py_agent.agent.tooling.process_session_records import merge_process_record
+    from agent_py_agent.agent.tooling.process_session_store import process_session_store_root
+    from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
+    from agent_py_agent.agent.tooling.workspace_read_scope import build_workspace_read_context
+    from agent_py_agent.tests._managed_process_harness import managed_request
+
+    owner = tmp_path.resolve()
+    boundary = {'read_scope_mode': 'exact', 'allowed_read_roots': [str(owner)], 'allowed_write_roots': [str(owner)]}
+    context = build_workspace_read_context(cwd=owner, write_boundary=boundary,
+        path_policy=PathAccessPolicy.from_values(owner_scope_root=str(owner)), granted_external_roots=())
+    access = ProcessAccessScope('owner-test', 'thread-test', str(owner))
+    execution = ProcessExecutionScope(str(owner), 'thread-test', 'task-test', 'self-run', 'self-attempt')
+    store = process_session_store_root(owner, owner)
+    hosted = start_background_process(managed_request(owner,
+        code='import time; print("PRIVATE_PROCESS_OUTPUT", flush=True); time.sleep(0.6)',
+        access_scope=access, execution_scope=execution, store_root=store,
+        exact_read_scope=exact_process_read_scope(context, (owner,))))
+    record = process_registry.attach(hosted.record, hosted.process, hosted.store_root)
+    tool = ProcessSessionTool(owner_scope_root=owner, workspace_root=owner)
+    scope = {'session_id': 'thread-test', 'root_task_id': 'task-test'}
+
+    def call(action, *, run='self-run', attempt='self-attempt', owner_id='owner-test', extra=None):
+        return execute_canonical_test_call(owner, tools={'process_session': tool}, tool_name='process_session',
+            arguments={'action': action, 'session_id': record.session_id, **(extra or {})},
+            run_id=run, attempt_id=attempt, call_id=f'{action}-{run}-{attempt}-{owner_id}',
+            owner_scope_root=str(owner), operation_owner_id=owner_id, write_boundary=boundary,
+            trusted_run_context={'run_scope': scope}).result
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('state observation must never read output log')
+
+    monkeypatch.setattr('agent_py_agent.agent.tooling.process_registry._read_log_tail', forbidden)
+    try:
+        for action in ('status', 'wait'):
+            result = call(action)
+            assert result.status == 'succeeded', repr(result)
+            text = ''.join(block.text or '' for block in result.content_blocks)
+            payload = json.JSONDecoder().raw_decode(text[text.index('{'):])[0]
+            assert payload['content_withheld_reason'] == 'EXACT_PROCESS_STATE_ONLY'
+            assert not ({'output', 'command', 'pid', 'output_file', 'cwd'} & payload.keys())
+            assert 'PRIVATE_PROCESS_OUTPUT' not in repr(result)
+        assert payload['status'] == 'exited' and payload['exit_code'] == 0
+        # 冷恢复复用原私有Store，不要求保留旧Gateway内存；仍只有同attempt可读。
+        cold = ProcessRegistry()
+        assert cold.exact_state(record.session_id, access, execution, context, store)['status'] == 'exited'
+        assert cold.exact_state(record.session_id, access, replace(execution, attempt_id='next'), context, store) is None
+        for kwargs in ({'run': 'parent-run'}, {'attempt': 'next'}, {'owner_id': 'other-owner'}):
+            denied = call('status', **kwargs)
+            assert denied.status != 'succeeded'
+            assert 'EXACT_PROCESS_READ_SCOPE_UNSUPPORTED' in repr(denied)
+        for action in ('list', 'network_status'):
+            assert call(action).status != 'succeeded'
+        forged = call('status', run='parent-run', extra={'__run_scope': {'run_id': 'self-run'}})
+        assert forged.status != 'succeeded'
+        # 入门核验后权威被移除，不能把空结果涂为成功或吞掉精确原因。
+        saved_exact = process_registry.exact_state
+        with monkeypatch.context() as scoped:
+            scoped.setattr(process_registry, 'exact_state',
+                lambda *args, **kwargs: saved_exact(*args, **kwargs) if kwargs.get('refresh') is False else None)
+            lost = call('status')
+            assert lost.status != 'succeeded'
+            assert 'EXACT_PROCESS_SCOPE_UNVERIFIED' in repr(lost)
+            assert 'not_started' in repr(lost)
+        original = dict(record.persisted_snapshot)
+        for proof in (None, {**original['exact_read_scope'], 'sandbox_read_roots': []}):
+            with pytest.raises(ValueError):
+                merge_process_record(original, {**original, 'exact_read_scope': proof})
+        legacy = {**original, 'exact_read_scope': None}
+        with pytest.raises(ValueError):
+            merge_process_record(legacy, original)
+    finally:
+
+        if hosted.process.poll() is None:
+            process_registry.kill(record.session_id, access, store)
+        hosted.process.wait(timeout=5)
+
+
+@pytest.mark.sandbox_capability(SANDBOX_CAPABILITY)
+def test_exact_shell_freezes_actual_launch_read_scope(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.process_registry import process_registry
+    from agent_py_agent.agent.tooling.process_scope import ProcessAccessScope
+    from agent_py_agent.agent.tooling.process_session_store import (
+        ProcessSessionStore,
+        process_session_store_root,
+    )
+    from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
+    from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+    owner = tmp_path.resolve()
+    boundary = {'read_scope_mode': 'exact', 'allowed_read_roots': [str(owner)], 'allowed_write_roots': [str(owner)]}
+    scope = {'session_id': 'thread-test', 'root_task_id': 'task-test'}
+    shell = ShellTool(owner, options=ShellToolOptions(owner_scope_root=str(owner)))
+    def call(name, tool, params):
+        result = execute_canonical_test_call(owner, tools={name: tool}, tool_name=name, arguments=params,
+            run_id='self-run', attempt_id='self-attempt', call_id=name,
+            owner_scope_root=str(owner), operation_owner_id='owner-test', write_boundary=boundary,
+            trusted_run_context={'run_scope': scope}).result
+        if result.status == 'approval_required':
+            approved = {**result.metadata['action_decision']['approval_request'],
+                        'approval_id': 'isolated-test-approval', 'status': 'APPROVED'}
+            return execute_canonical_test_call(owner, tools={name: tool}, tool_name=name, arguments=params,
+                run_id='self-run', attempt_id='self-attempt', call_id=name,
+                owner_scope_root=str(owner), operation_owner_id='owner-test',
+                write_boundary={**boundary, 'approved_actions': [approved]},
+                trusted_run_context={'run_scope': scope}).result
+        return result
+    started = call('run_command', shell, {'command': 'printf SELF_STATE_TEST; sleep 0.2', 'run_in_background': True})
+    assert started.status == 'succeeded', repr(started)
+    # ID来自原启动回执，非扫描或从命令文本推测归属。
+    import re
+    session = re.search(r'bg-[0-9]+-[0-9a-f]+', repr(started)).group()
+    store = process_session_store_root(owner, owner)
+    raw = ProcessSessionStore(store).load(session).record
+    assert raw['exact_read_scope']['read_context']['read_roots'] == [str(owner)]
+    assert raw['execution_scope']['run_id'] == 'self-run'
+    def forbidden(*args, **kwargs):
+        pytest.fail('exact status/wait must not consume logs')
+    monkeypatch.setattr('agent_py_agent.agent.tooling.process_registry._read_log_tail', forbidden)
+    try:
+        waited = call('process_session', ProcessSessionTool(owner_scope_root=owner, workspace_root=owner),
+                      {'action': 'wait', 'session_id': session, 'timeout_seconds': 5})
+        assert waited.status == 'succeeded', repr(waited)
+        assert 'EXACT_PROCESS_STATE_ONLY' in repr(waited)
+        assert 'SELF_STATE_TEST' not in repr(waited)
+    finally:
+        if ProcessSessionStore(store).load(session).record['status'] not in {'exited', 'killed', 'not_started'}:
+            process_registry.kill(session, ProcessAccessScope('owner-test', 'thread-test', str(owner)), store)

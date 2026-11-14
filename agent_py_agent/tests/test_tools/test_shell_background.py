@@ -690,3 +690,23 @@ def test_w16fix_wake_count_propagates_control_and_authority_errors(tmp_path, mon
         completion._active_wake_backed_process_count(agent, params)
     assert raised.value is error
     assert calls == (["verified", stage] if stage == "get_after_verified" else [stage])
+
+
+def test_external_workspace_background_log_uses_canonical_session_authority(tmp_path):
+    from agent_py_agent.agent.conversation.background_process_view import inspect_background_process
+    from agent_py_agent.agent.tooling.process_session_store import process_session_store_root
+
+    owner = tmp_path / "owner"
+    workspace = tmp_path / "external-workspace"
+    owner.mkdir()
+    workspace.mkdir()
+    tool = ShellTool(workspace, options=ShellToolOptions(owner_scope_root=str(owner)))
+    tool.granted_external_roots = (workspace,)
+    result = tool.execute({"command": "echo canonical-log; sleep 2", "run_in_background": True})
+    assert result.ok, result.output
+    payload = json.loads(result.output)
+    output = Path(payload["output_file"])
+    assert output.is_relative_to(process_session_store_root(workspace, owner))
+    detail = inspect_background_process(owner, payload["session_id"])
+    assert detail["session_id"] == payload["session_id"]
+    assert "canonical-log" in "\n".join(detail["log_tail"])

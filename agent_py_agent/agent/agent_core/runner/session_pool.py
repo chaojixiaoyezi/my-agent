@@ -185,7 +185,7 @@ def _record_runner_session_unscoped(lease, session, *, status, error=None, requi
             confirm_task_control_cleanup(
                 lease.manager, lease.run_id, attempt_id=lease.attempt_id, session=session, runner_status=status,
             )
-        if _runner_session_update_is_stale_for_terminal_task(task, status):
+        if _runner_session_update_is_stale_for_terminal_task(task, status, session=session):
             return False
         now = time.time()
         current = dict(session)
@@ -237,10 +237,16 @@ def _record_runner_session_unscoped(lease, session, *, status, error=None, requi
 def _runner_session_update_is_stale_for_terminal_task(
     task: object,
     requested_status: str,
+    *, session=None,
 ) -> bool:
     status = str(getattr(task, "status", "") or "").strip().upper()
     if status not in SUBAGENT_RECOVERY_CLOSED_STATUSES:
         return False
+    if status == TaskStatus.CANCELLED.value and requested_status in {'completed', 'failed'} and session is not None:
+        from ...subagents.runner_session_liveness import runner_session_matches_stop
+
+        if runner_session_matches_stop(task, session):
+            return False
     return not (
         status == TaskStatus.DONE.value
         and str(requested_status or "").strip().lower() == "completed"

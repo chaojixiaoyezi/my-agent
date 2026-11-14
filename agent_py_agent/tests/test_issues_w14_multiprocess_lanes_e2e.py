@@ -265,7 +265,17 @@ def test_foreign_thread_io_is_not_attributed_to_transition(tmp_path, monkeypatch
             assert wrote_after_install.wait(5), '安装观察器后没有发生真实外部写入'
             close_requested.set()
             assert closed.wait(5), '外部线程没有关闭持有的 FD'
-            result = run_with_transition(home, time.time(), transition)
+            now = time.time()
+            for tick in range(128):
+                assert owner_maintenance.owner_maintenance_due(home.owner_home_dir, now=now + tick)
+                result = run_with_transition(home, now + tick, transition)
+                marker = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+                if marker.get('maintenance_partial') is False:
+                    assert marker['storage_maintenance']['quota_reconciliation']['complete'] is True
+                    break
+                # 原配额分片可持一个扫描目录；未完成必须仍到期，不能把它当完成后的泄漏。
+            else:
+                pytest.fail(f'原维护入口未在有界续片内完成：{marker}')
     finally:
         stop.set()
         thread.join(5)

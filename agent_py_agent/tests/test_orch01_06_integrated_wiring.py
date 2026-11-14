@@ -300,6 +300,15 @@ def test_create_subagents_exact_write_set_upper_bound_narrowing(tmp_path: Path) 
 def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_path: Path) -> None:
     """Full composed smoke flow covering ORCH-01..06 together without state leaks or crashes."""
     agent = integrated_agent
+    # 组件宿主先登记固定父任务与线程，再沿原创建入口获得真正接收run；不使用显示别名。
+    parent_thread = agent.conversation_store.threads.create(title="integration-parent")
+    agent.conversation_store.tasks.bind({
+        "thread_id": parent_thread.thread_id, "task_id": "main-run-coord", "status": "active",
+    })
+    agent._current_run_params = SimpleNamespace(
+        run_id="main-run-coord", task_id="main-run-coord", request_id="req-main-coord",
+        task_attributes={"conversation_task_id": "main-run-coord", "conversation_thread_id": parent_thread.thread_id},
+    )
     tools = agent.tools
     module_a = Path(agent.home_paths.owner_home_dir) / "module_a.py"
     module_a.parent.mkdir(parents=True, exist_ok=True)
@@ -369,8 +378,8 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
 
     # 4. ORCH-04: ManageHandoffBoardTool 原生交接板状态机流转
     agent._current_run_params = SimpleNamespace(
-        run_id="main-run-coord",
-        task_id="task-main-coord",
+        run_id=child_task.parent_id,
+        task_id=child_task.root_id,
         request_id="req-main-coord",
     )
     dummy_snapshot = SimpleNamespace(runtimes=())
@@ -386,7 +395,7 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
         "action": "publish_item",
         "case_id": case_id,
         "request_id": "req-flow-1",
-        "responsible_actor": "worker-1",
+        "responsible_actor": child_run_id,
         "frozen_input_version": "git-sha-1234",
         "exclusive_write_set": [str(module_a)],
     }, proven_ctx)
@@ -396,7 +405,7 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
     assert item_id
 
     coordinator_params = agent._current_run_params
-    agent._current_run_params = SimpleNamespace(run_id="worker-1", task_id="worker-1")
+    agent._current_run_params = SimpleNamespace(run_id=child_run_id, task_id=child_run_id, task_attributes=child_task.attributes)
     # 4.2 record_ack
     ack_res = board_tool.execute_scoped({
         "action": "record_ack",
@@ -424,6 +433,8 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
         "item_id": item_id,
         "verdict": "accepted",
         "reason": "Integration verified cleanly",
+        "frozen_input_version": "git-sha-1234",
+        "submission_digest": json.loads(sub_res.output)["result"]["item"]["metadata"]["submission_digest"],
     }, proven_ctx)
     assert dec_res.ok is True, dec_res.output
     assert json.loads(dec_res.output).get("result", {}).get("item", {}).get("state") == "accepted"

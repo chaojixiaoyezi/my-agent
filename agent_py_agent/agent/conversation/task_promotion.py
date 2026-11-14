@@ -35,6 +35,11 @@ def promote_conversation_task_for_run(agent: object, params: object):
         if link is not None and isinstance(authoritative, dict) and isinstance(projection, dict) and projection is not authoritative:
             projection.clear()
             projection.update(authoritative)
+        if link is not None:
+            current = getattr(agent, "_current_run_params", None)
+            contract = getattr(current, "delivery_contract", None)
+            if isinstance(contract, dict):
+                object.__setattr__(params, "delivery_contract", contract)
         return link
 
     transition = getattr(params, "active_turn_transition_callback", None)

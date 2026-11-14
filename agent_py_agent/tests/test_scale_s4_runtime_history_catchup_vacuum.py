@@ -271,18 +271,26 @@ def test_idle_small_database_adds_no_physical_write(database):
     retention.maintain_runtime_history_lane(_request(home))
     before = repo.db_path.stat().st_size
     for _ in range(3):
-        commits = []
+        cursor = {}
+        for _slice in range(64):
+            commits = []
 
-        def commit(operation):
-            commits.append(True)
-            return operation()
+            def commit(operation):
+                commits.append(True)
+                return operation()
 
-        result = retention.maintain_runtime_history_lane(_request(home, commit=commit))
-        assert result["complete"] and result["items"] == 0
-        assert result.get("freed_bytes", 0) == 0
-        assert "deferred_reason" not in result
-        assert len(commits) == 3  # 仅有既存三个类别的逻辑批次，没有额外页维护提交。
-        assert repo.db_path.stat().st_size == before
+            result = retention.maintain_runtime_history_lane(_request(home, commit=commit, cursor=cursor))
+            assert result["items"] == 0 and result.get("freed_bytes", 0) == 0
+            assert len(commits) <= 3  # 仅有三个逻辑批次，没有额外页维护提交。
+            assert repo.db_path.stat().st_size == before
+            if result["complete"]:
+                assert "deferred_reason" not in result and len(commits) == 3
+                break
+            # 原25ms时片在系统繁忙时可正确延期；续拍不能放宽预算或跳过无物理写断言。
+            assert result["deferred_reason"] == "budget_exhausted"
+            cursor = result["cursor"]
+        else:
+            raise AssertionError("idle runtime history did not complete within bounded continuation")
         assert not conn.in_transaction
 
 

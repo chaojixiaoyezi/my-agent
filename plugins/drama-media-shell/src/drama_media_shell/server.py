@@ -151,7 +151,7 @@ class DramaMediaServer:
         except ValueError as exc:
             raise DramaShellError("INVALID_WRITE_CONTEXT", "工作区写入上下文无效。") from exc
 
-    # LLM: 初始化明确声明 SDK 0.2.0 对应的读写扩展版本，宿主据此决定是否附带逐次上下文。
+    # LLM: 初始化明确声明 SDK 0.3.0 对应的读写扩展版本，宿主据此决定是否附带逐次上下文。
     # 函数用途: 生成 MCP initialize 成功结果。
     @staticmethod
     def _initialize_result() -> dict:

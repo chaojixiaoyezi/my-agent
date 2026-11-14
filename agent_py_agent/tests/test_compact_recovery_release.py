@@ -283,3 +283,235 @@ def test_released_history_does_not_shrink_the_recorded_before_size(tmp_path, mon
     checkpoint = committed_compact_checkpoint_chain(fixture.agent, current)[-1]
     assert len(measured) == 1 and checkpoint["projected_tokens_before"] == measured[0]
     assert checkpoint["projected_tokens_before"] > checkpoint["projected_tokens_after"]
+
+
+@pytest.mark.parametrize('forced', [False, True])
+@pytest.mark.parametrize('with_seed', [False, True])
+def test_candidate_capacity_failure_can_only_continue_after_real_trim_under_original_trigger(monkeypatch, forced, with_seed):
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_ir_history import project_native_prompt_history
+    from agent_py_agent.agent.backends.tool_ir import ToolResult
+    from agent_py_agent.agent.conversation.compact_guard import CompactCapacityFacts
+    from agent_py_agent.tests.test_wave9_mid_loop_compact_continuation import arrange
+
+    error = ConversationCompactError('candidate oversized', code='COMPACT_CANDIDATE_TOO_LARGE',
+        capacity=CompactCapacityFacts(900, 700, 200, 100, 4, 4, 400, 1))
+    agent, params, _calls, snapshot = arrange(monkeypatch, error, tokens=850)
+    object.__setattr__(params, "conversation_history_seed", object() if with_seed else None)
+    policy = SimpleNamespace(context_window_tokens=1000, trigger_tokens=700, recovery_target_tokens=600)
+    host = SimpleNamespace(agent=agent, source=SimpleNamespace(policy=policy, messages=[], compact_context=object()), calibration=None,
+                           force=forced, degraded=False, resolved_input=None)
+
+    @dataclass(frozen=True)
+    class FrozenRequest:
+        prompt_input: object = object()
+        provider_history_messages: tuple = ()
+        compact_degradation_stubs: tuple = ()
+
+    monkeypatch.setattr(recovery_core, '_native_provider_history_messages', lambda *a, **k: [])
+    monkeypatch.setattr(recovery_core, 'render_prepared_prompt', lambda *a: 'system')
+    original_ir = list(params.tool_ir_history)
+    assert recovery_core._restore_optional_preflight(host, params, FrozenRequest(), 850, error)
+    assert host.degraded and host.resolved_input is not None
+    assert host.degraded_capacity is error.capacity
+    assert snapshot(agent, params, 'system').raw_estimated_tokens < 700
+    assert params.tool_ir_history == original_ir
+    _, projected = project_native_prompt_history(params, 'system')
+    assert [v for v in projected if isinstance(v, ToolResult)][-4:] == [
+        v for v in original_ir if isinstance(v, ToolResult)][-4:]
+
+
+def test_capacity_failure_with_fixed_floor_above_user_limit_is_not_locally_trimmed(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.compact_guard import CompactCapacityFacts
+    from agent_py_agent.tests.test_wave9_mid_loop_compact_continuation import arrange
+
+    error = ConversationCompactError('fixed floor', code='COMPACT_CANDIDATE_TOO_LARGE',
+        capacity=CompactCapacityFacts(950, 700, 50, 710, 4, 4, 100, 1))
+    agent, params, calls, _ = arrange(monkeypatch, error, tokens=850)
+    host = SimpleNamespace(agent=agent, source=None, calibration=None, force=False, degraded=False)
+    assert not recovery_core._restore_optional_preflight(host, params, None, 850, error)
+    assert not params.compact_degradation_stubs and not host.degraded and calls == []
+
+
+def test_capacity_report_keeps_real_budget_and_prior_tool_stage_without_plaintext(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.compact_guard import CompactCapacityFacts
+    from agent_py_agent.agent.runtime_errors import runtime_error_report
+    from agent_py_agent.tests.test_wave9_mid_loop_compact_continuation import arrange
+
+    original = ConversationCompactError('retained history floor', code='COMPACT_CANDIDATE_TOO_LARGE',
+        capacity=CompactCapacityFacts(820, 700, 60, 510, 4, 4, 250, 1))
+    agent, params, _, _ = arrange(monkeypatch, original)
+    host = SimpleNamespace(agent=agent, source=SimpleNamespace(policy=SimpleNamespace(
+        context_window_tokens=1000, trigger_tokens=700, recovery_target_tokens=600)), calibration=None, force=True)
+    error = recovery_core._recovery_failure(host, params, 900, original)
+    report = runtime_error_report(error)
+    assert report['compact_capacity']['candidate_tokens'] == 820
+    facts = report['compact_recovery']
+    assert facts['current_tokens'] == 900 and facts['trigger_tokens'] == 700
+    assert facts['context_window_tokens'] == facts['physical_input_ceiling_tokens'] == 1000
+    assert facts['prior_tool_results'] == 10 and facts['next_request_sent'] is False
+    assert facts['compact_committed'] is False and facts['prior_tools_replayed'] is False
+    assert 'memory_compact_auto_trigger_max_tokens' in report['message']
+    assert 'memory_compact_trigger_percent' in report['message']
+    assert 'file0.txt' not in str(report) and 'x' * 100 not in str(report)
+
+
+def test_candidate_degradation_latched_next_step_cannot_revert_to_wider_physical_limit(monkeypatch):
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+    from agent_py_agent.tests.test_wave9_mid_loop_compact_continuation import arrange
+
+    agent, params, _calls, _ = arrange(monkeypatch,
+        ConversationCompactError('candidate', code='COMPACT_CANDIDATE_TOO_LARGE'), tokens=900)
+    with pytest.raises(ConversationCompactError) as error:
+        service._continue_after_compact_failure(agent, params, lambda: 750,
+            reason='COMPACT_CANDIDATE_TOO_LARGE', force=False, fresh_failure=False)
+    assert error.value.code == 'COMPACT_BUDGET_EXCEEDED'
+    assert not params.compact_degradation_stubs
+
+
+def test_compact_public_error_projection_rejects_non_scalar_forged_capacity():
+    from agent_py_agent.agent.conversation.compact_guard import CompactCapacityFacts
+    from agent_py_agent.agent.runtime_errors import runtime_error_report
+
+    capacity = CompactCapacityFacts('private prompt', 100000, 100, None, 4, 4, 500, 1)
+    report = runtime_error_report(ConversationCompactError('capacity', code='COMPACT_CANDIDATE_TOO_LARGE', capacity=capacity))
+    assert 'candidate_tokens' not in report['compact_capacity']
+    assert report['compact_capacity']['input_ceiling_tokens'] == 100000
+    assert 'private prompt' not in str(report)
+
+
+@pytest.mark.parametrize('messages,context', [(None, object()), ([object()], object()), ([], None)])
+def test_missing_seed_cannot_restore_unknown_or_nonempty_transcript(monkeypatch, messages, context):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.compact_guard import CompactCapacityFacts
+    from agent_py_agent.tests.test_wave9_mid_loop_compact_continuation import arrange
+
+    error = ConversationCompactError('candidate', code='COMPACT_CANDIDATE_TOO_LARGE',
+        capacity=CompactCapacityFacts(900, 700, 100, 100, 4, 4, 400, 1))
+    agent, params, _, _ = arrange(monkeypatch, error, tokens=850)
+    host = SimpleNamespace(agent=agent, source=SimpleNamespace(messages=messages, compact_context=context),
+                           calibration=None, force=False, degraded=False)
+    assert not recovery_core._restore_optional_preflight(host, params, None, 850, error)
+    assert not params.compact_degradation_stubs and not host.degraded
+
+
+def test_gateway_failure_keeps_compact_exact_budget_in_user_notice(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.compact_guard import CompactCapacityFacts
+    from agent_py_agent.agent.gateway_parts.request_execution import _apply_gateway_request_failure
+    from agent_py_agent.tests.test_wave9_mid_loop_compact_continuation import arrange
+
+    original = ConversationCompactError('candidate', code='COMPACT_CANDIDATE_TOO_LARGE',
+        capacity=CompactCapacityFacts(120000, 100000, 7000, 50000, 4, 4, 60000, 1))
+    agent, params, _, _ = arrange(monkeypatch, original)
+    host = SimpleNamespace(agent=agent, source=SimpleNamespace(policy=SimpleNamespace(
+        context_window_tokens=128000, trigger_tokens=100000, recovery_target_tokens=75000)), calibration=None, force=True)
+    error = recovery_core._recovery_failure(host, params, 115000, original)
+    response = {}
+    _apply_gateway_request_failure(agent, {'request': {}}, response, error)
+    assert response['compact_capacity']['candidate_tokens'] == 120000
+    assert response['compact_recovery']['next_request_sent'] is False
+    assert '触发100000' in response['user_error']
+    assert 'memory_compact_auto_trigger_max_tokens' in response['user_error']
+    assert 'memory_compact_trigger_percent' in response['user_error']
+
+
+def test_local_trim_updates_host_attached_projection_without_changing_canonical_ir(monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+    from agent_py_agent.agent.agent_core.tool_ir_history import project_native_prompt_history
+    from agent_py_agent.agent.backends.tool_ir import ToolResult
+    from agent_py_agent.tests.test_wave9_mid_loop_compact_continuation import arrange
+
+    agent, params, _, _ = arrange(monkeypatch,
+        ConversationCompactError('candidate', code='COMPACT_CANDIDATE_TOO_LARGE'), tokens=850)
+    original = [item.with_live_prompt_projection(item.render_for_prompt()) if isinstance(item, ToolResult) else item
+                for item in params.tool_ir_history]
+    params = replace(params, tool_ir_history=original)
+
+    def estimate():
+        _, history = project_native_prompt_history(params, 'system')
+        return 850 - (sum(len(item.render_for_model_prompt()) for item in original if isinstance(item, ToolResult))
+                      - sum(len(item.render_for_model_prompt()) for item in history if isinstance(item, ToolResult))) // 10
+
+    assert service._continue_after_compact_failure(agent, params, estimate,
+        reason='COMPACT_CANDIDATE_TOO_LARGE', force=True, input_ceiling_tokens=700) > 0
+    assert estimate() < 700
+    assert params.tool_ir_history == original
+    _, projected = project_native_prompt_history(params, 'system')
+    raw_results = [item for item in original if isinstance(item, ToolResult)]
+    sent_results = [item for item in projected if isinstance(item, ToolResult)]
+    assert sent_results[-4:] == raw_results[-4:]
+    assert all(raw.refs == sent.refs and raw.status == sent.status
+               for raw, sent in zip(raw_results, sent_results, strict=True))
+    assert any('TOOL_OUTPUT_COMPACTED' in item.render_for_model_prompt() for item in sent_results[:-4])
+
+
+def test_capacity_notice_does_not_suggest_trigger_raise_when_physical_window_is_also_exceeded(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.compact_guard import CompactCapacityFacts
+    from agent_py_agent.tests.test_wave9_mid_loop_compact_continuation import arrange
+
+    original = ConversationCompactError('candidate', code='COMPACT_CANDIDATE_TOO_LARGE',
+        capacity=CompactCapacityFacts(1200, 700, 200, 900, 4, 4, 250, 1))
+    agent, params, _, _ = arrange(monkeypatch, original)
+    host = SimpleNamespace(agent=agent, source=SimpleNamespace(policy=SimpleNamespace(
+        context_window_tokens=1000, trigger_tokens=700, recovery_target_tokens=600)), calibration=None, force=True)
+    error = recovery_core._recovery_failure(host, params, 950, original)
+    assert '候选也超物理输入门' in str(error)
+    assert '不要虚增 model_context_window_tokens' in str(error)
+    assert '不能仅提高触发线' in str(error)
+    assert '下一步：管理员调整 memory_compact_auto_trigger_max_tokens' not in str(error)
+
+
+@pytest.mark.parametrize('outcome', ['ok', 'context_overflow'])
+def test_background_degraded_attempt_is_accepted_once_or_stops_without_replaying_candidate(tmp_path, monkeypatch, outcome):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.compact_guard import (
+        CompactCapacityFacts,
+        CompactRecoveryFacts,
+    )
+    from agent_py_agent.agent.runtime_errors import runtime_error_report
+    from agent_py_agent.tests.test_background_compact_recovery import _background
+
+    _agent, store, thread, request, execution, sink = _background(
+        tmp_path, backend='anthropic_compatible', detached=True, with_history=False)
+    attempts, persisted = [], []
+    facts = CompactRecoveryFacts(115000, 100000, 75000, 128000, 111616, 16384, 16384, 8, True)
+    capacity = CompactCapacityFacts(120000, 100000, 1000, 33000, 4, 4, 50000, 1)
+    recovery = SimpleNamespace(committed=False, degraded=True, degraded_capacity=capacity, degraded_recovery_facts=facts)
+    result = SimpleNamespace(runtime_status=outcome)
+
+    def attempt(_execution, _prompt, params, *_args, **_kwargs):
+        attempts.append(params.request_id)
+        return result, params, recovery
+
+    monkeypatch.setattr(background_execution, '_run_background_recovery_attempt', attempt)
+    monkeypatch.setattr(background_execution, '_persist_background_native_turn', lambda *args: persisted.append(args))
+    def run():
+        return background_execution.run_background_turn_with_compact(
+            execution, thread, request, user_prompt='继续合成任务', continuation_injection=[],
+            proactive_delivery_available=False, activity_sink=sink)
+    if outcome == 'ok':
+        assert run() is result and len(persisted) == 1
+    else:
+        with pytest.raises(ConversationCompactError) as failed:
+            run()
+        assert failed.value.code == 'COMPACT_LOCAL_RECOVERY_EXHAUSTED'
+        assert failed.value.capacity is capacity
+        report = runtime_error_report(failed.value)
+        assert 'next_request_sent' not in report['compact_recovery']
+        assert persisted == []
+    assert len(attempts) == 1
+    assert store.threads.require(thread.thread_id).compact_generation == 0

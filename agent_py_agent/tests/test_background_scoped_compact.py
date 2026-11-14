@@ -362,3 +362,20 @@ def test_detached_operational_and_native_source_do_not_load_all_bodies(backgroun
     visible = render_background_context(prepared)
     assert "PRE_CREATION_EVIDENCE" in visible and "TASK_A_LATER_EVIDENCE" in visible
     assert "UNRELATED_TASK_B_SECRET" not in visible
+
+
+def test_host_last_user_pointers_never_enter_model_projection_but_history_is_preserved(background_case):
+    from agent_py_agent.agent.conversation.background_context import _minimal_context_bundle
+
+    case = background_case
+    thread = case.store.threads.require(case.thread.thread_id)
+    assert thread.last_user_request_id == 'UNRELATED_TASK_B_SECRET'
+    assert thread.last_user_message_id == case.rows[-1].message_id
+    full = case.store.context_bundle(thread.thread_id, recent_limit=0)
+    minimal = _minimal_context_bundle(thread)
+    for projected in (full['thread'], minimal['thread']):
+        assert 'last_user_request_id' not in projected
+        assert 'last_user_message_id' not in projected
+    # 宿主指针与全线程合法历史均保留；只收紧模型头投影，不删历史或改变任务分离。
+    assert case.store.threads.require(thread.thread_id).to_dict()['last_user_request_id'] == thread.last_user_request_id
+    assert [row['message_id'] for row in full['messages']] == [row.message_id for row in case.rows]

@@ -59,6 +59,7 @@ GATEWAY_HTTP_ROUTES = {
         GatewayHTTPRoute("/plugin-host/v2/call", "handle_plugin_host_call", "plugin_token", "..plugin_host.http_transport"),
         GatewayHTTPRoute("/plugin-host/v2/stream", "handle_plugin_host_stream", "plugin_token", "..plugin_host.http_transport"),
         GatewayHTTPRoute("/client/plugin-panels", "handle_client_plugin_panels", "credential", ".plugin_panels_http"),
+        GatewayHTTPRoute("/client/agent-approval-view", "handle_background_approval_view", "credential", ".background_approval_view"),
         GatewayHTTPRoute("/client/permissions", "handle_client_approval_mode", "credential", ".approval_mode_service"),
         GatewayHTTPRoute("/client/history", "_handle_client_history", "credential"),
         GatewayHTTPRoute("/client/display-page", "handle_client_display_page", "credential", ".display_archive_service"),

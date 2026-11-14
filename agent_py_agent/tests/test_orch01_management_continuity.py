@@ -78,7 +78,14 @@ def case(tmp_path) -> Case:
     parent = agent.conversation_store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-T", "goal": "长期工作", "status": "active"}
     ).task_id
-    child = agent.subagents.create_run(goal="子任务", thought="", plan=["做"], parent_id=parent, root_id=parent, depth=1)
+    # 测试宿主登记真实主根执行，再创建下级；TaskLink的parent/root字段本身不证明运行库归属。
+    repository = agent.subagents.runtime_db
+    task = repository.create_task(owner_id=agent.home_paths.owner_id, thread_id=thread.thread_id,
+                                  conversation_task_id=parent)
+    task_run = repository.create_task_run(task_id=task["task_id"])
+    repository.create_agent_run(task_run_id=task_run["task_run_id"], run_id=parent, role="main")
+    child = agent.subagents.create_run(goal="子任务", thought="", plan=["做"], parent_id=parent, root_id=parent,
+                                      depth=1, allowed_tools=["read_file", "manage_handoff_board"])
     job = agent.scheduler_repository.create_job(SchedulerJobCreateRequest(
         name="定时检查", prompt="检查直属下级进展", thread_id=thread.thread_id, source_task_id=parent,
         schedule={"kind": "every", "every_seconds": 600, "timezone": "UTC", "anchor_at": 1000},
@@ -270,6 +277,7 @@ def test_unrelated_same_owner_thread_is_denied_and_routed_as_a_request(case):
     assert metadata["requester_run_id"] == other_task
     assert metadata["requester_thread_id"] == other_thread.thread_id
     assert metadata["child_run_id"] == case.child_id
+    assert pending[0].sender == other_thread.thread_id
     # 父级看到的是宿主事件而不是用户原话，也不能当作新的用户指令。
     rendered = _render_guidance_user_input(pending)
     assert "不是当前用户的原话" in rendered and "不要直接执行" in rendered
@@ -1342,3 +1350,81 @@ def test_031_2_registry_forged_and_mismatched_identities_deny_without_mutating_f
     assert _control_plane_fact_bytes(case, sibling.id) == before
     assert _request_status(case, "req-forged") == "OPEN"
     assert case.agent.subagents.load(case.child_id).status != TaskStatus.CANCELLED.value
+
+
+def test_routed_native_request_passes_the_actual_parent_instruction_admission_and_claim(case):
+    """队列可读还不够：真实来源分类与精确turn认领不能误拒合法的run/thread分列。"""
+    from agent_py_agent.agent.agent_core.runtime.guidance import _claim_guidance_for_active_turn
+
+    thread = _thread(case.agent, "native-requester")
+    task = case.agent.conversation_store.tasks.bind({
+        "thread_id": thread.thread_id, "task_id": "task-U", "status": "active",
+    })
+    _foreground(case.agent, thread, task.task_id)
+    result, payload = _guide(case.agent, case.child_id, "safe forwarded request", operation="native-claim-op")
+    assert result.ok and payload["delivered_to_target"] is False
+    route = payload["route"]
+    entries = case.agent.conversation_store.guidance.pending("task", case.parent_task_id)
+    claimed = _claim_guidance_for_active_turn(case.agent.conversation_store, entries,
+        "parent-real-turn", "parent-real-attempt", owner_id=case.agent.home_paths.owner_id)
+    assert [entry.guidance_id for entry in claimed] == [route["route_id"]]
+    receipt = case.agent.conversation_store.guidance.receipt(route["dedupe_key"])
+    assert receipt.status == "reserved"
+    assert claimed[0].sender == thread.thread_id
+    assert claimed[0].metadata["requester_run_id"] == task.task_id
+    assert claimed[0].metadata["origin_thread_id"] == thread.thread_id
+    assert _child_messages(case) == []
+    assert claimed[0].metadata["expected_turn_id"] == "parent-real-turn"
+
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _completed_turn_native_messages
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
+    from agent_py_agent.agent.tooling.runtime_contracts import (
+        ProviderToolCapability,
+        ToolCall,
+        ToolContentBlock,
+        ToolProtocolSnapshot,
+        ToolResult,
+    )
+
+    call = ToolCall(call_id="prior-call", tool_name="read_file", arguments={"path": "data.txt"},
+                    source_protocol="native", schema_hash="sha256:fixture-schema", run_id=case.parent_task_id,
+                    turn_id="parent-real-turn", attempt_id="parent-real-attempt")
+    history = [AssistantTurn(tool_calls=[call]),
+               ToolResult("prior-call", "read_file", "succeeded",
+                          content_blocks=(ToolContentBlock("text", "prior receipt retained"),)),
+               UserTurn(claimed[0].message, input_ids=(claimed[0].guidance_id,))]
+    params = SimpleNamespace(request_id="parent-real-turn", attempt_id="parent-real-attempt",
+        run_id=case.parent_task_id, task_id=case.parent_task_id, tool_ir_history=history, turn_trigger=None,
+        live_archive_state={"_guidance_ack_entries": {claimed[0].guidance_id: claimed[0]}},
+        tool_protocol_snapshot=ToolProtocolSnapshot(case.parent_task_id, "native", ProviderToolCapability(
+            provider="test", endpoint="local://test", model="test", stream=False, native_supported=True,
+            evidence="canonical_fixture")))
+    partial = json.dumps(_completed_turn_native_messages(params, None, agent=case.agent))
+    assert "safe forwarded request" not in partial
+    assert "prior-call" in partial and "prior receipt retained" in partial
+    assert history[-1].text == claimed[0].message  # 私有待发送IR不被归档过滤改写。
+
+    submissions = case.agent.conversation_store.guidance.submissions
+    for wrong_turn, wrong_attempt in (("foreign-turn", "parent-real-attempt"),
+                                      ("parent-real-turn", "foreign-attempt")):
+        with pytest.raises(DataCorruptionError, match="reservation mismatch"):
+            submissions.mark_submitted(wrong_turn, claimed, attempt_id=wrong_attempt,
+                                       provider_call_id="not-authorized-call")
+    assert case.agent.conversation_store.guidance.receipt(route["dedupe_key"]).status == "reserved"
+    submitted = submissions.mark_submitted("parent-real-turn", claimed, attempt_id="parent-real-attempt",
+                                           provider_call_id="original-provider-call")
+    assert submitted == (claimed[0].guidance_id,)
+    assert "safe forwarded request" in json.dumps(_completed_turn_native_messages(params, None, agent=case.agent))
+    acknowledgements = case.agent.conversation_store.guidance.acknowledgements
+    with pytest.raises(DataCorruptionError, match="turn mismatch"):
+        acknowledgements.consume_submitted("foreign-turn", claimed, provider_call_id="original-provider-call")
+    consumed = acknowledgements.consume_submitted("parent-real-turn", claimed,
+        provider_call_id="original-provider-call", consuming_task_id=case.parent_task_id)
+    assert consumed == submitted
+    assert case.agent.conversation_store.guidance.receipt(route["dedupe_key"]).status == "consumed"
+    assert "safe forwarded request" in json.dumps(_completed_turn_native_messages(params, None, agent=case.agent))
+    params.attempt_id = "another-execution"
+    assert "safe forwarded request" not in json.dumps(_completed_turn_native_messages(params, None, agent=case.agent))

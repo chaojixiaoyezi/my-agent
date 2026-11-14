@@ -1818,7 +1818,9 @@ def _summarize_once(
             else None
         )
         system_instruction = provider_surface.system_instruction
-    if tool_source_text and (provider_surface is None or provider_surface.transcript_prefix is None):
+    # 联合前缀已含全部选中工具；非联合前缀只含聊天，须附上同次完整工具来源才能取得覆盖权。
+    prefix = provider_surface.transcript_prefix if provider_surface is not None else None
+    if tool_source_text and not (prefix is not None and getattr(prefix, "joint_end", 0)):
         if message_source is None:
             prompt = f"{prompt}\n\n{tool_source_text}"
         else:

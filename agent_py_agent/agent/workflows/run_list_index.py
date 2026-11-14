@@ -19,7 +19,8 @@ from ..common.nofollow_fs import (
     read_text_beneath,
     write_text_atomic_beneath,
 )
-from .models import safe_path
+from ..plugin_host.errors import HostAPIError
+from .models import safe_path, safe_path_part
 
 
 # LLM: 私有投影按私有索引模式打开：data目录FD、nofollow单链接叶、连接后核叶身份及实际新开FD；附属叶拒绝链接，短连接始终关闭。
@@ -164,6 +165,41 @@ class WorkflowArtifactLocatorIncomplete(ValueError):
     error_code = 'WORKFLOW_ARTIFACT_RUN_LOCATOR_INCOMPLETE'
 
 
+class WorkflowRunIndexRecoveryPending(HostAPIError, RuntimeError):
+    """覆盖尚未完成是明确的可重试观察状态，不把锁忙变成空列表。"""
+
+    error_code = 'WORKFLOW_RUN_INDEX_RECOVERY_PENDING'
+
+    def __init__(self, busy_rows):
+        super().__init__(self.error_code, 503, message='运行列表投影尚未恢复完整；规范运行未修改，部分投影可能已推进。'
+            '请先按准确run_id读取快照，稍后再查询列表，不要重启或重做工作流。')
+        self.details = {'coverage': 'partial', 'busy_rows': busy_rows, 'canonical_writes': False,
+            'projection_may_have_advanced': True,
+            'recommended_action': 'wait_for_local_progress',
+            'recovery_hint': '按准确run_id读取原子快照；稍后重试列表，不要重新执行工作流'}
+
+
+def _legacy_run_directory(owner_home, name):
+    """旧迁移只接收合法的真实目录，忽略系统叶和链接，不删除任何规范文件。"""
+    try:
+        path = safe_path(owner_home, 'data', 'workflow_runs', name)
+    except ValueError:
+        return False
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _legacy_run_name(name):
+    """与运行路径共用编号规则；初始化和余集读取不逐目录stat。"""
+    try:
+        safe_path_part(name)
+        return True
+    except ValueError:
+        return False
+
+
 def _artifact_locator_schema(conn, version):
     if version < 3:
         conn.execute('CREATE TABLE IF NOT EXISTS artifact_run_keys('
@@ -219,7 +255,8 @@ class RunListIndex:
                     CREATE TABLE IF NOT EXISTS legacy(run_id TEXT PRIMARY KEY);
                 ''')
                 names = list_names_beneath(self.owner_home, ('data', 'workflow_runs'))
-                conn.executemany('INSERT OR IGNORE INTO legacy VALUES(?)', ((name,) for name in names))
+                conn.executemany('INSERT OR IGNORE INTO legacy VALUES(?)',
+                    ((name,) for name in names if _legacy_run_name(name)))
             if version < 2:
                 conn.execute('CREATE TABLE IF NOT EXISTS pending(run_id TEXT PRIMARY KEY)')
                 conn.execute('PRAGMA user_version=2')
@@ -290,39 +327,53 @@ class RunListIndex:
         with self.connection() as conn:
             query = 'SELECT run_id FROM legacy ORDER BY run_id'
             return [r[0] for r in conn.execute(query + (' LIMIT ?' if limit is not None else ''),
-                                              (limit,) if limit is not None else ())]
+                                              (limit,) if limit is not None else ())
+                    if _legacy_run_name(r[0])]
 
     # LLM: 每次最多修复固定批次，不在单次请求中修复全量旧正文；缺失 run 仅移除迁移项。
     # 函数用途: 让公开列表入口持续、可重启地推进旧历史回填。
     def backfill(self, store, batch_size=32):
-        names = self.legacy_ids(batch_size)
+        with self.connection() as conn:
+            names = [row[0] for row in conn.execute('SELECT run_id FROM legacy ORDER BY run_id LIMIT ?', (batch_size,))]
         for name in names:
-            with store._lock(name):
-                raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', name, 'run.json'))
-                if raw is None:
-                    with self.connection() as conn:
-                        conn.execute('DELETE FROM legacy WHERE run_id=?', (name,))
-                    continue
-                data = json.loads(raw)
-                if data['workflow_run_id'] != name:
-                    raise ValueError('运行身份与目录不匹配')
-                self.publish_rows([data])
+            if not _legacy_run_directory(self.owner_home, name):
+                with self.connection() as conn:
+                    conn.execute('DELETE FROM legacy WHERE run_id=?', (name,))
+                continue
+            # 原子行可独立观察；SQL既有revision比较阻止旧观察覆盖新行，不等待执行锁。
+            try:
+                data = store._read(name, 'run.json', concurrent_publication=True)
+            except FileNotFoundError:
+                with self.connection() as conn:
+                    conn.execute('DELETE FROM legacy WHERE run_id=?', (name,))
+                continue
+            if data['workflow_run_id'] != name:
+                raise ValueError('运行身份与目录不匹配')
+            self.publish_rows([data])
 
-    # LLM: marker 只定位原运行，不授权旧载荷覆盖新版本；持运行锁读回后幂等发布并 ACK。
+    # LLM: marker只定位原运行；短锁内发布并ACK，忙时保留marker，旧快照不得覆盖新revision。
     # 函数用途: 恢复 canonical 已提交但尚未确认的索引发布。
     def replay(self, store, batch_size=32):
+        from .run_store import _RunBusy
+
+        busy_rows = 0
         for run_id in self.pending_ids(batch_size):
-            with store._lock(run_id):
-                current = read_text_beneath(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'))
-                if current is not None:
-                    data = json.loads(current)
-                    if data['workflow_run_id'] != run_id:
-                        raise ValueError('运行身份与目录不匹配')
-                    self.publish_rows([data])
-                self.ack_pending(run_id)
+            try:
+                # ACK仍与canonical写互斥；忙时保留marker，不等整段脚本或LLM。
+                with store._lock(run_id, blocking=False):
+                    current = read_text_beneath(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'))
+                    if current is not None:
+                        data = json.loads(current)
+                        if data['workflow_run_id'] != run_id:
+                            raise ValueError('运行身份与目录不匹配')
+                        self.publish_rows([data])
+                    self.ack_pending(run_id)
+            except _RunBusy:
+                busy_rows += 1
+                continue
         # 大于一批的错误积压不能伪装成完整列表；下一请求继续有界推进同一 inbox。
         if self.pending_ids(1):
-            raise RuntimeError('WORKFLOW_RUN_INDEX_RECOVERY_PENDING')
+            raise WorkflowRunIndexRecoveryPending(busy_rows)
 
     # LLM: 条件只由明确字段组成，动态 SQL 仅拼固定片段；同时间按目录名称升序匹配锚点稳定排序。
     # 函数用途: 为四类过滤构造索引范围查询和后继 keyset。

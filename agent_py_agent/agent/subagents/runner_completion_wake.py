@@ -428,9 +428,8 @@ def _service_window_remaining(task: Any) -> float:
         return 0.0
 
 
-# LLM: Capability requests are routed one level upward. Nested requests wait
-# for the child's BLOCKED result to resume that exact parent; notification
-# failure is recorded and must not erase the durable request.
+# 能力申请只路由一级：根孩子走原会话邮箱；嵌套申请由工具提交边界立即调和直属父等待，
+# 本通知器不向根越级广播。通知失败不能抹掉原耐久申请。
 # 函数用途: 直接根孩子申请权限时唤醒根会话；孙代理申请交给直属父级处理。
 def notify_parent_on_capability_request(
     manager: Any,
@@ -525,6 +524,7 @@ def _capability_open_observation(
         "root_task_id": str(getattr(task, "root_id", "") or run_id),
         "requires_main_agent": True,
         "metadata": {
+            "conversation_request_id": str((getattr(task, "attributes", {}) or {}).get("conversation_request_id") or ""),
             "run_id": run_id,
             "request_id": request_id,
             "capability_type": str(getattr(request, "capability_type", "") or ""),
@@ -557,6 +557,7 @@ def _capability_open_signal(
         "root_task_id": str(getattr(task, "root_id", "") or run_id),
         "dedupe_key": f"capability-open:{run_id}:{request_id}",
         "metadata": {
+            "conversation_request_id": str((getattr(task, "attributes", {}) or {}).get("conversation_request_id") or ""),
             "run_id": run_id,
             "request_id": request_id,
             "capability_request": request_scope_snapshot(request),

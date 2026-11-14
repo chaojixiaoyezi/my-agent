@@ -243,7 +243,8 @@ class TuiBackgroundAgents:
                 sched_state = scheduling.get('state') or '未知'
                 reason_code = scheduling.get('reason_code') or ''
                 blocker_str = f'（阻断：{reason_code}）' if reason_code else ''
-                line += f' · 调度：{sched_state}{blocker_str}'
+                label = '调度' if isinstance(row.get('scheduling'), dict) else '上次查看调度'
+                line += f' · {label}：{sched_state}{blocker_str}'
             line += ' · ' + str(row.get('purpose') or '工作摘要未知')
             result.append(line)
             if row['agent_id'] in self._expanded:
@@ -289,7 +290,8 @@ class TuiBackgroundAgents:
             return {'items': [], 'coverage': 'unknown', 'next_cursor': cursor,
                     'read_denied': result.get('http_status') in (401, 403, 404),
                     'error_code': err_code, 'error_message': err_msg,
-                    'http_status': result.get('http_status')}
+                    'http_status': result.get('http_status'), 'error': dict(err),
+                    'request_id': result.get('request_id'), 'effect_outcome': result.get('effect_outcome', 'unknown')}
         coverage = data.get('coverage', 'unknown')
         items, message_ids = [], set()
         for row in data['items'][:100]:
@@ -305,7 +307,8 @@ class TuiBackgroundAgents:
         if cursor and cursor == next_cursor:
             next_cursor = None
         return {'items': items, 'coverage': coverage, 'next_cursor': next_cursor,
-                'display_events': data.get('display_events', [])}
+                'display_events': data.get('display_events', []),
+                'history_boundary': data.get('history_boundary', {})}
 
     # LLM: 仅在用户显式请求树时由TUI输入处理调用；通过原客户端读取指定空间/无归属中的准确根Agent，不派活或控制子代理生命周期。
     # 函数用途: 按需读取一个后台助手的组织树。
@@ -320,7 +323,7 @@ class TuiBackgroundAgents:
     # LLM: 按需读取后台助手的调度状态与阻断原因码，并写入受限大小的本地字典（V13-02 / ROUTE-02）。
     # 函数用途: 获取并缓存单个后台助手的调度和阻断事实。
     def load_scheduling(self, agent_id: str) -> dict:
-        result = self.client.call('background_agents.get', {'agent_id': agent_id})
+        result = self._activity_read('background_agents.get', {'agent_id': agent_id})
         if result.get('ok') is True:
             data = result.get('data', {})
             if isinstance(data, dict) and 'scheduling' in data:
@@ -451,7 +454,7 @@ class TuiBackgroundAgents:
         flt: dict[str, object] = {'agent_id': agent_id}
         if space_id is not None:
             flt['space_id'] = space_id
-        result = self.client.call('usage.get', {'filter': flt})
+        result = self._activity_read('usage.get', {'filter': flt})
         if result.get('ok') is True:
             data = result.get('data', {})
             with self._lock:
@@ -511,6 +514,8 @@ def start_business_observation(agent: object, navigation: object, stop_event: th
     """只启动 UI 只读观察；退出页面仅停止此观察，不停后台工作。"""
     projection = TuiBackgroundAgents(
         business_client_for_agent(agent, conversation_id=navigation.root_runtime.session_id), stop_event)
+    from .tui_background_approvals import start_background_approval_observation
+    start_background_approval_observation(agent, navigation, stop_event)
 
     def observe():
         delay, last, idle_cap = 5, None, _idle_poll_cap(agent)
@@ -548,6 +553,30 @@ def submit_business_input(event, params, text: str, *, has_media: bool = False) 
     if has_media:
         runtime.set_notice('后台会话附件请通过业务媒体入口上传；草稿保留。', duration_seconds=3)
         return True
+    if text == '/help':
+        runtime.write_console('后台会话：直接输入发送消息；/history 加载下一页；/model 读取本助手模型状态；'
+            '/followup <原task_id> <正文> 跟进本助手的既有任务（新建关联任务，不是消息）；'
+            '例如 /followup stask-示例 请核对原结果；/details 调度/用量/孩子；/tree 子树；'
+            '/log <source_ref> 日志；/pause /resume /retire 生命周期；Ctrl+G 返回观察入口。')
+        params.input_area.buffer.reset()
+        event.app.invalidate()
+        return True
+    follow_up = None
+    if text == '/followup' or text.startswith('/followup '):
+        parts = text.split(maxsplit=2)
+        if len(parts) != 3 or not parts[2].strip():
+            runtime.set_notice('未发送：用法 /followup <原task_id> <正文>；请从本助手任务详情复制准确 task_id，草稿保留。',
+                duration_seconds=6)
+            return True
+        try:
+            follow_up = projection.client.prepare('tasks.follow_up', {'task_id': parts[1], 'instruction': parts[2]})
+        except HostAPIError as error:
+            runtime.write_console('跟进未发送：' + json.dumps({'code': error.code, 'effect_outcome': 'not_started',
+                'details': getattr(error, 'details', {})}, ensure_ascii=False)
+                + '；按字段约束修正；从本助手任务详情复制准确 task_id，并保留非空正文。草稿保留。')
+            runtime.set_notice('跟进参数不合法，未发送；详细字段见本页，草稿保留。', duration_seconds=6)
+            event.app.invalidate()
+            return True
     if text == '/history':
         navigation.load_more_business_messages()
         params.input_area.buffer.reset()
@@ -601,10 +630,10 @@ def submit_business_input(event, params, text: str, *, has_media: bool = False) 
         params.input_area.buffer.reset()
         event.app.invalidate()
         return True
-    if text.startswith('/') and text != '/tree' and not text.startswith('/log '):
+    if text.startswith('/') and text not in ('/tree', '/details', '/model') and not text.startswith('/log ') and follow_up is None:
         runtime.set_notice('当前为后台会话；Ctrl+G 返回后使用 /team 等命令，未发送。', duration_seconds=3)
         return True
-    prepared = None if text.startswith('/') else projection.prepare_input(agent_id, text)
+    prepared = follow_up if follow_up is not None else (None if text.startswith('/') else projection.prepare_input(agent_id, text))
     space_id = snapshot.business_space_id or None
 
     # LLM: 由当前app后台任务执行，闭包沿提交时冻结的目标/runtime；线程外调用树、日志或已准备的发送请求，再向原runtime显示回执，不把接收回执当执行完成。
@@ -612,18 +641,59 @@ def submit_business_input(event, params, text: str, *, has_media: bool = False) 
     async def send():
         import asyncio
 
+        if text == '/model':
+            result = await asyncio.to_thread(projection.client.call, 'background_agents.model.get', {'agent_id': agent_id})
+            runtime.write_console('后台模型状态（只读）：' + json.dumps(result, ensure_ascii=False))
+            event.app.invalidate()
+            return
+        if follow_up is not None:
+            # 原任务目标不可由切页或模型正文猜出；读同源任务后仍由服务端复核Owner/空间/来源。
+            prior = await asyncio.to_thread(projection.client.call, 'tasks.get',
+                {'task_id': follow_up.payload()['params']['task_id']})
+            if not prior.get('ok'):
+                runtime.write_console('跟进未发送（读取原任务被拒）：' + json.dumps(prior, ensure_ascii=False))
+                event.app.invalidate()
+                return
+            task = prior.get('data', {}).get('task', {})
+            if task.get('thread_id') != snapshot.active_thread_id:
+                runtime.write_console('跟进未发送：FOLLOW_UP_TARGET_MISMATCH · not_started；'
+                    '原任务不属于提交时打开的后台会话，请进入原任务目标后重新核对 task_id。')
+                event.app.invalidate()
+                return
+        if text == '/details':
+            # 仅显式打开时读取；身份和空间沿提交时快照冻结，不随随后导航改投。
+            scheduling = await asyncio.to_thread(projection.load_scheduling, agent_id)
+            usage = await asyncio.to_thread(projection.load_usage, agent_id, space_id=space_id)
+            activity = await asyncio.to_thread(projection.execution_activity, agent_id,
+                thread_id=snapshot.active_thread_id, space_id=space_id, include_tools=False)
+            for title, detail in (('调度与阻拦', scheduling), ('用量与费用（未知值保留）', usage),
+                                  ('直属子代理（最多50条）', activity)):
+                runtime.write_console(title + '：' + json.dumps(detail, ensure_ascii=False))
+            runtime.set_notice('详情已读取；仅查询，未派工或变更状态。可用 /details 刷新或 Ctrl+G 返回', duration_seconds=5)
+            event.app.invalidate()
+            return
         if text == '/tree':
             result = await asyncio.to_thread(projection.load_tree, space_id, agent_id)
         elif text.startswith('/log '):
             result = await asyncio.to_thread(projection.load_log, text.partition(' ')[2])
         else:
             result = await asyncio.to_thread(projection.client.send, prepared)
+        if follow_up is not None and result.get('ok'):
+            new_task_id = result.get('data', {}).get('new_task_id')
+            runtime.write_console('跟进新任务已受理；这不是执行完成：' + json.dumps(result, ensure_ascii=False))
+            detail = await asyncio.to_thread(projection.client.call, 'tasks.get', {'task_id': new_task_id})
+            runtime.write_console('跟进新任务状态（按原ID只读）：' + json.dumps(detail, ensure_ascii=False))
+            status = detail.get('data', {}).get('task', {}).get('status') if detail.get('ok') else 'unknown'
+            runtime.set_notice('跟进已受理：' + str(new_task_id) + '；实际状态：' + str(status or 'unknown')
+                + '；/details 刷新，不代表已验收。', duration_seconds=6)
+            event.app.invalidate()
+            return
         runtime.write_console(json.dumps(result, ensure_ascii=False))
-        runtime.set_notice('回执：' + str(result.get('state', 'unknown')) + '；不等于执行完成', duration_seconds=4)
+        runtime.set_notice('回执：'  + str(result.get('state', 'unknown')) + '；不等于执行完成', duration_seconds=4)
         event.app.invalidate()
 
     event.app.create_background_task(send())
-    if prepared is not None:
+    if prepared is not None and follow_up is None:
         req_id = f"bg-msg-{time.time_ns()}"
         runtime.enqueue_prompt(req_id, text, queued=False, observed=True)
     params.input_area.buffer.reset()

@@ -64,8 +64,8 @@
     <pre id="asset-detail">尚未读取资料详情</pre>
     <h3>登记作品资料</h3>
     <label for="asset-reg-name">资料名称</label><input id="asset-reg-name">
-    <label for="asset-reg-kind">资料类型 (kind)</label><input id="asset-reg-kind" placeholder="document / image / video">
-    <label for="asset-reg-artifact-ref">产物引用 (artifact_ref)</label><input id="asset-reg-artifact-ref">
+    <label for="asset-reg-kind">资料类型 (kind)</label><input id="asset-reg-kind" placeholder="document / reference / character / voice / style / timeline / other">
+    <label for="asset-reg-artifact-ref">准确产物版本引用 JSON (artifact_ref)</label><textarea id="asset-reg-artifact-ref" placeholder='{"artifact_id":"复制上传回执的ID","version_ref":"复制同一回执的版本"}'></textarea>
     <button id="asset-register">登记资料</button><pre id="asset-reg-result">尚无登记回执</pre>
     <h3>上传原始媒体</h3><p class="muted">通过认证文件服务上传，只登记产物版本，不自动采纳资料或执行文件。未知结果保留原幂等键。</p>
     <label for="media-file">选择文件</label><input id="media-file" type="file"><button id="upload">上传到当前空间</button><pre id="upload-result">尚无上传回执</pre>

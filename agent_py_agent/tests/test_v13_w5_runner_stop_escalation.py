@@ -63,6 +63,138 @@ def _escalate(runner, stop=None, **kwargs):
     return hosts.escalate_exclusive_runner_stop(stop or _stop(), sleep=runner.sleep, now=runner.now, **kwargs)
 
 
+def test_running_worker_gets_original_relay_tick_before_host_cleanup(runner):
+    runner.on_sleep = lambda: setattr(runner, 'alive', False) if runner.clock >= 5.0 else None
+    stop = hosts.FrozenRunnerStop({'status': 'cooperative_requested', 'pid': runner.pid},
+                                 runner.pid, 'birth', 5.0, True)
+    result = _escalate(runner, stop)
+    assert result['host_exited'] is True
+    assert result['signals'] == []
+    assert 5.0 <= runner.clock <= 5.5
+
+
+def test_unconfirmed_foreground_cleanup_never_orphans_process_group(runner):
+    stop = hosts.FrozenRunnerStop({'status': 'cooperative_requested', 'pid': runner.pid},
+                                 runner.pid, 'birth', 1000.0, True)
+    result = _escalate(runner, stop)
+    assert result['host_exited'] is False
+    assert result['cleanup_state'] == 'unconfirmed'
+    assert result['reason_code'] == 'RUNNER_TOOL_EXIT_UNCONFIRMED'
+    assert result['signals'] == []
+    assert runner.clock <= 10.1
+
+
+def test_freeze_preserves_relay_interval_and_does_not_authorize_orphaning(monkeypatch):
+    session = {'in_process': False, 'worker_pid': 1234, 'worker_birth_token': 'original',
+               'launch_id': 'launch-1', 'attempt_id': 'attempt-1', 'interval_seconds': 5.0}
+    task = SimpleNamespace(id='run-1', attributes={'background_start': {
+        'launch_id': 'launch-1', 'attempt_id': 'attempt-1', 'pid': 1234}})
+    monkeypatch.setattr(hosts, 'has_fresh_runner_session', lambda _: True)
+    monkeypatch.setattr(hosts, 'runner_session_of', lambda _: session)
+    stop = hosts.freeze_runner_stop(task, [task], {'run-1'}, kill_process=True)
+    assert stop.pid == 1234 and stop.birth_token == 'original'
+    assert stop.relay_interval_seconds == 5.0
+    assert stop.cleanup_unconfirmed is True
+
+
+def test_stale_cancelled_runner_retains_original_identity_for_recheck(monkeypatch):
+    session = {'in_process': False, 'worker_pid': 1234, 'worker_birth_token': 'original',
+               'launch_id': 'launch-1', 'attempt_id': 'attempt-1', 'interval_seconds': 5.0,
+               'run_id': 'run-1', 'session_id': 'session-1', 'status': 'running'}
+    task = SimpleNamespace(id='run-1', runner_active_attempt_id='', attributes={
+        'background_start': {'launch_id': 'launch-1', 'attempt_id': 'attempt-1', 'pid': 1234},
+        'runner_session': session,
+        'cancel_subagents': {'stop_receipt': {'schema': 'runner-stop.v1',
+                                             'run_id': 'run-1', 'attempt_id': 'attempt-1'}}})
+    monkeypatch.setattr(hosts, 'has_fresh_runner_session', lambda _: False)
+    stop = hosts.freeze_runner_stop(task, [task], {'run-1'}, kill_process=True)
+    assert stop.pid == 1234 and stop.birth_token == 'original'
+    assert stop.cleanup_unconfirmed is True
+    task.runner_active_attempt_id = 'attempt-next'
+    assert hosts.freeze_runner_stop(task, [task], {'run-1'}, kill_process=True).report['status'] == 'no_pid'
+
+
+def test_worker_exit_without_tool_receipt_is_not_process_cleanup(runner):
+    runner.alive = False
+    stop = hosts.FrozenRunnerStop({'status': 'cooperative_requested', 'pid': runner.pid},
+                                 runner.pid, 'birth', 5.0, True)
+    result = cancellation.cleanup_subagent_stops(_batch(stop))
+    report = result['cancelled'][0]['pid_report']
+    assert report['host_exited'] is True and report['tools_exit_confirmed'] is False
+    assert result['ok'] is False
+    assert result['failed'][0]['error_code'] == 'RUNNER_TOOL_EXIT_UNCONFIRMED'
+    assert not any(event[0] == 'signal' for event in runner.events)
+
+
+def test_original_worker_final_receipt_confirms_cleanup_but_reused_birth_does_not(tmp_path, runner):
+    import json
+
+    runner.alive = False
+    path = tmp_path / 'canonical_state.json'
+    payload = {'id': 'run-123', 'runner_active_attempt_id': '', 'attributes': {
+        'cancel_subagents': {'stop_receipt': {'schema': 'runner-stop.v1', 'run_id': 'run-123', 'attempt_id': 'a1'}},
+        'runner_session': {'run_id': 'run-123', 'attempt_id': 'a1', 'session_id': 's1',
+                           'worker_pid': runner.pid, 'worker_birth_token': 'birth',
+                           'status': 'failed', 'ended_at': 10.0}}}
+    path.write_text(json.dumps(payload))
+    stop = hosts.FrozenRunnerStop({'status': 'cooperative_requested', 'pid': runner.pid},
+                                 runner.pid, 'birth', 5.0, True, str(path), 'run-123', 'a1', 's1')
+    assert cancellation.cleanup_subagent_stops(_batch(stop))['ok'] is True
+    payload['attributes']['runner_session']['worker_birth_token'] = 'reused'
+    path.write_text(json.dumps(payload))
+    assert cancellation.cleanup_subagent_stops(_batch(stop))['ok'] is False
+    path.write_text('{broken')
+    result = cancellation.cleanup_subagent_stops(_batch(stop))
+    proof = result['cancelled'][0]['pid_report']
+    assert proof['proof_error_type'] == 'JSONDecodeError'
+    assert proof['proof_reason'] == 'ORIGINAL_SESSION_EXIT_PROOF_UNREADABLE'
+    assert proof['proof_next_action']
+
+
+def test_abnormal_real_worker_exit_keeps_live_command_unconfirmed():
+    import sys
+    import time
+
+    code = ("import subprocess,sys,time; "
+            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(2)'], "
+            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True); "
+            "print(p.pid,flush=True); time.sleep(.3)")
+    with subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True) as worker:
+        command_pid = int(worker.stdout.readline())
+        birth = hosts.capture_process_birth_token(worker.pid)
+        assert birth
+        worker.wait(timeout=3)
+        stop = hosts.FrozenRunnerStop({'status': 'cooperative_requested', 'pid': worker.pid},
+                                     worker.pid, birth, 5.0, True)
+        result = cancellation.cleanup_subagent_stops(_batch(stop))
+        assert hosts.is_pid_alive(command_pid)
+        assert result['ok'] is False
+        assert result['cancelled'][0]['pid_report']['host_exited'] is True
+        assert result['cancelled'][0]['pid_report']['tools_exit_confirmed'] is False
+        # 不给无退出证明的命令发信号；该测试命令自行结束，不留下活跃孤儿。
+        deadline = time.monotonic() + 4
+        while hosts.is_pid_alive(command_pid) and time.monotonic() < deadline:
+            time.sleep(.05)
+        assert not hosts.is_pid_alive(command_pid)
+
+
+def test_idle_handler_proof_uses_exact_attempt_without_requiring_logs(tmp_path):
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / 'runtime.db')
+    first = repo.record_run_creation(owner_id='local/main', run_id='first', goal='执行')
+    other = repo.record_run_creation(owner_id='local/main', run_id='other', goal='独立空闲轮')
+    manager = SimpleNamespace(runtime_db=repo)
+    assert cancellation._runner_never_started_handler(manager, first)
+    op = repo.create_tool_operation(agent_run_id=first['agent_run_id'], attempt_id=first['attempt_id'],
+                                    operation_type='run_command')
+    assert cancellation._runner_never_started_handler(manager, first)
+    repo.mark_operation_executing(op['operation_id'])
+    assert not cancellation._runner_never_started_handler(manager, first)
+    assert cancellation._runner_never_started_handler(manager, other)
+    assert not cancellation._runner_never_started_handler(manager, {'attempt_id': 'unknown'})
+
+
 def _batch(stop):
     return cancellation.FrozenSubagentStops((cancellation.FrozenSubagentStop(
         {"run_id": "run-123", "thread_interrupt": "attempt_signaled"}, stop,

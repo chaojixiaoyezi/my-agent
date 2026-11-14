@@ -73,6 +73,9 @@ def test_absent_marker_preserves_original_task_json_bytes():
     old_payload.pop("input_dependency_refs")
     # 继任指针同样是后来新增的字段；模拟旧档案不能把新版asdict的默认值当作旧JSON。
     old_payload.pop("superseded_by_task_id")
+    # 截止续跑与可信用户来源同为后来新增的可选字段；旧档案没有这两个默认None键。
+    old_payload.pop("cutoff_continuation")
+    old_payload.pop("host_user_origin")
     assert CAPABILITY_SELECTION_KEY not in link.to_dict()
     assert (json.dumps(link.to_dict(), ensure_ascii=False, sort_keys=True, indent=2).encode()
             == json.dumps(old_payload, ensure_ascii=False, sort_keys=True, indent=2).encode())

@@ -4,6 +4,8 @@ This local candidate follows continuity v2 at `922510c099d9f72d8f92aba5dfc0641a8
 
 ## What a user can do
 
+2026-11-13 补充：`/space clear` 沿原 `sessions.space.set` 发送显式 `space_id:null`，清除当前发送者在本会话的选择。返回 `source=default` 并保留递增的当前 revision；模型可用同一工具，先 get 原版本再带幂等键和 expected_revision 调用 set。空字符串无效，旧版本不能恢复旧选择；已受理任务继续使用原冻结空间。
+
 In a conversation, `/space use <space_id>` writes the sender's selection to the canonical thread metadata. The main Gateway model turn can discover the same get and set actions. A newly accepted chat request captures the selection at admission. Switching later applies to the next new request. A replay retains the original request's selection.
 
 For the model's `tasks.assign` tool, an omitted space uses the accepted selection. An explicit space takes precedence and an explicit null keeps the task unassigned. A native or plugin assignment still uses its existing explicit schema. The IM task dispatcher freezes the admitted selection into the original SessionTask business context. An archived space can block dispatch into it. A normal IM chat can still proceed.

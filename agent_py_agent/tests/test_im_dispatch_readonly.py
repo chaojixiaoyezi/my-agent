@@ -277,7 +277,7 @@ def test_legacy_agent_keeps_live_policy_upper_bound(tmp_path, monkeypatch, block
     agent, scope = _case(tmp_path)
     _enable(agent, scope)
     monkeypatch.setattr(preferences.time, "time", lambda: _NOW)
-    monkeypatch.setattr(control_service, "_request_agent_for_scope", lambda _agent, _scope: agent)
+    monkeypatch.setattr(control_service, "resolve_loaded_gateway_scope_agent", lambda _agent, _scope: agent)
     assert im_dispatch_policy.capture_im_dispatch(agent, scope) == _capture(agent, scope)
     agent.owner_policy = SimpleNamespace(
         disabled_tools=("create_subagents",) if block == "disabled" else (),
@@ -294,7 +294,7 @@ def test_legacy_agent_bad_capability_does_not_fall_back_open(tmp_path, monkeypat
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_BAD_CAPABILITY_YAML, encoding="utf-8")
     monkeypatch.setattr(preferences.time, "time", lambda: _NOW)
-    monkeypatch.setattr(control_service, "_request_agent_for_scope", lambda _agent, _scope: agent)
+    monkeypatch.setattr(control_service, "resolve_loaded_gateway_scope_agent", lambda _agent, _scope: agent)
     assert im_dispatch_policy.capture_im_dispatch(agent, scope)["mode"] == "original"
 
 
@@ -392,7 +392,7 @@ def test_real_agent_reads_fresh_capability_file(tmp_path, monkeypatch):
     assert cached.im_task_delegation_enabled is False
     runtime_config_reload.capability_config_path_for(agent).write_text("im_task_delegation_enabled: true\n", encoding="utf-8")
     monkeypatch.setattr(preferences.time, "time", lambda: _NOW)
-    monkeypatch.setattr(control_service, "_request_agent_for_scope", lambda _agent, _scope: agent)
+    monkeypatch.setattr(control_service, "resolve_loaded_gateway_scope_agent", lambda _agent, _scope: agent)
     assert _capture(agent, scope)["mode"] == "delegated"
     assert im_dispatch_policy.capture_im_dispatch(agent, scope)["mode"] == "delegated"
     current = runtime_config_reload.capability_config_for_agent(agent)
@@ -440,7 +440,7 @@ def test_selected_user_read_failure_cannot_be_reset_by_later_removal(tmp_path, m
 
     monkeypatch.setattr(runtime_config_reload, "load_capability_config_snapshot", fail_selected)
     monkeypatch.setattr(preferences.time, "time", lambda: _NOW)
-    monkeypatch.setattr(control_service, "_request_agent_for_scope", lambda _agent, _scope: agent)
+    monkeypatch.setattr(control_service, "resolve_loaded_gateway_scope_agent", lambda _agent, _scope: agent)
     if entry == "agent-loader":
         assert runtime_config_reload.capability_config_for_agent(agent) is None
     elif entry == "cold-loader":
@@ -509,3 +509,72 @@ def test_unconfirmed_user_presence_failure_does_not_become_default(tmp_path, mon
         assert result is None
     assert checked == [path]
     assert not agent.home_paths.root.exists()
+
+
+@pytest.mark.parametrize('change', ['none', 'owner-disabled', 'owner-bad', 'capability-bad', 'route-off'])
+def test_count0_cold_metadata_matches_loaded_owner_without_building_agent(tmp_path, monkeypatch, change):
+    from agent_py_agent.agent.conversation.session_space import set_session_space
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts import control_service
+    from agent_py_agent.agent.owner_scoped_pool import _config_with_owner
+
+    target, scope = _case(tmp_path / 'home')
+    target.config = _config_with_owner(target.config, scope.resolved_owner)
+    target.config.workspace_root = str(target.root)
+    target.config.business_spaces_enabled = True
+    _enable(target, scope)
+    thread = target.conversation_store.threads.resolve(channel=scope.channel,
+        channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+    set_session_space(target.home_paths, target.conversation_store.threads, thread, actor_id=scope.user_id,
+        space_id='space-original-selection', expected_revision=0, idempotency_key='fixture-space', authorize=lambda: None)
+    if change in ('owner-disabled', 'owner-bad'):
+        target.home_paths.owner_tool_policy_json.write_text(
+            json.dumps({'disabled_tools': ['create_subagents']}) if change == 'owner-disabled' else '{broken')
+    elif change == 'capability-bad':
+        path = runtime_config_reload.default_capability_config_path(target.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_BAD_CAPABILITY_YAML)
+    elif change == 'route-off':
+        set_route_mode(target, thread, False, actor_id=scope.user_id, channel=scope.channel)
+    base_config = AgentConfig(enable_subagents=True, business_spaces_enabled=True,
+        workspace_root=str(target.root), conversation_workspace=str(tmp_path / 'main-only-conversation'))
+    base = SimpleNamespace(config=base_config, home_paths=home_paths(target.home_paths.root), root=target.root,
+        runtime_path_resolution=SimpleNamespace(paths={'conversation_workspace': base_config.conversation_workspace}))
+    before = _tree(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('入站只读元数据不得构造Owner Agent/Store')
+
+    monkeypatch.setattr(SimpleAgent, '__init__', forbidden)
+    monkeypatch.setattr(ConversationStore, '__init__', forbidden)
+    monkeypatch.setattr(control_service, '_request_agent_for_scope', forbidden)
+    with monkeypatch.context() as hot:
+        hot.setattr(control_service, 'resolve_loaded_gateway_scope_agent', lambda *_: target)
+        loaded = im_dispatch_policy.capture_gateway_input_context(base, scope)
+    cold = im_dispatch_policy.capture_gateway_input_context(base, scope)
+    assert cold == loaded
+    dispatch, space = cold
+    assert dispatch['owner_id'] == target.home_paths.owner_id
+    assert dispatch['mode'] == ('delegated' if change == 'none' else 'original')
+    assert space['thread_id'] == thread.thread_id and space['space_id'] == 'space-original-selection'
+    assert _tree(tmp_path) == before and not hasattr(base, '_owner_pool')
+
+
+def test_count0_absent_owner_capture_is_readonly_and_does_not_create_pool(tmp_path, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+
+    root = tmp_path / 'absent'
+    owner = OwnerIdentity.provider_user('feishu', 'cold-user')
+    scope = GatewayControlScope('cold-user', 'feishu', 'cold-conversation', resolved_owner=owner)
+    base = SimpleNamespace(config=AgentConfig(enable_subagents=True, business_spaces_enabled=True),
+                           home_paths=home_paths(root), root=tmp_path / 'constructor')
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('只读入站不能构造Agent或ConversationStore')
+
+    monkeypatch.setattr(SimpleAgent, '__init__', forbidden)
+    monkeypatch.setattr(ConversationStore, '__init__', forbidden)
+    dispatch, space = im_dispatch_policy.capture_gateway_input_context(base, scope)
+    assert dispatch['mode'] == 'original' and dispatch['route_origin']['thread_id'] == ''
+    assert dispatch['owner_id'] == resolve_owner_home(root, owner).owner_id
+    assert space is None and not root.exists() and not hasattr(base, '_owner_pool')

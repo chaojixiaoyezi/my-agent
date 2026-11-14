@@ -537,6 +537,52 @@ class ProcessRegistry:
         record = self.get(session_id, access_scope, store_root)
         return record.to_summary(include_output=True) if record is not None else None
 
+    def exact_state(self, session_id, access_scope, execution_scope, read_context, store_root, *, refresh=True):
+        """只观察已证明的同一执行，既不打开日志，也不调用含命令/路径的旧summary。"""
+        from dataclasses import asdict
+
+        with self._lock:
+            record = self._visible_record_locked(session_id, access_scope, store_root)
+            if record is None or not all(asdict(execution_scope).values()):
+                return None
+            snapshot = record.persisted_snapshot
+            proof = snapshot.get('exact_read_scope')
+            if (not isinstance(proof, dict) or read_context is None
+                    or snapshot.get('execution_scope') != asdict(execution_scope)
+                    or proof.get('read_context') != read_context.to_payload()):
+                return None
+            if refresh:
+                self._refresh_locked(record)
+                record = self._visible_record_locked(session_id, access_scope, store_root)
+                if (record is None or record.persisted_snapshot.get('execution_scope') != asdict(execution_scope)
+                        or record.persisted_snapshot.get('exact_read_scope') != proof):
+                    return None
+            result = {'session_id': record.session_id, 'status': record.status,
+                      'content_withheld_reason': 'EXACT_PROCESS_STATE_ONLY'}
+            if record.exit_code is not None:
+                result['exit_code'] = record.exit_code
+            return result
+
+    def wait_exact_state(self, session_id, access_scope, execution_scope, read_context, store_root,
+                         timeout_seconds, *, pending_input_probe=None):
+        """每轮重核原身份；等待沿原取消/插话探针有界，不读取输出文件。"""
+        started = time.monotonic()
+        deadline = started + max(0.0, timeout_seconds)
+        token = current_cancellation_token()
+        while True:
+            raise_if_cancelled()
+            result = self.exact_state(session_id, access_scope, execution_scope, read_context, store_root)
+            if result is None:
+                return None
+            terminal = result['status'] in PROCESS_TERMINAL_STATUSES
+            remaining = deadline - time.monotonic()
+            if terminal or remaining <= 0:
+                return {**result, 'wait_timed_out': not terminal}
+            if pending_input_probe is not None and pending_input_probe():
+                return {**result, 'wait_timed_out': False, 'wait_yielded': True}
+            interval = min(_process_wait_interval(time.monotonic() - started), remaining)
+            token.wait(interval) if token is not None else time.sleep(interval)
+
     # LLM: 简单内部调用沿结构化报告入口，模型工具需直接消费 list_report 中的错误。
     # 函数用途: 返回当前可见的进程摘要列表。
     def list(self, access_scope: ProcessAccessScope | None = None, store_root: str | Path | None = None) -> list[dict[str, Any]]:

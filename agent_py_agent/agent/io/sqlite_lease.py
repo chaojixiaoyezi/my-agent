@@ -113,6 +113,7 @@ class SQLiteConnectionLease(_SQLiteStatementLease):
         self._active = True
         self._initial_row_factory = conn.row_factory
         self._row_factory_changed = False
+        self._progress_handler_changed = False
 
     # LLM: sqlite3.Row沿原C接口，用户回调则拿访问层；非callable仍交SQLite保持原属性契约。
     # 函数用途: 给自定义行转换回调绑定租期，标准行工厂不改形状。
@@ -143,6 +144,12 @@ class SQLiteConnectionLease(_SQLiteStatementLease):
 
     # LLM: SQLite函数接收SQL值而非连接，回调重入的借用仍由scope的in_use规则决定。
     # 函数用途: 在当前有效连接登记普通SQLite函数。
+    def set_progress_handler(self, callback, instructions):
+        """只在有效租期设置查询预算；归还清除，不能将旧deadline留给下次借用。"""
+        result = self._call('set_progress_handler', (callback, instructions))
+        self._progress_handler_changed = callback is not None
+        return result
+
     def create_function(self, name, narg, function):
         return self._call('create_function', (name, narg, function))
 
@@ -162,6 +169,9 @@ class SQLiteConnectionLease(_SQLiteStatementLease):
     # 函数用途: 永久结束当前访问层及游标，避免本租期行工厂残留到下一借用。
     def _invalidate(self) -> None:
         self._active = False
+        if self._owned() and self._progress_handler_changed:
+            self._target.set_progress_handler(None, 0)
+            self._progress_handler_changed = False
         if self._row_factory_changed and self._owned():
             self._target.row_factory = self._initial_row_factory
 

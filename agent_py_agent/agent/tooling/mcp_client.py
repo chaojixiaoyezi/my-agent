@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from ..common.log_redaction import redact_sensitive_text
+from ..common.log_redaction import redact_sensitive_output_text
 from .background_process_launch import BackgroundLaunchError
 from .mcp_declarations import MCPPublication, parse_tool_approvals, parse_tool_observations
 from .mcp_protocol import MCPError, bounded_mcp_lock
@@ -80,7 +80,7 @@ _SECRET_ENV_HINT = re.compile(r"(?:token|key|secret|password|passwd|pwd|auth|cre
 def sanitize_credentials(text: str) -> str:
     """Compatibility name for the process-wide credential redactor."""
 
-    return redact_sensitive_text(
+    return redact_sensitive_output_text(
         text,
         redacted_marker="[REDACTED]",
         redact_assignment_labels=True,

@@ -20,6 +20,7 @@ from agent_py_agent.agent.conversation.background_team_lifecycle import (
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests.test_mega_background_lifecycle_controls import (
     native_cancellation_case,
+    native_task_work_file,
     ready_index,
 )
 
@@ -119,8 +120,8 @@ def test_default_timeout_cancellation_waits_for_worker_then_retires(tmp_path, ex
             assert not store.session_tasks.require(task_id).metadata["cancellation_control"]["outstanding_refs"]
             assert repo.get_agent_run_exec_lock(ref["agent_run_id"]) is None
             assert backend.calls == 2
-            assert (agent.home_paths.owner_home_dir / "before-cancel-result.txt").read_text() == "harmless original result"
-            assert not (agent.home_paths.owner_home_dir / "after-cancel-result.txt").exists()
+            assert native_task_work_file(agent, task_id, "before-cancel-result.txt").read_text() == "harmless original result"
+            assert not native_task_work_file(agent, task_id, "after-cancel-result.txt").exists()
         finally:
             backend.release.set()
             if backend.waiting_worker is not None:

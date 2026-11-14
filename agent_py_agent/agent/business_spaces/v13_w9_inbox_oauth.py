@@ -147,6 +147,11 @@ def _rotate_row(call, rows, row):
     metadata = {key: row.get(key) for key in
                 ('label', 'template_id', 'datasource_id', 'space_id', 'allowed_source_ips')}
     metadata['expires_at'] = None
+    if 'business_subscription' in row:
+        from ..gateway_parts.native_subscription_source import subscription_token_grant
+
+        metadata.update(subscription_token_grant(call, subscription_id=row['business_subscription']['subscription_id'],
+            space_id=row.get('space_id')))
     return _mint_row(call, rows, metadata)
 
 
@@ -224,7 +229,9 @@ def mint_token(call):
     # LLM: 从锁内当前集合追加，不覆盖锁外快照。
     # 函数用途: 提交新令牌。
     def mutate(rows):
-        return _mint_row(call, rows, metadata)
+        from ..gateway_parts.native_subscription_source import subscription_token_grant
+
+        return _mint_row(call, rows, {**metadata, **subscription_token_grant(call)})
 
     return _token_transaction(call, mutate)
 

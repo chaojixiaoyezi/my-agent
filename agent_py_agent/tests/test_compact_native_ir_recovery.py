@@ -237,7 +237,9 @@ def test_owned_recovery_fits_over_budget_native_history_before_business_request(
     body = "OVER_BUDGET_TOOL_BODY_" + "资料核对" * 3_700
     agent, store, thread, execution, sink, history, params, context, recorded = _native_ir_attempt(
         tmp_path, monkeypatch, backend="anthropic_compatible", full_result=body, pairs=4,
-        context_window_tokens=60_000,
+        # 真实模型量级的128k窗口；当前脚本/工作流Schema固定输入已超过旧60k夹具的45k物理门。
+        # 输出仍由原公式推出32k，四对历史仍超96k输入门；不靠减小输出让正向恢复变绿。
+        context_window_tokens=128_000,
     )
     ceiling = compact._compact_request_input_ceiling(agent, history.compact_source.policy)
     frozen_requests, shared_fits, candidates, summaries, business = [], [], [], [], []
@@ -458,7 +460,7 @@ def _committed_background_attempt(tmp_path, monkeypatch, respond):
     body = "OVER_BUDGET_TOOL_BODY_" + "资料核对" * 3_700
     agent, store, thread, execution, sink, history, params, context, _recorded = _native_ir_attempt(
         tmp_path, monkeypatch, backend="anthropic_compatible", full_result=body, pairs=4,
-        context_window_tokens=60_000,
+        context_window_tokens=128_000,
     )
     run = SimpleNamespace(agent=agent, store=store, thread=thread, candidates=[], summaries=[], business=[],
                           builds=[], stale_fits=[], committed=[], waits=[], result=None, recovery=None)

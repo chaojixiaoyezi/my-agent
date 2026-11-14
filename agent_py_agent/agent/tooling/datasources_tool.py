@@ -7,7 +7,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-from ..assets.datasource_store import DatasourceStore
+from ..assets.datasource_store import (
+    DatasourceSpecValidationError,
+    DatasourceStore,
+    prepare_datasource_spec,
+)
 from ..assets.source_manifest import (
     ManifestRevisionConflict,
     load_manifest,
@@ -35,7 +39,7 @@ class DatasourcesTool(BaseTool):
         ['list', 'get', 'save', 'test', 'inspect_schema', 'migrate',
          'manifest_get', 'manifest_register', 'manifest_prune'], {
             'datasource_id': {'type': 'string'}, 'workspace_root': {'type': 'string'},
-            'spec_payload': {'type': 'object'}, 'secret_payload': {'type': 'object'},
+            'spec_payload': {'type': 'object', 'description': 'save 必填 datasource_id、kind、title，均为非空字符串；扩展连接参数放 options 对象。例如 {"datasource_id":"orders","kind":"sqlite","title":"订单"}'}, 'secret_payload': {'type': 'object'},
             'credential_values': {'type': 'object'},
             'scope': {'type': 'string', 'enum': ['owner', 'workspace']},
             'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
@@ -89,6 +93,14 @@ class DatasourcesTool(BaseTool):
             required.append('target_spec')
         if any(key not in params for key in required):
             return _result({'error': '缺少动作必填参数', 'required': required}, False, 'TOOL_INVALID_ARGUMENTS', effect='not_started')
+        if action == 'save':
+            try:
+                prepare_datasource_spec(params['spec_payload'], params.get('scope', 'owner'))
+            except DatasourceSpecValidationError as error:
+                return _result({'error': '连接规格校验失败，尚未开始操作', 'error_code': error.error_code, **error.details,
+                    'next_action': '修正指出的字段后重新调用；连接扩展字段放入 options，凭据使用 secret_payload',
+                    'example': {'action': 'save', 'spec_payload': {'datasource_id': 'orders', 'kind': 'sqlite', 'title': '订单'}}},
+                    False, 'TOOL_INVALID_ARGUMENTS', effect='not_started')
         effective_root = self._effective_workspace_root()
         if 'workspace_root' in params and (effective_root is None or Path(params['workspace_root']).absolute() != effective_root):
             return _result({'error': '工作区未获宿主授权'}, False, 'DATASOURCE_WORKSPACE_NOT_AUTHORIZED', effect='not_started')
@@ -109,7 +121,9 @@ class DatasourcesTool(BaseTool):
                            False, 'TOOL_INVALID_ARGUMENTS', effect='not_started')
         except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as error:
             effect = 'unknown' if params['action'] in ('save', 'migrate', 'manifest_register', 'manifest_prune') else 'failed'
-            return _result({'error': '数据源操作失败', 'exception_type': type(error).__name__}, False,
+            return _result({'error': '数据源操作异常，无法确认写入结果' if effect == 'unknown' else '数据源读取或探测异常',
+                'exception_type': type(error).__name__, 'effect_outcome': effect,
+                'next_action': '先用 list/get 核对现有规格与 revision；禁止原样盲重试写操作' if effect == 'unknown' else '核对数据源代号、配置和访问权限后重试'}, False,
                            'DATASOURCE_OPERATION_FAILED', effect=effect)
 
     # LLM: workspace仅宿主授权；save兼容两个凭据参数并交Store合并/冲突检查，读取只返回安全投影。

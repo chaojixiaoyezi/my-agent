@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import TypeVar
 
 from ..backends.bounded_call import (
@@ -447,7 +448,7 @@ def call_backend_with_timeout(
 
     def _run_transport() -> object:
         try:
-            return _generate_with_original_transport(generate, prompt, response_schema)
+            return _generate_with_original_transport(generate, prompt, response_schema, backend=backend)
         finally:
             completed_worker.append(threading.current_thread())
 
@@ -473,7 +474,7 @@ def call_backend_with_timeout(
 
 # LLM: 只在原 bounded worker 实际发送前复核原后台 T/P5；检查结束即释放短门，不持门等网络。无实际后台 scope 的 Count0 沿原零 I/O 检查，不构造或补执行权。
 # 函数用途: 在原运输仍可提交时调用一次既有结构化后端，所有拒绝与后端异常原样返回。
-def _generate_with_original_transport(generate, prompt, response_schema):
+def _generate_with_original_transport(generate, prompt, response_schema, *, backend=None):
     from ..backends.request_scope import provider_request_timeout
     from ..gateway_parts.multiprocess_background_execution import require_background_model_admission
     from ..llm_scale.hot_path import global_llm_admission_slot
@@ -483,7 +484,18 @@ def _generate_with_original_transport(generate, prompt, response_schema):
     with global_llm_admission_slot(wait_timeout=provider_request_timeout(30)):
         provider_request_timeout(30)
         require_background_model_admission()
-        return generate(prompt, response_schema=response_schema)
+        # 辅助后端已绑定其授权模型档案配置；按同一请求选项换算，不修改共享后端。
+        options = {}
+        if bool(getattr(backend, "supports_provider_request_options", False)):
+            from ..backends.base import ProviderRequestOptions
+            from ..settings.reasoning_effort import request_reasoning_options
+
+            host = SimpleNamespace(config=getattr(backend, "config", None))
+            disabled, effort = request_reasoning_options(host, None, backend, forced=False)
+            options["request_options"] = ProviderRequestOptions(
+                thinking_disabled=disabled, reasoning_effort=effort,
+            )
+        return generate(prompt, response_schema=response_schema, **options)
 
 
 # LLM: 历史材料与可选注释均非权威；仅将匹配锚点的candidate_id映射为输出link_candidate_id，完整字段须同schema一致，不改变证据、晋升或游标。

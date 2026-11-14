@@ -281,6 +281,48 @@ class VerificationEvidenceRepository:
         finally:
             conn.close()
 
+    def progress_metadata(self, context: VerificationContext, *, requirement_id: str = "",
+                          related_task_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+        """精确执行范围的有界只读投影；不迁移、不创建、不加载命令或评审正文。"""
+        if not self.db_path.exists():
+            return {"state": "not_applicable"}
+        conn = sqlite3.connect(self.db_path.as_uri() + "?mode=ro", uri=True, timeout=0.05)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            # 按状态主键的 root 顺序取固定页，避免为最新事件排序扫描该任务所有根。
+            rows = conn.execute("""SELECT e.id, e.status, e.scope, e.created_at, s.last_edit_at
+                FROM verification_state s JOIN verification_events e ON e.id=s.last_event_id
+                WHERE s.owner_ref=? AND s.thread_id=? AND s.task_id=?
+                  AND e.owner_ref=s.owner_ref AND e.thread_id=s.thread_id AND e.task_id=s.task_id
+                ORDER BY s.root LIMIT 17""", (context.owner_ref, context.thread_id, context.task_id)).fetchall()
+            result = {"state": "read", "coverage": "partial" if len(rows) > 16 else "complete",
+                      "tests": [{"event_id": row["id"], "scope": row["scope"],
+                                 "status": "stale" if row["last_edit_at"] and row["last_edit_at"] > row["created_at"] else row["status"],
+                                 "created_at": row["created_at"]} for row in rows[:16]]}
+            if requirement_id:
+                row = conn.execute("""SELECT * FROM requirement_links WHERE owner_ref=? AND requirement_id=?
+                    AND length(root)+length(input_version)+length(watched_paths_json)
+                        +length(verification_event_ids_json)+length(author_principal_id)<=65536""",
+                                   (context.owner_ref, requirement_id)).fetchone()
+                if row is None or (row["task_id"] not in related_task_ids
+                                   and row["author_principal_id"] not in related_task_ids):
+                    result["review"] = {"state": "unknown", "reason_code": "REVIEW_BINDING_UNPROVEN"}
+                else:
+                    requirement = _row_to_requirement_record(row)
+                    reviews = conn.execute("""SELECT review_id,reviewer_principal_id,verdict,scope,created_at,candidate_ref
+                        FROM independent_reviews WHERE owner_ref=? AND requirement_id=?
+                        ORDER BY created_at DESC LIMIT 17""", (context.owner_ref, requirement_id)).fetchall()
+                    result["review"] = {"state": "read", "requirement_id": requirement_id,
+                        "review_status": requirement.review_status, "acceptance_status": requirement.acceptance_status,
+                        "coverage": "partial" if len(reviews) > 16 else "complete",
+                        "records": [{key: review[key] for key in ("review_id", "verdict", "scope", "created_at")}
+                                    for review in reviews[:16] if review["reviewer_principal_id"] == context.task_id
+                                    and review["candidate_ref"] == _candidate_binding_ref(requirement)]}
+            return result
+        finally:
+            conn.close()
+
     # LLM: 连接初始化时配置 WAL 模式、忙等待超时及增量自动清理与日志上限（Rule 10）。
     # 函数用途: 创建并配置 SQLite 数据库物理连接。
     def _connect(self) -> sqlite3.Connection:

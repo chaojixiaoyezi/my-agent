@@ -78,9 +78,10 @@ def test_f06_self_map_bootstrap_wires_scripts_tool_workspace_provider(tmp_path):
     from agent_py_agent.agent.agent_core.self_map_bootstrap import register_self_map
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor
     from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
-    home, project = tmp_path / 'owner', tmp_path / 'project'
-    home.mkdir()
+    home_paths = ensure_my_agent_home(tmp_path / 'home')
+    home, project = home_paths.owner_home_dir, tmp_path / 'project'
     project.mkdir()
     ScriptStore(home, workspace_root=project).save_script(
         AssetDescriptor(id='proj_only', kind='script', name='项目专属脚本'),
@@ -89,8 +90,9 @@ def test_f06_self_map_bootstrap_wires_scripts_tool_workspace_provider(tmp_path):
     )
     registered = {}
     agent = SimpleNamespace(
-        tools=SimpleNamespace(owner_type='main_agent', register=lambda t: registered.setdefault(type(t).__name__, t)),
-        home_paths=SimpleNamespace(owner_home_dir=home, is_admin=False),
+        tools=SimpleNamespace(owner_type='main_agent', register=lambda t: registered.setdefault(type(t).__name__, t),
+            _construction_params=SimpleNamespace(file_source_resolver=None)),
+        home_paths=home_paths,
         config=SimpleNamespace(enable_self_map=False),
         effective_workspace_root=project,
         current_skill_snapshot=lambda: None,
@@ -271,7 +273,8 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(asset_r
 
     registered = {}
     agent = SimpleNamespace(
-        tools=SimpleNamespace(owner_type='user', register=lambda t: registered.setdefault(type(t).__name__, t)),
+        tools=SimpleNamespace(owner_type='user', register=lambda t: registered.setdefault(type(t).__name__, t),
+            _construction_params=SimpleNamespace(file_source_resolver=None)),
         home_paths=SimpleNamespace(
             owner_home_dir=owner_home, owner_provider='feishu', owner_kind='user', owner_id='providers/feishu/users/ou_1',
             root=home.root,

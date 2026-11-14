@@ -2,6 +2,7 @@
 # 模块用途: 将跨用户资产投递公开为原生工具，复用唯一领域服务及原审批/副作用合同。
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ..assets.delivery_contracts import AssetDeliveryError
@@ -14,6 +15,7 @@ from .models import (
     EffectResolverPolicy,
     IdempotencyPolicy,
     ResourceScopePolicy,
+    ToolHandlerOutcome,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
@@ -35,11 +37,13 @@ def dispatch_delivery_action(service, owner_id, params):
     if action == 'targets':
         return service.list_targets(owner_id)
     if action == 'preview':
-        return service.preview_bundle(owner_id, params['asset_kind'], params['asset_id'], params.get('include_dependencies', True))
+        return service.preview_bundle(owner_id, params['asset_kind'], params['asset_id'], params.get('include_dependencies', True),
+            allow_secret_placeholder_replace=params.get('allow_secret_placeholder_replace', False))
     if action == 'send':
         return service.send_bundle(owner_id, params['recipient_owner_id'], params['asset_kind'], params['asset_id'],
             note=params.get('note', ''), include_dependencies=params.get('include_dependencies', True),
-            allow_secret_placeholder_replace=params.get('allow_secret_placeholder_replace', False))
+            allow_secret_placeholder_replace=params.get('allow_secret_placeholder_replace', False),
+            expected_bundle_sha256=params.get('expected_bundle_sha256'))
     if action == 'inbox':
         return service.list_inbox(owner_id, params.get('status_filter'))
     if action == 'accept':
@@ -82,6 +86,8 @@ class AssetDeliveryTool(BaseTool):
             'asset_kind': {'type': 'string', 'enum': ['workflow', 'script', 'monitor', 'skill']},
             'asset_id': _ID, 'delivery_id': _ID, 'recipient_owner_id': _OWNER, 'target_owner_id': _OWNER,
             'include_dependencies': {'type': 'boolean'}, 'allow_secret_placeholder_replace': {'type': 'boolean'},
+            'expected_bundle_sha256': {'type': 'string', 'pattern': '^[0-9a-f]{64}$',
+                'description': '可选投递内容前置：取同参数preview的bundle_sha256；不匹配时未投递，须重新读取并在受审场景重新审核。'},
             'note': {'type': 'string', 'maxLength': 4000}, 'reason': {'type': 'string', 'maxLength': 4000},
             'conflict_strategy': {'type': 'string', 'enum': ['keep_both_rename', 'overwrite', 'skip']},
             'enabled': {'type': 'boolean'}, 'operation': {'type': 'string', 'enum': ['get', 'add', 'remove']},
@@ -101,6 +107,22 @@ class AssetDeliveryTool(BaseTool):
         _identity(owner_id)
         self.owner_id = owner_id
         self.service = AssetDeliveryService(root_dir)
+
+    def workflow_review_precondition_action(self, arguments):
+        """纯投影送审所需的原preview调用，交原ActionPolicy核只读权限，不读取资产。"""
+        if arguments.get('action') != 'send':
+            return None
+        return {'action': 'preview', 'asset_kind': arguments['asset_kind'], 'asset_id': arguments['asset_id'],
+            'include_dependencies': arguments.get('include_dependencies', True),
+            'allow_secret_placeholder_replace': arguments.get('allow_secret_placeholder_replace', False)}
+
+    def workflow_review_precondition(self, arguments):
+        """宿主核过投影preview权限后调用；复用原读入口且Owner只取工具绑定。"""
+        read_arguments = self.workflow_review_precondition_action(arguments)
+        if read_arguments is None:
+            return None
+        preview = dispatch_delivery_action(self.service, self.owner_id, read_arguments)
+        return {'expected_bundle_sha256': preview['bundle_sha256']}
 
     # LLM: claim前纯校验，不能让非法条件参数先创建配额锁、目录或发件记录。
     # 函数用途: 验证封闭Schema和各动作必填项。
@@ -129,6 +151,11 @@ class AssetDeliveryTool(BaseTool):
             error = exc if isinstance(exc, AssetDeliveryError) else AssetDeliveryError(
                 'ASSET_DELIVERY_DEPENDENCY_MISSING', 'Asset dependency closure is incomplete',
                 missing_refs=list(exc.missing_refs))
+            if error.error_code in {'ASSET_DELIVERY_BUNDLE_CHANGED', 'ASSET_DELIVERY_BUNDLE_PRECONDITION_INVALID'}:
+                data = error.to_dict()
+                return ToolHandlerOutcome('asset_delivery', False, json.dumps(data, ensure_ascii=False),
+                    error_code='STALE_VERSION' if error.error_code == 'ASSET_DELIVERY_BUNDLE_CHANGED' else 'TOOL_INVALID_ARGUMENTS',
+                    reported_error_code=error.error_code, effect_outcome='not_started', result_envelope=data)
             return _outcome('asset_delivery', error.to_dict(), False, error.error_code, effect_outcome='unknown')
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
             return _outcome('asset_delivery', {'ok': False, 'error_code': 'ASSET_DELIVERY_FAILED',

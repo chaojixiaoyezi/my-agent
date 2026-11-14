@@ -187,6 +187,12 @@ def test_leaf_workflow_review_uses_original_pending_candidate_and_business_root(
     wrong_scope = invoke(leaf, review_params(requirement_id=binding['requirement_id'],
         reviewed_input_version=binding['input_version'], review_scope='ordinary-review'))
     assert not wrong_scope.ok and wrong_scope.effect_outcome == 'not_started'
+    diagnostic = json.loads(wrong_scope.output)['details']
+    assert diagnostic['field'] == 'review_scope'
+    assert diagnostic['actual'] == 'ordinary-review'
+    assert diagnostic['expected'] == 'workflow_effect.v1'
+    assert diagnostic['call_example']['requirement_id'] == binding['requirement_id']
+    assert diagnostic['call_example']['reviewed_input_version'] == binding['input_version']
     assert leaf.repo.list_independent_reviews(leaf.owner) == []
     result = invoke(leaf, review_params(requirement_id=binding['requirement_id'],
         reviewed_input_version=binding['input_version'], review_scope='workflow_effect.v1'))
@@ -417,3 +423,87 @@ def test_bound_reviewer_keeps_original_query_and_sign_but_cannot_bind_or_accept(
         assert not result.ok and result.effect_outcome == 'not_started'
         assert 'LEAF_PROVENANCE_ACTION_FORBIDDEN' in result.output
     assert leaf.repo.get_requirement(leaf.owner, 'R').acceptance_status == 'unaccepted'
+
+
+@pytest.mark.parametrize('value', [None, ''])
+def test_bound_reviewer_missing_requirement_returns_original_query_without_signing(leaf, value):
+    _bind_exact_reviewer_with_coordinator_template(leaf)
+    params = review_params()
+    if value is None:
+        del params['requirement_id']
+    else:
+        params['requirement_id'] = value
+    result = invoke(leaf, params)
+    assert not result.ok and result.effect_outcome == 'not_started'
+    diagnostic = json.loads(result.output)
+    assert diagnostic['reason'] == 'REVIEW_REQUIREMENT_REQUIRED'
+    assert diagnostic['details']['actual'] == value
+    assert diagnostic['details']['expected'] == 'R'
+    assert invoke(leaf, diagnostic['details']['query_example']).ok
+    assert leaf.repo.list_independent_reviews(leaf.owner) == []
+    assert invoke(leaf, review_params()).ok
+
+
+@pytest.mark.parametrize('variant', ['good', 'unbound', 'wrong_binding', 'other_parent', 'old_attempt', 'wrong_version'])
+def test_raw_workflow_reviewer_requires_exact_original_delegation(tmp_path, variant):
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor, IOContract
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.native_governance import NativeWorkflowGovernance
+    from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path / 'project')
+    home, owner, runtime = agent.home_paths.owner_home_dir, agent.home_paths.owner_id, agent.subagents.runtime_db
+    root = runtime.record_run_creation(owner_id=owner, run_id='raw-author', conversation_task_id='raw-original')
+    parent = runtime.parent_execution_ref(owner_id=owner, run_id='raw-author', attempt_id=root['attempt_id'])
+    store = WorkflowRunStore(home)
+    gov = NativeWorkflowGovernance(None, store, owner_home=home, owner_id=owner, author_provider=lambda: 'raw-author')
+    target = agent.root / 'issued.log'
+    ScriptStore(home).save_script(AssetDescriptor(id='raw-issue', kind='script', name='原审核后单次签发',
+        io_contract=IOContract(outputs=('result',))),
+        f"from pathlib import Path\nwith Path({str(target)!r}).open('a') as f: f.write('once'+chr(10))\nprint('{{\"result\":1}}')")
+    flow = {'descriptor': {'id': 'raw-flow', 'kind': 'workflow', 'name': '原无空间工作流',
+        'metadata': {'workflow_review_policy': {'steps': ['effect']}}}, 'steps': [
+        {'step_id': 'effect', 'name': 'effect', 'mode': 'deterministic_script', 'script_id': 'raw-issue', 'on_error': 'fail'}]}
+    engine = WorkflowEngine(home, workspace_root=agent.root, run_authorizer=gov.require_effect)
+    engine.runner = ScriptRunner(home, workspace_root=agent.root, extra_write_roots=(agent.root,))
+    first = engine.run_workflow(flow, owner_id=owner)
+    binding = first.steps[0].escalation_result['pending_review']
+    assert first.business_context == {} and first.scope_snapshot == {} and not target.exists()
+    if variant == 'other_parent':
+        other = runtime.record_run_creation(owner_id=owner, run_id='other-parent', parent_run_id='raw-author',
+            host_parent_execution=parent)
+        parent = runtime.parent_execution_ref(owner_id=owner, run_id='other-parent', attempt_id=other['attempt_id'])
+    attrs = {} if variant == 'unbound' else {'review_requirement_id':
+        'wrong-candidate' if variant == 'wrong_binding' else binding['requirement_id']}
+    task = agent.subagents.create_run(params=CreateRunParams(goal='审核精确原候选', thought='review', plan=['核对', '登记'],
+        role='reviewer', owner=owner, parent_id=parent.run_id, root_id='raw-author',
+        allowed_tools=[NAME], attributes=attrs, host_parent_execution=parent))
+    attempt = task.attributes['runtime_authority']['attempt_id']
+    if variant == 'old_attempt':
+        runtime.create_attempt(task.attributes['runtime_authority']['agent_run_id'])
+    case = SimpleNamespace(agent=agent, task=task, attempt=attempt, owner=owner,
+        tool=RequirementProvenanceTool(agent))
+    previous = set_current_subagent_context(agent, run_id=task.id, attempt_id=attempt)
+    try:
+        args = {'action': 'record_independent_review', 'requirement_id': binding['requirement_id'],
+            'reviewed_input_version': 'wrong' if variant == 'wrong_version' else binding['input_version'],
+            'review_scope': 'workflow_effect.v1', 'review_verdict': 'pass'}
+        result = invoke(case, args)
+        repo = VerificationEvidenceRepository(home)
+        if variant != 'good':
+            assert not result.ok and not target.exists(), result.output
+            assert repo.list_independent_reviews(owner, requirement_id=binding['requirement_id']) == []
+        else:
+            assert result.ok, result.output
+            reviews = repo.list_independent_reviews(owner, requirement_id=binding['requirement_id'])
+            assert len(reviews) == 1 and reviews[0].reviewer_principal_id == task.id
+            done = engine.resume_workflow_run(first.workflow_run_id,
+                expected_revision=first.revision, operation_key='release-once')
+            again = engine.resume_workflow_run(first.workflow_run_id,
+                expected_revision=first.revision, operation_key='release-once')
+            assert done.to_dict() == again.to_dict() and done.status == 'succeeded'
+            assert target.read_text().splitlines() == ['once']
+    finally:
+        restore_current_subagent_context(agent, previous)

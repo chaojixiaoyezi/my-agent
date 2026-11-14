@@ -130,7 +130,7 @@ def _record_background_owner_response(
     if block := public_receipt_delivery_block(delivery.agent, request, public_receipt, internal_content,
                                               has_attachments=bool(_channel_attachments(delivery_artifacts)), frozen_retry=frozen_retry):
         return _uncommitted_delivery("", block)
-    projection = project_user_reply(internal_content)
+    projection = project_user_reply(internal_content, finalized=True)
     if _background_reply_suppressed(
         delivery,
         request,

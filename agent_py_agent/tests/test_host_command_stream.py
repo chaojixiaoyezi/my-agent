@@ -173,9 +173,9 @@ def test_real_http_to_tui_approval_preserves_original_execution_and_foreground(t
 def test_disconnect_cancels_only_original_wait_and_replay_cannot_execute(tmp_path, monkeypatch):
     ended = threading.Event()
     original_stream = command_stream.serve_command_stream
-    def observe_stream(handler, paths, owner, request_id, execute):
+    def observe_stream(handler, paths, owner, request_id, execute, **options):
         try:
-            return original_stream(handler, paths, owner, request_id, execute)
+            return original_stream(handler, paths, owner, request_id, execute, **options)
         finally:
             if request_id == "departed":
                 ended.set()
@@ -267,7 +267,7 @@ def test_invalid_interactive_body_cannot_supply_a_path_or_start_execution(tmp_pa
     from agent_py_agent.cli.chat_client_context import post_gateway_json
 
     with plugin_host(tmp_path, monkeypatch) as (client, _paths, source, command):
-        for change in ({"interactive": "true"}, {"plugin_request_id": "../wrong"}):
+        for change in ({"interactive": "true"}, {"stream": "true"}, {"plugin_request_id": "../wrong"}):
             body = {"operation": "command", "command": command, "interactive": True,
                     "plugin_request_id": "original", "conversation_id": "transport-session",
                     "chunk_path": str(tmp_path / "injected"), **change}
@@ -383,3 +383,113 @@ def test_interactive_rejection_is_logged_with_its_code(tmp_path, monkeypatch, ca
     logged = [(r.levelno, r.getMessage()) for r in caplog.records if r.name.endswith("plugin_command_service")]
     assert logged == [(logging.WARNING, f"PLUGIN_COMMAND_REJECTED error_code={result['error_code']} "
                                         "action=plugin_call request_id=denied-call")]
+
+
+@pytest.mark.parametrize('slow_stage', ['start', 'stop'])
+def test_noninteractive_heartbeat_survives_slow_connection_lifecycle(tmp_path, monkeypatch, slow_stage):
+    from agent_py_agent.agent.plugin_runtime import PluginMCPClient
+
+    with plugin_host(tmp_path, monkeypatch) as (client, _paths, source, command):
+        original = getattr(PluginMCPClient, slow_stage)
+        calls = []
+        frame_kinds = []
+        encode = CommandStreamFrame.encode
+
+        def observed_frame(frame):
+            frame_kinds.append(frame.kind)
+            return encode(frame)
+
+        monkeypatch.setattr(CommandStreamFrame, 'encode', observed_frame)
+
+        def slow(connection, *args, **kwargs):
+            calls.append(connection)
+            time.sleep(3.2)
+            return original(connection, *args, **kwargs)
+
+        monkeypatch.setattr(PluginMCPClient, slow_stage, slow)
+        result = client.command(command)
+        assert result['state'] == 'rejected' and result['error_code'] == 'APPROVAL_UNAVAILABLE', result
+        assert result['connection_cleanup']['confirmed']
+        assert len(calls) == 1
+        assert frame_kinds[0] == 'connected' and frame_kinds[-1] == 'result'
+        assert frame_kinds.count('result') == 1 and 'heartbeat' in frame_kinds
+        assert 'permission_requested' not in frame_kinds
+        assert not source.with_suffix('.calls').exists()
+
+
+def test_noninteractive_long_authorized_command_executes_once_and_can_be_queried(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.mcp_registration import MCPProxyTool
+
+    with plugin_host(tmp_path, monkeypatch) as (client, _paths, source, command):
+        execute_approval_mode_operation(client.agent.home_paths, 'set', 'auto')
+        original = MCPProxyTool.execute_scoped
+        calls = []
+
+        def slow(tool, params, context):
+            calls.append(tool)
+            time.sleep(3.2)
+            return original(tool, params, context)
+
+        monkeypatch.setattr(MCPProxyTool, 'execute_scoped', slow)
+        result = client.command(command)
+        assert result['state'] == 'succeeded', result
+        assert result['connection_cleanup']['confirmed']
+        assert source.with_suffix('.calls').read_text().splitlines() == ['called']
+        queried = client.command('/plugins status ' + result['request_id'])
+        assert queried['state'] == 'succeeded'
+        assert queried['operation_id'] == result['operation_id']
+        assert len(calls) == 1
+
+
+def test_legacy_noninteractive_json_client_keeps_original_protocol(tmp_path, monkeypatch):
+    from agent_py_agent.cli.chat_client_context import post_gateway_json
+
+    with plugin_host(tmp_path, monkeypatch) as (client, _paths, source, command):
+        status, result = post_gateway_json(client.agent, '/client/plugins', {
+            'operation': 'command', 'command': command, 'plugin_request_id': 'legacy-json',
+            'conversation_id': 'transport-session', 'catalog_revision': client.refresh()['catalog']['revision'],
+        }, timeout=10)
+        assert status == 200
+        assert result['state'] == 'rejected' and result['error_code'] == 'APPROVAL_UNAVAILABLE'
+        assert result['connection_cleanup']['confirmed']
+        assert not source.with_suffix('.calls').exists()
+
+
+def test_noninteractive_disconnect_preserves_original_unknown_without_resubmission(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.mcp_registration import MCPProxyTool
+    from agent_py_agent.cli.chat_parts import plugin_command_stream
+
+    with plugin_host(tmp_path, monkeypatch) as (client, _paths, source, command):
+        execute_approval_mode_operation(client.agent.home_paths, 'set', 'auto')
+        original = MCPProxyTool.execute_scoped
+        calls, entered = [], threading.Event()
+        release = threading.Event()
+
+        def held(tool, params, context):
+            calls.append(tool)
+            value = original(tool, params, context)
+            entered.set()
+            assert release.wait(10)
+            return value
+
+        def disconnect(response, request_id, consumer):
+            assert CommandStreamFrame.decode(response.readline(COMMAND_STREAM_MAX_BYTES + 1),
+                                             request_id=request_id).kind == 'connected'
+            assert entered.wait(10)
+            raise OSError('synthetic disconnected response')
+
+        monkeypatch.setattr(MCPProxyTool, 'execute_scoped', held)
+        with monkeypatch.context() as patch:
+            patch.setattr(plugin_command_stream, '_read_command_frames', disconnect)
+            try:
+                result = client.command(command)
+                assert result['state'] == 'outcome_unknown'
+                assert result['request_id']
+                assert source.with_suffix('.calls').read_text().splitlines() == ['called']
+            finally:
+                release.set()
+        queried = wait_until(lambda: (row if (row := client.command('/plugins status ' + result['request_id']))
+                                     .get('state') != 'running' else None))
+        assert queried['request_id'] == result['request_id']
+        assert len(calls) == 1
+        assert source.with_suffix('.calls').read_text().splitlines() == ['called']

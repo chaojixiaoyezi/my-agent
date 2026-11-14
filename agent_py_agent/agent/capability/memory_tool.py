@@ -16,6 +16,8 @@ from ..conversation.authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
     current_conversation_task_attributes,
 )
+from ..conversation.host_actor import HostActorError, model_long_term_scope
+from ..memory_store import recall
 from ..memory_store.candidate_models import CandidateObservation, MemoryScope
 from ..memory_store.promotion_remove_recovery import CommittedRemoval
 from ..memory_store.security import scan_memory_content
@@ -273,10 +275,23 @@ class RememberTool(BaseTool):
         memory = getattr(self.agent, "memory", None)
         if memory is None or not hasattr(memory, "all"):
             return _memory_error("正式长期记忆不可用", "TOOL_UNAVAILABLE", not_started=True)
+        try:
+            scope = model_long_term_scope(self.agent, memory, frozen_only=True)
+        except HostActorError as exc:
+            return _memory_error(str(exc), exc.error_code, hint="请在原聊天核对绑定后重新提交。",
+                                 not_started=True)
+        current = getattr(self.agent, "_current_run_params", None)
+        isolated = recall.formal_recall_suppressed(getattr(current, "context_scope", ""), getattr(self.agent, "owner_policy", None))
         if action == "list":
-            return _memory_list_result(memory)
+            if isolated:
+                return _memory_error("本轮的宿主策略禁止读取正式长期记忆。", "TOOL_UNAVAILABLE",
+                                     hint="请在有权的普通会话中列出记忆。", not_started=True)
+            return _memory_list_result(memory, scope)
         operations = _memory_operations(params, action)
-        prepared = _prepare_observations(self.agent, memory, operations)
+        if isolated and any(str(op.get("action") or "").strip().lower() in {"replace", "remove"} for op in operations):
+            return _memory_error("本轮不能读取已有正式记忆以核对修改或删除目标。", "TOOL_UNAVAILABLE",
+                                 hint="请在有权的普通会话中核对原条目。", not_started=True)
+        prepared = _prepare_observations(self.agent, memory, operations, scope=scope)
         if isinstance(prepared, ToolHandlerOutcome):
             return prepared
         candidates = getattr(self.agent, "memory_candidates", None)
@@ -355,12 +370,13 @@ def _prepare_observations(
     agent: object,
     memory: object,
     operations: list[dict[str, object]],
+    *, scope=None,
 ) -> list[CandidateObservation | CommittedRemoval] | ToolHandlerOutcome:
     if not operations:
         return _memory_error("operations 必须是非空数组", "TOOL_INVALID_ARGUMENTS", not_started=True)
     observations: list[CandidateObservation | CommittedRemoval] = []
     for index, operation in enumerate(operations, start=1):
-        prepared = _prepare_observation(agent, memory, operation, index=index)
+        prepared = _prepare_observation(agent, memory, operation, index=index, scope=scope)
         if isinstance(prepared, ToolHandlerOutcome):
             return prepared
         observations.append(prepared)
@@ -377,6 +393,7 @@ def _prepare_observation(
     operation: dict[str, object],
     *,
     index: int,
+    scope=None,
 ) -> CandidateObservation | CommittedRemoval | ToolHandlerOutcome:
     identity = _validated_action_origin(operation, index=index)
     if isinstance(identity, ToolHandlerOutcome):
@@ -384,8 +401,10 @@ def _prepare_observation(
     action, origin = identity
     target_result = _resolved_target(memory, operation, action=action, index=index)
     if isinstance(target_result, ToolHandlerOutcome):
-        return _prepare_removal_retry(agent, operation, target_result, index=index)
+        return _prepare_removal_retry(agent, operation, target_result, index=index, scope=scope)
     entry_id, target = target_result
+    if target is not None and scope is not None and not recall.long_term_record_matches_scope(target, scope):
+        return _unavailable_target(index)
     body = _validated_candidate_body(operation, target, action=action, index=index)
     if isinstance(body, ToolHandlerOutcome):
         return body
@@ -474,14 +493,23 @@ def _resolved_target(
             hint="先 action=list 取得稳定 entry_id。",
             not_started=True,
         )
-    target = _memory_record(memory, entry_id)
+    try:
+        target = next((item for item in memory.all() if getattr(item, "entry_id", "") == entry_id), None)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return _formal_read_error(exc)
     if target is None:
-        return _memory_error(
-            f"第 {index} 个操作的 entry_id 不存在",
-            "MEMORY_ENTRY_NOT_FOUND",
-            not_started=True,
-        )
+        return _unavailable_target(index)
     return entry_id, target
+
+
+def _unavailable_target(index: int) -> ToolHandlerOutcome:
+    # 当前范围外与不存在的编号返回同一回执，不能让调用方探测其它项目的条目。
+    return _memory_error(
+        f"第 {index} 个操作的 entry_id 在当前可见记忆中不存在。",
+        "MEMORY_ENTRY_NOT_FOUND",
+        hint="用 remember(action=list) 核对当前空间可见的 entry_id。",
+        not_started=True,
+    )
 
 
 # LLM: Content is bounded by the shared threat and transient-credential guards before any
@@ -871,25 +899,24 @@ def _canonical_observation_sources(provenance: _ObservationProvenance) -> list[t
     return sorted(sources) if sources else [("request", provenance.request_id)]
 
 
-# LLM: Exact entry_id lookup is the only selection mechanism for replace/remove.
-# 函数用途: 从正式 active 长期记忆中查找稳定编号。
-def _memory_record(memory: object, entry_id: str) -> object | None:
-    try:
-        return next(
-            (item for item in memory.all() if str(getattr(item, "entry_id", "")) == entry_id),
-            None,
-        )
-    except Exception:
-        return None
+def _formal_read_error(exc: Exception) -> ToolHandlerOutcome:
+    # 读库出错不能充当条目不存在的证据或启动旧删除收尾，也不暴露异常中的原私密正文。
+    return _memory_error(
+        f"正式记忆库读取失败（{type(exc).__name__}），尚未核实条目或执行变更。",
+        "MEMORY_AUTHORITY_UNREADABLE",
+        hint="请由当前用户核对长期记忆库的读取权限与完整性。恢复读取后先执行 remember(action=list)，再核对目标编号。",
+        not_started=True,
+    )
 
 
 # LLM: Listing reads only active long_term authority; candidates, ops and daily never appear here.
 # 函数用途: 返回正式长期记忆及其稳定编号、版本和结构化范围。
-def _memory_list_result(memory: object) -> ToolHandlerOutcome:
+def _memory_list_result(memory: object, scope=None) -> ToolHandlerOutcome:
     try:
-        entries = [_memory_record_payload(record) for record in memory.all()]
-    except Exception as exc:  # noqa: BLE001
-        return _memory_error(f"读取失败: {exc}", "TOOL_EXECUTION_FAILED", not_started=True)
+        entries = [_memory_record_payload(record) for record in memory.all()
+                   if scope is None or recall.long_term_record_matches_scope(record, scope)]
+    except (OSError, ValueError, RuntimeError) as exc:
+        return _formal_read_error(exc)
     return ToolHandlerOutcome(
         "remember",
         True,

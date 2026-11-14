@@ -625,15 +625,25 @@ def _queue_owned_background_message_locked(host, *, actor, target, text, operati
     store = host.conversation_store
     owner = str(host.home_paths.owner_id)
     if actor.owner_id != owner or target.owner_id != owner or store.threads.require(actor.source_thread_id).owner_id != owner:
-        raise PermissionError("OWNER_MISMATCH")
+        from .business_access import BusinessError
+        raise BusinessError("BUSINESS_ACCESS_DENIED", details={
+            "reason": "发送者与目标不属于当前授权用户，消息尚未入队", "retry_same_arguments": False,
+            "next_action": "在原用户会话调用 background_agents.list 选择可见目标，不要复用其它用户的目标编号"})
     identity = background_identity(target)
     if identity is None or identity.identity_state in {"retired", "retiring"}:
-        raise ValueError("AGENT_NOT_AVAILABLE")
+        from .business_access import BusinessError
+        raise BusinessError("AGENT_NOT_AVAILABLE", details={
+            "field": "params.agent_id", "identity_state": identity.identity_state if identity else "missing",
+            "reason": "目标身份不接受新消息，消息尚未入队", "retry_same_arguments": False,
+            "next_action": "调用 background_agents.list 选择可用目标，或保留现有结果继续其它独立工作"})
     key = session_message_dedupe_key(actor.source_thread_id, target.thread_id, operation_key)
     previous = store.guidance.receipt(key)
     config = capability_config_for_agent(host) or CapabilityConfig()
     if previous is None and pair_limit_reached(store, actor.source_thread_id, target.thread_id, int(config.session_pair_hourly_limit or 0)):
-        raise ValueError(SESSION_TASK_RATE_LIMIT)
+        from .business_access import BusinessError
+        raise BusinessError(SESSION_TASK_RATE_LIMIT, details={
+            "reason": "会话对消息配额已达上限，消息尚未入队", "retry_same_arguments": False,
+            "next_action": "等待配额窗口恢复后再发送；不要立即重复调用"})
     store.guidance.append_once({"target_type": "thread", "target_id": target.thread_id, "message": text,
         "sender": actor.source_thread_id, "priority": "normal", "delivery": "next_turn",
         "metadata": {"origin_kind": SESSION_MESSAGE_ORIGIN_KIND, "origin_thread_id": actor.source_thread_id,
@@ -651,15 +661,31 @@ def _queue_owned_background_message_locked(host, *, actor, target, text, operati
 
 
 def authorize_business_child(host, run_id, actor, operation):
-    from ..subagents.authorization_gate import OperationRequest, authorize_direct_child_operation
+    from ..subagents.authorization_gate import (
+        AuthorizationError,
+        OperationRequest,
+        authorize_direct_child_operation,
+    )
+    from .business_access import BusinessError
 
     current = getattr(host, "_current_run_params", None)
     requester = str(getattr(current, "run_id", "") or "")
     if requester:
         host.subagents.runtime_db.parent_execution_ref(owner_id=actor.owner_id, run_id=requester,
                                                        attempt_id=str(current.attempt_id))
-    return authorize_direct_child_operation(host.subagents, OperationRequest(
-        operation, run_id, requester_owner=actor.owner_id, requester_run_id=requester))
+    try:
+        return authorize_direct_child_operation(host.subagents, OperationRequest(
+            operation, run_id, requester_owner=actor.owner_id, requester_run_id=requester))
+    except AuthorizationError as error:
+        raise BusinessError("BUSINESS_ACCESS_DENIED", details={
+            "field": "params.run_id", "reason": "目标执行未通过当前用户或直接下级授权核验，控制操作尚未执行",
+            "retry_same_arguments": False,
+            "next_action": "调用 subagents.list 选择当前执行可管理的直接下级，不要重试无权目标"}) from error
+    except FileNotFoundError as error:
+        raise BusinessError("RESOURCE_NOT_FOUND", details={
+            "field": "params.run_id", "reason": "目标执行不存在，控制操作尚未执行",
+            "retry_same_arguments": False,
+            "next_action": "调用 subagents.list 核对当前执行编号，不要重试已失效的编号"}) from error
 
 
 def control_business_subagent(host, service, action, params, *, actor, idempotency_key):
@@ -671,7 +697,11 @@ def control_business_subagent(host, service, action, params, *, actor, idempoten
     if action == "subagents.messages.send":
         if not task_status_in(task.status, {TaskStatus.PLANNING.value, TaskStatus.PENDING.value,
                                           TaskStatus.RUNNING.value, TaskStatus.BLOCKED.value}):
-            raise ValueError("SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING")
+            from .business_access import BusinessError
+            raise BusinessError("SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING", details={
+                "field": "params.run_id", "reason": "目标执行已不接受指导消息，消息尚未入队",
+                "retry_same_arguments": False,
+                "next_action": "先调用 subagents.get 核实目标执行状态；已有结果可继续汇总"})
         key = service._operation_key(actor, idempotency_key)
         entry = host.conversation_store.guidance.append_once({"target_type": "agent_run", "target_id": task.id,
             "message": params["text"], "sender": actor.source_thread_id, "priority": "normal", "delivery": "next_turn",

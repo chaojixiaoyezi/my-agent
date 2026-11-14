@@ -66,6 +66,7 @@ class BackgroundLaunchRequest:
     io_mode: str = "log"
     activation: PluginActivationRef | None = None
     retain_until_consumed: bool = False
+    exact_read_scope: dict[str, object] | None = None
     # LLM: 监听范围是结构化声明：loopback（默认）只允许本机回环监听，lan 由用户经审批/长期授权放开；enforce=False 时 host 只记
     #   listener_warning 不回收。值在 __post_init__ 规范化，进入 launch spec 与会话记录，host 按真实 socket 表核对。
     listen_scope: str = DEFAULT_LISTEN_SCOPE
@@ -75,6 +76,9 @@ class BackgroundLaunchRequest:
     # 函数用途: 在创建记录前验证寿命、管道、保留策略、监听范围与可信激活引用；任务启动不加载插件存储。
     def __post_init__(self) -> None:
         validate_launch_owner_scopes(self.access_scope, self.execution_scope)
+        if self.exact_read_scope is not None:
+            from .process_scope import validate_exact_process_read_scope
+            object.__setattr__(self, 'exact_read_scope', validate_exact_process_read_scope(self.exact_read_scope))
         object.__setattr__(self, "listen_scope", normalize_listen_scope(self.listen_scope))
         if type(self.listen_scope_enforce) is not bool:
             raise ValueError("managed background listen scope enforcement flag invalid")
@@ -294,6 +298,7 @@ def _reservation(request: BackgroundLaunchRequest, session_id: str) -> dict[str,
         "execution_scope": asdict(request.execution_scope),
         "activation_scope": asdict(request.activation.scope) if request.activation is not None else None,
         "retain_until_consumed": request.retain_until_consumed,
+        "exact_read_scope": request.exact_read_scope,
         "launcher_pid": launcher_pid,
         "launcher_birth_token": birth,
         "pid": 0,

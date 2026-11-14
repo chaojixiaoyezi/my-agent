@@ -40,8 +40,9 @@ def handle_tui_business_command(raw: str, *, agent: object, print_line: Callable
             for row in result['display_rows']:
                 print_line(' | '.join(row))
             print_line('覆盖：' + str(result.get('data', {}).get('coverage', 'unknown')))
-        elif result and result.get('ok') and raw.strip().startswith('/space use '):
-            print_line(f"当前会话空间：{result['data']['space_id']}")
+        elif result and result.get('ok') and (raw.strip().startswith('/space use ') or raw.strip() == '/space clear'):
+            selected = result['data']['space_id']
+            print_line('当前会话空间：默认' if selected is None else f'当前会话空间：{selected}')
         elif result and 'rendered' in result and any(raw.strip().startswith(p) for p in ('/workflow show', '/workflow get')):
             print_line(str(result['rendered']))
         else:

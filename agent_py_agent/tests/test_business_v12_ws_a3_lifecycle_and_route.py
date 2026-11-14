@@ -139,6 +139,14 @@ def test_g1_text_only_closeout_and_reply_linkage(native):  # noqa: F811
     turn_id = "turn-" + task_id
     host.conversation_store.session_tasks.bind_turn(task_id, turn_id=turn_id)
 
+    # fake执行回执不等于规范工作已结束；受管订单须复用宿主TaskLink的客观终态。
+    host.conversation_store.tasks.bind({"thread_id": agent["agent_id"], "task_id": task_id,
+                                        "goal": "compute order A total", "status": "active"})
+    _close_out_session_task_turn(host, req, exec_result, turn_id=turn_id)
+    assert host.conversation_store.session_tasks.require(task_id).status == "accepted"
+    host.conversation_store.tasks.update_status({"thread_id": agent["agent_id"], "task_id": task_id,
+                                                 "status": "completed"})
+
     # 执行收口
     _close_out_session_task_turn(host, req, exec_result, turn_id=turn_id)
 

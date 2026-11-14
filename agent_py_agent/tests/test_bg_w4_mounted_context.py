@@ -299,7 +299,15 @@ def test_invalid_or_unrecorded_lineage_stays_denied(agent, defect):
         assert store.threads.require(task.target_thread_id).metadata['background_agent']['managed_by_thread_id'] == chat.thread_id
     with pytest.raises(HostAPIError) as caught:
         local_business_context(agent, model=True)
-    assert caught.value.code == 'CAPABILITY_DENIED' and caught.value.__cause__ is None
+    assert caught.value.code == 'CAPABILITY_DENIED'
+    if defect in {'missing-parent', 'unreadable-parent'}:
+        expected_type = FileNotFoundError if defect == 'missing-parent' else ValueError
+        assert isinstance(caught.value.__cause__, expected_type)
+        assert 'BUSINESS_ACTOR_SOURCE_UNREADABLE' in caught.value.message
+        assert expected_type.__name__ in caught.value.message and '操作尚未开始' in caught.value.message
+        assert str(store.storage.root) not in caught.value.message
+    else:
+        assert caught.value.__cause__ is None
     outcome, result = _invoke(agent, 'spaces.get', {'space_id': sid})
     assert not outcome.ok and result['error']['code'] == 'CAPABILITY_DENIED'
 

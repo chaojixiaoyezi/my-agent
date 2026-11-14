@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1467,
+  "count": 1512,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -324,6 +324,38 @@
       "description": "产物定位最多返回的候选路径数，防目录过大拖慢检索。"
     },
     {
+      "name": "_CHILD_DELIVERY_MAX_COUNT",
+      "file": "agent_py_agent/agent/agent_core/child_delivery_artifacts.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每次收口最多复核64个直属成功子代；超量报告partial，不扫描整个Owner。"
+    },
+    {
+      "name": "_CHILD_DELIVERY_MAX_REF_COUNT",
+      "file": "agent_py_agent/agent/agent_core/child_delivery_artifacts.py",
+      "value": 128,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每子代最多核验128个完成时refs；截断保留partial，不把未核验项当空。"
+    },
+    {
+      "name": "_CHILD_REGISTRY_MAX_BYTES",
+      "file": "agent_py_agent/agent/agent_core/child_delivery_artifacts.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单子代最多读取256KiB；所有子代共享4MiB总预算（含超限哨兵），超限只报partial。"
+    },
+    {
+      "name": "_CHILD_REGISTRY_TOTAL_MAX_BYTES",
+      "file": "agent_py_agent/agent/agent_core/child_delivery_artifacts.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "所有直属子代合计的读取上限，计入每本登记簿用于确认超限的哨兵字节。"
+    },
+    {
       "name": "DYNAMIC_TIMEOUT_SAFETY_MARGIN",
       "file": "agent_py_agent/agent/agent_core/dynamic_timeout.py",
       "value": 2.0,
@@ -412,6 +444,22 @@
       "description": "实时摘要中内联文本的最大字符数，超长截断。"
     },
     {
+      "name": "_COORDINATION_WINDOW_MAX_BYTES",
+      "file": "agent_py_agent/agent/agent_core/orchestration/coordination_progress.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "原单文件读取的总字节上限；case、交接和裁决分别守同一固定小窗。"
+    },
+    {
+      "name": "_COORDINATION_WINDOW_MAX_RECORD_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/coordination_progress.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每次查询只取最近观察事件和对应的少量精确引用，不回退全历史。"
+    },
+    {
       "name": "_ISSUE_COUNT",
       "file": "agent_py_agent/agent/agent_core/orchestration/create_read_scope.py",
       "value": 20,
@@ -452,12 +500,28 @@
       "description": "常量用途: 限制单条 git 命令的运行时长。"
     },
     {
+      "name": "GIT_CONTENT_MAX_COMPONENT_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 24,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "常量用途: 限制一次strict快照的绝对路径分量数，避免深目录验证超过单拍预算。"
+    },
+    {
       "name": "GIT_OBSERVATION_BUDGET_SECONDS",
       "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
       "value": 10,
       "unit": "秒",
       "category": "上限预算",
       "description": "常量用途: 限制一次 git 观察的总时长。"
+    },
+    {
+      "name": "MAX_GIT_CONTENT_PATHS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 32,
+      "unit": "个路径",
+      "category": "上限预算",
+      "description": "内容观察只读本页已脏普通文件；总字节沿用输出上限，不递归或跟随链接。"
     },
     {
       "name": "MAX_GIT_OUTPUT_BYTES",
@@ -1074,6 +1138,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "未闭合工具开始标记的最大个数，防流解析失配。"
+    },
+    {
+      "name": "_DISCOVERY_MAX_RECORDS",
+      "file": "agent_py_agent/agent/artifacts/registry_locator.py",
+      "value": 4,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "每页至多检查的运行记录数，剩余项从持久游标继续。"
+    },
+    {
+      "name": "_REGISTRY_DISCOVERY_MAX_BYTES",
+      "file": "agent_py_agent/agent/artifacts/registry_locator.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "读取单个原登记簿时允许解码的最大字节数。"
     },
     {
       "name": "CACHE_MAX_BYTES",
@@ -2092,6 +2172,14 @@
       "description": "常量用途: 用户确认原AGENTS写预览的有效期（秒）；过期只能重新预览，不沿旧预览签权。"
     },
     {
+      "name": "BUSINESS_CAPABILITY_QUERY_MAX_CHARS",
+      "file": "agent_py_agent/agent/capability/business_capabilities.py",
+      "value": 8000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "能力查询接受的最大字符数，已授权候选沿同一查询截取边界排序。"
+    },
+    {
       "name": "_MAX_ATTACHMENT_COUNT",
       "file": "agent_py_agent/agent/capability/channel_message_tool.py",
       "value": 10,
@@ -2586,6 +2674,22 @@
       "unit": "字符",
       "category": "其它",
       "description": "浏览历史时单条记录的预览字符数。"
+    },
+    {
+      "name": "_MAX_SOURCES",
+      "file": "agent_py_agent/agent/capability/session_search_scope.py",
+      "value": 256,
+      "unit": "个来源",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_SOURCE_BYTES",
+      "file": "agent_py_agent/agent/capability/session_search_scope.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "_DEFAULT_BROWSE_COUNT",
@@ -3100,6 +3204,14 @@
       "description": "文本行缓存最多缓存的条目数；超出按 LRU 逐出，防止大目录扫描撑爆内存。"
     },
     {
+      "name": "_MAX_REDACTION_LEVEL_COUNT",
+      "file": "agent_py_agent/agent/common/log_redaction.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "结构遍历最多64层；超过时只遮蔽该子树，防止循环或内嵌JSON耗尽解释器栈。"
+    },
+    {
       "name": "OPAQUE_ID_MAX_LENGTH_CHARS",
       "file": "agent_py_agent/agent/common/opaque_id.py",
       "value": 128,
@@ -3412,6 +3524,22 @@
       "description": "用户需要理解、却又几乎不会调的旋钮。"
     },
     {
+      "name": "_LEASE_SECONDS",
+      "file": "agent_py_agent/agent/conversation/background_approval_views.py",
+      "value": 30,
+      "unit": "秒",
+      "category": "其它",
+      "description": "显式后台会话接收兴趣有效 30 秒；失联、过期或未来时戳不作为审批接收者。"
+    },
+    {
+      "name": "_MAX_VIEW_COUNT",
+      "file": "agent_py_agent/agent/conversation/background_approval_views.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同一个规范后台线程最多同时保留 8 个独立界面席位，防并行窗口兴趣无限增长。"
+    },
+    {
       "name": "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT",
       "file": "agent_py_agent/agent/conversation/background_context.py",
       "value": 20,
@@ -3594,6 +3722,54 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "机器人会话持久状态最多读取的字节数，超限不采用不完整状态。"
+    },
+    {
+      "name": "_RESULT_REGISTRY_MAX_BYTES",
+      "file": "agent_py_agent/agent/conversation/business_observability.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "状态页只核验既有引用；单个登记簿最多读取 256 KiB，超限保留引用并报告部分覆盖。"
+    },
+    {
+      "name": "_RESULT_REGISTRY_MAX_DIAGNOSTICS",
+      "file": "agent_py_agent/agent/conversation/business_observability.py",
+      "value": 8,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_RESULT_REGISTRY_MAX_ROWS",
+      "file": "agent_py_agent/agent/conversation/business_observability.py",
+      "value": 1024,
+      "unit": "行",
+      "category": "上限预算",
+      "description": "解析对象与坏行诊断也限额，不能只限制raw字节后再生成成千上万错误对象。"
+    },
+    {
+      "name": "_RESULT_REGISTRY_TOTAL_MAX_BYTES",
+      "file": "agent_py_agent/agent/conversation/business_observability.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "同一观察请求的所有任务共享 4 MiB（包括超限检测的一个字节），避免大页读放大。"
+    },
+    {
+      "name": "_RESULT_REGISTRY_TOTAL_MAX_DIAGNOSTICS",
+      "file": "agent_py_agent/agent/conversation/business_observability.py",
+      "value": 32,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_RESULT_REGISTRY_TOTAL_MAX_ROWS",
+      "file": "agent_py_agent/agent/conversation/business_observability.py",
+      "value": 16384,
+      "unit": "行",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "SELECTION_RESULT_MAX_BYTES",
@@ -4106,6 +4282,14 @@
       "unit": "条",
       "category": "其它",
       "description": "每个处理名额最多枚举16个目录项，跳过与非UUID名称同样消耗扫描预算。"
+    },
+    {
+      "name": "PENDING_REPLY_PAGE_SIZE",
+      "file": "agent_py_agent/agent/conversation/guidance_reply_obligations.py",
+      "value": 64,
+      "unit": "个",
+      "category": "其它",
+      "description": "每次公开答复最多固定这一页义务，后续输入沿FIFO等待下一次交付。"
     },
     {
       "name": "HAMT_MARK_MAX_NODES",
@@ -4636,6 +4820,22 @@
       "description": "任务关联索引进程内缓存的最大条目数。"
     },
     {
+      "name": "_BINDING_LOOKUP_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/conversation/store_threads.py",
+      "value": 4096,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "精确绑定热读只保存请求过的键；不把整个历史绑定表常驻内存。"
+    },
+    {
+      "name": "_BINDING_LOOKUP_CACHE_MAX_ENTRY_BYTES",
+      "file": "agent_py_agent/agent/conversation/store_threads.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条会话绑定的缓存体积上界，超出时直接读取权威记录。"
+    },
+    {
       "name": "_THREAD_CACHE_MAX_TOTAL_BYTES",
       "file": "agent_py_agent/agent/conversation/store_threads.py",
       "value": 33554432,
@@ -4716,6 +4916,22 @@
       "description": "唤醒信号模型进程内缓存的最大条目数。"
     },
     {
+      "name": "_CONTENT_BYTES",
+      "file": "agent_py_agent/agent/conversation/task_artifact_observation.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "其它",
+      "description": "交互观察一次能读回并校验的最大产物字节数。"
+    },
+    {
+      "name": "_REGISTRY_BYTES",
+      "file": "agent_py_agent/agent/conversation/task_artifact_observation.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "其它",
+      "description": "验证原任务产物登记时读取的最大登记簿字节数。"
+    },
+    {
       "name": "PAGE_SIZE",
       "file": "agent_py_agent/agent/conversation/task_history.py",
       "value": 128,
@@ -4746,6 +4962,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "计划续接 id 最多保留 64 个：限制状态体积。"
+    },
+    {
+      "name": "_MAX_CONTINUATION_COUNT",
+      "file": "agent_py_agent/agent/conversation/technical_continuation.py",
+      "value": 3,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同一未完成任务遇到有进展的技术截断后允许连续唤醒的最大次数。"
     },
     {
       "name": "_CHARS_PER_TOKEN_WINDOW",
@@ -4876,6 +5100,22 @@
       "description": "连续不计数满24小时且至少五次非batch尝试才结案；纯批次失败只隔离执行并提醒。"
     },
     {
+      "name": "_SOURCE_BYTES",
+      "file": "agent_py_agent/agent/conversation/workflow_artifact_observation.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "其它",
+      "description": "一次验证正式工作流产物索引时允许读取的最大源文件字节数。"
+    },
+    {
+      "name": "_WORKFLOW_CONTENT_BYTES",
+      "file": "agent_py_agent/agent/conversation/workflow_artifact_observation.py",
+      "value": 67108864,
+      "unit": "字节",
+      "category": "其它",
+      "description": "与正式RUN_OUT生产上限一致；不改变普通任务产物或上传预算。"
+    },
+    {
       "name": "TOOL_CATALOG_LIMIT_COUNT",
       "file": "agent_py_agent/agent/core.py",
       "value": 80,
@@ -4972,11 +5212,99 @@
       "description": "资源报告轮询间隔 0.1 秒：接近实时又不过度占 CPU。"
     },
     {
+      "name": "BLOCK_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/business_artifact_pages.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "MAX_CONTENT_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/business_artifact_pages.py",
+      "value": 67108864,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "WORKFLOW_DOWNLOAD_CHUNK_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/business_artifact_stream.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "下载校验和发送每次读取的字节数，用于限制单连接缓冲。"
+    },
+    {
+      "name": "WORKFLOW_DOWNLOAD_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/business_artifact_stream.py",
+      "value": 67108864,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个正式工作流产物可以下载的最大字节数。"
+    },
+    {
       "name": "UPLOAD_MAX_BYTES",
       "file": "agent_py_agent/agent/gateway_parts/business_artifacts_http.py",
       "value": 16777216,
       "unit": "字节",
       "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_PAGE",
+      "file": "agent_py_agent/agent/gateway_parts/business_asset_read.py",
+      "value": 65536,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_PROOF_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/business_asset_read.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_PROOF_LIMIT",
+      "file": "agent_py_agent/agent/gateway_parts/business_asset_read.py",
+      "value": 16,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_REGISTRY_READ_BUDGET",
+      "file": "agent_py_agent/agent/gateway_parts/business_asset_read.py",
+      "value": 2097152,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_RECORD_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/business_upload_registry.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_PROGRESS_LIMIT",
+      "file": "agent_py_agent/agent/gateway_parts/business_upload_registry.py",
+      "value": 8,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_STEPS",
+      "file": "agent_py_agent/agent/gateway_parts/business_upload_registry.py",
+      "value": 4,
+      "unit": "",
+      "category": "其它",
       "description": ""
     },
     {
@@ -6370,6 +6698,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "成本账本最多保留的 run 维度记录条数；超出逐出最旧（运行级成本是短期观测）。"
+    },
+    {
+      "name": "_MAX_TRANSPORT_SLOT_COUNT",
+      "file": "agent_py_agent/agent/llm_scale/gateway_transport_admission.py",
+      "value": 4096,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "一个 Gateway 进程树可分配的模型运输槽数量上限。"
+    },
+    {
+      "name": "_ROUND_PROBE_COUNT",
+      "file": "agent_py_agent/agent/llm_scale/gateway_transport_admission.py",
+      "value": 4,
+      "unit": "个",
+      "category": "其它",
+      "description": "每个等待者每轮最多探测的槽数，防止满载时重复扫描所有槽。"
     },
     {
       "name": "_MAX_TENANT_COUNT",
@@ -9089,7 +9433,7 @@
       "value": 1.0,
       "unit": "秒",
       "category": "其它",
-      "description": "托管进程运行满一分钟后的常态观察间隔（秒）：长驻服务的 host 不再每秒4次读记录；停止由清理方直接终止，不依赖此间隔。"
+      "description": "托管进程运行满一分钟后的常态观察间隔（秒）；停止方先给原host有界协作窗口，超时才沿原精确实例清理。"
     },
     {
       "name": "BACKGROUND_START_SETTLE_SECONDS",
@@ -10714,6 +11058,22 @@
       "unit": "天",
       "category": "其它",
       "description": ""
+    },
+    {
+      "name": "_MAX_OPEN_CURSORS",
+      "file": "agent_py_agent/agent/workflows/reference_index.py",
+      "value": 32,
+      "unit": "个游标",
+      "category": "上限预算",
+      "description": "同时保留的工作流引用目录扫描游标上限。"
+    },
+    {
+      "name": "_SCAN_IDLE_SECONDS",
+      "file": "agent_py_agent/agent/workflows/reference_index.py",
+      "value": 60,
+      "unit": "秒",
+      "category": "其它",
+      "description": "超过此空闲秒数的未借出游标可回收。"
     },
     {
       "name": "_MAX_WORK_CONTEXT_BYTES",

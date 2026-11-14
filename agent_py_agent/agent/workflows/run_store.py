@@ -1,4 +1,4 @@
-# LLM: 所有正文以Owner根nofollow读写并共用run.json锁；同线程IO复用已持锁，执行锁不可重复进入，不授予执行权。
+# LLM: Owner根nofollow写入共用run.json锁；只读原子快照不等执行锁，同线程写可重入，执行不可重复进入。
 # 模块用途: 脱敏并原子保存运行进度、冻结定义与步骤快照，支持跨平台互斥及断点恢复。
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from ..common.nofollow_fs import (
     write_text_atomic_beneath,
 )
 from ..concurrency.interrupt import is_interrupted
+from ..plugin_host.errors import HostAPIError
 from .models import (
     WorkflowRunRecord,
     payload,
@@ -194,8 +195,15 @@ def _concurrency_settled(record):
 
 # LLM: RuntimeError是新执行锁合同；同时保留旧引擎调用方捕获ValueError的兼容性。
 # 类用途: 明确说明同一工作流运行已被其它执行者持有。
-class _RunBusy(RuntimeError, ValueError):
-    pass
+class _RunBusy(HostAPIError, RuntimeError):
+    def __init__(self, message, *, reentrant=False):
+        self.reason_code = 'WORKFLOW_EXECUTION_REENTRANT' if reentrant else 'WORKFLOW_EXECUTION_LOCK_HELD'
+        super().__init__('WORKFLOW_RUN_BUSY', 409, 'not_started',
+            message=message + '；本次控制未执行，原运行可能仍在产生副作用。先读取原运行快照；需要中断时用原执行会话的/stop或已绑定取消入口，禁止重开同一运行。')
+        self.details = {'reason_code': self.reason_code, 'control_started': False,
+            'active_execution_may_have_effects': True,
+            'recommended_action': 'wait_for_existing_operation',
+            'recovery_hint': '读取原运行快照；通过原执行会话的/stop或已绑定取消入口中断，等待终态证明后再决定是否恢复，勿用新幂等键重复执行'}
 
 
 # LLM: 未启动与已结清各自需要完整状态证据，queued 标签本身不能代表没有委派责任。
@@ -285,16 +293,16 @@ class WorkflowRunStore:
         return self._folder(workflow_run_id)
 
     # LLM: 已持锁集合限定进程和线程，同线程普通IO可重入；执行准入总是非阻塞并拒绝重入。
-    # 函数用途: 让整次执行与每次账本读改写共用同一把跨平台JSON锁。
+    # 函数用途: 让整次执行与每次账本读改写共用同一把跨平台JSON锁，纯观察不调用此门。
     @contextmanager
-    def _lock(self, workflow_run_id, *, execution=False):
+    def _lock(self, workflow_run_id, *, execution=False, blocking=True):
         folder = self.run_dir(workflow_run_id)
         path = folder / 'run.json'
         key = (os.getpid(), os.path.normcase(str(path)))
         held = getattr(_HELD_LOCKS, 'paths', set())
         if key in held:
             if execution:
-                raise _RunBusy('工作流正在执行，不能重复续跑')
+                raise _RunBusy('工作流正在执行，不能重复续跑', reentrant=True)
             yield
             return
         ensure_private_dir(folder, canonical_root=self.owner_home)
@@ -308,7 +316,7 @@ class WorkflowRunStore:
         primary_error = None
         try:
             try:
-                with locked_json_path(path, blocking=not execution):
+                with locked_json_path(path, blocking=blocking and not execution):
                     _HELD_LOCKS.paths = held | {key}
                     previous_handoff = getattr(_HELD_LOCKS, 'handoff', None)
                     _HELD_LOCKS.handoff = handoff
@@ -331,8 +339,12 @@ class WorkflowRunStore:
     # 函数用途: 从Owner根读取一个工作流运行账本对象。
     def _read(self, workflow_run_id, name, *, concurrent_publication=False):
         self._folder(workflow_run_id)
-        raw = read_bytes_beneath(self.owner_home, ('data', 'workflow_runs', workflow_run_id, name),
-                                 snapshot_retries=2 if concurrent_publication and _supports_dir_fd() else 0)
+        try:
+            raw = read_bytes_beneath(self.owner_home, ('data', 'workflow_runs', workflow_run_id, name),
+                                     snapshot_retries=2 if concurrent_publication and _supports_dir_fd() else 0)
+        except FileNotFoundError:
+            # 缺少整条目录与缺少叶是同一未找到事实；不把宿主内部父目录名暴露成领域错误。
+            raise FileNotFoundError('工作流运行记录不存在') from None
         if raw is None:
             raise FileNotFoundError('工作流运行记录不存在')
         return json.loads(raw.decode('utf-8'))
@@ -685,9 +697,10 @@ class WorkflowRunStore:
             _write_json(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'), data)
 
     def _concurrency_policy(self, workflow_run_id):
-        with self._lock(workflow_run_id):
-            proof = self._read(workflow_run_id, 'run.json').get('concurrency_claim', {})
-            return proof.get('record', {}).get('policy', 'allow')
+        data = self._read(workflow_run_id, 'run.json', concurrent_publication=True)
+        if data['workflow_run_id'] != workflow_run_id:
+            raise ValueError('运行身份与目录不匹配')
+        return data.get('concurrency_claim', {}).get('record', {}).get('policy', 'allow')
 
     # LLM: 兼容任务指定的步骤保存名，不新增另一套存储格式或锁。
     # 函数用途: 通过同一原子保存链写入步骤记录。
@@ -697,19 +710,28 @@ class WorkflowRunStore:
     # LLM: 独立步骤快照优先；只读已登记的步骤，不因目录里多出文件执行新步骤。
     # 函数用途: 加载运行并补齐最后一次原子发表的步骤结果。
     def load_run(self, workflow_run_id):
-        with self._lock(workflow_run_id):
-            data = self._read(workflow_run_id, 'run.json')
+        # 执行锁仍保护唯一执行体；原子发表的只读快照不能排在整段脚本/LLM之后。
+        # 保留旧独立步骤恢复优先级；发现run修订交错时有界重读，最终退回完整run行。
+        for _attempt in range(3):
+            data = self._read(workflow_run_id, 'run.json', concurrent_publication=True)
             if data['workflow_run_id'] != workflow_run_id:
                 raise ValueError('运行身份与目录不匹配')
             for index, step in enumerate(data.get('steps', ())):
                 safe_path(self.root, step['step_id'] + '.json')
-                raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'steps', step['step_id'] + '.json'))
+                raw = read_bytes_beneath(self.owner_home,
+                    ('data', 'workflow_runs', workflow_run_id, 'steps', step['step_id'] + '.json'),
+                    snapshot_retries=2 if _supports_dir_fd() else 0)
                 if raw is not None:
                     snapshot = json.loads(raw)
                     if snapshot['step_id'] != step['step_id']:
                         raise ValueError('步骤身份与目录不匹配')
                     data['steps'][index] = snapshot
-            return _decode_run(data)
+            latest = self._read(workflow_run_id, 'run.json', concurrent_publication=True)
+            if latest['workflow_run_id'] != workflow_run_id:
+                raise ValueError('运行身份与目录不匹配')
+            if latest.get('revision', 0) == data.get('revision', 0):
+                return _decode_run(data)
+        return _decode_run(latest)
 
     # LLM: 只加载run.json登记的步骤，不消费额外叶子，不把磁盘文件名当新的执行指令。
     # 函数用途: 按运行定义顺序返回恢复后的步骤记录。
@@ -833,8 +855,7 @@ class WorkflowRunStore:
                 break
             for name, sort_time in candidates:
                 after = (sort_time, name)
-                with self._lock(name):
-                    record = _decode_run(self._read(name, 'run.json'))
+                record = _decode_run(self._read(name, 'run.json', concurrent_publication=True))
                 if record.workflow_run_id != name:
                     raise ValueError('运行身份与目录不匹配')
                 if name not in seen and (workflow_id is None or record.workflow_id == workflow_id) and (
@@ -849,11 +870,11 @@ class WorkflowRunStore:
         for name in legacy:
             if name in seen:
                 continue
-            with self._lock(name):
-                raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', name, 'run.json'))
-                if raw is None:
-                    continue
-                record = _decode_run(json.loads(raw))
+            raw = read_bytes_beneath(self.owner_home, ('data', 'workflow_runs', name, 'run.json'),
+                snapshot_retries=2 if _supports_dir_fd() else 0)
+            if raw is None:
+                continue
+            record = _decode_run(json.loads(raw))
             if record.workflow_run_id != name:
                 raise ValueError('运行身份与目录不匹配')
             if (workflow_id is None or record.workflow_id == workflow_id) and (status is None or record.status == status):

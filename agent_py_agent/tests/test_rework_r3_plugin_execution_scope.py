@@ -358,7 +358,8 @@ def test_exact_wake_finishes_only_after_durable_task_result(legacy):
     unrelated = legacy.store.wakes.raise_signal({'thread_id': legacy.target.thread_id,
         'reason': 'session_message', 'dedupe_key': 'unrelated-wake'})
     report = run_wake(legacy, signal)
-    scheduler = SimpleNamespace(store=legacy.store, _wake_retry_after={}, _quota_fallback_wakes=set(), scheduler_service=None)
+    scheduler = SimpleNamespace(store=legacy.store, _wake_retry_after={}, _quota_fallback_wakes=set(), scheduler_service=None,
+        runtime=BackgroundMainAgentRuntime(agent=legacy.agent, store=legacy.store))
     assert _complete_wake_report(scheduler, signal, replace(report, wake_handled=False),
         lifecycle_reason='session_task', now=time.time()) is None
     assert legacy.store.wakes.pending_one(signal.wake_signal_id) is not None

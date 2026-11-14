@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import time
 from collections.abc import Callable
 from copy import deepcopy
@@ -22,6 +23,7 @@ from ..common.cancellation import CancellationToken
 from ..common.log_redaction import redact_sensitive_value
 from ..contracts.diagnostics import DiagnosticEnvelope
 from ..contracts.error_taxonomy import error_contract
+from ..contracts.idempotency import BusinessEffectIdentity
 from ..io.sqlite_connection import sqlite_error_details
 from ..local_storage import ToolOperationRecord
 from ..plugin_events.decision_ledger import PLUGIN_GATE_DECISION_EVIDENCE_KEY
@@ -127,6 +129,9 @@ class ToolExecutorRequest:
     plugin_gate_reviewer: Callable | None = None
     admin_full_access: bool = False
     pending_input_probe: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
+    business_actor: object | None = field(default=None, kw_only=True, repr=False, compare=False)
+    business_context: object | None = field(default=None, kw_only=True, repr=False, compare=False)
+    business_effect: BusinessEffectIdentity | None = field(default=None, kw_only=True)
 
 
 # LLM: 同一授权裁决、输入来源和计时沿执行和前置失败出口共用；成组传递避免另建授权或多参数接口。
@@ -249,6 +254,8 @@ class ToolExecutor:
                 owner_id=request.operation_owner_id,
                 required_action=request.required_action,
                 require_model_visibility=request.require_model_visibility,
+                business_actor=request.business_actor,
+                business_context=request.business_context,
             )
         )
         from .plugin_gate_policy import tighten_plugin_decision
@@ -453,6 +460,13 @@ def _normalized_call(
     call = replace(request.call, arguments=normalized_arguments)
     if completion.error_code:
         return call, completion.sources, completion.error_code
+    effect = request.business_effect
+    if effect is not None:
+        if (not isinstance(effect, BusinessEffectIdentity)
+                or effect.owner_id != request.operation_owner_id or effect.task_id != _task_id(request)
+                or runtime.runtime_policy.idempotency_policy.scope != 'operation'):
+            return call, completion.sources, 'TOOL_AUTHORITY_CONTEXT_MISSING'
+        return replace(call, operation_id=effect.operation_id, idempotency_key=effect.key), completion.sources, ''
     scope = runtime.runtime_policy.idempotency_policy.scope
     if scope != "business":
         return call, completion.sources, ""
@@ -623,6 +637,11 @@ def _invoke_with_operation_policy(
     if blocked is not None:
         return blocked
     if decision.resolved_effect == "read_only":
+        if request.business_effect is not None:
+            return ToolHandlerOutcome(call.tool_name, False,
+                'business_effect仅用于有原操作账的写工具；只读工具无需业务项幂等，请删除该配置。',
+                error_code='TOOL_INVALID_ARGUMENTS', effect_outcome='not_started',
+                handler_executed=False, failure_stage=ToolFailureStage.VALIDATION.value)
         outcome = invoke()
         if (
             not outcome.ok
@@ -664,11 +683,11 @@ def _invoke_with_operation_policy(
             tool_name=call.tool_name,
             args_hash=call.args_hash,
             idempotency_key=call.idempotency_key,
-            idempotency_scope=runtime.runtime_policy.idempotency_policy.scope,
+            idempotency_scope='business' if request.business_effect is not None else runtime.runtime_policy.idempotency_policy.scope,
             idempotency_namespace=call.tool_name,
             timeout_seconds=runtime.runtime_policy.timeout_policy.seconds,
             invoke=invoke,
-            reconcile=_operation_reconciler(runtime, call),
+            reconcile=None if request.business_effect is not None else _operation_reconciler(runtime, call),
             on_settled=_operation_settlement_notifier(runtime, call),
             resource_scopes=resource_scopes,
             attempt_id=call.attempt_id,
@@ -1107,6 +1126,8 @@ def _canonical_result(
         "action_decision": decision.to_dict(),
         "input_sources": _source_dicts(input_sources),
         "reported_error_code": outcome.reported_error_code,
+        "host_error": dict(outcome.host_error),
+        **({"source_effect": dict(outcome.source_effect)} if outcome.source_effect else {}),
         "handler_details": dict(outcome.result_envelope or {}),
         "plugin_gate_decisions": decision.evidence.get(PLUGIN_GATE_DECISION_EVIDENCE_KEY) or [],
     }
@@ -1274,6 +1295,18 @@ def _decision_message(decision: ActionDecision) -> str:
     message = "Tool execution was blocked before the handler ran: " + ", ".join(
         decision.reason_codes or ("RUNTIME_GATE_DENIED",)
     )
+    if decision.evidence.get('business_scope_checked') is True:
+        reason = decision.evidence.get('reported_error_code')
+        if isinstance(reason, str) and reason:
+            message += '。具体原因: ' + reason[:128]
+            facts = {key: value[:512] for key in ('package_ref', 'expected_version_ref', 'actual_version_ref',
+                'expected_activation_id', 'actual_activation_id', 'actual_state')
+                if isinstance(value := decision.evidence.get(key), str)}
+            if facts:
+                message += '；' + json.dumps(facts, ensure_ascii=False)
+            next_action = decision.evidence.get('next_action')
+            if isinstance(next_action, str) and next_action:
+                message += '。下一步: ' + next_action[:512]
     boundary_error = str(decision.evidence.get("boundary_error") or "").strip()
     if boundary_error:
         message += f". {boundary_error}"
@@ -1342,15 +1375,91 @@ def _render_validation_issues(raw: object) -> str:
 def _render_validation_issue(item: dict[str, object]) -> str:
     path = str(item.get("path") or "").strip()
     keyword = str(item.get("keyword") or "").strip()
+    details = item.get('details')
+    facts = details if isinstance(details, dict) else {}
+    expected_type = facts.get('expected_type')
+    array_hint = '；请传 JSON 空数组 []' if facts.get('requires_empty_array') is True else ''
     if keyword == "required":
-        return f"{path}: 必填缺失"
+        typed = f'，期望 {expected_type}' if expected_type in ('array', 'object', 'string', 'number', 'integer', 'boolean', 'null') else ''
+        return f"{path}: 必填缺失{typed}{array_hint}"
     if keyword == "additionalProperties":
-        return f"{path}: 未声明字段(该工具不接受额外参数)"
+        return _render_unknown_property_issue(path, item.get("details"))
     if keyword == "type":
-        return f"{path}: 期望 {item.get('expected')}, 实际 {item.get('actual_type') or '?'}"
+        return f"{path}: 期望 {item.get('expected')}, 实际 {item.get('actual_type') or '?'}{array_hint}"
+    if keyword in ('minLength', 'maxLength', 'minItems', 'maxItems', 'minProperties', 'maxProperties'):
+        rendered = _render_length_boundary_issue(path, keyword, item.get('expected'), facts)
+        if rendered:
+            return rendered
+    if keyword in ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'):
+        rendered = _render_numeric_boundary_issue(path, keyword, item.get('expected'), facts)
+        if rendered:
+            return rendered
+    if keyword in ('oneOf', 'anyOf'):
+        if facts.get('multiple_matches') is True:
+            return f'{path}: 同时符合多个 {keyword} 分支，请按 schema 只保留目标分支独有的参数'
+        return f'{path}: 没有符合 {keyword} 的参数组合，请对照工具 schema 选择分支并补齐该分支必填字段'
     if keyword == "exclusiveArguments":
         return _render_exclusive_argument_issue(path, item.get("details"))
     return f"{path}: {keyword} 校验失败"
+
+
+
+def _safe_boundary_number(value: object) -> str | None:
+    """只展示有界、有限的原结构化数；拒绝bool、字符串和伪造的超大整数。"""
+    if type(value) is int and value.bit_length() <= 256:
+        return str(value)
+    if type(value) is float and math.isfinite(value):
+        return str(value)
+    return None
+
+
+def _render_length_boundary_issue(path: str, keyword: str, expected: object, facts: dict) -> str:
+    """字符、数组项、对象字段分开计量；只读validator计数，不读取或裁剪原输入。"""
+    if type(expected) is not int or expected < 0 or expected.bit_length() > 256:
+        return ''
+    kind, unit = {'Length': ('字符串', '个字符'), 'Items': ('数组', '项'),
+                  'Properties': ('对象', '个字段')}[keyword[3:]]
+    relation = '至少' if keyword.startswith('min') else '最多'
+    count = facts.get('actual_length')
+    actual = f'；实际 {count} {unit}' if type(count) is int and count >= 0 and count.bit_length() <= 256 else ''
+    direction = '补齐' if keyword.startswith('min') else '缩减'
+    unit_hint = '字符数不是UTF-8字节数。' if keyword.endswith('Length') else ''
+    return (f'{path}: {keyword} 要求{kind}{relation} {expected} {unit}{actual}。'
+            f'下一步：保留原需求，在原输入上{direction}此字段至该边界。'
+            f'{unit_hint}本次未执行，勿原样重试。')
+
+
+def _render_numeric_boundary_issue(path: str, keyword: str, expected: object, facts: dict) -> str:
+    """没有结构化实际值就只展示边界，不从异常文字或原输入猜测数值。"""
+    limit = _safe_boundary_number(expected)
+    if limit is None:
+        return ''
+    relations = {'minimum': '>=', 'maximum': '<=', 'exclusiveMinimum': '>', 'exclusiveMaximum': '<'}
+    requirement = f'数值必须是 {limit} 的整数倍' if keyword == 'multipleOf' else f'数值必须 {relations[keyword]} {limit}'
+    actual = _safe_boundary_number(facts.get('actual_number'))
+    suffix = f'；实际数值 {actual}' if actual is not None else ''
+    return (f'{path}: {keyword} 要求{requirement}{suffix}。'
+            '下一步：在原输入上按该数值关系修正此字段，仍传JSON数字。本次未执行，勿原样重试。')
+
+
+def _render_unknown_property_issue(path, raw):
+    """只消费校验器产生的路径、类型和有界允许字段，不回显原参数。"""
+    message = f"{path}: 未声明字段(该工具不接受额外参数)"
+    if not isinstance(raw, dict):
+        return message
+    names = raw.get('allowed_fields')
+    if isinstance(names, list):
+        names = [name[:128] for name in names[:16] if isinstance(name, str)]
+        if names:
+            message += '；当前层允许字段: ' + ', '.join(names)
+    examples = {'boolean': 'true', 'integer': '0', 'number': '0', 'string': '"示例"',
+                'object': '{}', 'array': '[]', 'null': 'null'}
+    target, expected = raw.get('suggested_path'), raw.get('expected_type')
+    if isinstance(target, str) and isinstance(expected, str) and expected in examples:
+        message += f'；请移至 {target[:512]}，类型 {expected}，示例值 {examples[expected]}'
+    else:
+        message += '；删除额外字段，按工具声明的嵌套结构重新调用；无法确定正确层级时先核对工具参数'
+    return message
 
 
 # LLM: 独立渲染一条互斥问题可让主循环保持两层以内；输出只消费安全提取器认可的字段名。

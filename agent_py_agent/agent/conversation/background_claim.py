@@ -22,7 +22,11 @@ from ..common.request_execution_ports import (
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..concurrency.interrupt import is_interrupted, register_interruptible
 from ..settings.thread_model_selection import is_model_configuration_unavailable
-from .background_execution import BackgroundCapacityDeferred, BackgroundCompactSliceYield
+from .background_execution import (
+    BackgroundCapacityDeferred,
+    BackgroundCompactPreflightDeferred,
+    BackgroundCompactSliceYield,
+)
 from .claim_execution_binding import ClaimExecutionBinding, bind_claim_execution
 from .compact_guard import is_provider_quota_failure
 from .control_commands import (
@@ -275,6 +279,10 @@ def run_with_heartbeat(
             # 本片让出不消费原 wake/observation/policy，下片沿 canonical checkpoint 继续。
             attempt_status = WAKE_CLAIM_YIELDED
             return None
+        except BackgroundCompactPreflightDeferred:
+            # 收回本片执行权，保留原唤醒。异常交给原有界失败账和车道退避，策略本身没有执行。
+            attempt_status = WAKE_CLAIM_YIELDED
+            raise
         except BackgroundCapacityDeferred:
             attempt_status, admission = WAKE_CLAIM_NOT_EXECUTED, "im_subagent_capacity"
             return None

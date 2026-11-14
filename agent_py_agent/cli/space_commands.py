@@ -155,6 +155,7 @@ _VERB_MAP = {
         'show': 'spaces.get',
         'get': 'spaces.get',
         'use': 'sessions.space.set',
+        'clear': 'sessions.space.set',
         'packages': 'spaces.packages.list',
         'rename': 'spaces.update',
         'archive': 'spaces.archive',
@@ -197,9 +198,14 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
     if head == '/space' and verb_lower == 'use' and not arguments.strip():
         # 缺失目标空间时不发送写入请求。
         raise ValueError('用法：/space use <space_id>')
+    clear_selection = head == '/space' and verb_lower == 'clear'
+    if clear_selection and arguments.strip():
+        raise ValueError('用法：/space clear（不带参数）')
     spec = _action_spec(action)
     options: dict[str, object] = {}
-    if not arguments:
+    if clear_selection:
+        params = {'space_id': None}
+    elif not arguments:
         params = {}
     elif arguments.lstrip().startswith('{'):
         value = json.loads(arguments)
@@ -293,6 +299,18 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
         wf = data.get('workflow', {})
         detail = data.get('detail', {})
         run_refs = data.get('run_refs', [])
+        # 只读最近五笔原运行；状态来自同一 run 的规范读口，不从定义 lifecycle 推断。
+        run_views = []
+        for run_id in run_refs[:5]:
+            observation = session.client.call('workflow_runs.get', {'workflow_run_id': run_id})
+            if observation.get('ok'):
+                run_data = observation.get('data', {})
+                if run_data.get('run', {}).get('workflow_run_id') == run_id:
+                    run_views.append(run_data)
+                    continue
+            run_views.append({'run': {'workflow_run_id': run_id},
+                              'observation_error': observation.get('error') or {'code': 'RUN_OBSERVATION_UNAVAILABLE'}})
+        view_data = {**data, 'run_views': run_views}
         draft_status = 'draft' if not wf.get('enabled', True) else wf.get('lifecycle', 'active')
         result = {
             **result,
@@ -303,8 +321,9 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
                 'steps': detail.get('steps', []),
                 'run_refs': run_refs,
                 'draft_status': draft_status,
+                'run_views': run_views,
             },
-            'rendered': format_workflow_detail(data),
+            'rendered': format_workflow_detail(view_data),
         }
     return result
 

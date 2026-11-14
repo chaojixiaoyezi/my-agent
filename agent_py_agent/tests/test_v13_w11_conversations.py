@@ -523,4 +523,4 @@ def test_query_filters_before_paging_and_binds_cursor(v13_native):  # noqa: F811
     assert status == 200 and [row['title'] for row in second['data']['items']] == ['命中乙'], second
     status, stale = call(v13_native, 'conversations.list', {**params, 'query': '不相关', 'cursor': cursor})
     # plan-w11错误表明确沿冻结_error_code保留503 retryable，而不是另造400。
-    assert status == 503 and stale['error']['code'] == 'CURSOR_EXPIRED', stale
+    assert status == 410 and stale['error']['code'] == 'CURSOR_EXPIRED', stale

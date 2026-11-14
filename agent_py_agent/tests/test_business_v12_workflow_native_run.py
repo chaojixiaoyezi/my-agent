@@ -141,3 +141,109 @@ def test_non_primary_owner_executes_with_its_own_workflow_engine(native):  # noq
         user='workflow-owner', idempotency_key='owner-run-denied-0001')
     assert status == 409 and denied['error']['code'] == 'WORKFLOW_UNASSIGNED', denied
     assert len(WorkflowRunStore(owner_home).list_runs(limit=10)) == 1
+
+
+def test_scope_remove_last_binding_real_http_roundtrip(native):  # noqa: F811 - 原生HTTP fixture
+    from agent_py_agent.agent.assets.workflow_store import WorkflowStore
+    from agent_py_agent.tests.test_business_v12_f4_workflows import definition
+
+    space = ok(native, 'spaces.create', {'name': 'remove-last-wire'},
+               idempotency_key='remove-last-space-00001')['space_id']
+    created = ok(native, 'workflows.create', {'definition': definition('remove-last-wire'),
+        'scope': {'scope_mode': 'spaces', 'space_ids': [space]}}, idempotency_key='remove-last-create-0001')
+    params = {'workflow_ref': 'remove-last-wire', 'scope': {'scope_mode': 'spaces', 'space_ids': []}}
+    stale_status, stale = call(native, 'workflows.scope.set', params,
+        expected_revision=0, idempotency_key='remove-last-stale-00001')
+    assert stale_status == 409 and stale['effect_outcome'] == 'not_started'
+    removed = ok(native, 'workflows.scope.set', params, expected_revision=created['scope_revision'],
+                 idempotency_key='remove-last-command-001')
+    assert removed['scope'] == {'scope_mode': 'unassigned', 'space_ids': []}
+    assert removed['scope_revision'] == created['scope_revision'] + 1
+    replay = ok(native, 'workflows.scope.set', params, expected_revision=created['scope_revision'],
+                idempotency_key='remove-last-command-001')
+    assert replay == removed
+    view = ok(native, 'workflows.scope.get', {'workflow_ref': 'remove-last-wire'})
+    assert view['scope'] == removed['scope'] and view['scope_revision'] == removed['scope_revision']
+    stored = WorkflowStore(native[1].home_paths.owner_home_dir).get_workflow('remove-last-wire')
+    assert stored.descriptor.metadata['business_workflow']['orphan_since'] is not None
+    status, blocked = call(native, 'workflows.run', {'workflow_ref': 'remove-last-wire'},
+                           idempotency_key='remove-last-blocked-run')
+    assert status == 409 and blocked['error']['code'] == 'WORKFLOW_UNASSIGNED'
+    assert blocked['effect_outcome'] == 'not_started'
+    for action, payload in [('workflows.create', {'definition': definition('bad-create'),
+            'scope': params['scope']}), ('workflows.restore', params)]:
+        status, rejected = call(native, action, payload,
+            **({'expected_revision': 0} if action == 'workflows.restore' else {}),
+            idempotency_key='remove-last-invalid-0001')
+        assert status == 400 and rejected['effect_outcome'] == 'not_started'
+
+
+def test_native_step_retry_observation_keeps_exact_step_history_and_bounds(native):  # noqa: F811 - 复用原HTTP fixture
+    """真实HTTP投影读取同一步原账；协议夹具不计作真实模型重试验收。"""
+    import json
+    from datetime import datetime
+
+    _, agent = native
+    _script(agent)
+    ok(native, 'workflows.create', _flow('native-retry-view'), idempotency_key='g5-retry-create-0001')
+    receipt = ok(native, 'workflows.run', {'workflow_ref': 'native-retry-view'}, idempotency_key='g5-retry-run-000001')
+    store = WorkflowRunStore(agent.home_paths.owner_home_dir)
+    record = store.load_run(receipt['workflow_run_id'])
+    step = record.steps[0]
+    step.attempt_count, step.max_attempts = 25, 25
+    step.escalation_result.update(attempt_id='step-attempt-25', retry_history=[{
+        'attempt': index, 'attempt_id': f'step-attempt-{index}',
+        'error_code': 'PATH_NOT_FOUND', 'error_message': 'token=synthetic-do-not-export',
+        'next_delay_seconds': 3.0, 'timestamp': 1700000000.0 + index,
+    } for index in range(1, 25)])
+    store.save_run(record)
+    before = store.load_run(record.workflow_run_id)
+    view = ok(native, 'workflow_runs.get', {'workflow_run_id': record.workflow_run_id})
+    retry = view['steps'][0]['retry_observation']
+    assert retry['attempt_count'] == retry['max_attempts'] == 25
+    assert retry['current_attempt_id'] == 'step-attempt-25'
+    assert retry['coverage'] == 'partial'
+    assert len(retry['history']) == 20
+    assert [row['attempt'] for row in retry['history']] == list(range(5, 25))
+    assert retry['history'][0]['attempt_id'] == 'step-attempt-5'
+    assert datetime.fromisoformat(retry['history'][0]['occurred_at']).timestamp() == 1700000005.0
+    assert all(row['error_code'] == 'PATH_NOT_FOUND' and row['next_delay_seconds'] == 3.0
+               for row in retry['history'])
+    assert 'synthetic-do-not-export' not in json.dumps(view)
+    assert store.load_run(record.workflow_run_id).revision == before.revision
+
+
+def test_native_step_retry_observation_marks_invalid_history_partial(native):  # noqa: F811 - 复用原HTTP fixture
+    _, agent = native
+    _script(agent)
+    ok(native, 'workflows.create', _flow('native-retry-invalid'), idempotency_key='g5-invalid-create-01')
+    receipt = ok(native, 'workflows.run', {'workflow_ref': 'native-retry-invalid'}, idempotency_key='g5-invalid-run-00001')
+    store = WorkflowRunStore(agent.home_paths.owner_home_dir)
+    record = store.load_run(receipt['workflow_run_id'])
+    step = record.steps[0]
+    step.attempt_count, step.max_attempts = 2, 2
+    step.escalation_result.update(attempt_id='exact-current', retry_history=[
+        {'attempt': 1, 'attempt_id': 'older', 'error_code': 'PATH_NOT_FOUND',
+         'next_delay_seconds': 10 ** 400, 'timestamp': 1700000000.0}])
+    store.save_run(record)
+    retry = ok(native, 'workflow_runs.get', {'workflow_run_id': record.workflow_run_id})['steps'][0]['retry_observation']
+    assert retry == {'attempt_count': 2, 'max_attempts': 2, 'current_attempt_id': 'exact-current',
+                     'history': [], 'coverage': 'partial'}
+    record = store.load_run(record.workflow_run_id)
+    record.steps[0].escalation_result.update(attempt_id='', retry_history=[
+        {'attempt': 1, 'attempt_id': 'older', 'error_code': 'PATH_NOT_FOUND',
+         'next_delay_seconds': 3.0, 'timestamp': 1700000000.0}])
+    store.save_run(record)
+    retry = ok(native, 'workflow_runs.get', {'workflow_run_id': record.workflow_run_id})['steps'][0]['retry_observation']
+    assert retry['current_attempt_id'] is None and retry['coverage'] == 'partial'
+    assert retry['history'][0]['attempt_id'] == 'older'
+
+
+
+def test_native_normal_step_does_not_invent_retry_observation(native):  # noqa: F811 - 复用原HTTP fixture
+    _, agent = native
+    _script(agent)
+    ok(native, 'workflows.create', _flow('native-no-retry'), idempotency_key='g5-no-retry-create-1')
+    receipt = ok(native, 'workflows.run', {'workflow_ref': 'native-no-retry'}, idempotency_key='g5-no-retry-run-0001')
+    step = ok(native, 'workflow_runs.get', {'workflow_run_id': receipt['workflow_run_id']})['steps'][0]
+    assert step['status'] == 'succeeded' and 'retry_observation' not in step

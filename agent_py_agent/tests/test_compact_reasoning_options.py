@@ -28,7 +28,7 @@ from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
 )
 @pytest.mark.parametrize(
     "purpose",
-    ["conversation_compact_summary", "conversation_compact_media_digest"],
+    ["conversation_compact_summary", "conversation_compact_media_digest", "workflow_analysis"],
 )
 def test_auxiliary_payload_uses_same_thread_reasoning_partition(
     level, expected_thinking, expected_effort, purpose

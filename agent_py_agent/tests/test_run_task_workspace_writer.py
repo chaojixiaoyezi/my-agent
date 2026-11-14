@@ -830,11 +830,344 @@ def test_delivery_contract_bad_optional_paths_do_not_crash_finalization(bad):
 
     from agent_py_agent.agent.agent_core._finalization_service import _declared_delivery_targets
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
-        _business_delivery_output_dir,
+        _delivery_output_dir,
     )
 
     contract = {'task_workspace': {'output_dir': bad},
                 'artifacts': [{'allowed_output_roots': bad, 'path': bad}]}
-    assert _business_delivery_output_dir(SimpleNamespace(business_context=object()), contract) is None
+    assert _delivery_output_dir(SimpleNamespace(business_context=object()), contract) is None
     assert _declared_delivery_targets({}, contract) == ((), frozenset())
     assert _declared_delivery_targets({}, {'artifacts': bad}) == ((), frozenset())
+
+
+def _foreground_output_case(tmp_path):
+    from types import SimpleNamespace
+
+    owner = tmp_path / "owners/local/main"
+    owner.mkdir(parents=True)
+    link = SimpleNamespace(task_id="request-a", thread_id="thread-a", status="active", created_at=1704067200.0)
+    thread = SimpleNamespace(owner_id="local/main", metadata={}, last_user_request_id="request-a", last_user_message_id="msg-a")
+    store = SimpleNamespace(tasks=SimpleNamespace(link_report=lambda thread_id, task_id: (link, None)),
+                            threads=SimpleNamespace(load=lambda thread_id: thread))
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=owner, owner_id="local/main", root=tmp_path),
+        conversation_store=store, config=SimpleNamespace(workspace_task_path_template="tasks/{date}/{task_slug}"))
+    params = SimpleNamespace(task_attributes={"conversation_task_id":"request-a", "conversation_thread_id":"thread-a"},
+                             request_id="request-a", delivery_contract=None, business_context=None)
+    return agent, params, link, thread
+
+
+def test_foreground_output_uses_original_link_birth_and_preserves_explicit_contract(tmp_path):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _host_delivery_contract,
+    )
+
+    agent, params, link, thread = _foreground_output_case(tmp_path)
+    result = _host_delivery_contract(agent, params)
+    output = agent.home_paths.owner_home_dir / "tasks/2024-01-01/request-a/output"
+    assert result["task_workspace"]["output_dir"] == str(output)
+    assert output.is_dir()
+    assert _host_delivery_contract(agent, params) == result
+    params.delivery_contract = {"task_workspace":{"output_dir":"/explicit/project/output"}}
+    assert _host_delivery_contract(agent, params) == params.delivery_contract
+
+
+@pytest.mark.parametrize("mismatch", ["owner", "request", "terminal", "background", "missing_birth"])
+def test_foreground_output_rejects_unbound_identity_without_creation(tmp_path, mismatch):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _host_delivery_contract,
+    )
+
+    agent, params, link, thread = _foreground_output_case(tmp_path)
+    if mismatch == "owner":
+        thread.owner_id = "local/other"
+    if mismatch == "request":
+        thread.last_user_request_id = "other"
+    if mismatch == "terminal":
+        link.status = "completed"
+    if mismatch == "background":
+        thread.metadata = {"background_agent": True}
+    if mismatch == "missing_birth":
+        link.created_at = 0
+    assert _host_delivery_contract(agent, params) is None
+    assert not (agent.home_paths.owner_home_dir / "tasks").exists()
+
+
+def test_foreground_output_rejects_control_template_and_child_link(tmp_path):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _host_delivery_contract,
+    )
+
+    agent, params, link, thread = _foreground_output_case(tmp_path)
+    agent.config.workspace_task_path_template = "runs/{date}/{task_slug}"
+    with pytest.raises(ValueError):
+        _host_delivery_contract(agent, params)
+    assert not (agent.home_paths.owner_home_dir / "runs").exists()
+    agent.config.workspace_task_path_template = "tasks/{date}/{task_slug}"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (agent.home_paths.owner_home_dir / "tasks").symlink_to(outside, target_is_directory=True)
+    with pytest.raises((ValueError, OSError)):
+        _host_delivery_contract(agent, params)
+    assert not list(outside.iterdir())
+
+
+def test_task_promotion_publishes_same_delivery_contract_to_loop(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+    from agent_py_agent.agent.conversation import task_promotion
+
+    contract = {"task_workspace":{"output_dir":"/owner/tasks/task-a/output"}}
+    agent = SimpleNamespace(_current_run_params=SimpleNamespace(task_attributes={"conversation_task_id":"task-a"}, delivery_contract=contract))
+    projection = ToolLoopExecuteParams(user_prompt="做个文件", memories=[], runtime_injections=[], prompt_files=[],
+        tool_catalog_section="", tool_recommendations_section="", tool_context=[], effective_on_chunk=None,
+        allowed_tools=None, write_boundary=None, task_attributes={}, request_id="req", run_id="req", task_id="req",
+        one_shot_tool_calls=set(), executed_tools=[], archive_tool_calls=[])
+    monkeypatch.setattr(task_promotion, "promote_current_conversation_task", lambda agent: object())
+    task_promotion.promote_conversation_task_for_run(agent, projection)
+    assert projection.delivery_contract is contract
+    assert projection.task_attributes == agent._current_run_params.task_attributes
+
+
+def test_child_uses_same_parent_task_output_without_changing_cwd(tmp_path):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _host_delivery_contract,
+    )
+
+    agent, params, link, thread = _foreground_output_case(tmp_path)
+    parent = _host_delivery_contract(agent, params)
+    agent._current_subagent_run_id = "child-run"
+    params.context_scope = "task_local"
+    params.request_id = "child-attempt"
+    params.task_attributes["conversation_execution_cwd"] = str(tmp_path / "explicit-project")
+    child = _host_delivery_contract(agent, params)
+    assert child == parent
+    assert params.task_attributes["conversation_execution_cwd"] == str(tmp_path / "explicit-project")
+
+
+def test_foreground_materialization_freezes_host_output_in_manifest_and_params(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        materialize_promoted_task_workspace,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+
+    agent, values, link, thread = _foreground_output_case(tmp_path)
+    agent.root = agent.home_paths.owner_home_dir
+    agent.tools = SimpleNamespace(workspace_root=tmp_path)
+    params = RunParams(request_id="request-a", run_id="request-a", task_id="request-a",
+        source="gateway", task_attributes=values.task_attributes)
+    root = materialize_promoted_task_workspace(agent, params, "制作文件")
+    manifest = json.loads((root / "work/run_workspace.json").read_text())
+    expected = str(agent.root / "tasks/2024-01-01/request-a/output")
+    assert params.delivery_contract["task_workspace"]["output_dir"] == expected
+    assert manifest["delivery_contract"]["task_workspace"]["output_dir"] == expected
+    assert params.task_attributes["run_workspace"]["task_root"] == str(root)
+    assert params.task_attributes["run_workspace"]["output_dir"] == expected
+    assert agent.tools.workspace_root == tmp_path
+
+
+def _ordinary_session_output_case(tmp_path):
+    from types import SimpleNamespace
+
+    owner = tmp_path / 'owners/local/main'
+    owner.mkdir(parents=True)
+    task = SimpleNamespace(task_id='stask-a', sender_thread_id='sender', target_thread_id='executor',
+        created_at=1704067200.0, status='accepted', metadata={}, conversation_request_id='stask-a')
+    threads = {'sender': SimpleNamespace(owner_id='local/main'),
+               'executor': SimpleNamespace(owner_id='local/main')}
+    store = SimpleNamespace(session_tasks=SimpleNamespace(load=lambda key: task if key == task.task_id else None),
+        threads=SimpleNamespace(load=threads.get), tasks=SimpleNamespace(link_report=lambda *args: (None, None)))
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=owner, owner_id='local/main'),
+        config=SimpleNamespace(workspace_task_path_template='tasks/{date}/{task_slug}'), conversation_store=store)
+    params = SimpleNamespace(source='background_main_agent', run_id='stask-a', task_id='stask-a', request_id='stask-a',
+        business_context=None, delivery_contract=None, task_attributes={
+            'conversation_session_task_id': 'stask-a', 'conversation_task_id': 'stask-a',
+            'conversation_thread_id': 'executor', 'conversation_execution_cwd': str(tmp_path / 'explicit-project')})
+    return agent, params, task, threads
+
+
+def test_ordinary_session_uses_original_birth_and_narrow_output_without_changing_cwd(tmp_path):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _host_delivery_contract
+
+    agent, params, task, threads = _ordinary_session_output_case(tmp_path)
+    expected = str(agent.home_paths.owner_home_dir / 'tasks/2024-01-01/stask-a/output')
+    assert _host_delivery_contract(agent, params)['task_workspace']['output_dir'] == expected
+    assert params.task_attributes['conversation_execution_cwd'] == str(tmp_path / 'explicit-project')
+    assert not (agent.home_paths.owner_home_dir / 'tasks').exists()
+    params.task_attributes.pop('conversation_task_id')
+    assert _host_delivery_contract(agent, params)['task_workspace']['output_dir'] == expected
+    params.delivery_contract = {'task_workspace': {'output_dir': str(tmp_path / 'explicit-output')}}
+    assert _host_delivery_contract(agent, params) == params.delivery_contract
+
+
+@pytest.mark.parametrize('mismatch', ['owner', 'sender_owner', 'target', 'run', 'task', 'request', 'attribute', 'cancelled', 'bound_request'])
+def test_ordinary_session_output_rejects_wrong_owner_target_or_exact_executor(tmp_path, mismatch):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _host_delivery_contract
+
+    agent, params, task, threads = _ordinary_session_output_case(tmp_path)
+    if mismatch == 'owner':
+        threads['executor'].owner_id = 'local/other'
+    elif mismatch == 'sender_owner':
+        threads['sender'].owner_id = 'local/other'
+    elif mismatch == 'target':
+        params.task_attributes['conversation_thread_id'] = 'sender'
+    elif mismatch in {'run', 'task', 'request'}:
+        setattr(params, mismatch + '_id', 'stask-other')
+    elif mismatch == 'attribute':
+        params.task_attributes['conversation_task_id'] = 'stask-other'
+    elif mismatch == 'cancelled':
+        task.status = 'cancelled'
+    else:
+        task.conversation_request_id = 'other-request'
+    with pytest.raises(PermissionError, match='SESSION_TASK_WORKSPACE_IDENTITY_MISMATCH'):
+        _host_delivery_contract(agent, params)
+    assert not (agent.home_paths.owner_home_dir / 'tasks').exists()
+
+
+@pytest.mark.parametrize('mismatch', [None, 'root_request', 'root', 'thread', 'attempt', 'terminal', 'transcript', 'origin_request'])
+def test_ordinary_session_child_reuses_only_canonical_parent_output(tmp_path, mismatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _host_delivery_contract
+
+    agent, params, task, threads = _ordinary_session_output_case(tmp_path)
+    params.source, params.context_scope = 'subagent', 'task_local'
+    params.run_id, params.request_id, params.attempt_id = 'child-a', 'attempt-a', 'attempt-a'
+    params.task_attributes.pop('conversation_session_task_id')
+    params.task_attributes['conversation_request_id'] = params.request_id
+    record = SimpleNamespace(id='child-a', root_id=task.task_id, status='RUNNING', runner_active_attempt_id='attempt-a',
+        attributes={'conversation_request_id': task.task_id, 'conversation_task_id': task.task_id,
+                    'conversation_thread_id': task.target_thread_id})
+    agent._current_subagent_run_id = record.id
+    agent.subagents = SimpleNamespace(load=lambda run_id: record if run_id == record.id else None)
+    def require_authority(request):
+        if request.attempt_id != 'attempt-a' or record.status == 'CANCELLED':
+            raise PermissionError('EXECUTION_AUTHORITY_UNAVAILABLE')
+    agent.tools = SimpleNamespace(operation_store=SimpleNamespace(require_authority=require_authority))
+    if mismatch == 'root_request':
+        params.task_attributes['conversation_request_id'] = task.task_id
+    elif mismatch == 'root':
+        record.root_id = 'stask-other'
+    elif mismatch == 'thread':
+        record.attributes['conversation_thread_id'] = 'other-thread'
+    elif mismatch == 'attempt':
+        params.attempt_id = 'old-attempt'
+    elif mismatch == 'terminal':
+        record.status = 'CANCELLED'
+    elif mismatch == 'transcript':
+        params.task_attributes['conversation_request_id'] = 'other-attempt'
+    elif mismatch == 'origin_request':
+        record.attributes['conversation_request_id'] = 'other-task'
+    if mismatch not in {None, 'root_request'}:
+        with pytest.raises(PermissionError):
+            _host_delivery_contract(agent, params)
+    else:
+        result = _host_delivery_contract(agent, params)
+        assert result['task_workspace']['output_dir'] == str(agent.home_paths.owner_home_dir / 'tasks/2024-01-01/stask-a/output')
+    assert not (agent.home_paths.owner_home_dir / 'tasks').exists()
+
+
+@pytest.mark.parametrize('bound_before_context', [False, True])
+def test_ordinary_session_output_contract_materializes_and_inherits_exact_root(tmp_path, bound_before_context):
+    from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
+        delegated_product_write_roots,
+    )
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        attach_run_task_workspace_context,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home')), tmp_path/'project')
+    sender = agent.conversation_store.threads.create(owner_id=agent.home_paths.owner_id, canonical_user_id='local-agent')
+    target = agent.conversation_store.threads.create(owner_id=agent.home_paths.owner_id, canonical_user_id='local-agent')
+    task = agent.conversation_store.session_tasks.create(SessionTaskDraft(sender.thread_id, target.thread_id, '普通委派'), now=1704067200.0)
+    if bound_before_context:
+        agent.conversation_store.session_tasks.bind_turn(task.task_id, turn_id=task.task_id)
+    owner = agent.home_paths.owner_home_dir
+    attrs = {'conversation_thread_id': target.thread_id, 'conversation_task_id': task.task_id,
+        'conversation_session_task_id': task.task_id, 'conversation_execution_cwd': str(owner),
+        'conversation_runtime_workspace_roots': [str(owner)], 'conversation_execution_workspace_explicit': True}
+    if not bound_before_context:
+        # 原首次wake尚未晋升ThreadTaskLink，只携带原SessionTask ID；不替宿主补字段。
+        attrs.pop('conversation_task_id')
+    params = RunParams(source='background_main_agent', run_id=task.task_id, task_id=task.task_id,
+        request_id=task.task_id, task_attributes=attrs)
+    attached = attach_run_task_workspace_context(agent, params, '制作文件')
+    output = owner / 'tasks/2024-01-01' / task.task_id / 'output'
+    assert attached.delivery_contract['task_workspace']['output_dir'] == str(output)
+    from agent_py_agent.agent.agent_core._finalization_service import _declared_delivery_targets
+    if bound_before_context:
+        assert attached.task_attributes['run_workspace']['output_dir'] == str(output)
+        # 工作晋升后无工具表达阶段也保留同一个不可执行的宿主声明。
+        roots, exact = _declared_delivery_targets(attached.task_attributes, None)
+        assert roots == (output,) and not exact
+    else:
+        assert 'run_workspace' not in attached.task_attributes  # 原预绑定阶段仍不提前物化内部运行目录。
+    assert attached.task_attributes['conversation_execution_cwd'] == str(owner)
+    assert output.is_dir()
+    agent._current_run_params = attached
+    roots = delegated_product_write_roots(agent)
+    assert str(output) in roots and str(owner/'tasks') not in roots
+    assert agent.conversation_store.session_tasks.load(task.task_id).status == ('accepted' if bound_before_context else 'queued')
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+        write_boundary_with_runtime_ledger,
+    )
+    from agent_py_agent.tests.test_tool_gateway_contract import _execute, _registry
+
+    registry = _registry(owner)
+    registry.owner_scope_root = str(owner)
+    agent.tools = registry
+    child = RunParams(source='subagent_run_model_turn', context_scope='task_local', task_id=task.task_id,
+        task_attributes=dict(attached.task_attributes), write_boundary={'allowed_write_roots': list(roots)})
+    boundary = write_boundary_with_runtime_ledger(agent, child)
+    own = _execute(registry, 'write_file', {'path': str(output/'own.csv'), 'content': 'label,value\nalpha,7\n'}, write_boundary=boundary)
+    assert own.ok, own.output
+    foreign = owner/'tasks/2024-01-01/stask-other/output/no.csv'
+    denied = _execute(registry, 'write_file', {'path': str(foreign), 'content': 'foreign'}, write_boundary=boundary)
+    assert not denied.ok and not foreign.exists()
+
+
+def test_session_child_output_uses_real_execution_fence_not_lagging_runner_projection(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _host_delivery_contract
+    from agent_py_agent.agent.runtime_db.managed_operation_store import (
+        AuthorityContextMissing,
+        ManagedOperationStore,
+    )
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    agent, params, task, threads = _ordinary_session_output_case(tmp_path)
+    repo = RuntimeRepository(tmp_path / 'runtime.db')
+    native = repo.record_run_creation(owner_id='local/main', conversation_task_id=task.task_id,
+        thread_id=task.target_thread_id, run_id='child-a', role='assistant')
+    params.source, params.context_scope = 'subagent_run_model_turn', 'task_local'
+    params.run_id, params.request_id, params.attempt_id = 'child-a', native['attempt_id'], native['attempt_id']
+    params.task_attributes.pop('conversation_session_task_id')
+    params.task_attributes['conversation_request_id'] = params.request_id
+    record = SimpleNamespace(id='child-a', root_id=task.task_id, status='PENDING', runner_active_attempt_id='',
+        attributes={'conversation_request_id': task.task_id, 'conversation_task_id': task.task_id,
+                    'conversation_thread_id': task.target_thread_id})
+    agent._current_subagent_run_id = record.id
+    agent.subagents = SimpleNamespace(load=lambda run_id: record if run_id == record.id else None)
+    agent.tools = SimpleNamespace(operation_store=ManagedOperationStore(repo))
+    expected = _host_delivery_contract(agent, params)
+    assert expected['task_workspace']['output_dir'].endswith('/tasks/2024-01-01/stask-a/output')
+    params.attempt_id = 'other-child-attempt'
+    params.request_id = params.attempt_id
+    params.task_attributes['conversation_request_id'] = params.attempt_id
+    with pytest.raises(AuthorityContextMissing):
+        _host_delivery_contract(agent, params)
+    params.attempt_id = native['attempt_id']
+    params.request_id = params.attempt_id
+    params.task_attributes['conversation_request_id'] = params.attempt_id
+    assert repo.settle_agent_attempt(agent_run_id=native['agent_run_id'], attempt_id=native['attempt_id'])['settled']
+    with pytest.raises(AuthorityContextMissing):
+        _host_delivery_contract(agent, params)
+    assert not (agent.home_paths.owner_home_dir / 'tasks').exists()

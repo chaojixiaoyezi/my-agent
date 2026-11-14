@@ -93,6 +93,7 @@ _THREAD_RECORD_CACHE_TOTAL_BYTES: int = 0
 
 # 精确绑定热读只保存请求过的键；不把整个历史绑定表常驻内存。
 _BINDING_LOOKUP_CACHE_MAX_ENTRIES = 4096
+# 单条会话绑定的缓存体积上界，超出时直接读取权威记录。
 _BINDING_LOOKUP_CACHE_MAX_ENTRY_BYTES = 8192
 _BINDING_LOOKUP_CACHE: OrderedDict[tuple[str, str], tuple[tuple[int, int, int, int], str]] = OrderedDict()
 _BINDING_LOOKUP_CACHE_LOCK = threading.Lock()

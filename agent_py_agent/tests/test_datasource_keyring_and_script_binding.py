@@ -1119,3 +1119,49 @@ def test_wp16_review_alias_representation_conflict_fails_before_write(store, fir
         store.save_datasource({'datasource_id': 'ambiguous', 'kind': 'custom', 'title': '冲突', 'description': str(first)},
                               secret_payload={'pin': first}, credential_values={'pin': second})
     assert not (store.owner_home / 'assets/datasources/ambiguous.json').exists()
+
+
+@pytest.mark.parametrize(('payload', 'field', 'actual'), [
+    ({'kind': 'sqlite', 'title': '缺代号'}, 'spec_payload.datasource_id', 'missing'),
+    ({'datasource_id': 'orders', 'kind': 'sqlite', 'title': '订单', 'extra': 'synthetic-secret'}, 'spec_payload.extra', 'str'),
+    ({'datasource_id': 'orders', 'kind': 'sqlite', 'title': '订单', 'port': True}, 'spec_payload.port', 'bool'),
+])
+def test_datasource_save_spec_rejection_is_before_any_store_write(store, monkeypatch, payload, field, actual):
+    from agent_py_agent.agent.tooling.datasources_tool import DatasourcesTool
+
+    tool = DatasourcesTool(store.owner_home, store=store)
+    monkeypatch.setattr(store, 'save_datasource', lambda *a, **k: pytest.fail('invalid spec reached writer'))
+    result = tool.execute({'action': 'save', 'spec_payload': payload})
+    assert not result.ok and result.error_code == 'TOOL_INVALID_ARGUMENTS'
+    assert result.effect_outcome == 'not_started'
+    data = json.loads(result.output)
+    assert data['field'] == field and data['actual_type'] == actual
+    assert data['next_action'] and data['example']['spec_payload']['datasource_id']
+    assert 'synthetic-secret' not in result.output
+    assert not store.owner_home.exists()
+
+
+def test_datasource_save_open_kind_options_and_inline_credentials_survive_precheck(store):
+    from agent_py_agent.agent.tooling.datasources_tool import DatasourcesTool
+
+    tool = DatasourcesTool(store.owner_home, store=store)
+    result = tool.execute({'action': 'save', 'spec_payload': {'datasource_id': 'open-kind',
+        'kind': 'future-driver', 'title': '开放类型', 'password': 'synthetic-inline-secret',
+        'options': {'future_setting': {'enabled': True}}}})
+    assert result.ok, result.output
+    spec = store.get_datasource_spec('open-kind')
+    assert spec.kind == 'future-driver' and spec.options == {'future_setting': {'enabled': True}}
+    assert store.resolve_secret(spec.credential_ref)['password'] == 'synthetic-inline-secret'
+    assert 'synthetic-inline-secret' not in result.output
+
+
+def test_datasource_write_exception_stays_unknown_and_requires_reconciliation(store, monkeypatch):
+    from agent_py_agent.agent.tooling.datasources_tool import DatasourcesTool
+
+    tool = DatasourcesTool(store.owner_home, store=store)
+    def fail_after_write(*args, **kwargs):
+        raise OSError('synthetic-secret must never be exposed')
+    monkeypatch.setattr(store, 'save_datasource', fail_after_write)
+    result = tool.execute({'action': 'save', 'spec_payload': {'datasource_id': 'orders', 'kind': 'sqlite', 'title': '订单'}})
+    assert not result.ok and result.effect_outcome == 'unknown'
+    assert '禁止原样盲重试' in result.output and 'synthetic-secret' not in result.output

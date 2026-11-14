@@ -240,6 +240,36 @@ def test_debug_generic_modes_do_not_implicitly_enable_formal_execution(tmp_path,
     else:
         assert run.status == 'failed' and not seen and not marker.exists()
         assert run.steps[0].error_code == 'NODE_EXECUTOR_UNAVAILABLE'
+        diagnostic = run.steps[0].escalation_result['execution_support']
+        assert diagnostic['mode'] == mode and diagnostic['step_id'] == run.steps[0].step_id
+        assert diagnostic['formal_executor_available'] is False
+        assert diagnostic['effect_outcome'] == 'not_started'
+        assert diagnostic['formal_step_example']['mode'] == 'tool_call'
+        assert diagnostic['formal_step_example']['condition']['op'] == 'gt'
+        assert diagnostic['debug_example']['allow_side_effects'] is False
+        assert mode in run.steps[0].error_message and 'not_started' in run.steps[0].error_message
+        assert '更换工作流ID' in run.steps[0].error_message
+        assert not run.steps[0].escalation_result.get('effect_started')
+
+
+def test_unavailable_node_hint_formal_condition_example_runs_without_enabling_debug_mode(tmp_path):
+    save_node(tmp_path, 'condition_branch')
+    engine = WorkflowEngine(tmp_path)
+    failed = engine.run_workflow('debug-flow')
+    example = failed.steps[0].escalation_result['execution_support']['formal_step_example']
+    seen = []
+    def execute(**kwargs):
+        seen.append(kwargs['spec']['tool_spec'])
+        kwargs['step'].status = 'succeeded'
+        kwargs['step'].output_snapshot = {'value': 'readonly-result'}
+    formal = WorkflowEngine(tmp_path, tool_step_executor=execute)
+    skipped = formal.run_workflow(definition(example), inputs={'n': 3})
+    assert skipped.status == 'succeeded' and skipped.steps[0].status == 'skipped' and seen == []
+    assert skipped.steps[0].output_snapshot == {} and not skipped.steps[0].escalation_result.get('effect_started')
+    normal = formal.run_workflow(definition(example), inputs={'n': 4})
+    assert normal.status == 'succeeded' and normal.steps[0].output_snapshot == {'value': 'readonly-result'}
+    assert seen == [{'tool_name': 'list_agents', 'arguments': {}}]
+    assert formal.run_workflow('debug-flow').steps[0].error_code == 'NODE_EXECUTOR_UNAVAILABLE'
 
 
 # LLM: 前置执行条件和condition节点自身表达式不是一个缓存，不能用True前置条件掩盖False或坏表达式。

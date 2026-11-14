@@ -98,7 +98,7 @@ def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolHandler
 # not add a second end-user approval gate; exact dangerous child actions remain
 # subject to their own runtime approval. Resolution persists audit facts and
 # queues the same run for continuation; it never grades output or acts as a push tool.
-# 类用途: 当前代理在自身既有权限内裁决直属子代理的能力申请；grant/deny 都让同一 run 自动续跑。
+# 类用途: 当前代理在自身既有权限内裁决直属子代理的能力申请；只有全部派发条件满足时同一 run 才能续跑。
 class ResolveCapabilityRequestsTool(BaseTool):
     model_spec = build_resolve_capability_requests_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -180,6 +180,7 @@ class ResolveCapabilityRequestsTool(BaseTool):
         task = self.agent.subagents.load(run_id)
         _wake_subagent(self.agent, _ResolveContext(task=task, decision=decision, params=params, reason=reason))
         _start_resolved_child_continuation(self.agent, task, continuation)
+        _describe_unresolved_gaps(task, continuation)
         payload = {
             "ok": bool(resolved) and not errors,
             "run_id": run_id,
@@ -414,6 +415,11 @@ def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolHandlerOutc
             "系统会自动恢复可续跑故障并发生命周期事件；只在用户要求或确认不应继续时 cancel_subagents。"
         ),
     }
+    diagnostics = {}
+    _describe_unresolved_gaps(task, diagnostics)
+    if diagnostics:
+        payload['continuation'] = diagnostics
+        payload['note'] = '没有待裁决申请，但仍有独立 OPEN 能力缺口；重复 grant 或发送 guidance 不会解除缺口。请按 continuation.diagnostics 处置。'
     return ToolHandlerOutcome(
         "resolve_capability_requests", True, json.dumps(payload, ensure_ascii=False, indent=2)
     )
@@ -571,6 +577,35 @@ def _start_resolved_child_continuation(agent: Any, task: Any, continuation: dict
 
     # 原入口复读 canonical，统一检查暂停/取消、活会话、在途启动、RuntimeDB 与受管执行来源。
     continuation["dispatch"] = auto_start_orphan_run(agent, str(task.id))
+
+
+def _describe_unresolved_gaps(task, continuation):
+    """仅补充原派发门已知的 OPEN gap 诊断，不改授权、状态或派发判断。"""
+    from ....common.log_redaction import redact_sensitive_value
+
+    gaps = [item for item in (getattr(task, 'capability_gaps', None) or []) if item.status == 'OPEN']
+    if not gaps:
+        return
+    def names(raw):
+        return [item[:128] for item in raw[:8] if isinstance(item, str)] if isinstance(raw, list) else []
+
+    rows = []
+    for gap in gaps[:8]:
+        scope = gap.requested_scope if isinstance(gap.requested_scope, dict) else {}
+        rows.append({'gap_id': str(gap.id)[:128], 'request_id': str(gap.request_id)[:128],
+            'status': 'OPEN', 'scope': {
+                'capability_type': str(scope.get('capability_type') or gap.gap_type)[:128],
+                'requested_tools': names(scope.get('requested_tools')),
+                'requested_skills': names(scope.get('requested_skills')),
+                'requested_mcp_tools': names(scope.get('requested_mcp_tools'))}})
+    continuation['diagnostics'] = redact_sensitive_value({
+        'reason_code': 'OPEN_CAPABILITY_GAP', 'execution_ready': False,
+        'open_gap_count': len(gaps), 'unresolved_gaps': rows, 'truncated': len(gaps) > len(rows),
+        'retry_same_resolution': False,
+        'side_effects': '裁决结果见 resolved；独立 OPEN gap 未被本次调用解除',
+        'next_action': '先核对对应 GAP 申请与所需能力。当前工具没有关闭 gap 的动作；不要重复 grant、派发或发送 guidance 试图绕过。父级可在既有授权内完成不依赖缺口的部分，并向用户说明缺少的能力；需要改变任务范围或停止时另行明确控制。',
+        'inspection_example': {'tool': 'list_pending_requests', 'arguments': {'include_resolved': True, 'limit': 20}},
+        'inspection_hint': '按 unresolved_gaps.request_id 找到原申请；默认未决列表不包含 GAP。'})
 
 
 # 函数用途: 找出该 run 需要父级裁决的请求（OPEN 或 fail-closed 的非法状态）。

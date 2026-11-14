@@ -527,20 +527,17 @@ def test_reference_sources_dynamic_host_conversation_store(tmp_path: Path):
     host = SimpleNamespace(owner_home=owner_home, conversation_store=None)
     reader = build_workflow_reference_reader(host)
 
-    mock_tasks = SimpleNamespace(
-        list_page=lambda limit=100: {
-            "items": [
-                SimpleNamespace(
+    task = SimpleNamespace(
                     status="running",
                     task_id="task_live_1",
                     dedupe_key="wf:flow_dyn_target:step1",
                     metadata={},
                 )
-            ]
-        }
-    )
+    mock_tasks = SimpleNamespace(list_page=lambda limit=100: {
+        "items": [task], "coverage": "complete", "next_cursor": None, "load_errors": []})
     host.conversation_store = SimpleNamespace(session_tasks=mock_tasks)
-
+    assert not [item for item in reader("flow_dyn_target")["blockers"] if item["kind"] == "session_task"]
+    task.metadata = {"workflow_ref": "flow_dyn_target"}
     result = reader("flow_dyn_target")
     blockers = [b for b in result["blockers"] if b["kind"] == "session_task"]
     assert len(blockers) == 1

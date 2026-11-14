@@ -19,6 +19,8 @@ _BACKGROUND_WORK_TOOLS = (
     *SELF_DISCOVERY_TOOLS,
     *OWNER_TASK_TOOLS,
     "read_artifact",
+    "read_business_asset",
+    "session_search",
     "apply_patch",
     "web_search",
     "web_fetch",
@@ -76,7 +78,9 @@ SESSION_TASK_WAKE_ALLOWED_TOOLS = (
     "list_owner_sessions",
     # 业务派活（tasks.assign/submit）也走 session_task 唤醒：后台代理/总控接单后可只读查看空间与团队、
     #   再分派或追问；tasks.submit 与身份生命周期仍不放入，避免总控自递归与后台改团队编制。
-    "business_spaces_get", "business_spaces_list", "business_background_agents_list", "business_background_agents_get",
+    "business_spaces_get", "business_spaces_list",
+    "business_spaces_capabilities_resolve", "business_spaces_usage_list", "business_spaces_packages_catalog",
+    "business_background_agents_list", "business_background_agents_get",
     "business_tasks_assign", "business_tasks_follow_up", "business_tasks_get", "business_tasks_list", "business_messages_list",
 )
 
@@ -90,7 +94,8 @@ GOAL_BACKGROUND_ALLOWED_TOOLS = (
 #   原有工具顺序不变。补进来的只是候选目录，owner/task 策略、显式配置与退休过滤仍只做减法。
 # 函数用途: 给子代理整合档和 goal 子代理档补齐创建、只读状态、插话、取消和权限答复这组直属管理工具。
 def _with_direct_child_controls(tools: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys((*tools, *DIRECT_CHILD_CONTROL_TOOLS)))
+    # 交接参与不再等同于派生权限；原整合轮的交接工具及其顺序仍须保留。
+    return tuple(dict.fromkeys((*tools, *DIRECT_CHILD_CONTROL_TOOLS, "manage_handoff_board")))
 
 
 # 子代理生命周期唤醒与 goal 子代理阶段都在管理直属下级，必须拿到完整一组管理工具（含只读的 list_agents）。
@@ -220,7 +225,7 @@ def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -
         targets.add("watch_stream")
     if reason in SCHEDULED_WAKE_REASONS:
         targets.add("schedule")
-    controls = {"create_subagents", *DIRECT_CHILD_CONTROL_TOOLS}
+    controls = {"create_subagents", *DIRECT_CHILD_CONTROL_TOOLS, "manage_handoff_board"}
     deferred = heavy | controls | {"get_goal", "update_goal"}
     if request.active_goal:
         targets.update({"get_goal", "update_goal"})

@@ -576,12 +576,10 @@ def _prefix_free_compact(request: AuxiliaryModelCallRequest) -> bool:
             and getattr(request.tool_choice, "mode", "") == "none")
 
 
-# LLM: 读取当前线程真实档位；压缩工具 none 不冒充强制工具的关思考操作。
-# 函数用途: 保留线程原来的推理档位和已关闭思考状态。
+# LLM: 所有辅助调用都读取当前线程/模型配置；压缩工具 none 不冒充强制工具的关思考操作。
+# 函数用途: 保留辅助请求原来的推理档位和已关闭思考状态。
 def _compact_baseline_reasoning(request: AuxiliaryModelCallRequest, backend: object) -> tuple[bool, str]:
     if not bool(getattr(backend, "supports_provider_request_options", False)):
-        return False, ""
-    if not _is_compact_purpose(request.purpose):
         return False, ""
     from ..settings.reasoning_effort import request_reasoning_options
 
@@ -607,7 +605,7 @@ def _compact_downshift_reason(request: AuxiliaryModelCallRequest, backend: objec
     return reason
 
 
-# LLM: Purpose 是宿主给定的结构化路由标签；仅压缩目的共用缓存分区，其它辅助请求保持旧默认。
+# LLM: Purpose 是宿主给定的结构化路由标签；仅压缩目的可应用压缩降档，其它辅助请求保留线程/模型配置。
 # 函数用途: 判断辅助目的是否属于对话压缩，不从提示正文推断行为。
 def _is_compact_purpose(purpose: str) -> bool:
     return str(purpose or "") in {

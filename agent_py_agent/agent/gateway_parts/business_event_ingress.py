@@ -10,13 +10,17 @@ from ..conversation.managed_subscriptions import (
     SourceEvent,
     SourceIdentity,
 )
+from ..conversation.session_task_dispatch import SessionTaskDispatchError
 from .remote_push_service import RemotePushError
 
 
 def _failure(error):
-    denied = error.code in {'BUSINESS_ACCESS_DENIED', 'SOURCE_AUTHORITY_REQUIRED', 'SOURCE_SCOPE_MISMATCH', 'SPACE_SCOPE_MISMATCH'}
+    denied = error.code in {'BUSINESS_ACCESS_DENIED', 'SOURCE_AUTHORITY_REQUIRED', 'SOURCE_SCOPE_MISMATCH', 'SPACE_SCOPE_MISMATCH',
+        'POLICY_AUTHORIZATION_REQUIRED'}
     return RemotePushError(error.code, 403 if denied else 409 if error.code in {
-        'SUBSCRIPTION_NOT_ACTIVE', 'SUBSCRIPTION_REMOVED', 'SOURCE_INTENT_CONFLICT'} else 503)
+        'SUBSCRIPTION_NOT_ACTIVE', 'SUBSCRIPTION_REMOVED', 'SOURCE_INTENT_CONFLICT',
+        'SOURCE_ROUTE_UNBOUND', 'SOURCE_ROUTE_AMBIGUOUS', 'REVISION_CONFLICT'} else 503, details=error.details,
+        effect_outcome=error.effect_outcome)
 
 
 @dataclass(frozen=True)
@@ -31,11 +35,15 @@ class SubscriptionIngress:
         try:
             return self.service.accept_event(self.intent['subscription_id'], self.event, actor=self.actor,
                 source_identity=self.source, frozen_intent=frozen_intent)
+        except SessionTaskDispatchError as error:
+            raise RemotePushError(error.error_code, 409 if error.effect_outcome == 'not_started' else 503,
+                effect_outcome=error.effect_outcome, details={**error.details,
+                    'next_action': '先按原事件/幂等键核对规范任务与接收回执；未知结果禁止换键重派。'}) from error
         except BusinessError as error:
             raise _failure(error) from None
 
 
-def prepare_subscription_push(server, body, authenticated_token):
+def prepare_subscription_push(server, body, authenticated_token, *, stack=None):
     """W13注入两个host-only factory；缺接线明确不可用，绝不回退成普通ask。
 
     business_subscriptions(owner_id) -> 原ManagedSubscriptionService。
@@ -44,12 +52,26 @@ def prepare_subscription_push(server, body, authenticated_token):
     """
     service_factory = getattr(server, 'business_subscriptions', getattr(getattr(server, 'agent', None), 'business_subscriptions', None))
     actor_factory = getattr(server, 'business_subscription_actor', getattr(getattr(server, 'agent', None), 'business_subscription_actor', None))
-    if not callable(service_factory) or not callable(actor_factory):
-        raise RemotePushError('REMOTE_PUSH_SUBSCRIPTIONS_UNAVAILABLE', 503)
-    service = service_factory(body['target_owner'])
+    native_actor = None
+    if service_factory is None and actor_factory is None:
+        from .native_subscription_source import prepare_native_subscription
+
+        if stack is None:
+            raise RemotePushError('REMOTE_PUSH_SUBSCRIPTIONS_UNAVAILABLE', 503)
+        try:
+            service, native_actor = prepare_native_subscription(server, authenticated_token, body, stack)
+        except BusinessError as error:
+            raise _failure(error) from error
+    else:
+        if not callable(service_factory) or not callable(actor_factory):
+            raise RemotePushError('REMOTE_PUSH_SUBSCRIPTIONS_UNAVAILABLE', 503, details={
+                'reason': '显式订阅组合缺少service或actor端口，不覆盖为默认来源权限',
+                'next_action': '由宿主补齐原订阅服务和实时授权端口；没有提交业务任务。'})
+        service = service_factory(body['target_owner'])
     if not isinstance(service, ManagedSubscriptionService) or service.owner_id != body['target_owner']:
         raise RemotePushError('REMOTE_PUSH_TOKEN_SCOPE_DENIED', 403)
-    actor = actor_factory(body['target_owner'], authenticated_token['token_id'], body['source_ref'])
+    actor = native_actor if native_actor is not None else actor_factory(
+        body['target_owner'], authenticated_token['token_id'], body['source_ref'])
     source = SourceIdentity(body['target_owner'], body['source_ref'], authenticated_token['token_id'])
     instruction = body['instruction']
     if body.get('context_payload') or body.get('context_snapshot'):

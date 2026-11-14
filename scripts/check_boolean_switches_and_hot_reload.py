@@ -109,6 +109,8 @@ SEMANTIC_PARAM_ALLOWLIST: dict[tuple[str, str, str], str] = {
         "access bookkeeping ownership moves to the caller; not output-equivalent",
     (_A + "runtime_db/repository.py", "RuntimeRepository.create_attempt", "reuse_pending"):
         "idempotent attempt-reuse semantics",
+    (_A + "gateway_parts/request_history.py", "append_gateway_conversation_message", "defer_index_pending"):
+        "request admission propagates index progress to the queue; delivery repair owns its own retry",
     ("agent_py_agent/cli/chat_parts/tui_runtime.py", "TuiRuntime.begin_turn", "defer_assistant_display"): "UI display ordering",
     ("agent_py_agent/cli/chat_parts/tui_runtime.py", "TuiTurnEventAdapter.__init__", "defer_assistant_display"): "UI display ordering",
     ("agent_py_agent/cli/gateway_worker_runtime.py", "CoordinatorWorkers.close", "defer_native"): "shutdown ordering",

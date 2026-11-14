@@ -52,6 +52,7 @@ def _worker(payload):
                     "action": "list_items",
                     "case_id": payload["case"],
                     "responsible_actor": payload["child"],
+                    "item_id": payload["item"],
                 },
                 context,
             )

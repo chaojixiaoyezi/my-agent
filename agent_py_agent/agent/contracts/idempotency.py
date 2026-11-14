@@ -15,6 +15,29 @@ class IdempotencyDecision:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class BusinessEffectIdentity:
+    """宿主派生的同任务业务项身份；不承载授权，实参另由原账严格比较。"""
+
+    owner_id: str
+    task_id: str
+    scope_key: str
+    item_key: str
+
+    def __post_init__(self):
+        for value in (self.owner_id, self.task_id, self.scope_key, self.item_key):
+            if not isinstance(value, str) or not value.strip() or len(value) > 4096:
+                raise ValueError('业务幂等身份要求非空且有界的owner/task/scope/item')
+
+    @property
+    def key(self) -> str:
+        return idempotency_key('business-item', self.__dict__)
+
+    @property
+    def operation_id(self) -> str:
+        return f'op:business-item:{self.key.rsplit(":", 1)[-1]}'
+
+
 def idempotency_key(operation: str, payload: dict[str, Any]) -> str:
     digest = _stable_digest({"operation": str(operation or ""), "payload": _normalize(payload)})
     return f"idem:{operation}:{digest}"

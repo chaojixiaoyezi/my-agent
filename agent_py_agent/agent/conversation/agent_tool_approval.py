@@ -63,6 +63,7 @@ class AgentToolApprovalHandle:
     scope_valid: Callable[[], bool] = field(repr=False, compare=False)
     decision_input: Callable | None = field(default=None, repr=False, compare=False)
     close_input: Callable | None = field(default=None, repr=False, compare=False)
+    consumer_live: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: 仅原waiter生产不可变的纯清理结果，不能包含writer/批准callback；request同对象另以规范JSON核漂移，消费须核原native出处。
@@ -506,15 +507,15 @@ def _approval_retirement_transport_run_closed(error, payload, agent):
                for repo, agent_run_id, run_id, attempt_id, _status, _ended, _generation, _task_run in error._retirement_origin.run_receipts)
 
 
-# LLM: 主/子共用精确审批入口；后台默认不可交互，前台须由宿主显式启用，群禁止剩余人工审批；缓存不跨 claim/attempt。
-# 类用途: 在已有权限内自动续跑，剩余确认只在交互前台发布原会话审批账。
+# 主/子共用精确审批入口；后台只发现当前 TUI 同根接收租约，显式非交互和群仍拒绝；缓存不跨 claim/attempt。
+# 类用途: 在已有权限内自动续跑，剩余确认只向有接收能力的原会话发布审批账。
 # LLM: sink只负责审批运输，approved_session归原Agent有界缓存；每次凭当前canonical执行/权限生成scope，不能从展示对象保存授权事实。
 # 类用途: 给主/子后台回合提供同一审批入口，重建展示对象时保留准确会话许可。
 class AgentToolApprovalSinkMixin:
     agent: object
     thread_id: str
     task_id: str
-    approval_interactive: bool = False
+    approval_interactive: bool | None = None
 
     # LLM: 插件禁缓存/provider；会话许可复用原Agent缓存，scope仅由当前canonical执行与权限生成；后台/群剩余确认仍拒，typed未知原样传播。
     # 函数用途: 自动续跑已有权限内操作，交互前台才上送精确确认。
@@ -533,7 +534,8 @@ class AgentToolApprovalSinkMixin:
                 return ToolApprovalDecision(request.permission_id, "cancelled").to_dict()
             if time.time() >= approval_deadline(request):
                 return ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT").to_dict()
-            scope = _request_scope(self.agent, self.task_id, self.thread_id, request)
+            run_id = _sink_approval_run_id(self.agent, self.task_id, self.thread_id)
+            scope = _request_scope(self.agent, run_id, self.thread_id, request)
             from ..gateway_parts.approval_session import agent_tool_approval_session_cache
 
             session_key = "" if forced else _approval_session_key(request)
@@ -557,11 +559,14 @@ class AgentToolApprovalSinkMixin:
             if automatic is not None:
                 return automatic.to_dict()
             home = getattr(self.agent, "home_paths", None)
-            if not getattr(self, "approval_interactive", False) or getattr(home, "owner_kind", "") == "group":
+            interactive = getattr(self, "approval_interactive", None)
+            if interactive is None:
+                interactive = _interactive_consumer_available(self.agent, scope)
+            if interactive is not True or getattr(home, "owner_kind", "") == "group":
                 return ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_NONINTERACTIVE").to_dict()
             handle = publish_agent_tool_approval(
                 self.agent,
-                run_id=self.task_id,
+                run_id=run_id,
                 thread_id=self.thread_id,
                 request_value=request,
             )
@@ -584,7 +589,13 @@ class AgentToolApprovalSinkMixin:
             permission_id = str(request_value.get("permission_id") or "").strip()
             if not permission_id:
                 raise
-            decision = ToolApprovalDecision(permission_id, "unavailable")
+            # 只暴露异常类型与结构化阶段；不复制可能含凭据/私人路径的异常正文。
+            scope_failure = isinstance(error, (FileNotFoundError, TypeError, ValueError))
+            decision = ToolApprovalDecision(permission_id, "unavailable",
+                reason_code='APPROVAL_SCOPE_INVALID' if scope_failure else 'APPROVAL_STORAGE_UNAVAILABLE',
+                diagnostic=f'{type(error).__name__}: {error}' if isinstance(error, _ApprovalScopeInvalid) else
+                    f'{type(error).__name__}: approval execution scope/binding unavailable'
+                    if scope_failure else f'{type(error).__name__}: approval ledger read/write failed')
         return decision.to_dict()
 
 
@@ -618,6 +629,7 @@ def publish_agent_tool_approval(
     handle = AgentToolApprovalHandle(
         scope, path, request, created_at,
         partial(tool_approval_scope_is_current, agent, scope),
+        consumer_live=_background_consumer_probe(agent, scope),
     )
     from dataclasses import replace
 
@@ -696,7 +708,9 @@ def _wait_for_agent_tool_approval(
         lease_seen_at = _consumer_seen_at(handle.path.parent, handle.scope.root_task_id)
         from .im_tool_approval import im_approval_wait_live
 
-        lease_fresh = now - lease_seen_at <= max(1.0, float(consumer_lease_seconds)) or im_approval_wait_live(report.payload, now)
+        lease_fresh = (now - lease_seen_at <= max(1.0, float(consumer_lease_seconds))
+                       or (handle.consumer_live is not None and handle.consumer_live())
+                       or im_approval_wait_live(report.payload, now))
         if not lease_fresh and now - handle.created_at >= max(0.0, float(discovery_seconds)):
             transport = report.payload.get("im_control") or {}
             reason = "APPROVAL_TRANSPORT_FAILED" if transport.get("delivery_status") == "failed" else "APPROVAL_UNAVAILABLE"
@@ -1175,10 +1189,40 @@ def _approval_root_for_store(store: object, root_task_id: str) -> Path:
 
 # LLM: 发布和缓存使用同一归属校验；明确 thread/run 与 canonical 状态冲突时拒绝，不能猜测或代换身份。
 # 函数用途: 核对当前 sink 是否有资格为这一次调用发起审批。
+class _ApprovalScopeInvalid(ValueError):
+    """只携带本模块定义的字段/状态诊断，不复制底层路径或业务参数。"""
+
+
+def _sink_approval_run_id(agent: object, task_id: str, thread_id: str) -> str:
+    """无预先任务的唤醒只用当前 core 已发布的同线程身份，不从展示线程猜根。"""
+    if task_id:
+        return task_id
+    from ..agent_core.runtime.loop_models import RunParams
+    from .local_run_control import LocalRunControl
+
+    current = getattr(agent, '_current_run_params', None)
+    if not isinstance(current, RunParams):
+        raise _ApprovalScopeInvalid('current RunParams is missing/untyped for taskless background wake')
+    attrs = current.task_attributes if isinstance(current.task_attributes, dict) else {}
+    control = current.conversation_task_binding_callback
+    if (attrs.get('conversation_thread_id') != thread_id or not isinstance(control, LocalRunControl)
+            or control.request_id != current.request_id or not LocalRunControl.__call__(control, None)):
+        raise _ApprovalScopeInvalid('conversation_thread_id/control/request_id mismatch or control closed')
+    authority = control.runtime_authority()
+    if any(not getattr(current, key, '') or authority.get(key) != getattr(current, key, '')
+           for key in ('run_id', 'task_id', 'attempt_id')):
+        raise _ApprovalScopeInvalid('run_id/task_id/attempt_id does not match published control authority')
+    return current.run_id
+
+
 def _request_scope(agent: object, run_id: str, thread_id: str, request: ToolApprovalRequest) -> ToolApprovalScope:
     scope = tool_approval_scope(agent, run_id)
-    if not scope.active or scope.thread_id != thread_id or request.binding.get("run_id") != scope.run_id:
-        raise ValueError("tool approval execution scope mismatch")
+    if not scope.active:
+        raise _ApprovalScopeInvalid('canonical execution scope active=false; refresh original claim/attempt')
+    if scope.thread_id != thread_id:
+        raise _ApprovalScopeInvalid('sink thread_id does not match canonical execution thread_id')
+    if request.binding.get("run_id") != scope.run_id:
+        raise _ApprovalScopeInvalid('request.binding.run_id does not match canonical execution run_id')
     return scope
 
 
@@ -1308,9 +1352,58 @@ def _decision_from_payload(payload: object) -> ToolApprovalDecision | None:
         return None
 
 
-# LLM: Lease read validates exact schema/root and returns zero for missing,
-# corrupt, or cross-root files; zero can only shorten waiting, never approve.
-# 函数用途: 读取最近一次交互界面领取审批请求的时间。
+# 当前选中任务与原消费者租约共同决定可投递性，不能由展示标记签发许可。
+def _background_consumer_probe(agent, scope):
+    """等待栈局部至多每秒核一次兴趣；决定入口仍每次锁内核原scope，不用缓存授权。"""
+    from .background_team_lifecycle import background_identity
+
+    try:
+        link, error = agent.conversation_store.tasks.load_report(scope.root_task_id)
+        thread = agent.conversation_store.threads.load(link.thread_id) if error is None and link is not None else None
+        if thread is None or background_identity(thread) is None:
+            return None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    checked, live = -1.0, False
+
+    def probe():
+        nonlocal checked, live
+        now = time.monotonic()
+        if now - checked >= 1:
+            live, checked = _interactive_consumer_available(agent, scope), now
+        return live
+    return probe
+
+
+def _interactive_consumer_available(agent: object, scope: ToolApprovalScope) -> bool:
+    """只发现同用户当前 TUI 任务的接收能力；租约不能批准任何工具调用。"""
+    store = getattr(agent, "conversation_store", None)
+    home = getattr(agent, "home_paths", None)
+    if store is None or getattr(home, "owner_kind", "") == "group":
+        return False
+    try:
+        link, error = store.tasks.load_report(scope.root_task_id)
+        if error is not None or link is None or link.status != "active":
+            return False
+        thread, error = store.threads.load_report(link.thread_id)
+        if (error is not None or thread is None
+                or thread.owner_id != str(getattr(home, "owner_id", ""))
+                or thread.workspace_task_id != scope.root_task_id):
+            return False
+        from .background_team_lifecycle import background_identity
+        if background_identity(thread) is not None:
+            from .background_approval_views import receiving
+            return receiving(agent, thread.thread_id)
+        if not any(binding.channel == "chat" for binding in thread.channel_bindings):
+            return False
+        seen_at = _consumer_seen_at(_approval_root(agent, scope.root_task_id), scope.root_task_id)
+        age = time.time() - seen_at
+        return seen_at > 0 and 0 <= age <= AGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+# 缺失、损坏和异根租约只缩短等待，不产生批准。
 def _consumer_seen_at(directory: Path, root_task_id: str) -> float:
     report = read_json_object_report(directory / ".consumer.json", context="subagent.tool_approval.consumer")
     payload = report.payload

@@ -188,13 +188,22 @@ class ManagedSubscriptionService:
         result = self.background_service.submit({'space_id': intent['space_id'], 'instruction': intent['instruction']},
             actor=submit_actor, idempotency_key=intent['idempotency_key'])
         if type(result) is not dict or not result.get('task_id') or result.get('state') != 'accepted':
-            raise BusinessError('TASK_RECEIPT_UNCONFIRMED')
+            raise BusinessError('TASK_RECEIPT_UNCONFIRMED', effect_outcome='unknown', details={
+                'next_action': '原提交口未给可核实受理回执；先按原事件幂等键核对任务，禁止换键重派。'})
         # 仅在原任务耐久受理后推进显示游标；这是同一catalog上的投影，不保存另一份任务状态。
         def advance(state, _request):
             latest = self._require(state, subscription_id, actor, 'subscriptions.get')
             require_revision(row['revision'], latest['revision'])
             latest['cursor'] = event.cursor or intent['idempotency_key']
             return {'subscription': self._view(latest, actor), 'revision': latest['revision']}, True
-        self.catalog._transaction('subscriptions.update', {'subscription_id': subscription_id}, actor=actor,
-            expected_revision=row['revision'], idempotency_key='cursor:' + intent['idempotency_key'] + ':' + str(row['revision']), mutate=advance)
+        try:
+            self.catalog._transaction('subscriptions.update', {'subscription_id': subscription_id}, actor=actor,
+                expected_revision=row['revision'], idempotency_key='cursor:' + intent['idempotency_key'] + ':' + str(row['revision']), mutate=advance)
+        except (BusinessError, OSError, ValueError, TypeError) as error:
+            code = error.code if isinstance(error, BusinessError) else 'SUBSCRIPTION_CURSOR_COMMIT_FAILED'
+            raise BusinessError(code, effect_outcome='committed', details={
+                'exception_type': type(error).__name__, 'side_effect_state': 'task_accepted_cursor_pending',
+                'task_id': result['task_id'], 'request_id': result.get('request_id'),
+                'operation_id': result.get('operation_id'),
+                'next_action': '任务已耐久受理，不得换键重派；仅按原事件/幂等键核对任务并补订阅游标。'}) from error
         return _copy(result)

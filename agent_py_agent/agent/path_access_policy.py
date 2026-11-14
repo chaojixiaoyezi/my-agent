@@ -220,6 +220,7 @@ class PathAccessPolicy:
     agent_home_root: Path | None = None
     host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True)
     workspace_roots: tuple[Path, ...] = field(default=(), kw_only=True)
+    business_aggregate_roots: tuple[Path, ...] = field(default=(), kw_only=True)
     _workspace_warning_emitted: ClassVar[bool] = False
     _workspace_warning_lock: ClassVar = Lock()
 
@@ -281,6 +282,7 @@ class PathAccessPolicy:
         agent_home_root: object = None,
         host_exclusive_roots: Iterable[object] = (),
         workspace_roots: Iterable[object] = (),
+        business_aggregate_roots: Iterable[object] = (),
     ) -> PathAccessPolicy:
         normalized_mode = normalize_path_access_mode(mode)
         roots = tuple(_normalized_root(item) for item in (dangerous_roots or DEFAULT_DANGEROUS_PATH_ROOTS))
@@ -300,7 +302,9 @@ class PathAccessPolicy:
         exclusive = tuple(dict.fromkeys(path for value in host_exclusive_roots if (path := _normalized_root(value)) is not None))
         workspaces = tuple(dict.fromkeys(path for value in workspace_roots if (path := _normalized_root(value)) is not None))
         return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope, agent_home_root=data_root,
-                   host_exclusive_roots=exclusive, workspace_roots=workspaces)
+                   host_exclusive_roots=exclusive, workspace_roots=workspaces,
+                   business_aggregate_roots=tuple(dict.fromkeys(root for item in business_aggregate_roots
+                       if (root := _aggregate_lexical_root(item)) is not None)))
 
     # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；模式放行后再拒宿主凭据
     #   （PATH_HOST_CREDENTIAL_BLOCKED，H3），所以原有拒绝码不变。只读构造时冻结的根，不受另一个会话或子进程环境影响。
@@ -311,6 +315,11 @@ class PathAccessPolicy:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
+        aggregate = next((root for root in self.business_aggregate_roots if _host_source_contains(resolved, root)), None)
+        if aggregate is not None:
+            return PathAccessDecision(False, "PATH_HOST_MANAGED_STORE_BLOCKED",
+                "当前业务范围不能用通用文件入口读取宿主跨项目记忆/会话/业务资产原始聚合账；未读取正文。"
+                "请用 memory_search(query=...)、remember(action=list) 或 session_search(mode=search, query=...) 按当前结构化范围查询；业务资产用 read_business_asset 按当前获准的精确space/project/asset/version读取；勿改裸路径绕范围。普通工程文件仍可按原授权读取。", str(aggregate))
         # H2：宿主托管存储（插件安装库、包库）不随 owner 墙、Full Access 或数据根豁免开放，最先判定。
         store = self._host_managed_store_of(resolved)
         if store is not None:
@@ -436,7 +445,7 @@ class PathAccessPolicy:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             return None
-        return self._host_managed_store_of(resolved)
+        return next((root for root in self.business_aggregate_roots if _host_source_contains(resolved, root)), None) or self._host_managed_store_of(resolved)
 
     # LLM: 管理员身份及regular日志形状由同一helper核验；只豁免H2，H3写门及services整体隐藏不变。
     # 函数用途: 为Full/Auto/Ask管理员开放规范日志只读，其他owner仍由原托管存储门拒绝。
@@ -477,6 +486,7 @@ class PathAccessPolicy:
         policy = external_policy or PathAccessPolicy.from_values(
             mode=self.mode, dangerous_roots=self.dangerous_roots, agent_home_root=self.agent_home_root,
             host_exclusive_roots=self.host_exclusive_roots, workspace_roots=self.workspace_roots,
+            business_aggregate_roots=self.business_aggregate_roots,
         )
         return policy.check(resolved)
 
@@ -1607,3 +1617,30 @@ def _persona_home_write_decision(path: Path, home: Path) -> PathAccessDecision |
                               "人格、persona控制域及已配置AGENTS来源不能用基础文件或命令修改；"
                               "USER请使用 update_persona target=user（无需用户确认），AGENTS请使用 /agents 显式预览确认，"
                               "SOUL请使用 update_persona target=soul 用户确认链。", str(home))
+
+
+def business_aggregate_paths(owner_home: Path) -> tuple[Path, ...]:
+    """仅规范owner宿主聚合布局；不屏蔽data/workspace或工程里的同名memory。"""
+    parts = (("memory",), ("memory.md",), ("memory-hot.md",), ("memory_archive",),
+             ("sessions",), ("conversations",), ("compact",), ("workspace", "runtime"),
+             ("data", "telemetry"), ("logs",), ("audit",),
+             ("artifacts", "business"), ("data", "business"))
+    return (*(owner_home.joinpath(*item) for item in parts),
+            *(owner_home / ("runtime.db" + suffix) for suffix in ("", *SQLITE_SIDECAR_SUFFIXES)))
+
+
+def business_aggregate_paths_from_boundary(boundary: object) -> tuple[Path, ...]:
+    """只接宿主冻结且与原canonical owner一致的标记；模型参数不参与。"""
+    if not isinstance(boundary, dict):
+        return ()
+    owner = _aggregate_lexical_root(boundary.get("canonical_owner_home_root"))
+    selected = _aggregate_lexical_root(boundary.get("business_aggregate_owner_root"))
+    return business_aggregate_paths(owner) if owner is not None and selected == owner else ()
+
+
+def _aggregate_lexical_root(value: object) -> Path | None:
+    """根来自宿主canonical owner的固定布局；不逐工具realpath数十个相同派生地址。"""
+    if not isinstance(value, (str, Path)) or not str(value):
+        return None
+    root = Path(value)
+    return root if root.is_absolute() and ".." not in root.parts else None

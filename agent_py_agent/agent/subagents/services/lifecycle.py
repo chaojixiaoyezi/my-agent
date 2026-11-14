@@ -197,6 +197,9 @@ class SubAgentLifecycleService:
         # plus the grant timestamp; it must not perform network calls or nested canonical saves.
         # 函数用途: 在权威锁内幂等写入一条授权、结清对应申请并合并允许的工具和技能。
         def _grant_reducer(task: SubAgentTask) -> None:
+            # 第一次grant前还能精确证明独立权限；旧混合账不可倒推或用展示manifest补权。
+            if task.base_allowed_tools is None and not task.capability_grants:
+                task.base_allowed_tools = list(task.allowed_tools)
             grant = next(
                 (
                     item

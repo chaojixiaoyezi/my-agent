@@ -215,7 +215,7 @@ class _ToolConfigFields:
     # 同owner在本进程内共享的工具worker额度；0保持原行为，任务属性不能覆盖。
     max_parallel_tool_calls_per_owner: int = 0
     # 原工具等待期间，对本人新输入生成一次不执行工具的临时答复。
-    tool_wait_input_reply_enabled: bool = True
+    tool_wait_input_reply_enabled: bool = field(default=True, metadata={"effect": "immediate"})
     # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
@@ -391,7 +391,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     # 只给普通主会话追加执行中沟通软引导，不额外采样、不改变历史或执行终态。
     assistant_progress_updates_enabled: bool = True
-    technical_cutoff_continuation_enabled: bool = True
+    # 同一任务的技术性截断可在有进展时有界续作，已登记者下次检查时采用最新值。
+    technical_cutoff_continuation_enabled: bool = field(default=True, metadata={"effect": "immediate"})
     workspace_root: str | list[str] = ""
     # 未配置时允许打开 Gateway/TUI 和 /model，但不选厂商、不调用模型；echo 仅供显式离线调试。
     model_backend: str = field(default="", metadata={"host_only": True, "model_projection": True})
@@ -691,6 +692,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_queue_wait_seconds: float = field(default=0.0, metadata={"host_only": True, "model_projection": True})
     # 每进程每HTTP origin的物理请求上限；0关闭，只按可信owner轮转，不跨进程计额。
     provider_max_concurrent_requests: int = 0
+    # 同Gateway进程树全部实际模型运输共享额度；0关闭，不限制CPU/脚本任务。
+    gateway_llm_inflight_limit: int = 0
     # Responses会话WebSocket的空闲存活秒数与进程内空闲连接池容量；任一值为0即关闭复用。
     responses_ws_idle_ttl_seconds: int = 300
     responses_ws_max_idle_connections: int = 32

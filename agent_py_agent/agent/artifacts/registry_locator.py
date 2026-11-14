@@ -21,8 +21,10 @@ from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
 from ..path_access_policy import agent_home_root_for_owner, owner_home_containing
 
 _PARTS = ('data', 'artifacts', '.registry-locations.sqlite3')
-_BUDGET = 2 * 1024 * 1024
-_DISCOVERY_LIMIT = 4
+# 读取单个原登记簿时允许解码的最大字节数。
+_REGISTRY_DISCOVERY_MAX_BYTES = 2 * 1024 * 1024
+# 每页至多检查的运行记录数，剩余项从持久游标继续。
+_DISCOVERY_MAX_RECORDS = 4
 
 
 @contextmanager
@@ -39,6 +41,9 @@ def connection(owner):
                        'run_id TEXT NOT NULL, task_id TEXT NOT NULL, PRIMARY KEY(artifact_id,root))')
             db.execute('CREATE INDEX IF NOT EXISTS refs_task ON refs(task_id,artifact_id,root)')
             db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS discovery_failures (source TEXT NOT NULL, position INTEGER NOT NULL, '
+                       'attempts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,position))')
+            db.execute('CREATE INDEX IF NOT EXISTS discovery_failure_retry ON discovery_failures(source,attempts,position)')
             return db
         except BaseException:
             db.close()
@@ -124,8 +129,8 @@ def _put(db, owner, root, record):
 
 
 def read_object(owner, path):
-    raw = read_bytes_beneath(owner, Path(path).relative_to(owner).parts, max_bytes=_BUDGET + 1)
-    if raw is None or len(raw) > _BUDGET:
+    raw = read_bytes_beneath(owner, Path(path).relative_to(owner).parts, max_bytes=_REGISTRY_DISCOVERY_MAX_BYTES + 1)
+    if raw is None or len(raw) > _REGISTRY_DISCOVERY_MAX_BYTES:
         raise ValueError('ARTIFACT_LOCATOR_SOURCE_UNAVAILABLE')
     value = json.loads(raw)
     if not isinstance(value, dict):
@@ -160,8 +165,8 @@ def discover(owner, store, owner_id):
         if prior is None or prior[0] != generation or after > high_water:
             after, prior_error_count = 0, 0
         rows = source.execute('SELECT rowid,run_id FROM runs WHERE rowid>? ORDER BY rowid LIMIT ?',
-            (after, _DISCOVERY_LIMIT + 1)).fetchall()
-    for _, run_id in rows[:_DISCOVERY_LIMIT]:
+            (after, _DISCOVERY_MAX_RECORDS + 1)).fetchall()
+    for _, run_id in rows[:_DISCOVERY_MAX_RECORDS]:
         try:
             state = read_object(owner, workspace / run_id / 'task.json')
             if state.get('canonical_state_ref'):
@@ -170,10 +175,10 @@ def discover(owner, store, owner_id):
                 raise ValueError('ARTIFACT_LOCATOR_OWNER_RUN_MISMATCH')
             root = Path(state.get('agent_run_workspace_dir') or state.get('task_dir') or '')
             parts = root.relative_to(owner).parts
-            raw = read_bytes_beneath(owner, (*parts, *REGISTRY_RELATIVE_PATH.parts), max_bytes=_BUDGET + 1)
+            raw = read_bytes_beneath(owner, (*parts, *REGISTRY_RELATIVE_PATH.parts), max_bytes=_REGISTRY_DISCOVERY_MAX_BYTES + 1)
             if raw is None:
                 continue
-            if len(raw) > _BUDGET:
+            if len(raw) > _REGISTRY_DISCOVERY_MAX_BYTES:
                 raise ValueError('ARTIFACT_REGISTRY_READ_BUDGET')
             records, bad = latest_records_from_lines(root / REGISTRY_RELATIVE_PATH,
                 raw.decode('utf-8').splitlines(), _record_from_payload)
@@ -187,12 +192,98 @@ def discover(owner, store, owner_id):
             _put(db, owner, root, record)
         current = db.execute("SELECT value FROM meta WHERE key='discovery_after'").fetchone()
         if (current[0] if current else '') == saved:
-            next_after = rows[min(_DISCOVERY_LIMIT, len(rows)) - 1][0] if rows else after
+            next_after = rows[min(_DISCOVERY_MAX_RECORDS, len(rows)) - 1][0] if rows else after
             db.execute("INSERT OR REPLACE INTO meta VALUES ('discovery_after',?)", (str(next_after),))
             db.execute("INSERT OR REPLACE INTO meta VALUES ('discovery_source',?)", (generation,))
             db.execute("INSERT OR REPLACE INTO meta VALUES ('discovery_errors',?)", (str(prior_error_count + len(errors)),))
-    return {'coverage': 'partial' if len(rows) > _DISCOVERY_LIMIT else 'unknown' if prior_error_count + len(errors) else 'complete',
+    return {'coverage': 'partial' if len(rows) > _DISCOVERY_MAX_RECORDS else 'unknown' if prior_error_count + len(errors) else 'complete',
         'after': next_after if 'next_after' in locals() else after, 'source_generation': generation}
+
+
+def discover_main(owner, store, owner_id, runtime=None):
+    """沿宿主主run账每次核四个关联根；缺失或坏关联保留未知，不补造旧登记。"""
+    from .registry import REGISTRY_RELATIVE_PATH, _record_from_payload
+    from .registry_reader import latest_records_from_lines
+
+    if runtime is None:
+        return {'coverage': 'unknown', 'after': 0}
+    owner = Path(owner).absolute()
+    info = runtime.db_path.stat()
+    generation = f'main-v1:{info.st_dev}:{info.st_ino}'
+    with connection(owner) as db:
+        values = dict(db.execute("SELECT key,value FROM meta WHERE key LIKE 'main_discovery_%'"))
+        failed = db.execute('SELECT position FROM discovery_failures WHERE source=? ORDER BY attempts,position LIMIT 1',
+            (generation,)).fetchone()
+    after = int(values.get('main_discovery_after', '0'))
+    budget = _DISCOVERY_MAX_RECORDS - int(failed is not None)
+    select = ('SELECT ar.rowid AS position,ar.run_id,ar.role,ar.parent_agent_run_id,t.owner_id,'
+        't.conversation_task_id,t.thread_id,tr.metadata_json FROM agent_runs ar '
+        'LEFT JOIN task_runs tr ON tr.task_run_id=ar.task_run_id '
+        'LEFT JOIN tasks t ON t.task_id=tr.task_id ')
+    with runtime._runtime_connection() as source:
+        high_water = source.execute('SELECT COALESCE(MAX(rowid),0) FROM agent_runs').fetchone()[0]
+        if values.get('main_discovery_source') != generation or after > high_water:
+            after = 0
+        rows = source.execute(select + 'WHERE ar.rowid>? ORDER BY ar.rowid LIMIT ?',
+            (after, budget + 1)).fetchall()
+        selected = list(rows[:budget])
+        if selected:
+            after = selected[-1]['position']
+        if failed is not None and not any(row['position'] == failed[0] for row in selected):
+            retry = source.execute(select + 'WHERE ar.rowid=?', (failed[0],)).fetchone()
+            if retry is not None:
+                selected.append(retry)
+    failures, resolved = set(), {failed[0]} if failed else set()
+    publications = []
+    for row in selected:
+        resolved.add(row['position'])
+        if row['role'] != 'main':
+            if not row['role'] and not row['parent_agent_run_id']:
+                failures.add(row['position'])  # 旧run缺角色不等于已证非主任务。
+            continue
+        try:
+            if row['owner_id'] != owner_id:
+                raise ValueError('ARTIFACT_MAIN_RUNTIME_OWNER_MISMATCH')
+            meta = json.loads(row['metadata_json'])
+            task_id = meta.get('session_task_ref') or row['conversation_task_id']
+            thread_id, run_id = row['thread_id'], row['run_id']
+            if store.threads.require(thread_id).owner_id != owner_id:
+                raise ValueError('ARTIFACT_MAIN_OWNER_MISMATCH')
+            link, error = store.tasks.link_report(thread_id, task_id)
+            if error or link is None:
+                raise ValueError('ARTIFACT_MAIN_LINK_UNAVAILABLE')
+            root = Path(link.task_path)
+            parts = root.relative_to(owner).parts
+            if not parts or '..' in parts:
+                raise ValueError('ARTIFACT_MAIN_ROOT_INVALID')
+            raw = read_bytes_beneath(owner, (*parts, *REGISTRY_RELATIVE_PATH.parts), max_bytes=_REGISTRY_DISCOVERY_MAX_BYTES + 1)
+            if raw is None:
+                continue
+            if len(raw) > _REGISTRY_DISCOVERY_MAX_BYTES:
+                raise ValueError('ARTIFACT_REGISTRY_READ_BUDGET')
+            records, bad = latest_records_from_lines(root / REGISTRY_RELATIVE_PATH,
+                raw.decode('utf-8').splitlines(), _record_from_payload)
+            if bad:
+                raise ValueError('ARTIFACT_REGISTRY_UNREADABLE')
+            publications.extend((root, record) for record in records.values()
+                if record.task_id == task_id and record.run_id == run_id)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            failures.add(row['position'])
+    with connection(owner) as db:
+        for position in resolved - failures:
+            db.execute('DELETE FROM discovery_failures WHERE source=? AND position=?', (generation, position))
+        for position in failures:
+            db.execute('INSERT INTO discovery_failures(source,position) VALUES (?,?) '
+                'ON CONFLICT(source,position) DO UPDATE SET attempts=attempts+1', (generation, position))
+        unknown = db.execute('SELECT 1 FROM discovery_failures WHERE source=? LIMIT 1', (generation,)).fetchone() is not None
+        for root, record in publications:
+            _put(db, owner, root, record)
+        current = dict(db.execute("SELECT key,value FROM meta WHERE key LIKE 'main_discovery_%'"))
+        if current == values:
+            for key, value in {'after': after, 'source': generation}.items():
+                db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('main_discovery_' + key, str(value)))
+    return {'coverage': 'partial' if len(rows) > budget else 'unknown' if unknown else 'complete',
+        'after': after, 'examined': len(selected)}
 
 
 def lookup(owner, artifact_id):

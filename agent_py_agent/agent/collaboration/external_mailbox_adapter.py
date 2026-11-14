@@ -290,6 +290,19 @@ class ExternalMailboxAdapter:
                         })
                         continue
                     ack_payload = msg.get("recipient_ack") or msg.get("payload") or {}
+                    ack_payload = dict(ack_payload) if isinstance(ack_payload, dict) else {}
+                    if "actor_id" in ack_payload and ack_payload["actor_id"] != layout.actor_id:
+                        errors.append({
+                            "item_id": item_id, "action": action,
+                            "error_code": "MAILBOX_ACTOR_MISMATCH",
+                            "field": "recipient_ack.actor_id",
+                            "error": "recipient_ack.actor_id 必须与当前邮箱 actor_id 完全一致",
+                            "required_actor_id": layout.actor_id,
+                            "effect_outcome": "not_started",
+                            "next_action": "将 recipient_ack.actor_id 改为 required_actor_id，或省略该字段由邮箱绑定；不得代其他主体签收。",
+                        })
+                        continue
+                    ack_payload["actor_id"] = layout.actor_id
                     frozen_ver = str(msg.get("frozen_input_version") or "")
                     ack_id = str(msg.get("ack_id") or msg.get("message_id") or "")
                     handoff_service.record_ack(
@@ -318,6 +331,19 @@ class ExternalMailboxAdapter:
                         ev_tuple = ()
                     sub_id = str(msg.get("submission_id") or msg.get("message_id") or "")
                     sub_payload = msg.get("payload") or {}
+                    sub_payload = dict(sub_payload) if isinstance(sub_payload, dict) else {}
+                    if "actor_id" in sub_payload and sub_payload["actor_id"] != layout.actor_id:
+                        errors.append({
+                            "item_id": item_id, "action": action,
+                            "error_code": "MAILBOX_ACTOR_MISMATCH",
+                            "field": "payload.actor_id",
+                            "error": "payload.actor_id 必须与当前邮箱 actor_id 完全一致",
+                            "required_actor_id": layout.actor_id,
+                            "effect_outcome": "not_started",
+                            "next_action": "将 payload.actor_id 改为 required_actor_id，或省略该字段由邮箱绑定；不得代其他主体提交。",
+                        })
+                        continue
+                    sub_payload["actor_id"] = layout.actor_id
                     handoff_service.submit_handoff(
                         case_id=case_id,
                         item_id=item_id,

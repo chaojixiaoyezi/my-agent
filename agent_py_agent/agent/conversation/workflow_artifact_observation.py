@@ -23,6 +23,7 @@ from .task_artifact_observation import (
     verify_artifact_content,
 )
 
+# 一次验证正式工作流产物索引时允许读取的最大源文件字节数。
 _SOURCE_BYTES = 8 * 1024 * 1024
 # 与正式RUN_OUT生产上限一致；不改变普通任务产物或上传预算。
 _WORKFLOW_CONTENT_BYTES = 64 * 1024 * 1024

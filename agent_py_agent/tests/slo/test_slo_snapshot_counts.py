@@ -21,11 +21,12 @@ class ObjectClient:
     # LLM: The fake stores actual bytes and counts actual storage API calls.
     # 函数用途: Initialize an isolated in-memory object store.
     def __init__(self):
-        self.objects, self.downloads, self.uploads = {}, [], []
+        self.objects, self.downloads, self.uploads, self.heads = {}, [], [], []
 
     # LLM: Missing objects use the same structured code checked by the production upload path.
     # 函数用途: Look up a content-addressed object without treating a head call as an upload.
     def head_object(self, *, Bucket, Key):
+        self.heads.append(Key)
         if Key not in self.objects:
             error = RuntimeError("missing fixture object")
             error.response = {"Error": {"Code": "404"}}
@@ -43,6 +44,10 @@ class ObjectClient:
     def upload_file(self, path, bucket, key, **_kwargs):
         self.uploads.append(key)
         self.objects[key] = Path(path).read_bytes()
+
+    def upload_fileobj(self, source, bucket, key, **_kwargs):
+        self.uploads.append(key)
+        self.objects[key] = source.read()
 
 
 class MemoryBackend:
@@ -107,13 +112,18 @@ class MemoryManifestStore(OwnerSnapshotStore):
     # 函数用途: Construct a snapshot store with a test-owned complete manifest.
     def __init__(self, client):
         self.rows = []
+        self.owner_lock_depth = 0
         super().__init__(MemoryBackend(self), client, OwnerObjectConfig("fixture"))
 
     # LLM: Single-threaded test ownership replaces only the external advisory lock.
     # 函数用途: Provide the database lock port without a PostgreSQL dependency.
     @contextlib.contextmanager
     def _owner_lock(self, *_args):
-        yield
+        self.owner_lock_depth += 1
+        try:
+            yield
+        finally:
+            self.owner_lock_depth -= 1
 
     # LLM: A complete manifest is the authoritative fake DB state in every tested mode.
     # 函数用途: Read the current manifest without altering object counters.
@@ -129,7 +139,7 @@ class MemoryManifestStore(OwnerSnapshotStore):
 # LLM: Public ScaleAgentPool.run drives the real checkout/commit path; only Agent and IM ports are fake.
 # 函数用途: Compare per-turn storage transfers in full and delta modes without claiming enumeration is O(1).
 @pytest.mark.slo
-@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("mode", ["full", "delta", "delta_compat"])
 def test_snapshot_counts(tmp_path, monkeypatch, slo_data, slo_report, mode):
     scenario = next(row for row in slo_data["scenarios"] if row["id"] == f"snapshot_{mode}")
     profile, client = scenario["load_profile"], ObjectClient()
@@ -149,12 +159,28 @@ def test_snapshot_counts(tmp_path, monkeypatch, slo_data, slo_report, mode):
     pool._snapshot_mode, pool._lease_ttl_seconds = mode, slo_data["fixture"]["condition_seconds"]
     pool._build_agent = lambda _message, home_root, _workspace: SimpleNamespace(
         home_root=home_root)
-    turn = [0]
+    turn, lock_coverage, staged = [0], [], []
+    from agent_py_agent.agent import owner_object_store
+
+    original_stage = owner_object_store.stage_and_hash
+
+    def stage(source, directory, **kwargs):
+        result = original_stage(source, directory, **kwargs)
+        staged.append({"path": source.name, "bytes": result[2]})
+        return result
+
+    monkeypatch.setattr(owner_object_store, "stage_and_hash", stage)
     # LLM: Only the model/tool execution port is fake; the pool selects its production snapshot mode.
     # 函数用途: Modify the configured files inside the current production checkout and return a deterministic response.
     def execute(agent, message, trace):
         from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
         home = resolve_owner_home(agent.home_root, OwnerIdentity.provider_user("feishu", message.owner_id)).home_dir
+        lock_coverage.append(store.owner_lock_depth > 0)
+        # 下载减少必须来自真实内容复用，不能把漏文件或旧内容算缓存命中。
+        for index in range(profile['files']):
+            expected = (f'turn-{turn[0] - 1}' if turn[0] and index < profile['changed_files']
+                        else f'initial-{index}')
+            assert (home / f'file-{index}.txt').read_bytes() == expected.encode()
         for index in range(profile["changed_files"]):
             (home / f"file-{index}.txt").write_text(f"turn-{turn[0]}")
         turn[0] += 1
@@ -163,15 +189,24 @@ def test_snapshot_counts(tmp_path, monkeypatch, slo_data, slo_report, mode):
     monkeypatch.setattr("agent_py_agent.agent.scale_downstream._adapter", lambda: SimpleNamespace(reply_message=lambda *_args: True))
     measurements = []
     for index in range(profile["turns"]):
-        before = len(client.downloads), len(client.uploads)
+        before = len(client.downloads), len(client.uploads), len(client.heads), len(staged)
         pool.run(ScaleMessage("tenant", "user", "synthetic", "fixture", str(index), "session", "synthetic"),
                  TraceContext(f"{index + 1:032x}", f"{index + 1:016x}"))
-        measurements.append({"downloaded": len(client.downloads) - before[0], "uploaded": len(client.uploads) - before[1]})
+        measurements.append({"downloaded": len(client.downloads) - before[0], "uploaded": len(client.uploads) - before[1],
+                             "object_heads": len(client.heads) - before[2], "staged": len(staged) - before[3]})
+    assert lock_coverage == [mode != 'delta'] * profile['turns']
+    assert store.owner_lock_depth == 0
+    assert len(store.rows) == profile['files']
+    for row in store.rows:
+        index = int(Path(row.relative_path).stem.removeprefix('file-'))
+        expected = (f"turn-{profile['turns'] - 1}" if index < profile['changed_files'] else f'initial-{index}').encode()
+        assert client.objects[row.object_key] == expected
+        assert row.content_sha256 == hashlib.sha256(expected).hexdigest()
     report = slo_report(scenario["id"], profile, [], object_transfers=measurements,
-        enumeration_complexity="O(F)", scope="scale_path_only", delta_api_available=callable(getattr(store, "checkout_delta", None)))
-    if mode == "full":
-        assert all(row["downloaded"] == scenario["targets"]["downloads_per_turn"] for row in measurements), report
-        assert all(row["uploaded"] == scenario["targets"]["uploads_per_turn"] for row in measurements), report
-    else:
-        require_target(callable(getattr(store, "checkout_delta", None)), report)
-        require_target(measurements[-1]["downloaded"] <= scenario["targets"]["downloads_warm_max"], report)
+        enumeration_complexity="O(F)", scope="scale_path_only", delta_api_available=callable(getattr(store, "checkout_delta", None)),
+        owner_lock_coverage=lock_coverage, all_manifest_contents_verified=True)
+    require_target(callable(getattr(store, "checkout_delta", None)), report)
+    require_target(measurements[0]['downloaded'] == profile['files'], report)
+    require_target(measurements[-1]["downloaded"] <= scenario["targets"]["downloads_warm_max"], report)
+    assert all(row['uploaded'] == scenario['targets']['uploads_per_turn'] for row in measurements), report
+    assert all(row['object_heads'] == row['staged'] == profile['changed_files'] for row in measurements), report

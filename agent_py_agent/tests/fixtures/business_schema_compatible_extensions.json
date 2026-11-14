@@ -1,0 +1,437 @@
+{
+  "baseline_commit": "bdaa38c93",
+  "spaces_create": {
+    "controller_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "该空间当前绑定到的控制者引用；只来自 binding.controller（interfaces.resolve 的 controller_ref）。新创建的空间没有界面绑定时为 null，不表示 Owner 没有控制线程。"
+    },
+    "controller_state": {
+      "type": "string",
+      "enum": [
+        "not_bound",
+        "bound"
+      ],
+      "description": "not_bound=该空间没有绑定控制者的界面记录；bound=controller_ref 来自现存的 binding.controller。"
+    },
+    "allowed_actions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "maxItems": 200,
+      "description": "与 spaces.get 同一实现：当前身份在该空间上确实可调用的动作，不是客户端目录推断。"
+    }
+  },
+  "spaces_create_description": {
+    "legacy": "completed时data的正式投影；async的accepted回执使用accepted_result_schema，只返回已耐久受理的ID，不伪造尚未完成的字段。错误响应data为空对象并带error。",
+    "current": "completed时data的正式投影；async的accepted回执使用accepted_result_schema，只返回已耐久受理的ID，不伪造尚未完成的字段。错误响应data为空对象并带error。controller_ref/controller_state/allowed_actions 为可选扩展：升级前持久化的旧幂等回执重放时可能没有这些字段，缺失表示未知，不表示没有控制者或没有可调用动作。"
+  },
+  "public_model_display_event": {
+    "type": "object",
+    "properties": {
+      "source_message_id": {
+        "$ref": "#/$defs/Id"
+      },
+      "occurred_at": {
+        "$ref": "#/$defs/Timestamp"
+      },
+      "schema": {
+        "const": "conversation_history_display.v1"
+      },
+      "kind": {
+        "const": "assistant_completed"
+      },
+      "phase": {
+        "const": "completed"
+      },
+      "request_id": {
+        "$ref": "#/$defs/Id"
+      },
+      "block_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "payload": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 262144
+          },
+          "canonical_message_id": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "schema",
+      "kind",
+      "phase",
+      "request_id",
+      "block_id",
+      "payload"
+    ],
+    "additionalProperties": false
+  },
+  "execution_lifecycle": {
+    "type": "object",
+    "properties": {
+      "source": {
+        "type": "object",
+        "properties": {
+          "sender_thread_id": {
+            "$ref": "#/$defs/NullableId"
+          },
+          "input_ref": {
+            "$ref": "#/$defs/NullableId"
+          },
+          "request_id": {
+            "$ref": "#/$defs/NullableId"
+          }
+        },
+        "required": [
+          "sender_thread_id",
+          "input_ref",
+          "request_id"
+        ],
+        "additionalProperties": false
+      },
+      "claim": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "claim_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "status": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "phase": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "cancel_requested": {
+                "type": "boolean"
+              },
+              "started_at": {
+                "$ref": "#/$defs/Timestamp"
+              },
+              "expires_at": {
+                "$ref": "#/$defs/Timestamp"
+              }
+            },
+            "required": [
+              "claim_id",
+              "status",
+              "phase",
+              "reason",
+              "cancel_requested",
+              "started_at",
+              "expires_at"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "events": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "event_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "kind": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "occurred_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "details": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "value": {
+                    "$ref": "#/$defs/JsonScalar"
+                  }
+                },
+                "required": [
+                  "key",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 64
+            }
+          },
+          "required": [
+            "event_id",
+            "kind",
+            "occurred_at",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        "maxItems": 100
+      },
+      "attempts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "attempt_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "status": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "started_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "ended_at": {
+              "$ref": "#/$defs/Timestamp"
+            }
+          },
+          "required": [
+            "attempt_id",
+            "status",
+            "started_at",
+            "ended_at"
+          ],
+          "additionalProperties": false
+        },
+        "maxItems": 100
+      },
+      "coverage": {
+        "$ref": "#/$defs/Coverage"
+      },
+      "unavailable": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "maxItems": 10
+      }
+    },
+    "required": [
+      "source",
+      "claim",
+      "events",
+      "attempts",
+      "coverage",
+      "unavailable"
+    ],
+    "additionalProperties": false
+  },
+  "workflow_output_artifacts": {
+    "output_artifacts": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/$defs/Id"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "attempt_id": {
+            "$ref": "#/$defs/Id"
+          },
+          "batch_index": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "artifact_id",
+          "sha256"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "output_artifacts_coverage": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial"
+      ]
+    }
+  },
+  "result_ref_coverage_diagnostics": {
+    "type": "array",
+    "maxItems": 8,
+    "items": {
+      "type": "object",
+      "properties": {
+        "error_code": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "run_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "exception_type": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "coverage": {
+          "const": "partial"
+        },
+        "stage": {
+          "const": "delivery_observation"
+        },
+        "effect_outcome": {
+          "const": "not_started"
+        },
+        "source_effect_outcome": {
+          "const": "unknown"
+        },
+        "next_action": {
+          "type": "string",
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "error_code",
+        "coverage",
+        "stage",
+        "effect_outcome",
+        "source_effect_outcome",
+        "next_action"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "message_execution_association": {
+    "input_ref": {
+      "$ref": "#/$defs/NullableId"
+    },
+    "execution_refs": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "$ref": "#/$defs/Id"
+          },
+          "attempt_id": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "required": [
+          "run_id",
+          "attempt_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "association_coverage": {
+      "$ref": "#/$defs/Coverage"
+    },
+    "association_reason": {
+      "type": "string",
+      "maxLength": 128
+    }
+  },
+  "workflow_retry_observation": {
+    "retry_observation": {
+      "type": "object",
+      "properties": {
+        "attempt_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "current_attempt_id": {
+          "$ref": "#/$defs/NullableId"
+        },
+        "history": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "properties": {
+              "attempt": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "attempt_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "error_code": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "next_delay_seconds": {
+                "type": "number",
+                "minimum": 0
+              },
+              "occurred_at": {
+                "$ref": "#/$defs/Timestamp"
+              }
+            },
+            "required": [
+              "attempt",
+              "attempt_id",
+              "error_code",
+              "next_delay_seconds",
+              "occurred_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "coverage": {
+          "$ref": "#/$defs/Coverage"
+        }
+      },
+      "required": [
+        "attempt_count",
+        "max_attempts",
+        "current_attempt_id",
+        "history",
+        "coverage"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

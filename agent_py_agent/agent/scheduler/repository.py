@@ -259,6 +259,7 @@ class SchedulerJobCreateRequest:
     rules: object = None
     creator: object = None
     execution_target: object = field(default=None, kw_only=True)
+    business_context: object = field(default=None, kw_only=True, metadata={"host_only": True})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", str(self.thread_id or "").strip())
@@ -1725,6 +1726,9 @@ class _SchedulerRecordParsing:
             if isinstance(claim_epoch, bool) or not isinstance(claim_epoch, int) or claim_epoch < 0:
                 raise ValueError("claim epoch")
             normalize_execution(raw.get("execution"))
+            from .execution_policy import normalize_business_context
+
+            normalize_business_context(raw.get('business_context'), self.owner['id'])
             normalize_precheck(raw.get("precheck"))
             normalize_delivery(raw.get("delivery"))
             from .event_source_lifecycle import validate_event_run
@@ -2689,6 +2693,9 @@ def _new_job_payload(
     request: SchedulerJobCreateRequest,
     now: float,
 ) -> dict[str, object]:
+    from .execution_policy import normalize_business_context
+
+    business = normalize_business_context(request.business_context, owner['id'])
     if request.rules is not None:
         from .monitor_state import new_monitor
         return new_monitor(owner, request, now)
@@ -2719,6 +2726,7 @@ def _new_job_payload(
                 "policy": policy,
                 "execution": execution,
                 "execution_target": target,
+                **({'business_context': business} if business is not None else {}),
                 "precheck": precheck,
                 "delivery": delivery,
             },
@@ -2736,6 +2744,7 @@ def _new_job_payload(
         "thread_id": thread,
         "source_thread_id": request.source_thread_id,
         "source_task_id": request.source_task_id,
+        **({'business_context': business} if business is not None else {}),
         "creator": deepcopy(request.creator),
         "definition_generation": 1,
         "run_count": 0,
@@ -2843,6 +2852,7 @@ def _reserved_run(
         "notification_binding": deepcopy(normalize_notification_binding(job.get('notification_binding'))),
         "precheck_checkpoint": deepcopy(job.get("precheck_checkpoint")),
         "source_task_id": str(job.get("source_task_id") or ""),
+        **({'business_context': deepcopy(job['business_context'])} if job.get('business_context') is not None else {}),
         "name": str(job["name"]),
         "prompt": str(job.get("prompt") or job["name"]),
         "skill_refs": deepcopy(job.get("skill_refs") or []),
@@ -3167,6 +3177,9 @@ def parse_scheduler_job(raw, owner):
         _normalize_skill_refs(raw.get("skill_refs"))
         normalize_policy(raw.get("policy"))
         normalize_execution(raw.get("execution"))
+        from .execution_policy import normalize_business_context
+
+        normalize_business_context(raw.get('business_context'), owner['id'])
         normalize_precheck(raw.get("precheck"))
         normalize_delivery(raw.get("delivery"))
         binding = normalize_notification_binding(raw.get('notification_binding'))

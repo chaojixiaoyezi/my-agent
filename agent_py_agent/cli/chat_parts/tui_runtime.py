@@ -1881,7 +1881,8 @@ class _TuiSessionRuntimeMixin(
                     "queue_added",
                     "queued",
                     queue_id,
-                    {"queue_id": queue_id, "text": str(text), "priority": "next"},
+                    {"queue_id": queue_id, "text": str(text), "priority": "next",
+                     "editable": queue_id not in self._observed_queue_ids},
                     request_id=normalized,
                 )
             return
@@ -2214,11 +2215,12 @@ class TuiRuntime(_TuiSessionRuntimeMixin):
             [str, ToolApprovalRequest, ToolApprovalDecision],
             object,
         ],
+        interest_id: str = "",
     ) -> bool:
         return self._permission_coordinator.sync_external(
             value,
             decision_writer=decision_writer,
-            controller_factory=_TuiPermissionController,
+            controller_factory=_TuiPermissionController, interest_id=interest_id,
         )
 
     # LLM: 统一 publish 锁住 sequencer+store，任何来源都不能让较大 seq 先进入 journal。

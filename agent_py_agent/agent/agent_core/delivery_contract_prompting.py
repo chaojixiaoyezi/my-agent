@@ -15,11 +15,26 @@ def render_delivery_contract_section(contract: dict[str, object]) -> str:
         [
             "[tool-system delivery-contract]",
             json.dumps(_model_visible_contract(contract), ensure_ascii=False, sort_keys=True),
+            *_task_output_guidance_lines(contract),
             *_bootstrap_guidance_lines(contract),
             *_artifact_guidance_lines(contract),
             *render_recovery_guidance_lines(contract, _artifact_items(contract)),
         ]
     )
+
+
+def _task_output_guidance_lines(contract: dict[str, object]) -> list[str]:
+    workspace = contract.get("task_workspace")
+    output = workspace.get("output_dir") if isinstance(workspace, dict) else None
+    if not isinstance(output, str) or not output.strip():
+        return []
+    return [
+        f"宿主已绑定本任务交付目录：{output}。cwd和已经选定的工作文件位置保持原语义。",
+        "用户要求新的文件交付且未指定最终位置时，请用能返回结构化文件回执的文件工具将最终文件写入该目录；"
+        "若首笔工作文件已写在别处，可读取核实后主动生成最终交付文件。"
+        "用户已有明确最终位置或交付合同应保持原位置。"
+        "不要自动发布普通代码编辑、凭据或第三方文件；不需要向用户索要运行ID或内部路径。",
+    ]
 
 
 def delivery_contract_preflight_findings(contract: dict[str, object]) -> list[dict[str, object]]:

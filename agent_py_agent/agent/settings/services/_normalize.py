@@ -234,6 +234,7 @@ class ModelFieldsService:
                 ("request_timeout", 1, 600),
                 ("max_tokens", 1, None),
                 ("provider_max_concurrent_requests", 0, None),
+                ("gateway_llm_inflight_limit", 0, 4096),
                 ("responses_ws_idle_ttl_seconds", 0, None),
                 ("responses_ws_max_idle_connections", 0, 256),
                 ("model_http_max_idle_connections", 0, 256),  # bounds：与字段元数据一致。

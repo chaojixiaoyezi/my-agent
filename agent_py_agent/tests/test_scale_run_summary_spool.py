@@ -463,11 +463,22 @@ def test_summary_snapshot_portable_branch(tmp_path, monkeypatch, kind, summary_t
     from agent_py_agent.agent.common import nofollow_fs
     from agent_py_agent.agent.workflows import run_list_index
     store, get = asset(tmp_path, kind)
-    monkeypatch.setattr(nofollow_fs, '_supports_dir_fd', lambda: False)
-    monkeypatch.setattr(run_list_index, '_supports_dir_fd', lambda: False)
     module = script_store if kind == 'script' else workflow_store
-    monkeypatch.setattr(module, '_supports_dir_fd', lambda: False, raising=False)
-    selected = store._summary_snapshot('sample')
+    connections = []
+    connect = run_list_index.sqlite3.connect
+
+    def counted_connect(*args, **kwargs):
+        connections.append(True)
+        return connect(*args, **kwargs)
+
+    # 此合同验证portable只读快照，不把无dirfd能力借给后续strict私有SQLite写事务。
+    with monkeypatch.context() as portable:
+        portable.setattr(nofollow_fs, '_supports_dir_fd', lambda: False)
+        portable.setattr(run_list_index, '_supports_dir_fd', lambda: False)
+        portable.setattr(module, '_supports_dir_fd', lambda: False, raising=False)
+        portable.setattr(run_list_index.sqlite3, 'connect', counted_connect)
+        selected = store._summary_snapshot('sample')
+        assert not connections
     assert (selected['id'] if kind == 'script' else selected.descriptor.id) == 'sample'
     store.record_run_summary('sample', 'succeeded', 1, '001', blocking=False, run_id='portable')
     spool.append(store.owner_home, kind, 'sample',

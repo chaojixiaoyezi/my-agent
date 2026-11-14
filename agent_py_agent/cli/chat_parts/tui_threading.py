@@ -1315,7 +1315,17 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
         selected = view.selected_run_id.removeprefix("bg:")
         for index, row in enumerate(rows):
             if row["session_id"] == selected:
-                rows[index] = inspect_background_process(Path(home), selected, thread_id=thread_id, expected_owner_id=owner_id)
+                detail = inspect_background_process(
+                    Path(home), selected, thread_id=thread_id, expected_owner_id=owner_id,
+                    include_log_errors=True,
+                )
+                log_error = detail.get("log_error")
+                if isinstance(log_error, dict):
+                    detail["log_tail"] = [
+                        f"{log_error['code']}: {log_error['error_type']}: {log_error['summary']}；"
+                        f"未读取日志，未改变进程状态。{log_error['next_action']}"
+                    ]
+                rows[index] = detail
     with getattr(root, "_lock", nullcontext()):
         if (not _background_poll_current(agent, root, _BackgroundPollReport(context))
                 or getattr(navigation, "_background_watch_scope", None) != scope):

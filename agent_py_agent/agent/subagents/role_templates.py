@@ -22,8 +22,8 @@ from ..tooling.write_boundary import WRITE_TOOL_ORDER
 _ROLE_TEMPLATE_LIST_OPTIONS = StringListOptions(split_commas=True)
 ROLE_TEMPLATE_ATTRIBUTE_KEY = "role_template"
 WEB_TOOLS = ["web_search", "web_fetch"]
-READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
-WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
+READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", "read_business_asset", *WEB_TOOLS]
+WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", "read_business_asset", *WEB_TOOLS]
 ARTIFACT_BUILDER_TOOLS: list[str] = []
 # LLM: Writable role defaults consume the canonical file-mutation order; role
 # templates may narrow this list but must not silently omit an available editor.
@@ -86,10 +86,11 @@ DIRECT_CHILD_CONTROL_TOOLS = [
     "cancel_subagents",
     "resolve_capability_requests",
     "list_pending_requests",
-    "manage_handoff_board",
 ]
 COORDINATOR_TOOLS = [
     *DIRECT_CHILD_CONTROL_TOOLS,
+    # 交接板含收件人本人签收与独立验收，不属于管理孩子；末级可显式继承，动作另守身份与角色门。
+    "manage_handoff_board",
     # 独立审核不是管理下级；叶可显式继承该工具，但实际动作仍由原handler按身份/同工作范围裁决。
     "manage_requirement_provenance",
     *ROLE_BASE_TOOLS,

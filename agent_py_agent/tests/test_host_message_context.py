@@ -120,15 +120,18 @@ def test_original_context_rejects_unrelated_or_stale_execution(tmp_path, monkeyp
 
 
 def test_delegated_replay_cannot_replace_original_reference_input(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.session_task_dispatch import SessionTaskDispatchError
     from agent_py_agent.agent.gateway_parts.im_task_routing import prepare_im_task_dispatch
-    from agent_py_agent.agent.runtime_errors import DataCorruptionError
 
     agent, actor, _, task, context, source = delegated_case(tmp_path, monkeypatch)
     monkeypatch.setattr('agent_py_agent.agent.gateway_parts.im_task_routing._message_context',
         lambda *_: HostMessageContext(actor, ((provider_message_reference('om_new'), 'om_new'),)))
     before = agent.conversation_store.session_tasks.load(task.task_id).to_dict()
-    with pytest.raises(DataCorruptionError):
+    with pytest.raises(SessionTaskDispatchError) as rejected:
         prepare_im_task_dispatch(context, source, task.goal)
+    assert rejected.value.error_code == "SESSION_IDENTITY_UNAVAILABLE"
+    assert rejected.value.effect_outcome == "not_started"
+    assert "原派活引用输入冲突" in rejected.value.outcome.output
     assert agent.conversation_store.session_tasks.load(task.task_id).to_dict() == before
 
 

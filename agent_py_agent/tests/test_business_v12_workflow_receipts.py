@@ -3,6 +3,8 @@
 #   真正写入路径上的 OSError 仍保留 OUTCOME_UNKNOWN。只用 tmp 隔离 home，不是线上证据。
 from __future__ import annotations
 
+import pytest
+
 from agent_py_agent.agent.assets.workflow_store import WorkflowStore
 from agent_py_agent.tests.test_business_v12_background_scheduling import (  # noqa: F401 - pytest fixture
     call,
@@ -24,6 +26,25 @@ def refused(native, action, params, code, **extra):  # noqa: F811
     return payload
 
 
+def test_space_name_conflict_is_not_retryable_and_preserves_original(native):  # noqa: F811
+    original = ok(native, 'spaces.create', {'name': '同名空间'}, idempotency_key='space-conflict-create-001')
+    payload = refused(native, 'spaces.create', {'name': '同名空间'}, 'SPACE_NAME_CONFLICT',
+                      idempotency_key='space-conflict-create-002')
+    assert payload['error']['retryable'] is False
+    after = ok(native, 'spaces.get', {'space_id': original['space_id']})
+    assert after['space']['revision'] == original['revision']
+    assert after['space']['name'] == original['name']
+
+
+@pytest.mark.parametrize('code', ['SPACE_NAME_CONFLICT', 'ASSET_VERSION_CONFLICT', 'BINDING_CONFLICT',
+                                  'SOURCE_INTENT_CONFLICT'])
+def test_deterministic_catalog_conflicts_keep_not_started_outcome(code):
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+    from agent_py_agent.agent.gateway_parts.business_api import _error_code
+
+    assert _error_code(BusinessError(code)) == (code, 409, 'not_started')
+
+
 def test_deterministic_workflow_refusals_are_not_started_and_leave_state_unchanged(native):  # noqa: F811
     ok(native, 'workflows.create', {'definition': definition('receipt-flow')}, idempotency_key='receipt-create-000001')
     refused(native, 'workflows.create', {'definition': definition('receipt-flow')}, 'WORKFLOW_ALREADY_EXISTS',
@@ -37,7 +58,11 @@ def test_deterministic_workflow_refusals_are_not_started_and_leave_state_unchang
             'scope': {'scope_mode': 'owner_global', 'space_ids': []}}, 'IDEMPOTENCY_CONFLICT',
             idempotency_key='receipt-scope-0000002', expected_revision=2)
     before = ok(native, 'workflows.get', {'workflow_ref': 'receipt-flow'})
-    # 原生组合没有工作流引用索引：覆盖未知时回收在写入前被拒绝，并给出首个阻断原因。
+    # 默认宿主已有引用读口；显式损坏真实调度来源，验证未知覆盖仍在写入前拒绝。
+    _, agent = native
+    scheduler_source = agent.home_paths.owner_home_dir / 'data' / 'scheduler' / 'store.json'
+    scheduler_source.parent.mkdir(parents=True, exist_ok=True)
+    scheduler_source.write_text('{broken-reference-source', encoding='utf-8')
     payload = refused(native, 'workflows.recycle', {'workflow_ref': 'receipt-flow'},
                       'WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN', idempotency_key='receipt-recycle-00001',
                       expected_revision=before['workflow']['definition_revision'])

@@ -78,6 +78,16 @@ print(json.dumps({{'step': {index}}}))
     calls, threads, markers, completed = [], [], {}, {}
     original = ScriptRunner.run_script
     execute_process = script_runner._execute
+    cleanup_process = script_runner._cleanup_process
+    process_exits = []
+
+    def observed_cleanup(process):
+        result = cleanup_process(process)
+        # 只记录原执行器持有的 Popen；不补信号、不用 PID 消失替代原 wait。
+        process_exits.append((process.pid, process.returncode, process.poll(), result))
+        return result
+
+    monkeypatch.setattr(script_runner, '_cleanup_process', observed_cleanup)
 
     # 只观察真实 runner；不在测试 callback 中补注册，不替代进程或执行结果。
     def observed(runner, script_id, inputs=None, **options):
@@ -95,22 +105,24 @@ print(json.dumps({{'step': {index}}}))
         archived = (home / 'data/workflow_runs' / target.workflow_run_id / 'artifacts'
             / target.step_id / target.attempt_id)
         markers[label].append((target.step_id, scratch, archived))
-        result = execute_process(command, folder, environment, input_json, timeout, capture)
-        # 原执行器已回收真实进程，runner尚未清理scratch；只读实物，不补文件、不伪造回执。
-        files = {}
-        for index in range(1, 4):
-            path = scratch / f's{index}'
-            if path.is_file():
-                files[path.name] = path.read_text()
-        completed[label].append(SimpleNamespace(step_id=target.step_id,
-            exit_code=result[0], cleanup=result[4], markers=files))
-        return result
+        try:
+            return execute_process(command, folder, environment, input_json, timeout, capture)
+        finally:
+            # 取消会抛出原异常；退出事实必须从执行器 finally 的真实 wait 回执读取。
+            files = {}
+            for index in range(1, 4):
+                path = scratch / f's{index}'
+                if path.is_file():
+                    files[path.name] = path.read_text()
+            completed[label].append(SimpleNamespace(step_id=target.step_id,
+                exit_code=capture.get('exit_code'), cleanup=capture.get('cleanup_error'), markers=files))
 
     monkeypatch.setattr(script_runner, '_execute', observed_process)
     value = SimpleNamespace(agent=agent, home=home, store=store, service=service,
         repo=agent.scheduler_repository, scheduler=scheduler, channels=channels,
         workflows=WorkflowStore(home, workspace_root=tmp_path), runs=WorkflowRunStore(home),
-        root=tmp_path, calls=calls, threads=threads, markers=markers, completed=completed)
+        root=tmp_path, calls=calls, threads=threads, markers=markers, completed=completed,
+        process_exits=process_exits)
     try:
         yield value
     finally:
@@ -247,9 +259,12 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     _join(thread, errors)
     records = case.runs.list_runs(workflow_id=run.workflow_id)
     history, load_errors = case.repo.history(job_id=run.job['job_id'])
-    assert _markers(run) == ['s1'], {'markers': _markers(run), 'workflow': [r.status for r in records], 'history': history}
+    assert _markers(run) == [], {'markers': _markers(run), 'workflow': [r.status for r in records], 'history': history}
     assert [process.step_id for process in run.completed] == ['s1']
-    assert run.completed[0].exit_code == 0 and not run.completed[0].cleanup
+    assert run.completed[0].exit_code < 0 and not run.completed[0].cleanup
+    pid, waited_returncode, polled_returncode, cleanup = case.process_exits[-1]
+    assert pid > 0 and waited_returncode == polled_returncode == run.completed[0].exit_code
+    assert not cleanup
     assert all(not scratch.exists() for _, scratch, _ in run.markers)
     assert len(records) == 1 and records[0].status == 'paused_for_resume'
     assert not load_errors and not history, history
@@ -379,7 +394,12 @@ def test_real_script_failure_preserves_terminal_agreement_and_zero_fd_delta(case
     assert [process.exit_code for process in run.completed] == [3]
     assert all(not scratch.exists() for _, scratch, _ in run.markers)
     assert case.store.tasks.load(run.signal.root_task_id).status == 'abandoned'
-    assert len(case.channels.attempts) == delivery_before
+    assert len(case.channels.attempts) == delivery_before + 1
+    context, envelope, receipt = case.channels.attempts[-1]
+    assert context.task_id == run.signal.root_task_id
+    assert receipt.delivery_status == 'sent'
+    assert 'SCRIPT' in envelope.content
+    assert history[0]['error_code']
     assert_fd_unchanged(fd_before, case.home)
 
 

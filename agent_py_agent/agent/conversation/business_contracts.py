@@ -5,12 +5,12 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Literal, Self
 
 
 class _BusinessDTO:
-    """六个固定载体共用独立 JSON 投影，不增添持久状态或动态属性。"""
+    """固定载体共用独立 JSON 投影，不增添持久状态或动态属性。"""
 
     __slots__ = ()
 
@@ -111,6 +111,19 @@ class BusinessContextIntent(_BusinessDTO):
 
 
 @dataclass(frozen=True, slots=True)
+class BusinessPackageVersion(_BusinessDTO):
+    """原引用解析器给出的包版本与可选激活身份；只存定位事实，不授予读取或执行权。"""
+
+    package_ref: str
+    version_ref: str
+    activation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _strings(self, ('package_ref', 'version_ref'))
+        _string(self.activation_id, 'activation_id', optional=True)
+
+
+@dataclass(frozen=True, slots=True)
 class BusinessExecutionContext(_BusinessDTO):
     """已冻结业务选择；task_id 是 canonical 业务任务，不是 runtime task ID。
 
@@ -130,12 +143,43 @@ class BusinessExecutionContext(_BusinessDTO):
     selected_method_refs: tuple[str, ...]
     asset_version_refs: tuple[str, ...]
     schema_version: str
+    package_versions: tuple[BusinessPackageVersion, ...] = field(default=(), kw_only=True)
+    package_versions_state: str = field(default='legacy_unproven', kw_only=True)
 
     def __post_init__(self) -> None:
         _strings(self, ('owner_id', 'task_id', 'schema_version'), ('space_id', 'project_ref', 'binding_id'))
         _counter(self.space_revision, 'space_revision', optional=True)
         _freeze_refs(self, 'selected_method_refs')
         _freeze_refs(self, 'asset_version_refs')
+        _enum(self.package_versions_state, 'package_versions_state', ('frozen', 'legacy_unproven'))
+        if type(self.package_versions) not in (tuple, list) or any(
+                type(item) is not BusinessPackageVersion for item in self.package_versions):
+            raise TypeError('package_versions 必须是原包版本载体数组')
+        versions = tuple(self.package_versions)
+        if len({item.package_ref for item in versions}) != len(versions):
+            raise ValueError('package_versions 不得重复包引用')
+        if any(item.package_ref not in self.selected_method_refs for item in versions):
+            raise ValueError('package_versions 必须属于原selected_method_refs')
+        if self.package_versions_state == 'legacy_unproven' and versions:
+            raise ValueError('旧任务未证明的包版本不能包含补读的最新版本')
+        object.__setattr__(self, 'package_versions', versions)
+
+    def to_dict(self) -> dict[str, object]:
+        result = _BusinessDTO.to_dict(self)
+        result['package_versions'] = [item.to_dict() for item in self.package_versions]
+        return result
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        if type(value) is not dict:
+            raise TypeError('业务 DTO 必须从 JSON 对象恢复')
+        values = dict(value)
+        if 'package_versions' in values:
+            if type(values['package_versions']) not in (list, tuple):
+                raise TypeError('package_versions 必须是数组')
+            values['package_versions'] = tuple(BusinessPackageVersion.from_dict(item)
+                                               for item in values['package_versions'])
+        return cls(**values)
 
 
 @dataclass(frozen=True, slots=True)

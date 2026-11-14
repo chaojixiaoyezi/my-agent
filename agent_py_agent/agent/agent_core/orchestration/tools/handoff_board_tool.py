@@ -56,7 +56,9 @@ logger = logging.getLogger(__name__)
 def build_manage_handoff_board_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="manage_handoff_board",
-        description="管理跨代理原生交接板（Handoff Board）项目生命周期与外部助手邮箱同步。本工具严格用于多代理/子代理协作任务交接（multi-agent / subagent collaboration），单代理独立执行时严禁调用本工具（单代理步骤进度记录请使用 Todo 工具）。",
+        description="管理跨代理原生交接板项目与外部助手邮箱。仅用于多代理协作，单代理进度请用 Todo。"
+        "末级需显式受权，用 case_id+item_id 读取指定项目、本人 ACK/提交；不创建或发布交接项。"
+        "终审需宿主角色 can_accept=true，decide_acceptance 必须带原读取的 frozen_input_version 和 item.metadata.submission_digest。",
         input_schema={
             "type": "object",
             "additionalProperties": False,
@@ -88,14 +90,15 @@ def build_manage_handoff_board_model_spec() -> ToolModelSpec:
                 "case_id": {"type": "string", "description": "所属协作 case 标识"},
                 "item_id": {"type": "string", "description": "交接项标识"},
                 "request_id": {"type": "string", "description": "关联协作请求标识"},
-                "responsible_actor": {"type": "string", "description": "负责代理标识"},
-                "actor_id": {"type": "string", "description": "外部助手标识（同 responsible_actor）"},
+                "responsible_actor": {"type": "string", "description": "publish/publish_item的接收者：internal_run必须原样使用create_subagents.created_run_ids或原生树中的run_id，不得用姓名/角色/自造别名；external_assistant用原外部助手标识。发表后将回执case_id+item_id交给该接收者"},
+                "actor_id": {"type": "string", "description": "发布目标的兼容字段；internal_run仍须真实run_id，与responsible_actor同时传入时必须相同；external_assistant保持原外部助手身份语义"},
                 "actor_kind": {
                     "type": "string",
                     "enum": ["internal_run", "external_assistant"],
-                    "description": "代理类型",
+                    "description": "internal_run表示宿主已证明的原生运行身份；外部助手必须明确external_assistant，不能靠ID前缀推断",
                 },
-                "frozen_input_version": {"type": "string", "description": "冻结输入版本；确认接收与提交均须显式携带已读取的原版本"},
+                "frozen_input_version": {"type": "string", "description": "冻结输入版本；签收、提交和验收均须携带原读取版本"},
+                "submission_digest": {"type": "string", "description": "验收必填：从 list_items 返回的 item.metadata.submission_digest 原样读取；不可自行猜测"},
                 "exclusive_write_set": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -227,6 +230,9 @@ class ManageHandoffBoardTool(BaseTool):
         action = str(params.get("action") or "").strip().lower()
         principal, _ = authoritative_self_principal(self.agent)
         actor = str(principal.run_id or "").strip()
+        access = self._leaf_handoff_access(params, actor)
+        if access is not None:
+            return access
         scope_warnings: list[str] = []
         if action in {"decide_acceptance", "release", "block", "open_case"}:
             # 协调者也只能代表自己的裁决；不能用模型给出的名字绕过独立审查。
@@ -275,6 +281,83 @@ class ManageHandoffBoardTool(BaseTool):
             outcome.output = json.dumps(payload, ensure_ascii=False, indent=2)
             outcome.result_envelope = {**outcome.result_envelope, "scope_warnings": scope_warnings}
         return outcome
+
+    def _leaf_handoff_access(self, params: dict[str, object], actor: str) -> ToolHandlerOutcome | None:
+        """末级只处理同任务明确交给自己的项目；终审另需宿主角色 can_accept。"""
+        if not current_subagent_run_id(self.agent):
+            return None
+        from ....subagents.role_templates import role_template_snapshot_for_task
+
+        source = {"record": "runner_task", "run_id": actor}
+        try:
+            manager = getattr(self.agent, "subagents", None)
+            task = manager.load(actor) if manager is not None else None
+            if task is None:
+                return self._failure("当前执行者的规范角色记录不存在，未操作；请核实原 run_id，不能用模型角色名补授权。",
+                                     "TOOL_PERMISSION_DENIED", {"reason": "HANDOFF_ROLE_UNPROVEN", "run_id": actor})
+            role = role_template_snapshot_for_task(task)
+            if role.get("can_spawn_children") is True:
+                return None
+            action = str(params.get("action") or "").strip().lower()
+            reads = {"read", "list_items"}
+            receipts = {"claim", "record_ack", "complete", "submit_handoff"}
+            reviews = {"release", "block", "decide_acceptance"}
+            if action not in reads | receipts | reviews:
+                return self._failure("末级不能创建、发布、取消交接项或同步外部邮箱，也不能枚举全部协作单；"
+                                     "请由原协调者派发，末级仅处理指定 case_id/item_id。",
+                                     "TOOL_PERMISSION_DENIED", {"reason": "HANDOFF_LEAF_ACTION_FORBIDDEN", "action": action})
+            case_id = str(params.get("case_id") or "").strip()
+            item_id = str(params.get("item_id") or "").strip()
+            if not case_id or not item_id:
+                return self._failure('末级须指定 case_id 和 item_id；请使用发送方给出的引用，例如 '
+                                     '{"action":"list_items","case_id":"case-…","item_id":"item-…"}。未读取其它项目。',
+                                     "TOOL_INVALID_ARGUMENTS", {"reason": "HANDOFF_ITEM_REFERENCE_REQUIRED",
+                                         "required_fields": {"$.case_id": "nonempty string", "$.item_id": "nonempty string"},
+                                         "provided": {"case_id": case_id, "item_id": item_id},
+                                         "next_action": "read_exact_case_and_item_refs_from_sender"})
+            service = self._resolve_service()
+            source = {"record": "handoff_item", "case_id": case_id, "item_id": item_id}
+            item = service.store.load_handoff_item(case_id, item_id) if service is not None else None
+            if item is None:
+                return self._failure("指定交接项不存在；请向原协调者核对 case_id/item_id，未操作。",
+                                     "RESOURCE_NOT_FOUND")
+            source = {"record": "recipient_task", "run_id": item.responsible_actor}
+            root_id = str(getattr(task, "root_id", "") or "").strip()
+            try:
+                recipient = task if item.responsible_actor == actor else manager.load(item.responsible_actor)
+                from ....subagents.authorization_gate import OperationRequest, authorize_operation
+
+                owner = str(getattr(getattr(self.agent, 'home_paths', None), 'owner_id', '') or '')
+                recipient = authorize_operation(manager, OperationRequest('view', item.responsible_actor,
+                    requester_owner=owner, requester_run_id=root_id), target=recipient)
+                repo = getattr(manager, 'runtime_db', None)
+                if repo is not None:
+                    caller_run, recipient_run = repo.agent_run_for_run_id(actor), repo.agent_run_for_run_id(item.responsible_actor)
+                    if (caller_run is None or recipient_run is None
+                            or caller_run['task_run_id'] != recipient_run['task_run_id']):
+                        return self._failure('原执行库未证明接收者与当前执行者属于同一原任务；未读取正文或写入。',
+                            'TOOL_PERMISSION_DENIED', {'reason': 'HANDOFF_TASK_SCOPE_MISMATCH'})
+                recipient_root = str(getattr(recipient, 'root_id', '') or getattr(recipient, 'id', '') or '').strip()
+            except FileNotFoundError:
+                owner = str(getattr(getattr(self.agent, 'home_paths', None), 'owner_id', '') or '')
+                native_root = self._native_root_recipient(manager, item.responsible_actor, root_id, owner)
+                recipient_root = root_id if native_root is not None else ''
+            if (not root_id or recipient_root != root_id or item.actor_kind != "internal_run"):
+                return self._failure("交接项不属于当前末级的原生任务树；请由其原协调者处理，未读取正文或更改状态。",
+                                     "TOOL_PERMISSION_DENIED", {"reason": "HANDOFF_TASK_SCOPE_MISMATCH"})
+            if action in reviews and role.get("can_accept") is not True:
+                return self._failure("当前宿主角色 can_accept 不是 true，不能签终审票；请交给原协调者指定的受权验收主体，未签票。",
+                                     "TOOL_PERMISSION_DENIED", {"reason": "HANDOFF_ACCEPTANCE_ROLE_REQUIRED",
+                                         "role_id": role.get("id"), "can_accept": role.get("can_accept"),
+                                         "required_can_accept": True, "next_action": "request_authorized_acceptor_from_parent"})
+            if action in reads:
+                return self._success({"items": [item.to_dict()], "total_count": 1, "next_cursor": None})
+        except Exception as exc:
+            return self._failure(f"核验当前角色或交接项规范记录失败（{type(exc).__name__}）；未操作。"
+                                 "请核实当前 run 与指定交接项可读，不要原样盲目重试。",
+                                 "TOOL_PERMISSION_DENIED", {"reason": "HANDOFF_SCOPE_UNAVAILABLE", "error_type": type(exc).__name__,
+                                     "source": source, "next_action": "verify_canonical_record_readability"})
+        return None
 
     # LLM: 解析操作并分发至各具体动作，统一包装结构化结果或失败原因。
     # 函数用途: 执行交接板具体动作指令。
@@ -424,18 +507,59 @@ class ManageHandoffBoardTool(BaseTool):
             except Exception:
                 pass
 
+        thread_id, task_id = self._native_case_context()
+        if self.agent is None:
+            thread_id = str(params.get("thread_id") or "").strip()
+            task_id = str(params.get("task_id") or "").strip()
+        elif any(params.get(key) and params[key] != value for key, value in (
+            ("thread_id", thread_id), ("task_id", task_id),
+        )):
+            return self._failure(
+                "CASE_SCOPE_MISMATCH: thread_id/task_id 与原宿主运行来源不一致；省略这两个字段，"
+                "由当前运行的 canonical Task/TaskLink 绑定。未创建协作单。",
+                "CASE_SCOPE_MISMATCH",
+            )
         req_payload = {
             "title": title or summary,
             "summary": summary or title,
             "priority": str(params.get("priority") or "normal").strip(),
             "created_by": created_by or "coordinator",
-            "thread_id": str(params.get("thread_id") or "").strip(),
-            "task_id": str(params.get("task_id") or "").strip(),
+            "thread_id": thread_id,
+            "task_id": task_id,
             "required_capabilities": params.get("required_capabilities") or [],
             "metadata": params.get("metadata") or {},
         }
         case = service.store.open_case(req_payload)
-        return self._success({"action": "open_case", "case": case.to_dict()})
+        return self._success({"action": "open_case", "case": case.to_dict(),
+                              "scope_resolution": {"case_context": "canonical_task" if task_id else "unbound"}})
+
+    def _native_case_context(self) -> tuple[str, str]:
+        """从当前执行的原运行库取得业务根与来源线程；子代执行聊天不能替代根任务线程。"""
+        agent = self.agent
+        if agent is None:
+            return "", ""
+        principal, _ = authoritative_self_principal(agent)
+        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+        native = repo.agent_run_for_run_id(principal.run_id) if repo is not None else None
+        if native is None:
+            return "", ""
+        task_run = repo.get_task_run(native["task_run_id"])
+        task = repo.get_task(task_run["task_id"]) if task_run is not None else None
+        owner = str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
+        if task is None or not owner or task["owner_id"] != owner:
+            raise HandoffError("CASE_OWNER_MISMATCH: 当前运行来源不属于本 owner，未创建协作单。",
+                               error_code="CASE_OWNER_MISMATCH", details={"effect_outcome": "not_started"})
+        thread_id = str(task["thread_id"] or "")
+        root_id = str(task["conversation_task_id"] or "")
+        store = getattr(agent, "conversation_store", None)
+        if not thread_id or not root_id or store is None:
+            return "", ""
+        link, error = store.tasks.load_report(root_id)
+        thread = store.threads.load(thread_id)
+        if (error is not None or link is None or link.thread_id != thread_id
+                or thread is None or thread.owner_id != owner):
+            return "", ""
+        return thread_id, root_id
 
     def _handle_list_cases(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
         status = str(params.get("status") or "").strip() or None
@@ -453,6 +577,136 @@ class ManageHandoffBoardTool(BaseTool):
         ]
         return self._success({"action": "list_cases", "cases": cases_data, "total_count": len(cases)})
 
+    def _native_root_recipient(self, manager, recipient_id: str, root_id: str, owner: str):
+        """主控无叶记录时只核原canonical root与runtime owner；不把名字/前缀当身份。"""
+        if not owner or not root_id or recipient_id != root_id:
+            return None
+        repo = getattr(manager, 'runtime_db', None)
+        native = repo.agent_run_for_run_id(recipient_id) if repo is not None else None
+        if native is None:
+            return None
+        principal, _ = authoritative_self_principal(self.agent)
+        caller = repo.agent_run_for_run_id(principal.run_id)
+        if caller is None or caller['task_run_id'] != native['task_run_id']:
+            return None
+        task_run = repo.get_task_run(native['task_run_id'])
+        task = repo.get_task(task_run['task_id']) if task_run is not None else None
+        return native if task is not None and task['owner_id'] == owner else None
+
+    def _validate_native_publish_recipient(self, recipient_id: str, params: dict[str, object]) -> None:
+        """只核新发布的规范身份；工具待授权与可恢复状态不当作永久不能接收。"""
+        from ....subagents.authorization_gate import (
+            AuthorizationError,
+            OperationRequest,
+            authorize_operation,
+        )
+        from ....subagents.models import SUBAGENT_RECOVERY_CLOSED_STATUSES, task_status_in
+
+        def reject(reason: str, message: str, *, error_code: str = 'TOOL_PERMISSION_DENIED',
+                   source: str | None = None, recipient_status: str | None = None,
+                   execution_status: str | None = None, exception_type: str | None = None) -> None:
+            extra = {key: value for key, value in (
+                ('source', source), ('recipient_status', recipient_status),
+                ('execution_status', execution_status), ('exception_type', exception_type),
+            ) if value is not None}
+            raise HandoffError(message, error_code=error_code, details={
+                'reason': reason, 'field': 'responsible_actor', 'actual': recipient_id,
+                'effect_outcome': 'not_started',
+                'next_action': 'use_exact_created_run_id_and_deliver_case_item_refs',
+                'example': {'action': 'publish_item', 'case_id': '<原case_id>',
+                    'responsible_actor': '<create_subagents.created_run_ids中的原run_id>',
+                    'actor_kind': 'internal_run', 'frozen_input_version': '<原冻结版本>'}, **extra})
+
+        explicit = str(params.get('responsible_actor') or '').strip()
+        alternate = str(params.get('actor_id') or '').strip()
+        if explicit and alternate and explicit != alternate:
+            reject('HANDOFF_RECIPIENT_REFERENCE_CONFLICT',
+                'publish的responsible_actor与actor_id不一致；未发布。仅传一个真实接收者run_id，不能混用名称或角色。',
+                error_code='TOOL_INVALID_ARGUMENTS')
+        principal, _ = authoritative_self_principal(self.agent)
+        sender = str(principal.run_id or '').strip()
+        if not sender:
+            reject('HANDOFF_RECIPIENT_CONTEXT_UNPROVEN', '缺少原发布者执行身份；未发布。请在原任务有权执行轮内发布。')
+        # 根主代理本人没有普通子代理记录；其原执行身份已由scoped入口证明。
+        if recipient_id == sender and not current_subagent_run_id(self.agent):
+            return
+        manager = getattr(self.agent, 'subagents', None)
+        owner = str(getattr(getattr(self.agent, 'home_paths', None), 'owner_id', '') or '')
+        try:
+            scope_root = sender
+            if current_subagent_run_id(self.agent):
+                caller = authorize_operation(manager, OperationRequest('view', sender, requester_owner=owner,
+                    requester_run_id=sender))
+                scope_root = str(caller.root_id or caller.id).strip()
+            try:
+                target = manager.load(recipient_id)
+            except FileNotFoundError:
+                repo = getattr(manager, 'runtime_db', None)
+                native = repo.agent_run_for_run_id(recipient_id) if repo is not None else None
+                native_root = self._native_root_recipient(manager, recipient_id, scope_root, owner)
+                if native_root is not None:
+                    # 合法上级主控只在原runtime有身份，没有叶task.json；不猜名字/前缀。
+                    from ....conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
+                    from ....conversation.task_state import conversation_task_link_is_terminal
+                    from ....runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
+
+                    # core一轮done不等于原工作已关闭；父级自然yield后仍可由原任务接交接。
+                    tasks = getattr(getattr(manager, 'conversation_store', None), 'tasks', None)
+                    read_link = getattr(tasks, 'load_report', None)
+                    link, error = read_link(recipient_id) if callable(read_link) else (None, None)
+                    if error is not None:
+                        reject('HANDOFF_RECIPIENT_STATE_UNAVAILABLE',
+                            '原主控任务链接不可读，不能把单轮结束当作任务关闭或继续证明；未发布。请核对原task链接后有界重试。',
+                            source='thread_task_link')
+                    if link is not None:
+                        origin = getattr(link, 'host_user_origin', None)
+                        if (link.task_id != recipient_id or not link.thread_id
+                                or origin is not None and (not isinstance(origin, dict)
+                                    or origin.get('owner_id') != owner or origin.get('task_id') != recipient_id
+                                    or origin.get('thread_id') != link.thread_id)):
+                            reject('HANDOFF_RECIPIENT_NOT_IN_SCOPE', '原主控任务链接与已证明owner/task/thread不一致；未发布，不能以active或closed标签冒充另一任务。')
+                        if conversation_task_link_is_terminal(link.status):
+                            reject('HANDOFF_RECIPIENT_CLOSED', '原会话任务已明确关闭，不能新接单；未发布。请沿原任务合法恢复入口处理，不能给旧ID换名。',
+                                recipient_status=link.status, execution_status=native_root['status'])
+                        if link.status == THREAD_TASK_LINK_ACTIVE_STATUS:
+                            return
+                        reject('HANDOFF_RECIPIENT_STATE_UNAVAILABLE', '原主控任务链接状态没有明确可接收证明；未发布。请核对原任务状态，不得据单轮done猜测关闭或放行。')
+                    if native_root['status'] in AGENT_RUN_TERMINAL_STATUSES:
+                        reject('HANDOFF_RECIPIENT_STATE_UNAVAILABLE', '原主控执行轮已结束且缺少活动任务链接，不能证明仍可接收；未发布。请由原任务正常续接后再发布。',
+                            execution_status=native_root['status'])
+                    return
+                if native is not None:
+                    sender_run = repo.agent_run_for_run_id(sender)
+                    if sender_run is None or sender_run['task_run_id'] != native['task_run_id']:
+                        reject('HANDOFF_RECIPIENT_NOT_IN_SCOPE',
+                            'responsible_actor不是原任务可见的已证明原生run；未发布。请使用create_subagents.created_run_ids或原生树run_id，不要使用名字/角色。')
+                    reject('HANDOFF_RECIPIENT_STATE_UNAVAILABLE',
+                        '原运行存在但规范接收记录暂不可读，不能确认资格；未发布。请核对原run状态后有界重试，不要创建替代别名。')
+                reject('HANDOFF_RECIPIENT_NOT_IN_SCOPE',
+                    'responsible_actor不是原任务可见的已证明原生run；未发布。请使用create_subagents.created_run_ids或原生树run_id，不要使用名字/角色。')
+            target_root = str(target.root_id or target.id).strip()
+            if target_root != scope_root:
+                reject('HANDOFF_RECIPIENT_NOT_IN_SCOPE', '接收者不在原任务有权范围或原权威身份不存在；未发布。请用当前有权树的真实run_id。')
+            target = authorize_operation(manager, OperationRequest('view', recipient_id, requester_owner=owner,
+                requester_run_id=scope_root), target=target)
+            repo = getattr(manager, 'runtime_db', None)
+            if repo is not None:
+                sender_run, target_run = repo.agent_run_for_run_id(sender), repo.agent_run_for_run_id(recipient_id)
+                if sender_run is None or target_run is None or sender_run['task_run_id'] != target_run['task_run_id']:
+                    reject('HANDOFF_RECIPIENT_NOT_IN_SCOPE', '原执行库未证明发送者与接收者属于同一原任务；未发布。请核对原生树run_id，不能用root字段声明扩大范围。')
+            if task_status_in(target.status, SUBAGENT_RECOVERY_CLOSED_STATUSES):
+                reject('HANDOFF_RECIPIENT_CLOSED',
+                    '原接收运行已关闭，不能新接单；未发布。请核对原任务合法恢复语义，不要向已结束ID新发交接。',
+                    recipient_status=str(getattr(target.status, 'value', target.status)))
+        except HandoffError:
+            raise
+        except AuthorizationError:
+            reject('HANDOFF_RECIPIENT_NOT_IN_SCOPE', '接收者不在原任务有权范围或原权威身份不存在；未发布。请用当前有权树的真实run_id。')
+        except Exception as error:
+            reject('HANDOFF_RECIPIENT_STATE_UNAVAILABLE',
+                f'核验原接收身份失败（{type(error).__name__}）；未发布。请核实原run记录与权限后有界重试，不要改名盲试。',
+                exception_type=type(error).__name__)
+
     # LLM: 处理 publish_item 动作。
     # 函数用途: 发布交接项。
     def _handle_publish(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
@@ -462,17 +716,53 @@ class ManageHandoffBoardTool(BaseTool):
         service._require_existing_case(case_id)
 
         request_id = str(params.get("request_id") or "").strip()
-        actor = str(params.get("responsible_actor") or params.get("actor_id") or "").strip()
+        actor_field = 'responsible_actor' if params.get('responsible_actor') else 'actor_id'
+        raw_actor = params.get('responsible_actor') or params.get('actor_id')
+        raw_version = params.get('frozen_input_version')
+        actor = raw_actor.strip() if isinstance(raw_actor, str) else ''
         actor_kind = str(params.get("actor_kind") or "internal_run").strip()
-        ver = str(params.get("frozen_input_version") or "").strip()
+        ver = raw_version.strip() if isinstance(raw_version, str) else ''
         if not actor or not ver:
-            return self._failure("publish 缺少 responsible_actor 或 frozen_input_version。", "TOOL_INVALID_ARGUMENTS")
+            invalid = {}
+            for field, raw, valid in ((actor_field if raw_actor is not None else 'responsible_actor', raw_actor, actor),
+                                      ('frozen_input_version', raw_version, ver)):
+                if valid:
+                    continue
+                invalid['$.' + field] = {'expected': 'nonempty string', 'actual_type': type(raw).__name__,
+                    'actual_value': raw if raw is None or isinstance(raw, (str, bool, int, float)) else '<non-string value omitted>',
+                    'reason': 'missing' if raw is None else 'empty' if isinstance(raw, str) else 'type_mismatch'}
+            return self._failure(
+                'publish参数未满足：' + ', '.join(invalid) + '必须是非空string；未发布。'
+                + ('已提供的接收者有效，不能改成新名称；' if actor else '')
+                + '请保留有效字段，仅修正列出的字段。冻结版本取自原任务冻结输入/候选版本，不由本工具猜测或自动补齐。',
+                'TOOL_INVALID_ARGUMENTS', {'reason': 'HANDOFF_PUBLISH_PARAMETERS_INVALID',
+                    'invalid_fields': invalid,
+                    'missing_fields': [key for key, value in invalid.items() if value['reason'] in {'missing', 'empty'}],
+                    'provided_responsible_actor': actor or None,
+                    'provided_frozen_input_version': ver or None,
+                    'effect_outcome': 'not_started',
+                    'next_action': 'preserve_valid_actor_and_supply_original_frozen_version',
+                    'example': {'action': 'publish_item', 'case_id': case_id,
+                        'responsible_actor': actor or '<原已证明接收者标识>', 'actor_kind': actor_kind,
+                        'frozen_input_version': ver or '<从原冻结输入/候选读取的非空版本string>'}})
 
         write_set = params.get("exclusive_write_set") or ()
         if isinstance(write_set, (list, tuple)):
             ws_tuple = tuple(str(x) for x in write_set)
         else:
             ws_tuple = ()
+
+        # 身份读取在case锁外完成；去重后只应用结果，不在case锁里取manager层级锁。
+        recipient_error = None
+        if actor_kind == 'internal_run' and self.agent is not None:
+            try:
+                self._validate_native_publish_recipient(actor, params)
+            except HandoffError as error:
+                recipient_error = error
+
+        def apply_recipient_validation():
+            if recipient_error is not None:
+                raise recipient_error
 
         item = service.publish_item(
             case_id=case_id,
@@ -483,8 +773,13 @@ class ManageHandoffBoardTool(BaseTool):
             exclusive_write_set=ws_tuple,
             idempotency_key=str(params.get("idempotency_key") or "").strip(),
             item_id=str(params.get("item_id") or "").strip(),
+            recipient_validator=apply_recipient_validation if actor_kind == 'internal_run' and self.agent is not None else None,
         )
-        return self._success({"item": item.to_dict()})
+        return self._success({"item": item.to_dict(),
+            "handoff_reference": {"case_id": item.case_id, "item_id": item.item_id,
+                "responsible_actor": item.responsible_actor, "actor_kind": item.actor_kind,
+                "frozen_input_version": item.frozen_input_version},
+            "next_action": "将handoff_reference经原有消息入口交给接收者；同级接收者由共同父级转交，末级须携带精确case_id+item_id读取。"})
 
     # LLM: 处理 record_ack 动作。
     # 函数用途: 登记接收方 ACK 回执。
@@ -579,8 +874,15 @@ class ManageHandoffBoardTool(BaseTool):
             verdict=verdict,
             reviewer_principal=reviewer,
             reason=reason,
+            frozen_input_version=str(params.get("frozen_input_version") or "").strip(),
+            submission_digest=str(params.get("submission_digest") or "").strip(),
         )
         res_data: dict[str, Any] = {"item": item.to_dict()}
+        if not params.get("frozen_input_version") and not params.get("submission_digest"):
+            res_data["existing_vote_reused_without_new_signature"] = True
+            res_data["existing_vote_binding_known"] = bool(
+                (item.acceptance_verdict or {}).get("frozen_input_version")
+                and (item.acceptance_verdict or {}).get("submission_digest"))
         if scope_warnings:
             res_data["scope_warnings"] = scope_warnings
         return self._success(res_data)

@@ -710,6 +710,11 @@ def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
     )
 
 
+def _physical_admission_enabled(request):
+    from ..llm_scale.gateway_transport_admission import configured
+    return request.provider_max_concurrent_requests > 0 or configured()
+
+
 # LLM: 显式 max_retries 是整次 HTTP 调用的唯一重试计数；None 维持普通请求既有策略，期限耗尽前不再发请求。
 # 函数用途: 每次重试先取得物理名额再执行有限次 HTTP open；零重试仍在每次物理发送前生效。
 def _open_gateway_request(request: GatewayRequest):
@@ -718,7 +723,7 @@ def _open_gateway_request(request: GatewayRequest):
     for attempt in range(last_attempt + 1):
         remaining_deadline_seconds(request.deadline)
         response = (_gateway_admitted_attempt(request, attempt, last_attempt)
-                    if request.provider_max_concurrent_requests > 0
+                    if _physical_admission_enabled(request)
                     else _gateway_request_attempt(request, attempt, last_attempt))
         if response is not None:
             return response
@@ -854,7 +859,7 @@ def _request_http_retry(exc: urllib.error.HTTPError, request: GatewayRequest, at
             setattr(exc, _HTTP_ERROR_DETAIL_ATTR, "")
         _GatewayResponseGuard(exc).abort()
         return False
-    admitted_body_cached = request.provider_max_concurrent_requests > 0 and isinstance(
+    admitted_body_cached = _physical_admission_enabled(request) and isinstance(
         getattr(exc, _HTTP_ERROR_DETAIL_ATTR, None), str)
     if (request.deadline is not None or request.max_response_bytes is not None) and not admitted_body_cached:
         with _gateway_response_scope(exc) as (response, guard):

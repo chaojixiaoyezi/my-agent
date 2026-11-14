@@ -373,14 +373,22 @@ def _parent_tool_authority_names(agent) -> set[str] | None:
             snapshot = registry.runtime_snapshot(allowed_tools=getattr(current, "allowed_tools", None))
             base_tools = set(snapshot.available_tool_names)
 
+    # 父本身不能执行child-only工具，但可派发owner策略仍就绪的原申请/经验入口。
+    # 在真实subagent父的任务上界相交之前加入，禁用/已撤工具不能因此复活。
+    registry = getattr(agent, "tools", None)
+    if base_tools is not None and isinstance(registry, ToolRegistry):
+        base_tools.update(registry.runtime_snapshot(
+            allowed_tools=[CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL]).available_tool_names)
+
     run_id = current_subagent_run_id(agent)
     manager = getattr(agent, "subagents", None)
     if run_id and manager:
         try:
             parent = manager.load(run_id)
-            parent_allowed = getattr(parent, "allowed_tools", None)
-            if parent is not None and parent_allowed:
-                parent_set = set(parent_allowed)
+            from ...subagents.capability_authority import task_tool_authority
+            from ...subagents.services.runner_context_service import _runner_allowed_tools
+            if parent is not None:
+                parent_set = set(_runner_allowed_tools(parent, task_tool_authority(parent)[0]))
                 base_tools = (base_tools & parent_set) if base_tools is not None else parent_set
         except Exception:
             pass
@@ -405,9 +413,9 @@ def _within_parent_tool_authority(agent, tools: list[str]) -> list[str]:
     else:
         # 无 registry 的纯合同调用仍在最终宿主执行边界复核；不以 mock 或自然语言生成工具事实。
         return tools
-    internal = [CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL]
-    if isinstance(registry, ToolRegistry):
-        available.update(registry.runtime_snapshot(allowed_tools=internal).available_tool_names)
+    dispatchable = _parent_tool_authority_names(agent)
+    if dispatchable is not None:
+        available = dispatchable
     catalog_only = CATALOG_ONLY_TOOL_GRANT in tools or CATALOG_ONLY_TOOL_GRANT in parent_grants
     result = list(dict.fromkeys("tool_search" if name == "list_tools" else name
         for name in tools if ("tool_search" if name == "list_tools" else name) in available))
@@ -644,6 +652,13 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
         source = spawn_source_projection(current_conversation_task_attributes(agent))
         if source is not None:
             attrs[LEARNING_SOURCE_KEY] = source
+    # 只继承宿主原范围，覆盖模型attributes同名值；后代不得丢掉聚合库读保护。
+    attrs.pop("host_business_aggregate_owner_root", None)
+    if agent is not None:
+        from ..tool_runtime_ledger import business_aggregate_owner_root
+        protected_owner = business_aggregate_owner_root(agent, getattr(agent, "_current_run_params", None))
+        if protected_owner is not None:
+            attrs["host_business_aggregate_owner_root"] = str(protected_owner)
     _inherit_conversation_request_id(attrs, agent)
     _add_current_task_workspace(attrs, agent)
     _inherit_audit_guarantee(attrs, agent)

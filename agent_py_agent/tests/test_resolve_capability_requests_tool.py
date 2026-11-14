@@ -99,6 +99,7 @@ def test_resolved_background_child_starts_after_durable_wake_without_waiting(tmp
         payload = json.loads(result.output)
         assert payload["continuation"]["status"] == "queued"
         assert payload["continuation"]["dispatch"]["started"] == 1
+        assert "diagnostics" not in payload["continuation"]
         assert entered.wait(2) and not finished.is_set()
         wake, run_ids, attempt_id = observed[0]
         assert wake["status"] == "raised" and wake["decision"] == decision
@@ -1247,8 +1248,13 @@ def test_capability_open_wake_uses_exact_canonical_urgent_value():
     from agent_py_agent.agent.subagents.runner_completion_wake import _capability_open_signal
 
     request = CapabilityRequest('synthetic-request', 'synthetic-child', 'p', 'n')
-    task = SimpleNamespace(id='synthetic-child', parent_id='synthetic-parent', root_id='synthetic-root')
+    task = SimpleNamespace(id='synthetic-child', parent_id='synthetic-parent', root_id='synthetic-root',
+                           attributes={'conversation_request_id': 'canonical-request'})
     signal = _capability_open_signal(SimpleNamespace(thread_id='synthetic-thread'), task, request, object())
+    assert signal['metadata']['conversation_request_id'] == 'canonical-request'
+    from agent_py_agent.agent.subagents.runner_completion_wake import _capability_open_observation
+    observation = _capability_open_observation(SimpleNamespace(thread_id='synthetic-thread'), task, request)
+    assert observation['metadata']['conversation_request_id'] == 'canonical-request'
     assert signal['urgency'] == 'urgent'
     assert wake_urgency(signal['urgency']) == 'urgent'
     assert signal['dedupe_key'] == 'capability-open:synthetic-child:synthetic-request'
@@ -1274,3 +1280,68 @@ def test_command_only_cwd_scope_uses_original_safe_directory_gate(tmp_path, outs
         assert current.capability_grants[0].path_scope == [cwd]
         assert current.capability_grants[0].tools == ['run_command']
         assert current.capability_grants[0].request_scope['cwd_scope'] == [cwd]
+
+
+def test_partial_grant_reports_independent_open_gap_without_changing_dispatch(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.background import dispatch
+    from agent_py_agent.agent.agent_core.orchestration.tools.pending_requests import (
+        ListPendingRequestsTool,
+    )
+    from agent_py_agent.agent.contracts.tool_input_schema import validate_tool_input
+    from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGapParams
+
+    agent, task, request = _agent_and_blocked_task(str(tmp_path))
+    missing = agent.subagents.lifecycle.record_capability_request(task.id, RecordCapabilityRequestParams(
+        problem='独立技能缺口', needed_capability='missing-package', capability_type='skill',
+        requested_skills=['missing-package']))
+    gap = agent.subagents.lifecycle.record_capability_gap(task.id, RecordCapabilityGapParams(
+        missing_capability='synthetic-private-value', why_failed='synthetic-private-value', request_id=missing.id,
+        gap_type='skill', requested_scope={'capability_type': 'skill', 'requested_skills': ['missing-package'],
+                                          'authorization': 'synthetic-private-value'}))
+    _enable_background_continuation(agent, task)
+    monkeypatch.setattr(dispatch, '_start_background_dispatch', lambda *a, **k: pytest.fail('OPEN gap must retain dispatch gate'))
+    result = _tool(agent).execute({'run_id': task.id, 'request_id': request.id,
+                                  'decision': 'grant', 'reason': '只批准可授予的目录权限'})
+    assert result.ok, result.output
+    payload = json.loads(result.output)
+    assert payload['continuation']['status'] == 'queued'
+    assert payload['continuation']['dispatch']['status'] == 'not_needed'
+    diagnostics = payload['continuation']['diagnostics']
+    assert diagnostics['reason_code'] == 'OPEN_CAPABILITY_GAP'
+    assert diagnostics['execution_ready'] is False and diagnostics['retry_same_resolution'] is False
+    assert diagnostics['unresolved_gaps'] == [{'gap_id': gap.id, 'request_id': missing.id, 'status': 'OPEN',
+        'scope': {'capability_type': 'skill', 'requested_tools': [], 'requested_skills': ['missing-package'],
+                  'requested_mcp_tools': []}}]
+    assert 'synthetic-private-value' not in result.output
+    example = diagnostics['inspection_example']
+    assert example['tool'] == ListPendingRequestsTool.model_spec.name
+    assert validate_tool_input(example['arguments'], ListPendingRequestsTool.model_spec.input_schema).ok
+    current = agent.subagents.load(task.id)
+    assert next(item for item in current.capability_requests if item.id == request.id).status == 'GRANTED'
+    assert next(item for item in current.capability_requests if item.id == missing.id).status == 'GAP'
+    assert next(item for item in current.capability_gaps if item.id == gap.id).status == 'OPEN'
+    repeated = _tool(agent).execute({'run_id': task.id, 'request_id': request.id,
+                                    'decision': 'grant', 'reason': '重复查询裁决'})
+    again = json.loads(repeated.output)
+    assert again['status'] == 'no_pending_requests'
+    assert again['continuation']['diagnostics']['unresolved_gaps'][0]['gap_id'] == gap.id
+
+
+def test_unresolved_gap_diagnostics_are_bounded_and_do_not_echo_free_text():
+    from agent_py_agent.agent.agent_core.orchestration.tools.capability import (
+        _describe_unresolved_gaps,
+    )
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityGap
+
+    gaps = [CapabilityGap(id=f'gap-{i}', run_id='run', missing_capability='private-value',
+        source_task='private-value', why_failed='private-value', request_id=f'request-{i}',
+        requested_scope={'capability_type': 'tool', 'requested_tools': [f'tool-{j}' for j in range(20)],
+                         'network_scope': ['private-value'], 'password': 'private-value'}) for i in range(12)]
+    continuation = {'status': 'queued', 'dispatch': {'status': 'not_needed', 'started': 0}}
+    _describe_unresolved_gaps(SimpleNamespace(capability_gaps=gaps), continuation)
+    details = continuation['diagnostics']
+    assert details['open_gap_count'] == 12 and details['truncated'] is True
+    assert len(details['unresolved_gaps']) == 8
+    assert len(details['unresolved_gaps'][0]['scope']['requested_tools']) == 8
+    assert 'private-value' not in json.dumps(continuation)
+    assert continuation['status'] == 'queued' and continuation['dispatch']['status'] == 'not_needed'

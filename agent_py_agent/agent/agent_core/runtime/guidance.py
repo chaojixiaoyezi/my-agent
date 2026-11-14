@@ -88,6 +88,7 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
         return ""
     runs: list[Any] = []
     load_errors: list[object] = []
+    parent = None
     try:
         root_reporter = getattr(manager, "list_runs_for_root_report", None)
         reporter = getattr(manager, "list_runs_report", None)
@@ -108,11 +109,14 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
             runs = list(manager.list_runs())
     except (AttributeError, OSError, TypeError, ValueError):
         load_errors = ["canonical_read_failed"]
+    from ...subagents.direct_parent_lifecycle import direct_child_scope_matches
+
     children = [
         task
         for task in runs
         if str(getattr(task, "parent_id", "") or "").strip() == parent_run_id
         and str(getattr(task, "id", "") or "").strip()
+        and (parent is None or direct_child_scope_matches(parent, task))
     ]
     children.sort(key=lambda task: str(getattr(task, "id", "") or "").strip())
     if not children and not load_errors:
@@ -124,10 +128,17 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
         run_id = str(getattr(task, "id", "") or "").strip()
         status = str(getattr(task, "status", "") or "UNKNOWN").strip().upper() or "UNKNOWN"
         row: dict[str, object] = {"run_id": run_id, "status": status}
-        from ...subagents.direct_parent_lifecycle import current_activity_diagnostic
+        from ...subagents.direct_parent_lifecycle import (
+            current_activity_diagnostic,
+            direct_child_capability_facts,
+        )
 
         if diagnostic := current_activity_diagnostic(task):
             row["activity_diagnostic"] = diagnostic
+        if current_subagent_run_id(agent):
+            capability_facts = direct_child_capability_facts(task)
+            if capability_facts["capability_notice_key"]:
+                row.update(capability_facts)
         # 根父级通过耐久事件接收正文，快照不再重复装入一遍；递归父级没有根邮箱，需在这里交接。
         if current_subagent_run_id(agent) and (task_status_in(status, SUBAGENT_ENDED_STATUSES) or status == "BLOCKED"):
             from ...subagents.runner_completion_payload import completion_handoff_payload

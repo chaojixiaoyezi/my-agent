@@ -650,3 +650,27 @@ def test_idle_sweeper_starts_once_under_concurrent_configure(monkeypatch):
     for rival in rivals:
         rival.join(5)
     assert len(starts) == 1, "并发设置只能启动一条巡检线程"
+
+
+@pytest.mark.parametrize("case,expected", [("other-owner", "PATH_OWNER_SCOPE_BLOCKED"),
+    ("empty-command", "TOOL_INVALID_ARGUMENTS"), ("command-policy", "COMMAND_POLICY_BLOCKED")])
+def test_pty_pre_spawn_refusal_preserves_not_started(tmp_path, monkeypatch, case, expected):
+    owner = tmp_path / "owner-a"
+    workspace = owner / "workspace"
+    other = tmp_path / "owner-b"
+    workspace.mkdir(parents=True)
+    other.mkdir()
+    tool = TerminalSessionTool(ShellTool(workspace, options=ShellToolOptions(owner_scope_root=str(owner))))
+    def must_not_start(*args, **kwargs):
+        pytest.fail("PTY预检拒绝不得创建会话或派生进程")
+    monkeypatch.setattr(pty_session_registry, "start", must_not_start)
+    params = {"action": "start", "command": "printf synthetic"}
+    if case == "other-owner":
+        params["working_dir"] = str(other)
+    elif case == "empty-command":
+        params["command"] = " "
+    else:
+        params["command"] = "rm -rf /"
+    result = tool.execute(params)
+    assert not result.ok and result.error_code == expected
+    assert result.effect_outcome == "not_started"

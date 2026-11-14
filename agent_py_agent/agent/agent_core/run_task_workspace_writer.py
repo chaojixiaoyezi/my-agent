@@ -1,6 +1,6 @@
 
 # LLM: 运行归档使用 owner_runs_dir 与结构化身份；归档不选择业务 cwd，不改写模型文件或交付合同的路径。
-# 模块用途: 保存可恢复的运行记录并注入真实工作位置，业务整理交给共享目录指南。
+# 模块用途: 保存可恢复运行记录；任务交付位置由宿主原任务身份派生，保持真实工作位置和显式交付合同。
 
 from __future__ import annotations
 
@@ -615,6 +615,20 @@ def managed_business_default_workspace(agent, params):
 
 
 def attach_run_task_workspace_context(agent, params, user_prompt: str):
+    delivery = _host_delivery_contract(agent, params)
+    if delivery is not None:
+        params = replace(params, delivery_contract=delivery)
+    session_output = (_session_task_delivery_output_dir(agent, params)
+                      if getattr(params, 'business_context', None) is None else None)
+    if session_output is not None and _delivery_output_dir(params, delivery) == session_output:
+        # 原会话cwd不变；只把该任务的确切交付根沿既有工作区合同传给直属子代理。
+        from ..conversation.authority import CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR
+
+        ensure_private_dir(session_output, canonical_root=Path(agent.home_paths.owner_home_dir))
+        attrs = dict(params.task_attributes)
+        roots = list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR) or ())
+        attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = list(dict.fromkeys([*roots, str(session_output)]))
+        params = replace(params, task_attributes=attrs)
     workspace = managed_business_default_workspace(agent, params)
     if workspace is not None:
         # 默认执行位置和委派继承共用同一原业务任务目录；运行归档仍由原run workspace管理。
@@ -637,7 +651,7 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
     result = _ensure_workspace_for_run(agent, params, user_prompt)
     primary_workspace_root = _primary_workspace_root(agent, params)
     frozen_contract = result.delivery_contract or getattr(params, "delivery_contract", None)
-    delivery_output_dir = _business_delivery_output_dir(params, frozen_contract)
+    delivery_output_dir = _delivery_output_dir(params, frozen_contract)
     injection = _workspace_prompt_section(
         primary_workspace_root=primary_workspace_root,
         # R7c 实锤(单次 run"请示退出"形态):cli_run 是一次性非交互运行,中途请示
@@ -657,8 +671,8 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
     return replace(params, inject=next_inject, task_attributes=next_attrs, delivery_contract=next_contract)
 
 
-def _business_delivery_output_dir(params, contract) -> Path | None:
-    if getattr(params, "business_context", None) is None or not isinstance(contract, dict):
+def _delivery_output_dir(params, contract) -> Path | None:
+    if not isinstance(contract, dict):
         return None
     workspace = contract.get("task_workspace")
     output = workspace.get("output_dir") if isinstance(workspace, dict) else None
@@ -698,19 +712,158 @@ def _business_task_output_dir(agent, context, params):
     return Path(os.path.abspath(result)) / "output"
 
 
-def _business_delivery_contract(agent, params):
+def _host_delivery_contract(agent, params):
     context = getattr(params, "business_context", None)
-    if context is None:
-        return None
     contract = getattr(params, "delivery_contract", None)
     if isinstance(contract, dict) and contract.get("artifacts"):
         return dict(contract)
-    output = _business_task_output_dir(agent, context, params)
+    workspace = contract.get("task_workspace") if isinstance(contract, dict) else None
+    if isinstance(workspace, dict) and isinstance(workspace.get("output_dir"), str) and workspace["output_dir"].strip():
+        return dict(contract)
+    output = (_business_task_output_dir(agent, context, params) if context is not None
+              else _session_task_delivery_output_dir(agent, params))
+    if output is None:
+        output = _main_task_delivery_output_dir(agent, params)
+    if output is None:
+        return contract
     result = dict(contract) if isinstance(contract, dict) else {"schema_version": "delivery_contract.v1"}
     workspace = dict(result.get("task_workspace") or {})
     workspace.setdefault("output_dir", str(output))
     result["task_workspace"] = workspace
     return result
+
+
+def _session_task_delivery_output_dir(agent, params) -> Path | None:
+    """普通委派复用原SessionTask生日与目标身份；无业务上下文也不能退回Owner随意路径。"""
+    from ..runtime_context import current_subagent_run_id
+    from ..user_space.home_layout import task_workspace_path
+
+    attrs = getattr(params, "task_attributes", None)
+    if not isinstance(attrs, dict):
+        return None
+    child_id = current_subagent_run_id(agent)
+    child = bool(child_id and getattr(params, 'context_scope', '') == 'task_local')
+    parent = getattr(params, "source", "") == "background_main_agent" and attrs.get(CONVERSATION_SESSION_TASK_ID_ATTR)
+    if not parent and not child:
+        return None
+    if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
+        return None
+    task_id = attrs.get("conversation_task_id") if child else attrs[CONVERSATION_SESSION_TASK_ID_ATTR]
+    store, home = getattr(agent, "conversation_store", None), getattr(agent, "home_paths", None)
+    if store is None or home is None:
+        raise PermissionError("SESSION_TASK_WORKSPACE_IDENTITY_MISMATCH: 缺少原任务与Owner事实源")
+    sessions = getattr(store, 'session_tasks', None)
+    if sessions is None and child:
+        return None
+    if sessions is None:
+        raise PermissionError("SESSION_TASK_WORKSPACE_IDENTITY_MISMATCH: 缺少原SessionTask事实源")
+    task = sessions.load(task_id)
+    if child and task is None:
+        # 普通前台子任务仍走原ThreadTaskLink合同，不把所有子代理都当SessionTask。
+        return None
+    if child:
+        manager = getattr(agent, 'subagents', None)
+        record = manager.load(child_id) if manager is not None else None
+        executor_matches = (record is not None and record.id == child_id and record.root_id == task_id
+            and getattr(params, 'run_id', '') == child_id and getattr(params, 'task_id', '') == task_id
+            and attrs.get('conversation_request_id') in {task_id, getattr(params, 'request_id', '')}
+            and getattr(params, 'request_id', '') == getattr(params, 'attempt_id', '')
+            and record.attributes.get('conversation_request_id') == task_id
+            and record.attributes.get('conversation_task_id') == task_id
+            and record.attributes.get('conversation_thread_id') == attrs.get('conversation_thread_id'))
+        if executor_matches:
+            # runner显示状态可早于/晚于本轮；执行权只取原canonical fence，不用投影active_attempt猜授权。
+            from ..runtime_db.managed_operation_store import ToolOperationAuthorityRequest
+
+            authority = getattr(getattr(agent, 'tools', None), 'operation_store', None)
+            if not callable(getattr(authority, 'require_authority', None)):
+                raise PermissionError('SESSION_TASK_WORKSPACE_AUTHORITY_UNAVAILABLE: 未读取原子执行权；未创建交付目录。')
+            authority.require_authority(ToolOperationAuthorityRequest(owner_id=home.owner_id,
+                run_id=child_id, attempt_id=str(getattr(params, 'attempt_id', '') or ''), task_id=task_id,
+                operation_id='session-task-output-scope', tool_name='write_file'))
+    else:
+        executor_matches = all(getattr(params, key, "") == task_id for key in ("run_id", "task_id", "request_id"))
+    # 宿主先装配执行上下文、再bind_turn；原queued单尚无conversation_request_id不是身份冲突。
+    # 原父的conversation_session_task_id及task/run/request/目标全匹配即可核权；conv_task别名晋升前可缺，
+    # accepted的capacity续跑也有此阶段；显式冲突不接受，子代理仍须完整字段和原canonical fence。
+    target = store.threads.load(getattr(task, "target_thread_id", "")) if task is not None else None
+    sender = store.threads.load(getattr(task, "sender_thread_id", "")) if task is not None else None
+    prebinding = bool(parent and getattr(task, 'status', '') == 'queued'
+                      and not getattr(task, 'conversation_request_id', ''))
+    checks = {
+        'session_task': task is not None and task.task_id == task_id,
+        'target_thread': target is not None and task.target_thread_id == attrs.get('conversation_thread_id'),
+        'conversation_task_id': attrs.get('conversation_task_id') == task_id or (parent and not attrs.get('conversation_task_id')),
+        'executor': bool(executor_matches),
+        'request_binding': prebinding or (getattr(task, 'status', '') == 'accepted'
+                                         and getattr(task, 'conversation_request_id', '') == task_id),
+        'target_owner': target is not None and target.owner_id == home.owner_id,
+        'sender_owner': sender is not None and sender.owner_id == home.owner_id,
+        'status': getattr(task, 'status', '') in ({'queued', 'accepted'} if parent else {'accepted'}),
+        'created_at': bool(getattr(task, 'created_at', 0) and task.created_at > 0),
+    }
+    if not all(checks.values()):
+        facts = {'failed_fields': [key for key, valid in checks.items() if not valid],
+                 'expected_task_id': task_id, 'actual_status': getattr(task, 'status', None),
+                 'actual_conversation_task_id': attrs.get('conversation_task_id'),
+                 'actual_run_id': getattr(params, 'run_id', None), 'actual_task_id': getattr(params, 'task_id', None),
+                 'actual_request_id': getattr(params, 'request_id', None), 'expected_checks': 'all true'}
+        raise PermissionError('SESSION_TASK_WORKSPACE_IDENTITY_MISMATCH: ' + json.dumps(facts, ensure_ascii=False)
+            + '；未创建交付目录；请核原SessionTask、目标线程与本次执行身份，禁止改身份或扩大tasks写范围后重试。')
+    day = datetime.fromtimestamp(task.created_at, timezone.utc).date().isoformat()
+    output = Path(os.path.abspath(task_workspace_path(home.owner_home_dir,
+        getattr(agent.config, "workspace_task_path_template", "tasks/{date}/{task_slug}"),
+        date=day, task_name=task.task_id))) / "output"
+    owner = Path(home.owner_home_dir)
+    output.relative_to(owner)
+    from ..conversation.workspace_context import validate_workspace_directory
+
+    validate_workspace_directory(output, owner_home=owner, is_admin=False,
+        home_root=getattr(home, 'root', None), initializing=True)
+    return output
+
+
+def _main_task_delivery_output_dir(agent, params) -> Path | None:
+    """原会话任务出生时间决定交付位置；归档根、cwd和模型提供的路径不授予交付身份。"""
+    from ..runtime_context import current_subagent_run_id
+    from ..user_space.home_layout import task_workspace_path
+
+    attrs = getattr(params, "task_attributes", None)
+    store = getattr(agent, "conversation_store", None)
+    home = getattr(agent, "home_paths", None)
+    if not isinstance(attrs, dict) or store is None or home is None:
+        return None
+    if not bool(getattr(agent.config, "run_task_workspace_enabled", True)):
+        return None
+    if getattr(params, "context_scope", "default") == "control_plane":
+        return None
+    task_id, thread_id = str(attrs.get("conversation_task_id") or ""), str(attrs.get("conversation_thread_id") or "")
+    if not task_id or not thread_id or attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True:
+        return None
+    link, error = store.tasks.link_report(thread_id, task_id)
+    thread = store.threads.load(thread_id)
+    if (error or link is None or thread is None or link.status != "active"
+            or link.task_id != task_id or link.thread_id != thread_id
+            or thread.owner_id != getattr(home, "owner_id", "") or thread.metadata.get("background_agent")
+            or not link.created_at or link.created_at <= 0):
+        return None
+    child = current_subagent_run_id(agent)
+    if not child and (getattr(params, "request_id", "") != thread.last_user_request_id
+                      or not thread.last_user_message_id):
+        return None
+    owner = Path(home.owner_home_dir)
+    day = datetime.fromtimestamp(link.created_at, timezone.utc).date().isoformat()
+    output = Path(os.path.abspath(task_workspace_path(owner,
+        getattr(agent.config, "workspace_task_path_template", "tasks/{date}/{task_slug}"),
+        date=day, task_name=task_id))) / "output"
+    # 模板本身不授予墙外或控制面路径；只建立当前Owner的原任务业务目录。
+    output.relative_to(owner)
+    from ..conversation.workspace_context import validate_workspace_directory
+
+    validate_workspace_directory(output, owner_home=owner, is_admin=False,
+        home_root=getattr(home, "root", None), initializing=True)
+    ensure_private_dir(output, canonical_root=owner)
+    return output
 
 
 def _should_create_workspace(agent, params) -> bool:
@@ -756,7 +909,7 @@ def materialize_promoted_task_workspace(agent: object, params: object, goal: str
         return None
     attrs.update(_task_attributes_with_workspace(attrs, result))
     contract = _delivery_contract_with_workspace(
-        getattr(params, "delivery_contract", None),
+        result.delivery_contract or getattr(params, "delivery_contract", None),
         result,
         primary_workspace_root=_primary_workspace_root(agent, params),
     )
@@ -764,6 +917,19 @@ def materialize_promoted_task_workspace(agent: object, params: object, goal: str
         params.delivery_contract = contract
     agent._current_run_task_workspace = str(result.root)
     return result.root
+
+
+def canonical_run_workspace_candidate(agent, *, task_id, run_id, request_id, created_at):
+    """恢复只计算原producer的一个候选；须由调用方复读原manifest，不找suffix或创建目录。"""
+    from types import SimpleNamespace
+
+    from ..user_space.home_layout import task_workspace_path
+
+    params = SimpleNamespace(task_id=task_id, run_id=run_id, request_id=request_id,
+        source='background_main_agent', task_attributes=None, business_context=None, delivery_contract=None)
+    request = _run_workspace_request(agent, params, '')
+    return task_workspace_path(request.home, request.template,
+        date=datetime.fromtimestamp(created_at).date().isoformat(), task_name=request.task_name)
 
 
 def _ensure_workspace_for_run(agent, params, user_prompt: str):
@@ -775,7 +941,7 @@ def _ensure_workspace_for_run(agent, params, user_prompt: str):
 
 
 # LLM: 新 run 归档写入 canonical owner_runs_dir；task_id 只决定不透明存储键，不从自然语言选择用户目录。
-# 函数用途: 生成唯一宿主运行目录请求；tasks 整理模板仅用于模型提示，已有运行仍按原链接恢复。
+# 函数用途: 生成唯一宿主运行归档请求，并带入由原业务身份绑定的独立交付合同；已有运行沿原链接恢复。
 def _run_workspace_request(agent, params, user_prompt: str) -> EnsureRunWorkspaceRequest:
     home_paths = agent.home_paths
     owner_home = getattr(home_paths, "owner_home_dir", None)
@@ -802,7 +968,7 @@ def _run_workspace_request(agent, params, user_prompt: str) -> EnsureRunWorkspac
         owner_id=str(getattr(home_paths, "owner_id", "") or ""),
         owner_home=str(owner_home or ""),
         source=str(getattr(params, "source", "") or "run"),
-        delivery_contract=_business_delivery_contract(agent, params),
+        delivery_contract=_host_delivery_contract(agent, params),
     )
 
 
@@ -969,9 +1135,13 @@ def _append_once(items: list[str], injection: str) -> list[str]:
 
 def _task_attributes_with_workspace(attrs: object, paths) -> dict:
     result = dict(attrs) if isinstance(attrs, dict) else {}
+    contract = getattr(paths, "delivery_contract", None)
+    declared = contract.get("task_workspace") if isinstance(contract, dict) else None
+    # 输出声明与宿主已冻结合同相同；内部归档根仍由task_root/work_dir表达，不并入交付范围。
+    output = declared.get("output_dir") if isinstance(declared, dict) else None
     result["run_workspace"] = {
         "task_root": str(paths.root),
-        "output_dir": str(paths.output_dir),
+        "output_dir": str(output or paths.output_dir),
         "work_dir": str(paths.work_dir),
     }
     return result

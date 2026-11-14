@@ -26,6 +26,11 @@ JUNK_NAME_BASELINE = {
 FORBIDDEN_CLASS_BASELINE: set[str] = set()
 
 BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
+    "agent_py_agent/agent/adapter/feishu_ws.py:connect_kwargs": (
+        "Transparent lark-oapi SDK adapter: older releases call without arguments and newer releases "
+        "pass connection_headers positionally or by keyword. Preserve the SDK callable protocol; "
+        "only post-process its returned handshake options, not a product service boundary."
+    ),
     "agent_py_agent/agent/retrieval/embedding_usage.py:wrapper": (
         "Transparent purpose-labelling decorator (counted_as) must preserve arbitrary method signatures; "
         "嵌入用量计数的用途标注，不是产品服务接口。"
@@ -100,6 +105,11 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
 }
 
 BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
+    "agent_py_agent/agent/adapter/feishu_ws.py:connect_kwargs": (
+        "Transparent lark-oapi SDK adapter forwards the original cross-version callable protocol "
+        "unchanged before adjusting timeout/proxy options; covered by positional/keyword header tests. "
+        "This precise third-party adapter is not a product service parameter entry point."
+    ),
     "agent_py_agent/agent/retrieval/embedding_usage.py:wrapper": (
         "Transparent purpose-labelling decorator (counted_as) must preserve arbitrary method signatures; "
         "嵌入用量计数的用途标注，不是产品服务接口。"

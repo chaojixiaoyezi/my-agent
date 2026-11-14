@@ -257,9 +257,9 @@ def test_nested_directory_changes_expand_each_changed_subtree_once(tmp_path):
     original = store._warm_paths
     expanded = []
 
-    def scan(path):
+    def scan(path, **kwargs):
         expanded.append(path)
-        return original(path)
+        return original(path, **kwargs)
 
     store._warm_paths = scan
     with _checkout(store, warm, home):

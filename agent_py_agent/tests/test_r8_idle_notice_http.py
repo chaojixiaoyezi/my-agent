@@ -82,7 +82,10 @@ store.messages.append({'thread_id':sys.argv[2],'role':'assistant','content':'new
         identity['user_id'] = 'u-1'
         server.auth_middleware.set_local_client_credential('revoked-original-local-credential')
         status, payload = client.request_json('POST', '/client/notices', body)
-        assert status == 403 and payload == {}  # 真实Client对HTTPError保留状态码、不解析拒绝正文。
+        assert status == 403
+        # 原Client保留结构化拒绝，调用者无需把403猜成网络失败或空数据。
+        assert payload == {'error': 'forbidden', 'error_code': 'LOCAL_CREDENTIAL_REQUIRED',
+                           'message': 'untrusted source:不可信来源不可提交任务'}
         assert len(page_calls) == 2
     finally:
         server.stop()

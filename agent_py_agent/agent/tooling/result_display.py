@@ -44,7 +44,9 @@ def _text(value):
 
 def workflow_result_display(action, data, *, ok, error_code=''):
     """展示真实名称、范围和状态，不将整份 JSON 或内部调用引用当作预览。"""
-    lines = ['工作流 · ' + _text(action) + ('：调用成功' if ok else '：失败')]
+    run = data.get('run') if isinstance(data.get('run'), dict) else data
+    paused = run.get('status') == 'paused_for_resume'
+    lines = ['工作流 · ' + _text(action) + ('：已暂停／待恢复' if paused else '：调用成功' if ok else '：失败')]
     if not ok:
         lines.append('原因：' + _text(data.get('error_code') or error_code or 'TOOL_EXECUTION_FAILED'))
     rows = data.get('items', data.get('workflows'))
@@ -66,11 +68,15 @@ def workflow_result_display(action, data, *, ok, error_code=''):
         mode = scope.get('scope_mode')
         title = {'owner_global': '本人全局', 'spaces': '指定业务空间', 'unassigned': '未分配'}.get(mode, mode)
         lines.append('范围：' + _text(title))
-    state = data.get('state') or data.get('status')
+    state = run.get('status') or data.get('state')
     if state:
         lines.append('状态：' + _text(state))
+    if paused:
+        lines.append('运行：' + _text(run.get('workflow_run_id')))
+        breakpoint = data.get('breakpoint') or {}
+        lines.append('下一步：' + _text(data.get('next_action') or breakpoint.get('required_action') or 'inspect_run'))
     lines.append('按 Ctrl+E 查看本次完整结果')
-    return {'kind': 'summary', 'summary': '\n'.join(lines[:6])}
+    return {'kind': 'summary', 'summary': '\n'.join(lines[:8])}
 
 
 def artifact_read_display(payload):

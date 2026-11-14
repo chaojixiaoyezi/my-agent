@@ -21,8 +21,10 @@ from ....tooling.models import (
     EffectResolverPolicy,
     ResourceScopePolicy,
     ToolHandlerOutcome,
+    ToolInvocationContext,
     ToolRuntimePolicy,
 )
+from ....workspace_read_context import WorkspaceReadContext
 from ...agent_tree.model_view import (
     agent_tree_model_payload,
     agent_tree_model_preview,
@@ -63,12 +65,18 @@ class ListAgentsTool(BaseTool):
     # LLM: 身份裁决仍由 canonical tree 完成；原始结果保留，稳定进展元数据只接既有软观察，不判死或取消。
     #   快照构造前的单调时钟起点一并传给进展上下文，使快照/仓库校验/关联读取与 git 观察共用同一总预算。
     # 函数用途: 读取状态与产物引用，并排除仅耗时变化的假进展；不改等待、权限或生命周期状态。
+    def execute_scoped(self, params: dict[str, object], context: ToolInvocationContext) -> ToolHandlerOutcome:
+        return self._execute(params, context.workspace_read_context)
+
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+        return self._execute(params, None)
+
+    def _execute(self, params: dict[str, object], read_context: WorkspaceReadContext | None) -> ToolHandlerOutcome:
         started_monotonic = time.monotonic()
         run_id = str(params.get("run_id") or "").strip()
         query = {"run_id": run_id, "scope": "own_subtree"} if run_id else {}
         snapshot = agent_tree_status_payload(self.agent, query)
-        context = progress_read_context(self.agent, snapshot, started_monotonic=started_monotonic)
+        context = progress_read_context(self.agent, snapshot, started_monotonic=started_monotonic, read_context=read_context)
         payload = agent_tree_model_payload(snapshot, progress_context=context)
         return ToolHandlerOutcome(
             self.model_spec.name,
@@ -104,9 +112,11 @@ def progress_read_context(
     snapshot: dict[str, object],
     *,
     started_monotonic: float | None = None,
+    read_context: WorkspaceReadContext | None = None,
 ) -> ProgressReadContext:
     from ....capability import runtime_config_reload
     from ....capability.config import CapabilityConfig
+    from ..git_progress_adapter import GIT_OBSERVATION_BUDGET_SECONDS
 
     started = time.monotonic() if started_monotonic is None else started_monotonic
     now = time.time()
@@ -125,7 +135,7 @@ def progress_read_context(
     limit = limit or DEFAULT_PROGRESS_CHECK_CHILD_LIMIT_COUNT
     visible = [node for node in snapshot.get("nodes") or [] if isinstance(node, dict)]
     classified = visible[:limit]
-    sources = _node_sources(agent, classified)
+    sources = _node_sources(agent, classified, deadline=started + GIT_OBSERVATION_BUDGET_SECONDS)
     if config.orchestration_git_progress_enabled is True:
         # ORCH03-R2-a / S3-budget：独占关联看完整已授权视图，但只对进入本次分类窗口的 exact 目标执行 git 观察。
         classified_ids = {run_id for node in classified if (run_id := str(node.get("run_id") or ""))}
@@ -136,6 +146,7 @@ def progress_read_context(
             visible,
             classified_ids=classified_ids,
             started_monotonic=started,
+            read_context=read_context,
         )
     else:
         # 关掉即作废上一次样本：重新打开后第一次观察没有比较对象，不会拿关之前的旧样本说“有变化”。
@@ -149,9 +160,11 @@ def progress_read_context(
 # LLM: 只给前 child_limit 个节点读必需来源；审批账每个根一次、共用一个截止。runtime_read 取“节点已在授权快照里”
 #   这一事实，其它记录的加载错误仍在快照 warnings 里。不写任何状态。
 # 函数用途: 汇总受限节点集合的必需来源事实。
-def _node_sources(agent: object, nodes: list[dict[str, object]]) -> dict[str, dict[str, dict[str, object]]]:
+def _node_sources(agent: object, nodes: list[dict[str, object]], *, deadline: float | None = None) -> dict[str, dict[str, dict[str, object]]]:
     from ...agent_tree.node_rendering import progress_source_facts
+    from ..coordination_progress import coordination_source_facts
 
+    coordination = coordination_source_facts(agent, nodes, deadline=deadline)
     approvals = _approval_counts(agent, {str(node.get("root_id") or "") for node in nodes})
     result: dict[str, dict[str, dict[str, object]]] = {}
     for node in nodes:
@@ -159,6 +172,7 @@ def _node_sources(agent: object, nodes: list[dict[str, object]]) -> dict[str, di
         if not run_id:
             continue
         facts = progress_source_facts(agent, run_id)
+        facts.update(coordination.get(run_id, {}))
         root = str(node.get("root_id") or "")
         state = approvals.get(root)
         facts["tool_approvals"] = ({"state": "not_applicable"} if not root else
@@ -210,6 +224,7 @@ def _git_facts(
     *,
     classified_ids: set[str] | None = None,
     started_monotonic: float | None = None,
+    read_context: WorkspaceReadContext | None = None,
 ) -> dict[str, dict[str, object]]:
     from .. import git_progress_adapter as git
 
@@ -255,7 +270,7 @@ def _git_facts(
         if association["association"] == "exact" and run_id in targets:
             repo = association["repo"]
             if repo not in observed:
-                observed[repo] = git.observe(Path(repo), deadline=deadline)
+                observed[repo] = git.observe_registered(agent, repo, deadline=deadline, read_context=read_context)
             entry["previous"] = previous.get((run_id, repo))
             entry["observation"] = observed[repo]
             if not observed[repo].get("error_code"):

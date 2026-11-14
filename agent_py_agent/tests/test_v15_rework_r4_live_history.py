@@ -59,6 +59,7 @@ class CanonicalTransport:
         self.allowed = True
         self.requests = []
         self.responses = []
+        self.activity_requests = []
         self.fail_once = False
         self.after_response = None
         host = SimpleNamespace(home_paths=SimpleNamespace(owner_id='local/r4', owner_home_dir=home),
@@ -72,17 +73,23 @@ class CanonicalTransport:
     def __call__(self, path, payload, *, timeout):
         assert path == '/client/business' and timeout > 0
         request = json.loads(json.dumps(payload))
-        assert request['action'] == 'messages.list'
-        assert request['params']['limit'] == 100
-        self.requests.append(request)
-        if self.fail_once:
+        history = request['action'] == 'messages.list'
+        if history:
+            assert request['params']['limit'] == 100
+            self.requests.append(request)
+        else:
+            # 打开完整会话还读取原执行状态；同样交真实领域路由，不让只准messages的旧夹具中断已读历史。
+            assert request['action'] in {'background_agents.get', 'executions.list', 'subagents.list', 'tool_calls.list'}
+            self.activity_requests.append(request)
+        if history and self.fail_once:
             self.fail_once = False
             raise OSError('simulated connection interruption')
         status, response = execute_business(request, self.context, self.services)
         result = json.loads(json.dumps(response))
-        self.responses.append((status, result))
+        if history:
+            self.responses.append((status, result))
         assert result['request_id'] == request['request_id']
-        if self.after_response is not None:
+        if history and self.after_response is not None:
             self.after_response()
         return status, result
 
@@ -199,7 +206,7 @@ def test_live_refresh_after_history_is_exhausted_never_reuses_old_cursor(case, c
         assert len(transport.requests) == before + 1
         assert transport.requests[-1]['params']['cursor'] == cursor
     assert nav._business_history['background-a']['next_cursor'] is None
-    assert nav._business_messages['background-a'] == {row.message_id for row in original}
+    assert set(nav._business_messages['background-a']) == {row.message_id for row in original}
     reply = append(case, '实时回复-历史已读完')
     # 同一真实客户端先证明 canonical 最新页确实已包含这条回复，不从 UI 失败推测数据丢失。
     latest = case.projection.client.call('messages.list', {
@@ -229,7 +236,7 @@ def test_partial_history_continuation_only_advances_on_explicit_history(case):
     assert case.nav.load_more_business_messages()
     case.threads.join()
     assert case.transport.requests[-1]['params']['cursor'] == cursor
-    assert case.nav._business_messages['background-a'] == {row.message_id for row in [*original, reply]}
+    assert set(case.nav._business_messages['background-a']) == {row.message_id for row in [*original, reply]}
     before = len(case.transport.requests)
     assert case.nav.load_more_business_messages()
     case.threads.join()
@@ -310,7 +317,7 @@ def test_reset_during_inflight_page_does_not_restore_old_display_or_ids(case):
         case.threads.join()
     assert texts(runtime) == [], '已重置的 UI 不能被迟到旧页重新填入正文'
     assert reply.message_id not in case.nav._business_messages['background-a']
-    assert case.nav._business_messages['background-a'] == before_ids
+    assert set(case.nav._business_messages['background-a']) == before_ids
 
 
 def descriptor_count():
@@ -486,5 +493,59 @@ def test_new_current_window_gap_keeps_all_unseen_history_reachable(case, initial
         case.threads.join()
         assert len(case.transport.requests) == before + 1
     assert case.nav._business_history['background-a']['next_cursor'] is None
-    assert case.nav._business_messages['background-a'] == {row.message_id for row in [*original, *burst]}
+    assert set(case.nav._business_messages['background-a']) == {row.message_id for row in [*original, *burst]}
     assert len(texts(runtime)) == len(set(texts(runtime))) == len(original) + len(burst)
+
+
+def test_missing_and_corrupt_history_are_distinct_and_initial_failure_can_retry(case):
+    runtime = enter(case)
+    page = case.projection.conversation('background-a', thread_id='background-a')
+    assert page['history_boundary']['reason_code'] == 'CANONICAL_HISTORY_NOT_RECORDED'
+    assert '未记录' in runtime.notice()
+    path = case.store.storage.message_path('background-a')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{invalid json\n', encoding='utf-8')
+    try:
+        refresh(case)
+        assert 'HOST_NOT_READY' in runtime.notice()
+        diagnostic = [text for text in texts(runtime) if '历史读取失败' in text]
+        assert len(diagnostic) == 1 and 'CANONICAL_HISTORY_UNREADABLE' in diagnostic[0]
+        assert 'JSONDecodeError' in diagnostic[0] and 'none' in diagnostic[0]
+        assert case.transport.responses[-1][1]['request_id'] in diagnostic[0]
+        assert 'effect_outcome' in diagnostic[0]
+        assert case.nav._business_history['background-a']['next_cursor'] is None
+        assert not any(block.block_id.startswith('history:') for block in (
+            *runtime.store.snapshot().stable_blocks, *runtime.store.snapshot().active_blocks))
+        refresh(case)
+        assert [text for text in texts(runtime) if '历史读取失败' in text] == diagnostic
+    finally:
+        path.unlink()
+    row = append(case, '修复原来源后可明确重读')
+    before = len(case.transport.requests)
+    assert case.nav.load_more_business_messages()
+    case.threads.join()
+    assert len(case.transport.requests) == before + 1
+    assert 'cursor' not in case.transport.requests[-1]['params']
+    assert row.message_id in case.nav._business_messages['background-a']
+    assert 'read_error_code' not in case.nav._business_history['background-a']
+
+
+def test_expired_history_cursor_is_reseeded_only_on_explicit_reentry(case):
+    seed(case, 105)
+    runtime = enter(case)
+    original = case.nav._business_history['background-a']['next_cursor']
+    # 服务重启会换游标签名；不篡改token，不用本地猜测新续点。
+    case.transport.service._cursor_key = b's' * 32
+    assert case.nav.load_more_business_messages()
+    case.threads.join()
+    assert 'CURSOR_EXPIRED' in runtime.notice()
+    assert case.nav._business_history['background-a']['next_cursor'] == original
+    assert case.nav.back() and case.nav.enter_selected()
+    case.threads.join()
+    fresh = case.nav._business_history['background-a']['next_cursor']
+    assert fresh and fresh != original
+    assert 'read_error_code' not in case.nav._business_history['background-a']
+    assert case.nav.load_more_business_messages()
+    case.threads.join()
+    assert case.transport.requests[-1]['params']['cursor'] == fresh
+    assert len(case.nav._business_messages['background-a']) == 105

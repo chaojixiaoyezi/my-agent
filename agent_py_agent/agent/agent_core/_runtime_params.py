@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any
 
 from ..action_protocol import RunScope
@@ -83,6 +84,14 @@ class ToolLoopExecuteParams:
     attempt_id: str = ""
     # 会话运行时 run snapshot: catalog, search, native Schema and execution share one tool universe.
     tool_runtime_snapshot: Any = None
+    # 仅活跃attempt内的弱通知订阅；不进入归档，replace沿当前执行片共享。
+    _capability_update_source: Any = field(default=None, repr=False, compare=False)
+    # 能力刷新副本只共享本请求的释放所有权；快照/权限值仍保持各副本不可变。
+    _capability_refresh_lock: Any = field(default_factory=RLock, repr=False, compare=False)
+    _provider_history_owners: Any = field(default=None, repr=False, compare=False)
+    _capability_update_epoch: int = -1
+    _capability_next_expiry: float = 0.0
+    _capability_recheck_tools: frozenset[str] = frozenset()
     # The provider capability and native/text decision are fixed once per run.
     tool_protocol_snapshot: Any = None
     # The existing EffectiveContractSnapshot remains the sole task obligation authority.

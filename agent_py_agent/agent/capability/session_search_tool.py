@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from ..conversation.host_actor import HostActorError
 from ..local_storage.search import ThreadSearch, record_thread_id, search_records_in_thread
 from ..tooling.models import (
     BaseTool,
@@ -94,6 +95,7 @@ def build_session_search_model_spec() -> ToolModelSpec:
         name="session_search",
         description=(
             "检索/翻看当前用户自己的本地历史记录(普通聊天、记忆、任务产物、归档),零成本纯读。"
+            "已绑定空间/业务任务时只返回原来源可证的冻结范围；旧索引无来源证明会报告partial，不能据此认定不存在。"
             "必须指定mode：search全文检索、recent最近列表、around锚点窗口、message原文分段、"
             "thread_search当前会话检索、thread_browse当前会话分页。各模式字段互斥。"
             "已结束的 Gateway 任务命中可能带 task_ref，并在默认检索结果里优先展示；"
@@ -147,16 +149,58 @@ class SessionSearchTool(BaseTool):
         self.agent = agent
 
     # LLM: 会话原文读取（message_id / current_thread 浏览）只依赖会话库，本地索引不可用时仍可读；
-    #   需要索引的形态在分派时单独拒绝。可预期失败给结构化码，其余异常统一为可重试的执行失败。
+    #   需要索引的形态在分派时单独拒绝。可预期失败保留原公开码；只有SQLite明确忙锁可重试，系统故障不泄露异常正文。
     # 函数用途: 把各形态分派交给 _dispatch;存储不可用/检索异常都给结构化码。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         try:
             _validate_mode_params(params)
-            payload = _dispatch(self.agent, _store_for(self.agent), params)
+            from .session_search_scope import frozen_history_scope, scoped_dispatch
+            scope = frozen_history_scope(self.agent)
+            payload = (_dispatch(self.agent, _store_for(self.agent), params) if scope is None
+                       else scoped_dispatch(self.agent, _store_for(self.agent), params, scope))
         except SessionHistoryRefusal as refusal:
             return _error(refusal.message, refusal.hint, refusal.code)
-        except Exception as exc:  # noqa: BLE001 — 检索失败要给明确可重试码,不逃逸成 UNKNOWN_ERROR
-            return _error(f"历史检索失败: {exc}", "可原样重试一次", "TOOL_EXECUTION_FAILED")
+        except HostActorError as exc:
+            return _error(str(exc), '在原聊天核对当前发起人绑定后重新检索。', exc.error_code)
+        except Exception as exc:  # noqa: BLE001 — 纯读故障按机械异常事实分类，不公开可能含路径/正文的原异常文本
+            import sqlite3
+
+            from ..runtime_errors import DataCorruptionError
+
+            sqlite_code = getattr(exc, "sqlite_errorcode", None) if isinstance(exc, sqlite3.Error) else None
+            primary = sqlite_code & 255 if type(sqlite_code) is int else None
+            retryable = primary in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            corrupt = isinstance(exc, DataCorruptionError) or primary in (
+                sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB
+            )
+            if retryable:
+                code, reason = "HISTORY_STORAGE_BUSY", "历史存储被并发操作占用，SQLite返回明确的忙锁状态。"
+                hint = "稍后在同一授权范围重试一次；若仍忙锁，停止重复查询并请宿主检查原存储占用。"
+            elif corrupt:
+                code, reason = "HISTORY_SOURCE_CORRUPT", "历史来源或派生索引完整性校验失败。"
+                hint = "停止原样重试；请宿主检查原历史来源与派生索引完整性。已有授权message_id可用message模式核对；该入口也失败则保留原记录等待修复，勿扩大范围。"
+            else:
+                code, reason = "HISTORY_QUERY_UNAVAILABLE", "历史读取依赖接口或系统状态异常，当前查询不可用。"
+                hint = "停止原样重试；请宿主核对运行版本、历史存储接口和系统状态。可用当前范围内已经返回的引用继续处理，勿改用全目录扫描或扩大授权。"
+            safe_types = (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.Error,
+                          AttributeError, OSError, ValueError, TypeError, RuntimeError)
+            exception_type = next((kind.__name__ for kind in safe_types if isinstance(exc, kind)), "Exception")
+            if isinstance(exc, DataCorruptionError):
+                exception_type = "DataCorruptionError"
+            payload = {
+                "error": reason, "error_code": code, "exception_type": exception_type,
+                "failure_stage": "execution", "phase": "history_query", "effect_outcome": "not_started",
+                "effects": "本工具仅执行历史读取；未执行业务写入、删除或修改原历史。",
+                "retryable": retryable, "hint": hint,
+            }
+            if primary is not None:
+                payload["sqlite_primary_code"] = primary
+            return ToolHandlerOutcome(
+                "session_search", False, json.dumps(payload, ensure_ascii=False),
+                error_code=code, retryable=retryable,
+                recommended_action="retry" if retryable else "change_strategy",
+                recovery_hint=hint, effect_outcome="not_started", failure_stage="execution", phase="history_query",
+            )
         return ToolHandlerOutcome("session_search", True, json.dumps(payload, ensure_ascii=False))
 
 

@@ -56,14 +56,15 @@ def _released_from(receipt: GuidanceOnceReceipt, receipt_turn_id: str) -> bool:
     return receipt_turn_id in {str(item or "").strip() for item in released_ids}
 
 
-# LLM: 认领时补记/改绑接收回合的两种情形：宿主投递回执还没绑定回合（首次认领）；会话消息被上一回合释放后由别的回合
+# LLM: 认领时补记/改绑接收回合的两种情形：规范回执还没绑定回合（首次认领）；会话消息被上一回合释放后由别的回合
 #   跨回合认领（调用方已确认它在 released_turn_ids 里）。插话和派活正文的跨回合认领不改绑，行为不变。
 # 函数用途: 判断这次认领是否要把回执的 expected_turn_id 写成当前回合并补回合索引。
 def _binds_on_claim(metadata: dict, receipt_turn_id: str, requested_turn_id: str) -> bool:
+    # 首次认领任何规范回执都必须绑定本次精确回合；来源类型不决定输入提交身份。
+    if not receipt_turn_id:
+        return bool(requested_turn_id)
     if not _host_delivery_receipt(metadata):
         return False
-    if not receipt_turn_id:
-        return True
     origin_kind = str(metadata.get("origin_kind") or "").strip()
     return origin_kind == SESSION_MESSAGE_ORIGIN_KIND and receipt_turn_id != requested_turn_id
 

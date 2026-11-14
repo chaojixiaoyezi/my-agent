@@ -111,7 +111,11 @@ def finish_retirement(case):
             break
         scheduler.tick_thread(thread_id)
     assert states[-1] == "retired", states
-    assert store.threads.require(thread_id).task_ids == ()
+    assert store.threads.require(thread_id).active_task_ids == ()
+    # 退休只清活跃责任；分页历史仍须能读回原任务完成事实，不能为断言删历史。
+    for task_id in store.tasks.iter_task_ids(thread_id):
+        link, error = store.tasks.link_report(thread_id, task_id)
+        assert error is None and link is not None and link.status == "completed"
     return states
 
 
@@ -212,7 +216,10 @@ def test_stream_drain_restore_assign_has_one_execution_and_one_final_per_task(bu
     scheduler.tick_thread(thread_id)
     assert store.session_tasks.require(second).status == "done"
     assert model.calls == 2 and model.peak == 1
-    assert len(finals(store, thread_id)) == 2 and store.threads.require(thread_id).task_ids == ()
+    assert len(finals(store, thread_id)) == 2 and store.threads.require(thread_id).active_task_ids == ()
+    for completed_id in (task_id, second):
+        link, error = store.tasks.link_report(thread_id, completed_id)
+        assert error is None and link is not None and link.status == 'completed'
 
 
 def test_suspended_pending_body_without_live_wake_is_resumed_once_by_drain(business_wire):

@@ -47,5 +47,6 @@ def test_native_review_changes_requested_survives_other_pass_and_scope_or_expire
     vote('A-repeat-overflow', 'reviewer-A', 'pass')
     with pytest.raises(WorkflowReviewPending, match='WORKFLOW_REVIEW_HISTORY_INCOMPLETE') as caught:
         governance.require_effect(run, WorkflowEffectPhase('effect'))
-    assert '修订候选' in caught.value.details['recommended_action']
+    assert caught.value.details['recommended_action'] == 'repair_against_acceptance_findings'
+    assert '修订候选' in caught.value.details['recovery_hint']
     assert target.read_text() == 'effect\n'

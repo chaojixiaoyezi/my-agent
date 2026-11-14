@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -70,6 +72,137 @@ def test_exact_vocabulary_and_no_grant_upgrade():
 
 # LLM: 锁住业务动作目录与Schema包除显式已批可选投影（含FLAG-7 B无上限unresolved_count/omitted_count）外的完整冻结摘要，禁止未授权schema漂移。
 # 函数用途: 校验冻结的完整业务动作目录与Schema捆绑包摘要一致性。
+def _normalize_compatible_schema_additions(api, schemas, definitions):
+    """锁住合法新合同的完整形状后，还原旧视图核验原四个摘要，不忽略未知差额。"""
+    step_warning = {'type': 'object',
+     'properties': {'code': {'type': 'string', 'maxLength': 4096},
+                    'contract_version': {'type': 'integer', 'enum': [1]},
+                    'validation_error': {'type': 'string', 'maxLength': 4096},
+                    'missing_keys': {'type': 'array',
+                                     'items': {'type': 'string', 'maxLength': 512},
+                                     'maxItems': 100},
+                    'null_keys': {'type': 'array',
+                                  'items': {'type': 'string', 'maxLength': 512},
+                                  'maxItems': 100},
+                    'executed_step_count': {'type': 'integer', 'minimum': 0},
+                    'next_action': {'type': 'string', 'maxLength': 4096}},
+     'required': ['code',
+                  'contract_version',
+                  'validation_error',
+                  'missing_keys',
+                  'null_keys',
+                  'executed_step_count',
+                  'next_action'],
+     'additionalProperties': False}
+    public_step = {'type': 'object',
+     'properties': {'workflow_run_id': {'type': 'string'},
+                    'workflow_id': {'type': 'string'},
+                    'step_id': {'type': 'string'},
+                    'name': {'type': 'string'},
+                    'description': {'type': 'string'},
+                    'status': {'enum': ['pending', 'running', 'succeeded', 'failed', 'skipped', 'paused_for_resume']},
+                    'duration_ms': {'type': 'integer', 'minimum': 0},
+                    'seq': {'type': 'integer', 'minimum': 0},
+                    'next_step_ids': {'type': 'array', 'items': {'type': 'string'}}},
+     'required': ['workflow_run_id',
+                  'workflow_id',
+                  'step_id',
+                  'name',
+                  'description',
+                  'status',
+                  'duration_ms',
+                  'seq',
+                  'next_step_ids'],
+     'additionalProperties': False}
+    for defs in (api["$defs"], schemas["$defs"], definitions):
+        # scope.set 是输入命令，允许已绑定流程显式解除空间；持久 Scope 仍拒绝 spaces+空数组。
+        command = defs.pop("ScopeSetCommand")
+        assert command.pop("description") == "仅供 scope.set。对已绑定空间的流程传 scope_mode=spaces 和 space_ids=[] 会原子转为 unassigned。"
+        expected_command = deepcopy(defs["Scope"])
+        expected_command["oneOf"][1]["properties"]["space_ids"]["minItems"] = 0
+        assert command == expected_command
+        scope_items = defs["Scope"]["oneOf"][1]["properties"]["space_ids"]
+        assert scope_items["items"] == {"$ref": "#/$defs/Id"}
+        scope_items["items"] = deepcopy(defs["Id"])
+        step = defs["WorkflowStepView"]
+        assert "output_contract_warning" not in step["required"]
+        assert step["properties"].pop("output_contract_warning") == step_warning
+        assert defs.pop("PublicWorkflowStep") == public_step
+        event = defs["PublicModelDisplayEvent"]
+        assert not {"thread_id", "task_id"} & set(event["required"])
+        assert event["properties"].pop("thread_id") == {"$ref": "#/$defs/Id"}
+        assert event["properties"].pop("task_id") == {"$ref": "#/$defs/NullableId"}
+        assert event["properties"]["kind"] == {"enum": ["assistant_completed", "system_message"]}
+        event["properties"]["kind"] = {"const": "assistant_completed"}
+        assert event["properties"]["payload"]["properties"].pop("workflow_step") == {
+            "$ref": "#/$defs/PublicWorkflowStep"}
+        assert event.pop("oneOf") == [
+            {"properties": {"kind": {"const": "assistant_completed"}}},
+            {"properties": {"kind": {"const": "system_message"}, "payload": {"required": ["workflow_step"]}},
+             "required": ["thread_id", "task_id"]}]
+    for index, row in enumerate(api["actions"]):
+        if row["action"] == "workflows.scope.set":
+            for params in (row["params_schema"], row["plugin_payload_schema"],
+                           schemas["request_schema"]["oneOf"][index]["properties"]["params"]):
+                assert params["properties"]["scope"] == {"$ref": "#/$defs/ScopeSetCommand"}
+                params["properties"]["scope"] = {"$ref": "#/$defs/Scope"}
+
+
+def _normalize_observability_extensions(api, schemas, definitions):
+    """可选展示不改旧required；精确锁住展示形状与更强内容授权标志，再比较原W0摘要。"""
+    frozen = json.loads((Path(__file__).parent / "fixtures" / "business_schema_compatible_extensions.json").read_text())
+    assert frozen["baseline_commit"] == "bdaa38c93"
+
+    def remove_optional(result, additions):
+        assert not set(additions) & set(result.get("required", []))
+        for key, shape in additions.items():
+            assert result["properties"].pop(key) == shape
+
+    def space_result(result):
+        remove_optional(result, frozen["spaces_create"])
+        assert result["description"] == frozen["spaces_create_description"]["current"]
+        result["description"] = frozen["spaces_create_description"]["legacy"]
+
+    result_ref = {"type": "string", "minLength": 1, "maxLength": 512}
+    display = {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/PublicModelDisplayEvent"}}
+    for defs in (api["$defs"], schemas["$defs"], definitions):
+        space_result(defs["Result_spaces_create"])
+        remove_optional(defs["MessageView"], frozen["message_execution_association"])
+        remove_optional(defs["Result_messages_list"], {"display_events": display})
+        remove_optional(defs["Result_executions_get"], {"lifecycle": frozen["execution_lifecycle"]})
+        assert defs["Result_tool_calls_get"]["properties"]["result_ref"] == result_ref
+        defs["Result_tool_calls_get"]["properties"]["result_ref"] = {"$ref": "#/$defs/Id"}
+        tool = defs["ToolCallView"]
+        assert tool["properties"]["result_ref"] == {"anyOf": [result_ref, {"type": "null"}]}
+        tool["properties"]["result_ref"] = {"$ref": "#/$defs/NullableId"}
+        remove_optional(tool, {"invocation": {"type": "string", "maxLength": 100}})
+        remove_optional(defs["PackageMountView"], {"name": {"type": "string", "minLength": 1, "maxLength": 160}})
+        remove_optional(defs["WorkflowStepView"], frozen["workflow_output_artifacts"])
+        remove_optional(defs["WorkflowStepView"], frozen["workflow_retry_observation"])
+        assert defs.pop("PublicModelDisplayEvent") == frozen["public_model_display_event"]
+    for index, row in enumerate(api["actions"]):
+        action = row["action"]
+        if action == "spaces.create":
+            space_result(row["result_schema"])
+            assert row["result_fields"][-3:] == ["controller_ref", "controller_state", "allowed_actions"]
+            del row["result_fields"][-3:]
+        elif action == "messages.list":
+            for params in (row["params_schema"], row["plugin_payload_schema"],
+                           schemas["request_schema"]["oneOf"][index]["properties"]["params"]):
+                remove_optional(params, {"include_display": {"type": "boolean", "default": False}})
+            remove_optional(row["result_schema"], {"display_events": display})
+            assert row["result_fields"].pop() == "display_events"
+        elif action == "executions.get":
+            remove_optional(row["result_schema"], {"lifecycle": frozen["execution_lifecycle"]})
+            assert row["result_fields"].pop() == "lifecycle"
+        elif action == "tool_calls.get":
+            assert row["result_schema"]["properties"]["result_ref"] == result_ref
+            row["result_schema"]["properties"]["result_ref"] = {"$ref": "#/$defs/Id"}
+        elif action == "assets.versions.accept":
+            # 只还原旧目录展示：真实enforcement仍须显式内容授权，另由撤权行为测试证明。
+            assert row.pop("content_authorization_required") is True
+
+
 def test_frozen_full_catalog_and_schema_bundle_hashes():
     module = catalog()
     api = module.business_api()
@@ -89,7 +222,7 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
     # ROUTE-02 只可选追加后台调度投影：锁住新定义与两处可选引用，再规范化比较原冻结目录。
     scheduling_schema = {"type": "object", "properties": {
         "state": {"type": "string", "enum": ["no_work", "queued", "running", "paused", "retiring", "retired",
-                                             "model_unavailable", "wake_backoff", "stalled", "terminal", "unknown"]},
+                                             "model_unavailable", "wake_backoff", "stalled", "terminal", "unknown", "waiting_child"]},
         "reason_code": {"type": "string", "minLength": 0, "maxLength": 128},
         "pending_task_count": {"type": ["integer", "null"], "minimum": 0},
         "wake_signal_ids": {"type": "array", "items": {"$ref": "#/$defs/Id"}, "maxItems": 20},
@@ -136,6 +269,8 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         "unresolved_count": {"type": "integer", "minimum": 0},
         "omitted_count": {"type": "integer", "minimum": 0}},
         "required": ["state", "unresolved_count", "omitted_count"], "additionalProperties": False}
+    coverage_schema["properties"]["diagnostics"] = json.loads((Path(__file__).parent / "fixtures"
+        / "business_schema_compatible_extensions.json").read_text())["result_ref_coverage_diagnostics"]
     for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
         assert "result_ref_coverage" not in definitions["TaskView"]["required"]
         assert definitions["TaskView"]["properties"].pop("result_ref_coverage") == {"$ref": "#/$defs/ResultRefCoverage"}
@@ -212,7 +347,7 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         result = definitions["Result_background_agents_list"]
         assert "quota" not in result["required"]
         assert result["properties"].pop("quota") == {"$ref": "#/$defs/BackgroundAgentQuotaView"}
-    nullable_space_actions = {"background_agents.create", "background_agents.list", "tasks.assign", "tasks.submit"}
+    nullable_space_actions = {"background_agents.create", "background_agents.list", "tasks.assign", "tasks.submit", "agent_tree.get"}
     for index, row in enumerate(normalized_api["actions"]):
         if row["action"] in nullable_space_actions:
             request_params = normalized_schemas["request_schema"]["oneOf"][index]["properties"]["params"]
@@ -223,6 +358,8 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
             result = row["result_schema"]
             assert "quota" not in result["required"]
             assert result["properties"].pop("quota") == {"$ref": "#/$defs/BackgroundAgentQuotaView"}
+    _normalize_compatible_schema_additions(normalized_api, normalized_schemas, normalized_defs)
+    _normalize_observability_extensions(normalized_api, normalized_schemas, normalized_defs)
     assert digest(normalized_api) == "d7f7859fded58ec5ab3e82a5dc8b1d363c7b45bb9a772deea17dcf54113df737"
     assert digest(normalized_schemas) == "d7883032c859fa4d2c7d6365d50e77b2d3f2cb6fa77904f355925bbf3dca2d4b"
     assert digest(normalized_defs) == "c2441120aa06032bd0aba9a5b83075f72d60d34f7cc69cd376b80779a5b9554a"
@@ -632,3 +769,181 @@ def test_business_capability_uses_original_live_grant_issuer_and_revocation(tmp_
     finally:
         issuer.close()
         api.set_host_api_base(None)
+
+
+def test_optional_display_extensions_accept_old_result_shapes_and_keep_closed_fields():
+    module = catalog()
+    for action, additions in (
+        ('spaces.create', ('controller_ref', 'controller_state', 'allowed_actions')),
+        ('messages.list', ('display_events',)), ('executions.get', ('lifecycle',)),
+    ):
+        spec = module.business_action_spec(action)
+        old_result = schema_example(spec.result_schema, spec.result_schema)
+        assert not set(additions) & set(old_result)
+        assert spec.validate_result(old_result) == old_result
+        with pytest.raises(HostAPIError):
+            spec.validate_result({**old_result, 'untrusted_extension': True})
+    spec = module.business_action_spec('messages.list')
+    old_params = schema_example(spec.plugin_payload_schema, spec.plugin_payload_schema)
+    assert 'include_display' not in old_params
+    assert decode_call(wire(spec.plugin_action, old_params)).payload['include_display'] is False
+    assert decode_call(wire(spec.plugin_action, {**old_params, 'include_display': True})).payload['include_display'] is True
+    with pytest.raises(HostAPIError):
+        decode_call(wire(spec.plugin_action, {**old_params, 'include_display': 'false'}))
+
+
+def test_workflow_public_event_addition_preserves_old_assistant_and_requires_origin():
+    module = catalog()
+    defs = module.business_defs()
+    schema = module.standalone_schema(defs['PublicModelDisplayEvent'])
+    old = {'schema': 'conversation_history_display.v1', 'kind': 'assistant_completed',
+           'phase': 'completed', 'request_id': 'request', 'block_id': 'block', 'payload': {'text': '完成'}}
+    assert validate_object(old, schema) == old
+    incomplete = {**old, 'kind': 'system_message'}
+    with pytest.raises(HostAPIError):
+        validate_object(incomplete, schema)
+    step_schema = module.standalone_schema(defs['PublicWorkflowStep'])
+    step = schema_example(step_schema, step_schema)
+    current = {**incomplete, 'thread_id': 'thread', 'task_id': None,
+               'payload': {'text': '步骤状态', 'workflow_step': step}}
+    assert validate_object(current, schema) == current
+    paused = {**current, 'payload': {'text': '等待恢复', 'workflow_step': {**step, 'status': 'paused_for_resume'}}}
+    assert validate_object(paused, schema) == paused
+    for changed in ({'status': 'done'}, {'seq': -1}, {'private_input': 'untrusted'}):
+        invalid = {**current, 'payload': {'text': '步骤状态', 'workflow_step': {**step, **changed}}}
+        with pytest.raises(HostAPIError):
+            validate_object(invalid, schema)
+    for missing in ('thread_id', 'task_id'):
+        with pytest.raises(HostAPIError):
+            validate_object({key: value for key, value in current.items() if key != missing}, schema)
+
+
+def test_scope_command_expansion_never_makes_empty_spaces_a_persisted_scope():
+    module = catalog()
+    defs = module.business_defs()
+    command = module.standalone_schema(defs['ScopeSetCommand'])
+    persisted = module.standalone_schema(defs['Scope'])
+    for value in ({'scope_mode': 'owner_global', 'space_ids': []},
+                  {'scope_mode': 'spaces', 'space_ids': ['space']},
+                  {'scope_mode': 'unassigned', 'space_ids': []}):
+        assert validate_object(value, command) == validate_object(value, persisted) == value
+    clearing = {'scope_mode': 'spaces', 'space_ids': []}
+    assert validate_object(clearing, command) == clearing
+    with pytest.raises(HostAPIError):
+        validate_object(clearing, persisted)
+    for schema in (command, persisted):
+        with pytest.raises(HostAPIError):
+            validate_object({'scope_mode': 'spaces', 'space_ids': ['space', 'space']}, schema)
+        with pytest.raises(HostAPIError):
+            validate_object({'scope_mode': 'spaces', 'space_ids': ['中' * 64]}, schema)
+
+
+def test_optional_result_coverage_diagnostic_preserves_unknown_source_effect():
+    module = catalog()
+    schema = module.standalone_schema(module.business_defs()['ResultRefCoverage'])
+    old = {'state': 'partial', 'unresolved_count': 1, 'omitted_count': 0}
+    assert validate_object(old, schema) == old
+    item = {'error_code': 'DELIVERY_OBSERVATION_BUDGET_EXCEEDED', 'coverage': 'partial',
+            'stage': 'delivery_observation', 'effect_outcome': 'not_started',
+            'source_effect_outcome': 'unknown', 'next_action': '读取原执行回执核对'}
+    current = {**old, 'diagnostics': [item]}
+    assert validate_object(current, schema) == current
+    with_type = {**old, 'diagnostics': [{**item, 'exception_type': 'PermissionError'}]}
+    assert validate_object(with_type, schema) == with_type
+    for forged in ({'coverage': 'complete'}, {'source_effect_outcome': 'not_started'},
+                   {'effect_outcome': 'committed'}, {'private_input': 'untrusted'}, {'exception_type': 1}):
+        with pytest.raises(HostAPIError):
+            validate_object({**old, 'diagnostics': [{**item, **forged}]}, schema)
+
+
+def test_result_reference_expansion_accepts_old_ids_without_unbounded_strings():
+    module = catalog()
+    spec = module.business_action_spec('tool_calls.get')
+    original = schema_example(spec.result_schema, spec.result_schema)
+    full_ref = 'tool-operation://' + 'r' * 120 + '/' + 'o' * 120
+    assert 128 < len(full_ref) <= 512
+    for ref in ('old-operation-id', full_ref):
+        value = {**original, 'result_ref': ref}
+        assert spec.validate_result(value) == value
+    for invalid in ('', 'x' * 513):
+        with pytest.raises(HostAPIError):
+            spec.validate_result({**original, 'result_ref': invalid})
+
+
+def test_message_execution_association_is_optional_and_never_a_tool_ownership_claim():
+    module = catalog()
+    schema = module.standalone_schema(module.business_defs()['MessageView'])
+    old = schema_example(schema, schema)
+    assert not {'input_ref', 'execution_refs', 'association_coverage', 'association_reason'} & set(old)
+    assert validate_object(old, schema) == old
+    current = {**old, 'input_ref': None, 'execution_refs': [{'run_id': 'run', 'attempt_id': 'attempt'}],
+               'association_coverage': 'partial',
+               'association_reason': 'ATTEMPT_CONTEXT_NOT_EXCLUSIVE_TOOL_OWNERSHIP'}
+    assert validate_object(current, schema) == current
+    with pytest.raises(HostAPIError):
+        validate_object({**current, 'execution_refs': [{'run_id': 'run'}]}, schema)
+    with pytest.raises(HostAPIError):
+        validate_object({**current, 'execution_refs': [{'run_id': 'run', 'attempt_id': 'attempt',
+                                                       'exclusive_tool_owner': True}]}, schema)
+
+
+def test_workflow_retry_observation_is_optional_bounded_and_keeps_old_step_dto():
+    module = catalog()
+    schema = module.standalone_schema(module.business_defs()['WorkflowStepView'])
+    old = schema_example(schema, schema)
+    assert 'retry_observation' not in old
+    assert validate_object(old, schema) == old
+    row = {'attempt': 1, 'attempt_id': 'attempt-one', 'error_code': 'PATH_NOT_FOUND',
+           'next_delay_seconds': 3, 'occurred_at': '2026-11-13T00:00:00Z'}
+    observation = {'attempt_count': 2, 'max_attempts': 2, 'current_attempt_id': 'attempt-two',
+                   'history': [row], 'coverage': 'complete'}
+    assert validate_object({**old, 'retry_observation': observation}, schema)
+    for patch in ({'max_attempts': 0}, {'history': [row] * 21}, {'coverage': 'invented'},
+                  {'current_attempt_id': 42}, {'private_input': 'synthetic'}):
+        with pytest.raises(HostAPIError):
+            validate_object({**old, 'retry_observation': {**observation, **patch}}, schema)
+    with pytest.raises(HostAPIError):
+        validate_object({**old, 'retry_observation': {**observation,
+            'history': [{**row, 'error_message': 'synthetic private detail'}]}}, schema)
+
+
+def test_domain_message_result_names_utf8_limit_without_returning_content():
+    from agent_py_agent.agent.conversation.business_access import BusinessError, validate_result
+
+    module = catalog()
+    spec = module.business_action_spec('messages.list')
+    result = schema_example(spec.result_schema, spec.result_schema)
+    message_schema = module.standalone_schema(module.business_defs()['MessageView'])
+    item = schema_example(message_schema, message_schema)
+    # 字符合同仍合法，UTF8字节超原65536上界；不放宽任何原单位限制。
+    value = '中' * 21846
+    assert len(value) < message_schema['properties']['text']['maxLength']
+    with pytest.raises(BusinessError) as failure:
+        validate_result('messages.list', {**result, 'items': [{**item, 'text': value}]})
+    error = failure.value
+    assert error.code == 'DOMAIN_RESULT_INVALID'
+    assert error.details['field_path'] == '$.items[0].text'
+    assert error.details['constraint'] == 'x-max-bytes'
+    assert error.details['expected'] == 65536 and error.details['actual_length'] == 65538
+    assert error.details['length_unit'] == 'utf8_bytes'
+    assert '不要重新发起写操作' in error.details['next_action']
+    assert value not in json.dumps(error.details, ensure_ascii=False)
+    valid = {**result, 'items': [{**item, 'text': '中' * 21845 + 'a'}]}
+    assert validate_result('messages.list', valid) == valid
+
+
+@pytest.mark.parametrize('text_value,field_schema,constraint,expected,length,unit', [
+    ('合成', {'type': 'string', 'maxLength': 1}, 'maxLength', 1, 2, 'characters'),
+    ('合成', {'type': 'string', 'x-max-bytes': 5}, 'x-max-bytes', 5, 6, 'utf8_bytes'),
+    ('\ud800', {'type': 'string'}, 'utf8', 'valid UTF-8', None, None),
+])
+def test_schema_diagnostic_preserves_units_and_encoding_without_values(
+        text_value, field_schema, constraint, expected, length, unit):
+    with pytest.raises(HostAPIError) as failure:
+        validate_object({'value': text_value}, closed({'value': field_schema}))
+    details = failure.value.details
+    assert details['field_path'] == '$.value'
+    assert details['constraint'] == constraint and details['expected'] == expected
+    if length is not None:
+        assert details['actual_length'] == length and details['length_unit'] == unit
+    assert text_value not in json.dumps(details, ensure_ascii=False)

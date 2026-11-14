@@ -12,6 +12,7 @@ from .package_provider import list_installed_capability_packages
 from .skill_learning_store import SkillLearningStore
 from .skill_usage_ledger import MAX_USAGE_LEDGER_EVENTS, _usage_read_index
 
+# 能力查询接受的最大字符数，已授权候选沿同一查询截取边界排序。
 BUSINESS_CAPABILITY_QUERY_MAX_CHARS = 8000
 
 
@@ -231,8 +232,14 @@ class BusinessCapabilityService:
                 or ('project_ref' in request and request['project_ref'] != context.project_ref)):
             raise PermissionError('业务对象与宿主上下文不一致')
         if action == 'spaces.capabilities.resolve':
-            return resolve_business_capabilities(context=context, request=BusinessCapabilityRequest(request.get('query', '')),
-                                                   host=self.host).to_dict()
+            result = resolve_business_capabilities(context=context,
+                request=BusinessCapabilityRequest(request.get('query', '')), host=self.host)
+            from .method_usage import record_candidates
+            matches = [{'kind': 'capability_package' if row['kind'] == 'package' else row['kind'],
+                        'stable_id': row['method_ref']} for row in result.candidates]
+            record_candidates(self.host, self.host.current_skill_snapshot(), matches,
+                              source='spaces.capabilities.resolve')
+            return result.to_dict()
         return _usage_page(self.host, owner, action, request, context)
 
 
@@ -241,11 +248,6 @@ def _usage_page(host, owner, action, request, context):
     import sqlite3
 
     from ..conversation.business_access import BusinessError
-    from ..conversation.business_observability import (
-        ObservationSourcePage,
-        runtime_source_revision,
-        source_after,
-    )
     from ..local_storage.owner_read_index import require_complete
     from ..runtime_db.repository import RuntimeRepository
     from ..runtime_db.schema import runtime_db_path
@@ -273,28 +275,107 @@ def _usage_page(host, owner, action, request, context):
             'source_coverage': getattr(error, 'coverage', {}),
             'next_action': '检查原技能使用账本后从首页重新读取。'}) from error
     path = runtime_db_path(Path(host.home_paths.owner_home_dir).resolve())
-    revision = runtime_source_revision(path) if path.exists() else None
-    identity = hashlib.sha256(json.dumps([owner, action, context.space_id, request.get('task_id'),
-        context.task_id, revision, {key: view.get(key) for key in ('generation', 'through', 'source_size', 'captured_status')}], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    position = {'skill_offset': 0, 'runtime_after': 0}
+
+    def expired(reason='USAGE_CURSOR_VERSION_OR_SOURCE_CHANGED'):
+        return BusinessError('CURSOR_EXPIRED', details={'reason': reason,
+            'next_action': '移除旧 cursor，从首页重新读取当前保留范围的使用记录。'})
+
+    def skill_boundary(count):
+        if not count:
+            return {'count': 0, 'first': '', 'last': ''}
+        result = []
+        for offset in (0, count - 1):
+            rows = require_complete(index.query(view, limit=1, offset=offset))['rows']
+            if len(rows) != 1:
+                raise expired('SKILL_USAGE_FROZEN_RANGE_MISSING')
+            result.append(hashlib.sha256(json.dumps(rows[0], ensure_ascii=False,
+                sort_keys=True, separators=(',', ':')).encode()).hexdigest())
+        return {'count': count, 'first': result[0], 'last': result[1]}
+
+    def runtime_boundary(expected=None):
+        if not path.exists():
+            if expected is not None:
+                raise expired('RUNTIME_USAGE_FROZEN_RANGE_MISSING')
+            return None
+        info = path.stat()
+        physical = [info.st_dev, info.st_ino]
+        repo = RuntimeRepository(path, read_only=True)
+        with repo._runtime_connection() as conn:
+            if expected is None:
+                first = conn.execute('SELECT rowid,operation_id FROM tool_operations ORDER BY rowid LIMIT 1').fetchone()
+                last = conn.execute('SELECT rowid,operation_id FROM tool_operations ORDER BY rowid DESC LIMIT 1').fetchone()
+                return {'physical': physical, 'first': list(first) if first else None,
+                        'last': list(last) if last else None}
+            if physical != expected['physical']:
+                raise expired('RUNTIME_USAGE_SOURCE_REPLACED')
+            for anchor in (expected['first'], expected['last']):
+                if anchor is not None:
+                    row = conn.execute('SELECT operation_id FROM tool_operations WHERE rowid=?', (anchor[0],)).fetchone()
+                    if row is None or row[0] != anchor[1]:
+                        raise expired('RUNTIME_USAGE_FROZEN_RANGE_MISSING')
+        return expected
+
+    # 游标冻结来源截止而非整个WAL版本；查询自己的写账和后来追加不会扩入旧读窗。
+    # 每页重新鉴权并读取行的当前状态，不把该有界读窗宣称为所有历史状态的不可变快照。
+    scope = [owner, action, context.space_id, context.project_ref, context.binding_id,
+             request.get('task_id'), context.task_id]
+    position = {'skill_offset': 0, 'runtime_after': 0, 'runtime_after_id': ''}
     cursor = request.get('cursor')
-    if cursor is not None:
-        try:
+    try:
+        if cursor is None:
+            cutoff = {'skill': skill_boundary(skill_count), 'runtime': runtime_boundary()}
+        else:
             if type(cursor) is not str or not 1 <= len(cursor) <= 2048:
                 raise ValueError('invalid cursor')
             decoded = json.loads(base64.b64decode(cursor + '=' * (-len(cursor) % 4), altchars=b'-_', validate=True))
-            if (type(decoded) is not dict or set(decoded) != {'version', 'identity', 'position'}
-                    or decoded['version'] != 2 or decoded['identity'] != identity):
+            if (type(decoded) is not dict or set(decoded) != {'version', 'identity', 'cutoff', 'position'}
+                    or decoded['version'] != 3):
                 raise ValueError('expired cursor')
-            position = decoded['position']
-            if (type(position) is not dict or set(position) != {'skill_offset', 'runtime_after'}
-                    or any(type(v) is not int or v < 0 for v in position.values())
-                    or position['skill_offset'] > skill_count):
+            cutoff, position = decoded['cutoff'], decoded['position']
+            if type(cutoff) is not dict or set(cutoff) != {'skill', 'runtime'}:
+                raise ValueError('invalid cutoff')
+            skill = cutoff['skill']
+            if (type(skill) is not dict or set(skill) != {'count', 'first', 'last'}
+                    or type(skill['count']) is not int or not 0 <= skill['count'] <= MAX_USAGE_LEDGER_EVENTS
+                    or any(type(skill[k]) is not str or len(skill[k]) > 64 for k in ('first', 'last'))
+                    or skill['count'] > skill_count or skill_boundary(skill['count']) != skill):
+                raise expired('SKILL_USAGE_FROZEN_RANGE_MISSING')
+            runtime = cutoff['runtime']
+            if runtime is not None:
+                if (type(runtime) is not dict or set(runtime) != {'physical', 'first', 'last'}
+                        or type(runtime['physical']) is not list or len(runtime['physical']) != 2
+                        or any(type(v) is not int or v < 0 for v in runtime['physical'])):
+                    raise ValueError('invalid runtime cutoff')
+                for anchor in (runtime['first'], runtime['last']):
+                    if anchor is not None and (type(anchor) is not list or len(anchor) != 2
+                            or type(anchor[0]) is not int or not 0 < anchor[0] <= 2**63 - 1
+                            or type(anchor[1]) is not str or not 1 <= len(anchor[1]) <= 128):
+                        raise ValueError('invalid runtime anchor')
+                if (runtime['first'] is None) != (runtime['last'] is None):
+                    raise ValueError('invalid runtime range')
+                if runtime['first'] and runtime['first'][0] > runtime['last'][0]:
+                    raise ValueError('invalid runtime range')
+                runtime_boundary(runtime)
+            identity = hashlib.sha256(json.dumps([scope, cutoff], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            if decoded['identity'] != identity:
+                raise ValueError('scope changed')
+            if (type(position) is not dict or set(position) != {'skill_offset', 'runtime_after', 'runtime_after_id'}
+                    or any(type(position[k]) is not int or position[k] < 0 for k in ('skill_offset', 'runtime_after'))
+                    or type(position['runtime_after_id']) is not str or len(position['runtime_after_id']) > 128
+                    or bool(position['runtime_after']) != bool(position['runtime_after_id'])
+                    or position['skill_offset'] > skill['count']
+                    or position['runtime_after'] > (runtime['last'][0] if runtime and runtime['last'] else 0)):
                 raise ValueError('invalid position')
-        except (ValueError, TypeError, KeyError) as error:
-            raise BusinessError('CURSOR_EXPIRED', details={
-                'reason': 'USAGE_CURSOR_VERSION_OR_SOURCE_CHANGED',
-                'next_action': '移除旧 cursor，从首页重新读取使用记录。'}) from error
+    except BusinessError:
+        raise
+    except (ValueError, TypeError, KeyError) as error:
+        raise expired() from error
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        raise BusinessError('STORE_UNAVAILABLE', details={'reason': 'RUNTIME_USAGE_SOURCE_UNREADABLE',
+            'exception_type': type(error).__name__, 'next_action': '检查原runtime使用来源后从首页重读。'}) from error
+    identity = hashlib.sha256(json.dumps([scope, cutoff], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    skill_count = cutoff['skill']['count']
+    runtime = cutoff['runtime']
     items, contexts = [], {}
     def business_for(task_id):
         if task_id not in contexts:
@@ -312,12 +393,14 @@ def _usage_page(host, owner, action, request, context):
         return business
     offset = position['skill_offset']
     try:
-        selected = require_complete(index.query(view, limit=limit, offset=offset))['rows']
+        selected = (require_complete(index.query(view, limit=min(limit, skill_count - offset), offset=offset))['rows']
+                    if offset < skill_count else [])
     except (OSError, ValueError) as error:
         raise BusinessError('STORE_UNAVAILABLE', details={'reason': 'SKILL_USAGE_PAGE_UNREADABLE',
             'source_coverage': getattr(error, 'coverage', {}),
             'next_action': '检查原技能使用来源后从首页重新读取。'}) from error
-    phases = {'manual_get': 'read', 'adopted': 'selected', 'host_injected': 'visible', 'manual_search': 'considered'}
+    phases = {'manual_get': 'read', 'adopted': 'selected', 'host_injected': 'visible', 'manual_search': 'considered',
+              'visible': 'visible', 'selected': 'selected', 'executed': 'executed'}
     for row in selected:
         if not row.get('task_id') or type(row.get('sequence')) is not int:
             continue
@@ -325,20 +408,26 @@ def _usage_page(host, owner, action, request, context):
         if business is None:
             continue
         reasons = ['original_skill_usage_ledger'] + (['mounted_first'] if row.get('mounted_first') else [])
+        if row.get('source_key') and row.get('producer'):
+            reasons.append(row['producer'])
         items.append({'event_id': f"skill-usage:{row['sequence']}", 'space_id': business.space_id,
             'task_id': business.task_id, 'run_id': None, 'method_ref': row['skill_id'],
-            'phase': phases.get(row.get('event'), 'read'), 'reason_codes': reasons, 'receipt_ref': None})
+            'phase': phases.get(row.get('event'), 'read'), 'reason_codes': reasons, 'receipt_ref': row.get('receipt_ref') or None})
     position['skill_offset'] += len(selected)
     more = position['skill_offset'] < skill_count
-    if not selected and not more and revision is not None:
+    if not selected and not more and runtime is not None and runtime['last'] is not None:
         # 与原 tool_calls reader 同一 rowid/revision 来源页；先取位置再做有界授权 join。
-        page = ObservationSourcePage(position={'revision': revision, 'after': position['runtime_after']}, limit=limit)
-        after = source_after(page, revision)
+        after = position['runtime_after']
         try:
             repo = RuntimeRepository(path, read_only=True)
             with repo._runtime_connection() as conn:
-                positions = conn.execute('SELECT rowid FROM tool_operations WHERE rowid>? ORDER BY rowid LIMIT ?',
-                    (after, limit + 1)).fetchall()
+                conn.execute('BEGIN')
+                if after:
+                    anchor = conn.execute('SELECT operation_id FROM tool_operations WHERE rowid=?', (after,)).fetchone()
+                    if anchor is None or anchor[0] != position['runtime_after_id']:
+                        raise expired('RUNTIME_USAGE_FROZEN_RANGE_MISSING')
+                positions = conn.execute('SELECT rowid,operation_id FROM tool_operations WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?',
+                    (after, runtime['last'][0], limit + 1)).fetchall()
                 ids = [row[0] for row in positions[:limit]]
                 operations = conn.execute(
                     'SELECT x.operation_id,x.operation_type,x.status,x.handler_started_at,ar.run_id,t.task_id, '
@@ -374,11 +463,10 @@ def _usage_page(host, owner, action, request, context):
                     'space_id': business.space_id, 'task_id': business.task_id, 'run_id': op['run_id'] or None,
                     'method_ref': op['operation_type'], 'phase': phase, 'reason_codes': reasons,
                     'receipt_ref': 'receipt:' + op['operation_id'] if phase == 'executed' else None})
-            if runtime_source_revision(path) != revision:
-                raise BusinessError('CURSOR_EXPIRED', details={'reason': 'RUNTIME_USAGE_SOURCE_CHANGED',
-                    'next_action': '从首页重新读取当前版本使用记录。'})
+            runtime_boundary(runtime)
             if ids:
                 position['runtime_after'] = ids[-1]
+                position['runtime_after_id'] = positions[len(ids) - 1][1]
             more = len(positions) > limit
         except BusinessError:
             raise
@@ -387,27 +475,40 @@ def _usage_page(host, owner, action, request, context):
                 'reason': 'RUNTIME_USAGE_SOURCE_UNREADABLE', 'exception_type': type(error).__name__,
                 'next_action': '检查原 runtime 工具账本；修复后从首页重新读取。'}) from error
     elif selected and not more:
-        more = revision is not None
-    next_cursor = (base64.urlsafe_b64encode(json.dumps({'version': 2, 'identity': identity,
-        'position': position}).encode()).decode().rstrip('=') if more else None)
+        more = runtime is not None and runtime['last'] is not None
+    next_cursor = (base64.urlsafe_b64encode(json.dumps({'version': 3, 'identity': identity,
+        'cutoff': cutoff, 'position': position}).encode()).decode().rstrip('=') if more else None)
     return {'items': items, 'next_cursor': next_cursor, 'coverage': 'partial' if skill_count or items or more else 'unknown'}
 
 
 def _page(rows, request, scope):
     """游标只绑定只读投影版本/过滤/Owner，不是权限令牌；改变来源或范围必须重新分页。"""
+    from ..conversation.business_access import BusinessError
+
     limit, cursor = request.get('limit', 50), request.get('cursor')
     if type(limit) is not int or not 1 <= limit <= 100:
-        raise ValueError('分页大小必须为1至100')
+        raise BusinessError('INVALID_SCHEMA', details={'field': 'limit', 'reason': 'PAGE_LIMIT_OUT_OF_RANGE',
+            'next_action': 'limit须为1至100的整数；保留上一页查询和过滤条件后重新读取。'})
     identity = hashlib.sha256(json.dumps([scope, rows], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     offset = 0
     if cursor is not None:
+        def expired(reason, field='cursor'):
+            return BusinessError('CURSOR_EXPIRED', details={'field': field, 'reason': reason,
+                'pagination_recovery': '下一页须保留上一页的query及过滤参数，limit须为1至100；'
+                    '可去掉cursor并按原查询从首页重新读取。游标不是授权，不能跨Owner或来源复用。'})
         if type(cursor) is not str or not 1 <= len(cursor) <= 2048:
-            raise ValueError('无效业务游标')
-        payload = json.loads(base64.b64decode(cursor + '='*(-len(cursor) % 4), altchars=b'-_', validate=True))
+            raise expired('CURSOR_FORMAT_INVALID')
+        try:
+            payload = json.loads(base64.b64decode(cursor + '='*(-len(cursor) % 4), altchars=b'-_', validate=True))
+        except (ValueError, RecursionError):
+            raise expired('CURSOR_FORMAT_INVALID') from None
         if (type(payload) is not dict or set(payload) != {'version', 'identity', 'offset'}
-                or payload['version'] != 1 or payload['identity'] != identity
-                or type(payload['offset']) is not int or not 0 <= payload['offset'] <= len(rows)):
-            raise ValueError('业务游标已过期或范围不匹配')
+                or type(payload['version']) is not int or payload['version'] != 1):
+            raise expired('CURSOR_PAYLOAD_INVALID')
+        if payload['identity'] != identity:
+            raise expired('CURSOR_SCOPE_OR_SOURCE_CHANGED')
+        if type(payload['offset']) is not int or not 0 <= payload['offset'] <= len(rows):
+            raise expired('CURSOR_OFFSET_INVALID', 'cursor.offset')
         offset = payload['offset']
     page = rows[offset:offset+limit]
     end = offset + len(page)

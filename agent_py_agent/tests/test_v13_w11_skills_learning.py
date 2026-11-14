@@ -100,7 +100,7 @@ def test_list_cursor_expired_on_tamper(v13_native):
     cursor = body['data']['next_cursor']
     assert cursor and body['data']['coverage'] == 'partial'
     status, body = v13_call(server, 'skills.list', {'limit': 1, 'cursor': cursor + 'x'}, user=USER)
-    assert status == 503, body
+    assert status == 410, body
     assert body['error']['code'] == 'CURSOR_EXPIRED'
 
 

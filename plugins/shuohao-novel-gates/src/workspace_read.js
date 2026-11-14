@@ -56,10 +56,11 @@ function pathList(value) {
 // LLM: 对应 _read_policy：只恢复宿主冻结的字段，不读本进程环境变量补默认值。
 // 函数用途: 校验并恢复一份路径策略。
 function readPolicy(value) {
-  if (!exactKeys(value, POLICY_FIELDS) || !["normal", "full"].includes(value.mode)) {
+  if ((!exactKeys(value, POLICY_FIELDS) && !exactKeys(value, [...POLICY_FIELDS, "business_aggregate_roots"])) || !["normal", "full"].includes(value.mode)) {
     throw new ContextError("路径策略协议无效");
   }
   return {
+    businessAggregateRoots: pathList(value.business_aggregate_roots === undefined ? [] : value.business_aggregate_roots),
     mode: value.mode,
     dangerousRoots: pathList(value.dangerous_roots),
     ownerScopeRoot: value.owner_scope_root === null ? null : absolutePath(value.owner_scope_root),
@@ -215,7 +216,23 @@ function ownerScopeDecision(policy, resolved, homeRoot) {
 // LLM: 对应 PathAccessPolicy.check：owner 墙先于 full；无 owner 墙时 normal 模式依次检查凭据文件名、
 //   my-agent 数据目录豁免与危险目录。resolved 已是真实路径。
 // 函数用途: 对一个已解析的目标做路径策略裁决。
+// 与宿主相同：大小写别名核真实inode，不拒绝大小写敏感卷上另一个普通目录。
+function aggregateContains(target, source) {
+  if (within(target, source)) return true;
+  if (!within(target.toLowerCase(), source.toLowerCase())) return false;
+  const candidate = target.split("/").slice(0, source.split("/").length).join("/");
+  try {
+    const a = fs.statSync(candidate), b = fs.statSync(source);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return true;
+  }
+}
+
 function policyCheck(policy, resolved) {
+  if (policy.businessAggregateRoots.some((root) => aggregateContains(resolved, root))) {
+    return decision(false, "PATH_HOST_MANAGED_STORE_BLOCKED", resolved);
+  }
   const name = resolved.slice(resolved.lastIndexOf("/") + 1);
   if (policy.ownerScopeRoot !== null) {
     if (within(resolved, policy.ownerScopeRoot)) {

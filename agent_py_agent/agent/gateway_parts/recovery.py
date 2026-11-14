@@ -2077,7 +2077,7 @@ def _recovery_conversation_store(agent: SimpleAgent | None, payload: dict, *, te
 
 # LLM: 仅当前原执行者明确返回可重排后调用；原T/P5与精确lease CAS保护原processing→pending，非终态不释放P3或改request ID。
 # 函数用途: 将已经让出执行的原请求按结构化到期时间回到同一队列，不把陈旧回执当恢复许可。
-def requeue_current_processing_request(paths, claim, transition, *, not_before_at):
+def requeue_current_processing_request(paths, claim, transition, *, not_before_at, preserve_priority=False, deferred_reason="", conversation_store=None):
     from .queue_service import GatewayClaim
     from .request_binding import GatewayActiveTurnTransition
 
@@ -2086,15 +2086,17 @@ def requeue_current_processing_request(paths, claim, transition, *, not_before_a
             or transition.request_path != claim.path or transition.request_id != claim.request_id
             or transition.execution_attempt_id != claim.execution_attempt_id
             or type(not_before_at) not in (int, float) or not math.isfinite(not_before_at)
-            or not_before_at < time.time()):
+            or not_before_at < time.time() or type(preserve_priority) is not bool
+            or not isinstance(deferred_reason, str) or len(deferred_reason) > 128):
         raise DataCorruptionError("current processing requeue identity is invalid")
-    return transition("requeue", lambda: _requeue_current_processing_locked(paths, claim, not_before_at))
+    return transition("requeue", lambda: _requeue_current_processing_locked(paths, claim, not_before_at,
+        preserve_priority=preserve_priority, deferred_reason=deferred_reason, conversation_store=conversation_store))
 
 
 
 # LLM: 原T已持有，transition已实读P5；再次核完整lease且不覆盖任何pending/terminal，异常不自动重放或制造释放回执。
 # 函数用途: 在精确执行代次仍一致时更新原运输状态并移动回pending。
-def _requeue_current_processing_locked(paths, claim, not_before_at):
+def _requeue_current_processing_locked(paths, claim, not_before_at, *, preserve_priority=False, deferred_reason="", conversation_store=None):
     report = read_json_file_report(claim.path, context="gateway.recovery.current_requeue.read")
     fresh = report.payload
     if (report.load_error is not None or fresh.get("id") != claim.request_id
@@ -2105,7 +2107,16 @@ def _requeue_current_processing_locked(paths, claim, not_before_at):
     # 终态未知沿原异常路径保留当前执行记录，不能重排同一请求。
     if target.exists() or gateway_terminal_exists(paths, claim.path.name):
         raise DataCorruptionError("current processing requeue target already exists")
-    requeued = dict(fresh, status="pending", priority="background", requeued_at=time.time(), not_before_at=not_before_at)
+    if conversation_store is not None:
+        # ask 的 pinned lane 原由终态收尾；准备回队先按原thread/task绑定释放，不能只删引用让下一片等待TTL。
+        _finish_gateway_conversation_claim(fresh, claim.request_id, conversation_store)
+    requeued = dict(fresh, status="pending", not_before_at=not_before_at)
+    if not preserve_priority:
+        requeued.update(priority="background", requeued_at=time.time())
+    else:
+        requeued["deferred_at"] = time.time()
+    if deferred_reason:
+        requeued["deferred_reason"] = deferred_reason
     for key in ("execution_attempt_id", "lease_owner", "lease_started_at", "lease_heartbeat_at",
                 "lease_process_identity", "runtime_authority", "turn_phase", "conversation_claim"):
         requeued.pop(key, None)

@@ -628,6 +628,13 @@ class TranscriptReader:
                 current = manifest()
                 stamp = os.fstat(self.hot.fileno())
                 if current == self.manifest and (stamp.st_dev, stamp.st_ino) == _hot_transcript_identity(path, root):
+                    if read_budget is not None and self.manifest is not None:
+                        frontier = self.manifest.get('hot_frontier', {})
+                        frontier_bytes = frontier.get('bytes', 0) if isinstance(frontier, dict) else 0
+                        if type(frontier_bytes) is int and frontier_bytes > 0:
+                            if frontier_bytes > read_budget.max_bytes - read_budget.size:
+                                raise MessageReadDeferred('message integrity frontier exceeds read budget')
+                            read_budget.charge(size=frontier_bytes)
                     if not _transcript_prefix_matches(self.hot, self.manifest):
                         raise DataCorruptionError('canonical hot transcript prefix mismatches')
                     if (stamp.st_dev, stamp.st_ino) == _hot_transcript_identity(path, root):
@@ -640,7 +647,21 @@ class TranscriptReader:
             raise DataCorruptionError('canonical transcript layout changed during snapshot open')
         self.base = self.manifest['hot_base'] if self.manifest else 0
         physical_end = self.hot.seek(0, 2)
-        self.complete_end = self.base + complete_jsonl_end(self.hot, physical_end)
+        try:
+            if read_budget is not None and physical_end:
+                if read_budget.exhausted():
+                    raise MessageReadDeferred('message tail check exceeds read budget')
+                self.hot.seek(physical_end - 1)
+                tail = self.hot.read(1)
+                read_budget.charge(size=len(tail))
+                if tail != b'\n':
+                    raise MessageReadDeferred('unfinished message tail requires explicit original read')
+                self.complete_end = self.base + physical_end
+            else:
+                self.complete_end = self.base + complete_jsonl_end(self.hot, physical_end)
+        except BaseException:
+            self.hot.close()
+            raise
         self.end = self.complete_end if complete_only else self.base + physical_end
         self.position, self.cached = 0, None
         self.index = (ImmutableJsonIndex(self._base, (*self._parts, 'archive', self.manifest['thread_id'], 'index'))
@@ -731,7 +752,11 @@ class TranscriptReader:
             if self.position >= self.base:
                 wanted = remaining
                 self.hot.seek(self.position - self.base)
+                if self.read_budget is not None and wanted > self.read_budget.max_bytes - self.read_budget.size:
+                    raise MessageReadDeferred('message hot read exceeds budget')
                 raw = self.hot.read(wanted)
+                if self.read_budget is not None:
+                    self.read_budget.charge(size=len(raw))
             else:
                 descriptor, block = self._segment()
                 wanted = min(remaining, descriptor['end'] - self.position)
@@ -770,18 +795,21 @@ class TranscriptReader:
 
 # LLM: 冷索引仅指向本线程不可变冷段原行；必须按实际字节hash读回，不把缓存地址当证据。
 # 函数用途: 为精确ID及幂等键恢复冷消息与原虚拟位置。
-def cold_message_lookup(path: Path, key: str, *, reader=None):
+def cold_message_lookup(path: Path, key: str, *, reader=None, read_budget=None):
     if reader is None:
         if not path.exists() and transcript_manifest(path) is None:
             return None
         with TranscriptReader(path) as frozen:
-            return cold_message_lookup(path, key, reader=frozen)
+            return cold_message_lookup(path, key, reader=frozen, read_budget=read_budget)
     manifest = reader.manifest
     if manifest is None:
         return None
-    address = reader.index.get(manifest['index'], key)
+    address = (reader.index.get(manifest['index'], key) if read_budget is None
+               else reader.index.get(manifest['index'], key, read_budget=read_budget))
     if address is None:
         return None
+    if read_budget is not None and address['length'] > read_budget.max_bytes - read_budget.size:
+        raise MessageReadDeferred('message row exceeds read budget')
     reader.seek(address['offset'])
     raw = reader.read(address['length'])
     if hashlib.sha256(raw).hexdigest() != address['sha256']:

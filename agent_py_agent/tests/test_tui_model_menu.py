@@ -244,3 +244,85 @@ def test_auth_escape_cancels_login_without_interrupting_agent(tmp_path, monkeypa
                 await runner
 
     asyncio.run(scenario())
+
+
+def test_startup_model_read_retries_busy_and_preserves_newer_selection(monkeypatch):
+    runtime = TuiRuntime("busy-selection")
+    calls = []
+    busy = {"ok": False, "error_code": "MODEL_METADATA_BUSY", "retryable": True}
+
+    def request(*, session_id, operation, payload):
+        calls.append((session_id, operation))
+        if len(calls) < 3:
+            return busy
+        runtime.publish_model_selection("newer-model", revision=7)
+        return {"ok": True, "selected": "p", "selection_available": True,
+                "selection_revision": 6, "profiles": [{"id": "p", "model_name": "older-model"}]}
+
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    source = SimpleNamespace(gateway_client_only=True, request_models=request)
+    tui_model_menu.refresh_model_selection(source, "busy-selection", runtime)
+    assert calls == [("busy-selection", "list")] * 3
+    assert runtime.store.snapshot().selected_model_name == "newer-model"
+
+
+@pytest.mark.parametrize("code, retryable, expected", [("MODEL_METADATA_BUSY", True, 8),
+                                                       ("AUTH_DENIED", False, 1),
+                                                       ("MODEL_METADATA_BUSY", False, 1)])
+def test_startup_model_read_is_bounded_and_does_not_retry_denial(monkeypatch, code, retryable, expected):
+    calls = []
+
+    def request(**kwargs):
+        calls.append(kwargs["operation"])
+        return {"ok": False, "error_code": code, "retryable": retryable}
+
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    tui_model_menu.refresh_model_selection(SimpleNamespace(gateway_client_only=True, request_models=request),
+                                            "bounded", TuiRuntime("bounded"))
+    assert calls == ["list"] * expected
+
+
+def test_startup_busy_read_stops_during_wait_without_republishing():
+    runtime = TuiRuntime("stop-busy")
+    runtime.publish_model_selection("confirmed", revision=5)
+    calls = []
+
+    class Stop:
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            return True
+
+    def request(**kwargs):
+        calls.append(kwargs)
+        return {"ok": False, "error_code": "MODEL_METADATA_BUSY", "retryable": True}
+
+    tui_model_menu.refresh_model_selection(SimpleNamespace(gateway_client_only=True, request_models=request),
+                                            "stop-busy", runtime, Stop())
+    assert len(calls) == 1 and runtime.store.snapshot().selected_model_name == "confirmed"
+
+
+def test_startup_late_model_response_cannot_cross_new_conversation():
+    runtime = TuiRuntime("reset-selection")
+    entered, release = threading.Event(), threading.Event()
+
+    def request(**kwargs):
+        entered.set()
+        assert release.wait(3)
+        return {"ok": True, "selected": "p", "selection_available": True,
+                "selection_revision": 99, "profiles": [{"id": "p", "model_name": "old-thread-model"}]}
+
+    source = SimpleNamespace(gateway_client_only=True, request_models=request)
+    worker = threading.Thread(target=tui_model_menu.refresh_model_selection,
+                              args=(source, "reset-selection", runtime))
+    worker.start()
+    try:
+        assert entered.wait(3)
+        runtime.publish_conversation_reset("new-thread")
+        runtime.publish_model_selection("new-thread-model", revision=1)
+    finally:
+        release.set()
+        worker.join(3)
+    assert not worker.is_alive()
+    assert runtime.store.snapshot().selected_model_name == "new-thread-model"

@@ -148,7 +148,7 @@ def test_list_example_status_pending_without_space_id(v13_native):
     assert len(second['items']) == 1 and data['items'] != second['items']
     assert first in data['items'] + second['items']
     failure = _send(v13_native, 'detection_proposals.list',
-        {'status': 'approved', 'cursor': data['next_cursor']}, status=503)
+        {'status': 'approved', 'cursor': data['next_cursor']}, status=410)
     assert failure['error']['code'] == 'CURSOR_EXPIRED'
 
 

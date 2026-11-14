@@ -14,7 +14,9 @@ from .business_contracts import BusinessExecutionContext
 from .business_observability import ObservationRecord, ObservationSourceError
 from .session_tasks import SessionTask
 
+# 验证原任务产物登记时读取的最大登记簿字节数。
 _REGISTRY_BYTES = 2 * 1024 * 1024
+# 交互观察一次能读回并校验的最大产物字节数。
 _CONTENT_BYTES = 8 * 1024 * 1024
 
 

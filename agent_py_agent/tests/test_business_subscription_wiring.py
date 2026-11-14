@@ -151,3 +151,237 @@ def test_source_and_policy_refusals_never_commit_subscription(wired, failure):
     assert result['http_status'] == 403 and result['error']['code'] == expected
     assert result['effect_outcome'] == 'not_started'
     assert service.catalog._read().get('subscriptions', {}) == {}
+
+
+def _signed_native_push(native, body, secret):
+    import hashlib
+    import hmac
+    import http.client
+    import json
+    import time
+    import uuid
+
+    server, _ = native
+    raw = json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode()
+    stamp, nonce = str(int(time.time())), uuid.uuid4().hex
+    signature = hmac.digest(secret.encode(), f'{stamp}.{nonce}.{hashlib.sha256(raw).hexdigest()}'.encode(), 'sha256').hex()
+    conn = http.client.HTTPConnection('127.0.0.1', server.server.server_address[1], timeout=30)
+    try:
+        conn.request('POST', '/remote-agent/push', raw, {'Content-Type': 'application/json',
+            'X-Agent-Push-Token': secret, 'X-Agent-Timestamp': stamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature})
+        response = conn.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        conn.close()
+
+
+def test_native_subscription_token_routes_only_explicit_bound_source_and_revokes(native, monkeypatch):
+    from agent_py_agent.tests.test_business_v12_background_scheduling import (
+        add_echo_profile,
+        ok,
+        scheduler_for,
+        tick,
+    )
+
+    _, host = native
+    from agent_py_agent.agent.gateway_parts.business_host_ports import wire_business_host_ports
+    wire_business_host_ports(host)
+    add_echo_profile(host)
+    space = ok(native, 'spaces.create', {'name': 'bound-event-space'}, idempotency_key='native-event-space-0001')['space_id']
+    assistant = ok(native, 'background_agents.create', {'space_id': space, 'name': 'event-worker'},
+        idempotency_key='native-event-worker-0001')['agent']['agent_id']
+    binding = ok(native, 'interfaces.bind', {'surface_ref': 'gateway', 'name': 'signed-source', 'space_ids': [space],
+        'default_space_id': space, 'controller': {'mode': 'agent', 'agent_id': assistant}},
+        idempotency_key='native-event-binding-0001')['binding_id']
+    from agent_py_agent.tests.test_business_v12_f4_workflows import definition
+    ok(native, 'workflows.create', {'definition': definition('native-source-policy'),
+        'scope': {'scope_mode': 'spaces', 'space_ids': [space]}}, idempotency_key='native-event-policy-0001')
+    sub = ok(native, 'subscriptions.create', {'space_id': space, 'source_ref': binding,
+        'policy_ref': 'workflow:native-source-policy'},
+        idempotency_key='native-event-subscribe-0001')['subscription']['subscription_id']
+    token = ok(native, 'inbox.tokens.mint', {'space_id': space, 'label': 'scoped-service-token', 'subscription_id': sub},
+        idempotency_key='native-event-token-0001')
+    body = {'target_owner': host.home_paths.owner_id, 'instruction': 'compute 7 plus 9', 'idempotency_key': 'native-event-one',
+        'event_id': 'event-one', 'subscription_id': sub, 'source_ref': binding, 'event_revision': 1}
+    from agent_py_agent.agent.gateway_parts import remote_push_service
+    persist = remote_push_service.persist_push_json
+    def lose_accept_receipt(path, value):
+        if path.name == 'receipts.json' and any(row.get('accepted') for row in value.get('entries', {}).values()):
+            raise OSError('controlled ACK persistence loss')
+        return persist(path, value)
+    with monkeypatch.context() as patch:
+        patch.setattr(remote_push_service, 'persist_push_json', lose_accept_receipt)
+        status, uncertain = _signed_native_push(native, body, token['secret'])
+    assert status == 503 and uncertain['effect_outcome'] == 'unknown'
+    original, = host.conversation_store.session_tasks.list_report(limit=0)[0]
+    token = ok(native, 'inbox.tokens.rotate', {'fingerprint': token['token']['fingerprint']},
+        idempotency_key='native-event-rotate-0001')
+    status, first = _signed_native_push(native, body, token['secret'])
+    assert status == 202 and first['task_id'] == original.task_id, first
+    task = host.conversation_store.session_tasks.require(first['task_id'])
+    assert task.target_thread_id == assistant
+    assert task.metadata['business_context']['space_id'] == space
+    assert task.metadata['business_context']['binding_id'] == binding
+    assert not host.conversation_store.threads.require(task.sender_thread_id).channel_bindings
+    status, duplicate = _signed_native_push(native, body, token['secret'])
+    assert status == 202 and duplicate['task_id'] == first['task_id'] and duplicate['duplicate']
+    # 特定订阅令牌不能省略范围降格成普通ask，也不能自行更换来源/Owner。
+    plain_body = {key: value for key, value in body.items() if key not in {'subscription_id', 'source_ref', 'event_revision', 'event_id'}}
+    for forged in (plain_body, {**body, 'source_ref': 'other-source'}, {**body, 'target_owner': 'local/other'}):
+        status, refused = _signed_native_push(native, forged, token['secret'])
+        assert status == 403 and refused['error_code'] == 'REMOTE_PUSH_TOKEN_SCOPE_DENIED'
+    legacy = ok(native, 'inbox.tokens.mint', {'space_id': space, 'label': 'ordinary-push'},
+        idempotency_key='native-event-legacy-token-0001')
+    status, refused = _signed_native_push(native, body, legacy['secret'])
+    assert status == 403 and refused['error_code'] == 'REMOTE_PUSH_TOKEN_SCOPE_DENIED'
+    status, ordinary = _signed_native_push(native, plain_body, legacy['secret'])
+    assert status == 202 and ordinary['run_id'] and 'task_id' not in ordinary
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    with monkeypatch.context() as patch:
+        patch.setattr(host, '_current_run_params', RunParams(task_id=task.task_id, source='background_main_agent',
+            business_context=BusinessExecutionContext.from_dict(task.metadata['business_context']),
+            task_attributes={'conversation_thread_id': task.target_thread_id}), raising=False)
+        with pytest.raises(HostAPIError, match='BUSINESS_ACTOR_SOURCE_MISSING'):
+            api._model_business_actor(host)
+    scheduler = scheduler_for(host)
+    tick(scheduler, assistant, __import__('time').time())
+    assert host.conversation_store.session_tasks.require(task.task_id).status == 'done'
+    ok(native, 'subscriptions.pause', {'subscription_id': sub}, expected_revision=0,
+        idempotency_key='native-event-pause-0001')
+    status, paused = _signed_native_push(native, {**body, 'event_id': 'paused-event'}, token['secret'])
+    assert status == 409 and paused['error_code'] == 'SUBSCRIPTION_NOT_ACTIVE'
+    ok(native, 'subscriptions.resume', {'subscription_id': sub}, expected_revision=1,
+        idempotency_key='native-event-resume-0001')
+    other = ok(native, 'spaces.create', {'name': 'policy-other-space'}, idempotency_key='native-policy-other-0001')['space_id']
+    scope = ok(native, 'workflows.scope.get', {'workflow_ref': 'native-source-policy'})
+    ok(native, 'workflows.scope.set', {'workflow_ref': 'native-source-policy',
+        'scope': {'scope_mode': 'spaces', 'space_ids': [other]}}, expected_revision=scope['scope_revision'],
+        idempotency_key='native-policy-move-0001')
+    status, policy_denied = _signed_native_push(native, {**body, 'event_id': 'policy-denied-event'}, token['secret'])
+    assert status == 403 and policy_denied['error_code'] == 'POLICY_AUTHORIZATION_REQUIRED'
+    ok(native, 'interfaces.unbind', {'binding_id': binding}, expected_revision=0,
+        idempotency_key='native-event-unbind-0001')
+    status, unbound = _signed_native_push(native, {**body, 'event_id': 'unbound-event'}, token['secret'])
+    assert status == 409 and unbound['error_code'] == 'SOURCE_ROUTE_UNBOUND'
+    assert unbound['effect_outcome'] == 'not_started'
+    ok(native, 'inbox.tokens.revoke', {'fingerprint': token['token']['fingerprint']},
+        idempotency_key='native-event-revoke-0001')
+    status, refused = _signed_native_push(native, body, token['secret'])
+    assert status == 401 and refused['error_code'] == 'REMOTE_PUSH_TOKEN_INVALID'
+    assert len(host.conversation_store.session_tasks.list_report(limit=0)[0]) == 1
+
+
+def test_subscription_cursor_failure_keeps_original_task_and_committed_receipt(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.managed_subscriptions import SourceEvent
+    from agent_py_agent.tests.test_business_v12_f7_observation import subscription_fixture
+
+    case = subscription_fixture(tmp_path)
+    sub = case.subscriptions.execute('subscriptions.create', {'space_id': case.space, 'source_ref': 'comments'},
+        actor=case.subscription_actor, idempotency_key='cursor-sub')['subscription']['subscription_id']
+    event = SourceEvent('comments', 'cursor-event', 1, 'data')
+    transact = case.catalog._transaction
+    def interrupted(action, params, **kwargs):
+        if action == 'subscriptions.update':
+            raise BusinessError('REVISION_CONFLICT')
+        return transact(action, params, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(case.catalog, '_transaction', interrupted)
+        with pytest.raises(BusinessError) as caught:
+            case.subscriptions.accept_event(sub, event, actor=case.subscription_actor, source_identity=case.source_identity)
+    assert caught.value.code == 'REVISION_CONFLICT' and caught.value.effect_outcome == 'committed'
+    assert caught.value.details['side_effect_state'] == 'task_accepted_cursor_pending'
+    task_id = caught.value.details['task_id']
+    assert case.store.session_tasks.require(task_id).status == 'queued'
+    restored = case.subscriptions.accept_event(sub, event, actor=case.subscription_actor, source_identity=case.source_identity)
+    assert restored['task_id'] == task_id
+    assert len(case.store.session_tasks.list_report(limit=0)[0]) == 2  # 原夹具任务+一个来源事件。
+
+
+def test_signed_event_changed_target_requires_owner_resolution_before_dispatch(native, tmp_path):
+    """原签名入口返回可处置的未启动状态；配置变化不继承旧token跨空间权限。"""
+    from agent_py_agent.agent.gateway_parts.business_host_ports import wire_business_host_ports
+    from agent_py_agent.tests.test_business_v12_background_scheduling import ok
+    _, host = native
+    wire_business_host_ports(host)
+    a, b = [ok(native, 'spaces.create', {'name': 'source-resolution-' + label},
+               idempotency_key='source-resolution-space-' + label)['space_id'] for label in ('a', 'b')]
+    binding = ok(native, 'interfaces.bind', {'surface_ref': 'gateway', 'name': 'original-source',
+        'space_ids': [a], 'default_space_id': a, 'controller': {'mode': 'global'}},
+        idempotency_key='source-resolution-binding')['binding_id']
+    sub = ok(native, 'subscriptions.create', {'space_id': a, 'source_ref': binding},
+        idempotency_key='source-resolution-subscription')['subscription']['subscription_id']
+    token = ok(native, 'inbox.tokens.mint', {'space_id': a, 'subscription_id': sub, 'label': 'original-target-only'},
+        idempotency_key='source-resolution-token')
+    ok(native, 'interfaces.update', {'binding_id': binding, 'space_ids': [b], 'default_space_id': b},
+        expected_revision=0, idempotency_key='source-resolution-change')
+    body = {'target_owner': host.home_paths.owner_id, 'instruction': '原测试事件，不应执行',
+        'idempotency_key': 'source-resolution-event', 'event_id': 'source-resolution-event',
+        'subscription_id': sub, 'source_ref': binding, 'event_revision': 1}
+    status, refused = _signed_native_push(native, body, token['secret'])
+    assert status == 403 and refused['error_code'] == 'SOURCE_SCOPE_MISMATCH', refused
+    assert refused['effect_outcome'] == 'not_started'
+    details = refused['details']
+    assert details['resolution_state'] == 'operator_action_required'
+    assert details['retry_same_request'] is False
+    assert 'interfaces.resolve' in details['required_actions'] and 'inbox.tokens.mint' in details['required_actions']
+    assert not host.conversation_store.session_tasks.list_report(limit=0)[0]
+    assert not host.conversation_store.wakes.pending(limit=20)
+    import json
+    (tmp_path / 'signed-event-resolution-receipt.json').write_text(json.dumps(
+        {'http': status, 'response': refused, 'binding_id': binding, 'old_space': a, 'new_space': b,
+         'task_count': 0, 'wake_count': 0, 'model_execution': False}, ensure_ascii=False, indent=2))
+
+
+def test_active_native_subscription_retains_exact_bound_controller_until_paused(native):
+    from agent_py_agent.agent.conversation.background_team_lifecycle import identity_outstanding
+    from agent_py_agent.agent.gateway_parts.business_host_ports import wire_business_host_ports
+    from agent_py_agent.tests.test_business_v12_background_scheduling import add_echo_profile, ok
+    _, host = native
+    wire_business_host_ports(host)
+    add_echo_profile(host)
+    space = ok(native, 'spaces.create', {'name': 'retirement-source'}, idempotency_key='retirement-source-space')['space_id']
+    agent = ok(native, 'background_agents.create', {'space_id': space, 'name': 'subscription-target'},
+        idempotency_key='retirement-source-agent')['agent']['agent_id']
+    binding = ok(native, 'interfaces.bind', {'surface_ref': 'gateway', 'name': 'subscription-source',
+        'space_ids': [space], 'default_space_id': space, 'controller': {'mode': 'agent', 'agent_id': agent}},
+        idempotency_key='retirement-source-binding')['binding_id']
+    sub = ok(native, 'subscriptions.create', {'space_id': space, 'source_ref': binding},
+        idempotency_key='retirement-source-subscription')['subscription']['subscription_id']
+    thread = host.conversation_store.threads.require(agent)
+    assert 'subscription:' + sub in identity_outstanding(host, thread)[0]
+    before = ok(native, 'background_agents.get', {'agent_id': agent})
+    retired = ok(native, 'background_agents.retire', {'agent_id': agent, 'disposition': 'drain'},
+        expected_revision=before['agent']['revision'], idempotency_key='retirement-source-retire')
+    assert retired['agent']['identity_state'] == 'retiring'
+    assert 'subscription:' + sub in retired['outstanding_refs']
+    ok(native, 'subscriptions.pause', {'subscription_id': sub}, expected_revision=0,
+       idempotency_key='retirement-source-pause')
+    assert 'subscription:' + sub not in identity_outstanding(host, thread)[0]
+    assert ok(native, 'background_agents.get', {'agent_id': agent})['agent']['identity_state'] == 'retired'
+
+
+@pytest.mark.parametrize('fault', ['row_owner', 'binding_owner', 'unbound', 'space', 'global', 'missing'])
+def test_subscription_controller_resolution_never_borrows_other_scope(fault):
+    from agent_py_agent.agent.conversation.background_team_lifecycle import (
+        bound_subscription_controller,
+    )
+    row = {'owner_id': 'owner-a', 'space_id': 'space-a', 'source_ref': 'binding-a'}
+    binding = {'owner_id': 'owner-a', 'state': 'bound', 'space_ids': ['space-a'],
+               'default_space_id': 'space-a', 'controller': {'mode': 'agent', 'agent_id': 'bg-a'}}
+    state = {'bindings': {'binding-a': binding}}
+    assert bound_subscription_controller(state, row, 'owner-a') == 'bg-a'
+    if fault == 'row_owner':
+        row['owner_id'] = 'owner-b'
+    elif fault == 'binding_owner':
+        binding['owner_id'] = 'owner-b'
+    elif fault == 'unbound':
+        binding['state'] = 'unbound'
+    elif fault == 'space':
+        row['space_id'] = 'space-b'
+    elif fault == 'global':
+        binding['controller'] = {'mode': 'global'}
+    else:
+        state['bindings'].clear()
+    assert bound_subscription_controller(state, row, 'owner-a') is None

@@ -117,3 +117,24 @@ def test_dispatch_failure_preserves_code_effect_and_outcome(world, monkeypatch):
     assert failure.error_code != 'UNKNOWN_ERROR'
     assert caught.value.effect_outcome == 'not_started'
     assert caught.value.outcome is failure
+
+
+def test_clear_session_keeps_accepted_task_original_space(world):
+    from agent_py_agent.agent.conversation.session_space import (
+        read_session_space,
+        set_session_space,
+    )
+
+    context, conversation, spaces, _services, _actor = world
+    task = prepare_im_task_dispatch(context, conversation, '整理原受理材料')
+    before = dict(task.metadata['business_context'])
+    source = context.agent.conversation_store.threads.require(conversation.thread_id)
+    cleared = set_session_space(context.agent.home_paths, context.agent.conversation_store.threads, source,
+        actor_id='ou_a', space_id=None, expected_revision=1,
+        idempotency_key='clear-after-admission', authorize=lambda: None)
+    assert cleared == {'space_id': None, 'revision': 2, 'source': 'default'}
+    source = context.agent.conversation_store.threads.require(conversation.thread_id)
+    assert read_session_space(context.agent.home_paths, source, actor_id='ou_a') == cleared
+    replay = prepare_im_task_dispatch(context, conversation, '整理原受理材料')
+    assert replay.task_id == task.task_id and replay.metadata['business_context'] == before
+    assert before['space_id'] == spaces[0]['space_id']

@@ -227,7 +227,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         # policy still intersects every candidate with the parent's run scope.
         allowed_tools=scheduled_child_tools(
             ToolPolicyRequest(
-                parent_tools=list(parent.allowed_tools),
+                parent_tools=_current_parent_tools(parent),
                 spec=spec,
                 extra_write_roots=request.extra_write_roots,
                 goal=request.goal,
@@ -250,3 +250,9 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         attributes=hctx.inherited_hierarchy_attributes(parent, spec),
         host_channel_actor=HostChannelActor.from_record(parent.host_channel_actor) if parent.host_channel_actor else None,
     )
+
+
+def _current_parent_tools(parent):
+    from ...capability_authority import task_tool_authority
+    from ..runner_context_service import _runner_allowed_tools
+    return _runner_allowed_tools(parent, task_tool_authority(parent)[0])

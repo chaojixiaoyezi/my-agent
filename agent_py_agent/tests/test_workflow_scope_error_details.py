@@ -24,7 +24,7 @@ CASES = [
 
 
 def request(mode, ids):
-    return {'action': 'workflows.scope.set', 'request_id': 'scope-error-diagnostics',
+    return {'action': 'workflows.restore', 'request_id': 'scope-error-diagnostics',
             'idempotency_key': 'scope-error-diagnostics-once', 'expected_revision': 1,
             'params': {'workflow_ref': 'unused-workflow', 'scope': {'scope_mode': mode, 'space_ids': ids}}}
 
@@ -32,7 +32,7 @@ def request(mode, ids):
 @pytest.mark.parametrize('mode,ids,constraint,expected', CASES)
 def test_schema_scope_refusal_has_precise_safe_details(mode, ids, constraint, expected):
     with pytest.raises(HostAPIError) as caught:
-        validate_object(request(mode, ids), business_action_spec('workflows.scope.set').native_request_schema)
+        validate_object(request(mode, ids), business_action_spec('workflows.restore').native_request_schema)
     error = caught.value
     assert error.code == 'INVALID_SCHEMA' and error.outcome == 'not_started'
     assert error.details['field_path'] == '$.params.scope.space_ids'
@@ -73,5 +73,5 @@ def test_real_client_server_scope_error_roundtrip(gateway, mode, ids, constraint
 @pytest.mark.parametrize('mode,ids', [('owner_global', []), ('unassigned', []), ('spaces', ['one']), ('spaces', ['one', 'two'])])
 def test_valid_scope_unchanged(mode, ids):
     value = request(mode, ids)
-    assert validate_object(value, business_action_spec('workflows.scope.set').native_request_schema) == value
+    assert validate_object(value, business_action_spec('workflows.restore').native_request_schema) == value
     assert WorkflowScope(mode, ids, 1).space_ids == tuple(ids)

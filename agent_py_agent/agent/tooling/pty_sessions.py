@@ -951,20 +951,21 @@ class TerminalSessionTool(BaseTool):
     def _start(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         command_result = parse_shell_command(self.model_spec.name, params.get("command", ""))
         if isinstance(command_result, ToolHandlerOutcome):
-            return self._error(command_result.error_code, command_result.output)
+            return self._error(command_result.error_code, command_result.output, effect_outcome="not_started")
         command = command_result
         command_policy = evaluate_command_policy(command, allow_shell_operators=True)
         if not command_policy.allowed:
             return self._error(
                 "COMMAND_POLICY_BLOCKED",
                 "危险命令被系统拒绝: " + ",".join(command_policy.finding_codes),
+                effect_outcome="not_started",
             )
         write_roots = _sandbox_write_roots(params)
         read_roots = _sandbox_read_roots(params)
         protected_write_paths = _sandbox_protected_write_paths(params)
         target = self.shell_tool._execution_target(params, command)
         if isinstance(target, ToolHandlerOutcome):
-            return self._error(target.error_code, target.output)
+            return self._error(target.error_code, target.output, effect_outcome="not_started")
         timeout = self.shell_tool.pty_session_idle_timeout_seconds
         try:
             session = pty_session_registry.start(

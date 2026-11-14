@@ -1,7 +1,7 @@
 # browser-lite
 
 自有工具型插件：在插件专属的无头浏览器上下文里打开受控页面、读取元素、点击和填写测试表单。
-插件本身只依赖标准库和 SDK `my-agent-plugin-api==0.2.0`，**不打包 Playwright 或任何浏览器**，
+插件本身只依赖标准库和 SDK `my-agent-plugin-api==0.3.0`，**不打包 Playwright 或任何浏览器**，
 而是用标准库实现的最小 CDP（Chrome DevTools Protocol）客户端驱动本机已有的 Chrome/Chromium。
 当前已完成本地标准包、独立 MCP 进程与真实浏览器的组件验证；宿主审批链与真实 TUI 验收尚未完成。
 
@@ -15,7 +15,7 @@ python scripts/build_plugin_api.py --wheel-dir /tmp/plugin-build/wheels
 python scripts/build_plugin_package.py \
   --project plugins/browser-lite \
   --declaration browser_lite/declaration.json \
-  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.2.0-py3-none-any.whl \
+  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.3.0-py3-none-any.whl \
   --output /tmp/plugin-build/browser-lite.zip
 ```
 

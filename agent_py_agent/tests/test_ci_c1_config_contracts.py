@@ -97,9 +97,7 @@ def test_constants_sync_entrypoint_detects_drift_without_writing(tmp_path):
 # 函数用途: 核对read_only/isolate实际进入沙箱而非只添加配置读取字符串。
 @pytest.mark.parametrize("mode, scoped", [("read_only", False), ("isolate", False), ("isolate", True)])
 def test_other_owner_policy_reaches_shell_sandbox(tmp_path, monkeypatch, mode, scoped):
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox
+    from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox, SandboxHostPolicy
     from agent_py_agent.agent.tooling.shell import _sandbox_exec
 
     own = tmp_path / "owners/local/main"
@@ -108,8 +106,7 @@ def test_other_owner_policy_reaches_shell_sandbox(tmp_path, monkeypatch, mode, s
         path.mkdir(parents=True)
     seen = []
     monkeypatch.setattr(AttemptExecutionSandbox, "build_argv", lambda self, argv: seen.append(self.spec) or argv)
-    policy = SimpleNamespace(private_roots=(), network_access=False, host_credential_env_names=frozenset(),
-                             full_access_other_owner_homes=mode)
+    policy = SandboxHostPolicy(network_access=False, full_access_other_owner_homes=mode)
     _sandbox_exec("true", own, own if scoped else None, own, host_policy=policy)
     spec = seen[0]
     assert spec.full_access is not scoped

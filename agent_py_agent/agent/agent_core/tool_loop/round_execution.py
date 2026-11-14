@@ -260,6 +260,8 @@ class _ToolRoundProgress:
 # LLM: 每段原位绑定实时Compact/描述查询，保留provider顺序与审批；已完成工具轮末由宿主受限入口刷新方法目录。
 # 函数用途: 执行一轮 canonical 工具调用，保留只读并发段和顺序屏障，为执行、拒绝、延后与取消写入配对 ToolResult。
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
+    from ..runtime.capability_refresh import refresh_subagent_capabilities
+    request = replace(request, params=refresh_subagent_capabilities(request.agent, request.params))
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
     _append_assistant_tool_round_context(request)
     calls = list(request.calls)
@@ -906,6 +908,8 @@ def _rejected_approval_execution(
             decision.reason_code,
             str(getattr(decision, "message", "") or "工具执行未获批准。"),
         )
+    if decision.diagnostic:
+        message += f"\n宿主诊断：{decision.diagnostic}。工具主体未执行；请刷新原执行/审批状态，必要时修复原账本，不要原样盲重试。"
     if decision.feedback:
         message = (
             f"{message}\n用户反馈：{decision.feedback}\n"
@@ -1017,9 +1021,9 @@ def _execute_parallel_segment(
     with register_interrupt_callback(callback):
         if scheduler is not None:
             if wait_input_reply_enabled(request):
-                futures = [_submit_round_item(request, scheduler, item) for item in items]
-                return await_tool_futures(request, futures,
-                    before_input_error=partial(_record_completed_before_input_error, request))
+                return execute_work_items(items, partial(_submit_round_item, request, scheduler),
+                    await_futures=partial(await_tool_futures, request,
+                        before_input_error=partial(_record_completed_before_input_error, request)))
             return execute_work_items(items, partial(_submit_round_item, request, scheduler))
         if wait_input_reply_enabled(request):
             return await_tool_futures(request, [submit_wait_item(item) for item in items],
@@ -1173,8 +1177,12 @@ def _execute_owned_serial(request, work, *, emit_started=False):
     if scheduler is None:
         if not waiting:
             return item.run()
-        execution = await_tool_futures(request, [submit_wait_item(item)],
-            before_input_error=record_before_input_error)[0]
+        token = getattr(request.params, "cancellation_token", None)
+        cancel = getattr(token, "cancel", None)
+        # 等待线程不继承主 runner 的中断旗；用同一令牌将精确停止传给已启动的工具。
+        with register_interrupt_callback(lambda: cancel("interrupted") if callable(cancel) else None):
+            execution = await_tool_futures(request, [submit_wait_item(item)],
+                before_input_error=record_before_input_error)[0]
         if promoted and promoted[-1] is not None:
             request.agent._current_run_task_workspace = promoted[-1]
         return execution

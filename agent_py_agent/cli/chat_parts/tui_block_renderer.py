@@ -12,6 +12,7 @@ from typing import Any
 
 from wcwidth import wcswidth
 
+from ...agent.contracts.protocol_status import SUBAGENT_ENDED_STATUSES
 from ...agent.conversation.compact_progress import (
     COMPACT_SOURCE_ACTIVE_TURN,
     COMPACT_SOURCE_TRANSCRIPT,
@@ -986,11 +987,11 @@ def _render_background_activity(
     if main_phase in {"", "waiting", "finalizing"} and _active_subagent_count(rows):
         main_label = derived_label
     focused_status = context.focused_agent_status
+    ended_at = _safe_render_float(main_activity.get("ended_at"))
     focused_terminal = bool(
         context.focused_agent_run_id
-        and focused_status in FOCUSED_AGENT_TERMINAL_STATUSES
+        and (focused_status in SUBAGENT_ENDED_STATUSES or ended_at > 0)
     )
-    ended_at = _safe_render_float(main_activity.get("ended_at"))
     elapsed_end = ended_at if focused_terminal and ended_at > 0 else context.now
     elapsed = max(0, int(elapsed_end - started_at)) if started_at and elapsed_end else 0
     main_style = (
@@ -1007,7 +1008,7 @@ def _render_background_activity(
         )
     elif focused_terminal:
         terminal_icon, terminal_label, terminal_style = _subagent_status_display(
-            focused_status, failure_label=context.focused_agent_failure_label,
+            focused_status, lifecycle_phase="terminal", failure_label=context.focused_agent_failure_label,
         )
         terminal_label = _with_replacement_marker(terminal_label, context.focused_agent_replaced_by)
         prefix = (
@@ -1295,12 +1296,7 @@ def _subagent_activity_rows(value: object) -> list[dict[str, object]]:
 def _main_agent_activity_label(rows: list[dict[str, object]]) -> str:
     if not rows:
         return "运行中"
-    running = sum(
-        1
-        for row in rows
-        if str(row.get("status") or "").upper()
-        in {"PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"}
-    )
+    running = _active_subagent_count(rows)
     if running:
         return f"等待 {running} 个子代理"
     return "整理结果中"
@@ -1310,12 +1306,13 @@ def _main_agent_activity_label(rows: list[dict[str, object]]) -> str:
 # avoid showing a completed model-turn label while descendants still run.
 # 函数用途: 统计代理面板里尚未结束的直属子代理数。
 def _active_subagent_count(rows: list[dict[str, object]]) -> int:
-    return sum(
-        1
-        for row in rows
-        if str(row.get("status") or "").upper()
-        in {"PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"}
-    )
+    # 相同run在重复投影中只计一次；结束证明优先于残留活动阶段。
+    return len({str(row.get("run_id") or "") for row in rows
+        if str(row.get("run_id") or "")
+        and str(row.get("status") or "").strip().upper() in {"PLANNING", "PENDING", "RUNNING", "PAUSED"}
+        and str(row.get("status") or "").strip().upper() not in SUBAGENT_ENDED_STATUSES
+        and str(row.get("lifecycle_phase") or "").strip().lower() != "terminal"
+        and _safe_render_float(row.get("ended_at")) <= 0})
 
 
 # LLM: A child row mirrors 终端交互's width budgeting: canonical status and
@@ -1329,6 +1326,8 @@ def _render_subagent_activity_row(
 ) -> tuple[FormattedLine, ...]:
     status = str(row.get("status") or "").strip().upper()
     lifecycle_phase = str(row.get("lifecycle_phase") or "").strip().lower()
+    if status in SUBAGENT_ENDED_STATUSES or _safe_render_float(row.get("ended_at")) > 0:
+        lifecycle_phase = "terminal"
     icon, label, style = _subagent_status_display(
         status,
         lifecycle_phase=lifecycle_phase,
@@ -1420,6 +1419,10 @@ def _subagent_status_display(
     failure_label: str = "",
 ) -> tuple[str, str, str]:
     phase = str(lifecycle_phase or "").strip().lower()
+    if status == "BLOCKED" or status == "PAUSED" and phase == "terminal":
+        return "–", f"已结束 · {failure_label or ('受阻' if status == 'BLOCKED' else '暂停')}", "class:tui-subagent-blocked"
+    if phase == "terminal" and status in {"PLANNING", "PENDING", "RUNNING"}:
+        return "–", "已结束", "class:tui-muted"
     if status == "PLANNING" or phase == "queued":
         return "○", "排队中", "class:tui-subagent-pending"
     if phase == "waiting_descendants":
@@ -2718,6 +2721,8 @@ def _render_permission(
     selected_option = permission.options[permission.selected_index]
     feedback_enabled = bool(selected_option.get("feedback_type"))
     hint = " Esc 取消 · F4 权限模式"
+    if context.business_thread_active:
+        hint += " · Ctrl+G 返回（不表决）"
     if feedback_enabled and not permission.feedback_mode:
         hint += " · Tab 补充说明"
     lines.extend(
@@ -3229,7 +3234,10 @@ def _render_compact_input_receipts(
     if queued_inputs:
         append_single_line(f"• 已排队的后续消息（{len(queued_inputs)} 条）")
         append_single_line(f"  ↳ {queued_inputs[0].text}", italic=True)
-        append_single_line("    ↑ 取回并编辑排队消息")
+        append_single_line(
+            "    ↑ 取回并编辑排队消息" if any(item.editable for item in queued_inputs)
+            else "    已交宿主排队，当前仅观察，不能取回编辑"
+        )
     return tuple(lines)
 
 
@@ -3252,10 +3260,13 @@ def _render_queue(
         )
     )
     for item in queued_inputs:
-        lines.extend(_render_pending_input_message(item.text, context, italic=True))
+        text = item.text if item.editable else f"[宿主已接管，仅观察] {item.text}"
+        lines.extend(_render_pending_input_message(text, context, italic=True))
     lines.extend(
         wrap_fragments(
-            (("class:tui-muted", "↑ 取回并编辑排队消息"),),
+            (("class:tui-muted",
+              "↑ 取回并编辑排队消息" if any(item.editable for item in queued_inputs)
+              else "已交宿主排队，当前仅观察，不能取回编辑"),),
             width=context.width,
             first_prefix=(("class:tui-muted", "    "),),
             continuation_prefix=(("class:tui-muted", "    "),),
@@ -3295,7 +3306,7 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         return _render_footer_base(snapshot, context)
     if context.business_list_active or context.business_thread_active:
         text = '  Ctrl+G 返回 · '
-        text += 'Enter 下钻/下一页 · ↑↓ 选择' if context.business_list_active else '输入发往本后台会话 · /tree 子树 · /log 日志 · /history 下一页'
+        text += 'Enter 下钻/下一页 · ↑↓ 选择' if context.business_list_active else '/help 命令 · 输入发往本后台会话 · /tree 子树 · /log 日志 · /history 下一页'
         if context.business_thread_active:
             identity = {'available': '可接单', 'suspended': '已挂起', 'retiring': '退役中', 'retired': '已退役'}.get(context.business_identity_state, '未知')
             work = {'idle': '待命', 'running': '运行中', 'waiting': '等待', 'queued': '排队', 'failed': '失败',
@@ -3341,7 +3352,8 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         badge_style = 'class:tui-agent-selected' if process_selected else 'class:tui-bg-watch'
         business_fragments = ((business_style, business_badge),) if business_badge else ()
         badge_fragments = ((badge_style, process_badge),) if process_badge else ()
-        return (*base, *business_fragments, *badge_fragments)
+        # 保留已公布的驻留入口紧随原控制栏；新增团队徽标不插入两者之间。
+        return (*base, *badge_fragments, *business_fragments)
     if context.background_watch_active:
         text = "  Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出"
         if context.notice:

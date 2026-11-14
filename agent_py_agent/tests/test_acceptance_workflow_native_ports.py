@@ -515,7 +515,10 @@ def test_workflow_ids_never_fill_missing_core_identity(wire, monkeypatch):
         space_id='', idempotency_key='effect-attempt', logical_step_key='workflow-step:uncanonical:count',
         run=SimpleNamespace(workflow_run_id='uncanonical'),
         step=SimpleNamespace(escalation_result={'attempt_id': 'uncanonical-effect-attempt'}))
-    assert result == {'ok': False, 'error_code': 'TOOL_AUTHORITY_CONTEXT_MISSING', 'effect_outcome': 'not_started'}
+    assert result == {'ok': False, 'error_code': 'TOOL_AUTHORITY_CONTEXT_MISSING',
+        'effect_outcome': 'not_started', 'handler_executed': False, 'failure_stage': 'authorization',
+        'call_id': 'workflow-step:uncanonical:count', 'tool_name': 'native_counter',
+        'error_message': '当前宿主缺少真实run_id/attempt_id；未进入handler、未执行工具。请在正常授权执行轮重新发起，不能用工作流或effect身份代填。'}
     assert not calls and not counter.calls
 
 

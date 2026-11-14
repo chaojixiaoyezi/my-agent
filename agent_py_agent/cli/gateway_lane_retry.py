@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -20,6 +21,7 @@ from ..agent.backends.errors import (
     is_provider_environment_fault,
     provider_error_http_status,
 )
+from ..agent.conversation.background_execution import BackgroundCompactPreflightDeferred
 from ..agent.conversation.compact_guard import (
     ConversationCompactError,
     is_compact_transient_provider_failure,
@@ -52,6 +54,9 @@ class _LaneFailure:
     wait_count: int = 0
     waiting_for_user_input: bool = False
     inbound_marker: str | None = None
+    compact_capacity_failures: int = 0
+    compact_fingerprint: str | None = None
+    waiting_for_compact_change: bool = False
 
 
 # LLM: worker 写入和 planner 读取共用短锁；配置与指纹读取在锁外，不能堵住其它用户或正在慢流的模型。
@@ -67,16 +72,32 @@ class BackgroundLaneRetry:
     #   其余从 delay 起连续翻倍冷却并封顶；远端 400/413 这类请求问题、临时断线都不是环境故障。环境暂停打一行日志。
     # 函数用途: 失败后记住这条车道要等配置、等环境恢复，还是等一段冷却时间。
     def failed(self, owner: str, thread_id: str, exc: Exception, *, delay: float,
-               wait_for_inbound_marker: str | None = None, headless: bool = False) -> None:
+               wait_for_inbound_marker: str | None = None, headless: bool = False,
+               compact_fingerprint: str | None = None) -> None:
         key = (owner, thread_id)
         with self._lock:
             previous = self._failures.get(key)
             row = _next_failure(previous, exc, delay, headless=headless)
+            if isinstance(exc, BackgroundCompactPreflightDeferred):
+                same = previous is not None and previous.compact_fingerprint == compact_fingerprint
+                failures = previous.compact_capacity_failures if same else 0
+                # 熔断/供应商冷却不计坏候选次数，仍按原计时探测；只隔离重复容量拒绝。
+                failures += int(exc.code == 'COMPACT_CANDIDATE_TOO_LARGE')
+                row = replace(row, compact_capacity_failures=failures,
+                    compact_fingerprint=compact_fingerprint,
+                    waiting_for_compact_change=(exc.code == 'COMPACT_CANDIDATE_TOO_LARGE' and failures >= 3))
             if row.waiting_for_user_input:
                 row = replace(row, inbound_marker=wait_for_inbound_marker)
             if key not in self._failures and len(self._failures) >= 1024:
                 self._failures.pop(next(iter(self._failures)))
             self._failures[key] = row
+        if row.waiting_for_compact_change and (previous is None or not previous.waiting_for_compact_change):
+            _log_lane_event('compact_capacity_wait', key, {
+                'reason_code': 'COMPACT_SAME_INPUT_RETRY_EXHAUSTED',
+                'wait_count': row.compact_capacity_failures,
+                'current_slice_business_request_not_sent': True,
+                'next_action': '保留原wake和任务；等待模型、容量配置、输入或原压缩检查点变化后自动继续，不重放旧工具。',
+            })
         if row.waiting_for_user_input and (previous is None or not previous.waiting_for_user_input
                                           or previous.inbound_marker != row.inbound_marker):
             if headless:
@@ -113,11 +134,23 @@ class BackgroundLaneRetry:
         model_ready: Callable[[], bool],
         fingerprint: Callable[[], str] | None = None,
         inbound_marker: Callable[[], str | None] | None = None,
+        compact_fingerprint: Callable[[], str | None] | None = None,
     ) -> bool:
         with self._lock:
             row = self._failures.get((owner, thread_id))
         if row is None:
             return True
+        if row.compact_capacity_failures:
+            current = _read_fingerprint(compact_fingerprint)
+            if current is not None and current != row.compact_fingerprint:
+                with self._lock:
+                    if self._failures.get((owner, thread_id)) is not row:
+                        return False
+                    self._failures.pop((owner, thread_id))
+                _log_lane_event('compact_capacity_resumed', (owner, thread_id), {'reason_code': 'COMPACT_INPUT_CHANGED'})
+                return True
+            if row.waiting_for_compact_change:
+                return False
         if row.waiting_for_user_input:
             current = _read_fingerprint(inbound_marker)
             if current is None:
@@ -210,7 +243,12 @@ def _next_failure(
     headless: bool = False,
 ) -> _LaneFailure:
     now = time.monotonic()
-    if headless:
+    if isinstance(exc, BackgroundCompactPreflightDeferred) and exc.code == 'COMPACT_CIRCUIT_OPEN':
+        remaining = exc.retry_after_seconds
+        if type(remaining) in (int, float) and math.isfinite(remaining) and remaining >= 0:
+            return _LaneFailure(now + remaining, False,
+                wait_count=(previous.wait_count + 1 if previous else 1))
+    if headless and not isinstance(exc, BackgroundCompactPreflightDeferred):
         attempt = (previous.wait_count + 1) if previous is not None else 1
         if attempt >= _MAX_HEADLESS_CONSECUTIVE_RETRY_COUNT:
             return _LaneFailure(0.0, False, waiting_for_user_input=True, wait_count=attempt)
@@ -230,6 +268,7 @@ def _next_failure(
     # 压缩包装的额度错误仍由原环境探测/模型指纹恢复，不能强制等待新消息。
     if (
         isinstance(exc, (RuntimeRecoveryRequiredError, ConversationCompactError))
+        and not isinstance(exc, BackgroundCompactPreflightDeferred)
         and not is_provider_quota_failure(exc)
         and not is_compact_transient_provider_failure(exc)
     ):

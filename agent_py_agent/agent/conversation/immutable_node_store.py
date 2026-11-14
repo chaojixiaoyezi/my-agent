@@ -154,10 +154,14 @@ class ImmutableNodeStore:
                     conn.rollback()
                 raise
 
-    def read(self, name):
+    def read(self, name, *, max_bytes=None):
         if not self.exists():
             return None
         with self.connection() as conn:
+            if max_bytes is not None:
+                size = conn.execute('SELECT length(raw) FROM nodes WHERE name=?', (name,)).fetchone()
+                if size is not None and size[0] is not None and size[0] > max_bytes:
+                    raise ValueError('immutable index node exceeds read budget')
             row = conn.execute('SELECT raw FROM nodes WHERE name=?', (name,)).fetchone()
         return None if row is None or row[0] is None else bytes(row[0])
 

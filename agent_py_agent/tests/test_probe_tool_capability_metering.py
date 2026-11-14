@@ -106,6 +106,38 @@ def _agent(wire: _ProbeWire, monkeypatch) -> SimpleNamespace:
     return agent
 
 
+@pytest.mark.parametrize('level', ['off', 'low', 'auto'])
+def test_probe_inherits_effective_reasoning_without_changing_default(monkeypatch, level):
+    wire = _ProbeWire()
+    agent = _agent(wire, monkeypatch)
+    agent.backend.reasoning_control = 'effort'
+    agent.backend.reasoning_levels = ('low', 'high', 'max')
+    agent.config.model_reasoning_effort = level
+    select_tool_protocol(agent, run_id='reasoning-run', request_id='reasoning-request')
+    [payload] = wire.payloads
+    assert payload.get('thinking') == ({'type': 'disabled'} if level == 'off' else None)
+    assert payload.get('reasoning_effort') == ('low' if level == 'low' else None)
+    assert current_probe_accounting() is None
+
+
+@pytest.mark.parametrize('matching_run', [True, False])
+def test_probe_uses_only_its_bound_run_reasoning_snapshot(monkeypatch, matching_run):
+    wire = _ProbeWire()
+    agent = _agent(wire, monkeypatch)
+    agent.backend.reasoning_control = 'effort'
+    agent.backend.reasoning_levels = ('low', 'high', 'max')
+    agent.config.model_reasoning_effort = 'low'
+    agent._current_run_params = SimpleNamespace(
+        run_id='reasoning-run' if matching_run else 'other-run',
+        task_attributes={'conversation_thread_id': 'thread-reasoning'},
+        live_archive_state={'_request_reasoning_snapshot': {'thread_id': 'thread-reasoning', 'level': 'off'}},
+    )
+    select_tool_protocol(agent, run_id='reasoning-run', request_id='reasoning-request')
+    [payload] = wire.payloads
+    assert payload.get('thinking') == ({'type': 'disabled'} if matching_run else None)
+    assert payload.get('reasoning_effort') == (None if matching_run else 'low')
+
+
 def test_probe_calls_are_accounted_with_dedicated_purpose(monkeypatch):
     wire = _ProbeWire()
     agent = _agent(wire, monkeypatch)

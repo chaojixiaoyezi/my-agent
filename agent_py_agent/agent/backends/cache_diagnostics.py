@@ -10,7 +10,7 @@ import json
 import math
 import sys
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 _CACHE_LOCK = threading.Lock()
 # 缓存诊断单条消息摘要进程内LRU缓存的最大条目数
@@ -167,8 +167,8 @@ def _row_digest(message: object) -> str:
 
 # LLM: 链步按上一链值与严格行摘要缓存，散列在锁外；中间消息变更仍会改变它之后的每个检查点。
 # 函数用途: 复用未变化前缀的链步，保留原“上一链值+NUL+行摘要”字节算法。
-def _chained_digest(previous_chain: str, message: object) -> str:
-    row_digest = _row_digest(message)
+def _chain_step_digest(previous_chain: str, row_digest: str) -> str:
+    """行结构只核对一次；运输链和正文链共享已计算的严格行摘要。"""
     key = (previous_chain, row_digest)
     with _CACHE_LOCK:
         cached = _CHAIN_STEP_CACHE.get(key)
@@ -188,14 +188,28 @@ def _chained_digest(previous_chain: str, message: object) -> str:
 #   长度变化不能直接比较两个不同范围的末链值，调用方必须按共同 index 比较并检查末块是否可证。
 # 函数用途: 对消息序列生成稀疏检查点列表（[{index, chain}]，index 是 1 起的消息序号）。
 def _chain_checkpoints(rows: list) -> list[dict]:
-    chain, checkpoints = _digest("request_surface.v2.seed"), []
+    return _message_checkpoints(rows, include_content=False)[0]
+
+
+def _message_checkpoints(rows: list, *, include_content: bool) -> tuple[list[dict], list[dict]]:
+    """单遍读取消息，逐行共享摘要；仅保留固定尾窗，不积累全历史检查点或正文副本。"""
+    chain = content_chain = _digest("request_surface.v2.seed")
+    checkpoints: deque[dict] = deque(maxlen=_CHAIN_CHECKPOINT_LIMIT_COUNT)
+    content_checkpoints: deque[dict] = deque(maxlen=_CHAIN_CHECKPOINT_LIMIT_COUNT)
     for position, row in enumerate(rows, start=1):
-        chain = _chained_digest(chain, row)
+        row_digest = _row_digest(row)
+        previous_chain = chain
+        chain = _chain_step_digest(chain, row_digest)
+        if include_content:
+            content_row = _without_message_cache_control(row)
+            content_digest = row_digest if content_row is row else _row_digest(content_row)
+            content_chain = (chain if content_chain == previous_chain and content_digest == row_digest
+                             else _chain_step_digest(content_chain, content_digest))
         if position % _CHAIN_BLOCK_SIZE_COUNT == 0 or position == len(rows):
             checkpoints.append({"index": position, "chain": chain})
-    if len(checkpoints) > _CHAIN_CHECKPOINT_LIMIT_COUNT:
-        checkpoints = checkpoints[-_CHAIN_CHECKPOINT_LIMIT_COUNT:]
-    return checkpoints
+            if include_content:
+                content_checkpoints.append({"index": position, "chain": content_chain})
+    return list(checkpoints), list(content_checkpoints)
 
 
 # LLM: 协议名字提取按顶层name、Chat function.name、custom.name优先；内置工具缺name时以type标记，仅参与不可逆摘要。
@@ -227,7 +241,8 @@ def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
         system = [row for row in rows if isinstance(row, dict) and row.get("role") in {"system", "developer"}]
     options = {key: value for key, value in payload.items()
                if key not in {"model", "messages", "input", "system", "instructions", "tools", "stream", "previous_response_id"}}
-    checkpoints = _chain_checkpoints(rows)
+    # 运输与去运输标记的内容诊断共享逐行摘要；工具正文中的同名业务字段仍原样散列。
+    checkpoints, content_checkpoints = _message_checkpoints(rows, include_content=True)
     tools = payload.get("tools", [])
     tool_names = [_extract_tool_name(tool) for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else []
     return {"schema": "request_surface.v2", "endpoint": _digest(endpoint), "model": _digest(payload.get("model")),
@@ -236,7 +251,20 @@ def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
             # 分区选项单独留摘要：只有这几个键会切换服务端缓存分区，混在 options 里看不出是换了分区。
             "partition_options": {key: _digest(options.get(key)) for key in sorted(_PARTITION_OPTION_KEYS) if key in options},
             "chain_checkpoints": checkpoints, "message_count": len(rows),
+            "content_chain_schema": "message_cache_control_excluded.v1",
+            "content_chain_checkpoints": content_checkpoints,
             "partial": len(rows) > _CHAIN_COVERAGE_LIMIT_COUNT}
+
+
+def _without_message_cache_control(row):
+    """仅复制携带运输缓存标记的消息块，正文内同名字段属于业务数据，原样保留。"""
+    if not isinstance(row, dict) or not isinstance(row.get("content"), list):
+        return row
+    blocks = row["content"]
+    if not any(isinstance(block, dict) and "cache_control" in block for block in blocks):
+        return row
+    return {**row, "content": [{key: value for key, value in block.items() if key != "cache_control"}
+                               if isinstance(block, dict) else block for block in blocks]}
 
 
 # LLM: 检查点只能证明“该检查点及之前”的链值整体未变。窗口滚动会裁掉最前面的检查点，所以比较必须按
@@ -306,10 +334,40 @@ def compare_request_surfaces(previous: dict, current: dict) -> dict[str, object]
         if previous.get("options") != current.get("options"):
             changes.append(_OPTIONS_CHANGED_CODE)
     changes.extend(history)
+    content_facts = {}
+    if previous.get("content_chain_schema") == current.get("content_chain_schema") == "message_cache_control_excluded.v1":
+        content_facts = {"content_prefix_comparable": False, "content_prefix_changed": None,
+                         "content_shared_message_prefix": 0, "cache_control_only_prefix_changed": False}
+        if _valid_content_checkpoints(previous) and _valid_content_checkpoints(current):
+            old_content = {**previous, "chain_checkpoints": previous["content_chain_checkpoints"]}
+            new_content = {**current, "chain_checkpoints": current["content_chain_checkpoints"]}
+            content_changes, _, content_shared, content_comparable = _history_changes(old_content, new_content)
+            content_facts = {
+                "content_prefix_comparable": content_comparable,
+                "content_prefix_changed": "history_prefix_changed" in content_changes if content_comparable else None,
+                "content_shared_message_prefix": content_shared,
+                "cache_control_only_prefix_changed": ("history_prefix_changed" in history and content_comparable
+                                                       and "history_prefix_changed" not in content_changes),
+            }
     return {"baseline_available": True, "comparable": comparable, "changes": changes,
             "shared_message_prefix": shared, "changed_block_index": divergent,
             "partial": bool(previous.get("partial") or current.get("partial") or not comparable),
-            "server_cache_state": "unknown", **current_tools}
+            "server_cache_state": "unknown", **current_tools, **content_facts}
+
+
+def _valid_content_checkpoints(surface: dict) -> bool:
+    """缺失或破损的可选正文链不能破坏原运输诊断，也不能凭schema标签声称可比。"""
+    rows, count = surface.get("content_chain_checkpoints"), surface.get("message_count")
+    if type(count) is not int or count < 0 or not isinstance(rows, list) or len(rows) > _CHAIN_CHECKPOINT_LIMIT_COUNT:
+        return False
+    last = 0
+    for row in rows:
+        if (not isinstance(row, dict) or type(row.get("index")) is not int
+                or not last < row["index"] <= count or not isinstance(row.get("chain"), str)
+                or not _public_digest(row["chain"])):
+            return False
+        last = row["index"]
+    return last == count
 
 
 # LLM: 只按 payload 的结构化键比较，不解析正文；reasoning 与 reasoning_effort 是同一档位的两个键名，
@@ -366,6 +424,20 @@ def public_cache_diagnostic(value: object) -> dict[str, object]:
     count = value.get("shared_message_prefix")
     block = value.get("changed_block_index")
     tool_count = value.get("current_tool_count")
+    content_facts = {}
+    if type(value.get("content_prefix_comparable")) is bool:
+        comparable = value["content_prefix_comparable"]
+        changed = (value.get("content_prefix_changed")
+                   if comparable and type(value.get("content_prefix_changed")) is bool else None)
+        content_facts = {
+            "content_prefix_comparable": comparable,
+            "content_prefix_changed": changed,
+            "content_shared_message_prefix": max(0, value["content_shared_message_prefix"])
+            if type(value.get("content_shared_message_prefix")) is int else 0,
+            "cache_control_only_prefix_changed": (value.get("cache_control_only_prefix_changed") is True
+                and comparable and changed is False and isinstance(changes, list)
+                and "history_prefix_changed" in changes),
+        }
     return {
         "baseline_available": value["baseline_available"],
         "comparable": value.get("comparable") is not False,
@@ -377,4 +449,5 @@ def public_cache_diagnostic(value: object) -> dict[str, object]:
         "tool_names_comparable": value.get("tool_names_comparable") is True,
         "partial": value.get("partial") is True,
         "server_cache_state": "unknown",
+        **content_facts,
     }

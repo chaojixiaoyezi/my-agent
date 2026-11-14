@@ -141,7 +141,7 @@ def closed(required: dict, optional: dict | None = None) -> dict:
 def validate_object(value: object, schema: dict) -> dict:
     validation = validate_tool_input(value, schema)
     if not isinstance(value, dict) or not validation.ok:
-        raise _invalid_schema(_schema_diagnostic(value, schema, schema))
+        raise _invalid_schema(_schema_diagnostic(validation))
     _validate_units(value, schema)
     result = json.loads(canonical_json(value))
     for key, field in schema.get("properties", {}).items():
@@ -157,44 +157,44 @@ def _invalid_schema(details: dict) -> HostAPIError:
     return error
 
 
-def _schema_diagnostic(value, schema, root, *, path='$', depth=0, selector='') -> dict:
-    """复用原校验器，唯一const判别分支只用于解释失败，不改变合法性结论。"""
-    if depth <= JSON_DEPTH_COUNT:
-        if '$ref' in schema:
-            return _schema_diagnostic(value, _unit_reference(root, schema['$ref']), root,
-                                      path=path, depth=depth + 1, selector=selector)
-        for keyword in ('oneOf', 'anyOf'):
-            candidates = []
-            for branch in schema.get(keyword, []):
-                constants = {key: prop['const'] for key, prop in branch.get('properties', {}).items()
-                             if isinstance(prop, dict) and 'const' in prop}
-                if constants and isinstance(value, dict) and all(key in value and type(value[key]) is type(item) and value[key] == item
-                                                           for key, item in constants.items()):
-                    candidates.append((branch, constants))
-            if len(candidates) == 1:
-                branch, constants = candidates[0]
-                return _schema_diagnostic(value, branch, root, path=path, depth=depth + 1,
-                    selector=canonical_json(constants)[:256])
-        if isinstance(value, dict):
-            for key, child in schema.get('properties', {}).items():
-                if key in value and not validate_tool_input(value[key], {**child, '$defs': root.get('$defs', {})}).ok:
-                    return _schema_diagnostic(value[key], child, root, path=f'{path}.{key}',
-                                              depth=depth + 1, selector=selector)
-    validation = validate_tool_input(value, {**schema, '$defs': root.get('$defs', {})})
+def _schema_diagnostic(validation) -> dict:
+    """业务端与模型端共用原工具合同的字段诊断，避免重新遍历并猜测分支。"""
     issue = validation.issues[0] if validation.issues else None
     constraint = issue.keyword if issue else 'type'
     expected = issue.expected if issue else 'object'
     if expected is not None and type(expected) not in (str, int, float, bool):
         expected = canonical_json(expected)[:256]
-    details = {'field_path': (path + issue.path[1:] if issue else path)[:512],
+    details = {'field_path': issue.path[:512] if issue else '$',
                'constraint': constraint, 'expected': expected,
                'next_action': '按此字段约束修正参数后重新提交；本次未开始执行。'}
-    if constraint == 'minItems':
+    if issue and issue.actual_type:
+        details['actual_type'] = issue.actual_type
+    location = issue.details if issue and constraint == 'additionalProperties' else None
+    if location and 'suggested_path' in location:
+        target = location['suggested_path'][:512]
+        kind = location['expected_type']
+        details.update(suggested_path=target, expected_type=kind)
+        example = '，例如 JSON 布尔值 true' if kind == 'boolean' else ''
+        details['next_action'] = f'将字段移到 {target}，传入 {kind}{example}。'
+    elif constraint == 'minItems':
         details['next_action'] = f'至少提供 {expected} 个条目后重新提交；本次未开始执行。'
     elif constraint == 'maxItems':
         details['next_action'] = f'最多保留 {expected} 个条目后重新提交；本次未开始执行。'
-    if selector:
-        details['schema_selector'] = selector
+    facts = issue.details if issue and issue.details else {}
+    if type(facts.get('actual_length')) is int:
+        details['actual_length'] = facts['actual_length']
+        details['length_unit'] = ('characters' if constraint in {'minLength', 'maxLength'} else
+            'properties' if constraint in {'minProperties', 'maxProperties'} else 'items')
+    if constraint in {'minLength', 'maxLength'}:
+        details['next_action'] = f'按 {constraint}={expected} 的字符数约束修正此字段后重新提交；本次未开始执行。'
+    elif constraint in {'enum', 'const'}:
+        details['next_action'] = '使用 expected 中声明的协议值，不使用旧状态、翻译或别名；本次未开始执行。'
+    elif constraint == 'type':
+        details['next_action'] = f'将此字段改为声明的 JSON 类型 {expected}，不要把数组、对象或布尔值写成字符串；本次未开始执行。'
+    if facts.get('requires_empty_array'):
+        details['next_action'] = f"将 {details['field_path']} 设为 JSON 空数组 [] 后重试；本次未开始执行。"
+    if facts.get('schema_selector'):
+        details['schema_selector'] = canonical_json(facts['schema_selector'])[:256]
     return details
 
 
@@ -227,9 +227,15 @@ def _validate_units(value, schema: dict, *, root: dict | None = None, active: fr
         byte_count = len(value.encode("utf-8")) if isinstance(value, str) else (
             len(canonical_json(value).encode("utf-8")) if "x-max-bytes" in schema else 0)
     except (ValueError, TypeError, UnicodeError, RecursionError):
-        raise HostAPIError("INVALID_SCHEMA") from None
-    if byte_count > schema.get("x-max-bytes", REQUEST_MAX_BYTES):
-        raise HostAPIError("INVALID_SCHEMA")
+        raise _invalid_schema({"field_path": path[:512], "constraint": "utf8",
+            "expected": "valid UTF-8", "actual_type": "string" if isinstance(value, str) else type(value).__name__,
+            "next_action": "修正此字段的无效字符编码后重新提交；本次未开始执行。"}) from None
+    byte_limit = schema.get("x-max-bytes", REQUEST_MAX_BYTES)
+    if byte_count > byte_limit:
+        raise _invalid_schema({"field_path": path[:512], "constraint": "x-max-bytes",
+            "expected": byte_limit, "actual_type": "string" if isinstance(value, str) else type(value).__name__,
+            "actual_length": byte_count, "length_unit": "utf8_bytes",
+            "next_action": f"将此字段缩短到最多 {byte_limit} 个 UTF-8 字节，或按原分页/引用入口读取；本次未开始执行。"})
     if isinstance(value, dict):
         for key, item in value.items():
             additional = schema.get("additionalProperties", {})

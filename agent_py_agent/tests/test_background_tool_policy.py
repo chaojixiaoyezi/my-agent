@@ -91,3 +91,26 @@ def test_session_task_native_work_and_delegation_are_available_but_still_narrowe
     configured = policy.BackgroundToolPolicyRequest(reason='session_task',
         config=SimpleNamespace(background_main_agent_allowed_tools=['read_file']))
     assert initial(configured) == frozenset({'read_file'})
+
+
+@pytest.mark.parametrize('reason', ['session_task_assigned', 'thread_goal_continue', 'scheduled_job_due', 'audit_finding', ''])
+def test_complete_background_main_can_recall_owner_history(reason):
+    request = policy.BackgroundToolPolicyRequest(reason=reason, active_goal=reason == 'thread_goal_continue')
+    assert 'session_search' in policy.background_allowed_tools(request=request)
+    assert 'session_search' in initial(request)
+
+
+@pytest.mark.parametrize('restriction', ['configured', 'task', 'owner', 'plugin'])
+def test_history_default_never_expands_restricted_background_profiles(restriction):
+    options = {'reason': 'session_task_assigned'}
+    if restriction == 'configured':
+        options['config'] = SimpleNamespace(background_main_agent_allowed_tools=['tool_search', 'read_file'])
+    elif restriction == 'task':
+        options['policy_snapshot'] = {'allowed_tools': ['tool_search', 'read_file']}
+    elif restriction == 'owner':
+        options['owner_policy'] = SimpleNamespace(disabled_tools=('session_search',))
+    else:
+        options['wake_signal'] = {'metadata': {'plugin_origin': True, 'tool_policy': 'none'}}
+    request = policy.BackgroundToolPolicyRequest(**options)
+    assert 'session_search' not in policy.background_allowed_tools(request=request)
+    assert 'session_search' not in initial(request)

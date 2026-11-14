@@ -56,6 +56,7 @@ class TuiQueuedInput:
     text: str
     priority: str
     seq: int
+    editable: bool = False
 
 
 # LLM: TuiPendingSteer is a UI-only receipt keyed by the opaque client message id; the text
@@ -1157,6 +1158,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
                 text=str(event.payload.get("text") or ""),
                 priority=str(event.payload.get("priority") or "next"),
                 seq=event.seq,
+                editable=event.payload.get("editable") is True,
             )
         )
         self.queued_inputs.sort(key=_queue_sort_key)

@@ -49,6 +49,8 @@ def execution_lifecycle(service, execution):
     if claim is None:
         unavailable.append('EXACT_CLAIM_UNAVAILABLE')
     event_views, error, retry_refs = [], None, []
+    canonical_success = execution.get('status') == 'done' and any(
+        item['attempt_id'] == attempt_id and item['status'] == 'done' for item in attempts[:100])
     known_attempts = {item['attempt_id'] for item in attempts[:100]}
     relation_keys = ('previous_attempt_id', 'superseded_by_attempt_id', 'recovered_attempt_id')
     keys = ('reason', 'source', 'status', 'error_code', 'runtime_reason', 'effect_outcome',
@@ -75,7 +77,10 @@ def execution_lifecycle(service, execution):
             candidate = payload.get(key)
             if isinstance(candidate, str) and candidate != attempt_id and candidate in known_attempts:
                 retry_refs.append(candidate)
-        code = payload.get('error_code') or payload.get('runtime_reason')
+        # 正常runner收尾说明仍是事件事实；准确attempt已成功时，不能将其冒充结构化错误码。
+        code = payload.get('error_code')
+        if not code and not canonical_success:
+            code = payload.get('runtime_reason')
         if error is None and isinstance(code, str) and code:
             error = {'code': code[:128], 'message': str(redact_sensitive_value(payload.get('error_message')
                      or payload.get('message') or ''))[:4096],

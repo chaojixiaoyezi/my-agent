@@ -296,14 +296,14 @@ def test_hierarchy_execute_child_creation_rejects_when_allow_descendants_false(t
     assert len(manager.load(parent.id).child_ids) == 0
 
 
-def test_hierarchy_execute_child_creation_rejects_when_max_depth_exceeded(tmp_path):
-    """When parent depth + 1 > max_descendant_depth, execute_child_creation rejects with SUBAGENT_DESCENDANTS_FORBIDDEN."""
+def test_hierarchy_execute_child_creation_rejects_when_remaining_depth_exhausted(tmp_path):
+    """剩余代数为0时拒绝；绝对树深度不能替代已经逐代递减的余量。"""
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(goal="p", thought="t", plan=["p"])
     parent.depth = 2
     parent.attributes["delegation_constraints"] = StructuredDelegationConstraints(
         allow_descendants=True,
-        max_descendant_depth=2,  # depth 2 + 1 = 3 > 2
+        max_descendant_depth=0,  # 当前剩余为0，与parent.depth=2无关
     ).to_dict()
     manager.save(parent)
 
@@ -970,10 +970,12 @@ def test_orch06_grandchild_monotonic_write_and_tool_scope_enforcement(tmp_path: 
         goal="constrained parent",
         thought="plan",
         plan=["step1"],
+        role="coordinator",
+        allowed_tools=["read_file", "write_file", "create_subagents"],
     )
     parent_task.extra_write_roots = [str(allowed_file)]
     parent_task.allowed_write_roots = [str(allowed_file)]
-    parent_task.allowed_tools = ["read_file", "write_file", "create_subagents"]
+    # 独立工具权限在创建时给出；改raw历史并集不能冒充新的授权来源。
     parent_task.attributes["delegation_constraints"] = parent_constraints.to_dict()
     agent.subagents.save(parent_task)
 
@@ -1071,3 +1073,57 @@ def test_orch06_grandchild_monotonic_write_and_tool_scope_enforcement(tmp_path: 
     assert grandchild_c4.permitted_tools == parent_constraints.permitted_tools
     assert grandchild_c4.max_cumulative_children == parent_constraints.max_cumulative_children
     assert "git_push" in grandchild_c4.prohibited_actions
+
+
+@pytest.mark.parametrize("absolute_depth", [0, 7])
+def test_delegation_remaining_depth_is_consumed_by_the_same_created_chain(tmp_path, absolute_depth):
+    """真实创建出的同一代约束继续进原派工门，余量2→1→0且不能显式放宽。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"),
+                                   execution_mode="local_unmanaged"), tmp_path / "workspace")
+    try:
+        parent = agent.subagents.create_run(goal="parent", thought="plan", plan=["delegate"],
+                                            role="coordinator", allowed_tools=["create_subagents", "read_file"])
+        parent.depth = absolute_depth
+        parent.attributes["delegation_constraints"] = StructuredDelegationConstraints(
+            allow_descendants=True, max_cumulative_children=4, max_descendant_depth=2,
+        ).to_dict()
+        agent.subagents.save(parent)
+        tool = CreateSubagentsTool(agent)
+
+        def enter(task):
+            agent._current_run_params = RunParams(task_attributes=task.attributes, host_channel_actor=None)
+            set_current_subagent_context(agent, run_id=task.id, task_attributes=task.attributes)
+
+        enter(parent)
+        first = tool.execute({"items": [{"goal": "first", "role": "coordinator"}]})
+        assert first.ok, first.output
+        child = agent.subagents.load(json.loads(first.output)["created_run_ids"][0])
+        assert child.depth == absolute_depth + 1
+        assert child.attributes["delegation_constraints"]["max_descendant_depth"] == 1
+        enter(child)
+        for proposed in (1, 2):
+            widened = tool.execute({"items": [{"goal": "widened", "role": "coordinator",
+                "delegation_constraints": {"max_descendant_depth": proposed}}]})
+            assert not widened.ok
+            assert widened.reported_error_code == "DELEGATION_SCOPE_EXCEEDS_PARENT"
+            assert not agent.subagents.load(child.id).child_ids
+        second = tool.execute({"items": [{"goal": "second", "role": "coordinator"}]})
+        assert second.ok, second.output
+        grandchild = agent.subagents.load(json.loads(second.output)["created_run_ids"][0])
+        assert grandchild.depth == absolute_depth + 2
+        assert grandchild.attributes["delegation_constraints"]["max_descendant_depth"] == 0
+        enter(grandchild)
+        refused = tool.execute({"items": [{"goal": "third", "role": "worker"}]})
+        assert not refused.ok and refused.reported_error_code == "SUBAGENT_DESCENDANTS_FORBIDDEN"
+        assert refused.effect_outcome == "not_started"
+        payload = json.loads(refused.output)
+        assert payload["reasons"] == ["max_descendant_depth=0 (remaining generations exhausted)"]
+        assert not agent.subagents.load(grandchild.id).child_ids
+    finally:
+        close = getattr(agent, "close", None)
+        if callable(close):
+            close()

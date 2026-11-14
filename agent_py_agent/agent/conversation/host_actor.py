@@ -82,6 +82,44 @@ def actor_from_scope(agent, scope, thread_id: str, request_id: str) -> HostChann
     return _validate_scope(agent, thread_id, value)
 
 
+def validate_space_recall_actor(agent, snapshot, actor, request_id):
+    """前台读取已选空间时重新核验原通道绑定，空间选择继续沿用受理时的版本。"""
+    if actor is None:
+        # 本地入口的会话与 owner 已在 Gateway 受理时核实，不从旧回合猜一个通道身份。
+        return
+    if not isinstance(actor, HostChannelActor):
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    if (actor.owner_id != snapshot.get("owner_id") or actor.actor_id != snapshot.get("actor_id")
+            or actor.source_thread_id != snapshot.get("thread_id") or actor.entry_request_id != request_id):
+        raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+    _validate_scope(agent, actor.source_thread_id, actor)
+
+
+def checked_foreground_memory_scope(agent, params):
+    """每次自动或显式项目记忆检索前核一次原绑定，不在逐条记录过滤时读线程。"""
+    scope = getattr(params, "memory_recall_scope", None)
+    snapshot = getattr(params, "host_session_space", None)
+    if scope is not None and snapshot is not None:
+        validate_space_recall_actor(agent, snapshot, params.host_channel_actor, params.request_id)
+    return scope
+
+
+def model_long_term_scope(agent, memory, *, frozen_only=False):
+    """模型读取正式记忆前复核原发送者。未选空间时，管理列表仍可列出本人的旧记录。"""
+    from ..memory_store.recall import runtime_long_term_scope
+    from .business_contracts import BusinessExecutionContext
+
+    current = getattr(agent, "_current_run_params", None)
+    foreground = checked_foreground_memory_scope(agent, current)
+    business = getattr(current, "business_context", None)
+    if frozen_only and foreground is None and not isinstance(business, BusinessExecutionContext):
+        return None
+    attrs = getattr(current, "task_attributes", None)
+    return runtime_long_term_scope(memory, task_id=str(getattr(current, "task_id", "") or ""),
+                                   task_attributes=attrs if isinstance(attrs, dict) else {},
+                                   business_context=business, memory_recall_scope=foreground)
+
+
 # LLM: 原 ThreadStore 的 owner 和不可变来源是验证锚；读取错误统一拒绝，不打印原错误正文。
 # 函数用途: 读取本次线程及其原聊天，避免跨用户引用或坏来源被当成本地身份。
 def _origin(agent, thread_id: str):

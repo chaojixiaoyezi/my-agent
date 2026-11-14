@@ -51,6 +51,7 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
 )
 from agent_py_agent.agent.conversation.channels import project_user_reply
+from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.conversation.control_commands import (
     parse_conversation_control,
 )
@@ -1525,7 +1526,7 @@ def test_gateway_fake_run_repeated_pressure_stops_without_unrendered_commit(tmp_
         )
 
     monkeypatch.setattr(agent, "run", pressure_without_progress)
-    with pytest.raises(ConversationPersistenceError, match="超过模型上下文上限"):
+    with pytest.raises(ConversationCompactError) as cutoff:
         _run_claimed_gateway_ask(
             GatewayAskRunContext(
                 agent,
@@ -1537,6 +1538,7 @@ def test_gateway_fake_run_repeated_pressure_stops_without_unrendered_commit(tmp_
             )
         )
 
+    assert cutoff.value.error_code == "COMPACT_RECOVERY_EXHAUSTED"
     # fake 不进入真实模型渲染安全点，所有 defer 候选保持未提交；重试上限必须失败关闭。
     assert calls == 8
     thread = agent.conversation_store.threads.load(existing.thread_id)
@@ -2195,7 +2197,7 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
         },
     }
 
-    with pytest.raises(ConversationPersistenceError):
+    with pytest.raises(ConversationPersistenceError, match="disk full") as failure:
         _run_claimed_gateway_ask(
             GatewayAskRunContext(
                 agent,
@@ -2206,6 +2208,8 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
                 lambda _chunk: None,
             )
         )
+    assert isinstance(failure.value.__cause__, OSError)
+    assert failure.value.error_code == "CONVERSATION_PERSISTENCE_UNAVAILABLE"
     assert agent.memory.all() == []
 
 
@@ -5663,9 +5667,10 @@ def test_gateway_overflow_without_observer_refuses_unprepared_active_compact(tmp
         return SimpleNamespace(runtime_status="ok", response="已继续")
 
     agent.run = run
-    with pytest.raises(ConversationPersistenceError, match="无法继续压缩"):
+    with pytest.raises(ConversationCompactError) as no_source:
         _run_gateway_turn_with_conversation_compact(context, prompt, conversation)
 
+    assert no_source.value.error_code == "COMPACT_SOURCE_EMPTY"
     assert len(captured) == 1
     assert captured[0].runtime_rejected_actions == [rejection]
     assert RunParams().runtime_rejected_actions == []

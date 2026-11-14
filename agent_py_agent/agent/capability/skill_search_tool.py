@@ -125,6 +125,11 @@ class SkillSearchTool(BaseTool):
 
     # LLM: search 的 resource_path 冲突在读取快照前拒绝，不能丢条件、转换动作或返回未授权成员建议；默认动作保持原合同。
     # 函数用途: 先检查动作与路径参数，再选择公开检索、原 Skill 读取或包内读取，避免成功却查了另一件事。
+    def execute_scoped(self, params, context):
+        from .method_usage import method_usage_scope
+        with method_usage_scope(getattr(self.agent, '_current_run_params', None)):
+            return self.execute(params)
+
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or ("get" if params.get("skill_id") else "search")).strip()
         if action == "search" and "resource_path" in params:
@@ -201,7 +206,7 @@ class SkillSearchTool(BaseTool):
             "hint": "选择后原样使用对应 next_read 调用本工具；Skill 用 skill_id，能力包用 package_id，不能混用。",
         }
         outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
-        _record_search_matches(self.agent, matches)
+        _record_search_matches(self.agent, matches, snapshot=snapshot)
         return outcome
 
     # LLM: 解析不到包时先看主任务 pin 诊断（停用/换代则回执让模型告诉用户）；解析到后先比对显式代次，不符只回参数纠错；
@@ -225,6 +230,11 @@ class SkillSearchTool(BaseTool):
             config = getattr(self.agent, "config", None) or default_agent_config()
             if action == "search":
                 payload = _package_matches(package, params, offset)
+                if payload.get('matches'):
+                    from .method_usage import record_candidates
+                    record_candidates(self.agent, snapshot,
+                        [{'kind': 'capability_package', 'stable_id': package.stable_id}],
+                        source='skill_search.package_search')
             else:
                 raise_if_cancelled()
                 resource_path = str(params.get("resource_path") or "")
@@ -242,8 +252,8 @@ class SkillSearchTool(BaseTool):
             outcome = _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
             if action == "get":
                 record_method_read(self.agent, package, resource_path)
-                record_skill_usage_event(self.agent, event="manual_get", skill_id=package_id,
-                                         kind="capability_package", source="package", chars=len(payload.get("body") or ""))
+                from .method_usage import record_read
+                record_read(self.agent, package, chars=len(payload.get("body") or ""))
                 if outcome.ok and package.mcp_runtime == "on_demand" and package.mcp_tool_names:
                     outcome = replace(outcome, result_envelope={**outcome.result_envelope, "capability_package_tools": {
                         "package_id": package.package_id, "activation_id": package.activation_id,
@@ -302,27 +312,16 @@ class SkillSearchTool(BaseTool):
         }
         outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         record_method_read(self.agent, entry)
-        record_skill_usage_event(self.agent, event="manual_get", skill_id=entry.stable_id, source=entry.source, chars=len(body))
+        from .method_usage import record_read
+        record_read(self.agent, entry, chars=len(body))
         return outcome
 
 
 # LLM: 只记录返回卡片的结构化身份；当前请求/线程提前冻结，批量写入失败仅告警，不影响检索回执。
 # 函数用途: 把全部人工搜索命中交给一次owner使用事务，避免逐命中扫描整个目录。
-def _record_search_matches(agent, matches: list[dict]) -> None:
-    import logging
-
-    try:
-        params = getattr(agent, "_current_run_params", None)
-        attrs = getattr(params, "task_attributes", None) or {}
-        context = {"request_id": getattr(params, "request_id", ""), "task_id": getattr(params, "task_id", ""),
-                   "thread_id": attrs.get("conversation_thread_id", "")}
-        batch = [{"event": "manual_search", "kind": match["kind"],
-                  "skill_id": match["package_id"] if match["kind"] == "capability_package" else match["skill_id"],
-                  "source": "package" if match["kind"] == "capability_package" else match["source"], **context}
-                 for match in matches if match["kind"] in {"skill", "capability_package"}]
-        record_skill_usage_events(SkillLearningStore.for_home(agent.home_paths), batch)
-    except Exception:  # noqa: BLE001 - 附带统计不能改变搜索成功事实。
-        logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
+def _record_search_matches(agent, matches, *, snapshot=None):
+    from .method_usage import record_candidates
+    record_candidates(agent, snapshot or _snapshot_for(agent), matches, source='skill_search.search')
 
 
 # LLM: 纯树只计算当前描述符；无固定方法时直接空图，不借目录、正文或拓扑环枚举补出资产。

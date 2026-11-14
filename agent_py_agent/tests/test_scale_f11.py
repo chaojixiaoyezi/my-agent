@@ -388,3 +388,91 @@ def test_real_terminal_commit_during_tick_preserves_versions_and_settles_once(tm
     assert all(_marker_path(paths, key).exists() and _projection_path(paths, key).exists() for key in (first, second))
     rows = GatewayHistoryIndex(paths).page(after="", limit=128)
     assert len(rows) == 2 and {row["id"] for row in rows} == {first, second}
+
+
+def test_canonical_change_uses_one_full_connection_and_initializes_schema_once(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent.gateway_parts import recovery_pending_index as pending
+
+    original = pending.private_projection_connection
+    calls, statements = [], []
+
+    @contextmanager
+    def measured(path, *, blocking=True, deadline=None):
+        calls.append((blocking, deadline))
+        with original(path, blocking=blocking, deadline=deadline) as db:
+            assert db.execute("PRAGMA synchronous").fetchone()[0] == 2
+            db.set_trace_callback(statements.append)
+            yield db
+
+    monkeypatch.setattr(pending, "private_projection_connection", measured)
+    path = tmp_path / "input_receipts" / "one.json"
+    pending.record_canonical_change(path)
+    first_schema_count = sum("CREATE TABLE" in sql for sql in statements)
+    assert len(calls) == 1 and first_schema_count == 2
+    pending.record_canonical_change(path)
+    assert len(calls) == 2
+    assert sum("CREATE TABLE" in sql for sql in statements) == first_schema_count
+    index = pending.RecoveryPendingIndex(tmp_path)
+    assert index.page("receipt") == (("one", 2),)
+    with index.connect() as db:
+        db.execute("PRAGMA user_version=0")
+    migrated = pending.RecoveryPendingIndex(tmp_path)
+    assert migrated.page("receipt") == (("one", 2),)
+    with migrated.connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+    index.path.unlink()
+    pending.record_canonical_change(path)
+    assert pending.RecoveryPendingIndex(tmp_path).page("receipt") == (("one", 1),)
+
+
+def test_canonical_change_concurrent_initialization_keeps_all_pending_versions(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from agent_py_agent.agent.gateway_parts.recovery_pending_index import (
+        RecoveryPendingIndex,
+        record_canonical_change,
+    )
+
+    barrier = Barrier(8)
+
+    def record(index):
+        barrier.wait()
+        record_canonical_change(tmp_path / "input_receipts" / f"item-{index}.json")
+
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        list(workers.map(record, range(8)))
+    rows = RecoveryPendingIndex(tmp_path).page("receipt")
+    assert {key for key, _ in rows} == {f"item-{index}" for index in range(8)}
+    assert {version for _, version in rows} == set(range(1, 9))
+
+
+def test_canonical_change_preserves_deadline_nonblocking_and_future_schema(tmp_path):
+    import time
+
+    from agent_py_agent.agent.common.json_io import locked_json_path
+    from agent_py_agent.agent.gateway_parts.recovery_pending_index import (
+        RecoveryPendingIndex,
+        record_canonical_change,
+    )
+
+    index = RecoveryPendingIndex(tmp_path)
+    path = tmp_path / "input_receipts" / "one.json"
+    # 真实同路径跨线程争用，非阻塞不得丢弃pending责任后冒称成功。
+    from concurrent.futures import ThreadPoolExecutor
+
+    with locked_json_path(index.path), ThreadPoolExecutor(max_workers=1) as worker:
+        future = worker.submit(record_canonical_change, path, blocking=False)
+        with pytest.raises(BlockingIOError):
+            future.result(timeout=2)
+    with pytest.raises(BlockingIOError, match="budget expired"):
+        record_canonical_change(path, deadline=time.monotonic() - 1)
+    assert index.page("receipt") == ()
+    with index.connect() as db:
+        db.execute("PRAGMA user_version=9")
+    with pytest.raises(ValueError, match="schema version: 9"):
+        record_canonical_change(path)
+    with index.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 0

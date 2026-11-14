@@ -3,6 +3,9 @@ import copy
 import hashlib
 import json
 
+import pytest
+
+from agent_py_agent.agent.assets.workflow_package_template import WorkflowTemplateError
 from agent_py_agent.agent.assets.workflow_store import WorkflowStore
 from agent_py_agent.agent.business_spaces import v13_w7_playbooks as playbooks
 from agent_py_agent.agent.capability.package_resources import package_resource_reference
@@ -40,10 +43,17 @@ def test_package_origin_survives_public_and_store_edits(v13_host):
     value = saved.to_dict()
     value['descriptor']['metadata']['derived_from'] = {'package_id': 'not-the-original'}
     value['body_markdown'] = '第二次编辑'
+    with pytest.raises(WorkflowTemplateError, match='WORKFLOW_TEMPLATE_SOURCE_HOST_ONLY'):
+        store.save_workflow(value, expected_revision=saved.descriptor.revision)
+    rejected = WorkflowStore(call.owner_home).get_workflow(created['workflow_ref'])
+    assert rejected.to_dict() == saved.to_dict()
+    value['descriptor']['metadata']['derived_from'] = copy.deepcopy(expected)
     store.save_workflow(value, expected_revision=saved.descriptor.revision)
     reopened = WorkflowStore(call.owner_home).get_workflow(created['workflow_ref'])
     assert reopened.descriptor.metadata['derived_from'] == expected
     assert reopened.descriptor.source_scope == 'owner'
+    assert reopened.body_markdown == '第二次编辑'
+    assert reopened.descriptor.revision == saved.descriptor.revision + 1
     assert package.read(member) == original
     assert 'derived_from' not in json.loads(original)['descriptor'].get('metadata', {})
 

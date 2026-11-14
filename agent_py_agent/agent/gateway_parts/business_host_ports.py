@@ -45,19 +45,63 @@ def build_default_task_business_context(host: Any) -> Callable[[str], Any | None
         if not isinstance(bc, dict) or not bc.get('space_id'):
             return None
         from ..conversation.business_contracts import BusinessExecutionContext
-        owner_id = bc.get('owner_id') or getattr(getattr(host, 'home_paths', None), 'owner_id', '')
-        return BusinessExecutionContext(
-            owner_id,
-            bc['space_id'],
-            bc.get('project_ref'),
-            str(task_id),
-            bc.get('space_revision') or 1,
-            bc.get('binding_id'),
-            tuple(bc.get('selected_method_refs') or ()),
-            tuple(bc.get('asset_version_refs') or ()),
-            bc.get('schema_version') or 'business-context.v1'
-        )
+        if bc.get('task_id') != str(task_id):
+            return None
+        return BusinessExecutionContext.from_dict(bc)
     return task_business_context
+
+
+def build_default_business_package_reference_resolver(host: Any) -> Callable[[str, str, Any], dict[str, Any] | None]:
+    """按规范Owner安装表解析内容包，不装配执行端口，不以挂载授予工具或插件权限。"""
+    owner_id = getattr(getattr(host, 'home_paths', None), 'owner_id', '')
+    owner_home = getattr(getattr(host, 'home_paths', None), 'owner_home_dir', None)
+    home = Path(owner_home).absolute() if owner_home else None
+
+    def resolve(kind, ref_id, actor):
+        from ..capability.package_provider import _owner_from_home
+        from ..conversation.business_access import BusinessError, require_actor
+        from ..plugin_install_store import PluginInstallStore
+        from ..user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+        if kind != 'package' or not isinstance(ref_id, str) or not ref_id:
+            return None
+        if home is None or not owner_id:
+            raise BusinessError('HOST_NOT_READY', details={'reason': 'PACKAGE_OWNER_SOURCE_UNAVAILABLE',
+                'effect_outcome': 'not_started', 'next_action': '恢复宿主当前Owner的规范路径后重新读取包目录。'})
+        if actor is not None:
+            require_actor(actor)
+            if actor.owner_id != owner_id or Path(actor.service.owner_root).absolute() != home:
+                raise BusinessError('SPACE_SCOPE_MISMATCH')
+        try:
+            owner = _owner_from_home(home)
+            if owner.owner_id != owner_id:
+                raise BusinessError('SPACE_SCOPE_MISMATCH')
+            packages = list(PluginInstallStore(owner).snapshot())
+            if owner.identity != OwnerIdentity.local_main():
+                public_owner = resolve_owner_home(owner.root, OwnerIdentity.local_main())
+                packages.extend(item for item in PluginInstallStore(public_owner).snapshot()
+                                if item.installation_scope == 'public')
+        except BusinessError:
+            raise
+        except (OSError, ValueError, RuntimeError) as error:
+            raise BusinessError('STORE_UNAVAILABLE', details={'reason': 'PACKAGE_INSTALL_SOURCE_UNREADABLE',
+                'exception_type': type(error).__name__, 'effect_outcome': 'not_started',
+                'next_action': '核对当前Owner原安装表及读取权限；不要把来源故障当作包不存在，修复后重读。'}) from error
+        for package in packages:
+            if not package.manifest.is_capability_pack:
+                continue
+            identifier = ('public/' if package.installation_scope == 'public' else '') + package.manifest.plugin_id
+            if ref_id not in (identifier, f'capability:{identifier}'):
+                continue
+            value = {'owner_id': owner_id, 'ref': ref_id, 'package_ref': identifier,
+                'state': 'available' if package.enabled else 'disabled', 'kind': 'package',
+                'version_ref': package.package_sha256, 'name': identifier}
+            if package.activation_id:
+                value['activation_id'] = package.activation_id
+            return value
+        return None
+
+    return resolve
 
 
 # LLM: 构造空间 10 类对象引用的默认解析器，只返回元数据定位字段，不复制正文与任意元数据。
@@ -66,6 +110,7 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
     owner_id = getattr(getattr(host, 'home_paths', None), 'owner_id', '')
     owner_home = getattr(getattr(host, 'home_paths', None), 'owner_home_dir', None)
     owner_home_path = Path(owner_home).resolve() if owner_home else None
+    package_resolver = build_default_business_package_reference_resolver(host)
 
     # LLM: 解析单个指定类型的空间外部引用，支持 10 类规范资源。
     # 函数用途: 校验并定位外部引用对象是否存在且归属于当前 owner。
@@ -93,35 +138,9 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                     return None
             return None
 
-        # 2. package: 已安装能力包
+        # 2. package: 与默认空间挂载共用原Owner安装表，只投影内容元数据。
         if kind == 'package':
-            if owner_home_path is not None:
-                try:
-                    from ..capability.package_provider import list_installed_capability_packages
-                    pkgs = list_installed_capability_packages(owner_home_path)
-                    for pkg in pkgs:
-                        pkg_id = (pkg.get('package_id') or pkg.get('name')) if isinstance(pkg, dict) else (getattr(pkg, 'package_id', None) or getattr(pkg, 'name', None))
-                        pkg_ref = (pkg.get('package_ref') or pkg_id) if isinstance(pkg, dict) else getattr(pkg, 'package_ref', pkg_id)
-                        enabled = pkg.get('enabled', True) if isinstance(pkg, dict) else getattr(pkg, 'enabled', True)
-                        digest = (pkg.get('digest') or pkg.get('version_ref') or pkg.get('version')) if isinstance(pkg, dict) else (getattr(pkg, 'digest', None) or getattr(pkg, 'version_ref', None) or getattr(pkg, 'version', None))
-                        matches = (str(pkg_id), str(pkg_ref), f"capability:{pkg_id}") if pkg_id else (str(pkg_ref),)
-                        if str(ref_id) in matches:
-                            res = {
-                                'owner_id': owner_id,
-                                'ref': str(ref_id),
-                                'package_ref': str(pkg_ref),
-                                'state': 'available' if enabled else 'disabled',
-                                'kind': 'package'
-                            }
-                            if digest:
-                                res['version_ref'] = str(digest)
-                            name = pkg.get('name') if isinstance(pkg, dict) else getattr(pkg, 'name', None)
-                            if isinstance(name, str) and 0 < len(name) <= 160:
-                                res['name'] = name
-                            return res
-                except (OSError, ValueError, RuntimeError):
-                    return None
-            return None
+            return package_resolver(kind, ref_id, actor)
 
         # 3. surface: 交互界面渠道
         if kind == 'surface':

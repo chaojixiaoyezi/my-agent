@@ -86,6 +86,9 @@ def workflow_review_material(owner_home, run, requirement, snapshot):
             dependencies.add(ref['step_id'])
     projection = _BoundedProjection()
     data = {'schema': 'workflow.review-material.v1', 'binding': projection.value(binding),
+            'review_gate': {'scope': 'workflow_effect.v1', 'step_id': step.step_id,
+                            'minimum_independent_reviews': policy.get('minimum_reviews', 1),
+                            'effect_started': False},
             'definition_ref': run.execution_definition_ref,
             'step': projection.value({'step_id': step.step_id, 'mode': step.mode, 'script_id': step.script_id,
                                      'input_snapshot': step.input_snapshot, 'definition': spec}),
@@ -117,9 +120,65 @@ def workflow_review_material(owner_home, run, requirement, snapshot):
         except (OSError, ValueError, UnicodeError) as error:
             data['script'].update(coverage='unavailable', reason_code=str(error) if isinstance(error, ReviewMaterialError)
                                   else 'FROZEN_SCRIPT_READ_' + type(error).__name__,
-                                  recommended_action='request_scoped_frozen_evidence_do_not_approve_unverified_code')
+            recommended_action='repair_evidence_refs',
+            recovery_hint='请从原候选所属Owner与审核范围获取受审版本的冻结脚本证据；核对版本和摘要后再登记审核，当前不能批准、执行或改读最新版本。')
     data['limits'] = {'projection_characters': 24576, 'projection_nodes': 256, 'depth': 8,
                       'items_per_container': 32, 'upstream_steps': 16, 'script_bytes': 16384}
     data.update(coverage='partial' if projection.truncated or data.get('script', {}).get('coverage') == 'unavailable'
                 else 'complete', truncated=projection.truncated)
     return data
+
+
+def review_material_page(material, requirement_id, cursor, *, wire_budget=4000):
+    """分页的是已授权冻结投影；游标不授权，每次调用仍须重核原审核绑定。"""
+    import json
+
+    raw = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    digest = hashlib.sha256(raw.encode('utf-8')).hexdigest()
+    base = {'schema': 'review-material.page.v1', 'sha256': digest,
+            'source_coverage': material['coverage'], 'total_chars': len(raw)}
+    if cursor is None:
+        binding = material['binding']
+        page = {**base, 'requirement_id': requirement_id,
+                'input_version': binding['input_version'], 'gate': material['review_gate'],
+                'tool_precondition': binding.get('tool_precondition'),
+                'source_limits': material['limits'],
+                'next_action': '按read_example续读，异sha256禁止拼接。source_coverage=partial表示原投影触及limits或脚本缺失；按omitted/coverage/reason_code判断关键证据是否充分。',
+                'read_example': {'action': 'query_provenance', 'requirement_id': requirement_id,
+                                 'material_cursor': digest + ':0'}}
+        if len(json.dumps(json.dumps(page, ensure_ascii=False, separators=(',', ':')),
+                          ensure_ascii=False).encode('utf-8')) > wire_budget:
+            condition = binding.get('tool_precondition') or {}
+            page['tool_precondition'] = {key: condition[key] for key in ('tool_name', 'arguments_sha256')
+                                        if key in condition}
+            page['tool_precondition']['constraints_in_material_pages'] = True
+    else:
+        if not isinstance(cursor, str) or re.fullmatch(r'[0-9a-f]{64}:[0-9]{1,8}', cursor) is None:
+            raise ReviewMaterialError('REVIEW_MATERIAL_CURSOR_INVALID')
+        expected, offset = cursor.split(':')
+        offset = int(offset)
+        if expected != digest:
+            raise ReviewMaterialError('REVIEW_MATERIAL_CHANGED')
+        if offset >= len(raw):
+            raise ReviewMaterialError('REVIEW_MATERIAL_OFFSET_INVALID')
+        # 对最终JSON及其嵌入消息字符串的转义计费，不能按未转义内容字符猜页大小。
+        def candidate(end):
+            return {**base, 'offset': offset, 'content': raw[offset:end],
+                    'next_cursor': digest + ':' + str(end) if end < len(raw) else None,
+                    'page_coverage': 'complete' if end == len(raw) else 'partial'}
+        lo, hi = offset, len(raw)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            value = candidate(mid)
+            encoded = json.dumps(json.dumps(value, ensure_ascii=False, separators=(',', ':')), ensure_ascii=False)
+            if len(encoded.encode('utf-8')) <= wire_budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        if lo == offset:
+            raise ReviewMaterialError('REVIEW_MATERIAL_PAGE_BUDGET_TOO_SMALL')
+        page = candidate(lo)
+    output = json.dumps(page, ensure_ascii=False, separators=(',', ':'))
+    if len(json.dumps(output, ensure_ascii=False).encode('utf-8')) > wire_budget:
+        raise ReviewMaterialError('REVIEW_MATERIAL_PAGE_BUDGET_TOO_SMALL')
+    return page, output

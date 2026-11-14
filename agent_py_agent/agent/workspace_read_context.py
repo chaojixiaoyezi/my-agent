@@ -67,6 +67,7 @@ class WorkspaceReadContext:
 # 函数用途: 将唯一策略转换成协议值。
 def _policy_payload(policy: PathAccessPolicy) -> dict[str, object]:
     return {
+        **({"business_aggregate_roots": [str(root) for root in policy.business_aggregate_roots]} if policy.business_aggregate_roots else {}),
         "mode": policy.mode, "dangerous_roots": [str(root) for root in policy.dangerous_roots],
         "owner_scope_root": str(policy.owner_scope_root) if policy.owner_scope_root is not None else None,
         "agent_home_root": str(policy.agent_home_root) if policy.agent_home_root is not None else None,
@@ -77,10 +78,11 @@ def _policy_payload(policy: PathAccessPolicy) -> dict[str, object]:
 # 函数用途: 恢复完整路径策略；缺字段、未知模式及相对根拒绝。
 def _read_policy(value: object) -> PathAccessPolicy:
     fields = {"mode", "dangerous_roots", "owner_scope_root", "agent_home_root"}
-    if not isinstance(value, dict) or set(value) != fields or value["mode"] not in ("normal", "full"):
+    if not isinstance(value, dict) or set(value) not in (fields, fields | {"business_aggregate_roots"}) or value["mode"] not in ("normal", "full"):
         raise ValueError("路径策略协议无效")
     return PathAccessPolicy(
         mode=value["mode"], dangerous_roots=_path_list(value["dangerous_roots"]),
+        business_aggregate_roots=_path_list(value.get("business_aggregate_roots", [])),
         owner_scope_root=_absolute_path(value["owner_scope_root"]) if value["owner_scope_root"] is not None else None,
         agent_home_root=_absolute_path(value["agent_home_root"]) if value["agent_home_root"] is not None else None,
     )

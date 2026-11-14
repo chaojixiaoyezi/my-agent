@@ -105,7 +105,10 @@ class CapabilityRequestTool(BaseTool):
                 )
         if auto_grant is None:
             # R4 子项②：提交即推送父级（observation + wake），主代理不再对未决请求失明。
-            from ..subagents.runner_completion_wake import notify_parent_on_capability_request
+            from ..subagents.runner_completion_wake import (
+                has_persisted_subagent_parent,
+                notify_parent_on_capability_request,
+            )
 
             authority = direct_parent_tool_authority(
                 self.agent,
@@ -118,6 +121,11 @@ class CapabilityRequestTool(BaseTool):
                 record,
                 parent_tool_authority=authority.to_dict(),
             )
+            if has_persisted_subagent_parent(self.agent.subagents.load, self.agent.subagents.load(request.run_id)):
+                # 申请已经耐久记录：沿原直属等待CAS与执行轮栅栏接续父级，不给根会话越级广播。
+                from .runner.worker import _resume_direct_parent_after_session
+
+                _resume_direct_parent_after_session(self.agent, request.run_id)
         payload = self._request_payload(request.run_id, record, auto_grant)
         payload.update(scope_resolution_payload(request.scope_resolution))
         return _capability_ok(payload, refresh_runtime=auto_grant is not None)

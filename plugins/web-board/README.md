@@ -7,7 +7,7 @@
 
 ## 开发构建
 
-插件只依赖精确版本 SDK `my-agent-plugin-api==0.2.0`，无其它第三方依赖。以下命令从仓库根执行，
+插件只依赖精确版本 SDK `my-agent-plugin-api==0.3.0`，无其它第三方依赖。以下命令从仓库根执行，
 构建离线、不下载依赖、不改用户插件安装表，输出已存在时明确失败：
 
 ```bash
@@ -15,7 +15,7 @@ python scripts/build_plugin_api.py --wheel-dir /tmp/plugin-build/wheels
 python scripts/build_plugin_package.py \
   --project plugins/web-board \
   --declaration web_board/declaration.json \
-  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.2.0-py3-none-any.whl \
+  --wheel /tmp/plugin-build/wheels/my_agent_plugin_api-0.3.0-py3-none-any.whl \
   --output /tmp/plugin-build/web-board.zip
 ```
 

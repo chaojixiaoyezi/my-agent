@@ -33,6 +33,29 @@ class ConversationPersistenceError(RuntimeError):
     error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
 
 
+class GatewayHistoryPreparationPending(RuntimeError):
+    """用户回合正文执行前，严格去重索引已推进但本片尚未追平。"""
+
+    error_code = 'GATEWAY_HISTORY_INDEX_PENDING'
+    operation_entered = False
+
+    def __init__(self, request, thread_id, progress):
+        self.request_id = str(request.get('id') or '')
+        self.execution_attempt_id = str(request.get('execution_attempt_id') or '')
+        self.lease_epoch = request.get('lease_epoch')
+        self.thread_id = thread_id
+        self.progress = dict(progress)
+        super().__init__('会话去重索引已按有界切片推进，原请求等待下次认领；模型及工具尚未运行，无需重发')
+
+    @property
+    def progressed(self):
+        before, after = self.progress.get('cursor_before'), self.progress.get('cursor_after')
+        removed, end = self.progress.get('reset_removed'), self.progress.get('source_end')
+        return (type(end) is int and end >= 0 and (
+            type(before) is int and type(after) is int and 0 <= before < after <= end
+            or type(removed) is int and removed > 0))
+
+
 # LLM: 任务绑定冲突与历史文件读写故障分别报告；不据此清空历史或自动重放旧操作。
 # 类用途: 表示会话任务与执行身份不一致，提供可定位的错误码而不归咎用户聊天记录。
 class ConversationTaskBindingError(RuntimeError):
@@ -244,6 +267,23 @@ def gateway_client_error_message(error_code: object) -> str:
         return (
             "压缩恢复记录读取或校验失败，本轮没有继续执行；原始历史和任务文件仍保留。"
             "请查看压缩诊断并修复读取问题，切换更大上下文的模型不能保证解决。"
+        )
+    if code == "COMPACT_RECOVERY_EXHAUSTED":
+        return (
+            "同一请求连续 8 次上下文恢复没有确认的新工具执行进展，仍无法安全继续，本轮已停止；"
+            "原历史、已提交检查点与工具记录保留，已有工具操作可能已产生副作用。"
+            "请先核对原请求和工具结果，再切换更大上下文的模型继续原任务；不要原样重发或重放已执行操作。"
+        )
+    if code == "COMPACT_SOURCE_EMPTY":
+        return (
+            "上下文恢复没有可压缩的新来源或可推进的检查点，本轮已停止；原记录保留，已有工具操作可能已产生副作用。"
+            "请先核对压缩诊断及原请求的工具结果，再调整模型容量继续原任务；不要原样重发或重放已执行操作。"
+        )
+    if code == "COMPACT_CANDIDATE_TOO_LARGE":
+        return (
+            "压缩候选的完整下一请求仍超过输入上限，候选未提交，本轮已停止；"
+            "原历史、已有检查点与工具记录保留，此前工具操作可能已产生副作用。"
+            "请查看候选容量、固定开销及保留历史诊断，调整模型容量后继续原任务；不要原样重发或重放已执行操作。"
         )
     if code.startswith("COMPACT_"):
         return (

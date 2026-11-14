@@ -14,6 +14,19 @@ from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
 
 
+@pytest.fixture
+def fts_slice_clock(monkeypatch):
+    """只给资格/内容测试分配可控片；不改SQLite、行/字节/step预算或真实锁等待。"""
+    from agent_py_agent.agent.local_storage import fts_upgrade
+
+    clock = SimpleNamespace(now=time.monotonic())
+    proxy = SimpleNamespace(**vars(time))
+    proxy.monotonic = lambda: clock.now
+    monkeypatch.setattr(fts_upgrade, 'time', proxy)
+    monkeypatch.setattr(maintenance, 'time', proxy)
+    return clock
+
+
 def _legacy(tmp_path):
     home = ensure_my_agent_home(tmp_path)
     store = LocalStore(home.owner_data_dir / 'local_store' / 'local.db')
@@ -49,6 +62,7 @@ def test_constructor_preserves_old_active_without_synchronous_rebuild(tmp_path, 
 
 @pytest.mark.parametrize('coordinator', [False, True])
 @pytest.mark.parametrize('policy_change', [{'maintenance_enabled': False}, {'maintenance_interval_seconds': 0}])
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_formal_owner_entry_aligns_legacy_despite_disabled_retention(tmp_path, monkeypatch, coordinator, policy_change):
     home, store, items = _legacy(tmp_path)
     policy = json.loads(home.owner_retention_json.read_text())
@@ -79,6 +93,7 @@ def test_formal_owner_entry_aligns_legacy_despite_disabled_retention(tmp_path, m
     assert not store._search_fts('needle0', limit=10, source_type=None, visibility=None)
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_insufficient_space_preserves_active_and_retries_original_job(tmp_path, monkeypatch):
     home, store, items = _legacy(tmp_path)
     policy = json.loads(home.owner_retention_json.read_text())
@@ -101,6 +116,7 @@ def test_insufficient_space_preserves_active_and_retries_original_job(tmp_path, 
     assert _aligned(store)
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_large_document_reuses_original_bounded_single_document_cap(tmp_path):
     home, store, items = _legacy(tmp_path)
     text = 'full large document needle ' * 370_000 + ' deependingneedle'
@@ -121,6 +137,7 @@ def test_large_document_reuses_original_bounded_single_document_cap(tmp_path):
     assert store.get_record(large.id).content == text
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_source_rejection_preserves_original_identity_and_no_completion(tmp_path):
     from agent_py_agent.agent.local_storage.fts_upgrade import advance_upgrade
 
@@ -136,6 +153,7 @@ def test_source_rejection_preserves_original_identity_and_no_completion(tmp_path
 
 
 @pytest.mark.parametrize('coordinator', [False, True])
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_retired_fts_configuration_cannot_disable_formal_index_upgrade(tmp_path, coordinator):
     from agent_py_agent.agent.memory_store.owner_resources import build_owner_local_store
 
@@ -181,6 +199,7 @@ def test_aligned_point_write_work_does_not_scale_with_fts_history(tmp_path, size
     assert not store._search_fts('oldneedle', limit=10, source_type=None, visibility=None)
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_legal_hold_keeps_deletion_disabled_but_index_progresses(tmp_path, monkeypatch):
     home, store, _ = _legacy(tmp_path)
     policy = json.loads(home.owner_retention_json.read_text())
@@ -197,6 +216,7 @@ def test_legal_hold_keeps_deletion_disabled_but_index_progresses(tmp_path, monke
     assert _aligned(store)
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_low_space_index_does_not_starve_original_retention(tmp_path, monkeypatch, request):
     import os
 
@@ -258,6 +278,7 @@ def test_low_space_index_does_not_starve_original_retention(tmp_path, monkeypatc
     request.node.user_properties.append(('retention_resume_turns', turn + 1))
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_event_interleaving_keeps_original_job_and_final_exact_content(tmp_path, monkeypatch):
     from threading import Event, Thread
 
@@ -316,6 +337,7 @@ def test_unreadable_maintenance_cursor_is_not_overwritten_as_empty(tmp_path):
     assert not _aligned(store)
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_workspace_discovery_uses_one_persistent_page_not_full_listing(tmp_path, monkeypatch):
     from pathlib import Path
 
@@ -338,6 +360,7 @@ def test_workspace_discovery_uses_one_persistent_page_not_full_listing(tmp_path,
     assert first['cursor']['directory'] != second['cursor']['directory']
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_portable_workspace_page_preserves_small_scale_upgrade(tmp_path, monkeypatch):
     from agent_py_agent.agent.user_space import directory_paging
 
@@ -364,6 +387,7 @@ def test_portable_workspace_page_preserves_small_scale_upgrade(tmp_path, monkeyp
                     directory_paging._SCAN_STREAMS.pop(key)[0].close()
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_unicode61_active_survives_until_formal_target_publish(tmp_path):
     home, store, items = _legacy(tmp_path)
     with store._connection() as conn:
@@ -392,6 +416,7 @@ def test_unicode61_active_survives_until_formal_target_publish(tmp_path):
 
 
 @pytest.mark.parametrize('first_deferred', [False, True])
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_owner_store_rotation_preserves_other_job_progress(tmp_path, monkeypatch, first_deferred):
     home, second, _ = _legacy(tmp_path)
     first = LocalStore(home.owner_data_dir / 'local_store.sqlite3')
@@ -419,6 +444,7 @@ def test_owner_store_rotation_preserves_other_job_progress(tmp_path, monkeypatch
     assert first._search_fts('firstneedle', limit=1, source_type=None, visibility=None)
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_busy_projection_slice_does_not_wait_for_business_sqlite_timeout(tmp_path):
     import sqlite3
     from threading import Event, Thread
@@ -507,6 +533,7 @@ def test_missing_fts_is_rebuilt_by_formal_owner_entry_without_erasing_records(tm
     assert {row.id for row in store.search('searchable', limit=10)} == {item.id for item in items}
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_active_coverage_is_checked_at_commit_without_invalidating_durable_job(tmp_path, monkeypatch):
     home, store, _ = _legacy(tmp_path)
     first = store.rebuild_fts_step(max_rows=1, max_records=1)
@@ -531,6 +558,7 @@ def test_active_coverage_is_checked_at_commit_without_invalidating_durable_job(t
     assert _aligned(store)
 
 
+@pytest.mark.usefixtures('fts_slice_clock')
 def test_disabled_writes_during_job_resume_with_current_canonical_coverage(tmp_path):
     home, store, items = _legacy(tmp_path)
     first = store.rebuild_fts_step(max_rows=1, max_records=1)

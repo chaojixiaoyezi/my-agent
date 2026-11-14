@@ -1415,6 +1415,15 @@ class _BackgroundOwnerPlannerMixin:
 
 # LLM: 只读原用户活动代次，后台消息或元数据更新时间不算新用户输入；读不到不能解除挂起。
 # 函数用途: 为等待新消息的车道取得规范线程入站标记。
+def _thread_compact_retry_fingerprint(scheduler, thread_id):
+    from .gateway_compact_retry import compact_retry_fingerprint
+
+    try:
+        return compact_retry_fingerprint(scheduler, thread_id)
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
 def _thread_inbound_marker(scheduler, thread_id: str) -> str | None:
     store = getattr(scheduler, "store", None) or getattr(
         getattr(getattr(scheduler, "runtime", None), "agent", None), "conversation_store", None
@@ -1578,6 +1587,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                 model_ready=lambda: thread_model_is_configured(scheduler.runtime.agent, thread_id),
                 fingerprint=lambda: thread_model_fingerprint(scheduler.runtime.agent, thread_id),
                 inbound_marker=lambda: _thread_inbound_marker(scheduler, thread_id),
+                compact_fingerprint=lambda: _thread_compact_retry_fingerprint(scheduler, thread_id),
             )
         except Exception as exc:
             self._record_thread_failure(label, thread_id, exc)
@@ -1586,7 +1596,8 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     # LLM: 执行异常与恢复检查异常共用 typed 退避及脱敏日志，不修改持久 wake、claim 或 Goal。
     # 函数用途: 记录精确失败车道和恢复条件，环境级故障按车道暂停，普通错误从 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 起连续翻倍冷却并封顶。
     def _record_thread_failure(self, label: str, thread_id: str, exc: Exception, *,
-                               wait_for_inbound_marker: str | None = None) -> None:
+                               wait_for_inbound_marker: str | None = None,
+                               compact_retry_fingerprint: str | None = None) -> None:
         import inspect
 
         from ..agent.conversation.compact_guard import ConversationCompactError
@@ -1598,6 +1609,8 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         kwargs = {"delay": BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS, "wait_for_inbound_marker": wait_for_inbound_marker}
         if "headless" in sig.parameters:
             kwargs["headless"] = is_headless
+        if "compact_fingerprint" in sig.parameters:
+            kwargs["compact_fingerprint"] = compact_retry_fingerprint
         self._lane_retry.failed(label, thread_id, exc, **kwargs)
 
         if isinstance(exc, (OwnerQuotaUnavailable, RuntimeRecoveryRequiredError, ConversationCompactError)):
@@ -1730,7 +1743,11 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                 _retire_deleted_thread_sources(scheduler, thread_id)
                 self._lane_retry.succeeded(label, thread_id)
                 return []
-            self._record_thread_failure(label, thread_id, exc, wait_for_inbound_marker=inbound_marker)
+            from ..agent.conversation.background_execution import BackgroundCompactPreflightDeferred
+            compact_key = (_thread_compact_retry_fingerprint(scheduler, thread_id)
+                if isinstance(exc, BackgroundCompactPreflightDeferred) else None)
+            self._record_thread_failure(label, thread_id, exc, wait_for_inbound_marker=inbound_marker,
+                compact_retry_fingerprint=compact_key)
             return []
 
 

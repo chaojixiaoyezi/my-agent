@@ -500,12 +500,21 @@ def test_formal_asset_definition_preserves_full_and_legacy_contracts():
     value = build(payload, 'script-one', 'script')
     assert isinstance(value, descriptor.AssetDescriptor) and value.id == 'script-one' and value.kind == 'script'
     assert 'id' not in payload
-    with pytest.raises(ValueError, match='id/kind'):
-        build(dict(payload, id='other'), 'script-one', 'script')
-    with pytest.raises(ValueError, match='列表'):
+    for field in ('id', 'kind'):
+        with pytest.raises(descriptor.AssetDescriptorValidationError, match='ASSET_DESCRIPTOR_INVALID') as rejected:
+            build(dict(payload, **{field: 'other'}), 'script-one', 'script')
+        assert rejected.value.field == 'descriptor.' + field
+        assert rejected.value.expected == 'same as target ' + field
+        assert rejected.value.actual_type == 'str'
+    with pytest.raises(descriptor.AssetDescriptorValidationError, match='ASSET_DESCRIPTOR_INVALID') as rejected:
         build(dict(payload, data_sources={}), 'script-one', 'script')
-    with pytest.raises(ValueError, match='标准提取Key'):
-        build({'name': 'old'}, 'script-one', 'script')
+    assert rejected.value.field == 'descriptor.data_sources'
+    assert rejected.value.expected == 'array' and rejected.value.actual_type == 'dict'
+    for field in descriptor.REQUIRED_DEFINITION_KEYS:
+        incomplete = {key: item for key, item in payload.items() if key != field}
+        with pytest.raises(descriptor.AssetDescriptorValidationError, match='ASSET_DESCRIPTOR_INVALID') as rejected:
+            build(incomplete, 'script-one', 'script')
+        assert rejected.value.field == 'descriptor.' + field and rejected.value.actual_type == 'missing'
     assert descriptor.AssetDescriptor.from_dict({'id': 'old', 'kind': 'script', 'name': 'old'}).data_sources == ()
 
 

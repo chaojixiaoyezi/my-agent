@@ -52,7 +52,7 @@ class WorkflowTable:
         raise ValueError('编号已失效，请重新查看列表')
 
 
-# LLM: 格式化 workflows.get 详情回执，完整展示用途、IO、版本、步骤、运行引用及草稿状态（V07-03）。
+# LLM: 格式化 workflows.get 详情回执，展示用途、IO、版本、步骤、运行引用、状态及宿主已裁决动作（V07-03）。
 # 函数用途: 将工作流详情 DTO 转换为多行文本展示。
 def format_workflow_detail(data: dict) -> str:
     workflow = data.get('workflow', {})
@@ -80,6 +80,33 @@ def format_workflow_detail(data: dict) -> str:
         mode = step.get('mode', '')
         lines.append(f"  - [{step_id}] {name} ({mode})")
     lines.append(f"运行引用 ({len(run_refs)}): {', '.join(run_refs) if run_refs else '无'}")
+    for view in data.get('run_views', [])[:5]:
+        run = view.get('run', {})
+        run_id = run.get('workflow_run_id', '')
+        if view.get('observation_error'):
+            lines.append(f"运行 {run_id}: 未确认 · {view['observation_error']}")
+            continue
+        status = run.get('status', 'unknown')
+        label = '已暂停／待恢复' if status == 'paused_for_resume' else status
+        lines.append(f"运行 {run_id}: {label} [{status}] · 效果 {run.get('effect_outcome', 'unknown')}")
+        for step in view.get('steps', [])[:100]:
+            lines.append(f"  步骤 [{step.get('step_id', '')}]: {step.get('status', 'unknown')}")
+        breakpoint = view.get('breakpoint') or {}
+        if breakpoint:
+            lines.append(f"  断点: {breakpoint.get('reason_code', 'unknown')} · 下一步: {breakpoint.get('required_action', 'unknown')}")
+    actions = data.get('allowed_actions')
+    if 'allowed_actions' not in data:
+        lines.append('可用操作: 未知（宿主未返回动作清单，请重新读取详情）')
+    elif not isinstance(actions, list) or any(not isinstance(action, str) or not action for action in actions):
+        lines.append('可用操作: 未知（宿主动作清单格式不正确，请重新读取详情）')
+    elif not actions:
+        lines.append('可用操作: 无（宿主未授予当前对象的编辑或管理操作）')
+    else:
+        # 展示标签不参与权限裁决；新动作保留宿主机器名，不因客户端尚不认识而隐藏。
+        labels = {'workflows.update': '编辑内容', 'workflows.scope.set': '调整关联空间',
+                  'workflows.run': '运行', 'workflows.recycle': '回收', 'workflows.restore': '恢复'}
+        lines.append('可用操作: ' + '、'.join(
+            f'{labels[action]} [{action}]' if action in labels else action for action in actions))
     return "\n".join(lines)
 
 

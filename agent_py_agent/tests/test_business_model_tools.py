@@ -105,10 +105,19 @@ def test_workflows_space_scope_uses_same_owner_business_host(agent):
     assert [row['workflow_ref'] for row in rows] == ['daily']
     scoped = tool.execute({'action': 'workflows.scope.get', 'workflow_ref': 'daily'})
     assert scoped.ok and json.loads(scoped.output)['scope']['space_ids'] == [sid]
+    from agent_py_agent.agent.assets.workflow_store import WorkflowStore
+
+    store = WorkflowStore(agent.home_paths.owner_home_dir)
+    before = store.get_workflow('daily').to_dict()
     agent.config.business_spaces_enabled = False
     denied = tool.execute({'action': 'workflows.list', 'space_id': sid})
-    assert not denied.ok and denied.error_code == 'HOST_NOT_READY'
+    assert not denied.ok and denied.error_code == denied.reported_error_code == 'HOST_NOT_READY'
+    # 已注册宿主写前拒绝保原码；关闭服务不修改已有工作流或其空间归属。
+    payload = json.loads(denied.output)
+    assert payload['error_code'] == payload['host_error']['code'] == 'HOST_NOT_READY'
+    assert payload['host_error']['outcome'] == denied.effect_outcome == 'not_started'
     assert 'WORKFLOW_BUSINESS_HOST_UNAVAILABLE' not in denied.output
+    assert store.get_workflow('daily').to_dict() == before
 
 
 @pytest.mark.parametrize('scoped', [False, True])
@@ -151,7 +160,13 @@ def test_business_context_rechecks_turn_and_rejects_foreign_thread(agent):
     agent._current_run_params = replace(original, task_attributes={'conversation_thread_id': foreign.thread_id})
     outcome = agent.tools.tools['business_background_agents_list'].execute({
         'action': 'background_agents.list', 'request_id': 'foreign', 'params': {}})
-    assert not outcome.ok and outcome.reported_error_code == 'CAPABILITY_DENIED'
+    assert not outcome.ok
+    assert outcome.error_code == outcome.reported_error_code == 'CHANNEL_ACTOR_SCOPE_MISMATCH'
+    payload = json.loads(outcome.output)
+    assert payload['error']['code'] == outcome.host_error['code'] == 'CHANNEL_ACTOR_SCOPE_MISMATCH'
+    assert outcome.host_error['source'] == 'business_host' and outcome.host_error['http_status'] == 403
+    assert payload['effect_outcome'] == outcome.effect_outcome == 'not_started'
+    assert '请在原会话重新发起' in payload['error']['message']
 
 
 def test_explicit_disable_rejects_existing_business_tool(agent):
@@ -180,3 +195,81 @@ def test_local_list_authorization_has_no_per_record_source_reads(agent, monkeypa
     agent._current_run_params.task_attributes['conversation_thread_id'] = 'other-thread'
     with pytest.raises(HostAPIError, match='CAPABILITY_DENIED'):
         context.check('background_agents.list', {})
+
+
+def test_native_health_discovery_and_call_keep_original_permission_boundary(agent):
+    """新增宣告只使原只读方法可发现，不扩大当前工具范围或绕过原参数合同。"""
+    name = 'business_workflows_health_get'
+    found = execute_registry_test_call(agent.tools, 'tool_search', {'names': [name]})
+    assert found.ok and name in found.metadata['handler_details']['tool_search']['loaded_tool_names']
+    restricted = execute_registry_test_call(agent.tools, 'tool_search', {'names': [name]},
+        allowed_tools=['tool_search'])
+    assert restricted.ok
+    assert name not in restricted.metadata['handler_details']['tool_search']['loaded_tool_names']
+    request = {'action': 'workflows.health.get', 'request_id': 'health-model-read',
+        'params': {'workflow_ref': 'model-health', 'limit': 1}}
+    refused = execute_registry_test_call(agent.tools, name, request, allowed_tools=['tool_search'])
+    assert not refused.ok and refused.handler_executed is False
+    definition = {'descriptor': {'id': 'model-health', 'kind': 'workflow', 'name': '健康读取',
+        'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}}, 'steps': []}
+    business_call(agent, 'workflows.create', {'definition': definition}, idempotency_key='health-create')
+    read = execute_registry_test_call(agent.tools, name, request)
+    assert read.ok, read.output
+    data = json.loads(read.output)['data']
+    assert data['workflow_ref'] == 'model-health'
+    assert data['health']['bounded_limit'] == 1 and data['health']['sampled_runs'] == 0
+    assert data['health_read_coverage']['latest_guaranteed'] is False
+    forged = execute_registry_test_call(agent.tools, name,
+        {**request, 'params': {**request['params'], 'owner_id': 'local/other'}})
+    assert not forged.ok and forged.handler_executed is False
+
+
+def test_business_static_model_cache_matches_original_and_isolates_callers():
+    from agent_py_agent.agent.gateway_parts import business_api as api
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_action_specs
+
+    api._cached_business_model_spec.cache_clear()
+    for spec in business_action_specs().values():
+        expected = api._build_business_model_spec(spec)
+        first = api._business_model_spec(spec)
+        assert first == expected
+        first.input_schema['properties'].clear()
+        second = api._business_model_spec(spec)
+        assert second == expected
+        assert second is not first
+        second.assert_schema_hash()
+    assert api._cached_business_model_spec.cache_info().hits >= len(business_action_specs())
+
+
+def test_business_static_model_cache_uses_complete_record_and_is_bounded():
+    from agent_py_agent.agent.gateway_parts import business_api as api
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+
+    api._cached_business_model_spec.cache_clear()
+    original = business_action_spec('spaces.list')
+    initial = api._business_model_spec(original)
+    for index in range(140):
+        record = original.metadata
+        record['params_schema']['properties']['cache_marker'] = {'type': 'integer', 'const': index}
+        changed = replace(original, _record_json=json.dumps(record, ensure_ascii=False))
+        model = api._business_model_spec(changed)
+        assert model.input_schema['properties']['params']['properties']['cache_marker']['const'] == index
+        assert model != initial
+    info = api._cached_business_model_spec.cache_info()
+    assert info.maxsize == info.currsize == 128
+    assert info.misses == 141
+    api._cached_business_model_spec.cache_clear()
+
+
+def test_business_mutable_extension_model_spec_is_not_cached():
+    from agent_py_agent.agent.gateway_parts import business_api as api
+    from agent_py_agent.agent.gateway_parts.business_api_v13 import v13_action_spec
+
+    original = v13_action_spec('sessions.space.get')
+    params = {'type': 'object', 'properties': {'first': {'type': 'string'}}, 'additionalProperties': False}
+    spec = replace(original, definition=replace(original.definition, params_schema=params))
+    first = api._business_model_spec(spec)
+    params['properties']['second'] = {'type': 'integer'}
+    second = api._business_model_spec(spec)
+    assert 'second' not in first.input_schema['properties']['params']['properties']
+    assert 'second' in second.input_schema['properties']['params']['properties']

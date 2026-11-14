@@ -18,6 +18,43 @@ from agent_py_agent.agent.workflows import reference_index as index
 from agent_py_agent.agent.workflows.reference_sources import WorkflowReferenceReader
 
 
+def test_default_business_host_reads_references_and_refuses_unknown(tmp_path):
+    from agent_py_agent.agent.gateway_parts.business_api import BusinessServices
+    from agent_py_agent.agent.workflows.orphan_maintenance import cleanup_status
+
+    host = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=tmp_path, owner_id='local/main'),
+        config=SimpleNamespace(business_spaces_enabled=True),
+    )
+    service = BusinessServices(host).workflows
+    definition = WorkflowDefinition(
+        descriptor=AssetDescriptor(id='target', kind='workflow', name='target'), steps=(),
+    )
+    service.store.save_workflow(definition)
+    assert cleanup_status(service, service._get('target'))['blockers'] == []
+    # 后装配的真实任务端口必须即时可见，不能缓存启动时的空引用。
+    host.conversation_store = SimpleNamespace(session_tasks=SimpleNamespace(
+        list_page=lambda **kwargs: {'items': [_task({'workflow_ref': 'target'})],
+                                   'coverage': 'complete', 'next_cursor': None},
+    ))
+    assert cleanup_status(service, service._get('target'))['blockers'][0]['reason_code'] == 'OPEN_SESSION_TASK'
+    host.conversation_store.session_tasks.list_page = lambda **kwargs: {'items': [], 'coverage': 'unknown'}
+    codes = {row['reason_code'] for row in cleanup_status(service, service._get('target'))['blockers']}
+    assert codes == {'REFERENCE_COVERAGE_UNKNOWN', 'SESSION_TASK_REFERENCE_SOURCE_INCOMPLETE'}
+
+
+def test_scheduler_created_after_reference_reader_is_not_assumed_empty(tmp_path):
+    reader = WorkflowReferenceReader(tmp_path)
+    assert reader('target')['coverage'] == 'complete'
+    scheduler = tmp_path / 'data' / 'scheduler'
+    scheduler.mkdir(parents=True)
+    (scheduler / 'store.json').write_text('{broken', encoding='utf-8')
+    result = reader('target')
+    assert result['coverage'] == 'unknown'
+    assert any(row['reason_code'] == 'SCHEDULER_REFERENCE_SOURCE_INCOMPLETE'
+               for row in result['blockers'])
+
+
 def _task(metadata, *, status="queued", dedupe=""):
     return SessionTask(
         "task",

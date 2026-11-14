@@ -71,7 +71,7 @@ def workflow_step_event(value: object) -> dict[str, object]:
     from ..common.log_redaction import redact_sensitive_value
 
     if (not isinstance(value, dict) or not isinstance(value.get("status"), str)
-            or value["status"] not in {"pending", "running", "succeeded", "failed", "skipped"}):
+            or value["status"] not in {"pending", "running", "succeeded", "failed", "skipped", "paused_for_resume"}):
         return {}
     strings = ("workflow_run_id", "workflow_id", "step_id", "name", "status", "description")
     if any(not isinstance(value.get(key), str) for key in strings):

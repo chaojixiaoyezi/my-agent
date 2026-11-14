@@ -252,9 +252,14 @@ def test_branding_get_update_logo_artifact(v13_native):  # noqa: F811
     _failed(v13_native, 'branding.update', {'logo_artifact_id': text['artifact_id'],
                                             'logo_version_ref': text['version_ref']},
             'INVALID_SCHEMA', 400, key='w11-branding-text-key', revision=0)
-    _failed(v13_native, 'branding.update', {'logo_artifact_id': 'artifact-missing',
-                                            'logo_version_ref': 'version-missing'},
-            'RESOURCE_NOT_FOUND', 404, key='w11-branding-missing-key', revision=0)
+    # 此夹具没有完整旧run登记覆盖证明；未知ID保持可核验的503，不能冒充已证不存在。
+    missing = _failed(v13_native, 'branding.update', {'logo_artifact_id': 'artifact-missing',
+                                                     'logo_version_ref': 'version-missing'},
+                      'HOST_NOT_READY', 503, key='w11-branding-missing-key', revision=0)
+    details = {item['key']: item['value'] for item in missing['error']['details']}
+    assert details['reason'] == 'ARTIFACT_REGISTRY_DISCOVERY_INCOMPLETE'
+    assert details['next_action'] and missing['effect_outcome'] == 'not_started'
+    assert _completed(v13_native, 'branding.get', {}) == empty
     params = {'product_name': 'AiSOC 租户', 'primary_color': '#1a2b3c',
               'logo_artifact_id': image['artifact_id'], 'logo_version_ref': image['version_ref']}
     brand = _completed(v13_native, 'branding.update', params,
@@ -278,7 +283,12 @@ def test_branding_get_update_logo_artifact(v13_native):  # noqa: F811
 
     status, headers, content = _request(v13_native, 'GET', brand['logo_url'])
     assert status == 200 and headers['Content-Type'] == 'image/png' and content == _PNG
-    assert _request(v13_native, 'GET', brand['logo_url'], user='business-bob')[0] == 404
+    foreign_status, _, foreign_content = _request(v13_native, 'GET', brand['logo_url'], user='business-bob')
+    assert foreign_status == 503 and _PNG not in foreign_content
+    foreign_error = json.loads(foreign_content)['error']
+    assert foreign_error['code'] == 'HOST_NOT_READY'
+    assert foreign_error['message'] == 'ARTIFACT_REGISTRY_DISCOVERY_INCOMPLETE'
+    assert foreign_error['outcome'] == 'not_started'
     other = _completed(v13_native, 'branding.get', {}, user='business-bob')
     assert other['branding']['configured'] is False
 

@@ -23,6 +23,7 @@ from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..concurrency.interrupt import register_interrupt_callback
 from ..path_access_policy import (
     PathAccessPolicy,
+    business_aggregate_paths_from_boundary,
     data_root_from_boundary,
     granted_external_work_roots,
 )
@@ -201,10 +202,18 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
     )
     tool_params = _with_task_workspace_relative_path(tool_params, request)
     exact_roots = exact_read_roots(request.write_boundary, request.workspace_root)
+    state_context = None
+    if exact_roots is not None and request.tool_name == 'process_session' and tool_params.get('action') in ('status', 'wait'):
+        from .process_sessions import ProcessSessionTool
+
+        if type(tool) is ProcessSessionTool:
+            candidate = _invocation_context(request)
+            if tool.exact_state_admitted(tool_params, candidate):
+                state_context = candidate
     # 旧句柄没有启动时精确读范围证明；不能将同会话身份升级为内容读权。停止/关闭仍按原控制权限执行。
     if exact_roots is not None and (request.tool_name == "lsp" or (
         request.tool_name == "terminal_session" and tool_params.get("action") not in {"resize", "close"}
-    ) or (request.tool_name == "process_session" and tool_params.get("action") != "stop"
+    ) or (request.tool_name == "process_session" and tool_params.get("action") != "stop" and state_context is None
     ) or (request.tool_name == "controlled_exec" and tool_params.get("apply") is True)):
         blocked = structured_tool_error(request.tool_name,
                 "EXACT_PROCESS_READ_SCOPE_UNSUPPORTED: 当前进程入口不能强制本次精确读取范围。",
@@ -255,7 +264,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
                 workspace_root=request.workspace_root,
                 write_boundary=request.write_boundary,
                 sandbox_read_roots=sandbox_read_roots,
-                invocation_context=_invocation_context(request),
+                invocation_context=state_context or _invocation_context(request),
                 on_handler_started=request.on_handler_started,
             )
         ),
@@ -268,15 +277,27 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
             payload = {}
         keys = {"session_id", "status", "exit_code", "columns", "rows", "signal", "confirmed",
                 "stop_requested", "termination_confirmed", "cleanup_confirmed"}
+        if state_context is not None:
+            keys |= {'wait_timed_out', 'wait_yielded'}
         safe = {key: value for key, value in payload.items()
                 if key in keys and type(value) in (str, bool, int, float, type(None))} if isinstance(payload, dict) else {}
-        safe["content_withheld_reason"] = "EXACT_HANDLE_READ_SCOPE_UNVERIFIED"
-        safe["next_action"] = "旧句柄缺少启动读取范围证明，内容未公开；请在原授权上下文核验控制结果，未知结果禁止盲目重试。"
+        safe["content_withheld_reason"] = 'EXACT_PROCESS_STATE_ONLY' if state_context else "EXACT_HANDLE_READ_SCOPE_UNVERIFIED"
+        safe["next_action"] = ('此精确入口只返回自有进程状态/退出事实，未读取输出；保留原句柄有界等待或停止。' if state_context
+                              else "旧句柄缺少启动读取范围证明，内容未公开；请在原授权上下文核验控制结果，未知结果禁止盲目重试。")
         if outcome.error_code:
             safe["error_code"] = outcome.error_code
+            if state_context is not None:
+                safe["reason_code"] = ("PROCESS_SESSION_AUTHORITY_UNREADABLE"
+                    if outcome.error_code == "PROCESS_SESSION_AUTHORITY_UNREADABLE"
+                    else "EXACT_PROCESS_SCOPE_UNVERIFIED")
+                safe["side_effect_state"] = "not_started"
+                safe["next_action"] = "原启动身份或权威记录在派发时不能核实，未读取日志或发送控制；保留原句柄，稍后在原运行内核验，禁止另起进程替代未知结果。"
         outcome.output = json.dumps(safe, ensure_ascii=False)
+        observation = outcome.result_envelope.get("progress_observation") if state_context is not None else None
         outcome.result_envelope = {"exact_read_scope": {"content_withheld": True,
-            "reason_code": "EXACT_HANDLE_READ_SCOPE_UNVERIFIED"}}
+            "reason_code": safe.get("reason_code") or ('EXACT_PROCESS_STATE_ONLY' if state_context else "EXACT_HANDLE_READ_SCOPE_UNVERIFIED")}}
+        if isinstance(observation, dict):
+            outcome.result_envelope["progress_observation"] = observation
     return outcome
 
 
@@ -287,7 +308,8 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
 def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationContext:
     policy = PathAccessPolicy.from_values(mode=request.path_access_mode, dangerous_roots=request.path_dangerous_roots,
                                          owner_scope_root=request.owner_scope_root,
-                                         agent_home_root=data_root_from_boundary(request.write_boundary))
+                                         agent_home_root=data_root_from_boundary(request.write_boundary),
+                                         business_aggregate_roots=business_aggregate_paths_from_boundary(request.write_boundary))
     return ToolInvocationContext(
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
         pending_input_probe=request.pending_input_probe,
@@ -301,6 +323,9 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
         workspace_write_context=build_workspace_write_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
         ),
+        exact_process_state_only=(request.tool_name == 'process_session'
+            and request.arguments.get('action') in ('status', 'wait')
+            and exact_read_roots(request.write_boundary, request.workspace_root) is not None),
     )
 
 
@@ -397,7 +422,14 @@ def _request_local_tool_for_invocation(
         dangerous_roots=request.path_dangerous_roots,
         owner_scope_root=effective_owner_scope,
         agent_home_root=getattr(configured_policy, "agent_home_root", None),
+        business_aggregate_roots=tuple(dict.fromkeys((*getattr(configured_policy, "business_aggregate_roots", ()),
+            *business_aggregate_paths_from_boundary(request.write_boundary)))),
     )
+    process_tool = scoped.shell_tool if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool") else scoped
+    if hasattr(process_tool, "host_exclusive_paths"):
+        # 私有HOME规则会重新放行owner整根；聚合库沿原hidden_paths在owner放行后拒绝。
+        process_tool.host_exclusive_paths = tuple(dict.fromkeys((*process_tool.host_exclusive_paths,
+            *dynamic_policy.business_aggregate_roots)))
     if hasattr(scoped, "path_access_policy"):
         scoped.path_access_policy = dynamic_policy
     if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):
@@ -576,7 +608,8 @@ def _sandbox_read_roots_for_invocation(
         owner = request.owner_scope_root or getattr(registered_policy, "owner_scope_root", None)
         policy = PathAccessPolicy.from_values(mode=request.path_access_mode,
             dangerous_roots=request.path_dangerous_roots, owner_scope_root=owner,
-            agent_home_root=getattr(registered_policy, "agent_home_root", None) or data_root_from_boundary(request.write_boundary))
+            agent_home_root=getattr(registered_policy, "agent_home_root", None) or data_root_from_boundary(request.write_boundary),
+            business_aggregate_roots=business_aggregate_paths_from_boundary(request.write_boundary))
         external = granted_external_work_roots(request.write_boundary, owner)
         # exact只能收窄owner墙；目录授权也不能包含其它owner或宿主数据根。
         return tuple(root for root in exact if policy.check_with_external_roots(root, external).allowed)
@@ -806,13 +839,19 @@ def _task_host_state_path_strings(boundary: dict[str, object]) -> list[str]:
 # 函数用途: 给已授权工具补充模型不可见的写根、读根、临时根顺序和其它运行边界参数。
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
     params = dict(request.tool_params)
+    if request.tool_name == "run_command":
+        # canonical登记根仅由宿主边界下发；不从模型隐藏字段恢复。
+        params.pop("__artifact_registry_root", None)
+        if isinstance(request.write_boundary, dict):
+            _copy_boundary_path(BoundaryPathCopyRequest(params=params, boundary=request.write_boundary,
+                target_key="__artifact_registry_root", source_key="artifact_registry_root"))
     if request.tool_name == "send_message":
         # 登记根只能来自宿主当前任务，模型同名隐藏参数不能决定查找范围。
         params.pop("__artifact_registry_root", None)
         params.pop("__artifact_task_root", None)
         params.pop("__artifact_gateway_root", None)
     if not isinstance(request.write_boundary, dict):
-        return params if request.tool_name == "send_message" else request.tool_params
+        return params if request.tool_name in {"send_message", "run_command"} else request.tool_params
     if request.tool_name == "send_message":
         _copy_boundary_path(BoundaryPathCopyRequest(params=params, boundary=request.write_boundary,
             target_key="__artifact_task_root", source_key="task_root"))

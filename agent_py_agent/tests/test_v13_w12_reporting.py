@@ -431,7 +431,14 @@ def _native_content(native, artifact):
     assert status == 200 and headers['X-Content-Type-Options'] == 'nosniff'
     assert len(content) == artifact['size_bytes']
     assert hashlib.sha256(content).hexdigest() == artifact['content_sha256']
-    assert native_request(native, 'GET', path, user='business-bob')[0] == 404
+    foreign_status, _, foreign_content = native_request(native, 'GET', path, user='business-bob')
+    # 新Owner尚无旧run完整覆盖证明；拒绝内容并如实返回未知，不把未发现冒充确定404。
+    assert foreign_status == 503 and content not in foreign_content
+    foreign = json.loads(foreign_content)
+    assert set(foreign) == {'error'}
+    assert foreign['error']['code'] == 'HOST_NOT_READY'
+    assert foreign['error']['message'] == 'ARTIFACT_REGISTRY_DISCOVERY_INCOMPLETE'
+    assert foreign['error']['outcome'] == 'not_started'
     return content
 
 
@@ -551,3 +558,135 @@ def test_reporting_structure_has_lazy_registry_imports_and_explicit_parameters()
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
         mutators = [node for node in function.body if isinstance(node, ast.FunctionDef) and node.name == 'mutate']
         assert len(mutators) == 1 and mutators[0].args.args[0].arg == 'rows'
+
+
+def test_audit_export_known_upload_source_replays_and_separates_subjects(v13_host):
+    call = _call(v13_host, 'audit.export', {'format': 'csv'}, key='known-source-key')
+    space = call.services.spaces.create({'name': 'known source'}, actor=call.services.actor(call.context),
+        idempotency_key='known-source-space')
+    call = replace(call, params={'format': 'csv', 'space_id': space['space_id']})
+    _seed_audit(call, 2)
+    first = reporting.audit_export(call)
+    assert reporting.audit_export(call) == first
+    other = _call(v13_host, 'audit.export', call.params, subject='analyst-b', key=call.idempotency_key)
+    second = reporting.audit_export(other)
+    assert second['export']['artifact_id'] != first['export']['artifact_id']
+    assert reporting.audit_export(call) == first
+
+
+def test_known_upload_lookup_does_not_treat_foreign_source_as_absent(v13_host):
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_observed_artifact,
+    )
+
+    call = _call(v13_host, 'audit.export', {'format': 'csv'}, key='existing-foreign-source')
+    _, artifact_id = reporting._export_identity(call)
+    root = call.owner_home / 'artifacts' / 'business'
+    root.mkdir(parents=True)
+    path = root / (artifact_id + '.blob')
+    data = b'existing-other-source'
+    path.write_bytes(data)
+    register_observed_artifact(ArtifactRegistration(root, path, artifact_id=artifact_id, source='workflow', status='ready',
+        metadata={'owner_id': call.owner_id}), observed_sha256=hashlib.sha256(data).hexdigest(),
+        observed_size_bytes=len(data), atomic_publish=True)
+    before = {p.name: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    with pytest.raises(HostAPIError) as conflict:
+        reporting.audit_export(call)
+    assert conflict.value.code == 'HOST_NOT_READY' and conflict.value.status == 503
+    assert {p.name: p.read_bytes() for p in root.rglob('*') if p.is_file()} == before
+
+
+def test_known_upload_lookup_enforces_primary_registry_read_budget(v13_host, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import business_artifacts_http as media
+
+    call = _call(v13_host, 'audit.export', {'format': 'csv'}, key='bounded-source-lookup')
+    _, artifact_id = reporting._export_identity(call)
+    observed = []
+    def read(_owner, parts, *, max_bytes=None):
+        observed.append((parts, max_bytes))
+        return b'x' * max_bytes
+    monkeypatch.setattr(media, 'read_bytes_beneath', read)
+    with pytest.raises(HostAPIError) as limit:
+        reporting._export_artifact(call, artifact_id)
+    assert limit.value.code == 'HOST_NOT_READY' and '读取预算' in limit.value.message
+    assert len(observed) == 1 and observed[0][1] == 2 * 1024 * 1024 + 1
+    assert not (call.owner_home / 'artifacts' / 'business').exists()
+
+
+def test_known_upload_absence_cannot_overwrite_unregistered_blob(v13_host):
+    call = _call(v13_host, 'audit.export', {'format': 'csv'}, key='unregistered-upload-unknown')
+    space = call.services.spaces.create({'name': 'unknown upload'}, actor=call.services.actor(call.context),
+        idempotency_key='unknown-upload-space')
+    call = replace(call, params={'format': 'csv', 'space_id': space['space_id']})
+    _seed_audit(call, 1)
+    _, artifact_id = reporting._export_identity(call)
+    root = call.owner_home / 'artifacts' / 'business'
+    root.mkdir(parents=True)
+    path = root / (artifact_id + '.blob')
+    path.write_bytes(b'original-unconfirmed-blob')
+    stamp = path.stat().st_mtime_ns
+    with pytest.raises(HostAPIError) as unknown:
+        reporting.audit_export(call)
+    assert (unknown.value.code, unknown.value.status, unknown.value.outcome) == ('OUTCOME_UNKNOWN', 503, 'unknown')
+    assert path.read_bytes() == b'original-unconfirmed-blob' and path.stat().st_mtime_ns == stamp
+
+
+@pytest.mark.parametrize('reported_outcome', ['not_started', 'committed'])
+def test_real_upload_post_commit_lookup_failure_keeps_unknown_or_declared_commit(v13_host, monkeypatch, reported_outcome):
+    from agent_py_agent.agent.gateway_parts import business_artifacts_http as media
+
+    call = _call(v13_host, 'audit.export', {'format': 'csv'}, key='post-upload-readback')
+    space = call.services.spaces.create({'name': 'post upload'}, actor=call.services.actor(call.context),
+        idempotency_key='post-upload-space')
+    call = replace(call, params={'format': 'csv', 'space_id': space['space_id']})
+    _seed_audit(call, 2)
+    original = media.business_upload_artifact
+    calls = []
+    def lookup(*args):
+        calls.append(args[0])
+        if len(calls) == 2:
+            raise HostAPIError('HOST_NOT_READY', 503, reported_outcome, message='QA_POST_UPLOAD_LOOKUP_UNAVAILABLE')
+        return original(*args)
+    monkeypatch.setattr(media, 'business_upload_artifact', lookup)
+    with pytest.raises(HostAPIError) as failure:
+        reporting.audit_export(call)
+    expected = 'unknown' if reported_outcome == 'not_started' else 'committed'
+    assert (failure.value.code, failure.value.status, failure.value.outcome) == ('HOST_NOT_READY', 503, expected)
+    if expected == 'unknown':
+        assert '勿自动重传' in failure.value.message and 'QA_POST_UPLOAD_LOOKUP_UNAVAILABLE' in failure.value.message
+    artifact = original(calls[0], call.context, call.services)
+    assert artifact is not None and artifact['available']
+    path = call.owner_home / 'artifacts' / 'business' / (artifact['artifact_id'] + '.blob')
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    monkeypatch.setattr(media, 'business_upload_artifact', original)
+    replayed = reporting.audit_export(call)
+    assert replayed['export']['artifact_id'] == artifact['artifact_id']
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_native_post_upload_readback_failure_reports_unknown_without_retransmission(v13_native, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import business_artifacts_http as media
+
+    space = _native_data(v13_native, 'spaces.create', {'name': 'native post upload'}, key='native-post-upload-space')
+    host = _native_owner(v13_native, space['space_id'])
+    _seed_audit(_call(host, 'audit.list', {}), 2)
+    original = media.business_upload_artifact
+    reads = []
+    def lookup(*args):
+        reads.append(args)
+        if len(reads) == 2:
+            raise HostAPIError('HOST_NOT_READY', 503, message='QA_NATIVE_POST_UPLOAD_READBACK')
+        return original(*args)
+    monkeypatch.setattr(media, 'business_upload_artifact', lookup)
+    status, body = v13_call(v13_native, 'audit.export', {'format': 'csv', 'space_id': space['space_id']},
+        user='business-alice', idempotency_key='native-post-upload-key')
+    assert status == 503 and body['error']['code'] == 'HOST_NOT_READY'
+    assert body['effect_outcome'] == 'unknown' and body['data'] == {}
+    assert 'QA_NATIVE_POST_UPLOAD_READBACK' in body['error']['message']
+    details = {item['key']: item['value'] for item in body['error']['details']}
+    assert details['retry_same_request'] is False and '勿重发' in details['next_action']
+    artifact = original(*reads[0])
+    assert artifact is not None and artifact['available'] and len(reads) == 2
+    path = reads[0][2].owner_home / 'artifacts' / 'business' / (artifact['artifact_id'] + '.blob')
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact['content_sha256']

@@ -697,3 +697,26 @@ def test_scope_agent_detail_filters_current_execution_using_original_task_and_ru
         assert result['current_execution'] is None
         assert result['pending_tasks'] == []
         assert task.task_id not in str(result) and run_id not in str(result)
+
+
+def test_private_business_approval_reader_is_wired_without_gifting_complete_coverage(production_host):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import home_paths_with_owner
+
+    server, _, owner, *_ = production_host
+    server.agent = SimpleNamespace(config=AgentConfig(business_spaces_enabled=True),
+        home_paths=home_paths_with_owner(home_paths(owner.root), owner))
+    from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_folders
+
+    ensure_gateway_folders(server.paths)
+    # 原私有HTTP授权与目标owner store真实装配；没有完整运行宿主时不把缺记录宣称不存在。
+    listed = production_call(production_host, 'business.approvals.list')
+    assert listed['items'] == [] and listed['coverage'] == 'partial'
+    backend = composition.business_port(server.plugin_host.composition.ports)
+    service = next(iter(backend._services.values()))
+    assert {'approvals', 'approvals.get'} <= set(service.projection.readers)
+    assert service.projection.owner_id == owner.owner_id
+    assert 'approvals.decide' not in listed.get('allowed_actions', [])

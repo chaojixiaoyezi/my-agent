@@ -212,7 +212,10 @@ def test_scratch_ancestor_swap_cannot_redirect_unlink_into_output(tmp_path, monk
         return descriptor
 
     monkeypatch.setattr(apply, "open_directory_beneath", swapping)
-    service.apply(now=NOW)
+    for _ in range(64):
+        report = service.apply(now=NOW)
+        if swapped or not report.scan_partial:
+            break
     assert swapped, "must actually inject the ancestor replacement"
     assert (moved / "output/tmp/x").read_text() == "must survive outside tmp"
 
@@ -348,9 +351,16 @@ def test_first_state_publication_invalidates_next_action_snapshot(tmp_path, monk
         return result
 
     monkeypatch.setattr(apply, "_apply_action", publish)
-    report = service.apply(now=later)
+    actions = []
+    for _ in range(64):
+        report = service.apply(now=later)
+        actions.extend(report.actions)
+        if not report.scan_partial:
+            break
+    else:
+        pytest.fail("retention did not finish within bounded continuation")
     assert published and not first.destination.exists() and second.destination.exists()
-    assert next(a for a in report.actions if a.path == second.destination).status == "state_changed"
+    assert next(a for a in actions if a.path == second.destination).status == "state_changed"
 
 
 # LLM: 仅日期/任务目录的scandir失败，必须真的经过注入且complete=False，不靠chmod行为猜权限。

@@ -29,7 +29,7 @@ from .models import (
 )
 from .process_network_status import managed_process_network_status
 from .process_registry import ProcessSessionAuthorityError, process_registry
-from .process_scope import process_access_scope
+from .process_scope import ProcessExecutionScope, process_access_scope
 from .process_session_cleanup import ProcessSessionCleanupError
 from .process_session_store import process_session_store_root
 
@@ -174,7 +174,47 @@ class ProcessSessionTool(BaseTool):
     #   stop 在可能已发信号之后失败（ProcessSessionCleanupError，或 stop 回执未确认）→ 仍是 unknown。
     # 函数用途: 执行后台进程控制；未确认的停止结果明确 UNKNOWN，保留结果供核对。
     def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
+        if getattr(context, 'exact_process_state_only', False):
+            try:
+                return self._execute_exact_state(params, context)
+            except ProcessSessionAuthorityError:
+                return ToolHandlerOutcome(self.model_spec.name, False,
+                    'PROCESS_SESSION_AUTHORITY_UNREADABLE: 原进程身份记录暂不可核验，未读取日志或发送控制；保留原句柄稍后查询。',
+                    error_code='PROCESS_SESSION_AUTHORITY_UNREADABLE', effect_outcome='not_started')
         return self.execute(params, pending_input_probe=context.pending_input_probe)
+
+    def exact_state_admitted(self, params, context):
+        """注册入口在handler前只核原资源身份；从不以模型metadata声明授权。"""
+        if params.get('action') not in ('status', 'wait'):
+            return False
+        scope = process_access_scope(params.get('__run_scope'), self.owner_scope_root)
+        if not scope.is_bound():
+            return False
+        try:
+            return process_registry.exact_state(str(params.get('session_id') or ''), scope,
+                ProcessExecutionScope.from_run_scope(params.get('__run_scope'), self.owner_scope_root),
+                context.workspace_read_context, process_session_store_root(self.workspace_root, scope.owner_home),
+                refresh=False) is not None
+        except (ProcessSessionAuthorityError, ValueError):
+            return False
+
+    def _execute_exact_state(self, params, context):
+        scope = process_access_scope(params.get('__run_scope'), self.owner_scope_root)
+        execution = ProcessExecutionScope.from_run_scope(params.get('__run_scope'), self.owner_scope_root)
+        root = process_session_store_root(self.workspace_root, scope.owner_home)
+        identity = str(params.get('session_id') or '')
+        if params.get('action') == 'status':
+            result = process_registry.exact_state(identity, scope, execution, context.workspace_read_context, root)
+        elif params.get('action') == 'wait':
+            result = process_registry.wait_exact_state(identity, scope, execution, context.workspace_read_context,
+                root, min(self.max_wait_seconds, self._wait_timeout(params.get('timeout_seconds'))),
+                pending_input_probe=context.pending_input_probe)
+        else:
+            result = None
+        if result is None:
+            return self._error('SANDBOX_UNAVAILABLE',
+                'EXACT_PROCESS_SCOPE_UNVERIFIED: 原进程启动读取证明或完整执行身份不匹配；未读取内容，保留句柄核对原运行。')
+        return self._ok(result, observe_progress=True)
 
     def execute(self, params: dict[str, Any], *, pending_input_probe: Callable[[], bool] | None = None) -> ToolHandlerOutcome:
         # 动作只取结构化参数，不看错误文本。

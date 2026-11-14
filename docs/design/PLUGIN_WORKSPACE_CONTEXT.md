@@ -56,3 +56,11 @@ Python 绕过协议直接访问系统；不把声明 `read_only` 或一份元数
 上下文、逐条期望裁决和必须拒绝的畸形上下文，期望值由本文件描述的宿主实现裁决（pytest 同时校验参考实现）。
 Node 样例移植全部通过，典型错误写法（先按字面折叠 `..`、直接用语言自带 realpath、按字符串前缀判断包含等）均能被用例抓出。
 写入上下文暂无跨语言用例。详见[任意语言插件](PLUGIN_ANY_LANGUAGE.md#第-2-项实测非-python-插件怎么检查工作区路径)。
+
+## 业务范围中的原始聚合库保护（SDK 0.3.0，2026-11-13）
+
+受理时冻结了业务空间/项目的回合，通用文件读取、递归搜索和目录发现不能将本 owner 的正式 Memory、会话/索引/遥测派生账或业务上传/blob/catalog 原始聚合库当工作区输入。宿主沿原 typed 业务上下文或已核验前台空间快照冻结保护，后代沿原任务属性继承；模型填写 exact 路径或同名 attributes 不能授予原始库读取权。普通工程里的 `memory/`、用户 `data/uploads/` 和工作区文件不因此被拒。未选空间的本人维护仍走原权限；业务回合的默认 full 模式不能隐式解除保护。
+
+`path_policy` 可携带 `business_aggregate_roots`，每个真实目标仍由唯一 PathAccessPolicy 核验，大小写别名按实际文件身份判定。SDK 0.3.0 与仓内 Node 实现消费同一收窄字段；核心 Shell/PTY 复用原 hidden paths 强制隐藏，未建立另一套沙箱。Memory/历史应使用 `memory_search`、`remember(action=list)`、`session_search`；业务正文使用 `read_business_asset` 按获准的精确 space/project/asset/version 读取。
+
+SDK 0.2.0 的严格字段解析会拒绝带此字段的受限上下文，即使本次请求的文件本身不敏感，也不能静默删掉保护字段兼容。未携带该字段的原无空间调用保持原协议形状。旧已安装插件不自动升级；需要按原包构建、确认与启用链更新 SDK 依赖。此协议是合作式插件读取合同，不宣称能阻止恶意原生 MCP 进程绕过 SDK 直接调用操作系统文件 API。

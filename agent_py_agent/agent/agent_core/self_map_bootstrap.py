@@ -272,6 +272,7 @@ def _script_runtime_options(agent):
                 'write_roots': [str(path) for path in write_roots]}}
     return {'work_context': context,
         'public_read_roots': read_roots, 'extra_write_roots': write_roots,
+        'read_scope_mode': ('exact' if str(boundary.get('read_scope_mode') or '').strip().lower() == 'exact' else 'policy'),
         'write_protection': SandboxWriteProtection(absolute_paths=absolute_paths, denied_roots=denied_roots),
         'host_path_protection': host_sandbox_paths(agent.home_paths.root, agent.home_paths.owner_home_dir,
                                                   config=agent.config),
@@ -310,6 +311,16 @@ def _workflow_business_binding(agent):
 
     context, services = local_business_context(agent, model=True)
     return services.workflows, services.actor(context)
+
+
+def _workflow_native_governance(agent):
+    """审核依赖原操作库和作者fence，不依赖业务空间功能是否启用。"""
+    from ..gateway_parts.business_host_ports import build_default_workflow_governance
+
+    configured = getattr(agent, 'business_governance', None)
+    if configured is not None or 'business_governance' in vars(agent):
+        return configured
+    return build_default_workflow_governance(agent)
 
 
 def _workflow_runtime_ports(agent):
@@ -367,18 +378,22 @@ def _workflow_execution_scope(agent, caller_params, engine, record):
             handler = bind(turn.params)
         if callable(handler):
             bound.analysis_handler = functools.wraps(handler)(lambda *args: invoke(lambda: handler(*args)))
-        authorize = bound.run_authorizer
-        if callable(authorize):
-            def native_authorize(record, phase):
-                from ..workflows.native_governance import workflow_review_author_scope
-                with workflow_review_author_scope(agent, turn):
-                    return invoke(lambda: authorize(record, phase))
-            bound.run_authorizer = native_authorize
-        bound.runner = ScriptRunner(bound.owner_home, workspace_root=bound.workspace_root,
-            **_script_runtime_options(agent))
-        yield bound
-        current = bound.store.load_run(record.workflow_run_id)
-        turn.runtime_status = 'ok' if current.status == 'succeeded' else 'cancelled' if current.status == 'cancelled' else 'failed'
+        # 子流程复用engine时回到原业务核权器，不叠用父流程的运行绑定。
+        authorize = getattr(bound.run_authorizer, '_workflow_original_authorizer', bound.run_authorizer)
+        from ..workflows.native_governance import workflow_review_author_scope
+
+        # 在原宿主栈签出作用域；worker只用本次可撤销调用闭包运输作者事实。
+        scoped_authorize = (lambda current, phase: invoke(lambda: authorize(current, phase))) if callable(authorize) else None
+        with workflow_review_author_scope(agent, turn, authorize=scoped_authorize,
+                workflow_run_id=record.workflow_run_id) as native_authorize:
+            if callable(native_authorize):
+                native_authorize._workflow_original_authorizer = authorize
+                bound.run_authorizer = native_authorize
+            bound.runner = ScriptRunner(bound.owner_home, workspace_root=bound.workspace_root,
+                **_script_runtime_options(agent))
+            yield bound
+            current = bound.store.load_run(record.workflow_run_id)
+            turn.runtime_status = 'ok' if current.status == 'succeeded' else 'cancelled' if current.status == 'cancelled' else 'failed'
 
 
 class _WorkflowToolDispatcher:
@@ -392,7 +407,92 @@ class _WorkflowToolDispatcher:
         from .tool_runtime_ledger import write_boundary_with_runtime_ledger
         self.boundary = write_boundary_with_runtime_ledger(agent, params) if params is not None else None
 
-    def execute_scoped(self, tool_name, arguments, *, owner_id, space_id, idempotency_key, logical_step_key, run, step):
+    @staticmethod
+    def _review_arguments_hash(arguments, constraints):
+        import hashlib
+        import json
+
+        material = {key: value for key, value in arguments.items() if key not in constraints}
+        return hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False,
+            separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+    def workflow_review_precondition(self, *, run, step, definition, engine, outputs):
+        """业务范围已核后，按本轮工具快照/执行权读取声明的只读资源约束。"""
+        from ..workflows.business_scope import WorkflowPolicyRefusal
+        from ..workflows.tool_steps import resolve_tool_arguments
+
+        if run.owner_id != self.agent.home_paths.owner_id:
+            raise WorkflowPolicyRefusal('WORKFLOW_OWNER_MISMATCH')
+        spec = next(item for item in definition['steps'] if item['step_id'] == step.step_id)
+        tool_name, arguments = resolve_tool_arguments(engine, step, run, spec, outputs)
+        runtime = self.snapshot.runtime(tool_name)
+        if runtime is None or not runtime.availability.available:
+            raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PERMISSION_DENIED', details={
+                'effect_outcome': 'not_started',
+                'recommended_action': 'request_permission',
+                'recovery_hint': '未读取资源；请由原执行者核对当轮工具授权与可用性。'})
+        hook = getattr(runtime.handler, 'workflow_review_precondition', None)
+        if not callable(hook):
+            return None
+
+        def read():
+            from ..tooling.input_schema import validate_tool_input
+
+            if not validate_tool_input(arguments, runtime.model_spec.input_schema).ok:
+                raise WorkflowPolicyRefusal('WORKFLOW_TOOL_SCHEMA_INVALID')
+            from ..tooling.host_read_policy import host_tool_entry_policy
+
+            projection = getattr(runtime.handler, 'workflow_review_precondition_action', None)
+            if not callable(projection):
+                raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PRECONDITION_READ_ACTION_MISSING')
+            readonly_arguments = projection(arguments)
+            if readonly_arguments is None:
+                return None
+            if not isinstance(readonly_arguments, dict):
+                raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PRECONDITION_READ_ACTION_INVALID')
+            key = 'workflow-review:' + run.workflow_run_id + ':' + step.step_id
+            send = host_tool_entry_policy(self.agent, self.params, self.snapshot, tool_name, arguments,
+                claim_id=key + ':effect', boundary=self.boundary, idempotency_key=key)
+            preview = host_tool_entry_policy(self.agent, self.params, self.snapshot, tool_name, readonly_arguments,
+                claim_id=key + ':read', boundary=self.boundary, idempotency_key=key + ':read')
+            if send.status == 'deny' or not preview.allowed or preview.resolved_effect != 'read_only':
+                raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PRECONDITION_PERMISSION_DENIED', details={
+                    'effect_policy_reasons': list(send.reason_codes), 'read_policy_reasons': list(preview.reason_codes),
+                    'effect_outcome': 'not_started',
+                    'recommended_action': 'request_permission',
+                    'recovery_hint': '未读取资源；须原工具副作用入口非拒绝、对应只读入口明确许可。请核对当前工具/业务/路径授权再重审。'})
+            invalid = runtime.handler.validate_invocation(arguments, None)
+            if invalid is not None:
+                raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PRECONDITION_ARGUMENTS_INVALID')
+            return hook(arguments)
+
+        try:
+            constraints = self.invoke(read)
+        except WorkflowPolicyRefusal:
+            raise
+        except Exception as error:
+            raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PRECONDITION_READ_FAILED', details={
+                'source_error_code': str(getattr(error, 'error_code', '') or type(error).__name__),
+                'exception_type': type(error).__name__, 'effect_outcome': 'not_started',
+                'recommended_action': 'repair_evidence_refs',
+                'recovery_hint': '资源未读取成功、未执行；核对原工具权限和资源状态后重审，不得沿旧票盲重试。'}) from error
+        if constraints is None:
+            return None
+        properties = runtime.model_spec.input_schema.get('properties', {})
+        if (not isinstance(constraints, dict) or not 1 <= len(constraints) <= 32
+                or any(not isinstance(key, str) or key not in properties or properties[key].get('type') != 'string'
+                    or not isinstance(value, str) or not value or len(value) > 512
+                    for key, value in constraints.items())):
+            raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PRECONDITION_INVALID')
+        if any(key in arguments and arguments[key] != value for key, value in constraints.items()):
+            raise WorkflowPolicyRefusal('WORKFLOW_TOOL_PRECONDITION_CONFLICT', details={
+                'effect_outcome': 'not_started',
+                'recommended_action': 'repair_tool_arguments',
+                'recovery_hint': '显式工具约束与当前资源摘要不一致；未执行。核对preview后修订候选并重新审核，不能覆盖宿主钉子。'})
+        return {'tool_name': tool_name, 'arguments_sha256': self._review_arguments_hash(arguments, constraints),
+            'constraints': dict(constraints)}
+
+    def execute_scoped(self, tool_name, arguments, *, owner_id, space_id, idempotency_key, logical_step_key, run, step, business_effect=None):
         # 原effect attempt变化不产生新操作身份；未确认写由原coordinator拒绝重放，不再建第二账。
         from ..tooling.runtime_contracts import ToolCall
 
@@ -400,28 +500,79 @@ class _WorkflowToolDispatcher:
             raise PermissionError('WORKFLOW_OWNER_MISMATCH')
         runtime = self.snapshot.runtime(tool_name)
         if runtime is None:
-            return {'ok': False, 'error_code': 'TOOL_NOT_ALLOWED', 'effect_outcome': 'not_started'}
+            return {'ok': False, 'error_code': 'TOOL_NOT_ALLOWED', 'effect_outcome': 'not_started',
+                'error_message': f'工具 {tool_name} 不在当前宿主允许工具快照中；未进入handler、未执行业务。请查看tool_search当前授权列表，不要换幂等键绕过。',
+                'handler_executed': False, 'failure_stage': 'authorization',
+                'call_id': logical_step_key, 'tool_name': tool_name}
+        pending = step.escalation_result.get('pending_review')
+        pin = pending.get('tool_precondition') if isinstance(pending, dict) else None
+        if pin is not None:
+            constraints = pin.get('constraints', {})
+            if (pin.get('tool_name') != tool_name or not constraints
+                    or pin.get('arguments_sha256') != self._review_arguments_hash(arguments, constraints)
+                    or any(key in arguments and arguments[key] != value for key, value in constraints.items())):
+                return {'ok': False, 'error_code': 'WORKFLOW_TOOL_PRECONDITION_CONFLICT',
+                    'effect_outcome': 'not_started', 'handler_executed': False,
+                    'failure_stage': 'authorization', 'call_id': logical_step_key, 'tool_name': tool_name,
+                    'error_message': '执行实参与原审核票约束不一致；未执行。请修订新候选重审，不得覆盖旧摘要。'}
+            arguments = {**arguments, **constraints}
         params = self.params
         run_id = str(getattr(params, 'run_id', '') or '')
         attempt_id = str(getattr(params, 'attempt_id', '') or '')
         if not run_id or not attempt_id:
             # WorkflowRun/effect attempt不是core执行权，绝不代填；实际scope必须先绑定原canonical轮。
-            return {'ok': False, 'error_code': 'TOOL_AUTHORITY_CONTEXT_MISSING', 'effect_outcome': 'not_started'}
+            return {'ok': False, 'error_code': 'TOOL_AUTHORITY_CONTEXT_MISSING', 'effect_outcome': 'not_started',
+                'error_message': '当前宿主缺少真实run_id/attempt_id；未进入handler、未执行工具。请在正常授权执行轮重新发起，不能用工作流或effect身份代填。',
+                'handler_executed': False, 'failure_stage': 'authorization',
+                'call_id': logical_step_key, 'tool_name': tool_name}
         turn_id = str(getattr(params, 'request_id', '') or run_id)
         call = ToolCall(call_id=logical_step_key, tool_name=tool_name, arguments=arguments, source_protocol='text',
             schema_hash=runtime.model_spec.schema_hash, run_id=run_id, turn_id=turn_id, attempt_id=attempt_id,
             operation_id=logical_step_key, idempotency_key=logical_step_key)
+        effect = None
+        if business_effect is not None:
+            from ..contracts.idempotency import BusinessEffectIdentity, idempotency_key
+            task_id = str(getattr(params, 'task_id', '') or '')
+            context = run.business_context
+            if (not owner_id or not space_id or not task_id or not run.execution_definition_ref
+                    or context.get('owner_id') != owner_id or not context.get('task_id')
+                    or context.get('space_id') != space_id):
+                return {'ok': False, 'error_code': 'WORKFLOW_BUSINESS_EFFECT_SCOPE_REQUIRED',
+                    'effect_outcome': 'not_started', 'handler_executed': False,
+                    'failure_stage': 'authorization', 'call_id': logical_step_key, 'tool_name': tool_name,
+                    'error_message': '业务项幂等要求可信owner/task/space及冻结版本；未执行。请在同业务空间正式任务运行，不能用模型参数补签。'}
+            scope_key = idempotency_key('workflow-step', {'owner_id': owner_id, 'task_id': task_id,
+                'space_id': space_id, 'project_ref': context.get('project_ref'),
+                'package_versions': context.get('package_versions', []),
+                'asset_version_refs': context.get('asset_version_refs', []),
+                'workflow_id': run.workflow_id, 'step_id': step.step_id,
+                'execution_definition_ref': run.execution_definition_ref,
+                'tool_name': tool_name, 'schema_hash': runtime.model_spec.schema_hash,
+                'configuration_key': business_effect['configuration_key']})
+            effect = BusinessEffectIdentity(owner_id, task_id, scope_key, business_effect['item_key'])
+            step.escalation_result['business_effect'] = {'scope_key': scope_key, 'item_key': effect.item_key,
+                'operation_id': effect.operation_id, 'idempotency_key': effect.key}
 
         def execute():
+            from ..conversation.business_context import business_execution_policy_scope
+
             result = self.registry.execute_tool(call, write_boundary=self.boundary, runtime_snapshot=self.snapshot,
+                business_effect=effect,
+                **business_execution_policy_scope(self.agent),
                 trusted_run_context={'interactive': callable(getattr(getattr(params, 'on_chunk', None), 'request_permission', None)),
                     'task_attributes': dict(getattr(params, 'task_attributes', None) or {}),
                     'run_scope': {'run_id': run_id, 'task_id': str(getattr(params, 'task_id', '') or ''),
                         'attempt_id': attempt_id}},
                 cancellation_token=getattr(params, 'cancellation_token', None)).result
+            if effect is not None and result.operation is not None:
+                # 每次先走本轮Executor权限门；历史游标不是当前授权来源。
+                from ..workflows.step_watermarks import load_workflow_step_watermark
+                step.escalation_result['prior_watermark'] = load_workflow_step_watermark(
+                    self.agent.home_paths.owner_home_dir, run.workflow_id, step.step_id, scope_key=effect.scope_key)
             from ..workflows.governance import bind_workflow_tool_operation
             bind_workflow_tool_operation(self.agent.tools.operation_store, run, step, call,
-                result.operation, task_id=str(getattr(params, 'task_id', '') or ''))
+                result.operation, task_id=str(getattr(params, 'task_id', '') or ''),
+                business_effect=effect, source_operation=result.metadata.get('handler_details', {}).get('tool_operation'))
             return {**result.to_dict(), 'ok': result.ok,
                 'operation_id': result.operation.operation_id if result.operation is not None else '',
                 'effect_outcome': result.effect_outcome, 'error_message': result.output if not result.ok else ''}
@@ -445,13 +596,15 @@ def register_self_map(agent):
             agent.tools.register(ScriptsTool(owner_home, workspace_root_provider=ws_provider, im_notifier=im_notifier,
                                              runner_options_provider=runner_options))
             agent.tools.register(DatasourcesTool(owner_home, workspace_root_provider=ws_provider))
-            agent.tools.register(WorkflowsTool(owner_home,
+            agent.tools.register(WorkflowsTool(owner_home, owner_id=agent.home_paths.owner_id,
+                package_resource_resolver=agent.tools._construction_params.file_source_resolver,
                 workspace_root_provider=ws_provider,
                 skill_snapshot_provider=lambda: agent.current_skill_snapshot(),
                 analysis_handler=_workflow_analysis_handler(agent),
                 business_binding_provider=functools.partial(_workflow_business_binding, agent),
                 runtime_ports_provider=functools.partial(_workflow_runtime_ports, agent),
                 review_dispatch=functools.partial(dispatch_pending_review, agent),
+                review_governance_provider=functools.partial(_workflow_native_governance, agent),
                 execution_scope_provider=lambda params: functools.partial(_workflow_execution_scope, agent, params),
                 run_params_provider=lambda: getattr(agent, '_current_run_params', None),
                 im_notifier=im_notifier, runner_options_provider=runner_options))

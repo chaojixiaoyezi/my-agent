@@ -248,12 +248,14 @@ class _BotToolRegistry(ToolRegistry):
     def execute_tool(
         self, call, *, write_boundary=None, runtime_snapshot=None, trusted_run_context=None,
         cancellation_token=None, required_action=None, pre_handler_gate=None, output_archiver=None, options=None,
+        business_actor=None, business_context=None,
     ):
         from ..tooling.models import ToolFailureStage, apply_tool_execution_facts
 
         call_kwargs = {
             "write_boundary": write_boundary, "runtime_snapshot": runtime_snapshot,
             "trusted_run_context": trusted_run_context, "cancellation_token": cancellation_token,
+            "business_actor": business_actor, "business_context": business_context,
             "required_action": required_action, "pre_handler_gate": pre_handler_gate,
             "output_archiver": output_archiver, **(options or {}),
         }

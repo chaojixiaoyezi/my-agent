@@ -7,7 +7,8 @@ from ..gateway_parts.io import update_json_file_atomic
 from ..turn_end import result_turn_end_reason
 
 WAKE_REASON = "technical_cutoff_continue"
-_LIMIT = 3
+# 同一未完成任务遇到有进展的技术截断后允许连续唤醒的最大次数。
+_MAX_CONTINUATION_COUNT = 3
 _SOURCES = {
     "TOOL_ROUND_LIMIT_REACHED": ("tool_loop", "unfinished"),
     "MODEL_RESPONSE_TRUNCATED": ("tool_loop", "unfinished"),
@@ -47,7 +48,7 @@ def receipt_for(link) -> CutoffReceipt | None:
         if (any(not isinstance(item, str) for item in strings)
                 or not all((receipt.owner_id, receipt.thread_id, receipt.task_id, receipt.user_message_id,
                             receipt.origin_request_id, receipt.run_id, receipt.attempt_id))
-                or type(receipt.sequence) is not int or not 0 <= receipt.sequence <= _LIMIT
+                or type(receipt.sequence) is not int or not 0 <= receipt.sequence <= _MAX_CONTINUATION_COUNT
                 or receipt.status not in {"pending", "claimed", "stopped", "finished", "void"}):
             return None
         return receipt
@@ -143,7 +144,7 @@ def record_closeout(agent, ctx) -> CutoffReceipt | None:
             return old
         count = old.sequence if inherited and old is not None and not natural and not child_event else 0
         status = "finished" if natural else "stopped"
-        if cutoff and progress > 0 and count < _LIMIT:
+        if cutoff and progress > 0 and count < _MAX_CONTINUATION_COUNT:
             status = "pending"
             count += 1
         return CutoffReceipt(owner, thread_id, task_id, thread.last_user_message_id,

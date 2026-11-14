@@ -689,6 +689,7 @@ V13_ACTIONS = (
         effect='config',
         params_schema={'type': 'object',
  'properties': {'space_id': {'$ref': '#/$defs/Id'},
+                'subscription_id': {'$ref': '#/$defs/Id'},
                 'label': {'type': 'string', 'minLength': 1, 'maxLength': 120},
                 'template_id': {'$ref': '#/$defs/Id'},
                 'datasource_id': {'$ref': '#/$defs/Id'},

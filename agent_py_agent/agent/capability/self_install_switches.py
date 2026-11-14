@@ -27,6 +27,8 @@ CAPABILITY_FRESH_SWITCH_KEYS = SELF_INSTALL_SWITCH_KEYS | frozenset({
     "orchestration_pending_inbox_enabled",
     # 进展 git 观察开关在 list_agents 每次读取时经 capability_config_for_agent 现读。
     "orchestration_git_progress_enabled",
+    # 原审核派工入口每次通过 capability_config_for_agent 读取当前策略。
+    "workflow_auto_dispatch_reviewers",
 })
 # 配置文件读不到或解析失败时的版本标记：开关按关处理，回执如实带上这个标记。
 UNREADABLE_CONFIG_VERSION = "unreadable"

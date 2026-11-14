@@ -198,3 +198,36 @@ def test_count0_repeated_recovery_preserves_immutable_source(tmp_path, source_st
         assert report.summary['requeued'] == 1 and not report.load_errors, (index, report)
         actual = read_json_file(pending)
         assert ('source' in actual, actual.get('source'), actual['request_fingerprint']) == expected
+
+
+@pytest.mark.parametrize('stale', [False, True])
+def test_history_preparation_uses_original_worker_lease_and_preserves_priority(current, stale):
+    from agent_py_agent.agent.gateway_parts.request_errors import GatewayHistoryPreparationPending
+    from agent_py_agent.agent.gateway_parts.request_worker import (
+        _ClaimedGatewayRequestContext,
+        _requeue_history_preparation,
+    )
+
+    binding, original, agent, paths, _ = current
+    agent.conversation_store = SimpleNamespace()
+    context = _ClaimedGatewayRequestContext(agent, binding.claim.path, dict(original), binding.claim.request_id,
+                                           binding.claim.lease_owner)
+    pending = GatewayHistoryPreparationPending(original, 'thread-test',
+        {'cursor_before': 0, 'cursor_after': 500, 'source_end': 1200, 'reset_removed': 0})
+    if stale:
+        pending.execution_attempt_id = 'later-attempt'
+    before = binding.claim.path.read_bytes()
+    p3 = reservation_file(paths, binding.claim.request_id).read_bytes()
+    with worker_execution_scope(binding, agent):
+        if stale:
+            with pytest.raises(DataCorruptionError):
+                _requeue_history_preparation(context, paths, pending)
+            assert binding.claim.path.read_bytes() == before
+        else:
+            assert _requeue_history_preparation(context, paths, pending)
+            result = json.loads((paths.inbox / binding.claim.path.name).read_text())
+            assert result.get('priority') == original.get('priority')
+            assert result.get('requeued_at') == original.get('requeued_at')
+            assert result['deferred_reason'] == 'GATEWAY_HISTORY_INDEX_PENDING'
+            assert result['route'] == original['route'] and result['request_fingerprint'] == original['request_fingerprint']
+    assert reservation_file(paths, binding.claim.request_id).read_bytes() == p3

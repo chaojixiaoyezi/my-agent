@@ -326,7 +326,8 @@ def test_background_agent_badge_trails_controls(running_count, selected, active,
         assert text.index("Esc" if active else "F4") < text.index("后台Agent")
     assert "/route" not in text and "简洁" not in text
     if process_count:
-        assert text.endswith(badge + " · ⚡ 后台驻留 2 项")
+        assert text.endswith(" · ⚡ 后台驻留 2 项" + badge)
+        assert text.index("F6 原生模式") < text.index("后台驻留") < text.index("后台Agent")
     else:
         assert text.endswith(badge)
 
@@ -1126,7 +1127,7 @@ def test_pending_and_queued_inputs_stay_fixed_above_composer() -> None:
             "queue_added",
             "queued",
             "queue:2",
-            {"queue_id": "queue:2", "text": "排队消息", "priority": "next"},
+            {"queue_id": "queue:2", "text": "排队消息", "priority": "next", "editable": True},
         )
     )
     store.publish(
@@ -1193,6 +1194,7 @@ def test_input_receipt_flood_collapses_without_changing_canonical_queue() -> Non
                     "queue_id": f"queue:{index}",
                     "text": f"排队消息 {index}",
                     "priority": "next",
+                    "editable": True,
                 },
             )
         )

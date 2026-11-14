@@ -10,6 +10,9 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentScheduler,
     FakeDeliveryService,
 )
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR,
+)
 from agent_py_agent.agent.conversation.channels import (
     DeliveryContext,
     DeliveryReceipt,
@@ -300,6 +303,7 @@ def test_durable_schedule_run_uses_stable_run_identity_and_full_owner_tools() ->
         "scheduler_job_id": "job-1",
         "scheduler_run_id": "srun-1",
         "scheduler_trigger": "",
+        CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR: False,
     }
 
 

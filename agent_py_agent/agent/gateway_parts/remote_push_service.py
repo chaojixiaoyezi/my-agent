@@ -27,8 +27,10 @@ _NONCE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 class RemotePushError(ValueError):
     # LLM: status由宿主代码生成，绝不从外部正文采信。
     # 函数用途: 保存安全原因码及HTTP状态。
-    def __init__(self, code: str, status: int = 400):
+    def __init__(self, code: str, status: int = 400, *, details=None, effect_outcome="not_started"):
         self.error_code, self.status = code, status
+        self.details = details or {}
+        self.effect_outcome = effect_outcome
         super().__init__(code)
 
 
@@ -214,6 +216,8 @@ def authenticate_push(root, raw, headers, peer, current):
     if (not isinstance(owners, list) or body["target_owner"] not in owners
             or actions != ["push_event"]):
         raise RemotePushError("REMOTE_PUSH_TOKEN_SCOPE_DENIED", 403)
+    if 'business_subscription' in row and 'subscription_id' not in body:
+        raise RemotePushError('REMOTE_PUSH_TOKEN_SCOPE_DENIED', 403)
     if 'subscription_id' in body and (type(row.get('allowed_source_refs')) is not list
             or body['source_ref'] not in row['allowed_source_refs'] or type(row.get('allowed_subscription_ids')) is not list
             or body['subscription_id'] not in row['allowed_subscription_ids']):
@@ -262,9 +266,17 @@ def handle_remote_push(handler, server):
         result = accept_remote_push(server, raw, handler.headers, handler.client_address[0])
         handler._send_json(202, result)
     except RemotePushError as exc:
-        handler._send_json(exc.status, {"ok": False, "error_code": exc.error_code})
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-        handler._send_json(503, {"ok": False, "error_code": "REMOTE_PUSH_UNAVAILABLE"})
+        handler._send_json(exc.status, {"ok": False, "error_code": exc.error_code,
+            **({"details": exc.details, "effect_outcome": exc.effect_outcome} if exc.details else {})})
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        import logging
+        import traceback
+
+        frames = [(Path(item.filename).name, item.name, item.lineno) for item in traceback.extract_tb(exc.__traceback__)]
+        logging.getLogger(__name__).error("REMOTE_PUSH_HANDLER_FAILED exception_type=%s frames=%s", type(exc).__name__, frames)
+        handler._send_json(503, {"ok": False, "error_code": "REMOTE_PUSH_UNAVAILABLE",
+            "effect_outcome": "unknown", "details": {"exception_type": type(exc).__name__,
+            "next_action": "核对原推送回执和任务编号后再决定是否重试；不得换幂等键重复派发。"}})
 
 
 # LLM: 仅已持对应locked_json_path者调用；私有原子写及fsync由同一公共叶完成，不重复取不可重入锁。
@@ -372,6 +384,13 @@ def enqueue_remote_push(server, body, entry, token_id):
 # LLM: state锁串行幂等与rate；线程hash另含mode前缀，new_thread与reuse_key不能同标签碰撞。prepared恢复仍复用原ID。
 # 函数用途: 验证并耐久接纳一次推送，重复业务键返回原接收结果。
 def accept_remote_push(server, raw, headers, peer):
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        return _accept_remote_push(server, raw, headers, peer, stack=stack)
+
+
+def _accept_remote_push(server, raw, headers, peer, *, stack):
     root, current = remote_push_root(server), time.time()
     row, body, nonce = authenticate_push(root, raw, headers, peer, current)
     consume_push_nonce(root, row["token_id"], nonce, current)
@@ -379,7 +398,7 @@ def accept_remote_push(server, raw, headers, peer):
     if 'subscription_id' in body:
         from .business_event_ingress import prepare_subscription_push
         # 即使返回旧受理回执，也先重核当前来源/Owner/space/权限，不能借旧receipt续权。
-        managed = prepare_subscription_push(server, body, row)
+        managed = prepare_subscription_push(server, body, row, stack=stack)
     path = root / "receipts.json"
     with locked_json_path(path, blocking=False):
         state = read_push_json(root, "receipts.json")

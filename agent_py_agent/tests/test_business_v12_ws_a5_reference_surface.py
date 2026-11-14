@@ -251,7 +251,7 @@ const assert = require('node:assert/strict');
   await surface.materials.getAsset('sp_1', 'ast_1');
   assert.equal(calls.at(-1).body.action, 'assets.get');
 
-  await surface.materials.registerAsset('sp_1', '材料名', 'document', 'art_1');
+  await surface.materials.registerAsset('sp_1', '材料名', 'document', {artifact_id: 'art_1', version_ref: 'ver_1'});
   assert.equal(calls.at(-1).body.action, 'assets.register');
 
   await surface.materials.listVersions('sp_1', 'ast_1');
@@ -649,6 +649,22 @@ const app = require({json.dumps(str(app_path))});
   const permRes = await surface.delivery.getPermissions({{ kind: 'background_main', id: agentId }});
   assert.equal(permRes.state, 'completed', 'getPermissions 失败: ' + JSON.stringify(permRes.error));
   assert.equal(permRes.error, null);
+
+  // 上传真实字节，再通过公开消费端按准确版本登记；不手写服务端回执。
+  const assetSpace = await client.call('spaces.create', {{name: 'asset-wire-space'}}, {{mutating: true}});
+  const sid = assetSpace.data.space_id;
+  const uploaded = await client.uploadArtifact(new File(['wire document'], 'wire.txt', {{type: 'text/plain'}}), sid, 'uploadassetwiretest001');
+  const ref = {{artifact_id: uploaded.artifact_id, version_ref: uploaded.version_ref}};
+  const registered = await surface.materials.registerAsset(sid, 'wire-document', 'document', JSON.stringify(ref));
+  assert.equal(registered.error, null);
+  assert.equal(registered.state, 'completed');
+  assert.throws(() => surface.materials.registerAsset(sid, 'bad', 'document', uploaded.artifact_id), /JSON/);
+  await assert.rejects(() => client.call('assets.register', {{space_id: sid, name: 'bad', kind: 'document', artifact_ref: 'wrong-string'}}, {{mutating: true}}), error => {{
+    assert.match(error.message, /INVALID_SCHEMA/);
+    assert.match(error.message, /not_started/);
+    assert.match(error.message, /参数类型/);
+    return true;
+  }});
 }})().catch(err => {{
   console.error(err);
   process.exit(1);

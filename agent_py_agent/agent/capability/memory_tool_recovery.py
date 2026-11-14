@@ -13,7 +13,7 @@ from ..tooling.models import ToolHandlerOutcome
 
 # LLM: 仅在active目标确实不存在时读取墓碑；沿用原scope/subject校验，整批准备阶段零副作用。
 # 函数用途: 把可恢复的删除转换为宿主冻结清理计划，其它错误原样返回。
-def prepare_removal_retry(agent, operation, error, *, index):
+def prepare_removal_retry(agent, operation, error, *, index, scope=None):
     from .memory_tool import _validated_domain_fields
 
     if str(operation.get('action') or '').strip().lower() != 'remove' or error.error_code != 'MEMORY_ENTRY_NOT_FOUND':
@@ -22,6 +22,8 @@ def prepare_removal_retry(agent, operation, error, *, index):
     if plan is None:
         return error
     candidate = plan.candidate
+    if scope is not None and not scope.allows(candidate.scope.get('scope_type'), candidate.scope.get('scope_key')):
+        return error
     target = SimpleNamespace(kind={'long_term_fact': 'fact', 'event': 'event', 'project': 'project'}.get(
         candidate.candidate_type, 'fact'), attributes=dict(candidate.scope, subject_key=candidate.subject_key))
     domain = _validated_domain_fields(agent, operation, target, index=index)

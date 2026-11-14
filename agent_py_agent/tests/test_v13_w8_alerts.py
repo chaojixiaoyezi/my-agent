@@ -174,9 +174,9 @@ def test_list_filters_and_cursor_binding(native):
     second = completed(invoke(native, 'soc.alerts.list', {'severity': 'high', 'cursor': cursor}))
     assert first['items'][0]['alert_id'] != second['items'][0]['alert_id']
     for params in ({'severity': 'low', 'cursor': cursor}, {'cursor': cursor + 'x'}):
-        rejected(invoke(native, 'soc.alerts.list', params), 503, 'CURSOR_EXPIRED')
+        rejected(invoke(native, 'soc.alerts.list', params), 410, 'CURSOR_EXPIRED')
     rejected(invoke(native, 'soc.alerts.list', {'severity': 'high', 'cursor': cursor}, user='business-bob'),
-             503, 'CURSOR_EXPIRED')
+             410, 'CURSOR_EXPIRED')
     seed_alert(native, 'd-high', 'high')
     rejected(invoke(native, 'soc.alerts.list', {'severity': 'high', 'cursor': cursor}), 503, 'CURSOR_EXPIRED')
 

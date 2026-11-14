@@ -89,3 +89,15 @@ def test_model_menu_request_keeps_gateway_and_local_error_semantics(monkeypatch)
 
     monkeypatch.setattr(thread_model_selection, "execute_local_model_operation", _raise)
     assert tui_model_menu._request_data_sync(object(), "s1", "list", {}) == {"ok": False, "message": "模型配置结构无效。"}
+
+
+def test_renderer_and_subagent_models_share_canonical_ended_protocol():
+    from agent_py_agent.agent.contracts.protocol_status import SUBAGENT_ENDED_STATUSES
+    from agent_py_agent.agent.subagents.models import SUBAGENT_ENDED_STATUSES as server_statuses
+    from agent_py_agent.agent.subagents.models import TaskStatus
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import (
+        SUBAGENT_ENDED_STATUSES as renderer_statuses,
+    )
+
+    assert renderer_statuses is server_statuses is SUBAGENT_ENDED_STATUSES
+    assert all(TaskStatus(value).value == value for value in SUBAGENT_ENDED_STATUSES)

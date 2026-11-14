@@ -10,12 +10,46 @@ before a record reaches stderr, journald, a file handler, or a third-party
 handler.
 """
 
+import json
 import logging
 import re
 from collections.abc import Mapping
+from contextvars import ContextVar
+from functools import wraps
 from typing import Any
 
 _REDACTED = "<redacted>"
+# 结构化输出与内嵌JSON共用同一条有界遍历；只遮蔽过深/循环的子树，不损伤正常同级字段。
+_REDACTION_FRAME = ContextVar('redaction_frame', default=(0, frozenset()))
+# 结构遍历最多64层；超过时只遮蔽该子树，防止循环或内嵌JSON耗尽解释器栈。
+_MAX_REDACTION_LEVEL_COUNT = 64
+
+
+def _bounded_structure_redaction(function):
+    missing_field = object()
+
+    @wraps(function)
+    def guarded(value, *, field_name=missing_field, code_file=False, redacted_marker=_REDACTED,
+                redact_assignment_labels=False, redaction_events=None):
+        depth, active = _REDACTION_FRAME.get()
+        container = isinstance(value, (Mapping, list, tuple))
+        marker = redacted_marker
+        if depth >= _MAX_REDACTION_LEVEL_COUNT or container and id(value) in active:
+            return marker
+        token = _REDACTION_FRAME.set((depth + 1, active | {id(value)} if container else active))
+        try:
+            options = {'code_file': code_file, 'redacted_marker': redacted_marker,
+                'redact_assignment_labels': redact_assignment_labels, 'redaction_events': redaction_events}
+            # 正文脱敏没有field_name参数；未提供时不补传，错误调用仍由原函数明确拒绝。
+            if field_name is not missing_field:
+                options['field_name'] = field_name
+            return function(value, **options)
+        except RecursionError:
+            # JSON解码器/异常文本也可能先耗尽解释器栈；边界上不回退原始秘密正文。
+            return marker
+        finally:
+            _REDACTION_FRAME.reset(token)
+    return guarded
 _SENSITIVE_FIELD_NAMES = frozenset(
     {
         "access_key",
@@ -124,6 +158,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(^|[^\w.-])([A-Za-z0-9_.-]+)(\s*[:=]\s*)([\"']?)"
     r"([^\s,;&\"']{1,})(\4)"
 )
+# 只定位独立长参数，值由线性扫描读取；不把路径中的 --token 或普通参数名当作凭据。
+_CLI_ARGUMENT_RE = re.compile(r'(?<!\S)--([A-Za-z0-9_][A-Za-z0-9_.-]*)(?:[ \t]|\\\r?\n)+')
 # LLM: 整体遮蔽引号中的凭据赋值，避免空格和转义引号后的尾段泄露；普通字段保持原文。
 # 常量用途: 只匹配凭据键的完整引号值，跨行或未闭合也整段遮蔽，普通外层字符串不吞掉内部匹配。
 _SECRET_QUOTED_ASSIGNMENT_RE = re.compile(
@@ -303,6 +339,91 @@ def _mask_authorization_value(value: str, marker: str) -> str:
     return scheme.group(1) + scheme.group(2) + _mask_secret_value(scheme.group(3), marker)
 
 
+def _redact_cli_arguments(text: str, marker: str, labels_only: bool, *, events=None) -> str:
+    """遮蔽敏感长参数的整个Shell词；引号、转义和截断只扫一遍，不执行或解析命令。"""
+    parts, position = [], 0
+    context_position, host_quote = 0, ''
+    markers = tuple(value for value in dict.fromkeys(('<redacted>', '[REDACTED]', marker)) if value)
+    marker_forms = tuple(form for value in markers for form in (
+        value, "'" + value + "'", '"' + value + '"', "\\'" + value + "\\'", '\\"' + value + '\\"'))
+    while (match := _CLI_ARGUMENT_RE.search(text, position)) is not None:
+        # 单调扫描原文本前缀，识别repr/JSON等宿主字符串；不能每个参数重新扫整段。
+        while context_position < match.start():
+            char = text[context_position]
+            if char == '\\':
+                context_position += 2
+                continue
+            if host_quote:
+                if char == host_quote:
+                    host_quote = ''
+            elif char in "\"'":
+                host_quote = char
+            context_position += 1
+        start = match.end()
+        if not _field_is_sensitive(match.group(1)):
+            parts.append(text[position:start])
+            position = start
+            continue
+        end, quote = start, ''
+        closed_marker_end = next((start + len(value) for value in marker_forms
+                                  if text.startswith(value, start)), -1)
+        # 占位符可能来自不可信正文；与其紧邻的字面值仍属同一敏感词，不能借尖括号绕过扫描。
+        marker_word = any(text.startswith(value, start) for value in markers)
+        if marker_word:
+            end += len(next(value for value in markers if text.startswith(value, start)))
+        encoded_quote = text[start:start + 2] in ('\\"', "\\'")
+        if encoded_quote:
+            quote = text[start + 1]
+            end += 2
+        while end < len(text):
+            char = text[end]
+            # 仅完整独立占位符可在已知宿主闭引号前结束，保留源码/JSON语法；
+            # 紧邻字面值或未闭合秘密不具此资格，仍按原Shell词保守遮蔽。
+            if (end == closed_marker_end and host_quote and char == host_quote
+                    and (end + 1 == len(text) or text[end + 1] in ' \t\r\n,]})')):
+                break
+            if encoded_quote and quote and char == '\\':
+                closing = end
+                while closing < len(text) and text[closing] == '\\':
+                    closing += 1
+                if closing < len(text) and text[closing] == quote:
+                    # JSON中的三个反斜杠表示Shell词内的转义引号，不是词的结束。
+                    if (closing - end) % 4 == 1:
+                        quote = ''
+                    end = closing + 1
+                else:
+                    end = closing
+                continue
+            if char == '\\' and quote != "'":
+                end = min(len(text), end + 2)
+                continue
+            if quote:
+                if char == quote:
+                    quote = ''
+            elif char in "\"'":
+                quote = char
+            elif char.isspace() or char in ';|&' or char in '<>' and not marker_word:
+                break
+            end += 1
+        if end == start:
+            parts.append(text[position:start])
+            position = start
+            continue
+        value = text[start:end]
+        if quote and end == len(text) and events is not None:
+            # 只记录词法事实与范围，不记录参数值；未闭合秘密仍保守遮到当前文本末尾。
+            events.append({'code': 'UNCLOSED_CREDENTIAL_ARGUMENT',
+                'start': match.start(), 'end': end, 'hidden_through': 'end_of_text'})
+        # JSON日志会转义外层引号；只有完整纯环境变量引用仍保留原字节。
+        pure_reference = (encoded_quote and value[-2:] == value[:2]
+            and _PURE_VARIABLE_REFERENCE_RE.fullmatch(value[2:-2]) is not None)
+        parts.append(text[position:match.start() if labels_only else start])
+        parts.append(marker if labels_only else value if pure_reference else _mask_secret_value(value, marker))
+        position = end
+    parts.append(text[position:])
+    return ''.join(parts)
+
+
 # LLM: 调用方决定是否为源码；插值内字面量和实际 URL 凭证仍须遮蔽，已知密钥扫描始终执行。
 # 函数用途: 返回脱敏副本，不写文件；保持源码结构和日志安全边界各自生效。
 def redact_sensitive_text(
@@ -311,6 +432,7 @@ def redact_sensitive_text(
     code_file: bool = False,
     redacted_marker: str = _REDACTED,
     redact_assignment_labels: bool = False,
+    redaction_events: list[dict[str, object]] | None = None,
 ) -> str:
     """Return a safe string; preserve source-code assignments when requested.
 
@@ -324,6 +446,10 @@ def redact_sensitive_text(
     text = str(value)
     if not text:
         return text
+    # 长命令参数先按词边界遮蔽，避免后续通用表达式对同一大段秘密反复扫描。
+    if not code_file:
+        text = _redact_cli_arguments(text, redacted_marker, redact_assignment_labels,
+                                     events=redaction_events)
     query_pattern = _SENSITIVE_QUERY_RE if code_file else _LOG_SENSITIVE_QUERY_RE
     text = query_pattern.sub(
         lambda match: (
@@ -399,40 +525,74 @@ def _redact_source_slot(slot: str, marker: str) -> str:
     return slot[:start] + sanitized + "}"
 
 
+@_bounded_structure_redaction
 def redact_sensitive_value(
     value: Any,
     *,
     field_name: str = "",
     code_file: bool = False,
+    redacted_marker: str = _REDACTED,
+    redact_assignment_labels: bool = False,
+    redaction_events: list[dict[str, object]] | None = None,
 ) -> Any:
     """Recursively redact strings and values under credential-named fields."""
 
     if _field_is_sensitive(field_name):
-        return _REDACTED
+        return redacted_marker
     if isinstance(value, str):
-        return redact_sensitive_text(value, code_file=code_file)
+        return redact_sensitive_output_text(value, code_file=code_file, redacted_marker=redacted_marker,
+            redact_assignment_labels=redact_assignment_labels, redaction_events=redaction_events)
     if isinstance(value, BaseException):
-        return redact_sensitive_text(value, code_file=code_file)
+        return redact_sensitive_text(value, code_file=code_file, redacted_marker=redacted_marker,
+            redact_assignment_labels=redact_assignment_labels, redaction_events=redaction_events)
     if isinstance(value, Mapping):
         return {
             key: redact_sensitive_value(
                 item,
                 field_name=str(key),
                 code_file=code_file,
+                redacted_marker=redacted_marker, redact_assignment_labels=redact_assignment_labels,
+                redaction_events=redaction_events,
             )
             for key, item in value.items()
         }
     if isinstance(value, tuple):
         return tuple(
-            redact_sensitive_value(item, code_file=code_file)
+            redact_sensitive_value(item, code_file=code_file, redacted_marker=redacted_marker,
+                redact_assignment_labels=redact_assignment_labels, redaction_events=redaction_events)
             for item in value
         )
     if isinstance(value, list):
         return [
-            redact_sensitive_value(item, code_file=code_file)
+            redact_sensitive_value(item, code_file=code_file, redacted_marker=redacted_marker,
+                redact_assignment_labels=redact_assignment_labels, redaction_events=redaction_events)
             for item in value
         ]
     return value
+
+
+@_bounded_structure_redaction
+def redact_sensitive_output_text(value: object, *, code_file: bool = False,
+        redacted_marker: str = _REDACTED, redact_assignment_labels: bool = False,
+        redaction_events: list[dict[str, object]] | None = None) -> str:
+    """复用原字段脱敏处理完整 JSON；反复投影也不把转义引号当跨字段秘密边界。"""
+    text = str(value)
+    if not code_file and text.lstrip().startswith(('{', '[')):
+        try:
+            parsed = json.loads(text)
+        except RecursionError:
+            return redacted_marker
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            events = [] if redaction_events is not None else None
+            safe = redact_sensitive_value(parsed, redacted_marker=redacted_marker,
+                redact_assignment_labels=redact_assignment_labels, redaction_events=events)
+            if events is not None:
+                redaction_events.extend({**event, 'hidden_through': 'end_of_string_field'} for event in events)
+            return text if safe == parsed else json.dumps(safe, ensure_ascii=False)
+    return redact_sensitive_text(text, code_file=code_file, redacted_marker=redacted_marker,
+        redact_assignment_labels=redact_assignment_labels, redaction_events=redaction_events)
 
 
 # LLM: 结构字段与文本赋值采用同一完整凭据后缀，不按任意子串判断，操作计数与编号不能被误删。

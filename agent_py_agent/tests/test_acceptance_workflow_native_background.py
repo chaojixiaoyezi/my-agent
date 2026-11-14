@@ -381,3 +381,21 @@ def test_native_cancel_host_lease_rejects_drift_before_mutation(wire, monkeypatc
     assert lent == released and len(lent) == 1
     assert store.load_run(waiting.workflow_run_id).to_dict() == waiting.to_dict()
     assert agent.conversation_store.session_tasks.require(task_id) == task
+
+
+def test_native_background_explicit_disabled_host_ports_stays_unavailable(wire):
+    """完整宿主重用服务入口仍尊重显式关闭，不由HTTP投影自动打开执行端口。"""
+    agent, client = wire
+    agent.business_host_ports_enabled = False
+    space = client.call('spaces.create', {'name': 'native-disabled'})['data']['space_id']
+    definition = flow('native-disabled', [{'step_id': 'work', 'name': 'work', 'mode': 'agent_task',
+        'on_error': 'fail', 'config': {'instruction': 'Synthetic disabled execution.'}}])
+    assert client.call('workflows.create', {'definition': definition,
+        'scope': {'scope_mode': 'spaces', 'space_ids': [space]}})['ok']
+    result = client.call('workflows.run', {'workflow_ref': 'native-disabled', 'space_id': space})
+    run = WorkflowRunStore(agent.home_paths.owner_home_dir).load_run(result['data']['workflow_run_id'])
+    assert run.status == 'failed'
+    assert run.steps[0].error_message == 'WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE'
+    assert 'task_id' not in run.steps[0].escalation_result
+    assert getattr(agent, 'workflow_agent_steps', None) is None
+    assert not getattr(agent, '_business_host_ports_wired', False)

@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 
 from agent_py_agent.agent.workflows.engine import WorkflowEngine
-from agent_py_agent.agent.workflows.run_store import WorkflowExecutionError
+from agent_py_agent.agent.workflows.run_store import WorkflowExecutionError, _RunBusy
 
 
 # LLM: 只用真实运行账本和本地分析端口，不启动外部动作。
@@ -76,9 +76,8 @@ def test_normal_start_executes_once(tmp_path, policy):
     assert calls == [1]
 
 
-# LLM: 执行锁已持有时保留等待及原修订冲突，不把执行中的取消外推为启动窗口取消。
-# 函数用途: 固定持锁取消的既有控制语义。
-def test_cancel_while_execution_lock_held_keeps_wait_and_cas_semantics(tmp_path):
+# 执行中控制快速拒绝且不写取消账；原执行完成后仍核原CAS，不把忙误报为已停止。
+def test_cancel_while_execution_lock_held_returns_busy_and_keeps_cas_semantics(tmp_path):
     engine = WorkflowEngine(tmp_path)
     entered, release = threading.Event(), threading.Event()
 
@@ -103,12 +102,16 @@ def test_cancel_while_execution_lock_held_keeps_wait_and_cas_semantics(tmp_path)
                 return engine.cancel_workflow_run('held', expected_revision=1, operation_key='cancel')
 
             cancellation = pool.submit(cancel)
-            assert checking.wait(5) and not cancellation.done()
+            assert checking.wait(5)
+            with pytest.raises(_RunBusy) as caught:
+                cancellation.result(timeout=1)
+            assert caught.value.code == 'WORKFLOW_RUN_BUSY' and caught.value.outcome == 'not_started'
+            assert 'cancel' not in engine.store._read('held', 'run.json').get('control_operations', {})
         finally:
             release.set()
         assert future.result(5).status == 'succeeded'
         with pytest.raises(ValueError, match='WORKFLOW_RUN_REVISION_CONFLICT'):
-            cancellation.result(5)
+            engine.cancel_workflow_run('held', expected_revision=1, operation_key='cancel')
 
 
 # LLM: 在save_run失败出口精确注入两种稳定码；回读使用真实已封存终态。

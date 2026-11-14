@@ -53,3 +53,68 @@ def test_original_rejected_write_has_precise_error_and_no_state_change(gateway, 
     assert rejected['error']['code'] != 'TOOL_OPERATION_OUTCOME_UNKNOWN'
     assert before['data'] == after['data']
     assert tasks_before['data'] == tasks_after['data']
+
+
+@pytest.mark.parametrize('field', ['space_id', 'project_ref'])
+def test_assignment_scope_error_names_bound_field_without_creating_task(gateway, field):
+    client, space_a, space_b, agent = _setup(gateway)
+    params = {'agent_id': agent['agent_id'], 'space_id': space_a, 'instruction': '独立合成验收'}
+    params[field] = space_b if field == 'space_id' else 'test-marker-is-not-a-project'
+    before = client.call('tasks.list', {'filter': {'agent_id': agent['agent_id']}})
+    reply = _write(client, 'tasks.assign', params, idempotency_key='assignment-field-conflict-' + field)
+    assert reply['error']['code'] == 'SPACE_MISMATCH'
+    details = {row['key']: row['value'] for row in reply['error']['details']}
+    assert details['field_path'] == '$.params.' + field
+    assert details['actual'] == params[field]
+    assert details['expected'] == (space_a if field == 'space_id' else None)
+    assert details['side_effect_state'] == 'not_started' and details['task_created'] is False
+    assert details['retry_same_arguments'] is False
+    assert 'background_agents.get' in details['read_example']
+    if field == 'project_ref':
+        assert '省略project_ref' in details['next_action']
+    after = client.call('tasks.list', {'filter': {'agent_id': agent['agent_id']}})
+    assert before['data'] == after['data']
+
+
+@pytest.mark.parametrize('field,value,constraint,expected,actual_length,unit', [
+    ('name', '合成秘密片段' * 60, 'maxLength', 120, 360, 'characters'),
+    ('state', 'legacy-done-synthetic-secret', 'enum', '["active","archived"]', None, None),
+    ('revision', 'synthetic-private-revision', 'type', 'integer', None, None),
+    ('space_id', '中' * 43, 'x-max-bytes', 128, 129, 'utf8_bytes'),
+])
+def test_domain_result_validation_survives_real_http_without_entity_text(
+        gateway, monkeypatch, tmp_path, field, value, constraint, expected, actual_length, unit):
+    from agent_py_agent.agent.conversation.business_spaces import BusinessSpaceService
+
+    _, client = gateway
+    created = _write(client, 'spaces.create', {'name': 'isolated-valid-space'},
+                     idempotency_key='result-validation-shape-0001')
+    assert created['ok'], created
+    original = BusinessSpaceService.space_view
+    calls = []
+
+    def invalid_view(self, row, *, actor):
+        result = original(self, row, actor=actor)
+        calls.append(row['space_id'])
+        return {**result, field: value}
+
+    monkeypatch.setattr(BusinessSpaceService, 'space_view', invalid_view)
+    prepared = client.prepare('spaces.get', {'space_id': created['data']['space_id']})
+    reply = client.send(prepared)
+    assert calls and set(calls) == {created['data']['space_id']}
+    assert reply['error']['code'] == 'DOMAIN_RESULT_INVALID'
+    assert reply['state'] == 'failed' and reply['data'] == {}
+    assert reply['request_id'] == prepared.payload()['request_id']
+    details = {row['key']: row['value'] for row in reply['error']['details']}
+    assert details['field_path'] == '$.space.' + field
+    assert details['constraint'] == constraint and details['expected'] == expected
+    assert details['validation_stage'] == 'domain_result'
+    assert '不要重新发起写操作' in details['next_action']
+    if actual_length is not None:
+        assert details['actual_length'] == actual_length and details['length_unit'] == unit
+    assert value not in json.dumps(reply, ensure_ascii=False)
+    assert len(json.dumps(reply, ensure_ascii=False).encode()) < 8192
+    (tmp_path / ('domain-result-' + field + '.json')).write_text(
+        json.dumps(reply, ensure_ascii=False, indent=2) + '\n')
+    monkeypatch.setattr(BusinessSpaceService, 'space_view', original)
+    assert client.call('spaces.get', {'space_id': created['data']['space_id']})['ok']

@@ -50,6 +50,7 @@ def handle_client_models(handler, server) -> None:
     if server is None or server.agent is None and getattr(server, "control_plane", None) is None:
         handler._send_json(503, {"ok": False, "message": "Gateway 尚未就绪。"})
         return
+    body: object = {}
     try:
         body = handler._read_json()
         if not isinstance(body, dict) or not _http_conversation_id(body):
@@ -82,6 +83,16 @@ def handle_client_models(handler, server) -> None:
             BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable) as exc:
         handler._send_json(503, {"ok": False, "error_code": exc.error_code, "error_stage": "execution",
                                  "message": "模型设置宿主暂不可用，原已存状态保持。"})
+        return
+    except BlockingIOError:
+        # 冷启动短事务不得等待其它owner工作；只读列表可重读，保存结果须先核实而非盲目重送。
+        handler._send_json(503, {
+            "ok": False, "error_code": "MODEL_METADATA_BUSY", "error_type": "BlockingIOError",
+            "error_stage": "metadata_lock", "retryable": isinstance(body, dict) and body.get("operation") == "list",
+            "effect_outcome": "unknown",
+            "message": "同一用户的模型元数据正由另一短事务更新；本次结果尚未确认，线程元数据可能已初始化。",
+            "next_action": "重新读取本会话模型列表核实最新选择；不要原样重发保存或选模操作。",
+        })
         return
     except json.JSONDecodeError:
         handler._send_json(400, {"ok": False, "message": "模型配置请求格式错误。"})

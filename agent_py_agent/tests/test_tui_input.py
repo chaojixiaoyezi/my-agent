@@ -2754,3 +2754,33 @@ def test_up_real_navigation_top_selection_remains_selected(monkeypatch):
     monkeypatch.setattr(tui_keybindings, "_restore_editable_queue", lambda _params: False)
     tui_keybindings._handle_up_keybinding(event, params)
     history_up.assert_called_once_with(count=1, go_to_start_of_line_if_history_changes=True)
+
+
+def test_gateway_observed_queue_does_not_offer_local_editing() -> None:
+    from queue import Queue
+    from threading import Lock
+
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext, _render_queue
+    from agent_py_agent.cli.chat_parts.tui_input import restore_queued_prompts
+    from agent_py_agent.cli.chat_parts.tui_markdown import fragments_text
+
+    runtime = TuiRuntime("host-owned")
+    runtime.enqueue_prompt("host", "宿主已接管", queued=True, observed=True)
+    jobs = Queue()
+    jobs.put(SimpleNamespace(request_id="host", user="宿主已接管"))
+    restored = restore_queued_prompts(
+        jobs=jobs, runtime=runtime, state_lock=Lock(), pending_jobs_ref=[1],
+        current_text="", current_cursor=0,
+    )
+    assert restored is None and jobs.qsize() == 1
+    snapshot = runtime.store.snapshot()
+    assert snapshot.queued_inputs[0].editable is False
+    processor = TuiQueuedPlaceholderProcessor(runtime)
+    transformed = processor.apply_transformation(SimpleNamespace(
+        lineno=0, document=Document(""), fragments=[("", "")],
+    ))
+    assert QUEUE_EDIT_PLACEHOLDER not in str(transformed.fragments)
+    text = "\n".join(fragments_text(line) for line in _render_queue(
+        snapshot.queued_inputs, TuiRenderContext(width=80),
+    ))
+    assert "已交宿主排队" in text and "↑" not in text

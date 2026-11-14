@@ -24,6 +24,8 @@ def runner_attempt_cancelled(manager: object, run_id: str, attempt_id: str) -> b
         if attempt["status"] in {"cancelled", "unknown", "abandoned"}:
             return True
     task = manager.load(run_id)
+    from .capability_updates import observe_capability_updates
+    observe_capability_updates(manager, task)
     return (
         task.status in {"CANCELLED", "ABANDONED", "TAKEN_OVER"}
         or task_control_blocks_execution(task)

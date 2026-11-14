@@ -302,3 +302,44 @@ def test_stop_releases_request_lock_before_waiting_for_task_guard(hot, monkeypat
             stopping.join(4)
     assert not binding.is_alive() and not stopping.is_alive() and not failures, failures
     assert len(outcomes) == 1 and outcomes[0].ok
+
+
+def test_stop_reuses_fresh_committed_binding_without_reopening_request(hot, monkeypatch):
+    _publish(hot)
+    _write(hot.store, hot.scope, 'bg-main')
+    # discovery快照尚无绑定；必须取原updater锁内实时读到并成功提交的身份。
+    assert 'runtime_authority' not in hot.payload
+    original = control_service.read_json_file_report
+    reads = []
+
+    def observe(path, *args, **kwargs):
+        reads.append(path)
+        assert path != hot.path, '停止成功后不应重开同一请求，应复用原子提交快照'
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(control_service, 'read_json_file_report', observe)
+    monkeypatch.setattr(resources, 'cleanup_process_stop', lambda _batch: None)
+    result = _stop(hot)
+    assert result.ok and result.delivery_status == 'accepted'
+    assert hot.path not in reads
+    assert hot.repo.get_attempt(hot.record['attempt_id'])['status'] == 'cancelled'
+    saved = read_json_file(hot.path)
+    assert saved['cancel_requested'] is True and saved['turn_phase'] == 'closing'
+    assert saved['runtime_authority']['agent_run_id'] == hot.record['agent_run_id']
+
+
+def test_stale_stop_without_mark_cannot_freeze_or_reuse_a_snapshot(hot, monkeypatch):
+    _publish(hot)
+    current = read_json_file(hot.path)
+    current['execution_attempt_id'] = 'newer-transport'
+    write_json_file(hot.path, current)
+    freeze = Mock(side_effect=AssertionError('未标记成功不能冻结资源'))
+    monkeypatch.setattr(control_service, '_stop_unpromoted_main', freeze)
+    result = _stop(hot)
+    assert not result.ok
+    freeze.assert_not_called()
+    assert read_json_file(hot.path) == current
+    assert hot.repo.get_attempt(hot.record['attempt_id'])['status'] == 'running'
+    # 原有公开/外层调用形状仍为二元组。
+    assert control_service._mark_request_stopping(
+        _GatewayRequestRecord(hot.path, hot.payload), hot.control_scope) == (False, '当前任务刚刚结束，无需停止。')

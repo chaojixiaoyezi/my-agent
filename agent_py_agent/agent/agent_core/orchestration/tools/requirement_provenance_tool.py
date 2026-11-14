@@ -69,11 +69,15 @@ def build_manage_requirement_provenance_model_spec() -> ToolModelSpec:
                 },
                 "requirement_id": {
                     "type": "string",
-                    "description": "需求标识（如 ORCH-05）。",
+                    "description": "候选的精确 requirement_id；审核派工必须使用原绑定值。先 query_provenance 读取该候选，不可省略、使用工作流名称或另造标识。",
                 },
                 "input_version": {
                     "type": "string",
                     "description": "绑定的提交哈希或版本快照标识。",
+                },
+                "material_cursor": {
+                    "type": "string",
+                    "description": "仅query_provenance读取原审核冻结材料时使用：首次查询的read_example给出游标，后续原requirement_id不变并原样传next_cursor；全部页须同sha256，变化则丢弃旧页重新查询。无需read_artifact或文件权限。",
                 },
                 "watched_paths": {
                     "type": "array",
@@ -110,7 +114,7 @@ def build_manage_requirement_provenance_model_spec() -> ToolModelSpec:
                 "review_id": {"type": "string", "description": "本需求同输入版本的独立评审引用；省略时冻结最近匹配的通过记录。"},
                 "review_scope": {
                     "type": "string",
-                    "description": "评审范围说明（如架构、代码、回归单测等）。",
+                    "description": "评审范围标识；工作流待审候选必须为 workflow_effect.v1，不是中文说明句。普通候选沿其原审核范围；评审说明放 evidence_refs 对应证据。",
                 },
                 "accepted_by_principal_id": {
                     "type": "string",
@@ -130,7 +134,7 @@ def build_manage_requirement_provenance_model_spec() -> ToolModelSpec:
                 },
                 "scope": {
                     "type": "string",
-                    "description": "评审或观测范围（review_scope 的别名）。",
+                    "description": "review_scope 的别名；工作流待审候选固定为 workflow_effect.v1。",
                 },
                 "evidence_refs": {
                     "type": "array",
@@ -139,7 +143,7 @@ def build_manage_requirement_provenance_model_spec() -> ToolModelSpec:
                 },
                 "root": {
                     "type": "string",
-                    "description": "工程根目录（默认当前工作区）。",
+                    "description": "绑定新需求时可指定项目根。独立审核已有候选时省略 root，由宿主按 requirement_id 取得原绑定。列举需求时可用 root 筛选。",
                 },
                 "task_id": {
                     "type": "string",
@@ -224,6 +228,7 @@ def _provenance_failure(
     effect_outcome: str = "not_started",
     scope_warnings: list[str] | tuple[str, ...] | None = None,
     recovery_code: str = "",
+    field_details: dict[str, object] | None = None,
 ) -> ToolHandlerOutcome:
     details: dict[str, object] = {
         "reason": reason,
@@ -235,6 +240,8 @@ def _provenance_failure(
         "message": message,
         "details": details,
     }
+    if field_details:
+        details.update(field_details)
     if scope_warnings:
         details["scope_warnings"] = list(scope_warnings)
         payload["scope_warnings"] = list(scope_warnings)
@@ -340,7 +347,16 @@ class RequirementProvenanceTool(BaseTool):
             if review_bound and (not isinstance(review_target, str) or not review_target.strip()):
                 return deny("REVIEW_REQUIREMENT_BINDING_INVALID", "原派工审核对象无效；未读写。请由原任务核对绑定，不得改用其它候选。")
             if review_bound and params.get("requirement_id") != review_target:
-                return deny("REVIEW_REQUIREMENT_SCOPE_MISMATCH", "本审核派工仅可查询或登记原指定候选；未读写其它条目。请使用原派工的requirement_id。")
+                missing = params.get("requirement_id") in (None, "")
+                return _provenance_failure(
+                    "REVIEW_REQUIREMENT_REQUIRED" if missing else "REVIEW_REQUIREMENT_SCOPE_MISMATCH",
+                    "缺少原派工 requirement_id；未读写。先按 query_example 查询原候选，再使用返回的 input_version 登记审核。"
+                    if missing else "requirement_id 与原派工绑定不符；未读写。仅可按 query_example 查询原候选，不要原样重试。",
+                    error_code="TOOL_INVALID_ARGUMENTS" if missing else "TOOL_PERMISSION_DENIED",
+                    recovery_code="query_original_review_requirement",
+                    field_details={"field": "requirement_id", "actual": params.get("requirement_id"),
+                        "expected": review_target,
+                        "query_example": {"action": "query_provenance", "requirement_id": review_target}})
             if not review_bound and role_template_snapshot_for_task(task).get("can_spawn_children") is True:
                 return None
             if "manage_requirement_provenance" not in (task.allowed_tools or []):
@@ -381,6 +397,24 @@ class RequirementProvenanceTool(BaseTool):
                     return deny_task_scope()
                 related = (run.owner_id == owner_context.owner_ref and business is not None
                     and run.business_context == business.to_dict())
+                if (not related and run.owner_id == owner_context.owner_ref and business is None
+                        and not run.business_context and not run.scope_snapshot):
+                    # 原无空间工作流仍有真实作者与派工边；同Owner/TaskRun本身不授予审核权。
+                    if not review_bound:
+                        return deny("REVIEW_REQUIREMENT_BINDING_REQUIRED",
+                            "当前叶未被派给该精确审核候选；未读写。请由原作者通过原派工入口设置review_requirement_id，"
+                            "创建独立reviewer；不要给当前叶补身份、改root或原样重试。")
+                    author = runtime.parent_execution_ref(owner_id=owner_context.owner_ref,
+                        run_id=requirement.author_principal_id)
+                    leaf = runtime.agent_run_for_run_id(actor)
+                    delegation = (runtime.get_delegation(leaf["delegation_id"])
+                                  if leaf is not None and leaf["delegation_id"] else None)
+                    related = (task.parent_id == requirement.author_principal_id
+                        and author.task_run_id == own.task_run_id and author.agent_run_id != own.agent_run_id
+                        and leaf is not None and leaf["parent_agent_run_id"] == author.agent_run_id
+                        and delegation is not None
+                        and delegation["parent_agent_run_id"] == author.agent_run_id
+                        and delegation["child_agent_run_id"] == own.agent_run_id)
                 if related:
                     bindings = [step.escalation_result.get("pending_review") for step in run.steps]
                     related = any(isinstance(binding, dict) and binding.get("requirement_id") == requirement_id
@@ -396,7 +430,17 @@ class RequirementProvenanceTool(BaseTool):
                         except ReviewMaterialError as error:
                             return deny(str(error), "原工作流待审绑定已变化或未证明未执行；未返回材料。请核对原运行，不要据旧票审核或原样重试。")
                     if params.get("action") == "record_independent_review" and params.get("review_scope", params.get("scope")) != "workflow_effect.v1":
-                        return deny("REVIEW_SCOPE_MISMATCH", "原工作流候选仅接受workflow_effect.v1审核；未写入。")
+                        return _provenance_failure("REVIEW_SCOPE_MISMATCH",
+                            "review_scope 必须是 workflow_effect.v1，不能填写评审说明句；未写入。先查询并审阅原候选材料，"
+                            "再按 call_example 登记你自己的结论和证据；不要未经审核照抄通过结论。",
+                            recovery_code="review_original_workflow_material_then_record",
+                            field_details={"field": "review_scope", "actual": params.get("review_scope", params.get("scope")),
+                                "expected": "workflow_effect.v1",
+                                "query_example": {"action": "query_provenance", "requirement_id": requirement_id},
+                                "call_example": {"action": "record_independent_review", "requirement_id": requirement_id,
+                                    "reviewed_input_version": requirement.input_version,
+                                    "review_scope": "workflow_effect.v1", "review_verdict": "changes_requested",
+                                    "evidence_refs": ["<审阅后取得的真实证据引用>"]}})
             if not related:
                 return deny_task_scope()
             # 先证明同工作，再比较版本/根；无权调用不能用拒绝差异探测其它root的候选内容。
@@ -404,7 +448,12 @@ class RequirementProvenanceTool(BaseTool):
                     params.get("reviewed_input_version") != requirement.input_version):
                 return deny("REVIEW_INPUT_VERSION_MISMATCH", "审核输入版本与当前绑定候选不符；请读取准确候选后再审核，未写入。")
             if params.get("root") and str(params["root"]) != requirement.root:
-                return deny("REVIEW_ROOT_MISMATCH", "请求的候选根与原绑定不符；未写入。")
+                return _provenance_failure("REVIEW_ROOT_MISMATCH",
+                    "root 与原审核候选的绑定目录不符，本次未写入。省略 root，按 query_example 读取派给你的候选；"
+                    "登记结论时使用原 requirement_id 和查询返回的 input_version。",
+                    error_code="TOOL_PERMISSION_DENIED", recovery_code="query_original_review_requirement",
+                    field_details={"field": "root", "expected": "omit_root_to_use_bound_requirement",
+                        "query_example": {"action": "query_provenance", "requirement_id": requirement_id}})
             return requirement
         except (AttributeError, OSError, ValueError, TypeError, KeyError) as error:
             return deny("REVIEW_EXECUTION_UNPROVEN",
@@ -807,10 +856,43 @@ class RequirementProvenanceTool(BaseTool):
         }
         if review_material is not None:
             payload["workflow_review_material"] = review_material
+        envelope = {}
+        if review_material:
+            from .requirement_review_material import ReviewMaterialError, review_material_page
+
+            try:
+                page, visible = review_material_page(review_material, req_id, params.get("material_cursor"))
+            except ReviewMaterialError as error:
+                reason = str(error)
+                messages = {
+                    "REVIEW_MATERIAL_CURSOR_INVALID": "material_cursor格式错误；须为64位小写十六进制SHA256、冒号、1至8位非负十进制偏移，例如<64位sha256>:0。未写入。省略material_cursor按原requirement_id重新query_provenance，原样复制read_example；勿自行拼造游标。",
+                    "REVIEW_MATERIAL_CHANGED": "material_cursor中的旧材料摘要与当前已授权绑定材料的SHA256不符。未写入。丢弃全部旧页，省略material_cursor按原requirement_id重新query_provenance；只拼接同一SHA256的页，不得沿旧偏移继续。",
+                    "REVIEW_MATERIAL_OFFSET_INVALID": "material_cursor偏移越界；偏移必须小于当前冻结材料的total_chars。未写入。不要自行增加偏移；使用上一页next_cursor，若为null则已到末页；缺少上一页时省略游标重新查询。",
+                    "REVIEW_MATERIAL_PAGE_BUDGET_TOO_SMALL": "宿主冻结材料分页的内部传输预算不足，无法容纳当前页或必要绑定摘要。未写入。停止原样重试，不要缩改材料或申请扩大权限；将此精确错误码交原任务或维护者修复分页预算后重新查询。",
+                }
+                cursor = params.get("material_cursor")
+                facts = {"field": "material_cursor", "actual_type": type(cursor).__name__,
+                         "side_effect_state": "not_started"}
+                if isinstance(cursor, str):
+                    facts["actual_chars"] = len(cursor)
+                if reason == "REVIEW_MATERIAL_OFFSET_INVALID":
+                    facts["total_chars"] = len(json.dumps(review_material, ensure_ascii=False,
+                        sort_keys=True, separators=(',', ':')))
+                return _provenance_failure(reason, messages[reason], field_details=facts)
+            if params.get("material_cursor") is not None:
+                payload = page
+            else:
+                payload["material_page"] = page
+            # 原完整机器结果与归档保持不变；模型视图沿既有宿主投影协议，不授予归档读取权。
+            envelope = {"tool_output_policy": {"live_prompt_output": visible, "preserve_prompt_output": True}}
+        elif params.get("material_cursor") is not None:
+            return _provenance_failure("REVIEW_MATERIAL_NOT_AVAILABLE",
+                "此查询没有当前已授权的冻结审核材料；未写入。仅用原派工requirement_id查询，不可用游标探测其它任务。")
         return ToolHandlerOutcome(
             "manage_requirement_provenance",
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
+            result_envelope=envelope,
         )
 
 

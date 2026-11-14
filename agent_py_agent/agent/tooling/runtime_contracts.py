@@ -10,6 +10,8 @@ tool output text are untrusted data and cannot manufacture lifecycle fields.
 
 import hashlib
 import json
+import re
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -579,7 +581,9 @@ class ToolResult:
             "metadata": deepcopy(self.metadata),
         }
 
-    def render_for_prompt(self) -> str:
+    def render_for_prompt(self, *, project_text: Callable[[str], str] | None = None) -> str:
+        # 宿主组件分别脱敏后再拼接，不能将 JSON 正文退化成带协议前缀的普通文本重扫。
+        project = project_text or (lambda value: value)
         fields = [
             f"tool={self.tool_name}",
             f"status={self.status}",
@@ -587,17 +591,41 @@ class ToolResult:
             f"duration_ms={self.duration_ms}",
         ]
         if self.error_code:
+            host_error = self.metadata.get("host_error")
+            host_code = host_error.get("code") if isinstance(host_error, dict) else None
+            host_status = host_error.get("http_status") if isinstance(host_error, dict) else None
+            trusted_host_error = (isinstance(host_error, dict) and host_error.get("source") == "business_host"
+                and isinstance(host_code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", host_code)
+                and type(host_status) is int and 400 <= host_status <= 599)
             fields.extend(
                 (
-                    f"error_code={self.error_code}",
+                    f"error_code={host_code if trusted_host_error else self.error_code}",
                     f"recommended_action={self.recommended_action}",
                 )
             )
+            if trusted_host_error:
+                fields.extend((f"control_error_code={self.error_code}", f"http_status={host_status}"))
+            # 领域原因和宿主恢复分类分开展示；只接收有界机器码，不能把任意回执正文拼进协议头。
+            reported = self.metadata.get("reported_error_code")
+            if (isinstance(reported, str) and reported != self.error_code
+                    and re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", reported)):
+                fields.append(f"reported_error_code={reported}")
         if self.failure_stage:
             fields.append(f"failure_stage={self.failure_stage}")
         if self.effect_outcome:
             fields.append(f"effect_outcome={self.effect_outcome}")
-        parts = [f"[tool-result; {'; '.join(fields)}]", self.output]
+        from .models import source_effect_facts
+        source_effect = source_effect_facts(self.metadata.get('source_effect'))
+        if source_effect:
+            fields.append(f"source_effect_outcome={source_effect['effect_outcome']}")
+        parts = [project(f"[tool-result; {'; '.join(fields)}]"), project(self.output)]
+        if self.error_code and trusted_host_error and host_error.get("next_action"):
+            from ..common.log_redaction import redact_sensitive_text
+
+            action = host_error["next_action"]
+            if isinstance(action, str):
+                parts.insert(1, "[host-business-recovery] " + project(json.dumps({
+                    "next_action": redact_sensitive_text(action[:2048])}, ensure_ascii=False)))
         if self.applied_approval is not None:
             parts.append(
                 "[tool-approval; status=approved; "
@@ -611,12 +639,12 @@ class ToolResult:
             parts.append(
                 "[tool-recovery; "
                 f"retryable={'true' if self.retryable else 'false'}; "
-                f"hint={self.recovery_hint}]"
+                f"hint={project(self.recovery_hint)}]"
             )
         if self.refs:
             parts.append(
                 "[tool-result-refs] "
-                + json.dumps([ref.to_dict() for ref in self.refs], ensure_ascii=False)
+                + project(json.dumps([ref.to_dict() for ref in self.refs], ensure_ascii=False))
             )
         return "\n".join(part for part in parts if part)
 

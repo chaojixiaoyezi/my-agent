@@ -243,7 +243,7 @@ def test_compact_auxiliary_and_child_do_not_consume_override(monkeypatch) -> Non
         assert next_call_reasoning_level(params) == "high", f"{purpose} 消费了续跑覆盖"
 
     assert rows[0]["reasoning_effort"] == "max"
-    assert "reasoning_effort" not in rows[1]
+    assert rows[1]["reasoning_effort"] == "max", "辅助调用继承用户原档位，不能消费主轮降档覆盖"
     result = loop.execute_tool_loop(agent, params)
     assert result.final_response.text == "resume done"
     assert rows[2]["reasoning_effort"] == "high"

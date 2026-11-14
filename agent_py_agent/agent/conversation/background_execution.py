@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -28,7 +29,7 @@ from .background_context import (
 from .background_history_seed import prepare_background_history_or_raise, refresh_background_history
 from .claim_execution_binding import publish_claim_runtime_authority
 from .compact_carry import compact_overflow_carry
-from .compact_guard import ConversationCompactError
+from .compact_guard import CompactCapacityFacts, CompactRecoveryFacts, ConversationCompactError
 from .compact_progress import COMPACT_TRIGGER_PREFLIGHT
 from .local_run_control import LocalRunControl
 from .models import ConversationThread
@@ -83,12 +84,23 @@ class BackgroundExecutionResult:
     execution_identity: dict[str, str] | None = None
     # 来自本片实际消费的用户输入；普通后台事件不创建公开回复义务。
     user_reply_accepted: bool = False
+    delivery_artifact_diagnostics: tuple[dict[str, object], ...] = ()
 
 
 # LLM: 仅在同片八次 Compact 都推进 canonical 代次后让出；调度器必须单独处理，不将其记为失败。
 # 类用途: 表示健康长任务用完本片压缩配额，等待下一片从原检查点继续。
 class BackgroundCompactSliceYield(RuntimeError):
     pass
+
+
+class BackgroundCompactPreflightDeferred(ConversationCompactError):
+    """本片的首次业务请求尚未发送，可沿原 wake 退避后重试；原工具执行不获得重放权。"""
+
+    def __init__(self, message: str, *, code: str, capacity: CompactCapacityFacts | None = None,
+                 recovery_facts: CompactRecoveryFacts | None = None,
+                 retry_after_seconds: float | None = None) -> None:
+        super().__init__(message, code=code, capacity=capacity, recovery_facts=recovery_facts)
+        self.retry_after_seconds = retry_after_seconds
 
 
 # LLM: 子代理容量在原创建事务复核后暂不可用；后台宿主保留原 wake/正文，沿原不执行退避，不能记失败或 DONE。
@@ -220,8 +232,8 @@ def invoke_background_turn(
     except (BackgroundCompactSliceYield, BackgroundCapacityDeferred):
         activity_sink.finish()
         raise
-    except Exception:
-        activity_sink.fail()
+    except Exception as exc:
+        activity_sink.fail(exc)
         raise
     activity_sink.finish()
     snapshot = activity_sink.display_history_snapshot()
@@ -314,7 +326,7 @@ def run_background_turn_with_compact(
         )
         promoted_task_attrs.update(_promoted_task_binding_attrs(run_params))
         slice_request_id = slice_request_id or run_params.request_id
-        if recovering and (recovery is None or not recovery.committed):
+        if recovering and (recovery is None or not (recovery.committed or getattr(recovery, 'degraded', False) is True)):
             raise ConversationCompactError(
                 "background compact recovery could not reduce context",
                 code="COMPACT_CANDIDATE_TOO_LARGE",
@@ -327,6 +339,11 @@ def run_background_turn_with_compact(
             if completed_run_callback is not None:
                 completed_run_callback(run_params)
             return result
+        if recovery is not None and getattr(recovery, 'degraded', False) is True:
+            from .compact_guard import local_compact_recovery_exhausted
+
+            raise local_compact_recovery_exhausted(capacity=recovery.degraded_capacity,
+                                                   recovery_facts=recovery.degraded_recovery_facts)
         native_compact_carry, carried_archive_tool_calls, carried_active_turn_user_inputs = _next_overflow_carry(
             result, carried_archive_tool_calls, carried_active_turn_user_inputs,
         )
@@ -342,7 +359,7 @@ def run_background_turn_with_compact(
                 "background compact has no recoverable source",
                 code="COMPACT_SOURCE_EMPTY",
             )
-        if recovering and (recovery is None or not recovery.committed):
+        if recovering and (recovery is None or not (recovery.committed or getattr(recovery, 'degraded', False) is True)):
             raise ConversationCompactError(
                 "background compact recovery could not reduce context",
                 code="COMPACT_CANDIDATE_TOO_LARGE",
@@ -487,8 +504,27 @@ def _run_background_recovery_attempt(execution, prompt, params, history, context
             progress_callback=activity_sink.write_conversation_compact_progress, interrupt_check=is_interrupted,
             force=recovering, trigger_source=trigger_source,
         )
-    with model_request_selection_scope(recovery) if recovery is not None else nullcontext():
-        result, resolved = _run_background_model_attempt(execution.agent, prompt, params)
+    try:
+        with model_request_selection_scope(recovery) if recovery is not None else nullcontext():
+            result, resolved = _run_background_model_attempt(execution.agent, prompt, params)
+    except ConversationCompactError as exc:
+        # 只有本片首次请求在选定、发送前被容量门拒绝才有此证明。一次业务调用之后的压缩
+        # 可能涉及已经发生的工具副作用，必须继续由原执行账核实，不能据相同错误码自动重试。
+        # 已实测的固定地板超过本轮真实策略门时，重试相同摘要不可能改善；不能只因未写入就持续占车道。
+        fixed_floor_blocked = (exc.code == "COMPACT_CANDIDATE_TOO_LARGE" and exc.capacity is not None
+                               and exc.capacity.fixed_tokens is not None and exc.recovery_facts is not None
+                               and exc.capacity.fixed_tokens >= min(exc.recovery_facts.trigger_tokens,
+                                                                    exc.recovery_facts.physical_input_ceiling_tokens))
+        if (not recovering and recovery is not None and recovery.consumed
+                and recovery.resolved_input is None and not recovery.committed and not fixed_floor_blocked
+                and exc.code in {"COMPACT_CANDIDATE_TOO_LARGE", "COMPACT_CIRCUIT_OPEN"}):
+            retry_after = None
+            if exc.code == 'COMPACT_CIRCUIT_OPEN':
+                retry_after = max(0.0, recovery.source.thread.compact_failure_updated_at
+                    + recovery.source.policy.failure_cooldown_seconds - time.time())
+            raise BackgroundCompactPreflightDeferred(str(exc), code=exc.code, capacity=exc.capacity,
+                recovery_facts=exc.recovery_facts, retry_after_seconds=retry_after) from exc
+        raise
     return result, resolved, recovery
 
 
@@ -553,6 +589,7 @@ def collect_background_execution_result(
         response=str(getattr(result, "response", "") or ""),
         tool_call_count=len(calls), tool_success_count=successes, material_progress_count=material_progress,
         delivery_artifacts=artifacts, message_tool_deliveries=deliveries,
+        delivery_artifact_diagnostics=tuple(getattr(result, 'delivery_artifact_diagnostics', None) or ()),
         operation_verification=operation_verification, assistant_commentaries=assistant_commentaries,
         display_snapshot=display_snapshot,
         runtime_status=str(getattr(result, "runtime_status", "") or ""),

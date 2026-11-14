@@ -4,10 +4,87 @@
 """
 from __future__ import annotations
 
+import os
+import stat
+import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="验证真实 macOS 系统根别名")
+@pytest.mark.parametrize("prefix", ["/var/tmp", "/tmp"])
+def test_macos_gateway_alias_uses_same_projection_root_with_missing_spaced_dirs(prefix):
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.recovery_pending_index import RecoveryPendingIndex
+
+    with tempfile.TemporaryDirectory(prefix="gateway alias ", dir=prefix) as directory:
+        raw = Path(directory) / "missing parent" / "gateway"
+        paths = gateway_paths_from_root(raw)
+        assert paths.root == Path("/private") / raw.relative_to("/")
+        assert gateway_paths_from_root(paths.root) == paths
+        index = RecoveryPendingIndex(paths.root)
+        assert index.path.is_file()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="验证真实 macOS 系统根别名")
+def test_macos_gateway_alias_keeps_replaceable_child_link_rejected():
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.recovery_pending_index import RecoveryPendingIndex
+
+    with tempfile.TemporaryDirectory(prefix="gateway-link-", dir="/tmp") as directory:
+        base = Path(directory)
+        outside = base / "outside"
+        outside.mkdir()
+        (base / "child").symlink_to(outside, target_is_directory=True)
+        paths = gateway_paths_from_root(base / "child" / "gateway")
+        assert "child" in paths.root.parts
+        with pytest.raises((OSError, ValueError)):
+            RecoveryPendingIndex(paths.root)
+        assert not (outside / "gateway").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows 普通用户可能无创建链接权限")
+def test_gateway_arbitrary_link_is_not_canonicalized(tmp_path):
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    target = tmp_path / "outside"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    assert gateway_paths_from_root(link / "gateway").root == link / "gateway"
+
+
+def test_gateway_os_alias_unchanged_on_other_platform(monkeypatch):
+    from agent_py_agent.agent.gateway_parts import paths
+
+    monkeypatch.setattr(paths.sys, "platform", "linux")
+    assert paths.gateway_paths_from_root(Path("/var/tmp/gateway")).root == Path("/var/tmp/gateway")
+
+
+@pytest.mark.parametrize("parent_mode,parent_uid,alias_uid,alias_target", [
+    (stat.S_IFDIR | 0o777, 0, 0, "private/var"),
+    (stat.S_IFDIR | 0o755, 501, 0, "private/var"),
+    (stat.S_IFDIR | 0o755, 0, 501, "private/var"),
+    (stat.S_IFDIR | 0o755, 0, 0, "other/var"),
+])
+def test_gateway_os_alias_requires_system_owned_original_mapping(
+    monkeypatch, parent_mode, parent_uid, alias_uid, alias_target,
+):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts import paths
+
+    monkeypatch.setattr(paths.sys, "platform", "darwin")
+    monkeypatch.setattr(Path, "lstat", lambda path: SimpleNamespace(
+        st_mode=stat.S_IFLNK | 0o755 if str(path) == "/var" else parent_mode,
+        st_uid=alias_uid if str(path) == "/var" else parent_uid,
+    ))
+    monkeypatch.setattr(paths.os, "readlink", lambda path: alias_target)
+    with pytest.raises(PermissionError):
+        paths.gateway_paths_from_root(Path("/var/tmp/gateway"))
 
 
 class TestGatewayPaths:

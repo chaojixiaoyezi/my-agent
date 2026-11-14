@@ -60,6 +60,24 @@ def _specs():
     return result
 
 
+def _create_schema_legacy_view(schema):
+    """逐项锁定已声明的审核线索与说明增量，其余验证字段仍用原摘要核对。"""
+    result = deepcopy(schema)
+    item = result['properties']['items']['items']
+    props = item['properties']
+    assert 'review_requirement_id' not in item.get('required', [])
+    assert props.pop('review_requirement_id') == {'type': 'string', 'minLength': 1, 'maxLength': 128, 'description': '本次独立审核的候选编号。它是查询线索；审核时由宿主另核真实身份、原任务和版本。'}
+    assert props['allowed_tools']['description'] == '初始工具选择。普通角色仍会补齐默认发现和任务工具。创建时需要精确清单请用 delegation_constraints.permitted_tools。所有工具仍受父级授权上界约束。'
+    props['allowed_tools']['description'] = '一般省略；不完整列表不会剥夺子代理基础读写能力。'
+    constraints = props['delegation_constraints']['properties']
+    assert constraints['permitted_tools'].pop('description') == '创建时的精确工具清单，覆盖 allowed_tools 的默认补齐，不能超过父级当前权限。后续缺失能力须走原 capability_request 和父级裁决。审批不能绕过宿主禁用项、路径围栏或不可扩大的授权上界。'
+    assert constraints['max_descendant_depth'].pop('description') == '交给该子代理的剩余后代代数（非根树绝对深度）：0 禁止它再派子代，1 允许再派一代；每次派工继承时减1，子代显式值必须小于父级原剩余值。省略表示继承父级剩余值减1；无父级限制时省略表示不加此限。'
+    reviewer = '- reviewer: 独立审核子代理；核对原任务的结构化候选与证据，沿原账本登记独立审核；不执行候选或代替发布。；适用=需要独立身份核对明确候选、版本和证据并登记审核。；不适用=未设置；能力=read_only\n'
+    assert props['role']['description'].count(reviewer) == 1
+    props['role']['description'] = props['role']['description'].replace(reviewer, '')
+    return result
+
+
 # LLM: Canonical JSON includes descriptions as well as nested validation fields.
 # 函数用途: 计算可复核的契约快照摘要。
 def _sha(value):
@@ -88,6 +106,8 @@ def test_input_contract_is_unchanged(name):
     schema = _specs()[name].input_schema
     if name == 'watch_ordinary':
         schema = _ordinary_schema(schema)
+    if name in {'create_subagents', 'create_subagents_media'}:
+        schema = _create_schema_legacy_view(schema)
     assert _sha(schema) == _SCHEMA_HASHES[name]
 
 
@@ -208,3 +228,23 @@ def test_invalid_temperature_warns_or_raises(value):
 def _profile(temperature):
     return {'provider_id': 'demo', 'model_name': 'demo', 'model_backend': 'openai_compatible',
             'model_context_window_tokens': 4096, 'temperature': temperature}
+
+
+@pytest.mark.parametrize('name', ['create_subagents', 'create_subagents_media'])
+def test_create_review_hint_is_optional_and_does_not_open_legacy_shape(name):
+    from agent_py_agent.agent.tooling.input_schema import validate_tool_input
+
+    schema = _specs()[name].input_schema
+    old = {'items': [{'goal': '核对冻结材料', 'allowed_tools': ['read_file'],
+                     'delegation_constraints': {'max_descendant_depth': 0, 'permitted_tools': ['read_file']}}]}
+    assert validate_tool_input(old, schema).ok
+    current = deepcopy(old)
+    current['items'][0]['review_requirement_id'] = 'requirement'
+    assert validate_tool_input(current, schema).ok
+    for invalid in ('', 'x' * 129, True):
+        current['items'][0]['review_requirement_id'] = invalid
+        assert not validate_tool_input(current, schema).ok
+    assert not validate_tool_input({'goal': '不能绕过items'}, schema).ok
+    current['items'][0]['review_requirement_id'] = 'requirement'
+    current['items'][0]['trusted_review'] = True
+    assert not validate_tool_input(current, schema).ok

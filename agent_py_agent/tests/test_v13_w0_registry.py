@@ -86,7 +86,7 @@ def test_new_error_codes_only(code, status):
     assert api._error_code(BusinessError(code))[:2] == (code, status)
     assert api._error_code(HostAPIError(code))[:2] == (code, status)
     assert v13.v13_error_status('CURSOR_EXPIRED') is None
-    assert api._error_code(BusinessError('CURSOR_EXPIRED'))[1] == 503
+    assert api._error_code(BusinessError('CURSOR_EXPIRED'))[1] == 410
     assert api._error_code(HostAPIError('RESOURCE_NOT_FOUND', 404))[1] == 404
 
 

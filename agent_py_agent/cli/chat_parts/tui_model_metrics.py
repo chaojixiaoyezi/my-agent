@@ -35,12 +35,16 @@ def _decision_part(metrics: dict[str, object]) -> str:
 
 
 # LLM: 只显示会话累计命中率（账本累计 cache_read ÷ 累计输入，DeepSeek Harness 页脚同一口径），保留两位小数：用户拿
-#   "累计会话 × 总缓存%"就能算出命中/未命中的量。最近一次的命中率压缩前后会掉到个位数，容易误判，不再显示；
+#   数值为已报读取占供应商输入的账面比例；部分缺报时差额不能当成供应商确认的未命中。最近一次命中率不再显示；
 #   账本里仍有 cache_percent 给 /status 等消费者。
 # 函数用途: 生成统计行里的"总缓存 87.21%"片段；供应商一次都没回报缓存时显示"总缓存 —"。
 def _cache_part(metrics: dict[str, object]) -> str:
     session = metrics.get("cache_percent_session")
-    return f"总缓存 {session:.2f}%" if session is not None else "总缓存 —"
+    if session is None:
+        return "总缓存 —"
+    coverage = metrics.get("cache_usage_coverage")
+    suffix = {"partial": "（部分回报）", "unknown": "（覆盖未知）"}.get(coverage, "")
+    return f"总缓存 {session:.2f}%{suffix}"
 
 
 # LLM: 行的固定顺序（2026-10-08 用户定）：本轮模型轮 · 当轮工具 · 总缓存 · 累计会话 · 决策（开关）及其成败 · [重试] · 输出 · [速度]。

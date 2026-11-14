@@ -4,7 +4,7 @@
 
 - 四个检查工具只读取本次宿主上下文允许的工作区文件。
 - prepare、confirm、status 和 audit 的作业记录只保存在插件私有数据目录；**不会写工作区**。
-- run、collect 只会写固定离线夹具，工作区写入逐项接受 Python SDK 0.2.0 上下文裁决。
+- run、collect 只会写固定离线夹具，工作区写入逐项接受 Python SDK 0.3.0 上下文裁决。
 - `production_collect` 的说明是"按已完成的夹具运行记录重新生成同一份夹具字节并写回输出"——
   它不消费确认、不接供应商，只是把 run 已生成的那份夹具字节再写一遍，不是"从缓存重新收集"。
 - `production_prepare`、`production_confirm` 声明为 `read_only`：宿主合同里 read_only 只保证不写

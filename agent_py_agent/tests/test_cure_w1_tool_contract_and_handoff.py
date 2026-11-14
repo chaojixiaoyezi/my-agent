@@ -343,7 +343,7 @@ def test_handoff_board_tool_lifecycle_and_zero_lock_files(tmp_path: Path) -> Non
             "action": "publish",
             "case_id": case_id,
             "item_id": "item-pipe-1",
-            "responsible_actor": "worker-w1",
+            "responsible_actor": "run-w1-coord",
             "frozen_input_version": "v1.0.0",
             "exclusive_write_set": ["module_a.py"],
         },
@@ -352,7 +352,8 @@ def test_handoff_board_tool_lifecycle_and_zero_lock_files(tmp_path: Path) -> Non
     assert pub_res.ok is True
     assert pub_res.result_envelope["item"]["state"] == "published"
 
-    agent._current_run_params = SimpleNamespace(run_id="worker-w1")
+    # 本组件回环使用已证明的当前主代理本人；虚构别名的原生接收方必须拒绝。
+    agent._current_run_params = SimpleNamespace(run_id="run-w1-coord")
     claim_res = tool.execute_scoped(
         {
             "action": "claim",
