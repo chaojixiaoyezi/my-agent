@@ -36,7 +36,7 @@ def message_thread_source(thread: object, message: object) -> dict[str, object] 
             or derive_source_projection(metadata) is not None):
         return None
     # 这是来源资格的保守门，不把未知插件通道或internal自动当作真人前台。
-    foreground = {"tui", "web", "feishu", "telegram", "discord", "slack", "dingtalk", "wecom", "wechat", "qq"}
+    foreground = {"tui", "web", "feishu", "telegram", "discord", "slack", "dingtalk", "wecom", "wechat"}
     channel = getattr(message, "channel", "")
     if channel not in foreground:
         return None

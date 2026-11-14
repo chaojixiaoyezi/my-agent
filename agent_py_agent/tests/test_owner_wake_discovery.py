@@ -140,11 +140,11 @@ def test_disabled_policy_alone_is_not_discovered(tmp_path) -> None:
 def test_pending_wake_signal_discovered_in_alternate_layouts(tmp_path) -> None:
     owners = tmp_path / "owners"
     _write_wake_signal(_store_root(owners, "feishu", "users", "u2", "data"), "normal", "ws-1")
-    _write_wake_signal(_store_root(owners, "qq", "users", "u3", "plain"), "urgent", "ws-2")
+    _write_wake_signal(_store_root(owners, "wechat", "users", "u3", "plain"), "urgent", "ws-2")
 
     found = {(o.provider, o.owner_id) for o in discover_wake_pending_owners(owners)}
 
-    assert found == {("feishu", "u2"), ("qq", "u3")}
+    assert found == {("feishu", "u2"), ("wechat", "u3")}
 
 
 def test_group_bucket_yields_group_identity(tmp_path) -> None:
@@ -1044,7 +1044,7 @@ def test_single_page_matches_full_enumeration_order(snapshots, monkeypatch, tmp_
     owners = tmp_path / "owners"
     _owner_home(owners, "feishu", "groups", "g1")
     _owner_home(owners, "feishu", "users", "u1")
-    _owner_home(owners, "qq", "users", "u2")
+    _owner_home(owners, "wechat", "users", "u2")
     counter = _count_enumerations(snapshots, monkeypatch)
     expected = [
         (provider, owner_kind, owner_home.name)
@@ -1056,7 +1056,7 @@ def test_single_page_matches_full_enumeration_order(snapshots, monkeypatch, tmp_
     assert expected == [
         ("feishu", "group", "g1"),
         ("feishu", "user", "u1"),
-        ("qq", "user", "u2"),
+        ("wechat", "user", "u2"),
     ]
 
     first = discover_owner_home_page(owners, limit=64)

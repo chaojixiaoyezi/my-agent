@@ -18,7 +18,6 @@ from agent_py_agent.agent.adapter.delivery import (
 )
 from agent_py_agent.agent.adapter.feishu import FeishuAdapter
 from agent_py_agent.agent.adapter.manager import _gateway_delivery_key
-from agent_py_agent.agent.adapter.qq import QQAdapter
 from agent_py_agent.agent.gateway_parts import daemon_metadata
 
 
@@ -279,7 +278,6 @@ def test_permission_error_is_not_owner_death(tmp_path, world, monkeypatch):
 def test_channel_recovery_capabilities_are_explicit_and_windowed():
     assert getattr(BaseChannelAdapter, "provider_idempotent_delivery", None) is False
     assert getattr(BaseChannelAdapter, "provider_delivery_queryable", None) is False
-    assert QQAdapter.provider_idempotent_delivery is False
     assert FeishuAdapter.provider_idempotent_delivery is True
     assert getattr(FeishuAdapter, "provider_delivery_queryable", None) is False
     assert getattr(FeishuAdapter, "provider_idempotency_window_seconds", None) == 3600.0

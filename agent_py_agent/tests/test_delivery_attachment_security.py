@@ -235,7 +235,7 @@ def test_real_send_tool_identity_ignores_attempt_to_contact_someone_else(tmp_pat
     assert adapter.effects == [('text', target)]
     adapter.effects.clear()
     if kind != 'main':
-        other = tool.execute({'notify_channel': 'qq', 'message': '跨渠道不可借管理员'})
+        other = tool.execute({'notify_channel': 'web', 'message': '跨渠道不可借管理员'})
         assert not other.ok and other.error_code == 'CHANNEL_TARGET_OUT_OF_SCOPE'
         assert not adapter.effects
 

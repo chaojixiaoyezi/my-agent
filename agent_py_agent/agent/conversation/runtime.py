@@ -2328,7 +2328,7 @@ def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[objec
 
 # 后台主代理产出的投递路由。只有"内部/无真实外部路由"(子代理事件叫回、定时巡检默认走 internal)才
 # 尝试升级成主动外呼:若该会话绑过可主动外呼的通道(飞书)就投到那个通道,这样"叫回来产出的汇总"才发
-# 得到用户所在真渠道、不进内部黑洞。显式外部路由(feishu/wechat/qq/chat…进度策略或入站消息带来的)一律
+# 得到用户所在真渠道、不进内部黑洞。显式外部路由(feishu/wechat/chat…进度策略或入站消息带来的)一律
 # 原样尊重,不改既有语义;没有可外呼绑定则保持原路由(internal → 单机/CLI 行为不变)。
 _INTERNAL_ROUTE_CHANNELS = frozenset({"internal", ""})
 

@@ -305,14 +305,14 @@ class TestSessionContextSync:
         assert "**当前活跃任务:**" in result
         assert "task_001" in result
 
-    def test_format_context_for_channel_qq(self, tmp_path: Path):
-        """qq 通道格式化（纯文本）。"""
+    def test_format_context_for_channel_plain_text(self, tmp_path: Path):
+        """非飞书通道格式化（纯文本）。"""
         from agent_py_agent.agent.session.context_sync import format_context_for_channel
 
         context = {
             "session_id": "sess_123",
             "from_channel": "chat",
-            "to_channel": "qq",
+            "to_channel": "web",
             "recent_messages": [
                 {"role": "user", "content": "帮我分析日志"},
             ],
@@ -321,9 +321,9 @@ class TestSessionContextSync:
             ],
         }
 
-        result = format_context_for_channel(context, "qq")
+        result = format_context_for_channel(context, "web")
 
-        # QQ 不支持 markdown，应该是纯文本
+        # 非飞书通道不使用 markdown，应该是纯文本
         assert "**会话接续**" not in result
         assert "会话接续" in result
         assert "task_001" in result
@@ -536,8 +536,8 @@ class TestIntegration:
         primary = cc.get_primary_channel(session.session_id)
         assert primary == "feishu"
 
-        # 6. 绑定第三个通道 qq
-        cc.bind_session(session.session_id, "qq", "admin")
+        # 6. 绑定第三个通道 web
+        cc.bind_session(session.session_id, "web", "admin")
 
         # 7. 验证三个通道都存在
         bound = cc.get_bound_sessions(session.session_id)
@@ -551,4 +551,4 @@ class TestIntegration:
         channels = {b["channel"]: b for b in bound}
         assert channels["chat"]["active"] is False
         assert channels["feishu"]["active"] is True
-        assert channels["qq"]["active"] is True
+        assert channels["web"]["active"] is True

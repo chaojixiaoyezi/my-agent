@@ -792,13 +792,13 @@ def restart_adapter(supervisor) -> bool:
 
 
 # LLM: requested_channel优先，只有单个合法通道才采用列表；不把任意状态值运输成CLI选项。
-# 函数用途: 从上次启动记录恢复feishu、qq或all范围。
+# 函数用途: 从上次启动记录恢复feishu或all范围。
 def _adapter_restart_channel(state: dict) -> str:
     requested = state.get("requested_channel")
-    if requested in ("feishu", "qq", "all"):
+    if requested in ("feishu", "all"):
         return requested
     channels = state.get("channels")
-    if isinstance(channels, list) and len(channels) == 1 and channels[0] in ("feishu", "qq"):
+    if isinstance(channels, list) and len(channels) == 1 and channels[0] == "feishu":
         return channels[0]
     return "all"
 

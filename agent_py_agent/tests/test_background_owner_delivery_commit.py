@@ -515,7 +515,7 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path,
 
     monkeypatch.setattr(wake_attempt_tracking, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(_backend, "generate", generate)
-    # 真实 registry 永远声明 feishu/qq（与凭据是否齐全无关）。
+    # 真实 registry 永远声明 feishu（与凭据是否齐全无关）。
     real = DeliveryService(build_default_channel_registry(agent.config))
     assert real.declares_channel("feishu") is True
     assert real.declared_proactive("feishu") is True

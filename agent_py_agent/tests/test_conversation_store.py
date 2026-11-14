@@ -1684,7 +1684,7 @@ def test_new_unbound_channel_does_not_implicitly_mix_latest_thread(tmp_path) -> 
 
     assert second.thread_id != first.thread_id
 
-    resumed = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "qq", 'channel_conversation_id': "chat-c", 'channel_user_id': "user-c", 'reuse_latest_for_user': True, 'now': 30.0})
+    resumed = store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "web", 'channel_conversation_id': "chat-c", 'channel_user_id': "user-c", 'reuse_latest_for_user': True, 'now': 30.0})
 
     assert resumed.thread_id == second.thread_id
 

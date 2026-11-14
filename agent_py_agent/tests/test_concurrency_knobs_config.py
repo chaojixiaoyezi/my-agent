@@ -284,7 +284,7 @@ def test_background_lane_defaults_give_admin_64_and_each_ordinary_owner_2():
         OwnerIdentity.local_user("admin"),
         OwnerIdentity.provider_user("feishu", "main"),
         OwnerIdentity.provider_group("feishu", "admin"),
-        OwnerIdentity.provider_user("qq", "ordinary"),
+        OwnerIdentity.provider_user("feishu", "ordinary"),
     )
     with _background_lane_plan(AgentConfig(), owners) as supervisor:
         supervisor._submit_ready_thread_ticks()

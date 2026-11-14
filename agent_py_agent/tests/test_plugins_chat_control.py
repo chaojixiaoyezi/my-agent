@@ -62,7 +62,7 @@ def test_plugin_control_keeps_raw_text_for_the_shared_parser(text):
     _command(text)
 
 
-@pytest.mark.parametrize("channel", ["feishu", "qq", "custom-im"])
+@pytest.mark.parametrize("channel", ["feishu", "web", "custom-im"])
 @pytest.mark.parametrize("text", ["/plugins list", '/plugins@Demo run --path "中文 空格"'])
 def test_im_routes_to_the_same_management_service_with_host_parameters(host, monkeypatch, channel, text):
     _command(text)

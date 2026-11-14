@@ -882,11 +882,11 @@ def restore_channel(state: dict) -> str:
         raise ValueError('原适配器通道记录不可用，未停止服务')
     rows = state.get('channels')
     names = [row.get('name') for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-    if not names or len(names) != len(rows) or any(not isinstance(name, str) or name not in {'feishu', 'qq'} for name in names) or len(names) != len(set(names)):
+    if not names or len(names) != len(rows) or any(not isinstance(name, str) or name not in {'feishu'} for name in names) or len(names) != len(set(names)):
         raise ValueError('原适配器通道记录不可用，未停止服务')
     requested = state.get('requested_channel')
     if requested is not None:
-        if not isinstance(requested, str) or requested not in {'feishu', 'qq', 'all'} or (requested != 'all' and set(names) != {requested}):
+        if not isinstance(requested, str) or requested not in {'feishu', 'all'} or (requested != 'all' and set(names) != {requested}):
             raise ValueError('原适配器通道记录冲突，未停止服务')
         return requested
     return names[0] if len(names) == 1 else 'all'

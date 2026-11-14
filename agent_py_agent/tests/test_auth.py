@@ -31,8 +31,8 @@ class TestRoleInference:
         role = infer_role("feishu", "ou_123")
         assert role == Role.USER
 
-    def test_qq_channel_is_user(self) -> None:
-        role = infer_role("qq", "777")
+    def test_web_channel_is_user(self) -> None:
+        role = infer_role("web", "777")
         assert role == Role.USER
 
     def test_admin_user_id_in_external_channel_is_admin(self) -> None:
@@ -40,7 +40,7 @@ class TestRoleInference:
         assert role == Role.ADMIN
 
     def test_admin_user_id_custom(self) -> None:
-        role = infer_role("qq", "superuser", admin_user_id="superuser")
+        role = infer_role("web", "superuser", admin_user_id="superuser")
         assert role == Role.ADMIN
 
     def test_different_admin_user_id_still_user(self) -> None:
@@ -94,7 +94,7 @@ class TestAuthManagerAuthenticate:
     def test_auth_disabled_all_admin(self) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=False)
         p1 = mgr.authenticate("feishu", "any_user")
-        p2 = mgr.authenticate("qq", "another_user")
+        p2 = mgr.authenticate("web", "another_user")
         assert p1.role == Role.ADMIN
         assert p2.role == Role.ADMIN
         assert p1.can_access_all_users is True
@@ -178,12 +178,12 @@ class TestAuthMiddleware:
         assert uid == "ou_123"
         assert ch == "feishu"
 
-    def test_qq_headers(self, tmp_path) -> None:
+    def test_web_headers(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
         mw = authenticated_middleware(tmp_path, mgr)
-        uid, ch = mw.extract_identity(authenticated_headers(tmp_path, user="777", channel="qq"))
+        uid, ch = mw.extract_identity(authenticated_headers(tmp_path, user="777", channel="web"))
         assert uid == "777"
-        assert ch == "qq"
+        assert ch == "web"
 
     def test_admin_header_user_in_feishu(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)

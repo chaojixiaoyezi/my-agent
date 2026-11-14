@@ -47,7 +47,7 @@ class AuthManager:
         """根据通道和用户 ID 进行认证，返回权限对象。
 
         Args:
-            channel: 通道名（如 feishu、qq、chat）
+            channel: 通道名（如 feishu、chat）
             user_id: 用户 ID
 
         Returns:

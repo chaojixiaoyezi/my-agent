@@ -8,10 +8,7 @@ from .protocol import (
     OutgoingMessage,
     feishu_to_incoming,
     outgoing_to_feishu,
-    outgoing_to_qq,
-    qq_to_incoming,
 )
-from .qq import QQAdapter
 
 __all__ = [
     "BaseChannelAdapter",
@@ -19,9 +16,6 @@ __all__ = [
     "IncomingMessage",
     "OutgoingMessage",
     "FeishuAdapter",
-    "QQAdapter",
     "feishu_to_incoming",
     "outgoing_to_feishu",
-    "qq_to_incoming",
-    "outgoing_to_qq",
 ]

@@ -316,7 +316,7 @@ class TestAdapterCliBundles:
             watch=False,
             poll_interval=0.5,
             no_start_gateway=True,
-            channel="qq",
+            channel="feishu",
             pid_file=str(tmp_path / "adapter.pid"),
             daemon=False,
         )
@@ -327,7 +327,7 @@ class TestAdapterCliBundles:
         assert options.inbox == tmp_path / "custom_inbox"
         assert options.outbox == tmp_path / "custom_outbox"
         assert options.stop_timeout == 10.0
-        assert options.channel == "qq"
+        assert options.channel == "feishu"
 
     def test_process_file_adapter_loop_uses_options_not_args(self, tmp_path: Path):
         from agent_py_agent.cli.adapter import FileAdapterLoopContext, _process_file_adapter_loop

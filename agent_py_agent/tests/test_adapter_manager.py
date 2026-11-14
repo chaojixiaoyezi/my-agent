@@ -216,8 +216,8 @@ class TestChannelManagerActiveChannel:
             manager.update_active_channel("user_1", "feishu")
             assert manager.get_active_channel("user_1") == "feishu"
 
-            manager.update_active_channel("user_1", "qq")
-            assert manager.get_active_channel("user_1") == "qq"
+            manager.update_active_channel("user_1", "web")
+            assert manager.get_active_channel("user_1") == "web"
 
 
 class TestChannelManagerRouteMessage:

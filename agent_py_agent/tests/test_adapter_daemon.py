@@ -88,10 +88,10 @@ def test_short_polling_preserves_state_write_interval(wait_case, monkeypatch):
         return case.event.is_set()
 
     monkeypatch.setattr(case.event, "wait", advance)
-    adapter._wait_for_adapter_shutdown(case.manager, case.paths, case.event, requested_channel="qq")
+    adapter._wait_for_adapter_shutdown(case.manager, case.paths, case.event, requested_channel="all")
     assert write_times == pytest.approx([5.0, 10.0])
     assert case.writes.call_args_list == [call(case.paths, "running", {
-        "channels": [{"name": "feishu"}], "requested_channel": "qq",
+        "channels": [{"name": "feishu"}], "requested_channel": "all",
     })] * 2
     assert not case.stop_path.exists()
 

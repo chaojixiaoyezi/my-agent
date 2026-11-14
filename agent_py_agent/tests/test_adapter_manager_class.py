@@ -98,7 +98,7 @@ class TestAdapterRegistration:
         adapter1.adapter_name = "feishu"
 
         adapter2 = MagicMock()
-        adapter2.adapter_name = "qq"
+        adapter2.adapter_name = "web"
 
         manager.register_adapter(adapter1)
         manager.register_adapter(adapter2)
@@ -106,7 +106,7 @@ class TestAdapterRegistration:
         result = manager.list_adapters()
 
         assert "feishu" in result
-        assert "qq" in result
+        assert "web" in result
 
 
 class TestStartStopAll:
