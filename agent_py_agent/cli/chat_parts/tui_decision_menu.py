@@ -20,12 +20,10 @@ from .tui_model_menu import _dialog, _request
 _POINT_NAMES = {"model_selection": "模型选择", "subagent_model": "子代理模型", "skill_tool": "Skill / 工具推荐",
                 "pre_recall": "记忆召回前补充查询", "recall": "记忆召回后重排", "curator": "后台记忆整理（用户长期）",
                 "curator_relation": "正式记忆关系建议（用户后台）", "external_material_order": "外部材料阅读优先级",
-                "planning": "现有待办优先级", "delivery_quality": "交付复核焦点", "action_candidate": "动作候选",
-                "skill_proposal_review": "Skill 提案审核顺序（用户长期）"}
+                "planning": "现有待办优先级", "delivery_quality": "交付复核焦点", "action_candidate": "动作候选"}
 _POINTS = {point: _POINT_NAMES.get(point, point) for point in POINTS}
 _GENERAL = {"enabled": "总开关", "profile_id": "默认决策模型", "timeout_seconds": "前台单次上限（秒）",
             "stage_timeout_seconds": "前台阶段上限（秒）", "background_timeout_seconds": "后台阶段上限（秒）",
-            "experiment_enabled": "实验能力（仍需独立授权）",
             "observe_nonblocking_enabled": "观察不挡回复（observe 点位改在后台问决策模型）"}
 _POINT_FIELDS = {"mode": "模式", "profile_id": "决策模型", "timeout_seconds": "单次上限（秒）",
                  "context_policy": "上下文减量策略", "optional_categories": "可选工具类别",
@@ -253,9 +251,8 @@ def _mode_control(value: str):
     return control, lambda: "off" if "enabled" not in control.current_values else "observe" if "observe" in control.current_values else "apply"
 
 
-# LLM: 每次只提交原字段/CAS；两个布尔开关都不构造授权信封，实验能力编辑必须说明当前联网不可用。
-#   点位模式用"开启 / 观察模式"两个勾选项编辑，存储仍是原 off/observe/apply。
-# 函数用途: 编辑普通开关、实验能力或点级配置，保存后读回，不触发实验或探测。
+# LLM: 每次只提交原字段/CAS；点位模式用"开启 / 观察模式"两个勾选项编辑，存储仍是原 off/observe/apply。
+# 函数用途: 编辑普通开关或点级配置，保存后读回，不触发探测。
 async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
     value = _value(view, field)
     mode_value = None
@@ -267,8 +264,7 @@ async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
         control, mode_value = _mode_control(value)
     else:
         control = _plain_control(field, value)
-    notice = Label("这里只开启能力，不建立实验许可；当前联网实验不可用。" if field == "experiment_enabled" else
-                   "开启后观察模式的点位在后台问决策模型，回复不再等它；等待上限用后台阶段上限。正式使用（apply）的点位不受影响。"
+    notice = Label("开启后观察模式的点位在后台问决策模型，回复不再等它；等待上限用后台阶段上限。正式使用（apply）的点位不受影响。"
                    if field == "observe_nonblocking_enabled" else
                    "候选请填原模型目录 ID 的 JSON 字符串数组；[] 表示全部当前授权生成模型。" if field.endswith(".candidate_profile_ids") else
                    "类别请填 JSON 字符串数组，如 [\"plugins\", \"自定义类别\"]；[] 不额外收起。" if field.endswith(".optional_categories") else

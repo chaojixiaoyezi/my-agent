@@ -70,24 +70,13 @@ ControlKind = Literal[
     "team",
     "unsupported",
 ]
-TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
+TaskCommandKind = Literal["audit_prepare"]
 
 _AUDIT_UNIT_SECONDS = {"d": 86400, "h": 3600, "m": 60}
 # 审计窗口最大 400 天（秒）：防止误传超大窗口拖垮查询。
 _AUDIT_WINDOW_MAX_SECONDS = 400 * 86400
 # 任务工作名最多 64 字符：限制命令入参长度。
 _WORK_NAME_MAX_CHARS = 64
-DECISION_EXPERIMENT_TASK_KIND = "decision_experiment"
-# 只开放有经验输入上界标定和只观察消费者的接入点；其它点即使授权也无法发送，因此在入口直接拒绝。
-_EXPERIMENT_POINTS = frozenset({"skill_tool"})
-# observe 只授权本轮只观察实验；apply 另外授权宿主在证据规则满足时把本会话该点改为 apply，实验调用本身仍只观察。
-_EXPERIMENT_MODES = frozenset({"observe", "apply"})
-_EXPERIMENT_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-_EXPERIMENT_FIELDS = frozenset({"mode", "point", "duration_seconds", "max_http_requests", "max_input_tokens"})
-_EXPERIMENT_USAGE = ("用法：/experiment observe|apply skill_tool 时长 HTTP次数 输入token上限 任务内容，"
-                     "例如 /experiment observe skill_tool 10m 1 50000 整理本周资料。apply 另外授权：最近证据满足规则时，"
-                     "宿主自动把本会话 skill_tool 改为 apply（实验本身仍只观察，用户后改优先，reset 恢复继承）。"
-                     "输入上界是经验值，不是供应商保证。")
 
 
 # LLM: 控制命令只承载入口已解析的结构化参数；recover 的 target_id 和 confirmation_code 不从正文或回执反推，
@@ -389,39 +378,6 @@ def conversation_task_attributes(system_task: object) -> dict[str, object]:
         CONVERSATION_WORK_NAME_ATTR: name,
         CONVERSATION_CANCELLATION_SCOPE_ATTR: "foreground",
     }
-
-
-# LLM: 只认显式 /experiment 语法；参数冻结进 system_task，模型只看到任务正文，不能从正文或模型参数取得授权。
-# 函数用途: 把实验命令拆成任务正文和结构化实验参数，格式或数值不合法时返回用法。
-def _experiment_command(trailing: object) -> ConversationTaskCommand:
-    match = re.match(r"^(\S+)\s+(\S+)\s+(\d{1,9})([smhd])\s+(\d{1,9})\s+(\d{1,12})\s+(.+)$",
-                     str(trailing or "").strip(), re.IGNORECASE | re.DOTALL)
-    if match is None:
-        return ConversationTaskCommand(DECISION_EXPERIMENT_TASK_KIND, valid=False, usage=_EXPERIMENT_USAGE)
-    mode, point, amount, unit, http_requests, input_tokens, prompt = match.groups()
-    attributes = {"mode": mode.lower(), "point": point,
-                  "duration_seconds": int(amount) * _EXPERIMENT_UNIT_SECONDS[unit.lower()],
-                  "max_http_requests": int(http_requests), "max_input_tokens": int(input_tokens)}
-    valid = decision_experiment_task({"kind": DECISION_EXPERIMENT_TASK_KIND, "attributes": attributes}) is not None
-    return ConversationTaskCommand(DECISION_EXPERIMENT_TASK_KIND, prompt=prompt.strip(), attributes=attributes,
-                                   valid=valid and bool(prompt.strip()), usage=_EXPERIMENT_USAGE)
-
-
-# LLM: 宿主授权只消费这里严格校验后的冻结参数；缺字段、多字段、非 observe/apply、未标定点或非正整数一律视为无实验。
-# 函数用途: 从排队请求的 system_task 读取实验参数，供 Gateway 在模型前授权使用。
-def decision_experiment_task(system_task: object) -> dict[str, object] | None:
-    if not isinstance(system_task, dict) or system_task.get("kind") != DECISION_EXPERIMENT_TASK_KIND:
-        return None
-    attributes = system_task.get("attributes")
-    if not isinstance(attributes, dict) or set(attributes) != _EXPERIMENT_FIELDS:
-        return None
-    if (type(attributes["mode"]) is not str or attributes["mode"] not in _EXPERIMENT_MODES
-            or type(attributes["point"]) is not str or attributes["point"] not in _EXPERIMENT_POINTS):
-        return None
-    counts = (attributes["duration_seconds"], attributes["max_http_requests"], attributes["max_input_tokens"])
-    if any(type(value) is not int or value <= 0 for value in counts):
-        return None
-    return dict(attributes)
 
 
 # LLM: 只解析明确的目标生命周期语法，目标正文仍是模型或用户文本，不参与协议解析。
@@ -1144,14 +1100,12 @@ _TRAILING_PARSERS: dict[str, Callable[[object], ConversationControlCommand | Con
     "wakes": _wakes_command,
     "model": _model_command,
     "admin": _admin_command,
-    "experiment": _experiment_command,
     "skills": _skills_command,
     "settings": _settings_command,
 }
 
 
 __all__ = [
-    "DECISION_EXPERIMENT_TASK_KIND",
     "ConversationControlCommand",
     "ConversationControlResult",
     "ConversationTaskCommand",
@@ -1159,7 +1113,6 @@ __all__ = [
     "NamedConversationWorkStatus",
     "control_command_carries_secret",
     "conversation_task_attributes",
-    "decision_experiment_task",
     "conversation_compact_interrupt_name",
     "conversation_request_interrupt_name",
     "parse_conversation_control",

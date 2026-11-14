@@ -17,12 +17,6 @@ from agent_py_agent.agent.conversation.decision_policy import (
     persist_cooldown_snapshot,
     restore_cooldown_snapshot,
 )
-from agent_py_agent.tests.test_decision_skill_proposal_review import (
-    install as review_install,
-)
-from agent_py_agent.tests.test_decision_skill_proposal_review import (
-    seeded,
-)
 
 _OWNER = "owner-1"
 _PROFILE = "profile-1"
@@ -55,13 +49,13 @@ def test_persist_then_restore_survives_process_boundary(tmp_path: Path, monkeypa
 
 def test_persisted_file_keeps_point_backoff_key_shape(tmp_path: Path, monkeypatch) -> None:
     _fresh_table(monkeypatch)
-    decision_policy.record_failure(_key("skill_proposal_review"), _REVISION, TimeoutError("超时"))
+    decision_policy.record_failure(_key("planning"), _REVISION, TimeoutError("超时"))
     path = tmp_path / "cooldown.json"
     persist_cooldown_snapshot(path, _OWNER)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
     assert payload["schema"] == COOLDOWN_FILE_SCHEMA and payload["owner"] == _OWNER
-    key_text = json.dumps([_OWNER, _PROFILE, _REVISION, "skill_proposal_review"], sort_keys=True)
+    key_text = json.dumps([_OWNER, _PROFILE, _REVISION, "planning"], sort_keys=True)
     status, revision, until_wall, streak = payload["entries"][key_text]
     assert (status, revision, streak) == ("cooldown", _REVISION, 1)
     assert until_wall is not None and until_wall > time.time()
@@ -98,20 +92,23 @@ def test_restore_ignores_corrupt_foreign_and_oversized_files(tmp_path: Path, mon
     assert restore_cooldown_snapshot(oversized, _OWNER) == 0
 
 
-def test_review_entry_persists_cooldown_next_to_proposals(tmp_path, monkeypatch) -> None:
-    from agent_py_agent.agent.capability import decision_skill_proposal_review as module
+def test_persisted_cooldown_roundtrips_next_to_proposals_without_import_coupling(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
-    ctx = seeded(tmp_path, 3)
-    host = SimpleNamespace(home_paths=ctx.home)
+    _fresh_table(monkeypatch)
+    home = ensure_my_agent_home(tmp_path / "home")
+    host = SimpleNamespace(home_paths=home)
     owner_ref = decision_policy.decision_owner_ref(host)
     decision_policy.record_failure((owner_ref, _PROFILE, _REVISION), _REVISION, ProviderQuotaExhaustedError("q"))
-    review_install(monkeypatch, {"proposal_3": "review_first"})
 
-    result = module.skill_proposal_review_order(host, ctx.service, ctx.service.list())
-    assert result is not None
-    cooldown_file = ctx.home.owner_skill_proposals_dir / ".cooldown.json"
+    cooldown_file = home.owner_skill_proposals_dir / ".cooldown.json"
+    assert persist_cooldown_snapshot(cooldown_file, owner_ref) == 1
     assert cooldown_file.is_file()
     payload = json.loads(cooldown_file.read_text(encoding="utf-8"))
     assert payload["schema"] == COOLDOWN_FILE_SCHEMA and payload["owner"] == owner_ref
     key_text = json.dumps([owner_ref, _PROFILE, _REVISION], sort_keys=True)
     assert payload["entries"][key_text][0] == "cooldown"
+
+    _fresh_table(monkeypatch)
+    assert restore_cooldown_snapshot(cooldown_file, owner_ref) == 1
+    assert decision_policy.cooldown_state((owner_ref, _PROFILE, _REVISION), _REVISION)[0] == "cooldown"

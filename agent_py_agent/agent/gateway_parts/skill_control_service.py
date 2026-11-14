@@ -1,7 +1,6 @@
 # LLM: 聊天 `/skills` 的执行与中文回执，TUI 与飞书等 IM 共用（都经 Gateway 控制通道）。只处理当前控制范围解析出的 owner：
 #   提案走 SkillProposalService（确认/拒绝必须带用户看到的版本号，服务端在锁内复核），自动总结 Skill 走
-#   skill_learning_report（与 CLI 同一事实推导与闸门）；列提案时调用自学习审核顺序点 skill_proposal_review_order（与 CLI
-#   同一入口）。不构造 Agent、不暴露给模型；回执不含本机绝对路径。改动须同步 control_commands._skills_command、
+#   skill_learning_report（与 CLI 同一事实推导与闸门）。不构造 Agent、不暴露给模型；回执不含本机绝对路径。改动须同步 control_commands._skills_command、
 #   command_catalog 的 skills 条目、TUI control_runtime 的文本还原与本地拒绝，以及 test_skill_chat_control.py。
 #   using 仅通过 owner_conversation_store 和 method_carry 操作当前线程隐藏登记，不加载正文或冷 Agent。
 # 模块用途: 在TUI和IM展示两类技能候选及准确确认命令，管理已发布Skill和本会话方法沿用。
@@ -16,7 +15,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..runtime_db.repository import RuntimeRepository
 
-from ..capability.decision_skill_proposal_review import skill_proposal_review_order
 from ..capability.skill_learning_proposals import list_learning_proposals
 from ..capability.skill_learning_publish import SkillLearningGateError
 from ..capability.skill_learning_report import (
@@ -52,7 +50,6 @@ _BODY_MAX_CHARS = 3000
 _EVENT_ROWS = 10
 _STATUS_LABELS = {"pending_confirmation": "待确认", "committed": "已确认并安装", "rejected": "已拒绝"}
 _STATE_LABELS = {"archived":"已归档（可restore）", "disabled":"用户已停用", "cooled":"已冷藏（仍可检索）", "active": "生效中", "user_modified": "已被你修改（不再自动更新）", "missing": "文件已不存在"}
-_REVIEW_NOTE = "已按决策模型建议的审核顺序排列，仅供参考；确认或拒绝仍需你逐条执行。"
 _FAILURE_HINTS = {
     CODE_REVISION_MISMATCH: "提案已有更新，版本号对不上；请先用 /skills show 查看最新内容和版本再操作。",
     CODE_NOT_PENDING: "这条提案已经不是待确认状态，无需再处理。",
@@ -306,30 +303,25 @@ def _proposals(host: SkillControlHost, tokens: list[str]) -> str:
     return '\n'.join(lines + _automatic_proposal_lines(drafts))
 
 
-# LLM: 原审核顺序点及格式不变；仅在另有自动候选时省略空提示，由结构化候选存在性决定，绝不解析文案。
+# LLM: 仅在另有自动候选时省略空提示，由结构化候选存在性决定，绝不解析文案。
 # 函数用途: 生成原子代理提案列表及命令，避免有自动候选却称没有待办。
 def _proposal_list_lines(host: SkillControlHost, *, status: str | None, include_empty_notice: bool = True) -> list[str]:
     service = _proposals_service(host)
-    proposals = service.list(status=status)
-    review = skill_proposal_review_order(host, service, proposals)
-    ordered = list(proposals if review is None else review.proposals)
-    labels = {} if review is None else {entry.proposal_id: entry.label for entry in review.entries}
+    ordered = list(service.list(status=status))
     switch = "开启" if getattr(host.config, "enable_self_learning", False) else "关闭"
     title = "待确认的技能提案" if status == PROPOSAL_PENDING else "技能提案"
     lines = [f"{title}：{len(ordered)} 条（自学习：{switch}）"]
     if not ordered:
         return lines + (["没有需要你处理的提案。"] if include_empty_notice else [])
-    if review is not None:
-        lines.append(_REVIEW_NOTE)
     for index, proposal in enumerate(ordered, 1):
-        lines += _proposal_entry_lines(index, proposal, labels.get(proposal.proposal_id, ""))
+        lines += _proposal_entry_lines(index, proposal)
     return lines
 
 
 # 函数用途: 生成列表里的一条提案（摘要一行、来源一行、操作一行）。
-def _proposal_entry_lines(index: int, proposal: SkillProposal, label: str) -> list[str]:
+def _proposal_entry_lines(index: int, proposal: SkillProposal) -> list[str]:
     status = _STATUS_LABELS.get(proposal.status, proposal.status)
-    lines = [f"{index}. {proposal.target.skill_name}［{status}］{proposal.draft.description}" + (f"〔{label}〕" if label else ""),
+    lines = [f"{index}. {proposal.target.skill_name}［{status}］{proposal.draft.description}",
              f"   来源任务 {'、'.join(proposal.source.task_ids) or '无'}；版本 {proposal.revision}"]
     return lines + [f"   {_proposal_commands(proposal)}"]
 

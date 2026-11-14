@@ -19,7 +19,7 @@ from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
 from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
 _DECISION_ACTIONS = {
-    "decision_read", "decision_patch", "decision_reset", "decision_experiment_revoke",
+    "decision_read", "decision_patch", "decision_reset",
     "decision_models", "decision_probe",
 }
 _RESTRICTED_CONTEXTS = (

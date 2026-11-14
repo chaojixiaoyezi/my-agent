@@ -1,4 +1,4 @@
-# LLM: 界面/工具共用 owner→thread 锁及 CAS；实验许可只由宿主专用参数提交，普通 patch/reset/restore 无授权权，不发网络。
+# LLM: 界面/工具共用 owner→thread 锁及 CAS；不发网络。
 # 模块用途: 在原模型目录和会话存储修改或恢复决策覆盖，按后台或会话作用范围读回有效值及版本。
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _validate_request(context: object, operation: str, payload: dict, thread_id:
     home = context.home_paths
     if any(not str(getattr(home, field, "") or "").strip() for field in ("owner_provider", "owner_kind", "owner_id")):
         raise DecisionSettingsAccessError("决策设置需要已验证的用户身份。")
-    if type(operation) is not str or operation not in {"read", "patch", "reset", "restore", "experiment_authorize", "experiment_revoke"} or type(payload) is not dict:
+    if type(operation) is not str or operation not in {"read", "patch", "reset", "restore"} or type(payload) is not dict:
         raise ModelProfileError("决策设置操作无效。")
     allowed = {"scope"} if operation == "read" else {"scope", "expected_revision"}
     if operation == "patch":
@@ -41,16 +41,12 @@ def _validate_request(context: object, operation: str, payload: dict, thread_id:
         allowed.update(("fields", "reason"))
     elif operation == "restore":
         allowed.update(("set", "unset"))
-    elif operation == "experiment_revoke":
-        allowed.add("authorization_id")
     unknown = set(payload) - allowed
     if unknown:
         raise DecisionSettingsUnknownFields(sorted(unknown), sorted(allowed))
     scope = payload.get("scope", "owner")
     if type(scope) is not str or scope not in {"owner", "thread"} or scope == "thread" and not thread_id:
         raise ModelProfileError("会话临时设置需要当前会话编号。")
-    if operation.startswith("experiment_") and scope != "thread":
-        raise ModelProfileError("实验授权首片只支持当前会话。")
     return scope
 
 
@@ -119,23 +115,18 @@ def _check_thread_owner(context: object, thread: object) -> None:
         raise DecisionSettingsAccessError("决策设置缺少已验证的会话归属。")
 
 
-# LLM: owner 锁持有期间调用原 thread.update_atomic；授权及撤销与原覆盖共用完整 CAS，不把普通配置操作升级成授权。
-# 函数用途: 原子修改会话设置或唯一实验信封，保留 Compact、模型选择和其他线程状态。
-def _update_thread(context: object, data: dict, thread_id: str, operation: str, payload: dict, authorization: dict | None) -> dict:
+# LLM: owner 锁持有期间调用原 thread.update_atomic；与原覆盖共用完整 CAS。
+# 函数用途: 原子修改会话设置，保留 Compact、模型选择和其他线程状态。
+def _update_thread(context: object, data: dict, thread_id: str, operation: str, payload: dict) -> dict:
     before = {}
 
-    # LLM: 原 thread 锁内核对身份及两层版本；授权使用整份宿主信封，非授权修改保留原信封且令其旧 revision 失效。
-    # 函数用途: 在最新线程快照上提交字段操作或实验许可，保持其他状态不变。
+    # LLM: 原 thread 锁内核对身份及两层版本。
+    # 函数用途: 在最新线程快照上提交字段操作，保持其他状态不变。
     def update(latest):
         _check_thread_owner(context, latest)
         current = validate_decision_settings(latest.decision_settings)
         _check_revision(payload, data["decision_settings"], current)
         before.update(decision_settings_projection(context, data, latest, scope="thread"))
-        if operation.startswith("experiment_"):
-            from .decision_experiment import experiment_settings_transition
-
-            updated = experiment_settings_transition(current, operation, payload, authorization, before)
-            return replace(latest, decision_settings=updated)
         return replace(latest, decision_settings=_patch_settings(context, data, current, operation, payload, scope="thread"))
 
     saved = context.conversation_store.threads.update_atomic(thread_id, update)
@@ -161,8 +152,7 @@ def _owner_operation(context: object, path, data: dict, thread: object, operatio
 # 宿主非阻塞读取不取锁：目录与线程文件都经临时文件替换原子写入，单次写事务只改其中一个文件，
 # 读到的总是已提交版本；读者之间不再互相挤成 settings_busy，调用方仍在调用前后复核版本。
 # 函数用途: 执行一次设置文件事务，供公共入口在锁外发布成功提交通知。
-def _execute_transaction(context: object, operation: str, payload: dict, thread_id: str, scope: str, blocking: bool,
-                         authorization: dict | None) -> dict:
+def _execute_transaction(context: object, operation: str, payload: dict, thread_id: str, scope: str, blocking: bool) -> dict:
     path = model_profiles_path(context.home_paths)
     if operation == "read" and not blocking:
         thread = _load_thread(context, thread_id) if thread_id else None
@@ -172,7 +162,7 @@ def _execute_transaction(context: object, operation: str, payload: dict, thread_
     with locked_json_path(path, blocking=blocking):
         data = read_model_profiles(path)
         if scope == "thread" and operation != "read":
-            return _update_thread(context, data, thread_id, operation, payload, authorization)
+            return _update_thread(context, data, thread_id, operation, payload)
         if thread_id:
             store = context.conversation_store.threads
             with locked_json_path(store.storage.thread_path(thread_id), blocking=blocking):
@@ -181,39 +171,21 @@ def _execute_transaction(context: object, operation: str, payload: dict, thread_
         return _owner_operation(context, path, data, None, operation, payload, scope)
 
 
-# LLM: 手动群覆盖/实验建立先过群配置门并持策略锁到原 CAS 提交；read/revoke 保持免新增授权，通知仍在锁外。
-# 函数用途: 共用覆盖和实验许可事务；普通工具只开放读取与撤销，保存成功后令旧建议失效。
-def execute_decision_settings_operation(context: object, operation: str, payload: dict, *, thread_id: str = "", blocking: bool = True,
-                                        host_authorization: dict | None = None) -> dict:
+# LLM: 手动群覆盖先过群配置门并持策略锁到原 CAS 提交；read 保持免新增授权，通知仍在锁外。
+# 函数用途: 共用决策设置事务，保存成功后令旧建议失效。
+def execute_decision_settings_operation(context: object, operation: str, payload: dict, *, thread_id: str = "", blocking: bool = True) -> dict:
     scope = _validate_request(context, operation, payload, thread_id)
-    if (operation == "experiment_authorize") != (host_authorization is not None):
-        raise DecisionSettingsAccessError("建立实验许可只接受宿主显式用户控制入口。")
     if type(blocking) is not bool or not blocking and operation != "read":
         raise ModelProfileError("非阻塞选项仅供宿主读取决策设置。")
-    guard = (group_capability_guard(context, "assistant.configure", thread_id=thread_id)
-             if operation not in {"read", "experiment_revoke"} else nullcontext())
+    guard = group_capability_guard(context, "assistant.configure", thread_id=thread_id) if operation != "read" else nullcontext()
     with guard:
-        result = _execute_transaction(context, operation, payload, thread_id, scope, blocking, host_authorization)
+        result = _execute_transaction(context, operation, payload, thread_id, scope, blocking)
     return _finalize_settings_operation(context, operation, payload, result)
 
 
-# LLM: 仅原已授权宿主状态机调用，当前唯一调用是实验 grant/CAS 已复核后的自动 promotion；工具与 HTTP 不可选择此来源。
-# 函数用途: 提交系统自动设置转移，保留原 thread CAS、记账和通知，不把自动状态更新误判成人工配置。
-def _execute_host_decision_settings_patch(context, payload, *, thread_id):
-    scope = _validate_request(context, "patch", payload, thread_id)
-    if scope != "thread":
-        raise DecisionSettingsAccessError("宿主自动设置只支持原线程。")
-    result = _execute_transaction(context, "patch", payload, thread_id, scope, True, None)
-    return _finalize_settings_operation(context, "patch", payload, result)
-
-
-# LLM: 原文件事务已完成；记账和进程内通知不授予新权限、不持群策略锁，系统与人工提交共用原结果。
+# LLM: 原文件事务已完成；记账和进程内通知不授予新权限、不持群策略锁。
 # 函数用途: 在设置落盘后记录公开原因及通知当前工作片重新核对版本。
 def _finalize_settings_operation(context, operation, payload, result):
-    if operation == "experiment_revoke":
-        from .decision_experiment import revoke_original_experiment_budget
-
-        revoke_original_experiment_budget(context, result["experiment_authorization"])
     if operation in {"patch", "reset"}:
         # reason 只记录与展示（截断 200 字），不参与任何机器判断；写进与模型档案同一目录的修改账本，
         # /settings history 一类的入口可显示；超长时回执标明，让调用方知道原因被截断。

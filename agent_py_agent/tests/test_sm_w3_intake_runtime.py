@@ -70,6 +70,7 @@ from agent_py_agent.cli.gateway_loops import (
     _skill_learning_pending,
 )
 from agent_py_agent.tests.test_skill_learning import BODY, _ctx, _FakeBackend, _output
+from agent_py_agent.tests.test_skill_proposals import seed_proposals_from_candidates
 
 
 def _finalize_ctx(
@@ -519,7 +520,7 @@ def test_isolated_proposal_adoption_and_pruning_skip_corrupt_sibling(tmp_path: P
         ),
         applies_when="需要校验归档清单并核对表头编码时触发。",
     )
-    [valid] = proposals.propose_from_candidates([valid_cand])
+    [valid] = seed_proposals_from_candidates(proposals, [valid_cand])
     committed = proposals.confirm(valid.proposal_id, valid.revision)
     assert committed.ok
     (proposals.directory / "broken-corrupt.json").write_text("{corrupt", encoding="utf-8")
@@ -538,7 +539,7 @@ def test_isolated_proposal_adoption_and_pruning_skip_corrupt_sibling(tmp_path: P
         ),
         applies_when="需要清理旧临时归档文件时触发。",
     )
-    [stale] = proposals.propose_from_candidates([stale_cand])
+    [stale] = seed_proposals_from_candidates(proposals, [stale_cand])
     stale_path = proposals.directory / f"{stale.proposal_id}.json"
     assert cands.redact_content(content_hashes={stale_cand.content_hash}) >= 1
     (store.directory / "proposals").mkdir(parents=True, exist_ok=True)

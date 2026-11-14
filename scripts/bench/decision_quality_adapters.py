@@ -184,33 +184,6 @@ def model_selection(case: dict, shared: dict) -> tuple[dict, dict, dict]:
     return state, questions, {"model": set(case["expected"])}
 
 
-# LLM: 用产品 render_lesson_draft 在内存里生成合法草稿（hash 与渲染一致），组装待确认的 SkillProposal 后调用 _facts/_material；
-#   不写提案文件、不读 owner 目录。提案按用例顺序成为 proposal_<序号>，期望按序号写。
-# 函数用途: 生成 Skill 提案审核顺序（skill_proposal_review）一条用例的真实请求材料与期望答案。
-def skill_proposal_review(case: dict, shared: dict) -> tuple[dict, dict, dict]:
-    from agent_py_agent.agent.capability import decision_skill_proposal_review as module
-    from agent_py_agent.agent.capability.skill_proposals import (
-        PROPOSAL_PENDING,
-        SkillProposal,
-        SkillProposalSource,
-        SkillProposalTarget,
-        render_lesson_draft,
-    )
-
-    pending = []
-    for index, (skill_name, lesson, scenario) in enumerate(case["proposals"], start=1):
-        candidate = SimpleNamespace(content=lesson, scope={"applies_when": scenario}, candidate_id=f"candidate-{index}",
-                                    source_task_ids=(f"task-{index}",), source_run_ids=(f"run-{index}",))
-        draft = render_lesson_draft(candidate, skill_name)
-        pending.append(SkillProposal(f"proposal-{index}", 1, PROPOSAL_PENDING,
-                                     SkillProposalSource(f"candidate-{index}", draft.sha256, (f"task-{index}",), (f"run-{index}",)),
-                                     SkillProposalTarget(skill_name), draft,
-                                     f"2026-10-0{index}T00:00:00+00:00", f"2026-10-0{index}T00:00:00+00:00"))
-    pending = tuple(pending)
-    state, questions, _revision = module._material(pending, module._facts(pending))
-    return state, questions, {f"proposal_{number}": set(values) for number, values in case["expected"].items()}
-
-
 # LLM: 按用例步骤造本轮工具归档：verify 步是 run_command 的验证事件，edit 步是写入工具留下的 stale 状态；最后一步是当前回执。
 #   调用交付复核点的 _review_focuses/_material；期望按“项目根|kind|scope”写，这里按产品焦点顺序换算成 focus_<序号>。
 # 函数用途: 生成交付复核焦点（delivery_quality）一条用例的真实请求材料与期望答案。
@@ -314,5 +287,5 @@ def subagent_model(case: dict, shared: dict) -> tuple[dict, dict, dict]:
 # 已有用例的点位 → 适配函数；没登记的点位没有基准，不能默认打开（见 decision_quality_bench.gate_failures）。
 ADAPTERS = {"pre_recall": pre_recall, "recall": recall, "curator": curator, "curator_relation": curator_relation,
             "planning": planning, "external_material_order": external_material_order, "model_selection": model_selection,
-            "skill_proposal_review": skill_proposal_review, "delivery_quality": delivery_quality,
+            "delivery_quality": delivery_quality,
             "action_candidate": action_candidate, "skill_tool": skill_tool, "subagent_model": subagent_model}

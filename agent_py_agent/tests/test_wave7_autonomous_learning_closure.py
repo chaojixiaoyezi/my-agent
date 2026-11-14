@@ -694,17 +694,6 @@ def test_f10_service_keeps_renamed_pending_identity(tmp_path):
     assert {row['decision']['name'] for row in list_learning_proposals(store)} == {'one-method', 'same-renamed'}
 
 
-# LLM: 从 record_lesson 候选生成的提案应在统一资产表中保留同一个 proposal_id，不能丢失入口出处。
-# 函数用途: 检查 S1 候选提案与统一资产登记之间的来源关联。
-def test_f16_s1_candidate_has_unified_provenance(tmp_path):
-    from agent_py_agent.tests.test_skill_proposals import _record_lesson, _runtime
-
-    ctx = _runtime(tmp_path)
-    [proposal] = ctx.service.propose_from_candidates(_record_lesson(ctx))
-    rows = SkillLearningStore.for_home(ctx.home).load_registry().assets.values()
-    assert any(ref.get('proposal_id') == proposal.proposal_id for row in rows for ref in row['provenance'])
-
-
 # LLM: 明显危险的候选必须先被安全门拒绝，验证器调用记录和技能登记都应保持为空。
 # 函数用途: 验证发布晋升在调用执行验证器之前先落实内容安全检查。
 def test_f07_guard_rejects_before_execution_verifier(tmp_path):

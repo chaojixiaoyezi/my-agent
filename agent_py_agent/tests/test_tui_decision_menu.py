@@ -478,29 +478,6 @@ def test_pipe_thread_can_clean_legacy_background_override_without_offering_new_p
     asyncio.run(scenario())
 
 
-def test_pipe_experiment_boolean_can_save_and_reset_without_creating_authorization(tmp_path):
-    async def scenario():
-        gateway = Gateway(tmp_path)
-        async with running(tmp_path, gateway) as ui:
-            await open_scope(ui, thread=True)
-            assert "实验能力（仍需独立授权）：关闭" in visible(ui.app)
-            await choose(ui, 4)
-            assert "不建立实验许可" in visible(ui.app) and "当前联网实验不可用" in visible(ui.app)
-            await press(ui, b"\x1b[B\r")
-            view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
-            assert view["effective"]["experiment_enabled"] is True
-            assert view["experiment_authorization"] is None
-            await choose(ui, scope_index(gateway, "reset", thread=True))  # 原恢复列表也必须能显示新布尔字段
-            assert "实验能力（仍需独立授权）：开启" in visible(ui.app)
-            await press(ui, "\r")
-            view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
-            assert "experiment_enabled" not in view["overrides"]["thread"]
-            assert view["effective"]["experiment_enabled"] is False and view["experiment_authorization"] is None
-            assert not hasattr(gateway.host, "_model_call_ledger")
-            assert not any(op in {"probe", "decision_probe", "decision_experiment_authorize"} for op, _ in gateway.calls)
-    asyncio.run(scenario())
-
-
 def test_menu_points_follow_the_schema_registry_and_reset_can_list_pre_recall(tmp_path):
     from agent_py_agent.agent.settings.decision_settings_schema import POINTS
     from agent_py_agent.cli.chat_parts.tui_decision_menu import _reset_label

@@ -206,22 +206,6 @@ class GatewayTaskBindingWriter:
             self.request_path, self.request_id, self.execution_attempt_id,
         )("bind_runtime_authority", persist)
 
-    # LLM: core 在主轮发布 run/attempt 后、首次模型调用前调用；只消费入口冻结的 /experiment 参数，回执存在即不再授权。
-    # 实现归 request_experiment.py，失败只提示用户，不阻断业务回合，也不改变本类其它绑定。
-    # 函数用途: 为本请求执行至多一次的决策实验授权。
-    def grant_decision_experiment(self, agent: object, params: object) -> dict | None:
-        from .request_experiment import grant_request_decision_experiment
-
-        return grant_request_decision_experiment(self, agent, params)
-
-    # LLM: 只读：user_config 的 decision_read 在已有授权信封时经当前运行参数找到本写入器调用；实现归 request_experiment_records。
-    #   请求记录路径来自本写入器（原 Gateway 队列），不接受模型参数；不写文件、不触发晋升。
-    # 函数用途: 为设置读取提供当前会话实验证据的只读评估。
-    def decision_experiment_evaluation(self, agent: object, thread_id: str, authorization: dict) -> dict:
-        from .request_experiment_records import thread_experiment_evaluation
-
-        return thread_experiment_evaluation(self, agent, thread_id=thread_id, authorization=authorization)
-
     # LLM: 只读：audit_records 工具经当前运行参数找到本写入器调用；队列目录来自本写入器的请求路径（原 Gateway 队列），
     #   不接受模型参数，也不信任 agent 自身的 Gateway 配置；实现归 request_audit_records，不写任何文件。
     # 函数用途: 为审计工具提供指定会话在请求记录里的决策观察。

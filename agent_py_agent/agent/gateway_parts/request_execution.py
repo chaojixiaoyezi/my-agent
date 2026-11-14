@@ -5,8 +5,6 @@
 # 同turn展示及已评估事实仅由本请求局部回调持有，失效清除后本turn不再推荐，不进恢复账或结果。
 # 延迟transcript Compact沿同次恢复准备提交；原CAS后的上下文必须回传至下一溢出或最终持久化。
 # typed overflow携带原生IR与精确插话ID，下一轮重建权限/前缀，不能用归档preview替代原完整工具回执。
-# 决策实验对照记录由能力观察出口拆出写入请求记录；回合正常收尾后才补写实际工具用量并在 apply 授权内检查晋升。
-# 新晋升提示并入当轮原 host_notice 流和 final；开轮旧提示不重发，联测 test_decision_experiment_notice 与 test_host_notices。
 # 本轮工具排的提示（details.turn_request_id 是本请求）同批发布；别的来源中途到的仍留下一轮，联测 test_host_notices。
 # 内部background只消费原canonical来源；原运输或心跳/Call停止unknown上抛至claim出口，停止本线程资源但不封终态或发续跑许可。
 # LLM: Bot在receipt复验后绑定私有工具视图；原执行器守目录/离线/总预算，Compact不重置额度，不改普通会话依赖。
@@ -68,7 +66,6 @@ from ..tooling.operation_verification import public_operation_verification
 from . import (
     request_binding,
     request_context,
-    request_experiment_records,
     request_history,
     request_prompt,
 )
@@ -531,10 +528,8 @@ def _execute_gateway_conversation_turn(
         conversation,
         observer=observer,
     )
-    # 实验收尾只在回合正常返回后执行；普通请求零 I/O，停止/失败不补写，任何异常都不改变本轮结果。
-    promoted = request_experiment_records.finish_decision_experiment_turn(context, result)
-    # 能力包宿主核验结论（核验账本的结构化事实）和实验晋升提示同一批发布、同一批随最终回复提交。
-    promoted += queue_pack_verification_notice(context, conversation, result)
+    # 能力包宿主核验结论（核验账本的结构化事实）同一批发布、同一批随最终回复提交。
+    promoted = queue_pack_verification_notice(context, conversation, result)
     promoted += _turn_tool_notices(context, conversation, notices + promoted)
     notices += _publish_gateway_host_notices(context, conversation, notices=promoted)
     return request_history.persist_gateway_assistant_result(context, conversation, result, host_notices=notices)
@@ -786,8 +781,6 @@ def _run_gateway_turn_with_conversation_compact(
         run_params.capability_presentation_evaluated = presentation_evaluated
         run_params.capability_presentation_turn_id = str(request.get("execution_attempt_id") or context.request_id)
         run_params.capability_presentation_callback = retain_presentation
-        run_params.capability_presentation_observer = partial(
-            request_experiment_records.observe_capability_presentation, context)
         from ..conversation.bot_tool_policy import BotExecutionGuard, bot_execution_scope
 
         if isinstance(run_params, _BotGatewayRunParams) and bot_guard is None:

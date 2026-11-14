@@ -14,8 +14,6 @@ from ..runtime_context import (
     current_subagent_attempt_id,
     current_subagent_run_id,
     current_task_attributes,
-    restore_current_subagent_context,
-    set_current_subagent_context,
 )
 
 
@@ -81,24 +79,9 @@ class DecisionSendPermit:
         if time.monotonic() >= self.deadline:
             raise ProviderSendRefused("deadline_exhausted")
 
-    # LLM: 在发送线程临时恢复调用线程的 runner 身份再复读设置；复读异常（锁忙、坏配置）一律拒绝发送。
-    # 函数用途: 按当前设置重跑实验准入并比较策略与连接版本，任何变化都拒绝。
+    # 函数用途: 实验能力已退役，发送复核统一按不可用拒绝。
     def _check_current(self) -> None:
-        from .decision_experiment import experiment_current
-
-        run_id, attempt_id, attributes = self.runner_context
-        previous = set_current_subagent_context(self.agent, run_id=run_id, attempt_id=attempt_id, task_attributes=attributes)
-        try:
-            reason = experiment_current(self.agent, self.params, thread_id=self.experiment.thread_id, point=self.experiment.point,
-                                        revision=self.experiment.policy_revision, connection=self.binding.connection_revision)
-        except (InterruptedError, KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as exc:
-            raise ProviderSendRefused("experiment_state_unavailable") from exc
-        finally:
-            restore_current_subagent_context(self.agent, previous)
-        if reason:
-            raise ProviderSendRefused(reason)
+        raise ProviderSendRefused("experiment_state_unavailable")
 
 
 # LLM: 必须在预留成功后的调用线程执行，捕获该线程 runner 身份；本函数不消费预算、不联网。

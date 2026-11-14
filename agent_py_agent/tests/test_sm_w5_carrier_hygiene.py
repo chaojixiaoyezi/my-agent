@@ -38,6 +38,7 @@ from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.models import SubAgentParsedOutput, SubAgentTask
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+from agent_py_agent.tests.test_skill_proposals import seed_proposals_from_candidates
 
 
 def _make_candidate(
@@ -436,7 +437,7 @@ def _seed_s1(ctx: SimpleNamespace, lesson: str, run_id: str) -> tuple[str, str]:
         updated_at=100.0,
     )
     recorded = ctx.manager.memory_candidates.record_result_candidates(task, lessons=[lesson], findings=[])
-    [proposal] = ctx.s1_service.propose_from_candidates(recorded)
+    [proposal] = seed_proposals_from_candidates(ctx.s1_service, recorded)
     return proposal.proposal_id, recorded[0].candidate_id
 
 

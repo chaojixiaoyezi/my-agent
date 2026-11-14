@@ -40,7 +40,6 @@ from .decision_candidates import (
     selected_capabilities,
     selection_questions,
 )
-from .decision_experiment_sample import experiment_sample_record
 
 # 宿主 state 副本里只供本机核对、不发给 Jev 的键：完整候选行和候选投影截断计数。
 _HOST_ONLY_STATE_KEYS = frozenset({"candidates", "candidate_projection"})
@@ -137,8 +136,7 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
             return _skip(original, agent, carried, reason)
         stage = begin_decision_stage(agent, params, operation_id="skill_tool:" + candidate_digest(operation))
         if stage.error_code or "skill_tool" not in stage.enabled_points:
-            return (_experiment_observe(agent, params, snapshot, contract=contract) if _experiment_eligible(stage, carried)
-                    else _skip(original, agent, carried, stage_miss_reason(stage, "skill_tool")))
+            return _skip(original, agent, carried, stage_miss_reason(stage, "skill_tool"))
         if carried is not None:
             return _restore_presentation(agent, params, snapshot, contract, stage, carried)
         policy = _policy(agent, stage.thread_id)
@@ -245,66 +243,6 @@ def _observed(presentation: CapabilityPresentation, base: dict, retain_reason: s
             required_skill_count=len(presentation.required_skill_ids),
         )
     return replace(presentation, observation=observation)
-
-
-# LLM: 普通阶段无错、该点普通模式为 off（不在 enabled_points）、同次读取提示可能有实验且本片没有携带展示时才进入实验；
-#   experiment_available 只是零 I/O 提示，真正准入仍由实验阶段复读设置决定。
-# 函数用途: 判断本工作片是否值得再建一次只观察的实验阶段，默认关闭时不增加任何读取。
-def _experiment_eligible(stage, carried) -> bool:
-    return not stage.error_code and stage.experiment_available and carried is None
-
-
-# LLM: 只在普通模式 off 时由宿主已授权的实验阶段调用；材料与普通路径同源，结果固定 observe，原快照原样返回。
-#   这是一次新评估的到达：实验阶段拒绝记阶段码或 experiment_forbidden，没有题记 nothing_to_recommend，调用前记 called。
-#   真正发起过实验决策时与普通路径一样附结构化 observation（不采用，保留原因即结果码），供宿主落盘核对；
-#   若调用进入过原账预留（outcome.experiment 有值），observation 另带 experiment_record（E2 对照记录），宿主拆出后写入请求记录。
-# 函数用途: 执行一次有预算的只观察实验，把结构化结果写入 finding，不改变模型可见的 prompt 或工具 schema。
-def _experiment_observe(agent, params, snapshot, *, contract) -> CapabilityPresentation:
-    original = CapabilityPresentation(snapshot)
-    operation = getattr(params, "request_id", "") or getattr(params, "run_id", "")
-    stage = begin_decision_stage(agent, params, operation_id="skill_tool:" + candidate_digest(operation), experiment=True)
-    if stage.error_code or "skill_tool" not in stage.enabled_points:
-        note_decision_reach(agent, "skill_tool", stage.error_code or "experiment_forbidden")
-        return replace(original, finding="skill_tool_decision:experiment:" + (stage.error_code or "experiment_point_forbidden"))
-    policy = _policy(agent, stage.thread_id)
-    discoverable = _skill_discoverable(agent, params, snapshot)
-    skills = agent.current_skill_snapshot()
-    state, questions, revision = counted_material(
-        agent, "skill_tool", lambda: _material(agent, params, snapshot, skills, policy, discoverable))
-    if not questions:
-        note_decision_reach(agent, "skill_tool", "nothing_to_recommend")
-        return original
-    wire_state = _wire_state(state)
-    note_decision_reach(agent, "skill_tool", CALLED)
-    outcome = decide(agent, params, stage, point="skill_tool", state=wire_state, questions=questions,
-                     candidates_revision=revision)
-    code = outcome.reason or outcome.status
-    observed = _observed(replace(original, finding="skill_tool_decision:experiment:" + code),
-                         _observation_base(stage, outcome, revision, (state, questions)), code)
-    if outcome.experiment is None:
-        return observed
-    projected, reason = _experiment_candidate(params, outcome, snapshot=snapshot, contract=contract, skills=skills,
-                                              material=(state, questions), policy=policy, discoverable=discoverable)
-    record = experiment_sample_record(agent, params, stage=stage, outcome=outcome, snapshot=snapshot,
-                                      candidates_revision=revision, question_count=len(questions),
-                                      candidate=projected, candidate_reason=reason)
-    return replace(observed, observation={**observed.observation, "experiment_record": record})
-
-
-# LLM: 候选只由原 selected_capabilities 与原 _project 纯投影算出，和 apply 路径同一规则；结果只进入实验记录，
-#   绝不返回给模型、不改展示快照。非成功、非选择或投影校验失败都只给结构化原因，不猜名单。
-# 函数用途: 计算“若按 apply 采用这次 Jev 回答，会展示/收起哪些工具”的候选投影。
-def _experiment_candidate(params, outcome, *, snapshot, contract, skills, material, policy, discoverable):
-    if outcome.status != "success" or outcome.response is None:
-        return None, "decision_" + outcome.status
-    state, questions = material
-    selected, reason = selected_capabilities(outcome.response, questions, state["candidates"])
-    if reason:
-        return None, "retained:" + reason
-    try:
-        return _project(params, snapshot, contract, skills, selected, policy, discoverable), ""
-    except ValueError:
-        return None, "projection_failed"
 
 
 # LLM: 版本比较结构化能力/必要引用、输入与生成连接摘要；不保存凭据、活快照或将Compact代际当作新权限。
