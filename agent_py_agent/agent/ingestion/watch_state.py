@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from copy import deepcopy
@@ -16,12 +17,23 @@ from hashlib import sha1, sha256
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import read_json_object_report
+from ..common.json_io import locked_json_path, read_json_object, read_json_object_report
+from ..common.nofollow_fs import NoFollowPathError, read_bytes_beneath
 from .config import IngestTuning, tuning_from_params
 from .engine import StreamDigestEngine
 
 _SCHEMA_VERSION = "watch-stream-state.v1"
 _DIR_NAME = "watch_state"
+_SAFE_WATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def is_valid_watch_id(watch_id: object) -> bool:
+    """Return True only for canonical single-segment watch identifiers."""
+    if not isinstance(watch_id, str):
+        return False
+    if not watch_id or ".." in watch_id or "/" in watch_id or "\\" in watch_id or "\x00" in watch_id:
+        return False
+    return _SAFE_WATCH_ID_RE.fullmatch(watch_id) is not None
 
 
 @dataclass
@@ -139,6 +151,7 @@ class WatchState:
     # 保证档时全 0;老 watch 升级时快照当前值——覆盖回执的 dropped 只算启用之后的增量
     # (启用后这些计数就不该再涨,涨了=违约,回执如实亮红)。
     audit_baseline: dict[str, int] = field(default_factory=dict)
+    source_binding_revision_seq: int = 0
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -181,38 +194,88 @@ def state_dir(owner_home: Path) -> Path:
     return Path(owner_home) / _DIR_NAME
 
 
+def _canonical_owner_home_key(owner_home: Path | str) -> str:
+    return str(Path(owner_home).expanduser().resolve(strict=False))
+
+
+def _watch_registry_key(owner_home: Path | str, watch_id: str) -> tuple[str, str]:
+    return (_canonical_owner_home_key(owner_home), str(watch_id))
+
+
 class WatchRegistry:
     """进程内 watch 注册表;open 幂等(同 owner+url 同 id),miss 时从盘上快照复活。"""
 
     def __init__(self) -> None:
-        self._states: dict[str, WatchState] = {}
+        self._states: dict[tuple[str, str], WatchState] = {}
         self._lock = threading.RLock()
 
-    def get(self, watch_id: str) -> WatchState | None:
+    def _matching_entries(
+        self,
+        watch_id: str,
+    ) -> list[tuple[tuple[str, str], WatchState]]:
+        target = str(watch_id)
+        return [
+            (key, state)
+            for key, state in self._states.items()
+            if key[1] == target
+        ]
+
+    def get(
+        self,
+        watch_id: str,
+        owner_home: Path | str | None = None,
+    ) -> WatchState | None:
+        if not is_valid_watch_id(watch_id):
+            return None
         with self._lock:
-            return self._states.get(watch_id)
+            if owner_home is not None:
+                key = _watch_registry_key(owner_home, watch_id)
+                state = self._states.get(key)
+                if state is not None:
+                    if _canonical_owner_home_key(state.owner_home) == key[0]:
+                        return state
+                    self._states.pop(key, None)
+                return None
+            matches = self._matching_entries(watch_id)
+            if len(matches) == 1:
+                return matches[0][1]
+            return None
 
     def put(self, state: WatchState) -> None:
         with self._lock:
-            self._states[state.watch_id] = state
+            self._states[_watch_registry_key(state.owner_home, state.watch_id)] = state
 
-    def drop(self, watch_id: str) -> None:
+    def drop(
+        self,
+        watch_id: str,
+        owner_home: Path | str | None = None,
+    ) -> None:
         with self._lock:
-            self._states.pop(watch_id, None)
+            if owner_home is not None:
+                self._states.pop(_watch_registry_key(owner_home, watch_id), None)
+                return
+            matches = self._matching_entries(watch_id)
+            if len(matches) == 1:
+                self._states.pop(matches[0][0], None)
 
     def ids(self) -> list[str]:
         """当前注册的 watch_id 只读快照(测试 teardown 停止收割线程用)。"""
         with self._lock:
-            return list(self._states.keys())
+            return list(dict.fromkeys(key[1] for key in self._states))
 
     def get_or_load(self, owner_home: Path, watch_id: str) -> WatchState | None:
+        if not is_valid_watch_id(watch_id):
+            return None
         with self._lock:
-            state = self._states.get(watch_id)
+            key = _watch_registry_key(owner_home, watch_id)
+            state = self._states.get(key)
             if state is not None:
-                return state
+                if _canonical_owner_home_key(state.owner_home) == key[0]:
+                    return state
+                self._states.pop(key, None)
             state = load_state(owner_home, watch_id)
             if state is not None:
-                self._states[watch_id] = state
+                self._states[_watch_registry_key(state.owner_home, state.watch_id)] = state
             return state
 
 
@@ -251,10 +314,13 @@ def _window_seconds(params: dict[str, object]) -> int:
 
 def persist_state(state: WatchState) -> None:
     """快照原子写盘(tmp+rename);包含引擎画像/census,重启后从游标+温启动续。"""
+    if not is_valid_watch_id(state.watch_id):
+        raise ValueError(f"invalid watch_id: {state.watch_id!r}")
     path = state_dir(state.owner_home) / f"{state.watch_id}.json"
-    disk = _disk_merge_facts(path)
-    _merge_monotonic_disk_state(state, disk)
-    _write_state_payload(path, _state_payload(state, disk))
+    with locked_json_path(path):
+        disk = _disk_merge_facts(path)
+        _merge_monotonic_disk_state(state, disk)
+        _write_state_payload(path, _state_payload(state, disk))
 
 
 def persist_source_binding_revision(state: WatchState) -> None:
@@ -269,26 +335,112 @@ def persist_source_binding_revision(state: WatchState) -> None:
     identity, URL, mode and committed record boundary did not change.
     """
 
+    if not is_valid_watch_id(state.watch_id):
+        raise ValueError(f"invalid watch_id: {state.watch_id!r}")
     path = state_dir(state.owner_home) / f"{state.watch_id}.json"
     profile_ref = state.source_profile_ref
     document_refs = list(state.document_refs)
     config_version = state.source_config_version
-    disk = _disk_merge_facts(path)
-    for key in (
-        "source_profile_ref",
-        "document_refs",
-        "source_config_version",
-    ):
-        disk.pop(key, None)
-    _merge_monotonic_disk_state(state, disk)
-    state.source_profile_ref = profile_ref
-    state.document_refs = document_refs
-    state.source_config_version = config_version
-    _write_state_payload(path, _state_payload(state, disk))
+    with locked_json_path(path):
+        disk = _disk_merge_facts(path)
+        for key in (
+            "source_profile_ref",
+            "document_refs",
+            "source_config_version",
+        ):
+            disk.pop(key, None)
+        _merge_monotonic_disk_state(state, disk, prefer_disk_commit=True)
+        state.source_profile_ref = profile_ref
+        state.document_refs = document_refs
+        state.source_config_version = config_version
+        state.source_binding_revision_seq = (
+            max(
+                int(state.source_binding_revision_seq or 0),
+                int(disk.get("source_binding_revision_seq") or 0),
+            )
+            + 1
+        )
+        _write_state_payload(path, _state_payload(state, disk))
 
 
-def _merge_monotonic_disk_state(state: WatchState, disk: dict[str, Any]) -> None:
+def _merge_disk_progress_facts(
+    state: WatchState,
+    disk: dict[str, Any],
+    *,
+    prefer_disk_commit: bool,
+) -> None:
+    """Merge monotonic progress and durable harvest commit identity from disk."""
+
+    orig_position = (
+        max(0, int(state.spool_generation or 0)),
+        max(0, int(state.spool_seq or 0)),
+        max(0, int(state.cursor or 0)),
+        max(0, int(state.line_cursor or 0)),
+    )
+    orig_commit_id = state.harvest_commit_id
+    disk_gen = max(0, int(disk.get("spool_generation") or 0))
+    disk_seq = max(0, int(disk.get("spool_seq") or 0))
+    disk_cursor = max(0, int(disk.get("cursor") or 0))
+    disk_line_cursor = max(0, int(disk.get("line_cursor") or 0))
+    disk_position = (disk_gen, disk_seq, disk_cursor, disk_line_cursor)
+
+    state.spool_generation = max(orig_position[0], disk_gen)
+    state.spool_seq = max(orig_position[1], disk_seq)
+    state.cursor = max(orig_position[2], disk_cursor)
+    state.line_cursor = max(orig_position[3], disk_line_cursor)
+    state.last_pull_at = max(state.last_pull_at, float(disk.get("last_pull_at") or 0.0))
+    state.last_poll_at = max(state.last_poll_at, float(disk.get("last_poll_at") or 0.0))
+    state.feedback_offset = max(
+        state.feedback_offset,
+        int(disk.get("feedback_offset") or 0),
+    )
+
+    disk_totals = disk.get("totals")
+    if isinstance(disk_totals, dict):
+        for key, raw_value in disk_totals.items():
+            key_str = str(key)
+            if key_str not in state.totals:
+                continue
+            try:
+                value = int(raw_value or 0)
+            except (TypeError, ValueError):
+                continue
+            state.totals[key_str] = max(int(state.totals.get(key_str, 0) or 0), value)
+
+    disk_commit_id = str(disk.get("harvest_commit_id") or "")
+    if prefer_disk_commit:
+        if disk_commit_id:
+            state.harvest_commit_id = disk_commit_id
+        if disk_position > orig_position or (
+            disk_commit_id and disk_commit_id != orig_commit_id
+        ):
+            checkpoint = disk.get("source_checkpoint")
+            if isinstance(checkpoint, dict):
+                state.source_checkpoint = deepcopy(checkpoint)
+            if "last_reached_end" in disk and disk.get("last_reached_end") is not None:
+                state.last_reached_end = bool(disk.get("last_reached_end"))
+            if "file_identity" in disk and disk.get("file_identity") is not None:
+                state.file_identity = str(disk.get("file_identity") or "")
+            if "file_fragment_start" in disk and disk.get("file_fragment_start") is not None:
+                state.file_fragment_start = int(disk.get("file_fragment_start") or 0)
+            if "file_fragment_bytes" in disk and disk.get("file_fragment_bytes") is not None:
+                state.file_fragment_bytes = int(disk.get("file_fragment_bytes") or 0)
+            if "file_fragment_sha256" in disk and disk.get("file_fragment_sha256") is not None:
+                state.file_fragment_sha256 = str(disk.get("file_fragment_sha256") or "")
+    elif disk_commit_id:
+        if (disk_gen, disk_seq) > (orig_position[0], orig_position[1]) or not state.harvest_commit_id:
+            state.harvest_commit_id = disk_commit_id
+
+
+def _merge_monotonic_disk_state(
+    state: WatchState,
+    disk: dict[str, Any],
+    *,
+    prefer_disk_commit: bool = False,
+) -> None:
     """Preserve facts another process may have advanced before snapshot replace."""
+    if not disk:
+        return
 
     state.window_finalized_at = max(
         state.window_finalized_at,
@@ -320,16 +472,42 @@ def _merge_monotonic_disk_state(state: WatchState, disk: dict[str, Any]) -> None
             float(disk.get("ingest_records_per_second") or 0.0),
         )
         state.ingest_rate_updated_at = disk_ingest_updated_at
-    if state.audit_guarantee or bool(disk.get("audit_guarantee")):
+    _merge_disk_progress_facts(state, disk, prefer_disk_commit=prefer_disk_commit)
+    disk_binding_rev = max(0, int(disk.get("source_binding_revision_seq") or 0))
+    state_binding_rev = max(0, int(state.source_binding_revision_seq or 0))
+    if not prefer_disk_commit and (
+        disk_binding_rev > state_binding_rev
+        or state.audit_guarantee
+        or bool(disk.get("audit_guarantee"))
+    ):
         state.owner_id = str(disk.get("owner_id") or state.owner_id)
         state.source_id = str(disk.get("source_id") or state.source_id)
-        state.source_profile_ref = str(disk.get("source_profile_ref") or state.source_profile_ref)
-        disk_document_refs = disk.get("document_refs")
-        if isinstance(disk_document_refs, list) and disk_document_refs:
-            state.document_refs = [str(item) for item in disk_document_refs if str(item).strip()]
-        state.source_config_version = str(
-            disk.get("source_config_version") or state.source_config_version
-        )
+        disk_config_version = str(disk.get("source_config_version") or "")
+        if disk_binding_rev > state_binding_rev or (
+            disk_config_version and disk_config_version != state.source_config_version
+        ):
+            if "source_profile_ref" in disk and disk.get("source_profile_ref") is not None:
+                state.source_profile_ref = str(disk.get("source_profile_ref") or "")
+            disk_document_refs = disk.get("document_refs")
+            if isinstance(disk_document_refs, list):
+                state.document_refs = [
+                    str(item) for item in disk_document_refs if str(item).strip()
+                ]
+            if disk_config_version:
+                state.source_config_version = disk_config_version
+        else:
+            state.source_profile_ref = str(
+                disk.get("source_profile_ref") or state.source_profile_ref
+            )
+            disk_document_refs = disk.get("document_refs")
+            if isinstance(disk_document_refs, list) and disk_document_refs:
+                state.document_refs = [
+                    str(item) for item in disk_document_refs if str(item).strip()
+                ]
+            state.source_config_version = (
+                disk_config_version or state.source_config_version
+            )
+        state.source_binding_revision_seq = max(state_binding_rev, disk_binding_rev)
 
 
 def _merge_audit_run_fields(state: WatchState, disk: dict[str, Any]) -> None:
@@ -367,6 +545,7 @@ def _state_payload(state: WatchState, disk: dict[str, Any]) -> dict[str, Any]:
         "source_profile_ref": state.source_profile_ref,
         "document_refs": list(state.document_refs),
         "source_config_version": state.source_config_version,
+        "source_binding_revision_seq": state.source_binding_revision_seq,
         "source_checkpoint": deepcopy(state.source_checkpoint),
         "cursor": state.cursor,
         "opened_at": state.opened_at,
@@ -445,35 +624,53 @@ def _write_state_payload(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
+_MERGE_FACT_KEYS = (
+    "closed",
+    "window_finalized_at",
+    "closed_at",
+    "close_reason",
+    "close_pending_records",
+    "audit_guarantee",
+    "prepare_root_task_id",
+    "audit_root_task_id",
+    "audit_run_epoch",
+    "audit_objective",
+    "audit_run_prompt",
+    "source_task_goal",
+    "source_id",
+    "owner_id",
+    "source_profile_ref",
+    "document_refs",
+    "source_config_version",
+    "source_binding_revision_seq",
+    "ingest_window_started_at",
+    "ingest_window_start_records",
+    "ingest_records_per_second",
+    "ingest_rate_updated_at",
+    "harvest_commit_id",
+    "cursor",
+    "line_cursor",
+    "spool_seq",
+    "spool_generation",
+    "totals",
+    "last_pull_at",
+    "last_poll_at",
+    "feedback_offset",
+    "source_checkpoint",
+    "last_reached_end",
+    "file_identity",
+    "file_fragment_start",
+    "file_fragment_bytes",
+    "file_fragment_sha256",
+)
+
+
 def _disk_merge_facts(path: Path) -> dict[str, Any]:
     """读盘上须单调合并的事实，整体覆写前先取，防跨进程覆盖。"""
-    report = read_json_object_report(path, context="watch_state.merge_read")
-    if report.load_error is not None:
+    state_doc = read_json_object(path)
+    if not state_doc:
         return {}
-    payload = report.payload
-    return {
-        "closed": payload.get("closed"),
-        "window_finalized_at": payload.get("window_finalized_at"),
-        "closed_at": payload.get("closed_at"),
-        "close_reason": payload.get("close_reason"),
-        "close_pending_records": payload.get("close_pending_records"),
-        "audit_guarantee": payload.get("audit_guarantee"),
-        "prepare_root_task_id": payload.get("prepare_root_task_id"),
-        "audit_root_task_id": payload.get("audit_root_task_id"),
-        "audit_run_epoch": payload.get("audit_run_epoch"),
-        "audit_objective": payload.get("audit_objective"),
-        "audit_run_prompt": payload.get("audit_run_prompt"),
-        "source_task_goal": payload.get("source_task_goal"),
-        "source_id": payload.get("source_id"),
-        "owner_id": payload.get("owner_id"),
-        "source_profile_ref": payload.get("source_profile_ref"),
-        "document_refs": payload.get("document_refs"),
-        "source_config_version": payload.get("source_config_version"),
-        "ingest_window_started_at": payload.get("ingest_window_started_at"),
-        "ingest_window_start_records": payload.get("ingest_window_start_records"),
-        "ingest_records_per_second": payload.get("ingest_records_per_second"),
-        "ingest_rate_updated_at": payload.get("ingest_rate_updated_at"),
-    }
+    return {key: state_doc.get(key) for key in _MERGE_FACT_KEYS}
 
 
 def refresh_scalars_from_disk(state: WatchState) -> None:
@@ -554,26 +751,43 @@ def _refresh_durable_totals(state: WatchState, payload: dict[str, Any]) -> None:
     state.harvest_commit_id = str(payload.get("harvest_commit_id") or "") or state.harvest_commit_id
 
 
-def _refresh_audit_identity(state: WatchState, payload: dict[str, Any]) -> None:
-    state.audit_guarantee = bool(state.audit_guarantee or payload.get("audit_guarantee"))
+def _refresh_audit_identity(state: WatchState, state_doc: dict[str, Any]) -> None:
+    state.audit_guarantee = bool(state.audit_guarantee or state_doc.get("audit_guarantee"))
     state.prepare_root_task_id = state.prepare_root_task_id or str(
-        payload.get("prepare_root_task_id") or ""
+        state_doc.get("prepare_root_task_id") or ""
     )
     state.audit_root_task_id = state.audit_root_task_id or str(
-        payload.get("audit_root_task_id") or ""
+        state_doc.get("audit_root_task_id") or ""
     )
-    _merge_audit_run_fields(state, payload)
-    state.source_id = str(payload.get("source_id") or state.source_id)
-    state.owner_id = str(payload.get("owner_id") or state.owner_id)
-    state.source_profile_ref = str(payload.get("source_profile_ref") or state.source_profile_ref)
-    disk_document_refs = payload.get("document_refs")
-    if isinstance(disk_document_refs, list) and disk_document_refs:
-        state.document_refs = [str(item) for item in disk_document_refs if str(item).strip()]
-    state.source_config_version = str(
-        payload.get("source_config_version") or state.source_config_version
-    )
-    state.last_error = str(payload.get("last_error") or "") or state.last_error
-    state.last_error_code = str(payload.get("last_error_code") or "") or state.last_error_code
+    _merge_audit_run_fields(state, state_doc)
+    state.source_id = str(state_doc.get("source_id") or state.source_id)
+    state.owner_id = str(state_doc.get("owner_id") or state.owner_id)
+    disk_binding_rev = max(0, int(state_doc.get("source_binding_revision_seq") or 0))
+    state_binding_rev = max(0, int(state.source_binding_revision_seq or 0))
+    disk_config_version = str(state_doc.get("source_config_version") or "")
+    if disk_binding_rev > state_binding_rev or (
+        disk_config_version and disk_config_version != state.source_config_version
+    ):
+        if "source_profile_ref" in state_doc and state_doc.get("source_profile_ref") is not None:
+            state.source_profile_ref = str(state_doc.get("source_profile_ref") or "")
+        disk_document_refs = state_doc.get("document_refs")
+        if isinstance(disk_document_refs, list):
+            state.document_refs = [
+                str(item) for item in disk_document_refs if str(item).strip()
+            ]
+        if disk_config_version:
+            state.source_config_version = disk_config_version
+    else:
+        state.source_profile_ref = str(state_doc.get("source_profile_ref") or state.source_profile_ref)
+        disk_document_refs = state_doc.get("document_refs")
+        if isinstance(disk_document_refs, list) and disk_document_refs:
+            state.document_refs = [str(item) for item in disk_document_refs if str(item).strip()]
+        state.source_config_version = str(
+            disk_config_version or state.source_config_version
+        )
+    state.source_binding_revision_seq = max(state_binding_rev, disk_binding_rev)
+    state.last_error = str(state_doc.get("last_error") or "") or state.last_error
+    state.last_error_code = str(state_doc.get("last_error_code") or "") or state.last_error_code
 
 
 def _refresh_ingest_rate(state: WatchState, payload: dict[str, Any]) -> None:
@@ -604,82 +818,110 @@ def _refresh_engine_totals(state: WatchState, payload: dict[str, Any]) -> None:
             state.engine.totals[key] = max(state.engine.totals[key], int(value))
 
 
-def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
-    path = state_dir(owner_home) / f"{watch_id}.json"
-    report = read_json_object_report(path, context="watch_state.read")
-    if report.load_error is not None:
+def _read_watch_snapshot_doc(owner_home: Path, watch_id: str) -> dict[str, Any] | None:
+    if not is_valid_watch_id(watch_id):
         return None
-    payload = report.payload
-    source_url = str(payload.get("source_url") or "")
+    canonical_root = Path(owner_home).expanduser().resolve(strict=False)
+    try:
+        raw = read_bytes_beneath(
+            canonical_root,
+            (_DIR_NAME, f"{watch_id}.json"),
+            max_bytes=16 * 1024 * 1024,
+            require_dir_fd=False,
+        )
+    except (NoFollowPathError, OSError, ValueError):
+        return None
+    if raw is None:
+        return None
+    try:
+        state_doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(state_doc, dict):
+        return None
+    if str(state_doc.get("watch_id") or "") != watch_id:
+        return None
+    return state_doc
+
+
+def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
+    state_doc = _read_watch_snapshot_doc(owner_home, watch_id)
+    if state_doc is None:
+        return None
+    source_url = str(state_doc.get("source_url") or "")
     if not source_url:
         return None
     state = new_state(
         owner_home,
         source_url,
-        dict(payload.get("tuning") or {}),
-        watch_id=str(payload.get("watch_id") or watch_id),
+        dict(state_doc.get("tuning") or {}),
+        watch_id=str(state_doc.get("watch_id") or watch_id),
     )
-    state.cursor = int(payload.get("cursor") or 0)
-    state.owner_id = str(payload.get("owner_id") or "")
-    state.source_id = str(payload.get("source_id") or source_id_for(owner_home, source_url))
-    state.source_profile_ref = str(payload.get("source_profile_ref") or "")
-    raw_document_refs = payload.get("document_refs")
+    state.cursor = int(state_doc.get("cursor") or 0)
+    state.owner_id = str(state_doc.get("owner_id") or "")
+    state.source_id = str(state_doc.get("source_id") or source_id_for(owner_home, source_url))
+    state.source_profile_ref = str(state_doc.get("source_profile_ref") or "")
+    raw_document_refs = state_doc.get("document_refs")
     state.document_refs = (
         [str(item) for item in raw_document_refs if str(item).strip()]
         if isinstance(raw_document_refs, list)
         else []
     )
-    state.source_config_version = str(payload.get("source_config_version") or "")
-    checkpoint = payload.get("source_checkpoint")
+    state.source_config_version = str(state_doc.get("source_config_version") or "")
+    state.source_binding_revision_seq = max(
+        0,
+        int(state_doc.get("source_binding_revision_seq") or 0),
+    )
+    checkpoint = state_doc.get("source_checkpoint")
     state.source_checkpoint = deepcopy(checkpoint) if isinstance(checkpoint, dict) else {}
-    state.opened_at = float(payload.get("opened_at") or time.time())
-    state.watch_window_seconds = int(payload.get("watch_window_seconds") or 0)
-    state.window_finalized_at = float(payload.get("window_finalized_at") or 0.0)
-    state.closed = bool(payload.get("closed"))
-    state.closed_at = float(payload.get("closed_at") or 0.0)
-    state.close_reason = str(payload.get("close_reason") or "")
+    state.opened_at = float(state_doc.get("opened_at") or time.time())
+    state.watch_window_seconds = int(state_doc.get("watch_window_seconds") or 0)
+    state.window_finalized_at = float(state_doc.get("window_finalized_at") or 0.0)
+    state.closed = bool(state_doc.get("closed"))
+    state.closed_at = float(state_doc.get("closed_at") or 0.0)
+    state.close_reason = str(state_doc.get("close_reason") or "")
     state.close_pending_records = max(
         0,
-        int(payload.get("close_pending_records") or 0),
+        int(state_doc.get("close_pending_records") or 0),
     )
-    state.last_pull_at = float(payload.get("last_pull_at") or 0.0)
-    state.last_reached_end = bool(payload.get("last_reached_end"))
-    state.last_error = str(payload.get("last_error") or "")
-    state.last_error_code = str(payload.get("last_error_code") or "")
-    state.ingest_window_started_at = float(payload.get("ingest_window_started_at") or 0.0)
+    state.last_pull_at = float(state_doc.get("last_pull_at") or 0.0)
+    state.last_reached_end = bool(state_doc.get("last_reached_end"))
+    state.last_error = str(state_doc.get("last_error") or "")
+    state.last_error_code = str(state_doc.get("last_error_code") or "")
+    state.ingest_window_started_at = float(state_doc.get("ingest_window_started_at") or 0.0)
     state.ingest_window_start_records = max(
         0,
-        int(payload.get("ingest_window_start_records") or 0),
+        int(state_doc.get("ingest_window_start_records") or 0),
     )
     state.ingest_records_per_second = max(
         0.0,
-        float(payload.get("ingest_records_per_second") or 0.0),
+        float(state_doc.get("ingest_records_per_second") or 0.0),
     )
-    state.ingest_rate_updated_at = float(payload.get("ingest_rate_updated_at") or 0.0)
-    state.spool_seq = int(payload.get("spool_seq") or 0)
-    state.spool_generation = int(payload.get("spool_generation") or 0)
-    state.harvest_commit_id = str(payload.get("harvest_commit_id") or "")
-    state.source_mode = str(payload.get("source_mode") or "")
-    state.line_cursor = int(payload.get("line_cursor") or 0)
-    state.file_identity = str(payload.get("file_identity") or "")
-    state.file_fragment_start = int(payload.get("file_fragment_start") or 0)
-    state.file_fragment_bytes = int(payload.get("file_fragment_bytes") or 0)
-    state.file_fragment_sha256 = str(payload.get("file_fragment_sha256") or "")
-    state.last_poll_at = float(payload.get("last_poll_at") or 0.0)
-    state.judgment_note = str(payload.get("judgment_note") or "")
-    envelope = payload.get("source_envelope")
+    state.ingest_rate_updated_at = float(state_doc.get("ingest_rate_updated_at") or 0.0)
+    state.spool_seq = int(state_doc.get("spool_seq") or 0)
+    state.spool_generation = int(state_doc.get("spool_generation") or 0)
+    state.harvest_commit_id = str(state_doc.get("harvest_commit_id") or "")
+    state.source_mode = str(state_doc.get("source_mode") or "")
+    state.line_cursor = int(state_doc.get("line_cursor") or 0)
+    state.file_identity = str(state_doc.get("file_identity") or "")
+    state.file_fragment_start = int(state_doc.get("file_fragment_start") or 0)
+    state.file_fragment_bytes = int(state_doc.get("file_fragment_bytes") or 0)
+    state.file_fragment_sha256 = str(state_doc.get("file_fragment_sha256") or "")
+    state.last_poll_at = float(state_doc.get("last_poll_at") or 0.0)
+    state.judgment_note = str(state_doc.get("judgment_note") or "")
+    envelope = state_doc.get("source_envelope")
     state.source_envelope = dict(envelope) if isinstance(envelope, dict) else {}
-    sample_digest = payload.get("last_sample_digest")
+    sample_digest = state_doc.get("last_sample_digest")
     state.last_sample_digest = dict(sample_digest) if isinstance(sample_digest, dict) else {}
-    state.feedback_offset = int(payload.get("feedback_offset") or 0)
-    state.audit_guarantee = bool(payload.get("audit_guarantee"))
-    state.prepare_root_task_id = str(payload.get("prepare_root_task_id") or "")
-    state.audit_root_task_id = str(payload.get("audit_root_task_id") or "")
-    state.audit_run_epoch = max(0, int(payload.get("audit_run_epoch") or 0))
-    state.audit_objective = str(payload.get("audit_objective") or "")
-    state.audit_run_prompt = str(payload.get("audit_run_prompt") or "")
-    state.source_task_goal = str(payload.get("source_task_goal") or "")
-    baseline = payload.get("audit_baseline")
+    state.feedback_offset = int(state_doc.get("feedback_offset") or 0)
+    state.audit_guarantee = bool(state_doc.get("audit_guarantee"))
+    state.prepare_root_task_id = str(state_doc.get("prepare_root_task_id") or "")
+    state.audit_root_task_id = str(state_doc.get("audit_root_task_id") or "")
+    state.audit_run_epoch = max(0, int(state_doc.get("audit_run_epoch") or 0))
+    state.audit_objective = str(state_doc.get("audit_objective") or "")
+    state.audit_run_prompt = str(state_doc.get("audit_run_prompt") or "")
+    state.source_task_goal = str(state_doc.get("source_task_goal") or "")
+    baseline = state_doc.get("audit_baseline")
     state.audit_baseline = (
         {str(k): int(v) for k, v in baseline.items()} if isinstance(baseline, dict) else {}
     )
@@ -689,11 +931,11 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
         state.last_sample_digest = {}
         state.engine.apply_spec(None)
     else:
-        _restore_spec(state, payload.get("source_spec"))
-    for key, value in dict(payload.get("totals") or {}).items():
+        _restore_spec(state, state_doc.get("source_spec"))
+    for key, value in dict(state_doc.get("totals") or {}).items():
         if key in state.totals:
             state.totals[key] = int(value)
-    state.engine.restore(dict(payload.get("engine") or {}), time.time())
+    state.engine.restore(dict(state_doc.get("engine") or {}), time.time())
     return state
 
 
@@ -796,9 +1038,9 @@ def close_watch_state(
                 int(backlog.get("candidates_unjudged") or 0),
             )
             persist_state(state)
-    stop_harvester(state.watch_id)
+    stop_harvester(state.watch_id, state.owner_home)
     clear_source_worker_lease(state.owner_home, state.watch_id)
-    registry.drop(state.watch_id)
+    registry.drop(state.watch_id, state.owner_home)
     return {
         "watch_id": state.watch_id,
         "closed_at": state.closed_at,
@@ -871,35 +1113,33 @@ def reopen_on_disk(state: WatchState) -> None:
     吃掉别进程的 close;显式 open 是用户意图,必须能重开——真机实锤:close 过的源重启后
     再 open,内存态刚置 False 就被盘上旧 True 合并回去,收割线程按 closed 自停,盯守空转。
     绝不抛异常。"""
+    if not is_valid_watch_id(state.watch_id):
+        return
     path = state_dir(state.owner_home) / f"{state.watch_id}.json"
-    report = read_json_object_report(path, context="watch_state.reopen")
-    if report.load_error is not None:
-        return
-    payload = report.payload
-    disk_opened_at = float(payload.get("opened_at") or 0.0)
-    reset_window = (
-        float(state.opened_at or 0.0) > disk_opened_at
-        and float(state.window_finalized_at or 0.0) <= 0
-    )
-    if not payload.get("closed") and not reset_window:
-        return
-    payload["closed"] = False
-    payload["closed_at"] = 0.0
-    payload["close_reason"] = ""
-    payload["close_pending_records"] = 0
-    if reset_window:
-        # LLM: Explicitly reopening an expired window is the only operation
-        # allowed to clear the otherwise monotonic boundary-commit marker.
-        # 函数用途: 新一场窗口不能继承上一场“已最终补拉”事实，否则到点会少拉最后一拍。
-        payload["window_finalized_at"] = 0.0
-    try:
-        tmp = _unique_tmp(path)
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+    with locked_json_path(path):
+        state_doc = read_json_object(path)
+        if not state_doc:
+            return
+        disk_opened_at = float(state_doc.get("opened_at") or 0.0)
+        reset_window = (
+            float(state.opened_at or 0.0) > disk_opened_at
+            and float(state.window_finalized_at or 0.0) <= 0
         )
-        tmp.replace(path)
-    except OSError:
-        return
+        if not state_doc.get("closed") and not reset_window:
+            return
+        state_doc["closed"] = False
+        state_doc["closed_at"] = 0.0
+        state_doc["close_reason"] = ""
+        state_doc["close_pending_records"] = 0
+        if reset_window:
+            # LLM: Explicitly reopening an expired window is the only operation
+            # allowed to clear the otherwise monotonic boundary-commit marker.
+            # 函数用途: 新一场窗口不能继承上一场“已最终补拉”事实，否则到点会少拉最后一拍。
+            state_doc["window_finalized_at"] = 0.0
+        try:
+            _write_state_payload(path, state_doc)
+        except OSError:
+            return
 
 
 def audit_append(state: WatchState, record: dict[str, Any]) -> bool:
@@ -937,6 +1177,7 @@ __all__ = [
     "close_audit_watches_for_task",
     "close_prepare_watches_for_task",
     "close_watch_state",
+    "is_valid_watch_id",
     "list_states",
     "load_state",
     "new_state",

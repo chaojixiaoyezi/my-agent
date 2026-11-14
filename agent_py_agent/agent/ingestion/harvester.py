@@ -95,30 +95,81 @@ class HarvesterHandle:
     stop_event: threading.Event
     thread: threading.Thread
     started_at: float = field(default_factory=time.time)
+    owner_home: Path | None = None
+
+
+def _harvester_registry_key(
+    owner_home: Path | str | None,
+    watch_id: str,
+) -> tuple[str, str]:
+    if owner_home is None or str(owner_home) == "":
+        return ("", str(watch_id))
+    return (str(Path(owner_home).expanduser().resolve(strict=False)), str(watch_id))
 
 
 class _HarvesterRegistry:
-    """进程内收割线程注册表(每 watch 至多一个;死线程自动清位)。"""
+    """进程内收割线程注册表(每 owner+watch 至多一个;死线程自动清位)。"""
 
     def __init__(self) -> None:
-        self._handles: dict[str, HarvesterHandle] = {}
+        self._handles: dict[tuple[str, str], HarvesterHandle] = {}
         self._lock = threading.Lock()
 
-    def get_live(self, watch_id: str) -> HarvesterHandle | None:
+    def get_live(
+        self,
+        watch_id: str,
+        owner_home: Path | str | None = None,
+    ) -> HarvesterHandle | None:
         with self._lock:
-            handle = self._handles.get(watch_id)
-            if handle is not None and handle.thread.is_alive():
-                return handle
-            self._handles.pop(watch_id, None)
+            if owner_home is not None:
+                key = _harvester_registry_key(owner_home, watch_id)
+                handle = self._handles.get(key)
+                if handle is not None and handle.thread.is_alive():
+                    return handle
+                self._handles.pop(key, None)
+                return None
+            target = str(watch_id)
+            live_matches: list[HarvesterHandle] = []
+            for key, handle in list(self._handles.items()):
+                if key[1] != target:
+                    continue
+                if handle.thread.is_alive():
+                    live_matches.append(handle)
+                else:
+                    self._handles.pop(key, None)
+            if len(live_matches) == 1:
+                return live_matches[0]
             return None
 
     def put(self, handle: HarvesterHandle) -> None:
         with self._lock:
-            self._handles[handle.watch_id] = handle
+            self._handles[_harvester_registry_key(handle.owner_home, handle.watch_id)] = handle
 
-    def stop(self, watch_id: str) -> None:
+    def stop(
+        self,
+        watch_id: str,
+        owner_home: Path | str | None = None,
+    ) -> None:
+        handle: HarvesterHandle | None = None
         with self._lock:
-            handle = self._handles.pop(watch_id, None)
+            if owner_home is not None:
+                handle = self._handles.pop(
+                    _harvester_registry_key(owner_home, watch_id),
+                    None,
+                )
+            else:
+                target = str(watch_id)
+                matches = [key for key in self._handles if key[1] == target]
+                if len(matches) == 1:
+                    handle = self._handles.pop(matches[0], None)
+                elif len(matches) > 1:
+                    live_keys = [
+                        key for key in matches if self._handles[key].thread.is_alive()
+                    ]
+                    for key in matches:
+                        if key not in live_keys:
+                            self._handles.pop(key, None)
+                    if len(live_keys) == 1:
+                        handle = self._handles.pop(live_keys[0], None)
         if handle is not None:
             handle.stop_event.set()
 
@@ -566,7 +617,7 @@ def ensure_harvester(
     返回 {"mode": "local"|"remote"}；租约不可证明可独占时也按 remote fail-closed，
     不回落成第二个 inline 读者。只有已成功占租但线程资源本身启动失败时返回 None。
     """
-    if harvesters.get_live(state.watch_id) is not None:
+    if harvesters.get_live(state.watch_id, state.owner_home) is not None:
         return {"mode": "local"}
     claimed, lease = _claim_harvester_lease(state)
     if not claimed:
@@ -592,12 +643,20 @@ def ensure_harvester(
         _clear_lease(state, lease_id)
         _LOGGER.warning("harvester thread start failed (watch=%s)", state.watch_id, exc_info=True)
         return None
-    harvesters.put(HarvesterHandle(state.watch_id, lease_id, stop_event, thread))
+    harvesters.put(
+        HarvesterHandle(
+            state.watch_id,
+            lease_id,
+            stop_event,
+            thread,
+            owner_home=state.owner_home,
+        )
+    )
     return {"mode": "local"}
 
 
-def stop_harvester(watch_id: str) -> None:
-    harvesters.stop(watch_id)
+def stop_harvester(watch_id: str, owner_home: Path | str | None = None) -> None:
+    harvesters.stop(watch_id, owner_home)
 
 
 def _harvest_loop(
@@ -4599,7 +4658,7 @@ def _clear_lease(state: WatchState, lease_id: str) -> None:
 
 def harvester_block(state: WatchState) -> dict[str, Any]:
     """给 pull/status 载荷的收割者健康块(模型据此如实上报源健康/积压)。"""
-    handle = harvesters.get_live(state.watch_id)
+    handle = harvesters.get_live(state.watch_id, state.owner_home)
     lease = _read_lease(state)
     block = {
         "running": handle is not None or lease is not None,

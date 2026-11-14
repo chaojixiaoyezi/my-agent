@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..common.audit_activation import (
     AUDIT_ATTR,
@@ -70,6 +70,7 @@ from ..subagents.models import (
     VerificationStatus,
     task_status_in,
 )
+from . import watch_state as _watch_state
 from .watch_state import (
     WatchState,
     list_states,
@@ -77,7 +78,6 @@ from .watch_state import (
     persist_source_binding_revision,
     persist_state,
     refresh_scalars_from_disk,
-    registry,
     state_dir,
 )
 
@@ -296,8 +296,20 @@ def authorize_source_worker_action(
         or owner_home != str(state.owner_home)
         or worker_key != audit_source_worker_key(audit_id, watch_id)
         or run_epoch != _normalized_run_epoch(state.audit_run_epoch)
-        or not _source_state_matches_current_audit_epoch(agent, state)
     ):
+        return _denied(
+            "AUDIT_SOURCE_BINDING_MISMATCH",
+            "当前来源子代理与这条 watch 的结构化绑定不一致。",
+        )
+    epoch_status = _source_state_matches_current_audit_epoch(agent, state)
+    if epoch_status == "unavailable":
+        return _denied(
+            "AUDIT_EPOCH_CHECK_UNAVAILABLE",
+            "当前无法读取父 Audit 的最新运行轮次，来源操作尚未执行。",
+            effect_outcome="not_started",
+            next_action="保持当前 watch 开启并在任务账可恢复读取后重试该操作，勿关闭或新建 watch。",
+        )
+    if epoch_status != "match":
         return _denied(
             "AUDIT_SOURCE_BINDING_MISMATCH",
             "当前来源子代理与这条 watch 的结构化绑定不一致。",
@@ -550,7 +562,22 @@ def _source_worker_preflight(
     worker_key = audit_source_worker_key(audit_id, state.watch_id)
     if not state.audit_guarantee or state.closed:
         return audit_id, worker_key, {"ok": False, "state": "not_required", "error_code": ""}
-    if not _source_state_matches_current_audit_epoch(agent, state):
+    epoch_status = _source_state_matches_current_audit_epoch(agent, state)
+    if epoch_status == "unavailable":
+        return (
+            audit_id,
+            worker_key,
+            {
+                "ok": False,
+                "state": "degraded",
+                "error_code": "AUDIT_EPOCH_CHECK_UNAVAILABLE",
+                "effect_outcome": "not_started",
+                "next_action": "保持当前来源 watch 开启，待任务账可恢复读取后重试预检与派工。",
+                "worker_key": worker_key,
+                "created": False,
+            },
+        )
+    if epoch_status != "match":
         return (
             audit_id,
             worker_key,
@@ -1259,7 +1286,7 @@ def retire_published_audit_sources(
             or bool(row.get("closed"))
         ):
             continue
-        state = registry.get_or_load(owner_home, str(row.get("watch_id") or ""))
+        state = _watch_state.registry.get_or_load(owner_home, str(row.get("watch_id") or ""))
         if state is None or state.closed:
             continue
         if state.audit_root_task_id != selected_audit or state.source_id not in selected_sources:
@@ -1293,7 +1320,7 @@ def _open_audit_watch(owner_home: Path, row: dict[str, object]) -> WatchState | 
     if not bool(row.get("audit_guarantee")) or bool(row.get("closed")):
         return None
     watch_id = str(row.get("watch_id") or "").strip()
-    state = registry.get_or_load(owner_home, watch_id)
+    state = _watch_state.registry.get_or_load(owner_home, watch_id)
     return state if state is not None and not state.closed else None
 
 
@@ -1305,7 +1332,19 @@ def _reconcile_one_audit_source_worker(
     *,
     runs_snapshot: list[object] | None = None,
 ) -> dict[str, object]:
-    if not _source_state_matches_current_audit_epoch(agent, state):
+    epoch_status = _source_state_matches_current_audit_epoch(agent, state)
+    if epoch_status == "unavailable":
+        return {
+            "ok": False,
+            "state": "degraded",
+            "error_code": "AUDIT_EPOCH_CHECK_UNAVAILABLE",
+            "effect_outcome": "not_started",
+            "next_action": "保持来源 watch 开启并在任务账可恢复读取后重新执行对账，勿提前关闭来源。",
+            "worker_key": audit_source_worker_key(state.audit_root_task_id, state.watch_id),
+            "watch_id": state.watch_id,
+            "created": False,
+        }
+    if epoch_status != "match":
         return _close_reconciled_source(
             agent,
             state,
@@ -1376,7 +1415,10 @@ def _record_source_reconcile_result(
     if result.get("closed") is True:
         summary["skipped"] = int(summary.get("skipped") or 0) + 1
         return
-    if result.get("error_code") == "AUDIT_PARENT_STATE_UNAVAILABLE":
+    if result.get("error_code") in {
+        "AUDIT_PARENT_STATE_UNAVAILABLE",
+        "AUDIT_EPOCH_CHECK_UNAVAILABLE",
+    }:
         summary["degraded"] = int(summary["degraded"]) + 1
         return
     summary["duplicate_workers_retired"] = int(summary["duplicate_workers_retired"]) + int(
@@ -1751,24 +1793,26 @@ def audit_parent_reconcile_state(
 def _source_state_matches_current_audit_epoch(
     agent: object,
     state: WatchState,
-) -> bool:
+) -> Literal["match", "mismatch", "unavailable"]:
     """Fence old-run source attempts after the same named Audit is restarted."""
 
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(getattr(store, 'tasks', None), 'load', None)
+    loader = getattr(getattr(store, "tasks", None), "load", None)
     if not callable(loader):
-        return True
+        return "match"
     try:
         link = loader(str(state.audit_root_task_id or "").strip())
     except Exception:
-        return False
+        return "unavailable"
     if link is None:
-        return False
-    return _normalized_run_epoch(
+        return "mismatch"
+    if _normalized_run_epoch(
         getattr(link, "run_epoch", 0),
     ) == _normalized_run_epoch(
         state.audit_run_epoch,
-    )
+    ):
+        return "match"
+    return "mismatch"
 
 
 def _normalized_run_epoch(value: object) -> int:
@@ -2548,7 +2592,7 @@ def source_worker_lifecycle_state(
     if not raw_owner_home or not watch_id:
         return "unavailable"
     owner_home = Path(raw_owner_home)
-    state = registry.get_or_load(owner_home, watch_id)
+    state = _watch_state.registry.get_or_load(owner_home, watch_id)
     if state is None:
         return "unavailable"
     # The Gateway, a CLI worker and an exact named-clear command may run in
@@ -2649,7 +2693,7 @@ def record_source_worker_recovery(
     } and structured_audit_source_worker_attributes(attrs):
         from .harvester import record_audit_batch_failure
 
-        state = registry.get_or_load(
+        state = _watch_state.registry.get_or_load(
             Path(str(attrs.get(AUDIT_SOURCE_OWNER_HOME_ATTR) or "")),
             str(attrs.get(AUDIT_SOURCE_WATCH_ID_ATTR) or ""),
         )
@@ -3654,8 +3698,23 @@ def _float(value: object) -> float:
         return 0.0
 
 
-def _denied(error_code: str, error: str) -> dict[str, object]:
-    return {"ok": False, "error_code": error_code, "error": error}
+def _denied(
+    error_code: str,
+    error: str,
+    *,
+    effect_outcome: str = "",
+    next_action: str = "",
+) -> dict[str, object]:
+    record_body: dict[str, object] = {
+        "ok": False,
+        "error_code": error_code,
+        "error": error,
+    }
+    if effect_outcome:
+        record_body["effect_outcome"] = effect_outcome
+    if next_action:
+        record_body["next_action"] = next_action
+    return record_body
 
 
 __all__ = [
