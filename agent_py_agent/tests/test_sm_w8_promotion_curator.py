@@ -18,6 +18,15 @@ import pytest
 
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.capability.persona_repository import PersonaRepository
+from agent_py_agent.agent.capability.skill_learning import (
+    SkillLearningRuntime,
+    SkillLearningService,
+    SkillLearningSettings,
+)
+from agent_py_agent.agent.capability.skill_learning_prompt import (
+    SkillLearningMaterial,
+    skill_learning_prompt,
+)
 from agent_py_agent.agent.capability.skill_learning_store import (
     REQUEST_SCHEMA_VERSION,
     SkillLearningStore,
@@ -560,9 +569,13 @@ def test_procedural_skill_carrier_delegates_without_popups_and_handles_deferred(
     req_dir = owner / "data" / "skill_learning" / "requests"
     files = list(req_dir.glob("*.json"))
     assert len(files) == 1
-    req_payload = json.loads(files[0].read_text(encoding="utf-8"))
-    assert req_payload["schema_version"] == REQUEST_SCHEMA_VERSION
-    assert req_payload["source_candidate_id"] == proc_cand.candidate_id
+    request_record = json.loads(files[0].read_text(encoding="utf-8"))
+    assert request_record["schema_version"] == REQUEST_SCHEMA_VERSION
+    assert request_record["candidate_id"] == proc_cand.candidate_id
+    assert request_record["user_prompt"]
+    prompt = skill_learning_prompt(SkillLearningMaterial(request_record, (), (), frozenset()))
+    assert "ruff check agent_py_agent" in prompt
+    assert '"user_prompt": null' not in prompt
 
     # 对已撤回的同一候选重放，保持幂等且不制造多余条目或错误。
     replay = service.promote(proc_cand.candidate_id, automatic=True)
@@ -637,6 +650,58 @@ def test_procedural_skill_carrier_delegates_without_popups_and_handles_deferred(
     assert batch_res[1].promoted is True
     assert batch_res[1].reason_code == "PROMOTED"
     assert len(lessons.list()) == 1
+
+
+def test_standalone_and_runner_carrier_share_request_key_and_schema(tmp_path: Path) -> None:
+    owner, service, _conv, _thread, candidates, _lt, _lessons, _hot = _setup_owner(tmp_path)
+    candidate = candidates.observe(
+        CandidateObservation(
+            candidate_type="lesson",
+            content=(
+                "# 标准发布检查步骤\n## 适用场景\n执行版本发布与静态检查前。\n## 执行步骤\n"
+                "1. 读取版本记录并核对变更；\n2. 运行 `ruff check agent_py_agent`；\n"
+                "3. 提交前确认文件白名单与状态。"
+            ),
+            subject_key="deploy.shared-request",
+            scope=MemoryScope("personal", "personal"),
+            origin="subagent_lesson",
+            source_task_ids=("task-shared",),
+            source_run_ids=("run-shared",),
+            source_tool_refs=(_tool_ref("run-shared", "op-shared"),),
+            promotion_target="lesson",
+            learning_source=ls.subagent_projection(
+                trigger_kind=ls.TRIGGER_USER_DIALOGUE,
+                run_ids=("run-shared",),
+                task_ids=("task-shared",),
+            ),
+        )
+    )
+    store = SkillLearningStore(owner / "data" / "skill_learning", owner / "skills")
+    learning = SkillLearningService(
+        store,
+        SkillLearningSettings(autonomous_verified=True),
+        SkillLearningRuntime(backend=None, snapshot_provider=lambda: SimpleNamespace(entries=())),
+    )
+    intake = learning.enqueue_lesson_candidates([candidate])
+    assert not intake["refused"] and not intake["deferred"]
+    assert intake["queued"][0]["status"] == "queued"
+    before = store.read_request(store.pending_requests()[0])
+
+    delegated = service.promote(candidate.candidate_id, automatic=True)
+
+    assert (delegated.status, delegated.reason_code) == ("withdrawn", "DELEGATED_TO_SKILL_CARRIER")
+    pending = store.pending_requests()
+    assert len(pending) == 1
+    after = store.read_request(pending[0])
+    assert before == after
+    assert before["request_key"] == intake["queued"][0]["request_key"]
+    from agent_py_agent.agent.capability.skill_learning_request import lesson_candidate_request
+
+    standalone = lesson_candidate_request(candidate)
+    assert standalone["request_key"] == before["request_key"]
+    assert {key: value for key, value in standalone.items() if key != "created_at"} == {
+        key: value for key, value in before.items() if key != "created_at"
+    }
 
 
 def test_curator_run_maintenance_if_due_independent_of_model_and_live_config(tmp_path: Path) -> None:

@@ -29,6 +29,7 @@ from agent_py_agent.agent.conversation.business_contracts import (
     BusinessExecutionContext,
     TrustedTaskCompletion,
 )
+from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.settings import load_config
@@ -239,7 +240,8 @@ def test_cli_list_show_revert_remove_round_trip(tmp_path: Path, capsys) -> None:
 
 def _subagent_task(run_id: str) -> SubAgentTask:
     return SubAgentTask(id=run_id, root_id="project-root", goal="修复并发写入导致的状态覆盖", thought="", plan=[],
-                        output_json=f"/artifacts/{run_id}/output.json", updated_at=100.0)
+                        output_json=f"/artifacts/{run_id}/output.json", updated_at=100.0,
+                        attributes={"learning_source": user_dialogue_projection()})
 
 
 def test_subagent_lesson_proposals_wait_for_user_confirmation(tmp_path: Path) -> None:
