@@ -5932,6 +5932,56 @@ def _ensure_goal_progress_wake_chain(
 
 # LLM: 只认 active Goal 与 active task；沿唯一 goal wake 去重，不再创建由 Todo 驱动的第二套周期策略。
 # 函数用途: 在安全回合边界为持久目标安排下一轮；子代理尚在工作时留给生命周期事件接续。
+def _ensure_goal_progress_continuation_once(
+    agent: object,
+    *,
+    selected_store: ConversationStore,
+    task_id: str,
+    thread_id: str,
+    now: float | None,
+    goal_id: str,
+) -> tuple[bool, bool]:
+    """执行单次 Goal 续跑链校验与唤醒发布；返回 `(是否已入队, 是否可能为瞬态空读导致未入队)`。"""
+    resolved_thread_id = str(thread_id or "").strip() or _thread_id_for_task(selected_store, task_id)
+    if not resolved_thread_id:
+        return False, True
+    try:
+        goal = selected_store.goals.load(resolved_thread_id, goal_id=goal_id, task_id=task_id)
+    except KeyError:
+        return False, True
+    except (DataCorruptionError, ValueError) as exc:
+        # 目标文件损坏或选择歧义属于确定性状态，不重试也不阻断回合收尾。
+        _HEARTBEAT_LOGGER.warning(
+            "goal continuation skipped code=%s task_id=%s effect_outcome=%s next_action=%s error=%s",
+            "GOAL_STATE_UNREADABLE",
+            task_id,
+            "not_started",
+            "repair or remove the unreadable goal file",
+            exc,
+        )
+        return False, False
+    if goal is None:
+        return False, True
+    if (
+        str(getattr(goal, "task_id", "") or "").strip() != task_id
+        or str(getattr(goal, "status", "") or "").strip().lower() != "active"
+    ):
+        return False, False
+    request = BackgroundRunRequest(thread_id=resolved_thread_id, task_id=task_id, reason="thread_goal_continue")
+    task_status = _background_task_link_status(agent, request, store=selected_store)
+    if task_status != "active":
+        return False, task_status == ""
+    phase, state_error = _goal_subagent_phase(agent, task_id)
+    if phase == "subagents_active":
+        return False, False
+    if state_error:
+        return False, True
+    from .goal_runtime import raise_goal_continuation_wake
+
+    raise_goal_continuation_wake(selected_store, goal, now=now)
+    return True, False
+
+
 def ensure_goal_progress_continuation(
     agent: object | None,
     *,
@@ -5948,29 +5998,33 @@ def ensure_goal_progress_continuation(
     selected_store = store or getattr(agent, "conversation_store", None)
     if selected_store is None:
         return False
-    thread_id = str(thread_id or "").strip() or _thread_id_for_task(selected_store, task_id)
-    if not thread_id:
-        return False
-    try:
-        goal = selected_store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
-    except Exception:
-        return False
-    if (
-        goal is None
-        or str(getattr(goal, "task_id", "") or "").strip() != task_id
-        or str(getattr(goal, "status", "") or "").strip().lower() != "active"
-    ):
-        return False
-    request = BackgroundRunRequest(thread_id=thread_id, task_id=task_id, reason="thread_goal_continue")
-    if _background_task_link_status(agent, request, store=selected_store) != "active":
-        return False
-    phase, state_error = _goal_subagent_phase(agent, task_id)
-    if phase == "subagents_active" or state_error:
-        return False
-    from .goal_runtime import raise_goal_continuation_wake
-
-    raise_goal_continuation_wake(selected_store, goal, now=now)
-    return True
+    # 对瞬态读取空串或单次 I/O 异常做有界 1 次重试，连续两次异常原样上抛。
+    for attempt in range(2):
+        try:
+            published, retryable = _ensure_goal_progress_continuation_once(
+                agent,
+                selected_store=selected_store,
+                task_id=task_id,
+                thread_id=thread_id,
+                now=now,
+                goal_id=goal_id,
+            )
+        except Exception as exc:
+            if attempt == 1:
+                raise
+            _HEARTBEAT_LOGGER.warning(
+                "goal continuation ensure attempt failed; retrying once code=%s task_id=%s "
+                "effect_outcome=%s next_action=%s error=%s",
+                "GOAL_ENSURE_CONTINUATION_RETRYING",
+                task_id,
+                "not_yet_raised",
+                "retrying idempotent ensure_goal_progress_continuation once",
+                exc,
+            )
+            continue
+        if published or not retryable:
+            return published
+    return False
 
 
 def _thread_id_for_task(store: ConversationStore, task_id: str) -> str:

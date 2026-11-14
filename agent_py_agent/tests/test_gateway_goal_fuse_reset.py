@@ -188,10 +188,11 @@ def test_user_message_queued_during_the_third_idle_slice_is_handled_first(world,
     monkeypatch.setattr(request_history, "append_gateway_conversation_message", append_after_accounting)
     monkeypatch.setattr(conversation_runtime, "_invoke_background_main_agent", third_slice)
     monkeypatch.setattr(world.store.claims, "finish", finish)
-    # 新用户输入抢占本片，原背景执行权结算 cancelled；它不产生普通空片报告，不应计入 idle fuse。
-    assert world.scheduler.tick(now=103.0) == []
+    # 新用户输入排队在场期间受 #28b 活持有人保护，不被仅靠 TTL 越权抢走租约；本片正常结束后结算为 finished，
+    # 且因用户回合仍在车道等待，记账时仍跳过 idle_slices 递增，不提前熔断。
+    assert len(world.scheduler.tick(now=103.0)) == 1
     assert len(background_claim_ids) == 1
-    assert any(row["claim_id"] == background_claim_ids[0] and row["status"] == "cancelled" for row in finished_claims)
+    assert any(row["claim_id"] == background_claim_ids[0] and row["status"] == "finished" for row in finished_claims)
 
     # 改前这里已是 ("paused", 3, NO_PROGRESS_REASON_CODE)：第 3 片记账时熔断，用户消息之后只能清计数。
     assert _fuse(world) == ("active", 2, "")

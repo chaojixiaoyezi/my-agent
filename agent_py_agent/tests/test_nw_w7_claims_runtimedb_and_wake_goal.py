@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import sqlite3
 import threading
@@ -26,6 +27,8 @@ from agent_py_agent.agent.conversation.background_goal import (
     continue_goal_after_report,
 )
 from agent_py_agent.agent.conversation.goal_clock import GoalClockGroup
+from agent_py_agent.agent.conversation.goal_progress_fuse import FUSE_METADATA_KEY
+from agent_py_agent.agent.conversation.goal_runtime import raise_goal_continuation_wake
 from agent_py_agent.agent.conversation.models import (
     BackgroundMainAgentReport,
     ThreadGoal,
@@ -38,10 +41,12 @@ from agent_py_agent.agent.conversation.run_claim import (
 from agent_py_agent.agent.conversation.runtime import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
+    _background_goal_dependencies,
     _complete_wake_report,
     _handle_nonquota_wake_error,
     _select_same_reason_wake_batch,
     _select_successful_completion_batch,
+    ensure_goal_progress_continuation,
 )
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.conversation.task_run_closeout import settle_terminal_task_run
@@ -51,6 +56,7 @@ from agent_py_agent.agent.conversation.technical_continuation import (
     receipt_for,
     record_closeout,
 )
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.run_creation import RunCreation, create_run_chain
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
@@ -829,3 +835,421 @@ def test_stopped_technical_cutoff_no_longer_suppresses_goal_continuation(tmp_pat
 
     pending_reasons = [w.reason for w in store.wakes.pending(limit=20)]
     assert "thread_goal_continue" in pending_reasons
+
+
+# ------------------------------------------------------------------ R6: U-10 & U-11
+
+
+def test_claim_acquire_nested_workspace_layout_resolves_owner_runtime_db(
+    tmp_path: Path, monkeypatch
+):
+    from agent_py_agent.agent.conversation import store_claims as store_claims_mod
+
+    owner_home = tmp_path / "owner-home"
+    ws_conversations = (
+        owner_home / "workspace" / "runtime" / "workspaces" / "ws-prod-key" / "conversations"
+    )
+    store = ConversationStore(ws_conversations, compact_root=owner_home / "compact")
+    repo = RuntimeRepository(runtime_db_path(owner_home))
+
+    active_run = repo.record_run_creation(
+        owner_id="owner-w7",
+        conversation_task_id="task-nested-active",
+        run_id="run-nested-active",
+        attempt_status="pending",
+    )
+    active_attempt = repo.create_attempt(active_run["agent_run_id"], reuse_pending=True)
+    settled_run = repo.record_run_creation(
+        owner_id="owner-w7",
+        conversation_task_id="task-nested-settled",
+        run_id="run-nested-settled",
+        attempt_status="pending",
+    )
+    settled_attempt = repo.create_attempt(settled_run["agent_run_id"], reuse_pending=True)
+
+    thread_active = _make_thread(store, "conv-nested-active")
+    thread_settled = _make_thread(store, "conv-nested-settled")
+
+    claim_active = store.claims.acquire(
+        {
+            "thread_id": thread_active.thread_id,
+            "task_id": "task-nested-active",
+            "reason": "thread_goal_continue",
+            "lease_seconds": 1,
+            "now": 100.0,
+        }
+    )
+    claim_settled = store.claims.acquire(
+        {
+            "thread_id": thread_settled.thread_id,
+            "task_id": "task-nested-settled",
+            "reason": "thread_goal_continue",
+            "lease_seconds": 1,
+            "now": 100.0,
+        }
+    )
+    assert claim_active is not None and claim_settled is not None
+
+    for thread_obj, claim_obj, run_id_val, run_info, attempt_info in (
+        (thread_active, claim_active, "run-nested-active", active_run, active_attempt),
+        (thread_settled, claim_settled, "run-nested-settled", settled_run, settled_attempt),
+    ):
+        claim_path = store.storage.background_claims_dir / f"{thread_obj.thread_id}.json"
+        persisted = json.loads(claim_path.read_text(encoding="utf-8"))
+        persisted["owner_process"] = {"host_id": "remote-nested-host", "pid": 888777, "start_time": 99}
+        persisted["runtime_authority"] = {
+            "schema_version": "conversation_claim_execution.v1",
+            "claim_id": claim_obj["claim_id"],
+            "invocation_run_id": f"inv-{run_id_val}",
+            "task_id": persisted["task_id"],
+            "run_id": run_id_val,
+            "agent_run_id": run_info["agent_run_id"],
+            "attempt_id": attempt_info["attempt_id"],
+        }
+        claim_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    # 模拟首任持有人执行已终态落账但 claim finish 写入遇到 EIO，且外部进程仍存活。
+    repo.settle_agent_run(
+        agent_run_id=settled_run["agent_run_id"],
+        status="done",
+        attempt_id=settled_attempt["attempt_id"],
+    )
+    original_finish = store.claims.finish
+    with monkeypatch.context() as patched:
+        def fail_finish_once(_req):
+            raise OSError(errno.EIO, "simulated claim finish write error")
+
+        patched.setattr(store.claims, "finish", fail_finish_once)
+        with pytest.raises(OSError):
+            store.claims.finish({"thread_id": thread_settled.thread_id, "claim_id": claim_settled["claim_id"]})
+    assert original_finish is not None
+
+    monkeypatch.setattr(store_claims_mod, "process_identity_is_live", lambda _ident: True)
+
+    # 仍在 RuntimeDB 中 running 的异机持有人仍受保护，禁止抢占。
+    assert (
+        store.claims.acquire(
+            {
+                "thread_id": thread_active.thread_id,
+                "task_id": "task-nested-competitor",
+                "reason": "test",
+                "now": 500.0,
+            }
+        )
+        is None
+    )
+
+    # 已在 <owner_home>/runtime.db 终态释放执行锁的记录即使在嵌套工作区下也能被准确核验并接管。
+    recovered = store.claims.acquire(
+        {
+            "thread_id": thread_settled.thread_id,
+            "task_id": "task-nested-recover",
+            "reason": "test",
+            "now": 500.0,
+        }
+    )
+    assert recovered is not None and recovered["claim_id"] != claim_settled["claim_id"]
+
+
+@pytest.mark.parametrize("stage", ["goal_load", "task_status", "fuse_write", "wake_after_fuse"])
+def test_continue_goal_after_report_retries_once_across_all_stages(
+    tmp_path: Path, monkeypatch, stage: str
+):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = _make_thread(store, f"conv-u11-{stage}")
+    task_id = f"task-u11-{stage}"
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "goal": "keep moving", "status": "active"})
+    goal = store.goals.create(
+        {"thread_id": thread.thread_id, "objective": "keep moving", "task_id": task_id}
+    )
+    signal = raise_goal_continuation_wake(
+        store,
+        goal,
+        channel="internal",
+        conversation_id=thread.thread_id,
+        now=5.0,
+    )
+    assert signal is not None
+    store.wakes.mark_handled(signal.wake_signal_id, now=10.0)
+    agent = SimpleNamespace(
+        conversation_store=store,
+        home_paths=SimpleNamespace(owner_id="owner-w7"),
+        config=AgentConfig(goal_continuation_idle_limit=3),
+    )
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    deps = _background_goal_dependencies(scheduler)
+    report = BackgroundMainAgentReport(
+        thread_id=thread.thread_id,
+        task_id=goal.task_id,
+        reason="thread_goal_continue",
+        response="idle slice",
+        route_channel="internal",
+        route_target=thread.thread_id,
+        created_at=50.0,
+        tool_call_count=0,
+        tool_success_count=0,
+        material_progress_count=0,
+        goal_continuation_allowed=True,
+    )
+
+    calls = {"target": 0}
+    if stage == "goal_load":
+        orig_load = store.goals.load
+
+        def flaky_load(*args, **kwargs):
+            calls["target"] += 1
+            if calls["target"] == 1:
+                raise OSError(errno.EIO, "transient goal read error")
+            return orig_load(*args, **kwargs)
+
+        monkeypatch.setattr(store.goals, "load", flaky_load)
+    elif stage == "task_status":
+        orig_link_report = store.tasks.link_report
+
+        def flaky_link_report(*args, **kwargs):
+            calls["target"] += 1
+            if calls["target"] == 1:
+                raise OSError(errno.EIO, "transient link read error")
+            return orig_link_report(*args, **kwargs)
+
+        monkeypatch.setattr(store.tasks, "link_report", flaky_link_report)
+    elif stage == "fuse_write":
+        orig_fuse = store.goals.record_continuation_fuse
+
+        def flaky_fuse(*args, **kwargs):
+            calls["target"] += 1
+            if calls["target"] == 1:
+                raise OSError(errno.EIO, "transient fuse persist error")
+            return orig_fuse(*args, **kwargs)
+
+        monkeypatch.setattr(store.goals, "record_continuation_fuse", flaky_fuse)
+    elif stage == "wake_after_fuse":
+        orig_raise = store.wakes.raise_signal
+
+        def flaky_raise(*args, **kwargs):
+            calls["target"] += 1
+            if calls["target"] == 1:
+                persisted_goal = store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+                assert persisted_goal is not None
+                assert persisted_goal.metadata[FUSE_METADATA_KEY]["idle_slices"] == 1
+                raise OSError(errno.EIO, "transient wake queue error")
+            return orig_raise(*args, **kwargs)
+
+        monkeypatch.setattr(store.wakes, "raise_signal", flaky_raise)
+
+    continue_goal_after_report(deps, signal, report=report, now=50.0)
+
+    assert calls["target"] == 2
+    pending = [w for w in store.wakes.pending(limit=20) if w.reason == "thread_goal_continue"]
+    assert len(pending) == 1
+    refreshed = store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+    assert refreshed is not None and refreshed.status == "active"
+    assert refreshed.metadata[FUSE_METADATA_KEY]["idle_slices"] == 1
+
+
+def test_continue_goal_after_report_never_reopens_terminal_goal_or_task(tmp_path: Path, monkeypatch):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = _make_thread(store, "conv-terminal-u11")
+    store.tasks.bind(
+        {"thread_id": thread.thread_id, "task_id": "task-term", "goal": "done", "status": "completed"}
+    )
+    goal = store.goals.create(
+        {"thread_id": thread.thread_id, "objective": "done", "task_id": "task-term"}
+    )
+    signal = store.wakes.raise_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "thread_goal_continue",
+            "metadata": {"goal_id": goal.goal_id},
+        }
+    )
+    store.wakes.mark_handled(signal.wake_signal_id, now=10.0)
+    agent = SimpleNamespace(
+        conversation_store=store,
+        home_paths=SimpleNamespace(owner_id="owner-w7"),
+        config=AgentConfig(goal_continuation_idle_limit=3),
+    )
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    deps = _background_goal_dependencies(scheduler)
+    report = BackgroundMainAgentReport(
+        thread_id=thread.thread_id,
+        task_id=goal.task_id,
+        reason="thread_goal_continue",
+        response="done",
+        route_channel="internal",
+        route_target=thread.thread_id,
+        created_at=20.0,
+        goal_continuation_allowed=True,
+    )
+
+    continue_goal_after_report(deps, signal, report=report, now=20.0)
+    assert store.tasks.load("task-term").status == "completed"
+    assert store.wakes.pending(limit=20) == []
+
+    # 目标已终态完成时也不得因重试重新激活。
+    thread2 = _make_thread(store, "conv-terminal-u11-goal")
+    store.tasks.bind(
+        {"thread_id": thread2.thread_id, "task_id": "task-term-goal", "goal": "done", "status": "active"}
+    )
+    goal2 = store.goals.create(
+        {"thread_id": thread2.thread_id, "objective": "done", "task_id": "task-term-goal"}
+    )
+    store.goals.update({"thread_id": thread2.thread_id, "goal_id": goal2.goal_id, "status": "complete"})
+    signal2 = WakeSignal(
+        wake_signal_id="wake-term-goal",
+        thread_id=thread2.thread_id,
+        root_task_id=goal2.task_id,
+        reason="thread_goal_continue",
+        metadata={"goal_id": goal2.goal_id},
+    )
+    report2 = BackgroundMainAgentReport(
+        thread_id=thread2.thread_id,
+        task_id=goal2.task_id,
+        reason="thread_goal_continue",
+        response="done",
+        route_channel="internal",
+        route_target=thread2.thread_id,
+        created_at=20.0,
+        goal_continuation_allowed=True,
+    )
+    calls = {"load": 0}
+    orig_load = store.goals.load
+
+    def flaky_terminal_load(*args, **kwargs):
+        calls["load"] += 1
+        if calls["load"] == 1:
+            raise OSError(errno.EIO, "transient terminal goal read")
+        return orig_load(*args, **kwargs)
+
+    monkeypatch.setattr(store.goals, "load", flaky_terminal_load)
+    continue_goal_after_report(deps, signal2, report=report2, now=30.0)
+    assert calls["load"] == 2
+    assert store.goals.load(thread2.thread_id, goal_id=goal2.goal_id).status == "complete"
+    assert store.wakes.pending(limit=20) == []
+
+
+def test_ensure_goal_progress_continuation_retries_once_and_reraises_on_double_error(
+    tmp_path: Path, monkeypatch
+):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = _make_thread(store, "conv-ensure-u11")
+    task_id = "task-ensure-u11"
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "goal": "keep moving", "status": "active"})
+    goal = store.goals.create({"thread_id": thread.thread_id, "objective": "keep moving", "task_id": task_id})
+
+    def _clear_pending() -> None:
+        for idx, pending in enumerate(store.wakes.pending(limit=20)):
+            store.wakes.mark_handled(pending.wake_signal_id, now=100.0 + idx)
+
+    # 1. wake 发布出现 1 次瞬态 EIO：重试后返回 True 并入队 1 条唤醒。
+    orig_raise = store.wakes.raise_signal
+    wake_calls = {"n": 0}
+    with monkeypatch.context() as patched:
+        def flaky_wake_once(*args, **kwargs):
+            wake_calls["n"] += 1
+            if wake_calls["n"] == 1:
+                raise OSError(errno.EIO, "transient wake write error")
+            return orig_raise(*args, **kwargs)
+
+        patched.setattr(store.wakes, "raise_signal", flaky_wake_once)
+        assert ensure_goal_progress_continuation(
+            agent, task_id=task_id, thread_id=thread.thread_id, store=store, goal_id=goal.goal_id, now=10.0
+        ) is True
+    assert wake_calls["n"] == 2
+    assert len(store.wakes.pending(limit=20)) == 1
+    _clear_pending()
+
+    # 2a. 目标读取出现 1 次瞬态 EIO：重试后返回 True 并入队 1 条唤醒。
+    orig_load = store.goals.load
+    load_calls = {"n": 0}
+    with monkeypatch.context() as patched:
+        def flaky_load_once(*args, **kwargs):
+            load_calls["n"] += 1
+            if load_calls["n"] == 1:
+                raise OSError(errno.EIO, "transient goal read error")
+            return orig_load(*args, **kwargs)
+
+        patched.setattr(store.goals, "load", flaky_load_once)
+        assert ensure_goal_progress_continuation(
+            agent, task_id=task_id, thread_id=thread.thread_id, store=store, goal_id=goal.goal_id, now=20.0
+        ) is True
+    assert load_calls["n"] == 2
+    assert len(store.wakes.pending(limit=20)) == 1
+    _clear_pending()
+
+    # 2b. link_report 出现 1 次瞬态 EIO（_background_task_link_status 返回空串）：重试后返回 True 并入队 1 条唤醒。
+    orig_link = store.tasks.link_report
+    link_calls = {"n": 0}
+    with monkeypatch.context() as patched:
+        def flaky_link_once(*args, **kwargs):
+            link_calls["n"] += 1
+            if link_calls["n"] == 1:
+                raise OSError(errno.EIO, "transient task link read error")
+            return orig_link(*args, **kwargs)
+
+        patched.setattr(store.tasks, "link_report", flaky_link_once)
+        assert ensure_goal_progress_continuation(
+            agent, task_id=task_id, thread_id=thread.thread_id, store=store, goal_id=goal.goal_id, now=30.0
+        ) is True
+    assert link_calls["n"] == 2
+    assert len(store.wakes.pending(limit=20)) == 1
+    _clear_pending()
+
+    # 3. 连续两次 EIO：原样上抛第二次异常，不吞错、不伪装成功。
+    double_wake_calls = {"n": 0}
+    with monkeypatch.context() as patched:
+        def always_fail_wake(*_args, **_kwargs):
+            double_wake_calls["n"] += 1
+            raise OSError(errno.EIO, f"persistent wake error #{double_wake_calls['n']}")
+
+        patched.setattr(store.wakes, "raise_signal", always_fail_wake)
+        with pytest.raises(OSError) as exc_info:
+            ensure_goal_progress_continuation(
+                agent, task_id=task_id, thread_id=thread.thread_id, store=store, goal_id=goal.goal_id, now=40.0
+            )
+    assert double_wake_calls["n"] == 2
+    assert exc_info.value.errno == errno.EIO
+    assert "persistent wake error #2" in str(exc_info.value)
+    assert store.wakes.pending(limit=20) == []
+
+    double_load_calls = {"n": 0}
+    with monkeypatch.context() as patched:
+        def always_fail_load(*_args, **_kwargs):
+            double_load_calls["n"] += 1
+            raise OSError(errno.EIO, f"persistent goal read #{double_load_calls['n']}")
+
+        patched.setattr(store.goals, "load", always_fail_load)
+        with pytest.raises(OSError) as load_exc_info:
+            ensure_goal_progress_continuation(
+                agent, task_id=task_id, thread_id=thread.thread_id, store=store, goal_id=goal.goal_id, now=50.0
+            )
+    assert double_load_calls["n"] == 2
+    assert load_exc_info.value.errno == errno.EIO
+    assert "persistent goal read #2" in str(load_exc_info.value)
+    assert store.wakes.pending(limit=20) == []
+
+
+def test_ensure_goal_progress_continuation_handles_corrupt_goal_file_without_raising(tmp_path: Path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = _make_thread(store, "conv-corrupt-goal-u11")
+    task_id = "task-corrupt-goal-u11"
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "goal": "keep moving", "status": "active"})
+    goal = store.goals.create({"thread_id": thread.thread_id, "objective": "keep moving", "task_id": task_id})
+
+    store.storage.goal_path(thread.thread_id).write_text("{corrupt", encoding="utf-8")
+
+    result = ensure_goal_progress_continuation(
+        agent,
+        task_id=task_id,
+        thread_id=thread.thread_id,
+        store=store,
+        goal_id=goal.goal_id,
+        now=10.0,
+    )
+    assert result is False
+    assert store.wakes.pending(limit=20) == []
