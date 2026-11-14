@@ -253,16 +253,68 @@ def _unit_text(tool, prefix):
 # LLM: 身份/路径只由宿主构造，所有写动作须管理员与显式True双门且保留原审批；不注册为脚本执行拦截器。
 # 类用途: 提供运行状态、维护锁、准确孤儿清理与用户级看门狗配置。
 class RuntimeGovernanceTool(BaseTool):
-    model_spec = ToolModelSpec(TOOL_NAME, '管理员运行治理：只读查看三层看门狗、发行版本和未受管进程；写动作须管理员及admin_authorized=True，不限制日常脚本。',
-        {'type': 'object', 'properties': {
-            'action': {'type': 'string', 'enum': ['status', *WRITES]},
-            'admin_authorized': {'type': 'boolean', 'description': '管理员明确授权本次控制动作，不替代宿主审批'},
-            'reason': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
-            'ttl_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 604800, 'default': 1800},
-            'target_pid': {'type': 'integer', 'minimum': 2},
-            'unit_name': {'type': 'string', 'default': DEFAULT_UNIT},
-        }, 'required': ['action'], 'additionalProperties': False},
-        hints=ToolModelHints(category='system', default_deferred=True, deferred_summary='管理员运行治理：三层看门狗、维护锁与准确孤儿清理，不限制普通脚本'))
+    model_spec = ToolModelSpec(
+        TOOL_NAME,
+        '管理员运行治理：只读查看三层看门狗、发行版本和未受管进程；写动作须管理员及admin_authorized=True，不限制日常脚本。',
+        {
+            'type': 'object',
+            'properties': {
+                'action': {
+                    'type': 'string',
+                    'enum': ['status', *WRITES],
+                    'description': 'status 只读查看三层看门狗、发行版本和未受管进程；其余写动作须管理员身份且显式传 admin_authorized=true。',
+                },
+                'admin_authorized': {
+                    'type': 'boolean',
+                    'description': '管理员明确授权本次控制动作，不替代宿主审批',
+                },
+                'reason': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'maxLength': 1000,
+                    'description': '设置维护锁等治理动作的原因说明（1–1000 字符）。',
+                },
+                'ttl_seconds': {
+                    'type': 'integer',
+                    'minimum': 1,
+                    'maximum': 604800,
+                    'default': 1800,
+                    'description': 'action=set_maintenance_lock 时维护锁的有效秒数（1–604800，默认 1800）。',
+                },
+                'target_pid': {
+                    'type': 'integer',
+                    'minimum': 2,
+                    'description': 'action=terminate_orphan 时要终止的本发行非交互未受管进程 PID（>=2）。',
+                },
+                'unit_name': {
+                    'type': 'string',
+                    'default': DEFAULT_UNIT,
+                    'description': 'action=configure_watchdog_service 时的单段安全 .service 单元名，默认 my-agent-gw-supervisor.service。',
+                },
+            },
+            'required': ['action'],
+            'additionalProperties': False,
+        },
+        hints=ToolModelHints(
+            category='system',
+            use_cases=(
+                '管理员查询三层看门狗状态、私有发行版本、维护锁与未受管进程快照（action=status）',
+                '管理员在升级或维护窗口显式授权开启或清除维护锁（set_maintenance_lock / clear_maintenance_lock）',
+                '管理员显式授权清理已核验的非交互孤儿发行进程或生成用户级看门狗 unit 配置',
+            ),
+            avoid_when=(
+                '日常执行普通脚本、工作流或监控任务时（不要用本工具代替常规执行工具）',
+                '未获管理员明确指令时不要发起写动作或自行设置 admin_authorized=true',
+            ),
+            keywords=('runtime_governance', 'watchdog', '看门狗', '维护锁', '孤儿进程', 'supervisor'),
+            examples=(
+                '{"action":"status"}',
+                '{"action":"set_maintenance_lock","admin_authorized":true,"reason":"rolling upgrade","ttl_seconds":1800}',
+            ),
+            default_deferred=True,
+            deferred_summary='管理员运行治理：三层看门狗、维护锁与准确孤儿清理，不限制普通脚本',
+        ),
+    )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy('dangerous', by_parameter=(('action', (('status', 'read_only'),)),)),
         approval_policy=ApprovalPolicy('always', always_effects=('dangerous',)), sandbox_policy=SandboxPolicy('none'),
