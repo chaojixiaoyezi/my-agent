@@ -343,6 +343,11 @@ class CompactPolicyTool(BaseTool):
             ),
             avoid_when=("需要修改与上下文压缩无关的普通运行参数时（请用 user_config）",),
             keywords=("compact_policy", "compact", "压缩策略", "压缩比例", "压缩阈值", "闲置压缩"),
+            examples=(
+                '{"action":"status"}',
+                '{"action":"set_thread","trigger_percent":80}',
+                '{"action":"set_user","trigger_percent":75,"expected_revision":0}',
+            ),
             default_deferred=True,
             deferred_summary="查询或配置多级上下文压缩触发比例与管理员强制开关",
         ),

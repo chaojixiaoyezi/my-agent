@@ -93,8 +93,8 @@ class ControlledExecTool(BaseTool):
             ),
             keywords=("controlled", "exec", "shell", "subagent", "grant", "command"),
             examples=(
-                '{"tool":"controlled_exec","apply":true,"command":"pwd","cwd":"."}',
-                '{"tool":"controlled_exec","apply":true,"grant_id":"grant-shell-1","command":["python3","-c","print(\'x\' * 2000)"]}',
+                '{"apply":false,"command":"pwd","cwd":"."}',
+                '{"apply":true,"grant_id":"grant-shell-1","command":["python3","-V"]}',
             ),
         ),
     )
@@ -134,7 +134,23 @@ class ControlledExecTool(BaseTool):
         return tuple(roots)
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
-        return ToolHandlerOutcome(self.model_spec.name, False, "controlled_exec requires registry write_boundary", error_code="TOOL_EXECUTION_FAILED")
+        return ToolHandlerOutcome(
+            self.model_spec.name,
+            False,
+            (
+                "controlled_exec requires host registry execution with "
+                "RegistryToolInvokeRequest.write_boundary (write_boundary.controlled_exec_grants); "
+                "not_started: no command or file action was executed."
+            ),
+            error_code="TOOL_EXECUTION_FAILED",
+            effect_outcome="not_started",
+            failure_stage="runtime_gate",
+            next_action=(
+                "Invoke controlled_exec through ToolExecutor / invoke_registry_tool with a parent "
+                "capability grant in write_boundary.controlled_exec_grants, or use read_file / "
+                "write_file / run_command when appropriate."
+            ),
+        )
 
 
 # LLM: 原 grant、审批和清理合同不变；实际 shell 启动沿宿主来源擦洗，不把来源名写入计划或工具结果。
@@ -142,10 +158,29 @@ class ControlledExecTool(BaseTool):
 def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolHandlerOutcome:
     grant_ref, grant_error = _select_controlled_exec_grant(request.params, request.write_boundary)
     if grant_error:
-        return ToolHandlerOutcome("controlled_exec", False, grant_error, error_code="WRITE_FORBIDDEN")
+        return ToolHandlerOutcome(
+            "controlled_exec",
+            False,
+            grant_error,
+            error_code="WRITE_FORBIDDEN",
+            effect_outcome="not_started",
+            failure_stage="validation",
+            next_action=(
+                "Request or select a matching parent capability grant in "
+                "write_boundary.controlled_exec_grants (specify grant_id when multiple grants exist)."
+            ),
+        )
     command = request.params.get("command")
     if command is None:
-        return ToolHandlerOutcome("controlled_exec", False, "controlled_exec requires command", error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome(
+            "controlled_exec",
+            False,
+            "controlled_exec requires command",
+            error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
+            failure_stage="validation",
+            next_action="Provide a non-empty command string or argv string array in command.",
+        )
     grant = _grant_from_ref(grant_ref)
     exec_request = ControlledExecRequest(
         command=command,

@@ -48,6 +48,65 @@ _USER_ACTIONS = {"create_user", "list_users", "get_user", "set_user_password", "
 # 拒绝原因码到错误码：身份/范围类是权限拒绝，策略文件坏了按持久化阻塞，其余按参数错误
 _REASON_CODES = {"not_admin": "ADMIN_CONTROL_DENIED", "admin_self_only": "ADMIN_CONTROL_DENIED",
                  "policy_unreadable": "TOOL_PERSISTENCE_FAILED"}
+_CONTROL_DESCRIPTIONS = {
+    "decision_model_allowed": "是否允许该用户调用 Jev 决策模型。",
+    "audit_allowed": "是否允许该用户使用审计记录工具。",
+    "cross_owner_audit_allowed": "是否允许本机管理员主代理执行跨用户审计（仅 owner_id=local/main 可设）。",
+}
+_GOVERNANCE_FIELD_DESCRIPTIONS = {
+    "target_owner_id": "受管治理目标用户标识（如 local/alice 或 alice；与 owner_id/user_id 三选一）。",
+    "soul_md": "set_user_persona 时写入的目标用户 SOUL.md 正文。",
+    "agents_md": "set_user_persona 时写入的目标用户 AGENTS.md 正文。",
+    "user_md": "set_user_persona 时写入的目标用户 USER.md 正文。",
+    "category": "记忆查询或写入时的记忆类别过滤或目标类别。",
+    "status_filter": "列表查询时的状态筛选值（如 pending、approved、active）。",
+    "entry_id": "mutate_user_memory 编辑或删除已有正式记忆时的条目 ID。",
+    "candidate_id": "mutate_user_memory 批准或退回记忆候选时的候选 ID。",
+    "content": "mutate_user_memory 新增或编辑记忆时的正文内容。",
+    "asset_id": "toggle_user_asset 或资产治理时指定的目标资产 ID。",
+    "conflict_strategy": "provision_user_assets 配发资产遇到同名冲突时的处理策略。",
+    "note": "治理操作、记忆变更或资产配发的管理员备注说明。",
+    "prompt": "dispatch_user_task 向目标普通用户派发任务时的指令正文。",
+    "title": "dispatch_user_task 派发任务或治理项的可选标题。",
+    "thread_id": "dispatch_user_task 或会话关联查询时可选的目标会话 ID。",
+    "priority": "dispatch_user_task 派发任务的优先级标识。",
+    "review_id": "decide_governance_review 批复治理审核单时的审核单 ID。",
+    "feedback": "decide_governance_review 批复或退回审核单时的反馈说明。",
+    "review_type_filter": "list_governance_reviews 按审核单类型筛选的过滤值。",
+    "review_type": "治理审核单类型标识。",
+    "idempotency_key": "写操作可选幂等键，防止重复创建或重复派发。",
+    "include_candidates": "list_user_memories 时是否同时返回待审记忆候选。",
+    "locked": "set_user_persona 等治理操作中是否锁定目标配置禁止用户自行修改。",
+    "lock_memory": "mutate_user_memory 时是否将该条记忆设为管理员锁定。",
+    "auto_enable": "provision_user_assets 配发资产后是否立即启用。",
+    "enabled": "toggle_user_asset 等操作的目标启用状态（true 启用，false 停用）。",
+    "policy_patch": "set_governance_policy 时提交的受管治理策略字段补丁对象。",
+    "patch_override": "decide_governance_review 批准时可选的策略补丁覆盖对象。",
+    "payload_override": "provision_user_assets 或批复审核时可选的资产请求参数覆盖对象。",
+    "action_match": "治理规则或资源匹配条件对象（至少包含一个匹配键）。",
+    "expected_revision": "并发更新受管用户状态、人格或审核单时的非负整数 CAS 修订号。",
+    "persona_mode": "set_user_persona 时的人格管控模式枚举。",
+    "operation": "mutate_user_memory 的具体记忆治理子操作枚举。",
+    "asset_kind": "provision_user_assets 或 toggle_user_asset 的资产类型枚举。",
+    "decision": "decide_governance_review 的批复结论（approve 或 reject_with_feedback）。",
+}
+
+
+# 函数用途: 构造带中文说明的受管治理参数字典副本，不修改共享领域 schema。
+def _described_governance_schema() -> dict[str, dict]:
+    raw = governance_tool_schema()
+    return {
+        name: {**shape, "description": _GOVERNANCE_FIELD_DESCRIPTIONS.get(name, f"受管治理字段 {name}。")}
+        for name, shape in raw.items()
+    }
+
+
+# 函数用途: 构造带中文说明的管理员布尔控制开关字段字典。
+def _control_switch_properties() -> dict[str, dict]:
+    return {
+        key: {"type": "boolean", "description": _CONTROL_DESCRIPTIONS.get(key, f"布尔控制开关 {key}。")}
+        for key in CONTROL_DEFAULTS
+    }
 
 
 # LLM: 回执仅含 owner、控制及本地账号公开视图，不含路径、密码散列或其它策略；非管理员不展示跨用户审计项。
@@ -92,37 +151,65 @@ class AdminControlsTool(BaseTool):
                 "action": {"type": "string", "enum": ["get", "list_owners", "set_controls", "grant_resource", "revoke_resource",
                     "create_user", "list_users", "get_user", "set_user_password", "enable_user", "disable_user",
                     "list", "set", "resources", "resource_grant", "resource_revoke", *GOVERNANCE_TOOL_ACTIONS], "description": "管理账号、控制、受管治理和准确资源许可，兼容旧动作。"},
-                **governance_tool_schema(),
+                **_described_governance_schema(),
                 "owner_id": {"type": "string", "description": "set 必填：list 返回的规范 owner_id，例如 local/main 或 providers/feishu/users/<id>。"},
                 "user_id": {"type": "string", "description": "本地普通用户名，可由 owner_id 推导。"},
                 "password": {"type": "string", "description": "初始或新密码，至少8位且含大小写字母与数字，不回显。"},
                 "display_name": {"type": "string", "description": "创建时的可选显示名称。"},
                 "quotas": {"type": "object", "description": "创建时的原用户配额。"},
                 "reason": {"type": "string", "description": "停用原因。"},
-                "controls": {"type": "object", "properties": {key: {"type": "boolean"} for key in CONTROL_DEFAULTS},
-                    "additionalProperties": False, "minProperties": 1},
+                "controls": {
+                    "type": "object",
+                    "description": "set_controls 或 create_user 时提交的用户控制布尔开关（与 changes 二选一）。",
+                    "properties": _control_switch_properties(),
+                    "additionalProperties": False,
+                    "minProperties": 1,
+                },
                 "changes": {
                     "type": "object",
-                    "properties": {key: {"type": "boolean"} for key in CONTROL_DEFAULTS},
-                    "additionalProperties": False, "minProperties": 1,
+                    "properties": _control_switch_properties(),
+                    "additionalProperties": False,
+                    "minProperties": 1,
                     "description": "set 必填：要修改的开关，值为 true/false；cross_owner_audit_allowed 只能对 local/main 设置。",
                 },
                 "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_OWNERS_COUNT, "description": "list 最多列出的用户数，默认 50。"},
-                "resource": {"type": "object", "properties": {
-                    "provider": {"type": "string"}, "resource_type": {"type": "string"},
-                    "resource_token": {"type": "string"}, "operations": {"type": "array", "items": {"type": "string"}},
-                }, "required": ["provider", "resource_type", "resource_token", "operations"], "additionalProperties": False},
+                "resource": {
+                    "type": "object",
+                    "description": "grant_resource / revoke_resource（或 resource_grant / resource_revoke）必填的精确云资源许可对象，不含凭据。",
+                    "properties": {
+                        "provider": {"type": "string", "description": "云资源所属平台标识（如 feishu）。"},
+                        "resource_type": {"type": "string", "description": "云资源类型（如 sheet、docx、wiki）。"},
+                        "resource_token": {"type": "string", "description": "目标云资源的精确标识 token。"},
+                        "operations": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "允许或撤销的资源操作名列表（如 sheet_read、document_read）。",
+                        },
+                    },
+                    "required": ["provider", "resource_type", "resource_token", "operations"],
+                    "additionalProperties": False,
+                },
             },
             "required": ["action"],
             "additionalProperties": False,
         },
-        hints=ToolModelHints(category="system", use_cases=(
-            "管理员要求创建本地用户或重置登录密码、停用和重新启用账号",
-            "管理员要求关闭或开启某个用户的 Jev 决策模型",
-            "管理员要求关闭或开启某个用户的审计工具",
-            "管理员明确允许或收回 my-agent 跨用户审计",
-        ), avoid_when=("普通用户问自己的设置时（用 user_config 或 audit_records）",),
-            default_deferred=True, deferred_summary="管理员专用：创建和管理本地用户、决策/审计控制及精确资源授权"),
+        hints=ToolModelHints(
+            category="system",
+            use_cases=(
+                "管理员要求创建本地用户或重置登录密码、停用和重新启用账号",
+                "管理员要求关闭或开启某个用户的 Jev 决策模型",
+                "管理员要求关闭或开启某个用户的审计工具",
+                "管理员明确允许或收回 my-agent 跨用户审计",
+            ),
+            avoid_when=("普通用户问自己的设置时（用 user_config 或 audit_records）",),
+            examples=(
+                '{"action":"list_owners","limit":50}',
+                '{"action":"set_controls","owner_id":"local/alice","controls":{"decision_model_allowed":true,"audit_allowed":false}}',
+                '{"action":"grant_resource","owner_id":"local/alice","resource":{"provider":"feishu","resource_type":"docx","resource_token":"doccnExampleToken","operations":["document_read"]}}',
+            ),
+            default_deferred=True,
+            deferred_summary="管理员专用：创建和管理本地用户、决策/审计控制及精确资源授权",
+        ),
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("action", tuple((action, "read_only") for action in

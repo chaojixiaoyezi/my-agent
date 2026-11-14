@@ -88,17 +88,14 @@ _AVOID_WHEN = (
 _KEYWORDS = ("加模型", "新增模型", "换模型", "切换模型", "默认模型", "删除模型", "服务商", "api key", "密钥", "/model", "上下文窗口",
              "共享模型", "初始模型", "语义记忆", "向量模型", "embedding")
 _EXAMPLES = (
-    '{"tool":"manage_models","action":"list"}',
-    '{"tool":"manage_models","action":"add","profile":{"model_name":"MiniMax-M2.7","model_backend":"anthropic_compatible",'
-    '"api_base":"https://api.example.com/anthropic","api_key":"<用户给的密钥>","model_context_window_tokens":200000}}',
-    '{"tool":"manage_models","action":"select","profile_id":"<list 返回的 id>"}',
-    '{"tool":"manage_models","action":"save_provider","provider_id":"minimax","editing":true,"provider":{"display_name":"MiniMax 主号"}}',
-    '{"tool":"manage_models","action":"probe","profile_id":"<list 返回的 id>"}',
-    '{"tool":"manage_models","action":"add_models","connection":{"model_backend":"openai_compatible",'
-    '"api_base":"https://api.example.com/v1","api_key":"<用户给的密钥>"},'
-    '"models":[{"model_name":"model-a","model_context_window_tokens":128000}]}',
-    '{"tool":"manage_models","action":"set_initial","profile_id":"<list 返回的 id>"}',
-    '{"tool":"manage_models","action":"set_embedding","profile_id":"<list 返回的 embedding 用途模型 id>"}',
+    '{"action":"list"}',
+    '{"action":"select","profile_id":"default"}',
+    '{"action":"save_provider","provider_id":"minimax","editing":true,"provider":{"display_name":"MiniMax 主号"}}',
+    '{"action":"save_model","provider_id":"minimax","profile":{"model_name":"MiniMax-M2.7","model_backend":"anthropic_compatible","model_context_window_tokens":200000}}',
+    '{"action":"probe","profile_id":"profile-id-from-list"}',
+    '{"action":"add_models","provider_id":"minimax","model_backend":"openai_compatible","models":[{"model_name":"model-a","model_context_window_tokens":128000}]}',
+    '{"action":"set_initial","profile_id":"profile-id-from-list"}',
+    '{"action":"set_embedding","profile_id":"embedding-profile-id-from-list"}',
 )
 _PARAMETERS = {
     "action": "必填。" + "/".join(_ACTIONS) + "。",
@@ -133,50 +130,94 @@ _PARAMETERS = {
 _PROVIDER_SCHEMA = {
     "type": "object",
     "properties": {
-        "display_name": {"type": "string"},
-        "api_base": {"type": "string"},
-        "api_key": {"type": "string"},
-        "enabled": {"type": "boolean"},
-        "capabilities": {"type": "array", "items": {"type": "string", "enum": sorted(CAPABILITIES)}},
-        "custom_headers": {"type": "object"},
-        "session_header": {"type": "string"},
+        "display_name": {"type": "string", "description": "服务商显示名称（如 MiniMax 主号）。"},
+        "api_base": {"type": "string", "description": "服务商接口根地址（HTTPS/HTTP URL）。"},
+        "api_key": {"type": "string", "description": "服务商调用密钥；编辑已有服务商时留空表示保留原密钥。"},
+        "enabled": {"type": "boolean", "description": "是否启用该服务商。"},
+        "capabilities": {
+            "type": "array",
+            "items": {"type": "string", "enum": sorted(CAPABILITIES)},
+            "description": "服务商支持的模型用途列表（agentic、decision、embedding）。",
+        },
+        "custom_headers": {"type": "object", "description": "附加到该服务商请求的可选自定义 HTTP 请求头字典。"},
+        "session_header": {"type": "string", "description": "可选会话粘性请求头名称。"},
     },
     "additionalProperties": False,
 }
 _PROFILE_SCHEMA = {
     "type": "object",
     "properties": {
-        "provider_id": {"type": "string"},
-        "model_name": {"type": "string"},
-        "model_backend": {"type": "string", "enum": sorted(BACKENDS)},
-        "api_base": {"type": "string"},
-        "api_key": {"type": "string"},
-        "model_context_window_tokens": {"type": "integer", "minimum": 4096},
-        "capability": {"type": "string", "enum": sorted(CAPABILITIES)},
-        "enabled": {"type": "boolean"},
-        "temperature": {"type": "number"},
-        "top_p": {"type": "number"},
-        "model_queue_wait_seconds": {"type": "integer", "minimum": 0},
-        "usage_tags": {"type": "array", "items": {"type": "string"}},
-        "input_modalities": {"type": "array", "items": {"type": "string"}},
+        "provider_id": {"type": "string", "description": "所属已保存服务商 ID（save_model 时可填在此处或顶层）。"},
+        "model_name": {"type": "string", "description": "服务商侧真实模型名称（无需出现在 discover 列表中）。"},
+        "model_backend": {
+            "type": "string",
+            "enum": sorted(BACKENDS),
+            "description": "接口协议类型枚举（如 openai_compatible、anthropic_compatible 等）。",
+        },
+        "api_base": {"type": "string", "description": "action=add 快捷新建时的服务商接口根地址。"},
+        "api_key": {"type": "string", "description": "action=add 快捷新建时的接口调用密钥（仅传入一次，回执不回显）。"},
+        "model_context_window_tokens": {
+            "type": "integer",
+            "minimum": 4096,
+            "description": "模型上下文窗口总 token 数（整数，至少 4096）。",
+        },
+        "capability": {
+            "type": "string",
+            "enum": sorted(CAPABILITIES),
+            "description": "模型档案用途（agentic 对话主模型、decision 决策模型、embedding 向量模型）。",
+        },
+        "enabled": {"type": "boolean", "description": "是否启用该模型档案。"},
+        "temperature": {"type": "number", "description": "可选采样温度参数。"},
+        "top_p": {"type": "number", "description": "可选核采样 top_p 参数。"},
+        "model_queue_wait_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "可选并发排队最长等待秒数（非负整数）。",
+        },
+        "usage_tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "可选模型用途标签字符串数组。",
+        },
+        "input_modalities": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "可选支持输入模态列表（如 text、image）。",
+        },
         # 服务商声明的思考档位（如 low/medium/high/xhigh/max）；Responses 接口用它对应 /effort 档位。
-        "reasoning_levels": {"type": "array", "items": {"type": "string"}},
+        "reasoning_levels": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "服务商支持的思考强度档位列表（如 low、medium、high、xhigh、max）。",
+        },
         # 思考控制方式；取值与 backends/reasoning_control.REASONING_CONTROLS 一致，缺省 auto。
-        "reasoning_control": {"type": "string", "enum": list(REASONING_CONTROLS)},
+        "reasoning_control": {
+            "type": "string",
+            "enum": list(REASONING_CONTROLS),
+            "description": "思考控制发送方式（auto/effort/budget/none，默认 auto）。",
+        },
         # 结构化输出方式；取值与 backends/structured_output_mode.STRUCTURED_OUTPUT_MODES 一致，缺省 auto。
-        "structured_output": {"type": "string", "enum": list(STRUCTURED_OUTPUT_MODES)},
+        "structured_output": {
+            "type": "string",
+            "enum": list(STRUCTURED_OUTPUT_MODES),
+            "description": "结构化输出格式策略（auto/native/json_object，默认 auto）。",
+        },
     },
     "additionalProperties": False,
 }
 _CONNECTION_SCHEMA = {
     "type": "object",
     "properties": {
-        "model_backend": {"type": "string", "enum": sorted(BACKENDS)},
-        "api_base": {"type": "string"},
-        "api_key": {"type": "string"},
-        "custom_headers": {"type": "object"},
-        "session_header": {"type": "string"},
-        "display_name": {"type": "string"},
+        "model_backend": {
+            "type": "string",
+            "enum": sorted(BACKENDS),
+            "description": "未保存临时连接的接口协议类型。",
+        },
+        "api_base": {"type": "string", "description": "未保存临时连接的接口根地址。"},
+        "api_key": {"type": "string", "description": "未保存临时连接的调用密钥（仅本次发现或批量添加使用）。"},
+        "custom_headers": {"type": "object", "description": "未保存临时连接的可选自定义 HTTP 请求头字典。"},
+        "session_header": {"type": "string", "description": "未保存临时连接的可选会话粘性请求头名称。"},
+        "display_name": {"type": "string", "description": "add_models 自动创建服务商时使用的可选显示名称。"},
     },
     "additionalProperties": False,
 }
@@ -186,9 +227,17 @@ _MODELS_SCHEMA = {
     "items": {
         "type": "object",
         "properties": {
-            "model_name": {"type": "string"},
-            "model_context_window_tokens": {"type": "integer", "minimum": 4096},
-            "reasoning_levels": {"type": "array", "items": {"type": "string"}},
+            "model_name": {"type": "string", "description": "要批量添加的模型名称。"},
+            "model_context_window_tokens": {
+                "type": "integer",
+                "minimum": 4096,
+                "description": "该模型的上下文窗口总 token 数（整数，至少 4096）。",
+            },
+            "reasoning_levels": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "该模型可选支持的思考强度档位列表。",
+            },
         },
         "required": ["model_name", "model_context_window_tokens"],
         "additionalProperties": False,
@@ -459,7 +508,14 @@ def _outcome(request: _ModelToolRequest, result: dict) -> ToolHandlerOutcome:
     if request.action in {"probe", "discover"}:
         if body.get("ok") is False:
             code = "MODEL_PROBE_FAILED" if request.action == "probe" else "MODEL_DISCOVER_FAILED"
-            return ToolHandlerOutcome(TOOL_NAME, False, json.dumps(body, ensure_ascii=False), error_code=code)
+            return ToolHandlerOutcome(
+                TOOL_NAME,
+                False,
+                json.dumps(body, ensure_ascii=False),
+                error_code=code,
+                reported_error_code=code,
+                failure_stage="execution",
+            )
         return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(body, ensure_ascii=False))
     for name in ("profile_id", "provider_id"):
         if request.payload.get(name):

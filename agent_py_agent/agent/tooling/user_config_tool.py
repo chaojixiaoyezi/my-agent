@@ -50,6 +50,53 @@ from .models import (
     ToolRuntimePolicy,
 )
 
+_DECISION_POINT_LABELS = {
+    "model_selection": "主会话选模型",
+    "subagent_model": "子代理选模型",
+    "skill_tool": "技能与工具裁剪",
+    "pre_recall": "预召回查询规划",
+    "recall": "召回筛选",
+    "curator": "后台记忆整理",
+    "curator_relation": "后台记忆关联",
+    "external_material_order": "外部材料排序",
+    "planning": "计划编排",
+    "delivery_quality": "交付质量把关",
+    "action_candidate": "动作候选评估",
+}
+_DECISION_GENERAL_DESCRIPTIONS = {
+    "enabled": "是否启用当前范围的 Jev 决策模型总开关。",
+    "observe_sampling_enabled": "是否开启决策模型 observe 观察采样。",
+    "observe_nonblocking_enabled": "observe 模式是否采用后台非阻塞执行。",
+    "timeout_seconds": "前台单次决策模型调用等待超时秒数（正数，须在 agent_timeout_bounds 范围内）。",
+    "stage_timeout_seconds": "单阶段决策流程累计等待超时秒数（正数，须在 agent_timeout_bounds 范围内）。",
+    "background_timeout_seconds": "后台整理类决策调用超时秒数（正数，仅 scope=owner 支持，须在 agent_timeout_bounds 范围内）。",
+}
+_DECISION_EXTRA_DESCRIPTIONS = {
+    "points.model_selection.cadence": "主会话选模型询问节奏（every_turn 每轮询问，structure_change 仅结构变化时询问）。",
+    "points.subagent_model.candidate_profile_ids": "子代理选模型允许挑选的已保存模型编号非空列表。",
+    "points.skill_tool.context_policy": "技能与工具裁剪接入点的上下文披露策略（metadata 仅摘要，progressive 渐进展开）。",
+    "points.skill_tool.optional_categories": "技能与工具裁剪接入点默认按需收起的可选工具类别名称列表。",
+    "points.pre_recall.fragment_material": "预召回接入点交给决策模型的片段材料模式（query_text 仅查询文本，with_new_facts 附预检新增事实）。",
+}
+_PRE_WRITE_PERMISSION_CODES = frozenset({"PARAMETER_BOUNDARY", "PARAMETER_SOURCE_READ_ONLY"})
+_PRE_WRITE_REVISION_CODES = frozenset({"CONFIG_REVISION_CONFLICT"})
+_PRE_WRITE_INVALID_CODES = frozenset(
+    {
+        "PARAMETER_UNKNOWN",
+        "PARAMETER_STRUCTURED",
+        "PARAMETER_INVALID",
+        "PARAMETER_NOT_OVERRIDDEN",
+        "USER_CONFIG_MISSING",
+        "USER_CONFIG_IS_PACKAGED",
+        "CAPABILITY_IS_PACKAGED",
+        "CONFIG_PATH_INVALID",
+        "CONFIG_INVALID",
+        "CHANGE_NOT_FOUND",
+        "CHANGE_AMBIGUOUS",
+        "CHANGE_MASKED",
+    }
+)
+
 
 # LLM: schema 字段来自同一决策登记表，不通过任意属性路径扩大可修改范围；运行时仍由服务严格校验。
 #   各接入点的 points.<点>.profile_id 与 changes.profile_id 同义，只写“同 profile_id”指回去，不重复同一句说明；类型不变。
@@ -61,6 +108,20 @@ def _decision_change_properties() -> dict:
     for path, shape in properties.items():
         if path.startswith("points.") and path.endswith(".profile_id") and "description" in shape:
             shape["description"] = "同 profile_id，只作用于本接入点。"
+            continue
+        if "description" in shape:
+            continue
+        if path in _DECISION_GENERAL_DESCRIPTIONS:
+            shape["description"] = _DECISION_GENERAL_DESCRIPTIONS[path]
+        elif path in _DECISION_EXTRA_DESCRIPTIONS:
+            shape["description"] = _DECISION_EXTRA_DESCRIPTIONS[path]
+        elif path.startswith("points."):
+            _, point, field = path.split(".")
+            label = _DECISION_POINT_LABELS.get(point, point)
+            if field == "mode":
+                shape["description"] = f"{label}接入点的决策运行模式（off 关闭、observe 仅观察、apply 实际采用）。"
+            elif field == "timeout_seconds":
+                shape["description"] = f"{label}接入点的单次决策等待超时秒数（正数，须在 agent_timeout_bounds 范围内）。"
     return properties
 
 
@@ -99,13 +160,23 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
                      "decision_models 只读脱敏目录；decision_probe 仅在用户明确要求测试连接时使用，会联网并产生用量。"
                      "本工具不开放本机全局配置、凭据或其他用户设置。"),
         input_schema={"type": "object", "properties": properties, "required": ["action"], "additionalProperties": False},
-        hints=ToolModelHints(category="system", use_cases=(
-            "用户要求开启、关闭或调整自己的决策模型等待时间与接入点",
-            "用户要求查看自己的决策模型设置、已保存模型",
-            "用户明确要求测试已保存决策模型连接",
-        ), avoid_when=("需要本机全局配置、凭据或其他用户设置时",),
+        hints=ToolModelHints(
+            category="system",
+            use_cases=(
+                "用户要求开启、关闭或调整自己的决策模型等待时间与接入点",
+                "用户要求查看自己的决策模型设置、已保存模型",
+                "用户明确要求测试已保存决策模型连接",
+            ),
+            avoid_when=("需要本机全局配置、凭据或其他用户设置时",),
             keywords=("user_config", "配置项", "配置参数", "决策设置", "决策模型"),
-            default_deferred=True, deferred_summary="查看或修改自己的决策模型设置"),
+            examples=(
+                '{"action":"decision_read"}',
+                '{"action":"decision_patch","scope":"owner","expected_revision":{"owner":0,"thread":0},"changes":{"enabled":true,"timeout_seconds":6}}',
+                '{"action":"decision_models"}',
+            ),
+            default_deferred=True,
+            deferred_summary="查看或修改自己的决策模型设置",
+        ),
     )
 
 
@@ -233,8 +304,23 @@ class UserConfigTool(BaseTool):
                 "change_id": {"type": "string", "description": "action=revert 要回滚的修改记录编号（history 返回的 id，至少 6 位）。"},
                 "reason": {"type": "string", "description": "set/reset/revert 可选：这次修改的原因，记入修改记录；decision_patch/decision_reset 也可带，记入决策设置修改记录并展示（截断 200 字）。"},
                 "scope": {"type": "string", "enum": ["owner", "thread"], "description": "决策设置范围，默认 owner；thread 只指当前可信运行会话。"},
-                "expected_revision": {"type": "object", "properties": {"owner": {"type": "integer", "minimum": 0}, "thread": {"type": "integer", "minimum": 0}}, "required": ["owner", "thread"], "additionalProperties": False},
-                "changes": {"type": "object", "properties": _decision_change_properties(), "additionalProperties": False, "minProperties": 1},
+                "expected_revision": {
+                    "type": "object",
+                    "description": "decision_patch / decision_reset 必填的并发校验修订号对象，取自最近一次 decision_read 返回的 revision。",
+                    "properties": {
+                        "owner": {"type": "integer", "minimum": 0, "description": "当前用户长期决策设置的非负整数 revision。"},
+                        "thread": {"type": "integer", "minimum": 0, "description": "当前可信会话临时决策覆盖的非负整数 revision。"},
+                    },
+                    "required": ["owner", "thread"],
+                    "additionalProperties": False,
+                },
+                "changes": {
+                    "type": "object",
+                    "description": "decision_patch 必填：要修改的决策设置字段键值字典（至少一项；等待秒数须在 agent_timeout_bounds 范围内）。",
+                    "properties": _decision_change_properties(),
+                    "additionalProperties": False,
+                    "minProperties": 1,
+                },
                 "fields": {"type": "array", "items": {"type": "string", "enum": list(_decision_change_properties())}, "minItems": 1, "description": "decision_reset 删除这些覆盖字段以恢复继承。"},
                 "profile_id": {"type": "string", "description": "decision_probe 必填：decision_models 返回的已保存 Decision 编号或 shared:编号，不能传模型名称、地址或凭据。"},
                 "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "decision_probe 必填：用户明确要求的有限正测试预算秒数，包含准备与完整请求。"},
@@ -252,6 +338,12 @@ class UserConfigTool(BaseTool):
             ),
             avoid_when=("需要改权限模式、危险路径或凭据时",),
             keywords=("user_config", "配置项", "配置参数", "决策设置", "决策模型"),
+            examples=(
+                '{"action":"search","query":"compact"}',
+                '{"action":"view","key":"memory_compact_trigger_percent"}',
+                '{"action":"decision_read"}',
+                '{"action":"decision_patch","scope":"owner","expected_revision":{"owner":0,"thread":0},"changes":{"enabled":true,"timeout_seconds":6}}',
+            ),
             default_deferred=True,
             deferred_summary="查看或修改配置参数（参数中心，等同 /settings；含决策模型设置）",
         ),
@@ -299,6 +391,8 @@ class UserConfigTool(BaseTool):
             False,
             "不支持的配置 action。",
             error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
+            failure_stage="validation",
         )
 
     # LLM: 用户配置路径取当前进程实际加载的配置文件（见 user_config_path）；参数事实来自参数中心登记表。
@@ -553,15 +647,56 @@ def _capability_path(agent: object) -> object | None:
         return None
 
 
-# LLM: 保留原通用权限/参数大类，同时将参数中心精确结构化码写进 reported_error_code，不能只剩自然语言说明。
-# 函数用途: 按自然顺序输出核心摘要，保留原权限和参数拒绝分类。
+# LLM: 按参数中心结构化错误码精确区分写前拒绝（not_started）与持久化/回读不确定失败（unknown），绝不凭错误文本猜测。
+# 函数用途: 将参数中心结果映射为带副作用证明与原始 reported_error_code 的工具回执。
 def _outcome(report: dict[str, object]) -> ToolHandlerOutcome:
     if report.get("ok"):
         return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=False, default=str))
-    code = ("TOOL_PERMISSION_DENIED" if report.get("code") in {"PARAMETER_BOUNDARY", "PARAMETER_SOURCE_READ_ONLY"}
-            else "TOOL_INVALID_ARGUMENTS")
-    return ToolHandlerOutcome("user_config", False, str(report.get("error") or "配置修改被拒绝"), error_code=code,
-                              reported_error_code=str(report.get("code") or code))
+    raw_code = str(report.get("code") or "").strip()
+    message = str(report.get("error") or "配置修改被拒绝")
+    if raw_code in _PRE_WRITE_PERMISSION_CODES:
+        return ToolHandlerOutcome(
+            "user_config",
+            False,
+            message,
+            error_code="TOOL_PERMISSION_DENIED",
+            reported_error_code=raw_code,
+            effect_outcome="not_started",
+            failure_stage="validation",
+        )
+    if raw_code in _PRE_WRITE_REVISION_CODES:
+        return ToolHandlerOutcome(
+            "user_config",
+            False,
+            message,
+            error_code="STALE_VERSION",
+            reported_error_code=raw_code,
+            effect_outcome="not_started",
+            failure_stage="validation",
+        )
+    if raw_code in _PRE_WRITE_INVALID_CODES:
+        return ToolHandlerOutcome(
+            "user_config",
+            False,
+            message,
+            error_code="TOOL_INVALID_ARGUMENTS",
+            reported_error_code=raw_code,
+            effect_outcome="not_started",
+            failure_stage="validation",
+        )
+    return ToolHandlerOutcome(
+        "user_config",
+        False,
+        message,
+        error_code="TOOL_PERSISTENCE_FAILED",
+        reported_error_code=raw_code or "TOOL_PERSISTENCE_FAILED",
+        effect_outcome="unknown",
+        failure_stage="persistence",
+        next_action=(
+            "请先用 user_config(action='view') 或 user_config(action='history') 核对目标配置是否已写入，"
+            "确认状态后再决定后续操作，不要原样盲目重放。"
+        ),
+    )
 
 
 __all__ = ["UserConfigTool"]
