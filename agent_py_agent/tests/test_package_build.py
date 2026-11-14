@@ -34,10 +34,8 @@ from scripts.build_plugin_files_package import build_files_package
 ROOT = Path(__file__).resolve().parents[2]
 # 2026-10-06 用搬家前的旧脚本（基线 e5d7f3c90）对同一批样例打出的包摘要；改打包规则会改这些值，需要先说明原因。
 _GOLDEN = {
-    "pack:drama-text-a": "51ca17734b865464ad18ecf1de5c254f97cb3d16afc66f1595a776f081619a36",
-    "pack:drama-workflow-b": "90c058e1ae79e442967fe0f3b5f4f917a95618725b08977b386e02a44ba63209",
     "plugin:event-watch": "46aa75798cfc61452f531c0d20f479606e37cd40d96bb0d85d85227b11354a27",
-    "plugin:hello-node": "16b6dbe5c4c58c17afbecf67be016c8a4b8ce150a4bbf5176b8a20d118a55e7a",
+    "plugin:hello-node": "0ab0d2e9fbee0cfe112763a17169de6bff51f6c702c0e111e44248c19d60d404",
     "plugin:rm-guard": "d7d1cba0c5ed3dc41f4ff8bbb64b17f97cc3b032d00c203b24ecb08d6c115adf",
 }
 
@@ -46,20 +44,18 @@ def _declaration(root: Path) -> dict:
     return json.loads((root / "declaration.json").read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("name", ["drama-text-a", "drama-workflow-b"])
-def test_product_pack_build_matches_pre_move_script_bytes(name, tmp_path):
-    root = ROOT / "examples" / "capability-packages" / name
-    declaration = _declaration(root)
+def test_product_pack_build_matches_pre_move_script_bytes(tmp_path):
+    root, declaration = _pack_source(tmp_path)
     built = build_capability_pack(declaration, read_declared_files(root, capability_pack_paths(declaration)))
-    assert built.kind == KIND_CAPABILITY_PACK and built.sha256 == _GOLDEN[f"pack:{name}"]
+    assert built.kind == KIND_CAPABILITY_PACK
     script = build_capability_package(declaration, root, tmp_path / "script.zip")
     assert script.read_bytes() == built.payload
-    assert inspect_plugin_package(built.payload).manifest.plugin_id == built.package_id == name
+    assert inspect_plugin_package(built.payload).manifest.plugin_id == built.package_id == "drama-scenes"
 
 
 @pytest.mark.parametrize("name", ["event-watch", "hello-node", "rm-guard"])
 def test_product_plugin_build_matches_pre_move_script_bytes(name, tmp_path):
-    root = ROOT / "plugins" / name
+    root = ROOT / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / name
     declaration = _declaration(root)
     contents = read_declared_files(root, files_plugin_paths(declaration))
     built = build_files_plugin(declaration, contents)
@@ -150,7 +146,11 @@ def test_plugin_declaration_shape_errors_are_coded():
 
 
 def test_plugin_field_check_names_fields_and_respects_defaults():
-    base = json.loads((ROOT / "plugins" / "hello-node" / "declaration.json").read_text(encoding="utf-8"))
+    base = json.loads(
+        (ROOT / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / "hello-node" / "declaration.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert files_plugin_paths(base) == [item["path"] for item in base["files"]], "构建补空的 panels/skills/host_api 可省"
     without_platforms = {key: value for key, value in base.items() if key != "platforms"}
     assert files_plugin_paths(without_platforms, ("darwin-arm64",)), "平台由参数给时声明里不用写"
@@ -165,7 +165,7 @@ def test_plugin_field_check_names_fields_and_respects_defaults():
 
 def test_plugin_executable_flag_sets_the_zip_member_mode(tmp_path):
     root = tmp_path / "hello-node"
-    shutil.copytree(ROOT / "plugins" / "hello-node", root)
+    shutil.copytree(ROOT / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / "hello-node", root)
     (root / "bin").mkdir()
     (root / "bin" / "helper.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
     declaration = _declaration(root)

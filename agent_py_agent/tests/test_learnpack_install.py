@@ -211,12 +211,47 @@ def _switches(agent, *, pack=False, plugin=False) -> None:
                     f"plugin_self_install_enabled: {str(plugin).lower()}\n", encoding="utf-8")
 
 
-def _build(agent, version="0.1.0", *, sample: str = "") -> dict:
+def _build(agent, version="0.1.0", *, with_verifier: bool = False) -> dict:
     base = _owner(agent) / "runs" / "2026-10-06" / "learn"
-    if sample:
-        root = base / f"{sample}-{version}"
-        shutil.copytree(ROOT / "examples" / "capability-packages" / sample, root)
-        declaration = json.loads((root / "declaration.json").read_text(encoding="utf-8"))
+    if with_verifier:
+        root = base / f"drama-verifier-{version}"
+        (root / "scripts").mkdir(parents=True)
+        (root / "CAPABILITY.md").write_text(f"# 短剧校验 {version}\n先核查交付结构。\n", encoding="utf-8")
+        (root / "scripts" / "check_delivery.py").write_text(
+            "import json\nprint(json.dumps({'schema': 'pack_verifier_result.v1', 'valid': True}))\n",
+            encoding="utf-8",
+        )
+        declaration = {
+            "plugin_id": "drama-verifier",
+            "version": version,
+            "summary": "短剧交付校验方法",
+            "capability": {
+                "description": "校验短剧交付产物结构",
+                "keywords": ["短剧", "校验"],
+                "entry_document": "CAPABILITY.md",
+                "verification": {
+                    "deliverables": [
+                        {
+                            "id": "delivery",
+                            "path_patterns": ["**/*.json"],
+                            "required": True,
+                            "field_match": {"format": "json", "field": "schema", "equals": ["story_delivery.v1"]},
+                        }
+                    ],
+                    "verifiers": [
+                        {
+                            "id": "check-delivery",
+                            "member": "scripts/check_delivery.py",
+                            "runtime": "python",
+                            "applies_to": "delivery",
+                            "args": ["{target}", "--host-json"],
+                            "timeout_seconds": 20,
+                        }
+                    ],
+                    "input_policy": "preserve_originals",
+                },
+            },
+        }
     else:
         root = base / f"drama-scenes-{version}"
         root.mkdir(parents=True)
@@ -324,16 +359,16 @@ def test_new_version_replaces_the_old_one_and_remembers_it(tmp_path, monkeypatch
 def test_pack_checker_programs_follow_the_plugin_switch(tmp_path, monkeypatch):
     agent = _agent(tmp_path, monkeypatch)
     _switches(agent, pack=True, plugin=False)
-    build = _build(agent, "0.5.4", sample="drama-text-a")
+    build = _build(agent, "0.5.4", with_verifier=True)
     outcome, body = _install(agent, build["sha256"])
     # 包里有检查程序而插件开关关着：不半路停下，改为出单（不碰任何已装版本）。
     assert outcome.ok and body["state"] == "awaiting_user_confirmation" and body["package"]["runs_programs"] is True
     assert body["enable_auto_install_command"] == "/settings set plugin_self_install_enabled true"
-    assert _installed_entry(agent, "drama-text-a") is None
+    assert _installed_entry(agent, "drama-verifier") is None
     _switches(agent, pack=True, plugin=True)
     outcome, body = _install(agent, build["sha256"])
     assert outcome.ok and body["state"] == STATE_ENABLED, body
-    assert _installed_entry(agent, "drama-text-a").enabled
+    assert _installed_entry(agent, "drama-verifier").enabled
 
 
 def test_not_self_built_sha_is_refused_and_nothing_written(tmp_path, monkeypatch):
@@ -490,7 +525,7 @@ def test_switches_do_not_cross_over(tmp_path, monkeypatch):
     _outcome, body = _install(agent, _build(agent)["sha256"])
     assert body["state"] == "awaiting_user_confirmation", "能力包只看能力包开关"
     plugin_root = _owner(agent) / "runs" / "2026-10-06" / "learn" / "hello-node"
-    shutil.copytree(ROOT / "plugins" / "hello-node", plugin_root)
+    shutil.copytree(ROOT / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / "hello-node", plugin_root)
     declaration = json.loads((plugin_root / "declaration.json").read_text(encoding="utf-8"))
     built = agent.tools.tools["package_build"].execute({"kind": "plugin", "source_dir": str(plugin_root),
                                                         "declaration": declaration, "origin": "自己写的", "license": "自有"})
@@ -701,7 +736,7 @@ def test_revert_refuses_what_is_not_hers(tmp_path, monkeypatch):
 
 def _build_hello_node(agent) -> str:
     plugin_root = _owner(agent) / "runs" / "2026-10-06" / "learn" / "hello-node"
-    shutil.copytree(ROOT / "plugins" / "hello-node", plugin_root)
+    shutil.copytree(ROOT / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / "hello-node", plugin_root)
     declaration = json.loads((plugin_root / "declaration.json").read_text(encoding="utf-8"))
     built = agent.tools.tools["package_build"].execute({"kind": "plugin", "source_dir": str(plugin_root),
                                                         "declaration": declaration, "origin": "自己写的", "license": "自有"})

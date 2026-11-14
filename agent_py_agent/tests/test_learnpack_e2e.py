@@ -54,7 +54,7 @@ def _pack_turn(version: str) -> list:
 
 
 def _plugin_turn() -> list:
-    sample = ROOT / "plugins" / "hello-node"
+    sample = ROOT / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / "hello-node"
     writes = [("write_file", {"path": f"hello-node/{path.relative_to(sample).as_posix()}",
                               "content": path.read_text(encoding="utf-8")})
               for path in sorted(sample.rglob("*")) if path.is_file()]

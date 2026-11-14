@@ -24,11 +24,11 @@ from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import tool_arguments_hash
 from agent_py_agent.tests.test_plugin_event_display import decisions as b6_decisions
 from agent_py_agent.tests.test_plugin_event_display import info_message
-from agent_py_agent.tests.test_plugin_gate_event_combination import _persist_execution
 from agent_py_agent.tests.test_plugin_gate_reapproval import _execute
 from agent_py_agent.tests.test_plugin_gate_reapproval import reapproval_case as reapproval_case
 from agent_py_agent.tests.test_plugin_management import manager
 from agent_py_agent.tests.test_plugin_manifest_v8 import _bundle, _v8
+from agent_py_agent.tests.test_plugin_protocol_samples import _persist_execution
 
 _FIXTURES = (reapproval_case,)
 

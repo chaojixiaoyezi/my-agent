@@ -183,7 +183,7 @@ def test_unknown_pack_action_and_extra_arguments_are_coded(tmp_path, monkeypatch
 def test_plugins_keep_the_plain_management_lines_and_are_marked_in_the_list(tmp_path, monkeypatch):
     agent = _agent(tmp_path, monkeypatch)
     plugin_root = Path(agent.home_paths.owner_home_dir) / "runs" / "2026-10-06" / "learn" / "hello-node"
-    shutil.copytree(ROOT / "plugins" / "hello-node", plugin_root)
+    shutil.copytree(ROOT / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / "hello-node", plugin_root)
     declaration = json.loads((plugin_root / "declaration.json").read_text(encoding="utf-8"))
     built = agent.tools.tools["package_build"].execute({"kind": "plugin", "source_dir": str(plugin_root),
                                                         "declaration": declaration, "origin": "自己写的", "license": "自有"})

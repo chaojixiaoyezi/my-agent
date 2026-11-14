@@ -129,7 +129,7 @@ v8 两语言启用都要求用户本人确认入口/文件/解释器、订阅正
 - 先读 `docs/design/PLUGIN_WORKSPACE_CONTEXT.md` 和 `PLUGIN_WORKSPACE_WRITE.md` 的现行合同。
 - Python 先核 SDK 当前接口（`plugins/sdk`；`my-agent-plugin-api`），v8 的依赖必须显式随文件交付，
   不能传 wheel 给 v8 文件构建器；旧 wheel 工程才用 `build_plugin_api.py` 和 `--wheel`，不猜版本或下载依赖。
-- Node 参考 `plugins/hello-node/src/workspace_read.js`，跑 `plugins/sdk/conformance/workspace_read_check.json`；
+- Node 参考 `agent_py_agent/tests/plugin_samples/fixtures/hello-node/src/workspace_read.js`，跑 `plugins/sdk/conformance/workspace_read_check.json`；
   不声称普通字符串前缀检查是安全路径校验。非 Python 写入暂缺跨语言一致性用例，不直接复制读取检查当写入检查。
 - 权限上下文只取本次可信 `_meta`，缺失或非法须拒绝；不要缓存旧轮授权。宿主只读 API 也须明确声明和授权。
 - 文件协作合同不是 OS 沙箱；新增风险遵守用户授权、宿主工具审批和目录边界，不能由插件自行扩权。

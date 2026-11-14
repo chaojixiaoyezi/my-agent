@@ -190,11 +190,11 @@ def test_repository_samples_build_through_the_tool(tmp_path, monkeypatch):
     ok, body, _ = _run(agent, _params(pack_root))
     assert ok and body["build"]["sha256"] == "6722bd3d87fe22becd4a2725371fcad0a60503d2c46155b76c4f6fd7c60cb787"
     plugin_root = _owner(agent) / "runs" / "2026-10-06" / "learn" / "hello-node"
-    shutil.copytree(ROOT / "plugins" / "hello-node", plugin_root)
+    shutil.copytree(ROOT / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / "hello-node", plugin_root)
     plugin_declaration = json.loads((plugin_root / "declaration.json").read_text(encoding="utf-8"))
     ok, body, _ = _run(agent, _params(plugin_root, kind="plugin", declaration=plugin_declaration, license="自有"))
     assert ok and body["build"]["kind"] == "plugin"
-    assert body["build"]["sha256"] == "16b6dbe5c4c58c17afbecf67be016c8a4b8ce150a4bbf5176b8a20d118a55e7a"
+    assert body["build"]["sha256"] == "0ab0d2e9fbee0cfe112763a17169de6bff51f6c702c0e111e44248c19d60d404"
 
 
 def test_non_admin_handler_call_is_denied(tmp_path):

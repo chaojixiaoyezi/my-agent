@@ -205,7 +205,7 @@ def test_real_platform_sandbox_blocks_writes_outside_the_data_dir(tmp_path):
 def test_node_sample_runs_inside_the_platform_sandbox(tmp_path):
     if plugin_sandbox_problem(True, tmp_path):
         pytest.skip("本机平台沙箱不可用（Linux 需要可用的 bwrap，macOS 需要 sandbox-exec）")
-    project = Path(__file__).parents[2] / "plugins" / "hello-node"
+    project = Path(__file__).parents[2] / "agent_py_agent" / "tests" / "plugin_samples" / "fixtures" / "hello-node"
     declaration = json.loads((project / "declaration.json").read_text(encoding="utf-8"))
     service, _ = manager(tmp_path, process_sandbox=True, legacy_sandbox_default=False)
     package = build_files_package(declaration, project, tmp_path / "hello-node.zip")
