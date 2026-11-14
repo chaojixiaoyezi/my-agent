@@ -57,6 +57,8 @@ from ..workflows.review_receipts import pending_review_error
 from ..workflows.run_store import WorkflowExecutionError
 from .models import BaseTool
 from .scripts_tool import (
+    _annotate_schema_properties,
+    _annotate_shared_asset_defs,
     _dispatch,
     _outcome,
     _owner,
@@ -137,26 +139,123 @@ def _analysis_summary(step, resolved_skills, context, *, owner_home, workspace_r
             'llm_involved': False, 'skill_summaries': summaries}
 
 
+_WORKFLOW_DEFINITION_DESCRIPTIONS: dict[str, str] = {
+    'descriptor': '工作流标准资产描述符对象（含 name、access_targets、data_sources、credential_refs、io_contract 等）。',
+    'steps': '工作流步骤定义数组。',
+    'body_markdown': '工作流业务背景与操作说明 Markdown 正文。',
+    'enabled': '工作流定义是否启用。',
+    'edges': '可选显式步骤有向边数组。',
+    'schedule_ids': '关联的定时计划 ID 列表。',
+    'datasource_ids': '工作流级关联的数据源代号列表。',
+}
+
+_WORKFLOW_EDGE_DESCRIPTIONS: dict[str, str] = {
+    'from_step_id': '有向边起点步骤 ID。',
+    'to_step_id': '有向边终点步骤 ID。',
+    'label': '有向边分支条件或展示说明标签。',
+}
+
+_WORKFLOW_STEP_DESCRIPTIONS: dict[str, str] = {
+    'step_id': '工作流内唯一步骤标识。',
+    'name': '步骤显示名称。',
+    'description': '步骤用途与执行要求说明。',
+    'script_id': '脚本模式绑定的固化脚本资产 ID。',
+    'skill_ids': '分析或混合模式精确绑定的 Skill 稳定引用数组。',
+    'skill_tags': '按标签匹配当前 owner 可用 Skill 的补充标签数组。',
+    'on_error': '步骤失败策略（如 fail、skip、escalate_to_agent）。',
+    'inputs_map': '步骤入参映射字典（引用前序 step_id 或 $inputs 的输出字段）。',
+    'timeout_seconds': '单步运行超时秒数。',
+    'next_step_ids': '显式下游步骤 ID 数组。',
+    'depends_on': '前置依赖步骤 ID 数组。',
+    'ui_position': '可视化画布节点位置坐标对象。',
+    'foreach': '数组分批迭代执行配置对象。',
+    'retry_policy': '步骤瞬态错误重试策略对象。',
+    'tool_spec': 'tool_call 模式调用的原生工具名称与参数规格对象。',
+    'notification_spec': '步骤结构化通知投递规格对象。',
+}
+
+_WORKFLOW_STEP_NESTED_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    'ui_position': {
+        'x': '画布节点横坐标数值。',
+        'y': '画布节点纵坐标数值。',
+    },
+    'foreach': {
+        'from': '待遍历集合来源引用或字段路径。',
+        'batch_size': '每批处理的记录数量。',
+        'max_parallel': '最大并行批次上限。',
+        'as': '当前元素或批次注入步骤输入的键名。',
+        'max_batch_tokens': '单批估算最大 Token 预算上限。',
+        'on_batch_error': '单批执行失败时的处理策略。',
+        'mode': '集合分批执行模式。',
+    },
+    'retry_policy': {
+        'max_attempts': '最大尝试总次数。',
+        'delay_seconds': '首次重试间隔秒数。',
+        'backoff_factor': '连续重试退避乘数。',
+        'retryable_codes': '允许触发自动重试的错误码数组。',
+    },
+    'tool_spec': {
+        'tool_name': '要调用的目标原生工具名。',
+        'arguments': '传给目标工具的静态 JSON 参数对象。',
+        'arguments_map': '从上游步骤或 $inputs 映射的工具参数字典。',
+        'idempotent': '该工具调用是否声明为幂等操作。',
+    },
+    'notification_spec': {
+        'channel': '通知目标通道标识。',
+        'target': '已授权通知目标引用标识。',
+        'template': '通知消息模板标识或格式说明。',
+    },
+}
+
+
+def _resolve_local_def(definitions: dict, node: object) -> dict | None:
+    if not isinstance(node, dict):
+        return None
+    ref = node.get('$ref')
+    if isinstance(ref, str) and ref.startswith('#/$defs/'):
+        target = definitions.get(ref[len('#/$defs/'):])
+        if isinstance(target, dict):
+            return target
+    return node
+
+
 def _typed_definition_spec(spec):
     """复用公开定义字段向模型说明真实 JSON 类型；Owner 旧字段仍由原构造器裁决。"""
     from ..plugin_host.business_action_specs import standalone_schema
     from .business_spaces_tool import _model_projection
 
     schema = copy.deepcopy(spec.input_schema)
+    schema['properties']['action']['description'] = (
+        '工作流动作：list/get/inspect_run/preview/versions/diff/impact/status 及对应业务读动作为只读查询；'
+        'save/draft/publish/rollback/bind_skill/unbind_skill 维护工作流定义与版本，run/resume/delete 执行、恢复或删除。'
+    )
     public = _model_projection(standalone_schema({'$ref': '#/$defs/WorkflowDefinition'}))
     definitions = public.pop('$defs')
+    _annotate_shared_asset_defs(definitions)
     definition = definitions['WorkflowDefinition']
     descriptor = definitions['WorkflowDescriptorInput']
     # 原生 save 的 id/kind 来自 workflow_id；不能把业务创建入口的必填条件扩大到旧入口。
     descriptor['required'] = [key for key in descriptor['required'] if key not in ('id', 'kind')]
     descriptor['additionalProperties'] = True
     definition['additionalProperties'] = True
+    _annotate_schema_properties(definition, _WORKFLOW_DEFINITION_DESCRIPTIONS)
+    edges_prop = definition.get('properties', {}).get('edges')
+    if isinstance(edges_prop, dict):
+        edge_item = _resolve_local_def(definitions, edges_prop.get('items'))
+        if edge_item is not None:
+            _annotate_schema_properties(edge_item, _WORKFLOW_EDGE_DESCRIPTIONS)
+    _annotate_schema_properties(definitions['WorkflowStepDefinition'], _WORKFLOW_STEP_DESCRIPTIONS)
+    step_fields = definitions['WorkflowStepDefinition']['properties']
+    for nested_key, nested_map in _WORKFLOW_STEP_NESTED_DESCRIPTIONS.items():
+        nested_prop = step_fields.get(nested_key)
+        target_node = _resolve_local_def(definitions, nested_prop)
+        if target_node is not None:
+            _annotate_schema_properties(target_node, nested_map)
     definitions['WorkflowStepDefinition']['properties']['condition']['description'] = (
         '结构化条件优先：{"op":"gte","ref":{"step_id":"$inputs","key":"count"},"value":2}；'
         '支持eq/neq/gt/gte/lt/lte/in/not_in/exists/not_exists/regex，数值须传JSON数值。'
         '组合使用{"op":"and","conditions":[条件对象,...]}或op=or；'
         'regex的value是正则文本。兼容旧{step_id,key,equals}对象；不要猜字符串表达式语法。')
-    step_fields = definitions['WorkflowStepDefinition']['properties']
     step_fields['mode']['description'] = ('save成功只证明定义可保存，不保证宿主有该mode的正式执行器。'
         'condition/condition_branch/script_transform/script/approval_wait默认仅供debug_step，'
         '除非宿主明确安装对应正式执行器。条件分支正式运行时，把结构化condition直接放到已有正式步骤'
@@ -183,7 +282,25 @@ def _typed_definition_spec(spec):
     from .input_schema import inline_local_schema_refs
 
     schema['properties']['definition'] = inline_local_schema_refs(schema, schema['properties']['definition'])
-    return replace(spec, input_schema=schema, schema_hash='')
+    hints = replace(
+        spec.hints,
+        use_cases=(
+            '定义、保存、预览与执行包含确定性脚本、原生工具调用或 Skill 分析的多步骤可恢复工作流',
+            '按 workflow_run_id 只读检查运行轨迹与产物（inspect_run），并在暂停或人工修复后用 resume 断点续跑',
+            '管理工作流草稿发布（draft/publish）、历史版本对比与影响评估（versions/diff/impact）及安全回滚（rollback）',
+        ),
+        avoid_when=(
+            '仅注册或单次运行单个确定性提取脚本、无需多步编排与断点恢复时用 scripts',
+            '仅在当前回合把几个常规工具按固定依赖串联成一次性短流水线、无需持久化工作流资产时用 tool_program',
+            '需要按未来时间点、固定间隔、cron 或飞书群事件建立持久周期触发计划时用 schedule',
+        ),
+        examples=(
+            '{"action":"list"}',
+            '{"action":"inspect_run","workflow_run_id":"run_001"}',
+            '{"action":"save","workflow_id":"daily_check","definition":{"descriptor":{"name":"日常巡检","access_targets":[],"data_sources":[],"credential_refs":[],"io_contract":{}},"steps":[]}}',
+        ),
+    )
+    return replace(spec, input_schema=schema, hints=hints, schema_hash='')
 
 
 def _schema_save_source(spec):
@@ -214,36 +331,78 @@ class WorkflowsTool(BaseTool):
     model_spec = _spec('workflows', '管理Owner工作流、脚本/Skill引用、运行与断点续跑。步骤输出_pause_for_resume=true可暂停，再用resume+patched_step_output续跑。'
         '业务任务的脚本将交付文件写入环境变量MY_AGENT_RUN_OUT指向的目录；从inspect_run的steps[].output_artifacts取得artifact_id和sha256，按原版本交付。',
         list(ACTIONS), {
-            'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
-            **{key: {'type': ['integer', 'null'], 'minimum': 1} for key in ('version', 'from_version', 'to_version')},
-            'summary_line': {'type': 'string', 'maxLength': 120},
-            'include_monitors': {'type': 'boolean'},
-            'idempotency_key': {'type': 'string', 'minLength': 1, 'maxLength': 256},
-            **{key: {'type': 'string', 'minLength': 1, 'maxLength': 128}
-               for key in ('workflow_ref', 'space_id', 'project_ref', 'resolution_ref')},
-            'cursor': {'type': 'string', 'minLength': 1, 'maxLength': 2048},
-            'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
+            'expected_revision': {'type': ['integer', 'null'], 'minimum': 0,
+                'description': '乐观锁期望整数 revision（更新、发布、回滚或业务写动作传精确整数版本防覆盖）。'},
+            'version': {'type': ['integer', 'null'], 'minimum': 1,
+                'description': '目标历史整数版本号（>= 1）。'},
+            'from_version': {'type': ['integer', 'null'], 'minimum': 1,
+                'description': 'diff 对比的起始整数版本号（>= 1，diff 必填）。'},
+            'to_version': {'type': ['integer', 'null'], 'minimum': 1,
+                'description': 'diff 对比的目标整数版本号或 rollback 要恢复到的历史版本号（>= 1）。'},
+            'summary_line': {'type': 'string', 'maxLength': 120,
+                'description': '版本变更简短摘要说明（最长 120 字符）。'},
+            'include_monitors': {'type': 'boolean',
+                'description': 'impact/status 查询时是否一并包含关联监控引用。'},
+            'idempotency_key': {'type': 'string', 'minLength': 1, 'maxLength': 256,
+                'description': '业务写动作或触发调用的客户端幂等键（1 至 256 字符）。'},
+            'workflow_ref': {'type': 'string', 'minLength': 1, 'maxLength': 128,
+                'description': '业务工作流动作指定的工作流稳定引用（1 至 128 字符）。'},
+            'space_id': {'type': 'string', 'minLength': 1, 'maxLength': 128,
+                'description': '关联或筛选的业务空间稳定 ID（1 至 128 字符）。'},
+            'project_ref': {'type': 'string', 'minLength': 1, 'maxLength': 128,
+                'description': '关联或筛选的业务项目引用标识（1 至 128 字符）。'},
+            'resolution_ref': {'type': 'string', 'minLength': 1, 'maxLength': 128,
+                'description': '人工裁决或异常恢复关联引用 ID（1 至 128 字符）。'},
+            'cursor': {'type': 'string', 'minLength': 1, 'maxLength': 2048,
+                'description': '列表查询续读的不透明分页游标字符串。'},
+            'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100,
+                'description': '列表或历史版本单次最多返回条数（1 至 100）。'},
             'query': {'type': 'string', 'maxLength': 256, 'description': '列表按工作流显示名或ID做区分大小写的包含匹配；空串不过滤'},
             'scope_mode': {'type': 'string', 'enum': ['owner_global', 'spaces', 'unassigned', 'all'], 'description': '列表范围过滤；省略或all不过滤'},
             'lifecycle': {'type': 'string', 'enum': ['active', 'recycled', 'all'], 'description': '显式过滤工作流生命周期；原生list省略时全部，业务workflows.list省略时active'},
-            'protected': {'type': 'boolean'},
-            'policy': {'type': 'object'},
+            'protected': {'type': 'boolean',
+                'description': 'workflows.protection.set 设置是否保护工作流免于自动回收清理。'},
+            'policy': {'type': 'object',
+                'description': 'workflows.cleanup.policy.set 更新的工作流清理治理策略对象。'},
             'concurrency_policy': {'type': 'string', 'enum': ['allow', 'skip_if_running', 'queue'],
                 'description': 'run/resume并发策略，默认allow；skip_if_running跳过重叠，queue有界FIFO等待当前执行释放'},
-            'scope': {'type': 'object', 'properties': {
-                'scope_mode': {'type': 'string', 'enum': ['owner_global', 'spaces', 'unassigned']},
-                'space_ids': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128}}},
-                'required': ['scope_mode', 'space_ids'], 'additionalProperties': False},
+            'scope': {
+                'type': 'object',
+                'description': 'workflows.scope.set 设置的工作流可见与归属空间范围对象。',
+                'properties': {
+                    'scope_mode': {
+                        'type': 'string',
+                        'enum': ['owner_global', 'spaces', 'unassigned'],
+                        'description': '工作流范围模式：owner_global（全局）、spaces（指定业务空间）或 unassigned（未分配）。',
+                    },
+                    'space_ids': {
+                        'type': 'array',
+                        'items': {'type': 'string', 'minLength': 1, 'maxLength': 128},
+                        'description': '当 scope_mode="spaces" 时绑定的业务空间 ID 列表（其它模式传 []）。',
+                    },
+                },
+                'required': ['scope_mode', 'space_ids'],
+                'additionalProperties': False,
+            },
             'allow_script_drift': {'type': 'boolean', 'description': '显式确认恢复采用当前脚本版本'},
-            'workflow_id': {'type': ['string', 'null']},
-            **{key: {'type': 'string'} for key in ('step_id', 'skill_id', 'workflow_run_id', 'from_step_id')},
+            'workflow_id': {'type': ['string', 'null'],
+                'description': '原生工作流资产唯一稳定 ID（除 list/status/resume/inspect_run 外必填）。'},
+            'step_id': {'type': 'string',
+                'description': '工作流内目标步骤唯一 ID（bind_skill/unbind_skill 等动作使用）。'},
+            'skill_id': {'type': 'string',
+                'description': 'bind_skill/unbind_skill 针对的 Skill 稳定引用 ID。'},
+            'workflow_run_id': {'type': 'string',
+                'description': '工作流运行实例唯一 ID（resume/inspect_run 必填）。'},
+            'from_step_id': {'type': 'string',
+                'description': 'resume 断点续跑时可选指定的起始重跑步骤 ID。'},
             'definition': {'type': 'object', 'description': (
                 '工作流定义对象：{descriptor: {name, access_targets:[], data_sources:[], credential_refs:[], io_contract:{}}, '
                 'body_markdown: 说明文本, steps: [{step_id, name, mode(deterministic_script|llm_skill_analysis|hybrid), '
                 'script_id(可选), skill_ids(可选列表), condition(可选:{"step_id":"前步ID或$inputs","key":"字段","equals":值}), '
                 'inputs_map(可选:{"入参":{"step_id":"前步ID或$inputs","key":"字段"}}), on_error(escalate_to_agent|fail|skip)}]}')},
             'patched_step_output': {'type': 'object', 'description': '断点续跑时注入并经脚本IO契约校验的步骤输出（用于人工确认或故障修复）'},
-            'resolution_origin': {'type': 'string', 'enum': ['user', 'agent', 'system']},
+            'resolution_origin': {'type': 'string', 'enum': ['user', 'agent', 'system'],
+                'description': '断点恢复或人工修复裁决来源标识（user、agent 或 system）。'},
             'updated_data_sources': {'type': ['object', 'array'], 'description': '断点续跑时更新的数据源配置'},
             'inputs': {'type': 'object', 'description': '工作流运行输入参数字典（可在step的condition或inputs_map中用step_id="$inputs"引用）'}})
     model_spec = _schema_save_source(_typed_definition_spec(model_spec))
@@ -599,6 +758,7 @@ class WorkflowsTool(BaseTool):
             for step in steps) if isinstance(steps, list) else False
         if not outcome.ok and (data.get('effect_outcome') == 'unknown' or unknown_step):
             reported_code = outcome.reported_error_code or outcome.error_code
+            prior_next = outcome.next_action
             data = {**data, 'effect_outcome': 'unknown',
                 'reported_error_code': reported_code}
             original_run_id = data.get('workflow_run_id')
@@ -609,9 +769,11 @@ class WorkflowsTool(BaseTool):
                     'resume_permitted': False,
                     'instruction': '本轮已因未知副作用停止。请另发一条消息，仅只读查询此原运行；'
                                    '使用parameters中的完整参数，不要resume、重跑或更换幂等键。'}
+                if not prior_next:
+                    prior_next = data['recovery_query']['instruction']
             outcome = _outcome('workflows', data, False,
                 'WORKFLOW_RECONCILIATION_REQUIRED', effect_outcome='unknown',
-                failure_stage='effect_reconciliation')
+                failure_stage='effect_reconciliation', next_action=prior_next)
             outcome.reported_error_code = reported_code
         if (outcome.error_code != 'WORKFLOW_RECONCILIATION_REQUIRED' and self.review_dispatch and context is not None and not outcome.ok and isinstance(params, dict)
                 and params.get('action') in ('run', 'resume', 'workflows.run', 'workflow_runs.resume')
@@ -654,7 +816,7 @@ class WorkflowsTool(BaseTool):
         except WorkflowTemplateError as exc:
             return _outcome('workflows', exc.details, False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
         except AssetPostCommitReadbackError as exc:
-            return _post_commit_failure('workflows', exc)
+            return _post_commit_failure('workflows', exc, params=params)
         except AssetActionError as exc:
             return _outcome('workflows', exc.data, False, exc.code, effect_outcome='not_started')
         except WorkflowExecutionError as exc:

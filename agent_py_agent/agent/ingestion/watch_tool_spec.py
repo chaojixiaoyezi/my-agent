@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 from ..common.audit_activation import AUDIT_SOURCE_OPEN_FIELDS
@@ -150,24 +151,26 @@ _PARAMETERS = {
 
 _SCORE_RANGE_SCHEMA = {
     "type": "object",
+    "description": "总分或单维度评分的数值闭区间上下界对象。",
     "additionalProperties": False,
     "properties": {
-        "min": {"type": "number"},
-        "max": {"type": "number"},
+        "min": {"type": "number", "description": "评分允许的最小数值下界。"},
+        "max": {"type": "number", "description": "评分允许的最大数值上界。"},
     },
     "required": ["min", "max"],
 }
 
 _DIMENSIONS_SCHEMA = {
     "type": "array",
+    "description": "按任务约定拆分的分维度评分明细数组。",
     "items": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "name": {"type": "string"},
-            "score": {"type": "number"},
+            "name": {"type": "string", "description": "评分维度名称。"},
+            "score": {"type": "number", "description": "该维度的实得数值分数。"},
             "range": _SCORE_RANGE_SCHEMA,
-            "reason": {"type": "string"},
+            "reason": {"type": "string", "description": "该维度给分的事实依据说明。"},
         },
         "required": ["name", "score"],
     },
@@ -175,15 +178,30 @@ _DIMENSIONS_SCHEMA = {
 
 _INLINE_FINDING_SCHEMA = {
     "type": "object",
+    "description": "verdict=hit 或复核更正时随行提交的结构化命中结论对象。",
     "additionalProperties": False,
     "properties": {
-        "claim": {"type": "string", "minLength": 1, "maxLength": 2000},
-        "kind": {"type": "string"},
-        "confidence": {"type": "string"},
-        "finding_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "stage": {"type": "string"},
-        "needs_evidence": {"type": "boolean"},
-        "urgency": {"type": "string", "enum": ["normal", "urgent"]},
+        "claim": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "满足当前 Audit 汇报条件的核心事实结论摘要。",
+        },
+        "kind": {"type": "string", "description": "发现结论类别标识（如 hit、anomaly、policy_match）。"},
+        "confidence": {"type": "string", "description": "模型对该命中结论的把握程度说明（如 high、medium、low）。"},
+        "finding_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "可选稳定发现编号（用于复核与后续汇报关联同一事项）。",
+        },
+        "stage": {"type": "string", "description": "产生该发现的阶段标识（如 initial 或 review）。"},
+        "needs_evidence": {"type": "boolean", "description": "是否仍需补充外部交叉证据做进一步确认。"},
+        "urgency": {
+            "type": "string",
+            "enum": ["normal", "urgent"],
+            "description": "汇报紧急程度：normal（常规汇总）或 urgent（高优提醒）。",
+        },
         "requires_llm_report": {
             "type": "boolean",
             "description": (
@@ -195,6 +213,7 @@ _INLINE_FINDING_SCHEMA = {
             "type": "array",
             "maxItems": 20,
             "items": {"type": "string"},
+            "description": "支撑该发现的附加原文或文档引用数组（最多 20 项）。",
         },
     },
     "required": ["claim"],
@@ -271,21 +290,38 @@ def _request_value_binding_schema(*, cursor: bool) -> dict[str, object]:
 
     cursor_fields: dict[str, object] = (
         {
-            "initial": {"type": "integer", "minimum": 0},
-            "offset": {"type": "integer"},
+            "initial": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "首次请求尚未取得上一页游标时注入的起始整数位置（>= 0）。",
+            },
+            "offset": {
+                "type": "integer",
+                "description": "按已验证接口协议对上一页响应游标施加的整数偏移量。",
+            },
         }
         if cursor
         else {}
     )
     return {
         "type": "object",
+        "description": (
+            "HTTP 增量游标参数注入位置与初始/偏移规则对象。"
+            if cursor
+            else "HTTP 单页条数（limit/page_size）参数注入位置绑定对象。"
+        ),
         "oneOf": [
             {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "location": {"const": "query"},
-                    "name": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "location": {"const": "query", "description": "参数注入位置固定为 URL query 查询串。"},
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "URL query 查询参数原名。",
+                    },
                     **cursor_fields,
                 },
                 "required": ["location", "name"],
@@ -294,12 +330,13 @@ def _request_value_binding_schema(*, cursor: bool) -> dict[str, object]:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "location": {"const": "json_body"},
+                    "location": {"const": "json_body", "description": "参数注入位置固定为 JSON 请求体嵌套路径。"},
                     "path": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 16,
                         "items": {"type": "string", "minLength": 1},
+                        "description": "写入 json_body 的逐层键名路径数组（如 [\"page\", \"cursor\"]）。",
                     },
                     **cursor_fields,
                 },
@@ -310,7 +347,13 @@ def _request_value_binding_schema(*, cursor: bool) -> dict[str, object]:
 
 
 def _secret_binding_schema() -> dict[str, object]:
-    common_secret = {"secret_ref": {"type": "string", "minLength": 1}}
+    common_secret = {
+        "secret_ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "受权私人凭据引用或授权读取范围内的 file: 引用（绝不填明文密钥）。",
+        }
+    }
     return {
         "type": "object",
         "oneOf": [
@@ -318,8 +361,16 @@ def _secret_binding_schema() -> dict[str, object]:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "location": {"enum": ["header", "query"]},
-                    "name": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "location": {
+                        "enum": ["header", "query"],
+                        "description": "敏感凭据注入位置：HTTP 请求头（header）或 URL 查询参数（query）。",
+                    },
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "注入的目标请求头名称或 query 参数名称。",
+                    },
                     **common_secret,
                 },
                 "required": ["location", "name", "secret_ref"],
@@ -328,12 +379,13 @@ def _secret_binding_schema() -> dict[str, object]:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "location": {"const": "json_body"},
+                    "location": {"const": "json_body", "description": "敏感凭据注入位置固定为 JSON 请求体路径。"},
                     "path": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 16,
                         "items": {"type": "string", "minLength": 1},
+                        "description": "注入到 json_body 内的逐层键名路径数组。",
                     },
                     **common_secret,
                 },
@@ -374,18 +426,20 @@ _PARAMETER_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "method": {"type": "string", "enum": ["GET", "POST"]},
+            "method": {"type": "string", "enum": ["GET", "POST"], "description": "已试通确认的 HTTP 请求方法（GET 或 POST）。"},
             "headers": {
                 "type": "object",
                 "additionalProperties": {"type": "string"},
+                "description": "普通非敏感 HTTP 请求头键值对象（敏感凭据须走 secret_bindings 或 credential_ref）。",
             },
-            "json_body": {"type": "object"},
+            "json_body": {"type": "object", "description": "POST 请求的基础 JSON 请求体结构对象。"},
             "cursor_binding": _request_value_binding_schema(cursor=True),
             "page_size_binding": _request_value_binding_schema(cursor=False),
             "secret_bindings": {
                 "type": "array",
                 "maxItems": 32,
                 "items": _secret_binding_schema(),
+                "description": "由宿主按声明位置注入私人凭据引用的绑定列表（最多 32 项）。",
             },
             "credential_ref": {"type": "string", "description": "request_credentials返回的原任务/监控引用，宿主核验owner、actor、origin与准确root；无原授权的冷来源不发送。"},
         },
@@ -394,8 +448,17 @@ _PARAMETER_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "path": {"type": "string", "minLength": 1, "maxLength": 512},
-            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "当前命名 Audit 工作区内已验证请求适配器 Python 脚本的相对路径。",
+            },
+            "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "适配器脚本文件的 64 位小写十六进制 SHA-256 哈希。",
+            },
         },
         "required": ["path", "sha256"],
     },
@@ -414,8 +477,15 @@ _PARAMETER_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "mode": {"type": "string", "enum": ["line", "delimiter"]},
-            "delimiter": {"type": "string"},
+            "mode": {
+                "type": "string",
+                "enum": ["line", "delimiter"],
+                "description": "文件记录切分方式：line 按行切分，delimiter 按精确分隔符切分多行记录。",
+            },
+            "delimiter": {
+                "type": "string",
+                "description": "mode=delimiter 时使用的精确完整记录分隔符字符串。",
+            },
         },
         "required": ["mode"],
     },
@@ -564,11 +634,15 @@ def _surface_parameter_names(surface: str) -> set[str]:
 
 def _surface_examples(surface: str, examples: list[str]) -> list[str]:
     actions = set(_SURFACE_ACTIONS[surface])
-    return [
-        example
-        for example in examples
-        if any(f'"action":"{action}"' in example for action in actions)
-    ]
+    names = _surface_parameter_names(surface)
+    selected: list[str] = []
+    for example in examples:
+        if not any(f'"action":"{action}"' in example for action in actions):
+            continue
+        parsed = json.loads(example)
+        if isinstance(parsed, dict) and set(parsed).issubset(names):
+            selected.append(example)
+    return selected
 
 
 def build_watch_stream_model_spec(*, surface: str = "ordinary") -> ToolModelSpec:
@@ -803,18 +877,18 @@ def build_watch_stream_runtime_policy(*, surface: str = "ordinary") -> ToolRunti
 
 def _watch_stream_examples() -> list[str]:
     return [
-        '{"tool":"watch_stream","action":"open","url":"https://source.example/events?position=<next>&page_size=<limit>","mode":"cursor","source_id":"source-a","source_profile_ref":"docs/sources/source-a.md","document_refs":["docs/sources/source-a-fields.xlsx"],"watch_window_seconds":1200}',
-        '{"tool":"watch_stream","action":"open","url":"https://source.example/query","http_request":{"method":"POST","json_body":{"page":{}},"cursor_binding":{"location":"json_body","path":["page","cursor"],"initial":0},"page_size_binding":{"location":"json_body","path":["page","size"]}},"record_list_field":"records","cursor_field":"next","cursor_semantics":"next_position"}',
-        '{"tool":"watch_stream","action":"open","url":"file:///var/log/app/events.log","watch_window_seconds":3600}',
-        '{"tool":"watch_stream","action":"open","url":"file:///var/log/app/multiline.log","record_boundary":{"mode":"delimiter","delimiter":"\\n---END---\\n"}}',
-        '{"tool":"watch_stream","action":"open","url":"http://192.0.2.10:9100/health","mode":"poll","poll_query_seconds":60}',
-        '{"tool":"watch_stream","action":"sample","watch_id":"ws-ab12cd34ef","sample_count":300}',
-        '{"tool":"watch_stream","action":"configure","watch_id":"ws-ab12cd34ef","spec":{"result_field":"state","normal_values":["ready"],"ignore_fields":["trace_id"]}}',
-        '{"tool":"watch_stream","action":"pull","watch_id":"ws-ab12cd34ef","max_wait_seconds":45}',
-        '{"tool":"watch_stream","action":"verdict","delivery_ref":"ad-0123456789abcdef01234567","verdicts":[{"verdict_token":"vt-0123456789abcdef01234567","verdict":"hit","score":18,"score_range":{"min":0,"max":20},"dimensions":[{"name":"维度A","score":8,"range":{"min":0,"max":10},"reason":"记录中的对应事实"},{"name":"维度B","score":10,"range":{"min":0,"max":10},"reason":"关联证据"}],"note":"结合两个维度得到总分","finding":{"claim":"该记录满足当前 Audit 的汇报条件","kind":"hit"}}]}',
-        '{"tool":"watch_stream","action":"verdict","verdicts":[{"ack_id":"12:0","source_ref":"audit://ws-ab12cd34ef/candidate/12:0","event_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review":true,"verdict":"hit","score":95,"note":"后续证据证明首次判断需更正","finding":{"claim":"补充证据已证明该记录满足当前 Audit 的汇报条件","kind":"hit","stage":"review"}}]}',
-        '{"tool":"watch_stream","action":"inspect","source_ref":"audit://ws-ab12cd34ef/candidate/12:0"}',
-        '{"tool":"watch_stream","action":"list"}',
+        '{"action":"open","url":"https://source.example/events?position=<next>&page_size=<limit>","mode":"cursor","source_id":"source-a","source_profile_ref":"docs/sources/source-a.md","document_refs":["docs/sources/source-a-fields.xlsx"],"watch_window_seconds":1200}',
+        '{"action":"open","url":"https://source.example/query","http_request":{"method":"POST","json_body":{"page":{}},"cursor_binding":{"location":"json_body","path":["page","cursor"],"initial":0},"page_size_binding":{"location":"json_body","path":["page","size"]}},"record_list_field":"records","cursor_field":"next","cursor_semantics":"next_position"}',
+        '{"action":"open","url":"file:///var/log/app/events.log","watch_window_seconds":3600}',
+        '{"action":"open","url":"file:///var/log/app/multiline.log","record_boundary":{"mode":"delimiter","delimiter":"\\n---END---\\n"}}',
+        '{"action":"open","url":"http://192.0.2.10:9100/health","mode":"poll","poll_query_seconds":60}',
+        '{"action":"sample","watch_id":"ws-ab12cd34ef","sample_count":300}',
+        '{"action":"configure","watch_id":"ws-ab12cd34ef","spec":{"result_field":"state","normal_values":["ready"],"ignore_fields":["trace_id"]}}',
+        '{"action":"pull","watch_id":"ws-ab12cd34ef","max_wait_seconds":45}',
+        '{"action":"verdict","delivery_ref":"ad-0123456789abcdef01234567","verdicts":[{"verdict_token":"vt-0123456789abcdef01234567","verdict":"hit","score":18,"score_range":{"min":0,"max":20},"dimensions":[{"name":"维度A","score":8,"range":{"min":0,"max":10},"reason":"记录中的对应事实"},{"name":"维度B","score":10,"range":{"min":0,"max":10},"reason":"关联证据"}],"note":"结合两个维度得到总分","finding":{"claim":"该记录满足当前 Audit 的汇报条件","kind":"hit"}}]}',
+        '{"action":"verdict","verdicts":[{"ack_id":"12:0","source_ref":"audit://ws-ab12cd34ef/candidate/12:0","event_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","review":true,"verdict":"hit","score":95,"note":"后续证据证明首次判断需更正","finding":{"claim":"补充证据已证明该记录满足当前 Audit 的汇报条件","kind":"hit","stage":"review"}}]}',
+        '{"action":"inspect","source_ref":"audit://ws-ab12cd34ef/candidate/12:0"}',
+        '{"action":"list"}',
     ]
 
 

@@ -274,12 +274,31 @@ def send_remote_push(url, secret, body, allowed_private_hosts, timeout):
 class RemoteAgentPushTool(BaseTool):
     model_spec = ToolModelSpec("remote_agent_push", "向已配置远端节点单向投递事件；只返回接收回执，不查询报告。",
         {"type": "object", "properties": {
-            **{key: {"type": "string"} for key in ("endpoint_ref", "endpoint_url", "target_owner", "instruction",
-                "title", "idempotency_key", "source_thread_id", "thread_reuse_key")},
-            "thread_mode": {"type": "string", "enum": ["new_thread", "reuse_key"]},
-            "context_payload": {"type": "object"}},
+            "endpoint_ref": {"type": "string", "description": "宿主已登记的远端节点配置别名（优先于 endpoint_url 使用）。"},
+            "endpoint_url": {"type": "string", "description": "已配置白名单允许的目标远端节点 HTTPS/HTTP 接收地址；通常省略并改用 endpoint_ref。"},
+            "target_owner": {"type": "string", "description": "远端节点上的目标接收者 owner 标识（如 local/alice）。"},
+            "instruction": {"type": "string", "description": "单向投递给远端代理处理的明确任务指令正文。"},
+            "title": {"type": "string", "description": "可选远端会话或事件简短标题。"},
+            "idempotency_key": {"type": "string", "description": "本次推送的业务幂等键；同一事件重试须保持不变以防重复入队。"},
+            "source_thread_id": {"type": "string", "description": "可选本端来源会话 thread_id，需属于当前 owner 方可附加脱敏上下文。"},
+            "thread_reuse_key": {"type": "string", "description": "thread_mode=reuse_key 时用于复用远端同一会话的稳定键。"},
+            "thread_mode": {"type": "string", "enum": ["new_thread", "reuse_key"], "description": "远端会话投递模式：new_thread 新建会话，reuse_key 按 thread_reuse_key 复用会话。"},
+            "context_payload": {"type": "object", "description": "随事件单向附带的结构化脱敏上下文字典（勿放密钥或原始凭据）。"}},
          "required": ["target_owner", "instruction", "idempotency_key"], "additionalProperties": False},
-        hints=ToolModelHints(category="network", default_deferred=True, deferred_summary="单向推送事件与脱敏上下文到已配置节点"))
+        hints=ToolModelHints(category="network",
+            use_cases=(
+                "向宿主已配置信任的远端 my-agent 节点单向推送告警事件或跟进指令",
+                "将当前会话脱敏上下文摘要分叉投递给远端节点异步处理",
+            ),
+            avoid_when=(
+                "同一宿主本用户不同会话间发消息或派任务时用 send_session_message / create_session_task",
+                "本会话内并行拆分子任务时用 create_subagents；跨用户投递脚本/工作流/Skill 资产时用 asset_delivery",
+            ),
+            keywords=("远端", "推送", "节点", "事件", "remote", "push"),
+            examples=(
+                '{"target_owner":"local/alice","endpoint_ref":"ops-node","instruction":"核查最新巡检告警并汇总","idempotency_key":"alert-20261114-01"}',
+            ),
+            default_deferred=True, deferred_summary="单向推送事件与脱敏上下文到已配置节点"))
     runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy(default_effect="mutating"),
         idempotency_policy=IdempotencyPolicy(scope="business"))
 

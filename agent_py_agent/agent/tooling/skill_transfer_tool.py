@@ -29,17 +29,43 @@ from .models import (
 # LLM: 不提供authorize/accept，来源固定当前owner；status不传reference时只读本owner列表，不制造双端授权。
 # 函数用途: 声明准备参数格式与可省略引用的状态查询schema。
 def build_skill_transfer_spec():
-    owner = {'type': 'object', 'properties': {key: {'type': 'string'} for key in ('provider', 'owner_kind', 'owner_id')},
-         'required': ['provider', 'owner_kind', 'owner_id'], 'additionalProperties': False}
+    owner = {
+        'type': 'object',
+        'description': 'prepare 必填的目标接收方身份三元组（provider、owner_kind、owner_id）。',
+        'properties': {
+            'provider': {'type': 'string', 'description': '目标助手身份通道提供方（如 local 或 feishu）。'},
+            'owner_kind': {'type': 'string', 'description': '目标身份类别（如 user 或 main）。'},
+            'owner_id': {'type': 'string', 'description': '目标用户在对应 provider 下的准确 owner_id。'},
+        },
+        'required': ['provider', 'owner_kind', 'owner_id'],
+        'additionalProperties': False,
+    }
     return ToolModelSpec(name='skill_transfer', description='准备Skill定向投递/一次复刻清单；双端本人必须分别用/skills transfer命令确认。', input_schema={'type': 'object', 'properties': {
-        'action': {'type': 'string', 'enum': ['prepare', 'status']}, 'target': owner,
-        'skills': {'type': 'array', 'items': {'type': 'object', 'properties': {
-        'stable_id': {'type': 'string'}, 'content_sha256': {'type': 'string'},
-        'resources': {'type': 'array', 'items': {'type': 'string'}}, 'target_name': {'type': 'string'}},
-        'required': ['stable_id', 'content_sha256'], 'additionalProperties': False}},
-        'clone': {'type': 'boolean'}, 'memory_candidates': {'type': 'array', 'items': {'type': 'string'}},
+        'action': {'type': 'string', 'enum': ['prepare', 'status'], 'description': '迁移操作：prepare 生成待双端确认的投递/复刻清单，status 查询本身份相关迁移回执。'},
+        'target': owner,
+        'skills': {'type': 'array', 'description': 'action=prepare 时要投递或复刻的精确 Skill 条目列表。', 'items': {'type': 'object', 'properties': {
+            'stable_id': {'type': 'string', 'description': '来源 Skill 的稳定标识（如 owner:skill_name）。'},
+            'content_sha256': {'type': 'string', 'description': '来源 Skill 当前内容 64 位十六进制 SHA-256 摘要，用于防篡改一致性核验。'},
+            'resources': {'type': 'array', 'items': {'type': 'string'}, 'description': '可选随附的 Skill 目录内相对资源路径列表。'},
+            'target_name': {'type': 'string', 'description': '可选目标端保存的 Skill 名称；省略时沿用原名称。'}},
+            'required': ['stable_id', 'content_sha256'], 'additionalProperties': False}},
+        'clone': {'type': 'boolean', 'description': '是否为一次性助手复刻模式（连带可选已审核记忆候选，仍须双端本人确认）。'},
+        'memory_candidates': {'type': 'array', 'items': {'type': 'string'}, 'description': 'clone=true 时可选附带的已审核记忆条目/候选 ID 列表。'},
         'reference': {'type': 'string', 'description': 'status可省略或留空以列出本身份发出/收到的投递回执；非空时查原引用。'}}, 'required': ['action'], 'additionalProperties': False},
-        hints=ToolModelHints(category='capability',default_deferred=True,
+        hints=ToolModelHints(category='capability',
+            use_cases=(
+                '准备将当前用户的私有 Skill 定向分享或一次性复刻给指定目标助手（生成待 /skills transfer 双端确认的清单）',
+                '查询当前身份已发起或收到的 Skill 迁移清单状态与引用回执',
+            ),
+            avoid_when=(
+                '通用四类资产（workflow/script/monitor/skill）直接投递收件箱时优先用 asset_delivery',
+                '只是检索或查看本地可用 Skill 时用 skill_search，不要误创建迁移单',
+            ),
+            examples=(
+                '{"action":"status"}',
+                '{"action":"prepare","target":{"provider":"local","owner_kind":"user","owner_id":"alice"},"skills":[{"stable_id":"owner:daily_summary","content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}',
+            ),
+            default_deferred=True,
             deferred_summary='准备Skill定向投递或一次复刻的准确清单、查询状态；双端本人用/skills transfer确认。',
             keywords=('skill','transfer','clone','投递','复刻','迁移')))
 

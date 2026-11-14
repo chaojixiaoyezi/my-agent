@@ -79,23 +79,28 @@ def _validate(tool, params):
     name = tool.model_spec.name
     validation = validate_tool_input(params, tool.model_spec.input_schema)
     if not validation.ok:
+        advice = ('按issues[].path修正对应字段；object用真实对象如{}、array用真实数组如[]，'
+                  '删除未声明字段，不要原样重试或传序列化JSON字符串。')
         return _outcome(name, {'error': '参数不符合工具Schema',
             'issues': [issue.to_dict() for issue in validation.issues[:8]],
             'issues_truncated': len(validation.issues) > 8, 'effect_outcome': 'not_started',
-            'next_action': '按issues[].path修正对应字段；object用真实对象如{}、array用真实数组如[]，'
-                           '删除未声明字段，不要原样重试或传序列化JSON字符串。'},
-                        False, 'TOOL_INVALID_ARGUMENTS')
+            'next_action': advice},
+                        False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started', next_action=advice)
     if 'skill_id' in params:
         try:
             valid_skill_reference(params['skill_id'])
         except (TypeError, ValueError) as exc:
-            return _outcome(name, {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
+            return _outcome(name, {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS',
+                            effect_outcome='not_started',
+                            next_action='请传入合法的 Skill 稳定引用（先通过 skill_search 查询准确 skill_id）。')
     action = params['action']
     descriptor = params.get('descriptor')
     if (name == 'scripts' and isinstance(descriptor, dict) and 'kind' in descriptor
             and descriptor['kind'] != 'script'):
         return _outcome(name, {'error': '脚本kind冲突', 'expected_kind': 'script',
-            'provided_kind': descriptor['kind']}, False, 'TOOL_INVALID_ARGUMENTS')
+            'provided_kind': descriptor['kind']}, False, 'TOOL_INVALID_ARGUMENTS',
+            effect_outcome='not_started',
+            next_action='descriptor.kind 省略或固定填 "script"；工作流定义请改用 workflows 工具。')
     key = 'script_id' if name == 'scripts' else 'workflow_id'
     required = [] if action in ('list', 'status', 'promote_draft') else [key]
     if action == 'promote_draft':
@@ -105,7 +110,8 @@ def _validate(tool, params):
     if action == 'diff':
         required += ['from_version']
     if action == 'versions' and params.get('limit', 20) > 50:
-        return _outcome(name, {'error': '版本列表limit必须为1至50'}, False, 'TOOL_INVALID_ARGUMENTS')
+        return _outcome(name, {'error': '版本列表limit必须为1至50'}, False, 'TOOL_INVALID_ARGUMENTS',
+                        effect_outcome='not_started', next_action='将 limit 调整到 1 至 50 之间后再查询。')
     if action in ('resume', 'inspect_run'):
         required = ['workflow_run_id']
     if action == 'register':
@@ -117,7 +123,9 @@ def _validate(tool, params):
     if action in ('bind_skill', 'unbind_skill'):
         required += ['step_id', 'skill_id']
     if any(key not in params or params[key] is None or params[key] == '' for key in required):
-        return _outcome(name, {'error': '缺少条件必填参数', 'required': required}, False, 'TOOL_INVALID_ARGUMENTS')
+        return _outcome(name, {'error': '缺少条件必填参数', 'required': required}, False, 'TOOL_INVALID_ARGUMENTS',
+                        effect_outcome='not_started',
+                        next_action=f'补齐动作 {action} 所需的必填参数 {required} 后再调用。')
     return None
 
 
@@ -140,7 +148,7 @@ def _plain(value):
 
 # LLM: 两工具共用错误出口；明确提交后读回事实优先于异常类型，进程清理未确认仍保留unknown。
 # 函数用途: 将动作结果转换为宿主结果，运行失败也附完整业务回执与精确副作用状态。
-def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage=''):
+def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage='', next_action=''):
     if isinstance(data, dict) and data.get('effect_outcome'):
         effect_outcome = data['effect_outcome']
     if not ok and not effect_outcome:
@@ -152,7 +160,8 @@ def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage='
     plain = _plain(data)
     outcome = ToolHandlerOutcome(name, ok, json.dumps(plain, ensure_ascii=False), error_code=code,
         result_envelope=plain if isinstance(plain, dict) else {},
-        effect_outcome='' if ok else effect_outcome, failure_stage=failure_stage)
+        effect_outcome='' if ok else effect_outcome, failure_stage=failure_stage,
+        next_action='' if ok else next_action)
     if isinstance(plain, dict):
         for field_name in ('workflow_run_id', 'phase', 'execution_definition_ref', 'confirmed_step_refs'):
             if field_name in plain:
@@ -160,13 +169,58 @@ def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage='
     return outcome
 
 
-# LLM: 只接Store提交后typed异常；业务stage精确保留，宿主阶段沿既有execution枚举，不越界扩通用模型。
-# 函数用途: 给两个资产工具统一返回已提交但读回失败的unknown回执。
-def _post_commit_failure(name, error):
-    return _outcome(name, {'error': str(error), 'committed': True,
-                          'failure_stage': 'post_commit_readback', 'effect_outcome': 'unknown'},
+def _extract_post_commit_target(name: str, error: Exception, params: dict | None) -> tuple[str, str, str]:
+    id_key = 'script_id' if name == 'scripts' else 'workflow_id'
+    target_id = ''
+    action = ''
+    if isinstance(params, dict):
+        action = str(params.get('action') or '').strip()
+        for candidate_key in (id_key, 'workflow_ref', 'draft_id'):
+            raw_val = params.get(candidate_key)
+            if isinstance(raw_val, str) and raw_val.strip():
+                target_id = raw_val.strip()
+                break
+    if not target_id:
+        text = str(error)
+        if text.startswith('资产') and text.endswith('提交后读回失败'):
+            target_id = text[len('资产'):-len('提交后读回失败')].strip()
+    return id_key, target_id, action
+
+
+# LLM: 只接Store提交后typed异常；业务stage精确保留，宿主阶段沿既有execution枚举，禁止重放写动作修复读回。
+# 函数用途: 给两个资产工具统一返回已提交但读回失败的unknown非重试回执，并保留目标引用与只读核实指引。
+def _post_commit_failure(name, error, *, params=None):
+    id_key, target_id, action = _extract_post_commit_target(name, error, params)
+    cause = getattr(error, '__cause__', None) or error
+    cause_type = type(cause).__name__
+    ref_arg = f'{id_key}="{target_id}"' if target_id else f'目标 {id_key}'
+    advice = (
+        f'资产主写入已提交落盘，仅提交后读回失败（committed=true, effect_outcome=unknown）：'
+        f'严禁重新执行 {action or "本次写操作"} 以免重复变更或版本漂移；'
+        f'请改用只读 {name}(action="get", {ref_arg}) 或 {name}(action="versions", {ref_arg}) 核实已提交版本与原操作回执。'
+    )
+    refs = {
+        **({id_key: target_id, 'target_asset_id': target_id} if target_id else {}),
+        **({'operation_action': action} if action else {}),
+    }
+    envelope = {
+        'error': str(error),
+        'error_code': 'TOOL_POST_COMMIT_READBACK_FAILED',
+        'committed': True,
+        'failure_stage': 'post_commit_readback',
+        'effect_outcome': 'unknown',
+        'retryable': False,
+        **refs,
+        'error_details': {
+            'cause': 'post_commit_readback_failed',
+            'committed': True,
+            'readback_exception_type': cause_type,
+            **refs,
+        },
+    }
+    return _outcome(name, envelope,
                     False, 'TOOL_POST_COMMIT_READBACK_FAILED', effect_outcome='unknown',
-                    failure_stage='execution')
+                    failure_stage='execution', next_action=advice)
 
 
 # LLM: 危险动作在ask模式走原审批、在auto/full-access模式沿自主决策放行；资源按细化动态身份锁定 (WF-06)。
@@ -180,6 +234,106 @@ def _policy(name, reads, dangerous):
         resource_scopes=ResourceScopePolicy(mode='none'))
 
 
+_SHARED_ASSET_DEF_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    'AccessTarget': {
+        'target_id': '访问目标稳定标识。',
+        'type': '访问目标类别（如 http、database、filesystem、channel）。',
+        'endpoint': '目标逻辑端点或地址标识（不含明文凭据）。',
+        'method': '访问方式或请求方法（如 GET、POST、SELECT）。',
+        'extra': '目标扩展结构化元数据字典。',
+    },
+    'CredentialBindingRef': {
+        'credential_ref': '隔离凭据库中的凭据引用 ID（不含明文密钥）。',
+        'alias': '资产内部引用的凭据逻辑别名。',
+        'authentication': '凭据注入认证方式（如 bearer、header、basic、query）。',
+        'status': '凭据绑定当前核验状态。',
+    },
+    'EvaluatedCandidate': {
+        'candidate_id': '候选数据源标识。',
+        'decision': '候选源评估决定（active、ignored 或 pending）。',
+        'evaluated_at': '候选源评估时间戳（ISO-8601）。',
+        'reason': '采纳或忽略该候选源的原因说明。',
+        'sample_count': '评估时核验的样本条数。',
+    },
+    'DataSourceSpec': {
+        'source_id': '资产绑定的数据源稳定代号。',
+        'system': '数据源所属外部或本地系统标识。',
+        'query_scope': '绑定的查询范围过滤参数字典。',
+        'evaluated_candidates': '已评估的候选数据源记录列表。',
+    },
+    'IOContract': {
+        'inputs': '声明的输入字段名数组或输入规格描述。',
+        'outputs': '声明的必选输出 JSON 字段名非空字符串数组。',
+        'nullable_outputs': '允许值为 null 的输出字段名数组。',
+        'output_types': '输出字段名到 JSON 类型说明的映射字典。',
+    },
+    'AssetRefs': {
+        'workflows': '关联或引用的工作流 ID 数组。',
+        'scripts': '关联或引用的脚本 ID 数组。',
+        'skills': '关联或引用的 Skill 稳定引用数组。',
+        'monitors': '关联或引用的监控任务 ID 数组。',
+        'skill_dir': '关联的 Skill 目录引用标识。',
+    },
+    'RuntimeSummary': {
+        'run_count': '累计运行总次数。',
+        'consecutive_failures': '最近连续失败次数。',
+        'last_status': '最近一次运行终态标识。',
+        'last_run_at': '最近一次运行时间戳（ISO-8601）。',
+        'last_duration_ms': '最近一次运行耗时毫秒数。',
+        'last_error': '最近一次失败的脱敏错误摘要。',
+    },
+}
+
+_DESCRIPTOR_FIELD_DESCRIPTIONS: dict[str, str] = {
+    'id': '资产稳定唯一 ID（原生注册/保存时可省略并由顶层 script_id 或 workflow_id 固定）。',
+    'kind': '资产固定类型标识（script 或 workflow）。',
+    'name': '资产显示名称（必填非空字符串）。',
+    'summary': '资产职责与用途简短摘要。',
+    'version': '资产语义或快照版本号。',
+    'revision': '存储层乐观并发控制整数 revision。',
+    'owner_id': '资产归属 owner 标识（由宿主固定）。',
+    'scope_layer': '资产归属作用域层级（如 owner 或 workspace）。',
+    'source_scope': '资产来源范围标识。',
+    'workspace_root': '关联工作区根路径投影（由宿主维护）。',
+    'access_targets': '声明的访问目标数组（无目标传 []）。',
+    'data_sources': '声明的数据源规格数组（无数据源传 []）。',
+    'credential_refs': '声明的隔离凭据引用数组（无凭据传 []）。',
+    'io_contract': '输入输出字段契约对象（无约束可传 {}）。',
+    'refs': '正向引用的脚本、Skill、工作流与监控集合。',
+    'used_by': '反向引用当前资产的上游资产集合（只读投影）。',
+    'runtime_summary': '最近受控运行统计摘要（只读投影）。',
+    'tags': '资产分类与检索标签字符串数组。',
+    'metadata': '开放扩展 JSON 元数据对象（保存结构化扩展键值）。',
+    'enabled': '资产是否处于启用状态。',
+    'schema_version': '资产描述符结构协议版本号。',
+}
+
+
+def _annotate_schema_properties(node: dict, descriptions: dict[str, str]) -> None:
+    props = node.get('properties')
+    if not isinstance(props, dict):
+        return
+    for key, text in descriptions.items():
+        field = props.get(key)
+        if isinstance(field, dict) and not field.get('description'):
+            field['description'] = text
+
+
+def _annotate_shared_asset_defs(definitions: dict) -> None:
+    for def_name, mapping in _SHARED_ASSET_DEF_DESCRIPTIONS.items():
+        target = definitions.get(def_name)
+        if isinstance(target, dict):
+            _annotate_schema_properties(target, mapping)
+    for desc_name in ('AssetDescriptor', 'WorkflowDescriptorInput'):
+        descriptor = definitions.get(desc_name)
+        if isinstance(descriptor, dict):
+            _annotate_schema_properties(descriptor, _DESCRIPTOR_FIELD_DESCRIPTIONS)
+            for ref_field in ('refs', 'used_by'):
+                sub = descriptor.get('properties', {}).get(ref_field)
+                if isinstance(sub, dict):
+                    _annotate_schema_properties(sub, _SHARED_ASSET_DEF_DESCRIPTIONS['AssetRefs'])
+
+
 def _typed_descriptor_spec(spec):
     """脚本描述符复用公开资产字段；这里只展示类型，不接管运行权限或生成默认内容。"""
     from copy import deepcopy
@@ -188,13 +342,18 @@ def _typed_descriptor_spec(spec):
     from .business_spaces_tool import _model_projection
 
     schema = deepcopy(spec.input_schema)
+    schema['properties']['action']['description'] = (
+        '脚本动作：list/get/check_sources/versions/diff 只读查询；'
+        'register 新建固化脚本，update/update_sources/record_candidate/rollback/promote_draft 更新或回滚，run 受控单次运行，delete 删除。'
+    )
     public = _model_projection(standalone_schema({'$ref': '#/$defs/AssetDescriptor'}))
     definitions = public.pop('$defs')
     descriptor = definitions['AssetDescriptor']
     # register以script_id固定id/kind；其余标准Key与原构造器必填项保持一致。
     descriptor['required'] = sorted(REQUIRED_DEFINITION_KEYS)
-    descriptor['properties']['kind'] = {'const': 'script'}
+    descriptor['properties']['kind'] = {'const': 'script', 'description': '脚本资产固定种类常量 "script"。'}
     definitions['IOContract']['properties']['outputs']['items'] = {'type': 'string', 'minLength': 1}
+    _annotate_shared_asset_defs(definitions)
     schema['properties']['descriptor'] = {'$ref': '#/$defs/AssetDescriptor',
         'description': '真实JSON描述符对象。access_targets/data_sources/credential_refs必须是数组（无项目传[]），'
                        'io_contract必须是对象（无输入输出要求可传{}）；不可传空串或序列化JSON文本。'
@@ -206,7 +365,25 @@ def _typed_descriptor_spec(spec):
     from .input_schema import inline_local_schema_refs
 
     schema['properties']['descriptor'] = inline_local_schema_refs(schema, schema['properties']['descriptor'])
-    return replace(spec, input_schema=schema, schema_hash='')
+    hints = replace(
+        spec.hints,
+        use_cases=(
+            '注册、版本化维护与单次受控运行可复用的确定性数据处理脚本（stdout 输出单行 JSON）',
+            '维护脚本绑定的数据源查询范围（update_sources/check_sources）与候选源评估账本（record_candidate）',
+            '查看脚本历史版本差异（versions/diff）、提升草稿（promote_draft）或按 expected_revision 回滚（rollback）',
+        ),
+        avoid_when=(
+            '需要多步骤编排、条件分支、绑定 Skill 分析或断点续跑（resume）时用 workflows',
+            '仅在当前回合把若干只读/常规工具调用按固定 DAG 一次性串联、无需注册长期脚本资产时用 tool_program',
+            '需要按未来时刻、固定间隔、cron 或飞书群事件持久周期触发时用 schedule',
+        ),
+        examples=(
+            '{"action":"list"}',
+            '{"action":"get","script_id":"daily_summary"}',
+            '{"action":"register","script_id":"daily_summary","code":"import json\\nprint(json.dumps({\\"result\\": 1}))\\n","descriptor":{"name":"每日汇总","access_targets":[],"data_sources":[],"credential_refs":[],"io_contract":{"inputs":[],"outputs":["result"]}}}',
+        ),
+    )
+    return replace(spec, input_schema=schema, hints=hints, schema_hash='')
 
 
 # LLM: Store与runner均绑定同一个可信Owner；纯schema/descriptor沿共享构造器，execute不接收执行身份或任意命令。
@@ -216,11 +393,30 @@ class ScriptsTool(BaseTool):
         '正式工作流步骤要交付文件时，写入宿主提供的MY_AGENT_RUN_OUT目录。',
         ['list', 'get', 'register', 'update', 'update_sources', 'record_candidate', 'run', 'delete', 'check_sources',
          'versions', 'diff', 'rollback', 'promote_draft'], {
-            'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
-            **{key: {'type': ['integer', 'null'], 'minimum': 1} for key in ('version', 'from_version', 'to_version')},
-            'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50},
-            'draft_id': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-            **{key: {'type': 'string'} for key in ('script_id', 'code', 'entrypoint', 'interpreter', 'source_id', 'scope_key')},
+            'expected_revision': {'type': ['integer', 'null'], 'minimum': 0,
+                'description': '乐观锁期望整数 revision（update/rollback 等写动作传入当前精确整数版本防并发覆盖）。'},
+            'version': {'type': ['integer', 'null'], 'minimum': 1,
+                'description': '指定查询的目标历史整数版本号（>= 1）。'},
+            'from_version': {'type': ['integer', 'null'], 'minimum': 1,
+                'description': 'diff 对比的起始整数版本号（>= 1，diff 必填）。'},
+            'to_version': {'type': ['integer', 'null'], 'minimum': 1,
+                'description': 'diff 对比的目标整数版本号或 rollback 要恢复到的历史版本号（>= 1）。'},
+            'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50,
+                'description': 'versions 返回的最大历史版本条数（1 至 50，默认 20）。'},
+            'draft_id': {'type': 'string', 'minLength': 1, 'maxLength': 128,
+                'description': 'promote_draft 要提升为正式脚本的草稿 ID。'},
+            'script_id': {'type': 'string',
+                'description': '脚本资产唯一稳定 ID（除 list/promote_draft 外必填）。'},
+            'code': {'type': 'string',
+                'description': 'register 必填或 update 可选的脚本源码正文；运行时应向 stdout 输出单行 JSON 对象。'},
+            'entrypoint': {'type': 'string',
+                'description': '可选脚本入口标识（默认使用标准脚本主入口）。'},
+            'interpreter': {'type': 'string',
+                'description': '可选受控脚本解释器标识（如 python3）。'},
+            'source_id': {'type': 'string',
+                'description': 'update_sources 或 record_candidate 针对的数据源 source_id。'},
+            'scope_key': {'type': 'string',
+                'description': '可选查询范围分区键，限定 update_sources/record_candidate 作用的子范围。'},
             'descriptor': {'type': 'object', 'description': (
                 '必填标准提取Key对象：{name: 非空字符串, access_targets: 列表(如[]), '
                 'data_sources: 列表(如[{"source_id":"s1","system":"web","query_scope":{}}]), '
@@ -228,9 +424,13 @@ class ScriptsTool(BaseTool):
             'inputs': {'type': 'object', 'description': '传给脚本stdin及MY_AGENT_SCRIPT_INPUT_JSON的JSON对象'},
             'query_scope': {'type': 'object', 'description': 'update_sources时合并到指定source_id的查询范围字典'},
             'candidate': {'type': 'object', 'description': '候选源评估：{candidate_id, decision(active|ignored|pending), reason, sample_count}'},
-            **{key: {'type': 'array', 'items': {'type': 'string'}} for key in ('add', 'remove')},
+            'add': {'type': 'array', 'items': {'type': 'string'},
+                'description': '增量添加的标签或关联引用字符串数组。'},
+            'remove': {'type': 'array', 'items': {'type': 'string'},
+                'description': '增量移除的标签或关联引用字符串数组。'},
             'override_data_sources': {'type': ['object', 'array'], 'description': '仅本次传给runner，绝不写回资产'},
-            'timeout_seconds': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 3600}})
+            'timeout_seconds': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 3600,
+                'description': 'run 单次受控运行超时秒数（0 到 3600 秒之间）。'}})
     model_spec = _typed_descriptor_spec(model_spec)
     runtime_policy = _policy('scripts', ('list', 'get', 'check_sources', 'versions', 'diff'), ('run', 'delete'))
 
@@ -299,7 +499,7 @@ class ScriptsTool(BaseTool):
             ok = params['action'] != 'run' or data.get('ok') is True
             return _outcome('scripts', data, ok, 'TOOL_EXECUTION_FAILED' if not ok else '')
         except AssetPostCommitReadbackError as exc:
-            return _post_commit_failure('scripts', exc)
+            return _post_commit_failure('scripts', exc, params=params)
         except AssetActionError as exc:
             return _outcome('scripts', exc.data, False, exc.code, effect_outcome='not_started')
         except (ValueError, TypeError, KeyError) as exc:

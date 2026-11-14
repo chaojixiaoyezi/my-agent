@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -65,9 +66,180 @@ _ACTIONS = ("create", "list", "get", "update", "update_delivery", "delivery_targ
 _MUTATING_EXISTING_ACTIONS = frozenset({"update", "update_delivery", "pause", "resume", "delete", "takeover", "cancel", "recover"})
 
 
+def _annotate_props(node: object, descriptions: dict[str, str]) -> None:
+    if not isinstance(node, dict):
+        return
+    props = node.get("properties")
+    if not isinstance(props, dict):
+        return
+    for key, text in descriptions.items():
+        child = props.get(key)
+        if isinstance(child, dict) and not child.get("description"):
+            child["description"] = text
+
+
+def _annotate_execution_target_schema(node: dict[str, object]) -> dict[str, object]:
+    node.setdefault("description", "可选绑定固化脚本或工作流资产作为计划到期时的确定性执行目标。")
+    _annotate_props(
+        node,
+        {
+            "kind": "绑定执行目标资产类型（如 script 或 workflow）。",
+            "asset_id": "绑定执行的脚本或工作流稳定资产 ID。",
+            "pinned_version": "可选固定的目标资产历史整数版本号。",
+            "execution_definition_ref": "可选固定的目标资产定义哈希引用。",
+            "input_ref": "传给目标资产运行时的结构化输入包装对象。",
+        },
+    )
+    props = node.get("properties")
+    if isinstance(props, dict):
+        input_ref = props.get("input_ref")
+        _annotate_props(input_ref, {"inputs": "传给目标脚本或工作流运行时的 JSON 入参字典。"})
+    return node
+
+
+def _annotate_delivery_schema(node: dict[str, object], *, policy_alias: bool = False) -> dict[str, object]:
+    node["description"] = (
+        "通知投递策略兼容入参对象（语义同 delivery，二者同时提供时不可冲突）。"
+        if policy_alias
+        else "计划运行结果的通知投递策略对象（如 mode=origin/local/none、触发门槛及认证多通道目标）。"
+    )
+    _annotate_props(
+        node,
+        {
+            "mode": "通知投递模式：origin 发回原创建会话，local 仅留存内部结果，none 不发通知。",
+            "follow_latest_channel_session": "是否自动跟随同一通道绑定的最新活跃会话投递。",
+            "include_origin": "显式指定 targets 时是否同时保留原创建会话通知。",
+            "targets": "引用 delivery_targets 认证目录的多通道通知目标数组。",
+        },
+    )
+    props = node.get("properties")
+    if isinstance(props, dict) and isinstance(props.get("targets"), dict):
+        _annotate_props(
+            props["targets"].get("items"),
+            {
+                "binding_id": "delivery_targets 返回的已认证目标绑定唯一 ID。",
+                "channel": "通知目标通道标识（如 feishu、telegram、local）。",
+                "account_id": "宿主已认证通道账号 ID。",
+                "chat_id": "已认证目标私聊或群会话精确 chat_id。",
+                "target_kind": "通知目标会话类型（如 user、group、session）。",
+                "min_severity": "向该目标外发通知的最低严重级别。",
+                "severities": "允许投递到该目标的精确严重级别数组。",
+            },
+        )
+    return node
+
+
+def _build_annotated_schedule_subschemas() -> dict[str, dict[str, object]]:
+    event_source = deepcopy(EVENT_SOURCE_INPUT_SCHEMA)
+    event_source.setdefault("description", "schedule_kind=event_source 时必填的已授权群成员或机器人消息订阅配置。")
+    _annotate_props(
+        event_source,
+        {
+            "max_batch_events": "单次触发最多合并消费的事件条数。",
+            "min_interval_seconds": "相邻两次事件触发之间的最小间隔秒数。",
+        },
+    )
+
+    execution = deepcopy(EXECUTION_SCHEMA)
+    _annotate_props(
+        execution,
+        {
+            "mode": "计划触发时的会话上下文执行模式（如独立后台会话或沿用原会话）。",
+            "model_policy": "触发执行时的模型选用策略（跟随默认或固定指定 profile）。",
+            "profile_id": "固定模型策略下选用的当前可用模型 profile_id。",
+        },
+    )
+
+    execution_target = _annotate_execution_target_schema(deepcopy(EXECUTION_TARGET_SCHEMA))
+    delivery = _annotate_delivery_schema(deepcopy(DELIVERY_SCHEMA), policy_alias=False)
+    delivery_policy = _annotate_delivery_schema(deepcopy(DELIVERY_SCHEMA), policy_alias=True)
+
+    rules = deepcopy(RULES_SCHEMA)
+    rule_item = rules.get("items") if isinstance(rules, dict) else None
+    if isinstance(rule_item, dict):
+        _annotate_props(
+            rule_item,
+            {
+                "id": "多规则监控任务中单条规则的稳定唯一编号。",
+                "name": "单条监控规则的简短名称。",
+                "enabled": "该条规则是否启用（默认 true）。",
+                "depends_on": "当前规则前置依赖的同任务规则编号列表。",
+                "schedule": "该条规则独立的定时触发或 event_source 订阅配置对象。",
+                "precheck": "唤醒分析前先执行的轻量工具预检配置对象。",
+                "tool": "不经过 LLM、直接执行的确定性工具调用配置对象。",
+                "condition": "基于前序规则或预检输出字段判断的结构化条件对象。",
+                "use_llm": "满足前置条件后是否调用 LLM 生成判断与通知。",
+                "prompt": "该条规则专用的 LLM 执行提示词。",
+                "execution": "该条规则局部覆盖的执行上下文与模型策略对象。",
+                "policy": "该条规则局部覆盖的逾期与失败退避策略对象。",
+                "delivery": "该条规则局部覆盖的通知投递策略对象。",
+            },
+        )
+        rprops = rule_item.get("properties")
+        if isinstance(rprops, dict):
+            _annotate_props(
+                rprops.get("condition"),
+                {
+                    "rule_id": "作为比较数据来源的前序规则 ID。",
+                    "pointer": "提取比较值的 JSON 字段路径或指针。",
+                    "op": "结构化比较操作符（如 eq、neq、gt、gte、lt、lte、contains、exists）。",
+                    "value": "参与比较的目标阈值或期望常量。",
+                    "max_age_seconds": "允许复用前序规则结果的最大有效秒数。",
+                },
+            )
+            if isinstance(rprops.get("delivery"), dict):
+                _annotate_delivery_schema(rprops["delivery"], policy_alias=False)
+            if isinstance(rprops.get("execution"), dict):
+                _annotate_props(
+                    rprops["execution"],
+                    {
+                        "mode": "该规则局部覆盖的执行上下文模式。",
+                        "model_policy": "该规则局部覆盖的模型选择策略。",
+                        "profile_id": "该规则局部指定的模型 profile_id。",
+                    },
+                )
+            if isinstance(rprops.get("policy"), dict):
+                _annotate_props(rprops["policy"], {"misfire": "逾期策略：skip 跳过或 coalesce 合并补跑一次。"})
+            if isinstance(rprops.get("execution_target"), dict):
+                _annotate_execution_target_schema(rprops["execution_target"])
+            if isinstance(rprops.get("schedule"), dict):
+                _annotate_props(
+                    rprops["schedule"],
+                    {
+                        "kind": "单条规则的计划触发类型（at、every、cron 或 event_source）。",
+                        "at": "kind=at 时的未来绝对 ISO-8601 时间。",
+                        "every_seconds": "kind=every 时的固定间隔秒数。",
+                        "anchor_at": "kind=every 时的可选周期对齐锚点时间。",
+                        "expression": "kind=cron 时的五段 cron 表达式。",
+                        "timezone": "解析规则时间使用的 IANA 时区。",
+                        "max_batch_events": "kind=event_source 时单次最大事件批大小。",
+                        "min_interval_seconds": "kind=event_source 时最小触发间隔秒数。",
+                    },
+                )
+                for branch in rprops["schedule"].get("oneOf", ()):
+                    _annotate_props(branch, {"kind": "单条规则的计划触发类型判别字段。"})
+            if isinstance(rprops.get("tool"), dict):
+                _annotate_props(
+                    rprops["tool"],
+                    {
+                        "name": "该规则直接调用的受权工具名称。",
+                        "arguments": "传给该规则工具的 JSON 参数字典。",
+                    },
+                )
+    return {
+        "event_source": event_source,
+        "execution": execution,
+        "execution_target": execution_target,
+        "delivery": delivery,
+        "delivery_policy": delivery_policy,
+        "rules": rules,
+    }
+
+
 # LLM: 公开单计划与每条规则只选择消息引用，原宿主解析canonical来源；发现元数据不路由/授权，完成只认repository回执。
 # 函数用途: 声明计划、认证投递目录与更新参数；新目标必须引用delivery_targets，不接受隐藏身份或任意地址。
 def build_schedule_tool_model_spec() -> ToolModelSpec:
+    subschemas = _build_annotated_schedule_subschemas()
     return ToolModelSpec(
         name="schedule",
         description=(
@@ -96,7 +268,7 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "name": {"type": "string", "description": "create 必填的简短名称；update 可选。"},
                 "prompt": {"type": "string", "description": "到点后执行的完整用户要求，执行与通知身份由宿主固定。"},
                 "schedule_kind": {"type": "string", "enum": ["at", "every", "cron", "event_source"], "description": "计划类型。"},
-                "event_source": EVENT_SOURCE_INPUT_SCHEMA,
+                "event_source": subschemas["event_source"],
                 "at": {
                 "type": "string",
                 "description": (
@@ -120,19 +292,19 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "misfire_grace_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "错过后允许补执行的秒数。"},
                 "policy": {"type": "object", "description": "可选运行策略；不提供保持原行为。超宽限可跳过或合并补一次，失败只影响以后周期，不重放已执行动作。",
                     "properties": {
-                        "misfire": {"type": "string", "enum": ["skip", "coalesce"]},
+                        "misfire": {"type": "string", "enum": ["skip", "coalesce"], "description": "错过执行窗口后的处理策略：skip 跳过逾期周期，coalesce 合并补跑一次。"},
                         "queue_timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "预留后最长排队时间；0 不限制。"},
                         "failure_pause_after": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "连续失败多少次后暂停；0 不自动暂停。"},
                         "failure_backoff_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "连续失败指数退避基数，最长七天；0 不退避。"}},
                     "additionalProperties": False},
                 "skill_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "固定到计划的当前可用 Skill 稳定 ID。"},
-                "rules": RULES_SCHEMA,
+                "rules": subschemas["rules"],
                 "rule_id": {"type": "string", "description": "多规则监控 run_now 必须选择准确规则编号。"},
-                "execution": EXECUTION_SCHEMA,
-                "execution_target": EXECUTION_TARGET_SCHEMA,
+                "execution": subschemas["execution"],
+                "execution_target": subschemas["execution_target"],
                 "precheck": PRECHECK_SCHEMA,
-                "delivery": DELIVERY_SCHEMA,
-                "delivery_policy": DELIVERY_SCHEMA,
+                "delivery": subschemas["delivery"],
+                "delivery_policy": subschemas["delivery_policy"],
                 "notify_mode": {"enum": ["origin", "local", "none"], "description": "旧通知模式输入，与delivery_policy冲突时拒绝。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "list/history 的返回条数。"},
                 "metadata_only": {"type": "boolean", "description": "list/get/history/status 只输出状态、时间和编号，排除名字、提示词、回复预览及原始错误正文。"},
@@ -152,14 +324,16 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "当前长任务内部等待使用 wait",
                 "用户没有要求跨当前执行轮持续存在时不要创建计划",
                 "不能指定其他用户、群或任意会话",
+                "仅需注册/维护单次脚本或多步可恢复工作流（不登记未来定时或群事件订阅）时用 scripts / workflows",
+                "仅需在当前回合把多个工具调用按依赖一次性串联执行时用 tool_program",
             ),
             keywords=("提醒", "定时", "schedule", "cron", "每天", "每周", "稍后", "周期任务", "监控", "消息订阅", "机器人消息"),
             examples=(
-                '{"tool":"schedule","action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90,"delivery":{"mode":"origin"}}',
-                '{"tool":"schedule","action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai","delivery":{"mode":"origin"}}',
-                '{"tool":"schedule","action":"create","name":"资料更新","prompt":"汇总资料变化","schedule_kind":"every","every_seconds":600,"precheck":{"tool_name":"read_file","arguments":{"path":"source.txt"}}}',
-                '{"tool":"schedule","action":"list"}',
-                '{"tool":"schedule","action":"pause","job_id":"job_...","expected_version":2}',
+                '{"action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90,"delivery":{"mode":"origin"}}',
+                '{"action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai","delivery":{"mode":"origin"}}',
+                '{"action":"create","name":"资料更新","prompt":"汇总资料变化","schedule_kind":"every","every_seconds":600,"precheck":{"tool_name":"read_file","arguments":{"path":"source.txt"}}}',
+                '{"action":"list"}',
+                '{"action":"pause","job_id":"job_...","expected_version":2}',
             ),
             # 又大又少用：开关 tool_default_deferral_enabled 打开时前台回合不发 Schema，目录索引留下面这句用途，用到时 tool_search 加载。
             default_deferred=True,

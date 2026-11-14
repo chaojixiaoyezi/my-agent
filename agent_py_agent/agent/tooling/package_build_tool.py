@@ -100,7 +100,11 @@ class PackageBuildTool(BaseTool):
         input_schema={
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": [KIND_CAPABILITY_PACK, KIND_PLUGIN]},
+                "kind": {
+                    "type": "string",
+                    "enum": [KIND_CAPABILITY_PACK, KIND_PLUGIN],
+                    "description": "打包产物类型：capability_pack 表示方法/模板/检查清单能力包，plugin 表示可运行的文件型插件包",
+                },
                 "source_dir": {"type": "string", "description": "要打包的目录：写文件回执里的相对路径，或绝对路径"},
                 "declaration": {"type": "object", "description": "包声明（不含摘要和协议版本）"},
                 "origin": {"type": "string", "description": "学自哪里：仓库地址@提交，或“自己写的”"},
@@ -114,6 +118,9 @@ class PackageBuildTool(BaseTool):
             use_cases=("学完外部 agent 后把方法做成能力包", "把自己写的离线小工具或服务做成插件包"),
             avoid_when=("只是普通写文件或给用户交付文档", "未取得用户明确打包可分发能力包（CAPABILITY.md）或插件的要求时不要使用；创建普通 Skill（SKILL.md）或原生工作流/脚本不打包，分别用 Skill 入口及 workflows / scripts 工具"),
             keywords=("能力包", "插件", "打包", "learnpack"),
+            examples=(
+                '{"kind":"capability_pack","source_dir":"packs/review-pack","declaration":{"plugin_id":"review-pack","version":"0.1.0","summary":"审查清单能力包"},"origin":"自己写的","license":"自有"}',
+            ),
             default_deferred=True,
             deferred_summary="把整理好的外部学习能力包或插件目录打成包（不用于普通Skill或workflows/scripts）",
         ),
