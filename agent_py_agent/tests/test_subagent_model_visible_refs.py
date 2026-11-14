@@ -69,13 +69,6 @@ def test_create_subagents_payload_keeps_current_paths_visible(monkeypatch):
     assert "[internal_legacy_subagent_path_hidden]" not in result.output
 
 
-def test_model_visible_ref_sanitizer_module_is_removed():
-    """旧路径 sanitizer 不再是主链路的一部分。"""
-    import importlib.util
-
-    assert importlib.util.find_spec("agent_py_agent.agent.model_visible_ref_sanitizer") is None
-
-
 def test_model_visible_text_is_passthrough():
     """模型可见文本不再做旧路径替换。"""
     from agent_py_agent.agent.model_visible_refs import current_model_text

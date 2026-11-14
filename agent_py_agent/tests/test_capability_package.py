@@ -160,3 +160,70 @@ def test_content_builder_rejects_all_member_symlinks(tmp_path, kind):
     with pytest.raises(ValueError, match="无链接"):
         build_capability_package(declaration, root, output)
     assert not output.exists()
+
+
+_SAMPLE_PACKAGE_IDS = ("pkg-alpha", "pkg-beta", "pkg-gamma")
+
+
+def _write_sample_package_dir(root, package_id: str) -> tuple[dict, object]:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "methods").mkdir(parents=True, exist_ok=True)
+    (root / "licenses").mkdir(parents=True, exist_ok=True)
+    files = {
+        "CAPABILITY.md": f"# {package_id}\n\n入口说明。\n",
+        "PROVENANCE.md": f"来源说明: {package_id}\n",
+        "LICENSE": "MIT\n",
+        "licenses/NOTICE.txt": f"Notice for {package_id}\n",
+        "methods/workflow.md": f"# 工作流 ({package_id})\n",
+        "methods/review.md": f"# 复核清单 ({package_id})\n",
+    }
+    for rel_path, text in files.items():
+        (root / rel_path).write_text(text, encoding="utf-8")
+    declaration = {
+        "plugin_id": package_id,
+        "version": "1.0.0",
+        "summary": f"{package_id} 能力包",
+        "capability": {"description": f"{package_id} 描述", "keywords": ["workflow"], "entry_document": "CAPABILITY.md"},
+        "files": [{"path": rel_path} for rel_path in sorted(files)],
+        "settings_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    }
+    (root / "declaration.json").write_text(json.dumps(declaration, ensure_ascii=False), encoding="utf-8")
+    return declaration, root
+
+
+@pytest.mark.parametrize("package", _SAMPLE_PACKAGE_IDS)
+def test_samples_build_reproducibly_and_expose_only_one_package(package, tmp_path):
+    declaration, root = _write_sample_package_dir(tmp_path / package, package)
+    first = build_capability_package(declaration, root, tmp_path / "first.zip")
+    second = build_capability_package(declaration, root, tmp_path / "second.zip")
+    assert first.read_bytes() == second.read_bytes()
+    inspected = inspect_plugin_package(first.read_bytes())
+    manifest = inspected.manifest
+    assert manifest.is_content_only and manifest.plugin_id == package
+    assert manifest.skills == () and manifest.tools == () and manifest.actions == ()
+    assert manifest.to_payload()["schema_version"] == "plugin_package.v7"
+    assert manifest.to_payload()["package_kind"] == "capability"
+    assert manifest.capability.entry_document == "CAPABILITY.md"
+    members = {item.path: item for item in manifest.files}
+    assert {"CAPABILITY.md", "PROVENANCE.md", "LICENSE", "methods/workflow.md", "methods/review.md"} <= set(members)
+    assert any(path.startswith("licenses/") for path in members)
+    assert "declaration.json" not in members
+    assert all(item.executable is False for item in members.values())
+    with zipfile.ZipFile(first) as archive:
+        assert set(archive.namelist()) == {"plugin.json", *members}
+        for name, member in members.items():
+            assert hashlib.sha256(archive.read(name)).hexdigest() == member.sha256
+            assert archive.read(name) == (root / name).read_bytes()
+
+
+def test_packages_keep_same_relative_method_independent(tmp_path):
+    texts, digests = set(), set()
+    for package in _SAMPLE_PACKAGE_IDS:
+        declaration, root = _write_sample_package_dir(tmp_path / package, package)
+        bundle = build_capability_package(declaration, root, tmp_path / f"{package}.zip")
+        manifest = inspect_plugin_package(bundle.read_bytes()).manifest
+        method = next(item for item in manifest.files if item.path == "methods/review.md")
+        digests.add(method.sha256)
+        with zipfile.ZipFile(bundle) as archive:
+            texts.add(archive.read(method.path))
+    assert len(texts) == len(digests) == 3

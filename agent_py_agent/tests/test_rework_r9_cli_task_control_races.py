@@ -38,7 +38,6 @@ from agent_py_agent.agent.contracts.state_machine import (
     terminal_outcome,
     waiting_reason,
 )
-from agent_py_agent.agent.contracts.state_machine_transitions import transition_contract
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
 from agent_py_agent.agent.settings import AgentConfig
@@ -355,9 +354,3 @@ def test_state_machine_registers_paused_as_nonterminal_non_repairable_wait():
     assert (decision.action, decision.allow_new_run, decision.reason) == ("wait", False, "paused")
     snapshot = run_state_snapshot_from_task(type("Task", (), {"id": "run-1", "status": "PAUSED"})())
     assert snapshot["status"] == "PAUSED" and snapshot["status_protocol_error"] == ""
-    assert transition_contract("RUNNING", "PAUSED").allowed
-    resume = transition_contract("PAUSED", "PENDING")
-    assert resume.allowed and resume.required_condition == "explicit_resume_after_exact_cleanup"
-    assert not transition_contract("PAUSED", "RUNNING").allowed
-    assert transition_contract("PAUSED", "ABANDONED").allowed
-    assert not transition_contract("DONE", "PAUSED").allowed

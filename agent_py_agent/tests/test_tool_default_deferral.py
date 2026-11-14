@@ -59,7 +59,7 @@ def _visible(agent, **kwargs) -> set[str]:
 # LLM: 以本轮实际可用集合断言前台折叠；后台候选不再构成前台常驻豁免。
 # 函数用途: 验证默认折叠及每个工具仍有准确用途索引。
 def test_declared_tools_leave_the_native_surface_and_get_a_compact_index(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     visible = _visible(agent)
     assert visible.isdisjoint(DEFERRED_EFFECTIVE)
     # 不可用或未注册项仍按原快照排除，后台允许集合不改变前台折叠。
@@ -89,7 +89,7 @@ def test_declared_set_is_pinned_and_every_summary_is_short(tmp_path):
 
 
 def test_tool_search_loads_a_declared_tool_for_the_next_call(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     result = agent.tools.tools["tool_search"].execute({"query": "manage_models", "limit": 3})
     loaded = result.result_envelope["tool_search"]["loaded_tool_names"]
     assert loaded[0] == "manage_models"
@@ -111,18 +111,18 @@ def test_tool_search_loads_a_declared_tool_for_the_next_call(tmp_path):
     ("把这次的做法总结成内部技能", "skill_summarize"),
 ])
 def test_natural_requests_find_each_declared_tool(tmp_path, query, tool):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     hits = [spec.name for spec in agent.tools.search_deferred_specs(query, limit=5)]
     assert tool in hits
 
 
 def test_explicit_allowed_tools_stay_fully_visible(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     assert _visible(agent, allowed_tools=["user_config", "read_file"]) == {"user_config", "read_file"}
 
 
 def test_declared_deferral_needs_an_available_visible_tool_search(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     snapshot = agent.tools.runtime_snapshot()
     assert _declared_deferred_names(snapshot, []) == frozenset(
         _declared(snapshot.available_tool_names) & snapshot.available_tool_names
@@ -135,7 +135,7 @@ def test_declared_deferral_needs_an_available_visible_tool_search(tmp_path):
 
 
 def test_decision_projection_and_declared_deferral_merge(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     base = agent.tools.runtime_snapshot()
     projected = replace(base, presentation_deferred_names=frozenset({"session_search"}),
                         presentation_shortlist_names=frozenset({"read_file"}))
@@ -158,7 +158,7 @@ def test_hint_requires_a_summary_when_declared():
 
 
 def test_discovery_entry_stays_direct_even_if_it_declares_deferral(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     search_tool = agent.tools.tools["tool_search"]
     spec = search_tool.model_spec
     search_tool.model_spec = replace(spec, hints=replace(spec.hints, default_deferred=True, deferred_summary="搜索工具"))
@@ -169,7 +169,7 @@ def test_discovery_entry_stays_direct_even_if_it_declares_deferral(tmp_path):
 # LLM: 目录帮助只指向规范catalog，不恢复独立list_tools模型入口。
 # 函数用途: 检查折叠提示的完整目录指引和格式。
 def test_index_without_other_folded_names_has_no_dangling_name_list(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True, tool_catalog_deferred_categories=[])
+    agent = _agent(tmp_path, tool_catalog_deferred_categories=[])
     section = agent.tools.render_catalog_section()
     assert "也可用 tool_search(action=catalog) 查看完整清单。\n  默认收起的工具" in section
     assert "完整清单：" not in section
@@ -184,20 +184,11 @@ def test_semantic_document_only_grows_for_tools_with_a_summary(tmp_path):
     assert _tool_semantic_document(schedule).endswith("summary: " + schedule.hints.deferred_summary)
 
 
-def test_switch_is_normalized_from_yaml_strings():
-    from agent_py_agent.agent.settings.config import normalize_agent_config
-
-    normalized, warnings = normalize_agent_config({"tool_default_deferral_enabled": "false"})
-    assert normalized["tool_default_deferral_enabled"] is False
-    normalized, _ = normalize_agent_config({"tool_default_deferral_enabled": "true"})
-    assert normalized["tool_default_deferral_enabled"] is True
-
-
 @pytest.mark.parametrize("broken", ["unavailable", "hidden"])
 def test_declared_deferral_backs_off_when_tool_search_is_unusable(tmp_path, broken):
     from agent_py_agent.agent.tooling.models import ToolAvailability, ToolExposure
 
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     snapshot = agent.tools.runtime_snapshot()
     damaged = {
         "unavailable": {"availability": ToolAvailability(False, "TOOL_UNAVAILABLE", "test")},
@@ -211,7 +202,7 @@ def test_declared_deferral_backs_off_when_tool_search_is_unusable(tmp_path, brok
 # LLM: 带 tool_search 的白名单仍可按需展示，执行/发现授权闭包不变。
 # 函数用途: 验证显式授权不会强制所有重工具常驻。
 def test_explicit_allowed_tools_catalog_supports_declared_index_with_search(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     section = agent.tools.render_catalog_section(allowed_tools=["user_config", "read_file", "tool_search"])
     assert "默认收起的工具" in section
     assert [spec.name for spec in agent.tools.search_deferred_specs(
@@ -238,7 +229,7 @@ def _blind_call(agent, record=None, loaded=()):
 
 
 def test_blind_call_validation_failure_loads_the_schema_for_the_next_request(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     hint, loaded = _blind_call(agent)
     assert loaded == {"manage_models"}
     assert hint.startswith("\n[tool-schema-loaded] manage_models ")
@@ -246,20 +237,20 @@ def test_blind_call_validation_failure_loads_the_schema_for_the_next_request(tmp
 
 
 @pytest.mark.parametrize("case", [
-    (True, "manage_models", True, "validation"),
-    (True, "manage_models", False, "execution"),
-    (True, "audit_records", False, "validation"),
-    (True, "read_file", False, "validation"),
-    (True, "no_such_tool", False, "validation"),
+    ("manage_models", True, "validation"),
+    ("manage_models", False, "execution"),
+    ("audit_records", False, "validation"),
+    ("read_file", False, "validation"),
+    ("no_such_tool", False, "validation"),
 ])
 def test_blind_call_reload_only_for_declared_deferral_validation_failures(tmp_path, case):
-    deferral, tool, ok, stage = case
-    agent = _agent(tmp_path, tool_default_deferral_enabled=deferral)
+    tool, ok, stage = case
+    agent = _agent(tmp_path)
     assert _blind_call(agent, _failed_record(tool, stage, ok=ok)) == ("", set())
 
 
 def test_blind_call_already_loaded_is_left_alone(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     assert _blind_call(agent, loaded={"manage_models"}) == ("", {"manage_models"})
 
 
@@ -270,7 +261,7 @@ def test_blind_call_already_loaded_is_left_alone(tmp_path):
     ("execution", "NO_SUCH_ERROR_CODE", False),
 ])
 def test_handler_side_argument_errors_also_reload_the_schema(tmp_path, stage, error_code, reloads):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     hint, loaded = _blind_call(agent, _failed_record("user_config", stage, error_code))
     assert (loaded == {"user_config"}) is reloads
     assert bool(hint) is reloads
@@ -279,7 +270,7 @@ def test_handler_side_argument_errors_also_reload_the_schema(tmp_path, stage, er
 # LLM: 闭包仅保证可执行/可发现，前台包和人格工具遵守自己的默认折叠声明。
 # 函数用途: 防止后台工具豁免表再次泄漏进前台 Schema。
 def test_continuation_required_tools_do_not_override_foreground_deferral(tmp_path):
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     visible = _visible(agent)
     assert {"remember", "skill_search", "run_command"} <= visible
     assert {"update_persona", "package_build", "package_install", "user_config", "schedule", "manage_models"}.isdisjoint(visible)
@@ -296,7 +287,7 @@ def test_tool_search_finds_each_newly_declared_tool(tmp_path):
         "cancel_session_task", "memory_search", "publish_audit_update",
         "send_message", "send_session_message", "stop_named_work",
     }
-    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    agent = _agent(tmp_path)
     available = set(agent.tools.runtime_snapshot().available_tool_names)
     registered = sorted(new_names & available)
     assert registered, f"本批新工具在测试环境应至少可用一个：{sorted(new_names & set(agent.tools.tools))}"
