@@ -31,7 +31,10 @@ class _BrokenBackgroundContextStore(ConversationStore):
 
 
 def test_background_context_reports_load_errors_without_hiding_state(tmp_path):
-    from agent_py_agent.agent.conversation.background_context import context_markdown
+    from agent_py_agent.agent.conversation.background_context import (
+        prepare_background_context,
+        render_background_context,
+    )
 
     store = _BrokenBackgroundContextStore(tmp_path / "conversations")
     thread = store.threads.get_or_create(
@@ -45,7 +48,9 @@ def test_background_context_reports_load_errors_without_hiding_state(tmp_path):
     agent = SimpleNamespace(config=None, root=tmp_path)
     request = SimpleNamespace(reason="scheduled_progress_report", task_id="task-1", wake_signal=None)
 
-    prompt = context_markdown(agent=agent, store=store, thread=thread, request=request)
+    prompt = render_background_context(
+        prepare_background_context(agent=agent, store=store, thread=thread, request=request)
+    )
 
     assert "Runtime Load Errors" in prompt
     assert "background_context.context_bundle" in prompt
@@ -56,8 +61,6 @@ def test_background_context_reports_load_errors_without_hiding_state(tmp_path):
 
 
 def test_background_context_reports_corrupt_jsonl_rows_without_dropping_good_rows(tmp_path):
-    from agent_py_agent.agent.conversation.background_context import context_markdown
-
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
     store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "这条消息应该保留"})
@@ -157,7 +160,10 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     from agent_py_agent.agent.agent_core.runtime.task_identity import (
         task_path_progress_ledger_id,
     )
-    from agent_py_agent.agent.conversation.background_context import context_markdown
+    from agent_py_agent.agent.conversation.background_context import (
+        prepare_background_context,
+        render_background_context,
+    )
     from agent_py_agent.agent.task_progress import (
         read_task_progress_report,
         write_task_progress,
@@ -224,7 +230,9 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     )
     request = SimpleNamespace(reason="thread_goal_continue", task_id="task-demo", wake_signal=None)
 
-    prompt = context_markdown(agent=agent, store=store, thread=thread, request=request)
+    prompt = render_background_context(
+        prepare_background_context(agent=agent, store=store, thread=thread, request=request)
+    )
 
     assert "Task Runtime State" in prompt
     assert "完成演示任务" in prompt
@@ -251,7 +259,10 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
 
 
 def test_background_context_hides_unrelated_operational_tasks_but_keeps_thread_history(tmp_path):
-    from agent_py_agent.agent.conversation.background_context import context_markdown
+    from agent_py_agent.agent.conversation.background_context import (
+        prepare_background_context,
+        render_background_context,
+    )
 
     owner_root = tmp_path / "owner"
     store = ConversationStore(owner_root / "conversations")
@@ -319,15 +330,17 @@ def test_background_context_hides_unrelated_operational_tasks_but_keeps_thread_h
         ),
     )
 
-    prompt = context_markdown(
-        agent=agent,
-        store=store,
-        thread=thread,
-        request=SimpleNamespace(
-            reason="scheduled_progress_report",
-            task_id="current-task",
-            wake_signal=None,
-        ),
+    prompt = render_background_context(
+        prepare_background_context(
+            agent=agent,
+            store=store,
+            thread=thread,
+            request=SimpleNamespace(
+                reason="scheduled_progress_report",
+                task_id="current-task",
+                wake_signal=None,
+            ),
+        )
     )
 
     assert "历史消息仍属于同一个会话" in prompt
@@ -351,11 +364,16 @@ def _thread(store: ConversationStore):
 
 
 def _context_prompt(store: ConversationStore, thread, root) -> str:
-    from agent_py_agent.agent.conversation.background_context import context_markdown
+    from agent_py_agent.agent.conversation.background_context import (
+        prepare_background_context,
+        render_background_context,
+    )
 
     agent = SimpleNamespace(config=None, root=root)
     request = SimpleNamespace(reason="scheduled_progress_report", task_id="", wake_signal=None)
-    return context_markdown(agent=agent, store=store, thread=thread, request=request)
+    return render_background_context(
+        prepare_background_context(agent=agent, store=store, thread=thread, request=request)
+    )
 
 
 def _append_bad_jsonl_rows(path) -> None:

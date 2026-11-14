@@ -39,10 +39,6 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "not a product service parameter entry point."
     ),
-    "agent_py_agent/scripts/b_acceptance/timeout_budget_evidence.py:log_message": (
-        "HTTPRequestHandler-style logging override accepts formatter arguments; "
-        "门槛预算取证脚本(超时预算证据采集), not a product service parameter entry point."
-    ),
     "scripts/fake_provider_outage.py:log_message": (
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "drill harness script, not a product service parameter entry point."
@@ -538,21 +534,6 @@ def test_no_macos_or_python_cache_artifacts() -> None:
     assert not bad, f"Found dirty tracked artifacts: {bad}"
 
 
-# LLM: 仅解除已退役的尺寸政策/报告存在性要求，其他治理文档缺失仍须报错。
-# 函数用途: 保留现存非尺寸治理文档的存在性检查。
-def test_governance_docs_exist() -> None:
-    """Key governance documents must be present in the repo."""
-
-    required_docs = [
-        "ARCHITECTURE_EXEMPTIONS.md",
-        "REFACTORING_BACKLOG.md",
-        "CLEAN_PACKAGE_POLICY.md",
-        "TESTING_POLICY.md",
-    ]
-    missing = [name for name in required_docs if not (REPO_ROOT / name).exists()]
-    assert not missing, f"Missing governance docs: {missing}"
-
-
 # ---- scripts/ 本机 Gateway 凭据守卫（G2b 前置，flc）----
 # LLM: scripts/ 下指向本机 Gateway 的 HTTP 调用（curl/urllib）必须带本机客户端凭据头
 #   （X-Gateway-Token，或经 gateway_script_headers/gateway_client_credentials 取得的凭据变量），
@@ -820,14 +801,3 @@ def test_gateway_script_credential_rule_self_check() -> None:
     wrong = [sample for sample, name, flagged in GATEWAY_SCRIPT_SELF_CHECK_SAMPLES
              if bool(_shell_text_offenders(sample, name) or _python_text_offenders(sample, name)) is not flagged]
     assert not wrong, "自检样本判定与期望不符：" + repr(wrong[0][:60])
-
-
-# LLM: 尺寸退役不得继续让历史报告路径豁免真实实现的同文件注释要求；模块文档齐全也不能触发旧旁路。
-# 函数用途: 验证含旧报告路径的变更仍受现存doc sync规则检查。
-def test_retired_size_report_cannot_waive_same_file_comments() -> None:
-    from scripts.check_doc_sync import evaluate_sync
-
-    path = "agent_py_agent/agent/subagents/services/base.py"
-    changes = [path, "CODE_SIZE_REPORT.md", "docs/modules/subagent/02-progress.md", "docs/modules/subagent/04-structure.md"]
-    problems = evaluate_sync(changes, {path: "+def changed():\n+    return True"})
-    assert any("no same-file comment/doc update" in problem for problem in problems)

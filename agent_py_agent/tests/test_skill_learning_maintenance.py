@@ -471,11 +471,6 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
         snapshots.append((root, max_entries, max_ms, result))
         return result
 
-    # LLM: 旧全树扫描已退出准入主链；若批量记账回退到该入口，直接暴露而不伪造返回值。
-    # 函数用途: 防止一次批量使用记录重新触发全owner目录遍历。
-    def forbid_full_scan(root):
-        raise AssertionError('usage admission requested a full owner scan')
-
     # LLM: 双文件写入继续使用原函数；异常不得被记为已完成保存，原返回值和异常保持。
     # 函数用途: 只统计实际成功返回的批处理保存。
     def counted_save(*args):
@@ -485,7 +480,6 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
 
     monkeypatch.setattr(SkillLearningStore, 'state_lock', counted_lock)
     monkeypatch.setattr(owner_quota, '_bounded_quota_snapshot', counted_scan)
-    monkeypatch.setattr(owner_quota, '_owner_usage_bytes_for_admission', forbid_full_scan)
     monkeypatch.setattr(usage, '_save_usage', counted_save)
     result = SkillSearchTool(fixture.agent).execute({'action': 'search', 'query': 'entry', 'limit': 20})
     assert result.ok, result.output

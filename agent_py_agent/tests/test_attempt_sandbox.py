@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,7 +28,6 @@ from agent_py_agent.agent.attempt.sandbox import (
     SandboxHostPolicy,
     SandboxUnavailableError,
 )
-from agent_py_agent.agent.attempt.view import build_attempt_view
 
 IS_LINUX = sys.platform.startswith("linux")
 IS_MACOS = sys.platform == "darwin"
@@ -42,22 +42,19 @@ def env(tmp_path):
     shared = tmp_path / "shared"
     shared.mkdir()
     (shared / "keep.txt").write_text("keep", encoding="utf-8")
-    view = build_attempt_view(
-        shared_workspace=shared,
-        views_root=tmp_path / "views",
-        view_name="att-1",
-    )
+    view = tmp_path / "views" / "att-1"
+    shutil.copytree(shared, view)
     staging = tmp_path / "staging"
     staging.mkdir()
     spec = AttemptSandboxSpec(
-        attempt_view=view.view_path,
+        attempt_view=view,
         staging_root=staging,
         shared_workspace=shared,
         owner_home=tmp_path / "home" / "owner",
     )
     (tmp_path / "home" / "owner").mkdir(parents=True)
     sandbox = AttemptExecutionSandbox(spec)
-    return _Env(sandbox, view.view_path, shared, staging)
+    return _Env(sandbox, view, shared, staging)
 
 
 class _Env:

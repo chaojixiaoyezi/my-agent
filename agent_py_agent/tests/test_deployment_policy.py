@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.user_space.home_layout import home_paths
+from agent_py_agent.agent.common import json_io, nofollow_fs
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings import deployment_policy as policy_module
+from agent_py_agent.agent.settings.deployment_policy import DeploymentPolicyError
+from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home, home_paths
 
 
 # LLM: 模拟宿主已解析的本机管理员身份，不从请求正文授予权限。
@@ -313,3 +321,341 @@ def test_deployment_policy_without_dir_fd_uses_portable_chain(tmp_path, monkeypa
     target.write_text(json.dumps(payload))
     assert module.load_deployment_policy(trusted_host_paths=paths).revision == 3
     assert module._confirm_deployment_policy_commit(trusted_host_paths=paths, payload=payload).revision == 3
+
+
+_CHANGES = {
+    "runtime_guards": {"repeat_fail_threshold": 7, "tool_rate_max_calls": 12},
+    "shutdown": {"total_grace_seconds": 6},
+    "cache": {"resident_budget_bytes": None},
+}
+_ALTERATIONS = (
+    "missing", "revision_low", "revision_high", "revision_missing", "revision_bool",
+    "same_revision_payload", "explicit_key_removed", "malformed", "symlink", "hardlink_metadata",
+    "during_read_missing", "during_read_in_place",
+)
+
+
+def _commit_home(tmp_path, revision=0):
+    paths = replace(home_paths(tmp_path), owner_provider="local", owner_kind="main", owner_id="main")
+    if revision:
+        paths.config_dir.mkdir(parents=True)
+        (paths.config_dir / "deployment_policy.json").write_text(json.dumps({
+            "schema_version": "deployment-policy.v1", "revision": revision,
+            "query": {"max_scan_items": 101},
+        }), encoding="utf-8")
+    return paths
+
+
+def _expected(revision):
+    payload = {"schema_version": "deployment-policy.v1", "revision": revision + 1, **_CHANGES}
+    if revision:
+        payload["query"] = {"max_scan_items": 101}
+    return payload
+
+
+def _assert_receipt(error, *, committed, revision, path):
+    assert isinstance(error, policy_module.DeploymentPolicyCommitError)
+    assert error.committed is committed
+    assert error.unconfirmed is True
+    assert error.durability_confirmed is False
+    assert error.expected_revision == revision
+    reason = "deployment_policy_durability_unconfirmed" if committed else "deployment_policy_commit_unconfirmed"
+    assert error.reason == reason
+    assert "DO-NOT-ECHO" not in str(error)
+    assert str(path) not in str(error)
+    assert error.__cause__ is None
+
+
+def _alter_target(path, payload, alteration, monkeypatch, calls):
+    if alteration == "missing":
+        path.unlink()
+        return
+    if alteration == "malformed":
+        path.write_text("{DO-NOT-ECHO", encoding="utf-8")
+        return
+    if alteration in {"during_read_missing", "during_read_in_place"}:
+        original_read = nofollow_fs._read_descriptor
+
+        def read_then_change(descriptor, max_bytes):
+            content = original_read(descriptor, max_bytes)
+            calls.append("target_changed_during_read")
+            monkeypatch.setattr(nofollow_fs, "_read_descriptor", original_read)
+            if alteration == "during_read_missing":
+                path.unlink()
+            else:
+                changed = json.loads(json.dumps(payload))
+                changed["runtime_guards"]["repeat_fail_threshold"] = 8
+                path.write_text(json.dumps(changed), encoding="utf-8")
+            return content
+
+        monkeypatch.setattr(nofollow_fs, "_read_descriptor", read_then_change)
+        return
+    if alteration == "hardlink_metadata":
+        target_stat = path.stat()
+        original = os.fstat
+
+        def multilink_fstat(descriptor):
+            metadata = original(descriptor)
+            if (metadata.st_dev, metadata.st_ino) == (target_stat.st_dev, target_stat.st_ino):
+                calls.append("multilink_metadata_checked")
+                return os.stat_result((*metadata[:3], 2, *metadata[4:]))
+            return metadata
+
+        monkeypatch.setattr(os, "fstat", multilink_fstat)
+        return
+    if alteration == "symlink":
+        other = path.parent.parent / "untrusted-copy.json"
+        other.write_text(json.dumps(payload), encoding="utf-8")
+        path.unlink()
+        path.symlink_to(other)
+        return
+    changed = json.loads(json.dumps(payload))
+    if alteration == "revision_low":
+        changed["revision"] -= 1
+    elif alteration == "revision_high":
+        changed["revision"] += 1
+    elif alteration == "revision_missing":
+        del changed["revision"]
+    elif alteration == "revision_bool":
+        changed["revision"] = True
+    elif alteration == "same_revision_payload":
+        changed["runtime_guards"]["repeat_fail_threshold"] = 8
+    elif alteration == "explicit_key_removed":
+        del changed["cache"]
+    else:
+        raise AssertionError("未登记的故障注入类型")
+    path.write_text(json.dumps(changed), encoding="utf-8")
+
+
+def _fail_directory_fsync(monkeypatch, path, expected, *, alteration=None):
+    original = json_io.os.fsync
+    calls = []
+
+    def fsync(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            assert json.loads(path.read_text(encoding="utf-8")) == expected
+            calls.append("replaced_before_directory_fsync")
+            if alteration is not None:
+                _alter_target(path, expected, alteration, monkeypatch, calls)
+            raise OSError("DO-NOT-ECHO directory fsync failure")
+        return original(descriptor)
+
+    monkeypatch.setattr(json_io.os, "fsync", fsync)
+    return calls
+
+
+@pytest.mark.parametrize("revision", [0, 4])
+def test_update_confirms_complete_payload_and_target_revision(tmp_path, revision):
+    paths = _commit_home(tmp_path, revision)
+    result = policy_module.update_deployment_policy(
+        trusted_host_paths=paths, expected_revision=revision, changes=_CHANGES,
+    )
+    path = paths.config_dir / "deployment_policy.json"
+    assert result.to_dict() == _expected(revision)
+    assert result.revision == revision + 1
+    assert json.loads(path.read_text(encoding="utf-8")) == _expected(revision)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not list(paths.config_dir.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("revision", [0, 4])
+def test_directory_fsync_failure_reports_confirmed_target(tmp_path, monkeypatch, revision):
+    paths = _commit_home(tmp_path, revision)
+    path = paths.config_dir / "deployment_policy.json"
+    expected = _expected(revision)
+    calls = _fail_directory_fsync(monkeypatch, path, expected)
+    with pytest.raises(policy_module.DeploymentPolicyError) as caught:
+        policy_module.update_deployment_policy(
+            trusted_host_paths=paths, expected_revision=revision, changes=_CHANGES,
+        )
+    assert calls == ["replaced_before_directory_fsync"]
+    _assert_receipt(caught.value, committed=True, revision=revision + 1, path=path)
+    assert json.loads(path.read_text(encoding="utf-8")) == expected
+    assert not list(paths.config_dir.glob(".*.tmp"))
+    with pytest.raises(policy_module.DeploymentPolicyError) as conflict:
+        policy_module.update_deployment_policy(
+            trusted_host_paths=paths, expected_revision=revision, changes=_CHANGES,
+        )
+    assert conflict.value.reason == "deployment_policy_conflict"
+
+
+@pytest.mark.parametrize("alteration", _ALTERATIONS)
+def test_post_write_readback_rejects_changed_or_missing_target(tmp_path, monkeypatch, alteration):
+    paths = _commit_home(tmp_path, 4)
+    path = paths.config_dir / "deployment_policy.json"
+    original = json_io.write_private_json_file_atomic_unlocked
+    calls = []
+
+    def write_then_alter(target, payload):
+        original(target, payload)
+        assert payload == _expected(4)
+        calls.append("written")
+        _alter_target(target, payload, alteration, monkeypatch, calls)
+
+    monkeypatch.setattr(json_io, "write_private_json_file_atomic_unlocked", write_then_alter)
+    with pytest.raises(policy_module.DeploymentPolicyError) as caught:
+        policy_module.update_deployment_policy(trusted_host_paths=paths, expected_revision=4, changes=_CHANGES)
+    expected_calls = ["written", "multilink_metadata_checked"] if alteration == "hardlink_metadata" else ["written"]
+    if alteration in {"during_read_missing", "during_read_in_place"}:
+        expected_calls.append("target_changed_during_read")
+    assert calls == expected_calls
+    _assert_receipt(caught.value, committed=None, revision=5, path=path)
+    assert not list(paths.config_dir.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("alteration", _ALTERATIONS)
+def test_directory_fsync_failure_cannot_confirm_altered_target(tmp_path, monkeypatch, alteration):
+    paths = _commit_home(tmp_path, 4)
+    path = paths.config_dir / "deployment_policy.json"
+    calls = _fail_directory_fsync(monkeypatch, path, _expected(4), alteration=alteration)
+    with pytest.raises(policy_module.DeploymentPolicyError) as caught:
+        policy_module.update_deployment_policy(trusted_host_paths=paths, expected_revision=4, changes=_CHANGES)
+    expected_calls = ["replaced_before_directory_fsync"]
+    if alteration == "hardlink_metadata":
+        expected_calls.append("multilink_metadata_checked")
+    if alteration in {"during_read_missing", "during_read_in_place"}:
+        expected_calls.append("target_changed_during_read")
+    assert calls == expected_calls
+    _assert_receipt(caught.value, committed=None, revision=5, path=path)
+    assert not list(paths.config_dir.glob(".*.tmp"))
+
+
+def test_file_fsync_failure_does_not_claim_target_committed(tmp_path, monkeypatch):
+    paths = _commit_home(tmp_path, 4)
+    path = paths.config_dir / "deployment_policy.json"
+    before = path.read_bytes()
+    calls = []
+
+    def fail_file_fsync(descriptor):
+        assert stat.S_ISREG(os.fstat(descriptor).st_mode)
+        calls.append("file_fsync")
+        raise OSError("DO-NOT-ECHO file fsync failure")
+
+    monkeypatch.setattr(json_io.os, "fsync", fail_file_fsync)
+    with pytest.raises(policy_module.DeploymentPolicyError) as caught:
+        policy_module.update_deployment_policy(trusted_host_paths=paths, expected_revision=4, changes=_CHANGES)
+    assert calls == ["file_fsync"]
+    _assert_receipt(caught.value, committed=None, revision=5, path=path)
+    assert path.read_bytes() == before
+    assert not list(paths.config_dir.glob(".*.tmp"))
+
+
+def _policy(root, threshold, *, revision=1):
+    paths = ensure_my_agent_home(root)
+    path = paths.root / "config" / "deployment_policy.json"
+    path.write_text(json.dumps({"schema_version": "deployment-policy.v1", "revision": revision, "runtime_guards": {
+        "repeat_fail_threshold": threshold,
+        "main_agent_auto_resume_attempt_limit": threshold,
+        "provider_transient_redispatch_limit": threshold,
+    }}), encoding="utf-8")
+    return path
+
+
+def _agent(home, workspace):
+    return SimpleAgent(AgentConfig(my_agent_home=str(home), model_backend="echo", prompt_files=[],
+                                   enable_tools=False), workspace, defer_mcp_connect=True)
+
+
+def test_simple_agent_guard_uses_configured_host_home(tmp_path, monkeypatch):
+    first, other = tmp_path / "configured", tmp_path / "environment"
+    _policy(first, 7)
+    _policy(other, 13)
+    monkeypatch.setenv("MY_AGENT_HOME", str(other))
+    agent = _agent(first, tmp_path / "workspace")
+    assert agent.home_paths.root == first
+    assert agent.runtime_guard_policy.repeat_fail_threshold == 7
+    assert getattr(agent.config, "runtime_guard_policy", None) is agent.runtime_guard_policy
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "changed"))
+    assert agent.runtime_guard_policy.repeat_fail_threshold == 7
+    assert replace(agent.config).runtime_guard_policy is agent.runtime_guard_policy
+    _policy(first, 11, revision=2)
+    rebuilt = SimpleAgent(replace(agent.config), tmp_path / "reloaded-workspace", defer_mcp_connect=True)
+    assert rebuilt.home_paths.root == first
+    assert rebuilt.runtime_guard_policy.repeat_fail_threshold == 11
+    assert rebuilt.config.runtime_guard_policy is rebuilt.runtime_guard_policy
+    assert agent.runtime_guard_policy.repeat_fail_threshold == 7
+    _policy(first, 17, revision=3).write_text("{broken", encoding="utf-8")
+    with pytest.raises(DeploymentPolicyError):
+        SimpleAgent(replace(rebuilt.config), tmp_path / "invalid-reload", defer_mcp_connect=True)
+
+
+def test_simple_agent_bad_configured_policy_fails_closed(tmp_path, monkeypatch):
+    first, other = tmp_path / "configured", tmp_path / "environment"
+    _policy(first, 7).write_text("{broken", encoding="utf-8")
+    _policy(other, 13)
+    monkeypatch.setenv("MY_AGENT_HOME", str(other))
+    with pytest.raises(DeploymentPolicyError):
+        _agent(first, tmp_path / "workspace")
+
+
+def test_runner_candidate_consumes_frozen_guard(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.runner.dispatch import (
+        RunnerCandidatePolicy,
+        _is_dispatch_runner_candidate,
+    )
+    from agent_py_agent.agent.settings.deployment_policy import RuntimeGuardPolicy
+
+    _policy(tmp_path / "home", 13)
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "home"))
+    task = SimpleNamespace(id="test", attributes={}, status="FAILED", failure_type="transient_error",
+                           runner_attempts=8, channel_status="", capability_requests=[], capability_gaps=[],
+                           runner_active_attempt_id="", runner_session_pid=0)
+    policy = RunnerCandidatePolicy()
+    object.__setattr__(policy, "runtime_guard_policy", RuntimeGuardPolicy(provider_transient_redispatch_limit=7))
+    assert not _is_dispatch_runner_candidate(task, policy=policy)
+
+
+def test_planner_and_capability_sweep_prefilters_consume_agent_frozen_guard(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.service import (
+        update_pending_work_state,
+    )
+    from agent_py_agent.agent.agent_core.planner_service import (
+        PlannerStateParams,
+        _collect_parent_planner_context,
+    )
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+
+    first, other = tmp_path / "configured", tmp_path / "environment"
+    _policy(first, 7)
+    _policy(other, 0)
+    monkeypatch.setenv("MY_AGENT_HOME", str(other))
+    agent = _agent(first, tmp_path / "workspace")
+    # 冻结后把磁盘和环境都改成 0（收紧）或 20（放宽），验证真实预筛入口始终只认 agent 冻结额度 7。
+    _policy(first, 0, revision=2)
+    _policy(other, 0, revision=2)
+
+    from agent_py_agent.tests.test_subagent_listruns_cache import _selected_task_file
+
+    request_id = 'frozen-guard-request'
+    agent._current_run_params = SimpleNamespace(request_id=request_id)
+    tasks = []
+    for name, attempts in (('run-eligible', 6), ('run-exhausted', 8)):
+        path = _selected_task_file(agent.subagents, name, 'BLOCKED')
+        payload = json.loads(path.read_text())
+        payload.update(failure_type='transient_error', runner_attempts=attempts,
+                       provider_retry_count=attempts - 1, failure_retry_count=0,
+                       no_progress_count=0, recovery_history_unknown_count=0)
+        payload['attributes']['conversation_request_id'] = request_id
+        path.write_text(json.dumps(payload))
+        task = agent.subagents.load(name)
+        agent.subagents.persistence.run_index.upsert(task)
+        tasks.append(task)
+    eligible_task, _exhausted_task = tasks
+    monkeypatch.setattr(
+        agent.subagents,
+        "board",
+        SimpleNamespace(
+            build_board=lambda **_kw: {},
+            due_check=lambda **_kw: {},
+            plan_actions=lambda *_a, **_kw: [],
+        ),
+    )
+    _, ctx = _collect_parent_planner_context(
+        agent,
+        PlannerStateParams(cfg=CapabilityConfig(), limit=10, max_runners=10, reviewer="", note=""),
+    )
+    assert [t.id for t in ctx.runner_candidates] == [eligible_task.id]
+
+    _policy(first, 20, revision=3)
+    _policy(other, 20, revision=3)
+    assert update_pending_work_state(agent) is True

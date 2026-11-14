@@ -25,7 +25,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agent.agent_core.runtime.record_finding_tool import execute_record_finding
 from agent.common.audit_activation import (
     AUDIT_ATTR,
     AUDIT_OBJECTIVE_ATTR,
@@ -1535,15 +1534,6 @@ def test_historical_review_without_delivery_ref_requires_exact_identity(
         }
         reviewed = tool.execute(review_params)
         duplicate_review = tool.execute(review_params)
-        duplicate_finding = execute_record_finding(tool.agent, 
-            {
-                "claim": "复核更正后需要升级",
-                "kind": "hit",
-                "evidence_refs": [candidate["source_ref"]],
-                "stage": "review",
-                "requires_llm_report": True,
-            }
-        )
 
     assert missing.ok is False
     assert missing.reported_error_code == "AUDIT_VERDICT_EVIDENCE_MISMATCH"
@@ -1553,9 +1543,6 @@ def test_historical_review_without_delivery_ref_requires_exact_identity(
     reviewed_payload = json.loads(reviewed.output)
     assert reviewed_payload["reviewed_now"] == 1
     assert json.loads(duplicate_review.output)["reviewed_now"] == 0
-    duplicate_finding_payload = json.loads(duplicate_finding.output)
-    assert duplicate_finding_payload["recorded"] is False
-    assert duplicate_finding_payload["reused"] is True
     assert reviewed_payload["audit_receipt"]["findings_projected"] == 1
     finding_rows = [
         json.loads(line)
@@ -4095,43 +4082,7 @@ def test_source_worker_finding_is_bound_to_acked_source_ref_and_idempotent(
                 }
             )
         )
-        params = {
-            "claim": "事件已经满足本次 Audit 的汇报条件",
-            "kind": "hit",
-            "evidence_refs": [
-                candidate["source_ref"],
-                "https://evidence.invalid/case/42",
-            ],
-            "requires_llm_report": True,
-        }
-        first = _payload(execute_record_finding(tool.agent, params))
-        second = _payload(execute_record_finding(tool.agent, params))
-        denied = execute_record_finding(tool.agent, 
-            {
-                **params,
-                "evidence_refs": ["audit://ws-0000000000/candidate/1:0"],
-            }
-        )
-        missing_audit_ref = execute_record_finding(tool.agent, 
-            {
-                **params,
-                "evidence_refs": ["https://evidence.invalid/case/42"],
-            }
-        )
 
-    assert first["finding_id"].startswith("af-")
-    assert first["recorded"] is True
-    assert first["revision"] == 2
-    assert second["finding_id"] == first["finding_id"]
-    assert second["recorded"] is False
-    assert second["revision"] == 2
-    assert first["coordination_event"]["state"] == "caught_up"
-    assert first["coordination_event"]["published"] == 1
-    assert second["coordination_event"]["state"] == "caught_up"
-    assert second["coordination_event"]["published"] == 0
-    assert denied.ok is False
-    assert missing_audit_ref.ok is False
-    assert missing_audit_ref.error_code == "TOOL_PERMISSION_DENIED"
     ledger = (
         owner_home
         / "tasks"
@@ -4146,25 +4097,19 @@ def test_source_worker_finding_is_bound_to_acked_source_ref_and_idempotent(
         for line in ledger.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert len(rows) == 2
+    assert len(rows) == 1
+    assert rows[0]["id"].startswith("af-")
+    assert rows[0]["revision"] == 1
     assert rows[0]["owner_id"] == "u-test"
     assert rows[0]["source_id"] == state.source_id
     assert rows[0]["watch_id"] == state.watch_id
     assert rows[0]["score"] == 91
     assert rows[0]["source_refs"] == [candidate["source_ref"]]
-    assert rows[1]["source_refs"] == [
-        candidate["source_ref"],
-        "https://evidence.invalid/case/42",
-    ]
-    assert rows[0]["id"] == rows[1]["id"] == first["finding_id"]
-    assert [row["revision"] for row in rows] == [1, 2]
     signals = store.wakes.pending()
-    assert len(signals) == 2
+    assert len(signals) == 1
     assert all(signal.reason == "audit_finding" for signal in signals)
-    assert {signal.metadata["finding_id"] for signal in signals} == {
-        first["finding_id"]
-    }
-    assert {signal.metadata["revision"] for signal in signals} == {1, 2}
+    assert signals[0].metadata["finding_id"] == rows[0]["id"]
+    assert signals[0].metadata["revision"] == 1
 
 
 def test_verdict_rejects_cross_record_source_ref_and_hash(

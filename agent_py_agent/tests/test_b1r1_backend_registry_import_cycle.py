@@ -13,7 +13,6 @@ import pytest
 # 函数用途: 证明六个入口单独冷导入时不会触发设置与后端的循环导入。
 @pytest.mark.parametrize("module", [
     "agent_py_agent.agent.backends.base",
-    "agent_py_agent.agent.backends.registry",
     "agent_py_agent.agent.backends.http",
     "agent_py_agent.agent.backends.typesafe_decision",
     "agent_py_agent.agent.backends.vision_capability",
@@ -33,24 +32,3 @@ def test_backend_cold_import_does_not_cycle(module):
     )
     stderr_lines = result.stderr.splitlines()
     assert result.returncode == 0, stderr_lines[-1] if stderr_lines else f"exit code {result.returncode}"
-
-
-# LLM: 只触碰唯一测试键并在 finally 清理；不构造后端或改变其他注册项。
-# 函数用途: 核对登记、查找、名称快照和清理仍保持原有行为。
-def test_backend_registry_round_trip_preserves_constructor_identity():
-    from agent_py_agent.agent.backends import registry
-
-    # LLM: 作为不可执行的测试哨兵；任何提前构造都会使测试失败。
-    # 函数用途: 阻止登记和查找阶段偷偷执行后端构造器。
-    def constructor(config):
-        raise AssertionError("登记和查找不能执行后端构造器")
-
-    name = "b1r1-probe"
-    assert name not in registry.registered_backend_names()
-    try:
-        registry.register_backend(name, constructor)
-        assert registry.resolve_registered_backend(name) is constructor
-        assert name in registry.registered_backend_names()
-    finally:
-        registry._BACKENDS.pop(name, None)
-    assert name not in registry.registered_backend_names()

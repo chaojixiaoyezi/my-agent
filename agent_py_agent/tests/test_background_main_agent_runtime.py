@@ -4539,7 +4539,10 @@ def test_audit_finding_without_message_tool_delivery_stays_internal_and_retryabl
 def test_audit_finding_context_projects_exact_event_without_supervision_noise(
     tmp_path,
 ) -> None:
-    from agent_py_agent.agent.conversation.background_context import context_markdown
+    from agent_py_agent.agent.conversation.background_context import (
+        prepare_background_context,
+        render_background_context,
+    )
     from agent_py_agent.agent.conversation.runtime import (
         _AUDIT_FINDING_REPORT_PROMPT,
         BackgroundRunRequest,
@@ -4606,11 +4609,13 @@ def test_audit_finding_context_projects_exact_event_without_supervision_noise(
         },
     )
 
-    rendered = context_markdown(
-        agent=agent,
-        store=store,
-        thread=thread,
-        request=request,
+    rendered = render_background_context(
+        prepare_background_context(
+            agent=agent,
+            store=store,
+            thread=thread,
+            request=request,
+        )
     )
 
     assert "检测到命令执行并获得稳定回显" in rendered
@@ -5665,7 +5670,10 @@ def test_scheduled_continuation_keeps_direct_child_results_after_wakes_are_consu
     monkeypatch.setattr(context_budget, "DEFAULT_BACKGROUND_CONTEXT_BUDGET",
                         _replace(context_budget.DEFAULT_BACKGROUND_CONTEXT_BUDGET, max_string_chars=240))
 
-    from agent_py_agent.agent.conversation.background_context import context_markdown
+    from agent_py_agent.agent.conversation.background_context import (
+        prepare_background_context,
+        render_background_context,
+    )
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
 
     agent = SimpleAgent(
@@ -5750,21 +5758,23 @@ def test_scheduled_continuation_keeps_direct_child_results_after_wakes_are_consu
         }
     )
 
-    rendered = context_markdown(
-        agent=agent,
-        store=store,
-        thread=store.threads.load(thread.thread_id),
-        request=BackgroundRunRequest(
-            thread_id=thread.thread_id,
-            task_id="task-root",
-            reason="scheduled_progress_report",
-            wake_signal={
-                "wake_signal_id": "wake-progress",
-                "thread_id": thread.thread_id,
-                "root_task_id": "task-root",
-                "reason": "scheduled_progress_report",
-            },
-        ),
+    rendered = render_background_context(
+        prepare_background_context(
+            agent=agent,
+            store=store,
+            thread=store.threads.load(thread.thread_id),
+            request=BackgroundRunRequest(
+                thread_id=thread.thread_id,
+                task_id="task-root",
+                reason="scheduled_progress_report",
+                wake_signal={
+                    "wake_signal_id": "wake-progress",
+                    "thread_id": thread.thread_id,
+                    "root_task_id": "task-root",
+                    "reason": "scheduled_progress_report",
+                },
+            ),
+        )
     )
 
     assert "## Subagent Completion Inputs" in rendered

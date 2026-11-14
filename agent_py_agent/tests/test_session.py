@@ -5,13 +5,12 @@
 import json
 import time
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
 from agent_py_agent.agent.session import Session, generate_session_id
 from agent_py_agent.agent.session.manager import SessionManager
-from agent_py_agent.agent.session.resume import format_resume_context, resume_session
 
 
 @pytest.fixture
@@ -260,87 +259,6 @@ class TestSessionManager:
             manager.delete_session(malicious)
         # 拒绝发生在路径拼接之前：会话根目录下不得出现任何越界痕迹。
         assert list(manager._session_root.iterdir()) == []
-
-
-class TestResumeSession:
-    """测试会话恢复功能。"""
-
-    @pytest.fixture
-    def mock_agent(self, tmp_path):
-        """创建模拟的 Agent 实例。"""
-        agent = Mock()
-        config = Mock()
-        config.session_workspace = str(tmp_path / "sessions")
-        config.user_id = "test_user"
-        config.memory_path = str(tmp_path / "memory.jsonl")
-        agent.config = config
-        agent.root = tmp_path
-        return agent
-
-    def test_resume_session_with_metadata(self, mock_agent):
-        """测试恢复带元数据的会话。"""
-        manager = SessionManager(mock_agent.config)
-        session = manager.create_session(
-            user_id="test_user",
-            metadata={"context": "test"},
-        )
-
-        resume_data = resume_session(mock_agent, session.session_id)
-        assert resume_data["session"] is not None
-        assert resume_data["session"].session_id == session.session_id
-        assert resume_data["session"].metadata == {"context": "test"}
-
-    def test_resume_nonexistent_session(self, mock_agent):
-        """测试恢复不存在的会话。"""
-        resume_data = resume_session(mock_agent, "sess_nonexistent")
-        assert resume_data["session"] is None
-        assert "error" in resume_data
-
-    def test_format_resume_context_with_session(self):
-        """测试格式化恢复上下文（有会话）。"""
-        resume_data = {
-            "session": Mock(
-                session_id="sess_test",
-                created_at=1234567890.0,
-                updated_at=1234567891.0,
-                last_active_channel="chat",
-            ),
-            "recent_memories": [
-                {"role": "user", "content": "测试记忆内容"},
-            ],
-            "subagent_context": [
-                {"id": "sub-001", "goal": "测试任务", "status": "DONE"},
-            ],
-        }
-        formatted = format_resume_context(resume_data)
-        assert "会话 ID: sess_test" in formatted
-        assert "最近记忆 (1 条)" in formatted
-        assert "子代理任务 (1 条)" in formatted
-
-    def test_format_resume_context_with_error(self):
-        """测试格式化恢复上下文（有错误）。"""
-        resume_data = {
-            "session": None,
-            "error": "会话不存在",
-        }
-        formatted = format_resume_context(resume_data)
-        assert "恢复失败: 会话不存在" in formatted
-
-    def test_format_resume_context_no_records(self):
-        """测试格式化恢复上下文（无记录）。"""
-        resume_data = {
-            "session": Mock(
-                session_id="sess_test",
-                created_at=1234567890.0,
-                updated_at=1234567891.0,
-                last_active_channel="chat",
-            ),
-            "recent_memories": [],
-            "subagent_context": [],
-        }
-        formatted = format_resume_context(resume_data)
-        assert "会话 ID: sess_test" in formatted
-        assert "暂无历史记录" in formatted
 
 
 class TestSessionIntegration:

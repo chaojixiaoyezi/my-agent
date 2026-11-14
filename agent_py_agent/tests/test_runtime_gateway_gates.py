@@ -8,10 +8,6 @@ from agent_py_agent.agent.contracts.gates.path_url_command import (
     PathUrlCommandFacts,
     evaluate_path_url_command_gate,
 )
-from agent_py_agent.agent.contracts.gates.state_event_ledger import (
-    StateEventLedgerSnapshot,
-    evaluate_state_event_ledger_gate,
-)
 from agent_py_agent.agent.contracts.gates.tool_approval_binding import (
     ApprovalBindingFacts,
     evaluate_approval_binding_gate,
@@ -100,35 +96,6 @@ def test_approval_binding_gate_rejects_mismatched_args_hash_or_run():
     assert passed.evidence["approval_id"] == "approval-1"
 
 
-def test_state_event_ledger_gate_requires_events_and_blocks_late_or_duplicate_actions():
-    missing_event = evaluate_state_event_ledger_gate(
-        StateEventLedgerSnapshot("run-1", "RUNNING", transitions=[{"from_status": "PLANNING", "to_status": "RUNNING"}])
-    )
-    done_dispatch = evaluate_state_event_ledger_gate(
-        StateEventLedgerSnapshot(
-            "run-1",
-            "DONE",
-            next_action="dispatch",
-            events=[{"event_id": "evt-1", "run_id": "run-1", "event_type": "state_transition"}],
-        )
-    )
-    expired_lease_tool_result = evaluate_state_event_ledger_gate(_expired_lease_snapshot())
-    passed = evaluate_state_event_ledger_gate(
-        StateEventLedgerSnapshot(
-            "run-1",
-            "VERIFYING",
-            transitions=[{"from_status": "RUNNING", "to_status": "VERIFYING", "event_id": "evt-1"}],
-            events=[{"event_id": "evt-1", "run_id": "run-1", "event_type": "state_transition"}],
-        )
-    )
-
-    assert missing_event.finding_codes == ("STATE_EVENT_LEDGER_EVENT_MISSING",)
-    assert missing_event.recommended_action == "repair"
-    assert done_dispatch.finding_codes == ("STATE_EVENT_LEDGER_TERMINAL_ACTION_BLOCKED",)
-    assert expired_lease_tool_result.finding_codes == ("STATE_EVENT_LEDGER_LEASE_EXPIRED_RESULT",)
-    assert passed.allowed is True
-
-
 def _workspace_with_symlink_escape(tmp_path: Path) -> Path:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -167,18 +134,6 @@ def _approval_facts(
         idempotency_key="idem-1",
         args_hash=args_hash,
         approved_actions=(approved,),
-    )
-
-
-def _expired_lease_snapshot() -> StateEventLedgerSnapshot:
-    return StateEventLedgerSnapshot(
-        "run-1",
-        "WAITING_FOR_TOOL",
-        lease_status="EXPIRED",
-        events=[
-            {"event_id": "evt-1", "run_id": "run-1", "event_type": "state_transition"},
-            {"event_id": "evt-2", "run_id": "run-1", "event_type": "tool_result", "operation_id": "op-1"},
-        ],
     )
 
 

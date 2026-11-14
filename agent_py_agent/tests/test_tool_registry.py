@@ -2,6 +2,7 @@
 # 模块用途: 锁住紧凑工具回执、批量加载、弱信号与追加顺序。
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -15,10 +16,15 @@ from agent_py_agent.agent.tooling.models import (
     _score_keyword_token,
 )
 from agent_py_agent.agent.tooling.registry import (
+    ToolRegistry,
+    ToolRegistryParams,
     ToolSearchTool,
     _render_recommended_tools,
 )
-from agent_py_agent.tests._tool_runtime_harness import make_test_model_spec
+from agent_py_agent.tests._tool_runtime_harness import (
+    execute_registry_test_call,
+    make_test_model_spec,
+)
 
 
 # LLM: 每例独立临时 owner，使用产品装配但不发模型或网络请求。
@@ -26,8 +32,7 @@ from agent_py_agent.tests._tool_runtime_harness import make_test_model_spec
 @pytest.fixture
 def registry(tmp_path):
     config = AgentConfig(enable_tools=True, enable_subagents=True,
-                         memory_path=str(tmp_path / "memory.jsonl"),
-                         tool_default_deferral_enabled=True)
+                         memory_path=str(tmp_path / "memory.jsonl"))
     return SimpleAgent(config, str(tmp_path)).tools
 
 
@@ -190,3 +195,60 @@ def test_explicit_name_is_not_duplicated_in_weak_candidates(registry):
     assert result.result_envelope["tool_search"]["loaded_tool_names"] == ["weak_probe"]
     assert live["matched_count"] == 1
     assert not live["candidates"]
+
+
+def _dry_run_registry(root: Path) -> ToolRegistry:
+    return ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=root,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+            shell_tool_output_max_chars=200,
+            operation_store_required=False,
+        )
+    )
+
+
+def _controlled_exec_grant(root: Path) -> dict[str, object]:
+    return {
+        "grant_id": "grant-real-dry-run",
+        "request_id": "req-real-dry-run",
+        "run_id": "run-real-dry-run",
+        "command_allowlist": ["pwd"],
+        "path_scope": [str(root)],
+        "network_scope": [],
+        "output_budget": {"stdout_bytes": 200, "stderr_bytes": 200},
+        "risk_level": "low",
+    }
+
+
+def test_real_tool_dry_run_accepts_actual_read_only_and_dry_run_wrapper_results(tmp_path: Path) -> None:
+    (tmp_path / "input.txt").write_text("hello from real read_file wrapper\n", encoding="utf-8")
+    test_registry = _dry_run_registry(tmp_path)
+    read_result = execute_registry_test_call(
+        test_registry,
+        "read_file",
+        {"path": "input.txt"},
+        allowed_tools=["read_file"],
+    )
+    dry_run_result = execute_registry_test_call(
+        test_registry,
+        "controlled_exec",
+        {"command": "pwd", "apply": False, "cwd": "."},
+        allowed_tools=["controlled_exec"],
+        write_boundary={
+            "controlled_exec_grants": [
+                _controlled_exec_grant(tmp_path),
+            ]
+        },
+    )
+
+    assert read_result.ok is True
+    assert dry_run_result.ok is True

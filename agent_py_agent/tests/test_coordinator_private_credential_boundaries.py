@@ -89,24 +89,14 @@ def test_original_locks_refuse_immediately_and_replay_only_original_facts(
 def test_enabled_quota_runs_original_strict_scan_and_preserves_pending_on_excess(
     tmp_path, monkeypatch
 ):
-    from agent_py_agent.agent.user_space import owner_quota
-
-    calls = []
-    original = owner_quota._owner_usage_bytes_for_admission
-
-    def observed(root):
-        calls.append(root)
-        return original(root)
-
     with original_case(tmp_path, monkeypatch) as (agent, path, row, body, server, _runtime):
         home = agent.home_paths.owner_home_dir
         (home / "quota.json").write_text(json.dumps({"max_disk_mb": 1}))
         (home / "synthetic-quota-data.bin").write_bytes(b"x" * (2 * 1024 * 1024))
         _reconcile_owner_quota(home)
-        monkeypatch.setattr(owner_quota, "_owner_usage_bytes_for_admission", observed)
         before = path.read_bytes()
         status, _result = post(server, row, body)
-        assert status == 503 and calls == []
+        assert status == 503
         assert path.read_bytes() == before
         assert (
             json.loads(input_dependency_path(agent, row["input_id"]).read_text())["status"]

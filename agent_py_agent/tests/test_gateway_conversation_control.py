@@ -2727,18 +2727,23 @@ def test_selected_task_reuses_the_single_thread_history_without_guidance_copy(tm
             "metadata": {"gateway_request_id": "req-next"},
         }
     )
-    from agent_py_agent.agent.conversation.background_context import context_markdown
+    from agent_py_agent.agent.conversation.background_context import (
+        prepare_background_context,
+        render_background_context,
+    )
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
 
-    background_context = context_markdown(
-        agent=agent,
-        store=agent.conversation_store,
-        thread=thread,
-        request=BackgroundRunRequest(
-            thread_id=thread.thread_id,
-            task_id=link.task_id,
-            reason="scheduled_progress_report",
-        ),
+    background_context = render_background_context(
+        prepare_background_context(
+            agent=agent,
+            store=agent.conversation_store,
+            thread=thread,
+            request=BackgroundRunRequest(
+                thread_id=thread.thread_id,
+                task_id=link.task_id,
+                reason="scheduled_progress_report",
+            ),
+        )
     )
     assert first is not None and second is not None
     assert attrs["conversation_task_id"] == link.task_id

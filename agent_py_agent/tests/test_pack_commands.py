@@ -235,13 +235,29 @@ def test_gateway_logs_pack_commands_under_their_own_action_name():
 
 
 def test_view_says_whether_the_pack_runs_checkers(tmp_path, monkeypatch):
+    from agent_py_agent.tests.test_capability_verification_declaration import CHECKER, VERIFICATION
+
     agent = _agent(tmp_path, monkeypatch)
-    root = Path(agent.home_paths.owner_home_dir) / "runs" / "2026-10-06" / "learn" / "drama-text-a"
-    shutil.copytree(ROOT / "examples" / "capability-packages" / "drama-text-a", root)
-    declaration = json.loads((root / "declaration.json").read_text(encoding="utf-8"))
+    root = Path(agent.home_paths.owner_home_dir) / "runs" / "2026-10-06" / "learn" / "pack-with-checkers"
+    (root / "scripts").mkdir(parents=True)
+    (root / "CAPABILITY.md").write_text("# 通用能力包\n", encoding="utf-8")
+    (root / "scripts" / "check.py").write_bytes(CHECKER)
+    declaration = {
+        "plugin_id": "pack-with-checkers",
+        "version": "0.1.0",
+        "summary": "带检查程序的通用能力包",
+        "capability": {
+            "description": "内容能力验证",
+            "keywords": ["内容"],
+            "entry_document": "CAPABILITY.md",
+            "verification": VERIFICATION,
+        },
+        "files": [{"path": "CAPABILITY.md"}, {"path": "scripts/check.py"}],
+        "settings_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    }
     built = agent.tools.tools["package_build"].execute({"kind": "capability_pack", "source_dir": str(root),
                                                         "declaration": declaration, "origin": "仓库样例", "license": "自有"})
     body = json.loads(agent.tools.tools["package_install"].execute({"sha256": json.loads(built.output)["build"]["sha256"]}).output)
     assert _tui(agent, body["user_confirm_command"])["ok"]
-    view = _tui(agent, "/plugins#drama-text-a 查看")
+    view = _tui(agent, "/plugins#pack-with-checkers 查看")
     assert view["ok"] and "带检查程序：是" in view["message"], view

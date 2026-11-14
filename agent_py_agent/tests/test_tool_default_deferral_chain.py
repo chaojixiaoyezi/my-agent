@@ -75,10 +75,9 @@ class _DeferralWire:
                 "usage": {"prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020}}
 
 
-# 类用途: 一次链路用例的设置：开关、脚本化模型的出招序列、owner 身份（默认本机管理员）。
+# 类用途: 一次链路用例的设置：脚本化模型的出招序列、owner 身份（默认本机管理员）。
 @dataclass(frozen=True)
 class _Setup:
-    deferral: bool
     script: tuple = _SEARCH_THEN_CALL
     owner: dict = field(default_factory=dict)
 
@@ -86,7 +85,6 @@ class _Setup:
 # 函数用途: 搭一个只有一个会话的真实前台环境。
 def _chain(tmp_path, monkeypatch, setup: _Setup) -> tuple[RealChain, _DeferralWire]:
     config = _agent_config(tmp_path, **setup.owner)
-    config.tool_default_deferral_enabled = setup.deferral
     agent = SimpleAgent(config, tmp_path / "root")
     _select_scripted_model(agent, config)
     wire = _DeferralWire(setup.script)
@@ -104,7 +102,7 @@ _OWNERS = {
 
 @pytest.mark.parametrize("owner", sorted(_OWNERS))
 def test_deferred_tool_is_found_loaded_and_executed_in_one_search(tmp_path, monkeypatch, owner):
-    chain, wire = _chain(tmp_path, monkeypatch, _Setup(True, owner=_OWNERS[owner]))
+    chain, wire = _chain(tmp_path, monkeypatch, _Setup(owner=_OWNERS[owner]))
     chain.ask("A", _PROMPT)
 
     assert len(wire.calls) == 3, wire.calls
@@ -118,7 +116,7 @@ def test_deferred_tool_is_found_loaded_and_executed_in_one_search(tmp_path, monk
 
 
 def test_blind_call_of_a_deferred_tool_gets_its_schema_on_the_next_request(tmp_path, monkeypatch):
-    chain, wire = _chain(tmp_path, monkeypatch, _Setup(True, _BLIND_THEN_RETRY))
+    chain, wire = _chain(tmp_path, monkeypatch, _Setup(_BLIND_THEN_RETRY))
     chain.ask("A", _PROMPT)
 
     assert len(wire.calls) == 3, wire.calls

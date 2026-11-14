@@ -340,12 +340,6 @@ def test_manager_creates_work_order_files(tmp_path: Path):
     assert deps["dependencies"] == []
 
 
-def test_manager_does_not_parse_write_roots_from_natural_language():
-    import agent_py_agent.agent.subagents.manager as manager
-
-    assert not hasattr(manager, "_extract_write_dirs")
-
-
 def test_inherited_workspace_root_removes_only_equal_default_deny(tmp_path: Path):
     from agent_py_agent.agent.subagents.models import SubAgentTask
     from agent_py_agent.agent.subagents.services.base import _reconciled_forbidden_write_roots

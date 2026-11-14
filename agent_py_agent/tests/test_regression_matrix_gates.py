@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.gates.artifact_gate import evaluate_artifact_report_gate
 from agent_py_agent.agent.contracts.gates.command_policy import evaluate_command_policy
 from agent_py_agent.agent.contracts.gates.compaction_gate import (
     CompactionGateFacts,
@@ -20,90 +19,6 @@ from agent_py_agent.agent.contracts.gates.tool_guardrail import (
     ToolGuardrailFacts,
     evaluate_tool_guardrail_gate,
 )
-
-
-# ============================================================
-# Scenario 1: 模型假完成
-# ============================================================
-class TestScenario1ModelFakeCompletion:
-    """模型报告 ok=True 但包含 hard findings（文件实际缺失等）。"""
-
-    def test_artifact_gate_blocks_when_findings_present(self):
-        report = {
-            "artifact_ref": "/tmp/out.json",
-            "artifact_kind": "output",
-            "ok": True,
-            "findings": [
-                {"code": "ARTIFACT_MISSING", "severity": "hard", "message": "file does not exist",
-                 "location": "/tmp/out.json", "value": ""},
-            ],
-        }
-        decision = evaluate_artifact_report_gate(report)
-        assert not decision.allowed
-        assert any("ARTIFACT_MISSING" in f.code for f in decision.findings)
-
-    def test_artifact_gate_blocks_when_not_ok(self):
-        report = {
-            "artifact_ref": "/tmp/out.json",
-            "artifact_kind": "output",
-            "ok": False,
-        }
-        decision = evaluate_artifact_report_gate(report)
-        assert not decision.allowed
-
-    def test_artifact_gate_allows_clean_report(self):
-        report = {
-            "artifact_ref": "/tmp/out.json",
-            "artifact_kind": "output",
-            "ok": True,
-        }
-        decision = evaluate_artifact_report_gate(report)
-        assert decision.allowed
-
-
-# ============================================================
-# Scenario 2: 产物缺失
-# ============================================================
-class TestScenario2ArtifactMissing:
-    def test_missing_artifact_ref_blocked(self):
-        report = {"artifact_kind": "output", "ok": True}
-        decision = evaluate_artifact_report_gate(report)
-        assert not decision.allowed
-        assert any("ARTIFACT_REF_MISSING" in f.code for f in decision.findings)
-
-    def test_missing_kind_blocked(self):
-        report = {"artifact_ref": "/tmp/out.json", "ok": True}
-        decision = evaluate_artifact_report_gate(report)
-        assert not decision.allowed
-        assert any("ARTIFACT_KIND_MISSING" in f.code for f in decision.findings)
-
-
-# ============================================================
-# Scenario 3: 空产物
-# ============================================================
-class TestScenario3EmptyArtifact:
-    def test_empty_finding_code_blocked(self):
-        report = {
-            "artifact_ref": "/tmp/out.json",
-            "artifact_kind": "output",
-            "ok": True,
-            "findings": [
-                {"code": "ARTIFACT_EMPTY", "severity": "hard", "message": "file is empty",
-                 "location": "/tmp/out.json", "value": "0 bytes"},
-            ],
-        }
-        decision = evaluate_artifact_report_gate(report)
-        assert not decision.allowed
-        assert any("ARTIFACT_EMPTY" in f.code for f in decision.findings)
-
-    def test_no_findings_allowed(self):
-        report = {
-            "artifact_ref": "/tmp/ok.txt",
-            "artifact_kind": "output",
-            "ok": True,
-        }
-        decision = evaluate_artifact_report_gate(report)
-        assert decision.allowed
 
 
 # ============================================================

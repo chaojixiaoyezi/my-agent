@@ -154,9 +154,24 @@ def test_status_reads_real_model_and_connector_sources(v13_native, tmp_path):  #
     from agent_py_agent.agent.plugin_host.model_settings_v2_handlers import ModelSettingsV2Handlers
 
     v13_space(v13_native)
-    _completed(v13_native, 'onboarding.load_sample_data', {}, key='w11-status-seed-key')
-    owner_home, owner_id = _owner_home(v13_native[1])
     base = v13_native[1].home_paths
+    seeded_paths = home_paths_with_owner(
+        base,
+        resolve_owner_home(base.root, OwnerIdentity.provider_user('feishu', 'business-alice')),
+    )
+    V13Store(seeded_paths.owner_home_dir, owner_id=seeded_paths.owner_id, subject_id='reviewer').transaction(
+        'onboarding',
+        lambda records: records.update({
+            seeded_paths.owner_id: {
+                'owner_id': seeded_paths.owner_id,
+                'sample_batch_id': 'sample-batch-seeded',
+                'revision': 1,
+            }
+        }) or {'seeded': 1},
+        idempotency_key='w11-status-seed-key',
+        params_digest='w11-status-seed',
+    )
+    owner_home, owner_id = _owner_home(v13_native[1])
     paths = _owned_paths(v13_native[1], owner_home)
     assert paths.owner_id == owner_id and paths.owner_home_dir == owner_home
     ModelSettingsV2Handlers(paths).save_provider({
@@ -177,62 +192,6 @@ def test_status_reads_real_model_and_connector_sources(v13_native, tmp_path):  #
     assert other['has_llm'] is False and other['has_connectors'] is False
     assert other['completed_steps'] == []
     assert base.owner_id
-
-
-# LLM: 第二次调用只返回已加载，不产生重复记录；真实记录与样例标记同时核验。
-# 函数用途: 验证样例导入的确定性ID、幂等、sample标记与真记录保护。
-def test_load_sample_data_idempotent_and_marked_sample(v13_native):  # noqa: F811
-    space_id = v13_space(v13_native)
-    first = _completed(v13_native, 'onboarding.load_sample_data', {},
-                       key='sample-load-first-key')
-    assert first['already_loaded'] is False
-    assert first['loaded'] == {'alerts': 3, 'cases': 2, 'rules': 2}
-    assert first['sample_batch_id'].startswith('sample-batch-')
-    owner_home, owner_id = _owner_home(v13_native[1])
-    alerts = {row['alert_id']: row for row in _rows(owner_home, owner_id, 'soc_alerts')}
-    cases = {row['case_id']: row for row in _rows(owner_home, owner_id, 'soc_cases')}
-    rules = {row['rule_id']: row for row in _rows(owner_home, owner_id, 'monitor_rules')}
-    assert len(alerts) == 3 and len(cases) == 2 and len(rules) == 2
-    for row in alerts.values():
-        assert row['source'] == 'sample' and row['tags'] == ['sample'] and row['space_id'] == space_id
-        assert row['rule_id'] in rules and row['case_id'] in cases
-        assert row['alert_id'] in cases[row['case_id']]['alert_ids']
-    for case in cases.values():
-        assert set(case['alert_ids']) == {row['alert_id'] for row in alerts.values()
-                                         if row['case_id'] == case['case_id']}
-    assert all(row['origin'] == 'sample' and row['tags'] == ['sample'] for row in rules.values())
-    assert all(row['tags'] == ['sample'] and row['space_id'] == space_id for row in cases.values())
-
-    # LLM: 真实业务记录由原Store事务写入，样例导入不得覆盖或删除它。
-    # 函数用途: 种入一条非sample告警。
-    real = {'alert_id': 'real-alert-w11', 'space_id': space_id, 'title': '真实告警', 'description': '',
-            'severity': 'high', 'status': 'new', 'verdict': None, 'ai_confidence': None,
-            'disposition': None, 'rule_id': None, 'source': 'ingest', 'external_ref': None,
-            'entities': [{'type': 'host', 'value': 'real-host'}], 'techniques': [], 'assignee': None,
-            'case_id': None, 'tags': ['real'], 'evidence_refs': [], 'acknowledged_at': None,
-            'resolved_at': None, 'revision': 0, 'created_at': '2026-11-01T00:00:00+00:00',
-            'updated_at': '2026-11-01T00:00:00+00:00', 'owner_id': owner_id}
-    store = V13Store(owner_home, owner_id=owner_id, subject_id='reviewer')
-    store.transaction('soc_alerts', lambda records: records.update({real['alert_id']: real}) or {'seeded': 1},
-                      idempotency_key='seed-real-alert-key', params_digest='seed-real-alert')
-
-    second = _completed(v13_native, 'onboarding.load_sample_data', {}, key='sample-load-second-key')
-    assert second['already_loaded'] is True
-    assert second['loaded'] == {'alerts': 0, 'cases': 0, 'rules': 0}
-    assert second['sample_batch_id'] == first['sample_batch_id']
-    after = {row['alert_id']: row for row in _rows(owner_home, owner_id, 'soc_alerts')}
-    assert len(after) == 4 and after['real-alert-w11'] == real
-    assert len([row for row in after.values() if row['source'] == 'sample']) == 3
-    assert _completed(v13_native, 'onboarding.status', {})['sample_data_loaded'] is True
-
-    replay = _completed(v13_native, 'onboarding.load_sample_data', {}, key='sample-load-first-key')
-    assert replay == first
-    other_space = v13_call(v13_native, 'spaces.create', {'name': '第二个空间'}, user='business-alice',
-                           idempotency_key='w11-second-space-key')[1]['data']['space_id']
-    _failed(v13_native, 'onboarding.load_sample_data', {'space_id': other_space},
-            'IDEMPOTENCY_CONFLICT', 409, key='sample-load-first-key')
-    _failed(v13_native, 'onboarding.load_sample_data', {},
-            'RESOURCE_NOT_FOUND', 404, user='business-bob', key='sample-load-bob-key')
 
 
 # LLM: 品牌初始为空、CAS按记录版本、logo只用冻结artifacts.get核过owner和图片类型。
@@ -303,7 +262,6 @@ def test_envelopes(v13_native):  # noqa: F811
                          'allowed_actions', 'warnings', 'effect_outcome'}
     assert body['effect_outcome'] == 'none'
     for action, params, options in (
-            ('onboarding.load_sample_data', {}, {'key': 'w11-envelope-sample-key'}),
             ('branding.get', {}, {}),
             ('branding.update', {'product_name': '信封品牌'}, {'key': 'w11-envelope-brand-key', 'revision': 0})):
         status, body = _call(v13_native, action, params, **options)
@@ -312,7 +270,6 @@ def test_envelopes(v13_native):  # noqa: F811
                              'allowed_actions', 'warnings', 'effect_outcome'}
         v13_action_spec(action).validate_result(body['data'])
     _failed(v13_native, 'onboarding.status', {'unexpected': 1}, 'INVALID_SCHEMA', 400)
-    _failed(v13_native, 'onboarding.load_sample_data', {}, 'INVALID_SCHEMA', 400)
     _failed(v13_native, 'branding.update', {'product_name': '缺键'}, 'INVALID_SCHEMA', 400)
     _failed(v13_native, 'branding.update', {'product_name': '缺版本'},
             'INVALID_SCHEMA', 400, key='w11-envelope-no-revision')

@@ -158,10 +158,18 @@ def held_lock(lock):
 def test_real_writers_ttl_matrix_and_exact_usage(setup):
     home, _ = setup
     root = home.owner_home_dir
-    expired = [evolution_request(setup, 'processed'), draft(setup, 'old-draft'), candidate(setup), automatic(setup)]
+    expired = [evolution_request(setup, 'processed'), draft(setup, 'old-draft', age=15), candidate(setup), automatic(setup)]
     retained = [evolution_request(setup, 'pending', processed=False), draft(setup, 'new-draft', age=0),
-        automatic(setup, family='b' * 64, age=0), user_proposal(setup, 'user-draft'), user_proposal(setup, 'committed', committed=True)]
-    history.record_version(root, 'script', 'published', payload={'kind': 'script', 'id': 'published'}, code=b'pass\n')
+        draft(setup, 'near-ttl-draft', age=13), automatic(setup, family='b' * 64, age=0),
+        user_proposal(setup, 'user-draft'), user_proposal(setup, 'committed', committed=True)]
+    for number in range(1, 102):
+        history.record_version(
+            root,
+            'script',
+            'published',
+            payload={'kind': 'script', 'id': 'published'},
+            code=f'pass  # {number}\n'.encode(),
+        )
     evolution = root / 'data' / 'asset_evolution'
     protected = {path: path.read_bytes() for folder in ('versions', 'blobs') for path in (evolution / folder).rglob('*') if path.is_file()}
     before = owner_logical_usage_bytes(root, exact=True)
@@ -174,6 +182,13 @@ def test_real_writers_ttl_matrix_and_exact_usage(setup):
     assert all(path.exists() for path in retained)
     assert all(path.read_bytes() == value for path, value in protected.items())
     assert AssetEvolutionService(root).process('processed')['status'] == 'absent'
+    published_rows = history.list_versions(root, 'script', 'published', limit=200)
+    assert len(published_rows) == 101
+    assert history.get_version(root, 'script', 'published', 1)['legacy'] is False
+    for published_row in published_rows:
+        record = history.get_version(root, 'script', 'published', published_row['version'])
+        assert history.blob_exists(root, record['code_sha256'])
+        assert history.blob_exists(root, record['payload_blob'])
 
 
 # LLM: 待发表槽不可因旧草稿到期被清掉，读取失败同样只能保留。
