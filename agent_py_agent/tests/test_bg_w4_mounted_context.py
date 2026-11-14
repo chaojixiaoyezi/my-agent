@@ -34,7 +34,7 @@ def agent(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     monkeypatch.setenv('MY_AGENT_HOME', str(home))
     host = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(home), memory_path='memory.jsonl',
-        execution_mode='local_unmanaged'), tmp_path / 'workspace')
+        orphan_supervision_interval_seconds=0), tmp_path / 'workspace')
     monkeypatch.setattr(host, 'run', lambda *a, **k: pytest.fail('挂载能力解析不能调用模型'))
     return host
 
@@ -42,8 +42,12 @@ def agent(tmp_path, monkeypatch):
 def _invoke(agent, action, params=None, **options):
     if 'idempotency_key' in options:
         options['idempotency_key'] = 'bg-w4-mounted-' + options['idempotency_key']
+    current = getattr(agent, '_current_run_params', None)
+    run_id = getattr(current, 'run_id', '') or 'test-run'
+    attempt_id = getattr(current, 'attempt_id', '') or 'test-attempt'
     outcome = execute_registry_test_call(agent.tools, 'business_' + action.replace('.', '_'),
-        {'action': action, 'request_id': 'bg-w4', 'params': params or {}, **options}, call_id='bg-w4-' + uuid4().hex)
+        {'action': action, 'request_id': 'bg-w4', 'params': params or {}, **options},
+        run_id=run_id, attempt_id=attempt_id, register_with=agent, call_id='bg-w4-' + uuid4().hex)
     return outcome, json.loads(outcome.output)
 
 
@@ -55,7 +59,15 @@ def _call(agent, action, params=None, **options):
 
 def _task_turn(agent, task):
     context = BusinessExecutionContext.from_dict(task.metadata['business_context'])
-    agent._current_run_params = RunParams(request_id='turn-' + uuid4().hex,
+    run_id = 'turn-run-' + uuid4().hex
+    proof = agent.subagents.runtime_db.record_run_creation(
+        owner_id=agent.home_paths.owner_id,
+        run_id=run_id,
+        thread_id=task.target_thread_id,
+        task_run_metadata={'business_context': context.to_dict(), 'session_task_ref': task.task_id},
+    )
+    agent._current_run_params = RunParams(run_id=run_id, attempt_id=proof['attempt_id'],
+        request_id='turn-' + uuid4().hex,
         task_attributes={'conversation_thread_id': task.target_thread_id}, business_context=context)
     return context
 
@@ -114,11 +126,8 @@ def test_space_less_business_task_keeps_plain_routing(agent, monkeypatch):
     worker = _call(agent, 'background_agents.create', {'name': '未分配', 'space_id': None}, idempotency_key='nospace')
     task_id = _call(agent, 'tasks.assign', {'agent_id': worker['agent']['agent_id'], 'space_id': None,
         'instruction': '随便看看'}, idempotency_key='nospace-assign')['task_id']
-    context = BusinessExecutionContext.from_dict(
-        agent.conversation_store.session_tasks.require(task_id).metadata['business_context'])
+    context = _task_turn(agent, agent.conversation_store.session_tasks.require(task_id))
     assert context.space_id is None
-    agent._current_run_params = RunParams(request_id='turn-2', task_attributes={'conversation_thread_id': worker['agent']['agent_id']},
-        business_context=context)
     assert business_context_for_host(agent) is None
     monkeypatch.setattr(business_capabilities, 'resolve_business_capabilities',
                         lambda **_: pytest.fail('无空间上下文不能进入挂载解析'))

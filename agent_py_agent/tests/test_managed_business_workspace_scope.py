@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core.run_task_workspace_writer import _primary_workspace_root
+from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+    _now_iso,
+    _primary_workspace_root,
+)
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
 from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
 from agent_py_agent.tests.test_tool_gateway_contract import _execute, _registry
@@ -12,9 +15,10 @@ from agent_py_agent.tests.test_tool_gateway_contract import _execute, _registry
 
 def case(tmp_path, task='order-a', space='space-a', *, explicit=None, source='background_main_agent', child=False):
     owner = tmp_path / 'owners/local/main'
-    work = owner / 'tasks/2026-11-13' / task / 'work'
+    day = _now_iso()[:10]
+    work = owner / 'tasks' / day / task / 'work'
     output = work.parent / 'output'
-    internal = owner / 'runs/2026-11-13' / task
+    internal = owner / 'runs' / day / task
     for path in (work, output, internal / 'work', internal / 'output'):
         path.mkdir(parents=True, exist_ok=True)
     registry = _registry(owner)

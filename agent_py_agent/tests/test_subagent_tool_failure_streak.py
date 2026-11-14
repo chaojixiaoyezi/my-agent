@@ -160,7 +160,7 @@ def _child_tool_call(manager, child, index: int, outcome: dict):
 
 
 def _child_node(manager, child):
-    payload = json.loads(ListAgentsTool(SimpleNamespace(subagents=manager)).execute({}).output)
+    payload = json.loads(ListAgentsTool(SimpleNamespace(root=manager.workspace, subagents=manager)).execute({}).output)
     return next(node for node in payload["nodes"] if node["run_id"] == child.id), payload
 
 

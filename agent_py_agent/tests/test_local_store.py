@@ -648,13 +648,13 @@ def _b2_pending_ids(store):
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_failed_rewrite_recovers_without_new_db_deletions(tmp_path, monkeypatch, coordinator):
     # Cat3-R4：不再走旧重写失败/恢复链；重开仍只维护 SQL，活动文件原样保留。
-    from agent_py_agent.agent.local_storage import maintenance
+    from agent_py_agent.agent.common import json_io
 
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     original = store.events_path.read_bytes()
     def fail(*args, **kwargs):
         raise OSError("injected rewrite failure")
-    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
+    monkeypatch.setattr(json_io, "write_private_text_file_atomic_unlocked", fail)
     with scope():
         assert store.prune_events(before=50, keep_last=2, max_delete=3)["deleted_db"] == 3
         store = LocalStore(store.db_path, coordinator_io=coordinator)
@@ -978,7 +978,7 @@ def test_prune_events_preserves_invalid_utf8_inside_json_string_even_when_event_
     # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     tmp_path, monkeypatch, coordinator, patched_writer, ending,
 ):
-    from agent_py_agent.agent.local_storage import maintenance
+    from agent_py_agent.agent.common import json_io
 
     store, events, scope = _perf_e_event_store(tmp_path, coordinator)
     original = store.events_path.read_bytes().splitlines(keepends=True)
@@ -987,7 +987,7 @@ def test_prune_events_preserves_invalid_utf8_inside_json_string_even_when_event_
         handle.write(bad)
     captured = []
     if patched_writer:
-        writer = maintenance.write_private_text_file_atomic_unlocked
+        writer = json_io.write_private_text_file_atomic_unlocked
 
         # LLM: 包装原writer保留其真实写入与C参数，不替代被测的过滤过程。
         # 函数用途: 核对兼容text writer收到的内容仍含完整坏字节。
@@ -995,7 +995,7 @@ def test_prune_events_preserves_invalid_utf8_inside_json_string_even_when_event_
             captured.append(content.encode("utf-8", errors="surrogateescape"))
             return writer(path, content, **kwargs)
 
-        monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", capture)
+        monkeypatch.setattr(json_io, "write_private_text_file_atomic_unlocked", capture)
     with scope():
         result = store.prune_events(before=50, keep_last=2, max_delete=1)
         assert events[0].event_id not in {row.event_id for row in store.timeline()}

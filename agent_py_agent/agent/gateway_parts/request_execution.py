@@ -781,6 +781,8 @@ def _run_gateway_turn_with_conversation_compact(
         run_params.capability_presentation_evaluated = presentation_evaluated
         run_params.capability_presentation_turn_id = str(request.get("execution_attempt_id") or context.request_id)
         run_params.capability_presentation_callback = retain_presentation
+        run_params.capability_presentation_observer = partial(
+            request_binding.record_capability_presentation_observation, context)
         from ..conversation.bot_tool_policy import BotExecutionGuard, bot_execution_scope
 
         if isinstance(run_params, _BotGatewayRunParams) and bot_guard is None:

@@ -167,7 +167,7 @@ def test_oversized_message_truncation_without_result_limit_exceeded(test_env):
     assert len(result["items"]) == 1
     item = result["items"][0]
 
-    # Wire schema enforcement: exactly 9 MessageView keys, additionalProperties: False
+    # Wire schema enforcement: exact 13 MessageView keys, additionalProperties: False
     expected_keys = {
         "message_id",
         "thread_id",
@@ -178,8 +178,12 @@ def test_oversized_message_truncation_without_result_limit_exceeded(test_env):
         "occurred_at",
         "source",
         "artifact_refs",
+        "association_coverage",
+        "association_reason",
+        "execution_refs",
+        "input_ref",
     }
-    assert set(item.keys()) == expected_keys, f"MessageView must match exact 9 keys, got {set(item.keys())}"
+    assert set(item.keys()) == expected_keys, f"MessageView must match exact 13 keys, got {set(item.keys())}"
 
     # Text length MUST be <= 262144
     assert len(item["text"]) <= 262144
@@ -273,7 +277,7 @@ def test_structured_tui_blocks_and_pagination_prepend(monkeypatch):
     notice_text = active_runtime.notice()
     assert "unknown" in notice_text
     assert "DATA_CORRUPTED" in notice_text
-    assert "Ctrl+G" in notice_text
+    assert "/history 重试" in notice_text
     assert active_runtime.notice_kind() == "warning"
 
 

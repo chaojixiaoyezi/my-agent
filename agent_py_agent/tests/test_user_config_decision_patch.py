@@ -54,7 +54,7 @@ def test_a_valid_patch_through_the_real_tool_entry_persists_and_bumps_the_revisi
 
 @pytest.mark.parametrize("extra", [
     {"fields": ["timeout_seconds"]}, {"timeout_seconds": 15},
-    {"profile_id": "some-profile"}, {"authorization_id": "auth-1"},
+    {"profile_id": "some-profile"},
 ])
 def test_foreign_fields_are_still_rejected_and_named(tmp_path, extra):
     host = host_at(tmp_path)

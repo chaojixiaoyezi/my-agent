@@ -8,6 +8,10 @@ from uuid import uuid4
 from ..chat_client_context import post_gateway_json
 
 
+def _reset_generation(runtime_obj) -> int:
+    return getattr(runtime_obj, "conversation_reset_generation", 0)
+
+
 def start_background_approval_observation(agent, navigation, stop_event):
     def selected():
         snapshot = navigation.snapshot()
@@ -15,7 +19,7 @@ def start_background_approval_observation(agent, navigation, stop_event):
 
     def observe():
         current, view, runtime, next_read = ('', ''), None, None, 0.0
-        root_generation = navigation.root_runtime.conversation_reset_generation
+        root_generation = _reset_generation(navigation.root_runtime)
 
         def close():
             nonlocal view, runtime
@@ -32,7 +36,7 @@ def start_background_approval_observation(agent, navigation, stop_event):
         try:
             while not stop_event.is_set():
                 target = selected()
-                observed_generation = navigation.root_runtime.conversation_reset_generation
+                observed_generation = _reset_generation(navigation.root_runtime)
                 if observed_generation != root_generation:
                     close()
                     current, root_generation = target, observed_generation
@@ -45,14 +49,14 @@ def start_background_approval_observation(agent, navigation, stop_event):
                         runtime = navigation.root_runtime
                 if view is not None and time.monotonic() >= next_read:
                     frozen, target_runtime, target_key = dict(view), runtime, current
-                    generation = target_runtime.conversation_reset_generation
+                    generation = _reset_generation(target_runtime)
                     source_generation = root_generation
                     status, result = post_gateway_json(agent, '/client/agent-approval-view', {
                         'conversation_id': navigation.root_runtime.session_id,
                         'operation': 'observe', 'view': frozen}, timeout=5)
                     next_read = time.monotonic() + 5
-                    if (selected() != target_key or generation != target_runtime.conversation_reset_generation
-                            or source_generation != navigation.root_runtime.conversation_reset_generation):
+                    if (selected() != target_key or generation != _reset_generation(target_runtime)
+                            or source_generation != _reset_generation(navigation.root_runtime)):
                         continue
                     if status != 200 or not isinstance(result, dict) or result.get('ok') is not True:
                         target_runtime.sync_agent_permission_requests([], decision_writer=lambda *_: {'ok': False},
@@ -65,8 +69,8 @@ def start_background_approval_observation(agent, navigation, stop_event):
                                    original_generation=generation, original_source_generation=source_generation):
                             # 离开/重入同名页也有不同view；迟到按钮不能借新界面复活。
                             if (selected() != key or view != original or runtime is not original_runtime
-                                    or original_generation != original_runtime.conversation_reset_generation
-                                    or original_source_generation != navigation.root_runtime.conversation_reset_generation):
+                                    or original_generation != _reset_generation(original_runtime)
+                                    or original_source_generation != _reset_generation(navigation.root_runtime)):
                                 return {'ok': False, 'error_code': 'BACKGROUND_APPROVAL_VIEW_INACTIVE'}
                             _, receipt = post_gateway_json(agent, '/client/agent-permission', {
                                 'conversation_id': navigation.root_runtime.session_id,

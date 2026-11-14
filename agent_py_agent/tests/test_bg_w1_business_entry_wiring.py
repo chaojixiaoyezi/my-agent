@@ -35,7 +35,7 @@ def agent(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     monkeypatch.setenv('MY_AGENT_HOME', str(home))
     host = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(home), memory_path='memory.jsonl',
-        execution_mode='local_unmanaged'), tmp_path / 'workspace')
+        orphan_supervision_interval_seconds=0), tmp_path / 'workspace')
     monkeypatch.setattr(host, 'run', lambda *a, **k: pytest.fail('业务接线不能调用模型'))
     return host
 
@@ -51,8 +51,11 @@ def _call(agent, action, params=None, **options):
     if 'idempotency_key' in options:
         options['idempotency_key'] = 'bg-w1-entry-' + options['idempotency_key']
     request = {'action': action, 'request_id': 'bg-w1', 'params': params or {}, **options}
+    current = getattr(agent, '_current_run_params', None)
+    run_id = getattr(current, 'run_id', '') or 'test-run'
+    attempt_id = getattr(current, 'attempt_id', '') or 'test-attempt'
     outcome = execute_registry_test_call(agent.tools, 'business_' + action.replace('.', '_'), request,
-        call_id='bg-w1-' + uuid4().hex)
+        run_id=run_id, attempt_id=attempt_id, register_with=agent, call_id='bg-w1-' + uuid4().hex)
     return outcome, (json.loads(outcome.output) if outcome.output.startswith('{') else {})
 
 
@@ -105,7 +108,7 @@ def test_http_business_read_uses_selected_conversation_scope(agent):
     ('追问后台任务进度', 'business_tasks_follow_up'),
 ])
 def test_task_dispatch_words_find_business_task_tools(agent, query, expected):
-    found = execute_registry_test_call(agent.tools, 'tool_search', {'query': query, 'limit': 5})
+    found = execute_registry_test_call(agent.tools, 'tool_search', {'query': query, 'limit': 5}, register_with=agent)
     assert found.ok, found.output
     assert found.metadata['handler_details']['tool_search']['loaded_tool_names'][0] == expected, found.output
     spec = agent.tools.tools[expected].model_spec
@@ -126,7 +129,18 @@ def test_self_map_business_section_lists_task_entry(agent):
 
 
 def _background_turn(agent, thread_id, context, request_id='bg-turn-1'):
-    agent._current_run_params = RunParams(request_id=request_id, task_attributes={'conversation_thread_id': thread_id},
+    run_id, attempt_id = '', ''
+    if context is not None:
+        run_id = 'bg-run-' + uuid4().hex
+        proof = agent.subagents.runtime_db.record_run_creation(
+            owner_id=agent.home_paths.owner_id,
+            run_id=run_id,
+            thread_id=thread_id,
+            task_run_metadata={'business_context': context.to_dict(), 'session_task_ref': context.task_id},
+        )
+        attempt_id = proof['attempt_id']
+    agent._current_run_params = RunParams(run_id=run_id, attempt_id=attempt_id,
+        request_id=request_id, task_attributes={'conversation_thread_id': thread_id},
         business_context=context)
 
 

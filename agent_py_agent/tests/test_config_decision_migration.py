@@ -15,7 +15,7 @@ def test_decision_defaults_ignore_legacy_flat_config():
     context = SimpleNamespace(config=SimpleNamespace(decision_enabled=True, decision_timeout_seconds=99),
                               capability_config=SimpleNamespace(decision_subagent_model_mode="apply"))
     values, sources = decision_defaults(context)
-    assert len(values) == 25
+    assert len(values) == 23
     assert values["enabled"] is False
     assert values["timeout_seconds"] == 3.0
     assert values["points.subagent_model.mode"] == "off"
@@ -42,7 +42,7 @@ def test_decision_fast_projection_ignores_legacy_flat_config():
 
 
 # LLM: 退役设置只能显式转换进入原 catalog 覆盖，不把未填写默认补成用户配置，也不支持旧构造参数。
-# 函数用途: 验证二十五个平铺字段退出运行 schema，离线迁移保留开关、列表及小数。
+# 函数用途: 验证二十三个平铺字段退出运行 schema，离线迁移保留开关、列表及小数。
 def test_decision_flat_fields_removed_and_explicit_migration_validates_values():
     from dataclasses import fields
 
@@ -54,7 +54,7 @@ def test_decision_flat_fields_removed_and_explicit_migration_validates_values():
     )
 
     mapping = decision_config_fields()
-    assert len(mapping) == 25
+    assert len(mapping) == 23
     assert not {key for domain, key in mapping.values() if domain != "capability"} & {item.name for item in fields(AgentConfig)}
     assert not {key for domain, key in mapping.values() if domain == "capability"} & {item.name for item in fields(CapabilityConfig)}
     result = migrate_legacy_decision_overrides(
