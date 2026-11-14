@@ -2,8 +2,11 @@
 # 模块用途: 将未执行的旧工具请求转换为规范输入，不重执行完成历史。
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
+from types import MappingProxyType
+from typing import Any
 
 from ..contracts.error_taxonomy import error_contract
 
@@ -109,3 +112,204 @@ def _create_v1(values):
         output.append({**defaults, **item})
     summary = values.get("goal")
     return {**({"batch_summary": summary} if summary else {}), "items": output}
+
+
+# 冻结的 105 个业务动作到目标工具映射（40 space + 26 execution + 38 activity + 1 独立人工确认工具）。
+_BUSINESS_DOMAIN_ACTIONS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "business_space": (
+        "approvals.decide",
+        "approvals.get",
+        "approvals.list",
+        "assets.get",
+        "assets.list",
+        "assets.register",
+        "assets.unlink",
+        "assets.versions.add",
+        "assets.versions.list",
+        "controllers.ensure",
+        "controllers.get",
+        "interfaces.bind",
+        "interfaces.get",
+        "interfaces.list",
+        "interfaces.resolve",
+        "interfaces.unbind",
+        "interfaces.update",
+        "model_profiles.list",
+        "permissions.get",
+        "policies.apply",
+        "policies.get",
+        "policies.preview",
+        "sessions.space.get",
+        "sessions.space.set",
+        "spaces.archive",
+        "spaces.capabilities.resolve",
+        "spaces.create",
+        "spaces.get",
+        "spaces.list",
+        "spaces.packages.attach",
+        "spaces.packages.catalog",
+        "spaces.packages.detach",
+        "spaces.packages.list",
+        "spaces.packages.preview",
+        "spaces.packages.reorder",
+        "spaces.packages.set",
+        "spaces.restore",
+        "spaces.update",
+        "spaces.usage.list",
+        "system.capabilities",
+    ),
+    "business_execution": (
+        "agent_tree.get",
+        "background_agents.create",
+        "background_agents.get",
+        "background_agents.list",
+        "background_agents.messages.send",
+        "background_agents.model.get",
+        "background_agents.model.set",
+        "background_agents.restore",
+        "background_agents.resume",
+        "background_agents.retire",
+        "background_agents.suspend",
+        "background_agents.update",
+        "executions.cancel",
+        "executions.get",
+        "executions.list",
+        "messages.list",
+        "subagents.cancel",
+        "subagents.get",
+        "subagents.list",
+        "subagents.messages.send",
+        "tasks.assign",
+        "tasks.cancel",
+        "tasks.follow_up",
+        "tasks.get",
+        "tasks.list",
+        "tasks.submit",
+    ),
+    "business_activity": (
+        "artifacts.get",
+        "artifacts.list",
+        "changes.get",
+        "events.list",
+        "logs.read",
+        "operations.get",
+        "subscriptions.create",
+        "subscriptions.get",
+        "subscriptions.list",
+        "subscriptions.pause",
+        "subscriptions.remove",
+        "subscriptions.resume",
+        "subscriptions.update",
+        "tool_calls.get",
+        "tool_calls.list",
+        "usage.get",
+        "workflow_runs.cancel",
+        "workflow_runs.get",
+        "workflow_runs.list",
+        "workflow_runs.resume",
+        "workflows.cleanup.policy.get",
+        "workflows.cleanup.policy.set",
+        "workflows.cleanup.preview",
+        "workflows.cleanup.run",
+        "workflows.create",
+        "workflows.disable",
+        "workflows.enable",
+        "workflows.get",
+        "workflows.health.get",
+        "workflows.list",
+        "workflows.preview",
+        "workflows.protection.set",
+        "workflows.recycle",
+        "workflows.restore",
+        "workflows.run",
+        "workflows.scope.get",
+        "workflows.scope.set",
+        "workflows.update",
+    ),
+    "business_assets_versions_accept": (
+        "assets.versions.accept",
+    ),
+})
+
+_BUSINESS_ACTION_TO_TOOL: Mapping[str, str] = MappingProxyType({
+    action: target
+    for target, actions in _BUSINESS_DOMAIN_ACTIONS.items()
+    for action in actions
+})
+
+_RETIRED_TOOL_ALIASES: Mapping[str, tuple[str, str]] = MappingProxyType({
+    f"business_{action.replace('.', '_')}": (target, action)
+    for target, actions in _BUSINESS_DOMAIN_ACTIONS.items()
+    if target != "business_assets_versions_accept"
+    for action in actions
+})
+
+
+def business_domain_actions() -> Mapping[str, tuple[str, ...]]:
+    """返回冻结的业务域动作全集映射。"""
+    return _BUSINESS_DOMAIN_ACTIONS
+
+
+def business_domain_tool(action: str) -> str:
+    """按精确冻结表返回业务动作归属的规范工具名，不做近似匹配或自然语言推断。"""
+    if not isinstance(action, str):
+        raise ValueError("业务动作必须是字符串")
+    target = _BUSINESS_ACTION_TO_TOOL.get(action)
+    if target is None:
+        raise ValueError(f"未知业务动作: {action}")
+    return target
+
+
+def retired_tool_aliases() -> Mapping[str, tuple[str, str]]:
+    """返回不可变的 104 个退役业务叶子工具别名映射：legacy_name -> (target, action)。"""
+    return _RETIRED_TOOL_ALIASES
+
+
+def decode_retired_tool_call(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    available: frozenset[str],
+) -> tuple[str, dict[str, Any], str] | None:
+    """仅当原名称不在当前已注册可用集合时，按显式退役表转换未执行调用。"""
+    if not isinstance(name, str) or not isinstance(arguments, dict) or not isinstance(available, (frozenset, set)):
+        raise ValueError("无效退役工具调用输入")
+    if name in available:
+        return None
+    alias = _RETIRED_TOOL_ALIASES.get(name)
+    if alias is None:
+        return None
+    target, expected_action = alias
+    if "action" in arguments:
+        supplied = arguments["action"]
+        if not isinstance(supplied, str) or supplied != expected_action:
+            raise ValueError(f"退役工具 {name} 动作冲突: 期望 {expected_action}")
+    decoded = deepcopy(arguments)
+    decoded["action"] = expected_action
+    return target, decoded, expected_action
+
+
+def dead_business_spaces_redirect(arguments: object) -> dict[str, str]:
+    """为已退役的旧聚合工具 business_spaces 生成不执行的结构化迁移指引。"""
+    raw_action = arguments.get("action") if isinstance(arguments, dict) else None
+    action = raw_action.strip() if isinstance(raw_action, str) else ""
+    target = _BUSINESS_ACTION_TO_TOOL.get(action) if action else None
+    if target is not None:
+        return {
+            "retired_tool": "business_spaces",
+            "action": action,
+            "target_tool": target,
+            "next_action": (
+                f"business_spaces 已退役且与现行操作回执身份不兼容，本次未执行；"
+                f"请先用 tool_search 加载 {target}，再以 {target}(action=\"{action}\") 发起新调用。"
+            ),
+        }
+    return {
+        "retired_tool": "business_spaces",
+        "target_tools": "business_space,business_execution,business_activity,business_assets_versions_accept",
+        "next_action": (
+            "business_spaces 已退役且本次未执行；请按动作改用 business_space、"
+            "business_execution、business_activity 或独立工具 business_assets_versions_accept，"
+            "调用前先通过 tool_search 加载目标工具。"
+        ),
+    }

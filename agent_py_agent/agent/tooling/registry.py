@@ -21,6 +21,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Collection
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -54,10 +55,17 @@ from .models import (
     ToolRuntimePolicy,
     ToolRuntimeSnapshot,
 )
-from .registry_auth import CATALOG_ONLY_TOOL_GRANT, allowed_tool_set, snapshot_search_can_load
+from .registry_auth import (
+    CATALOG_ONLY_TOOL_GRANT,
+    action_ceilings,
+    allowed_tool_set,
+    normalize_tool_grants,
+    snapshot_search_can_load,
+)
 from .registry_bootstrap import build_tool_retriever, register_base_tools
 from .registry_workspace import effective_registry_cwd
 from .runtime_contracts import ToolCall, ToolResult
+from .versioned_input_decoder import dead_business_spaces_redirect, retired_tool_aliases
 
 if TYPE_CHECKING:
     from ..user_space.owner_resolver import OwnerHomeResult
@@ -78,6 +86,9 @@ _MCP_BORROW_WORKER_LOCK = threading.Lock()
 _MCP_BORROW_WORKER: threading.Thread | None = None
 _TOOL_PROJECTION_INIT_LOCK = threading.Lock()
 _TOOL_PROJECTION_MAX_SNAPSHOTS = 8
+_NARROWED_MODEL_SPEC_LOCK = threading.Lock()
+_NARROWED_MODEL_SPEC_CACHE: OrderedDict[tuple[str, str, tuple[str, ...]], ToolModelSpec] = OrderedDict()
+_NARROWED_MODEL_SPEC_MAX = 128
 
 
 # LLM: GC only invokes the reentrant C SimpleQueue.put; one shared daemon does lock-taking/IO at a safe execution point.
@@ -271,7 +282,7 @@ def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
                   if getattr(type(tool), "hidden_when_unavailable", False) is True
                   and name not in snapshot.available_tool_names}
         payload["allowed_tools"] = [name for name in payload["allowed_tools"]
-                                    if name != CATALOG_ONLY_TOOL_GRANT and name not in hidden]
+                                    if ":" not in name and name not in hidden]
     payload["self_context"] = self_context
     payload["permission_mode"] = self_context["permissions"]["mode"]
     payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
@@ -367,9 +378,17 @@ class ToolSearchTool(BaseTool):
     ) -> ToolHandlerOutcome:
         action = params.get("action", "search")
         current = snapshot.runtime("tool_search")
-        if (current is not None and current.model_spec.input_schema.get("properties", {}).get("action", {}).get("enum") == ["catalog"]
-                and action != "catalog"):
+        action_enum = (
+            current.model_spec.input_schema.get("properties", {}).get("action", {}).get("enum")
+            if current is not None
+            else None
+        )
+        if action_enum == ["catalog"] and action != "catalog":
             return _tool_search_invalid_arguments("旧目录授权只允许catalog，不允许搜索或加载")
+        if isinstance(action_enum, list) and action not in action_enum:
+            return _tool_search_invalid_arguments(
+                f"当前工具发现授权只允许动作: {', '.join(str(item) for item in action_enum)}"
+            )
         if action == "catalog":
             if set(params) != {"action"}:
                 return _tool_search_invalid_arguments("catalog只接受action，不接受搜索参数")
@@ -426,9 +445,14 @@ def _search_deferred_tool_result(
     requested = list(dict.fromkeys(names or []))
     exact = snapshot.runtime(query) if query else None
     unavailable_names = {name for name, _code, _reason in snapshot.unavailable_tools}
-    if exact is not None or query in unavailable_names:
+    aliases = retired_tool_aliases()
+    if exact is not None or query in unavailable_names or query in aliases or query == "business_spaces":
         requested = list(dict.fromkeys([*requested, query]))
-    specs, not_found, unavailable = _resolve_tool_search_names(registry, snapshot, requested)
+    specs, not_found, unavailable, renamed_aliases = _resolve_tool_search_names(
+        registry,
+        snapshot,
+        requested,
+    )
     candidates = []
     if query and query not in requested:
         for spec, score in _deferred_tool_search_hits(registry, query, snapshot, limit, category):
@@ -462,6 +486,7 @@ def _search_deferred_tool_result(
         "candidates": candidates,
         "not_found": not_found,
         "unavailable": unavailable,
+        **({"renamed_aliases": renamed_aliases} if renamed_aliases else {}),
     }
     if names:
         payload["names"] = list(dict.fromkeys(names))
@@ -484,17 +509,82 @@ def _search_deferred_tool_result(
     )
 
 
-# LLM: 仅在当前已授权快照解析名字，不从全局注册表恢复 handler；不可用项只展示原失败原因。
-# 函数用途: 对精确批量逐项返回就绪定义、未找到名和不可用事实。
+# LLM: 仅在当前已授权快照解析名字，不从全局注册表恢复 handler；精确旧别名优先于模糊建议但只加载已授权目标。
+# 函数用途: 对精确批量逐项返回就绪定义、未找到名、不可用事实和已退役别名映射。
 def _resolve_tool_search_names(registry: Any, snapshot: ToolRuntimeSnapshot, names: list[str]):
-    specs, not_found, unavailable = [], [], []
+    specs, not_found, unavailable, renamed_aliases = [], [], [], []
+    seen_specs: set[str] = set()
     failures = {name: (code, reason) for name, code, reason in snapshot.unavailable_tools}
+    aliases = retired_tool_aliases()
     for name in names:
         runtime = snapshot.runtime(name)
-        if snapshot.allowed_tools is not None and name not in snapshot.allowed_tools:
+        direct_authorized = snapshot.allowed_tools is None or name in snapshot.allowed_tools
+        if runtime is not None and direct_authorized and runtime.exposure.model_visible:
+            if runtime.model_spec.name not in seen_specs:
+                specs.append(runtime.model_spec)
+                seen_specs.add(runtime.model_spec.name)
+            continue
+        if name == "business_spaces":
+            redirect = dead_business_spaces_redirect({})
+            renamed_aliases.append(
+                {
+                    "requested": name,
+                    "target": redirect.get("target_tool") or redirect.get("target_tools") or "business_space",
+                    "action": "",
+                    "authorized": False,
+                    "available": False,
+                    "redirect_only": True,
+                    "next_action": redirect["next_action"],
+                }
+            )
+            unavailable.append(
+                {
+                    "name": name,
+                    "category": "spaces",
+                    "error_code": "TOOL_RETIRED_REDIRECT",
+                    "reason": str(redirect["next_action"]),
+                }
+            )
+            continue
+        if name in aliases:
+            target, alias_act = aliases[name]
+            target_auth = snapshot.allowed_tools is None or target in snapshot.allowed_tools
+            target_rt = snapshot.runtime(target) if target_auth else None
+            action_permitted = False
+            if target_rt is not None and target_rt.exposure.model_visible:
+                enum_vals = _declared_schema_actions(target_rt.model_spec)
+                action_permitted = enum_vals is None or alias_act in enum_vals
+            renamed_aliases.append(
+                {
+                    "requested": name,
+                    "target": target,
+                    "action": alias_act,
+                    "authorized": bool(target_auth and (target_rt is None or action_permitted)),
+                    "available": bool(target_rt is not None and target_rt.exposure.model_visible and action_permitted),
+                }
+            )
+            if target_rt is not None and target_rt.exposure.model_visible and action_permitted:
+                if target_rt.model_spec.name not in seen_specs:
+                    specs.append(target_rt.model_spec)
+                    seen_specs.add(target_rt.model_spec.name)
+            elif target in failures or name in failures:
+                code, reason = failures.get(target) or failures[name]
+                tool = registry.tools.get(target) or registry.tools.get(name)
+                unavailable.append(
+                    {
+                        "name": name,
+                        "target": target,
+                        "action": alias_act,
+                        "category": tool.model_spec.category if tool else "general",
+                        "error_code": code,
+                        "reason": reason,
+                    }
+                )
+            else:
+                not_found.append(name)
+            continue
+        if not direct_authorized:
             not_found.append(name)
-        elif runtime is not None and runtime.exposure.model_visible:
-            specs.append(runtime.model_spec)
         elif name in failures:
             code, reason = failures[name]
             tool = registry.tools.get(name)
@@ -502,7 +592,7 @@ def _resolve_tool_search_names(registry: Any, snapshot: ToolRuntimeSnapshot, nam
                                 "error_code": code, "reason": reason})
         else:
             not_found.append(name)
-    return specs, not_found, unavailable
+    return specs, not_found, unavailable, renamed_aliases
 
 
 # LLM: 检索只消费授权快照中的可见deferred定义；索引补原生创作的双语能力别名，不改Schema、执行身份或权限。
@@ -535,8 +625,8 @@ def _deferred_tool_projection(registry, snapshot, allowed_tools=None):
             return cached[1]
         extra, _declared = _extra_deferred_names(registry, snapshot, allowed_tools)
         specs = tuple(runtime.model_spec for runtime in snapshot.runtimes if runtime.exposure.model_visible
-                      and (snapshot.allowed_tools is None or runtime.model_spec.name in snapshot.allowed_tools)
-                      and (allowed is None or runtime.model_spec.name in allowed)
+                      and _name_allowed_in_grants(runtime.model_spec.name, snapshot.allowed_tools)
+                      and _name_allowed_in_grants(runtime.model_spec.name, allowed)
                       and (runtime.model_spec.category in categories or runtime.model_spec.name in extra))
         indexed = tuple(_tool_search_index_spec(spec) for spec in specs)
         grouped = {'': list(zip(specs, indexed))}
@@ -918,7 +1008,7 @@ class ToolRegistry:
         specs = list(snapshot.specs)
         allowed = allowed_tool_set(allowed_tools)
         if allowed is not None:
-            specs = [spec for spec in specs if spec.name in allowed]
+            specs = [spec for spec in specs if _name_allowed_in_grants(spec.name, allowed)]
         if not include_orchestration:
             specs = [spec for spec in specs if spec.category != "orchestration"]
         return specs
@@ -1043,22 +1133,48 @@ class ToolRegistry:
         by_name = {spec.name: spec for spec in visible}
         return [by_name[name] for name in dict.fromkeys(names) if name in by_name]
 
-    # LLM: 推荐名卡可按宿主短名单做减法，基础发现入口保留；未loaded的原deferred工具不能因此出现在原生Schema。
+    # LLM: 推荐名卡可按宿主短名单做减法，基础发现入口保留；native 排除已注入原生 Schema 的活跃工具并可推荐未加载授权折叠工具。
     # 函数用途: 在原快照内显示本轮相关工具名称，保持搜索可达与权限范围不变。
     def render_recommended_tools_section(
         self,
         query: str,
         *,
         allowed_tools: list[str] | None = None,
+        loaded_tool_names: Collection[str] | None = None,
         tool_protocol: str = "native",
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
         snapshot = runtime_snapshot or self.runtime_snapshot(allowed_tools=allowed_tools)
-        specs = self.model_visible_specs(
-            allowed_tools=allowed_tools,
-            runtime_snapshot=snapshot,
-        )
         presentation = allowed_tools is None and snapshot.allowed_tools is None
+        native = str(tool_protocol or "").strip().lower() == "native"
+        if native:
+            all_specs = self.specs(
+                allowed_tools=allowed_tools,
+                include_orchestration=True,
+                runtime_snapshot=snapshot,
+            )
+            if not all_specs:
+                return (
+                    "# Recommended Tools\n"
+                    "当前执行上下文没有授权工具。若缺少能力，请提交 capability_request。"
+                )
+            active_names = {
+                spec.name
+                for spec in self.model_visible_specs(
+                    allowed_tools=allowed_tools,
+                    loaded_tool_names=loaded_tool_names,
+                    runtime_snapshot=snapshot,
+                )
+            }
+            specs = [spec for spec in all_specs if spec.name not in active_names]
+            if not specs:
+                return ""
+        else:
+            specs = self.model_visible_specs(
+                allowed_tools=allowed_tools,
+                loaded_tool_names=loaded_tool_names,
+                runtime_snapshot=snapshot,
+            )
         return _render_recommended_tools(
             query,
             specs,
@@ -1213,18 +1329,220 @@ def _share_registry_mcp_state(registry, source):
             return True
 
 
-# LLM: 保留原权限交集/禁用/可用性门；旧目录grant归一为规范工具+持久化动作令牌，令牌优先于宽工具名，不连接客户端。
+def _name_allowed_in_grants(
+    name: str,
+    allowed: set[str] | frozenset[str] | None,
+    ceilings: dict[str, frozenset[str]] | None = None,
+) -> bool:
+    if allowed is None:
+        return True
+    if ":" not in name and name in allowed:
+        return True
+    alias = retired_tool_aliases().get(name)
+    if alias is None:
+        return False
+    target, action = alias
+    if target not in allowed:
+        return False
+    if ceilings is not None:
+        target_ceiling = ceilings.get(target)
+        if target_ceiling is not None:
+            return action in target_ceiling
+    tokens = {
+        item.partition(":")[2]
+        for item in allowed
+        if item.startswith(f"{target}:")
+    }
+    return not tokens or action in tokens
+
+
+def _declared_schema_actions(spec: ToolModelSpec) -> tuple[str, ...]:
+    props = spec.input_schema.get("properties")
+    action_prop = props.get("action") if isinstance(props, dict) else None
+    raw_enum = action_prop.get("enum") if isinstance(action_prop, dict) else None
+    if not isinstance(raw_enum, list):
+        return ()
+    return tuple(str(item).strip() for item in raw_enum if isinstance(item, str) and str(item).strip())
+
+
+def _disabled_actions_for_tool(name: str, disabled_names: set[str]) -> frozenset[str]:
+    if not disabled_names:
+        return frozenset()
+    blocked: set[str] = set()
+    prefix = f"{name}:"
+    aliases = retired_tool_aliases()
+    for item in disabled_names:
+        if item.startswith(prefix):
+            act = item[len(prefix) :].strip()
+            if act and ":" not in act:
+                blocked.add(act)
+        elif item == "list_tools" and name == "tool_search":
+            blocked.add("catalog")
+        elif item in aliases and aliases[item][0] == name:
+            blocked.add(aliases[item][1])
+    return frozenset(blocked)
+
+
+def _branch_action_set(branch: object) -> set[str] | None:
+    if not isinstance(branch, dict):
+        return None
+    props = branch.get("properties")
+    act_prop = props.get("action") if isinstance(props, dict) else None
+    if not isinstance(act_prop, dict):
+        return None
+    if isinstance(act_prop.get("const"), str) and act_prop["const"].strip():
+        return {act_prop["const"].strip()}
+    raw_enum = act_prop.get("enum")
+    if isinstance(raw_enum, list):
+        vals = {str(v).strip() for v in raw_enum if isinstance(v, str) and str(v).strip()}
+        return vals or set()
+    return None
+
+
+def _collect_schema_refs(node: object, out: set[tuple[str, str]]) -> None:
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            for root_key in ("$defs", "definitions"):
+                prefix = f"#/{root_key}/"
+                if ref.startswith(prefix):
+                    def_name = ref[len(prefix) :].split("/", 1)[0]
+                    if def_name:
+                        out.add((root_key, def_name))
+        for key, value in node.items():
+            if key in {"$defs", "definitions"}:
+                continue
+            _collect_schema_refs(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_schema_refs(item, out)
+
+
+def _prune_schema_for_actions(schema: dict[str, Any], allowed_actions: frozenset[str]) -> dict[str, Any]:
+    updated = deepcopy(schema)
+    props = updated.get("properties")
+    if isinstance(props, dict) and isinstance(props.get("action"), dict):
+        act_prop = props["action"]
+        if isinstance(act_prop.get("enum"), list):
+            act_prop["enum"] = [v for v in act_prop["enum"] if isinstance(v, str) and v in allowed_actions]
+        elif isinstance(act_prop.get("const"), str) and act_prop["const"] not in allowed_actions:
+            act_prop["enum"] = sorted(allowed_actions)
+            act_prop.pop("const", None)
+    for combinator in ("oneOf", "anyOf"):
+        branches = updated.get(combinator)
+        if not isinstance(branches, list):
+            continue
+        kept_branches: list[Any] = []
+        for branch in branches:
+            branch_acts = _branch_action_set(branch)
+            if branch_acts is not None:
+                overlap = branch_acts & allowed_actions
+                if not overlap:
+                    continue
+                if isinstance(branch, dict):
+                    b_props = branch.get("properties")
+                    b_act = b_props.get("action") if isinstance(b_props, dict) else None
+                    if isinstance(b_act, dict) and isinstance(b_act.get("enum"), list):
+                        b_act["enum"] = [v for v in b_act["enum"] if isinstance(v, str) and v in allowed_actions]
+            kept_branches.append(branch)
+        if kept_branches:
+            updated[combinator] = kept_branches
+        else:
+            updated.pop(combinator, None)
+    initial_refs: set[tuple[str, str]] = set()
+    _collect_schema_refs(updated, initial_refs)
+    reachable: set[tuple[str, str]] = set()
+    queue = list(initial_refs)
+    while queue:
+        pair = queue.pop()
+        if pair in reachable:
+            continue
+        reachable.add(pair)
+        defs_map = updated.get(pair[0])
+        target_def = defs_map.get(pair[1]) if isinstance(defs_map, dict) else None
+        if target_def is not None:
+            nested_refs: set[tuple[str, str]] = set()
+            _collect_schema_refs(target_def, nested_refs)
+            for nxt in nested_refs:
+                if nxt not in reachable:
+                    queue.append(nxt)
+    for root_key in ("$defs", "definitions"):
+        defs_map = updated.get(root_key)
+        if not isinstance(defs_map, dict):
+            continue
+        pruned_defs = {k: v for k, v in defs_map.items() if (root_key, k) in reachable}
+        if pruned_defs:
+            updated[root_key] = pruned_defs
+        else:
+            updated.pop(root_key, None)
+    return updated
+
+
+def _example_matches_actions(example: str, allowed_actions: frozenset[str]) -> bool:
+    text = str(example or "").strip()
+    if not text:
+        return False
+    candidates = [text]
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if 0 <= brace_start < brace_end:
+        candidates.append(text[brace_start : brace_end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("action"), str):
+            return parsed["action"].strip() in allowed_actions
+    return True
+
+
+def _narrow_model_spec_for_actions(spec: ToolModelSpec, allowed_actions: frozenset[str]) -> ToolModelSpec:
+    if spec.name == "tool_search" and allowed_actions == frozenset({"catalog"}):
+        return _catalog_only_model_spec(spec)
+    action_tuple = tuple(sorted(allowed_actions))
+    cache_key = (spec.name, spec.schema_hash, action_tuple)
+    with _NARROWED_MODEL_SPEC_LOCK:
+        cached = _NARROWED_MODEL_SPEC_CACHE.get(cache_key)
+        if cached is not None and cached.description == spec.description:
+            _NARROWED_MODEL_SPEC_CACHE.move_to_end(cache_key)
+            return cached
+    pruned_schema = _prune_schema_for_actions(spec.input_schema, allowed_actions)
+    kept_examples = tuple(ex for ex in spec.hints.examples if _example_matches_actions(ex, allowed_actions))
+    narrowed = replace(
+        spec,
+        schema_hash="",
+        input_schema=pruned_schema,
+        hints=replace(spec.hints, examples=kept_examples),
+    )
+    with _NARROWED_MODEL_SPEC_LOCK:
+        _NARROWED_MODEL_SPEC_CACHE[cache_key] = narrowed
+        _NARROWED_MODEL_SPEC_CACHE.move_to_end(cache_key)
+        while len(_NARROWED_MODEL_SPEC_CACHE) > _NARROWED_MODEL_SPEC_MAX:
+            _NARROWED_MODEL_SPEC_CACHE.popitem(last=False)
+    return narrowed
+
+
+def _apply_tool_action_narrowing(
+    tool: object,
+    spec: ToolModelSpec,
+    allowed_actions: frozenset[str],
+) -> ToolModelSpec:
+    if spec.name == "tool_search" and allowed_actions == frozenset({"catalog"}):
+        return _catalog_only_model_spec(spec)
+    narrower = getattr(type(tool), "model_spec_for_actions", None)
+    if callable(narrower):
+        custom = narrower(tool, allowed_actions)
+        if isinstance(custom, ToolModelSpec):
+            return _narrow_model_spec_for_actions(custom, allowed_actions)
+    return _narrow_model_spec_for_actions(spec, allowed_actions)
+
+
+# LLM: 保留原权限交集/禁用/可用性门；旧目录与业务叶grant归一为规范工具+持久化动作令牌，支持精确动作收窄，不连接客户端。
 # 函数用途: 在独立辅助函数里生成同一份工具事实快照，保持所有目录和执行入口一致。
 def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root):
     allowed = allowed_tool_set(allowed_tools)
-    # 旧宿主白名单只迁为catalog-only schema，当前显式tool_search授权才含search/load。
-    catalog_only = allowed is not None and (CATALOG_ONLY_TOOL_GRANT in allowed
-        or ("list_tools" in allowed and "tool_search" not in allowed))
-    if allowed is not None:
-        if "list_tools" in allowed or CATALOG_ONLY_TOOL_GRANT in allowed:
-            allowed = (allowed - {"list_tools"}) | {"tool_search"}
-        if catalog_only:
-            allowed.add(CATALOG_ONLY_TOOL_GRANT)
+    ceilings = action_ceilings(list(allowed)) if allowed is not None else {}
     regime = path_scope_regime(registry.owner_scope_root if owner_scope_root is None else owner_scope_root,
                                registry.path_access_mode)
     runtimes: list[ToolRuntime] = []
@@ -1233,7 +1551,7 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
     for name, tool in registry.tools.items():
         if allowed is None and name in registry.default_hidden_tool_names:
             continue
-        if allowed is not None and name not in allowed:
+        if allowed is not None and not _name_allowed_in_grants(name, allowed, ceilings):
             continue
         spec = getattr(tool, "model_spec", None)
         exposure = getattr(tool, "exposure", None)
@@ -1243,18 +1561,58 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
         availability = _safe_tool_availability(tool, registry=registry) if hidden_when_unavailable else None
         if availability is not None and not availability.available:
             continue
-        if catalog_only and name == "tool_search":
-            spec = _catalog_only_model_spec(spec)
+        declared_actions = _declared_schema_actions(spec) if isinstance(spec, ToolModelSpec) else ()
+        tool_ceiling = ceilings.get(name)
+        if tool_ceiling is not None:
+            if not declared_actions:
+                unavailable.append((
+                    name,
+                    "TOOL_ACTION_NOT_PERMITTED",
+                    f"工具 {name} 不支持按 action 细分动作上界 {sorted(tool_ceiling)}；请改用裸工具名 '{name}'。",
+                ))
+                continue
+            unknown_actions = sorted(tool_ceiling - set(declared_actions))
+            if unknown_actions:
+                unavailable.append((
+                    name,
+                    "TOOL_ACTION_NOT_PERMITTED",
+                    f"工具 {name} 收到未知动作上界 {', '.join(unknown_actions)}；合法动作: {', '.join(declared_actions[:8])}。",
+                ))
+                continue
+        ceiling_actions = (
+            tuple(act for act in declared_actions if act in tool_ceiling)
+            if tool_ceiling is not None
+            else declared_actions
+        )
+        if isinstance(spec, ToolModelSpec) and tool_ceiling is not None and len(ceiling_actions) < len(declared_actions):
+            spec = _apply_tool_action_narrowing(tool, spec, frozenset(ceiling_actions))
         if isinstance(spec, ToolModelSpec) and (exposure is None or bool(getattr(exposure, "model_visible", True))):
             catalog_specs.append(spec)
-        if name in registry.disabled_tool_names or (catalog_only and name == "tool_search" and "list_tools" in registry.disabled_tool_names):
+        if name in registry.disabled_tool_names:
+            continue
+        disabled_actions = _disabled_actions_for_tool(name, registry.disabled_tool_names)
+        effective_actions = (
+            tuple(act for act in ceiling_actions if act not in disabled_actions)
+            if declared_actions
+            else ()
+        )
+        if declared_actions and not effective_actions:
             continue
         availability = availability or _safe_tool_availability(tool, registry=registry)
         if not availability.available:
             unavailable.append((name, availability.error_code or "TOOL_UNAVAILABLE", availability.reason))
             continue
         runtime = _snapshot_runtime(name, tool, availability, regime)
-        runtimes.append(replace(runtime, model_spec=spec) if catalog_only and name == "tool_search" else runtime)
+        if declared_actions and len(effective_actions) < len(declared_actions):
+            narrowed_spec = (
+                spec
+                if (runtime.model_spec is getattr(tool, "model_spec", None)
+                    and tool_ceiling is not None
+                    and effective_actions == ceiling_actions)
+                else _apply_tool_action_narrowing(tool, runtime.model_spec, frozenset(effective_actions))
+            )
+            runtime = replace(runtime, model_spec=narrowed_spec)
+        runtimes.append(runtime)
     return ToolRuntimeSnapshot(
         run_id=str(run_id or ""), runtimes=tuple(runtimes),
         available_tool_names=frozenset(runtime.model_spec.name for runtime in runtimes),

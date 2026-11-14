@@ -126,8 +126,13 @@ def test_metadata_only_shortens_name_cards_without_removing_direct_schema_or_loa
     query = f"{a.model_spec.name} {b.model_spec.name} {legacy.model_spec.name}"
     original = registry.render_recommended_tools_section(query, runtime_snapshot=snapshot)
     selected = registry.render_recommended_tools_section(query, runtime_snapshot=projected)
-    assert b.model_spec.name in original and b.model_spec.name not in selected
-    assert a.model_spec.name in selected and legacy.model_spec.name not in selected
+    assert legacy.model_spec.name in original and legacy.model_spec.name in selected
+    assert a.model_spec.name not in original and b.model_spec.name not in original
+    assert a.model_spec.name not in selected and b.model_spec.name not in selected
+    text_original = registry.render_recommended_tools_section(query, tool_protocol="text", runtime_snapshot=snapshot)
+    text_selected = registry.render_recommended_tools_section(query, tool_protocol="text", runtime_snapshot=projected)
+    assert b.model_spec.name in text_original and b.model_spec.name not in text_selected
+    assert a.model_spec.name in text_selected and legacy.model_spec.name not in text_selected
     payload, loaded = search(registry, projected, legacy.model_spec.name)
     assert legacy.model_spec.name in loaded and payload["tools"]
     assert not projected.presentation_deferred_names

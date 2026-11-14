@@ -63,13 +63,12 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
     )
 
 
-# LLM: 父快照缺tool_grants时仅保留目录；复用动作证据转换收窄角色默认，限制不是新工具，子级窄意图和父级收窄均保留，无IO。
-# 函数用途: 正式归一化时同时守住父工具集合及目录动作上界，不让落盘丢失限制。
+# LLM: 父快照缺tool_grants时仅保留目录；复用动作证据转换与精确动作上界求交收窄角色默认，子级窄意图和父级收窄均保留，无IO。
+# 函数用途: 正式归一化时同时守住父工具集合及精确动作上界，不让落盘丢失限制。
 def _tools_within_creation_scope(tools, attributes):
     from ..tooling.registry_auth import (
-        CATALOG_ONLY_TOOL_GRANT,
-        canonical_discovery_grants,
         creation_snapshot_tool_grants,
+        intersect_tool_grants,
     )
     from .capability_scope import DIRECT_PARENT_TOOL_AUTHORITY_ATTR
     from .role_templates import CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL
@@ -78,16 +77,10 @@ def _tools_within_creation_scope(tools, attributes):
     if not isinstance(value, dict) or value.get("schema_version") != "direct_parent_tool_authority.v1":
         return tools
     names = value.get("available_tool_names")
-    if not isinstance(names, list):
+    if not isinstance(names, list) or not tools:
         return []
-    parent_scope = creation_snapshot_tool_grants(value)
-    available = {*parent_scope, CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL}
-    if "tool_search" in available:
-        available.add(CATALOG_ONLY_TOOL_GRANT)
-    narrowed = [name for name in canonical_discovery_grants(tools or []) if name in available]
-    if "tool_search" in narrowed and CATALOG_ONLY_TOOL_GRANT in parent_scope and CATALOG_ONLY_TOOL_GRANT not in narrowed:
-        narrowed.append(CATALOG_ONLY_TOOL_GRANT)
-    return narrowed
+    parent_scope = [*creation_snapshot_tool_grants(value), CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL]
+    return intersect_tool_grants(list(tools), parent_scope)
 
 
 def _default_template_role(role: str) -> str | None:
@@ -113,12 +106,34 @@ def _allowed_tools_for_role(
     template: RoleTemplate | None,
 ) -> list[str] | None:
     if tools is not None:
+        from ..tooling.registry_auth import CATALOG_ONLY_TOOL_GRANT
+        from ..tooling.versioned_input_decoder import retired_tool_aliases
+
         explicit = [str(item) for item in _list_value(tools) if item not in (None, "")]
-        active = active_model_subagent_tools(explicit)
+        raw_active = active_model_subagent_tools(explicit)
+        aliases = retired_tool_aliases()
+        bare_set: set[str] = set()
+        for entry in raw_active:
+            if entry in {"list_tools", CATALOG_ONLY_TOOL_GRANT}:
+                bare_set.add("tool_search")
+            elif ":" not in entry:
+                bare_set.add(aliases[entry][0] if entry in aliases else entry)
+        active = [
+            entry
+            for entry in raw_active
+            if entry == CATALOG_ONLY_TOOL_GRANT
+            or ":" not in entry
+            or (
+                entry.count(":") == 1
+                and bool(entry.partition(":")[0])
+                and bool(entry.partition(":")[2])
+                and entry.partition(":")[0] in bare_set
+            )
+        ]
         if template is not None and template.can_spawn_children:
             return active
         controls = set(DIRECT_CHILD_CONTROL_TOOLS)
-        return [tool for tool in active if tool not in controls]
+        return [tool for tool in active if tool.partition(":")[0] not in controls]
     if template:
         return _stable_tools([*template.default_tools, *(ROLE_BASE_TOOLS if template.inherit_base_tools else [])])
     if role in {REPORTER_ROLE, CHECKER_ROLE}:

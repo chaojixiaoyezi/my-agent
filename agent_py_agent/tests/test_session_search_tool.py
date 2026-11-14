@@ -102,17 +102,25 @@ class TestSpec:
         assert "source_type\":\"gateway_request" in spec.examples[1]
 
     def test_recent_named_project_ranks_session_search_first_in_real_registry(self, tmp_path):
-        """完整默认工具集里，真实续作措辞也必须把 session_search 排到首位。"""
+        """完整默认工具集里，真实续作措辞必须把 session_search 排到首位，且 native 不重复已加载活跃 Schema。"""
+        from dataclasses import replace
+
         agent = SimpleAgent(
             AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
             tmp_path,
         )
+        query = "回到刚才那个星河日志分析器，在原项目里增加 CSV 输出"
 
-        section = agent.tools.render_recommended_tools_section(
-            "回到刚才那个星河日志分析器，在原项目里增加 CSV 输出"
-        )
-        recommendations = [line for line in section.splitlines() if line.startswith("- ")]
+        text_section = agent.tools.render_recommended_tools_section(query, tool_protocol="text")
+        assert text_section.splitlines()[1].startswith("- session_search [")
 
+        snapshot = agent.tools.runtime_snapshot()
+        native_active = agent.tools.render_recommended_tools_section(query, runtime_snapshot=snapshot)
+        assert "- session_search：" not in native_active
+
+        deferred_snapshot = replace(snapshot, presentation_deferred_names=frozenset({"session_search"}))
+        native_deferred = agent.tools.render_recommended_tools_section(query, runtime_snapshot=deferred_snapshot)
+        recommendations = [line for line in native_deferred.splitlines() if line.startswith("- ")]
         assert recommendations[0].startswith("- session_search：")
 
 

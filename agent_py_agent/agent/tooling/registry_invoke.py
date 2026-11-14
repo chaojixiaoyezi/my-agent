@@ -15,6 +15,7 @@ from typing import Any
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.cancellation import ToolCancelled, bind_cancellation_token
+from ..common.log_redaction import redact_sensitive_text
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     raise_if_transport_uncertain,
@@ -739,12 +740,27 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
                 _notify_handler_started(request)
                 result = request.tool.execute_scoped(params, request.invocation_context)
             if not isinstance(result, ToolHandlerOutcome):
+                stage = ToolFailureStage.EXECUTION.value if handler_started else ToolFailureStage.RUNTIME_GATE.value
+                summary = f"invalid handler return type: {type(result).__name__}"
                 result = ToolHandlerOutcome(
                     request.tool_name,
                     False,
-                    json.dumps({"error": f"invalid handler return type: {type(result).__name__}"}, ensure_ascii=False),
-                    error_code="INTERNAL_ERROR",
-                    effect_outcome="unknown",
+                    json.dumps(
+                        {
+                            "error": summary,
+                            "hint": "核对工具返回契约与目标状态；副作用未证伪前禁止原样盲目重放。",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    result_envelope={
+                        "error_details": {
+                            "exception_type": type(result).__name__,
+                            "summary": summary,
+                            "stage": stage,
+                        }
+                    },
+                    error_code="TOOL_RUNTIME_ERROR",
+                    effect_outcome="unknown" if handler_started else "not_started",
                 )
     except ToolCancelled as exc:
         raise_if_transport_uncertain(exc)
@@ -760,11 +776,30 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
         raise_if_transport_uncertain(exc)
         if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
             raise
-        result = structured_tool_error(
+        stage = ToolFailureStage.EXECUTION.value if handler_started else ToolFailureStage.RUNTIME_GATE.value
+        safe_summary = redact_sensitive_text(
+            _truncate(str(exc) or type(exc).__name__, _MAX_EXCEPTION_MESSAGE_CHARS)
+        )
+        details: dict[str, Any] = {
+            "exception_type": type(exc).__name__,
+            "summary": safe_summary,
+            "stage": stage,
+        }
+        if isinstance(exc, OSError) and exc.errno is not None:
+            details["errno"] = exc.errno
+        result = ToolHandlerOutcome(
             request.tool_name,
-            _format_tool_exception(exc),
-            "检查参数后重试;若反复失败,换一种方法或工具完成同一目标。",
-            error_code="TOOL_ERROR",
+            False,
+            json.dumps(
+                {
+                    "error": redact_sensitive_text(_format_tool_exception(exc)),
+                    "hint": "核对具体异常类型与执行阶段；副作用未证伪前禁止原样盲目重放。",
+                },
+                ensure_ascii=False,
+            ),
+            result_envelope={"error_details": details},
+            error_code="TOOL_RUNTIME_ERROR",
+            effect_outcome="" if handler_started else "not_started",
         )
     try:
         return apply_tool_execution_facts(
@@ -780,12 +815,30 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
         raise_if_transport_uncertain(exc)
         if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable, ToolCancelled, InterruptedError, KeyboardInterrupt)):
             raise
+        stage = ToolFailureStage.EXECUTION.value if handler_started else ToolFailureStage.RUNTIME_GATE.value
+        safe_summary = redact_sensitive_text(
+            _truncate(str(exc) or type(exc).__name__, _MAX_EXCEPTION_MESSAGE_CHARS)
+        )
+        details = {
+            "exception_type": type(exc).__name__,
+            "summary": safe_summary,
+            "stage": stage,
+        }
+        if isinstance(exc, OSError) and exc.errno is not None:
+            details["errno"] = exc.errno
         fallback = ToolHandlerOutcome(
             request.tool_name,
             False,
-            json.dumps({"error": f"apply tool execution facts failed: {type(exc).__name__}"}, ensure_ascii=False),
-            error_code="INTERNAL_ERROR",
-            effect_outcome="unknown",
+            json.dumps(
+                {
+                    "error": f"apply tool execution facts failed: {type(exc).__name__}",
+                    "hint": "核对工具执行诊断字段与目标状态；副作用未证伪前禁止原样盲目重放。",
+                },
+                ensure_ascii=False,
+            ),
+            result_envelope={"error_details": details},
+            error_code="TOOL_RUNTIME_ERROR",
+            effect_outcome="unknown" if handler_started else "not_started",
         )
         fallback.failure_stage = ToolFailureStage.EXECUTION if handler_started else ToolFailureStage.RUNTIME_GATE
         fallback.handler_executed = handler_started

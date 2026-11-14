@@ -14,9 +14,13 @@ from typing import TYPE_CHECKING, Any
 from ..contracts.gates.command_policy import command_source_too_large
 from ..tooling.registry_auth import (
     CATALOG_ONLY_TOOL_GRANT,
+    action_ceilings,
     creation_snapshot_tool_grants,
+    intersect_tool_grants,
+    normalize_tool_grants,
     snapshot_tool_grants,
 )
+from ..tooling.versioned_input_decoder import business_domain_actions, retired_tool_aliases
 from .model_capabilities import CapabilityRequest
 from .model_task import SubAgentTask
 from .utils import _merge_list
@@ -266,28 +270,87 @@ def direct_parent_tool_authority(
         )
     )
     parent_run_id = str(getattr(task, "parent_id", "") or "").strip()
-    available, source, error_code = _direct_parent_available_tools(
+    parent_grants, source, error_code = _direct_parent_tool_grants(
         agent_or_manager,
         task,
     )
-    grantable = tuple(item for item in requested if item in available)
-    unavailable = tuple(item for item in requested if item not in available)
+    req_norm = normalize_tool_grants(list(requested))
+    req_ceilings = action_ceilings(req_norm)
+    req_bare = {entry for entry in req_norm if ":" not in entry}
+    inter = intersect_tool_grants(req_norm, parent_grants)
+    inter_ceilings = action_ceilings(inter)
+    inter_bare = {entry for entry in inter if ":" not in entry}
+    domain_actions = business_domain_actions()
+    aliases = retired_tool_aliases()
+    grantable_items: list[str] = []
+    unavailable_items: list[str] = []
+    for item in requested:
+        if item in {CATALOG_ONLY_TOOL_GRANT, "list_tools"} or item in aliases:
+            single = normalize_tool_grants([item])
+            ok = bool(single) and intersect_tool_grants(single, parent_grants) == single
+        elif ":" in item:
+            tool_part, sep, act_part = item.partition(":")
+            valid_domain_act = (
+                act_part in domain_actions[tool_part]
+                if tool_part in domain_actions
+                else (act_part in {"search", "catalog"} if tool_part == "tool_search" else True)
+            )
+            ok = (
+                bool(sep and tool_part and act_part and ":" not in act_part)
+                and valid_domain_act
+                and tool_part in req_bare
+                and tool_part in inter_bare
+                and (inter_ceilings.get(tool_part) is None or act_part in inter_ceilings[tool_part])
+            )
+        elif item in req_ceilings:
+            requested_acts = req_ceilings[item]
+            valid_acts = (
+                requested_acts <= frozenset(domain_actions[item])
+                if item in domain_actions
+                else (requested_acts <= frozenset({"search", "catalog"}) if item == "tool_search" else True)
+            )
+            ok = (
+                valid_acts
+                and item in inter_bare
+                and (inter_ceilings.get(item) is None or inter_ceilings[item] == requested_acts)
+            )
+        else:
+            ok = item in inter_bare and item not in inter_ceilings
+        if ok:
+            grantable_items.append(item)
+        else:
+            unavailable_items.append(item)
     return CapabilityToolAuthorityDecision(
         parent_run_id=parent_run_id,
         authority_source=source,
         requested_tools=requested,
-        grantable_tools=grantable,
-        unavailable_tools=unavailable,
+        grantable_tools=tuple(grantable_items),
+        unavailable_tools=tuple(unavailable_items),
         snapshot_error_code=error_code,
     )
 
 
-# LLM: 真实父记录优先，可信创建快照回退与角色归一共用动作证据转换；旧v1缺失动作证据时拒绝完整发现且给结构化原因。
-# 函数用途: 读取直属父级真实工具与动作上界，防止旧快照在恢复能力申请时扩权。
 def _direct_parent_available_tools(
     agent_or_manager: Any,
     task: SubAgentTask,
 ) -> tuple[set[str], str, str]:
+    parent_grants, source, error_code = _direct_parent_tool_grants(
+        agent_or_manager,
+        task,
+    )
+    available = {item for item in parent_grants if ":" not in item}
+    if CATALOG_ONLY_TOOL_GRANT in parent_grants:
+        available.discard("tool_search")
+        available.add("list_tools")
+    return available, source, error_code
+
+
+# LLM: 真实父记录优先，可信创建快照回退与角色归一共用动作证据转换；保留精确动作上界，旧v1缺失动作证据时拒绝完整发现且给结构化原因。
+# 函数用途: 读取直属父级真实工具与精确动作上界，防止能力申请放宽父级上界。
+def _direct_parent_tool_grants(
+    agent_or_manager: Any,
+    task: SubAgentTask,
+) -> tuple[list[str], str, str]:
     manager = getattr(agent_or_manager, "subagents", None)
     if manager is None and callable(getattr(agent_or_manager, "load", None)):
         manager = agent_or_manager
@@ -301,21 +364,21 @@ def _direct_parent_available_tools(
     if parent_task is not None:
         try:
             parent_context = manager.runner_context.build_execution_context(parent_run_id)
-            available = {
+            grants_list = normalize_tool_grants([
                 str(item or "").strip()
                 for item in (parent_context.allowed_tools or [])
                 if str(item or "").strip()
-            }
+            ])
             source = "parent_run_execution_context"
             error_code = ""
         except Exception:
-            available = set()
+            grants_list = []
             source = "parent_run_execution_context"
             error_code = "PARENT_TOOL_SNAPSHOT_UNAVAILABLE"
     else:
         creation_snapshot = task_creation_tool_authority(task)
         if creation_snapshot:
-            available = set(creation_snapshot_tool_grants(creation_snapshot))
+            grants_list = creation_snapshot_tool_grants(creation_snapshot)
             grants = creation_snapshot.get("tool_grants")
             source = "parent_creation_runtime_snapshot"
             error_code = ""
@@ -324,7 +387,7 @@ def _direct_parent_available_tools(
                 error_code = "PARENT_TOOL_ACTION_EVIDENCE_MISSING"
         elif parent_run_id:
             # 有委派边却缺失可信父证据时拒绝新增授权，不能把owner全权冒充父级上界。
-            available = set()
+            grants_list = []
             source = "parent_creation_runtime_snapshot"
             error_code = "PARENT_CREATION_SNAPSHOT_MISSING"
         else:
@@ -332,17 +395,14 @@ def _direct_parent_available_tools(
             try:
                 registry = agent_or_manager.tools
                 snapshot = registry.runtime_snapshot(run_id=parent_run_id)
-                available = set(snapshot_tool_grants(snapshot))
+                grants_list = normalize_tool_grants(snapshot_tool_grants(snapshot))
                 source = "legacy_process_runtime_snapshot"
                 error_code = "PARENT_CREATION_SNAPSHOT_MISSING"
             except Exception:
-                available = set()
+                grants_list = []
                 source = "legacy_process_runtime_snapshot"
                 error_code = "PARENT_TOOL_SNAPSHOT_UNAVAILABLE"
-    if CATALOG_ONLY_TOOL_GRANT in available:
-        available.discard("tool_search")
-        available.add("list_tools")
-    return available, source, error_code
+    return grants_list, source, error_code
 
 
 # LLM: 墙外只消费本task既有工作根；根和每个墙外target都过原继承过滤，宽祖先根不得穿透foreign/宿主。owner内原语义不变，manager宽workspace不是授权，路径沿准确child cwd。

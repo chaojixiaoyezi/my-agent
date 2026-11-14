@@ -357,6 +357,56 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return prompt
 
 
+def _dedup_native_recommendations_section(agent: object, params: ToolLoopExecuteParams, request: object):
+    tools_sec = getattr(request, "tools", None)
+    if tools_sec is None or not getattr(tools_sec, "native_tool_use", False):
+        return request
+    text = str(getattr(tools_sec, "tool_recommendations_section", "") or "")
+    if not text.startswith("# Recommended Tools\n"):
+        return request
+    from ..tooling.tool_search_state import ordered_loop_loaded_tool_names
+    from .runtime.turn_trigger import turn_trigger_recommendation
+
+    if turn_trigger_recommendation(getattr(params, "turn_trigger", None)) is not None:
+        return request
+    registry = getattr(agent, "tools", None)
+    snapshot = getattr(params, "tool_runtime_snapshot", None)
+    if registry is None or snapshot is None or not hasattr(registry, "model_visible_specs"):
+        return request
+    active_names = {
+        spec.name
+        for spec in registry.model_visible_specs(
+            allowed_tools=getattr(params, "allowed_tools", None),
+            loaded_tool_names=ordered_loop_loaded_tool_names(params),
+            runtime_snapshot=snapshot,
+        )
+    }
+    if not active_names:
+        return request
+    head, sep, tail = text.partition("\n\n# ")
+    tail_section = ("# " + tail) if sep else ""
+    body = head[len("# Recommended Tools\n") :]
+    kept_blocks: list[str] = []
+    had_bullet = False
+    for block in body.split("\n\n"):
+        stripped = block.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("- ") and "：" in stripped:
+            had_bullet = True
+            tool_name = stripped[2:].split("：", 1)[0].strip()
+            if tool_name in active_names:
+                continue
+        kept_blocks.append(block)
+    if not had_bullet:
+        return request
+    rebuilt_head = ("# Recommended Tools\n" + "\n\n".join(kept_blocks)) if kept_blocks else ""
+    updated = "\n\n".join(part for part in (rebuilt_head, tail_section) if part)
+    if updated == text:
+        return request
+    return replace(request, tools=replace(tools_sec, tool_recommendations_section=updated))
+
+
 # LLM: 保持 Goal/workspace/execution facts 原准备顺序；在用身份已随 ToolLoopExecuteParams 冻结，不能在渲染时替换执行参数，
 #   否则 Compact 的原参数身份核对会失败。宿主与 child 只冻结同一次 gather，纯预览不改变 Goal 修订号；联测 method_gateway。
 # 函数用途: 读取宿主事实并透传逐 run 冻结的方法名单，原名卡与纯请求投影共用布局。
@@ -370,6 +420,7 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
             if params.tool_catalog_section else ""
         ),
     )
+    request = _dedup_native_recommendations_section(agent, params, request)
     from ..model_request_selection import render_selected_request
 
     return render_selected_request(agent, params, request)
@@ -2713,9 +2764,10 @@ def _inspect_unknown_original_operation(agent, record):
         if not callable(get):
             return {'lookup': 'unavailable', 'reason': 'original_operation_store_unavailable'}
         saved = get(owner_id=scope.owner_id, run_id=scope.run_id, operation_id=operation.operation_id)
+        expected_tool = runtime.handler.operation_identity_for(call.arguments)
         if (saved is None or saved.owner_id != scope.owner_id or saved.run_id != scope.run_id
                 or saved.task_id != scope.task_id or saved.attempt_id != scope.attempt_id
-                or saved.operation_id != call.operation_id or saved.tool != call.tool_name
+                or saved.operation_id != call.operation_id or saved.tool != expected_tool
                 or saved.args_hash != call.args_hash):
             return {'lookup': 'unavailable', 'reason': 'original_operation_record_mismatch'}
         facts = {'lookup': 'owner_bound_tool_operation_store.get_tool_operation', 'read_only': True,

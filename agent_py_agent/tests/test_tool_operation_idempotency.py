@@ -420,8 +420,9 @@ def test_failed_result_is_replayed_exactly(tmp_path):
 
     assert first.ok is False and replay.ok is False
     assert replay.error_code == first.error_code
-    assert replay.retryable == first.retryable
-    assert replay.recommended_action == first.recommended_action
+    assert first.retryable is True and replay.retryable is False
+    assert first.recommended_action == "retry_after_backoff"
+    assert replay.recommended_action == "change_strategy"
     assert replay.output == first.output
     assert first.failure_stage == ToolFailureStage.EXECUTION.value
     assert first.handler_executed is True
