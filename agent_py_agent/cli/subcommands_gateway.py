@@ -246,7 +246,7 @@ def _add_gateway_service_subcommands(gateway_sub):
     start_all = gateway_sub.add_parser("start-all", help="一键启动 gateway（带 supervisor）+ 所有适配器")
     start_all.add_argument(
         "--adapter",
-        choices=["feishu", "qq", "all", "none"],
+        choices=["feishu", "all", "none"],
         default="all",
         help="启动哪些通道适配器；默认 all；none 表示不启动适配器",
     )
@@ -293,10 +293,10 @@ def add_adapter_subcommand(sub: argparse._SubParsersAction) -> None:
     adapter_file.add_argument("--no-start-gateway", action="store_true", help="不自动启动 gateway；未运行时直接失败")
     adapter_file.set_defaults(func=cmd_adapter_file)
 
-    adapter_start = adapter_sub.add_parser("start", help="启动通道适配器（feishu / qq / all）")
+    adapter_start = adapter_sub.add_parser("start", help="启动通道适配器（feishu / all）")
     adapter_start.add_argument(
         "--channel",
-        choices=["feishu", "qq", "all"],
+        choices=["feishu", "all"],
         default="all",
         help="指定要启动的通道，默认 all",
     )

@@ -149,6 +149,7 @@ extend-exclude = [
   "agent_py_agent/data",
   "agent_py_agent/memory",
   "agent_py_agent/memory_archive",
+  "agent_py_agent/tests/plugin_samples/fixtures",
   "my-agent-worktrees",
 ]
 

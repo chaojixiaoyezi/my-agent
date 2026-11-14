@@ -15,7 +15,6 @@
         "MIN_RECOMMENDED_TOOL_SCORE",
         "MODEL_OUTPUT_WINDOW_DIVISOR",
         "PHRASE_BONUS",
-        "REQUIRED_RECALL",
         "_ADVISORY_LOCK_KEY",
         "_BM25_B",
         "_BM25_K1",

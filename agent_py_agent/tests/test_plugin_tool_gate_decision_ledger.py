@@ -4,7 +4,7 @@
 
 只构造内存假件（假安装表、假传输、真 B2 池）+ 临时 runtime.db；不启用真实 v8、不连真实 Gateway。
 字段集合与设计第9节对齐，本文件的库替身/旧B6投影只提供组件证据；
-真实RuntimeRepository与当前B6 info接线在test_plugin_gate_event_combination覆盖，不能把本文件替身外推为生产验收。
+真实RuntimeRepository与当前B6 info接线在test_plugin_protocol_samples覆盖，不能把本文件替身外推为生产验收。
 """
 from __future__ import annotations
 

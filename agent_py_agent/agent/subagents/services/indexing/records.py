@@ -93,17 +93,6 @@ def index_capability_route_via(service: Any, record: object) -> None:
     )
 
 
-def index_patch_review_via(service: Any, record: object) -> None:
-    index_dataclass_record_via(
-        service,
-        DataclassRecordIndexParams(
-            "subagent_patch_review", record.id,
-            f"Patch review {record.decision} {record.run_id}",
-            record, "subagent_patch_review_logged",
-        ),
-    )
-
-
 def index_channel_probe_via(service: Any, result: object) -> None:
     index_dataclass_record_via(
         service,

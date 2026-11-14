@@ -869,9 +869,10 @@ class BusinessServices:
             background_context = context if isinstance(self.background, _BackgroundPort) else context.business_context
             return self.background.execute(action, params, actor=context.actor, context=background_context, **kwargs)
         if implementer == 'W6':
+            from ..capability.business_capabilities import BusinessCapabilityService
+
             backend = self.capabilities
             if backend is None:
-                from ..capability.business_capabilities import BusinessCapabilityService
                 backend = BusinessCapabilityService(self.host)
             business_context = context.business_context
             if business_context is None and isinstance(params, dict) and params.get('space_id'):
@@ -887,6 +888,8 @@ class BusinessServices:
                     (),
                     'business-context.v1'
                 )
+            if isinstance(backend, BusinessCapabilityService):
+                return backend.execute(action, params, context=business_context, spaces=self.spaces, actor=actor)
             return backend.execute(action, params, context=business_context)
         if action == 'messages.list':
             from .business_api_v13 import v13_conversation_messages

@@ -62,16 +62,26 @@ def test_model_business_call_keeps_host_typed_context_and_rejects_identity_confl
     home = tmp_path / 'home'
     monkeypatch.setenv('MY_AGENT_HOME', str(home))
     agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(home),
-        execution_mode='local_unmanaged', business_spaces_enabled=True), tmp_path / 'workspace')
+        execution_mode='managed', business_spaces_enabled=True), tmp_path / 'workspace')
     thread = agent.conversation_store.threads.get_or_create({
         'canonical_user_id': 'local-agent', 'channel': 'tui', 'channel_conversation_id': 'frozen-test',
         'channel_user_id': 'local-agent', 'owner_id': agent.home_paths.owner_id,
         'owner_home': str(agent.home_paths.owner_home_dir)})
+    canonical_frozen = BusinessExecutionContext(
+        agent.home_paths.owner_id, 'space-frozen', None, 'stask-frozen', 7, None,
+        ('capability:pack',), ('version-asset-frozen',), 'business-context.v1')
+    record = agent.subagents.runtime_db.record_run_creation(
+        owner_id=agent.home_paths.owner_id,
+        run_id='run-frozen',
+        task_run_metadata={'business_context': canonical_frozen.to_dict(), 'session_task_ref': 'stask-frozen'},
+    )
     frozen = BusinessExecutionContext('foreign' if mismatch == 'owner' else agent.home_paths.owner_id,
         'space-frozen', None, 'other-task' if mismatch == 'task' else 'stask-frozen', 7, None,
         ('capability:pack',), ('version-asset-frozen',), 'business-context.v1')
-    agent._current_run_params = RunParams(request_id='frozen-request', task_id='stask-frozen',
-        business_context=frozen, task_attributes={'conversation_thread_id': thread.thread_id})
+    agent._current_run_params = RunParams(
+        request_id='frozen-request', run_id='run-frozen', attempt_id=record['attempt_id'],
+        task_id='stask-frozen', business_context=frozen,
+        task_attributes={'conversation_thread_id': thread.thread_id})
     if mismatch:
         with pytest.raises(HostAPIError) as caught:
             local_business_context(agent, model=True)

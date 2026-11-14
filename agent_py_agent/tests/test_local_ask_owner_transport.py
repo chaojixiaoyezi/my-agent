@@ -351,7 +351,7 @@ def test_registration_error_or_missing_original_task_command_has_zero_post(tmp_p
 
 @pytest.mark.parametrize(
     "raw",
-    ["/audit 安全巡检 prepare 逐条检查来源", "/experiment observe skill_tool 10m 1 50000 整理资料"],
+    ["/audit 安全巡检 prepare 逐条检查来源"],
 )
 @pytest.mark.parametrize("count", [0, 2])
 def test_prepared_plain_job_transports_original_task_slash_and_server_reparses(
@@ -597,7 +597,7 @@ def test_lost_response_reports_unconfirmed_without_changing_committed_host_reque
 
 @pytest.mark.parametrize(
     "raw",
-    ["/audit 安全巡检 prepare 逐条检查来源", "/experiment observe skill_tool 10m 1 50000 整理资料"],
+    ["/audit 安全巡检 prepare 逐条检查来源"],
 )
 def test_actual_tui_prepared_job_keeps_raw_command_separate_from_display(
     tmp_path, monkeypatch, raw
@@ -683,7 +683,7 @@ def test_mismatched_original_command_rejects_before_callback_and_post(tmp_path, 
     if damage == "different_prompt":
         params.prompt = "另一正文"
     elif damage == "different_task":
-        params.system_task = {**params.system_task, "kind": "experiment"}
+        params.system_task = {**params.system_task, "kind": "audit_other"}
     else:
         params.original_prompt = None
     effects = []

@@ -47,10 +47,6 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "R1-02 resilience-drill proxy script, not a product service parameter entry point."
     ),
-    "scripts/watch_harness/content_source_simulator.py:log_message": (
-        "HTTPRequestHandler-style logging override accepts formatter arguments; "
-        "watch self-test harness script, not a product service parameter entry point."
-    ),
     "agent_py_agent/agent/concurrency/retry.py:wrapper": (
         "Transparent retry decorator forwarding must preserve arbitrary callable signatures; "
         "this is infrastructure, not a product service interface."
@@ -72,10 +68,6 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "Watch-harness HTTP simulator logging override accepts formatter arguments; "
         "not a product service parameter entry point (same as http_service/feishu)."
     ),
-    "scripts/watch_harness/messy_source_simulator.py:log_message": (
-        "Watch-harness HTTP simulator logging override accepts formatter arguments; "
-        "not a product service parameter entry point (same as multi_source_simulator)."
-    ),
     "scripts/gateway_pressure.py:log_message": (
         "Pressure-harness stub LLM logging override accepts formatter arguments; "
         "not a product service parameter entry point (same as http_service/feishu)."
@@ -88,9 +80,6 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
     ),
     "agent_py_agent/cli/chat_parts/renderer.py:style_text": (
         "Small rendering helper accepts style codes; no product service boundary."
-    ),
-    "agent_py_agent/cli/scenario_utils.py:scenario_command": (
-        "CLI command-list builder accepts command fragments; no service boundary."
     ),
     "agent_py_agent/cli/thinking_spinner.py:__exit__": (
         "Context-manager protocol method accepts arbitrary exception details."
@@ -261,9 +250,6 @@ NATURAL_LANGUAGE_FACT_SOURCE_FORBIDDEN_MARKERS = {
     "agent_py_agent/agent/agent_core/orchestration_root_contract.py": [
         "_missing_terms",
         "_missing_hierarchy_contracts",
-    ],
-    "agent_py_agent/agent/subagents/patch/patch_apply_helpers.py": [
-        "extract_patch_test_command",
     ],
     "agent_py_agent/agent/subagents/services/patch_apply/test_commands.py": [
         "for check in task.acceptance_checks",

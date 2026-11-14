@@ -35,7 +35,7 @@ SAMPLE_SUCCESS = "observe_sample_ok"
 NONBLOCKING_BUSY = "observe_nonblocking_busy"
 # 本片接入到达计数的点位；其余点位展示时明确写“未统计”，不显示成 0 次。
 COVERED_POINTS = ("planning", "delivery_quality", "action_candidate", "external_material_order",
-                  "skill_proposal_review", "pre_recall", "recall", "curator", "curator_relation", "model_selection",
+                  "pre_recall", "recall", "curator", "curator_relation", "model_selection",
                   "skill_tool", "subagent_model")
 # 点位的适用范围说明（宿主事实，不是原因码）：诊断里带出，审计与菜单照原样显示，免得把“这里本来就不判断”看成没接线。
 _POINT_NOTES = {"model_selection": "只在经 Gateway 的对话里判断，本机直连 TUI 不判断"}

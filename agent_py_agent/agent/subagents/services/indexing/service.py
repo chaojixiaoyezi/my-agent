@@ -25,7 +25,6 @@ if TYPE_CHECKING:
         DispatchRecord,
         DispatchWatchRecord,
         ParentPlannerRecord,
-        PatchReviewRecord,
         SubAgentRunnerResult,
     )
 
@@ -37,7 +36,6 @@ from .records import (
     index_capability_route_via,
     index_channel_probe_via,
     index_dataclass_record_via,
-    index_patch_review_via,
     index_runner_result_via,
 )
 
@@ -133,9 +131,6 @@ class SubAgentIndexingService:
 
     def index_capability_route(self, record: CapabilityRouteRecord) -> None:
         index_capability_route_via(self, record)
-
-    def index_patch_review(self, record: PatchReviewRecord) -> None:
-        index_patch_review_via(self, record)
 
     def index_dispatch_record(self, record: DispatchRecord) -> None:
         _index_dispatch_record_via(self, record)

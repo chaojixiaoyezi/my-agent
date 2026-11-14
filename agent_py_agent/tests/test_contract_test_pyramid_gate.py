@@ -27,7 +27,6 @@ def test_contract_test_pyramid_gate_rejects_production_task_specific_needles(tmp
         "agent_py_agent/tests/fake_tools",
         "agent_py_agent/tests/fake_llm",
         "agent_py_agent/tests/replay",
-        "agent_py_agent/tests/scenario_packs",
     ):
         path = tmp_path / rel
         path.mkdir(parents=True)

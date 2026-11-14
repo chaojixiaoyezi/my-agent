@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1523,
+  "count": 1509,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2212,30 +2212,6 @@
       "description": "Jev 候选适用场景上限 144 字节：约 24 个汉字。"
     },
     {
-      "name": "_BASELINE_NAME_LIMIT_CHARS",
-      "file": "agent_py_agent/agent/capability/decision_experiment_sample.py",
-      "value": 64,
-      "unit": "字符",
-      "category": "上限预算",
-      "description": "基线名称只供核对，截到 64 个（与能力观测同一口径）；完整集合另以数量与摘要表达。"
-    },
-    {
-      "name": "_CANDIDATE_NAME_LIMIT_CHARS",
-      "file": "agent_py_agent/agent/capability/decision_experiment_sample.py",
-      "value": 256,
-      "unit": "字符",
-      "category": "上限预算",
-      "description": "候选短名单/延迟名单要逐个判断实际调用的工具是否被保留，需尽量完整；256 覆盖常见工具规模，超出时显式标记截断。"
-    },
-    {
-      "name": "_LESSON_EXCERPT_CHARS",
-      "file": "agent_py_agent/agent/capability/decision_skill_proposal_review.py",
-      "value": 240,
-      "unit": "字符",
-      "category": "其它",
-      "description": "经验条目在提案摘录里的最大字符数。"
-    },
-    {
       "name": "_DROPPED_LIST_LIMIT_COUNT",
       "file": "agent_py_agent/agent/capability/learnpack_build_notes.py",
       "value": 10,
@@ -4124,30 +4100,6 @@
       "description": "每个 owner 最多展示这么多条按调用次数排序的会话明细"
     },
     {
-      "name": "MIN_COMPARABLE_SAMPLES_COUNT",
-      "file": "agent_py_agent/agent/conversation/decision_experiment_evaluation.py",
-      "value": 3,
-      "unit": "个",
-      "category": "其它",
-      "description": "至少 3 个可比较的已完成样本才可能提出建议：一两次命中可能是巧合，不足以证明短名单不会漏掉实际要用的工具。"
-    },
-    {
-      "name": "REQUIRED_RECALL",
-      "file": "agent_py_agent/agent/conversation/decision_experiment_evaluation.py",
-      "value": 1.0,
-      "unit": "",
-      "category": "其它",
-      "description": "可信指标是短名单召回：实际调用过、且属于本次快照的工具必须全部在候选短名单内；漏一个就意味着 apply 会让模型多绕一次搜索。"
-    },
-    {
-      "name": "WINDOW_SAMPLES_COUNT",
-      "file": "agent_py_agent/agent/conversation/decision_experiment_evaluation.py",
-      "value": 8,
-      "unit": "个",
-      "category": "其它",
-      "description": "只看最近 8 个已完成样本（与请求记录条目上限一致），更早的样本不再参与，避免很久以前的环境左右当前判断。"
-    },
-    {
       "name": "_MAX_RECORDS_COUNT",
       "file": "agent_py_agent/agent/conversation/decision_outcome_log.py",
       "value": 20000,
@@ -6002,30 +5954,6 @@
       "unit": "个",
       "category": "上限预算",
       "description": "上下文最近任务工作区最多保留 4 个：只给模型最近几个可续做的现场。"
-    },
-    {
-      "name": "_CHAIN_REQUESTS",
-      "file": "agent_py_agent/agent/gateway_parts/request_experiment_records.py",
-      "value": 16,
-      "unit": "次",
-      "category": "其它",
-      "description": "证据链最多回读 16 条原请求记录，读路径与回合收尾都保持有界 I/O。"
-    },
-    {
-      "name": "_REALIZED_NAME_LIMIT_COUNT",
-      "file": "agent_py_agent/agent/gateway_parts/request_experiment_records.py",
-      "value": 64,
-      "unit": "个",
-      "category": "上限预算",
-      "description": "实际调用的不同工具名截到 64 个；超过时显式标记截断，评估器不据此计算召回。"
-    },
-    {
-      "name": "_RECORD_LIMIT_COUNT",
-      "file": "agent_py_agent/agent/gateway_parts/request_experiment_records.py",
-      "value": 8,
-      "unit": "个",
-      "category": "上限预算",
-      "description": "超出的旧记录直接丢弃，防止实验账无限增长。"
     },
     {
       "name": "_ADMISSION_WAIT_REFRESH_SECONDS",
@@ -9196,14 +9124,6 @@
       "description": "单次 run 教训账本的最大字节数；超限拒绝追加，防失控循环撑爆账本。"
     },
     {
-      "name": "_PATCH_TEST_TIMEOUT_SECONDS",
-      "file": "agent_py_agent/agent/subagents/patch/patch_apply_helpers.py",
-      "value": 120,
-      "unit": "秒",
-      "category": "超时",
-      "description": "patch 测试命令的超时秒数；超时即判测试失败，防止测试命令挂死。"
-    },
-    {
       "name": "BACKGROUND_START_STALE_SECONDS",
       "file": "agent_py_agent/agent/subagents/process_control.py",
       "value": 180.0,
@@ -12138,38 +12058,6 @@
       "unit": "个",
       "category": "上限预算",
       "description": "2026-09-28 参数减量从配置降为常量（值不变，原默认 8）。"
-    },
-    {
-      "name": "_SCENARIO_GATEWAY_READY_MAX_SECONDS",
-      "file": "agent_py_agent/cli/scenario_utils.py",
-      "value": 60.0,
-      "unit": "秒",
-      "category": "上限预算",
-      "description": "场景脚本等待 Gateway 就绪的预算上限 60 秒"
-    },
-    {
-      "name": "_SCENARIO_GATEWAY_READY_MIN_SECONDS",
-      "file": "agent_py_agent/cli/scenario_utils.py",
-      "value": 10.0,
-      "unit": "秒",
-      "category": "其它",
-      "description": "会把“还在起来”的 Gateway 报成启动失败（exit 2）；这里只决定等多久，就绪判据仍由 gateway start 自己裁决。"
-    },
-    {
-      "name": "_SCENARIO_GATEWAY_START_EXTRA_SECONDS",
-      "file": "agent_py_agent/cli/scenario_utils.py",
-      "value": 60.0,
-      "unit": "秒",
-      "category": "其它",
-      "description": "--force 会先停旧实例再冷启动，start 子进程自身的时限要在就绪预算之外再留出停止等待的余量。"
-    },
-    {
-      "name": "_SCENARIO_GATEWAY_STOP_GRACE_SECONDS",
-      "file": "agent_py_agent/cli/scenario_utils.py",
-      "value": 5.0,
-      "unit": "秒",
-      "category": "其它",
-      "description": "正式 stop 停不掉时按 pid 升级终止：SIGTERM 后等这么久，仍活着再 SIGKILL 并再等一次。"
     },
     {
       "name": "_SHARED_PROGRESS_ROOT_COUNT",

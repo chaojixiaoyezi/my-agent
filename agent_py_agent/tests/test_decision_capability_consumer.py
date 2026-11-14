@@ -394,15 +394,6 @@ def test_only_new_evaluations_count_one_reach_each(surface, monkeypatch, tmp_pat
                           "nothing_to_recommend": 1, "bad_material": 1}, 1)
 
 
-def test_experiment_path_is_one_reach_with_its_own_reason(surface, monkeypatch, tmp_path):
-    reasons = reach_counter(surface.host, monkeypatch, "skill_tool", tmp_path)
-    stages = iter([SimpleNamespace(error_code="", enabled_points=(), experiment_available=True),
-                   SimpleNamespace(error_code="", enabled_points=(), experiment_available=False)])
-    monkeypatch.setattr(module, "begin_decision_stage", lambda *_args, **_kwargs: next(stages))
-    result = module.recommend_capabilities(surface.host, surface.params, surface.snapshot, surface.contract)
-    assert result.finding == "skill_tool_decision:experiment:experiment_point_forbidden"
-    assert reasons() == ({"experiment_forbidden": 1}, 0), "普通阶段没开时只记实验这一次的结果，不另记 point_off"
-
 def test_host_turn_survives_db_attempt_rotation_but_not_host_turn_change(surface, monkeypatch):
     calls = provider(monkeypatch)
     surface.params.capability_presentation_turn_id = "gateway-execution-1"

@@ -203,7 +203,7 @@ def test_admin_owner_and_live_access_boundaries(tmp_path):
     assert _call(ordinary, 'autonomy_policy.list')[0] == 503
 
 
-# LLM: 同一清单应包含所有49动作，闭合schema必须在任何领域调用前拒绝未知字段。
+# LLM: 同一清单应包含所有46动作，闭合schema必须在任何领域调用前拒绝未知字段。
 # 函数用途: 验证W11静态目录、权限位与Schema引用闭包。
 def test_registry_contracts_closed_and_complete(tmp_path):
     from agent_py_agent.agent.gateway_parts.business_api_v13_w11 import (
@@ -214,12 +214,12 @@ def test_registry_contracts_closed_and_complete(tmp_path):
         V13_JOB_KINDS,
     )
     # 经冻结合同逐字段核验后的静态投影指纹；不依赖部署外任务文件。
-    for value, expected in ((_ACTION_CONTRACTS, 'cd5d5c0ab010a811ac22fe3d96b931893c22523a9a0420eb4f0f1b43472bf07a'),
+    for value, expected in ((_ACTION_CONTRACTS, '609892a9c5d0fcb76b20062d76da36463439fef8c6b0b7255e5d9215db943398'),
                             (V13_DEFS, '3fd49da67b0f0955d66f0533f6eff0b09ab20c2f6fb5eed57610e7404020e9fc')):
         encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()
         assert hashlib.sha256(encoded).hexdigest() == expected
-    assert len(V13_ACTIONS) == 49
-    assert len({item.name for item in V13_ACTIONS}) == 49
+    assert len(V13_ACTIONS) == 46
+    assert len({item.name for item in V13_ACTIONS}) == 46
     assert V13_COLLECTIONS['conversations'] == V13_COLLECTIONS['soc_alerts'] == 'owner'
     assert set(V13_JOB_KINDS) == {'skill_backtest'}
     host = _host(tmp_path)

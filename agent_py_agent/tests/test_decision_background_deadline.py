@@ -111,11 +111,11 @@ def test_smaller_caller_deadlines_still_win(host, clock):
     assert sent == [103.0, 103.0, 102.8, 103.2]
 
 
-@pytest.mark.parametrize("scope,experiment,expected", [
-    ("owner_background", False, 114.0), ("owner_background", True, 108.0), ("thread", False, 108.0),
+@pytest.mark.parametrize("scope,expected", [
+    ("owner_background", 114.0), ("thread", 108.0),
 ])
-def test_only_ordinary_background_stages_drop_the_stage_cap(scope, experiment, expected):
-    stage = service.DecisionStage("op", "owner", "", "run", "", 100.0, 108.0, scope=scope, experiment=experiment)
+def test_only_ordinary_background_stages_drop_the_stage_cap(scope, expected):
+    stage = service.DecisionStage("op", "owner", "", "run", "", 100.0, 108.0, scope=scope)
     outcome = service.DecisionOutcome("apply", "success", deadline=114.0)
     assert service._point_deadline(stage, 106.0, 8.0, None) == expected
     assert service._adoption_deadline(stage, outcome) == expected

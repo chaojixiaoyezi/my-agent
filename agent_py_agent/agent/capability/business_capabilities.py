@@ -47,15 +47,21 @@ class BusinessCapabilityResolution:
                 'unavailable': list(self.unavailable), 'policy_revision': self.policy_revision}
 
 
-def resolve_business_capabilities(*, context: BusinessExecutionContext, request: object, host: object) -> object:
+def resolve_business_capabilities(*, context: BusinessExecutionContext, request: object, host: object, spaces=None, actor=None) -> object:
     """只对原授权候选做mounted_first稳定排序；每次重读空间和可用性，绝不缓存执行许可。"""
     from .router import CapabilitySearchHit, score_card
 
-    space = _space_for_context(host, context)
+    space = _space_for_context(host, context, spaces=spaces, actor=actor)
     if isinstance(request, dict):
         request = BusinessCapabilityRequest(query=request.get('query', ''))
     if not isinstance(request, BusinessCapabilityRequest):
         raise TypeError('需要宿主能力查询')
+    if (not callable(getattr(host, 'current_skill_snapshot', None))
+            or getattr(host, 'skills_service', None) is None
+            or getattr(host, 'tools', None) is None
+            or (request.candidates is None and getattr(host, 'capability_router', None) is None)):
+        from ..plugin_host.errors import HostAPIError
+        raise HostAPIError('HOST_NOT_READY', 503, message='当前入口未挂载能力快照解析端口')
     frozen = host.current_skill_snapshot()
     live = host.skills_service.snapshot_for(frozen.workspace_root)
     if frozen.owner_id != context.owner_id or live.owner_id != context.owner_id:
@@ -154,16 +160,17 @@ def _owner(host):
     return owner
 
 
-def _space_for_context(host, context):
+def _space_for_context(host, context, *, spaces=None, actor=None):
     if not isinstance(context, BusinessExecutionContext) or context.owner_id != _owner(host) or context.space_id is None:
         raise PermissionError('业务上下文Owner/空间不匹配')
-    if hasattr(host, 'business_spaces') and hasattr(host, 'business_actor'):
-        spaces, actor = host.business_spaces, host.business_actor
-    else:
-        from ..gateway_parts.business_api import local_business_context
+    if spaces is None or actor is None:
+        if hasattr(host, 'business_spaces') and hasattr(host, 'business_actor'):
+            spaces, actor = host.business_spaces, host.business_actor
+        else:
+            from ..gateway_parts.business_api import local_business_context
 
-        call_context, services = local_business_context(host, model=True)
-        spaces, actor = services.spaces, services.actor(call_context)
+            call_context, services = local_business_context(host, model=True)
+            spaces, actor = services.spaces, services.actor(call_context)
     view = spaces.get(context.space_id, actor=actor)
     space = view['space']
     if space['space_id'] != context.space_id or space['state'] != 'active':
@@ -203,7 +210,8 @@ class BusinessCapabilityService:
     def __init__(self, host):
         self.host = host
 
-    def execute(self, action: str, request: dict, *, context: BusinessExecutionContext | None = None) -> dict:
+    def execute(self, action: str, request: dict, *, context: BusinessExecutionContext | None = None,
+                spaces=None, actor=None) -> dict:
         owner = _owner(self.host)
         fields = {'spaces.packages.catalog': {'cursor', 'limit', 'query'},
                   'spaces.capabilities.resolve': {'space_id', 'project_ref', 'task_id', 'query'},
@@ -233,17 +241,18 @@ class BusinessCapabilityService:
             raise PermissionError('业务对象与宿主上下文不一致')
         if action == 'spaces.capabilities.resolve':
             result = resolve_business_capabilities(context=context,
-                request=BusinessCapabilityRequest(request.get('query', '')), host=self.host)
+                request=BusinessCapabilityRequest(request.get('query', '')), host=self.host,
+                spaces=spaces, actor=actor)
             from .method_usage import record_candidates
             matches = [{'kind': 'capability_package' if row['kind'] == 'package' else row['kind'],
                         'stable_id': row['method_ref']} for row in result.candidates]
             record_candidates(self.host, self.host.current_skill_snapshot(), matches,
                               source='spaces.capabilities.resolve')
             return result.to_dict()
-        return _usage_page(self.host, owner, action, request, context)
+        return _usage_page(self.host, owner, action, request, context, spaces=spaces, actor=actor)
 
 
-def _usage_page(host, owner, action, request, context):
+def _usage_page(host, owner, action, request, context, *, spaces=None, actor=None):
     """原来源行有界推进；过滤空页也保留游标，不为一页结果全扫历史。"""
     import sqlite3
 
@@ -252,7 +261,7 @@ def _usage_page(host, owner, action, request, context):
     from ..runtime_db.repository import RuntimeRepository
     from ..runtime_db.schema import runtime_db_path
 
-    space = _space_for_context(host, context)
+    space = _space_for_context(host, context, spaces=spaces, actor=actor)
     loader = getattr(host, 'task_business_context', None)
     if not callable(loader):
         _page([], request, (owner, action, context.space_id, request.get('task_id')))

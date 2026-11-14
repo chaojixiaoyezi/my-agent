@@ -1,5 +1,5 @@
 # LLM: 会话控制保留原类型、参数语义和回执格式；插件只保留公共命名空间和原输入，参数与执行归共享插件服务。
-# /experiment 与 /audit 准备轮同为任务命令：参数冻结进 system_task，只有任务正文进入模型。
+# /audit 准备轮为任务命令：参数冻结进 system_task，只有任务正文进入模型。
 # /admin、/approve 的密码只在 command.value 中，任何持久化之前经 persisted_control_command_text 脱敏。
 # /effort 的八档白名单取唯一换算表，TUI/IM 共用解析，不按模型名或展示文字扩大取值。
 # /dir和/fork只解析结构化参数，执行必须另由已认证owner调用工作区领域服务，不从路径授予管理员身份。

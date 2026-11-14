@@ -128,21 +128,6 @@ def test_absent_mcp_servers_keeps_anchor_v7_bytes_and_manifest():
     assert manifest.is_content_only
 
 
-@pytest.mark.parametrize("name,digest", [
-    ("drama-text-a", "51ca17734b865464ad18ecf1de5c254f97cb3d16afc66f1595a776f081619a36"),
-    ("drama-workflow-b", "90c058e1ae79e442967fe0f3b5f4f917a95618725b08977b386e02a44ba63209"),
-])
-def test_v7_existing_fixed_digests_remain_locked(name, digest):
-    # 摘要原样引用只读 test_package_build.py 的历史值，不重录或自动更新。
-    root = Path(__file__).resolve().parents[2] / "examples" / "capability-packages" / name
-    declaration = json.loads((root / "declaration.json").read_text(encoding="utf-8"))
-    assert "mcp_servers" not in declaration
-    contents = read_declared_files(root, capability_pack_paths(declaration))
-    built = build_capability_pack(declaration, contents)
-    assert built.sha256 == digest
-    assert built.payload == _anchor_v7_bytes(declaration, contents)
-
-
 @pytest.mark.parametrize("catalog", ["declared", "pinned_on_enable"])
 @pytest.mark.parametrize("executable_entry", [False, True])
 def test_one_server_builds_v10_and_preserves_input(catalog, executable_entry):

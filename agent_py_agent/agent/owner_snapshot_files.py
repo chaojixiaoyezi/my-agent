@@ -200,7 +200,7 @@ class SnapshotParent:
                 os.close(child)
             os.close(root)
 
-    def __exit__(self, *_args):
+    def __exit__(self, exc_type=None, exc=None, tb=None):
         for descriptor in (self.fd, self.root_fd):
             if descriptor is not None:
                 os.close(descriptor)
@@ -370,9 +370,9 @@ class DownloadedObjects:
             raise
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, exc_type=None, exc=None, tb=None):
         try:
-            self.private.__exit__(*args)
+            self.private.__exit__(exc_type, exc, tb)
         finally:
             self.temporary.cleanup()
 

@@ -14,7 +14,6 @@ REQUIRED_TEST_DIRS = (
     "agent_py_agent/tests/fake_tools",
     "agent_py_agent/tests/fake_llm",
     "agent_py_agent/tests/replay",
-    "agent_py_agent/tests/scenario_packs",
 )
 
 REQUIRED_TEST_LAYERS = ("contract", "fake-tool", "fake-llm", "replay", "real-tui")

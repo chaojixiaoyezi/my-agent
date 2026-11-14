@@ -358,5 +358,7 @@ class TestSupervisorSubcommands:
         sub = parser.add_subparsers(dest="gateway_command")
         add_gateway_subcommands(sub)
 
-        args = parser.parse_args(["gateway", "start-all", "--adapter", "qq"])
-        assert args.adapter == "qq"
+        args = parser.parse_args(["gateway", "start-all", "--adapter", "feishu"])
+        assert args.adapter == "feishu"
+        with pytest.raises(SystemExit):
+            parser.parse_args(["gateway", "start-all", "--adapter", "qq"])
