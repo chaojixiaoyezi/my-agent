@@ -213,7 +213,7 @@ def _concurrency_settled(record):
                 and result.get('reconciliation_state') == 'absent')
             if obligation and not settled:
                 return False
-        elif result.get('effect_started') and not _non_agent_step_settled(step, result):
+        elif result.get('effect_started') and record.status != 'cancelled' and not _non_agent_step_settled(step, result):
             return False
     return record.status in ('succeeded', 'failed', 'skipped', 'cancelled') or record.effect_outcome == 'not_started'
 
