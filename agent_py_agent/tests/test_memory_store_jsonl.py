@@ -231,3 +231,72 @@ class TestJsonlMemoryIntegration:
             parsed = json.loads(record.to_json())
             assert "role" in parsed
             assert "content" in parsed
+
+
+def test_read_memory_file_skips_corrupt_lines(tmp_path) -> None:
+    mem = JsonlMemory(tmp_path / "mem.jsonl")
+    mem.path.write_text(
+        "\n".join([
+            json.dumps({"role": "user", "content": "good1"}),
+            "{not valid json",  # 坏 JSON 行(并发撕行/磁盘满半写)
+            json.dumps({"role": "assistant", "content": "good2", "future_field": 123}),  # 新版本未知字段
+            json.dumps([1, 2, 3]),  # 非 dict
+            "",  # 空行
+            json.dumps({"role": "user", "content": "good3"}),
+        ]),
+        encoding="utf-8",
+    )
+    records = mem._read_memory_file(mem.path)  # 不抛异常
+    assert [r.content for r in records] == ["good1", "good2", "good3"]  # 坏的跳过、好的全保留
+    assert all(r.role for r in records)  # 未知字段被过滤,记录正常构造
+
+
+def test_record_missing_required_field_skipped(tmp_path) -> None:
+    mem = JsonlMemory(tmp_path / "mem.jsonl")
+    mem.path.write_text(
+        "\n".join([
+            json.dumps({"content": "no role"}),  # 缺必填 role → 跳过(构造失败)
+            json.dumps({"role": "user", "content": "ok"}),
+        ]),
+        encoding="utf-8",
+    )
+    records = mem._read_memory_file(mem.path)
+    assert [r.content for r in records] == ["ok"]  # 缺必填的被跳过,不崩
+
+
+def test_missing_file_returns_empty(tmp_path) -> None:
+    mem = JsonlMemory(tmp_path / "nope.jsonl")
+    assert mem._read_memory_file(mem.path) == []
+
+
+# LLM: 正式召回只读owner内MemoryReadIndex，旧LocalStore不再参与；真实损坏已建索引文件，不伪造读取结果。
+# 函数用途: 验证读索引不可用时仍回读正式权威，并把降级如实报告而不是当作没有记忆。
+def test_memory_search_report_reads_primary_jsonl_and_reports_index_failure(tmp_path: Path) -> None:
+    from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
+
+    store = MagicMock()
+    store.search.side_effect = ValueError("local memory index is broken")
+    memory = JsonlMemory(tmp_path / "memory.jsonl", local_store=store)
+    memory.add("user", "Python primary JSONL memory survives index failure")
+    assert memory.index_all() == 1
+    MemoryReadIndex(memory.path).path.write_bytes(b"local memory index is broken" * 64)
+
+    results, load_errors = memory.search_report("Python", top_k=5)
+
+    assert [record.content for record in results] == ["Python primary JSONL memory survives index failure"]
+    assert load_errors
+    assert load_errors[0]["context"] == "memory_store.read_index"
+    assert load_errors[0]["coverage"]["status"] == "unavailable"
+    assert load_errors[0]["fallback"] == "committed_authority_scan"
+    store.search.assert_not_called()
+
+
+def test_memory_search_api_reads_primary_jsonl_on_index_failure(tmp_path: Path) -> None:
+    store = MagicMock()
+    store.search.side_effect = ValueError("local memory index is broken")
+    memory = JsonlMemory(tmp_path / "memory.jsonl", local_store=store)
+    memory.add("user", "Search still finds primary JSONL memory")
+
+    results = memory.search("primary", top_k=5)
+
+    assert [record.content for record in results] == ["Search still finds primary JSONL memory"]

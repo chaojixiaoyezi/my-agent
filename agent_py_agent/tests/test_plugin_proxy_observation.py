@@ -13,6 +13,7 @@ from agent_py_agent.agent.plugin_observation import (
     OBSERVATION_STALE,
 )
 from agent_py_agent.agent.plugin_runtime import PluginProxyTool, plugin_tool_name
+from agent_py_agent.agent.tooling.mcp_client import MCPError
 from agent_py_agent.tests.test_plugin_observation import _payload, _Repo
 from agent_py_agent.tests.test_plugin_package import _v5_manifest, _wheel
 
@@ -163,3 +164,41 @@ def test_plugin_side_stale_or_not_found_rejection_is_lifted_to_structured_codes(
     client.result = {"content": json.dumps({"code": "OBSERVATION_STALE"}), "structuredContent": {"my_agent_observation_error": {"code": "stale"}}, "isError": True}
     plain = _proxy(client, "click").execute({"selector": "#go", "__run_scope": RUN_SCOPE})
     assert plain.reported_error_code == "TOOL_EXECUTION_FAILED" and "observation_rejected" not in plain.result_envelope, "没走候选路径的错误不提升"
+
+
+# 类用途: 假插件客户端；激活是否有效和连接是否已关分别可控，记录是否真的发出了业务调用。
+class _RevokedClient:
+    def __init__(self, *, revoked: bool):
+        self.calls = 0
+        self.activation_ref = SimpleNamespace(require=self._require)
+        self._revoked = revoked
+
+    def _require(self, *, allow_preparing: bool = False):
+        if self._revoked:
+            raise ValueError("插件激活已撤销")
+        return SimpleNamespace(enabled=True)
+
+    def call_tool(self, tool_name, arguments, **options):
+        self.calls += 1
+        raise MCPError("MCP 连接已关闭或被替换", code="MCP_CONNECTION_CLOSED", effect_outcome="not_started")
+
+
+def _revoked_tool(client) -> PluginProxyTool:
+    return PluginProxyTool(client, "read", SimpleNamespace(name="plugin__sample_peek_07b51450__read_3316348d"), SimpleNamespace())
+
+
+def test_revoked_activation_wins_over_closed_connection_and_never_sends():
+    client = _RevokedClient(revoked=True)
+    outcome = _revoked_tool(client).execute({"path": "/tmp/x"})
+    assert outcome.ok is False and outcome.error_code == "TOOL_UNAVAILABLE"
+    assert outcome.effect_outcome == "not_started"
+    assert outcome.reported_error_code == "PLUGIN_ACTIVATION_UNAVAILABLE", "具体原因码与审批前/批准后复核一致"
+    assert json.loads(outcome.output)["error"] == "原插件已停用或激活不可用"
+    assert client.calls == 0, "撤销后不再向连接发送，也不看连接是否已关"
+
+
+def test_live_activation_falls_through_to_the_mcp_call_path():
+    client = _RevokedClient(revoked=False)
+    outcome = _revoked_tool(client).execute({"path": "/tmp/x"})
+    assert client.calls == 1
+    assert outcome.error_code == "TOOL_EXECUTION_FAILED", "连接确实已关时仍是原 MCP_CONNECTION_CLOSED 映射"

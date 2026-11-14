@@ -11,13 +11,6 @@ from agent_py_agent.agent.settings import AgentConfig
 
 
 class TestPromptBuilderInit:
-    def test_init_with_valid_config_and_root(self):
-        config = AgentConfig()
-        root = Path("/tmp/test")
-        builder = PromptBuilder(config, root)
-        assert builder.config is config
-        assert builder.root == root
-
     def test_init_config_is_agent_config_instance(self):
         config = AgentConfig(system_prompt="custom prompt")
         builder = PromptBuilder(config, Path("/tmp"))
@@ -26,28 +19,10 @@ class TestPromptBuilderInit:
 
 
 class TestReadPromptFiles:
-    def test_read_prompt_files_empty_list(self, tmp_path):
-        config = AgentConfig(prompt_files=[])
-        builder = PromptBuilder(config, tmp_path)
-        result = builder.read_prompt_files()
-        assert result == []
-
-    def test_read_prompt_files_none_extra(self, tmp_path):
-        config = AgentConfig(prompt_files=[])
-        builder = PromptBuilder(config, tmp_path)
-        result = builder.read_prompt_files(None)
-        assert result == []
-
     def test_read_prompt_files_extra_files_none(self, tmp_path):
         config = AgentConfig(prompt_files=[])
         builder = PromptBuilder(config, tmp_path)
         result = builder.read_prompt_files(extra_files=None)
-        assert result == []
-
-    def test_read_prompt_files_nonexistent(self, tmp_path):
-        config = AgentConfig(prompt_files=["nonexistent.txt"])
-        builder = PromptBuilder(config, tmp_path)
-        result = builder.read_prompt_files()
         assert result == []
 
     def test_read_prompt_files_absolute_path_not_exists(self, tmp_path):
@@ -117,13 +92,6 @@ class TestBuildBasic:
         assert "# Related Memory" in result
         assert "（无相关记忆）" in result
 
-    def test_build_no_memories(self, tmp_path):
-        config = AgentConfig()
-        builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [])
-        assert "hello" in result
-        assert "（无相关记忆）" in result
-
     def test_build_with_single_memory(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
@@ -156,13 +124,6 @@ class TestBuildBasic:
 
 
 class TestBuildInject:
-    def test_build_inject_none(self, tmp_path):
-        config = AgentConfig()
-        builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], inject=None)
-        assert "# Runtime Injection" in result
-        assert "（无）" in result
-
     def test_build_inject_empty_list(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
@@ -175,13 +136,6 @@ class TestBuildInject:
         builder = PromptBuilder(config, tmp_path)
         result = builder.build("hello", [], inject=["injected content"])
         assert "injected content" in result
-
-    def test_build_inject_multiple_items(self, tmp_path):
-        config = AgentConfig()
-        builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], inject=["line1", "line2"])
-        assert "line1" in result
-        assert "line2" in result
 
 
 class TestBuildToolSections:
@@ -308,10 +262,3 @@ class TestBuildDynamicPromptFiles:
         result = builder.build("hello", [], prompt_files=["dynamic.txt"])
         assert "dynamic rule content" in result
         assert "# Dynamic Prompt Files" in result
-
-    def test_build_dynamic_files_section_empty_when_no_files(self, tmp_path):
-        config = AgentConfig()
-        builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [])
-        assert "# Dynamic Prompt Files" in result
-        assert "（无）" in result

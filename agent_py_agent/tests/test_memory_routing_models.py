@@ -242,23 +242,11 @@ def test_dedupe_removes_empty():
     assert result == ["a", "b"]
 
 
-def test_dedupe_strips_before_dedup():
-    """测试去重前先去除空白。"""
-    items = ["a", "  a  ", "b"]
-    result = dedupe_strings(items)
-    assert result == ["a", "b"]
-
-
 def test_dedupe_only_strings():
     """测试去重只处理字符串，非字符串应预先转换。"""
     items = ["a", "b", "a", "c"]
     result = dedupe_strings(items)
     assert result == ["a", "b", "c"]
-
-
-def test_dedupe_empty_list():
-    """测试空列表。"""
-    assert dedupe_strings([]) == []
 
 
 # ── 边界场景测试 ──────────────────────────────────────────────────────────

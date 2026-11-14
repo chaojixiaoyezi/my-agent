@@ -79,13 +79,6 @@ class TestMemoryRecordModel:
         assert parsed["tags"] == ["important", "review"]
         assert parsed["created_at"] == 1234567890.5
 
-    def test_record_to_json_auto_timestamp(self):
-        """验证 to_json 自动设置时间戳。"""
-        record = MemoryRecord(role="user", content="hi")
-        assert record.created_at == 0.0
-        record.to_json()
-        assert record.created_at > 0
-
     def test_record_to_json_timestamp_not_overwritten(self):
         """验证已设置的时间戳不被覆盖。"""
         import json

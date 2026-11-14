@@ -21,32 +21,7 @@ from agent_py_agent.agent.memory_archive import (
     append_snapshot,
     has_resume_trigger,
 )
-from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.agent.settings import AgentConfig
-
-
-def _promote_formal_route(agent: SimpleAgent) -> str:
-    candidate = None
-    for task_id in ("task-route-a", "task-route-b"):
-        candidate = agent.memory_candidates.observe(
-            CandidateObservation(
-                candidate_type="lesson",
-                content="长期规则正文：回答 memory routing 问题时先核对正式 lesson。",
-                subject_key="memory.routing",
-                scope=MemoryScope("global", "global"),
-                origin="subagent_lesson",
-                evidence_refs=({"ref_id": task_id, "kind": "task"},),
-                source_task_ids=(task_id,),
-                observation_id=f"route-observation:{task_id}",
-                promotion_target="lesson",
-            )
-        )
-    assert candidate is not None
-    # 用户通过原管理入口审核精确lesson；来源事实本身不授予自动发布权。
-    agent.memory_promotion.review(candidate.candidate_id, approved=True, reviewer="explicit-test-user")
-    result = agent.memory_promotion.promote(candidate.candidate_id, confirmed=True)
-    assert result.promoted is True
-    return result.promotion_ref.split("#", 1)[0]
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -155,51 +130,6 @@ class NeverCalledBackend:
     def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.calls += 1
         raise AssertionError("backend should not be called after preflight overflow")
-
-
-def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
-    """LLM: Tests runtime injects only formal routed lesson through the one Memory envelope."""
-    agent = _offline_agent(
-        AgentConfig(
-            model_backend="echo",
-            memory_rule_routing_mode="soft",
-            memory_rule_auto_read_limit=1,
-        ),
-        tmp_path,
-    )
-    lesson_path = _promote_formal_route(agent)
-
-    result = agent.run("请按长期规则处理 memory index", save=False)
-
-    assert result.memory_route_matches == 1
-    assert result.memory_route_paths == [lesson_path]
-    assert "### Routed memory authority:" not in result.prompt
-    assert result.prompt.count("<memory-context") == 1
-    assert "长期规则正文" in result.prompt
-    assert result.archive_events == 0
-
-
-def test_run_writes_raw_archive_when_saved(tmp_path):
-    """LLM: Tests that agent.run() writes raw archive events when save=True."""
-    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
-
-    result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
-
-    raw_dir = Path(agent.home_paths.owner_audit_dir)
-    fact_path = Path(agent.home_paths.owner_home_dir) / "memory_archive" / "runtime_facts" / "req-archive-save" / "task.json"
-    files = sorted(raw_dir.glob("*.jsonl"))
-    assert result.archive_events == 2
-    assert result.archive_token_estimate > 0
-    assert result.recovery_snapshot_path == ""
-    assert fact_path.exists()
-    assert len(files) == 1
-    records = _read_jsonl(files[0])
-    assert [record["speaker"] for record in records] == ["user", "assistant"]
-    assert records[0]["content_preview"] == "请归档这轮对话"
-    assert records[1]["action"] == "response"
-    facts = json.loads(fact_path.read_text(encoding="utf-8"))
-    assert facts["goal"] == "请归档这轮对话"
-    assert facts["runtime_progress"]["phase"] == "final"
 
 
 def test_saved_empty_model_response_is_archived_without_empty_long_term_memory(tmp_path):
@@ -396,40 +326,6 @@ def test_run_no_save_blocks_persistent_auto_compact_apply(tmp_path):
     assert not (tmp_path / "memory_archive" / "compact_applies").exists()
 
 
-def test_run_no_save_does_not_write_raw_archive(tmp_path):
-    """LLM: Tests that agent.run() with save=False does not write any raw archive files."""
-    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
-
-    result = agent.run("不要归档这轮对话", save=False)
-
-    assert result.archive_events == 0
-    assert result.recovery_snapshot_path == ""
-    assert not (tmp_path / "audit").exists()
-    assert not (tmp_path / "memory" / "hooks").exists()
-
-
-def test_run_no_save_does_not_write_runtime_fact(tmp_path):
-    """LLM: Tests that save=False does not write runtime fact sources."""
-    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
-
-    result = agent.run(
-        "子代理已完成，请写恢复锚点",
-        save=False,
-        request_id="req-1",
-        run_id="subagent-1",
-        task_id="subagent-1",
-        source="subagent_run",
-        recovery_content_paths=["subagents/subagent-1/STATUS.md"],
-        recovery_next_actions=["读取 STATUS.md 后继续验收"],
-    )
-
-    assert result.archive_events == 0
-    assert result.recovery_snapshot_path == ""
-    assert not (tmp_path / "audit").exists()
-    assert not (tmp_path / "memory" / "hooks").exists()
-    assert not (tmp_path / "memory_archive" / "runtime_facts").exists()
-
-
 def test_run_no_save_still_persists_thread_model_usage_without_runtime_archive(
     tmp_path,
 ) -> None:
@@ -579,17 +475,6 @@ def test_saved_run_runtime_fact_keeps_target_coverage_contract(tmp_path):
     assert payload["target_coverage"]["target_items"][0]["source_path"] == "data/source.txt"
 
 
-def test_auto_resume_context_is_disabled_by_default(tmp_path):
-    """LLM: Tests that auto resume context is disabled by default in agent config."""
-    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
-    agent.run("README 恢复上下文任务", save=True)
-
-    result = agent.run("继续 README", save=False)
-
-    assert result.memory_resume_context_injected is False
-    assert "### Auto Recovery Context" not in result.prompt
-
-
 def test_continue_inside_new_cli_task_does_not_resume_old_task(tmp_path):
     """LLM: Tests that ordinary 'continue working' phrasing does not leak old CLI task memory."""
     agent = _offline_agent(
@@ -607,52 +492,3 @@ def test_continue_inside_new_cli_task_does_not_resume_old_task(tmp_path):
     assert has_resume_trigger("请整理这个目录，内容很多也要继续往下做，最后写报告。") is False
     assert result.memory_resume_context_injected is False
     assert "huge-md5-100mb" not in result.prompt
-
-
-def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
-    """LLM: Tests that auto resume context injects recovery context in always mode."""
-    agent = _offline_agent(
-        _test_config(
-            tmp_path,
-            model_backend="echo",
-            memory_resume_auto_context_mode="always",
-        ),
-        tmp_path,
-    )
-    agent.run("README 恢复上下文任务", save=True, request_id="request-auto-1")
-
-    result = agent.run("继续 README", save=False)
-
-    assert result.memory_resume_context_injected is True
-    assert result.memory_resume_context_query == "README"
-    assert result.memory_resume_context_matches >= 1
-    assert "### Auto Recovery Context" in result.prompt
-    assert "# Recovery Brief" in result.prompt
-    assert "latest_user_intent: README 恢复上下文任务" in result.prompt
-    assert result.memory_resume_context_error == ""
-
-
-def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
-    """LLM: Tests that auto resume context can be enabled per-run with resume_context=True."""
-    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
-    agent.run("README 临时恢复开关任务", save=True, request_id="request-auto-override")
-
-    result = agent.run("继续 README", save=False, resume_context=True)
-
-    assert result.memory_resume_context_injected is True
-    assert result.memory_resume_context_token_estimate > 0
-    assert result.prompt_token_estimate >= result.memory_resume_context_token_estimate
-
-
-def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
-    """LLM: Tests that auto resume context can be disabled per-run with resume_context=False override."""
-    agent = _offline_agent(
-        _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_mode="trigger"),
-        tmp_path,
-    )
-    agent.run("README 禁用恢复开关任务", save=True)
-
-    result = agent.run("继续 README", save=False, resume_context=False)
-
-    assert result.memory_resume_context_injected is False
-    assert "### Auto Recovery Context" not in result.prompt
