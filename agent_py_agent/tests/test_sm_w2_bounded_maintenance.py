@@ -1,6 +1,7 @@
 """W2 合同测试：V2-3 活跃索引保护、80/20 探索推荐、7d/15d/15d 独立生命周期、人工控制与有界游标维护。"""
 from __future__ import annotations
 
+import shutil
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -615,3 +616,99 @@ def test_w2_reconcile_due_bounded_cursor_maintenance_and_sqlite_receipt_cleanup(
     # keep_pairs 中活跃与归档记录依然完好。
     assert read_usage_aggregate(repo, incarnation_id=active_pair[0], activation_id=active_pair[1], content_sha256=active_pair[2]) is not None
     assert read_usage_aggregate(repo, incarnation_id=archived_pair[0], activation_id=archived_pair[1], content_sha256=archived_pair[2]) is not None
+
+
+def test_w2_manual_learned_dir_deletion_converges_and_unblocks_publish(tmp_path):
+    """手动删除托管 learned/archived 目录或清空 SKILL.md 后交还 user_modified 并释放槽位以放行新发布。"""
+    _, _, store = _store_with_runtime(tmp_path)
+    _publish(store, "alpha")
+    _publish(store, "beta")
+
+    shutil.rmtree(store.learned_root / "alpha")
+    assert "alpha" not in store.managed_records(store.load_registry())
+
+    first = maintain_learning(
+        store,
+        mode="autonomous",
+        cool_seconds=604800,
+        archive_seconds=1296000,
+        evict_seconds=1296000,
+        protection_complete=True,
+        batch_ms=5000,
+    )
+    assert first["backlog"] is False
+    assert store.load_registry().skills["alpha"].maintenance["ownership"] == "user_modified"
+
+    gamma_dec = replace(
+        decision("gamma"),
+        body=f"{BODY}\n\n# skill:gamma:v1",
+        when_to_use="when handling gamma",
+        tags=("gamma", "csv"),
+    )
+    gamma_evt = publish_learned_skill(store, PublishRequest(gamma_dec, max_skills=2))
+    assert gamma_evt.event == "published"
+    assert {"beta", "gamma"} <= set(store.managed_records(store.load_registry()))
+
+    second = maintain_learning(
+        store,
+        mode="autonomous",
+        cool_seconds=604800,
+        archive_seconds=1296000,
+        evict_seconds=1296000,
+        protection_complete=True,
+        batch_ms=5000,
+    )
+    assert second["backlog"] is False
+    assert store.load_registry().skills["alpha"].maintenance["ownership"] == "user_modified"
+
+    # 同类情形 1：已归档目录被手动整目录删除后，维护收敛为 user_modified 且不再纳入托管集合。
+    _patch_maint(store, "beta", baseline_at=10.0, modified_at=10.0, last_used_at=0.0, restored_at=0.0)
+    archived = maintain_learning(
+        store,
+        mode="autonomous",
+        cool_seconds=0,
+        archive_seconds=10,
+        evict_seconds=10000,
+        protected_ids=("owner:gamma",),
+        protection_complete=True,
+        now=500.0,
+        batch_ms=5000,
+    )
+    assert archived["backlog"] is False
+    assert store.load_registry().skills["beta"].maintenance["state"] == "archived"
+
+    shutil.rmtree(store.archived_skill_path("beta").parent)
+    assert "beta" not in store.managed_records(store.load_registry(), include_archived=True)
+
+    after_arch_del = maintain_learning(
+        store,
+        mode="autonomous",
+        cool_seconds=604800,
+        archive_seconds=1296000,
+        evict_seconds=1296000,
+        protection_complete=True,
+        batch_ms=5000,
+    )
+    assert after_arch_del["backlog"] is False
+    reg_arch = store.load_registry()
+    assert reg_arch.skills["beta"].maintenance["ownership"] == "user_modified"
+    assert "beta" not in store.managed_records(reg_arch, include_archived=True)
+
+    # 同类情形 2：仅删除 SKILL.md 留下空目录时，同样收敛为 user_modified 并从托管记录释放。
+    _publish(store, "delta")
+    (store.learned_root / "delta" / "SKILL.md").unlink()
+    assert (store.learned_root / "delta").is_dir()
+
+    after_empty = maintain_learning(
+        store,
+        mode="autonomous",
+        cool_seconds=604800,
+        archive_seconds=1296000,
+        evict_seconds=1296000,
+        protection_complete=True,
+        batch_ms=5000,
+    )
+    assert after_empty["backlog"] is False
+    reg_empty = store.load_registry()
+    assert reg_empty.skills["delta"].maintenance["ownership"] == "user_modified"
+    assert "delta" not in store.managed_records(reg_empty)

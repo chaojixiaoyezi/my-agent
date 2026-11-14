@@ -30,6 +30,9 @@ from agent_py_agent.agent.capability.skill_learning_publish import (
 )
 from agent_py_agent.agent.capability.skill_learning_request import build_learning_request
 from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+from agent_py_agent.agent.capability.skill_usage_ledger import record_skill_usage_event
+from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
 BODY = ('# 数据整理\n\n## 步骤\n先核对表头、编码和输入合同，再按日期稳定排序。'
@@ -936,18 +939,55 @@ def test_r2_protection_source_failure_preserves_other_references(learned, monkey
     assert set(expected.values()) - {expected[broken]} <= set(result['protected_ids'])
 
 
-# LLM: 三个独立任务的采用及宿主有效反馈使试用转为 active，晋升历史应追加一次而非重写或重复追加。
+# LLM: 三个独立任务的真实送达与宿主有效反馈使试用转为 active，晋升历史应追加一次而非重写或重复追加。
 # 函数用途: 检查试用技能激活后的状态和完整晋升轨迹。
 def test_r2_trial_to_active_records_one_promotion_transition(learned):
-    _, store = learned
+    home, _ = learned
+    repo = RuntimeRepository(runtime_db_path(home.owner_home_dir))
+    store = SkillLearningStore.for_home(home, usage_runtime_provider=lambda: repo)
     current = store.load_registry().skills['csv-cleaner']
     for task in ('one', 'two', 'three'):
+        record_skill_usage_event(
+            store,
+            event='manual_get',
+            skill_id=f'owner:{current.name}',
+            source='learned',
+            kind='skill',
+            task_id=task,
+            chars=len(BODY),
+            body_chars=len(BODY),
+            content_sha256=current.sha256,
+            incarnation_id=str(current.maintenance.get('incarnation_id') or ''),
+            activation_id=str(current.maintenance.get('activation_id') or ''),
+            strike_epoch=int(current.maintenance.get('strike_epoch', 0) or 0),
+        )
         observe_learning(store, current.name, sha256=current.sha256, task_id=task, outcome='adopted')
         observe_learning(store, current.name, sha256=current.sha256, task_id=task, outcome='effective',
                          source=LearningObservationSource(authority='host', receipt_id=task))
     row = store.load_registry().skills[current.name]
     assert row.maintenance['state'] == 'active'
-    assert row.maintenance['promotion_history'] == ['observed','candidate','validated','trial','active']
+    assert row.maintenance['quality'] == 'established'
+    assert row.maintenance['promotion_history'] == ['observed', 'candidate', 'validated', 'trial', 'active']
+    record_skill_usage_event(
+        store,
+        event='manual_get',
+        skill_id=f'owner:{current.name}',
+        source='learned',
+        kind='skill',
+        task_id='four',
+        chars=len(BODY),
+        body_chars=len(BODY),
+        content_sha256=current.sha256,
+        incarnation_id=str(current.maintenance.get('incarnation_id') or ''),
+        activation_id=str(current.maintenance.get('activation_id') or ''),
+        strike_epoch=int(current.maintenance.get('strike_epoch', 0) or 0),
+    )
+    observe_learning(store, current.name, sha256=current.sha256, task_id='four', outcome='adopted')
+    observe_learning(store, current.name, sha256=current.sha256, task_id='four', outcome='effective',
+                     source=LearningObservationSource(authority='host', receipt_id='four'))
+    assert store.load_registry().skills[current.name].maintenance['promotion_history'] == [
+        'observed', 'candidate', 'validated', 'trial', 'active',
+    ]
 
 
 # LLM: 默认 Runtime 必须有宿主验证器；请求内自报的执行成功回执不可信，发布后应记录独立静态验证事实。

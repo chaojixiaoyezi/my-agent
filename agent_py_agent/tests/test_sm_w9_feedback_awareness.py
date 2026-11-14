@@ -469,7 +469,7 @@ def test_skill_feedback_remove_and_restore_explicit_human_flow_and_non_learned_r
 def test_skill_feedback_ineffective_channel_a_dedup_and_three_strikes(tmp_path: Path):
     agent, repo, store = _make_real_agent(tmp_path, enable_self_learning=True)
     v1 = _publish_skill(store, "tri-strike")
-    for idx in (1, 2):
+    for idx in (1, 2, 3):
         _record_delivery(store, v1, task_id=f"establish-{idx}")
         observe_learning(
             store,
@@ -483,6 +483,7 @@ def test_skill_feedback_ineffective_channel_a_dedup_and_three_strikes(tmp_path: 
             ),
         )
     v1_est = store.load_registry().skills["tri-strike"]
+    assert v1_est.maintenance["quality"] == "established"
     v2 = _publish_skill(store, "tri-strike", update_from=v1_est)
     solo = _publish_skill(store, "solo-strike")
     claim = _activate_main_turn(agent, tmp_path, run_id="run-main-1", task_id="task-main-1", request_id="req-main-1")

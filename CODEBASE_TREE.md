@@ -4958,6 +4958,10 @@ agent_py_agent/agent/capability/
 |   |-- test_sm_w8_promotion_curator.py # 闭环 W8：lesson CAS 晋升、载体委派与整理器维护
 |   |-- test_sm_w9_feedback_awareness.py # 闭环 W9：skill_feedback 五动作、UserConfigTool live 策略与 self_map 遥测
 |   |-- test_sm_w10_closed_loop.py # 闭环跨切片组合：275→50 收敛、崩溃恢复、5,000 owner 隔离、工作计数；真实组合根上的 V2-1..V2-5 全链路
+|   |-- test_sm_rework_config_scope.py # R1 返工：全局配置仅限主会话开放，受限上下文保留决策设置分流与执行阶段复核
+|   |-- test_sm_rework_carrier_source.py # R1 返工：lesson 载体请求共享 schema 与去重键，入队/执行/提交重验规范候选源
+|   |-- test_sm_rework_lifecycle_sync.py # R1 返工：生命周期替换发布后目录 fsync 异常保留 pending_operation 并冷启收敛
+|   |-- test_sm_rework_quality.py # R1 返工：质量确立唯一认 3+hurt_count 版本绑定真实使用，以及删除托管目录交还 user_modified
 |   |-- test_wave7_autonomous_learning_closure.py # W2自包含F01–F17及R2六项修复回归；CAS/冻结/输出合同限W2自身入口
 |   |-- test_wave7_w1_integration_contracts.py # W1三项原普通断言原样保留，正常收集、不skip/xfail，跨线集成须另验
 |   |-- test_skill_learning_maintenance.py # 采用与质量分离、引用保护/归档回滚、52条真实库与缓存失效

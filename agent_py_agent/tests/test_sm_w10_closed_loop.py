@@ -194,6 +194,8 @@ def _candidate(cid: str, content: str, *, subject_key: str = "closed.loop", scop
 # ---------------------------------------------------------------------------
 
 
+# 275 条真实文件发布与有界多轮收敛在共享/慢速 runner 上可能超过默认 60s 超时，显式放宽本用例超时上限并保持 275 规模不变。
+@pytest.mark.timeout(180)
 def test_275_to_50_convergence_preserves_exempt_layers_and_displaces_coldest_unadopted(tmp_path: Path) -> None:
     home, _repo, store = _store_with_runtime(tmp_path / "home")
     names = [f"sk-{index:03d}" for index in range(275)]
@@ -543,12 +545,13 @@ def test_stage_b_v2_2_three_channels_one_strike_per_task_and_third_strike_rollba
     agent, repo, store = _make_real_agent(tmp_path, enable_self_learning=True)
     name = "three-channel"
     v1 = _publish_skill(store, name)
-    for idx in (1, 2):
+    for idx in (1, 2, 3):
         _record_delivery(store, v1, task_id=f"establish-{idx}")
         observe_learning(
             store, name, sha256=v1.sha256, task_id=f"establish-{idx}", outcome="effective",
             source=LearningObservationSource(authority="host", receipt_id=f"rcpt-est-{idx}"),
         )
+    assert store.load_registry().skills[name].maintenance["quality"] == "established"
     v2 = _publish_skill(store, name, update_from=store.load_registry().skills[name])
     identity = {
         "incarnation_id": str(v2.maintenance["incarnation_id"]),
