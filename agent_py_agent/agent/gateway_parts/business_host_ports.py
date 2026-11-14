@@ -103,6 +103,17 @@ def _list_all_threads(threads_store: Any, *, strict: bool = False, scan_cap: int
 
 
 def _list_all_session_tasks(session_tasks: Any, *, scan_cap: int = 1_000_000) -> list[Any]:
+    list_report = getattr(session_tasks, 'list_report', None)
+    # 若测试或调用方未在实例上覆写 list_page，则优先走直接扫描目录与 load_errors 的 list_report(limit=0)。
+    use_page_override = 'list_page' in getattr(session_tasks, '__dict__', {})
+    if callable(list_report) and not use_page_override:
+        try:
+            items, load_errors = list_report(limit=0)
+        except (OSError, ValueError, TypeError) as error:
+            _fail_host_not_ready('SESSION_TASK_SCAN_FAILED', '会话任务扫描失败，确认宿主存储就绪后重试。', error)
+        if load_errors or not isinstance(items, (list, tuple)):
+            _fail_host_not_ready('SESSION_TASK_SCAN_INCOMPLETE', '会话任务扫描未完整完成，不能按无活跃任务归档。')
+        return list(items)
     if hasattr(session_tasks, 'list_page'):
         tasks: list[Any] = []
         seen_ids: set[str] = set()
@@ -112,7 +123,14 @@ def _list_all_session_tasks(session_tasks: Any, *, scan_cap: int = 1_000_000) ->
             page = session_tasks.list_page(limit=100) if cursor is None else session_tasks.list_page(limit=100, cursor=cursor)
             if not isinstance(page, dict):
                 _fail_host_not_ready('SESSION_TASK_SCAN_INVALID', '会话任务分页结果格式无效，请修复后重试。')
-            if page.get('partial') or page.get('truncated') or page.get('errors'):
+            if (
+                page.get('partial')
+                or page.get('incomplete')
+                or page.get('truncated')
+                or page.get('errors')
+                or page.get('load_errors')
+                or page.get('coverage') not in (None, 'complete')
+            ):
                 _fail_host_not_ready('SESSION_TASK_SCAN_INCOMPLETE', '会话任务分页未完整完成，不能按无活跃任务归档。')
             for task in page.get('items', []):
                 tid = getattr(task, 'task_id', None)
@@ -180,18 +198,26 @@ def _list_unsettled_workflow_runs(
     if not runs_dir.is_dir() and not index_db.is_file():
         return []
 
+    # SQL 终态过滤列表与外层 settled_states 保持同源，避免新增终态时 SQL 与二次过滤不一致。
+    settled_tuple = tuple(sorted(str(state) for state in settled_states))
     index = RunListIndex(owner_home_path)
     try:
         with index.connection() as conn:
-            run_ids = [
-                row[0]
-                for row in conn.execute(
-                    'SELECT run_id FROM runs WHERE status NOT IN (?, ?, ?, ?, ?) '
+            if settled_tuple:
+                placeholders = ', '.join('?' for _ in settled_tuple)
+                rows = conn.execute(
+                    f'SELECT run_id FROM runs WHERE status NOT IN ({placeholders}) '
                     'UNION SELECT run_id FROM pending '
                     'UNION SELECT run_id FROM legacy',
-                    ('succeeded', 'completed', 'failed', 'cancelled', 'settled'),
+                    settled_tuple,
                 ).fetchall()
-            ]
+            else:
+                rows = conn.execute(
+                    'SELECT run_id FROM runs '
+                    'UNION SELECT run_id FROM pending '
+                    'UNION SELECT run_id FROM legacy'
+                ).fetchall()
+            run_ids = [row[0] for row in rows]
     except sqlite3.Error as error:
         _fail_host_not_ready('WORKFLOW_INDEX_UNREADABLE', '工作流运行索引不可读，确认宿主存储就绪后重试。', error)
 
@@ -596,7 +622,17 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
         # 3. running/paused/queued/waiting_for_agent WorkflowRunStore runs
         if owner_home_path is not None:
             try:
-                settled_states = {'succeeded', 'completed', 'failed', 'cancelled', 'settled'}
+                settled_states = {
+                    'succeeded',
+                    'completed',
+                    'done',
+                    'failed',
+                    'cancelled',
+                    'aborted',
+                    'retired',
+                    'settled',
+                    'skipped',
+                }
                 for wf_run_id, bc in _list_unsettled_workflow_runs(owner_home_path, settled_states):
                     if bc.get('space_id') == space_id:
                         blockers.append({

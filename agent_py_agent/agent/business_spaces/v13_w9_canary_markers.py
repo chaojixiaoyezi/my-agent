@@ -210,6 +210,32 @@ def _rollback_document(call, artifact):
 
 # LLM: 随机值只在首次响应公开；唯一持久 verifier 是 SHA256，禁止将秘密放进标签或触发详情。
 # 函数用途: 创建凭据、API key 或文档型标记。
+def _can_compensate_marker_upload(call, artifact_id):
+    """在补偿删除已暂存附件前先查幂等回执与标记账本，避免已持久记录后误删。"""
+    from ..conversation.business_access import BusinessError
+    from .v13_store import v13_store_for
+
+    if not artifact_id:
+        return False
+    try:
+        existing = _precheck_w9_receipt(call, "canary_markers")
+    except BusinessError as error:
+        if getattr(error, "code", None) != "IDEMPOTENCY_CONFLICT":
+            return False
+        try:
+            records = v13_store_for(call, "owner")._read("canary_markers").get("records") or {}
+        except Exception:
+            # 无法读取日志与主记录时按提交状态未知处理，保留附件由对账清理。
+            return False
+        return not any(
+            isinstance(rec, dict) and (rec.get("artifact") or {}).get("artifact_id") == artifact_id
+            for rec in records.values()
+        )
+    except Exception:
+        return False
+    return existing is None
+
+
 def create_marker(call):
     space_id = w9_require_space(call, call.params.get("space_id"))
     replayed = _precheck_w9_receipt(call, "canary_markers")
@@ -240,10 +266,18 @@ def create_marker(call):
     try:
         result = w9_write(call, "canary_markers", mutate, receipt_view=_receipt)
     except Exception:
-        if artifact is not None:
+        if artifact is not None and _can_compensate_marker_upload(call, str(artifact.get("artifact_id") or "")):
             _rollback_document(call, artifact)
         raise
-    if artifact is not None and not committed:
+    artifact_id = artifact.get("artifact_id") if artifact is not None else None
+    returned_marker = result.get("marker") or {} if isinstance(result, dict) else {}
+    returned_artifact_id = (returned_marker.get("artifact") or {}).get("artifact_id")
+    if (
+        artifact is not None
+        and not committed
+        and returned_marker.get("token_id") != identifier
+        and (not artifact_id or returned_artifact_id != artifact_id)
+    ):
         _rollback_document(call, artifact)
     return result
 
