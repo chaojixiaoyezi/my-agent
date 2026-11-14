@@ -55,6 +55,7 @@ from .watch_payloads import (
     group_rows,
 )
 from .watch_state import (
+    WatchSourcePositionConflict,
     WatchState,
     _unique_tmp,
     audit_append,
@@ -388,7 +389,7 @@ def _commit_harvest_transaction(
         _write_harvest_transaction(marker, transaction)
         try:
             persist_state(state, expected_source_position=expected_pos)
-        except OSError as exc:
+        except WatchSourcePositionConflict as exc:
             state.harvest_commit_id = prev_commit_id
             state.file_identity = str(start_info.get("file_identity") or "")
             state.cursor = int(start_info.get("cursor") or 0)
@@ -409,8 +410,6 @@ def _commit_harvest_transaction(
                 expected_transaction_id=tx_id,
             )
             refresh_scalars_from_disk(state)
-            if isinstance(exc, _HarvestTransactionUnavailable):
-                raise
             raise _HarvestTransactionUnavailable(str(exc)) from exc
         _commit_transaction_source_record_keys(state, transaction)
         _clear_harvest_transaction_unlocked(

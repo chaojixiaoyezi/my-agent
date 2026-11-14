@@ -1852,12 +1852,12 @@ def test_harvest_state_commit_crash_rolls_back_append_and_retries_once(
     original_persist = hv.persist_state
     failed = False
 
-    def fail_first_commit(selected):
+    def fail_first_commit(selected, **kwargs):
         nonlocal failed
         if selected.harvest_commit_id and not failed:
             failed = True
             raise OSError("simulated crash before canonical state replace")
-        return original_persist(selected)
+        return original_persist(selected, **kwargs)
 
     monkeypatch.setattr(hv, "persist_state", fail_first_commit)
     transaction = hv._begin_harvest_transaction(state)

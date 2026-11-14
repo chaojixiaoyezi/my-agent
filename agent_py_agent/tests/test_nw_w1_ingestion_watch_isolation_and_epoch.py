@@ -542,6 +542,7 @@ def test_harvester_commit_cas_conflict_preserves_cause_after_inline_drain_rewind
 
         with pytest.raises(harvester_module._HarvestTransactionUnavailable) as exc_info:
             harvester_module._commit_harvest_transaction(state, tx)
+        assert isinstance(exc_info.value.__cause__, watch_state_module.WatchSourcePositionConflict)
         assert isinstance(exc_info.value.__cause__, OSError)
         assert "conflict" in str(exc_info.value.__cause__)
 
@@ -784,5 +785,130 @@ def test_refresh_scalars_from_disk_and_binding_revision_across_source_rotation(t
         assert final_state.cursor == 12
         assert final_state.line_cursor == 1
         assert final_state.feedback_offset == 0
+    finally:
+        _cleanup_owner_watch(owner_home, state.watch_id)
+
+
+def _open_fd_count() -> int:
+    for fd_dir in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(fd_dir):
+            return len(os.listdir(fd_dir))
+    return -1
+
+
+@pytest.mark.parametrize("writer", ["metadata", "binding", "source_commit"])
+def test_disk_merge_read_error_preserves_canonical_snapshot_for_all_writers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+) -> None:
+    owner_home = tmp_path / f"owner_r2_merge_read_{writer}"
+    state = watch_state_module.new_state(
+        owner_home,
+        "https://feed.example.invalid/records",
+        {},
+    )
+    watch_state_module.persist_state(state)
+    try:
+        stale = watch_state_module.load_state(owner_home, state.watch_id)
+        assert stale is not None
+        prior = (stale.harvest_commit_id, stale.file_identity, stale.cursor, stale.line_cursor)
+
+        state.cursor = 23
+        state.harvest_commit_id = "committed-current"
+        state.closed = True
+        state.closed_at = 123.0
+        state.close_reason = "watch_tool_close"
+        watch_state_module.persist_state(state)
+
+        path = watch_state_module.state_dir(owner_home) / f"{state.watch_id}.json"
+        before = path.read_bytes()
+        original_read_text = Path.read_text
+        reads_failed = 0
+
+        def fail_once(self: Path, *args, **kwargs) -> str:
+            nonlocal reads_failed
+            if self == path and reads_failed == 0:
+                reads_failed += 1
+                raise OSError(errno.EIO, "simulated I/O error")
+            return original_read_text(self, *args, **kwargs)
+
+        fd_before = _open_fd_count()
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "read_text", fail_once)
+            with pytest.raises(OSError) as exc_info:
+                if writer == "metadata":
+                    stale.audit_objective = "metadata revision"
+                    watch_state_module.persist_state(stale)
+                elif writer == "binding":
+                    stale.source_profile_ref = "profile-revision"
+                    watch_state_module.persist_source_binding_revision(stale)
+                else:
+                    stale.cursor = 99
+                    stale.harvest_commit_id = "stale-candidate"
+                    watch_state_module.persist_state(stale, expected_source_position=prior)
+        fd_after = _open_fd_count()
+        if fd_before >= 0 and fd_after >= 0:
+            assert fd_after - fd_before == 0
+
+        assert type(exc_info.value) is OSError
+        assert reads_failed == 1
+        assert path.read_bytes() == before
+
+        after = watch_state_module.load_state(owner_home, state.watch_id)
+        assert after is not None
+        assert after.closed is True
+        assert after.cursor == 23
+        assert after.harvest_commit_id == "committed-current"
+
+        # Subsequent healthy calls preserve monotonic closed/progress facts or report CAS conflict.
+        if writer == "metadata":
+            watch_state_module.persist_state(stale)
+            merged = watch_state_module.load_state(owner_home, state.watch_id)
+            assert merged is not None
+            assert merged.closed is True
+            assert merged.cursor == 23
+            assert merged.harvest_commit_id == "committed-current"
+            assert merged.audit_objective == "metadata revision"
+        elif writer == "binding":
+            watch_state_module.persist_source_binding_revision(stale)
+            merged = watch_state_module.load_state(owner_home, state.watch_id)
+            assert merged is not None
+            assert merged.closed is True
+            assert merged.cursor == 23
+            assert merged.harvest_commit_id == "committed-current"
+            assert merged.source_profile_ref == "profile-revision"
+        else:
+            with pytest.raises(watch_state_module.WatchSourcePositionConflict):
+                watch_state_module.persist_state(stale, expected_source_position=prior)
+            merged = watch_state_module.load_state(owner_home, state.watch_id)
+            assert merged is not None
+            assert merged.cursor == 23
+            assert merged.harvest_commit_id == "committed-current"
+    finally:
+        _cleanup_owner_watch(owner_home, state.watch_id)
+
+
+def test_disk_merge_corrupt_json_raises_oserror_and_preserves_bytes(tmp_path: Path) -> None:
+    owner_home = tmp_path / "owner_r2_merge_corrupt"
+    state = watch_state_module.new_state(
+        owner_home,
+        "https://feed.example.invalid/corrupt",
+        {},
+    )
+    watch_state_module.persist_state(state)
+    path = watch_state_module.state_dir(owner_home) / f"{state.watch_id}.json"
+    corrupt_bytes = b"{not-valid-json"
+    path.write_bytes(corrupt_bytes)
+    try:
+        fd_before = _open_fd_count()
+        with pytest.raises(OSError) as exc_info:
+            state.audit_objective = "should not replace corrupt file"
+            watch_state_module.persist_state(state)
+        fd_after = _open_fd_count()
+        if fd_before >= 0 and fd_after >= 0:
+            assert fd_after - fd_before == 0
+        assert type(exc_info.value) is OSError
+        assert path.read_bytes() == corrupt_bytes
     finally:
         _cleanup_owner_watch(owner_home, state.watch_id)

@@ -36,6 +36,10 @@ def is_valid_watch_id(watch_id: object) -> bool:
     return _SAFE_WATCH_ID_RE.fullmatch(watch_id) is not None
 
 
+class WatchSourcePositionConflict(OSError):
+    """Raised when a CAS watch snapshot write observes a newer disk position."""
+
+
 @dataclass
 class WatchState:
     watch_id: str
@@ -395,7 +399,7 @@ def persist_state(
                     max(0, _safe_int(disk.get("line_cursor"), 0)),
                 )
                 if disk_pos != exp_pos and disk_pos != candidate_pos:
-                    raise OSError(
+                    raise WatchSourcePositionConflict(
                         f"watch_state source position conflict for {state.watch_id}: "
                         f"expected={exp_pos!r}, actual={disk_pos!r}"
                     )
@@ -826,7 +830,10 @@ _MERGE_FACT_KEYS = (
 
 def _disk_merge_facts(path: Path) -> dict[str, Any]:
     """读盘上须单调合并的事实，整体覆写前先取，防跨进程覆盖。"""
-    state_doc = read_json_object(path)
+    report = read_json_object_report(path, context="watch_state.merge")
+    state_doc, load_error = (getattr(report, name) for name in report.__dataclass_fields__)
+    if load_error is not None:
+        raise OSError(f"watch_state merge snapshot unavailable for {path.name}")
     if not state_doc:
         return {}
     return {key: state_doc.get(key) for key in _MERGE_FACT_KEYS}
@@ -1360,6 +1367,7 @@ def audit_append(state: WatchState, record: dict[str, Any]) -> bool:
 
 __all__ = [
     "WatchRegistry",
+    "WatchSourcePositionConflict",
     "WatchState",
     "audit_append",
     "close_audit_watches_for_task",
