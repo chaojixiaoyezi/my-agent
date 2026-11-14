@@ -62,9 +62,36 @@ def _record_lesson(ctx: SimpleNamespace, lesson: str = LESSON, run_id: str = "ru
     return ctx.manager.memory_candidates.record_result_candidates(_task(run_id), lessons=[lesson], findings=[])
 
 
+def seed_proposals_from_candidates(service: SkillProposalService, candidates: list[object]) -> list:
+    """测试专用：替代已退役的 SkillProposalService.propose_from_candidates 写入提案并同步 S1 资产登记。"""
+    from agent_py_agent.agent.capability.asset_promotion import register_asset
+    from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+
+    eligible = [item for item in candidates if skill_proposals.lesson_candidate_eligible(item)]
+    if not eligible:
+        return []
+    now = skill_proposals._utc_now()
+    drafts = [skill_proposals.build_lesson_proposal(item, now=now) for item in eligible]
+    with service._locked():
+        created = [service._create_if_absent(item) for item in drafts]
+    result = [item for item in created if item is not None]
+    for draft in drafts:
+        item = service.show(draft.proposal_id)
+        register_asset(
+            SkillLearningStore.for_home(service.home_paths),
+            kind="skill",
+            asset_id=item.target.skill_name,
+            asset={"body": item.draft.body},
+            sha256=item.draft.sha256,
+            source={"origin": "S1", "proposal_id": item.proposal_id},
+            state="trial" if item.status == skill_proposals.PROPOSAL_COMMITTED else "candidate",
+        )
+    return result
+
+
 def _proposal_ctx(tmp_path: Path, lesson: str = LESSON) -> SimpleNamespace:
     ctx = _runtime(tmp_path)
-    [ctx.proposal] = ctx.service.propose_from_candidates(_record_lesson(ctx, lesson))
+    [ctx.proposal] = seed_proposals_from_candidates(ctx.service, _record_lesson(ctx, lesson))
     return ctx
 
 
@@ -131,8 +158,8 @@ def test_enabled_agent_wires_service_to_scoped_owner_paths(tmp_path: Path) -> No
 def test_one_lesson_yields_exactly_one_idempotent_proposal(tmp_path: Path) -> None:
     ctx = _runtime(tmp_path)
     recorded = _record_lesson(ctx)
-    created = ctx.service.propose_from_candidates(recorded)
-    replays = [ctx.service.propose_from_candidates(_record_lesson(ctx, run_id=run)) for run in ("run-1", "run-2")]
+    created = seed_proposals_from_candidates(ctx.service, recorded)
+    replays = [seed_proposals_from_candidates(ctx.service, _record_lesson(ctx, run_id=run)) for run in ("run-1", "run-2")]
     files = sorted(ctx.home.owner_skill_proposals_dir.glob("*.json"))
     record = json.loads(files[0].read_text(encoding="utf-8"))
     candidate = recorded[0]
@@ -209,7 +236,7 @@ def test_non_lesson_model_inferred_and_provenance_less_candidates_are_ignored(tm
 
     assert (inferred.candidate_type, inferred.origin, orphan.status) == ("lesson", "model_inferred", "pending_review")
     assert (mislabeled.origin, mislabeled.status) == ("subagent_lesson", "pending_review")
-    assert ctx.service.propose_from_candidates(ignored) == []
+    assert seed_proposals_from_candidates(ctx.service, ignored) == []
     assert not ctx.home.owner_skill_proposals_dir.exists()
 
 
@@ -487,7 +514,7 @@ def test_runner_result_keeps_proposal_pending_until_user_confirmation(tmp_path: 
     assert not ctx.home.owner_skill_proposals_dir.exists()
 
     # 直接显式 S1 提案接口仍保持 pending_confirmation，直到用户按准确 revision 确认。
-    [proposal] = ctx.service.propose_from_candidates(_record_lesson(ctx))
+    [proposal] = seed_proposals_from_candidates(ctx.service, _record_lesson(ctx))
     assert proposal.status == "pending_confirmation"
     assert not proposal.receipt
     assert ctx.service.confirm(proposal.proposal_id, proposal.revision).ok
@@ -521,8 +548,8 @@ def _cli(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
 
 def test_cli_list_show_confirm_reject_round_trip(tmp_path: Path, capsys) -> None:
     ctx = _runtime(tmp_path)
-    first = ctx.service.propose_from_candidates(_record_lesson(ctx))[0]
-    second = ctx.service.propose_from_candidates(_record_lesson(ctx, "写入用户文件前先备份原文件。", "run-2"))[0]
+    first = seed_proposals_from_candidates(ctx.service, _record_lesson(ctx))[0]
+    second = seed_proposals_from_candidates(ctx.service, _record_lesson(ctx, "写入用户文件前先备份原文件。", "run-2"))[0]
     config_path = _config(tmp_path)
 
     listed = _cli(capsys, config_path, "list")

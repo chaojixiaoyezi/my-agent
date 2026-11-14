@@ -15,13 +15,12 @@ POINT_RUNTIME_SCOPES = MappingProxyType({
     "pre_recall": "thread", "recall": "thread", "curator": "owner_background", "curator_relation": "owner_background",
     "external_material_order": "thread", "planning": "thread", "delivery_quality": "thread",
     "action_candidate": "thread",
-    "skill_proposal_review": "owner_background",
 })
 POINTS = tuple(POINT_RUNTIME_SCOPES)
-GENERAL_FIELDS = ("enabled", "experiment_enabled", "observe_sampling_enabled", "observe_nonblocking_enabled",
+GENERAL_FIELDS = ("enabled", "observe_sampling_enabled", "observe_nonblocking_enabled",
                   "timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds", "profile_id")
 # 通用字段里的布尔开关：schema、写入校验和 TUI 决策菜单共用这一份，新增布尔开关只改这里。
-BOOLEAN_FIELDS = frozenset({"enabled", "experiment_enabled", "observe_sampling_enabled", "observe_nonblocking_enabled"})
+BOOLEAN_FIELDS = frozenset({"enabled", "observe_sampling_enabled", "observe_nonblocking_enabled"})
 POINT_FIELDS = ("mode", "timeout_seconds", "profile_id")
 _POINT_EXTRA_SCHEMAS = {"subagent_model": {
     "candidate_profile_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
@@ -185,11 +184,11 @@ def validate_decision_settings(value: object) -> dict:
     overrides = value["overrides"]
     if type(overrides) is not dict or len(overrides) > len(decision_field_scopes()):
         raise ModelProfileError("决策覆盖字段无效，原配置未修改。")
-    from .decision_experiment_schema import validate_experiment_authorization
-
+    if value["experiment_authorization"] is not None:
+        raise ModelProfileError("决策覆盖结构无效，原配置未修改。")
     return {"schema": DECISION_SETTINGS_SCHEMA, "revision": value["revision"],
             "overrides": {key: validate_decision_field(key, item) for key, item in overrides.items()},
-            "experiment_authorization": validate_experiment_authorization(value["experiment_authorization"])}
+            "experiment_authorization": None}
 
 
 # LLM: 会话 v1-v9/无版本旧记录只补空覆盖；未知线程版本拒绝写回，不能降级清除未来状态。

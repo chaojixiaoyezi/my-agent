@@ -21,7 +21,6 @@ POINT_TIMEOUT_FLOOR_SECONDS = {"model_selection": SELECTION_POINT_TIMEOUT_SECOND
 
 _DECISION_DEFAULTS = {
     "enabled": False,
-    "experiment_enabled": False,
     "observe_sampling_enabled": False,
     "observe_nonblocking_enabled": False,
     "timeout_seconds": 3.0,
@@ -44,7 +43,6 @@ _DECISION_DEFAULTS = {
     "points.planning.mode": "off",
     "points.delivery_quality.mode": "off",
     "points.action_candidate.mode": "off",
-    "points.skill_proposal_review.mode": "off",
 }
 
 

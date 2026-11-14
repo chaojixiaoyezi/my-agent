@@ -25,7 +25,7 @@ def decision_settings_summary(host: object, thread_id: str = "") -> dict:
     effective = report["effective"]
     return {
         "scope": report["scope"],
-        **{key: effective[key] for key in ("enabled", "experiment_enabled", "timeout_seconds",
+        **{key: effective[key] for key in ("enabled", "timeout_seconds",
                                             "stage_timeout_seconds", "background_timeout_seconds")},
         "profile_bound": bool(effective.get("profile_id")),
         "points": {point: row["effective_mode"] for point, row in effective["points"].items()},

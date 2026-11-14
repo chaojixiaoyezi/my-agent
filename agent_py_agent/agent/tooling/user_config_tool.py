@@ -87,7 +87,7 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
     properties = {key: value for key, value in full_spec.input_schema["properties"].items()
                   if key not in {"key", "value", "include_constants", "include_full_config"}}
     properties["action"] = {**properties["action"],
-        "enum": ["decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe", "decision_experiment_revoke"],
+        "enum": ["decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe"],
         "description": "仅管理当前可信 owner 的决策设置；读取后携完整 revision 修改。连接测试须用户明确要求。"}
     return ToolModelSpec(
         name=full_spec.name,
@@ -97,12 +97,11 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
                      "另可带 reason（见参数说明），多带的字段会被拒绝并在回执 unknown_fields 里列出。"
                      "等待时间只能在 decision_read 返回的 agent_timeout_bounds 范围内调整，越界会被拒绝。"
                      "decision_models 只读脱敏目录；decision_probe 仅在用户明确要求测试连接时使用，会联网并产生用量。"
-                     "decision_experiment_revoke 只能撤销当前会话已有授权，不能建立授权。"
                      "本工具不开放本机全局配置、凭据或其他用户设置。"),
         input_schema={"type": "object", "properties": properties, "required": ["action"], "additionalProperties": False},
         hints=ToolModelHints(category="system", use_cases=(
             "用户要求开启、关闭或调整自己的决策模型等待时间与接入点",
-            "用户要求查看自己的决策模型设置、已保存模型或撤销当前实验授权",
+            "用户要求查看自己的决策模型设置、已保存模型",
             "用户明确要求测试已保存决策模型连接",
         ), avoid_when=("需要本机全局配置、凭据或其他用户设置时",),
             keywords=("user_config", "配置项", "配置参数", "决策设置", "决策模型"),
@@ -187,26 +186,6 @@ def _decision_thread_scope(agent: object) -> tuple[str, str]:
     return "", "current_runner_context"
 
 
-# LLM: 只在本会话已有实验授权信封、且当前运行由 Gateway 宿主写入器承载时附只读 experiment_evaluation；
-#   读取器来自宿主运行参数（不是模型参数），失败只给结构化 unavailable，不影响设置读取，也绝不触发晋升或写入。
-#   评估块插在授权信封之后，避免被大段字段目录挤出有界预览；没有信封时原输出逐字节不变。
-# 函数用途: 让模型在读取决策设置时能看到实验证据是否已满足晋升建议。
-def _with_experiment_evaluation(agent: object, report: dict, thread_id: str) -> dict:
-    authorization = report.get("experiment_authorization")
-    writer = getattr(getattr(agent, "_current_run_params", None), "conversation_task_binding_callback", None)
-    reader = getattr(writer, "decision_experiment_evaluation", None)
-    if authorization is None or not thread_id or not callable(reader):
-        return report
-    try:
-        evaluation = reader(agent, thread_id, authorization)
-    except Exception:  # noqa: BLE001 只读证据读取失败不能影响设置读取
-        evaluation = {"status": "unavailable", "reasons": ["evidence_unreadable"]}
-    keys = list(report)
-    position = keys.index("experiment_authorization") + 1
-    return {**{key: report[key] for key in keys[:position]}, "experiment_evaluation": evaluation,
-            **{key: report[key] for key in keys[position:]}}
-
-
 # LLM: main_agent 保留完整配置能力，普通 owner 仅得 decision-only 视图；目录只读，探测只接受已存引用和显式预算。
 # 类用途: 按可信owner展示配置工具，单键回执优先展示结果，读取和修改仍复用原服务。
 class UserConfigTool(BaseTool):
@@ -224,7 +203,6 @@ class UserConfigTool(BaseTool):
             "decision_read/decision_patch/decision_reset 读取、字段修改或恢复决策设置继承；"
             "decision_patch 只填 scope/expected_revision/changes，decision_reset 只填 scope/expected_revision/fields，"
             "另可带 reason（见参数说明），多带的字段会被拒并在回执 unknown_fields 列出；"
-            "decision_experiment_revoke 可用当前授权编号撤销本会话实验；本工具不能建立实验授权，能力开关不代表用户授权。"
             "先读 revision 再作为 expected_revision 提交。scope=owner 为长期设置，thread 仅当前可信会话；"
             "时间使用有限正秒数，且须在 decision_read 返回的 agent_timeout_bounds 范围内（越界拒绝、不自动夹取）；"
             "总开关关闭保留各点模式，observe 也会产生用量；"
@@ -238,7 +216,7 @@ class UserConfigTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["view", "search", "set", "reset", "history", "revert", "decision_read", "decision_patch", "decision_reset", "decision_experiment_revoke", "decision_models", "decision_probe"],
+                    "enum": ["view", "search", "set", "reset", "history", "revert", "decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe"],
                     "description": "view/search/set/reset/history/revert 管理本机配置；decision_read/patch/reset 管理覆盖，decision_models 只读目录，decision_probe 显式测试连接。",
                 },
                 "key": {
@@ -260,7 +238,6 @@ class UserConfigTool(BaseTool):
                 "fields": {"type": "array", "items": {"type": "string", "enum": list(_decision_change_properties())}, "minItems": 1, "description": "decision_reset 删除这些覆盖字段以恢复继承。"},
                 "profile_id": {"type": "string", "description": "decision_probe 必填：decision_models 返回的已保存 Decision 编号或 shared:编号，不能传模型名称、地址或凭据。"},
                 "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "decision_probe 必填：用户明确要求的有限正测试预算秒数，包含准备与完整请求。"},
-                "authorization_id": {"type": "string", "description": "decision_experiment_revoke 必填：decision_read 返回的当前完整实验授权编号；不能用来建立许可。"},
             },
             "additionalProperties": False,
         },
@@ -305,7 +282,7 @@ class UserConfigTool(BaseTool):
     # 函数用途: 按结构化 action 分派原设置服务，并对普通 owner 阻断 legacy view/set。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         action = str(params.get("action") or "view").strip().lower()
-        if action in {"decision_read", "decision_patch", "decision_reset", "decision_experiment_revoke"}:
+        if action in {"decision_read", "decision_patch", "decision_reset"}:
             return _decision(self._agent, action.removeprefix("decision_"), params)
         if action in {"decision_models", "decision_probe"}:
             return _decision_model_operation(self._agent, action, params)
@@ -355,14 +332,13 @@ class UserConfigTool(BaseTool):
         )
 
 
-# LLM: 主会话可读取宿主线程本地 RunParams，子代理只读自身 runner 身份；撤销只能引用原许可并使用完整 CAS。
-#   read 在本会话已有实验授权时附只读实验证据评估（_with_experiment_evaluation），模型无法据此授权或晋升。
+# LLM: 主会话可读取宿主线程本地 RunParams，子代理只读自身 runner 身份。
 #   patch 的等待时间先按能力配置上下限检查，越界直接拒绝（DECISION_TIMEOUT_OUT_OF_BOUNDS），不进设置服务；
 #   read 回显该范围与管理员是否允许本用户使用 Jev（admin_decision_model_allowed，只读，模型改不了）。
 #   本工具各动作共用一份扁平 schema，reason/key/value 等别的动作的字段也能过 schema；这里不替模型删字段，
 #   服务拒绝时回执写明 unknown_fields 与 allowed_fields（2026-09-28 生产上连续被拒三次，旧回执看不出是哪个字段）。
 #   与类状态无关，抽成模块级函数给 execute 调用，避免 UserConfigTool 类超行数软上限。
-# 函数用途: 调用原决策设置服务；群配置拒绝返回固定码，撤销保留免 grant，原身份/CAS 与等待上限不变。
+# 函数用途: 调用原决策设置服务；群配置拒绝返回固定码，原身份/CAS 与等待上限不变。
 def _decision(agent: object | None, operation: str, params: dict) -> ToolHandlerOutcome:
     from ..settings.decision_settings import execute_decision_settings_operation
     from ..settings.decision_settings_schema import (
@@ -397,7 +373,7 @@ def _decision(agent: object | None, operation: str, params: dict) -> ToolHandler
         return ToolHandlerOutcome("user_config", False, "配置存储读写失败，请重新读取核对是否保存。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
     report["scope_resolution"] = {"source": source, "effective": {"thread_id": thread_id, "scope": report["scope"]}}
     if operation == "read":
-        report = _with_experiment_evaluation(agent, {**_read_facts(agent), **report}, thread_id)
+        report = {**_read_facts(agent), **report}
     # 原投影先列 revision，再列大段字段目录；排序会把 CAS 版本挤出有界模型预览。
     return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False))
 

@@ -44,7 +44,7 @@ def test_user_manifest_has_decision_only_user_config_and_no_gateway_status(tmp_p
     schema = entry["input_schema"]
     assert schema["required"] == ["action"]
     assert set(schema["properties"]["action"]["enum"]) == {
-        "decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe", "decision_experiment_revoke",
+        "decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe",
     }
     assert "key" not in schema["properties"] and "value" not in schema["properties"]
     assert "MY_AGENT_CONFIG" not in entry["description"]

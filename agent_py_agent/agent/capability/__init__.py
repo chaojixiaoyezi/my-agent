@@ -26,7 +26,6 @@ from .runtime_config_models import (
     CapabilityConfigReloadResult,
     CapabilityConfigSnapshot,
 )
-from .runtime_config_patch import apply_capability_config_patch
 from .runtime_config_reload import (
     capability_config_version,
     default_capability_config_path,
@@ -53,7 +52,6 @@ __all__ = [
     "SkillSnapshotEntry",
     "SkillSnapshotError",
     "SkillsService",
-    "apply_capability_config_patch",
     "capability_config_version",
     "classify_tool_model_risk",
     "default_capability_cards",

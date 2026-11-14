@@ -67,12 +67,6 @@
       "min_scored_questions": 20,
       "max_call_failure_rate": 0.1,
       "reason": "只追加阅读顺序，原结果与归档不变"
-    },
-    "skill_proposal_review": {
-      "min_accuracy": 0.8,
-      "min_scored_questions": 20,
-      "max_call_failure_rate": 0.1,
-      "reason": "只重排展示并加标签，不确认或改写提案"
     }
   }
 }

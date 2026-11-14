@@ -1,7 +1,6 @@
-# LLM: 可选决策只有建议权；实验阶段另读原授权，仅在点普通模式 off 时以 observe 经原账预留和发送许可联网，
-# 普通增强保留原路径，期限及身份发送前后复核；发送拒绝与预算拒绝显式映射，不进入连接退避。
+# LLM: 可选决策只有建议权；期限及身份发送前后复核；发送拒绝与预算拒绝显式映射，不进入连接退避。
 # 普通 thread 范围的 observe 调用在 observe_nonblocking_enabled 打开时交给 decision_observe_nonblocking 后台执行，
-# 调用方当场拿到 deferred 占位、不等待；apply、实验与用户后台点位始终同步。
+# 调用方当场拿到 deferred 占位、不等待；apply 与用户后台点位始终同步。
 # 模块用途: 为原业务批次执行准确会话或用户后台范围的可选决策，不授予业务写入权。
 from __future__ import annotations
 
@@ -76,8 +75,7 @@ from .decision_reach_counts import (
 DEFERRED_STATUS = "deferred"
 
 
-# LLM: 宿主准备前创建；experiment 只标记路径而非许可，准入通过时 enabled_points 只含普通模式为 off 的授权点；
-# experiment_available 是普通阶段同次读取得到的零 I/O 提示，只决定是否值得再建实验阶段，不代表准入；scope/deadline 不跨身份复用。
+# LLM: 宿主准备前创建；scope/deadline 不跨身份复用。
 # caller_deadline 单独保存建阶段时调用方给的绝对期限（如 Curator 租约），普通后台点位不再吃阶段预算残值时仍受它约束。
 # 类用途: 保存同一原业务批次共用的绝对预算与可信身份。
 @dataclass(frozen=True)
@@ -92,14 +90,10 @@ class DecisionStage:
     error_code: str = ""
     scope: str = "thread"
     enabled_points: tuple[str, ...] = ()
-    experiment: bool = False
-    experiment_available: bool = False
     caller_deadline: float | None = None
 
 
 # LLM: may_apply仅表示返回时信封有效；消费前用同一helper核验内存连接摘要/绝对期限，逐题error仍由消费者处理，不授予写入权。
-#   experiment 只在实验调用真正进入原账预留（因而有结算）时才有值：授权编号、设置/策略/连接版本和原账结算视图；
-#   普通调用恒为 None，它只供宿主写实验记录，不参与采用、比较或授权判断。
 #   blocking=False 表示这次 observe 转后台执行、调用方没有等待：当场返回的 deferred 占位、队列满的拒绝和后台最终结果都是 False。
 # 类用途: 明确区分关闭、观察、可用建议、到期、冷却和过期结果，失败时保留原业务方案。
 @dataclass(frozen=True)
@@ -113,7 +107,6 @@ class DecisionOutcome:
     retain_original: bool = True
     connection_revision: str = field(default="", repr=False)
     deadline: float = 0.0
-    experiment: dict | None = field(default=None, repr=False, compare=False)
     # 字段用途: 建了调用记录的调用才有的链路事实（终态、超时阶段、各尝试分段毫秒、本地估算输入），只写结果日志，不参与采用。
     transport: dict | None = field(default=None, repr=False, compare=False)
     # 字段用途: false 表示这次 observe 转到后台执行、调用方没有等待；只写结果日志的 blocking 字段，不参与采用。
@@ -166,24 +159,24 @@ def _deadline(value: object) -> float | None:
     return float(value)
 
 
-# LLM: 前台（thread）阶段与实验阶段保留阶段总上限：前台用户在等，实验另有授权窗口。普通后台（owner_background）阶段
+# LLM: 前台（thread）阶段保留阶段总上限：前台用户在等。普通后台（owner_background）阶段
 #   的每个点位从自己的开始时刻起算完整点位预算，不吃同阶段前一点位留下的阶段倒计时残值。两类都不越过调用方绝对期限
 #   （建阶段时的 caller_deadline 与本次调用的取更小）。decide 与 decision_outcome_is_current 必须同口径，
 #   改动同步 test_decision_background_deadline。
 # 函数用途: 算出一次点位调用的绝对截止时刻；纯计算，不读写状态。
 def _point_deadline(stage: DecisionStage, started: float, timeout_seconds: float, caller: float | None) -> float:
     limits = [started + timeout_seconds]
-    if stage.scope != "owner_background" or stage.experiment:
+    if stage.scope != "owner_background":
         limits.append(stage.deadline)
     limits.extend(value for value in (stage.caller_deadline, caller) if value is not None)
     return min(limits)
 
 
-# LLM: 与 _point_deadline 同口径：普通后台阶段的建议只看自带的点位期限（发送时已并入调用方期限），不能在阶段预算到点后
-#   把按完整点位预算拿到的结果判为过期；前台与实验阶段仍取阶段上限与点位期限的较小值。
+# LLM: 与 _point_deadline 同口径：后台阶段的建议只看自带的点位期限（发送时已并入调用方期限），不能在阶段预算到点后
+#   把按完整点位预算拿到的结果判为过期；前台阶段仍取阶段上限与点位期限的较小值。
 # 函数用途: 算出一条建议最晚可被采用的绝对时刻；纯计算，不读写状态。
 def _adoption_deadline(stage: DecisionStage, outcome: DecisionOutcome) -> float:
-    if stage.scope == "owner_background" and not stage.experiment:
+    if stage.scope == "owner_background":
         return outcome.deadline
     return min(stage.deadline, outcome.deadline)
 
@@ -196,47 +189,38 @@ def _check_interrupted() -> None:
         raise InterruptedError("当前决策随用户任务停止。")
 
 
-# LLM: 开始时刻在读配置前取得；实验资格先于材料准备且不能重置总期限，准入失败时不发布可准备点。
-# 普通阶段顺带给出零 I/O 的 experiment_available 提示（能力开或本线程存在授权信封），默认关闭时不增加任何读取。
-# 管理员禁用本 owner 的 Jev 时直接返回 admin_disabled 阶段（不读设置、不准备材料）；真正的硬门在 invoke_decision_model_call。
-# 后台阶段的 deadline 仍按 background_timeout_seconds 记下，但普通后台点位不以它为上限（见 _point_deadline），
+# LLM: 开始时刻在读配置前取得；管理员禁用本 owner 的 Jev 时直接返回 admin_disabled 阶段（不读设置、不准备材料）；
+#   真正的硬门在 invoke_decision_model_call。
+# 后台阶段的 deadline 仍按 background_timeout_seconds 记下，但后台点位不以它为上限（见 _point_deadline），
 # 调用方期限另存 caller_deadline 供点位取更小值。
-# 函数用途: 建立原决策阶段；实验关闭、撤销或口径缺失均返回结构化原因，不调用后端或建立预算。
+# 函数用途: 建立原决策阶段；口径缺失返回结构化原因，不调用后端或建立预算。
 def begin_decision_stage(agent: object, params: object, *, operation_id: str, caller_deadline: float | None = None,
-                         scope: str = "thread", experiment: bool = False) -> DecisionStage:
+                         scope: str = "thread") -> DecisionStage:
     started = time.monotonic()
     _check_interrupted()
     identity = ("", "", "", "")
     try:
-        if type(operation_id) is not str or not operation_id or len(operation_id) > 1024 or type(experiment) is not bool:
+        if type(operation_id) is not str or not operation_id or len(operation_id) > 1024:
             raise DecisionInputError("决策阶段需要宿主操作编号。")
         identity = _identity(agent, params, scope=scope)
         caller = _deadline(caller_deadline)
         if not owner_decision_model_allowed(getattr(agent, "home_paths", None)):
-            return DecisionStage(operation_id, *identity, started, started, "admin_disabled", scope=scope, experiment=experiment)
+            return DecisionStage(operation_id, *identity, started, started, "admin_disabled", scope=scope)
         settings = execute_decision_settings_operation(agent, "read", {}, thread_id=identity[1], blocking=False)
         budget = "background_timeout_seconds" if scope == "owner_background" else "stage_timeout_seconds"
         deadline = started + settings["effective"][budget]
         if caller is not None:
             deadline = min(deadline, caller)
         _check_interrupted()
-        if experiment:
-            from .decision_experiment import experiment_admission, experiment_stage_points
-
-            reason, experiment_deadline = experiment_admission(agent, params, settings)
-            return DecisionStage(operation_id, *identity, started, min(deadline, experiment_deadline), reason, scope=scope,
-                                 enabled_points=() if reason else experiment_stage_points(settings, scope), experiment=True)
         points = tuple(point for point, row in settings["effective"]["points"].items()
                        if row["effective_mode"] != "off" and POINT_RUNTIME_SCOPES[point] == scope)
-        available = bool(settings["effective"]["experiment_enabled"] or settings["experiment_authorization"] is not None)
         return DecisionStage(operation_id, *identity, started, deadline, scope=scope, enabled_points=points,
-                             experiment_available=available, caller_deadline=caller)
+                             caller_deadline=caller)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception as exc:
         code = "settings_busy" if isinstance(exc, BlockingIOError) else "invalid_identity" if isinstance(exc, DecisionInputError) else "configuration_unavailable"
-        return DecisionStage(operation_id if type(operation_id) is str else "", *identity, started, started, code, scope=scope,
-                             experiment=experiment is True)
+        return DecisionStage(operation_id if type(operation_id) is str else "", *identity, started, started, code, scope=scope)
 
 
 # LLM: 策略版本绑定两层CAS及实际有效值；连接摘要另外绑定，模型目录改动不能借未变的设置revision混过。
@@ -263,15 +247,10 @@ def _snapshot(agent: object, thread_id: str, point: str) -> tuple[dict, dict, st
 
 
 # LLM: 当前身份、设置和连接必须仍匹配发送快照；关闭/共享撤销/换密钥均不能应用旧建议。
-# 实验阶段改走实验专用复核（要求普通模式仍为 off 并重跑准入），不能把 off 当作关闭而误判或误放行。
 # 函数用途: 在调用前后复读原事实源，返回旧请求是否已经失效。
 def _stale(agent: object, params: object, stage: DecisionStage, point: str, revision: str, connection: str) -> str:
     if _identity(agent, params, scope=stage.scope) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
         return "identity_changed"
-    if stage.experiment:
-        from .decision_experiment import experiment_current
-
-        return experiment_current(agent, params, thread_id=stage.thread_id, point=point, revision=revision, connection=connection)
     _settings, row, current_revision, config = _snapshot(agent, stage.thread_id, point)
     if row["effective_mode"] == "off":
         return "disabled"
@@ -332,11 +311,11 @@ def _sampled_outcome(agent: object, point: str, row: dict, settings: dict) -> De
     return DecisionOutcome("observe", "skipped", reason="observe_sampled_out")
 
 
-# LLM: 只有普通 thread 范围、点位有效模式为 observe、且决策设置 observe_nonblocking_enabled 为真才转后台；
-#   apply、实验与用户后台（owner_background）永远同步，时序与原先完全一致。只读本次路由快照，不另读设置。
+# LLM: 只有 thread 范围、点位有效模式为 observe、且决策设置 observe_nonblocking_enabled 为真才转后台；
+#   apply 与用户后台（owner_background）永远同步，时序与原先完全一致。只读本次路由快照，不另读设置。
 # 函数用途: 判断这次决策调用是否交给后台执行、不让调用方等待。
 def _nonblocking(stage: DecisionStage, row: dict, settings: dict) -> bool:
-    return (stage.scope == "thread" and not stage.experiment and row["effective_mode"] == "observe"
+    return (stage.scope == "thread" and row["effective_mode"] == "observe"
             and (settings.get("effective") or {}).get("observe_nonblocking_enabled") is True)
 
 
@@ -363,9 +342,9 @@ def _decide_outcome(agent: object, params: object, call: _DecideCall) -> Decisio
             raise DecisionInputError("决策接入点或重试标志无效。")
         if not isinstance(stage, DecisionStage) or _identity(agent, params, scope=stage.scope) != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id):
             return DecisionOutcome(mode, "stale", reason="identity_changed")
-        if stage.error_code == "admin_disabled" and not stage.experiment:
+        if stage.error_code == "admin_disabled":
             return DecisionOutcome(mode, "off", reason="admin_disabled")
-        if stage.error_code and not stage.experiment:
+        if stage.error_code:
             return DecisionOutcome(mode, "error" if stage.error_code == "settings_busy" else "configuration_required", reason=stage.error_code)
         if POINT_RUNTIME_SCOPES[point] != stage.scope:
             raise DecisionInputError("决策接入点与本次运行范围不匹配。")
@@ -375,7 +354,7 @@ def _decide_outcome(agent: object, params: object, call: _DecideCall) -> Decisio
         if refused is not None:
             return refused
         settings, row, revision, config = route
-        if not stage.experiment and (sampled := _sampled_outcome(agent, point, row, settings)) is not None:
+        if (sampled := _sampled_outcome(agent, point, row, settings)) is not None:
             return replace(sampled, mode=mode)
         nonblocking = _nonblocking(stage, row, settings)
         # 转后台的调用没人在等，不占前台阶段预算：期限由后台 worker 开始执行时按 background_timeout_seconds 另算。
@@ -410,16 +389,9 @@ def _decide_outcome(agent: object, params: object, call: _DecideCall) -> Decisio
         return DecisionOutcome(mode, "error", reason="invalid_input" if isinstance(exc, DecisionInputError) else "enhancement_failed")
 
 
-# LLM: 普通路径 off 不解析连接即返回；实验路径复读准入并要求点普通模式为 off，以 observe 身份继续，均不构造后端。
+# LLM: off 不解析连接即返回，不构造后端。
 # 函数用途: 为 decide 取得本次调用的模式、提前结束结果或（设置、点行、策略版本、已授权连接）。
 def _route(agent: object, params: object, stage: DecisionStage, *, point: str) -> tuple[str, DecisionOutcome | None, tuple | None]:
-    if stage.experiment:
-        from .decision_experiment import experiment_route
-
-        reason, route = experiment_route(agent, params, thread_id=stage.thread_id, point=point)
-        if reason:
-            return "off", DecisionOutcome("off", "off" if reason == "experiment_disabled" else "experiment_unavailable", reason=reason), None
-        return "observe", None, (route.settings, route.row, route.revision, route.config)
     settings, row, revision, config = _snapshot(agent, stage.thread_id, point)
     mode = row["effective_mode"]
     if mode == "off":
@@ -429,38 +401,13 @@ def _route(agent: object, params: object, stage: DecisionStage, *, point: str) -
     return mode, None, (settings, row, revision, config)
 
 
-# LLM: 实验调用只从准入快照取授权编号，连同线程/点/策略/连接版本交给原调用边界；普通调用返回 None，不增加任何参数。
-# 函数用途: 生成传给 invoke_decision_model_call 的实验调用事实（普通调用为空）。
-def _experiment_call(request: DecisionRequest, active: ActiveDecision, *, stage: DecisionStage, key: tuple):
-    if not stage.experiment:
-        return None
-    from .decision_send_permit import DecisionExperimentCall
-
-    authorization_id = active.settings["experiment_authorization"]["authorization_id"]
-    return DecisionExperimentCall(authorization_id, stage.thread_id, request.binding.point,
-                                  request.binding.policy_revision, key[2])
-
-
-# LLM: 只在调用边界确已结算（进入过原账预留）时附实验事实；版本取本次路由快照，结算取原账返回视图，均不重读或另记。
-# 函数用途: 把实验调用的授权、配置版本与结算结果挂到本次结果上，供宿主写实验记录。
-def _with_experiment_facts(outcome: DecisionOutcome, call, active: ActiveDecision) -> DecisionOutcome:
-    if call is None or not call.settlements:
-        return outcome
-    authorization = active.settings["experiment_authorization"]
-    return replace(outcome, experiment={
-        "authorization_id": call.authorization_id, "settings_revision": dict(active.settings["revision"]),
-        "policy_revision": call.policy_revision, "connection_revision": call.connection_revision,
-        "input_bound_policy": authorization.get("input_bound_policy", ""), "settlement": dict(call.settlements[-1])})
-
-
-# LLM: 普通调用与原先完全相同；实验调用在同一次调用后附上结算事实。用户中断照常传播，不产生结果或记录。
-#   建了调用记录的（成功、超时、失败，含准入忙这类没发出请求的）再附链路事实，供 decide() 写进结果日志；调用前就结束的不带。
-# 函数用途: 执行一次决策调用并返回结果，实验路径额外带回原账结算视图，建了调用记录的额外带回链路分段计时。
+# LLM: 用户中断照常传播，不产生结果或记录。
+#   建了调用记录的（成功、超时、失败，含准入忙这类没发出请求的）附链路事实，供 decide() 写进结果日志；调用前就结束的不带。
+# 函数用途: 执行一次决策调用并返回结果，建了调用记录的带回链路分段计时。
 def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionOutcome:
-    call, transport = _experiment_call(request, active, stage=stage, key=key), []
+    transport: list[dict] = []
     outcome = _invoke_call(params, stage=stage, request=request, backend=backend, deadline=deadline, key=key,
-                           active=active, experiment=call, transport_facts=transport)
-    outcome = _with_experiment_facts(outcome, call, active)
+                           active=active, transport_facts=transport)
     return replace(outcome, transport=transport[-1]) if transport else outcome
 
 
@@ -540,14 +487,14 @@ def _dispatch_nonblocking(params: object, call: _DecideCall, prepared: _Prepared
 
 
 # LLM: 注册取消后再次复查堵住关闭/启动竞态；用户中断必须传播，设置取消与宿主关闭仅使建议失效，不能冒充用户停止。
-# 连接一返回响应就复位该连接的退避阶梯（进程内冷却表），之后的复核失败不算连接故障；实验结果固定 observe、不可采用。
+# 连接一返回响应就复位该连接的退避阶梯（进程内冷却表），之后的复核失败不算连接故障。
 # transport_facts 原样交给调用边界收集链路分段计时，本函数不读它。
 # 函数用途: 调用原模型边界并核验响应绑定、摘要、请求模型和最新配置；不执行任何业务变更。
-def _invoke_call(params, *, stage, request, backend, deadline, key, active, experiment, transport_facts) -> DecisionOutcome:
+def _invoke_call(params, *, stage, request, backend, deadline, key, active, transport_facts) -> DecisionOutcome:
     from .decision_model_call import invoke_decision_model_call
 
     agent, point, revision = active.context, request.binding.point, request.binding.policy_revision
-    mode = "observe" if stage.experiment else active.settings["effective"]["points"][point]["effective_mode"]
+    mode = active.settings["effective"]["points"][point]["effective_mode"]
     try:
         stale = _stale(agent, params, stage, point, revision, key[2])
         if stale:
@@ -559,7 +506,7 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
         namespace = "decision-observe" if active.nonblocking else "decision"
         response = invoke_decision_model_call(agent, params, request, backend, deadline=deadline,
             resource_key=(namespace, stage.owner_ref, stage.thread_id, key[1], key[2]), interrupt_handle=active.handle,
-            experiment=experiment, transport_facts=transport_facts)
+            transport_facts=transport_facts)
         record_success(key)
         record_success((*key, point))
         _check_interrupted()
@@ -577,7 +524,7 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
             return revoked
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="late_validation")
-        if mode == "observe" and not stage.experiment:
+        if mode == "observe":
             note_observe_sample_success(agent, point)
         return DecisionOutcome(mode, "success", response, mode == "apply", connection_revision=key[2], deadline=deadline)
     except InterruptedError:
@@ -632,9 +579,9 @@ def _failure_outcome(request: DecisionRequest, exc: Exception, active: ActiveDec
     if isinstance(exc, DecisionModelDisallowed):
         return DecisionOutcome(mode, "off", reason=exc.reason)
     if isinstance(exc, ProviderSendRefused):
-        return DecisionOutcome(mode, "experiment_unavailable", reason="send_refused:" + exc.code)
+        return DecisionOutcome(mode, "error", reason="send_refused:" + exc.code)
     if isinstance(exc, ModelCallBudgetError):
-        return DecisionOutcome(mode, "experiment_unavailable", reason=exc.reason)
+        return DecisionOutcome(mode, "error", reason=exc.reason)
     if active.settings_cancelled:
         return DecisionOutcome(mode, "stale", reason="settings_changed")
     if active.shutdown_cancelled or find_model_call_admission_error(exc) is not None:

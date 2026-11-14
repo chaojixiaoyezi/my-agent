@@ -7,7 +7,6 @@
 - 失败/超时不占名额（只有成功路径记样本）；
 - 跨自然小时重新计数；
 - apply 点位不受影响；
-- 实验路径不做采样；
 - 样本计数不改变 reach_counts 的到达/调用/未调用诊断口径。
 
 记账点：真实成功路径在 `decision_service._invoke_call` 的 success 分支调用 `note_observe_sample_success`。
@@ -92,7 +91,7 @@ def _stub_response(request, backend):
 
 
 # 函数用途: 造一次 decide 调用的打包参数；state/questions 必须是 JSON 数据，否则 DecisionRequest 会判 invalid_input。
-def _call(stage, *, experiment: bool = False) -> _DecideCall:
+def _call(stage) -> _DecideCall:
     return _DecideCall(stage, POINT, {"note": "sampling-test"}, {"q1": "?"}, "rev", ("source-ref",), None, False)
 
 
@@ -200,23 +199,18 @@ def test_apply_point_is_not_sampled(tmp_path):
     assert _observe_sampled_out(agent, POINT, {"effective_mode": "apply"}, _settings(enabled=True, mode="apply")) is False
 
 
-def test_experiment_stage_is_not_sampled(tmp_path, monkeypatch):
-    """实验路径不做 observe 采样：采样判定只在普通路由里被问一次。
-
-    实验调用走 `decision_experiment` 的独立路由（不在本用例范围内）；产品代码里该分支由 `not stage.experiment`
-    明确排除，因此这里断言的是「判定函数只在普通路径被读一次」，不伪造实验调用链。
-    """
+def test_observe_path_reads_sample_count_while_apply_skips_sampling(tmp_path, monkeypatch):
+    """apply 点位不做 observe 采样：采样判定只在普通 observe 路由里读一次样本计数。"""
     agent, params, stage = _host(tmp_path)
     row = {"effective_mode": "observe", "timeout_seconds": 5.0, "profile_id": "profile"}
-    settings = _settings(enabled=True)
     from agent_py_agent.agent.conversation import decision_service as svc
 
     reads: list[int] = []
     monkeypatch.setattr(svc, "observe_sample_success_count", lambda *a, **k: reads.append(1) or 999)
-    assert _observe_sampled_out(agent, POINT, row, settings) is True
+    assert _observe_sampled_out(agent, POINT, row, _settings(enabled=True)) is True
     assert reads == [1]  # 普通 observe 点位会读样本计数
     assert _observe_sampled_out(agent, POINT, {"effective_mode": "apply"}, _settings(enabled=True, mode="apply")) is False
-    assert reads == [1]  # apply 与实验一样不读样本计数
+    assert reads == [1]  # apply 不读样本计数
 
 
 

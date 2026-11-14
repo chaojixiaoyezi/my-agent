@@ -153,23 +153,6 @@
       "reps": 2,
       "scored_questions": 30
     },
-    "skill_proposal_review": {
-      "accuracy": 0.9167,
-      "call_failures": 0,
-      "calls": 8,
-      "cases_digest": "51874fcc2aaf37a39ec0218d7f93c65799d90679a7f4e15f1c8947be13202280",
-      "elapsed_ms_max": 1843,
-      "elapsed_ms_median": 1404.5,
-      "material_digest": "d0ca703e311a06051370ba54e96480e7615e0b4db316114ecbffa2783393d46a",
-      "met": true,
-      "models": [
-        "jev-1.13.0"
-      ],
-      "passed": 22,
-      "recorded_at": "2026-10-02T04:09:35-0700",
-      "reps": 2,
-      "scored_questions": 24
-    },
     "skill_tool": {
       "accuracy": 1.0,
       "call_failures": 0,
