@@ -18,7 +18,6 @@ from agent_py_agent.agent.settings.config import AgentConfig, load_config
 from agent_py_agent.agent.settings.live_switches import (
     LIVE_SWITCH_KEYS,
     SELF_LEARNING_LIVE_POLICY_KEYS,
-    LiveSwitches,
     refresh_live_switches,
     register_live_config,
 )
@@ -245,9 +244,9 @@ def test_live_switches_reloads_all_policy_fields_with_three_way_merge_and_stat_c
     overridden = replace(base, self_learning_max_skills=12, memory_lesson_archive_days=3)
     unregistered = replace(base, config_path="", self_learning_cool_seconds=99)
 
-    LiveSwitches.register(base)
-    LiveSwitches.register(overridden)
-    LiveSwitches.register(unregistered)
+    register_live_config(base)
+    register_live_config(overridden)
+    register_live_config(unregistered)
 
     # 未改写老文件时只 stat 不重读配置
     load_calls = 0
@@ -259,7 +258,7 @@ def test_live_switches_reloads_all_policy_fields_with_three_way_merge_and_stat_c
         return orig_load(target)
 
     monkeypatch.setattr(live, "load_config", _counting_load)
-    assert LiveSwitches.refresh(base) == frozenset()
+    assert refresh_live_switches(base) == frozenset()
     assert load_calls == 0
 
     updated = {

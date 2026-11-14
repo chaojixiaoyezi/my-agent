@@ -283,13 +283,7 @@ def test_core_public_work_context_and_optional_registry_transport(tmp_path, monk
     from agent_py_agent.agent import core
     from agent_py_agent.agent.settings.config import AgentConfig
 
-    assert hasattr(core, 'build_script_work_context')
     assert hasattr(core, '_tool_registry_host_exclusive_kwargs')
-    workspace, scratch = tmp_path / 'workspace', tmp_path / 'scratch'
-    agent = SimpleNamespace(effective_workspace_root=workspace)
-    context = core.build_script_work_context(agent, scratch_dir=scratch, run_id='run', task_id='task',
-        effective_path_scope={'read_roots': [workspace], 'write_roots': []})
-    assert context.workspace_root == workspace and context.scratch_dir == scratch and context.run_id == 'run'
     paths = SimpleNamespace(root=tmp_path / 'home')
     old = core.ToolRegistryParams
     monkeypatch.setattr(core, 'ToolRegistryParams', SimpleNamespace(__dataclass_fields__={}))

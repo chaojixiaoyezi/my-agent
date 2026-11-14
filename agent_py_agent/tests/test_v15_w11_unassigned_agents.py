@@ -6,8 +6,8 @@ import pytest
 
 from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
 from agent_py_agent.agent.conversation.business_contracts import BackgroundAgentIdentity
+from agent_py_agent.agent.conversation.session_messaging import queue_owned_background_message
 from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
-from agent_py_agent.agent.tooling.background_agents_tool import execute_background_action
 from agent_py_agent.tests.test_business_v12_f3_agents import business_host as business_host
 from agent_py_agent.tests.test_mega_business_api_actions import native_http as native_http
 
@@ -31,11 +31,10 @@ def test_null_identity_and_public_schema_roundtrip():
 def test_null_create_get_list_and_explicit_null_filter(business_host):
     host, actor = business_host
     service = BackgroundAgentService(host)
-    root = execute_background_action(host, "background_agents.create", {"space_id": None, "name": "root worker"},
-        actor=actor, idempotency_key="null")["agent"]
+    root = service.create({"space_id": None, "name": "root worker"}, actor=actor, idempotency_key="null")["agent"]
     scoped = service.create({"space_id": "space-A", "name": "scoped"}, actor=actor, idempotency_key="scoped")["agent"]
     assert root["space_id"] is None
-    assert execute_background_action(host, "background_agents.get", {"agent_id": root["agent_id"]}, actor=actor)["agent"]["space_id"] is None
+    assert service.get(root["agent_id"], actor=actor)["agent"]["space_id"] is None
     assert {row["agent_id"] for row in service.list({}, actor=actor)["items"]} == {root["agent_id"], scoped["agent_id"]}
     assert [row["agent_id"] for row in service.list({"space_id": None}, actor=actor)["items"]] == [root["agent_id"]]
     assert [row["agent_id"] for row in service.list({"space_id": "space-A"}, actor=actor)["items"]] == [scoped["agent_id"]]
@@ -209,9 +208,14 @@ def test_work_state_waits_for_accepted_unconsumed_message(business_host, surface
     service = BackgroundAgentService(host)
     agent = service.create({"space_id": "space-A", "name": "worker"}, actor=actor,
         idempotency_key="message-worker")["agent"]
-    reply = execute_background_action(host, "background_agents.messages.send",
-        {"agent_id": agent["agent_id"], "text": "请处理此项工作", "input_kind": "message"},
-        actor=actor, idempotency_key="pending-work")
+    reply = queue_owned_background_message(
+        host,
+        actor=actor,
+        target=service._thread(agent["agent_id"], actor),
+        text="请处理此项工作",
+        input_kind="message",
+        operation_key=service._operation_key(actor, "pending-work"),
+    )
     assert reply["receipt_state"] == "accepted"
     page = service.store.session_tasks.list_page(target_thread_id=agent["thread_id"], limit=100)
     assert page["coverage"] == "complete" and page["items"] == []

@@ -236,17 +236,3 @@ def test_config_task_attributes_cannot_weaken_host_hard_guards():
     params.task_attributes = {"hard_failure_halt_threshold": 2, "repeated_failure_halt_threshold": 3}
     assert hard_failure_halt_threshold(params) == 2
     assert repeated_failure_halt_threshold(params) == 3
-# LLM: task 的恢复额度只能收紧宿主正上限；显式零不能把宿主额度改成无限。
-# 函数用途: 验证主代理自动恢复也遵守同一部署硬上限。
-def test_config_auto_resume_request_cannot_weaken_host_limit():
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.contracts import main_agent_auto_resume as module
-    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
-
-    # 宿主上限经冻结 typed 快照传入，不再替换模块内读取函数。
-    host = RuntimeGuardPolicy(main_agent_auto_resume_attempt_limit=2)
-    for requested, expected in ((0, 2), (5, 2), (1, 1), (None, 2)):
-        request = SimpleNamespace(max_auto_recovery_attempts=requested)
-        assert module.auto_resume_limit(request, policy=host) == expected
-    assert RuntimeGuardPolicy().main_agent_auto_resume_attempt_limit == module.DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT

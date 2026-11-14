@@ -191,16 +191,6 @@ class TestNormalizeContextPacks:
         assert len(result) == 1
 
 
-class TestNoNaturalWriteDirExtraction:
-    """确认当前 normalization 模块不再从自然语言目标里抽写入根。"""
-
-    def test_extract_write_dirs_api_removed(self):
-        """写入根必须来自 extra_write_roots/workspace/refs，不再有自然语言兜底 API。"""
-        import agent_py_agent.agent.subagents.services.persistence.model_normalizers as model_normalizers
-
-        assert not hasattr(model_normalizers, "_extract_write_dirs")
-
-
 class TestReadOnlySubagentTools:
     """测试 manager workflow service 中的只读工具常量。"""
 

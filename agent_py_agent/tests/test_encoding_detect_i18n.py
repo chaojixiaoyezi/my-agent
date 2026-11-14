@@ -15,7 +15,6 @@ import pytest
 
 from agent_py_agent.agent.common.encoding_detect import (
     decode_bytes,
-    detect_encoding,
     detect_line_ending,
     encode_text,
 )
@@ -111,7 +110,6 @@ def test_write_new_file_defaults_utf8(tmp_path: Path) -> None:
     result = WriteFileTool(workspace).execute({"path": "new.txt", "content": "新文件 hello"})
     assert result.ok is True
     assert (workspace / "new.txt").read_bytes() == "新文件 hello".encode()  # 新文件默认 utf-8
-    assert detect_encoding((workspace / "new.txt").read_bytes()) == "utf-8"
 
 
 @pytest.mark.parametrize("codec,bom", [

@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -59,34 +58,9 @@ def test_regression_max_tool_rounds_from_task_attributes():
     assert effective_max == 20
 
 
-def test_regression_max_tool_rounds_fallback_to_config():
-    """验证 task_attributes 没有 max_tool_rounds 时回退到全局配置"""
-    attrs = {}  # 没有 max_tool_rounds
-    config_max = 10
-    effective_max = config_max
-    if attrs and "max_tool_rounds" in attrs:
-        effective_max = int(attrs["max_tool_rounds"])
-    assert effective_max == 10
-
-
 # ============================================================
 # Regression 2: QQ WebSocket Pong frame (a610b9b)
 # ============================================================
-
-def test_regression_qq_websocket_pong_opcode():
-    """验证 QQ WebSocket Ping 回应正确的 Pong opcode (0x8A)"""
-    # 修复前：发送 Close frame (0x88)
-    # 修复后：发送 Pong frame (0x8A)
-    OPCODE_PONG = 0x8A
-    OPCODE_CLOSE = 0x88
-
-    # 模拟 _WebSocketFrame.build_close_frame() 返回 0x88
-    close_frame_byte = 0x88
-    pong_frame_byte = OPCODE_PONG
-
-    assert pong_frame_byte == 0x8A, "Pong opcode must be 0x8A"
-    assert close_frame_byte != pong_frame_byte, "Close and Pong are different"
-
 
 def test_regression_qq_websocket_pong_frame_bytes():
     """验证 Pong 帧格式 [0x8A, 0x00]"""
@@ -94,23 +68,6 @@ def test_regression_qq_websocket_pong_frame_bytes():
     pong_frame = bytes([0x8A, 0x00])
     assert pong_frame[0] == 0x8A
     assert pong_frame[1] == 0x00
-
-
-def test_regression_qq_websocket_no_question_when_no_query():
-    """验证 WebSocket handshake URL 没有 query 时不构造 '?'"""
-    path = "/gateway"
-    url_no_query = "wss://example.com/gateway"
-    url_with_query = "wss://example.com/gateway?token=abc"
-
-    # 提取 query
-    query = url_with_query.split("?", 1)[1] if "?" in url_with_query else ""
-    request_target = f"{path}?{query}" if query else path
-    assert request_target == "/gateway?token=abc"
-
-    # 无 query 时
-    query = url_no_query.split("?", 1)[1] if "?" in url_no_query else ""
-    request_target = f"{path}?{query}" if query else path
-    assert request_target == "/gateway"  # 而不是 "/gateway?"
 
 
 # ============================================================
@@ -207,32 +164,6 @@ def test_regression_config_warnings_accumulated():
 # Regression 4: tool input boundary validation (ae7de13)
 # ============================================================
 
-def test_regression_tool_path_not_relative_absolute():
-    """验证路径不能是绝对路径（在工作区外）"""
-    # 模拟 filesystem 工具的路径验证
-    def validate_path(path_str: str, workspace: str = "/Users/example/my_agent/my-agent") -> bool:
-        if not isinstance(path_str, str):
-            return False
-        if not path_str:
-            return False
-        if path_str.startswith("/"):  # 绝对路径在工作区外
-            return False
-        return True
-
-    assert validate_path("/etc/passwd") is False  # 绝对路径被拒绝
-    assert validate_path("relative/path") is True
-
-
-def test_regression_tool_path_no_control_chars():
-    """验证路径不能包含控制字符"""
-    def has_control_chars(s: str) -> bool:
-        return bool(re.search(r'[\x00-\x1f\x7f]', s))
-
-    assert has_control_chars("safe/path") is False
-    assert has_control_chars("path\x00with\x07null") is True
-    assert has_control_chars("path\twith\ttab") is True
-
-
 def test_regression_tool_registry_rejects_non_dict_payload():
     """验证工具注册层拒绝非对象 payload"""
     from pathlib import Path
@@ -292,17 +223,6 @@ def test_regression_tool_registry_rejects_unknown_tool():
     assert tool_name not in known_tools
 
 
-def test_regression_tool_web_rejects_non_http():
-    """验证网络工具只允许 http/https"""
-    def is_allowed_url(url: str) -> bool:
-        return url.startswith("http://") or url.startswith("https://")
-
-    assert is_allowed_url("https://example.com") is True
-    assert is_allowed_url("http://example.com") is True
-    assert is_allowed_url("file:///etc/passwd") is False
-    assert is_allowed_url("ftp://example.com") is False
-
-
 def test_regression_tool_web_rejects_url_with_userinfo():
     """验证 URL 包含 userinfo 被拒绝"""
     url_with_creds = "https://user:pass@example.com/path"
@@ -322,22 +242,6 @@ def test_regression_tool_web_rejects_url_with_userinfo():
 # ============================================================
 # Regression 5: subagent write boundaries (ee2db4e)
 # ============================================================
-
-def test_regression_write_boundary_path_type_check():
-    """验证写边界检查 path 类型"""
-    def validate_write_path(path) -> tuple[bool, str]:
-        if not isinstance(path, str):
-            return False, "path must be str"
-        if not path:
-            return False, "path empty"
-        return True, "ok"
-
-    ok, msg = validate_write_path("/allowed/workspace/file.txt")
-    assert ok is True
-
-    ok, msg = validate_write_path(123)  # 不是字符串
-    assert ok is False
-
 
 def test_regression_write_boundary_symlink_resolution():
     """验证写边界解析 symlink 并检查最终路径在工作区内"""

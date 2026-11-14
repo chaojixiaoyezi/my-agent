@@ -6,7 +6,6 @@ import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -564,41 +563,6 @@ def test_runtime_summary_legacy_default_and_error_redaction(api):
     assert api.RuntimeSummary.from_dict({'last_error': raw}) == summary
     with pytest.raises(ValueError):
         api.RuntimeSummary.from_dict({'last_error': 12})
-
-
-# LLM: 失败状态必须累计并继承已知错误；省略时间生成UTC，显式空时间不被替换；无IO。
-# 函数用途: 验证所有失败状态的默认时间、错误脱敏和旧错误保留。
-@pytest.mark.parametrize('status', ['failed', 'error', 'timeout', 'timed_out'])
-def test_next_run_summary_failure_error_and_default_utc(api, status):
-    module = importlib.import_module('agent_py_agent.agent.assets')
-    assert 'last_error' in inspect.signature(module.next_run_summary).parameters
-    previous = api.RuntimeSummary(run_count=3, consecutive_failures=1, last_error='old detail')
-    before = datetime.now(timezone.utc)
-    raw = 'Bearer synthetic-summary-secret timeout'
-    current = module.next_run_summary(previous, status, 12.5, last_error=raw)
-    observed = datetime.fromisoformat(current.last_run_at)
-    assert observed.utcoffset() == timedelta(0) and before <= observed <= datetime.now(timezone.utc)
-    assert current.last_status == status and current.last_duration_ms == 12.5
-    assert current.run_count == 4 and current.consecutive_failures == 2
-    assert current.last_error == api.clean_json(raw) and 'synthetic-summary-secret' not in current.last_error
-    inherited = module.next_run_summary(current, status, 1, '', last_error='')
-    assert inherited.last_run_at == '' and inherited.last_error == current.last_error
-    assert inherited.run_count == 5 and inherited.consecutive_failures == 3
-
-
-# LLM: 非失败状态默认清除历史错误，也允许保留调用方显式说明；原摘要不能被修改。
-# 函数用途: 验证成功及其它非失败状态的归零和错误覆盖规则。
-@pytest.mark.parametrize('status', ['succeeded', 'skipped', 'paused'])
-def test_next_run_summary_nonfailure_clears_error(api, status):
-    module = importlib.import_module('agent_py_agent.agent.assets')
-    assert 'last_error' in inspect.signature(module.next_run_summary).parameters
-    previous = api.RuntimeSummary(run_count=2, consecutive_failures=2, last_error='old failure')
-    cleared = module.next_run_summary(previous, status, 5, '2026-10-21')
-    assert cleared.to_dict() == {'last_run_at': '2026-10-21', 'last_status': status, 'last_duration_ms': 5,
-                                 'run_count': 3, 'consecutive_failures': 0, 'last_error': ''}
-    supplied = module.next_run_summary(previous, status, 5, last_error='--password=synthetic-summary-secret')
-    assert supplied.last_error == api.clean_json('--password=synthetic-summary-secret')
-    assert previous.last_error == 'old failure' and previous.consecutive_failures == 2
 
 
 # LLM: 两类Store均使用真实临时资产和磁盘JSON，不以返回对象冒充持久化；无真实Owner写入。

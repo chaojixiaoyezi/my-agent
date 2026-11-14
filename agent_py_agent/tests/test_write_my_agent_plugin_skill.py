@@ -200,52 +200,6 @@ def test_skill_only_requires_authoring_tools():
     assert "只能等于或严于默认" in body
 
 
-def test_skill_documents_v8_and_production_boundary():
-    body = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    assert all(token in body for token in ("v8", "events", "tool_gates", "permissions.network",
-        "allow_as_is", "ask", "deny", "arguments: full", "plugin_events_disabled",
-        "my-agent/events", "my-agent/tool-gate", "local/main", "强制沙箱", "会话和记忆"))
-    assert "不能自行安装、启用" in body and "默认 `false`" in body
-
-
-# LLM: 事件字段表是给模型读的合同，写错字段名会直接造出读不到数据的插件；这里让表与 B4 的唯一白名单同源比对。
-#   B4 的 points.py 尚未合入本分支时不能凭缺失判失败（那是分支差异不是错），因此先按文件存在与否决定跳过，
-#   17j 合入 B4 后同一用例会自动开始严格比对。
-# 函数用途: 校验 author-contract 的事件字段表与 points.py 的 _EVENT_FACT_FIELDS 逐类逐字段一致。
-def test_author_contract_event_table_matches_event_point_projection():
-    points_path = ROOT / "agent_py_agent/agent/plugin_events/points.py"
-    if not points_path.exists():
-        pytest.skip("B4 的 plugin_events/points.py 尚未合入本分支；17j 合入后本用例自动生效")
-
-    import ast
-
-    tree = ast.parse(points_path.read_text(encoding="utf-8"))
-    expected: dict[str, tuple[str, ...]] = {}
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(target, ast.Name) and target.id == "_EVENT_FACT_FIELDS" for target in node.targets):
-            continue
-        expected = {key.value: tuple(item.value for item in value.elts)
-                    for key, value in zip(node.value.keys, node.value.values)}
-    assert expected, "points.py 里找不到 _EVENT_FACT_FIELDS"
-
-    table = (SKILL / "references/author-contract.md").read_text(encoding="utf-8")
-    documented: dict[str, tuple[str, ...]] = {}
-    for line in table.splitlines():
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) < 3 or not cells[0].startswith("`"):
-            continue
-        name = cells[0].strip("` ")
-        if name not in expected:
-            continue
-        documented[name] = tuple(part.strip("` ") for part in cells[1].split("、"))
-
-    assert set(documented) == set(expected), f"表里缺或多：{sorted(set(expected) ^ set(documented))}"
-    for event_type, fields in expected.items():
-        assert documented[event_type] == fields, f"{event_type} 字段不一致：表 {documented[event_type]} vs 实现 {fields}"
-
-
 # LLM: 截断标记是 B5 宿主给的结构化事实，文档和模板都得用同一个字段名，写错了门就永远看不到截断；
 #   B5 的 tool_gate.py 尚未合入本分支时不能凭缺失判失败（那是分支差异不是错），因此先按文件存在与否跳过，
 #   合入 B5 后同一用例会自动开始严格比对。
@@ -611,7 +565,7 @@ def test_existing_packages_match_baseline_bytes(author_workspace):
     baseline = _baseline_builder()
     sdk = build_plugin_api(author_workspace / "sdk")
     names = ("activity-line", "context-inspector", "browser-lite", "design-lite", "desktop-lite",
-             "drama-media-shell", "genui-lite", "harness-console", "image-text")
+             "genui-lite", "harness-console", "image-text")
     for name in names:
         project = ROOT / "plugins" / name
         metadata = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))

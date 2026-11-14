@@ -25,7 +25,6 @@ from agent_py_agent.agent.workflows.pinned_definitions import (
 from agent_py_agent.agent.workflows.query_health import (
     build_workflow_health_view,
     summarize_run_step_health,
-    workflow_state_report,
 )
 from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
 
@@ -596,10 +595,6 @@ def test_build_workflow_health_view_bounded_and_coverage(tmp_path):
 
     # Canonical references
     assert len(step_calc['canonical_references']['effect_ids']) == 3
-
-    # Redaction: secret_token_xyz masked
-    rep = workflow_state_report(run_store, 'wf_analytics', limit=50)
-    assert rep['coverage'] == 'complete'
 
 
 def test_subworkflow_parallel_dag_siblings_no_deadlock_and_depth(tmp_path):

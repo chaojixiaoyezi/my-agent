@@ -151,7 +151,6 @@ def _heavy_case(tmp_path, counts):
         model_context_window_tokens=262144,
         max_tokens=128,
         memory_compact_remote_enabled=False,
-        tool_default_deferral_enabled=True,
     )
     agent = SimpleAgent(config, workspace)
     provider = _CaptureProvider()

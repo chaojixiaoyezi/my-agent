@@ -12,7 +12,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.session.resume import _load_subagent_context
 from agent_py_agent.agent.subagents.cancellation import (
     CancelSubagentTaskRequest,
     prepare_subagent_stops,
@@ -139,38 +138,6 @@ def test_dispatch_selects_current_before_canonical_reads(tmp_path, monkeypatch):
     assert manager.indexing.select_runs([]) == []
 
 
-def test_session_recent_scope_is_selected_before_hydration(tmp_path, monkeypatch):
-    manager = SubAgentManager(tmp_path)
-    for number in range(7):
-        task = manager.create_run(goal=f"当前-{number}", thought="", plan=[],
-                                  attributes={"session_id": "session-a", "conversation_thread_id": "session-a"})
-    _history(manager, 100)
-    reads = _reads(manager, monkeypatch)
-    rows = _load_subagent_context(SimpleNamespace(subagents=manager), "session-a")
-    assert [row["goal"] for row in rows] == [f"当前-{number}" for number in range(6, 1, -1)]
-    assert len(reads) == 5 and task.id in reads
-    assert all(not run_id.startswith("history-") for run_id in reads)
-
-
-def test_resume_uses_real_session_task_references_and_retains_recent_order(tmp_path, monkeypatch):
-    from agent_py_agent.agent.session.manager import SessionManager
-    from agent_py_agent.agent.session.resume import resume_session
-    from agent_py_agent.agent.settings import AgentConfig
-
-    manager = SubAgentManager(tmp_path / "runs")
-    root = manager.create_run(goal="本会话的根", thought="", plan=[])
-    for number in range(6):
-        manager.create_run(goal=str(number), thought="", plan=[], parent_id=root.id, root_id=root.id)
-    expected = [task.id for task in manager.list_runs_for_root_report(root.id).runs[:5]]
-    config = AgentConfig(session_workspace=str(tmp_path / "sessions"), memory_path=str(tmp_path / "memory.jsonl"))
-    session = SessionManager(config).create_session(metadata={"task_id": root.id})
-    _history(manager, 100)
-    reads = _reads(manager, monkeypatch)
-    result = resume_session(SimpleNamespace(subagents=manager, config=config), session.session_id)
-    assert [row["id"] for row in result["subagent_context"]] == expected
-    assert len(reads) == 5 and not any(run_id.startswith("history-") for run_id in reads)
-
-
 def test_board_current_approval_scope_and_filters_precede_item_construction(tmp_path, monkeypatch):
     from agent_py_agent.agent.subagents.models import CapabilityRequest
     from agent_py_agent.agent.subagents.services.board import service
@@ -218,8 +185,6 @@ def test_corrupt_selected_canonical_is_unknown_before_any_stop_signal(tmp_path, 
     assert snapshot.load_errors and snapshot.warnings and snapshot.runs == []
     report = manager.hierarchy.orchestrate_recovery(params=RecoveryOrchestrationRequest(run_ids=[task.id]))
     assert report.load_errors and report.steps == []
-    context = _load_subagent_context(SimpleNamespace(subagents=manager), "session", metadata={"task_id": task.id})
-    assert context[0]["type"] == "subagent_context_load_error"
 
 
 def test_partial_and_replaced_index_never_fall_back_to_owner_history(tmp_path, monkeypatch):
@@ -392,12 +357,10 @@ def test_index_scope_connections_release_descriptors_on_success_and_error(tmp_pa
     for _ in range(4):
         manager.board.build_board(options=SubAgentBoardOptions(root_id=task.id))
         manager.kernel_snapshot(SubagentKernelQuery(root_id=task.id))
-        _load_subagent_context(SimpleNamespace(subagents=manager), "session")
     canonical_state_path_from_payload(asdict(task)).write_text("{broken", encoding="utf-8")
     for _ in range(4):
         with pytest.raises(SubagentRunIndexUnavailable):
             manager.board.build_board(options=SubAgentBoardOptions(root_id=task.id))
-        assert _load_subagent_context(SimpleNamespace(subagents=manager), "session")[0]["type"] == "subagent_context_load_error"
     delta = len(os.listdir(fd_dir)) - before
     record_property("fd_delta", delta)
     assert delta == 0

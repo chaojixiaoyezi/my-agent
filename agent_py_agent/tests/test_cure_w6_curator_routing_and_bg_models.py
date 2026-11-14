@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,7 +30,6 @@ from agent_py_agent.agent.conversation.compact_guard import ConversationCompactE
 from agent_py_agent.agent.conversation.host_actor import HostChannelActor
 from agent_py_agent.agent.core import (
     _curator_model_router,
-    _curator_profile_route,
     _skill_learning_service,
 )
 from agent_py_agent.agent.llm_scale.model_pricing import (
@@ -60,32 +59,6 @@ from agent_py_agent.agent.memory_store.daily import DailyMemoryStore
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.cli.gateway_lane_retry import BackgroundLaneRetry
 from agent_py_agent.cli.gateway_loops import _BackgroundMainSupervisor
-
-
-@dataclass
-class _FakeProfileConfig:
-    model_name: str
-    model_backend: str
-    stream_enabled: bool = True
-
-
-def test_curator_skips_profiles_lacking_specific_tool_choice(monkeypatch) -> None:
-    """_curator_profile_route and _curator_model_router skip profiles lacking 'specific' tool choice."""
-    fake_caps = SimpleNamespace(native_tool_choices=("auto",))
-    fake_backend = SimpleNamespace(name="anthropic_compatible", model_request_capabilities=fake_caps)
-    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda *a, **k: fake_backend)
-
-    profile_config = _FakeProfileConfig(
-        model_name="MiniMax-M3.1-Flash",
-        model_backend="anthropic_compatible",
-    )
-    route = _curator_profile_route("minimax-prof", profile_config)
-    assert route is None
-
-    out_reasons: dict[str, str] = {}
-    route_with_reasons = _curator_profile_route("minimax-prof", profile_config, out_reasons=out_reasons)
-    assert route_with_reasons is None
-    assert out_reasons.get("minimax-prof") == "forced_tool_choice_not_supported"
 
 
 def test_skill_learning_dynamic_backend_provider(tmp_path: Path) -> None:

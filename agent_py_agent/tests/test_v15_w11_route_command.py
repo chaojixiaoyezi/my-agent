@@ -1,7 +1,11 @@
 """W11路由使用真实线程存储；受理快照不得因后续开关变化而漂移。"""
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import replace
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -25,10 +29,33 @@ from agent_py_agent.agent.gateway_parts.im_dispatch_policy import (
     capture_im_dispatch_for_owner,
 )
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
-from agent_py_agent.agent.settings.im_task_preferences import set_delegation_preference
+from agent_py_agent.agent.scheduler.schedule import _canonical_zone_name
+from agent_py_agent.agent.settings.im_task_preferences import preference_key, preference_path
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.tests.test_business_v12_f3_agents import business_host as business_host
 from agent_py_agent.tests.test_im_execution_threads import fixture_agent
+
+
+def _write_legacy_preference(agent, channel: str, actor_id: str) -> None:
+    timezone = _canonical_zone_name(str(agent.config.timezone or ""))
+    local = datetime.fromtimestamp(time.time(), ZoneInfo(timezone))
+    midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), tzinfo=ZoneInfo(timezone))
+    payload = {
+        "schema_version": "im_user_preferences.v1",
+        "owner_id": str(agent.home_paths.owner_id),
+        "users": {
+            preference_key(channel, actor_id): {
+                "enabled": True,
+                "expires_at": midnight.timestamp(),
+                "business_day": local.date().isoformat(),
+                "timezone": timezone,
+                "revision": 1,
+            }
+        },
+    }
+    path = preference_path(agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 # LLM: pytest对封闭合法输入逐项调用纯解析函数，核对状态查询与布尔结果；无存储、线程或模型副作用。
@@ -162,7 +189,7 @@ def test_im_capture_freezes_route_and_origin_and_only_structured_self_override(t
 def test_legacy_enable_is_not_upgraded_to_persistent_route(tmp_path, monkeypatch):
     agent, thread = fixture_agent(tmp_path)
     agent.config.enable_subagents = True
-    set_delegation_preference(agent, 'feishu', 'ou_a', True)
+    _write_legacy_preference(agent, 'feishu', 'ou_a')
     monkeypatch.setattr('agent_py_agent.agent.gateway_parts.control_service._request_agent_for_scope', lambda base, scope: agent)
     snapshot = capture_im_dispatch(agent, GatewayControlScope('ou_a', 'feishu', 'oc_source'))
     assert snapshot['mode'] == 'original'
@@ -214,7 +241,7 @@ def test_route_status_reports_real_owner_quota_and_unlimited(business_host, limi
 # 函数用途: 检查旧偏好只用于迁移提醒，不能改变当前路由状态。
 def test_old_preference_is_a_readonly_migration_hint_not_route_state(tmp_path):
     agent, thread = fixture_agent(tmp_path)
-    set_delegation_preference(agent, 'feishu', 'ou_a', True)
+    _write_legacy_preference(agent, 'feishu', 'ou_a')
     before = agent.conversation_store.storage.thread_path(thread.thread_id).read_bytes()
     result = execute_route_control(agent, ConversationControlCommand('route', value='status'), thread,
         actor_id='ou_a', channel='feishu')

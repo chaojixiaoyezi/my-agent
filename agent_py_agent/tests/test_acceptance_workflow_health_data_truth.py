@@ -9,7 +9,6 @@ from agent_py_agent.agent.workflows.models import StepExecutionRecord, WorkflowR
 from agent_py_agent.agent.workflows.query_health import (
     build_workflow_health_view,
     summarize_run_step_health,
-    workflow_state_report,
 )
 
 
@@ -143,7 +142,7 @@ def test_prefer_readonly_sample_port_without_legacy_reads():
                     'scan_limit': 8, 'scan_count': 1, 'read_limit': 1, 'read_count': 1}
         def list_runs(self, **kwargs):
             pytest.fail('legacy read called')
-    result = workflow_state_report(Sampler(), 'wf', limit=1)
+    result = build_workflow_health_view(Sampler(), workflow_id='wf', limit=1)
     assert result['coverage'] == 'complete'
     assert result['sampled_runs'] == 1
     assert result['source_coverage']['read_count'] == 1
@@ -234,7 +233,7 @@ def test_original_health_value_assertions_on_real_record_memory_window():
     assert partial['sampled_runs'] == 2
     assert partial['coverage'] == 'partial'
     assert partial['truncated'] is True
-    complete = workflow_state_report(Window(records), 'wf_analytics', limit=50)
+    complete = build_workflow_health_view(Window(records), workflow_id='wf_analytics', limit=50)
     assert complete['schema_version'] == 'workflow_health.v1'
     assert complete['coverage'] == 'complete'
     assert complete['truncated'] is False

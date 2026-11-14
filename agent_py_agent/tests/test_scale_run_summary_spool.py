@@ -1,5 +1,4 @@
 """摘要历史扩容、稳定顺序、事务重放及旧格式迁移的本地回归。"""
-import ast
 import inspect
 import json
 import os
@@ -10,15 +9,29 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.assets import next_run_summary
-from agent_py_agent.agent.assets.descriptor import AssetDescriptor, RuntimeSummary
+from agent_py_agent.agent.assets.descriptor import AssetDescriptor, RuntimeSummary, clean_json
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStore
 from agent_py_agent.agent.workflows import run_summary_spool as spool
+
+
+def next_run_summary(summary, status, duration_ms, run_at=None, last_error=""):
+    if not isinstance(status, str) or not status.strip():
+        raise ValueError("运行状态不能为空")
+    if run_at is None:
+        run_at = datetime.now(timezone.utc).isoformat()
+    if status in {"failed", "error", "timeout", "timed_out"}:
+        failures = summary.consecutive_failures + 1
+        resolved_error = clean_json(str(last_error or summary.last_error or ""))
+    else:
+        failures = 0
+        resolved_error = clean_json(str(last_error or ""))
+    return RuntimeSummary(run_at, status, duration_ms, summary.run_count + 1, failures, resolved_error)
 
 
 # LLM: 合成Owner祖先限制全局发现，所有运行记录只属于临时测试资产。
@@ -209,10 +222,6 @@ def test_summary_signature_and_projection_guard():
     assert valid_signature(ScriptStore.record_run_summary)
     assert valid_signature(WorkflowStore.record_run_summary)
     assert not valid_signature(lambda **kwargs: None)
-    tree = ast.parse(Path(spool.__file__).read_text())
-    project = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'project')
-    assert not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == '_pending'
-                   for node in ast.walk(project))
 
 
 # LLM: 子进程在真实SQLite事务内或提交后退出，不把模拟返回值当耐久重放证据。

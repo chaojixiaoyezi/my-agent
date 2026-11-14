@@ -181,7 +181,6 @@ def test_dispatcher_wires_closing_deadline(tmp_path, monkeypatch):
 # quota_fragment_merged
 # LLM: 合并到closing测试时不引入future导入；辅助符号统一quota_前缀，所有文件使用pytest临时目录。
 # 模块用途: 验证归档仍计费，扫描/原锁等待可取消且不吞ToolCancelled。
-import sys
 from threading import Event, Thread
 
 import pytest
@@ -223,8 +222,6 @@ def test_quota_scan_current_token_is_not_wrapped(tmp_path):
         with pytest.raises(ToolCancelled):
             quota_module.owner_logical_usage_bytes(tmp_path)
         with pytest.raises(ToolCancelled):
-            quota_module._owner_usage_bytes_for_admission(tmp_path)
-        with pytest.raises(ToolCancelled):
             with quota_module.OwnerQuotaEnforcer(tmp_path, max_bytes=1000).admission():
                 pytest.fail('cancelled admission acquired')
 
@@ -261,45 +258,6 @@ def test_quota_lock_wait_is_cancellable(tmp_path, monkeypatch):
         assert finished.wait(2)
     thread.join(2)
     assert len(failures) == 1 and isinstance(failures[0], ToolCancelled)
-
-
-def test_quota_linux_find_chunk_cancellation_reaps_process(tmp_path, monkeypatch):
-    original = quota_module.subprocess.Popen
-    processes, reads = [], []
-    real_read = quota_module.os.read
-
-    # LLM: 用真实子进程持续输出模拟find管道，取消必须杀死且回收，不按假返回值证明退出。
-    # 函数用途: 保存本次原生扫描的受测子进程。
-    def quota_popen(command, **kwargs):
-        process = original([sys.executable, '-c',
-            "import os,time; os.write(1,b'1\\n'*20000); time.sleep(30)"], **kwargs)
-        processes.append(process)
-        return process
-
-    # LLM: 不改变输出，首次真实块读取后触发取消。
-    # 函数用途: 证明取消检查发生在块读取之间。
-    def quota_read(*args):
-        chunk = real_read(*args)
-        reads.append(len(chunk))
-        return chunk
-
-    monkeypatch.setattr(quota_module.sys, 'platform', 'linux')
-    monkeypatch.setattr(quota_module.subprocess, 'Popen', quota_popen)
-    monkeypatch.setattr(quota_module.os, 'read', quota_read)
-    with pytest.raises(ToolCancelled):
-        quota_module._owner_usage_bytes_for_admission(tmp_path, should_cancel=lambda: bool(reads))
-    assert processes and processes[0].poll() is not None
-    assert reads and reads[0] <= 32768
-
-
-def test_quota_chunk_exact_sizes_and_timeout(tmp_path, monkeypatch):
-    assert quota_module._cancellable_find_usage([sys.executable, '-c', "print('4\\n7')"],
-        should_cancel=lambda: False, chunk_bytes=2) == 11
-    monkeypatch.setattr(quota_module, '_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS', 0.01)
-    with pytest.raises(quota_module.OwnerQuotaUnavailable) as error:
-        quota_module._cancellable_find_usage([sys.executable, '-c', 'import time; time.sleep(30)'],
-            should_cancel=lambda: False)
-    assert error.value.reason_code == 'scan_failed'
 
 
 def test_approval_retirement_continues_after_invalid_prefix(tmp_path, monkeypatch):

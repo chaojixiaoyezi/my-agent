@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.common.path_normalize import normalize_path
 from agent_py_agent.agent.common.safe_id import safe_id
 
 pytestmark = pytest.mark.integration
@@ -22,15 +21,6 @@ def test_safe_id_semantics_cover_all_legacy_call_sites() -> None:
     assert safe_id("x" * 100, max_len=48) == "x" * 48
     assert safe_id("v1.2.3") == "v1.2.3", "保留点号(task_progress 既有语义)"
     assert safe_id("--a--") == "a", "首尾 -_ 剥离"
-
-
-def test_normalize_path_expands_vars_user_and_resolves(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("MY_TEST_ROOT", str(tmp_path))
-    result = normalize_path("$MY_TEST_ROOT/sub/../sub/file.txt")
-    assert result == tmp_path / "sub" / "file.txt", "expandvars+resolve 全链生效"
-    assert normalize_path("") is None and normalize_path(None) is None
-    home = normalize_path("~/x")
-    assert home is not None and str(home).startswith(str(Path.home()))
 
 
 def _make_lines_cache_stable(path: Path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import random
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +17,6 @@ from agent_py_agent.agent.conversation.store_io import (
 )
 from agent_py_agent.agent.gateway_parts.request_history import (
     _conversation_row_artifacts,
-    _dedupe_facts,
     _gateway_message_matches_part,
     gateway_recent_artifacts,
 )
@@ -24,6 +24,22 @@ from agent_py_agent.agent.gateway_parts.request_history import (
 _CONTEXT = "conversation.messages.read"
 _LIMITS = (1, 2, 3, 5, 8, 20, 80, 100, 200, 1000)
 _TEXT = "资料核对abc😀 中文xyz\u0085尾"
+
+
+@dataclass(frozen=True)
+class _DedupeFacts:
+    role: object
+    channel_message_id: object
+    metadata: dict
+
+
+def _dedupe_facts(row: object) -> _DedupeFacts:
+    metadata = getattr(row, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return _DedupeFacts(
+        getattr(row, "role", ""), getattr(row, "channel_message_id", ""),
+        {key: metadata[key] for key in ("gateway_request_id", "assistant_part_id", "gateway_execution_attempt_id", "turn_end_reason") if key in metadata},
+    )
 
 
 # LLM: 生成确定性的账本行：正常/展示/解析失败/坏 JSON/非对象/空白/仅分隔符行，偶尔 CRLF 与大行；只写测试目录。
