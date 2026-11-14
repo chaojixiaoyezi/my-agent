@@ -133,11 +133,28 @@ func signatureHeader(k string) bool {
 
 type ownerIdentity struct{ tenant, kind, id string }
 
+func cardActionValue(ev map[string]any) map[string]any {
+	action := object(ev, "action")
+	if action == nil {
+		return nil
+	}
+	if m, ok := action["value"].(map[string]any); ok {
+		return m
+	}
+	if s, ok := action["value"].(string); ok {
+		var m map[string]any
+		if json.Unmarshal([]byte(s), &m) == nil && m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
 func isPrivatePasswordCardAction(ev map[string]any, openID string) bool {
 	if openID == "" {
 		return false
 	}
-	val := object(object(ev, "action"), "value")
+	val := cardActionValue(ev)
 	if val == nil {
 		return false
 	}
@@ -236,15 +253,7 @@ func isCard(p map[string]any) bool {
 	if ev == nil {
 		ev = p
 	}
-	v := object(ev, "action")["value"]
-	if _, ok := v.(map[string]any); ok {
-		return true
-	}
-	if s, ok := v.(string); ok {
-		var m map[string]any
-		return json.Unmarshal([]byte(s), &m) == nil && m != nil
-	}
-	return false
+	return cardActionValue(ev) != nil
 }
 func eventKey(p map[string]any, raw []byte) string {
 	if id := text(object(p, "header"), "event_id"); id != "" {

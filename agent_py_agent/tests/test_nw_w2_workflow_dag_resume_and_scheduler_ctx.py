@@ -896,3 +896,233 @@ def test_dag_pre_admission_non_agent_failure_settles_while_foreach_keeps_effect_
     fe_run = fe_engine.run_workflow(fe_definition, {'items': ['x']}, workflow_run_id='run-fe-1')
     assert fe_run.status == 'failed'
     assert fe_run.steps[0].escalation_result.get('effect_started') is True
+
+
+def test_cancelled_non_agent_runs_release_concurrency_claim_while_preserving_retained_guards(tmp_path):
+    # (a) 非 agent_task 步骤（tool_call）在 _admit_effect 后、worker 正文执行前取消暂停（paused_for_resume + effect_started=True）：
+    #     未取消前仍保留并发占位（skip_if_running 跳过）；显式 cancel_workflow_run 后转 cancelled 并释放占位，后续运行正常成功。
+    prebody_dir = tmp_path / 'prebody_cancel'
+    prebody_calls = []
+    prebody_mode = {'pause': True}
+
+    def _prebody_dispatcher(_tool_name, _arguments, **_kwargs):
+        if prebody_mode['pause']:
+            raise ToolCancelled('paused-before-worker-body')
+        prebody_calls.append('executed')
+        return {'ok': True, 'done': True}
+
+    pre_engine = WorkflowEngine(
+        prebody_dir,
+        workspace_root=prebody_dir,
+    )
+    pre_engine.tool_dispatcher = _prebody_dispatcher
+    pre_def = _dag_definition(
+        [
+            {
+                'step_id': 'tool_step',
+                'mode': 'tool_call',
+                'tool_spec': {'tool_name': 'demo_tool', 'arguments': {'x': 1}},
+            }
+        ],
+        workflow_id='wf_prebody_cancel_claim',
+    )
+
+    with pytest.raises(ToolCancelled):
+        pre_engine.run_workflow(
+            pre_def,
+            workflow_run_id='run-prebody-paused',
+            concurrency_policy='skip_if_running',
+        )
+    paused = pre_engine.store.load_run('run-prebody-paused')
+    assert paused is not None
+    assert paused.status == 'paused_for_resume'
+    assert paused.steps[0].escalation_result.get('effect_started') is True
+    assert prebody_calls == []
+    assert _concurrency_settled(paused) is False
+    assert pre_engine.store._read('run-prebody-paused', 'run.json')['concurrency_claim']['phase'] == 'retained'
+
+    blocked_pre = pre_engine.run_workflow(
+        pre_def,
+        workflow_run_id='run-prebody-blocked',
+        concurrency_policy='skip_if_running',
+    )
+    assert isinstance(blocked_pre, dict)
+    assert blocked_pre['status'] == 'skipped'
+    assert blocked_pre['running_run_id'] == 'run-prebody-paused'
+
+    outstanding = pre_engine.cancel_workflow_run(
+        'run-prebody-paused',
+        expected_revision=paused.revision,
+        operation_key='cancel-prebody-paused',
+    )
+    assert outstanding == []
+    cancelled_pre = pre_engine.store.load_run('run-prebody-paused')
+    assert cancelled_pre.status == 'cancelled'
+    assert _concurrency_settled(cancelled_pre) is True
+    assert pre_engine.store._read('run-prebody-paused', 'run.json')['concurrency_claim']['phase'] == 'released'
+
+    prebody_mode['pause'] = False
+    following_pre = pre_engine.run_workflow(
+        pre_def,
+        workflow_run_id='run-prebody-following',
+        concurrency_policy='skip_if_running',
+    )
+    assert isinstance(following_pre, WorkflowRunRecord)
+    assert following_pre.status == 'succeeded'
+    assert prebody_calls == ['executed']
+
+    # (b) 同步非 agent_task 步骤以 effect_outcome='unknown' 失败（未取消前保留占位并拦截 skip_if_running），
+    #     显式 cancel_workflow_run 后转 cancelled 并释放占位，后续运行成功。
+    failed_dir = tmp_path / 'sync_failed_cancel'
+    sync_mode = {'fail_unknown': True}
+
+    def _sync_dispatcher(_tool_name, _arguments, **_kwargs):
+        if sync_mode['fail_unknown']:
+            return {
+                'ok': False,
+                'status': 'failed',
+                'effect_outcome': 'unknown',
+                'error_code': 'SIMULATED_IO_ERROR',
+                'error_message': 'simulated I/O error with uncertain outcome',
+            }
+        return {'ok': True, 'recovered': True}
+
+    sync_engine = WorkflowEngine(
+        failed_dir,
+        workspace_root=failed_dir,
+    )
+    sync_engine.tool_dispatcher = _sync_dispatcher
+    sync_def = _dag_definition(
+        [
+            {
+                'step_id': 'sync_tool',
+                'mode': 'tool_call',
+                'tool_spec': {'tool_name': 'demo_tool', 'arguments': {'x': 2}},
+            }
+        ],
+        workflow_id='wf_sync_failed_cancel_claim',
+    )
+    first_failed = sync_engine.run_workflow(
+        sync_def,
+        workflow_run_id='run-sync-failed',
+        concurrency_policy='skip_if_running',
+    )
+    assert first_failed.status == 'failed'
+    assert first_failed.steps[0].escalation_result.get('effect_started') is True
+    assert _concurrency_settled(first_failed) is False
+    assert sync_engine.store._read('run-sync-failed', 'run.json')['concurrency_claim']['phase'] == 'retained'
+
+    blocked_sync = sync_engine.run_workflow(
+        sync_def,
+        workflow_run_id='run-sync-blocked',
+        concurrency_policy='skip_if_running',
+    )
+    assert isinstance(blocked_sync, dict)
+    assert blocked_sync['status'] == 'skipped'
+    assert blocked_sync['running_run_id'] == 'run-sync-failed'
+
+    assert (
+        sync_engine.cancel_workflow_run(
+            'run-sync-failed',
+            expected_revision=first_failed.revision,
+            operation_key='cancel-sync-failed',
+        )
+        == []
+    )
+    cancelled_sync = sync_engine.store.load_run('run-sync-failed')
+    assert cancelled_sync.status == 'cancelled'
+    assert _concurrency_settled(cancelled_sync) is True
+    assert sync_engine.store._read('run-sync-failed', 'run.json')['concurrency_claim']['phase'] == 'released'
+
+    sync_mode['fail_unknown'] = False
+    following_sync = sync_engine.run_workflow(
+        sync_def,
+        workflow_run_id='run-sync-following',
+        concurrency_policy='skip_if_running',
+    )
+    assert isinstance(following_sync, WorkflowRunRecord)
+    assert following_sync.status == 'succeeded'
+
+    # (c) cleanup_error 与未结清 agent_task 即使在 run.status == 'cancelled' 时仍必须阻断释放；
+    #     未取消的 failed/paused_for_resume 且 effect_started=True 也继续保留占位。
+    cleanup_dir = tmp_path / 'cleanup_err_retained'
+
+    def _cleanup_err_dispatcher(_tool_name, _arguments, **kwargs):
+        kwargs['step'].escalation_result['cleanup_error'] = 'rollback unfinished'
+        return {
+            'ok': False,
+            'status': 'failed',
+            'effect_outcome': 'unknown',
+            'error_code': 'SIMULATED_IO_ERROR',
+            'error_message': 'simulated error during cleanup',
+        }
+
+    cleanup_engine = WorkflowEngine(
+        cleanup_dir,
+        workspace_root=cleanup_dir,
+    )
+    cleanup_engine.tool_dispatcher = _cleanup_err_dispatcher
+    cleanup_def = _dag_definition(
+        [
+            {
+                'step_id': 'cleanup_tool',
+                'mode': 'tool_call',
+                'tool_spec': {'tool_name': 'demo_tool', 'arguments': {'x': 3}},
+            }
+        ],
+        workflow_id='wf_cleanup_err_retained',
+    )
+    cleanup_run = cleanup_engine.run_workflow(
+        cleanup_def,
+        workflow_run_id='run-cleanup-err',
+        concurrency_policy='skip_if_running',
+    )
+    assert cleanup_run.status == 'failed'
+    assert (
+        cleanup_engine.cancel_workflow_run(
+            'run-cleanup-err',
+            expected_revision=cleanup_run.revision,
+            operation_key='cancel-cleanup-err',
+        )
+        == []
+    )
+    cancelled_cleanup = cleanup_engine.store.load_run('run-cleanup-err')
+    assert cancelled_cleanup.status == 'cancelled'
+    assert _concurrency_settled(cancelled_cleanup) is False
+    assert cleanup_engine.store._read('run-cleanup-err', 'run.json')['concurrency_claim']['phase'] == 'retained'
+
+    blocked_cleanup = cleanup_engine.run_workflow(
+        cleanup_def,
+        workflow_run_id='run-cleanup-blocked',
+        concurrency_policy='skip_if_running',
+    )
+    assert isinstance(blocked_cleanup, dict)
+    assert blocked_cleanup['status'] == 'skipped'
+    assert blocked_cleanup['running_run_id'] == 'run-cleanup-err'
+
+    unsettled_agent_cancelled = WorkflowRunRecord(
+        workflow_run_id='run-agent-cancelled-unsettled',
+        workflow_id='wf-agent-check',
+        owner_id='alice',
+        trigger_kind='manual',
+        status='cancelled',
+        started_at=1.0,
+        ended_at=2.0,
+        duration_ms=10.0,
+        steps=(
+            StepExecutionRecord(
+                step_id='agent_step',
+                name='agent_step',
+                mode='agent_task',
+                status='cancelled',
+                started_at=1.0,
+                ended_at=2.0,
+                duration_ms=10.0,
+                llm_involved=True,
+                escalation_result={'effect_started': True, 'task_id': 'stask-unsettled-1'},
+            ),
+        ),
+        final_output={},
+        effect_outcome='unknown',
+    )
+    assert _concurrency_settled(unsettled_agent_cancelled) is False

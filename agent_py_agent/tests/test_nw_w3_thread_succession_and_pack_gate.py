@@ -1,6 +1,7 @@
 """Next-Wave W3 (#10, #11, #18) 回归单测：会话继任链上限与元数据保留、能力包晋升双门禁。"""
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +14,18 @@ from agent_py_agent.agent.capability.asset_promotion import (
 )
 from agent_py_agent.agent.capability.package_provider import _owner_from_home
 from agent_py_agent.agent.capability.skill_learning_publish import SkillLearningGateError
+from agent_py_agent.agent.conversation.models import ChannelBinding, ConversationThread
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.conversation.store_threads import (
     resolve_thread_successor_chain,
 )
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.plugin_install_store import PluginInstallStore
+from agent_py_agent.agent.scheduler.execution import delivery_thread
+from agent_py_agent.agent.scheduler.notification_binding import SCHEMA, bound_notification_thread
+from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.user_space.admin_channel_identity import bind_admin_channel_identity
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_resolver import home_paths_with_owner
 
@@ -56,12 +64,178 @@ def test_w3_10_thread_successor_chain_supports_25_hops_and_keeps_bounds(tmp_path
         current = store.threads.succeed(current.thread_id, title=f"hop-{idx + 1}")
 
     assert resolve_thread_successor_chain(store, root.thread_id) == current.thread_id
+    assert resolve_thread_successor_chain(store, root.thread_id, max_hops=4097) == current.thread_id
+    assert resolve_thread_successor_chain(store, current.thread_id, max_hops=0) == current.thread_id
+
+    for bad_max in (5, 0, -1, True, False):
+        with pytest.raises(ValueError, match="THREAD_SUCCESSOR_HOP_LIMIT"):
+            resolve_thread_successor_chain(store, root.thread_id, max_hops=bad_max)
+
+
+def test_w3_10_thread_successor_chain_traverses_beyond_4100_hops_for_scheduler_and_notification_binding(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    agent = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        workspace,
+    )
+    store = agent.conversation_store
+    owner_id = agent.home_paths.owner_id
+    owner_home = str(agent.home_paths.owner_home_dir)
+    scope = ["feishu", "ou_w3_long", "oc_w3_long"]
+    scope_key = "\x1f".join(scope)
+    identity = bind_admin_channel_identity(home, "feishu", "ou_w3_long")
+
+    root = store.threads.get_or_create(
+        {
+            "canonical_user_id": "u_w3_long",
+            "channel": "feishu",
+            "channel_user_id": "ou_w3_long",
+            "channel_conversation_id": "oc_w3_long",
+            "owner_id": owner_id,
+            "owner_home": owner_home,
+            "cwd": str(workspace),
+            "now": 900,
+        }
+    )
+    hop_ids = [root.thread_id] + [f"thread_w3_hop_{idx:04d}" for idx in range(1, 4105)]
+    for idx in range(1, 4105):
+        tid = hop_ids[idx]
+        nxt = hop_ids[idx + 1] if idx + 1 < len(hop_ids) else None
+        meta = {
+            "predecessor_thread_id": hop_ids[idx - 1],
+            "predecessor_binding": list(scope),
+            "succession_binding": list(scope),
+            "succession_published": True,
+        }
+        if nxt is not None:
+            meta["successor_thread_id"] = nxt
+            meta["succeeded_at"] = 1000.0 + idx
+            meta["succession_by_binding"] = {scope_key: nxt}
+        row = ConversationThread(
+            thread_id=tid,
+            canonical_user_id="u_w3_long",
+            owner_id=owner_id,
+            owner_home=owner_home,
+            title=f"hop-{idx}",
+            channel_bindings=(
+                ChannelBinding(
+                    channel="feishu",
+                    channel_user_id="ou_w3_long",
+                    channel_conversation_id="oc_w3_long",
+                    canonical_user_id="u_w3_long",
+                    thread_id=tid,
+                    last_active_at=1000.0 + idx,
+                ),
+            ),
+            status="archived" if nxt is not None else "active",
+            metadata=meta,
+            created_at=1000.0 + idx,
+            updated_at=1000.0 + idx,
+        )
+        store.storage.thread_path(tid).write_text(json.dumps(row.to_dict()), encoding="utf-8")
+
+    store.threads.update_atomic(
+        root.thread_id,
+        lambda item: replace(
+            item,
+            status="archived",
+            metadata={
+                **item.metadata,
+                "successor_thread_id": hop_ids[1],
+                "succeeded_at": 1000.5,
+                "succession_binding": list(scope),
+                "succession_by_binding": {scope_key: hop_ids[1]},
+            },
+        ),
+    )
+    tail = store.threads.succeed(hop_ids[-1], title="hop-4105-real")
+
+    assert resolve_thread_successor_chain(store, root.thread_id, binding=scope) == tail.thread_id
+    assert (
+        store.threads.resolve(
+            channel="feishu",
+            channel_conversation_id="oc_w3_long",
+            channel_user_id="ou_w3_long",
+        ).thread_id
+        == tail.thread_id
+    )
 
     with pytest.raises(ValueError, match="THREAD_SUCCESSOR_HOP_LIMIT"):
-        resolve_thread_successor_chain(store, root.thread_id, max_hops=5)
+        resolve_thread_successor_chain(store, root.thread_id, max_hops=4096, binding=scope)
 
-    with pytest.raises(ValueError, match="THREAD_SUCCESSOR_HOP_LIMIT"):
-        resolve_thread_successor_chain(store, root.thread_id, max_hops=4097)
+    job, _ = agent.scheduler_repository.create_job(
+        SchedulerJobCreateRequest(
+            name="长继任链绑定任务",
+            prompt="check",
+            thread_id=root.thread_id,
+            schedule={"kind": "every", "every_seconds": 600, "anchor_at": 1000, "timezone": "UTC"},
+            now=900,
+        )
+    )
+    notif_binding = {
+        "schema_version": SCHEMA,
+        "version": 1,
+        "owner": agent.scheduler_repository.owner,
+        "source_thread_id": root.thread_id,
+        "binding": {"channel": "feishu", "actor_id": "ou_w3_long", "conversation_id": "oc_w3_long"},
+        "admin_bound_at": identity.bound_at,
+        "request_id": "w3-long-chain-notif",
+    }
+    agent.scheduler_repository.update_notification_binding(
+        job["job_id"], notif_binding, expected_version=job["version"]
+    )
+    assert bound_notification_thread(agent, notif_binding).thread_id == tail.thread_id
+
+    run = {
+        "run_id": "srun_w3_long",
+        "thread_id": "thread-exec-long",
+        "owner": agent.scheduler_repository.owner,
+        "delivery": {"mode": "origin", "follow_latest_channel_session": True},
+        "execution_context": {
+            "origin_thread_id": root.thread_id,
+            "origin_bindings": [
+                {
+                    "channel": "feishu",
+                    "channel_user_id": "ou_w3_long",
+                    "channel_conversation_id": "oc_w3_long",
+                    "canonical_user_id": "u_w3_long",
+                    "thread_id": root.thread_id,
+                    "last_active_at": 900.0,
+                }
+            ],
+        },
+    }
+    agent_view = SimpleNamespace(
+        conversation_store=store,
+        scheduler_repository=SimpleNamespace(
+            get_active_run=lambda _tid: run,
+            event_run_is_current=lambda _tid: True,
+        ),
+    )
+    assert delivery_thread(agent_view, root, SimpleNamespace(task_id="srun_w3_long", thread_id="thread-exec-long")).thread_id == tail.thread_id
+
+    # 即使在长链末端注入环路，visited 集合仍必须稳定拦截 THREAD_SUCCESSOR_CYCLE。
+    store.threads.update_atomic(
+        tail.thread_id,
+        lambda item: replace(
+            item,
+            metadata={
+                **item.metadata,
+                "successor_thread_id": hop_ids[10],
+                "succession_by_binding": {scope_key: hop_ids[10]},
+            },
+        ),
+    )
+    with pytest.raises(ValueError, match="THREAD_SUCCESSOR_CYCLE"):
+        resolve_thread_successor_chain(store, root.thread_id, binding=scope)
 
 
 def test_w3_10_thread_successor_chain_detects_cycle(tmp_path: Path) -> None:

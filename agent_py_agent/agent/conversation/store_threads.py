@@ -1125,21 +1125,22 @@ class ThreadStore:
 
 
 # LLM: 显式继任链不提供授权；每跳复核准确owner/home及原(channel, account/actor, chat)三元组，环/缺失/越界拒绝。
-# 函数用途: 找到最多4096跳内已成对发表的同通道新会话；不读取最近会话、不修改任何计划。
-def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int = 4096, binding=None) -> str:
+# 函数用途: 找到所有已成对发表的同通道新会话（默认不限跳数，可选 max_hops 限制）；不读取最近会话、不修改任何计划。
+def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int | None = None, binding=None) -> str:
     threads = getattr(store, "threads", store)
-    if type(max_hops) is not int or not 0 <= max_hops <= 4096:
+    if max_hops is not None and (isinstance(max_hops, bool) or type(max_hops) is not int or max_hops < 0):
         raise ValueError("THREAD_SUCCESSOR_HOP_LIMIT")
     current = threads.require(thread_id)
     identity = (current.owner_id, current.owner_home)
     scope = ([binding.channel, binding.channel_user_id, binding.channel_conversation_id] if isinstance(binding, ChannelBinding)
         else list(binding) if binding is not None else current.metadata.get("succession_binding"))
     visited = {current.thread_id}
-    for hop in range(max_hops + 1):
+    hops = 0
+    while True:
         next_id = _succession_target(current, scope)
         if not next_id:
             return current.thread_id
-        if hop == max_hops:
+        if max_hops is not None and hops >= max_hops:
             raise ValueError("THREAD_SUCCESSOR_HOP_LIMIT")
         if not isinstance(next_id, str) or next_id in visited:
             raise ValueError("THREAD_SUCCESSOR_CYCLE")
@@ -1156,7 +1157,7 @@ def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int = 409
             raise ValueError("THREAD_SUCCESSOR_CHANNEL_MISMATCH")
         visited.add(next_id)
         current = following
-    raise ValueError("THREAD_SUCCESSOR_HOP_LIMIT")
+        hops += 1
 
 
 # LLM: 空三元组仅适用于原本无绑定的Web线程；不得用空目标穿越到IM或另一chat。
