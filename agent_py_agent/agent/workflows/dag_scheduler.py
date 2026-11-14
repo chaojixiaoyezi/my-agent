@@ -324,8 +324,9 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
         )
         if exc is not None:
             state['record'] = record
-            halt_reason['type'] = 'cancel'
-            halt_reason['exc'] = exc
+            if halt_reason['type'] != 'cancel':
+                halt_reason['type'] = 'cancel'
+                halt_reason['exc'] = exc
             halt_event = True
             return
 
@@ -336,14 +337,16 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
 
         step_status[sid] = completed_step.status
         if completed_step.status == 'waiting_for_agent':
-            halt_reason['type'] = 'waiting_for_agent'
-            halt_reason['step'] = completed_step
+            if halt_reason['type'] != 'cancel':
+                halt_reason['type'] = 'waiting_for_agent'
+                halt_reason['step'] = completed_step
             halt_event = True
         elif completed_step.status in ('failed', 'paused_for_resume'):
             if not completed_step.needs_repair and completed_step.output_snapshot:
                 outputs[sid] = payload(completed_step.output_snapshot)
-            halt_reason['type'] = completed_step.status
-            halt_reason['step'] = completed_step
+            if halt_reason['type'] != 'cancel':
+                halt_reason['type'] = completed_step.status
+                halt_reason['step'] = completed_step
             halt_event = True
         elif completed_step.status in SUCCESS:
             if completed_step.status != 'skipped':
@@ -459,10 +462,12 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 break
 
             if not active_futures and unstarted_step_ids:
+                if _get_ready_step_ids():
+                    continue
                 newly_handled = False
                 for sid in list(unstarted_step_ids):
                     spec = step_specs[sid]
-                    if any(step_status.get(d) == 'skipped' for d in deps.get(sid, ())):
+                    if _is_blocked_by_skipped_upstream(spec, deps, step_status):
                         unstarted_step_ids.remove(sid)
                         _mark_step_skipped(spec, reason='upstream_skipped')
                         newly_handled = True
@@ -495,6 +500,7 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
         raise halt_reason['exc']
 
     if halt_reason['type'] == 'waiting_for_agent':
+        _check_stop()
         waiting_step = halt_reason['step']
         engine._step_progress(record, waiting_step, progress)
         record = replace_run_record(

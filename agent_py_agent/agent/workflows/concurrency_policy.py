@@ -716,6 +716,7 @@ def dispatch(
     _lifecycle=None,
     operation_key=None,
     operation_fingerprint=None,
+    business_context=None,
 ):
     if type(policy) is not str or policy not in ("allow", "skip_if_running", "queue"):
         return {"status": "skipped", "error_code": "INVALID_CONCURRENCY_POLICY"}
@@ -780,18 +781,33 @@ def dispatch(
             lease = _create_claim(parent, ticket)
             _bind_claim(scope, parent, lease)
         elif policy == "skip_if_running":
-            return {
+            receipt = {
                 "status": "skipped",
                 "error_code": "WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING",
                 "running_run_id": holder.record.get("run_id", "") if holder else "",
                 **({"reason_code": "queued_predecessor"} if holder is None else {}),
             }
+            if _lifecycle is not None and holder is not None:
+                if holder.record.get("lifecycle") == "workflow":
+                    try:
+                        executing, _ = _holder_executing_data(holder, _lifecycle)
+                    except ValueError:
+                        executing = False
+                else:
+                    executing = _identity_live(holder.record.get("identity")) is True
+                receipt["holder_phase"] = "executing" if executing else "retained"
+            if business_context:
+                receipt["business_context"] = business_context
+            return receipt
         else:
             if len(entries) >= queue_limit:
-                return {
+                receipt = {
                     "status": "skipped",
                     "error_code": "WORKFLOW_RUN_QUEUE_FULL",
                 }
+                if business_context:
+                    receipt["business_context"] = business_context
+                return receipt
             entries.append(ticket)
             position = len(entries)
             try:
