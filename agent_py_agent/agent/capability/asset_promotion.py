@@ -8,7 +8,20 @@ import json
 import os
 import re
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
+
+_ACTIVE_PROMOTION_HOST: ContextVar[object | None] = ContextVar("_ACTIVE_PROMOTION_HOST", default=None)
+
+
+@contextmanager
+def bind_promotion_host(host: object | None):
+    """在单次同步晋升调用期间绑定宿主上下文，供下层能力包门禁在 commit 内读取实时配置与管理员身份。"""
+    token = _ACTIVE_PROMOTION_HOST.set(host)
+    try:
+        yield
+    finally:
+        _ACTIVE_PROMOTION_HOST.reset(token)
 
 from ..common.nofollow_fs import read_text_beneath, unlink_file_beneath, write_text_atomic_beneath
 from .skill_learning_promotion import promote_verified_skill as promote_verified_skill
@@ -587,9 +600,101 @@ def _promote_workflow_asset(home, name, desc, candidate, *, commit=None):
     return _binding_from_record('workflow', submitted)
 
 
-# LLM: 纯内容包先完整检验；安装/启用同一次原来源短门但底层各CAS，失败可能保留禁用安装，不宣称零副作用。
+def _admin_owner_view(owner, host=None):
+    """构造用于本地主管理员权限核验的归属视图；若宿主显式携带身份则一并纳入核验。"""
+    from types import SimpleNamespace
+
+    owner_view = SimpleNamespace(
+        owner_provider=owner.identity.provider,
+        owner_kind=owner.identity.owner_kind,
+        owner_id=owner.identity.owner_id,
+    )
+    if host is None:
+        return owner_view, None
+    host_paths = getattr(host, "home_paths", None)
+    if host_paths is not None and any(
+        hasattr(host_paths, field) for field in ("owner_provider", "owner_kind", "owner_id")
+    ):
+        return owner_view, host_paths
+    if any(hasattr(host, field) for field in ("owner_provider", "owner_kind", "owner_id")):
+        host_view = SimpleNamespace(
+            owner_provider=getattr(host, "owner_provider", ""),
+            owner_kind=getattr(host, "owner_kind", ""),
+            owner_id=getattr(host, "owner_id", ""),
+        )
+        return owner_view, host_view
+    return owner_view, None
+
+
+def _require_capability_pack_self_install_gate(home, *, host=None):
+    """晋升 capability_package 前强检自安装开关与完整 local/main 管理员身份，未放行时零副作用拒绝。"""
+    from types import SimpleNamespace
+
+    from ..user_space.owner_access import is_complete_local_admin_owner
+    from .package_provider import _owner_from_home
+    from .self_install_switches import (
+        PACK_SELF_INSTALL_KEY,
+        read_self_install_switches,
+        switch_command,
+    )
+    from .skill_learning_publish import SkillLearningGateError
+
+    effective_host = _ACTIVE_PROMOTION_HOST.get() if host is None else host
+    owner = _owner_from_home(home)
+    owner_view, host_view = _admin_owner_view(owner, host=effective_host)
+    if not is_complete_local_admin_owner(owner_view) or (
+        host_view is not None and not is_complete_local_admin_owner(host_view)
+    ):
+        admin_code = "CAPABILITY_PACK_ADMIN_REQUIRED"
+        active_view = (
+            host_view
+            if (host_view is not None and not is_complete_local_admin_owner(host_view))
+            else owner_view
+        )
+        raise SkillLearningGateError(
+            admin_code,
+            {
+                "error_code": admin_code,
+                "effect_outcome": "not_started",
+                "owner_provider": getattr(active_view, "owner_provider", ""),
+                "owner_kind": getattr(active_view, "owner_kind", ""),
+                "owner_id": getattr(active_view, "owner_id", ""),
+                "next_action": (
+                    "仅完整本机主管理员（local/main 且 owner_id 非空）可执行能力包晋升；"
+                    "当前未执行任何安装或启用写入。请切换为本机主管理员或改为提交人工确认提案，勿原样重试。"
+                ),
+            },
+        )
+    switch_host = effective_host
+    if switch_host is None or (
+        not getattr(switch_host, "capability_config_path", "")
+        and getattr(switch_host, "root", None) is None
+    ):
+        switch_host = SimpleNamespace(root=owner.root, capability_config_path="")
+    switches = read_self_install_switches(switch_host)
+    if not switches.capability_pack:
+        disabled_code = "CAPABILITY_PACK_SELF_INSTALL_DISABLED"
+        raise SkillLearningGateError(
+            disabled_code,
+            {
+                "error_code": disabled_code,
+                "effect_outcome": "not_started",
+                "capability_pack": False,
+                "config_version": switches.config_version,
+                "next_action": (
+                    "capability_pack 自主安装开关当前为关闭（未执行任何安装或启用变更）。"
+                    f"请由本机管理员使用 {switch_command(PACK_SELF_INSTALL_KEY, True)} 或在 capability_config.yaml "
+                    "将 capability_pack_self_install_enabled 设为 true 后再试，勿盲目重复调用。"
+                ),
+            },
+        )
+    return owner
+
+
+# LLM: 纯内容包先校验开关与主管理员，再完整检验包内容；安装/启用同一次原来源短门但底层各CAS，失败可能保留禁用安装，不宣称零副作用。
 # 函数用途: 安全构建发布能力包并返回准确启用代次，原安装表仍是唯一状态权威。
-def _promote_package_asset(home, name, desc, candidate, *, commit=None):
+def _promote_package_asset(home, name, desc, candidate, *, commit=None, host=None):
+    _require_capability_pack_self_install_gate(home, host=host)
     import io
     import zipfile
 
@@ -631,6 +736,7 @@ def _promote_package_asset(home, name, desc, candidate, *, commit=None):
     # LLM: 安装与启用共用一次原来源短门；底层安装表仍是两次CAS，启用失败可留已安装但禁用的准确revision，不伪报零写入。
     # 函数用途: 在本次原Commit内完成已验证内容包发布，返回准确启用记录用于receipt。
     def install_and_enable():
+        _require_capability_pack_self_install_gate(home, host=host)
         inst = pstore.install(PluginInstallRequest(snap, f'promote:{name}:{existing.revision if existing else 0}', existing.revision if existing else 0)).installation
         act = PluginContentActivation('enable', inst.manifest.plugin_id, inst.package_sha256, inst.revision, inst.settings_revision)
         return pstore.change_activation(PluginActivationRequest('enable', inst.revision, act)).installation
@@ -641,7 +747,7 @@ def _promote_package_asset(home, name, desc, candidate, *, commit=None):
 
 # LLM: Verify不占C短门；Skill锁内FD读回匹配原事件revision/hash、目录/文件inode及完整冻结proof；缺证明不成功，非Skill不得嵌套资产锁。
 # 函数用途: 四载体验证/CAS后绑定真实回执，不用同族、缺失记录或晚到的新版本伪造成功。
-def promote_verified_asset(owner_home, candidate, *, commit=None):
+def promote_verified_asset(owner_home, candidate, *, commit=None, host=None):
     from copy import deepcopy
     from pathlib import Path
 
@@ -660,6 +766,8 @@ def promote_verified_asset(owner_home, candidate, *, commit=None):
     if static.get('status') != 'passed':
         return None
     carrier, name, desc = select_asset_carrier(candidate), candidate['name'], candidate['description']
+    if carrier == 'capability_package':
+        _require_capability_pack_self_install_gate(home, host=host)
     if carrier == 'skill':
         dec = SkillLearningDecision('create', 'verified', name=name, description=desc,
             when_to_use=candidate.get('when_to_use', desc), tags=tuple(candidate.get('tags', ())), body=candidate['body'])
@@ -693,7 +801,10 @@ def promote_verified_asset(owner_home, candidate, *, commit=None):
             and binding and previous.get('formal_binding') == binding):
         return {**previous['verification_receipt'], 'asset_id': name, 'reused': True}
     handlers = {'script': _promote_script_asset, 'workflow': _promote_workflow_asset, 'capability_package': _promote_package_asset}
-    binding = handlers[carrier](home, name, desc, candidate, commit=commit)
+    if carrier == 'capability_package':
+        binding = _promote_package_asset(home, name, desc, candidate, commit=commit, host=host)
+    else:
+        binding = handlers[carrier](home, name, desc, candidate, commit=commit)
     if not binding:
         return None
     if not isinstance(binding, str) or _formal_binding(home, carrier, name) != binding:

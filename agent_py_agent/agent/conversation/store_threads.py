@@ -1125,10 +1125,10 @@ class ThreadStore:
 
 
 # LLM: 显式继任链不提供授权；每跳复核准确owner/home及原(channel, account/actor, chat)三元组，环/缺失/越界拒绝。
-# 函数用途: 找到最多16跳内已成对发表的同通道新会话；不读取最近会话、不修改任何计划。
-def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int = 16, binding=None) -> str:
+# 函数用途: 找到最多4096跳内已成对发表的同通道新会话；不读取最近会话、不修改任何计划。
+def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int = 4096, binding=None) -> str:
     threads = getattr(store, "threads", store)
-    if type(max_hops) is not int or not 0 <= max_hops <= 16:
+    if type(max_hops) is not int or not 0 <= max_hops <= 4096:
         raise ValueError("THREAD_SUCCESSOR_HOP_LIMIT")
     current = threads.require(thread_id)
     identity = (current.owner_id, current.owner_home)
@@ -1217,8 +1217,19 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
             if claim.get("status") in {"claimed", "running"} and claim.get("recover_same_task_only") is True:
                 raise ValueError("NEW_SESSION_BUSY")
             stamp = now(None)
-            metadata = {key: copy.deepcopy(value) for key, value in latest.metadata.items()
-                        if key in {"provider", "model", "permission_mode", "packs", "verbose_level_source"}}
+            metadata = {
+                key: copy.deepcopy(value)
+                for key, value in latest.metadata.items()
+                if key in {
+                    "provider",
+                    "model",
+                    "permission_mode",
+                    "packs",
+                    "verbose_level_source",
+                    "route_mode.v1",
+                    "session_space.v1",
+                }
+            }
             portal = latest.metadata.get("plugin_host_v2", {})
             if isinstance(portal, dict) and portal:
                 metadata["plugin_host_v2"] = {key: copy.deepcopy(value) for key, value in portal.items()
