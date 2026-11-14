@@ -142,7 +142,7 @@ def test_unknown_halt_reads_exact_original_operation_without_running_handler(tmp
 def test_only_original_snapshot_business_handler_can_issue_receipt_inspection(agent):
     service, _, result = setup_receipt(agent)
     snapshot = agent.tools.runtime_snapshot(run_id='receipt-snapshot')
-    runtime = snapshot.runtime('business_spaces_create')
+    runtime = snapshot.runtime('business_space')
     request = {'action': 'spaces.create', 'request_id': 'original-receipt-request',
         'params': PARAMS, 'idempotency_key': KEY}
     before = state_hashes(service.owner_root)

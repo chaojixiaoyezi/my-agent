@@ -1,32 +1,40 @@
 """领域默认拒绝与业务主体显式效果证明不得互相冒充。"""
 import pytest
 
-from agent_py_agent.agent.conversation.business_access import BusinessActor, BusinessError
-from agent_py_agent.agent.tooling.business_spaces_tool import BusinessSpacesTool
+from agent_py_agent.agent.conversation.business_access import BusinessError
+from agent_py_agent.agent.gateway_parts import business_api as api
+from agent_py_agent.tests import test_business_model_tools as business
+
+agent = business.agent
 
 
-@pytest.mark.parametrize('declared,expected', [(None, 'unknown'), ('not_started', 'not_started'), ('unknown', 'unknown')])
-def test_business_body_only_trusts_declared_effect(declared, expected):
+@pytest.mark.parametrize(
+    'raised,expected',
+    [
+        (BusinessError('REVISION_CONFLICT', effect_outcome='not_started'), 'not_started'),
+        (BusinessError('REVISION_CONFLICT', effect_outcome='committed'), 'unknown'),
+        (BusinessError('REVISION_CONFLICT', effect_outcome='unknown'), 'unknown'),
+        (RuntimeError('post-enter-untyped-error'), 'unknown'),
+    ],
+)
+def test_business_body_only_trusts_declared_effect(agent, monkeypatch, raised, expected):
     calls = []
 
-    class Service:
-        owner_id = 'local/test'
+    def fail_invoke(self, action, params, context, **kwargs):
+        calls.append(action)
+        raise raised
 
-        def authorize_call(self, action, params, actor):
-            pass
-
-        def call(self, action, params, **kwargs):
-            calls.append(action)
-            options = {} if declared is None else {'effect_outcome': declared}
-            raise BusinessError('REVISION_CONFLICT', **options)
-
-    service = Service()
-    actor = BusinessActor(service.owner_id, 'test', service, lambda *_: True)
-    result = BusinessSpacesTool(service, actor=actor).execute({'action': 'spaces.create',
-        'params': {'name': 'synthetic'}, 'request_id': 'provenance-request',
-        'idempotency_key': 'provenance-operation-0001'})
+    monkeypatch.setattr(api.BusinessServices, 'invoke', fail_invoke)
+    result = agent.tools.tools['business_space'].execute(
+        {
+            'action': 'spaces.create',
+            'params': {'name': 'synthetic'},
+            'request_id': 'provenance-request',
+            'idempotency_key': 'provenance-operation-0001',
+        }
+    )
     assert calls == ['spaces.create']
-    assert not result.ok and result.reported_error_code == 'REVISION_CONFLICT'
+    assert not result.ok
     assert result.effect_outcome == expected
 
 

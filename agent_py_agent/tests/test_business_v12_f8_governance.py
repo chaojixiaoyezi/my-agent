@@ -4,8 +4,6 @@ These fakes do not claim real tickets, W3 persistence, W2 enqueue, or W13 HTTP i
 """
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -26,9 +24,62 @@ from agent_py_agent.tests.test_business_v12_f2_spaces import World, assert_code,
 
 
 def tool(world, actor=None):
-    name = 'agent_py_agent.agent.tooling.business_spaces_tool'
-    assert importlib.util.find_spec(name) is not None, 'native business entry is missing'
-    return importlib.import_module(name).BusinessSpacesTool(world.service, actor=actor or world.actor)
+    from agent_py_agent.agent.gateway_parts import business_api as api
+
+    active_actor = actor or world.actor
+    registered: dict[str, BaseTool] = {}
+    fake_tools = SimpleNamespace(
+        tools=registered,
+        register=lambda t: registered.__setitem__(t.model_spec.name, t),
+    )
+    host = SimpleNamespace(
+        config=SimpleNamespace(business_spaces_enabled=True, business_host_ports_enabled=False),
+        home_paths=SimpleNamespace(
+            owner_id=world.owner,
+            owner_provider='local',
+            owner_kind='main',
+            owner_home_dir=world.root,
+            root=world.root,
+        ),
+        business_space_reference_resolver=world.reference,
+        business_active_references=world.service.active_references,
+        business_governance=world.service.governance,
+        tools=fake_tools,
+    )
+    services = api._local_business_services(host)
+    services.spaces = world.service
+    api.register_business_tools(host)
+    domain_tool = registered['business_space']
+
+    def execute_with_world(params, invocation=None):
+        context = api.bind_business_context(
+            host,
+            authorize=active_actor.authorize,
+            actor=active_actor,
+            subject_id=active_actor.subject_id,
+        )
+        rejected = domain_tool.validate_invocation(params, None)
+        if rejected is not None:
+            return rejected
+        status, result = api.execute_business(params, context, services)
+        code = (result.get('error') or {}).get('code', '')
+        effect = result.get('effect_outcome', 'not_started')
+        tool_effect = 'not_started' if effect == 'none' else effect if effect in {'not_started', 'unknown'} else 'unknown'
+        from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+        return ToolHandlerOutcome(
+            domain_tool.model_spec.name,
+            status < 400,
+            json.dumps(result, ensure_ascii=False),
+            result_envelope=result,
+            error_code=api._business_tool_control_code(code, tool_effect) if status >= 400 else code,
+            reported_error_code=code,
+            effect_outcome=tool_effect if status >= 400 else '',
+            source_effect=api._business_tool_source_effect(params['action'], status, result, params.get('request_id')),
+        )
+
+    domain_tool.execute = execute_with_world
+    domain_tool.execute_scoped = execute_with_world
+    return domain_tool
 
 
 def envelope(action, params, *, revision=None):
@@ -48,22 +99,66 @@ def decision(native, request, root, **extra):
     return ActionPolicy().decide(ActionPolicyRequest(call, snapshot, root, approval_mode='auto', **extra))
 
 
+def _execute_in_executor(native, request, root, **extra):
+    from agent_py_agent.agent.tooling.executor import ToolExecutor, ToolExecutorRequest
+
+    runtime = ToolRuntime(native.model_spec, native.runtime_policy, native)
+    snapshot = ToolRuntimeSnapshot('run-executor', (runtime,), frozenset({native.model_spec.name}), (), None)
+    call = ToolCall(
+        'call-executor',
+        native.model_spec.name,
+        request,
+        'native',
+        native.model_spec.schema_hash,
+        snapshot.run_id,
+        'turn-executor',
+        'attempt-executor',
+        idempotency_key=request.get('idempotency_key', ''),
+    )
+    return ToolExecutor().execute(
+        ToolExecutorRequest(
+            call=call,
+            runtime_snapshot=snapshot,
+            workspace_root=root,
+            workspace_roots=(root,),
+            approval_mode='auto',
+            operation_store_required=False,
+            **extra,
+        )
+    )
+
+
 def test_native_entry_executes_real_domain_and_closed_result(tmp_path):
     world = World(tmp_path / 'owner')
     outcome = tool(world).execute(envelope('spaces.create', {'name': 'native作品'}))
     assert outcome is not None and outcome.ok is True
-    sid = outcome.result_envelope['space_id']
+    sid = outcome.result_envelope['data']['space_id']
     assert world.service.get(sid, actor=world.actor)['space']['name'] == 'native作品'
     replay = tool(world).execute(envelope('spaces.create', {'name': 'native作品'}))
     assert replay.result_envelope == outcome.result_envelope
 
 
 def test_real_action_policy_denies_revoked_scope_before_handler(tmp_path):
+    from agent_py_agent.agent.conversation.business_context import resolve_business_context
+
     world = World(tmp_path / 'owner')
     sid = world.create()['space_id']
     native = tool(world)
+    frozen = resolve_business_context(
+        actor=world.actor,
+        task_id='stask-policy',
+        requested_space_id=sid,
+        project_ref=None,
+        binding_id=None,
+    )
     world.denied_spaces.add(sid)
-    result = decision(native, envelope('spaces.get', {'space_id': sid}), world.root)
+    result = decision(
+        native,
+        envelope('spaces.get', {'space_id': sid}),
+        world.root,
+        business_actor=world.actor,
+        business_context=frozen,
+    )
     assert result.status == 'deny' and 'BUSINESS_ACCESS_DENIED' in result.reason_codes
 
 
@@ -73,19 +168,21 @@ def test_real_action_policy_denies_revoked_scope_before_handler(tmp_path):
 ])
 def test_native_parameters_cannot_inject_identity_or_roles(tmp_path, injected):
     world = World(tmp_path / 'owner')
-    params = {**envelope('spaces.create', {'name': 'malicious'}), **injected}
+    params = {**envelope('spaces.create', {'name': 'untrusted-input'}), **injected}
     outcome = tool(world).execute(params)
     assert not outcome.ok and outcome.error_code == 'TOOL_INVALID_ARGUMENTS'
     assert outcome.reported_error_code == 'INVALID_SCHEMA'
-    assert outcome.result_envelope == {'error_code': 'INVALID_SCHEMA'}
+    assert outcome.result_envelope['error']['code'] == 'INVALID_SCHEMA'
+    assert outcome.effect_outcome == 'not_started'
     assert not world.service.state_path.exists()
 
 
 def test_native_utf8_limit_is_checked_inside_real_policy_chain(tmp_path):
     world = World(tmp_path / 'owner')
     request = envelope('spaces.get', {'space_id': '汉' * 43})
-    result = decision(tool(world), request, world.root)
-    assert result.status == 'deny'
+    execution = _execute_in_executor(tool(world), request, world.root)
+    assert not execution.result.ok and execution.result.handler_executed is False
+    assert execution.result.effect_outcome == 'not_started'
     assert not world.service.state_path.exists()
 
 
@@ -230,8 +327,9 @@ def test_legacy_tool_without_business_context_keeps_original_action_policy(tmp_p
 def test_native_duplicate_mounts_fail_before_policy_allows_effect(tmp_path):
     world = World(tmp_path / 'owner')
     request = envelope('spaces.create', {'name': '重复挂载', 'mounts': [{'package_ref': 'pkg'}, {'package_ref': 'pkg'}]})
-    result = decision(tool(world), request, world.root)
-    assert result.status == 'deny'
+    execution = _execute_in_executor(tool(world), request, world.root)
+    assert not execution.result.ok and execution.result.handler_executed is False
+    assert execution.result.effect_outcome == 'not_started'
     assert not world.service.state_path.exists()
 
 
@@ -266,31 +364,48 @@ def test_native_original_backend_error_after_commit_is_unknown_not_not_started(t
     original = backend.apply_policy
     def committed_then_error(*args, **kwargs):
         original(*args, **kwargs)
-        raise module('business_access').BusinessError('REVISION_CONFLICT')
+        raise module('business_access').BusinessError('REVISION_CONFLICT', effect_outcome='unknown')
     backend.apply_policy = committed_then_error
     outcome = tool(world).execute(envelope('policies.apply',
         {'space_id': sid, 'policy': policy, 'authorization_ref': 'original-approval'}, revision=0))
     assert backend.commits == [policy] and backend.revision == 1
     assert outcome.ok is False and outcome.reported_error_code == 'REVISION_CONFLICT'
+    assert outcome.error_code == 'TOOL_OPERATION_OUTCOME_UNKNOWN'
     assert outcome.effect_outcome == 'unknown'
 
 
 def test_original_executor_reaches_native_domain_and_rejects_revoked_scope(tmp_path):
+    from agent_py_agent.agent.conversation.business_context import resolve_business_context
     from agent_py_agent.agent.tooling.executor import ToolExecutor, ToolExecutorRequest
 
     world = World(tmp_path / 'owner')
     sid = world.create()['space_id']
     native = tool(world)
+    frozen = resolve_business_context(
+        actor=world.actor,
+        task_id='stask-executor',
+        requested_space_id=sid,
+        project_ref=None,
+        binding_id=None,
+    )
     runtime = ToolRuntime(native.model_spec, native.runtime_policy, native)
-    snapshot = ToolRuntimeSnapshot('run-original-executor', (runtime,), frozenset({'business_spaces'}), (), None)
-    call = ToolCall('call-original-executor', 'business_spaces', envelope('spaces.get', {'space_id': sid}),
+    snapshot = ToolRuntimeSnapshot('run-original-executor', (runtime,), frozenset({'business_space'}), (), None)
+    call = ToolCall('call-original-executor', 'business_space', envelope('spaces.get', {'space_id': sid}),
         'native', native.model_spec.schema_hash, snapshot.run_id, 'turn-original', 'attempt-original')
-    request = ToolExecutorRequest(call=call, runtime_snapshot=snapshot, workspace_root=world.root,
-        workspace_roots=(world.root,), operation_store_required=False)
+    request = ToolExecutorRequest(
+        call=call,
+        runtime_snapshot=snapshot,
+        workspace_root=world.root,
+        workspace_roots=(world.root,),
+        approval_mode='auto',
+        operation_store_required=False,
+        business_actor=world.actor,
+        business_context=frozen,
+    )
     # 原local_unmanaged只读测试入口，不把它宣称为W13注册/managed operation store端到端。
     execution = ToolExecutor().execute(request)
     assert execution.result.ok and execution.result.handler_executed
-    assert json.loads(execution.result.output)['space']['space_id'] == sid
+    assert json.loads(execution.result.output)['data']['space']['space_id'] == sid
     before = world.service.state_path.read_bytes()
     world.denied_spaces.add(sid)
     denied = ToolExecutor().execute(request)

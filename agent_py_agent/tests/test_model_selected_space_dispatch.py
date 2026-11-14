@@ -45,8 +45,12 @@ def test_registered_model_tool_dispatches_exact_selected_or_explicit_space(agent
     assert outcome.ok, outcome.output
     task = agent.conversation_store.session_tasks.require(assigned['data']['task_id'])
     assert task.metadata['business_context']['space_id'] == target_space
-    model_schema = agent.tools.tools['business_tasks_assign'].model_spec.input_schema
-    assert 'space_id' not in model_schema['properties']['params']['required']
+    model_schema = agent.tools.tools['business_execution'].model_spec.input_schema
+    assign_branch = next(
+        b for b in model_schema['oneOf']
+        if b['properties']['action']['const'] == 'tasks.assign'
+    )
+    assert 'space_id' not in assign_branch['properties']['params']['required']
     assert 'space_id' in business_action_spec('tasks.assign').params_schema['required']
 
 

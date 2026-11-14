@@ -270,14 +270,14 @@ def test_actual_core_registry_reaches_shared_business_api_and_rejects_alias(tmp_
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
     agent = SimpleAgent(AgentConfig(enable_tools=True, business_spaces_enabled=True, memory_path='memory.jsonl'), tmp_path)
-    tool = agent.tools.tools['business_system_capabilities']
+    tool = agent.tools.tools['business_space']
     response = tool.execute({'action': 'system.capabilities', 'request_id': 'model-one', 'params': {}})
     assert json.loads(response.output)['error'] is None
     denied = tool.execute({'action': 'approvals.decide', 'request_id': 'model-fake', 'params': {}})
     # 工具错误码沿原taxonomy归一；业务原码必须保留在reported字段及JSON正文。
     assert denied.reported_error_code == 'INVALID_SCHEMA'
     assert json.loads(denied.output)['error']['code'] == 'INVALID_SCHEMA'
-    scope_tool = agent.tools.tools['business_workflows_scope_set']
+    scope_tool = agent.tools.tools['business_activity']
     duplicate = scope_tool.execute({'action': 'workflows.scope.set', 'request_id': 'duplicate-scope',
         'params': {'workflow_ref': 'daily', 'scope': {'scope_mode': 'spaces', 'space_ids': ['s1', 's1']}},
         'expected_revision': 0, 'idempotency_key': 'duplicate-scope-key'})

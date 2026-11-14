@@ -25,9 +25,15 @@ def test_registered_model_tools_switch_same_session_and_recover_unreadable_selec
     thread = foreground(agent)
     from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
-    discovered = execute_registry_test_call(agent.tools, 'tool_search', {'query': '切换空间', 'limit': 5})
+    discovered = execute_registry_test_call(
+        agent.tools,
+        'tool_search',
+        {'query': '切换空间', 'limit': 5},
+        register_with=agent,
+    )
     assert discovered.ok, discovered.output
-    assert 'business_sessions_space_set' in discovered.metadata['handler_details']['tool_search']['loaded_tool_names']
+    assert 'business_space' in discovered.metadata['handler_details']['tool_search']['loaded_tool_names']
+    assert 'sessions.space.set' in agent.tools.tools['business_space'].model_spec.input_schema['properties']['action']['enum']
     spaces = []
     for name in ('first', 'second'):
         outcome, created = _call(agent, 'spaces.create', {'name': name}, idempotency_key='create-' + name)

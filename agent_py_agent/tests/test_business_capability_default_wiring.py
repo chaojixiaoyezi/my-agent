@@ -17,8 +17,11 @@ def test_default_readonly_capability_tools_follow_business_switch(tmp_path, monk
         memory_path='memory.jsonl', execution_mode='local_unmanaged', business_spaces_enabled=enabled),
         tmp_path / 'workspace')
     names = agent.tools.tools
-    for name in ('business_spaces_capabilities_resolve', 'business_spaces_usage_list'):
-        assert (name in names) is enabled
+    assert ('business_space' in names) is enabled
+    if enabled:
+        space_actions = set(names['business_space'].model_spec.input_schema['properties']['action']['enum'])
+        for act in ('spaces.capabilities.resolve', 'spaces.usage.list'):
+            assert act in space_actions
     assert not getattr(agent, '_business_host_ports_wired', False)
     assert getattr(agent, 'workflow_agent_steps', None) is None
     if enabled:
@@ -43,13 +46,18 @@ def test_session_task_readonly_business_candidates_remain_explicitly_narrowable(
         BackgroundToolPolicyRequest,
         background_tool_policy_decision,
     )
-    names = {'business_spaces_capabilities_resolve', 'business_spaces_usage_list',
-             'business_spaces_packages_catalog'}
+    names = {
+        'business_space:spaces.capabilities.resolve',
+        'business_space:spaces.usage.list',
+        'business_space:spaces.packages.catalog',
+    }
     default = background_tool_policy_decision(request=BackgroundToolPolicyRequest(reason='session_task'))
     assert names <= set(default.allowed_tools)
+    assert 'business_space' in set(default.allowed_tools)
     restricted = background_tool_policy_decision(request=BackgroundToolPolicyRequest(
         reason='session_task', policy_snapshot={'allowed_tools': ['skill_search']}))
     assert not names.intersection(restricted.allowed_tools)
+    assert 'business_space' not in set(restricted.allowed_tools)
     assert set(restricted.allowed_tools) == {'skill_search'}
 
 

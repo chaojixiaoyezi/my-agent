@@ -25,7 +25,7 @@ def test_actual_domain_write_then_invalid_projection_retains_host_source_fact(ag
         return result
 
     monkeypatch.setattr(api.BusinessServices, 'invoke', malformed)
-    tool = agent.tools.tools['business_spaces_create']
+    tool = agent.tools.tools['business_space']
     result = tool.execute({'action': 'spaces.create', 'params': {'name': 'source-effect-proof'},
         'request_id': FACT['request_id'], 'idempotency_key': 'source-effect-create-0001'})
     assert not result.ok and result.effect_outcome == 'unknown'

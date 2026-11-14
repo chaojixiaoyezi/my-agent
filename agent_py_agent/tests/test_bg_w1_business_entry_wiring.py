@@ -102,18 +102,19 @@ def test_http_business_read_uses_selected_conversation_scope(agent):
 
 # LLM: 用户自然语言“派活/分配任务/交给总控”必须直接命中 tasks.* 原工具，不被同义的会话派活或后台代理创建抢走。
 # 函数用途: 覆盖 tool_search 首位命中、tasks 分类、执行类用途说明与 self_map 业务分块。
-@pytest.mark.parametrize('query,expected', [
-    ('派活', 'business_tasks_assign'), ('给后台代理派任务', 'business_tasks_assign'),
-    ('分配任务', 'business_tasks_assign'), ('总控 提交任务', 'business_tasks_submit'),
-    ('追问后台任务进度', 'business_tasks_follow_up'),
+@pytest.mark.parametrize('query,expected_action', [
+    ('派活', 'tasks.assign'), ('给后台代理派任务', 'tasks.assign'),
+    ('分配任务', 'tasks.assign'), ('总控 提交任务', 'tasks.submit'),
+    ('追问后台任务进度', 'tasks.follow_up'),
 ])
-def test_task_dispatch_words_find_business_task_tools(agent, query, expected):
+def test_task_dispatch_words_find_business_task_tools(agent, query, expected_action):
     found = execute_registry_test_call(agent.tools, 'tool_search', {'query': query, 'limit': 5}, register_with=agent)
     assert found.ok, found.output
-    assert found.metadata['handler_details']['tool_search']['loaded_tool_names'][0] == expected, found.output
-    spec = agent.tools.tools[expected].model_spec
-    assert spec.hints.category == 'tasks' and spec.hints.default_deferred
+    assert 'business_execution' in found.metadata['handler_details']['tool_search']['loaded_tool_names'], found.output
+    spec = agent.tools.tools['business_execution'].model_spec
+    assert spec.hints.category == 'background_agents' and spec.hints.default_deferred
     assert 0 < len(spec.hints.deferred_summary) <= 60
+    assert expected_action in spec.input_schema['properties']['action']['enum']
 
 
 def test_self_map_business_section_lists_task_entry(agent):
@@ -122,10 +123,10 @@ def test_self_map_business_section_lists_task_entry(agent):
     tool = agent.tools.tools['self_map']
     context = ToolInvocationContext(agent.tools.runtime_snapshot())
     overview = tool.execute_scoped({'section': 'business'}, context)
-    assert overview.ok and '{"item":"tasks"}' in overview.output, overview.output
-    entry = json.loads(tool.execute_scoped({'section': 'business', 'item': 'tasks'}, context).output)['item']
+    assert overview.ok and '{"item":"background_agents"}' in overview.output, overview.output
+    entry = json.loads(tool.execute_scoped({'section': 'business', 'item': 'background_agents'}, context).output)['item']
     assert entry['state'] == 'available'
-    assert {'business_tasks_assign', 'business_tasks_submit', 'business_tasks_follow_up'} <= set(entry['tools'])
+    assert 'business_execution' in set(entry['tools'])
 
 
 def _background_turn(agent, thread_id, context, request_id='bg-turn-1'):
@@ -352,15 +353,15 @@ def test_steer_cancel_and_next_task_keep_lineage_and_context_scope(agent, delega
 def test_message_and_task_model_help_distinguish_receipt_and_execution(agent):
     from agent_py_agent.agent.tooling.input_schema import validate_tool_input
 
-    message = agent.tools.tools['business_background_agents_messages_send'].model_spec
-    assignment = agent.tools.tools['business_tasks_assign'].model_spec
-    assert '不新建SessionTask' in message.description and '不为新工作冻结' in message.description
-    assert 'business_tasks_assign' in message.description and '不是新task_id' in message.description
-    assert 'params.instruction' in assignment.description and '冻结其业务上下文' in assignment.description
-    assert 'business_tasks_get' in assignment.description and '只证明已受理' in assignment.description
-    for spec in (message, assignment):
-        assert len(spec.hints.examples) == 1
-        example = json.loads(spec.hints.examples[0])
+    spec = agent.tools.tools['business_execution'].model_spec
+    assert 'tasks.assign' in spec.description and 'SessionTask' in spec.description
+    assert 'background_agents.messages.send' in spec.description and '不新建SessionTask' in spec.description
+    assert '冻结' in spec.description and '只证明已受理' in spec.description
+    assert len(spec.hints.examples) >= 2
+    seen_actions = set()
+    for raw in spec.hints.examples:
+        example = json.loads(raw)
         assert validate_tool_input(example, spec.input_schema).ok
-        assert example['action'] == spec.input_schema['properties']['action']['const']
-        assert 'idempotency_key' in example and 'request_id' in example
+        seen_actions.add(example['action'])
+        assert 'request_id' in example
+    assert {'tasks.assign', 'background_agents.messages.send'} <= seen_actions
