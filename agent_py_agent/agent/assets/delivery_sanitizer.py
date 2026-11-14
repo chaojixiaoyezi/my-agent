@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from bisect import bisect_right
@@ -15,7 +16,8 @@ from .delivery_contracts import MAX_BUNDLE_BYTES, AssetDeliveryError
 
 _SECRET_KEYS = frozenset(('secret', 'token', 'password', 'passwd', 'pwd', 'passphrase', 'pass_phrase',
     'apikey', 'api_key', 'access_key', 'access_token', 'refresh_token', 'client_secret',
-    'private_key', 'auth_token', 'credential', 'webhook', 'web_hook', 'cookie', 'bearer', 'authorization'))
+    'private_key', 'auth_token', 'credential', 'webhook', 'web_hook', 'cookie', 'bearer', 'authorization',
+    'pin', 'passcode', 'secret_code', 'key_id', 'token_id'))
 _KEY_NAME = r'[A-Za-z0-9_][A-Za-z0-9_.-]*'
 _UNQUOTED_ASSIGNMENT = re.compile(
     rf'''(?im)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?(?P<key>{_KEY_NAME})[ \t]*[:=][ \t]*(?P<literal>[^\s#"'\r\n,;{{}}()\[\]]+)[ \t]*(?:\#.*)?$''')
@@ -37,7 +39,11 @@ _ENV_REFERENCE = re.compile(
 _SECRET_METADATA = frozenset({'schema_version', 'credential_ref', 'datasource_id',
     'updated_at', 'created_at', 'kind', 'driver'})
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
-_JSON_STRUCTURE_TOKEN = re.compile(_JSON_STRING.pattern + r'|[{}\[\],]')
+_NUMERIC_SECRET = re.compile(r'-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?')
+_JSON_UNQUOTED_SCALAR = re.compile(
+    r'(?<![A-Za-z0-9_.])(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)(?![A-Za-z0-9_.])'
+)
+_JSON_STRUCTURE_TOKEN = re.compile(_JSON_STRING.pattern + r'|' + _JSON_UNQUOTED_SCALAR.pattern + r'|[{}\[\],]')
 _YAML_HEADER = re.compile(rf'''(?i)^(?P<indent>[ \t]*)(?P<seq>-[ \t]+)?["']?(?P<key>{_KEY_NAME})["']?[ \t]*:[ \t]*(?P<tail>.*)$''')
 _YAML_INLINE = re.compile(rf'''(?im)(?:^|(?<=[{{,\[\s]))["']?(?P<key>{_KEY_NAME})["']?[ \t]*:[ \t]*''')
 _YAML_BLOCK = re.compile(r'[|>](?:[1-9][+-]?|[+-][1-9]?)?')
@@ -49,6 +55,8 @@ def _sensitive_key(key):
     normalized = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', key)
     normalized = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', normalized)
     normalized = normalized.replace('-', '_').replace('.', '_').lower()
+    if normalized == 'base_workflow_pin':
+        return False
     return any(normalized == word or normalized.endswith('_' + word) for word in _SECRET_KEYS)
 
 
@@ -64,6 +72,8 @@ def _secret_strings(value):
             pending.extend(item)
         elif isinstance(item, str) and item:
             result.add(item)
+        elif isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(item):
+            result.add(str(item))
     return result
 
 
@@ -359,7 +369,12 @@ def _matches(text, secrets, *, limit=None):
         matches.extend((*match.span(group), name) for match in islice(candidates,
             None if limit is None else max(0, limit - len(matches))))
     for secret in secrets:
-        iterator = islice(re.finditer(re.escape(secret), text), None if limit is None else max(0, limit - len(matches)))
+        if _NUMERIC_SECRET.fullmatch(secret):
+            prefix = r'(?<![A-Za-z0-9_.])' if secret.startswith('-') else r'(?<![A-Za-z0-9_.-])'
+            pattern = re.compile(prefix + re.escape(secret) + r'(?![A-Za-z0-9_.])')
+        else:
+            pattern = re.compile(re.escape(secret))
+        iterator = islice(pattern.finditer(text), None if limit is None else max(0, limit - len(matches)))
         matches.extend((*match.span(), 'known_secret') for match in iterator)
     return matches
 
@@ -415,10 +430,22 @@ def _json_structure_scan(text, *, replace=False):
             stack.append([any(stack[-1]), False])
             continue
         if raw in {'}', ']'}:
-            stack.pop()
+            if len(stack) > 1:
+                stack.pop()
             continue
         if raw == ',':
             stack[-1][1] = False
+            continue
+        if not raw.startswith('"'):
+            # 仅检查JSON对象{}内部直接归属敏感键的未加引号数字标量；布尔/null作为非秘密保留，容器外文本交YAML扫描器处理。
+            direct_sensitive = len(stack) > 1 and stack[-1][1]
+            stack[-1][1] = False
+            if direct_sensitive and not _placeholder(raw, unquoted=True):
+                matches.append((*token.span(), 'json_sensitive_key'))
+                if not replace:
+                    return matches, text
+                pieces.extend((text[cursor:token.start()], '"<REDACTED_SECRET>"'))
+                cursor = token.end()
             continue
         value = json.loads(raw)
         following = token.end()
@@ -426,12 +453,15 @@ def _json_structure_scan(text, *, replace=False):
             following += 1
         if text[following:following + 1] == ':':
             stack[-1][1] = _sensitive_key(value)
-        elif any(stack[-1]) and value and not _placeholder(value):
-            matches.append((*token.span(), 'json_sensitive_key'))
-            if not replace:
-                return matches, text
-            pieces.extend((text[cursor:token.start()], '"<REDACTED_SECRET>"'))
-            cursor = token.end()
+        else:
+            sensitive = any(stack[-1])
+            stack[-1][1] = False
+            if sensitive and value and not _placeholder(value):
+                matches.append((*token.span(), 'json_sensitive_key'))
+                if not replace:
+                    return matches, text
+                pieces.extend((text[cursor:token.start()], '"<REDACTED_SECRET>"'))
+                cursor = token.end()
     return matches, ''.join((*pieces, text[cursor:])) if replace else text
 
 
@@ -483,7 +513,13 @@ def _paths(text, owner_home):
 def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace=False, extra_secrets=()):
     if type(allow_secret_placeholder_replace) is not bool:
         raise ValueError('allow_secret_placeholder_replace必须是布尔值')
-    secrets = tuple(set(_environment_secrets()) | {value for value in extra_secrets if isinstance(value, str) and value})
+    extra = set()
+    for value in extra_secrets:
+        if isinstance(value, str) and value:
+            extra.add(value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            extra.add(str(value))
+    secrets = tuple(set(_environment_secrets()) | extra)
     result = {}
     for name, raw in files.items():
         if not isinstance(name, str) or not isinstance(raw, bytes):

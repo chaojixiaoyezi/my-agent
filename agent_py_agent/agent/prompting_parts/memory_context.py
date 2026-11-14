@@ -36,6 +36,7 @@ class BudgetedMemoryRecords(list):
 # LLM: 纯准入判断，严格保持原正文扫描及origin白名单；渲染、预算和JSONL确认共用，不登记访问或改记录。
 # 函数用途: 判断一条记录的正文和来源是否允许进入记忆信封。
 def is_memory_context_admissible(record: MemoryRecord) -> bool:
+    from ..conversation.learning_source import projection_is_learnable
     from ..memory_store.security import scan_memory_content
 
     content = str(getattr(record, "content", "") or "")
@@ -43,7 +44,24 @@ def is_memory_context_admissible(record: MemoryRecord) -> bool:
         return False
     attributes = getattr(record, "attributes", None)
     attributes = attributes if isinstance(attributes, dict) else {}
-    return str(attributes.get("origin") or "legacy").strip() in _ALLOWED_ORIGINS
+    origin = str(attributes.get("origin") or "legacy").strip()
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    if origin != "model_inferred":
+        return False
+    record_kind = str(getattr(record, "kind", "") or "").strip()
+    candidate_type = str(attributes.get("candidate_type") or "").strip()
+    is_working_agreement = (
+        record_kind in {"", "dialogue", "working_agreement"}
+        and candidate_type in {"", "working_agreement"}
+        and (record_kind == "working_agreement" or candidate_type == "working_agreement")
+    )
+    if not is_working_agreement:
+        return False
+    candidate_id = str(attributes.get("candidate_id") or "").strip()
+    if not candidate_id:
+        return False
+    return projection_is_learnable(attributes.get("learning_source"))
 
 
 # LLM: 原正文扫描/origin准入共用同一predicate；直接调用仍统计全部隔离项，markup转义与非权威信封不变。
@@ -98,8 +116,7 @@ def memory_context_text(memories: Iterable[MemoryRecord]) -> str:
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
     )
-    notice = (f"\n[... {omitted} formal memory entries omitted by context budget; "
-              "use memory_search to inspect full memory store ...]" if omitted else "")
+    notice = f"\n[... {omitted} formal memory entries omitted; use memory_search ...]" if omitted else ""
     return f"<memory-context>\n{_MEMORY_GUIDANCE}\n{envelope}{notice}\n</memory-context>"
 
 

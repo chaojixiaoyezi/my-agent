@@ -283,7 +283,7 @@ class GatewayPluginRequests:
             if not fresh:
                 raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
             inputs.queue_gateway_input_locked(paths, receipt)
-        claim = claim_request(paths, paths.inbox / (request_id + ".json"))
+        claim = claim_request(paths, paths.inbox / (request_id + ".json"), claim_mode="inline_direct")
         if claim is None:
             raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
         row = strict_json(claim.path.read_bytes(), RUNTIME_RECORD_MAX_BYTES)

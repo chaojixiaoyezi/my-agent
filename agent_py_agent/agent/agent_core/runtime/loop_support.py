@@ -849,6 +849,8 @@ def _budgeted_formal_memories(records: list, *, budget: ContextBudget | None = N
             kept.append(record)
             hot_chars += size
     regular: list = []
+    prior_omitted = getattr(records, "omitted_count", 0)
+    skipped = 0
     for group in (lessons, agreements, rest):
         group_cap = (
             agreement_cap
@@ -857,23 +859,24 @@ def _budgeted_formal_memories(records: list, *, budget: ContextBudget | None = N
         )
         group_kept = []
         for record in group:
-            if (
-                len(memory_context_text([*regular, record])) > recall_cap
-                or len(memory_context_text([*group_kept, record])) > group_cap
-            ):
+            candidate = [*regular, record]
+            total_len = len(
+                memory_context_text(BudgetedMemoryRecords(candidate, omitted_count=prior_omitted + skipped))
+                if prior_omitted or skipped
+                else memory_context_text(candidate)
+            )
+            if total_len > recall_cap or len(memory_context_text([*group_kept, record])) > group_cap:
+                skipped += 1
                 continue
             regular.append(record)
             group_kept.append(record)
-    prior_omitted = getattr(records, "omitted_count", 0)
-    # 提示本身同时计入非HOT总预算和工作约定子预算；必要时整条让位。
+    # 省略提示只计入非HOT总预算，不再向工作约定子预算重复扣减以免误逐出已适配的约定。
     while regular:
         omitted = prior_omitted + len(records) - len(kept) - len(regular)
         selected_agreements = [record for record in regular if record in agreements]
         if len(memory_context_text(BudgetedMemoryRecords(regular, omitted_count=omitted))) > recall_cap:
             regular.pop()
-        elif selected_agreements and len(memory_context_text(BudgetedMemoryRecords(
-            selected_agreements, omitted_count=omitted,
-        ))) > agreement_cap:
+        elif selected_agreements and len(memory_context_text(selected_agreements)) > agreement_cap:
             regular.remove(selected_agreements[-1])
         else:
             break

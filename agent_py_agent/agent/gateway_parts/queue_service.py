@@ -48,6 +48,17 @@ from .status_rendering import (
 )
 
 _CLAIM_LOCK = threading.Lock()
+_CLAIM_MODES = frozenset({"queue_worker", "inline_direct"})
+_PLUGIN_INLINE_EXECUTION_KINDS = frozenset({"tool", "script", "workflow", "workflow_resume"})
+
+
+def _is_inline_plugin_execution_record(record: object) -> bool:
+    """判断队列记录是否为 Plugin Host 同步直领的四类执行请求。"""
+    if not isinstance(record, dict) or record.get("source") != "plugin" or record.get("kind") != "ask":
+        return False
+    metadata = record.get("metadata")
+    provenance = metadata.get("plugin_provenance") if isinstance(metadata, dict) else None
+    return isinstance(provenance, dict) and provenance.get("kind") in _PLUGIN_INLINE_EXECUTION_KINDS
 
 
 @dataclass(frozen=True)
@@ -237,12 +248,29 @@ def ensure_gateway_folders(paths: GatewayPaths) -> None:
 
 
 # LLM: 原T内先比真实P3/P5全量快照再rename/fence，C末门覆盖实际写入；缺scope不回落原Count0入口，不变更原损坏/回滚/计数语义。
-# 函数用途: 领取原队列请求并返回同一执行围栏；默认无snapshot保留原路径，W或C只消费各自已冻结来源。
-def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=None, coordinator_snapshot=None) -> GatewayClaim | None:
+# 函数用途: 领取原队列请求并返回同一执行围栏；默认queue_worker跳过同步Plugin Host执行请求，inline_direct仅跳过worker分区快照要求。
+def claim_request(
+    paths: GatewayPaths,
+    request_path: Path,
+    *,
+    worker_snapshot=None,
+    coordinator_snapshot=None,
+    claim_mode: str = "queue_worker",
+) -> GatewayClaim | None:
     from contextlib import ExitStack
 
     from .logging import _report_gateway_side_effect_error
 
+    if claim_mode not in _CLAIM_MODES:
+        raise ValueError(
+            f"INVALID_CLAIM_MODE: unsupported claim_mode={claim_mode!r}; "
+            "effect_outcome=not_started; next_action=pass 'queue_worker' or 'inline_direct'"
+        )
+    if claim_mode == "inline_direct" and worker_snapshot is not None:
+        raise ValueError(
+            "CONFLICTING_CLAIM_MODE: claim_mode='inline_direct' cannot be combined with worker_snapshot; "
+            "effect_outcome=not_started; next_action=use claim_mode='queue_worker' when providing worker_snapshot"
+        )
     processing_path = paths.processing / request_path.name
     claim: GatewayClaim | None = None
     with _CLAIM_LOCK:
@@ -252,7 +280,7 @@ def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=No
                 return None
             from .multiprocess_mode import current_worker_partition
 
-            if worker_snapshot is not None or current_worker_partition() is not None:
+            if claim_mode == "queue_worker" and (worker_snapshot is not None or current_worker_partition() is not None):
                 from .multiprocess_queue import require_worker_claim_locked
 
                 require_worker_claim_locked(paths, request_path, worker_snapshot)
@@ -278,6 +306,8 @@ def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=No
                 claim = GatewayClaim(processing_path, processing_path.stem, "", 0, "")
             else:
                 transport_payload = report.payload
+                if claim_mode == "queue_worker" and _is_inline_plugin_execution_record(transport_payload):
+                    return None
                 try:
                     transport_payload = _gateway_claim_transport_payload(
                         report.payload,
