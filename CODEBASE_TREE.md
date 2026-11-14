@@ -1,3 +1,18 @@
+## 2026-11-14 工具表面收敛与副作用错误契约（Workstream B：W0–W6）
+
+```text
+docs/design/
+`-- TOOL_SURFACE_ERROR_CONTRACT.md                  # 业务工具 104->3 归并、单调动作上界、副作用归因、原生推荐去重与验收指标
+agent_py_agent/tests/
+|-- test_tool_slimming_w0_contracts.py              # W0 运行时契约：副作用恢复、校验器诊断、别名解码、动作上界与 O(1) 快照索引
+|-- test_tool_slimming_w1_business_domains.py       # W1 业务域归并、严格分支预检、人工确认保留、历史回执同源与唤醒上界
+|-- test_tool_slimming_w2_core_contracts.py         # W2 核心文件/会话/编排契约：部分补丁证据、写前拒绝与嵌套字段说明
+|-- test_tool_slimming_w3_domain_schemas.py         # W3 延迟领域工具嵌套说明、合规示例与提交后读回异常不重复写入
+|-- test_tool_slimming_w4_admin_schemas.py          # W4 管理配置工具嵌套说明、无秘密示例与写前拒绝证明
+|-- test_tool_slimming_w5_computer_use.py           # W5 Computer Use 上游中文说明、按键成对释放与 MCP 三段式错误契约
+`-- test_tool_slimming_w6_wire_acceptance.py        # W6 原生/HTTP 往返、104 项双版本别名迁移、只读上界、单故障重放与快照复用验收
+```
+
 ## 2026-11-14 全仓精简瘦身（Waves 1–4）与无损单测归并
 
 ```text
@@ -2134,10 +2149,13 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 |       `-- test_wave9_progressive_capability_addressing.py # 12总览/4专项、原策略及资产摘要、默认短页/权限和Level0去重
 `-- docs/
     `-- design/
-        `-- SELF_MAP.md # 自我目录公开读口、权限、完整性与导航合同
+        |-- SELF_MAP.md # 自我目录公开读口、权限、完整性与导航合同
+        `-- TOOL_SURFACE_ERROR_CONTRACT.md # 业务域工具归并、动作上界授权、确定性副作用归因与分层计数契约
 ```
 
 ## 关键文件说明
+
+- `docs/design/TOOL_SURFACE_ERROR_CONTRACT.md` 与 `agent_py_agent/tests/test_tool_slimming_w0..w6_*.py`：记录业务工具 `104 -> 3` 分域归并、独立 `business_assets_versions_accept` 真人确认、可信双版本输入解码与共享操作幂等身份、单调 `tool:action` 动作上界、确定性 `effect_outcome` / `next_action` 重放以及原生 `# Recommended Tools` 去重的完整设计与回归矩阵。
 
 - `test_r8_candidate_pin_stream.py` 与 `test_r8_retention_directory_fds.py`：验证候选只读流和维护扫描释放临时对象/目录句柄，同时保留全部保护引用与代次校验。
 - `test_r8_gateway_memory_diagnostics.py`：用独立进程验证正式启动与信号导出，覆盖追踪所有权、私密正文不输出及停止后释放回调。

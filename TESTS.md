@@ -1,3 +1,15 @@
+## 2026-11-14 工具表面收敛与副作用错误契约组合验收（Workstream B：W0–W6）
+
+基于集成分支 `feat/tool-slim-w6`（已合入 W0–W5 基线 `3e68158ef4`），在隔离 `HOME`/`MY_AGENT_HOME`/`TMPDIR` 下完成 W0–W6 分片与组合往返验证：
+
+- **新增 `test_tool_slimming_w6_wire_acceptance.py`（5 项核心集成用例全部通过，0 跳过/预期失败）**：
+  - `test_native_and_http_wire_roundtrip`：真实本地 `GatewayHTTPServer` `/client/business` 与 `BusinessClient` HTTP 往返、Anthropic/OpenAI 原生工具 Schema 序列化、`business_spaces_enabled` / `enable_self_map` 开关与服务就绪收缩、105 动作映射（`40 + 26 + 38 + 1`）、`x-max-bytes` / `x-business-unique-items` 预检拦截以及 `business_assets_versions_accept` 真人确认端到端采用；
+  - `test_all_aliases_both_host_versions`：可信宿主输入版本 `1` 与 `2` 下全量 104 个退役 `business_<action>` 别名解码、挂起输入迁移保留、`tool_search` 发现投影、历史叶记录重放零二次执行、原始业务回执查询与 `business_spaces` 非执行型重定向；
+  - `test_read_only_action_ceiling_end_to_end`：跨两个隔离作用域与不同治理就绪度的单调 `tool:action` 交集，验证只读上界有效 Schema 零写动作混入、未就绪上界保守失败关闭及写请求执行前拦截；
+  - `test_effect_replay_single_faults`：`apply_patch` 单点模拟 I/O 部分提交（`TOOL_PARTIAL_COMMIT`）、写前策略拒绝（`not_started`）、校验器内部异常（`TOOL_INVOCATION_VALIDATOR_FAILED`）、提交后读回异常（`TOOL_POST_COMMIT_READBACK_FAILED` 重放不二次写入）、后置输出归档异常（`TOOL_OUTPUT_ARCHIVE_FAILED`）及 MCP 传输中断/远端 `MCP_REMOTE_ERROR`；
+  - `test_prompt_snapshot_reuse_and_metrics`：核验 `70/63/29`（业务关闭）与 `73/66/29`（业务开启，首轮直出 `41,884` 字符）指标、`tool_search` 加载后原生 `# Recommended Tools` 去重、未变回合无 `os.walk` 重扫及 `_NARROWED_MODEL_SPEC_CACHE` 有界复用。
+- **既有契约回归与全套分片联跑**：更新 `test_tool_progressive_disclosure.py` 中 2 处原生推荐去重断言后，联跑 `test_tool_gateway_contract.py`、`test_tool_operation_result_ref_wire.py`、`test_tool_progressive_disclosure.py` 及 `test_tool_slimming_w0..w6_*.py` 共 10 个测试模块全部通过；改动文件 `ruff check --no-cache`、`git diff --check` 及 `run_review.py post --inventory-only`（`W6` 与 `all`）零违例。未在本分片运行全仓 `pytest` 或真实线上供应商采样。
+
 ## 2026-11-14 全仓精简瘦身（Waves 1–4）与无损单测归并全量验收
 
 基于瘦身前基线 `d829a882b` 完成 Waves 1–4 收敛与 4 路回归补齐（`d36af38ac`、`15e871b9f`、`eea7961d5`、`60a52631c`），在隔离 `HOME`/`MY_AGENT_HOME`/`TMPDIR` 下完成全仓验证：

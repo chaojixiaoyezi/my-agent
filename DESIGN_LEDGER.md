@@ -1,3 +1,13 @@
+## 2026-11-14 工具表面收敛与确定性副作用错误契约（Workstream B：W0–W6，集成候选）
+
+按冻结边界完成工具表面精简、业务域归并、动作上界授权与确定性错误恢复闭环，零新增配置项（复用 `business_spaces_enabled`、`enable_self_map`、`tool_catalog_*` 等存量配置）：
+
+- **业务工具分域收敛（104 -> 3 + 独立真人确认）**：将 104 个 `business_<action>` 叶工具归并为 `business_space`（40 项）、`business_execution`（26 项）、`business_activity`（38 项），保留独立 `business_assets_versions_accept`（1 项，`ask`/`auto`/`admin_full_access` 均强制真人确认）与核心只读工具 `read_business_asset`；21 个点号工作流动作及 `workflows.health.get` 始终留在 `business_activity` 中，不依赖 `enable_self_map`；移除死代码 `BusinessSpacesTool` 并对误调 `business_spaces` 返回非执行型重定向（`TOOL_RETIRED_REDIRECT`、`effect_outcome="not_started"`）。
+- **双版本别名解码与共享操作身份**：`versioned_input_decoder.py` 在宿主输入协议版本 `1` 与 `2` 下将 104 个退役名称解码为规范领域调用，保留 `call_id`、`operation_id`、`idempotency_key`、`request_id`、`expected_revision`、`params` 与挂起恢复 `prior_migration`；`operation_identity_for` 保持 `"business_" + action.replace(".", "_")`，确保历史叶记录重放不二次执行底层业务写入。
+- **单调 `tool:action` 动作上界与有界静态缓存**：`registry_auth.py` 保证子级或预设传入裸领域工具名绝不放宽父级 `tool:action` 上界，孤立令牌不单独授权，旧叶禁用名精确减去单动作，缩窄后的 Schema 按静态 `(tool_name, spec_revision, sorted_actions)` 有界缓存（上限 128）。
+- **确定性副作用归因与重放保护**：写前校验/策略/权限拒绝统一报告 `effect_outcome="not_started"`；`effect_outcome="unknown"` 全局强制 `retryable=False`；补齐 `apply_patch` `TOOL_PARTIAL_COMMIT`、`scripts`/`workflows` `TOOL_POST_COMMIT_READBACK_FAILED`、校验器异常 `TOOL_INVOCATION_VALIDATOR_FAILED`、后置归档失败 `TOOL_OUTPUT_ARCHIVE_FAILED`、MCP 远端 `MCP_REMOTE_ERROR` 与持久化脱敏 `next_action`（`<= 2048` 字符，`[tool-next-action]` 单次渲染）。
+- **全量嵌套字段说明、原生推荐去重与分层指标**：补齐 W1–W5 各层 Schema 属性中文说明与无秘密合规示例；`tool_protocol="native"` 下 `# Recommended Tools` 自动剔除直出工具与当轮 `tool_search` 已加载工具；`ToolRuntimeSnapshot.runtime(name)` 采用 $O(1)$ 不可变字典索引；出厂默认计数收敛为 `70/63/29`（业务关闭）与 `73/66/29`（业务开启，首轮直出固定 `41,884` 字符）。详见 [工具表面收敛与副作用错误契约](docs/design/TOOL_SURFACE_ERROR_CONTRACT.md)。
+
 ## 2026-11-14 全仓精简瘦身（Waves 1–4）与无损单测归并
 
 按已冻结范围完成全仓冗余代码、退役模块与重复静态断言清理，并将细碎单测文件按领域无损归并：

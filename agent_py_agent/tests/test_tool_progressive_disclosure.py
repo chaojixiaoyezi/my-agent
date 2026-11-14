@@ -151,11 +151,22 @@ def test_core_tools_stay_in_main_catalog(tmp_path) -> None:
 
 
 def test_deferred_tools_surface_via_tool_search_not_initial_recommendations(tmp_path) -> None:
-    """推荐区不虚报未加载工具；协作任务会推荐 tool_search 作为发现入口。"""
+    """native 推荐区排除已直出 Schema 的 tool_search，仅提示未加载授权折叠工具且不含已退役工具。"""
     agent = _agent(tmp_path)
+    visible_names = {spec.name for spec in agent.tools.model_visible_specs()}
+    assert "tool_search" in visible_names
+    assert "manage_handoff_board" not in visible_names
+
     rec = agent.tools.render_recommended_tools_section("发起跨代理协作 协作请求 collaboration 协助")
-    assert "tool_search" in rec
+    assert "tool_search" not in rec
+    assert "manage_handoff_board" in rec
     assert "raise_collaboration" not in rec
+
+    rec_after_load = agent.tools.render_recommended_tools_section(
+        "发起跨代理协作 协作请求 collaboration 协助",
+        loaded_tool_names={"manage_handoff_board"},
+    )
+    assert "manage_handoff_board" not in rec_after_load
 
 
 def test_native_recommendations_do_not_duplicate_structured_tool_schemas(tmp_path) -> None:
@@ -167,10 +178,17 @@ def test_native_recommendations_do_not_duplicate_structured_tool_schemas(tmp_pat
     )
 
     assert "# Recommended Tools" in text
-    assert "list_files" in text or "run_command" in text
+    assert "list_files" not in text
+    assert "run_command" not in text
     assert "参数：" not in text
     assert "属性：effect=" not in text
     assert len(text) < 1_200
+
+    text_mode = agent.tools.render_recommended_tools_section(
+        "查看项目文件并运行测试",
+        tool_protocol="text",
+    )
+    assert "list_files" in text_mode or "run_command" in text_mode
 
 
 def test_normal_query_recommended_stays_small(tmp_path) -> None:

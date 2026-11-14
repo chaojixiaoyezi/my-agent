@@ -1,3 +1,19 @@
+## 2026-11-14 Workstream B（工具表面收敛与副作用错误契约 W0–W6）分片收口
+
+来源为 `astra-arch-tool-slimming-ux-kit/workstreams.json` 的零重叠白名单（`overlap_count = 0`，`configuration.added = []`）：
+
+| 分片 | 核心职责与独占范围摘要 |
+|---|---|
+| W0 | 运行时工具契约、`effect_outcome="unknown"` 非可重试不变量、持久化脱敏 `next_action`、104 项双版本别名解码、单调 `tool:action` 动作上界、原生 `# Recommended Tools` 去重、$O(1)$ 快照索引及 `test_tool_slimming_w0_contracts.py` |
+| W1 | 104 个业务叶工具归并为 `business_space`（40）/ `business_execution`（26）/ `business_activity`（38）、保留独立真人确认 `business_assets_versions_accept` 与核心 `read_business_asset`、移除 `BusinessSpacesTool` 及 `test_tool_slimming_w1_business_domains.py` |
+| W2 | 核心文件/会话/编排工具嵌套 Schema 说明、`apply_patch` `TOOL_PARTIAL_COMMIT` 部分提交证据、写前确定性 `not_started` 归因及 `test_tool_slimming_w2_core_contracts.py` |
+| W3 | 12 个延迟领域工具嵌套 Schema 说明、无秘密合规示例、`scripts`/`workflows` 提交后读回异常 `TOOL_POST_COMMIT_READBACK_FAILED` 防重放及 `test_tool_slimming_w3_domain_schemas.py` |
+| W4 | 6 个管理配置工具嵌套 Schema 说明、无秘密示例、写前拒绝证明及 `test_tool_slimming_w4_admin_schemas.py` |
+| W5 | Computer Use 上游已知工具简明中文说明（保持原签名）、按键成对释放引导、MCP 三段式错误契约（`MCP_REMOTE_ERROR`）及 `test_tool_slimming_w5_computer_use.py` |
+| W6 | 组合往返验收 `test_tool_slimming_w6_wire_acceptance.py`、渐进披露推荐断言对齐、设计文档 `docs/design/TOOL_SURFACE_ERROR_CONTRACT.md` 与共享台账收口 |
+
+集成边界：W0–W5 已在 `3e68158ef4` 合入；由于四大核心状态机（`SessionTaskStore`、`ClaimStore`、`PtySessionRegistry`、`WorkflowEngine`）未在本工作流发生变更，`test_tla_formal_state_machines.py` 与 `test_deterministic_simulation_replay.py` 保持未改动。分片仅在独立 worktree 本地提交，合并 `main`、跨分片存量快照单测对齐、双路终审与远端 CI 由总控统一执行。
+
 ## 2026-11-01 当前 MEGA 唯一派工入口
 
 本轮 4 波/17 片的完整 SHA、分工、依赖、精确写白名单投影与真实验收欠账统一见 [MEGA_DISPATCH_PROGRESS](tasks/MEGA_DISPATCH_PROGRESS.md)。写权仍只来自本轮冻结 `workstreams.json`，本页不复制活跃权限表，不解析自然语言扩权；read_only_tests 无写权。
