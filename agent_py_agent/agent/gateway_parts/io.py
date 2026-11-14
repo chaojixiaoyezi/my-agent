@@ -27,7 +27,6 @@ from pathlib import Path
 
 from ..common.json_io import (
     check_io_deadline,
-    jsonl_lines,
     path_thread_lock,
     serialize_private_json_no_newline,
     write_private_json_file_atomic_no_newline,
@@ -56,18 +55,7 @@ try:
 except ImportError:  # pragma: no cover - POSIX import guard.
     msvcrt = None
 
-_GATEWAY_HISTORY_CACHE_LOCK = threading.Lock()
 _path_lock = path_thread_lock
-# 限制历史文件进程内快照缓存条目上限，防止多工作区长期运行无界增长。
-_MAX_GATEWAY_HISTORY_CACHE_ENTRIES = 64
-# 网关历史缓存允许缓存的单个文件最大字节数。
-_MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES = 4 * 1024 * 1024
-# 网关历史文件进程内缓存允许占用的总字节数上限。
-_MAX_GATEWAY_HISTORY_CACHE_TOTAL_BYTES = 16 * 1024 * 1024
-_GATEWAY_HISTORY_CACHE: dict[
-    str,
-    tuple[tuple[int, int], tuple[str, ...], dict[str, _GatewayHistoryIndexEntry]],
-] = {}
 GATEWAY_REQUEST_FINGERPRINT_SCHEMA = "gateway_request_fingerprint.v1"
 _GATEWAY_REQUEST_FINGERPRINT_KEYS = (
     "kind",
@@ -87,15 +75,6 @@ _GATEWAY_REQUEST_FINGERPRINT_KEYS = (
     "resume_context",
     "client_capabilities",
 )
-
-
-# LLM: Gateway 历史索引仅为进程内缓存，终态规范归档仍是权威；外部写入以 mtime/size 使缓存失效，修改须联查历史修复测试。
-# 类用途: 缓存某个请求 ID 在历史投影中的完整正文、出现次数和冲突情况。
-@dataclass(frozen=True)
-class _GatewayHistoryIndexEntry:
-    payload: dict
-    count: int = 1
-    conflict: bool = False
 
 
 # LLM: Gateway JSON 读口用独立字段区分正文、读取错误与暂时锁忙；调用方不得把竞争误判为缺失或损坏。
@@ -1049,78 +1028,3 @@ def append_gateway_history_once(paths: GatewayPaths, payload: dict) -> bool:
     from .gateway_history_index import GatewayHistoryIndex
 
     return GatewayHistoryIndex(paths).append(payload)
-
-
-# LLM: 原行与索引保留冲突修复合同；单文件及总字节预算只限制内存驻留，不改变返回正文或磁盘权威。
-# 函数用途: 读取 Gateway 历史一次并构建按请求 ID 查询的进程内索引。
-def _gateway_history_snapshot(
-    path: Path,
-) -> tuple[list[str], dict[str, _GatewayHistoryIndexEntry]]:
-    stamp = _gateway_history_stamp(path)
-    key = str(path.resolve())
-    with _GATEWAY_HISTORY_CACHE_LOCK:
-        cached = _GATEWAY_HISTORY_CACHE.get(key)
-    if cached is not None and cached[0] == stamp and stamp[1] <= _MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES:
-        return list(cached[1]), dict(cached[2])
-    # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-    lines = jsonl_lines(path.read_text(encoding="utf-8")) if path.exists() else []
-    index: dict[str, _GatewayHistoryIndexEntry] = {}
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        request_id = str(row.get("id") or row.get("request_id") or "").strip()
-        if not request_id:
-            continue
-        existing = index.get(request_id)
-        if existing is None:
-            index[request_id] = _GatewayHistoryIndexEntry(dict(row))
-        else:
-            index[request_id] = _GatewayHistoryIndexEntry(
-                existing.payload,
-                count=existing.count + 1,
-                conflict=existing.conflict or existing.payload != row,
-            )
-    _cache_gateway_history_snapshot(key, stamp, lines, index)
-    return lines, index
-
-
-# LLM: 冷读与写后刷新共用同一锁内预算，超大项移除旧版本；按原插入顺序淘汰，不另存正文副本。
-# 函数用途: 仅保留单文件不超4MiB、合计不超16MiB且条数有界的历史快照。
-def _cache_gateway_history_snapshot(key: str, stamp: tuple[int, int], lines: list[str], index: dict) -> None:
-    with _GATEWAY_HISTORY_CACHE_LOCK:
-        if stamp[1] > _MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES:
-            _GATEWAY_HISTORY_CACHE.pop(key, None)
-            return
-        _GATEWAY_HISTORY_CACHE[key] = (stamp, tuple(lines), dict(index))
-        total = sum(row[0][1] for row in _GATEWAY_HISTORY_CACHE.values())
-        while _GATEWAY_HISTORY_CACHE and (
-            len(_GATEWAY_HISTORY_CACHE) > _MAX_GATEWAY_HISTORY_CACHE_ENTRIES
-            or total > _MAX_GATEWAY_HISTORY_CACHE_TOTAL_BYTES
-        ):
-            removed = _GATEWAY_HISTORY_CACHE.pop(next(iter(_GATEWAY_HISTORY_CACHE)))
-            total -= removed[0][1]
-
-
-# LLM: Gateway 历史缓存以 mtime/size 感知其它进程写入，仅作失效提示；不得将缓存戳当跨进程状态或执行授权。
-# 函数用途: 返回历史文件当前缓存校验戳，不存在时用零值。
-def _gateway_history_stamp(path: Path) -> tuple[int, int]:
-    try:
-        stat = path.stat()
-    except OSError:
-        return 0, 0
-    return int(stat.st_mtime_ns), int(stat.st_size)
-
-
-# LLM: 调用方已按原历史事务落盘；读新stat后仍经统一条数/字节准入，超大文件不保留旧快照。
-# 函数用途: 在写入历史后同步刷新对应进程内索引缓存。
-def _store_gateway_history_cache(
-    path: Path,
-    lines: list[str],
-    index: dict[str, _GatewayHistoryIndexEntry],
-) -> None:
-    key = str(path.resolve())
-    _cache_gateway_history_snapshot(key, _gateway_history_stamp(path), lines, index)

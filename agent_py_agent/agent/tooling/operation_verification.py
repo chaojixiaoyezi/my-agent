@@ -468,20 +468,6 @@ def _public_label_part(value: object, *, fallback: str = "") -> str:
     return (text[:80] or fallback)
 
 
-# LLM: 状态文案只映射固定枚举，不分析或改写模型自然语言。
-# 函数用途: 将机器核验状态转成简短中文说明。
-def _verification_status_text(status: str) -> str:
-    return {
-        "succeeded": "成功",
-        "failed": "失败",
-        "not_started": "未执行",
-        "unknown": "结果未知，系统未自动重试",
-        "cancelled": "已取消",
-        "incomplete": "尚未结束，未按成功处理",
-        "unverified": "缺少权威终态，未按成功处理",
-    }.get(status, "未按成功处理")
-
-
 # LLM: 对外计数使用固定状态白名单；未知键和非整数值一律忽略。
 # 函数用途: 清洗 operation verification 的公开计数字段。
 def _public_verification_counts(value: object) -> dict[str, int]:

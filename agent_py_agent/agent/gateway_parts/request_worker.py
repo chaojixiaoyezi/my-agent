@@ -57,7 +57,7 @@ from .io import (
     write_json_file_atomic,
 )
 from .owner_retention import gateway_terminal_exists
-from .paths import GatewayPaths, gateway_chunk_path
+from .paths import GatewayPaths
 from .queue_service import (
     GatewayClaim,
     archive_request,
@@ -2132,36 +2132,6 @@ def _conversation_store_for_request(agent: SimpleAgent | None, payload: dict) ->
         return _resolve_request_agent(agent, payload).conversation_store
     except Exception:
         return None
-
-
-def _attach_archived_chunk_stream(
-    paths: GatewayPaths, request_id: str, target_folder: Path, response: dict
-) -> None:
-    archived_path, archive_error = _archive_gateway_chunk_stream(paths, request_id, target_folder)
-    if archived_path is not None:
-        response["chunk_stream_path"] = str(archived_path)
-    if archive_error is not None:
-        response["chunk_stream_archive_error"] = archive_error
-
-
-def _archive_gateway_chunk_stream(
-    paths: GatewayPaths, request_id: str, target_folder: Path
-) -> tuple[Path | None, dict | None]:
-    chunk_path = gateway_chunk_path(paths, request_id)
-    if not chunk_path.exists():
-        return None, None
-    target_folder.mkdir(parents=True, exist_ok=True)
-    target = target_folder / chunk_path.name
-    try:
-        chunk_path.replace(target)
-    except OSError as exc:
-        from ..runtime_errors import runtime_error_report
-
-        report = runtime_error_report(exc, context="gateway.worker.chunk_stream.archive")
-        report["path"] = str(chunk_path)
-        report["target_path"] = str(target)
-        return None, report
-    return target, None
 
 
 # LLM: 继承现有 owner 拒绝链，沿用规范失败归档，不建立另一个恢复状态机。

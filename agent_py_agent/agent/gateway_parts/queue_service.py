@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from agent_py_agent.agent.core import SimpleAgent
 
-import json
 import sqlite3
 import threading
 import time
@@ -26,7 +25,6 @@ from typing import Any
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .io import (
     GATEWAY_REQUEST_FINGERPRINT_SCHEMA,
-    GatewayJsonReadReport,
     gateway_request_fingerprint,
     gateway_response_path,
     gateway_turn_transition,
@@ -124,10 +122,6 @@ def rebuild_gateway_index_report(agent: SimpleAgent, paths: GatewayPaths | None 
     )
 
 
-def _rebuild_gateway_history_index(agent: SimpleAgent, paths: GatewayPaths) -> int:
-    return _rebuild_gateway_history_index_report(agent, paths).indexed_count
-
-
 # LLM: doctor离线重建按持久游标迁移旧源，再keyset读固定128条；不改变完成权威或公开入口。
 # 函数用途: 从可恢复历史投影分批重建检索记录，保留坏旧行的错误报告。
 def _rebuild_gateway_history_index_report(agent: SimpleAgent, paths: GatewayPaths) -> GatewayIndexRebuildReport:
@@ -160,41 +154,6 @@ def _rebuild_gateway_history_index_report(agent: SimpleAgent, paths: GatewayPath
     return GatewayIndexRebuildReport(count, load_errors)
 
 
-def _payload_from_history_line(line: str) -> dict:
-    return _payload_from_history_line_report(line).payload
-
-
-def _payload_from_history_line_report(
-    line: str,
-    path: Path | None = None,
-    line_number: int = 0,
-) -> GatewayJsonReadReport:
-    if not line.strip():
-        return GatewayJsonReadReport({})
-    try:
-        payload = json.loads(line)
-    except json.JSONDecodeError as exc:
-        return GatewayJsonReadReport(
-            {},
-            _gateway_index_load_error(path, exc, "gateway.index.history.read", line_number=line_number),
-        )
-    if isinstance(payload, dict):
-        return GatewayJsonReadReport(payload)
-    return GatewayJsonReadReport(
-        {},
-        _gateway_index_load_error(
-            path,
-            ValueError(f"gateway history row is {type(payload).__name__}, expected object"),
-            "gateway.index.history.read",
-            line_number=line_number,
-        ),
-    )
-
-
-def _rebuild_gateway_request_file_index(agent: SimpleAgent, paths: GatewayPaths) -> int:
-    return _rebuild_gateway_request_file_index_report(agent, paths).indexed_count
-
-
 def _rebuild_gateway_request_file_index_report(agent: SimpleAgent, paths: GatewayPaths) -> GatewayIndexRebuildReport:
     count = 0
     load_errors: list[dict[str, Any]] = []
@@ -209,11 +168,6 @@ def _rebuild_gateway_request_file_index_report(agent: SimpleAgent, paths: Gatewa
 def _iter_gateway_request_files(paths: GatewayPaths):
     for folder in (paths.inbox, paths.processing, paths.done, paths.failed):
         yield from sorted(folder.glob("*.json"))
-
-
-def _index_gateway_request_file(agent: SimpleAgent, paths: GatewayPaths, request_path: Path) -> bool:
-    indexed, _ = _index_gateway_request_file_report(agent, paths, request_path)
-    return indexed
 
 
 def _index_gateway_request_file_report(
@@ -241,10 +195,6 @@ def _index_gateway_request_file_report(
         GatewayIndexPayloadOptions(request_path=request_path, response_path=response_path),
     )
     return indexed, load_errors
-
-
-def _rebuild_gateway_response_index(agent: SimpleAgent, paths: GatewayPaths) -> int:
-    return _rebuild_gateway_response_index_report(agent, paths).indexed_count
 
 
 def _rebuild_gateway_response_index_report(agent: SimpleAgent, paths: GatewayPaths) -> GatewayIndexRebuildReport:

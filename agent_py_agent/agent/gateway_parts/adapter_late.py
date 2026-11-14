@@ -64,10 +64,6 @@ def check_late_responses_report(paths: AdapterPaths) -> LateResponseCheckReport:
     return LateResponseCheckReport(results, entries_report.load_errors)
 
 
-def _iter_late_pending_entries(late_path: Path) -> list[dict]:
-    return _iter_late_pending_entries_report(late_path).entries
-
-
 def _iter_late_pending_entries_report(late_path: Path) -> _LatePendingEntriesReport:
     entries: list[dict] = []
     raw_unreadable_lines: list[str] = []

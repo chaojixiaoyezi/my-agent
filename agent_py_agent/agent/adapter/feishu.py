@@ -1041,35 +1041,6 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         if client is not None:
             client.close()  # 尽力关闭底层 ws(关不掉就靠 daemon 线程随进程退出)
 
-    # LLM: 只关闭原HTTP服务，异常日志只类型；不改timeout/线程退出或事件受理事实。
-    # 函数用途: 在原关闭线程退出回调服务，保留既有生命周期清理。
-    def _shutdown_server_async(self) -> None:
-        if not self._server:
-            return
-        try:
-            t = threading.Thread(target=self._do_shutdown, daemon=True)
-            t.start()
-        except Exception as exc:
-            logger.warning('关闭飞书 HTTP 服务异常 error_type=%s', type(exc).__name__)
-        self._server = None
-
-    def _join_server_thread(self) -> None:
-        if not self._server_thread:
-            return
-        self._server_thread.join(timeout=5)
-        self._server_thread = None
-
-    # LLM: 原服务关闭异常只记类型，不能从异常文本复制回调或认证数据。
-    # 函数用途: 关闭原服务连接，不改变外发或owner状态。
-    def _do_shutdown(self) -> None:
-        if self._server:
-            try:
-                self._server.shutdown()
-                self._server.server_close()
-            except Exception as exc:
-                logger.warning('飞书 HTTP shutdown 异常 error_type=%s', type(exc).__name__)
-
-
     # LLM: callback 结果必须显式返给 WS/webhook；异常仅记类型，暂时失败不伪装接受或永久忽略。
     # 函数用途: 经原群门与认证入口接收消息，返回运输回执并记录有界脱敏状态。
     def _handle_feishu_event(self, payload: dict[str, Any]) -> FeishuEventDisposition:

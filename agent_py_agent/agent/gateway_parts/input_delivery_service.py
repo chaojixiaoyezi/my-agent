@@ -17,7 +17,6 @@ import logging
 import os
 import threading
 import time
-from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -744,27 +743,6 @@ def _settle_terminal_queued_input(paths: GatewayPaths, receipt: GatewayInputRece
     return "terminal_unknown"
 
 
-# 输入回执定期清理缓存跟踪的最大目录数量。
-_RECEIPT_SWEEP_MAX_DIRECTORY_COUNT = 32
-# 输入回执目录定期清理复查的最小间隔时间。
-_RECEIPT_SWEEP_RECHECK_SECONDS = 60.0
-_RECEIPT_SWEEP_LOCK = threading.Lock()
-
-
-# LLM: 只记录完整连续扫描的覆盖证据，不缓存正文或业务裁决；未扫描完不能把一页终态推成全目录终态。
-# 类用途: 保存某一代回执目录的连续扫描位置和完成核验时刻。
-@dataclass(frozen=True)
-class _ReceiptSweep:
-    stamp: tuple[int, int, int, int, int]
-    seen: int
-    last_name: str
-    complete: bool
-    verified_at: float
-
-
-_RECEIPT_SWEEP_CACHE: OrderedDict[str, _ReceiptSweep] = OrderedDict()
-
-
 # 隔离是有界调度提示，不改回执或结算事实；原文件变化立即重试。
 @dataclass(frozen=True)
 class _ReceiptFailure:
@@ -823,67 +801,6 @@ def _record_receipt_failure(path: Path, stamp: tuple[int, int] | None,
     return quarantined
 
 
-# LLM: 目录缺失或拒读时不信旧门；签名额外包含inode/ctime，不能只按mtime和size漏掉同名换代。
-# 函数用途: 只stat回执顶层目录，生成扫描门的文件系统代次。
-def _receipt_sweep_stamp(directory: Path) -> tuple[int, int, int, int, int] | None:
-    try:
-        return cache_stat_signature(directory.stat())
-    except OSError:
-        return None
-
-
-# LLM: 只有完整连续扫描全是consumed且同代可信时才跳过；热命中不续期，60秒后必须重新轮转。
-# 函数用途: 用一次目录stat跳过稳定且无未消费回执的整个扫描入口。
-def _receipt_sweep_gate(paths: GatewayPaths) -> tuple[tuple | None, bool]:
-    directory = paths.root / "input_receipts"
-    stamp, now = _receipt_sweep_stamp(directory), time.monotonic()
-    with _RECEIPT_SWEEP_LOCK:
-        cached = _RECEIPT_SWEEP_CACHE.get(str(directory))
-        if cached is not None and (
-            stamp != cached.stamp or (cached.complete and now - cached.verified_at >= _RECEIPT_SWEEP_RECHECK_SECONDS)
-        ):
-            _RECEIPT_SWEEP_CACHE.pop(str(directory), None)
-            cached = None
-        # 目录mtime不反映原文件原地改写；只复用名字投影，逐页stat原文件，不缓存“全目录无事”。
-        skip = False
-        if skip:
-            _RECEIPT_SWEEP_CACHE.move_to_end(str(directory))
-        return stamp, skip
-
-
-# LLM: 复用原名字投影验证页连续性，外部游标跳跃/错误/缺失或非consumed立即清证；目录变化不发布完整门。
-# 函数用途: 跨多批累计真正连续覆盖的回执，只有整圈无待办时才开放O(1)空闲短路。
-def _record_receipt_sweep(paths: GatewayPaths, stamp: tuple | None, page: tuple[Path, ...], summary: dict) -> None:
-    directory, key = paths.root / "input_receipts", str(paths.root / "input_receipts")
-    with _RECEIPT_DIR_CACHE_LOCK:
-        projection = _RECEIPT_DIR_CACHE.get(key)
-    clean = (stamp is not None and summary["errors"] == 0 and summary["terminal_unknown_errors"] == 0
-             and summary["checked"] == summary["consumed"] == len(page))
-    if not clean or projection is None or _receipt_sweep_stamp(directory) != stamp:
-        with _RECEIPT_SWEEP_LOCK:
-            _RECEIPT_SWEEP_CACHE.pop(key, None)
-        return
-    if projection[0] != (stamp[0], stamp[1], stamp[3], stamp[4]):
-        return
-    names = projection[1]
-    total = len(names)
-    first = bisect_right(names, page[0].name) - 1 if page else 0
-    if any(path.name != names[(first + index) % total] for index, path in enumerate(page)):
-        return
-    with _RECEIPT_SWEEP_LOCK:
-        cached = _RECEIPT_SWEEP_CACHE.get(key)
-        seen = len(page)
-        if cached is not None and cached.stamp == stamp and not cached.complete and page and total:
-            if names[bisect_right(names, cached.last_name) % total] == page[0].name:
-                seen += cached.seen
-        _RECEIPT_SWEEP_CACHE[key] = _ReceiptSweep(
-            stamp, min(seen, total), page[-1].name if page else "", seen >= total, time.monotonic(),
-        )
-        _RECEIPT_SWEEP_CACHE.move_to_end(key)
-        while len(_RECEIPT_SWEEP_CACHE) > _RECEIPT_SWEEP_MAX_DIRECTORY_COUNT:
-            _RECEIPT_SWEEP_CACHE.popitem(last=False)
-
-
 # LLM: 逐条恢复仍经原owner和guidance权威；完整无待办目录可按代次短路，不能只凭首批consumed跳过后页。
 #   批尾finally仅提交一次最后完成扫描的位置；typed未知立即停止且不越过当前项（只提交前一项），
 #   批内异常优先于提交失败；双重错误保留原异常对象，并以异常链保留游标写入失败，不伪称落盘成功。
@@ -905,9 +822,6 @@ def reconcile_gateway_input_receipts(
         "last_terminal_unknown_error": {},
         "quarantined": 0,
     }
-    sweep_stamp, skip = _receipt_sweep_gate(paths)
-    if skip:
-        return summary
     last_path: Path | None = None
     pending_error: BaseException | None = None
     token = _receipt_consumer_ack.set(True)

@@ -410,17 +410,6 @@ class FeishuWsClient:
         """订阅了但无需处理的事件(如机器人贴 reaction 后飞书回的 created/deleted 通知)直接忽略,
         避免 lark 报 processor not found 刷屏日志。"""
 
-    # LLM: 卡片点击沿原即记去重合同；普通消息必须使用 claim/finish，不得再调用这个前置提交入口。
-    # 函数用途: 保留卡片回调的原有界去重，并用相同锁保护缓存。
-    def _is_duplicate(self, message_id: str) -> bool:
-        """按 message_id 去重(有界缓存 _dedup_cap):防飞书重投/重连重放同一消息导致重复回复
-        (移植参考实现的去重;原 my-agent base adapter 无去重,移植时漏了→真机踩出重复回复)。"""
-        with self._dedup_lock:
-            if message_id in self._seen_ids:
-                return True
-            self._remember_message(message_id)
-            return False
-
     # LLM: 原 SDK 仍独占分发与 ACK；观测只包装本次实例的元数据入口，不开启 DEBUG 或增加连接。
     # 函数用途: 注册原事件及卡片处理器，安装安全观测后启动唯一长连接。
     def start(self) -> None:
