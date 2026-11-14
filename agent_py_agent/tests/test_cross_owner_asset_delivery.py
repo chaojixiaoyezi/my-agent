@@ -1714,9 +1714,9 @@ def test_round2_json_replacement_preserves_unicode_escape_validity(sanitize, tmp
     assert b'abcd1234' not in output
 
 
-# LLM: 非字符串值或JSON语法本身若命中秘密，不能用未引号占位符破坏JSON后返回成功。
-# 函数用途: 验证无法安全替换的JSON原始位置失败关闭。
-@pytest.mark.parametrize('raw,secret', [(b'{"n":123}', '123'), (b'{"field":"data"}', ':')])
+# LLM: 布尔/空值字面量或JSON语法本身若命中秘密，不能用未引号占位符破坏JSON后返回成功；完整数值秘密在显式替换下转为完整字符串占位符。
+# 函数用途: 验证无法安全替换的JSON原始位置失败关闭，并验证已登记整数秘密的拒绝与安全替换边界。
+@pytest.mark.parametrize('raw,secret', [(b'{"field":true}', 'true'), (b'{"field":null}', 'null'), (b'{"field":"data"}', ':')])
 def test_round2_json_replacement_rejects_nonstring_secret(sanitize, tmp_path, raw, secret):
     from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
 
@@ -1724,6 +1724,21 @@ def test_round2_json_replacement_rejects_nonstring_secret(sanitize, tmp_path, ra
         sanitize({'payload.json': raw}, owner_home=tmp_path, extra_secrets=(secret,),
             allow_secret_placeholder_replace=True)
     assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+
+
+def test_round2_json_numeric_secret_rejects_default_and_replaces_to_valid_json(sanitize, tmp_path):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    raw = b'{"n":123}'
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({'config.json': raw}, owner_home=tmp_path, extra_secrets=('123',))
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    replaced = sanitize({'config.json': raw}, owner_home=tmp_path, extra_secrets=('123',),
+        allow_secret_placeholder_replace=True)['config.json']
+    assert json.loads(replaced) == {'n': '<REDACTED_SECRET>'}
+    assert b'123' not in replaced
 
 
 # LLM: 六个可选参数继续接受旧位置及命名调用，值对象必须严格拒绝未知或重复赋值；不修改管理员可信调用边界。
@@ -2346,3 +2361,121 @@ def test_delivery_explicitly_excluded_dependencies_do_not_change_bundle_digest(k
     second = kit.service.preview_bundle('local/main', 'workflow', 'flow', include_dependencies=False)
     assert first['bundle_sha256'] == second['bundle_sha256']
     assert first['closure_summary']['total_assets_count'] == 1
+
+
+@pytest.mark.parametrize('encoded', [b'{"n":35e-1}', b'{"n":3.50}', b'{"n":0.35e1}'])
+def test_equivalent_registered_numeric_value_must_not_be_delivered(kit, encoded):
+    import json
+
+    from agent_py_agent.agent.assets.datasource_store import DatasourceStore
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    ds = DatasourceStore(kit.main)
+    summary = ds.save_datasource(
+        {'datasource_id': 'numeric-source', 'kind': 'http', 'title': 'Numeric fixture'},
+        credential_values={'ratio': 3.5},
+    )
+    actual = ds.resolve_secret(summary['credential_ref'])['ratio']
+    assert type(actual) is float and type(json.loads(encoded)['n']) is float
+    assert json.loads(encoded)['n'] == actual
+    ScriptStore(kit.main).save_script(AssetDescriptor('numeric_copy', 'script', 'Numeric fixture'), 'print("ok")\n')
+    (kit.main / 'scripts/numeric_copy/config.json').write_bytes(encoded)
+    with pytest.raises(AssetDeliveryError) as exc:
+        kit.service.send_bundle('local/main', 'local/alice', 'script', 'numeric_copy')
+    assert exc.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert '3.5' not in str(exc.value.to_dict())
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+
+    sent = kit.service.send_bundle(
+        'local/main', 'local/alice', 'script', 'numeric_copy', allow_secret_placeholder_replace=True
+    )
+    accepted = kit.service.accept_delivery('local/alice', sent['delivery_id'])
+    assert accepted['status'] == 'accepted'
+    delivered = json.loads((kit.alice / 'scripts/numeric_copy/config.json').read_bytes())
+    assert delivered == {'n': '<REDACTED_SECRET>'}
+
+
+@pytest.mark.parametrize('encoded', [b'{"n":35e-1}', b'{"n":3.50}', b'{"n":0.35e1}'])
+def test_equivalent_registered_numeric_value_replacement(sanitize, tmp_path, encoded):
+    import json
+
+    result = sanitize(
+        {'config.json': encoded},
+        owner_home=tmp_path,
+        allow_secret_placeholder_replace=True,
+        extra_secrets=['3.5'],
+    )
+    assert json.loads(result['config.json'])['n'] == '<REDACTED_SECRET>'
+
+
+def test_unregistered_numbers_and_booleans_are_preserved(sanitize, tmp_path):
+    raw = b'{"n":42,"v":4.50,"enabled":true,"off":false,"other":null}'
+    result = sanitize({'config.json': raw}, owner_home=tmp_path, extra_secrets=['3.5'])
+    assert result['config.json'] == raw
+
+
+def test_registered_numeric_value_root_array_duplicates_placeholders_and_binary(kit, sanitize, tmp_path):
+    import json
+
+    from agent_py_agent.agent.assets.datasource_store import DatasourceStore
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    for raw_json, expected in (
+        (b'35e-1', '<REDACTED_SECRET>'),
+        (b'[1, 3.50, true, false, null]', [1, '<REDACTED_SECRET>', True, False, None]),
+    ):
+        with pytest.raises(AssetDeliveryError) as exc:
+            sanitize({'scalar.json': raw_json}, owner_home=tmp_path, extra_secrets=['3.5'])
+        assert exc.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+        replaced = sanitize(
+            {'scalar.json': raw_json},
+            owner_home=tmp_path,
+            allow_secret_placeholder_replace=True,
+            extra_secrets=['3.5'],
+        )
+        assert json.loads(replaced['scalar.json']) == expected
+
+    ds = DatasourceStore(kit.main)
+    ds.save_datasource(
+        {'datasource_id': 'numeric-controls', 'kind': 'http', 'title': 'Numeric controls'},
+        credential_values={'ratio': 3.5},
+    )
+    ScriptStore(kit.main).save_script(AssetDescriptor('numeric_ctrl', 'script', 'Numeric controls'), 'print("ok")\n')
+    raw_doc = (
+        b'{"n":35e-1,"safe":42,"v":4.50,"n":3.50,'
+        b'"tpl":"${MY_SECRET}","redacted":"<REDACTED_SECRET>","ok":true,"no":false,"none":null}'
+    )
+    raw_bin = bytes([0, 255, 128, 254, 10])
+    (kit.main / 'scripts/numeric_ctrl/config.json').write_bytes(raw_doc)
+    (kit.main / 'scripts/numeric_ctrl/blob.bin').write_bytes(raw_bin)
+    with pytest.raises(AssetDeliveryError) as exc:
+        kit.service.send_bundle('local/main', 'local/alice', 'script', 'numeric_ctrl')
+    assert exc.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+
+    sent = kit.service.send_bundle(
+        'local/main', 'local/alice', 'script', 'numeric_ctrl', allow_secret_placeholder_replace=True
+    )
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    delivered_pairs = json.loads((kit.alice / 'scripts/numeric_ctrl/config.json').read_bytes(), object_pairs_hook=list)
+    assert delivered_pairs == [
+        ('n', '<REDACTED_SECRET>'),
+        ('safe', 42),
+        ('v', 4.5),
+        ('n', '<REDACTED_SECRET>'),
+        ('tpl', '${MY_SECRET}'),
+        ('redacted', '<REDACTED_SECRET>'),
+        ('ok', True),
+        ('no', False),
+        ('none', None),
+    ]
+    assert (kit.alice / 'scripts/numeric_ctrl/blob.bin').read_bytes() == raw_bin
+
+    ScriptStore(kit.main).save_script(AssetDescriptor('numeric_safe', 'script', 'Numeric safe'), 'print("ok")\n')
+    safe_doc = b'{"safe":42,"v":4.50,"tpl":"${MY_SECRET}","ok":true,"no":false,"none":null}'
+    (kit.main / 'scripts/numeric_safe/config.json').write_bytes(safe_doc)
+    (kit.main / 'scripts/numeric_safe/blob.bin').write_bytes(raw_bin)
+    safe_sent = kit.service.send_bundle('local/main', 'local/alice', 'script', 'numeric_safe')
+    assert kit.service.accept_delivery('local/alice', safe_sent['delivery_id'])['status'] == 'accepted'
+    assert (kit.alice / 'scripts/numeric_safe/config.json').read_bytes() == safe_doc
+    assert (kit.alice / 'scripts/numeric_safe/blob.bin').read_bytes() == raw_bin

@@ -420,8 +420,9 @@ def _shared_scan(text):
 
 # LLM: 仅接受已确认合法的JSON；平坦词法栈保留容器敏感关联及重复键，解码判占位后只替换完整token，不重建字段。
 # 函数用途: 递归关联敏感键与其dict/list内字符串和数字值；短值和转义值同样拒绝，显式替换使用固定字面值。
-def _json_structure_scan(text, *, replace=False):
+def _json_structure_scan(text, *, replace=False, secrets=()):
     matches, pieces, cursor = [], [], 0
+    known_numeric = {value for value in secrets if _NUMERIC_SECRET.fullmatch(value)}
     # 每层保存继承敏感性和当前键敏感性；列表及根标量不凭空产生键关联。
     stack = [[False, False]]
     for token in _JSON_STRUCTURE_TOKEN.finditer(text):
@@ -437,10 +438,15 @@ def _json_structure_scan(text, *, replace=False):
             stack[-1][1] = False
             continue
         if not raw.startswith('"'):
-            # 检查JSON对象{}或数组[]内继承自敏感键的未加引号数字标量；布尔/null作为非秘密保留，容器外文本交YAML扫描器处理。
+            # 检查JSON对象{}、数组[]或根标量内继承自敏感键或已登记数值的未加引号数字标量；布尔/null作为非秘密保留，容器外文本交YAML扫描器处理。
             inherited_sensitive = len(stack) > 1 and any(stack[-1])
+            known_numeric_value = bool(
+                known_numeric
+                and _NUMERIC_SECRET.fullmatch(raw)
+                and (raw in known_numeric or str(json.loads(raw)) in known_numeric)
+            )
             stack[-1][1] = False
-            if inherited_sensitive and not _placeholder(raw, unquoted=True):
+            if (inherited_sensitive or known_numeric_value) and not _placeholder(raw, unquoted=True):
                 matches.append((*token.span(), 'json_sensitive_key'))
                 if not replace:
                     return matches, text
@@ -541,7 +547,7 @@ def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace
             except (ValueError, RecursionError):
                 pass
         if valid_json:
-            structured, text = _json_structure_scan(text, replace=allow_secret_placeholder_replace)
+            structured, text = _json_structure_scan(text, replace=allow_secret_placeholder_replace, secrets=secrets)
         yaml_findings = set()
         if not valid_json:
             text = _scan_and_redact_yaml_structure(text, findings=yaml_findings, redact=allow_secret_placeholder_replace)
