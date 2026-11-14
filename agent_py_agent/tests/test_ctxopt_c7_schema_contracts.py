@@ -32,12 +32,20 @@ from agent_py_agent.tests.ctxopt_c7_contract_snapshot import (
 # 7101c9fa2 有意收窄：create_subagents 顶层只留 items/batch_summary（items 必填且非空、每项 goal 非空），说明改为
 # “一项或多项统一用items”；task_progress 的 action 枚举去掉 create。以下四项按该提交后的当前生产 spec 重算，其余沿用冻结快照。
 # WS-F2 显式扩展：request_credentials 支持 access_scope 范围（owner/group/task），按生产 spec 同步 hash。
+# Workstream B 显式补齐嵌套参数中文 description（结构、类型、枚举与必填零删改），按当前生产 spec 同步 hash。
 _SCHEMA_HASHES = {
     **_SCHEMA_HASHES,
-    'create_subagents': 'b46bdf6b78891e0cfc04917a0bb9b4f56404ce1096a3ebbe44a63acdcb912ffa',
-    'create_subagents_media': 'e9e6d79ac58295060893e28372d8de6af9f304f873ec5d6fac4c28395519ed20',
-    'task_progress': '28d00d48e4519db2f9fe8a0275104ce7062ebf84cce7af8145ea3fd921adb050',
-    'request_credentials': '392914c0437b5820c12c53c02c01fac68adf0524b64cb316f174de91b71a37d1',
+    'create_subagents': 'ef1b9cf22c2f295fd45e0028a813a477a322410abdc9df9c4478a93918e5f5da',
+    'create_subagents_media': 'ce6289c046eeb5401fdcc3e4e2a6e65ca5663f9e0d7b34468c5e8f633c26800b',
+    'task_progress': 'c86032c3c99ec9d562d658b4b0e9503ee96974f4b6d98eaf309a2218c719b0d1',
+    'remember': '488fdb62959ad875e0914b65e1c7f5a6308dceb27abf4ffc4bcf157ace695ffe',
+    'request_credentials': 'b4c3ac4ba4a2e721d6516b3ce4ace0d07d13fb6b8858d61ce9bae9acf2609337',
+    'update_goal': '390f15d94028bcccbf55e1a7532acc3ad803090bcdd2081f3ba5f259150ed680',
+    'package_build': '0272c8997985e250c437530980369f6621b3c412b25e99ed688d46e40c7a209a',
+    'watch_ordinary': 'f5f02b0fd146c611935d2c72edc96bd1af3863327623acf009b81603718daf86',
+    'watch_audit_prepare': 'ca7e33908e3afe293dd5a9523d47dc5fb429db5e142cb4658a2e39df557ecce0',
+    'watch_audit_binding': '5779ff5c662606744de469600a72dfba5033d77adc6663655e1b5307830dbedd',
+    'watch_audit_source': '10ac093a7326198d63ae88cb625c9b8802e4709693f990c2ba79f2e0ce00c4b6',
 }
 _DESCRIPTION_HASHES = {
     **_DESCRIPTION_HASHES,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 - create_subagents：7101c9fa2 起顶层只剩 items/batch_summary，派工字段只在 items[] 里出现并各带完整说明（不再写
   “同顶层 X。”）；本项专属的 goal/description 照旧，input_media_refs（第 14 条）只在开关打开时出现。
-- remember：batch 单项的 scope 只写“同顶层 scope。”，结构与顶层 scope 完全一致。
+- remember：batch 单项外层 scope 只写“同顶层 scope。”，内部子字段说明与结构从顶层唯一来源同源继承。
 - user_config：points.<点>.profile_id 只写“同 profile_id”，changes.profile_id 保留完整说明。
 """
 
@@ -65,7 +65,8 @@ def test_remember_batch_scope_is_the_top_level_scope_without_repeated_text():
     top_scope = schema["properties"]["scope"]
     batch_scope = schema["properties"]["operations"]["items"]["properties"]["scope"]
     assert batch_scope["description"] == "同顶层 scope。"
-    assert all("description" not in shape for shape in batch_scope["properties"].values())
+    assert batch_scope["properties"] == top_scope["properties"]
+    assert all(bool(shape.get("description")) for shape in batch_scope["properties"].values())
     assert _without_descriptions(batch_scope) == _without_descriptions(top_scope)
     assert "personal/personal" in top_scope["description"]
     assert top_scope["properties"]["scope_key"]["description"]

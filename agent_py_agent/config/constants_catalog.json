@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1509,
+  "count": 1510,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -10114,6 +10114,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "tool_search(action=catalog) 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。"
+    },
+    {
+      "name": "_NARROWED_MODEL_SPEC_MAX",
+      "file": "agent_py_agent/agent/tooling/registry.py",
+      "value": 128,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "_TOOL_PROJECTION_MAX_SNAPSHOTS",

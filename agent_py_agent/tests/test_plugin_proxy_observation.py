@@ -120,7 +120,16 @@ def test_sent_actions_record_the_observation_action_fact_whatever_the_outcome():
     client.result = {"content": "{}", "structuredContent": {"my_agent_observation_error": {"code": "stale"}}, "isError": True}
     rejected = _proxy(client, "click").execute({"candidate_id": candidates[0]["candidate_id"], "__run_scope": RUN_SCOPE})
     assert not rejected.ok and rejected.reported_error_code == OBSERVATION_STALE
-    assert rejected.result_envelope == {"observation_action": fact, "observation_rejected": OBSERVATION_STALE}, "发送过就算碰过，提供方拒绝也记"
+    assert rejected.result_envelope == {
+        "observation_action": fact,
+        "observation_rejected": OBSERVATION_STALE,
+        "error_details": {
+            "stage": "remote_is_error",
+            "reported_cause": "MCP_REMOTE_ERROR",
+            "resolved_effect": "mutating",
+            "side_effect_state": "failed",
+        },
+    }, "发送过就算碰过，提供方拒绝也记"
     before = len(client.sent)
     unknown = _proxy(client, "click").execute({"candidate_id": "cand-0123456789abcdef", "__run_scope": RUN_SCOPE})
     assert "observation_action" not in unknown.result_envelope and len(client.sent) == before, "没发送就不算碰过"
@@ -159,11 +168,11 @@ def test_plugin_side_stale_or_not_found_rejection_is_lifted_to_structured_codes(
         assert outcome.result_envelope["observation_rejected"] == host_code
     client.result = {"content": json.dumps({"code": "TIMEOUT", "message": "超时"}), "isError": True}
     other = _proxy(client, "click").execute({"candidate_id": candidates[0]["candidate_id"], "__run_scope": RUN_SCOPE})
-    assert (other.error_code, other.reported_error_code) == ("TOOL_EXECUTION_FAILED", "TOOL_EXECUTION_FAILED"), "其它插件错误沿原 MCP 映射"
+    assert (other.error_code, other.reported_error_code) == ("TOOL_RUNTIME_ERROR", "MCP_REMOTE_ERROR"), "其它插件错误沿原 MCP 映射"
     assert "observation_rejected" not in other.result_envelope and other.effect_outcome == "failed"
     client.result = {"content": json.dumps({"code": "OBSERVATION_STALE"}), "structuredContent": {"my_agent_observation_error": {"code": "stale"}}, "isError": True}
     plain = _proxy(client, "click").execute({"selector": "#go", "__run_scope": RUN_SCOPE})
-    assert plain.reported_error_code == "TOOL_EXECUTION_FAILED" and "observation_rejected" not in plain.result_envelope, "没走候选路径的错误不提升"
+    assert (plain.error_code, plain.reported_error_code) == ("TOOL_RUNTIME_ERROR", "MCP_REMOTE_ERROR") and "observation_rejected" not in plain.result_envelope, "没走候选路径的错误不提升"
 
 
 # 类用途: 假插件客户端；激活是否有效和连接是否已关分别可控，记录是否真的发出了业务调用。

@@ -231,7 +231,7 @@ def test_action_tool_rechecks_candidate_before_sending_and_lifts_provider_reject
     lifted = click.execute({"candidate_id": candidates[1]["candidate_id"], "__run_scope": RUN_SCOPE})
     assert (lifted.reported_error_code, lifted.effect_outcome, lifted.result_envelope["observation_rejected"]) == (OBSERVATION_STALE, "not_started", OBSERVATION_STALE)
     plain = click.execute({"selector": "#go", "__run_scope": RUN_SCOPE})
-    assert plain.reported_error_code == "TOOL_EXECUTION_FAILED" and client.sent[-1]["meta"] is None, "没填候选沿原路径，不附 _meta、不提升"
+    assert plain.reported_error_code == "MCP_REMOTE_ERROR" and client.sent[-1]["meta"] is None, "没填候选沿原路径，不附 _meta、不提升"
 
 
 def test_real_transport_mints_a_host_connection_id_independent_of_process_birth():

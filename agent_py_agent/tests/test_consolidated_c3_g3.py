@@ -182,7 +182,12 @@ def test_business_error_and_sent_unknown_are_not_relabelled_not_started(tmp_path
     try:
         monkeypatch.setattr(client, "call_tool", lambda *args, **kwargs: {"content": "business rejected", "isError": True})
         failed = client.pack_tools[0].execute({})
-        assert not failed.ok and failed.error_code == "TOOL_EXECUTION_FAILED" and failed.effect_outcome == "failed"
+        assert (
+            not failed.ok
+            and failed.error_code == "TOOL_RUNTIME_ERROR"
+            and failed.reported_error_code == "MCP_REMOTE_ERROR"
+            and failed.effect_outcome == "failed"
+        )
         def unknown(*args, **kwargs):
             raise MCPError("sent timeout", code="MCP_TIMEOUT", effect_outcome="unknown")
         monkeypatch.setattr(client, "call_tool", unknown)
