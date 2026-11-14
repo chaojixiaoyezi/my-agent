@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 
 import agent_py_agent.agent.memory_archive.compact_apply as compact_apply_module
+from agent_py_agent.agent.memory_archive import RawMemoryEvent, append_raw_event
 from agent_py_agent.agent.memory_archive.compact import (
     MemoryCompactPlanOptions,
     build_memory_compact_plan,
@@ -34,10 +35,12 @@ from agent_py_agent.agent.memory_archive.compact_suggest import (
 )
 from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests.memory_compact_support import (
+    append_compact_token_usage,
     assert_apply_ids_match,
     assert_apply_preserved_sources,
     assert_schema_v2,
     check_names,
+    compact_raw_event,
     failed_self_check,
     load_apply_artifacts,
     owner_home,
@@ -550,3 +553,177 @@ def test_canonical_generation_does_not_rewrite_historical_v1(tmp_path):
     assert resumed["ok"] is True
     assert path.read_bytes() == before
     assert json.loads(before)["actor"] == "memory-compact"
+
+
+def _bulk_raw_event(index: int) -> RawMemoryEvent:
+    return RawMemoryEvent(
+        event_id=f"raw-bulk-{index:03d}",
+        session_id="session-bulk",
+        request_id="request-bulk",
+        run_id=f"run-bulk-{index:03d}",
+        task_id="task-bulk",
+        speaker="user",
+        target="assistant",
+        action="message",
+        status="ok",
+        content_preview=f"bulk compact record {index}",
+        source="run",
+        archive_level=2,
+        created_at=f"2026-05-06T08:{index // 60:02d}:{index % 60:02d}+00:00",
+    )
+
+
+def test_memory_compact_default_covers_all_matching_records(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    for index in range(60):
+        append_raw_event(root, _bulk_raw_event(index))
+
+    plan = build_memory_compact_plan(
+        root,
+        MemoryCompactPlanOptions(session_id="session-bulk", request_id="request-bulk"),
+    )
+
+    assert plan["scope"]["limit"] == 0
+    assert plan["archive"]["record_count"] == 60
+
+
+def test_memory_fact_write_closes_compact_missing_fields(tmp_path: Path, capsys) -> None:
+    config_path = write_config(tmp_path)
+    root = owner_home(config_path)
+    write_compact_fixture(root)
+    first_apply = _apply_scoped_compact(root)
+    parser = build_parser()
+
+    args = parser.parse_args([
+        "--config", str(config_path), "memory-fact-write",
+        "--from-compact", first_apply["apply_id"],
+        "--acceptance", "compact resume can continue after approved facts",
+        "--constraint", "do not touch user config",
+        "--latest-test", "python3 -m pytest -q agent_py_agent/tests/test_memory_compact.py",
+        "--json",
+    ])
+    code = args.func(args)
+    payload = json.loads(capsys.readouterr().out)
+    second_apply = _apply_scoped_compact(root)
+    resume = build_memory_compact_resume(
+        root,
+        MemoryCompactResumeOptions(apply_ref=second_apply["apply_id"], resume_mode="auto"),
+    )
+    resume_args = parser.parse_args([
+        "--config", str(config_path), "memory-resume",
+        "--from-compact", second_apply["apply_id"],
+        "--compact-resume-mode", "auto",
+        "--json",
+    ])
+    resume_code = resume_args.func(resume_args)
+    resume_payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["fact_id"] == "request-compact"
+    assert Path(payload["fact_source_path"], "task.json").exists()
+    assert Path(payload["fact_source_path"]).is_relative_to(root)
+    assert not (workspace(config_path) / "memory_archive" / "runtime_facts" / "request-compact").exists()
+    assert second_apply["work_state_snapshot"]["missing_fields"] == []
+    assert resume["action_guard"]["status"] == "allow_automated_continue"
+    assert resume_code == 0
+    assert resume_payload["workspace_root"] == str(root)
+    assert resume_payload["action_guard"]["status"] == "allow_automated_continue"
+
+
+def _apply_scoped_compact(root: Path) -> dict:
+    return apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+
+def test_apply_memory_compact_records_compaction_gate(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+
+    result = _apply_compact(root)
+
+    gate = result["compaction_gate"]
+    assert gate["pre"]["gate"] == "compaction_gate"
+    assert gate["pre"]["allowed"] is True
+    assert gate["state_snapshot"]["recovery_packet"]
+    assert gate["state_snapshot"]["artifact_refs"]
+
+
+def test_memory_compact_resume_checks_compaction_gate_state_loss(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+
+    result = _apply_compact(root)
+    work_state_path = Path(result["refs"]["work_state_snapshot"])
+    work_state = json.loads(work_state_path.read_text(encoding="utf-8"))
+    work_state.pop("restore_refs")
+    work_state_path.write_text(json.dumps(work_state, ensure_ascii=False), encoding="utf-8")
+
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=result["apply_id"]))
+    checks = {item["name"]: item for item in resume["consistency_report"]["checks"]}
+    assert checks["compaction_gate_ok"]["ok"] is False
+    assert resume["ok"] is False
+
+
+def _apply_compact(root: Path) -> dict:
+    return apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+
+
+def test_memory_compact_work_state_filters_shared_archive_files_by_scope(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_scoped_and_leaking_archives(root)
+    _write_scoped_and_leaking_fact_sources(root)
+
+    result = apply_memory_compact(root, MemoryCompactApplyOptions(_scoped_plan_options()))
+
+    assert result["work_state_snapshot"]["acceptance"]["items"] == ["scoped acceptance"]
+
+
+def _scoped_plan_options() -> MemoryCompactPlanOptions:
+    return MemoryCompactPlanOptions(
+        session_id="session-compact",
+        request_id="request-compact",
+        run_id="run-compact",
+        task_id="run-compact",
+    )
+
+
+def _write_scoped_and_leaking_archives(root: Path) -> None:
+    append_raw_event(root, compact_raw_event())
+    append_raw_event(root, _leaking_raw_event())
+    append_compact_token_usage(root)
+
+
+def _leaking_raw_event() -> RawMemoryEvent:
+    return RawMemoryEvent(
+        event_id="raw-leak",
+        session_id="session-leak",
+        request_id="request-leak",
+        run_id="run-leak",
+        task_id="run-leak",
+        speaker="user",
+        target="assistant",
+        action="message",
+        status="ok",
+        content_preview="unrelated task should not leak",
+        source="run",
+        archive_level=2,
+        created_at="2026-05-06T08:03:00+00:00",
+    )
+
+
+def _write_scoped_and_leaking_fact_sources(root: Path) -> None:
+    good_dir = root / "subagents" / "run-compact"
+    leak_dir = root / "subagents" / "run-leak"
+    good_dir.mkdir(parents=True)
+    leak_dir.mkdir(parents=True)
+    (good_dir / "ACCEPTANCE.md").write_text("- scoped acceptance\n", encoding="utf-8")
+    (leak_dir / "ACCEPTANCE.md").write_text("- leaked acceptance\n", encoding="utf-8")

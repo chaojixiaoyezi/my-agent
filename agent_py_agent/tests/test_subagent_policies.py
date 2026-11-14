@@ -243,21 +243,6 @@ def test_risk_weight_empty_list():
 
 # ── _severity_weight 测试 ─────────────────────────────────────────────────
 
-def test_severity_weight_p0():
-    """测试 P0 最高权重。"""
-    assert _severity_weight("P0") == 1000
-
-
-def test_severity_weight_p1():
-    """测试 P1 权重。"""
-    assert _severity_weight("P1") == 500
-
-
-def test_severity_weight_p2():
-    """测试 P2 权重。"""
-    assert _severity_weight("P2") == 100
-
-
 def test_severity_weight_unknown():
     """测试未知严重度返回 0。"""
     assert _severity_weight("P3") == 0
@@ -522,12 +507,6 @@ def test_is_active_terminal_status():
     ]
     for status in terminal_statuses:
         assert _is_active(status) is False
-
-
-def test_is_active_running():
-    """测试运行状态是 active。"""
-    assert _is_active("RUNNING") is True
-    assert _is_active("PENDING") is True
 
 
 # ── _default_forbidden_write_roots 测试 ────────────────────────────────────

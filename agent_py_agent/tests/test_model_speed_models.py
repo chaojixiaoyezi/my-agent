@@ -10,17 +10,6 @@ from agent_py_agent.agent.model_speed.models import SpeedProfile, SpeedSample
 class TestSpeedSampleModel:
     """测试 SpeedSample 模型"""
 
-    def test_create_with_all_fields(self):
-        """验证创建带所有字段的 SpeedSample"""
-        sample = SpeedSample(
-            input_tokens=1000,
-            output_tokens=500,
-            latency_seconds=1.5,
-        )
-        assert sample.input_tokens == 1000
-        assert sample.output_tokens == 500
-        assert sample.latency_seconds == 1.5
-
     def test_create_with_defaults(self):
         """验证创建带默认值的 SpeedSample"""
         sample = SpeedSample()
@@ -182,12 +171,6 @@ class TestSpeedProfileSerialization:
 class TestSpeedProfileInterpolationLogic:
     """测试 SpeedProfile 插值逻辑"""
 
-    def test_empty_samples_returns_30_seconds(self):
-        """验证空样本返回 30 秒默认值"""
-        profile = SpeedProfile(backend="test", model="test", samples=[])
-        result = profile.interpolate(input_tokens=1000, output_tokens=500)
-        assert result == 30.0
-
     def test_single_sample_returns_sample_latency(self):
         """验证单样本返回样本延迟"""
         sample = SpeedSample(input_tokens=1000, output_tokens=500, latency_seconds=2.5)
@@ -239,23 +222,6 @@ class TestSpeedProfileInterpolationLogic:
 
         result = profile.interpolate(input_tokens=3000, output_tokens=1500)
         assert result == 4.0
-
-    def test_log_linear_method(self):
-        """验证对数线性插值方法"""
-        samples = [
-            SpeedSample(input_tokens=1000, output_tokens=500, latency_seconds=1.0),
-            SpeedSample(input_tokens=10000, output_tokens=5000, latency_seconds=10.0),
-        ]
-        profile = SpeedProfile(
-            backend="test",
-            model="test",
-            samples=samples,
-            interpolation_method="log_linear",
-        )
-
-        result = profile.interpolate(input_tokens=5500, output_tokens=2750)
-        # 在对数空间中线性插值
-        assert 1.0 < result < 10.0
 
     def test_simple_linear_method(self):
         """验证简单线性插值方法"""

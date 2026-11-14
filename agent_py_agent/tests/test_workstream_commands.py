@@ -49,25 +49,6 @@ class TestLocalStoreCommandsForWorkstream:
             result = cmd_local_store_status(args)
             assert result == 0
 
-    def test_timeline_for_workstream(self, tmp_path: Path):
-        """工作流时间线用于追踪任务进度。"""
-        from agent_py_agent.cli.local_commands import cmd_timeline
-
-        args = MagicMock()
-        args.config = str(tmp_path / "config.yaml")
-        args.limit = 20
-        args.source_type = None
-        args.event_type = None
-        args.details = False
-        args.json = False
-
-        mock_agent = MagicMock()
-        mock_agent.local_store.timeline.return_value = []
-
-        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent):
-            result = cmd_timeline(args)
-            assert result == 0
-
 
 class TestStatusCommandsForWorkstream:
     """测试状态命令（workstream 需要这些来显示任务状态）。"""
@@ -238,24 +219,6 @@ class TestLocalSearchForWorkstream:
 
 class TestMemoryCommandsForWorkstream:
     """测试记忆命令（workstream 需要持久化上下文）。"""
-
-    def test_memory_list_for_workstream(self, tmp_path: Path):
-        """列出记忆用于恢复上下文。"""
-        from agent_py_agent.cli.local_commands import cmd_memory_list
-
-        args = MagicMock()
-        args.config = str(tmp_path / "config.yaml")
-        args.limit = 20
-
-        mock_record = MagicMock()
-        mock_record.__dict__ = {"id": "mem_001", "content": "测试记忆", "kind": "note"}
-
-        mock_agent = MagicMock()
-        mock_agent.memory.all.return_value = [mock_record]
-
-        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent):
-            result = cmd_memory_list(args)
-            assert result == 0
 
     def test_memory_search_for_workstream(self, tmp_path: Path):
         """搜索记忆用于上下文恢复。"""

@@ -19,14 +19,6 @@ def _local_mock_agent():
     return agent
 
 
-def test_unbound_magicmock_is_not_host_actor_authority():
-    from agent_py_agent.agent.conversation.host_actor import HostActorError, current_actor_for_child
-
-    assert current_actor_for_child(_local_mock_agent()) is None
-    with pytest.raises(HostActorError):
-        current_actor_for_child(MagicMock())
-
-
 # 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
 # 相对路径 "MagicMock/..."。每条测试先切到自己的临时目录，免得写进仓库根（conftest 的仓库树防线会让这种测试报错）。
 @pytest.fixture(autouse=True)

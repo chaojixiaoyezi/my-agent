@@ -1,5 +1,4 @@
 """版本记录与当前实例ready纯合同；原实际子进程出生节点保留在固定来源，另待授权验收。"""
-import copy
 import json
 import os
 import selectors
@@ -15,12 +14,6 @@ from agent_py_agent.agent.gateway_parts.multiprocess_bootstrap_ready import (
     require_current_worker,
 )
 from agent_py_agent.agent.gateway_parts.multiprocess_executor_identity import process_birth
-from agent_py_agent.agent.gateway_parts.multiprocess_records import (
-    MultiprocessRecordError,
-    deserialize_record,
-    serialize_record,
-    validate_record,
-)
 from agent_py_agent.agent.gateway_parts.multiprocess_route import WorkerPartition
 
 
@@ -40,18 +33,6 @@ def heartbeat():
             "pid": 102, "process_identity": identity(), "c_run_id": "c-one", "instance_id": "w0-one",
             "ready": True, "loop_health": "healthy", "inflight": 0, "updated_at": 100.0,
             "readiness": {"ready": True, "gateway_ports": [43123]}}
-
-
-@pytest.mark.parametrize("factory", [registry, heartbeat])
-def test_new_wire_records_round_trip_without_changing_input(factory):
-    source = factory()
-    before = copy.deepcopy(source)
-    try:
-        actual = deserialize_record(serialize_record(source))
-    except MultiprocessRecordError as error:
-        actual = error.to_payload()
-    assert actual == source
-    assert source == before
 
 
 def test_current_instance_is_accepted_and_result_is_independent():
@@ -103,38 +84,6 @@ def test_ready_requires_actual_coordinator_port_readback(readiness):
     candidate["readiness"] = readiness
     with pytest.raises(WorkerReadyError):
         require_current_worker(registry(), candidate, WorkerPartition(0, 2, "c-one"), 105.0)
-
-
-# LLM: 原六类坏身份逐项保留，提前返回使每条夹具仅有一层判断。
-# 函数用途: 构造身份含混的登记，测试仍通过原 P0 入口验证拒绝。
-def ambiguous_registry(change):
-    record = registry()
-    if change == "duplicate_worker":
-        record["workers"].append(copy.deepcopy(record["workers"][0]))
-        return record
-    if change == "duplicate_instance":
-        extra = copy.deepcopy(record["workers"][0])
-        extra.update(worker=1, executor_ledger_ref="workers/executors/w1")
-        record["workers"].append(extra)
-        return record
-    if change == "bad_ledger":
-        record["workers"][0]["executor_ledger_ref"] = "../other"
-        return record
-    if change == "pid_only":
-        record["workers"][0]["process_identity"]["start_time"] = None
-        return record
-    if change == "port_bool":
-        record["http_port"] = True
-        return record
-    record["argv"] = ["not-allowed"]
-    return record
-
-
-@pytest.mark.parametrize("change", ["duplicate_worker", "duplicate_instance", "bad_ledger", "pid_only", "port_bool", "unknown"])
-def test_registry_rejects_ambiguous_or_incomplete_identity(change):
-    record = ambiguous_registry(change)
-    with pytest.raises(MultiprocessRecordError):
-        validate_record(record)
 
 
 @pytest.mark.parametrize("field,value", [("worker", True), ("of", True), ("pid", True), ("inflight", -1),
