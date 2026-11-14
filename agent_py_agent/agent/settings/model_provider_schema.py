@@ -10,7 +10,6 @@ from uuid import UUID
 
 from ..backends.provider_headers import validate_headers, validate_session_header
 from ..backends.reasoning_control import normalize_reasoning_control
-from ..backends.registry import registered_backend_names
 from ..backends.sampling import validate_top_p
 from ..backends.structured_output_mode import JSON_OBJECT_BACKENDS, normalize_structured_output
 
@@ -192,11 +191,10 @@ def parse_temperature(value: object) -> float | None:
 # LLM: 模型引用不持有第二份 secret；decision 只走独立决策协议，不能进入生成适配器；同步用途隔离测试。
 #   目录读取也经本函数重校验，未登记的字段会被丢弃；可选用途标签、输入模态和思考控制方式在此登记，决策模型都不接受。
 # LLM: v6 容量 null 表示未声明，正整数保留真实小窗口；能力开关归当前档案，非法声明不静默丢弃。
-#   自定义协议只接受可信宿主进程内注册的名称，不执行构造器，也不放宽用途或凭据边界。
 # 函数用途: 检查模型协议、用途、容量、采样与能力；型号允许透传，决策模型不接受无效的生成参数。
 def validate_model(value: object) -> dict:
     if (not isinstance(value, dict) or not isinstance(value.get("model_backend"), str)
-            or (value["model_backend"] not in BACKENDS and value["model_backend"] not in registered_backend_names())):
+            or value["model_backend"] not in BACKENDS):
         raise ModelProfileError("请选择 OpenAI Chat、OpenAI Responses、Anthropic 或 TypeSafe 决策接口。")
     name = value.get("model_name")
     if not isinstance(name, str) or not name.strip() or len(name) > 4096 or any(ord(c) < 32 for c in name):

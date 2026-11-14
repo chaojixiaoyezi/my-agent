@@ -4,16 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_URL_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]*")
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
-
-
-def url_spans(text: str) -> list[tuple[int, int]]:
-    return [(match.start(), match.end()) for match in _URL_PATTERN.finditer(text)]
-
-
-def overlaps_spans(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
-    return any(start < span_end and end > span_start for span_start, span_end in spans)
 
 
 # LLM: 只在这个建议真的能纠正路径时才给：建议等于请求路径时它没有纠正价值，只会诱导调用方原地重试，

@@ -705,9 +705,6 @@ class CollaborationRequestStore(CollaborationCaseStore):
         report = read_jsonl_report(self._requests_path(case_id), context="collaboration.requests.read")
         return [CollaborationRequest.from_dict(row) for row in report.rows], report.load_errors
 
-    def _request_targets(self, required: tuple[str, ...], kwargs: dict[str, Any]) -> tuple[str, ...]:
-        return self._request_targets_report(required, kwargs).targets
-
     def _request_targets_report(
         self, required: tuple[str, ...], kwargs: dict[str, Any]
     ) -> _RequestTargetResolution:
@@ -902,10 +899,6 @@ class CollaborationPendingRequestStore(CollaborationRequestStatusStore):
         rows.sort(key=lambda item: (str(item.get("priority") or ""), float(item.get("created_at") or 0.0)))
         return (rows if limit <= 0 else rows[:limit]), load_errors
 
-    def _pending_request_rows_for_identities(self, identities: set[str]) -> list[dict[str, Any]]:
-        rows, _load_errors = self._pending_request_rows_for_identities_report(identities)
-        return rows
-
     # LLM: 正常查询在一个复用连接内按目标分页；只对版本变化的候选 case 精确恢复，不作全树回退。
     # 函数用途: 读取热投影，复核候选规范指纹，显式报告中断提交或未完成迁移。
     def _pending_request_rows_for_identities_report(
@@ -925,32 +918,6 @@ class CollaborationPendingRequestStore(CollaborationRequestStatusStore):
             raise RuntimeError("collaboration canonical candidates changed repeatedly")
         except Exception as exc:  # noqa: BLE001 索引错误不伪装健康空集，也不回退全树读取
             return [], [runtime_error_report(exc, context="collaboration.pending.index")]
-
-    def _pending_rows_for_case(self, case, identities: set[str]) -> list[dict[str, Any]]:
-        rows, _load_errors = self._pending_rows_for_case_report(case, identities)
-        return rows
-
-    def _pending_rows_for_case_report(
-        self, case, identities: set[str]
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        evidence, evidence_errors = self.case_evidence_report(case.case_id)
-        requests_results, request_errors = self.case_requests_report(case.case_id)
-        evidence_sources = evidence_sources_by_request(evidence, identity_keys=self.agent_identity_keys)
-        return [
-            pending_request_row(case, request)
-            for request in requests_results
-            if self._request_waits_for_identity(request, identities, evidence_sources)
-        ], [*evidence_errors, *request_errors]
-
-    def _request_waits_for_identity(
-        self, request: CollaborationRequest, identities: set[str], evidence_sources: dict[str, set[str]]
-    ) -> bool:
-        target_identity_keys = self.agent_identity_keys(request.target_agent_ids)
-        if not identities.intersection(target_identity_keys):
-            return False
-        if identities.intersection(evidence_sources.get(request.request_id, set())):
-            return False
-        return not (is_declined_request_status(request.status) or is_blocked_request_status(request.status))
 
 
 # ---------------------------------------------------------------------------

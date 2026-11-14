@@ -291,32 +291,6 @@ class SubAgentFailureAnalyzer:
         return self.suggest_splits(task)
 
 
-def adaptive_retry(
-    task: SubAgentTask,
-    analysis: FailureAnalysis,
-    max_split_depth: int = 2,
-) -> SubAgentTask | list[SubAgentTask]:
-    if not analysis.should_retry and not analysis.should_split:
-        return []
-
-    if analysis.should_split:
-        if task.depth >= max_split_depth:
-            return []
-        return split_task(task, analysis.split_suggestions)
-
-    if analysis.should_adjust_timeout and analysis.new_timeout_seconds:
-        task.attributes["dynamic_timeout_seconds"] = analysis.new_timeout_seconds
-        task.runner_attempts = 0
-        task.status = "PLANNING"
-        task.failure_type = ""
-        return [task]
-
-    task.runner_attempts = 0
-    task.status = "PLANNING"
-    task.failure_type = ""
-    return [task]
-
-
 def split_task(task: SubAgentTask, suggestions: list[str]) -> list[SubAgentTask]:
     subtasks = [
         _build_split_subtask(task, suggestions, index, suggestion)
@@ -367,22 +341,3 @@ def _mark_task_split(task: SubAgentTask, subtasks: list[SubAgentTask]) -> None:
     task.attributes["split_into"] = [subtask.id for subtask in subtasks]
     task.child_ids = [subtask.id for subtask in subtasks]
     task.updated_at = time.time()
-
-
-def should_auto_split(task: SubAgentTask, max_depth: int = 2) -> bool:
-    if task.depth >= max_depth:
-        return False
-    if len(task.plan) <= 3:
-        return False
-    return task.failure_type == FailureType.RUNNER_TIMEOUT.value and task.runner_attempts >= 2
-
-
-def estimate_split_count(task: SubAgentTask) -> int:
-    plan_length = len(task.plan)
-    if plan_length <= 3:
-        return 1
-    if plan_length <= 6:
-        return 2
-    if plan_length <= 10:
-        return 3
-    return max(3, plan_length // 4)

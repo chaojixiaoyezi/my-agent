@@ -31,16 +31,6 @@ from . import harvester as harvest
 from .watch_state import load_state, registry
 
 
-# LLM: 原冻结W/current execution/heldC/不可逆host都只选择更严来源请求路径，不能从缺current scope回落Count0或授执行权；原ControlPlane正数仍同源拒daemon。
-# 函数用途: 判断watch是否必须交原Gateway独立请求，默认只读原内存事实，不创建线程或账本。
-def requires_request_harvest(agent=None):
-    from ..gateway_parts.request_entry_admission import request_execution_required
-
-    control = getattr(agent, '_gateway_control_plane', None)
-    return (request_execution_required()
-            or control is not None and type(control.worker_count) is int and control.worker_count > 0)
-
-
 # LLM: 原source字段开放保留；只核身份、schema、有限机械数字及bool，不从prose/name/URL内容推工作类型。
 # 函数用途: 为C/W桥读取同一份原watch快照，坏字段不得变成可执行默认值。
 def validate_harvester_payload(payload, *, owner_id, watch_id):

@@ -170,7 +170,6 @@ class _HomeProviderConfigFields:
     # 仅向模型说明推荐的业务文件整理格式，不决定运行归档或文件权限。
     workspace_task_path_template: str = "tasks/{date}/{task_slug}"
     home_context_enabled: bool = True
-    thread_prompt_prefix_freeze_enabled: bool = True
     # 业务空间默认可用；显式关闭仍拒绝业务操作，开启不授予空间或插件权限。
     business_spaces_enabled: bool = field(default=True, kw_only=True)
     # 运行时快照投影默认开启；关闭恢复旧粗粒度文本，消费方须按单次请求冻结值。
@@ -274,10 +273,6 @@ class _ToolConfigFields:
     tool_catalog_deferred_categories: list[str] = field(
         default_factory=lambda: ["collaboration", "web", "vision", "meta", "mcp"]
     )
-    # 工具在自己规格里声明的“默认收起”（又大又少用的工具）是否生效；默认开（2026-10-02 用户授权、生产开启三天
-    # 无异常），前台回合不再每轮发它们的 Schema，目录末尾留“名字：一句用途”的索引，用到时 tool_search 一步加载；
-    # 关回 false 即恢复全量直出。显式 allowed_tools 的回合不受影响。
-    tool_default_deferral_enabled: bool = True
     # 打开后 tool_search/盲调补表不在缓存段内改原生工具表（换工具表会让整段提示缓存作废），新工具定义随工具结果给出、
     # 模型按名调用，下次 Compact 时并入原生工具表；默认关，验收通过后再改默认值。
     tool_discovery_cache_pin_enabled: bool = False
@@ -481,7 +476,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     local_store_path: str = ""
     local_store_files_dir: str = ""
     local_store_events_path: str = ""
-    local_store_fts_enabled: bool = True
     prompt_files: list[str] = field(default_factory=lambda: ["builtin:prompts/default.md"])
     # 额外可写根（沙箱写边界扩展）：任务 work/output 之外的目录也允许模型写入。
     # 会话运行时 对应 sandbox_workspace_write.writable_roots；测试/用户可配置共享工作区。
@@ -569,10 +563,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_processing_timeout_seconds: int = 900
     # 仅计 processing 租约失效的失败次数；服务重启续接不计，0 不限，副作用未知仍禁止盲目重放。
     gateway_request_max_attempts: int = 2
-    # 默认开启单次 Gateway 请求线程内有界 SQLite 复用；结束回收、及时提交不变，显式 False 可关闭。
-    sqlite_connection_reuse: bool = True
-    # 默认开启后台只读内容投影，实际领取与写入仍读取原权威；显式 False 可关闭投影优化。
-    background_tick_cheap_checks: bool = True
     # 后台主代理车道对无待办信号（无到期任务/唤醒/进展汇报/待处理观测）的空闲 owner 采用指数退避检查的最大间隔秒数（0=不退避）。
     background_idle_owner_max_backoff_seconds: float = 10.0
     # 前台用户主动发新消息时若存在上一轮中断遗留的 unknown 副作用操作，默认自动登记为待核实并放行本轮（注入结构化核实提示）；False 则保留手动 /recover 硬拦。

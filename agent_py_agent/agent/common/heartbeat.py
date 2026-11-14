@@ -17,7 +17,6 @@ import math
 import os
 import struct
 import sys
-import time
 
 # macOS 读单个进程信息的 sysctl 名字：CTL_KERN、KERN_PROC、KERN_PROC_PID（<sys/sysctl.h> 固定协议值），末位补 pid。
 _DARWIN_PROC_PID_MIB_PROTOCOL = (1, 14, 1)
@@ -202,18 +201,3 @@ def _posix_process_alive(pid: int, *, start_time: str | None = None) -> bool:
         return True
     current = process_start_time(pid)
     return current is None or current == start_time  # 取不到指纹时不否决(保守判活,避免误杀)
-
-
-def heartbeat_record(pid: int | None = None) -> dict:
-    """生成一条心跳记录:pid + 启动指纹 + 时间戳。常驻进程周期写出,看门狗读入判活。"""
-    pid = pid if pid is not None else os.getpid()
-    return {"pid": pid, "start_time": process_start_time(pid), "heartbeat_at": time.time()}
-
-
-def is_dead(record: dict, *, now: float, max_age: float) -> bool:
-    """据心跳记录判进程是否已死(看门狗据此决定重启):进程不在/指纹不符,或心跳超过 max_age 没刷新。"""
-    pid = int(record.get("pid", 0) or 0)
-    if not process_alive(pid, start_time=record.get("start_time")):
-        return True
-    last = float(record.get("heartbeat_at", 0) or 0)
-    return (now - last) > max_age

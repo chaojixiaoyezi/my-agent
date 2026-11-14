@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -108,16 +107,6 @@ def float_value(value: object, *, default: float = 0.0) -> float:
         return float(value if value is not None else default)
     except (TypeError, ValueError):
         return default
-
-
-def dict_value(value: object) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def dict_values(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list | tuple):
-        return []
-    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def _json_list(text: str) -> list[object] | None:

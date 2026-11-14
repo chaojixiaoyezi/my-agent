@@ -917,10 +917,6 @@ def task_progress_status_is_closed(value: object) -> bool:
     return normalize_task_progress_status(value) in TASK_PROGRESS_CLOSED_STATUSES
 
 
-def task_progress_status_is_done(value: object) -> bool:
-    return normalize_task_progress_status(value) == "done"
-
-
 def normalize_task_progress_status(value: object) -> str:
     text = str(value or "").strip()
     return text if task_progress_status_is_known(text) else TASK_PROGRESS_UNKNOWN_STATUS

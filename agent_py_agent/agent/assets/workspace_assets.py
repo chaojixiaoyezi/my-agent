@@ -138,15 +138,6 @@ def _store_view(root, kind):
     return view
 
 
-# LLM: 工作流外层仍用原定义schema，公共资产清单用平铺描述符；转换不产生权限或写盘。
-# 函数用途: 将平铺的工作流详情恢复为原WorkflowDefinition。
-def _workflow_definition(record):
-    from .workflow_store import WorkflowDefinition
-
-    return WorkflowDefinition.from_any({'descriptor': {key: value for key, value in record.items()
-        if key in _DESCRIPTOR_FIELDS}, 'steps': record['steps'], 'body_markdown': record.get('body_markdown', '')})
-
-
 # LLM: 来源事实由遍历根决定，覆盖任何正文伪造的作用域；scope_layer全局与source_scope内置分别展示。
 # 函数用途: 给一份独立资产字典标记实际来源。
 def _project(record, layer, workspace):

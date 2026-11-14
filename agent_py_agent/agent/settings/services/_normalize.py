@@ -349,7 +349,7 @@ _HOME_STRING_FIELDS = (
     "my_agent_owner_id", "workspace_task_path_template",
 )
 _HOME_RUNTIME_BOOL_FIELDS = (
-    "home_context_enabled", "run_task_workspace_enabled", "thread_prompt_prefix_freeze_enabled",
+    "home_context_enabled", "run_task_workspace_enabled",
     "business_spaces_enabled", "prompt_runtime_snapshots_enabled",
     # 来源开关同样走真实布尔归一，带引号false不能按非空字符串误开启本地或网络读取。
     "agents_source_enabled", "agents_source_network_enabled",
@@ -454,10 +454,9 @@ class UserFieldsService:
 # Runtime bool switches (was _normalize_operational_fields.py)
 # ---------------------------------------------------------------------------
 
-# 带引号的 "false" 必须转成真实布尔值，避免误开自学习、SQLite连接复用和后台廉价检查。
+# 带引号的 "false" 必须转成真实布尔值，避免误开自学习等运行时开关。
 _RUNTIME_BOOL_FIELDS = (
-    "auto_save_memory", "local_store_fts_enabled",
-    "sqlite_connection_reuse", "background_tick_cheap_checks",
+    "auto_save_memory",
     "enable_file_syntax_diagnostics", "decision_skip_records_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
     "enable_subagents", "enable_self_learning", "enable_self_map", "self_learning_include_background",
@@ -517,7 +516,6 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
             "shell_sandbox_boundary_facts",
             "stream_enabled",
             "tool_catalog_include_examples",
-            "tool_default_deferral_enabled",
             "tool_vector_search_enabled",
             "computer_use_enabled",
             "computer_use_observation_enabled",

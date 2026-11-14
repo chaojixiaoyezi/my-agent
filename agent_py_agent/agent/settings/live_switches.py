@@ -343,18 +343,3 @@ def _refresh_guard(config, binding, checked, *, force) -> set[str]:
         config.runtime_guard_policy = replacement
     binding.guard_applied.update(updates)
     return changed
-
-
-class LiveSwitches:
-    """按配置文件 stat 指纹热刷新布尔开关与自学习闭环策略字段。"""
-
-    KEYS = LIVE_SWITCH_KEYS
-    POLICY_KEYS = SELF_LEARNING_LIVE_POLICY_KEYS
-
-    @staticmethod
-    def register(config) -> None:
-        register_live_config(config)
-
-    @staticmethod
-    def refresh(config=None, *, path=None, force: bool = False) -> frozenset[str]:
-        return refresh_live_switches(config, path=path, force=force)

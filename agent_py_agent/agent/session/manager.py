@@ -141,9 +141,6 @@ class SessionManager:
         session_file = self._get_session_path(session_id)
         return session_file.exists()
 
-    def _load_session_for_user(self, session_dir: Path, user_id: str) -> Session | None:
-        session, _load_error = self._load_session_for_user_report(session_dir, user_id)
-        return session
 
     def _load_session_for_user_report(
         self,

@@ -91,9 +91,6 @@ my_agent_owner_id: "main"
 # - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
 # - run_task_workspace_enabled: 保存宿主运行记录到用户 runs/日期/不透明ID；普通聊天不建运行，记录不改变工具 cwd。
 home_context_enabled: true
-# 在线程内冻结系统提示里的 AGENTS/SOUL/USER 三份人格文件（目前不冻结其它提示来源）。
-# 期间的安全行变化放动态尾巴；已提交压缩或换模型后下一次准备刷新。关闭后恢复每次现读。
-thread_prompt_prefix_freeze_enabled: true
 # 业务空间默认可用；显式关闭仍拒绝业务操作，开启不授予空间或插件权限。
 business_spaces_enabled: true
 # OpenAI 兼容网关与诊断模型调用入口；默认关闭，不增加路由或模型用量，只允许用户显式启用。
@@ -147,8 +144,6 @@ local_store_files_dir: ""
 # 一般不需要改，只有你想把这份数据放到独立数据盘或指定目录时才需要设；留空则用运行目录下的默认位置。
 # （安全边界：只能由用户在配置文件里改，模型不能改）
 local_store_events_path: ""
-# 本地记忆库是否启用全文检索（FTS5）：关闭后相关记忆的关键词召回退化为慢速扫描。
-local_store_fts_enabled: true
 
 # 每轮请求最多带多少条相关记忆进入 prompt
 memory_top_k: 5
@@ -603,10 +598,6 @@ gateway_processing_timeout_seconds: 900
 # 一个请求失败后最多尝试几次（含第一次）。
 # 上游不稳定时可以调大，但重试也会消耗用量。
 gateway_request_max_attempts: 2
-# 单次 Gateway 请求线程内有界复用 SQLite 连接，结束回收；不延迟原事务提交。默认开启，可显式 false 关闭。
-sqlite_connection_reuse: true
-# 后台检查只缓存可重建内容投影，实际到期、领取和状态写入仍走原权威；默认开启，可显式 false 关闭。
-background_tick_cheap_checks: true
 # 后台主代理车道对没有任何待办信号的空闲 owner 采用指数退避检查的最大间隔秒数（0 表示不退避，每拍都查）。
 background_idle_owner_max_backoff_seconds: 10.0
 # 前台用户主动发新消息时，若上一轮异常中断留下未确认（unknown）的副作用操作，是否自动登记为待核实并继续本轮（同时提醒模型先核实外部结果）。设为 false 则恢复手动 /recover 阻塞。
@@ -1199,15 +1190,6 @@ tool_catalog_categories: []
 # orchestration 与 goal 不收起，直属代理和持久目标控制默认首次调用就可见，避免把计划误当作已建立目标。
 # 设为 [] 即恢复全部工具直出。
 tool_catalog_deferred_categories: ["collaboration", "web", "vision", "meta", "mcp"]
-
-# 按工具声明默认收起：有些工具又大又少用（如改配置、换模型、查审计、定时任务、Gateway 管理），它们在自己的规格里
-# 声明了“默认收起”和一句用途。打开后，前台回合不再每轮把这些工具的完整说明发给模型，只在工具目录末尾留
-# “名字：一句用途”的索引；模型用到时先用 tool_search 搜索，一步加载后即可调用。权限和可调用范围不变。
-# - 省下的是每轮请求的 token；用到这些工具的那一轮会多一次 tool_search。
-# - 显式 allowed_tools 的后台/子代理回合本来就全量直出，不受影响；tool_search 本身不可用时自动不收起。
-# - 默认 true（2026-10-02 用户授权“工具这一块按你的来，别影响工作”；生产开启三天无异常；再收一批零使用工具后
-#   每次调用约省 4.4K token 的工具说明）。关回 false 即恢复“全量直出”旧行为；修改后重启 Gateway 生效。
-tool_default_deferral_enabled: true
 
 # 工具检索不改缓存段内的原生工具表（缓存钉住）。工具定义位于提示最前部（DeepSeek 实测、Anthropic 文档的缓存顺序
 # 均为 tools → system → messages），中途用 tool_search 加载新工具会让整段提示缓存作废：2026-11-07 四窗口实测

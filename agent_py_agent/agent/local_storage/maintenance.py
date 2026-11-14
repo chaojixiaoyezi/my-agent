@@ -19,7 +19,6 @@ import re
 import shutil
 import sqlite3
 import stat
-import tempfile
 import time
 import uuid
 from contextlib import ExitStack, contextmanager, nullcontext
@@ -30,11 +29,7 @@ from pathlib import Path
 from types import EllipsisType
 from typing import TYPE_CHECKING, Any
 
-from ..common.json_io import (
-    _sync_parent_directory,
-    locked_json_path,
-    write_private_text_file_atomic_unlocked,
-)
+from ..common.json_io import _sync_parent_directory, locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_connection import sqlite_error_details
 from ..runtime_db.maintenance import execute_runtime_statement
@@ -45,7 +40,6 @@ if TYPE_CHECKING:
     from ..user_space.storage_lanes import StorageLaneRequest
 
 _EVENTS_PRUNE_PENDING_KEY = "events_prune_pending_ids"
-_DEFAULT_WRITE_ATOMIC_UNLOCKED = write_private_text_file_atomic_unlocked
 STEADY_STATE_EVENTS_KEEP_LAST = 20000
 STEADY_STATE_EVENTS_MAX_DELETE = 5000
 
@@ -301,10 +295,6 @@ class LocalStoreMaintenanceMixin:
         with _fts_rebuild_lock(self):
             return _fts_cleanup_locked(self, limits)
 
-    # LLM: 兼容入口共用持久状态机，不保留另一套清空active的重建实现。
-    # 函数用途: 转发旧coordinator重建调用。
-    def _rebuild_fts_coordinator(self):
-        return self.rebuild_fts()
 
     # LLM: 原无参同步入口一次调用合同保留；显式step每次调用，ContextVar只含纯预算。
     # 函数用途: 在写门外准备本批完整raw行及正文。
@@ -677,22 +667,6 @@ def _read_pending_event_ids(conn) -> list[str]:
     return list(dict.fromkeys(pending))
 
 
-# LLM: 只在已有写事务内更新固定metadata键；空账删除键，不碰schema/FTS及其它维护标记。
-# 函数用途: 将仍待擦除的事件ID数组保存到原库的恢复账本。
-def _write_pending_event_ids(conn, pending):
-    if pending:
-        conn.execute("INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                     (_EVENTS_PRUNE_PENDING_KEY, json.dumps(pending)))
-    else:
-        conn.execute("DELETE FROM metadata WHERE key=?", (_EVENTS_PRUNE_PENDING_KEY,))
-
-
-# LLM: max_delete已由公开入口归一为正数；小额旧账仍可合并，达到本批或5000阈值则先恢复不扩账。
-# 函数用途: 用同一只读判据限制预查与事务内的新删除批次准入。
-def _event_prune_pending_is_full(pending, max_delete):
-    return len(pending) >= min(max_delete, STEADY_STATE_EVENTS_MAX_DELETE)
-
-
 # LLM: 旧pending仅供消化；本拍按seq前缀删除，触发器保留的行不计入已删集。
 # 函数用途: 准备有界SQL删除批次，不再新增逐行重写责任。
 def _prepare_event_prune(conn, options):
@@ -701,77 +675,6 @@ def _prepare_event_prune(conn, options):
     targets = list(dict.fromkeys([*pending, *sorted(deleted)]))
     # Cat3-R4：旧 pending 只迁移消化，新的 SQL 删除不再登记逐行重写责任。
     return selected, deleted, targets
-
-
-# LLM: JSONL已成功处理targets；重新读取当前账，只减本批ID以保留文件锁释放后并发登记的新批次。
-# 函数用途: 清除已经完成的恢复责任，不误删其它维护者的新挂起ID。
-def _clear_pending_event_ids(conn, targets):
-    completed = set(targets)
-    remaining = [item for item in _read_pending_event_ids(conn) if item not in completed]
-    _write_pending_event_ids(conn, remaining)
-
-
-# LLM: 普通模式必须在释放events文件锁之后才能重取SQLite写锁；BEGIN下读改写账本防并发丢更新。
-# 函数用途: 用独立短事务完成普通模式的恢复清账，失败保留可幂等重试的pending。
-def _clear_pending_events_transaction(store, targets):
-    with store._connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        _clear_pending_event_ids(conn, targets)
-        conn.commit()
-
-
-# LLM: 原输入按二进制LF边界读取，只有strict UTF-8及JSON均有效的命中行可删除；内存只随单记录变化。
-# 函数用途: 将未命中的行逐字节流式复制到同目录暂存文件，不拼接整份流水。
-def _copy_retained_event_lines(path, retained, target_ids):
-    removed = 0
-    with path.open("rb") as handle:
-        for line in handle:
-            if _pruned_event_line(line, target_ids):
-                removed += 1
-            else:
-                retained.write(line)
-    return removed
-
-
-# LLM: 只替换同events_path且调用者持原锁；生产路径不读回暂存正文，C仅一次replace沿原末门。
-# 函数用途: 原子发表已同步的流式文件；保留既有替换函数的monkeypatch故障注入合同。
-def _publish_pruned_event_file(store, temporary):
-    if write_private_text_file_atomic_unlocked is not _DEFAULT_WRITE_ATOMIC_UNLOCKED:
-        # 仅过滤完成后的测试替身兼容发表允许surrogateescape，不能用它判断输入行是否合法。
-        content = temporary.read_bytes().decode("utf-8", errors="surrogateescape")
-        operation = partial(write_private_text_file_atomic_unlocked,
-            store.events_path, content, preserve_bytes=True,
-            **({"replace_once": True} if store.coordinator_io else {}))
-    else:
-        operation = partial(os.replace, temporary, store.events_path)
-    if store.coordinator_io:
-        store._local_write(operation)
-    else:
-        operation()
-
-
-# LLM: 同目录mkstemp独占0600且只写原始bytes；fsync后替换，无命中仍补父目录同步以覆盖上次partial窗口。
-# 函数用途: 以不随文件行数增长的内存执行重写，无命中时不替换原文件。
-def _stream_prune_event_jsonl(store, target_ids):
-    descriptor, name = tempfile.mkstemp(prefix=f".{store.events_path.name}.", suffix=".tmp",
-                                        dir=store.events_path.parent)
-    temporary = Path(name)
-    primary = None
-    try:
-        with os.fdopen(descriptor, "wb") as retained:
-            removed = _copy_retained_event_lines(store.events_path, retained, target_ids)
-            if removed:
-                retained.flush()
-                os.fsync(retained.fileno())
-        if removed:
-            _publish_pruned_event_file(store, temporary)
-        _sync_parent_directory(store.events_path)
-        return removed
-    except BaseException as exc:
-        primary = exc
-        raise
-    finally:
-        _discard_event_temp(temporary, primary)
 
 
 # LLM: 清理失败不盖掉原始读取/同步/撤权异常；无主错误时清理失败照常传播，pending仍不清。
@@ -813,8 +716,6 @@ def _event_step_transaction(store, operation):
         return result
 
 
-# 续扫前核对的前缀样本窗口：文件头与已提交offset之前各取至多这么多字节，正常追加不改变这两段。
-_EVENT_STEP_PROBE_BYTES = 4096
 _EVENT_STEP_TEMP_NAME = re.compile(r"\.events-prune-[a-zA-Z0-9_-]+\.step")
 
 
@@ -835,42 +736,6 @@ def _read_event_step_job(conn):
     except (TypeError, ValueError):
         return {}
     return job if isinstance(job, dict) else {}
-
-
-# LLM: 只认本版完整字段；旧版含size/mtime的revision游标、坏偏移、坏尾字节或坏暂存名都不可续扫，只能从0重扫。
-# 函数用途: 校验游标结构，避免不可信偏移或暂存名进入续扫。
-def _event_step_job_valid(job):
-    source, targets, tail, name = job.get("source"), job.get("targets"), job.get("tail_hex"), job.get("temporary")
-    return (isinstance(source, list) and len(source) == 2 and all(type(item) is int for item in source)
-            and isinstance(targets, list) and bool(targets)
-            and all(isinstance(item, str) and item for item in targets)
-            and all(type(job.get(key)) is int and job[key] >= 0 for key in ("offset", "output_offset", "removed"))
-            and isinstance(tail, str) and re.fullmatch(r"(?:[0-9a-f]{2})*", tail) is not None
-            and isinstance(job.get("prefix"), str)
-            and isinstance(name, str) and _EVENT_STEP_TEMP_NAME.fullmatch(name) is not None)
-
-
-# LLM: 身份只取dev/ino，正常追加只改变字节数而不再使游标失效；换代、截断与前缀改写由调用方另行判定。
-# 函数用途: 返回JSONL来源身份[dev, ino]与当前字节数，接受路径或已打开FD。
-def _event_file_revision(path):
-    info = os.stat(path)
-    return [info.st_dev, info.st_ino], info.st_size
-
-
-# LLM: 样本走同一已打开FD，只读文件头与已提交offset前各至多4KiB，不随文件变大，也不计入扫描预算。
-# 函数用途: 读取前缀完整性样本：文件头窗口与游标之前的边界窗口。
-def _event_prefix_windows(source, offset):
-    source.seek(0)
-    head = source.read(min(_EVENT_STEP_PROBE_BYTES, offset))
-    start = max(0, offset - _EVENT_STEP_PROBE_BYTES)
-    source.seek(start)
-    return head, source.read(offset - start)
-
-
-# LLM: 游标只存摘要，不在metadata复制事件正文；头长度进入摘要，避免两段拼接产生歧义。
-# 函数用途: 把两个样本窗口压成游标保存的前缀摘要。
-def _event_prefix_digest(head, boundary):
-    return hashlib.sha256(len(head).to_bytes(8, "big") + head + boundary).hexdigest()
 
 
 # LLM: 临时文件只准原events目录中mkstemp的准确basename，nofollow单链接且0600；坏游标不能指向任意路径。
@@ -963,39 +828,6 @@ def _expire_event_segments(store, max_bytes) -> dict:
     return result
 
 
-# LLM: 只有结构完整、目标未变、同dev/ino、size不小于已提交offset且前缀样本一致才续扫；否则视为换代从0重扫。
-# 函数用途: 判定已保存游标能否在当前文件上续扫，返回已核对的样本窗口或None。
-def _event_step_resume(job, targets, source, identity, size):
-    if (job is None or not _event_step_job_valid(job) or job["targets"] != sorted(targets)
-            or job["source"] != identity or size < job["offset"]):
-        return None
-    windows = _event_prefix_windows(source, job["offset"])
-    return windows if _event_prefix_digest(*windows) == job["prefix"] else None
-
-
-# LLM: 同目录mkstemp独占0600且basename受固定模式约束；新游标从0开始，只登记当前身份与原目标。
-# 函数用途: 为一次完整扫描创建暂存文件与初始游标。
-def _event_step_new_job(store, targets, identity, write):
-    descriptor, name = write(lambda: tempfile.mkstemp(prefix=".events-prune-", suffix=".step",
-                                                      dir=store.events_path.parent))
-    os.close(descriptor)
-    return {"source": identity, "targets": sorted(targets), "temporary": Path(name).name, "offset": 0,
-            "output_offset": 0, "tail_hex": "", "removed": 0, "prefix": _event_prefix_digest(b"", b"")}
-
-
-# LLM: 暂存缺失（已被原子发表消费）或短于已提交output位置都不能续写，交调用方重扫；形状不符仍按原合同拒绝。
-# 函数用途: 打开续扫所需的原暂存文件，返回路径与FD或None。
-def _event_step_open_temp(store, job, write):
-    try:
-        temporary, descriptor = write(lambda: _event_step_temp(store, job))
-    except FileNotFoundError:
-        return None
-    if os.fstat(descriptor).st_size < job["output_offset"]:
-        os.close(descriptor)
-        return None
-    return temporary, descriptor
-
-
 # LLM: 名字不符固定模式的不是本维护创建的文件，不碰；已被原子发表消费则无需清理；形状不符仍按原合同拒绝。
 # 函数用途: 放弃旧游标时删除其暂存文件。
 def _drop_event_step_temp(store, job, write):
@@ -1009,60 +841,6 @@ def _drop_event_step_temp(store, job, write):
         return
     os.close(descriptor)
     write(lambda: _discard_event_temp(temporary, None))
-
-
-# LLM: 本拍新建、尚未登记游标的暂存在失败时尽力删除；清理失败不盖掉原异常，已被发表消费时无操作。
-# 函数用途: 避免失败的首拍遗留无主暂存文件。
-def _discard_new_event_temp(store, job, write, primary):
-    temporary = store.events_path.parent / job["temporary"]
-    try:
-        write(lambda: _discard_event_temp(temporary, primary))
-    except BaseException:
-        pass
-
-
-# LLM: 只处理本拍已读字节：未完整行留在游标tail_hex，final仅在锁内EOF使用；暂存先截回已提交output位置再追加并fsync。
-# 函数用途: 过滤一段原始字节写入暂存文件，并推进游标offset、输出位置、计数与前缀样本。
-def _event_step_consume(write, retained, job, windows, data, result, *, final):
-    parts = (bytes.fromhex(job["tail_hex"]) + data).split(b"\n")
-    tail = parts.pop()
-    if len(tail) > 8 * 1024 * 1024:
-        raise ValueError("event line exceeds bounded maintenance budget")
-    lines = [part + b"\n" for part in parts]
-    if final and tail:
-        lines.append(tail)
-        tail = b""
-    target_ids = set(job["targets"])
-    kept = [line for line in lines if not _pruned_event_line(line, target_ids)]
-
-    # 读取/解析在原短门外，末写只处理本批已准备字节。
-    def append():
-        retained.truncate(job["output_offset"])
-        retained.seek(job["output_offset"])
-        retained.writelines(kept)
-        retained.flush()
-        os.fsync(retained.fileno())
-
-    write(append)
-    head, boundary = windows
-    if len(head) < _EVENT_STEP_PROBE_BYTES:
-        head = (head + data)[:_EVENT_STEP_PROBE_BYTES]
-    boundary = (boundary + data)[-_EVENT_STEP_PROBE_BYTES:]
-    removed = len(lines) - len(kept)
-    job.update(offset=job["offset"] + len(data), output_offset=retained.tell(), tail_hex=tail.hex(),
-               removed=job["removed"] + removed, prefix=_event_prefix_digest(head, boundary))
-    result["removed"] += removed
-    result["scanned_bytes"] += len(data)
-    return head, boundary
-
-
-# LLM: 仅此段持原JSONL锁（C模式由step锁持同一把锁）；核路径仍指向原inode、未截断且前缀样本未变，锁内不碰SQLite。
-# 函数用途: 复核当前锁内EOF，来源换代或被改写时拒绝发表，并返回锁内字节数。
-def _event_step_locked_eof(store, source, job, windows):
-    identity, size = _event_file_revision(store.events_path)
-    if identity != job["source"] or size < job["offset"] or _event_prefix_windows(source, job["offset"]) != windows:
-        raise ValueError("event source changed during bounded scan")
-    return size
 
 
 # LLM: 完成态只消化旧pending/游标；新生产路径不再写部分逐行位置。
@@ -1087,18 +865,6 @@ def _delete_prunable_events(conn, before: float, keep_last: int, max_delete: int
             f"SELECT event_id FROM events WHERE event_id IN ({placeholders})", batch)}
         deleted.update(set(batch) - remaining)
     return len(selected), deleted
-
-
-# LLM: 原始CR、坏UTF-8、坏JSON、递归超限及非字符串ID都保留；ValueError涵盖UnicodeDecodeError和JSON错误。
-# 函数用途: 只删除strict UTF-8解码成功、无原始CR且精确命中目标ID的JSON对象行。
-def _pruned_event_line(line: bytes, target_ids: set[str]) -> bool:
-    if b"\r" in line.rstrip(b"\n"):
-        return False
-    try:
-        row = json.loads(line.decode("utf-8", errors="strict"))
-    except (ValueError, RecursionError):
-        return False
-    return isinstance(row, dict) and isinstance(row.get("event_id"), str) and row["event_id"] in target_ids
 
 
 # LLM: deleted_jsonl沿旧键返回封存段数，不再代表行数；不把跨介质partial伪装成全事务回滚。

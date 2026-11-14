@@ -23,7 +23,6 @@ from ...path_access_policy import (
 )
 from ...runtime_context import current_subagent_run_id
 from ...subagents.models import SUBAGENT_REUSABLE_STATUSES, task_status_in
-from ...subagents.role_templates import role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams, PreparedSubagentRun
 from ...subagents.services.contract_identity import (
     idempotency_contract_identity_from_context_packs,
@@ -34,20 +33,6 @@ from .create_context import (
     is_relative_to,
     normalized_write_root,
 )
-
-
-def role_allows_direct_product_work(role: str, role_template_dirs: object = None) -> bool:
-    normalized = str(role or "worker").strip().lower().replace("-", "_")
-    if not normalized:
-        return True
-    snapshot = role_template_snapshot_for_role(normalized, role_template_dirs)
-    if not snapshot:
-        return True
-    if bool(snapshot.get("can_spawn_children")):
-        return False
-    if bool(snapshot.get("depends_on_outputs")) or bool(snapshot.get("can_run_tests")):
-        return False
-    return bool(snapshot.get("can_write"))
 
 
 # LLM: Explicit extra roots come only from structured parameters; goal prose

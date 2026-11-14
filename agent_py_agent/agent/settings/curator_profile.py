@@ -36,19 +36,6 @@ def effective_auxiliary_model_profile(config: object) -> str:
     return str(getattr(config, "memory_curator_model_profile", "") or "").strip()
 
 
-# LLM: 判断当前是否显式配置了后台辅助模型。
-# 函数用途: 检查后台辅助模型是否处于开启状态。
-def curator_profile_configured(config: object) -> bool:
-    return bool(effective_auxiliary_model_profile(config))
-
-
-# LLM: 解析辅助模型编号，若未配置返回None。
-# 函数用途: 为调度器与服务提供已配置的辅助模型编号。
-def resolve_curator_model_selection(config: object, agent: object | None = None) -> str | None:
-    profile = effective_auxiliary_model_profile(config)
-    return profile if profile else None
-
-
 # LLM: 记录共享辅助模型提供者故障并计算阶梯退避时长（10m -> 30m -> 60m）。
 # 函数用途: 登记模型失败，使其他共享此模型的用户在冷却期内跳过无效探测。
 def record_auxiliary_profile_failure(
@@ -151,62 +138,6 @@ class CuratorThreadProfiles:
     thread_profiles: dict[str, str]
     fallback_reasons: dict[str, str]
     configs: dict[str, object]
-
-
-# LLM: 只读：直接 threads.load，不经 thread_model_profile_id（它会给空引用迁移写库）；不构造后端、不联网。
-#   会话选的档案与 owner 默认相同就归默认组；解析失败按 ModelProfileError.reason（档案被删、停用、撤销共享等）、
-#   目录读不了记 catalog_unreadable、连接字段缺（如订阅登出）记 model_configuration_missing，都退回默认并留原因。
-# 函数用途: 给记忆整理解析一批会话各自的主代理模型。
-def curator_thread_profiles(agent: object, thread_ids: tuple[str, ...]) -> CuratorThreadProfiles:
-    default_id = _default_profile_id(agent)
-    profiles: dict[str, str] = {}
-    reasons: dict[str, str] = {}
-    configs: dict[str, object] = {}
-    # 同一档案只解析一次：编号 → （失败原因, 配置）。
-    resolved: dict[str, tuple[str, object | None]] = {}
-    for thread_id in thread_ids:
-        thread = agent.conversation_store.threads.load(thread_id)
-        selected = str(getattr(thread, "model_profile_id", "") or "") if thread is not None else ""
-        if not selected or selected == default_id:
-            continue
-        if selected not in resolved:
-            resolved[selected] = _thread_profile_config(agent, selected)
-        failed_reason, config = resolved[selected]
-        if failed_reason:
-            reasons[thread_id] = failed_reason
-        else:
-            profiles[thread_id], configs[selected] = selected, config
-    return CuratorThreadProfiles(default_id, profiles, reasons, configs)
-
-
-# 函数用途: 解析一个会话档案；返回（失败原因, 配置），可用时原因为空。
-def _thread_profile_config(agent: object, profile_id: str) -> tuple[str, object | None]:
-    from ..backends.factory import model_configuration_missing
-
-    try:
-        config = selected_model_config(agent, profile_id=profile_id)
-    except ModelProfileError as exc:
-        return str(exc.reason or "profile_unavailable"), None
-    except OSError:
-        return "catalog_unreadable", None
-    if model_configuration_missing(config.model_backend, config):
-        return "model_configuration_missing", None
-    return "", config
-
-
-# LLM: 只读；和主代理同一条默认解析（model_profiles._default_for_owner：普通用户在管理员指定初始模型时用它，否则部署配置）。
-#   owner 自己选过默认模型时返回空串（不另记）；目录读不了也返回空串，由默认组的原解析器报错。来源词与 /model 列表的
-#   default_source 一致（admin_initial），部署配置记 deployment_default。没有自己档案的 owner（model-less）靠它看出默认从哪来。
-# 函数用途: 告诉记忆整理“owner 默认模型”是从哪来的，写进运行记录。
-def curator_default_model_source(agent: object) -> str:
-    from .model_profiles import _default_for_owner
-
-    if _default_profile_id(agent) != "default":
-        return ""
-    try:
-        return "deployment_default" if _default_for_owner(agent) == "default" else "admin_initial"
-    except (ModelProfileError, OSError):
-        return ""
 
 
 # 函数用途: 读 owner 当前选中的模型编号；目录读不了时返回空串（默认组照常用原解析器报错）。

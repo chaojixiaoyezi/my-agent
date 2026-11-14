@@ -26,15 +26,6 @@ def assert_credential_callback_identity(row, payload, body):
         raise ValueError('原卡输入绑定不匹配')
 
 
-# LLM: 同终态/同实际提交者才确认，fields从不参与重放；原输入pending只在原任务活跃且未过期时继续发布。
-# 函数用途: 判断已保存决定能否恢复原发布；已过期但输入已结算的卡只确认旧事实，不产生Wake。
-# LLM: Count0保原动态输入/任务事实，C与原包装共享同一重放判据，不接受fields覆盖已存秘密。
-# 函数用途: 沿原Agent资源核对一次已保存的决定。
-def credential_callback_replay(agent, row, body, actor):
-    from ..conversation.input_dependencies import input_dependency_access
-    return credential_callback_replay_for_input(input_dependency_access(agent), row, body, actor)
-
-
 # LLM: 输入服务只提供原canonical读取；同scope/owner/ref/provider/input/实际提交者与原期限全部核验，不签新权限。
 # 函数用途: 为原Agent和C判断同卡是否只需补既有投影。
 def credential_callback_replay_for_input(inputs, row, body, actor):

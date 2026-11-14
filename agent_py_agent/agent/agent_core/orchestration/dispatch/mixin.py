@@ -28,12 +28,11 @@ from .params import (
     DispatchContext,
     DispatchExecutionPlan,
     DispatchParams,
-    RunnerBatchContext,
     WatchParams,
     merge_dispatch_params,
     merge_watch_params,
 )
-from .runner_batches import execute_runner_jobs, run_dispatch_runner_stage
+from .runner_batches import run_dispatch_runner_stage
 from .runner_selection import scoped_runner_tasks
 from .service import (
     make_patch_review_records,
@@ -234,9 +233,6 @@ class _DispatchFailureMixin:
         except Exception as save_exc:
             _log_introspection_failure(getattr(task, "id", ""), save_exc, stage="record_error")
 
-    def _update_pending_work_state(self) -> None:
-        self._has_pending_work = update_pending_work_state(self)
-
 
 # LLM: 自省失败日志的统一出口；stage 取 load/apply/record_error，方便日志检索。
 # 函数用途: 打一条带阶段标记的自省失败 warning 日志。
@@ -270,21 +266,6 @@ class _DispatchCollectionBase:
 
     def _collect_dispatch_records(self, ctx: DispatchContext):
         return collect_dispatch_records(self, ctx)
-
-    def _execute_runner_jobs(self, *, ctx: DispatchContext, max_cards: int, probe: bool, records: list) -> list:
-        batch_ctx = RunnerBatchContext(
-            pending_runner_jobs=[],
-            runner_concurrency=0,
-            runner_timeout_seconds=0,
-            effective_runner_instruction=ctx.runner_instruction,
-            max_cards=max_cards,
-            probe=probe,
-            records=list(records),
-            execution_plan=ctx.execution_plan,
-        )
-        records = execute_runner_jobs(self, ctx, batch_ctx)
-        ctx.runner_instruction = batch_ctx.effective_runner_instruction
-        return records
 
     def _finalize_dispatch(self, params: DispatchParams, records: list):
         records = list(records)

@@ -11,7 +11,6 @@ import stat
 import sys
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
@@ -482,24 +481,6 @@ class _AssetStore:
             os.close(parent)
         self._history_notify('delete', asset_id=asset_id)
         return True
-
-
-# LLM: Store在原集合锁内调用；省略时间使用UTC，失败继承旧错误而非失败默认清空，错误沿统一脱敏口；不执行资产。
-# 函数用途: 从旧摘要计算本次计数、最近耗时和安全错误说明。
-def next_run_summary(summary, status, duration_ms, run_at=None, last_error=""):
-    from .descriptor import RuntimeSummary, clean_json
-
-    if not isinstance(status, str) or not status.strip():
-        raise ValueError("运行状态不能为空")
-    if run_at is None:
-        run_at = datetime.now(timezone.utc).isoformat()
-    if status in {"failed", "error", "timeout", "timed_out"}:
-        failures = summary.consecutive_failures + 1
-        resolved_error = clean_json(str(last_error or summary.last_error or ""))
-    else:
-        failures = 0
-        resolved_error = clean_json(str(last_error or ""))
-    return RuntimeSummary(run_at, status, duration_ms, summary.run_count + 1, failures, resolved_error)
 
 
 # LLM: 延迟导出避免descriptor与Store初始化环；只暴露资产服务，不执行发现、写盘或权限检查。

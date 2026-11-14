@@ -184,13 +184,6 @@ def _chain_step_digest(previous_chain: str, row_digest: str) -> str:
     return chain
 
 
-# LLM: 逐条核当前结构并复用行/链LRU，按固定间隔抽稀保末点；输出字典每次新建，调用方不能污染缓存。
-#   长度变化不能直接比较两个不同范围的末链值，调用方必须按共同 index 比较并检查末块是否可证。
-# 函数用途: 对消息序列生成稀疏检查点列表（[{index, chain}]，index 是 1 起的消息序号）。
-def _chain_checkpoints(rows: list) -> list[dict]:
-    return _message_checkpoints(rows, include_content=False)[0]
-
-
 def _message_checkpoints(rows: list, *, include_content: bool) -> tuple[list[dict], list[dict]]:
     """单遍读取消息，逐行共享摘要；仅保留固定尾窗，不积累全历史检查点或正文副本。"""
     chain = content_chain = _digest("request_surface.v2.seed")
