@@ -34,7 +34,7 @@ def test_tool_catalog_and_recommended_sections():
     """LLM: verify that catalog and recommended-tools sections render correctly.
 
     新手说明:
-    检查 API/HTTP 场景也统一推荐 web_fetch，避免模型看到重复网络入口。
+    native 协议下 web_fetch 已通过原生工具通道暴露，推荐列表对原生已可见工具执行去重，不重复展示。
     """
     registry = _registry()
 
@@ -49,8 +49,9 @@ def test_tool_catalog_and_recommended_sections():
     assert "关键参数" not in catalog
     assert "适用场景" not in catalog
     assert "示例：" not in catalog
-    assert "web_fetch" in recommended
-    assert "命中" in recommended
+    recommended_names = [line[2:].split("：", 1)[0] for line in recommended.splitlines() if line.startswith("- ")]
+    assert "web_fetch" in {s.name for s in registry.model_visible_specs()}
+    assert "web_fetch" not in recommended_names
 
 
 def test_registry_uses_configured_write_inline_recommendation(tmp_path: Path):

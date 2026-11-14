@@ -730,7 +730,7 @@ def test_tool_round_streams_tool_progress_chunks():
 
 
 def test_plain_parallel_project_prompt_recommends_direct_create(tmp_path):
-    """大白话并行任务直接推荐首轮可见的创建工具。"""
+    """native 协议下首轮已在原生工具通道可见的创建工具在推荐区去重，不重复列出。"""
     agent = SimpleAgent(_text_agent_config(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
 
     _catalog, recommendations = (
@@ -738,29 +738,42 @@ def test_plain_parallel_project_prompt_recommends_direct_create(tmp_path):
         agent.tools.render_recommended_tools_section("请让子代理分别去看不同项目，最后你汇总。"),
     )
 
-    assert "create_subagents" in recommendations
+    visible_names = {s.name for s in agent.tools.model_visible_specs()}
+    recommended_names = [line[2:].split("：", 1)[0] for line in recommendations.splitlines() if line.startswith("- ")]
+    assert "create_subagents" in visible_names
+    assert "create_subagents" not in recommended_names
 
 
 def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations(tmp_path):
-    """运行时推荐工具必须看用户原始任务，不能退化成空 query。"""
+    """运行时推荐工具读取用户原始任务，并对原生通道已可见工具执行去重。"""
     from agent_py_agent.agent.agent_core.runtime.loop_support import (
         ToolSectionsRequest,
         _resolve_tool_sections,
     )
 
     agent = SimpleAgent(_text_agent_config(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+    runtime_snapshot = agent.tools.runtime_snapshot()
 
     _catalog, recommendations = _resolve_tool_sections(
         ToolSectionsRequest(
             agent=agent,
             user_prompt="请让子代理分别去看不同项目，最后你汇总。",
             allowed_tools=None,
-            runtime_snapshot=agent.tools.runtime_snapshot(),
+            runtime_snapshot=runtime_snapshot,
             protocol_snapshot=_text_protocol_snapshot("tool-sections"),
         )
     )
 
-    assert "create_subagents" in recommendations
+    visible_names = {
+        s.name
+        for s in agent.tools.model_visible_specs(
+            allowed_tools=None,
+            runtime_snapshot=runtime_snapshot,
+        )
+    }
+    recommended_names = [line[2:].split("：", 1)[0] for line in recommendations.splitlines() if line.startswith("- ")]
+    assert "create_subagents" in visible_names
+    assert "create_subagents" not in recommended_names
 
 
 @pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")
