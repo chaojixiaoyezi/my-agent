@@ -497,15 +497,21 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     assert root == fixture.agent.home_paths.owner_home_dir
     assert (max_entries, max_ms, complete) == (128, 2500.0, True)
     summary = usage.load_skill_usage_summary(store)
+    assert summary['totals']['visible'] == len(matches)
     assert summary['totals']['manual_search'] == len(matches)
     assert summary['totals']['effective_uses'] == 0
     saved_summary = json.loads((store.directory / 'usage_summary.json').read_text())
     assert saved_summary['totals'] == summary['totals']
-    assert saved_summary['last_sequence'] == len(matches)
+    expected_events = 2 * len(matches)
+    assert saved_summary['last_sequence'] == expected_events
     rows = [json.loads(line) for line in (store.directory / 'usage_ledger.jsonl').read_text().splitlines()]
-    assert [row['sequence'] for row in rows] == list(range(1, len(matches) + 1))
+    assert [row['sequence'] for row in rows] == list(range(1, expected_events + 1))
+    assert [row['event'] for row in rows] == ['visible', 'manual_search'] * len(matches)
+    assert [row['skill_id'] for row in rows] == [match['stable_id'] for match in matches for _ in range(2)]
+    assert all(row['task_id'] == fixture.params.task_id for row in rows)
     assert all(row['request_id'] == fixture.params.request_id for row in rows)
     assert all(row['thread_id'] == fixture.link.thread_id for row in rows)
+    assert all(row['producer'] == 'skill_search.search' for row in rows)
 
 
 # LLM: 真实枚举首项后推进2501ms，耗尽128项/2500ms准入预算；辅助记账故障不改变搜索结果。
@@ -633,6 +639,8 @@ def test_c4r_search_matches_quota_entry_budget_exhaustion_and_reconciled_recover
     assert json.loads(quota_path.read_text(encoding='utf-8'))['dirty_since'] is None
 
     caplog.clear()
+    expected_ids = ['capability:entry-0', 'capability:entry-0', 'capability:entry-1',
+                    'capability:entry-1', 'capability:entry-2', 'capability:entry-2']
     with caplog.at_level(logging.WARNING, logger=usage.__name__):
         for _ in range(2):
             result = tool.execute({'action': 'search', 'query': 'entry', 'limit': 20})
@@ -643,10 +651,28 @@ def test_c4r_search_matches_quota_entry_budget_exhaustion_and_reconciled_recover
     rows = [json.loads(line) for line in ledger_path.read_text(encoding='utf-8').splitlines()]
     assert len(rows) == 6
     assert [row['sequence'] for row in rows] == list(range(1, 7))
-    assert [row['skill_id'] for row in rows] == ['entry-0', 'entry-1', 'entry-2'] * 2
-    assert all(row['event'] == 'manual_search' for row in rows)
+    assert [row['skill_id'] for row in rows] == expected_ids
+    assert [row['event'] for row in rows] == ['visible', 'manual_search'] * 3
     summary = json.loads(summary_path.read_text(encoding='utf-8'))
-    assert summary['last_sequence'] == summary['totals']['manual_search'] == 6
+    assert summary['last_sequence'] == 6
+    assert summary['totals']['visible'] == summary['totals']['manual_search'] == 3
+
+    # 切换新任务标识发起第二批搜索，确认对账后仍可持续追加记账且配额保持干净。
+    fixture.params.task_id = f'{fixture.params.task_id}-batch2'
+    with caplog.at_level(logging.WARNING, logger=usage.__name__):
+        result = tool.execute({'action': 'search', 'query': 'entry', 'limit': 20})
+        assert result.ok, result.output
+        assert [row['package_id'] for row in json.loads(result.output)['matches']] == ['entry-0', 'entry-1', 'entry-2']
+        assert warning not in caplog.record_tuples
+        assert json.loads(quota_path.read_text(encoding='utf-8'))['dirty_since'] is None
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding='utf-8').splitlines()]
+    assert len(rows) == 12
+    assert [row['sequence'] for row in rows] == list(range(1, 13))
+    assert [row['skill_id'] for row in rows] == expected_ids * 2
+    assert [row['event'] for row in rows] == ['visible', 'manual_search'] * 6
+    summary = json.loads(summary_path.read_text(encoding='utf-8'))
+    assert summary['last_sequence'] == 12
+    assert summary['totals']['visible'] == summary['totals']['manual_search'] == 6
 
 
 # LLM: 公开批量接口须保留原四类事件和序号口径；空批次不能创建目录，坏批次不能写部分记录。
