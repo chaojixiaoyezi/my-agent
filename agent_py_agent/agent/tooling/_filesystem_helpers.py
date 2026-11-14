@@ -673,19 +673,3 @@ def _is_under_any_root(path: Path, roots: list[Path]) -> bool:
         except ValueError:
             continue
     return False
-
-
-def _read_text_safe(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return None
-
-
-def _parse_count_param(value: Any) -> int:
-    if value is None:
-        return 1
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 1

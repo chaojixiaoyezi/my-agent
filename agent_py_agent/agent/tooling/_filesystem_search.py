@@ -877,13 +877,6 @@ def _iter_matching_lines(request: MatchingLineRequest):
                 yield hit
 
 
-def _non_null_hits(hits):
-    for hit in hits:
-        raise_if_cancelled()
-        if hit is not None:
-            yield hit
-
-
 # LLM: 收集阶段只构造匹配，不为跳过行、哨兵或非正文模式打开上下文窗口。
 # 函数用途: 将匹配行转换为无上下文命中。
 def _matching_line_hit(request: MatchingLineRequest, idx: int, raw_line: str) -> SearchHit | None:

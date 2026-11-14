@@ -4,7 +4,6 @@ import ctypes
 import errno
 import os
 
-from .multiprocess_executor_identity import _ProcBSDInfo
 from .multiprocess_takeover_darwin_types import KinfoProc
 from .multiprocess_takeover_probe import DisappearedProcessSnapshot, UnstableProcessSnapshot
 
@@ -142,26 +141,3 @@ def _kernel_birth(value) -> str:
     if birth.tv_sec <= 0 or not 0 <= birth.tv_usec < 1000000:
         raise ValueError("darwin_process_identity_invalid")
     return f"{birth.tv_sec}:{birth.tv_usec:06d}"
-
-
-# LLM: 复用P1固定136字节结构与秒:微秒出生格式；BSDInfo pid/ppid/pgid均是内核字段。
-# 函数用途: 读取一个macOS进程的精确身份；只有明确已消失可从快照略去。
-def _darwin_row(library, pid: int):
-    query = library.proc_pidinfo
-    query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-    query.restype = ctypes.c_int
-    info = _ProcBSDInfo()
-    ctypes.set_errno(0)
-    count = query(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
-    if count != ctypes.sizeof(info):
-        if ctypes.get_errno() == errno.ESRCH:
-            return None
-        raise OSError(ctypes.get_errno(), "proc_pidinfo_incomplete")
-    if info.prefix[3] != pid or info.start_sec == 0:
-        raise ValueError("darwin_process_identity_invalid")
-    try:
-        session = os.getsid(pid)
-    except ProcessLookupError:
-        return None
-    return {"pid": pid, "ppid": int(info.prefix[4]), "pgid": int(info.scope[1]), "sid": session,
-            "birth": f"{info.start_sec}:{info.start_usec:06d}", "state": "Z" if info.prefix[1] == 5 else "S"}

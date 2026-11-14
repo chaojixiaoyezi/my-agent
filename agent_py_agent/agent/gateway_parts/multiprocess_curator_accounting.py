@@ -21,7 +21,7 @@ from ..common.nofollow_fs import (
 )
 from ..common.strict_json import load_strict_json
 from ..memory_store.curator_run_log import CuratorRunRecord
-from ..owner_wake_discovery import _owner_home_signature, discover_owner_home_page
+from ..owner_wake_discovery import _owner_home_signature
 from ..settings.config import AgentConfig
 from ..user_space.owner_resolver import OwnerIdentity, _owner_home_dir
 from .multiprocess_mode import current_worker_partition
@@ -138,44 +138,6 @@ def _inventory_version(home_root):
             continue
         os.close(descriptor)
     return version
-
-
-# LLM: 显式首次v2迁移只读原日审计全集；保旧count且既有记录不会在模式切换后再加一次。
-# 函数用途: 收集同一canonical home中所有现存owner的实际当日消耗。
-def _all_consumed_records(home_root):
-    version = _inventory_version(home_root)
-    records = owner_consumed_records(home_root, OwnerIdentity.local_main())
-    cursor = None
-    while True:
-        page = discover_owner_home_page(Path(home_root) / "owners", limit=64, after_cursor=cursor)
-        for target in page.targets:
-            records.update(owner_consumed_records(home_root, target.identity))
-        cursor = page.next_cursor
-        if cursor is None:
-            if _inventory_version(home_root) != version:
-                raise ValueError("curator_quota_owner_inventory_changed")
-            return records
-
-
-# LLM: 原C短门/quota锁保序；实际写点另拒独立executor与W，actual audit同步补账，不借无W分区自授全局写。
-# 函数用途: 在同一原文件内合并实际运行，第一次迁移保旧count且后续不重扣。
-def _reconcile_unlocked(path, home_root, owners=None):
-    require_global_writer("curator_quota")
-    value = _read_quota(path)
-    previous = dict(value)
-    records = (_all_consumed_records(home_root) if owners is None or value.get("schema_version") != _QUOTA_SCHEMA
-               else set().union(*(owner_consumed_records(home_root, owner) for owner in owners)))
-    if value.get("schema_version") != _QUOTA_SCHEMA:
-        value = {"schema_version": _QUOTA_SCHEMA, "date": quota_date(),
-                 "count": max(value["count"], len(records)), "accounted_records": sorted(records),
-                 "migration": {"from": "legacy-date-count", "preserved_count": value["count"]}}
-    else:
-        existing = set(value["accounted_records"])
-        value["count"] += len(records - existing)
-        value["accounted_records"] = sorted(existing | records)
-    if value != previous:
-        write_json_file_atomic_unlocked(path, value)
-    return value
 
 
 # LLM: 原冻结入口仍消费同Root末门；原审计固定批读取先在热门外完成，callback里只复核CAS及写唯一quota。

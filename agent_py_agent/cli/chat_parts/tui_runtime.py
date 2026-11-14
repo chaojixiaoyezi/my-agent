@@ -858,11 +858,6 @@ def _normalize_context_usage(value: object) -> dict[str, object]:
     return public_context_usage(value)
 
 
-# 函数用途: 只接受字符串、去首尾空白、截到 80 字符；其它类型按空串，不让长正文借状态行标签进 TUI 事件。
-def _context_usage_label(value: object) -> str:
-    return value.strip()[:80] if isinstance(value, str) else ""
-
-
 # LLM: Todo snapshots are canonical display rows, never free-form tool output.
 # Keep only bounded id/title/status scalars before publishing a TUI event.
 # 函数用途: 清洗后台 task_progress 快照，供输入框上方清单实时替换。

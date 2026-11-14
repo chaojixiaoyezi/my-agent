@@ -69,17 +69,6 @@ def _degrade(load_errors: list[dict], error: dict) -> None:
     (warnings if isinstance(warnings, list) else load_errors).append(error)
 
 
-# LLM: Only hot JSON-row reports retain every other dedupe fact; parse/I/O/rotated-window failures stay blocking.
-# 函数用途: 确认全是可跳过坏行并逐条记位置，不把空历史错误当作去重未命中。
-def _garbage_row_errors(errors) -> bool:
-    if not all(isinstance(error, dict) and error.get("context") == "conversation.messages.read"
-               and "line_number" in error for error in errors):
-        return False
-    for error in errors:
-        logger.warning("JSONL_ROW_SKIPPED context=gateway.dedupe path=%s line=%s", error.get("path", "-"), error["line_number"])
-    return True
-
-
 # LLM: 这是同一结果的不可变传输包，不是第二份会话事实源；正常提交和 repair 必须使用相同投影。
 #   host_notices 是本轮随最终回复送出的宿主提示（HostNotice.to_dict），只进元数据供显示与回放，不拼进正文、不进模型历史。
 # 类用途: 将原生消息、结束原因、独立显示快照与宿主提示一起交给 final/repair，展示数据不进入模型历史。

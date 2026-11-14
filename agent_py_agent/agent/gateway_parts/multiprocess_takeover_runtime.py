@@ -518,61 +518,6 @@ def retire_idle_worker_source(controller, issuer):
         return True
 
 
-# LLM: 全部P1先完整核读；仅原C认领或原W/P4实际提交的精确ID/摘要可排除，角色不由桶/JSON授信，同步C来源与W接手合同。
-# 函数用途: 让合法当前C/W自产变化不污染旧域比较，启动已冻结ID、旧代、未知源仍走原P2隔离。
-def _takeover_targets_only(controller, targets):
-    from .multiprocess_worker_commit import WorkerCommitRejected
-
-    baseline = controller._bootstrap_sources
-    frozen_ids = {identifier for scope, _digests in json.loads(baseline[0])
-                  for identifier in scope["executor_reservation_ids"]} if baseline is not None else set()
-    result = []
-    for target in targets:
-        scope = target.scope
-        if scope['role'] == 'C' and _current_coordinator_target(controller, target, frozen_ids):
-            continue
-        issuer = controller._current_workers.get(scope["worker_index"]) if scope["role"] == "W" else None
-        exclude = (scope["c_run_id"] == controller.c_run_id and issuer is not None
-                   and not frozen_ids.intersection(scope["executor_reservation_ids"])
-                   and all(identifier in issuer._executor_records
-                           and issuer._executor_records[identifier] == (target.digests or {}).get(identifier)
-                           for identifier in scope["executor_reservation_ids"]))
-        if exclude:
-            try:
-                issuer._require_current()
-                issuer._require_worker(issuer.process.pid)
-            except WorkerCommitRejected:
-                exclude = False
-        if not exclude:
-            result.append(target)
-    return result
-
-
-# LLM: 本地来源须是原controller捕获的精确对象与原gate/claim/lease；逐ID对照实际自产摘要，不给同桶未知记录豁免。
-# 函数用途: 从当前旧域比较中排除本C真正提交过的本地主体P1，其物理寿命责任仍留原lease账。
-def _current_coordinator_target(controller, target, frozen_ids):
-    from .multiprocess_coordinator_executor_source import CoordinatorExecutorSource
-    from .multiprocess_worker_commit import WorkerCommitRejected
-
-    scope = target.scope
-    if scope['c_run_id'] != controller.c_run_id or frozen_ids.intersection(scope['executor_reservation_ids']):
-        return False
-    submitted = {}
-    try:
-        for source, origin in controller._current_coordinator_sources:
-            if type(source) is not CoordinatorExecutorSource or source._sources is not origin or origin[4] is not controller:
-                return False
-            source._require_source_identity()
-            for identifier, digest in source._executor_records.items():
-                if identifier in submitted:
-                    return False
-                submitted[identifier] = digest
-    except WorkerCommitRejected:
-        return False
-    return all(submitted.get(identifier) == (target.digests or {}).get(identifier)
-               for identifier in scope['executor_reservation_ids'])
-
-
 # LLM: closing仅原C物理域/host精确结清；内存门只冻结原refs，域观察及host join在门外；不发signal或按TTL/EOF清pin，同步C/native收尾测试。
 # 函数用途: 等原内核域与末回送结清责任，未知域保pin且不持C短门等待消费者。
 def collect_coordinator_executor_domains(controller):

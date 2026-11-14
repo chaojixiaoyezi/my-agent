@@ -43,13 +43,6 @@ def _resolve_agent(args):
     return make_agent(args)
 
 
-def _load_and_validate_routes(index_path: Path, agent) -> tuple[list[MemoryRoute], list[str]]:
-    from ...agent.memory_routing import load_routes, validate_routes
-    routes = load_routes(index_path)
-    warnings = validate_routes(routes, agent.root)
-    return routes, warnings
-
-
 def _load_routes_for_matching(index_path: Path, agent, args) -> tuple[list[MemoryRoute], list[MemoryRouteMatch], list[str], list[str]]:
     from ...agent.memory_routing import load_routes
 
@@ -62,14 +55,6 @@ def _load_routes_for_matching(index_path: Path, agent, args) -> tuple[list[Memor
 
     resolution = resolve_required_paths(matches, mode=mode, auto_read_limit=auto_read_limit)
     return routes, matches, resolution.required_read_paths, resolution.candidate_paths
-
-
-def _try_validate_routes(index_path: Path, agent) -> tuple[bool, list[MemoryRoute], list[str], list[str]]:
-    try:
-        routes, route_warnings = _load_and_validate_routes(index_path, agent)
-        return True, routes, route_warnings, ["memory route validation completed."]
-    except Exception as exc:
-        return False, [], [], [f"memory route index could not be loaded: {type(exc).__name__}: {exc}"]
 
 
 def _try_validate_routes_for_root(index_path: Path, authority_root: Path) -> tuple[bool, list[MemoryRoute], list[str], list[str]]:

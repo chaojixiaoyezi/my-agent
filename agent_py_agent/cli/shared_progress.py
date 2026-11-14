@@ -181,10 +181,6 @@ def _dict_metadata(run: Any, key: str) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _read_takeover_read_order(readiness_ref: str, failure_ref: str) -> list[str]:
-    return _read_takeover_read_order_report(readiness_ref, failure_ref)[0]
-
-
 def _read_takeover_read_order_report(readiness_ref: str, failure_ref: str) -> tuple[list[str], dict[str, object] | None]:
     refs = [readiness_ref, failure_ref]
     if readiness_ref:

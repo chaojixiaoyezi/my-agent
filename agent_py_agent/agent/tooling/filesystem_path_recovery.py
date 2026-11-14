@@ -305,20 +305,6 @@ def _score_near_name_entries(
     return scored
 
 
-# LLM: Reads an entry's type without following symlinks, so a link can never be classified by what
-# it points at (which may live outside every granted root).
-# 函数用途: 用 follow_symlinks=False 判断条目类型，不因链接目标而分类。
-def _entry_kind_matches(entry: os.DirEntry, expected_kind: str) -> bool:
-    try:
-        if expected_kind == "file":
-            return entry.is_file(follow_symlinks=False)
-        if expected_kind == "directory":
-            return entry.is_dir(follow_symlinks=False)
-        return entry.is_file(follow_symlinks=False) or entry.is_dir(follow_symlinks=False)
-    except OSError:
-        return False
-
-
 # LLM: Returns None when the distance exceeds ``limit`` so callers can skip cheaply; the early
 # exit matters because this runs once per directory entry. Two-row rolling array: the per-row
 # "did anything stay within limit" check happens in a helper, so nesting stays at two levels.

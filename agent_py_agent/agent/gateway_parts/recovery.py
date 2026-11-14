@@ -800,26 +800,6 @@ def _terminal_directory_stamp(directory: Path) -> tuple[int, int] | None:
     return (int(stat.st_mtime_ns), int(stat.st_size))
 
 
-# LLM: 游标里的目录时间戳是上次扫描时的观察值；坏值当没记录（宁可多扫一次，不漏补）。
-# 函数用途: 从游标负载里读出上次记录的终态目录时间戳。
-def _cursor_directory_stamp(cursor: dict) -> tuple[int, int] | None:
-    value = cursor.get("directory_stamp")
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        return None
-    try:
-        return (int(value[0]), int(value[1]))
-    except (TypeError, ValueError):
-        return None
-
-
-# LLM: 追平 = 上一轮已沿文件名推进到目录末尾；只有追平之后，目录时间戳没变才能安全跳过。
-#   否则积压（需要处理的文件多于每轮上限）会被节流卡死，崩溃恢复退化成每小时补一批。
-#   旧游标没有这个字段时按未追平处理（宁可多扫一轮，不漏补）。
-# 函数用途: 从游标负载里读出上一轮是否已沿文件名推进到目录末尾。
-def _cursor_caught_up(cursor: dict) -> bool:
-    return cursor.get("caught_up") is True
-
-
 # LLM: 游标是投影扫描唯一的持久进度：last_name 决定轮转起点，directory_stamp 决定稳态是否跳过，
 #   caught_up 决定"目录没变"能不能跳过（未追平必须继续推进），full_scan_at 决定低频全量复核
 #   何时到期；它们必须一起更新，避免"跳过了却没记录"或"没追平却停止"。收成小数据类是为了

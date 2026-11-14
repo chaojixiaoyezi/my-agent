@@ -80,10 +80,6 @@ def _write_subagents_test_classification(task, report, output: dict[str, object]
     return classification
 
 
-def _output_declares_tests(task) -> bool:
-    return bool([item for item in _read_task_output(task).get("tests", []) if isinstance(item, dict)])
-
-
 def _subagents_tests_exit_code(report) -> int:
     if report.total_tests <= 0 or report.failed > 0:
         return 1

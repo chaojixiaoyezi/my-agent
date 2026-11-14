@@ -205,45 +205,6 @@ def _observe(authorized, context, ports, payload):
     return data
 
 
-# LLM: 最多读取10000条公开投影；超限拒绝而非报告部分集合为完整态势，错误列表去重不丢覆盖缺口。
-# 函数用途: 为选定owner的态势聚合收集有界公开页。
-def _gather(method, caller, *, owner_ids=None, kinds=None, severity="", since="", options=None):
-    arguments = dict(options or {})
-    for key, val in (("owner_ids", owner_ids), ("kinds", kinds), ("severity", severity), ("since", since)):
-        if val not in (None, ""):
-            arguments[key] = val
-    rows, errors, token, as_of = [], {}, "", ""
-    for _ in range(50):
-        data = method(caller, limit=200, cursor=token, **arguments)
-        rows.extend(data["items"])
-        errors.update({digest(row): row for row in data["source_errors"]})
-        as_of = data["as_of"]
-        token = data["next_cursor"]
-        if not token:
-            return rows, list(errors.values()), as_of
-    raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
-
-
-# LLM: 明确的owner_ids不可静默变成全局查询；所有汇总只消费AG1安全投影，不触及源私有记录。
-# 函数用途: 计算页面选中账号的态势子集。
-def _selected_posture(service, caller, owner_ids):
-    owners, errors, stamp = _gather(service.list_owners, caller)
-    requested = set(owner_ids)
-    if requested - {row["owner_id"] for row in owners}:
-        raise AuditGroupError("OWNER_NOT_FOUND", status_code=404)
-    owners = [row for row in owners if row["owner_id"] in requested]
-    assets, failures, _ = _gather(service.summarize_assets, caller, owner_ids=owner_ids)
-    alerts, alert_errors, _ = _gather(service.list_alerts, caller, owner_ids=owner_ids)
-    errors = list({digest(row): row for row in [*errors, *failures, *alert_errors]}.values())
-    return {"coverage": "partial" if errors else "complete", "source_errors": errors, "as_of": stamp,
-        "owners_total": len(owners), "enabled_owners": sum(row["status"] == "enabled" for row in owners),
-        "audit_group_members": sum(row["in_audit_group"] for row in owners),
-        "assets_by_kind": {kind: sum(row["kind"] == kind for row in assets)
-                           for kind in ("script", "workflow", "skill", "monitor")},
-        "active_monitors": sum(row["kind"] == "monitor" and row["enabled"] for row in assets),
-        "alerts_summary": {"total": len(alerts), "error": len(alerts)}}
-
-
 # LLM: manager先持久绑定代次再由真实Gateway服务入队，队列重放不重新决定线程，后台不会被分卷迁移。
 # 函数用途: 接通四个Bot动作并返回准确受理回执。
 def _bot(authorized, context, ports, payload):

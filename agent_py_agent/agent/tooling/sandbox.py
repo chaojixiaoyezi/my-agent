@@ -1516,20 +1516,6 @@ def _persona_parent_writable(path: Path, mounts: tuple[_MountProjection, ...]) -
     raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: namespace alias cycle")
 
 
-# LLM: 逆序单次遍历挂载，用已覆盖的路径前缀排除影子项；成本随总路径段数增长，不逐项重扫挂载表。
-# 函数用途: 取得保持原顺序的最终有效挂载，保留异名、空覆盖和嵌套写根。
-def _effective_mounts(mounts: tuple[_MountProjection, ...]) -> tuple[_MountProjection, ...]:
-    covered: set[str] = set()
-    effective = []
-    for mount in reversed(mounts):
-        target_str = os.fspath(mount.target)
-        if target_str in covered or any(parent in covered for parent in _str_parents(target_str)):
-            continue
-        covered.add(target_str)
-        effective.append(mount)
-    return tuple(reversed(effective))
-
-
 # LLM: 只移除随后恢复的子挂载影子，ro-bind-try与ro-bind同组三参数处理；非挂载选项与同目标挂载保留。
 # 函数用途: 从argv清掉旧子挂载的影子副本，空挂载与紧邻的remount-ro成组移除。
 def _remove_shadowed_mount_arguments(argv: list[str], arguments: set[tuple[str, ...]]) -> None:
