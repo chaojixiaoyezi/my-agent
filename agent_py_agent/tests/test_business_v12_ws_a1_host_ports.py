@@ -572,11 +572,15 @@ def test_gateway_startup_wiring_and_biz_004_governance_guard(native, monkeypatch
     assert res == 'started'
     assert fake_agent._business_host_ports_wired is True
     assert fake_agent.business_space_reference_resolver is not None
-    # 验证 G4 工具已注册 (spaces_archive, interfaces_*, assets_*)
+    # 验证 G4 工具已注册 (business_space 含 spaces.archive / interfaces.* / assets.*，且独立注册采用确认工具)
     tool_names = [getattr(getattr(t, 'model_spec', None), 'name', '') for t in registered_tools]
-    assert 'business_spaces_archive' in tool_names
-    assert any(name.startswith('business_interfaces_') for name in tool_names)
-    assert any(name.startswith('business_assets_') for name in tool_names)
+    assert 'business_space' in tool_names
+    assert 'business_assets_versions_accept' in tool_names
+    space_tool = next(t for t in registered_tools if getattr(t, 'model_spec', None) and t.model_spec.name == 'business_space')
+    space_actions = set(space_tool.model_spec.input_schema['properties']['action']['enum'])
+    assert 'spaces.archive' in space_actions
+    assert any(act.startswith('interfaces.') for act in space_actions)
+    assert any(act.startswith('assets.') for act in space_actions)
 
     # 验证 business_spaces_enabled=False 时不装配
     fake_agent_disabled = SimpleNamespace(

@@ -35,7 +35,6 @@ from agent_py_agent.agent.plugin_host.business_action_specs import (
     validate_object,
 )
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-from agent_py_agent.agent.tooling.business_spaces_tool import BusinessSpacesTool
 from agent_py_agent.agent.tooling.executor import _bound_redacted_input
 from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome
 from agent_py_agent.agent.tooling.tool_operation_coordinator import _result_payload
@@ -313,25 +312,37 @@ def test_reconciliation_receipts_publish_the_original_scoped_reason(tmp_path):
     assert not row['error']['retryable'] and '/private/internal' not in str(row)
 
 
-def test_biz013_business_spaces_tool_effect_outcome_canonical():
-    class FakeService:
-        owner_id = 'local/test'
+def test_biz013_business_spaces_tool_effect_outcome_canonical(tmp_path: Path, monkeypatch):
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts import business_api as api
+    from agent_py_agent.agent.settings import AgentConfig
 
-        def authorize_call(self, action, params, actor):
-            pass
-
-        def call(self, action, params, actor, expected_revision=None, idempotency_key=None):
-            if action == 'spaces.list':
-                return {'spaces': []}
-            if action == 'spaces.create':
-                if params.get('name') == 'Error Space':
-                    raise BusinessError('BUSINESS_SPACE_DUPLICATE')
-                return {'space_id': 'sp-123'}
-            return {'ok': True}
-
-    service = FakeService()
-    actor = BusinessActor('local/test', 'user', service, lambda a, f: True)
-    tool = BusinessSpacesTool(service, actor=actor)
+    home = tmp_path / 'biz013-home'
+    monkeypatch.setenv('MY_AGENT_HOME', str(home))
+    host = SimpleAgent(
+        AgentConfig(
+            model_backend='echo',
+            my_agent_home=str(home),
+            memory_path='memory.jsonl',
+            execution_mode='local_unmanaged',
+            business_spaces_enabled=True,
+        ),
+        tmp_path / 'biz013-ws',
+    )
+    thread = host.conversation_store.threads.get_or_create({
+        'canonical_user_id': 'local-agent',
+        'channel': 'tui',
+        'channel_conversation_id': 'biz013-conv',
+        'channel_user_id': 'local-agent',
+        'owner_id': host.home_paths.owner_id,
+        'owner_home': str(host.home_paths.owner_home_dir),
+    })
+    host._current_run_params = RunParams(
+        request_id='biz013-req',
+        task_attributes={'conversation_thread_id': thread.thread_id},
+    )
+    tool = host.tools.tools['business_space']
 
     res_list = tool.execute({'action': 'spaces.list', 'params': {}, 'request_id': 'req-list-1234'})
     assert res_list.ok is True
@@ -348,32 +359,33 @@ def test_biz013_business_spaces_tool_effect_outcome_canonical():
     assert res_create.effect_outcome == ''
     assert res_create.result_envelope['effect_outcome'] == 'committed'
 
-    res_fail = tool.execute({
+    res_duplicate = tool.execute({
         'action': 'spaces.create',
         'request_id': 'req-create-1235',
         'idempotency_key': 'idemp-key-12345679',
-        'params': {'name': 'Error Space'},
+        'params': {'name': 'Valid Space'},
     })
-    assert res_fail.ok is False
-    assert res_fail.effect_outcome == 'unknown'
+    assert res_duplicate.ok is False
+    assert res_duplicate.effect_outcome == 'not_started'
 
-    class ExplicitErrorService(FakeService):
-        def call(self, action, params, actor, expected_revision=None, idempotency_key=None):
-            err = BusinessError('BUSINESS_SPACE_DUPLICATE')
-            err.effect_outcome = 'failed'
-            raise err
-
-    explicit_service = ExplicitErrorService()
-    actor_explicit = BusinessActor('local/test', 'user', explicit_service, lambda a, f: True)
-    tool_explicit = BusinessSpacesTool(explicit_service, actor=actor_explicit)
-    res_explicit = tool_explicit.execute({
+    orig_invoke = api.BusinessServices.invoke
+    monkeypatch.setattr(
+        api.BusinessServices,
+        'invoke',
+        lambda self, action, params, context, **kw: (_ for _ in ()).throw(
+            BusinessError('REVISION_CONFLICT', effect_outcome='unknown')
+        )
+        if action == 'spaces.create'
+        else orig_invoke(self, action, params, context, **kw),
+    )
+    res_unknown = tool.execute({
         'action': 'spaces.create',
         'request_id': 'req-create-1236',
         'idempotency_key': 'idemp-key-12345680',
-        'params': {'name': 'Error Space'},
+        'params': {'name': 'Uncertain Space'},
     })
-    assert res_explicit.ok is False
-    assert res_explicit.effect_outcome == 'failed'
+    assert res_unknown.ok is False
+    assert res_unknown.effect_outcome == 'unknown'
 
     res_bad = tool.execute({'action': 'spaces.create', 'params': {}, 'request_id': 'req-bad'})
     assert res_bad.ok is False

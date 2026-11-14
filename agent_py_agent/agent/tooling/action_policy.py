@@ -293,36 +293,22 @@ def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | N
 
 
 # LLM: 业务门只收窄原授权；旧无上下文调用无新读取/导入。校验在effect/claim/handler前，不能替代后续原路径、审批和工具门。
-# 函数用途: 从真实native handler或宿主typed context重新核验当次业务范围，不用展示标签授予执行权。
+# 函数用途: 从宿主typed context重新核验当次业务范围，不用展示标签授予执行权。
 def _business_scope_decision(request: ActionPolicyRequest, runtime: ToolRuntime) -> ActionDecision | None:
-    native = runtime.model_spec.name == 'business_spaces'
-    if not native and request.business_context is None and request.business_actor is None:
+    if request.business_context is None and request.business_actor is None:
         return None
     from ..conversation.business_access import BusinessError
     from ..conversation.business_context import revalidate_business_context
 
     try:
-        handler = runtime.handler
-        if native:
-            from .business_spaces_tool import BusinessSpacesTool
-
-            if type(handler) is not BusinessSpacesTool:
-                raise BusinessError('ACTOR_REQUIRED')
-            handler.authorize_invocation(request.call.arguments)
-        if request.business_context is not None or request.business_actor is not None:
-            actor = request.business_actor if request.business_actor is not None else handler.actor if native else None
-            # 仅实际包范围读取才重验该包，不因A换代封死B、取消/状态查询或普通Skill。
-            package = (request.call.arguments.get('package_id')
-                       if runtime.model_spec.name == 'skill_search' else None)
-            source = request.call.arguments.get('source_ref')
-            if isinstance(source, dict) and source.get('kind') == 'capability_package':
-                package = source.get('package_id')
-            revalidate_business_context(actor=actor, context=request.business_context,
-                                        package_ref=package.strip() if isinstance(package, str) and package.strip() else None)
-            if native:
-                sid = request.call.arguments.get('params', {}).get('space_id')
-                if sid is not None and sid != request.business_context.space_id:
-                    raise BusinessError('SPACE_SCOPE_MISMATCH')
+        # 仅实际包范围读取才重验该包，不因A换代封死B、取消/状态查询或普通Skill。
+        package = (request.call.arguments.get('package_id')
+                   if runtime.model_spec.name == 'skill_search' else None)
+        source = request.call.arguments.get('source_ref')
+        if isinstance(source, dict) and source.get('kind') == 'capability_package':
+            package = source.get('package_id')
+        revalidate_business_context(actor=request.business_actor, context=request.business_context,
+                                    package_ref=package.strip() if isinstance(package, str) and package.strip() else None)
     except BusinessError as error:
         # 只发表当前已授权scope的有限定位事实；异常正文/路径/其它Owner信息不进入模型回执。
         public = {'business_scope_checked': True}

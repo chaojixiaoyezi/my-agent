@@ -12,6 +12,16 @@ from ..subagents.role_templates import (
     SHELL_SESSION_TOOLS,
     active_model_subagent_tools,
 )
+from ..tooling.registry_auth import (
+    CATALOG_ONLY_TOOL_GRANT,
+    action_ceilings,
+    intersect_tool_grants,
+    normalize_tool_grants,
+)
+from ..tooling.versioned_input_decoder import (
+    business_domain_actions,
+    retired_tool_aliases,
+)
 from .models import SESSION_TASK_WAKE_REASON, SUBAGENT_LIFECYCLE_WAKE_REASONS
 
 # 后台唤醒继续同一 Agent；本表提供默认目录，owner/task 策略在此基础上收紧。
@@ -78,10 +88,20 @@ SESSION_TASK_WAKE_ALLOWED_TOOLS = (
     "list_owner_sessions",
     # 业务派活（tasks.assign/submit）也走 session_task 唤醒：后台代理/总控接单后可只读查看空间与团队、
     #   再分派或追问；tasks.submit 与身份生命周期仍不放入，避免总控自递归与后台改团队编制。
-    "business_spaces_get", "business_spaces_list",
-    "business_spaces_capabilities_resolve", "business_spaces_usage_list", "business_spaces_packages_catalog",
-    "business_background_agents_list", "business_background_agents_get",
-    "business_tasks_assign", "business_tasks_follow_up", "business_tasks_get", "business_tasks_list", "business_messages_list",
+    "business_space",
+    "business_execution",
+    "business_space:spaces.get",
+    "business_space:spaces.list",
+    "business_space:spaces.capabilities.resolve",
+    "business_space:spaces.usage.list",
+    "business_space:spaces.packages.catalog",
+    "business_execution:background_agents.list",
+    "business_execution:background_agents.get",
+    "business_execution:tasks.assign",
+    "business_execution:tasks.follow_up",
+    "business_execution:tasks.get",
+    "business_execution:tasks.list",
+    "business_execution:messages.list",
 )
 
 GOAL_BACKGROUND_ALLOWED_TOOLS = (
@@ -209,15 +229,20 @@ def background_allowed_tools(
 # LLM: 初次展示取原授权闭包与显式运行上界交集；记忆/画像等重工具只按结构化唤醒预载，授权仍可按需发现，不解析正文。
 # 函数用途: 为后台首次模型请求选择所需工具，未展示的允许工具仍能按需发现。
 def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -> frozenset[str]:
-    allowed = frozenset(background_allowed_tools(request=request))
+    allowed_grants = background_allowed_tools(request=request)
     if request.allowed_tools is not None:
-        allowed &= frozenset(request.allowed_tools)
-    if "tool_search" not in allowed:
+        allowed_grants = intersect_tool_grants(allowed_grants, list(request.allowed_tools))
+    allowed = frozenset(item for item in allowed_grants if ":" not in item)
+    if "tool_search" not in allowed or CATALOG_ONLY_TOOL_GRANT in allowed_grants:
         return allowed
     heavy = {"watch_stream", "schedule", "package_build", "package_install", "remember", "update_persona"}
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    targets = set(tool_names(wake.get("tool_names"))) | set(tool_names(wake.get("required_tools")))
-    targets.update(tool_names(wake.get("tool_name")))
+    raw_targets = [
+        *tool_names(wake.get("tool_names")),
+        *tool_names(wake.get("required_tools")),
+        *tool_names(wake.get("tool_name")),
+    ]
+    targets = {item for item in normalize_tool_grants(raw_targets) if ":" not in item}
     reason = str(request.reason or wake.get("reason") or "").strip().lower()
     if reason in heavy:
         targets.add(reason)
@@ -343,21 +368,84 @@ def _default_profile_for_request(
     return "default", DEFAULT_BACKGROUND_ALLOWED_TOOLS
 
 
+def _subtract_disabled_grants(
+    grants: list[str],
+    raw_disabled: list[str],
+) -> list[str]:
+    if not grants or not raw_disabled:
+        return list(grants)
+    aliases = retired_tool_aliases()
+    domain_actions = business_domain_actions()
+    disabled_bare: set[str] = set()
+    disabled_actions: dict[str, set[str]] = {}
+    for entry in raw_disabled:
+        if entry in aliases:
+            target, act = aliases[entry]
+            disabled_actions.setdefault(target, set()).add(act)
+        elif entry == "list_tools":
+            disabled_actions.setdefault("tool_search", set()).add("catalog")
+        elif ":" in entry:
+            tool, sep, act = entry.partition(":")
+            if sep and tool and act and ":" not in act:
+                disabled_actions.setdefault(tool, set()).add(act)
+        else:
+            disabled_bare.add(entry)
+
+    bare_list = [item for item in grants if ":" not in item]
+    ceilings = action_ceilings(grants)
+    kept_bare: list[str] = []
+    kept_tokens: list[str] = []
+    for tool in bare_list:
+        if tool in disabled_bare:
+            continue
+        blocked = disabled_actions.get(tool)
+        current = ceilings.get(tool)
+        if not blocked:
+            kept_bare.append(tool)
+            if current is not None:
+                kept_tokens.extend(f"{tool}:{act}" for act in sorted(current))
+            continue
+        if current is not None:
+            remaining = set(current) - blocked
+            if not remaining:
+                continue
+            kept_bare.append(tool)
+            kept_tokens.extend(f"{tool}:{act}" for act in sorted(remaining))
+            continue
+        full: tuple[str, ...] | None = domain_actions.get(tool)
+        if full is None and tool == "tool_search":
+            full = ("search", "catalog")
+        if full is None:
+            kept_bare.append(tool)
+            continue
+        remaining = set(full) - blocked
+        if not remaining:
+            continue
+        kept_bare.append(tool)
+        if len(remaining) < len(full):
+            kept_tokens.extend(f"{tool}:{act}" for act in sorted(remaining))
+    return [*kept_bare, *kept_tokens]
+
+
 # LLM: 任务允许列表与 owner/task 禁用项只能收紧候选目录，不能加入新能力；保持原顺序与限制投影。
 # 函数用途: 计算结构化策略过滤后的工具及剔除结果，不修改原配置。
 def _apply_policy_limits(
     tools: list[str],
     request: BackgroundToolPolicyRequest,
 ) -> tuple[list[str], list[str]]:
-    allowed = list(dict.fromkeys(tools))
+    initial = normalize_tool_grants(tools)
+    allowed = list(initial)
     task_policy = request.policy_snapshot if isinstance(request.policy_snapshot, dict) else {}
     task_allowed = _task_allowed_tools(request)
     if task_allowed:
-        allowed = [tool for tool in allowed if tool in set(task_allowed)]
-    disabled = set(_disabled_tools_from_owner(request.owner_policy))
-    disabled.update(tool_names(task_policy.get("disabled_tools")))
-    filtered = [tool for tool in allowed if tool not in disabled]
-    removed = [tool for tool in allowed if tool not in filtered]
+        allowed = intersect_tool_grants(allowed, task_allowed)
+    raw_disabled = [
+        *_disabled_tools_from_owner(request.owner_policy),
+        *tool_names(task_policy.get("disabled_tools")),
+    ]
+    filtered = _subtract_disabled_grants(allowed, raw_disabled)
+    filtered_set = set(filtered)
+    removed = [tool for tool in initial if tool not in filtered_set]
     return filtered, removed
 
 

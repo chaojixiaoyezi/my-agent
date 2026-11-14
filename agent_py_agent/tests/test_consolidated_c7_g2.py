@@ -441,7 +441,7 @@ def call_tasks(agent, entrypoint, **params):
     request = {'action': 'tasks.list', 'request_id': 'local-pagination', 'params': params}
     if entrypoint == 'command':
         return api.run_business_command(agent, 'space', 'call ' + json.dumps(request))
-    outcome = agent.tools.tools['business_tasks_list'].execute(request)
+    outcome = agent.tools.tools['business_execution'].execute(request)
     result = json.loads(outcome.output)
     assert outcome.ok is (result['error'] is None), outcome
     if not outcome.ok and result.get('effect_outcome') == 'none':

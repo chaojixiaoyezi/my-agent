@@ -1799,99 +1799,791 @@ def _business_tool_control_code(code, effect):
     return code
 
 
-def _build_business_model_spec(spec):
-    """只装配静态模型合同，不读取owner、就绪状态或授权。"""
+_BUSINESS_FIELD_DESCRIPTIONS: dict[str, str] = {
+    'access_targets': '工作流声明要访问的外部或受控目标列表。',
+    'action': '要执行的业务动作名，须与对应 params 分支合同严格一致。',
+    'after_task': '后台代理完成单次任务后的处置策略（如保持待命或自动挂起）。',
+    'agent_id': '常驻后台代理ID，从 business_execution(action="background_agents.list"|"background_agents.create") 获取。',
+    'alias': '凭据在当前工作流内引用的别名标识。',
+    'approval_id': '待决业务审批单ID，从 business_space(action="approvals.list"|"approvals.get") 获取。',
+    'arguments': '工作流工具步骤的静态入参键值对象。',
+    'arguments_map': '工作流工具步骤从上下文映射入参的字段映射表。',
+    'artifact_id': '业务产物ID，从 business_activity(action="artifacts.list") 或资产引用获取。',
+    'artifact_ref': '关联的已落盘业务产物引用对象（含 artifacts.list/get 返回的 artifact_id、精确 version_ref 与可选 content_sha256）。',
+    'as': 'foreach 迭代步骤在单轮子上下文中绑定的当前元素变量名。',
+    'asset_id': '已登记业务资产ID，从 business_space(action="assets.list"|"assets.register") 获取。',
+    'asset_refs': '随任务提交一并冻结的业务资产精确版本引用列表（取自 assets.get / assets.versions.list）。',
+    'attempt_id': '单次执行尝试ID，从 executions.get 或 executions.list 返回记录获取。',
+    'authentication': '凭据绑定的认证机制类型标识。',
+    'authorization_ref': '策略变更关联的宿主审批或授权单引用ID（取自 approvals.get）。',
+    'automatic_release_scope_ref': '阶段策略自动放行适用的作用域引用标识。',
+    'backoff_factor': '步骤重试间隔的指数退避倍率。',
+    'batch_size': 'foreach 批处理每批包含的元素数量上限。',
+    'binding_id': '界面绑定记录ID，从 business_space(action="interfaces.list"|"interfaces.bind") 获取。',
+    'body_markdown': '工作流定义的正文说明与运行指引（Markdown 文本）。',
+    'budget_ref': '阶段策略绑定的配额或预算规则引用ID。',
+    'candidate_id': '数据源评估候选条目ID。',
+    'candidate_ref': '要查看变更对比的候选版本或提案引用ID（取自事件或审批记录）。',
+    'channel': '工作流通知步骤投递的目标通道标识。',
+    'condition': '步骤执行前置条件表达式或结构化守卫条件。',
+    'config': '工作流步骤的附加配置键值对象。',
+    'content_sha256': '产物内容的小写十六进制 SHA-256 校验摘要（取自 artifacts.get）。',
+    'controller': '界面绑定关联的控制器目标配置（指定默认总控或指定常驻代理）。',
+    'controller_agent_id': '接收任务的总控后台代理ID，从 controllers.get/ensure 或 background_agents.list 获取；省略时用空间默认总控。',
+    'credential_ref': '宿主凭据库中已登记的不透明凭据引用ID（禁止填入明文密钥）。',
+    'credential_refs': '工作流声明绑定的凭据引用列表。',
+    'cursor': '分页续读游标，仅原样传入同动作同筛选条件上一页返回的 next_cursor；首页省略，游标过期时从首页重取。',
+    'data_sources': '工作流声明依赖的数据源规格列表。',
+    'datasource_ids': '工作流启用的已登记数据源ID列表。',
+    'decision': '审批或候选评估的裁决结果枚举值。',
+    'default_project_ref': '业务空间默认关联的项目引用ID（null 表示不设默认项目）。',
+    'default_space_id': '界面绑定默认进入的业务空间ID（取自 spaces.list，null 表示无默认空间）。',
+    'definition': '完整的业务工作流结构化定义对象（含 descriptor、steps、edges 等）。',
+    'delay_seconds': '步骤首次重试前的等待秒数。',
+    'depends_on': '当前步骤依赖的上游步骤 step_id 列表。',
+    'description': '对象或步骤的简要用途说明。',
+    'descriptor': '工作流元信息描述符（含标识、名称、输入输出契约、数据源与凭据引用）。',
+    'disposition': '常驻后台代理退役时的未决工作处置方式（如交接或排空停止）。',
+    'edges': '工作流有向边列表，定义步骤间的流转关系。',
+    'enabled': '是否启用当前挂载、策略或工作流定义。',
+    'endpoint': '受控访问目标的服务端点标识或地址模板。',
+    'evaluated_at': '候选数据源完成评估的 ISO-8601 UTC 时间戳。',
+    'evaluated_candidates': '数据源选型时已评估的候选源记录列表。',
+    'evidence_ref': '支持正式采用该资产版本的审阅或验收证据引用ID。',
+    'expected_revision': '乐观并发控制期望修订号（非负整数），须先从对应资源的 get 接口读取当前 revision 后原样传入。',
+    'extra': '访问目标的附加受控元数据键值表。',
+    'filter': '列表查询的结构化过滤条件对象（按空间、项目、任务、运行或时间窗收窄）。',
+    'foreach': '工作流步骤的集合并行/分批迭代配置。',
+    'from': 'foreach 迭代读取的数据源集合路径或上游输出引用。',
+    'from_step_id': '工作流有向边的起点步骤 step_id。',
+    'handoff_agent_id': '退役交接时接管后续工作的常驻后台代理ID（取自 background_agents.list）。',
+    'id': '目标节点或工作流描述符的唯一标识ID。',
+    'idempotency_key': '写操作幂等键（16..128位字母数字/_/-），重试同一逻辑写请求时保持不变以命中原回执，新操作须换新键。',
+    'idempotent': '声明该工具步骤是否具备幂等重放安全性。',
+    'include_completed': '是否在返回结果中包含已结束（已完成/失败/取消）的记录。',
+    'include_descendants': '取消任务或执行时是否级联取消其派生的下级子任务与子代理。',
+    'include_display': '消息列表是否附带面向界面展示的摘要字段。',
+    'input_kind': '向后台代理投递消息的类型：message 为普通消息，guidance 为运行中引导提示（均不新建 SessionTask）。',
+    'inputs': '工作流输入契约定义或触发工作流运行时的实际输入参数对象。',
+    'inputs_map': '步骤输入字段与工作流上下文路径的绑定映射表。',
+    'instruction': '派发或追问的具体业务任务指令正文。',
+    'io_contract': '工作流输入输出字段类型与可空性契约定义。',
+    'kind': '资源、资产或目标节点的分类枚举类型。',
+    'label': '工作流连接边上的条件或展示标签。',
+    'lifecycle': '按生命周期状态筛选后台代理或工作流（如 active / suspended / retired / recycled）。',
+    'limit': '单页最多返回的记录条数。',
+    'max_attempts': '步骤包含首次执行在内的最大尝试次数。',
+    'max_batch_tokens': 'foreach 单批允许累计的最大估算 Token 预算。',
+    'max_bytes': '单次读取日志返回的最大 UTF-8 字节数。',
+    'max_depth': '展开代理树时向下递归的最大层级深度。',
+    'max_parallel': 'foreach 迭代允许同时并发执行的最大批次数。',
+    'metadata': '工作流描述符附带的非敏感自定义元数据键值对象。',
+    'method': '访问外部或受控目标时声明的操作/请求方法。',
+    'mode': '界面控制器路由模式或工作流清理策略模式。',
+    'model_profile_id': '常驻后台代理绑定的模型档位ID，从 business_space(action="model_profiles.list") 获取。',
+    'monitors': '资产引用包中关联的监控器标识列表。',
+    'mounts': '业务空间挂载的能力包配置列表（按挂载优先级排列）。',
+    'name': '资源、空间、资产、后台代理或工作流步骤的显示名称。',
+    'next_step_ids': '当前步骤完成后直接流转的下游步骤 step_id 列表。',
+    'notification_spec': '工作流通知步骤的通道、目标与模板配置。',
+    'nullable_outputs': '允许输出值为 null 的工作流输出字段名列表。',
+    'on_batch_error': 'foreach 单批执行失败时的错误处理策略。',
+    'on_error': '工作流步骤执行失败时的分支或中止策略。',
+    'operation_id': '业务或工具操作回执ID，从写动作返回结果、operations.get 或 tool_calls.list 获取。',
+    'origin_task_id': '发起本次再分派的上游源任务ID（取自当前受理的 SessionTask 或 tasks.get）。',
+    'orphan_after_days': '无引用工作流判定为孤儿可回收对象前的保留天数。',
+    'output_types': '工作流各输出字段名到类型标识的映射表。',
+    'outputs': '工作流声明产出的输出字段定义表。',
+    'package_ref': '单个能力包引用ID，从 spaces.packages.catalog 或 spaces.packages.list 获取。',
+    'package_refs': '能力包引用ID有序列表，各项从 spaces.packages.catalog 或 spaces.packages.list 获取（不可重复）。',
+    'params': '与所选 action 分支严格对应的闭合业务参数对象；禁止传入未声明字段。',
+    'parent_run_id': '父级执行运行ID，从 executions.list 或 subagents.get 获取。',
+    'policy': '要预览或应用的治理策略 / 清理策略结构化配置对象。',
+    'policy_ref': '事件订阅关联的投递或限流策略引用ID。',
+    'project_ref': '归属项目引用ID（无项目归属时为 null），须与所属空间或原冻结任务一致。',
+    'protected': '是否开启工作流防回收保护开关（true 禁止自动回收清理）。',
+    'purpose': '业务空间或常驻后台代理的职责与用途说明。',
+    'query': '按关键词或名称筛选目录、空间或能力的检索词。',
+    'query_scope': '数据源允许查询的范围约束说明。',
+    'reason': '执行审批裁决、取消运行或选用候选源的简要原因说明。',
+    'refs': '工作流描述符关联的脚本、技能、子工作流与监控资产引用集合。',
+    'reply_to_message_id': '所回复的目标消息ID，从 business_execution(action="messages.list") 获取。',
+    'request_id': '调用方生成的单次业务请求标识（用于回执对账与日志追踪，不充当权限或幂等键）。',
+    'resolution_ref': '恢复挂起工作流运行时引用的审批或人工处理结果ID。',
+    'response_ticket': '审批单签发的单次响应票据，须从 approvals.get 返回记录原样读取。',
+    'retry_policy': '工作流步骤失败重试次数、退避与可重试错误码策略。',
+    'retryable_codes': '允许按重试策略自动重试的错误码列表。',
+    'root_agent_id': '要查询代理层级树的根代理ID，从 background_agents.list 或 subagents.list 获取。',
+    'routing_instruction': '事件触发订阅投递时附带给目标处理方的路由说明。',
+    'run_id': '执行或子代理运行ID，从 executions.list、subagents.list 或任务受理回执获取。',
+    'sample_count': '候选数据源评估时抽样核验的样本条数。',
+    'schedule_ids': '绑定触发该工作流的定时任务ID列表。',
+    'schema_version': '工作流描述符遵循的契约模式版本号。',
+    'scope': '业务工作流可见与可执行的空间作用域配置（全局、指定空间列表或私有）。',
+    'scope_mode': '工作流作用域模式枚举（如 owner_global、spaces、none 等）。',
+    'script_id': '工作流脚本步骤调用的已登记脚本ID。',
+    'scripts': '工作流引用的脚本资产ID列表。',
+    'selected_space_id': '当前会话选中的业务空间ID（取自 sessions.space.get 或 spaces.list，null 表示未选中）。',
+    'since': '按起始时间筛选记录的 ISO-8601 时间戳下界。',
+    'skill_dir': '工作流关联的技能目录相对标识。',
+    'skill_ids': '步骤显式声明使用的技能ID列表。',
+    'skill_tags': '步骤按标签筛选可用技能的标签列表。',
+    'skills': '工作流引用的技能资产ID列表。',
+    'source_id': '数据源在工作流内的唯一标识ID。',
+    'source_ref': '日志读取或事件订阅绑定的精确事件源/运行源引用对象。',
+    'space_id': '业务空间ID，从 business_space(action="spaces.list"|"spaces.create") 获取。',
+    'space_ids': '作用域包含的业务空间ID列表（各项取自 spaces.list，不可重复）。',
+    'state': '按空间状态筛选（如 active / archived）。',
+    'status': '凭据绑定当前的可用状态枚举。',
+    'step_id': '工作流步骤在同一工作流定义内的唯一标识ID。',
+    'steps': '工作流按拓扑组织的所有执行步骤定义列表。',
+    'subscription_id': '业务事件订阅ID，从 business_activity(action="subscriptions.list"|"subscriptions.create") 获取。',
+    'subworkflow_ref': '子工作流步骤调用的目标工作流引用ID（取自 workflows.list）。',
+    'summary': '工作流功能的简明摘要描述。',
+    'surface_ref': '外部或本地交互界面入口引用标识（如频道会话或面板入口）。',
+    'system': '数据源所属外部或本地系统名称。',
+    'tags': '用于分类检索工作流的字符串标签列表。',
+    'target': '消息查询、权限核查或通知投递的目标节点引用对象。',
+    'target_id': '受控访问目标在其分类下的唯一标识。',
+    'task_id': '业务任务ID，从 tasks.assign/tasks.submit 受理回执或 tasks.list 获取。',
+    'template': '通知步骤渲染消息所用的模板标识或正文模板。',
+    'text': '投递给常驻后台代理或子代理的消息/补充说明正文。',
+    'timeout_seconds': '单步执行允许的最大超时秒数。',
+    'to_step_id': '工作流有向边的终点步骤 step_id。',
+    'tool_name': '工作流工具步骤要调用的规范工具名称。',
+    'tool_spec': '工作流工具步骤的工具名、参数与幂等属性规格。',
+    'type': '受控访问目标的类型标识。',
+    'ui_position': '工作流步骤在可视化画布中的坐标位置对象。',
+    'until': '按结束时间筛选记录的 ISO-8601 时间戳上界。',
+    'version': '工作流描述符声明的版本号字符串。',
+    'version_ref': '精确资产或产物版本引用，从 assets.get、assets.versions.list 或 artifacts.list 获取；禁止写 latest。',
+    'workflow_ref': '业务工作流引用ID，从 business_activity(action="workflows.list"|"workflows.create") 获取。',
+    'workflow_run_id': '业务工作流运行实例ID，从 workflows.run 回执或 workflow_runs.list 获取。',
+    'workflows': '工作流描述符引用的关联子工作流ID列表。',
+    'x': '画布节点横坐标数值。',
+    'y': '画布节点纵坐标数值。',
+}
+
+_BUSINESS_ACTION_FIELD_OVERRIDES: dict[tuple[str, str], str] = {
+    ('tasks.assign', 'space_id'): '目标业务空间ID（取自 spaces.list）；省略时自动采用当前会话选中空间，显式传 null 表示无归属空间。',
+    ('tasks.assign', 'instruction'): '正式派给指定后台身份的任务指令正文；宿主新建 SessionTask 并冻结其业务上下文，返回 task_id 仅证明已受理。',
+    ('sessions.space.set', 'space_id'): '要切换为当前会话默认的业务空间ID（取自 spaces.list）；显式传 null 恢复默认，须带 sessions.space.get 返回的 expected_revision。',
+    ('background_agents.messages.send', 'text'): '投递给后台代理的消息或运行引导正文；不新建 SessionTask、不为新工作冻结空间上下文，正式派活请用 tasks.assign。',
+}
+
+_BUSINESS_DOMAIN_METADATA: dict[str, dict[str, object]] = {
+    'business_space': {
+        'category': 'spaces',
+        'description': (
+            '管理业务空间、包挂载、界面绑定、资产引用、策略和审批；先按action读取对应params合同。'
+            '正式采用资产版本须调用独立工具business_assets_versions_accept。读取资产正文用read_business_asset。'
+        ),
+        'deferred_summary': '管理业务空间、包挂载、界面绑定、资产引用、策略与审批',
+        'keywords': (
+            '业务空间', '空间', 'space', 'spaces', '/space',
+            '当前空间', '选择空间', '切换空间', '恢复默认空间', '/space use', '/space clear', 'sessions.space',
+            '挂载', '能力包', '界面绑定', '资产引用', '策略', '审批',
+            '创建', '新建', '列出', '列表', '查询', '查看', '修改', '更新', 'system.capabilities',
+        ),
+        'use_cases': (
+            '创建、查看、修改、归档或还原业务空间，以及查看或切换当前会话默认空间',
+            '管理空间能力包挂载、界面绑定、资产登记与版本列表、治理策略和审批单',
+        ),
+        'avoid_when': (
+            '正式采用业务资产版本时禁止使用本工具，必须调用独立人工确认工具 business_assets_versions_accept',
+            '读取已登记业务资产的 UTF-8 正文页时改用 read_business_asset',
+        ),
+        'examples': (
+            ('spaces.list', {'action': 'spaces.list', 'request_id': 'space-list-0001', 'params': {}}),
+            ('spaces.create', {
+                'action': 'spaces.create',
+                'request_id': 'space-create-0001',
+                'idempotency_key': 'space-create-key-0001',
+                'params': {'name': '示例业务空间'},
+            }),
+            ('sessions.space.get', {'action': 'sessions.space.get', 'request_id': 'session-space-0001', 'params': {}}),
+        ),
+    },
+    'business_execution': {
+        'category': 'background_agents',
+        'description': (
+            '管理常驻后台代理、正式派活、追问、子代理与执行记录。'
+            'tasks.assign创建任务（宿主新建SessionTask并冻结其业务上下文，返回task_id只证明已受理，省略space_id取当前选中空间）；'
+            'background_agents.messages.send只投递消息（不新建SessionTask、不为新工作冻结上下文，不代表派活完成）。'
+            '一次性并行子任务用create_subagents。'
+        ),
+        'deferred_summary': '管理常驻后台代理、正式派活、追问、子代理与执行记录',
+        'keywords': (
+            '后台代理', '常驻代理', 'background_agents', 'team', '/team',
+            '后台任务', '派活', '派任务', '分配任务', '布置任务', '交给后台代理', '交给总控', '提交任务',
+            '追问', '补充要求', '暂停', '挂起', '恢复', '退役', '还原', '取消',
+            '发送消息', '发消息', 'send_message', 'tasks', 'subagents', 'executions', 'agent_tree',
+        ),
+        'use_cases': (
+            '创建、查看、暂停、恢复、退役常驻后台代理或向其投递补充消息/引导',
+            '通过 tasks.assign 派给指定后台代理或用 tasks.submit 交给总控，追问任务进度并查看执行与子代理记录',
+        ),
+        'avoid_when': (
+            '不需要常驻后台身份的一次性并行子任务优先用 create_subagents',
+            'background_agents.messages.send 只投递消息或补充指导，不能代替 tasks.assign 正式派活',
+        ),
+        'examples': (
+            ('tasks.assign', {
+                'action': 'tasks.assign',
+                'request_id': 'assign-request-0001',
+                'idempotency_key': 'assign-key-00000001',
+                'params': {
+                    'agent_id': 'thread-bg-example',
+                    'space_id': 'space-example',
+                    'instruction': '在所派空间内完成任务并回报原task_id。',
+                },
+            }),
+            ('background_agents.messages.send', {
+                'action': 'background_agents.messages.send',
+                'request_id': 'message-request-0001',
+                'idempotency_key': 'message-key-00000001',
+                'params': {
+                    'agent_id': 'thread-bg-example',
+                    'input_kind': 'message',
+                    'text': '补充说明；已有任务继续按原范围处理。',
+                },
+            }),
+            ('background_agents.list', {
+                'action': 'background_agents.list',
+                'request_id': 'bg-list-0001',
+                'params': {},
+            }),
+        ),
+    },
+    'business_activity': {
+        'category': 'business',
+        'description': (
+            '查询业务事件、日志、操作回执、工具记录、用量和产物，管理订阅，并保留原业务工作流动作。'
+            '普通工作流优先用workflows；已有业务请求继续使用本入口，保持request_id、幂等键和原params结构。'
+        ),
+        'deferred_summary': '查询业务事件、日志、操作回执、工具记录、用量与产物，管理订阅与业务工作流',
+        'keywords': (
+            '业务事件', '日志', '操作回执', '工具记录', '用量', '产物', '订阅', '业务工作流',
+            'events', 'logs', 'operations', 'artifacts', 'subscriptions', 'usage', 'changes', 'tool_calls',
+            'workflows', 'workflow_runs', 'workflows.health', 'workflows.health.get', '工作流健康',
+        ),
+        'use_cases': (
+            '查询业务事件、日志、操作回执、工具调用、变更、用量和产物记录',
+            '管理业务事件订阅，或执行保留原业务请求信封与 16..128 位幂等键约束的 workflows.* / workflow_runs.* 动作',
+        ),
+        'avoid_when': (
+            '不依赖业务请求信封与业务空间治理的新建普通工作流优先用原生 workflows 工具',
+            '读取已授权业务资产的精确版本正文用 read_business_asset',
+        ),
+        'examples': (
+            ('events.list', {'action': 'events.list', 'request_id': 'events-list-0001', 'params': {}}),
+            ('operations.get', {
+                'action': 'operations.get',
+                'request_id': 'op-get-0001',
+                'params': {'operation_id': 'op-example-0001'},
+            }),
+            ('workflows.health.get', {
+                'action': 'workflows.health.get',
+                'request_id': 'wf-health-0001',
+                'params': {'workflow_ref': 'wf-daily'},
+            }),
+        ),
+    },
+}
+
+
+def _business_action_effect(spec) -> str:
+    """按冻结业务动作契约返回精确副作用等级；治理裁决与执行动作保持 dangerous。"""
+    if spec.action in {'approvals.decide', 'policies.apply', 'assets.versions.accept'}:
+        return 'dangerous'
+    effect = spec.metadata.get('effect')
+    if effect == 'read':
+        return 'read_only'
+    if effect == 'execute':
+        return 'dangerous'
+    return 'mutating'
+
+
+def _annotate_business_schema(node, *, action_name: str | None = None):
+    if isinstance(node, list):
+        return [_annotate_business_schema(item, action_name=action_name) for item in node]
+    if not isinstance(node, dict):
+        return node
+    updated = dict(node)
+    if isinstance(updated.get('properties'), dict):
+        new_props = {}
+        for prop_name, child in updated['properties'].items():
+            child_copy = _annotate_business_schema(child, action_name=action_name)
+            if isinstance(child_copy, dict):
+                existing = child_copy.get('description')
+                if not isinstance(existing, str) or not existing.strip():
+                    desc = (
+                        _BUSINESS_ACTION_FIELD_OVERRIDES.get((action_name or '', prop_name))
+                        or _BUSINESS_FIELD_DESCRIPTIONS.get(prop_name)
+                        or f'业务请求字段 {prop_name}。'
+                    )
+                    child_copy = {**child_copy, 'description': desc}
+            new_props[prop_name] = child_copy
+        updated['properties'] = new_props
+    for defs_key in ('$defs', 'definitions'):
+        if isinstance(updated.get(defs_key), dict):
+            updated[defs_key] = {
+                k: _annotate_business_schema(v, action_name=None)
+                for k, v in updated[defs_key].items()
+            }
+    for sub_key in ('items', 'additionalProperties'):
+        if isinstance(updated.get(sub_key), dict):
+            updated[sub_key] = _annotate_business_schema(updated[sub_key], action_name=action_name)
+    for comb_key in ('oneOf', 'anyOf', 'allOf'):
+        if isinstance(updated.get(comb_key), list):
+            updated[comb_key] = [
+                _annotate_business_schema(branch, action_name=action_name)
+                for branch in updated[comb_key]
+            ]
+    return updated
+
+
+def _collect_local_def_refs(node, out: set[str]) -> None:
+    if isinstance(node, dict):
+        ref = node.get('$ref')
+        if isinstance(ref, str) and ref.startswith('#/$defs/'):
+            name = ref[len('#/$defs/'):].replace('~1', '/').replace('~0', '~')
+            if name:
+                out.add(name)
+        for key, val in node.items():
+            if key == '$defs':
+                continue
+            _collect_local_def_refs(val, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_local_def_refs(item, out)
+
+
+def _merge_common_field_shapes(shapes: list[dict], description: str) -> dict:
+    from ..plugin_host.schemas import canonical_json
+
+    seen: set[str] = set()
+    distinct: list[dict] = []
+    for shape in shapes:
+        stripped = {k: v for k, v in shape.items() if k != 'description'}
+        sig = canonical_json(stripped)
+        if sig not in seen:
+            seen.add(sig)
+            distinct.append(stripped)
+    if len(distinct) == 1:
+        return {**distinct[0], 'description': description}
+    return {'anyOf': distinct, 'description': description}
+
+
+def _build_business_domain_model_spec(tool_name: str, specs: tuple):
+    from copy import deepcopy
+
     from ..tooling.models import ToolModelHints, ToolModelSpec
 
-    family = spec.action.split('.')[0]
-    title, keywords = {
-        'spaces': ('业务空间', ('业务空间', '空间', 'space', 'spaces', '/space')),
-        'background_agents': ('后台代理', ('后台代理', '常驻代理', 'background_agents', 'team', '/team')),
-        'tasks': ('后台任务', ('后台任务', '派活', '派任务', '分配任务', '布置任务', '交给后台代理', 'tasks')),
-        'sessions': ('会话空间', ('当前空间', '选择空间', '切换空间', '恢复默认空间', '/space use', '/space clear', 'sessions.space')),
-    }.get(family, ('业务动作', (spec.action,)))
-    verbs = {
-        'list': ('列出', '列表', '查询'), 'get': ('查看', '详情', '查询'),
-        'create': ('创建', '新建'), 'update': ('修改', '更新'),
-        'messages.send': ('发送消息', '发消息', 'send_message'),
-        'suspend': ('暂停', '挂起'), 'resume': ('恢复', '继续'),
-        'retire': ('退役', '停用'), 'restore': ('还原', '复原'),
-        'assign': ('派给', '分配', '执行'), 'submit': ('交给总控', '提交'),
-        'follow_up': ('追问', '补充要求', '继续'), 'cancel': ('取消', '停止'),
-    }.get(spec.action.partition('.')[2], ()) if family in {'spaces', 'background_agents', 'tasks'} else ()
-    purpose = (verbs[0] if verbs else '') + title + '：' + spec.action
-    if spec.action in {'sessions.space.get', 'sessions.space.set'}:
-        purpose = ('查看' if spec.action.endswith('.get') else '切换') + '当前会话空间：' + spec.action
-    if family == 'tasks' and spec.metadata['effect'] == 'execute':
-        purpose += '（异步执行；结束后结果自动回报本会话）'
-    model_schema = _model_business_schema(spec.native_request_schema)
-    description = purpose
-    examples = ()
-    if spec.action == 'background_agents.messages.send':
-        description += ('；向params.agent_id投递params.text，params.input_kind为message或guidance。'
-            '可能唤醒接收者，但不新建SessionTask，也不为新工作冻结空间/项目业务上下文；'
-            '需要正式派活、资产业务写入或任务终态跟踪时用business_tasks_assign，不能把消息受理当成任务已执行。'
-            '成功data.request_id与target_thread_id是消息凭据，不是新task_id。')
-        examples = (json.dumps({'action': spec.action, 'request_id': 'message-request-0001',
-            'idempotency_key': 'message-key-00000001', 'params': {'agent_id': 'thread-bg-example',
-                'input_kind': 'message', 'text': '补充说明；已有任务继续按原范围处理。'}}, ensure_ascii=False),)
-    if spec.action == 'sessions.space.set':
-        description += '；params.space_id显式null恢复默认；先get取得原revision，再带expected_revision与幂等键set；不改变已受理任务'
-    if spec.action == 'tasks.assign':
-        params_schema = model_schema['properties']['params']
-        params_schema['required'] = [key for key in params_schema['required'] if key != 'space_id']
-        description += '；省略 space_id 使用本次消息受理时选中的空间，显式 null 表示未归属空间'
-        description += ('；正式派给指定后台身份：params.agent_id填background_agents.create/get返回的agent_id，'
-            'params.instruction填任务正文，可用params.project_ref指定该Owner已有项目。'
-            '宿主创建原SessionTask并冻结其业务上下文；成功data.task_id/assignment_ref只证明已受理，'
-            '随后用business_tasks_get的params.task_id核终态，或等待原会话自动回报；勿重复派发。'
-            'background_agents.messages.send只是消息/指导，不代替本派活入口。')
-        examples = (json.dumps({'action': spec.action, 'request_id': 'assign-request-0001',
-            'idempotency_key': 'assign-key-00000001', 'params': {'agent_id': 'thread-bg-example',
-                'space_id': 'space-example', 'instruction': '在所派空间内完成任务并回报原task_id。'}},
-            ensure_ascii=False),)
-    return ToolModelSpec('business_' + spec.action.replace('.', '_'),
-        description + '；直接调用内置工具，状态和权限由当前宿主复核。',
-        model_schema,
-        hints=ToolModelHints(category=family if family in {'spaces', 'background_agents', 'tasks'} else 'business',
-            keywords=(*keywords, *verbs), use_cases=(purpose,),
+    if not specs:
+        raise ValueError(f'{tool_name} 至少需要一个已就绪业务动作')
+    meta = _BUSINESS_DOMAIN_METADATA[tool_name]
+    raw_defs: dict[str, dict] = {}
+    branches: list[dict] = []
+    req_id_shapes: list[dict] = []
+    idem_shapes: list[dict] = []
+    rev_shapes: list[dict] = []
+
+    for spec in specs:
+        projected = _model_business_schema(spec.native_request_schema)
+        branch_defs = projected.pop('$defs', {})
+        for def_name, def_val in branch_defs.items():
+            if def_name in raw_defs and raw_defs[def_name] != def_val:
+                raise ValueError(f'{tool_name} 共享定义冲突: {def_name}')
+            raw_defs[def_name] = def_val
+        branch = deepcopy(projected)
+        if spec.action == 'tasks.assign':
+            params_schema = branch['properties']['params']
+            params_schema['required'] = [key for key in params_schema['required'] if key != 'space_id']
+        props = branch.get('properties', {})
+        if isinstance(props.get('request_id'), dict):
+            req_id_shapes.append(props['request_id'])
+        if isinstance(props.get('idempotency_key'), dict):
+            idem_shapes.append(props['idempotency_key'])
+        if isinstance(props.get('expected_revision'), dict):
+            rev_shapes.append(props['expected_revision'])
+        annotated = _annotate_business_schema(branch, action_name=spec.action)
+        annotated['properties']['action'] = {
+            **annotated['properties']['action'],
+            'description': f'固定选择业务动作 {spec.action}。',
+        }
+        annotated['properties']['params'] = {
+            **annotated['properties']['params'],
+            'description': f'动作 {spec.action} 的闭合业务参数对象。',
+        }
+        branches.append(annotated)
+
+    action_names = [spec.action for spec in specs]
+    root_props: dict[str, dict] = {
+        'action': {
+            'type': 'string',
+            'enum': action_names,
+            'description': _BUSINESS_FIELD_DESCRIPTIONS['action'],
+        },
+        'params': {
+            'type': 'object',
+            'description': _BUSINESS_FIELD_DESCRIPTIONS['params'],
+        },
+        'request_id': _merge_common_field_shapes(
+            req_id_shapes or [{'type': 'string', 'minLength': 1, 'maxLength': 128}],
+            _BUSINESS_FIELD_DESCRIPTIONS['request_id'],
+        ),
+    }
+    if idem_shapes:
+        root_props['idempotency_key'] = _merge_common_field_shapes(
+            idem_shapes,
+            _BUSINESS_FIELD_DESCRIPTIONS['idempotency_key'],
+        )
+    if rev_shapes:
+        root_props['expected_revision'] = _merge_common_field_shapes(
+            rev_shapes,
+            _BUSINESS_FIELD_DESCRIPTIONS['expected_revision'],
+        )
+
+    root_required = ['action', 'params', 'request_id']
+    for opt_field in ('idempotency_key', 'expected_revision'):
+        if opt_field in root_props and all(opt_field in b.get('required', ()) for b in branches):
+            root_required.append(opt_field)
+
+    initial_refs: set[str] = set()
+    _collect_local_def_refs(root_props, initial_refs)
+    _collect_local_def_refs(branches, initial_refs)
+    reachable_defs: set[str] = set()
+    pending = list(initial_refs)
+    while pending:
+        def_name = pending.pop()
+        if def_name in reachable_defs or def_name not in raw_defs:
+            continue
+        reachable_defs.add(def_name)
+        nested: set[str] = set()
+        _collect_local_def_refs(raw_defs[def_name], nested)
+        pending.extend(name for name in nested if name not in reachable_defs)
+
+    schema: dict[str, object] = {
+        'type': 'object',
+        'properties': root_props,
+        'required': root_required,
+        'additionalProperties': False,
+        'oneOf': branches,
+    }
+    if reachable_defs:
+        schema['$defs'] = {
+            name: _annotate_business_schema(deepcopy(raw_defs[name]), action_name=None)
+            for name in sorted(reachable_defs)
+        }
+
+    ready_set = set(action_names)
+    examples = tuple(
+        json.dumps(sample_req, ensure_ascii=False)
+        for act, sample_req in meta['examples']
+        if act in ready_set
+    )
+    if not examples:
+        examples = (json.dumps(_sample_business_request(specs[0]), ensure_ascii=False),)
+
+    return ToolModelSpec(
+        name=tool_name,
+        description=str(meta['description']),
+        input_schema=schema,
+        hints=ToolModelHints(
+            category=str(meta['category']),
+            keywords=tuple(meta['keywords']),
+            use_cases=tuple(meta['use_cases']),
+            avoid_when=tuple(meta['avoid_when']),
             examples=examples,
-            default_deferred=True, deferred_summary=purpose))
+            default_deferred=True,
+            deferred_summary=str(meta['deferred_summary']),
+        ),
+    )
 
 
 @lru_cache(maxsize=128)
-def _cached_business_model_spec(spec):
-    # 原BusinessActionSpec只含不可变字段及完整合同JSON；缓存不会接收可变扩展定义。
-    return _build_business_model_spec(spec)
+def _cached_business_domain_model_spec(tool_name: str, specs: tuple):
+    return _build_business_domain_model_spec(tool_name, specs)
 
 
-def _business_model_spec(spec):
+def _business_domain_model_spec(tool_name: str, specs: tuple):
     from copy import deepcopy
 
     from ..plugin_host.business_action_specs import BusinessActionSpec
 
-    if type(spec) is BusinessActionSpec:
-        # 原型从不外泄；各Owner/调用者可变schema独立，改一个不能污染下一次装配。
-        return deepcopy(_cached_business_model_spec(spec))
-    return _build_business_model_spec(spec)
+    if all(type(spec) is BusinessActionSpec for spec in specs):
+        return deepcopy(_cached_business_domain_model_spec(tool_name, specs))
+    return _build_business_domain_model_spec(tool_name, specs)
+
+
+def _build_business_accept_model_spec(spec):
+    from ..tooling.models import ToolModelHints, ToolModelSpec
+
+    schema = _annotate_business_schema(
+        _model_business_schema(spec.native_request_schema),
+        action_name=spec.action,
+    )
+    example = {
+        'action': 'assets.versions.accept',
+        'request_id': 'accept-asset-0001',
+        'idempotency_key': 'accept-asset-key-0001',
+        'expected_revision': 1,
+        'params': {
+            'space_id': 'space-example',
+            'asset_id': 'asset-example',
+            'version_ref': 'ver-0001',
+        },
+    }
+    return ToolModelSpec(
+        name='business_assets_versions_accept',
+        description=(
+            '正式采用业务空间内指定资产版本（assets.versions.accept）；必须携带准确的 space_id、asset_id、'
+            'version_ref、当前 expected_revision 与幂等键，且每次执行均须经当前真实人类确认。'
+        ),
+        input_schema=schema,
+        hints=ToolModelHints(
+            category='business',
+            keywords=('资产版本采用', '采纳资产', '正式采用', 'assets.versions.accept', 'asset', 'accept'),
+            use_cases=('经用户本人明确审阅后，将业务空间内某个候选资产版本正式采用为当前生效版本',),
+            avoid_when=('查看资产或新增候选版本请使用 business_space；读取资产正文请使用 read_business_asset',),
+            examples=(json.dumps(example, ensure_ascii=False),),
+            default_deferred=True,
+            deferred_summary='正式采用业务空间内指定资产版本（须本人确认）',
+        ),
+    )
+
+
+def _sample_from_schema(node: object, root: dict, field_name: str = '', depth: int = 0):
+    if depth > 8 or not isinstance(node, dict):
+        return 'example'
+    if '$ref' in node and isinstance(node['$ref'], str) and node['$ref'].startswith('#/$defs/'):
+        def_name = node['$ref'][len('#/$defs/'):].replace('~1', '/').replace('~0', '~')
+        target = (root.get('$defs') or {}).get(def_name, {})
+        return _sample_from_schema(target, root, field_name=field_name, depth=depth + 1)
+    if 'const' in node:
+        return node['const']
+    if isinstance(node.get('enum'), list) and node['enum']:
+        return node['enum'][0]
+    for comb in ('oneOf', 'anyOf'):
+        if isinstance(node.get(comb), list) and node[comb]:
+            return _sample_from_schema(node[comb][0], root, field_name=field_name, depth=depth + 1)
+    kind = node.get('type')
+    if isinstance(kind, list):
+        kind = next((item for item in kind if item != 'null'), kind[0] if kind else 'string')
+    if kind == 'object' or 'properties' in node:
+        props = node.get('properties') or {}
+        req = node.get('required') or ()
+        return {
+            key: _sample_from_schema(props.get(key, {}), root, field_name=key, depth=depth + 1)
+            for key in req
+            if key in props
+        }
+    if kind == 'array':
+        min_items = int(node.get('minItems') or 0)
+        if min_items <= 0:
+            return []
+        item_schema = node.get('items') if isinstance(node.get('items'), dict) else {}
+        return [
+            _sample_from_schema(item_schema, root, field_name=field_name, depth=depth + 1)
+            + (f'-{idx}' if isinstance(_sample_from_schema(item_schema, root, field_name=field_name, depth=depth + 1), str) and idx > 0 else '')
+            if isinstance(_sample_from_schema(item_schema, root, field_name=field_name, depth=depth + 1), str)
+            else _sample_from_schema(item_schema, root, field_name=field_name, depth=depth + 1)
+            for idx in range(min_items)
+        ]
+    if kind == 'boolean':
+        return True
+    if kind in {'integer', 'number'}:
+        return int(node.get('minimum') or 0)
+    if kind == 'null':
+        return None
+    pattern = str(node.get('pattern') or '')
+    if '16,128' in pattern or field_name == 'idempotency_key':
+        return 'idem-example-0001'
+    if '64' in pattern or 'sha256' in field_name:
+        return '0' * 64
+    if '\\d{4}-\\d\\d-\\d\\dT' in pattern or field_name in {'since', 'until', 'evaluated_at'}:
+        return '2026-01-01T00:00:00Z'
+    min_len = int(node.get('minLength') or 1)
+    max_len = int(node.get('maxLength') or max(min_len, 32))
+    base = f'{field_name.replace("_", "-")}-example' if field_name else 'example-01'
+    if len(base) < min_len:
+        base = (base + '-' + '0' * min_len)[:min_len]
+    return base[:max_len]
+
+
+def _sample_business_request(spec) -> dict:
+    native = spec.native_request_schema
+    sample = _sample_from_schema(native, native)
+    if isinstance(sample, dict):
+        sample['action'] = spec.action
+        sample.setdefault('request_id', 'req-example-0001')
+        sample.setdefault('params', {})
+    return sample if isinstance(sample, dict) else {'action': spec.action, 'request_id': 'req-example-0001', 'params': {}}
+
+
+def _validation_failure_outcome(tool_name: str, params: object, error: HostAPIError, example_spec, *, extra_hint: str = ''):
+    from ..tooling.models import ToolHandlerOutcome
+
+    raw_req_id = params.get('request_id') if isinstance(params, dict) else None
+    req_id = raw_req_id if isinstance(raw_req_id, str) and 1 <= len(raw_req_id) <= 128 else 'invalid-request'
+    diag = dict(getattr(error, 'details', None) or {})
+    field_path = str(diag.get('field_path') or '$')
+    constraint = str(diag.get('constraint') or 'schema')
+    actual_type = str(diag.get('actual_type') or '')
+    expected = diag.get('expected')
+    example_dict = _sample_business_request(example_spec)
+    example_json = json.dumps(example_dict, ensure_ascii=False)
+    base_hint = str(diag.get('next_action') or '请按声明字段约束修正参数后重新调用；本次未开始执行。')
+    parts = [f'字段 {field_path} 未通过 {constraint} 校验']
+    if actual_type:
+        parts.append(f'实际类型={actual_type}')
+    if expected is not None:
+        parts.append(f'期望={expected}')
+    if extra_hint:
+        parts.append(extra_hint)
+    next_action = f'{"，".join(parts)}。{base_hint} 正确调用示例: {tool_name}({example_json})'[:2048]
+    diag['next_action'] = next_action
+    error.details = diag
+    details_list = _error_details(error)
+    envelope = _response(
+        req_id,
+        error={
+            'code': error.code,
+            'message': _public_host_error_message(error) or next_action,
+            'retryable': False,
+            'details': details_list,
+        },
+        effect='not_started',
+    )
+    return ToolHandlerOutcome(
+        tool_name,
+        False,
+        json.dumps(envelope, ensure_ascii=False),
+        result_envelope={**envelope, 'error_details': {**diag, 'example': example_dict}},
+        error_code='TOOL_INVALID_ARGUMENTS',
+        reported_error_code=error.code,
+        host_error={
+            'source': 'business_host',
+            'code': error.code,
+            'http_status': error.status,
+            'next_action': next_action,
+        },
+        effect_outcome='not_started',
+        failure_stage='validation',
+        next_action=next_action,
+    )
+
+
+def _validate_business_invocation_request(tool_name: str, specs_by_action: dict, ready_specs: tuple, params: object):
+    from ..plugin_host.schemas import reject_identity_injection, validate_tree
+    from ..tooling.versioned_input_decoder import business_domain_tool
+
+    fallback_spec = ready_specs[0]
+    if type(params) is not dict:
+        err = HostAPIError('INVALID_SCHEMA')
+        err.details = {
+            'field_path': '$',
+            'constraint': 'type',
+            'expected': 'object',
+            'actual_type': type(params).__name__,
+        }
+        return _validation_failure_outcome(tool_name, params, err, fallback_spec)
+    action = params.get('action')
+    if type(action) is not str or action not in specs_by_action:
+        err = HostAPIError('INVALID_SCHEMA')
+        extra_hint = ''
+        if type(action) is str:
+            try:
+                owner_tool = business_domain_tool(action)
+            except ValueError:
+                owner_tool = ''
+            if owner_tool and owner_tool != tool_name:
+                extra_hint = f'动作 {action} 归属工具 {owner_tool}，请改调 {owner_tool}'
+            elif owner_tool == tool_name:
+                extra_hint = f'动作 {action} 在当前宿主尚未就绪，请先用 system.capabilities 核对'
+        err.details = {
+            'field_path': '$.action',
+            'constraint': 'required' if 'action' not in params else ('enum' if type(action) is str else 'type'),
+            'expected': list(specs_by_action)[:12] if type(action) is str else 'string',
+            'actual_type': 'missing' if 'action' not in params else type(action).__name__,
+        }
+        return _validation_failure_outcome(tool_name, params, err, fallback_spec, extra_hint=extra_hint)
+
+    spec = specs_by_action[action]
+    try:
+        try:
+            validate_tree(params)
+        except ValueError:
+            tree_err = HostAPIError('INVALID_SCHEMA')
+            tree_err.details = {
+                'field_path': '$',
+                'constraint': 'maxDepth',
+                'expected': 'valid UTF-8 JSON value within depth <= 12',
+                'actual_type': 'object',
+            }
+            raise tree_err from None
+        native_schema = spec.native_request_schema
+        if (
+            spec.action == 'tasks.assign'
+            and isinstance(params.get('params'), dict)
+            and 'space_id' not in params['params']
+        ):
+            params_schema = {
+                **native_schema['properties']['params'],
+                'required': [k for k in native_schema['properties']['params']['required'] if k != 'space_id'],
+            }
+            native_schema = {
+                **native_schema,
+                'properties': {**native_schema['properties'], 'params': params_schema},
+            }
+        validated = validate_object(params, native_schema)
+        try:
+            reject_identity_injection(
+                validated.get('params', {}),
+                spec.action.startswith('users.'),
+                workflow_definition=spec.action in {'workflows.create', 'workflows.update'},
+            )
+        except HostAPIError as id_err:
+            if not getattr(id_err, 'details', None):
+                id_err.details = {
+                    'field_path': '$.params',
+                    'constraint': 'forbiddenIdentityField',
+                    'expected': 'no host identity or raw credential keys in params',
+                    'actual_type': 'object',
+                }
+            raise
+    except HostAPIError as error:
+        return _validation_failure_outcome(tool_name, params, error, spec)
+    return None
 
 
 # LLM: 注册与执行共用原宿主服务寿命；注册只看就绪状态，不把它缓存成调用授权。
 # 函数用途: 将当前就绪业务动作注册到原模型工具目录。
 def _inspect_business_tool_receipt(tool, request):
     """原快照中的宿主方法只查原主体/原实参永久回执，不执行原写动作。"""
-    if not isinstance(request, dict) or request.get('action') != tool.action:
+    if not isinstance(request, dict):
         raise HostAPIError('INVALID_SCHEMA')
-    spec = resolve_business_action_spec(tool.action)
+    action = request.get('action')
+    specs_by_action = getattr(tool, '_specs_by_action', None)
+    if isinstance(specs_by_action, dict):
+        if type(action) is not str or action not in specs_by_action:
+            raise HostAPIError('INVALID_SCHEMA')
+        spec = specs_by_action[action]
+    else:
+        expected_action = getattr(tool, 'action', None)
+        if type(action) is not str or action != expected_action:
+            raise HostAPIError('INVALID_SCHEMA')
+        spec = resolve_business_action_spec(action)
     if (spec.metadata['implementer'] != 'W1' or not spec.requires_idempotency
             or spec.metadata.get('human_authorization_required')):
         return None
     validate_object(request, spec.native_request_schema)
     context, services = local_business_context(tool._business_host, model=True)
-    context.check(tool.action, {'owner_id': services.owner_id, **request['params']})
-    result = services.spaces.inspect_receipt(tool.action, request['params'], actor=services.actor(context),
+    context.check(spec.action, {'owner_id': services.owner_id, **request['params']})
+    result = services.spaces.inspect_receipt(spec.action, request['params'], actor=services.actor(context),
         expected_revision=request.get('expected_revision'), idempotency_key=request['idempotency_key'])
-    context.check(tool.action, {'owner_id': services.owner_id, **request['params']})
+    context.check(spec.action, {'owner_id': services.owner_id, **request['params']})
     return validate_result('operations.get', result) if result is not None else None
 
 
@@ -1903,8 +2595,79 @@ def inspect_registered_business_receipt(runtime, request):
     return method(request)
 
 
+def _execute_registered_business_request(host, tool_name: str, spec, params: dict, invocation=None):
+    from ..tooling.models import ToolHandlerOutcome
+
+    action = spec.action
+    content_auth_required = spec.metadata.get('content_authorization_required') is True
+    try:
+        context, services = local_business_context(host, model=True)
+        if content_auth_required:
+            from ..conversation.business_access import content_authorization_facts
+
+            proof = getattr(invocation, 'human_approval_check', None)
+            expected = content_authorization_facts(
+                context.owner_id,
+                action,
+                params['params'],
+                params.get('expected_revision'),
+            )
+
+            def authorize_content(facts):
+                if not callable(proof) or facts != expected:
+                    return False
+                try:
+                    proof()
+                except PermissionError:
+                    return False
+                return True
+
+            context = replace(context, content_authorizer=authorize_content)
+            _ISSUED.add(context)
+        if action == 'tasks.assign' and isinstance(params.get('params'), dict) and 'space_id' not in params['params']:
+            params = {**params, 'params': {**params['params'], 'space_id': context.selected_space_id}}
+        status, result = execute_business(params, context, services)
+    except HostAPIError as error:
+        status, result = error.status, {
+            'error': {
+                'code': error.code,
+                'message': _public_host_error_message(error),
+                'details': _error_details(error),
+            },
+            'effect_outcome': error.outcome,
+        }
+    code = (result.get('error') or {}).get('code', '')
+    effect = result.get('effect_outcome', 'not_started')
+    tool_effect = 'not_started' if effect == 'none' else effect if effect in {'not_started', 'unknown'} else 'unknown'
+    host_error = {}
+    next_action = ''
+    if status >= 400 and isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
+        details = (result.get('error') or {}).get('details') or []
+        next_action = next((item.get('value') for item in details
+            if isinstance(item, dict) and item.get('key') == 'next_action'
+            and isinstance(item.get('value'), str)), '')
+        host_error = {
+            'source': 'business_host',
+            'code': code,
+            'http_status': status,
+            'next_action': next_action[:2048],
+        }
+    return ToolHandlerOutcome(
+        tool_name,
+        status < 400,
+        json.dumps(result, ensure_ascii=False),
+        result_envelope=result,
+        error_code=_business_tool_control_code(code, tool_effect) if status >= 400 else code,
+        reported_error_code=code,
+        host_error=host_error,
+        source_effect=_business_tool_source_effect(action, status, result, params.get('request_id')),
+        effect_outcome=tool_effect if status >= 400 else '',
+        next_action=next_action[:2048] if status >= 400 else '',
+    )
+
+
 def register_business_tools(agent):
-    """只向原Registry登记已接通动作；原执行、审批、归档和W9诊断链保持唯一。"""
+    """只向原Registry登记已接通的3个业务域工具与独立资产采用工具；原执行、审批、归档和诊断链保持唯一。"""
     if not bool(getattr(agent.config, 'business_spaces_enabled', False)):
         return
     from ..tooling.models import (
@@ -1916,27 +2679,60 @@ def register_business_tools(agent):
         OutputPolicy,
         ResourceScopePolicy,
         SandboxPolicy,
-        ToolHandlerOutcome,
         ToolRuntimePolicy,
     )
+    from ..tooling.versioned_input_decoder import business_domain_actions, business_domain_tool
 
-    class BusinessTool(BaseTool):
+    class BusinessDomainTool(BaseTool):
         inspect_operation_receipt = _inspect_business_tool_receipt
 
-        def __init__(self, spec):
+        def __init__(self, domain_name: str, ready_specs: tuple):
+            if any(
+                s.action == 'assets.versions.accept' or s.metadata.get('content_authorization_required') is True
+                for s in ready_specs
+            ):
+                raise ValueError('正式采用资产版本禁止并入普通业务域工具')
             self._business_host = agent
-            self.action = spec.action
-            self.content_authorization_required = spec.metadata.get("content_authorization_required") is True
-            self.model_spec = _business_model_spec(spec)
-            effect = {'read': 'read_only', 'configure': 'mutating', 'execute': 'dangerous'}.get(spec.metadata['effect'], 'mutating')
-            self.runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy(default_effect=effect),
-                approval_policy=ApprovalPolicy("always", require_human=True) if self.content_authorization_required else ApprovalPolicy(),
-                sandbox_policy=SandboxPolicy('none'), concurrency_policy=ConcurrencyPolicy('serial'),
-                idempotency_policy=IdempotencyPolicy('operation'), output_policy=OutputPolicy(trust='runtime'),
-                resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)))
+            self._domain_name = domain_name
+            self._ready_specs = tuple(ready_specs)
+            self._ready_action_names = tuple(s.action for s in self._ready_specs)
+            self._specs_by_action = {s.action: s for s in self._ready_specs}
+            self.model_spec = _business_domain_model_spec(domain_name, self._ready_specs)
+            by_action = tuple((s.action, _business_action_effect(s)) for s in self._ready_specs)
+            self.runtime_policy = ToolRuntimePolicy(
+                effect_resolver=EffectResolverPolicy(
+                    default_effect='mutating',
+                    by_parameter=(('action', by_action),),
+                ),
+                approval_policy=ApprovalPolicy(),
+                sandbox_policy=SandboxPolicy('none'),
+                concurrency_policy=ConcurrencyPolicy('serial'),
+                idempotency_policy=IdempotencyPolicy('operation'),
+                output_policy=OutputPolicy(trust='runtime'),
+                resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)),
+            )
 
-        # LLM: 每次执行仍取当前上下文并复核动作，不持有注册时或上一调用的actor。
-        # 函数用途: 从注册工具进入同一个本地业务调用边界。
+        def operation_identity_for(self, arguments):
+            if isinstance(arguments, dict):
+                action = arguments.get('action')
+                if type(action) is str and action in self._specs_by_action:
+                    return 'business_' + action.replace('.', '_')
+            return self.model_spec.name
+
+        def model_spec_for_actions(self, actions):
+            selected = tuple(s for s in self._ready_specs if s.action in actions)
+            if not selected:
+                return self.model_spec
+            return _business_domain_model_spec(self._domain_name, selected)
+
+        def validate_invocation(self, params, context):
+            return _validate_business_invocation_request(
+                self.model_spec.name,
+                self._specs_by_action,
+                self._ready_specs,
+                params,
+            )
+
         def execute(self, params):
             return self._execute(params)
 
@@ -1944,56 +2740,82 @@ def register_business_tools(agent):
             return self._execute(params, invocation)
 
         def _execute(self, params, invocation=None):
-            try:
-                if params.get('action') != self.action:
-                    raise HostAPIError('INVALID_SCHEMA', message=(
-                        f'当前工具要求 action 为 {self.action}。请修正该字段后调用，业务动作尚未执行。'))
-                context, services = local_business_context(agent, model=True)
-                if self.content_authorization_required:
-                    from ..conversation.business_access import content_authorization_facts
-                    proof = getattr(invocation, 'human_approval_check', None)
-                    expected = content_authorization_facts(context.owner_id, self.action, params['params'], params.get('expected_revision'))
-                    def authorize_content(facts):
-                        if not callable(proof) or facts != expected:
-                            return False
-                        try:
-                            proof()
-                        except PermissionError:
-                            return False
-                        return True
-                    context = replace(context, content_authorizer=authorize_content)
-                    _ISSUED.add(context)
-                if self.action == 'tasks.assign' and isinstance(params.get('params'), dict) and 'space_id' not in params['params']:
-                    params = {**params, 'params': {**params['params'], 'space_id': context.selected_space_id}}
-                status, result = execute_business(params, context, services)
-            except HostAPIError as error:
-                # 当前上下文认证可以在进入领域前拒绝；将原宿主的原因和纠正步骤连同效果交回模型。
-                status, result = error.status, {'error': {'code': error.code,
-                    'message': _public_host_error_message(error), 'details': _error_details(error)},
-                    'effect_outcome': error.outcome}
-            code = (result.get('error') or {}).get('code', '')
-            # 业务none表示只读无副作用；工具合同用not_started表达同一事实。
-            # 已提交/运行的业务结果不得误报未执行；JSON原值保留，工具层保守标unknown。
-            effect = result.get('effect_outcome', 'not_started')
-            tool_effect = 'not_started' if effect == 'none' else effect if effect in {'not_started', 'unknown'} else 'unknown'
-            # HTTP状态与领域原因取原宿主业务结果，独立于归一化控制码；模型或子提供方正文不能签发此字段。
-            host_error = {}
-            if status >= 400 and isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
-                details = (result.get('error') or {}).get('details') or []
-                next_action = next((item.get('value') for item in details
-                    if isinstance(item, dict) and item.get('key') == 'next_action'
-                    and isinstance(item.get('value'), str)), '')
-                host_error = {'source': 'business_host', 'code': code, 'http_status': status,
-                              'next_action': next_action[:2048]}
-            return ToolHandlerOutcome(self.model_spec.name, status < 400, json.dumps(result, ensure_ascii=False),
-                result_envelope=result,
-                error_code=_business_tool_control_code(code, tool_effect) if status >= 400 else code,
-                reported_error_code=code, host_error=host_error,
-                source_effect=_business_tool_source_effect(self.action, status, result, params.get('request_id')),
-                effect_outcome=tool_effect if status >= 400 else '')
+            rejected = _validate_business_invocation_request(
+                self.model_spec.name,
+                self._specs_by_action,
+                self._ready_specs,
+                params,
+            )
+            if rejected is not None:
+                return rejected
+            spec = self._specs_by_action[params['action']]
+            return _execute_registered_business_request(
+                agent,
+                self.model_spec.name,
+                spec,
+                params,
+                invocation,
+            )
+
+    class BusinessAcceptTool(BaseTool):
+        inspect_operation_receipt = _inspect_business_tool_receipt
+
+        def __init__(self, spec):
+            if spec.action != 'assets.versions.accept' or spec.metadata.get('content_authorization_required') is not True:
+                raise ValueError('独立确认工具仅用于 assets.versions.accept')
+            self._business_host = agent
+            self.action = spec.action
+            self._ready_specs = (spec,)
+            self._ready_action_names = (spec.action,)
+            self._specs_by_action = {spec.action: spec}
+            self.model_spec = _build_business_accept_model_spec(spec)
+            self.runtime_policy = ToolRuntimePolicy(
+                effect_resolver=EffectResolverPolicy(default_effect='dangerous'),
+                approval_policy=ApprovalPolicy('always', require_human=True),
+                sandbox_policy=SandboxPolicy('none'),
+                concurrency_policy=ConcurrencyPolicy('serial'),
+                idempotency_policy=IdempotencyPolicy('operation'),
+                output_policy=OutputPolicy(trust='runtime'),
+                resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)),
+            )
+
+        def operation_identity_for(self, arguments):
+            return 'business_assets_versions_accept'
+
+        def validate_invocation(self, params, context):
+            return _validate_business_invocation_request(
+                self.model_spec.name,
+                self._specs_by_action,
+                self._ready_specs,
+                params,
+            )
+
+        def execute(self, params):
+            return self._execute(params)
+
+        def execute_scoped(self, params, invocation):
+            return self._execute(params, invocation)
+
+        def _execute(self, params, invocation=None):
+            rejected = _validate_business_invocation_request(
+                self.model_spec.name,
+                self._specs_by_action,
+                self._ready_specs,
+                params,
+            )
+            if rejected is not None:
+                return rejected
+            return _execute_registered_business_request(
+                agent,
+                self.model_spec.name,
+                self._ready_specs[0],
+                params,
+                invocation,
+            )
 
     services = _local_business_services(agent)
     from .business_asset_read import ReadBusinessAssetTool
+
     registered = getattr(agent.tools, 'tools', {})
     present = isinstance(registered, dict) and 'read_business_asset' in registered
     if services.ready('assets.get') and not present:
@@ -2002,15 +2824,37 @@ def register_business_tools(agent):
 
     # 原生扩展只宣告已经接通的明确入口；健康读取复用原有有界服务，不全开V13。
     native_model_actions = ('sessions.space.get', 'sessions.space.set', 'workflows.health.get')
-    specs = [*business_action_specs().values(), *(v13_action_spec(name) for name in native_model_actions)]
-    for spec in specs:
-        if services.ready(spec.action):
-            tool = BusinessTool(spec)
-            tools_obj = getattr(agent, "tools", None)
-            if tools_obj is not None:
-                inner_tools = getattr(tools_obj, "tools", None)
-                if isinstance(inner_tools, dict) and tool.model_spec.name in inner_tools:
+    all_specs = [*business_action_specs().values(), *(v13_action_spec(name) for name in native_model_actions)]
+    spec_by_action = {spec.action: spec for spec in all_specs}
+    domain_table = business_domain_actions()
+    expected_actions = {act for actions in domain_table.values() for act in actions}
+    if set(spec_by_action) != expected_actions:
+        raise ValueError('业务模型动作全集与冻结路由表不一致')
+
+    candidates: list[BaseTool] = []
+    for domain_name in ('business_space', 'business_execution', 'business_activity'):
+        ready_specs = tuple(
+            spec_by_action[act]
+            for act in domain_table[domain_name]
+            if business_domain_tool(act) == domain_name and services.ready(act)
+        )
+        if ready_specs:
+            candidates.append(BusinessDomainTool(domain_name, ready_specs))
+    if services.ready('assets.versions.accept'):
+        candidates.append(BusinessAcceptTool(spec_by_action['assets.versions.accept']))
+
+    tools_obj = getattr(agent, 'tools', None)
+    for tool in candidates:
+        name = tool.model_spec.name
+        if tools_obj is not None:
+            inner_tools = getattr(tools_obj, 'tools', None)
+            if isinstance(inner_tools, dict) and name in inner_tools:
+                if getattr(inner_tools[name], '_ready_action_names', None) == tool._ready_action_names:
                     continue
-                if hasattr(type(tools_obj), "__contains__") and tool.model_spec.name in tools_obj:
-                    continue
-            agent.tools.register(tool)
+                inner_tools[name] = tool
+                if hasattr(tools_obj, '_tool_registry_generation'):
+                    tools_obj._tool_registry_generation += 1
+                continue
+            if hasattr(type(tools_obj), '__contains__') and name in tools_obj:
+                continue
+        agent.tools.register(tool)

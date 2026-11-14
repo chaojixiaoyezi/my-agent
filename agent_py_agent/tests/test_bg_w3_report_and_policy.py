@@ -22,14 +22,19 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 SESSION_TASK_BUSINESS = {
-    'business_spaces_get', 'business_spaces_list', 'business_background_agents_list',
-    'business_background_agents_get', 'business_tasks_assign', 'business_tasks_follow_up',
-    'business_tasks_get', 'business_tasks_list', 'business_messages_list',
+    'business_space', 'business_execution',
+    'business_space:spaces.get', 'business_space:spaces.list',
+    'business_execution:background_agents.list', 'business_execution:background_agents.get',
+    'business_execution:tasks.assign', 'business_execution:tasks.follow_up',
+    'business_execution:tasks.get', 'business_execution:tasks.list',
+    'business_execution:messages.list',
 }
 NEVER_IN_BACKGROUND = {
-    'business_tasks_submit', 'business_background_agents_create', 'business_background_agents_retire',
-    'business_background_agents_suspend', 'business_background_agents_resume',
-    'business_spaces_create', 'business_spaces_update',
+    'business_activity', 'business_assets_versions_accept',
+    'business_execution:tasks.submit', 'business_execution:background_agents.create',
+    'business_execution:background_agents.retire', 'business_execution:background_agents.suspend',
+    'business_execution:background_agents.resume',
+    'business_space:spaces.create', 'business_space:spaces.update',
 }
 
 
@@ -110,4 +115,4 @@ def test_session_task_wake_profile_carries_business_dispatch_tools(agent):
     assert not NEVER_IN_BACKGROUND & session_task
     for reason in ('', 'urgent', 'thread_goal_continue', 'audit_finding'):
         assert not {name for name in _allowed(agent, reason) if name.startswith('business_')}, reason
-    assert set(agent.tools.tools) >= SESSION_TASK_BUSINESS, '白名单名必须是真实注册的业务工具名'
+    assert set(agent.tools.tools) >= {'business_space', 'business_execution'}, '白名单域工具名必须是真实注册的业务工具名'

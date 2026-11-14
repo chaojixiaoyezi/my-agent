@@ -19,9 +19,9 @@ def business_projection(context):
     states = {row['name']: row['state'] for row in context.public_context.get('tool_states', ())}
     items = []
     for family, title, purpose in (
-            ('spaces', '业务空间', '查询、创建和管理业务空间；与 /space 共用原服务'),
-            ('background_agents', '后台代理', '查询、创建、发消息、暂停、恢复和退役常驻代理；与 /team 共用原服务'),
-            ('tasks', '后台任务', '派活给后台代理(tasks.assign)或总控(tasks.submit)、追问与查看结果；结束后结果自动回报本会话')):
+            ('spaces', '业务空间', '管理业务空间、会话默认空间、包挂载、界面绑定、资产引用、策略与审批；与 /space 共用原服务'),
+            ('background_agents', '后台代理与任务执行', '管理常驻后台代理、正式派活(tasks.assign/tasks.submit)、追问、子代理与执行记录；与 /team 共用原服务'),
+            ('business', '业务活动与工作流', '查询业务事件、日志、回执、用量与产物，管理订阅、业务工作流及资产版本读取/采用')):
         names = [spec.name for spec in specs if spec.category == family]
         if names:
             available = any(states.get(name) in {'ready', 'deferred'} for name in names)

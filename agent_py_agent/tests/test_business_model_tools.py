@@ -43,31 +43,34 @@ def business_call(agent, action, params=None, **options):
     return result['data']
 
 
-@pytest.mark.parametrize('query,prefix', [
-    ('业务空间', 'business_spaces_'), ('space', 'business_spaces_'), ('spaces', 'business_spaces_'),
-    ('后台代理', 'business_background_agents_'), ('常驻代理', 'business_background_agents_'),
-    ('background_agents', 'business_background_agents_'), ('team', 'business_background_agents_'),
+@pytest.mark.parametrize('query,expected_tool', [
+    ('业务空间', 'business_space'), ('space', 'business_space'), ('spaces', 'business_space'),
+    ('后台代理', 'business_execution'), ('常驻代理', 'business_execution'),
+    ('background_agents', 'business_execution'), ('team', 'business_execution'),
 ])
-def test_real_tool_search_and_route_find_business_tools(agent, query, prefix):
+def test_real_tool_search_and_route_find_business_tools(agent, query, expected_tool):
     result = execute_registry_test_call(agent.tools, 'tool_search', {'query': query, 'limit': 5})
     assert result.ok, result.output
     loaded = result.metadata['handler_details']['tool_search']['loaded_tool_names']
-    assert any(name.startswith(prefix) for name in loaded), result.output
+    assert expected_tool in loaded, result.output
     hits = agent.capability_router.search(query, kinds={'tool'}, limit=5)
-    assert any(hit.card.name.startswith(prefix) for hit in hits), hits
+    assert any(hit.card.name == expected_tool for hit in hits), hits
 
 
-@pytest.mark.parametrize('query,action', [
-    ('业务空间 创建', 'spaces_create'), ('业务空间 列表', 'spaces_list'),
-    ('后台代理 暂停', 'background_agents_suspend'), ('后台代理 恢复', 'background_agents_resume'),
-    ('后台代理 发消息', 'background_agents_messages_send'), ('background_agents send_message', 'background_agents_messages_send'),
+@pytest.mark.parametrize('query,expected_tool,expected_action', [
+    ('业务空间 创建', 'business_space', 'spaces.create'),
+    ('业务空间 列表', 'business_space', 'spaces.list'),
+    ('后台代理 暂停', 'business_execution', 'background_agents.suspend'),
+    ('后台代理 恢复', 'business_execution', 'background_agents.resume'),
+    ('后台代理 发消息', 'business_execution', 'background_agents.messages.send'),
+    ('background_agents send_message', 'business_execution', 'background_agents.messages.send'),
 ])
-def test_action_words_find_executable_builtin_schema(agent, query, action):
-    expected = 'business_' + action
-    found = execute_registry_test_call(agent.tools, 'tool_search', {'query': query})
+def test_action_words_find_executable_builtin_schema(agent, query, expected_tool, expected_action):
+    found = execute_registry_test_call(agent.tools, 'tool_search', {'query': query, 'limit': 5})
     assert found.ok, found.output
-    assert expected in found.metadata['handler_details']['tool_search']['loaded_tool_names'], found.output
-    assert expected in [hit.card.name for hit in agent.capability_router.search(query, kinds={'tool'}, limit=3)]
+    assert expected_tool in found.metadata['handler_details']['tool_search']['loaded_tool_names'], found.output
+    assert expected_tool in [hit.card.name for hit in agent.capability_router.search(query, kinds={'tool'}, limit=5)]
+    assert expected_action in agent.tools.tools[expected_tool].model_spec.input_schema['properties']['action']['enum']
 
 
 def test_self_map_overview_and_business_entries_explain_original_tools(agent):
@@ -84,7 +87,7 @@ def test_self_map_overview_and_business_entries_explain_original_tools(agent):
     assert entry.ok and 'tool_search' in entry.output
     restricted = ToolInvocationContext(agent.tools.runtime_snapshot(allowed_tools=['self_map', 'tool_search']))
     limited = tool.execute_scoped({'section': 'business'}, restricted)
-    assert limited.ok and 'business_background_agents_' not in limited.output
+    assert limited.ok and 'business_execution' not in limited.output
 
 
 def test_workflows_space_scope_uses_same_owner_business_host(agent):
@@ -158,7 +161,7 @@ def test_business_context_rechecks_turn_and_rejects_foreign_thread(agent):
         context.check('spaces.list', {})
     foreign = agent.conversation_store.threads.create(owner_id='other', owner_home='/other')
     agent._current_run_params = replace(original, task_attributes={'conversation_thread_id': foreign.thread_id})
-    outcome = agent.tools.tools['business_background_agents_list'].execute({
+    outcome = agent.tools.tools['business_execution'].execute({
         'action': 'background_agents.list', 'request_id': 'foreign', 'params': {}})
     assert not outcome.ok
     assert outcome.error_code == outcome.reported_error_code == 'CHANNEL_ACTOR_SCOPE_MISMATCH'
@@ -171,7 +174,7 @@ def test_business_context_rechecks_turn_and_rejects_foreign_thread(agent):
 
 def test_explicit_disable_rejects_existing_business_tool(agent):
     agent.config.business_spaces_enabled = False
-    outcome = agent.tools.tools['business_spaces_list'].execute({'action': 'spaces.list',
+    outcome = agent.tools.tools['business_space'].execute({'action': 'spaces.list',
         'request_id': 'disabled', 'params': {}})
     assert not outcome.ok and outcome.error_code == 'HOST_NOT_READY'
 
@@ -199,66 +202,76 @@ def test_local_list_authorization_has_no_per_record_source_reads(agent, monkeypa
 
 def test_native_health_discovery_and_call_keep_original_permission_boundary(agent):
     """新增宣告只使原只读方法可发现，不扩大当前工具范围或绕过原参数合同。"""
-    name = 'business_workflows_health_get'
-    found = execute_registry_test_call(agent.tools, 'tool_search', {'names': [name]})
-    assert found.ok and name in found.metadata['handler_details']['tool_search']['loaded_tool_names']
-    restricted = execute_registry_test_call(agent.tools, 'tool_search', {'names': [name]},
-        allowed_tools=['tool_search'])
+    canonical_name = 'business_activity'
+    legacy_name = 'business_workflows_health_get'
+    found = execute_registry_test_call(agent.tools, 'tool_search', {'names': [canonical_name]}, call_id='search-health-1')
+    assert found.ok and canonical_name in found.metadata['handler_details']['tool_search']['loaded_tool_names']
+    assert 'workflows.health.get' in agent.tools.tools[canonical_name].model_spec.input_schema['properties']['action']['enum']
+    restricted = execute_registry_test_call(agent.tools, 'tool_search', {'names': [canonical_name]},
+        allowed_tools=['tool_search'], call_id='search-health-2')
     assert restricted.ok
-    assert name not in restricted.metadata['handler_details']['tool_search']['loaded_tool_names']
+    assert canonical_name not in restricted.metadata['handler_details']['tool_search']['loaded_tool_names']
     request = {'action': 'workflows.health.get', 'request_id': 'health-model-read',
         'params': {'workflow_ref': 'model-health', 'limit': 1}}
-    refused = execute_registry_test_call(agent.tools, name, request, allowed_tools=['tool_search'])
+    refused = execute_registry_test_call(agent.tools, legacy_name, request, allowed_tools=['tool_search'],
+        call_id='health-refused-1')
     assert not refused.ok and refused.handler_executed is False
     definition = {'descriptor': {'id': 'model-health', 'kind': 'workflow', 'name': '健康读取',
         'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}}, 'steps': []}
     business_call(agent, 'workflows.create', {'definition': definition}, idempotency_key='health-create')
-    read = execute_registry_test_call(agent.tools, name, request)
+    read = execute_registry_test_call(agent.tools, legacy_name, request, call_id='health-read-1')
     assert read.ok, read.output
     data = json.loads(read.output)['data']
     assert data['workflow_ref'] == 'model-health'
     assert data['health']['bounded_limit'] == 1 and data['health']['sampled_runs'] == 0
     assert data['health_read_coverage']['latest_guaranteed'] is False
-    forged = execute_registry_test_call(agent.tools, name,
-        {**request, 'params': {**request['params'], 'owner_id': 'local/other'}})
+    forged = execute_registry_test_call(agent.tools, canonical_name,
+        {**request, 'params': {**request['params'], 'owner_id': 'local/other'}}, call_id='health-forged-1')
     assert not forged.ok and forged.handler_executed is False
 
 
 def test_business_static_model_cache_matches_original_and_isolates_callers():
     from agent_py_agent.agent.gateway_parts import business_api as api
-    from agent_py_agent.agent.plugin_host.business_action_specs import business_action_specs
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+    from agent_py_agent.agent.tooling.versioned_input_decoder import business_domain_actions
 
-    api._cached_business_model_spec.cache_clear()
-    for spec in business_action_specs().values():
-        expected = api._build_business_model_spec(spec)
-        first = api._business_model_spec(spec)
+    api._cached_business_domain_model_spec.cache_clear()
+    for domain_name in ('business_space', 'business_execution', 'business_activity'):
+        specs = tuple(
+            business_action_spec(name)
+            for name in business_domain_actions()[domain_name]
+            if name not in {'sessions.space.get', 'sessions.space.set', 'workflows.health.get'}
+        )
+        expected = api._build_business_domain_model_spec(domain_name, specs)
+        first = api._business_domain_model_spec(domain_name, specs)
         assert first == expected
         first.input_schema['properties'].clear()
-        second = api._business_model_spec(spec)
+        second = api._business_domain_model_spec(domain_name, specs)
         assert second == expected
         assert second is not first
         second.assert_schema_hash()
-    assert api._cached_business_model_spec.cache_info().hits >= len(business_action_specs())
+    assert api._cached_business_domain_model_spec.cache_info().hits >= 3
 
 
 def test_business_static_model_cache_uses_complete_record_and_is_bounded():
     from agent_py_agent.agent.gateway_parts import business_api as api
     from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
 
-    api._cached_business_model_spec.cache_clear()
+    api._cached_business_domain_model_spec.cache_clear()
     original = business_action_spec('spaces.list')
-    initial = api._business_model_spec(original)
+    initial = api._business_domain_model_spec('business_space', (original,))
     for index in range(140):
         record = original.metadata
         record['params_schema']['properties']['cache_marker'] = {'type': 'integer', 'const': index}
         changed = replace(original, _record_json=json.dumps(record, ensure_ascii=False))
-        model = api._business_model_spec(changed)
-        assert model.input_schema['properties']['params']['properties']['cache_marker']['const'] == index
+        model = api._business_domain_model_spec('business_space', (changed,))
+        branch = model.input_schema['oneOf'][0]
+        assert branch['properties']['params']['properties']['cache_marker']['const'] == index
         assert model != initial
-    info = api._cached_business_model_spec.cache_info()
+    info = api._cached_business_domain_model_spec.cache_info()
     assert info.maxsize == info.currsize == 128
     assert info.misses == 141
-    api._cached_business_model_spec.cache_clear()
+    api._cached_business_domain_model_spec.cache_clear()
 
 
 def test_business_mutable_extension_model_spec_is_not_cached():
@@ -268,8 +281,8 @@ def test_business_mutable_extension_model_spec_is_not_cached():
     original = v13_action_spec('sessions.space.get')
     params = {'type': 'object', 'properties': {'first': {'type': 'string'}}, 'additionalProperties': False}
     spec = replace(original, definition=replace(original.definition, params_schema=params))
-    first = api._business_model_spec(spec)
+    first = api._business_domain_model_spec('business_space', (spec,))
     params['properties']['second'] = {'type': 'integer'}
-    second = api._business_model_spec(spec)
-    assert 'second' not in first.input_schema['properties']['params']['properties']
-    assert 'second' in second.input_schema['properties']['params']['properties']
+    second = api._business_domain_model_spec('business_space', (spec,))
+    assert 'second' not in first.input_schema['oneOf'][0]['properties']['params']['properties']
+    assert 'second' in second.input_schema['oneOf'][0]['properties']['params']['properties']

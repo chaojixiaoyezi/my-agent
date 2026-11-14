@@ -37,7 +37,7 @@ def test_unregistered_preflight_code_stays_unknown():
 
 
 def test_native_tool_precise_permission_rejection_and_old_tool_live_disable(agent):
-    tool = agent.tools.tools['business_background_agents_messages_send']
+    tool = agent.tools.tools['business_execution']
     thread_id = agent._current_run_params.task_attributes['conversation_thread_id']
     result = tool.execute({'action': 'background_agents.messages.send', 'request_id': 'permission-before',
         'params': {'agent_id': thread_id, 'text': 'synthetic', 'input_kind': 'message'}, 'idempotency_key': 'permission-rejection-0001'})
@@ -45,7 +45,7 @@ def test_native_tool_precise_permission_rejection_and_old_tool_live_disable(agen
     assert result.error_code == result.reported_error_code == 'BUSINESS_ACCESS_DENIED'
     assert result.effect_outcome == 'not_started'
     assert json.loads(result.output)['effect_outcome'] == 'not_started'
-    cached = agent.tools.tools['business_spaces_list']
+    cached = agent.tools.tools['business_space']
     assert cached.execute({'action': 'spaces.list', 'request_id': 'before-revoke', 'params': {}}).ok
     agent.config.business_spaces_enabled = False
     revoked = cached.execute({'action': 'spaces.list', 'request_id': 'after-revoke', 'params': {}})
@@ -112,7 +112,7 @@ def test_foreign_space_domain_reason_survives_handler_executor_native_renderer(a
     bob = World(tmp_path / 'bob', 'owner-bob')
     foreign = bob.create('Bob private')['space_id']
     request = {'action': 'spaces.get', 'request_id': 'foreign-space-read', 'params': {'space_id': foreign}}
-    handler = agent.tools.tools['business_spaces_get'].execute(request)
+    handler = agent.tools.tools['business_space'].execute(request)
     assert handler.error_code == handler.reported_error_code == 'SPACE_NOT_FOUND'
     assert handler.host_error['source'] == 'business_host' and handler.host_error['http_status'] == 404
     result = execute_registry_test_call(agent.tools, 'business_spaces_get', request, call_id='foreign-native-call')
