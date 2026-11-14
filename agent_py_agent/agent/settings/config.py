@@ -254,6 +254,10 @@ class _ToolConfigFields:
     tool_shell_demoted_nice: int = field(default=15, metadata={"bounds": (0, 19)})
     # PTY 会话空闲兜底回收阈值（分钟，0=不限制）：分页器等按键会让命令永不退出，超过阈值由宿主自动收回。
     pty_session_idle_timeout_minutes: int = 30
+    # 全局活跃 PTY 终端会话上限（0 = 不限制；默认 32）；修改后重启 Gateway 生效。
+    pty_max_sessions: int = field(default=32, kw_only=True, metadata={"bounds": (0, None), "unit": "个"})
+    # 单个 owner 同时活跃的 PTY 终端会话上限（0 = 不限制；默认 8）；修改后重启 Gateway 生效。
+    pty_max_sessions_per_owner: int = field(default=8, kw_only=True, metadata={"bounds": (0, None), "unit": "个"})
     # 后台服务默认只允许监听本机回环；声明 loopback 却绑到局域网地址时由 host 回收（False 只记 listener_warning）。
     background_process_listen_scope_enforce: bool = True
     # macOS 上对非本机管理员的 owner 拒读用户家目录（本 owner 可见范围除外），并把其 Shell 的 HOME 指到 owner home。默认关闭。
@@ -388,6 +392,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     assistant_progress_updates_enabled: bool = True
     # 同一任务的技术性截断可在有进展时有界续作，已登记者下次检查时采用最新值。
     technical_cutoff_continuation_enabled: bool = field(default=True, metadata={"effect": "immediate"})
+    # 宿主技术截断后单次任务最多续跑片数（0 = 不限制；默认 3）。
+    technical_cutoff_continuation_max_count: int = field(default=3, kw_only=True, metadata={"bounds": (0, None), "effect": "immediate", "unit": "片"})
     workspace_root: str | list[str] = ""
     # 未配置时允许打开 Gateway/TUI 和 /model，但不选厂商、不调用模型；echo 仅供显式离线调试。
     model_backend: str = field(default="", metadata={"host_only": True, "model_projection": True})
@@ -403,6 +409,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 空=两边都不用语义,只走关键词。档案指向服务商凭据与端点,属于安全边界,模型不能改。
     embedding_model_profile: str = ""  # /model 里 embedding 用途档案的编号;空=不发请求、只走关键词
     memory_archive_level: int = 3
+    # 运行中每轮实时事实进度最多扫描的近期测试调用条数（0 = 跳过实时测试提取；默认 20）。
+    memory_runtime_fact_recent_tests: int = field(default=20, kw_only=True, metadata={"bounds": (0, None), "effect": "immediate", "unit": "条"})
     memory_hook_enabled: bool = True
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
@@ -466,8 +474,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 正式规则更新仅追加到其它线程请求尾部，冻结系统记忆前缀不变。
     memory_rule_notices_enabled: bool = True
     memory_rule_notices_max_chars: int = 1200
-    # compact 自动续跑深度硬顶已降为读取点旁的具名常量
-    # （finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH，2026-09-28 参数减量）。
+    # 单次 run 内自动 compact 后允许续跑的最大深度硬顶（0 = 不限制；默认 50）。
+    memory_compact_auto_continue_max_depth: int = field(default=50, kw_only=True, metadata={"bounds": (0, None), "effect": "immediate", "unit": "次"})
     # compact 续跑时对卸掉的中段历史做一次 LLM 语义摘要（短板6，长期助手 trajectory_compressor
     # 蓝本）：默认开，保护首尾、只摘要中段；异常、供应商超时或无 backend 时回退机械重建。
     # 摘要不另设不可取消线程超时，直接沿用统一模型传输超时。enabled=false 即完全关闭。

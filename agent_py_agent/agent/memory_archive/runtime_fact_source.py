@@ -46,6 +46,9 @@ class RuntimeFactSourceRequest:
     artifact_refs: list[str] = field(default_factory=list)
     delivery_contract: dict[str, Any] | None = None
     model_calls: dict[str, Any] = field(default_factory=dict)
+    incremental: bool = False
+    recent_tests_limit: int | None = None
+    cached_run_intent: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,9 +86,10 @@ def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     with locked_json_path(_runtime_fact_fence_path(root.parent)):
         # 目录退休后再获准的写者在同一互斥边界内重建目录，再发布事实与locator。
         ensure_private_dir(root)
-        payload = _runtime_fact_payload(request)
-        _write_json_atomic(root / "task.json", payload)
-        update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
+        previous = _read_json_dict(root / "task.json") if request.incremental else None
+        fact_doc = _runtime_fact_payload(request, previous=previous)
+        _write_json_atomic(root / "task.json", fact_doc)
+        update_locator(root.parent, root.name, fact_doc, limit=_MAX_FACT_FILES)
     return str(root)
 
 
@@ -140,21 +144,51 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
     return str(root)
 
 
-def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
-    latest_tests = dedupe_strings(_tool_test_items(request.archive_tool_calls))
+def _runtime_fact_payload(
+    request: RuntimeFactSourceRequest,
+    *,
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    limit = request.recent_tests_limit
+    if limit == 0:
+        latest_tests: list[str] = []
+    elif request.incremental and isinstance(previous, dict) and previous:
+        prev_tests = previous.get("latest_tests") if isinstance(previous.get("latest_tests"), list) else []
+        new_tests = _tool_test_items(request.archive_tool_calls)
+        merged_tests = dedupe_strings([*[str(item) for item in prev_tests], *new_tests])
+        latest_tests = merged_tests[-limit:] if limit is not None and limit > 0 else merged_tests
+    else:
+        source_calls = (
+            request.archive_tool_calls[-limit:]
+            if limit is not None and limit > 0
+            else request.archive_tool_calls
+        )
+        latest_tests = dedupe_strings(_tool_test_items(source_calls))
+        if limit is not None and limit > 0:
+            latest_tests = latest_tests[-limit:]
     desired_outputs = runtime_desired_outputs(request.delivery_contract, request.runtime_injections)
     delivery_contract = _delivery_contract_payload(request.delivery_contract)
     target_coverage = _target_coverage_payload(request.delivery_contract)
-    run_intent = build_run_intent(
-        user_prompt=request.user_prompt,
-        delivery_contract=request.delivery_contract,
-        workspace_root=request.root,
-    )
-    if desired_outputs and not run_intent_has_desired_outputs(run_intent):
-        run_intent = run_intent_payload(
-            reference_roots=[],
-            desired_outputs=[item["target_path"] for item in desired_outputs if item.get("target_path")],
+    if isinstance(request.cached_run_intent, dict):
+        run_intent = dict(request.cached_run_intent)
+    elif (
+        request.incremental
+        and isinstance(previous, dict)
+        and isinstance(previous.get("run_intent"), dict)
+        and str(previous.get("goal") or "") == request.user_prompt.strip()
+    ):
+        run_intent = dict(previous["run_intent"])
+    else:
+        run_intent = build_run_intent(
+            user_prompt=request.user_prompt,
+            delivery_contract=request.delivery_contract,
+            workspace_root=request.root,
         )
+        if desired_outputs and not run_intent_has_desired_outputs(run_intent):
+            run_intent = run_intent_payload(
+                reference_roots=[],
+                desired_outputs=[item["target_path"] for item in desired_outputs if item.get("target_path")],
+            )
     return {
         "version": 1,
         "source": "runtime_fact_source",
@@ -170,7 +204,7 @@ def _runtime_fact_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
         "delivery_contract": delivery_contract,
         "target_coverage": target_coverage,
         "run_intent": run_intent,
-        "runtime_progress": _runtime_progress_payload(request),
+        "runtime_progress": _runtime_progress_payload(request, previous=previous),
         "run_status": {
             "status": request.status,
             "backend": request.backend,
@@ -190,14 +224,39 @@ def _target_coverage_payload(value: dict[str, Any] | None) -> dict[str, Any]:
     return dict(coverage) if isinstance(coverage, dict) else {}
 
 
-def _runtime_progress_payload(request: RuntimeFactSourceRequest) -> dict[str, Any]:
+def _runtime_progress_payload(
+    request: RuntimeFactSourceRequest,
+    *,
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    prev_progress = (
+        previous.get("runtime_progress")
+        if request.incremental and isinstance(previous, dict) and isinstance(previous.get("runtime_progress"), dict)
+        else {}
+    )
+    prev_executed = prev_progress.get("executed_tools") if isinstance(prev_progress.get("executed_tools"), list) else []
+    prev_archive_refs = (
+        prev_progress.get("latest_archive_refs") if isinstance(prev_progress.get("latest_archive_refs"), list) else []
+    )
+    prev_artifact_refs = (
+        prev_progress.get("artifact_refs") if isinstance(prev_progress.get("artifact_refs"), list) else []
+    )
     return {
         "phase": request.phase or _phase_from_status(request.status),
         "source": request.source,
         "tool_rounds": max(0, int(request.tool_rounds or 0)),
-        "executed_tools": dedupe_strings([str(item) for item in request.executed_tools if str(item).strip()])[-20:],
-        "latest_archive_refs": dedupe_strings(request.latest_archive_refs)[-20:],
-        "artifact_refs": dedupe_strings(request.artifact_refs)[-20:],
+        "executed_tools": dedupe_strings(
+            [
+                *[str(item) for item in prev_executed if str(item).strip()],
+                *[str(item) for item in request.executed_tools if str(item).strip()],
+            ]
+        )[-20:],
+        "latest_archive_refs": dedupe_strings(
+            [*[str(item) for item in prev_archive_refs if str(item)], *request.latest_archive_refs]
+        )[-20:],
+        "artifact_refs": dedupe_strings(
+            [*[str(item) for item in prev_artifact_refs if str(item)], *request.artifact_refs]
+        )[-20:],
         "model_calls": dict(request.model_calls),
         "updated_at": _utc_timestamp(),
     }

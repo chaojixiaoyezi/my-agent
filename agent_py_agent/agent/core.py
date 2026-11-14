@@ -1192,6 +1192,8 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
             tool_shell_demote_after_seconds=config.tool_shell_demote_after_seconds,
             tool_shell_demoted_nice=config.tool_shell_demoted_nice,
             pty_session_idle_timeout_minutes=config.pty_session_idle_timeout_minutes,
+            pty_max_sessions=config.pty_max_sessions,
+            pty_max_sessions_per_owner=config.pty_max_sessions_per_owner,
             path_access_mode=effective_path_access_mode,
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,

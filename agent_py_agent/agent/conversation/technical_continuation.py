@@ -37,7 +37,22 @@ class CutoffReceipt:
         return f"cutoff:{self.task_id}:{self.attempt_id}"
 
 
-def receipt_for(link) -> CutoffReceipt | None:
+def _max_continuation_count(agent: object | None = None, *, limit: int | None = None) -> int:
+    raw = limit if limit is not None else getattr(
+        getattr(agent, "config", None),
+        "technical_cutoff_continuation_max_count",
+        _MAX_CONTINUATION_COUNT,
+    )
+    if isinstance(raw, bool):
+        return _MAX_CONTINUATION_COUNT
+    try:
+        parsed = int(_MAX_CONTINUATION_COUNT if raw is None else raw)
+    except (TypeError, ValueError):
+        return _MAX_CONTINUATION_COUNT
+    return max(0, parsed)
+
+
+def receipt_for(link, *, max_continuations: int | None = None) -> CutoffReceipt | None:
     """只接受完整当前schema；坏记录不得提供执行授权。"""
     value = getattr(link, "cutoff_continuation", None)
     if not isinstance(value, dict) or set(value) != set(CutoffReceipt.__dataclass_fields__):
@@ -45,10 +60,13 @@ def receipt_for(link) -> CutoffReceipt | None:
     try:
         receipt = CutoffReceipt(**value)
         strings = [getattr(receipt, name) for name in CutoffReceipt.__dataclass_fields__ if name != "sequence"]
+        sequence_too_large = (
+            max_continuations is not None and max_continuations > 0 and receipt.sequence > max_continuations
+        )
         if (any(not isinstance(item, str) for item in strings)
                 or not all((receipt.owner_id, receipt.thread_id, receipt.task_id, receipt.user_message_id,
                             receipt.origin_request_id, receipt.run_id, receipt.attempt_id))
-                or type(receipt.sequence) is not int or not 0 <= receipt.sequence <= _MAX_CONTINUATION_COUNT
+                or type(receipt.sequence) is not int or receipt.sequence < 0 or sequence_too_large
                 or receipt.status not in {"pending", "claimed", "stopped", "finished", "void"}):
             return None
         return receipt
@@ -121,6 +139,8 @@ def record_closeout(agent, ctx) -> CutoffReceipt | None:
                "user_message_id": thread.last_user_message_id, "request_id": ctx.request_id}
               if direct else None)
 
+    max_count = _max_continuation_count(agent)
+
     def update(link):
         old = receipt_for(link)
         if (link.thread_id != thread_id or link.status != "active" or link.superseded_by_task_id
@@ -144,7 +164,7 @@ def record_closeout(agent, ctx) -> CutoffReceipt | None:
             return old
         count = old.sequence if inherited and old is not None and not natural and not child_event else 0
         status = "finished" if natural else "stopped"
-        if cutoff and progress > 0 and count < _MAX_CONTINUATION_COUNT:
+        if cutoff and progress > 0 and (max_count == 0 or count < max_count):
             status = "pending"
             count += 1
         return CutoffReceipt(owner, thread_id, task_id, thread.last_user_message_id,
@@ -156,10 +176,11 @@ def record_closeout(agent, ctx) -> CutoffReceipt | None:
                      publish=lambda value: _publish_receipt(store, value))
     if receipt is not None and receipt.status == "stopped" and cutoff:
         from .host_notices import host_notice, queue_host_notice
+        limit_hint = f"达到 {max_count} 片上限或" if max_count > 0 else ""
         queue_host_notice(store, thread_id, host_notice("technical_cutoff", "CUTOFF_CONTINUATION_STOPPED",
-            "本次技术续跑已停止：达到三片上限或本片没有已确认的实际进展。请检查结果后决定下一步。",
+            f"本次技术续跑已停止：{limit_hint}本片没有已确认的实际进展。请检查结果后决定下一步。",
             details={"task_id": task_id, "attempt_id": receipt.attempt_id, "sequence": receipt.sequence,
-                     "reason": receipt.reason}))
+                     "reason": receipt.reason, "max_continuations": max_count}))
     return receipt
 
 

@@ -25,6 +25,26 @@ from .owner_roots import runtime_archive_roots
 _LOGGER = logging.getLogger(__name__)
 
 
+def _runtime_fact_recent_tests_limit(agent: object) -> int:
+    default_limit = 20
+    raw = getattr(getattr(agent, "config", None), "memory_runtime_fact_recent_tests", default_limit)
+    if isinstance(raw, bool):
+        return default_limit
+    try:
+        parsed = int(default_limit if raw is None else raw)
+    except (TypeError, ValueError):
+        return default_limit
+    return max(0, parsed)
+
+
+def _tail_sequence(values: object, limit: int) -> list[Any]:
+    if limit <= 0 or not values:
+        return []
+    if isinstance(values, (list, tuple)):
+        return list(values[-limit:])
+    return list(values)[-limit:]
+
+
 def write_runtime_fact_start_if_enabled(agent: object, params: object) -> None:
     if not _live_archive_enabled(agent, params):
         return
@@ -139,27 +159,124 @@ def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, to
     if not request_id:
         return
     try:
-        for root in runtime_archive_roots(agent):
+        recent_tests_limit = _runtime_fact_recent_tests_limit(agent)
+        raw_calls = getattr(params, "archive_tool_calls", None) or ()
+        if not isinstance(raw_calls, (list, tuple)):
+            raw_calls = list(raw_calls)
+        total_calls = len(raw_calls)
+        raw_executed = getattr(params, "executed_tools", None) or ()
+        if not isinstance(raw_executed, (list, tuple)):
+            raw_executed = list(raw_executed)
+        total_executed = len(raw_executed)
+
+        state = getattr(params, "live_archive_state", None)
+        state_dict = state if isinstance(state, dict) else None
+        if state_dict is not None:
+            if state_dict.get("runtime_fact_request_id") != request_id:
+                state_dict["runtime_fact_request_id"] = request_id
+                state_dict["runtime_fact_call_cursor"] = 0
+                state_dict["runtime_fact_executed_cursor"] = 0
+                state_dict["runtime_fact_run_intent_by_root"] = {}
+            prev_cursor = int(state_dict.get("runtime_fact_call_cursor", 0) or 0)
+            if prev_cursor < 0 or prev_cursor > total_calls:
+                prev_cursor = 0
+            executed_cursor = int(state_dict.get("runtime_fact_executed_cursor", 0) or 0)
+            if executed_cursor < 0 or executed_cursor > total_executed:
+                executed_cursor = 0
+            intent_cache = state_dict.setdefault("runtime_fact_run_intent_by_root", {})
+            if not isinstance(intent_cache, dict):
+                intent_cache = {}
+                state_dict["runtime_fact_run_intent_by_root"] = intent_cache
+            incremental = True
+        else:
+            prev_cursor = 0
+            executed_cursor = max(0, total_executed - 20)
+            intent_cache = {}
+            incremental = False
+
+        if recent_tests_limit == 0:
+            delta_calls: list[Any] = []
+        else:
+            scan_start = max(prev_cursor, total_calls - recent_tests_limit)
+            delta_calls = list(raw_calls[scan_start:total_calls])
+        delta_executed = [str(item) for item in raw_executed[executed_cursor:total_executed]]
+
+        user_prompt = _root_user_prompt(params)
+        next_actions = _runtime_next_actions(params)
+        runtime_injections = runtime_injection_texts(getattr(params, "runtime_injections", None))
+        run_id = str(getattr(params, "run_id", "") or "")
+        task_id = str(getattr(params, "task_id", "") or "")
+        latest_archive_refs = _latest_archive_refs(params)
+        artifact_refs = _artifact_refs(params)
+        delivery_contract = _delivery_contract(params)
+
+        roots = runtime_archive_roots(agent)
+        for root in roots:
+            root_key = str(root)
+            cached_entry = intent_cache.get(root_key) if isinstance(intent_cache, dict) else None
+            cached_intent = (
+                cached_entry.get("run_intent")
+                if isinstance(cached_entry, dict)
+                and cached_entry.get("user_prompt") == user_prompt
+                and cached_entry.get("delivery_present") == (delivery_contract is not None)
+                and cached_entry.get("injections_count") == len(runtime_injections)
+                and isinstance(cached_entry.get("run_intent"), dict)
+                else None
+            )
+            computed_intent = None
+            if isinstance(intent_cache, dict) and cached_intent is None:
+                from ...memory_archive import runtime_fact_source
+                from ...memory_archive.runtime_workspace_outputs import (
+                    run_intent_has_desired_outputs,
+                    runtime_desired_outputs,
+                )
+
+                desired_outputs = runtime_desired_outputs(delivery_contract, runtime_injections)
+                computed_intent = runtime_fact_source.build_run_intent(
+                    user_prompt=user_prompt,
+                    delivery_contract=delivery_contract,
+                    workspace_root=root,
+                )
+                if desired_outputs and not run_intent_has_desired_outputs(computed_intent):
+                    computed_intent = runtime_fact_source.run_intent_payload(
+                        reference_roots=[],
+                        desired_outputs=[item["target_path"] for item in desired_outputs if item.get("target_path")],
+                    )
+                cached_intent = computed_intent
             write_runtime_fact_source(
                 RuntimeFactSourceRequest(
                     root=root,
                     request_id=request_id,
-                    user_prompt=_root_user_prompt(params),
+                    user_prompt=user_prompt,
                     status="running",
-                    next_actions=_runtime_next_actions(params),
-                    archive_tool_calls=list(getattr(params, "archive_tool_calls", []) or []),
-                    runtime_injections=runtime_injection_texts(getattr(params, "runtime_injections", None)),
-                    run_id=str(getattr(params, "run_id", "") or ""),
-                    task_id=str(getattr(params, "task_id", "") or ""),
+                    next_actions=next_actions,
+                    archive_tool_calls=delta_calls,
+                    runtime_injections=runtime_injections,
+                    run_id=run_id,
+                    task_id=task_id,
                     source="live_tool_loop",
                     phase="tool_loop",
                     tool_rounds=tool_round,
-                    executed_tools=list(getattr(params, "executed_tools", []) or []),
-                    latest_archive_refs=_latest_archive_refs(params),
-                    artifact_refs=_artifact_refs(params),
-                    delivery_contract=_delivery_contract(params),
+                    executed_tools=delta_executed,
+                    latest_archive_refs=latest_archive_refs,
+                    artifact_refs=artifact_refs,
+                    delivery_contract=delivery_contract,
+                    incremental=incremental,
+                    recent_tests_limit=recent_tests_limit,
+                    cached_run_intent=cached_intent,
                 )
             )
+            if isinstance(intent_cache, dict) and computed_intent is not None:
+                intent_cache[root_key] = {
+                    "user_prompt": user_prompt,
+                    "delivery_present": delivery_contract is not None,
+                    "injections_count": len(runtime_injections),
+                    "run_intent": computed_intent,
+                }
+        # 所有目标根均写入成功后才推进已提交游标，避免多根部分失败时漏掉未写入根的增量事件。
+        if state_dict is not None:
+            state_dict["runtime_fact_call_cursor"] = total_calls
+            state_dict["runtime_fact_executed_cursor"] = total_executed
     except Exception as exc:
         _record_live_archive_error(params, exc, context="live_archive.runtime_fact.progress")
 
@@ -215,19 +332,19 @@ def _root_user_prompt(params: object) -> str:
 
 
 def _latest_archive_refs(params: object) -> list[str]:
-    records = list(getattr(params, "archive_tool_calls", []) or [])
+    records = _tail_sequence(getattr(params, "archive_tool_calls", None), 20)
     return [
         str(record.get("raw_archive_path") or "")
-        for record in records[-20:]
+        for record in records
         if isinstance(record, dict) and str(record.get("raw_archive_path") or "")
     ]
 
 
 def _artifact_refs(params: object) -> list[str]:
-    records = list(getattr(params, "archive_tool_calls", []) or [])
+    records = _tail_sequence(getattr(params, "archive_tool_calls", None), 20)
     keys = ("artifact_ref", "artifact_path", "output_artifact_ref", "raw_archive_path")
     refs: list[str] = []
-    for record in records[-20:]:
+    for record in records:
         if not isinstance(record, dict):
             continue
         refs.extend(str(record.get(key) or "") for key in keys if str(record.get(key) or ""))

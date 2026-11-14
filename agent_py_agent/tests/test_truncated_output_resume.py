@@ -138,7 +138,7 @@ def test_provider_shaped_truncation_stops_after_limit() -> None:
     assert decision.action == "break"
     assert decision.response.runtime_status == "unfinished"
     assert decision.response.runtime_reason == "MODEL_RESPONSE_TRUNCATED"
-    assert decision.response.runtime_source == "model_provider"
+    assert decision.response.runtime_source == "tool_loop"
     assert params.tool_context == []
 
 

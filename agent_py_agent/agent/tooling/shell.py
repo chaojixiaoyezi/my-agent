@@ -162,6 +162,8 @@ class ShellToolOptions:
     sandbox_boundary_facts: bool = True
     # 仅宿主装配PTY空闲分钟数；None供直接调用继承注册表默认，0仅关闭本工具新建会话的空闲回收。
     pty_session_idle_timeout_minutes: float | None = None
+    pty_max_sessions: int | None = None
+    pty_max_sessions_per_owner: int | None = None
     host_exclusive_paths: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
 
 
@@ -1237,6 +1239,22 @@ class ShellTool(BaseTool):
                 self.pty_session_idle_timeout_seconds = max(0.0, float(options.pty_session_idle_timeout_minutes)) * 60.0
             except (TypeError, ValueError):
                 self.pty_session_idle_timeout_seconds = 0.0
+        raw_pty_max_sessions = getattr(options, "pty_max_sessions", None)
+        if raw_pty_max_sessions is None or isinstance(raw_pty_max_sessions, bool):
+            self.pty_max_sessions = None
+        else:
+            try:
+                self.pty_max_sessions = max(0, int(raw_pty_max_sessions))
+            except (TypeError, ValueError):
+                self.pty_max_sessions = None
+        raw_pty_max_per_owner = getattr(options, "pty_max_sessions_per_owner", None)
+        if raw_pty_max_per_owner is None or isinstance(raw_pty_max_per_owner, bool):
+            self.pty_max_sessions_per_owner = None
+        else:
+            try:
+                self.pty_max_sessions_per_owner = max(0, int(raw_pty_max_per_owner))
+            except (TypeError, ValueError):
+                self.pty_max_sessions_per_owner = None
         self.model_spec = _build_shell_tool_model_spec(
             self.access_mode, self.default_timeout, self.max_output_chars,
             owner_sandbox_hint=self.sandbox_boundary_facts and self.path_access_policy.owner_scope_root is not None,

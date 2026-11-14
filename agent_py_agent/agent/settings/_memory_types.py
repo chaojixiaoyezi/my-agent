@@ -14,6 +14,7 @@ from typing import Any
 class MemorySettings:
     """Effective memory config after validation and default normalization."""
     memory_archive_level: int = 3
+    memory_runtime_fact_recent_tests: int = 20
     memory_hook_enabled: bool = True
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
@@ -26,6 +27,7 @@ class MemorySettings:
     memory_compact_auto_trigger_max_tokens: int = 300_000
     memory_compact_recovery_target_percent: int = 60
     memory_compact_summary_max_output_tokens: int = 16_384
+    memory_compact_auto_continue_max_depth: int = 50
     memory_compact_remote_enabled: bool = True
     memory_compact_reasoning_level: str = "low"
     memory_curator_enabled: bool = True

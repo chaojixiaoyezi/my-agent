@@ -170,17 +170,29 @@ def _compact_auto_cycle_result_fields(
     }
 
 
-# LLM: compact 自动续跑的绝对深度硬顶是算法护栏，用具名常量（2026-09-28 参数减量），不再读配置。
-# 函数用途: 返回自动续跑深度硬顶常量。
+# 函数用途: 从 agent.config 读取自动 compact 续跑深度硬顶（0 = 不限制；默认回到 _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH）。
 def _max_compact_auto_continue_depth(agent: object) -> int:
-    return _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH
+    raw = getattr(
+        getattr(agent, "config", None),
+        "memory_compact_auto_continue_max_depth",
+        _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH,
+    )
+    if isinstance(raw, bool):
+        return _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH
+    try:
+        parsed = int(_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH if raw is None else raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH
+    return max(0, parsed)
 
 
 def _compact_auto_continue_depth_exhausted(agent: object, ctx: FinalizeContext) -> bool:
-    # 只在「已经在续跑链里」（depth>=1）才考虑硬顶；首轮（depth=0）永不触顶。续跑链每加一层
-    # depth+1（见 runtime_mixin._compact_auto_continue_params），达到上限即强制收口。
+    # 只在「已经在续跑链里」（depth>=1）才考虑硬顶；配置 0 表示不限制深度，仍由连续无工具软顶兜底。
+    max_depth = _max_compact_auto_continue_depth(agent)
+    if max_depth == 0:
+        return False
     depth = int(ctx.compact_auto_continue_depth or 0)
-    if depth < _max_compact_auto_continue_depth(agent):
+    if depth < max_depth:
         return False
     # 守望豁免：任务在派工时被【结构化声明】为长期运行（long_running，如持续盯守/常驻监控），
     # 固定深度硬顶与"故意一直跑"直接冲突——声明过的任务放开硬顶、无限 compact 续跑。防跑飞

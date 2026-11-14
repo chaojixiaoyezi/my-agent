@@ -66,6 +66,37 @@ from .write_boundary import SandboxWriteProtection
 
 # PTY 会话最多 32 个：防失控并发把资源占满。
 _MAX_SESSION_COUNT = 32
+
+
+class PtySessionLimitError(OSError):
+    """当活跃 PTY 会话数达到单 owner 或进程全局上限时抛出的结构化异常。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        scope: str,
+        limit: int,
+        active_count: int,
+        owner_id: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.scope = scope
+        self.limit = limit
+        self.active_count = active_count
+        self.owner_id = owner_id
+
+
+def _session_owner_key(session: PtySession) -> str:
+    owner_id = str(getattr(session, "owner_id", "") or "").strip()
+    if owner_id:
+        return owner_id
+    exec_scope = getattr(session, "execution_scope", None)
+    exec_home = str(getattr(exec_scope, "owner_home", "") or "").strip()
+    if exec_home:
+        return exec_home
+    access_scope = getattr(session, "access_scope", None)
+    return str(getattr(access_scope, "owner_home", "") or "").strip()
 # PTY 输出缓冲上限 1 MiB：防输出积压撑爆内存。
 _MAX_BUFFER_BYTES = 1_000_000
 # PTY 单次写入最多 64 KiB：控制单次写入体积。
@@ -115,6 +146,7 @@ class PtySession:
     idle_timeout_seconds: float | None = None
     # 保持 resize 返回原会话的契约；额外携带同一次 FD 借用内的内核读回值。
     resize_readback: tuple[int, int] | None = None
+    owner_id: str = ""
 
     def append(self, chunk: bytes) -> None:
         with self.lock:
@@ -200,6 +232,8 @@ class _PtySandboxInputs:
 class PtyHostPolicy(SandboxHostPolicy):
     protected_persona_root: object = None
     idle_timeout_seconds: float | None = None
+    max_sessions: int | None = None
+    max_sessions_per_owner: int | None = None
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
@@ -210,6 +244,7 @@ class _PtyStart:
     execution_scope: ProcessExecutionScope
     cancelled: bool = False
     spawned: bool = False
+    owner_id: str = ""
 
 
 # LLM: 宿主停止事务选中的一代PTY清理义务；只存选中时冻结的执行范围/出生身份与宿主消费者（只含存储定位和不可变身份）。
@@ -292,7 +327,12 @@ def _pty_access_scope(
 class PtySessionRegistry:
     # LLM: 创建中也占容量；历史最多保留最近一批终态，计数 ID 不在 clear 后复用。
     # 函数用途: 初始化唯一会话表和并发创建预留。
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_sessions: int | None = None,
+        max_sessions_per_owner: int | None = None,
+    ) -> None:
         self._sessions: dict[str, PtySession] = {}
         self._counter = 0
         self._lock = threading.Lock()
@@ -302,6 +342,14 @@ class PtySessionRegistry:
         # 仅供未指定会话超时的直接调用继承；工具装配不再改它，巡检在正超时会话登记后惰性启动。
         self.idle_timeout_seconds = 0.0
         self._idle_thread: threading.Thread | None = None
+        self.max_sessions = (
+            None if max_sessions is None or isinstance(max_sessions, bool) else max(0, int(max_sessions))
+        )
+        self.max_sessions_per_owner = (
+            None
+            if max_sessions_per_owner is None or isinstance(max_sessions_per_owner, bool)
+            else max(0, int(max_sessions_per_owner))
+        )
         register_source_registry(self)
 
     # LLM: 容量和执行身份一起预留；宿主来源及会话超时随spawn冻结，不入模型参数，不修改进程默认超时。
@@ -324,14 +372,57 @@ class PtySessionRegistry:
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
         raise_if_cancelled()
         execution_scope = ProcessExecutionScope.from_run_scope(run_scope, owner_home)
+        default_per_owner_limit = 8
+        raw_global = self.max_sessions if self.max_sessions is not None else getattr(host_policy, "max_sessions", None)
+        if raw_global is None or isinstance(raw_global, bool):
+            global_limit = max(0, int(_MAX_SESSION_COUNT))
+        else:
+            global_limit = max(0, int(raw_global))
+        raw_owner = (
+            self.max_sessions_per_owner
+            if self.max_sessions_per_owner is not None
+            else getattr(host_policy, "max_sessions_per_owner", None)
+        )
+        if raw_owner is None or isinstance(raw_owner, bool):
+            per_owner_limit = default_per_owner_limit
+        else:
+            per_owner_limit = max(0, int(raw_owner))
+        owner_scope = process_access_scope(run_scope, owner_home)
+        owner_key = str(owner_scope.owner_id or owner_scope.owner_home or "").strip()
         with self._lock:
-            _prune_finished_sessions(self)
-            active = sum(not _source_resource_retired(session) for session in self._sessions.values())
-            if active + len(self._pending_starts) >= _MAX_SESSION_COUNT:
-                raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSION_COUNT}")
+            _prune_finished_sessions(
+                self,
+                keep_count=global_limit if global_limit > 0 else max(1, int(_MAX_SESSION_COUNT)),
+            )
+            active_sessions = [
+                session for session in self._sessions.values() if not _source_resource_retired(session)
+            ]
+            if owner_key and per_owner_limit > 0:
+                owner_active = (
+                    sum(1 for session in active_sessions if _session_owner_key(session) == owner_key)
+                    + sum(1 for pending in self._pending_starts.values() if pending.owner_id == owner_key)
+                )
+                if owner_active >= per_owner_limit:
+                    raise PtySessionLimitError(
+                        f"PTY_SESSION_LIMIT: active per-owner session limit is {per_owner_limit}",
+                        scope="owner",
+                        limit=per_owner_limit,
+                        active_count=owner_active,
+                        owner_id=owner_key,
+                    )
+            if global_limit > 0:
+                global_active = len(active_sessions) + len(self._pending_starts)
+                if global_active >= global_limit:
+                    raise PtySessionLimitError(
+                        f"PTY_SESSION_LIMIT: active session limit is {global_limit}",
+                        scope="global",
+                        limit=global_limit,
+                        active_count=global_active,
+                        owner_id=owner_key,
+                    )
             self._counter += 1
             session_id = f"pty-{self._counter}-{int(time.time())}"
-            self._pending_starts[session_id] = _PtyStart(execution_scope)
+            self._pending_starts[session_id] = _PtyStart(execution_scope, owner_id=owner_key)
         try:
             protection = write_protection or SandboxWriteProtection()
             sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protection.absolute_paths,
@@ -419,6 +510,7 @@ class PtySessionRegistry:
             execution_scope=launch.execution_scope,
             source_configurations=source_configurations,
             idle_timeout_seconds=idle_timeout_seconds,
+            owner_id=launch.owner_id,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -659,12 +751,14 @@ def _sweep_idle_sessions(registry: PtySessionRegistry, now: float | None = None)
 # LLM: 调用方持registry锁；只有完整树退役记录可裁剪，poll/closed/历史上限均不免除未知资源责任。
 #   宿主取消选中、清理证明尚未确认持久化的原对象既不裁剪也不计入无关会话的历史上限。
 # 函数用途: 保留最近32个已确认退役的无关历史，同时保留全部未确认资源与未确认证明。
-def _prune_finished_sessions(registry: PtySessionRegistry) -> None:
+def _prune_finished_sessions(registry: PtySessionRegistry, *, keep_count: int | None = None) -> None:
+    keep = max(0, int(_MAX_SESSION_COUNT if keep_count is None else keep_count))
     finished = [
         key for key, item in registry._sessions.items()
         if key not in registry._cleanup_proofs and _source_resource_retired(item) and item.process.poll() is not None
     ]
-    for key in finished[:-_MAX_SESSION_COUNT]:
+    victims = finished[:-keep] if keep > 0 else finished
+    for key in victims:
         del registry._sessions[key]
 
 
@@ -983,12 +1077,42 @@ class TerminalSessionTool(BaseTool):
                     self.shell_tool.protected_persona_root,
                     full_access_other_owner_homes=getattr(self.shell_tool, "full_access_other_owner_homes", "read_only"),
                     idle_timeout_seconds=timeout,
+                    max_sessions=getattr(self.shell_tool, "pty_max_sessions", None),
+                    max_sessions_per_owner=getattr(self.shell_tool, "pty_max_sessions_per_owner", None),
                 ),
             )
         except AgentsContractError as exc:
             return self._error("SANDBOX_UNAVAILABLE", exc.code)
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))
+        except PtySessionLimitError as exc:
+            reported_code = (
+                "PTY_OWNER_SESSION_LIMIT_REACHED"
+                if exc.scope == "owner"
+                else "PTY_GLOBAL_SESSION_LIMIT_REACHED"
+            )
+            next_action = (
+                "请先调用 terminal_session(action='list') 查看当前终端会话，"
+                "并使用 terminal_session(action='close', session_id=...) 关闭不再需要的空闲或已结束会话后重试；"
+                "若无需交互终端，也可改用非交互式 run_command。"
+            )
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                f"{exc}。{next_action}",
+                error_code="TOOL_RUNTIME_ERROR",
+                reported_error_code=reported_code,
+                effect_outcome="not_started",
+                next_action=next_action,
+                result_envelope={
+                    "error_code": reported_code,
+                    "effect_outcome": "not_started",
+                    "scope": exc.scope,
+                    "limit": exc.limit,
+                    "active_count": exc.active_count,
+                    "next_action": next_action,
+                },
+            )
         except OSError as exc:
             return self._error("COMMAND_FAILED", str(exc))
         return self._ok(
@@ -1146,7 +1270,7 @@ def _pty_session_summary(session: PtySession) -> dict[str, object]:
     }
 
 
-__all__ = ["PtyReadableSession", "PtyReadableSessionResolver", "PtySessionRegistry",
+__all__ = ["PtyReadableSession", "PtyReadableSessionResolver", "PtySessionLimitError", "PtySessionRegistry",
            "TerminalSessionTool", "pty_session_registry", "reclaim_pty_sessions"]
 
 

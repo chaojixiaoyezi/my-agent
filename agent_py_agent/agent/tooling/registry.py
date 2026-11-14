@@ -202,6 +202,8 @@ class ToolRegistryParams:
     tool_shell_demoted_nice: int = 15
     # PTY 会话空闲兜底回收阈值（分钟，0=不限制）；装配点据此配置进程级 PTY 注册表。
     pty_session_idle_timeout_minutes: int = 30
+    pty_max_sessions: int = 32
+    pty_max_sessions_per_owner: int = 8
     background_process_listen_scope_enforce: bool = True
     # 来自配置 shell_sandbox_boundary_facts：owner 隔离 Shell 失败时是否附带沙箱边界事实。
     shell_sandbox_boundary_facts: bool = True
