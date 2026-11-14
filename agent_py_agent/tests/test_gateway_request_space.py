@@ -79,7 +79,6 @@ def test_real_chat_space_switch_freezes_accepted_request(space_http, monkeypatch
     from agent_py_agent.agent.gateway_parts.input_delivery_service import read_gateway_input_receipt
     from agent_py_agent.agent.session import SessionManager
     from agent_py_agent.cli.chat_parts.gateway_client import ChatRequestContent, submit_chat_request
-    from agent_py_agent.cli.chat_parts.session_state import create_or_resume_session
     from agent_py_agent.cli.space_commands import (
         BusinessCommandSession,
         business_client_for_agent,
@@ -89,7 +88,7 @@ def test_real_chat_space_switch_freezes_accepted_request(space_http, monkeypatch
 
     server, agent = space_http
     client = _client(agent, server)
-    _, session_id = create_or_resume_session(SessionManager(agent.config), None)
+    session_id = SessionManager(agent.config).create_session(channel="chat").session_id
     business = business_client_for_agent(client, conversation_id=session_id)
     commands = BusinessCommandSession(business)
     spaces = [business.send(business.prepare('spaces.create', {'name': name}))['data']['space_id']

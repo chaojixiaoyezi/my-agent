@@ -41,7 +41,6 @@ from agent_py_agent.agent.workflows.agent_steps import (
 from agent_py_agent.agent.workflows.analysis_isolation import (
     WorkflowIsolationUnavailable,
     resolve_analysis_isolation,
-    run_isolated_analysis,
 )
 from agent_py_agent.agent.workflows.engine import WorkflowEngine
 from agent_py_agent.agent.workflows.models import (
@@ -486,20 +485,13 @@ def test_analysis_isolation_explicit_supported_mode():
     assert resolve_analysis_isolation({"analysis_isolation": "stateless_skill"})['mode'] == 'stateless_skill'
 
 
-@pytest.mark.parametrize('executor', [None, lambda *args, **kwargs: {}])
+@pytest.mark.parametrize('executor', [None, lambda *args, **kwargs: pytest.fail('unvalidated callable must not execute')])
 def test_analysis_isolation_never_trusts_arbitrary_executor(executor):
     with pytest.raises(WorkflowIsolationUnavailable) as caught:
         resolve_analysis_isolation({'analysis_isolation': 'lightweight_subagent'},
             step_config={'allowed_tools': ['custom_writer'], 'max_turns': 0}, isolation_executor=executor)
     assert caught.value.effect_outcome == 'not_started'
     assert caught.value.details['retry_same_configuration'] is False
-
-
-def test_legacy_isolated_helper_does_not_execute_injected_callable():
-    def forbidden(*args, **kwargs):
-        pytest.fail('未验证的callable不能成为隔离能力')
-    with pytest.raises(WorkflowIsolationUnavailable):
-        run_isolated_analysis({}, None, isolation_executor=forbidden)
 
 
 # ==============================================================================

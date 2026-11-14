@@ -153,3 +153,18 @@ def test_fake_llm_short_collection_coverage_is_rejected(tmp_path: Path):
 def _fixture(name: str) -> dict[str, object]:
     path = Path(__file__).parent / name
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_fake_message_firewall_browser_and_ticket_tools_return_structured_results(tmp_path: Path) -> None:
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(tmp_path)
+    message = runner.execute("send_message", {"target": "session:1", "idempotency_key": "msg-1"})
+    firewall = runner.execute("block_ip", {"ip": "203.0.113.7", "mode": "dry_run"})
+    browser = runner.execute("browser_open", {"url": "https://example.test"})
+    ticket = runner.execute("create_ticket", {"title": "Investigate failed artifact"})
+
+    assert message["ok"] is True
+    assert firewall["mode"] == "dry_run"
+    assert browser["dom_ref"] == "artifact://browser/dom-snapshot.json"
+    assert ticket["ticket_id"]

@@ -111,81 +111,6 @@ def test_owner_usage_root_permission_error_is_not_treated_as_missing(
         owner_logical_usage_bytes(owner)
 
 
-def test_linux_admission_scan_uses_exact_native_regular_file_sizes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_py_agent.agent.user_space import owner_quota
-
-    owner = tmp_path / "owner"
-    owner.mkdir()
-    observed: dict[str, object] = {}
-
-    def native_run(command, **kwargs):
-        observed["command"] = command
-        observed["kwargs"] = kwargs
-        return SimpleNamespace(returncode=0, stdout="4\n7\n", stderr="")
-
-    monkeypatch.setattr(owner_quota.sys, "platform", "linux")
-    monkeypatch.setattr(owner_quota.os, "access", lambda _path, _mode: True)
-    monkeypatch.setattr(owner_quota.subprocess, "run", native_run)
-
-    assert owner_quota._owner_usage_bytes_for_admission(owner) == 11
-    command = observed["command"]
-    assert command[:4] == ["/usr/bin/find", str(owner), "-type", "f"]
-    assert str(owner / ".owner-quota.lock") in command
-    assert observed["kwargs"] == {
-        "check": False,
-        "capture_output": True,
-        "text": True,
-        "timeout": owner_quota._NATIVE_USAGE_SCAN_TIMEOUT_SECONDS,
-    }
-
-
-def test_linux_admission_scan_timeout_is_fail_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_py_agent.agent.user_space import owner_quota
-
-    owner = tmp_path / "owner"
-    owner.mkdir()
-
-    def timeout(*_args, **_kwargs):
-        raise owner_quota.subprocess.TimeoutExpired("find", 15)
-
-    monkeypatch.setattr(owner_quota.sys, "platform", "linux")
-    monkeypatch.setattr(owner_quota.os, "access", lambda _path, _mode: True)
-    monkeypatch.setattr(owner_quota.subprocess, "run", timeout)
-
-    with pytest.raises(owner_quota.OwnerQuotaUnavailable, match="timed out"):
-        owner_quota._owner_usage_bytes_for_admission(owner)
-
-
-def test_linux_admission_scan_falls_back_when_find_is_not_supported(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agent_py_agent.agent.user_space import owner_quota
-
-    owner = tmp_path / "owner"
-    owner.mkdir()
-    (owner / "payload.bin").write_bytes(b"12345")
-    monkeypatch.setattr(owner_quota.sys, "platform", "linux")
-    monkeypatch.setattr(owner_quota.os, "access", lambda _path, _mode: True)
-    monkeypatch.setattr(
-        owner_quota.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=1,
-            stdout="",
-            stderr="find: unknown predicate -printf",
-        ),
-    )
-
-    assert owner_quota._owner_usage_bytes_for_admission(owner) == 5
-
-
 def test_zero_quota_policy_disables_hot_path_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -201,8 +126,8 @@ def test_zero_quota_policy_disables_hot_path_scan(
     enforcer = owner_quota.owner_quota_enforcer_from_policy(owner)
     monkeypatch.setattr(
         owner_quota,
-        "_owner_usage_bytes_for_admission",
-        lambda _root: (_ for _ in ()).throw(AssertionError("unlimited policy must not scan")),
+        "owner_logical_usage_bytes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unlimited policy must not scan")),
     )
 
     with enforcer.admission() as admission:
@@ -658,7 +583,6 @@ def test_usage_and_reconcile_exclude_control_runtime_and_empty_lock_files(tmp_pa
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / relative).write_bytes(payload)
     assert quota.owner_logical_usage_bytes(tmp_path) == quota.owner_logical_usage_bytes(tmp_path, exact=True) == 9
-    assert quota._native_regular_file_usage_bytes(tmp_path) in (None, 9)
     (tmp_path / '.owner-quota-ledger.json').unlink()
     result = _finish_reconcile(tmp_path)
     assert result['used_bytes'] == 9 and result['inode_count'] == 2

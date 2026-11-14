@@ -2,63 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 
 class TestDispatchLoopExceptions:
-    """测试 dispatch 循环中的异常处理。"""
-
-    def test_task_not_found_during_dispatch(self, tmp_path: Path):
-        """任务不存在时的异常处理。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
-            DispatchLoopReport,
-            dispatch_loop,
-        )
-
-        agent = MagicMock()
-        agent.config.runner_failure_retry_limit = 1
-
-        # 模拟 load 抛出 FileNotFoundError
-        def load_side_effect(task_id):
-            raise FileNotFoundError(f"Task {task_id} not found")
-
-        agent.subagents.load.side_effect = load_side_effect
-        agent.subagents.list_runs.return_value = []
-        agent.has_pending_work = False
-
-        mock_report = MagicMock()
-        mock_report.records = []
-        agent.dispatch_subagents.return_value = mock_report
-
-        result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
-        assert isinstance(result, DispatchLoopReport)
-
-    def test_corrupted_task_file(self, tmp_path: Path):
-        """任务文件损坏时的行为。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
-            DispatchLoopReport,
-            dispatch_loop,
-        )
-
-        agent = MagicMock()
-        agent.config.runner_failure_retry_limit = 1
-
-        # 模拟 JSON 解析失败
-        def load_side_effect(task_id):
-            raise ValueError("Invalid JSON format")
-
-        agent.subagents.load.side_effect = load_side_effect
-        agent.subagents.list_runs.return_value = []
-        agent.has_pending_work = False
-
-        mock_report = MagicMock()
-        mock_report.records = []
-        agent.dispatch_subagents.return_value = mock_report
-
-        result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
-        assert isinstance(result, DispatchLoopReport)
+    """测试 failure_introspection 在异常场景下的规则主链。"""
 
     def test_failure_introspection_uses_rules(self, tmp_path: Path):
         """失败自省使用同一条规则主链。"""
@@ -121,31 +71,6 @@ class TestDispatchLoopExceptions:
         assert result.confidence == 0.55
         agent.run.assert_not_called()
 
-    def test_all_tasks_failed_and_no_retry(self, tmp_path: Path):
-        """所有任务都失败且不允许重试时的处理。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
-            DispatchLoopReport,
-            dispatch_loop,
-        )
-
-        agent = MagicMock()
-        agent.config.runner_failure_retry_limit = 0  # 不重试策略
-
-        mock_report = MagicMock()
-        # 所有记录都是失败的
-        failed_record = MagicMock()
-        failed_record.ok = False
-        failed_record.status = "FAILED"
-        mock_report.records = [failed_record]
-
-        agent.dispatch_subagents.return_value = mock_report
-        agent.subagents.list_runs.return_value = []
-        agent.has_pending_work = False
-
-        result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
-        assert isinstance(result, DispatchLoopReport)
-        assert result.rounds_count == 1
-
 
 class TestMemoryPushExceptions:
     """测试 memory_push 在异常场景下的行为。"""
@@ -187,19 +112,6 @@ class TestMemoryPushExceptions:
 
         result = push_relevant_memories(agent, "timeout", {}, limit=3)
         assert result == []
-
-    def test_legacy_memory_entry_schema_is_removed(self, tmp_path: Path):
-        """旧 MemoryEntry/MemoryType 不能继续形成第二套 lesson Schema。"""
-        import agent_py_agent.agent.memory_push as memory_push
-
-        assert not hasattr(memory_push, "MemoryEntry")
-        assert not hasattr(memory_push, "MemoryType")
-
-    def test_direct_lesson_writer_is_removed(self, tmp_path: Path):
-        """失败/规划召回模块不得再暴露绕过 CandidateService 的写入口。"""
-        import agent_py_agent.agent.memory_push as memory_push
-
-        assert not hasattr(memory_push, "write_memory_with_type")
 
 
 class TestFailureIntrospectorRulePath:

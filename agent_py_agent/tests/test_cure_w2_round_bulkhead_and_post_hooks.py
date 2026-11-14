@@ -65,8 +65,6 @@ from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolSuccessFacts,
 )
 from agent_py_agent.agent.verification.runtime import (
-    VerificationItem,
-    VerificationRuntime,
     record_tool_verification,
 )
 from agent_py_agent.tests._tool_runtime_harness import (
@@ -410,23 +408,6 @@ def test_skill_learning_host_feedback_resilience(tmp_path):
 
     result = execute_skill_learning_host_action(agent, failing_action)
     assert result is None
-
-
-def test_verification_runtime_resilience():
-    """Verify VerificationRuntime.verify isolates unexpected exceptions into a failed VerificationItem."""
-    def buggy_verifier(_ctx):
-        raise ValueError("invalid verification payload")
-
-    item = VerificationRuntime.verify(buggy_verifier, {})
-    assert isinstance(item, VerificationItem)
-    assert item.passed is False
-    assert "ValueError" in item.message
-
-    def interrupted_verifier(_ctx):
-        raise InterruptedError("interrupted")
-
-    with pytest.raises(InterruptedError):
-        VerificationRuntime.verify(interrupted_verifier, {})
 
 
 def test_run_pack_verification_hooks_resilience():

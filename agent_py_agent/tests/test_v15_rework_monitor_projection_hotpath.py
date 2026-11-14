@@ -45,7 +45,7 @@ def _logical_skill_case(tmp_path, name):
         model_backend="echo", my_agent_home=str(tmp_path / "home"),
         memory_path=str(tmp_path / "memory.jsonl"), enable_tools=True,
         enable_self_learning=False, prompt_files=[], model_context_window_tokens=262144,
-        max_tokens=128, memory_compact_remote_enabled=False, tool_default_deferral_enabled=True,
+        max_tokens=128, memory_compact_remote_enabled=False,
     ), workspace)
     provider = _CaptureProvider()
     agent.backend = provider

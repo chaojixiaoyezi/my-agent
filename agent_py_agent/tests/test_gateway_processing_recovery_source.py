@@ -577,10 +577,7 @@ def test_closing_between_hot_commit_and_post_keeps_input_and_p3_debt(tmp_path, m
 
 
 def test_metadata_ports_do_not_install_p5_or_executor_launch_permission(tmp_path, monkeypatch):
-    from agent_py_agent.agent.common.executor_registration import (
-        ExecutorRegistrationError,
-        registered_popen,
-    )
+    from agent_py_agent.agent.common.executor_registration import capture_executor_launcher
     from agent_py_agent.agent.gateway_parts.multiprocess_execution import current_worker_execution
 
     with recovery_case(tmp_path, monkeypatch) as c:
@@ -588,9 +585,7 @@ def test_metadata_ports_do_not_install_p5_or_executor_launch_permission(tmp_path
 
         def metadata_only(_paths, _path, _payload, _context):
             assert current_worker_execution() is None
-            with pytest.raises(ExecutorRegistrationError) as error:
-                registered_popen("shell", ["unused"], None)
-            assert error.value.error["error_code"] == "EXECUTOR_CONTEXT_REQUIRED"
+            assert capture_executor_launcher() is None
             return ""
 
         assert (

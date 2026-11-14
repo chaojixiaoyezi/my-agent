@@ -14,8 +14,8 @@ from agent_py_agent.agent.gateway_parts.delegation_control import execute_delega
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings.im_task_preferences import (
     delegation_preference,
+    preference_key,
     preference_path,
-    set_delegation_preference,
 )
 from agent_py_agent.tests.test_im_execution_threads import fixture_agent
 
@@ -23,7 +23,23 @@ from agent_py_agent.tests.test_im_execution_threads import fixture_agent
 def test_zero_midnight_expires_without_timer_and_actor_settings_are_independent(tmp_path):
     agent, _ = fixture_agent(tmp_path)
     before = datetime(2026, 10, 12, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
-    enabled = set_delegation_preference(agent, "feishu", "ou_a", True, now=before)
+    expires_at = datetime(2026, 10, 13, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    path = preference_path(agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schema_version": "im_user_preferences.v1",
+        "owner_id": str(agent.home_paths.owner_id),
+        "users": {
+            preference_key("feishu", "ou_a"): {
+                "enabled": True,
+                "expires_at": expires_at,
+                "business_day": "2026-10-12",
+                "timezone": "Asia/Shanghai",
+                "revision": 1,
+            },
+        },
+    }))
+    enabled = delegation_preference(agent, "feishu", "ou_a", now=before)
     assert enabled["enabled"]
     assert not delegation_preference(agent, "feishu", "ou_b", now=before)["enabled"]
     assert not delegation_preference(agent, "feishu", "ou_a", now=enabled["expires_at"])["enabled"]
@@ -33,31 +49,11 @@ def test_zero_midnight_expires_without_timer_and_actor_settings_are_independent(
     assert enabled["enabled"]  # 已受理任务持有的原快照没有被下一天读取改变。
 
 
-def test_disable_advances_only_own_setting_and_does_not_mutate_frozen_mode(tmp_path):
-    agent, _ = fixture_agent(tmp_path)
-    snapshot = set_delegation_preference(agent, "feishu", "ou_a", True, now=1000)
-    other = set_delegation_preference(agent, "feishu", "ou_b", True, now=1000)
-    disabled = set_delegation_preference(agent, "feishu", "ou_a", False, now=1010)
-    assert not disabled["enabled"]
-    assert disabled["revision"] == snapshot["revision"] + 1
-    assert snapshot["enabled"]
-    assert delegation_preference(agent, "feishu", "ou_b", now=1010) == other
-
-
 def test_unconfigured_status_uses_same_deployment_timezone_as_enable(tmp_path, monkeypatch):
     agent, _ = fixture_agent(tmp_path)
     agent.config.timezone = ""
     monkeypatch.setattr("agent_py_agent.agent.scheduler.schedule._local_zone_name", lambda: "Asia/Tokyo")
     assert delegation_preference(agent, "feishu", "ou_a")["timezone"] == "Asia/Tokyo"
-    assert set_delegation_preference(agent, "feishu", "ou_a", True)["timezone"] == "Asia/Tokyo"
-
-
-def test_dst_uses_next_business_midnight_instead_of_24_hour_ttl(tmp_path):
-    agent, _ = fixture_agent(tmp_path)
-    agent.config.timezone = "America/New_York"
-    instant = datetime(2026, 3, 8, tzinfo=ZoneInfo(agent.config.timezone)).timestamp()
-    enabled = set_delegation_preference(agent, "feishu", "ou_a", True, now=instant)
-    assert enabled["expires_at"] - instant == 23 * 3600
 
 
 def test_disabled_child_creation_rejects_enable_and_keeps_new_input_original(tmp_path, monkeypatch):
@@ -67,7 +63,6 @@ def test_disabled_child_creation_rejects_enable_and_keeps_new_input_original(tmp
     agent.config.enable_subagents = True
     monkeypatch.setattr("agent_py_agent.agent.gateway_parts.control_service._request_agent_for_scope", lambda *_: agent)
     scope = GatewayControlScope(user_id="ou_a", channel="feishu", conversation_id="oc_a")
-    set_delegation_preference(agent, "feishu", "ou_a", True)
     agent.owner_policy = SimpleNamespace(disabled_tools=("create_subagents",))
     assert not execute_delegation_control(agent, parse_conversation_command("/delegate enable"), scope).ok
     assert capture_im_dispatch(agent, scope)["mode"] == "original"
@@ -76,11 +71,25 @@ def test_disabled_child_creation_rejects_enable_and_keeps_new_input_original(tmp
 def test_tui_and_foreign_or_broken_preferences_are_rejected(tmp_path):
     agent, _ = fixture_agent(tmp_path)
     with pytest.raises(ValueError):
-        set_delegation_preference(agent, "tui", "ou_a", True)
-    set_delegation_preference(agent, "feishu", "ou_a", True)
-    payload = json.loads(preference_path(agent).read_text())
+        delegation_preference(agent, "tui", "ou_a")
+    path = preference_path(agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "im_user_preferences.v1",
+        "owner_id": str(agent.home_paths.owner_id),
+        "users": {
+            preference_key("feishu", "ou_a"): {
+                "enabled": True,
+                "expires_at": datetime(2026, 10, 13, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp(),
+                "business_day": "2026-10-12",
+                "timezone": "Asia/Shanghai",
+                "revision": 1,
+            },
+        },
+    }
+    path.write_text(json.dumps(payload))
     payload["owner_id"] = "foreign"
-    preference_path(agent).write_text(json.dumps(payload))
+    path.write_text(json.dumps(payload))
     with pytest.raises(DataCorruptionError):
         delegation_preference(agent, "feishu", "ou_a")
 

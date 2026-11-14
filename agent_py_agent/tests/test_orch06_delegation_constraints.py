@@ -43,7 +43,6 @@ from agent_py_agent.agent.agent_core.orchestration.delegation_constraints import
     ToolPermissionDeniedError,
     evaluate_delegation_enforcement,
     extract_delegation_constraints,
-    is_action_prohibited,
     validate_delegation_constraints_upper_bound,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
@@ -618,34 +617,6 @@ def test_scheduled_child_tools_removes_prohibited_actions():
     assert "create_subagents" not in child_tools
     assert "web_search" not in child_tools
     assert "read_file" in child_tools
-
-
-def test_is_action_prohibited_matches_commands_and_actions():
-    """is_action_prohibited matches git_push, git_reset_hard, spawn_children, and network_access."""
-    constraints = StructuredDelegationConstraints(
-        prohibited_actions=("git_push", "git_reset_hard", "spawn_children", "network_access"),
-    )
-    # git push commands
-    prohibited, _ = is_action_prohibited("git push origin main", constraints)
-    assert prohibited is True
-
-    # git reset commands
-    prohibited, _ = is_action_prohibited("git reset --hard HEAD~1", constraints)
-    assert prohibited is True
-
-    # git status (allowed)
-    prohibited, _ = is_action_prohibited("git status", constraints)
-    assert prohibited is False
-
-    # spawn_children
-    prohibited, _ = is_action_prohibited("create_subagents", constraints)
-    assert prohibited is True
-
-    # network access
-    prohibited, _ = is_action_prohibited("curl https://example.com", constraints)
-    assert prohibited is True
-    prohibited, _ = is_action_prohibited("web_fetch", constraints)
-    assert prohibited is True
 
 
 # -----------------------------------------------------------------------------

@@ -295,3 +295,75 @@ class TestHelpers:
         assert result[0]["name"] == "item1"
         assert result[0]["count"] == 5
         assert result[1]["tags"] == ["t1", "t2"]
+
+
+def test_subagent_result_ignores_deliverables_alias_for_artifacts():
+    text = (
+        "[SUBAGENT_RESULT]\n"
+        "{"
+        '"status":"DONE",'
+        '"summary":"homepage written",'
+        '"deliverables":[{"path":"deliverables/site-output/index.html","kind":"html"}],'
+        '"files":[{"summary":"not a path"}],'
+        '"tests":[]'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+    parsed = parse_subagent_runner_output(text)
+
+    assert parsed.ok
+    assert parsed.artifacts == []
+
+
+def test_subagent_result_recovers_artifact_from_evidence_path():
+    text = (
+        "[SUBAGENT_RESULT]\n"
+        "{"
+        '"status":"DONE",'
+        '"summary":"homepage written",'
+        '"evidence":[{"kind":"artifact","path":"/tmp/site/index.html","summary":"HTML"}],'
+        '"artifacts":[]'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+    parsed = parse_subagent_runner_output(text)
+
+    assert parsed.ok
+    assert parsed.artifacts == [{"path": "/tmp/site/index.html", "kind": "file", "summary": "HTML"}]
+
+
+def test_subagent_result_recovers_artifact_from_evidence_packet_refs():
+    text = (
+        "[SUBAGENT_RESULT]\n"
+        "{"
+        '"status":"DONE",'
+        '"summary":"homepage written",'
+        '"evidence_packets":[{"claim":"HTML exists","artifact_refs":["/tmp/site/index.html"]}],'
+        '"artifacts":[]'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+    parsed = parse_subagent_runner_output(text)
+
+    assert parsed.ok
+    assert parsed.artifacts == [{"path": "/tmp/site/index.html", "kind": "file", "summary": "HTML exists"}]
+
+
+def test_subagent_result_ignores_files_modified_alias():
+    text = (
+        "[SUBAGENT_RESULT]\n"
+        "{"
+        '"status":"COMPLETED",'
+        '"summary":"homepage fixed",'
+        '"files_modified":["deliverables/site-output/index.html"]'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+    parsed = parse_subagent_runner_output(text)
+
+    assert parsed.ok
+    assert parsed.artifacts == []

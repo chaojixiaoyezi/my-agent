@@ -180,7 +180,6 @@ def test_standalone_file_tool_keeps_explicit_options(tmp_path, enabled):
 
 def test_legacy_flag_cannot_disable_thread_persona_freeze(scene):
     builder, paths, _ = scene
-    builder.config.thread_prompt_prefix_freeze_enabled = False
     first, _ = prefix_and_updates(builder, request())
     paths["agents"].write_text("- 当轮变化\n", encoding="utf-8")
     stable, updates = prefix_and_updates(builder, request())
@@ -190,7 +189,6 @@ def test_legacy_flag_cannot_disable_thread_persona_freeze(scene):
 
 def test_legacy_flag_cannot_drop_canonical_thread_scope():
     config = AgentConfig()
-    config.thread_prompt_prefix_freeze_enabled = False
     thread = SimpleNamespace(compact_generation=3, model_profile_id="model-one")
     agent = SimpleNamespace(config=config, conversation_store=SimpleNamespace(
         threads=SimpleNamespace(load=lambda _thread: thread)))

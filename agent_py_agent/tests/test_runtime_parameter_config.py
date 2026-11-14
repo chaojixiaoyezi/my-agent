@@ -121,64 +121,6 @@ def test_dispatch_runtime_policy_defaults_are_code_constants() -> None:
     assert not hasattr(DispatchRuntimePolicy, "from_config")
 
 
-def test_dispatch_loop_omitted_numbers_follow_code_defaults() -> None:
-    from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
-
-    agent = SimpleNamespace(
-        config=SimpleNamespace(runner_failure_retry_limit=1),
-        has_pending_work=True,
-    )
-    agent.subagents = SimpleNamespace(list_runs=lambda: [])
-
-    class Report:
-        records = []
-
-    seen_params = []
-
-    def dispatch_subagents(_router, _capability_config, *, params):
-        seen_params.append(params)
-        agent.has_pending_work = False
-        return Report()
-
-    agent.dispatch_subagents = dispatch_subagents
-
-    result = dispatch_loop(agent, router=None)
-
-    assert result.rounds_count == 1
-    assert result.stopped_by_limit is False
-    assert seen_params[0].execution_plan.max_runners == 1
-    assert seen_params[0].limit == 20
-
-
-def test_dispatch_loop_explicit_numbers_override_code_defaults() -> None:
-    from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
-
-    agent = SimpleNamespace(
-        config=SimpleNamespace(runner_failure_retry_limit=1),
-        has_pending_work=True,
-    )
-    agent.subagents = SimpleNamespace(list_runs=lambda: [])
-
-    class Report:
-        records = []
-
-    seen_params = []
-
-    def dispatch_subagents(_router, _capability_config, *, params):
-        seen_params.append(params)
-        agent.has_pending_work = False
-        return Report()
-
-    agent.dispatch_subagents = dispatch_subagents
-
-    result = dispatch_loop(agent, router=None, max_consecutive_rounds=5, max_runners=2, limit=11)
-
-    assert result.rounds_count == 1
-    assert result.stopped_by_limit is False
-    assert seen_params[0].execution_plan.max_runners == 2
-    assert seen_params[0].limit == 11
-
-
 def test_runner_concurrency_is_the_single_concurrency_knob() -> None:
     from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 

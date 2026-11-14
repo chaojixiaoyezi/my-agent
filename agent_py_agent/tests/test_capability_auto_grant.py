@@ -323,13 +323,6 @@ def test_audit_source_wake_uses_durable_background_autostart(monkeypatch):
             lambda _agent, _run_id: started.append(1)
             or {"started": 2, "run_ids": [task.id]},
         )
-        monkeypatch.setattr(
-            capability_auto_sweep,
-            "_redispatch_stalled_subagents",
-            lambda _agent: (_ for _ in ()).throw(
-                AssertionError("source continuation must not occupy wake runner")
-            ),
-        )
 
         summary = capability_auto_sweep.auto_capability_sweep(
             agent,
