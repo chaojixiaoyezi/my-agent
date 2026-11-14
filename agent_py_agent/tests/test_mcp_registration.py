@@ -375,7 +375,11 @@ def test_proxy_execute_server_tool_error_maps_to_execution_failed():
     proxy = _proxy(client)
     out = proxy.execute({"x": 1})
     assert out.ok is False
-    assert out.error_code == "TOOL_EXECUTION_FAILED"
+    assert out.error_code == "TOOL_RUNTIME_ERROR"
+    assert out.reported_error_code == "MCP_REMOTE_ERROR"
+    assert out.effect_outcome == "failed"
+    assert out.retryable is False
+    assert out.next_action
 
 
 def test_proxy_execute_timeout_maps_to_tool_timeout():
@@ -384,6 +388,7 @@ def test_proxy_execute_timeout_maps_to_tool_timeout():
     out = proxy.execute({})
     assert out.ok is False
     assert out.error_code == "TOOL_TIMEOUT"
+    assert out.reported_error_code == "MCP_TIMEOUT"
 
 
 def test_proxy_availability_tracks_existing_mcp_process_without_restart():
@@ -409,7 +414,11 @@ def test_proxy_execute_unexpected_exception_does_not_crash():
     proxy = _proxy(client)
     out = proxy.execute({})
     assert out.ok is False
-    assert out.error_code == "TOOL_EXECUTION_FAILED"
+    assert out.error_code == "TOOL_RUNTIME_ERROR"
+    assert out.reported_error_code == "TOOL_RUNTIME_ERROR"
+    assert out.effect_outcome == "unknown"
+    assert out.retryable is False
+    assert out.next_action
 
 
 # ---------------------------------------------------------------------------
@@ -819,10 +828,13 @@ def test_failed_structured_content_still_survives_diagnostic_extension():
     client = _FakeClient(result={'content': 'bad input', 'isError': True,
         'structuredContent': {'reason': 'missing', 'field': 'name', 'token': 'private-token'}})
     outcome = _proxy(client).execute({})
-    payload = json.loads(outcome.output)
-    assert not outcome.ok and outcome.error_code == 'TOOL_EXECUTION_FAILED'
+    parsed = json.loads(outcome.output)
+    assert not outcome.ok and outcome.error_code == 'TOOL_RUNTIME_ERROR'
+    assert outcome.reported_error_code == 'MCP_REMOTE_ERROR'
     assert outcome.effect_outcome == 'failed'
-    assert payload['structuredContent']['reason'] == 'missing'
-    assert payload['structuredContent']['field'] == 'name'
-    assert payload['structuredContent']['token'] == '<redacted>'
+    assert outcome.retryable is False
+    assert outcome.next_action
+    assert parsed['structuredContent']['reason'] == 'missing'
+    assert parsed['structuredContent']['field'] == 'name'
+    assert parsed['structuredContent']['token'] == '<redacted>'
     assert len(client.calls) == 1

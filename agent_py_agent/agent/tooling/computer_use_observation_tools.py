@@ -108,11 +108,81 @@ def register_observation_tools(server: Any, *, with_typing: bool, observe_only: 
         server.add_tool(type_into_candidate, name="type_into_candidate", description=(type_into_candidate.__doc__ or "").strip())
 
 
+_PRE_CLICK_OBSERVATION_NEXT_ACTIONS: dict[str, str] = {
+    "tool_not_available_in_observe_only": (
+        "当前 Computer Use 处于只看档（未触发任何桌面操作）；仅允许调用 observe_window 只读观察，切勿重试点击或输入工具。"
+    ),
+    "invalid_arguments": (
+        "调用参数未通过前置校验（未触发任何桌面操作）；请按工具 Schema 修正参数类型与必填项后再调用，禁止原样重试。"
+    ),
+    "missing_context": (
+        "缺少宿主观察上下文或结构不匹配（未触发任何桌面操作）；请先调用 observe_window 获取当前轮候选后再操作，禁止原样重试。"
+    ),
+    "clear_unsupported": (
+        "当前平台后端不支持自动清空（未触发任何桌面操作）；请设 clear_existing=false 或改用键盘组合键处理，禁止原样重试。"
+    ),
+    "stale": (
+        "候选快照已过期（未触发点击或输入）；请先调用 observe_window 重新采样目标窗口并改用新生成的 candidate_id，禁止原样重试旧候选。"
+    ),
+    "not_found": (
+        "候选编号不存在或不属于当前观察代次（未触发点击或输入）；请先调用 observe_window 获取有效 candidate_id，禁止原样重试。"
+    ),
+    "window_ambiguous": (
+        "存在多个同名可见窗口（未触发任何桌面操作）；请从返回的 windows 清单中选择准确的 win:... 别名填入 window 参数后重新调用 observe_window。"
+    ),
+    "window_not_found": (
+        "未找到匹配的可见窗口（未触发任何桌面操作）；请核对返回的 windows 清单并改用准确的 win:... 别名或留空采样最前窗口，不要原样重试。"
+    ),
+    "not_viewable": (
+        "目标窗口当前不可见或已最小化（未触发任何桌面操作）；若在完整档可先用 list_windows / activate_window 确认窗口状态后再调用 observe_window。"
+    ),
+    "occluded": (
+        "目标窗口被上层窗口遮挡（未触发任何桌面操作）；若在完整档可先调用 activate_window 置前目标窗口后再调用 observe_window。"
+    ),
+    "screen_locked": (
+        "当前屏幕已锁定（未触发任何桌面操作）；请提示用户解锁屏幕后再继续观察，禁止循环重试。"
+    ),
+    "screen_recording_not_permitted": (
+        "缺少系统屏幕录制权限（未触发任何桌面操作）；请提示用户在系统隐私设置中授予屏幕录制权限后再试，禁止循环重试。"
+    ),
+    "accessibility_not_permitted": (
+        "缺少系统辅助功能权限（未触发任何桌面操作）；请提示用户在系统隐私设置中授予辅助功能权限后再试，禁止循环重试。"
+    ),
+    "cancelled": (
+        "本次观察调用在执行副作用前已取消（未触发任何桌面操作）；请先核对当前任务控制状态，不要自动盲目重放。"
+    ),
+}
+_DEFAULT_OBSERVATION_NEXT_ACTION = (
+    "窗口采样或识别失败（未触发桌面修改）；请核对目标窗口是否仍存在且可正常显示后再调用 observe_window，不要原样循环重试。"
+)
+
+
+# 函数用途: 为本地观察适配器错误生成“原因码 + 副作用状态 + 下一步观察建议”三段式结构化事实。
+def _observation_error_presentation(exc: ObservationError) -> tuple[str, str, str]:
+    if exc.clicked:
+        if exc.code == "type_failed":
+            return (
+                "failed",
+                "partial_input_possible",
+                "目标控件已发生点击且可能已输入部分字符；禁止原样盲目重发，请先调用 observe_window 核对当前控件文本与焦点状态，再决定是否使用 clear_existing=true 修正输入。",
+            )
+        return (
+            "failed",
+            "clicked_before_failure",
+            "目标控件已发生点击但后续输入未完成；禁止原样盲目重试，请先调用 observe_window 核对窗口焦点与控件状态后再决定下一步。",
+        )
+    return (
+        "not_started",
+        "none",
+        _PRE_CLICK_OBSERVATION_NEXT_ACTIONS.get(exc.code, _DEFAULT_OBSERVATION_NEXT_ACTION),
+    )
+
+
 # LLM: 返回 (正文, structuredContent, isError)。观察载荷只进 structuredContent、正文不重复（和 browser-lite 一致）；失败正文带
-#   OBSERVATION_<CODE> 与中文说明，structuredContent 带 {my_agent_observation_error: {code, ...details}}（window_not_found /
+#   OBSERVATION_<CODE>、副作用状态与下一步建议，structuredContent 带 {my_agent_observation_error: {code, ...details}}（window_not_found /
 #   window_ambiguous 的 details 是可见窗口清单 windows 与 truncated），宿主据此提升 stale / not_found，其它码原样给模型。
 #   只看档在执行面 fail-closed：context.observe_only 为真时除 observe_window 之外的任何工具名都直接返回结构化错误，不碰 observer
-#   的任何方法——tools/list 只列 observe_window 是目录层的收窄，这一层是执行层的兜底，绕开目录直接点名调用也点不动。
+#   的任何方法——tools/list 只列 observe_window 是目录层的收窄，这一层是执行层的兜底，直接点名调用也点不动。
 # 函数用途: 执行一个观察工具调用并给出可编码的三元组；context 为 None 表示没有宿主上下文（也不会被取消）。
 def call_observation_tool(observer: Any, name: str, arguments: Mapping[str, Any], context: CallContext | None) -> tuple[dict, dict | None, bool]:
     context = context or CallContext()
@@ -126,7 +196,20 @@ def call_observation_tool(observer: Any, name: str, arguments: Mapping[str, Any]
     except ObservationError as exc:
         error = {"code": exc.code, **({"clicked": True} if exc.clicked else {}),
                  **{key: value for key, value in exc.details.items() if key not in {"code", "clicked"}}}
-        return {"code": "OBSERVATION_" + exc.code.upper(), "message": str(exc), **{k: v for k, v in error.items() if k != "code"}}, {OBSERVATION_ERROR_KEY: error}, True
+        effect_outcome, side_effect, next_action = _observation_error_presentation(exc)
+        error_body = {
+            "code": "OBSERVATION_" + exc.code.upper(),
+            "message": str(exc),
+            "effect_outcome": effect_outcome,
+            "side_effect": side_effect,
+            "next_action": next_action,
+            **{
+                k: v
+                for k, v in error.items()
+                if k not in {"code", "effect_outcome", "side_effect", "next_action"}
+            },
+        }
+        return error_body, {OBSERVATION_ERROR_KEY: error}, True
     return body, structured, False
 
 
