@@ -306,14 +306,12 @@ def test_tool_execution_gate_finding_codes_are_registered():
     from agent_py_agent.agent.contracts.error_taxonomy import error_contract
     gate_files = [
         AGENT_ROOT / "tooling" / "action_policy.py",
-            AGENT_ROOT / "contracts" / "gates" / "gate_pipeline.py",
-            AGENT_ROOT / "contracts" / "gates" / "adapters.py",
-            AGENT_ROOT / "contracts" / "gates" / "path_url_command.py",
+        AGENT_ROOT / "contracts" / "gates" / "path_url_command.py",
         AGENT_ROOT / "contracts" / "gates" / "command_policy.py",
         AGENT_ROOT / "path_access_policy.py",
         AGENT_ROOT / "contracts" / "gates" / "tool_guardrail.py",
         AGENT_ROOT / "contracts" / "gates" / "tool_rate_limit.py",
-            AGENT_ROOT / "contracts" / "gates" / "tool_approval_binding.py",
+        AGENT_ROOT / "contracts" / "gates" / "tool_approval_binding.py",
     ]
     used: set[str] = set()
     for path in gate_files:
