@@ -470,6 +470,7 @@ def revert_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningE
         target_sha = skill_content_sha256(text)
         ts = time.time()
         next_maint = dict(current.maintenance)
+        hist_adoptions = _historical_adoptions(current)
         stable = next_maint.get("previous_stable")
         if is_proven_stable_version(stable) and stable["version"] == target_ver and stable["sha256"] == target_sha:
             est_at = float(stable["established_at"])
@@ -485,8 +486,10 @@ def revert_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningE
                 "independent_uses": 0,
                 "independent_uses_coverage": "exact",
                 "uses_since_hurt": 0,
+                "strike_epoch": 0,
                 "activation_id": uuid.uuid4().hex,
                 "epoch_started_at": ts,
+                "historical_adoptions": hist_adoptions,
                 "observations": [],
                 "rolled_back_from": current.sha256,
             })
@@ -498,9 +501,12 @@ def revert_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningE
                 "helped_count": 0,
                 "hurt_count": 0,
                 "independent_uses": 0,
+                "independent_uses_coverage": "exact",
                 "uses_since_hurt": 0,
+                "strike_epoch": 0,
                 "activation_id": uuid.uuid4().hex,
                 "epoch_started_at": ts,
+                "historical_adoptions": hist_adoptions,
                 "observations": [],
                 "rolled_back_from": current.sha256,
             })
@@ -551,6 +557,7 @@ def _rollback_to_proven_stable_locked(
         raise SkillLearningGateError(CODE_VERSION_MISSING, {"skill_name": current.name, "version": target_ver})
     ts = time.time() if now is None else float(now)
     maint = dict(owned.maintenance)
+    hist_adoptions = _historical_adoptions(owned)
     maint.pop("previous_stable", None)
     maint.pop("previous_verification", None)
     maint.update({
@@ -563,8 +570,10 @@ def _rollback_to_proven_stable_locked(
         "independent_uses": 0,
         "independent_uses_coverage": "exact",
         "uses_since_hurt": 0,
+        "strike_epoch": 0,
         "activation_id": uuid.uuid4().hex,
         "epoch_started_at": ts,
+        "historical_adoptions": hist_adoptions,
         "observations": [],
         "rolled_back_from": owned.sha256,
         "task_family_fingerprint": skill_family_fingerprint(text),
