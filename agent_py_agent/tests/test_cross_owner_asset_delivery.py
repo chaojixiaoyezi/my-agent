@@ -61,7 +61,7 @@ def test_h01_json_sensitive_container_and_duplicate_keys(sanitize, tmp_path, key
     output = sanitize({'config.json': raw}, owner_home=tmp_path,
         allow_secret_placeholder_replace=True)['config.json']
     pairs = json.loads(output, object_pairs_hook=list)
-    assert pairs == [(key, ['<REDACTED_SECRET>', [('ordinary', '<REDACTED_SECRET>')], None, 42, False]),
+    assert pairs == [(key, ['<REDACTED_SECRET>', [('ordinary', '<REDACTED_SECRET>')], None, '<REDACTED_SECRET>', False]),
         ('safe', '保留'), (key, '${TOKEN}')]
 
 

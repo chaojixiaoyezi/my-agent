@@ -477,3 +477,107 @@ def test_owner_quota_bounded_host_control_admission_at_full_quota_and_boundaries
     with pytest.raises(OwnerQuotaExceeded):
         with enforcer.reserve([OwnerQuotaChange(oversized_skill, 200 * 1024)]):
             pass
+
+
+def test_delivery_sanitizer_redacts_inherited_numeric_secrets_across_two_owners(
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.user_space.local_user_store import LocalUser, LocalUserStore
+
+    root = tmp_path / "delivery-host"
+    sender_home = root / "owners" / "local" / "main"
+    receiver_home = root / "owners" / "local" / "alice"
+    sender_home.mkdir(parents=True, exist_ok=True)
+    receiver_home.mkdir(parents=True, exist_ok=True)
+
+    user_store = LocalUserStore(root)
+    alice = LocalUser("alice", "enabled", 1, "alice", "2026-10-25", "2026-10-25", 1)
+    user_store.save(
+        "alice",
+        {
+            "schema": "local-user.v1",
+            "user": alice.to_dict(),
+            "provision": {
+                "phase": "committed",
+                "operation_id": "fixture",
+                "home_identity": user_store.directory_identity(
+                    receiver_home.relative_to(root).parts
+                ),
+            },
+            "operations": {"fixture": alice.to_dict()},
+        },
+    )
+
+    nested_bundle = {
+        "credential": {
+            "value": 482910,
+            "zero": 0,
+            "score": 12.5,
+            "enabled": True,
+            "optional": None,
+        },
+        "password": [482910, 0, -7, 3.14, False, None],
+        "metrics": {"count": 42, "ratios": [0, 1.5], "ok": True},
+    }
+    raw_bytes = json.dumps(nested_bundle).encode("utf-8")
+
+    # 1. 直接扫描入口必须拦截嵌套对象与数组中的数字凭据，并在显式替换时保留普通数值与布尔/null。
+    with pytest.raises(AssetDeliveryError) as direct_err:
+        sanitize_bundle_files({"config.json": raw_bytes}, owner_home=sender_home)
+    assert direct_err.value.error_code == "ASSET_DELIVERY_SECRET_DETECTED"
+
+    replaced_files = sanitize_bundle_files(
+        {"config.json": raw_bytes},
+        owner_home=sender_home,
+        allow_secret_placeholder_replace=True,
+    )
+    replaced_doc = json.loads(replaced_files["config.json"].decode("utf-8"))
+    expected_redacted_doc = {
+        "credential": {
+            "value": "<REDACTED_SECRET>",
+            "zero": "<REDACTED_SECRET>",
+            "score": "<REDACTED_SECRET>",
+            "enabled": True,
+            "optional": None,
+        },
+        "password": [
+            "<REDACTED_SECRET>",
+            "<REDACTED_SECRET>",
+            "<REDACTED_SECRET>",
+            "<REDACTED_SECRET>",
+            False,
+            None,
+        ],
+        "metrics": {"count": 42, "ratios": [0, 1.5], "ok": True},
+    }
+    assert replaced_doc == expected_redacted_doc
+
+    # 2. 真实双 Owner ScriptStore + AssetDeliveryService 投递与接收闭环校验。
+    ScriptStore(sender_home).save_script(
+        AssetDescriptor("num_demo", "script", "嵌套数字凭据测试"),
+        'print("ok")\n',
+    )
+    (sender_home / "scripts" / "num_demo" / "config.json").write_bytes(raw_bytes)
+
+    service = AssetDeliveryService(root)
+    with pytest.raises(AssetDeliveryError) as send_err:
+        service.send_bundle("local/main", "local/alice", "script", "num_demo")
+    assert send_err.value.error_code == "ASSET_DELIVERY_SECRET_DETECTED"
+    assert service.list_inbox("local/alice")["deliveries"] == []
+
+    sent = service.send_bundle(
+        "local/main",
+        "local/alice",
+        "script",
+        "num_demo",
+        allow_secret_placeholder_replace=True,
+    )
+    accepted = service.accept_delivery("local/alice", sent["delivery_id"])
+    assert accepted["status"] == "accepted"
+    delivered_doc = json.loads(
+        (receiver_home / "scripts" / "num_demo" / "config.json").read_text(encoding="utf-8")
+    )
+    assert delivered_doc == expected_redacted_doc
