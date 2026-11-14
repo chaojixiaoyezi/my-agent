@@ -1,8 +1,7 @@
 """W11初始化引导与租户品牌；状态只读真实模型、数据源和空间事实。
 
 本模块只供统一业务调度器在已签发的实时上下文内调用：读取路径不发起模型请求或
-网络探测，写入路径使用原V13Store的quota、幂等回执和owner隔离，样例记录带
-sample标记且ID确定，不覆盖任何真实业务记录。
+网络探测，写入路径使用原V13Store的quota、幂等回执和owner隔离。
 """
 from __future__ import annotations
 
@@ -15,7 +14,6 @@ from ..gateway_parts.business_api_v13 import (
     HostAPIError,
     v13_call_frozen,
     v13_require_access,
-    v13_resolve_space,
 )
 from .v13_store import v13_store_for
 
@@ -166,124 +164,6 @@ def status(call):
             'steps': steps, 'has_connectors': has_connectors, 'has_llm': has_llm,
             'sample_data_loaded': sample_loaded,
             'coverage': 'complete' if available else 'partial'}
-
-
-# LLM: 未显式指定空间时只接受唯一活跃空间，多个空间要求调用方明确选择。
-# 函数用途: 解析样例数据要写入的真实空间。
-def _sample_space(call):
-    space_id = call.params.get('space_id')
-    if space_id is not None:
-        return v13_resolve_space(call, space_id)['space_id']
-    listing = v13_call_frozen(call, 'spaces.list', {'limit': 100})
-    active = [row for row in listing['items'] if row.get('state') == 'active']
-    if len(active) != 1:
-        raise BusinessError('RESOURCE_NOT_FOUND' if not active else 'INVALID_SCHEMA')
-    return active[0]['space_id']
-
-
-# LLM: 同一owner、空间和数据集的批次摘要稳定，重复调用不会生成第二套记录。
-# 函数用途: 计算确定性批次摘要。
-def _batch_digest(owner_id, space_id, dataset):
-    value = [owner_id, space_id, dataset]
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
-                                     separators=(',', ':')).encode()).hexdigest()[:16]
-
-
-# LLM: 样例ID由批次摘要派生，跨进程重放仍指向同一位置，且带sample前缀便于排除。
-# 函数用途: 生成确定性样例记录ID。
-def _sample_id(digest, kind, index):
-    return 'sample-' + digest + '-' + kind + '-' + str(index)
-
-
-# LLM: 样例严格按W7/W8规范shape构造；告警到案件的单一分配决定双向引用。
-# 函数用途: 生成一个批次的样例告警、案件和规则。
-def _sample_rows(owner_id, space_id, digest, now):
-    alert_ids = [_sample_id(digest, 'alert', index) for index in (1, 2, 3)]
-    case_ids = [_sample_id(digest, 'case', index) for index in (1, 2)]
-    rule_ids = [_sample_id(digest, 'rule', index) for index in (1, 2)]
-    entities = [{'type': 'user', 'value': 'sample.analyst'},
-                {'type': 'host', 'value': 'sample-workstation-01'},
-                {'type': 'ip', 'value': '203.0.113.10'}]
-    alerts = {}
-    for index, alert_id in enumerate(alert_ids):
-        alerts[alert_id] = {'alert_id': alert_id, 'space_id': space_id,
-                            'title': '示例告警：异常登录 ' + str(index + 1),
-                            'description': '初始化引导样例数据，仅用于演示研判流程。',
-                            'severity': ('high', 'medium', 'low')[index], 'status': 'new',
-                            'verdict': None, 'ai_confidence': (0.92, 0.71, 0.55)[index],
-                            'disposition': 'triage', 'rule_id': rule_ids[index % len(rule_ids)],
-                            'source': 'sample', 'external_ref': None,
-                            'entities': [entities[index]], 'techniques': ['T1078'],
-                            'assignee': None, 'case_id': case_ids[index % len(case_ids)],
-                            'tags': ['sample'], 'evidence_refs': [],
-                            'acknowledged_at': None, 'resolved_at': None, 'revision': 0,
-                            'created_at': now, 'updated_at': now, 'owner_id': owner_id}
-    cases = {}
-    for index, case_id in enumerate(case_ids):
-        cases[case_id] = {'case_id': case_id, 'space_id': space_id,
-                          'title': '示例案件：可疑登录调查 ' + str(index + 1),
-                          'description': '初始化引导样例数据，仅用于演示案件流转。',
-                          'severity': ('high', 'medium')[index], 'status': 'open',
-                          'assignee': None, 'alert_ids': [row['alert_id'] for row in alerts.values()
-                                                         if row['case_id'] == case_id],
-                          'merged_into': None, 'tags': ['sample'], 'custom_values': {},
-                          'closed_at': None, 'revision': 0, 'created_at': now, 'updated_at': now,
-                          'owner_id': owner_id}
-    rules = {}
-    for index, rule_id in enumerate(rule_ids):
-        rules[rule_id] = {'rule_id': rule_id, 'space_id': space_id,
-                          'name': '示例规则：异常登录检测 ' + str(index + 1),
-                          'description': '初始化引导样例规则，不进入真实调度。', 'enabled': True,
-                          'severity': ('medium', 'low')[index],
-                          'query': {'language': 'sigma', 'text': 'title: "sample login"'},
-                          'schedule': ({'kind': 'every', 'every_seconds': 3600},
-                                       {'kind': 'cron', 'expression': '0 9 * * 1-5', 'timezone': 'UTC'})[index],
-                          'script_id': None, 'skill_ids': [], 'datasource_ids': [],
-                          'mitre_techniques': ['T1078'], 'tags': ['sample'], 'exclusions': [],
-                          'origin': 'sample', 'scheduler_job_id': None, 'last_run': None,
-                          'revision': 0, 'created_at': now, 'updated_at': now, 'owner_id': owner_id}
-    return {'soc_alerts': alerts, 'soc_cases': cases, 'monitor_rules': rules}
-
-
-# LLM: 四个集合与引导指针同笔提交，回执处理重放；只补缺失样例ID，不覆盖既有真记录。
-# 函数用途: 幂等导入样例告警、案件和规则并返回回执。
-def load_sample_data(call):
-    space_id = _sample_space(call)
-    dataset = call.params.get('dataset', 'soc_basic')
-    digest = _batch_digest(call.owner_id, space_id, dataset)
-    batch_id = 'sample-batch-' + digest
-    collections = ('onboarding', 'soc_alerts', 'soc_cases', 'monitor_rules')
-
-    # LLM: 所有读取与写入都在原Store锁内，已加载判断依据当前记录而非锁外快照。
-    # 函数用途: 在一个多集合事务中提交样例批次。
-    def mutate(records):
-        v13_require_access(call)
-        previous = records['onboarding'].get(call.owner_id)
-        if previous is not None:
-            if previous.get('owner_id') != call.owner_id:
-                raise BusinessError('RESOURCE_NOT_FOUND')
-            v13_require_access(call, previous)
-        now = _now(call)
-        rows = _sample_rows(call.owner_id, space_id, digest, now)
-        if all(set(rows[name]) <= set(records[name]) for name in rows):
-            return {'sample_batch_id': batch_id,
-                    'loaded': {'alerts': 0, 'cases': 0, 'rules': 0}, 'already_loaded': True}
-        loaded = {'alerts': 0, 'cases': 0, 'rules': 0}
-        for name, key in (('soc_alerts', 'alerts'), ('soc_cases', 'cases'), ('monitor_rules', 'rules')):
-            for record_id, row in rows[name].items():
-                if record_id not in records[name]:
-                    records[name][record_id] = row
-                    loaded[key] += 1
-        revision = 0 if previous is None else previous['revision']
-        records['onboarding'][call.owner_id] = {
-            'owner_id': call.owner_id, 'sample_batch_id': batch_id, 'sample_loaded_at': now,
-            'revision': revision + 1, 'created_at': previous['created_at'] if previous else now,
-            'updated_at': now}
-        return {'sample_batch_id': batch_id, 'loaded': loaded, 'already_loaded': False}
-
-    facts = {'space_id': space_id, 'dataset': dataset}
-    return v13_store_for(call).transaction_many(collections, mutate, idempotency_key=call.idempotency_key,
-                                                params_digest=_digest(call, facts))
 
 
 # LLM: 未配置品牌返回configured=false的完整空视图；已有记录仍核owner后才投影。
