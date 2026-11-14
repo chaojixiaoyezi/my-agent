@@ -333,6 +333,46 @@ def test_stage_cleanup_failure_after_move_rolls_back_and_retry_succeeds(tmp_path
     assert store.load_registry().skills[decision.name].sha256 == skill_content_sha256(text)
 
 
+# LLM: 仅第二次stage清理模拟EACCES；第一次预检、正式移动/回滚/重试均走真实组件。
+# 函数用途: 安装暂存已移动正文后清理失败须回滚，且允许干净重试。
+def test_stage_cleanup_failure_after_install_move_rolls_back_and_retry_succeeds(tmp_path, monkeypatch):
+    import errno
+
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+    from agent_py_agent.agent.capability.skill_snapshot import skill_content_sha256
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='retry-method', description='核对资料', body='# 检查\n1. 比较输入\n')
+    original, cleanups = shutil.rmtree, []
+
+    # LLM: 首次stage清理正常执行，第二次须已移动到准备区；其余清理保持真实行为。
+    # 函数用途: 精确覆盖安装stage收尾失败，不把预检失败算作安装回滚。
+    def fail_once(path, *args, **kwargs):
+        if path == '.' or '_stage_' in str(path):
+            cleanups.append(path)
+            if len(cleanups) == 2:
+                assert list(store.directory.glob('.publish_*'))
+                raise PermissionError(errno.EACCES, 'injected stage cleanup')
+        return original(path, *args, **kwargs)
+
+    fail_once.avoids_symlink_attacks = original.avoids_symlink_attacks
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, 'rmtree', fail_once)
+        with pytest.raises(SkillLearningGateError) as failure:
+            module.publish_learned_skill(store, PublishRequest(decision))
+    assert len(cleanups) >= 2
+    assert failure.value.code == module.CODE_INSTALL_FAILED
+    assert isinstance(failure.value.__cause__, PermissionError)
+    assert failure.value.__cause__.errno == errno.EACCES
+    assert not (store.learned_root / decision.name).exists()
+    assert decision.name not in store.load_registry().skills
+    assert not list(store.directory.glob('.publish_*'))
+    event = module.publish_learned_skill(store, PublishRequest(decision))
+    assert event.event == 'published'
+    text = (store.learned_root / decision.name / 'SKILL.md').read_text()
+    assert store.load_registry().skills[decision.name].sha256 == skill_content_sha256(text)
+
+
 # LLM: 支持旧路径重开与新版固定FD下子目录打开两个等价注入点；只有取得target_fd后的第二个资源获取失败。
 # 函数用途: EMFILE发生时，第一个目标目录FD必须已关闭。
 def test_stage_second_directory_open_failure_closes_target_fd(tmp_path, monkeypatch):
