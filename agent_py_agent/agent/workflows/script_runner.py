@@ -3,6 +3,7 @@
 # 模块用途: 执行Owner脚本并脱敏回执，正式运行回写摘要，内存调试不改资产计数和修订。
 from __future__ import annotations
 
+import errno
 import inspect
 import json
 import logging
@@ -617,6 +618,18 @@ def _terminate(process):
     except ProcessLookupError:
         pass
     process.wait()
+    if os.name == 'posix':
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                break
+            except PermissionError as exc:
+                if exc.errno in (errno.EPERM, errno.EACCES):
+                    break
+                raise
+            time.sleep(0.005)
 
 
 # LLM: 清理拒绝不授予任何新信号权限；只尝试有限回收并保留原异常及进程组未验证事实。

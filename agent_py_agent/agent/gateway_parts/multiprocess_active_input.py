@@ -130,9 +130,12 @@ class OriginalPendingTurnInput:
     # 函数用途: 只观察自己已发布的输入引用，不扫描共享历史或别的owner回执。
     # LLM: 本次deadline显式贯穿读后与末writer；source先核，资源busy退出全部门再等待，None低层调用不刷新预算。
     # 函数用途: 保持原固定动作及部分事实，不在已过期时开始下一副作用。
-    def _receipts(self, agent, *, finishing=False, deadline=None):
+    def _receipts(self, agent, *, finishing=False, deadline=None, abort_on_closing=False):
         self._require_budget(agent, deadline)
-        payload, claim = self._current(finishing=finishing)
+        payload, claim = self._current(finishing=finishing or abort_on_closing)
+        if abort_on_closing and (payload.get('cancel_requested') or payload.get('turn_phase') == 'closing'):
+            self._require_budget(agent, deadline)
+            return
         self._require_budget(agent, deadline)
         fence = {key: getattr(self.claim, key) for key in ('request_id', 'execution_attempt_id', 'lease_epoch', 'lease_owner')}
         for ref in inputs.transport_turn_input_references(self.paths, self.claim.request_id, deadline=deadline):
@@ -185,7 +188,7 @@ class OriginalPendingTurnInput:
         self._require_budget(agent, deadline)
         self._require_params(params)
         pending = False
-        for receipt in self._receipts(agent, deadline=deadline):
+        for receipt in self._receipts(agent, deadline=deadline, abort_on_closing=True):
             row = original_input_guidance(agent.conversation_store, receipt)
             if row is None or row.status == 'pending' and guidance_not_yet_injected(params, [row.entry]):
                 pending = True

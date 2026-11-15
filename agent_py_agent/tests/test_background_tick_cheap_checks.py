@@ -30,6 +30,7 @@ import pytest
 
 import agent_py_agent.agent.scheduler.repository as scheduler_module
 import agent_py_agent.agent.tooling.process_session_store as process_store_module
+from agent_py_agent.agent.common import cache_capacity
 from agent_py_agent.agent.conversation.process_events import (
     PROCESS_COMPLETION_REASON,
     process_completion_target,
@@ -145,6 +146,7 @@ def _age_path(path: Path, *, seconds: float = 3.0) -> None:
 @pytest.fixture
 def projections():
     """用例前后清空模块级投影和统计，避免跨用例串味。"""
+    cache_capacity.reset_for_tests()
     for cache in (
         scheduler_module._WAITING_PROJECTION_CACHE,
         scheduler_module._STORE_PROJECTION_CACHE,
@@ -156,12 +158,15 @@ def projections():
     ):
         for name in list(stats):
             stats[name] = 0
-    yield scheduler_module
-    for cache in (
-        scheduler_module._WAITING_PROJECTION_CACHE,
-        scheduler_module._STORE_PROJECTION_CACHE,
-    ):
-        cache.clear()
+    try:
+        yield scheduler_module
+    finally:
+        cache_capacity.reset_for_tests()
+        for cache in (
+            scheduler_module._WAITING_PROJECTION_CACHE,
+            scheduler_module._STORE_PROJECTION_CACHE,
+        ):
+            cache.clear()
 
 
 @pytest.fixture

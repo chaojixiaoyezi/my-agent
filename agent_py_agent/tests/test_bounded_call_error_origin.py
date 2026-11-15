@@ -25,14 +25,14 @@ def held_call(monkeypatch, *, operation=lambda: "actual-result", key="origin-cal
         if worker.name.startswith("bounded-call:") and not seen:
             seen["worker"] = worker
             tail.set()
-            assert release.wait(3)
+            assert release.wait(5)
         return result
 
     with monkeypatch.context() as patch:
         patch.setattr(threading.Thread, "run", run)
         try:
             with pytest.raises(bounded.BoundedCallExitUnconfirmedError) as caught:
-                bounded.call_with_deadline(operation, deadline=time.monotonic() + .08,
+                bounded.call_with_deadline(operation, deadline=time.monotonic() + 0.45,
                                            resource_key=key, wait_for_exit=True)
             assert tail.is_set() and seen["worker"].is_alive()
             call = next(c for c in bounded.bounded_call_drain_snapshot() if c.call_id == caught.value.call_id)

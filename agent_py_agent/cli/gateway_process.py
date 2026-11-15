@@ -1906,8 +1906,11 @@ def _attach_cold_start_settled_intent(
     ):
         try:
             setattr(context, attr, value)
-        except AttributeError:
-            object.__setattr__(context, attr, value)
+        except (AttributeError, TypeError):
+            try:
+                object.__setattr__(context, attr, value)
+            except (AttributeError, TypeError):
+                pass
 
 
 # 函数用途: 按单步配额渐进巡检各 owner 已终态超期的遗留后台进程，全部完成后记录一次总结事件。
