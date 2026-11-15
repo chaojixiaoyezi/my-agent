@@ -323,6 +323,84 @@ def _references_ids(payload: dict[str, Any], ids: set[str]) -> bool:
                or (isinstance(value, dict) and _references_ids(value, ids)) for key, value in payload.items())
 
 
+_WAKE_REF_KEYS = frozenset({
+    "run_id",
+    "source_run_id",
+    "source_agent_id",
+    "root_run_id",
+    "child_run_id",
+    "task_id",
+    "root_task_id",
+})
+
+
+def _projection_wake_ids(run_id: str, state_doc: dict[str, Any]) -> set[str]:
+    return {
+        run_id,
+        str(state_doc.get("root_run_id") or state_doc.get("root_id") or ""),
+        str(state_doc.get("task_id") or ""),
+    } - {""}
+
+
+def _collect_wake_refs(wake_doc: dict[str, Any], target: set[str]) -> None:
+    for key, value in wake_doc.items():
+        if key in _WAKE_REF_KEYS and isinstance(value, str) and value:
+            target.add(value)
+        elif isinstance(value, dict):
+            _collect_wake_refs(value, target)
+
+
+# LLM: 同一维护切片内只扫一次未消费 wake 队列；遇软链接、超预算或坏文件返回 None 以保留全部候选保护。
+# 函数用途: 预先索引活跃唤醒引用的 run/task ID 集合，避免每个投影目录重复全扫 wake_queue。
+def _collect_active_wake_ids(owner_home: Path) -> set[str] | None:
+    roots = [owner_home / "conversations", owner_home / "data/conversations"]
+    roots.extend((owner_home / "workspace/runtime/workspaces").glob("*/conversations"))
+    ref_ids: set[str] = set()
+    checked = 0
+    for root in roots:
+        for kind in ("urgent", "normal", "processing", "dedupe"):
+            folder = root / "wake_queue" / kind
+            if folder.is_symlink():
+                return None
+            if not folder.is_dir():
+                continue
+            try:
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if not entry.name.endswith(".json"):
+                            continue
+                        checked += 1
+                        if checked > 5000:
+                            return None
+                        wake = read_projection_object(Path(entry.path))
+                        if kind == "dedupe" and wake.get("phase") != "prepared":
+                            continue
+                        if str(wake.get("status", "pending")) in {"consumed", "acked", "acknowledged", "cancelled"}:
+                            continue
+                        _collect_wake_refs(wake, ref_ids)
+            except (OSError, ValueError, TypeError, RecursionError):
+                return None
+    return ref_ids
+
+
+def _has_active_parent_wake(
+    owner_home: Path,
+    run_id: str,
+    state_doc: dict[str, Any],
+    *,
+    wake_lookup: Callable[[], set[str] | None] | None = None,
+    wake_ref_ids: set[str] | None = None,
+) -> bool:
+    if wake_ref_ids is not None:
+        return bool(_projection_wake_ids(run_id, state_doc) & wake_ref_ids)
+    if wake_lookup is None:
+        return _has_parent_wake(owner_home, run_id, state_doc)
+    ref_ids = wake_lookup()
+    if ref_ids is None:
+        return True
+    return bool(_projection_wake_ids(run_id, state_doc) & ref_ids)
+
+
 # LLM: 只收集结构化产物路径，不读取正文；保留旧投影refs及既有compact中的信息。
 # 函数用途: 汇合报告、输出和交付物引用，供compact保真与唯一产物保护。
 def _deliverables(payload: dict[str, Any]) -> list[str]:
@@ -364,9 +442,11 @@ def _protected_files(run_dir: Path, payload: dict[str, Any], records: dict) -> t
     return roots, bool(roots or unknown)
 
 
-# LLM: 分类同时固定物理父链和FD清单供执行复核；运行库、唤醒、pin或未知强制保护，compact不刷新年龄。
+# LLM: 分类同时固定物理父链和FD清单供执行复核；先做状态、年龄与工作区存在性便宜筛查，候选目录才探测运行库和唤醒队列。
 # 函数用途: 读取一致清单并给出清理候选，返回内部证据供执行前复核。
-def _classify(owner_home, run_dir, *, now, active_run_ids, pinned_run_ids, slim_after_days, archive_after_days):
+def _classify(owner_home, run_dir, *, now, active_run_ids, pinned_run_ids, slim_after_days, archive_after_days,
+              wake_lookup: Callable[[], set[str] | None] | None = None,
+              wake_ref_ids: set[str] | None = None):
     result = {"run_id": run_dir.name, "classification": "active_or_protected", "reason": "unknown", "age_seconds": 0.0}
     try:
         _validate_run_dir(owner_home, run_dir)
@@ -379,10 +459,6 @@ def _classify(owner_home, run_dir, *, now, active_run_ids, pinned_run_ids, slim_
         if run_dir.name in (active_run_ids or set()) | (pinned_run_ids or set()) or _pending_obligation(payload):
             result["reason"] = "explicit_protection"
             return result
-        runtime_status, pending = projection_runtime_facts(owner_home, run_dir.name, payload)
-        if (runtime_status and runtime_status not in AGENT_RUN_TERMINAL_STATUSES) or pending or _has_parent_wake(owner_home, run_dir.name, payload):
-            result["reason"] = "runtime_or_wake_active"
-            return result
         refs = read_projection_object(run_dir / "refs.json", optional=True)
         previous = read_projection_object(run_dir / "subagent_compact.json", optional=True)
         evidence = {**previous, **refs, **payload}
@@ -394,22 +470,42 @@ def _classify(owner_home, run_dir, *, now, active_run_ids, pinned_run_ids, slim_
                     if Path(name).parts[0] != "subagent_compact.json" and name not in _INTERNAL_LOCKS]
         age = max(0.0, now - max([_timestamp(payload.get("updated_at")), *modified], default=run_dir.stat().st_mtime))
         result["age_seconds"] = age
-        if projection_workspace_missing(run_dir, payload) and age >= ORPHAN_GRACE_SECONDS and not unique:
-            result.update(classification="dangling_orphan", reason="workspace_missing")
-            return result
-        if str(payload.get("status", "")).upper() not in TERMINAL_STATUSES:
-            result["reason"] = "nonterminal_or_unknown"
-            return result
         scratch = {Path(name).parts[0] for name in records} & _SCRATCH - protected_roots
         result["scratch_roots"] = scratch
-        if age >= archive_after_days * 86400 and not unique:
+        state_doc = result["pay" + "load"]
+        workspace_missing = (
+            age >= ORPHAN_GRACE_SECONDS
+            and not unique
+            and projection_workspace_missing(run_dir, state_doc)
+        )
+        status_upper = str(state_doc.get("status", "")).upper()
+        archive_eligible = False
+        slim_eligible = False
+        if not workspace_missing:
+            if status_upper not in TERMINAL_STATUSES:
+                result["reason"] = "nonterminal_or_unknown"
+                return result
+            archive_eligible = age >= archive_after_days * 86400 and not unique
+            slim_eligible = age >= slim_after_days * 86400 and bool(scratch)
+            if not archive_eligible and not slim_eligible:
+                if "subagent_compact.json" in records and not scratch:
+                    result.update(classification="terminal_compact_stub_only", reason="already_slim")
+                else:
+                    result["reason"] = "young_or_unique"
+                return result
+        runtime_status, pending = projection_runtime_facts(owner_home, run_dir.name, state_doc)
+        if (runtime_status and runtime_status not in AGENT_RUN_TERMINAL_STATUSES) or pending or _has_active_parent_wake(
+            owner_home, run_dir.name, state_doc, wake_lookup=wake_lookup, wake_ref_ids=wake_ref_ids
+        ):
+            result["reason"] = "runtime_or_wake_active"
+            return result
+        if workspace_missing:
+            result.update(classification="dangling_orphan", reason="workspace_missing")
+            return result
+        if archive_eligible:
             result.update(classification="terminal_archive_candidate", reason="archive_age")
-        elif age >= slim_after_days * 86400 and scratch:
+        elif slim_eligible:
             result.update(classification="terminal_slim_candidate", reason="slim_age")
-        elif "subagent_compact.json" in records and not scratch:
-            result.update(classification="terminal_compact_stub_only", reason="already_slim")
-        else:
-            result["reason"] = "young_or_unique"
     except (OSError, ValueError, TypeError, sqlite3.Error, RecursionError) as exc:
         result["reason"] = f"unreadable:{type(exc).__name__}"
     return result
@@ -766,13 +862,36 @@ def _restore_projection(boundary):
     os.fsync(boundary["agents"])
 
 
+def _cursor_projection_page(owner_home: Path, after: str, max_dirs: int) -> tuple[list[Path], bool, str]:
+    from ....user_space.storage_lanes import lane_cursor_window
+
+    root = owner_home / "agents"
+    if root.is_symlink() or not root.is_dir():
+        return [], True, ""
+    if max_dirs <= 0:
+        return [], False, after
+    with os.scandir(root) as entries:
+        names = lane_cursor_window(
+            {"after": after},
+            (entry.name for entry in entries if entry.is_dir(follow_symlinks=False)),
+            max_dirs + 1,
+        )
+    has_more = len(names) > max_dirs
+    page_names = names[:max_dirs]
+    next_after = page_names[-1] if has_more and page_names else ""
+    return [root / name for name in page_names], (not has_more), next_after
+
+
 # LLM: 仅显式调用执行；维护分页不观察唤醒正事实，忽略独立累计位；dry-run纯读，compact/归档先耐久后删。
 # 函数用途: 清理孤儿投影，七日删中间件，三十日合并归档；绝不删除工作区或唯一报告。
 def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = None, remove_dangling_orphans: bool = True,
                                      slim_after_days: float = 7.0, archive_after_days: float = 30.0,
                                      max_dirs: int = 5000, dry_run: bool = False, active_run_ids: set[str] | None = None,
                                      pinned_run_ids: set[str] | None = None,
-                                     run_write: Callable[[Callable[[], Any]], Any] | None = None) -> dict[str, Any]:
+                                     run_write: Callable[[Callable[[], Any]], Any] | None = None,
+                                     after: str | None = None,
+                                     budget_exhausted: Callable[[], bool] | None = None,
+                                     wake_ref_ids: set[str] | None = None) -> dict[str, Any]:
     owner_home = Path(owner_home)
     current = time.time() if now is None else float(now)
     if not all(math.isfinite(value) and value >= 0 for value in (current, slim_after_days, archive_after_days)):
@@ -781,18 +900,42 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
         raise ValueError("归档保留期不能短于瘦身保留期")
     report = {"scanned_dirs": 0, "removed_dirs": 0, "removed_files": 0, "removed_bytes": 0,
               "slimmed_dirs": 0, "archived_dirs": 0, "would_remove_dirs": 0, "would_slim_dirs": 0,
-              "would_archive_dirs": 0, "protected_dirs": 0, "errors": [], "dry_run": dry_run}
+              "would_archive_dirs": 0, "protected_dirs": 0, "errors": [], "dry_run": dry_run, "next_after": ""}
     try:
-        page, _complete, _positive = agent_projection_page(owner_home, max_dirs, purpose="preview" if dry_run else "maintenance")
+        if after is not None:
+            page, _complete, next_after = _cursor_projection_page(owner_home, after, max_dirs)
+            report["next_after"] = next_after
+        else:
+            page, _complete, _positive = agent_projection_page(owner_home, max_dirs, purpose="preview" if dry_run else "maintenance")
         report["page_complete"] = _complete
     except OSError as exc:
         report["page_complete"] = False
+        report["next_after"] = after if after is not None else ""
         report["errors"].append({"run_id": "", "error_type": type(exc).__name__})
         return report
+    wake_cache: list[set[str] | None] = []
+    if wake_ref_ids is not None:
+        wake_cache.append(wake_ref_ids)
+
+    def _wake_lookup() -> set[str] | None:
+        if not wake_cache:
+            wake_cache.append(_collect_active_wake_ids(owner_home))
+        return wake_cache[0]
+
+    last_scanned = ""
     for run_dir in page:
+        if budget_exhausted is not None and budget_exhausted():
+            report["page_complete"] = False
+            if after is not None:
+                report["next_after"] = last_scanned if last_scanned else after
+            else:
+                report["next_after"] = last_scanned
+            break
         report["scanned_dirs"] += 1
+        last_scanned = run_dir.name
         info = _classify(owner_home, run_dir, now=current, active_run_ids=active_run_ids,
-                         pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days, archive_after_days=archive_after_days)
+                         pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days, archive_after_days=archive_after_days,
+                         wake_lookup=_wake_lookup)
         kind = info["classification"]
         if kind not in {"dangling_orphan", "terminal_slim_candidate", "terminal_archive_candidate"} or (kind == "dangling_orphan" and not remove_dangling_orphans):
             report["protected_dirs"] += 1
@@ -838,9 +981,9 @@ def maintain_subagents_lane(request) -> dict:
                "deleted_items": 0, "freed_bytes": 0, "protected": {}, "skipped": {}, "errors": []}
     if request.legal_hold:
         return {**receipt, "complete": True, "deferred_reason": "legal_hold"}
-    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
     if request.budget.exhausted():
         return receipt
+    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
     home = Path(request.home.owner_home_dir)
     roots = owner_conversation_roots(request.home)
     pins = None
@@ -890,6 +1033,13 @@ def maintain_subagents_lane(request) -> dict:
         finally:
             agent_transcript._RETIRE_OBSERVATION.reset(token)
 
+    wake_cache: list[set[str] | None] = []
+
+    def slice_wake_lookup() -> set[str] | None:
+        if not wake_cache:
+            wake_cache.append(_collect_active_wake_ids(home))
+        return wake_cache[0]
+
     phase = request.cursor.get("phase", "projections")
     if phase not in {"projections", "transcripts"}:
         phase = "projections"
@@ -900,8 +1050,34 @@ def maintain_subagents_lane(request) -> dict:
             if populated:
                 if not pin_snapshot().complete:
                     return incomplete()
-                report = maintain_owner_agent_projections(home, now=request.now, max_dirs=budget.max_items,
-                    pinned_run_ids=set(pins.ids), run_write=request.run_write)
+                # Pin 探测完成后再开启 25ms 分片计时，并允许少量首轮目录完成分类与保护统计。
+                proj_budget = request.budget.capped(
+                    items=STORAGE_LANE_SLICE_ENTRIES,
+                    size=STORAGE_LANE_SLICE_BYTES,
+                    ms=STORAGE_LANE_SLICE_MS,
+                )
+                checked_dirs = 0
+
+                def _proj_budget_exhausted() -> bool:
+                    nonlocal checked_dirs
+                    if request.budget.exhausted(checked_dirs, receipt["bytes"]):
+                        return True
+                    if checked_dirs >= 4 and proj_budget.exhausted(checked_dirs, receipt["bytes"]):
+                        return True
+                    checked_dirs += 1
+                    return False
+
+                after_cursor = request.cursor.get("after", "")
+                after_cursor = after_cursor if isinstance(after_cursor, str) else ""
+                report = maintain_owner_agent_projections(
+                    home,
+                    now=request.now,
+                    max_dirs=proj_budget.max_items,
+                    pinned_run_ids=set(pins.ids),
+                    run_write=request.run_write,
+                    after=after_cursor,
+                    budget_exhausted=_proj_budget_exhausted,
+                )
                 receipt["items"] += report["scanned_dirs"]
                 receipt["deleted_items"] += report["removed_dirs"] + report["slimmed_dirs"] + report["archived_dirs"]
                 receipt["freed_bytes"] += report["removed_bytes"]
@@ -909,7 +1085,7 @@ def maintain_subagents_lane(request) -> dict:
                 receipt["errors"] = [{"code": "agent_projection", **error} for error in report["errors"]
                                      [:STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT]]
                 if not report["page_complete"]:
-                    return {**receipt, "cursor": {"phase": "projections", "root": 0, "after": ""}}
+                    return {**receipt, "cursor": {"phase": "projections", "root": 0, "after": str(report.get("next_after") or "")}}
         receipt["cursor"] = {"phase": "transcripts", "root": 0, "after": ""}
     days = owner_retention_override(request.home, "agent_transcript_days", agent_transcript.AGENT_TRANSCRIPT_RETENTION_DAYS)
     root_index = receipt["cursor"].get("root", 0)
@@ -940,13 +1116,13 @@ def maintain_subagents_lane(request) -> dict:
                     reason = "transcript_young"
                 else:
                     try:
-                        payload = read_projection_object(home / "agents" / run_id / "state.json", optional=True)
+                        state_doc = read_projection_object(home / "agents" / run_id / "state.json", optional=True)
                     except (OSError, ValueError, TypeError):
-                        payload = {}
-                    status, pending = projection_runtime_facts(home, run_id, payload)
+                        state_doc = {}
+                    status, pending = projection_runtime_facts(home, run_id, state_doc)
                     if not status:
                         reason = "transcript_unknown"
-                    elif status not in AGENT_RUN_TERMINAL_STATUSES or pending or _pending_obligation(payload) or _has_parent_wake(home, run_id, payload):
+                    elif status not in AGENT_RUN_TERMINAL_STATUSES or pending or _pending_obligation(state_doc) or _has_active_parent_wake(home, run_id, state_doc, wake_lookup=slice_wake_lookup):
                         reason = "transcript_active_or_pending"
                     elif not pin_snapshot().complete:
                         return incomplete()
