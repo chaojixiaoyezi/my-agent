@@ -2021,6 +2021,79 @@ class _OwnerReaders:
         return tuple(pages), event_map
 
 
+class _ApprovalScanBudget:
+    """Bounded directory entry budget compatible with ThreadStore.page_report."""
+
+    def __init__(self, max_entries: int) -> None:
+        self.max_entries = max_entries
+        self.entries = 0
+
+    def charge(self, *, entries: int = 0, size: int = 0) -> None:
+        self.entries += entries
+
+    def exhausted(self) -> bool:
+        return self.entries >= self.max_entries
+
+
+def _load_bounded_owner_threads(threads_store, *, max_threads: int = 2048) -> tuple[list[Any], bool]:
+    page_report = getattr(threads_store, 'page_report', None)
+    load_report = getattr(threads_store, 'load_report', None)
+    if callable(page_report) and callable(load_report):
+        budget = _ApprovalScanBudget(max_threads)
+        cursor: dict[str, Any] | None = None
+        threads: list[Any] = []
+        complete = False
+        while not budget.exhausted():
+            before_entries = budget.entries
+            page_ids, errors, cursor, page_complete = page_report(cursor=cursor, limit=16, budget=budget)
+            if errors:
+                raise ValueError('approval threads unavailable')
+            for thread_id in page_ids:
+                thread, load_error = load_report(thread_id)
+                if load_error is not None:
+                    raise ValueError('approval threads unavailable')
+                if thread is not None:
+                    threads.append(thread)
+            if page_complete:
+                complete = True
+                break
+            if not page_ids and budget.entries <= before_entries:
+                break
+        return threads, complete
+    threads, errors = threads_store.list_report(limit=max_threads)
+    if errors:
+        raise ValueError('approval threads unavailable')
+    return threads, len(threads) < max_threads
+
+
+def _match_indexed_bindings(
+    request_doc: dict[str, Any],
+    exact_bindings: dict[tuple[str, str, str], list[tuple[Any, Any, Any]]],
+    wildcard_bindings: dict[str, list[tuple[Any, Any, Any]]],
+    matches_scope_fn,
+) -> list[tuple[Any, Any, Any]]:
+    conversation = request_doc.get('conversation')
+    conversation = conversation if isinstance(conversation, dict) else {}
+    metadata = request_doc.get('metadata')
+    metadata = metadata if isinstance(metadata, dict) else {}
+    request_channel = str(conversation.get('channel') or metadata.get('channel') or '').strip()
+    request_conversation = str(conversation.get('channel_conversation_id') or '').strip()
+    if not request_conversation:
+        return []
+    request_user = str(
+        request_doc.get('user_id')
+        or conversation.get('canonical_user_id')
+        or conversation.get('channel_user_id')
+        or metadata.get('user_id')
+        or ''
+    ).strip()
+    matched = list(exact_bindings.get((request_channel, request_conversation, request_user), ()))
+    for candidate in wildcard_bindings.get(request_conversation, ()):
+        if matches_scope_fn(request_doc, candidate[2]):
+            matched.append(candidate)
+    return matched
+
+
 # LLM: 四参数默认工厂没有真实前台执行句柄；组合根持有真实Agent时才显式装配审批。
 # 函数用途: 绑定原生审批读口，不签票、不决定、不创建替代Agent。
 def native_approval_readers(agent, paths, owner_id, store) -> dict:
@@ -2038,67 +2111,239 @@ def native_approval_readers(agent, paths, owner_id, store) -> dict:
 class _NativeApprovals:
     """原生待决审批只读投影，决定仍只走专用人工通道。"""
 
+    # 单次列表扫描的 processing JSON 文件数、目录项数、线程数、活跃根数与子任务审批上限，防止大目录无界遍历。
+    _MAX_PROCESSING_SCAN = 2048
+    _MAX_PROCESSING_DIR_ENTRIES = 8192
+    _MAX_THREADS_SCAN = 2048
+    _MAX_AGENT_APPROVAL_ROOTS_SCAN = 256
+    _AGENT_APPROVAL_SCAN_LIMIT = 128
+    _AGENT_APPROVAL_SCAN_SECONDS = 0.25
+
     # LLM: 保存真实宿主，不构造运行时替身或新的审批账。
     # 函数用途: 绑定规范Gateway与owner Store。
     def __init__(self, agent, paths, owner, store):
         self.agent, self.paths, self.owner, self.store = agent, paths, owner, store
 
-    # LLM: 列表重用原生pending资格/版本，逐次重读，不缓存审批授权。
-    # 函数用途: 合并前台及主/子任务原生待决审批。
+    # LLM: 预索引 owner 线程绑定后单遍有界扫描 processing，不重放 N_bindings × N_processing 嵌套目录扫描。
+    # 函数用途: 合并前台及主/子任务原生待决审批，上限触达时如实暴露 partial coverage。
     def list(self, params):
-        from ..contracts.tool_approval import approval_deadline
-        from ..conversation.agent_tool_approval import list_pending_agent_tool_approvals
-        from ..plugin_host.interactions import approval_interaction, approval_revision
-        from .admin_control_service import pending_tool_approvals
-        from .control_service import GatewayControlScope
+        from dataclasses import fields
 
-        threads, errors = self.store.threads.list_report(limit=0)
-        if errors:
-            raise ValueError('approval threads unavailable')
-        rows, seen = [], set()
+        from ..contracts.tool_approval import approval_deadline
+        from ..conversation.agent_tool_approval import list_pending_agent_tool_approvals_report
+        from ..plugin_host.interactions import approval_interaction, approval_revision
+        from .admin_control_service import _lease_started_at, _unresolved_permission_requests
+        from .control_service import (
+            GatewayControlScope,
+            _GatewayRequestRecord,
+            _record_id,
+            _request_accepts_active_input,
+            _request_matches_scope,
+            resolve_gateway_scope_owner,
+        )
+        from .io import GatewayJsonReadReport, read_json_file_report
+        from .paths import claimed_request_chunk_path
+        from .permission_bridge import gateway_permission_decision_path
+        from .request_worker import OwnerScopeUnavailableError, _resolve_request_owner_identity
+
+        report_body_attr = fields(GatewayJsonReadReport)[0].name
+
+        threads, threads_complete = _load_bounded_owner_threads(
+            self.store.threads,
+            max_threads=self._MAX_THREADS_SCAN,
+        )
+        threads_by_id: dict[str, Any] = {}
+        exact_bindings: dict[tuple[str, str, str], list[tuple[Any, Any, Any]]] = {}
+        wildcard_bindings: dict[str, list[tuple[Any, Any, Any]]] = {}
+        active_roots: list[str] = []
+        seen_roots: set[str] = set()
         for thread in threads:
             if thread.owner_id != self.owner:
                 continue
+            threads_by_id[thread.thread_id] = thread
             identity = background_identity(thread)
             for binding in thread.channel_bindings:
+                conv_id = str(binding.channel_conversation_id or '').strip()
+                if not conv_id:
+                    continue
                 scope = GatewayControlScope(binding.channel_user_id, binding.channel, binding.channel_conversation_id)
-                for pending in pending_tool_approvals(self.agent, self.paths, scope):
-                    request = pending.request
-                    if request.permission_id in seen:
-                        continue
-                    seen.add(request.permission_id)
-                    deadline = approval_deadline(request)
-                    if deadline <= time.time():
-                        continue
-                    value = {'approval_id': request.permission_id, 'thread_id': thread.thread_id,
-                        'task_id': None, 'run_id': request.binding['run_id'], 'revision': approval_revision(request.to_dict()),
-                        'state': 'pending', 'summary': redact_sensitive_value(request.description)[:4096],
-                        'expires_at': _stamp(deadline), 'allowed_decisions': []}
-                    rows.append(ObservationRecord(value, self.owner, identity.space_id if identity else None,
-                        identity.project_ref if identity else None, thread_id=thread.thread_id, run_id=value['run_id']))
-            # 跨owner原始base Agent不能读取别人的主/子执行资格，未接真实owner宿主时不冒充完整。
-            if (getattr(getattr(self.agent, 'home_paths', None), 'owner_id', None) != self.owner
-                    or getattr(self.agent, 'conversation_store', None) is not self.store):
-                continue
+                entry = (thread, identity, scope)
+                channel = str(binding.channel or '').strip()
+                user_id = str(binding.channel_user_id or '').strip()
+                if (channel == binding.channel and conv_id == binding.channel_conversation_id
+                        and user_id == binding.channel_user_id and channel and user_id):
+                    exact_bindings.setdefault((channel, conv_id, user_id), []).append(entry)
+                else:
+                    wildcard_bindings.setdefault(conv_id, []).append(entry)
             for root in thread.active_task_ids:
-                for pending in list_pending_agent_tool_approvals(self.agent, root_task_id=root):
-                    interaction = approval_interaction(self.agent, pending, root)
+                if root not in seen_roots:
+                    seen_roots.add(root)
+                    active_roots.append(root)
+
+        rows, seen = [], set()
+        now = time.time()
+        processing_complete = True
+        if exact_bindings or wildcard_bindings:
+            scope_owner_cache: dict[tuple[str, str, str], Any] = {}
+            json_scanned = 0
+            dir_scanned = 0
+            try:
+                with os.scandir(self.paths.processing) as entries:
+                    for entry in entries:
+                        dir_scanned += 1
+                        if dir_scanned > self._MAX_PROCESSING_DIR_ENTRIES:
+                            processing_complete = False
+                            break
+                        name = entry.name
+                        if name.startswith('.') or not name.endswith('.json'):
+                            continue
+                        json_scanned += 1
+                        if json_scanned > self._MAX_PROCESSING_SCAN:
+                            processing_complete = False
+                            break
+                        try:
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                        except OSError:
+                            processing_complete = False
+                            continue
+                        path = Path(entry.path)
+                        report = read_json_file_report(
+                            path, context='business.approvals.processing.read', blocking=False
+                        )
+                        if report.load_error is not None:
+                            processing_complete = False
+                            continue
+                        request_doc = getattr(report, report_body_attr)
+                        if not request_doc:
+                            continue
+                        record = _GatewayRequestRecord(path, request_doc)
+                        if not _request_accepts_active_input(record):
+                            continue
+                        matched = _match_indexed_bindings(
+                            request_doc, exact_bindings, wildcard_bindings, _request_matches_scope
+                        )
+                        if not matched:
+                            continue
+                        chunk_path = claimed_request_chunk_path(path, _record_id(record))
+                        unresolved = _unresolved_permission_requests(chunk_path, _lease_started_at(request_doc))
+                        if not unresolved:
+                            continue
+                        try:
+                            request_owner = _resolve_request_owner_identity(self.agent, request_doc)
+                        except (OwnerScopeUnavailableError, ValueError, KeyError, AttributeError):
+                            continue
+                        for thread, identity, scope in matched:
+                            scope_key = (scope.user_id, scope.channel, scope.conversation_id)
+                            if scope_key not in scope_owner_cache:
+                                try:
+                                    scope_owner_cache[scope_key] = resolve_gateway_scope_owner(self.agent, scope)
+                                except (OwnerScopeUnavailableError, ValueError, KeyError, AttributeError):
+                                    scope_owner_cache[scope_key] = None
+                            scope_owner = scope_owner_cache[scope_key]
+                            if scope_owner is None or request_owner != scope_owner:
+                                continue
+                            for request in unresolved:
+                                if request.permission_id in seen:
+                                    continue
+                                deadline = approval_deadline(request)
+                                if deadline <= now or gateway_permission_decision_path(chunk_path, request).exists():
+                                    continue
+                                seen.add(request.permission_id)
+                                value = {
+                                    'approval_id': request.permission_id,
+                                    'thread_id': thread.thread_id,
+                                    'task_id': None,
+                                    'run_id': request.binding['run_id'],
+                                    'revision': approval_revision(request.to_dict()),
+                                    'state': 'pending',
+                                    'summary': redact_sensitive_value(request.description)[:4096],
+                                    'expires_at': _stamp(deadline),
+                                    'allowed_decisions': [],
+                                }
+                                rows.append(ObservationRecord(
+                                    value,
+                                    self.owner,
+                                    identity.space_id if identity else None,
+                                    identity.project_ref if identity else None,
+                                    thread_id=thread.thread_id,
+                                    run_id=value['run_id'],
+                                ))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                processing_complete = False
+
+        # 跨owner原始base Agent不能读取别人的主/子执行资格，未接真实owner宿主时不冒充完整。
+        full = (
+            getattr(getattr(self.agent, 'home_paths', None), 'owner_id', None) == self.owner
+            and getattr(self.agent, 'conversation_store', None) is self.store
+        )
+        agent_approvals_complete = True
+        if full and active_roots:
+            max_roots = self._MAX_AGENT_APPROVAL_ROOTS_SCAN
+            if len(active_roots) > max_roots:
+                agent_approvals_complete = False
+            deadline = time.monotonic() + self._AGENT_APPROVAL_SCAN_SECONDS
+            for root in active_roots[:max_roots]:
+                if time.monotonic() >= deadline:
+                    agent_approvals_complete = False
+                    break
+                pending_rows, root_complete = list_pending_agent_tool_approvals_report(
+                    self.agent,
+                    root_task_id=root,
+                    deadline=deadline,
+                    scan_limit=self._AGENT_APPROVAL_SCAN_LIMIT,
+                )
+                if not root_complete:
+                    agent_approvals_complete = False
+                for pending in pending_rows:
+                    try:
+                        interaction = approval_interaction(self.agent, pending, root)
+                    except (FileNotFoundError, KeyError, ValueError):
+                        agent_approvals_complete = False
+                        continue
                     if interaction['interaction_id'] in seen:
                         continue
-                    target = self.store.threads.require(interaction['thread_id'])
+                    target = threads_by_id.get(interaction['thread_id'])
+                    if target is None:
+                        load_report = getattr(self.store.threads, 'load_report', None)
+                        if callable(load_report):
+                            target, load_err = load_report(interaction['thread_id'])
+                            if load_err is not None:
+                                agent_approvals_complete = False
+                                continue
+                        else:
+                            target = self.store.threads.load(interaction['thread_id'])
+                        if target is None:
+                            agent_approvals_complete = False
+                            continue
                     if target.owner_id != self.owner:
                         continue
                     seen.add(interaction['interaction_id'])
                     target_identity = background_identity(target)
-                    value = {'approval_id': interaction['interaction_id'], 'thread_id': target.thread_id,
-                        'task_id': None, 'run_id': interaction['run_id'], 'revision': interaction['revision'],
-                        'state': 'pending', 'summary': redact_sensitive_value(interaction['request']['description'])[:4096],
-                        'expires_at': _stamp(interaction['expires_at']), 'allowed_decisions': []}
-                    rows.append(ObservationRecord(value, self.owner, target_identity.space_id if target_identity else None,
-                        target_identity.project_ref if target_identity else None, thread_id=target.thread_id, run_id=value['run_id']))
-        full = (getattr(getattr(self.agent, 'home_paths', None), 'owner_id', None) == self.owner
-            and getattr(self.agent, 'conversation_store', None) is self.store)
-        return ObservationPage(tuple(rows), coverage='complete' if full else 'partial')
+                    value = {
+                        'approval_id': interaction['interaction_id'],
+                        'thread_id': target.thread_id,
+                        'task_id': None,
+                        'run_id': interaction['run_id'],
+                        'revision': interaction['revision'],
+                        'state': 'pending',
+                        'summary': redact_sensitive_value(interaction['request']['description'])[:4096],
+                        'expires_at': _stamp(interaction['expires_at']),
+                        'allowed_decisions': [],
+                    }
+                    rows.append(ObservationRecord(
+                        value,
+                        self.owner,
+                        target_identity.space_id if target_identity else None,
+                        target_identity.project_ref if target_identity else None,
+                        thread_id=target.thread_id,
+                        run_id=value['run_id'],
+                    ))
+
+        all_complete = full and threads_complete and processing_complete and agent_approvals_complete
+        return ObservationPage(tuple(rows), coverage='complete' if all_complete else 'partial')
 
     # LLM: 详情必须仍为本次pending，不回放旧行，也不披露批准动作。
     # 函数用途: 返回精确审批版本与期限。

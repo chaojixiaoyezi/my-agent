@@ -1037,6 +1037,14 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
                 agent.tools.runtime_guard_policy = policy
         with canonical_subagent_model_scope(agent, params.run_id, task_local=params.context_scope == "task_local"), model_dependency_lifetime(agent), current_prompt_scope(agent, user_prompt, params):
             if agent.config.enable_tools:
+                if (
+                    getattr(agent.config, "business_spaces_enabled", False)
+                    and getattr(agent, "home_paths", None) is not None
+                    and hasattr(getattr(agent, "tools", None), "register")
+                ):
+                    from ..gateway_parts.business_api import register_business_tools
+
+                    register_business_tools(agent)
                 agent.tools.prepare_for_run()
             prepared = _prepare_runtime_context(
                 agent,
