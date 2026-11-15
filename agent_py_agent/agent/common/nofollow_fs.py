@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import secrets
 import stat
@@ -624,9 +625,18 @@ def resolve_existing_symlink_anchor(anchor: str | Path) -> Path:
 def split_existing_anchor(path: str | Path) -> tuple[Path, tuple[str, ...]]:
     anchor = Path(path)
     parts: tuple[str, ...] = ()
-    while not anchor.exists() and not anchor.is_symlink():
-        parts = (anchor.name, *parts)
-        anchor = anchor.parent
+    while True:
+        try:
+            os.lstat(anchor)
+            break
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                raise
+            parent = anchor.parent
+            if parent == anchor:
+                break
+            parts = (anchor.name, *parts)
+            anchor = parent
     return anchor, parts
 
 

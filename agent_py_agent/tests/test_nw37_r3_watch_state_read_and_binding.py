@@ -117,7 +117,7 @@ def test_read_json_object_report_status_eio_and_controls(
 
     def _exists_py314(path: Path, *, follow_symlinks: bool = True) -> bool:
         if path != target:
-            return original_exists(path, follow_symlinks=follow_symlinks)
+            return original_exists(path) if follow_symlinks else original_exists(path, follow_symlinks=follow_symlinks)
         counts["exists_calls"] += 1
         try:
             path.stat(follow_symlinks=follow_symlinks)
@@ -253,7 +253,7 @@ def test_persist_state_preserves_durable_facts_under_status_eio_and_rejects_read
 
         def _exists_py314(path: Path, *, follow_symlinks: bool = True) -> bool:
             if path != canonical:
-                return original_exists(path, follow_symlinks=follow_symlinks)
+                return original_exists(path) if follow_symlinks else original_exists(path, follow_symlinks=follow_symlinks)
             counts["exists_calls"] += 1
             try:
                 if counts["status_errors"] == 0:

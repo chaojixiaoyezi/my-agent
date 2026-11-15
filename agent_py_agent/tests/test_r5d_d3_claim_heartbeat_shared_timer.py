@@ -171,7 +171,7 @@ def test_transient_os_error_reschedules_within_ttl_and_stops_after_ttl(monkeypat
     import agent_py_agent.agent.conversation.run_claim as run_claim_mod
 
     clock = [100.0]
-    monkeypatch.setattr(run_claim_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(run_claim_mod, "_monotonic", lambda: clock[0])
 
     attempt_count = 0
 

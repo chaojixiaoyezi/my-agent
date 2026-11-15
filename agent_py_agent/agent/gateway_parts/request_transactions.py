@@ -6,6 +6,7 @@ import os
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
@@ -76,6 +77,48 @@ class OriginalRequestWriteSource:
                 and held.transition is self.transition and held.creator_pid == os.getpid()
                 and held.thread_id == threading.get_ident())
 
+    def _is_cancelled_same_foreground_attempt(self, phase: str) -> bool:
+        from ..runtime_errors import DataCorruptionError
+        from .io import gateway_turn_transition, read_json_file_report
+        from .multiprocess_dispatch import WorkerDispatchError
+        from .multiprocess_execution import check_worker_transition
+        from .owner_retention import gateway_terminal_exists
+        from .paths import gateway_paths_from_root
+        from .request_errors import RequestExecutionOutcomeUncertainError
+
+        try:
+            self.require_original(phase)
+        except RequestExecutionOutcomeUncertainError:
+            return False
+        request_path = getattr(self.transition, "request_path", None)
+        request_id = getattr(self.transition, "request_id", None)
+        attempt_id = getattr(self.transition, "execution_attempt_id", None)
+        if not isinstance(request_path, Path) or not request_id or not attempt_id:
+            return False
+        paths = gateway_paths_from_root(request_path.parent.parent.parent)
+        try:
+            with gateway_turn_transition(paths, request_id):
+                report = read_json_file_report(
+                    request_path,
+                    context="gateway.foreground_short_scope.cancel_check",
+                )
+                record = report.payload
+                turn_phase = str(record.get("turn_phase") or "open").strip().lower()
+                if (
+                    report.load_error is not None
+                    or not record
+                    or str(record.get("id") or request_path.stem) != request_id
+                    or str(record.get("status") or "") != "processing"
+                    or str(record.get("execution_attempt_id") or "") != attempt_id
+                    or not (record.get("cancel_requested") is True or turn_phase == "closing")
+                    or gateway_terminal_exists(paths, f"{request_id}.json")
+                ):
+                    return False
+                check_worker_transition(self.execution, record)
+                return True
+        except (OSError, DataCorruptionError, ValueError, WorkerDispatchError):
+            return False
+
     # LLM: BG复用原共享window逻辑，foreground在同一个原transition.scope下完成短body；nested不重入非重入T，网络/线程等待必须外移。
     # 函数用途: 在平台最终门内执行一次公开文件事务。
     @contextmanager
@@ -106,6 +149,10 @@ class OriginalRequestWriteSource:
                     window.active = False
                     self._window = None
                     _FOREGROUND_WINDOW.reset(token)
+        except InterruptedError as error:
+            if entered or self._is_cancelled_same_foreground_attempt(phase):
+                raise
+            raise self.rejection(phase) from error
         except Exception as error:
             if entered:
                 raise

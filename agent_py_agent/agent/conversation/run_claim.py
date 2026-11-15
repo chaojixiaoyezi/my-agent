@@ -21,6 +21,12 @@ from ..concurrency.interrupt import interrupt_by_name, register_interruptible
 from ..runtime_errors import runtime_error_report
 
 _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
+_default_monotonic = time.monotonic
+_monotonic = _default_monotonic
+
+
+def _monotonic_now() -> float:
+    return time.monotonic() if _monotonic is _default_monotonic else _monotonic()
 # 进程内登记（键是本会话执行租约文件路径，值是在场的用户回合数）：只供后台 Goal 熔断记账判断“用户消息先处理”，
 # 不是执行权、不落盘；进程退出即消失，重启后排队的请求重新等车道时再登记。
 _USER_INPUT_TURNS: dict[str, int] = {}
@@ -123,7 +129,7 @@ class ConversationRunClaimHeartbeat:
                 self._done.set()
                 return
             if self._lease_deadline is None:
-                self._lease_deadline = time.monotonic() + self.lease_seconds
+                self._lease_deadline = _monotonic_now() + self.lease_seconds
             self._done.clear()
             pending = daemon_executor.DeferredCall(
                 lambda: _CLAIM_RENEWS.submit(copy_context().run, self._tick)
@@ -174,7 +180,7 @@ class ConversationRunClaimHeartbeat:
                         runtime_error_report(exc, context="conversation_claim_heartbeat.renew"),
                     )
                     if not self.stop_event.is_set() and (
-                        self._lease_deadline is None or time.monotonic() < self._lease_deadline
+                        self._lease_deadline is None or _monotonic_now() < self._lease_deadline
                     ):
                         return self.start()
                     if not self.stop_event.is_set() and self.claim_id:
@@ -192,7 +198,7 @@ class ConversationRunClaimHeartbeat:
                     if not self.stop_event.is_set() and self.claim_id:
                         interrupt_by_name(conversation_claim_interrupt_name(self.claim_id))
                     break
-                self._lease_deadline = time.monotonic() + self.lease_seconds
+                self._lease_deadline = _monotonic_now() + self.lease_seconds
                 if self.stop_event.is_set():
                     break
                 return self.start()
