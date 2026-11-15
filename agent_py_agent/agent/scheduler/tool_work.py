@@ -84,6 +84,20 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
     except (ValueError, TypeError):
         parsed = None
     parsed = parsed if isinstance(parsed, dict) else None
+    code = execution.result.error_code or ''
+    if (action['name'] == 'workflows' and isinstance(parsed, dict)
+            and parsed.get('error_code') == 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING'):
+        from .execution import _close_skipped_target_claim, _unsettled_prior_run_response
+        if parsed.get('holder_phase') == 'executing':
+            _close_skipped_target_claim(service, claim, signal, response=output,
+                error_code='WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING')
+            from ..conversation.task_run_closeout import settle_terminal_task_run
+            settle_terminal_task_run(getattr(getattr(agent, 'subagents', None), 'runtime_db', None),
+                service.conversation_store, task_id=claim.run_id)
+            return
+        output = _unsettled_prior_run_response(parsed)
+        parsed = json.loads(output)
+        ok, code = False, 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE'
     needs_repair = (action['name'] in ('workflows', 'scripts') and isinstance(parsed, dict)
         and (parsed.get('needs_repair') is True or parsed.get('status') == 'paused_for_resume'))
     confirmed = ok or needs_repair
@@ -114,7 +128,7 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
     service.finish(claim, status='done' if confirmed else 'failed', response=output,
         delivery_status=commit.delivery_status if commit is not None else 'suppressed',
         delivery_reason='tool_rule_result' if commit is not None else 'tool_only_internal_result',
-        error_code=execution.result.error_code or '', now=now)
+        error_code=code, now=now)
     service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=now)
     from ..conversation.task_run_closeout import settle_terminal_task_run
     settle_terminal_task_run(getattr(getattr(agent, 'subagents', None), 'runtime_db', None), service.conversation_store, task_id=claim.run_id)
