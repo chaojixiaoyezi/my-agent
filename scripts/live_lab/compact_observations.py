@@ -9,11 +9,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import statistics
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -598,27 +600,27 @@ def _normalize_model_usage_event(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _normalize_flat_usage_row(row: Mapping[str, Any]) -> dict[str, Any]:
     nested = row.get("usage") if isinstance(row.get("usage"), Mapping) else {}
-    inp = _first_opt_int(
+    inp = _first_opt_int((
         row.get("input_tokens"),
         row.get("prompt_tokens"),
         row.get("accounted_input_tokens"),
         nested.get("input_tokens"),
         nested.get("prompt_tokens"),
-    )
-    out = _first_opt_int(
+    ))
+    out = _first_opt_int((
         row.get("output_tokens"),
         row.get("completion_tokens"),
         nested.get("output_tokens"),
         nested.get("completion_tokens"),
-    )
-    cached = _first_opt_int(
+    ))
+    cached = _first_opt_int((
         row.get("cached_tokens"),
         row.get("cached_input_tokens"),
         row.get("cache_read_input_tokens"),
         nested.get("cached_tokens"),
         nested.get("cached_input_tokens"),
         nested.get("cache_read_input_tokens"),
-    )
+    ))
     status = str(row.get("status") or "").strip().lower()
     call_count = _opt_nonneg_int(row.get("call_count"))
     if call_count is None:
@@ -645,7 +647,7 @@ def _normalize_flat_usage_row(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _first_opt_int(*candidates: Any) -> int | None:
+def _first_opt_int(candidates: Sequence[Any]) -> int | None:
     for item in candidates:
         value = _opt_nonneg_int(item)
         if value is not None:
@@ -733,23 +735,53 @@ def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     return bucket
 
 
+def _is_compact_summary_purpose(purpose: str) -> bool:
+    norm = str(purpose or "").strip().lower()
+    if not norm:
+        return False
+    return (
+        norm in {
+            "conversation_compact_summary",
+            "conversation_compact_remote",
+            "conversation_compact_media_digest",
+            "compact_live_tool_summary",
+            "compact_carried_summary",
+            "compact",
+            "compact_summary",
+        }
+        or norm.startswith("conversation_compact")
+        or norm.startswith("compact_")
+    )
+
+
 def aggregate_usage_records(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Aggregate normalized or raw usage rows with strict missing-counter preservation."""
     total = _empty_bucket_metrics()
     by_purpose: dict[str, dict[str, Any]] = {}
+    compaction_occurred = False
+    compact_purpose_calls = 0
 
     for raw in rows:
         item = normalize_usage_record(raw)
+        if bool(item.get("compaction_occurred")) or (
+            isinstance(raw, Mapping) and bool(raw.get("compaction_occurred"))
+        ):
+            compaction_occurred = True
         _accumulate_bucket(total, item)
         sub = item.get("purpose_breakdown") or {}
         if isinstance(sub, Mapping) and sub:
             for p_key, p_item in sub.items():
-                target = by_purpose.setdefault(str(p_key), _empty_bucket_metrics())
+                key_str = str(p_key)
+                target = by_purpose.setdefault(key_str, _empty_bucket_metrics())
                 _accumulate_bucket(target, p_item)
+                if _is_compact_summary_purpose(key_str):
+                    compact_purpose_calls += max(1, int((p_item or {}).get("call_count") or 1))
         else:
             p_key = str(item.get("purpose") or "main")
             target = by_purpose.setdefault(p_key, _empty_bucket_metrics())
             _accumulate_bucket(target, item)
+            if _is_compact_summary_purpose(p_key):
+                compact_purpose_calls += max(1, int(item.get("call_count") or 1))
 
     _finalize_bucket(total)
     finalized_purposes = {
@@ -760,6 +792,8 @@ def aggregate_usage_records(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     return {
         "schema": "live_lab_turn_usage.v1",
         **total,
+        "compaction_occurred": compaction_occurred,
+        "compact_purpose_calls": compact_purpose_calls,
         "purpose_breakdown": finalized_purposes,
     }
 
@@ -821,18 +855,88 @@ def _parse_json_lines(lines: Sequence[str]) -> list[dict[str, Any]]:
     return out
 
 
+def _opt_timestamp(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = float(value)
+        return num if math.isfinite(num) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            num = float(text)
+            return num if math.isfinite(num) else None
+        except ValueError:
+            pass
+        try:
+            normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _correlate_compaction_turns(
+    turn_usages: Sequence[Mapping[str, Any]],
+    cycles: Sequence[Mapping[str, Any]],
+    *,
+    turn_markers: Sequence[Mapping[str, Any]] | None = None,
+) -> list[int]:
+    indices: set[int] = {
+        idx for idx, turn in enumerate(turn_usages)
+        if bool(turn.get("compaction_occurred"))
+    }
+    markers = list(turn_markers) if turn_markers is not None else list(turn_usages)
+    label_to_idx: dict[str, int] = {}
+    for idx, turn in enumerate(turn_usages):
+        label = str(turn.get("turn") or "").strip()
+        if label and label not in label_to_idx:
+            label_to_idx[label] = idx
+
+    cycle_times = [
+        ts for ts in (_opt_timestamp(cycle.get("created_at")) for cycle in cycles)
+        if ts is not None
+    ]
+    if cycle_times:
+        for pos, marker in enumerate(markers):
+            if not isinstance(marker, Mapping):
+                continue
+            start = _opt_timestamp(marker.get("started_at"))
+            end = _opt_timestamp(marker.get("finished_at"))
+            if start is None or end is None or end < start:
+                continue
+            target_idx = _opt_nonneg_int(marker.get("turn_index"))
+            if target_idx is None:
+                m_label = str(marker.get("turn") or marker.get("turn_label") or "").strip()
+                if m_label and m_label in label_to_idx:
+                    target_idx = label_to_idx[m_label]
+                else:
+                    target_idx = pos
+            if not (0 <= target_idx < len(turn_usages)):
+                continue
+            if any(start <= ts <= end for ts in cycle_times):
+                indices.add(target_idx)
+    return sorted(indices)
+
+
 def compute_pre_post_compaction_cache_ratios(
     turn_usages: Sequence[Mapping[str, Any]],
     *,
     compaction_turn_indices: Sequence[int] = (),
 ) -> dict[str, Any]:
     """Compute observed-subset cached_tokens ratio before and after compaction turns."""
-    split_index: int | None = min(compaction_turn_indices) if compaction_turn_indices else None
-    if split_index is None:
-        for idx, turn in enumerate(turn_usages):
-            if turn.get("compaction_occurred"):
-                split_index = idx
-                break
+    resolved_indices = sorted({
+        idx for idx in compaction_turn_indices
+        if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(turn_usages)
+    })
+    if not resolved_indices:
+        resolved_indices = [
+            idx for idx, turn in enumerate(turn_usages)
+            if bool(turn.get("compaction_occurred"))
+        ]
+    split_index: int | None = resolved_indices[0] if resolved_indices else None
 
     if split_index is None:
         pre_turns = list(turn_usages)
@@ -846,6 +950,7 @@ def compute_pre_post_compaction_cache_ratios(
 
     return {
         "split_turn_index": split_index,
+        "compaction_turns": resolved_indices,
         "pre_compaction": _summarize_turn_slice_cache(pre_turns),
         "post_compaction": _summarize_turn_slice_cache(post_turns),
         "first_post_compaction": _summarize_turn_slice_cache(first_post),
@@ -918,22 +1023,48 @@ def snapshot_compaction_baseline(
     }
 
 
-def _load_thread_records(threads_dir: Path | None) -> dict[str, dict[str, Any]]:
+def _load_thread_records_with_errors(
+    threads_dir: Path | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     records: dict[str, dict[str, Any]] = {}
+    errors_by_tid: dict[str, list[dict[str, Any]]] = {}
     if threads_dir is None or not threads_dir.is_dir():
-        return records
+        return records, errors_by_tid
     for path in sorted(threads_dir.glob("*.json")):
         if path.name.startswith("."):
             continue
+        stem_tid = path.stem
         try:
             with path.open("r", encoding="utf-8") as handle:
                 record = json.load(handle)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            errors_by_tid.setdefault(stem_tid, []).append({
+                "thread_id": stem_tid,
+                "path": str(path),
+                "error": f"unreadable_thread_authority:{stem_tid}: {exc}",
+            })
             continue
         if isinstance(record, dict):
-            tid = str(record.get("thread_id") or path.stem).strip()
+            tid = str(record.get("thread_id") or stem_tid).strip()
             if tid:
                 records[tid] = record
+            else:
+                errors_by_tid.setdefault(stem_tid, []).append({
+                    "thread_id": stem_tid,
+                    "path": str(path),
+                    "error": f"invalid_thread_authority:{stem_tid}: empty thread_id",
+                })
+        else:
+            errors_by_tid.setdefault(stem_tid, []).append({
+                "thread_id": stem_tid,
+                "path": str(path),
+                "error": f"invalid_thread_authority:{stem_tid}: thread record must be dict",
+            })
+    return records, errors_by_tid
+
+
+def _load_thread_records(threads_dir: Path | None) -> dict[str, dict[str, Any]]:
+    records, _errors = _load_thread_records_with_errors(threads_dir)
     return records
 
 
@@ -982,8 +1113,9 @@ def load_canonical_compaction_checkpoints(
     """Read canonical committed checkpoint chains and separate failed/superseded candidates."""
     c_dir = Path(compact_dir)
     t_dir = Path(threads_dir) if threads_dir is not None else None
-    threads = _load_thread_records(t_dir)
+    threads, thread_errors_by_tid = _load_thread_records_with_errors(t_dir)
     baseline_gens = dict((baseline or {}).get("thread_generations") or {})
+    baseline_ids = dict((baseline or {}).get("thread_checkpoint_ids") or {})
 
     convs_dir = c_dir / "conversations"
     ledger_files = sorted(convs_dir.glob("*.jsonl")) if convs_dir.is_dir() else []
@@ -1001,6 +1133,15 @@ def load_canonical_compaction_checkpoints(
         if tid not in seen_tids:
             seen_tids.add(tid)
             candidate_threads.append(tid)
+    for tid in sorted(thread_errors_by_tid):
+        if thread_id is not None and tid != thread_id:
+            continue
+        if tid not in seen_tids:
+            seen_tids.add(tid)
+            candidate_threads.append(tid)
+    if thread_id is not None and thread_id not in seen_tids:
+        seen_tids.add(thread_id)
+        candidate_threads.append(thread_id)
 
     committed_cycles: list[dict[str, Any]] = []
     uncommitted_candidates: list[dict[str, Any]] = []
@@ -1008,6 +1149,8 @@ def load_canonical_compaction_checkpoints(
 
     for tid in candidate_threads:
         thread = threads.get(tid)
+        t_errs = thread_errors_by_tid.get(tid, ())
+        chain_errors.extend(t_errs)
         ledger_path = convs_dir / f"{tid}.jsonl"
         all_rows, read_errs = _read_checkpoint_rows(ledger_path)
         chain_errors.extend(read_errs)
@@ -1020,16 +1163,45 @@ def load_canonical_compaction_checkpoints(
 
         committed_ids: set[str] = set()
         chain_rows: list[dict[str, Any]] = []
-        if thread is not None:
+        base_gen = max(0, int(baseline_gens.get(tid) or 0))
+        base_head_id = str(baseline_ids.get(tid) or "").strip()
+
+        if thread is None:
+            if not t_errs and (all_rows or ledger_path.is_file() or thread_id == tid):
+                chain_errors.append({
+                    "thread_id": tid,
+                    "error": f"missing_thread_authority:{tid}",
+                })
+        else:
             head_id = str(thread.get("compact_checkpoint_id") or "").strip()
-            head_gen = max(0, int(thread.get("compact_generation") or 0))
-            if head_id and head_gen > 0:
+            raw_gen = thread.get("compact_generation")
+            head_gen_opt = _opt_nonneg_int(raw_gen) if raw_gen is not None else 0
+            if head_gen_opt is None:
+                chain_errors.append({
+                    "thread_id": tid,
+                    "error": f"invalid_compact_generation:{tid}:{raw_gen!r}",
+                })
+            elif bool(head_id) != (head_gen_opt > 0):
+                chain_errors.append({
+                    "thread_id": tid,
+                    "checkpoint_id": head_id,
+                    "error": f"incomplete_thread_compact_pointer:{tid}:head={head_id!r}:gen={head_gen_opt}",
+                })
+            elif head_id and head_gen_opt > 0:
                 current_id = head_id
-                expected_gen = head_gen
+                expected_gen = head_gen_opt
                 visited: set[str] = set()
+                local_chain: list[dict[str, Any]] = []
+                local_committed: set[str] = set()
+                chain_valid = True
                 while current_id:
                     if current_id in visited:
-                        chain_errors.append({"thread_id": tid, "error": "checkpoint chain cycle detected"})
+                        chain_errors.append({
+                            "thread_id": tid,
+                            "checkpoint_id": current_id,
+                            "error": f"checkpoint_cycle:{tid}:{current_id}",
+                        })
+                        chain_valid = False
                         break
                     visited.add(current_id)
                     row = by_id.get(current_id) or _cold_checkpoint_copy(c_dir, tid, current_id)
@@ -1037,36 +1209,68 @@ def load_canonical_compaction_checkpoints(
                         chain_errors.append({
                             "thread_id": tid,
                             "checkpoint_id": current_id,
-                            "error": "missing checkpoint row in canonical chain",
+                            "error": f"missing_checkpoint_in_chain:{tid}:{current_id}",
                         })
+                        chain_valid = False
+                        break
+                    row_tid = str(row.get("thread_id") or "").strip()
+                    if row_tid and row_tid != tid:
+                        chain_errors.append({
+                            "thread_id": tid,
+                            "checkpoint_id": current_id,
+                            "error": f"checkpoint_thread_mismatch:{tid}:{current_id}:actual={row_tid}",
+                        })
+                        chain_valid = False
                         break
                     row_gen = _opt_nonneg_int(row.get("generation")) or 0
                     if row_gen != expected_gen:
                         chain_errors.append({
                             "thread_id": tid,
                             "checkpoint_id": current_id,
-                            "error": f"generation mismatch expected={expected_gen} actual={row_gen}",
+                            "error": f"compact_generation_mismatch:{tid}:{current_id}:expected={expected_gen}:actual={row_gen}",
                         })
+                        chain_valid = False
                         break
-                    committed_ids.add(current_id)
-                    chain_rows.append(row)
+                    local_committed.add(current_id)
+                    local_chain.append(row)
                     current_id = str(row.get("previous_checkpoint_id") or "").strip()
                     expected_gen -= 1
-                chain_rows.reverse()
-        else:
-            # No thread JSON was provided (standalone checkpoint file): treat explicit committed rows only.
-            for row in sorted(all_rows, key=lambda item: int(item.get("generation") or 0)):
-                status = str(row.get("status") or "").strip().lower()
-                if status in {"committed", "validated_candidate"} and row.get("checkpoint_id"):
-                    cid = str(row["checkpoint_id"])
-                    committed_ids.add(cid)
-                    chain_rows.append(row)
+                if chain_valid and (expected_gen != 0 or len(local_chain) != head_gen_opt):
+                    chain_errors.append({
+                        "thread_id": tid,
+                        "checkpoint_id": head_id,
+                        "error": (
+                            f"compact_generation_mismatch:{tid}:ended_early:"
+                            f"expected_len={head_gen_opt}:actual_len={len(local_chain)}"
+                        ),
+                    })
+                    chain_valid = False
+                if chain_valid and base_head_id and base_head_id not in local_committed:
+                    chain_errors.append({
+                        "thread_id": tid,
+                        "checkpoint_id": base_head_id,
+                        "error": f"baseline_checkpoint_missing_in_chain:{tid}:{base_head_id}",
+                    })
+                    chain_valid = False
+                if chain_valid:
+                    local_chain.reverse()
+                    chain_rows = local_chain
+                    committed_ids = local_committed
 
-        base_gen = max(0, int(baseline_gens.get(tid) or 0))
-        for row in chain_rows:
+        if base_head_id and base_head_id in committed_ids:
+            base_idx = next(
+                idx for idx, item in enumerate(chain_rows)
+                if str(item.get("checkpoint_id") or "").strip() == base_head_id
+            )
+            post_baseline_rows = chain_rows[base_idx + 1:]
+        else:
+            post_baseline_rows = [
+                row for row in chain_rows
+                if max(0, int(row.get("generation") or 0)) > base_gen
+            ]
+
+        for row in post_baseline_rows:
             gen = max(0, int(row.get("generation") or 0))
-            if gen <= base_gen:
-                continue
             before_tokens = _opt_nonneg_int(row.get("projected_tokens_before")) or 0
             after_tokens = _opt_nonneg_int(row.get("projected_tokens_after")) or 0
             ratio = round(before_tokens / after_tokens, 4) if after_tokens > 0 else None
@@ -1203,8 +1407,8 @@ def parse_compaction_telemetry(
                 "committed": bool(rec.get("committed", False)),
                 "thread_id": str(rec.get("thread_id") or ""),
                 "generation": _opt_nonneg_int(rec.get("generation")),
-                "tokens_before": _first_opt_int(rec.get("tokens_before"), rec.get("projected_tokens_before"), rec.get("before_tokens")),
-                "candidate_tokens": _first_opt_int(rec.get("candidate_tokens"), rec.get("tokens_after"), rec.get("after_tokens")),
+                "tokens_before": _first_opt_int((rec.get("tokens_before"), rec.get("projected_tokens_before"), rec.get("before_tokens"))),
+                "candidate_tokens": _first_opt_int((rec.get("candidate_tokens"), rec.get("tokens_after"), rec.get("after_tokens"))),
                 "operation_id": str(rec.get("operation_id") or ""),
             })
         elif mode in {"cache_fork", "independent_summary", "provider_compaction"} or (
@@ -1370,8 +1574,9 @@ def collect_bg_process_census(
             "path": str(err.get("path") or ""),
         })
 
+    using_default_probe = pid_alive_fn is None
     for record in records:
-        classified = _classify_bg_record(record, probe_pid)
+        classified = _classify_bg_record(record, probe_pid, using_default_probe=using_default_probe)
         state = classified["state"]
         if state == "active":
             active.append(classified)
@@ -1406,36 +1611,209 @@ def _session_id_from_error(err: Mapping[str, Any]) -> str:
     return Path(raw_path).stem if raw_path else ""
 
 
+def _probe_instance_alive(
+    pid: int,
+    birth_token: str,
+    probe_pid: Callable[[int], bool | None],
+    *,
+    using_default_probe: bool,
+) -> bool | None:
+    if pid <= 0:
+        return False
+    alive = probe_pid(pid)
+    if alive is not True:
+        return alive
+    if not using_default_probe or not birth_token.strip():
+        return True
+    try:
+        from agent_py_agent.agent.tooling.process_registry import (
+            _birth_token_matches,
+            _process_is_zombie,
+            capture_process_birth_token,
+        )
+
+        if _process_is_zombie(pid):
+            return False
+        current = capture_process_birth_token(pid)
+        if not current:
+            return False if probe_pid(pid) is False else None
+        return bool(_birth_token_matches(pid, birth_token, current))
+    except Exception:
+        return None
+
+
+def _combine_liveness(states: Sequence[bool | None]) -> bool | None:
+    if any(item is True for item in states):
+        return True
+    if any(item is None for item in states):
+        return None
+    return False
+
+
+def _collect_unresolved_from_receipt(
+    container: Mapping[str, Any],
+    unresolved_instances: list[Mapping[str, Any]],
+    unresolved_pids: list[int],
+) -> None:
+    raw_instances = container.get("unresolved_instances")
+    if isinstance(raw_instances, (list, tuple)):
+        for item in raw_instances:
+            if isinstance(item, Mapping):
+                unresolved_instances.append(item)
+    raw_pids = container.get("unresolved_pids")
+    if isinstance(raw_pids, (list, tuple)):
+        for raw_pid in raw_pids:
+            if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) and raw_pid > 0:
+                unresolved_pids.append(raw_pid)
+
+
+def _probe_unresolved_cleanup_live(
+    unresolved_instances: Sequence[Mapping[str, Any]],
+    unresolved_pids: Sequence[int],
+    probe_pid: Callable[[int], bool | None],
+    *,
+    using_default_probe: bool,
+) -> bool:
+    for item in unresolved_instances:
+        inst_pid = int(item.get("pid") or 0)
+        inst_birth = str(item.get("birth_token") or "")
+        if _probe_instance_alive(
+            inst_pid, inst_birth, probe_pid, using_default_probe=using_default_probe
+        ) is True:
+            return True
+    for raw_pid in unresolved_pids:
+        if _probe_instance_alive(
+            int(raw_pid), "", probe_pid, using_default_probe=using_default_probe
+        ) is True:
+            return True
+    return False
+
+
+def _evaluate_termination_cleanup(
+    termination: Any,
+    status: str,
+    target_pid: int,
+    probe_pid: Callable[[int], bool | None],
+    *,
+    using_default_probe: bool,
+) -> tuple[str, str, bool | None]:
+    default_reason = f"terminal_status:{status}_pid_dead" if target_pid > 0 else f"terminal_status:{status}"
+    if termination is None or termination == {}:
+        return "settled", default_reason, False
+    if not isinstance(termination, Mapping):
+        return "unknown", "termination_malformed", None
+
+    if "cleanup" in termination:
+        cleanup = termination.get("cleanup")
+        if not isinstance(cleanup, Mapping):
+            return "unknown", "cleanup_malformed", None
+        unresolved_instances: list[Mapping[str, Any]] = []
+        unresolved_pids: list[int] = []
+        _collect_unresolved_from_receipt(cleanup, unresolved_instances, unresolved_pids)
+
+        receipt_unconfirmed = False
+        tree_incomplete = cleanup.get("tree_observation_complete") is False
+        raw_receipts = cleanup.get("instances")
+        if isinstance(raw_receipts, (list, tuple)):
+            for receipt in raw_receipts:
+                if not isinstance(receipt, Mapping):
+                    receipt_unconfirmed = True
+                    continue
+                _collect_unresolved_from_receipt(receipt, unresolved_instances, unresolved_pids)
+                if receipt.get("confirmed") is not True:
+                    receipt_unconfirmed = True
+                if receipt.get("tree_observation_complete") is False:
+                    tree_incomplete = True
+
+        has_unresolved = bool(unresolved_instances or unresolved_pids)
+        not_confirmed = cleanup.get("confirmed") is not True or receipt_unconfirmed
+        if not_confirmed or tree_incomplete or has_unresolved:
+            if _probe_unresolved_cleanup_live(
+                unresolved_instances,
+                unresolved_pids,
+                probe_pid,
+                using_default_probe=using_default_probe,
+            ):
+                return "active", "cleanup_unresolved_live", True
+            if has_unresolved:
+                return "unknown", "unresolved_instances_present", False
+            if tree_incomplete:
+                return "unknown", "tree_observation_complete_false", False
+            return "unknown", "cleanup_unconfirmed", False
+        return "settled", f"terminal_status:{status}_cleanup_confirmed", False
+
+    unresolved_instances = []
+    unresolved_pids = []
+    _collect_unresolved_from_receipt(termination, unresolved_instances, unresolved_pids)
+    tree_incomplete = termination.get("tree_observation_complete") is False
+    has_unresolved = bool(unresolved_instances or unresolved_pids)
+    not_confirmed = termination.get("confirmed") is False
+    if not_confirmed or tree_incomplete or has_unresolved:
+        if _probe_unresolved_cleanup_live(
+            unresolved_instances,
+            unresolved_pids,
+            probe_pid,
+            using_default_probe=using_default_probe,
+        ):
+            return "active", "cleanup_unresolved_live", True
+        if has_unresolved:
+            return "unknown", "unresolved_instances_present", False
+        if tree_incomplete:
+            return "unknown", "tree_observation_complete_false", False
+        return "unknown", "cleanup_unconfirmed", False
+    return "settled", default_reason, False
+
+
 def _classify_bg_record(
     record: Mapping[str, Any],
     probe_pid: Callable[[int], bool | None],
+    *,
+    using_default_probe: bool = False,
 ) -> dict[str, Any]:
     scope = record.get("execution_scope") if isinstance(record.get("execution_scope"), Mapping) else {}
     session_id = str(record.get("session_id") or "")
     status = str(record.get("status") or "unknown")
     child_pid = int(record.get("child_pid") or 0)
+    child_birth = str(record.get("child_pid_birth_token") or "")
     host_pid = int(record.get("pid") or 0)
+    host_birth = str(record.get("pid_birth_token") or "")
     launcher_pid = int(record.get("launcher_pid") or 0)
+    launcher_birth = str(record.get("launcher_birth_token") or "")
     target_pid = child_pid if child_pid > 0 else host_pid
 
-    alive: bool | None = probe_pid(target_pid) if target_pid > 0 else False
+    child_alive = _probe_instance_alive(
+        child_pid, child_birth, probe_pid, using_default_probe=using_default_probe
+    )
+    host_alive = _probe_instance_alive(
+        host_pid, host_birth, probe_pid, using_default_probe=using_default_probe
+    )
+    alive: bool | None = _combine_liveness((child_alive, host_alive))
+
     reason = ""
     if status in _TERMINAL_PROCESS_STATUSES:
-        if target_pid <= 0:
-            state = "settled"
-            reason = f"terminal_status:{status}"
-        elif alive is False:
-            state = "settled"
-            reason = f"terminal_status:{status}_pid_dead"
-        elif alive is True:
+        if alive is True:
             state = "unknown"
             reason = f"terminal_status:{status}_pid_still_alive"
-        else:
+        elif alive is None:
             state = "unknown"
             reason = f"terminal_status:{status}_pid_unverified"
+        else:
+            state, reason, alive = _evaluate_termination_cleanup(
+                record.get("termination"),
+                status,
+                target_pid,
+                probe_pid,
+                using_default_probe=using_default_probe,
+            )
     elif status in {"starting", "running"}:
-        liveness_pid = target_pid if target_pid > 0 else launcher_pid
-        liveness = alive if target_pid > 0 else (probe_pid(liveness_pid) if liveness_pid > 0 else False)
+        if child_pid > 0 or host_pid > 0:
+            liveness_pid = target_pid
+            liveness = alive
+        else:
+            liveness_pid = launcher_pid
+            liveness = _probe_instance_alive(
+                launcher_pid, launcher_birth, probe_pid, using_default_probe=using_default_probe
+            )
         alive = liveness
         if liveness_pid <= 0:
             state = "unknown"
@@ -1450,8 +1828,22 @@ def _classify_bg_record(
             state = "unknown"
             reason = f"nonterminal_status:{status}_pid_unverified"
     else:
-        state = "unknown"
-        reason = f"status:{status}"
+        if alive is True:
+            state = "active"
+            reason = f"status:{status}_pid_alive"
+        else:
+            term_state, term_reason, term_alive = _evaluate_termination_cleanup(
+                record.get("termination"),
+                status,
+                target_pid,
+                probe_pid,
+                using_default_probe=using_default_probe,
+            )
+            if term_state == "active":
+                state, reason, alive = term_state, term_reason, term_alive
+            else:
+                state = "unknown"
+                reason = term_reason if term_state == "unknown" else f"status:{status}"
 
     return {
         "session_id": session_id,
@@ -1511,6 +1903,7 @@ def collect_compaction_observations(
     thread_id: str | None = None,
     pre_bg_census: Mapping[str, Any] | None = None,
     pid_alive_fn: Callable[[int], bool | None] | None = None,
+    turn_markers: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble full compaction, cache, policy, and 3-state bg-* observation report."""
     home_ctx = resolve_live_lab_home_context(config_path)
@@ -1521,7 +1914,15 @@ def collect_compaction_observations(
         baseline=baseline,
     )
     telemetry = parse_compaction_telemetry(telemetry_sources)
-    cache_phases = compute_pre_post_compaction_cache_ratios(turn_usages)
+    correlated_indices = _correlate_compaction_turns(
+        turn_usages,
+        checkpoints.get("cycles") or (),
+        turn_markers=turn_markers,
+    )
+    cache_phases = compute_pre_post_compaction_cache_ratios(
+        turn_usages,
+        compaction_turn_indices=correlated_indices,
+    )
     post_bg = collect_bg_process_census(home_ctx["process_store_root"], pid_alive_fn=pid_alive_fn)
     bg_diff = diff_bg_process_census(pre_bg_census or {"counts": {"active": 0, "settled": 0, "unknown": 0, "total": 0}}, post_bg)
 

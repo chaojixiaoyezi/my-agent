@@ -75,20 +75,27 @@ def case_main_compact_stress_long_read(lab) -> None:
     )
     observations["source_provenance"] = source_meta
     observations["report_provenance"] = _artifact_stamp(report)
+    stress_gate = evaluate_compact_stress_observations(observations, min_cycles=REQUIRED_COMPACT_CYCLES)
+    observations["stress_gate"] = stress_gate
 
     telemetry_path = lab.responses_dir / "main_compact_stress_long_read.telemetry.json"
     telemetry_path.write_text(json.dumps(observations, ensure_ascii=False, indent=2), encoding="utf-8")
     if hasattr(lab, "record_case_telemetry"):
         lab.record_case_telemetry("main_compact_stress_long_read", observations)
 
-    compact_count = int(observations["checkpoints"]["successful_cycle_count"])
+    if stress_gate["checkpoint_errors"]:
+        raise RuntimeError(
+            "COMPACT_CHECKPOINT_AUTHORITY_ERROR: canonical checkpoint verification failed: "
+            f"{stress_gate['checkpoint_errors']}"
+        )
+    compact_count = int(stress_gate["successful_cycle_count"])
     if compact_count < REQUIRED_COMPACT_CYCLES:
         raise RuntimeError(
             f"COMPACT_CYCLES_INSUFFICIENT: expected>={REQUIRED_COMPACT_CYCLES} committed canonical generations "
             f"above baseline, actual={compact_count} (uncommitted_or_superseded="
-            f"{observations['checkpoints']['uncommitted_or_superseded_count']})"
+            f"{stress_gate['uncommitted_or_superseded_count']})"
         )
-    if observations["telemetry"]["runaway_no_progress_detected"]:
+    if stress_gate["runaway_no_progress_detected"]:
         raise RuntimeError(
             "COMPACT_NO_PROGRESS_LOOP: repeated non-progress compaction skip events detected: "
             f"count={observations['telemetry']['no_progress_count']}"
@@ -102,6 +109,38 @@ def case_main_compact_stress_long_read(lab) -> None:
     lab.log(f"compact_stress_report={report}")
     lab.log(f"compact_stress_telemetry={telemetry_path}")
     lab.log(f"compact_stress_compact_cycles={compact_count}")
+
+
+def evaluate_compact_stress_observations(
+    observations: Mapping[str, Any],
+    *,
+    min_cycles: int = REQUIRED_COMPACT_CYCLES,
+) -> dict[str, Any]:
+    """Evaluate canonical checkpoints, loop telemetry, and bg-* census for compact stress."""
+    checkpoints = observations.get("checkpoints") if isinstance(observations.get("checkpoints"), Mapping) else {}
+    telemetry = observations.get("telemetry") if isinstance(observations.get("telemetry"), Mapping) else {}
+    bg_diff = observations.get("bg_census_diff") if isinstance(observations.get("bg_census_diff"), Mapping) else {}
+
+    checkpoint_errors = list(checkpoints.get("errors") or ())
+    compact_count = int(checkpoints.get("successful_cycle_count") or 0)
+    uncommitted_count = int(checkpoints.get("uncommitted_or_superseded_count") or 0)
+    runaway_no_progress = bool(telemetry.get("runaway_no_progress_detected"))
+    leaked_count = int(bg_diff.get("leaked_count") or 0)
+
+    ok = (
+        not checkpoint_errors
+        and compact_count >= max(1, int(min_cycles))
+        and not runaway_no_progress
+        and leaked_count == 0
+    )
+    return {
+        "ok": ok,
+        "successful_cycle_count": compact_count,
+        "uncommitted_or_superseded_count": uncommitted_count,
+        "checkpoint_errors": checkpoint_errors,
+        "runaway_no_progress_detected": runaway_no_progress,
+        "leaked_count": leaked_count,
+    }
 
 
 def _compact_stress_prompt() -> str:
@@ -425,4 +464,4 @@ def _stress_size_mb() -> int:
     return max(1, value)
 
 
-__all__ = ["case_main_compact_stress_long_read"]
+__all__ = ["case_main_compact_stress_long_read", "evaluate_compact_stress_observations"]
