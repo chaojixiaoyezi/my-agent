@@ -1968,7 +1968,7 @@ def _commit_protected_shell_outcome(
             settle_shell_artifact_operation(
                 request.tool.artifact_backup_root,
                 run_scope=request.run_scope,
-                operation_id="",
+                operation_id=request.operation_id,
                 operation_key=prepared.operation_key,
             )
         except (OSError, TypeError, ValueError):

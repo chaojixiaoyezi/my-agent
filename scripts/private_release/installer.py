@@ -904,7 +904,7 @@ def _linux_bwrap_preflight(prefix: Path) -> str | None:
     if not bwrap:
         return None
     try:
-        proc = subprocess.run([bwrap, "--unshare-user", "--", "true"], capture_output=True, text=True, timeout=3, check=False)
+        proc = subprocess.run([bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-user", "--", "true"], capture_output=True, text=True, timeout=3, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         return f"警告：bwrap userns 预检未通过（{error}）；Ubuntu 24.04+ 请检查 kernel.apparmor_restrict_unprivileged_userns。"
     if proc.returncode != 0:

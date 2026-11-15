@@ -545,9 +545,17 @@ def _patch_denied_path(
     changes: list[dict[str, Any]],
     workspace_root: Path,
 ) -> str:
+    explicit_target = str(getattr(exc, "target_path", "") or "").strip()
+    if explicit_target:
+        return explicit_target
     msg = str(exc)
     if "target=" in msg:
-        target_token = msg.partition("target=")[2].split(None, 1)[0].strip()
+        raw_target = msg.partition("target=")[2]
+        if " workspace_roots=" in raw_target:
+            raw_target = raw_target.partition(" workspace_roots=")[0]
+        else:
+            raw_target = raw_target.split(None, 1)[0]
+        target_token = raw_target.strip()
         if target_token:
             return target_token
     candidates: list[str] = []

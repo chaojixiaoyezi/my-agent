@@ -138,7 +138,7 @@ def _persona_approval_write_error(target: Path, protected_root: Path | None = No
     if target.name == "AGENTS.md":
         return (
             "AGENTS.md 是当前 owner 的长期工作约定，不能用基础文件或 shell 直接修改。"
-            "请使用 update_persona target=agents；该操作可由 Agent 自主完成。"
+            "请先使用 /agents show 查看当前约定，再通过 /agents write \"...\" 生成预览并经用户确认后修改。"
         )
     return (
         "SOUL.md 是需要用户同意的长期性格设定，不能用基础文件或 shell 直接修改。"

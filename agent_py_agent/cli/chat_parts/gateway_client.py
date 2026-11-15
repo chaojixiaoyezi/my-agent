@@ -678,8 +678,11 @@ class NetworkGatewayObserver:
                 if self.cursor:
                     headers["Last-Event-ID"] = self.cursor
                 target = urllib.request.Request(self.base_url + f"/client/requests/{quoted}/events?include={include}", headers=headers)
+                stream_opened = False
+                wait_window_expired = False
                 try:
                     with open_authenticated_request(target, timeout=current_remaining_seconds()) as response:
+                        stream_opened = True
                         for kind, data, cursor in self._frames(response):
                             if callable(request.is_wait_cancelled) and request.is_wait_cancelled():
                                 return {}
@@ -698,8 +701,10 @@ class NetworkGatewayObserver:
                                 if len(parts) == 5 and parts[3].isdecimal() and parts[4].isdecimal():
                                     self.cursor, self.line_cursor = cursor, int(parts[3])
                             if time.monotonic() >= min(hard_mono_deadline, rolling_deadline):
+                                wait_window_expired = True
                                 break
-                    failures += 1
+                    if not wait_window_expired:
+                        failures += 1
                 except urllib.error.HTTPError as error:
                     if error.code == 503:
                         self._http_only = True
@@ -710,8 +715,16 @@ class NetworkGatewayObserver:
                         self._refreshed = True
                     else:
                         failures += 1
-                except (OSError, UnicodeError, ValueError, urllib.error.URLError):
-                    failures += 1
+                except (OSError, UnicodeError, ValueError, urllib.error.URLError) as error:
+                    is_timeout = isinstance(error, TimeoutError) or (
+                        isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)
+                    )
+                    if stream_opened and is_timeout and time.monotonic() >= min(hard_mono_deadline, rolling_deadline):
+                        wait_window_expired = True
+                    else:
+                        failures += 1
+                if wait_window_expired:
+                    continue
                 if failures >= 2:
                     self._http_only = True
                 if not self._http_only:

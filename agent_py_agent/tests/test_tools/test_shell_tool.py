@@ -1885,6 +1885,8 @@ def test_shell_default_cwd_owner_refusal_keeps_exact_code_through_executor(tmp_p
     owner.mkdir()
     outside.mkdir()
     tool = ShellTool(outside, options=ShellToolOptions(owner_scope_root=str(owner)))
+    # 预热 bwrap binary 探测后再安装 Popen 禁用钩子，避免沙箱二进制版本检测被拦截。
+    tool.availability()
     def must_not_spawn(*args, **kwargs):
         pytest.fail("默认cwd被拒绝时不得派生进程")
     monkeypatch.setattr(subprocess, "Popen", must_not_spawn)

@@ -122,10 +122,11 @@ _READ_FILE_EXAMPLES = [
 class WriteScopeError(ValueError):
     """A mutating file target is outside this invocation's structured write roots."""
 
-    # 函数用途: 保存拒绝原因和可选的结构化拒绝码（空表示沿用 WRITE_FORBIDDEN）。
-    def __init__(self, message: str, access_code: str = "") -> None:
+    # 函数用途: 保存拒绝原因、可选的结构化拒绝码（空表示沿用 WRITE_FORBIDDEN）及越界目标路径。
+    def __init__(self, message: str, access_code: str = "", *, target_path: str = "") -> None:
         super().__init__(message)
         self.access_code = str(access_code or "").strip()
+        self.target_path = str(target_path or "").strip()
 
 
 # LLM: Preserve the distinction between an invalid path argument and a policy denial so mutating tools fail closed with WRITE_FORBIDDEN.
@@ -287,7 +288,11 @@ class FileSystemTool(BaseTool):
         """解析写路径，并在多用户模式下强制命中本轮已授权工作区。"""
         reference_error = logical_reference_write_path_error(raw_path)
         if reference_error:
-            raise WriteScopeError(reference_error, access_code="ARTIFACT_REF_AS_WRITE_PATH")
+            raise WriteScopeError(
+                reference_error,
+                access_code="ARTIFACT_REF_AS_WRITE_PATH",
+                target_path=str(raw_path or "").strip(),
+            )
         try:
             candidate = self.resolve_path(raw_path)
         except PathAccessError as exc:
@@ -298,20 +303,29 @@ class FileSystemTool(BaseTool):
             allowed = list(self.workspace_roots)
             if self.path_access_policy.owner_scope_root:
                 allowed.append(self.path_access_policy.owner_scope_root)
+            try:
+                raw_candidate = Path(raw_path).expanduser()
+                if not raw_candidate.is_absolute():
+                    raw_candidate = self.workspace_root / raw_candidate
+                resolved_target = str(raw_candidate.resolve(strict=False))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                resolved_target = str(raw_path or "").strip()
             raise WriteScopeError(
                 f"{exc} 可用的写入位置: {'、'.join(str(p) for p in allowed) or '（无）'}",
                 access_code=exc.access_code if exc.access_code in HOST_FILE_DENIAL_CODES else "",
+                target_path=resolved_target,
             ) from exc
         host_decision = self.path_access_policy.host_write_decision(candidate)
         if not host_decision.allowed:
-            raise WriteScopeError(host_decision.message, host_decision.code)
+            raise WriteScopeError(host_decision.message, host_decision.code, target_path=str(candidate))
         if self.path_access_policy.owner_scope_root is None:
             return candidate
         if any(_path_is_under(candidate, root) for root in self.workspace_roots):
             return candidate
         raise WriteScopeError(
             "写入被阻止: 多用户 owner 只能写当前任务工作区或结构化授权的输出目录。"
-            f" target={candidate} workspace_roots={','.join(str(root) for root in self.workspace_roots)}"
+            f" target={candidate} workspace_roots={','.join(str(root) for root in self.workspace_roots)}",
+            target_path=str(candidate),
         )
 
     def display_path(self, path: Path) -> str:

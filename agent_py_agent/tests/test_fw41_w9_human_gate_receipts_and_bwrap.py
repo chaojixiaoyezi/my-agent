@@ -265,7 +265,7 @@ def test_installer_linux_bwrap_preflight_nonblocking_warning(tmp_path, monkeypat
     warning = installer._linux_bwrap_preflight(prefix)
     assert warning is not None
     assert "kernel.apparmor_restrict_unprivileged_userns" in warning
-    assert calls == [[str(bundled), "--unshare-user", "--", "true"]]
+    assert calls == [[str(bundled), "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-user", "--", "true"]]
 
     # OSError / TimeoutExpired also stay non-blocking with diagnostic
     def timeout_bwrap(_cmd, **_kwargs):
