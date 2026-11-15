@@ -1,6 +1,7 @@
 """W5（PD-4 / BIZ-012）运行时行为回归：空 step_id 断点投影、工作流引用覆盖与取消/未结清阻断、资产到运行锁序、维护结构化诊断。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -18,6 +19,7 @@ from agent_py_agent.agent.conversation.business_contracts import BusinessExecuti
 from agent_py_agent.agent.conversation.business_spaces import BusinessSpaceService
 from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
 from agent_py_agent.agent.workflows import engine as engine_module
+from agent_py_agent.agent.workflows import reference_sources as reference_sources_module
 from agent_py_agent.agent.workflows.business_scope import (
     WorkflowPolicyRefusal,
     WorkflowScopeService,
@@ -31,7 +33,7 @@ from agent_py_agent.agent.workflows.orphan_maintenance import (
 )
 from agent_py_agent.agent.workflows.reference_sources import build_workflow_reference_reader
 from agent_py_agent.agent.workflows.run_list_index import RunListIndex
-from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
+from agent_py_agent.agent.workflows.run_store import WorkflowRunStore, _RunBusy
 
 
 def _service(
@@ -301,7 +303,7 @@ def test_cancelling_and_legacy_unindexed_runs_block_workflow_recycle_and_purge(
     )
     monkeypatch.undo()
 
-    # 3. 缺少 open_ref_scan（模拟旧 v4 库升级、已有 runs 行）时，fail-closed 为 REFERENCE_COVERAGE_UNKNOWN。
+    # 3. 缺少 open_ref_scan（模拟旧 v4 库升级、已有 runs 行）且单次受限回填尚未扫完时，fail-closed 为 REFERENCE_COVERAGE_UNKNOWN。
     _create_workflow(api, actor, 'wf-legacy')
     legacy_dir = runs_root / 'wfrun-legacy-disk'
     legacy_dir.mkdir(parents=True, exist_ok=True)
@@ -312,14 +314,16 @@ def test_cancelling_and_legacy_unindexed_runs_block_workflow_recycle_and_purge(
         conn.execute('DROP TABLE IF EXISTS open_ref_runs')
         conn.execute('DROP TABLE IF EXISTS open_ref_scan')
         conn.execute('PRAGMA user_version = 4')
-    with pytest.raises(WorkflowPolicyRefusal) as unknown_err:
-        api.execute(
-            'workflows.recycle',
-            {'workflow_ref': 'wf-legacy'},
-            actor=actor,
-            expected_revision=1,
-            idempotency_key='recycle-legacy-unknown',
-        )
+    with monkeypatch.context() as mp:
+        mp.setattr(reference_sources_module, '_max_open_ref_backfill_batches', 1)
+        with pytest.raises(WorkflowPolicyRefusal) as unknown_err:
+            api.execute(
+                'workflows.recycle',
+                {'workflow_ref': 'wf-legacy'},
+                actor=actor,
+                expected_revision=1,
+                idempotency_key='recycle-legacy-unknown',
+            )
     assert unknown_err.value.error_code == 'WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN'
     assert unknown_err.value.details['blocker_reason_code'] == 'REFERENCE_COVERAGE_UNKNOWN'
 
@@ -591,3 +595,250 @@ def test_orphan_maintenance_surfaces_structured_exception_diagnostics(
     with caplog.at_level(logging.WARNING, logger='agent_py_agent.agent.workflows.orphan_maintenance'):
         maintain_owner_workflows(api, actor=actor, idempotency_key='maintain-diag-00001')
     assert any('REFERENCE_READER_FAILED' in rec.getMessage() for rec in caplog.records)
+
+
+def test_concurrent_duplicate_run_registration_does_not_deadlock_with_asset_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FW41-P1-01：create_run 在 asset_root_lock 内必须非阻塞取运行锁，避免与持 execution_lock 读 ScriptStore 形成 AB/BA 死锁。"""
+    api, actor, space_id = _service(tmp_path, use_default_reader=True, with_space=True)
+    exec_calls: list[int] = []
+    _create_script(tmp_path, 'lock-cycle-script', 'print(\'{"done": true}\')\n')
+    _create_workflow(
+        api,
+        actor,
+        'wf-lock-cycle',
+        steps=[{'step_id': 's1', 'name': 's1', 'mode': 'deterministic_script', 'script_id': 'lock-cycle-script'}],
+        scope={'scope_mode': 'spaces', 'space_ids': [space_id]},
+    )
+
+    idemp_key = 'same-run-idempotency-key'
+    expected_run_id = hashlib.sha256((actor.owner_id + '\0workflows.run\0' + idemp_key).encode()).hexdigest()
+
+    holding_exec_lock = threading.Event()
+    allow_asset_read = threading.Event()
+    paused_before_asset_read = threading.Event()
+
+    real_exec_lock = WorkflowRunStore.execution_lock
+    real_get_script = ScriptStore.get_script
+    real_run_script_wd = engine_module.run_script_with_datasources
+
+    def wrapped_run_script_wd(*args, **kwargs):
+        exec_calls.append(1)
+        return real_run_script_wd(*args, **kwargs)
+
+    def wrapped_exec_lock(self: WorkflowRunStore, workflow_run_id: str):
+        cm = real_exec_lock(self, workflow_run_id)
+        if workflow_run_id != expected_run_id:
+            return cm
+
+        class _TrackedLock:
+            def __enter__(self_inner):
+                res = cm.__enter__()
+                holding_exec_lock.set()
+                return res
+
+            def __exit__(self_inner, exc_type, exc, tb):
+                holding_exec_lock.clear()
+                return cm.__exit__(exc_type, exc, tb)
+
+        return _TrackedLock()
+
+    def wrapped_get_script(self: ScriptStore, script_id: str):
+        # 仅在线程 1 已持有 execution_lock 进入步骤脚本执行读取资产时暂停，避免阻塞 preflight 的 _script_pins。
+        if script_id == 'lock-cycle-script' and holding_exec_lock.is_set() and not paused_before_asset_read.is_set():
+            assert not asset_root_lock_held(tmp_path)
+            paused_before_asset_read.set()
+            assert allow_asset_read.wait(timeout=5.0)
+        return real_get_script(self, script_id)
+
+    monkeypatch.setattr(WorkflowRunStore, 'execution_lock', wrapped_exec_lock)
+    monkeypatch.setattr(ScriptStore, 'get_script', wrapped_get_script)
+    monkeypatch.setattr(engine_module, 'run_script_with_datasources', wrapped_run_script_wd)
+
+    t1_results: list[dict] = []
+    t1_errors: list[BaseException] = []
+    t2_errors: list[BaseException] = []
+
+    def worker_one() -> None:
+        try:
+            res = api.execute(
+                'workflows.run',
+                {'workflow_ref': 'wf-lock-cycle', 'space_id': space_id},
+                actor=actor,
+                idempotency_key=idemp_key,
+            )
+            t1_results.append(res)
+        except BaseException as exc:  # pragma: no cover - 仅失败诊断收集
+            t1_errors.append(exc)
+
+    def worker_two() -> None:
+        try:
+            store = WorkflowRunStore(tmp_path)
+            frozen_snapshot = store.load_workflow_snapshot(expected_run_id)
+            dup_record = _run_record('wf-lock-cycle', expected_run_id, status='running')
+            dup_record = WorkflowRunRecord(**{**dup_record.to_dict(), 'owner_id': actor.owner_id})
+            store.create_run(dup_record, frozen_snapshot, require_active_asset=True)
+        except BaseException as exc:
+            t2_errors.append(exc)
+
+    t1 = threading.Thread(target=worker_one, name='fw41-p1-01-t1')
+    t2 = threading.Thread(target=worker_two, name='fw41-p1-01-t2')
+    try:
+        t1.start()
+        assert paused_before_asset_read.wait(timeout=5.0), 'thread 1 did not reach asset read under execution_lock'
+
+        t2.start()
+        # 线程 2 必须在线程 1 仍持有 execution_lock 且尚未读资产之前立即返回 WORKFLOW_RUN_BUSY，不能阻塞等待或持 asset 锁挂死。
+        t2.join(timeout=5.0)
+        assert not t2.is_alive(), 'duplicate create_run blocked inside register_run_locked'
+    finally:
+        allow_asset_read.set()
+        t1.join(timeout=5.0)
+
+    assert not t1.is_alive(), 'executing workflow thread hung trying to acquire asset lock'
+    assert not t1_errors, f'thread 1 raised unexpectedly: {t1_errors!r}'
+    assert len(t1_results) == 1 and t1_results[0]['state'] == 'completed'
+    assert len(t2_errors) == 1
+    busy_err = t2_errors[0]
+    assert isinstance(busy_err, _RunBusy)
+    assert busy_err.code == 'WORKFLOW_RUN_BUSY'
+    assert busy_err.status == 409
+    assert busy_err.outcome == 'not_started'
+    assert busy_err.details['reason_code'] == 'WORKFLOW_EXECUTION_LOCK_HELD'
+    assert busy_err.details['control_started'] is False
+
+    # 资产读取恢复正常，终态保留为 succeeded，且脚本副作用仅发生一次、同键重放幂等。
+    assert ScriptStore(tmp_path).get_script('lock-cycle-script')['id'] == 'lock-cycle-script'
+    run_store = WorkflowRunStore(tmp_path)
+    saved = run_store.load_run(expected_run_id)
+    assert saved.status == 'succeeded'
+    assert len(exec_calls) == 1
+    replay = api.execute(
+        'workflows.run',
+        {'workflow_ref': 'wf-lock-cycle', 'space_id': space_id},
+        actor=actor,
+        idempotency_key=idemp_key,
+    )
+    assert replay['workflow_run_id'] == expected_run_id
+    assert replay['state'] == 'completed'
+    assert len(exec_calls) == 1
+
+
+def test_open_ref_scan_upgrade_backfill_converges_without_list_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FABLE-P1-4：旧 v4 索引升级后 _check_runs 自动有界回填 open_ref_scan，无需先调 list_runs 也不走 runs 目录枚举。"""
+    # 1. 约 100 条无关已结清运行在掉落 open_ref_scan 后，单次 cleanup_status 与 recycle 直接收敛且不调用 list_runs/iterdir。
+    home_clean = tmp_path / 'upgrade_clean'
+    api_clean, actor_clean, _ = _service(home_clean, use_default_reader=True)
+    run_store_clean = WorkflowRunStore(home_clean)
+    _create_workflow(api_clean, actor_clean, 'wf-other-clean')
+    _create_workflow(api_clean, actor_clean, 'wf-target-clean')
+    for idx in range(96):
+        run_store_clean.create_run(_run_record('wf-other-clean', f'wfrun-clean-{idx:03d}', now=200.0 + idx))
+
+    runs_root_clean = run_store_clean.run_dir('wfrun-clean-000').parent
+    index_clean = RunListIndex(home_clean)
+    with index_clean.connection() as conn:
+        conn.execute('DROP TABLE IF EXISTS open_ref_runs')
+        conn.execute('DROP TABLE IF EXISTS open_ref_scan')
+        conn.execute('PRAGMA user_version = 4')
+
+    real_iterdir = Path.iterdir
+    with monkeypatch.context() as mp:
+        def no_runs_walk(self: Path):
+            if self == runs_root_clean:
+                raise AssertionError('bounded upgrade backfill must not enumerate runs_root')
+            return real_iterdir(self)
+
+        def forbid_list_runs(self: WorkflowRunStore, *_args, **_kwargs):
+            raise AssertionError('upgrade probe must converge without calling list_runs')
+
+        mp.setattr(Path, 'iterdir', no_runs_walk)
+        mp.setattr(WorkflowRunStore, 'list_runs', forbid_list_runs)
+        status_clean = cleanup_status(api_clean, api_clean._get('wf-target-clean'))
+        assert status_clean['blockers'] == []
+        recycled = api_clean.execute(
+            'workflows.recycle',
+            {'workflow_ref': 'wf-target-clean'},
+            actor=actor_clean,
+            expected_revision=1,
+            idempotency_key='recycle-clean-upgrade',
+        )
+        assert recycled['lifecycle'] == 'recycled'
+
+    # 2. 同类升级场景下若目标工作流存在未结清 agent_task 终态运行，单次查询必须精确回报 ACTIVE_WORKFLOW_RUN。
+    home_blocked = tmp_path / 'upgrade_blocked'
+    api_blocked, actor_blocked, _ = _service(home_blocked, use_default_reader=True)
+    run_store_blocked = WorkflowRunStore(home_blocked)
+    _create_workflow(api_blocked, actor_blocked, 'wf-other-blocked')
+    _create_workflow(api_blocked, actor_blocked, 'wf-target-blocked')
+    for idx in range(70):
+        run_store_blocked.create_run(_run_record('wf-other-blocked', f'wfrun-blk-other-{idx:03d}', now=200.0 + idx))
+    unsettled_step = StepExecutionRecord(
+        step_id='agent-1',
+        name='agent',
+        mode='agent_task',
+        status='failed',
+        started_at=310.0,
+        ended_at=311.0,
+        duration_ms=1000.0,
+        llm_involved=False,
+        escalation_result={'task_id': 'stask-upgrade-1', 'submission_state': 'committed'},
+    )
+    run_store_blocked.create_run(
+        _run_record('wf-target-blocked', 'wfrun-target-unsettled', status='cancelled', steps=(unsettled_step,), now=310.0)
+    )
+    index_blocked = RunListIndex(home_blocked)
+    with index_blocked.connection() as conn:
+        conn.execute('DROP TABLE IF EXISTS open_ref_runs')
+        conn.execute('DROP TABLE IF EXISTS open_ref_scan')
+        conn.execute('PRAGMA user_version = 4')
+
+    status_blocked = cleanup_status(api_blocked, api_blocked._get('wf-target-blocked'))
+    assert any(
+        b['ref'] == 'wfrun-target-unsettled' and b['reason_code'] == 'ACTIVE_WORKFLOW_RUN'
+        for b in status_blocked['blockers']
+    )
+
+    # 3. 回填受单次批数上限约束：当历史条数超过单次上限时首次仍 fail-closed，后续调用继续推进并最终收敛。
+    home_bounded = tmp_path / 'upgrade_bounded'
+    api_bounded, actor_bounded, _ = _service(home_bounded, use_default_reader=True)
+    run_store_bounded = WorkflowRunStore(home_bounded)
+    _create_workflow(api_bounded, actor_bounded, 'wf-other-bounded')
+    _create_workflow(api_bounded, actor_bounded, 'wf-target-bounded')
+    for idx in range(45):
+        run_store_bounded.create_run(_run_record('wf-other-bounded', f'wfrun-bnd-{idx:03d}', now=200.0 + idx))
+    index_bounded = RunListIndex(home_bounded)
+    with index_bounded.connection() as conn:
+        conn.execute('DROP TABLE IF EXISTS open_ref_runs')
+        conn.execute('DROP TABLE IF EXISTS open_ref_scan')
+        conn.execute('PRAGMA user_version = 4')
+
+    with monkeypatch.context() as mp:
+        mp.setattr(reference_sources_module, '_max_open_ref_backfill_batches', 1)
+        first_status = cleanup_status(api_bounded, api_bounded._get('wf-target-bounded'))
+        assert any(b['reason_code'] == 'REFERENCE_COVERAGE_UNKNOWN' for b in first_status['blockers'])
+        second_status = cleanup_status(api_bounded, api_bounded._get('wf-target-bounded'))
+        assert second_status['blockers'] == []
+
+    # 4. 回填过程遇到损坏 run.json 时必须保持 fail-closed（REFERENCE_COVERAGE_UNKNOWN），不得吞错放行。
+    home_corrupt = tmp_path / 'upgrade_corrupt'
+    api_corrupt, actor_corrupt, _ = _service(home_corrupt, use_default_reader=True)
+    run_store_corrupt = WorkflowRunStore(home_corrupt)
+    _create_workflow(api_corrupt, actor_corrupt, 'wf-other-corrupt')
+    _create_workflow(api_corrupt, actor_corrupt, 'wf-target-corrupt')
+    for idx in range(5):
+        run_store_corrupt.create_run(_run_record('wf-other-corrupt', f'wfrun-cor-{idx:03d}', now=200.0 + idx))
+    index_corrupt = RunListIndex(home_corrupt)
+    with index_corrupt.connection() as conn:
+        conn.execute('DROP TABLE IF EXISTS open_ref_runs')
+        conn.execute('DROP TABLE IF EXISTS open_ref_scan')
+        conn.execute('PRAGMA user_version = 4')
+    (run_store_corrupt.run_dir('wfrun-cor-002') / 'run.json').write_text('{corrupt', encoding='utf-8')
+
+    status_corrupt = cleanup_status(api_corrupt, api_corrupt._get('wf-target-corrupt'))
+    assert any(b['reason_code'] == 'REFERENCE_COVERAGE_UNKNOWN' for b in status_corrupt['blockers'])

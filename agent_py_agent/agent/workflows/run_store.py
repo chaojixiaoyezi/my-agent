@@ -467,7 +467,8 @@ class WorkflowRunStore:
         wf_dir = self.owner_home / 'workflows'
 
         def _commit_initial():
-            with self._lock(record.workflow_run_id):
+            # register_run_locked 已持有 asset_root_lock；此处必须非阻塞取运行锁，避免与运行中步骤反向抢锁形成死锁。
+            with self._lock(record.workflow_run_id, blocking=False):
                 raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', record.workflow_run_id, 'run.json'))
                 if raw is not None:
                     raise ValueError('运行编号已存在')
