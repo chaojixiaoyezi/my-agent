@@ -405,6 +405,11 @@ class AdapterFieldsService:
             defaults.feishu_callback_port, min_val=1024, max_val=65535,
         )
         apply("feishu_callback_port", v, w)
+        v, w = CoercionService.coerce_int(
+            "feishu_webhook_max_body_bytes", out.get("feishu_webhook_max_body_bytes"),
+            defaults.feishu_webhook_max_body_bytes, min_val=1,
+        )
+        apply("feishu_webhook_max_body_bytes", v, w)
         warnings.extend(_apply_float_fields(out, defaults, (("im_stream_heartbeat_seconds", 0.0, 120.0),)))
 
         for key in ("qq_app_id", "qq_app_secret"):
