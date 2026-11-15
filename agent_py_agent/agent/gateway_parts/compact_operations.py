@@ -85,50 +85,53 @@ def _root_is_settled_terminal_history(agent, store, root_task_id: str) -> bool:
     return True
 
 
-def _next_in_progress_approval_thread(
-    storage_root: object, owner_key: str, checked_keys: set[tuple[str, str]]
-) -> tuple[str | None, int]:
-    """返回尚未收口且未命中的审批扫描线程，避免跨 >256 线程轮转时被 LRU 提前淘汰。"""
-    prefix_root = str(storage_root)
+def _next_in_progress_approval_candidate(
+    owner_keys: frozenset[str], checked_keys: set[tuple[str, str]]
+) -> tuple[tuple[str, str, str] | None, dict[str, object] | None, int]:
+    """返回活跃 owner 中尚未收口且未命中的审批扫描游标，避免跨 >256 线程或 owner 轮转时被 LRU 提前淘汰。"""
     with _IDLE_APPROVAL_SCAN_LOCK:
         for cursor_key, state in _IDLE_APPROVAL_SCAN_CURSORS.items():
-            if cursor_key[0] != prefix_root or cursor_key[1] != owner_key:
+            owner_key, cand_thread_id = cursor_key[1], cursor_key[2]
+            if owner_key not in owner_keys or (owner_key, cand_thread_id) in checked_keys:
                 continue
-            cand_thread_id = cursor_key[2]
-            if (owner_key, cand_thread_id) in checked_keys:
-                continue
+            restarts_raw = state.get("restarts", 0)
+            restarts = restarts_raw if isinstance(restarts_raw, int) else 0
             if (
                 state.get("phase") != "done"
                 and state.get("hit_path") is None
                 and not state.get("subdir_overflow")
+                and restarts <= 2
             ):
                 ticks = state.get("ticks", 0)
-                return cand_thread_id, ticks if isinstance(ticks, int) else 0
-    return None, 0
+                return cursor_key, state, ticks if isinstance(ticks, int) else 0
+    return None, None, 0
 
 
-def _drop_in_progress_approval_cursor(storage_root: object, owner_key: str, thread_id: str) -> None:
-    cursor_key = (str(storage_root), owner_key, thread_id)
+def _drop_in_progress_approval_cursor(cursor_key: tuple[str, str, str]) -> None:
     with _IDLE_APPROVAL_SCAN_LOCK:
         _IDLE_APPROVAL_SCAN_CURSORS.pop(cursor_key, None)
 
 
 def _retire_stale_approval_cursor(
-    storage_root: object, owner_key: str, thread_id: str, *, ticks_before: int
+    cursor_key: tuple[str, str, str],
+    *,
+    state_before: dict[str, object] | None,
+    ticks_before: int,
 ) -> None:
-    """若优先续扫未触发审批游标推进，则清除陈旧未完成记录以防阻塞其余线程。"""
-    cursor_key = (str(storage_root), owner_key, thread_id)
+    """若优先续扫未触发审批游标进入、或连续目录扰动重启超限，则清除该游标以防阻塞其余线程。"""
     with _IDLE_APPROVAL_SCAN_LOCK:
         state = _IDLE_APPROVAL_SCAN_CURSORS.get(cursor_key)
         if state is None:
             return
         ticks_raw = state.get("ticks", 0)
         ticks_after = ticks_raw if isinstance(ticks_raw, int) else 0
+        restarts_raw = state.get("restarts", 0)
+        restarts = restarts_raw if isinstance(restarts_raw, int) else 0
         if (
             state.get("phase") != "done"
             and state.get("hit_path") is None
             and not state.get("subdir_overflow")
-            and ticks_after <= ticks_before
+            and ((state is state_before and ticks_after <= ticks_before) or restarts > 2)
         ):
             _IDLE_APPROVAL_SCAN_CURSORS.pop(cursor_key, None)
 
@@ -267,7 +270,7 @@ def _inspect_approval_record(path, thread_id: str) -> str:
     return ""
 
 
-def _new_idle_scan_state(approvals_stamp, confirmations_stamp) -> dict[str, object]:
+def _new_idle_scan_state(approvals_stamp, confirmations_stamp, *, restarts: int = 0) -> dict[str, object]:
     return {
         "phase": "approvals",
         "approvals_stamp": approvals_stamp,
@@ -286,6 +289,7 @@ def _new_idle_scan_state(approvals_stamp, confirmations_stamp) -> dict[str, obje
         "confirmations_complete": confirmations_stamp is None,
         "visited_count": 0,
         "ticks": 0,
+        "restarts": restarts,
         "hit_path": None,
         "completed_at": None,
     }
@@ -327,9 +331,11 @@ def _idle_pending_approval_state(agent, store, thread):
     try:
         approvals_stamp = _approval_dir_stamp(approvals_dir)
         confirmations_stamp = _approval_dir_stamp(confirmations_dir)
+        restarts = 0
         if state is not None and not _round_stamps_match(
             state, approvals_dir, confirmations_dir, approvals_stamp, confirmations_stamp
         ):
+            restarts = int(state.get("restarts", 0)) + 1
             state = None
 
         if state is not None and state["phase"] == "done":
@@ -344,14 +350,18 @@ def _idle_pending_approval_state(agent, store, thread):
             state = None
 
         if state is None:
-            state = _new_idle_scan_state(approvals_stamp, confirmations_stamp)
+            state = _new_idle_scan_state(approvals_stamp, confirmations_stamp, restarts=restarts)
 
         hit_path = state.get("hit_path")
         if hit_path is not None:
             try:
                 recheck = _inspect_approval_record(hit_path, thread.thread_id)
             except FileNotFoundError:
-                state = _new_idle_scan_state(approvals_stamp, confirmations_stamp)
+                state = _new_idle_scan_state(
+                    approvals_stamp,
+                    confirmations_stamp,
+                    restarts=int(state.get("restarts", 0)) + 1,
+                )
                 hit_path = None
             else:
                 if recheck == "pending_approval":
@@ -601,7 +611,9 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
         scans.pop(key).close()
     if not candidates:
         return {"checked": 0, "compacted": 0, "failed": 0}
-    agents = list({str(item.home_paths.owner_home_dir): item for item in candidates}.values())
+    agents_by_key = {str(item.home_paths.owner_home_dir): item for item in candidates}
+    agents = list(agents_by_key.values())
+    owner_keys = frozenset(agents_by_key)
     position = int(cursor.get("owner", 0))
     config = getattr(base_agent, "config", None)
     remaining = getattr(config, "retention_scan_slice_entries", default_config_int("retention_scan_slice_entries"))
@@ -611,25 +623,29 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
     maximum = max(0, maximum) if type(maximum) is int else 2
     checked_keys: set[tuple[str, str]] = set()
     for _ in range(maximum):
-        agent = agents[position % len(agents)]
-        position += 1
-        store = getattr(agent, "conversation_store", None)
-        if store is None:
-            continue
-        key = str(agent.home_paths.owner_home_dir)
-        storage_root = getattr(getattr(store, "storage", None), "root", None)
-        cand_thread_id, ticks_before = (
-            _next_in_progress_approval_thread(storage_root, key, checked_keys)
-            if storage_root is not None
-            else (None, 0)
+        cand_key, state_before, ticks_before = _next_in_progress_approval_candidate(
+            owner_keys, checked_keys
         )
-        is_continuation = cand_thread_id is not None
+        is_continuation = cand_key is not None
         if is_continuation:
+            key = cand_key[1]
+            thread_id = cand_key[2]
+            agent = agents_by_key[key]
+            store = getattr(agent, "conversation_store", None)
+            storage_root = getattr(getattr(store, "storage", None), "root", None)
+            if store is None or storage_root is None or str(storage_root) != cand_key[0]:
+                _drop_in_progress_approval_cursor(cand_key)
+                continue
             if remaining <= 0 or time.monotonic() >= deadline:
                 break
             remaining -= 1
-            thread_id = cand_thread_id
         else:
+            agent = agents[position % len(agents)]
+            position += 1
+            store = getattr(agent, "conversation_store", None)
+            if store is None:
+                continue
+            key = str(agent.home_paths.owner_home_dir)
             scan = scans.setdefault(key, DirectoryCursor())
             while remaining > 0 and time.monotonic() < deadline:
                 remaining -= 1
@@ -645,8 +661,8 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
         row, error = store.threads.load_report(thread_id)
         report["checked"] += 1
         if error or row is None or row.owner_home and row.owner_home != key:
-            if is_continuation and storage_root is not None:
-                _drop_in_progress_approval_cursor(storage_root, key, thread_id)
+            if is_continuation:
+                _drop_in_progress_approval_cursor(cand_key)
             report["failed"] += 1
             continue
         try:
@@ -654,11 +670,13 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
             with pin:
                 outcome = maybe_auto_compact_idle_session(agent, store, row, now=now)
             report["compacted"] += bool(outcome["compacted"])
-            if is_continuation and storage_root is not None:
-                _retire_stale_approval_cursor(storage_root, key, thread_id, ticks_before=ticks_before)
+            if is_continuation:
+                _retire_stale_approval_cursor(
+                    cand_key, state_before=state_before, ticks_before=ticks_before
+                )
         except Exception:
-            if is_continuation and storage_root is not None:
-                _drop_in_progress_approval_cursor(storage_root, key, thread_id)
+            if is_continuation:
+                _drop_in_progress_approval_cursor(cand_key)
             report["failed"] += 1
     cursor["owner"] = position % len(agents)
     return report
