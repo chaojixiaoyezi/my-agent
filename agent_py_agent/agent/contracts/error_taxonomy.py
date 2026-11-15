@@ -11245,4 +11245,18 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
         recovery_hint='路径范围校验未通过；操作未执行或已安全中止，请修正为允许写根内的规范路径后重新调用。',
     ),
+    'COMPACT_NO_PROGRESS': ErrorContract(
+        code='COMPACT_NO_PROGRESS',
+        category='compact',
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='压缩候选体积未低于压缩前基线，原历史与检查点未改动；请改用缩减输出或分阶段整理等策略，禁止原样盲目重压。',
+    ),
+    'PARENT_TERMINAL_UNPROVEN': ErrorContract(
+        code='PARENT_TERMINAL_UNPROVEN',
+        category='state',
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint='根任务或直属父级终态尚未通过权威状态源证实，能力请求保持 OPEN 未提前结算；请先核实或等待父级终态确认。',
+    ),
 })
