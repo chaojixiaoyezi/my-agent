@@ -7,6 +7,7 @@ import logging
 import os
 import sqlite3
 import stat
+from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 
@@ -239,3 +240,42 @@ class SchedulerHistoryIndex:
                 return [json.loads(row[0]) for row in rows], sorted(set(errors))
         except (OSError, sqlite3.Error, ValueError) as exc:
             return [], ["SCHEDULER_HISTORY_READ_FAILED", type(exc).__name__]
+
+    def membership(self, run_ids: Iterable[str]) -> tuple[frozenset[str], bool]:
+        """在同一只读快照内按分片核对 run_id 归属；仅当索引完整且未滞后时返回权威结果。"""
+        try:
+            targets = tuple(rid for rid in dict.fromkeys(str(item or "") for item in run_ids) if rid)
+            with locked_json_path(self.source), closing(self._connect(read_only=True)) as conn:
+                conn.execute("BEGIN")
+                snapshot = _snapshot(self.source)
+                if not snapshot["stamp"]:
+                    return frozenset(), False
+                state = self._state(conn)
+                size = snapshot["stamp"][2]
+                if (
+                    state.get("owner") != self.owner
+                    or any(state.get(key) != snapshot[key] for key in ("stamp", "head", "tail"))
+                    or state.get("cursor") != size
+                    or state.get("pending")
+                    or state.get("skipping")
+                    or "SCHEDULER_HISTORY_ROW_TOO_LARGE" in (state.get("errors") or ())
+                ):
+                    return frozenset(), False
+                if not targets:
+                    return frozenset(), True
+                found: set[str] = set()
+                generation = state["generation"]
+                chunk_size = 500
+                for offset in range(0, len(targets), chunk_size):
+                    batch = targets[offset : offset + chunk_size]
+                    placeholders = ",".join("?" for _ in batch)
+                    rows = conn.execute(
+                        f"SELECT run_id FROM history_effects WHERE generation=? AND run_id IN ({placeholders})",
+                        (generation, *batch),
+                    ).fetchall()
+                    found.update(str(row[0]) for row in rows)
+                if _snapshot(self.source) != snapshot:
+                    return frozenset(), False
+                return frozenset(found), True
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+            return frozenset(), False
