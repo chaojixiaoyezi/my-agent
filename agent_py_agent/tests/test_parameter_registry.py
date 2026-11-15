@@ -478,11 +478,11 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
     # 摘要进度心跳归高级，后台日志容量归部署；计数覆盖全部正式目录项。
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 229, "deployment": 149}
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 231, "deployment": 149}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
     assert len(DEPLOYMENT_ONLY_KEYS) == 126
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 392
+    assert len(registry) == 394
     for key in ("technical_cutoff_continuation_enabled", "tool_wait_input_reply_enabled", "workflow_auto_dispatch_reviewers"):
         assert registry[key].tier == "advanced" and registry[key].effect == "immediate"
     capacity = registry["gateway_llm_inflight_limit"]
@@ -513,6 +513,8 @@ def test_listed_parameter_classification_has_exact_counts():
         "self_learning_evict_seconds",
         "self_learning_merge_similarity_percent",
         "self_learning_recommended_explore_percent",
+        "user_profile_dream_entry_threshold",
+        "user_profile_dream_token_threshold",
     ):
         assert registry[key].tier == "advanced"
     assert len(COMMON_KEYS) == len(set(COMMON_KEYS))

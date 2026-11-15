@@ -161,7 +161,7 @@ _CATEGORIES = (
     (("assistant_",), "沟通与展示"),
     (("max_tokens", "model_", "temperature", "top_p", "request_timeout", "stream_", "reasoning_", "anthropic_", "embedding_"),
      "模型请求"),
-    (("memory_", "compact_"), "记忆与压缩"),
+    (("memory_", "compact_", "user_profile_dream_"), "记忆与压缩"),
     (("decision_",), "决策模型 Jev"),
     (("tool_", "shell_", "web_", "read_", "write_"), "工具"),
     (("subagent", "max_subagents", "task_", "acceptance_"), "子代理与任务"),
@@ -605,6 +605,22 @@ _APPLIED_RULES: dict[str, tuple[Callable[[object], object], str]] = {
     "memory_lesson_archive_days": (
         lambda config: int(getattr(config, "memory_lesson_archive_days", 15)),
         "配置热刷新立即生效：0 关闭教训自动归档；正数天内未被活跃或待审方法引用时静默归档，可审计恢复且不影响永久记忆",
+    ),
+    "user_profile_dream_entry_threshold": (
+        lambda config: (
+            int(getattr(config, "user_profile_dream_entry_threshold", 70))
+            if _self_learning_autonomous_enabled(config)
+            else 0
+        ),
+        "自学习开启且处于 autonomous 自动维护模式、宿主空闲时生效：USER.md 条目数超过该阈值触发做梦整合；0 表示关闭条目数触发（配置热刷新立即生效）",
+    ),
+    "user_profile_dream_token_threshold": (
+        lambda config: (
+            int(getattr(config, "user_profile_dream_token_threshold", 5000))
+            if _self_learning_autonomous_enabled(config)
+            else 0
+        ),
+        "自学习开启且处于 autonomous 自动维护模式、宿主空闲时生效：USER.md token 估算超过该阈值触发做梦整合；0 表示关闭 token 触发（两项均为 0 时关闭自动整合，配置热刷新立即生效）",
     ),
     "gateway_event_fallback_poll_seconds": (
         lambda config: getattr(config, "gateway_event_fallback_poll_seconds", 0.0)

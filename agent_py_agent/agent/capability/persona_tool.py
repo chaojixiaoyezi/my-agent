@@ -87,7 +87,7 @@ _PERSONA_PARAMETERS = {
         "可选审计说明。可记录促成本次 USER 画像变更的用户原话；只进入版本记录，不参与授权或文本匹配。"
     ),
     "expected_sha256": "可选。list 返回的文件哈希；并发修改后不匹配则拒绝覆盖。",
-    "rollback_version": "rollback 必填。history 返回的精确版本号；0 表示首次修改前基线。",
+    "rollback_version": "rollback 必填（target=user 时可省略，默认回退最近一次 USER.md 做梦整合前的 1 步快照）。history 返回的精确版本号；0 表示首次修改前基线。",
     "operations": (
         "可选，仅 target=user。同一条消息要写多个画像事实时使用；"
         "每项为 action/content/entry_id，可选 source_quote 仅作审计记录；按顺序原子执行。"
@@ -241,7 +241,7 @@ class UpdatePersonaTool(BaseTool):
             return _err("外部事件或自动来源不能代替用户修改人格，请由本人在原会话确认。",
                         "PERSONA_USER_REQUEST_REQUIRED", effect_outcome="not_started")
         if request.target == "agents" and request.action not in {"list", "status", "history"}:
-            return _agents_write_user_only_error()
+            return _agents_write_user_only_error(_prospective_agents_write_content(self._repository(), request))
         try:
             repository = self._repository()
             if request.target != "agents" or repository.agents_source is None:
@@ -332,7 +332,7 @@ def _parse_persona_tool_request(
         return _err("add/replace 的 content 必填", "TOOL_INVALID_ARGUMENTS")
     if action in {"replace", "remove"} and not entry_id:
         return _err("replace/remove 必须提供 list 返回的 entry_id", "TOOL_INVALID_ARGUMENTS")
-    rollback_version = _parse_rollback_version(action, params.get("rollback_version"))
+    rollback_version = _parse_rollback_version(action, params.get("rollback_version"), target=target)
     if isinstance(rollback_version, ToolHandlerOutcome):
         return rollback_version
     return _PersonaToolRequest(
@@ -353,7 +353,7 @@ def _parse_persona_operations(
 ) -> tuple[_PersonaToolOperation, ...] | ToolHandlerOutcome:
     if raw_operations is None:
         return ()
-    if target != "user":
+    if target not in {"user", "agents"}:
         return _err("operations 批量变更仅支持 target=user", "TOOL_INVALID_ARGUMENTS")
     if str(params.get("action") or "").strip().lower() not in {"", "batch"} or any(
         params.get(name) not in (None, "") for name in ("content", "entry_id")
@@ -405,8 +405,12 @@ def _parse_persona_operations(
 def _parse_rollback_version(
     action: str,
     value: object,
+    *,
+    target: str = "",
 ) -> int | None | ToolHandlerOutcome:
     if action == "rollback" and value in (None, ""):
+        if target == "user":
+            return None
         return _err("rollback 必须提供 history 返回的 rollback_version", "TOOL_INVALID_ARGUMENTS")
     if value in (None, ""):
         return None
@@ -611,6 +615,7 @@ def _err(
     effect_outcome: str = "",
     copy_command: str = "",
     copy_commands: tuple[str, ...] | list[str] = (),
+    next_action: str = "",
 ) -> ToolHandlerOutcome:
     body: dict[str, object] = {"error": msg}
     if hint:
@@ -626,7 +631,60 @@ def _err(
         error_code=code,
         effect_outcome=effect_outcome,
         failure_stage="validation" if effect_outcome == "not_started" else "",
+        next_action=next_action,
     )
+
+
+def _prospective_agents_write_content(
+    repository: PersonaRepository,
+    request: _PersonaToolRequest,
+) -> str | None:
+    """Compute a read-only preview of AGENTS.md without acquiring write locks or mutating disk."""
+    from ..memory_store.security import scan_memory_content
+    from .persona_repository import (
+        _MAX_PERSONA_FILE_BYTES,
+        PersonaRepositoryError,
+        _apply_operation_to_text,
+    )
+
+    try:
+        snapshot = repository.load("agents")
+        if snapshot.diagnostic is not None and snapshot.diagnostic.state not in {"ok", "missing", ""}:
+            return None
+        current_text = snapshot.content
+        if request.action == "rollback":
+            if request.rollback_version is None:
+                return None
+            prospective = repository._content_for_version("agents", request.rollback_version)
+        elif request.action == "batch":
+            prospective = current_text
+            for op in request.operations:
+                prospective, _, _, _ = _apply_operation_to_text(
+                    prospective,
+                    target="agents",
+                    action=op.action,
+                    content=op.content,
+                    entry_id=op.entry_id,
+                )
+        elif request.action in {"add", "replace", "remove"}:
+            prospective, _, _, _ = _apply_operation_to_text(
+                current_text,
+                target="agents",
+                action=request.action,
+                content=request.content,
+                entry_id=request.entry_id,
+            )
+        else:
+            return None
+        if not prospective or not prospective.strip():
+            return None
+        if len(prospective.encode("utf-8")) > _MAX_PERSONA_FILE_BYTES:
+            return None
+        if not scan_memory_content(prospective).safe:
+            return None
+        return prospective
+    except (PersonaRepositoryError, OSError, ValueError, TypeError):
+        return None
 
 
 def _agents_write_user_only_error(full_content: str | None = None) -> ToolHandlerOutcome:
@@ -640,6 +698,7 @@ def _agents_write_user_only_error(full_content: str | None = None) -> ToolHandle
             effect_outcome="not_started",
             copy_command=command,
             copy_commands=[command, "/agents show"],
+            next_action=command,
         )
     return _err(
         "AGENTS规则只能由用户在当前请求通过 /agents 预览并确认修改；本次未写入。",
@@ -648,6 +707,7 @@ def _agents_write_user_only_error(full_content: str | None = None) -> ToolHandle
         effect_outcome="not_started",
         copy_command="/agents show",
         copy_commands=["/agents show"],
+        next_action="/agents show",
     )
 
 

@@ -407,6 +407,7 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
                     if root
                 ),
             ),
+            persona=agent.persona_repository,
             config_provider=lambda: _live_agent_config(agent, config),
         ),
     )
