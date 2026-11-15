@@ -177,12 +177,22 @@ class SessionSearchTool(BaseTool):
             corrupt = isinstance(exc, DataCorruptionError) or primary in (
                 sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB
             )
+            interrupted = not retryable and not corrupt and (
+                primary == sqlite3.SQLITE_INTERRUPT
+                or (isinstance(exc, sqlite3.OperationalError) and "interrupted" in str(exc).lower())
+            )
+            next_action_text = ""
             if retryable:
                 code, reason = "HISTORY_STORAGE_BUSY", "历史存储被并发操作占用，SQLite返回明确的忙锁状态。"
                 hint = "稍后在同一授权范围重试一次；若仍忙锁，停止重复查询并请宿主检查原存储占用。"
             elif corrupt:
                 code, reason = "HISTORY_SOURCE_CORRUPT", "历史来源或派生索引完整性校验失败。"
                 hint = "停止原样重试；请宿主检查原历史来源与派生索引完整性。已有授权message_id可用message模式核对；该入口也失败则保留原记录等待修复，勿扩大范围。"
+            elif interrupted:
+                code = "HISTORY_QUERY_UNAVAILABLE"
+                reason = "历史子串回退扫描超出单次时间片预算，已安全中止，未将部分扫描冒充为空结果。"
+                hint = '请缩小关键词（至少 3 个字符以命中全文索引），或改用 {"mode": "thread_browse"} 按当前会话分段浏览历史。'
+                next_action_text = json.dumps({"mode": "thread_browse"}, ensure_ascii=False)
             else:
                 code, reason = "HISTORY_QUERY_UNAVAILABLE", "历史读取依赖接口或系统状态异常，当前查询不可用。"
                 hint = "停止原样重试；请宿主核对运行版本、历史存储接口和系统状态。可用当前范围内已经返回的引用继续处理，勿改用全目录扫描或扩大授权。"
@@ -191,19 +201,23 @@ class SessionSearchTool(BaseTool):
             exception_type = next((kind.__name__ for kind in safe_types if isinstance(exc, kind)), "Exception")
             if isinstance(exc, DataCorruptionError):
                 exception_type = "DataCorruptionError"
-            payload = {
+            error_body = {
                 "error": reason, "error_code": code, "exception_type": exception_type,
                 "failure_stage": "execution", "phase": "history_query", "effect_outcome": "not_started",
                 "effects": "本工具仅执行历史读取；未执行业务写入、删除或修改原历史。",
                 "retryable": retryable, "hint": hint,
             }
             if primary is not None:
-                payload["sqlite_primary_code"] = primary
+                error_body["sqlite_primary_code"] = primary
+            if interrupted:
+                error_body["scan_budget_exhausted"] = True
+                error_body["next_action"] = {"tool": "session_search", "arguments": {"mode": "thread_browse"}}
             return ToolHandlerOutcome(
-                "session_search", False, json.dumps(payload, ensure_ascii=False),
+                "session_search", False, json.dumps(error_body, ensure_ascii=False),
                 error_code=code, retryable=retryable,
                 recommended_action="retry" if retryable else "change_strategy",
-                recovery_hint=hint, effect_outcome="not_started", failure_stage="execution", phase="history_query",
+                recovery_hint=hint, next_action=next_action_text,
+                effect_outcome="not_started", failure_stage="execution", phase="history_query",
             )
         return ToolHandlerOutcome("session_search", True, json.dumps(payload, ensure_ascii=False))
 

@@ -17,7 +17,7 @@ from .maintenance import LocalStoreMaintenanceMixin
 from .records import LocalStoreRecordMixin
 from .runtime_gate_ledger import LocalStoreRuntimeGateLedgerMixin
 from .schema import LocalStoreSchemaMixin
-from .search import LocalStoreSearchMixin
+from .search import LocalStoreSearchMixin, normalize_scan_slice_ms
 from .tool_operations import LocalStoreToolOperationMixin
 
 
@@ -49,6 +49,7 @@ class LocalStore(
         events_path: str | Path | None = None,
         enable_fts: bool = True,
         coordinator_io: bool = False,
+        scan_slice_ms: int = 25,
     ):
         self.db_path = Path(db_path)
         self.root = self.db_path.parent
@@ -56,6 +57,7 @@ class LocalStore(
         self.events_path = Path(events_path) if events_path is not None else self.root / "events.jsonl"
         self.enable_fts = enable_fts
         self.coordinator_io = coordinator_io
+        self.scan_slice_ms = normalize_scan_slice_ms(scan_slice_ms)
         self._fts_available = False
         self._connection_local = local()
         self._init_schema()
