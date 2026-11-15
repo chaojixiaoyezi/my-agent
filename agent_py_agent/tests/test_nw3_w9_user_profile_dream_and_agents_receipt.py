@@ -541,8 +541,12 @@ def test_w9_dream_one_step_rollback_and_thread_user_prefix_expiry(tmp_path: Path
     assert saved_snap["sections"]["agents"] == frozen_agents
     assert saved_snap["sections"]["soul"] == frozen_soul
     assert saved_snap["sections"]["user"] == ""
+    assert saved_snap["user_refresh_pending"] is True
 
-    # Next turn sees updated USER.md via persona_updates while agents & soul stay untouched from freeze!
+    # Standalone expire helper when user refresh is already pending returns 0.
+    assert expire_thread_user_persona_prefixes(owner_home) == 0
+
+    # Next turn selectively refreshes fixed user prefix while agents & soul stay untouched from freeze!
     next_sections, next_delta = freeze_thread_persona(
         owner_home,
         scope,
@@ -554,15 +558,18 @@ def test_w9_dream_one_step_rollback_and_thread_user_prefix_expiry(tmp_path: Path
                 "diagnostics": "",
             },
             truncated_targets=frozenset(),
+            persona_epoch=None,
         ),
     )
     assert frozen_agents in next_sections
     assert frozen_soul in next_sections
     assert "CHANGED DISK AGENTS" not in "\n".join(next_sections)
-    assert "language: Chinese" in next_delta
-
-    # Standalone expire helper when user is already cleared returns 0.
-    assert expire_thread_user_persona_prefixes(owner_home) == 0
+    assert "language: Chinese" in "\n".join(next_sections)
+    assert "## user" not in next_delta
+    refreshed_snap = json.loads(snap_file.read_text(encoding="utf-8"))
+    assert "user_refresh_pending" not in refreshed_snap
+    assert list(refreshed_snap["sections"]) == ["agents", "soul", "user", "diagnostics"]
+    assert refreshed_snap["sections"]["user"] == post_content
 
     # Stale in-flight persona_epoch is rejected cleanly after consolidation bumped persistent epoch.
     stale_sections, stale_delta = freeze_thread_persona(
