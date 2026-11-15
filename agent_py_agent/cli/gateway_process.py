@@ -1833,6 +1833,9 @@ def _stop_settled_background_processes(agent) -> int:
 
 
 def _discover_cold_start_owner_targets(agent) -> list[tuple[str, str | None]]:
+    """发现冷启动清扫需要检查的规范 owner 目录（含主 owner、普通本地用户及通道用户/群组）。"""
+    from ..agent.user_space.owner_resolver import OwnerIdentity
+
     targets: list[tuple[str, str | None]] = []
     seen: set[Path] = set()
     primary = _gateway_owner_home(agent)
@@ -1842,15 +1845,36 @@ def _discover_cold_start_owner_targets(agent) -> list[tuple[str, str | None]]:
         targets.append((str(resolved), _background_store_root(agent)))
     home_root = getattr(getattr(agent, "home_paths", None), "root", None)
     if home_root:
-        root_path = Path(home_root)
-        for pattern in ("owners/local/main", "owners/providers/*/users/*", "owners/providers/*/groups/*"):
+        root_path = Path(home_root).expanduser()
+        for pattern in ("owners/local/*", "owners/providers/*/users/*", "owners/providers/*/groups/*"):
             try:
                 matches = sorted(root_path.glob(pattern))
             except OSError:
                 continue
             for cand in matches:
+                try:
+                    cur = root_path
+                    has_symlink = False
+                    for part in cand.relative_to(root_path).parts:
+                        cur = cur / part
+                        if cur.is_symlink():
+                            has_symlink = True
+                            break
+                    if has_symlink or not cand.is_dir():
+                        continue
+                except (OSError, ValueError):
+                    continue
+                if pattern == "owners/local/*":
+                    if cand.name != "main":
+                        try:
+                            if OwnerIdentity.local_user(cand.name).owner_id != cand.name:
+                                continue
+                        except ValueError:
+                            continue
+                elif cand.name.startswith(".") or cand.parent.parent.name.startswith("."):
+                    continue
                 resolved = cand.expanduser().resolve(strict=False)
-                if resolved not in seen and cand.is_dir():
+                if resolved not in seen:
                     seen.add(resolved)
                     targets.append((str(resolved), None))
     return targets
