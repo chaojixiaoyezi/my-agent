@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import sqlite3
 import threading
 from collections import OrderedDict
@@ -1215,32 +1216,61 @@ class CollaborationStore(CollaborationPendingRequestStore):
         with locked_json_path(lock_path):
             yield
 
+    # LLM: 只能在调用方已持有 locked_json_path(idx_path) 锁时读取或保守重建活跃索引；
+    #   绝不嵌套获取 handoff_case_lock，避免跨文件锁序反转或自锁死。
+    # 函数用途: 验证并加载活跃 case 索引；损坏或缺失时按 JSONL 保守重建并原子落盘。
+    def _active_case_ids_locked(self, idx_path: Path) -> set[str]:
+        if idx_path.exists():
+            try:
+                data = json.loads(idx_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    raw_ids = data.get("active_cases")
+                elif isinstance(data, list):
+                    raw_ids = data
+                else:
+                    raise ValueError("invalid active cases index container")
+                if not isinstance(raw_ids, list):
+                    raise ValueError("invalid active_cases list")
+                validated: set[str] = set()
+                for entry in raw_ids:
+                    if not isinstance(entry, str):
+                        raise ValueError("invalid active_cases entry type")
+                    validated.add(validate_opaque_id(entry, kind="case_id"))
+                return validated
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                logging.getLogger(__name__).warning(
+                    "Reconstructing active handoff cases index %s after read/validation error: %s",
+                    idx_path,
+                    type(exc).__name__,
+                )
+
+        rebuilt: set[str] = set()
+        for path in sorted(self.handoff_items_dir.glob("*.jsonl")):
+            try:
+                cid = validate_opaque_id(path.stem, kind="case_id")
+            except ValueError:
+                continue
+            try:
+                items, load_errors = self.case_handoff_items_report(cid)
+                if load_errors or any(it.state != "closed" for it in items):
+                    rebuilt.add(cid)
+            except Exception:  # noqa: BLE001
+                rebuilt.add(cid)
+        write_json_file_atomic_unlocked(idx_path, {"active_cases": sorted(rebuilt)})
+        return rebuilt
+
     # LLM: 维护活跃（含非 closed 状态）case 索引集合 .active_cases.json。
     # 函数用途: 在文件锁保护下原子更新活跃 case 索引表。
     def _update_active_cases_index(self, case_id: str, *, is_active: bool) -> None:
+        clean_case_id = validate_opaque_id(case_id, kind="case_id")
         ensure_private_dir(self.handoff_items_dir)
         idx_path = self.handoff_items_dir / ".active_cases.json"
         with locked_json_path(idx_path):
-            active_set: set[str] = set()
-            if idx_path.exists():
-                try:
-                    data = json.loads(idx_path.read_text(encoding="utf-8"))
-                    if isinstance(data, dict):
-                        active_set = set(data.get("active_cases", []))
-                    elif isinstance(data, list):
-                        active_set = set(data)
-                except Exception:
-                    active_set = set()
-            else:
-                for p in self.handoff_items_dir.glob("*.jsonl"):
-                    cid = p.stem
-                    items = self.case_handoff_items(cid)
-                    if any(it.state != "closed" for it in items):
-                        active_set.add(cid)
+            active_set = self._active_case_ids_locked(idx_path)
             if is_active:
-                active_set.add(case_id)
+                active_set.add(clean_case_id)
             else:
-                active_set.discard(case_id)
+                active_set.discard(clean_case_id)
             write_json_file_atomic_unlocked(idx_path, {"active_cases": sorted(active_set)})
 
     # LLM: 交接项状态变更是只追加 JSONL（同 item_id 取最后一行）；写入由 locked_json_path / append_private_jsonl_records 串行。
@@ -1320,15 +1350,9 @@ class CollaborationStore(CollaborationPendingRequestStore):
         is_non_closed_query = state is not None and state != "closed"
 
         case_ids: list[str] | None = None
-        if is_non_closed_query and idx_path.exists():
-            try:
-                data = json.loads(idx_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    case_ids = sorted(data.get("active_cases", []))
-                elif isinstance(data, list):
-                    case_ids = sorted(data)
-            except Exception:
-                case_ids = None
+        if is_non_closed_query:
+            with locked_json_path(idx_path):
+                case_ids = sorted(self._active_case_ids_locked(idx_path))
 
         if case_ids is not None:
             for case_id in case_ids:

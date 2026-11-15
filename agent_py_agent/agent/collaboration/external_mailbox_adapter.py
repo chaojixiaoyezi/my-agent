@@ -269,6 +269,7 @@ class ExternalMailboxAdapter:
         acked_item_ids: list[str] = []
         submitted_item_ids: list[str] = []
         errors: list[dict[str, Any]] = []
+        retryable_apply_error = False
 
         # 1. 消费外部助手的回复
         for msg in messages:
@@ -353,11 +354,35 @@ class ExternalMailboxAdapter:
                         now=current_time_val,
                     )
                     submitted_item_ids.append(item_id)
+            except OSError as exc:
+                retryable_apply_error = True
+                logger.warning(
+                    "Transient I/O error applying external mailbox message item_id=%s action=%s: %s",
+                    item_id,
+                    action,
+                    exc,
+                )
+                errors.append(
+                    {
+                        "item_id": item_id,
+                        "action": action,
+                        "error_code": "MAILBOX_APPLY_IO_ERROR",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "exception_type": type(exc).__name__,
+                        "errno": exc.errno,
+                        "effect_outcome": "unknown",
+                        "retryable": True,
+                        "next_action": (
+                            f"Retry sync_external_mailbox with root_dir={str(layout.root_dir)!r} "
+                            f"and actor_id={layout.actor_id!r}; keep original message IDs."
+                        ),
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 errors.append({"item_id": item_id, "action": action, "error": str(exc)})
 
-        # 记录处理进度 cursor
-        if inbox_path.exists():
+        # 记录处理进度 cursor；存在可重试 I/O 故障时保持游标不前进，避免消息丢失
+        if inbox_path.exists() and not retryable_apply_error:
             try:
                 write_json_file_atomic(
                     cursor_path,
