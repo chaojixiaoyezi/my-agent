@@ -3,13 +3,58 @@
 # 模块用途: 统一全文检索、会话内全文检索、最近列表和会话内时间邻居查询，不从记录正文推断身份。
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from .models import LocalSearchResult
 from .schema import _FTS_REBUILD_PENDING_KEY, FTS_ROWID_ALIGNED_KEY, _fts_active_complete
+
+
+def normalize_scan_slice_ms(value: object, default: int = 25) -> int:
+    """将单次扫描时间片收敛为正整数毫秒，无效值回退到默认值。"""
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        numeric = float(value) if isinstance(value, (int, float, str)) else float("nan")
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(numeric) or numeric <= 0:
+        return default
+    return max(1, int(numeric))
+
+
+def _is_non_fallback_sqlite_error(exc: sqlite3.OperationalError) -> bool:
+    """判断 SQLite 错误是否属于并发忙锁或主动中断，这类错误不得再次降级为全表 LIKE。"""
+    sqlite_code = getattr(exc, "sqlite_errorcode", None)
+    primary = sqlite_code & 0xFF if isinstance(sqlite_code, int) and not isinstance(sqlite_code, bool) else None
+    if primary in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_INTERRUPT):
+        return True
+    message = str(exc).lower()
+    return any(token in message for token in ("interrupted", "locked", "busy"))
+
+
+def _bounded_like_fetchall(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: list[Any],
+    *,
+    slice_ms: int,
+) -> list[sqlite3.Row]:
+    """用 SQLite progress handler 为 LIKE 全表回退绑定时间片预算，并在退出时强制清零。"""
+    deadline = time.monotonic() + max(1, slice_ms) / 1000.0
+    conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 1000)
+    try:
+        cursor = conn.execute(sql, params)
+        try:
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+    finally:
+        conn.set_progress_handler(None, 0)
 
 
 def fts_rowid_aligned(conn: sqlite3.Connection) -> bool:
@@ -114,12 +159,7 @@ class LocalStoreSearchMixin:
     ) -> list[LocalSearchResult]:
         fts_query = self._fts_query(query)
         if not fts_query:
-            return self._search_like(
-                query,
-                limit=limit,
-                source_type=source_type,
-                visibility=visibility,
-            )
+            return []
         clauses, params = _record_fts_filters(fts_query, source_type, visibility)
         sql = f"""
             SELECT records.*, bm25(records_fts) AS rank
@@ -146,8 +186,10 @@ class LocalStoreSearchMixin:
         visibility: str | None,
     ) -> list[LocalSearchResult]:
         clauses, params = _record_like_filters(query, source_type, visibility)
+        slice_ms = normalize_scan_slice_ms(getattr(self, "scan_slice_ms", 25))
         with self._connection() as conn:
-            rows = conn.execute(
+            rows = _bounded_like_fetchall(
+                conn,
                 f"""
                 SELECT *
                 FROM records
@@ -156,7 +198,8 @@ class LocalStoreSearchMixin:
                 LIMIT ?
                 """,
                 [*params, limit],
-            ).fetchall()
+                slice_ms=slice_ms,
+            )
         return [self._row_to_result(row, score=0.0) for row in rows]
 
     def _fts_query(self, query: str) -> str:
@@ -228,13 +271,10 @@ class LocalStoreSearchMixin:
                 source_type=source_type,
                 visibility=visibility,
             )
-        except sqlite3.OperationalError:
-            return self._search_like(
-                query,
-                limit=limit,
-                source_type=source_type,
-                visibility=visibility,
-            )
+        except sqlite3.OperationalError as exc:
+            if _is_non_fallback_sqlite_error(exc):
+                raise
+            return []
 
 
 @dataclass(frozen=True)
@@ -335,7 +375,9 @@ def search_records_in_thread(store: Any, query: str, scope: ThreadSearch) -> lis
     if fts_query:
         try:
             hits = _search_thread_fts(store, fts_query, clean_scope)
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            if _is_non_fallback_sqlite_error(exc):
+                raise
             hits = []
         if hits:
             return hits
@@ -369,11 +411,14 @@ def _search_thread_fts(store: Any, fts_query: str, scope: ThreadSearch) -> list[
 def _search_thread_like(store: Any, query: str, scope: ThreadSearch) -> list[LocalSearchResult]:
     clauses, params = _record_like_filters(query, scope.source_type, None)
     clauses.append(f"{_thread_expression()} = ?")
+    slice_ms = normalize_scan_slice_ms(getattr(store, "scan_slice_ms", 25))
     with store._connection() as conn:
-        rows = conn.execute(
+        rows = _bounded_like_fetchall(
+            conn,
             f"SELECT * FROM records WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT ?",
             [*params, scope.thread_id, scope.limit],
-        ).fetchall()
+            slice_ms=slice_ms,
+        )
     return [store._row_to_result(row, score=0.0) for row in rows]
 
 

@@ -55,9 +55,14 @@ def build_owner_memory_quota(home_paths: object, owner_policy: object, *, coordi
 # LLM: C显式透传到60本地IO，保留原paths与当前borrow scope；FTS沿LocalStore的快速默认值，不读配置开关。
 # 函数用途: 创建真实本地索引，不另建冷服务替身。
 def build_owner_local_store(config: object, paths: dict[str, object], *, coordinator_io: bool = False) -> LocalStore:
-    return LocalStore(paths["local_store_path"], files_dir=paths["local_store_files_dir"],
-                      events_path=paths["local_store_events_path"],
-                      **({} if not coordinator_io else {"coordinator_io": True}))
+    raw_slice_ms = getattr(config, "retention_scan_slice_ms", 25)
+    return LocalStore(
+        paths["local_store_path"],
+        files_dir=paths["local_store_files_dir"],
+        events_path=paths["local_store_events_path"],
+        scan_slice_ms=raw_slice_ms,
+        **({} if not coordinator_io else {"coordinator_io": True}),
+    )
 
 
 # LLM: 原Candidate构造会准备其父目录；复用传入quota引用，不改唯一候选路径或扫描状态。
