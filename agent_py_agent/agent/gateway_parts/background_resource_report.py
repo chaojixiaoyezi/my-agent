@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import os
 import sqlite3
 import stat
@@ -19,7 +20,7 @@ import tracemalloc
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -479,13 +480,13 @@ _ATTEMPT_TERMINAL_STATUSES = frozenset({*AGENT_RUN_TERMINAL_STATUSES, ATTEMPT_ST
 @dataclass(frozen=True)
 class _RuntimeDbSnapshot:
     error: str = ""
-    task_runs_by_id: dict[str, dict[str, str]] = None  # type: ignore[assignment]
-    task_runs_by_task_id: dict[str, list[dict[str, str]]] = None  # type: ignore[assignment]
-    agent_runs_by_id: dict[str, dict[str, str]] = None  # type: ignore[assignment]
-    agent_runs_by_run_id: dict[str, list[dict[str, str]]] = None  # type: ignore[assignment]
-    agent_runs_by_task_run_id: dict[str, list[dict[str, str]]] = None  # type: ignore[assignment]
+    task_runs_by_id: dict[str, dict[str, Any]] = None  # type: ignore[assignment]
+    task_runs_by_task_id: dict[str, list[dict[str, Any]]] = None  # type: ignore[assignment]
+    agent_runs_by_id: dict[str, dict[str, Any]] = None  # type: ignore[assignment]
+    agent_runs_by_run_id: dict[str, list[dict[str, Any]]] = None  # type: ignore[assignment]
+    agent_runs_by_task_run_id: dict[str, list[dict[str, Any]]] = None  # type: ignore[assignment]
     children_by_parent_id: dict[str, list[str]] = None  # type: ignore[assignment]
-    attempts_by_agent_run_id: dict[str, list[dict[str, str]]] = None  # type: ignore[assignment]
+    attempts_by_agent_run_id: dict[str, list[dict[str, Any]]] = None  # type: ignore[assignment]
     locks_by_scope: dict[str, list[float]] = None  # type: ignore[assignment]
     locks_by_attempt_id: dict[str, list[float]] = None  # type: ignore[assignment]
     active_wakes_by_task_id: frozenset[str] = frozenset()
@@ -495,8 +496,8 @@ class _RuntimeDbSnapshot:
 @dataclass(frozen=True)
 class _SchedulerSnapshot:
     error: str = ""
-    runs_by_run_id: dict[str, list[str]] = None  # type: ignore[assignment]
-    runs_by_task_id: dict[str, list[str]] = None  # type: ignore[assignment]
+    runs_by_run_id: dict[str, list[tuple[str, object]]] = None  # type: ignore[assignment]
+    runs_by_task_id: dict[str, list[tuple[str, object]]] = None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -506,6 +507,11 @@ class _WorkflowSnapshot:
     unsettled_task_ids: frozenset[str] = frozenset()
     settled_run_ids: frozenset[str] = frozenset()
     settled_task_ids: frozenset[str] = frozenset()
+    runs_dir: Path | None = None
+    settled_ended_at_by_run_id: dict[str, list[object]] = field(default_factory=dict)
+    settled_ended_at_by_task_id: dict[str, list[object]] = field(default_factory=dict)
+    indexed_settled_skipped: frozenset[str] = frozenset()
+    skipped_run_cache: dict[str, tuple[str, object]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -515,6 +521,17 @@ class _ConversationSnapshot:
     wake_error: str = ""
     active_wake_task_ids: frozenset[str] = frozenset()
     active_wake_run_ids: frozenset[str] = frozenset()
+
+
+def _valid_settled_timestamp(raw: object, *, effective_now: float) -> float | None:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if not math.isfinite(value) or value <= 0.0:
+        return None
+    if value > effective_now + 1.0e-6:
+        return None
+    return min(value, effective_now)
 
 
 def _optional_lstat(path: Path) -> os.stat_result | None:
@@ -551,27 +568,28 @@ def _load_runtime_db_snapshot(owner_home: Path) -> _RuntimeDbSnapshot:
                 str(row[0])
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
-            task_runs_by_id: dict[str, dict[str, str]] = {}
-            task_runs_by_task_id: dict[str, list[dict[str, str]]] = {}
+            task_runs_by_id: dict[str, dict[str, Any]] = {}
+            task_runs_by_task_id: dict[str, list[dict[str, Any]]] = {}
             if "task_runs" in tables:
-                for row in conn.execute("SELECT task_run_id, task_id, status FROM task_runs"):
+                for row in conn.execute("SELECT task_run_id, task_id, status, closed_at FROM task_runs"):
                     item = {
                         "task_run_id": str(row["task_run_id"] or ""),
                         "task_id": str(row["task_id"] or ""),
                         "status": str(row["status"] or "").strip().lower(),
+                        "closed_at": row["closed_at"],
                     }
                     if item["task_run_id"]:
                         task_runs_by_id[item["task_run_id"]] = item
                     if item["task_id"]:
                         task_runs_by_task_id.setdefault(item["task_id"], []).append(item)
 
-            agent_runs_by_id: dict[str, dict[str, str]] = {}
-            agent_runs_by_run_id: dict[str, list[dict[str, str]]] = {}
-            agent_runs_by_task_run_id: dict[str, list[dict[str, str]]] = {}
+            agent_runs_by_id: dict[str, dict[str, Any]] = {}
+            agent_runs_by_run_id: dict[str, list[dict[str, Any]]] = {}
+            agent_runs_by_task_run_id: dict[str, list[dict[str, Any]]] = {}
             children_by_parent_id: dict[str, list[str]] = {}
             if "agent_runs" in tables:
                 for row in conn.execute(
-                    "SELECT agent_run_id, task_run_id, parent_agent_run_id, run_id, current_attempt_id, status FROM agent_runs"
+                    "SELECT agent_run_id, task_run_id, parent_agent_run_id, run_id, current_attempt_id, status, updated_at FROM agent_runs"
                 ):
                     item = {
                         "agent_run_id": str(row["agent_run_id"] or ""),
@@ -580,6 +598,7 @@ def _load_runtime_db_snapshot(owner_home: Path) -> _RuntimeDbSnapshot:
                         "run_id": str(row["run_id"] or ""),
                         "current_attempt_id": str(row["current_attempt_id"] or ""),
                         "status": str(row["status"] or "").strip().lower(),
+                        "updated_at": row["updated_at"],
                     }
                     if item["agent_run_id"]:
                         agent_runs_by_id[item["agent_run_id"]] = item
@@ -590,13 +609,14 @@ def _load_runtime_db_snapshot(owner_home: Path) -> _RuntimeDbSnapshot:
                     if item["parent_agent_run_id"] and item["agent_run_id"]:
                         children_by_parent_id.setdefault(item["parent_agent_run_id"], []).append(item["agent_run_id"])
 
-            attempts_by_agent_run_id: dict[str, list[dict[str, str]]] = {}
+            attempts_by_agent_run_id: dict[str, list[dict[str, Any]]] = {}
             if "agent_attempts" in tables:
-                for row in conn.execute("SELECT attempt_id, agent_run_id, status FROM agent_attempts"):
+                for row in conn.execute("SELECT attempt_id, agent_run_id, status, ended_at FROM agent_attempts"):
                     item = {
                         "attempt_id": str(row["attempt_id"] or ""),
                         "agent_run_id": str(row["agent_run_id"] or ""),
                         "status": str(row["status"] or "").strip().lower(),
+                        "ended_at": row["ended_at"],
                     }
                     if item["agent_run_id"]:
                         attempts_by_agent_run_id.setdefault(item["agent_run_id"], []).append(item)
@@ -671,19 +691,22 @@ def _load_scheduler_snapshot(owner_home: Path) -> _SchedulerSnapshot:
         items = [("", value) for value in raw_runs]
     else:
         return _SchedulerSnapshot(error="scheduler_runs_invalid_shape", runs_by_run_id={}, runs_by_task_id={})
-    runs_by_run_id: dict[str, list[str]] = {}
-    runs_by_task_id: dict[str, list[str]] = {}
+    runs_by_run_id: dict[str, list[tuple[str, object]]] = {}
+    runs_by_task_id: dict[str, list[tuple[str, object]]] = {}
     for fallback_key, entry in items:
         if not isinstance(entry, dict):
             return _SchedulerSnapshot(error="scheduler_run_entry_invalid", runs_by_run_id={}, runs_by_task_id={})
         status = str(entry.get("status") or "").strip().lower()
+        ended_at = entry.get("ended_at")
         r_id = str(entry.get("run_id") or fallback_key or "").strip()
         if r_id:
-            runs_by_run_id.setdefault(r_id, []).append(status)
+            runs_by_run_id.setdefault(r_id, []).append((status, ended_at))
+        seen_task_ids: set[str] = set()
         for key in ("root_task_id", "task_id"):
             t_id = str(entry.get(key) or "").strip()
-            if t_id:
-                runs_by_task_id.setdefault(t_id, []).append(status)
+            if t_id and t_id not in seen_task_ids:
+                seen_task_ids.add(t_id)
+                runs_by_task_id.setdefault(t_id, []).append((status, ended_at))
     return _SchedulerSnapshot(runs_by_run_id=runs_by_run_id, runs_by_task_id=runs_by_task_id)
 
 
@@ -704,24 +727,25 @@ def _extract_workflow_refs(workflow_doc: object, run_ids: set[str], task_ids: se
             _extract_workflow_refs(nested, run_ids, task_ids)
 
 
-def _read_workflow_dir_refs(run_dir: Path, run_ids: set[str], task_ids: set[str]) -> str:
+def _read_workflow_dir_refs(run_dir: Path, run_ids: set[str], task_ids: set[str]) -> tuple[str, object]:
     run_file = run_dir / "run.json"
     try:
         run_st = _optional_lstat(run_file)
         if run_st is None:
-            return ""
+            return "", None
         if stat.S_ISLNK(run_st.st_mode):
-            return "workflow_run_symlink"
+            return "workflow_run_symlink", None
         run_doc = json.loads(run_file.read_text(encoding="utf-8"))
         if not isinstance(run_doc, dict):
-            return "workflow_run_invalid"
+            return "workflow_run_invalid", None
         status = str(run_doc.get("status") or "").strip().lower()
+        ended_at = run_doc.get("ended_at")
         _extract_workflow_refs(run_doc, run_ids, task_ids)
         steps_dir = run_dir / "steps"
         steps_st = _optional_lstat(steps_dir)
         if steps_st is not None:
             if stat.S_ISLNK(steps_st.st_mode):
-                return "workflow_steps_dir_symlink"
+                return "workflow_steps_dir_symlink", None
             if stat.S_ISDIR(steps_st.st_mode):
                 with os.scandir(steps_dir) as entries:
                     step_names = sorted(
@@ -731,14 +755,41 @@ def _read_workflow_dir_refs(run_dir: Path, run_ids: set[str], task_ids: set[str]
                     step_file = steps_dir / step_name
                     step_st = os.lstat(step_file)
                     if stat.S_ISLNK(step_st.st_mode):
-                        return "workflow_step_symlink"
+                        return "workflow_step_symlink", None
                     step_doc = json.loads(step_file.read_text(encoding="utf-8"))
                     if not isinstance(step_doc, dict):
-                        return "workflow_step_invalid"
+                        return "workflow_step_invalid", None
                     _extract_workflow_refs(step_doc, run_ids, task_ids)
-        return f"status:{status}"
+        return f"status:{status}", ended_at
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        return f"workflow_dir_{type(exc).__name__}"
+        return f"workflow_dir_{type(exc).__name__}", None
+
+
+def _read_skipped_workflow_run(workflow: _WorkflowSnapshot, run_id: str) -> tuple[str, object]:
+    if not run_id or workflow.runs_dir is None:
+        return "", None
+    cached = workflow.skipped_run_cache.get(run_id)
+    if cached is not None:
+        return cached
+    if "/" in run_id or "\\" in run_id or run_id in {".", ".."} or ".." in Path(run_id).parts:
+        result: tuple[str, object] = ("", None)
+        workflow.skipped_run_cache[run_id] = result
+        return result
+    run_dir = workflow.runs_dir / run_id
+    try:
+        dir_st = _optional_lstat(run_dir)
+        if dir_st is None:
+            result = ("", None)
+        elif stat.S_ISLNK(dir_st.st_mode):
+            result = ("workflow_run_dir_symlink", None)
+        elif not stat.S_ISDIR(dir_st.st_mode):
+            result = ("", None)
+        else:
+            result = _read_workflow_dir_refs(run_dir, {run_id}, set())
+    except OSError as exc:
+        result = (f"workflow_dir_{type(exc).__name__}", None)
+    workflow.skipped_run_cache[run_id] = result
+    return result
 
 
 def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256) -> _WorkflowSnapshot:
@@ -749,6 +800,9 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
     settled_run_ids: set[str] = set()
     settled_task_ids: set[str] = set()
     indexed_settled: set[str] = set()
+    settled_ended_at_by_run_id: dict[str, list[object]] = {}
+    settled_ended_at_by_task_id: dict[str, list[object]] = {}
+    scanned_dir_names: set[str] = set()
 
     try:
         index_st = _optional_lstat(index_db)
@@ -809,9 +863,10 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
                 is_known_settled = dir_name in indexed_settled and dir_name not in unsettled_run_ids
                 if is_known_settled and settled_scanned >= max_settled_dir_scan:
                     continue
+                scanned_dir_names.add(dir_name)
                 r_ids: set[str] = {dir_name}
                 t_ids: set[str] = set()
-                outcome = _read_workflow_dir_refs(run_dir, r_ids, t_ids)
+                outcome, wf_ended_at = _read_workflow_dir_refs(run_dir, r_ids, t_ids)
                 if outcome and not outcome.startswith("status:"):
                     return _WorkflowSnapshot(error=outcome)
                 status = outcome.removeprefix("status:") if outcome else ""
@@ -822,15 +877,27 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
                 elif status in _WORKFLOW_SETTLED_STATES:
                     settled_run_ids.update(r_ids)
                     settled_task_ids.update(t_ids)
+                    for rid in r_ids:
+                        settled_ended_at_by_run_id.setdefault(rid, []).append(wf_ended_at)
+                    for tid in t_ids:
+                        settled_ended_at_by_task_id.setdefault(tid, []).append(wf_ended_at)
                     settled_scanned += 1
             settled_run_ids.difference_update(unsettled_run_ids)
             settled_task_ids.difference_update(unsettled_task_ids)
+            for rid in unsettled_run_ids:
+                settled_ended_at_by_run_id.pop(rid, None)
+            for tid in unsettled_task_ids:
+                settled_ended_at_by_task_id.pop(tid, None)
 
     return _WorkflowSnapshot(
         unsettled_run_ids=frozenset(unsettled_run_ids),
         unsettled_task_ids=frozenset(unsettled_task_ids),
         settled_run_ids=frozenset(settled_run_ids),
         settled_task_ids=frozenset(settled_task_ids),
+        runs_dir=runs_dir,
+        settled_ended_at_by_run_id=settled_ended_at_by_run_id,
+        settled_ended_at_by_task_id=settled_ended_at_by_task_id,
+        indexed_settled_skipped=frozenset((indexed_settled - unsettled_run_ids - scanned_dir_names) & settled_run_ids),
     )
 
 
@@ -929,11 +996,11 @@ def _runtime_tree_verdict(
     root_task_id: str,
     run_id: str,
     effective_now: float,
-) -> tuple[list[str], list[str], bool]:
+) -> tuple[list[str], list[str], bool, float | None, bool]:
     active_reasons: list[str] = []
     unknown_reasons: list[str] = []
-    matched_task_runs: dict[str, dict[str, str]] = {}
-    matched_agent_runs: dict[str, dict[str, str]] = {}
+    matched_task_runs: dict[str, dict[str, Any]] = {}
+    matched_agent_runs: dict[str, dict[str, Any]] = {}
 
     for row in runtime.task_runs_by_task_id.get(root_task_id, ()):
         matched_task_runs[row["task_run_id"]] = row
@@ -994,8 +1061,36 @@ def _runtime_tree_verdict(
     if root_task_id in runtime.active_wakes_by_task_id or run_id in runtime.active_wakes_by_run_id:
         active_reasons.append("runtime_wake_pending")
 
+    settled_candidates: list[float] = []
+    ts_complete = True
+    matched_attempt_count = 0
+    for tr in matched_task_runs.values():
+        ts = _valid_settled_timestamp(tr.get("closed_at"), effective_now=effective_now)
+        if ts is None:
+            ts_complete = False
+        else:
+            settled_candidates.append(ts)
+
+    for ar_id in matched_agent_runs:
+        for attempt in runtime.attempts_by_agent_run_id.get(ar_id, ()):
+            matched_attempt_count += 1
+            ts = _valid_settled_timestamp(attempt.get("ended_at"), effective_now=effective_now)
+            if ts is None:
+                ts_complete = False
+            else:
+                settled_candidates.append(ts)
+
+    if not matched_task_runs and matched_attempt_count == 0:
+        for ar in matched_agent_runs.values():
+            ts = _valid_settled_timestamp(ar.get("updated_at"), effective_now=effective_now)
+            if ts is None:
+                ts_complete = False
+            else:
+                settled_candidates.append(ts)
+
     affirmed = bool(matched_task_runs or matched_agent_runs)
-    return active_reasons, unknown_reasons, affirmed
+    runtime_settled_at = max(settled_candidates) if (affirmed and ts_complete and settled_candidates) else None
+    return active_reasons, unknown_reasons, affirmed, runtime_settled_at, ts_complete
 
 
 def _classify_execution_record(
@@ -1077,7 +1172,7 @@ def _classify_execution_record(
         except Exception as exc:  # noqa: BLE001 会话存储读取异常保守判未知
             unknown_reasons.append(f"conversation_store_{type(exc).__name__}")
 
-    rt_active, rt_unknown, rt_affirmed = _runtime_tree_verdict(
+    rt_active, rt_unknown, rt_affirmed, runtime_settled_at, runtime_ts_complete = _runtime_tree_verdict(
         runtime, root_task_id=root_task_id, run_id=run_id, effective_now=effective_now,
     )
     active_reasons.extend(rt_active)
@@ -1085,13 +1180,13 @@ def _classify_execution_record(
     if rt_affirmed and not rt_active and not rt_unknown:
         affirmed_sources.append("runtime_db")
 
-    sched_statuses = [
+    sched_entries = [
         *scheduler.runs_by_run_id.get(run_id, ()),
         *scheduler.runs_by_task_id.get(root_task_id, ()),
     ]
-    if sched_statuses:
-        sched_active = [s for s in sched_statuses if s in _SCHEDULER_ACTIVE_STATUSES]
-        sched_unknown = [s for s in sched_statuses if s not in _SCHEDULER_ACTIVE_STATUSES and s not in _SCHEDULER_SETTLED_STATUSES]
+    if sched_entries:
+        sched_active = [s for s, _ in sched_entries if s in _SCHEDULER_ACTIVE_STATUSES]
+        sched_unknown = [s for s, _ in sched_entries if s not in _SCHEDULER_ACTIVE_STATUSES and s not in _SCHEDULER_SETTLED_STATUSES]
         if sched_active:
             active_reasons.append(f"scheduler_run_{sched_active[0]}")
         elif sched_unknown:
@@ -1099,10 +1194,28 @@ def _classify_execution_record(
         else:
             affirmed_sources.append("scheduler")
 
+    wf_raw_ended_ats: list[object] = []
+    wf_missing_ts = False
     if run_id in workflow.unsettled_run_ids or root_task_id in workflow.unsettled_task_ids:
         active_reasons.append("workflow_run_unsettled")
     elif run_id in workflow.settled_run_ids or root_task_id in workflow.settled_task_ids:
-        affirmed_sources.append("workflow")
+        wf_affirmed = True
+        if run_id in workflow.indexed_settled_skipped:
+            skip_outcome, skip_ended_at = _read_skipped_workflow_run(workflow, run_id)
+            if skip_outcome and not skip_outcome.startswith("status:"):
+                unknown_reasons.append(skip_outcome)
+                wf_affirmed = False
+            elif skip_outcome and skip_outcome.removeprefix("status:") not in _WORKFLOW_SETTLED_STATES:
+                active_reasons.append("workflow_run_unsettled")
+                wf_affirmed = False
+            elif skip_outcome:
+                wf_raw_ended_ats.append(skip_ended_at)
+            else:
+                wf_missing_ts = True
+        wf_raw_ended_ats.extend(workflow.settled_ended_at_by_run_id.get(run_id, ()))
+        wf_raw_ended_ats.extend(workflow.settled_ended_at_by_task_id.get(root_task_id, ()))
+        if wf_affirmed:
+            affirmed_sources.append("workflow")
 
     if active_reasons:
         return {**facts, "classification": "active", "reason": active_reasons[0]}
@@ -1122,29 +1235,80 @@ def _classify_execution_record(
         return {**facts, "classification": "unknown", "reason": "root_state_unknown"}
 
     dedup_sources = list(dict.fromkeys(affirmed_sources))
+    settled_timestamps: list[float] = []
+    authority_ts_complete = True
+    if "runtime_db" in dedup_sources:
+        if not runtime_ts_complete or runtime_settled_at is None:
+            authority_ts_complete = False
+        else:
+            settled_timestamps.append(runtime_settled_at)
+    if "scheduler" in dedup_sources:
+        for _, raw_ts in sched_entries:
+            ts = _valid_settled_timestamp(raw_ts, effective_now=effective_now)
+            if ts is None:
+                authority_ts_complete = False
+            else:
+                settled_timestamps.append(ts)
+    if "workflow" in dedup_sources:
+        if wf_missing_ts or not wf_raw_ended_ats:
+            authority_ts_complete = False
+        for raw_ts in wf_raw_ended_ats:
+            ts = _valid_settled_timestamp(raw_ts, effective_now=effective_now)
+            if ts is None:
+                authority_ts_complete = False
+            else:
+                settled_timestamps.append(ts)
+
+    settled_at: float | None = None
+    settled_age_seconds: float | None = None
+    settled_age_known = False
+    if authority_ts_complete and settled_timestamps:
+        settled_at = max(settled_timestamps)
+        started_ts = _valid_settled_timestamp(record.get("started_at"), effective_now=effective_now)
+        if started_ts is not None and started_ts > settled_at:
+            settled_at = started_ts
+        settled_age_seconds = max(0.0, effective_now - settled_at)
+        settled_age_known = True
+
     if min_settled_age_seconds > 0:
-        started_at = record.get("started_at")
-        if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
-            return {**facts, "classification": "unknown", "reason": "started_at_unknown"}
-        age_seconds = effective_now - float(started_at)
-        if age_seconds < min_settled_age_seconds:
+        if not settled_age_known or settled_age_seconds is None:
+            return {
+                **facts,
+                "classification": "settled",
+                "reason": "settled_at_unknown",
+                "affirmed_sources": dedup_sources,
+                "settled_age_seconds": None,
+                "settled_age_known": False,
+                "eligible_to_stop": False,
+                "stopped": False,
+            }
+        if settled_age_seconds < min_settled_age_seconds:
             return {
                 **facts,
                 "classification": "settled",
                 "reason": "younger_than_min_settled_age",
                 "affirmed_sources": dedup_sources,
-                "age_seconds": age_seconds,
+                "settled_at": settled_at,
+                "settled_age_seconds": settled_age_seconds,
+                "settled_age_known": True,
+                "age_seconds": settled_age_seconds,
                 "eligible_to_stop": False,
                 "stopped": False,
             }
 
-    return {
+    settled_item: dict[str, Any] = {
         **facts,
         "classification": "settled",
         "reason": "settled_terminal",
         "affirmed_sources": dedup_sources,
+        "settled_age_seconds": settled_age_seconds,
+        "settled_age_known": settled_age_known,
         "eligible_to_stop": True,
     }
+    if settled_at is not None:
+        settled_item["settled_at"] = settled_at
+        settled_item["age_seconds"] = settled_age_seconds
+    return settled_item
 
 
 def _stop_settled_batch(
@@ -1397,7 +1561,7 @@ def freeze_settled_leftover_processes(
             unknown_processes.append(item)
         else:
             settled_processes.append(item)
-            if item.pop("eligible_to_stop", False):
+            if item.get("eligible_to_stop", False):
                 eligible_entries.append((rec, item))
             else:
                 deferred_settled.append(item)

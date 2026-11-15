@@ -1113,10 +1113,11 @@ def _start_owner_maintenance_loop(
     except Exception as exc:
         _print_gateway_loop_error("gateway_owner_maintenance.initialize", "owner-maintenance", exc)
         return None
-    if controller.interval <= 0:
+    has_cold_settled = int(getattr(controller, "_cold_settled_ttl", 0) or 0) > 0
+    if controller.interval <= 0 and not has_cold_settled:
         return None
     hints = getattr(getattr(context, "agent", None), "_owner_wake_hints", None)
-    if hints is not None:
+    if hints is not None and controller.interval > 0:
         hints.bind_controller("maintenance", controller)
     thread = threading.Thread(
         target=controller.run,
@@ -2751,6 +2752,10 @@ class _GatewayOwnerMaintenanceController:
         self._base_yield = False
         self._base_idle_first = False
         self._idle_compact_cursor: dict = {}
+        self._cold_settled_ttl = max(0, int(getattr(context, "cold_start_settled_ttl_seconds", 0) or 0))
+        self._cold_settled_state: dict[str, object] = {}
+        self._cold_settled_done = self._cold_settled_ttl <= 0
+        self._cold_ready_event = getattr(context, "cold_start_ready_event", None)
         self.interval = max(
             0.0,
             _float_config(
@@ -2760,10 +2765,62 @@ class _GatewayOwnerMaintenanceController:
             ),
         )
 
+    def _advance_cold_settled_sweep(self, *, stop_event: threading.Event | None = None) -> bool:
+        if getattr(self, "_cold_settled_done", True):
+            return True
+        ttl_seconds = max(0, int(getattr(self, "_cold_settled_ttl", 0) or 0))
+        if ttl_seconds <= 0:
+            self._cold_settled_done = True
+            return True
+        from .gateway_process import run_cold_start_settled_sweep_step
+
+        state = getattr(self, "_cold_settled_state", None)
+        if not isinstance(state, dict):
+            state = {}
+            self._cold_settled_state = state
+        slice_ms = _positive_int_config(
+            self._base_agent,
+            "retention_scan_slice_ms",
+            default=AgentConfig.retention_scan_slice_ms,
+        )
+        try:
+            done = run_cold_start_settled_sweep_step(
+                self._base_agent,
+                state,
+                ttl_seconds=ttl_seconds,
+                max_owners_per_tick=8,
+                slice_ms=slice_ms,
+                stop_event=stop_event,
+            )
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_owner_maintenance.cold_settled_sweep", "owner-maintenance", exc)
+            self._cold_settled_done = True
+            return True
+        self._cold_settled_done = bool(done)
+        return bool(done)
+
+    def _run_cold_start_settled_sweep(self, stop_event: threading.Event) -> None:
+        if getattr(self, "_cold_settled_done", True):
+            return
+        ready_event = getattr(self, "_cold_ready_event", None)
+        while ready_event is not None and not ready_event.is_set():
+            if stop_event.is_set():
+                return
+            if ready_event.wait(0.05):
+                break
+        while not getattr(self, "_cold_settled_done", True) and not stop_event.is_set():
+            done = self._advance_cold_settled_sweep(stop_event=stop_event)
+            if done or stop_event.is_set():
+                break
+            stop_event.wait(0.01)
+
     # LLM: 节奏交给 _run_loop_with_backoff：出错记账、限流打印、等 max(interval, 退避)。
     # 函数用途: 跑维护循环直到 stop_event 置位。
     def run(self, stop_event: threading.Event) -> None:
         try:
+            self._run_cold_start_settled_sweep(stop_event)
+            if getattr(self, "interval", 0.0) <= 0:
+                return
             _run_hinted_controller(
                 self, stop_event,
                 _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
@@ -2779,6 +2836,8 @@ class _GatewayOwnerMaintenanceController:
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘；容量兜底取AgentConfig。
     # 函数用途: 保护期后有界追赶 owner 维护，保留原摘要与安全清理。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
+        if not getattr(self, "_cold_settled_done", True):
+            self._advance_cold_settled_sweep()
         _cleanup_loaded_runtime_safety(self._base_agent)
         if _startup_grace_active(self):
             return _maintenance_summary([], 0)

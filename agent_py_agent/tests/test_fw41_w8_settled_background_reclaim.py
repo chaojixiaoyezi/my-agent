@@ -8,12 +8,14 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 import agent_py_agent.agent.tooling.background_process_launch as bg_launch
@@ -45,7 +47,14 @@ from agent_py_agent.agent.tooling.process_session_store import (
     ProcessSessionStore,
     process_session_store_root,
 )
-from agent_py_agent.cli.gateway_process import _run_standalone_gateway, cmd_gateway_stop
+from agent_py_agent.cli.gateway_loops import _start_owner_maintenance_loop
+from agent_py_agent.cli.gateway_process import (
+    _attach_cold_start_settled_intent,
+    _run_standalone_gateway,
+    cmd_gateway_stop,
+    run_cold_start_settled_sweep_step,
+)
+from agent_py_agent.cli.models import GatewayRunContext
 from agent_py_agent.cli.parser import build_parser
 
 
@@ -190,24 +199,29 @@ def _insert_runtime_run(
     attempt_status: str,
     parent_agent_run_id: str = "",
     lock_expires_at: float | None = None,
+    ts: float | None = None,
+    closed_at: float | None = None,
+    ended_at: float | None = None,
 ) -> None:
-    now = time.time()
+    base_ts = float(time.time() if ts is None else ts)
+    effective_closed_at = (base_ts if closed_at is None else float(closed_at)) if task_status in {"done", "failed", "cancelled"} else 0.0
+    effective_ended_at = (base_ts if ended_at is None else float(ended_at)) if attempt_status != "running" else 0.0
     with closing(sqlite3.connect(db)) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO task_runs(task_run_id, task_id, status, created_at, updated_at, closed_at) "
             "VALUES(?, ?, ?, ?, ?, ?)",
-            (task_run_id, task_id, task_status, now, now, now if task_status in {"done", "failed", "cancelled"} else 0.0),
+            (task_run_id, task_id, task_status, base_ts, base_ts, effective_closed_at),
         )
         conn.execute(
             "INSERT OR REPLACE INTO agent_runs(agent_run_id, task_run_id, parent_agent_run_id, run_id, role, status, "
             "current_attempt_id, current_attempt_generation, workspace_epoch, created_at, updated_at) "
             "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent_run_id, task_run_id, parent_agent_run_id, run_id, "main", agent_status, attempt_id, 1, 1, now, now),
+            (agent_run_id, task_run_id, parent_agent_run_id, run_id, "main", agent_status, attempt_id, 1, 1, base_ts, base_ts),
         )
         conn.execute(
             "INSERT OR REPLACE INTO agent_attempts(attempt_id, agent_run_id, attempt_generation, status, started_at, ended_at) "
             "VALUES(?, ?, ?, ?, ?, ?)",
-            (attempt_id, agent_run_id, 1, attempt_status, now, now if attempt_status != "running" else 0.0),
+            (attempt_id, agent_run_id, 1, attempt_status, base_ts, effective_ended_at),
         )
         if lock_expires_at is not None:
             conn.execute(
@@ -225,8 +239,8 @@ def _insert_runtime_run(
                     1,
                     0,
                     lock_expires_at,
-                    now,
-                    now,
+                    base_ts,
+                    base_ts,
                 ),
             )
         conn.commit()
@@ -303,6 +317,7 @@ def test_freeze_settled_leftover_processes_enforces_three_state_active_unknown_s
             agent_status="done",
             attempt_id="att-parent",
             attempt_status="done",
+            ts=now - 1000,
         )
         _insert_runtime_run(
             db,
@@ -315,6 +330,7 @@ def test_freeze_settled_leftover_processes_enforces_three_state_active_unknown_s
             attempt_id="att-sub",
             attempt_status="running",
             parent_agent_run_id="ar-parent",
+            ts=now - 1000,
         )
         _write_running_session(
             store,
@@ -427,6 +443,7 @@ def test_freeze_settled_leftover_processes_enforces_three_state_active_unknown_s
             agent_status="done",
             attempt_id="att-unk",
             attempt_status="unknown",
+            ts=now - 1000,
         )
         _write_running_session(
             store,
@@ -461,6 +478,7 @@ def test_freeze_settled_leftover_processes_enforces_three_state_active_unknown_s
             agent_status="done",
             attempt_id="att-settled",
             attempt_status="done",
+            ts=now - 600,
         )
         _write_running_session(
             store,
@@ -683,7 +701,10 @@ def test_background_process_settled_ttl_seconds_registered_in_parameter_registry
     conv_root = owner_home / "conversations"
     conv_root.mkdir(parents=True)
     conv_store = ConversationStore(conv_root)
-    t_settled = _bind_task_link(conv_store, task_id="task-settled", status="completed")
+    db = runtime_db_path(owner_home)
+    RuntimeRepository(db)
+    t_old = _bind_task_link(conv_store, task_id="task-settled-old", status="completed")
+    t_young = _bind_task_link(conv_store, task_id="task-settled-young", status="completed")
 
     procs: list[subprocess.Popen[str]] = []
     try:
@@ -697,14 +718,38 @@ def test_background_process_settled_ttl_seconds_registered_in_parameter_registry
         store_root = background_store_root(tmp_path / "workspace", owner_home)
         store = ProcessSessionStore(Path(store_root))
         now = time.time()
+        _insert_runtime_run(
+            db,
+            task_run_id="tr-settled-old",
+            task_id="task-settled-old",
+            task_status="done",
+            agent_run_id="ar-settled-old",
+            run_id="run-settled-old",
+            agent_status="done",
+            attempt_id="att-settled-old",
+            attempt_status="done",
+            ts=now - 900,
+        )
+        _insert_runtime_run(
+            db,
+            task_run_id="tr-settled-young",
+            task_id="task-settled-young",
+            task_status="done",
+            agent_run_id="ar-settled-young",
+            run_id="run-settled-young",
+            agent_status="done",
+            attempt_id="att-settled-young",
+            attempt_status="done",
+            ts=now - 10,
+        )
         _write_running_session(
-            store, owner_home=owner_home, session_id="bg-old-settled", thread_id=t_settled,
-            root_task_id="task-settled", run_id="run-settled", started_at=now - 900,
+            store, owner_home=owner_home, session_id="bg-old-settled", thread_id=t_old,
+            root_task_id="task-settled-old", run_id="run-settled-old", started_at=now - 900,
             pid=old_proc.pid, birth_token=old_birth, child_pid=old_proc.pid, child_birth=old_birth,
         )
         _write_running_session(
-            store, owner_home=owner_home, session_id="bg-young-settled", thread_id=t_settled,
-            root_task_id="task-settled", run_id="run-settled", started_at=now - 10,
+            store, owner_home=owner_home, session_id="bg-young-settled", thread_id=t_young,
+            root_task_id="task-settled-young", run_id="run-settled-young", started_at=now - 900,
             pid=young_proc.pid, birth_token=young_birth, child_pid=young_proc.pid, child_birth=young_birth,
         )
 
@@ -724,12 +769,50 @@ def test_background_process_settled_ttl_seconds_registered_in_parameter_registry
         def _run_gateway(ttl: int, *, restart_marker: dict | None, after_pid: int) -> None:
             fake_agent = SimpleNamespace(
                 root=tmp_path / "workspace",
-                config=AgentConfig(background_process_settled_ttl_seconds=ttl),
+                config=AgentConfig(
+                    background_process_settled_ttl_seconds=ttl,
+                    owner_maintenance_scan_interval_seconds=0.0,
+                ),
                 home_paths=SimpleNamespace(root=tmp_path, owner_home_dir=owner_home),
                 subagents=SimpleNamespace(workspace=tmp_path / "subagents"),
             )
             args = SimpleNamespace(after_pid=after_pid)
-            run_ctx = SimpleNamespace(process_started_at=time.time(), process_identity={"pid": 1}, control_plane=None)
+            run_ctx = GatewayRunContext(
+                agent=fake_agent,
+                paths=gw_paths,
+                config_path=tmp_path / "agent_config.yaml",
+                process_started_at=time.time(),
+                process_identity={"pid": 1},
+            )
+            stop_event = threading.Event()
+            service_loop_entered = threading.Event()
+            sweep_entered = threading.Event()
+            sweep_finished = threading.Event()
+            sweep_ran_during_cmd_threads: list[bool] = []
+            maint_threads: list[threading.Thread] = []
+
+            def _fake_cmd_threads(req, **_kwargs):
+                maint_thread = _start_owner_maintenance_loop(req.context, stop_event)
+                if maint_thread is not None:
+                    maint_threads.append(maint_thread)
+                sweep_ran_during_cmd_threads.append(sweep_entered.is_set())
+                return stop_event, None, None, None, None
+
+            def _fake_service_loop(_ctx, **_kwargs):
+                service_loop_entered.set()
+                if maint_threads:
+                    assert sweep_finished.wait(timeout=5)
+                    maint_threads[0].join(timeout=5)
+                return {"status": "stopped", "reason": "test"}
+
+            def _gated_freeze(target_home: str | Path, **kwargs):
+                sweep_entered.set()
+                assert service_loop_entered.wait(timeout=5)
+                try:
+                    return freeze_settled_leftover_processes(target_home, **kwargs)
+                finally:
+                    sweep_finished.set()
+
             with ExitStack() as stack:
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process.make_agent", return_value=fake_agent))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=gw_paths))
@@ -737,9 +820,10 @@ def test_background_process_settled_ttl_seconds_registered_in_parameter_registry
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process._preflight_required_local_credential"))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process.take_restart_marker", return_value=restart_marker))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process._cmd_gateway_run_setup", return_value=(0, 12345)))
-                stack.enter_context(patch("agent_py_agent.cli.gateway_process._cmd_gateway_run_threads", return_value=(None, None, None, None, None)))
+                stack.enter_context(patch("agent_py_agent.cli.gateway_process._cmd_gateway_run_threads", side_effect=_fake_cmd_threads))
+                stack.enter_context(patch("agent_py_agent.cli.gateway_process.freeze_settled_leftover_processes", side_effect=_gated_freeze))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process._install_gateway_signal_handlers", return_value=()))
-                stack.enter_context(patch("agent_py_agent.cli.gateway_process._run_gateway_service_loop", return_value={"status": "stopped", "reason": "test"}))
+                stack.enter_context(patch("agent_py_agent.cli.gateway_process._run_gateway_service_loop", side_effect=_fake_service_loop))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process._classify_gateway_service_return", return_value=SimpleNamespace(kind="stopped", status="stopped", reason="test", exit_code=0)))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process._record_gateway_service_termination"))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process._cmd_gateway_run_cleanup", return_value={"drain_complete": True}))
@@ -747,7 +831,22 @@ def test_background_process_settled_ttl_seconds_registered_in_parameter_registry
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process.record_standalone_stop_observation"))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process.record_standalone_stop"))
                 stack.enter_context(patch("agent_py_agent.cli.gateway_process.log_gateway_event", side_effect=lambda _a, name, event_data: events.append((name, event_data))))
-                assert _run_standalone_gateway(args, object()) == 0
+                try:
+                    assert _run_standalone_gateway(args, object()) == 0
+                finally:
+                    stop_event.set()
+                    service_loop_entered.set()
+                    for maint_thread in maint_threads:
+                        maint_thread.join(timeout=5)
+            assert sweep_ran_during_cmd_threads == [False]
+            if ttl <= 0 or restart_marker is not None or after_pid > 0:
+                assert run_ctx.cold_start_settled_ttl_seconds == 0  # type: ignore[attr-defined]
+                assert maint_threads == []
+                assert not sweep_entered.is_set()
+            else:
+                assert run_ctx.cold_start_settled_ttl_seconds == ttl  # type: ignore[attr-defined]
+                assert len(maint_threads) == 1
+                assert not maint_threads[0].is_alive()
 
         # 1. TTL=0 -> no sweep
         _run_gateway(0, restart_marker=None, after_pid=0)
@@ -762,7 +861,7 @@ def test_background_process_settled_ttl_seconds_registered_in_parameter_registry
         _run_gateway(300, restart_marker=None, after_pid=99999)
         assert store.load("bg-old-settled").record["status"] == "running"
 
-        # 4. True cold start with TTL=300 -> sweeps ONLY aged settled process, keeps younger settled
+        # 4. True cold start with TTL=300 -> sweeps asynchronously post-ready ONLY aged settled process
         _run_gateway(300, restart_marker=None, after_pid=0)
         old_proc.wait(timeout=5)
         assert young_proc.poll() is None
@@ -896,3 +995,440 @@ def test_stat_eio_and_scheduler_blocking_io_fail_closed_to_unknown(tmp_path: Pat
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+
+
+def test_settled_age_uses_terminal_timestamp_over_process_birth_age(tmp_path: Path) -> None:
+    """ASTRA-F3: long-lived processes settled recently are deferred; max across authorities and skipped workflow runs apply."""
+    owner_home = tmp_path / "owner_home"
+    conv_root = owner_home / "conversations"
+    conv_store = ConversationStore(conv_root, initialize=True)
+    db = runtime_db_path(owner_home)
+    RuntimeRepository(db)
+    store_root = background_store_root(tmp_path / "workspace", owner_home)
+    store = ProcessSessionStore(Path(store_root))
+    now = 2_000_000.0
+
+    # Prepare workflow index exceeding max_settled_dir_scan=256 so wf-259 is skipped during directory scan
+    index_db = owner_home / "data" / "workflow_run_index.sqlite3"
+    index_db.parent.mkdir(parents=True, exist_ok=True)
+    wf_runs_dir = owner_home / "data" / "workflow_runs"
+    wf_runs_dir.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(index_db)) as conn:
+        conn.execute("CREATE TABLE runs(run_id TEXT, status TEXT)")
+        conn.execute("CREATE TABLE pending(run_id TEXT)")
+        conn.execute("CREATE TABLE legacy(run_id TEXT)")
+        for idx in range(260):
+            wf_id = f"wf-{idx:03d}"
+            conn.execute("INSERT INTO runs(run_id, status) VALUES(?, ?)", (wf_id, "completed"))
+            run_dir = wf_runs_dir / wf_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            ended_at = (now - 15.0) if idx == 259 else (now - 1000.0)
+            (run_dir / "run.json").write_text(
+                json.dumps({"workflow_run_id": wf_id, "status": "completed", "ended_at": ended_at}),
+                encoding="utf-8",
+            )
+        conn.commit()
+
+    procs: list[subprocess.Popen[str]] = []
+    try:
+        # 1. Old process (started 7200s ago), runtime settled only 20s ago -> deferred
+        p_recent = _spawn_sleeper()
+        procs.append(p_recent)
+        b_recent = bg_launch.capture_process_birth_token(p_recent.pid) or "b-recent"
+        t_recent = _bind_task_link(conv_store, task_id="task-recent", status="completed")
+        _insert_runtime_run(
+            db,
+            task_run_id="tr-recent",
+            task_id="task-recent",
+            task_status="done",
+            agent_run_id="ar-recent",
+            run_id="run-recent",
+            agent_status="done",
+            attempt_id="att-recent",
+            attempt_status="done",
+            ts=now - 20.0,
+        )
+        _write_running_session(
+            store,
+            owner_home=owner_home,
+            session_id="bg-old-proc-recent-settle",
+            thread_id=t_recent,
+            root_task_id="task-recent",
+            run_id="run-recent",
+            started_at=now - 7200.0,
+            pid=p_recent.pid,
+            birth_token=b_recent,
+            child_pid=p_recent.pid,
+            child_birth=b_recent,
+        )
+
+        # 2. Old process (started 7200s ago), runtime settled 400s ago -> stopped
+        p_old = _spawn_sleeper()
+        procs.append(p_old)
+        b_old = bg_launch.capture_process_birth_token(p_old.pid) or "b-old"
+        t_old = _bind_task_link(conv_store, task_id="task-old", status="completed")
+        _insert_runtime_run(
+            db,
+            task_run_id="tr-old",
+            task_id="task-old",
+            task_status="done",
+            agent_run_id="ar-old",
+            run_id="run-old",
+            agent_status="done",
+            attempt_id="att-old",
+            attempt_status="done",
+            ts=now - 400.0,
+        )
+        _write_running_session(
+            store,
+            owner_home=owner_home,
+            session_id="bg-old-proc-old-settle",
+            thread_id=t_old,
+            root_task_id="task-old",
+            run_id="run-old",
+            started_at=now - 7200.0,
+            pid=p_old.pid,
+            birth_token=b_old,
+            child_pid=p_old.pid,
+            child_birth=b_old,
+        )
+
+        # 3. Multi-authority settled: runtime (400s ago) + scheduler (350s ago) + workflow wf-259 (15s ago, past scan cap) -> max wins -> deferred
+        p_multi = _spawn_sleeper()
+        procs.append(p_multi)
+        b_multi = bg_launch.capture_process_birth_token(p_multi.pid) or "b-multi"
+        t_multi = _bind_task_link(conv_store, task_id="task-multi", status="completed")
+        _insert_runtime_run(
+            db,
+            task_run_id="tr-multi",
+            task_id="task-multi",
+            task_status="done",
+            agent_run_id="ar-multi",
+            run_id="wf-259",
+            agent_status="done",
+            attempt_id="att-multi",
+            attempt_status="done",
+            ts=now - 400.0,
+        )
+        sched_path = owner_home / "data" / "scheduler" / "store.json"
+        sched_path.parent.mkdir(parents=True, exist_ok=True)
+        sched_path.write_text(
+            json.dumps(
+                {
+                    "runs": {
+                        "sched-multi": {
+                            "run_id": "wf-259",
+                            "task_id": "task-multi",
+                            "status": "done",
+                            "ended_at": now - 350.0,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        _write_running_session(
+            store,
+            owner_home=owner_home,
+            session_id="bg-multi-auth-skipped-wf",
+            thread_id=t_multi,
+            root_task_id="task-multi",
+            run_id="wf-259",
+            started_at=now - 7200.0,
+            pid=p_multi.pid,
+            birth_token=b_multi,
+            child_pid=p_multi.pid,
+            child_birth=b_multi,
+        )
+
+        report = freeze_settled_leftover_processes(owner_home, min_settled_age_seconds=300, now_ts=now)
+        assert report["counts"] == {
+            "active": 0,
+            "settled": 3,
+            "stopped": 1,
+            "deferred_settled": 2,
+            "stop_failed": 0,
+            "unknown": 0,
+        }
+        stopped_ids = {row["session_id"] for row in report["stopped_processes"] if row.get("stopped")}
+        assert stopped_ids == {"bg-old-proc-old-settle"}
+
+        deferred_by_id = {row["session_id"]: row for row in report["deferred_settled_processes"]}
+        assert set(deferred_by_id) == {"bg-old-proc-recent-settle", "bg-multi-auth-skipped-wf"}
+        assert deferred_by_id["bg-old-proc-recent-settle"]["reason"] == "younger_than_min_settled_age"
+        assert deferred_by_id["bg-old-proc-recent-settle"]["settled_age_known"] is True
+        assert deferred_by_id["bg-old-proc-recent-settle"]["settled_age_seconds"] == pytest.approx(20.0)
+        assert deferred_by_id["bg-multi-auth-skipped-wf"]["reason"] == "younger_than_min_settled_age"
+        assert deferred_by_id["bg-multi-auth-skipped-wf"]["settled_age_known"] is True
+        assert deferred_by_id["bg-multi-auth-skipped-wf"]["settled_age_seconds"] == pytest.approx(15.0)
+        assert set(deferred_by_id["bg-multi-auth-skipped-wf"]["affirmed_sources"]) >= {
+            "runtime_db",
+            "scheduler",
+            "workflow",
+        }
+
+        p_old.wait(timeout=5)
+        assert p_recent.poll() is None
+        assert p_multi.poll() is None
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
+
+def test_missing_or_invalid_settled_timestamps_defer_when_min_age_positive_and_stop_when_zero(tmp_path: Path) -> None:
+    """ASTRA-F3: missing/incomplete/future timestamps or conversation-link-only defer if min_age>0, stop if min_age==0."""
+    owner_home = tmp_path / "owner_home"
+    conv_root = owner_home / "conversations"
+    conv_store = ConversationStore(conv_root, initialize=True)
+    db = runtime_db_path(owner_home)
+    RuntimeRepository(db)
+    store_root = background_store_root(tmp_path / "workspace", owner_home)
+    store = ProcessSessionStore(Path(store_root))
+    now = 2_000_000.0
+
+    procs: list[subprocess.Popen[str]] = []
+    try:
+        # 1. runtime.db with closed_at=0.0, ended_at=0.0
+        _insert_runtime_run(
+            db,
+            task_run_id="tr-zero-ts",
+            task_id="task-zero-ts",
+            task_status="done",
+            agent_run_id="ar-zero-ts",
+            run_id="run-zero-ts",
+            agent_status="done",
+            attempt_id="att-zero-ts",
+            attempt_status="done",
+            ts=now - 1000.0,
+            closed_at=0.0,
+            ended_at=0.0,
+        )
+        # 2. runtime.db partial: closed_at valid, attempt ended_at=0.0 -> incomplete
+        _insert_runtime_run(
+            db,
+            task_run_id="tr-partial-ts",
+            task_id="task-partial-ts",
+            task_status="done",
+            agent_run_id="ar-partial-ts",
+            run_id="run-partial-ts",
+            agent_status="done",
+            attempt_id="att-partial-ts",
+            attempt_status="done",
+            ts=now - 1000.0,
+            closed_at=now - 800.0,
+            ended_at=0.0,
+        )
+        # 3. runtime.db future drifted timestamps
+        _insert_runtime_run(
+            db,
+            task_run_id="tr-future-ts",
+            task_id="task-future-ts",
+            task_status="done",
+            agent_run_id="ar-future-ts",
+            run_id="run-future-ts",
+            agent_status="done",
+            attempt_id="att-future-ts",
+            attempt_status="done",
+            ts=now + 600.0,
+        )
+        # 4. scheduler missing ended_at
+        sched_path = owner_home / "data" / "scheduler" / "store.json"
+        sched_path.parent.mkdir(parents=True, exist_ok=True)
+        sched_path.write_text(
+            json.dumps({"runs": {"sched-no-ts": {"run_id": "run-sched-nots", "task_id": "task-sched-nots", "status": "done"}}}),
+            encoding="utf-8",
+        )
+        # 5. workflow missing ended_at
+        wf_dir = owner_home / "data" / "workflow_runs" / "run-wf-nots"
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "run.json").write_text(
+            json.dumps({"workflow_run_id": "run-wf-nots", "task_id": "task-wf-nots", "status": "completed"}),
+            encoding="utf-8",
+        )
+
+        cases = [
+            ("bg-zero-ts", "task-zero-ts", "run-zero-ts"),
+            ("bg-partial-ts", "task-partial-ts", "run-partial-ts"),
+            ("bg-future-ts", "task-future-ts", "run-future-ts"),
+            ("bg-sched-nots", "task-sched-nots", "run-sched-nots"),
+            ("bg-wf-nots", "task-wf-nots", "run-wf-nots"),
+            ("bg-link-only", "task-link-only", "run-link-only"),
+        ]
+        for session_id, task_id, run_id in cases:
+            proc = _spawn_sleeper()
+            procs.append(proc)
+            birth = bg_launch.capture_process_birth_token(proc.pid) or session_id
+            thread_id = _bind_task_link(conv_store, task_id=task_id, status="completed")
+            _write_running_session(
+                store,
+                owner_home=owner_home,
+                session_id=session_id,
+                thread_id=thread_id,
+                root_task_id=task_id,
+                run_id=run_id,
+                started_at=now - 3600.0,
+                pid=proc.pid,
+                birth_token=birth,
+                child_pid=proc.pid,
+                child_birth=birth,
+            )
+
+        deferred_report = freeze_settled_leftover_processes(owner_home, min_settled_age_seconds=300, now_ts=now)
+        assert deferred_report["counts"] == {
+            "active": 0,
+            "settled": 6,
+            "stopped": 0,
+            "deferred_settled": 6,
+            "stop_failed": 0,
+            "unknown": 0,
+        }
+        for row in deferred_report["deferred_settled_processes"]:
+            assert row["reason"] == "settled_at_unknown"
+            assert row["settled_age_seconds"] is None
+            assert row["settled_age_known"] is False
+            assert row["eligible_to_stop"] is False
+            assert row["stopped"] is False
+        assert all(proc.poll() is None for proc in procs)
+
+        stop_report = freeze_settled_leftover_processes(owner_home, min_settled_age_seconds=0, now_ts=now)
+        assert stop_report["counts"]["stopped"] == 6
+        for proc in procs:
+            proc.wait(timeout=5)
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
+
+def test_cold_start_settled_sweep_step_paginates_handles_errors_and_yields_on_stop(tmp_path: Path) -> None:
+    """ASTRA-F4: bounded cold-start sweep paginates across owners, tolerates owner errors, and yields cleanly on stop."""
+    primary_home = (tmp_path / "owners" / "local" / "main").resolve()
+    primary_home.mkdir(parents=True)
+    extra_homes = []
+    for idx in range(1, 5):
+        oh = (tmp_path / "owners" / "providers" / "feishu" / "users" / f"u{idx}").resolve()
+        oh.mkdir(parents=True)
+        extra_homes.append(oh)
+
+    fake_agent = SimpleNamespace(
+        root=tmp_path / "workspace",
+        config=AgentConfig(background_process_settled_ttl_seconds=300),
+        home_paths=SimpleNamespace(root=tmp_path, owner_home_dir=primary_home),
+    )
+    gw_paths = SimpleNamespace(root=tmp_path / "gw")
+    frozen_ctx = GatewayRunContext(
+        agent=fake_agent,
+        paths=gw_paths,
+        config_path=tmp_path / "agent_config.yaml",
+    )
+    ready_ev = threading.Event()
+    _attach_cold_start_settled_intent(frozen_ctx, ttl_seconds=300, ready_event=ready_ev)
+    assert frozen_ctx.cold_start_settled_ttl_seconds == 300  # type: ignore[attr-defined]
+    assert frozen_ctx.cold_start_ready_event is ready_ev  # type: ignore[attr-defined]
+
+    events: list[tuple[str, dict[str, object]]] = []
+    visited: list[str] = []
+
+    def _fake_freeze(owner_home: str | Path, **_kwargs):
+        visited.append(str(owner_home))
+        if str(owner_home).endswith("u2"):
+            raise RuntimeError("owner_read_error")
+        return {
+            "counts": {
+                "active": 0,
+                "settled": 1,
+                "stopped": 1,
+                "deferred_settled": 0,
+                "stop_failed": 0,
+                "unknown": 0,
+            }
+        }
+
+    with (
+        patch("agent_py_agent.cli.gateway_process.freeze_settled_leftover_processes", side_effect=_fake_freeze),
+        patch("agent_py_agent.cli.gateway_process.log_gateway_event", side_effect=lambda _a, name, event_data: events.append((name, event_data))),
+    ):
+        state: dict[str, object] = {}
+        stop_ev = threading.Event()
+        assert run_cold_start_settled_sweep_step(fake_agent, state, ttl_seconds=300, max_owners_per_tick=2, slice_ms=0, stop_event=stop_ev) is False
+        assert len(visited) == 2
+        assert events == []
+
+        assert run_cold_start_settled_sweep_step(fake_agent, state, ttl_seconds=300, max_owners_per_tick=2, slice_ms=0, stop_event=stop_ev) is False
+        assert len(visited) == 4
+        assert events == []
+
+        stop_ev.set()
+        assert run_cold_start_settled_sweep_step(fake_agent, state, ttl_seconds=300, max_owners_per_tick=2, slice_ms=0, stop_event=stop_ev) is False
+        assert len(visited) == 4
+        assert events == []
+
+        stop_ev.clear()
+        assert run_cold_start_settled_sweep_step(fake_agent, state, ttl_seconds=300, max_owners_per_tick=2, slice_ms=0, stop_event=stop_ev) is True
+        assert len(visited) == 5
+        assert len(events) == 1
+        assert events[0][0] == "gateway_settled_background_sweep"
+        assert events[0][1]["stopped"] == 4
+        assert events[0][1]["settled"] == 4
+        assert len(events[0][1]["errors"]) == 1
+        assert events[0][1]["errors"][0]["error_type"] == "RuntimeError"
+
+
+def test_owner_maintenance_controller_interval_zero_runs_one_shot_cold_sweep_and_exits(tmp_path: Path) -> None:
+    """ASTRA-F4: when scan interval is 0 and cold sweep TTL>0, controller waits on ready_event, runs sweep once, and exits."""
+    owner_home = (tmp_path / "owners" / "local" / "main").resolve()
+    owner_home.mkdir(parents=True)
+    fake_agent = SimpleNamespace(
+        root=tmp_path / "workspace",
+        config=AgentConfig(
+            background_process_settled_ttl_seconds=300,
+            owner_maintenance_scan_interval_seconds=0.0,
+            retention_scan_slice_ms=25,
+        ),
+        home_paths=SimpleNamespace(root=tmp_path, owner_home_dir=owner_home),
+        _owner_wake_hints=None,
+    )
+    ctx = GatewayRunContext(
+        agent=fake_agent,
+        paths=SimpleNamespace(root=tmp_path / "gw"),
+        config_path=tmp_path / "agent_config.yaml",
+    )
+    ready_event = threading.Event()
+    _attach_cold_start_settled_intent(ctx, ttl_seconds=300, ready_event=ready_event)
+
+    freeze_called = threading.Event()
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def _fake_freeze(_home: str | Path, **_kwargs):
+        freeze_called.set()
+        return {"counts": {"active": 0, "settled": 0, "stopped": 0, "deferred_settled": 0, "stop_failed": 0, "unknown": 0}}
+
+    stop_event = threading.Event()
+    with (
+        patch("agent_py_agent.cli.gateway_process.freeze_settled_leftover_processes", side_effect=_fake_freeze),
+        patch("agent_py_agent.cli.gateway_process.log_gateway_event", side_effect=lambda _a, name, event_data: events.append((name, event_data))),
+    ):
+        thread = _start_owner_maintenance_loop(ctx, stop_event)
+        assert thread is not None
+        try:
+            assert not freeze_called.wait(timeout=0.15)
+            ready_event.set()
+            assert freeze_called.wait(timeout=5)
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            assert [name for name, _ in events] == ["gateway_settled_background_sweep"]
+        finally:
+            stop_event.set()
+            ready_event.set()
+            thread.join(timeout=5)
