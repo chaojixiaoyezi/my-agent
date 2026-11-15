@@ -30,6 +30,7 @@ from scripts.live_lab.main_agent_compact_stress import (
     _seed_stress_file,
     _stress_facts,
     case_main_compact_stress_long_read,
+    evaluate_compact_stress_observations,
 )
 from scripts.live_lab.reporter import LabReporter
 from scripts.live_lab.runner import LabRunner, LiveLabError, _utf8_env
@@ -684,3 +685,420 @@ def test_compact_stress_d4_reuse_and_counter_enforce_provenance_and_baseline(
     assert saved_obs["checkpoints"]["successful_cycle_count"] == 5
     assert saved_obs["compact_policy"]["effective_trigger_percent"] == 70
     assert saved_obs["bg_census_diff"]["leaked_count"] == 0
+
+
+def test_fable_p1_3_token_alias_extraction_without_variadic_helper() -> None:
+    telemetry = parse_compaction_telemetry([
+        {
+            "event": "compact_skip",
+            "reason_code": "COMPACT_NO_PROGRESS",
+            "committed": False,
+            "projected_tokens_before": 180_000,
+            "tokens_after": 181_500,
+        },
+        {
+            "event": "compact_skip",
+            "reason_code": "COMPACT_NO_PROGRESS",
+            "committed": False,
+            "before_tokens": 175_000,
+            "after_tokens": 176_000,
+        },
+    ])
+    assert telemetry["no_progress_count"] == 2
+    assert telemetry["no_progress_events"][0]["tokens_before"] == 180_000
+    assert telemetry["no_progress_events"][0]["candidate_tokens"] == 181_500
+    assert telemetry["no_progress_events"][1]["tokens_before"] == 175_000
+    assert telemetry["no_progress_events"][1]["candidate_tokens"] == 176_000
+
+    agg = aggregate_usage_records([
+        {
+            "purpose": "main",
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 120,
+                "cache_read_input_tokens": 900,
+            },
+        }
+    ])
+    assert agg["input_tokens"] == 1200
+    assert agg["output_tokens"] == 120
+    assert agg["cached_tokens"] == 900
+    assert agg["observed_cached_ratio"] == pytest.approx(0.75)
+
+
+def test_astra_f5_checkpoint_authority_rejects_uncommitted_and_broken_chains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = LabSessionManager(_make_args(tmp_path, run_id="astra-f5"))
+    session.setup()
+    ctx = session.resolved_home_context
+    compact_dir = Path(ctx["owner_compact_dir"])
+    threads_dir = Path(ctx["threads_dir"])
+    threads_dir.mkdir(parents=True, exist_ok=True)
+    (compact_dir / "conversations").mkdir(parents=True, exist_ok=True)
+
+    def _make_chain_rows(tid: str, start_gen: int, end_gen: int, *, status: str = "validated_candidate", prev_id: str = "") -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
+        prev = prev_id
+        for gen in range(start_gen, end_gen + 1):
+            cid = f"compact-v3-{tid}-{gen}"
+            out.append({
+                "schema": "conversation_compact_checkpoint.v3",
+                "thread_id": tid,
+                "generation": gen,
+                "checkpoint_id": cid,
+                "previous_checkpoint_id": prev,
+                "status": status,
+                "commit_authority": "conversation_thread.compact_checkpoint_id",
+                "projected_tokens_before": 150_000,
+                "projected_tokens_after": 15_000,
+                "mode": "cache_fork",
+            })
+            prev = cid
+        return out
+
+    # 1. 5 validated_candidate rows with missing threads/<tid>.json -> 0 verified cycles + errors + gate fail.
+    candidate_rows = _make_chain_rows("t-missing", 1, 5, status="validated_candidate")
+    (compact_dir / "conversations" / "t-missing.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in candidate_rows) + "\n", encoding="utf-8"
+    )
+    missing_auth = load_canonical_compaction_checkpoints(
+        compact_dir=compact_dir,
+        threads_dir=threads_dir,
+        thread_id="t-missing",
+    )
+    assert missing_auth["successful_cycle_count"] == 0
+    assert missing_auth["uncommitted_or_superseded_count"] == 5
+    assert any("missing_thread_authority" in err["error"] for err in missing_auth["errors"])
+    gate_missing = evaluate_compact_stress_observations({
+        "checkpoints": missing_auth,
+        "telemetry": {"runaway_no_progress_detected": False},
+        "bg_census_diff": {"leaked_count": 0},
+    })
+    assert gate_missing["ok"] is False
+    assert gate_missing["checkpoint_errors"]
+
+    # 2. Unreadable/corrupt threads/<tid>.json -> 0 verified cycles + errors + gate fail.
+    (threads_dir / "t-missing.json").write_text("{corrupt-json", encoding="utf-8")
+    corrupt_auth = load_canonical_compaction_checkpoints(
+        compact_dir=compact_dir,
+        threads_dir=threads_dir,
+        thread_id="t-missing",
+    )
+    assert corrupt_auth["successful_cycle_count"] == 0
+    assert any("unreadable_thread_authority" in err["error"] for err in corrupt_auth["errors"])
+    assert evaluate_compact_stress_observations({"checkpoints": corrupt_auth})["ok"] is False
+    (threads_dir / "t-missing.json").unlink()
+    (compact_dir / "conversations" / "t-missing.jsonl").unlink()
+
+    # 3. Broken chain (missing previous checkpoint link) & generation mismatch -> zero partial promotion.
+    broken_rows = _make_chain_rows("t-broken", 1, 5)
+    # Drop generation 2 so chain breaks between gen 3 -> gen 2; gens 3..5 must NOT promote!
+    broken_without_gen2 = [r for r in broken_rows if r["generation"] != 2]
+    (compact_dir / "conversations" / "t-broken.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in broken_without_gen2) + "\n", encoding="utf-8"
+    )
+    (threads_dir / "t-broken.json").write_text(
+        json.dumps({"thread_id": "t-broken", "compact_generation": 5, "compact_checkpoint_id": "compact-v3-t-broken-5"}),
+        encoding="utf-8",
+    )
+    broken_res = load_canonical_compaction_checkpoints(
+        compact_dir=compact_dir,
+        threads_dir=threads_dir,
+        thread_id="t-broken",
+    )
+    assert broken_res["successful_cycle_count"] == 0
+    assert any("missing_checkpoint_in_chain" in err["error"] for err in broken_res["errors"])
+    assert evaluate_compact_stress_observations({"checkpoints": broken_res})["ok"] is False
+
+    # Generation mismatch on node 4.
+    mismatch_rows = _make_chain_rows("t-mismatch", 1, 5)
+    mismatch_rows[3]["generation"] = 99
+    (compact_dir / "conversations" / "t-mismatch.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in mismatch_rows) + "\n", encoding="utf-8"
+    )
+    (threads_dir / "t-mismatch.json").write_text(
+        json.dumps({"thread_id": "t-mismatch", "compact_generation": 5, "compact_checkpoint_id": "compact-v3-t-mismatch-5"}),
+        encoding="utf-8",
+    )
+    mismatch_res = load_canonical_compaction_checkpoints(
+        compact_dir=compact_dir,
+        threads_dir=threads_dir,
+        thread_id="t-mismatch",
+    )
+    assert mismatch_res["successful_cycle_count"] == 0
+    assert any("compact_generation_mismatch" in err["error"] for err in mismatch_res["errors"])
+    assert evaluate_compact_stress_observations({"checkpoints": mismatch_res})["ok"] is False
+
+    # Clean broken threads before testing valid 7-gen chain across baseline=2.
+    for name in ("t-broken", "t-mismatch"):
+        (threads_dir / f"{name}.json").unlink()
+        (compact_dir / "conversations" / f"{name}.jsonl").unlink()
+
+    valid_rows = _make_chain_rows("t-valid", 1, 7)
+    (compact_dir / "conversations" / "t-valid.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in valid_rows) + "\n", encoding="utf-8"
+    )
+    (threads_dir / "t-valid.json").write_text(
+        json.dumps({"thread_id": "t-valid", "compact_generation": 2, "compact_checkpoint_id": "compact-v3-t-valid-2"}),
+        encoding="utf-8",
+    )
+    baseline = snapshot_compaction_baseline(compact_dir=compact_dir, threads_dir=threads_dir)
+    (threads_dir / "t-valid.json").write_text(
+        json.dumps({"thread_id": "t-valid", "compact_generation": 7, "compact_checkpoint_id": "compact-v3-t-valid-7"}),
+        encoding="utf-8",
+    )
+    valid_res = load_canonical_compaction_checkpoints(
+        compact_dir=compact_dir,
+        threads_dir=threads_dir,
+        baseline=baseline,
+    )
+    assert valid_res["successful_cycle_count"] == 5
+    assert valid_res["errors"] == []
+    assert [c["generation"] for c in valid_res["cycles"]] == [3, 4, 5, 6, 7]
+    gate_valid = evaluate_compact_stress_observations({
+        "checkpoints": valid_res,
+        "telemetry": {"runaway_no_progress_detected": False},
+        "bg_census_diff": {"leaked_count": 0},
+    })
+    assert gate_valid["ok"] is True
+    assert gate_valid["checkpoint_errors"] == []
+
+    # Mixed state in stress runner: 5 valid cycles on t-valid + 1 broken thread must fail case_main_compact_stress_long_read.
+    (compact_dir / "conversations" / "t-extra-bad.jsonl").write_text(
+        json.dumps(candidate_rows[0]) + "\n", encoding="utf-8"
+    )
+    reporter = LabReporter(session, session.args)
+    runner = LabRunner(session, reporter, session.args)
+    facts = _stress_facts()
+    report = session.fixture_root / "lab_outputs" / "compact-stress" / "report.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report_lines = ["# Compact Stress Report", "", "## 总体结论", "最终决定。"] + [
+        f"章节 {f.section:03d} | {f.city} | 最终决定：{f.decision} | {f.risk} | {f.checkpoint}"
+        for f in facts
+    ]
+    report_body = "\n".join(report_lines) + ("\n证据" * 150)
+
+    def _mock_run_with_extra_bad(*_args, **_kwargs):
+        report.write_text(report_body, encoding="utf-8")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(runner, "run_command", _mock_run_with_extra_bad)
+    from scripts.live_lab.runner import _LabInterface
+
+    lab = _LabInterface(runner)
+    with pytest.raises(RuntimeError, match="COMPACT_CHECKPOINT_AUTHORITY_ERROR"):
+        case_main_compact_stress_long_read(lab)
+
+
+def test_astra_f6_bg_census_consumes_w6_termination_cleanup_proof(tmp_path: Path) -> None:
+    session = LabSessionManager(_make_args(tmp_path, run_id="astra-f6"))
+    session.setup()
+    assert session.process_store_root is not None
+    store_root = session.process_store_root
+    store_root.mkdir(parents=True, exist_ok=True)
+    owner_home = str(session.owner_home_dir)
+    workspace_root = str(session.fixture_root)
+    pre = collect_bg_process_census(store_root, pid_alive_fn=lambda _pid: False)
+
+    # 1. Unconfirmed cleanup / incomplete tree observation / unresolved_instances -> NOT settled.
+    unconfirmed = _v4_bg_record(
+        session_id="bg-unconfirmed",
+        owner_home=owner_home,
+        workspace_root=workspace_root,
+        status="killed",
+        child_pid=41010,
+        host_pid=9010,
+        finished_at=120.0,
+        exit_code=-9,
+    )
+    unconfirmed["termination"] = {
+        "cleanup": {
+            "confirmed": False,
+            "tree_observation_complete": False,
+            "instances": [],
+            "unresolved_instances": [{"pid": 43210, "birth_token": "b-desc"}],
+        }
+    }
+    (store_root / "bg-unconfirmed.json").write_text(json.dumps(unconfirmed), encoding="utf-8")
+
+    post_dead_desc = collect_bg_process_census(store_root, pid_alive_fn=lambda _pid: False)
+    assert post_dead_desc["counts"]["settled"] == 0
+    assert post_dead_desc["counts"]["unknown"] == 1
+    assert post_dead_desc["unknown"][0]["reason"] == "unresolved_instances_present"
+    assert diff_bg_process_census(pre, post_dead_desc)["leaked_count"] == 1
+
+    # When unresolved descendant PID is still alive -> classified as active (cleanup_unresolved_live).
+    post_live_desc = collect_bg_process_census(store_root, pid_alive_fn=lambda pid: pid == 43210)
+    assert post_live_desc["counts"]["settled"] == 0
+    assert post_live_desc["counts"]["active"] == 1
+    assert post_live_desc["active"][0]["reason"] == "cleanup_unresolved_live"
+    assert diff_bg_process_census(pre, post_live_desc)["leaked_count"] == 1
+
+    # When child is dead but host_pid is still alive -> NOT settled.
+    (store_root / "bg-unconfirmed.json").unlink()
+    host_alive_rec = _v4_bg_record(
+        session_id="bg-host-alive",
+        owner_home=owner_home,
+        workspace_root=workspace_root,
+        status="exited",
+        child_pid=41011,
+        host_pid=9011,
+        finished_at=121.0,
+        exit_code=0,
+    )
+    (store_root / "bg-host-alive.json").write_text(json.dumps(host_alive_rec), encoding="utf-8")
+    post_host_alive = collect_bg_process_census(store_root, pid_alive_fn=lambda pid: pid == 9011)
+    assert post_host_alive["counts"]["settled"] == 0
+    assert post_host_alive["counts"]["unknown"] == 1
+
+    # 2. Confirmed cleanup + tree_observation_complete=True + empty unresolved_instances -> settled.
+    (store_root / "bg-host-alive.json").unlink()
+    confirmed = _v4_bg_record(
+        session_id="bg-confirmed",
+        owner_home=owner_home,
+        workspace_root=workspace_root,
+        status="killed",
+        child_pid=41012,
+        host_pid=9012,
+        finished_at=122.0,
+        exit_code=-9,
+    )
+    confirmed["termination"] = {
+        "cleanup": {
+            "confirmed": True,
+            "tree_observation_complete": True,
+            "instances": [
+                {
+                    "method": "pgid",
+                    "confirmed": True,
+                    "return_code": 0,
+                    "observed_processes": 1,
+                    "unresolved_pids": [],
+                    "tree_observation_complete": True,
+                }
+            ],
+            "unresolved_instances": [],
+        }
+    }
+    (store_root / "bg-confirmed.json").write_text(json.dumps(confirmed), encoding="utf-8")
+    post_confirmed = collect_bg_process_census(store_root, pid_alive_fn=lambda _pid: False)
+    assert post_confirmed["counts"] == {"active": 0, "settled": 1, "unknown": 0, "total": 1}
+    assert diff_bg_process_census(pre, post_confirmed)["leaked_count"] == 0
+
+    # 3. Default live OS probe ignores recycled PID when birth token mismatches.
+    (store_root / "bg-confirmed.json").unlink()
+    recycled = _v4_bg_record(
+        session_id="bg-recycled",
+        owner_home=owner_home,
+        workspace_root=workspace_root,
+        status="exited",
+        child_pid=os.getpid(),
+        host_pid=os.getpid(),
+        finished_at=123.0,
+        exit_code=0,
+    )
+    recycled["pid_birth_token"] = "stale-host-birth-token"
+    recycled["child_pid_birth_token"] = "stale-child-birth-token"
+    recycled["termination"] = confirmed["termination"]
+    (store_root / "bg-recycled.json").write_text(json.dumps(recycled), encoding="utf-8")
+    post_recycled = collect_bg_process_census(store_root)
+    assert post_recycled["counts"] == {"active": 0, "settled": 1, "unknown": 0, "total": 1}
+
+
+def test_astra_info_i1_session_roundtrip_preserves_compaction_flag_and_correlates_timestamps(
+    tmp_path: Path,
+) -> None:
+    session = LabSessionManager(_make_args(tmp_path, run_id="astra-info-i1"))
+    session.setup()
+    usage_file = session.run_root / "llm_usage.jsonl"
+    session.usage_ledger_path = usage_file
+    ctx = session.resolved_home_context
+    compact_dir = Path(ctx["owner_compact_dir"])
+    threads_dir = Path(ctx["threads_dir"])
+    threads_dir.mkdir(parents=True, exist_ok=True)
+    (compact_dir / "conversations").mkdir(parents=True, exist_ok=True)
+
+    # Turn 1: pre-compaction turn.
+    t1 = session.begin_turn_usage("turn-1")
+    with usage_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"purpose": "main", "input_tokens": 10_000, "output_tokens": 200, "cached_tokens": 9_000})
+            + "\n"
+        )
+    r1 = session.end_turn_usage(t1)
+    assert r1["compaction_occurred"] is False
+    assert r1["compact_purpose_calls"] == 0
+
+    # Turn 2: compaction occurs during turn window, with one auxiliary compact call missing cached_tokens
+    # and NO compaction_occurred flag on the usage row itself -> correlated via checkpoint created_at!
+    t2 = session.begin_turn_usage("turn-2")
+    with usage_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"purpose": "main", "input_tokens": 20_000, "output_tokens": 300, "cached_tokens": 4_000})
+            + "\n"
+        )
+        handle.write(
+            json.dumps({"purpose": "conversation_compact_summary", "input_tokens": 5_000, "output_tokens": 400})
+            + "\n"
+        )
+    r2 = session.end_turn_usage(t2)
+    assert r2["compaction_occurred"] is False
+    assert r2["compact_purpose_calls"] == 1
+    checkpoint_ts = (float(r2["started_at"]) + float(r2["finished_at"])) / 2.0
+
+    # Turn 3: later post-compaction turn (with explicit compaction_occurred=False and full cache).
+    t3 = session.begin_turn_usage("turn-3")
+    with usage_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({
+                "purpose": "main",
+                "input_tokens": 25_000,
+                "output_tokens": 250,
+                "cached_tokens": 22_500,
+                "compaction_occurred": False,
+            })
+            + "\n"
+        )
+    session.end_turn_usage(t3)
+
+    # Also verify explicit compaction_occurred=True survives aggregate_usage_records directly.
+    explicit_agg = aggregate_usage_records([
+        {"purpose": "main", "input_tokens": 1000, "output_tokens": 50, "compaction_occurred": True},
+    ])
+    assert explicit_agg["compaction_occurred"] is True
+
+    # Write committed checkpoint matching turn-2 timestamp window.
+    (compact_dir / "conversations" / "corr-thread.jsonl").write_text(
+        json.dumps({
+            "schema": "conversation_compact_checkpoint.v3",
+            "thread_id": "corr-thread",
+            "generation": 1,
+            "checkpoint_id": "compact-v3-corr-1",
+            "previous_checkpoint_id": "",
+            "projected_tokens_before": 140_000,
+            "projected_tokens_after": 14_000,
+            "mode": "cache_fork",
+            "created_at": checkpoint_ts,
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    (threads_dir / "corr-thread.json").write_text(
+        json.dumps({"thread_id": "corr-thread", "compact_generation": 1, "compact_checkpoint_id": "compact-v3-corr-1"}),
+        encoding="utf-8",
+    )
+
+    report = collect_compaction_observations(
+        config_path=session.config_path,
+        turn_usages=session.turn_usage_records,
+        pid_alive_fn=lambda _pid: False,
+    )
+    phases = report["cache_phases"]
+    assert phases["compaction_turns"] == [1]
+    assert phases["split_turn_index"] == 1
+    assert phases["pre_compaction"]["observed_cached_ratio"] == pytest.approx(0.9)
+    # Turn 2 paired subset ignores the summary call that lacked cached_tokens (4_000 / 20_000 == 0.2, not fabricated 0).
+    assert phases["first_post_compaction"]["paired_input_tokens"] == 20_000
+    assert phases["first_post_compaction"]["observed_cached_ratio"] == pytest.approx(0.2)
+    assert phases["later_post_compaction"]["observed_cached_ratio"] == pytest.approx(0.9)

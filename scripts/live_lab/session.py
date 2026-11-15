@@ -335,6 +335,7 @@ request_timeout: {request_timeout}
         summary = aggregate_usage_records(rows)
         record = {
             "turn": label,
+            "turn_index": len(self.turn_usage_records),
             "started_at": token.get("started_at"),
             "finished_at": time.time(),
             "raw_event_count": len(rows),
