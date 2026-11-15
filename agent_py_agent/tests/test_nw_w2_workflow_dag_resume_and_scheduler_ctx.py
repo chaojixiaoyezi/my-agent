@@ -1126,3 +1126,160 @@ def test_cancelled_non_agent_runs_release_concurrency_claim_while_preserving_ret
         effect_outcome='unknown',
     )
     assert _concurrency_settled(unsettled_agent_cancelled) is False
+
+
+@pytest.mark.parametrize('phase', ['retained', 'executing', 'success'])
+def test_raw_scheduled_workflows_run_classifies_holder_phases_without_false_confirmation(tmp_path, phase):
+    import contextvars
+
+    from agent_py_agent.agent.assets.workflow_store import WorkflowStore
+
+    agent, store, thread = _scheduler_harness(tmp_path)
+    home = agent.home_paths.owner_home_dir
+    owner = agent.home_paths.owner_id
+    definition = {
+        'descriptor': {
+            'id': 'wf_raw_control_phase',
+            'kind': 'workflow',
+            'name': 'raw control phase',
+            'owner_id': owner,
+        },
+        'steps': [] if phase == 'success' else [
+            {'step_id': 'one', 'name': 'one', 'mode': 'llm_skill_analysis'},
+        ],
+    }
+    asset = WorkflowStore(home).save_workflow(definition)
+
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _analyze(*_args, **_kwargs):
+        calls.append('once')
+        if phase == 'executing':
+            entered.set()
+            assert release.wait(timeout=10.0)
+            return {'done': True}
+        raise ToolCancelled('simulated interrupted step')
+
+    engine = WorkflowEngine(home, workspace_root=tmp_path, analysis_handler=_analyze)
+    worker = None
+    prior_run_id = f'prior-run-{phase}'
+
+    if phase == 'executing':
+        ctx = contextvars.Context()
+        worker = threading.Thread(
+            target=lambda: ctx.run(
+                engine.run_workflow,
+                asset.to_dict(),
+                workflow_run_id=prior_run_id,
+                concurrency_policy='skip_if_running',
+            ),
+            daemon=True,
+        )
+        worker.start()
+        assert entered.wait(timeout=10.0)
+    elif phase == 'retained':
+        with pytest.raises(ToolCancelled):
+            engine.run_workflow(
+                asset.to_dict(),
+                workflow_run_id=prior_run_id,
+                concurrency_policy='skip_if_running',
+            )
+
+    job = agent.scheduler_repository.create_job(
+        SchedulerJobCreateRequest(
+            name=f'raw-workflow-job-{phase}',
+            prompt='',
+            thread_id=thread.thread_id,
+            schedule={
+                'kind': 'every',
+                'every_seconds': 600,
+                'anchor_at': 1000,
+                'timezone': 'UTC',
+            },
+            rules=[
+                {
+                    'id': 'r1',
+                    'name': 'run',
+                    'use_llm': False,
+                    'schedule': {
+                        'kind': 'every',
+                        'every_seconds': 600,
+                        'anchor_at': 1000,
+                        'timezone': 'UTC',
+                    },
+                    'tool': {
+                        'name': 'workflows',
+                        'arguments': {
+                            'action': 'run',
+                            'workflow_id': 'wf_raw_control_phase',
+                            'concurrency_policy': 'skip_if_running',
+                            'inputs': {},
+                        },
+                    },
+                },
+            ],
+            now=900,
+        ),
+    )[0]
+
+    try:
+        ticks = 3 if phase == 'retained' else 1
+        for tick in range(ticks):
+            signal, claim, kwargs = _claim_due_rule(agent, store, now=1000 + 600 * tick)
+            execute_scheduled_tool(agent, agent.scheduler_service, claim, signal, kwargs)
+            history, _ = agent.scheduler_repository.history(limit=10)
+            row = next(item for item in history if item['run_id'] == claim.run_id)
+            rule = agent.scheduler_repository.get_job(job['job_id'])['rules'][0]
+            parsed = json.loads(row['response'])
+            task = store.tasks.load(claim.run_id)
+            runtime_statuses = [
+                rec['status'] for rec in agent.subagents.runtime_db.task_runs_for_task(claim.run_id)
+            ]
+
+            assert task is not None
+            assert store.wakes.pending_one(signal.wake_signal_id) is None
+            assert runtime_statuses == ['done']
+
+            if phase == 'retained':
+                assert row['status'] == 'failed'
+                assert row.get('error_code') == 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE'
+                assert rule['consecutive_failures'] == tick + 1
+                assert rule.get('result') is None
+                assert parsed.get('status') == 'failed'
+                assert parsed.get('error_code') == 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE'
+                assert parsed.get('reason_code') == 'prior_run_unsettled'
+                assert parsed.get('running_run_id') == prior_run_id
+                assert parsed.get('holder_phase') == 'retained'
+                assert parsed.get('effect_outcome') == 'not_started'
+                assert isinstance(parsed.get('next_action'), str) and parsed['next_action'].strip()
+                assert task.status == 'abandoned'
+            elif phase == 'executing':
+                assert row['status'] == 'skipped'
+                assert row.get('error_code') == 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING'
+                assert rule['consecutive_failures'] == 0
+                assert rule.get('result') is None
+                assert parsed.get('status') == 'skipped'
+                assert parsed.get('error_code') == 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING'
+                assert parsed.get('running_run_id') == prior_run_id
+                assert parsed.get('holder_phase') == 'executing'
+                assert task.status == 'cancelled'
+            else:
+                assert row['status'] == 'done'
+                assert not row.get('error_code')
+                assert rule['consecutive_failures'] == 0
+                assert rule.get('result') is not None
+                assert parsed.get('workflow_id') == 'wf_raw_control_phase'
+                assert parsed.get('status') == 'succeeded'
+                assert task.status == 'completed'
+    finally:
+        release.set()
+        if worker is not None:
+            worker.join(timeout=10.0)
+            assert not worker.is_alive()
+
+    if phase in ('retained', 'executing'):
+        assert calls == ['once']
+    else:
+        assert calls == []
