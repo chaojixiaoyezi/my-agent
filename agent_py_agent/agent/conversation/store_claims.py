@@ -170,10 +170,10 @@ def _claim_acquisition_reason(data: dict[str, Any], current: float) -> str:
 # LLM: 损坏必须以 load_error 返回，不能伪装成正常空记录后抢占执行。
 # 函数用途: 读取原 claim JSON 及明确损坏事实，不写文件。
 def _read_claim_report(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    if not path.exists():
-        return {}, None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, None
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return {}, _claim_load_error(exc, path)
     if not isinstance(payload, dict):
@@ -237,10 +237,14 @@ class ClaimStore:
         *,
         require_thread: Callable[[str], ConversationThread],
         load_thread: Callable[[str], ConversationThread | None],
+        load_thread_report: Callable[
+            [str], tuple[ConversationThread | None, dict[str, Any] | None]
+        ] | None = None,
     ) -> None:
         self.storage = storage
         self._require_thread = require_thread
         self._load_thread = load_thread
+        self._load_thread_report = load_thread_report
 
 
     def _runtime_authority_settled(self, authority: object) -> bool:
@@ -409,10 +413,17 @@ class ClaimStore:
         thread_id = str(request.get("thread_id") or "")
         claim_scope_id = str(request.get("claim_scope_id") or thread_id).strip()
         claim_id = str(request.get("claim_id") or "")
-        # 续租只作用于 claim 租约文件（按 thread_id 定位），不需要线程对象。若线程此刻不可读
-        # （边缘/竞态：外部清理、长跑中线程消失、极端下 store 根不一致），续租已无意义——返回 None
-        # 让后台心跳线程按既有 `renewed is None → 停机` 契约优雅收尾，绝不抛 KeyError 裸崩 daemon 线程。
-        if self._load_thread(thread_id) is None:
+        # 续租只作用于 claim 租约文件（按 thread_id 定位），不需要线程对象。若线程确认缺失
+        # （(None, None)），返回 None 让后台心跳线程按既有 `renewed is None → 停机` 契约优雅收尾；
+        # 若线程读取返回结构化错误（如短暂 I/O 失败），须在改写租约前抛普通 OSError，
+        # 交由心跳既有的租约期重试窗口处理，绝不把读不确定误判为租约永久丢失。
+        if self._load_thread_report is not None:
+            thread, load_error = self._load_thread_report(thread_id)
+            if load_error is not None:
+                raise OSError(f"BACKGROUND_THREAD_READ_UNAVAILABLE: {load_error}")
+        else:
+            thread = self._load_thread(thread_id)
+        if thread is None:
             # 真机诊断锚点：把此刻解析出的线程文件绝对路径打出来（=该 store 的会话库根），
             # 一旦真出现「续租时线程缺失」，日志即可证实/排除 supervisor 与请求路的 store 根是否不一致。
             _STORE_LOGGER.warning(
@@ -469,7 +480,9 @@ class ClaimStore:
         # 的 finally 里跑：若线程在长跑中变不可读还硬 `_require_thread`，会二次抛 KeyError 盖掉真正的 run
         # 错误、并再次崩后台清理。改为对已存在的 claim 文件收尾；无 claim 文件则无可收尾直接返回 None。
         claim_path = self.storage.background_claim_path(claim_scope_id)
-        if not claim_path.exists():
+        try:
+            claim_path.stat()
+        except FileNotFoundError:
             return None
         current = now(request.get("now"))
         raw_status = request.get("status")
