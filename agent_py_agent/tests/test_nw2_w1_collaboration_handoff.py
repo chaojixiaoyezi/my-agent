@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import builtins
 import errno
+import inspect
 import json
 import logging
 import sqlite3
@@ -13,7 +15,19 @@ import pytest
 from agent_py_agent.agent.agent_core.orchestration.tools.handoff_board_tool import (
     ManageHandoffBoardTool,
 )
-from agent_py_agent.agent.collaboration import CollaborationCoordinator, CollaborationStore
+from agent_py_agent.agent.collaboration import (
+    CollaborationCoordinator,
+    CollaborationStore,
+)
+from agent_py_agent.agent.collaboration import (
+    external_mailbox_adapter as mailbox_adapter_mod,
+)
+from agent_py_agent.agent.collaboration import (
+    store as collab_store_mod,
+)
+from agent_py_agent.agent.collaboration import (
+    store_common as collab_store_common_mod,
+)
 from agent_py_agent.agent.collaboration.external_mailbox_adapter import (
     ExternalMailboxAdapter,
     create_external_mailbox_layout,
@@ -631,3 +645,403 @@ def test_nw2_p7_01_handoff_board_tool_effect_outcome_contract(
     assert not explicit_res.ok
     assert explicit_res.error_code == "INTERNAL_ERROR"
     assert explicit_res.effect_outcome == "not_started"
+
+
+def test_nw2r1_p1_01_canonical_handoff_read_eio_holds_cursor_during_ack_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    service = HandoffBoardService(store=store, workspace_root=tmp_path / "workspace")
+    case = store.open_case({"title": "Canonical EIO ACK", "summary": "s", "created_by": "coord"})
+    item = service.publish_item(
+        case_id=case.case_id,
+        request_id="",
+        item_id="item_canon_eio_ack",
+        responsible_actor="ext_worker",
+        actor_kind="external_assistant",
+        frozen_input_version="v1",
+        idempotency_key="canon-eio-ack",
+    )
+
+    coord_root = tmp_path / "mailbox_root"
+    coord_root.mkdir(parents=True, exist_ok=True)
+    layout = create_external_mailbox_layout(coord_root, "ext_worker")
+    adapter = ExternalMailboxAdapter(allowed_roots=[coord_root], max_file_bytes=262144)
+    first_sync = adapter.sync_external_mailbox(service, layout, now=10.0)
+    assert first_sync["delivered_item_ids"] == [item.item_id]
+
+    inbox_path = layout.actor_inbox_path
+    cursor_path = inbox_path.parent / ".coordinator_cursor.json"
+    prior_msg = json.dumps({"action": "noop", "case_id": "", "item_id": ""})
+    inbox_path.write_text(f"{prior_msg}\n", encoding="utf-8")
+    adapter.sync_external_mailbox(service, layout, now=11.0)
+    cursor_before = json.loads(cursor_path.read_text(encoding="utf-8"))
+    assert cursor_before["processed_lines"] == 1
+
+    ack_msg = json.dumps(
+        {
+            "action": "ack",
+            "case_id": case.case_id,
+            "item_id": item.item_id,
+            "ack_id": "ack-eio-1",
+            "frozen_input_version": "v1",
+            "recipient_ack": {"actor_id": "ext_worker", "status": "accepted"},
+        }
+    )
+    with inbox_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{ack_msg}\n")
+
+    target_handoff_path = store._handoff_items_path(case.case_id)
+    orig_cached_read = collab_store_common_mod.read_text_lines_cached
+    fault = {"active": True}
+
+    def flaky_read_text_lines_cached(path: Path) -> tuple[str, ...]:
+        if path == target_handoff_path and fault["active"]:
+            raise OSError(errno.EIO, "simulated canonical handoff ledger read EIO")
+        return orig_cached_read(path)
+
+    monkeypatch.setattr(collab_store_common_mod, "read_text_lines_cached", flaky_read_text_lines_cached)
+
+    fail_report = adapter.sync_external_mailbox(service, layout, now=12.0)
+    assert fail_report["acked_item_ids"] == []
+    assert len(fail_report["errors"]) == 1
+    err = fail_report["errors"][0]
+    assert err["error_code"] == "MAILBOX_APPLY_IO_ERROR"
+    assert err["effect_outcome"] == "unknown"
+    assert err["retryable"] is True
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == cursor_before
+
+    # Fault clears -> next clean sync applies ACK and advances cursor 1 -> 2.
+    fault["active"] = False
+    clean_report = adapter.sync_external_mailbox(service, layout, now=13.0)
+    assert clean_report["errors"] == []
+    assert clean_report["acked_item_ids"] == [item.item_id]
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["processed_lines"] == 2
+    assert store.load_handoff_item(case.case_id, item.item_id).state == "acked"
+
+
+def test_nw2r1_p1_01_inbox_read_eio_after_stat_holds_cursor_and_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    service = HandoffBoardService(store=store, workspace_root=tmp_path / "workspace")
+    case = store.open_case({"title": "Inbox EIO", "summary": "s", "created_by": "coord"})
+    item = service.publish_item(
+        case_id=case.case_id,
+        request_id="",
+        item_id="item_inbox_eio",
+        responsible_actor="ext_worker",
+        actor_kind="external_assistant",
+        frozen_input_version="v1",
+        idempotency_key="inbox-eio-1",
+    )
+
+    coord_root = tmp_path / "mailbox_root"
+    coord_root.mkdir(parents=True, exist_ok=True)
+    layout = create_external_mailbox_layout(coord_root, "ext_worker")
+    adapter = ExternalMailboxAdapter(allowed_roots=[coord_root], max_file_bytes=262144)
+    adapter.sync_external_mailbox(service, layout, now=20.0)
+
+    inbox_path = layout.actor_inbox_path
+    cursor_path = inbox_path.parent / ".coordinator_cursor.json"
+    prior_msg = json.dumps({"action": "noop", "case_id": "", "item_id": ""})
+    inbox_path.write_text(f"{prior_msg}\n", encoding="utf-8")
+    adapter.sync_external_mailbox(service, layout, now=21.0)
+    cursor_before = json.loads(cursor_path.read_text(encoding="utf-8"))
+    assert cursor_before["processed_lines"] == 1
+
+    ack_msg = json.dumps(
+        {
+            "action": "ack",
+            "case_id": case.case_id,
+            "item_id": item.item_id,
+            "ack_id": "ack-inbox-eio",
+            "frozen_input_version": "v1",
+            "recipient_ack": {"actor_id": "ext_worker", "status": "accepted"},
+        }
+    )
+    with inbox_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{ack_msg}\n")
+
+    # Line-count open after stat succeeds (#1), then read_actor_messages open hits EIO (#2).
+    orig_open = builtins.open
+    open_counter = {"reads": 0, "active": True}
+
+    def wrapped_open(
+        file,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ):
+        if open_counter["active"] and Path(file) == inbox_path and "r" in mode:
+            open_counter["reads"] += 1
+            if open_counter["reads"] == 2:
+                raise OSError(errno.EIO, "simulated inbox read EIO after line-count stat")
+        return orig_open(
+            file,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    monkeypatch.setattr(mailbox_adapter_mod, "open", wrapped_open, raising=False)
+
+    fail_report = adapter.sync_external_mailbox(service, layout, now=22.0)
+    assert fail_report["acked_item_ids"] == []
+    assert any(
+        entry.get("retryable") is True and "read_failed" in str(entry.get("reason") or "")
+        for entry in fail_report["quarantined"]
+    )
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == cursor_before
+
+    # Also verify stat_failed in read_actor_messages sets retryable=True and holds cursor.
+    orig_stat = Path.stat
+    stat_calls = {"active": True, "injected": False}
+
+    def wrapped_stat(path_obj: Path, follow_symlinks: bool = True):
+        frame = inspect.currentframe()
+        caller_name = frame.f_back.f_code.co_name if frame and frame.f_back else ""
+        if (
+            stat_calls["active"]
+            and not stat_calls["injected"]
+            and path_obj == inbox_path
+            and caller_name == "read_actor_messages"
+        ):
+            stat_calls["injected"] = True
+            raise OSError(errno.EIO, "simulated inbox stat EIO in read_actor_messages")
+        return orig_stat(path_obj, follow_symlinks=follow_symlinks)
+
+    with monkeypatch.context() as mp:
+        open_counter["active"] = False
+        mp.setattr(Path, "stat", wrapped_stat)
+        stat_fail_report = adapter.sync_external_mailbox(service, layout, now=22.5)
+    assert stat_calls["injected"] is True
+    assert stat_fail_report["acked_item_ids"] == []
+    assert any(
+        entry.get("retryable") is True and "stat_failed" in str(entry.get("reason") or "")
+        for entry in stat_fail_report["quarantined"]
+    )
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == cursor_before
+
+    # Recovery: next clean sync delivers/applies unread message and advances cursor 1 -> 2.
+    open_counter["active"] = False
+    clean_report = adapter.sync_external_mailbox(service, layout, now=23.0)
+    assert clean_report["errors"] == []
+    assert clean_report["quarantined"] == []
+    assert clean_report["acked_item_ids"] == [item.item_id]
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["processed_lines"] == 2
+    assert store.load_handoff_item(case.case_id, item.item_id).state == "acked"
+
+
+def test_nw2r1_p1_01_publish_item_idempotent_retry_raises_on_read_eio_and_preserves_item_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    service = HandoffBoardService(store=store, workspace_root=tmp_path / "workspace")
+    case = store.open_case({"title": "Publish EIO", "summary": "s", "created_by": "coord"})
+
+    orig_item = service.publish_item(
+        case_id=case.case_id,
+        request_id="req-1",
+        responsible_actor="worker-1",
+        frozen_input_version="v1",
+        exclusive_write_set=("a.py",),
+        idempotency_key="stable-pub-key",
+    )
+
+    target_handoff_path = store._handoff_items_path(case.case_id)
+    orig_cached_read = collab_store_common_mod.read_text_lines_cached
+    fault = {"active": True}
+
+    def flaky_read_text_lines_cached(path: Path) -> tuple[str, ...]:
+        if path == target_handoff_path and fault["active"]:
+            raise OSError(errno.EIO, "simulated canonical read EIO during idempotent publish")
+        return orig_cached_read(path)
+
+    monkeypatch.setattr(collab_store_common_mod, "read_text_lines_cached", flaky_read_text_lines_cached)
+
+    with pytest.raises(OSError):
+        service.publish_item(
+            case_id=case.case_id,
+            request_id="req-1",
+            responsible_actor="worker-1",
+            frozen_input_version="v1",
+            exclusive_write_set=("a.py",),
+            idempotency_key="stable-pub-key",
+        )
+
+    fault["active"] = False
+    replayed = service.publish_item(
+        case_id=case.case_id,
+        request_id="req-1",
+        responsible_actor="worker-1",
+        frozen_input_version="v1",
+        exclusive_write_set=("a.py",),
+        idempotency_key="stable-pub-key",
+    )
+    assert replayed.item_id == orig_item.item_id
+    all_items = store.case_handoff_items(case.case_id)
+    assert [it.item_id for it in all_items] == [orig_item.item_id]
+
+
+def test_nw2r1_p1_01_close_one_of_two_items_with_read_eio_does_not_evict_active_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    service = HandoffBoardService(store=store, workspace_root=tmp_path / "workspace")
+    case = store.open_case({"title": "Two items close EIO", "summary": "s", "created_by": "coord"})
+
+    first = service.publish_item(
+        case_id=case.case_id,
+        request_id="",
+        responsible_actor="worker-1",
+        frozen_input_version="v1",
+        idempotency_key="two-1",
+    )
+    second = service.publish_item(
+        case_id=case.case_id,
+        request_id="",
+        responsible_actor="worker-2",
+        frozen_input_version="v1",
+        idempotency_key="two-2",
+    )
+
+    idx_path = store.handoff_items_dir / ".active_cases.json"
+    assert case.case_id in json.loads(idx_path.read_text(encoding="utf-8"))["active_cases"]
+
+    target_handoff_path = store._handoff_items_path(case.case_id)
+    orig_cached_read = collab_store_common_mod.read_text_lines_cached
+    read_state = {"calls": 0}
+
+    def flaky_read_text_lines_cached(path: Path) -> tuple[str, ...]:
+        if path == target_handoff_path:
+            read_state["calls"] += 1
+            # Call #1: close_item -> load_handoff_item succeeds; Call #2: append_handoff_item remaining check hits EIO.
+            if read_state["calls"] == 2:
+                raise OSError(errno.EIO, "simulated EIO reading remaining items after close")
+        return orig_cached_read(path)
+
+    monkeypatch.setattr(collab_store_common_mod, "read_text_lines_cached", flaky_read_text_lines_cached)
+
+    with pytest.raises(OSError):
+        service.close_item(case_id=case.case_id, item_id=first.item_id, reason="first done")
+
+    assert case.case_id in json.loads(idx_path.read_text(encoding="utf-8"))["active_cases"]
+    assert store.load_handoff_item(case.case_id, first.item_id).state == "closed"
+
+    published = store.list_all_handoff_items(state="published")
+    assert [it.item_id for it in published] == [second.item_id]
+
+
+def test_nw2r1_p1_02_active_index_write_ordering_and_idempotent_replay_heal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    service = HandoffBoardService(store=store, workspace_root=tmp_path / "workspace")
+    case_ordered = store.open_case({"title": "Ordered write", "summary": "s", "created_by": "coord"})
+
+    idx_path = store.handoff_items_dir / ".active_cases.json"
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    idx_path.write_text(json.dumps({"active_cases": []}), encoding="utf-8")
+
+    # Part A: Single EIO on .active_cases.json fails BEFORE canonical JSONL publish; retry succeeds cleanly.
+    orig_write = collab_store_mod.write_json_file_atomic_unlocked
+    fault = {"active": True}
+
+    def flaky_write_index(path: Path, data: object, sort_keys: bool = True) -> None:
+        if path == idx_path and fault["active"]:
+            fault["active"] = False
+            raise OSError(errno.EIO, "simulated active index write EIO")
+        orig_write(path, data, sort_keys=sort_keys)
+
+    monkeypatch.setattr(collab_store_mod, "write_json_file_atomic_unlocked", flaky_write_index)
+
+    with pytest.raises(OSError):
+        service.publish_item(
+            case_id=case_ordered.case_id,
+            request_id="",
+            responsible_actor="ext_ordered",
+            actor_kind="external_assistant",
+            frozen_input_version="v1",
+            idempotency_key="ordered-key",
+        )
+
+    assert not store._handoff_items_path(case_ordered.case_id).exists()
+    assert json.loads(idx_path.read_text(encoding="utf-8")) == {"active_cases": []}
+
+    published_ordered = service.publish_item(
+        case_id=case_ordered.case_id,
+        request_id="",
+        responsible_actor="ext_ordered",
+        actor_kind="external_assistant",
+        frozen_input_version="v1",
+        idempotency_key="ordered-key",
+    )
+    assert case_ordered.case_id in json.loads(idx_path.read_text(encoding="utf-8"))["active_cases"]
+    assert [it.item_id for it in store.list_all_handoff_items(state="published")] == [published_ordered.item_id]
+
+    # Part B: Pre-existing unindexed canonical non-closed item healed by idempotent publish retry.
+    case_heal = store.open_case({"title": "Heal unindexed", "summary": "s", "created_by": "coord"})
+    orig_heal = service.publish_item(
+        case_id=case_heal.case_id,
+        request_id="",
+        responsible_actor="ext_heal",
+        actor_kind="external_assistant",
+        frozen_input_version="v1",
+        idempotency_key="heal-key",
+    )
+    # Simulate an unindexed valid index file (missing case_heal.case_id).
+    idx_path.write_text(json.dumps({"active_cases": [case_ordered.case_id]}), encoding="utf-8")
+    assert store.list_all_handoff_items(state="published", responsible_actor="ext_heal") == []
+
+    coord_root = tmp_path / "mailbox_heal"
+    coord_root.mkdir(parents=True, exist_ok=True)
+    layout = create_external_mailbox_layout(coord_root, "ext_heal")
+    adapter = ExternalMailboxAdapter(allowed_roots=[coord_root], max_file_bytes=262144)
+    assert adapter.sync_external_mailbox(service, layout, now=30.0)["delivered_item_ids"] == []
+
+    replayed_heal = service.publish_item(
+        case_id=case_heal.case_id,
+        request_id="",
+        responsible_actor="ext_heal",
+        actor_kind="external_assistant",
+        frozen_input_version="v1",
+        idempotency_key="heal-key",
+    )
+    assert replayed_heal.item_id == orig_heal.item_id
+    assert case_heal.case_id in json.loads(idx_path.read_text(encoding="utf-8"))["active_cases"]
+
+    sync_heal = adapter.sync_external_mailbox(service, layout, now=31.0)
+    assert sync_heal["delivered_item_ids"] == [orig_heal.item_id]
+    assert layout.coordinator_outbox_path.exists()
+
+    # Part C: Closed replay does NOT re-add closed case back into .active_cases.json.
+    case_closed = store.open_case({"title": "Closed replay", "summary": "s", "created_by": "coord"})
+    closed_pub = service.publish_item(
+        case_id=case_closed.case_id,
+        request_id="",
+        responsible_actor="worker-closed",
+        frozen_input_version="v1",
+        idempotency_key="closed-replay-key",
+    )
+    service.close_item(case_id=case_closed.case_id, item_id=closed_pub.item_id, reason="done")
+    assert case_closed.case_id not in json.loads(idx_path.read_text(encoding="utf-8"))["active_cases"]
+    closed_replayed = service.publish_item(
+        case_id=case_closed.case_id,
+        request_id="",
+        responsible_actor="worker-closed",
+        frozen_input_version="v1",
+        idempotency_key="closed-replay-key",
+    )
+    assert closed_replayed.item_id == closed_pub.item_id
+    assert closed_replayed.state == "closed"
+    assert case_closed.case_id not in json.loads(idx_path.read_text(encoding="utf-8"))["active_cases"]

@@ -121,7 +121,14 @@ class ExternalMailboxAdapter:
         try:
             file_stat = path.stat()
         except OSError as exc:
-            quarantined.append({"path": str(path), "reason": f"stat_failed: {exc}"})
+            quarantined.append({
+                "path": str(path),
+                "reason": f"stat_failed: {exc}",
+                "error_code": "MAILBOX_INBOX_IO_ERROR",
+                "exception_type": type(exc).__name__,
+                "errno": exc.errno,
+                "retryable": True,
+            })
             return valid_records, quarantined
 
         if file_stat.st_size > self.max_file_bytes:
@@ -145,7 +152,14 @@ class ExternalMailboxAdapter:
             with open(path, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
         except OSError as exc:
-            quarantined.append({"path": str(path), "reason": f"read_failed: {exc}"})
+            quarantined.append({
+                "path": str(path),
+                "reason": f"read_failed: {exc}",
+                "error_code": "MAILBOX_INBOX_IO_ERROR",
+                "exception_type": type(exc).__name__,
+                "errno": exc.errno,
+                "retryable": True,
+            })
             return valid_records, quarantined
 
         has_corrupt = False
@@ -248,6 +262,7 @@ class ExternalMailboxAdapter:
 
         current_file_size = 0
         total_file_lines = 0
+        inbox_io_error = False
         if inbox_path.exists():
             try:
                 st = inbox_path.stat()
@@ -258,8 +273,9 @@ class ExternalMailboxAdapter:
             except OSError:
                 current_file_size = 0
                 total_file_lines = 0
+                inbox_io_error = True
 
-        if current_file_size < last_file_size or total_file_lines < processed_lines:
+        if not inbox_io_error and (current_file_size < last_file_size or total_file_lines < processed_lines):
             # File shrunk, rotated, or truncated
             processed_lines = 0
 
@@ -269,7 +285,9 @@ class ExternalMailboxAdapter:
         acked_item_ids: list[str] = []
         submitted_item_ids: list[str] = []
         errors: list[dict[str, Any]] = []
-        retryable_apply_error = False
+        retryable_apply_error = inbox_io_error or any(
+            bool(entry.get("retryable")) for entry in quarantined if isinstance(entry, dict)
+        )
 
         # 1. 消费外部助手的回复
         for msg in messages:
@@ -395,10 +413,15 @@ class ExternalMailboxAdapter:
                 logger.warning("Failed to persist mailbox coordinator cursor: %s", cursor_err)
 
         # 2. 检查是否有待投递给该 external_assistant 的 published 交接项
-        all_items = handoff_service.store.list_all_handoff_items(
-            state="published",
-            responsible_actor=layout.actor_id,
-        )
+        try:
+            all_items = handoff_service.store.list_all_handoff_items(
+                state="published",
+                responsible_actor=layout.actor_id,
+            )
+        except OSError:
+            if not any(err.get("error_code") == "MAILBOX_APPLY_IO_ERROR" for err in errors):
+                raise
+            all_items = []
         for item in all_items:
             # 仅处理尚未写入 mailbox 投递记录的项目
             delivery_receipt = item.delivery_receipt or {}

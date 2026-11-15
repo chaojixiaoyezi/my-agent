@@ -1274,14 +1274,17 @@ class CollaborationStore(CollaborationPendingRequestStore):
             write_json_file_atomic_unlocked(idx_path, {"active_cases": sorted(active_set)})
 
     # LLM: 交接项状态变更是只追加 JSONL（同 item_id 取最后一行）；写入由 locked_json_path / append_private_jsonl_records 串行。
+    #   非 closed 项先登记活跃索引再追加规范 JSONL，避免索引写入故障留下已发布却不可发现的交接项；
+    #   closed 项先落盘，再在成功确认无剩余非 closed 项后移除活跃索引。
     # 函数用途: 将交接项的最新状态快照追加到所属 case 的交接账本并更新活跃索引。
     def append_handoff_item(self, item: HandoffBoardItem) -> None:
         ensure_private_dir(self.handoff_items_dir)
         path = self._handoff_items_path(item.case_id)
-        append_private_jsonl_records(path, [item.to_dict()], sort_keys=True)
         if item.state != "closed":
             self._update_active_cases_index(item.case_id, is_active=True)
+            append_private_jsonl_records(path, [item.to_dict()], sort_keys=True)
         else:
+            append_private_jsonl_records(path, [item.to_dict()], sort_keys=True)
             items = self.case_handoff_items(item.case_id)
             has_active = any(it.state != "closed" for it in items)
             self._update_active_cases_index(item.case_id, is_active=has_active)
@@ -1304,9 +1307,15 @@ class CollaborationStore(CollaborationPendingRequestStore):
         self._update_active_cases_index(case_id, is_active=has_active)
 
     # LLM: 读 case 的交接项快照；同 item_id 只保留最后一条，保持插入次序。
+    #   若存在结构化 I/O 读取故障（category == "io"）则直接上抛 OSError，避免把不可读账本误判为空。
     # 函数用途: 获取指定 case 下所有交接项的最新状态列表。
     def case_handoff_items(self, case_id: str) -> list[HandoffBoardItem]:
-        items, _ = self.case_handoff_items_report(case_id)
+        items, load_errors = self.case_handoff_items_report(case_id)
+        for err in load_errors:
+            if isinstance(err, dict) and err.get("category") == "io":
+                detail = str(err.get("message") or err.get("error_type") or "handoff items read error")
+                path_text = str(err.get("path") or "").strip()
+                raise OSError(f"{detail} ({path_text})" if path_text else detail)
         return items
 
     # LLM: 读交接项 JSONL 账本并返回解析结果与错误报告。
