@@ -199,6 +199,9 @@ class HandoffBoardService:
                             "exclusive_write_set": list(existing.exclusive_write_set),
                         })
                     if existing_digest == current_digest:
+                        # 刷新非 closed 幂等项的活跃索引成员，修复可能遗漏的历史索引记录（保持原 item_id）。
+                        if existing.state != "closed":
+                            self.store._update_active_cases_index(case_id, is_active=True)
                         return existing
                     raise IdempotencyConflictError(
                         f"IDEMPOTENCY_CONFLICT: Item {actual_item_id} (key={stable_key}) already exists with conflicting payload",
