@@ -321,21 +321,24 @@ def _remember_write_result(action: str, promotion_results: list[dict[str, object
     active_changed = any(item.get("formal_memory_changed") is True
                          for item in promotion_results)
     required_repairs = _remember_required_repairs(promotion_results)
+    copy_commands = _remember_copy_commands(promotion_results)
+    body: dict[str, object] = {
+        "ok": True,
+        "saved": _remember_saved(promotion_results),
+        "action": action,
+        "active_memory_changed": active_changed,
+        "results": promotion_results,
+        "required_repairs": required_repairs,
+        "hint": _remember_result_hint(action, active_changed, required_repairs, promotion_results),
+    }
+    if len(copy_commands) == 1:
+        body["copy_command"] = copy_commands[0]
+    if copy_commands:
+        body["copy_commands"] = copy_commands
     return ToolHandlerOutcome(
         "remember",
         True,
-        json.dumps(
-            {
-                "ok": True,
-                "saved": _remember_saved(promotion_results),
-                "action": action,
-                "active_memory_changed": active_changed,
-                "results": promotion_results,
-                "required_repairs": required_repairs,
-                "hint": _remember_result_hint(action, active_changed, required_repairs, promotion_results),
-            },
-            ensure_ascii=False,
-        ),
+        json.dumps(body, ensure_ascii=False),
     )
 
 
@@ -1000,7 +1003,28 @@ def _promotion_result_with_scope(
         "automatic_recall": recall_policy,
         "storage_authority": "canonical_formal_memory",
     }
+    candidate_id = str(result.get("candidate_id") or getattr(candidate, "candidate_id", "") or "").strip()
+    if str(result.get("reason_code") or "") == "REVIEW_REQUIRED" and candidate_id and not any(ch.isspace() for ch in candidate_id):
+        result["copy_command"] = f"/memory candidates preview {candidate_id}"
     return result
+
+
+def _remember_copy_commands(promotion_results: list[dict[str, object]]) -> list[str]:
+    commands: list[str] = []
+    seen: set[str] = set()
+    for item in promotion_results:
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get("copy_command") or "").strip()
+        if not command and str(item.get("reason_code") or "") == "REVIEW_REQUIRED":
+            candidate_id = str(item.get("candidate_id") or "").strip()
+            if candidate_id and not any(ch.isspace() for ch in candidate_id):
+                command = f"/memory candidates preview {candidate_id}"
+                item["copy_command"] = command
+        if command and command not in seen:
+            seen.add(command)
+            commands.append(command)
+    return commands
 
 
 # 正式操作完成码包括新提交、幂等命中和已提交删除的隐私清理完成；候选写入本身不算保存。
@@ -1034,10 +1058,12 @@ def _remember_result_hint(
     if removal_hint:
         return removal_hint
     unsaved = sum(str(item.get("reason_code") or "") not in _SAVED_REASON_CODES for item in promotion_results)
+    copy_commands = _remember_copy_commands(promotion_results)
     if active_changed and unsaved:
+        suffix = f"；待本人预览确认的候选请发送：{' ； '.join(copy_commands)}" if copy_commands else ""
         return (
             f"部分记上了：有 {unsaved} 条没记上（看 results 的 reason_code），不要对用户说全部记下了；"
-            "没记上的按 required_repairs 或 reason_code 处理，处理不了就如实告诉用户。"
+            f"没记上的按 required_repairs 或 reason_code 处理，处理不了就如实告诉用户。{suffix}"
         )
     if promotion_results and not unsaved and not active_changed:
         return "这些内容早就在正式记忆里了（这次没有重复写入），可以如实告诉用户已经记着。"
@@ -1060,9 +1086,15 @@ def _remember_result_hint(
             "物理存储位置不扩大自动召回范围。"
         )
     if required_repairs:
+        suffix = f"；另有待本人预览确认的候选请发送：{' ； '.join(copy_commands)}" if copy_commands else ""
         return (
             f"没记上（正式记忆没变）：{action} 只记成了候选，不要对用户说“已记下”或“记住了”。"
-            "按 required_repairs 补齐真实来源后重试，不能把缺证据说成等待用户确认；补不了就如实告诉用户没记上。"
+            f"按 required_repairs 补齐真实来源后重试，不能把缺证据说成等待用户确认；补不了就如实告诉用户没记上。{suffix}"
+        )
+    if copy_commands:
+        return (
+            f"没记上（正式记忆没变）：{action} 只记成了候选，不要对用户说“已记下”或“记住了”。"
+            f"需要本人确认后才会生效，请先发送 {' ； '.join(copy_commands)} 查看预览，再按预览输出中的确认命令完成提交。"
         )
     return (
         f"没记上（正式记忆没变）：{action} 只记成了候选，不要对用户说“已记下”或“记住了”。"

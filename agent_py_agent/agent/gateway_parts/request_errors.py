@@ -359,6 +359,22 @@ def gateway_client_error_message(error_code: object) -> str:
         ),
         "MODEL_PROFILE_UNAVAILABLE": "当前会话绑定的模型档案不可用或已被移除，请使用 /model 切换可用模型后重试。",
         "RUNTIME_DB_RECOVERY_DEFERRED": "运行时数据库正在执行短暂恢复维护，本轮尚未开始执行；请稍后重试。",
+        "AGENTS_WRITE_USER_ONLY": (
+            "AGENTS规则修改须由用户通过 /agents 显式预览确认；"
+            "请先发送 /agents show 查看当前规则，不借文件、shell或其他身份绕过确认。"
+        ),
+        "PLUGIN_CONFIRMATION_REQUIRED": (
+            "启用前需要你确认插件会运行的程序；这是等待用户确认的预览回执，不是参数错误。"
+            "请发送 /plugins 查看待确认插件及预览确认命令，不要重复提交其它参数。"
+        ),
+        "END_TASK_LIVE_ATTEMPT": (
+            "任务的执行树里还有没结束的执行；请先发送 /endtask 或 /status 查看任务编号，"
+            "等运行结束后再发起预览，不要强行结束正在跑的工作。"
+        ),
+        "END_TASK_STATE_CHANGED": (
+            "核对之后任务状态被别处改变，/endtask 没有覆盖它；"
+            "请发送 /endtask 查看最新状态后再决定。"
+        ),
     }
     if code in messages:
         return messages[code]
@@ -368,6 +384,67 @@ def gateway_client_error_message(error_code: object) -> str:
     if code.startswith("MODEL_"):
         return "模型本轮响应未完成，具体原因请查看请求诊断；已有工具操作和历史保留。"
     return "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。"
+
+
+def _clean_single_token(value: object) -> str:
+    token = str(value or "").strip()
+    return token if token and not any(ch.isspace() for ch in token) else ""
+
+
+def gateway_client_copy_commands(
+    error_code: object,
+    *,
+    goal_id: object = None,
+    task_id: object = None,
+    plugin_id: object = None,
+    candidate_id: object = None,
+) -> list[str]:
+    """Return concrete single-line recovery commands for known actionable error codes."""
+    code = str(error_code or "").strip().upper()
+    if code in {"MODEL_NOT_CONFIGURED", "MODEL_PROFILE_UNAVAILABLE"}:
+        return ["/model"]
+    if code in {"ACTIVE_TURN_OUTCOME_UNCERTAIN", "RUN_RECOVERY_REQUIRED"}:
+        return ["/recover"]
+    if code in {"CONVERSATION_TASK_BINDING_CONFLICT", "GOAL_STATE_CONFLICT"}:
+        gid = _clean_single_token(goal_id)
+        if gid:
+            return [f"/goal {gid} resume"]
+        return ["/goal resume"] if code == "CONVERSATION_TASK_BINDING_CONFLICT" else ["/goal"]
+    if code == "AGENTS_WRITE_USER_ONLY":
+        return ["/agents show"]
+    if code == "REVIEW_REQUIRED":
+        cid = _clean_single_token(candidate_id)
+        return [f"/memory candidates preview {cid}"] if cid else ["/memory candidates"]
+    if code == "PLUGIN_CONFIRMATION_REQUIRED":
+        pid = _clean_single_token(plugin_id)
+        return [f"/plugins enable {pid}"] if pid else ["/plugins"]
+    if code in {"END_TASK_LIVE_ATTEMPT", "END_TASK_STATE_CHANGED"}:
+        tid = _clean_single_token(task_id)
+        return [f"/endtask {tid}"] if tid else ["/endtask"]
+    return []
+
+
+def _copy_command_fields(
+    error_code: object,
+    *,
+    goal_id: object = None,
+    task_id: object = None,
+    plugin_id: object = None,
+    candidate_id: object = None,
+) -> dict[str, object]:
+    commands = gateway_client_copy_commands(
+        error_code,
+        goal_id=goal_id,
+        task_id=task_id,
+        plugin_id=plugin_id,
+        candidate_id=candidate_id,
+    )
+    if not commands:
+        return {}
+    fields: dict[str, object] = {"copy_commands": commands}
+    if len(commands) == 1:
+        fields["copy_command"] = commands[0]
+    return fields
 
 
 # LLM: PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED 的状态行短句与上面 gateway_client_error_message 里
@@ -414,6 +491,7 @@ def gateway_model_response_error_projection(result: object) -> dict:
         "turn_end_reason": end,
         "user_error": gateway_client_error_message(code),
         **_structured_error_projection(result),
+        **_copy_command_fields(code),
     }
 
 
@@ -459,7 +537,12 @@ def gateway_provider_error_projection(exc: BaseException) -> dict:
         return fields
     status = provider_error_http_status(exc)
     message = gateway_client_error_message(exc.error_code)
-    projection = {**fields, "error_origin": "model_provider", "user_error": message}
+    projection = {
+        **fields,
+        "error_origin": "model_provider",
+        "user_error": message,
+        **_copy_command_fields(exc.error_code),
+    }
     if status is not None:
         projection["http_status"] = status
         projection["user_error"] = f"模型请求 HTTP {status}：{message}"
@@ -677,6 +760,7 @@ def gateway_owner_scope_error_response(
         "lease_owner": "",
         "lease_started_at": 0,
         "lease_heartbeat_at": 0,
+        **_copy_command_fields(error_code),
     }
 
 
@@ -731,4 +815,5 @@ def gateway_unhandled_worker_error_response(
         "lease_owner": str(request.get("lease_owner") or ""),
         "lease_started_at": request.get("lease_started_at", 0),
         "lease_heartbeat_at": request.get("lease_heartbeat_at", 0),
+        **_copy_command_fields(error_code),
     }

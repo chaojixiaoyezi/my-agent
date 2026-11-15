@@ -77,6 +77,8 @@ def _create_schema_legacy_view(schema):
     assert props.pop('review_requirement_id') == {'type': 'string', 'minLength': 1, 'maxLength': 128, 'description': '本次独立审核的候选编号。它是查询线索；审核时由宿主另核真实身份、原任务和版本。'}
     assert props['allowed_tools']['description'] == '初始工具选择。普通角色仍会补齐默认发现和任务工具。创建时需要精确清单请用 delegation_constraints.permitted_tools。所有工具仍受父级授权上界约束。'
     props['allowed_tools']['description'] = '一般省略；不完整列表不会剥夺子代理基础读写能力。'
+    assert props['model']['description'] == '仅当用户要求或任务需要独立模型时填写。只认当前 owner 已新增配置；同名多配置用回执中的 id，不传地址或密钥；未知或未指定模型时先用 user_config/self_map 查看已配置档案，或省略 model 以继承父级配置。每个 item 可分别选择；子孙默认继续继承其直接父级。'
+    props['model']['description'] = '仅当用户要求或任务需要独立模型时填写。只认当前 owner 已新增配置；同名多配置用回执中的 id，未知模型先请用户 /model 新增，不传地址或密钥。每个 item 可分别选择；子孙默认继续继承其直接父级。'
     constraints = props['delegation_constraints']['properties']
     assert constraints['permitted_tools'].pop('description') == '创建时的精确工具清单，覆盖 allowed_tools 的默认补齐，不能超过父级当前权限。后续缺失能力须走原 capability_request 和父级裁决。审批不能绕过宿主禁用项、路径围栏或不可扩大的授权上界。'
     assert constraints['max_descendant_depth'].pop('description') == '交给该子代理的剩余后代代数（非根树绝对深度）：0 禁止它再派子代，1 允许再派一代；每次派工继承时减1，子代显式值必须小于父级原剩余值。省略表示继承父级剩余值减1；无父级限制时省略表示不加此限。'
