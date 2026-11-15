@@ -23,7 +23,9 @@ from ....common.request_execution_ports import (
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
 import logging
+import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
@@ -46,6 +48,98 @@ from ....subagents.services.runtime_closeout import recover_pending_closeouts
 from .conversation_lifecycle_gate import conversation_lifecycle_decisions
 
 _LOGGER = logging.getLogger(__name__)
+_SUPERVISION_TLS = threading.local()
+
+
+def _is_index_level_load_error(error: Any) -> bool:
+    if not isinstance(error, dict):
+        return True
+    return not str(error.get("run_id") or "").strip()
+
+
+def _record_supervision_canonical_errors(
+    scope: str,
+    errors: list[dict[str, Any]],
+    errors_out: list[dict[str, Any]] | None,
+) -> None:
+    if not errors:
+        return
+    if errors_out is not None:
+        errors_out.extend(errors)
+    collector = getattr(_SUPERVISION_TLS, "canonical_errors", None)
+    if isinstance(collector, list):
+        collector.extend(errors)
+    run_ids = [
+        str(err.get("run_id") or "").strip()
+        for err in errors
+        if isinstance(err, dict) and str(err.get("run_id") or "").strip()
+    ]
+    _LOGGER.warning(
+        "supervision %s isolated %d unreadable canonical row(s): %s",
+        scope,
+        len(errors),
+        ",".join(run_ids),
+    )
+
+
+def _raise_on_index_errors(report_errors: list[Any], message: str) -> None:
+    if any(_is_index_level_load_error(err) for err in report_errors):
+        error = SubagentRunIndexUnavailable(message)
+        error.load_errors = report_errors
+        raise error
+
+
+# LLM: SQLite 索引不可用仍 fail-closed 外抛，但单条坏 canonical 行只隔离计数并放行其余健康兄弟 run。
+# 函数用途: 为监督巡查读取可恢复候选列表，避免一条坏 task.json 阻塞整个 owner 监督。
+def _select_supervision_recovery_runs(
+    manager: Any,
+    predicate: Callable[[Any], bool] | None = None,
+    *,
+    errors_out: list[dict[str, Any]] | None = None,
+) -> list[Any]:
+    if not isinstance(manager, SubAgentManager):
+        return select_recovery_runs(manager, predicate)
+    report = manager.list_recovery_runs_report()
+    report_errors = list(getattr(report, "load_errors", ()) or ())
+    if report_errors:
+        _raise_on_index_errors(report_errors, "subagent recovery index unavailable")
+        _record_supervision_canonical_errors("recovery", report_errors, errors_out)
+    runs = list(getattr(report, "runs", ()) or ())
+    return [task for task in runs if predicate is None or predicate(task)]
+
+
+# 函数用途: 为监督巡查读取当前状态活跃候选列表，保留索引级 fail-closed 并隔离逐行读取错误。
+def _select_supervision_current_runs(
+    manager: Any,
+    predicate: Callable[[Any], bool] | None = None,
+    *,
+    statuses: tuple[str, ...] = (),
+    thread_id: str = "",
+    include_unbound_thread: bool = False,
+    include_open_capabilities: bool = False,
+    errors_out: list[dict[str, Any]] | None = None,
+) -> list[Any]:
+    if not isinstance(manager, SubAgentManager):
+        return select_current_runs(
+            manager,
+            predicate,
+            statuses=statuses,
+            thread_id=thread_id,
+            include_unbound_thread=include_unbound_thread,
+            include_open_capabilities=include_open_capabilities,
+        )
+    report = manager.list_current_runs_report(
+        statuses=statuses,
+        thread_id=thread_id,
+        include_unbound_thread=include_unbound_thread,
+        include_open_capabilities=include_open_capabilities,
+    )
+    report_errors = list(getattr(report, "load_errors", ()) or ())
+    if report_errors:
+        _raise_on_index_errors(report_errors, "subagent current index unavailable")
+        _record_supervision_canonical_errors("current", report_errors, errors_out)
+    runs = list(getattr(report, "runs", ()) or ())
+    return [task for task in runs if predicate is None or predicate(task)]
 
 # 与 runner_completion_wake / capability_request_tool 发出的 reason 对齐。
 CAPABILITY_SWEEP_REASONS = frozenset(
@@ -115,17 +209,22 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return {"started": 0}
+    load_errors: list[dict[str, Any]] = []
     try:
         from ....contracts.state_machine import DISPATCHABLE_STATES, normalize_status
 
-        tasks = select_current_runs(manager, lambda task:
-            normalize_status(str(getattr(task, "status", "") or "")) in DISPATCHABLE_STATES,
-            statuses=tuple(DISPATCHABLE_STATES))
+        tasks = _select_supervision_current_runs(
+            manager,
+            lambda task: normalize_status(str(getattr(task, "status", "") or "")) in DISPATCHABLE_STATES,
+            statuses=tuple(DISPATCHABLE_STATES),
+            errors_out=load_errors,
+        )
         if not tasks:
             return {
                 "started": 0,
                 "authority_recovery_blocked": 0,
                 "recovery_blocks": [],
+                "canonical_row_load_errors": len(load_errors),
             }
         decisions = conversation_lifecycle_decisions(agent, tasks)
         stalled: list[Any] = []
@@ -153,6 +252,7 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
             "started": 0,
             "authority_recovery_blocked": len(recovery_blocks),
             "recovery_blocks": recovery_blocks,
+            "canonical_row_load_errors": len(load_errors),
         }
     from ..background.dispatch import auto_start_tasks
 
@@ -166,6 +266,7 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
         "reused_run_ids": reused,
         "authority_recovery_blocked": len(recovery_blocks),
         "recovery_blocks": recovery_blocks,
+        "canonical_row_load_errors": len(load_errors),
     }
 
 
@@ -350,96 +451,116 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         "runtime_closeouts_recovered": 0,
         "runtime_closeouts_pending": 0,
         "runtime_closeouts_rejected": 0,
+        "canonical_row_load_errors": 0,
     }
+    canonical_errors: list[dict[str, Any]] = []
+    prev_collector = getattr(_SUPERVISION_TLS, "canonical_errors", None)
+    _SUPERVISION_TLS.canonical_errors = canonical_errors
     try:
-        manager = getattr(agent, "subagents", None)
-        repo = getattr(manager, "runtime_db", None)
-        reconcile = getattr(repo, "reconcile_superseded_attempts", None)
-        if callable(reconcile):
-            summary["superseded_attempts_reconciled"] = len(reconcile() or [])
-    except Exception as transport_error:
-        raise_if_transport_uncertain(transport_error)
-        _LOGGER.debug("supervision stale attempt reconcile failed", exc_info=True)
-    try:
-        parent_summary = _reconcile_conversation_parent_lifecycle(agent)
-        summary.update(parent_summary)
-    except SubagentRunIndexUnavailable:
-        raise
-    except Exception as transport_error:
-        raise_if_transport_uncertain(transport_error)
-        _LOGGER.debug("supervision parent lifecycle reconcile failed", exc_info=True)
-    try:
-        reclaimed = _reclaim_dead_running_runs(agent)
-        _merge_running_reclaim_summary(summary, reclaimed)
-    except SubagentRunIndexUnavailable:
-        raise
-    except Exception as transport_error:
-        raise_if_transport_uncertain(transport_error)
-        _LOGGER.debug("supervision running reclaim failed", exc_info=True)
-    # LLM: runner 终态收口的待重试事实由这个既有关键sweep确定性推进：只补记账（settle 权威
-    # run）与补通知（父级 wake），不重跑业务、不建新任务、不读任何自然语言。收口写库临时
-    # 失败或"收口后通知前中断"由此收敛，而不是永久留成 task 终态 / runtime created 的矛盾。
-    # 函数用途: 绑定原存储和父通知能力，推进待重试收口，不新增扫描器或执行入口。
-    try:
-        store = manager.conversation_store
-        notifier = runner_completion_wake.RunnerCompletionNotifier(
-            tasks=store.tasks if store is not None else None,
-            wakes=store.wakes if store is not None else None,
-            load_task=manager.load, save_task=manager.save,
-        )
-        summary.update(recover_pending_closeouts(
-            getattr(manager, "runtime_db", None), load_task=manager.load, save_task=manager.save,
-            list_tasks=partial(select_recovery_runs, manager),
-            notify_result=notifier.notify_result,
-        ))
-    except SubagentRunIndexUnavailable:
-        raise
-    except Exception as transport_error:
-        raise_if_transport_uncertain(transport_error)
-        _LOGGER.debug("supervision runtime closeout recovery failed", exc_info=True)
-    summary.update(_reconcile_direct_parent_waits(agent))
-    try:
-        # Crash/stall recovery is latency-sensitive: once a dead attempt has
-        # been fenced and requeued, restart that exact durable run before the
-        # broader watch-policy/source-reconciliation scans. Those scans can
-        # wait on unrelated file locks and previously delayed an already
-        # recovered source worker by another full minute.
-        _merge_orphan_revive_summary(summary, auto_start_stalled_orphans(agent))
-    except SubagentRunIndexUnavailable:
-        raise
-    except Exception as transport_error:
-        raise_if_transport_uncertain(transport_error)
-        _LOGGER.debug("supervision immediate orphan revive failed", exc_info=True)
-    try:
-        # Reuse this canonical periodic reconciler: one persisted Audit watch
-        # gets one idempotent source worker. No second scheduler or Agent loop.
-        from ....ingestion.source_worker import reconcile_audit_source_workers
+        try:
+            manager = getattr(agent, "subagents", None)
+            repo = getattr(manager, "runtime_db", None)
+            reconcile = getattr(repo, "reconcile_superseded_attempts", None)
+            if callable(reconcile):
+                summary["superseded_attempts_reconciled"] = len(reconcile() or [])
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
+            _LOGGER.debug("supervision stale attempt reconcile failed", exc_info=True)
+        try:
+            parent_summary = _reconcile_conversation_parent_lifecycle(agent)
+            summary.update(parent_summary)
+        except SubagentRunIndexUnavailable:
+            raise
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
+            _LOGGER.debug("supervision parent lifecycle reconcile failed", exc_info=True)
+        try:
+            reclaimed = _reclaim_dead_running_runs(agent)
+            _merge_running_reclaim_summary(summary, reclaimed)
+        except SubagentRunIndexUnavailable:
+            raise
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
+            _LOGGER.debug("supervision running reclaim failed", exc_info=True)
+        # LLM: runner 终态收口的待重试事实由这个既有关键sweep确定性推进：只补记账（settle 权威
+        # run）与补通知（父级 wake），不重跑业务、不建新任务、不读任何自然语言。收口写库临时
+        # 失败或"收口后通知前中断"由此收敛，而不是永久留成 task 终态 / runtime created 的矛盾。
+        # 函数用途: 绑定原存储和父通知能力，推进待重试收口，不新增扫描器或执行入口。
+        try:
+            store = manager.conversation_store
+            notifier = runner_completion_wake.RunnerCompletionNotifier(
+                tasks=store.tasks if store is not None else None,
+                wakes=store.wakes if store is not None else None,
+                load_task=manager.load, save_task=manager.save,
+            )
+            summary.update(recover_pending_closeouts(
+                getattr(manager, "runtime_db", None), load_task=manager.load, save_task=manager.save,
+                list_tasks=partial(_select_supervision_recovery_runs, manager),
+                notify_result=notifier.notify_result,
+            ))
+        except SubagentRunIndexUnavailable:
+            raise
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
+            _LOGGER.debug("supervision runtime closeout recovery failed", exc_info=True)
+        summary.update(_reconcile_direct_parent_waits(agent))
+        try:
+            # Crash/stall recovery is latency-sensitive: once a dead attempt has
+            # been fenced and requeued, restart that exact durable run before the
+            # broader watch-policy/source-reconciliation scans. Those scans can
+            # wait on unrelated file locks and previously delayed an already
+            # recovered source worker by another full minute.
+            _merge_orphan_revive_summary(summary, auto_start_stalled_orphans(agent))
+        except SubagentRunIndexUnavailable:
+            raise
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
+            _LOGGER.debug("supervision immediate orphan revive failed", exc_info=True)
+        try:
+            # Reuse this canonical periodic reconciler: one persisted Audit watch
+            # gets one idempotent source worker. No second scheduler or Agent loop.
+            from ....ingestion.source_worker import reconcile_audit_source_workers
 
-        source_summary = reconcile_audit_source_workers(agent)
-        summary["audit_source_workers"] = source_summary
-    except Exception as transport_error:
-        raise_if_transport_uncertain(transport_error)
-        _LOGGER.debug("supervision Audit source worker reconcile failed", exc_info=True)
-    else:
-        # Reconciliation may materialize a genuinely missing source position.
-        # Only that structural creation needs a second pass; ordinary sweeps
-        # keep a single auto-start call.
-        workers = source_summary.get("workers") if isinstance(source_summary, dict) else []
-        if any(
-            isinstance(item, dict) and item.get("created") is True
-            for item in (workers if isinstance(workers, list) else [])
-        ):
-            try:
-                revive = auto_start_stalled_orphans(agent)
-                summary["orphans_revived"] += int(revive.get("started") or 0)
-                summary["orphan_launches_reused"] += int(revive.get("launch_reused") or 0)
-            except Exception as transport_error:
-                raise_if_transport_uncertain(transport_error)
-                _LOGGER.debug(
-                    "supervision reconciled source revive failed",
-                    exc_info=True,
-                )
-    return summary
+            source_summary = reconcile_audit_source_workers(agent)
+            summary["audit_source_workers"] = source_summary
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
+            _LOGGER.debug("supervision Audit source worker reconcile failed", exc_info=True)
+        else:
+            # Reconciliation may materialize a genuinely missing source position.
+            # Only that structural creation needs a second pass; ordinary sweeps
+            # keep a single auto-start call.
+            workers = source_summary.get("workers") if isinstance(source_summary, dict) else []
+            if any(
+                isinstance(item, dict) and item.get("created") is True
+                for item in (workers if isinstance(workers, list) else [])
+            ):
+                try:
+                    revive = auto_start_stalled_orphans(agent)
+                    summary["orphans_revived"] += int(revive.get("started") or 0)
+                    summary["orphan_launches_reused"] += int(revive.get("launch_reused") or 0)
+                except SubagentRunIndexUnavailable:
+                    raise
+                except Exception as transport_error:
+                    raise_if_transport_uncertain(transport_error)
+                    _LOGGER.debug(
+                        "supervision reconciled source revive failed",
+                        exc_info=True,
+                    )
+        summary["canonical_row_load_errors"] = len(canonical_errors)
+        if canonical_errors:
+            error_run_ids = sorted(
+                {
+                    str(err.get("run_id") or "").strip()
+                    for err in canonical_errors
+                    if isinstance(err, dict) and str(err.get("run_id") or "").strip()
+                }
+            )
+            if error_run_ids:
+                summary["canonical_row_load_error_ids"] = error_run_ids
+        return summary
+    finally:
+        _SUPERVISION_TLS.canonical_errors = prev_collector
 
 
 # LLM: 只将既有回收记录投影到当前监督摘要，不读取 manager、不改运行账；逐项写回保持原异常时已算出的诊断。
@@ -502,6 +623,7 @@ def _merge_orphan_revive_summary(
 # LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
 # 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
+    load_errors: list[dict[str, Any]] = []
     try:
         from ....subagents.direct_parent_lifecycle import (
             _reconcile_parent_wait,
@@ -509,12 +631,21 @@ def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
         )
 
         manager = getattr(agent, "subagents", None)
-        parents = select_recovery_runs(manager, parent_wait_blocks_dispatch) if manager is not None else []
+        parents = (
+            _select_supervision_recovery_runs(
+                manager,
+                parent_wait_blocks_dispatch,
+                errors_out=load_errors,
+            )
+            if manager is not None
+            else []
+        )
         decisions = [_reconcile_parent_wait(manager, str(task.id)) for task in parents]
         return {
             "direct_parent_waits_checked": len(parents),
             "direct_parent_waits_released": sum(item.should_resume for item in decisions),
             "direct_parent_waits_errors": 0,
+            "canonical_row_load_errors": len(load_errors),
         }
     except SubagentRunIndexUnavailable:
         raise
@@ -525,6 +656,7 @@ def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
             "direct_parent_waits_checked": 0,
             "direct_parent_waits_released": 0,
             "direct_parent_waits_errors": 1,
+            "canonical_row_load_errors": len(load_errors),
         }
 
 
@@ -552,12 +684,24 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     if manager is None:
         return []
     reclaimed: list[dict[str, object]] = []
-    tasks = select_current_runs(manager, lambda task:
-        str(getattr(task, "status", "") or "").strip().upper() == "RUNNING", statuses=("RUNNING",))
+    running_errors: list[dict[str, Any]] = []
+    tasks = _select_supervision_current_runs(
+        manager,
+        lambda task: str(getattr(task, "status", "") or "").strip().upper() == "RUNNING",
+        statuses=("RUNNING",),
+        errors_out=running_errors,
+    )
     if not tasks:
         return []
-    all_tasks = select_recovery_runs(manager)
-    fully_stalled_host_pids = _fully_stalled_source_host_pids(all_tasks)
+    recovery_errors: list[dict[str, Any]] = []
+    all_tasks = _select_supervision_recovery_runs(manager, errors_out=recovery_errors)
+    # Any unreadable sibling row could belong to a healthy worker on the same
+    # shared host PID; refuse host termination until canonical rows are readable.
+    fully_stalled_host_pids = (
+        set()
+        if (running_errors or recovery_errors)
+        else _fully_stalled_source_host_pids(all_tasks)
+    )
     # A suspended host can retain task/watch file locks indefinitely.  Fence
     # the host process before rewriting its durable attempts; doing this in
     # the opposite order made five frozen workers consume several lock
@@ -1067,11 +1211,13 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
             "parent_recovery_held": 0,
             "source_workers_completed": 0,
             "source_workers_completion_pending": 0,
+            "canonical_row_load_errors": 0,
         }
     from ....common.audit_activation import structured_audit_source_worker_attributes
 
     store = getattr(agent, "conversation_store", None)
     acknowledged = []
+    load_errors: list[dict[str, Any]] = []
 
     def needs_reconcile(task):
         if not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES):
@@ -1083,7 +1229,9 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
         acknowledged.append(task.id)
         return False
 
-    tasks = select_recovery_runs(manager, needs_reconcile)
+    tasks = _select_supervision_recovery_runs(
+        manager, needs_reconcile, errors_out=load_errors
+    )
     if acknowledged and isinstance(manager, SubAgentManager):
         manager.persistence.run_index.acknowledge_source_lifecycles(acknowledged)
     if not tasks:
@@ -1092,6 +1240,7 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
             "parent_recovery_held": 0,
             "source_workers_completed": 0,
             "source_workers_completion_pending": 0,
+            "canonical_row_load_errors": len(load_errors),
         }
     decisions = conversation_lifecycle_decisions(agent, tasks)
     cancelled = 0
@@ -1121,6 +1270,7 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
         "parent_recovery_held": held,
         "source_workers_completed": completed,
         "source_workers_completion_pending": completion_pending,
+        "canonical_row_load_errors": len(load_errors),
     }
 
 
