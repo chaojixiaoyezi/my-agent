@@ -3342,7 +3342,7 @@ def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(t
             {
                 "thread_id": thread.thread_id,
                 "role": role,
-                "content": f"需要压缩的 {role} 消息",
+                "content": f"需要压缩的 {role} 消息 " + "详细对话历史。" * 2_500,
                 "channel": "feishu",
             }
         )
@@ -3416,7 +3416,7 @@ def test_manual_compact_after_task_head_uses_thread_source_and_replays_receipt(t
         "channel_conversation_id": "c-1", "channel_user_id": "u-1",
     })
     rows = [store.messages.append({
-        "thread_id": thread.thread_id, "role": role, "content": f"原始历史 {role}",
+        "thread_id": thread.thread_id, "role": role, "content": f"原始历史 {role} " + "详细对话历史。" * 2_500,
         "channel": "feishu", "metadata": {"conversation_request_id": f"prior-{role}"},
     }) for role in ("user", "assistant")]
     local_source = load_conversation_compact_source(
@@ -3525,7 +3525,7 @@ def test_manual_compact_cas_race_does_not_replace_winning_head(tmp_path, monkeyp
         "channel_conversation_id": "c-1", "channel_user_id": "u-1",
     })
     rows = [store.messages.append({
-        "thread_id": thread.thread_id, "role": role, "content": f"并发前历史 {role}",
+        "thread_id": thread.thread_id, "role": role, "content": f"并发前历史 {role} " + "详细对话历史。" * 400,
         "channel": "feishu",
     }) for role in ("user", "assistant")]
     # 有 Home 时目录未选模型即未配置，手动压缩会先失败；显式注入的 echo 后端才在模型作用域里保留。

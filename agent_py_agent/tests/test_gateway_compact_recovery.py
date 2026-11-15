@@ -27,7 +27,7 @@ from agent_py_agent.tests.test_gateway_model_observation import install_backend
 
 # LLM: 初始化真实owner/thread和历史；只用测试模型配置，不伪造恢复参数、来源或Compact提交。
 # 函数用途: 给恢复链验收准备一条旧历史与带重复注入文本的普通新请求。
-def _history_request(tmp_path, *, tools=False, mode="disabled", candidate_backend="anthropic_compatible", original_window=250_000, history_repeat=100):
+def _history_request(tmp_path, *, tools=False, mode="disabled", candidate_backend="anthropic_compatible", original_window=250_000, history_repeat=1200):
     fixture = actual_request(tmp_path, mode=mode, tools=tools, candidate_backend=candidate_backend, original_window=original_window)
     agent = fixture.agent
     context = fixture.context

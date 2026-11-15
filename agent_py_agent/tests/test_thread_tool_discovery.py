@@ -99,6 +99,12 @@ def test_compact_cas_preserves_discovery_written_during_summary(tmp_path, monkey
 
     agent, thread, _, records = _setup(tmp_path, monkeypatch, True)
     _Probe(monkeypatch, True, live=False)
+    for prior_role in ("user", "assistant"):
+        agent.conversation_store.messages.append({
+            "thread_id": thread.thread_id, "role": prior_role,
+            "content": "需要压缩归档的工具发现历史记录。" * 2_000,
+            "metadata": {"conversation_request_id": f"prior-pad-{prior_role}"},
+        })
     params = SimpleNamespace(task_attributes={"conversation_thread_id": thread.thread_id})
     generate = compact_request_budget.generate_auxiliary_model_response
 

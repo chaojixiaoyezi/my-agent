@@ -10,7 +10,11 @@ from agent_py_agent.agent.agent_core.runtime.turn_trigger import TurnTrigger
 from agent_py_agent.agent.agent_core.tool_request_projection import ToolLoopRequestInput
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError
 from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn, UserTurn
-from agent_py_agent.agent.conversation import background_execution, goal_prompting
+from agent_py_agent.agent.conversation import (
+    active_turn_compact,
+    background_execution,
+    goal_prompting,
+)
 from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
 from agent_py_agent.agent.prompting_parts.runtime_injection import (
     RUNTIME_DIRECT_CHILDREN_SOURCE,
@@ -19,13 +23,13 @@ from agent_py_agent.agent.prompting_parts.runtime_injection import (
     RuntimeInjectionFragment,
     runtime_injection_clear_text,
 )
+from agent_py_agent.tests.test_background_compact_recovery import _http_with_live_summary
 from agent_py_agent.tests.test_business_v12_f2_spaces import World
 from agent_py_agent.tests.test_cache_opt_snapshot_contract import prepared
 from agent_py_agent.tests.test_compact_native_ir_recovery import _native_ir_attempt
 from agent_py_agent.tests.test_gateway_compact_recovery import _history_request
 from agent_py_agent.tests.test_gateway_model_adoption import fake_http
 from agent_py_agent.tests.test_runtime_guidance import _tool_loop_params
-from agent_py_agent.tests.test_subagent_compact_recovery import _http
 
 
 def business_context():
@@ -131,8 +135,20 @@ def test_background_real_recovery_preserves_business_material_and_each_full_snap
             candidates.append(value)
         return value
 
+    in_summary = False
+    original_summary = active_turn_compact._active_turn_replacement_summary
+
+    def summary(*args, **kwargs):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **kwargs)
+        finally:
+            in_summary = False
+
     monkeypatch.setattr(recovery, '_project_mixed_recovery_material', observe)
-    _http(monkeypatch, backend=backend, on_business=lambda *_: None)
+    monkeypatch.setattr(active_turn_compact, '_active_turn_replacement_summary', summary)
+    _http_with_live_summary(monkeypatch, backend=backend, on_business=lambda *_: None, is_summary=lambda: in_summary)
     result, _, host = background_execution._run_background_recovery_attempt(execution, '继续核对', params, history, context,
         recovering=True, activity_sink=sink)
     assert host.committed and result.runtime_status != 'context_overflow'

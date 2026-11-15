@@ -39,6 +39,7 @@ from agent_py_agent.agent.conversation.compact import (
 from agent_py_agent.agent.conversation.compact_checkpoint import (
     committed_compact_checkpoint_chain,
 )
+from agent_py_agent.agent.conversation.compact_projection import ConversationCompactProjection
 from agent_py_agent.agent.conversation.compact_tool_identity import compact_tool_ref
 from agent_py_agent.agent.conversation.history_seed import seed_text_messages
 from agent_py_agent.agent.conversation.runtime import (
@@ -112,10 +113,21 @@ def _request(case, *, reason="scheduled_progress_report", turn_id="background-tu
 
 # LLM: 仍走真实 transcript 候选、原 writer 与 generation CAS，不手填线程 summary 或游标。
 # 函数用途: 先建立覆盖所有消息的全线程摘要，复现任务创建后的全局压缩交错。
+def _scoped_request_projector(view):
+    tokens = (
+        len(view.summary)
+        if view.is_candidate
+        else sum(len(item.content) + 40 for item in view.messages) + len(view.summary) + 100
+    )
+    return ConversationCompactProjection(tokens, view)
+
+
 def _global_compact(case):
     result = prepare_conversation_context(
         case.agent, case.store, case.store.threads.require(case.thread.thread_id),
-        options=ConversationCompactOptions(current_prompt="继续会话", force=True),
+        options=ConversationCompactOptions(
+            current_prompt="继续会话", force=True, request_projector=_scoped_request_projector,
+        ),
     )
     assert result.compacted
     assert result.thread.compacted_through_message_id == case.rows[-1].message_id
@@ -206,6 +218,7 @@ def test_detached_transcript_source_commits_locally_and_preserves_global_project
         case.agent, case.store, global_thread,
         options=ConversationCompactOptions(
             current_prompt="继续本任务", force=True, source=history.compact_source,
+            request_projector=_scoped_request_projector,
         ),
     )
     assert result.compacted and result.thread.compact_generation == global_thread.compact_generation + 1

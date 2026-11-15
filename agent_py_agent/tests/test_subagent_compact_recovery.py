@@ -40,7 +40,7 @@ def _child(tmp_path, *, backend: str, tools: bool):
         max_tool_rounds=1,
     ), tmp_path)
     task = agent.subagents.create_run(goal="核对材料并给出结论", thought="", plan=[], allowed_tools=["read_file"])
-    for role, content in (("user", "之前需要核对的原始材料" * 100), ("assistant", "已核对旧材料，等待下一步" * 100)):
+    for role, content in (("user", "之前需要核对的原始材料" * 1200), ("assistant", "已核对旧材料，等待下一步" * 1200)):
         agent.conversation_store.messages.append({
             "thread_id": task.agent_thread_id, "role": role, "content": content,
             "metadata": {"conversation_request_id": "completed-prior-turn"},

@@ -265,10 +265,19 @@ def test_empty_transcript_overflow_compacts_active_turn_before_reprepare(
     def send(request):
         response = original_http(request)
         if events and events[-1] == "active-summary":
+            handoff = (
+                "[compact-live-handoff.v1]\n"
+                "current_progress: 已完整读取并核对材料文件，正在整理阶段结果。\n"
+                "user_constraints: 保持既定任务范围与输出要求，只汇报已核对事实。\n"
+                "completed: 当前批次材料文件已通过 read_file 完整读取。\n"
+                "failures: 本轮没有工具失败。\n"
+                "unresolved: 继续读取下一项材料并形成结论。\n"
+                "next_step: 依据本摘要读取下一项材料并完成整理。"
+            )
             if "system" in request.payload:
-                return {"content": [{"type": "text", "text": "资料整理完成。"}],
+                return {"content": [{"type": "text", "text": handoff}],
                         "stop_reason": "end_turn", "usage": {"input_tokens": 101, "output_tokens": 5}}
-            return {"choices": [{"message": {"content": "资料整理完成。"}, "finish_reason": "stop"}],
+            return {"choices": [{"message": {"content": handoff}, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 101, "completion_tokens": 5}}
         if len(business) == 1 and events[-1] == "first-tool-request":
             wire = request.payload

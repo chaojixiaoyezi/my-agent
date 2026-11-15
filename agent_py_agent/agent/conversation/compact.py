@@ -1067,7 +1067,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             candidate = None
             continue
         if candidate.projected_tokens_after <= request.policy.recovery_target_tokens:
-            return _commit_compact_candidate_or_record_failure(request, candidate)
+            return _commit_or_reject_trigger_fallback(request, candidate, rejected)
         if (
             trigger_fallback is None
             or candidate.projected_tokens_after

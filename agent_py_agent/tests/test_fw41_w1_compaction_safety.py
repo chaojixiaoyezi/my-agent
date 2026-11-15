@@ -558,3 +558,126 @@ def test_compact_trigger_fallback_helper_guards_exception_path_too(tmp_path, mon
     current = store.threads.require(thread.thread_id)
     assert current.compact_generation == 0
     assert current.compact_failure_code == "COMPACT_NO_PROGRESS"
+
+
+@pytest.mark.parametrize(
+    ("before_tokens", "candidate_tokens"),
+    [
+        pytest.param(2_500, 2_500, id="equal_below_recovery_target"),
+        pytest.param(2_000, 2_500, id="inflated_below_recovery_target"),
+    ],
+)
+def test_ordinary_accept_branch_aborts_on_no_progress_below_recovery_target(
+    tmp_path,
+    monkeypatch,
+    before_tokens: int,
+    candidate_tokens: int,
+) -> None:
+    agent, store, thread, _attrs = _setup_carried_agent(
+        tmp_path,
+        monkeypatch,
+        trigger_percent=50,
+        recovery_target_percent=30,
+        output_cap=2_000,
+    )
+    agent.backend = HttpBackend(BackendOptions(
+        api_base="https://example.invalid", api_key="fake-key", model_name="test-model",
+        context_window_tokens=10_000, max_tokens=2_000,
+    ))
+    for index in range(3):
+        for role in ("user", "assistant"):
+            store.messages.append({
+                "thread_id": thread.thread_id,
+                "role": role,
+                "content": f"完整旧轮次 {index}",
+                "metadata": {"conversation_request_id": f"prior-ordinary-{index}"},
+            })
+
+    monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: "摘要正文")
+    events: list[dict[str, object]] = []
+
+    def project(view):
+        # candidate <= recovery_target(3000) 时会走普通接受分支；必须同样受 candidate < before 约束。
+        return ConversationCompactProjection(candidate_tokens if view.is_candidate else before_tokens, object())
+
+    with pytest.raises(ConversationCompactError) as exc_info:
+        prepare_conversation_context(
+            agent,
+            store,
+            thread,
+            options=ConversationCompactOptions(
+                current_prompt="继续任务",
+                force=True,
+                progress_callback=events.append,
+                request_projector=project,
+            ),
+        )
+
+    err = exc_info.value
+    assert err.code == "COMPACT_NO_PROGRESS"
+    assert isinstance(err.capacity, CompactCapacityFacts)
+    assert err.capacity.candidate_tokens == candidate_tokens
+    assert err.capacity.input_ceiling_tokens == 5_000
+    assert err.capacity.candidates_tried >= 1
+    assert compact_degradation_decision(err, degrade_eligible=True) == (False, "COMPACT_NO_PROGRESS")
+
+    current = store.threads.require(thread.thread_id)
+    assert current.compact_generation == 0
+    assert current.compact_checkpoint_id == ""
+    assert current.summary == ""
+    assert current.compacted_through_message_id == ""
+    assert current.compact_consecutive_failures == 1
+    assert current.compact_failure_code == "COMPACT_NO_PROGRESS"
+    assert committed_compact_checkpoint_chain(agent, current) == ()
+    failed_events = [item for item in events if item.get("phase") == "failed"]
+    assert len(failed_events) == 1
+    assert failed_events[0]["error_code"] == "COMPACT_NO_PROGRESS"
+
+
+def test_ordinary_accept_branch_commits_when_shrinking_below_recovery_target(tmp_path, monkeypatch) -> None:
+    agent, store, thread, _attrs = _setup_carried_agent(
+        tmp_path,
+        monkeypatch,
+        trigger_percent=50,
+        recovery_target_percent=30,
+        output_cap=2_000,
+    )
+    agent.backend = HttpBackend(BackendOptions(
+        api_base="https://example.invalid", api_key="fake-key", model_name="test-model",
+        context_window_tokens=10_000, max_tokens=2_000,
+    ))
+    for index in range(3):
+        for role in ("user", "assistant"):
+            store.messages.append({
+                "thread_id": thread.thread_id,
+                "role": role,
+                "content": f"完整旧轮次 {index}",
+                "metadata": {"conversation_request_id": f"prior-shrink-{index}"},
+            })
+
+    monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: "精简摘要正文")
+
+    def project(view):
+        return ConversationCompactProjection(2_000 if view.is_candidate else 2_800, object())
+
+    result = prepare_conversation_context(
+        agent,
+        store,
+        thread,
+        options=ConversationCompactOptions(
+            current_prompt="继续任务",
+            force=True,
+            request_projector=project,
+        ),
+    )
+
+    assert result.compacted is True
+    assert result.projected_tokens == 2_000
+    current = store.threads.require(thread.thread_id)
+    assert current.compact_generation == 1
+    assert current.compact_checkpoint_id != ""
+    assert current.summary != ""
+    assert current.compacted_through_message_id != ""
+    assert current.compact_consecutive_failures == 0
+    assert current.compact_failure_code == ""
+    assert len(committed_compact_checkpoint_chain(agent, current)) == 1

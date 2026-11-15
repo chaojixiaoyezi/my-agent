@@ -120,6 +120,12 @@ def test_transcript_compact_prioritizes_real_recent_tool_use(tmp_path, monkeypat
     history = tuple(f"t{i}" for i in range(1, 10))
     thread = agent.conversation_store.threads.update_atomic(thread.thread_id, lambda current: replace(
         current, loaded_tool_names=history, metadata={"discovered_tool_history": list(history)}))
+    for prior_role in ("user", "assistant"):
+        agent.conversation_store.messages.append({
+            "thread_id": thread.thread_id, "role": prior_role,
+            "content": "需要压缩归档的对话历史记录。" * 2_000,
+            "metadata": {"conversation_request_id": f"prior-pad-{prior_role}"},
+        })
     agent.conversation_store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": "used",
         "metadata": {"canonical_native_messages": canonical_native_messages_envelope([
             {"role": "assistant", "content": [{"type": "tool_use", "id": "call", "name": "t1", "input": {}}]},
@@ -215,7 +221,19 @@ def test_transcript_cas_preserves_existing_tool_rediscovered_during_summary(
     history = tuple(f"t{i}" for i in range(1, 10))
     thread = agent.conversation_store.threads.update_atomic(thread.thread_id, lambda current: replace(
         current, loaded_tool_names=history, metadata={"discovered_tool_history": list(history)}))
+    for prior_role in ("user", "assistant"):
+        agent.conversation_store.messages.append({
+            "thread_id": thread.thread_id, "role": prior_role,
+            "content": "需要压缩归档的对话历史记录。" * 2_000,
+            "metadata": {"conversation_request_id": f"prior-pad-{prior_role}"},
+        })
     params = SimpleNamespace(task_attributes={"conversation_thread_id": thread.thread_id})
+    for prior_role in ("user", "assistant"):
+        agent.conversation_store.messages.append({
+            "thread_id": thread.thread_id, "role": prior_role,
+            "content": "需要压缩归档的对话历史记录。" * 2_000,
+            "metadata": {"conversation_request_id": f"prior-pad-{prior_role}"},
+        })
     if versioned_baseline:
         persist_discovered_tools(agent, params,
             {"tool_result_envelope": {"tool_search": {"loaded_tool_names": list(history)}}})

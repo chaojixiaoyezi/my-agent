@@ -116,7 +116,7 @@ def test_p2a_explicit_compact_bypasses_and_resets_circuit(tmp_path):
     agent.backend = _SummaryBackend()
     context = _context(agent, _request(), "create", "开始")
     for role in ("user", "assistant"):
-        assert append_gateway_conversation_message(agent, {}, context, request_id=f"old-{role}", role=role, content="原始资料")
+        assert append_gateway_conversation_message(agent, {}, context, request_id=f"old-{role}", role=role, content="原始资料" * 6_000)
     for _ in range(3):
         agent.conversation_store.threads.record_compact_failure(
             context.thread_id, failure_code="COMPACT_TEST_FAILURE", expected_generation=0, now=time.time())

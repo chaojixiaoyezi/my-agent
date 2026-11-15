@@ -290,7 +290,7 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
         {
             "thread_id": thread.thread_id,
             "role": "user",
-            "content": "上一轮先核对已有项目状态。",
+            "content": "上一轮先核对已有项目状态。" + " 历史核对正文" * 2_500,
             "metadata": {"conversation_request_id": "prior-attempt"},
         }
     )
@@ -298,7 +298,7 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
         {
             "thread_id": thread.thread_id,
             "role": "assistant",
-            "content": "已完成状态核对，下一轮继续实现。",
+            "content": "已完成状态核对，下一轮继续实现。" + " 历史核对结论" * 2_500,
             "metadata": {"conversation_request_id": "prior-attempt"},
         }
     )
@@ -362,7 +362,7 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
         role="worker", allowed_tools=["read_file"],
     )
     materials = [
-        _material(agent, f"input-{index}.txt", f"第 {index} 批真实工具结果。")
+        _material(agent, f"input-{index}.txt", f"第 {index} 批真实工具结果。" + "核对证据正文" * 800)
         for index in range(1, overflow_count + 1)
     ]
     generations = []
@@ -400,9 +400,9 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
             })
         if number <= 3 * overflow_count and number % 3 == 0:
             return _response("anthropic_compatible", (
-                "[compact-live-handoff.v1]\ncurrent_progress: 已读取当前材料。\n"
-                "user_constraints: 保持任务范围。\ncompleted: 工具调用已完成。\n"
-                "failures: none。\nunresolved: 继续执行。\nnext_step: 读取下一项并形成结论。"
+                "[compact-live-handoff.v1]\ncurrent_progress: 已完整读取并核对当前材料文件，正在整理阶段结果。\n"
+                "user_constraints: 保持既定任务范围、核对标准与输出格式。\ncompleted: 当前批次材料读取与事实摘录已完成。\n"
+                "failures: none。\nunresolved: 继续读取下一项材料并完成核对。\nnext_step: 读取下一项材料并形成最终核对结论。"
             ))
         return response
 
@@ -493,8 +493,8 @@ def test_subagent_compact_retry_keeps_exact_attempt_authorized_for_later_tools(
         allowed_tools=["list_files"],
     )
     for role, content in (
-        ("user", "上一轮已经完成了初始目录核对。"),
-        ("assistant", "目录事实已经记录，可以继续后续工具步骤。"),
+        ("user", "上一轮已经完成了初始目录核对。" + " 历史目录材料" * 2_500),
+        ("assistant", "目录事实已经记录，可以继续后续工具步骤。" + " 历史核对记录" * 2_500),
     ):
         agent.conversation_store.messages.append(
             {
