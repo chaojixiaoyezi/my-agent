@@ -21,6 +21,7 @@ from ..common.nofollow_fs import (
     open_readonly_file_beneath,
 )
 from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
+from ..plugin_host.cursors import CURSOR_TTL_SECONDS
 from ..plugin_host.errors import HostAPIError
 
 _ROOT = ('artifacts', 'business')
@@ -135,12 +136,15 @@ def _load(db, owner, artifact_id, stamp, block):
 
 
 def _save(db, artifact_id, state):
+    now = time.time()
+    db.execute('DELETE FROM progress WHERE touched < ?', (now - CURSOR_TTL_SECONDS,))
+    if (db.execute('SELECT 1 FROM progress WHERE artifact_id=?', (artifact_id,)).fetchone() is None
+            and db.execute('SELECT count(*) FROM progress').fetchone()[0] >= _UPLOAD_PROGRESS_LIMIT_COUNT):
+        return
     raw, signature = _pack(state)
     db.execute('INSERT INTO progress VALUES (?,?,?,?) ON CONFLICT(artifact_id) DO UPDATE SET '
                'state=excluded.state,signature=excluded.signature,touched=excluded.touched',
-               (artifact_id, raw, signature, time.time()))
-    db.execute('DELETE FROM progress WHERE artifact_id NOT IN '
-               '(SELECT artifact_id FROM progress ORDER BY touched DESC LIMIT ?)', (_UPLOAD_PROGRESS_LIMIT_COUNT,))
+               (artifact_id, raw, signature, now))
 
 
 def _consume(state, chunk, *, eof, max_record_bytes=_MAX_RECORD_BYTES):

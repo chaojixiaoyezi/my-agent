@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -159,6 +160,14 @@ def _list_all_session_tasks(session_tasks: Any, *, scan_cap: int = 1_000_000) ->
     return []
 
 
+def _optional_stat(path: Path) -> os.stat_result | None:
+    """探测可选路径元数据时只把 FileNotFoundError 当缺失，避免吞掉读盘故障。"""
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        return None
+
+
 def _list_unsettled_workflow_runs(
     owner_home_path: Path, settled_states: set[str], *, scan_cap: int = 1_000_000
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -195,7 +204,11 @@ def _list_unsettled_workflow_runs(
                 active.append((run_id, bc if isinstance(bc, dict) else {}))
         return active
 
-    if not runs_dir.is_dir() and not index_db.is_file():
+    runs_stat = _optional_stat(runs_dir)
+    index_stat = _optional_stat(index_db)
+    if not (runs_stat is not None and stat.S_ISDIR(runs_stat.st_mode)) and not (
+        index_stat is not None and stat.S_ISREG(index_stat.st_mode)
+    ):
         return []
 
     # SQL 终态过滤列表与外层 settled_states 保持同源，避免新增终态时 SQL 与二次过滤不一致。
@@ -559,6 +572,15 @@ def build_default_business_workflow_reference_reader(host: Any) -> Callable[[str
     return workflow_reference_reader
 
 
+def _read_optional_reference_json(path: Path) -> Any | None:
+    """直接打开并解析可选引用 JSON，只把 FileNotFoundError 视作缺失，保留其它存储错误。"""
+    try:
+        with path.open('r', encoding='utf-8') as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return None
+
+
 # LLM: 探测指定业务空间的活跃引用，供空间归档前做阻断校验。
 # 函数用途: 返回指定 space_id 下仍在运行的任务、代理、工作流与订阅。
 def build_default_business_active_references(host: Any) -> Callable[[str, Any], list[dict[str, str]]]:
@@ -651,9 +673,8 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
                 seen_sub_ids: set[str] = set()
                 # Check data/business/catalog.json subscriptions
                 catalog_path = owner_home_path / 'data' / 'business' / 'catalog.json'
-                if catalog_path.is_file():
-                    with catalog_path.open('r', encoding='utf-8') as f:
-                        catalog_data = json.load(f)
+                catalog_data = _read_optional_reference_json(catalog_path)
+                if catalog_data is not None:
                     subs_raw = catalog_data.get('subscriptions', {}) if isinstance(catalog_data, dict) else {}
                     subs_items = subs_raw.values() if isinstance(subs_raw, dict) else (subs_raw if isinstance(subs_raw, list) else [])
                     for sub in subs_items:
@@ -669,9 +690,8 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
 
                 # Fallback: data/subscriptions.json
                 sub_file = owner_home_path / 'data' / 'subscriptions.json'
-                if sub_file.is_file():
-                    with sub_file.open('r', encoding='utf-8') as f:
-                        subs = json.load(f)
+                subs = _read_optional_reference_json(sub_file)
+                if subs is not None:
                     sub_list = subs.values() if isinstance(subs, dict) else (subs if isinstance(subs, list) else [])
                     for sub in sub_list:
                         if isinstance(sub, dict) and sub.get('space_id') == space_id and sub.get('enabled', True) and sub.get('state', 'active') == 'active':
