@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from dataclasses import asdict, dataclass
 
@@ -209,7 +210,17 @@ def stop_process_session(
             committed = True
         _await_original_host_cleanup(store, frozen)
         leaders_live_at_start = _count_live_leaders(frozen)
-        receipts = _terminate_frozen_instances(frozen, host_process)
+        _frozen_receipt_targets.entry = None
+        try:
+            receipts = _terminate_frozen_instances(frozen, host_process)
+            target_entry = getattr(_frozen_receipt_targets, "entry", None)
+        finally:
+            _frozen_receipt_targets.entry = None
+        receipt_targets = (
+            target_entry[1]
+            if isinstance(target_entry, tuple) and len(target_entry) == 2 and target_entry[0] is receipts
+            else None
+        )
         with store.transaction() as transaction:
             current = transaction.load(str(frozen["session_id"]))
             if current is None:
@@ -248,6 +259,7 @@ def stop_process_session(
                 current,
                 instances_gone=instances_gone,
                 prior_blocked=prior_blocked,
+                receipt_targets=receipt_targets,
             )
 
             remaining_unresolved: dict[tuple[int, str], dict[str, object]] = {}
@@ -401,16 +413,64 @@ def _await_original_host_cleanup(store: ProcessSessionStore, frozen: dict[str, o
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
 
-# host 在本次停止期间自行退出：由终止原语的 identity_changed 回执加两条独立事实推出（见下方函数），不是原语自己的观测。
+# host 在本次停止期间自行退出：由终止原语对 host 目标的 identity_changed / identity_unavailable 回执
+# 加独立终态与实例消失证明推出（见下方函数），不是原语自己的观测。
 _HOST_EXITED_DURING_STOP = "host_exited_during_stop"
+_frozen_receipt_targets = threading.local()
+
+
+def _host_race_receipt_settleable(
+    receipt: ProcessTerminationReceipt,
+    target: str | None,
+    record: dict[str, object],
+) -> bool:
+    if receipt.confirmed or receipt.method not in ("identity_changed", "identity_unavailable"):
+        return False
+    host_pid = record.get("pid")
+    child_pid = record.get("child_pid")
+    if type(host_pid) is not int or host_pid <= 0:
+        return False
+    if target is not None and target != "host":
+        return False
+    inst_pids: set[int] = set()
+    for raw_inst in receipt.unresolved_instances:
+        normalized = _normalize_unresolved_instance(raw_inst)
+        if normalized is None:
+            return False
+        inst_pid = int(normalized["pid"])
+        if (
+            target is None
+            and type(child_pid) is int
+            and child_pid > 0
+            and inst_pid == child_pid
+            and inst_pid != host_pid
+        ):
+            return False
+        if not _process_instance_terminated(inst_pid, str(normalized["birth_token"])):
+            return False
+        inst_pids.add(inst_pid)
+    for raw_pid in receipt.unresolved_pids:
+        if type(raw_pid) is not int or raw_pid <= 0:
+            return False
+        if (
+            target is None
+            and type(child_pid) is int
+            and child_pid > 0
+            and raw_pid == child_pid
+            and raw_pid != host_pid
+        ):
+            return False
+        if raw_pid != host_pid and raw_pid not in inst_pids:
+            return False
+    return True
 
 
 # LLM: 竞态来历：调用方预检时 host 还活着，采快照前 host 已按停止意图清完 child、写回已确认回执并自行退出，
-#   出生身份读不到，终止原语没发任何信号就回了 identity_changed（未确认）。改写只在两条独立事实同时成立时发生：
-#   ①记录已是 host 写的终态且顶层 termination.confirmed=True（host 自己确认清完 child 树）；②instances_gone，即两级
-#   实例都已按出生身份证明消失（进程不存在、僵尸或出生标识确实不同；读不到不算消失）。满足时把这张回执改写成已确认的
-#   host_exited_during_stop，保持存储不变式“cleanup 确认 ⇒ 每张回执确认”。身份核对不放宽：原语仍不向身份不符的进程发
-#   信号；其它未确认回执（信号后仍有残留等）原样保留，停止照旧是 unknown。只读入参，返回新元组，不写 Store。
+#   出生身份读不到（未复用返回 identity_unavailable，立刻复用返回 identity_changed），终止原语未发信号。
+#   改写只在独立事实同时成立时发生：①prior_blocked=False（无先前未完成树观察/未决项）；②当前记录已是 host 写的终态且
+#   顶层 termination.confirmed=True；③instances_gone，即 host/child 两级实例均已按出生身份证明消失；④回执属于 host 目标，
+#   且不携带仍存活的后代实例或未绑定出生身份的其它裸 PID。满足时改写成已确认的 host_exited_during_stop，
+#   保持存储不变式“cleanup 确认 ⇒ 每张回执确认”。其它未确认回执与 child 回执原样保留。只读入参，返回新元组，不写 Store。
 # 函数用途: 把“host 在停止期间自己正常退出”识别出来，避免它被误报成“停止结果未知”。
 def _host_exit_settled_receipts(
     receipts: tuple[ProcessTerminationReceipt, ...],
@@ -418,6 +478,7 @@ def _host_exit_settled_receipts(
     *,
     instances_gone: bool,
     prior_blocked: bool = False,
+    receipt_targets: tuple[str, ...] | None = None,
 ) -> tuple[ProcessTerminationReceipt, ...]:
     host_settled = (
         not prior_blocked
@@ -427,6 +488,7 @@ def _host_exit_settled_receipts(
     )
     if not host_settled:
         return receipts
+    targets_match = receipt_targets is not None and len(receipt_targets) == len(receipts)
     return tuple(
         ProcessTerminationReceipt(
             _HOST_EXITED_DURING_STOP,
@@ -438,8 +500,13 @@ def _host_exit_settled_receipts(
                 True if receipt.tree_observation_complete is not None else None
             ),
         )
-        if receipt.method == "identity_changed" and not receipt.confirmed else receipt
-        for receipt in receipts
+        if _host_race_receipt_settleable(
+            receipt,
+            receipt_targets[idx] if targets_match else None,
+            record,
+        )
+        else receipt
+        for idx, receipt in enumerate(receipts)
     )
 
 
@@ -450,6 +517,7 @@ def _terminate_frozen_instances(
     host_process: subprocess.Popen | None,
 ) -> tuple[ProcessTerminationReceipt, ...]:
     receipts: list[ProcessTerminationReceipt] = []
+    targets: list[str] = []
     invoked_targets: set[tuple[int, str]] = set()
     observed_unresolved: set[tuple[int, str]] = set()
     for pid_key, birth_key in (("pid", "pid_birth_token"), ("child_pid", "child_pid_birth_token")):
@@ -469,6 +537,7 @@ def _terminate_frozen_instances(
             pid, process, expected_birth_token=birth, grace_seconds=0.5,
         )
         receipts.append(receipt)
+        targets.append("host" if pid_key == "pid" else "child")
         for item in receipt.unresolved_instances:
             observed_unresolved.add((int(item["pid"]), str(item["birth_token"])))
 
@@ -494,6 +563,7 @@ def _terminate_frozen_instances(
                     tree_observation_complete=True,
                 )
             )
+            targets.append("prior_unresolved")
             continue
         if not _same_process(inst_pid, inst_birth):
             # 出生标识不能确认一致时绝不发信号，原样保留未决实例等待下次重试核对。
@@ -508,6 +578,7 @@ def _terminate_frozen_instances(
                     unresolved_instances=({"pid": inst_pid, "birth_token": inst_birth},),
                 )
             )
+            targets.append("prior_unresolved")
             continue
         receipt = terminate_process_tree(
             inst_pid, None, expected_birth_token=inst_birth, grace_seconds=0.5,
@@ -539,4 +610,7 @@ def _terminate_frozen_instances(
                 unresolved_instances=({"pid": inst_pid, "birth_token": inst_birth},),
             )
         receipts.append(receipt)
-    return tuple(receipts)
+        targets.append("prior_unresolved")
+    result = tuple(receipts)
+    _frozen_receipt_targets.entry = (result, tuple(targets))
+    return result
