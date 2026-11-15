@@ -1390,6 +1390,7 @@ def parent_capability_request_snapshot(agent: object, parent_task_id: str, *,
                                        request_ids: dict[str, tuple[str, ...]] | None = None,
                                        selection_boundary=None, workspace=None) -> tuple[str, ...]:
     from ..common.request_execution_ports import gateway_short_transaction
+    from ..subagents.capability_request_expiry import select_orphaned_capability_runs
     from ..subagents.model_capabilities import capability_request_counts_as_open
 
     if selection_boundary is not None:
@@ -1402,15 +1403,14 @@ def parent_capability_request_snapshot(agent: object, parent_task_id: str, *,
     manager = getattr(agent, "subagents", None)
     if not callable(getattr(manager, "creation_guard", None)) or not callable(getattr(manager, "list_runs_for_root_report", None)):
         return ()
+    owner_id = getattr(getattr(agent, "home_paths", None), "owner_id", None)
     with gateway_short_transaction("release"), manager.creation_guard():
         report = manager.list_runs_for_root_report(parent_task_id)
         if report.load_errors:
             raise OSError("parent capability request snapshot unavailable")
         selected = {task.id: tuple(request.id for request in task.capability_requests
                                    if capability_request_counts_as_open(request.status))
-                    for task in report.runs if task.parent_id == parent_task_id
-                    and task.status == "BLOCKED" and task.failure_type == "capability_request"
-                    and not task.runner_active_attempt_id}
+                    for task in select_orphaned_capability_runs(report.runs, parent_task_id, owner_id=owner_id)}
         selected = {run_id: ids for run_id, ids in selected.items() if ids}
         if request_ids is not None:
             request_ids.update(selected)
@@ -1460,6 +1460,152 @@ def reconcile_parent_capability_requests(workspace, parent_task_id, reason, requ
     if not read_only:
         close_existing_capability_requests(workspace, parent_task_id, reason, request_ids, selection_metadata=selection_metadata)
     return existing_capability_closeout_confirmed(workspace, parent_task_id, request_ids, selection_metadata=selection_metadata)
+
+
+def _safe_opaque_run_segment(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value not in {".", ".."}
+        and not any(sep in value for sep in ("/", "\\", "\x00"))
+    )
+
+
+def _iter_blocked_open_capability_pages(subagents, page_budget: int):
+    persistence = getattr(subagents, "persistence", None)
+    run_index = getattr(persistence, "run_index", None)
+    if persistence is not None and run_index is not None:
+        try:
+            persistence.prepare_run_index()
+            after = ""
+            while True:
+                page_ids, after = run_index.candidate_ids(
+                    statuses=("BLOCKED",),
+                    include_open_capabilities=True,
+                    after=after,
+                    limit=page_budget,
+                )
+                if page_ids:
+                    report = persistence.list_runs_by_ids_report(page_ids)
+                    yield report.runs, report.load_errors
+                if not after:
+                    break
+        except Exception as exc:
+            yield [], [{"error": type(exc).__name__}]
+        return
+    list_current = getattr(subagents, "list_current_runs_report", None)
+    if not callable(list_current):
+        return
+    report = list_current(statuses=("BLOCKED",), include_open_capabilities=True)
+    runs = list(getattr(report, "runs", ()) or ())
+    errors = list(getattr(report, "load_errors", ()) or ())
+    if not runs:
+        if errors:
+            yield [], errors
+        return
+    for offset in range(0, len(runs), page_budget):
+        yield runs[offset : offset + page_budget], errors if offset == 0 else []
+
+
+# LLM: 仅按当前BLOCKED与OPEN能力申请索引分页检查，同时核对根级终态证明与直属父子代理已终态后才收口，未证清原样保留并显式记录。
+# 函数用途: 为显式运维清理错失收口窗口的孤立能力申请，保持CLI层与subagents内部隔离。
+def settle_orphaned_capability_requests(
+    agent: object,
+    *,
+    canonical_terminal_reason,
+    page_budget: int,
+) -> tuple[list[str], list[dict[str, str]]]:
+    from ..runtime_errors import DataCorruptionError
+    from ..subagents.capability_request_expiry import (
+        close_existing_capability_requests,
+        existing_capability_closeout_confirmed,
+    )
+    from ..subagents.model_capabilities import capability_request_counts_as_open
+    from ..subagents.models import FailureType, TaskStatus, task_has_ended_status
+    from ..subagents.services.persistence.service import load_subagent_task
+
+    subagents = getattr(agent, "subagents", None)
+    workspace = getattr(subagents, "workspace", None)
+    if subagents is None or workspace is None:
+        return [], []
+    owner_id = getattr(getattr(agent, "home_paths", None), "owner_id", None)
+    settled: list[str] = []
+    unproven: list[dict[str, str]] = []
+    seen_runs: set[str] = set()
+    for runs, load_errors in _iter_blocked_open_capability_pages(subagents, max(1, int(page_budget))):
+        for err in load_errors or ():
+            unproven.append({
+                "run_id": str(err.get("run_id") or "") if isinstance(err, dict) else "",
+                "root_id": "",
+                "parent_id": "",
+                "reason_code": "PARENT_TERMINAL_UNPROVEN",
+            })
+        for run in runs:
+            run_id = str(getattr(run, "id", "") or "")
+            if not run_id or run_id in seen_runs:
+                continue
+            seen_runs.add(run_id)
+            if (getattr(run, "status", "") != TaskStatus.BLOCKED.value
+                    or getattr(run, "failure_type", "") != FailureType.CAPABILITY_REQUEST.value
+                    or getattr(run, "runner_active_attempt_id", "")):
+                continue
+            open_ids = tuple(
+                req.id for req in (getattr(run, "capability_requests", ()) or ())
+                if capability_request_counts_as_open(getattr(req, "status", ""))
+            )
+            if not open_ids:
+                continue
+            root_id = str(getattr(run, "root_id", "") or "").strip()
+            parent_id = str(getattr(run, "parent_id", "") or "").strip()
+            if owner_id and getattr(run, "owner", None) != owner_id:
+                unproven.append({
+                    "run_id": run_id,
+                    "root_id": root_id,
+                    "parent_id": parent_id,
+                    "reason_code": "PARENT_TERMINAL_UNPROVEN",
+                })
+                continue
+            reason = canonical_terminal_reason(root_id) if _safe_opaque_run_segment(root_id) else None
+            direct_parent_terminal = False
+            if reason is not None and _safe_opaque_run_segment(parent_id):
+                if parent_id == root_id:
+                    direct_parent_terminal = True
+                else:
+                    try:
+                        parent_run = load_subagent_task(workspace, parent_id)
+                        direct_parent_terminal = (
+                            getattr(parent_run, "root_id", "") == root_id
+                            and task_has_ended_status(parent_run)
+                        )
+                    except (FileNotFoundError, OSError, ValueError, DataCorruptionError):
+                        direct_parent_terminal = False
+            if reason is None or not direct_parent_terminal:
+                unproven.append({
+                    "run_id": run_id,
+                    "root_id": root_id,
+                    "parent_id": parent_id,
+                    "reason_code": "PARENT_TERMINAL_UNPROVEN",
+                })
+                continue
+            try:
+                close_existing_capability_requests(workspace, root_id, reason, {run_id: open_ids})
+                if existing_capability_closeout_confirmed(workspace, root_id, {run_id: open_ids}):
+                    settled.append(run_id)
+                else:
+                    unproven.append({
+                        "run_id": run_id,
+                        "root_id": root_id,
+                        "parent_id": parent_id,
+                        "reason_code": "PARENT_TERMINAL_UNPROVEN",
+                    })
+            except (OSError, ValueError, DataCorruptionError):
+                unproven.append({
+                    "run_id": run_id,
+                    "root_id": root_id,
+                    "parent_id": parent_id,
+                    "reason_code": "PARENT_TERMINAL_UNPROVEN",
+                })
+    return settled, unproven
 
 
 # LLM: 名册行只摊平 kernel 的唯一投影 replaced_by_view（接替者 run_id 与处置）成两个标量，TUI 白名单只收标量；
