@@ -393,6 +393,8 @@ def execute_background_request(context):
             return {"source_kind": "curator", "source_id": ref["source_id"], "outcome": "handled", "status": "disabled"}
         cfg = getattr(agent, "config", None)
         _refresh_execution_live_config(cfg)
+        from ..owner_wake_discovery import memory_read_index_blocked
+
         if _auxiliary_model_unavailable(cfg, service=getattr(agent, "memory_curator", None)):
             run_maint = getattr(agent.memory_curator, "run_maintenance_if_due", None)
             if callable(run_maint):
@@ -401,17 +403,26 @@ def execute_background_request(context):
                     (maint_result.get("status") if isinstance(maint_result, dict) else getattr(maint_result, "status", ""))
                     or "maintenance_only"
                 )
+                step_errors = maint_result.get("errors") if isinstance(maint_result, dict) else None
+                pending = (
+                    status == "partial"
+                    and not memory_read_index_blocked(home.owner_home_dir)
+                    and set(step_errors or {}) <= {"read_index"}
+                )
                 return {
                     "source_kind": "curator",
                     "source_id": ref["source_id"],
                     "status": status,
                     "run_id": "",
-                    "outcome": "pending" if status == "partial" else "handled",
+                    "outcome": "pending" if pending else "handled",
                 }
             return {"source_kind": "curator", "source_id": ref["source_id"], "outcome": "handled", "status": "model_unavailable"}
         result = agent.memory_curator.run_if_due()
+        pending = result.status == "busy" or (
+            result.status == "not_due" and not memory_read_index_blocked(home.owner_home_dir)
+        )
         return {"source_kind": "curator", "source_id": ref["source_id"], "status": result.status,
-                "run_id": result.run_id, "outcome": "pending" if result.status in {"busy", "not_due"} else "handled"}
+                "run_id": result.run_id, "outcome": "pending" if pending else "handled"}
 
 
 def _refresh_execution_live_config(cfg: object) -> None:

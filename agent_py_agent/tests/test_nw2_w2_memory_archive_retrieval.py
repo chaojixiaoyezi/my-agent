@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent import owner_wake_discovery
 from agent_py_agent.agent.backends.bounded_call import BoundedCallExitUnconfirmedError
 from agent_py_agent.agent.common.json_io import locked_json_path
 from agent_py_agent.agent.conversation import ConversationStore
@@ -588,3 +590,106 @@ def test_nw10_vector_store_corrupt_snapshot_caches_stamp_and_recovers(
     assert reload_calls == 3
     assert store.search([1.0, 0.0], top_k=1)[0].id == "entry-1"
     assert reload_calls == 3
+
+
+def test_nw2r1_deterministic_read_index_failure_backs_off_due_and_soft_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner, long_term, curator, _live_ns = _build_curator_env(tmp_path, slice_entries=2)
+    for idx in range(3):
+        long_term.add("user", f"fact entry nw2r1 {idx} " + "a" * 32)
+    long_term.migrate_tiers()
+    read_index = MemoryReadIndex(long_term.path)
+    assert _memory_read_index_pending(owner) is True
+
+    def _fail_owner_mismatch(*, batch_size: int):
+        raise ValueError("MEMORY_INDEX_OWNER_MISMATCH")
+
+    now = datetime(2026, 11, 15, 14, 0, tzinfo=timezone.utc)
+    base_mono = time.monotonic()
+    long_term.rebuild_read_index = _fail_owner_mismatch  # type: ignore[method-assign]
+    err_res = curator.run_maintenance_if_due(now=now)
+    assert err_res["errors"]["read_index"] == "MEMORY_INDEX_OWNER_MISMATCH"
+
+    assert _memory_read_index_pending(owner) is False
+    assert owner_wake_discovery.memory_read_index_blocked(owner) is True
+    assert _has_pending_memory_curator_work(owner) is False
+    settled_state = MemoryCuratorState(
+        last_success_at=now.isoformat(),
+        last_daily_finalize_date=datetime.now().astimezone().date().isoformat(),
+    )
+    assert curator_work_is_due(owner, settled_state) is False
+
+    monkeypatch.setattr(owner_wake_discovery.time, "monotonic", lambda: base_mono + 10_801.0)
+    assert _memory_read_index_pending(owner) is True
+
+    del long_term.rebuild_read_index
+    resumed = curator.run_maintenance_if_due(now=now + timedelta(seconds=10_801))
+    assert resumed["status"] == "partial"
+    assert read_index.coverage()["indexed_records"] > 0
+    assert owner_wake_discovery.memory_read_index_blocked(owner) is False
+
+    def _fail_busy(*, batch_size: int):
+        raise sqlite3.OperationalError("database is locked")
+
+    long_term.rebuild_read_index = _fail_busy  # type: ignore[method-assign]
+    busy_res = curator.run_maintenance_if_due(now=now + timedelta(seconds=10_802))
+    assert busy_res["errors"]["read_index"] == "CURATOR_MAINTENANCE_OPERATIONALERROR"
+    assert owner_wake_discovery.memory_read_index_blocked(owner) is False
+    assert _memory_read_index_pending(owner) is True
+
+
+def test_nw2r1_execute_background_request_stops_requeue_when_read_index_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    maint_responses = [
+        {"status": "partial", "errors": {"lessons": "X"}},
+        {"status": "partial"},
+        {"status": "partial", "errors": {"read_index": "OWNER_QUOTA_EXCEEDED"}},
+    ]
+
+    class _FakeCurator:
+        def run_maintenance_if_due(self):
+            return maint_responses.pop(0)
+
+        def run_if_due(self):
+            return SimpleNamespace(status="not_due", run_id="")
+
+    owner = OwnerIdentity.local_main()
+    resolved = ensure_owner_home(tmp_path, owner)
+    state_path = resolved.home_dir / "memory" / "curator" / "state.json"
+    MemoryCuratorStateStore(state_path).request("turn_threshold")
+    ref = freeze_source(tmp_path, owner, state_path, "curator")
+    monkeypatch.setattr(bg_exec, "background_request_scope", lambda _ctx: nullcontext())
+
+    fake_agent = SimpleNamespace(
+        home_paths=SimpleNamespace(
+            root=tmp_path,
+            owner_provider=owner.provider,
+            owner_kind=owner.owner_kind,
+            owner_home_dir=resolved.home_dir,
+        ),
+        config=SimpleNamespace(memory_curator_model_profile=""),
+        owner_home=resolved.home_dir,
+        memory_curator=_FakeCurator(),
+        run_background_turn=lambda *args, **kwargs: "",
+    )
+    request = {"metadata": {"background_source": ref}}
+
+    first = execute_background_request({"agent": fake_agent, "request": request})
+    assert first["outcome"] == "handled"
+
+    second = execute_background_request({"agent": fake_agent, "request": request})
+    assert second["outcome"] == "pending"
+
+    owner_wake_discovery.note_memory_read_index_blocked(resolved.home_dir, 60)
+    third = execute_background_request({"agent": fake_agent, "request": request})
+    assert third["outcome"] == "handled"
+
+    monkeypatch.setattr(bg_exec, "_auxiliary_model_unavailable", lambda *_args, **_kwargs: False)
+    fourth = execute_background_request({"agent": fake_agent, "request": request})
+    assert fourth["outcome"] == "handled"
+
+    owner_wake_discovery.clear_memory_read_index_blocked(resolved.home_dir)
+    fifth = execute_background_request({"agent": fake_agent, "request": request})
+    assert fifth["outcome"] == "pending"

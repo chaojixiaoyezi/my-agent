@@ -438,7 +438,13 @@ class _CuratorLifecycleMixin:
         mono_now = time.monotonic()
         last_mono = getattr(self, "_maintenance_at", None)
         last_now_ts = getattr(self, "_maintenance_now_ts", None)
-        from ..owner_wake_discovery import _memory_read_index_pending
+        import sqlite3
+
+        from ..owner_wake_discovery import (
+            _memory_read_index_pending,
+            clear_memory_read_index_blocked,
+            note_memory_read_index_blocked,
+        )
 
         read_index_pending = owner_home is not None and _memory_read_index_pending(owner_home)
         if now is not None:
@@ -587,7 +593,11 @@ class _CuratorLifecycleMixin:
                 except Exception as exc:
                     partial = True
                     step_errors["read_index"] = _maintenance_error_code(exc)
+                    if owner_home is not None and not isinstance(exc, sqlite3.OperationalError):
+                        note_memory_read_index_blocked(owner_home, interval)
                 else:
+                    if owner_home is not None:
+                        clear_memory_read_index_blocked(owner_home)
                     if isinstance(coverage, dict) and coverage.get("status") not in {
                         "complete",
                         "unmigrated",
