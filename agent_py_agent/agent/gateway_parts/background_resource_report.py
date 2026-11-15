@@ -8,24 +8,43 @@
 from __future__ import annotations
 
 import gc
+import json
+import sqlite3
 import sys
 import threading
 import time
 import tracemalloc
-from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from ..conversation.models import THREAD_TASK_LINK_INACTIVE_STATUSES
+from ..conversation.store import ConversationStore
+from ..conversation.task_promotion import conversation_thread_execution_state
+from ..io.sqlite_probe import require_plain_sqlite_files, sqlite_readonly_probe_uri
+from ..runtime_db.operations import (
+    AGENT_RUN_TERMINAL_STATUSES,
+    ATTEMPT_STATUS_RECOVERED,
+    ATTEMPT_STATUS_UNKNOWN,
+    exec_lock_scope,
+)
+from ..runtime_db.schema import runtime_db_path
+from ..scheduler.store_snapshot import read_atomic_store_bytes
 from ..tooling.process_resource_stop import (
     FrozenProcessStop,
     cleanup_process_stop,
     freeze_process_stop,
 )
 from ..tooling.process_scope import ProcessExecutionScope
+from ..tooling.process_session_cleanup import ProcessSessionCleanupError, stop_process_session
 from ..tooling.process_session_records import (
     MANAGED_PROCESS_SESSION_SCHEMAS,
+    PROCESS_SESSION_SCHEMA,
     PROCESS_TERMINAL_STATUSES,
+    TASK_PROCESS_SESSION_SCHEMA,
 )
 from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
 
@@ -444,6 +463,886 @@ def cleanup_session_leftover_processes(frozen: SessionLeftoverStop) -> list[dict
     return reports
 
 
+_EXECUTION_PROCESS_SESSION_SCHEMAS = frozenset({PROCESS_SESSION_SCHEMA, TASK_PROCESS_SESSION_SCHEMA})
+_CONVERSATION_ROOT_PATTERNS = (
+    "workspace/runtime/workspaces/*/conversations",
+    "conversations",
+    "data/conversations",
+)
+# 调度里 "unknown" 不能视作明确终态，必须单独保留。
+_SCHEDULER_SETTLED_STATUSES = frozenset({"done", "failed", "cancelled", "skipped"})
+_SCHEDULER_ACTIVE_STATUSES = frozenset({"queued", "claimed", "running", "waiting"})
+_WORKFLOW_SETTLED_STATES = frozenset({
+    "succeeded", "completed", "done", "failed", "cancelled", "aborted", "retired", "settled", "skipped",
+})
+_WAKE_ACTIVE_STATUSES = frozenset({"pending", "claimed", "waiting", "queued", "running"})
+_ATTEMPT_TERMINAL_STATUSES = frozenset({*AGENT_RUN_TERMINAL_STATUSES, ATTEMPT_STATUS_RECOVERED})
+
+
+@dataclass(frozen=True)
+class _RuntimeDbSnapshot:
+    error: str = ""
+    task_runs_by_id: dict[str, dict[str, str]] = None  # type: ignore[assignment]
+    task_runs_by_task_id: dict[str, list[dict[str, str]]] = None  # type: ignore[assignment]
+    agent_runs_by_id: dict[str, dict[str, str]] = None  # type: ignore[assignment]
+    agent_runs_by_run_id: dict[str, list[dict[str, str]]] = None  # type: ignore[assignment]
+    agent_runs_by_task_run_id: dict[str, list[dict[str, str]]] = None  # type: ignore[assignment]
+    children_by_parent_id: dict[str, list[str]] = None  # type: ignore[assignment]
+    attempts_by_agent_run_id: dict[str, list[dict[str, str]]] = None  # type: ignore[assignment]
+    locks_by_scope: dict[str, list[float]] = None  # type: ignore[assignment]
+    locks_by_attempt_id: dict[str, list[float]] = None  # type: ignore[assignment]
+    active_wakes_by_task_id: frozenset[str] = frozenset()
+    active_wakes_by_run_id: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _SchedulerSnapshot:
+    error: str = ""
+    runs_by_run_id: dict[str, list[str]] = None  # type: ignore[assignment]
+    runs_by_task_id: dict[str, list[str]] = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
+class _WorkflowSnapshot:
+    error: str = ""
+    unsettled_run_ids: frozenset[str] = frozenset()
+    unsettled_task_ids: frozenset[str] = frozenset()
+    settled_run_ids: frozenset[str] = frozenset()
+    settled_task_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _ConversationSnapshot:
+    stores: tuple[tuple[Path, ConversationStore], ...] = ()
+    discovery_error: str = ""
+    wake_error: str = ""
+    active_wake_task_ids: frozenset[str] = frozenset()
+    active_wake_run_ids: frozenset[str] = frozenset()
+
+
+def _empty_runtime_snapshot(error: str = "") -> _RuntimeDbSnapshot:
+    return _RuntimeDbSnapshot(
+        error=error,
+        task_runs_by_id={},
+        task_runs_by_task_id={},
+        agent_runs_by_id={},
+        agent_runs_by_run_id={},
+        agent_runs_by_task_run_id={},
+        children_by_parent_id={},
+        attempts_by_agent_run_id={},
+        locks_by_scope={},
+        locks_by_attempt_id={},
+    )
+
+
+def _load_runtime_db_snapshot(owner_home: Path) -> _RuntimeDbSnapshot:
+    db_path = runtime_db_path(owner_home)
+    if not db_path.exists() and not db_path.is_symlink():
+        return _empty_runtime_snapshot()
+    try:
+        require_plain_sqlite_files(db_path, beneath=owner_home)
+        with closing(sqlite3.connect(sqlite_readonly_probe_uri(db_path), uri=True, timeout=1.0)) as conn:
+            conn.row_factory = sqlite3.Row
+            tables = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            task_runs_by_id: dict[str, dict[str, str]] = {}
+            task_runs_by_task_id: dict[str, list[dict[str, str]]] = {}
+            if "task_runs" in tables:
+                for row in conn.execute("SELECT task_run_id, task_id, status FROM task_runs"):
+                    item = {
+                        "task_run_id": str(row["task_run_id"] or ""),
+                        "task_id": str(row["task_id"] or ""),
+                        "status": str(row["status"] or "").strip().lower(),
+                    }
+                    if item["task_run_id"]:
+                        task_runs_by_id[item["task_run_id"]] = item
+                    if item["task_id"]:
+                        task_runs_by_task_id.setdefault(item["task_id"], []).append(item)
+
+            agent_runs_by_id: dict[str, dict[str, str]] = {}
+            agent_runs_by_run_id: dict[str, list[dict[str, str]]] = {}
+            agent_runs_by_task_run_id: dict[str, list[dict[str, str]]] = {}
+            children_by_parent_id: dict[str, list[str]] = {}
+            if "agent_runs" in tables:
+                for row in conn.execute(
+                    "SELECT agent_run_id, task_run_id, parent_agent_run_id, run_id, current_attempt_id, status FROM agent_runs"
+                ):
+                    item = {
+                        "agent_run_id": str(row["agent_run_id"] or ""),
+                        "task_run_id": str(row["task_run_id"] or ""),
+                        "parent_agent_run_id": str(row["parent_agent_run_id"] or ""),
+                        "run_id": str(row["run_id"] or ""),
+                        "current_attempt_id": str(row["current_attempt_id"] or ""),
+                        "status": str(row["status"] or "").strip().lower(),
+                    }
+                    if item["agent_run_id"]:
+                        agent_runs_by_id[item["agent_run_id"]] = item
+                    if item["run_id"]:
+                        agent_runs_by_run_id.setdefault(item["run_id"], []).append(item)
+                    if item["task_run_id"]:
+                        agent_runs_by_task_run_id.setdefault(item["task_run_id"], []).append(item)
+                    if item["parent_agent_run_id"] and item["agent_run_id"]:
+                        children_by_parent_id.setdefault(item["parent_agent_run_id"], []).append(item["agent_run_id"])
+
+            attempts_by_agent_run_id: dict[str, list[dict[str, str]]] = {}
+            if "agent_attempts" in tables:
+                for row in conn.execute("SELECT attempt_id, agent_run_id, status FROM agent_attempts"):
+                    item = {
+                        "attempt_id": str(row["attempt_id"] or ""),
+                        "agent_run_id": str(row["agent_run_id"] or ""),
+                        "status": str(row["status"] or "").strip().lower(),
+                    }
+                    if item["agent_run_id"]:
+                        attempts_by_agent_run_id.setdefault(item["agent_run_id"], []).append(item)
+
+            locks_by_scope: dict[str, list[float]] = {}
+            locks_by_attempt_id: dict[str, list[float]] = {}
+            if "resource_locks" in tables:
+                for row in conn.execute("SELECT canonical_scope, attempt_id, lease_expires_at FROM resource_locks"):
+                    scope_key = str(row["canonical_scope"] or "")
+                    attempt_key = str(row["attempt_id"] or "")
+                    lease = float(row["lease_expires_at"] or 0.0)
+                    if scope_key:
+                        locks_by_scope.setdefault(scope_key, []).append(lease)
+                    if attempt_key:
+                        locks_by_attempt_id.setdefault(attempt_key, []).append(lease)
+
+            wake_tasks: set[str] = set()
+            wake_runs: set[str] = set()
+            if "wake_queue" in tables:
+                for row in conn.execute("SELECT root_task_id, root_run_id, status FROM wake_queue"):
+                    status = str(row["status"] or "").strip().lower()
+                    if status in _WAKE_ACTIVE_STATUSES:
+                        t_id = str(row["root_task_id"] or "")
+                        r_id = str(row["root_run_id"] or "")
+                        if t_id:
+                            wake_tasks.add(t_id)
+                        if r_id:
+                            wake_runs.add(r_id)
+
+        return _RuntimeDbSnapshot(
+            task_runs_by_id=task_runs_by_id,
+            task_runs_by_task_id=task_runs_by_task_id,
+            agent_runs_by_id=agent_runs_by_id,
+            agent_runs_by_run_id=agent_runs_by_run_id,
+            agent_runs_by_task_run_id=agent_runs_by_task_run_id,
+            children_by_parent_id=children_by_parent_id,
+            attempts_by_agent_run_id=attempts_by_agent_run_id,
+            locks_by_scope=locks_by_scope,
+            locks_by_attempt_id=locks_by_attempt_id,
+            active_wakes_by_task_id=frozenset(wake_tasks),
+            active_wakes_by_run_id=frozenset(wake_runs),
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        return _empty_runtime_snapshot(error=f"runtime_db_{type(exc).__name__}")
+
+
+def _load_scheduler_snapshot(owner_home: Path) -> _SchedulerSnapshot:
+    sched_path = owner_home / "data" / "scheduler" / "store.json"
+    if sched_path.is_symlink():
+        return _SchedulerSnapshot(error="scheduler_store_symlink", runs_by_run_id={}, runs_by_task_id={})
+    if not sched_path.exists():
+        return _SchedulerSnapshot(runs_by_run_id={}, runs_by_task_id={})
+    raw = read_atomic_store_bytes(sched_path)
+    if raw is None:
+        return _SchedulerSnapshot(error="scheduler_store_unreadable", runs_by_run_id={}, runs_by_task_id={})
+    try:
+        sched_doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return _SchedulerSnapshot(error="scheduler_store_invalid_json", runs_by_run_id={}, runs_by_task_id={})
+    if not isinstance(sched_doc, dict):
+        return _SchedulerSnapshot(error="scheduler_store_invalid_shape", runs_by_run_id={}, runs_by_task_id={})
+    raw_runs = sched_doc.get("runs")
+    if raw_runs is None:
+        return _SchedulerSnapshot(runs_by_run_id={}, runs_by_task_id={})
+    items: Sequence[tuple[str, object]]
+    if isinstance(raw_runs, dict):
+        items = [(str(key), value) for key, value in raw_runs.items()]
+    elif isinstance(raw_runs, list):
+        items = [("", value) for value in raw_runs]
+    else:
+        return _SchedulerSnapshot(error="scheduler_runs_invalid_shape", runs_by_run_id={}, runs_by_task_id={})
+    runs_by_run_id: dict[str, list[str]] = {}
+    runs_by_task_id: dict[str, list[str]] = {}
+    for fallback_key, entry in items:
+        if not isinstance(entry, dict):
+            return _SchedulerSnapshot(error="scheduler_run_entry_invalid", runs_by_run_id={}, runs_by_task_id={})
+        status = str(entry.get("status") or "").strip().lower()
+        r_id = str(entry.get("run_id") or fallback_key or "").strip()
+        if r_id:
+            runs_by_run_id.setdefault(r_id, []).append(status)
+        for key in ("root_task_id", "task_id"):
+            t_id = str(entry.get(key) or "").strip()
+            if t_id:
+                runs_by_task_id.setdefault(t_id, []).append(status)
+    return _SchedulerSnapshot(runs_by_run_id=runs_by_run_id, runs_by_task_id=runs_by_task_id)
+
+
+def _extract_workflow_refs(workflow_doc: object, run_ids: set[str], task_ids: set[str]) -> None:
+    if not isinstance(workflow_doc, dict):
+        return
+    for key in ("workflow_run_id", "run_id", "agent_run_id"):
+        val = str(workflow_doc.get(key) or "").strip()
+        if val:
+            run_ids.add(val)
+    for key in ("task_id", "root_task_id"):
+        val = str(workflow_doc.get(key) or "").strip()
+        if val:
+            task_ids.add(val)
+    for nested_key in ("business_context", "escalation_result", "result"):
+        nested = workflow_doc.get(nested_key)
+        if isinstance(nested, dict):
+            _extract_workflow_refs(nested, run_ids, task_ids)
+
+
+def _read_workflow_dir_refs(run_dir: Path, run_ids: set[str], task_ids: set[str]) -> str:
+    run_file = run_dir / "run.json"
+    if not run_file.exists():
+        return ""
+    try:
+        if run_file.is_symlink():
+            return "workflow_run_symlink"
+        run_payload = json.loads(run_file.read_text(encoding="utf-8"))
+        if not isinstance(run_payload, dict):
+            return "workflow_run_invalid"
+        status = str(run_payload.get("status") or "").strip().lower()
+        _extract_workflow_refs(run_payload, run_ids, task_ids)
+        steps_dir = run_dir / "steps"
+        if steps_dir.is_dir():
+            for step_file in sorted(steps_dir.glob("*.json")):
+                if step_file.is_symlink():
+                    return "workflow_step_symlink"
+                step_payload = json.loads(step_file.read_text(encoding="utf-8"))
+                if not isinstance(step_payload, dict):
+                    return "workflow_step_invalid"
+                _extract_workflow_refs(step_payload, run_ids, task_ids)
+        return f"status:{status}"
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        return f"workflow_dir_{type(exc).__name__}"
+
+
+def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256) -> _WorkflowSnapshot:
+    index_db = owner_home / "data" / "workflow_run_index.sqlite3"
+    runs_dir = owner_home / "data" / "workflow_runs"
+    unsettled_run_ids: set[str] = set()
+    unsettled_task_ids: set[str] = set()
+    settled_run_ids: set[str] = set()
+    settled_task_ids: set[str] = set()
+    indexed_settled: set[str] = set()
+
+    if index_db.exists() or index_db.is_symlink():
+        try:
+            require_plain_sqlite_files(index_db, beneath=owner_home)
+            with closing(sqlite3.connect(sqlite_readonly_probe_uri(index_db), uri=True, timeout=1.0)) as conn:
+                tables = {
+                    str(row[0])
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                }
+                if not {"runs", "pending", "legacy"}.issubset(tables):
+                    return _WorkflowSnapshot(error="workflow_index_incomplete")
+                for wf_run_id, raw_status in conn.execute("SELECT run_id, status FROM runs"):
+                    run_id = str(wf_run_id or "").strip()
+                    status = str(raw_status or "").strip().lower()
+                    if not run_id:
+                        continue
+                    if status in _WORKFLOW_SETTLED_STATES:
+                        settled_run_ids.add(run_id)
+                        indexed_settled.add(run_id)
+                    else:
+                        unsettled_run_ids.add(run_id)
+                for (wf_run_id,) in conn.execute("SELECT run_id FROM pending"):
+                    if wf_run_id:
+                        unsettled_run_ids.add(str(wf_run_id).strip())
+                for (wf_run_id,) in conn.execute("SELECT run_id FROM legacy"):
+                    if wf_run_id:
+                        unsettled_run_ids.add(str(wf_run_id).strip())
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            return _WorkflowSnapshot(error=f"workflow_index_{type(exc).__name__}")
+
+    if runs_dir.is_symlink():
+        return _WorkflowSnapshot(error="workflow_runs_dir_symlink")
+    if runs_dir.is_dir():
+        try:
+            subdirs = sorted((entry for entry in runs_dir.iterdir() if entry.is_dir()), key=lambda p: p.name)
+        except OSError as exc:
+            return _WorkflowSnapshot(error=f"workflow_runs_scan_{type(exc).__name__}")
+        settled_scanned = 0
+        for run_dir in subdirs:
+            if run_dir.is_symlink():
+                return _WorkflowSnapshot(error="workflow_run_dir_symlink")
+            dir_name = run_dir.name
+            is_known_settled = dir_name in indexed_settled and dir_name not in unsettled_run_ids
+            if is_known_settled and settled_scanned >= max_settled_dir_scan:
+                continue
+            r_ids: set[str] = {dir_name}
+            t_ids: set[str] = set()
+            outcome = _read_workflow_dir_refs(run_dir, r_ids, t_ids)
+            if outcome and not outcome.startswith("status:"):
+                return _WorkflowSnapshot(error=outcome)
+            status = outcome.removeprefix("status:") if outcome else ""
+            if dir_name in unsettled_run_ids or (outcome and status not in _WORKFLOW_SETTLED_STATES):
+                unsettled_run_ids.update(r_ids)
+                unsettled_task_ids.update(t_ids)
+                settled_run_ids.difference_update(r_ids)
+            elif status in _WORKFLOW_SETTLED_STATES:
+                settled_run_ids.update(r_ids)
+                settled_task_ids.update(t_ids)
+                settled_scanned += 1
+        settled_run_ids.difference_update(unsettled_run_ids)
+        settled_task_ids.difference_update(unsettled_task_ids)
+
+    return _WorkflowSnapshot(
+        unsettled_run_ids=frozenset(unsettled_run_ids),
+        unsettled_task_ids=frozenset(unsettled_task_ids),
+        settled_run_ids=frozenset(settled_run_ids),
+        settled_task_ids=frozenset(settled_task_ids),
+    )
+
+
+def _discover_conversation_snapshot(
+    owner_home: Path,
+    extra_roots: Sequence[str | Path] | None,
+    record_roots: Sequence[Path],
+) -> _ConversationSnapshot:
+    candidates: list[Path] = []
+    discovery_error = ""
+    try:
+        for pattern in _CONVERSATION_ROOT_PATTERNS:
+            if "*" in pattern:
+                candidates.extend(sorted(owner_home.glob(pattern)))
+            else:
+                candidates.append(owner_home / pattern)
+    except OSError as exc:
+        discovery_error = f"conversation_discovery_{type(exc).__name__}"
+    for extra in extra_roots or ():
+        candidates.append(Path(extra).expanduser().resolve(strict=False))
+    candidates.extend(record_roots)
+
+    seen: set[Path] = set()
+    stores: list[tuple[Path, ConversationStore]] = []
+    wake_tasks: set[str] = set()
+    wake_runs: set[str] = set()
+    wake_error = ""
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        stores.append((resolved, ConversationStore(resolved, initialize=False)))
+        for kind in ("urgent", "normal"):
+            wake_dir = resolved / "wake_queue" / kind
+            if not wake_dir.is_dir():
+                continue
+            try:
+                for wake_file in sorted(wake_dir.glob("*.json")):
+                    wake_doc = json.loads(wake_file.read_text(encoding="utf-8"))
+                    if not isinstance(wake_doc, dict):
+                        wake_error = wake_error or "conversation_wake_invalid"
+                        continue
+                    for t_key in ("root_task_id", "task_id"):
+                        val = str(wake_doc.get(t_key) or "").strip()
+                        if val:
+                            wake_tasks.add(val)
+                    for r_key in ("root_run_id", "run_id"):
+                        val = str(wake_doc.get(r_key) or "").strip()
+                        if val:
+                            wake_runs.add(val)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                wake_error = wake_error or f"conversation_wake_{type(exc).__name__}"
+
+    return _ConversationSnapshot(
+        stores=tuple(stores),
+        discovery_error=discovery_error,
+        wake_error=wake_error,
+        active_wake_task_ids=frozenset(wake_tasks),
+        active_wake_run_ids=frozenset(wake_runs),
+    )
+
+
+def _runtime_tree_verdict(
+    runtime: _RuntimeDbSnapshot,
+    *,
+    root_task_id: str,
+    run_id: str,
+    effective_now: float,
+) -> tuple[list[str], list[str], bool]:
+    active_reasons: list[str] = []
+    unknown_reasons: list[str] = []
+    matched_task_runs: dict[str, dict[str, str]] = {}
+    matched_agent_runs: dict[str, dict[str, str]] = {}
+
+    for row in runtime.task_runs_by_task_id.get(root_task_id, ()):
+        matched_task_runs[row["task_run_id"]] = row
+    if root_task_id in runtime.task_runs_by_id:
+        row = runtime.task_runs_by_id[root_task_id]
+        matched_task_runs[row["task_run_id"]] = row
+    for row in runtime.agent_runs_by_run_id.get(run_id, ()):
+        matched_agent_runs[row["agent_run_id"]] = row
+    if run_id in runtime.agent_runs_by_id:
+        row = runtime.agent_runs_by_id[run_id]
+        matched_agent_runs[row["agent_run_id"]] = row
+    for tr_id in list(matched_task_runs):
+        for row in runtime.agent_runs_by_task_run_id.get(tr_id, ()):
+            matched_agent_runs[row["agent_run_id"]] = row
+
+    # 沿 parent_agent_run_id 向下展开全量子代理树并回溯上级 task_run/parent。
+    queue: deque[str] = deque(matched_agent_runs)
+    while queue:
+        ar_id = queue.popleft()
+        row = runtime.agent_runs_by_id.get(ar_id)
+        if row:
+            tr_id = row["task_run_id"]
+            if tr_id and tr_id not in matched_task_runs and tr_id in runtime.task_runs_by_id:
+                matched_task_runs[tr_id] = runtime.task_runs_by_id[tr_id]
+                for sibling in runtime.agent_runs_by_task_run_id.get(tr_id, ()):
+                    if sibling["agent_run_id"] not in matched_agent_runs:
+                        matched_agent_runs[sibling["agent_run_id"]] = sibling
+                        queue.append(sibling["agent_run_id"])
+            parent_id = row["parent_agent_run_id"]
+            if parent_id and parent_id not in matched_agent_runs and parent_id in runtime.agent_runs_by_id:
+                matched_agent_runs[parent_id] = runtime.agent_runs_by_id[parent_id]
+                queue.append(parent_id)
+        for child_id in runtime.children_by_parent_id.get(ar_id, ()):
+            if child_id not in matched_agent_runs and child_id in runtime.agent_runs_by_id:
+                matched_agent_runs[child_id] = runtime.agent_runs_by_id[child_id]
+                queue.append(child_id)
+
+    for tr in matched_task_runs.values():
+        if tr["status"] not in AGENT_RUN_TERMINAL_STATUSES:
+            active_reasons.append(f"runtime_task_run_{tr['status'] or 'non_terminal'}")
+
+    for ar_id, ar in matched_agent_runs.items():
+        if ar["status"] not in AGENT_RUN_TERMINAL_STATUSES:
+            active_reasons.append(f"runtime_agent_run_{ar['status'] or 'non_terminal'}")
+        for lease in runtime.locks_by_scope.get(exec_lock_scope(ar_id), ()):
+            if lease > effective_now:
+                active_reasons.append("runtime_resource_lock_active")
+        for attempt in runtime.attempts_by_agent_run_id.get(ar_id, ()):
+            att_status = attempt["status"]
+            if att_status == ATTEMPT_STATUS_UNKNOWN:
+                unknown_reasons.append("runtime_attempt_status_unknown")
+            elif att_status not in _ATTEMPT_TERMINAL_STATUSES:
+                active_reasons.append(f"runtime_attempt_{att_status or 'active'}")
+            for lease in runtime.locks_by_attempt_id.get(attempt["attempt_id"], ()):
+                if lease > effective_now:
+                    active_reasons.append("runtime_attempt_lock_active")
+
+    if root_task_id in runtime.active_wakes_by_task_id or run_id in runtime.active_wakes_by_run_id:
+        active_reasons.append("runtime_wake_pending")
+
+    affirmed = bool(matched_task_runs or matched_agent_runs)
+    return active_reasons, unknown_reasons, affirmed
+
+
+def _classify_execution_record(
+    record: dict[str, object],
+    *,
+    owner_home_path: Path,
+    owner_home_str: str,
+    runtime: _RuntimeDbSnapshot,
+    scheduler: _SchedulerSnapshot,
+    workflow: _WorkflowSnapshot,
+    conversations: _ConversationSnapshot,
+    min_settled_age_seconds: int,
+    effective_now: float,
+) -> dict[str, Any]:
+    facts = background_process_facts(record)
+    if record.get("schema") not in _EXECUTION_PROCESS_SESSION_SCHEMAS or record.get("activation_scope") is not None:
+        return {**facts, "classification": "unknown", "reason": "activation_or_non_execution_schema"}
+
+    scope_raw = record.get("execution_scope")
+    if not isinstance(scope_raw, dict):
+        return {**facts, "classification": "unknown", "reason": "scope_incomplete"}
+
+    rec_owner = str(scope_raw.get("owner_home") or "").strip()
+    if not rec_owner:
+        return {**facts, "classification": "unknown", "reason": "owner_scope_missing"}
+    if str(Path(rec_owner).expanduser().resolve(strict=False)) != owner_home_str:
+        return {**facts, "classification": "unknown", "reason": "owner_scope_mismatch"}
+
+    thread_id = facts["thread_id"]
+    root_task_id = facts["root_task_id"]
+    run_id = facts["run_id"]
+    if not (thread_id and root_task_id and run_id):
+        return {**facts, "classification": "unknown", "reason": "scope_incomplete"}
+
+    completion_target = record.get("completion_target")
+    if isinstance(completion_target, dict) and completion_target.get("store_root"):
+        ct_root = Path(str(completion_target["store_root"])).expanduser().resolve(strict=False)
+        if not ct_root.is_relative_to(owner_home_path):
+            return {**facts, "classification": "unknown", "reason": "completion_target_outside_owner"}
+
+    active_reasons: list[str] = []
+    unknown_reasons: list[str] = []
+    affirmed_sources: list[str] = []
+
+    if root_task_id in conversations.active_wake_task_ids or run_id in conversations.active_wake_run_ids:
+        active_reasons.append("conversation_wake_pending")
+
+    for _store_path, store in conversations.stores:
+        try:
+            thread_obj, thread_err = store.threads.load_report(thread_id)
+            if thread_err is not None and thread_err.get("error_type") != "FileNotFoundError":
+                unknown_reasons.append("conversation_thread_unreadable")
+            if thread_obj is not None:
+                exec_state = conversation_thread_execution_state(store, thread_id)
+                if not exec_state.get("state_available") or exec_state.get("load_errors"):
+                    unknown_reasons.append("thread_execution_state_unreadable")
+                elif root_task_id in (exec_state.get("running_task_ids") or ()):
+                    active_reasons.append("thread_execution_state_active")
+
+                active_links, link_errors = store.tasks.active_report(thread_id)
+                if link_errors:
+                    unknown_reasons.append("conversation_active_links_unreadable")
+                elif any(getattr(link, "task_id", "") == root_task_id for link in active_links):
+                    active_reasons.append("conversation_task_active")
+
+            link, link_err = store.tasks.load_report(root_task_id)
+            if link_err is not None:
+                unknown_reasons.append("conversation_task_link_unreadable")
+            elif link is not None:
+                link_thread = str(getattr(link, "thread_id", "") or "")
+                if link_thread and link_thread != thread_id:
+                    unknown_reasons.append("task_link_thread_mismatch")
+                else:
+                    link_status = str(getattr(link, "status", "") or "").strip().lower()
+                    if link_status in THREAD_TASK_LINK_INACTIVE_STATUSES:
+                        affirmed_sources.append("conversation_task_link")
+                    else:
+                        active_reasons.append(f"conversation_task_link_{link_status or 'active'}")
+        except Exception as exc:  # noqa: BLE001 会话存储读取异常保守判未知
+            unknown_reasons.append(f"conversation_store_{type(exc).__name__}")
+
+    rt_active, rt_unknown, rt_affirmed = _runtime_tree_verdict(
+        runtime, root_task_id=root_task_id, run_id=run_id, effective_now=effective_now,
+    )
+    active_reasons.extend(rt_active)
+    unknown_reasons.extend(rt_unknown)
+    if rt_affirmed and not rt_active and not rt_unknown:
+        affirmed_sources.append("runtime_db")
+
+    sched_statuses = [
+        *scheduler.runs_by_run_id.get(run_id, ()),
+        *scheduler.runs_by_task_id.get(root_task_id, ()),
+    ]
+    if sched_statuses:
+        sched_active = [s for s in sched_statuses if s in _SCHEDULER_ACTIVE_STATUSES]
+        sched_unknown = [s for s in sched_statuses if s not in _SCHEDULER_ACTIVE_STATUSES and s not in _SCHEDULER_SETTLED_STATUSES]
+        if sched_active:
+            active_reasons.append(f"scheduler_run_{sched_active[0]}")
+        elif sched_unknown:
+            unknown_reasons.append(f"scheduler_run_{sched_unknown[0] or 'unknown'}")
+        else:
+            affirmed_sources.append("scheduler")
+
+    if run_id in workflow.unsettled_run_ids or root_task_id in workflow.unsettled_task_ids:
+        active_reasons.append("workflow_run_unsettled")
+    elif run_id in workflow.settled_run_ids or root_task_id in workflow.settled_task_ids:
+        affirmed_sources.append("workflow")
+
+    if active_reasons:
+        return {**facts, "classification": "active", "reason": active_reasons[0]}
+
+    for owner_err in (
+        runtime.error,
+        scheduler.error,
+        workflow.error,
+        conversations.discovery_error,
+        conversations.wake_error,
+    ):
+        if owner_err:
+            unknown_reasons.append(owner_err)
+    if unknown_reasons:
+        return {**facts, "classification": "unknown", "reason": unknown_reasons[0]}
+    if not affirmed_sources:
+        return {**facts, "classification": "unknown", "reason": "root_state_unknown"}
+
+    dedup_sources = list(dict.fromkeys(affirmed_sources))
+    if min_settled_age_seconds > 0:
+        started_at = record.get("started_at")
+        if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
+            return {**facts, "classification": "unknown", "reason": "started_at_unknown"}
+        age_seconds = effective_now - float(started_at)
+        if age_seconds < min_settled_age_seconds:
+            return {
+                **facts,
+                "classification": "settled",
+                "reason": "younger_than_min_settled_age",
+                "affirmed_sources": dedup_sources,
+                "age_seconds": age_seconds,
+                "eligible_to_stop": False,
+                "stopped": False,
+            }
+
+    return {
+        **facts,
+        "classification": "settled",
+        "reason": "settled_terminal",
+        "affirmed_sources": dedup_sources,
+        "eligible_to_stop": True,
+    }
+
+
+def _stop_settled_batch(
+    *,
+    store: ProcessSessionStore,
+    resolved_store_root: Path,
+    default_store_root: Path,
+    owner_home_str: str,
+    store_has_errors: bool,
+    all_scope_keys_by_scope: dict[tuple[str, str, str], set[str]],
+    eligible_entries: list[tuple[dict[str, object], dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    by_scope: dict[tuple[str, str, str], list[tuple[dict[str, object], dict[str, Any]]]] = {}
+    for record, item in eligible_entries:
+        scope_key = (item["thread_id"], item["root_task_id"], item["run_id"])
+        by_scope.setdefault(scope_key, []).append((record, item))
+
+    stopped_rows: list[dict[str, Any]] = []
+    for scope_key, group in by_scope.items():
+        group_sids = {str(item["session_id"]) for _, item in group}
+        whole_scope_eligible = (
+            not store_has_errors
+            and resolved_store_root == default_store_root
+            and all_scope_keys_by_scope.get(scope_key, set()).issubset(group_sids)
+        )
+        handled_via_freeze = False
+        if whole_scope_eligible:
+            thread_id, root_task_id, run_id = scope_key
+            try:
+                batch = freeze_process_stop(ProcessExecutionScope(
+                    owner_home=owner_home_str,
+                    thread_id=thread_id,
+                    root_task_id=root_task_id,
+                    run_id=run_id,
+                ))
+                if not batch.background_freeze_error and batch.receipt.records:
+                    cleanup = cleanup_process_stop(batch)
+                    sessions_by_id = {
+                        str(row.get("session_id") or ""): row
+                        for row in cleanup.get("sessions", ())
+                        if isinstance(row, dict)
+                    }
+                    # 只有冻结回执覆盖全部目标会话时才认整批完成；否则退回逐条精确收口。
+                    if group_sids.issubset(sessions_by_id):
+                        for _, item in group:
+                            s_row = sessions_by_id[str(item["session_id"])]
+                            stopped = bool(s_row.get("confirmed"))
+                            item.update({
+                                "stopped": stopped,
+                                "terminal_status": str(s_row.get("status") or ""),
+                                "reason": "settled_and_stopped" if stopped else "stop_unconfirmed",
+                            })
+                            if s_row.get("error"):
+                                item["stop_error"] = s_row["error"]
+                            stopped_rows.append(item)
+                        handled_via_freeze = True
+            except (OSError, RuntimeError, TypeError, ValueError):
+                handled_via_freeze = False
+
+        if handled_via_freeze:
+            continue
+
+        for record, item in group:
+            try:
+                result = stop_process_session(store, record)
+                stopped = bool(result.confirmed)
+                item.update({
+                    "stopped": stopped,
+                    "terminal_status": str(result.record.get("status") or ""),
+                    "reason": "settled_and_stopped" if stopped else "stop_unconfirmed",
+                })
+            except ProcessSessionCleanupError as exc:
+                item.update({
+                    "stopped": False,
+                    "terminal_status": "unknown",
+                    "reason": "stop_failed",
+                    "stop_error": exc.report,
+                })
+            stopped_rows.append(item)
+
+    return stopped_rows
+
+
+# LLM: 按三态合同（active / unknown / settled）只回收"所属 root/thread/task/run/workflow/scheduler 全链路已证实终态
+#   且年龄达到阈值"的托管执行进程；绝不按命令正文/进程名/端口猜测，绝不停止 unknown（坏记录、缺范围、状态未明或激活域进程）。
+# 函数用途: 分类并按需冻结/停止已证实终态的遗留后台进程，返回含三态明细与计数的结构化报告。
+def freeze_settled_leftover_processes(
+    owner_home: str | Path,
+    *,
+    min_settled_age_seconds: int = 0,
+    now_ts: float | None = None,
+    store_root: str | Path | None = None,
+    conversation_roots: Sequence[str | Path] | None = None,
+) -> dict[str, Any]:
+    effective_now = float(time.time() if now_ts is None else now_ts)
+    min_age = max(0, int(min_settled_age_seconds or 0))
+    owner_text = str(owner_home or "").strip()
+    if not owner_text:
+        return {
+            "owner_home": "",
+            "store_root": "",
+            "min_settled_age_seconds": min_age,
+            "now_ts": effective_now,
+            "active_processes": [],
+            "settled_processes": [],
+            "stopped_processes": [],
+            "deferred_settled_processes": [],
+            "unknown_processes": [],
+            "counts": {
+                "active": 0, "settled": 0, "stopped": 0,
+                "deferred_settled": 0, "stop_failed": 0, "unknown": 0,
+            },
+        }
+    owner_home_path = Path(owner_text).expanduser().resolve(strict=False)
+    owner_home_str = str(owner_home_path)
+    default_store_root = Path(background_store_root(owner_home_path, owner_home_path))
+    resolved_store_root = (
+        Path(store_root).expanduser().resolve(strict=False)
+        if store_root is not None
+        else default_store_root
+    )
+
+    active_processes: list[dict[str, Any]] = []
+    settled_processes: list[dict[str, Any]] = []
+    deferred_settled: list[dict[str, Any]] = []
+    unknown_processes: list[dict[str, Any]] = []
+
+    if not resolved_store_root.exists():
+        return {
+            "owner_home": owner_home_str,
+            "store_root": str(resolved_store_root),
+            "min_settled_age_seconds": min_age,
+            "now_ts": effective_now,
+            "active_processes": [],
+            "settled_processes": [],
+            "stopped_processes": [],
+            "deferred_settled_processes": [],
+            "unknown_processes": [],
+            "counts": {
+                "active": 0, "settled": 0, "stopped": 0,
+                "deferred_settled": 0, "stop_failed": 0, "unknown": 0,
+            },
+        }
+
+    store = ProcessSessionStore(resolved_store_root)
+    records, errors = store.list_records()
+    for err in errors:
+        err_dict = err if isinstance(err, dict) else {"detail": str(err)}
+        err_path = str(err_dict.get("path") or "")
+        sid = Path(err_path).stem if err_path else str(err_dict.get("session_id") or "")
+        unknown_processes.append({
+            "session_id": sid,
+            "classification": "unknown",
+            "reason": str(err_dict.get("error_type") or err_dict.get("context") or "record_load_error"),
+            "error": err_dict,
+        })
+
+    non_terminal = [
+        rec for rec in records
+        if rec.get("status") not in PROCESS_TERMINAL_STATUSES
+    ]
+    if not non_terminal:
+        return {
+            "owner_home": owner_home_str,
+            "store_root": str(resolved_store_root),
+            "min_settled_age_seconds": min_age,
+            "now_ts": effective_now,
+            "active_processes": [],
+            "settled_processes": [],
+            "stopped_processes": [],
+            "deferred_settled_processes": [],
+            "unknown_processes": unknown_processes,
+            "counts": {
+                "active": 0, "settled": 0, "stopped": 0,
+                "deferred_settled": 0, "stop_failed": 0, "unknown": len(unknown_processes),
+            },
+        }
+
+    record_conv_roots: list[Path] = []
+    for rec in non_terminal:
+        ct = rec.get("completion_target")
+        if isinstance(ct, dict) and ct.get("store_root"):
+            cand = Path(str(ct["store_root"])).expanduser().resolve(strict=False)
+            if cand.is_relative_to(owner_home_path):
+                record_conv_roots.append(cand)
+
+    runtime = _load_runtime_db_snapshot(owner_home_path)
+    scheduler = _load_scheduler_snapshot(owner_home_path)
+    workflow = _load_workflow_snapshot(owner_home_path)
+    conversations = _discover_conversation_snapshot(owner_home_path, conversation_roots, record_conv_roots)
+
+    eligible_entries: list[tuple[dict[str, object], dict[str, Any]]] = []
+    all_scope_keys_by_scope: dict[tuple[str, str, str], set[str]] = {}
+    for rec in non_terminal:
+        scope_raw = rec.get("execution_scope")
+        if isinstance(scope_raw, dict):
+            key = (
+                str(scope_raw.get("thread_id") or "").strip(),
+                str(scope_raw.get("root_task_id") or "").strip(),
+                str(scope_raw.get("run_id") or "").strip(),
+            )
+            all_scope_keys_by_scope.setdefault(key, set()).add(str(rec.get("session_id") or ""))
+
+    for rec in non_terminal:
+        item = _classify_execution_record(
+            rec,
+            owner_home_path=owner_home_path,
+            owner_home_str=owner_home_str,
+            runtime=runtime,
+            scheduler=scheduler,
+            workflow=workflow,
+            conversations=conversations,
+            min_settled_age_seconds=min_age,
+            effective_now=effective_now,
+        )
+        verdict = item["classification"]
+        if verdict == "active":
+            active_processes.append(item)
+        elif verdict == "unknown":
+            unknown_processes.append(item)
+        else:
+            settled_processes.append(item)
+            if item.pop("eligible_to_stop", False):
+                eligible_entries.append((rec, item))
+            else:
+                deferred_settled.append(item)
+
+    stopped_processes = _stop_settled_batch(
+        store=store,
+        resolved_store_root=resolved_store_root,
+        default_store_root=default_store_root,
+        owner_home_str=owner_home_str,
+        store_has_errors=bool(errors),
+        all_scope_keys_by_scope=all_scope_keys_by_scope,
+        eligible_entries=eligible_entries,
+    )
+    stopped_count = sum(1 for row in stopped_processes if row.get("stopped"))
+    stop_failed_count = sum(1 for row in stopped_processes if not row.get("stopped"))
+
+    return {
+        "owner_home": owner_home_str,
+        "store_root": str(resolved_store_root),
+        "min_settled_age_seconds": min_age,
+        "now_ts": effective_now,
+        "active_processes": active_processes,
+        "settled_processes": settled_processes,
+        "stopped_processes": stopped_processes,
+        "deferred_settled_processes": deferred_settled,
+        "unknown_processes": unknown_processes,
+        "counts": {
+            "active": len(active_processes),
+            "settled": len(settled_processes),
+            "stopped": stopped_count,
+            "deferred_settled": len(deferred_settled),
+            "stop_failed": stop_failed_count,
+            "unknown": len(unknown_processes),
+        },
+    }
+
+
 __all__ = [
     "DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS",
     "SessionLeftoverStop",
@@ -453,6 +1352,7 @@ __all__ = [
     "cleanup_session_leftover_processes",
     "collect_runtime_memory_diagnostics",
     "freeze_session_leftover_processes",
+    "freeze_settled_leftover_processes",
     "gateway_memory_tracing",
     "GatewayMemoryTracing",
     "list_running_background_processes",

@@ -101,6 +101,7 @@ _EXTRA_INT_RANGES = {
     "dynamic_timeout_min": (10, None),
     "dynamic_timeout_max": (60, None),
     "feishu_callback_port": (1024, 65535),
+    "background_process_settled_ttl_seconds": (0, None),
 }
 _EXTRA_FLOAT_RANGES = {
     "estimated_output_tokens_per_second": (1.0, None),

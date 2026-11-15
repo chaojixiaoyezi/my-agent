@@ -282,7 +282,7 @@ memory_compact_recovery_target_percent: 60
 # 0 优先继承常规天花板：显式共享窗口且能计量时可继承原始 max_tokens，否则继承旧四分之一窗口上限。
 # 正值只在 memory_compact_reasoning_level 的目标可由真实协议/档案表示时取 min(本值,常规天花板)；
 # 不支持降档或留空/auto/off 时沿用旧输出预留，记录 downshift_unavailable/downshift_disabled，绝不暗中改成4096。
-# 尾部更新 off 或被精确拒绝时仍可用请求级低档，C 不因此变大。已关闭思考的请求保持关闭。
+# 尾部更新 off 时使用请求级低档；auto 且仅新增尾部项被精确400拒绝时，仅撤掉该尾部项并保留原请求/线程思考强度重发，C 不因此变大。已关闭思考的请求保持关闭。
 # 准入用完整校准输入加 C 和2048工程余量；16K/低档不保证摘要完整，严格截断仍拒绝并保留原文。
 # 缓存是否命中及真实摘要质量需要供应商观测，不能由本地规划保证。修改后按参数中心标注的重载时机生效。
 memory_compact_summary_max_output_tokens: 16384
@@ -294,7 +294,7 @@ memory_compact_remote_enabled: true
 # 压缩摘要思考档位 memory_compact_reasoning_level（不是新的 memory_compact_reasoning_effort），默认low；
 # 留空/auto/off 沿用会话档位，不把 off 重新解释为关闭思考。目标必须能由当前模型的控制方式/档位声明表示。
 # 模型档案字段 model_reasoning_update_items 默认auto：合适的 Responses 请求优先在冻结历史后、摘要指令前追加低档项；
-# 仅新项类型的精确400结构化拒绝允许一次请求级低档回退，负能力只记本后端实例。off 直接请求级低档，on 严格拒绝不回退。
+# 仅新项类型的精确400结构化拒绝允许一次撤掉该尾部项并保留原请求/线程思考强度重试，负能力只记本后端实例。off 直接请求级低档，on 严格拒绝不回退。
 # 该档案字段由 /model 管理，参数中心只读展示（writable/user_editable=false），普通 user_config 不改写模型档案。
 # 其它协议（DeepSeek/Anthropic/OpenAI Chat）：复用主对话前缀的压缩请求（同工具+auto）保持会话档位，换档会换缓存分区、整段不命中；
 # 本来就不带工具且 tool_choice=none 的压缩请求（分段摘要、回合中无前缀摘要、闲置维护摘要）不复用任何前缀，目标能真实表示时用请求级档位/预算；
@@ -1169,6 +1169,9 @@ tool_shell_demoted_nice: 15
 # 自主审批模式也不会替你放开。声明 loopback 却绑到局域网地址时，后台 host 按真实 socket 表回收该服务并在记录里留证据；
 # 设为 false 则只记 listener_warning 不回收。
 background_process_listen_scope_enforce: true
+# 宿主冷启动时自动回收“已证实终态且超过此秒数”的遗留后台进程（0 = 关闭，仅手动执行 gateway stop --stop-background --settled-only 才回收；
+# 只会按所属任务/会话/运行/工作流/调度全部明确终态后的时间核验并保留状态未知或活跃中的进程，重启排空与接班时不自动触发；单位秒，修改后重启 Gateway 生效）。
+background_process_settled_ttl_seconds: 0
 # macOS 上 Shell 沙箱是否对"非本机管理员"的 owner（例如飞书等 IM 用户）拒读你的用户家目录（默认关闭）：
 # - false：这些 owner 的命令读不到 my-agent 数据目录里别人的部分，但仍能读你家目录里的其它内容（如 ~/.ssh、其它项目）。
 # - true：家目录里只有该 owner 自己的目录、工作区和授权目录能读；其 Shell 的 HOME 改指到 owner 自己的家目录，

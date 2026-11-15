@@ -56,6 +56,7 @@ from ..agent.gateway_parts import (
 from ..agent.gateway_parts.background_resource_report import (
     DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS,
     background_store_root,
+    freeze_settled_leftover_processes,
     gateway_memory_tracing,
     list_running_background_processes,
     stop_background_processes,
@@ -1495,6 +1496,8 @@ def _run_standalone_gateway(args, lifecycle) -> int:
         return 2
     restart_marker = take_restart_marker(paths)
     requeued, pid = _cmd_gateway_run_setup(agent, paths, context=run_context, restart_marker=restart_marker)
+    if restart_marker is None and int(getattr(args, "after_pid", 0) or 0) <= 0:
+        _sweep_cold_start_settled_background_processes(agent)
     http_port = getattr(agent.config, "gateway_port", 0) or 0
     try:
         stop_event, heartbeat_thread, request_thread, background_thread, http_server = _cmd_gateway_run_threads(
@@ -1674,6 +1677,13 @@ def _gateway_state_detail_for_display(running: bool, state: dict) -> dict:
 # LLM: 轻上下文保留原owner/path/进程身份与显式后台停止合同，不构造业务Agent或改变自停防线。
 # 函数用途: 沿原身份门停止所选Gateway，不为控制命令启动闲置MCP。
 def cmd_gateway_stop(args) -> int:
+    if getattr(args, "settled_only", False) is True and getattr(args, "stop_background", False) is not True:
+        print(
+            "参数冲突：--settled-only 不能单独使用；如需仅停止已明确终态的遗留后台进程，"
+            "请执行：`my-agent gateway stop --stop-background --settled-only`",
+            file=sys.stderr,
+        )
+        return 2
     args._defer_mcp_connect = True
     agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     paths = gateway_paths(agent)
@@ -1725,6 +1735,13 @@ def cmd_gateway_stop(args) -> int:
 #   既有资源停止路径，并只对本 gateway 登记的那批进程生效。停止失败按非零退出码报告，不谎报已停。
 # 函数用途: 列出（并按显式要求停止）本 gateway 登记的遗留后台进程，返回退出码。
 def _report_background_processes(args, agent, background: tuple[list, list]) -> int:
+    if getattr(args, "settled_only", False) is True and getattr(args, "stop_background", False) is not True:
+        print(
+            "参数冲突：--settled-only 必须与 --stop-background 同用，"
+            "请执行：`my-agent gateway stop --stop-background --settled-only`",
+            file=sys.stderr,
+        )
+        return 2
     processes, errors = background
     if not processes and not errors:
         return 0
@@ -1743,6 +1760,8 @@ def _report_background_processes(args, agent, background: tuple[list, list]) -> 
     if not getattr(args, "stop_background", False):
         print("以上进程默认保留；如需一并停止，重新执行并加 --stop-background")
         return 0
+    if getattr(args, "settled_only", False) is True:
+        return _stop_settled_background_processes(agent)
     results = stop_background_processes(
         _background_store_root(agent),
         processes,
@@ -1758,11 +1777,106 @@ def _report_background_processes(args, agent, background: tuple[list, list]) -> 
     return 0
 
 
+def _gateway_owner_home(agent) -> str:
+    return str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "").strip()
+
+
+def _stop_settled_background_processes(agent) -> int:
+    owner_home = _gateway_owner_home(agent) or str(getattr(agent, "root", "") or "")
+    report = freeze_settled_leftover_processes(
+        owner_home,
+        store_root=_background_store_root(agent),
+    )
+    active_rows = report["active_processes"]
+    settled_rows = report["settled_processes"]
+    unknown_rows = report["unknown_processes"]
+    stopped_rows = report["stopped_processes"]
+    print(
+        f"已按三态核验遗留后台进程：active={len(active_rows)}（保留），"
+        f"settled={len(settled_rows)}，unknown={len(unknown_rows)}（保留）"
+    )
+    for row in (*active_rows, *settled_rows, *unknown_rows):
+        owner = row.get("root_task_id") or row.get("run_id") or row.get("thread_id") or "unknown"
+        row_summary = {
+            "classification": row.get("classification"),
+            "session_id": row.get("session_id"),
+            "owner": owner,
+            "pid": row.get("pid"),
+            "reason": row.get("reason") or "",
+        }
+        if "stopped" in row:
+            row_summary["stopped"] = bool(row["stopped"])
+        print(json.dumps(row_summary, ensure_ascii=False, sort_keys=True))
+    failed = [row for row in stopped_rows if not row.get("stopped")]
+    if failed:
+        print(f"有 {len(failed)} 个已终态后台进程未确认停止", file=sys.stderr)
+        return 2
+    stopped_count = sum(1 for row in stopped_rows if row.get("stopped"))
+    print(f"已停止 {stopped_count} 个已终态遗留后台进程（保留 active={len(active_rows)}、unknown={len(unknown_rows)}）")
+    return 0
+
+
+def _discover_cold_start_owner_targets(agent) -> list[tuple[str, str | None]]:
+    targets: list[tuple[str, str | None]] = []
+    seen: set[Path] = set()
+    primary = _gateway_owner_home(agent)
+    if primary:
+        resolved = Path(primary).expanduser().resolve(strict=False)
+        seen.add(resolved)
+        targets.append((str(resolved), _background_store_root(agent)))
+    home_root = getattr(getattr(agent, "home_paths", None), "root", None)
+    if home_root:
+        root_path = Path(home_root)
+        for pattern in ("owners/local/main", "owners/providers/*/users/*", "owners/providers/*/groups/*"):
+            try:
+                matches = sorted(root_path.glob(pattern))
+            except OSError:
+                continue
+            for cand in matches:
+                resolved = cand.expanduser().resolve(strict=False)
+                if resolved not in seen and cand.is_dir():
+                    seen.add(resolved)
+                    targets.append((str(resolved), None))
+    return targets
+
+
+# LLM: 仅在非重启接班的 Gateway 冷启动执行一次，且只回收已证实终态并超过 TTL 秒数的遗留后台进程；
+#   活跃与状态未知的进程一律保留，单 owner 异常不阻塞 Gateway 启动。
+# 函数用途: Gateway 冷启动时按 background_process_settled_ttl_seconds 可选回收超期已终态后台进程。
+def _sweep_cold_start_settled_background_processes(agent) -> dict[str, object] | None:
+    config = getattr(agent, "config", None)
+    ttl_seconds = max(0, int((getattr(config, "background_process_settled_ttl_seconds", 0) if config is not None else 0) or 0))
+    if ttl_seconds <= 0:
+        return None
+    totals = {"active": 0, "settled": 0, "stopped": 0, "deferred_settled": 0, "stop_failed": 0, "unknown": 0}
+    errors: list[dict[str, str]] = []
+    for owner_home, store_root in _discover_cold_start_owner_targets(agent):
+        try:
+            report = freeze_settled_leftover_processes(
+                owner_home,
+                min_settled_age_seconds=ttl_seconds,
+                store_root=store_root,
+            )
+            for key, value in (report.get("counts") or {}).items():
+                if key in totals:
+                    totals[key] += int(value or 0)
+        except Exception as exc:  # noqa: BLE001 冷启动巡检异常只记录结构化原因，不阻塞启动
+            errors.append({"owner_home": owner_home, "error_type": type(exc).__name__})
+    event_payload: dict[str, object] = {
+        "ttl_seconds": ttl_seconds,
+        **totals,
+        "errors": errors,
+        "updated_at": time.time(),
+    }
+    log_gateway_event(agent, "gateway_settled_background_sweep", event_payload)
+    return event_payload
+
+
 # LLM: 托管后台进程登记表的地址只由产品那一个函数决定（同一 owner 的家目录+工作区），
 #   这里不另写第二套推导，避免列出/停止落在与写入不同的目录。
 # 函数用途: 返回本 gateway owner 的托管后台进程登记表根目录。
 def _background_store_root(agent) -> str:
-    home = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
+    home = _gateway_owner_home(agent)
     return background_store_root(getattr(agent, "root", ""), home)
 
 

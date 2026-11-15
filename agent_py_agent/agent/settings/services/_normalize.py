@@ -709,6 +709,7 @@ _TIMEOUT_INT_FIELDS = (
     ("skill_guard_max_files", 0, None),
     ("skill_guard_max_size_kb", 0, None),
     ("collaboration_auto_dispatch_max_runners", 0, None),
+    ("background_process_settled_ttl_seconds", 0, None),
 )
 
 
