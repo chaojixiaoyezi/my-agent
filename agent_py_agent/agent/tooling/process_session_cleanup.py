@@ -102,6 +102,23 @@ def _normalize_unresolved_instance(item: object) -> dict[str, object] | None:
     return {"pid": pid, "birth_token": birth}
 
 
+# 函数用途: 从单个清理回执中提取 (pid, birth_token) 复合键集合，防止操作系统 PID 复用导致旧实例误消账。
+def _receipt_unresolved_identity_keys(receipt_obj: dict[str, object]) -> set[tuple[int, str | None]]:
+    identities: set[tuple[int, str | None]] = set()
+    inst_pids: set[int] = set()
+    for raw_inst in receipt_obj.get("unresolved_instances") or ():
+        normalized = _normalize_unresolved_instance(raw_inst)
+        if normalized is None:
+            continue
+        pid = int(normalized["pid"])
+        identities.add((pid, str(normalized["birth_token"])))
+        inst_pids.add(pid)
+    for raw_pid in receipt_obj.get("unresolved_pids") or ():
+        if type(raw_pid) is int and raw_pid > 0 and raw_pid not in inst_pids:
+            identities.add((raw_pid, None))
+    return identities
+
+
 def _extract_prior_obligations(
     record: dict[str, object],
     *,
@@ -362,17 +379,14 @@ def stop_process_session(
                 if not cleanup_instances:
                     cleanup_instances = [dict(item) for item in prior.retained_receipts]
                 else:
-                    covered_bare = {
-                        pid
+                    covered_identities = {
+                        ident
                         for item in cleanup_instances
-                        for pid in (item.get("unresolved_pids") or ())
-                        if type(pid) is int
+                        for ident in _receipt_unresolved_identity_keys(item)
                     }
                     for item in prior.retained_receipts:
-                        item_pids = {
-                            pid for pid in (item.get("unresolved_pids") or ()) if type(pid) is int
-                        }
-                        if item_pids - covered_bare:
+                        item_identities = _receipt_unresolved_identity_keys(item)
+                        if item_identities - covered_identities:
                             cleanup_instances.append(dict(item))
             cleanup_data: dict[str, object] = {
                 "confirmed": confirmed,

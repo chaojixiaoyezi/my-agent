@@ -20,7 +20,7 @@ import json
 import os
 import platform
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 # 独立资源启动器在进入bwrap前运行，只依赖最小标准库并尽早exec，避免编译完整模块与污染stderr。
@@ -33,6 +33,7 @@ if not _IS_RESOURCE_LAUNCHER:
     import subprocess
     import tempfile
     import threading
+    from collections import OrderedDict
     from collections.abc import Sequence
 
     from ..path_access_policy import (
@@ -45,6 +46,10 @@ if not _IS_RESOURCE_LAUNCHER:
         validate_persona_source_identity,
     )
     from .write_boundary import ordered_write_scope_roots
+
+    # 按 stat 键记忆成功的 bwrap --version 探测结果（容量上限 16），避免同一二进制在每次 availability() 重复派生子进程。
+    _bwrap_binary_probe_entries: OrderedDict[tuple[str, int, int, int, int], SandboxReadiness] = OrderedDict()
+    _bwrap_binary_probe_lock = threading.Lock()
 
 # 仓库内置 bwrap(随 my-agent 分发,内网装不了包也自带)。
 _VENDOR_BWRAP = Path(__file__).resolve().parents[2] / "vendor" / "bin" / "bwrap.linux-x86_64"
@@ -1000,9 +1005,31 @@ class SandboxUnavailable(RuntimeError):
     """bwrap 不可用或未通过安全自检；owner-scoped 调用方必须拒绝执行。"""
 
 
+def _bwrap_binary_stat_key(bwrap: str) -> tuple[str, int, int, int, int] | None:
+    try:
+        st = os.stat(bwrap)
+    except OSError:
+        return None
+    resolved = os.path.realpath(bwrap)
+    return (resolved, int(st.st_dev), int(st.st_ino), int(st.st_mtime_ns), int(st.st_size))
+
+
+# 函数用途: 清空 bwrap 二进制版本探测的内存条目，供测试环境隔离使用。
+def _reset_bwrap_binary_probe_state() -> None:
+    with _bwrap_binary_probe_lock:
+        _bwrap_binary_probe_entries.clear()
+
+
 # LLM: 版本读取只证明二进制可加载；full probe 还必须执行 namespace/mount 行为验证。
-# 函数用途: 执行 bwrap --version，并把加载失败转换成结构化 readiness。
+# 函数用途: 执行 bwrap --version，按 stat 键记忆成功结果，并把加载失败转换成结构化 readiness。
 def _probe_binary(bwrap: str, *, timeout: float) -> SandboxReadiness:
+    stat_key = _bwrap_binary_stat_key(bwrap)
+    if stat_key is not None:
+        with _bwrap_binary_probe_lock:
+            recorded = _bwrap_binary_probe_entries.get(stat_key)
+            if recorded is not None:
+                _bwrap_binary_probe_entries.move_to_end(stat_key)
+                return recorded if recorded.bwrap_path == bwrap else replace(recorded, bwrap_path=bwrap)
     try:
         result = subprocess.run(
             [bwrap, "--version"],
@@ -1027,7 +1054,7 @@ def _probe_binary(bwrap: str, *, timeout: float) -> SandboxReadiness:
             bwrap_path=bwrap,
             version=version,
         )
-    return SandboxReadiness(
+    readiness = SandboxReadiness(
         True,
         "SANDBOX_BINARY_READY",
         "bwrap 二进制可启动",
@@ -1035,6 +1062,13 @@ def _probe_binary(bwrap: str, *, timeout: float) -> SandboxReadiness:
         version=version,
         checks=("binary",),
     )
+    if stat_key is not None and _bwrap_binary_stat_key(bwrap) == stat_key:
+        with _bwrap_binary_probe_lock:
+            _bwrap_binary_probe_entries[stat_key] = readiness
+            _bwrap_binary_probe_entries.move_to_end(stat_key)
+            while len(_bwrap_binary_probe_entries) > 16:
+                _bwrap_binary_probe_entries.popitem(last=False)
+    return readiness
 
 
 # LLM: probe 失败统一复用 binary provenance，避免各分支丢失版本和已完成检查证据。
