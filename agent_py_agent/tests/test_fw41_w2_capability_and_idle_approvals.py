@@ -559,12 +559,25 @@ def test_idle_approval_scan_portable_replay_preserves_cursor_across_eviction(tmp
     assert _fd_count() - before_fds == 0
 
 
+def _flush_portable_directory_streams() -> None:
+    from agent_py_agent.agent.conversation import claim_activity_projection
+    from agent_py_agent.agent.user_space import directory_paging
+
+    claim_activity_projection.close_claim_activity_projection()
+    with directory_paging._SCAN_LOCK:
+        assert len(directory_paging._SCAN_STREAMS) <= 32
+        while directory_paging._SCAN_STREAMS:
+            _, cached = directory_paging._SCAN_STREAMS.popitem(last=False)
+            cached[0].close()
+
+
 def test_idle_approval_scan_4097_terminal_roots_converges_while_catching_4097th_pending(tmp_path):
     from agent_py_agent.agent.conversation import ConversationStore
     from agent_py_agent.agent.conversation.models import ThreadTaskLink
     from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
 
     idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    _flush_portable_directory_streams()
     before_fds = _fd_count()
     owner_dir = tmp_path / "owner"
     storage_root = owner_dir / "conversations"
@@ -629,6 +642,7 @@ def test_idle_approval_scan_4097_terminal_roots_converges_while_catching_4097th_
         if mid_caught != "activity_unknown":
             break
     assert mid_caught == "pending_approval"
+    _flush_portable_directory_streams()
     assert _fd_count() - before_fds == 0
 
 
@@ -748,6 +762,7 @@ def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_p
     from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
 
     idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    _flush_portable_directory_streams()
     before_fds = _fd_count()
     owner_dir = tmp_path / "owner"
     store = ConversationStore(owner_dir / "conversations")
@@ -810,7 +825,7 @@ def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_p
     )
 
     tick_cursor: dict[str, object] = {}
-    for _ in range(12):
+    for _ in range(32):
         report = idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)
         assert report["failed"] == 0
         if compacted_ids:
@@ -842,7 +857,7 @@ def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_p
     )
     store.threads.record_user_activity(first_thread_id, now=7399.0)
     compacted_after = len(compacted_ids)
-    for _ in range(16):
+    for _ in range(32):
         idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)
         if len(compacted_ids) > compacted_after:
             break
@@ -853,6 +868,7 @@ def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_p
     scans = tick_cursor.get("directories", {})
     for scan in scans.values():
         scan.close()
+    _flush_portable_directory_streams()
     assert _fd_count() - before_fds == 0
 
 
@@ -864,6 +880,7 @@ def test_idle_compact_maintenance_tick_retains_continuation_after_single_mid_sca
     from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
 
     idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    _flush_portable_directory_streams()
     before_fds = _fd_count()
     owner_dir = tmp_path / "owner"
     store = ConversationStore(owner_dir / "conversations")
@@ -927,7 +944,10 @@ def test_idle_compact_maintenance_tick_retains_continuation_after_single_mid_sca
     )
 
     tick_cursor: dict[str, object] = {}
-    assert idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)["failed"] == 0
+    for _ in range(16):
+        assert idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)["failed"] == 0
+        if idle._IDLE_APPROVAL_SCAN_CURSORS:
+            break
     assert len(idle._IDLE_APPROVAL_SCAN_CURSORS) == 1
     target_key = next(iter(idle._IDLE_APPROVAL_SCAN_CURSORS))
     assert idle._IDLE_APPROVAL_SCAN_CURSORS[target_key]["restarts"] == 0
@@ -946,6 +966,7 @@ def test_idle_compact_maintenance_tick_retains_continuation_after_single_mid_sca
 
     for scan in tick_cursor.get("directories", {}).values():
         scan.close()
+    _flush_portable_directory_streams()
     assert _fd_count() - before_fds == 0
 
 
@@ -958,6 +979,7 @@ def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_p
     from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
 
     idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    _flush_portable_directory_streams()
     before_fds = _fd_count()
 
     compacted_owners: list[str] = []
@@ -1024,8 +1046,9 @@ def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_p
     )
 
     tick_cursor: dict[str, object] = {}
-    for _ in range(12):
-        idle.idle_compact_maintenance_tick(base_agent, cursor=tick_cursor, now=7400.0)
+    for _ in range(24):
+        report = idle.idle_compact_maintenance_tick(base_agent, cursor=tick_cursor, now=7400.0)
+        assert report["failed"] == 0
         if compacted_owners:
             break
     assert compacted_owners, "multi-owner pool must finish active continuation cursors before >256 eviction"
@@ -1033,4 +1056,5 @@ def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_p
 
     for scan in tick_cursor.get("directories", {}).values():
         scan.close()
+    _flush_portable_directory_streams()
     assert _fd_count() - before_fds == 0
