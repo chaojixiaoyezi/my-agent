@@ -5,6 +5,7 @@ import errno
 import inspect
 import json
 import logging
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -1045,3 +1046,357 @@ def test_nw2r1_p1_02_active_index_write_ordering_and_idempotent_replay_heal(
     assert closed_replayed.item_id == closed_pub.item_id
     assert closed_replayed.state == "closed"
     assert case_closed.case_id not in json.loads(idx_path.read_text(encoding="utf-8"))["active_cases"]
+
+
+def test_nw2r2_p1_01_reader_stat_and_lstat_eio_after_preflight_holds_cursor_and_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    service = HandoffBoardService(store=store, workspace_root=tmp_path / "workspace")
+    case = store.open_case({"title": "Reader stat EIO", "summary": "s", "created_by": "coord"})
+    item = service.publish_item(
+        case_id=case.case_id,
+        request_id="",
+        item_id="item_reader_stat_eio",
+        responsible_actor="ext_worker",
+        actor_kind="external_assistant",
+        frozen_input_version="v1",
+        idempotency_key="reader-stat-eio",
+    )
+
+    coord_root = tmp_path / "mailbox_root"
+    coord_root.mkdir(parents=True, exist_ok=True)
+    layout = create_external_mailbox_layout(coord_root, "ext_worker")
+    adapter = ExternalMailboxAdapter(allowed_roots=[coord_root], max_file_bytes=262144)
+
+    first_sync = adapter.sync_external_mailbox(service, layout, now=10.0)
+    assert first_sync["delivered_item_ids"] == [item.item_id]
+
+    inbox_path = layout.actor_inbox_path
+    cursor_path = inbox_path.parent / ".coordinator_cursor.json"
+    assert not cursor_path.exists()
+
+    ack_record = json.dumps(
+        {
+            "action": "ack",
+            "case_id": case.case_id,
+            "item_id": item.item_id,
+            "ack_id": "ack-r2-stat-1",
+            "frozen_input_version": "v1",
+            "recipient_ack": {"actor_id": "ext_worker", "status": "accepted"},
+        }
+    )
+    inbox_path.write_text(f"{ack_record}\n", encoding="utf-8")
+
+    # 1. Preflight succeeds (counts total_file_lines == 1 after opening inbox_path),
+    #    then reader's stat raises EIO once -> cursor stays absent, item stays delivered.
+    orig_os_stat = os.stat
+    orig_open = builtins.open
+    open_tracker = {"opened": False}
+    stat_injected = {"done": False}
+
+    def tracking_open(
+        file,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ):
+        if Path(file) == inbox_path and "r" in mode:
+            open_tracker["opened"] = True
+        return orig_open(
+            file,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    def flaky_reader_os_stat(path_arg, *args, **kwargs):
+        if (
+            open_tracker["opened"]
+            and not stat_injected["done"]
+            and isinstance(path_arg, (str, os.PathLike))
+            and Path(path_arg) == inbox_path
+        ):
+            stat_injected["done"] = True
+            raise OSError(errno.EIO, "simulated stat io error")
+        return orig_os_stat(path_arg, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(mailbox_adapter_mod, "open", tracking_open, raising=False)
+        mp.setattr(os, "stat", flaky_reader_os_stat)
+        fail_stat_report = adapter.sync_external_mailbox(service, layout, now=11.0)
+
+    assert open_tracker["opened"] is True
+    assert stat_injected["done"] is True
+    assert fail_stat_report["acked_item_ids"] == []
+    assert any(
+        entry.get("error_code") == "MAILBOX_INBOX_IO_ERROR"
+        and entry.get("retryable") is True
+        and entry.get("errno") == errno.EIO
+        and entry.get("exception_type") == "OSError"
+        and "stat_failed" in str(entry.get("reason") or "")
+        for entry in fail_stat_report["quarantined"]
+    )
+    assert not cursor_path.exists()
+    assert store.load_handoff_item(case.case_id, item.item_id).state == "delivered"
+
+    # 2. Preflight succeeds, then reader's validate_confined_path os.lstat raises EIO once.
+    orig_os_lstat = os.lstat
+    open_tracker["opened"] = False
+    lstat_injected = {"done": False}
+
+    def flaky_os_lstat(path_arg, *args, **kwargs):
+        if (
+            open_tracker["opened"]
+            and not lstat_injected["done"]
+            and isinstance(path_arg, (str, os.PathLike))
+            and Path(path_arg) == inbox_path
+        ):
+            lstat_injected["done"] = True
+            raise OSError(errno.EIO, "simulated lstat io error")
+        return orig_os_lstat(path_arg, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(mailbox_adapter_mod, "open", tracking_open, raising=False)
+        mp.setattr(os, "lstat", flaky_os_lstat)
+        fail_lstat_report = adapter.sync_external_mailbox(service, layout, now=12.0)
+
+    assert open_tracker["opened"] is True
+    assert lstat_injected["done"] is True
+    assert fail_lstat_report["acked_item_ids"] == []
+    assert any(
+        entry.get("error_code") == "MAILBOX_INBOX_IO_ERROR"
+        and entry.get("retryable") is True
+        and entry.get("errno") == errno.EIO
+        and "stat_failed" in str(entry.get("reason") or "")
+        for entry in fail_lstat_report["quarantined"]
+    )
+    assert not cursor_path.exists()
+    assert store.load_handoff_item(case.case_id, item.item_id).state == "delivered"
+
+    # 3. Next clean sync applies ACK once and advances cursor to processed_lines == 1.
+    clean_report = adapter.sync_external_mailbox(service, layout, now=13.0)
+    assert clean_report["errors"] == []
+    assert clean_report["quarantined"] == []
+    assert clean_report["acked_item_ids"] == [item.item_id]
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["processed_lines"] == 1
+    assert store.load_handoff_item(case.case_id, item.item_id).state == "acked"
+
+    repeat_report = adapter.sync_external_mailbox(service, layout, now=14.0)
+    assert repeat_report["errors"] == []
+    assert repeat_report["quarantined"] == []
+    assert repeat_report["acked_item_ids"] == []
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["processed_lines"] == 1
+
+
+def test_nw2r2_p1_01_preflight_stat_or_open_eio_holds_cursor_without_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    service = HandoffBoardService(store=store, workspace_root=tmp_path / "workspace")
+    case = store.open_case({"title": "Preflight EIO", "summary": "s", "created_by": "coord"})
+    item_zero = service.publish_item(
+        case_id=case.case_id,
+        request_id="",
+        item_id="item_preflight_zero",
+        responsible_actor="ext_worker",
+        actor_kind="external_assistant",
+        frozen_input_version="v1",
+        idempotency_key="preflight-zero",
+    )
+    item_one = service.publish_item(
+        case_id=case.case_id,
+        request_id="",
+        item_id="item_preflight_one",
+        responsible_actor="ext_worker",
+        actor_kind="external_assistant",
+        frozen_input_version="v1",
+        idempotency_key="preflight-one",
+    )
+
+    coord_root = tmp_path / "mailbox_root"
+    coord_root.mkdir(parents=True, exist_ok=True)
+    layout = create_external_mailbox_layout(coord_root, "ext_worker")
+    adapter = ExternalMailboxAdapter(allowed_roots=[coord_root], max_file_bytes=262144)
+    adapter.sync_external_mailbox(service, layout, now=10.0)
+
+    inbox_path = layout.actor_inbox_path
+    cursor_path = inbox_path.parent / ".coordinator_cursor.json"
+
+    # Case A: Cursor already persisted at line 0 with an unconsumed ACK in inbox.
+    ack_zero = json.dumps(
+        {
+            "action": "ack",
+            "case_id": case.case_id,
+            "item_id": item_zero.item_id,
+            "ack_id": "ack-preflight-0",
+            "frozen_input_version": "v1",
+            "recipient_ack": {"actor_id": "ext_worker", "status": "accepted"},
+        }
+    )
+    inbox_path.write_text(f"{ack_zero}\n", encoding="utf-8")
+    cursor_zero = {"processed_lines": 0, "file_size": 0}
+    cursor_path.write_text(json.dumps(cursor_zero), encoding="utf-8")
+
+    orig_os_stat = os.stat
+
+    def failing_os_stat(path_arg, *args, **kwargs):
+        if isinstance(path_arg, (str, os.PathLike)) and Path(path_arg) == inbox_path:
+            raise OSError(errno.EIO, "simulated preflight stat io error")
+        return orig_os_stat(path_arg, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "stat", failing_os_stat)
+        stat_fail_zero = adapter.sync_external_mailbox(service, layout, now=11.0)
+
+    assert stat_fail_zero["acked_item_ids"] == []
+    assert any(
+        entry.get("error_code") == "MAILBOX_INBOX_IO_ERROR" and entry.get("retryable") is True
+        for entry in stat_fail_zero["quarantined"]
+    )
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == cursor_zero
+    assert store.load_handoff_item(case.case_id, item_zero.item_id).state == "delivered"
+
+    # Preflight open fails once with EIO at cursor 0 -> cursor is NOT overwritten.
+    orig_open = builtins.open
+    open_state = {"calls": 0}
+
+    def flaky_preflight_open(
+        file,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ):
+        if Path(file) == inbox_path and "r" in mode:
+            open_state["calls"] += 1
+            if open_state["calls"] == 1:
+                raise OSError(errno.EIO, "simulated preflight open io error")
+        return orig_open(
+            file,
+            mode=mode,
+            buffering=buffering,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    with monkeypatch.context() as mp:
+        mp.setattr(mailbox_adapter_mod, "open", flaky_preflight_open, raising=False)
+        adapter.sync_external_mailbox(service, layout, now=12.0)
+
+    assert open_state["calls"] >= 1
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == cursor_zero
+
+    clean_zero = adapter.sync_external_mailbox(service, layout, now=13.0)
+    assert clean_zero["errors"] == []
+    assert clean_zero["acked_item_ids"] == [item_zero.item_id]
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["processed_lines"] == 1
+    assert store.load_handoff_item(case.case_id, item_zero.item_id).state == "acked"
+
+    # Case B: Cursor already at line 1 (skipping an already-quarantined corrupt line),
+    # then line 2 carries an unconsumed ACK.
+    inbox_path.write_text("{corrupt_line_already_processed\n", encoding="utf-8")
+    first_bad = adapter.sync_external_mailbox(service, layout, now=14.0)
+    assert len(first_bad["quarantined"]) == 1
+    cursor_one = json.loads(cursor_path.read_text(encoding="utf-8"))
+    assert cursor_one["processed_lines"] == 1
+    assert cursor_one["file_size"] > 0
+
+    ack_one = json.dumps(
+        {
+            "action": "ack",
+            "case_id": case.case_id,
+            "item_id": item_one.item_id,
+            "ack_id": "ack-preflight-1",
+            "frozen_input_version": "v1",
+            "recipient_ack": {"actor_id": "ext_worker", "status": "accepted"},
+        }
+    )
+    with inbox_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{ack_one}\n")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "stat", failing_os_stat)
+        stat_fail_one = adapter.sync_external_mailbox(service, layout, now=15.0)
+
+    assert stat_fail_one["acked_item_ids"] == []
+    assert any(
+        entry.get("error_code") == "MAILBOX_INBOX_IO_ERROR" and entry.get("retryable") is True
+        for entry in stat_fail_one["quarantined"]
+    )
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == cursor_one
+    assert store.load_handoff_item(case.case_id, item_one.item_id).state == "delivered"
+
+    # Preflight-only 1st os.stat raises EIO at cursor 1 while reader succeeds ->
+    # processed_lines must NOT reset to 0 (line 1 not re-quarantined) and cursor_one stays intact.
+    preflight_stat_once = {"calls": 0}
+
+    def flaky_preflight_stat_once(path_arg, *args, **kwargs):
+        if isinstance(path_arg, (str, os.PathLike)) and Path(path_arg) == inbox_path:
+            preflight_stat_once["calls"] += 1
+            if preflight_stat_once["calls"] == 1:
+                raise OSError(errno.EIO, "simulated preflight-only stat io error")
+        return orig_os_stat(path_arg, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "stat", flaky_preflight_stat_once)
+        preflight_once_report = adapter.sync_external_mailbox(service, layout, now=15.5)
+
+    assert preflight_stat_once["calls"] >= 1
+    assert not any("JSON_DECODE_ERROR" in str(q.get("reason") or "") for q in preflight_once_report["quarantined"])
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == cursor_one
+
+    # Preflight open EIO at cursor 1 must neither reset processed_lines=0 (no re-quarantine of line 1)
+    # nor overwrite cursor_one on disk.
+    open_state["calls"] = 0
+    with monkeypatch.context() as mp:
+        mp.setattr(mailbox_adapter_mod, "open", flaky_preflight_open, raising=False)
+        open_fail_one = adapter.sync_external_mailbox(service, layout, now=16.0)
+
+    assert open_state["calls"] >= 1
+    assert not any("JSON_DECODE_ERROR" in str(q.get("reason") or "") for q in open_fail_one["quarantined"])
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == cursor_one
+
+    clean_one = adapter.sync_external_mailbox(service, layout, now=17.0)
+    assert clean_one["errors"] == []
+    assert clean_one["quarantined"] == []
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["processed_lines"] == 2
+    assert store.load_handoff_item(case.case_id, item_one.item_id).state == "acked"
+
+
+def test_nw2r2_p1_01_missing_inbox_returns_empty_with_zero_errors(
+    tmp_path: Path,
+) -> None:
+    store = CollaborationStore(tmp_path / "collaboration")
+    service = HandoffBoardService(store=store, workspace_root=tmp_path / "workspace")
+    coord_root = tmp_path / "mailbox_root"
+    coord_root.mkdir(parents=True, exist_ok=True)
+    layout = create_external_mailbox_layout(coord_root, "ext_worker")
+    adapter = ExternalMailboxAdapter(allowed_roots=[coord_root], max_file_bytes=262144)
+
+    assert not layout.actor_inbox_path.exists()
+    msgs, quarantined = adapter.read_actor_messages(layout)
+    assert msgs == []
+    assert quarantined == []
+
+    report = adapter.sync_external_mailbox(service, layout, now=50.0)
+    assert report["acked_item_ids"] == []
+    assert report["submitted_item_ids"] == []
+    assert report["quarantined"] == []
+    assert report["errors"] == []
+    assert not (layout.actor_inbox_path.parent / ".coordinator_cursor.json").exists()
+
+    # Dangling symlink must still be rejected as SYMLINK_FORBIDDEN rather than treated as missing.
+    os.symlink(str(tmp_path / "missing_target.jsonl"), str(layout.actor_inbox_path))
+    sym_msgs, sym_quarantined = adapter.read_actor_messages(layout)
+    assert sym_msgs == []
+    assert len(sym_quarantined) == 1
+    assert sym_quarantined[0]["error_code"] == "SYMLINK_FORBIDDEN"

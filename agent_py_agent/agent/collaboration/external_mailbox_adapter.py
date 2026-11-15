@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -76,15 +77,23 @@ class ExternalMailboxAdapter:
         self.allowed_roots = tuple(Path(r).resolve() for r in allowed_roots)
         self.max_file_bytes = max_file_bytes
 
+    @staticmethod
+    def _ensure_not_symlink(target: Path, *, message: str) -> None:
+        try:
+            st = os.lstat(target)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(st.st_mode):
+            raise ExternalMailboxSecurityError(message, error_code="SYMLINK_FORBIDDEN")
+
     # LLM: 校验目标路径是否无软链接且 realpath 完全限制在 allowed_roots 之内。
     # 函数用途: 防范路径穿越与符号链接逃逸攻击。
     def validate_confined_path(self, path: Path | str) -> Path:
         target = Path(path)
-        if target.is_symlink():
-            raise ExternalMailboxSecurityError(
-                f"MAILBOX_SECURITY_VIOLATION: Symlink rejected for mailbox path: {target}",
-                error_code="SYMLINK_FORBIDDEN",
-            )
+        self._ensure_not_symlink(
+            target,
+            message=f"MAILBOX_SECURITY_VIOLATION: Symlink rejected for mailbox path: {target}",
+        )
         resolved = Path(os.path.realpath(target))
         is_confined = any(
             str(resolved).startswith(str(root) + os.sep) or resolved == root
@@ -109,17 +118,15 @@ class ExternalMailboxAdapter:
         quarantined: list[dict[str, Any]] = []
 
         path = layout.actor_inbox_path
-        if not path.exists():
-            return valid_records, quarantined
 
         try:
             self.validate_confined_path(path)
+            file_stat = path.stat()
         except ExternalMailboxSecurityError as exc:
             quarantined.append({"path": str(path), "reason": str(exc), "error_code": exc.error_code})
             return valid_records, quarantined
-
-        try:
-            file_stat = path.stat()
+        except FileNotFoundError:
+            return valid_records, quarantined
         except OSError as exc:
             quarantined.append({
                 "path": str(path),
@@ -206,19 +213,20 @@ class ExternalMailboxAdapter:
         target_path = layout.coordinator_outbox_path
         self.validate_confined_path(target_path.parent)
 
-        if target_path.exists() and target_path.is_symlink():
-            raise ExternalMailboxSecurityError(
-                f"MAILBOX_SECURITY_VIOLATION: coordinator_outbox is a symlink: {target_path}",
-                error_code="SYMLINK_FORBIDDEN",
-            )
+        self._ensure_not_symlink(
+            target_path,
+            message=f"MAILBOX_SECURITY_VIOLATION: coordinator_outbox is a symlink: {target_path}",
+        )
 
         ensure_private_dir(target_path.parent)
 
         # 读取已有行并追加新行，写入同目录下临时文件后原子替换
         existing_lines: list[str] = []
-        if target_path.exists():
+        try:
             with open(target_path, encoding="utf-8") as f:
                 existing_lines = f.readlines()
+        except FileNotFoundError:
+            existing_lines = []
 
         serialized_message = json.dumps(message, ensure_ascii=False, sort_keys=True)
         existing_lines.append(serialized_message + "\n")
@@ -249,31 +257,37 @@ class ExternalMailboxAdapter:
 
         processed_lines = 0
         last_file_size = 0
-        if cursor_path.exists():
-            try:
-                with open(cursor_path, encoding="utf-8") as f:
-                    cdata = json.load(f)
-                if isinstance(cdata, dict):
-                    processed_lines = int(cdata.get("processed_lines") or 0)
-                    last_file_size = int(cdata.get("file_size") or 0)
-            except Exception:
-                processed_lines = 0
-                last_file_size = 0
+        try:
+            with open(cursor_path, encoding="utf-8") as f:
+                cdata = json.load(f)
+            if isinstance(cdata, dict):
+                processed_lines = int(cdata.get("processed_lines") or 0)
+                last_file_size = int(cdata.get("file_size") or 0)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            processed_lines = 0
+            last_file_size = 0
 
         current_file_size = 0
         total_file_lines = 0
         inbox_io_error = False
-        if inbox_path.exists():
-            try:
-                st = inbox_path.stat()
-                current_file_size = st.st_size
-                with open(inbox_path, encoding="utf-8", errors="replace") as f:
-                    for _ in f:
-                        total_file_lines += 1
-            except OSError:
-                current_file_size = 0
-                total_file_lines = 0
-                inbox_io_error = True
+        inbox_exists = False
+        try:
+            st = inbox_path.stat()
+            inbox_exists = True
+            current_file_size = st.st_size
+            with open(inbox_path, encoding="utf-8", errors="replace") as f:
+                for _ in f:
+                    total_file_lines += 1
+        except FileNotFoundError:
+            inbox_exists = False
+            current_file_size = 0
+            total_file_lines = 0
+        except OSError:
+            current_file_size = 0
+            total_file_lines = 0
+            inbox_io_error = True
 
         if not inbox_io_error and (current_file_size < last_file_size or total_file_lines < processed_lines):
             # File shrunk, rotated, or truncated
@@ -400,7 +414,7 @@ class ExternalMailboxAdapter:
                 errors.append({"item_id": item_id, "action": action, "error": str(exc)})
 
         # 记录处理进度 cursor；存在可重试 I/O 故障时保持游标不前进，避免消息丢失
-        if inbox_path.exists() and not retryable_apply_error:
+        if inbox_exists and not retryable_apply_error:
             try:
                 write_json_file_atomic(
                     cursor_path,
