@@ -593,6 +593,12 @@ class _SchedulerReservationOperations:
         skipped: list[dict[str, object]] = []
         with self._mutation_scope() as (store, admission):
             reconciled = self._reconcile_history_runs_unlocked(store)
+            active_runs, _run_errors = self._valid_runs(store)
+            active_jobs = {str(run["job_id"]) for run in active_runs}
+            active_rules = {
+                (str(run["job_id"]), str(run.get("rule_id") or ""))
+                for run in active_runs
+            }
             jobs, _errors = self._valid_jobs(store)
             due = sorted(
                 (
@@ -613,7 +619,8 @@ class _SchedulerReservationOperations:
                 if selected >= max_selected:
                     break
                 job_id = str(job["job_id"])
-                if self._job_has_active_run(store, job_id, str(job.get("rule_id") or "")):
+                rule_id = str(job.get("rule_id") or "")
+                if (job_id, rule_id) in active_rules if rule_id else job_id in active_jobs:
                     continue
                 selected += 1
                 scheduled_for = float(job["next_run_at"])
@@ -641,6 +648,8 @@ class _SchedulerReservationOperations:
                     now=current,
                 )
                 store["runs"][str(run["run_id"])] = run
+                active_jobs.add(str(run["job_id"]))
+                active_rules.add((str(run["job_id"]), str(run.get("rule_id") or "")))
                 store["jobs"][job_id] = merge_rule_view(store["jobs"][job_id], _advance_after_reservation(job, current))
                 reserved.append(run)
             # A scheduler poll is read-only unless it actually reserves a run
@@ -1625,6 +1634,10 @@ class _SchedulerStoreSupport:
             except (OSError, ValueError, TypeError, KeyError):
                 # 派生索引失败只影响性能，不能当成规范身份不存在。
                 pass
+        if before is not None:
+            found, complete = self._history_index.membership(requested)
+            if complete and found <= requested and _history_file_stamp(self.history_path) == before:
+                return found
         if source_missing:
             self._history_source_seen = False
         found = _history_membership_fallback(self.history_path, requested,
