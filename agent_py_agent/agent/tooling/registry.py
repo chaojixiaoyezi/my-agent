@@ -1548,6 +1548,14 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
     ceilings = action_ceilings(list(allowed)) if allowed is not None else {}
     regime = path_scope_regime(registry.owner_scope_root if owner_scope_root is None else owner_scope_root,
                                registry.path_access_mode)
+    # 按当前 live_config 动态收起 workflows.* 业务动作，避免 live_config 热切换时停留在构造期旧状态。
+    effective_disabled = registry.disabled_tool_names
+    live_config = getattr(registry._construction_params, "live_config", None)
+    if getattr(live_config, "business_spaces_enabled", True) is False:
+        from ..workflows.business_scope import WORKFLOW_ACTION_FIELDS
+
+        effective_disabled = set(registry.disabled_tool_names)
+        effective_disabled.update(f"workflows:{act}" for act in WORKFLOW_ACTION_FIELDS)
     runtimes: list[ToolRuntime] = []
     unavailable: list[tuple[str, str, str]] = []
     catalog_specs: list[ToolModelSpec] = []
@@ -1589,16 +1597,25 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
         )
         if isinstance(spec, ToolModelSpec) and tool_ceiling is not None and len(ceiling_actions) < len(declared_actions):
             spec = _apply_tool_action_narrowing(tool, spec, frozenset(ceiling_actions))
-        if isinstance(spec, ToolModelSpec) and (exposure is None or bool(getattr(exposure, "model_visible", True))):
-            catalog_specs.append(spec)
-        if name in registry.disabled_tool_names:
-            continue
-        disabled_actions = _disabled_actions_for_tool(name, registry.disabled_tool_names)
+        disabled_actions = _disabled_actions_for_tool(name, effective_disabled)
         effective_actions = (
             tuple(act for act in ceiling_actions if act not in disabled_actions)
             if declared_actions
             else ()
         )
+        catalog_spec = spec
+        if (
+            isinstance(catalog_spec, ToolModelSpec)
+            and name == "workflows"
+            and disabled_actions
+            and effective_actions
+            and len(effective_actions) < len(ceiling_actions)
+        ):
+            catalog_spec = _apply_tool_action_narrowing(tool, catalog_spec, frozenset(effective_actions))
+        if isinstance(catalog_spec, ToolModelSpec) and (exposure is None or bool(getattr(exposure, "model_visible", True))):
+            catalog_specs.append(catalog_spec)
+        if name in effective_disabled:
+            continue
         if declared_actions and not effective_actions:
             continue
         availability = availability or _safe_tool_availability(tool, registry=registry)

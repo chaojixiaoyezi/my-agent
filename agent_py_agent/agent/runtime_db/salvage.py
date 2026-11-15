@@ -24,6 +24,7 @@ from .recovery_guard import (
     mark_runtime_connection_idle,
     retire_idle_runtime_connections,
     runtime_db_generation_guard,
+    runtime_db_recovery_error,
     runtime_db_recovery_pending,
 )
 from .repository import RuntimeRepository
@@ -530,6 +531,4 @@ def heal_runtime_db_at_startup(db_path: Path) -> RuntimeSalvageReceipt | None:
         return RuntimeSalvageReceipt(**result["receipt"])
     if result["status"] in {"healthy", "already_recovered", "superseded"}:
         return None
-    error = RuntimeDatabaseDeferred(str(result.get("reason", result["status"])))
-    error.runtime_db_recovery = result
-    raise error
+    raise runtime_db_recovery_error(result)

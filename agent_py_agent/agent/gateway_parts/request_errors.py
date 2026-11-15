@@ -359,6 +359,10 @@ def gateway_client_error_message(error_code: object) -> str:
         ),
         "MODEL_PROFILE_UNAVAILABLE": "当前会话绑定的模型档案不可用或已被移除，请使用 /model 切换可用模型后重试。",
         "RUNTIME_DB_RECOVERY_DEFERRED": "运行时数据库正在执行短暂恢复维护，本轮尚未开始执行；请稍后重试。",
+        "RUNTIME_DB_RECOVERY_REQUIRED": (
+            "运行时数据库发生无法自动完成抢救的结构性异常，系统已保留原始库与备份文件；"
+            "重复重试无法成功，请停止写入并通过 scripts/runtime_db_salvage.py 指定 --source 与 --target 全新路径完成离线抢救后再恢复服务。"
+        ),
         "AGENTS_WRITE_USER_ONLY": (
             "AGENTS规则修改须由用户通过 /agents 显式预览确认；"
             "请先发送 /agents show 查看当前规则，不借文件、shell或其他身份绕过确认。"

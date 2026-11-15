@@ -1175,6 +1175,47 @@ def _is_deterministic_pre_handler_failure(result: ToolHandlerOutcome) -> bool:
     return code in _PRE_HANDLER_DETERMINISTIC_CODES
 
 
+def _bounded_unknown_output_preview(raw: object) -> str:
+    """保留失败输出头 800 字与尾 1200 字，并在长 JSON 结果中优先前置报错字段。"""
+    text = str(raw or "")
+    if len(text) <= 2000:
+        return text
+    candidate = text
+    if text.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        diagnostic_keys = (
+            "ok",
+            "exit_code",
+            "error_code",
+            "error",
+            "stderr",
+            "stderr_preview",
+            "traceback",
+            "error_message",
+            "message",
+            "reason",
+        )
+        trigger_keys = diagnostic_keys[3:]
+        if isinstance(parsed, dict) and any(parsed.get(k) for k in trigger_keys):
+            tail_keys = {k: v for k, v in parsed.items() if k not in diagnostic_keys}
+            tail_size = len(json.dumps(tail_keys, ensure_ascii=False)) if tail_keys else 0
+            head_dict = {}
+            for key in diagnostic_keys:
+                if key not in parsed:
+                    continue
+                val = parsed[key]
+                if isinstance(val, str) and len(val) > 700 and tail_size > 1200:
+                    val = f"{val[:200]}...[omitted {len(val) - 650} chars]...{val[-450:]}"
+                head_dict[key] = val
+            candidate = json.dumps({**head_dict, **tail_keys}, ensure_ascii=False)
+            if len(candidate) <= 2000:
+                return candidate
+    return f"{candidate[:800]}\n...[omitted {len(candidate) - 2000} chars]...\n{candidate[-1200:]}"
+
+
 def _unknown_outcome_result(
     request: ToolOperationExecutionRequest,
     reported: ToolHandlerOutcome,
@@ -1188,10 +1229,10 @@ def _unknown_outcome_result(
     envelope["reported_tool_result"] = _reported_tool_result_facts(reported)
     # 2026-08-15 3×3 cell1 真机: COMMAND_FAILED(写命令失败, handler 真实执行
     # 过)被 UNKNOWN 包装时原始失败输出被丢弃——模型拿不到编译错误文本无法
-    # 修复, 任务 failed 死路。给模型的 output 保留有界摘要(截断防大正文/
-    # 密钥), 模型可见失败原因; 账本侧(_reported_tool_result_facts)保持
+    # 修复, 任务 failed 死路。给模型的 output 保留有界摘要(头尾截取防大正文/
+    # 密钥同时保留末尾 traceback/exit code), 模型可见失败原因; 账本侧保持
     # 不含 output 的安全归档不变。
-    reported_preview = str(reported.output or "")[:2000]
+    reported_preview = _bounded_unknown_output_preview(reported.output)
     return ToolHandlerOutcome(
         tool=request.tool_name,
         ok=False,

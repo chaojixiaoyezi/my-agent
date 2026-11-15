@@ -37,11 +37,11 @@ from ..io.sqlite_scope import scoped_guarded_connection, sqlite_connection_facto
 from .current_obligations import CURRENT_OBLIGATION_INDEX_SQL
 from .maintenance import execute_runtime_statement
 from .recovery_guard import (
-    RuntimeDatabaseDeferred,
     close_runtime_connection,
     guarded_runtime_connect,
     mark_runtime_connection_idle,
     runtime_db_exclusive_owned,
+    runtime_db_recovery_error,
     runtime_db_recovery_pending,
 )
 
@@ -737,9 +737,7 @@ class RuntimeSchemaMixin:
 
         report = recover_runtime_database(self.db_path, expected_identity=runtime_db_identity(self.db_path))
         if report["status"] not in {"healthy", "recovered", "already_recovered", "superseded"}:
-            error = RuntimeDatabaseDeferred(str(report.get("reason", report["status"])))
-            error.runtime_db_recovery = report
-            raise error
+            raise runtime_db_recovery_error(report)
 
     def _observe_runtime_db_error(self, error: BaseException, identity) -> None:
         details = runtime_db_corruption_details(error)

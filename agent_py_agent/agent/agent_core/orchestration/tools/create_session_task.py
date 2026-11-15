@@ -222,7 +222,7 @@ def build_create_session_task_model_spec() -> ToolModelSpec:
             "properties": {
                 "target_thread_id": {
                     "type": "string",
-                    "description": "接收任务的会话编号（来自 /sessions threads 或结构化列表）。",
+                    "description": "接收任务的会话编号（来自 list_owner_sessions 等结构化列表）。",
                 },
                 "goal": {
                     "type": "string",
