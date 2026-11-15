@@ -424,6 +424,8 @@ class PersonaRepository:
             raise PersonaSecurityError(
                 f"PERSONA_DREAM_TARGET_FORBIDDEN: Periodic dreaming only supports target='user' (USER.md); {normalized_target!r} is forbidden."
             )
+        from ..memory_store.jsonl import _managed_learning_policy_block, _managed_policy_scope
+        from ..plugin_host.errors import HostAPIError
         from ..user_space.group_authorization_context import require_group_persona_lease
         from ..user_space.managed_user_governance import require_managed_persona_write
 
@@ -438,17 +440,21 @@ class PersonaRepository:
         )
         require_group_persona_lease(self.path_for("user"))
         with self.quota_enforcer.admission() as admission:
-            return _consolidate_user_profile_document(
-                self,
-                admission,
-                consolidated_content=consolidated_content,
-                expected_sha256=expected_sha256,
-                expected_versions_tail=expected_versions_tail,
-                source=source,
-                pre_dream_backup_ref=pre_dream_backup_ref,
-                dream_run_id=dream_run_id,
-                source_quote=source_quote,
-            )
+            with _managed_policy_scope(self.owner_home) as governance:
+                block_code = _managed_learning_policy_block(governance, "user")
+                if block_code:
+                    raise HostAPIError(block_code, 403, outcome="not_started")
+                return _consolidate_user_profile_document(
+                    self,
+                    admission,
+                    consolidated_content=consolidated_content,
+                    expected_sha256=expected_sha256,
+                    expected_versions_tail=expected_versions_tail,
+                    source=source,
+                    pre_dream_backup_ref=pre_dream_backup_ref,
+                    dream_run_id=dream_run_id,
+                    source_quote=source_quote,
+                )
 
     # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
     # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
