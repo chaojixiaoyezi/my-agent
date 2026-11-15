@@ -10,6 +10,7 @@ from dataclasses import fields, replace
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
+from typing import Any
 
 from ..assets import AssetPostCommitReadbackError
 from ..assets.asset_dependents import (
@@ -140,7 +141,10 @@ def _analysis_summary(step, resolved_skills, context, *, owner_home, workspace_r
 
 
 _WORKFLOW_DEFINITION_DESCRIPTIONS: dict[str, str] = {
-    'descriptor': '工作流标准资产描述符对象（含 name、access_targets、data_sources、credential_refs、io_contract 等）。',
+    'descriptor': (
+        '工作流标准资产描述符对象（含 name、access_targets、data_sources、credential_refs、io_contract 等；'
+        '运行输入参数与 inputs 契约通过 descriptor.io_contract.inputs 声明）。'
+    ),
     'steps': '工作流步骤定义数组。',
     'body_markdown': '工作流业务背景与操作说明 Markdown 正文。',
     'enabled': '工作流定义是否启用。',
@@ -242,6 +246,14 @@ def _typed_definition_spec(spec):
     descriptor['additionalProperties'] = True
     definition['additionalProperties'] = True
     _annotate_schema_properties(definition, _WORKFLOW_DEFINITION_DESCRIPTIONS)
+    descriptor_extra = descriptor.get('description')
+    if isinstance(descriptor_extra, str) and descriptor_extra.strip():
+        base_desc = definition['properties']['descriptor'].get('description', '')
+        extra_text = descriptor_extra.strip()
+        if extra_text not in base_desc:
+            definition['properties']['descriptor']['description'] = (
+                f'{base_desc} {extra_text}'.strip() if base_desc else extra_text
+            )
     edges_prop = definition.get('properties', {}).get('edges')
     if isinstance(edges_prop, dict):
         edge_item = _resolve_local_def(definitions, edges_prop.get('items'))
@@ -323,6 +335,202 @@ def _schema_save_source(spec):
         '与definition互斥。原样使用skill_search的完整九字段source_ref。'
         '不覆盖现有工作流、不安装、不执行包脚本；来源及成员摘要由宿主固定，不能手填metadata伪造。')
     return replace(spec, input_schema=schema, schema_hash='')
+
+
+def _extract_workflow_run_id(public_run: dict[str, Any]) -> str:
+    nested = public_run.get('run') if isinstance(public_run.get('run'), dict) else {}
+    for candidate in (
+        public_run.get('workflow_run_id'),
+        nested.get('workflow_run_id'),
+        public_run.get('operation_id'),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ''
+
+
+def _load_business_run_snapshot(owner_home: Any, data: dict[str, Any]) -> dict[str, Any] | None:
+    run_id = _extract_workflow_run_id(data)
+    if not run_id or owner_home is None:
+        return None
+    from ..workflows.run_store import WorkflowRunStore
+
+    try:
+        record = WorkflowRunStore(owner_home).load_run(run_id)
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return None
+    loaded = _plain(record)
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _extract_step_detail(
+    failed_step: dict[str, Any] | None,
+    public_run: dict[str, Any],
+    failed_step_id: str,
+    step_error_code: str,
+    status: str,
+) -> str:
+    if failed_step is not None:
+        err_obj = failed_step.get('error') if isinstance(failed_step.get('error'), dict) else {}
+        for candidate in (
+            failed_step.get('error_message'),
+            err_obj.get('message'),
+            failed_step.get('error') if isinstance(failed_step.get('error'), str) else '',
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        escalation = failed_step.get('escalation_result')
+        if isinstance(escalation, dict):
+            for candidate in (
+                escalation.get('error_message'),
+                escalation.get('reason'),
+                escalation.get('error'),
+                escalation.get('stderr'),
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate
+            script_exec = escalation.get('script_execution')
+            if isinstance(script_exec, dict):
+                stderr = script_exec.get('stderr') or script_exec.get('error')
+                if isinstance(stderr, str) and stderr.strip():
+                    return stderr
+                exit_code = script_exec.get('exit_code')
+                if exit_code not in (None, 0):
+                    return f'script exited with code {exit_code}'
+    for candidate in (
+        public_run.get('error_message'),
+        public_run.get('reason_code'),
+        public_run.get('error') if isinstance(public_run.get('error'), str) else '',
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    step_status = str((failed_step.get('status') if failed_step else '') or status).strip() or 'failed'
+    return f'step {failed_step_id} {step_status} with {step_error_code}'
+
+
+# LLM: 把非成功工作流运行提炼为带首失败步骤、副作用边界和可执行下一步的结构化回执，禁止笼统报错或诱导原样重试。
+# 函数用途: 提取失败工作流首个异常步骤、脱敏单行摘要、副作用状态及恢复引导文本。
+def _summarize_failed_workflow_run(
+    public_run: dict[str, Any],
+    *,
+    error_code: str = 'WORKFLOW_FAILED',
+) -> tuple[str, dict[str, Any], str]:
+    from ..common.log_redaction import redact_sensitive_text
+
+    nested = public_run.get('run') if isinstance(public_run.get('run'), dict) else {}
+    workflow_id = str(public_run.get('workflow_id') or nested.get('workflow_ref') or '').strip()
+    run_id = _extract_workflow_run_id(public_run)
+    status = str(public_run.get('status') or nested.get('status') or public_run.get('state') or 'failed').strip() or 'failed'
+
+    raw_steps = public_run.get('steps') or public_run.get('step_results') or []
+    steps = [item for item in raw_steps if isinstance(item, dict)] if isinstance(raw_steps, list) else []
+
+    failed_step: dict[str, Any] | None = None
+    for step in steps:
+        if str(step.get('status') or '').strip().lower() in ('failed', 'blocked', 'cancelled'):
+            failed_step = step
+            break
+    if failed_step is None and public_run.get('failed_step_id'):
+        target_id = str(public_run['failed_step_id']).strip()
+        for step in steps:
+            if str(step.get('step_id') or '').strip() == target_id:
+                failed_step = step
+                break
+    if failed_step is None:
+        for step in steps:
+            if step.get('error_code') or step.get('error_message') or isinstance(step.get('error'), dict):
+                failed_step = step
+                break
+
+    failed_step_id = str(
+        (failed_step.get('step_id') if failed_step else '')
+        or public_run.get('failed_step_id')
+        or public_run.get('current_step_id')
+        or ''
+    ).strip() or '(pre_step)'
+    step_err_obj = failed_step.get('error') if (failed_step and isinstance(failed_step.get('error'), dict)) else {}
+    step_error_code = str(
+        (failed_step.get('error_code') if failed_step else '')
+        or step_err_obj.get('code')
+        or public_run.get('error_code')
+        or error_code
+    ).strip() or 'WORKFLOW_FAILED'
+
+    raw_detail = _extract_step_detail(failed_step, public_run, failed_step_id, step_error_code, status)
+    cleaned_detail = ' '.join(redact_sensitive_text(str(raw_detail)).split())
+    if not cleaned_detail:
+        cleaned_detail = f'step {failed_step_id} failed with {step_error_code}'
+    if len(cleaned_detail) > 240:
+        step_error_summary = cleaned_detail[:237].rstrip() + '...'
+    else:
+        step_error_summary = cleaned_detail
+
+    any_step_executed = any(
+        str(step.get('status') or '').strip().lower() in ('succeeded', 'completed')
+        or (
+            isinstance(step.get('escalation_result'), dict)
+            and bool(step['escalation_result'].get('effect_started'))
+        )
+        for step in steps
+    )
+    has_confirmed = bool(public_run.get('confirmed_step_refs') or nested.get('confirmed_step_refs'))
+    raw_effect_outcome = str(public_run.get('effect_outcome') or nested.get('effect_outcome') or '').strip().lower()
+    has_unknown_step_effect = any(
+        isinstance(step.get('escalation_result'), dict)
+        and str(step['escalation_result'].get('effect_outcome') or '').strip().lower() == 'unknown'
+        for step in steps
+    )
+    has_step_effect_outcome = any(
+        isinstance(step.get('escalation_result'), dict)
+        and str(step['escalation_result'].get('effect_outcome') or '').strip().lower()
+        not in ('', 'not_started', 'failed')
+        for step in steps
+    )
+    has_partial_effects = (
+        any_step_executed
+        or has_confirmed
+        or raw_effect_outcome not in ('', 'not_started', 'failed')
+        or has_unknown_step_effect
+        or has_step_effect_outcome
+    )
+    side_effect_state = 'partial_steps_executed' if has_partial_effects else 'not_started'
+    unknown_effect = raw_effect_outcome == 'unknown' or has_unknown_step_effect
+
+    if unknown_effect:
+        # 未知副作用阶段必须交给 execute_scoped 的 recovery_query 仅引导只读 inspect_run，不能误导模型直接 resume。
+        next_action = ''
+        next_hint = (
+            f"仅允许调用 workflows(action='inspect_run', workflow_run_id='{run_id}') 只读核查，不要直接 resume 或原样重试 run。"
+            if run_id
+            else '请只读检查运行状态，不要直接 resume 或原样重试 run。'
+        )
+    elif run_id:
+        next_action = (
+            f"不要直接原样重试 run；请先调用 workflows(action='inspect_run', workflow_run_id='{run_id}') "
+            f"检查步骤 {failed_step_id} 详情并修复输入参数或依赖配置，再调用 "
+            f"workflows(action='resume', workflow_run_id='{run_id}') 续跑。"
+        )
+        next_hint = next_action
+    else:
+        next_action = (
+            f"不要直接原样重试 run；请先核实工作流 {workflow_id or '定义'} 与步骤 {failed_step_id} 的输入参数或配置，"
+            '修复后通过 inspect_run / resume 核验恢复。'
+        )
+        next_hint = next_action
+
+    failed_step_info = {
+        'failed_step_id': failed_step_id,
+        'step_error_code': step_error_code,
+        'step_error_summary': step_error_summary,
+        'side_effect_state': side_effect_state,
+    }
+    summary_raw = (
+        f'{error_code} (workflow={workflow_id or "unnamed"}, workflow_run_id={run_id or "none"}, '
+        f'status={status}, failed_step={failed_step_id}, step_error_code={step_error_code}, '
+        f'side_effects={side_effect_state}): {step_error_summary} Next: {next_hint}'
+    )
+    summary_error = ' '.join(redact_sensitive_text(summary_raw).split())[:800]
+    return summary_error, failed_step_info, next_action
 
 
 # LLM: 路径由构造器Owner固定；纯schema沿tool_spec，运行/恢复/删除仍保持原危险动作分类。
@@ -820,13 +1028,17 @@ class WorkflowsTool(BaseTool):
             if params['action'] == 'publish' and data.get('publish_complete') is False:
                 ok = False
             code = ''
+            next_action = ''
             if not ok:
                 if data.get('status') == 'paused_for_resume':
                     code = 'WORKFLOW_PAUSED'
-                    data = {**data, 'next_action': 'inspect_run'}
+                    next_action = 'inspect_run'
+                    data = {**data, 'next_action': next_action}
                 else:
-                    code = pending_review_error(data) or 'TOOL_EXECUTION_FAILED'
-            return _outcome('workflows', data, ok, code)
+                    code, data, next_action = self._build_failure_outcome_fields(
+                        params['action'], data, business=business
+                    )
+            return _outcome('workflows', data, ok, code, next_action=next_action)
         except WorkflowTemplateError as exc:
             return _outcome('workflows', exc.details, False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
         except AssetPostCommitReadbackError as exc:
@@ -886,6 +1098,49 @@ class WorkflowsTool(BaseTool):
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
         except (OSError, RuntimeError, ImportError) as exc:
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
+
+    def _build_failure_outcome_fields(
+        self,
+        action: str,
+        data: dict[str, Any],
+        *,
+        business: bool,
+    ) -> tuple[str, dict[str, Any], str]:
+        review_code = pending_review_error(data)
+        raw_code = str(data.get('error_code') or '').strip() if not review_code else ''
+        is_run_action = action in ('run', 'resume', 'workflows.run', 'workflow_runs.resume')
+        if review_code:
+            code = review_code
+        elif raw_code:
+            from ..contracts.error_taxonomy import error_contract
+
+            code = raw_code if error_contract(raw_code).code == raw_code else ('WORKFLOW_FAILED' if is_run_action else 'TOOL_EXECUTION_FAILED')
+        elif is_run_action:
+            code = 'WORKFLOW_FAILED'
+        else:
+            code = 'TOOL_EXECUTION_FAILED'
+
+        if not is_run_action:
+            next_action = str(data.get('next_action') or '').strip()
+            return code, data, next_action
+
+        run_snapshot = data
+        if business and not data.get('steps') and not data.get('step_results'):
+            loaded = _load_business_run_snapshot(self.owner_home, data)
+            if loaded is not None:
+                run_snapshot = loaded
+        summary_error, failed_step_info, next_action = _summarize_failed_workflow_run(
+            run_snapshot, error_code=code
+        )
+        enriched = {
+            'error': summary_error,
+            'error_code': code,
+            'failed_step': failed_step_info,
+            'side_effect_state': failed_step_info['side_effect_state'],
+        }
+        if next_action:
+            enriched['next_action'] = next_action
+        return code, {**data, **enriched}, next_action
 
     # LLM: 恢复默认拒绝依赖漂移；宿主组合在恢复上下文及写回前拒绝，普通保存CAS仍由原Store核验。
     # 函数用途: 分派CRUD、绑定、运行、补丁恢复或快照检查。
