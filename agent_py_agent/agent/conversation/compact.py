@@ -1044,9 +1044,10 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
         except Exception as exc:
             raise_if_compact_interrupted(request.interrupt_check)
             if trigger_fallback is not None:
-                return _commit_compact_candidate_or_record_failure(
+                return _commit_or_reject_trigger_fallback(
                     request,
                     trigger_fallback,
+                    rejected,
                 )
             code = compact_exception_code(exc)
             if code == COMPACT_VISION_SUMMARY_FAILED:
@@ -1075,7 +1076,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             trigger_fallback = candidate
 
     if trigger_fallback is not None:
-        return _commit_compact_candidate_or_record_failure(request, trigger_fallback)
+        return _commit_or_reject_trigger_fallback(request, trigger_fallback, rejected)
 
     error = ConversationCompactError(
         "conversation compact candidate did not fit the input trigger and known output reserve",
@@ -1183,6 +1184,30 @@ class _RejectedCandidates:
         if self.smallest is None:
             return None
         return replace(self.smallest, candidates_tried=self.count, fixed_tokens=_fixed_request_tokens(self.request))
+
+
+def _commit_or_reject_trigger_fallback(
+    request: _CompactRunRequest,
+    trigger_fallback: _CompactCandidate,
+    rejected: _RejectedCandidates,
+) -> ConversationCompactResult:
+    """仅当回退候选确实缩小上下文时才提交；零净收益时先熔断并保留原历史与检查点。"""
+    ceiling = _compact_request_input_ceiling(request.agent, request.policy)
+    if trigger_fallback.projected_tokens_after >= request.projected_tokens:
+        capacity = replace(
+            rejected._capacity(trigger_fallback, ceiling),
+            candidates_tried=rejected.count + 1,
+            fixed_tokens=_fixed_request_tokens(request),
+        )
+        error = ConversationCompactError(
+            f"压缩后请求体未缩小（before={request.projected_tokens}, candidate={trigger_fallback.projected_tokens_after}），"
+            "已中止提交且未修改原会话历史与检查点；请保留原文继续或扩展保留边界后重试。",
+            code="COMPACT_NO_PROGRESS",
+            capacity=capacity,
+        )
+        _record_request_compact_failure(request, code=error.code)
+        raise error
+    return _commit_compact_candidate_or_record_failure(request, trigger_fallback)
 
 
 # LLM: 宿主已备surface原样沿用；新建面绑定已提交人格/加载名，前缀下界必超原预算时不保留旧正文，完整精确门仍执行。

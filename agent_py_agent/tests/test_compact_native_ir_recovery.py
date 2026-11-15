@@ -32,7 +32,10 @@ from agent_py_agent.agent.conversation.compact_guard import ConversationCompactE
 from agent_py_agent.agent.conversation.compact_summary_view import resolve_compact_summary_view
 from agent_py_agent.agent.conversation.runtime import _run_params
 from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
-from agent_py_agent.tests.test_background_compact_recovery import _background
+from agent_py_agent.tests.test_background_compact_recovery import (
+    _background,
+    _http_with_live_summary,
+)
 from agent_py_agent.tests.test_mixed_compact_recovery import _wire_from_material
 from agent_py_agent.tests.test_subagent_compact_recovery import _http
 
@@ -173,7 +176,9 @@ def test_empty_transcript_native_ir_recovery_summarizes_full_result_once_and_sen
             business.append(wire)
             assert len(candidates) == 1 and wire == _wire_from_material(agent, candidates[0])
 
-    all_wires, _ = _http(monkeypatch, backend=backend, on_business=on_http)
+    all_wires, _ = _http_with_live_summary(
+        monkeypatch, backend=backend, on_business=on_http, is_summary=lambda: in_summary,
+    )
     result, _, recovery = background_execution._run_background_recovery_attempt(
         execution, "继续核对完整工具结果", params, history, context,
         recovering=True, activity_sink=sink,
@@ -314,7 +319,7 @@ def test_owned_recovery_fits_over_budget_native_history_before_business_request(
     assert store.threads.require(thread.thread_id).compact_generation == 1
 
 
-@pytest.mark.parametrize("failure", ["cancel", "too_large"])
+@pytest.mark.parametrize("failure", ["cancel", "too_large", "no_progress"])
 def test_native_ir_recovery_failure_sends_no_business_or_commit(tmp_path, monkeypatch, failure) -> None:
     agent, store, thread, execution, sink, history, params, context, recorded = _native_ir_attempt(
         tmp_path, monkeypatch, backend="anthropic_compatible", full_result="FULL-CONTENT-" + "y" * 5_000,
@@ -360,7 +365,8 @@ def test_native_ir_recovery_failure_sends_no_business_or_commit(tmp_path, monkey
             business.append(wire)
             pytest.fail("原生 IR 候选未提交时发送了业务请求")
 
-    _http(monkeypatch, backend="anthropic_compatible", on_business=on_http)
+    http_helper = _http if failure == "no_progress" else partial(_http_with_live_summary, is_summary=lambda: in_summary)
+    http_helper(monkeypatch, backend="anthropic_compatible", on_business=on_http)
     expected_error = InterruptedError if failure == "cancel" else ConversationCompactError
     with pytest.raises(expected_error) as raised:
         background_execution._run_background_recovery_attempt(
@@ -372,6 +378,8 @@ def test_native_ir_recovery_failure_sends_no_business_or_commit(tmp_path, monkey
     assert not cas_calls
     if failure == "too_large":
         assert raised.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
+    elif failure == "no_progress":
+        assert raised.value.code == "COMPACT_NO_PROGRESS"
     committed = store.threads.require(thread.thread_id)
     assert committed.compact_generation == 0 and not committed.compact_checkpoint_id
 
