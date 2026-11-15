@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-import yaml
 
 import agent_py_agent.agent.gateway_parts.background_resource_report as bg_resource_report
 import agent_py_agent.agent.tooling.background_process_launch as bg_launch
@@ -32,6 +31,7 @@ from agent_py_agent.agent.gateway_parts.background_resource_report import (
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.settings.config_io import parse_simple_yaml_text
 from agent_py_agent.agent.settings.parameter_metadata import field_readers, ranges, unit_for_key
 from agent_py_agent.agent.settings.parameter_registry import (
     applied_value,
@@ -673,7 +673,7 @@ def test_background_process_settled_ttl_seconds_registered_in_parameter_registry
 ) -> None:
     yaml_path = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
     yaml_text = yaml_path.read_text(encoding="utf-8")
-    parsed_yaml = yaml.safe_load(yaml_text)
+    parsed_yaml = parse_simple_yaml_text(yaml_text)
     assert parsed_yaml["background_process_settled_ttl_seconds"] == 0
     # PD-1 Option B YAML comment alignment
     assert "撤掉该尾部项并保留原请求/线程思考强度" in yaml_text

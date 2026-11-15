@@ -2226,8 +2226,15 @@ class _NativeApprovals:
                         )
                         if not matched:
                             continue
-                        chunk_path = claimed_request_chunk_path(path, _record_id(record))
-                        unresolved = _unresolved_permission_requests(chunk_path, _lease_started_at(request_doc))
+                        record_request_id = _record_id(record)
+                        if not record_request_id:
+                            continue
+                        chunk_path = claimed_request_chunk_path(path, record_request_id)
+                        unresolved = [
+                            request
+                            for request in _unresolved_permission_requests(chunk_path, _lease_started_at(request_doc))
+                            if request.request_id == record_request_id
+                        ]
                         if not unresolved:
                             continue
                         try:

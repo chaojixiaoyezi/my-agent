@@ -23,9 +23,10 @@ from ....common.request_execution_ports import (
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
 import logging
+import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
@@ -82,10 +83,61 @@ def _record_supervision_canonical_errors(
     )
 
 
+def _sanitize_error_token(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", raw):
+        return ""
+    lowered = raw.lower()
+    if lowered.startswith(("sk-", "sk_", "ghp_", "gho_", "ghu_", "ghs_", "xoxb-", "xoxb_", "xoxp-", "xoxp_", "aiza", "bearer")):
+        return ""
+    return raw
+
+
+def _load_error_token(error: Any) -> str:
+    if isinstance(error, Mapping):
+        code = _sanitize_error_token(error.get("error_code") or error.get("code"))
+        err_type = _sanitize_error_token(error.get("error_type") or error.get("category"))
+        if code and err_type and code != err_type:
+            return f"{code}:{err_type}"
+        return code or err_type or "UNKNOWN_ERROR"
+    if isinstance(error, BaseException):
+        return _sanitize_error_token(type(error).__name__) or "UNKNOWN_ERROR"
+    return "NON_DICT_ERROR"
+
+
+def _summarize_index_load_errors(report_errors: Sequence[Any]) -> tuple[dict[str, Any], str]:
+    items = list(report_errors)
+    ordered = [err for err in items if _is_index_level_load_error(err)]
+    if len(ordered) < len(items):
+        ordered.extend(err for err in items if not _is_index_level_load_error(err))
+    distinct: list[str] = []
+    seen: set[str] = set()
+    for err in ordered:
+        token = _load_error_token(err)
+        if token not in seen:
+            seen.add(token)
+            distinct.append(token)
+    sample = distinct[:3]
+    truncated = len(distinct) > 3
+    summary: dict[str, Any] = {
+        "count": len(items),
+        "error_types": sample,
+        "truncated": truncated,
+    }
+    suffix = f"load_errors={len(items)}"
+    if sample:
+        suffix += f", types={','.join(sample)}"
+        if truncated:
+            suffix += ",+more"
+    return summary, suffix
+
+
 def _raise_on_index_errors(report_errors: list[Any], message: str) -> None:
     if any(_is_index_level_load_error(err) for err in report_errors):
-        error = SubagentRunIndexUnavailable(message)
+        summary, suffix = _summarize_index_load_errors(report_errors)
+        error = SubagentRunIndexUnavailable(f"{message} ({suffix})")
         error.load_errors = report_errors
+        error.load_error_summary = summary
         raise error
 
 

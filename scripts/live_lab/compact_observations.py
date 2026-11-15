@@ -878,6 +878,129 @@ def _opt_timestamp(value: Any) -> float | None:
     return None
 
 
+def _row_timestamp(row: Mapping[str, Any]) -> float | None:
+    for key in ("created_at", "timestamp", "ts", "finished_at", "started_at"):
+        ts = _opt_timestamp(row.get(key))
+        if ts is not None:
+            return ts
+    return None
+
+
+def _row_phase(row: Mapping[str, Any]) -> str:
+    raw = str(row.get("compaction_phase") or row.get("phase") or "").strip().lower()
+    if raw in {"pre", "before", "pre_compaction"}:
+        return "pre"
+    if raw in {"post", "after", "post_compaction", "first_post", "later_post"}:
+        return "post"
+    return ""
+
+
+def _is_pure_compact_summary_row(row: Mapping[str, Any]) -> bool:
+    purpose = str(row.get("purpose") or row.get("source") or "").strip()
+    if not _is_compact_summary_purpose(purpose):
+        return False
+    breakdown = row.get("purpose_breakdown")
+    if not isinstance(breakdown, Mapping) or not breakdown:
+        calls_dict = row.get("model_calls")
+        nested = calls_dict.get("purpose_breakdown") if isinstance(calls_dict, Mapping) else None
+        if not isinstance(nested, Mapping) or not nested:
+            return True
+        return all(_is_compact_summary_purpose(str(k)) for k in nested if str(k) != "schema")
+    return all(_is_compact_summary_purpose(str(k)) for k in breakdown if str(k) != "schema")
+
+
+def _to_cache_slice_entry(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    if "paired_input_tokens" in row and "paired_cached_tokens" in row:
+        return row
+    return aggregate_usage_records([row])
+
+
+def _extract_turn_subcalls(turn: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    for key in ("calls", "rows", "records", "events", "usage_rows", "usage_events"):
+        val = turn.get(key)
+        if isinstance(val, Sequence) and not isinstance(val, (str, bytes)):
+            items = [item for item in val if isinstance(item, Mapping)]
+            if items:
+                return items
+    return []
+
+
+def _filter_rows_for_boundary_turn(
+    turn: Mapping[str, Any],
+    turn_idx: int,
+    rows: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    turn_name = str(turn.get("turn") or turn.get("turn_label") or "").strip()
+    start = _opt_timestamp(turn.get("started_at"))
+    end = _opt_timestamp(turn.get("finished_at"))
+    matched: list[Mapping[str, Any]] = []
+    for row in rows:
+        r_idx = _opt_nonneg_int(row.get("turn_index"))
+        r_turn = str(row.get("turn") or row.get("turn_label") or "").strip()
+        if r_idx is not None and r_idx == turn_idx:
+            matched.append(row)
+            continue
+        if turn_name and r_turn and r_turn == turn_name:
+            matched.append(row)
+            continue
+        if start is not None and end is not None and end >= start:
+            ts = _row_timestamp(row)
+            if ts is not None and start <= ts <= end:
+                matched.append(row)
+    return matched
+
+
+def _partition_subcalls_around_compaction(
+    subcalls: Sequence[Mapping[str, Any]],
+    *,
+    boundary_ts: float | None,
+    has_subsequent_turns: bool,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]] | None:
+    if not subcalls:
+        return None
+    non_summary = [row for row in subcalls if not _is_pure_compact_summary_row(row)]
+    candidates = non_summary if non_summary else list(subcalls)
+
+    # 1. Explicit pre/post phase annotation on individual call rows.
+    phases = [_row_phase(row) for row in candidates]
+    if any(phases) and all(p in {"pre", "post"} for p in phases):
+        pre = [_to_cache_slice_entry(r) for r, p in zip(candidates, phases) if p == "pre"]
+        post = [_to_cache_slice_entry(r) for r, p in zip(candidates, phases) if p == "post"]
+        if pre or post:
+            return pre, post
+
+    # 2. Timestamp comparison against canonical checkpoint created_at.
+    if boundary_ts is not None:
+        ts_pairs = [(row, _row_timestamp(row)) for row in candidates]
+        timed = [(row, ts) for row, ts in ts_pairs if ts is not None]
+        if len(timed) >= 2 and len(timed) == len(candidates):
+            pre_rows = [_to_cache_slice_entry(r) for r, ts in ts_pairs if ts is not None and ts < boundary_ts]
+            post_rows = [_to_cache_slice_entry(r) for r, ts in ts_pairs if ts is not None and ts >= boundary_ts]
+            if (pre_rows and post_rows) or (pre_rows and has_subsequent_turns):
+                return pre_rows, post_rows
+
+    # 3. Structural compaction marker within embedded call list (at least 2 subcalls).
+    if len(subcalls) >= 2:
+        for idx, row in enumerate(subcalls):
+            if _is_pure_compact_summary_row(row):
+                pre_raw = [r for r in subcalls[:idx] if not _is_pure_compact_summary_row(r)]
+                post_raw = [r for r in subcalls[idx + 1 :] if not _is_pure_compact_summary_row(r)]
+                if pre_raw or post_raw:
+                    return (
+                        [_to_cache_slice_entry(r) for r in pre_raw],
+                        [_to_cache_slice_entry(r) for r in post_raw],
+                    )
+            if bool(row.get("compaction_occurred")) or bool(row.get("is_compaction_boundary")):
+                pre_raw = [r for r in subcalls[:idx] if not _is_pure_compact_summary_row(r)]
+                post_raw = [r for r in subcalls[idx:] if not _is_pure_compact_summary_row(r)]
+                if pre_raw:
+                    return (
+                        [_to_cache_slice_entry(r) for r in pre_raw],
+                        [_to_cache_slice_entry(r) for r in post_raw],
+                    )
+    return None
+
+
 def _correlate_compaction_turns(
     turn_usages: Sequence[Mapping[str, Any]],
     cycles: Sequence[Mapping[str, Any]],
@@ -899,25 +1022,38 @@ def _correlate_compaction_turns(
         ts for ts in (_opt_timestamp(cycle.get("created_at")) for cycle in cycles)
         if ts is not None
     ]
+    unmatched_cycle_times: list[float] = []
     if cycle_times:
-        for pos, marker in enumerate(markers):
-            if not isinstance(marker, Mapping):
-                continue
-            start = _opt_timestamp(marker.get("started_at"))
-            end = _opt_timestamp(marker.get("finished_at"))
-            if start is None or end is None or end < start:
-                continue
-            target_idx = _opt_nonneg_int(marker.get("turn_index"))
-            if target_idx is None:
-                m_label = str(marker.get("turn") or marker.get("turn_label") or "").strip()
-                if m_label and m_label in label_to_idx:
-                    target_idx = label_to_idx[m_label]
-                else:
-                    target_idx = pos
-            if not (0 <= target_idx < len(turn_usages)):
-                continue
-            if any(start <= ts <= end for ts in cycle_times):
-                indices.add(target_idx)
+        for ts in cycle_times:
+            matched_interval = False
+            for pos, marker in enumerate(markers):
+                if not isinstance(marker, Mapping):
+                    continue
+                start = _opt_timestamp(marker.get("started_at"))
+                end = _opt_timestamp(marker.get("finished_at"))
+                if start is None or end is None or end < start:
+                    continue
+                target_idx = _opt_nonneg_int(marker.get("turn_index"))
+                if target_idx is None:
+                    m_label = str(marker.get("turn") or marker.get("turn_label") or "").strip()
+                    if m_label and m_label in label_to_idx:
+                        target_idx = label_to_idx[m_label]
+                    else:
+                        target_idx = pos
+                if not (0 <= target_idx < len(turn_usages)):
+                    continue
+                if start <= ts <= end:
+                    indices.add(target_idx)
+                    matched_interval = True
+            if not matched_interval:
+                unmatched_cycle_times.append(ts)
+
+    for ts in unmatched_cycle_times:
+        for idx, turn in enumerate(turn_usages):
+            row_ts = _row_timestamp(turn)
+            if row_ts is not None and row_ts >= ts and not _is_pure_compact_summary_row(turn):
+                indices.add(idx)
+                break
     return sorted(indices)
 
 
@@ -925,25 +1061,80 @@ def compute_pre_post_compaction_cache_ratios(
     turn_usages: Sequence[Mapping[str, Any]],
     *,
     compaction_turn_indices: Sequence[int] = (),
+    compaction_timestamps: Sequence[float] = (),
+    usage_rows: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Compute observed-subset cached_tokens ratio before and after compaction turns."""
     resolved_indices = sorted({
         idx for idx in compaction_turn_indices
         if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(turn_usages)
     })
+    compact_times = sorted(
+        ts for ts in (_opt_timestamp(item) for item in compaction_timestamps)
+        if ts is not None
+    )
     if not resolved_indices:
         resolved_indices = [
             idx for idx, turn in enumerate(turn_usages)
             if bool(turn.get("compaction_occurred"))
         ]
+    if not resolved_indices and compact_times:
+        resolved_indices = _correlate_compaction_turns(
+            turn_usages,
+            [{"created_at": ts} for ts in compact_times],
+        )
     split_index: int | None = resolved_indices[0] if resolved_indices else None
 
     if split_index is None:
-        pre_turns = list(turn_usages)
+        pre_turns = [_to_cache_slice_entry(t) for t in turn_usages]
         post_turns: list[Mapping[str, Any]] = []
     else:
-        pre_turns = list(turn_usages[:split_index])
-        post_turns = list(turn_usages[split_index:])
+        pre_turns = [_to_cache_slice_entry(t) for t in turn_usages[:split_index]]
+        boundary_turn = turn_usages[split_index]
+        trailing_turns = [_to_cache_slice_entry(t) for t in turn_usages[split_index + 1 :]]
+        boundary_ts = _opt_timestamp(
+            boundary_turn.get("compaction_at") or boundary_turn.get("compacted_at")
+        )
+        if boundary_ts is None and compact_times:
+            b_start = _opt_timestamp(boundary_turn.get("started_at"))
+            b_end = _opt_timestamp(boundary_turn.get("finished_at"))
+            if b_start is not None and b_end is not None and b_end >= b_start:
+                in_window = [ts for ts in compact_times if b_start <= ts <= b_end]
+                boundary_ts = in_window[0] if in_window else compact_times[0]
+            else:
+                boundary_ts = compact_times[0]
+
+        split_result: tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]] | None = None
+        if isinstance(boundary_turn.get("pre_compaction"), Mapping) and isinstance(
+            boundary_turn.get("post_compaction"), Mapping
+        ):
+            split_result = (
+                [_to_cache_slice_entry(boundary_turn["pre_compaction"])],
+                [_to_cache_slice_entry(boundary_turn["post_compaction"])],
+            )
+        else:
+            embedded_calls = _extract_turn_subcalls(boundary_turn)
+            if embedded_calls:
+                split_result = _partition_subcalls_around_compaction(
+                    embedded_calls,
+                    boundary_ts=boundary_ts,
+                    has_subsequent_turns=bool(trailing_turns),
+                )
+            if split_result is None and usage_rows:
+                matched_rows = _filter_rows_for_boundary_turn(boundary_turn, split_index, usage_rows)
+                if matched_rows:
+                    split_result = _partition_subcalls_around_compaction(
+                        matched_rows,
+                        boundary_ts=boundary_ts,
+                        has_subsequent_turns=bool(trailing_turns),
+                    )
+
+        if split_result is not None:
+            boundary_pre, boundary_post = split_result
+            pre_turns.extend(boundary_pre)
+            post_turns = [*boundary_post, *trailing_turns]
+        else:
+            post_turns = [_to_cache_slice_entry(boundary_turn), *trailing_turns]
 
     first_post = post_turns[:1]
     later_post = post_turns[1:]
@@ -1894,6 +2085,139 @@ def diff_bg_process_census(pre: Mapping[str, Any], post: Mapping[str, Any]) -> d
     }
 
 
+def _discover_filtered_usage_rows(
+    home_ctx: Mapping[str, Any],
+    *,
+    thread_id: str | None = None,
+    baseline: Mapping[str, Any] | None = None,
+    extra_usage_files: Sequence[str | Path] = (),
+) -> list[dict[str, Any]]:
+    search_roots = [
+        p
+        for p in (
+            home_ctx.get("conversation_workspace"),
+            home_ctx.get("owner_home_dir"),
+            home_ctx.get("isolated_home_root"),
+        )
+        if p
+    ]
+    files = discover_usage_ledger_files(
+        model_usage_dir=home_ctx.get("model_usage_dir"),
+        search_roots=search_roots,
+    )
+    seen = {str(item.resolve(strict=False)) for item in files}
+    for extra in extra_usage_files:
+        path = Path(extra)
+        if path.is_file():
+            resolved = str(path.resolve(strict=False))
+            if resolved not in seen:
+                seen.add(resolved)
+                files.append(Path(resolved))
+    if not files:
+        return []
+    rows, _, _ = read_usage_delta_since(files, None)
+    if thread_id is not None:
+        rows = [
+            row for row in rows
+            if not str(row.get("thread_id") or "").strip() or str(row.get("thread_id") or "").strip() == thread_id
+        ]
+    baseline_ts = _opt_timestamp((baseline or {}).get("sampled_at"))
+    if baseline_ts is not None and rows:
+        epoch_rows = [ts for ts in (_row_timestamp(r) for r in rows) if ts is not None and ts >= 1_000_000_000.0]
+        if epoch_rows:
+            rows = [
+                row for row in rows
+                if (_row_timestamp(row) is None or float(_row_timestamp(row)) >= baseline_ts - 1e-6 or float(_row_timestamp(row)) < 1_000_000_000.0)
+            ]
+    if any(_row_timestamp(r) is not None for r in rows):
+        rows = sorted(
+            rows,
+            key=lambda r: (_row_timestamp(r) is None, _row_timestamp(r) or 0.0),
+        )
+    return rows
+
+
+def _synthesize_turn_usages_from_ledger(
+    ledger_rows: Sequence[Mapping[str, Any]],
+    *,
+    turn_markers: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if not ledger_rows:
+        return []
+    if turn_markers:
+        turns: list[dict[str, Any]] = []
+        used_indices: set[int] = set()
+        for idx, marker in enumerate(turn_markers):
+            if not isinstance(marker, Mapping):
+                continue
+            start = _opt_timestamp(marker.get("started_at"))
+            end = _opt_timestamp(marker.get("finished_at"))
+            label = str(marker.get("turn") or marker.get("turn_label") or f"turn_{idx + 1}")
+            m_idx = _opt_nonneg_int(marker.get("turn_index"))
+            turn_idx = idx if m_idx is None else m_idx
+            matched: list[Mapping[str, Any]] = []
+            for r_i, row in enumerate(ledger_rows):
+                if r_i in used_indices:
+                    continue
+                r_ts = _row_timestamp(row)
+                r_turn_idx = _opt_nonneg_int(row.get("turn_index"))
+                r_label = str(row.get("turn") or row.get("turn_label") or "").strip()
+                in_window = (
+                    start is not None
+                    and end is not None
+                    and end >= start
+                    and r_ts is not None
+                    and start <= r_ts <= end
+                )
+                in_label = bool(r_label and r_label == label) or (r_turn_idx is not None and r_turn_idx == turn_idx)
+                if in_window or in_label:
+                    matched.append(row)
+                    used_indices.add(r_i)
+            summary = aggregate_usage_records(matched)
+            turns.append({
+                "turn": label,
+                "turn_index": turn_idx,
+                "started_at": start,
+                "finished_at": end,
+                "raw_event_count": len(matched),
+                **summary,
+                "calls": matched,
+            })
+        leftover = [row for r_i, row in enumerate(ledger_rows) if r_i not in used_indices]
+        if turns and not leftover:
+            return turns
+        if turns and leftover:
+            # 只有部分行落在标记窗口外时把未匹配调用保留为细粒度切片，避免丢数据。
+            return [
+                *turns,
+                *(
+                    {
+                        **aggregate_usage_records([row]),
+                        **({"created_at": _row_timestamp(row)} if _row_timestamp(row) is not None else {}),
+                        "turn": str(row.get("turn") or row.get("request_id") or f"unassigned_{k + 1}"),
+                    }
+                    for k, row in enumerate(leftover)
+                ),
+            ]
+    entries: list[dict[str, Any]] = []
+    for i, row in enumerate(ledger_rows):
+        ts = _row_timestamp(row)
+        entry: dict[str, Any] = {
+            **aggregate_usage_records([row]),
+            "turn": str(row.get("turn") or row.get("request_id") or f"call_{i + 1}"),
+            "turn_index": i,
+            "purpose": str(row.get("purpose") or row.get("source") or "main"),
+        }
+        if ts is not None:
+            entry["created_at"] = ts
+        if isinstance(row.get("purpose_breakdown"), Mapping):
+            entry["purpose_breakdown"] = dict(row["purpose_breakdown"])
+        elif isinstance(row.get("model_calls"), Mapping) and isinstance(row["model_calls"].get("purpose_breakdown"), Mapping):
+            entry["purpose_breakdown"] = dict(row["model_calls"]["purpose_breakdown"])
+        entries.append(entry)
+    return entries
+
+
 def collect_compaction_observations(
     *,
     config_path: str | Path,
@@ -1904,35 +2228,61 @@ def collect_compaction_observations(
     pre_bg_census: Mapping[str, Any] | None = None,
     pid_alive_fn: Callable[[int], bool | None] | None = None,
     turn_markers: Sequence[Mapping[str, Any]] | None = None,
+    home_ctx: Mapping[str, Any] | None = None,
+    extra_usage_files: Sequence[str | Path] = (),
 ) -> dict[str, Any]:
     """Assemble full compaction, cache, policy, and 3-state bg-* observation report."""
-    home_ctx = resolve_live_lab_home_context(config_path)
+    resolved_home_ctx = dict(home_ctx) if home_ctx is not None else resolve_live_lab_home_context(config_path)
     checkpoints = load_canonical_compaction_checkpoints(
-        compact_dir=home_ctx["owner_compact_dir"],
-        threads_dir=home_ctx["threads_dir"],
+        compact_dir=resolved_home_ctx["owner_compact_dir"],
+        threads_dir=resolved_home_ctx["threads_dir"],
         thread_id=thread_id,
         baseline=baseline,
     )
     telemetry = parse_compaction_telemetry(telemetry_sources)
+    ledger_rows = _discover_filtered_usage_rows(
+        resolved_home_ctx,
+        thread_id=thread_id,
+        baseline=baseline,
+        extra_usage_files=extra_usage_files,
+    )
+    effective_turn_usages = (
+        list(turn_usages)
+        if turn_usages
+        else _synthesize_turn_usages_from_ledger(ledger_rows, turn_markers=turn_markers)
+    )
+    cycle_times = [
+        ts for ts in (_opt_timestamp(cycle.get("created_at")) for cycle in (checkpoints.get("cycles") or ()))
+        if ts is not None
+    ]
     correlated_indices = _correlate_compaction_turns(
-        turn_usages,
+        effective_turn_usages,
         checkpoints.get("cycles") or (),
         turn_markers=turn_markers,
     )
     cache_phases = compute_pre_post_compaction_cache_ratios(
-        turn_usages,
+        effective_turn_usages,
         compaction_turn_indices=correlated_indices,
+        compaction_timestamps=cycle_times,
+        usage_rows=ledger_rows,
     )
-    post_bg = collect_bg_process_census(home_ctx["process_store_root"], pid_alive_fn=pid_alive_fn)
+    post_bg = collect_bg_process_census(resolved_home_ctx["process_store_root"], pid_alive_fn=pid_alive_fn)
     bg_diff = diff_bg_process_census(pre_bg_census or {"counts": {"active": 0, "settled": 0, "unknown": 0, "total": 0}}, post_bg)
+
+    serialized_turn_usage = [
+        {k: v for k, v in item.items() if k != "calls"}
+        if not turn_usages and isinstance(item, Mapping) and "calls" in item
+        else item
+        for item in effective_turn_usages
+    ]
 
     return {
         "schema": "live_lab_compact_observations.v1",
-        "home_context": home_ctx,
-        "compact_policy": home_ctx["compact_policy"],
+        "home_context": resolved_home_ctx,
+        "compact_policy": resolved_home_ctx["compact_policy"],
         "checkpoints": checkpoints,
         "telemetry": telemetry,
-        "turn_usage": list(turn_usages),
+        "turn_usage": serialized_turn_usage,
         "cache_phases": cache_phases,
         "bg_census_pre": pre_bg_census,
         "bg_census_post": post_bg,
