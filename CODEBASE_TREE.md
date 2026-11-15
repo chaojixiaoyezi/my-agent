@@ -1,3 +1,21 @@
+## 2026-11-14 底座 41+5 双审收口修复与 LiveLab V1 观测加固（fw41：W1–W10）
+
+```text
+scripts/live_lab/
+`-- compact_observations.py                              # W10 LiveLab 压缩遥测解析器：直提分叉摘要与独立摘要计数、无进展拦截、运行事实回合数及缓存命中率
+agent_py_agent/tests/
+|-- test_fw41_w1_compaction_safety.py                    # W1 分叉历史四元组身份核验、运行事实跨保留组淘汰与 COMPACT_NO_PROGRESS 提交门禁回归单测
+|-- test_fw41_w2_capability_and_idle_approvals.py        # W2 根作用域孤儿子代能力申请 CAS 过期收口与有界可续扫空闲审批发现回归单测
+|-- test_fw41_w3_taxonomy_and_write_guidance.py          # W3 业务/宿主字面量错误码登记全覆盖、子代理派工不可写告警与 WRITE_FORBIDDEN 根指引回归单测
+|-- test_fw41_w4_native_approvals_wiring.py              # W4 原生审批列表单遍有界扫描与模型只读审批读取器接线回归单测
+|-- test_fw41_w5_workflow_breakpoint_and_references.py   # W5 工作流可空断点 step_id、资产到运行锁序、取消中引用覆盖与结构化清理诊断回归单测
+|-- test_fw41_w6_process_tree_cleanup_proof.py           # W6 后台会话重试停止跨轮保留未决后代进程出生身份与树观测完备性证明回归单测
+|-- test_fw41_w7_responses_effort_preservation.py        # W7 Responses 尾部推理更新 400 重试保留原推理档位与压缩预留预算对齐回归单测
+|-- test_fw41_w8_settled_background_reclaim.py           # W8 三态已终结后台进程回收、gateway stop --settled-only 与冷启动 TTL 清理配置回归单测
+|-- test_fw41_w9_human_gate_receipts_and_bwrap.py        # W9 人工确认/错误回执单行无占位符复制命令、模型配置提示与 Linux bwrap 预检回归单测
+`-- test_fw41_w10_live_lab_harness.py                    # W10 LiveLab 逐轮用量切片归因、压缩观测提取、严格临时目录隔离与三态后台进程清点回归单测
+```
+
 ## 2026-11-14 五条生产管线 37 项 P1 收口加固（Next Wave：W1–W8）
 
 ```text
@@ -4071,6 +4089,7 @@ scripts/
 |   |-- decision_quality_adapters.py   # 点位适配：中文用例 → 各点位真实材料构造代码 → 请求材料与每题可接受答案
 |   `-- decision_quality/              # thresholds.json（12 点位阈值）、results.json（登记成绩）、cases/<点位>.json（12 点位都有用例）、README
 |-- live_lab/                          # 真实链路 harness；真实 preflight、main-artifact、tool-recovery
+|   `-- compact_observations.py        # 压缩与缓存观测解析器：逐轮 llm_usage 切片、分叉/独立摘要与无进展遥测提取
 |-- tui_ansi_snapshot.py               # pyte 开发工具：从 raw ANSI/offset 账还原文本、样式、光标和标题快照
 |-- tui_reference_fixture_server.py    # loopback 确定性 Anthropic 服务：驱动 TUI Markdown/思考/权限/错误黑盒场景
 |-- tui_pty_recorder.py                # argv-only PTY 黑盒录制器：按键/粘贴/resize、原始 ANSI、事件索引与脱敏 manifest

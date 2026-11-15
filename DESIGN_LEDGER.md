@@ -1,3 +1,12 @@
+## 2026-11-14 底座 41+5 双审收口修复与 LiveLab V1 观测加固（fw41：W1–W10，集成候选）
+
+围绕上下文压缩、运行时生命周期、业务工作流契约、错误分类与回执指引、以及真实链路压测观测完成 10 个零重叠分片收敛：
+
+- **压缩安全与推理档位预留对齐（W1、W7）**：`_cache_fork_history` 严格核验四元组 `compact_tool_ref_key` 与原生工具结果源一一对应，失配或尾随重复时回退独立摘要；`summarized_runtime_fact_indexes` 在保留支配性快照与未结义务的前提下跨早期保留组淘汰已被取代的 `RuntimeFactsTurn`；活跃回合与兜底压缩提交均由 `COMPACT_NO_PROGRESS` 守卫（`candidate_tokens >= projected_tokens_before` 时拒绝覆盖原 IR/检查点）；Responses 后端遇到尾部推理更新 `400` 拒绝时仅移除插入的尾部项并保留原请求/线程推理档位，同时对齐辅助/压缩输出预留与输入准入预算。
+- **根作用域孤儿能力申请收口、空闲审批续扫与后台进程树生命周期（W2、W6、W8）**：根运行终结或 Gateway/CLI（`runtime-stale-attempts --settle`）恢复时按单请求锁与 CAS 收口孤儿子代挂起能力申请而不干扰活跃兄弟根；空闲压缩前的挂起审批探测改为有界可续扫游标（多轮目录溢出保守失败关闭）；`bg-*` 停止重试跨轮持久化未决后代 `(pid, start_token)` 出生身份与 `tree_observation_complete`；新增三态 `freeze_settled_leftover_processes`、CLI `my-agent gateway stop --stop-background --settled-only`（仅回收已确认终结作用域的遗留后台进程，活跃不触碰、未知只列不杀）及可选配置 `background_process_settled_ttl_seconds`（默认 `0` 关闭，仅在 Gateway 冷启动扫描一次，热重启排空期不触发）。
+- **业务审批只读接线、工作流可空断点与引用回收锁序（W4、W5）**：`_NativeApprovals.list` 改为单遍索引通道绑定与有界扫描处理记录，向模型接通只读原生审批读取器而严格封禁模型调用 `approvals.decide`；`Breakpoint.step_id` 放宽为 `NullableId` 并保证非空 `reason_code`；工作流引用源覆盖 `cancelling`/`pending`/`legacy` 状态，首轮运行登记遵循 `asset_lock -> run_store_lock` 锁序并在步骤执行前释放，孤儿维护返回脱敏结构化诊断。
+- **错误字典全覆盖、写边界/真人门回执指引与 LiveLab V1（W3、W9、W10）**：`error_taxonomy.py` 补齐全部业务与宿主字面量错误码（零回退 `UNKNOWN_ERROR`）；子代理派工保持写权限不扩权并产出 `OUTPUT_TARGET_NOT_WRITABLE` 告警，`WRITE_FORBIDDEN` 统一附带最多 5 个可写根与参数修正建议；人工确认与错误回执消除尖括号占位符并提供单行可直接复制命令；安装包新增 Linux `bwrap --unshare-user` 非阻塞预检告警；LiveLab 新增 `compact_observations.py`、逐轮 `llm_usage.jsonl` 切片归因、严格临时目录隔离与收尾三态 `bg-*` 进程清点。
+
 ## 2026-11-14 工具表面收敛与确定性副作用错误契约（Workstream B：W0–W6，集成候选）
 
 按冻结边界完成工具表面精简、业务域归并、动作上界授权与确定性错误恢复闭环，零新增配置项（复用 `business_spaces_enabled`、`enable_self_map`、`tool_catalog_*` 等存量配置）：
