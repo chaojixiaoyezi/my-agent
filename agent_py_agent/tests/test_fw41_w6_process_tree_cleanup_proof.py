@@ -713,3 +713,391 @@ def test_process_registry_kill_returns_isolated_cleanup_copy(tmp_path: Path) -> 
     assert reloaded_cleanup["confirmed"] is True
     assert len(reloaded_cleanup["instances"]) == 1
     assert reloaded_cleanup["instances"][0]["method"] == "SIGTERM"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX host 退出竞态与树完整性证明测试")
+def test_host_self_exit_identity_unavailable_during_snapshot_settles_with_complete_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ProcessSessionStore(tmp_path / "sessions")
+    host, host_birth = _spawn_sleeper()
+    child, child_birth = _spawn_sleeper()
+    try:
+        saved = store.write(
+            _base_record(
+                tmp_path,
+                session_id="bg-w6-host-exit-unavail",
+                status="exited",
+                pid=host.pid,
+                pid_birth_token=host_birth,
+                child_pid=child.pid,
+                child_pid_birth_token=child_birth,
+                termination={"confirmed": True, "method": "SIGTERM", "observed_processes": 1, "unresolved_pids": []},
+            )
+        )
+        _cleanup_proc(child)
+        real_snapshot = process_registry._fresh_process_tree_snapshot  # noqa: SLF001
+
+        def snapshot_during_host_exit(root_pid: int) -> tuple[dict[int, str], bool]:
+            if root_pid == host.pid:
+                _cleanup_proc(host)
+                return {}, False
+            return real_snapshot(root_pid)
+
+        monkeypatch.setattr(process_registry, "_fresh_process_tree_snapshot", snapshot_during_host_exit)
+        result = stop_process_session(store, saved)
+        assert result.confirmed is True
+        assert result.record["status"] == "exited"
+        assert result.record["termination"]["confirmed"] is True
+        cleanup = result.record["termination"]["cleanup"]
+        assert cleanup["confirmed"] is True
+        assert cleanup["tree_observation_complete"] is True
+        assert cleanup["unresolved_instances"] == []
+        assert len(cleanup["instances"]) == 1
+        host_entry = cleanup["instances"][0]
+        assert host_entry["method"] == "host_exited_during_stop"
+        assert host_entry["confirmed"] is True
+        assert host_entry["tree_observation_complete"] is True
+        assert host_entry["unresolved_pids"] == []
+
+        persisted = store.load("bg-w6-host-exit-unavail").record
+        assert persisted["termination"]["cleanup"]["confirmed"] is True
+        assert persisted["termination"]["cleanup"]["tree_observation_complete"] is True
+        assert persisted["termination"]["cleanup"]["unresolved_instances"] == []
+
+        ref = process_cleanup_reference(persisted)
+        validate_cleanup_reference(ref)
+        confirm_cleanup_reference(ref, persisted)
+    finally:
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX host 与子进程清理区分测试")
+def test_host_self_exit_identity_unavailable_alongside_already_gone_child_settles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ProcessSessionStore(tmp_path / "sessions")
+    host, host_birth = _spawn_sleeper()
+    child, child_birth = _spawn_sleeper()
+    try:
+        saved = store.write(
+            _base_record(
+                tmp_path,
+                session_id="bg-w6-host-unavail-child-gone",
+                status="exited",
+                pid=host.pid,
+                pid_birth_token=host_birth,
+                child_pid=child.pid,
+                child_pid_birth_token=child_birth,
+                termination={"confirmed": True, "method": "SIGTERM", "observed_processes": 1, "unresolved_pids": []},
+            )
+        )
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+        monkeypatch.setattr(process_session_cleanup, "capture_process_birth_token", lambda pid: host_birth if pid == host.pid else child_birth if pid == child.pid else "")
+        monkeypatch.setattr(
+            process_session_cleanup,
+            "terminate_process_tree",
+            lambda pid, proc, **kwargs: (
+                ProcessTerminationReceipt(
+                    "identity_unavailable",
+                    False,
+                    None,
+                    0,
+                    (host.pid,),
+                    tree_observation_complete=False,
+                    unresolved_instances=({"pid": host.pid, "birth_token": host_birth},),
+                )
+                if pid == host.pid
+                else ProcessTerminationReceipt(
+                    "already_gone",
+                    True,
+                    0,
+                    1,
+                    (),
+                    tree_observation_complete=True,
+                )
+            ),
+        )
+        result = stop_process_session(store, saved)
+        assert result.confirmed is True
+        cleanup = result.record["termination"]["cleanup"]
+        assert cleanup["confirmed"] is True
+        assert cleanup["tree_observation_complete"] is True
+        assert cleanup["unresolved_instances"] == []
+        assert [inst["method"] for inst in cleanup["instances"]] == ["host_exited_during_stop", "already_gone"]
+    finally:
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX child identity_unavailable 严禁自动结清测试")
+@pytest.mark.parametrize("with_child_unresolved", [True, False])
+def test_child_identity_unavailable_never_auto_settles_and_stays_sticky_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_child_unresolved: bool
+) -> None:
+    store = ProcessSessionStore(tmp_path / "sessions")
+    host, host_birth = _spawn_sleeper()
+    child, child_birth = _spawn_sleeper()
+    try:
+        saved = store.write(
+            _base_record(
+                tmp_path,
+                session_id=f"bg-w6-child-unavail-{int(with_child_unresolved)}",
+                status="exited",
+                pid=host.pid,
+                pid_birth_token=host_birth,
+                child_pid=child.pid,
+                child_pid_birth_token=child_birth,
+                termination={"confirmed": True, "method": "SIGTERM", "observed_processes": 1, "unresolved_pids": []},
+            )
+        )
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+        monkeypatch.setattr(
+            process_session_cleanup,
+            "capture_process_birth_token",
+            lambda pid: host_birth if pid == host.pid else child_birth if pid == child.pid else "",
+        )
+        monkeypatch.setattr(
+            process_session_cleanup,
+            "terminate_process_tree",
+            lambda pid, proc, **kwargs: (
+                ProcessTerminationReceipt("already_gone", True, 0, 1, (), tree_observation_complete=True)
+                if pid == host.pid
+                else ProcessTerminationReceipt(
+                    "identity_unavailable",
+                    False,
+                    None,
+                    0,
+                    (child.pid,) if with_child_unresolved else (),
+                    tree_observation_complete=False,
+                    unresolved_instances=(({"pid": child.pid, "birth_token": child_birth},) if with_child_unresolved else ()),
+                )
+            ),
+        )
+        first = stop_process_session(store, saved)
+        assert first.confirmed is False
+        cleanup1 = first.record["termination"]["cleanup"]
+        assert cleanup1["confirmed"] is False
+        assert cleanup1["tree_observation_complete"] is False
+        assert cleanup1["instances"][1]["method"] == "identity_unavailable"
+
+        monkeypatch.undo()
+        second = stop_process_session(store, first.record)
+        assert second.confirmed is False
+        cleanup2 = second.record["termination"]["cleanup"]
+        assert cleanup2["confirmed"] is False
+        assert cleanup2["tree_observation_complete"] is False
+    finally:
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 缺 host 终态确认时 identity_unavailable 严禁自动结清测试")
+@pytest.mark.parametrize(
+    "status,termination,expected_status",
+    [
+        ("running", {"confirmed": True, "method": "SIGTERM", "observed_processes": 1, "unresolved_pids": []}, "unknown"),
+        ("exited", {"confirmed": False, "method": "SIGTERM", "observed_processes": 1, "unresolved_pids": []}, "exited"),
+        ("exited", {}, "exited"),
+    ],
+)
+def test_host_identity_unavailable_without_confirmed_terminal_proof_stays_unconfirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    termination: dict[str, object],
+    expected_status: str,
+) -> None:
+    store = ProcessSessionStore(tmp_path / "sessions")
+    host, host_birth = _spawn_sleeper()
+    child, child_birth = _spawn_sleeper()
+    try:
+        saved = store.write(
+            _base_record(
+                tmp_path,
+                session_id="bg-w6-host-no-proof",
+                status=status,
+                pid=host.pid,
+                pid_birth_token=host_birth,
+                child_pid=child.pid,
+                child_pid_birth_token=child_birth,
+                termination=termination,
+            )
+        )
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+        monkeypatch.setattr(process_session_cleanup, "capture_process_birth_token", lambda pid: host_birth if pid == host.pid else "")
+        monkeypatch.setattr(
+            process_session_cleanup,
+            "terminate_process_tree",
+            lambda pid, proc, **kwargs: ProcessTerminationReceipt(
+                "identity_unavailable",
+                False,
+                None,
+                0,
+                (host.pid,),
+                tree_observation_complete=False,
+                unresolved_instances=({"pid": host.pid, "birth_token": host_birth},),
+            ),
+        )
+        result = stop_process_session(store, saved)
+        assert result.confirmed is False
+        assert result.record["status"] == expected_status
+        cleanup = result.record["termination"]["cleanup"]
+        assert cleanup["confirmed"] is False
+        assert cleanup["tree_observation_complete"] is False
+        assert cleanup["instances"][0]["method"] == "identity_unavailable"
+    finally:
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX prior_blocked 或存活后代阻塞 host 自动结清测试")
+def test_host_identity_unavailable_fails_closed_on_prior_blocked_and_live_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ProcessSessionStore(tmp_path / "sessions")
+    host, host_birth = _spawn_sleeper()
+    child, child_birth = _spawn_sleeper()
+    desc, desc_birth = _spawn_sleeper()
+    try:
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+
+        # 场景 1: prior_blocked=True（存在先前未完整树观察及存活后代）时严禁结算。
+        prior_cleanup = {
+            "confirmed": False,
+            "tree_observation_complete": False,
+            "unresolved_instances": [{"pid": desc.pid, "birth_token": desc_birth}],
+            "instances": [
+                {
+                    "method": "SIGTERM",
+                    "confirmed": False,
+                    "return_code": None,
+                    "observed_processes": 2,
+                    "unresolved_pids": [desc.pid],
+                    "tree_observation_complete": False,
+                    "unresolved_instances": [{"pid": desc.pid, "birth_token": desc_birth}],
+                }
+            ],
+        }
+        blocked_saved = store.write(
+            _base_record(
+                tmp_path,
+                session_id="bg-w6-prior-blocked",
+                status="exited",
+                pid=host.pid,
+                pid_birth_token=host_birth,
+                child_pid=child.pid,
+                child_pid_birth_token=child_birth,
+                termination={"confirmed": True, "cleanup": prior_cleanup},
+            )
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(process_session_cleanup, "capture_process_birth_token", lambda pid: host_birth if pid == host.pid else "")
+            patch.setattr(
+                process_session_cleanup,
+                "terminate_process_tree",
+                lambda pid, proc, **kwargs: (
+                    ProcessTerminationReceipt(
+                        "identity_unavailable",
+                        False,
+                        None,
+                        0,
+                        (host.pid,),
+                        tree_observation_complete=False,
+                        unresolved_instances=({"pid": host.pid, "birth_token": host_birth},),
+                    )
+                    if pid == host.pid
+                    else ProcessTerminationReceipt(
+                        "SIGTERM->SIGKILL",
+                        False,
+                        None,
+                        1,
+                        (desc.pid,),
+                        tree_observation_complete=True,
+                        unresolved_instances=({"pid": desc.pid, "birth_token": desc_birth},),
+                    )
+                ),
+            )
+            blocked_res = stop_process_session(store, blocked_saved)
+        assert blocked_res.confirmed is False
+        blocked_cleanup = blocked_res.record["termination"]["cleanup"]
+        assert blocked_cleanup["confirmed"] is False
+        assert blocked_cleanup["tree_observation_complete"] is False
+        assert {"pid": desc.pid, "birth_token": desc_birth} in blocked_cleanup["unresolved_instances"]
+
+        # 场景 2: 无 prior_blocked，但 host 回执携带仍在存活的后代实例 -> 严禁结清并保留该后代。
+        live_desc_saved = store.write(
+            _base_record(
+                tmp_path,
+                session_id="bg-w6-live-desc-receipt",
+                status="exited",
+                pid=host.pid,
+                pid_birth_token=host_birth,
+                child_pid=child.pid,
+                child_pid_birth_token=child_birth,
+                termination={"confirmed": True, "method": "SIGTERM", "observed_processes": 1, "unresolved_pids": []},
+            )
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(process_session_cleanup, "capture_process_birth_token", lambda pid: host_birth if pid == host.pid else "")
+            patch.setattr(
+                process_session_cleanup,
+                "terminate_process_tree",
+                lambda pid, proc, **kwargs: ProcessTerminationReceipt(
+                    "identity_unavailable",
+                    False,
+                    None,
+                    2,
+                    (host.pid, desc.pid),
+                    tree_observation_complete=False,
+                    unresolved_instances=({"pid": desc.pid, "birth_token": desc_birth},),
+                ),
+            )
+            live_res = stop_process_session(store, live_desc_saved)
+        assert live_res.confirmed is False
+        live_cleanup = live_res.record["termination"]["cleanup"]
+        assert live_cleanup["confirmed"] is False
+        assert live_cleanup["tree_observation_complete"] is False
+        assert live_cleanup["unresolved_instances"] == [{"pid": desc.pid, "birth_token": desc_birth}]
+
+        # 场景 3: host 回执携带未绑定出生身份的其它裸 PID -> 严禁结清。
+        bare_pid_saved = store.write(
+            _base_record(
+                tmp_path,
+                session_id="bg-w6-bare-pid-receipt",
+                status="exited",
+                pid=host.pid,
+                pid_birth_token=host_birth,
+                child_pid=child.pid,
+                child_pid_birth_token=child_birth,
+                termination={"confirmed": True, "method": "SIGTERM", "observed_processes": 1, "unresolved_pids": []},
+            )
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(process_session_cleanup, "capture_process_birth_token", lambda pid: host_birth if pid == host.pid else "")
+            patch.setattr(
+                process_session_cleanup,
+                "terminate_process_tree",
+                lambda pid, proc, **kwargs: ProcessTerminationReceipt(
+                    "identity_unavailable",
+                    False,
+                    None,
+                    2,
+                    (desc.pid,),
+                    tree_observation_complete=False,
+                ),
+            )
+            bare_res = stop_process_session(store, bare_pid_saved)
+        assert bare_res.confirmed is False
+        bare_cleanup = bare_res.record["termination"]["cleanup"]
+        assert bare_cleanup["confirmed"] is False
+        assert bare_cleanup["tree_observation_complete"] is False
+    finally:
+        _cleanup_proc(host)
+        _cleanup_proc(child)
+        _cleanup_proc(desc)
