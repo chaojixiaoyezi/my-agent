@@ -133,7 +133,11 @@ def _migrated_profile_data(data: dict) -> dict:
 # LLM: v1—v4 只读迁移的代次明确未知，v5 必须有真实随机代次；未知/损坏不覆盖，不能从读取伪造旧事件。
 # 函数用途: 读取原模型目录并校验用途、引用与持久版本，普通读取不会写文件。
 def read_model_profiles(path: Path) -> dict:
-    from .decision_settings_schema import empty_decision_settings, validate_decision_settings
+    from .decision_settings_schema import (
+        empty_decision_settings,
+        migrate_retired_decision_settings,
+        validate_decision_settings,
+    )
 
     if not path.exists():
         return {"schema": SCHEMA, "selected": "default", "providers": {}, "profiles": {},
@@ -142,7 +146,9 @@ def read_model_profiles(path: Path) -> dict:
         data = _migrated_profile_data(json.loads(path.read_text(encoding="utf-8")))
         if not isinstance(data["profiles"], dict) or not isinstance(data["providers"], dict):
             raise ModelProfileError("模型配置结构无效。")
-        data["decision_settings"] = validate_decision_settings(data["decision_settings"])
+        data["decision_settings"] = validate_decision_settings(
+            migrate_retired_decision_settings(data["decision_settings"])
+        )
         data["providers"] = {validate_provider_id(key): validate_provider(row) for key, row in data["providers"].items()}
         for profile_id, row in data["profiles"].items():
             UUID(profile_id)

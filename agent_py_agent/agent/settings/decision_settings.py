@@ -16,6 +16,7 @@ from .decision_settings_schema import (
     DecisionSettingsUnknownFields,
     decision_field_scopes,
     empty_decision_settings,
+    migrate_retired_decision_settings,
     validate_decision_field,
     validate_decision_settings,
 )
@@ -124,7 +125,7 @@ def _update_thread(context: object, data: dict, thread_id: str, operation: str, 
     # 函数用途: 在最新线程快照上提交字段操作，保持其他状态不变。
     def update(latest):
         _check_thread_owner(context, latest)
-        current = validate_decision_settings(latest.decision_settings)
+        current = validate_decision_settings(migrate_retired_decision_settings(latest.decision_settings))
         _check_revision(payload, data["decision_settings"], current)
         before.update(decision_settings_projection(context, data, latest, scope="thread"))
         return replace(latest, decision_settings=_patch_settings(context, data, current, operation, payload, scope="thread"))
