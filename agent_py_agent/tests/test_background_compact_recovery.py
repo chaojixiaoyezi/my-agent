@@ -496,6 +496,37 @@ def test_uncommitted_background_recovery_sends_no_restored_business(tmp_path, mo
         assert refreshed.summary == "另一个提交者已经获胜"
 
 
+# 函数用途: 让活动归档摘要请求在 HTTP 层返回合规的六字段结构化交接，避免误落入机械回退并保留工具探针通道。
+def _http_with_live_summary(monkeypatch, *, backend: str, on_business, is_summary):
+    from agent_py_agent.agent.backends import http
+
+    business, probes = _http(monkeypatch, backend=backend, on_business=on_business)
+    original_post = http.post_json
+    live_summary = (
+        "[compact-live-handoff.v1]\n"
+        "current_progress: 已完成先前工具材料核对，继续基于关键结论推进。\n"
+        "user_constraints: 保持原任务目标，仅基于已核对事实作答。\n"
+        "completed: 已核对旧归档结果中的关键数据。\n"
+        "failures: 无工具失败。\n"
+        "unresolved: 等待结合新请求继续输出最终结果。\n"
+        "next_step: 直接继续当前任务。"
+    )
+
+    def send(request):
+        result = original_post(request)
+        if not is_summary():
+            return result
+        if (result.get("stop_reason") == "tool_use"
+                or (result.get("choices") or [{}])[0].get("finish_reason") == "tool_calls"):
+            return result
+        if backend == "anthropic_compatible":
+            return {"content": [{"type": "text", "text": live_summary}], "stop_reason": "end_turn"}
+        return {"choices": [{"message": {"content": live_summary}, "finish_reason": "stop"}]}
+
+    monkeypatch.setattr(http, "post_json", send)
+    return business, probes
+
+
 # LLM: 两种后台scope只改变原宿主请求和历史种子；工具来源仍是同一四元原归档，不伪造provider工具对。
 # 函数用途: 给活动归档的HTTP成功与失败验收准备真实后台执行入口。
 def _active_background(tmp_path, *, backend: str, narrow: bool):
@@ -513,7 +544,7 @@ def _active_background(tmp_path, *, backend: str, narrow: bool):
         "call_id": "call-prior", "scoped_call_id": "run-prior:call-prior",
         "run_id": "run-prior", "attempt_id": "attempt-prior", "turn_id": "turn-prior",
         "tool": "read_file", "ok": True, "model_parameters": {"path": "old.txt"},
-        "model_summary": "先前已完成的读取结果", "output_preview": "旧材料摘要" * 400,
+        "model_summary": "先前已完成的读取结果：" + "旧材料摘要" * 400, "output_preview": "旧材料摘要" * 400,
     }]
 
     def prepare(thread_id, *, thread, history_seed):
@@ -587,7 +618,9 @@ def test_active_archive_recovery_sends_selected_wire(tmp_path, monkeypatch, back
             )
             assert wire == expected
 
-    business, _ = _http(monkeypatch, backend=backend, on_business=on_business)
+    business, _ = _http_with_live_summary(
+        monkeypatch, backend=backend, on_business=on_business, is_summary=lambda: in_summary,
+    )
     result = background_execution.run_background_turn_with_compact(
         execution, thread, request, user_prompt="报告本次新发现", continuation_injection=[],
         proactive_delivery_available=False, activity_sink=sink,
@@ -614,7 +647,7 @@ def test_active_archive_recovery_sends_selected_wire(tmp_path, monkeypatch, back
 
 
 @pytest.mark.parametrize("failure", [
-    "candidate_too_large", "unread_retained_ir", "summary_failure", "candidate_cancel", "generation_race",
+    "candidate_too_large", "no_progress", "unread_retained_ir", "summary_failure", "candidate_cancel", "generation_race",
 ])
 def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkeypatch, failure):
     agent, store, thread, request, execution, sink, _, _ = _active_background(
@@ -686,12 +719,15 @@ def test_uncommitted_active_recovery_sends_no_restored_business(tmp_path, monkey
             raise ProviderContextWindowError("测试供应商上下文溢出")
         pytest.fail("活动摘要未提交时发送了恢复业务请求")
 
-    business, _ = _http(monkeypatch, backend="anthropic_compatible", on_business=on_business)
-    with pytest.raises((ConversationCompactError, InterruptedError)):
+    http_helper = _http if failure == "no_progress" else partial(_http_with_live_summary, is_summary=lambda: in_summary)
+    business, _ = http_helper(monkeypatch, backend="anthropic_compatible", on_business=on_business)
+    with pytest.raises((ConversationCompactError, InterruptedError)) as raised:
         background_execution.run_background_turn_with_compact(
             execution, thread, request, user_prompt="报告本次新发现", continuation_injection=[],
             proactive_delivery_available=False, activity_sink=sink,
         )
+    if failure == "no_progress":
+        assert isinstance(raised.value, ConversationCompactError) and raised.value.code == "COMPACT_NO_PROGRESS"
     assert len(sent_business) == 1
     assert len(sent_summaries) == (0 if failure == "summary_failure" else 1)
     assert len(business) == 1 + len(sent_summaries)

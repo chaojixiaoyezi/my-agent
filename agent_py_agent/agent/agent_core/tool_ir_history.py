@@ -587,8 +587,18 @@ def drop_tool_call_pairs(
     return removed
 
 
-# LLM: 仅从 typed 调用/结果的顺序计算连续退休前缀；跳过较新的任意调用不授权删除其之前仍在用的状态。
-# 函数用途: 将已摘要调用转换为覆盖位置，复用联合恢复的旧状态退休规则，保留每个来源的最新状态。
+_NON_SUPERSEDED_RUNTIME_FACT_SOURCES = frozenset({
+    "host.lifecycle_wake",
+    "host.session_task",
+    "input_media_manifest",
+    "compact_tool_source",
+    "model_selection_restored_tools",
+    "runtime.guidance",
+})
+
+
+# LLM: 仅从 typed 调用/结果的顺序计算已摘要覆盖位置；跳过未覆盖调用不会删除其生效期间的治理快照，但后续已覆盖轮次内已被更新的具名快照可安全退休。
+# 函数用途: 将已摘要调用转换为覆盖位置，复用联合恢复的旧状态退休规则，保留每个来源的最新状态与治理快照。
 def _summarized_runtime_fact_indexes(history: list[Any], call_ids: set[str]) -> set[int]:
     positions = {
         index for index, item in enumerate(history)
@@ -599,25 +609,45 @@ def _summarized_runtime_fact_indexes(history: list[Any], call_ids: set[str]) -> 
     return summarized_runtime_fact_indexes(history, positions)
 
 
-# LLM: 位置集合必须来自调用方已证明覆盖的完整工具组；这里只看 typed 顺序，不按正文或裸调用名猜覆盖。
-# 函数用途: 为运行中及联合恢复共用连续退休前缀规则，始终保留每个来源的最新状态和全部带媒体的原事件，工具摘要不证明图片已被覆盖。
+# LLM: 位置集合必须来自调用方已证明覆盖的完整工具组；具名点时快照仅在其后存在更新同源快照、且不作为任意保留工具调用生效期治理快照时退休；
+#   非替代类宿主事件/指引/媒体事件及匿名旧记录跨过保留屏障时一律保守保留。
+# 函数用途: 为运行中及联合恢复共用运行时事实退休规则，防止早期保留工具锁死后续数百轮具名快照同时守住增量义务与媒体原事件。
 def summarized_runtime_fact_indexes(history: list[Any], retired_positions: set[int]) -> set[int]:
-    retired_through = -1
+    contiguous_retired_through = -1
+    contiguous_open = True
+    last_retired_through = -1
+    latest_by_source: dict[str, int] = {}
+    active_by_source: dict[str, int] = {}
+    protected: set[int] = set()
+
     for index, item in enumerate(history):
-        is_tool_item = isinstance(item, ToolResult) or (isinstance(item, AssistantTurn) and item.tool_calls)
-        if is_tool_item and index not in retired_positions:
-            break
-        if isinstance(item, ToolResult):
-            retired_through = index
-    latest_by_source = {
-        item.source: index for index, item in enumerate(history) if isinstance(item, RuntimeFactsTurn)
-    }
+        if isinstance(item, RuntimeFactsTurn):
+            latest_by_source[item.source] = index
+            active_by_source[item.source] = index
+            continue
+        is_tool_item = isinstance(item, ToolResult) or (isinstance(item, AssistantTurn) and bool(item.tool_calls))
+        if not is_tool_item:
+            continue
+        if index in retired_positions:
+            if isinstance(item, ToolResult):
+                if contiguous_open:
+                    contiguous_retired_through = index
+                last_retired_through = index
+        else:
+            contiguous_open = False
+            protected.update(active_by_source.values())
+
     return {
         index for index, item in enumerate(history)
         if isinstance(item, RuntimeFactsTurn)
         and not item.media
-        and index <= retired_through
         and index != latest_by_source[item.source]
+        and item.source not in _NON_SUPERSEDED_RUNTIME_FACT_SOURCES
+        and index not in protected
+        and (
+            index <= contiguous_retired_through
+            or (bool(item.source) and index <= last_retired_through)
+        )
     }
 
 

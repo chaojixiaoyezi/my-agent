@@ -36,7 +36,10 @@ from agent_py_agent.agent.conversation.compact_tool_summary import (
 )
 from agent_py_agent.agent.conversation.runtime import _run_params
 from agent_py_agent.agent.memory_archive import estimate_tokens
-from agent_py_agent.tests.test_background_compact_recovery import _background
+from agent_py_agent.tests.test_background_compact_recovery import (
+    _background,
+    _http_with_live_summary,
+)
 from agent_py_agent.tests.test_compact_active_projection import _fixture
 from agent_py_agent.tests.test_compact_native_ir_recovery import _native_ir_attempt
 from agent_py_agent.tests.test_compact_output_reserve import _case
@@ -111,8 +114,8 @@ def _failure_fields(seen, error) -> dict[str, object]:
 
 
 # 函数用途: 断言失败只量了一次固定开销，且量的是宿主“空摘要、无保留”的只计量版本，结果如实写进失败字段。
-def _assert_fixed_measured_once(seen, fields) -> None:
-    assert fields["error_code"] == "COMPACT_CANDIDATE_TOO_LARGE"
+def _assert_fixed_measured_once(seen, fields, *, expected_code: str = "COMPACT_CANDIDATE_TOO_LARGE") -> None:
+    assert fields["error_code"] == expected_code
     (view, measured), = seen.measured
     assert view.measure_only and view.summary == "" and view.retained_tool_records == ()
     assert view.retained_ir_history == ()
@@ -201,7 +204,7 @@ def test_mixed_transcript_entry_counts_only_ir_the_candidate_sends(tmp_path, mon
 
 
 # 活动回合入口（空 transcript、原生工具 IR）：固定开销走宿主 fixed_request_projector，候选投影器不再收到空摘要。
-@pytest.mark.parametrize("outcome", ["too_large", "committed"])
+@pytest.mark.parametrize("outcome", ["too_large", "no_progress", "committed"])
 def test_active_entry_measures_fixed_overhead_through_the_host_only_on_failure(tmp_path, monkeypatch, outcome):
     _agent, _store, _thread, execution, sink, history, params, context, _recorded = _native_ir_attempt(
         tmp_path, monkeypatch, backend="anthropic_compatible", full_result="FULL-CONTENT-" + "y" * 5_000,
@@ -223,8 +226,9 @@ def test_active_entry_measures_fixed_overhead_through_the_host_only_on_failure(t
         original_ceiling = compact._compact_request_input_ceiling
         monkeypatch.setattr(compact, "_compact_request_input_ceiling",
                             lambda *args: 1 if summaries else original_ceiling(*args))
-    _http(monkeypatch, backend="anthropic_compatible",
-          on_business=lambda wire, _number: (summaries if in_summary else business).append(wire))
+    http_helper = _http if outcome == "no_progress" else partial(_http_with_live_summary, is_summary=lambda: in_summary)
+    http_helper(monkeypatch, backend="anthropic_compatible",
+                on_business=lambda wire, _number: (summaries if in_summary else business).append(wire))
     run = partial(background_execution._run_background_recovery_attempt, execution, "继续核对完整工具结果",
                   params, history, context, recovering=True, activity_sink=sink)
     if outcome == "committed":
@@ -232,11 +236,14 @@ def test_active_entry_measures_fixed_overhead_through_the_host_only_on_failure(t
         assert prepared is not None and prepared.committed and len(business) == 1
         assert seen.candidates and seen.measured == [] and seen.failures == []
         return
-    with pytest.raises(ConversationCompactError):
+    with pytest.raises(ConversationCompactError) as raised:
         run()
+    expected_code = "COMPACT_NO_PROGRESS" if outcome == "no_progress" else "COMPACT_CANDIDATE_TOO_LARGE"
+    assert raised.value.code == expected_code
     assert business == [] and len(summaries) == 1 and seen.failed_in == ["active_turn_compact"]
     fields, = seen.failures
-    _assert_fixed_measured_once(seen, fields)
+    assert fields["error_code"] == expected_code
+    _assert_fixed_measured_once(seen, fields, expected_code=expected_code)
     assert fields["candidates_tried"] == 1
     (_view, candidate), = seen.candidates
     assert _tokens(candidate) == fields["candidate_tokens"]

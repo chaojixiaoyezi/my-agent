@@ -468,6 +468,31 @@ def _execute_active_turn_compact(
 #   冻结校准折算后的计量（无校准即原始投影），改判据要同步 compact._RejectedCandidates 的同一接受门。
 #   被拒时的保留 IR 取投影交回的实际发送 IR（没交回才按 sent_retained_ir 同一口径从计划保留区推出），固定开销走宿主只计量入口。
 # 函数用途: 在写任何检查点前校验完整请求，保留恰好获选的材料对象给同次发送。
+def _capacity_facts_for_rejected_candidate(
+    request: ActiveTurnArchiveCompactRequest,
+    plan: _ActiveTurnArchiveCompactPlan,
+    replacement: str,
+    projection: ConversationCompactProjection,
+    candidate_tokens: int,
+    ceiling: int,
+) -> CompactCapacityFacts:
+    """为被容量或进展门拒绝的 active-turn 压缩候选构造统一计量。"""
+    from .compact_tool_summary import retained_ir_facts, sent_retained_ir
+
+    sent = projection.retained_ir_history
+    ir_items, ir_tokens = retained_ir_facts(sent if sent is not None else sent_retained_ir(plan.retained_ir_history))
+    return CompactCapacityFacts(
+        candidate_tokens=candidate_tokens,
+        input_ceiling_tokens=ceiling,
+        summary_tokens=estimate_tokens(replacement),
+        fixed_tokens=_active_turn_fixed_tokens(request, plan),
+        retained_items=len(plan.retained_records),
+        retained_ir_items=ir_items,
+        retained_ir_tokens=ir_tokens,
+        candidates_tried=1,
+    )
+
+
 def _project_active_turn_request(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -492,17 +517,19 @@ def _project_active_turn_request(
     ceiling = _compact_request_input_ceiling(agent, plan.policy)
     candidate_tokens = calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
     if candidate_tokens >= ceiling:
-        from .compact_tool_summary import retained_ir_facts, sent_retained_ir
-
-        sent = projection.retained_ir_history
-        ir_items, ir_tokens = retained_ir_facts(sent if sent is not None else sent_retained_ir(plan.retained_ir_history))
         raise ConversationCompactError(
             "完整恢复请求仍超出输入阈值或已知输出预留", code="COMPACT_CANDIDATE_TOO_LARGE",
-            capacity=CompactCapacityFacts(
-                candidate_tokens=candidate_tokens, input_ceiling_tokens=ceiling,
-                summary_tokens=estimate_tokens(replacement), fixed_tokens=_active_turn_fixed_tokens(request, plan),
-                retained_items=len(plan.retained_records), retained_ir_items=ir_items,
-                retained_ir_tokens=ir_tokens, candidates_tried=1,
+            capacity=_capacity_facts_for_rejected_candidate(
+                request, plan, replacement, projection, candidate_tokens, ceiling,
+            ),
+        )
+    if request.projected_tokens_before is not None and candidate_tokens >= plan.projected_tokens_before:
+        raise ConversationCompactError(
+            f"压缩后请求体未缩小（before={plan.projected_tokens_before}, candidate={candidate_tokens}），"
+            "已中止提交且未修改原会话历史与检查点；请保留原文继续或扩展保留边界后重试。",
+            code="COMPACT_NO_PROGRESS",
+            capacity=_capacity_facts_for_rejected_candidate(
+                request, plan, replacement, projection, candidate_tokens, ceiling,
             ),
         )
     return projection
@@ -614,22 +641,117 @@ def _summary_source_material(
             "system_instruction": surface.system_instruction if surface is not None else ""}
 
 
-# LLM: 只在“每个被替代调用的结果都恰好出现一次在主请求原生 IR 里”时分叉：前缀截到最后一个被替代调用的结果为止，
-#   中间夹着的保留区或文字原样留在前缀里（摘要多看几条无害，覆盖范围不变）。跨片只在归档里的来源不在 IR 中，
-#   此时返回 None，调用方退回独立摘要，绝不丢来源。applied摘要在出站时前置，须从全IR保留，不能按原索引截掉。
-# 函数用途: 计算缓存分叉要带的主请求 IR 前缀；不满足结构化条件时返回 None。
+def _expected_fork_tool_names(plan: _ActiveTurnArchiveCompactPlan) -> dict[tuple[str, ...], str] | None:
+    """提取被替代调用的权威 tool_name 映射，来源内部同名冲突时返回 None。"""
+    expected: dict[tuple[str, ...], str] = {}
+    for record in plan.source_records:
+        key = compact_tool_ref_key(record)
+        name = str(record.get("tool_name") or record.get("tool") or "").strip()
+        if key is None or not name:
+            continue
+        if key in expected and expected[key] != name:
+            return None
+        expected[key] = name
+    for item in plan.source_ir_history:
+        calls = getattr(item, "tool_calls", None)
+        if not calls:
+            continue
+        for call in calls:
+            key = compact_tool_ref_key(call)
+            name = str(getattr(call, "tool_name", "") or "").strip()
+            if key is None or not name:
+                continue
+            if key in expected and expected[key] != name:
+                return None
+            expected[key] = name
+    return expected
+
+
+def _matched_fork_end_index(
+    history: tuple[object, ...],
+    wanted: set[tuple[str, ...]],
+    expected_names: dict[tuple[str, ...], str],
+) -> int | None:
+    """校验主请求 IR 中完整 4 元组调用/结果配对无冲突后，返回前缀截止索引。"""
+    from ..agent_core.tool_ir_history import native_tool_result_sources
+    from ..backends.tool_ir import AssistantTurn
+    from ..tooling.runtime_contracts import ToolCall, ToolResult
+
+    try:
+        if not native_tool_result_sources(list(history)):
+            return None
+    except ConversationCompactError:
+        return None
+
+    seen_call_keys: set[tuple[str, ...]] = set()
+    seen_result_keys: set[tuple[str, ...]] = set()
+    active_calls: dict[str, tuple[tuple[str, ...] | None, str]] | None = None
+    found: list[tuple[str, ...]] = []
+    end = 0
+    for index, item in enumerate(history):
+        if isinstance(item, AssistantTurn):
+            active_calls = None
+            if not item.tool_calls:
+                continue
+            group: dict[str, tuple[tuple[str, ...] | None, str]] = {}
+            for call in item.tool_calls:
+                if not isinstance(call, ToolCall) or call.call_id in group:
+                    return None
+                key = compact_tool_ref_key(call)
+                if key is not None:
+                    if key in seen_call_keys:
+                        return None
+                    seen_call_keys.add(key)
+                group[call.call_id] = (key, str(call.tool_name or "").strip())
+            active_calls = group
+            continue
+        if isinstance(item, ToolResult):
+            if active_calls is None or item.call_id not in active_calls:
+                return None
+            key, call_tool_name = active_calls[item.call_id]
+            result_tool_name = str(item.tool_name or "").strip()
+            if not result_tool_name or result_tool_name != call_tool_name:
+                return None
+            if key is not None:
+                if key in seen_result_keys:
+                    return None
+                seen_result_keys.add(key)
+                if key in wanted:
+                    expected_name = expected_names.get(key)
+                    if expected_name and result_tool_name != expected_name:
+                        return None
+                    found.append(key)
+                    end = index + 1
+            continue
+        active_calls = None
+    if len(found) != len(wanted) or set(found) != wanted:
+        return None
+    return end
+
+
+# LLM: 只在“每个被替代调用的完整 4 元组与工具名都恰好出现一次并完整配对在主请求原生 IR 里”时分叉：前缀截到最后一个
+#   被替代调用的结果为止，中间夹着的保留区或文字原样留在前缀里（摘要多看几条无害，覆盖范围不变）。跨片只在归档里的来源或
+#   同 call_id 跨轮/跨run/冲突情况一律返回 None，调用方退回独立摘要，绝不丢来源或误配对。applied摘要在出站时前置，须保留。
+# 函数用途: 计算缓存分叉要带的主请求 IR 前缀；不满足结构化 4 元组条件时返回 None。
 def _cache_fork_history(fork: ActiveTurnCacheFork, plan: _ActiveTurnArchiveCompactPlan) -> tuple[object, ...] | None:
     from ..backends.message_adapter import is_applied_compact_summary
-    from ..tooling.runtime_contracts import ToolResult
 
-    wanted = {str(ref.get("call_id") or "") for ref in plan.source_tool_refs} - {""}
-    found: list[str] = []
-    end = 0
-    for index, item in enumerate(fork.tool_ir_history):
-        if isinstance(item, ToolResult) and item.call_id in wanted:
-            found.append(item.call_id)
-            end = index + 1
-    if not wanted or len(found) != len(wanted) or set(found) != wanted:
+    if not plan.source_tool_refs:
+        return None
+    wanted_keys: list[tuple[str, ...]] = []
+    for ref in plan.source_tool_refs:
+        key = compact_tool_ref_key(ref)
+        if key is None:
+            return None
+        wanted_keys.append(key)
+    wanted = set(wanted_keys)
+    if len(wanted) != len(wanted_keys):
+        return None
+    expected_names = _expected_fork_tool_names(plan)
+    if expected_names is None:
+        return None
+    end = _matched_fork_end_index(fork.tool_ir_history, wanted, expected_names)
+    if end is None:
         return None
     return tuple(item for index, item in enumerate(fork.tool_ir_history)
                  if index < end or is_applied_compact_summary(item))
