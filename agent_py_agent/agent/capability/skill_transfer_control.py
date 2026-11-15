@@ -30,16 +30,22 @@ def execute_transfer_control(base_agent, scope, parts):
         require_transfer_enabled(host)
         actor = _control_actor(host, scope)
         operation, reference = parts
+        show_cmd = f'/skills transfer show {reference}'
         if operation == 'show':
             _payload, row, manifest, _store = load_transfer(host, reference)
-            result = {'ok': True, 'status': row['status'], 'manifest': public_manifest(manifest)}
+            next_cmd = (f'/skills transfer authorize {reference}' if row['status'] == 'draft'
+                else f'/skills transfer accept {reference}' if row['status'] == 'authorized' else show_cmd)
+            copy_commands = [next_cmd, show_cmd] if next_cmd != show_cmd else [show_cmd]
+            result = {'ok': True, 'status': row['status'], 'manifest': public_manifest(manifest),
+                'reference': reference, 'copy_command': next_cmd, 'copy_commands': copy_commands}
         elif operation == 'accept':
             result = accept_transfer(host, reference, actor)
         else:
             result = authorize_transfer(host, reference, actor, revoke=operation == 'revoke')
+        accept_cmd = f'/skills transfer accept {reference}'
         message = ('已完整接收允许清单；Skill执行仍用本助手原权限，记忆仅进入原待审核候选。' if operation == 'accept'
             else '来源授权已撤回；已接收独立副本保持原有状态。' if operation == 'revoke'
-            else '精确清单已授权，请在目标助手用 /skills transfer accept <reference> 接受。' if operation == 'authorize'
+            else f'精确清单已授权，请在目标助手发送：{accept_cmd}' if operation == 'authorize'
             else '以下是当前助手有权核对的精确清单：')
         return ConversationControlResult('skills', True, message + '\n' + json.dumps(result, ensure_ascii=False), details=result)
     except OwnerQuotaExceeded:

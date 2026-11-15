@@ -241,9 +241,7 @@ class UpdatePersonaTool(BaseTool):
             return _err("外部事件或自动来源不能代替用户修改人格，请由本人在原会话确认。",
                         "PERSONA_USER_REQUEST_REQUIRED", effect_outcome="not_started")
         if request.target == "agents" and request.action not in {"list", "status", "history"}:
-            return _err("AGENTS规则只能由用户在当前请求通过 /agents 预览并确认修改；本次未写入。",
-                        "AGENTS_WRITE_USER_ONLY", hint="请使用 /agents show 查看，或 /agents write <JSON字符串> 预览。",
-                        effect_outcome="not_started")
+            return _agents_write_user_only_error()
         try:
             repository = self._repository()
             if request.target != "agents" or repository.agents_source is None:
@@ -611,10 +609,16 @@ def _err(
     hint: str = "",
     *,
     effect_outcome: str = "",
+    copy_command: str = "",
+    copy_commands: tuple[str, ...] | list[str] = (),
 ) -> ToolHandlerOutcome:
-    body = {"error": msg}
+    body: dict[str, object] = {"error": msg}
     if hint:
         body["hint"] = hint
+    if copy_command:
+        body["copy_command"] = copy_command
+    if copy_commands:
+        body["copy_commands"] = list(copy_commands)
     return ToolHandlerOutcome(
         "update_persona",
         False,
@@ -622,6 +626,28 @@ def _err(
         error_code=code,
         effect_outcome=effect_outcome,
         failure_stage="validation" if effect_outcome == "not_started" else "",
+    )
+
+
+def _agents_write_user_only_error(full_content: str | None = None) -> ToolHandlerOutcome:
+    """Return concrete `/agents` guidance without placeholder JSON arguments."""
+    if isinstance(full_content, str) and full_content.strip():
+        command = f"/agents write {json.dumps(full_content, ensure_ascii=False)}"
+        return _err(
+            "AGENTS规则只能由用户在当前请求通过 /agents 预览并确认修改；本次未写入。",
+            "AGENTS_WRITE_USER_ONLY",
+            hint=f"请确认完整正文后由用户发送 {command} 发起预览（或先用 /agents show 查看）。",
+            effect_outcome="not_started",
+            copy_command=command,
+            copy_commands=[command, "/agents show"],
+        )
+    return _err(
+        "AGENTS规则只能由用户在当前请求通过 /agents 预览并确认修改；本次未写入。",
+        "AGENTS_WRITE_USER_ONLY",
+        hint="请先读取 AGENTS.md 并发送 /agents show 查看当前规则，确认完整正文后再由用户本人通过 /agents write 提交。",
+        effect_outcome="not_started",
+        copy_command="/agents show",
+        copy_commands=["/agents show"],
     )
 
 
@@ -640,7 +666,8 @@ def _agents_read_result(repository, request):
         return _err("AGENTS来源当前不可用。", "AGENTS_SOURCE_UNAVAILABLE", effect_outcome="not_started")
     payload = {"ok": True, "target": "agents", "action": request.action,
                "diagnostic": snapshot.diagnostic.to_dict(), "writable_by_tool": False,
-               "next_command": "/agents show"}
+               "next_command": "/agents show", "copy_command": "/agents show",
+               "copy_commands": ["/agents show"]}
     if snapshot.agents_source is not None:
         payload["source"] = snapshot.agents_source.to_dict()
     if request.action == "list":

@@ -135,8 +135,11 @@ def prepare_transfer(agent, target, selections, *, clone=False, memory_candidate
         metadata = json.dumps(updated.to_record(), ensure_ascii=False, indent=2, sort_keys=True) + '\n'
         admission.check([OwnerQuotaChange(path, len(raw)), OwnerQuotaChange(store.registry_path, len(metadata.encode()))])
         _save_prepared_export(store, operation_id, raw, updated, reference)
+    authorize_command = f'/skills transfer authorize {reference}'
+    show_command = f'/skills transfer show {reference}'
     return {'ok': True, 'reference': reference, 'manifest': public_manifest(manifest), 'manifest_hash': payload['manifest_hash'],
-        'status': 'draft', 'message': '尚未导出。请本人核对清单和目标后，在来源助手使用 /skills transfer authorize <reference>。'}
+        'status': 'draft', 'copy_command': authorize_command, 'copy_commands': [authorize_command, show_command],
+        'message': f'尚未导出。请本人核对清单和目标后，在来源助手发送：{authorize_command}'}
 
 
 # LLM: 引用仅携owner/hash/expiry并按原交互key独立用途MAC；不从可篡改JSON选私有路径，验签前不创建owner或key。
@@ -184,7 +187,10 @@ def authorize_transfer(host, reference, actor, *, revoke=False):
                  'reference': reference, 'confirmed_at': time.time()}
         updated = {**row, 'status': 'revoked' if revoke else 'authorized', 'source_grant': grant}
         store.save_registry(replace(registry, import_operations={**registry.import_operations, 'export:' + payload['operation_id']: updated}))
-    return {'ok': True, 'status': updated['status'], 'manifest': public_manifest(manifest), 'reference': reference}
+    copy_commands = ([f'/skills transfer accept {reference}', f'/skills transfer show {reference}']
+        if updated['status'] == 'authorized' else [f'/skills transfer show {reference}'])
+    return {'ok': True, 'status': updated['status'], 'manifest': public_manifest(manifest), 'reference': reference,
+        'copy_command': copy_commands[0], 'copy_commands': copy_commands}
 
 
 # LLM: 原双端quota/state锁保持至目标commit；成功后仅镜像元数据回执，不反转成功导入或把回执当授权。
@@ -259,11 +265,13 @@ def _transfer_status_row(reference, row, skills, *, outgoing):
     commands = [f'/skills transfer show {reference}']
     if outgoing and status == 'draft':
         commands.append(f'/skills transfer authorize {reference}')
-    elif not outgoing and status in {'preparing', 'failed'}:
+    elif not outgoing and status in {'authorized', 'preparing', 'failed'}:
         commands.append(f'/skills transfer accept {reference}')
+    primary_command = commands[1] if len(commands) > 1 else commands[0]
     return {'reference': reference, 'status': status, 'source_owner': row['source_owner'],
         'target_owner': row.get('receiver_owner', row.get('target_owner')), 'skills': skills, 'imported': imported,
-        'delivery_status': 'committed' if imported is not None else 'unconfirmed', 'next_commands': commands}
+        'delivery_status': 'committed' if imported is not None else 'unconfirmed',
+        'copy_command': primary_command, 'copy_commands': list(commands), 'next_commands': commands}
 
 
 # LLM: tx索引只在原owner目录无跟链读取，owner字段仅筛选本地展示，不参与授权；坏记录明确失败，不能假装空。

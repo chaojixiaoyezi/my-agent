@@ -892,6 +892,28 @@ def restore_channel(state: dict) -> str:
     return names[0] if len(names) == 1 else 'all'
 
 
+def _linux_bwrap_preflight(prefix: Path) -> str | None:
+    """Run a non-blocking Linux userns probe and warn cleanly if restricted."""
+    if not sys.platform.startswith("linux"):
+        return None
+    lib = prefix / "current" / "runtime" / "lib"
+    candidates = [lib / name / "site-packages/agent_py_agent/vendor/bin/bwrap.linux-x86_64" for name in ("python3.14", "python3.14t")]
+    if lib.is_dir():
+        candidates.extend(sorted(lib.glob("python3.*/site-packages/agent_py_agent/vendor/bin/bwrap.linux-x86_64"), reverse=True))
+    bwrap = next((str(path) for path in candidates if path.is_file()), None) or shutil.which("bwrap")
+    if not bwrap:
+        return None
+    try:
+        proc = subprocess.run([bwrap, "--unshare-user", "--", "true"], capture_output=True, text=True, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"警告：bwrap userns 预检未通过（{error}）；Ubuntu 24.04+ 请检查 kernel.apparmor_restrict_unprivileged_userns。"
+    if proc.returncode != 0:
+        raw_detail = (proc.stderr or "").strip() or (proc.stdout or "").strip() or f"exit={proc.returncode}"
+        detail = raw_detail.splitlines()[0][:160]
+        return f"警告：bwrap --unshare-user 预检失败（{detail}）；Ubuntu 24.04+ 请检查 kernel.apparmor_restrict_unprivileged_userns。"
+    return None
+
+
 # LLM: 安装切换沿原服务排空；主失败与恢复失败必须同时报告，中断亦尝试原恢复，不将超时/未知签成功。
 # 函数用途: 校验并更新原实例，恢复原连接；保留安装首因且不掩盖恢复欠账。
 def main() -> int:
@@ -930,6 +952,8 @@ def main() -> int:
     print(f"安装完成：{result['version']}\n程序及更新目录：{result['prefix']}\n数据目录：{result['data']}")
     print(f"首次配置模型：{command} --configure-model\n启动后台：{command} gateway start --ready-timeout 30\n进入 TUI：{command}")
     print(f"更新：退出 TUI 后，执行 {command} update --package 新包.run；也可 bash 新包.run --update（自动识别原目录）")
+    if warning := _linux_bwrap_preflight(Path(result["prefix"])):
+        print(warning)
     return 0
 
 

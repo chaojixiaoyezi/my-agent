@@ -31,16 +31,50 @@ if TYPE_CHECKING:
 # result crosses ToolOperationCoordinator; do not whitelist codes or parse the message.
 # 函数用途: 给目标工具返回结构化失败，明确未写入的错误可供模型纠正，其余保持保守处理。
 def _error(
-    tool: str, message: str, code: str, *, effect_outcome: str = "",
+    tool: str,
+    message: str,
+    code: str,
+    *,
+    effect_outcome: str = "",
+    copy_command: str = "",
+    copy_commands: tuple[str, ...] | list[str] = (),
 ) -> ToolHandlerOutcome:
+    body: dict[str, object] = {"ok": False, "error": message, "error_code": code}
+    if copy_command:
+        body["copy_command"] = copy_command
+    if copy_commands:
+        body["copy_commands"] = list(copy_commands)
     return ToolHandlerOutcome(
         tool,
         False,
-        json.dumps({"ok": False, "error": message, "error_code": code}, ensure_ascii=False),
+        json.dumps(body, ensure_ascii=False),
         error_code=code,
         effect_outcome=effect_outcome,
         failure_stage="validation" if effect_outcome == "not_started" else "",
     )
+
+
+def _goal_resume_copy_commands(items: list[object]) -> list[str]:
+    unfinished = [
+        item for item in items if str(getattr(item, "status", "") or "") != "complete"
+    ]
+    commands: list[str] = []
+    seen: set[str] = set()
+    for item in (unfinished or list(items)):
+        gid = str(getattr(item, "goal_id", "") or "").strip()
+        if not gid or any(ch.isspace() for ch in gid):
+            continue
+        command = f"/goal {gid} resume"
+        if command not in seen:
+            seen.add(command)
+            commands.append(command)
+    return commands or ["/goal"]
+
+
+def _goal_ambiguity_message(copy_commands: list[str]) -> str:
+    if copy_commands == ["/goal"]:
+        return "目标绑定存在歧义，请先发送 /goal 查看当前目标后再恢复。"
+    return f"目标绑定存在歧义，请使用精确目标命令恢复：{' ； '.join(copy_commands)}"
 
 
 # LLM: 输出真实目标及执行归属；metadata_only 沿 Goal 的白名单投影，不先生成正文再过滤。
@@ -135,12 +169,21 @@ class GetGoalTool(BaseTool):
         try:
             goal = store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
         except ValueError:
+            items = store.goals.list(thread_id)
+            copy_commands = _goal_resume_copy_commands(items)
+            body: dict[str, object] = {
+                "goal": None,
+                "goals": [item.public_dict(metadata_only=metadata_only) for item in items],
+                **({"metadata_only": True} if metadata_only else {}),
+                "error_code": "GOAL_STATE_CONFLICT",
+                "message": _goal_ambiguity_message(copy_commands),
+                "copy_commands": copy_commands,
+            }
+            if len(copy_commands) == 1:
+                body["copy_command"] = copy_commands[0]
             return ToolHandlerOutcome(
                 "get_goal", False,
-                json.dumps({"goal": None, "goals": [item.public_dict(metadata_only=metadata_only) for item in store.goals.list(thread_id)],
-                            **({"metadata_only": True} if metadata_only else {}),
-                            "error_code": "GOAL_STATE_CONFLICT",
-                            "message": "目标绑定存在歧义，请使用 /goal 目标编号 resume 精确恢复。"}, ensure_ascii=False),
+                json.dumps(body, ensure_ascii=False),
                 error_code="GOAL_STATE_CONFLICT", effect_outcome="not_started", failure_stage="validation",
             )
         if goal is None:
