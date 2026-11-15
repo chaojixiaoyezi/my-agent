@@ -657,6 +657,12 @@ def test_audit_source_worker_uses_facts_only_workspace_snapshot(tmp_path):
     agent.prompts.snapshot_workspace_context = MagicMock(
         return_value="- current_local_date: 2026-08-01"
     )
+    agent.prompts.snapshot_clock_context = MagicMock(
+        wraps=agent.prompts.snapshot_clock_context
+    )
+    agent.prompts.prepare_render_input = MagicMock(
+        wraps=agent.prompts.prepare_render_input
+    )
     audit_id = "audit-facts-only"
     watch_id = "ws-auth"
     attrs = {
@@ -680,6 +686,9 @@ def test_audit_source_worker_uses_facts_only_workspace_snapshot(tmp_path):
 
     assert result.response
     agent.prompts.snapshot_workspace_context.assert_called_once_with(facts_only=True)
+    agent.prompts.snapshot_clock_context.assert_called_once_with(facts_only=True)
+    captured_request = agent.prompts.prepare_render_input.call_args.args[0]
+    assert captured_request.clock_context_override == ""
 
 
 @pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")

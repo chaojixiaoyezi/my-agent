@@ -419,6 +419,7 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
             render_current_turn_execution_facts(agent, params.archive_tool_calls)
             if params.tool_catalog_section else ""
         ),
+        clock_context=params.clock_context_snapshot,
     )
     request = _dedup_native_recommendations_section(agent, params, request)
     from ..model_request_selection import render_selected_request

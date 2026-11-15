@@ -168,6 +168,7 @@ class ToolLoopExecuteParams:
     # 会话运行时 turn snapshot: volatile wall-clock fields must not rewrite the
     # first provider message on every tool round and invalidate prompt caching.
     workspace_context_snapshot: str = ""
+    clock_context_snapshot: str | None = None
     # 协议违规修复机会次数：模型输出格式偶发抖动时先给几次结构化重试再 break（代码常量，见模块顶部）。
     max_protocol_repairs: int = MAX_PROTOCOL_REPAIRS
     # 部署者显式开启 hard_failure_halt 后，同一工具同类失败连续达硬阈值的
