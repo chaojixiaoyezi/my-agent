@@ -14,6 +14,7 @@ it is never persisted and is submitted once directly.
 """
 # G3：提交和四条对账入口都在原身份头处加同一个宿主凭据；凭据不进入持久入站/回复记录。
 
+import inspect
 import json
 import logging
 import os
@@ -735,6 +736,18 @@ def _inbound_media_destination(agent: object, msg: IncomingMessage) -> Path:
     return destination
 
 
+def _accepts_kwarg(target: Any, name: str) -> bool:
+    try:
+        parameters = inspect.signature(target).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        or (param.name == name and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY))
+        for param in parameters
+    )
+
+
 # LLM: dest沿原owner，source_message_id仅来自准确引用核验；图片实际读取预算在下载前传入，路径失败仍抛异常。
 # 函数用途: 下载完整附件集合，图片按真实字节导入原内容寻址目录，普通文件保留原路径；不改变owner。
 def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id=None, images=None, downloaded_files=None):
@@ -748,7 +761,10 @@ def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id
             reference["file_name"] = f'{index + 1}-{reference["file_name"]}'
         image = images is not None and bool(reference.get('image_key'))
         limit = images.download_limit() if image else None
-        options = {'max_bytes': limit} if image and getattr(adapter, 'supports_bounded_inbound_media', False) is True else {}
+        supports_bounded = getattr(adapter, 'supports_bounded_inbound_media', False) is True
+        options: dict[str, Any] = {'max_bytes': limit} if image and supports_bounded else {}
+        if supports_bounded and _accepts_kwarg(adapter.fetch_media_to, 'strict_resource'):
+            options['strict_resource'] = source_message_id is None
         name = adapter.fetch_media_to(source_message_id or msg.message_id, reference, dest, **options)
         if not name or Path(name).name != name or name in {".", ".."}:
             if source_message_id:

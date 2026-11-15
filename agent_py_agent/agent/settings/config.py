@@ -634,6 +634,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_verification_token: str = field(default="", metadata={"secret_ref": True})
     feishu_encrypt_key: str = field(default="", metadata={"secret_ref": True})
     feishu_callback_port: int = 8421
+    feishu_webhook_max_body_bytes: int = field(default=4194304, metadata={"bounds": (1, None), "unit": "字节"})
     feishu_connection_mode: str = "long_connection"  # 默认长连接:免公网且支持密码/确认卡片回调；webhook 可显式选择
     feishu_ws_proxy: str = ""  # 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
     # 群聊只在直接 @机器人时触发；@全员不触发。

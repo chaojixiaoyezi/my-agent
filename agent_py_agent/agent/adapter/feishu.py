@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import threading
@@ -22,8 +23,8 @@ from typing import Any
 from urllib.parse import quote
 
 from ..common.authenticated_http import open_authenticated_request
-from ..common.http_listener import BoundThreadingHTTPServer
 from ..common.nofollow_fs import write_bytes_atomic_beneath
+from ..gateway_parts.bounded_http_server import GatewayBoundedHTTPServer
 from .base import BaseChannelAdapter
 from .feishu_attachment import FeishuAttachmentMixin
 from .feishu_media import (
@@ -376,9 +377,29 @@ def _send_feishu_file(
     )
 
 
-# LLM: 原认证请求禁止重定向；实际读取有界，明确超限抛typed输入错误，暂态网络仍返回None，不输出正文/token。
+def _kwarg_accepted(target: Any, name: str) -> bool:
+    try:
+        parameters = inspect.signature(target).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        or (param.name == name and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY))
+        for param in parameters
+    )
+
+
+# LLM: 原认证请求禁止重定向；实际读取有界，明确超限及主消息永久资源失效(400/404/410)抛typed输入错误，暂态/401/403仍返回None，不输出正文/token。
 # 函数用途: 从原消息资源API下载有界附件；图片可使用本条剩余额度，普通文件保留原类型上限。
-def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str, *, max_bytes: int | None = None) -> bytes | None:
+def _fetch_feishu_resource(
+    message_id: str,
+    key: str,
+    kind: str,
+    token: str,
+    *,
+    max_bytes: int | None = None,
+    strict_resource: bool = False,
+) -> bytes | None:
     """下载入站媒体 bytes;失败 None。"""
     req = urllib.request.Request(
         f"{_FEIHSU_API_BASE}/im/v1/messages/{quote(message_id, safe='')}/resources/{quote(key, safe='')}?type={kind}",
@@ -393,16 +414,26 @@ def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str, *, 
     except InboundMediaInputError:
         raise
     except Exception as exc:
-        logger.warning('飞书媒体下载失败 error_type=%s http_status=%s', type(exc).__name__,
-            exc.code if isinstance(exc, urllib.error.HTTPError) else 0)
+        http_status = exc.code if isinstance(exc, urllib.error.HTTPError) else 0
+        logger.warning('飞书媒体下载失败 error_type=%s http_status=%s', type(exc).__name__, http_status)
         if isinstance(exc, urllib.error.HTTPError):
             exc.close()
+        if strict_resource and http_status in {400, 404, 410}:
+            raise InboundMediaInputError('附件已撤回、过期或无法读取，请重新发送有效附件。') from exc
         return None
 
 
 # LLM: 目录由原owner解析，实际下载上限贯穿HTTP；原子私有写不跟随链接，路径失败不能降级为坏图回执。
 # 函数用途: 下载附件并按0600保存原owner目录，返回安全文件名；图片真实MIME随后由原生图片准备器验证。
-def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, token: str, *, max_bytes: int | None = None) -> str | None:
+def _fetch_media_to_dir(
+    message_id: str,
+    media: dict[str, str],
+    dest_dir: Path,
+    token: str,
+    *,
+    max_bytes: int | None = None,
+    strict_resource: bool = False,
+) -> str | None:
     """下载入站媒体落盘 dest_dir,返回文件名;无媒体/失败 None。"""
     if media.get("image_key"):
         key, kind, suffix = str(media["image_key"]), "image", ".png"
@@ -410,7 +441,9 @@ def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, 
         key, kind, suffix = str(media["file_key"]), "file", ".bin"
     else:
         return None
-    options = {'max_bytes': max_bytes} if max_bytes is not None else {}
+    options: dict[str, Any] = {'max_bytes': max_bytes} if max_bytes is not None else {}
+    if strict_resource and _kwarg_accepted(_fetch_feishu_resource, 'strict_resource'):
+        options['strict_resource'] = True
     blob = _fetch_feishu_resource(message_id, key, kind, token, **options)
     if blob == b'' and kind == 'image':
         raise InboundMediaInputError('图片内容为空，请重新发送可读取的图片。')
@@ -822,7 +855,7 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         self._bot_identity_retry_at = 0.0
         self._bot_identity_lock = threading.Lock()
 
-        self._server: BoundThreadingHTTPServer | None = None
+        self._server: GatewayBoundedHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
@@ -949,14 +982,22 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         return _feishu_runtime_health(self)
 
     def _start_webhook_server(self) -> None:
-        self._server = BoundThreadingHTTPServer(
+        server = GatewayBoundedHTTPServer(
             ("0.0.0.0", self.callback_port),
             _FeishuCallbackHandler,
+            config=self._live_config,
         )
-        self._server.adapter = self  # type: ignore[attr-defined]
-        self._server.daemon_threads = True
-        self._server_thread = threading.Thread(target=self._serve, daemon=True)
-        self._server_thread.start()
+        server.adapter = self  # type: ignore[attr-defined]
+        thread = threading.Thread(target=self._serve, daemon=True)
+        self._server = server
+        self._server_thread = thread
+        try:
+            thread.start()
+        except BaseException:
+            self._server = None
+            self._server_thread = None
+            server.server_close()
+            raise
         logger.info(f"飞书适配器已启动(webhook 模式)，回调端口={self.callback_port}")
 
     # LLM: 复用模块内原唯一WS接线，启动不代表连接成功；卡片仍仅在拥有home时注册。
@@ -1270,10 +1311,29 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
 
     # LLM: message_id来自原当前或已核parent，max_bytes只承载宿主预算；不改变认证/重定向或owner边界。
     # 函数用途: 使用原资源源消息有界下载到当前owner私有目录，返回安全文件名。
-    def fetch_media_to(self, message_id: str, media: dict[str, str], dest_dir: Path, *, max_bytes: int | None = None) -> str | None:
+    def fetch_media_to(
+        self,
+        message_id: str,
+        media: dict[str, str],
+        dest_dir: Path,
+        *,
+        max_bytes: int | None = None,
+        strict_resource: bool = False,
+    ) -> str | None:
         """下载入站媒体到 dest_dir,返回文件名;无媒体/失败 None。"""
         token = self._get_tenant_access_token()
-        return _fetch_media_to_dir(message_id, media, dest_dir, token, max_bytes=max_bytes) if token else None
+        return (
+            _fetch_media_to_dir(
+                message_id,
+                media,
+                dest_dir,
+                token,
+                max_bytes=max_bytes,
+                strict_resource=strict_resource,
+            )
+            if token
+            else None
+        )
 
     # LLM: 只读取明确 message_id，不查历史或递归 root；caller 必须核验返回 exact ID/chat/deleted/topic 再下载。
     # 函数用途: 用宿主 token 单次查取被引用消息；认证失败只返回结构化原因，不暴露凭据。
@@ -1350,6 +1410,25 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         return secrets.compare_digest(signature, expected)
 
 
+def _feishu_webhook_max_body_bytes(adapter: FeishuAdapter) -> int:
+    for source in (getattr(adapter, "_live_config", None), getattr(adapter, "config", None)):
+        if isinstance(source, Mapping):
+            raw = source.get("feishu_webhook_max_body_bytes")
+        elif source is not None:
+            raw = getattr(source, "feishu_webhook_max_body_bytes", None)
+        else:
+            raw = None
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value >= 1:
+            return value
+    return 4 * 1024 * 1024
+
+
 # LLM: webhook 必须先核验供应商签名，retryable 受理失败返回非成功 HTTP，卡片与验证挑战保持原合同。
 # 类用途: 接收飞书官方 webhook 并将运输 ACK 与真实受理结果对齐。
 class _FeishuCallbackHandler(BaseHTTPRequestHandler):
@@ -1360,7 +1439,7 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
         pass  # 静默日志
 
     # LLM: 认证后的消息复用原 typed 入站；不能以 HTTP200 吞掉暂时失败，也不能把正文或凭据放错误响应。
-    # 函数用途: 处理原回调路由，稳定接收返回成功，需要重投的消息返回503。
+    # 函数用途: 处理原回调路由，先校验长度上限再读取正文并核验签名，稳定接收返回成功，需要重投的消息返回503。
     def do_POST(self) -> None:
         if self.path != "/feishu/callback":
             self._write_json(404, {"error": "not found"})
@@ -1371,12 +1450,31 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
             self._write_json(500, {"error": "adapter unavailable"})
             return
 
-        try:
-            content_length = int(self.headers.get("Content-Length", 0))
-        except (TypeError, ValueError):
+        if str(self.headers.get("Transfer-Encoding", "")).strip():
             self._write_json(400, {"error": "invalid content length"})
             return
+        get_all = getattr(self.headers, "get_all", None)
+        if callable(get_all):
+            lengths = get_all("Content-Length")
+            if not isinstance(lengths, (list, tuple)) or len(lengths) != 1:
+                self._write_json(400, {"error": "invalid content length"})
+                return
+            raw_length = lengths[0]
+        else:
+            raw_length = self.headers.get("Content-Length")
+        length_text = "" if raw_length is None or isinstance(raw_length, bool) else str(raw_length).strip()
+        if not length_text or not length_text.isascii() or not length_text.isdigit():
+            self._write_json(400, {"error": "invalid content length"})
+            return
+        content_length = int(length_text)
+        max_body_bytes = _feishu_webhook_max_body_bytes(adapter)
+        if content_length > max_body_bytes:
+            self._write_json(413, {"error": "request body too large"})
+            return
         raw_body = self.rfile.read(content_length)
+        if len(raw_body) != content_length:
+            self._write_json(400, {"error": "incomplete request body"})
+            return
         from .feishu_crypto import FeishuWebhookDecodeRequest, verify_and_decode_webhook
 
         payload = verify_and_decode_webhook(

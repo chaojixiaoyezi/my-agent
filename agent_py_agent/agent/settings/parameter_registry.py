@@ -77,7 +77,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "gateway_restart_force_on_drain_timeout", "gateway_restart_cooldown_seconds", "gateway_port",
     "gateway_per_user_owner_scoping", "admin_channel_identity_enabled", "gateway_bind_host", "gateway_auth_token",
     "adapter_workspace", "feishu_app_id", "feishu_app_secret", "feishu_verification_token", "feishu_encrypt_key",
-    "feishu_callback_port", "feishu_connection_mode", "feishu_ws_proxy", "qq_app_id", "qq_app_secret", "session_workspace",
+    "feishu_callback_port", "feishu_webhook_max_body_bytes", "feishu_connection_mode", "feishu_ws_proxy", "qq_app_id", "qq_app_secret", "session_workspace",
     "conversation_workspace", "background_claim_ttl_seconds", "collaboration_workspace",
     "collaboration_auto_dispatch_max_runners", "audit_enabled", "audit_log_path", "daemon_mutate_state",
     "daemon_start_runners", "daemon_runner_instruction", "lease_stale_without_heartbeat_seconds", "log_level",

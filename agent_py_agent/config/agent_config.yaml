@@ -779,6 +779,12 @@ feishu_encrypt_key: ""
 # 只有你选择用 webhook 方式接入飞书时才需要它；这个端口会让本机对外监听，请确认它对外可达并做好防护，改完需要重启 Gateway 才生效。
 # （安全边界：只能由用户在配置文件里改，模型不能改）
 feishu_callback_port: 8421
+
+# 飞书 webhook（回调）模式下单个 HTTP POST 请求允许读取的最大正文字节数（默认 4194304 = 4 MB，最小 1）。
+# 缺少有效 Content-Length 或超过此上限的回调请求会在读取正文前直接拒绝，改完需要重启 Gateway 才生效。
+# （安全边界：只能由用户在配置文件里改，模型不能改）
+feishu_webhook_max_body_bytes: 4194304
+
 # 飞书机器人的接入方式：长连接或 webhook（本地回调服务）。
 # 长连接不需要公网地址、也支持交互卡片；webhook 需要公网能访问的地址，并配合 feishu_callback_port、feishu_verification_token、
 # feishu_encrypt_key 一起用。
