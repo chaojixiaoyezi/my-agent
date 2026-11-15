@@ -809,6 +809,8 @@ def _owner_fact_signature(owner_home: Path) -> tuple[tuple[str, tuple[Any, ...]]
         "memory_policy.json",
         "memory/curator/state.json",
         "memory/candidates.jsonl",
+        "memory/long_term/memory.jsonl.manifest.json",
+        "memory/long_term/memory_read_index.sqlite3",
         "data/scheduler/store.json",
     ):
         parts.append((relative, _file_signature(owner_home / relative)))
@@ -912,6 +914,23 @@ def _owner_memory_enabled(owner_home: Path) -> bool:
     return effective_memory_enabled(report.payload)
 
 
+# LLM: 只查询正式长期记忆代次清单与读索引水位，不创建库或改写目录；缺失/部分状态触发后台增量续建，损坏由维护入口暴露错误。
+# 函数用途: 判断指定 owner 的长期记忆派生读索引是否尚处于 missing/partial 待续建状态。
+def _memory_read_index_pending(owner_home: Path) -> bool:
+    from .memory_store.read_index import MemoryReadIndex
+
+    try:
+        coverage = MemoryReadIndex(
+            owner_home / "memory" / "long_term" / "memory.jsonl"
+        ).coverage()
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
+    return isinstance(coverage, dict) and coverage.get("status") in {
+        "missing",
+        "partial",
+    }
+
+
 # LLM: 内部解析沿canonical模型，不公开转导类型；原退避、pending/旧lease和时间边界不变。
 # 函数用途: 判断owner是否仍有原策展运行/输入事实，区别于候选来源资格与用户正式确认。
 def _has_pending_memory_curator_work(
@@ -937,8 +956,11 @@ def _has_pending_memory_curator_work(
     except FileNotFoundError:
         from .memory_store.curator_due import candidate_source_present
         automatic = curator_config is None or curator_config.auto_promotion_policy != "manual_only"
-        return (automatic and candidate_source_present(owner_home / "memory" / "candidates.jsonl")
-                or _curator_input_newer_than(owner_home, 0.0))
+        return (
+            automatic and candidate_source_present(owner_home / "memory" / "candidates.jsonl")
+            or _curator_input_newer_than(owner_home, 0.0)
+            or _memory_read_index_pending(owner_home)
+        )
     except (OSError, UnicodeError, ValueError, TypeError):
         # 坏 state 不能证明有活;CuratorService 运行时会以结构化错误暴露,发现层不据此占工位
         return False
@@ -972,6 +994,8 @@ def curator_work_is_due(owner_home, state, *, curator_config=None, timezone_name
     if state.last_failure_code and failure is not None and now-failure.timestamp() < backoff:
         _add_deadline(deadline_out,failure.timestamp()+backoff)
         return False
+    if _memory_read_index_pending(owner_home):
+        return True
     if state.pending_reasons or state.active_lease:
         return True
     from .memory_store.curator_due import candidate_scan_deadline, candidate_source_present

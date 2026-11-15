@@ -213,7 +213,7 @@ class VectorStore:
             stamp: tuple[int, int, int] | None = _file_stamp(self._path.stat())
         except OSError:
             stamp = None
-        if stamp != self._stamp or not self._readable:
+        if stamp != self._stamp or (not self._readable and self._stamp is None):
             self._reload()
 
     # LLM: 维度只认快照头里写下的整数（来自实际向量）；布尔值等非整数一律当没有，交给 META_MISSING 裁决。

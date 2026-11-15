@@ -438,9 +438,16 @@ class _CuratorLifecycleMixin:
         mono_now = time.monotonic()
         last_mono = getattr(self, "_maintenance_at", None)
         last_now_ts = getattr(self, "_maintenance_now_ts", None)
+        from ..owner_wake_discovery import _memory_read_index_pending
+
+        read_index_pending = owner_home is not None and _memory_read_index_pending(owner_home)
         if now is not None:
             now_ts = current.timestamp()
-            if last_now_ts is not None and 0.0 <= (now_ts - last_now_ts) < interval:
+            if (
+                not read_index_pending
+                and last_now_ts is not None
+                and 0.0 <= (now_ts - last_now_ts) < interval
+            ):
                 return {
                     "status": "not_due",
                     "reason": "interval",
@@ -450,7 +457,11 @@ class _CuratorLifecycleMixin:
                     "archive_days": live_cfg.lesson_archive_days,
                     "lesson_report": {},
                 }
-        elif last_mono is not None and (mono_now - last_mono) < interval:
+        elif (
+            not read_index_pending
+            and last_mono is not None
+            and (mono_now - last_mono) < interval
+        ):
             return {
                 "status": "not_due",
                 "reason": "interval",
@@ -474,6 +485,7 @@ class _CuratorLifecycleMixin:
 
         from ..common.nofollow_fs import NoFollowPathError
         from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
+        from ._jsonl_indexing import _NATIVE_MEMORY_ERRORS
         from .jsonl import MemoryAuthorityCorruptError
         from .lessons import LessonHeatUnavailableError, LessonRoutingPendingError
         from .promotion import _UNCERTAIN_PROMOTION_ERRORS
@@ -559,6 +571,28 @@ class _CuratorLifecycleMixin:
                             or bool(raw_report.get("incomplete"))
                         ):
                             partial = True
+            rebuild_fn = getattr(long_term, "rebuild_read_index", None)
+            if callable(rebuild_fn):
+                slice_entries = max(
+                    1,
+                    min(
+                        1000,
+                        int(getattr(live_cfg, "retention_scan_slice_entries", 1000) or 1000),
+                    ),
+                )
+                try:
+                    coverage = rebuild_fn(batch_size=slice_entries)
+                except (*uncertain_errors, *_NATIVE_MEMORY_ERRORS):
+                    raise
+                except Exception as exc:
+                    partial = True
+                    step_errors["read_index"] = _maintenance_error_code(exc)
+                else:
+                    if isinstance(coverage, dict) and coverage.get("status") not in {
+                        "complete",
+                        "unmigrated",
+                    }:
+                        partial = True
             flush_fn = getattr(long_term, "flush_access_events", None)
             if callable(flush_fn):
                 try:

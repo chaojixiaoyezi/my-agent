@@ -406,7 +406,7 @@ def execute_background_request(context):
                     "source_id": ref["source_id"],
                     "status": status,
                     "run_id": "",
-                    "outcome": "handled",
+                    "outcome": "pending" if status == "partial" else "handled",
                 }
             return {"source_kind": "curator", "source_id": ref["source_id"], "outcome": "handled", "status": "model_unavailable"}
         result = agent.memory_curator.run_if_due()
