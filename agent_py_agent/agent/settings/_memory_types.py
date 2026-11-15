@@ -41,6 +41,8 @@ class MemorySettings:
     memory_lesson_min_occurrences: int = 2
     memory_hot_min_occurrences: int = 3
     memory_lesson_archive_days: int = 15
+    user_profile_dream_entry_threshold: int = 70
+    user_profile_dream_token_threshold: int = 5000
     memory_curator_task_file_evidence_max_chars: int = 4000
     memory_curator_cross_thread_dedupe_window_seconds: int = 600
     memory_rule_notices_enabled: bool = True

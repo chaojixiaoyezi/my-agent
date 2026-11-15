@@ -67,6 +67,8 @@ class MemoryCuratorConfig:
     turn_threshold: int = 10
     batch_message_limit: int = CURATOR_BATCH_MESSAGE_LIMIT_COUNT
     max_input_chars: int = 40_000
+    user_profile_dream_entry_threshold: int = 70
+    user_profile_dream_token_threshold: int = 5000
     timeout_seconds: int = 90
     max_retries: int = CURATOR_MAX_RETRY_COUNT
     daily_finalize_hour: int = 23
@@ -87,12 +89,22 @@ class MemoryCuratorConfig:
     @classmethod
     def from_agent_config(cls, config: object) -> MemoryCuratorConfig:
         raw_archive_days = getattr(config, "memory_lesson_archive_days", 15)
+        raw_dream_entries = getattr(config, "user_profile_dream_entry_threshold", 70)
+        raw_dream_tokens = getattr(config, "user_profile_dream_token_threshold", 5000)
         return cls(
             enabled=bool(getattr(config, "memory_curator_enabled", True)),
             model_profile=str(getattr(config, "memory_curator_model_profile", "") or "").strip(),
             interval_seconds=int(getattr(config, "memory_curator_interval_seconds", 10_800)),
             turn_threshold=int(getattr(config, "memory_curator_turn_threshold", 10)),
             max_input_chars=int(getattr(config, "memory_curator_max_input_chars", 40_000)),
+            user_profile_dream_entry_threshold=max(
+                0,
+                int(70 if raw_dream_entries is None else raw_dream_entries),
+            ),
+            user_profile_dream_token_threshold=max(
+                0,
+                int(5000 if raw_dream_tokens is None else raw_dream_tokens),
+            ),
             timeout_seconds=int(getattr(config, "memory_curator_timeout_seconds", 90)),
             daily_finalize_hour=int(
                 getattr(config, "memory_curator_daily_finalize_hour", 23)
@@ -121,22 +133,26 @@ class MemoryCuratorConfig:
     # LLM: revision 反映策展语义/预算；新增字段为默认值时剔除，保持既有state的修订哈希，非默认值仍参与计算。
     # 函数用途: 生成短配置修订号。
     def revision(self) -> str:
-        payload = asdict(self)
+        revision_fields = asdict(self)
         for name, default in (("retention_scan_slice_entries", RETENTION_SCAN_SLICE_ENTRIES),
                 ("retention_scan_slice_bytes", RETENTION_SCAN_SLICE_BYTES), ("retention_scan_slice_ms", RETENTION_SCAN_SLICE_MS)):
-            if payload.get(name) == default:
-                payload.pop(name, None)
-        if payload.get("lesson_min_occurrences") == 2:
-            payload.pop("lesson_min_occurrences", None)
-        if payload.get("hot_min_occurrences") == 3:
-            payload.pop("hot_min_occurrences", None)
-        if payload.get("task_file_evidence_max_chars") == 4000:
-            payload.pop("task_file_evidence_max_chars", None)
-        if payload.get("cross_thread_dedupe_window_seconds") == 600:
-            payload.pop("cross_thread_dedupe_window_seconds", None)
-        if payload.get("lesson_archive_days") == 15:
-            payload.pop("lesson_archive_days", None)
-        material = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            if revision_fields.get(name) == default:
+                revision_fields.pop(name, None)
+        if revision_fields.get("lesson_min_occurrences") == 2:
+            revision_fields.pop("lesson_min_occurrences", None)
+        if revision_fields.get("hot_min_occurrences") == 3:
+            revision_fields.pop("hot_min_occurrences", None)
+        if revision_fields.get("task_file_evidence_max_chars") == 4000:
+            revision_fields.pop("task_file_evidence_max_chars", None)
+        if revision_fields.get("cross_thread_dedupe_window_seconds") == 600:
+            revision_fields.pop("cross_thread_dedupe_window_seconds", None)
+        if revision_fields.get("lesson_archive_days") == 15:
+            revision_fields.pop("lesson_archive_days", None)
+        if revision_fields.get("user_profile_dream_entry_threshold") == 70:
+            revision_fields.pop("user_profile_dream_entry_threshold", None)
+        if revision_fields.get("user_profile_dream_token_threshold") == 5000:
+            revision_fields.pop("user_profile_dream_token_threshold", None)
+        material = json.dumps(revision_fields, sort_keys=True, separators=(",", ":"))
         return "curator-config-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 

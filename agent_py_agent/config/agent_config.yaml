@@ -189,6 +189,10 @@ memory_hot_min_occurrences: 3
 # 已接受的教训连续未被活跃或待审方法引用多少天后可静默归档；0 表示不自动归档（范围 0-3650）。
 # 正式归档后仍保留可审计与恢复链路，不影响永久长期记忆，保存后立即生效。
 memory_lesson_archive_days: 15
+# USER.md 周期性做梦整合（Dreaming Consolidation）的条目数触发阈值；当 USER.md 条目数超过该值且宿主空闲时触发，0 表示关闭条目数触发（范围 0-10000），保存后立即生效。
+user_profile_dream_entry_threshold: 70
+# USER.md 周期性做梦整合的 token 估算触发阈值；当 USER.md token 估算超过该值且宿主空闲时触发，0 表示关闭 token 触发（两项均为 0 时关闭自动整合，范围 0-200000），保存后立即生效。
+user_profile_dream_token_threshold: 5000
 # 用户明确引用且同轮成功read_file的任务/规则文件，最多附多少字符摘录给记忆整理模型；0关闭关联。
 # 只使用已经核验的工具归档，不重新读取源文件；摘录仍受单批总字符预算限制。
 memory_curator_task_file_evidence_max_chars: 4000

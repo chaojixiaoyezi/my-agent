@@ -360,3 +360,38 @@ def _content_needles(contents: list[str]) -> list[str]:
     for text in contents:
         needles.extend(part.strip() for part in str(text or "").splitlines() if part.strip())
     return needles
+
+
+# LLM: 仅清空各线程冻结前缀里的 user 段并推进持久代次；agents 与 soul 冻结前缀必须原样保留。
+# 函数用途: USER.md 做梦整合提交后使各线程快照的 user 前缀失效，不影响 agents/soul 冻结段。
+def expire_thread_user_persona_prefixes(owner_home: Path) -> int:
+    """Clear only the frozen `user` section in existing thread snapshots after USER.md dreaming."""
+    home = Path(owner_home)
+    directory = home / "persona" / "thread_prefix"
+    if any(part.is_symlink() for part in (home, home / "persona", directory)):
+        raise ValueError("PERSONA_PREFIX_SYMLINK")
+    with locked_json_path(_thread_prefix_lock_path(home)):
+        _bump_persona_epoch(home)
+        if not directory.is_dir():
+            return 0
+        expired = 0
+        for path in sorted(directory.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            with locked_json_path(path):
+                try:
+                    saved = _read_snapshot(path)
+                except ValueError:
+                    continue
+                if saved is None:
+                    continue
+                sections = saved["sections"]
+                if not str(sections.get("user") or ""):
+                    continue
+                updated = dict(saved)
+                updated["sections"] = sections | {"user": ""}
+                write_private_text_file_atomic_unlocked(
+                    path, json.dumps(updated, ensure_ascii=False)
+                )
+                expired += 1
+        return expired

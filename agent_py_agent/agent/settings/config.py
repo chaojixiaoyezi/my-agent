@@ -469,6 +469,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_hot_min_occurrences: int = 3
     # 已接受的教训连续未被活跃或待审方法引用多少天后可归档；0 表示关闭自动归档（范围 0-3650）。
     memory_lesson_archive_days: int = field(default=15, kw_only=True)
+    # USER.md 周期性做梦整合的条目数触发阈值；0 表示关闭条目数触发（范围 0-10000）。
+    user_profile_dream_entry_threshold: int = field(default=70, kw_only=True, metadata={"unit": "条"})
+    # USER.md 周期性做梦整合的 token 估算触发阈值；0 表示关闭 token 触发（两项均为 0 时关闭自动整合，范围 0-200000）。
+    user_profile_dream_token_threshold: int = field(default=5000, kw_only=True, metadata={"unit": "tokens"})
     # 用户明确引用且本轮成功读取的文件摘录上限；0关闭关联，不改变消息学习资格。
     memory_curator_task_file_evidence_max_chars: int = 4000
     # 相同指令跨线程广播的去重窗口秒数；0关闭，不折叠单线程重复。

@@ -139,7 +139,11 @@ def test_model_tool_schema_and_original_authenticated_operations(configured):
     host, _key, _thread, tool = configured
     properties = _decision_change_properties()
     assert properties[POLICY]["enum"] == ["metadata", "progressive"]
-    assert properties[CATEGORIES] == {"type": "array", "items": {"type": "string", "minLength": 1}}
+    assert properties[CATEGORIES] == {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+        "description": "技能与工具裁剪接入点默认按需收起的可选工具类别名称列表。",
+    }
     assert "points.recall.context_policy" not in properties
     read = json.loads(tool.execute({"action": "decision_read", "scope": "thread"}).output)
     result = tool.execute({"action": "decision_patch", "scope": "thread", "expected_revision": read["revision"], "changes": {POLICY: "metadata", CATEGORIES: ["plugins", "new"]}})

@@ -657,6 +657,8 @@ def _outcome(report: dict[str, object]) -> ToolHandlerOutcome:
         return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=False, default=str))
     raw_code = str(report.get("code") or "").strip()
     message = str(report.get("error") or "配置修改被拒绝")
+    if raw_code and raw_code not in message:
+        message = f"{raw_code}: {message}"
     if raw_code in _PRE_WRITE_PERMISSION_CODES:
         return ToolHandlerOutcome(
             "user_config",

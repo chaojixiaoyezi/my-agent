@@ -51,6 +51,8 @@ _EXPECTED_DEFAULTS: dict[str, bool | int | str] = {
     "self_learning_archive_seconds": 1296000,
     "self_learning_evict_seconds": 1296000,
     "memory_lesson_archive_days": 15,
+    "user_profile_dream_entry_threshold": 70,
+    "user_profile_dream_token_threshold": 5000,
 }
 
 _ADMIN_HOME = SimpleNamespace(owner_provider="local", owner_kind="main", owner_id="main")
@@ -86,6 +88,8 @@ def test_shipped_defaults_match_agent_config_memory_settings_and_packaged_yaml()
         assert getattr(agent_defaults, key) == expected, key
         assert type(getattr(agent_defaults, key)) is type(expected), key
     assert memory_defaults.memory_lesson_archive_days == 15
+    assert memory_defaults.user_profile_dream_entry_threshold == 70
+    assert memory_defaults.user_profile_dream_token_threshold == 5000
 
 
 def test_explicit_false_observe_and_zero_disable_settings_are_preserved(tmp_path: Path):

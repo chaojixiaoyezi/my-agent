@@ -26,6 +26,8 @@ SELF_LEARNING_LIVE_POLICY_KEYS = frozenset({
     "self_learning_archive_seconds",
     "self_learning_evict_seconds",
     "memory_lesson_archive_days",
+    "user_profile_dream_entry_threshold",
+    "user_profile_dream_token_threshold",
 })
 
 DEPLOY_LIVE_SWITCH_KEYS = frozenset({

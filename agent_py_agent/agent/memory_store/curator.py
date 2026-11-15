@@ -258,6 +258,8 @@ class MemoryCuratorDependencies:
     learning_exclusions_revision: Callable[[], int] | None = None
     # 动态配置读取器：按运行期热更新后的 AgentConfig 读取维护周期与 lesson 归档天数。
     config_provider: Callable[[], object] | None = None
+    # 可选人格仓库：供 USER.md 周期性做梦整合与 thread prefix 失效使用；未注入时由运行期按 owner_home 解析。
+    persona: object | None = None
 
 
 # LLM: 运行上下文把已领取的租约与运行前游标快照绑定，避免辅助函数误用后续可变状态。
@@ -304,6 +306,8 @@ _CONFIG_PROVIDER_ATTR_MAP: tuple[tuple[str, str], ...] = (
     ("retention_scan_slice_bytes", "retention_scan_slice_bytes"),
     ("retention_scan_slice_ms", "retention_scan_slice_ms"),
     ("memory_lesson_archive_days", "lesson_archive_days"),
+    ("user_profile_dream_entry_threshold", "user_profile_dream_entry_threshold"),
+    ("user_profile_dream_token_threshold", "user_profile_dream_token_threshold"),
 )
 
 
@@ -482,7 +486,9 @@ class _CuratorLifecycleMixin:
         lessons_maintained = False
         candidates_compacted = False
         access_flushed = False
+        dream_consolidated = False
         lesson_report: dict[str, object] = {}
+        dream_report: dict[str, object] = {}
         step_errors: dict[str, str] = {}
         lessons = getattr(self.formal_memory_source, "lessons", None)
         hot = getattr(self.formal_memory_source, "hot", None)
@@ -626,12 +632,49 @@ class _CuratorLifecycleMixin:
                     self._terminal_compaction_at = time.monotonic()
                     candidates_compacted = True
 
+            dream_home = owner_home or getattr(self.persona, "owner_home", None)
+            if dream_home is not None:
+                from ..capability.persona_repository import (
+                    PersonaRepository,
+                    PersonaRepositoryError,
+                )
+                from .user_profile_dream import run_user_profile_dream_if_due
+
+                live_agent_cfg = None
+                if callable(self.config_provider):
+                    try:
+                        live_agent_cfg = self.config_provider()
+                    except Exception:
+                        live_agent_cfg = None
+                dream_persona = self.persona if isinstance(self.persona, PersonaRepository) else None
+                try:
+                    dream_report = run_user_profile_dream_if_due(
+                        owner_home=Path(dream_home),
+                        persona_repository=dream_persona,
+                        long_term_store=long_term,
+                        conversation_store=self.conversation_store,
+                        backend=self.backend,
+                        config=live_agent_cfg if live_agent_cfg is not None else live_cfg,
+                        entry_threshold=live_cfg.user_profile_dream_entry_threshold,
+                        token_threshold=live_cfg.user_profile_dream_token_threshold,
+                        cooldown_seconds=live_cfg.interval_seconds,
+                        now=current,
+                    )
+                except uncertain_errors:
+                    raise
+                except (*deterministic_errors, PersonaRepositoryError, RuntimeError) as exc:
+                    partial = True
+                    step_errors["user_profile_dream"] = _maintenance_error_code(exc)
+                else:
+                    if dream_report.get("status") == "consolidated":
+                        dream_consolidated = True
+
         if not partial and not step_errors:
             self._maintenance_at = time.monotonic()
             if now is not None or getattr(self, "_maintenance_now_ts", None) is None:
                 self._maintenance_now_ts = current.timestamp()
 
-        any_progress = lessons_maintained or access_flushed or candidates_compacted
+        any_progress = lessons_maintained or access_flushed or candidates_compacted or dream_consolidated
         if step_errors and not any_progress:
             status = "failed"
         elif partial or step_errors:
@@ -647,6 +690,7 @@ class _CuratorLifecycleMixin:
             "access_flushed": access_flushed,
             "archive_days": live_cfg.lesson_archive_days,
             "lesson_report": lesson_report,
+            **({"user_profile_dream": dream_report} if dream_report else {}),
             **({"errors": step_errors} if step_errors else {}),
         }
 
@@ -1903,6 +1947,7 @@ class MemoryCuratorService(
         self.migration_service = dependencies.migration_service
         self.learning_exclusions = dependencies.learning_exclusions
         self.learning_exclusions_revision = dependencies.learning_exclusions_revision
+        self.persona = dependencies.persona
         self.config_provider = dependencies.config_provider
         self._init_config = config
         self._init_provider_config: MemoryCuratorConfig | None = None

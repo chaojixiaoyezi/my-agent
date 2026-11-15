@@ -405,6 +405,51 @@ class PersonaRepository:
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_batch_document(self, admission, request)
 
+    # LLM: 做梦整合适配 70+ 条超批量场景，必须严格限制在 target='user'；通过同一目标锁、配额、扫描、CAS 与账本原子提交。
+    # 函数用途: 原子提交 USER.md 周期性做梦整合正文，记录整合前版本与备份引用，严禁触及 AGENTS.md/SOUL.md。
+    def consolidate_user_profile(
+        self,
+        *,
+        target: str = "user",
+        consolidated_content: str,
+        expected_sha256: str = "",
+        expected_versions_tail: str = "",
+        source: str = "user_profile_dream",
+        pre_dream_backup_ref: str = "",
+        dream_run_id: str = "",
+        source_quote: str = "",
+    ) -> dict[str, object]:
+        normalized_target = str(target or "").strip().lower()
+        if normalized_target != "user":
+            raise PersonaSecurityError(
+                f"PERSONA_DREAM_TARGET_FORBIDDEN: Periodic dreaming only supports target='user' (USER.md); {normalized_target!r} is forbidden."
+            )
+        from ..user_space.group_authorization_context import require_group_persona_lease
+        from ..user_space.managed_user_governance import require_managed_persona_write
+
+        require_managed_persona_write(
+            self.owner_home,
+            "user",
+            {
+                "operation": "consolidate_user_profile",
+                "source": source,
+                "dream_run_id": dream_run_id,
+            },
+        )
+        require_group_persona_lease(self.path_for("user"))
+        with self.quota_enforcer.admission() as admission:
+            return _consolidate_user_profile_document(
+                self,
+                admission,
+                consolidated_content=consolidated_content,
+                expected_sha256=expected_sha256,
+                expected_versions_tail=expected_versions_tail,
+                source=source,
+                pre_dream_backup_ref=pre_dream_backup_ref,
+                dream_run_id=dream_run_id,
+                source_quote=source_quote,
+            )
+
     # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
     # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     def _write_version_snapshot(
@@ -698,13 +743,215 @@ def _prepare_persona_rollback(
     request: PersonaMutationRequest,
 ) -> tuple[str, str, str]:
     if request.rollback_version is None:
-        raise ValueError("rollback_version is required")
-    next_text = repository._content_for_version(request.target, request.rollback_version)
+        if request.target != "user":
+            raise ValueError("rollback_version is required")
+        next_text = _resolve_user_pre_dream_rollback_content(repository)
+    else:
+        next_text = repository._content_for_version(request.target, request.rollback_version)
     from ..memory_store.security import scan_memory_content
 
     if not scan_memory_content(next_text).safe:
         raise PersonaSecurityError("rollback snapshot failed persona threat scan")
     return next_text, "", ""
+
+
+def _resolve_user_pre_dream_rollback_content(repository: PersonaRepository) -> str:
+    """Resolve the latest 1-step pre-dream USER.md snapshot via version ledger or verified backup."""
+    rows = repository.history("user")
+    dream_row: dict[str, object] | None = None
+    for row in reversed(rows):
+        if str(row.get("action") or "") == "consolidate" or str(row.get("source") or "") == "user_profile_dream":
+            dream_row = row
+            break
+    if dream_row is None:
+        raise PersonaEntryNotFoundError(
+            "未找到 USER.md 做梦整合记录；请先用 history 查看历史版本号并传入 rollback_version。"
+        )
+    expected_prev_sha = str(dream_row.get("previous_sha256") or "")
+    pre_dream_version = dream_row.get("pre_dream_version")
+    if isinstance(pre_dream_version, (int, str)) and not isinstance(pre_dream_version, bool):
+        try:
+            ver_num = int(pre_dream_version)
+        except ValueError:
+            ver_num = None
+        if ver_num is not None and ver_num >= 0:
+            try:
+                content = repository._content_for_version("user", ver_num)
+                if not expected_prev_sha or _sha256_text(content) == expected_prev_sha:
+                    return content
+            except PersonaEntryNotFoundError:
+                pass
+    backup_root = repository.backups_dir.resolve(strict=False)
+    pre_ref = str(dream_row.get("pre_dream_backup_ref") or "").strip()
+    if pre_ref:
+        raw_path = repository.owner_home / pre_ref
+        if raw_path.is_symlink():
+            raise PersonaSecurityError("persona pre-dream backup path must not be a symlink")
+        resolved = raw_path.resolve(strict=False)
+        try:
+            resolved.relative_to(backup_root)
+        except ValueError as exc:
+            raise PersonaSecurityError("persona pre-dream backup path escapes owner backup root") from exc
+        if resolved.is_file():
+            content = resolved.read_text(encoding="utf-8")
+            if expected_prev_sha and _sha256_text(content) != expected_prev_sha:
+                raise PersonaSecurityError("persona pre-dream backup hash mismatch")
+            return content
+    if expected_prev_sha:
+        for row in reversed(rows):
+            if str(row.get("sha256") or "") == expected_prev_sha:
+                ver_val = row.get("version")
+                if isinstance(ver_val, int) and not isinstance(ver_val, bool):
+                    return repository._content_for_version("user", ver_val)
+        user_backups_dir = repository.backups_dir / "user"
+        if user_backups_dir.is_dir() and not user_backups_dir.is_symlink():
+            candidates = sorted(
+                (p for p in user_backups_dir.glob("*.md") if p.is_file() and not p.is_symlink()),
+                key=lambda item: item.name,
+                reverse=True,
+            )[:32]
+            for path in candidates:
+                content = path.read_text(encoding="utf-8")
+                if _sha256_text(content) == expected_prev_sha:
+                    return content
+    raise PersonaEntryNotFoundError(
+        "USER.md 整合前快照不可用或已被移除；请用 history 查看可用版本号并指定 rollback_version。"
+    )
+
+
+def _consolidate_user_profile_document(
+    repository: PersonaRepository,
+    admission: OwnerQuotaAdmission,
+    *,
+    consolidated_content: str,
+    expected_sha256: str = "",
+    expected_versions_tail: str = "",
+    source: str = "user_profile_dream",
+    pre_dream_backup_ref: str = "",
+    dream_run_id: str = "",
+    source_quote: str = "",
+) -> dict[str, object]:
+    """Commit consolidated USER.md under persona target lock, quota, threat scan, and dual CAS."""
+    from ..memory_store.security import scan_memory_content
+
+    text = str(consolidated_content or "")
+    if text and not text.endswith("\n"):
+        text = f"{text}\n"
+    if len(text.encode("utf-8")) > _MAX_PERSONA_FILE_BYTES:
+        raise ValueError("persona file exceeds maximum size")
+    full_scan = scan_memory_content(text)
+    if not full_scan.safe:
+        raise PersonaSecurityError(f"PERSONA_DREAM_SECURITY_BLOCKED: {full_scan.reason()}")
+    for raw_line in text.splitlines():
+        if raw_line.strip():
+            line_scan = scan_memory_content(raw_line)
+            if not line_scan.safe:
+                raise PersonaSecurityError(f"PERSONA_DREAM_SECURITY_BLOCKED: {line_scan.reason()}")
+    safe_ref = str(pre_dream_backup_ref or "").strip()
+    if safe_ref:
+        raw_backup = repository.owner_home / safe_ref
+        if raw_backup.is_symlink():
+            raise PersonaSecurityError("pre_dream_backup_ref must not be a symlink")
+        try:
+            raw_backup.resolve(strict=False).relative_to(repository.backups_dir.resolve(strict=False))
+        except ValueError as exc:
+            raise PersonaSecurityError("pre_dream_backup_ref escapes owner backup root") from exc
+
+    path = repository.path_for("user")
+    lock_opts = {} if not repository.coordinator_io else {"birth_commit": _persona_birth_commit}
+    ledger_opts = {} if not repository.coordinator_io else {"coordinator_io": True}
+    with locked_json_path(path, **lock_opts):
+        if path.exists() and (path.is_symlink() or not path.is_file()):
+            raise PersonaSecurityError("persona target must be a regular file")
+        document_existed = path.exists()
+        previous = path.read_text(encoding="utf-8") if document_existed else ""
+        previous_sha = _sha256_text(previous)
+        if expected_sha256 and expected_sha256 != previous_sha:
+            raise PersonaConflictError(
+                f"persona changed: expected {expected_sha256}, current {previous_sha}"
+            )
+        if expected_versions_tail:
+            current_tail = versions_ledger_tail(repository.versions_path, **ledger_opts)
+            if current_tail != expected_versions_tail:
+                raise PersonaConflictError(
+                    "persona version ledger changed since consolidation started"
+                )
+        next_sha = _sha256_text(text)
+        if next_sha == previous_sha:
+            return {
+                "ok": True,
+                "changed": False,
+                "action": "consolidate",
+                "target": "user",
+                "sha256": previous_sha,
+                "previous_sha256": previous_sha,
+                "version": repository._current_version("user", previous_sha),
+                "versions_tail": versions_ledger_tail(repository.versions_path, **ledger_opts),
+                "dream_run_id": dream_run_id,
+            }
+        baseline = _prepare_persona_baseline(repository, "user", previous)
+        if baseline is not None:
+            pre_dream_version: int | None = 0
+        else:
+            existing_rows = repository.history("user")
+            matched_ver: int | None = None
+            for row in reversed(existing_rows):
+                if str(row.get("sha256") or "") == previous_sha:
+                    raw_ver = row.get("version")
+                    if isinstance(raw_ver, int) and not isinstance(raw_ver, bool):
+                        matched_ver = raw_ver
+                        break
+            pre_dream_version = matched_ver
+        version = repository._next_version("user")
+        backup_path = repository._version_snapshot_path("user", version, next_sha)
+        record = {
+            "target": "user",
+            "version": version,
+            "sha256": next_sha,
+            "previous_sha256": previous_sha,
+            "source_quote": str(source_quote or ""),
+            "confirmed": True,
+            "created_at": time.time(),
+            "backup_ref": str(backup_path.relative_to(repository.owner_home)),
+            "action": "consolidate",
+            "entry_id": "",
+            "source": str(source or "user_profile_dream"),
+            "pre_dream_version": pre_dream_version,
+            "pre_dream_backup_ref": safe_ref,
+            "dream_run_id": str(dream_run_id or ""),
+        }
+        prepared = _PreparedPersonaMutation(
+            previous=previous,
+            previous_sha=previous_sha,
+            next_text=text,
+            next_sha=next_sha,
+            prior_content="",
+            next_entry_id="",
+            version=version,
+            backup_path=backup_path,
+            record=record,
+            baseline=baseline,
+        )
+        _commit_persona_mutation(
+            repository,
+            prepared,
+            _PersonaCommitContext(path, document_existed, admission),
+        )
+        committed_tail = versions_ledger_tail(repository.versions_path, **ledger_opts)
+    return {
+        "ok": True,
+        "changed": True,
+        "action": "consolidate",
+        "target": "user",
+        "sha256": next_sha,
+        "previous_sha256": previous_sha,
+        "version": version,
+        "pre_dream_version": pre_dream_version,
+        "pre_dream_backup_ref": safe_ref,
+        "backup_ref": str(backup_path.relative_to(repository.owner_home)),
+        "versions_tail": committed_tail,
+        "dream_run_id": str(dream_run_id or ""),
+    }
 
 
 def _unchanged_persona_result(

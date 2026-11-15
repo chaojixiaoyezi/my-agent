@@ -228,6 +228,18 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
         validate=_int_within(0, 3650, message="必须是 0~3650 之间的整数（天，0 表示关闭教训自动归档）"),
         effect=EFFECT_IMMEDIATE,
     ),
+    "user_profile_dream_entry_threshold": TunableSpec(
+        key="user_profile_dream_entry_threshold",
+        describe="USER.md 周期性做梦整合的条目数触发阈值（0~10000 整数条，默认 70；0 表示关闭条目数触发）",
+        validate=_int_within(0, 10_000, message="必须是 0~10000 之间的整数（条，0 表示关闭条目数触发）"),
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "user_profile_dream_token_threshold": TunableSpec(
+        key="user_profile_dream_token_threshold",
+        describe="USER.md 周期性做梦整合的 token 估算触发阈值（0~200000 整数，默认 5000；0 表示关闭 token 触发）",
+        validate=_int_within(0, 200_000, message="必须是 0~200000 之间的整数（tokens，0 表示关闭 token 触发）"),
+        effect=EFFECT_IMMEDIATE,
+    ),
     "memory_runtime_fact_recent_tests": TunableSpec(
         key="memory_runtime_fact_recent_tests",
         describe="运行中每轮实时事实进度最多扫描的近期测试调用条数（默认 20；0 = 跳过实时测试提取）",
