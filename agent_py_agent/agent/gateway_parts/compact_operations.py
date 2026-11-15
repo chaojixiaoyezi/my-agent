@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+import stat
+import threading
 import time
+from collections import OrderedDict, deque
 from contextlib import nullcontext
-from itertools import chain, islice
 from types import SimpleNamespace
 
 from ..common.cancellation import ToolCancelled
@@ -27,7 +29,21 @@ from ..io.bounded_directory import DirectoryCursor
 from ..settings.config_layers import compact_idle_parameters
 from ..settings.defaults import default_config_int
 from ..settings.model_scope import selected_model_scope
+from ..user_space.directory_paging import directory_page
 from .background_resource_report import session_background_processes
+
+
+class _IdleApprovalScanPolicy:
+    """内部审批目录有界恢复扫描参数（非外部用户配置）。"""
+
+    batch_size: int = 512
+    max_cursors: int = 256
+    max_tracked_subdirs: int = 64
+    clean_stamp_ttl_seconds: float = 30.0
+
+
+_IDLE_APPROVAL_SCAN_LOCK = threading.Lock()
+_IDLE_APPROVAL_SCAN_CURSORS: OrderedDict[tuple[str, str, str], dict[str, object]] = OrderedDict()
 
 
 # LLM: 只读任务/claim/子代理的含错报告及原审批账；任何坏读失败关闭，状态正文不参与裁决。
@@ -97,37 +113,313 @@ def _idle_subagent_report(manager, thread):
     return SimpleNamespace(runs=list(runs.values()), load_errors=errors)
 
 
-# LLM: 仅观察同owner原审批/私卡路径，限制1024条；未知坏账拒绝，不调用会吞读错或续租的展示列表。
+def _idle_approval_scan_batch(agent) -> int:
+    configured = getattr(getattr(agent, "config", None), "retention_scan_slice_entries", None)
+    if type(configured) is int and configured > 0:
+        return configured
+    return _IdleApprovalScanPolicy.batch_size
+
+
+def _approval_dir_stamp(directory):
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise OSError("approval directory is not a regular directory")
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _save_idle_scan_state(key: tuple[str, str, str], state: dict[str, object]) -> None:
+    with _IDLE_APPROVAL_SCAN_LOCK:
+        _IDLE_APPROVAL_SCAN_CURSORS.pop(key, None)
+        while len(_IDLE_APPROVAL_SCAN_CURSORS) >= _IdleApprovalScanPolicy.max_cursors:
+            _IDLE_APPROVAL_SCAN_CURSORS.popitem(last=False)
+        _IDLE_APPROVAL_SCAN_CURSORS[key] = state
+        _IDLE_APPROVAL_SCAN_CURSORS.move_to_end(key)
+
+
+def _round_stamps_match(state, approvals_dir, confirmations_dir, current_approvals_stamp, current_confirmations_stamp) -> bool:
+    if state["approvals_stamp"] != current_approvals_stamp or state["confirmations_stamp"] != current_confirmations_stamp:
+        return False
+    active_root = state.get("active_root")
+    if active_root is not None and _approval_dir_stamp(approvals_dir / active_root) != state["active_root_stamp"]:
+        return False
+    for subdir, saved_stamp in state["subdir_stamps"].items():
+        if _approval_dir_stamp(approvals_dir / subdir) != saved_stamp:
+            return False
+    return True
+
+
+def _inspect_approval_record(path, thread_id: str) -> str:
+    if path.name.startswith(".") or not path.name.endswith(".json"):
+        return ""
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        raise OSError("approval symlink rejected during idle scan")
+    if not stat.S_ISREG(info.st_mode):
+        return ""
+    report = read_json_object_report(path, context="conversation.idle.approvals")
+    row = next((v for k, v in vars(report).items() if k != "load_error"), None)
+    if report.load_error or not isinstance(row, dict) or not row:
+        return "activity_unknown"
+    if row.get("status") not in {"pending", "active", "waiting_input", "waiting_confirmation"}:
+        return ""
+    expires = row.get("expires_at")
+    if expires is not None:
+        if type(expires) not in {int, float} or not math.isfinite(expires):
+            return "activity_unknown"
+        if expires <= time.time():
+            return ""
+    scope = row.get("scope", {})
+    tid = row.get("thread_id") or (scope.get("thread_id") if isinstance(scope, dict) else None)
+    if not tid:
+        return "activity_unknown"
+    if tid == thread_id:
+        return "pending_approval"
+    return ""
+
+
+def _new_idle_scan_state(approvals_stamp, confirmations_stamp) -> dict[str, object]:
+    return {
+        "phase": "approvals",
+        "approvals_stamp": approvals_stamp,
+        "roots_cursor": {},
+        "roots_complete": approvals_stamp is None,
+        "pending_roots": deque(),
+        "active_root": None,
+        "active_root_stamp": None,
+        "active_root_cursor": {},
+        "active_root_complete": False,
+        "pending_files": deque(),
+        "subdir_stamps": {},
+        "subdir_overflow": False,
+        "confirmations_stamp": confirmations_stamp,
+        "confirmations_cursor": {},
+        "confirmations_complete": confirmations_stamp is None,
+        "visited_count": 0,
+        "hit_path": None,
+        "completed_at": None,
+    }
+
+
+def _consume_pending_approval_files(folder, thread_id: str, state: dict[str, object], remaining: int) -> tuple[str | None, int]:
+    pending_files = state["pending_files"]
+    while remaining > 0 and pending_files:
+        name = pending_files.popleft()
+        remaining -= 1
+        state["visited_count"] += 1
+        if name.startswith(".") or not name.endswith(".json"):
+            continue
+        candidate = folder / name
+        verdict = _inspect_approval_record(candidate, thread_id)
+        if verdict == "activity_unknown":
+            return "activity_unknown", remaining
+        if verdict == "pending_approval":
+            state["hit_path"] = candidate
+            return "pending_approval", remaining
+    return None, remaining
+
+
+# LLM: 按目录分页与LRU续点有界扫描审批与私卡路径；未扫完绝不判空，目录变动、坏记录或超时失败关闭，零句柄泄漏。
 # 函数用途: 保护仍可处理的审批/确认；明确到期只跳过，坏期限/未知归属失败关闭，不消费或清理记录。
 def _idle_pending_approval_state(agent, store, thread):
     from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
 
-    approvals = (store.storage.root / "subagent_tool_approvals").glob("*/*.json")
-    confirmations = agent.home_paths.owner_home_dir.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS).glob("*.json")
-    for index, path in enumerate(islice(chain(approvals, confirmations), 1025)):
-        if index == 1024:
-            return "activity_unknown"
-        if path.name.startswith("."):
-            continue
-        report = read_json_object_report(path, context="conversation.idle.approvals")
-        if report.load_error or not report.payload:
-            return "activity_unknown"
-        row = report.payload
-        if row.get("status") not in {"pending", "active", "waiting_input", "waiting_confirmation"}:
-            continue
-        expires = row.get("expires_at")
-        if expires is not None:
-            if type(expires) not in {int, float} or not math.isfinite(expires):
-                return "activity_unknown"
-            if expires <= time.time():
+    storage_root = store.storage.root
+    owner_home_dir = agent.home_paths.owner_home_dir
+    approvals_dir = storage_root / "subagent_tool_approvals"
+    confirmations_dir = owner_home_dir.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS)
+    key = (str(storage_root), str(owner_home_dir), str(thread.thread_id))
+    scan_budget = _idle_approval_scan_batch(agent)
+
+    with _IDLE_APPROVAL_SCAN_LOCK:
+        state = _IDLE_APPROVAL_SCAN_CURSORS.pop(key, None)
+
+    try:
+        approvals_stamp = _approval_dir_stamp(approvals_dir)
+        confirmations_stamp = _approval_dir_stamp(confirmations_dir)
+        if state is not None and not _round_stamps_match(
+            state, approvals_dir, confirmations_dir, approvals_stamp, confirmations_stamp
+        ):
+            state = None
+
+        if state is not None and state["phase"] == "done":
+            completed_at = state.get("completed_at")
+            if (
+                not state["subdir_overflow"]
+                and completed_at is not None
+                and time.monotonic() - completed_at <= _IdleApprovalScanPolicy.clean_stamp_ttl_seconds
+            ):
+                _save_idle_scan_state(key, state)
+                return ""
+            state = None
+
+        if state is None:
+            state = _new_idle_scan_state(approvals_stamp, confirmations_stamp)
+
+        hit_path = state.get("hit_path")
+        if hit_path is not None:
+            try:
+                recheck = _inspect_approval_record(hit_path, thread.thread_id)
+            except FileNotFoundError:
+                state = _new_idle_scan_state(approvals_stamp, confirmations_stamp)
+                hit_path = None
+            else:
+                if recheck == "pending_approval":
+                    if not _round_stamps_match(
+                        state, approvals_dir, confirmations_dir,
+                        _approval_dir_stamp(approvals_dir), _approval_dir_stamp(confirmations_dir),
+                    ):
+                        return "activity_unknown"
+                    _save_idle_scan_state(key, state)
+                    return "pending_approval"
+                if recheck == "activity_unknown":
+                    return "activity_unknown"
+                state["hit_path"] = None
+
+        remaining = scan_budget
+        while remaining > 0:
+            if state["phase"] == "approvals":
+                active_root = state["active_root"]
+                if active_root is not None:
+                    active_dir = approvals_dir / active_root
+                    verdict, remaining = _consume_pending_approval_files(
+                        active_dir, thread.thread_id, state, remaining
+                    )
+                    if verdict == "activity_unknown":
+                        return "activity_unknown"
+                    if verdict == "pending_approval":
+                        if not _round_stamps_match(
+                            state, approvals_dir, confirmations_dir,
+                            _approval_dir_stamp(approvals_dir), _approval_dir_stamp(confirmations_dir),
+                        ):
+                            return "activity_unknown"
+                        _save_idle_scan_state(key, state)
+                        return "pending_approval"
+                    if not state["pending_files"] and not state["active_root_complete"]:
+                        if remaining <= 0:
+                            break
+                        names, cur, done = directory_page(
+                            storage_root,
+                            ("subagent_tool_approvals", active_root),
+                            state["active_root_cursor"],
+                            remaining,
+                            require_dir_fd=False,
+                        )
+                        state["active_root_cursor"] = cur
+                        state["active_root_complete"] = done
+                        state["pending_files"].extend(names)
+                        continue
+                    if not state["pending_files"] and state["active_root_complete"]:
+                        if _approval_dir_stamp(active_dir) != state["active_root_stamp"]:
+                            return "activity_unknown"
+                        if len(state["subdir_stamps"]) < _IdleApprovalScanPolicy.max_tracked_subdirs:
+                            state["subdir_stamps"][active_root] = state["active_root_stamp"]
+                        else:
+                            state["subdir_overflow"] = True
+                        state["active_root"] = None
+                        state["active_root_stamp"] = None
+                        state["active_root_cursor"] = {}
+                        state["active_root_complete"] = False
+                    continue
+
+                pending_roots = state["pending_roots"]
+                if not pending_roots and not state["roots_complete"]:
+                    if _approval_dir_stamp(approvals_dir) is None:
+                        state["roots_complete"] = True
+                    else:
+                        names, cur, done = directory_page(
+                            storage_root,
+                            ("subagent_tool_approvals",),
+                            state["roots_cursor"],
+                            remaining,
+                            require_dir_fd=False,
+                        )
+                        state["roots_cursor"] = cur
+                        state["roots_complete"] = done
+                        pending_roots.extend(names)
+                        if not names and not done:
+                            return "activity_unknown"
+                        continue
+                if pending_roots:
+                    subdir = pending_roots.popleft()
+                    remaining -= 1
+                    state["visited_count"] += 1
+                    if subdir.startswith("."):
+                        continue
+                    subdir_path = approvals_dir / subdir
+                    info = subdir_path.lstat()
+                    if stat.S_ISLNK(info.st_mode):
+                        return "activity_unknown"
+                    if not stat.S_ISDIR(info.st_mode):
+                        continue
+                    state["active_root"] = subdir
+                    state["active_root_stamp"] = _approval_dir_stamp(subdir_path)
+                    state["active_root_cursor"] = {}
+                    state["active_root_complete"] = False
+                    state["pending_files"].clear()
+                    continue
+                state["phase"] = "confirmations"
                 continue
-        scope = row.get("scope", {})
-        tid = row.get("thread_id") or (scope.get("thread_id") if isinstance(scope, dict) else None)
-        if not tid:
+
+            if state["phase"] == "confirmations":
+                verdict, remaining = _consume_pending_approval_files(
+                    confirmations_dir, thread.thread_id, state, remaining
+                )
+                if verdict == "activity_unknown":
+                    return "activity_unknown"
+                if verdict == "pending_approval":
+                    if not _round_stamps_match(
+                        state, approvals_dir, confirmations_dir,
+                        _approval_dir_stamp(approvals_dir), _approval_dir_stamp(confirmations_dir),
+                    ):
+                        return "activity_unknown"
+                    _save_idle_scan_state(key, state)
+                    return "pending_approval"
+                if not state["pending_files"] and not state["confirmations_complete"]:
+                    if remaining <= 0:
+                        break
+                    if _approval_dir_stamp(confirmations_dir) is None:
+                        state["confirmations_complete"] = True
+                    else:
+                        names, cur, done = directory_page(
+                            owner_home_dir,
+                            PRIVATE_INTERACTIONS_OWNER_PARTS,
+                            state["confirmations_cursor"],
+                            remaining,
+                            require_dir_fd=False,
+                        )
+                        state["confirmations_cursor"] = cur
+                        state["confirmations_complete"] = done
+                        state["pending_files"].extend(names)
+                        if not names and not done:
+                            return "activity_unknown"
+                        continue
+                if not state["pending_files"] and state["confirmations_complete"]:
+                    break
+
+        if not _round_stamps_match(
+            state, approvals_dir, confirmations_dir,
+            _approval_dir_stamp(approvals_dir), _approval_dir_stamp(confirmations_dir),
+        ):
             return "activity_unknown"
-        if tid == thread.thread_id:
-            return "pending_approval"
-    return ""
+
+        if (
+            state["phase"] == "confirmations"
+            and state["confirmations_complete"]
+            and not state["pending_files"]
+        ):
+            if state["visited_count"] > scan_budget and not state["subdir_overflow"]:
+                state["phase"] = "done"
+                state["completed_at"] = time.monotonic()
+                _save_idle_scan_state(key, state)
+            return ""
+
+        _save_idle_scan_state(key, state)
+        return "activity_unknown"
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return "activity_unknown"
 
 
 # LLM: 禁用先返回；模型scope显式禁止旧线程模型迁移，容量及其它只读资格不写线程；政策沿同次scope冻结。

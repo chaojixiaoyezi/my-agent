@@ -424,9 +424,21 @@ def _validated_capability_closeout(payload, *, owner_id=None):
             if not isinstance(metadata, dict):
                 raise DataCorruptionError("gateway capability selection metadata unavailable")
             count, indices = metadata.get("request_count"), metadata.get("open_indices")
+            has_descendant_root = "root_id" in metadata
+            expected_parent = proof["parent_task_id"]
+            if has_descendant_root:
+                descendant_valid = (
+                    type(metadata.get("root_id")) is str
+                    and metadata.get("root_id") == expected_parent
+                    and type(metadata.get("parent_task_id")) is str
+                    and bool(metadata.get("parent_task_id"))
+                    and metadata.get("parent_task_id") != expected_parent
+                )
+            else:
+                descendant_valid = metadata.get("parent_task_id") == expected_parent
             if (type(run_id) is not str or not run_id or metadata.get("run_id") != run_id
                     or metadata.get("owner_id") != proof["owner_id"]
-                    or metadata.get("parent_task_id") != proof["parent_task_id"]
+                    or not descendant_valid
                     or type(metadata.get("state_revision")) is not int or metadata["state_revision"] < 1
                     or type(count) is not int or count < 1 or not isinstance(indices, list) or not indices
                     or any(type(i) is not int or not 0 <= i < count for i in indices)

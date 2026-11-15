@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import stat
 from dataclasses import replace
 from typing import Any
 
+from ..agent.conversation.agent_activity import settle_orphaned_capability_requests
+from ..agent.gateway_parts.io import read_json_file_report
+from ..agent.gateway_parts.owner_retention import gateway_terminal_exists
+from ..agent.gateway_parts.paths import gateway_paths
 from ..agent.memory_api import DAILY_ACTORS, DAILY_EVENT_TYPES
+from ..agent.runtime_errors import DataCorruptionError
+from ..agent.settings.defaults import default_config_int
 from ..agent.user_space.home_index_rebuild import rebuild_home_indexes
 from ..agent.user_space.home_retention import apply_owner_retention, plan_owner_retention
 from ..agent.user_space.home_runtime_query import (
@@ -19,6 +26,8 @@ from ..agent.user_space.home_runtime_query import (
 )
 from .common import int_arg_or_default, make_agent
 from .task_commands import CLI_TASK_LIST_COUNT
+
+_TERMINAL_GATEWAY_STATUSES = frozenset({"done", "completed", "interrupted", "stopped", "cancelled", "failed"})
 
 
 # LLM: Home runtime commands expose only canonical owner paths; Daily filters follow v2 actor/
@@ -165,6 +174,58 @@ def cmd_home_index_rebuild(args) -> int:
 
 # LLM: --settle沿原repo死亡证明/CAS直接结清，无交互确认；安全结清转cancelled/abandoned，不伪造noop或重放旧工具。
 # 函数用途: 列出或取消当前owner可安全结清的历史运行，报告解锁结果及仍受保护的记录。
+def _canonical_gateway_terminal_reason(paths, root_id: str) -> str | None:
+    if (not isinstance(root_id, str) or not root_id or root_id in {".", ".."}
+            or any(sep in root_id for sep in ("/", "\\", "\x00"))):
+        return None
+    name = f"{root_id}.json"
+    terminal_file = paths.terminal / name
+    try:
+        info = terminal_file.lstat()
+    except FileNotFoundError:
+        try:
+            exists = gateway_terminal_exists(paths, name)
+        except (DataCorruptionError, OSError, ValueError):
+            return None
+        return "parent_turn_ended" if exists else None
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    report = read_json_file_report(terminal_file, context="cli.runtime_stale_attempts.terminal")
+    row = next((v for k, v in vars(report).items() if k not in {"load_error", "lock_busy"}), None) if report.load_error is None else None
+    if (
+        not isinstance(row, dict)
+        or row.get("schema_version") != "gateway_terminal_request.v1"
+        or row.get("id") != root_id
+    ):
+        return None
+    status = str(row.get("status") or "").strip()
+    if status not in _TERMINAL_GATEWAY_STATUSES:
+        return None
+    return "parent_turn_interrupted" if status in {"interrupted", "stopped"} else "parent_turn_ended"
+
+
+# LLM: 仅向conversation桥接层传入本owner的Gateway终态核验回调，不直接耦合subagents子模块。
+# 函数用途: 结清错失父级关闭窗口的孤立能力申请，并显式报告仍未证清的记录。
+def _settle_orphaned_capability_requests(agent) -> tuple[list[str], list[dict[str, str]]]:
+    subagents = getattr(agent, "subagents", None)
+    workspace = getattr(subagents, "workspace", None)
+    root = getattr(agent, "root", None)
+    gateway_workspace = getattr(getattr(agent, "config", None), "gateway_workspace", None)
+    if subagents is None or workspace is None or root is None or not gateway_workspace:
+        return [], []
+    default_budget = default_config_int("retention_scan_slice_entries")
+    configured = getattr(getattr(agent, "config", None), "retention_scan_slice_entries", default_budget)
+    page_budget = configured if type(configured) is int and configured > 0 else default_budget
+    paths = gateway_paths(agent)
+    return settle_orphaned_capability_requests(
+        agent,
+        canonical_terminal_reason=lambda root_id: _canonical_gateway_terminal_reason(paths, root_id),
+        page_budget=page_budget,
+    )
+
+
 def cmd_runtime_stale_attempts(args) -> int:
     agent = make_agent(args)
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
@@ -173,6 +234,8 @@ def cmd_runtime_stale_attempts(args) -> int:
         return 1
     settled: list[str] = []
     released_locks: list[str] = []
+    settled_capabilities: list[str] = []
+    unproven_capabilities: list[dict[str, str]] = []
     if bool(getattr(args, "settle", False)):
         days = max(0.0, float(getattr(args, "older_than_days", 1.0) or 0.0))
         repo.recover_stale_attempts()
@@ -184,15 +247,31 @@ def cmd_runtime_stale_attempts(args) -> int:
             if repo._stale_lock_cursor == (0.0, ""):
                 break
         settled = repo.settle_unidentified_attempts(older_than_seconds=days * 86400.0)
+        settled_capabilities, unproven_capabilities = _settle_orphaned_capability_requests(agent)
     remaining = repo.unidentified_stale_attempts()
-    payload = {"ok": True, "settled_agent_run_ids": settled, "released_resource_lock_ids": released_locks, "remaining": remaining}
+    result = {
+        "ok": True,
+        "settled_agent_run_ids": settled,
+        "released_resource_lock_ids": released_locks,
+        "settled_capability_run_ids": settled_capabilities,
+        "unproven_capability_requests": unproven_capabilities,
+        "remaining": remaining,
+    }
     if getattr(args, "json", False):
-        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     print("MY-AGENT RUNTIME STALE ATTEMPTS")
-    print(f"settled={len(settled)} remaining={len(remaining)}")
+    print(
+        f"settled={len(settled)} remaining={len(remaining)} "
+        f"settled_capabilities={len(settled_capabilities)} unproven_capabilities={len(unproven_capabilities)}"
+    )
     for item in remaining:
         print(f"- {item['run_id']} role={item['role']} attempt_status={item['attempt_status']} started_at={item['started_at']:.0f}")
+    for item in unproven_capabilities:
+        print(
+            f"- capability {item['run_id'] or '-'} root={item['root_id'] or '-'} "
+            f"parent={item['parent_id'] or '-'} reason={item['reason_code']}"
+        )
     if remaining and not settled:
         print("剩余记录可能仍活跃、身份不可核验或指针损坏；可安全结清的运行会取消并解除 unknown 阻塞。")
     return 0
