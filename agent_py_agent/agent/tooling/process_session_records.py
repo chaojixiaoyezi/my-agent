@@ -171,16 +171,46 @@ def _validate_v2_lifecycle(payload: dict[str, object]) -> None:
 
 # LLM: cleanup 只附加在原 termination 中，身份沿不可变 session 字段；缺失表示未记录，不能从 child-only confirmed 补齐。
 # 函数用途: 拒绝畸形或自相矛盾的完整资源清理回执，不修改既有 host 的终止协议。
+def _validate_unresolved_instances(value: object) -> None:
+    if not isinstance(value, (tuple, list)):
+        raise ValueError("invalid managed session cleanup evidence")
+    for item in value:
+        if (not isinstance(item, dict)
+                or set(item) != {"pid", "birth_token"}
+                or type(item["pid"]) is not int
+                or item["pid"] <= 0
+                or not isinstance(item["birth_token"], str)
+                or not item["birth_token"].strip()):
+            raise ValueError("invalid managed session cleanup evidence")
+
+
 def _validate_cleanup_evidence(termination) -> None:
     if not isinstance(termination, dict) or "cleanup" not in termination:
         return
     cleanup = termination["cleanup"]
-    if (not isinstance(cleanup, dict) or set(cleanup) != {"confirmed", "instances"}
-            or type(cleanup["confirmed"]) is not bool or not isinstance(cleanup["instances"], list)):
+    allowed_cleanup_keys = {"confirmed", "instances", "tree_observation_complete", "unresolved_instances"}
+    if (not isinstance(cleanup, dict)
+            or not {"confirmed", "instances"} <= set(cleanup)
+            or not set(cleanup) <= allowed_cleanup_keys
+            or type(cleanup["confirmed"]) is not bool
+            or not isinstance(cleanup["instances"], list)):
         raise ValueError("invalid managed session cleanup evidence")
-    keys = {"method", "confirmed", "return_code", "observed_processes", "unresolved_pids"}
+    if "tree_observation_complete" in cleanup:
+        if type(cleanup["tree_observation_complete"]) is not bool:
+            raise ValueError("invalid managed session cleanup evidence")
+        if cleanup["confirmed"] and not cleanup["tree_observation_complete"]:
+            raise ValueError("invalid managed session cleanup evidence")
+    if "unresolved_instances" in cleanup:
+        _validate_unresolved_instances(cleanup["unresolved_instances"])
+        if cleanup["confirmed"] and cleanup["unresolved_instances"]:
+            raise ValueError("invalid managed session cleanup evidence")
+    required_keys = {"method", "confirmed", "return_code", "observed_processes", "unresolved_pids"}
+    allowed_receipt_keys = required_keys | {"tree_observation_complete", "unresolved_instances"}
     for receipt in cleanup["instances"]:
-        if (not isinstance(receipt, dict) or set(receipt) != keys or type(receipt["confirmed"]) is not bool
+        if (not isinstance(receipt, dict)
+                or not required_keys <= set(receipt)
+                or not set(receipt) <= allowed_receipt_keys
+                or type(receipt["confirmed"]) is not bool
                 or not isinstance(receipt["method"], str) or not receipt["method"]
                 or type(receipt["observed_processes"]) is not int or receipt["observed_processes"] < 0
                 or receipt["return_code"] is not None and type(receipt["return_code"]) is not int
@@ -189,6 +219,15 @@ def _validate_cleanup_evidence(termination) -> None:
                 or receipt["confirmed"] and receipt["unresolved_pids"]
                 or cleanup["confirmed"] and not receipt["confirmed"]):
             raise ValueError("invalid managed session cleanup receipt")
+        if "tree_observation_complete" in receipt:
+            if type(receipt["tree_observation_complete"]) is not bool:
+                raise ValueError("invalid managed session cleanup receipt")
+            if (receipt["confirmed"] or cleanup["confirmed"]) and not receipt["tree_observation_complete"]:
+                raise ValueError("invalid managed session cleanup receipt")
+        if "unresolved_instances" in receipt:
+            _validate_unresolved_instances(receipt["unresolved_instances"])
+            if (receipt["confirmed"] or cleanup["confirmed"]) and receipt["unresolved_instances"]:
+                raise ValueError("invalid managed session cleanup receipt")
 
 
 # LLM: 保留 v1 的显式读取合同；它的附加字段不会让 v1 获得 v2 的任务停止授权。

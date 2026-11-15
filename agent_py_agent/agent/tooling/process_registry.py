@@ -76,6 +76,27 @@ class ProcessTerminationReceipt:
     return_code: int | None
     observed_processes: int
     unresolved_pids: tuple[int, ...] = ()
+    tree_observation_complete: bool | None = None
+    unresolved_instances: tuple[dict[str, object], ...] = ()
+
+
+def serialize_cleanup_receipt(receipt: ProcessTerminationReceipt) -> dict[str, object]:
+    """序列化清理回执为可持久化字典，兼容旧版 5 字段格式并保留可选实例证明。"""
+    serialized: dict[str, object] = {
+        "method": receipt.method,
+        "confirmed": receipt.confirmed,
+        "return_code": receipt.return_code,
+        "observed_processes": receipt.observed_processes,
+        "unresolved_pids": list(receipt.unresolved_pids),
+    }
+    if receipt.tree_observation_complete is not None:
+        serialized["tree_observation_complete"] = receipt.tree_observation_complete
+    if receipt.unresolved_instances:
+        serialized["unresolved_instances"] = [
+            {"pid": int(item["pid"]), "birth_token": str(item["birth_token"])}
+            for item in receipt.unresolved_instances
+        ]
+    return serialized
 # 滚动输出缓冲:查询时从日志文件尾部最多读这么多字符,够看进度/结论又不撑爆 prompt。
 _OUTPUT_TAIL_CHARS = 4000
 # 最多保留多少条已结束的进程记录,超了按启动时间淘汰最老的(防内存无界增长)。
@@ -628,7 +649,14 @@ class ProcessRegistry:
             with self._lock:
                 current = self._cache_payload(cleanup.record, root)
                 summary = current.to_summary()
-            summary["termination"] = {"confirmed": cleanup.confirmed, "instances": [asdict(r) for r in cleanup.terminations]}
+            stored_cleanup = (cleanup.record.get("termination") or {}).get("cleanup")
+            if isinstance(stored_cleanup, dict):
+                summary["termination"] = stored_cleanup
+            else:
+                summary["termination"] = {
+                    "confirmed": cleanup.confirmed,
+                    "instances": [serialize_cleanup_receipt(r) for r in cleanup.terminations],
+                }
             return summary
         return self._kill_legacy(record, access_scope)
 
@@ -884,23 +912,52 @@ def terminate_process_tree(
     Windows:taskkill /T /F 杀整棵进程树(/T 含子进程,/F 强制)。
     """
     if pid <= 0:
-        return ProcessTerminationReceipt("noop", False, None, 0)
+        return ProcessTerminationReceipt(
+            "noop", False, None, 0, tree_observation_complete=False,
+        )
     if expected_birth_token is not None and not expected_birth_token:
-        return ProcessTerminationReceipt("identity_unavailable", False, None, 0, (pid,))
+        return ProcessTerminationReceipt(
+            "identity_unavailable", False, None, 0, (pid,), tree_observation_complete=False,
+        )
     if _IS_WINDOWS:
         if expected_birth_token is not None and not _same_process(pid, expected_birth_token):
-            return ProcessTerminationReceipt("identity_changed", False, None, 0, (pid,))
+            return ProcessTerminationReceipt(
+                "identity_changed", False, None, 0, (pid,), tree_observation_complete=False,
+            )
         return _terminate_windows_tree(pid, proc)
     snapshot, complete = _fresh_process_tree_snapshot(pid)
     if expected_birth_token is not None:
         if not snapshot.get(pid):
-            return ProcessTerminationReceipt("identity_unavailable", False, None, len(snapshot), (pid,))
+            return ProcessTerminationReceipt(
+                "identity_unavailable",
+                False,
+                None,
+                len(snapshot),
+                (pid,),
+                tree_observation_complete=False,
+                unresolved_instances=({"pid": pid, "birth_token": expected_birth_token},),
+            )
         try:
             same = _birth_token_matches(pid, expected_birth_token, snapshot[pid])
         except (OSError, subprocess.TimeoutExpired, ValueError):
-            return ProcessTerminationReceipt("identity_unavailable", False, None, len(snapshot), (pid,))
+            return ProcessTerminationReceipt(
+                "identity_unavailable",
+                False,
+                None,
+                len(snapshot),
+                (pid,),
+                tree_observation_complete=False,
+                unresolved_instances=({"pid": pid, "birth_token": expected_birth_token},),
+            )
         if not same:
-            return ProcessTerminationReceipt("identity_changed", False, None, len(snapshot), (pid,))
+            return ProcessTerminationReceipt(
+                "identity_changed",
+                False,
+                None,
+                len(snapshot),
+                (pid,),
+                tree_observation_complete=False,
+            )
     if not complete and snapshot.get(pid) and _same_process(pid, snapshot[pid]):
         for _ in range(2):
             time.sleep(0.01)
@@ -937,11 +994,29 @@ def terminate_process_tree(
         _FINAL_CONFIRM_WITH_HANDLE_SECONDS if proc is not None else _FINAL_CONFIRM_WITHOUT_HANDLE_SECONDS,
         terminated,
     )
-    unresolved = tuple(member for member, token in snapshot.items()
-                       if member not in terminated and not _process_instance_terminated(member, token))
+    unresolved_pairs = tuple(
+        (member, token) for member, token in snapshot.items()
+        if member not in terminated and not _process_instance_terminated(member, token)
+    )
+    unresolved = tuple(member for member, _token in unresolved_pairs)
+    unresolved_instances = tuple(
+        {"pid": member, "birth_token": token}
+        for member, token in unresolved_pairs
+        if token
+    )
+    # 若仍有存活后代缺失出生标识，则本次树观察不能视为具备可跨重试核销的完整证明。
+    observation_complete = bool(complete) and all(bool(token) for _member, token in unresolved_pairs)
     return_code = proc.poll() if proc is not None else None
-    confirmed = complete and not unresolved and (proc is None or return_code is not None)
-    return ProcessTerminationReceipt(method, confirmed, return_code, len(snapshot), unresolved)
+    confirmed = observation_complete and not unresolved and (proc is None or return_code is not None)
+    return ProcessTerminationReceipt(
+        method,
+        confirmed,
+        return_code,
+        len(snapshot),
+        unresolved,
+        tree_observation_complete=observation_complete,
+        unresolved_instances=unresolved_instances,
+    )
 
 
 # LLM: Windows 仅在 taskkill /T /F 成功且直接子进程已回收时确认；单独 Popen.kill 不能证明后代退出。
@@ -958,10 +1033,19 @@ def _terminate_windows_tree(pid: int, proc: subprocess.Popen | None) -> ProcessT
             proc.wait(timeout=2)
         code = proc.poll() if proc is not None else None
         confirmed = result.returncode == 0 and proc is not None and code is not None
-        return ProcessTerminationReceipt("taskkill/T/F", confirmed, code, 1, () if confirmed else (pid,))
+        return ProcessTerminationReceipt(
+            "taskkill/T/F",
+            confirmed,
+            code,
+            1,
+            () if confirmed else (pid,),
+            tree_observation_complete=confirmed,
+        )
     except (OSError, subprocess.SubprocessError):
         _safe_popen_kill(proc)
-        return ProcessTerminationReceipt("popen.kill", False, None, 1, (pid,))
+        return ProcessTerminationReceipt(
+            "popen.kill", False, None, 1, (pid,), tree_observation_complete=False,
+        )
 
 
 def _safe_popen_kill(proc: subprocess.Popen | None) -> None:
