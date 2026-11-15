@@ -276,6 +276,27 @@ def test_installer_linux_bwrap_preflight_nonblocking_warning(tmp_path, monkeypat
     assert timeout_warn is not None
     assert "kernel.apparmor_restrict_unprivileged_userns" in timeout_warn
 
+    # Whitespace-only stderr/stdout falls back cleanly without IndexError, and non-empty stdout is preserved
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="\n"),
+    )
+    blank_warn = installer._linux_bwrap_preflight(prefix)
+    assert blank_warn is not None
+    assert "exit=1" in blank_warn
+    assert "kernel.apparmor_restrict_unprivileged_userns" in blank_warn
+
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="userns denied\n", stderr="\n"),
+    )
+    stdout_warn = installer._linux_bwrap_preflight(prefix)
+    assert stdout_warn is not None
+    assert "userns denied" in stdout_warn
+    assert "kernel.apparmor_restrict_unprivileged_userns" in stdout_warn
+
     # Full installer main() flow prints warning cleanly and exits 0
     monkeypatch.setattr(installer.subprocess, "run", fail_bwrap)
     monkeypatch.setattr(sys, "argv", ["installer.py", "--prefix", str(prefix)])

@@ -908,7 +908,8 @@ def _linux_bwrap_preflight(prefix: Path) -> str | None:
     except (OSError, subprocess.TimeoutExpired) as error:
         return f"警告：bwrap userns 预检未通过（{error}）；Ubuntu 24.04+ 请检查 kernel.apparmor_restrict_unprivileged_userns。"
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or f"exit={proc.returncode}").strip().splitlines()[0][:160]
+        raw_detail = (proc.stderr or "").strip() or (proc.stdout or "").strip() or f"exit={proc.returncode}"
+        detail = raw_detail.splitlines()[0][:160]
         return f"警告：bwrap --unshare-user 预检失败（{detail}）；Ubuntu 24.04+ 请检查 kernel.apparmor_restrict_unprivileged_userns。"
     return None
 
