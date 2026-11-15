@@ -38,8 +38,8 @@ class _IdleApprovalScanPolicy:
 
     batch_size: int = 512
     max_cursors: int = 256
-    max_tracked_subdirs: int = 64
-    clean_stamp_ttl_seconds: float = 30.0
+    max_tracked_subdirs: int = 4096
+    clean_stamp_ttl_seconds: float = 300.0
 
 
 _IDLE_APPROVAL_SCAN_LOCK = threading.Lock()
@@ -198,6 +198,7 @@ def _new_idle_scan_state(approvals_stamp, confirmations_stamp) -> dict[str, obje
         "confirmations_cursor": {},
         "confirmations_complete": confirmations_stamp is None,
         "visited_count": 0,
+        "ticks": 0,
         "hit_path": None,
         "completed_at": None,
     }
@@ -278,6 +279,7 @@ def _idle_pending_approval_state(agent, store, thread):
                     return "activity_unknown"
                 state["hit_path"] = None
 
+        state["ticks"] = int(state.get("ticks", 0)) + 1
         remaining = scan_budget
         while remaining > 0:
             if state["phase"] == "approvals":
@@ -310,6 +312,9 @@ def _idle_pending_approval_state(agent, store, thread):
                         state["active_root_cursor"] = cur
                         state["active_root_complete"] = done
                         state["pending_files"].extend(names)
+                        if not names and not done:
+                            _save_idle_scan_state(key, state)
+                            return "activity_unknown"
                         continue
                     if not state["pending_files"] and state["active_root_complete"]:
                         if _approval_dir_stamp(active_dir) != state["active_root_stamp"]:
@@ -340,6 +345,7 @@ def _idle_pending_approval_state(agent, store, thread):
                         state["roots_complete"] = done
                         pending_roots.extend(names)
                         if not names and not done:
+                            _save_idle_scan_state(key, state)
                             return "activity_unknown"
                         continue
                 if pending_roots:
@@ -394,6 +400,7 @@ def _idle_pending_approval_state(agent, store, thread):
                         state["confirmations_complete"] = done
                         state["pending_files"].extend(names)
                         if not names and not done:
+                            _save_idle_scan_state(key, state)
                             return "activity_unknown"
                         continue
                 if not state["pending_files"] and state["confirmations_complete"]:
@@ -410,6 +417,8 @@ def _idle_pending_approval_state(agent, store, thread):
             and state["confirmations_complete"]
             and not state["pending_files"]
         ):
+            if state["subdir_overflow"] and int(state.get("ticks", 0)) > 1:
+                return "activity_unknown"
             if state["visited_count"] > scan_budget and not state["subdir_overflow"]:
                 state["phase"] = "done"
                 state["completed_at"] = time.monotonic()

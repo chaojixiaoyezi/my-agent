@@ -407,3 +407,149 @@ def test_idle_approval_scan_lru_cursor_cache_remains_bounded(tmp_path):
         thread = SimpleNamespace(thread_id=f"thr-{i}", active_task_ids=())
         assert idle._idle_pending_approval_state(agent, store, thread) == "activity_unknown"
     assert len(idle._IDLE_APPROVAL_SCAN_CURSORS) <= idle._IdleApprovalScanPolicy.max_cursors
+
+
+def test_idle_approval_scan_multi_tick_subdir_overflow_fails_closed(tmp_path, monkeypatch):
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    monkeypatch.setattr(idle._IdleApprovalScanPolicy, "max_tracked_subdirs", 4)
+
+    storage_root = tmp_path / "conv"
+    owner_home = tmp_path / "owner_home"
+    approvals_dir = storage_root / "subagent_tool_approvals"
+    for idx in range(6):
+        subdir = approvals_dir / f"root-{idx:02d}"
+        subdir.mkdir(parents=True)
+        for item_idx in range(15):
+            (subdir / f"done-{item_idx:02d}.json").write_text(
+                json.dumps({"status": "completed", "thread_id": "other-thread"})
+            )
+
+    thread = SimpleNamespace(thread_id="thr-overflow", active_task_ids=())
+    store = SimpleNamespace(storage=SimpleNamespace(root=storage_root))
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_home),
+        config=SimpleNamespace(retention_scan_slice_entries=90),
+    )
+    key = (str(storage_root), str(owner_home), "thr-overflow")
+
+    # Tick 1 scans >4 subdirs (overflowing max_tracked_subdirs=4) and pauses before round end.
+    assert idle._idle_pending_approval_state(agent, store, thread) == "activity_unknown"
+    saved_state = idle._IDLE_APPROVAL_SCAN_CURSORS[key]
+    assert saved_state["subdir_overflow"] is True
+    tracked = set(saved_state["subdir_stamps"])
+    untracked_scanned = [
+        p.name
+        for p in sorted(approvals_dir.iterdir())
+        if p.name not in tracked and p.name != saved_state["active_root"]
+    ]
+    assert untracked_scanned
+
+    # Write a live pending approval inside an already-scanned untracked subdir (parent dir stamp unchanged).
+    (approvals_dir / untracked_scanned[0] / "live-pending.json").write_text(
+        json.dumps({"schema_version": "subagent_tool_approval.v1", "status": "pending", "thread_id": "thr-overflow"})
+    )
+
+    # Tick 2 completes round with subdir_overflow across >1 ticks -> fails closed (never ""), then fresh scan finds it.
+    tick2 = idle._idle_pending_approval_state(agent, store, thread)
+    assert tick2 == "activity_unknown"
+    assert tick2 != ""
+
+    discovered = None
+    for _ in range(5):
+        discovered = idle._idle_pending_approval_state(agent, store, thread)
+        if discovered == "pending_approval":
+            break
+    assert discovered == "pending_approval"
+
+
+@pytest.mark.parametrize("location", ["active_root", "confirmations"])
+def test_idle_approval_scan_portable_replay_preserves_cursor_across_eviction(tmp_path, monkeypatch, location):
+    from agent_py_agent.agent.user_space import directory_paging
+
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    with directory_paging._SCAN_LOCK:
+        while directory_paging._SCAN_STREAMS:
+            _, evicted = directory_paging._SCAN_STREAMS.popitem(last=False)
+            evicted[0].close()
+
+    monkeypatch.setattr(directory_paging, "_native_directory_supported", lambda: False)
+
+    storage_root = tmp_path / "conv"
+    owner_home = tmp_path / "owner_home"
+    if location == "active_root":
+        target_dir = storage_root / "subagent_tool_approvals" / "root-portable"
+    else:
+        target_dir = owner_home / "data" / "private_interactions"
+    target_dir.mkdir(parents=True)
+    for idx in range(350):
+        (target_dir / f"item-{idx:04d}.json").write_text(
+            json.dumps({"status": "completed", "thread_id": "other-thread"})
+        )
+
+    thread = SimpleNamespace(thread_id="thr-portable", active_task_ids=())
+    store = SimpleNamespace(storage=SimpleNamespace(root=storage_root))
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_home),
+        config=SimpleNamespace(retention_scan_slice_entries=100),
+    )
+    key = (str(storage_root), str(owner_home), "thr-portable")
+
+    before_fds = _fd_count()
+    # Two bounded ticks advance visited cursor to >= 199 before stream eviction.
+    assert idle._idle_pending_approval_state(agent, store, thread) == "activity_unknown"
+    assert idle._idle_pending_approval_state(agent, store, thread) == "activity_unknown"
+    state = idle._IDLE_APPROVAL_SCAN_CURSORS[key]
+    cursor_field = "active_root_cursor" if location == "active_root" else "confirmations_cursor"
+    saved_visited = state[cursor_field]["visited"]
+    assert saved_visited >= 199
+
+    # Evict _SCAN_STREAMS to force portable replay.
+    with directory_paging._SCAN_LOCK:
+        while directory_paging._SCAN_STREAMS:
+            _, evicted = directory_paging._SCAN_STREAMS.popitem(last=False)
+            evicted[0].close()
+
+    page_calls = 0
+    real_page = idle.directory_page
+
+    def counted_page(*args, **kwargs):
+        nonlocal page_calls
+        page_calls += 1
+        return real_page(*args, **kwargs)
+
+    monkeypatch.setattr(idle, "directory_page", counted_page)
+
+    # Pure-skip replay tick performs 1 directory_page call and preserves cursor in _IDLE_APPROVAL_SCAN_CURSORS.
+    replay_verdict = idle._idle_pending_approval_state(agent, store, thread)
+    assert replay_verdict == "activity_unknown"
+    assert page_calls == 1
+    assert key in idle._IDLE_APPROVAL_SCAN_CURSORS
+    assert idle._IDLE_APPROVAL_SCAN_CURSORS[key][cursor_field]["visited"] == saved_visited
+
+    # Subsequent ticks finish replay and converge cleanly to "" with no leaked FDs.
+    converged = None
+    for _ in range(10):
+        converged = idle._idle_pending_approval_state(agent, store, thread)
+        if converged == "":
+            break
+    assert converged == ""
+    assert _fd_count() - before_fds == 0
+
+    # Adding a pending approval is discovered across subsequent portable ticks, and resolving it converges to "".
+    pending_path = target_dir / "pending-portable.json"
+    write_json_file_atomic(pending_path, {"status": "pending", "thread_id": "thr-portable"})
+    found = None
+    for _ in range(10):
+        found = idle._idle_pending_approval_state(agent, store, thread)
+        if found == "pending_approval":
+            break
+    assert found == "pending_approval"
+
+    write_json_file_atomic(pending_path, {"status": "completed", "thread_id": "thr-portable"})
+    final_clean = None
+    for _ in range(10):
+        final_clean = idle._idle_pending_approval_state(agent, store, thread)
+        if final_clean == "":
+            break
+    assert final_clean == ""
+    assert _fd_count() - before_fds == 0
