@@ -234,8 +234,9 @@ def archive_ledger_file(src: Path, archive_dir: Path) -> bool:
         return False
     lock = Path(f"{src}.lock")
     try:
-        if lock.exists():
-            lock.rename(archive_dir / lock.name)
+        lock.rename(archive_dir / lock.name)
+    except FileNotFoundError:
+        pass
     except OSError as exc:
         logger = logging.getLogger(__name__)
         try:
@@ -260,13 +261,13 @@ def archive_ledger_file(src: Path, archive_dir: Path) -> bool:
 def read_json_object_report(
     path: Path, *, context: str
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    if not path.exists():
-        return {}, None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise DataCorruptionError(f"{path.name} is {type(payload).__name__}, expected object")
         return payload, None
+    except FileNotFoundError:
+        return {}, None
     except Exception as exc:
         report = runtime_error_report(exc, context=context)
         report["path"] = str(path)
