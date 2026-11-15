@@ -24,16 +24,25 @@ from ..assets.workflow_store import (
     WorkflowStore,
     normalize_workflow_asset_id,
 )
-from ..common.nofollow_fs import read_bytes_beneath, read_text_beneath
+from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath, read_text_beneath
 from .business_scope import (
     WorkflowPolicyRefusal,
     WorkflowScopeService,
     workflow_state,
 )
-from .run_store import WorkflowRunStore
+from .run_store import WorkflowRunStore, _decode_run, _is_blocking_workflow_run
 
 _max_blockers_page = 100
-_active_run_statuses = ("running", "queued", "waiting_for_agent", "paused_for_resume")
+_active_run_statuses = (
+    "starting",
+    "queued",
+    "running",
+    "waiting_for_agent",
+    "waiting_human",
+    "paused",
+    "paused_for_resume",
+    "cancelling",
+)
 _open_session_task_statuses = ("queued", "pending", "running", "accepted")
 # 有界分页：达到上限仍未取尽时按覆盖未知处理，不静默当作完整。
 _max_reference_pages = 100
@@ -442,44 +451,74 @@ class WorkflowReferenceReader:
             if self.owner_home is not None:
                 runs_root = self.owner_home / "data" / "workflow_runs"
                 index_path = self.owner_home / "data" / "workflow_run_index.sqlite3"
-                found_run_ids = set()
-                complete = True
+                found_run_ids: set[str] = set()
                 index_queried_ok = False
                 if index_path.exists():
                     try:
                         from .run_list_index import RunListIndex
 
                         idx = RunListIndex(self.owner_home)
-                        for st in _active_run_statuses:
-                            for q_id in (target_id, f"workflow:{target_id}"):
-                                page = idx.page(q_id, st, limit=_max_blockers_page + 1)
-                                complete = complete and len(page) <= _max_blockers_page
-                                for r_id, _ in page[:_max_blockers_page]:
-                                    found_run_ids.add(str(r_id))
+                        probe = idx.open_reference_probe(
+                            target_id, active_statuses=_active_run_statuses, limit=_max_blockers_page
+                        )
+                        pending_ids = probe["pending_ids"]
+                        legacy_ids = probe["legacy_ids"]
+                        complete = (
+                            bool(probe["open_ref_complete"])
+                            and not pending_ids
+                            and not legacy_ids
+                            and not probe["truncated"]
+                        )
+                        candidates = list(dict.fromkeys([*probe["candidate_ids"], *pending_ids, *legacy_ids]))
+                        retries = 2 if _supports_dir_fd() else 0
+                        for r_id in candidates[: _max_blockers_page * 2]:
+                            raw_bytes = read_bytes_beneath(
+                                self.owner_home, ("data", "workflow_runs", r_id, "run.json"), snapshot_retries=retries
+                            )
+                            if raw_bytes is None:
+                                if r_id in pending_ids:
+                                    complete = False
+                                continue
+                            data = json.loads(raw_bytes.decode("utf-8"))
+                            record = _decode_run(data)
+                            if record.workflow_run_id != r_id:
+                                complete = False
+                                continue
+                            if normalize_workflow_asset_id(record.workflow_id) == target_id and _is_blocking_workflow_run(record):
+                                found_run_ids.add(r_id)
                         index_queried_ok = True
                     except Exception:
                         index_queried_ok = False
+                        complete = False
                 if not index_queried_ok and runs_root.exists() and runs_root.is_dir():
                     scanned = 0
-                    max_scan = 100
+                    max_scan = _max_blockers_page
+                    retries = 2 if _supports_dir_fd() else 0
                     for entry in runs_root.iterdir():
                         if scanned >= max_scan:
                             complete = False
                             break
                         scanned += 1
-                        if not entry.is_dir() or entry.name.startswith("."):
+                        if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
                             continue
                         if entry.name in found_run_ids:
                             continue
-                        raw = read_text_beneath(self.owner_home, ("data", "workflow_runs", entry.name, "run.json"))
-                        if raw is None:
+                        raw_bytes = read_bytes_beneath(
+                            self.owner_home, ("data", "workflow_runs", entry.name, "run.json"), snapshot_retries=retries
+                        )
+                        if raw_bytes is None:
+                            complete = False
                             continue
-                        data = json.loads(raw)
-                        wf_id = normalize_workflow_asset_id(data.get("workflow_id", ""))
-                        st = data.get("status", "")
-                        if wf_id == target_id and st in _active_run_statuses:
+                        data = json.loads(raw_bytes.decode("utf-8"))
+                        record = _decode_run(data)
+                        if record.workflow_run_id != entry.name:
+                            complete = False
+                            continue
+                        if normalize_workflow_asset_id(record.workflow_id) == target_id and _is_blocking_workflow_run(record):
                             found_run_ids.add(entry.name)
-                for r_id in sorted(found_run_ids):
+                if len(found_run_ids) > _max_blockers_page:
+                    complete = False
+                for r_id in sorted(found_run_ids)[:_max_blockers_page]:
                     blockers.append({"ref": str(r_id), "kind": "workflow_run", "reason_code": "ACTIVE_WORKFLOW_RUN"})
             elif self.run_store is not None:
                 # Fallback for mock run_store

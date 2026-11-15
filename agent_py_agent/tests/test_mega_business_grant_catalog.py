@@ -146,6 +146,9 @@ def _normalize_compatible_schema_additions(api, schemas, definitions):
                            schemas["request_schema"]["oneOf"][index]["properties"]["params"]):
                 assert params["properties"]["scope"] == {"$ref": "#/$defs/ScopeSetCommand"}
                 params["properties"]["scope"] = {"$ref": "#/$defs/Scope"}
+    for defs in (api["$defs"], schemas["$defs"], definitions):
+        assert defs["Breakpoint"]["properties"]["step_id"] == {"$ref": "#/$defs/NullableId"}
+        defs["Breakpoint"]["properties"]["step_id"] = {"$ref": "#/$defs/Id"}
 
 
 def _normalize_observability_extensions(api, schemas, definitions):

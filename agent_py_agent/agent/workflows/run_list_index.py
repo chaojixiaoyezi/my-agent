@@ -200,6 +200,46 @@ def _legacy_run_name(name):
         return False
 
 
+def _normalize_wf_id(value):
+    from ..assets.workflow_store import normalize_workflow_asset_id
+
+    return str(normalize_workflow_asset_id(value) or '')
+
+
+def _row_is_open_reference(row):
+    from .run_store import _TERMINAL_RUN_STATUSES, _decode_run, _is_blocking_workflow_run
+
+    status = str(row.get('status') or '')
+    if status not in _TERMINAL_RUN_STATUSES:
+        return True
+    required = ('workflow_run_id', 'workflow_id', 'owner_id', 'trigger_kind', 'status', 'started_at', 'ended_at', 'duration_ms')
+    if all(key in row for key in required):
+        return _is_blocking_workflow_run(_decode_run(row))
+    return False
+
+
+def _open_reference_schema(conn):
+    has_scan = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='open_ref_scan'"
+    ).fetchone() is not None
+    conn.execute(
+        'CREATE TABLE IF NOT EXISTS open_ref_runs('
+        'run_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, revision INTEGER NOT NULL)'
+    )
+    conn.execute('CREATE INDEX IF NOT EXISTS open_ref_workflow ON open_ref_runs(workflow_id, run_id)')
+    conn.execute(
+        'CREATE TABLE IF NOT EXISTS open_ref_scan('
+        'singleton INTEGER PRIMARY KEY CHECK(singleton=1), '
+        'after_run_id TEXT NOT NULL, complete INTEGER NOT NULL)'
+    )
+    if not has_scan:
+        has_runs = conn.execute('SELECT 1 FROM runs LIMIT 1').fetchone() is not None
+        conn.execute(
+            "INSERT INTO open_ref_scan VALUES(1,'',?) ON CONFLICT(singleton) DO NOTHING",
+            (0 if has_runs else 1,),
+        )
+
+
 def _artifact_locator_schema(conn, version):
     if version < 3:
         conn.execute('CREATE TABLE IF NOT EXISTS artifact_run_keys('
@@ -261,6 +301,7 @@ class RunListIndex:
                 conn.execute('CREATE TABLE IF NOT EXISTS pending(run_id TEXT PRIMARY KEY)')
                 conn.execute('PRAGMA user_version=2')
             _artifact_locator_schema(conn, version)
+            _open_reference_schema(conn)
             yield conn
 
     # LLM: 待发表队列用主键索引，不把原子写临时文件当作未确认规范提交。
@@ -286,18 +327,66 @@ class RunListIndex:
     def publish_rows(self, rows):
         with self.connection() as conn:
             for row in rows:
+                run_id = row['workflow_run_id']
+                rev = row.get('revision', 0)
+                existing = conn.execute('SELECT revision FROM runs WHERE run_id=?', (run_id,)).fetchone()
                 conn.execute('''INSERT INTO runs VALUES(?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET
                     workflow_id=excluded.workflow_id, status=excluded.status,
                     sort_time=excluded.sort_time, revision=excluded.revision
                     WHERE excluded.revision >= runs.revision''',
-                    (row['workflow_run_id'], row['workflow_id'], row['status'], -row['started_at'], row.get('revision', 0)))
-                conn.execute('DELETE FROM legacy WHERE run_id=?', (row['workflow_run_id'],))
-                run_id = row['workflow_run_id']
+                    (run_id, row['workflow_id'], row['status'], -row['started_at'], rev))
+                if existing is None or rev >= existing[0]:
+                    if _row_is_open_reference(row):
+                        conn.execute(
+                            '''INSERT INTO open_ref_runs(run_id, workflow_id, revision) VALUES(?,?,?)
+                               ON CONFLICT(run_id) DO UPDATE SET
+                               workflow_id=excluded.workflow_id, revision=excluded.revision
+                               WHERE excluded.revision >= open_ref_runs.revision''',
+                            (run_id, _normalize_wf_id(row['workflow_id']), rev),
+                        )
+                    else:
+                        conn.execute('DELETE FROM open_ref_runs WHERE run_id=? AND revision <= ?', (run_id, rev))
+                conn.execute('DELETE FROM legacy WHERE run_id=?', (run_id,))
                 if len(run_id) > 64:
                     from .run_artifacts import workflow_artifact_run_key
                     conn.execute('INSERT OR IGNORE INTO artifact_run_keys VALUES(?,?)',
                                  (workflow_artifact_run_key(run_id), run_id))
             _advance_artifact_keys(conn)
+
+    def open_reference_probe(self, target_id, *, active_statuses, limit=100):
+        """有界读取开放引用候选、待发布标记与未迁移队列，禁止做全历史扫描。"""
+        norm_target = _normalize_wf_id(target_id)
+        q_ids = tuple(dict.fromkeys([norm_target, f'workflow:{norm_target}']))
+        status_tuple = tuple(active_statuses)
+        placeholders_w = ','.join('?' for _ in q_ids)
+        placeholders_s = ','.join('?' for _ in status_tuple)
+        with self.connection() as conn:
+            scan_row = conn.execute('SELECT complete FROM open_ref_scan WHERE singleton=1').fetchone()
+            open_ref_complete = bool(scan_row and scan_row[0])
+            pending_ids = [row[0] for row in conn.execute('SELECT run_id FROM pending ORDER BY run_id LIMIT ?', (limit + 1,))]
+            legacy_ids = [row[0] for row in conn.execute('SELECT run_id FROM legacy ORDER BY run_id LIMIT ?', (limit + 1,))]
+            open_candidates = [row[0] for row in conn.execute(
+                f'SELECT run_id FROM open_ref_runs WHERE workflow_id IN ({placeholders_w}) ORDER BY run_id LIMIT ?',
+                (*q_ids, limit + 1),
+            )]
+            status_candidates = [row[0] for row in conn.execute(
+                f'SELECT run_id FROM runs WHERE workflow_id IN ({placeholders_w}) AND status IN ({placeholders_s}) LIMIT ?',
+                (*q_ids, *status_tuple, limit + 1),
+            )] if status_tuple else []
+        truncated = (
+            len(pending_ids) > limit
+            or len(legacy_ids) > limit
+            or len(open_candidates) > limit
+            or len(status_candidates) > limit
+        )
+        candidates = list(dict.fromkeys([*open_candidates[:limit], *status_candidates[:limit]]))
+        return {
+            'open_ref_complete': open_ref_complete,
+            'pending_ids': pending_ids[:limit],
+            'legacy_ids': legacy_ids[:limit],
+            'candidate_ids': candidates,
+            'truncated': truncated,
+        }
 
     def artifact_run_ids(self, run_key):
         """已有库有界自愈；未覆盖与缺索引返回unknown，由公开读取端映射可恢复503。"""
@@ -350,6 +439,51 @@ class RunListIndex:
             if data['workflow_run_id'] != name:
                 raise ValueError('运行身份与目录不匹配')
             self.publish_rows([data])
+        if len(names) < batch_size:
+            self._advance_open_refs(store, batch_size=batch_size)
+
+    def _advance_open_refs(self, store, *, batch_size=32):
+        with self.connection() as conn:
+            row = conn.execute('SELECT after_run_id,complete FROM open_ref_scan WHERE singleton=1').fetchone()
+            if not row or row[1]:
+                return
+            cursor = row[0]
+            names = [r[0] for r in conn.execute(
+                'SELECT run_id FROM runs WHERE run_id>? ORDER BY run_id LIMIT ?', (cursor, batch_size),
+            )]
+        if not names:
+            with self.connection() as conn:
+                conn.execute('UPDATE open_ref_scan SET complete=1 WHERE singleton=1')
+            return
+        rows = []
+        missing = []
+        for name in names:
+            try:
+                data = store._read(name, 'run.json', concurrent_publication=True)
+            except FileNotFoundError:
+                missing.append(name)
+                continue
+            rows.append(data)
+        with self.connection() as conn:
+            for data in rows:
+                run_id = data['workflow_run_id']
+                rev = data.get('revision', 0)
+                if _row_is_open_reference(data):
+                    conn.execute(
+                        '''INSERT INTO open_ref_runs(run_id, workflow_id, revision) VALUES(?,?,?)
+                           ON CONFLICT(run_id) DO UPDATE SET
+                           workflow_id=excluded.workflow_id, revision=excluded.revision
+                           WHERE excluded.revision >= open_ref_runs.revision''',
+                        (run_id, _normalize_wf_id(data['workflow_id']), rev),
+                    )
+                else:
+                    conn.execute('DELETE FROM open_ref_runs WHERE run_id=? AND revision <= ?', (run_id, rev))
+            for name in missing:
+                conn.execute('DELETE FROM open_ref_runs WHERE run_id=?', (name,))
+            conn.execute(
+                'UPDATE open_ref_scan SET after_run_id=?,complete=? WHERE singleton=1 AND after_run_id=?',
+                (names[-1], int(len(names) < batch_size), cursor),
+            )
 
     # LLM: marker只定位原运行；短锁内发布并ACK，忙时保留marker，旧快照不得覆盖新revision。
     # 函数用途: 恢复 canonical 已提交但尚未确认的索引发布。
