@@ -324,7 +324,11 @@ def test_managed_profile_dream_single_io_error_at_governance_policy_read_fails_c
     assert maint.get("user_profile_dream", {}).get("status") != "consolidated"
     assert maint["reason"] == "STORE_UNAVAILABLE"
     assert maint["errors"]["user_profile_dream"] == "STORE_UNAVAILABLE"
-    assert _snapshot_user_profile_state(home.home_dir, repo) == before
+    # Note: NW3R1-P1-04 preserves pre-dream backup on STORE_UNAVAILABLE while USER.md & versions.jsonl stay untouched.
+    after_maint = _snapshot_user_profile_state(home.home_dir, repo)
+    assert after_maint[:2] == before[:2]
+    assert set(before[2]).issubset(set(after_maint[2]))
+    assert len(after_maint[2]) in {len(before[2]), len(before[2]) + 1}
 
     # Direct consolidate_user_profile also fails closed when single EIO hits policy read leaf.
     injection_count = 0
@@ -337,7 +341,7 @@ def test_managed_profile_dream_single_io_error_at_governance_policy_read_fails_c
     assert injection_count == 1
     assert exc_info.value.code == "STORE_UNAVAILABLE"
     assert exc_info.value.outcome == "not_started"
-    assert _snapshot_user_profile_state(home.home_dir, repo) == before
+    assert _snapshot_user_profile_state(home.home_dir, repo) == after_maint
 
 
 def test_managed_profile_dream_lock_order_and_concurrent_policy_flip_interleaving(
