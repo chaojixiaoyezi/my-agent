@@ -528,9 +528,9 @@ def test_skill_sequences_reject_bare_strings(tmp_path, kind):
     assert calls == [] and run.steps[0].llm_involved is False
 
 
-# LLM: 同时覆盖磁盘资产入口与可序列化 dataclass 协议，避免只测手工字典。
-# 函数用途: 验证dataclass定义以及Store明确缺失时的安全回退；正式Store入口另有真实集成测试。
-def test_dataclass_and_missing_store_fallback_entrypoints(tmp_path, monkeypatch):
+# LLM: 同时覆盖正式 WorkflowStore 资产与可序列化 dataclass 协议入口，避免只测手工字典。
+# 函数用途: 验证 dataclass 定义与已存储工作流编号入口及 Owner 隔离；fw41 W5 起首次运行登记要求正式 WorkflowStore 资产。
+def test_dataclass_and_missing_store_fallback_entrypoints(tmp_path):
     # LLM: 测试只复现资产定义的序列化合同，不依赖并行模块完成时序。
     # 类用途: 提供嵌套描述及元组步骤的最小数据结构。
     @dataclass
@@ -538,13 +538,22 @@ def test_dataclass_and_missing_store_fallback_entrypoints(tmp_path, monkeypatch)
         descriptor: dict
         steps: tuple
 
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.workflow_store import (
+        WorkflowDefinition,
+        WorkflowStepSpec,
+        WorkflowStore,
+    )
+
     script(tmp_path, 'print(\'{"value": 1}\')')
     definition = Definition({'id': 'daily', 'kind': 'workflow', 'name': 'daily', 'owner_id': 'alice'}, (step(),))
-    folder = tmp_path / 'workflows' / 'daily'
-    folder.mkdir(parents=True)
-    (folder / 'workflow.json').write_text(json.dumps(asdict(definition)))
-    from agent_py_agent.agent.assets.workflow_store import WorkflowStore
-    monkeypatch.setattr(WorkflowStore, 'get_workflow', lambda *args: None)
+    # fw41 W5 起首次运行登记通过 WorkflowStore 读取已保存工作流资产，不再由嵌套 workflow.json 回退替代。
+    WorkflowStore(tmp_path).save_workflow(
+        WorkflowDefinition(
+            AssetDescriptor('daily', 'workflow', 'daily', owner_id='alice'),
+            (WorkflowStepSpec('collect', 'collect', 'deterministic_script', script_id='collect'),),
+        )
+    )
     engine = WorkflowEngine(tmp_path)
     assert engine.run_workflow(definition, owner_id='alice').final_output == {'value': 1}
     assert engine.run_workflow('daily', owner_id='alice').status == 'succeeded'

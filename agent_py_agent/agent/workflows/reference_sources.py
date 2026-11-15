@@ -46,6 +46,7 @@ _active_run_statuses = (
 _open_session_task_statuses = ("queued", "pending", "running", "accepted")
 # 有界分页：达到上限仍未取尽时按覆盖未知处理，不静默当作完整。
 _max_reference_pages = 100
+_max_open_ref_backfill_batches = 32
 
 
 def _workflow_reference(value, target, *, typed=False):
@@ -461,6 +462,15 @@ class WorkflowReferenceReader:
                         probe = idx.open_reference_probe(
                             target_id, active_statuses=_active_run_statuses, limit=_max_blockers_page
                         )
+                        if not probe["open_ref_complete"]:
+                            backfill_store = WorkflowRunStore(self.owner_home)
+                            for _ in range(_max_open_ref_backfill_batches):
+                                if probe["open_ref_complete"]:
+                                    break
+                                idx.backfill(backfill_store)
+                                probe = idx.open_reference_probe(
+                                    target_id, active_statuses=_active_run_statuses, limit=_max_blockers_page
+                                )
                         pending_ids = probe["pending_ids"]
                         legacy_ids = probe["legacy_ids"]
                         complete = (
