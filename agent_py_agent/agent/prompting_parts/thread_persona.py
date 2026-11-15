@@ -115,6 +115,12 @@ def _read_or_freeze_snapshot(
         if saved is None or saved["epoch"] != epoch:
             saved = _snapshot_record(epoch, current)
             write_private_text_file_atomic_unlocked(path, json.dumps(saved, ensure_ascii=False))
+        elif saved.get("user_refresh_pending") is True:
+            # 做梦仅使 user 失效时，同代次下轮仅把新 user 刷新回固定前缀，不改 agents/soul/来源元数据。
+            updated = {key: value for key, value in saved.items() if key != "user_refresh_pending"}
+            updated["sections"] = saved["sections"] | {"user": str(current.sections.get("user") or "")}
+            write_private_text_file_atomic_unlocked(path, json.dumps(updated, ensure_ascii=False))
+            saved = updated
         return saved["sections"]
 
 
@@ -184,6 +190,8 @@ def _read_snapshot(path: Path) -> dict | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return _invalid_snapshot(path)
     if not isinstance(saved, dict) or saved.get("schema_version") != 1 or not isinstance(saved.get("epoch"), dict):
+        return _invalid_snapshot(path)
+    if "user_refresh_pending" in saved and not isinstance(saved["user_refresh_pending"], bool):
         return _invalid_snapshot(path)
     sections = saved.get("sections")
     if not isinstance(sections, dict) or list(sections) != ["agents", "soul", "user", "diagnostics"]:
@@ -386,10 +394,11 @@ def expire_thread_user_persona_prefixes(owner_home: Path) -> int:
                 if saved is None:
                     continue
                 sections = saved["sections"]
-                if not str(sections.get("user") or ""):
+                if saved.get("user_refresh_pending") is True and not str(sections.get("user") or ""):
                     continue
                 updated = dict(saved)
                 updated["sections"] = sections | {"user": ""}
+                updated["user_refresh_pending"] = True
                 write_private_text_file_atomic_unlocked(
                     path, json.dumps(updated, ensure_ascii=False)
                 )
