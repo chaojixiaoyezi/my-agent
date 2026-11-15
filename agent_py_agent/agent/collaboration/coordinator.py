@@ -102,7 +102,16 @@ class CollaborationCoordinator:
                 continue
             if case.status != "open":
                 continue
-            decision = self._tick_case(case, now=now)
+            # 单 case 局部 I/O 异常仅延迟当前 case，避免阻断同批次健康 case；非 OSError 仍继续上抛。
+            try:
+                decision = self._tick_case(case, now=now)
+            except OSError as exc:
+                logger.warning(
+                    "COLLABORATION_CASE_DEFERRED case_id=%s error_type=%s",
+                    case_id,
+                    type(exc).__name__,
+                )
+                continue
             if decision is not None:
                 decisions.append(decision)
         return decisions
