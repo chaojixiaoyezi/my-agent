@@ -3211,7 +3211,8 @@ agent_py_agent/
 |   |   |-- recall.py                 # active long-term/正式 lesson/HOT 的 owner+scope 安全召回
 |   |   |-- retention.py              # 统一 Retention service facade
 |   |   |-- retention_*.py            # 策略/计划/重验证/可恢复删除和 hard-delete 辅助模块
-|   |   `-- security.py               # Memory/Persona 共用持久内容威胁扫描
+|   |   |-- security.py               # Memory/Persona 共用持久内容威胁扫描
+|   |   `-- user_profile_dream.py     # USER.md 周期性空闲归并、跨项目去重与长期记忆迁移
 |   |-- memory_api.py                  # CLI/外层包使用的公开 Memory façade；只转发正式 Service/DTO，不建第二权威
 |   |-- memory_push.py                 # planner/runner 决策点只召回正式 Lesson/HOT，并复用唯一 memory-context 信封
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
@@ -4541,6 +4542,7 @@ docs/
 - `agent_py_agent/agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`：分别负责建议策略、连接隔离和实际模型调用；复用原存储/准入/取消/账本，不建立第二份任务权威。
 - `agent_py_agent/agent/conversation/decision_observe_nonblocking.py`：observe 不挡主链路（开关 `observe_nonblocking_enabled`）的唯一后台执行器，只执行决策服务交来的已登记调用，负责结果行、独立用量结算与完成回调，不另建决策状态。
 - `agent_py_agent/agent/memory_store/curator_routing.py`：记忆整理按“消息来源会话的主代理模型”分组的纯函数。批内第一条消息所在的组先跑，工具审计事件只跟 owner 默认模型那组；熔断历史只看同一模型、且投影到本组会话的游标；一次触发里多组结果汇总。路由表由组合根 `core._curator_model_router` 经 `settings/curator_profile.curator_thread_profiles` 只读解析后注入。
+- `agent_py_agent/agent/memory_store/user_profile_dream.py`：USER.md 周期性空闲归并、跨项目去重与长期记忆迁移（仅限 `target="user"`，经 `long_term` 落盘与双 CAS 提交并失效线程 user 前缀）。
 - `agent_py_agent/agent/memory_store/decision_curator.py`：原用户后台批次的临时分类/优先级建议；关闭不准备，失败保留完整输入，原提取/提交仍唯一。
 - `agent_py_agent/agent/memory_store/decision_curator_relation.py`：完整来源和正式 long-term 版本的可选关系注释；复用同一阶段、原仓库和账本，没有直接合并/晋升权限。消息×正式条目对数超过上限时按标准库 BM25 词面相似度挑前 32 对（同分保持原枚举顺序、无嵌入调用），并在 `state.coverage` 声明总对数、展示对数与挑选规则。
 - `agent_py_agent/tests/test_decision_curator_relation.py`：验证关系输入完整性、失效、原模型账本、作用域和 Curator 提取提交，fake 模型不代表真实语义质量。
