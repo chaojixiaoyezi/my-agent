@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import errno
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -408,3 +409,130 @@ def test_nw3_r1_p1_04_pre_commit_backup_cleanup_controls(
         HostAPIError("STORE_UNAVAILABLE", 503, outcome="not_started"),
     )
     assert len(preserved_other_code) == 1
+
+
+@pytest.mark.parametrize("first_commit_conflict", [False, True])
+def test_nw3_r2_p1_01_exact_case_distinct_relocation_and_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_commit_conflict: bool,
+) -> None:
+    owner_home = _make_owner_home_1gib(tmp_path)
+    repo = _make_repo(owner_home)
+    long_term = JsonlMemory(owner_home / "memory" / "long_term" / "memory.jsonl")
+    assert repo.quota_enforcer.max_bytes == 1024**3
+
+    entries = [
+        "workspace_id: AlphaOne",
+        "workspace_id: alphaone",
+        *[f"工作模块记录 {idx}: detail {idx}" for idx in range(69)],
+    ]
+    source = "# USER.md\n\n" + "\n".join(f"- {item}" for item in entries) + "\n"
+    (owner_home / "USER.md").write_text(source, encoding="utf-8")
+    now = datetime(2026, 11, 15, tzinfo=timezone.utc)
+
+    def run(at: datetime) -> dict[str, object]:
+        return run_user_profile_dream_if_due(
+            owner_home=owner_home,
+            persona_repository=repo,
+            long_term_store=long_term,
+            config=AgentConfig(),
+            now=at,
+        )
+
+    if first_commit_conflict:
+        def conflict(**_kwargs):
+            raise PersonaConflictError("simulated concurrent USER.md edit")
+
+        with monkeypatch.context() as patch_context:
+            patch_context.setattr(repo, "consolidate_user_profile", conflict)
+            with pytest.raises(PersonaConflictError):
+                run(now)
+        assert (owner_home / "USER.md").read_text(encoding="utf-8") == source
+        assert len(long_term.all()) == 22
+        assert not (owner_home / "persona" / "user_dream_state.json").exists()
+
+    outcome = run(now + timedelta(days=1))
+    assert outcome["status"] == "consolidated"
+    assert outcome["entry_threshold"] == 70
+    assert outcome["token_threshold"] == 5000
+    assert len(outcome["kept_source_ids"]) == 49
+    assert len(outcome["relocated_ids"]) == 22
+    assert outcome["superseded_ids"] == []
+
+    records = long_term.all()
+    assert len(records) == 22
+    for row in records:
+        assert (row.attributes or {}).get("subject_key") == (
+            f"user-profile-dream:{persona_entry_id('user', row.content)}"
+        )
+    durable = {row.content for row in records}
+    assert entries[0] in durable and entries[1] in durable
+
+    kept = {
+        line[2:]
+        for line in (owner_home / "USER.md").read_text(encoding="utf-8").splitlines()
+        if line.startswith("- ")
+    }
+    assert len(kept) == 49
+    assert kept | durable == set(entries)
+
+    assert run(now + timedelta(days=2))["reason"] == "watermark_unchanged"
+    assert len(long_term.all()) == 22
+
+
+def test_nw3_r2_p1_04_single_post_publish_directory_fsync_eio_preserves_backup_and_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_home = _make_owner_home_1gib(tmp_path, "dir_fsync")
+    repo = _make_repo(owner_home)
+    agent = _fake_agent(owner_home, repo)
+    long_term = JsonlMemory(owner_home / "memory" / "long_term" / "memory.jsonl")
+    before = _seed_history_then_72_entries(owner_home, repo)
+
+    real_transfer = persona_version_ledger.transfer
+    real_fsync = os.fsync
+    state = {"published": False, "failures": 0}
+
+    def tracked_transfer(source, destination, **kwargs):
+        value = real_transfer(source, destination, **kwargs)
+        if Path(destination) == repo.versions_path:
+            state["published"] = True
+        return value
+
+    def fail_one_directory_sync(descriptor: int) -> None:
+        if state["published"] and state["failures"] == 0:
+            descriptor_stat = os.fstat(descriptor)
+            parent_stat = repo.versions_path.parent.stat()
+            if (descriptor_stat.st_dev, descriptor_stat.st_ino) == (
+                parent_stat.st_dev,
+                parent_stat.st_ino,
+            ):
+                state["failures"] += 1
+                raise OSError(errno.EIO, "simulated I/O error")
+        return real_fsync(descriptor)
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr(persona_version_ledger, "transfer", tracked_transfer)
+        ctx.setattr(os, "fsync", fail_one_directory_sync)
+        with pytest.raises(PersonaLedgerPublishedError):
+            run_user_profile_dream_if_due(
+                owner_home=owner_home,
+                persona_repository=repo,
+                long_term_store=long_term,
+                config=AgentConfig(),
+                now=datetime(2026, 11, 15, 18, 0, tzinfo=timezone.utc),
+            )
+
+    assert state["failures"] == 1
+    assert (owner_home / "USER.md").read_bytes() != before
+    rows = [row for row in repo.history("user") if row.get("action") == "consolidate"]
+    assert len(rows) == 1
+    backup = owner_home / str(rows[0]["pre_dream_backup_ref"])
+    assert backup.is_file() and not backup.is_symlink()
+    assert backup.read_bytes() == before
+
+    rolled = UpdatePersonaTool(agent).execute({"action": "rollback", "target": "user"})
+    assert rolled.ok is True
+    assert (owner_home / "USER.md").read_bytes() == before
