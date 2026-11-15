@@ -283,7 +283,12 @@ class TuiControlOperationReconciler:
         try:
             self._reconcile_one(entry)
         except Exception as exc:  # noqa: BLE001 - durable row remains for the normal retry lane
-            self.on_error(exc)
+            try:
+                self.on_error(exc)
+            finally:
+                # Outbox file locks have already unwound; wait a bounded backoff while keeping
+                # the in-memory claim so failure recovery does not hot-spin.
+                self.stop_event.wait(self.maximum_delay)
         finally:
             with self._lock:
                 self._inflight_message_ids.discard(entry.message_id)

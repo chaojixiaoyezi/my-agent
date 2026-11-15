@@ -1763,6 +1763,7 @@ class _TuiSessionRuntimeMixin(
         self._permission_coordinator = TuiPermissionCoordinator(self)
         self._background_activity = _TuiBackgroundActivityController(self)
         self.conversation_reset_generation = 0
+        self._assistant_reply_first_number = 1
         self._conversation_history_binding = None
 
     # LLM: worker传入共享历史和原锁，runtime仅负责成功new时清理，不复制或持久化第二份正文。
@@ -1783,6 +1784,7 @@ class _TuiSessionRuntimeMixin(
     def publish_conversation_reset(self, thread_id: str) -> JournalAppendResult:
         with self._lock:
             self.conversation_reset_generation += 1
+            self._assistant_reply_first_number = 1
             if self._conversation_history_binding is not None:
                 history, history_lock, outputs = self._conversation_history_binding
                 with history_lock:
