@@ -96,7 +96,17 @@ def _tui_cleanup_after_job(
     try:
         if agent_response_text:
             if not response_recorded:
-                cfg.assistant_outputs.append(agent_response_text)
+                runtime = getattr(cfg, "tui_runtime", None)
+                if isinstance(runtime, TuiRuntime):
+                    with runtime._lock:
+                        cfg.assistant_outputs.append(agent_response_text)
+                        limit = max(1, int(runtime.store.reducer.max_stable_blocks))
+                        overflow = max(0, len(cfg.assistant_outputs) - limit)
+                        if overflow > 0:
+                            del cfg.assistant_outputs[:overflow]
+                            runtime._assistant_reply_first_number += overflow
+                else:
+                    cfg.assistant_outputs.append(agent_response_text)
             _append_conversation_turn(
                 ConversationTurnAppendRequest(
                     conversation_history=cfg.conversation_history,

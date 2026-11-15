@@ -12,6 +12,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from weakref import WeakKeyDictionary, WeakSet
 
 from .tui_identity_window import TuiIdentityWindow
 from .tui_params import StartWorkerParams, WorkerConfigParams
@@ -335,7 +336,7 @@ class _NoticeRefreshWake:
         self.lock = threading.Lock()
         self.enabled, self.polling = True, False
         self.thread = threading.get_ident()
-        self.states = {}
+        self.states: WeakKeyDictionary[object, tuple] = WeakKeyDictionary()
         self.runtime, self.navigation = runtime, navigation
         self.previous_callback = None
         self.bind(runtime)
@@ -372,7 +373,7 @@ class _NoticeRefreshWake:
             if not self.enabled:
                 return
             current = self.signature(runtime, store.snapshot())
-            previous = self.states[store]
+            previous = self.states.get(store)
             self.states[store] = current
             if current != previous and not (self.polling and threading.get_ident() == self.thread):
                 self.event.set()
@@ -1164,7 +1165,7 @@ class _RefreshCadence:
         self.signals = _WakeableStop(stop, navigation)
         self.changed_at = time.monotonic()
         self.lock = threading.Lock()
-        self.subscribed = set()
+        self.subscribed: WeakSet[object] = WeakSet()
 
     # LLM: 仅当前store事件能重置安静计时；旧页的迟到更新不能让当前页持续快刷。
     # 函数用途: 在发布时立即记录最近显示事件时间。

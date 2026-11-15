@@ -652,9 +652,11 @@ class NetworkGatewayObserver:
         last_observed_updated_at = None
 
         def refresh_inactivity_deadline() -> None:
-            nonlocal rolling_deadline
+            nonlocal rolling_deadline, hard_mono_deadline
             timeout_span = default_inactivity if default_inactivity < float("inf") else max(_WAIT_POLL_STEPS_SECONDS[-1] * 4, 30.0)
             rolling_deadline = time.monotonic() + timeout_span
+            if getattr(request, "on_wait_timeout", None) is not None:
+                hard_mono_deadline = max(hard_mono_deadline, rolling_deadline)
 
         def current_remaining_seconds() -> float:
             effective_deadline = min(hard_mono_deadline, rolling_deadline)
@@ -670,6 +672,7 @@ class NetworkGatewayObserver:
                     return {}
                 request.on_wait_timeout()
                 rolling_deadline = time.monotonic() + max(_WAIT_POLL_STEPS_SECONDS[-1], inactivity_timeout)
+                hard_mono_deadline = max(hard_mono_deadline, rolling_deadline)
             if not self._http_only:
                 headers = {**self._headers(), "Accept": "text/event-stream"}
                 if self.cursor:

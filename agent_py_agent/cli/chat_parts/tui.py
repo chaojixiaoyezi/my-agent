@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from agent_py_agent.cli.chat_parts.control_runtime import ChatControlState
 
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,7 +64,12 @@ class TuiLoopContext:
 # LLM: rich TUI 展开只读已保存的完整回复；直接使用slash_commands的共享解析规则，展示文案
 # 不得另造一套参数合同或英文 fallback。
 # 函数用途: 展开最后一条或指定编号的完整助手回复。
-def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:
+def _tui_handle_expand_command(
+    raw: str,
+    assistant_outputs: list[str],
+    *,
+    first_number: int = 1,
+) -> bool:
     from .slash_commands import parse_expand_target
 
     target = parse_expand_target(raw)
@@ -73,12 +79,23 @@ def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:
     if not assistant_outputs:
         _cprint("当前没有可展开的助手回复。")
         return True
-    index = len(assistant_outputs) if target == "last" else int(target)
-    if index < 1 or index > len(assistant_outputs):
-        _cprint(f"没有编号为 {index} 的助手回复；当前共有 {len(assistant_outputs)} 条。")
+    first = max(1, int(first_number))
+    last_number = first + len(assistant_outputs) - 1
+    index = last_number if target == "last" else int(target)
+    if 1 <= index < first:
+        _cprint(
+            f"编号为 {index} 的助手回复已超出当前保留范围（#{first}～#{last_number}）；"
+            "请通过会话历史浏览更早回复。"
+        )
+        return True
+    if index < 1 or index > last_number:
+        if first == 1:
+            _cprint(f"没有编号为 {index} 的助手回复；当前共有 {len(assistant_outputs)} 条。")
+        else:
+            _cprint(f"没有编号为 {index} 的助手回复；当前保留范围为 #{first}～#{last_number}。")
         return True
     _cprint(f"===== 助手回复 #{index} =====")
-    _cprint(assistant_outputs[index - 1])
+    _cprint(assistant_outputs[index - first])
     _cprint("===== 回复结束 =====")
     return True
 
@@ -128,7 +145,15 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
         _tui_request_exit(_make_tui_exit_refs(params))
         return True
     if params.user == "/expand" or params.user.startswith("/expand "):
-        return _tui_handle_expand_command(params.user, params.assistant_outputs)
+        runtime = getattr(params, "tui_runtime", None)
+        if runtime is not None:
+            with getattr(runtime, "_lock", nullcontext()):
+                outputs = list(params.assistant_outputs)
+                first_number = int(getattr(runtime, "_assistant_reply_first_number", 1))
+        else:
+            outputs = list(params.assistant_outputs)
+            first_number = 1
+        return _tui_handle_expand_command(params.user, outputs, first_number=first_number)
     from .tui_business_spaces import handle_tui_business_command
 
     if handle_tui_business_command(params.user, agent=params.agent, print_line=_cprint,
@@ -143,7 +168,10 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
             runtime = getattr(params, "tui_runtime", None)
             if runtime is not None:
                 runtime.publish_conversation_reset(result.details["thread_id"])
-            params.assistant_outputs.clear()
+                with getattr(runtime, "_lock", nullcontext()):
+                    params.assistant_outputs.clear()
+            else:
+                params.assistant_outputs.clear()
         return result
     return handle_common_slash_command(
         params.user,
