@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import shlex
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -1495,8 +1496,13 @@ def _start_pty_sleeper(
     attempt_id: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    runtime_python = sys.executable
+    if sys.platform.startswith("linux"):
+        runtime_python = shutil.which("python3", path=os.defpath)
+        if runtime_python is None:
+            raise RuntimeError("Linux PTY regression fixture requires system python3 in os.defpath")
     py_expr = '__import__("time").sleep(60)'
-    cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(py_expr)}"
+    cmd = f"{shlex.quote(runtime_python)} -c {shlex.quote(py_expr)}"
     scope = {
         "owner_home": str(owner_home),
         "session_id": thread_id,
@@ -1966,3 +1972,87 @@ def test_settled_sweep_mixed_or_missing_attempt_id_falls_back_to_per_record_stop
             _terminate_sleeper_proc(proc)
         _terminate_sleeper_proc(proc_new)
         pty_registry.clear()
+
+
+def test_start_pty_sleeper_selects_system_python_on_linux(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[tuple[str, Path, Path, dict[str, str]]] = []
+    which_calls: list[tuple[str, str | None]] = []
+
+    class _FakeRegistry:
+        def start(
+            self,
+            command: str,
+            target: Path,
+            *,
+            owner_home: Path,
+            run_scope: dict[str, str],
+        ):
+            started.append((command, target, owner_home, run_scope))
+            return SimpleNamespace(session_id="pty-fake")
+
+    work_dir = tmp_path / "work"
+    owner_home = tmp_path / "owner-home"
+    expected_expr = shlex.quote('__import__("time").sleep(60)')
+
+    def _fake_which_present(name: str, *, path: str | None = None) -> str:
+        which_calls.append((name, path))
+        return "/usr/bin/python3"
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", _fake_which_present)
+    res = _start_pty_sleeper(
+        _FakeRegistry(),  # type: ignore[arg-type]
+        work_dir=work_dir,
+        owner_home=owner_home,
+        thread_id="t-1",
+        task_id="task-1",
+        run_id="run-1",
+        attempt_id="att-1",
+        monkeypatch=monkeypatch,
+    )
+    assert res.session_id == "pty-fake"
+    assert which_calls == [("python3", os.defpath)]
+    assert started[-1][0] == f"{shlex.quote('/usr/bin/python3')} -c {expected_expr}"
+
+    def _fake_which_missing(name: str, *, path: str | None = None) -> None:
+        which_calls.append((name, path))
+        return None
+
+    monkeypatch.setattr(shutil, "which", _fake_which_missing)
+    before_count = len(started)
+    with pytest.raises(
+        RuntimeError,
+        match="Linux PTY regression fixture requires system python3 in os.defpath",
+    ):
+        _start_pty_sleeper(
+            _FakeRegistry(),  # type: ignore[arg-type]
+            work_dir=work_dir,
+            owner_home=owner_home,
+            thread_id="t-1",
+            task_id="task-1",
+            run_id="run-1",
+            attempt_id="att-1",
+            monkeypatch=monkeypatch,
+        )
+    assert len(started) == before_count
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("shutil.which should not run on darwin")),
+    )
+    _start_pty_sleeper(
+        _FakeRegistry(),  # type: ignore[arg-type]
+        work_dir=work_dir,
+        owner_home=owner_home,
+        thread_id="t-1",
+        task_id="task-1",
+        run_id="run-1",
+        attempt_id="att-1",
+        monkeypatch=monkeypatch,
+    )
+    assert started[-1][0] == f"{shlex.quote(sys.executable)} -c {expected_expr}"
