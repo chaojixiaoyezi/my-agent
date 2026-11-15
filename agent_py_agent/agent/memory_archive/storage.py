@@ -5,11 +5,15 @@ from __future__ import annotations
 
 from ..common.json_io import (
     append_private_jsonl_records,
+    append_private_jsonl_records_unlocked,
     jsonl_lines,
+    locked_json_path,
     write_private_json_file_atomic,
     write_private_text_file_atomic,
 )
-from ..common.nofollow_fs import open_readonly_file_beneath
+from ..common.nofollow_fs import ensure_private_dir, open_readonly_file_beneath
+
+_default_append_private_jsonl_records = append_private_jsonl_records
 
 """JSONL storage primitives for memory hook snapshots and raw archive events.
 
@@ -102,12 +106,35 @@ def filter_raw_event_for_level(payload: dict[str, Any], level: int) -> dict[str,
     return result
 
 
+def _append_verified_jsonl_record(
+    path: Path,
+    record: dict[str, Any],
+    *,
+    key: str,
+    value: str,
+) -> None:
+    """在同一把 path 锁内追加单条私有 JSONL 记录并执行有界尾部回读核验。"""
+
+    ensure_private_dir(path.parent)
+    if append_private_jsonl_records is _default_append_private_jsonl_records:
+        with locked_json_path(path):
+            append_private_jsonl_records_unlocked(path, [record], sort_keys=True)
+            _verify_record_exists(path, key=key, value=value, expected=record)
+        return
+    append_private_jsonl_records(path, [record], sort_keys=True)
+    with locked_json_path(path):
+        _verify_record_exists(path, key=key, value=value, expected=record)
+
+
 def append_snapshot(root: str | Path, snapshot: CompressionSnapshot) -> Path:
 
     path = snapshot_path_for(root, snapshot.created_at)
-    payload = snapshot.to_dict()
-    append_private_jsonl_records(path, [payload], sort_keys=True)
-    _verify_record_exists(path, key="snapshot_id", value=snapshot.snapshot_id, expected=payload)
+    _append_verified_jsonl_record(
+        path,
+        snapshot.to_dict(),
+        key="snapshot_id",
+        value=snapshot.snapshot_id,
+    )
     return path
 
 
@@ -123,13 +150,17 @@ def write_compression_snapshot_file(root: str | Path, snapshot: CompressionSnaps
 def append_raw_event(root: str | Path, event: RawMemoryEvent) -> Path:
 
     path = raw_event_path_for(root, event.created_at)
-    payload = filter_raw_event_for_level(event.to_dict(), event.archive_level)
-    append_private_jsonl_records(path, [payload], sort_keys=True)
-    _verify_record_exists(path, key="event_id", value=event.event_id, expected=payload)
+    record = filter_raw_event_for_level(event.to_dict(), event.archive_level)
+    _append_verified_jsonl_record(
+        path,
+        record,
+        key="event_id",
+        value=event.event_id,
+    )
     return path
 
 
-# LLM: JSONL 审计与快照尾部回读只验证刚追加的记录；大账本先从文件末尾有界切片回扫，仅当单条超长或尾部未命中时回退全量读取，保持完整相等校验与 LF 切分语义。
+# LLM: JSONL 审计与快照尾部回读只验证刚追加的记录；从文件末尾有界切片回扫，不再回退整文件全量读取，保持完整相等校验与 LF 切分语义。
 # 函数用途: 从末尾倒序核对刚写入的 JSONL 记录已完整落盘，避免每次追加都把整日大文件全量读入内存。
 def _verify_record_exists(path: Path, *, key: str, value: str, expected: dict[str, Any]) -> None:
     """Read a JSONL file backwards and confirm the just-written record is present.
@@ -148,34 +179,31 @@ def _verify_record_exists(path: Path, *, key: str, value: str, expected: dict[st
         normalized_expected=normalized_expected,
     ):
         return
-    if _scan_verified_jsonl_lines(
-        path.read_text(encoding="utf-8"),
-        key=key,
-        value=value,
-        normalized_expected=normalized_expected,
-    ):
-        return
     raise MemoryArchiveError(f"readback failed for {key}={value} in {path}")
 
 
-# LLM: 仅在文件尺寸超过尾部窗口时按字节 seek 并丢弃首段残行，确保切分点落在物理 LF 之后，不破坏多字节 UTF-8 字符。
-# 函数用途: 读取大 JSONL 文件尾部完整行文本；小文件或尾部无完整换行时返回 None 交由全量读取兜底。
+# LLM: 从文件尾部有界切片读取；仅当 start > 0 时丢弃首段残行并保证切在物理 LF 之后（不破坏多字节 UTF-8），
+#   当 start == 0 时完整保留第 0 行；失败时返回 None 由调用方抛 MemoryArchiveError，不做全文件读取回退。
+# 函数用途: 读取大 JSONL 文件尾部有界窗口内的完整行文本。
 def _read_tail_jsonl_text(path: Path, *, min_bytes: int) -> str | None:
     try:
         with path.open("rb") as handle:
             handle.seek(0, 2)
             size = handle.tell()
-            if size <= min_bytes:
+            if size <= 0:
                 return None
-            handle.seek(size - min_bytes)
-            raw = handle.read()
+            start = max(0, size - max(0, int(min_bytes)))
+            handle.seek(start)
+            raw = handle.read(size - start)
     except OSError:
         return None
-    first_nl = raw.find(b"\n")
-    if first_nl < 0:
-        return None
+    if start > 0:
+        first_nl = raw.find(b"\n")
+        if first_nl < 0:
+            return None
+        raw = raw[first_nl + 1 :]
     try:
-        return raw[first_nl + 1 :].decode("utf-8")
+        return raw.decode("utf-8")
     except UnicodeDecodeError:
         return None
 

@@ -204,11 +204,11 @@ class TextVectorCache:
                 stamp = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
             except FileNotFoundError:
                 stamp = ()
-            if stamp != self._read_stamp or self.last_read_error is not None:
+            if stamp != self._read_stamp or isinstance(self.last_read_error, OSError):
                 self.last_read_error = None
                 self._items = self._load()
-                # 用读取之前的指纹：期间若发生原子替换，下次get仍能发现它。
-                self._read_stamp = stamp if self.last_read_error is None else None
+                # 用读取之前的指纹：期间若发生原子替换，下次get仍能发现它；确定性坏内容按指纹缓存，仅 OSError 重试。
+                self._read_stamp = None if isinstance(self.last_read_error, OSError) else stamp
         except (OSError, UnicodeError) as exc:
             self.last_read_error = exc
             self._items = {}

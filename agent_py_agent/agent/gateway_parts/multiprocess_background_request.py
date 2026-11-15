@@ -393,8 +393,19 @@ def curator_input_revision(owner_home):
     from ..owner_wake_discovery import _owner_fact_signature
 
     parts = _owner_fact_signature(owner_home)
-    relevant = [(name, payload) for name, payload in parts
-                if name.startswith("messages:") or name in {"audit", "memory/candidates.jsonl", "memory/curator/state.json"}]
+    relevant = [
+        (name, value)
+        for name, value in parts
+        if name.startswith("messages:")
+        or name
+        in {
+            "audit",
+            "memory/candidates.jsonl",
+            "memory/curator/state.json",
+            "memory/long_term/memory.jsonl.manifest.json",
+            "memory/long_term/memory_read_index.sqlite3",
+        }
+    ]
     return source_digest(relevant)
 
 
