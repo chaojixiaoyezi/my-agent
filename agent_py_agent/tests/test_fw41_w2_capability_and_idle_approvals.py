@@ -300,6 +300,8 @@ def test_runtime_stale_attempts_settle_orphan_capabilities_and_protects_unproven
 
 @pytest.mark.parametrize("location", ["approvals", "private_interactions"])
 def test_idle_approval_scan_resumes_beyond_1024_and_converges(tmp_path, monkeypatch, location):
+    from pathlib import Path
+
     idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
     storage_root = tmp_path / "conv"
     owner_home = tmp_path / "owner_home"
@@ -307,7 +309,7 @@ def test_idle_approval_scan_resumes_beyond_1024_and_converges(tmp_path, monkeypa
     store = SimpleNamespace(storage=SimpleNamespace(root=storage_root))
     agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=owner_home))
 
-    total_completed = 1520
+    total_completed = 1521
     if location == "approvals":
         views_dir = storage_root / "subagent_tool_approvals" / ".views"
         views_dir.mkdir(parents=True)
@@ -324,8 +326,10 @@ def test_idle_approval_scan_resumes_beyond_1024_and_converges(tmp_path, monkeypa
         (target_dir / f"a-{idx:04d}.json").write_text(
             json.dumps({"status": "completed", "thread_id": "other-thread"})
         )
-    pending_file = target_dir / "zzz-pending-tail.json"
-    pending_file.write_text(json.dumps(pending_record))
+    with os.scandir(target_dir) as it:
+        json_paths = [Path(e.path) for e in it if e.name.endswith(".json")]
+    pending_file = json_paths[-1]
+    pending_file.write_text(json.dumps(pending_record), encoding="utf-8")
 
     before = _fd_count()
     tick1 = idle._idle_pending_approval_state(agent, store, thread)
@@ -552,4 +556,481 @@ def test_idle_approval_scan_portable_replay_preserves_cursor_across_eviction(tmp
         if final_clean == "":
             break
     assert final_clean == ""
+    assert _fd_count() - before_fds == 0
+
+
+def test_idle_approval_scan_4097_terminal_roots_converges_while_catching_4097th_pending(tmp_path):
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.conversation.models import ThreadTaskLink
+    from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
+
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    before_fds = _fd_count()
+    owner_dir = tmp_path / "owner"
+    storage_root = owner_dir / "conversations"
+    store = ConversationStore(storage_root)
+    thread = store.threads.create(canonical_user_id="user")
+    approvals_dir = store.storage.root / "subagent_tool_approvals"
+    approvals_dir.mkdir(parents=True, exist_ok=True)
+    total_roots = idle._IdleApprovalScanPolicy.max_tracked_subdirs + 1
+    assert total_roots == 4097
+    first_task_path = store.storage.task_path("root-0000")
+    first_task_path.parent.mkdir(parents=True, exist_ok=True)
+    for idx in range(total_roots):
+        root_id = f"root-{idx:04d}"
+        link = ThreadTaskLink(thread_id=thread.thread_id, task_id=root_id, goal="done", status="completed")
+        store.storage.task_path(root_id).write_text(json.dumps(link.to_dict()), encoding="utf-8")
+        (approvals_dir / root_id).mkdir()
+
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_dir),
+        config=AgentConfig(retention_scan_slice_entries=128),
+        subagents=SimpleNamespace(
+            list_runs_for_root_report=lambda _rid: SubAgentListRunsReport(runs=[], load_errors=[]),
+        ),
+    )
+
+    state_result = "activity_unknown"
+    for _ in range(256):
+        state_result = idle._idle_pending_approval_state(agent, store, thread)
+        if state_result != "activity_unknown":
+            break
+    assert state_result == ""
+    key = (str(store.storage.root), str(owner_dir), str(thread.thread_id))
+    assert idle._IDLE_APPROVAL_SCAN_CURSORS[key]["phase"] == "done"
+    assert idle._IDLE_APPROVAL_SCAN_CURSORS[key]["subdir_overflow"] is False
+    assert idle._IDLE_APPROVAL_SCAN_CURSORS[key]["subdir_stamps"] == {}
+    assert idle._idle_pending_approval_state(agent, store, thread) == ""
+
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    with os.scandir(approvals_dir) as it:
+        tail_root = [e.name for e in it if not e.name.startswith(".")][-1]
+    late_pending = approvals_dir / tail_root / "req-late.json"
+    late_pending.write_text(json.dumps({"status": "pending", "thread_id": thread.thread_id}), encoding="utf-8")
+    caught = "activity_unknown"
+    for _ in range(256):
+        caught = idle._idle_pending_approval_state(agent, store, thread)
+        if caught != "activity_unknown":
+            break
+    assert caught == "pending_approval"
+
+    late_pending.unlink()
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    assert idle._idle_pending_approval_state(agent, store, thread) == "activity_unknown"
+    mid_dir = approvals_dir / "root-9999-mid"
+    mid_dir.mkdir()
+    (mid_dir / "req-mid.json").write_text(
+        json.dumps({"status": "pending", "thread_id": thread.thread_id}),
+        encoding="utf-8",
+    )
+    mid_caught = "activity_unknown"
+    for _ in range(256):
+        mid_caught = idle._idle_pending_approval_state(agent, store, thread)
+        if mid_caught != "activity_unknown":
+            break
+    assert mid_caught == "pending_approval"
+    assert _fd_count() - before_fds == 0
+
+
+def test_idle_approval_scan_terminal_exemption_still_enforces_non_terminal_and_open_subagent_overflow(
+    tmp_path, monkeypatch
+):
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.conversation.models import ThreadTaskLink
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+    from agent_py_agent.agent.subagents.models import TaskStatus
+    from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
+
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    owner_dir = tmp_path / "owner"
+    store = ConversationStore(owner_dir / "conversations")
+    thread = store.threads.create(canonical_user_id="user")
+    approvals_dir = store.storage.root / "subagent_tool_approvals"
+    approvals_dir.mkdir(parents=True, exist_ok=True)
+    store.storage.task_path("seed").parent.mkdir(parents=True, exist_ok=True)
+
+    for root_id, link_status in (
+        ("root-active", "active"),
+        ("root-interrupted", "interrupted"),
+        ("root-done-1", "completed"),
+        ("root-done-2", "completed"),
+        ("root-done-3", "completed"),
+        ("root-open-run", "completed"),
+        ("root-open-cap", "completed"),
+        ("root-err-run", "completed"),
+        ("root-settled", "completed"),
+    ):
+        link = ThreadTaskLink(thread_id=thread.thread_id, task_id=root_id, goal="g", status=link_status)
+        store.storage.task_path(root_id).write_text(json.dumps(link.to_dict()), encoding="utf-8")
+
+    reports = {
+        "root-open-run": SubAgentListRunsReport(
+            runs=[SimpleNamespace(status=TaskStatus.RUNNING, capability_requests=())],
+            load_errors=[],
+        ),
+        "root-open-cap": SubAgentListRunsReport(
+            runs=[
+                SimpleNamespace(
+                    status=TaskStatus.DONE,
+                    capability_requests=[
+                        CapabilityRequest(
+                            id="cap-1",
+                            from_run_id="sub-1",
+                            problem="need",
+                            needed_capability="tool",
+                            status="OPEN",
+                        )
+                    ],
+                )
+            ],
+            load_errors=[],
+        ),
+        "root-err-run": SubAgentListRunsReport(runs=[], load_errors=[{"error": "corrupt"}]),
+        "root-settled": SubAgentListRunsReport(
+            runs=[
+                SimpleNamespace(
+                    status=TaskStatus.DONE,
+                    capability_requests=[
+                        CapabilityRequest(
+                            id="cap-closed",
+                            from_run_id="sub-2",
+                            problem="need",
+                            needed_capability="tool",
+                            status="CLOSED",
+                        )
+                    ],
+                )
+            ],
+            load_errors=[],
+        ),
+    }
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_dir),
+        config=AgentConfig(retention_scan_slice_entries=1),
+        subagents=SimpleNamespace(
+            list_runs_for_root_report=lambda rid: reports.get(rid, SubAgentListRunsReport(runs=[], load_errors=[])),
+        ),
+    )
+
+    assert idle._root_is_settled_terminal_history(agent, store, "root-active") is False
+    assert idle._root_is_settled_terminal_history(agent, store, "root-interrupted") is False
+    assert idle._root_is_settled_terminal_history(agent, store, "root-missing") is False
+    assert idle._root_is_settled_terminal_history(agent, store, "root-open-run") is False
+    assert idle._root_is_settled_terminal_history(agent, store, "root-open-cap") is False
+    assert idle._root_is_settled_terminal_history(agent, store, "root-err-run") is False
+    assert idle._root_is_settled_terminal_history(agent, store, "root-settled") is True
+
+    monkeypatch.setattr(idle._IdleApprovalScanPolicy, "max_tracked_subdirs", 2)
+    for root_id in ("root-done-1", "root-done-2", "root-done-3", "root-active", "root-interrupted"):
+        (approvals_dir / root_id).mkdir()
+
+    converged = "activity_unknown"
+    for _ in range(40):
+        converged = idle._idle_pending_approval_state(agent, store, thread)
+        if converged != "activity_unknown":
+            break
+    assert converged == ""
+
+    (approvals_dir / "root-missing").mkdir()
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    for _ in range(40):
+        overflow_state = idle._idle_pending_approval_state(agent, store, thread)
+        if overflow_state != "activity_unknown":
+            break
+    assert idle._idle_pending_approval_state(agent, store, thread) == "activity_unknown"
+
+
+def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_plus_threads(
+    tmp_path, monkeypatch
+):
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.conversation.models import ThreadTaskLink
+    from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
+
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    before_fds = _fd_count()
+    owner_dir = tmp_path / "owner"
+    store = ConversationStore(owner_dir / "conversations")
+    approvals_dir = store.storage.root / "subagent_tool_approvals"
+    approvals_dir.mkdir(parents=True, exist_ok=True)
+    store.storage.task_path("seed").parent.mkdir(parents=True, exist_ok=True)
+
+    threads = []
+    for _ in range(idle._IdleApprovalScanPolicy.max_cursors + 14):
+        thr = store.threads.create(canonical_user_id="user")
+        thr = store.threads.record_user_activity(thr.thread_id, now=100.0)
+        threads.append(thr)
+
+    for idx in range(12):
+        root_id = f"active-root-{idx:02d}"
+        link = ThreadTaskLink(thread_id=threads[0].thread_id, task_id=root_id, goal="work", status="active")
+        store.storage.task_path(root_id).write_text(json.dumps(link.to_dict()), encoding="utf-8")
+        (approvals_dir / root_id).mkdir()
+
+    def _fake_prepare_factory(recorded: list[str], *, capture_storage_root: bool = False):
+        def _fake_prepare(_agent, conv_store, thread, *, options=None):
+            recorded.append(str(conv_store.storage.root) if capture_storage_root else thread.thread_id)
+            return SimpleNamespace(
+                compacted=True,
+                thread=conv_store.threads.require(thread.thread_id),
+                messages=(),
+                projected_tokens=800_000,
+                trigger_tokens=600_000,
+            )
+
+        return _fake_prepare
+
+    compacted_ids: list[str] = []
+    monkeypatch.setattr(
+        idle,
+        "list_background_processes",
+        lambda *_a, **_k: {"projection_ok": True, "items": []},
+    )
+    monkeypatch.setattr(
+        idle,
+        "inspect_conversation_context",
+        lambda *_a, **_k: SimpleNamespace(projected_tokens=800_000, context_window_tokens=1_000_000),
+    )
+    monkeypatch.setattr(idle, "prepare_conversation_context", _fake_prepare_factory(compacted_ids))
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_dir),
+        config=AgentConfig(
+            retention_scan_slice_entries=4,
+            memory_compact_idle_max_per_tick=2,
+            memory_compact_idle_trigger_percent=50,
+            memory_compact_idle_seconds=1800,
+        ),
+        conversation_store=store,
+        backend=object(),
+        subagents=SimpleNamespace(
+            list_runs=lambda: [],
+            list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[]),
+            list_runs_for_root_report=lambda _rid: SubAgentListRunsReport(runs=[], load_errors=[]),
+        ),
+    )
+
+    tick_cursor: dict[str, object] = {}
+    for _ in range(12):
+        report = idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)
+        assert report["failed"] == 0
+        if compacted_ids:
+            break
+    assert compacted_ids, "continuation priority must converge threads before >256 cursor eviction"
+    assert all(isinstance(tid, str) and tid.startswith("thread-") for tid in compacted_ids)
+
+    first_thread_id = threads[0].thread_id
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    idle._save_idle_scan_state(
+        (str(store.storage.root), str(owner_dir), first_thread_id),
+        {
+            "phase": "approvals",
+            "approvals_stamp": (0, 0),
+            "confirmations_stamp": None,
+            "subdir_stamps": {},
+            "subdir_overflow": False,
+            "roots_cursor": {},
+            "roots_complete": False,
+            "active_root": None,
+            "active_root_stamp": None,
+            "active_root_cursor": {},
+            "active_root_complete": False,
+            "pending_files": [],
+            "visited_count": 1,
+            "ticks": 1,
+            "hit_path": None,
+        },
+    )
+    store.threads.record_user_activity(first_thread_id, now=7399.0)
+    compacted_after = len(compacted_ids)
+    for _ in range(16):
+        idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)
+        if len(compacted_ids) > compacted_after:
+            break
+    assert len(compacted_ids) > compacted_after
+    key_first = (str(store.storage.root), str(owner_dir), first_thread_id)
+    assert key_first not in idle._IDLE_APPROVAL_SCAN_CURSORS
+
+    scans = tick_cursor.get("directories", {})
+    for scan in scans.values():
+        scan.close()
+    assert _fd_count() - before_fds == 0
+
+
+def test_idle_compact_maintenance_tick_retains_continuation_after_single_mid_scan_mutation(
+    tmp_path, monkeypatch
+):
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.conversation.models import ThreadTaskLink
+    from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
+
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    before_fds = _fd_count()
+    owner_dir = tmp_path / "owner"
+    store = ConversationStore(owner_dir / "conversations")
+    approvals_dir = store.storage.root / "subagent_tool_approvals"
+    approvals_dir.mkdir(parents=True, exist_ok=True)
+    store.storage.task_path("seed").parent.mkdir(parents=True, exist_ok=True)
+
+    threads = []
+    for _ in range(idle._IdleApprovalScanPolicy.max_cursors + 14):
+        thr = store.threads.create(canonical_user_id="user")
+        thr = store.threads.record_user_activity(thr.thread_id, now=100.0)
+        threads.append(thr)
+
+    for idx in range(12):
+        root_id = f"active-root-{idx:02d}"
+        link = ThreadTaskLink(thread_id=threads[0].thread_id, task_id=root_id, goal="work", status="active")
+        store.storage.task_path(root_id).write_text(json.dumps(link.to_dict()), encoding="utf-8")
+        (approvals_dir / root_id).mkdir()
+
+    compacted_ids: list[str] = []
+    monkeypatch.setattr(
+        idle,
+        "list_background_processes",
+        lambda *_a, **_k: {"projection_ok": True, "items": []},
+    )
+    monkeypatch.setattr(
+        idle,
+        "inspect_conversation_context",
+        lambda *_a, **_k: SimpleNamespace(projected_tokens=800_000, context_window_tokens=1_000_000),
+    )
+    monkeypatch.setattr(
+        idle,
+        "prepare_conversation_context",
+        lambda _agent, conv_store, thread, *, options=None: (
+            compacted_ids.append(thread.thread_id)
+            or SimpleNamespace(
+                compacted=True,
+                thread=conv_store.threads.require(thread.thread_id),
+                messages=(),
+                projected_tokens=800_000,
+                trigger_tokens=600_000,
+            )
+        ),
+    )
+
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_dir),
+        config=AgentConfig(
+            retention_scan_slice_entries=4,
+            memory_compact_idle_max_per_tick=1,
+            memory_compact_idle_trigger_percent=50,
+            memory_compact_idle_seconds=1800,
+        ),
+        conversation_store=store,
+        backend=object(),
+        subagents=SimpleNamespace(
+            list_runs=lambda: [],
+            list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[]),
+            list_runs_for_root_report=lambda _rid: SubAgentListRunsReport(runs=[], load_errors=[]),
+        ),
+    )
+
+    tick_cursor: dict[str, object] = {}
+    assert idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)["failed"] == 0
+    assert len(idle._IDLE_APPROVAL_SCAN_CURSORS) == 1
+    target_key = next(iter(idle._IDLE_APPROVAL_SCAN_CURSORS))
+    assert idle._IDLE_APPROVAL_SCAN_CURSORS[target_key]["restarts"] == 0
+
+    (approvals_dir / "active-root-extra").mkdir()
+    assert idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)["failed"] == 0
+    assert target_key in idle._IDLE_APPROVAL_SCAN_CURSORS
+    assert idle._IDLE_APPROVAL_SCAN_CURSORS[target_key]["restarts"] == 1
+    assert idle._IDLE_APPROVAL_SCAN_CURSORS[target_key]["phase"] != "done"
+
+    for _ in range(24):
+        assert idle.idle_compact_maintenance_tick(agent, cursor=tick_cursor, now=7400.0)["failed"] == 0
+        if target_key[2] in compacted_ids:
+            break
+    assert target_key[2] in compacted_ids
+
+    for scan in tick_cursor.get("directories", {}).values():
+        scan.close()
+    assert _fd_count() - before_fds == 0
+
+
+def test_idle_compact_maintenance_tick_preserves_in_progress_cursor_across_256_plus_active_owners(
+    tmp_path, monkeypatch
+):
+    from contextlib import nullcontext
+
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.subagents.services.persistence.service import SubAgentListRunsReport
+
+    idle._IDLE_APPROVAL_SCAN_CURSORS.clear()
+    before_fds = _fd_count()
+
+    compacted_owners: list[str] = []
+    monkeypatch.setattr(
+        idle,
+        "list_background_processes",
+        lambda *_a, **_k: {"projection_ok": True, "items": []},
+    )
+    monkeypatch.setattr(
+        idle,
+        "inspect_conversation_context",
+        lambda *_a, **_k: SimpleNamespace(projected_tokens=800_000, context_window_tokens=1_000_000),
+    )
+
+    def _fake_prepare(_agent, conv_store, thread, *, options=None):
+        compacted_owners.append(str(conv_store.storage.root))
+        return SimpleNamespace(
+            compacted=True,
+            thread=conv_store.threads.require(thread.thread_id),
+            messages=(),
+            projected_tokens=800_000,
+            trigger_tokens=600_000,
+        )
+
+    monkeypatch.setattr(idle, "prepare_conversation_context", _fake_prepare)
+
+    shared_config = AgentConfig(
+        retention_scan_slice_entries=4,
+        memory_compact_idle_max_per_tick=2,
+        memory_compact_idle_trigger_percent=50,
+        memory_compact_idle_seconds=1800,
+    )
+    shared_subagents = SimpleNamespace(
+        list_runs=lambda: [],
+        list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[]),
+        list_runs_for_root_report=lambda _rid: SubAgentListRunsReport(runs=[], load_errors=[]),
+    )
+
+    owners = []
+    total_owners = idle._IdleApprovalScanPolicy.max_cursors + 14
+    for idx in range(total_owners):
+        owner_dir = tmp_path / f"owner-{idx:03d}"
+        store = ConversationStore(owner_dir / "conversations")
+        thr = store.threads.create(canonical_user_id=f"user-{idx}")
+        store.threads.record_user_activity(thr.thread_id, now=100.0)
+        approvals_dir = store.storage.root / "subagent_tool_approvals"
+        approvals_dir.mkdir(parents=True, exist_ok=True)
+        for sub_idx in range(8):
+            (approvals_dir / f"sub-{sub_idx:02d}").mkdir()
+        owners.append(
+            SimpleNamespace(
+                home_paths=SimpleNamespace(owner_home_dir=owner_dir),
+                config=shared_config,
+                conversation_store=store,
+                backend=object(),
+                subagents=shared_subagents,
+            )
+        )
+
+    base_agent = owners[0]
+    base_agent._owner_pool = SimpleNamespace(
+        active_agents=lambda: owners[1:],
+        pin=lambda *_a, **_k: nullcontext(),
+    )
+
+    tick_cursor: dict[str, object] = {}
+    for _ in range(12):
+        idle.idle_compact_maintenance_tick(base_agent, cursor=tick_cursor, now=7400.0)
+        if compacted_owners:
+            break
+    assert compacted_owners, "multi-owner pool must finish active continuation cursors before >256 eviction"
+    assert len(idle._IDLE_APPROVAL_SCAN_CURSORS) < 16
+
+    for scan in tick_cursor.get("directories", {}).values():
+        scan.close()
     assert _fd_count() - before_fds == 0
