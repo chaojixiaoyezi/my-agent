@@ -2,12 +2,27 @@
 # 模块用途: 覆盖策展性能优化、游标恢复和未结执行责任。
 from __future__ import annotations
 
+import errno
+import inspect
+import json
+import os
+from contextlib import ExitStack
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from agent_py_agent.agent.memory_store import curator_audit_cursor as audit_cursor
 from agent_py_agent.agent.memory_store.curator import CuratorInputError
+from agent_py_agent.agent.memory_store.curator_commit import (
+    CandidateObservation,
+    CuratorBatchCommit,
+    CuratorSuccessCommit,
+)
+from agent_py_agent.agent.memory_store.curator_inputs import _audit_input
+from agent_py_agent.agent.memory_store.curator_run_log import CuratorRunRecord
 from agent_py_agent.tests.test_curator_uncertain_outcome import _unknown
 from agent_py_agent.tests.test_memory_curator_v2 import (
     _conversation,
@@ -755,3 +770,350 @@ def test_h16_learning_excluded_messages_do_not_stall_pagination(tmp_path):
     assert ex1.message_id != ex2.message_id
     assert [row.message_id for row in rows] == [normal.message_id]
     assert skipped[thread.thread_id] == ex2.message_id
+
+
+def _curator_fd_count() -> int | None:
+    for probe in (Path("/dev/fd"), Path("/proc/self/fd")):
+        if probe.is_dir():
+            return len(os.listdir(probe))
+    return None
+
+
+def _setup_two_shard_curator(tmp_path: Path, *, create_audit: bool = True):
+    store, thread, message = _conversation(tmp_path)
+    audit = tmp_path / "audit"
+    first = audit / "1970-01-01.jsonl"
+    if create_audit:
+        audit.mkdir(parents=True, exist_ok=True)
+        for day, event_id in ((1, "event-a"), (2, "event-b")):
+            row = {
+                "event_id": event_id,
+                "action": "tool_call",
+                "created_at": f"1970-01-0{day}T00:00:12+00:00",
+                "status": "ok",
+                "tool_name": "read_file",
+                "tool_call_id": f"call-{event_id}",
+                "tool_success": True,
+                "effect_outcome": "confirmed",
+                "operation_id": f"operation-{event_id}",
+                "run_id": "run-1",
+                "task_id": "task-1",
+                "request_id": "request-1",
+                "thread_id": thread.thread_id,
+                "content_preview": f"Completed read {event_id}.",
+            }
+            (audit / f"1970-01-0{day}.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    model_output = _valid_output(thread.thread_id, message.message_id, message.content)
+    backend = _StaticStructuredBackend(model_output)
+    service = _service(tmp_path, backend, store)
+    original_collect = service._collect
+    collections: list[dict[str, object]] = []
+
+    def record_collect(*args, **kwargs):
+        batch = original_collect(*args, **kwargs)
+        ids = [row.event_id for row in batch.audit_events]
+        collections.append({"event_ids": ids, "errors": list(batch.load_errors)})
+        model_output["processed_audit_refs"] = [{"event_id": eid} for eid in ids]
+        model_output["next_cursor"]["last_audit_event_id"] = ids[-1] if ids else None
+        return batch
+
+    service._collect = record_collect
+    return service, thread, message, audit, first, backend, original_collect, collections
+
+
+def test_r4_curator_earlier_shard_stat_eio_processes_both_shards(tmp_path):
+    service, _thread, _message, audit, first, backend, original_collect, collections = _setup_two_shard_curator(tmp_path)
+    original_stat = os.stat
+    stat_faults = 0
+
+    def fault_stat(target, *args, **kwargs):
+        nonlocal stat_faults
+        if str(target) in {str(first), str(audit)}:
+            frame = inspect.currentframe()
+            caller = frame.f_back.f_code.co_name if frame and frame.f_back else ""
+            if caller in {"isfile", "is_file", "exists"}:
+                stat_faults += 1
+                raise OSError(errno.EIO, "simulated I/O error")
+        return original_stat(target, *args, **kwargs)
+
+    fd_before = _curator_fd_count()
+    with ExitStack() as stack:
+        for name in ("supports_dir_fd", "supports_follow_symlinks", "supports_fd"):
+            current = getattr(os, name)
+            if original_stat in current:
+                stack.enter_context(patch.object(os, name, current | {fault_stat}))
+        stack.enter_context(patch.object(os, "stat", fault_stat))
+        result = service.run(reason="admin")
+
+    assert stat_faults == 0
+    assert result.status == "succeeded"
+    assert backend.calls == 1
+    assert collections == [{"event_ids": ["event-a", "event-b"], "errors": []}]
+    state = service.state_store.load()
+    assert state.last_processed_audit_event_id == "event-b"
+    assert not state.active_lease
+    next_batch = original_collect(state, include_formal=False)
+    assert [row.event_id for row in next_batch.audit_events] == [] and not next_batch.load_errors
+    cold_rows, cold_errors = audit_cursor.collect_audit_window(
+        audit_cursor.AuditRead(audit, "", 80, 60_000),
+        _audit_input,
+    )
+    assert [row.event_id for row in cold_rows] == ["event-a", "event-b"] and not cold_errors
+    if fd_before is not None:
+        assert _curator_fd_count() == fd_before
+
+
+def test_r4_curator_shard_open_eio_blocks_commit_and_recovers(tmp_path):
+    service, _thread, _message, _audit, first, backend, _original_collect, collections = _setup_two_shard_curator(
+        tmp_path
+    )
+    original_open = Path.open
+    open_faults = 0
+
+    def fault_open(target, *args, **kwargs):
+        nonlocal open_faults
+        if target == first and open_faults == 0:
+            frame = inspect.currentframe()
+            caller = frame.f_back.f_code.co_name if frame and frame.f_back else ""
+            if caller == "_read_slice":
+                open_faults += 1
+                raise OSError(errno.EIO, "simulated I/O error")
+        return original_open(target, *args, **kwargs)
+
+    fd_before = _curator_fd_count()
+    with patch.object(Path, "open", fault_open):
+        failed = service.run(reason="admin")
+    assert open_faults == 1
+    assert failed.status == "failed"
+    assert failed.failure_code == "CURATOR_INPUT_AUDIT_READ_FAILED"
+    assert backend.calls == 0
+    state_after_fail = service.state_store.load()
+    assert state_after_fail.last_processed_audit_event_id == ""
+    assert not state_after_fail.active_lease
+    if fd_before is not None:
+        assert _curator_fd_count() == fd_before
+
+    fd_before = _curator_fd_count()
+    recovered = service.run(reason="admin")
+    assert recovered.status == "succeeded"
+    assert backend.calls == 1
+    assert collections[-1]["event_ids"] == ["event-a", "event-b"]
+    assert not collections[-1]["errors"]
+    assert service.state_store.load().last_processed_audit_event_id == "event-b"
+    if fd_before is not None:
+        assert _curator_fd_count() == fd_before
+
+
+def test_r4_curator_missing_audit_dir_vs_scandir_eio(tmp_path):
+    # 1. 审计目录真实缺失时保持空/非致命语义，不影响正常消息策展。
+    missing_root = tmp_path / "missing-audit-case"
+    svc_missing, thread, message, _audit, _first, be_missing, _orig, col_missing = _setup_two_shard_curator(
+        missing_root, create_audit=False
+    )
+    fd_before = _curator_fd_count()
+    missing_result = svc_missing.run(reason="admin")
+    assert missing_result.status == "succeeded"
+    assert be_missing.calls == 1
+    assert col_missing == [{"event_ids": [], "errors": []}]
+    missing_state = svc_missing.state_store.load()
+    assert missing_state.per_thread_cursors[thread.thread_id] == message.message_id
+    assert missing_state.last_processed_audit_event_id == ""
+    if fd_before is not None:
+        assert _curator_fd_count() == fd_before
+
+    # 2. 审计目录发生单次 scandir EIO 时必须按输入读错失败，不调用模型也不推进游标。
+    eio_root = tmp_path / "scandir-eio-case"
+    svc_eio, _t2, _m2, audit_dir, _f2, be_eio, _orig2, col_eio = _setup_two_shard_curator(eio_root, create_audit=True)
+    original_scandir = os.scandir
+    dir_faults = 0
+
+    def fault_scandir(target, *args, **kwargs):
+        nonlocal dir_faults
+        if Path(target) == audit_dir and dir_faults == 0:
+            dir_faults += 1
+            raise OSError(errno.EIO, "simulated I/O error")
+        return original_scandir(target, *args, **kwargs)
+
+    fd_before = _curator_fd_count()
+    with patch.object(os, "scandir", fault_scandir):
+        dir_failed = svc_eio.run(reason="admin")
+    assert dir_faults == 1
+    assert dir_failed.status == "failed"
+    assert dir_failed.failure_code == "CURATOR_INPUT_AUDIT_READ_FAILED"
+    assert be_eio.calls == 0
+    assert svc_eio.state_store.load().last_processed_audit_event_id == ""
+    assert not svc_eio.state_store.load().active_lease
+    if fd_before is not None:
+        assert _curator_fd_count() == fd_before
+
+    fd_before = _curator_fd_count()
+    dir_recovered = svc_eio.run(reason="admin")
+    assert dir_recovered.status == "succeeded"
+    assert be_eio.calls == 1
+    assert col_eio[-1] == {"event_ids": ["event-a", "event-b"], "errors": []}
+    assert svc_eio.state_store.load().last_processed_audit_event_id == "event-b"
+    if fd_before is not None:
+        assert _curator_fd_count() == fd_before
+
+
+def test_r4_curator_startup_option_a_recovery_preserves_audit_cursor(tmp_path):
+    # Case 1: state 未落盘前中断，Option A 启动恢复回滚未完成写入并重采两条审计事件。
+    uncommitted_root = tmp_path / "uncommitted"
+    first_svc, thread1, message1, _audit1, _f1, backend1, _orig1, _col1 = _setup_two_shard_curator(uncommitted_root)
+    acquired = first_svc.state_store.acquire(
+        reason="admin",
+        config_revision="rev1",
+        lease_seconds=60,
+        now=datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+    assert acquired is not None
+    state1, lease1 = acquired
+    commit_req1 = CuratorBatchCommit(
+        run_record=CuratorRunRecord(
+            run_id=str(lease1["run_id"]),
+            lease_id=str(lease1["lease_id"]),
+            status="succeeded",
+            reason="admin",
+            provider="fake",
+            model="fake",
+            started_at="1970-01-01T00:00:00+00:00",
+            finished_at="1970-01-01T00:00:01+00:00",
+            candidates=1,
+        ),
+        state_commit=CuratorSuccessCommit(
+            lease_id=str(lease1["lease_id"]),
+            run_id=str(lease1["run_id"]),
+            reason="admin",
+            per_thread_cursors=dict(state1.per_thread_cursors),
+            last_processed_audit_event_id="event-a",
+            processed_messages=0,
+            processed_audit_events=1,
+            candidate_count=1,
+            daily_event_count=0,
+            committed_at="1970-01-01T00:00:01+00:00",
+        ),
+        candidate_observations=(
+            CandidateObservation(
+                candidate_type="long_term_fact",
+                content="Uncommitted recovery control.",
+                subject_key="fact:r4_uncommitted",
+                scope={"scope_type": "global", "scope_key": "global"},
+                origin="model_inferred",
+                observed_at="1970-01-01T00:00:01+00:00",
+                confidence=0.9,
+            ),
+        ),
+    )
+    changes1, _daily1, _cands1 = first_svc.committer._build_changes(commit_req1)
+    first_svc.committer._prepare_transaction(commit_req1, changes1)
+    for target_path, target_text in changes1.items():
+        if target_path != first_svc.state_store.path:
+            first_svc.committer._write_target(target_path, target_text)
+    assert list(first_svc.committer.transactions_dir.glob("*/manifest.json"))
+
+    fd_before = _curator_fd_count()
+    recovered1 = _service(uncommitted_root, backend1, first_svc.conversation_store)
+    assert recovered1.committer.recover_incomplete() == 0
+    assert any(record.status == "recovered_rollback" for record in recovered1.run_log.list())
+    assert recovered1.candidate_service.list() == []
+    assert recovered1.state_store.load().last_processed_audit_event_id == ""
+    assert not list(recovered1.committer.transactions_dir.glob("*"))
+
+    seen1: list[list[str]] = []
+    orig_collect1 = recovered1._collect
+    model_out1 = _valid_output(thread1.thread_id, message1.message_id, message1.content)
+    recovered1.backend = _StaticStructuredBackend(model_out1)
+
+    def collect_uncommitted_after_recovery(*args, **kwargs):
+        batch = orig_collect1(*args, **kwargs)
+        ids = [row.event_id for row in batch.audit_events]
+        seen1.append(ids)
+        model_out1["processed_audit_refs"] = [{"event_id": eid} for eid in ids]
+        model_out1["next_cursor"]["last_audit_event_id"] = ids[-1] if ids else None
+        return batch
+
+    recovered1._collect = collect_uncommitted_after_recovery
+    res1 = recovered1.run(reason="admin")
+    assert res1.status == "succeeded"
+    assert seen1 == [["event-a", "event-b"]]
+    assert recovered1.state_store.load().last_processed_audit_event_id == "event-b"
+    if fd_before is not None:
+        assert _curator_fd_count() == fd_before
+
+    # Case 2: state 已落盘后仅遗留事务目录清理，Option A 保留 event-a 游标并续采 event-b。
+    committed_root = tmp_path / "committed"
+    second_svc, thread2, message2, _audit2, _f2, backend2, _orig2, _col2 = _setup_two_shard_curator(committed_root)
+    acquired2 = second_svc.state_store.acquire(reason="admin", config_revision="rev1", lease_seconds=60)
+    assert acquired2 is not None
+    _state2, lease2 = acquired2
+    commit_req2 = CuratorBatchCommit(
+        run_record=CuratorRunRecord(
+            run_id=str(lease2["run_id"]),
+            lease_id=str(lease2["lease_id"]),
+            status="succeeded",
+            reason="admin",
+            provider="fake",
+            model="fake",
+            started_at="1970-01-01T00:00:00+00:00",
+            finished_at="1970-01-01T00:00:01+00:00",
+            candidates=1,
+        ),
+        state_commit=CuratorSuccessCommit(
+            lease_id=str(lease2["lease_id"]),
+            run_id=str(lease2["run_id"]),
+            reason="admin",
+            per_thread_cursors={thread2.thread_id: message2.message_id},
+            last_processed_audit_event_id="event-a",
+            processed_messages=1,
+            processed_audit_events=1,
+            candidate_count=1,
+            daily_event_count=0,
+            committed_at="1970-01-01T00:00:01+00:00",
+        ),
+        candidate_observations=(
+            CandidateObservation(
+                candidate_type="long_term_fact",
+                content="Committed recovery control.",
+                subject_key="fact:r4_committed",
+                scope={"scope_type": "global", "scope_key": "global"},
+                origin="model_inferred",
+                observed_at="1970-01-01T00:00:01+00:00",
+                confidence=0.9,
+            ),
+        ),
+    )
+    with patch("agent_py_agent.agent.memory_store.curator_commit._cleanup_committed_best_effort", lambda _dir: None):
+        second_svc.committer.commit(commit_req2)
+    assert list(second_svc.committer.transactions_dir.glob("*/manifest.json"))
+
+    fd_before = _curator_fd_count()
+    recovered2 = _service(committed_root, backend2, second_svc.conversation_store)
+    assert recovered2.committer.recover_incomplete() == 0
+    assert not list(recovered2.committer.transactions_dir.glob("*"))
+    assert len(recovered2.candidate_service.list()) == 1
+    assert recovered2.state_store.load().last_processed_audit_event_id == "event-a"
+
+    seen_events: list[list[str]] = []
+    orig_collect2 = recovered2._collect
+    out2 = _valid_output(thread2.thread_id, message2.message_id, message2.content)
+    out2["processed_message_refs"] = []
+    out2["daily_events"] = []
+    out2["candidates"] = []
+    recovered2.backend = _StaticStructuredBackend(out2)
+
+    def collect_after_recovery(*args, **kwargs):
+        batch = orig_collect2(*args, **kwargs)
+        ids = [row.event_id for row in batch.audit_events]
+        seen_events.append(ids)
+        out2["processed_audit_refs"] = [{"event_id": eid} for eid in ids]
+        out2["next_cursor"]["last_audit_event_id"] = ids[-1] if ids else "event-a"
+        return batch
+
+    recovered2._collect = collect_after_recovery
+    res2 = recovered2.run(reason="admin")
+    assert res2.status == "succeeded"
+    assert seen_events == [["event-b"]]
+    assert recovered2.state_store.load().last_processed_audit_event_id == "event-b"
+    if fd_before is not None:
+        assert _curator_fd_count() == fd_before
