@@ -18,6 +18,16 @@ from .inbound_indicators import extract_indicators
 # Tier-2 每轮推荐段的估算 token 上限（UTF-8 字节 / 4）。
 TURN_RECOMMENDATION_MAX_TOKENS = 800
 
+# 通用英文功能词不参与名称子词或关键词宽松重叠计分，避免日常英文提问误触发固定方法推荐。
+_english_stopwords: frozenset[str] = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do",
+    "for", "from", "has", "have", "how", "if", "in", "into", "is", "it",
+    "its", "my", "no", "not", "of", "on", "or", "our", "so", "that",
+    "the", "their", "then", "there", "these", "they", "this", "to", "up",
+    "use", "using", "was", "we", "what", "when", "where", "which", "who",
+    "will", "with", "you", "your",
+})
+
 
 # LLM: 文本只用于展示，去控制字符并按字节截断，不把展示值用于授权或路径解析。
 # 函数用途: 生成可安全放入一行JSON的短文本。
@@ -152,8 +162,22 @@ class RecommendationIndex:
                 continue
             key = f"{row['kind']}:{row['id']}"
             matchers = _matchers(row['metadata'].get('trigger_matchers'))
-            tokens = tuple((token, _alias_pattern(token)) for token in sorted(set(
-                re.findall(r'[\w]+', f"{row['id']} {row['name']}".casefold()))))
+            matchers['intent_keywords'] = [
+                word for word in matchers['intent_keywords']
+                if word.strip() not in _english_stopwords
+                and any(part not in _english_stopwords for part in re.findall(r'[\w]+', word.casefold()))
+            ]
+            raw_tokens = re.findall(r'[\w]+', f"{row['id']} {row['name']}".casefold())
+            filtered_tokens = {token for token in raw_tokens if token not in _english_stopwords}
+            for exact in (str(row['id'] or '').casefold().strip(), str(row['name'] or '').casefold().strip()):
+                if (
+                    exact
+                    and exact not in _english_stopwords
+                    and exact not in filtered_tokens
+                    and re.fullmatch(r'[a-z0-9_.-]+', exact)
+                ):
+                    filtered_tokens.add(exact)
+            tokens = tuple((token, _alias_pattern(token)) for token in sorted(filtered_tokens))
             matchers['monitor_patterns'] = tuple((value, _alias_pattern(value)) for value in matchers['monitor_ids'])
             self._rows.append((row, matchers, tokens, tuple((alias, identifier, _alias_pattern(alias))
                 for alias, identifier in sorted(set(aliases[key]))), tuple(children.get(key, ()))))
@@ -290,8 +314,12 @@ def _section(items, using, notes):
         return ''
     lines = ['## 本轮推荐的固定方法', '优先调用匹配的现有固定方法，不要重写等价代码；推荐不增加授权，调用仍须遵守当前工具权限。']
     for row in items:
-        lines.append('- ' + json.dumps(row, ensure_ascii=False, separators=(',', ':')))
-        if row['monitor_aliases']:
+        display_row = {
+            key: value for key, value in row.items()
+            if not (isinstance(value, (list, tuple)) and len(value) == 0)
+        }
+        lines.append('- ' + json.dumps(display_row, ensure_ascii=False, separators=(',', ':')))
+        if row.get('monitor_aliases'):
             lines.append('  ' + ' · '.join(f'⏰ {alias}' for alias in row['monitor_aliases']))
     if using:
         lines.append('在用: ' + ', '.join(using))
@@ -378,7 +406,9 @@ def inventory_for_agent(agent, *, runtime_snapshot, allowed_tools=None, preserve
                 continue
             descriptor = AssetDescriptor(entry.stable_id.rsplit(':', 1)[-1] if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', entry.stable_id.rsplit(':', 1)[-1]) else
                 'skill-' + hashlib.sha256(entry.stable_id.encode()).hexdigest()[:24], 'skill', entry.name,
-                summary=entry.description, metadata={'stable_id': entry.stable_id},
+                summary=entry.description,
+                refs=entry.refs if isinstance(getattr(entry, 'refs', None), dict) else {},
+                metadata={**(entry.asset_metadata if isinstance(getattr(entry, 'asset_metadata', None), dict) else {}), 'stable_id': entry.stable_id},
                 source_scope='owner' if entry.source in {'owner', 'learned'} else 'builtin' if entry.source == 'builtin' else 'workspace' if entry.source == 'workspace' else 'global')
             rows.append(descriptor if preserve_descriptors else descriptor.to_dict())
     return rows, monitors, home

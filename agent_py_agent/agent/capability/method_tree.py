@@ -3,8 +3,20 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 
 from ..assets.topology import _components, _connect, _reference_index, _resolve_reference
+
+_OPAQUE_LESSON_SKILL_NAME_RE = re.compile(r"lesson-[0-9a-f]{6,64}")
+
+
+def is_opaque_undescribed_lesson_skill(name: object, description: object) -> bool:
+    """判定是否为无独立描述、仅靠十六进制摘要命名的自动经验 Skill。"""
+    clean_name = str(name or "").strip()
+    if not _OPAQUE_LESSON_SKILL_NAME_RE.fullmatch(clean_name):
+        return False
+    clean_desc = str(description or "").strip()
+    return not clean_desc or clean_desc == clean_name
 
 # 完整公开方法块的估算token预算，包含两组固定用法，不含能力包区。
 METHOD_CATALOG_BUDGET_TOKENS = 2_500
@@ -175,9 +187,22 @@ def _drawers(nodes, keys, kind, *, counts=False):
 
 # LLM: 每一级只改变固定展示粒度，所有计数源自同一可见图，不允许引入提问或在用参数。
 # 函数用途: 准备一档目录的技能行与其它方法行，供整块预算选择。
-def _level_lines(tree, level):
+def _level_lines(tree, level, *, pinned_skill_ids=()):
     nodes = tree["nodes"]
-    skills = [key for key in tree["roots"] if nodes[key]["kind"] == "skill"]
+    pinned = frozenset(str(item or "").strip() for item in pinned_skill_ids if str(item or "").strip())
+    skills = []
+    for key in tree["roots"]:
+        node = nodes[key]
+        if node["kind"] != "skill":
+            continue
+        stable_id = str(node["metadata"].get("stable_id") or node["id"] or "").strip()
+        desc = node.get("summary") or node.get("description") or ""
+        is_pinned = bool(pinned and (
+            stable_id in pinned or str(node["id"]).strip() in pinned or str(node["name"]).strip() in pinned or key in pinned
+        ))
+        if not is_pinned and is_opaque_undescribed_lesson_skill(node["name"], desc):
+            continue
+        skills.append(key)
     workflows = [key for key in tree["roots"] if nodes[key]["kind"] == "workflow"]
     scripts = [key for key in tree["roots"] if nodes[key]["kind"] == "script"]
     badges = {}
@@ -190,14 +215,19 @@ def _level_lines(tree, level):
         count = len(tree["children"][key])
         return (f" ⤷{count}" if count else "") + (" ⏰" + _alias_text(badges[key]) if key in badges and level < 5 else "")
 
+    name_counts = Counter(_one_line(nodes[key]["name"], 64) for key in skills)
     skill_lines = []
     for key in skills:
         node = nodes[key]
         cap = 40 if level == 0 else 20 if level < 3 else 0
         summary = _one_line(node.get("summary"), cap)
-        stable_id = node["metadata"].get("stable_id") or node["id"]
-        skill_lines.append(f"- {_one_line(node['name'], 64)}" + (f": {summary}" if summary else "")
-                           + f" (skill_id: {_one_line(stable_id)})" + suffix(key))
+        stable_id = str(node["metadata"].get("stable_id") or node["id"] or "").strip()
+        display_name = _one_line(node["name"], 64)
+        raw_name = str(node["name"] or "").strip()
+        source = str(node["metadata"].get("source") or node.get("source_scope") or "").strip()
+        redundant_id = bool(source and stable_id == f"{source}:{raw_name}" and name_counts[display_name] == 1)
+        id_suffix = "" if redundant_id else f" (skill_id: {_one_line(stable_id)})"
+        skill_lines.append(f"- {display_name}" + (f": {summary}" if summary else "") + id_suffix + suffix(key))
     lines = []
     if level == 5:
         flow_count = sum(node["kind"] == "workflow" for node in nodes.values())
@@ -247,12 +277,19 @@ def _omit_skills(header, skill_lines, method_lines, usage, max_bytes):
 
 # LLM: 首个完整块费用不超预算的级别获选；纯函数无IO，无运行时间或修订参与，供路由与测试共用。
 # 函数用途: 渲染固定方法块并返回各级实际字节估算费用。
-def render_method_catalog(descriptors, *, skill_usage_instructions, skill_header=(), bytes_per_token=4):
+def render_method_catalog(
+    descriptors,
+    *,
+    skill_usage_instructions,
+    skill_header=(),
+    bytes_per_token=4,
+    pinned_skill_ids=(),
+):
     tree = build_method_tree(descriptors)
     header = tuple(skill_header) or ("# Available Skills",)
     texts, costs = [], []
     for level in range(6):
-        skill_lines, method_lines = _level_lines(tree, level)
+        skill_lines, method_lines = _level_lines(tree, level, pinned_skill_ids=pinned_skill_ids)
         text = _assemble(header, skill_lines, method_lines, skill_usage_instructions)
         texts.append(text)
         costs.append((len(text.encode("utf-8")) + bytes_per_token - 1) // bytes_per_token)
@@ -260,7 +297,7 @@ def render_method_catalog(descriptors, *, skill_usage_instructions, skill_header
     omitted = 0
     text = texts[chosen]
     if costs[chosen] > METHOD_CATALOG_BUDGET_TOKENS:
-        skills, methods = _level_lines(tree, chosen)
+        skills, methods = _level_lines(tree, chosen, pinned_skill_ids=pinned_skill_ids)
         text, omitted = _omit_skills(header, skills, methods, skill_usage_instructions,
                                     METHOD_CATALOG_BUDGET_TOKENS * bytes_per_token)
     return {"text": text, "level": f"L{chosen}", "tokens": (len(text.encode("utf-8")) + bytes_per_token - 1) // bytes_per_token,

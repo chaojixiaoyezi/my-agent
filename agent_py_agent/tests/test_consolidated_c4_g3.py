@@ -571,7 +571,7 @@ def test_bound_children_shared_parent_counts_and_invisible_parent():
     assert set(tree["roots"]) == {"skill:owner:s", "workflow:other", "script:free"}
     assert tree["children"]["workflow:w"] == ["script:x"]
     text = catalog(rows)["text"]
-    assert "(skill_id: owner:s) ⤷1" in text and "[workflow] other" in text and "⤷1" in text
+    assert "- s ⤷1" in text and "(skill_id:" not in text and "[workflow] other" in text and "⤷1" in text
     assert "[workflow] w:" not in text and "hidden" not in text
     assert "free" in text and "fixed-script" not in text
 
@@ -611,7 +611,7 @@ def test_budget_ladder_first_fitting_level(scale, allowed):
     if scale == "gate":
         rows = inventory()
     elif scale == "worst":
-        rows = inventory(30, 50, 100, bindings=False, monitors=0)
+        rows = inventory(30, 80, 100, bindings=False, monitors=0)
     else:
         rows = inventory(30, 300, 600, bindings=False, monitors=0, distinct_categories=True)
     result = catalog(rows)
@@ -664,7 +664,7 @@ def test_summaries_single_line_and_category_slug():
 # LLM: 极大技能集合允许既有省略语义，整块仍必须有完整用法和预算。
 # 函数用途: 为超过150个技能和长标识符保留有界退出路径。
 def test_many_skills_omit_whole_lines_and_bound_envelope():
-    rows = inventory(400, 1, 1, bindings=False, monitors=0)
+    rows = inventory(500, 1, 1, bindings=False, monitors=0)
     result = catalog(rows)
     assert result["tokens"] <= 2500 and "未显示" in result["text"]
     assert _SKILL_USAGE_INSTRUCTIONS in result["text"]
@@ -692,7 +692,7 @@ def test_router_uses_frozen_bindings_and_fixed_method_header(tmp_path, name, rev
     agent.current_skill_snapshot = MethodType(snapshot_for, agent)
     router = CapabilityRouter(skill_snapshot_provider=agent.current_skill_snapshot)
     text = router.render_skill_metadata_index()
-    assert f"(skill_id: owner:{name}) ⤷1" in text
+    assert f"- {name}: inventory review ⤷1" in text and "(skill_id:" not in text
     assert "### 固定方法（工作流 / 脚本）" in text
     assert "[workflow] bound" not in text and "[script·" not in text
     assert (len(text.encode("utf-8")) + 3) // 4 <= 2500
@@ -737,7 +737,7 @@ def test_public_hidden_skill_absent_with_or_without_fixed_assets(with_asset):
                                     metadata={"stable_id": "script:owner:alone", "asset_id": "alone"}))
     text = CapabilityRouter(extra_cards=cards).render_skill_metadata_index()
     assert "owner:hidden" not in text and "hidden-method-name" not in text
-    assert "owner:visible" in text
+    assert ("visible: public summary" in text and "owner:visible" not in text) if with_asset else ("owner:visible" in text)
 
 
 # LLM: 包的在用标记和说明只属于包区，不能通过共享预算使固定Skill目录退成单项兜底。
@@ -984,22 +984,27 @@ def test_first_seen_order_and_structured_indicator_labels():
 # LLM: 只有pytest根内有样本资产；脚本正文是未执行的标记，不借外部环境提供资格。
 # 函数用途: 建立真实线程和一个可调用脚本。
 def setup_case(tmp_path, monkeypatch, *, asset=True):
+    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStore
+
     agent, thread, prior, records = _setup(tmp_path, monkeypatch, False)
     agent.tools.catalog_default_deferral_enabled = True
     if asset:
         ScriptStore(agent.home_paths.owner_home_dir).save_script(AssetDescriptor('fixed-query', 'script', '固定查询'), 'raise AssertionError("never execute")')
+        WorkflowStore(agent.home_paths.owner_home_dir).save_workflow(
+            WorkflowDefinition(AssetDescriptor('nightly', 'workflow', '夜间例行'), (), body_markdown='')
+        )
     return agent, thread
 
 
 # LLM: 每次重建本轮参数，工具顺序只能来自持久线程与原resolver，不能复用上一轮可变集合。
 # 函数用途: 沿真实初始加载接缝生成native工具表。
-def next_turn(agent, thread, *, allowed=None, scope='conversation'):
+def next_turn(agent, thread, *, allowed=None, scope='conversation', user_prompt='继续'):
     snapshot = agent.tools.runtime_snapshot(allowed_tools=allowed)
     attrs = {'conversation_thread_id': thread.thread_id}
-    original = SimpleNamespace(source='user', context_scope=scope, allowed_tools=allowed, task_attributes=attrs)
+    original = SimpleNamespace(source='user', context_scope=scope, allowed_tools=allowed, task_attributes=attrs, user_prompt=user_prompt)
     seed = SimpleNamespace(effective_contract_snapshot=None, tool_runtime_snapshot=snapshot)
     loaded = _initial_loop_loaded_tool_names(agent, original, seed, SimpleNamespace(loaded_tool_names=set()))
-    params = ToolLoopExecuteParams(user_prompt='继续', memories=[], runtime_injections=[], prompt_files=[],
+    params = ToolLoopExecuteParams(user_prompt=user_prompt, memories=[], runtime_injections=[], prompt_files=[],
         tool_catalog_section='', tool_recommendations_section='', tool_context=[], effective_on_chunk=None,
         allowed_tools=allowed, write_boundary=None, task_attributes=attrs, request_id='w3', run_id='w3', task_id='',
         one_shot_tool_calls=set(), executed_tools=[], archive_tool_calls=[], loaded_tool_names=loaded,
@@ -1012,7 +1017,7 @@ def next_turn(agent, thread, *, allowed=None, scope='conversation'):
 # 函数用途: 验证三轮、重建参数与资产删除后的原生前缀不变。
 def test_turns_one_to_three_persist_both_names_and_never_unmount(tmp_path, monkeypatch):
     agent, thread = setup_case(tmp_path, monkeypatch)
-    first_params, first = next_turn(agent, thread)
+    first_params, first = next_turn(agent, thread, user_prompt='请运行 fixed-query 和 nightly')
     current = agent.conversation_store.threads.require(thread.thread_id)
     assert current.loaded_tool_names == ('scripts', 'workflows')
     assert current.metadata['pinned_tool_names'] == ['scripts', 'workflows']
@@ -1032,7 +1037,7 @@ def test_real_tool_search_appends_exactly_one_and_survives_next_turn(tmp_path, m
     from agent_py_agent.agent.agent_core._tool_loop_service import _load_discovered_tools
 
     agent, thread = setup_case(tmp_path, monkeypatch)
-    params, before = next_turn(agent, thread)
+    params, before = next_turn(agent, thread, user_prompt='请运行 fixed-query 和 nightly')
     assert 'package_build' not in {row['name'] for row in before}
     outcome = agent.tools.tools['tool_search'].execute({'names': ['package_build']})
     record = {'tool': 'tool_search', 'tool_round': 1, 'tool_result_envelope': outcome.result_envelope}
@@ -1056,7 +1061,7 @@ def test_forced_compaction_keeps_asset_pins_active(tmp_path, monkeypatch):
     )
 
     agent, thread = setup_case(tmp_path, monkeypatch)
-    params, before = next_turn(agent, thread)
+    params, before = next_turn(agent, thread, user_prompt='请运行 fixed-query 和 nightly')
     _Probe(monkeypatch, False, live=False)
     for prior_role in ("user", "assistant"):
         agent.conversation_store.messages.append({
@@ -1087,7 +1092,12 @@ def test_ineligible_contexts_do_not_mount(tmp_path, monkeypatch, case):
     agent, thread = setup_case(tmp_path, monkeypatch, asset=case != 'empty')
     previous = set_current_subagent_context(agent, run_id='child') if case == 'subagent' else None
     try:
-        params, wire = next_turn(agent, thread, scope=case if case in {'task_local', 'isolated'} else 'conversation')
+        params, wire = next_turn(
+            agent,
+            thread,
+            scope=case if case in {'task_local', 'isolated'} else 'conversation',
+            user_prompt='请运行 fixed-query 和 nightly',
+        )
         assert not {'scripts', 'workflows'} & params.loaded_tool_names
         assert agent.conversation_store.threads.require(thread.thread_id).loaded_tool_names == ()
     finally:
@@ -1099,7 +1109,7 @@ def test_ineligible_contexts_do_not_mount(tmp_path, monkeypatch, case):
 # 函数用途: 验证只允许scripts时不挂workflows，之后收紧权限不泄露旧工具。
 def test_allowed_tools_only_reduce_mount_and_execution_surface(tmp_path, monkeypatch):
     agent, thread = setup_case(tmp_path, monkeypatch)
-    params, wire = next_turn(agent, thread, allowed=['tool_search', 'scripts'])
+    params, wire = next_turn(agent, thread, allowed=['tool_search', 'scripts'], user_prompt='请运行 fixed-query 和 nightly')
     assert params.loaded_tool_names == {'scripts'}
     assert {row['name'] for row in wire} == {'tool_search', 'scripts'}
     assert agent.conversation_store.threads.require(thread.thread_id).metadata['pinned_tool_names'] == ['scripts']

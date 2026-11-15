@@ -1682,6 +1682,16 @@ CHINESE_LOW_SIGNAL_TOKENS = frozenset({
     "一个", "查看", "设置", "管理", "创建", "工作", "进行", "处理", "结果", "信息",
 })
 
+# 英文高频停用词只在精确全名、结构化类别或显式关键词命中时计分，不参与描述与子串重叠。
+_english_stopwords: frozenset[str] = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do",
+    "for", "from", "has", "have", "how", "if", "in", "into", "is", "it",
+    "its", "my", "no", "not", "of", "on", "or", "our", "so", "that",
+    "the", "their", "then", "there", "these", "they", "this", "to", "up",
+    "use", "using", "was", "we", "what", "when", "where", "which", "who",
+    "will", "with", "you", "your",
+})
+
 
 # LLM: 保留原名称/关键词分词及首次出现顺序；中文弱信号是否计分在统一 scorer 决定。
 # 函数用途: 把查询分成去重的词和中文滑窗词，不按业务领域硬路由。
@@ -1705,10 +1715,11 @@ def _tokenize(text: str) -> list[str]:
 
 def _score_keyword_spec(spec: ToolModelSpec, tokens: list[str]) -> tuple[float, list[str]]:
     haystacks = _keyword_haystacks(spec)
+    exact_keywords = frozenset(str(word).strip().lower() for word in spec.keywords if str(word).strip())
     score = 0.0
     reasons: list[str] = []
     for token in tokens:
-        token_score, token_reasons = _score_keyword_token(token, haystacks)
+        token_score, token_reasons = _score_keyword_token(token, haystacks, exact_keywords=exact_keywords)
         score += token_score
         reasons.extend(token_reasons[:1])
     return score, reasons
@@ -1792,19 +1803,32 @@ def _semantic_tool_hits(
 
 # LLM: 通用二字不能仅靠描述得分；名称、显式 keywords 和类别权重不变，非通用中文二字用途命中只计0.25。
 # 函数用途: 统一工具检索的精确声明信号与低权重用途描述得分。
-def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, list[str]]:
+def _score_keyword_token(
+    token: str,
+    haystacks: dict[str, str],
+    *,
+    exact_keywords: frozenset[str] = frozenset(),
+) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
+    is_stopword = token in _english_stopwords
     checks = [
         ("name", 6.0, f"命中工具名'{token}'"),
         ("keywords", 4.0, f"命中关键词'{token}'"),
         ("category", 2.5, f"命中类别'{token}'"),
     ]
     for key, weight, reason in checks:
-        if _keyword_token_matches(token, haystacks[key]):
+        if is_stopword:
+            if key == "keywords":
+                matched = token in exact_keywords if exact_keywords else token == haystacks[key]
+            else:
+                matched = token == haystacks[key]
+        else:
+            matched = _keyword_token_matches(token, haystacks[key])
+        if matched:
             score += weight
             reasons.append(reason)
-    if token not in CHINESE_LOW_SIGNAL_TOKENS and (
+    if not is_stopword and token not in CHINESE_LOW_SIGNAL_TOKENS and (
         _keyword_token_matches(token, haystacks["description"]) or _keyword_token_matches(token, haystacks["use_cases"])
     ):
         score += 0.25 if re.fullmatch(r"[\u4e00-\u9fff]{2}", token) else 1.5
