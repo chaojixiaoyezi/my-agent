@@ -194,20 +194,35 @@ class GatewayRequest:
 #   transport_timing=True 时每次尝试另发 status=progress 的分段计时事件，并在尝试事件上附 transport 快照；只量不改发送。
 # 函数用途: 绑定 HTTP 尝试观察者，可附加无正文的请求前缀摘要与网络分段计时。
 @contextmanager
-def provider_attempt_observer(callback, *, cache_diagnostics: bool = False, transport_timing: bool = False):
+def provider_attempt_observer(
+    callback,
+    *,
+    cache_diagnostics: bool = False,
+    transport_timing: bool = False,
+    previous_message_count: int | None = None,
+):
     """Observe physical inference HTTP attempts in the current provider thread."""
 
     previous = getattr(_PROVIDER_ATTEMPT_OBSERVER, "callback", None)
     previous_diagnostics = getattr(_PROVIDER_ATTEMPT_OBSERVER, "cache_diagnostics", False)
     previous_timing = getattr(_PROVIDER_ATTEMPT_OBSERVER, "transport_timing", False)
+    previous_prev_count = getattr(_PROVIDER_ATTEMPT_OBSERVER, "previous_message_count", None)
     _PROVIDER_ATTEMPT_OBSERVER.cache_diagnostics = cache_diagnostics
     _PROVIDER_ATTEMPT_OBSERVER.transport_timing = transport_timing
+    _PROVIDER_ATTEMPT_OBSERVER.previous_message_count = previous_message_count
     _PROVIDER_ATTEMPT_OBSERVER.callback = callback
     try:
         yield
     finally:
         _PROVIDER_ATTEMPT_OBSERVER.cache_diagnostics = previous_diagnostics
         _PROVIDER_ATTEMPT_OBSERVER.transport_timing = previous_timing
+        if previous_prev_count is None:
+            try:
+                delattr(_PROVIDER_ATTEMPT_OBSERVER, "previous_message_count")
+            except AttributeError:
+                pass
+        else:
+            _PROVIDER_ATTEMPT_OBSERVER.previous_message_count = previous_prev_count
         if previous is None:
             try:
                 delattr(_PROVIDER_ATTEMPT_OBSERVER, "callback")
@@ -215,6 +230,12 @@ def provider_attempt_observer(callback, *, cache_diagnostics: bool = False, tran
                 pass
         else:
             _PROVIDER_ATTEMPT_OBSERVER.callback = previous
+
+
+# 函数用途: 读取当前 provider 线程观察者携带的上一轮请求消息条数，供精确边界检查点使用。
+def current_observer_previous_message_count() -> int | None:
+    value = getattr(_PROVIDER_ATTEMPT_OBSERVER, "previous_message_count", None)
+    return value if type(value) is int and value > 0 else None
 
 
 # LLM: timing 只在观察者开启分段计时时非空，事件附当前快照；回调异常一律吞掉，观测永远不能改变请求结果。
@@ -765,7 +786,12 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     if getattr(_PROVIDER_ATTEMPT_OBSERVER, "cache_diagnostics", False):
         from .cache_diagnostics import request_surface
 
-        base_event["request_surface"] = request_surface(request.payload, request.url)
+        prev_count = current_observer_previous_message_count()
+        base_event["request_surface"] = request_surface(
+            request.payload,
+            request.url,
+            extra_checkpoint_positions=(prev_count,) if type(prev_count) is int and prev_count > 0 else (),
+        )
     timing = _attempt_timing(base_event, req)
     _emit_provider_attempt({**base_event, "status": "started"}, timing)
     try:

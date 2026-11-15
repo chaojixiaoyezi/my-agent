@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from contextvars import Context, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -1541,7 +1542,12 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
     # 全局在飞 LLM 并发闸(T4 层4):默认关=nullcontext 零变化;配了 LLM_MAX_INFLIGHT 才封顶,
     # 拿槽在 llm_inflight 计数【之前】(槽满时等待期不算在飞,gauge 只反映真在飞)。
     # 请求前缀诊断始终开启：只算出站请求的不可逆摘要，不修改请求或记录正文、密钥。
-    with provider_attempt_observer(_observe_provider_attempt, cache_diagnostics=True):
+    previous_message_count = _previous_request_message_count(state)
+    with provider_attempt_observer(
+        _observe_provider_attempt,
+        cache_diagnostics=True,
+        previous_message_count=previous_message_count,
+    ):
         with global_llm_admission_slot(), owner_model_activity_scope(state.agent):
             llm_inflight(1)
             try:
@@ -1558,6 +1564,53 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
     record_llm_call(label, time.monotonic() - start, response, ok=True)
     record_llm_cost(model, response)  # 真实 USD 成本按 model 累计(审计 #19 残余)
     return response
+
+
+# LLM: 与 ModelCallLedger.provider_attempt 沿用一致的 thread_id / run_id 匹配口径，
+#   只读调用账本内上一轮已登记请求面的消息条数，不写账本也不读正文。
+# 函数用途: 取得同线程（或同 run）最近一次请求面的消息条数，供本次生成在精确边界处打检查点。
+def _previous_request_message_count(state: _ModelGenerationState) -> int | None:
+    ledger = getattr(state, "ledger", None)
+    records_fn = getattr(ledger, "records", None)
+    if not callable(records_fn):
+        return None
+    params = getattr(state, "params", None)
+    attrs = getattr(params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, Mapping) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "")
+    run_id = str(getattr(params, "run_id", "") or "")
+    record_fn = getattr(ledger, "record", None)
+    current = record_fn(state.call_id) if callable(record_fn) else None
+    if current is not None:
+        current_meta = getattr(current, "metadata", None)
+        if isinstance(current_meta, Mapping) and current_meta.get("thread_id"):
+            thread_id = str(current_meta["thread_id"])
+        if getattr(current, "run_id", ""):
+            run_id = str(current.run_id)
+    try:
+        records = list(records_fn())
+    except Exception:
+        return None
+    for item in reversed(records):
+        if getattr(item, "call_id", None) == state.call_id:
+            continue
+        meta = getattr(item, "metadata", None)
+        if not isinstance(meta, Mapping):
+            continue
+        if thread_id:
+            if meta.get("thread_id") != thread_id:
+                continue
+        elif str(getattr(item, "run_id", "") or "") != run_id:
+            continue
+        for key in ("request_surface", "cache_request_surface"):
+            surface = meta.get(key)
+            if isinstance(surface, Mapping) and surface:
+                count = surface.get("message_count")
+                return count if type(count) is int and count > 0 else None
+        count = meta.get("current_message_count")
+        if type(count) is int and count > 0:
+            return count
+    return None
 
 
 # LLM: 发出前在 liveness 锁内复核：guard 已放弃（墙钟超时/用户停止）的调用不登记、不提交插话、不发请求，只在账本记

@@ -44,6 +44,7 @@ from .gateway_helpers import (
     _should_retry_network_error,
     _stream_first_event_timeout,
     _stream_timeout_error,
+    current_observer_previous_message_count,
     gateway_request_body,
 )
 from .gateway_request_limits import remaining_deadline_seconds
@@ -236,7 +237,12 @@ def _attempt_event(request: GatewayRequest, attempt: int) -> dict:
     if getattr(_PROVIDER_ATTEMPT_OBSERVER, "cache_diagnostics", False):
         from .cache_diagnostics import request_surface
 
-        event["request_surface"] = request_surface(request.payload, request.url)
+        prev_count = current_observer_previous_message_count()
+        event["request_surface"] = request_surface(
+            request.payload,
+            request.url,
+            extra_checkpoint_positions=(prev_count,) if type(prev_count) is int and prev_count > 0 else (),
+        )
     return event
 
 

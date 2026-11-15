@@ -11,6 +11,7 @@ import math
 import sys
 import threading
 from collections import OrderedDict, deque
+from collections.abc import Sequence
 
 _CACHE_LOCK = threading.Lock()
 # 缓存诊断单条消息摘要进程内LRU缓存的最大条目数
@@ -184,11 +185,17 @@ def _chain_step_digest(previous_chain: str, row_digest: str) -> str:
     return chain
 
 
-def _message_checkpoints(rows: list, *, include_content: bool) -> tuple[list[dict], list[dict]]:
+def _message_checkpoints(
+    rows: list,
+    *,
+    include_content: bool,
+    extra_positions: Sequence[int] = (),
+) -> tuple[list[dict], list[dict]]:
     """单遍读取消息，逐行共享摘要；仅保留固定尾窗，不积累全历史检查点或正文副本。"""
     chain = content_chain = _digest("request_surface.v2.seed")
     checkpoints: deque[dict] = deque(maxlen=_CHAIN_CHECKPOINT_LIMIT_COUNT)
     content_checkpoints: deque[dict] = deque(maxlen=_CHAIN_CHECKPOINT_LIMIT_COUNT)
+    extra_set = {p for p in (extra_positions or ()) if type(p) is int and 1 <= p <= len(rows)}
     for position, row in enumerate(rows, start=1):
         row_digest = _row_digest(row)
         previous_chain = chain
@@ -198,11 +205,29 @@ def _message_checkpoints(rows: list, *, include_content: bool) -> tuple[list[dic
             content_digest = row_digest if content_row is row else _row_digest(content_row)
             content_chain = (chain if content_chain == previous_chain and content_digest == row_digest
                              else _chain_step_digest(content_chain, content_digest))
-        if position % _CHAIN_BLOCK_SIZE_COUNT == 0 or position == len(rows):
+        if position % _CHAIN_BLOCK_SIZE_COUNT == 0 or position in extra_set or position == len(rows):
             checkpoints.append({"index": position, "chain": chain})
             if include_content:
                 content_checkpoints.append({"index": position, "chain": content_chain})
     return list(checkpoints), list(content_checkpoints)
+
+
+# LLM: OpenAI Responses 会在外层包一层 type=="namespace" 容器，内层才是真实工具列表；
+#   解包只读取已知结构，不修改原载荷，普通平铺/Chat/custom 工具保持原样。
+# 函数用途: 展开 namespace 工具包装，返回用于计数和名字摘要的有效工具定义列表。
+def _iter_effective_tools(tools: object) -> list[dict]:
+    if not isinstance(tools, list):
+        return []
+    effective: list[dict] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        nested = item.get("tools")
+        if item.get("type") == "namespace" and isinstance(nested, list) and nested:
+            effective.extend(tool for tool in nested if isinstance(tool, dict))
+        else:
+            effective.append(item)
+    return effective
 
 
 # LLM: 协议名字提取按顶层name、Chat function.name、custom.name优先；内置工具缺name时以type标记，仅参与不可逆摘要。
@@ -226,7 +251,12 @@ def _extract_tool_name(tool: object) -> str:
 #   且 run 第一次调用也能留下自己的基线，供事后定位“第一次调用后收窄”。
 #   previous_response_id 是每轮都换的增量链锚点（传输事实，不是采样选项），不进 options，否则每次增量续接都误报 options_changed。
 # 函数用途: 在真正 HTTP 请求处提取诊断事实，兼容 chat/messages/responses 三种字段形态。
-def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
+def request_surface(
+    payload: dict,
+    endpoint: str,
+    *,
+    extra_checkpoint_positions: Sequence[int] = (),
+) -> dict[str, object]:
     messages = payload.get("messages", payload.get("input", []))
     rows = messages if isinstance(messages, list) else [messages]
     system = payload.get("system", payload.get("instructions", []))
@@ -235,9 +265,13 @@ def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
     options = {key: value for key, value in payload.items()
                if key not in {"model", "messages", "input", "system", "instructions", "tools", "stream", "previous_response_id"}}
     # 运输与去运输标记的内容诊断共享逐行摘要；工具正文中的同名业务字段仍原样散列。
-    checkpoints, content_checkpoints = _message_checkpoints(rows, include_content=True)
+    checkpoints, content_checkpoints = _message_checkpoints(
+        rows,
+        include_content=True,
+        extra_positions=extra_checkpoint_positions,
+    )
     tools = payload.get("tools", [])
-    tool_names = [_extract_tool_name(tool) for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else []
+    tool_names = [_extract_tool_name(tool) for tool in _iter_effective_tools(tools)]
     return {"schema": "request_surface.v2", "endpoint": _digest(endpoint), "model": _digest(payload.get("model")),
             "system": _digest(system), "tools": _digest(tools), "options": _digest(options),
             "tool_count": len(tool_names), "tool_names_digest": _digest(tool_names), "tool_names_schema": _TOOL_NAMES_SCHEMA,
