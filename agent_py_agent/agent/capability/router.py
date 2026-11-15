@@ -74,11 +74,10 @@ _APPROX_BYTES_PER_TOKEN = 4
 _SKILL_SOURCE_RANK = {"workspace": 0, "owner": 1, "shared": 2, "builtin": 3}
 
 _SKILL_USAGE_INSTRUCTIONS = """### How to use Skills
-- 发现：上面列的是当前轮可用 Skill 的名称、说明和稳定 skill_id；正文由 `skill_search` 读取。
 - 触发规则：用户点名某个 Skill，或任务明确匹配某个 Skill 的说明时，本轮必须使用它；多个命中只选择覆盖任务所需的最小集合，不把上一轮的选择自动带到下一轮。
 - 缺失或不可读：点名的 Skill 不在列表里，或正文无法读取时，简短说明并采用最合适的普通做法继续。
 - 使用步骤：
-  1. 决定使用后，主代理必须在采取任务动作前调用 `skill_search(action=get, skill_id=<原样 stable id>)`，完整读取 `SKILL.md` 正文并遵循；不能把读取、概括或解释 Skill 指令委派给子代理。
+  1. 决定使用后，主代理必须在采取任务动作前调用 `skill_search(action=get, skill_id=<条目名、显式 skill_id 或 <source>:<name>>)`，完整读取 `SKILL.md` 正文并遵循；不能把读取、概括或解释 Skill 指令委派给子代理。
   2. 正文引用相对路径时，以返回的 `path` 所在目录为基准；只读取当前任务需要的关联文件，读取被截断时继续到完整内容。
   3. 正文指向 `references/` 等目录时，按它的路由说明选择所需资料；有不同框架、供应商或领域变体时，只选相关变体并说明选择。
   4. 有现成 `scripts/`、资产或模板时优先复用，不重新手抄大段内容或另造一套。
@@ -335,7 +334,11 @@ class CapabilityRouter:
     # 函数用途: 生成固定公开目录，无资产时沿用原技能行与2%预算而不受包在用标记挤压。
     def _render_public_method_index(self, *, context_window_tokens=None, required_skill_ids=(),
                                    in_use_method_ids=(), query=""):
-        from .method_tree import build_method_tree, render_method_catalog
+        from .method_tree import (
+            build_method_tree,
+            is_opaque_undescribed_lesson_skill,
+            render_method_catalog,
+        )
 
         ranks = {"workspace": 0, "owner": 1, "shared": 2, "builtin": 3}
         skills = sorted([card for card in self.cards(kinds={"skill"})
@@ -353,24 +356,35 @@ class CapabilityRouter:
         unavailable = _render_unavailable_package_references(self._snapshot())
         budget = _SkillMetadataBudget(max(0, budget.limit - budget.cost(unavailable + "\n\n" if unavailable else "")), budget.token_based)
         package_budget, skill_budget = _public_metadata_partition(skills, baseline_packages, budget, required_skill_ids)
+        pinned_skill_ids = tuple(dict.fromkeys(
+            str(item).strip() for item in (*required_skill_ids, *in_use_method_ids) if str(item).strip()
+        ))
+        pinned_set = frozenset(pinned_skill_ids)
         descriptors = _public_method_descriptors(self, skills)
         tree = build_method_tree(descriptors)
         has_methods = any(node["kind"] in {"workflow", "script"} for node in tree["nodes"].values()) or bool(tree["monitors"])
+        visible_skills = skills if has_methods else [
+            card for card in skills
+            if str(card.metadata.get("stable_id") or "").strip() in pinned_set
+            or str(card.name or "").strip() in pinned_set
+            or not is_opaque_undescribed_lesson_skill(card.name, card.description)
+        ]
         if has_methods:
             skill_text = render_method_catalog(descriptors, skill_usage_instructions=_SKILL_USAGE_INSTRUCTIONS,
-                skill_header=_SKILL_METADATA_HEADER, bytes_per_token=_APPROX_BYTES_PER_TOKEN)["text"]
+                skill_header=_SKILL_METADATA_HEADER, bytes_per_token=_APPROX_BYTES_PER_TOKEN,
+                pinned_skill_ids=pinned_skill_ids)["text"]
         else:
-            skill_text = _render_public_skill_metadata(skills, skill_budget, required_skill_ids) if skills else ""
+            skill_text = _render_public_skill_metadata(visible_skills, skill_budget, required_skill_ids) if visible_skills else ""
         packages = using_method_cards(sorted(packages, key=lambda card: _package_priority(card, package_query, attrs)), in_use_method_ids)
         package_text, _ = _render_package_metadata(packages, package_budget, None, (*required_skill_ids, *in_use_method_ids))
         if not has_methods:
             char_budget = _SkillMetadataBudget(max(0, _MAX_SKILL_METADATA_ENVELOPE_CHARS
                 - (len(unavailable) + 2 if unavailable else 0)), False)
-            package_chars, skill_chars = _public_metadata_partition(skills, baseline_packages, char_budget, required_skill_ids)
+            package_chars, skill_chars = _public_metadata_partition(visible_skills, baseline_packages, char_budget, required_skill_ids)
             if len(package_text) > package_chars.limit:
                 package_text, _ = _render_package_metadata(packages, package_chars, None, (*required_skill_ids, *in_use_method_ids))
             if len(skill_text) > skill_chars.limit:
-                skill_text = _render_public_skill_metadata(skills, skill_chars, required_skill_ids) if skills else ""
+                skill_text = _render_public_skill_metadata(visible_skills, skill_chars, required_skill_ids) if visible_skills else ""
         package_text = "\n\n".join(part for part in (unavailable, package_text) if part)
         text = "\n\n".join(part for part in (package_text, skill_text) if part)
         if has_methods:

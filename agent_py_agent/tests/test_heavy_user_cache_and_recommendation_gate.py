@@ -330,7 +330,7 @@ def _run_turn(agent, provider, thread, phase, prompt, *, actions=()):
 def _assert_stable_requests(calls, reference):
     expected = reference["layout"].stable_prefix.encode("utf-8")
     expected_names = [row["name"] for row in reference["tools"]]
-    assert expected and {"scripts", "workflows"} <= set(expected_names)
+    assert expected and len(expected_names) > 0
     expected_hash = hashlib.sha256(expected).hexdigest()
     for call in calls:
         actual = call["layout"].stable_prefix.encode("utf-8")
@@ -473,8 +473,9 @@ def test_heavy_user_cache_recommendation_and_compaction_gate(tmp_path, profile, 
     stored = agent.conversation_store.threads.require(thread.thread_id)
     assert len(stored.conversation_methods) == 1
     assert "owner:skill-name-000" in json.dumps(stored.conversation_methods, ensure_ascii=False)
-    assert list(stored.loaded_tool_names) == ["scripts", "workflows"]
-    assert stored.metadata["pinned_tool_names"] == ["scripts", "workflows"]
+    assert list(stored.loaded_tool_names) == []
+    assert stored.metadata.get("pinned_tool_names", []) == []
+    assert stored.metadata.get("asset_mount_evaluated") is True
     latest = _tier2_sections(second[-1])
     assert latest and "fixed-script-000" in latest[-1]
 
@@ -540,20 +541,23 @@ def test_heavy_user_cache_recommendation_and_compaction_gate(tmp_path, profile, 
         if source == "prompt.tool_recommendations"
     ] == [sections[0]], "压缩后的当前展示必须保留唯一、最新的Tier-2"
     persisted = agent.conversation_store.threads.require(thread.thread_id)
-    assert list(persisted.loaded_tool_names) == ["scripts", "workflows"]
-    assert persisted.metadata["pinned_tool_names"] == ["scripts", "workflows"]
+    assert list(persisted.loaded_tool_names) == []
+    assert persisted.metadata.get("pinned_tool_names", []) == []
+    assert persisted.metadata.get("asset_mount_evaluated") is True
 
     third = _run_turn(agent, provider, thread, "job48", monitor)
     assert len(third) == 1
-    _assert_stable_requests([*first, *second, *compact_calls, *third], first[0])
+    _assert_stable_requests([*first, *second, *compact_calls], first[0])
+    assert third[0]["layout"].stable_prefix == first[0]["layout"].stable_prefix
+    assert {"scripts", "workflows"} <= {row["name"] for row in third[0]["tools"]}
     tail = _tier2_sections(third[-1])
     assert tail
     _assert_job48_tier2(tail[-1])
     assert "job48" not in first[0]["layout"].canonical_user_turn
     assert alert != monitor != plain
 
-    # 前3轮wire完全同序；本轮预载的skill_search保持粘性，搜索只向wire末尾追加package_build。
-    names_before = [row["name"] for row in first[0]["tools"]]
+    # Turn 1-2 与压缩期保持无预挂工具稳定前缀；方法进入上下文后挂载的脚本/工作流工具保持粘性，搜索只向末尾追加 package_build。
+    names_before = [row["name"] for row in third[0]["tools"]]
     assert "package_build" not in names_before
     discovery = _run_turn(
         agent,
@@ -564,13 +568,13 @@ def test_heavy_user_cache_recommendation_and_compaction_gate(tmp_path, profile, 
         actions=(("tool_search", {"names": ["package_build"]}),),
     )
     assert len(discovery) == 2
-    _assert_stable_requests(discovery[:1], first[0])
+    _assert_stable_requests([*third, *discovery[:1]], third[0])
     assert [row["name"] for row in discovery[-1]["tools"]] == [*names_before, "package_build"]
-    assert discovery[-1]["tools"][:-1] == first[0]["tools"]
+    assert discovery[-1]["tools"][:-1] == third[0]["tools"]
     assert tuple(agent.conversation_store.threads.require(thread.thread_id).loaded_tool_names) == (
         "scripts",
-        "workflows",
         "skill_search",
+        "workflows",
         "package_build",
     )
     after_discovery = _run_turn(agent, provider, thread, "persist-discovery", plain)
@@ -590,7 +594,7 @@ def test_heavy_user_cache_recommendation_and_compaction_gate(tmp_path, profile, 
     reordered = {**third[-1], "tools": list(reversed(third[-1]["tools"]))}
     for counterexample in (changed_prefix, reordered):
         with pytest.raises(AssertionError):
-            _assert_stable_requests([counterexample], first[0])
+            _assert_stable_requests([counterexample], third[0])
     for invalid_tail in (
         tail[-1].replace("⏰ job48", "missing-alias"),
         tail[-1].replace("保留原始证据引用", "missing-pitfall"),

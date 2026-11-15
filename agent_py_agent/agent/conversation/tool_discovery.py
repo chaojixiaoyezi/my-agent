@@ -97,8 +97,136 @@ def ordered_thread_loaded_tools(agent: object, params: object) -> tuple[str, ...
     return normalized_loaded_tools(getattr(thread, "loaded_tool_names", ()))
 
 
-# LLM: 仅主线程非隔离范围在当前授权快照内预挂资产工具；一次CAS合并loaded/history/pins，不伪造搜索或授予执行权。
-# 函数用途: 把可调用固定资产的两个管理入口持久挂到本线程，之后资产删除也不回收。
+def _turn1_matched_asset_tools(
+    agent: object,
+    params: object,
+    *,
+    authorized: tuple[str, ...],
+    rows: list[dict],
+    monitors: list[dict],
+) -> tuple[str, ...]:
+    """根据 Turn-1 结构化信号筛选值得首轮预挂的 workflows / scripts 入口。"""
+    from ..capability.method_carry import prompt_method_ids
+    from ..capability.turn_recommendations import (
+        _alias_pattern,
+        _english_stopwords,
+        build_recommendation_index,
+    )
+
+    active_assets = [
+        row for row in rows
+        if row.get("kind") in {"script", "workflow"}
+        and row.get("enabled") is True
+        and (row.get("metadata") or {}).get("hidden") is not True
+    ]
+    available_tools = {
+        ("workflows" if row.get("kind") == "workflow" else "scripts") for row in active_assets
+    } & set(authorized)
+    if not available_tools:
+        return ()
+
+    matched: set[str] = set()
+    attrs = getattr(params, "task_attributes", None)
+    if isinstance(attrs, dict):
+        if attrs.get("workflow_id") or attrs.get("workflow_ids"):
+            matched.add("workflows")
+        if attrs.get("script_id") or attrs.get("script_ids"):
+            matched.add("scripts")
+        work_kind = str(attrs.get("work_kind") or attrs.get("asset_kind") or "").strip().casefold()
+        if "workflow" in work_kind:
+            matched.add("workflows")
+        if "script" in work_kind:
+            matched.add("scripts")
+
+    skill_rows_by_id: dict[str, dict] = {}
+    workflow_ids: set[str] = set()
+    script_ids: set[str] = set()
+    for row in rows:
+        kind = row.get("kind")
+        row_id = str(row.get("id") or "").strip()
+        if kind == "workflow" and row_id:
+            workflow_ids.add(row_id)
+        elif kind == "script" and row_id:
+            script_ids.add(row_id)
+        elif kind == "skill":
+            meta = row.get("metadata") or {}
+            for key in (meta.get("stable_id"), row_id, row.get("name")):
+                clean = str(key or "").strip()
+                if clean:
+                    skill_rows_by_id[clean] = row
+
+    def add_skill_bindings(skill_row: dict) -> None:
+        refs = skill_row.get("refs") or {}
+        meta = skill_row.get("metadata") or {}
+        if (isinstance(refs, dict) and refs.get("workflows")) or meta.get("workflow_ids"):
+            matched.add("workflows")
+        if (isinstance(refs, dict) and refs.get("scripts")) or meta.get("script_ids"):
+            matched.add("scripts")
+
+    method_ids = (
+        *prompt_method_ids(agent),
+        *(getattr(params, "in_use_method_ids", None) or ()),
+        *(getattr(params, "selected_skill_ids", None) or ()),
+        *(getattr(params, "required_skill_ids", None) or ()),
+    )
+    for raw_id in method_ids:
+        clean = str(raw_id or "").strip()
+        if not clean:
+            continue
+        if clean.startswith("workflow:") or clean in workflow_ids:
+            matched.add("workflows")
+        elif clean.startswith("script:") or clean in script_ids:
+            matched.add("scripts")
+        else:
+            skill_row = skill_rows_by_id.get(clean.removeprefix("skill:"))
+            if skill_row is not None:
+                add_skill_bindings(skill_row)
+
+    prompt = str(getattr(params, "user_prompt", "") or getattr(params, "root_user_prompt", "") or "")
+    attachments = tuple(getattr(params, "attachments", None) or ())
+    ocr_texts = tuple(getattr(params, "ocr_texts", None) or ())
+    if prompt or attachments or ocr_texts:
+        recs = build_recommendation_index(rows, monitors=monitors).match(
+            prompt, attachments=attachments, ocr_texts=ocr_texts
+        )
+        for item in recs:
+            kind = item.get("kind")
+            if kind == "workflow":
+                matched.add("workflows")
+            elif kind == "script":
+                matched.add("scripts")
+            elif kind == "skill":
+                for ref in item.get("bound_methods") or ():
+                    ref_str = str(ref or "")
+                    if ref_str.startswith("workflow:"):
+                        matched.add("workflows")
+                    elif ref_str.startswith("script:"):
+                        matched.add("scripts")
+                skill_row = skill_rows_by_id.get(str(item.get("id") or "").strip())
+                if skill_row is not None:
+                    add_skill_bindings(skill_row)
+
+    if prompt:
+        folded = prompt[:65536].casefold()
+        for tool_name in available_tools:
+            if _alias_pattern(tool_name).search(folded):
+                matched.add(tool_name)
+        for row in active_assets:
+            tool_name = "workflows" if row.get("kind") == "workflow" else "scripts"
+            if tool_name in matched or tool_name not in available_tools:
+                continue
+            for candidate in (row.get("id"), row.get("name")):
+                text = str(candidate or "").casefold().strip()
+                if text and text not in _english_stopwords and _alias_pattern(text).search(folded):
+                    matched.add(tool_name)
+                    break
+
+    return tuple(name for name in authorized if name in (matched & available_tools))
+
+
+# LLM: 仅主线程非隔离范围在首轮按结构化信号预挂命中资产入口，并原子锁定已评估标记以保持会话前缀稳定；
+#   不回收已有线程持久化 pinned_tool_names，不伪造搜索或授予执行权。
+# 函数用途: Turn 1 按结构化信号将命中的 scripts/workflows 挂到本线程，已有引脚与评估后轮次保持稳定。
 def mount_thread_asset_tools(agent: object, params: object, *, runtime_snapshot: object) -> tuple[str, ...]:
     from ..capability.turn_recommendations import authorized_asset_tools, inventory_for_agent
     from ..runtime_context import current_subagent_run_id
@@ -111,22 +239,34 @@ def mount_thread_asset_tools(agent: object, params: object, *, runtime_snapshot:
     store = getattr(agent, "conversation_store", None)
     if not thread_id or store is None:
         return ()
-    allowed = getattr(params, "allowed_tools", None)
-    names = authorized_asset_tools(runtime_snapshot, allowed)
-    rows, monitors, home = inventory_for_agent(agent, runtime_snapshot=runtime_snapshot, allowed_tools=allowed)
-    if not names or not any(row.get("kind") in {"script", "workflow"} and row.get("enabled") is True
-                            and row.get("metadata", {}).get("hidden") is not True for row in rows):
+    existing = store.threads.load(thread_id)
+    if existing is None:
         return ()
+    if existing.metadata.get("asset_mount_evaluated") is True:
+        return normalized_loaded_tools(existing.loaded_tool_names)
 
-    # LLM: 锁内仅合并最新线程的已结构化名称，保留所有并发发现顺序和无关metadata；重复挂载不刷新revision。
-    # 函数用途: 原子发布同一线程的三份工具展示事实。
+    allowed = getattr(params, "allowed_tools", None)
+    authorized = authorized_asset_tools(runtime_snapshot, allowed)
+    rows, monitors, _home = inventory_for_agent(agent, runtime_snapshot=runtime_snapshot, allowed_tools=allowed)
+    matched_names = _turn1_matched_asset_tools(
+        agent, params, authorized=authorized, rows=rows, monitors=monitors
+    ) if authorized and rows else ()
+
+    # LLM: 锁内仅合并最新线程的已结构化名称并写入 asset_mount_evaluated=True，保留并发发现顺序与已有 pin。
+    # 函数用途: 原子发布同一线程的 Turn-1 资产挂载裁决。
     def merge(thread):
-        loaded = normalized_loaded_tools([*thread.loaded_tool_names, *names])
+        if thread.metadata.get("asset_mount_evaluated") is True:
+            return thread
+        loaded = normalized_loaded_tools([*thread.loaded_tool_names, *matched_names])
         metadata = dict(thread.metadata)
-        history = normalized_loaded_tools([*metadata.get("discovered_tool_history", ()), *thread.loaded_tool_names, *names])
-        pins = normalized_loaded_tools([*metadata.get("pinned_tool_names", ()), *names])
-        metadata["discovered_tool_history"], metadata["pinned_tool_names"] = list(history), list(pins)
-        added = tuple(name for name in names if name not in thread.loaded_tool_names)
+        metadata["asset_mount_evaluated"] = True
+        history = normalized_loaded_tools([*metadata.get("discovered_tool_history", ()), *thread.loaded_tool_names, *matched_names])
+        pins = normalized_loaded_tools([*metadata.get("pinned_tool_names", ()), *matched_names])
+        if history:
+            metadata["discovered_tool_history"] = list(history)
+        if pins:
+            metadata["pinned_tool_names"] = list(pins)
+        added = tuple(name for name in matched_names if name not in thread.loaded_tool_names)
         if added:
             revisions = discovery_revisions(thread)
             metadata["discovered_tool_revisions"] = {**revisions, **dict.fromkeys(added, max(revisions.values(), default=0) + 1)}
