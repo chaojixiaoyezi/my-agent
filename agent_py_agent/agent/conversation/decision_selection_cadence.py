@@ -30,13 +30,16 @@ _SCHEMA = "model_selection_structure.v1"
 # 函数用途: 读出选模型这一轮生效的询问节奏。
 def selection_cadence_from_read(config: object, owner_settings: dict, thread: object) -> str:
     from ..settings.decision_settings_defaults import decision_defaults
-    from ..settings.decision_settings_schema import validate_decision_settings
+    from ..settings.decision_settings_schema import (
+        migrate_retired_decision_settings,
+        validate_decision_settings,
+    )
 
     path = "points.model_selection.cadence"
     value = decision_defaults(None)[0][path]
-    layers = [validate_decision_settings(owner_settings)["overrides"]]
+    layers = [validate_decision_settings(migrate_retired_decision_settings(owner_settings))["overrides"]]
     if thread is not None:
-        layers.append(validate_decision_settings(thread.decision_settings)["overrides"])
+        layers.append(validate_decision_settings(migrate_retired_decision_settings(thread.decision_settings))["overrides"])
     for layer in layers:
         value = layer.get(path, value)
     return value

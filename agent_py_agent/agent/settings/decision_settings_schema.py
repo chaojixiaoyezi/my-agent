@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from copy import deepcopy
 from types import MappingProxyType
 from uuid import UUID
@@ -170,6 +171,25 @@ def validate_decision_field(path: object, value: object, *, scope: str | None = 
     return value
 
 
+# LLM: 只在持久读取边界剔除已退役键与过期实验授权，绝不原地修改调用方字典；写校验 validate_decision_settings 仍保持严格拒绝。
+# 函数用途: 将旧版持久决策设置里的已退役键（如 skill_proposal_review 与实验配置）纯函数式归一为当前可读结构。
+def migrate_retired_decision_settings(value: object) -> object:
+    if not isinstance(value, Mapping):
+        return value
+    migrated = dict(value)
+    if "experiment_authorization" in migrated and migrated["experiment_authorization"] is not None:
+        migrated["experiment_authorization"] = None
+    overrides = migrated.get("overrides")
+    if isinstance(overrides, Mapping):
+        migrated["overrides"] = {
+            key: item
+            for key, item in overrides.items()
+            if key not in {"experiment_enabled", "points.skill_proposal_review"}
+            and not (isinstance(key, str) and key.startswith("points.skill_proposal_review."))
+        }
+    return migrated
+
+
 # LLM: v1 只显式补无授权字段且不写盘；v2 严格保留唯一授权信封，普通覆盖不能授予或合并实验许可。
 # 函数用途: 校验并复制决策设置，旧覆盖及 revision 原样迁移，未知版本与损坏授权拒绝读取。
 def validate_decision_settings(value: object) -> dict:
@@ -199,4 +219,4 @@ def thread_decision_settings(data: dict) -> dict:
         raise ModelProfileError("会话配置版本不受支持，原记录未修改。")
     if "decision_settings" not in data and schema != "conversation_thread.v10":
         return empty_decision_settings()
-    return validate_decision_settings(data.get("decision_settings"))
+    return validate_decision_settings(migrate_retired_decision_settings(data.get("decision_settings")))

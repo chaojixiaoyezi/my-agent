@@ -11,6 +11,7 @@ from .decision_settings_schema import (
     decision_field_scopes,
     decision_point_fields,
     empty_decision_settings,
+    migrate_retired_decision_settings,
     validate_decision_settings,
 )
 from .model_provider_schema import ModelProfileError, resolved_model
@@ -31,9 +32,9 @@ def decision_point_mode_from_read(config: object, owner_settings: dict, thread: 
         raise ModelProfileError("此接入点没有登记决策运行范围。")
     defaults, _ = decision_defaults(None)
     values = {path: defaults[path] for path in paths}
-    layers = [validate_decision_settings(owner_settings)["overrides"]]
+    layers = [validate_decision_settings(migrate_retired_decision_settings(owner_settings))["overrides"]]
     if thread is not None and POINT_RUNTIME_SCOPES[point] == "thread":
-        layers.append(validate_decision_settings(thread.decision_settings)["overrides"])
+        layers.append(validate_decision_settings(migrate_retired_decision_settings(thread.decision_settings))["overrides"])
     for layer in layers:
         values.update({path: layer[path] for path in paths if path in layer})
     return _effective_point_mode(values, point)
@@ -97,8 +98,12 @@ def _fill_point_fields(values: dict, origins: dict, point: str, time_key: str) -
 #   observe 转后台的会话点位（observe_nonblocking_enabled）只看 background_timeout_seconds，并标 blocking=false。
 # 函数用途: 返回可写范围、真实字段来源和静态等待上限；前台运行服务仍须扣除原阶段已耗时间，后台点位各自完整计时。
 def decision_settings_projection(context: object, data: dict, thread: object = None, *, scope: str = "owner") -> dict:
-    owner = validate_decision_settings(data["decision_settings"])
-    temporary = validate_decision_settings(thread.decision_settings) if thread is not None else empty_decision_settings()
+    owner = validate_decision_settings(migrate_retired_decision_settings(data["decision_settings"]))
+    temporary = (
+        validate_decision_settings(migrate_retired_decision_settings(thread.decision_settings))
+        if thread is not None
+        else empty_decision_settings()
+    )
     if owner["experiment_authorization"] is not None:
         raise ModelProfileError("实验授权首片只支持准确会话，用户长期层中的授权不能使用。")
     field_scopes = decision_field_scopes()
