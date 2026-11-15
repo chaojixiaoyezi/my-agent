@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.gateway_parts.multiprocess_native_host_client import NativeHostProcess
 from agent_py_agent.agent.tooling import process_registry, process_session_cleanup
 from agent_py_agent.agent.tooling.process_cleanup_evidence import (
     confirm_cleanup_reference,
@@ -16,6 +19,7 @@ from agent_py_agent.agent.tooling.process_cleanup_evidence import (
     validate_cleanup_reference,
 )
 from agent_py_agent.agent.tooling.process_registry import (
+    ProcessRegistry,
     ProcessTerminationReceipt,
     capture_process_birth_token,
     terminate_process_tree,
@@ -556,3 +560,156 @@ def test_terminate_process_tree_populates_birth_proof_and_incomplete_flags(
         assert receipt.unresolved_instances == ({"pid": child_pid, "birth_token": "child-bt"},)
     finally:
         _cleanup_proc(proc)
+
+
+def test_five_arg_receipt_asdict_preserves_native_host_wire_contract_and_extended_replace() -> None:
+    five_arg = ProcessTerminationReceipt("native_singleton_kernel_exit", True, 0, 1, ())
+    wire_dict = asdict(five_arg)
+    assert set(wire_dict) == {
+        "method",
+        "confirmed",
+        "return_code",
+        "observed_processes",
+        "unresolved_pids",
+    }
+    wire_frame = json.loads(json.dumps({"version": 2, "receipt": wire_dict}))
+
+    proxy = NativeHostProcess.__new__(NativeHostProcess)
+    proxy._token = "tok-w6"  # noqa: SLF001
+    proxy._require_original = lambda: None  # noqa: SLF001
+    proxy._client = SimpleNamespace(_rpc=lambda frame, kind: {"result": wire_frame})  # noqa: SLF001
+    parsed = proxy.terminate_tree()
+    assert parsed == five_arg
+    assert proxy.returncode == 0
+
+    extended = ProcessTerminationReceipt(
+        "SIGTERM->SIGKILL",
+        False,
+        None,
+        2,
+        (7,),
+        tree_observation_complete=True,
+        unresolved_instances=({"pid": 7, "birth_token": "bt-7"},),
+    )
+    assert isinstance(extended, ProcessTerminationReceipt)
+    assert set(asdict(extended)) == {
+        "method",
+        "confirmed",
+        "return_code",
+        "observed_processes",
+        "unresolved_pids",
+        "tree_observation_complete",
+        "unresolved_instances",
+    }
+    replaced = replace(extended, confirmed=True, unresolved_pids=(), unresolved_instances=())
+    assert isinstance(replaced, ProcessTerminationReceipt)
+    assert replaced.tree_observation_complete is True and replaced.confirmed is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 僵尸进程出生标识探测行为测试")
+def test_incomplete_observation_retry_with_zombie_leader_stays_sticky_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ProcessSessionStore(tmp_path / "sessions")
+    host_pid, host_birth = 9999801, "zombie-host-birth"
+    child_pid, child_birth = 9999802, "zombie-child-birth"
+    prior_cleanup = {
+        "confirmed": False,
+        "instances": [
+            {
+                "method": "SIGTERM",
+                "confirmed": False,
+                "return_code": None,
+                "observed_processes": 2,
+                "unresolved_pids": [],
+                "tree_observation_complete": False,
+            }
+        ],
+        "tree_observation_complete": False,
+        "unresolved_instances": [],
+    }
+    saved = store.write(
+        _base_record(
+            tmp_path,
+            session_id="bg-w6-zombie-leader",
+            status="unknown",
+            pid=host_pid,
+            pid_birth_token=host_birth,
+            child_pid=child_pid,
+            child_pid_birth_token=child_birth,
+            termination={"cleanup": prior_cleanup},
+        )
+    )
+
+    # 未回收 zombie 的出生标识仍能读出原 birth_token，但 _process_instance_terminated 判为已终止。
+    monkeypatch.setattr(
+        process_session_cleanup,
+        "capture_process_birth_token",
+        lambda pid: host_birth if pid == host_pid else child_birth if pid == child_pid else "",
+    )
+    monkeypatch.setattr(process_session_cleanup, "_process_instance_terminated", lambda *_: True)
+    monkeypatch.setattr(process_session_cleanup, "_same_process", lambda *_: False)
+    monkeypatch.setattr(
+        process_session_cleanup,
+        "terminate_process_tree",
+        lambda pid, *args, **kwargs: ProcessTerminationReceipt(
+            "SIGTERM", True, 0, 1, (), tree_observation_complete=True,
+        ),
+    )
+
+    retried = stop_process_session(store, saved)
+    assert retried.confirmed is False
+    assert retried.record["status"] == "unknown"
+    assert retried.record["termination"]["cleanup"]["confirmed"] is False
+    assert retried.record["termination"]["cleanup"]["tree_observation_complete"] is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 进程清理缓存副本隔离测试")
+def test_process_registry_kill_returns_isolated_cleanup_copy(tmp_path: Path) -> None:
+    store = ProcessSessionStore(tmp_path / "sessions")
+    saved = store.write(
+        _base_record(
+            tmp_path,
+            session_id="bg-w6-kill-copy",
+            status="killed",
+            termination={
+                "cleanup": {
+                    "confirmed": True,
+                    "tree_observation_complete": True,
+                    "unresolved_instances": [],
+                    "instances": [
+                        {
+                            "method": "SIGTERM",
+                            "confirmed": True,
+                            "return_code": 0,
+                            "observed_processes": 2,
+                            "unresolved_pids": [],
+                            "tree_observation_complete": True,
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    reg = ProcessRegistry()
+    scope = process_registry.ProcessAccessScope(
+        owner_id="owner-w6",
+        conversation_id="conv-w6",
+        owner_home=str(tmp_path),
+    )
+    summary = reg.kill(saved["session_id"], access_scope=scope, store_root=store.root)
+    assert summary is not None
+    cached_entry = reg._processes[(str(store.root.resolve()), saved["session_id"])]  # noqa: SLF001
+    cached_cleanup = cached_entry.persisted_snapshot["termination"]["cleanup"]
+    summary["termination"]["confirmed"] = False
+    summary["termination"]["instances"][0]["method"] = "MUTATED"
+    summary["termination"]["instances"].append({"method": "EXTRA"})
+    assert cached_cleanup["confirmed"] is True
+    assert len(cached_cleanup["instances"]) == 1
+    assert cached_cleanup["instances"][0]["method"] == "SIGTERM"
+    reloaded = reg.get(saved["session_id"], access_scope=scope, store_root=store.root)
+    assert reloaded is not None
+    reloaded_cleanup = reloaded.persisted_snapshot["termination"]["cleanup"]
+    assert reloaded_cleanup["confirmed"] is True
+    assert len(reloaded_cleanup["instances"]) == 1
+    assert reloaded_cleanup["instances"][0]["method"] == "SIGTERM"

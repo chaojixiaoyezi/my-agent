@@ -21,7 +21,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from ..common.cancellation import current_cancellation_token, raise_if_cancelled
 from ..common.json_io import read_json_object
@@ -69,13 +69,52 @@ _FINAL_CONFIRM_WITHOUT_HANDLE_SECONDS = 2.0
 
 # LLM: 该回执只证明本次观察到的进程树是否已终止，不证明命令成功或外部系统已回滚。
 # 类用途: 把终止方式、退出码和无法确认的进程带回 shell 与后台进程控制调用方。
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ProcessTerminationReceipt:
     method: str
     confirmed: bool
     return_code: int | None
     observed_processes: int
     unresolved_pids: tuple[int, ...] = ()
+    tree_observation_complete: ClassVar[bool | None] = None
+    unresolved_instances: ClassVar[tuple[dict[str, object], ...]] = ()
+
+    def __new__(
+        cls,
+        method: str,
+        confirmed: bool,
+        return_code: int | None,
+        observed_processes: int,
+        unresolved_pids: tuple[int, ...] = (),
+        tree_observation_complete: bool | None = None,
+        unresolved_instances: tuple[dict[str, object], ...] = (),
+    ) -> ProcessTerminationReceipt:
+        if cls is ProcessTerminationReceipt and (
+            tree_observation_complete is not None or unresolved_instances
+        ):
+            return object.__new__(_ExtendedProcessTerminationReceipt)
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        method: str,
+        confirmed: bool,
+        return_code: int | None,
+        observed_processes: int,
+        unresolved_pids: tuple[int, ...] = (),
+        tree_observation_complete: bool | None = None,
+        unresolved_instances: tuple[dict[str, object], ...] = (),
+    ) -> None:
+        del tree_observation_complete, unresolved_instances
+        object.__setattr__(self, "method", method)
+        object.__setattr__(self, "confirmed", confirmed)
+        object.__setattr__(self, "return_code", return_code)
+        object.__setattr__(self, "observed_processes", observed_processes)
+        object.__setattr__(self, "unresolved_pids", unresolved_pids)
+
+
+@dataclass(frozen=True)
+class _ExtendedProcessTerminationReceipt(ProcessTerminationReceipt):
     tree_observation_complete: bool | None = None
     unresolved_instances: tuple[dict[str, object], ...] = ()
 
@@ -651,7 +690,7 @@ class ProcessRegistry:
                 summary = current.to_summary()
             stored_cleanup = (cleanup.record.get("termination") or {}).get("cleanup")
             if isinstance(stored_cleanup, dict):
-                summary["termination"] = stored_cleanup
+                summary["termination"] = deepcopy(stored_cleanup)
             else:
                 summary["termination"] = {
                     "confirmed": cleanup.confirmed,

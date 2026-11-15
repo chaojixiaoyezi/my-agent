@@ -184,7 +184,7 @@ def _count_live_leaders(record: dict[str, object]) -> int:
         pid, birth = record[pid_key], record[birth_key]
         if not pid:
             continue
-        if capture_process_birth_token(pid) != birth and _process_instance_terminated(pid, birth):
+        if _process_instance_terminated(pid, birth) or not _same_process(pid, birth):
             continue
         live += 1
     return live
