@@ -2,9 +2,13 @@
 # 模块用途: 为模型协议提供带物理并发限制的统一网络入口和有界工具探测；联合后端、OAuth、关闭与排队回归。
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 import threading
 import time
+from collections import OrderedDict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -50,6 +54,114 @@ def reset_unaccounted_probe_attempt_count() -> None:
     global _UNACCOUNTED_PROBE_ATTEMPT_COUNT
     with _UNACCOUNTED_PROBE_LOCK:
         _UNACCOUNTED_PROBE_ATTEMPT_COUNT = 0
+
+
+# 进程内有界原生工具能力缓存：仅保存经真实探针验证通过（native_supported=True）的结果，
+# 使 OwnerAgent 空闲释放或同配置重建后端后无需重复发探针；采用小写私有变量名避免触发静态常量表。
+_capability_probe_entries: OrderedDict[tuple[str, str, str, bool, str], ProviderToolCapability] = OrderedDict()
+_capability_probe_lock = threading.Lock()
+_capability_probe_generation = 0
+
+
+def _credential_fingerprint(backend: object) -> str:
+    """Return a short non-secret SHA-256 digest representing backend auth identity and key."""
+    auth_ref = getattr(backend, "auth_ref", None)
+    if isinstance(auth_ref, Mapping):
+        auth_part = json.dumps(dict(auth_ref), sort_keys=True, default=str, ensure_ascii=True)
+    elif auth_ref:
+        auth_part = str(auth_ref)
+    else:
+        auth_part = ""
+    try:
+        api_key = str(getattr(backend, "api_key", "") or "")
+    except Exception:  # noqa: BLE001 未初始化或动态凭据读取失败时回退静态字段计算指纹
+        api_key = str(getattr(backend, "_api_key", "") or "")
+    material = f"{auth_part}\n{api_key}".encode("utf-8", errors="surrogatepass")
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
+def _safe_tool_endpoint(backend: object) -> str:
+    endpoint = getattr(backend, "_tool_endpoint", None)
+    if callable(endpoint):
+        try:
+            return str(endpoint() or "")
+        except AttributeError:
+            return ""
+    return str(getattr(backend, "api_base", "") or "")
+
+
+def _capability_probe_key(backend: object) -> tuple[str, str, str, bool, str]:
+    return (
+        type(backend).__qualname__,
+        _safe_tool_endpoint(backend),
+        str(getattr(backend, "model_name", "") or ""),
+        bool(getattr(backend, "stream_enabled", False)),
+        _credential_fingerprint(backend),
+    )
+
+
+def _lookup_capability_probe_memo(
+    key: tuple[str, str, str, bool, str],
+) -> tuple[ProviderToolCapability | None, int]:
+    with _capability_probe_lock:
+        generation = _capability_probe_generation
+        entry = _capability_probe_entries.get(key)
+        if entry is not None:
+            _capability_probe_entries.move_to_end(key)
+        return entry, generation
+
+
+def _store_capability_probe_memo(
+    key: tuple[str, str, str, bool, str], capability: ProviderToolCapability,
+) -> int:
+    with _capability_probe_lock:
+        _capability_probe_entries[key] = capability
+        _capability_probe_entries.move_to_end(key)
+        while len(_capability_probe_entries) > 256:
+            _capability_probe_entries.popitem(last=False)
+        return _capability_probe_generation
+
+
+def invalidate_capability_probe_memo(backend: HttpBackend | None = None) -> None:
+    """清空全部或按后端键驱逐进程内原生工具能力探针缓存。"""
+    global _capability_probe_generation
+    if backend is None:
+        with _capability_probe_lock:
+            _capability_probe_entries.clear()
+            _capability_probe_generation += 1
+        return
+    keys = {_capability_probe_key(backend)}
+    previous_key = getattr(backend, "_provider_tool_capability_memo_key", None)
+    if previous_key is not None:
+        keys.add(previous_key)
+    with _capability_probe_lock:
+        for key in keys:
+            _capability_probe_entries.pop(key, None)
+    backend._provider_tool_capability_cache = None
+    backend._provider_tool_capability_memo_key = None
+
+
+def _is_tool_rejection_error(exc: BaseException, request_body: object = None) -> bool:
+    """Check whether an HTTP 400 rejection targets tool calling capability."""
+    details = getattr(exc, "details", None)
+    provider = details.get("provider_error") if isinstance(details, Mapping) else None
+    error = provider.get("error") if isinstance(provider, Mapping) else None
+    if not isinstance(error, Mapping) and isinstance(provider, Mapping):
+        error = provider
+    param = str(error.get("param") or "").lower() if isinstance(error, Mapping) else ""
+    code = str(error.get("code") or "").lower() if isinstance(error, Mapping) else ""
+    message = str(error.get("message") or "").lower() if isinstance(error, Mapping) else ""
+    exc_text = str(exc).lower()
+    if "configuration_update" in param or "configuration_update" in message:
+        return False
+    haystack = "\n".join((param, code, message, exc_text))
+    if any(token in haystack for token in ("tool", "function_call", "function calling", "functions")):
+        return True
+    return bool(
+        isinstance(request_body, Mapping)
+        and request_body.get("tools")
+        and any(token in param for token in ("tool", "function"))
+    )
 
 
 # LLM: HTTP 协议共同使用此请求级限额；不能热改实例配置，需同步 Chat/Messages/Responses 的摘要调用测试。
@@ -325,11 +437,42 @@ class HttpBackend(BaseBackend):
 
     # LLM: Serialize provider probes per backend instance and cache only proven-positive facts.
     # 函数用途: 并发冷启动共用一次有界协议探测，失败不缓存，避免暂时失败永久阻断后续任务。
+    def _cached_instance_capability(self) -> ProviderToolCapability | None:
+        cached = getattr(self, "_provider_tool_capability_cache", None)
+        if cached is None:
+            return None
+        generation = getattr(self, "_provider_tool_capability_generation", None)
+        if generation is not None and generation != _capability_probe_generation:
+            self._provider_tool_capability_cache = None
+            self._provider_tool_capability_memo_key = None
+            return None
+        memo_key = getattr(self, "_provider_tool_capability_memo_key", None)
+        if memo_key is not None and memo_key != _capability_probe_key(self):
+            self._provider_tool_capability_cache = None
+            self._provider_tool_capability_memo_key = None
+            return None
+        return cached
+
+    def _invalidate_memo_on_http_rejection(self, exc: BaseException, request_body: object = None) -> None:
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int) and (
+            status_code in (401, 403)
+            or (status_code == 400 and _is_tool_rejection_error(exc, request_body))
+        ):
+            invalidate_capability_probe_memo(self)
+
     def probe_tool_capability(self) -> ProviderToolCapability:
         """有界探测原生工具能力；只缓存成功事实，失败允许之后重新探测。"""
-        cached = self._provider_tool_capability_cache
+        cached = self._cached_instance_capability()
         if cached is not None:
             return cached
+        key = _capability_probe_key(self)
+        memo_hit, generation = _lookup_capability_probe_memo(key)
+        if memo_hit is not None:
+            self._provider_tool_capability_cache = memo_hit
+            self._provider_tool_capability_memo_key = key
+            self._provider_tool_capability_generation = generation
+            return memo_hit
         # 同一 Gateway/owner 的 Agent 会被多个请求线程复用。探针必须 single-flight，
         # 否则冷启动并发会重复烧请求，并让一个成功、一个失败的结果互相打架。
         # 等待别的请求探测时仍消费本轮停止信号；未取得锁绝不能释放别人的执行权。
@@ -337,10 +480,30 @@ class HttpBackend(BaseBackend):
             wait_interruptibly(0.05)
         try:
             wait_interruptibly(0)
-            cached = self._provider_tool_capability_cache
+            cached = self._cached_instance_capability()
             if cached is not None:
                 return cached
-            return self._probe_tool_capability_uncached()
+            key = _capability_probe_key(self)
+            memo_hit, generation = _lookup_capability_probe_memo(key)
+            if memo_hit is not None:
+                self._provider_tool_capability_cache = memo_hit
+                self._provider_tool_capability_memo_key = key
+                self._provider_tool_capability_generation = generation
+                return memo_hit
+            try:
+                capability = self._probe_tool_capability_uncached()
+            except ProviderConfigurationError:
+                invalidate_capability_probe_memo(self)
+                raise
+            if isinstance(capability, ProviderToolCapability):
+                if capability.native_supported:
+                    generation = _store_capability_probe_memo(key, capability)
+                    self._provider_tool_capability_cache = capability
+                    self._provider_tool_capability_memo_key = key
+                    self._provider_tool_capability_generation = generation
+                else:
+                    invalidate_capability_probe_memo(self)
+            return capability
         finally:
             self._provider_tool_capability_lock.release()
 
@@ -464,10 +627,14 @@ class HttpBackend(BaseBackend):
         if not self.api_key:
             raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
 
-        return post_json(self._gateway_request(
-            StreamCall(path=path, payload=payload, headers=headers),
-            options=StreamCallOptions(total_deadline_seconds=total_deadline_seconds),
-        ))
+        try:
+            return post_json(self._gateway_request(
+                StreamCall(path=path, payload=payload, headers=headers),
+                options=StreamCallOptions(total_deadline_seconds=total_deadline_seconds),
+            ))
+        except ProviderConfigurationError as exc:
+            self._invalidate_memo_on_http_rejection(exc, payload)
+            raise
 
     # LLM: Streaming collection forwards request-local first-event budget without changing backend-wide idle configuration.
     # 函数用途: 发起并完整收集一条流式 provider 请求，供非增量调用方使用。
@@ -480,9 +647,13 @@ class HttpBackend(BaseBackend):
         options: StreamCallOptions | None = None,
     ) -> list[str]:
         """Send a streaming request and collect all data lines."""
-        return post_stream(self._gateway_request(
-            StreamCall(path=path, payload=payload, headers=headers), options=options,
-        ))
+        try:
+            return post_stream(self._gateway_request(
+                StreamCall(path=path, payload=payload, headers=headers), options=options,
+            ))
+        except ProviderConfigurationError as exc:
+            self._invalidate_memo_on_http_rejection(exc, payload)
+            raise
 
     # LLM: The iterator preserves provider data order and per-request first-event timing for live consumers.
     # 函数用途: 发起流式请求并逐条交付 data，使 TUI 能实时显示正文、思考和工具参数进度。
@@ -495,9 +666,13 @@ class HttpBackend(BaseBackend):
         options: StreamCallOptions | None = None,
     ):
         """Send a streaming request and yield data lines as they arrive."""
-        yield from post_stream_iter(self._gateway_request(
-            StreamCall(path=path, payload=payload, headers=headers), options=options,
-        ))
+        try:
+            yield from post_stream_iter(self._gateway_request(
+                StreamCall(path=path, payload=payload, headers=headers), options=options,
+            ))
+        except ProviderConfigurationError as exc:
+            self._invalidate_memo_on_http_rejection(exc, payload)
+            raise
 
     # LLM: 唯一传输封装应用显式请求头和宿主会话；后台预算与首包预算保持 request-local，不改共享配置。
     #   cabfix：total_deadline_seconds 是调用方给的绝对墙钟上界，换算成 monotonic 时刻存进信封的
