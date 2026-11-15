@@ -5,6 +5,8 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shlex
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +20,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+import agent_py_agent.agent.gateway_parts.background_resource_report as bg_resource_report
 import agent_py_agent.agent.tooling.background_process_launch as bg_launch
+import agent_py_agent.agent.tooling.pty_sessions as pty_sessions_mod
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts.background_resource_report import (
     background_store_root,
@@ -47,6 +51,8 @@ from agent_py_agent.agent.tooling.process_session_store import (
     ProcessSessionStore,
     process_session_store_root,
 )
+from agent_py_agent.agent.tooling.pty_sessions import PtySessionRegistry
+from agent_py_agent.agent.tooling.sandbox import SandboxUnavailable
 from agent_py_agent.cli.gateway_loops import _start_owner_maintenance_loop
 from agent_py_agent.cli.gateway_process import (
     _attach_cold_start_settled_intent,
@@ -1432,3 +1438,531 @@ def test_owner_maintenance_controller_interval_zero_runs_one_shot_cold_sweep_and
             stop_event.set()
             ready_event.set()
             thread.join(timeout=5)
+
+
+def _terminate_sleeper_proc(proc: subprocess.Popen[str] | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        pass
+
+
+def _wait_proc_dead(proc: subprocess.Popen[str], timeout: float = 8.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"subprocess {proc.pid} remained alive after {timeout}s")
+
+
+def _wait_pty_stopped(session: object, timeout: float = 8.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        proc = getattr(session, "process", None)
+        proc_dead = proc is None or proc.poll() is not None
+        if proc_dead and (getattr(session, "closed", False) or getattr(session, "termination", None) is not None):
+            return
+        time.sleep(0.05)
+    proc = getattr(session, "process", None)
+    raise AssertionError(
+        f"PTY session did not settle within {timeout}s: "
+        f"poll={proc.poll() if proc else None}, closed={getattr(session, 'closed', None)}, "
+        f"termination={getattr(session, 'termination', None)}"
+    )
+
+
+def _start_pty_sleeper(
+    registry: PtySessionRegistry,
+    *,
+    work_dir: Path,
+    owner_home: Path,
+    thread_id: str,
+    task_id: str,
+    run_id: str,
+    attempt_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    py_expr = '__import__("time").sleep(60)'
+    cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(py_expr)}"
+    scope = {
+        "owner_home": str(owner_home),
+        "session_id": thread_id,
+        "root_task_id": task_id,
+        "task_id": f"gateway:{task_id}",
+        "run_id": run_id,
+        "attempt_id": attempt_id,
+    }
+    try:
+        return registry.start(cmd, work_dir, owner_home=owner_home, run_scope=scope)
+    except SandboxUnavailable:
+        # 受限容器缺少宿主沙箱后端时，仅在测试内直起真实子进程并保持 PTY 与 Scope 链路完整。
+        monkeypatch.setattr(
+            pty_sessions_mod,
+            "_sandbox_exec",
+            lambda c, target, owner_home=None, protected_persona_root=None, write_roots=None, read_roots=None, write_protection=None, *, host_policy=None, sandbox_factory=None: (c, True),
+        )
+        return registry.start(cmd, work_dir, owner_home=owner_home, run_scope=scope)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="stdlib pty is POSIX-only")
+def test_settled_sweep_scopes_batch_freeze_to_unique_attempt_id_isolating_concurrent_create_attempt_bg_and_pty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_home = tmp_path / "owner-home"
+    work_dir = tmp_path / "work"
+    owner_home.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    conv_root = owner_home / "conversations"
+    conv_root.mkdir(parents=True, exist_ok=True)
+    conv_store = ConversationStore(conv_root, initialize=True)
+    store = ProcessSessionStore(process_session_store_root(owner_home, owner_home))
+    db = runtime_db_path(owner_home)
+    repo = RuntimeRepository(db)
+    pty_registry = PtySessionRegistry()
+    monkeypatch.setattr(
+        "agent_py_agent.agent.tooling.process_resource_stop.pty_session_registry",
+        pty_registry,
+    )
+
+    settled_ts = time.time() - 3600.0
+    task_id = "task-fw41r2-unique-attempt"
+    thread_id = _bind_task_link(conv_store, task_id=task_id, status="completed")
+    run_id = "run-fw41r2-unique"
+    task_run_id = "tr-fw41r2-unique"
+    agent_run_id = "ar-fw41r2-unique"
+    old_attempt_id = "att-old-unique"
+    _insert_runtime_run(
+        db,
+        task_run_id=task_run_id,
+        task_id=task_id,
+        task_status="done",
+        agent_run_id=agent_run_id,
+        run_id=run_id,
+        agent_status="done",
+        attempt_id=old_attempt_id,
+        attempt_status="done",
+        ts=settled_ts,
+        closed_at=settled_ts,
+        ended_at=settled_ts,
+    )
+
+    proc_old: subprocess.Popen[str] | None = None
+    proc_new: subprocess.Popen[str] | None = None
+    classified_ready = threading.Event()
+    proceed_stop = threading.Event()
+    gated = [False]
+
+    try:
+        proc_old = _spawn_sleeper()
+        proc_old_birth = bg_launch.capture_process_birth_token(proc_old.pid)
+        _write_running_session(
+            store,
+            owner_home=owner_home,
+            session_id="bg-old",
+            thread_id=thread_id,
+            root_task_id=task_id,
+            run_id=run_id,
+            attempt_id=old_attempt_id,
+            started_at=settled_ts,
+            pid=proc_old.pid,
+            birth_token=proc_old_birth,
+            child_pid=proc_old.pid,
+            child_birth=proc_old_birth,
+        )
+        pty_old = _start_pty_sleeper(
+            pty_registry,
+            work_dir=work_dir,
+            owner_home=owner_home,
+            thread_id=thread_id,
+            task_id=task_id,
+            run_id=run_id,
+            attempt_id=old_attempt_id,
+            monkeypatch=monkeypatch,
+        )
+
+        requested_pty_scopes: list[dict[str, str]] = []
+        requested_pty_ids: list[str] = []
+        orig_request_stop = pty_registry.request_stop
+
+        def _spy_request_stop(
+            *,
+            owner_home: object,
+            thread_id: str = "",
+            task_id: str = "",
+            run_id: str = "",
+            attempt_id: str = "",
+        ) -> tuple[str, ...]:
+            requested_pty_scopes.append({
+                "owner_home": str(owner_home or ""),
+                "thread_id": str(thread_id or ""),
+                "task_id": str(task_id or ""),
+                "run_id": str(run_id or ""),
+                "attempt_id": str(attempt_id or ""),
+            })
+            stopped = orig_request_stop(
+                owner_home=owner_home,
+                thread_id=thread_id,
+                task_id=task_id,
+                run_id=run_id,
+                attempt_id=attempt_id,
+            )
+            requested_pty_ids.extend(stopped)
+            return stopped
+
+        monkeypatch.setattr(pty_registry, "request_stop", _spy_request_stop)
+
+        freeze_scopes: list[object] = []
+        orig_freeze_process_stop = bg_resource_report.freeze_process_stop
+
+        def _spy_freeze_process_stop(scope: object):
+            freeze_scopes.append(scope)
+            return orig_freeze_process_stop(scope)
+
+        monkeypatch.setattr(bg_resource_report, "freeze_process_stop", _spy_freeze_process_stop)
+
+        orig_stop_settled_batch = bg_resource_report._stop_settled_batch
+
+        def _gated_stop_settled_batch(
+            *,
+            store: ProcessSessionStore,
+            resolved_store_root: Path,
+            default_store_root: Path,
+            owner_home_str: str,
+            store_has_errors: bool,
+            all_scope_keys_by_scope: dict[tuple[str, str, str], set[str]],
+            eligible_entries: list[tuple[dict[str, object], dict[str, object]]],
+        ) -> list[dict[str, object]]:
+            if not gated[0] and eligible_entries:
+                gated[0] = True
+                classified_ready.set()
+                assert proceed_stop.wait(timeout=10)
+            return orig_stop_settled_batch(
+                store=store,
+                resolved_store_root=resolved_store_root,
+                default_store_root=default_store_root,
+                owner_home_str=owner_home_str,
+                store_has_errors=store_has_errors,
+                all_scope_keys_by_scope=all_scope_keys_by_scope,
+                eligible_entries=eligible_entries,
+            )
+
+        monkeypatch.setattr(bg_resource_report, "_stop_settled_batch", _gated_stop_settled_batch)
+
+        sweep_results: list[dict[str, object]] = []
+        sweep_errors: list[BaseException] = []
+
+        def _run_sweep() -> None:
+            try:
+                sweep_results.append(
+                    freeze_settled_leftover_processes(owner_home, min_settled_age_seconds=60.0)
+                )
+            except BaseException as exc:
+                sweep_errors.append(exc)
+
+        sweep_thread = threading.Thread(target=_run_sweep, daemon=True)
+        sweep_thread.start()
+        assert classified_ready.wait(timeout=10)
+
+        new_attempt_row = repo.create_attempt(agent_run_id)
+        new_attempt_id = str(new_attempt_row["attempt_id"])
+        assert new_attempt_id
+        assert new_attempt_id != old_attempt_id
+
+        proc_new = _spawn_sleeper()
+        proc_new_birth = bg_launch.capture_process_birth_token(proc_new.pid)
+        _write_running_session(
+            store,
+            owner_home=owner_home,
+            session_id="bg-new",
+            thread_id=thread_id,
+            root_task_id=task_id,
+            run_id=run_id,
+            attempt_id=new_attempt_id,
+            started_at=time.time(),
+            pid=proc_new.pid,
+            birth_token=proc_new_birth,
+            child_pid=proc_new.pid,
+            child_birth=proc_new_birth,
+        )
+        pty_new = _start_pty_sleeper(
+            pty_registry,
+            work_dir=work_dir,
+            owner_home=owner_home,
+            thread_id=thread_id,
+            task_id=task_id,
+            run_id=run_id,
+            attempt_id=new_attempt_id,
+            monkeypatch=monkeypatch,
+        )
+
+        diag_report = freeze_settled_leftover_processes(
+            owner_home,
+            min_settled_age_seconds=999999.0,
+        )
+        assert diag_report["counts"]["active"] == 2
+
+        proceed_stop.set()
+        sweep_thread.join(timeout=10)
+        assert not sweep_thread.is_alive()
+        assert not sweep_errors
+        assert len(sweep_results) == 1
+
+        assert len(freeze_scopes) == 1
+        assert getattr(freeze_scopes[0], "attempt_id", "") == old_attempt_id
+        assert len(requested_pty_scopes) == 1
+        assert requested_pty_scopes[0]["attempt_id"] == old_attempt_id
+        assert pty_old.session_id in requested_pty_ids
+        assert pty_new.session_id not in requested_pty_ids
+
+        _wait_proc_dead(proc_old)
+        _wait_pty_stopped(pty_old)
+        bg_old_doc = store.load("bg-old").record
+        assert bg_old_doc["stop_requested"] is True or bg_old_doc["status"] in PROCESS_TERMINAL_STATUSES
+
+        bg_new_doc = store.load("bg-new").record
+        assert bg_new_doc["status"] == "running"
+        assert bg_new_doc["stop_requested"] is False
+        assert proc_new.poll() is None
+        assert pty_new.closed is False
+        assert pty_new.process is not None and pty_new.process.poll() is None
+        latest_attempt = repo.get_attempt(new_attempt_id)
+        assert latest_attempt is not None and str(latest_attempt["status"]) == "running"
+    finally:
+        proceed_stop.set()
+        _terminate_sleeper_proc(proc_old)
+        _terminate_sleeper_proc(proc_new)
+        pty_registry.clear()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="stdlib pty is POSIX-only")
+@pytest.mark.parametrize("case", ["mixed_attempts", "missing_attempt"])
+def test_settled_sweep_mixed_or_missing_attempt_id_falls_back_to_per_record_stop_preserving_resumed_attempt(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_home = tmp_path / "owner-home"
+    work_dir = tmp_path / "work"
+    owner_home.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    conv_root = owner_home / "conversations"
+    conv_root.mkdir(parents=True, exist_ok=True)
+    conv_store = ConversationStore(conv_root, initialize=True)
+    store = ProcessSessionStore(process_session_store_root(owner_home, owner_home))
+    db = runtime_db_path(owner_home)
+    repo = RuntimeRepository(db)
+    pty_registry = PtySessionRegistry()
+    monkeypatch.setattr(
+        "agent_py_agent.agent.tooling.process_resource_stop.pty_session_registry",
+        pty_registry,
+    )
+
+    settled_ts = time.time() - 3600.0
+    task_id = f"task-fw41r2-{case}"
+    thread_id = _bind_task_link(conv_store, task_id=task_id, status="completed")
+    run_id = f"run-fw41r2-{case}"
+    task_run_id = f"tr-fw41r2-{case}"
+    agent_run_id = f"ar-fw41r2-{case}"
+
+    initial_attempt = "att-a" if case == "mixed_attempts" else "att-settled-db"
+    _insert_runtime_run(
+        db,
+        task_run_id=task_run_id,
+        task_id=task_id,
+        task_status="done",
+        agent_run_id=agent_run_id,
+        run_id=run_id,
+        agent_status="done",
+        attempt_id=initial_attempt,
+        attempt_status="done",
+        ts=settled_ts,
+        closed_at=settled_ts,
+        ended_at=settled_ts,
+    )
+    if case == "mixed_attempts":
+        with closing(sqlite3.connect(db)) as conn:
+            conn.execute(
+                "INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation, status, started_at, ended_at) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                ("att-b", agent_run_id, 2, "done", settled_ts, settled_ts),
+            )
+            conn.execute(
+                "UPDATE agent_runs SET current_attempt_id = ?, current_attempt_generation = ? "
+                "WHERE agent_run_id = ?",
+                ("att-b", 2, agent_run_id),
+            )
+            conn.commit()
+
+    old_procs: list[subprocess.Popen[str]] = []
+    proc_new: subprocess.Popen[str] | None = None
+    classified_ready = threading.Event()
+    proceed_stop = threading.Event()
+    gated = [False]
+
+    try:
+        old_attempt_specs = (
+            [("bg-old-1", "att-a"), ("bg-old-2", "att-b")]
+            if case == "mixed_attempts"
+            else [("bg-old-1", "")]
+        )
+        expected_old_sids = {sid for sid, _ in old_attempt_specs}
+        for sid, att_id in old_attempt_specs:
+            proc = _spawn_sleeper()
+            old_procs.append(proc)
+            birth = bg_launch.capture_process_birth_token(proc.pid)
+            _write_running_session(
+                store,
+                owner_home=owner_home,
+                session_id=sid,
+                thread_id=thread_id,
+                root_task_id=task_id,
+                run_id=run_id,
+                attempt_id=att_id,
+                started_at=settled_ts,
+                pid=proc.pid,
+                birth_token=birth,
+                child_pid=proc.pid,
+                child_birth=birth,
+            )
+
+        freeze_calls: list[object] = []
+        orig_freeze_process_stop = bg_resource_report.freeze_process_stop
+
+        def _spy_freeze_process_stop(scope: object):
+            freeze_calls.append(scope)
+            return orig_freeze_process_stop(scope)
+
+        monkeypatch.setattr(bg_resource_report, "freeze_process_stop", _spy_freeze_process_stop)
+
+        per_record_stop_ids: list[str] = []
+        orig_stop_process_session = bg_resource_report.stop_process_session
+
+        def _spy_stop_process_session(
+            target_store: ProcessSessionStore,
+            selected: dict[str, object],
+            *,
+            host_process: subprocess.Popen | None = None,
+        ):
+            per_record_stop_ids.append(str(selected.get("session_id") or ""))
+            return orig_stop_process_session(target_store, selected, host_process=host_process)
+
+        monkeypatch.setattr(bg_resource_report, "stop_process_session", _spy_stop_process_session)
+
+        orig_stop_settled_batch = bg_resource_report._stop_settled_batch
+
+        def _gated_stop_settled_batch(
+            *,
+            store: ProcessSessionStore,
+            resolved_store_root: Path,
+            default_store_root: Path,
+            owner_home_str: str,
+            store_has_errors: bool,
+            all_scope_keys_by_scope: dict[tuple[str, str, str], set[str]],
+            eligible_entries: list[tuple[dict[str, object], dict[str, object]]],
+        ) -> list[dict[str, object]]:
+            if not gated[0] and eligible_entries:
+                gated[0] = True
+                classified_ready.set()
+                assert proceed_stop.wait(timeout=10)
+            return orig_stop_settled_batch(
+                store=store,
+                resolved_store_root=resolved_store_root,
+                default_store_root=default_store_root,
+                owner_home_str=owner_home_str,
+                store_has_errors=store_has_errors,
+                all_scope_keys_by_scope=all_scope_keys_by_scope,
+                eligible_entries=eligible_entries,
+            )
+
+        monkeypatch.setattr(bg_resource_report, "_stop_settled_batch", _gated_stop_settled_batch)
+
+        sweep_results: list[dict[str, object]] = []
+        sweep_errors: list[BaseException] = []
+
+        def _run_sweep() -> None:
+            try:
+                sweep_results.append(
+                    freeze_settled_leftover_processes(owner_home, min_settled_age_seconds=60.0)
+                )
+            except BaseException as exc:
+                sweep_errors.append(exc)
+
+        sweep_thread = threading.Thread(target=_run_sweep, daemon=True)
+        sweep_thread.start()
+        assert classified_ready.wait(timeout=10)
+
+        new_attempt_row = repo.create_attempt(agent_run_id)
+        new_attempt_id = str(new_attempt_row["attempt_id"])
+        assert new_attempt_id and new_attempt_id != initial_attempt
+
+        proc_new = _spawn_sleeper()
+        proc_new_birth = bg_launch.capture_process_birth_token(proc_new.pid)
+        _write_running_session(
+            store,
+            owner_home=owner_home,
+            session_id="bg-new",
+            thread_id=thread_id,
+            root_task_id=task_id,
+            run_id=run_id,
+            attempt_id=new_attempt_id,
+            started_at=time.time(),
+            pid=proc_new.pid,
+            birth_token=proc_new_birth,
+            child_pid=proc_new.pid,
+            child_birth=proc_new_birth,
+        )
+        pty_new = _start_pty_sleeper(
+            pty_registry,
+            work_dir=work_dir,
+            owner_home=owner_home,
+            thread_id=thread_id,
+            task_id=task_id,
+            run_id=run_id,
+            attempt_id=new_attempt_id,
+            monkeypatch=monkeypatch,
+        )
+
+        proceed_stop.set()
+        sweep_thread.join(timeout=10)
+        assert not sweep_thread.is_alive()
+        assert not sweep_errors
+        assert len(sweep_results) == 1
+
+        assert freeze_calls == []
+        assert set(per_record_stop_ids) == expected_old_sids
+        assert "bg-new" not in per_record_stop_ids
+
+        for proc in old_procs:
+            _wait_proc_dead(proc)
+        for sid in expected_old_sids:
+            doc = store.load(sid).record
+            assert doc["stop_requested"] is True or doc["status"] in PROCESS_TERMINAL_STATUSES
+
+        bg_new_doc = store.load("bg-new").record
+        assert bg_new_doc["status"] == "running"
+        assert bg_new_doc["stop_requested"] is False
+        assert proc_new.poll() is None
+        assert pty_new.closed is False
+        assert pty_new.process is not None and pty_new.process.poll() is None
+    finally:
+        proceed_stop.set()
+        for proc in old_procs:
+            _terminate_sleeper_proc(proc)
+        _terminate_sleeper_proc(proc_new)
+        pty_registry.clear()

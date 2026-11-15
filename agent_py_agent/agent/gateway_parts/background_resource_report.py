@@ -1329,8 +1329,12 @@ def _stop_settled_batch(
     stopped_rows: list[dict[str, Any]] = []
     for scope_key, group in by_scope.items():
         group_sids = {str(item["session_id"]) for _, item in group}
+        attempt_ids = {str(item.get("attempt_id") or "").strip() for _, item in group}
+        unique_attempt_id = next(iter(attempt_ids)) if len(attempt_ids) == 1 else ""
+        # 只有整批 settled 记录共享同一个非空 attempt_id 时才走整域冻结，避免误波及并发重建的新 attempt。
         whole_scope_eligible = (
-            not store_has_errors
+            bool(unique_attempt_id)
+            and not store_has_errors
             and resolved_store_root == default_store_root
             and all_scope_keys_by_scope.get(scope_key, set()).issubset(group_sids)
         )
@@ -1343,6 +1347,7 @@ def _stop_settled_batch(
                     thread_id=thread_id,
                     root_task_id=root_task_id,
                     run_id=run_id,
+                    attempt_id=unique_attempt_id,
                 ))
                 if not batch.background_freeze_error and batch.receipt.records:
                     cleanup = cleanup_process_stop(batch)
