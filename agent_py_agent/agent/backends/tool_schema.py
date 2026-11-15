@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import threading
+from collections import deque
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -53,10 +54,74 @@ def tool_model_spec_to_input_schema(spec: ToolModelSpec) -> dict[str, Any]:
             if tool_schema_hash(cached) != spec.schema_hash or _schema_key_order(cached) != cache_key[1]:
                 raise ValueError(f"tool input_schema mutated during provider snapshot: {spec.name}")
             _strip_host_schema_extensions(cached)
+            cached = _prune_unreachable_defs(cached)
             while len(_STRIPPED_SCHEMA_CACHE) >= _STRIPPED_SCHEMA_CACHE_MAX_ENTRIES:
                 _STRIPPED_SCHEMA_CACHE.pop(next(iter(_STRIPPED_SCHEMA_CACHE)))
             _STRIPPED_SCHEMA_CACHE[cache_key] = cached
     return deepcopy(cached)
+
+
+# LLM: 严格核对普通 '#/$defs/<Name>' 指针，任何异常/跨指针形态即整包退回，确保绝不误删合法定义。
+# 函数用途: 收集单个节点内所有可解析到根 $defs 的本地引用名；遇到非普通引用或缺失目标返回 None。
+def _collect_plain_def_refs(node: Any, defs: dict[str, Any]) -> list[str] | None:
+    refs: list[str] = []
+    stack: list[Any] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            if "$ref" in current:
+                raw_ref = current["$ref"]
+                if not isinstance(raw_ref, str) or not raw_ref.startswith("#/$defs/"):
+                    return None
+                target = raw_ref[8:]
+                if not target or "/" in target or "~" in target or target not in defs:
+                    return None
+                refs.append(target)
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return refs
+
+
+# LLM: 仅保留从根 $defs 外部出发沿普通 '#/$defs/<Name>' 闭包可达的条目，空 $defs 直接移除以消除冗余上下文。
+# 函数用途: 裁剪 provider 工具输入 Schema 中不可达的根级 $defs；非安全引用形态下原样返回。
+def _prune_unreachable_defs(schema: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(schema, dict) or "$defs" not in schema:
+        return schema
+    defs = schema.get("$defs")
+    if not isinstance(defs, dict):
+        return schema
+
+    def_edges: dict[str, list[str]] = {}
+    for name, sub_schema in defs.items():
+        edges = _collect_plain_def_refs(sub_schema, defs)
+        if edges is None:
+            return schema
+        def_edges[name] = edges
+
+    root_without_defs = {key: value for key, value in schema.items() if key != "$defs"}
+    root_refs = _collect_plain_def_refs(root_without_defs, defs)
+    if root_refs is None:
+        return schema
+
+    reachable: set[str] = set()
+    queue = deque(root_refs)
+    while queue:
+        name = queue.popleft()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        for dep in def_edges.get(name, ()):
+            if dep not in reachable:
+                queue.append(dep)
+
+    pruned_defs = {name: value for name, value in defs.items() if name in reachable}
+    out = dict(schema)
+    if pruned_defs:
+        out["$defs"] = pruned_defs
+    else:
+        out.pop("$defs", None)
+    return out
 
 
 # LLM: 用显式栈遍历整棵 schema 以支持嵌套对象声明；仅移除当前宿主拥有的互斥扩展，其它 x-* annotation 保持原行为。
