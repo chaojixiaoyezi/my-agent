@@ -42,6 +42,31 @@ class RuntimeDatabaseDeferred(sqlite3.OperationalError):
         super().__init__(self.code + ": " + reason)
 
 
+class RuntimeDatabaseRecoveryRequired(RuntimeDatabaseDeferred):
+    """自动抢救无法安全完成的数据库恢复需求，须保留备份并离线恢复。"""
+    sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+    sqlite_errorname = "SQLITE_CORRUPT"
+    status = "requires_recovery"
+    code = "RUNTIME_DB_RECOVERY_REQUIRED"
+    error_code = "RUNTIME_DB_RECOVERY_REQUIRED"
+
+
+def runtime_db_recovery_error(report: dict) -> RuntimeDatabaseDeferred:
+    """按恢复报告状态构造可重试延迟异常或不可自动恢复的结构性异常。"""
+    status = str(report.get("status") or "")
+    exc_cls = (
+        RuntimeDatabaseRecoveryRequired
+        if status == "requires_recovery"
+        else RuntimeDatabaseDeferred
+    )
+    err_info = report.get("error")
+    err_type = err_info.get("type") if isinstance(err_info, dict) else None
+    reason = str(report.get("reason") or err_type or status or "requires_recovery")
+    error = exc_cls(reason)
+    error.runtime_db_recovery = report
+    return error
+
+
 def _path(path):
     return Path(os.path.abspath(path))
 

@@ -263,7 +263,7 @@ class UserConfigTool(BaseTool):
     model_spec = ToolModelSpec(
         name="user_config",
         description=(
-            "读取或修改本机用户级配置（参数中心：输出上限、超时、compact 百分比、各类预算与开关等两百多项）。"
+            "读取或修改本机用户级配置（参数中心：输出上限、超时、历史轮数、各类预算与开关等两百多项）。"
             "用户问'这个参数能不能改/现在是多少/配置在哪'时必须先用本工具查结构化事实，"
             "不要凭感觉回答'我没有权限'，也不要把随包默认 YAML 当成用户配置。"
             "action=search 按关键词（query）找参数名与中文说明，结果里 common=true 的是常用参数（聊天 /settings 默认列出的那些），"
@@ -292,7 +292,7 @@ class UserConfigTool(BaseTool):
                 },
                 "key": {
                     "type": "string",
-                    "description": "配置键名，例如 memory_compact_trigger_percent。",
+                    "description": "配置键名，例如 conversation_history_max_turns。",
                 },
                 "value": {
                     "type": "string",
@@ -331,16 +331,19 @@ class UserConfigTool(BaseTool):
             category="system",
             use_cases=(
                 "用户问某个运行参数现在是多少、存在哪个文件里",
-                "用户要求修改 compact 触发百分比等用户级偏好",
+                "用户要求修改历史轮数 conversation_history_max_turns 等配置默认值",
                 "需要说明某项配置为什么不能由模型自行修改",
                 "用户要求开启、关闭或调整决策模型等待时间及接入点，并指定长期或本会话范围",
                 "用户要求选择已保存的决策配置，或明确要求测试其连接",
             ),
-            avoid_when=("需要改权限模式、危险路径或凭据时",),
+            avoid_when=(
+                "需要调整当前会话或当前用户的上下文压缩触发比例时：请改用 compact_policy（set_thread / set_user）；此处的 memory_compact_trigger_percent 仅代表管理员层默认配置，会被会话/用户策略覆盖且通常需重启 Gateway 后生效",
+                "需要改权限模式、危险路径或凭据时",
+            ),
             keywords=("user_config", "配置项", "配置参数", "决策设置", "决策模型"),
             examples=(
-                '{"action":"search","query":"compact"}',
-                '{"action":"view","key":"memory_compact_trigger_percent"}',
+                '{"action":"search","query":"conversation_history"}',
+                '{"action":"view","key":"conversation_history_max_turns"}',
                 '{"action":"decision_read"}',
                 '{"action":"decision_patch","scope":"owner","expected_revision":{"owner":0,"thread":0},"changes":{"enabled":true,"timeout_seconds":6}}',
             ),

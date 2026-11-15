@@ -226,8 +226,11 @@ def _typed_definition_spec(spec):
 
     schema = copy.deepcopy(spec.input_schema)
     schema['properties']['action']['description'] = (
-        '工作流动作：list/get/inspect_run/preview/versions/diff/impact/status 及对应业务读动作为只读查询；'
-        'save/draft/publish/rollback/bind_skill/unbind_skill 维护工作流定义与版本，run/resume/delete 执行、恢复或删除。'
+        '工作流动作：不带点号的是宿主本地工作流动作（使用 workflow_id / workflow_run_id；'
+        'list/get/inspect_run/preview/versions/diff/impact/status 为只读查询，'
+        'save/draft/publish/rollback/bind_skill/unbind_skill 维护定义与版本，run/resume/delete 执行、恢复或删除）；'
+        '带点号 workflows.*/workflow_runs.* 属于业务空间受控动作（使用 workflow_ref/space_id，写动作需传 idempotency_key）。'
+        '未启用业务空间或操作个人工作流时请使用不带点号动作。'
     )
     public = _model_projection(standalone_schema({'$ref': '#/$defs/WorkflowDefinition'}))
     definitions = public.pop('$defs')
@@ -324,11 +327,22 @@ def _schema_save_source(spec):
 
 # LLM: 路径由构造器Owner固定；纯schema沿tool_spec，运行/恢复/删除仍保持原危险动作分类。
 # 类用途: 对Agent暴露可管理和恢复的工作流工具。
+_WORKFLOW_BUSINESS_NEXT_ACTIONS = {
+    'workflows.list': '当前未接入业务空间宿主；请改用不带点号的 workflows(action="list") 查询自有工作流。',
+    'workflows.get': '当前未接入业务空间宿主；请改用 workflows(action="get", workflow_id=...) 读取自有工作流详情。',
+    'workflows.run': '当前未接入业务空间宿主；请改用 workflows(action="run", workflow_id=...) 运行自有工作流。',
+    'workflows.preview': '当前未接入业务空间宿主；请改用 workflows(action="preview", workflow_id=...) 预览自有工作流。',
+    'workflow_runs.get': '当前未接入业务空间宿主；请改用 workflows(action="inspect_run", workflow_run_id=...) 查看自有工作流运行状态。',
+    'workflow_runs.resume': '当前未接入业务空间宿主；请改用 workflows(action="resume", workflow_run_id=...) 恢复自有工作流运行。',
+}
+
+
 class WorkflowsTool(BaseTool):
     ACTIONS = ('list', 'get', 'save', 'delete', 'bind_skill', 'unbind_skill', 'run', 'resume', 'inspect_run', 'preview',
                'versions', 'diff', 'impact', 'rollback', 'draft', 'publish', 'status', *WORKFLOW_ACTION_FIELDS)
     READ_ONLY_ACTIONS = ('list', 'get', 'inspect_run', 'preview', 'versions', 'diff', 'impact', 'status', *WORKFLOW_READ_ACTIONS)
     model_spec = _spec('workflows', '管理Owner工作流、脚本/Skill引用、运行与断点续跑。步骤输出_pause_for_resume=true可暂停，再用resume+patched_step_output续跑。'
+        '不带点号动作（使用 workflow_id/workflow_run_id）操作宿主本地工作流；带点号 workflows.*/workflow_runs.* 仅用于已启用业务空间（使用 workflow_ref/space_id，写动作需传 idempotency_key）。'
         '业务任务的脚本将交付文件写入环境变量MY_AGENT_RUN_OUT指向的目录；从inspect_run的steps[].output_artifacts取得artifact_id和sha256，按原版本交付。',
         list(ACTIONS), {
             'expected_revision': {'type': ['integer', 'null'], 'minimum': 0,
@@ -842,7 +856,29 @@ class WorkflowsTool(BaseTool):
             return _outcome('workflows', {'error_code': exc.code, 'error': str(exc),
                 'details': exc.details}, False, exc.code, effect_outcome='not_started')
         except PermissionError as exc:
-            return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_PERMISSION_DENIED', effect_outcome='not_started')
+            raw_code = str(exc)
+            if raw_code == 'WORKFLOW_BUSINESS_HOST_UNAVAILABLE':
+                action = str(params.get('action') or '') if isinstance(params, dict) else ''
+                next_action = _WORKFLOW_BUSINESS_NEXT_ACTIONS.get(
+                    action,
+                    '当前未接入业务空间宿主，无法执行业务空间动作；请改用不带点号的自有工作流动作，或调用 self_map(section="business") 核实业务空间状态。',
+                )
+                return _outcome(
+                    'workflows',
+                    {
+                        'ok': False,
+                        'error': next_action,
+                        'error_code': 'WORKFLOW_BUSINESS_HOST_UNAVAILABLE',
+                        'effect_outcome': 'not_started',
+                        'retryable': False,
+                        'next_action': next_action,
+                    },
+                    False,
+                    'WORKFLOW_BUSINESS_HOST_UNAVAILABLE',
+                    effect_outcome='not_started',
+                    next_action=next_action,
+                )
+            return _outcome('workflows', {'error': raw_code}, False, 'TOOL_PERMISSION_DENIED', effect_outcome='not_started')
         except (ValueError, KeyError, TypeError) as exc:
             if str(exc).startswith('ASSET_REVISION_CONFLICT:'):
                 return _outcome('workflows', {'error_code': 'ASSET_REVISION_CONFLICT', 'error': str(exc)},

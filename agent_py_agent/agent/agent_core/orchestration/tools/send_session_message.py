@@ -361,7 +361,7 @@ def build_send_session_message_model_spec() -> ToolModelSpec:
             "properties": {
                 "target_thread_id": {
                     "type": "string",
-                    "description": "接收消息的会话编号（来自 list_sessions 等结构化来源）。",
+                    "description": "接收消息的会话编号（来自 list_owner_sessions 等结构化来源）。",
                 },
                 "message": {
                     "type": "string",

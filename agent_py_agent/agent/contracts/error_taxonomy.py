@@ -276,6 +276,14 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="运行时数据库正在执行短暂恢复维护且本轮尚未开始；等待维护完成后重试，不修改持久状态。",
     ),
+    "RUNTIME_DB_RECOVERY_REQUIRED": ErrorContract(
+        code="RUNTIME_DB_RECOVERY_REQUIRED", category="storage", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint=(
+            "运行时数据库存在结构性损坏且自动抢救未完成；已保留原始库与备份文件，请停止写入与重试，"
+            "使用 scripts/runtime_db_salvage.py 指定 --source 只读原 runtime.db 与 --target 全新目标路径完成离线抢救。"
+        ),
+    ),
     "SINGLE_AGENT_HANDOFF_NOT_NEEDED": ErrorContract(
         code="SINGLE_AGENT_HANDOFF_NOT_NEEDED", category="contract", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
@@ -10656,6 +10664,13 @@ ERROR_CONTRACTS.update({
         retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint='依赖组件、配置或上游服务当前不可用；请先检查配置与服务健康状态或换用可用路径，避免重复失败调用。',
+    ),
+    'WORKFLOW_BUSINESS_HOST_UNAVAILABLE': ErrorContract(
+        code='WORKFLOW_BUSINESS_HOST_UNAVAILABLE',
+        category='state',
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='当前会话未接入业务空间宿主；请改用不带点号的宿主本地 workflows 动作，或调用 self_map(section="business") 核实业务空间状态，勿重复尝试点号业务动作。',
     ),
     'WORKFLOW_BUSINESS_EFFECT_INVALID': ErrorContract(
         code='WORKFLOW_BUSINESS_EFFECT_INVALID',
