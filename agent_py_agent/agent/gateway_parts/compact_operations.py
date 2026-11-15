@@ -23,6 +23,7 @@ from ..conversation.compact_threshold_policy import (
     compact_policy_scope,
     resolve_thread_compact_policy,
 )
+from ..conversation.models import THREAD_TASK_LINK_INACTIVE_STATUSES
 from ..conversation.run_claim import user_input_turn_on_lane
 from ..conversation.store_threads import IdleCompactActivityChanged
 from ..io.bounded_directory import DirectoryCursor
@@ -44,6 +45,92 @@ class _IdleApprovalScanPolicy:
 
 _IDLE_APPROVAL_SCAN_LOCK = threading.Lock()
 _IDLE_APPROVAL_SCAN_CURSORS: OrderedDict[tuple[str, str, str], dict[str, object]] = OrderedDict()
+
+
+def _root_is_settled_terminal_history(agent, store, root_task_id: str) -> bool:
+    """历史根任务已终态落盘且无未决子代理或能力申请时，免于计入活跃目录溢出预算。"""
+    tasks_api = getattr(store, "tasks", None)
+    load_report = getattr(tasks_api, "load_report", None)
+    if not callable(load_report):
+        return False
+    try:
+        link, error = load_report(root_task_id)
+    except Exception:
+        return False
+    if error is not None or link is None:
+        return False
+    status = str(getattr(getattr(link, "status", None), "value", getattr(link, "status", "")) or "").strip().lower()
+    if status not in THREAD_TASK_LINK_INACTIVE_STATUSES:
+        return False
+    subagents = getattr(agent, "subagents", None)
+    list_runs = getattr(subagents, "list_runs_for_root_report", None)
+    if not callable(list_runs):
+        return True
+    try:
+        run_report = list_runs(root_task_id)
+    except Exception:
+        return False
+    if getattr(run_report, "load_errors", None):
+        return False
+    for run in getattr(run_report, "runs", ()) or ():
+        run_status = str(getattr(getattr(run, "status", None), "value", getattr(run, "status", "")) or "").strip().upper()
+        if run_status not in {"DONE", "FAILED", "CANCELLED"}:
+            return False
+        for req in getattr(run, "capability_requests", ()) or ():
+            req_status = str(
+                getattr(getattr(req, "status", None), "value", getattr(req, "status", "OPEN")) or "OPEN"
+            ).strip().upper()
+            if req_status == "OPEN":
+                return False
+    return True
+
+
+def _next_in_progress_approval_thread(
+    storage_root: object, owner_key: str, checked_keys: set[tuple[str, str]]
+) -> tuple[str | None, int]:
+    """返回尚未收口且未命中的审批扫描线程，避免跨 >256 线程轮转时被 LRU 提前淘汰。"""
+    prefix_root = str(storage_root)
+    with _IDLE_APPROVAL_SCAN_LOCK:
+        for cursor_key, state in _IDLE_APPROVAL_SCAN_CURSORS.items():
+            if cursor_key[0] != prefix_root or cursor_key[1] != owner_key:
+                continue
+            cand_thread_id = cursor_key[2]
+            if (owner_key, cand_thread_id) in checked_keys:
+                continue
+            if (
+                state.get("phase") != "done"
+                and state.get("hit_path") is None
+                and not state.get("subdir_overflow")
+            ):
+                ticks = state.get("ticks", 0)
+                return cand_thread_id, ticks if isinstance(ticks, int) else 0
+    return None, 0
+
+
+def _drop_in_progress_approval_cursor(storage_root: object, owner_key: str, thread_id: str) -> None:
+    cursor_key = (str(storage_root), owner_key, thread_id)
+    with _IDLE_APPROVAL_SCAN_LOCK:
+        _IDLE_APPROVAL_SCAN_CURSORS.pop(cursor_key, None)
+
+
+def _retire_stale_approval_cursor(
+    storage_root: object, owner_key: str, thread_id: str, *, ticks_before: int
+) -> None:
+    """若优先续扫未触发审批游标推进，则清除陈旧未完成记录以防阻塞其余线程。"""
+    cursor_key = (str(storage_root), owner_key, thread_id)
+    with _IDLE_APPROVAL_SCAN_LOCK:
+        state = _IDLE_APPROVAL_SCAN_CURSORS.get(cursor_key)
+        if state is None:
+            return
+        ticks_raw = state.get("ticks", 0)
+        ticks_after = ticks_raw if isinstance(ticks_raw, int) else 0
+        if (
+            state.get("phase") != "done"
+            and state.get("hit_path") is None
+            and not state.get("subdir_overflow")
+            and ticks_after <= ticks_before
+        ):
+            _IDLE_APPROVAL_SCAN_CURSORS.pop(cursor_key, None)
 
 
 # LLM: 只读任务/claim/子代理的含错报告及原审批账；任何坏读失败关闭，状态正文不参与裁决。
@@ -319,10 +406,11 @@ def _idle_pending_approval_state(agent, store, thread):
                     if not state["pending_files"] and state["active_root_complete"]:
                         if _approval_dir_stamp(active_dir) != state["active_root_stamp"]:
                             return "activity_unknown"
-                        if len(state["subdir_stamps"]) < _IdleApprovalScanPolicy.max_tracked_subdirs:
-                            state["subdir_stamps"][active_root] = state["active_root_stamp"]
-                        else:
-                            state["subdir_overflow"] = True
+                        if not _root_is_settled_terminal_history(agent, store, active_root):
+                            if len(state["subdir_stamps"]) < _IdleApprovalScanPolicy.max_tracked_subdirs:
+                                state["subdir_stamps"][active_root] = state["active_root_stamp"]
+                            else:
+                                state["subdir_overflow"] = True
                         state["active_root"] = None
                         state["active_root_stamp"] = None
                         state["active_root_cursor"] = {}
@@ -521,6 +609,7 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
     report = {"checked": 0, "compacted": 0, "failed": 0}
     maximum = getattr(getattr(base_agent, "config", None), "memory_compact_idle_max_per_tick", 2)
     maximum = max(0, maximum) if type(maximum) is int else 2
+    checked_keys: set[tuple[str, str]] = set()
     for _ in range(maximum):
         agent = agents[position % len(agents)]
         position += 1
@@ -528,20 +617,36 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
         if store is None:
             continue
         key = str(agent.home_paths.owner_home_dir)
-        scan = scans.setdefault(key, DirectoryCursor())
-        while remaining > 0 and time.monotonic() < deadline:
-            remaining -= 1
-            entry = scan.next_entry(store.storage.threads_dir)
-            if entry is None or entry.name.startswith("thread-") and entry.name.endswith(".json"):
+        storage_root = getattr(getattr(store, "storage", None), "root", None)
+        cand_thread_id, ticks_before = (
+            _next_in_progress_approval_thread(storage_root, key, checked_keys)
+            if storage_root is not None
+            else (None, 0)
+        )
+        is_continuation = cand_thread_id is not None
+        if is_continuation:
+            if remaining <= 0 or time.monotonic() >= deadline:
                 break
+            remaining -= 1
+            thread_id = cand_thread_id
         else:
-            break
-        if entry is None:
-            continue
-        path = store.storage.threads_dir / entry.name
-        row, error = store.threads.load_report(path.stem)
+            scan = scans.setdefault(key, DirectoryCursor())
+            while remaining > 0 and time.monotonic() < deadline:
+                remaining -= 1
+                entry = scan.next_entry(store.storage.threads_dir)
+                if entry is None or entry.name.startswith("thread-") and entry.name.endswith(".json"):
+                    break
+            else:
+                break
+            if entry is None:
+                continue
+            thread_id = (store.storage.threads_dir / entry.name).stem
+        checked_keys.add((key, thread_id))
+        row, error = store.threads.load_report(thread_id)
         report["checked"] += 1
         if error or row is None or row.owner_home and row.owner_home != key:
+            if is_continuation and storage_root is not None:
+                _drop_in_progress_approval_cursor(storage_root, key, thread_id)
             report["failed"] += 1
             continue
         try:
@@ -549,7 +654,11 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
             with pin:
                 outcome = maybe_auto_compact_idle_session(agent, store, row, now=now)
             report["compacted"] += bool(outcome["compacted"])
+            if is_continuation and storage_root is not None:
+                _retire_stale_approval_cursor(storage_root, key, thread_id, ticks_before=ticks_before)
         except Exception:
+            if is_continuation and storage_root is not None:
+                _drop_in_progress_approval_cursor(storage_root, key, thread_id)
             report["failed"] += 1
     cursor["owner"] = position % len(agents)
     return report

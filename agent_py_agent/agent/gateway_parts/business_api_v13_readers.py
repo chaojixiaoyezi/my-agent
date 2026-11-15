@@ -337,7 +337,8 @@ def _observed_tool_error(control_code, *, result=None, workflow=None, fallback_m
             cause = facts.get('reason') if isinstance(facts, dict) else None
             if isinstance(cause, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,95}', cause):
                 details.append({'key': 'reason', 'value': cause})
-        return {'code': code, 'message': contract.recovery_hint, 'retryable': retryable and contract.retryable,
+        message = fallback_message if fallback_message and not reason else contract.recovery_hint
+        return {'code': code, 'message': message, 'retryable': retryable and contract.retryable,
                 'details': details}
     return {'code': code, 'message': fallback_message or code, 'retryable': retryable,
             'details': []}

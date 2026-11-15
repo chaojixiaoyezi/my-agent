@@ -484,3 +484,68 @@ def test_approvals_decide_remains_strictly_forbidden_to_model_tools(
     with pytest.raises(HostAPIError) as exc_info:
         context.check("approvals.decide", {})
     assert exc_info.value.code == "CAPABILITY_DENIED"
+
+
+def test_observed_tool_error_preserves_caller_fallback_message_when_no_review_reason():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    err = readers_mod._observed_tool_error(
+        "WORKFLOW_FAILED",
+        fallback_message="step_failed_alpha",
+    )
+    assert err is not None
+    assert err["code"] == "WORKFLOW_FAILED"
+    assert err["message"] == "step_failed_alpha"
+    assert err["details"] == [
+        {"key": "recommended_action", "value": error_contract("WORKFLOW_FAILED").recommended_action},
+    ]
+
+
+def test_observed_tool_error_uses_contract_recovery_hint_when_fallback_empty():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    err = readers_mod._observed_tool_error("WORKFLOW_FAILED", fallback_message="")
+    contract = error_contract("WORKFLOW_FAILED")
+    assert err is not None
+    assert err["code"] == "WORKFLOW_FAILED"
+    assert err["message"] == contract.recovery_hint
+    assert err["details"] == [
+        {"key": "recommended_action", "value": contract.recommended_action},
+    ]
+
+
+def test_observed_tool_error_pending_review_reason_overrides_fallback_message():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    workflow = {
+        "workflow_run_id": "wf-rev-1",
+        "status": "failed",
+        "failed_step_id": "step_rev",
+        "steps": [
+            {
+                "step_id": "step_rev",
+                "error_code": "WORKFLOW_REVIEW_REQUIRED",
+                "escalation_result": {
+                    "attempt_id": "att-1",
+                    "pending_review": {
+                        "schema": "workflow.pending-review.v1",
+                        "workflow_run_id": "wf-rev-1",
+                        "step_id": "step_rev",
+                        "attempt_id": "att-1",
+                    },
+                },
+            },
+        ],
+    }
+    err = readers_mod._observed_tool_error(
+        "WORKFLOW_FAILED",
+        workflow=workflow,
+        fallback_message="step_rev",
+    )
+    contract = error_contract("WORKFLOW_REVIEW_REQUIRED")
+    assert err is not None
+    assert err["code"] == "WORKFLOW_REVIEW_REQUIRED"
+    assert err["message"] == contract.recovery_hint
+    assert err["details"] == [
+        {"key": "recommended_action", "value": contract.recommended_action},
+    ]
