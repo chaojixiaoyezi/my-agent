@@ -914,9 +914,68 @@ def _owner_memory_enabled(owner_home: Path) -> bool:
     return effective_memory_enabled(report.payload)
 
 
+_memory_read_index_blocked_lock = threading.Lock()
+_memory_read_index_blocked_until: dict[str, float] = {}
+
+
+# LLM: 消除 curator candidate 派生路径与 discovery owner_home_dir 的符号链接别名差异，不访问磁盘索引。
+# 函数用途: 为指定 owner_home 生成进程内读索引退避表的规范化键。
+def _memory_read_index_key(owner_home: Path) -> str:
+    return os.path.realpath(os.fspath(owner_home))
+
+
+# LLM: 必须在 _memory_read_index_blocked_lock 锁内调用；清理已到期退避项防止多 owner 字典无界增长。
+# 函数用途: 从进程内读索引退避表移除已到期的条目。
+def _prune_expired_memory_read_index_blocked_locked(now: float) -> None:
+    expired = [
+        key
+        for key, deadline in _memory_read_index_blocked_until.items()
+        if deadline <= now
+    ]
+    for key in expired:
+        _memory_read_index_blocked_until.pop(key, None)
+
+
+# LLM: 只维护进程内单调时钟退避窗口，不写入磁盘文件或新增配置键；瞬态锁忙不得调用。
+# 函数用途: 在读索引重建遇确定性失败后记录指定 owner 的退避截止时间。
+def note_memory_read_index_blocked(owner_home: Path, retry_after_seconds: float) -> None:
+    key = _memory_read_index_key(owner_home)
+    now = time.monotonic()
+    deadline = now + max(0.0, float(retry_after_seconds))
+    with _memory_read_index_blocked_lock:
+        _prune_expired_memory_read_index_blocked_locked(now)
+        _memory_read_index_blocked_until.pop(key, None)
+        if deadline > now:
+            _memory_read_index_blocked_until[key] = deadline
+            while len(_memory_read_index_blocked_until) > 16384:
+                oldest = next(iter(_memory_read_index_blocked_until))
+                _memory_read_index_blocked_until.pop(oldest, None)
+
+
+# LLM: 只在读索引重建恢复执行并成功返回后解除退避，不修改磁盘文件或 state.json。
+# 函数用途: 清除指定 owner 的进程内读索引重建退避标记。
+def clear_memory_read_index_blocked(owner_home: Path) -> None:
+    key = _memory_read_index_key(owner_home)
+    with _memory_read_index_blocked_lock:
+        _memory_read_index_blocked_until.pop(key, None)
+
+
+# LLM: 仅查询内存退避字典并按单调时钟淘汰过期项，无 I/O 与额外文件描述符开销。
+# 函数用途: 判断指定 owner 的读索引重建当前是否处于确定性失败退避期内。
+def memory_read_index_blocked(owner_home: Path) -> bool:
+    key = _memory_read_index_key(owner_home)
+    now = time.monotonic()
+    with _memory_read_index_blocked_lock:
+        _prune_expired_memory_read_index_blocked_locked(now)
+        deadline = _memory_read_index_blocked_until.get(key)
+        return deadline is not None and deadline > now
+
+
 # LLM: 只查询正式长期记忆代次清单与读索引水位，不创建库或改写目录；缺失/部分状态触发后台增量续建，损坏由维护入口暴露错误。
 # 函数用途: 判断指定 owner 的长期记忆派生读索引是否尚处于 missing/partial 待续建状态。
 def _memory_read_index_pending(owner_home: Path) -> bool:
+    if memory_read_index_blocked(owner_home):
+        return False
     from .memory_store.read_index import MemoryReadIndex
 
     try:
