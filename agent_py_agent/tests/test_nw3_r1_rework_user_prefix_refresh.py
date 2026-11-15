@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import threading
@@ -17,7 +18,10 @@ from agent_py_agent.agent.capability.agents_write_contract import (
     AgentsWriteContext,
     write_intent_digest,
 )
-from agent_py_agent.agent.capability.persona_repository import PersonaRepository
+from agent_py_agent.agent.capability.persona_repository import (
+    PersonaRepository,
+    PersonaSecurityError,
+)
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 from agent_py_agent.agent.memory_store.user_profile_dream import run_user_profile_dream_if_due
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
@@ -486,3 +490,156 @@ def test_direct_epoch_sequenced_freeze_and_revoked_source_preservation(tmp_path:
     assert "## user" not in fresh_updates
     assert "NEW_DISK_AGENTS" in fresh_updates
     assert "user_refresh_pending" not in json.loads(snap_path.read_text(encoding="utf-8"))
+
+
+def test_one_user_read_eio_preserves_pending_then_next_healthy_turn_repairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = _build_scene(tmp_path, with_agents_source=True)
+    core = _seed_large_user_profile(scene.user_path)
+    request = _prompt_request(thread_id="independent-read-recovery")
+    _prefix_and_updates(scene.builder, request)
+    snap_path = scene.owner_home / "persona" / "thread_prefix" / "independent-read-recovery.json"
+    original = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert "agents_source" in original
+
+    report = run_user_profile_dream_if_due(
+        owner_home=scene.owner_home,
+        persona_repository=scene.repo,
+        long_term_store=scene.long_term,
+        config=AgentConfig(),
+        now=datetime(2026, 11, 15, 14, tzinfo=timezone.utc),
+    )
+    assert report["status"] == "consolidated"
+    assert report["expired_thread_prefixes"] == 1
+    assert scene.repo.quota_enforcer.max_bytes == 1024 * 1024 * 1024
+    retained = scene.repo.load("user").content
+    assert len(retained) > PERSONA_UPDATES_MAX_CHARS
+    assert all(line in retained for line in core)
+    pending = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert pending["user_refresh_pending"] is True
+    assert pending["sections"]["user"] == ""
+
+    original_read = Path.read_bytes
+    error_count = 0
+
+    def one_user_read_error(path: Path) -> bytes:
+        nonlocal error_count
+        if path == scene.user_path and error_count == 0:
+            error_count += 1
+            raise OSError(errno.EIO, "simulated I/O error")
+        return original_read(path)
+
+    with monkeypatch.context() as patch_context:
+        patch_context.setattr(Path, "read_bytes", one_user_read_error)
+        _prefix_and_updates(scene.builder, request)
+
+    assert error_count == 1
+    after_error = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert after_error["user_refresh_pending"] is True
+    assert after_error["sections"]["user"] == ""
+    for key in ("agents", "soul"):
+        assert after_error["sections"][key] == original["sections"][key]
+    for key in ("agents_source", "epoch"):
+        assert after_error[key] == original[key]
+
+    prefix, updates = _prefix_and_updates(scene.builder, request)
+    assert sum(line in prefix for line in core) == 48
+    assert "## user" not in updates
+    assert "变化超过尾部预算" not in updates
+    refreshed = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert "user_refresh_pending" not in refreshed
+    assert refreshed["sections"]["user"]
+    for key in ("agents", "soul"):
+        assert refreshed["sections"][key] == original["sections"][key]
+    for key in ("agents_source", "epoch"):
+        assert refreshed[key] == original[key]
+    repeated_prefix, repeated_updates = _prefix_and_updates(scene.builder, request)
+    assert repeated_prefix == prefix
+    assert repeated_updates == updates
+
+
+def test_readable_empty_user_after_dream_consumes_pending(tmp_path: Path) -> None:
+    scene = _build_scene(tmp_path, with_agents_source=True)
+    _seed_large_user_profile(scene.user_path, core_count=0, episodic_count=71)
+    request = _prompt_request(thread_id="independent-empty-refresh")
+    _prefix_and_updates(scene.builder, request)
+    snap_path = scene.owner_home / "persona" / "thread_prefix" / "independent-empty-refresh.json"
+    original = json.loads(snap_path.read_text(encoding="utf-8"))
+
+    report = run_user_profile_dream_if_due(
+        owner_home=scene.owner_home,
+        persona_repository=scene.repo,
+        long_term_store=scene.long_term,
+        config=AgentConfig(),
+        now=datetime(2026, 11, 15, 14, tzinfo=timezone.utc),
+    )
+    assert report["status"] == "consolidated"
+    assert report["expired_thread_prefixes"] == 1
+    assert report["entry_count_after"] == 0
+    # A readable empty file is a valid current value, not a failed read.
+    scene.user_path.write_text("", encoding="utf-8")
+    assert scene.repo.load("user").diagnostic.state == "ok"
+    assert json.loads(snap_path.read_text(encoding="utf-8"))["user_refresh_pending"] is True
+
+    _, updates = _prefix_and_updates(scene.builder, request)
+    refreshed = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert "user_refresh_pending" not in refreshed
+    assert refreshed["sections"]["user"] == ""
+    assert "## user" not in updates
+    for key in ("agents", "soul"):
+        assert refreshed["sections"][key] == original["sections"][key]
+    for key in ("agents_source", "epoch"):
+        assert refreshed[key] == original[key]
+
+
+def test_user_scope_validation_unavailable_preserves_pending_then_healthy_turn_repairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = _build_scene(tmp_path, with_agents_source=True)
+    core = _seed_large_user_profile(scene.user_path)
+    request = _prompt_request(thread_id="thread-scope-unavailable")
+    _prefix_and_updates(scene.builder, request)
+    snap_path = scene.owner_home / "persona" / "thread_prefix" / "thread-scope-unavailable.json"
+    original = json.loads(snap_path.read_text(encoding="utf-8"))
+
+    report = run_user_profile_dream_if_due(
+        owner_home=scene.owner_home,
+        persona_repository=scene.repo,
+        long_term_store=scene.long_term,
+        config=AgentConfig(),
+        now=datetime(2026, 11, 15, 14, tzinfo=timezone.utc),
+    )
+    assert report["status"] == "consolidated"
+    assert report["expired_thread_prefixes"] == 1
+
+    orig_path_for = PersonaRepository.path_for
+    failed_once = False
+
+    def fail_user_scope_once(repo: PersonaRepository, target: str) -> Path:
+        nonlocal failed_once
+        if target == "user" and not failed_once:
+            failed_once = True
+            raise PersonaSecurityError("scope validation failed")
+        return orig_path_for(repo, target)
+
+    with monkeypatch.context() as patch_context:
+        patch_context.setattr(PersonaRepository, "path_for", fail_user_scope_once)
+        _prefix_and_updates(scene.builder, request)
+
+    assert failed_once is True
+    after_error = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert after_error["user_refresh_pending"] is True
+    assert after_error["sections"]["user"] == ""
+    assert after_error["agents_source"] == original["agents_source"]
+    assert after_error["epoch"] == original["epoch"]
+
+    prefix, updates = _prefix_and_updates(scene.builder, request)
+    assert sum(line in prefix for line in core) == 48
+    assert "## user" not in updates
+    assert "变化超过尾部预算" not in updates
+    refreshed = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert "user_refresh_pending" not in refreshed
+    assert refreshed["sections"]["user"]
+    assert refreshed["sections"]["agents"] == original["sections"]["agents"]
+    assert refreshed["sections"]["soul"] == original["sections"]["soul"]

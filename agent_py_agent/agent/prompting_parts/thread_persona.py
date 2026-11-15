@@ -38,6 +38,8 @@ class RenderedPersonaSections:
     # None 表示调用方未提供代次（旧路径/测试构造），冻结时不核对；提供时与持久代次不一致即拒绝写。
     persona_epoch: int | None = None
     agents_source_metadata: dict | None = None
+    # 未读到正文的 target 不能确认一次有效的前缀刷新。
+    unavailable_targets: frozenset[str] = frozenset()
 
 
 # LLM: 主/子/后台渲染安全点共用，只加载线程元数据，不读消息；缺线程保持一次性准备语义。
@@ -115,7 +117,10 @@ def _read_or_freeze_snapshot(
         if saved is None or saved["epoch"] != epoch:
             saved = _snapshot_record(epoch, current)
             write_private_text_file_atomic_unlocked(path, json.dumps(saved, ensure_ascii=False))
-        elif saved.get("user_refresh_pending") is True:
+        elif (
+            saved.get("user_refresh_pending") is True
+            and "user" not in current.unavailable_targets
+        ):
             # 做梦仅使 user 失效时，同代次下轮仅把新 user 刷新回固定前缀，不改 agents/soul/来源元数据。
             updated = {key: value for key, value in saved.items() if key != "user_refresh_pending"}
             updated["sections"] = saved["sections"] | {"user": str(current.sections.get("user") or "")}

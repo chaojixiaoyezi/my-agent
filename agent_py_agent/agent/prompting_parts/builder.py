@@ -1032,7 +1032,11 @@ def _render_persona_sections(snapshots: dict, persona_epoch: int | None = None) 
     return RenderedPersonaSections(chunks, frozenset(target for target, snapshot in snapshots.items()
                                                     if snapshot.diagnostic.truncated),
                                    persona_epoch=persona_epoch,
-                                   agents_source_metadata=getattr(snapshots.get("agents"), "agents_source_metadata", None))
+                                   agents_source_metadata=getattr(snapshots.get("agents"), "agents_source_metadata", None),
+                                   unavailable_targets=frozenset(
+                                       target for target, snapshot in snapshots.items()
+                                       if snapshot.diagnostic.state in {"io", "security"}
+                                   ))
 
 
 # LLM: 仅在注入系统提示词前剥离HTML注释并收敛连续空行，不修改磁盘上的原始模板文件。
