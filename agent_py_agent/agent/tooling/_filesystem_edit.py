@@ -19,7 +19,7 @@ from ._filesystem_read import (
     WriteScopeError,
     owner_quota_error_result,
 )
-from ._filesystem_write import _atomic_write_bytes
+from ._filesystem_write import _atomic_write_bytes, _write_scope_denied_outcome
 from ._persona_write_guard import (
     _persona_approval_write_error,
     _persona_injection_write_error,
@@ -125,12 +125,11 @@ class EditFileTool(FileSystemTool):
             if old == new:
                 raise ValueError("old_string 与 new_string 相同，无需编辑")
         except WriteScopeError as exc:
-            return ToolHandlerOutcome(
+            return _write_scope_denied_outcome(
+                self,
                 "edit_file",
-                False,
-                str(exc),
-                error_code=exc.access_code or "WRITE_FORBIDDEN",
-                effect_outcome="not_started",
+                exc,
+                denied_path=params.get("path", ""),
             )
         except ValueError as exc:
             return ToolHandlerOutcome(

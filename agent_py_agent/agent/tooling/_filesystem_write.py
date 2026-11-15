@@ -78,6 +78,7 @@ from .models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from .write_boundary import build_write_forbidden_response
 
 _WRITE_FILE_USE_CASES = [
     "新建代码文件、配置文件、文档或二进制产物",
@@ -247,12 +248,11 @@ class WriteFileTool(FileSystemTool):
         except FileSourceUnavailableError as exc:
             return ToolHandlerOutcome("write_file", False, f"文件来源不可用: {exc}", error_code="TOOL_UNAVAILABLE", effect_outcome="not_started")
         except WriteScopeError as exc:
-            return ToolHandlerOutcome(
+            return _write_scope_denied_outcome(
+                self,
                 "write_file",
-                False,
-                str(exc),
-                error_code=exc.access_code or "WRITE_FORBIDDEN",
-                effect_outcome="not_started",
+                exc,
+                denied_path=params.get("path", ""),
             )
         except ValueError as exc:
             return ToolHandlerOutcome(
@@ -387,6 +387,40 @@ def _atomic_write_or_error(
         )
     update_syntax_diagnostics(diagnostics, observation)
     return None
+
+
+# 函数用途: 统一将 WriteScopeError 转为 ToolHandlerOutcome，并对 WRITE_FORBIDDEN 附带最多 5 个可写根与修复引导。
+def _write_scope_denied_outcome(
+    tool: FileSystemTool,
+    tool_name: str,
+    exc: WriteScopeError,
+    *,
+    denied_path: object = "",
+) -> ToolHandlerOutcome:
+    code = exc.access_code or "WRITE_FORBIDDEN"
+    if code != "WRITE_FORBIDDEN":
+        return ToolHandlerOutcome(
+            tool_name,
+            False,
+            str(exc),
+            error_code=code,
+            effect_outcome="not_started",
+        )
+    message, envelope, next_action = build_write_forbidden_response(
+        str(exc),
+        denied_path=denied_path,
+        allowed_roots=getattr(tool, "workspace_roots", ()) or (),
+        workspace_root=getattr(tool, "workspace_root", None),
+    )
+    return ToolHandlerOutcome(
+        tool_name,
+        False,
+        message,
+        error_code="WRITE_FORBIDDEN",
+        effect_outcome="not_started",
+        next_action=next_action,
+        result_envelope=envelope,
+    )
 
 
 # LLM: 原格式探测前固定 observed version；精确来源字节不做目标编码迁移，解析器只在路径/版本许可后读取并固定原任务引用。
