@@ -2,9 +2,14 @@
 # 模块用途: 覆盖E11c预算、首ID、LRU及粗时间窗口内不入缓存/不命中，稳态断言只对真实稳定文件成立。
 from __future__ import annotations
 
+import errno
+import inspect
 import os
-from dataclasses import replace
+from contextlib import ExitStack
+from dataclasses import astuple, replace
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -15,6 +20,7 @@ from agent_py_agent.agent.io.cursor_cache import CursorCache, cursor_key, file_s
 from agent_py_agent.agent.memory_store import curator_audit_cursor
 from agent_py_agent.agent.memory_store.curator_inputs import (
     CuratorMessageSource,
+    _audit_input,
     _collect_audit,
     _collect_messages,
 )
@@ -442,3 +448,137 @@ def test_slice3_nonblank_cursor_keeps_exact_whitespace_in_id(initial_cursor_case
     assert case.store.messages.after_report(case.tid, after_message_id='spaced') == ([], [])
     expected = LegacyMessageReader(case.store).after_report(case.tid, after_message_id=' spaced ')
     assert expected[0] and case.store.messages.after_report(case.tid, after_message_id=' spaced ') == expected
+
+
+def _fd_count() -> int | None:
+    for probe in (Path("/dev/fd"), Path("/proc/self/fd")):
+        if probe.is_dir():
+            return len(os.listdir(probe))
+    return None
+
+
+def _patch_stat_boundary(stack: ExitStack, fault_stat, original_stat) -> None:
+    for name in ("supports_dir_fd", "supports_follow_symlinks", "supports_fd"):
+        current = getattr(os, name)
+        if original_stat in current:
+            stack.enter_context(patch.object(os, name, current | {fault_stat}))
+    stack.enter_context(patch.object(os, "stat", fault_stat))
+
+
+def test_r4_audit_read_slice_and_dir_classify_missing_vs_io_error(tmp_path, monkeypatch):
+    cache = CursorCache(4)
+    monkeypatch.setattr(curator_audit_cursor, "_AUDIT_CURSORS", cache)
+
+    missing_shard = tmp_path / "missing" / "1970-01-01.jsonl"
+    fd_before = _fd_count()
+    missing_slice = curator_audit_cursor._read_slice(missing_shard, None)
+    assert not missing_slice.rows and not missing_slice.errors and not missing_slice.fatal
+    assert _collect_audit(tmp_path / "absent-audit", after_event_id="", limit=10, max_chars=20_000) == ([], [])
+    if fd_before is not None:
+        assert _fd_count() == fd_before
+
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    first = audit_dir / "1970-01-01.jsonl"
+    second = audit_dir / "1970-01-02.jsonl"
+    first.write_bytes(encode_row({"event_id": "event-a", "event_type": "tool_call", "status": "ok"}))
+    second.write_bytes(encode_row({"event_id": "event-b", "event_type": "tool_call", "status": "ok"}))
+
+    # 1. stat 路径不应当被 _read_slice 或 collect_audit_window 的预检触发。
+    original_stat = os.stat
+    stat_faults = 0
+
+    def fault_stat(target, *args, **kwargs):
+        nonlocal stat_faults
+        if str(target) in {str(first), str(audit_dir)}:
+            frame = inspect.currentframe()
+            caller = frame.f_back.f_code.co_name if frame and frame.f_back else ""
+            if caller in {"isfile", "is_file", "exists"}:
+                stat_faults += 1
+                raise OSError(errno.EIO, "simulated I/O error")
+        return original_stat(target, *args, **kwargs)
+
+    fd_before = _fd_count()
+    with ExitStack() as stack:
+        _patch_stat_boundary(stack, fault_stat, original_stat)
+        direct_slice = curator_audit_cursor._read_slice(first, None)
+        collected, collect_errors = curator_audit_cursor.collect_audit_window(
+            curator_audit_cursor.AuditRead(audit_dir, "", 10, 20_000),
+            _audit_input,
+        )
+    assert stat_faults == 0
+    assert [astuple(row)[0]["event_id"] for row in direct_slice.rows] == ["event-a"]
+    assert not direct_slice.errors and not direct_slice.fatal
+    assert [row.event_id for row in collected] == ["event-a", "event-b"] and not collect_errors
+    if fd_before is not None:
+        assert _fd_count() == fd_before
+
+    # 2. 缓存复核期间若遇 stat EIO，应安全退回冷扫描并由 _read_slice 直接打开读取完整事件。
+    settle_files([first, second])
+    warm, warm_err = _collect_audit(audit_dir, after_event_id="event-a", limit=10, max_chars=20_000)
+    assert [row.event_id for row in warm] == ["event-b"] and not warm_err
+    assert cache.get(cursor_key(audit_dir, "event-a")) is not None
+
+    cache_stat_faults = 0
+
+    def fault_cache_stat(target, *args, **kwargs):
+        nonlocal cache_stat_faults
+        if str(target) == str(first) and cache_stat_faults == 0:
+            cache_stat_faults += 1
+            raise OSError(errno.EIO, "simulated I/O error")
+        return original_stat(target, *args, **kwargs)
+
+    fd_before = _fd_count()
+    with ExitStack() as stack:
+        _patch_stat_boundary(stack, fault_cache_stat, original_stat)
+        fallback, fallback_err = _collect_audit(audit_dir, after_event_id="event-a", limit=10, max_chars=20_000)
+    assert cache_stat_faults == 1
+    assert [row.event_id for row in fallback] == ["event-b"] and not fallback_err
+    if fd_before is not None:
+        assert _fd_count() == fd_before
+
+    # 3. 真实 open EIO 与目录 scandir EIO 必须保留 AUDIT_READ_FAILED，不得静默视为空。
+    original_open = Path.open
+    open_faults = 0
+
+    def fault_open(target, *args, **kwargs):
+        nonlocal open_faults
+        if target == first and open_faults == 0:
+            frame = inspect.currentframe()
+            caller = frame.f_back.f_code.co_name if frame and frame.f_back else ""
+            if caller == "_read_slice":
+                open_faults += 1
+                raise OSError(errno.EIO, "simulated I/O error")
+        return original_open(target, *args, **kwargs)
+
+    fd_before = _fd_count()
+    with patch.object(Path, "open", fault_open):
+        failed_slice = curator_audit_cursor._read_slice(first, None)
+        assert open_faults == 1
+        assert failed_slice.fatal and failed_slice.errors[0]["error_code"] == "AUDIT_READ_FAILED"
+        open_faults = 0
+        rows_err, errs_open = _collect_audit(audit_dir, after_event_id="", limit=10, max_chars=20_000)
+        assert open_faults == 1
+        assert errs_open and errs_open[0]["error_code"] == "AUDIT_READ_FAILED"
+        assert [row.event_id for row in rows_err] == ["event-b"]
+    if fd_before is not None:
+        assert _fd_count() == fd_before
+
+    original_scandir = os.scandir
+    scandir_faults = 0
+
+    def fault_scandir(target, *args, **kwargs):
+        nonlocal scandir_faults
+        if Path(target) == audit_dir and scandir_faults == 0:
+            scandir_faults += 1
+            raise OSError(errno.EIO, "simulated I/O error")
+        return original_scandir(target, *args, **kwargs)
+
+    fd_before = _fd_count()
+    with patch.object(os, "scandir", fault_scandir):
+        dir_rows, dir_errs = _collect_audit(audit_dir, after_event_id="", limit=10, max_chars=20_000)
+    assert scandir_faults == 1
+    assert dir_rows == []
+    assert len(dir_errs) == 1 and dir_errs[0]["error_code"] == "AUDIT_READ_FAILED"
+    if fd_before is not None:
+        assert _fd_count() == fd_before

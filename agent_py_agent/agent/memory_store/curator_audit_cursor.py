@@ -157,11 +157,12 @@ def _read_error(path: Path, exc: BaseException, line: int) -> dict:
 # LLM: 二进制LF逐行严格解码与原整读等价；当前锚文件整读失败要求重定位，不能凭缓存认定cursor存在。
 # 函数用途: 读取一份分片并保留全部原诊断，可直接交给有界窗口而不累积整文件。
 def _read_slice(path: Path, cursor: AuditCursor | None, window: AuditWindow | None = None) -> AuditSlice:
-    if not path.is_file():
-        return AuditSlice()
+    # 直接打开分片以区分真实 FileNotFoundError 与存储读取错误，防止 stat EIO 静默漏读。
     try:
         with path.open("rb") as handle:
             return _read_open(handle, path, cursor, window)
+    except FileNotFoundError:
+        return AuditSlice()
     except (OSError, UnicodeDecodeError) as exc:
         return AuditSlice(errors=[_read_error(path, exc, 0)], fatal=True)
 
@@ -336,10 +337,16 @@ def _new_window(request: AuditRead, project: Callable, cursor: AuditCursor | Non
 # LLM: 不建磁盘状态，不迁移旧cursor；IO/UTF-8使缓存锚不可见时同算法冷扫保留原缺游标错误。
 # 函数用途: 收集精确audit事件之后的原有界输入。
 def collect_audit_window(request: AuditRead, project: Callable):
-    if not request.root.exists():
+    root = Path(request.root)
+    # 直接打开审计目录列举分片，防止 exists/glob 吞掉目录读取的 OSError。
+    try:
+        with os.scandir(root) as entries:
+            paths = sorted(root / entry.name for entry in entries if entry.name.endswith(".jsonl"))
+    except FileNotFoundError:
         return [], []
+    except OSError as exc:
+        return [], [_read_error(root, exc, 0)]
     request = replace(request, target=str(request.target or "").strip())
-    paths = sorted(request.root.glob("*.jsonl"))
     cursor = _reuse_cursor(request, paths) if request.target else None
     try:
         return _scan_window(_new_window(request, project, cursor), paths, cursor)
