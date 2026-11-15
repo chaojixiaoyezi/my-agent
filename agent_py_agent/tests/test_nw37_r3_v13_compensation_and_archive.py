@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import errno
 import http.client
+import inspect
 import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -1063,6 +1066,304 @@ def test_skill_operation_guard_releases_lock_and_zero_fd_delta_on_all_exits(
             "skills.activate", {"skill_id": "../bad"}, "r3-fd-bad-" + uuid4().hex
         )
         assert st_bad == 400 and bad["error"]["code"] == "INVALID_SCHEMA"
+    finally:
+        fd_after = _count_open_fds()
+        if fd_before >= 0 and fd_after >= 0:
+            assert fd_after - fd_before == 0
+
+
+def _error_detail_value(err_body: dict, key: str):
+    details = (err_body.get("error") or {}).get("details")
+    if isinstance(details, dict):
+        return details.get(key)
+    if isinstance(details, list):
+        for item in details:
+            if isinstance(item, dict) and item.get("key") == key:
+                return item.get("value")
+    return None
+
+
+def _patch_stat_error(stack: ExitStack, monkeypatch, target_path: Path, fn_names: set[str]):
+    """在指定调用栈函数内拦截一次目标路径的 os.stat，模拟单点存储 EIO。"""
+    original_stat = os.stat
+    state = {"faults": 0}
+    target_str = str(target_path)
+
+    def trap_stat(path, *args, **kwargs):
+        if str(path) == target_str and state["faults"] == 0:
+            if any(rec.function in fn_names for rec in inspect.stack()):
+                state["faults"] += 1
+                raise OSError(errno.EIO, "simulated I/O error")
+        return original_stat(path, *args, **kwargs)
+
+    for attr in ("supports_dir_fd", "supports_follow_symlinks", "supports_fd"):
+        current = getattr(os, attr)
+        if original_stat in current:
+            monkeypatch.setattr(os, attr, current | {trap_stat})
+    monkeypatch.setattr(os, "stat", trap_stat)
+    stack.callback(monkeypatch.undo)
+    return state
+
+
+def test_spaces_archive_subscription_and_workflow_read_boundaries_preserve_cause(
+    r3_native, monkeypatch
+):
+    """R4-P1-03：1024 MB 配额下真实网关归档不得因订阅或工作流目录 stat EIO 静默放行，并保留原始 OSError 因果链。"""
+    server, agent = r3_native
+    owner_home = agent.home_paths.owner_home_dir
+    _set_owner_quota_mb(agent, 1024)
+    assert json.loads((owner_home / "quota.json").read_text(encoding="utf-8"))["max_disk_mb"] == 1024
+
+    # 1. 创建空间、绑定接口并创建活跃受管订阅
+    sid, rev = _create_space(server, "archive-read-check")
+    st_bind, bind_res = _http_business(
+        server,
+        "interfaces.bind",
+        {
+            "surface_ref": "gateway",
+            "name": "read-check-source",
+            "space_ids": [sid],
+            "default_space_id": sid,
+            "controller": {"mode": "global"},
+        },
+        idempotency_key="r3-bind-" + uuid4().hex,
+    )
+    assert st_bind == 200, bind_res
+    binding_id = bind_res["data"]["binding_id"]
+
+    st_sub, sub_res = _http_business(
+        server,
+        "subscriptions.create",
+        {"space_id": sid, "source_ref": binding_id},
+        idempotency_key="r3-sub-" + uuid4().hex,
+    )
+    assert st_sub == 200, sub_res
+    sub_id = sub_res["data"]["subscription"]["subscription_id"]
+
+    # 健康对照组：活跃订阅必须阻止空间归档
+    st_healthy, healthy_res = _http_business(
+        server,
+        "spaces.archive",
+        {"space_id": sid},
+        idempotency_key="r3-arc-healthy-" + uuid4().hex,
+        expected_revision=rev,
+    )
+    assert st_healthy == 200, healthy_res
+    assert healthy_res["data"]["space"]["state"] == "active"
+    assert healthy_res["data"]["blockers"] == [
+        {"ref": sub_id, "kind": "subscription", "reason_code": "ACTIVE_SUBSCRIPTION"}
+    ]
+
+    # 真实缺失可选遗留订阅文件（data/subscriptions.json）时，无阻断的空空间可正常归档
+    catalog_path = owner_home / "data" / "business" / "catalog.json"
+    legacy_sub_path = owner_home / "data" / "subscriptions.json"
+    assert not legacy_sub_path.exists()
+    empty_sid, empty_rev = _create_space(server, "archive-missing-optional")
+    st_empty, empty_res = _http_business(
+        server,
+        "spaces.archive",
+        {"space_id": empty_sid},
+        idempotency_key="r3-arc-empty-" + uuid4().hex,
+        expected_revision=empty_rev,
+    )
+    assert st_empty == 200 and empty_res["data"]["space"]["state"] == "archived", empty_res
+    assert empty_res["data"]["blockers"] == []
+
+    fd_before = _count_open_fds()
+    try:
+        # 2. 对 catalog.json 触发一次直接 open() EIO：必须返回 503 HOST_NOT_READY / SUBSCRIPTION_SCAN_FAILED，且保留原 __cause__
+        orig_open = Path.open
+        open_state = {"faults": 0}
+
+        def trap_open(path_self, *args, **kwargs):
+            if path_self == catalog_path and open_state["faults"] == 0:
+                caller = inspect.currentframe().f_back.f_code.co_name
+                if caller in {"active_references", "_read_optional_reference_json"}:
+                    open_state["faults"] += 1
+                    raise OSError(errno.EIO, "simulated I/O error")
+            return orig_open(path_self, *args, **kwargs)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(Path, "open", trap_open)
+            st_read_err, err_res = _http_business(
+                server,
+                "spaces.archive",
+                {"space_id": sid},
+                idempotency_key="r3-arc-open-eio-" + uuid4().hex,
+                expected_revision=rev,
+            )
+        assert open_state["faults"] == 1
+        assert st_read_err == 503, err_res
+        assert err_res["error"]["code"] == "HOST_NOT_READY"
+        assert _error_detail_value(err_res, "reason") == "SUBSCRIPTION_SCAN_FAILED"
+        assert _error_detail_value(err_res, "effect_outcome") == "not_started"
+        assert err_res.get("effect_outcome") == "not_started"
+
+        open_state["faults"] = 0
+        with monkeypatch.context() as mp:
+            mp.setattr(Path, "open", trap_open)
+            with pytest.raises(BusinessError) as exc_catalog_open:
+                agent.business_active_references(sid, None)
+        assert open_state["faults"] == 1
+        assert exc_catalog_open.value.code == "HOST_NOT_READY"
+        assert exc_catalog_open.value.details["reason"] == "SUBSCRIPTION_SCAN_FAILED"
+        assert isinstance(exc_catalog_open.value.__cause__, OSError)
+        assert exc_catalog_open.value.__cause__.errno == errno.EIO
+
+        # 3. 针对 catalog.json 的 os.stat 故障点：因移除 is_file() 预检，stat 触发次数为 0，空间与订阅仍保持 active
+        with ExitStack() as stack, monkeypatch.context() as mp:
+            stat_state = _patch_stat_error(stack, mp, catalog_path, {"active_references"})
+            st_stat_arc, stat_arc_res = _http_business(
+                server,
+                "spaces.archive",
+                {"space_id": sid},
+                idempotency_key="r3-arc-stat-trap-" + uuid4().hex,
+                expected_revision=rev,
+            )
+        assert stat_state["faults"] == 0
+        assert st_stat_arc == 200, stat_arc_res
+        assert stat_arc_res["data"]["space"]["state"] == "active"
+        assert stat_arc_res["data"]["blockers"] == [
+            {"ref": sub_id, "kind": "subscription", "reason_code": "ACTIVE_SUBSCRIPTION"}
+        ]
+        st_sub_after, sub_after_res = _http_business(server, "subscriptions.get", {"subscription_id": sub_id})
+        assert st_sub_after == 200, sub_after_res
+        assert sub_after_res["data"]["subscription"]["state"] == "active"
+
+        # 4. 可选遗留 data/subscriptions.json 边界：活跃订阅阻断归档、无 is_file() stat 预检、直接 open EIO fail-closed
+        legacy_sid, legacy_rev = _create_space(server, "legacy-subscription-space")
+        legacy_sub_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_sub_path.write_text(
+            json.dumps(
+                {
+                    "sub-legacy-1": {
+                        "subscription_id": "sub-legacy-1",
+                        "space_id": legacy_sid,
+                        "enabled": True,
+                        "state": "active",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            st_leg_blk, leg_blk = _http_business(
+                server,
+                "spaces.archive",
+                {"space_id": legacy_sid},
+                idempotency_key="r3-leg-blk-" + uuid4().hex,
+                expected_revision=legacy_rev,
+            )
+            assert st_leg_blk == 200 and leg_blk["data"]["space"]["state"] == "active"
+            assert leg_blk["data"]["blockers"] == [
+                {"ref": "sub-legacy-1", "kind": "subscription", "reason_code": "ACTIVE_SUBSCRIPTION"}
+            ]
+
+            with ExitStack() as stack, monkeypatch.context() as mp:
+                leg_stat = _patch_stat_error(stack, mp, legacy_sub_path, {"active_references"})
+                st_leg_stat, leg_stat_res = _http_business(
+                    server,
+                    "spaces.archive",
+                    {"space_id": legacy_sid},
+                    idempotency_key="r3-leg-stat-" + uuid4().hex,
+                    expected_revision=legacy_rev,
+                )
+            assert leg_stat["faults"] == 0
+            assert st_leg_stat == 200 and leg_stat_res["data"]["space"]["state"] == "active"
+
+            leg_open_state = {"faults": 0}
+
+            def trap_legacy_open(path_self, *args, **kwargs):
+                if path_self == legacy_sub_path and leg_open_state["faults"] == 0:
+                    caller = inspect.currentframe().f_back.f_code.co_name
+                    if caller in {"active_references", "_read_optional_reference_json"}:
+                        leg_open_state["faults"] += 1
+                        raise OSError(errno.EIO, "simulated I/O error")
+                return orig_open(path_self, *args, **kwargs)
+
+            with monkeypatch.context() as mp:
+                mp.setattr(Path, "open", trap_legacy_open)
+                st_leg_err, leg_err = _http_business(
+                    server,
+                    "spaces.archive",
+                    {"space_id": legacy_sid},
+                    idempotency_key="r3-leg-open-eio-" + uuid4().hex,
+                    expected_revision=legacy_rev,
+                )
+            assert leg_open_state["faults"] == 1
+            assert st_leg_err == 503 and leg_err["error"]["code"] == "HOST_NOT_READY"
+            assert _error_detail_value(leg_err, "reason") == "SUBSCRIPTION_SCAN_FAILED"
+
+            leg_open_state["faults"] = 0
+            with monkeypatch.context() as mp:
+                mp.setattr(Path, "open", trap_legacy_open)
+                with pytest.raises(BusinessError) as exc_legacy_open:
+                    agent.business_active_references(legacy_sid, None)
+            assert exc_legacy_open.value.code == "HOST_NOT_READY"
+            assert exc_legacy_open.value.details["reason"] == "SUBSCRIPTION_SCAN_FAILED"
+            assert isinstance(exc_legacy_open.value.__cause__, OSError)
+            assert exc_legacy_open.value.__cause__.errno == errno.EIO
+
+            st_leg_get, leg_get = _http_business(server, "spaces.get", {"space_id": legacy_sid})
+            assert st_leg_get == 200 and leg_get["data"]["space"]["state"] == "active"
+        finally:
+            legacy_sub_path.unlink(missing_ok=True)
+
+        st_leg_done, leg_done = _http_business(
+            server,
+            "spaces.archive",
+            {"space_id": legacy_sid},
+            idempotency_key="r3-leg-done-" + uuid4().hex,
+            expected_revision=legacy_rev,
+        )
+        assert st_leg_done == 200 and leg_done["data"]["space"]["state"] == "archived"
+
+        # 5. 同类横扫：_list_unsettled_workflow_runs 对 workflow_runs / workflow_run_index.sqlite3 的 stat EIO 必须阻断归档并保留 __cause__
+        wf_sid, wf_rev = _create_space(server, "workflow-stat-boundary-space")
+        runs_dir = owner_home / "data" / "workflow_runs"
+        index_db = owner_home / "data" / "workflow_run_index.sqlite3"
+        for target_path in (runs_dir, index_db):
+            with ExitStack() as stack, monkeypatch.context() as mp:
+                wf_stat = _patch_stat_error(
+                    stack, mp, target_path, {"_list_unsettled_workflow_runs", "_optional_stat"}
+                )
+                st_wf_err, wf_err = _http_business(
+                    server,
+                    "spaces.archive",
+                    {"space_id": wf_sid},
+                    idempotency_key="r3-wf-stat-eio-" + uuid4().hex,
+                    expected_revision=wf_rev,
+                )
+            assert wf_stat["faults"] == 1
+            assert st_wf_err == 503 and wf_err["error"]["code"] == "HOST_NOT_READY"
+            assert _error_detail_value(wf_err, "reason") == "WORKFLOW_RUN_SCAN_FAILED"
+            assert _error_detail_value(wf_err, "effect_outcome") == "not_started"
+
+            with ExitStack() as stack, monkeypatch.context() as mp:
+                wf_stat_direct = _patch_stat_error(
+                    stack, mp, target_path, {"_list_unsettled_workflow_runs", "_optional_stat"}
+                )
+                with pytest.raises(BusinessError) as exc_wf:
+                    agent.business_active_references(wf_sid, None)
+            assert wf_stat_direct["faults"] == 1
+            assert exc_wf.value.code == "HOST_NOT_READY"
+            assert exc_wf.value.details["reason"] == "WORKFLOW_RUN_SCAN_FAILED"
+            assert isinstance(exc_wf.value.__cause__, OSError)
+            assert exc_wf.value.__cause__.errno == errno.EIO
+
+            st_wf_get, wf_get = _http_business(server, "spaces.get", {"space_id": wf_sid})
+            assert st_wf_get == 200 and wf_get["data"]["space"]["state"] == "active"
+
+        # 确认真正缺失工作流目录与索引库时仍正常归档且不创建空的 workflow_run_index.sqlite3
+        st_wf_ok, wf_ok = _http_business(
+            server,
+            "spaces.archive",
+            {"space_id": wf_sid},
+            idempotency_key="r3-wf-ok-" + uuid4().hex,
+            expected_revision=wf_rev,
+        )
+        assert st_wf_ok == 200 and wf_ok["data"]["space"]["state"] == "archived"
+        assert not index_db.exists()
     finally:
         fd_after = _count_open_fds()
         if fd_before >= 0 and fd_after >= 0:
