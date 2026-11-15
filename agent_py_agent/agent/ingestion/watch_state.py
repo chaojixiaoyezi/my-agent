@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha1, sha256
 from pathlib import Path
 from typing import Any
@@ -587,6 +587,18 @@ def _merge_disk_progress_facts(
         state.harvest_commit_id = disk_commit_id
 
 
+def _adopt_disk_transport_binding(state: WatchState, disk: dict[str, Any]) -> None:
+    """Adopt newer disk transport envelope and poll query interval while preserving unrelated tuning."""
+    if isinstance(disk.get("source_envelope"), dict):
+        state.source_envelope = deepcopy(disk["source_envelope"])
+    tuning = disk.get("tuning")
+    if isinstance(tuning, dict) and "poll_query_seconds" in tuning:
+        state.tuning = replace(
+            state.tuning,
+            poll_query_seconds=tuning_from_params(tuning).poll_query_seconds,
+        )
+
+
 def _merge_monotonic_disk_state(
     state: WatchState,
     disk: dict[str, Any],
@@ -649,6 +661,7 @@ def _merge_monotonic_disk_state(
         if disk_binding_rev > state_binding_rev or (
             disk_config_version and disk_config_version != state.source_config_version
         ):
+            _adopt_disk_transport_binding(state, disk)
             if "source_profile_ref" in disk and disk.get("source_profile_ref") is not None:
                 state.source_profile_ref = str(disk.get("source_profile_ref") or "")
             disk_document_refs = disk.get("document_refs")
@@ -806,6 +819,8 @@ _MERGE_FACT_KEYS = (
     "document_refs",
     "source_config_version",
     "source_binding_revision_seq",
+    "source_envelope",
+    "tuning",
     "ingest_window_started_at",
     "ingest_window_start_records",
     "ingest_records_per_second",
@@ -962,6 +977,7 @@ def _refresh_audit_identity(state: WatchState, state_doc: dict[str, Any]) -> Non
     if disk_binding_rev > state_binding_rev or (
         disk_config_version and disk_config_version != state.source_config_version
     ):
+        _adopt_disk_transport_binding(state, state_doc)
         if "source_profile_ref" in state_doc and state_doc.get("source_profile_ref") is not None:
             state.source_profile_ref = str(state_doc.get("source_profile_ref") or "")
         disk_document_refs = state_doc.get("document_refs")

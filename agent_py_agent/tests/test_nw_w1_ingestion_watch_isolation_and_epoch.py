@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -241,6 +242,8 @@ def test_persist_state_and_binding_revision_serialize_without_losing_fields(tmp_
     initial.source_profile_ref = "docs/p-0.md"
     initial.document_refs = ["docs/d-0.md"]
     initial.source_config_version = "sha256:" + "0" * 64
+    initial.source_envelope = {"mode": "poll", "request": {"headers": {"X-Rev": "0"}}}
+    initial.tuning = replace(initial.tuning, poll_query_seconds=60, max_candidates_per_pull=11)
     initial.harvest_commit_id = "txn-0"
     watch_state_module.persist_state(initial)
 
@@ -272,6 +275,11 @@ def test_persist_state_and_binding_revision_serialize_without_losing_fields(tmp_
                 worker_state.source_profile_ref = f"docs/p-{idx}.md"
                 worker_state.document_refs = [] if idx == rounds else [f"docs/d-{idx}.md"]
                 worker_state.source_config_version = f"sha256:{idx:064x}"
+                worker_state.source_envelope = {
+                    "mode": "poll",
+                    "request": {"headers": {"X-Rev": str(idx)}},
+                }
+                worker_state.tuning = replace(worker_state.tuning, poll_query_seconds=60 + idx)
                 watch_state_module.persist_source_binding_revision(worker_state)
         except BaseException as exc:  # pragma: no cover - surfaced by assertion below
             errors.append(exc)
@@ -286,6 +294,12 @@ def test_persist_state_and_binding_revision_serialize_without_losing_fields(tmp_
 
     # One final sync from each writer to confirm neither stale instance rolls back the other.
     watch_state_module.persist_state(harvester_state)
+    assert harvester_state.source_envelope == {
+        "mode": "poll",
+        "request": {"headers": {"X-Rev": str(rounds)}},
+    }
+    assert harvester_state.tuning.poll_query_seconds == 60 + rounds
+    assert harvester_state.tuning.max_candidates_per_pull == 11
     watch_state_module.persist_source_binding_revision(worker_state)
 
     reloaded = watch_state_module.load_state(owner_home, watch_id)
@@ -297,6 +311,12 @@ def test_persist_state_and_binding_revision_serialize_without_losing_fields(tmp_
     assert reloaded.source_profile_ref == f"docs/p-{rounds}.md"
     assert reloaded.document_refs == []
     assert reloaded.source_config_version == f"sha256:{rounds:064x}"
+    assert reloaded.source_envelope == {
+        "mode": "poll",
+        "request": {"headers": {"X-Rev": str(rounds)}},
+    }
+    assert reloaded.tuning.poll_query_seconds == 60 + rounds
+    assert reloaded.tuning.max_candidates_per_pull == 11
 
     # Concurrent reopen_on_disk also preserves harvest_commit_id and binding revision.
     reloaded.closed = True
@@ -310,6 +330,11 @@ def test_persist_state_and_binding_revision_serialize_without_losing_fields(tmp_
     assert after_reopen.closed is False
     assert after_reopen.harvest_commit_id == f"txn-{rounds}"
     assert after_reopen.source_config_version == f"sha256:{rounds:064x}"
+    assert after_reopen.source_envelope == {
+        "mode": "poll",
+        "request": {"headers": {"X-Rev": str(rounds)}},
+    }
+    assert after_reopen.tuning.poll_query_seconds == 60 + rounds
 
 
 def _make_audit_agent_and_state(

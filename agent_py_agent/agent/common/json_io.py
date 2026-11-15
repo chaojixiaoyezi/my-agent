@@ -120,12 +120,12 @@ def read_json_object_report(
 ) -> JsonObjectReadReport:
     """Read a JSON object and preserve a model-visible error for malformed files."""
 
-    if not path.exists():
-        return JsonObjectReadReport({})
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if parse_nested_string and isinstance(payload, str):
             payload = json.loads(payload)
+    except FileNotFoundError:
+        return JsonObjectReadReport({})
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         return JsonObjectReadReport({}, _json_object_load_error(path, exc, context))
     if isinstance(payload, dict):
