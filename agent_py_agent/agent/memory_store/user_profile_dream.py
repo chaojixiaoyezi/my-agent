@@ -15,6 +15,7 @@ from pathlib import Path
 from ..backends.decision_protocol import decision_input_tokens
 from ..backends.request_scope import foreground_model_active
 from ..capability.persona_repository import (
+    PersonaConflictError,
     PersonaRepository,
     PersonaSecurityError,
     _is_empty_persona_template_content,
@@ -200,23 +201,20 @@ def _strip_machine_tags(text: str) -> str:
 
 
 def _normalized_dedupe_key(clean_text: str) -> str:
-    collapsed = re.sub(r"[^\w\u4e00-\u9fff]+", "", clean_text.lower())
-    return collapsed or clean_text.lower()
+    return _normalize_whitespace(clean_text)
 
 
 def _preference_key(clean_text: str) -> str | None:
-    match = _KV_RE.match(clean_text)
+    if re.match(r"\[[A-Za-z_]+:[^\]\n]*\]", clean_text):
+        return None
+    match = _KV_RE.match(clean_text) or _SIMPLE_IS_RE.match(clean_text)
     if match:
         raw_key = _normalize_whitespace(match.group(1)).lower()
         value = _normalize_whitespace(match.group(2))
         if raw_key and value and len(raw_key) <= 32:
-            return f"kv:{_PREFERENCE_KEY_ALIASES.get(raw_key, raw_key)}"
-    is_match = _SIMPLE_IS_RE.match(clean_text)
-    if is_match:
-        raw_key = _normalize_whitespace(is_match.group(1)).lower()
-        value = _normalize_whitespace(is_match.group(2))
-        if raw_key and value:
-            return f"kv:{_PREFERENCE_KEY_ALIASES.get(raw_key, raw_key)}"
+            if raw_key in _PREFERENCE_KEY_ALIASES:
+                return f"alias:{_PREFERENCE_KEY_ALIASES[raw_key]}"
+            return f"kv:{raw_key}"
     return None
 
 
@@ -376,14 +374,15 @@ def plan_user_profile_consolidation(
         if entry.entry_id in winners_by_id:
             # Literal duplicate line with identical entry_id; keep newest instance.
             continue
-        is_conflict = (norm_key in seen_norm) or (pref_key is not None and pref_key in seen_pref_keys)
+        alias_pref_key = pref_key if (pref_key is not None and pref_key.startswith("alias:")) else None
+        is_conflict = (norm_key in seen_norm) or (alias_pref_key is not None and alias_pref_key in seen_pref_keys)
         if is_conflict:
             superseded_ids_set.add(entry.entry_id)
             continue
         winners_by_id[entry.entry_id] = entry
         seen_norm.add(norm_key)
-        if pref_key is not None:
-            seen_pref_keys.add(pref_key)
+        if alias_pref_key is not None:
+            seen_pref_keys.add(alias_pref_key)
 
     unique_winners = sorted(winners_by_id.values(), key=lambda item: item.chronology_rank)
 
@@ -925,12 +924,18 @@ def run_user_profile_dream_if_due(
             pre_dream_backup_ref=pre_dream_backup_ref,
             dream_run_id=dream_run_id,
         )
-    except Exception:
-        try:
-            if backup_path.exists() and not backup_path.is_symlink():
-                backup_path.unlink()
-        except OSError:
-            pass
+    except Exception as exc:
+        from ..plugin_host.errors import HostAPIError
+
+        if isinstance(exc, PersonaConflictError) or (
+            isinstance(exc, HostAPIError) and getattr(exc, "outcome", None) == "not_started"
+            and getattr(exc, "code", None) in ("AUTO_GOVERNANCE_SELF_LEARNING_DISABLED", "AUTO_GOVERNANCE_ADMIN_REVIEW_REQUIRED", "AUTO_GOVERNANCE_ADMIN_ONLY")
+        ):
+            try:
+                if backup_path.exists() and not backup_path.is_symlink():
+                    backup_path.unlink()
+            except OSError:
+                pass
         raise
 
     if not commit_result.get("changed"):
