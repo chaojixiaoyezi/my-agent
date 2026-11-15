@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import replace
@@ -195,6 +195,14 @@ def _non_agent_step_settled(step, result):
     return result.get('effect_outcome') in ('confirmed', 'failed', 'succeeded', 'not_started')
 
 
+_TERMINAL_RUN_STATUSES = ('succeeded', 'failed', 'skipped', 'cancelled')
+
+
+def _is_blocking_workflow_run(record):
+    """非终态运行（含 cancelling/starting/paused）及仍有未结清义务的终态运行均阻止工作流回收。"""
+    return record.status not in _TERMINAL_RUN_STATUSES or not _concurrency_settled(record)
+
+
 def _concurrency_settled(record):
     """终态标签不等于义务消失；只消费原步骤上的完成、取消或未提交证明。"""
     if record.status in ('queued', 'running', 'waiting_for_agent', 'cancelling'):
@@ -380,23 +388,118 @@ class WorkflowRunStore:
         safe_path(self.root, step.step_id + '.json')
         _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'steps', step.step_id + '.json'), step)
 
-    # LLM: 排他创建防同编号覆盖；步骤与冻结定义均由引擎提供的结构化值保存。
+    def _validate_asset_for_run(self, record, workflow_snapshot, current, *, asset_guard=None, require_active_asset=False):
+        from ..assets.delivery_contracts import AssetDisabledError
+        from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
+        from .business_scope import WorkflowPolicyRefusal, workflow_state
+
+        snap_desc = (workflow_snapshot or {}).get('descriptor', {}) if isinstance(workflow_snapshot, dict) else {}
+        snap_meta = snap_desc.get('metadata', {}) if isinstance(snap_desc, dict) else {}
+        is_owner_snapshot = (
+            isinstance(snap_desc, dict)
+            and snap_desc.get('source_scope', 'owner') == 'owner'
+            and snap_desc.get('scope_layer', 'owner') == 'owner'
+        )
+        snap_owner = snap_desc.get('owner_id', '') if isinstance(snap_desc, dict) else ''
+        # 跨源/外主已终结快照的存储写回不改本地宿主资产计时，也不能误触发本地同名资产拦截。
+        foreign_source_terminal = (
+            not require_active_asset
+            and asset_guard is None
+            and record.status in _TERMINAL_RUN_STATUSES
+            and workflow_snapshot is not None
+            and (
+                not is_owner_snapshot
+                or (
+                    current is not None
+                    and bool(snap_owner)
+                    and snap_owner == record.owner_id
+                    and bool(current.descriptor.owner_id)
+                    and snap_owner != current.descriptor.owner_id
+                )
+            )
+        )
+        if foreign_source_terminal:
+            return
+        if current is None:
+            if is_owner_snapshot and (
+                require_active_asset
+                or (isinstance(snap_meta, dict) and BUSINESS_WORKFLOW_METADATA in snap_meta)
+            ):
+                raise WorkflowPolicyRefusal('WORKFLOW_NOT_ACTIVE')
+        elif is_owner_snapshot or require_active_asset:
+            if BUSINESS_WORKFLOW_METADATA in current.descriptor.metadata:
+                state = workflow_state(current)
+                if state.get('lifecycle', 'active') != 'active':
+                    raise WorkflowPolicyRefusal('WORKFLOW_RECYCLED')
+                if not current.enabled:
+                    raise WorkflowPolicyRefusal('WORKFLOW_NOT_ACTIVE')
+                if record.owner_id and current.descriptor.owner_id and current.descriptor.owner_id != record.owner_id:
+                    raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+                if record.scope_snapshot or record.business_context:
+                    scope = state.get('scope') or {}
+                    if scope.get('scope_mode') == 'unassigned':
+                        raise WorkflowPolicyRefusal('WORKFLOW_UNASSIGNED')
+                    if scope.get('scope_mode') == 'spaces':
+                        space_id = (record.business_context or {}).get('space_id')
+                        if space_id not in scope.get('space_ids', ()):
+                            raise WorkflowPolicyRefusal('WORKFLOW_SPACE_MISMATCH')
+            elif not current.enabled:
+                raise AssetDisabledError('workflow', current.descriptor.id)
+        if callable(asset_guard):
+            asset_guard(current)
+
+    # LLM: 排他创建防同编号覆盖；先经资产锁校验活跃状态与范围，再持运行锁登记并立即双解锁，绝不持锁进入步骤执行。
     # 函数用途: 新建一个运行及各步初始快照。
-    def create_run(self, record, workflow_snapshot=None):
+    def create_run(self, record, workflow_snapshot=None, *, asset_guard=None, require_active_asset=False):
         payload(record)
         for step in record.steps:
             safe_path(self.root, step.step_id + '.json')
-        with self._lock(record.workflow_run_id):
-            raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', record.workflow_run_id, 'run.json'))
-            if raw is not None:
-                raise ValueError('运行编号已存在')
-            # DTO 可复制来创建不同运行；新行的 CAS 起点不能继承另一个 ID 的修订。
-            record.revision = 0
-            self.save_run(record, workflow_snapshot)
+        from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA, WorkflowStore
+
+        snap_meta = (workflow_snapshot or {}).get('descriptor', {}).get('metadata', {}) if isinstance(workflow_snapshot, dict) else {}
+        is_business_run = bool(
+            require_active_asset
+            or asset_guard is not None
+            or record.scope_snapshot
+            or record.business_context
+            or (isinstance(snap_meta, dict) and BUSINESS_WORKFLOW_METADATA in snap_meta)
+        )
+        wf_dir = self.owner_home / 'workflows'
+
+        def _commit_initial():
+            with self._lock(record.workflow_run_id):
+                raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', record.workflow_run_id, 'run.json'))
+                if raw is not None:
+                    raise ValueError('运行编号已存在')
+                # DTO 可复制来创建不同运行；新行的 CAS 起点不能继承另一个 ID 的修订。
+                record.revision = 0
+                return self._save_run_locked(record, workflow_snapshot)
+
+        deferred = None
+        if is_business_run or wf_dir.exists() or wf_dir.is_symlink():
+            def _guarded_commit(current):
+                self._validate_asset_for_run(
+                    record, workflow_snapshot, current,
+                    asset_guard=asset_guard, require_active_asset=require_active_asset,
+                )
+                return _commit_initial()
+
+            deferred = WorkflowStore(self.owner_home).register_run_locked(record.workflow_id, _guarded_commit)
+        else:
+            deferred = _commit_initial()
+        if deferred is not None:
+            _publish_completed_run(*deferred)
 
     # LLM: 仅引擎在启动、恢复和结束时调用；定义只在首次传入时替换，不跟随资产后来修改。
     # 函数用途: 保存运行全貌与所有步骤快照。
     def save_run(self, record, workflow_snapshot=None, *, expected_revision=None, resuming=False):
+        deferred = self._save_run_locked(
+            record, workflow_snapshot, expected_revision=expected_revision, resuming=resuming,
+        )
+        if deferred is not None:
+            _publish_completed_run(*deferred)
+
+    def _save_run_locked(self, record, workflow_snapshot=None, *, expected_revision=None, resuming=False):
         for step in record.steps:
             safe_path(self.root, step.step_id + '.json')
         with self._lock(record.workflow_run_id):
@@ -421,9 +524,10 @@ class WorkflowRunStore:
                 self._write_step(record.workflow_run_id, step)
             _write_json(self.owner_home, parts, data)
             record.revision = revision + 1
-            # 先有原运行的耐久完成证明；只在最外层运行锁退出后发表附属计时。
+            # 先有原运行的耐久完成证明；返回给最外层在运行锁及资产锁之外发表附属计时。
             if record.status in ('succeeded', 'failed', 'cancelled'):
-                _publish_completed_run(self.owner_home, deepcopy(record), data.get('workflow_snapshot'))
+                return (self.owner_home, deepcopy(record), data.get('workflow_snapshot'))
+        return None
 
     # LLM: 先发表独立快照再更新运行；全部终态拒绝普通晚到改写，显式恢复不允许复活cancelled。
     # 函数用途: 保存已存在步骤并推进位置，保留终态保护及同状态运行元数据更新。

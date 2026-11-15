@@ -7,10 +7,15 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import inspect
 import json
+import logging
 
+from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 from .business_scope import timestamp, workflow_state
+
+_LOGGER = logging.getLogger(__name__)
 
 BUSINESS_ORPHAN_AFTER_DAYS = 30
 BUSINESS_MAINTENANCE_MAX_ROWS = 128
@@ -58,36 +63,122 @@ def update_due_index(store, definition, *, committed=False):
         _save(store, record)
 
 
-def cleanup_status(service, definition):
+def _build_diagnostic(error_code, *, exception=None, summary='', recommended_action='check_reference_sources_and_retry'):
+    exc_type = type(exception).__name__ if exception is not None else ''
+    if not summary and exception is not None:
+        detail = redact_sensitive_value(str(exception))
+        summary = f'{exc_type}: {detail}' if detail else exc_type
+    else:
+        summary = str(redact_sensitive_value(summary))
+    return {
+        'error_code': error_code,
+        'exception_type': exc_type,
+        'summary': summary[:240],
+        'side_effect': 'not_started',
+        'recommended_action': recommended_action,
+    }
+
+
+def _record_diagnostic(target, diag, workflow_ref):
+    _LOGGER.warning(
+        'workflow cleanup coverage diagnostic workflow_ref=%s error_code=%s exception_type=%s '
+        'side_effect=%s recommended_action=%s summary=%s',
+        workflow_ref,
+        diag['error_code'],
+        diag['exception_type'] or 'none',
+        diag['side_effect'],
+        diag['recommended_action'],
+        diag['summary'],
+        extra={'cleanup_diagnostics': diag},
+    )
+    if isinstance(target, dict):
+        target.clear()
+        target.update(diag)
+
+
+def _invoke_reference_reader(reader, service, definition):
+    try:
+        sig = inspect.signature(reader)
+        positional = [
+            p for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+    except (ValueError, TypeError):
+        positional, has_varargs = [], True
+    if not has_varargs and len(positional) >= 3:
+        return reader('workflow', definition.descriptor.id, getattr(service, 'owner_id', None))
+    try:
+        return reader(definition.descriptor.id)
+    except TypeError:
+        if has_varargs or len(positional) != 1:
+            return reader('workflow', definition.descriptor.id, getattr(service, 'owner_id', None))
+        raise
+
+
+def cleanup_status(service, definition, *, diagnostics=None):
     state = workflow_state(definition)
     blockers = []
+    workflow_ref = definition.descriptor.id
     if state['protected']:
-        blockers.append({'ref': definition.descriptor.id, 'kind': 'protected', 'reason_code': 'PROTECTED'})
+        blockers.append({'ref': workflow_ref, 'kind': 'protected', 'reason_code': 'PROTECTED'})
     if definition.descriptor.source_scope != 'owner' or definition.descriptor.scope_layer != 'owner':
-        blockers.append({'ref': definition.descriptor.id, 'kind': 'read_only', 'reason_code': 'READ_ONLY'})
-    try:
-        if callable(getattr(service, 'reference_reader', None)):
-            try:
-                references = service.reference_reader(definition.descriptor.id)
-            except TypeError:
-                try:
-                    references = service.reference_reader('workflow', definition.descriptor.id, getattr(service, 'owner_id', None))
-                except Exception:
-                    references = None
-        else:
+        blockers.append({'ref': workflow_ref, 'kind': 'read_only', 'reason_code': 'READ_ONLY'})
+    references = None
+    diag = None
+    reader = getattr(service, 'reference_reader', None)
+    if not callable(reader):
+        diag = _build_diagnostic(
+            'REFERENCE_READER_UNAVAILABLE',
+            summary='Workflow reference reader is unavailable on workflow scope service.',
+            recommended_action='configure_workflow_reference_reader',
+        )
+    else:
+        try:
+            references = _invoke_reference_reader(reader, service, definition)
+        except Exception as exc:
+            diag = _build_diagnostic(
+                'REFERENCE_READER_FAILED',
+                exception=exc,
+                recommended_action='inspect_reference_sources_and_retry',
+            )
             references = None
-    except (OSError, ValueError, LookupError, TypeError):
-        references = None
-    if (not isinstance(references, dict) or references.get('coverage') != 'complete'
+    if diag is not None:
+        blockers.append({'ref': workflow_ref, 'kind': 'coverage', 'reason_code': 'REFERENCE_COVERAGE_UNKNOWN'})
+        _record_diagnostic(diagnostics, diag, workflow_ref)
+    elif (not isinstance(references, dict) or references.get('coverage') != 'complete'
             or not isinstance(references.get('blockers'), list)):
-        blockers.append({'ref': definition.descriptor.id, 'kind': 'coverage', 'reason_code': 'REFERENCE_COVERAGE_UNKNOWN'})
+        blockers.append({'ref': workflow_ref, 'kind': 'coverage', 'reason_code': 'REFERENCE_COVERAGE_UNKNOWN'})
         if isinstance(references, dict) and isinstance(references.get('blockers'), list):
-            blockers.extend(dict(row) for row in references['blockers'][:100]
-                if isinstance(row, dict) and set(row) == {'ref', 'kind', 'reason_code'} and row['kind'] == 'coverage')
+            valid_coverage = [
+                dict(row) for row in references['blockers'][:100]
+                if isinstance(row, dict) and set(row) == {'ref', 'kind', 'reason_code'} and row['kind'] == 'coverage'
+            ]
+            blockers.extend(valid_coverage)
+            codes = ', '.join(row['reason_code'] for row in valid_coverage[:5])
+            summary = f'Workflow reference coverage is {references.get("coverage")!r}' + (f': {codes}' if codes else '.')
+            diag = _build_diagnostic(
+                'REFERENCE_COVERAGE_INCOMPLETE',
+                summary=summary,
+                recommended_action='wait_for_index_recovery_or_inspect_reference_sources',
+            )
+        else:
+            diag = _build_diagnostic(
+                'REFERENCE_RESULT_INVALID',
+                summary=f'Invalid reference reader result type {type(references).__name__}.',
+                recommended_action='repair_reference_reader_contract_and_retry',
+            )
+        _record_diagnostic(diagnostics, diag, workflow_ref)
     else:
         for row in references['blockers']:
             if not isinstance(row, dict) or set(row) != {'ref', 'kind', 'reason_code'}:
-                blockers.append({'ref': definition.descriptor.id, 'kind': 'coverage', 'reason_code': 'REFERENCE_COVERAGE_UNKNOWN'})
+                blockers.append({'ref': workflow_ref, 'kind': 'coverage', 'reason_code': 'REFERENCE_COVERAGE_UNKNOWN'})
+                diag = _build_diagnostic(
+                    'REFERENCE_BLOCKER_INVALID',
+                    summary='Reference reader emitted a malformed blocker row.',
+                    recommended_action='repair_reference_reader_contract_and_retry',
+                )
+                _record_diagnostic(diagnostics, diag, workflow_ref)
                 break
             blockers.append(dict(row))
     policy = _record(service.store)['policy']
@@ -95,6 +186,13 @@ def cleanup_status(service, definition):
     return {'protected': state['protected'], 'orphan_since': timestamp(state['orphan_since']),
         'last_content_edit_at': timestamp(state['last_content_edit_at']), 'last_run_at': timestamp(state['last_run_at']),
         'last_restore_at': timestamp(state['last_restore_at']), 'eligible_at': timestamp(eligible), 'blockers': blockers[:100]}
+
+
+def cleanup_status_diagnostics(service, definition):
+    """返回完整清理状态与覆盖诊断明细，既守公开 Schema 又暴露排障根因。"""
+    diagnostics = {}
+    status = cleanup_status(service, definition, diagnostics=diagnostics)
+    return status, diagnostics
 
 
 def _operation_identity(action, request, key):
@@ -220,7 +318,8 @@ def maintain_owner_workflows(service, *, actor, idempotency_key, resume_inflight
             if (state['scope']['scope_revision'] == row['scope_revision']
                     and state['scope']['scope_mode'] == 'unassigned'
                     and state['orphan_since'] == row['orphan_since']):
-                status = cleanup_status(service, definition)
+                diagnostics = {}
+                status = cleanup_status(service, definition, diagnostics=diagnostics)
                 if any(item['reason_code'] == 'REFERENCE_COVERAGE_UNKNOWN' for item in status['blockers']):
                     outcome = 'unknown'
                 elif not status['blockers']:

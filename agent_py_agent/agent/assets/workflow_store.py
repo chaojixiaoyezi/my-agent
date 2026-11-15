@@ -8,6 +8,7 @@ import math
 import time
 import uuid
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 
 from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath
@@ -502,6 +503,19 @@ class WorkflowStore(_AssetStore):
                 metadata={**updated.descriptor.metadata, BUSINESS_WORKFLOW_METADATA: state}))
             self._save(updated)
             return result
+
+    def register_run_locked(self, workflow_id, callback, *, guard=None):
+        """在资产锁内重读工作流当前状态与范围并完成首个运行登记，返回前立即释放资产锁。"""
+        from . import asset_root_lock_held
+
+        norm_id = normalize_workflow_asset_id(workflow_id)
+        safe_asset_id(norm_id)
+        scope = nullcontext() if asset_root_lock_held(self.owner_home) else self._locked()
+        with scope:
+            current = self._get(norm_id)
+            if callable(guard):
+                guard(current)
+            return callback(current)
 
     # LLM: 项目冷读只用readonly视图，坏记录不回退；返回值不能决定后续更新写根。
     # 函数用途: 依项目、Owner、全局优先级读取工作流定义。

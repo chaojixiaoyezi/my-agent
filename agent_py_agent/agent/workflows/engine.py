@@ -22,6 +22,7 @@ from ..assets.descriptor import execution_definition_ref, workflow_output_contra
 from ..assets.script_store import ScriptStore
 from ..assets.skill_adapter import get_owner_skill_descriptor
 from ..assets.workflow_store import (
+    BUSINESS_WORKFLOW_METADATA,
     WorkflowDefinition,
     WorkflowStore,
     validate_definition_eligibility,
@@ -224,7 +225,6 @@ class _WorkflowRunLifecycle:
         owner_id = self.owner_id or owner_id
         if owner_id and descriptor.get('owner_id') and owner_id != descriptor['owner_id']:
             raise PermissionError('WORKFLOW_OWNER_MISMATCH')
-        from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
         from ..conversation.business_contracts import BusinessExecutionContext, WorkflowScope
         if business_context is not None and not isinstance(business_context, BusinessExecutionContext):
             raise TypeError('business_context必须由可信宿主提供DTO')
@@ -264,7 +264,12 @@ class _WorkflowRunLifecycle:
         self._authorize_run(record, 'preflight', definition=definition)
         if concurrency_policy != 'allow':
             record.status = 'queued'
-        self.store.create_run(record, definition)
+        require_active_asset = (
+            descriptor.get('scope_layer', 'owner') == 'owner'
+            and descriptor.get('source_scope', 'owner') == 'owner'
+            and (isinstance(workflow, str) or BUSINESS_WORKFLOW_METADATA in descriptor.get('metadata', {}))
+        )
+        self.store.create_run(record, definition, require_active_asset=require_active_asset)
 
         # LLM: 闭包在准入前捕获定义/输入/依赖与本次执行器；不按资产ID重读可变正文，取消终态不可复活。
         # 函数用途: 取得资产claim后沿本次原run锁及冻结快照执行。

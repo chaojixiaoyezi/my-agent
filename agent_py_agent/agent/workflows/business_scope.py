@@ -627,12 +627,18 @@ class WorkflowScopeService:
                 state['protected'] = request['protected']
             elif action == 'workflows.recycle':
                 from .orphan_maintenance import cleanup_status
-                status = cleanup_status(self, previous)
+                diagnostics = {}
+                status = cleanup_status(self, previous, diagnostics=diagnostics)
                 if status['blockers']:
                     # 引用存在或覆盖未知都在写入前拒绝；首个阻断原因让客户端区分“被引用”与“覆盖未知”。
-                    raise WorkflowPolicyRefusal('WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN', details={
+                    details = {
                         'blocker_reason_code': status['blockers'][0]['reason_code'],
-                        'blocker_count': len(status['blockers'])})
+                        'blocker_count': len(status['blockers']),
+                    }
+                    for key in ('error_code', 'exception_type', 'summary', 'side_effect', 'recommended_action'):
+                        if diagnostics.get(key) is not None:
+                            details[key] = diagnostics[key]
+                    raise WorkflowPolicyRefusal('WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN', details=details)
                 state['lifecycle'] = 'recycled'
             current = with_state(current, state)
             current = replace(current, descriptor=replace(current.descriptor, revision=previous.descriptor.revision + 1))
@@ -1019,9 +1025,21 @@ class WorkflowScopeService:
                          if step.error_code else None} for step in record.steps],
                 'assignments': [], 'review_refs': list(dict.fromkeys(ref for step in record.steps
                     for ref in step.escalation_result.get('review_refs', ()))),
-                'breakpoint': ({'step_id': record.current_step_id, 'reason_code': (record.breakpoint or {}).get('error_code', ''),
-                    'can_resume': (record.breakpoint or {}).get('can_resume', False), 'required_action': 'resume'}
-                    if record.breakpoint else None)}
+                'breakpoint': ({
+                    'step_id': (record.current_step_id
+                                or (record.breakpoint.get('step_id') if isinstance(record.breakpoint, dict) else None)
+                                or None),
+                    'reason_code': str(
+                        (record.breakpoint.get('error_code') or record.breakpoint.get('reason_code')
+                         if isinstance(record.breakpoint, dict) else '')
+                        or 'WORKFLOW_PAUSED'
+                    )[:128],
+                    'can_resume': bool(record.breakpoint.get('can_resume', False)) if isinstance(record.breakpoint, dict) else False,
+                    'required_action': str(
+                        (record.breakpoint.get('required_action') if isinstance(record.breakpoint, dict) else None)
+                        or 'resume'
+                    )[:128],
+                } if record.breakpoint else None)}
         if not idempotency_key:
             raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
         engine = self._engine(actor, resolution_ref=request.get('resolution_ref'))
