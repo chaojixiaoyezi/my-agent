@@ -90,7 +90,7 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
 
 def test_compact_stress_config_uses_realistic_context_threshold(tmp_path):
     source = tmp_path / "agent_config.yaml"
-    source.write_text("model_backend: echo\nmemory_compact_auto_trigger_percent: 50\n", encoding="utf-8")
+    source.write_text("model_backend: echo\nmemory_compact_trigger_percent: 50\n", encoding="utf-8")
     args = SimpleNamespace(
         config=str(source),
         runs_dir=str(tmp_path / "runs"),
@@ -108,9 +108,9 @@ def test_compact_stress_config_uses_realistic_context_threshold(tmp_path):
     text = session.config_path.read_text(encoding="utf-8")
     assert "# compact-stress overrides" in text
     assert "model_context_window_tokens: 200000" in text
-    assert "memory_compact_auto_trigger_percent: 70" in text
+    assert "memory_compact_trigger_percent: 70" in text
     assert "tool_read_max_chars: 100000" in text
-    assert source.read_text(encoding="utf-8") == "model_backend: echo\nmemory_compact_auto_trigger_percent: 50\n"
+    assert source.read_text(encoding="utf-8") == "model_backend: echo\nmemory_compact_trigger_percent: 50\n"
 
 
 def test_compact_stress_contract_requires_full_source_coverage():
