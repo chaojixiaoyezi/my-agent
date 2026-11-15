@@ -866,6 +866,11 @@ def run_user_profile_dream_if_due(
                 "tags": ["user-profile-dream"],
                 "source": "user-profile-dream",
                 "attributes": {
+                    # 迁移沿用结构化身份，精确区分大小写并保持重试幂等。
+                    "subject_key": (
+                        "user-profile-dream:"
+                        f"{persona_entry_id('user', entry.clean_text)}"
+                    ),
                     "relocated_from": f"USER.md#{entry.entry_id}",
                     "dream_run_id": dream_run_id,
                 },
