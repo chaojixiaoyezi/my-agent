@@ -45,8 +45,11 @@ def _add_cache_change_counts(previous: object, diagnostic: object) -> dict[str, 
     counts = {key: int(value) for key, value in (previous.items() if isinstance(previous, Mapping) else ())
               if key in allowed and type(value) is int and value > 0}
     changes = diagnostic.get("changes") if isinstance(diagnostic, Mapping) else None
+    cache_control_only = isinstance(diagnostic, Mapping) and diagnostic.get("cache_control_only_prefix_changed") is True
     for code in changes if isinstance(changes, list) else []:
         if isinstance(code, str) and code in allowed:
+            if code == "history_prefix_changed" and cache_control_only:
+                continue
             counts[code] = counts.get(code, 0) + 1
     return counts
 
