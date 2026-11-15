@@ -1483,6 +1483,33 @@ def handle_client_business_stream(handler, server):
             handler.close_connection = True
 
 
+def _local_native_approval_paths(host):
+    """为本地模型服务解析可信且就绪的 Gateway 路径；非主用户不越过 owner 目录探测主网关目录。"""
+    explicit = getattr(host, 'business_v13_gateway_paths', None)
+    if explicit is not None and getattr(explicit, 'processing', None) is not None:
+        return explicit
+    current_run = getattr(host, '_current_run_params', None)
+    if current_run is not None:
+        from ..artifacts.registry_provenance import gateway_root_from_host_params
+        from .paths import gateway_paths_from_root
+
+        root = gateway_root_from_host_params(host, current_run)
+        if root is not None:
+            return gateway_paths_from_root(root)
+    home = getattr(host, 'home_paths', None)
+    is_main = getattr(home, 'owner_provider', None) == 'local' and getattr(home, 'owner_kind', None) == 'main'
+    if is_main and getattr(host, 'root', None) is not None and getattr(getattr(host, 'config', None), 'gateway_workspace', None):
+        from .paths import gateway_paths
+
+        try:
+            candidate = gateway_paths(host)
+        except (AttributeError, OSError, PermissionError, TypeError, ValueError):
+            return None
+        if candidate.processing.is_dir():
+            return candidate
+    return None
+
+
 # LLM: 缓存仅属于这个live host，来源快照保留对象身份而非可变对象的相等比较；不保存actor或授权决定。
 # 函数用途: 在owner、canonical home、配置和原服务来源不变时复用本地业务服务。
 def _local_business_services(host):
@@ -1503,6 +1530,7 @@ def _local_business_services(host):
                 'business_governance', 'business_background', 'business_capabilities', 'business_subscriptions',
                 'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
                 'business_approval_decider', 'business_v13_providers', 'business_v13_clock',
+                'business_v13_gateway_paths',
                 'business_space_reference_resolver', 'business_workflow_reference_reader',
                 'task_business_context', 'business_operation_store')), *workflow_port_source(host))
         cached = getattr(host, '_local_business_services_cache', None)
@@ -1510,7 +1538,23 @@ def _local_business_services(host):
                 or any(previous is not current for previous, current in zip(cached[1], sources))):
             cached = (key, sources, BusinessServices(host))
             host._local_business_services_cache = cached
-        return cached[2]
+        services = cached[2]
+        if bool(getattr(host.config, 'business_spaces_enabled', False)):
+            services._prepare_live_ports()
+            if services._default_projection and isinstance(services.projection, BusinessObservationService):
+                from .business_api_v13_readers import native_approval_readers
+
+                approval_paths = _local_native_approval_paths(host)
+                readers = (
+                    native_approval_readers(host, approval_paths, host.home_paths.owner_id, store)
+                    if approval_paths is not None else {}
+                )
+                if readers:
+                    services.projection.readers.update(readers)
+                else:
+                    services.projection.readers.pop('approvals', None)
+                    services.projection.readers.pop('approvals.get', None)
+        return services
 
 
 def _model_business_actor(host):
@@ -2836,7 +2880,11 @@ def register_business_tools(agent):
         ready_specs = tuple(
             spec_by_action[act]
             for act in domain_table[domain_name]
-            if business_domain_tool(act) == domain_name and services.ready(act)
+            if (
+                business_domain_tool(act) == domain_name
+                and not (spec_by_action[act].human_authorization_required and services._default_projection)
+                and services.ready(act)
+            )
         )
         if ready_specs:
             candidates.append(BusinessDomainTool(domain_name, ready_specs))
