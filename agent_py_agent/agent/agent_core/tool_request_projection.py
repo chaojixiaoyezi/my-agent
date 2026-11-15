@@ -119,7 +119,11 @@ def tool_loop_prompt_request(
     runtime_injections: list[InjectionValue] | tuple[InjectionValue, ...],
     workspace_context: str | None,
     execution_facts: str,
+    clock_context: str | None = None,
 ) -> PromptBuildRequest:
+    resolved_clock = getattr(params, "clock_context_snapshot", None) if clock_context is None else clock_context
+    if workspace_context is not None and "current_local_time:" in workspace_context:
+        resolved_clock = ""
     return PromptBuildRequest(
         user_prompt=params.user_prompt,
         memories=params.memories,
@@ -140,6 +144,7 @@ def tool_loop_prompt_request(
             native_tool_use=native_tool_use_active(params),
             self_map_available=self_map_available(params.tool_runtime_snapshot, params.allowed_tools),
         ),
+        clock_context_override=resolved_clock,
     )
 
 

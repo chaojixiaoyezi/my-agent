@@ -51,15 +51,33 @@ def test_week_start_by_locale() -> None:
 # ---------- prompt 日期注入按配置时区 ----------
 
 def test_prompt_context_renders_in_configured_timezone(tmp_path, monkeypatch) -> None:
-    from agent_py_agent.agent.prompting_parts.builder import _workspace_context_text
+    from agent_py_agent.agent.prompting_parts.builder import (
+        PromptBuilder,
+        _clock_context_text,
+        _workspace_context_text,
+    )
+    from agent_py_agent.agent.settings import AgentConfig
 
     monkeypatch.delenv("AGENT_TIMEZONE", raising=False)
     builder = SimpleNamespace(root=str(tmp_path), config=SimpleNamespace(timezone="Asia/Tokyo", week_start="monday"))
     text = _workspace_context_text(builder)
-    expected_date = datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
+    tokyo_now = datetime.now(ZoneInfo("Asia/Tokyo"))
+    expected_date = tokyo_now.date().isoformat()
     assert f"current_local_date: {expected_date}" in text  # 按东京时区算日期(非服务器本地)
-    time_line = next(line for line in text.splitlines() if "current_local_time" in line)
-    assert time_line.strip().endswith(("JST",)) or "JST" in time_line  # 带时区缩写 %Z(跨区不歧义)
+    assert "current_local_time:" not in text  # 秒级时钟已拆分至 snapshot_clock_context / prompt.clock
+
+    clock_line = _clock_context_text(builder)
+    assert clock_line.startswith("- current_local_time: ")
+    assert "+09:00 (" in clock_line
+    assert clock_line.endswith(")")
+
+    prompt_builder = PromptBuilder(AgentConfig(timezone="Asia/Tokyo", week_start="monday"), tmp_path)
+    ws_snapshot = prompt_builder.snapshot_workspace_context()
+    clock_snapshot = prompt_builder.snapshot_clock_context()
+    assert f"current_local_date: {expected_date}" in ws_snapshot
+    assert "current_local_time:" not in ws_snapshot
+    assert "+09:00 (" in clock_snapshot
+    assert prompt_builder.snapshot_clock_context(facts_only=True) == ""
 
 
 def test_prompt_context_empty_timezone_is_server_local(tmp_path, monkeypatch) -> None:

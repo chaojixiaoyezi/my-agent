@@ -1757,6 +1757,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         context_scope=params.context_scope,
         loaded_tool_names=_initial_loop_loaded_tool_names(agent, params, seed, reconstructed),
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),
+        clock_context_snapshot=_clock_context_snapshot(agent, params),
         max_protocol_repairs=MAX_PROTOCOL_REPAIRS,
     )
 
@@ -1879,10 +1880,16 @@ def _required_action_contract_snapshot(
     )
 
 
-def _workspace_context_snapshot(agent, params: RuntimeLoopParams) -> str:
-    snapshot = getattr(getattr(agent, "prompts", None), "snapshot_workspace_context", None)
+def _snapshot_prompt_context(
+    agent,
+    params: RuntimeLoopParams,
+    method_name: str,
+    *,
+    default: str | None,
+) -> str | None:
+    snapshot = getattr(getattr(agent, "prompts", None), method_name, None)
     if not callable(snapshot):
-        return ""
+        return default
     from ...common.audit_activation import (
         structured_audit_source_worker_attributes,
     )
@@ -1890,6 +1897,14 @@ def _workspace_context_snapshot(agent, params: RuntimeLoopParams) -> str:
     if structured_audit_source_worker_attributes(params.task_attributes):
         return str(snapshot(facts_only=True) or "")
     return str(snapshot() or "")
+
+
+def _workspace_context_snapshot(agent, params: RuntimeLoopParams) -> str:
+    return str(_snapshot_prompt_context(agent, params, "snapshot_workspace_context", default="") or "")
+
+
+def _clock_context_snapshot(agent, params: RuntimeLoopParams) -> str | None:
+    return _snapshot_prompt_context(agent, params, "snapshot_clock_context", default=None)
 
 
 # LLM: This container deliberately keeps effect-control fields separate from model-facing context.

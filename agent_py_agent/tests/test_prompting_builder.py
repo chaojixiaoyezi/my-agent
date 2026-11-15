@@ -105,6 +105,7 @@ class TestPromptBuilderInit:
     def test_runtime_workspace_projection_keeps_clock_but_replaces_execution_roots(self, tmp_path):
         builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path / "service-cwd")
         snapshot = builder.snapshot_workspace_context()
+        clock_snapshot = builder.snapshot_clock_context()
         task_root = tmp_path / "owners" / "u1" / "tasks" / "task-a"
         output_dir = task_root / "output"
         work_dir = task_root / "work"
@@ -121,7 +122,12 @@ class TestPromptBuilderInit:
         assert f"当前工具工作目录（仅供执行定位）: {(tmp_path / 'service-cwd').resolve()}" not in projected
         assert f"task_output_dir: {output_dir}" in projected
         assert f"task_work_dir: {work_dir}" in projected
-        assert "current_local_time:" in projected
+        assert "current_local_date:" in projected
+        assert "current_local_year:" in projected
+        assert "current_week_range:" in projected
+        assert "last_7_days_range:" in projected
+        assert "current_local_time:" not in projected
+        assert clock_snapshot.startswith("- current_local_time: ")
         assert projected.count("相对路径默认相对当前工具工作目录") == 1
         assert "权限允许写入目录（不代表默认落点）" in projected
         assert "文件整理遵循家目录约定" in projected
@@ -624,10 +630,10 @@ class TestBuildBasic:
 
         rendered = builder.build("继续长任务", [])
 
-        assert "task_progress 是软清单" in rendered
-        assert "回复前核对" in rendered
-        assert "显式 covers 绑定的子代理 DONE 会按 id 更新" in rendered
-        assert "宿主不猜测完成，也不因清单未完自动续跑" in rendered
+        assert "task_progress 是软清单" not in rendered
+        assert "task_progress 是模型可选的当前运行清单" not in rendered
+        assert "直接按实际进展逐步更新目标文件" in rendered
+        assert "不能把写报告文件列入 task_progress" in rendered
 
     def test_workspace_context_can_disable_extra_todo_closeout_discipline(self, tmp_path):
         builder = PromptBuilder(
@@ -641,7 +647,7 @@ class TestBuildBasic:
         rendered = builder.build("继续长任务", [])
 
         assert "task_progress 是软清单" not in rendered
-        assert "task_progress 是模型可选的当前运行清单" in rendered
+        assert "task_progress 是模型可选的当前运行清单" not in rendered
 
     def test_build_includes_current_local_date(self, tmp_path):
         """主代理每轮都能看到当前日期，报告日期不要从旧文件里猜。"""
@@ -700,7 +706,7 @@ class TestBuildBasic:
         assert "直接按实际进展逐步更新目标文件" in result
         assert "不要为了形式单独建立检查点" in result
         assert "不要把内部记录动作反复当作用户进度回复" in result
-        assert "task_progress 是软清单" in result
+        assert "task_progress 是软清单" not in result
         # 诊断不推断写文件授权，构建也不能用报告冒充实现。
         assert "普通分析、诊断或对比可以直接在对话中回答" in result
         assert "用户明确要求只读、不要修改、不要落盘或只在对话中回答时" in result

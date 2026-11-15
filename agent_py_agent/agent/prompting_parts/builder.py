@@ -26,10 +26,6 @@ from ..capability.persona_repository import PersonaRepository, PersonaRepository
 from ..common import agent_time
 from ..settings import AgentConfig
 from ..settings.defaults import context_window_or_default
-from ..task_progress_guidance import (
-    task_progress_closeout_guidance_enabled,
-    task_progress_model_discipline,
-)
 from ..user_space.approval_mode import is_permission_admin
 from .cache_layout import CacheStructuredPrompt
 from .memory_context import memory_context_text
@@ -117,6 +113,7 @@ class PromptBuildRequest:
     thread_persona: ThreadPersonaScope | None = None
     # 成功准备后清空；要采集新的宿主快照须使用新的请求或显式重新安装贡献器。
     contributors: tuple[PromptContributor, ...] = ()
+    clock_context_override: str | None = None
 
 
 PromptContributor = Callable[[PromptBuildRequest], tuple[InjectionValue, ...]]
@@ -134,6 +131,7 @@ class _PromptBuildFields:
     system_prompt_override: str | None
     context_scope: str
     workspace_context_override: str | None
+    clock_context_override: str | None = None
 
 
 # LLM: 所有字段均为已采集的值；注入片段按原位置冻结，不解析正文识别来源，不另存合并副本。
@@ -158,6 +156,7 @@ class PromptRenderInput:
     persona_updates: str = ""
     deployment_context: str = ""
     prompt_runtime_snapshots_enabled: bool = True
+    clock_context: str = ""
 
     # LLM: 冻结调用方容器，片段包括空串和内嵌换行；不得按正文去重或猜测历史来源。
     # 函数用途: 避免准备完成后修改原注入列表影响当前请求，只有新候选可以显式替换片段。
@@ -278,6 +277,7 @@ class PromptBuilder:
         system_prompt_override: str | None = None,
         context_scope: str = "default",
         workspace_context_override: str | None = None,
+        clock_context_override: str | None = None,
     ) -> str:
         """拼出完整 prompt。
 
@@ -296,6 +296,7 @@ class PromptBuilder:
                 system_prompt_override,
                 context_scope,
                 workspace_context_override,
+                clock_context_override,
             ),
         )
         return render_prepared_prompt(self.prepare_render_input(request))
@@ -343,6 +344,12 @@ class PromptBuilder:
             owner_scope,
             workspace_context,
         )
+        clock_context = ""
+        if "current_local_time:" not in workspace_context:
+            if request.clock_context_override is not None:
+                clock_context = request.clock_context_override
+            elif request.workspace_context_override is None:
+                clock_context = _clock_context_text(self)
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         recommendations = _tools.tool_recommendations_section or default_recommendations
@@ -365,6 +372,7 @@ class PromptBuilder:
             persona_updates=updates,
             deployment_context=deployment_context,
             prompt_runtime_snapshots_enabled=snapshots_enabled,
+            clock_context=clock_context,
         )
         if contributors:
             request.inject = list(prepared.injection_fragments)
@@ -382,9 +390,14 @@ class PromptBuilder:
     # LLM: 冻结单轮时间与工作区结构化事实，facts_only模式仅保留路径与时间事实，不附通用工作提示。
     # 函数用途: 生成单轮模型调用使用的工作区上下文快照文本。
     def snapshot_workspace_context(self, *, facts_only: bool = False) -> str:
-        """Freeze date/time and workspace facts for one model turn."""
+        """Freeze same-day date and workspace facts without per-second wall clock."""
 
         return _workspace_context_text(self, facts_only=facts_only)
+
+    def snapshot_clock_context(self, *, facts_only: bool = False) -> str:
+        """Freeze per-turn wall-clock context outside stable workspace facts."""
+
+        return _clock_context_text(self, facts_only=facts_only)
 
 
 # 提示词中归属边界与工作区事实共享的字符预算上限。
@@ -420,6 +433,10 @@ def _bounded_owner_workspace_sections(
 # LLM: 真实 build 和创建前投影必须共用此纯入口；仅格式化已冻结字符串，不能补读宿主、文件或模型状态。
 #   回合开头由 turn_trigger 决定；人格变化与部署事实只在原生动态尾巴，文本协议保留完整可读信息。
 # 函数用途: 同源渲染固定前缀及易变尾巴，同一冻结输入重复投影不补读宿主。
+def _renderable_clock_context(workspace_context: str, clock_context: str) -> str:
+    return clock_context if clock_context and "current_local_time:" not in workspace_context else ""
+
+
 def render_prepared_prompt(prepared: PromptRenderInput) -> str:
     from ..agent_core.runtime.turn_trigger import current_turn_text
 
@@ -434,15 +451,19 @@ def render_prepared_prompt(prepared: PromptRenderInput) -> str:
                 workspace_context=prepared.workspace_context, injection_fragments=prepared.injection_fragments,
                 execution_facts=prepared.execution_facts,
                 prompt_runtime_snapshots_enabled=prepared.prompt_runtime_snapshots_enabled,
+                clock_context=prepared.clock_context,
             ) + _volatile_prompt_updates(prepared),
             canonical_user_turn=current_turn_text(prepared.user_prompt, prepared.turn_trigger),
         )
+    clock_text = _renderable_clock_context(prepared.workspace_context, prepared.clock_context)
+    clock_section = f"# Current Time\n{clock_text}\n\n" if clock_text else ""
     return (
         f"# System\n{prepared.system_prompt}\n\n"
         f"# Related Memory\n{prepared.memory_text}\n\n"
         f"# Owner Scope\n{prepared.owner_scope}\n\n"
         f"# Dynamic Prompt Files\n{prepared.dynamic or '（无）'}\n\n"
         f"# Workspace Context\n{prepared.workspace_context}\n\n"
+        f"{clock_section}"
         f"# Runtime Injection\n{prepared.injected or '（无）'}\n\n"
         f"{prepared.tool_catalog}\n\n"
         f"{prepared.recommendations}\n\n"
@@ -480,14 +501,18 @@ def _native_cache_volatile_sections(
     injection_fragments: tuple[InjectionValue, ...],
     execution_facts: str,
     prompt_runtime_snapshots_enabled: bool,
+    clock_context: str = "",
 ) -> tuple[tuple[str, str], ...]:
     runtime = runtime_injection_sections(injection_fragments) if prompt_runtime_snapshots_enabled else (
         ("prompt.runtime_injection", "# Runtime Injection\n" + ("\n".join(runtime_injection_texts(injection_fragments)) or "（无）")),
     )
+    clock_text = _renderable_clock_context(workspace_context, clock_context)
+    clock_sections = (("prompt.clock", f"# Current Time\n{clock_text}"),) if clock_text else ()
     return (
         ("prompt.related_memory", f"# Related Memory\n{memory_text}"),
         ("prompt.tool_recommendations", tool_recommendations),
         ("prompt.workspace", f"# Workspace Context\n{workspace_context}"),
+        *clock_sections,
         *runtime,
         ("prompt.execution", f"{execution_facts}\n"),
     )
@@ -625,6 +650,7 @@ def _prompt_build_request(
         args.system_prompt_override,
         args.context_scope,
         args.workspace_context_override,
+        clock_context_override=args.clock_context_override,
     )
 
 
@@ -818,7 +844,6 @@ def _workspace_context_text(
         f"- 当前工具工作目录（仅供执行定位）: {root}",
         f"- current_local_date: {today.isoformat()}",
         f"- current_local_year: {today.year}",
-        f"- current_local_time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"- current_week_range: {current_week_start.isoformat()}..{current_week_end.isoformat()}",
         f"- last_7_days_range: {last_7_days_start.isoformat()}..{today.isoformat()}",
         "- 相对路径默认相对当前工具工作目录。",
@@ -827,14 +852,6 @@ def _workspace_context_text(
     ]
     if facts_only:
         return "\n".join(facts)
-    progress_guidance = (
-        task_progress_model_discipline()
-        if task_progress_closeout_guidance_enabled(builder)
-        else (
-            "task_progress 是模型可选的当前运行清单；它不选择会话、不切换工作区，"
-            "也不会让普通任务自动续跑或阻止下一条用户消息。"
-        )
-    )
     guidance = [
         *facts,
         "- 写报告日期时优先使用 current_local_date；相对时间先换明确日期范围，搜索和报告都使用这个明确范围；"
@@ -845,7 +862,6 @@ def _workspace_context_text(
         "搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。",
         "- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；复杂任务沿用稳定计划，草稿按需保留。"
         "不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。",
-        f"- {progress_guidance}",
         "- 交付形式服从用户目标：需要保存的成果按需落盘；普通分析、诊断或对比可以直接在对话中回答，"
         "不为形式另写报告。用户明确要求只读、不要修改、不要落盘或只在对话中回答时，"
         "不能创建报告文件，也不能把写报告文件列入 task_progress。实现任务不能用报告代替功能交付。",
@@ -856,6 +872,20 @@ def _workspace_context_text(
         "- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。",
     ]
     return "\n".join(guidance)
+
+
+# LLM: 仅承载每轮秒级 wall-clock，与同日字节稳定的 Workspace Context 拆段，避免每秒击穿 prompt 缓存。
+# 函数用途: 按配置时区渲染 ISO8601+tz 与英文星期；facts_only 模式返回空串避免无谓波动。
+def _clock_context_text(
+    builder: PromptBuilder,
+    *,
+    facts_only: bool = False,
+) -> str:
+    if facts_only:
+        return ""
+    now = agent_time.now(getattr(builder.config, "timezone", "") or "")
+    weekdays = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+    return f"- current_local_time: {now.isoformat(timespec='seconds')} ({weekdays[now.weekday()]})"
 
 
 # LLM: 原生tool_use模式下工具往返由messages结构化承载，仅非native模式回退附加文本tool_context。
