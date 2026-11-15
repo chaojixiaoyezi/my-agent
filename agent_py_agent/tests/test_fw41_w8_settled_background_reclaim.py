@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -779,3 +781,118 @@ def test_background_process_settled_ttl_seconds_registered_in_parameter_registry
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=5)
+
+
+def test_stat_eio_and_scheduler_blocking_io_fail_closed_to_unknown(tmp_path: Path) -> None:
+    """Stat EIO on authority paths or scheduler EAGAIN must keep sessions unknown without stopping."""
+    owner_home = tmp_path / "owner_home"
+    conv_root = owner_home / "conversations"
+    conv_store = ConversationStore(conv_root, initialize=True)
+    t_settled = _bind_task_link(conv_store, task_id="task-eio-settled", status="completed")
+
+    RuntimeRepository(runtime_db_path(owner_home))
+    wf_dir = owner_home / "data" / "workflow_runs" / "wf-settled-1"
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    (wf_dir / "run.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    (conv_root / "wake_queue" / "urgent").mkdir(parents=True, exist_ok=True)
+
+    store_root = background_store_root(tmp_path / "workspace", owner_home)
+    store = ProcessSessionStore(Path(store_root))
+    proc = _spawn_sleeper()
+    try:
+        birth = bg_launch.capture_process_birth_token(proc.pid) or "eio-birth"
+        now = time.time()
+        _write_running_session(
+            store,
+            owner_home=owner_home,
+            session_id="bg-eio-settled",
+            thread_id=t_settled,
+            root_task_id="task-eio-settled",
+            run_id="run-eio-settled",
+            started_at=now - 600,
+            pid=proc.pid,
+            birth_token=birth,
+            child_pid=proc.pid,
+            child_birth=birth,
+        )
+
+        supports_sets = tuple(
+            sup_set
+            for sup_set in (
+                getattr(os, "supports_fd", None),
+                getattr(os, "supports_dir_fd", None),
+                getattr(os, "supports_follow_symlinks", None),
+                getattr(os, "supports_effective_ids", None),
+            )
+            if isinstance(sup_set, set)
+        )
+        real_stat = os.stat
+        real_lstat = os.lstat
+
+        def _make_eio_wrapper(real_fn, target_substr: str):
+            def _wrapped(path, *args, **kwargs):
+                if target_substr in str(path):
+                    raise OSError(errno.EIO, "simulated I/O error", str(path))
+                return real_fn(path, *args, **kwargs)
+            return _wrapped
+
+        @contextmanager
+        def _inject_stat_eio(target_substr: str):
+            stat_wrapper = _make_eio_wrapper(real_stat, target_substr)
+            lstat_wrapper = _make_eio_wrapper(real_lstat, target_substr)
+            added = [
+                (sup_set, fn)
+                for sup_set in supports_sets
+                for real_fn, fn in ((real_stat, stat_wrapper), (real_lstat, lstat_wrapper))
+                if real_fn in sup_set
+            ]
+            for sup_set, fn in added:
+                sup_set.add(fn)
+            try:
+                with patch("os.stat", stat_wrapper), patch("os.lstat", lstat_wrapper):
+                    yield
+            finally:
+                for sup_set, fn in added:
+                    sup_set.discard(fn)
+
+        for target, prefix in (
+            ("runtime.db", "runtime_db_"),
+            ("workflow_runs", "workflow_runs_"),
+            ("run.json", "workflow_dir_"),
+            ("wake_queue", "conversation_wake_"),
+            (str(store_root), "store_root_"),
+        ):
+            with _inject_stat_eio(target):
+                report = freeze_settled_leftover_processes(owner_home, store_root=store_root, now_ts=now)
+            assert report["counts"]["stopped"] == 0
+            assert report["counts"]["settled"] == 0
+            assert report["counts"]["unknown"] == 1
+            assert str(report["unknown_processes"][0]["reason"]).startswith(prefix)
+            assert proc.poll() is None
+            assert store.load("bg-eio-settled").record["status"] == "running"
+
+        with patch(
+            "agent_py_agent.agent.gateway_parts.background_resource_report.read_atomic_store_bytes",
+            side_effect=BlockingIOError(errno.EAGAIN, "busy"),
+        ):
+            sched_report = freeze_settled_leftover_processes(owner_home, store_root=store_root, now_ts=now)
+        assert sched_report["counts"]["stopped"] == 0
+        assert sched_report["counts"]["settled"] == 0
+        assert sched_report["counts"]["unknown"] == 1
+        assert sched_report["unknown_processes"][0]["reason"] == "scheduler_store_BlockingIOError"
+        assert proc.poll() is None
+
+        # Control: without faults, settled session stops cleanly.
+        clean_report = freeze_settled_leftover_processes(owner_home, store_root=store_root, now_ts=now)
+        assert clean_report["counts"]["stopped"] == 1
+        assert clean_report["counts"]["unknown"] == 0
+        proc.wait(timeout=5)
+        assert store.load("bg-eio-settled").record["status"] in PROCESS_TERMINAL_STATUSES
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)

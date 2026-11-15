@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -464,11 +466,6 @@ def cleanup_session_leftover_processes(frozen: SessionLeftoverStop) -> list[dict
 
 
 _EXECUTION_PROCESS_SESSION_SCHEMAS = frozenset({PROCESS_SESSION_SCHEMA, TASK_PROCESS_SESSION_SCHEMA})
-_CONVERSATION_ROOT_PATTERNS = (
-    "workspace/runtime/workspaces/*/conversations",
-    "conversations",
-    "data/conversations",
-)
 # 调度里 "unknown" 不能视作明确终态，必须单独保留。
 _SCHEDULER_SETTLED_STATUSES = frozenset({"done", "failed", "cancelled", "skipped"})
 _SCHEDULER_ACTIVE_STATUSES = frozenset({"queued", "claimed", "running", "waiting"})
@@ -520,6 +517,13 @@ class _ConversationSnapshot:
     active_wake_run_ids: frozenset[str] = frozenset()
 
 
+def _optional_lstat(path: Path) -> os.stat_result | None:
+    try:
+        return os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
 def _empty_runtime_snapshot(error: str = "") -> _RuntimeDbSnapshot:
     return _RuntimeDbSnapshot(
         error=error,
@@ -537,9 +541,9 @@ def _empty_runtime_snapshot(error: str = "") -> _RuntimeDbSnapshot:
 
 def _load_runtime_db_snapshot(owner_home: Path) -> _RuntimeDbSnapshot:
     db_path = runtime_db_path(owner_home)
-    if not db_path.exists() and not db_path.is_symlink():
-        return _empty_runtime_snapshot()
     try:
+        if _optional_lstat(db_path) is None:
+            return _empty_runtime_snapshot()
         require_plain_sqlite_files(db_path, beneath=owner_home)
         with closing(sqlite3.connect(sqlite_readonly_probe_uri(db_path), uri=True, timeout=1.0)) as conn:
             conn.row_factory = sqlite3.Row
@@ -641,13 +645,16 @@ def _load_runtime_db_snapshot(owner_home: Path) -> _RuntimeDbSnapshot:
 
 def _load_scheduler_snapshot(owner_home: Path) -> _SchedulerSnapshot:
     sched_path = owner_home / "data" / "scheduler" / "store.json"
-    if sched_path.is_symlink():
-        return _SchedulerSnapshot(error="scheduler_store_symlink", runs_by_run_id={}, runs_by_task_id={})
-    if not sched_path.exists():
-        return _SchedulerSnapshot(runs_by_run_id={}, runs_by_task_id={})
-    raw = read_atomic_store_bytes(sched_path)
+    try:
+        raw = read_atomic_store_bytes(sched_path)
+    except OSError as exc:
+        return _SchedulerSnapshot(
+            error=f"scheduler_store_{type(exc).__name__}",
+            runs_by_run_id={},
+            runs_by_task_id={},
+        )
     if raw is None:
-        return _SchedulerSnapshot(error="scheduler_store_unreadable", runs_by_run_id={}, runs_by_task_id={})
+        return _SchedulerSnapshot(runs_by_run_id={}, runs_by_task_id={})
     try:
         sched_doc = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
@@ -699,25 +706,36 @@ def _extract_workflow_refs(workflow_doc: object, run_ids: set[str], task_ids: se
 
 def _read_workflow_dir_refs(run_dir: Path, run_ids: set[str], task_ids: set[str]) -> str:
     run_file = run_dir / "run.json"
-    if not run_file.exists():
-        return ""
     try:
-        if run_file.is_symlink():
+        run_st = _optional_lstat(run_file)
+        if run_st is None:
+            return ""
+        if stat.S_ISLNK(run_st.st_mode):
             return "workflow_run_symlink"
-        run_payload = json.loads(run_file.read_text(encoding="utf-8"))
-        if not isinstance(run_payload, dict):
+        run_doc = json.loads(run_file.read_text(encoding="utf-8"))
+        if not isinstance(run_doc, dict):
             return "workflow_run_invalid"
-        status = str(run_payload.get("status") or "").strip().lower()
-        _extract_workflow_refs(run_payload, run_ids, task_ids)
+        status = str(run_doc.get("status") or "").strip().lower()
+        _extract_workflow_refs(run_doc, run_ids, task_ids)
         steps_dir = run_dir / "steps"
-        if steps_dir.is_dir():
-            for step_file in sorted(steps_dir.glob("*.json")):
-                if step_file.is_symlink():
-                    return "workflow_step_symlink"
-                step_payload = json.loads(step_file.read_text(encoding="utf-8"))
-                if not isinstance(step_payload, dict):
-                    return "workflow_step_invalid"
-                _extract_workflow_refs(step_payload, run_ids, task_ids)
+        steps_st = _optional_lstat(steps_dir)
+        if steps_st is not None:
+            if stat.S_ISLNK(steps_st.st_mode):
+                return "workflow_steps_dir_symlink"
+            if stat.S_ISDIR(steps_st.st_mode):
+                with os.scandir(steps_dir) as entries:
+                    step_names = sorted(
+                        entry.name for entry in entries if entry.name.endswith(".json")
+                    )
+                for step_name in step_names:
+                    step_file = steps_dir / step_name
+                    step_st = os.lstat(step_file)
+                    if stat.S_ISLNK(step_st.st_mode):
+                        return "workflow_step_symlink"
+                    step_doc = json.loads(step_file.read_text(encoding="utf-8"))
+                    if not isinstance(step_doc, dict):
+                        return "workflow_step_invalid"
+                    _extract_workflow_refs(step_doc, run_ids, task_ids)
         return f"status:{status}"
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         return f"workflow_dir_{type(exc).__name__}"
@@ -732,7 +750,11 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
     settled_task_ids: set[str] = set()
     indexed_settled: set[str] = set()
 
-    if index_db.exists() or index_db.is_symlink():
+    try:
+        index_st = _optional_lstat(index_db)
+    except OSError as exc:
+        return _WorkflowSnapshot(error=f"workflow_index_{type(exc).__name__}")
+    if index_st is not None:
         try:
             require_plain_sqlite_files(index_db, beneath=owner_home)
             with closing(sqlite3.connect(sqlite_readonly_probe_uri(index_db), uri=True, timeout=1.0)) as conn:
@@ -761,37 +783,48 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
             return _WorkflowSnapshot(error=f"workflow_index_{type(exc).__name__}")
 
-    if runs_dir.is_symlink():
-        return _WorkflowSnapshot(error="workflow_runs_dir_symlink")
-    if runs_dir.is_dir():
-        try:
-            subdirs = sorted((entry for entry in runs_dir.iterdir() if entry.is_dir()), key=lambda p: p.name)
-        except OSError as exc:
-            return _WorkflowSnapshot(error=f"workflow_runs_scan_{type(exc).__name__}")
-        settled_scanned = 0
-        for run_dir in subdirs:
-            if run_dir.is_symlink():
-                return _WorkflowSnapshot(error="workflow_run_dir_symlink")
-            dir_name = run_dir.name
-            is_known_settled = dir_name in indexed_settled and dir_name not in unsettled_run_ids
-            if is_known_settled and settled_scanned >= max_settled_dir_scan:
-                continue
-            r_ids: set[str] = {dir_name}
-            t_ids: set[str] = set()
-            outcome = _read_workflow_dir_refs(run_dir, r_ids, t_ids)
-            if outcome and not outcome.startswith("status:"):
-                return _WorkflowSnapshot(error=outcome)
-            status = outcome.removeprefix("status:") if outcome else ""
-            if dir_name in unsettled_run_ids or (outcome and status not in _WORKFLOW_SETTLED_STATES):
-                unsettled_run_ids.update(r_ids)
-                unsettled_task_ids.update(t_ids)
-                settled_run_ids.difference_update(r_ids)
-            elif status in _WORKFLOW_SETTLED_STATES:
-                settled_run_ids.update(r_ids)
-                settled_task_ids.update(t_ids)
-                settled_scanned += 1
-        settled_run_ids.difference_update(unsettled_run_ids)
-        settled_task_ids.difference_update(unsettled_task_ids)
+    try:
+        runs_dir_st = _optional_lstat(runs_dir)
+    except OSError as exc:
+        return _WorkflowSnapshot(error=f"workflow_runs_stat_{type(exc).__name__}")
+    if runs_dir_st is not None:
+        if stat.S_ISLNK(runs_dir_st.st_mode):
+            return _WorkflowSnapshot(error="workflow_runs_dir_symlink")
+        if stat.S_ISDIR(runs_dir_st.st_mode):
+            try:
+                dir_names: list[str] = []
+                with os.scandir(runs_dir) as entries:
+                    for entry in entries:
+                        entry_st = os.lstat(runs_dir / entry.name)
+                        if stat.S_ISLNK(entry_st.st_mode):
+                            return _WorkflowSnapshot(error="workflow_run_dir_symlink")
+                        if stat.S_ISDIR(entry_st.st_mode):
+                            dir_names.append(entry.name)
+                dir_names.sort()
+            except OSError as exc:
+                return _WorkflowSnapshot(error=f"workflow_runs_scan_{type(exc).__name__}")
+            settled_scanned = 0
+            for dir_name in dir_names:
+                run_dir = runs_dir / dir_name
+                is_known_settled = dir_name in indexed_settled and dir_name not in unsettled_run_ids
+                if is_known_settled and settled_scanned >= max_settled_dir_scan:
+                    continue
+                r_ids: set[str] = {dir_name}
+                t_ids: set[str] = set()
+                outcome = _read_workflow_dir_refs(run_dir, r_ids, t_ids)
+                if outcome and not outcome.startswith("status:"):
+                    return _WorkflowSnapshot(error=outcome)
+                status = outcome.removeprefix("status:") if outcome else ""
+                if dir_name in unsettled_run_ids or (outcome and status not in _WORKFLOW_SETTLED_STATES):
+                    unsettled_run_ids.update(r_ids)
+                    unsettled_task_ids.update(t_ids)
+                    settled_run_ids.difference_update(r_ids)
+                elif status in _WORKFLOW_SETTLED_STATES:
+                    settled_run_ids.update(r_ids)
+                    settled_task_ids.update(t_ids)
+                    settled_scanned += 1
+            settled_run_ids.difference_update(unsettled_run_ids)
+            settled_task_ids.difference_update(unsettled_task_ids)
 
     return _WorkflowSnapshot(
         unsettled_run_ids=frozenset(unsettled_run_ids),
@@ -806,14 +839,21 @@ def _discover_conversation_snapshot(
     extra_roots: Sequence[str | Path] | None,
     record_roots: Sequence[Path],
 ) -> _ConversationSnapshot:
-    candidates: list[Path] = []
+    candidates: list[Path] = [
+        owner_home / "conversations",
+        owner_home / "data" / "conversations",
+    ]
     discovery_error = ""
     try:
-        for pattern in _CONVERSATION_ROOT_PATTERNS:
-            if "*" in pattern:
-                candidates.extend(sorted(owner_home.glob(pattern)))
-            else:
-                candidates.append(owner_home / pattern)
+        ws_parent = owner_home / "workspace" / "runtime" / "workspaces"
+        ws_parent_st = _optional_lstat(ws_parent)
+        if ws_parent_st is not None:
+            if stat.S_ISLNK(ws_parent_st.st_mode):
+                ws_parent_st = os.stat(ws_parent)
+            if stat.S_ISDIR(ws_parent_st.st_mode):
+                with os.scandir(ws_parent) as ws_entries:
+                    for ws_name in sorted(entry.name for entry in ws_entries):
+                        candidates.append(ws_parent / ws_name / "conversations")
     except OSError as exc:
         discovery_error = f"conversation_discovery_{type(exc).__name__}"
     for extra in extra_roots or ():
@@ -827,16 +867,38 @@ def _discover_conversation_snapshot(
     wake_error = ""
     for candidate in candidates:
         resolved = candidate.resolve(strict=False)
-        if resolved in seen or not resolved.is_dir():
+        if resolved in seen:
+            continue
+        try:
+            cand_st = _optional_lstat(resolved)
+            if cand_st is not None and stat.S_ISLNK(cand_st.st_mode):
+                cand_st = os.stat(resolved)
+        except OSError as exc:
+            discovery_error = discovery_error or f"conversation_discovery_{type(exc).__name__}"
+            continue
+        if cand_st is None or not stat.S_ISDIR(cand_st.st_mode):
             continue
         seen.add(resolved)
         stores.append((resolved, ConversationStore(resolved, initialize=False)))
         for kind in ("urgent", "normal"):
             wake_dir = resolved / "wake_queue" / kind
-            if not wake_dir.is_dir():
-                continue
             try:
-                for wake_file in sorted(wake_dir.glob("*.json")):
+                wake_st = _optional_lstat(wake_dir)
+                if wake_st is not None and stat.S_ISLNK(wake_st.st_mode):
+                    wake_error = wake_error or "conversation_wake_symlink"
+                    continue
+                if wake_st is None or not stat.S_ISDIR(wake_st.st_mode):
+                    continue
+                with os.scandir(wake_dir) as entries:
+                    wake_names = sorted(
+                        entry.name for entry in entries if entry.name.endswith(".json")
+                    )
+                for wake_name in wake_names:
+                    wake_file = wake_dir / wake_name
+                    wake_file_st = os.lstat(wake_file)
+                    if stat.S_ISLNK(wake_file_st.st_mode):
+                        wake_error = wake_error or "conversation_wake_symlink"
+                        continue
                     wake_doc = json.loads(wake_file.read_text(encoding="utf-8"))
                     if not isinstance(wake_doc, dict):
                         wake_error = wake_error or "conversation_wake_invalid"
@@ -1210,7 +1272,37 @@ def freeze_settled_leftover_processes(
     deferred_settled: list[dict[str, Any]] = []
     unknown_processes: list[dict[str, Any]] = []
 
-    if not resolved_store_root.exists():
+    try:
+        store_root_st = _optional_lstat(resolved_store_root)
+        if store_root_st is not None and stat.S_ISLNK(store_root_st.st_mode):
+            store_root_st = os.stat(resolved_store_root)
+    except OSError as exc:
+        unknown_processes.append({
+            "session_id": "",
+            "classification": "unknown",
+            "reason": f"store_root_{type(exc).__name__}",
+            "error": {
+                "error_type": type(exc).__name__,
+                "detail": str(exc),
+                "path": str(resolved_store_root),
+            },
+        })
+        return {
+            "owner_home": owner_home_str,
+            "store_root": str(resolved_store_root),
+            "min_settled_age_seconds": min_age,
+            "now_ts": effective_now,
+            "active_processes": [],
+            "settled_processes": [],
+            "stopped_processes": [],
+            "deferred_settled_processes": [],
+            "unknown_processes": unknown_processes,
+            "counts": {
+                "active": 0, "settled": 0, "stopped": 0,
+                "deferred_settled": 0, "stop_failed": 0, "unknown": len(unknown_processes),
+            },
+        }
+    if store_root_st is None:
         return {
             "owner_home": owner_home_str,
             "store_root": str(resolved_store_root),
