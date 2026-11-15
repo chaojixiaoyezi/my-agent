@@ -142,7 +142,7 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
             ledger=ledger, call_id=call_id, timeouts=_auxiliary_timeout_plan(request, input_tokens),
             token_budget_state=budget_state,
         ))
-        if isinstance(response, ModelResponse):
+        if isinstance(response, ModelResponse) and response.request_token_budget is None:
             response.request_token_budget = budget_state[0]
         raise_if_cancelled()
         if is_interrupted():
@@ -152,6 +152,10 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
         _record_auxiliary_failure(ledger, _AuxiliaryFailureCall(
             call_id=call_id, exc=exc, started_at=started_at, label=label,
         ))
+        if _is_compact_purpose(request.purpose) and isinstance(exc, RequestBudgetExceeded) and exc.reason != "input_overflow":
+            from .compact_guard import ConversationCompactError
+
+            raise ConversationCompactError("配置的摘要输出预算无法容纳", code="COMPACT_INVALID_OUTPUT_BUDGET") from exc
         raise
     finally:
         try:
@@ -453,13 +457,35 @@ def _auxiliary_provider_options(
     thinking_disabled, reasoning_effort = _compact_reasoning_options(request, backend)
     reasoning_update_effort = _compact_reasoning_update_effort(request, backend)
     output_cap = _compact_output_cap(request)
+    effective_budget = request.token_budget
+    supports = getattr(backend, "supports_reasoning_update_items", None)
+    if (
+        _is_compact_purpose(request.purpose)
+        and effective_budget is not None
+        and output_cap is not None
+        and output_cap != effective_budget.output_tokens
+        and getattr(backend, "name", "") == "openai_responses"
+        and not reasoning_update_effort
+        and callable(supports)
+        and not supports()
+    ):
+        # 预算冻结到构建请求选项之间能力 memo 刚失效时，同步按保留档位重签预留并复核窗口准入。
+        from .compact_request_budget import freeze_compact_request_budget
+
+        effective_budget = freeze_compact_request_budget(
+            replace(request, token_budget=None),
+            input_tokens=effective_budget.input_tokens,
+            allow_tail_downshift=False,
+        ).token_budget
+        if budget_state is not None:
+            budget_state[:] = [effective_budget]
     declared = bool(system_instruction or thinking_disabled or reasoning_effort or reasoning_update_effort
                     or request.compaction_trigger)
     has_timeouts = timeouts.first_event_budget_seconds is not None or timeouts.total_deadline_seconds is not None
-    if not (declared or has_timeouts or output_cap is not None or request.token_budget is not None):
+    if not (declared or has_timeouts or output_cap is not None or effective_budget is not None):
         return None
     if not _accepts_keyword(generate, "request_options"):
-        if declared or (request.token_budget is not None
+        if declared or (effective_budget is not None
                         and bool(getattr(backend, "supports_provider_request_options", False))):
             raise TypeError("auxiliary model backend does not accept request_options")
         if output_cap is not None and output_cap != max_output_tokens(request.agent):
@@ -475,7 +501,7 @@ def _auxiliary_provider_options(
         first_event_timeout_seconds=timeouts.first_event_budget_seconds,
         total_deadline_seconds=timeouts.total_deadline_seconds,
         # 旧后端仍用既有max_output_tokens控制；不把新预算对象塞进它不认识的选项。
-        token_budget=request.token_budget if request_budget_supported_backend(request.agent) else None,
+        token_budget=effective_budget if request_budget_supported_backend(request.agent) else None,
         structured_budget_resolver=_structured_compact_budget_resolver(request, budget_state),
     )
 

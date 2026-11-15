@@ -109,9 +109,9 @@ def compact_cache_surface_budget(agent: object) -> int:
 
 # LLM: 只有已证明的共享总窗口叠加工程余量；未知/输入型窗口和旧后端沿原本地输出预留，不升级物理容量保证。
 # 函数用途: 一次解析压缩窗口、输出预留及适用的工程余量。
-def _compact_request_geometry(agent: object) -> tuple[int, int, int]:
+def _compact_request_geometry(agent: object, *, allow_tail_downshift: bool = True) -> tuple[int, int, int]:
     window = resolve_model_context_window_tokens(agent)
-    reserve = compact_summary_output_reserve_tokens(agent)
+    reserve = compact_summary_output_reserve_tokens(agent, allow_tail_downshift=allow_tail_downshift)
     safety = REQUEST_INPUT_SAFETY_TOKENS if request_budget_shared_window(agent) else 0
     return window, reserve, safety
 
@@ -131,8 +131,16 @@ def _compact_input_budget(window: int, reserve: int, safety: int) -> int:
 
 # LLM: 只消费已经校准的完整输入；auxiliary 不得再用更大的 raw 估算重做本次准入。
 # 函数用途: 为实际摘要材料签发完整输出预算，窗口不足时明确抛规划错误。
-def freeze_compact_request_budget(request: AuxiliaryModelCallRequest, *, input_tokens: int) -> AuxiliaryModelCallRequest:
-    window, reserve, safety = _compact_request_geometry(request.agent)
+def freeze_compact_request_budget(
+    request: AuxiliaryModelCallRequest,
+    *,
+    input_tokens: int,
+    allow_tail_downshift: bool = True,
+) -> AuxiliaryModelCallRequest:
+    window, reserve, safety = _compact_request_geometry(
+        request.agent,
+        allow_tail_downshift=allow_tail_downshift,
+    )
     if reserve == 0 and not request_budget_supported_backend(request.agent):
         return replace(request, token_budget=None)
     facts = dict(input_tokens=input_tokens, output_ceiling=reserve, context_window_tokens=window)
@@ -603,6 +611,19 @@ def _summarize_segment(
         except ProviderContextWindowError:
             # 同一源片段按更小窗口重试，不跳过字节；小到无法容纳固定前缀时明确失败。
             budget = max(1, min(budget - 1, measure(_request_tokens(candidate)) // 2))
+            end = _segment_end(base, source, offset, summary, budget, calibration=calibration)
+            shrink_floor = min(shrink_floor, end)
+            reason = ""
+            continue
+        except RequestBudgetExceeded as exc:
+            if exc.reason != "input_overflow":
+                raise ConversationCompactError("配置的摘要输出预算无法容纳", code="COMPACT_INVALID_OUTPUT_BUDGET") from exc
+            # 尾项能力失效后输出预留扩张时，按更新后的分段预算收紧同段继续推进。
+            updated = compact_summary_budget(base.agent)
+            next_budget = updated if 0 < updated < budget else max(1, min(budget - 1, measure(_request_tokens(candidate)) // 2))
+            if budget <= 1 and next_budget <= 1:
+                raise ConversationCompactError("分段摘要请求超出当前预算，保留原始来源", code="COMPACT_SEGMENT_REQUEST_TOO_LARGE") from exc
+            budget = next_budget
             end = _segment_end(base, source, offset, summary, budget, calibration=calibration)
             shrink_floor = min(shrink_floor, end)
             reason = ""

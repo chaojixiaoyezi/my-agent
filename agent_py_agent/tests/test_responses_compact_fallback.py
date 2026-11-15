@@ -70,13 +70,15 @@ def test_structured_rejection_retries_once_and_memoizes(monkeypatch):
     assert response.text == "已核实的事实"
     assert len(sent) == 2
     assert sent[0]["reasoning"] == {"effort": "max"}
-    assert sent[1]["reasoning"] == {"effort": "low"}
-    assert sent[0]["max_output_tokens"] == sent[1]["max_output_tokens"] == 16384
+    assert sent[1]["reasoning"] == {"effort": "max"}
+    assert sent[0]["max_output_tokens"] == 16384
+    assert sent[1]["max_output_tokens"] == agent.backend.max_tokens == 68000
+    assert response.request_token_budget.output_tokens == 68000
     assert errors[0].details["provider_error"]["error"]["code"] == "invalid_value"
     assert not agent.backend.supports_reasoning_update_items()
     generate_bounded_compact_response(_summary_request(agent))
     assert len(sent) == 3
-    # 已失败调用的兼容重放保留low意图；后续新调用按r4恢复线程分区和旧输出预留。
+    # PD-1 Option B：精确拒绝尾部项只撤回该项并保留原线程档位，兼容重放与后续调用统一恢复旧输出预留。
     assert sent[-1]["reasoning"] == {"effort": "max"}
     assert sent[-1]["max_output_tokens"] == agent.backend.max_tokens == 68000
     assert not any(item.get("type") == "configuration_update" for item in sent[-1]["input"])
@@ -171,7 +173,8 @@ def test_retry_preserves_prefix_and_removes_only_new_item(monkeypatch, subscript
     assert len(sent) == 2 and history == before
     expected = deepcopy(sent[0])
     del expected["input"][-2]
-    expected["reasoning"] = {"effort": "low"}
+    if not subscription:
+        expected["max_output_tokens"] = agent.backend.max_tokens
     assert sent[1] == expected
     assert sent[1]["input"][0] == old
     assert sent[1]["prompt_cache_key"] == "stable-fixture" and sent[1]["top_p"] == 0.8
@@ -218,7 +221,7 @@ def test_failed_fallback_preserves_first_error_context(monkeypatch):
     assert len(sent) == 2
 
 
-def test_inflight_memo_change_cannot_drop_requested_low(monkeypatch):
+def test_inflight_memo_change_preserves_thread_effort_and_reserve(monkeypatch):
     agent, sent = _responses_agent(monkeypatch)
     original = agent.backend._generate
 
@@ -231,7 +234,9 @@ def test_inflight_memo_change_cannot_drop_requested_low(monkeypatch):
     monkeypatch.setattr(agent.backend, "_generate", race)
     result = generate_bounded_compact_response(_summary_request(agent))
     assert result.text and len(sent) == 1
-    assert sent[0]["reasoning"] == {"effort": "low"} and sent[0]["max_output_tokens"] == 16384
+    assert sent[0]["reasoning"] == {"effort": "max"}
+    assert sent[0]["max_output_tokens"] == agent.backend.max_tokens == 68000
+    assert result.request_token_budget.output_tokens == 68000
     assert not any(item.get("type") == "configuration_update" for item in sent[0]["input"])
 
 
@@ -328,4 +333,7 @@ def test_logical_call_has_two_physical_attempts(monkeypatch):
     assert response.text and len(opened) == 2 and len(records) == 1
     assert records[0].provider_attempt_count == observed[0].provider_http_attempt_count == 2
     assert observed[0].call_id == records[0].call_id
-    assert opened[0]["reasoning"] == {"effort": "max"} and opened[1]["reasoning"] == {"effort": "low"}
+    assert opened[0]["reasoning"] == {"effort": "max"} and opened[1]["reasoning"] == {"effort": "max"}
+    assert opened[0]["max_output_tokens"] == 16384
+    assert opened[1]["max_output_tokens"] == agent.backend.max_tokens == 68000
+    assert response.request_token_budget.output_tokens == 68000

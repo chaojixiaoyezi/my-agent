@@ -19,9 +19,35 @@ from .errors import ProviderRequestRejectedError, ProviderResponseError, Provide
 from .http import bounded_output_tokens, request_stream_lines
 from .openai_chat import OpenAICompatibleBackend
 from .reply_diagnostics import responses_call_diagnostic
+from .request_budget import RequestBudgetExceeded, RequestTokenBudget, resolve_request_token_budget
 from .responses_wire import collect_response, input_items, insert_reasoning_update, response_fields
 from .tool_protocol_adapter import tools_for_choice
 from .wire_contract import repair_native_messages, validate_responses_input
+
+_FALLBACK_BUDGET_TLS = threading.local()
+
+
+def _push_fallback_budget_slot(initial: RequestTokenBudget | None) -> list[RequestTokenBudget | None]:
+    stack = getattr(_FALLBACK_BUDGET_TLS, "slots", None)
+    if stack is None:
+        stack = []
+        _FALLBACK_BUDGET_TLS.slots = stack
+    slot: list[RequestTokenBudget | None] = [initial]
+    stack.append(slot)
+    return slot
+
+
+def _record_fallback_budget(budget: RequestTokenBudget | None) -> None:
+    stack = getattr(_FALLBACK_BUDGET_TLS, "slots", None)
+    if stack:
+        stack[-1][0] = budget
+
+
+def _pop_fallback_budget_slot(slot: list[RequestTokenBudget | None]) -> RequestTokenBudget | None:
+    stack = getattr(_FALLBACK_BUDGET_TLS, "slots", None)
+    if stack and stack[-1] is slot:
+        stack.pop()
+    return slot[0]
 
 
 # LLM: 继承公开生成签名；普通和压缩同源组包，trigger必须最后且降档不得抢到历史user之前。
@@ -101,13 +127,16 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         update = (responses_reasoning_update_item(self.reasoning_control, request.reasoning_update_effort,
                                                   payload.get("reasoning"), self.reasoning_levels)
                   if request.reasoning_update_effort and not request.thinking_disabled and self.supports_reasoning_update_items() else None)
+        subscription = (getattr(self, "auth_ref", None) or {}).get("mode") == "chatgpt"
         if request.reasoning_update_effort and not request.thinking_disabled and update is None:
-            # 请求组装后能力 memo 可能已变化；意图不能随着 tail 消失而静默丢失。
+            # 确认配置的目标档位可表示；若因能力 memo 变更或声明 off 无法插 tail 项，
+            # 保留原线程思考档位不篡改请求级 reasoning，并对齐输出预留与窗口准入。
             target = responses_reasoning_field(self.reasoning_control, request.reasoning_update_effort,
                                               self.reasoning_levels, disabled=False)
             if not target:
                 raise ValueError("compact reasoning target is not representable")
-            payload.update(target)
+            if not self.supports_reasoning_update_items():
+                request, _ = self._align_preserved_effort_budget(payload, request, subscription=subscription)
         if update is not None:
             layout = prompt_cache_layout(request.prompt)
             before_suffix = not request.compaction_trigger and bool(layout and layout.volatile_suffix)
@@ -116,7 +145,6 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["text"] = {"format": {"type": "json_schema", "name": "my_agent_output", "strict": True, "schema": request.response_schema}}
         elif request.json_object:
             payload["text"] = {"format": {"type": "json_object"}}
-        subscription = getattr(self, "auth_ref", {}).get("mode") == "chatgpt"
         if subscription:
             for field in ("temperature", "max_output_tokens", "truncation", "user", "metadata", "max_tool_calls",
                           "background", "conversation", "prompt", "prompt_cache_retention", "safety_identifier",
@@ -146,13 +174,75 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         payload.update(_session_cache_key(subscription))
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
                    **_subscription_affinity_headers(subscription)}
-        obj = self._send_with_reasoning_update_fallback(payload, headers, request, inserted_index=inserted_index)
+        slot = _push_fallback_budget_slot(request.token_budget)
+        try:
+            obj = self._send_with_reasoning_update_fallback(payload, headers, request, inserted_index=inserted_index)
+        finally:
+            effective_budget = _pop_fallback_budget_slot(slot)
         from .responses_ws_pool import cache_usage
 
         usage = obj.get("usage") or {}
         obj["usage"] = cache_usage(usage, reused=subscription and usage.get("ws_connection_reused") is True,
                                    incremental=subscription and usage.get("incremental_chain_hit") is True)
-        return ModelResponse(backend=self.name, model_call_diagnostic=responses_call_diagnostic(obj, payload, request), **_checked_response_fields(obj, self.model_name, tools, request.is_probe))
+        return ModelResponse(
+            backend=self.name,
+            model_call_diagnostic=responses_call_diagnostic(obj, payload, request),
+            request_token_budget=effective_budget,
+            **_checked_response_fields(obj, self.model_name, tools, request.is_probe),
+        )
+
+    def _align_preserved_effort_budget(self, wire_body: dict, request, *, subscription: bool) -> tuple[object, RequestTokenBudget | None]:
+        """当尾部降档项不可用/被拒绝并保留原思考档位时，同步恢复未降档输出预留并重核窗口准入。"""
+        legacy = bounded_output_tokens(
+            self.max_tokens,
+            None,
+            configured_ceiling=self.request_output_ceiling(),
+        )
+        current_budget = request.token_budget
+        current_cap = (
+            int(request.max_output_tokens)
+            if request.max_output_tokens is not None
+            else (int(current_budget.output_tokens) if current_budget is not None else legacy)
+        )
+        target_output = max(current_cap, legacy)
+        updated_budget = current_budget
+        if current_budget is not None:
+            if target_output != current_budget.output_tokens:
+                updated_budget = resolve_request_token_budget(
+                    input_tokens=current_budget.input_tokens,
+                    context_window_tokens=current_budget.context_window_tokens,
+                    output_ceiling=target_output,
+                    shared_window=current_budget.shared_window,
+                    server_managed_output=current_budget.server_managed_output,
+                    require_full_output=True,
+                    safety_tokens=current_budget.safety_tokens,
+                )
+            effective_output = bounded_output_tokens(
+                self.max_tokens,
+                target_output,
+                configured_ceiling=self.request_output_ceiling(),
+                token_budget=updated_budget,
+            )
+        else:
+            effective_output = bounded_output_tokens(
+                self.max_tokens,
+                target_output,
+                configured_ceiling=self.request_output_ceiling(),
+            )
+        if not subscription and ("max_output_tokens" in wire_body or request.max_output_tokens is not None):
+            wire_body["max_output_tokens"] = effective_output
+        updated_max_output = (
+            effective_output
+            if request.max_output_tokens is not None or updated_budget is not None
+            else None
+        )
+        aligned_request = replace(
+            request,
+            reasoning_update_effort="",
+            max_output_tokens=updated_max_output,
+            token_budget=updated_budget,
+        )
+        return aligned_request, updated_budget
 
     # LLM: 只按结构化事实判断：档案显式 on/off 优先；auto 按已核对的模型名前缀 gpt-6（OpenAI 文档：GPT-6 及以后
     #   支持用 configuration_update 项改档位且前缀不变）。不是封闭枚举：新模型可在档案里显式声明 on。
@@ -191,13 +281,18 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
                 raise ProviderTimeoutError("Responses compatibility retry deadline exhausted", stage="wall_clock") from first
             fallback = deepcopy(payload)
             del fallback["input"][inserted_index]
-            from .reasoning_control import responses_reasoning_field
-
-            fallback.update(responses_reasoning_field(self.reasoning_control, request.reasoning_update_effort,
-                                                      self.reasoning_levels, disabled=False))
             validate_responses_input(fallback["input"])
-            retried = replace(observed, reasoning_effort=request.reasoning_update_effort,
-                              reasoning_update_effort="", total_deadline_seconds=remaining)
+            subscription = (getattr(self, "auth_ref", None) or {}).get("mode") == "chatgpt"
+            try:
+                aligned, updated_budget = self._align_preserved_effort_budget(
+                    fallback,
+                    observed,
+                    subscription=subscription,
+                )
+            except RequestBudgetExceeded as overflow:
+                raise overflow from first
+            retried = replace(aligned, total_deadline_seconds=remaining)
+            _record_fallback_budget(updated_budget)
             try:
                 return self._send_responses_request(fallback, headers, retried)
             except BaseException as second:
