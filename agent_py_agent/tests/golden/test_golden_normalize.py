@@ -650,6 +650,30 @@ def test_rendered_clock_zones_normalize_without_changing_lifecycle_order(zone):
     assert normalize(normalized) == normalized
 
 
+@pytest.mark.parametrize(
+    ("clock_value", "weekday"),
+    [
+        ("2026-11-15T10:00:01-08:00", "Sunday"),
+        ("2026-11-16T00:00:01+05:30", "Monday"),
+        ("2026-11-17T18:00:01Z", "Tuesday"),
+        ("2026-11-18T12:34:56", "Wednesday"),
+    ],
+)
+def test_current_time_section_iso_clock_normalizes_idempotently(clock_value, weekday):
+    """W5 拆分后的 `# Current Time`（ISO8601 + 时区 + 星期）须脱敏为 timestamp#1 并保持幂等。"""
+    def snapshot(rendered_clock):
+        trace = provider_message_trace(f"# Current Time\n- current_local_time: {rendered_clock}\n")
+        trace[0].update(started_at=10, finished_at=20)
+        return trace
+
+    normalized = normalize(snapshot(f"{clock_value} ({weekday})"))
+    assert normalized == normalize(snapshot("2026-11-07 07:38:58 UTC"))
+    assert normalized == normalize(snapshot(f"timestamp#1 ({weekday})"))
+    assert "# Current Time\n- current_local_time: timestamp#1\n" in normalized[0]["body"]["messages"][0]["content"]
+    assert normalized[0]["started_at"] < normalized[0]["finished_at"]
+    assert normalize(normalized) == normalized
+
+
 def test_fixture_date_file_stems_are_bijective_before_body_hashing():
     """测试根内日期文件名跨日等价，但同一回放内不同日期仍可区分。"""
     def event(first, second):

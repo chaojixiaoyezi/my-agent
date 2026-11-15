@@ -163,11 +163,17 @@ def normalize(trace):
                     "[timestamp#2..timestamp#1]" if float(match.group()) < 0 else "[timestamp#1..timestamp#1]", header)
             value = header + separator + payload
         value = re.sub(r"(?<=nonce )[0-9a-f]{16}", lambda match: identity("probe_nonce", match.group()), value)
-        # Rendered workspace clock snapshots are independent metadata substreams, not lifecycle clocks.
-        # 生产端使用 %Z；旧基线已替换日期但仍带时区，也须归入同一幂等表示。
-        value = re.sub(r"(current_local_(?:date|year|time): )(?:\d{4}(?:-\d{2}-\d{2})?(?: \d{2}:\d{2}:\d{2})?|timestamp#1)"
-                       r"(?: (?:[A-Za-z]+|[+-]\d{2}(?::?\d{2})?))?",
-                       r"\1timestamp#1", value)
+        # Rendered workspace / # Current Time clock snapshots are independent metadata substreams, not lifecycle clocks.
+        # 生产端使用 %Z 或 ISO8601+时区偏移 (Weekday)；旧基线已替换日期但仍带时区或星期，也须归入同一幂等表示。
+        value = re.sub(
+            r"(current_local_(?:date|year|time): )"
+            r"(?:\d{4}(?:-\d{2}-\d{2})?(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?|timestamp#1)"
+            r"(?:Z|[+-]\d{2}(?::?\d{2})?)?"
+            r"(?: (?:[A-Za-z]+|[+-]\d{2}(?::?\d{2})?))?"
+            r"(?: \((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\))?",
+            r"\1timestamp#1",
+            value,
+        )
         # Range endpoints share a substream so an inverted or collapsed interval stays observable.
         # LLM: Both endpoints retain their shared temporal ordering and equality relation.
         # 函数用途: Convert one rendered calendar interval without concealing a reversed range.

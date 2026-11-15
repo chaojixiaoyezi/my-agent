@@ -37,7 +37,8 @@ def test_human_gate_receipts_contain_exact_copy_commands_and_no_placeholders(tmp
     from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
     from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
-    # 1. persona_tool: AGENTS_WRITE_USER_ONLY without full content uses /agents show, never <JSON字符串>
+    # 1. persona_tool: AGENTS_WRITE_USER_ONLY returns ready-to-paste /agents write when AGENTS.md is healthy,
+    #    and falls back to /agents show when AGENTS.md is unavailable (never <JSON字符串>)
     persona_dir = tmp_path / "persona"
     persona_dir.mkdir()
     for name, head in (("SOUL.md", "# SOUL\n"), ("USER.md", "# USER\n"), ("AGENTS.md", "# AGENTS\n")):
@@ -56,11 +57,35 @@ def test_human_gate_receipts_contain_exact_copy_commands_and_no_placeholders(tmp
         arguments={"target": "agents", "content": "产物用 HTML"},
     )
     persona_doc = json.loads(execution.result.output)
-    assert persona_doc["copy_command"] == "/agents show"
+    expected_write = '/agents write "# AGENTS\\n- 产物用 HTML\\n"'
+    assert persona_doc["copy_command"] == expected_write
+    assert persona_doc["copy_commands"] == [expected_write, "/agents show"]
     assert "/agents show" in persona_doc["copy_commands"]
     assert "<JSON" not in execution.result.output
     assert not _ANGLE_PLACEHOLDER_RE.search(persona_doc["hint"])
     _assert_clean_single_line_commands(persona_doc["copy_commands"])
+
+    blocked_agents = persona_dir / "AGENTS_SYMLINK.md"
+    blocked_agents.symlink_to(persona_dir / "AGENTS.md")
+    unavailable_agent = SimpleNamespace(
+        home_paths=SimpleNamespace(
+            owner_soul_md=persona_dir / "SOUL.md",
+            owner_user_md=persona_dir / "USER.md",
+            owner_agents_md=blocked_agents,
+        ),
+    )
+    fallback_execution = execute_canonical_test_call(
+        persona_dir,
+        tools={"update_persona": persona_tool.UpdatePersonaTool(unavailable_agent)},
+        tool_name="update_persona",
+        arguments={"target": "agents", "content": "产物用 HTML"},
+    )
+    fallback_doc = json.loads(fallback_execution.result.output)
+    assert fallback_doc["copy_command"] == "/agents show"
+    assert fallback_doc["copy_commands"] == ["/agents show"]
+    assert "<JSON" not in fallback_execution.result.output
+    assert not _ANGLE_PLACEHOLDER_RE.search(fallback_doc["hint"])
+    _assert_clean_single_line_commands(fallback_doc["copy_commands"])
 
     # When full AGENTS.md text is explicitly available, emitted /agents write command is single-line and parser-valid
     full_outcome = persona_tool._agents_write_user_only_error("# Rules\n- Keep outputs structured\n")
