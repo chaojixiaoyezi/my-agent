@@ -568,6 +568,9 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest, *, restart_marker=N
         f"http_port={http_port}",
         flush=True,
     )
+    ready_event = getattr(context, "cold_start_ready_event", None)
+    if ready_event is not None:
+        ready_event.set()
     return stop_event, heartbeat_thread, request_thread, background_thread, http_server
 
 
@@ -1496,8 +1499,17 @@ def _run_standalone_gateway(args, lifecycle) -> int:
         return 2
     restart_marker = take_restart_marker(paths)
     requeued, pid = _cmd_gateway_run_setup(agent, paths, context=run_context, restart_marker=restart_marker)
-    if restart_marker is None and int(getattr(args, "after_pid", 0) or 0) <= 0:
-        _sweep_cold_start_settled_background_processes(agent)
+    cold_settled_ttl = _resolve_cold_start_settled_sweep_ttl(
+        agent,
+        args=args,
+        restart_marker=restart_marker,
+    )
+    cold_ready_event = threading.Event() if cold_settled_ttl > 0 else None
+    _attach_cold_start_settled_intent(
+        run_context,
+        ttl_seconds=cold_settled_ttl,
+        ready_event=cold_ready_event,
+    )
     http_port = getattr(agent.config, "gateway_port", 0) or 0
     try:
         stop_event, heartbeat_thread, request_thread, background_thread, http_server = _cmd_gateway_run_threads(
@@ -1505,8 +1517,12 @@ def _run_standalone_gateway(args, lifecycle) -> int:
             **({"restart_marker": restart_marker} if restart_marker is not None else {}),
         )
     except Exception as exc:
+        if cold_ready_event is not None:
+            cold_ready_event.set()
         _record_gateway_run_failed(paths, agent, pid, exc, context=run_context)
         return 2
+    if cold_ready_event is not None:
+        cold_ready_event.set()
 
     memory_tracing = getattr(args, "_gateway_memory_trace", None)
     memory_kwargs = {}
@@ -1840,21 +1856,91 @@ def _discover_cold_start_owner_targets(agent) -> list[tuple[str, str | None]]:
     return targets
 
 
-# LLM: 仅在非重启接班的 Gateway 冷启动执行一次，且只回收已证实终态并超过 TTL 秒数的遗留后台进程；
-#   活跃与状态未知的进程一律保留，单 owner 异常不阻塞 Gateway 启动。
-# 函数用途: Gateway 冷启动时按 background_process_settled_ttl_seconds 可选回收超期已终态后台进程。
-def _sweep_cold_start_settled_background_processes(agent) -> dict[str, object] | None:
+def _resolve_cold_start_settled_sweep_ttl(
+    agent,
+    *,
+    args=None,
+    restart_marker=None,
+) -> int:
+    if restart_marker is not None:
+        return 0
+    if args is not None and int(getattr(args, "after_pid", 0) or 0) > 0:
+        return 0
     config = getattr(agent, "config", None)
-    ttl_seconds = max(0, int((getattr(config, "background_process_settled_ttl_seconds", 0) if config is not None else 0) or 0))
-    if ttl_seconds <= 0:
-        return None
-    totals = {"active": 0, "settled": 0, "stopped": 0, "deferred_settled": 0, "stop_failed": 0, "unknown": 0}
-    errors: list[dict[str, str]] = []
-    for owner_home, store_root in _discover_cold_start_owner_targets(agent):
+    return max(0, int((getattr(config, "background_process_settled_ttl_seconds", 0) if config is not None else 0) or 0))
+
+
+def _attach_cold_start_settled_intent(
+    context,
+    *,
+    ttl_seconds: int,
+    ready_event: threading.Event | None,
+) -> None:
+    for attr, value in (
+        ("cold_start_settled_ttl_seconds", max(0, int(ttl_seconds or 0))),
+        ("cold_start_ready_event", ready_event),
+    ):
+        try:
+            setattr(context, attr, value)
+        except AttributeError:
+            object.__setattr__(context, attr, value)
+
+
+# 函数用途: 按单步配额渐进巡检各 owner 已终态超期的遗留后台进程，全部完成后记录一次总结事件。
+def run_cold_start_settled_sweep_step(
+    agent,
+    state: dict[str, object],
+    *,
+    ttl_seconds: int,
+    max_owners_per_tick: int = 8,
+    slice_ms: int = 200,
+    stop_event: threading.Event | None = None,
+) -> bool:
+    resolved_ttl = max(0, int(ttl_seconds or 0))
+    if resolved_ttl <= 0:
+        state["done"] = True
+        return True
+    if state.get("done"):
+        return True
+
+    if not state.get("initialized"):
+        state["initialized"] = True
+        state["targets"] = _discover_cold_start_owner_targets(agent)
+        state["cursor"] = 0
+        state["totals"] = {
+            "active": 0,
+            "settled": 0,
+            "stopped": 0,
+            "deferred_settled": 0,
+            "stop_failed": 0,
+            "unknown": 0,
+        }
+        state["errors"] = []
+
+    raw_targets = state.get("targets")
+    targets: list[tuple[str, str | None]] = list(raw_targets) if isinstance(raw_targets, (list, tuple)) else []
+    cursor = int(state.get("cursor", 0) or 0)
+    raw_totals = state.get("totals")
+    totals: dict[str, int] = raw_totals if isinstance(raw_totals, dict) else {}
+    raw_errors = state.get("errors")
+    errors: list[dict[str, str]] = raw_errors if isinstance(raw_errors, list) else []
+
+    deadline = (time.monotonic() + (slice_ms / 1000.0)) if slice_ms > 0 else None
+    processed = 0
+    while cursor < len(targets):
+        if stop_event is not None and stop_event.is_set():
+            state["cursor"] = cursor
+            return False
+        if processed > 0:
+            if max_owners_per_tick > 0 and processed >= max_owners_per_tick:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+        owner_home, store_root = targets[cursor]
         try:
             report = freeze_settled_leftover_processes(
                 owner_home,
-                min_settled_age_seconds=ttl_seconds,
+                min_settled_age_seconds=resolved_ttl,
                 store_root=store_root,
             )
             for key, value in (report.get("counts") or {}).items():
@@ -1862,14 +1948,42 @@ def _sweep_cold_start_settled_background_processes(agent) -> dict[str, object] |
                     totals[key] += int(value or 0)
         except Exception as exc:  # noqa: BLE001 冷启动巡检异常只记录结构化原因，不阻塞启动
             errors.append({"owner_home": owner_home, "error_type": type(exc).__name__})
-    event_payload: dict[str, object] = {
-        "ttl_seconds": ttl_seconds,
+        cursor += 1
+        processed += 1
+        state["cursor"] = cursor
+
+    if cursor < len(targets):
+        return False
+
+    state["done"] = True
+    sweep_summary: dict[str, object] = {
+        "ttl_seconds": resolved_ttl,
         **totals,
-        "errors": errors,
+        "errors": list(errors),
         "updated_at": time.time(),
     }
-    log_gateway_event(agent, "gateway_settled_background_sweep", event_payload)
-    return event_payload
+    state["sweep_summary"] = sweep_summary
+    log_gateway_event(agent, "gateway_settled_background_sweep", sweep_summary)
+    return True
+
+
+# LLM: 仅在非重启接班的 Gateway 冷启动执行一次，且只回收已证实终态并超过 TTL 秒数的遗留后台进程；
+#   活跃与状态未知的进程一律保留，单 owner 异常不阻塞 Gateway 启动。
+# 函数用途: Gateway 冷启动时按 background_process_settled_ttl_seconds 可选回收超期已终态后台进程。
+def _sweep_cold_start_settled_background_processes(agent) -> dict[str, object] | None:
+    ttl_seconds = _resolve_cold_start_settled_sweep_ttl(agent)
+    if ttl_seconds <= 0:
+        return None
+    state: dict[str, object] = {}
+    run_cold_start_settled_sweep_step(
+        agent,
+        state,
+        ttl_seconds=ttl_seconds,
+        max_owners_per_tick=0,
+        slice_ms=0,
+    )
+    sweep_summary = state.get("sweep_summary")
+    return sweep_summary if isinstance(sweep_summary, dict) else None
 
 
 # LLM: 托管后台进程登记表的地址只由产品那一个函数决定（同一 owner 的家目录+工作区），
@@ -2014,4 +2128,5 @@ __all__ = [
     "_gateway_ready_for_pid",
     "_record_is_current_generation",
     "wait_for_gateway_readiness",
+    "run_cold_start_settled_sweep_step",
 ]
