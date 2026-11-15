@@ -560,8 +560,10 @@ def test_idle_approval_scan_portable_replay_preserves_cursor_across_eviction(tmp
 
 
 def _flush_portable_directory_streams() -> None:
+    from agent_py_agent.agent.conversation import claim_activity_projection
     from agent_py_agent.agent.user_space import directory_paging
 
+    claim_activity_projection.close_claim_activity_projection()
     with directory_paging._SCAN_LOCK:
         assert len(directory_paging._SCAN_STREAMS) <= 32
         while directory_paging._SCAN_STREAMS:
