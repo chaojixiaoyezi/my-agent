@@ -166,6 +166,8 @@ def test_biz006_all_domain_error_codes_registered_in_taxonomy() -> None:
         "RUN_OUTCOME_UNKNOWN",
         "MEMORY_CONTROL_RESULT_UNKNOWN",
         "UNASSIGNED_TASK_LINEAGE_CYCLE",
+        "COMPACT_NO_PROGRESS",
+        "PARENT_TERMINAL_UNPROVEN",
     )
     for code in required_spot_codes:
         contract = error_contract(code)
@@ -177,6 +179,8 @@ def test_biz006_all_domain_error_codes_registered_in_taxonomy() -> None:
     assert ERROR_CONTRACTS["OUTCOME_UNKNOWN"].retryable is False
     assert ERROR_CONTRACTS["RUN_OUTCOME_UNKNOWN"].retryable is False
     assert ERROR_CONTRACTS["MEMORY_CONTROL_RESULT_UNKNOWN"].retryable is False
+    assert ERROR_CONTRACTS["COMPACT_NO_PROGRESS"].retryable is False
+    assert ERROR_CONTRACTS["PARENT_TERMINAL_UNPROVEN"].retryable is False
     assert ERROR_CONTRACTS["WRITE_FORBIDDEN"].recommended_action == "request_permission"
 
     for sample_code in (
@@ -187,6 +191,8 @@ def test_biz006_all_domain_error_codes_registered_in_taxonomy() -> None:
         "AGENTS_WRITE_CROSS_OWNER_FORBIDDEN",
         "WORKFLOW_CANCELLED",
         "PLUGIN_CLEANUP_UNCONFIRMED",
+        "COMPACT_NO_PROGRESS",
+        "PARENT_TERMINAL_UNPROVEN",
     ):
         outcome = ToolHandlerOutcome("sample_tool", False, "failed", error_code=sample_code)
         assert outcome.error_code == sample_code
