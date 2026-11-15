@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .models import CaseDecision, new_decision_id
+
+logger = logging.getLogger(__name__)
 from .request_status import (
     CollaborationRequestStatus,
     is_blocked_request_status,
@@ -59,7 +62,46 @@ class CollaborationCoordinator:
 
     def tick(self, *, now: float) -> list[CaseDecision]:
         decisions: list[CaseDecision] = []
-        for case in self.store.list_cases(status="open"):
+        try:
+            errors = self.store._prepare_history_read()
+            with self.store.history_index.connect() as db:
+                db.execute("BEGIN")
+                open_case_ids = [
+                    str(row[0])
+                    for row in db.execute(
+                        "SELECT c.case_id FROM cases c "
+                        "WHERE c.status = 'open' "
+                        "AND NOT EXISTS (SELECT 1 FROM dirty d WHERE d.case_id = c.case_id) "
+                        "ORDER BY c.created, c.case_id"
+                    )
+                ]
+                meta_row = db.execute("SELECT value FROM meta WHERE key = 'cases_complete'").fetchone()
+                partial = meta_row is None or str(meta_row[0]) != "1"
+                dirty = db.execute("SELECT 1 FROM dirty LIMIT 1").fetchone() is not None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("COLLABORATION_INDEX_UNAVAILABLE error_type=%s", type(exc).__name__)
+            return decisions
+
+        if errors or partial or dirty:
+            logger.warning(
+                "COLLABORATION_INDEX_DEFERRED error_count=%d partial=%s dirty=%s",
+                len(errors),
+                partial,
+                dirty,
+            )
+
+        for case_id in open_case_ids:
+            try:
+                case = self.store.load_case(case_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "COLLABORATION_CASE_DEFERRED case_id=%s error_type=%s",
+                    case_id,
+                    type(exc).__name__,
+                )
+                continue
+            if case.status != "open":
+                continue
             decision = self._tick_case(case, now=now)
             if decision is not None:
                 decisions.append(decision)

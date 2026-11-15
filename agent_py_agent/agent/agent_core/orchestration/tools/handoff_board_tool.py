@@ -404,6 +404,12 @@ class ManageHandoffBoardTool(BaseTool):
                 return self._handle_sync_mailbox(service, params)
             return self._failure(f"未知交接板动作: {action!r}", "TOOL_INVALID_ARGUMENTS")
         except KeyError as exc:
+            explicit_outcome = getattr(exc, "effect_outcome", None)
+            resolved_outcome = (
+                str(explicit_outcome)
+                if explicit_outcome in {"not_started", "unknown", "applied", "partial"}
+                else "not_started"
+            )
             return self._failure(
                 str(exc),
                 "RESOURCE_NOT_FOUND",
@@ -411,14 +417,70 @@ class ManageHandoffBoardTool(BaseTool):
                     "error": str(exc),
                     "hint": "请先通过 action='list_cases' 查询已有协作单，或通过 action='open_case' 创建新协作单。",
                 },
+                effect_outcome=resolved_outcome,
             )
         except (ValueError, TypeError) as exc:
-            return self._failure(str(exc), "TOOL_INVALID_ARGUMENTS")
+            explicit_outcome = getattr(exc, "effect_outcome", None)
+            resolved_outcome = (
+                str(explicit_outcome)
+                if explicit_outcome in {"not_started", "unknown", "applied", "partial"}
+                else "not_started"
+            )
+            return self._failure(str(exc), "TOOL_INVALID_ARGUMENTS", effect_outcome=resolved_outcome)
         except HandoffError as exc:
-            return self._failure(str(exc), exc.error_code, details=exc.details)
+            exc_details = dict(exc.details) if isinstance(exc.details, dict) else {}
+            explicit_outcome = exc_details.get("effect_outcome") or getattr(exc, "effect_outcome", None)
+            resolved_outcome = (
+                str(explicit_outcome)
+                if explicit_outcome in {"not_started", "unknown", "applied", "partial"}
+                else "not_started"
+            )
+            return self._failure(str(exc), exc.error_code, details=exc_details, effect_outcome=resolved_outcome)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Unexpected error in ManageHandoffBoardTool: %s", exc)
-            return self._failure(f"执行失败: {exc}", "INTERNAL_ERROR")
+            read_only_actions = {"list", "read", "list_cases", "read_case", "list_items"}
+            explicit_outcome = getattr(exc, "effect_outcome", None)
+            if explicit_outcome in {"not_started", "unknown", "applied", "partial"}:
+                resolved_outcome = str(explicit_outcome)
+            elif action in read_only_actions:
+                resolved_outcome = "not_started"
+            else:
+                resolved_outcome = "unknown"
+
+            case_id = str(params.get("case_id") or "").strip() or None
+            item_id = str(params.get("item_id") or "").strip() or None
+            exc_type = type(exc).__name__
+            err_details: dict[str, Any] = {
+                "action": action,
+                "exception_type": exc_type,
+                "effect_outcome": resolved_outcome,
+            }
+            if isinstance(exc, OSError) and exc.errno is not None:
+                err_details["errno"] = exc.errno
+            if case_id:
+                err_details["case_id"] = case_id
+            if item_id:
+                err_details["item_id"] = item_id
+            if resolved_outcome == "not_started":
+                err_details["next_action"] = "未触发持久化写入；请核对参数与当前状态后重试。"
+            else:
+                read_hint = (
+                    f"action='list_items' with case_id={case_id!r}"
+                    if case_id
+                    else "action='list_cases' / action='list_items'"
+                )
+                err_details["next_action"] = (
+                    f"变更状态未知，请先调用 {read_hint} 读取当前状态并确认是否已落盘，"
+                    "确认未生效后再保留原 idempotency_key/item_id 安全重试。"
+                )
+            err_summary = str(exc).splitlines()[0][:240] if str(exc) else ""
+            message = f"执行失败 ({exc_type}): {err_summary}" if err_summary else f"执行失败 ({exc_type})"
+            return self._failure(
+                message,
+                "INTERNAL_ERROR",
+                details=err_details,
+                effect_outcome=resolved_outcome,
+            )
 
     # LLM: 尝试从内部属性或 agent 解析 HandoffBoardService 实例。
     # 函数用途: 解析交接板服务对象。
@@ -995,18 +1057,26 @@ class ManageHandoffBoardTool(BaseTool):
         details: dict[str, Any] | None = None,
         effect_outcome: str = "not_started",
     ) -> ToolHandlerOutcome:
-        det = details or {}
-        payload = {
+        det = dict(details) if details else {}
+        envelope: dict[str, Any] = {
+            "details": det,
+            "error_code": error_code,
+            "effect_outcome": effect_outcome,
+        }
+        if "next_action" in det:
+            envelope["next_action"] = det["next_action"]
+        outcome_data = {
             "ok": False,
             "error_code": error_code,
             "message": message,
+            "effect_outcome": effect_outcome,
             "details": det,
         }
         outcome = ToolHandlerOutcome(
             "manage_handoff_board",
             False,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            result_envelope={"details": det, "error_code": error_code},
+            json.dumps(outcome_data, ensure_ascii=False, indent=2),
+            result_envelope=envelope,
             error_code=error_code,
             effect_outcome=effect_outcome,
         )
