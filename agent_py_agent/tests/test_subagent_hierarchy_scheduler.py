@@ -400,7 +400,7 @@ def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
                     goal="arithmetic领域：创建worker_arithmetic，写入solution.py",
                     role="coordinator",
                     agent_name="arithmetic-lead",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+                    allowed_tools=["create_subagents", "list_agents", "cancel_subagents"],
                 )
             ],
             apply=True,
@@ -439,7 +439,7 @@ def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_d
                     goal=f"创建 arithmetic worker，产物写至 {deliverables}/leaf_outputs/worker_arithmetic/",
                     role="coordinator",
                     agent_name="arithmetic-lead",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+                    allowed_tools=["create_subagents", "list_agents", "cancel_subagents"],
                 )
             ],
             apply=True,
@@ -518,7 +518,7 @@ def _schedule_controlled_exec_contract_leaf(manager: SubAgentManager, child_id: 
                     goal="继续创建 depth=3 worker，保留 controlled_exec 合同。",
                     role="coordinator",
                     agent_name="grand-lead",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+                    allowed_tools=["create_subagents", "list_agents", "cancel_subagents"],
                 )
             ],
             apply=True,
@@ -550,7 +550,7 @@ def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
                     goal="创建 leaf worker，实现 add(a,b) 并写测试",
                     role="coordinator",
                     agent_name="child",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+                    allowed_tools=["create_subagents", "list_agents", "cancel_subagents"],
                 )
             ],
             apply=True,
@@ -573,3 +573,38 @@ def _schedule_vague_leaf(manager: SubAgentManager, parent_id: str):
             max_depth=2,
         )
     )
+
+
+def test_hierarchy_schedule_all_retired_explicit_tools_fails_closed_with_guidance(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(
+        goal="父级调度协调者。",
+        thought="root",
+        plan=["plan"],
+    )
+
+    result = manager.hierarchy.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="仅传已退役控制工具名的协调者子代理",
+                    role="coordinator",
+                    agent_name="retired-only-lead",
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    child = manager.load(result.created_run_ids[0])
+
+    assert child.allowed_tools == []
+    assert child.attributes["retired_explicit_tools_stripped"] == [
+        "schedule_child_subagents",
+        "dispatch_subagents",
+        "inspect_agent_tree",
+    ]
+    guidance = child.attributes["retired_explicit_tools_guidance"]
+    for tool_name in ("create_subagents", "list_agents", "inspect_agent_run", "cancel_agent"):
+        assert tool_name in str(guidance)

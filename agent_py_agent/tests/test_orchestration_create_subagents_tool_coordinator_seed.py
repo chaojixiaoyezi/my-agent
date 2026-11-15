@@ -812,10 +812,20 @@ class TestResourceScopePolicyNormalizationPerSeq269:
             EffectResolverPolicy,
             ResourceScopePolicy,
             ToolFailureStage,
+            ToolModelSpec,
             ToolRuntimePolicy,
         )
 
         class _BrokenHookTool(BaseTool):
+            model_spec = ToolModelSpec(
+                name="broken_hook",
+                description="Mutating scope hook error test tool.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"run_id": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            )
             runtime_policy = ToolRuntimePolicy(
                 effect_resolver=EffectResolverPolicy("mutating"),
                 resource_scopes=ResourceScopePolicy(
@@ -857,7 +867,7 @@ class TestResourceScopePolicyNormalizationPerSeq269:
         outcome = _invoke_with_operation_policy(
             request,
             call,
-            SimpleNamespace(runtime_policy=tool.runtime_policy, handler=tool),
+            SimpleNamespace(model_spec=tool.model_spec, runtime_policy=tool.runtime_policy, handler=tool),
             ActionDecision("allow", resolved_effect="mutating"),
         )
         assert outcome.ok is False
@@ -885,12 +895,22 @@ class TestResourceScopePolicyNormalizationPerSeq269:
             EffectResolverPolicy,
             ResourceScopePolicy,
             ToolHandlerOutcome,
+            ToolModelSpec,
             ToolRuntimePolicy,
         )
 
         tool_name = "broken_hook_ro"
 
         class _BrokenHookReadOnlyTool(BaseTool):
+            model_spec = ToolModelSpec(
+                name=tool_name,
+                description="Read-only scope hook skip test tool.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"run_id": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            )
             runtime_policy = ToolRuntimePolicy(
                 effect_resolver=EffectResolverPolicy("read_only"),
                 resource_scopes=ResourceScopePolicy(
@@ -913,7 +933,7 @@ class TestResourceScopePolicyNormalizationPerSeq269:
 
         tool = _BrokenHookReadOnlyTool()
         snapshot_runtime = SimpleNamespace(
-            model_spec=SimpleNamespace(name=tool_name),
+            model_spec=tool.model_spec,
             runtime_policy=tool.runtime_policy,
             handler=tool,
         )
@@ -958,7 +978,7 @@ class TestResourceScopePolicyNormalizationPerSeq269:
         outcome = _invoke_with_operation_policy(
             request,
             call,
-            SimpleNamespace(runtime_policy=tool.runtime_policy, handler=tool),
+            snapshot_runtime,
             ActionDecision("allow", resolved_effect="read_only"),
         )
         assert outcome.ok is True

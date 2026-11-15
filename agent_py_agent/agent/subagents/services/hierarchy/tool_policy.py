@@ -14,6 +14,7 @@ from ...role_templates import (
     COORDINATOR_TOOLS,
     DIRECT_CHILD_CONTROL_TOOLS,
     RECORD_LESSON_TOOL,
+    RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS,
     active_model_subagent_tools,
     role_template_snapshot_for_role,
     template_for_role,
@@ -179,3 +180,19 @@ def _merge_preserving_explicit_ceilings(explicit: list[str], defaults: list[str]
 # 函数用途: 清理递归工具输入并迁移旧目录与业务叶授权，避免升级记录丢工具或扩权。
 def _clean_tools(value: object) -> list[str]:
     return normalize_tool_grants(active_model_subagent_tools(value))
+
+
+# 函数用途: 提取显式 allowed_tools 中被 active_model_subagent_tools 移除的已退役旧控制工具名（保序去重），供调度器写入诊断指引。
+def stripped_retired_explicit_tools(spec: Any) -> tuple[str, ...]:
+    """Return retired control tool names stripped from explicit spec.allowed_tools."""
+    raw_explicit = getattr(spec, "allowed_tools", None)
+    if not isinstance(raw_explicit, list | tuple | set):
+        return ()
+    items = sorted(raw_explicit, key=str) if isinstance(raw_explicit, set) else raw_explicit
+    return tuple(
+        dict.fromkeys(
+            text
+            for item in items
+            if (text := str(item or "").strip()) and text in RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS
+        )
+    )

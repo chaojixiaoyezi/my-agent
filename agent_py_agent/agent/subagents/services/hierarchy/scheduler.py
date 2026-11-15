@@ -38,6 +38,7 @@ from .tool_policy import (
     ToolPolicyRequest,
     scheduled_child_tools,
     should_infer_leaf_coding_tools,
+    stripped_retired_explicit_tools,
 )
 from .write_policy import (
     ChildWriteRootRequest,
@@ -208,6 +209,36 @@ def _child_create_params(
 # CreateRunParams used at the root. Description remains display-only while all
 # capability and write bounds continue to come from structured parent facts.
 # 函数用途: 将递归规格和父专有 actor 转成创建参数，保留职责与权限，不读模型身份别名。
+def _scheduled_child_attributes(parent: SubAgentTask, spec: HierarchyChildSpec) -> dict[str, object]:
+    """继承父子属性并在显式 allowed_tools 命中已退役控制工具时附带诊断信息。"""
+    attributes = hctx.inherited_hierarchy_attributes(parent, spec)
+    attributes.pop("retired_explicit_tools_stripped", None)
+    attributes.pop("retired_explicit_tools_guidance", None)
+    stripped = stripped_retired_explicit_tools(spec)
+    if stripped:
+        attributes["retired_explicit_tools_stripped"] = list(stripped)
+        attributes["retired_explicit_tools_guidance"] = {
+            "replacement_tools": [
+                "create_subagents",
+                "list_agents",
+                "inspect_agent_run",
+                "cancel_agent",
+            ],
+            "active_control_tools": [
+                "create_subagents",
+                "list_agents",
+                "send_guidance",
+                "cancel_subagents",
+            ],
+            "message": (
+                "显式 allowed_tools 包含已退役旧控制工具，已按 fail-closed 规则移除；"
+                "请改用新版编排控制工具（create_subagents、list_agents、inspect_agent_run、cancel_agent；"
+                "当前运行时对应控制工具为 create_subagents、list_agents、send_guidance、cancel_subagents）。"
+            ),
+        }
+    return attributes
+
+
 def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParams:
     parent = request.parent
     spec = request.spec
@@ -247,7 +278,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         context_manifest=child_context_manifest(parent, spec),
         context_packs=child_context_packs(parent, spec),
         extra_write_roots=request.extra_write_roots,
-        attributes=hctx.inherited_hierarchy_attributes(parent, spec),
+        attributes=_scheduled_child_attributes(parent, spec),
         host_channel_actor=HostChannelActor.from_record(parent.host_channel_actor) if parent.host_channel_actor else None,
     )
 

@@ -10,6 +10,12 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.tooling import executor
+from agent_py_agent.agent.tooling.models import BaseTool
+from agent_py_agent.tests._tool_runtime_harness import (
+    make_test_model_spec,
+    make_test_runtime_policy,
+    runtime_snapshot_for_tools,
+)
 from agent_py_agent.tests.test_plan_w4_storage_errors import (
     CountingTool,
     managed_store,
@@ -18,14 +24,32 @@ from agent_py_agent.tests.test_plan_w4_storage_errors import (
 )
 
 
+class _ProbeTool(BaseTool):
+    model_spec = make_test_model_spec("probe")
+    runtime_policy = make_test_runtime_policy()
+
+    def execute(self, params):
+        raise AssertionError("authority check test should not invoke handler")
+
+
 def _authority_request(store):
-    return SimpleNamespace(operation_store=store, operation_owner_id="test-owner",
-        write_boundary={}, trusted_run_context={"run_scope": {"task_id": "test-task"}})
+    return SimpleNamespace(
+        operation_store=store,
+        operation_owner_id="test-owner",
+        write_boundary={},
+        trusted_run_context={"run_scope": {"task_id": "test-task"}},
+        runtime_snapshot=runtime_snapshot_for_tools({"probe": _ProbeTool()}),
+    )
 
 
 def _call(number):
-    return SimpleNamespace(run_id=f"run-{number}", operation_id=f"op-{number}",
-        tool_name="probe", attempt_id=f"attempt-{number}")
+    return SimpleNamespace(
+        run_id=f"run-{number}",
+        operation_id=f"op-{number}",
+        tool_name="probe",
+        attempt_id=f"attempt-{number}",
+        arguments={},
+    )
 
 
 @pytest.mark.parametrize("code", [5, 261])
