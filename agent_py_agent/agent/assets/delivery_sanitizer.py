@@ -7,6 +7,7 @@ import math
 import os
 import re
 from bisect import bisect_right
+from decimal import Decimal, InvalidOperation
 from itertools import islice
 from pathlib import Path
 
@@ -418,11 +419,20 @@ def _shared_scan(text):
     return changed, scanned
 
 
+def _exact_decimal(text):
+    """解析十进制数值用于精确等值比较；指数超限时返回 None 交由原字符串匹配处理。"""
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
 # LLM: 仅接受已确认合法的JSON；平坦词法栈保留容器敏感关联及重复键，解码判占位后只替换完整token，不重建字段。
 # 函数用途: 递归关联敏感键与其dict/list内字符串和数字值；短值和转义值同样拒绝，显式替换使用固定字面值。
 def _json_structure_scan(text, *, replace=False, secrets=()):
     matches, pieces, cursor = [], [], 0
     known_numeric = {value for value in secrets if _NUMERIC_SECRET.fullmatch(value)}
+    numeric_values = {parsed for value in known_numeric if (parsed := _exact_decimal(value)) is not None}
     # 每层保存继承敏感性和当前键敏感性；列表及根标量不凭空产生键关联。
     stack = [[False, False]]
     for token in _JSON_STRUCTURE_TOKEN.finditer(text):
@@ -443,7 +453,8 @@ def _json_structure_scan(text, *, replace=False, secrets=()):
             known_numeric_value = bool(
                 known_numeric
                 and _NUMERIC_SECRET.fullmatch(raw)
-                and (raw in known_numeric or str(json.loads(raw)) in known_numeric)
+                and (raw in known_numeric or str(json.loads(raw)) in known_numeric
+                     or (numeric_values and _exact_decimal(raw) in numeric_values))
             )
             stack[-1][1] = False
             if (inherited_sensitive or known_numeric_value) and not _placeholder(raw, unquoted=True):

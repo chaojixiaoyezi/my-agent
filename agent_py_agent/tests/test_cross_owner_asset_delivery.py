@@ -2479,3 +2479,121 @@ def test_registered_numeric_value_root_array_duplicates_placeholders_and_binary(
     assert kit.service.accept_delivery('local/alice', safe_sent['delivery_id'])['status'] == 'accepted'
     assert (kit.alice / 'scripts/numeric_safe/config.json').read_bytes() == safe_doc
     assert (kit.alice / 'scripts/numeric_safe/blob.bin').read_bytes() == raw_bin
+
+
+@pytest.mark.parametrize('registered,encoded', [
+    (31337, b'{"n":31337.0}'),
+    (31337, b'{"n":313370e-1}'),
+    (31337.0, b'{"n":31337}'),
+])
+def test_numeric_equivalence_rejected_before_publication(kit, registered, encoded):
+    import json
+
+    from agent_py_agent.agent.assets.datasource_store import DatasourceStore
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    ds = DatasourceStore(kit.main)
+    item = ds.save_datasource(
+        {'datasource_id': 'numeric-check', 'kind': 'http', 'title': 'Numeric fixture'},
+        credential_values={'value': registered},
+    )
+    stored = ds.resolve_secret(item['credential_ref'])['value']
+    assert json.loads(encoded)['n'] == stored
+    ScriptStore(kit.main).save_script(
+        AssetDescriptor('numeric_copy', 'script', 'Numeric fixture'), 'print("ok")\n'
+    )
+    (kit.main / 'scripts/numeric_copy/config.json').write_bytes(encoded)
+    with pytest.raises(AssetDeliveryError) as error:
+        kit.service.send_bundle('local/main', 'local/alice', 'script', 'numeric_copy')
+    assert error.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert '31337' not in str(error.value.to_dict())
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+
+
+@pytest.mark.parametrize('registered,encoded', [
+    (31337, b'{"n":31337.0}'),
+    (31337, b'{"n":313370e-1}'),
+    (31337.0, b'{"n":31337}'),
+])
+def test_numeric_equivalence_replaced_before_acceptance(kit, registered, encoded):
+    import json
+
+    from agent_py_agent.agent.assets.datasource_store import DatasourceStore
+
+    ds = DatasourceStore(kit.main)
+    ds.save_datasource(
+        {'datasource_id': 'numeric-check', 'kind': 'http', 'title': 'Numeric fixture'},
+        credential_values={'value': registered},
+    )
+    ScriptStore(kit.main).save_script(
+        AssetDescriptor('numeric_copy', 'script', 'Numeric fixture'), 'print("ok")\n'
+    )
+    (kit.main / 'scripts/numeric_copy/config.json').write_bytes(encoded)
+    sent = kit.service.send_bundle(
+        'local/main', 'local/alice', 'script', 'numeric_copy',
+        allow_secret_placeholder_replace=True,
+    )
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    delivered = json.loads((kit.alice / 'scripts/numeric_copy/config.json').read_bytes())
+    assert delivered == {'n': '<REDACTED_SECRET>'}
+
+
+def test_unrelated_large_integer_and_boolean_values_remain_unchanged(kit, sanitize, tmp_path):
+    from agent_py_agent.agent.assets.datasource_store import DatasourceStore
+
+    raw = b'{"n":9007199254740993,"enabled":true,"absent":null}'
+    result = sanitize(
+        {'config.json': raw}, owner_home=tmp_path,
+        extra_secrets=(9007199254740992,),
+        allow_secret_placeholder_replace=True,
+    )
+    assert result['config.json'] == raw
+
+    DatasourceStore(kit.main).save_datasource(
+        {'datasource_id': 'large-int-check', 'kind': 'http', 'title': 'Large int fixture'},
+        credential_values={'value': 9007199254740992},
+    )
+    ScriptStore(kit.main).save_script(
+        AssetDescriptor('large_int_safe', 'script', 'Large int fixture'), 'print("ok")\n'
+    )
+    (kit.main / 'scripts/large_int_safe/config.json').write_bytes(raw)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'script', 'large_int_safe')
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    assert (kit.alice / 'scripts/large_int_safe/config.json').read_bytes() == raw
+
+
+def test_current_same_type_numeric_equivalence_is_preserved(kit, sanitize, tmp_path):
+    import json
+
+    from agent_py_agent.agent.assets.datasource_store import DatasourceStore
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    raw = b'{"n":35e-1,"safe":17}'
+    with pytest.raises(AssetDeliveryError):
+        sanitize({'config.json': raw}, owner_home=tmp_path, extra_secrets=(3.5,))
+    result = sanitize(
+        {'config.json': raw}, owner_home=tmp_path, extra_secrets=(3.5,),
+        allow_secret_placeholder_replace=True,
+    )
+    assert json.loads(result['config.json']) == {'n': '<REDACTED_SECRET>', 'safe': 17}
+
+    DatasourceStore(kit.main).save_datasource(
+        {'datasource_id': 'same-type-check', 'kind': 'http', 'title': 'Float fixture'},
+        credential_values={'value': 3.5},
+    )
+    ScriptStore(kit.main).save_script(
+        AssetDescriptor('same_type_float', 'script', 'Float fixture'), 'print("ok")\n'
+    )
+    (kit.main / 'scripts/same_type_float/config.json').write_bytes(raw)
+    with pytest.raises(AssetDeliveryError) as exc_info:
+        kit.service.send_bundle('local/main', 'local/alice', 'script', 'same_type_float')
+    assert exc_info.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    sent = kit.service.send_bundle(
+        'local/main', 'local/alice', 'script', 'same_type_float',
+        allow_secret_placeholder_replace=True,
+    )
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    assert json.loads((kit.alice / 'scripts/same_type_float/config.json').read_bytes()) == {
+        'n': '<REDACTED_SECRET>',
+        'safe': 17,
+    }
