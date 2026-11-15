@@ -110,6 +110,7 @@ def test_preflight_mixed_recovery_reaches_healthy_target_with_retired_runtime_fa
     agent, store, thread, request, execution, sink, _ = _mixed_background(
         tmp_path, backend="anthropic_compatible", detached=False,
         window=300_000 if trigger_percent == 90 else 384_000,
+        history_repeat=100,
     )
     from agent_py_agent.agent.agent_core.runtime import loop_support
     from agent_py_agent.agent.conversation import compact_request_budget

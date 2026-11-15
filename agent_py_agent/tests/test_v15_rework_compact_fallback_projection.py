@@ -27,7 +27,6 @@ def test_child_goal_recovers_with_canonical_mechanical_summary(tmp_path, summary
     # 摘要调用会浅拷贝后端；共享计数和请求列表不能依赖后端自身的整数属性。
     calls = Counter()
     summary_requests = []
-    resumed_messages = []
 
     class Backend:
         name = "mechanical-summary-recovery"
@@ -48,9 +47,73 @@ def test_child_goal_recovers_with_canonical_mechanical_summary(tmp_path, summary
                     if summary_mode == "tool_call" else []
                 ))
             calls["turn"] += 1
-            assert calls["turn"] <= 4, "显式完成目标后不得再续跑"
+            assert calls["turn"] <= 2, "COMPACT_NO_PROGRESS 中止后不得继续执行业务轮"
             if calls["turn"] == 1:
                 return ModelResponse(text="第一段已处理，后续继续。", backend=self.name)
+            return ModelResponse(
+                text="上下文压力", backend=self.name, runtime_status="context_overflow",
+                runtime_reason="context_overflow", runtime_source="provider_error",
+            )
+
+    agent.backend = Backend()
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    # PD-2: preserve_complete_fallback mechanical fallback retains full rows plus fallback headers
+    # (`after > before`), so it cannot shrink and must reject via COMPACT_NO_PROGRESS without mutating state.
+    assert result.ok is False, result.message
+    assert result.status == "FAILED"
+    assert "COMPACT_NO_PROGRESS" in result.message
+    assert calls == {"turn": 2, "summary": 2}
+    assert summary_requests[0]["tools"] == summary_requests[1]["tools"]
+    assert summary_requests[0]["tool_choice"] == summary_requests[1]["tool_choice"]
+    assert agent.conversation_store.goals.load(task.agent_thread_id).status == "active"
+    committed = agent.conversation_store.threads.require(task.agent_thread_id)
+    assert committed.compact_generation == 0
+    assert committed.compact_checkpoint_id == ""
+    assert committed.summary == ""
+    assert committed.compact_failure_code == "COMPACT_NO_PROGRESS"
+    assert list(iter_committed_compact_checkpoints(agent, committed)) == []
+    assert agent.subagents.load(task.id).status == "FAILED"
+
+
+@pytest.mark.parametrize("summary_mode", ["tool_call", "empty"])
+def test_child_goal_recovers_with_canonical_stripped_summary_after_repair(tmp_path, summary_mode):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    task = agent.subagents.create_run(
+        goal="处理两段工作", role="worker", attributes={"persistent_goal": "完成两段工作并总结"},
+    )
+    # 摘要调用会浅拷贝后端；共享计数和请求列表不能依赖后端自身的整数属性。
+    calls = Counter()
+    summary_requests = []
+    resumed_messages = []
+
+    class Backend:
+        name = "repaired-summary-recovery"
+        context_window_tokens = 128_000
+
+        def probe_tool_capability(self):
+            return ProviderToolCapability(
+                provider=self.name, endpoint="local://compact-regression", model="", stream=False,
+                native_supported=True, evidence="test_backend_declares_native_tools", observed_at=_utc_now_iso(),
+            )
+
+        def generate(self, prompt, on_chunk=None, **kwargs):
+            if "Direct factual archival only: maintain a concise summary" in prompt:
+                calls["summary"] += 1
+                summary_requests.append(kwargs)
+                if calls["summary"] == 1:
+                    return ModelResponse(text="", backend=self.name, tool_use_blocks=(
+                        [{"id": "s1", "name": "update_goal", "input": {"status": "complete"}}]
+                        if summary_mode == "tool_call" else []
+                    ))
+                return ModelResponse(text="  第一段已处理，后续继续。\n\n", backend=self.name)
+            calls["turn"] += 1
+            assert calls["turn"] <= 4, "显式完成目标后不得再续跑"
+            if calls["turn"] == 1:
+                return ModelResponse(
+                    text="第一段已处理，后续继续。\n" + ("阶段处理记录与核对明细。\n" * 600),
+                    backend=self.name,
+                )
             if calls["turn"] == 2:
                 return ModelResponse(
                     text="上下文压力", backend=self.name, runtime_status="context_overflow",

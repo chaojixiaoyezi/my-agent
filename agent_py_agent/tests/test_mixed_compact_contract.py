@@ -294,7 +294,7 @@ def test_cancellation_from_committing_progress_leaves_checkpoint_unpublished(mix
 
     with pytest.raises(ToolCancelled if typed_exception else InterruptedError):
         _compact(
-            case, lambda view: ConversationCompactProjection(100, view),
+            case, lambda view: ConversationCompactProjection(100 if view.is_candidate else 500, view),
             interrupt_check=lambda: token.cancelled, progress_callback=progress,
         )
 

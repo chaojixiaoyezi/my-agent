@@ -609,7 +609,7 @@ def test_child_compact_recovery_does_not_repeat_entry_preparation(tmp_path, monk
 
     agent, _, _ = _fixture(tmp_path)
     child = _child(agent)
-    for role, text in (("user", "此前提供的合成事实"), ("assistant", "此前记录")):
+    for role, text in (("user", "此前提供的合成事实" * 2_500), ("assistant", "此前记录" * 2_500)):
         agent.conversation_store.messages.append({"thread_id": child.agent_thread_id, "role": role, "content": text,
                                                   "metadata": {"conversation_request_id": "prior-fixture"}})
     backend = _OverflowThenCompleteChildBackend()

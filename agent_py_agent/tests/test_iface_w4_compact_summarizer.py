@@ -44,7 +44,7 @@ from agent_py_agent.agent.tooling.compact_policy_tool import CompactPolicyTool
 _OMITTED = object()
 
 
-def _case(tmp_path, *, repeats=1):
+def _case(tmp_path, *, repeats=300):
     store = ConversationStore(tmp_path / "conversation")
     thread = store.threads.get_or_create({"canonical_user_id": "owner", "now": 1})
     rows = tuple(store.messages.append({
@@ -326,7 +326,7 @@ def test_injected_summary_failures_keep_original_checkpoint_and_cas_rules(tmp_pa
 
 @pytest.mark.parametrize("row_index", [0, 2], ids=["compacted-prefix", "retained-tail"])
 def test_both_snapshot_partitions_are_reverified_immediately_before_cas(tmp_path, row_index):
-    agent, thread, source, rows = _case(tmp_path)
+    agent, thread, source, rows = _case(tmp_path, repeats=50)
     source = replace(source, policy=replace(source.policy, recent_tail_max_turns=1, recent_tail_tokens=1_000))
     path = agent.conversation_store.storage.message_path(thread.thread_id)
     before = path.read_bytes()
@@ -466,7 +466,8 @@ def test_provider_media_and_landmark_outcomes_reach_original_measurement_and_che
         if view.is_candidate:
             assert view.provider_compaction == record
             views.append(view)
-        return ConversationCompactProjection(800 + compact.estimate_tokens(view.summary), {"summary": view.summary})
+            return ConversationCompactProjection(800 + compact.estimate_tokens(view.summary), {"summary": view.summary})
+        return ConversationCompactProjection(2_000, {"summary": view.summary})
 
     result = _run(agent, thread, source, summarize, provider_surface=surface, request_projector=project)
     assert len(calls) == 1 and len(views) == 2

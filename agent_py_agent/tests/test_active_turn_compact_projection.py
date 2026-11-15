@@ -484,7 +484,7 @@ def test_scoped_active_checkpoint_inherits_its_distinct_evidence_not_global(carr
             case.agent, case.store, case.thread,
             options=compact_module.ConversationCompactOptions(
                 source=source, force=True,
-                request_projector=lambda _: ConversationCompactProjection(100, object()),
+                request_projector=lambda view: ConversationCompactProjection(100 if view.is_candidate else 500, object()),
             ),
         )
         assert result.compacted

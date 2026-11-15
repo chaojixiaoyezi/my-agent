@@ -263,7 +263,7 @@ def test_second_transcript_compaction_chains_on_the_stored_item(tmp_path, monkey
     def projector(view):
         if view.is_candidate:
             views.append(provider_compaction_content(view.provider_compaction))
-        return ConversationCompactProjection(projected_tokens=1_000, material=object())
+        return ConversationCompactProjection(projected_tokens=1_000 if view.is_candidate else 2_000, material=object())
 
     surface = ConversationCompactProviderSurface("稳定前缀", None, "摘要系统")
     source = load_conversation_compact_source(agent, agent.conversation_store, thread, scope=THREAD_COMPACT_SCOPE)

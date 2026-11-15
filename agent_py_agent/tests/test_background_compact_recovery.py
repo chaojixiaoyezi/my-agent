@@ -43,7 +43,7 @@ from agent_py_agent.tests.test_subagent_compact_recovery import _http
 #   有 Home 的后台轮只认 v6 目录选中的模型：同一连接经原目录服务新增并设为 owner 默认，窗口只由档案声明。
 # 函数用途: 为普通、拆出或无任务的后台轮建立已结束历史，并返回同一片执行依赖。
 def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = True, taskless: bool = False,
-                window: int = 200_000):
+                window: int = 200_000, history_repeat: int = 1200):
     api_base = "https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1"
     model_name = "MiniMax-M2.7" if backend == "anthropic_compatible" else "deepseek-v4-flash"
     agent = SimpleAgent(AgentConfig(
@@ -69,8 +69,8 @@ def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = 
             "cancellation_scope": "detached" if detached else "shared", "now": 11.0,
         })
     for position, (role, content) in enumerate((
-        ("user", "之前需要核对的原始材料" * 100),
-        ("assistant", "已核对旧材料，等待下一步" * 100),
+        ("user", "之前需要核对的原始材料" * history_repeat),
+        ("assistant", "已核对旧材料，等待下一步" * history_repeat),
     ) if with_history else ()):
         store.messages.append({
             "thread_id": thread.thread_id, "role": role, "content": content,
@@ -308,7 +308,7 @@ def test_background_first_request_compacts_after_complete_prepare(tmp_path, monk
     # 先触发压缩再装下候选，25000 起不再需要压缩；取中间值给工具目录增减留出余量，断言不放松。完整准备仍须越过触发线，
     # 摘要后的完整提示则须容纳（见下方候选断言）。窗口由所选模型档案声明。
     agent, store, thread, request, execution, sink = _background(
-        tmp_path, backend=backend, detached=False, window=19_500,
+        tmp_path, backend=backend, detached=False, window=19_500, history_repeat=120,
     )
     agent.config.max_tokens = agent.backend.max_tokens = 1_024
     for role in ("user", "assistant"):

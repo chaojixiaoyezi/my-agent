@@ -1058,6 +1058,12 @@ def test_forced_compaction_keeps_asset_pins_active(tmp_path, monkeypatch):
     agent, thread = setup_case(tmp_path, monkeypatch)
     params, before = next_turn(agent, thread)
     _Probe(monkeypatch, False, live=False)
+    for prior_role in ("user", "assistant"):
+        agent.conversation_store.messages.append({
+            "thread_id": thread.thread_id, "role": prior_role,
+            "content": "需要压缩归档的资产历史记录。" * 2_000,
+            "metadata": {"conversation_request_id": f"prior-pad-{prior_role}"},
+        })
     current = agent.conversation_store.threads.require(thread.thread_id)
     result = prepare_conversation_context(agent, agent.conversation_store, current,
         options=ConversationCompactOptions(force=True, model_surface=ConversationCompactModelSurface(

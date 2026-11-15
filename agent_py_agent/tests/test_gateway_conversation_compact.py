@@ -69,7 +69,7 @@ def test_p2a_optional_preflight_failure_restores_seed_and_completes_turn(tmp_pat
     from agent_py_agent.tests.test_gateway_compact_recovery import _history_request
     from agent_py_agent.tests.test_gateway_model_adoption import fake_http
 
-    fixture = _history_request(tmp_path, original_window=100_000, history_repeat=1)
+    fixture = _history_request(tmp_path, original_window=100_000, history_repeat=400)
     fixture.agent.config.memory_compact_trigger_percent = 90
     monkeypatch.setattr(compact, "_summarize", lambda *a, **k: "已提交的第一代摘要")
     prepare_conversation_context(
@@ -205,7 +205,7 @@ def test_p2a_manual_control_bypasses_automatic_cooldown(tmp_path, monkeypatch):
     agent.backend = _SummaryBackend()
     context = _context(agent, _request(), "manual-create", "开始")
     for role in ("user", "assistant"):
-        assert append_gateway_conversation_message(agent, {}, context, request_id=f"old-{role}", role=role, content="原始资料")
+        assert append_gateway_conversation_message(agent, {}, context, request_id=f"old-{role}", role=role, content="原始资料" * 6_000)
     for _ in range(3):
         agent.conversation_store.threads.record_compact_failure(
             context.thread_id, failure_code="COMPACT_TEST_FAILURE", expected_generation=0, now=time.time())
@@ -644,7 +644,7 @@ def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp
             context,
             request_id=f"gw-manual-{role}",
             role=role,
-            content="保留这条会话事实",
+            content="保留这条会话事实" * 400,
         )
     thread = agent.conversation_store.threads.load(context.thread_id)
     assert thread is not None
@@ -674,8 +674,8 @@ def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) 
     request = _request("ou_empty_compact")
     context = _context(agent, request, "gw-create", "开始")
     for role, content in (
-        ("user", "继续紫藤项目，保留端口 8080"),
-        ("assistant", "已经检查项目，下一步运行测试"),
+        ("user", "继续紫藤项目，保留端口 8080。" + " 详细背景记录。" * 400),
+        ("assistant", "已经检查项目，下一步运行测试。" + " 详细过程记录。" * 400),
     ):
         assert append_gateway_conversation_message(
             agent,
@@ -722,8 +722,8 @@ def test_first_empty_compact_response_retries_once_then_commits_model_summary(tm
     agent.backend = backend
     context = _context(agent, _request("ou_repaired_compact"), "gw-create", "开始")
     for role, content in (
-        ("user", "继续紫藤项目，保留端口 8080"),
-        ("assistant", "已经检查项目，下一步运行测试"),
+        ("user", "继续紫藤项目，保留端口 8080。" + " 详细背景记录。" * 400),
+        ("assistant", "已经检查项目，下一步运行测试。" + " 详细过程记录。" * 400),
     ):
         assert append_gateway_conversation_message(
             agent, {"metadata": {"channel": "feishu"}}, context,
@@ -757,8 +757,8 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> Non
     request = _request("ou_compact_no_tools")
     context = _context(agent, request, "gw-create", "开始")
     for role, content in (
-        ("user", "请保留本轮真实事实。"),
-        ("assistant", "本轮已经正常完成。"),
+        ("user", "请保留本轮真实事实。" + " 详细背景记录。" * 4_000),
+        ("assistant", "本轮已经正常完成。" + " 详细过程记录。" * 4_000),
     ):
         assert append_gateway_conversation_message(
             agent,
@@ -1034,7 +1034,7 @@ def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> Non
             context,
             request_id=f"gw-progress-{role}",
             role=role,
-            content=f"待压缩 {role}",
+            content=f"待压缩 {role} " + "详细过程记录。" * 4_000,
         )
     thread = agent.conversation_store.threads.load(context.thread_id)
     assert thread is not None
@@ -1321,7 +1321,7 @@ def test_repeated_compact_checkpoints_form_one_generation_chain(tmp_path) -> Non
                 context,
                 request_id=f"gw-chain-{index}-{role}",
                 role=role,
-                content=f"链路 {index} {role}",
+                content=f"链路 {index} {role} " + "历史阶段内容。" * 400,
             )
 
     first = gateway_conversation_context(
@@ -1342,7 +1342,7 @@ def test_repeated_compact_checkpoints_form_one_generation_chain(tmp_path) -> Non
             first,
             request_id=f"gw-new-{role}",
             role=role,
-            content=f"新一代 {role}",
+            content=f"新一代 {role} " + "新增阶段内容。" * 600,
         )
     second = gateway_conversation_context(
         GatewayConversationLoadRequest(agent, request, "gw-second", "再继续"),
@@ -1473,7 +1473,7 @@ def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_u
     # 函数用途: 构造低于触发阈值的摘要候选，固定容量观察边界。
     def build_candidate_below_trigger(*args, **kwargs):
         candidate = original_build(*args, **kwargs)
-        return replace(candidate, projected_tokens_after=8_500)
+        return replace(candidate, projected_tokens_after=7_000)
 
     monkeypatch.setattr(
         compact_module,
@@ -1492,7 +1492,7 @@ def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_u
     stored = agent.conversation_store.threads.load(context.thread_id)
 
     assert compacted.compacted is True
-    assert compacted.projected_tokens == 8_500
+    assert compacted.projected_tokens == 7_000
     assert compacted.trigger_tokens == 9_000
     assert stored is not None and stored.compact_generation == 1
     assert stored.compact_consecutive_failures == 0
@@ -1539,7 +1539,7 @@ def test_transcript_candidate_respects_output_reserve_before_target_or_fallback(
     # 这里只隔离测量值和摘要供应商；候选分区、接受判断、checkpoint/CAS及失败记账均走生产链。
     monkeypatch.setattr(module, "_summarize", lambda *args, **kwargs: "新摘要")
     monkeypatch.setattr(module, "_projected_context_tokens", lambda _agent, summary, *args, **kwargs:
-                        candidate_tokens if summary else 8_500)
+                        candidate_tokens if summary else 8_900)
     options = ConversationCompactOptions(current_prompt="继续完整任务", force=force)
     if accepted:
         result = prepare_conversation_context(agent, store, thread, options=options)
@@ -1570,7 +1570,7 @@ def test_compact_circuit_half_opens_after_cooldown_and_success_resets_it(tmp_pat
             context,
             request_id=f"gw-half-open-{role}",
             role=role,
-            content=f"待压缩 {role}",
+            content=f"待压缩 {role} " + "详细过程记录。" * 4_000,
         )
     for failure_index in range(3):
         agent.conversation_store.threads.record_compact_failure(
@@ -1613,7 +1613,7 @@ def test_checkpoint_write_failure_does_not_commit_candidate(tmp_path, monkeypatc
             context,
             request_id=f"gw-checkpoint-{role}",
             role=role,
-            content=f"待压缩 {role}",
+            content=f"待压缩 {role} " + "详细过程记录。" * 4_000,
         )
 
     # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
@@ -1822,7 +1822,7 @@ def test_compact_keeps_operation_evidence_outside_conflicting_model_summary(tmp_
         context,
         request_id="gw-conflicting-claim",
         role="assistant",
-        content="已经删除海王星项目记忆。",
+        content="已经删除海王星项目记忆。" + " 已核验原始查询记录。" * 6_000,
         operation_verification=verification,
     )
 
@@ -1994,7 +1994,7 @@ def test_forced_compact_keeps_current_gateway_turn_out_of_summary(tmp_path) -> N
                 first,
                 request_id=f"gw-old-{index}-{role}",
                 role=role,
-                content=f"旧消息 {index} {role}",
+                content=f"旧消息 {index} {role} " + "历史核对内容。" * 2_000,
             )
     current_marker = "本轮输入不能进入较早摘要"
     assert append_gateway_conversation_message(
@@ -2049,7 +2049,7 @@ def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
         first,
         request_id=request_id,
         role="user",
-        content=user_marker,
+        content=user_marker + " 历史工作详情。" * 4_000,
     )
     assert append_gateway_conversation_message(
         agent,
@@ -2057,7 +2057,7 @@ def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
         first,
         request_id=request_id,
         role="assistant",
-        content=assistant_marker,
+        content=assistant_marker + " 历史整合详情。" * 4_000,
     )
 
     refreshed = gateway_conversation_context(
@@ -2137,7 +2137,7 @@ def test_transcript_compact_preserves_pending_deferred_tool_surface_after_overfl
             first,
             request_id=f"gw-deferred-{role}",
             role=role,
-            content=f"待压缩 {role}",
+            content=f"待压缩 {role} " + "详细过程记录。" * 4_000,
         )
 
     refreshed = gateway_conversation_context(

@@ -180,7 +180,7 @@ def gateway_surface(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F81
     conversation = _context(agent, request, request["id"], "核对来源")
     for role in ("user", "assistant"):
         assert append_gateway_conversation_message(agent, {}, conversation, request_id="old-" + role,
-                                                   role=role, content="保留来源事实" + role)
+                                                   role=role, content="保留来源事实" + role + " " + "详细来源材料记录。" * 2_500)
     conversation = _context(agent, request, request["id"], "核对来源")
     paths = gateway_paths(agent)
     paths.processing.mkdir(parents=True, exist_ok=True)

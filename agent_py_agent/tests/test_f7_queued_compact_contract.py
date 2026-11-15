@@ -39,11 +39,13 @@ def test_enabled_queue_keeps_f6_native_prefix_and_counts_only_actual_summary_sen
     ref = import_input_media(image_path, input_media_root(agent))
     store = agent.conversation_store
     thread = store.threads.get_or_create({'canonical_user_id': 'synthetic-owner'})
-    native = [{'role': 'user', 'content': [{'type': 'text', 'text': '旧图要求'}, *input_media_blocks([ref])]},
-              {'role': 'assistant', 'content': [{'type': 'text', 'text': '旧图已确认'}]}]
-    store.messages.append({'thread_id': thread.thread_id, 'role': 'user', 'content': '旧图要求',
+    prior_user = "旧图要求 " + "需要压缩归档的多模态历史正文。" * 1_600
+    prior_assistant = "旧图已确认 " + "需要压缩归档的图像核对结论。" * 1_600
+    native = [{'role': 'user', 'content': [{'type': 'text', 'text': prior_user}, *input_media_blocks([ref])]},
+              {'role': 'assistant', 'content': [{'type': 'text', 'text': prior_assistant}]}]
+    store.messages.append({'thread_id': thread.thread_id, 'role': 'user', 'content': prior_user,
         'metadata': {'conversation_request_id': 'old'}})
-    store.messages.append({'thread_id': thread.thread_id, 'role': 'assistant', 'content': '旧图已确认',
+    store.messages.append({'thread_id': thread.thread_id, 'role': 'assistant', 'content': prior_assistant,
         'metadata': {'conversation_request_id': 'old',
             CANONICAL_NATIVE_MESSAGES_METADATA_KEY: canonical_native_messages_envelope(native)}})
     original = store.messages.recent(thread.thread_id, limit=0)

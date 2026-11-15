@@ -116,7 +116,7 @@ def test_child_fake_backend_routes_by_generation_scope_not_prompt_text(capabilit
 def append_prior_turn(agent, thread_id):
     for role in ("user", "assistant"):
         agent.conversation_store.messages.append({"thread_id": thread_id, "role": role,
-            "content": "核对来源事实" + role, "metadata": {"conversation_request_id": "prior-turn"}})
+            "content": "核对来源事实" + role + " " + "详细来源材料记录。" * 2_500, "metadata": {"conversation_request_id": "prior-turn"}})
     return provider_history_messages_from_rows(agent.conversation_store.messages.recent(thread_id, limit=0))
 
 

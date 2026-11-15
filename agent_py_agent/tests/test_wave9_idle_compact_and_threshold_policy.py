@@ -250,7 +250,7 @@ def summary_case(tmp_path, monkeypatch):
     store = agent.conversation_store
     for index in range(3):
         for role in ("user", "assistant"):
-            store.messages.append({"thread_id": context.thread_id, "role": role, "content": f"原始材料{index}"})
+            store.messages.append({"thread_id": context.thread_id, "role": role, "content": f"原始材料{index}-" + "历史证据段落" * 2_500})
     row = store.threads.record_user_activity(context.thread_id, now=100.0)
     agent.backend = _SummaryBackend()
     monkeypatch.setattr(idle, "inspect_conversation_context", lambda *_: SimpleNamespace(projected_tokens=650000, context_window_tokens=1000000))

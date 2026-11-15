@@ -980,7 +980,7 @@ def test_idle_original_summary_chain_and_user_race(tmp_path, monkeypatch, race):
     context = _context(agent, _request(), "idle-create", "start")
     for index in range(3):
         for role in ("user", "assistant"):
-            append_gateway_conversation_message(agent, {}, context, request_id=f"seed-{index}-{role}", role=role, content="需要保留的原文材料")
+            append_gateway_conversation_message(agent, {}, context, request_id=f"seed-{index}-{role}", role=role, content=f"需要保留的原文材料-{index}-{role} " + "详细历史记录。" * 1_200)
     store = agent.conversation_store
     row = store.threads.record_user_activity(context.thread_id, request_id="idle-last", now=100.0)
     before = store.storage.message_path(row.thread_id).read_bytes()
@@ -1135,7 +1135,7 @@ def test_native_gateway_maintenance_tick_compacts_idle_thread(tmp_path, monkeypa
     agent.backend = _SummaryBackend()
     context = _context(agent, _request(), "tick-create", "start")
     for role in ("user", "assistant"):
-        append_gateway_conversation_message(agent, {}, context, request_id="tick-seed-" + role, role=role, content="维护摘要的原始资料")
+        append_gateway_conversation_message(agent, {}, context, request_id="tick-seed-" + role, role=role, content="维护摘要的原始资料。" * 3_500)
     row = agent.conversation_store.threads.record_user_activity(context.thread_id, now=100.0)
     monkeypatch.setattr(idle, "inspect_conversation_context", lambda *_: SimpleNamespace(projected_tokens=650000, context_window_tokens=1000000))
     controller = _GatewayOwnerMaintenanceController(SimpleNamespace(agent=agent))
