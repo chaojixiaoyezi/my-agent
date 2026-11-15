@@ -85,10 +85,10 @@ def test_failed_precheck_and_mutating_tool_do_not_run_model_or_save_checkpoint(t
     history, _ = repo.history()
     assert history[0]["status"] == "failed" and history[0]["precheck_observation"]["status"] == "failed"
     assert "precheck_checkpoint" not in repo.get_job(case.job["job_id"])
-    assert case.backend.prompts == [] and case.tool.calls == 2  # 原工具执行器允许一次只读瞬态重试。
+    assert case.backend.prompts == [] and case.tool.calls == 1  # 非瞬态 TOOL_EXECUTION_FAILED 不自动重试。
     case.tool.runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy(default_effect="mutating"), approval_policy=ApprovalPolicy("dangerous"))
     case.scheduler.tick(now=1600)
-    assert case.backend.prompts == [] and case.tool.calls == 2
+    assert case.backend.prompts == [] and case.tool.calls == 1
 
 
 @pytest.mark.parametrize("attempt_elapsed", [0.0, 2.0])
