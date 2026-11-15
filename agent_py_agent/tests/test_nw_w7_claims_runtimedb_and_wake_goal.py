@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.assets.workflow_store import WorkflowStore
 from agent_py_agent.agent.backends.errors import (
     ProviderQueueTimeoutError,
     ProviderStreamIncompleteError,
@@ -62,6 +64,8 @@ from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.run_creation import RunCreation, create_run_chain
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
+from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
+from agent_py_agent.agent.scheduler.tool_work import execute_scheduled_tool
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.models import EffectResolverPolicy, ToolRuntimePolicy
 
@@ -1470,3 +1474,213 @@ def test_ensure_goal_ambiguity_not_retried_and_persistent_goal_io_fail_closed(
         )
     assert ambiguity_reads["reads"] == 1
     assert store.wakes.pending(limit=20) == []
+
+
+def _w7_stack_in_update_task_status_completed() -> bool:
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code.co_name == "_update_task_status":
+            req = frame.f_locals.get("request")
+            if isinstance(req, dict) and str(req.get("status") or "") == "completed":
+                return True
+        frame = frame.f_back
+    return False
+
+
+def test_scheduled_workflow_single_stat_eio_completes_task_and_guards_missing_or_read_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home_w7_r4_stat_eio"
+    workspace = tmp_path / "ws_w7_r4_stat_eio"
+    home.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+
+    agent = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            enable_tools=True,
+            business_spaces_enabled=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        workspace,
+    )
+    store = agent.conversation_store
+    thread = _make_thread(store, cid="conv-w7-r4-stat-eio")
+    WorkflowStore(home).save_workflow(
+        {
+            "descriptor": {
+                "id": "wf-r4-stat-eio",
+                "kind": "workflow",
+                "name": "wf-r4-stat-eio",
+                "owner_id": agent.home_paths.owner_id,
+            },
+            "steps": [],
+        }
+    )
+    schedule = {
+        "kind": "every",
+        "every_seconds": 600,
+        "anchor_at": 1000,
+        "timezone": "UTC",
+    }
+    job = agent.scheduler_repository.create_job(
+        SchedulerJobCreateRequest(
+            name="定时工作流 stat 容错",
+            prompt="",
+            thread_id=thread.thread_id,
+            schedule=schedule,
+            rules=[
+                {
+                    "id": "run-wf",
+                    "name": "运行空工作流",
+                    "use_llm": False,
+                    "schedule": schedule,
+                    "tool": {
+                        "name": "workflows",
+                        "arguments": {
+                            "action": "run",
+                            "workflow_id": "wf-r4-stat-eio",
+                            "concurrency_policy": "skip_if_running",
+                            "inputs": {},
+                        },
+                    },
+                }
+            ],
+            now=900,
+        )
+    )[0]
+
+    agent.scheduler_service.monitor_jitter_window_seconds = 0
+    enqueued = agent.scheduler_service.enqueue_ready_runs(now=1000)
+    assert len(enqueued) == 1
+    pending = store.wakes.pending(limit=20)
+    assert len(pending) == 1
+    signal = pending[0]
+    claim_res = agent.scheduler_service.claim_wake(signal, now=1000)
+    claim = claim_res.claim
+    assert claim is not None
+    agent.scheduler_repository.mark_run_running(claim.run_id, claim.claim_id, now=1000)
+    kwargs = {
+        "thread_id": str(claim.run["thread_id"]),
+        "task_id": claim.run_id,
+        "reason": signal.reason,
+        "route_channel": "internal",
+        "route_target": "",
+        "now": 1000.0,
+        "wake_signal": signal,
+    }
+    task_path = store.storage.task_path(claim.run_id).resolve()
+
+    fd_before = _fd_count()
+    original_stat = os.stat
+    stat_fault = {"faults": 0}
+    target_abs = os.path.abspath(task_path)
+
+    def fault_once_stat(path, *args, **kwargs):
+        if (
+            stat_fault["faults"] == 0
+            and isinstance(path, (str, os.PathLike))
+            and kwargs.get("dir_fd") is None
+            and os.path.abspath(os.fspath(path)) == target_abs
+            and _w7_stack_in_update_task_status_completed()
+        ):
+            stat_fault["faults"] += 1
+            raise OSError(errno.EIO, "simulated stat EIO")
+        return original_stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "stat", fault_once_stat)
+        if original_stat in os.supports_dir_fd:
+            patched.setattr(
+                os, "supports_dir_fd", os.supports_dir_fd | {fault_once_stat}
+            )
+        if original_stat in os.supports_follow_symlinks:
+            patched.setattr(
+                os,
+                "supports_follow_symlinks",
+                os.supports_follow_symlinks | {fault_once_stat},
+            )
+        execute_scheduled_tool(agent, agent.scheduler_service, claim, signal, kwargs)
+
+    assert stat_fault["faults"] == 1
+    history, history_errors = agent.scheduler_repository.history(job_id=job["job_id"])
+    assert history_errors == []
+    assert any(
+        run.get("run_id") == claim.run_id and run.get("status") == "done"
+        for run in history
+    )
+    link = store.tasks.load(claim.run_id)
+    assert link is not None
+    assert link.status == "completed"
+    runtime_task = agent.subagents.runtime_db.get_task(claim.run_id)
+    assert runtime_task is not None
+    task_runs = agent.subagents.runtime_db.task_runs_for_task(claim.run_id)
+    assert len(task_runs) >= 1
+    assert task_runs[-1]["status"] == "done"
+    assert task_runs[-1]["closed_at"] > 0
+    assert store.wakes.pending_one(signal.wake_signal_id) is None
+
+    # Control 1: genuine missing task returns None and never creates a missing file.
+    missing_task_id = "missing-task-w7-r4-stat"
+    missing_path = store.storage.task_path(missing_task_id)
+    assert not missing_path.exists()
+    assert (
+        store.tasks.update_status(
+            {
+                "task_id": missing_task_id,
+                "status": "completed",
+                "expected_status": "active",
+                "now": 1001.0,
+            }
+        )
+        is None
+    )
+    assert not missing_path.exists()
+
+    # Control 2: actual uncached record read EIO preserves DataCorruptionError facade and active link.
+    active_task_id = "active-task-w7-r4-read-eio"
+    store.tasks.bind(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": active_task_id,
+            "goal": "verify update_status read error boundary",
+            "status": "active",
+            "now": 1002.0,
+        }
+    )
+    active_path = store.storage.task_path(active_task_id).resolve()
+    with store_tasks._TASK_LINK_CACHE_LOCK:
+        store_tasks._TASK_LINK_CACHE.pop(str(active_path), None)
+
+    original_read_text = Path.read_text
+    read_fault = {"faults": 0}
+
+    def fault_once_read(self: Path, *args, **kwargs) -> str:
+        if read_fault["faults"] == 0 and self.resolve() == active_path:
+            read_fault["faults"] += 1
+            raise OSError(errno.EIO, "simulated record read error")
+        return original_read_text(self, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "read_text", fault_once_read)
+        with pytest.raises(DataCorruptionError):
+            store.tasks.update_status(
+                {
+                    "task_id": active_task_id,
+                    "status": "abandoned",
+                    "expected_status": "active",
+                    "now": 1003.0,
+                }
+            )
+    assert read_fault["faults"] == 1
+    persisted_active = store.tasks.load(active_task_id)
+    assert persisted_active is not None
+    assert persisted_active.status == "active"
+
+    fd_after = _fd_count()
+    if fd_before is not None and fd_after is not None:
+        assert fd_after - fd_before == 0

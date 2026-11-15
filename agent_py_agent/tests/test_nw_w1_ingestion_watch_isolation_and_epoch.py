@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -22,7 +23,9 @@ from agent_py_agent.agent.common.audit_activation import (
     AUDIT_SOURCE_WORKER_KEY_ATTR,
     audit_source_worker_key,
 )
+from agent_py_agent.agent.conversation import store_tasks as store_tasks_module
 from agent_py_agent.agent.conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.ingestion import harvester as harvester_module
 from agent_py_agent.agent.ingestion import source_worker as source_worker_module
 from agent_py_agent.agent.ingestion import watch_state as watch_state_module
@@ -935,5 +938,272 @@ def test_disk_merge_corrupt_json_raises_oserror_and_preserves_bytes(tmp_path: Pa
             assert fd_after - fd_before == 0
         assert type(exc_info.value) is OSError
         assert path.read_bytes() == corrupt_bytes
+    finally:
+        _cleanup_owner_watch(owner_home, state.watch_id)
+
+
+def _stack_contains(frame_name: str) -> bool:
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code.co_name == frame_name:
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _inject_single_stat_eio(
+    monkeypatch: pytest.MonkeyPatch,
+    target_path: Path,
+    *,
+    caller_frame: str,
+) -> dict[str, int]:
+    original_stat = os.stat
+    target = os.path.abspath(target_path)
+    state = {"faults": 0}
+
+    def wrapped_stat(path, *args, **kwargs):
+        if (
+            state["faults"] == 0
+            and isinstance(path, (str, os.PathLike))
+            and kwargs.get("dir_fd") is None
+            and os.path.abspath(os.fspath(path)) == target
+            and _stack_contains(caller_frame)
+        ):
+            state["faults"] += 1
+            raise OSError(errno.EIO, "simulated stat EIO")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", wrapped_stat)
+    if original_stat in os.supports_dir_fd:
+        monkeypatch.setattr(
+            os, "supports_dir_fd", os.supports_dir_fd | {wrapped_stat}
+        )
+    if original_stat in os.supports_follow_symlinks:
+        monkeypatch.setattr(
+            os, "supports_follow_symlinks", os.supports_follow_symlinks | {wrapped_stat}
+        )
+    return state
+
+
+def _make_real_epoch_watch_harness(
+    tmp_path: Path,
+    name: str,
+    *,
+    epoch: int = 2,
+):
+    owner_home = tmp_path / name
+    store = ConversationStore(owner_home / "conversations")
+    thread = store.threads.get_or_create(
+        {
+            "canonical_user_id": "owner-1",
+            "channel": "internal",
+            "channel_conversation_id": f"conv-{name}",
+            "channel_user_id": "owner-1",
+            "now": 10.0,
+        }
+    )
+    audit_id = f"audit-root-{name}"
+    store.tasks.bind(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": audit_id,
+            "goal": "Audit source records completely.",
+            "status": "active",
+            "work_kind": "audit",
+            "work_name": "source-audit",
+            "run_epoch": epoch,
+            "now": 10.0,
+        }
+    )
+    watch_id = watch_state_module.watch_id_for(
+        owner_home,
+        "https://feed.example.invalid/a",
+        f"{audit_id}:e{epoch}",
+    )
+    state = watch_state_module.new_state(
+        owner_home,
+        "https://feed.example.invalid/a",
+        {},
+        watch_id=watch_id,
+    )
+    state.audit_guarantee = True
+    state.owner_id = "owner-1"
+    state.source_id = "source-a"
+    state.audit_root_task_id = audit_id
+    state.audit_run_epoch = epoch
+    state.source_task_goal = "Audit source records completely."
+    state.source_config_version = "sha256:" + "a" * 64
+    watch_state_module.persist_state(state)
+
+    worker_key = audit_source_worker_key(audit_id, watch_id)
+    attrs = {
+        CONVERSATION_REQUEST_ID_ATTR: audit_id,
+        AUDIT_ATTR: True,
+        AUDIT_RUN_EPOCH_ATTR: epoch,
+        AUDIT_SOURCE_WORKER_ATTR: True,
+        AUDIT_SOURCE_ID_ATTR: "source-a",
+        AUDIT_SOURCE_OPEN_ATTR: True,
+        AUDIT_SOURCE_OWNER_HOME_ATTR: str(owner_home),
+        AUDIT_SOURCE_WATCH_ID_ATTR: watch_id,
+        AUDIT_SOURCE_WORKER_KEY_ATTR: worker_key,
+    }
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_home, owner_id="owner-1"),
+        conversation_store=store,
+        _current_run_params=SimpleNamespace(
+            task_id="worker-task-1",
+            task_attributes=attrs,
+        ),
+    )
+    return owner_home, store, thread, audit_id, state, agent
+
+
+def test_real_task_store_single_stat_eio_at_load_and_thread_preserves_active_audit_watch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_home, store, thread, audit_id, state, agent = _make_real_epoch_watch_harness(
+        tmp_path,
+        "real_epoch_stat",
+        epoch=2,
+    )
+    task_path = store.storage.task_path(audit_id).resolve()
+    try:
+        fd_before = _open_fd_count()
+        with monkeypatch.context() as patched:
+            load_faults = _inject_single_stat_eio(
+                patched,
+                task_path,
+                caller_frame="load_report",
+            )
+            result = source_worker_module._reconcile_one_audit_source_worker(
+                agent,
+                state,
+                runs_snapshot=[],
+            )
+        assert load_faults["faults"] == 1
+        assert result["error_code"] not in {
+            "AUDIT_RUN_EPOCH_MISMATCH",
+            "AUDIT_EPOCH_CHECK_UNAVAILABLE",
+        }
+        reloaded = watch_state_module.load_state(owner_home, state.watch_id)
+        assert reloaded is not None
+        assert reloaded.closed is False
+        assert reloaded.close_reason == ""
+        parent_link = store.tasks.load(audit_id)
+        assert parent_link is not None
+        assert parent_link.status == "active"
+        assert parent_link.run_epoch == 2
+
+        with monkeypatch.context() as patched:
+            thread_faults = _inject_single_stat_eio(
+                patched,
+                task_path,
+                caller_frame="thread_for_report",
+            )
+            loaded_thread, thread_err = store.tasks.thread_for_report(audit_id)
+        assert thread_faults["faults"] == 1
+        assert thread_err is None
+        assert loaded_thread is not None
+        assert loaded_thread.thread_id == thread.thread_id
+
+        result_after = source_worker_module._reconcile_one_audit_source_worker(
+            agent,
+            state,
+            runs_snapshot=[],
+        )
+        assert result_after["error_code"] not in {
+            "AUDIT_RUN_EPOCH_MISMATCH",
+            "AUDIT_EPOCH_CHECK_UNAVAILABLE",
+        }
+        reloaded_after = watch_state_module.load_state(owner_home, state.watch_id)
+        assert reloaded_after is not None
+        assert reloaded_after.closed is False
+        assert reloaded_after.close_reason == ""
+
+        fd_after = _open_fd_count()
+        if fd_before >= 0 and fd_after >= 0:
+            assert fd_after - fd_before == 0
+    finally:
+        _cleanup_owner_watch(owner_home, state.watch_id)
+
+
+def test_real_task_store_record_read_eio_and_genuine_missing_preserve_epoch_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_home, store, _thread, audit_id, state, agent = _make_real_epoch_watch_harness(
+        tmp_path,
+        "real_epoch_read_and_missing",
+        epoch=2,
+    )
+    task_path = store.storage.task_path(audit_id).resolve()
+
+    def _clear_task_cache() -> None:
+        with store_tasks_module._TASK_LINK_CACHE_LOCK:
+            store_tasks_module._TASK_LINK_CACHE.pop(str(task_path), None)
+
+    original_read_text = Path.read_text
+    read_fault = {"armed": False, "faults": 0}
+
+    def wrapped_read_text(self: Path, *args, **kwargs) -> str:
+        if read_fault["armed"] and self.resolve() == task_path:
+            read_fault["armed"] = False
+            read_fault["faults"] += 1
+            raise OSError(errno.EIO, "simulated record read error")
+        return original_read_text(self, *args, **kwargs)
+
+    try:
+        fd_before = _open_fd_count()
+        with monkeypatch.context() as patched:
+            patched.setattr(Path, "read_text", wrapped_read_text)
+
+            _clear_task_cache()
+            read_fault["armed"] = True
+            link, load_err = store.tasks.load_report(audit_id)
+            assert link is None
+            assert load_err is not None
+            assert load_err["error_type"] == "OSError"
+
+            _clear_task_cache()
+            read_fault["armed"] = True
+            loaded_thread, thread_err = store.tasks.thread_for_report(audit_id)
+            assert loaded_thread is None
+            assert thread_err is not None
+            assert thread_err["error_type"] == "OSError"
+
+            _clear_task_cache()
+            read_fault["armed"] = True
+            result = source_worker_module._reconcile_one_audit_source_worker(
+                agent,
+                state,
+                runs_snapshot=[],
+            )
+        assert read_fault["faults"] == 3
+        assert result["state"] == "degraded"
+        assert result["error_code"] == "AUDIT_EPOCH_CHECK_UNAVAILABLE"
+        reloaded_open = watch_state_module.load_state(owner_home, state.watch_id)
+        assert reloaded_open is not None
+        assert reloaded_open.closed is False
+        assert reloaded_open.close_reason == ""
+
+        task_path.unlink()
+        assert store.tasks.load_report(audit_id) == (None, None)
+        assert store.tasks.thread_for_report(audit_id) == (None, None)
+        missing_result = source_worker_module._reconcile_one_audit_source_worker(
+            agent,
+            state,
+            runs_snapshot=[],
+        )
+        assert missing_result["state"] == "not_required"
+        assert missing_result["error_code"] == "AUDIT_RUN_EPOCH_MISMATCH"
+        reloaded_closed = watch_state_module.load_state(owner_home, state.watch_id)
+        assert reloaded_closed is not None
+        assert reloaded_closed.closed is True
+        assert reloaded_closed.close_reason == "audit_run_superseded"
+
+        fd_after = _open_fd_count()
+        if fd_before >= 0 and fd_after >= 0:
+            assert fd_after - fd_before == 0
     finally:
         _cleanup_owner_watch(owner_home, state.watch_id)
