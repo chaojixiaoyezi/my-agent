@@ -590,3 +590,121 @@ def test_delivery_sanitizer_redacts_inherited_numeric_secrets_across_two_owners(
         (receiver_home / "scripts" / "num_demo" / "config.json").read_text(encoding="utf-8")
     )
     assert delivered_doc == expected_redacted_doc
+
+
+def test_delivery_sanitizer_matches_cross_type_numeric_values_and_preserves_controls(
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.user_space.local_user_store import LocalUser, LocalUserStore
+
+    root = tmp_path / "cross-type-host"
+    sender_home = root / "owners" / "local" / "main"
+    receiver_home = root / "owners" / "local" / "alice"
+    sender_home.mkdir(parents=True, exist_ok=True)
+    receiver_home.mkdir(parents=True, exist_ok=True)
+
+    user_store = LocalUserStore(root)
+    alice = LocalUser("alice", "enabled", 1, "alice", "2026-10-25", "2026-10-25", 1)
+    user_store.save(
+        "alice",
+        {
+            "schema": "local-user.v1",
+            "user": alice.to_dict(),
+            "provision": {
+                "phase": "committed",
+                "operation_id": "fixture",
+                "home_identity": user_store.directory_identity(
+                    receiver_home.relative_to(root).parts
+                ),
+            },
+            "operations": {"fixture": alice.to_dict()},
+        },
+    )
+
+    DatasourceStore(sender_home).save_datasource(
+        {"datasource_id": "cross-type-secret", "kind": "http", "title": "Cross-type numeric"},
+        credential_values={
+            "pin": 31337,
+            "alt": 48291.0,
+            "large": 9007199254740992,
+        },
+    )
+    raw_bytes = (
+        b'{"a":31337.0,"b":313370e-1,"c":48291,"safe":9007199254740993,'
+        b'"ordinary":42,"enabled":true,"disabled":false,"absent":null}'
+    )
+
+    ScriptStore(sender_home).save_script(
+        AssetDescriptor("cross_num_demo", "script", "跨类型数字凭据测试"),
+        'print("ok")\n',
+    )
+    (sender_home / "scripts" / "cross_num_demo" / "config.json").write_bytes(raw_bytes)
+
+    service = AssetDeliveryService(root)
+    with pytest.raises(AssetDeliveryError) as send_err:
+        service.send_bundle("local/main", "local/alice", "script", "cross_num_demo")
+    assert send_err.value.error_code == "ASSET_DELIVERY_SECRET_DETECTED"
+    assert service.list_inbox("local/alice")["deliveries"] == []
+
+    sent = service.send_bundle(
+        "local/main",
+        "local/alice",
+        "script",
+        "cross_num_demo",
+        allow_secret_placeholder_replace=True,
+    )
+    accepted = service.accept_delivery("local/alice", sent["delivery_id"])
+    assert accepted["status"] == "accepted"
+    delivered_doc = json.loads(
+        (receiver_home / "scripts" / "cross_num_demo" / "config.json").read_text(encoding="utf-8")
+    )
+    assert delivered_doc == {
+        "a": "<REDACTED_SECRET>",
+        "b": "<REDACTED_SECRET>",
+        "c": "<REDACTED_SECRET>",
+        "safe": 9007199254740993,
+        "ordinary": 42,
+        "enabled": True,
+        "disabled": False,
+        "absent": None,
+    }
+
+    # 独立文件直扫校验 0.0 <-> 0/-0.0 跨类型等价与超大指数安全边界。
+    zero_home = tmp_path / "zero-owner"
+    zero_home.mkdir(parents=True, exist_ok=True)
+    DatasourceStore(zero_home).save_datasource(
+        {"datasource_id": "zero-secret", "kind": "http", "title": "Zero float secret"},
+        credential_values={"zero": 0.0, "neg": -31337},
+    )
+    zero_secrets = datasource_secret_values(zero_home)
+    zero_raw = b'{"z":0,"nz":-0.0,"neg":-31337.0,"ordinary":42,"ok":true,"no":false,"none":null}'
+    with pytest.raises(AssetDeliveryError) as zero_err:
+        sanitize_bundle_files({"zero.json": zero_raw}, owner_home=zero_home, extra_secrets=zero_secrets)
+    assert zero_err.value.error_code == "ASSET_DELIVERY_SECRET_DETECTED"
+    zero_replaced = sanitize_bundle_files(
+        {"zero.json": zero_raw},
+        owner_home=zero_home,
+        allow_secret_placeholder_replace=True,
+        extra_secrets=zero_secrets,
+    )
+    assert json.loads(zero_replaced["zero.json"].decode("utf-8")) == {
+        "z": "<REDACTED_SECRET>",
+        "nz": "<REDACTED_SECRET>",
+        "neg": "<REDACTED_SECRET>",
+        "ordinary": 42,
+        "ok": True,
+        "no": False,
+        "none": None,
+    }
+
+    # 超大指数超出 Decimal 范围时不崩，仍保留普通数值。
+    huge_exp = b'{"huge":1e99999999999999999999999999,"ok":123}'
+    preserved = sanitize_bundle_files(
+        {"huge.json": huge_exp},
+        owner_home=sender_home,
+        extra_secrets=("1e999999999999999999999999999999", "456"),
+    )
+    assert preserved["huge.json"] == huge_exp
