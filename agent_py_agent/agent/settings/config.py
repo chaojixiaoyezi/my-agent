@@ -260,6 +260,8 @@ class _ToolConfigFields:
     pty_max_sessions_per_owner: int = field(default=8, kw_only=True, metadata={"bounds": (0, None), "unit": "个"})
     # 后台服务默认只允许监听本机回环；声明 loopback 却绑到局域网地址时由 host 回收（False 只记 listener_warning）。
     background_process_listen_scope_enforce: bool = True
+    # 宿主冷启动时自动回收已证实终态的遗留后台进程所需最小空闲秒数（0 = 关闭；修改后重启 Gateway 生效）。
+    background_process_settled_ttl_seconds: int = field(default=0, kw_only=True, metadata={"bounds": (0, None), "unit": "秒"})
     # macOS 上对非本机管理员的 owner 拒读用户家目录（本 owner 可见范围除外），并把其 Shell 的 HOME 指到 owner home。默认关闭。
     shell_sandbox_hide_user_home: bool = False
     # owner 隔离的 Shell 命令以非零码退出时，结果附带沙箱边界事实（本次允许读写的目录、可能越界的提示与下一步建议），

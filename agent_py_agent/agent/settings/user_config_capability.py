@@ -331,6 +331,12 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
         validate=_positive_int,
         effect=EFFECT_GATEWAY_RESTART,
     ),
+    "background_process_settled_ttl_seconds": TunableSpec(
+        key="background_process_settled_ttl_seconds",
+        describe="宿主冷启动自动回收已终态遗留后台进程的最小保留秒数（0 关闭；只回收已证实终态且超过此秒数的进程，活跃与未知状态保留）",
+        validate=_non_negative_int,
+        effect=EFFECT_GATEWAY_RESTART,
+    ),
 }
 
 # LLM: 拒绝名单是**结构性**的：这些项要么决定谁能读写什么（权限/路径），要么是宿主或供应商凭据，

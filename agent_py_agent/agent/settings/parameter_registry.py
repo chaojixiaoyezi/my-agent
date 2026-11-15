@@ -165,7 +165,7 @@ _CATEGORIES = (
     (("decision_",), "决策模型 Jev"),
     (("tool_", "shell_", "web_", "read_", "write_"), "工具"),
     (("subagent", "max_subagents", "task_", "acceptance_"), "子代理与任务"),
-    (("gateway_", "daemon_", "runner_", "lease_", "scheduler_", "background_dispatch_"), "Gateway 与调度"),
+    (("gateway_", "daemon_", "runner_", "lease_", "scheduler_", "background_dispatch_", "background_process_"), "Gateway 与调度"),
     (("feishu_", "qq_", "wechat_", "im_", "adapter_"), "IM 通道"),
     (("skill", "self_learning", "enable_self_learning", "capability_"), "技能与自学习"),
 )
@@ -630,6 +630,11 @@ _APPLIED_RULES: dict[str, tuple[Callable[[object], object], str]] = {
         "真实准入、保留尾部和发送统一使用含当前供应商上限的宿主预留，配置入口无法确认该运行时事实"),
     "model_reasoning_effort": (_reasoning_effect, "按当前模型的思考控制方式换算：不支持调节的模型不发送任何推理参数；"
                                                   "会话里用 /effort 单独设过的以会话为准"),
+    "background_process_settled_ttl_seconds": (
+        lambda config: max(0, int(getattr(config, "background_process_settled_ttl_seconds", 0) or 0)),
+        "0 关闭；正数秒仅在 Gateway 冷启动时执行一次只清理已证实终态且超过该空闲秒数的遗留后台进程，"
+        "活跃/未知进程一律保留，重启接班与排空阶段不触发",
+    ),
 }
 # 修改回执里的新值是渲染后的文本；按登记类型转回，派生规则拿到的类型与重启后加载的一致
 _TEXT_TO_TYPE: dict[str, Callable[[str], object]] = {
