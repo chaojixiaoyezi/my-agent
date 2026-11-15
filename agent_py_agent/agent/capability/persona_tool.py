@@ -641,6 +641,8 @@ def _prospective_agents_write_content(
 ) -> str | None:
     """Compute a read-only preview of AGENTS.md without acquiring write locks or mutating disk."""
     from ..memory_store.security import scan_memory_content
+    from ..user_space.managed_user_governance import HostAPIError, _persona_governance
+    from .agents_source_contract import AgentsContractError
     from .persona_repository import (
         _MAX_PERSONA_FILE_BYTES,
         PersonaRepositoryError,
@@ -648,10 +650,33 @@ def _prospective_agents_write_content(
     )
 
     try:
-        snapshot = repository.load("agents")
-        if snapshot.diagnostic is not None and snapshot.diagnostic.state not in {"ok", "missing", ""}:
+        gov = _persona_governance(repository.owner_home)
+        if gov is not None and gov[0].policy()["persona_mode"] == "admin_locked":
             return None
-        current_text = snapshot.content
+        if repository.agents_source is not None:
+            loaded = repository.agents_source.load()
+            if (
+                loaded.content is None
+                or loaded.snapshot.kind == "url"
+                or not scan_memory_content(loaded.content).safe
+            ):
+                return None
+            current_text = (
+                loaded.content.replace("\r\n", "\n").replace("\r", "\n")
+                if loaded.snapshot.kind == "owner_default"
+                else loaded.content
+            )
+        else:
+            snapshot = repository.load("agents")
+            if snapshot.diagnostic is not None and (
+                snapshot.diagnostic.state not in {"ok", "missing", "truncated", ""}
+                or snapshot.diagnostic.blocked_lines > 0
+            ):
+                return None
+            agents_path = repository.path_for("agents")
+            if agents_path.is_symlink() or (agents_path.exists() and not agents_path.is_file()):
+                return None
+            current_text = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
         if request.action == "rollback":
             if request.rollback_version is None:
                 return None
@@ -683,7 +708,7 @@ def _prospective_agents_write_content(
         if not scan_memory_content(prospective).safe:
             return None
         return prospective
-    except (PersonaRepositoryError, OSError, ValueError, TypeError):
+    except (PersonaRepositoryError, AgentsContractError, HostAPIError, OSError, UnicodeDecodeError, ValueError, TypeError):
         return None
 
 

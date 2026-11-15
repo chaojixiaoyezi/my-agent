@@ -17,6 +17,8 @@ from ..backends.request_scope import foreground_model_active
 from ..capability.persona_repository import (
     PersonaRepository,
     PersonaSecurityError,
+    _is_empty_persona_template_content,
+    _persona_birth_commit,
     persona_entry_id,
     versions_ledger_tail,
 )
@@ -301,7 +303,7 @@ def parse_user_profile_entries(
         else:
             numbered = re.match(r"^\d+\.\s+(.+)$", stripped)
             raw_body = numbered.group(1).strip() if numbered else stripped
-        if not raw_body:
+        if not raw_body or _is_empty_persona_template_content(raw_body):
             continue
         entry_id = persona_entry_id("user", raw_body)
         clean_text = _strip_machine_tags(raw_body) or _normalize_whitespace(raw_body)
@@ -760,9 +762,20 @@ def run_user_profile_dream_if_due(
         agents_path=home / "AGENTS.md",
     )
     snapshot = repo.load("user")
-    if snapshot.diagnostic.state in {"security", "io"}:
+    if snapshot.diagnostic.state in {"security", "io", "blocked"} or snapshot.diagnostic.blocked_lines > 0:
         raise PersonaSecurityError(snapshot.diagnostic.detail or snapshot.diagnostic.state)
-    current_content = snapshot.content
+    if snapshot.diagnostic.state == "missing":
+        return _skip_result(
+            "user_profile_empty",
+            entry_threshold=eff_entry_thr,
+            token_threshold=eff_token_thr,
+        )
+    user_path = repo.path_for("user")
+    read_lock_opts = {} if not repo.coordinator_io else {"birth_commit": _persona_birth_commit}
+    with locked_json_path(user_path, **read_lock_opts):
+        if user_path.is_symlink() or (user_path.exists() and not user_path.is_file()):
+            raise PersonaSecurityError("persona target must be a regular file")
+        current_content = user_path.read_text(encoding="utf-8") if user_path.exists() else ""
     if not current_content.strip():
         return _skip_result(
             "user_profile_empty",
