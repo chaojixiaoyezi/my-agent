@@ -576,8 +576,12 @@ def max_output_tokens(agent: object) -> int:
 #   2026-10-08 生产事故（step17x，mc3 DeepSeek v4-flash max 档）：16384 只对"压缩调用真的降到了低档"成立；DeepSeek/MiniMax
 #   的压缩调用仍按线程档位推理，推理 token 算进输出上限，摘要正好在 16384 被截断（COMPACT_SUMMARY_TRUNCATED，回合失败）。
 #   所以配置的预留只在后端能用 configuration_update 降档且配置了压缩档位时生效，其它后端沿用主请求上限（部署前口径）。
-# 函数用途: 返回压缩摘要调用的输出 token 上限；配置为 0、主请求上限更小、或压缩调用降不了档时沿用主请求的上限。
-def compact_summary_output_reserve_tokens(agent: object) -> int:
+# 函数用途: 返回压缩摘要调用的输出 token 上限；allow_tail_downshift=False 时沿用保留原档位的输出预留。
+def compact_summary_output_reserve_tokens(
+    agent: object,
+    *,
+    allow_tail_downshift: bool = True,
+) -> int:
     legacy = max_output_tokens(agent)
     normal = configured_output_ceiling(agent) if request_budget_shared_window(agent) else legacy
     raw = getattr(getattr(agent, "config", None), "memory_compact_summary_max_output_tokens", 0)
@@ -591,7 +595,9 @@ def compact_summary_output_reserve_tokens(agent: object) -> int:
         configured = 16384
     if normal <= 0:
         return configured
-    return min(configured, normal) if _compact_reasoning_downshift_available(agent) else legacy
+    if allow_tail_downshift and _compact_reasoning_downshift_available(agent):
+        return min(configured, normal)
+    return legacy
 
 
 # LLM: 只读两个结构化事实：后端的 supports_reasoning_update_items()（GPT-6 Responses 的 configuration_update 项）和配置的
