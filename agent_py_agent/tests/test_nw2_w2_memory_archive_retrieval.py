@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,13 +21,48 @@ from agent_py_agent.agent.backends.bounded_call import BoundedCallExitUnconfirme
 from agent_py_agent.agent.common.json_io import locked_json_path
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation import learning_source as ls
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import multiprocess_background_execution as bg_exec
+from agent_py_agent.agent.gateway_parts import multiprocess_mode
+from agent_py_agent.agent.gateway_parts.control_plane import GatewayControlPlane
+from agent_py_agent.agent.gateway_parts.io import read_json_file
+from agent_py_agent.agent.gateway_parts.multiprocess_admission import (
+    CoordinatorAdmissionScope,
+    PersistentAdmission,
+    session_scope_for_request,
+)
 from agent_py_agent.agent.gateway_parts.multiprocess_background_execution import (
     execute_background_request,
 )
 from agent_py_agent.agent.gateway_parts.multiprocess_background_request import (
     curator_input_revision,
+    enqueue_source,
     freeze_source,
+)
+from agent_py_agent.agent.gateway_parts.multiprocess_coordinator import coordinator_guard
+from agent_py_agent.agent.gateway_parts.multiprocess_coordinator_claim import (
+    freeze_coordinator_claim,
+)
+from agent_py_agent.agent.gateway_parts.multiprocess_coordinator_execution import (
+    coordinator_execution_scope,
+)
+from agent_py_agent.agent.gateway_parts.multiprocess_drain_runtime import GatewayDrainRuntime
+from agent_py_agent.agent.gateway_parts.multiprocess_takeover_runtime import (
+    bind_admission_takeover,
+    prepare_coordinator_takeover,
+)
+from agent_py_agent.agent.gateway_parts.paths import gateway_paths
+from agent_py_agent.agent.gateway_parts.queue_service import (
+    GatewayClaim,
+    claim_request,
+    ensure_gateway_folders,
+)
+from agent_py_agent.agent.gateway_parts.request_worker import (
+    AdmissionLimits,
+    _iter_pending_requests,
+    _process_claimed_gateway_request_path,
+    _request_deferred_until_later,
+    dispatch_pending_requests,
 )
 from agent_py_agent.agent.memory_archive import storage as archive_storage
 from agent_py_agent.agent.memory_archive.models import CompressionSnapshot, RawMemoryEvent
@@ -52,7 +88,7 @@ from agent_py_agent.agent.memory_store.curator_models import (
 from agent_py_agent.agent.memory_store.curator_run_log import CuratorRunLog
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
 from agent_py_agent.agent.memory_store.daily import DailyMemoryStore
-from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+from agent_py_agent.agent.memory_store.jsonl import JsonlMemory, MemoryRecord
 from agent_py_agent.agent.memory_store.lessons import HotRuleRepository, LessonRepository
 from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 from agent_py_agent.agent.owner_wake_discovery import (
@@ -62,6 +98,8 @@ from agent_py_agent.agent.owner_wake_discovery import (
 )
 from agent_py_agent.agent.retrieval.text_vector_cache import TextVectorCache
 from agent_py_agent.agent.retrieval.vector_store import VectorIdentityError, VectorStore
+from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
 
 
@@ -639,6 +677,59 @@ def test_nw2r1_deterministic_read_index_failure_backs_off_due_and_soft_facts(
     assert _memory_read_index_pending(owner) is True
 
 
+def _attach_owner_quota(agent: SimpleAgent, quota: OwnerQuotaEnforcer) -> None:
+    agent.owner_quota = quota
+    agent.memory.quota_enforcer = quota
+    agent.persona_repository.quota_enforcer = quota
+    curator = getattr(agent, "memory_curator", None)
+    if curator is not None:
+        curator.candidate_service.quota_enforcer = quota
+        curator.daily_store.quota_enforcer = quota
+        curator.formal_memory_source.long_term.quota_enforcer = quota
+
+
+@contextmanager
+def _open_coordinator_gate(agent: SimpleAgent, c_run_id: str, *, worker_count: int = 2):
+    paths = gateway_paths(agent)
+    ensure_gateway_folders(paths)
+    gate = PersistentAdmission(paths, agent, CoordinatorAdmissionScope(worker_count, c_run_id))
+    with coordinator_guard(paths.root, gate.count):
+        controller = prepare_coordinator_takeover(paths, gate.count, gate.c_run_id, config=agent.config)
+        bind_admission_takeover(gate, controller)
+        control = GatewayControlPlane(
+            agent.config,
+            agent.home_paths.root,
+            paths,
+            gate.count,
+            gate.c_run_id,
+            agent_root=agent.root,
+        )
+        GatewayDrainRuntime(control).retain_admission(gate)
+        yield paths, gate
+
+
+def _admit_and_claim_request(
+    gate: PersistentAdmission,
+    paths,
+    req_path: Path,
+    owner: OwnerIdentity,
+) -> GatewayClaim:
+    req_doc = read_json_file(req_path)
+    decision = gate.admit(
+        req_path,
+        (owner, session_scope_for_request(req_doc)),
+        AdmissionLimits(8, 8),
+    )
+    assert decision["status"] == "admitted"
+    claim = claim_request(
+        paths,
+        req_path,
+        coordinator_snapshot=freeze_coordinator_claim(gate, decision),
+    )
+    assert claim is not None
+    return claim
+
+
 def test_nw2r1_execute_background_request_stops_requeue_when_read_index_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -646,6 +737,8 @@ def test_nw2r1_execute_background_request_stops_requeue_when_read_index_blocked(
         {"status": "partial", "errors": {"lessons": "X"}},
         {"status": "partial"},
         {"status": "partial", "errors": {"read_index": "OWNER_QUOTA_EXCEEDED"}},
+        {"status": "failed", "errors": {"read_index": "MEMORY_INDEX_OWNER_MISMATCH"}},
+        {"status": "failed", "errors": {"read_index": "OWNER_QUOTA_EXCEEDED", "lessons": "X"}},
     ]
 
     class _FakeCurator:
@@ -656,15 +749,15 @@ def test_nw2r1_execute_background_request_stops_requeue_when_read_index_blocked(
             return SimpleNamespace(status="not_due", run_id="")
 
     owner = OwnerIdentity.local_main()
-    resolved = ensure_owner_home(tmp_path, owner)
+    resolved = ensure_owner_home(tmp_path / "unit", owner)
     state_path = resolved.home_dir / "memory" / "curator" / "state.json"
     MemoryCuratorStateStore(state_path).request("turn_threshold")
-    ref = freeze_source(tmp_path, owner, state_path, "curator")
+    ref = freeze_source(tmp_path / "unit", owner, state_path, "curator")
     monkeypatch.setattr(bg_exec, "background_request_scope", lambda _ctx: nullcontext())
 
     fake_agent = SimpleNamespace(
         home_paths=SimpleNamespace(
-            root=tmp_path,
+            root=tmp_path / "unit",
             owner_provider=owner.provider,
             owner_kind=owner.owner_kind,
             owner_home_dir=resolved.home_dir,
@@ -684,12 +777,413 @@ def test_nw2r1_execute_background_request_stops_requeue_when_read_index_blocked(
 
     owner_wake_discovery.note_memory_read_index_blocked(resolved.home_dir, 60)
     third = execute_background_request({"agent": fake_agent, "request": request})
-    assert third["outcome"] == "handled"
+    assert third["outcome"] == "pending"
+
+    fourth = execute_background_request({"agent": fake_agent, "request": request})
+    assert fourth["outcome"] == "pending"
+
+    fifth = execute_background_request({"agent": fake_agent, "request": request})
+    assert fifth["outcome"] == "handled"
 
     monkeypatch.setattr(bg_exec, "_auxiliary_model_unavailable", lambda *_args, **_kwargs: False)
-    fourth = execute_background_request({"agent": fake_agent, "request": request})
-    assert fourth["outcome"] == "handled"
+    sixth = execute_background_request({"agent": fake_agent, "request": request})
+    assert sixth["outcome"] == "pending"
 
     owner_wake_discovery.clear_memory_read_index_blocked(resolved.home_dir)
-    fifth = execute_background_request({"agent": fake_agent, "request": request})
-    assert fifth["outcome"] == "pending"
+    seventh = execute_background_request({"agent": fake_agent, "request": request})
+    assert seventh["outcome"] == "pending"
+
+    monkeypatch.setattr(multiprocess_mode, "_WORKER_PARTITION", None)
+    mp_agent = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(tmp_path / "mp-home"),
+            model_backend="echo",
+            max_tokens=65536,
+            gateway_worker_process_count=2,
+            memory_curator_enabled=True,
+            memory_curator_interval_seconds=75,
+            enable_self_learning=False,
+        ),
+        tmp_path / "mp-ws",
+    )
+    mp_state = mp_agent.home_paths.owner_home_dir / "memory" / "curator" / "state.json"
+    MemoryCuratorStateStore(mp_state).request("turn_threshold")
+    mp_ref = freeze_source(mp_agent.home_paths.root, owner, mp_state, "curator")
+    pending_result = {
+        "background_result": {
+            "source_kind": "curator",
+            "source_id": mp_ref["source_id"],
+            "outcome": "pending",
+        }
+    }
+
+    with _open_coordinator_gate(mp_agent, "c-run-nw2r1-requeue") as (paths, gate):
+        req_path, created = enqueue_source(paths, mp_agent.home_paths.root, mp_ref)
+        assert created is True
+
+        owner_wake_discovery.note_memory_read_index_blocked(mp_agent.home_paths.owner_home_dir, 60)
+        mp_agent.memory_curator = SimpleNamespace(
+            _effective_config=lambda: SimpleNamespace(interval_seconds=180)
+        )
+        claim_eff = _admit_and_claim_request(gate, paths, req_path, owner)
+        with coordinator_execution_scope(gate, claim_eff, mp_agent):
+            t_eff = time.time()
+            assert bg_exec.requeue_pending_background_request(pending_result, mp_agent) is True
+        doc_eff = read_json_file(paths.inbox / req_path.name)
+        assert doc_eff["not_before_at"] >= t_eff + 180.0
+
+        mp_agent.memory_curator = SimpleNamespace(config=SimpleNamespace(interval_seconds=90))
+        claim_cfg = _admit_and_claim_request(gate, paths, req_path, owner)
+        with coordinator_execution_scope(gate, claim_cfg, mp_agent):
+            t_cfg = time.time()
+            assert bg_exec.requeue_pending_background_request(pending_result, mp_agent) is True
+        doc_cfg = read_json_file(paths.inbox / req_path.name)
+        assert doc_cfg["not_before_at"] >= t_cfg + 90.0
+
+        mp_agent.memory_curator = SimpleNamespace(config=None)
+        claim_agent_cfg = _admit_and_claim_request(gate, paths, req_path, owner)
+        with coordinator_execution_scope(gate, claim_agent_cfg, mp_agent):
+            t_agent = time.time()
+            assert bg_exec.requeue_pending_background_request(pending_result, mp_agent) is True
+        doc_agent = read_json_file(paths.inbox / req_path.name)
+        assert doc_agent["not_before_at"] >= t_agent + 75.0
+
+        # Clearing blocked state (as in transient sqlite3.OperationalError) keeps fast 1.0s retry.
+        owner_wake_discovery.clear_memory_read_index_blocked(mp_agent.home_paths.owner_home_dir)
+        claim_fast = _admit_and_claim_request(gate, paths, req_path, owner)
+        with coordinator_execution_scope(gate, claim_fast, mp_agent):
+            t_fast = time.time()
+            assert bg_exec.requeue_pending_background_request(pending_result, mp_agent) is True
+        doc_fast = read_json_file(paths.inbox / req_path.name)
+        assert t_fast <= doc_fast["not_before_at"] < t_fast + 10.0
+
+
+def test_nw2r2_read_index_eio_requeue_recovers_after_backoff_without_source_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(multiprocess_mode, "_WORKER_PARTITION", None)
+    cfg = AgentConfig(
+        my_agent_home=str(tmp_path / "home"),
+        model_backend="echo",
+        max_tokens=65536,
+        gateway_worker_process_count=2,
+        memory_curator_enabled=True,
+        memory_curator_interval_seconds=120,
+        retention_scan_slice_entries=1000,
+        enable_self_learning=False,
+    )
+    agent = SimpleAgent(cfg, tmp_path / "ws")
+    owner = OwnerIdentity.local_main()
+    owner_home = agent.home_paths.owner_home_dir
+    quota = OwnerQuotaEnforcer(owner_home, max_bytes=100 * 1024 * 1024, policy_available=True)
+    _attach_owner_quota(agent, quota)
+    assert agent.memory_curator._effective_config().interval_seconds == 120
+    assert agent.memory.path == agent.memory_curator.formal_memory_source.long_term.path
+
+    lines = [
+        MemoryRecord(
+            role="user",
+            content=(
+                "zxqvtarget0852 unique archival completion entry"
+                if idx == 852
+                else f"distractor archive record {idx:04d} stable context entry"
+            ),
+            kind="fact",
+            entry_id=f"memory-{idx:04d}",
+            created_at=float(1000 + idx),
+            updated_at=float(1000 + idx),
+        ).to_json()
+        for idx in range(1501)
+    ]
+    agent.memory_curator.formal_memory_source.long_term.path.parent.mkdir(parents=True, exist_ok=True)
+    agent.memory_curator.formal_memory_source.long_term.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    agent.memory_curator.formal_memory_source.long_term.migrate_tiers()
+
+    read_index = MemoryReadIndex(agent.memory_curator.formal_memory_source.long_term.path)
+    assert not read_index.path.exists()
+    state_path = owner_home / "memory" / "curator" / "state.json"
+    MemoryCuratorStateStore(state_path).request("turn_threshold")
+    assert _memory_read_index_pending(owner_home) is True
+
+    wall_base = time.time()
+    mono_base = time.monotonic()
+    clock_offset = [0.0]
+    monkeypatch.setattr(time, "time", lambda: wall_base + clock_offset[0])
+    monkeypatch.setattr(time, "monotonic", lambda: mono_base + clock_offset[0])
+
+    real_connect = MemoryReadIndex._connect
+    trigger_open_eio = [False]
+
+    def _guarded_connect(self: MemoryReadIndex, *, write: bool = False):
+        if write and trigger_open_eio[0] and self.path == read_index.path:
+            trigger_open_eio[0] = False
+            raise OSError(errno.EIO, "simulated index open io error")
+        return real_connect(self, write=write)
+
+    monkeypatch.setattr(MemoryReadIndex, "_connect", _guarded_connect)
+
+    # Phase 1: Slice 1 completes 1000/1501 records cleanly and leaves 501 records pending.
+    with _open_coordinator_gate(agent, "c-run-nw2r2") as (paths, gate):
+        ref_1 = freeze_source(agent.home_paths.root, owner, state_path, "curator")
+        req_1_path, created_1 = enqueue_source(paths, agent.home_paths.root, ref_1)
+        assert created_1 is True
+        claim_1 = _admit_and_claim_request(gate, paths, req_1_path, owner)
+        with coordinator_execution_scope(gate, claim_1, agent):
+            assert (
+                _process_claimed_gateway_request_path(
+                    agent, paths, claim_1.path, claim_1.lease_owner, claim=claim_1
+                )
+                is True
+            )
+        gate.release_settled()
+
+        assert read_index.coverage()["indexed_records"] == 1000
+        assert read_index.coverage()["total_records"] == 1501
+        assert owner_wake_discovery.memory_read_index_blocked(owner_home) is False
+        assert _memory_read_index_pending(owner_home) is True
+
+        pre_records, pre_errors = agent.memory_curator.formal_memory_source.long_term.search_report(
+            "zxqvtarget0852", top_k=5
+        )
+        assert "memory-0852" not in [record.entry_id for record in pre_records]
+        assert any(err.get("error_type") == "MEMORY_READ_INDEX_PENDING" for err in pre_errors)
+
+        # Phase 2: Freeze slice 2 request, simulate single write-open EIO before SQLite rewrite.
+        ref_2 = freeze_source(agent.home_paths.root, owner, state_path, "curator")
+        req_2_path, created_2 = enqueue_source(paths, agent.home_paths.root, ref_2)
+        assert created_2 is True
+        req_2_id = req_2_path.stem
+        rev_before_eio = curator_input_revision(agent.home_paths.root)
+
+        trigger_open_eio[0] = True
+        claim_2 = _admit_and_claim_request(gate, paths, req_2_path, owner)
+        before_eio_ts = time.time()
+        with coordinator_execution_scope(gate, claim_2, agent):
+            assert (
+                _process_claimed_gateway_request_path(
+                    agent, paths, claim_2.path, claim_2.lease_owner, claim=claim_2
+                )
+                is True
+            )
+
+        assert not (paths.terminal / f"{req_2_id}.json").exists()
+        assert not claim_2.path.exists()
+        requeued_path = paths.inbox / f"{req_2_id}.json"
+        assert requeued_path.exists()
+        requeued_doc = read_json_file(requeued_path)
+        assert requeued_doc["id"] == req_2_id
+        assert requeued_doc["status"] == "pending"
+        assert requeued_doc["not_before_at"] >= before_eio_ts + 120.0
+        assert owner_wake_discovery.memory_read_index_blocked(owner_home) is True
+        assert read_index.coverage()["indexed_records"] == 1000
+        assert curator_input_revision(agent.home_paths.root) == rev_before_eio
+
+        # Unrelated ready request stays claimable while deferred read_index request waits.
+        thread = agent.conversation_store.threads.get_or_create(
+            {
+                "canonical_user_id": "local-agent",
+                "channel": "chat",
+                "channel_conversation_id": "unrelated-ready-wake",
+                "channel_user_id": "local-agent",
+            }
+        )
+        wake = agent.conversation_store.wakes.raise_signal(
+            {"thread_id": thread.thread_id, "reason": "unrelated-ready"}
+        )
+        other_ref = freeze_source(
+            agent.home_paths.root,
+            owner,
+            agent.conversation_store.storage.wake_signal_path(wake),
+            "wake",
+        )
+        other_path, other_created = enqueue_source(paths, agent.home_paths.root, other_ref)
+        assert other_created is True
+        submitted_ready: list[GatewayClaim] = []
+        dispatched = dispatch_pending_requests(
+            paths,
+            AdmissionLimits(8, 8),
+            lambda c, _u, _r: submitted_ready.append(c),
+            admission_gate=gate,
+        )
+        assert dispatched == 1
+        assert [c.request_id for c in submitted_ready] == [other_path.stem]
+        assert requeued_path.exists()
+        with coordinator_execution_scope(gate, submitted_ready[0], agent):
+            assert (
+                _process_claimed_gateway_request_path(
+                    agent,
+                    paths,
+                    submitted_ready[0].path,
+                    submitted_ready[0].lease_owner,
+                    claim=submitted_ready[0],
+                )
+                is True
+            )
+        gate.release_settled()
+
+        # Phase 3a: Before not_before_at, persisted not_before_at on disk blocks claiming even if in-memory backoff clears.
+        clock_offset[0] = 60.0
+        assert owner_wake_discovery.memory_read_index_blocked(owner_home) is True
+        owner_wake_discovery.clear_memory_read_index_blocked(owner_home)
+        pending_entries = _iter_pending_requests(paths)
+        assert len(pending_entries) == 1
+        assert _request_deferred_until_later(pending_entries[0]) is True
+        mid_claims: list[GatewayClaim] = []
+        assert (
+            dispatch_pending_requests(
+                paths,
+                AdmissionLimits(8, 8),
+                lambda c, _u, _r: mid_claims.append(c),
+                admission_gate=gate,
+            )
+            == 0
+        )
+        assert mid_claims == []
+        # Re-arm remaining monotonic backoff (60s left) so expiry at +130s is driven by real monotonic clock.
+        owner_wake_discovery.note_memory_read_index_blocked(owner_home, 60.0)
+        assert owner_wake_discovery.memory_read_index_blocked(owner_home) is True
+
+        # Phase 3b: Advance past both not_before_at and monotonic deadline with ZERO formal source change.
+        trigger_open_eio[0] = False
+        clock_offset[0] = 130.0
+        assert owner_wake_discovery.memory_read_index_blocked(owner_home) is False
+        assert curator_work_is_due(owner_home, agent.memory_curator.state_store.load()) is True
+        assert curator_input_revision(agent.home_paths.root) == rev_before_eio
+
+        ref_retry = freeze_source(agent.home_paths.root, owner, state_path, "curator")
+        assert ref_retry == ref_2
+        path_retry, created_retry = enqueue_source(paths, agent.home_paths.root, ref_retry)
+        assert path_retry.stem == req_2_id and created_retry is False
+
+        final_claims: list[GatewayClaim] = []
+        assert (
+            dispatch_pending_requests(
+                paths,
+                AdmissionLimits(8, 8),
+                lambda c, _u, _r: final_claims.append(c),
+                admission_gate=gate,
+            )
+            == 1
+        )
+        assert [c.request_id for c in final_claims] == [req_2_id]
+        claim_final = final_claims[0]
+        with coordinator_execution_scope(gate, claim_final, agent):
+            assert (
+                _process_claimed_gateway_request_path(
+                    agent,
+                    paths,
+                    claim_final.path,
+                    claim_final.lease_owner,
+                    claim=claim_final,
+                )
+                is True
+            )
+        gate.release_settled()
+
+        assert (paths.terminal / f"{req_2_id}.json").exists()
+        assert not (paths.inbox / f"{req_2_id}.json").exists()
+
+    assert read_index.coverage()["indexed_records"] == 1501
+    assert read_index.coverage()["total_records"] == 1501
+    records, errors = agent.memory_curator.formal_memory_source.long_term.search_report(
+        "zxqvtarget0852", top_k=5
+    )
+    assert records and records[0].entry_id == "memory-0852"
+    assert errors == []
+
+
+def test_nw2r2_read_index_sqlite_locked_keeps_fast_retry_and_unconfirmed_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(multiprocess_mode, "_WORKER_PARTITION", None)
+    agent = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(tmp_path / "home"),
+            model_backend="echo",
+            max_tokens=65536,
+            gateway_worker_process_count=2,
+            memory_curator_enabled=True,
+            memory_curator_interval_seconds=120,
+            enable_self_learning=False,
+        ),
+        tmp_path / "ws",
+    )
+    owner = OwnerIdentity.local_main()
+    owner_home = agent.home_paths.owner_home_dir
+    _attach_owner_quota(
+        agent,
+        OwnerQuotaEnforcer(owner_home, max_bytes=100 * 1024 * 1024, policy_available=True),
+    )
+
+    lines = [
+        MemoryRecord(
+            role="user",
+            content=f"transient lock entry {idx:03d}",
+            kind="fact",
+            entry_id=f"lock-{idx:03d}",
+            created_at=float(2000 + idx),
+            updated_at=float(2000 + idx),
+        ).to_json()
+        for idx in range(5)
+    ]
+    agent.memory_curator.formal_memory_source.long_term.path.parent.mkdir(parents=True, exist_ok=True)
+    agent.memory_curator.formal_memory_source.long_term.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    agent.memory_curator.formal_memory_source.long_term.migrate_tiers()
+    state_path = owner_home / "memory" / "curator" / "state.json"
+    MemoryCuratorStateStore(state_path).request("turn_threshold")
+
+    def _raise_locked(*, batch_size: int):
+        raise sqlite3.OperationalError("database is locked")
+
+    agent.memory_curator.formal_memory_source.long_term.rebuild_read_index = _raise_locked  # type: ignore[method-assign]
+
+    with _open_coordinator_gate(agent, "c-run-sqlite-locked") as (paths, gate):
+        ref = freeze_source(agent.home_paths.root, owner, state_path, "curator")
+        req_path, created = enqueue_source(paths, agent.home_paths.root, ref)
+        assert created is True
+        claim = _admit_and_claim_request(gate, paths, req_path, owner)
+        before_locked = time.time()
+        with coordinator_execution_scope(gate, claim, agent):
+            assert (
+                _process_claimed_gateway_request_path(
+                    agent, paths, claim.path, claim.lease_owner, claim=claim
+                )
+                is True
+            )
+        assert owner_wake_discovery.memory_read_index_blocked(owner_home) is False
+        assert not (paths.terminal / req_path.name).exists()
+        requeued_locked = read_json_file(paths.inbox / req_path.name)
+        assert before_locked <= requeued_locked["not_before_at"] < before_locked + 10.0
+
+        def _raise_unconfirmed(*, batch_size: int):
+            raise BoundedCallExitUnconfirmedError("call-read-index", "timeout")
+
+        agent.memory_curator.formal_memory_source.long_term.rebuild_read_index = _raise_unconfirmed  # type: ignore[method-assign]
+        claim_unconfirmed = _admit_and_claim_request(gate, paths, req_path, owner)
+        with (
+            coordinator_execution_scope(gate, claim_unconfirmed, agent),
+            pytest.raises(BoundedCallExitUnconfirmedError),
+        ):
+            execute_background_request(
+                {
+                    "agent": agent,
+                    "request_path": claim_unconfirmed.path,
+                    "request_id": claim_unconfirmed.request_id,
+                    "request": read_json_file(claim_unconfirmed.path),
+                }
+            )
+
+        with (
+            coordinator_execution_scope(gate, claim_unconfirmed, agent),
+            pytest.raises(BoundedCallExitUnconfirmedError),
+        ):
+            _process_claimed_gateway_request_path(
+                agent,
+                paths,
+                claim_unconfirmed.path,
+                claim_unconfirmed.lease_owner,
+                claim=claim_unconfirmed,
+            )
+        assert claim_unconfirmed.path.exists()
+        assert not (paths.inbox / req_path.name).exists()
+        assert not (paths.terminal / req_path.name).exists()

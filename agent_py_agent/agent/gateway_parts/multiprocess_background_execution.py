@@ -393,8 +393,6 @@ def execute_background_request(context):
             return {"source_kind": "curator", "source_id": ref["source_id"], "outcome": "handled", "status": "disabled"}
         cfg = getattr(agent, "config", None)
         _refresh_execution_live_config(cfg)
-        from ..owner_wake_discovery import memory_read_index_blocked
-
         if _auxiliary_model_unavailable(cfg, service=getattr(agent, "memory_curator", None)):
             run_maint = getattr(agent.memory_curator, "run_maintenance_if_due", None)
             if callable(run_maint):
@@ -405,9 +403,8 @@ def execute_background_request(context):
                 )
                 step_errors = maint_result.get("errors") if isinstance(maint_result, dict) else None
                 pending = (
-                    status == "partial"
-                    and not memory_read_index_blocked(home.owner_home_dir)
-                    and set(step_errors or {}) <= {"read_index"}
+                    (status == "partial" and not step_errors)
+                    or (status in {"partial", "failed"} and set(step_errors or {}) == {"read_index"})
                 )
                 return {
                     "source_kind": "curator",
@@ -418,11 +415,8 @@ def execute_background_request(context):
                 }
             return {"source_kind": "curator", "source_id": ref["source_id"], "outcome": "handled", "status": "model_unavailable"}
         result = agent.memory_curator.run_if_due()
-        pending = result.status == "busy" or (
-            result.status == "not_due" and not memory_read_index_blocked(home.owner_home_dir)
-        )
         return {"source_kind": "curator", "source_id": ref["source_id"], "status": result.status,
-                "run_id": result.run_id, "outcome": "pending" if pending else "handled"}
+                "run_id": result.run_id, "outcome": "pending" if result.status in {"busy", "not_due"} else "handled"}
 
 
 def _refresh_execution_live_config(cfg: object) -> None:
@@ -565,8 +559,28 @@ def requeue_pending_background_request(response, agent):
         return False
     transition = GatewayActiveTurnTransition(claim.path, claim.request_id, claim.execution_attempt_id)
     paths = gateway_paths_from_root(claim.path.parent.parent.parent)
-    # 人工接手不应每秒重建消费者；不消费来源、也不挡同owner其它已就绪请求。
-    delay = 30.0 if result.get("recovery_eligibility") or result.get("status") == "storage_wait" else 1.0
+    # 人工接手不应每秒重建消费者；读索引确定性失败退避按策展周期重排，不写终态抑制同源续建，也不挡同owner其它已就绪请求。
+    if result.get("recovery_eligibility") or result.get("status") == "storage_wait":
+        delay = 30.0
+    elif result.get("source_kind") == "curator":
+        from ..owner_wake_discovery import memory_read_index_blocked
+
+        if memory_read_index_blocked(agent.home_paths.owner_home_dir):
+            curator = getattr(agent, "memory_curator", None)
+            effective_fn = getattr(curator, "_effective_config", None)
+            if callable(effective_fn):
+                raw_interval = getattr(effective_fn(), "interval_seconds", None)
+            else:
+                raw_interval = (
+                    getattr(getattr(curator, "config", None), "interval_seconds", None)
+                    or getattr(getattr(agent, "config", None), "memory_curator_interval_seconds", None)
+                    or 1
+                )
+            delay = float(max(1, int(raw_interval or 1)))
+        else:
+            delay = 1.0
+    else:
+        delay = 1.0
     return requeue_current_processing_request(paths, claim, transition, not_before_at=time.time() + delay)
 
 
