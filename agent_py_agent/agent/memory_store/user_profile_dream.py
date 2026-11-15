@@ -178,7 +178,7 @@ def _require_user_dream_target(target: object) -> str:
     return "user"
 
 
-def _ensure_no_symlinks(*paths: Path) -> None:
+def _ensure_no_symlinks(paths: Sequence[Path]) -> None:
     for path in paths:
         if path.is_symlink():
             raise PersonaSecurityError(f"PERSONA_DREAM_SYMLINK: symlink path is forbidden ({path.name})")
@@ -472,7 +472,7 @@ def _dream_ledger_path(owner_home: Path) -> Path:
 
 
 def _read_dream_state(path: Path) -> dict[str, object]:
-    _ensure_no_symlinks(path)
+    _ensure_no_symlinks((path,))
     if not path.exists():
         return {}
     if not path.is_file():
@@ -686,13 +686,15 @@ def run_user_profile_dream_if_due(
     _require_user_dream_target(target)
     home = Path(owner_home)
     _ensure_no_symlinks(
-        home,
-        home / "persona",
-        home / "USER.md",
-        _dream_state_path(home),
-        _dream_ledger_path(home),
-        home / "persona" / "backups",
-        home / "persona" / "backups" / "user",
+        (
+            home,
+            home / "persona",
+            home / "USER.md",
+            _dream_state_path(home),
+            _dream_ledger_path(home),
+            home / "persona" / "backups",
+            home / "persona" / "backups" / "user",
+        )
     )
 
     (
@@ -909,7 +911,7 @@ def run_user_profile_dream_if_due(
     backup_dir = home / "persona" / "backups" / "user"
     ensure_private_dir(backup_dir)
     backup_path = backup_dir / f"{ts_tag}-v{pre_ver}-{uuid.uuid4().hex[:6]}.md"
-    _ensure_no_symlinks(backup_path)
+    _ensure_no_symlinks((backup_path,))
     write_private_text_file_atomic(backup_path, current_content)
     pre_dream_backup_ref = str(backup_path.relative_to(home))
 
@@ -985,7 +987,7 @@ def run_user_profile_dream_if_due(
         "pre_dream_backup_ref": pre_dream_backup_ref,
     }
     with locked_json_path(state_path):
-        _ensure_no_symlinks(state_path)
+        _ensure_no_symlinks((state_path,))
         write_private_text_file_atomic_unlocked(
             state_path,
             json.dumps(next_state, ensure_ascii=False, indent=2),
