@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import textwrap
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
@@ -54,10 +55,12 @@ def case_main_compact_stress_long_read(lab) -> None:
     prompt = _compact_stress_prompt()
     contract_path = _compact_stress_delivery_contract_path(lab, facts)
     lab.record_prompt("main_compact_stress_long_read", prompt)
+    run_started_at = time.time()
     response = lab.run_command(
         lab.agent_command("run", prompt, "--delivery-contract-file", str(contract_path), "--save"),
         timeout=lab.args.timeout + 900,
     )
+    run_finished_at = time.time()
     stdout_path = lab.responses_dir / "main_compact_stress_long_read.stdout.txt"
     stdout_path.write_text(response.stdout, encoding="utf-8")
 
@@ -66,12 +69,28 @@ def case_main_compact_stress_long_read(lab) -> None:
 
     telemetry_sources: list[Any] = [response.stdout, response.stderr]
     turn_usage = list(getattr(lab, "turn_usage_records", ()))
+    turn_markers_raw = getattr(lab, "turn_markers", None)
+    if turn_markers_raw is not None:
+        turn_markers = [dict(marker) for marker in turn_markers_raw if isinstance(marker, Mapping)]
+    elif turn_usage:
+        turn_markers = [dict(row) for row in turn_usage if isinstance(row, Mapping)]
+    else:
+        turn_markers = [{
+            "turn": "turn_1",
+            "turn_index": 0,
+            "started_at": run_started_at,
+            "finished_at": run_finished_at,
+        }]
+    usage_files = lab.usage_ledger_files() if callable(getattr(lab, "usage_ledger_files", None)) else ()
     observations = collect_compaction_observations(
         config_path=lab.config_path,
         turn_usages=turn_usage,
         telemetry_sources=telemetry_sources,
         baseline=baseline,
         pre_bg_census=pre_bg,
+        turn_markers=turn_markers,
+        home_ctx=home_ctx,
+        extra_usage_files=usage_files,
     )
     observations["source_provenance"] = source_meta
     observations["report_provenance"] = _artifact_stamp(report)

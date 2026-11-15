@@ -792,6 +792,10 @@ def _read_skipped_workflow_run(workflow: _WorkflowSnapshot, run_id: str) -> tupl
     return result
 
 
+def _is_safe_workflow_dir_name(name: str) -> bool:
+    return bool(name) and "/" not in name and "\\" not in name and name not in {".", ".."} and ".." not in Path(name).parts
+
+
 def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256) -> _WorkflowSnapshot:
     index_db = owner_home / "data" / "workflow_run_index.sqlite3"
     runs_dir = owner_home / "data" / "workflow_runs"
@@ -803,6 +807,7 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
     settled_ended_at_by_run_id: dict[str, list[object]] = {}
     settled_ended_at_by_task_id: dict[str, list[object]] = {}
     scanned_dir_names: set[str] = set()
+    index_available = False
 
     try:
         index_st = _optional_lstat(index_db)
@@ -834,8 +839,43 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
                 for (wf_run_id,) in conn.execute("SELECT run_id FROM legacy"):
                     if wf_run_id:
                         unsettled_run_ids.add(str(wf_run_id).strip())
+            index_available = True
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
             return _WorkflowSnapshot(error=f"workflow_index_{type(exc).__name__}")
+
+    def _inspect_workflow_dir(dir_name: str) -> str | None:
+        if not _is_safe_workflow_dir_name(dir_name):
+            return "workflow_run_id_invalid"
+        run_dir = runs_dir / dir_name
+        try:
+            dir_st = _optional_lstat(run_dir)
+        except OSError as exc:
+            return f"workflow_runs_scan_{type(exc).__name__}"
+        if dir_st is None:
+            return None
+        if stat.S_ISLNK(dir_st.st_mode):
+            return "workflow_run_dir_symlink"
+        if not stat.S_ISDIR(dir_st.st_mode):
+            return None
+        scanned_dir_names.add(dir_name)
+        r_ids: set[str] = {dir_name}
+        t_ids: set[str] = set()
+        outcome, wf_ended_at = _read_workflow_dir_refs(run_dir, r_ids, t_ids)
+        if outcome and not outcome.startswith("status:"):
+            return outcome
+        status = outcome.removeprefix("status:") if outcome else ""
+        if dir_name in unsettled_run_ids or (outcome and status not in _WORKFLOW_SETTLED_STATES):
+            unsettled_run_ids.update(r_ids)
+            unsettled_task_ids.update(t_ids)
+            settled_run_ids.difference_update(r_ids)
+        elif status in _WORKFLOW_SETTLED_STATES:
+            settled_run_ids.update(r_ids)
+            settled_task_ids.update(t_ids)
+            for rid in r_ids:
+                settled_ended_at_by_run_id.setdefault(rid, []).append(wf_ended_at)
+            for tid in t_ids:
+                settled_ended_at_by_task_id.setdefault(tid, []).append(wf_ended_at)
+        return None
 
     try:
         runs_dir_st = _optional_lstat(runs_dir)
@@ -845,43 +885,41 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
         if stat.S_ISLNK(runs_dir_st.st_mode):
             return _WorkflowSnapshot(error="workflow_runs_dir_symlink")
         if stat.S_ISDIR(runs_dir_st.st_mode):
-            try:
-                dir_names: list[str] = []
-                with os.scandir(runs_dir) as entries:
-                    for entry in entries:
-                        entry_st = os.lstat(runs_dir / entry.name)
-                        if stat.S_ISLNK(entry_st.st_mode):
-                            return _WorkflowSnapshot(error="workflow_run_dir_symlink")
-                        if stat.S_ISDIR(entry_st.st_mode):
-                            dir_names.append(entry.name)
-                dir_names.sort()
-            except OSError as exc:
-                return _WorkflowSnapshot(error=f"workflow_runs_scan_{type(exc).__name__}")
-            settled_scanned = 0
-            for dir_name in dir_names:
-                run_dir = runs_dir / dir_name
-                is_known_settled = dir_name in indexed_settled and dir_name not in unsettled_run_ids
-                if is_known_settled and settled_scanned >= max_settled_dir_scan:
-                    continue
-                scanned_dir_names.add(dir_name)
-                r_ids: set[str] = {dir_name}
-                t_ids: set[str] = set()
-                outcome, wf_ended_at = _read_workflow_dir_refs(run_dir, r_ids, t_ids)
-                if outcome and not outcome.startswith("status:"):
-                    return _WorkflowSnapshot(error=outcome)
-                status = outcome.removeprefix("status:") if outcome else ""
-                if dir_name in unsettled_run_ids or (outcome and status not in _WORKFLOW_SETTLED_STATES):
-                    unsettled_run_ids.update(r_ids)
-                    unsettled_task_ids.update(t_ids)
-                    settled_run_ids.difference_update(r_ids)
-                elif status in _WORKFLOW_SETTLED_STATES:
-                    settled_run_ids.update(r_ids)
-                    settled_task_ids.update(t_ids)
-                    for rid in r_ids:
-                        settled_ended_at_by_run_id.setdefault(rid, []).append(wf_ended_at)
-                    for tid in t_ids:
-                        settled_ended_at_by_task_id.setdefault(tid, []).append(wf_ended_at)
-                    settled_scanned += 1
+            if index_available:
+                # 索引可用时不整目录 scandir，仅按主键直查未决目录与有界已终结样本，防 O(N) 目录遍历。
+                for dir_name in sorted(unsettled_run_ids):
+                    err = _inspect_workflow_dir(dir_name)
+                    if err:
+                        return _WorkflowSnapshot(error=err)
+                settled_budget = max(0, int(max_settled_dir_scan))
+                settled_candidates = sorted(indexed_settled - unsettled_run_ids)
+                for dir_name in settled_candidates[:settled_budget]:
+                    err = _inspect_workflow_dir(dir_name)
+                    if err:
+                        return _WorkflowSnapshot(error=err)
+            else:
+                try:
+                    dir_names: list[str] = []
+                    with os.scandir(runs_dir) as entries:
+                        for entry in entries:
+                            entry_st = os.lstat(runs_dir / entry.name)
+                            if stat.S_ISLNK(entry_st.st_mode):
+                                return _WorkflowSnapshot(error="workflow_run_dir_symlink")
+                            if stat.S_ISDIR(entry_st.st_mode):
+                                dir_names.append(entry.name)
+                    dir_names.sort()
+                except OSError as exc:
+                    return _WorkflowSnapshot(error=f"workflow_runs_scan_{type(exc).__name__}")
+                settled_scanned = 0
+                for dir_name in dir_names:
+                    is_known_settled = dir_name in indexed_settled and dir_name not in unsettled_run_ids
+                    if is_known_settled and settled_scanned >= max_settled_dir_scan:
+                        continue
+                    err = _inspect_workflow_dir(dir_name)
+                    if err:
+                        return _WorkflowSnapshot(error=err)
+                    if dir_name in settled_run_ids and dir_name not in unsettled_run_ids:
+                        settled_scanned += 1
             settled_run_ids.difference_update(unsettled_run_ids)
             settled_task_ids.difference_update(unsettled_task_ids)
             for rid in unsettled_run_ids:
@@ -1196,12 +1234,22 @@ def _classify_execution_record(
 
     wf_raw_ended_ats: list[object] = []
     wf_missing_ts = False
-    if run_id in workflow.unsettled_run_ids or root_task_id in workflow.unsettled_task_ids:
+    if (
+        run_id in workflow.unsettled_run_ids
+        or root_task_id in workflow.unsettled_task_ids
+        or root_task_id in workflow.unsettled_run_ids
+    ):
         active_reasons.append("workflow_run_unsettled")
-    elif run_id in workflow.settled_run_ids or root_task_id in workflow.settled_task_ids:
+    elif (
+        run_id in workflow.settled_run_ids
+        or root_task_id in workflow.settled_task_ids
+        or root_task_id in workflow.settled_run_ids
+    ):
         wf_affirmed = True
-        if run_id in workflow.indexed_settled_skipped:
-            skip_outcome, skip_ended_at = _read_skipped_workflow_run(workflow, run_id)
+        for skipped_wf_id in dict.fromkeys((run_id, root_task_id)):
+            if skipped_wf_id not in workflow.indexed_settled_skipped:
+                continue
+            skip_outcome, skip_ended_at = _read_skipped_workflow_run(workflow, skipped_wf_id)
             if skip_outcome and not skip_outcome.startswith("status:"):
                 unknown_reasons.append(skip_outcome)
                 wf_affirmed = False
@@ -1213,6 +1261,7 @@ def _classify_execution_record(
             else:
                 wf_missing_ts = True
         wf_raw_ended_ats.extend(workflow.settled_ended_at_by_run_id.get(run_id, ()))
+        wf_raw_ended_ats.extend(workflow.settled_ended_at_by_run_id.get(root_task_id, ()))
         wf_raw_ended_ats.extend(workflow.settled_ended_at_by_task_id.get(root_task_id, ()))
         if wf_affirmed:
             affirmed_sources.append("workflow")

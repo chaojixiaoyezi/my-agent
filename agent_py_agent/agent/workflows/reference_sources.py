@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -76,6 +76,10 @@ def _explicit_workflow_reference(value, target):
 
 def _coverage_blocker(blockers, target, reason):
     blockers.append({'ref': target, 'kind': 'coverage', 'reason_code': reason})
+
+
+def _needs_open_ref_backfill(probe_row: Mapping[str, Any]) -> bool:
+    return not bool(probe_row.get("open_ref_complete")) or bool(probe_row.get("legacy_ids"))
 
 
 def _extract_owner_home(host_or_owner_home: Any) -> Path | None:
@@ -462,15 +466,25 @@ class WorkflowReferenceReader:
                         probe = idx.open_reference_probe(
                             target_id, active_statuses=_active_run_statuses, limit=_max_blockers_page
                         )
-                        if not probe["open_ref_complete"]:
+                        if _needs_open_ref_backfill(probe):
                             backfill_store = WorkflowRunStore(self.owner_home)
                             for _ in range(_max_open_ref_backfill_batches):
-                                if probe["open_ref_complete"]:
+                                if not _needs_open_ref_backfill(probe):
                                     break
+                                # 只运行无锁 backfill（推进 open_ref_scan 与 legacy），绝不在读口/资产锁内 replay(pending) 抢 run_store._lock。
                                 idx.backfill(backfill_store)
-                                probe = idx.open_reference_probe(
+                                next_probe = idx.open_reference_probe(
                                     target_id, active_statuses=_active_run_statuses, limit=_max_blockers_page
                                 )
+                                if (
+                                    bool(next_probe["open_ref_complete"]) == bool(probe["open_ref_complete"])
+                                    and bool(probe["legacy_ids"])
+                                    and len(next_probe["legacy_ids"]) >= len(probe["legacy_ids"])
+                                    and next_probe["legacy_ids"] == probe["legacy_ids"]
+                                ):
+                                    probe = next_probe
+                                    break
+                                probe = next_probe
                         pending_ids = probe["pending_ids"]
                         legacy_ids = probe["legacy_ids"]
                         complete = (

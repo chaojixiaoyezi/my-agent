@@ -338,18 +338,30 @@ def test_cancelling_and_legacy_unindexed_runs_block_workflow_recycle_and_purge(
     assert 'REFERENCE_COVERAGE_UNKNOWN' in {b['reason_code'] for b in status_pending['blockers']}
     index.ack_pending('wfrun-pending-x')
 
-    # 5. 存在 legacy 行：backfill 吸收前 fail-closed；backfill 完成后旧未索引 cancelling run 进入 open_ref_runs 继续阻断原工作流，无关清洁工作流可回收。
+    # 5. 存在有效 legacy 行时 cleanup_status 自动无锁 backfill 吸收：wf-legacy 立刻暴露 ACTIVE_WORKFLOW_RUN，无关清洁工作流可直接回收；
+    #    而无法吸收/损坏的 legacy 行仍必须 fail-closed 维持 REFERENCE_COVERAGE_UNKNOWN。
     legacy_dir_2 = runs_root / 'wfrun-legacy-only'
     legacy_dir_2.mkdir(parents=True, exist_ok=True)
     legacy_rec_2 = _run_record('wf-legacy', 'wfrun-legacy-only', status='cancelling')
     (legacy_dir_2 / 'run.json').write_text(json.dumps(legacy_rec_2.to_dict()), encoding='utf-8')
     with index.connection() as conn:
         conn.execute('INSERT OR IGNORE INTO legacy VALUES(?)', ('wfrun-legacy-only',))
-    status_legacy_marker = cleanup_status(api, api._get('wf-clean-target'))
-    assert 'REFERENCE_COVERAGE_UNKNOWN' in {b['reason_code'] for b in status_legacy_marker['blockers']}
-
-    index.backfill(run_store, batch_size=500)
     assert any(b['reason_code'] == 'ACTIVE_WORKFLOW_RUN' for b in cleanup_status(api, api._get('wf-legacy'))['blockers'])
+    with index.connection() as conn:
+        assert conn.execute('SELECT run_id FROM legacy').fetchall() == []
+
+    corrupt_dir = runs_root / 'wfrun-legacy-corrupt'
+    corrupt_dir.mkdir(parents=True, exist_ok=True)
+    (corrupt_dir / 'run.json').write_text('{not-valid-json', encoding='utf-8')
+    with index.connection() as conn:
+        conn.execute('INSERT OR IGNORE INTO legacy VALUES(?)', ('wfrun-legacy-corrupt',))
+    status_legacy_corrupt = cleanup_status(api, api._get('wf-clean-target'))
+    assert 'REFERENCE_COVERAGE_UNKNOWN' in {b['reason_code'] for b in status_legacy_corrupt['blockers']}
+    with index.connection() as conn:
+        conn.execute('DELETE FROM legacy WHERE run_id=?', ('wfrun-legacy-corrupt',))
+    (corrupt_dir / 'run.json').unlink()
+    corrupt_dir.rmdir()
+
     assert api.execute(
         'workflows.recycle',
         {'workflow_ref': 'wf-clean-target'},
