@@ -196,8 +196,6 @@ def _read_task_link(
         if cached is not None and cached[0] == before_fp and cached[1].task_id == task_id:
             return _clone_cached_task_link(cached_link), None
     try:
-        if not resolved_path.exists():
-            raise FileNotFoundError(key)
         payload = json.loads(resolved_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"conversation task link is {type(payload).__name__}, expected object")
@@ -1043,9 +1041,10 @@ class TaskStore:
         if not selected:
             return None, None
         path = self.storage.task_path(selected)
-        if not path.exists():
+        link, error = _read_task_link(path, selected)
+        if error is not None and error.get("error_type") == "FileNotFoundError":
             return None, None
-        return _read_task_link(path, selected)
+        return link, error
 
     # 复用单任务读口的缺失与坏账合同；归属只核链接中的线程身份，不加载线程历史索引。
     def link_report(
@@ -1172,10 +1171,10 @@ class TaskStore:
         self, task_id: str
     ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
         path = self.storage.task_path(task_id)
-        if not path.exists():
-            return None, None
         link, error = _read_task_link(path, task_id, context="conversation.thread_for_task")
         if error is not None:
+            if error.get("error_type") == "FileNotFoundError":
+                return None, None
             return None, error
         if link is None:
             return None, None
@@ -1231,12 +1230,12 @@ class TaskStore:
 def _update_task_status(store: TaskStore, request: dict) -> ThreadTaskLink | None:
     task_id = str(request.get("task_id") or "")
     path = store.storage.task_path(task_id)
-    if not path.exists():
+    cached_link = store.load(task_id)
+    if cached_link is None:
         return None
     current = now(request.get("now"))
     requested_status = str(request.get("status") or "active")
     expected_status = str(request.get("expected_status") or "").strip().lower()
-    cached_link, _ = _read_task_link(path, task_id)
     if (cached_link is not None and str(cached_link.status or "") == requested_status
             and (not expected_status or str(cached_link.status or "").strip().lower() == expected_status)):
         thread, _ = store._load_thread_report(cached_link.thread_id)
