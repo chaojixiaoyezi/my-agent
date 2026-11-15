@@ -254,6 +254,13 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         with self._reasoning_update_lock:
             if self._reasoning_update_unsupported:
                 return False
+        from ..settings.model_oauth_schema import SIWC_BASE
+
+        if (
+            str((getattr(self, "auth_ref", None) or {}).get("mode") or "") == "chatgpt"
+            and str(self.api_base or "").rstrip("/") == SIWC_BASE.rstrip("/")
+        ):
+            return False
         return str(self.model_name or "").lower().startswith("gpt-6")
 
     # LLM: 只重放本次新插入尾项的精确拒绝；同一绝对期限、取消及流关闭由原发送边界保留。
@@ -353,16 +360,34 @@ def _is_reasoning_update_rejection(exc: BaseException, *, payload: dict, inserte
     details = exc.details
     provider = details.get("provider_error") if isinstance(details, Mapping) else None
     error = provider.get("error") if isinstance(provider, Mapping) else None
-    if not isinstance(error, Mapping) or error.get("code") not in {"invalid_value", "unsupported_value", "unsupported_type"}:
+    if not isinstance(error, Mapping):
+        error = provider if isinstance(provider, Mapping) else None
+    if not isinstance(error, Mapping):
         return False
-    param = error.get("param")
-    match = re.fullmatch(r"input(?:\[([0-9]+)\]|\.([0-9]+))\.type", param) if isinstance(param, str) else None
     items = payload.get("input")
-    return bool(match and isinstance(items, list) and type(inserted_index) is int
-                and 0 <= inserted_index < len(items)
-                and int(match.group(1) or match.group(2)) == inserted_index
-                and isinstance(items[inserted_index], Mapping)
-                and items[inserted_index].get("type") == "configuration_update")
+    if not (
+        isinstance(items, list)
+        and type(inserted_index) is int
+        and 0 <= inserted_index < len(items)
+        and isinstance(items[inserted_index], Mapping)
+        and items[inserted_index].get("type") == "configuration_update"
+    ):
+        return False
+    code = str(error.get("code") or "").strip()
+    param = error.get("param")
+    if code in {"invalid_value", "unsupported_value", "unsupported_type"}:
+        match = re.fullmatch(r"input(?:\[([0-9]+)\]|\.([0-9]+))\.type", param) if isinstance(param, str) else None
+        return bool(match and int(match.group(1) or match.group(2)) == inserted_index)
+    if code == "subscription_sharing_unsupported_capability":
+        if isinstance(param, str):
+            match = re.fullmatch(r"input(?:\[([0-9]+)\]|\.([0-9]+))(?:\.type)?", param)
+            if match and int(match.group(1) or match.group(2)) == inserted_index:
+                return True
+            if "configuration_update" in param.lower():
+                return True
+        message = error.get("message")
+        return isinstance(message, str) and "configuration_update" in message.lower()
+    return False
 
 
 # LLM: 本次请求独占观察状态；原回调及 complete 方法原样代理，不把状态放到共享 backend。

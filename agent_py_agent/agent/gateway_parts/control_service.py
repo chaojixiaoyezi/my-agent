@@ -22,6 +22,7 @@ from collections import Counter
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NamedTuple
 
 from ..concurrency.interrupt import (
@@ -1351,11 +1352,16 @@ def _execute_registered_compact_control(
                 True,
                 "当前会话还没有可压缩的历史。",
             )
+        from ..backends.provider_headers import provider_runtime_scope
         from ..conversation.compact import load_conversation_compact_source
         from ..conversation.compact_scope import THREAD_COMPACT_SCOPE
         from ..settings.model_scope import selected_model_scope
 
-        with _manual_compact_lane(owner_agent, store, thread.thread_id), selected_model_scope(owner_agent, thread_id=thread.thread_id):
+        with (
+            _manual_compact_lane(owner_agent, store, thread.thread_id),
+            selected_model_scope(owner_agent, thread_id=thread.thread_id),
+            provider_runtime_scope(owner_agent, SimpleNamespace(thread_id=thread.thread_id)),
+        ):
             refreshed = store.threads.load(thread.thread_id)
             if refreshed is None:
                 raise OSError("conversation thread disappeared before manual compact")

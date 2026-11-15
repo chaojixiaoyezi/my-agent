@@ -17,7 +17,7 @@ from agent_py_agent.agent.backends.base import (
 )
 from agent_py_agent.agent.backends.errors import ProviderResponseError, ProviderTimeoutError
 from agent_py_agent.agent.backends.factory import get_backend
-from agent_py_agent.agent.backends.http import HttpBackend
+from agent_py_agent.agent.backends.http import HttpBackend, invalidate_capability_probe_memo
 from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.responses import OpenAIResponsesBackend
 from agent_py_agent.agent.settings.config import AgentConfig
@@ -35,6 +35,13 @@ _DEFAULT_OPTIONS = BackendOptions(
 
 def _options(**overrides) -> BackendOptions:
     return replace(_DEFAULT_OPTIONS, **overrides)
+
+
+@pytest.fixture(autouse=True)
+def _reset_capability_probe_memo():
+    invalidate_capability_probe_memo()
+    yield
+    invalidate_capability_probe_memo()
 
 
 class TestModelResponse:

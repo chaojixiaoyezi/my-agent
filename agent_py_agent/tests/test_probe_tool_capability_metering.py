@@ -21,6 +21,7 @@ from agent_py_agent.agent.agent_core.runtime.context_compactor import RuntimeCom
 from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends.errors import ProviderRecoverableError
 from agent_py_agent.agent.backends.http import (
+    invalidate_capability_probe_memo,
     reset_unaccounted_probe_attempt_count,
     unaccounted_probe_attempt_count,
 )
@@ -39,6 +40,13 @@ from agent_py_agent.agent.conversation.native_history import CANONICAL_NATIVE_ME
 
 _API = "https://relay.example.test/v1"
 _KEY = "<redacted>"
+
+
+@pytest.fixture(autouse=True)
+def _reset_capability_probe_memo():
+    invalidate_capability_probe_memo()
+    yield
+    invalidate_capability_probe_memo()
 
 
 # 函数用途: 构造一个真实 OpenAI 兼容后端的最小配置（窗口 128000 → 输出上限 32000，非流式）。
@@ -275,6 +283,7 @@ def test_unaccounted_probe_attempt_is_counted(monkeypatch):
     assert backend2.probe_tool_capability().native_supported is True
     assert unaccounted_probe_attempt_count() == 1
     reset_unaccounted_probe_attempt_count()
+    invalidate_capability_probe_memo()
     agent = _agent(wire, monkeypatch)
     select_tool_protocol(agent, run_id="run-1", request_id="req-1")
     assert unaccounted_probe_attempt_count() == 0, "绑定记账 scope 的探测不计入未绑定计数"

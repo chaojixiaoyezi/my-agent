@@ -7,7 +7,11 @@ import pytest
 
 from agent_py_agent.agent.backends.base import BackendOptions
 from agent_py_agent.agent.backends.errors import ProviderTransientError
-from agent_py_agent.agent.backends.http import HttpBackend, unaccounted_probe_attempt_count
+from agent_py_agent.agent.backends.http import (
+    HttpBackend,
+    invalidate_capability_probe_memo,
+    unaccounted_probe_attempt_count,
+)
 from agent_py_agent.agent.backends.request_scope import provider_request_budget
 from agent_py_agent.agent.concurrency.interrupt import interrupt_by_name, register_interruptible
 from agent_py_agent.agent.llm_scale import hot_path
@@ -18,7 +22,9 @@ def admission(monkeypatch):
     monkeypatch.setenv('LLM_MAX_INFLIGHT', '1')
     monkeypatch.setenv('LLM_ADMISSION_WAIT_SECONDS', '10')
     hot_path.reset_hot_path_admission_for_test()
+    invalidate_capability_probe_memo()
     yield
+    invalidate_capability_probe_memo()
     hot_path.reset_hot_path_admission_for_test()
 
 
