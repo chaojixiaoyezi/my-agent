@@ -1,3 +1,18 @@
+## 2026-11-15 第二波运行时稳定性与工具契约加固（NW2：W1–W9）
+
+```text
+agent_py_agent/tests/
+|-- test_nw2_w1_collaboration_handoff.py                 # W1 协作未决工单索引步进、交接活跃索引修复、邮箱游标防护与交接面板未知副作用回执回归单测
+|-- test_nw2_w2_memory_archive_retrieval.py              # W2 正式记忆读索引续扫调度、归档锁内有界尾部读回核验与损坏向量缓存戳记回归单测
+|-- test_nw2_w3_tui_and_gateway_observer.py              # W3 TUI 观察器弱引用淘汰、/expand 有界保留与序号推进、控制发件箱退避及网关硬截止续期回归单测
+|-- test_nw2_w4_feishu_webhook_and_media.py              # W4 飞书有界回调服务接入、请求体上限部署参数与撤回/过期入站附件终态分类回归单测
+|-- test_nw2_w5_local_search_budget.py                   # W5 LocalStore 有界 LIKE 降级扫描与 FTS 异常单遍透传回归单测
+|-- test_nw2_w6_scheduler_index_and_reserve.py           # W6 调度历史索引成员归属核验与 O(1) 预约活跃通道集合回归单测
+|-- test_nw2_w7_taxonomy_and_tooling_contracts.py        # W7 运行库恢复错误契约、错误分类表登记与业务工作流/配置/会话工具说明对齐回归单测
+|-- test_nw2_w8_subagent_supervision_and_hygiene.py      # W8 子代理孤儿监管单行错误隔离与投影清理持久游标/时间预算回归单测
+`-- test_nw2_w9_retired_tool_policy_and_gates.py         # W9 子代理已退役工具名闭式诊断提示与确定性门禁夹具对齐回归单测
+```
+
 ## 2026-11-14 底座 41+5 双审收口修复与 LiveLab V1 观测加固（fw41：W1–W10）
 
 ```text
