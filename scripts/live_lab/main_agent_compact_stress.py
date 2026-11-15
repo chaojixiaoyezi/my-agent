@@ -5,9 +5,19 @@ from __future__ import annotations
 import json
 import os
 import textwrap
+from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
+
+from .compact_observations import (
+    assert_isolated_home_path,
+    collect_bg_process_census,
+    collect_compaction_observations,
+    resolve_live_lab_home_context,
+    snapshot_compaction_baseline,
+)
 
 DEFAULT_STRESS_SIZE_MB = 10
 SECTION_COUNT = 80
@@ -25,11 +35,22 @@ class StressFact:
 
 def case_main_compact_stress_long_read(lab) -> None:
     lab.section("CASE main_compact_stress_long_read")
-    _ensure_compact_stress_config(lab)
-    _disable_shell_tool_for_compact_stress(lab)
+    home_ctx = _ensure_compact_stress_config(lab)
+    _disable_shell_tool_for_compact_stress(lab, home_ctx=home_ctx)
+
+    baseline = snapshot_compaction_baseline(
+        compact_dir=home_ctx["owner_compact_dir"],
+        threads_dir=home_ctx["threads_dir"],
+    )
+    pre_bg = collect_bg_process_census(home_ctx["process_store_root"])
+
     facts = _stress_facts()
     source = lab.fixture_root / "data" / "long_field_journal.txt"
-    _seed_stress_file(source, facts, size_mb=_stress_size_mb())
+    source_meta = _seed_stress_file(source, facts, size_mb=_stress_size_mb())
+
+    report = lab.fixture_root / "lab_outputs" / "compact-stress" / "report.md"
+    pre_report_stamp = _artifact_stamp(report)
+
     prompt = _compact_stress_prompt()
     contract_path = _compact_stress_delivery_contract_path(lab, facts)
     lab.record_prompt("main_compact_stress_long_read", prompt)
@@ -37,13 +58,49 @@ def case_main_compact_stress_long_read(lab) -> None:
         lab.agent_command("run", prompt, "--delivery-contract-file", str(contract_path), "--save"),
         timeout=lab.args.timeout + 900,
     )
-    (lab.responses_dir / "main_compact_stress_long_read.stdout.txt").write_text(response.stdout, encoding="utf-8")
-    report = lab.fixture_root / "lab_outputs" / "compact-stress" / "report.md"
+    stdout_path = lab.responses_dir / "main_compact_stress_long_read.stdout.txt"
+    stdout_path.write_text(response.stdout, encoding="utf-8")
+
+    _assert_current_run_report_provenance(report, pre_report_stamp)
     _assert_stress_report(lab, report, facts)
-    compact_count = _compact_cycle_count(lab.fixture_root / ".my_agent" / "home")
+
+    telemetry_sources: list[Any] = [response.stdout, response.stderr]
+    turn_usage = list(getattr(lab, "turn_usage_records", ()))
+    observations = collect_compaction_observations(
+        config_path=lab.config_path,
+        turn_usages=turn_usage,
+        telemetry_sources=telemetry_sources,
+        baseline=baseline,
+        pre_bg_census=pre_bg,
+    )
+    observations["source_provenance"] = source_meta
+    observations["report_provenance"] = _artifact_stamp(report)
+
+    telemetry_path = lab.responses_dir / "main_compact_stress_long_read.telemetry.json"
+    telemetry_path.write_text(json.dumps(observations, ensure_ascii=False, indent=2), encoding="utf-8")
+    if hasattr(lab, "record_case_telemetry"):
+        lab.record_case_telemetry("main_compact_stress_long_read", observations)
+
+    compact_count = int(observations["checkpoints"]["successful_cycle_count"])
     if compact_count < REQUIRED_COMPACT_CYCLES:
-        raise RuntimeError(f"compact 次数不足：expected>={REQUIRED_COMPACT_CYCLES}, actual={compact_count}")
+        raise RuntimeError(
+            f"COMPACT_CYCLES_INSUFFICIENT: expected>={REQUIRED_COMPACT_CYCLES} committed canonical generations "
+            f"above baseline, actual={compact_count} (uncommitted_or_superseded="
+            f"{observations['checkpoints']['uncommitted_or_superseded_count']})"
+        )
+    if observations["telemetry"]["runaway_no_progress_detected"]:
+        raise RuntimeError(
+            "COMPACT_NO_PROGRESS_LOOP: repeated non-progress compaction skip events detected: "
+            f"count={observations['telemetry']['no_progress_count']}"
+        )
+    bg_diff = observations["bg_census_diff"]
+    if bg_diff["leaked_count"] > 0:
+        raise RuntimeError(
+            f"BG_PROCESS_LEAK: non-settled bg-* sessions remained after run: {bg_diff['leaked_sessions']}"
+        )
+
     lab.log(f"compact_stress_report={report}")
+    lab.log(f"compact_stress_telemetry={telemetry_path}")
     lab.log(f"compact_stress_compact_cycles={compact_count}")
 
 
@@ -62,12 +119,66 @@ def _compact_stress_prompt() -> str:
     ).strip()
 
 
-def _seed_stress_file(path: Path, facts: list[StressFact], *, size_mb: int) -> None:
+def _seed_stress_file(path: Path, facts: list[StressFact], *, size_mb: int) -> dict[str, Any]:
     target_bytes = max(1, int(size_mb)) * 1024 * 1024
-    if path.exists() and path.stat().st_size >= target_bytes:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_stress_file_text(facts, target_bytes=target_bytes), encoding="utf-8")
+    expected_text = _stress_file_text(facts, target_bytes=target_bytes)
+    expected_digest = sha256(expected_text.encode("utf-8")).hexdigest()
+    reused = False
+    if path.is_file() and path.stat().st_size >= target_bytes:
+        actual_digest = _sha256_path(path)
+        if actual_digest == expected_digest:
+            reused = True
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(expected_text, encoding="utf-8")
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(expected_text, encoding="utf-8")
+    st = path.stat()
+    return {
+        "path": str(path),
+        "bytes": int(st.st_size),
+        "sha256": expected_digest,
+        "reused_verified_content": reused,
+    }
+
+
+def _sha256_path(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_stamp(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"exists": False, "path": str(path)}
+    st = path.stat()
+    return {
+        "exists": True,
+        "path": str(path),
+        "size": int(st.st_size),
+        "mtime_ns": int(st.st_mtime_ns),
+        "sha256": _sha256_path(path),
+    }
+
+
+def _assert_current_run_report_provenance(report: Path, pre_stamp: Mapping[str, Any]) -> None:
+    if not report.is_file():
+        raise RuntimeError(f"compact stress 报告不存在: {report}")
+    post_stamp = _artifact_stamp(report)
+    if pre_stamp.get("exists") and (
+        post_stamp.get("mtime_ns") == pre_stamp.get("mtime_ns")
+        and post_stamp.get("size") == pre_stamp.get("size")
+        and post_stamp.get("sha256") == pre_stamp.get("sha256")
+    ):
+        raise RuntimeError(
+            "STALE_REPORT_PROVENANCE: compact stress report matches preexisting file unchanged across reused run_id"
+        )
 
 
 def _stress_file_text(facts: list[StressFact], *, target_bytes: int) -> str:
@@ -217,58 +328,75 @@ def _missing_fact_values(lowered_content: str, fact: StressFact, *, include_chec
     ]
 
 
-def _compact_cycle_count(home: Path) -> int:
-    apply_ids: set[str] = set()
-    for ledger in home.glob("**/memory_archive/**/compact_applies/ledger.jsonl"):
-        apply_ids.update(_jsonl_apply_ids(ledger))
-    return len(apply_ids)
+def _compact_cycle_count(
+    compact_dir: Path,
+    *,
+    threads_dir: Path | None = None,
+    baseline: Mapping[str, Any] | None = None,
+) -> int:
+    from .compact_observations import load_canonical_compaction_checkpoints
+
+    result = load_canonical_compaction_checkpoints(
+        compact_dir=compact_dir,
+        threads_dir=threads_dir,
+        baseline=baseline,
+    )
+    return int(result["successful_cycle_count"])
 
 
-def _jsonl_apply_ids(path: Path) -> set[str]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return set()
-    apply_ids: set[str] = set()
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        apply_id = str(payload.get("apply_id") or payload.get("event_id") or "").strip()
-        if apply_id:
-            apply_ids.add(apply_id)
-    return apply_ids
-
-
-def _ensure_compact_stress_config(lab) -> None:
+def _ensure_compact_stress_config(lab) -> dict[str, Any]:
     marker = "# compact-stress overrides"
     text = lab.config_path.read_text(encoding="utf-8")
-    if marker in text:
-        return
-    overrides = textwrap.dedent(
-        f"""
+    if marker not in text:
+        overrides = textwrap.dedent(
+            f"""
 
-        {marker}
-        enable_subagents: false
-        max_tool_rounds: 0
-        model_context_window_tokens: 200000
-        memory_compact_auto_trigger_percent: 70
-        request_timeout: {max(600, int(lab.args.timeout))}
-        tool_read_max_chars: 100000
-        tool_output_externalize_min_chars: 140000
-        tool_output_preview_chars: 8000
-        """
-    )
-    lab.config_path.write_text(text + overrides, encoding="utf-8")
+            {marker}
+            enable_subagents: false
+            max_tool_rounds: 0
+            model_context_window_tokens: 200000
+            memory_compact_trigger_percent: 70
+            request_timeout: {max(600, int(lab.args.timeout))}
+            tool_read_max_chars: 100000
+            tool_output_externalize_min_chars: 140000
+            tool_output_preview_chars: 8000
+            """
+        )
+        lab.config_path.write_text(text + overrides, encoding="utf-8")
+
+    session = getattr(lab, "_session", None)
+    if session is not None and hasattr(session, "refresh_resolved_home_context"):
+        home_ctx = session.refresh_resolved_home_context()
+    else:
+        home_ctx = resolve_live_lab_home_context(lab.config_path)
+
+    policy = home_ctx.get("compact_policy") or {}
+    effective_trigger = policy.get("effective_trigger_percent")
+    if effective_trigger != 70:
+        raise RuntimeError(
+            f"COMPACT_POLICY_OVERRIDE_NOT_EFFECTIVE: expected effective_trigger_percent=70, actual={effective_trigger}, "
+            f"source={policy.get('effective_source')!r}"
+        )
+    if hasattr(lab, "log"):
+        lab.log(f"compact_stress_effective_policy={json.dumps(policy, ensure_ascii=False)}")
+    return home_ctx
 
 
-def _disable_shell_tool_for_compact_stress(lab) -> None:
-    policy_path = lab.fixture_root / ".my_agent" / "home" / "owners" / "local" / "main" / "tool_policy.json"
+def _disable_shell_tool_for_compact_stress(
+    lab,
+    *,
+    home_ctx: Mapping[str, Any] | None = None,
+) -> Path:
+    resolved = dict(home_ctx) if home_ctx is not None else resolve_live_lab_home_context(lab.config_path)
+    policy_path = Path(resolved["owner_tool_policy_json"])
+    assert_isolated_home_path(resolved["isolated_home_root"], label="isolated_home")
+    fixture_root = getattr(lab, "fixture_root", None)
+    if isinstance(fixture_root, Path):
+        resolved_fixture = fixture_root.resolve(strict=False)
+        if policy_path.resolve(strict=False).is_relative_to(resolved_fixture):
+            raise RuntimeError(
+                f"TOOL_POLICY_INSIDE_FIXTURE: resolved owner_tool_policy_json {policy_path} unexpectedly inside {resolved_fixture}"
+            )
     policy_path.parent.mkdir(parents=True, exist_ok=True)
     policy_path.write_text(
         json.dumps(
@@ -283,7 +411,9 @@ def _disable_shell_tool_for_compact_stress(lab) -> None:
         ),
         encoding="utf-8",
     )
-    lab.log(f"compact_stress_disabled_tools={policy_path}")
+    if hasattr(lab, "log"):
+        lab.log(f"compact_stress_disabled_tools={policy_path}")
+    return policy_path
 
 
 def _stress_size_mb() -> int:

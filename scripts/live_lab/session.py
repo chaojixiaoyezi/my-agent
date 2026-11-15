@@ -7,9 +7,25 @@ from __future__ import annotations
 """
 
 import argparse
+import hashlib
+import json
 import time
 import uuid
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
+
+from .compact_observations import (
+    UsageFileCursor,
+    aggregate_usage_records,
+    assert_isolated_home_path,
+    collect_bg_process_census,
+    discover_usage_ledger_files,
+    read_usage_delta_since,
+    resolve_live_lab_home_context,
+    snapshot_compaction_baseline,
+    snapshot_usage_cursors,
+)
 
 
 def live_lab_model_request_timeout(args: argparse.Namespace) -> int:
@@ -54,13 +70,59 @@ class LabSessionManager:
         self.fixture_root = self.run_root / "fixture_project"
         # 宿主数据根不能嵌在业务工作区内；两个目录同属本轮，仍保持完全隔离。
         self.isolated_home = self.run_root / "home"
+        assert_isolated_home_path(self.run_root, label="run_root")
+        assert_isolated_home_path(self.isolated_home, label="isolated_home")
+
         self.prompts_dir = self.run_root / "prompts"
         self.responses_dir = self.run_root / "responses"
         self.config_path = self.run_root / "live_agent_config.yaml"
         self.transcript_path = self.run_root / "TRANSCRIPT.md"
         self.summary_path = self.run_root / "live_lab_summary.json"
         self.stop_file = self.run_root / "STOP"
+        self.provenance_path = self.run_root / "run_provenance.json"
         self.created = False
+
+        self.run_token = uuid.uuid4().hex
+        self.started_at = time.time()
+        self.started_monotonic_ns = time.monotonic_ns()
+        self.reused_existing_run_root = self.run_root.exists()
+        self.preexisting_artifacts = self._snapshot_preexisting_artifacts()
+
+        self.resolved_home_context: dict[str, Any] = {}
+        self.owner_home_dir: Path | None = None
+        self.owner_compact_dir: Path | None = None
+        self.owner_tool_policy_json: Path | None = None
+        self.conversation_workspace: Path | None = None
+        self.model_usage_dir: Path | None = None
+        self.threads_dir: Path | None = None
+        self.process_store_root: Path | None = None
+        self.resolved_compact_policy: dict[str, Any] = {}
+        self.usage_ledger_path: Path | None = None
+        self.turn_usage_records: list[dict[str, Any]] = []
+        self._active_usage_cursors: dict[str, UsageFileCursor] = {}
+        self.compact_baseline: dict[str, Any] = {}
+        self.bg_census_baseline: dict[str, Any] = {}
+
+    def _snapshot_preexisting_artifacts(self) -> dict[str, dict[str, Any]]:
+        targets = {
+            "summary_json": self.summary_path,
+            "compact_stress_source": self.fixture_root / "data" / "long_field_journal.txt",
+            "compact_stress_report": self.fixture_root / "lab_outputs" / "compact-stress" / "report.md",
+        }
+        snapshot: dict[str, dict[str, Any]] = {}
+        for name, target in targets.items():
+            if target.is_file():
+                st = target.stat()
+                snapshot[name] = {
+                    "exists": True,
+                    "path": str(target),
+                    "size": int(st.st_size),
+                    "mtime_ns": int(st.st_mtime_ns),
+                    "sha256": _sha256_file(target) if st.st_size <= 32 * 1024 * 1024 else "",
+                }
+            else:
+                snapshot[name] = {"exists": False, "path": str(target)}
+        return snapshot
 
     def setup(self) -> None:
         """creates the isolated live-lab workspace and config."""
@@ -72,6 +134,7 @@ class LabSessionManager:
         self.write_fixture()
         self.write_config()
         self.prepare_runtime_dirs()
+        self.write_provenance()
         self.created = True
 
     @property
@@ -158,6 +221,7 @@ request_timeout: {request_timeout}
         from agent_py_agent.cli.common import make_lightweight_cli_agent_context
 
         context = make_lightweight_cli_agent_context(argparse.Namespace(config=str(self.config_path)))
+        assert_isolated_home_path(context.home_paths.root, label="resolved_home_root")
         ensure_my_agent_home(context.home_paths.root)
         # 项目路径与 owner 固定服务路径的相对基准不同，不能手拼 fixture 子目录。
         event_path = context.runtime_paths["local_store_events_path"]
@@ -166,3 +230,127 @@ request_timeout: {request_timeout}
         memory = JsonlMemory(context.runtime_paths["memory_path"])
         memory.migrate_tiers()
         memory.rebuild_read_index()
+
+        self.refresh_resolved_home_context()
+        self.compact_baseline = snapshot_compaction_baseline(
+            compact_dir=self.owner_compact_dir or (self.isolated_home / "owners" / "local" / "main" / "compact"),
+            threads_dir=self.threads_dir,
+        )
+        self.bg_census_baseline = collect_bg_process_census(self.process_store_root)
+        self._active_usage_cursors = snapshot_usage_cursors(self.usage_ledger_files())
+
+    def refresh_resolved_home_context(self) -> dict[str, Any]:
+        """Re-read effective isolated paths and compact policy from live_agent_config.yaml."""
+        info = resolve_live_lab_home_context(self.config_path)
+        self.resolved_home_context = info
+        self.owner_home_dir = Path(info["owner_home_dir"])
+        self.owner_compact_dir = Path(info["owner_compact_dir"])
+        self.owner_tool_policy_json = Path(info["owner_tool_policy_json"])
+        self.conversation_workspace = Path(info["conversation_workspace"])
+        self.model_usage_dir = Path(info["model_usage_dir"])
+        self.threads_dir = Path(info["threads_dir"])
+        self.process_store_root = Path(info["process_store_root"])
+        self.resolved_compact_policy = dict(info.get("compact_policy") or {})
+        return info
+
+    def write_provenance(self) -> Path:
+        """Persist explicit run baseline and provenance for D4-REUSE verification."""
+        provenance = {
+            "schema": "live_lab_run_provenance.v1",
+            "run_token": self.run_token,
+            "started_at": self.started_at,
+            "reused_existing_run_root": self.reused_existing_run_root,
+            "run_root": str(self.run_root),
+            "isolated_home": str(self.isolated_home),
+            "owner_home_dir": str(self.owner_home_dir or ""),
+            "owner_compact_dir": str(self.owner_compact_dir or ""),
+            "owner_tool_policy_json": str(self.owner_tool_policy_json or ""),
+            "config_sha256": _sha256_file(self.config_path) if self.config_path.is_file() else "",
+            "source_config_sha256": _sha256_file(self.source_config) if self.source_config.is_file() else "",
+            "preexisting_artifacts": self.preexisting_artifacts,
+            "compact_baseline": self.compact_baseline,
+            "bg_census_baseline": self.bg_census_baseline,
+        }
+        self.provenance_path.write_text(json.dumps(provenance, ensure_ascii=False, indent=2), encoding="utf-8")
+        return self.provenance_path
+
+    def usage_ledger_files(self, *, extra_files: Sequence[str | Path] = ()) -> list[Path]:
+        """Return deduplicated usage JSONL files belonging strictly to this isolated run."""
+        search_roots: list[Path] = [self.run_root, self.isolated_home]
+        if self.owner_home_dir is not None:
+            search_roots.append(self.owner_home_dir)
+        if self.conversation_workspace is not None:
+            search_roots.append(self.conversation_workspace)
+        files = discover_usage_ledger_files(
+            model_usage_dir=self.model_usage_dir,
+            llm_usage_path=self.usage_ledger_path,
+            search_roots=search_roots,
+        )
+        seen = {str(item.resolve(strict=False)) for item in files}
+        for item in extra_files:
+            path = Path(item)
+            if path.is_file():
+                resolved = str(path.resolve(strict=False))
+                if resolved not in seen:
+                    seen.add(resolved)
+                    files.append(Path(resolved))
+        return files
+
+    def begin_turn_usage(
+        self,
+        turn_label: str = "",
+        *,
+        extra_files: Sequence[str | Path] = (),
+    ) -> dict[str, Any]:
+        """Snapshot usage JSONL byte/line cursors right before a turn executes."""
+        files = self.usage_ledger_files(extra_files=extra_files)
+        cursors = snapshot_usage_cursors(files)
+        self._active_usage_cursors = dict(cursors)
+        return {
+            "turn_label": turn_label or f"turn_{len(self.turn_usage_records) + 1}",
+            "started_at": time.time(),
+            "files": [str(item) for item in files],
+            "cursors": {key: value.to_dict() for key, value in cursors.items()},
+        }
+
+    def end_turn_usage(
+        self,
+        turn_token: Mapping[str, Any] | None = None,
+        *,
+        turn_label: str = "",
+        extra_files: Sequence[str | Path] = (),
+    ) -> dict[str, Any]:
+        """Slice ONLY newly completed usage rows since begin_turn_usage and aggregate them."""
+        token = dict(turn_token or {})
+        label = turn_label or str(token.get("turn_label") or f"turn_{len(self.turn_usage_records) + 1}")
+        before_raw = token.get("cursors")
+        before_cursors = (
+            before_raw
+            if isinstance(before_raw, Mapping)
+            else self._active_usage_cursors
+        )
+        files = self.usage_ledger_files(extra_files=extra_files)
+        rows, after_cursors, delta_meta = read_usage_delta_since(files, before_cursors)
+        self._active_usage_cursors = after_cursors
+        summary = aggregate_usage_records(rows)
+        record = {
+            "turn": label,
+            "started_at": token.get("started_at"),
+            "finished_at": time.time(),
+            "raw_event_count": len(rows),
+            **summary,
+            "delta_metadata": delta_meta,
+        }
+        self.turn_usage_records.append(record)
+        return record
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
