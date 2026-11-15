@@ -12,7 +12,9 @@ agent_py_agent/tests/
 |-- test_nw_w6_curator_recovery_hot_scope_and_loops.py   # W6 审计游标预算止损、Curator 启动恢复、HOT 作用域校验、租约活性与双池轮询
 |-- test_nw_w7_claims_runtimedb_and_wake_goal.py         # W7 认领心跳竞态防护、task_runs 重开与独立收口、批次去重及目标唤醒有界重试
 |-- test_nw_w8_config_pty_compact_and_tool_loop.py       # W8 五项可调/部署配置贯通、PTY 会话配额、运行事实增量游标与截断续写
-`-- test_nw37_r3_v13_compensation_and_archive.py         # R3 v13 日志提交后补偿防护、会话任务不完整扫描拒绝与终态跳过工作流归档
+|-- test_nw37_r3_v13_compensation_and_archive.py         # R1-R3 v13 日志提交后补偿防护、同技能操作串行门、会话任务不完整扫描拒绝与终态跳过归档
+|-- test_nw37_r3_watch_state_read_and_binding.py         # R3 json_io 直读异常不误判缺失与监听状态合并采纳传输绑定及轮询周期
+`-- test_nw37_r3_claim_read_boundary.py                  # R3 认领续租遇到线程读取瞬态 I/O 异常走租约重试、不误判线程缺失中断
 ```
 
 ## 2026-11-14 工具表面收敛与副作用错误契约（Workstream B：W0–W6）
