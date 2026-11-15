@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from ...model_visible_refs import has_placeholder_path_segment
+from ...tooling.write_boundary import WRITE_TOOL_NAMES
 from ..context_bundle_refs import execution_cwd
 
 OUTPUT_TARGET_LOCKED_CODE = "OUTPUT_TARGET_LOCKED"
+OUTPUT_TARGET_NOT_WRITABLE_CODE = "OUTPUT_TARGET_NOT_WRITABLE"
 _DECLARED_FIELDS = ("output_files", "output_refs")
 # 与 context_bundle_contracts._SAFE_FILE_SUFFIX_RE 保持一致（导入会成环，正则单独镜像）
 _SAFE_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,63}$")
@@ -23,20 +25,29 @@ class OutputAnchoring:
     """声明产物的真实路径和冲突警告（只读投影）。"""
 
     anchored_refs: list[str] = field(default_factory=list)
-    warnings: list[dict[str, str]] = field(default_factory=list)
+    warnings: list[dict[str, Any]] = field(default_factory=list)
 
 
 # LLM: 输出声明不产生权限，继承 cwd 与绝对目标必须和文件工具相同。
-# 函数用途: 解析显式产物引用，并保留任务锁冲突警告；不创建目录或搬运文件。
+# 函数用途: 解析显式产物引用，并保留任务锁与不可写目标冲突警告；不创建目录或扩展写权限。
 def anchored_output_refs(task: Any) -> OutputAnchoring:
     locked_paths = _resolved_roots(getattr(task, "locked_files", None) or [])
+    writable_roots = _task_writable_roots(task)
+    forbidden_roots = _task_forbidden_roots(task)
     refs: list[str] = []
-    warnings: list[dict[str, str]] = []
+    warnings: list[dict[str, Any]] = []
     for ref, fieldname in _declared_path_refs(task):
         target = anchor_refs_for_execution(task, [ref])[0]
         if target not in refs:
             refs.append(target)
         _append_locked_warning(warnings, fieldname, target, locked_paths)
+        _append_not_writable_warning(
+            warnings,
+            fieldname,
+            target,
+            writable_roots=writable_roots,
+            forbidden_roots=forbidden_roots,
+        )
     return OutputAnchoring(anchored_refs=refs, warnings=warnings)
 
 
@@ -62,7 +73,7 @@ def anchor_refs_for_execution(task: Any, refs: list[str]) -> list[str]:
 #   的客观事实，必须暴露给模型与 watch 报告；缺 cwd 的相对引用不猜宿主地址。
 # 函数用途: 落点被锁时追加 OUTPUT_TARGET_LOCKED 警告（去重）。
 def _append_locked_warning(
-    warnings: list[dict[str, str]],
+    warnings: list[dict[str, Any]],
     fieldname: str,
     anchored: str,
     locked_paths: list[Path],
@@ -227,10 +238,120 @@ def record_locked_files_change(task: Any, previous: list[str] | None, now: float
     task.attributes = attrs
 
 
+# LLM: 非扩权派工前预检：按真实任务写根与 forbidden_write_roots 评估绝对输出目标；
+#   缺少可信 cwd 的相对路径继续保留原引用，不靠猜宿主 cwd 触发误报，也不向 allowed_write_roots 扩权。
+# 函数用途: 当已锚定为绝对路径的输出目标不可写时，追加 OUTPUT_TARGET_NOT_WRITABLE 警告（去重）。
+def _append_not_writable_warning(
+    warnings: list[dict[str, Any]],
+    fieldname: str,
+    anchored: str,
+    *,
+    writable_roots: list[Path],
+    forbidden_roots: list[Path],
+    max_roots: int = 5,
+) -> None:
+    target = Path(anchored).expanduser()
+    if not target.is_absolute():
+        return
+    resolved_target = target.resolve(strict=False)
+    matching_allowed = [
+        root for root in writable_roots if resolved_target == root or _is_relative_to(resolved_target, root)
+    ]
+    blocked_by_forbidden = False
+    if matching_allowed and forbidden_roots:
+        allowed_specificity = max(len(root.parts) for root in matching_allowed)
+        blocked_by_forbidden = any(
+            (resolved_target == froot or _is_relative_to(resolved_target, froot))
+            and len(froot.parts) >= allowed_specificity
+            for froot in forbidden_roots
+        )
+    if matching_allowed and not blocked_by_forbidden:
+        return
+    if any(w.get("ref") == anchored and w.get("code") == OUTPUT_TARGET_NOT_WRITABLE_CODE for w in warnings):
+        return
+    capped_roots = [root.as_posix() for root in writable_roots[:max(0, max_roots)]]
+    roots_preview = ", ".join(capped_roots) if capped_roots else "none"
+    warnings.append(
+        {
+            "code": OUTPUT_TARGET_NOT_WRITABLE_CODE,
+            "field": fieldname,
+            "ref": anchored,
+            "target_path": resolved_target.as_posix(),
+            "writable_roots": capped_roots,
+            "side_effect": "none",
+            "recommended_action": "use_writable_child_workspace_or_parent_integration",
+            "message_zh": (
+                f"声明的输出目标 {resolved_target.as_posix()} 不在子代理可写范围内"
+                f"（writable_roots={roots_preview}）；未自动放宽写权限，"
+                "请改派到子代理可写工作区内或由父级整合输出。"
+            ),
+        }
+    )
+
+
+# 函数用途: 提取子代理当前真正可写的规范绝对根目录（不扩大权限）。
+def _task_writable_roots(task: Any) -> list[Path]:
+    base_dir = _task_anchor_base(task)
+    raw_candidates: list[object] = [
+        getattr(task, "task_workspace_dir", ""),
+        getattr(task, "agent_run_workspace_dir", ""),
+        *(getattr(task, "allowed_write_roots", None) or []),
+    ]
+    for grant in getattr(task, "capability_grants", None) or []:
+        tools = {str(item or "").strip() for item in (getattr(grant, "tools", None) or [])}
+        if not (tools & WRITE_TOOL_NAMES):
+            continue
+        scope = getattr(grant, "path_scope", None)
+        if isinstance(scope, str):
+            raw_candidates.append(scope)
+        elif isinstance(scope, (list, tuple, set)):
+            raw_candidates.extend(scope)
+    return _resolved_roots_with_base(raw_candidates, base_dir=base_dir)
+
+
+# 函数用途: 提取任务声明的 forbidden_write_roots 规范绝对根目录列表。
+def _task_forbidden_roots(task: Any) -> list[Path]:
+    base_dir = _task_anchor_base(task)
+    return _resolved_roots_with_base(getattr(task, "forbidden_write_roots", None) or [], base_dir=base_dir)
+
+
+def _task_anchor_base(task: Any) -> Path | None:
+    for candidate in (
+        execution_cwd(task),
+        str(getattr(task, "task_workspace_dir", "") or "").strip(),
+        str(getattr(task, "task_dir", "") or "").strip(),
+    ):
+        if candidate:
+            path = Path(candidate).expanduser()
+            if path.is_absolute():
+                return path.resolve(strict=False)
+    return None
+
+
+def _resolved_roots_with_base(raw_roots: Any, *, base_dir: Path | None) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for raw in raw_roots or ():
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            if base_dir is None:
+                continue
+            path = base_dir / path
+        resolved = path.resolve(strict=False)
+        if resolved not in seen:
+            seen.add(resolved)
+            roots.append(resolved)
+    return roots
+
+
 __all__ = [
     "LOCKED_FILES_CHANGES_ATTR",
     "LOCKED_FILES_SANITIZED_ATTR",
     "OUTPUT_TARGET_LOCKED_CODE",
+    "OUTPUT_TARGET_NOT_WRITABLE_CODE",
     "OutputAnchoring",
     "anchor_refs_for_execution",
     "anchored_output_refs",

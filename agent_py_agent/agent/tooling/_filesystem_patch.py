@@ -19,7 +19,7 @@ from ._filesystem_read import (
     WriteScopeError,
     owner_quota_error_result,
 )
-from ._filesystem_write import _atomic_write_bytes
+from ._filesystem_write import _atomic_write_bytes, _write_scope_denied_outcome
 from ._persona_write_guard import _persona_approval_write_error
 from .file_syntax_diagnostics import (
     FileSyntaxDiagnostics,
@@ -188,9 +188,11 @@ class ApplyPatchTool(FileSystemTool):
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         diagnostics = FileSyntaxDiagnostics() if self.enable_file_syntax_diagnostics else None
         patch_started = False
+        parsed_changes: list[dict[str, Any]] = []
         try:
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)
             changes = _parse_simple_patch(patch)
+            parsed_changes = changes
             versions = _patch_expected_versions(changes, self, params.get("expected_versions"))
             if approval_error := _persona_patch_approval_error(changes, self):
                 return ToolHandlerOutcome(
@@ -251,12 +253,11 @@ class ApplyPatchTool(FileSystemTool):
                 effect_outcome="not_started",
             )
         except WriteScopeError as exc:
-            return ToolHandlerOutcome(
+            return _write_scope_denied_outcome(
+                self,
                 "apply_patch",
-                False,
-                str(exc),
-                error_code=exc.access_code or "WRITE_FORBIDDEN",
-                effect_outcome="not_started",
+                exc,
+                denied_path=_patch_denied_path(exc, parsed_changes, self.workspace_root),
             )
         except ValueError as exc:
             return ToolHandlerOutcome(
@@ -470,6 +471,8 @@ def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool, *, 
                 changed = (tool.resolve_write_path(name) for name in touched[previous_count:])
                 versions.update((path, file_version(path)) for path in changed)
         except (OSError, ValueError) as exc:
+            if isinstance(exc, WriteScopeError) and not touched:
+                raise
             unchanged = isinstance(exc, StaleFileVersionError) or _patch_target_proven_unchanged(
                 target,
                 destination=destination,
@@ -537,6 +540,32 @@ def _patch_expected_versions(changes: list, tool: FileSystemTool, expected: obje
 
 # LLM: 预检必须按补丁顺序模拟同路径的连续变更，并同时生成与最终字节一致的 UI diff；UI 数据不能反向改变配额裁决。
 # 函数用途: 在真正写盘前验证全部目标、计算配额变化，并整理单文件或多文件差异预览。
+def _patch_denied_path(
+    exc: WriteScopeError,
+    changes: list[dict[str, Any]],
+    workspace_root: Path,
+) -> str:
+    msg = str(exc)
+    if "target=" in msg:
+        target_token = msg.partition("target=")[2].split(None, 1)[0].strip()
+        if target_token:
+            return target_token
+    candidates: list[str] = []
+    for change in changes:
+        for raw in (change.get("move_to"), change.get("path")):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            candidates.append(text)
+            path = Path(text).expanduser()
+            if not path.is_absolute():
+                path = workspace_root / path
+            resolved = str(path.resolve(strict=False))
+            if resolved in msg or text in msg:
+                return text
+    return candidates[0] if candidates else ""
+
+
 def _preview_patch_quota_changes(
     changes: list[dict[str, Any]],
     tool: FileSystemTool,

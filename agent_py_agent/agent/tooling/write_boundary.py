@@ -11,6 +11,7 @@ prompt 里说'只能写这个目录'只是提醒，真正防止越界写文件�
 # LLM: 本模块是文件写工具的结构化路径裁决层；路径规则按最具体条目优先，且不能从 prompt 推导权限。
 # 模块用途: 在真正写文件前统一核对允许目录、禁止目录和锁定文件，避免子代理越界或被矛盾祖先规则误伤。
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,11 +57,19 @@ _WRITE_SCOPE_BOUNDARY_KEYS = frozenset(
 # 类用途: 写边界拒绝消息，附带要上报的错误码。
 class WriteBoundaryDenial(str):
     code: str
+    details: dict[str, Any]
 
-    # 函数用途: 用消息和结构化码构造拒绝结果。
-    def __new__(cls, message: str, code: str = "WRITE_FORBIDDEN") -> WriteBoundaryDenial:
+    # 函数用途: 用消息、结构化码和可选结构化细节构造拒绝结果。
+    def __new__(
+        cls,
+        message: str,
+        code: str = "WRITE_FORBIDDEN",
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> WriteBoundaryDenial:
         denial = super().__new__(cls, message)
         denial.code = code
+        denial.details = dict(details or {})
         return denial
 
 
@@ -68,6 +77,106 @@ class WriteBoundaryDenial(str):
 # 函数用途: 取写边界拒绝结果要上报的错误码。
 def write_boundary_error_code(error: str) -> str:
     return getattr(error, "code", "") or "WRITE_FORBIDDEN"
+
+
+# 函数用途: 将允许写根规范化为去重后的绝对 POSIX 路径列表，最多保留 max_roots 条。
+def normalize_write_guidance_roots(
+    allowed_roots: Iterable[object],
+    *,
+    workspace_root: Path | None = None,
+    max_roots: int = 5,
+) -> tuple[list[str], int]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    base = workspace_root.resolve(strict=False) if workspace_root is not None else None
+    for raw in allowed_roots or ():
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            if base is None:
+                continue
+            candidate = base / candidate
+        posix = candidate.resolve(strict=False).as_posix()
+        if posix not in seen:
+            seen.add(posix)
+            normalized.append(posix)
+    total = len(normalized)
+    return normalized[: max(0, max_roots)], total
+
+
+def _normalize_denied_path_text(denied_path: object, *, workspace_root: Path | None = None) -> str:
+    if isinstance(denied_path, Path):
+        return denied_path.resolve(strict=False).as_posix()
+    text = str(denied_path or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        return text
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        if workspace_root is None:
+            return text.replace("\\", "/")
+        candidate = workspace_root.resolve(strict=False) / candidate
+    return candidate.resolve(strict=False).as_posix()
+
+
+# LLM: PD-3 写禁止结构化修复引导——绝不放宽权限，只把实际允许的最多 5 个写根、零副作用事实与下一步动作
+#   （repair_tool_arguments）返回给模型，供 write_boundary 与写工具共用，消除盲目重试。
+# 函数用途: 构造统一的 WRITE_FORBIDDEN 文本消息、结构化 result_envelope 与 next_action。
+def build_write_forbidden_response(
+    base_message: str,
+    *,
+    denied_path: object = "",
+    allowed_roots: Iterable[object] = (),
+    workspace_root: Path | None = None,
+    max_roots: int = 5,
+) -> tuple[str, dict[str, Any], str]:
+    capped_roots, total_roots = normalize_write_guidance_roots(
+        allowed_roots, workspace_root=workspace_root, max_roots=max_roots
+    )
+    denied_text = _normalize_denied_path_text(denied_path, workspace_root=workspace_root)
+    allowed_preview = ", ".join(capped_roots) if capped_roots else "none"
+    extra_note = f" (total_allowed_roots={total_roots})" if total_roots > len(capped_roots) else ""
+    guidance = (
+        f"denied_path={denied_text or 'unknown'}; "
+        f"allowed={allowed_preview}{extra_note}; "
+        "recommended_action=repair_tool_arguments; "
+        "side_effect=not_started。"
+        "未执行写入，请先检查目标路径或改用允许写根内的路径后重新调用工具。"
+    )
+    stripped_base = str(base_message or "").strip()
+    message = f"{stripped_base} | {guidance}" if stripped_base else guidance
+    details: dict[str, Any] = {
+        "denied_path": denied_text,
+        "allowed_roots": capped_roots,
+        "total_allowed_roots": total_roots,
+        "side_effect": "not_started",
+        "recommended_action": "repair_tool_arguments",
+        "retryable": False,
+    }
+    envelope: dict[str, Any] = {
+        **details,
+        "error_details": dict(details),
+    }
+    return message, envelope, "repair_tool_arguments"
+
+
+def _write_forbidden_denial(
+    base_message: str,
+    *,
+    denied_path: Path,
+    allowed_roots: Iterable[object],
+    workspace_root: Path,
+) -> WriteBoundaryDenial:
+    message, envelope, _ = build_write_forbidden_response(
+        base_message,
+        denied_path=denied_path,
+        allowed_roots=allowed_roots,
+        workspace_root=workspace_root,
+    )
+    return WriteBoundaryDenial(message, "WRITE_FORBIDDEN", details=envelope["error_details"])
 
 
 def _path_text(raw_path: object, *, label: str = "path") -> str:
@@ -126,8 +235,21 @@ def validate_write_boundary(
         access_decision = path_policy.check_write(target)
         if not access_decision.allowed:
             code = access_decision.code if access_decision.code in HOST_FILE_DENIAL_CODES else "WRITE_FORBIDDEN"
-            return WriteBoundaryDenial(f"写入被阻止: {access_decision.message}", code)
-        install_error = _runtime_install_error(target, write_boundary, workspace_root)
+            base_msg = f"写入被阻止: {access_decision.message}"
+            if code != "WRITE_FORBIDDEN":
+                return WriteBoundaryDenial(base_msg, code)
+            return _write_forbidden_denial(
+                base_msg,
+                denied_path=target,
+                allowed_roots=allowed_roots if enforces_scope else roots,
+                workspace_root=workspace_root,
+            )
+        install_error = _runtime_install_error(
+            target,
+            write_boundary,
+            workspace_root,
+            allowed_roots=allowed_roots if enforces_scope else roots,
+        )
         if install_error:
             return install_error
         if not enforces_scope:
@@ -140,13 +262,15 @@ def validate_write_boundary(
         )
         if allowed_error:
             return allowed_error
-        internal_output_error = _internal_output_json_error(target, write_boundary, workspace_root, roots)
+        internal_output_error = _internal_output_json_error(
+            target, write_boundary, workspace_root, roots, allowed_roots=allowed_roots
+        )
         if internal_output_error:
             return internal_output_error
         forbidden_error = _forbidden_boundary_error(target, allowed_roots, write_boundary, workspace_root)
         if forbidden_error:
             return forbidden_error
-        locked_error = _locked_boundary_error(target, write_boundary, workspace_root)
+        locked_error = _locked_boundary_error(target, write_boundary, workspace_root, allowed_roots=allowed_roots)
         if locked_error:
             return locked_error
     return ""
@@ -205,6 +329,8 @@ def _internal_output_json_error(
     write_boundary: dict[str, object],
     workspace_root: Path,
     workspace_roots: list[Path],
+    *,
+    allowed_roots: list[Path] | None = None,
 ) -> str:
     output_refs = _boundary_paths([write_boundary.get("output_json")], workspace_root, workspace_roots)
     if not output_refs or target == output_refs[0]:
@@ -214,11 +340,17 @@ def _internal_output_json_error(
     product_roots = _boundary_paths(write_boundary.get("product_write_roots"), workspace_root, workspace_roots)
     if not any(_is_relative_to(target, root) for root in product_roots):
         return ""
-    return (
+    base_msg = (
         "内部结果文件写入被阻止: output.json 是子代理 runner 的收口/验收文件，"
         "不能写进用户产物目录，避免污染 deliverables。"
         f" target={_display_path(target, workspace_root)} "
         f"execution_context.output_json={output_refs[0]}"
+    )
+    return _write_forbidden_denial(
+        base_msg,
+        denied_path=target,
+        allowed_roots=allowed_roots or (),
+        workspace_root=workspace_root,
     )
 
 
@@ -230,18 +362,25 @@ def _allowed_boundary_error(
     scope_declared: bool,
 ) -> str:
     if not allowed_roots:
-        return (
-            "写入被阻止: 当前任务没有有效的 allowed_write_roots，按安全默认拒绝写入。"
-            if scope_declared
-            else ""
+        if not scope_declared:
+            return ""
+        return _write_forbidden_denial(
+            "写入被阻止: 当前任务没有有效的 allowed_write_roots，按安全默认拒绝写入。",
+            denied_path=target,
+            allowed_roots=(),
+            workspace_root=workspace_root,
         )
     if any(_is_relative_to(target, root) for root in allowed_roots):
         return ""
-    allowed = ", ".join(_display_path(root, workspace_root) for root in allowed_roots[:5])
-    suffix = "" if len(allowed_roots) <= 5 else f" 等 {len(allowed_roots)} 个"
-    return (
+    base_msg = (
         "写入被阻止: 目标路径不在 allowed_write_roots 内。"
-        f" target={_display_path(target, workspace_root)} allowed={allowed}{suffix}"
+        f" target={_display_path(target, workspace_root)}"
+    )
+    return _write_forbidden_denial(
+        base_msg,
+        denied_path=target,
+        allowed_roots=allowed_roots,
+        workspace_root=workspace_root,
     )
 
 
@@ -254,9 +393,15 @@ def _forbidden_boundary_error(
     forbidden_roots = _boundary_paths(write_boundary.get("forbidden_write_roots"), workspace_root)
     for root in forbidden_roots:
         if _forbidden_root_blocks_target(target, root, allowed_roots):
-            return (
+            base_msg = (
                 "写入被阻止: 目标路径落在 forbidden_write_roots 内。"
                 f" target={_display_path(target, workspace_root)} forbidden={_display_path(root, workspace_root)}"
+            )
+            return _write_forbidden_denial(
+                base_msg,
+                denied_path=target,
+                allowed_roots=allowed_roots,
+                workspace_root=workspace_root,
             )
     return ""
 
@@ -286,23 +431,47 @@ def ordered_write_scope_roots(
 
 # LLM: 安装目录保护与写入范围无关、也不受“更具体的允许目录胜出”影响：命中就拒，Full Access 同样生效。
 # 函数用途: 拒绝改写正在运行的 my-agent 安装目录，提示去开发工作树改代码。
-def _runtime_install_error(target: Path, write_boundary: dict[str, object], workspace_root: Path) -> str:
+def _runtime_install_error(
+    target: Path,
+    write_boundary: dict[str, object],
+    workspace_root: Path,
+    *,
+    allowed_roots: list[Path] | None = None,
+) -> str:
     for root in _boundary_paths(write_boundary.get(RUNTIME_INSTALL_ROOTS_KEY), workspace_root):
         if _is_relative_to(target, root):
-            return (
+            base_msg = (
                 "写入被阻止: 目标位于正在运行的 my-agent 安装目录，部署会整体替换它，不能直接修改。"
                 f" target={_display_path(target, workspace_root)}；改自身代码请在配置的开发工作树里改。"
+            )
+            return _write_forbidden_denial(
+                base_msg,
+                denied_path=target,
+                allowed_roots=allowed_roots or (),
+                workspace_root=workspace_root,
             )
     return ""
 
 
-def _locked_boundary_error(target: Path, write_boundary: dict[str, object], workspace_root: Path) -> str:
+def _locked_boundary_error(
+    target: Path,
+    write_boundary: dict[str, object],
+    workspace_root: Path,
+    *,
+    allowed_roots: list[Path] | None = None,
+) -> str:
     locked_paths = _boundary_paths(write_boundary.get("locked_files"), workspace_root)
     for locked in locked_paths:
         if target == locked or _is_relative_to(target, locked):
-            return (
+            base_msg = (
                 "写入被阻止: 目标路径已被 locked_files 锁定。"
                 f" target={_display_path(target, workspace_root)} locked={_display_path(locked, workspace_root)}"
+            )
+            return _write_forbidden_denial(
+                base_msg,
+                denied_path=target,
+                allowed_roots=allowed_roots or (),
+                workspace_root=workspace_root,
             )
     return ""
 
