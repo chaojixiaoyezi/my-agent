@@ -2232,10 +2232,29 @@ def _has_pending_wake_signal(store_root: Path, *, owner_home=None, deadline_out=
             for path in _recovery_source_page(directory, deadline_out):
                 if not path.name.endswith(".json"):
                     continue
-                payload = json.loads(path.read_text(encoding="utf-8"))
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError(f"wake record must be an object; actual_type={type(payload).__name__}")
+                except (OSError, ValueError) as exc:
+                    # 单条坏来源只保留待核，不得吞掉同页其它准确唤醒；复用有界诊断去重。
+                    if _OwnerHomeDiagnosticLedger.claim(f"wake-unreadable:{path}:{type(exc).__name__}"):
+                        detail = (exc.msg if isinstance(exc, json.JSONDecodeError) else
+                                  exc.reason if isinstance(exc, UnicodeError) else
+                                  exc.strerror if isinstance(exc, OSError) else str(exc))
+                        _LOGGER.warning(
+                            "OWNER_WAKE_RECORD_UNREADABLE path=%s error_type=%s reason=%s line=%s column=%s side_effects=not_started "
+                            "next_action=保留并核对该记录，同页健康唤醒继续发现", path, type(exc).__name__, detail,
+                            getattr(exc, 'lineno', None), getattr(exc, 'colno', None),
+                            extra={"owner_wake_diagnostic": {"code": "OWNER_WAKE_RECORD_UNREADABLE",
+                                "path": str(path), "error_type": type(exc).__name__, "reason": detail,
+                                "line": getattr(exc, 'lineno', None), "column": getattr(exc, 'colno', None),
+                                "side_effects": "not_started", "next_action": "核对或修复该记录；健康唤醒继续发现"}},
+                        )
+                    continue
                 from .gateway_parts.multiprocess_background_sources import source_recovery_block
 
-                if not isinstance(payload, dict) or source_recovery_block(owner_home, "wake", payload) is None:
+                if source_recovery_block(owner_home, "wake", payload) is None:
                     return True
         except (OSError, ValueError):
             continue

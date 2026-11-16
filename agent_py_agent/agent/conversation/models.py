@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -150,6 +151,23 @@ class MessageLogEntry:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MessageLogEntry:
+        # 时间是展示事实；有完整原消息身份才可降为既有未知值0，顺序仍沿canonical偏移。
+        raw_created_at = data.get("created_at")
+        try:
+            created_at = float(raw_created_at or 0.0)
+            if not math.isfinite(created_at):
+                raise ValueError("message timestamp must be finite")
+        except (TypeError, ValueError, OverflowError):
+            if (not all(isinstance(data.get(key), str) and data[key].strip()
+                        for key in ("message_id", "thread_id", "role"))
+                    or not isinstance(data.get("content"), str)):
+                raise ValueError("CONVERSATION_MESSAGE_IDENTITY_INVALID: invalid timestamp cannot be recovered without message_id/thread_id/role and explicit content") from None
+            created_at = 0.0
+            logging.getLogger(__name__).warning(
+                "CONVERSATION_MESSAGE_TIMESTAMP_INVALID message_id=%s field=created_at actual_type=%s "
+                "fallback=unknown side_effects=not_started next_action=核对原记录时间；原消息身份和正文保持",
+                data["message_id"], type(raw_created_at).__name__,
+            )
         metadata = data.get("metadata")
         return cls(
             message_id=str(data.get("message_id") or ""),
@@ -158,7 +176,7 @@ class MessageLogEntry:
             content=str(data.get("content") or ""),
             channel=str(data.get("channel") or "internal"),
             channel_message_id=str(data.get("channel_message_id") or ""),
-            created_at=float(data.get("created_at") or 0.0),
+            created_at=created_at,
             metadata=metadata if isinstance(metadata, dict) else {},
         )
 
