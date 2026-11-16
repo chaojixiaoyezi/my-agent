@@ -1036,52 +1036,44 @@ def _stop_bound_background_turn(
     )
 
 
-# LLM: 派活/消息片不一定有 ConversationThread 任务链接或 claim.task_id；显式会话任务停止读取原派活绑定。
-#   这里只用真实存在的两件结构化事实：①目标会话里**任务记录**绑定了这个 turn
-#   （task.conversation_request_id == expected_turn_id，由 session_tasks.bind_turn 在认领时写入）；
-#   ②目标会话的后台认领记录**正在跑**（status=running，且没有别的来源占用它）。
-#   两条都成立才认为"这个回合确实在跑"；读不到或对不上就返回 False，让调用方如实不确认。
-# 函数用途: 判断某个已绑定的会话任务回合此刻是否正在后台执行。
+# LLM: 精确后台 claim 的原执行身份给出 task/turn 定位；只读该任务，不让无关坏记录扩大拒绝范围。
+# 函数用途: 核对同 owner/thread/task/turn/claim 后，允许原专用中断名停止这一回合；未知身份继续拒绝。
 def _bound_background_turn_is_running(
     base_agent: object, scope: GatewayControlScope, expected_turn_id: str,
 ) -> bool:
-    turn_id = str(expected_turn_id or "").strip()
+    turn_id = str(expected_turn_id or '').strip()
     if not turn_id:
         return False
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
-        thread = store.threads.resolve(
-            channel=scope.channel,
-            channel_conversation_id=scope.conversation_id,
-            channel_user_id=scope.user_id,
-        )
-        if thread is None:
+        thread = store.threads.resolve(channel=scope.channel,
+            channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+        owner_id = str(owner_agent.home_paths.owner_id)
+        if thread is None or not thread.thread_id or thread.owner_id != owner_id:
             return False
-        thread_id = str(getattr(thread, "thread_id", "") or "")
-        if not thread_id:
+        claim, error = store.claims.load_report(thread.thread_id)
+        if (error or not isinstance(claim, dict) or claim.get('schema_version') != 'background_run_claim.v1'
+                or claim.get('status') != 'running' or not claim.get('claim_id')
+                or claim.get('thread_id') != thread.thread_id or claim.get('claim_scope_id') != thread.thread_id):
             return False
-        # limit=0：全量读；默认只读前 100 条，任务多时会漏掉正在跑的那条。
-        tasks, task_errors = store.session_tasks.list_report(limit=0)
-        if task_errors:
+        authority = claim.get('runtime_authority')
+        if (not isinstance(authority, dict) or authority.get('schema_version') != 'conversation_claim_execution.v1'
+                or authority.get('claim_id') != claim['claim_id'] or authority.get('invocation_run_id') != turn_id
+                or any(not isinstance(authority.get(key), str) or not authority[key]
+                       for key in ('task_id', 'run_id', 'agent_run_id', 'attempt_id'))
+                or claim.get('task_id') not in {'', authority['task_id']}):
             return False
-    except Exception:
+        task = store.session_tasks.load(authority['task_id'])
+        if (task is None or task.task_id != authority['task_id'] or task.target_thread_id != thread.thread_id
+                or task.conversation_request_id != turn_id or task.status != 'accepted'):
+            return False
+        sender = store.threads.require(task.sender_thread_id)
+        if sender.owner_id != owner_id or sender.owner_home != thread.owner_home:
+            return False
+        return True
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
         return False
-    bound = [
-        task for task in tasks
-        if str(getattr(task, "conversation_request_id", "") or "").strip() == turn_id
-    ]
-    if len(bound) != 1:
-        return False
-    if str(getattr(bound[0], "status", "") or "") in {"done", "failed", "cancelled"}:
-        return False
-    try:
-        claim = store.claims.load(thread_id)
-    except Exception:
-        return False
-    if claim.get("load_error") or str(claim.get("status") or "") != "running":
-        return False
-    return True
 
 
 # LLM: 先解析可信 owner；首次创建时共用请求目录校验，仅初始化空 cwd，不能重定向已绑定任务。
