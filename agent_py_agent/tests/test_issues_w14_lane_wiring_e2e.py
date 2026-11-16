@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,7 +49,7 @@ from agent_py_agent.agent.tooling.process_session_store import (
     ProcessSessionStore,
     process_session_store_root,
 )
-from agent_py_agent.agent.user_space import storage_lanes
+from agent_py_agent.agent.user_space import home_retention, storage_lanes
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_quota import owner_logical_usage_bytes
 from agent_py_agent.agent.user_space.owner_resolver import (
@@ -240,6 +241,10 @@ def _live_owner(home, now, *, managed_process=True):
     log = _process_log(home, now, session_id='bg-live', terminal=False) if managed_process else None
     output = _tool_output(home, repo, now, name='live-call', settled=False)
     archive = _display(store, home, thread.thread_id, now, days=0)
+    # 活展示副本须由canonical消息投影实际引用，单有活线程不授予整目录永久保留。
+    archive_ref = json.loads((archive / 'manifest.json').read_text())
+    thread = store.threads.update_atomic(thread.thread_id, lambda latest: replace(latest, metadata={
+        **latest.metadata, 'message': {'role': 'assistant', 'display_archive_ref': archive_ref['archive_id']}}))
     pending = _evolution(home, now, name='pending-evolution', processed=False)
     paths = [store.storage.thread_path(thread.thread_id), store.storage.message_path(thread.thread_id),
              projection / 'state.json', projection / 'events.jsonl', output, pending]
@@ -247,7 +252,6 @@ def _live_owner(home, now, *, managed_process=True):
         paths.append(log)
     # 展示副本允许一天后无损合页；manifest 和公开读页的完整结果才是应保留的事实。
     paths.append(archive / 'manifest.json')
-    archive_ref = json.loads((archive / 'manifest.json').read_text())
     archive_pages = [read_display_archive_page(store, archive_ref, number)
                      for number in range(archive_ref['page_count'])]
     protected = {path: path.read_bytes() for path in paths}
@@ -381,10 +385,19 @@ def _observe_state(home, *, coordinator):
     marker = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
     state = marker['storage_maintenance']
     assert state['errors'] == []
-    if coordinator:
+    if 'coordinator_lanes' in state:
         assert state['coordinator_lanes']['fallback_kinds'] == []
         assert state['coordinator_lanes']['errors'] == []
+        if not coordinator:
+            # 配额续片沿原协调投影保存同一资格，按本轮结构化删除证明核已接线集合。
+            allowed = (storage_lanes.LANE_BINDINGS if state['retention_deletion_safe']
+                       else storage_lanes.LANE_PROJECTION_BINDINGS)
+            assert state['deletion_enabled'] is False
+            assert set(state['unbound_kinds']) == (
+                {kind.kind for kind in home_retention.storage_kind_registry()} - set(allowed))
+            assert set(state['coordinator_lanes']['ran']) <= set(allowed)
         return marker, set(state['coordinator_lanes']['ran'])
+    assert not coordinator
     assert state['unbound_kinds'] == []
     assert state['lane_fallback_kinds'] == []
     for kind, receipt in state['lane_reports'].items():
@@ -515,8 +528,8 @@ def _lane_service_clock(monkeypatch):
     spent = [wall_clock()]
     original = storage_lanes.resolve_storage_lane
 
-    def resolve(kind):
-        lane = original(kind)
+    def resolve(kind, *, projection_only=False):
+        lane = original(kind, projection_only=projection_only)
         if lane is None:
             return None
 
@@ -564,7 +577,7 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
         now += 7 * 86400 if tick == 0 else (1 if marker['maintenance_partial'] else
             MemoryRetentionPolicy().maintenance_interval_seconds)
     else:
-        pytest.fail('真实控制器未在有界拍数内消费宽限证明并重新走完全部登记车道')
+        pytest.fail(f'真实控制器未在有界拍数内消费宽限证明并重新走完全部登记车道：{marker}')
     assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all, '首轮真正完成后，必须再逐片走完全部车道并完成第二轮'

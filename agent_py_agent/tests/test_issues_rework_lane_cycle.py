@@ -565,13 +565,13 @@ def test_dispatcher_cycle_closes_with_waiting_row_and_grace_entry(compact_case, 
     # 全局索引留给协调者，不应阻止本地轮次结束或下一轮重新调度。
     assert set(state["pending_kinds"]) <= {"global_indexes"}
     assert state["continuation_pending"] is False
-    assert reports == set(storage_lanes.LANE_BINDINGS)
+    assert reports == set(storage_lanes.LANE_BINDINGS) - {'global_indexes'}
     assert state["cursors"]["compact_checkpoints"]["journal_offset"] == 0
     assert state["cursors"]["conversation_messages"]["pending"]
     assert action.destination.is_dir()
     later = _owner_tick(home, previous, now + (finished + 1) * 3600)
     assert not later["errors"]
-    assert set(later["lane_reports"]) == set(storage_lanes.LANE_BINDINGS)
+    assert set(later["lane_reports"]) == set(storage_lanes.LANE_BINDINGS) - {'global_indexes'}
 
 
 def test_dispatcher_cycle_closes_with_torn_journal_tail(compact_case, record_property):
@@ -600,10 +600,10 @@ def test_dispatcher_cycle_closes_with_torn_journal_tail(compact_case, record_pro
     assert finished is not None
     assert state["continuation_pending"] is False
     assert set(state["pending_kinds"]) <= {"global_indexes"}
-    assert reports == set(storage_lanes.LANE_BINDINGS)
+    assert reports == set(storage_lanes.LANE_BINDINGS) - {'global_indexes'}
     later = _owner_tick(home, previous, now + (finished + 1) * 3600)
     assert not later["errors"]
-    assert set(later["lane_reports"]) == set(storage_lanes.LANE_BINDINGS)
+    assert set(later["lane_reports"]) == set(storage_lanes.LANE_BINDINGS) - {'global_indexes'}
     assert journal.read_bytes() == original and journal.read_bytes().endswith(torn)
 
 

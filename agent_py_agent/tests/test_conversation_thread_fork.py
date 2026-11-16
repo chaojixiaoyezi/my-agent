@@ -586,7 +586,10 @@ def test_wp15_fork_post_publish_failure_removes_child_record(case, monkeypatch):
     from agent_py_agent.agent.conversation import thread_fork_service as service
 
     _add(case)
-    before = {path: path.read_bytes() for path in case.home.rglob('*') if path.is_file() and path.suffix != '.lock'}
+    # SQLite列表投影可由原writer推进；原始线程、消息和Compact等canonical字节必须保持。
+    projection_names = {".threads-thread-list.sqlite3", ".threads-thread-list.sqlite3-wal",
+                        ".threads-thread-list.sqlite3-shm"}
+    before = {path: path.read_bytes() for path in case.home.rglob('*') if path.is_file() and path.suffix != '.lock' and path.name not in projection_names}
     original = service.create_thread_atomic
 
     # LLM: 保留真实原子线程创建；仅在其成功返回后注入后置IO错误。
@@ -598,9 +601,11 @@ def test_wp15_fork_post_publish_failure_removes_child_record(case, monkeypatch):
     monkeypatch.setattr(service, 'create_thread_atomic', fail_after_publish)
     with pytest.raises(OSError, match='post-publish failure'):
         _fork(case.store, source_thread_id=case.thread.thread_id, owner_home=case.home)
-    after = {path: path.read_bytes() for path in case.home.rglob('*') if path.is_file() and path.suffix != '.lock'}
+    after = {path: path.read_bytes() for path in case.home.rglob('*') if path.is_file() and path.suffix != '.lock' and path.name not in projection_names}
     assert after == before
 
+    rows, errors = case.store.threads.list_report(limit=0)
+    assert not errors and [row.thread_id for row in rows] == [case.thread.thread_id]
 
 # LLM: 明确传空消息ID不能按省略处理；命令无效时仍保留明确错误，不产生分叉线程。
 # 函数用途: 验证空引号参数在公开解析器中被拒绝。

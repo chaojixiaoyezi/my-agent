@@ -17,14 +17,19 @@ from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 def _missing_lanes(monkeypatch):
     monkeypatch.setattr(storage_lanes, 'LANE_BINDINGS', dict.fromkeys(
         storage_lanes.LANE_BINDINGS, 'nonexistent_issue_lane_module:x'))
+    monkeypatch.setattr(storage_lanes, 'LANE_PROJECTION_BINDINGS', dict.fromkeys(
+        storage_lanes.LANE_PROJECTION_BINDINGS, 'nonexistent_issue_lane_module:x'))
 
 
 # 函数用途: 在真实解析路径注入一个仅供本例使用的领域模块。
 def _bind_lane(monkeypatch, lane, kind='compact_checkpoints'):
-    module = ModuleType('agent_py_agent.agent.issues_lane_stub')
+    module_leaf = 'issues_lane_stub_' + kind
+    module = ModuleType('agent_py_agent.agent.' + module_leaf)
     module.maintain = lane
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    monkeypatch.setitem(storage_lanes.LANE_BINDINGS, kind, 'issues_lane_stub:maintain')
+    monkeypatch.setitem(storage_lanes.LANE_BINDINGS, kind, module_leaf + ':maintain')
+    if kind in storage_lanes.LANE_PROJECTION_BINDINGS:
+        monkeypatch.setitem(storage_lanes.LANE_PROJECTION_BINDINGS, kind, module_leaf + ':maintain')
     return kind
 
 
@@ -44,7 +49,13 @@ def _run(home, previous=None, retention=None, **options):
 @pytest.fixture
 def lane_home(tmp_path, monkeypatch):
     _missing_lanes(monkeypatch)
-    return ensure_my_agent_home(tmp_path / 'home')
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    return home_paths_with_owner(home, resolve_owner_home(home.root))
 
 
 # 函数用途: 固定前32项的顺序与后续新增类别的元数据，不把登记当作删除许可。
@@ -56,7 +67,8 @@ def test_registry_appends_four_kinds_without_changing_original_order():
         'capability_grants', 'media_inputs', 'persona_versions', 'outbox_delivery', 'process_sessions', 'cache_tmp_trash',
         'legacy_layout', 'session_pair_rate')
     appended = ('display_archives', 'conversation_ledgers', 'asset_auxiliary', 'session_task_payloads',
-        'runtime_history', 'gateway_history', 'gateway_input_refs', 'usage_sources')
+        'runtime_history', 'gateway_history', 'gateway_input_refs', 'usage_sources',
+        'task_call_telemetry', 'thread_index')
     registry = home_retention.storage_kind_registry()
     assert len(registry) == len({kind.kind for kind in registry}) == len(original) + len(appended)
     assert tuple(kind.kind for kind in registry[:32]) == original
@@ -71,7 +83,7 @@ def test_registry_appends_four_kinds_without_changing_original_order():
 def test_lane_dto_budget_and_run_write(monkeypatch, lane_home):
     assert [field.name for field in fields(storage_lanes.StorageLaneBudget)] == ['max_items', 'max_bytes', 'deadline']
     assert [field.name for field in fields(storage_lanes.StorageLaneRequest)] == [
-        'kind', 'home', 'now', 'cursor', 'budget', 'legal_hold', 'coordinator', 'pressure', 'commit']
+        'kind', 'home', 'now', 'cursor', 'budget', 'legal_hold', 'coordinator', 'pressure', 'commit', 'config']
     monkeypatch.setattr(storage_lanes.time, 'monotonic', lambda: 100.0)
     unlimited = storage_lanes.StorageLaneBudget(None, None, None)
     assert unlimited.remaining_ms() == math.inf and not unlimited.exhausted()
@@ -123,7 +135,7 @@ def test_all_missing_lanes_fall_back_and_finish(lane_home, monkeypatch, single_a
             break
         previous = {'storage_maintenance': state}
     assert not state['continuation_pending'], state
-    assert sorted(fallbacks) == sorted(storage_lanes.LANE_BINDINGS)
+    assert sorted(fallbacks) == sorted(set(storage_lanes.LANE_BINDINGS) - {'global_indexes'})
 
 
 # 函数用途: 验证单进程DTO、hold透传和真实调度器发布的游标与可选计量。
@@ -137,15 +149,25 @@ def test_bound_lane_receives_request_and_publishes_validated_cursor(lane_home, m
         return {'cursor': {'after': 'confirmed'}, 'complete': True, 'items': 1, 'bytes': 3,
                 'protected': {'active': 2}, 'skipped': {'lock_busy': 1}, 'backlog': 2}
 
-    kind = _bind_lane(monkeypatch, lane)
-    state = _run(lane_home, retention=_policy(legal_hold=legal_hold))
+    # hold时只读投影可推进，删除类compact车道必须保持未进入。
+    kind = _bind_lane(monkeypatch, lane, "thread_index" if legal_hold else "compact_checkpoints")
+    if legal_hold:
+        from agent_py_agent.agent.common.json_io import locked_json_path
+        with locked_json_path(lane_home.owner_data_dir / 'maintenance.json'):
+            state = _run(lane_home, retention=_policy(legal_hold=True), state_locked=True)
+    else:
+        state = _run(lane_home, retention=_policy())
     assert len(received) == 1
     request = received[0]
     assert isinstance(request, storage_lanes.StorageLaneRequest) and request.home is lane_home
     assert request.coordinator is False and request.commit is None and request.legal_hold is legal_hold
     assert state['cursors'][kind] == {'after': 'confirmed'}
-    assert state['lane_reports'][kind]['protected'] == {'active': 2}
-    assert 'cursor' not in state['lane_reports'][kind]
+    reports = state.get('lane_reports', state.get('coordinator_lanes'))
+    if legal_hold:
+        assert state['coordinator_lanes']['ran'] == [kind]
+    else:
+        assert reports[kind]['protected'] == {'active': 2}
+        assert 'cursor' not in reports[kind]
 
 
 # 函数用途: 非法回执即使改过输入副本，也不能覆盖上一片已提交游标。
@@ -289,7 +311,7 @@ def test_lane_resolver_propagates_internal_import_errors(lane_home, monkeypatch,
 
     # 函数用途: 模拟已有stub模块加载内部依赖失败，保留原异常身份。
     def load(name):
-        if name == 'agent_py_agent.agent.issues_lane_stub':
+        if name == 'agent_py_agent.agent.issues_lane_stub_' + kind:
             raise error
         return original(name)
 
@@ -303,5 +325,5 @@ def test_lane_resolver_propagates_internal_import_errors(lane_home, monkeypatch,
 # 函数用途: 缺少入口属性只回退，不将缺失函数误报为内部依赖失败。
 def test_lane_resolver_missing_attribute_falls_back(lane_home, monkeypatch):
     kind = _bind_lane(monkeypatch, lambda request: {})
-    monkeypatch.setitem(storage_lanes.LANE_BINDINGS, kind, 'issues_lane_stub:absent')
+    monkeypatch.setitem(storage_lanes.LANE_BINDINGS, kind, 'issues_lane_stub_' + kind + ':absent')
     assert storage_lanes.resolve_storage_lane(kind) is None

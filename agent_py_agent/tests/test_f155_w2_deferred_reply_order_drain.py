@@ -73,7 +73,13 @@ def test_failed_page_cannot_disappear_from_coverage(tmp_path, monkeypatch):
         raise OSError('injected import failure')
     monkeypatch.setattr(history.GatewayHistoryLedger, 'import_repair', fail)
     progress = {}
-    history.repair_gateway_conversation_messages(store, thread.thread_id, [], progress=progress, limit=1)
+    # 发现页也包含锁等设施；保持每页一项，直到真实JSON消费点执行故障注入。
+    for _ in range(10):
+        history.repair_gateway_conversation_messages(store, thread.thread_id, [], progress=progress, limit=1)
+        if progress["repair_error"]:
+            break
+        assert not progress["legacy_complete"]
+        assert not store.messages.recent(thread.thread_id, limit=10)
     assert progress['repair_error'] and not progress['legacy_complete']
     assert not GatewayHistoryPreparationPending({}, thread.thread_id, progress).progressed
     monkeypatch.setattr(history.GatewayHistoryLedger, 'import_repair', original)
@@ -200,12 +206,17 @@ def test_idle_no_work_does_not_create_ledger_or_repair_directory(tmp_path):
     assert not (store.storage.root / 'message_repairs').exists()
 
 
-@pytest.mark.parametrize('budget', [{'max_bytes': 0}, {'deadline': 0.0}])
-def test_zero_byte_or_expired_deadline_cannot_claim_progress(tmp_path, budget):
+@pytest.mark.parametrize('budget', [{'max_bytes': 0}, {'deadline': 0.0}, {'limit': 0}])
+def test_zero_byte_or_expired_deadline_cannot_claim_progress(tmp_path, monkeypatch, budget):
     store = ConversationStore(tmp_path)
     thread = store.threads.create()
     history._queue_gateway_conversation_repair(SimpleNamespace(conversation_store=store), {},
         SimpleNamespace(thread_id=thread.thread_id), request_id='old', role='assistant', content='old')
+    def forbidden(*args, **kwargs):
+        pytest.fail('无额度不能封尾、扫描修复目录或打开账本')
+    monkeypatch.setattr(store.messages, 'seal_torn_tail', forbidden)
+    monkeypatch.setattr(history, 'legacy_repair_page', forbidden)
+    monkeypatch.setattr(history.GatewayHistoryLedger, 'connection', forbidden)
     progress = {}
     history.repair_gateway_conversation_messages(store, thread.thread_id, [], progress=progress, **budget)
     assert progress['visited_entries'] <= 1000

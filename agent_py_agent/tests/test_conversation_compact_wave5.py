@@ -327,7 +327,8 @@ def test_workspace_listing_only_clones_returned_slice(tmp_path, monkeypatch):
 
     monkeypatch.setattr(store_threads, "_clone_cached_thread", cloned)
     rows, errors = store.threads.list_report(limit=2, workspace_dir=str(tmp_path))
-    assert not errors and calls == ["t-6", "t-7"]
+    assert not errors and calls == ["t-7", "t-6"]
+    assert [row.thread_id for row in rows] == ["t-6", "t-7"]
     rows[0].metadata["value"]["x"] = -1
     assert store.threads.require("t-6").metadata["value"]["x"] == 6
 

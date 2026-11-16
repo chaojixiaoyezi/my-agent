@@ -534,6 +534,7 @@ def test_real_owner_rotation_retains_bounded_lane_progress_to_expired_tail(tmp_p
         time=maintenance.time.time, monotonic=lambda: clock[0],
     ))
     counts, covered, commits = [], {"compact": set(), "expire": set()}, []
+    expected_commits = []
     active = [None, None]
     open_scan = maintenance._open_scan
 
@@ -560,7 +561,12 @@ def test_real_owner_rotation_retains_bounded_lane_progress_to_expired_tail(tmp_p
     def step(current_home, cursor, maximum=128):
         active[:] = [current_home, cursor.get("phase", "compact")]
         counts.append(0)
+        before_commits = len(commits)
         receipt = validate_lane_receipt(lane(request(current_home, cursor, maximum=maximum, commit=commit)))
+        # 引用投影未完时必须零写；其余非空归档调用仍精确经过一次原提交门。
+        expected = 0 if receipt['skipped'].get('pins_incomplete') else 1
+        expected_commits.append(expected)
+        assert len(commits) - before_commits == expected
         assert not receipt["errors"] and counts[-1] <= 2048
         assert len(maintenance._live_scans) <= 128 and len(maintenance._scan_recent) <= 257
         return receipt
@@ -612,7 +618,8 @@ def test_real_owner_rotation_retains_bounded_lane_progress_to_expired_tail(tmp_p
         assert archive.read_display_archive_page(store(root), ordered[0], 0)["rows"]
         for _, other_root, ref, _ in others:
             assert archive.read_display_archive_page(store(other_root), ref, 0)["rows"]
-        assert len(commits) == len(counts) and foreground_writes == []
+        assert len(expected_commits) == len(counts)
+        assert len(commits) == sum(expected_commits) and foreground_writes == []
     finally:
         with maintenance._scan_cursor_lock:
             for scans, _, _ in maintenance._live_scans.values():

@@ -830,6 +830,11 @@ def _repair_gateway_conversation_messages(
         if progress is not None:
             progress.update(report)
         return
+    # 无可用额度不能封尾、发现目录或打开账本，更不能把非正文目录项算成恢复进度。
+    if budget == 0 or byte_budget == 0 or (deadline is not None and time.monotonic() >= deadline):
+        if progress is not None:
+            progress.update(report)
+        return
     repair_dir = Path(root) / "message_repairs"
     ledger = GatewayHistoryLedger(store)
     append_attempted = False

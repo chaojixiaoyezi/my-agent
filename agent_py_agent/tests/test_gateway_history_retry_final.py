@@ -109,6 +109,7 @@ def test_repair_commentary_precedes_final_and_old_attempt_cannot_follow(runtime,
 def test_queued_completed_attempts_replay_in_host_chronological_order(runtime, monkeypatch):
     agent, conversation = runtime
     clock = iter([10, 20])
+    real_time_ns = history.time.time_ns
     monkeypatch.setattr(history.time, "time_ns", lambda: next(clock))
     # 两个身份的文件名哈希顺序与宿主排队时钟相反。
     for attempt, content in [("two", "先完成"), ("one", "后完成")]:
@@ -118,6 +119,7 @@ def test_queued_completed_attempts_replay_in_host_chronological_order(runtime, m
             assistant_turn=history.GatewayAssistantTurn(end_reason="completed"),
         )
     errors = []
+    monkeypatch.setattr(history.time, "time_ns", real_time_ns)
     history.repair_gateway_conversation_messages(agent.conversation_store, conversation.thread_id, errors)
     assert not errors
     assert [row.content for row in agent.conversation_store.messages.recent(conversation.thread_id)] == ["先完成"]

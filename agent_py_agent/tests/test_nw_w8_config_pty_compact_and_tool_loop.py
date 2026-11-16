@@ -460,7 +460,7 @@ def test_w8_34_terminal_tool_returns_structured_error_envelope_on_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_shell = SimpleNamespace(
-        path_access_policy=SimpleNamespace(owner_scope_root=tmp_path),
+        path_access_policy=SimpleNamespace(owner_scope_root=tmp_path, foreground_admin_full_access=False),
         default_timeout=30,
         host_private_roots=(),
         host_credential_env_names=frozenset(),

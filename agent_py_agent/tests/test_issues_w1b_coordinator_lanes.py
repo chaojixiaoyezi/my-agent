@@ -71,7 +71,9 @@ def test_coordinator_empty_owner_all_fallbacks_make_zero_lane_commits(lane_home)
     assert len(commits) == 1
     assert state['coordinator_lanes']['ran'] == []
     assert state['coordinator_lanes']['fallback_kinds'] == sorted(storage_lanes.LANE_BINDINGS)
-    assert not state['coordinator_lanes']['errors'] and not state['coordinator_lanes']['pending_kinds']
+    assert not state['coordinator_lanes']['errors']
+    assert state['coordinator_lanes']['pending_kinds'] == ['global_indexes']
+    assert state['cursors']['global_indexes']['mode'] == 'coordinator_deferred'
 
 
 # 函数用途: 没有原写门时不运行任何lane，旧延期语义和状态头保留。
@@ -89,7 +91,9 @@ def test_coordinator_without_commit_never_enters_lane(lane_home, monkeypatch):
 def test_coordinator_unsafe_retention_never_enters_lane(lane_home, monkeypatch, report):
     _bind_lane(monkeypatch, lambda request: pytest.fail('unsafe retention entered lane'))
     state = _run(lane_home, retention=report, coordinator=True, commit_transition=lambda operation: operation())
-    assert 'coordinator_lanes' not in state
+    assert state['coordinator_lanes']['ran'] == []
+    assert set(state['coordinator_lanes']['fallback_kinds']) == set(storage_lanes.LANE_PROJECTION_BINDINGS)
+    assert not state['coordinator_lanes']['errors']
 
 
 # 函数用途: 协调者的未完lane也保留pending责任而非等到下个日周期。
@@ -154,7 +158,8 @@ def test_pressure_prioritizes_display_archives_without_policy_changes(lane_home,
         _bind_lane(monkeypatch, lane, kind)
     options = {'coordinator': True, 'commit_transition': lambda operation: operation()} if coordinator else {}
     state = _run(lane_home, **options)
-    assert calls == list(storage_lanes.LANE_EVICTION_ORDER)
+    assert calls == [kind for kind in storage_lanes.LANE_EVICTION_ORDER
+                     if coordinator or kind != 'global_indexes']
     assert state['pressure'] is pressure and lane_home.owner_retention_json.read_bytes() == before
 
 
@@ -212,7 +217,7 @@ def test_actual_coordinator_entry_persists_lane_cursor_through_original_ports(tm
         request.run_write(lambda: path.write_text('confirmed'))
         return {'cursor': {'after': 'actual-c'}, 'complete': True, 'items': 1, 'bytes': 0}
 
-    kind = _bind_lane(monkeypatch, lane)
+    kind = _bind_lane(monkeypatch, lane, "thread_index")
     with curator_case(tmp_path, monkeypatch, source_kind='maintenance') as (agent, _, _, gate, claim, _):
         response = run_original(agent, gate, claim)
         assert response['ok'] is True and len(received) == 1
@@ -226,6 +231,8 @@ def test_actual_coordinator_entry_persists_lane_cursor_through_original_ports(tm
 @pytest.mark.parametrize('coordinator', [False, True])
 @pytest.mark.parametrize('first_result', ['pending', 'error'])
 def test_original_entry_retries_lane_on_next_tick(lane_home, monkeypatch, coordinator, first_result):
+    _bind_lane(monkeypatch, lambda request: {
+        'cursor': {'complete': True}, 'complete': True, 'items': 0, 'bytes': 0}, 'global_indexes')
     received = []
 
     # 函数用途: 第一拍留下真实欠账，第二拍必须看到原游标并完成同一领域。
@@ -271,6 +278,8 @@ def test_original_entry_retries_lane_on_next_tick(lane_home, monkeypatch, coordi
 @pytest.mark.parametrize('coordinator', [False, True])
 @pytest.mark.parametrize('level', ['high', 'critical'])
 def test_original_entry_pressure_redue_runs_lanes_again(lane_home, monkeypatch, coordinator, level):
+    _bind_lane(monkeypatch, lambda request: {
+        'cursor': {'complete': True}, 'complete': True, 'items': 0, 'bytes': 0}, 'global_indexes')
     # 固定单调时钟（与 test_issues_w1_lane_framework 一致），避免 CI 调度抖动超过 350ms 切片阈值引发偶发 partial。
     monkeypatch.setattr(owner_maintenance.time, 'monotonic', lambda: 100.0)
     received = []
@@ -300,6 +309,8 @@ def test_original_entry_pressure_redue_runs_lanes_again(lane_home, monkeypatch, 
 @pytest.mark.parametrize('coordinator', [False, True])
 @pytest.mark.parametrize('pressure', [False, True])
 def test_lane_continuation_keeps_only_pending_then_restarts_new_cycle(lane_home, monkeypatch, coordinator, pressure):
+    _bind_lane(monkeypatch, lambda request: {
+        'cursor': {'complete': True}, 'complete': True, 'items': 0, 'bytes': 0}, 'global_indexes')
     seen = []
     pending = 'compact_checkpoints'
     kinds = ('display_archives', pending, 'process_sessions')
@@ -351,7 +362,8 @@ def test_lane_continuation_rechecks_changed_retention_policy(lane_home, monkeypa
     assert owner_maintenance.run_owner_retention_if_due(lane_home, now=2_000_001, **options).ran
     marker = json.loads((lane_home.owner_data_dir / 'maintenance.json').read_text())
     if change == 'hold':
-        assert holds == [False, True] and marker['legal_hold'] is True
+        assert holds == [False] and marker['legal_hold'] is True
+        assert 'compact_checkpoints' not in marker['storage_maintenance'].get('coordinator_lanes', {}).get('ran', [])
     else:
         assert holds == [False] and marker['load_errors']
 

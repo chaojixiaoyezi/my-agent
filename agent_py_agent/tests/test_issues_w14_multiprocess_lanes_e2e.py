@@ -18,6 +18,7 @@ from agent_py_agent.agent.common import json_io
 from agent_py_agent.agent.common.request_execution_ports import RequestExecutionContextUnavailable
 from agent_py_agent.agent.contracts.optimization_contracts import StoreSchemaNewerError
 from agent_py_agent.agent.memory_store import candidates as memory_candidates
+from agent_py_agent.agent.memory_store import retention_scan
 from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPolicy
 from agent_py_agent.agent.memory_store.retention_scan import file_fingerprint
 from agent_py_agent.agent.memory_store.retention_transition import RetentionPolicyChangedError
@@ -344,7 +345,7 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
             now += 7 * 86400 if tick == 0 else (1 if marker['maintenance_partial'] or not quota_complete else
                 MemoryRetentionPolicy().maintenance_interval_seconds)
         else:
-            pytest.fail('协调维护未在有界拍数内排空配额、消费宽限证明并重新走完全部登记车道')
+            pytest.fail(f'协调维护未在有界拍数内排空配额、消费宽限证明并重新走完全部登记车道：{marker}')
     assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all
@@ -434,10 +435,10 @@ def test_transition_revocation_propagates_without_late_mutations(lane_world):
     _assert_live(world.second)
 
 
-# LLM: 冷真实入口观察准确候选FD、flock和解析，不预创建锁或替代原领域算法。
-# 函数用途: 验证候选锁出生受门而只读等待与解析在门外。
+# LLM: 冷真实入口沿不可变候选快照读取，不预创建锁或替代领域算法。
+# 函数用途: 验证候选只读来源不创建写锁，且读取始终留在短写门外。
 def test_candidate_lock_birth_is_fenced_but_reads_and_flock_stay_outside(tmp_path, monkeypatch):
-    """冷 owner 不预创建候选锁；只在准确 FD 出生时持短门，扫描与等待仍在门外。"""
+    """冷 owner 的候选快照不需要写锁；有限续片中的真实读取留在门外。"""
     home = ensure_my_agent_home(tmp_path / 'candidate-cold')
     home.owner_retention_json.write_text(json.dumps(MemoryRetentionPolicy().to_dict()))
     lock = home.owner_memory_candidates_jsonl.with_suffix('.jsonl.lock')
@@ -446,7 +447,7 @@ def test_candidate_lock_birth_is_fenced_but_reads_and_flock_stay_outside(tmp_pat
     births, flocks, reads = [], [], []
     original_open = json_io._open_private_lock_descriptor
     original_flock = json_io._flock_descriptor
-    original_read = memory_candidates._borrow_candidate_readonly_rows
+    original_read = retention_scan._PinProjection._candidate_rows
 
     # LLM: 保留原open返回和异常，只记录当前真实短门是否活跃。
     # 函数用途: 观察准确候选锁FD的出生窗口。
@@ -466,24 +467,27 @@ def test_candidate_lock_birth_is_fenced_but_reads_and_flock_stay_outside(tmp_pat
 
     # LLM: 透传原只读借用入口，不伪造缓存或返回行。
     # 函数用途: 观察真实候选解析时的门状态。
-    def scanned(service):
-        if service.path == home.owner_memory_candidates_jsonl:
+    def scanned(projection, path):
+        if path == home.owner_memory_candidates_jsonl:
             reads.append(transition.active)
-        return original_read(service)
+        yield from original_read(projection, path)
 
     monkeypatch.setattr(json_io, '_open_private_lock_descriptor', opened)
     monkeypatch.setattr(json_io, '_flock_descriptor', flocked)
-    monkeypatch.setattr(memory_candidates, '_borrow_candidate_readonly_rows', scanned)
-    result = run_with_transition(home, time.time(), transition)
+    monkeypatch.setattr(retention_scan._PinProjection, '_candidate_rows', scanned)
+    for tick in range(128):
+        result = run_with_transition(home, time.time() + tick, transition)
+        if reads:
+            break
     assert result.ran and result.apply_outcome == 'applied'
-    assert births == [(lock, True)], '候选锁 FD 出生必须由本次 transition 授权'
-    assert flocks == reads == [False], '候选解析和 flock 等待不能搬入短写门'
-    assert lock.is_file() and lock.stat().st_size == 0
-    assert transition.commits.count('state') == 1
+    assert births == flocks == [], '不可变候选快照读取不应创建或等待写锁'
+    assert reads and not any(reads), '候选读取必须留在短写门外'
+    assert not lock.exists()
+    assert transition.commits.count('state') == tick + 1
 
 
-# LLM: 在原候选读入口准确撤回同一来源，原异常身份及文件出生事实都须核对。
-# 函数用途: 防止候选锁在撤权后先创建、后由其他提交报错。
+# LLM: 在当前候选快照入口撤回同一来源，原异常身份和canonical状态均须核对。
+# 函数用途: 保证撤权后不创建候选锁，也不发表新的维护状态。
 def test_revocation_at_candidate_scan_prevents_lock_birth(tmp_path, monkeypatch):
     """在真实候选规划入口撤权，缺失锁不得先创建再等后续状态提交拒绝。"""
     home = ensure_my_agent_home(tmp_path / 'candidate-revoked')
@@ -491,20 +495,27 @@ def test_revocation_at_candidate_scan_prevents_lock_birth(tmp_path, monkeypatch)
     lock = home.owner_memory_candidates_jsonl.with_suffix('.jsonl.lock')
     assert not lock.exists()
     transition = _RecordingTransition(home)
-    original = memory_candidates.CandidateService.readonly_rows
+    original = retention_scan._PinProjection._candidate_rows
 
     # LLM: 仅改变真实录制门的撤权时刻，原候选读链仍完整执行。
     # 函数用途: 在锁出生前撤销本次transition。
-    def revoked(service, *args, **kwargs):
+    def revoked(projection, path):
         transition.revoke_after = len(transition.commits)
-        return original(service, *args, **kwargs)
+        yield from original(projection, path)
 
-    monkeypatch.setattr(memory_candidates.CandidateService, 'readonly_rows', revoked)
-    with pytest.raises(RequestExecutionContextUnavailable) as caught:
-        run_with_transition(home, time.time(), transition)
-    assert caught.value is transition.revoked
+    monkeypatch.setattr(retention_scan._PinProjection, '_candidate_rows', revoked)
+    state_path = home.owner_data_dir / 'maintenance.json'
+    for tick in range(128):
+        before = state_path.read_bytes() if state_path.exists() else None
+        try:
+            run_with_transition(home, time.time() + tick, transition)
+        except RequestExecutionContextUnavailable as caught:
+            assert caught is transition.revoked
+            break
+    else:
+        pytest.fail('有限候选来源未进入真实快照读取')
+    assert (state_path.read_bytes() if state_path.exists() else None) == before
     assert not lock.exists()
-    assert not (home.owner_data_dir / 'maintenance.json').exists()
 
 
 # LLM: 使用真实候选writer与删除CAS；不重入门、准确删除回执和实际清空均须满足。

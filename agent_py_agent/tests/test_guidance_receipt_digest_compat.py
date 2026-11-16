@@ -191,7 +191,7 @@ def test_real_corruption_stays_terminal_unknown_without_rewrites_and_is_counted(
     assert first["terminal_unknown_errors"] == 1
     assert first["last_terminal_unknown_error"] == {
         "request_id": request_id, "error_type": "DataCorruptionError", "category": "data_corruption",
-        "context": "gateway.input_receipt.reconcile",
+        "context": "gateway.input_receipt.reconcile", "stage": "terminal_unknown",
     }
     before = receipt_path.read_bytes()
 

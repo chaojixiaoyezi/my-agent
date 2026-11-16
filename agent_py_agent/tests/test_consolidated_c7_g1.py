@@ -575,16 +575,18 @@ def test_second_connect_opens_no_python_fd_on_live_files(tmp_path, monkeypatch):
     assert set(opened).isdisjoint(os.fspath(path) for path in _files(store.db_path))
 
 
-# LLM: 仅模拟 Seatbelt 的 file-link 拒绝；真实 LocalStore 仍须守住私有权限、链接拒绝与活库零 Python FD。
-# 函数用途: 验证硬链接不可用时新库能安全出生，后续建连不会碰掉 SQLite 的锁。
+# LLM: 模拟 file-link 拒绝须无新库副作用；恢复权限后的显式重试仍核私有权限与活库零 Python FD。
+# 函数用途: 验证拒绝后的清理与真实重试，不恢复已退休的直接创建回退。
 def test_private_birth_falls_back_cleanly_when_hardlink_denied(tmp_path, monkeypatch):
     denied = []
     opened = []
     real_open = schema.os.open
+    real_link = schema.os.link
 
     # LLM: 记录真实出生尝试后抛出与 Seatbelt 相同的 EPERM，不代替文件创建或数据库连接。
     # 函数用途: 让硬链接发表稳定触发权限拒绝。
-    def deny_link(birth, path):
+    def deny_link(birth, path, *, follow_symlinks=True):
+        assert follow_symlinks is False
         denied.append((birth, path))
         raise PermissionError(1, "Operation not permitted")
 
@@ -597,7 +599,12 @@ def test_private_birth_falls_back_cleanly_when_hardlink_denied(tmp_path, monkeyp
     monkeypatch.setattr(schema.os, "link", deny_link)
     previous = os.umask(0o022)
     try:
-        store = LocalStore(tmp_path / "seatbelt" / "local.db", enable_fts=False)
+        db = tmp_path / "seatbelt" / "local.db"
+        with pytest.raises(PermissionError, match="SQLITE_BIRTH_PUBLICATION_DENIED"):
+            LocalStore(db, enable_fts=False)
+        assert not db.exists() and list(tmp_path.rglob("*.birth*")) == []
+        monkeypatch.setattr(schema.os, "link", real_link)
+        store = LocalStore(db, enable_fts=False)
         live = store._connect()
         try:
             assert {path.name: stat.S_IMODE(os.lstat(path).st_mode) for path in _files(store.db_path)} == {
@@ -610,9 +617,9 @@ def test_private_birth_falls_back_cleanly_when_hardlink_denied(tmp_path, monkeyp
         finally:
             live.close()
         assert len(denied) == 1
-        assert denied[0][0].name.endswith(".birth")
+        assert Path(denied[0][0]).name.startswith(".local.db.birth-")
         assert denied[0][1] == store.db_path
-        assert list(tmp_path.rglob("*.birth")) == []
+        assert list(tmp_path.rglob("*.birth*")) == []
 
         for link_target in ("existing", "dangling"):
             target = tmp_path / f"{link_target}.db"
@@ -630,13 +637,13 @@ def test_private_birth_falls_back_cleanly_when_hardlink_denied(tmp_path, monkeyp
                 assert target.read_bytes() == b"must remain untouched"
                 assert stat.S_IMODE(target.stat().st_mode) == 0o644
         assert len(denied) == 1
-        assert list(tmp_path.rglob("*.birth")) == []
+        assert list(tmp_path.rglob("*.birth*")) == []
     finally:
         os.umask(previous)
 
 
-# LLM: 在 link 被拒前模拟其它进程发表主路径；回退的 O_EXCL 不得覆盖普通文件或跟随链接。
-# 函数用途: 验证回退创建遇到并发路径时保留原 inode，并继续拒绝已有和悬空链接。
+# LLM: 在 link 被拒前模拟其它进程发表主路径；本次拒绝与后续重试都不得覆盖原 inode 或跟随链接。
+# 函数用途: 验证并发路径在发表拒绝后保持完整，并继续拒绝已有和悬空链接。
 @pytest.mark.parametrize("racing_path", ["regular", "existing_symlink", "dangling_symlink"])
 def test_private_birth_fallback_preserves_racing_path(tmp_path, monkeypatch, racing_path):
     db = tmp_path / "seatbelt-race" / "local.db"
@@ -645,10 +652,12 @@ def test_private_birth_fallback_preserves_racing_path(tmp_path, monkeypatch, rac
         target.write_bytes(b"must remain untouched")
         target.chmod(0o644)
     published = []
+    real_link = schema.os.link
 
-    # LLM: 只在尚不存在的主路径模拟一次外进程发表；拒绝 link 后仍由生产回退与 lstat 做裁决。
-    # 函数用途: 在初次不存在检查与直接创建之间放入竞争文件或链接。
-    def publish_then_deny_link(birth, path):
+    # LLM: 只在尚不存在的主路径模拟一次外进程发表；拒绝后仅恢复真实 link 再显式重试。
+    # 函数用途: 在初次不存在检查与硬链接发表之间放入竞争文件或链接。
+    def publish_then_deny_link(birth, path, *, follow_symlinks=True):
+        assert follow_symlinks is False
         if racing_path == "regular":
             path.touch(mode=0o600)
         else:
@@ -657,6 +666,12 @@ def test_private_birth_fallback_preserves_racing_path(tmp_path, monkeypatch, rac
         raise PermissionError(1, "Operation not permitted")
 
     monkeypatch.setattr(schema.os, "link", publish_then_deny_link)
+    with pytest.raises(PermissionError, match="SQLITE_BIRTH_PUBLICATION_DENIED"):
+        LocalStore(db, enable_fts=False)
+    assert len(published) == 1
+    assert os.lstat(db).st_ino == published[0].st_ino
+    assert list(tmp_path.rglob("*.birth*")) == []
+    monkeypatch.setattr(schema.os, "link", real_link)
     if racing_path == "regular":
         store = LocalStore(db, enable_fts=False)
         conn = store._connect()
@@ -676,7 +691,7 @@ def test_private_birth_fallback_preserves_racing_path(tmp_path, monkeypatch, rac
     assert len(published) == 1
     current = os.lstat(db)
     assert (current.st_dev, current.st_ino) == (published[0].st_dev, published[0].st_ino)
-    assert list(tmp_path.rglob("*.birth")) == []
+    assert list(tmp_path.rglob("*.birth*")) == []
 
 
 # =============================================================================

@@ -174,7 +174,12 @@ def test_real_writers_ttl_matrix_and_exact_usage(setup):
     protected = {path: path.read_bytes() for folder in ('versions', 'blobs') for path in (evolution / folder).rglob('*') if path.is_file()}
     before = owner_logical_usage_bytes(root, exact=True)
     expected_freed = sum(path.stat().st_size for path in expired)
-    rows = drain(setup)
+    rows = []
+    # 引用投影未完时本轮只保留；按原一小时轮次继续，直到同一批到期记录真正退休。
+    for cycle in range(8):
+        rows.extend(drain(setup, now=setup[1].timestamp() + cycle * 3601))
+        if all(not path.exists() for path in expired):
+            break
     after = owner_logical_usage_bytes(root, exact=True)
     assert sum(row['deleted_items'] for row in rows) == 4
     assert sum(row['freed_bytes'] for row in rows) == expected_freed == before - after

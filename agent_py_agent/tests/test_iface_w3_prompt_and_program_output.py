@@ -243,7 +243,7 @@ def test_contract_failure_is_structured_and_never_reexecutes(tmp_path, phase, ex
 def _archive(probe, budget):
     snapshot = runtime_snapshot_for_tools({'probe': probe})
     child = canonical_test_call(snapshot, 'probe', {})
-    request = SimpleNamespace(runtime_snapshot=snapshot, output_archiver=None)
+    request = SimpleNamespace(runtime_snapshot=snapshot, output_archiver=None, host_output_redaction=None)
     captured = {}
     NestedToolDispatcher(request, child)._archive(child,
         ToolHandlerOutcome('probe', True, probe.text), captured=captured, capture_budget=budget)

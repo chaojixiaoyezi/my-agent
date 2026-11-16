@@ -5072,6 +5072,11 @@ def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path
 
 
 def test_gateway_followup_archive_reuses_active_task_workspace(tmp_path):
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        activate_run_workspace,
+    )
+
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -5080,6 +5085,10 @@ def test_gateway_followup_archive_reuses_active_task_workspace(tmp_path):
     )
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
+    activate_run_workspace(workspace, EnsureRunWorkspaceRequest(
+        home=agent.home_paths.root, template="tasks/{date}/{task_slug}", task_name="analysis",
+        user_prompt="原始任务", task_id="gw-first", run_id="gw-second",
+        owner_id=agent.home_paths.owner_id, owner_home=str(agent.home_paths.owner_home_dir)))
 
     written = write_run_task_workspace_if_needed(
         agent,
@@ -5110,6 +5119,11 @@ def test_gateway_followup_archive_reuses_active_task_workspace(tmp_path):
 
 
 def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_index_title(tmp_path):
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        activate_run_workspace,
+    )
+
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -5126,9 +5140,13 @@ def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_inde
         "gw-parent",
         "做图书馆运营方案",
     )
-    workspace = tmp_path / "home" / "owners" / "users" / "ou_user1" / "tasks" / "图书馆运营方案"
+    workspace = agent.home_paths.owner_home_dir / "tasks" / "2026-06-03" / "图书馆运营方案"
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
+    activate_run_workspace(workspace, EnsureRunWorkspaceRequest(
+        home=agent.home_paths.root, template="tasks/{date}/{task_slug}", task_name="图书馆运营方案",
+        user_prompt="做图书馆运营方案", task_id="task-library", run_id="subagent-child",
+        owner_id=agent.home_paths.owner_id, owner_home=str(agent.home_paths.owner_home_dir)))
     agent.conversation_store.tasks.bind(
         {
             "thread_id": conversation.thread_id,

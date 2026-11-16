@@ -51,14 +51,15 @@ assert 'agent_py_agent.agent.gateway_parts.gateway_history_index' not in sys.mod
 
 def test_history_lanes_append_without_reordering_existing_eviction_lanes():
     actual_order = storage_lanes.LANE_EVICTION_ORDER
-    assert actual_order == (*_ORIGINAL_EVICTION_ORDER, *_HISTORY_LANES, "usage_sources")
+    assert actual_order == (*_ORIGINAL_EVICTION_ORDER, *_HISTORY_LANES, "usage_sources",
+                            "global_indexes", "task_call_telemetry", "thread_index")
 
 
 def test_history_registration_reduces_unbound_kinds_through_real_dispatch(tmp_path):
     home = ensure_my_agent_home(tmp_path / "home")
     registry = {kind.kind: kind for kind in home_retention.storage_kind_registry()}
-    assert tuple(registry)[-len(_HISTORY_LANES)-1:-1] == _HISTORY_LANES
-    assert tuple(registry)[-1] == "usage_sources"
+    assert tuple(registry)[32+4:32+4+len(_HISTORY_LANES)] == _HISTORY_LANES
+    assert tuple(registry)[-3:] == ("usage_sources", "task_call_telemetry", "thread_index")
     for name in ("runtime_events", "gateway_logs", *_HISTORY_LANES):
         assert "policy-delete" in registry[name].actions
     assert registry["runtime_events"].policy_ref == "audit_days / tool_output_days_after_terminal after terminal"
@@ -110,10 +111,15 @@ def test_owner_maintenance_publishes_both_real_history_lane_receipts(tmp_path, m
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
     from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
     from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
     from agent_py_agent.tests.test_cat3_runtime_history_retention import _event, _llm, _run, _tool
 
     home = ensure_my_agent_home(tmp_path / "home")
+    home = home_paths_with_owner(home, resolve_owner_home(home.root))
     repo = RuntimeRepository(runtime_db_path(home.owner_home_dir))
     with closing(sqlite3.connect(repo.db_path)) as conn:
         _run(conn)

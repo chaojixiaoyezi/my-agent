@@ -1328,7 +1328,7 @@ def test_explicit_actions_report_and_s1_migration_isolation(tmp_path: Path, monk
     for skill_name in ("broken-s1", "valid-s1"):
         s_dir = mig_store.skills_root / skill_name
         s_dir.mkdir(parents=True, exist_ok=True)
-        (s_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\ndescription: s1\n---\n\n{BODY}\n", encoding="utf-8")
+        (s_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\ndescription: s1\nwhen_to_use: s1\n---\n\n{BODY}\n", encoding="utf-8")
 
     def make_prop(skill_name: str, pid: str):
         text = (mig_store.skills_root / skill_name / "SKILL.md").read_text(encoding="utf-8")
@@ -1340,7 +1340,7 @@ def test_explicit_actions_report_and_s1_migration_isolation(tmp_path: Path, monk
                 "skill_path": str(mig_store.skills_root / skill_name / "SKILL.md"),
                 "skill_sha256": sha,
             },
-            draft=SimpleNamespace(sha256=sha),
+            draft=SimpleNamespace(sha256=sha, description="s1", when_to_use="s1", body=BODY),
             source=SimpleNamespace(run_ids=("run-s1",), marker=skill_name),
         )
 
@@ -4031,7 +4031,11 @@ def test_maintain_reconciles_manual_restore_duplicate_active_authority(tmp_path:
         expected_revision=rev1.revision,
     )
     later = datetime.now(timezone.utc) + timedelta(days=20)
-    repo.maintain(now=later, archive_days=15)
+    for _ in range(128):
+        result = repo.maintain(now=later, archive_days=15)
+        if not result["backlog"]:
+            break
+    assert result["backlog"] is False
     archived = repo.lessons_dir / "archive" / f"{later.year:04d}-{later.month:02d}" / Path(rev1.path).name
     assert archived.exists()
 
@@ -4047,7 +4051,11 @@ def test_maintain_reconciles_manual_restore_duplicate_active_authority(tmp_path:
         )
     )
     (repo.lessons_dir / Path(rev1.path).name).write_text(restored_rev1, encoding="utf-8")
-    repo.maintain(now=later, archive_days=15)
+    for _ in range(128):
+        result = repo.maintain(now=later, archive_days=15)
+        if not result["backlog"]:
+            break
+    assert result["backlog"] is False
 
     assert repo.get(rev2.lesson_id).status == "active"
     assert repo.get(rev1.lesson_id).status == "superseded"
