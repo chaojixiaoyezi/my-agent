@@ -440,9 +440,15 @@ class ObservationStore:
         selected = events if limit <= 0 else events[-limit:]
         return selected, [*report.load_errors, *parse_errors]
 
-    # LLM: 大历史包括 limit=0 均只查 pending；仅固定 16 分片/64KiB 内的小集合保留旧 ScanIndex 记忆化。
-    # 函数用途: 汇总未处理主代理观察，limit<=0 只放开活跃结果数，不放开历史扫描预算。
-    def unhandled_requiring_main(self, *, limit: int = 20) -> list[ObservationEvent]:
+    # LLM: 显式传 thread_id 或超出 16 分片/64KiB 均只查 pending 索引；仅无 thread 过滤的小集合保留旧 ScanIndex 记忆化。
+    # 函数用途: 汇总未处理主代理观察，支持按 thread_id 精确下推；limit<=0 只放开活跃结果数，不放开历史扫描预算。
+    def unhandled_requiring_main(
+        self, *, limit: int = 20, thread_id: str | None = None
+    ) -> list[ObservationEvent]:
+        if thread_id is not None:
+            if not isinstance(thread_id, str) or not thread_id.strip():
+                raise ValueError("未处理观察需要准确线程身份")
+            return self._index.pending(limit, thread_id=thread_id)
         if not self._small_legacy_snapshot():
             return self._index.pending(limit)
         index = self.storage.indexes.get("observations")
