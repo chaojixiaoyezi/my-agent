@@ -201,3 +201,45 @@ def test_tail_repair_never_mutates_linked_source(tmp_path, link_kind):
         ToolTelemetryLedger(home).record_tool_call(dict(call_id='forbidden', tool_name='read', started_at=1, ended_at=2))
     assert outside.read_bytes() == before
     assert not list(directory.glob('.tool_calls.jsonl.torn-*'))
+
+
+@pytest.mark.parametrize('domain,table', [('telemetry', 'ori_telemetry'), ('task_rounds', 'ori_task_rounds')])
+def test_missing_projection_table_rebuilds_each_source_without_stale_empty(tmp_path, domain, table):
+    import json
+    import sqlite3
+
+    from agent_py_agent.agent.common.nofollow_fs import append_text_beneath
+    from agent_py_agent.agent.observability.task_rounds import _frame, _validate_frame
+
+    sources = [('data', 'first.jsonl'), ('data', 'second.jsonl')]
+    validator = None if domain == 'telemetry' else _validate_frame
+    if domain == 'telemetry':
+        ledger = _ledger(tmp_path, 3)
+        canonical = tmp_path.joinpath(*PARTS, 'tool_calls.jsonl').read_bytes()
+    else:
+        canonical = b''.join((json.dumps(_frame('a' * 64, i + 1, dict(round_id=f'r{i}'))) + '\n').encode()
+                             for i in range(3))
+    for parts in sources:
+        append_text_beneath(tmp_path, parts, canonical.decode())
+    index = OwnerReadIndex(tmp_path)
+    old = [index.advance(domain, parts, validator=validator) for parts in sources]
+    assert all(view['status'] == 'complete' for view in old)
+    with sqlite3.connect(tmp_path / 'cache/owner_read_index.sqlite3') as connection:
+        connection.execute(f'DROP TABLE {table}')
+        assert connection.execute('SELECT COUNT(*) FROM ori_sources WHERE domain=?', (domain,)).fetchone()[0] == 2
+    readonly = OwnerReadIndex(tmp_path).query_readonly_page(domain, sources[0], validator=validator)
+    assert readonly['coverage']['status'] == 'unavailable'
+    # 第一次只推进一条，不能继续拿旧 complete 水位宣称空集合。
+    first = index.advance(domain, sources[0], validator=validator, max_rows=1)
+    assert first['status'] == 'partial' and first['generation'] != old[0]['generation']
+    for parts, previous in zip(sources, old):
+        for _ in range(4):
+            view = index.advance(domain, parts, validator=validator, max_rows=1)
+            if view['status'] == 'complete':
+                break
+        page = index.query(view)
+        assert page['coverage']['status'] == 'complete' and len(page['rows']) == 3
+        assert view['generation'] != previous['generation']
+        assert tmp_path.joinpath(*parts).read_bytes() == canonical
+    stale = index.query(old[1])
+    assert stale['coverage']['status'] == 'unavailable'

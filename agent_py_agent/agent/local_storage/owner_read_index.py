@@ -718,7 +718,31 @@ class OwnerReadIndex:
             raise
 
     # 同一建表叶同时服务新库与旧缓存的惰性扩展，不另开连接或管理第二套索引。
+    def _domain_validation(self, connection, domain, validator):
+        validation = self._validator_tag(validator)
+        if domain == 'usage' and validator is None:
+            validation += ':method-stages-v2'
+        row = connection.execute('SELECT value FROM ori_meta WHERE key=?', ('domain_generation:' + domain,)).fetchone()
+        return validation + (':domain:' + row[0] if row else '')
+
     def _initialize_domain(self, connection, domain):
+        """缺失派生表换代；旧源逐项在原 advance 预算内重建，不批量清空历史水位。"""
+        connection.execute('SAVEPOINT domain_projection')
+        try:
+            missing = connection.execute('SELECT 1 FROM sqlite_master WHERE type=? AND name=?',
+                                         ('table', _TABLES[domain])).fetchone() is None
+            self._initialize_domain_table(connection, domain)
+            if missing:
+                connection.execute('INSERT INTO ori_meta(key,value) VALUES(?,?) '
+                    'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                    ('domain_generation:' + domain, secrets.token_hex(16)))
+            connection.execute('RELEASE domain_projection')
+        except BaseException:
+            connection.execute('ROLLBACK TO domain_projection')
+            connection.execute('RELEASE domain_projection')
+            raise
+
+    def _initialize_domain_table(self, connection, domain):
         table = _TABLES[domain]
         columns = ", ".join(name + " " + kind for name, kind in _FIELDS[domain].items())
         connection.execute(
@@ -1645,8 +1669,8 @@ class OwnerReadIndex:
             with self._database(
                 create=True, write=True, deadline=budget.deadline,
             ) as connection:
-                if domain in {"task_rounds", "usage"}:
-                    self._initialize_domain(connection, domain)
+                self._initialize_domain(connection, domain)
+                validation = self._domain_validation(connection, domain, validator)
                 checkpoint = self._checkpoint(connection, sid, domain, parts)
                 old = checkpoint
                 rebuild = checkpoint is None
@@ -1733,8 +1757,10 @@ class OwnerReadIndex:
             descriptor, observed, parents = self._open_source(parts)
             if checkpoint is None:
                 return self._view(domain, parts, sid, None, "unavailable", "index_missing", observed[2])
-            if checkpoint['validation'] != self._validator_tag(validator):
-                raise _Issue('validator_changed')
+            with self._database(deadline=deadline) as connection:
+                expected_validation = self._domain_validation(connection, domain, validator)
+            if checkpoint['validation'] != expected_validation:
+                raise _Issue('validator_or_domain_changed')
             if generation is not None and generation != checkpoint['generation']:
                 raise _Issue('stale_generation')
             if through is not None and (type(through) is not int or not 0 <= through <= checkpoint['through']):
@@ -1838,6 +1864,14 @@ class OwnerReadIndex:
                     or self._marked(sid, view["generation"])
                 ):
                     raise _Issue("stale_generation")
+                present = connection.execute('SELECT 1 FROM sqlite_master WHERE type=? AND name=?',
+                                             ('table', _TABLES[view['domain']])).fetchone()
+                epoch = connection.execute('SELECT value FROM ori_meta WHERE key=?',
+                                           ('domain_generation:' + view['domain'],)).fetchone()
+                if present is None:
+                    raise _Issue('projection_table_missing')
+                if epoch and not checkpoint['validation'].endswith(':domain:' + epoch[0]):
+                    raise _Issue('stale_domain_generation')
                 old_stamp = checkpoint["stamp"]
                 if observed != old_stamp:
                     if (
