@@ -341,7 +341,7 @@ def test_success_projection_does_not_hide_unrelated_or_unproven_rows(variation):
 
 @pytest.mark.parametrize(('historical_same_request', 'cancel_before_requeue', 'named_audit'),
     [(False, False, False), (True, False, False), (False, True, False), (False, False, True)])
-def test_cold_gateway_index_defers_same_request_then_executes_once(tmp_path, monkeypatch, historical_same_request, cancel_before_requeue, named_audit):
+def test_cold_gateway_index_defers_same_request_then_executes_once(tmp_path, monkeypatch, historical_same_request, cancel_before_requeue, named_audit, record_property):
     import json
     import time
 
@@ -390,15 +390,25 @@ def test_cold_gateway_index_defers_same_request_then_executes_once(tmp_path, mon
         type(ledger.path)(str(ledger.path) + suffix).unlink(missing_ok=True)
     calls = []
     original = agent.run
+    def request_user_rows():
+        return [row for row in store.messages.recent(thread.thread_id, limit=1300)
+                if row.role == 'user' and row.metadata.get('gateway_request_id') == request_id]
+    baseline_user_count = int(historical_same_request)
     def observed(*args, **kwargs):
+        assert kwargs['params'].request_id == request_id
+        assert len(request_user_rows()) == 1, '正文执行前用户消息必须已幂等提交'
         calls.append(True)
         return original(*args, **kwargs)
     monkeypatch.setattr(agent, 'run', observed)
     steps = []
     actual_catch_up = GatewayHistoryLedger.catch_up
     def measured_catch_up(*args, **kwargs):
-        steps.append(bool(calls))
-        return actual_catch_up(*args, **kwargs)
+        import sys
+        ready = actual_catch_up(*args, **kwargs)
+        steps.append({'business_started': bool(calls), 'ready': ready,
+                      'caller': sys._getframe(1).f_code.co_name,
+                      'progress': dict(kwargs.get('progress') or {})})
+        return ready
     monkeypatch.setattr(GatewayHistoryLedger, 'catch_up', measured_catch_up)
     if cancel_before_requeue:
         from agent_py_agent.agent.gateway_parts import request_worker
@@ -415,7 +425,13 @@ def test_cold_gateway_index_defers_same_request_then_executes_once(tmp_path, mon
         _process_gateway_requests(agent, paths)
         if response.exists():
             break
-        assert steps[step_start:] == [False], '每个准备片只准一次索引事务'
+        preparation = steps[step_start:]
+        assert preparation and not any(step['business_started'] or step['ready'] for step in preparation)
+        assert len(request_user_rows()) == baseline_user_count, '未就绪片不能追加新用户消息'
+        for step in preparation:
+            progress = step['progress']
+            assert 0 < progress['cursor_after'] - progress['cursor_before'] <= 1024 * 1024
+            assert progress['cursor_after'] <= progress['source_end']
         pending = json.loads((paths.inbox / (request_id + '.json')).read_text())
         assert pending['status'] == 'pending' and pending['id'] == request_id
         assert pending['deferred_reason'] == 'GATEWAY_HISTORY_INDEX_PENDING'
@@ -429,15 +445,28 @@ def test_cold_gateway_index_defers_same_request_then_executes_once(tmp_path, mon
     if cancel_before_requeue:
         assert result['status'] == 'interrupted', result
         assert not calls and not (paths.processing / (request_id + '.json')).exists()
+        assert len(request_user_rows()) == baseline_user_count
+        _process_gateway_requests(agent, paths)
+        assert not calls and not (paths.inbox / (request_id + '.json')).exists()
         return
     assert result['ok'], result
     assert deferred >= 2 and len(calls) == 1
-    assert steps[step_start:].count(False) == (2 if named_audit else 1), '仅命名任务写入前允许额外隔离预检'
+    # 准入repair与最终append前repair均可复核已就绪索引；验证语义，不锁死内部读口次数。
+    final_steps = steps[step_start:]
+    assert final_steps and all(step['ready'] for step in final_steps)
+    record_property('ready_prebusiness_callers', json.dumps(
+        [step['caller'] for step in final_steps if not step['business_started']]))
+    assert any(not step['business_started'] for step in final_steps)
+    assert any(step['business_started'] for step in final_steps), '助手结果需在唯一次正文之后持久化'
     _process_gateway_requests(agent, paths)
     assert len(calls) == 1
     rows = [json.loads(line) for line in store.storage.message_path(thread.thread_id).read_text().splitlines()]
     matched = [row for row in rows if row['role'] == 'user' and row.get('metadata', {}).get('gateway_request_id') == request_id]
     assert len(matched) == 1
+    assert sum(row['role'] == 'assistant' and row.get('metadata', {}).get('gateway_request_id') == request_id
+               for row in rows) == 1, '原请求只能提交一次助手结果'
+    assert not (paths.inbox / (request_id + '.json')).exists()
+    assert not (paths.processing / (request_id + '.json')).exists()
     if named_audit:
         links = [link for link in store.tasks.list(thread.thread_id) if link.work_name == '冷索引准备']
         assert len(links) == 1
@@ -470,3 +499,78 @@ def test_index_preparation_never_defers_real_failure_or_no_progress(runtime, mon
         history.append_gateway_conversation_message(agent, {'id': 'request', 'execution_attempt_id': 'attempt', 'lease_epoch': 1},
             conversation, request_id='request', role='user', content='尚未执行', defer_index_pending=True)
     assert type(caught.value) is not GatewayHistoryPreparationPending
+
+
+def test_gateway_tool_effect_then_unsettled_refresh_never_requeues_business(tmp_path, monkeypatch):
+    """受控正文执行器产生工具副作用后溢出，真实Gateway刷新不能伪装成未执行重领。"""
+    import json
+
+    from agent_py_agent.agent.backends import get_backend
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts import (
+        GatewayAskParams,
+        _process_gateway_requests,
+        gateway_paths,
+        request_context,
+        submit_gateway_ask,
+    )
+    from agent_py_agent.agent.gateway_parts.request_errors import ConversationPersistenceError
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    monkeypatch.setenv('MY_AGENT_HOME', str(tmp_path / 'home'))
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'),
+        prompt_files=[], gateway_per_user_owner_scoping=False), tmp_path / 'workspace')
+    agent.backend = get_backend('echo', agent.config)
+    paths = gateway_paths(agent)
+    for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        path.mkdir(parents=True, exist_ok=True)
+    request_id, _, response = submit_gateway_ask(paths, params=GatewayAskParams(
+        prompt='工具后刷新', save=False, chat_session_id='refresh-effect', agent=agent))
+    effect = tmp_path / 'tool-effect.txt'
+    calls, refresh_flags, requeues, refresh_errors = [], [], [], []
+    actual_context = request_context.gateway_conversation_context
+    def load(inputs, **kwargs):
+        if calls:
+            refresh_flags.append(inputs.allow_history_defer)
+        try:
+            return actual_context(inputs, **kwargs)
+        except ConversationPersistenceError as exc:
+            refresh_errors.append(exc)
+            raise
+    monkeypatch.setattr(request_context, 'gateway_conversation_context', load)
+    from agent_py_agent.agent.gateway_parts import request_worker
+    actual_requeue = request_worker._requeue_history_preparation
+    def requeue(*args, **kwargs):
+        requeues.append(True)
+        return actual_requeue(*args, **kwargs)
+    monkeypatch.setattr(request_worker, '_requeue_history_preparation', requeue)
+    def tool_then_overflow(_prompt, *, params):
+        calls.append(params.request_id)
+        with effect.open('a') as handle:
+            handle.write('executed\n')
+        conversation = SimpleNamespace(thread_id=params.task_attributes['conversation_thread_id'])
+        for index in range(101):
+            history._queue_gateway_conversation_repair(agent, {}, conversation,
+                request_id=f'old-reply-{index}', role='assistant', content=f'old reply {index}')
+        return SimpleNamespace(runtime_status='context_overflow', runtime_source='tool_context_overflow',
+            archive_tool_calls=[], active_turn_user_inputs=[])
+    monkeypatch.setattr(agent, 'run', tool_then_overflow)
+    _process_gateway_requests(agent, paths)
+    assert response.exists()
+    result = json.loads(response.read_text())
+    assert result['ok'] is False, result
+    assert calls == [request_id]
+    assert refresh_flags == [False], '已执行工具的刷新必须保持禁止未执行defer'
+    assert len(refresh_errors) == 1 and type(refresh_errors[0]) is ConversationPersistenceError
+    assert not requeues
+    assert not (paths.inbox / f'{request_id}.json').exists()
+    assert not (paths.processing / f'{request_id}.json').exists()
+    _process_gateway_requests(agent, paths)
+    assert calls == [request_id] and effect.read_text() == 'executed\n'
+    thread = agent.conversation_store.threads.resolve(channel='chat',
+        channel_conversation_id='refresh-effect', channel_user_id='local-agent')
+    ledger = history.GatewayHistoryLedger(agent.conversation_store)
+    with ledger.connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM repairs WHERE thread=?', (thread.thread_id,)).fetchone()[0] == 1
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=200)
+    assert sum(row.role == 'user' and row.metadata.get('gateway_request_id') == request_id for row in rows) == 1
