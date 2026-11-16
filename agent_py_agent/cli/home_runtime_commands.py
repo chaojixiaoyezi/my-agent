@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import stat
 from dataclasses import replace
 from typing import Any
 
 from ..agent.conversation.agent_activity import settle_orphaned_capability_requests
-from ..agent.gateway_parts.io import read_json_file_report
-from ..agent.gateway_parts.owner_retention import gateway_terminal_exists
-from ..agent.gateway_parts.paths import gateway_paths
+from ..agent.conversation.runtime_reconciliation import reconcile_owner_runtime
 from ..agent.memory_api import DAILY_ACTORS, DAILY_EVENT_TYPES
-from ..agent.runtime_errors import DataCorruptionError
 from ..agent.settings.defaults import default_config_int
 from ..agent.user_space.home_index_rebuild import rebuild_home_indexes
 from ..agent.user_space.home_retention import apply_owner_retention, plan_owner_retention
@@ -175,35 +171,8 @@ def cmd_home_index_rebuild(args) -> int:
 # LLM: --settle沿原repo死亡证明/CAS直接结清，无交互确认；安全结清转cancelled/abandoned，不伪造noop或重放旧工具。
 # 函数用途: 列出或取消当前owner可安全结清的历史运行，报告解锁结果及仍受保护的记录。
 def _canonical_gateway_terminal_reason(paths, root_id: str) -> str | None:
-    if (not isinstance(root_id, str) or not root_id or root_id in {".", ".."}
-            or any(sep in root_id for sep in ("/", "\\", "\x00"))):
-        return None
-    name = f"{root_id}.json"
-    terminal_file = paths.terminal / name
-    try:
-        info = terminal_file.lstat()
-    except FileNotFoundError:
-        try:
-            exists = gateway_terminal_exists(paths, name)
-        except (DataCorruptionError, OSError, ValueError):
-            return None
-        return "parent_turn_ended" if exists else None
-    except OSError:
-        return None
-    if not stat.S_ISREG(info.st_mode):
-        return None
-    report = read_json_file_report(terminal_file, context="cli.runtime_stale_attempts.terminal")
-    row = next((v for k, v in vars(report).items() if k not in {"load_error", "lock_busy"}), None) if report.load_error is None else None
-    if (
-        not isinstance(row, dict)
-        or row.get("schema_version") != "gateway_terminal_request.v1"
-        or row.get("id") != root_id
-    ):
-        return None
-    status = str(row.get("status") or "").strip()
-    if status not in _TERMINAL_GATEWAY_STATUSES:
-        return None
-    return "parent_turn_interrupted" if status in {"interrupted", "stopped"} else "parent_turn_ended"
+    from ..agent.conversation.runtime_reconciliation import canonical_gateway_terminal_reason
+    return canonical_gateway_terminal_reason(paths, root_id)
 
 
 # LLM: 仅向conversation桥接层传入本owner的Gateway终态核验回调，不直接耦合subagents子模块。
@@ -218,10 +187,10 @@ def _settle_orphaned_capability_requests(agent) -> tuple[list[str], list[dict[st
     default_budget = default_config_int("retention_scan_slice_entries")
     configured = getattr(getattr(agent, "config", None), "retention_scan_slice_entries", default_budget)
     page_budget = configured if type(configured) is int and configured > 0 else default_budget
-    paths = gateway_paths(agent)
+    from ..agent.conversation.runtime_reconciliation import canonical_parent_terminal_reason
     return settle_orphaned_capability_requests(
         agent,
-        canonical_terminal_reason=lambda root_id: _canonical_gateway_terminal_reason(paths, root_id),
+        canonical_terminal_reason=lambda root_id: canonical_parent_terminal_reason(agent, root_id),
         page_budget=page_budget,
     )
 
@@ -256,6 +225,7 @@ def cmd_runtime_stale_attempts(args) -> int:
         "settled_capability_run_ids": settled_capabilities,
         "unproven_capability_requests": unproven_capabilities,
         "remaining": remaining,
+        "runtime_reconciliation": reconcile_owner_runtime(agent, apply=bool(getattr(args, 'settle', False))),
     }
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

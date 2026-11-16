@@ -38,7 +38,12 @@ _METADATA = frozenset({"state.json", "workspace_locator.json", "refs.json", "sub
 _INTERNAL_LOCKS = frozenset(f"{name}.lock" for name in _METADATA)
 _SCAN_LOCK = threading.RLock()
 _SCANS: OrderedDict[tuple[str, str], tuple[tuple[int, int], Any, bool]] = OrderedDict()
+_ADMIN_RECONCILE: ContextVar[tuple | None] = ContextVar("projection_admin_reconcile", default=None)
 _MAINTENANCE_BOUNDARY: ContextVar[dict | None] = ContextVar("projection_maintenance_boundary", default=None)
+
+
+class ProjectionInspectionBudgetExceeded(ValueError):
+    error_code = 'PROJECTION_INSPECTION_BUDGET_EXHAUSTED'
 
 
 # LLM: 只读nofollow普通文件；缺失可显式为空，损坏、链接和非对象均抛错，不能作删除许可。
@@ -51,6 +56,13 @@ def read_projection_object(path: Path, *, optional: bool = False) -> dict[str, A
             return {}
         raise
     with os.fdopen(fd, "r", encoding="utf-8") as source:
+        context = _ADMIN_RECONCILE.get()
+        if context is not None:
+            budget = context[1]
+            size = os.fstat(source.fileno()).st_size
+            context[2]['bytes'] += size
+            if budget is not None and budget.exhausted(size=context[2]['bytes']):
+                raise ProjectionInspectionBudgetExceeded('projection inspection byte/deadline budget exhausted')
         value = json.load(source)
     if not isinstance(value, dict):
         raise ValueError("投影必须是JSON对象")
@@ -113,9 +125,16 @@ def _runtime_file_facts(db: Path, run_id: str, payload: dict[str, Any]) -> tuple
     if wal.is_symlink() or shm.is_symlink() or (wal.exists() and not shm.is_file()):
         raise ValueError("拒绝链接runtime旁文件")
     uri = sqlite_readonly_probe_uri(db)
-    with closing(sqlite3.connect(uri, uri=True, timeout=0.05)) as conn:
+    context = _ADMIN_RECONCILE.get()
+    if context is not None:
+        from ....conversation.runtime_reconciliation import _snapshot
+        scope = _snapshot(db)
+    else:
+        scope = closing(sqlite3.connect(uri, uri=True, timeout=0.05))
+    with scope as conn:
         conn.execute("PRAGMA query_only=ON")
-        conn.execute("BEGIN")
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
         rows = conn.execute("SELECT status FROM agent_runs WHERE run_id = ? OR agent_run_id = ?", (run_id, run_id)).fetchall()
         statuses = {str(row[0]) for row in rows}
         active = statuses - AGENT_RUN_TERMINAL_STATUSES
@@ -184,6 +203,11 @@ def _inventory(run_dir: Path, *, root_fd: int | None = None) -> dict[str, tuple[
     def walk(parent_fd, prefix):
         with os.scandir(parent_fd) as entries:
             for entry in entries:
+                context = _ADMIN_RECONCILE.get()
+                if context is not None:
+                    context[2]['items'] += 1
+                if context is not None and context[1] is not None and context[1].exhausted(context[2]['items']):
+                    raise ProjectionInspectionBudgetExceeded('projection inventory budget exhausted')
                 info = entry.stat(follow_symlinks=False)
                 if stat.S_ISLNK(info.st_mode) or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                     raise ValueError("投影包含链接或特殊文件")
@@ -289,6 +313,10 @@ def _pending_obligation(payload: dict[str, Any]) -> bool:
 def _has_parent_wake(owner_home: Path, run_id: str, payload: dict[str, Any]) -> bool:
     ids = {run_id, str(payload.get("root_run_id") or payload.get("root_id") or ""), str(payload.get("task_id") or "")} - {""}
     roots = [owner_home / "conversations", owner_home / "data/conversations"]
+    context = _ADMIN_RECONCILE.get()
+    if context is not None:
+        refs = _collect_active_wake_ids(owner_home)
+        return refs is None or bool(ids & refs)
     roots.extend((owner_home / "workspace/runtime/workspaces").glob("*/conversations"))
     checked = 0
     for root in roots:
@@ -354,7 +382,24 @@ def _collect_wake_refs(wake_doc: dict[str, Any], target: set[str]) -> None:
 # 函数用途: 预先索引活跃唤醒引用的 run/task ID 集合，避免每个投影目录重复全扫 wake_queue。
 def _collect_active_wake_ids(owner_home: Path) -> set[str] | None:
     roots = [owner_home / "conversations", owner_home / "data/conversations"]
-    roots.extend((owner_home / "workspace/runtime/workspaces").glob("*/conversations"))
+    context = _ADMIN_RECONCILE.get()
+    if context is not None:
+        # 只检查有界活跃工作区目录；超预算保持未知，不枚举历史目录。
+        base = owner_home / 'workspace/runtime/workspaces'
+        if base.is_symlink():
+            return None
+        if base.is_dir():
+            with os.scandir(base) as entries:
+                for entry in entries:
+                    context[2]['items'] += 1
+                    if context[1] is not None and context[1].exhausted(context[2]['items']):
+                        return None
+                    if entry.is_symlink():
+                        return None
+                    if entry.is_dir(follow_symlinks=False):
+                        roots.append(Path(entry.path) / 'conversations')
+    else:
+        roots.extend((owner_home / "workspace/runtime/workspaces").glob("*/conversations"))
     ref_ids: set[str] = set()
     checked = 0
     for root in roots:
@@ -367,9 +412,13 @@ def _collect_active_wake_ids(owner_home: Path) -> set[str] | None:
             try:
                 with os.scandir(folder) as entries:
                     for entry in entries:
+                        checked += 1
+                        if context is not None:
+                            context[2]['items'] += 1
+                        if context is not None and context[1] is not None and context[1].exhausted(context[2]['items']):
+                            return None
                         if not entry.name.endswith(".json"):
                             continue
-                        checked += 1
                         if checked > 5000:
                             return None
                         wake = read_projection_object(Path(entry.path))
@@ -478,6 +527,33 @@ def _classify(owner_home, run_dir, *, now, active_run_ids, pinned_run_ids, slim_
             and not unique
             and projection_workspace_missing(run_dir, state_doc)
         )
+        context = _ADMIN_RECONCILE.get()
+        if context is not None:
+            agent, budget = context[:2]
+            from ....conversation.runtime_reconciliation import inspect_parent_terminal
+            owner = state_doc.get('owner', state_doc.get('owner_id'))
+            root_id = str(state_doc.get('root_run_id') or state_doc.get('root_id') or '')
+            if (owner != agent.home_paths.owner_id or not root_id or unique or age < ORPHAN_GRACE_SECONDS
+                    or state_doc.get('runner_active_attempt_id') or state_doc.get('runner_pid') or state_doc.get('pid')
+                    or any(name in records for name in ('heartbeat.json', 'heartbeat'))
+                    or state_doc.get('input_dependency_refs') or state_doc.get('pending_inputs')
+                    or any(request.get('status') not in {'CLOSED', 'DENIED', 'CANCELLED'}
+                        for request in state_doc.get('capability_requests', ()) if isinstance(request, dict))):
+                result['reason'] = 'authority_missing_reference_unproven'
+                return result
+            if not any(path.is_file() for path in (runtime_db_path(owner_home), owner_home / 'data/runtime.db')):
+                result['reason'] = 'authority_missing_coverage_unknown'
+                return result
+            runtime_status, pending = projection_runtime_facts(owner_home, run_dir.name, state_doc)
+            if runtime_status or pending or not inspect_parent_terminal(agent, root_id)['eligible']:
+                result['reason'] = 'authority_present_or_parent_unproven'
+                return result
+            if _has_active_parent_wake(owner_home, run_dir.name, state_doc, wake_lookup=wake_lookup, wake_ref_ids=wake_ref_ids):
+                result['reason'] = 'wake_reference_unknown_or_active'
+                return result
+            result.update(classification='authority_missing_archive_candidate', reason='authority_missing')
+            result['compact_source'] = {**evidence, 'authority_state': 'authority_missing'}
+            return result
         status_upper = str(state_doc.get("status", "")).upper()
         archive_eligible = False
         slim_eligible = False
@@ -507,7 +583,7 @@ def _classify(owner_home, run_dir, *, now, active_run_ids, pinned_run_ids, slim_
         elif slim_eligible:
             result.update(classification="terminal_slim_candidate", reason="slim_age")
     except (OSError, ValueError, TypeError, sqlite3.Error, RecursionError) as exc:
-        result["reason"] = f"unreadable:{type(exc).__name__}"
+        result["reason"] = getattr(exc, "error_code", f"unreadable:{type(exc).__name__}")
     return result
 
 
@@ -528,6 +604,7 @@ def _compact(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
             "parent_run_id": payload.get("parent_run_id", payload.get("parent_id", "")),
             "root_run_id": payload.get("root_run_id", payload.get("root_id", "")),
             "task_id": payload.get("task_id", ""), "status": payload.get("status", ""),
+            **({"authority_state": "authority_missing"} if payload.get("authority_state") == "authority_missing" else {}),
             "created_at": payload.get("created_at"), "updated_at": payload.get("updated_at"),
             "result_summary": payload.get("result_summary", payload.get("last_progress_summary", "")),
             "deliverable_paths": _deliverables(payload), "error_summary": payload.get("error_summary", payload.get("error", "")),
@@ -540,7 +617,11 @@ def _archive_entry(path: Path, compact: dict[str, Any]) -> None:
     import fcntl
 
     boundary = _MAINTENANCE_BOUNDARY.get()
-    if boundary is None or path.parent != boundary["owner_home"] / "agents":
+    if boundary is None:
+        raise ValueError("归档缺少受信维护边界")
+    parts = path.parent.relative_to(boundary['owner_home']).parts
+    if parts != ('agents',) and not (_ADMIN_RECONCILE.get() is not None and len(parts) == 3
+            and parts[:2] == ('agents', 'archived_subagents') and path.name == boundary['run_id'] + '.jsonl'):
         raise ValueError("归档缺少受信维护边界")
     if (not isinstance(compact, dict) or compact.get("schema") != "subagent_compact.v1"
             or compact.get("run_id") != boundary["run_id"]):
@@ -548,13 +629,22 @@ def _archive_entry(path: Path, compact: dict[str, Any]) -> None:
     validate_opaque_id(compact["run_id"], kind="run_id")
     _verify_boundary(boundary)
     with ExitStack() as stack:
+        if parts != ('agents',):
+            archive_fd = open_directory_beneath(boundary['owner_home'], parts, create=True, require_dir_fd=True)
+            stack.callback(os.close, archive_fd)
+            boundary['archive_fd'], boundary['archive_parts'] = archive_fd, parts
+            stack.callback(lambda: boundary.pop('archive_fd', None))
+            stack.callback(lambda: boundary.pop('archive_parts', None))
         fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
-                     0o600, dir_fd=boundary["agents"])
+                     0o600, dir_fd=boundary.get('archive_fd', boundary["agents"]))
         stack.callback(os.close, fd)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _verify_archive_leaf(boundary, path.name, fd)
         target = stack.enter_context(os.fdopen(os.dup(fd), "a+", encoding="utf-8"))
         target.seek(0)
+        context = _ADMIN_RECONCILE.get()
+        if context is not None and context[1] is not None and context[1].exhausted(size=os.fstat(fd).st_size):
+            raise ProjectionInspectionBudgetExceeded('archive receipt exceeds inspection budget')
         found = False
         for line in target:
             if not line.endswith("\n"):
@@ -576,15 +666,22 @@ def _archive_entry(path: Path, compact: dict[str, Any]) -> None:
         if not any(json.loads(line) == compact for line in target):
             raise ValueError("归档读回失败")
         _verify_archive_leaf(boundary, path.name, fd)
-        os.fsync(boundary["agents"])
+        os.fsync(boundary.get("archive_fd", boundary["agents"]))
 
 
 # LLM: FD仍可读不代表路径仍指向该归档；单链接、普通类型和当前路径身份同时成立才准继续。
 # 函数用途: 核对归档打开前后未被换名、链接或脱链。
 def _verify_archive_leaf(boundary, name, fd):
     _verify_boundary(boundary)
+    if 'archive_parts' in boundary:
+        descriptor = open_directory_beneath(boundary['owner_home'], boundary['archive_parts'], require_dir_fd=True)
+        try:
+            if _identity(os.fstat(descriptor)) != _identity(os.fstat(boundary['archive_fd'])):
+                raise ValueError('archive bucket identity changed')
+        finally:
+            os.close(descriptor)
     info = os.fstat(fd)
-    current = os.stat(name, dir_fd=boundary["agents"], follow_symlinks=False)
+    current = os.stat(name, dir_fd=boundary.get('archive_fd', boundary["agents"]), follow_symlinks=False)
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not stat.S_ISREG(current.st_mode)
             or current.st_nlink != 1 or _identity(info) != _identity(current)):
         raise ValueError("归档不是当前单链接普通文件")
@@ -601,14 +698,16 @@ def _maintenance_guard(owner_home: Path, run_dir: Path, *, expected=None):
     with _pinned_projection(owner_home, run_dir, expected) as boundary, ExitStack() as stack:
         fcntl.flock(boundary["owner"], fcntl.LOCK_EX | fcntl.LOCK_NB)
         canonical = runtime_db_path(owner_home)
-        try:
-            fd = os.open(canonical.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                         0o600, dir_fd=boundary["owner"])
-        except FileExistsError:
-            pass
-        else:
-            os.close(fd)
-            RuntimeRepository(canonical)
+        # 显式归档只锁现存权威库，不创建空 canonical 旁路。
+        if _ADMIN_RECONCILE.get() is None:
+            try:
+                fd = os.open(canonical.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=boundary["owner"])
+            except FileExistsError:
+                pass
+            else:
+                os.close(fd)
+                RuntimeRepository(canonical)
         for db in (canonical, owner_home / "data/runtime.db"):
             if not db.exists() and not db.is_symlink():
                 continue
@@ -664,12 +763,15 @@ def _maintain_projection(owner_home, run_dir, info, report, *, now, active_run_i
             _remove_records(run_dir, records, info["scratch_roots"], report)
             report["slimmed_dirs"] += 1
         else:
-            if kind == "terminal_archive_candidate":
+            if kind in {"terminal_archive_candidate", "authority_missing_archive_candidate"}:
                 archive = owner_home / "agents" / datetime.fromtimestamp(now, timezone.utc).strftime("archived_subagents_%Y_%m.jsonl")
+                if kind == 'authority_missing_archive_candidate':
+                    day = datetime.fromtimestamp(_timestamp(info['payload'].get('updated_at')), timezone.utc).strftime('%Y-%m-%d')
+                    archive = owner_home / 'agents' / 'archived_subagents' / day / (run_dir.name + '.jsonl')
                 _archive_entry(archive, _compact(info["compact_source"], run_dir.name))
                 records = _verify_before_delete(owner_home, run_dir, info, **options)
             _remove_records(run_dir, records, None, report)
-            if kind == "terminal_archive_candidate":
+            if kind in {"terminal_archive_candidate", "authority_missing_archive_candidate"}:
                 report["archived_dirs"] += 1
 
 
@@ -1148,3 +1250,51 @@ def maintain_subagents_lane(request) -> dict:
         after = ""
         receipt["cursor"] = {"phase": "transcripts", "root": index + 1, "after": ""}
     return {**receipt, "cursor": {}, "complete": True}
+
+
+def reconcile_projection_page(agent, *, apply=False, after='', limit=100, budget=None,
+                              commit_transition=None, run_ids=()):
+    """显式管理员仅按准确编号归档无权威投影；缺完整目录索引不做全目录扫描。"""
+    report = {'scanned_dirs': 0, 'removed_dirs': 0, 'removed_files': 0, 'removed_bytes': 0,
+              'slimmed_dirs': 0, 'archived_dirs': 0, 'protected_dirs': 0,
+              'errors': [], 'items': [], 'next_after': '', 'page_complete': True,
+              'effect_outcome': 'not_started'}
+    if not run_ids:
+        report['errors'].append({'reason_code': 'PROJECTION_DISCOVERY_UNAVAILABLE',
+            'next_step': '当前没有完整的只读投影目录索引；请传 run_ids 精确预览，不要全目录扫描或猜测空集合。'})
+        return report
+    home = Path(agent.home_paths.owner_home_dir)
+    usage = {'items': 0, 'bytes': 0}
+    for run_id in sorted(set(run_ids)):
+        if run_id <= after:
+            continue
+        if report['scanned_dirs'] >= limit or (budget is not None and budget.exhausted(usage['items'], usage['bytes'])):
+            report.update(page_complete=False, next_after=report['items'][-1]['run_id'] if report['items'] else after)
+            break
+        report['scanned_dirs'] += 1
+        token = _ADMIN_RECONCILE.set((agent, budget, usage))
+        try:
+            info = _classify(home, home / 'agents' / run_id,
+                now=time.time(), active_run_ids=None, pinned_run_ids=None, slim_after_days=7, archive_after_days=30)
+            item = {key: info[key] for key in ('run_id', 'classification', 'reason', 'age_seconds')}
+            item['eligible'] = info['classification'] == 'authority_missing_archive_candidate'
+            item['repaired'] = False
+            if not item['eligible']:
+                item['next_step'] = '保留原投影；核对当前 owner 的 state/refs、父级终态、执行身份、唯一产物与未消费输入/唤醒。预算不足时请缩小 run_ids 后重新预览。'
+            if item['eligible'] and apply:
+                def commit():
+                    _maintain_projection(home, home / 'agents' / run_id, info, report,
+                        now=time.time(), active_run_ids=None, pinned_run_ids=None, slim_after_days=7, archive_after_days=30)
+                    return True
+                item['repaired'] = commit() if commit_transition is None else commit_transition(commit)
+                report['effect_outcome'] = 'succeeded'
+            elif not item['eligible']:
+                report['protected_dirs'] += 1
+            report['items'].append(item)
+        except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+            report['errors'].append({'run_id': run_id, 'reason_code': 'PROJECTION_ARCHIVE_UNCONFIRMED', 'error_type': type(exc).__name__,
+                'next_step': '保留原投影与归档；先核对原回执，不要重放原外部操作。'})
+            report['effect_outcome'] = 'unknown' if apply else 'not_started'
+        finally:
+            _ADMIN_RECONCILE.reset(token)
+    return report

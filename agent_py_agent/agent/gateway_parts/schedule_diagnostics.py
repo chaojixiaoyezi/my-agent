@@ -83,6 +83,23 @@ def schedule_error_code(exc: Exception) -> str:
     return storage_code or (code if code in _MESSAGES else 'SCHEDULER_CONTROL_FAILED')
 
 
+def schedule_authority_details(owner, *, actor=None, scope=None):
+    """仅公开宿主身份标量与修正步骤，不回显请求或账本路径。"""
+    if not isinstance(owner, dict):
+        from ..user_space.owner_resolver import _owner_id
+        canonical_id = _owner_id(owner) if owner is not None else ''
+        owner = {'provider': str(getattr(owner, 'provider', '') or ''),
+                 'kind': str(getattr(owner, 'owner_kind', '') or ''),
+                 'id': canonical_id}
+    channel = str(getattr(actor, 'channel', '') or getattr(scope, 'channel', '') or '')
+    return {'actor': {'entry_kind': 'channel' if actor is not None else 'local' if channel in {'tui', 'cli', 'local'} else 'unknown',
+                      'channel': channel, 'actor_id': str(getattr(actor, 'actor_id', '') or getattr(scope, 'user_id', '') or '')},
+            'owner': {key: str(owner.get(key, '') or '') for key in ('provider', 'kind', 'id')},
+            'required_identity': '本机 local/main 前台管理员（私人入口须当前绑定），或原授权创建者',
+            'next_step': '从本机前台或当前已绑定管理员私聊重新发起；其他空间请由原创建者操作。',
+            'effect_outcome': 'not_started'}
+
+
 # LLM: 诊断编号只关联本次错误；日志仅包含可信身份和数值，不含用户参数，写入不改变监控任务状态。
 # 函数用途: 保存可检索的结构化失败信息并返回无需刷新的中文回执。
 def schedule_failure(exc: Exception, scope: object, *, operation: str, stage: str, started: float) -> ConversationControlResult:
@@ -92,6 +109,8 @@ def schedule_failure(exc: Exception, scope: object, *, operation: str, stage: st
     details = {'diagnostic_id': diagnostic_id, 'error_code': code, 'exception_type': type(exc).__name__,
                'errno': getattr(exc, 'errno', None), 'operation': operation, 'stage': stage,
                'elapsed_ms': max(0, int((time.monotonic() - started) * 1000))}
+    if code.startswith('CHANNEL_ACTOR_') or code.startswith('SCHEDULER_CREATOR_'):
+        details.update(schedule_authority_details(owner, scope=scope))
     source = getattr(exc, 'details', {})
     if isinstance(source, dict):
         details.update({key: value for key in ('line_no', 'column')

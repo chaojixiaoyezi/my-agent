@@ -81,7 +81,8 @@ def execute_schedule_control(agent, command, scope):
             from ..scheduler.control import authorize_job
             owner_agent = _control_agent(agent, repo)
             authorize_job(repo, job, _control_actor(owner_agent, scope), home_root=owner_agent.home_paths.root,
-                          agent=owner_agent, operation=operation)
+                          agent=owner_agent, operation=operation,
+                          host_foreground_interactive=_foreground_admin_scope(owner_agent, scope))
         if operation not in {'get', 'history'}:
             stage = 'control'
         if operation in {'delete', 'takeover', 'execution', 'cancel', 'recover'}:
@@ -96,13 +97,15 @@ def execute_schedule_control(agent, command, scope):
             actor = _control_actor(owner_agent, scope)
             if operation in {'execution', 'recover'}:
                 facts = (inspect_monitor_execution(owner_agent, repo, job['job_id'], actor=actor) if operation == 'execution'
-                    else recover_monitor(owner_agent, repo, job['job_id'], job['version'], actor=actor))
+                    else recover_monitor(owner_agent, repo, job['job_id'], job['version'], actor=actor,
+                        host_foreground_interactive=_foreground_admin_scope(owner_agent, scope)))
                 text = '\n'.join(f"{row['rule_id']} {row['run_id']}：{row['status']}；任务:{row['task_status']}；取消:{'已请求' if row['cancel_requested'] else '未请求'}"
                     for row in facts['runs'])
                 return _result(True, ('已重新核对原执行；未启动新工作。\n' if operation == 'recover' else '当前执行：\n') + (text or '暂无当前执行。'), facts)
             if operation in {'delete', 'cancel'}:
                 handler = delete_monitor if operation == 'delete' else cancel_monitor
-                facts = handler(owner_agent, repo, job['job_id'], job['version'], actor=actor)
+                facts = handler(owner_agent, repo, job['job_id'], job['version'], actor=actor,
+                    host_foreground_interactive=_foreground_admin_scope(owner_agent, scope))
                 message = ('已删除监控；后续运行已停止，当前执行已停止。' if facts['cancellation_status'] == 'stopped'
                     else '已删除监控；后续运行已停止，当前执行已请求取消，等待准确收口。')
                 if operation == 'cancel':
@@ -230,6 +233,20 @@ def _control_agent(base, repository):
     if candidate.scheduler_repository.owner != repository.owner:
         raise ScheduleOwnerChanged('监控 owner 已变化')
     return candidate
+
+
+def _foreground_admin_scope(agent, scope):
+    """命令入口只接受认证后的本机通道或当前管理员私人绑定。"""
+    from ..user_space.admin_channel_identity import find_admin_channel_identity
+    home = getattr(agent, 'home_paths', None)
+    owner = getattr(scope, 'resolved_owner', None)
+    if (home is None or owner is None or (home.owner_provider, home.owner_kind, home.owner_id) != ('local', 'main', 'local/main')
+            or (owner.provider, owner.owner_kind, owner.owner_id) != ('local', 'main', 'main')):
+        return False
+    if scope.channel in {'tui', 'cli', 'local', 'terminal', 'gateway-cli'}:
+        return True
+    return (scope.metadata.get('channel_chat_type') in {'p2p', 'private'}
+            and find_admin_channel_identity(home.root, scope.channel, scope.user_id) is not None)
 
 
 # LLM: slash actor只取认证scope与原ThreadStore；缺线程只按已解析owner创建准确入口绑定，不消费正文、名称或模型参数。

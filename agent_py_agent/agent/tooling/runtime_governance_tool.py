@@ -41,7 +41,7 @@ from .models import (
 
 PROC_ROOT = Path('/proc')
 TOOL_NAME = 'runtime_governance'
-WRITES = ('set_maintenance_lock', 'clear_maintenance_lock', 'terminate_orphan', 'configure_watchdog_service')
+WRITES = ('set_maintenance_lock', 'clear_maintenance_lock', 'terminate_orphan', 'configure_watchdog_service', 'reconcile_apply')
 DENIED = 'PERMISSION_DENIED: Watchdog and runtime control actions require admin identity and explicit admin_authorized=True.'
 MARKER = '.my-agent-private-install.json'
 DEFAULT_UNIT = 'my-agent-gw-supervisor.service'
@@ -261,9 +261,12 @@ class RuntimeGovernanceTool(BaseTool):
             'properties': {
                 'action': {
                     'type': 'string',
-                    'enum': ['status', *WRITES],
+                    'enum': ['status', 'reconcile_preview', *WRITES],
                     'description': 'status 只读查看三层看门狗、发行版本和未受管进程；其余写动作须管理员身份且显式传 admin_authorized=true。',
                 },
+                'cursor': {'type': 'string', 'maxLength': 8192, 'description': '上一页 next_cursor；首次使用空字符串，绑定当前 owner 与过滤。'},
+                'limit': {'type': 'integer', 'minimum': 1, 'description': '本次最多处理的条目数；不传使用 retention_scan_slice_entries。'},
+                'run_ids': {'type': 'array', 'items': {'type': 'string', 'minLength': 1}, 'description': '可选准确子代理编号；不接受其他 owner 或路径。'},
                 'admin_authorized': {
                     'type': 'boolean',
                     'description': '管理员明确授权本次控制动作，不替代宿主审批',
@@ -316,7 +319,7 @@ class RuntimeGovernanceTool(BaseTool):
         ),
     )
     runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy('dangerous', by_parameter=(('action', (('status', 'read_only'),)),)),
+        effect_resolver=EffectResolverPolicy('dangerous', by_parameter=(('action', (('status', 'read_only'), ('reconcile_preview', 'read_only'), ('reconcile_apply', 'dangerous'))),)),
         approval_policy=ApprovalPolicy('always', always_effects=('dangerous',)), sandbox_policy=SandboxPolicy('none'),
         concurrency_policy=ConcurrencyPolicy('serial'), idempotency_policy=IdempotencyPolicy('operation'),
         resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('runtime_governance:installation',)))
@@ -362,6 +365,18 @@ class RuntimeGovernanceTool(BaseTool):
         if not validate_tool_input(params, self.model_spec.input_schema).ok:
             return _reply({'error': '参数不符合治理工具Schema'}, 'TOOL_INVALID_ARGUMENTS')
         try:
+            if action in {'reconcile_preview', 'reconcile_apply'}:
+                from ..conversation.runtime_reconciliation import reconcile_owner_runtime
+                if self.agent is None:
+                    return _reply({'error': '缺少当前 owner 宿主上下文；请从管理员前台重试。', 'effect_outcome': 'not_started'}, 'RECONCILIATION_CONTEXT_REQUIRED')
+                if action == 'reconcile_apply':
+                    from ..user_space.owner_access import is_foreground_admin_interactive
+                    if not is_foreground_admin_interactive(self.agent):
+                        return _reply({'error': '当前调用没有本机管理员前台受理证明；请从本机前台或当前绑定管理员私聊发起。',
+                                       'effect_outcome': 'not_started'}, 'ADMIN_CONTROL_DENIED')
+                report = reconcile_owner_runtime(self.agent, apply=action == 'reconcile_apply',
+                    cursor=params.get('cursor', ''), limit=params.get('limit'), run_ids=tuple(params.get('run_ids', ())))
+                return _reply(report, 'RECONCILIATION_PARTIAL' if report['errors'] else '', effect=report['effect_outcome'])
             if action == 'status':
                 return _reply(self._status())
             if self.workspace is None:
@@ -433,6 +448,9 @@ class RuntimeGovernanceTool(BaseTool):
     def effective_write_roots(self, arguments, write_boundary, workspace_root):
         if arguments.get('action') not in WRITES:
             return ()
+        if arguments.get('action') == 'reconcile_apply':
+            root = getattr(getattr(self.agent, 'home_paths', None), 'owner_home_dir', None)
+            return (str(root),) if root is not None else ()
         roots = [str(self.workspace)] if self.workspace is not None else []
         if arguments.get('action') == 'configure_watchdog_service':
             roots.append(str(Path.home() / '.config/systemd/user'))

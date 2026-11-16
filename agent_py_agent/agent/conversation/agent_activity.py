@@ -1509,6 +1509,14 @@ def _iter_blocked_open_capability_pages(subagents, page_budget: int):
 
 # LLM: 仅按当前BLOCKED与OPEN能力申请索引分页检查，同时核对根级终态证明与直属父子代理已终态后才收口，未证清原样保留并显式记录。
 # 函数用途: 为显式运维清理错失收口窗口的孤立能力申请，保持CLI层与subagents内部隔离。
+def settle_orphaned_capability_requests_page(agent, *, apply=False, cursor='', limit=100,
+                                             run_ids=(), commit_transition=None):
+    """工具单页与显式 CLI 全页分开；原全页签名和回执保持兼容。"""
+    from .runtime_reconciliation import reconcile_capability_page
+    return reconcile_capability_page(agent, apply=apply, after=cursor, limit=limit,
+        run_ids=run_ids, commit_transition=commit_transition)
+
+
 def settle_orphaned_capability_requests(
     agent: object,
     *,

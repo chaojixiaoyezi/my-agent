@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from contextlib import nullcontext
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -344,6 +345,9 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
 
 # LLM: 调度读写都经原 repository；元数据查询不得改变鉴权、生命周期或持久字段。
 # 类用途: 管理当前 owner 的计划并查询运行和交付状态。
+_FOREGROUND_SCOPE_ALLOWED = ContextVar('schedule_foreground_scope_allowed', default=True)
+
+
 class ScheduleTool(BaseTool):
     # LLM: 新控制动作沿同一工具副作用和幂等策略；显式 ask 保持原权限裁决，不通过 slash 入口改变模型调用策略。
     # host_authorizer只由认证宿主适配器注入，不进入模型参数或修改Agent共享run上下文。
@@ -382,6 +386,20 @@ class ScheduleTool(BaseTool):
             parameter_kinds={"job_id": "logical"}),
             input_policy=ToolInputPolicy(internal_parameters=("__tool_call_id", "__run_scope")),
         )
+
+    def _foreground_admin(self):
+        from ..user_space.owner_access import is_foreground_admin_interactive
+        # 外部插件宿主保持原独立 authorizer，不继承普通前台证明。
+        return (_FOREGROUND_SCOPE_ALLOWED.get() and self._host_authorizer is None
+                and is_foreground_admin_interactive(self.agent))
+
+    def execute_scoped(self, params, context):
+        role = getattr(getattr(context, 'runtime_snapshot', None), 'owner_type', '')
+        token = _FOREGROUND_SCOPE_ALLOWED.set(_FOREGROUND_SCOPE_ALLOWED.get() and role in {'main_agent', 'user'})
+        try:
+            return self.execute(params)
+        finally:
+            _FOREGROUND_SCOPE_ALLOWED.reset(token)
 
     # LLM: 群新工作在真实 actor 与原策略锁内写入；只读/停止不受新建授权门限制，失败不泄露正文。
     # 函数用途: 校验动作后调用调度账本，未认证目标保持专用错误码和not_started，不降级为其它路由。
@@ -427,7 +445,12 @@ class ScheduleTool(BaseTool):
         except SchedulerNotFoundError as exc:
             return _error(str(exc), "SCHEDULER_NOT_FOUND", metadata_only=metadata_only)
         except HostActorError as exc:
-            return _error(str(exc), exc.error_code, metadata_only=metadata_only)
+            from ..gateway_parts.schedule_diagnostics import schedule_authority_details
+            current = getattr(self.agent, '_current_run_params', None)
+            outcome = _error(str(exc), exc.error_code, metadata_only=metadata_only)
+            outcome.result_envelope.update(schedule_authority_details(
+                repository.owner, actor=getattr(current, 'host_channel_actor', None)))
+            return outcome
         except SchedulerConflictError as exc:
             return _error(str(exc), "SCHEDULER_CONFLICT", metadata_only=metadata_only)
         except OwnerQuotaExceeded as exc:
@@ -492,7 +515,7 @@ class ScheduleTool(BaseTool):
                 thread_id, _task = _conversation_scope(self.agent)
                 authorize_job(repository, repository.get_job(job_id, include_deleted=action == 'delete'),
                     resolve_host_actor(self.agent, thread_id), home_root=getattr(getattr(self.agent, 'home_paths', None), 'root', None),
-                    agent=self.agent, operation=action)
+                    agent=self.agent, operation=action, host_foreground_interactive=self._foreground_admin())
         if action == 'execution':
             from .control import inspect_monitor_execution
             thread_id, _task = _conversation_scope(self.agent)
@@ -574,10 +597,12 @@ class ScheduleTool(BaseTool):
         thread_id, _task = _conversation_scope(self.agent)
         actor = resolve_host_actor(self.agent, thread_id)
         if action == 'recover':
-            return _success(action, recover_monitor(self.agent, repository, job_id, expected_version, actor=actor))
+            return _success(action, recover_monitor(self.agent, repository, job_id, expected_version, actor=actor,
+                host_foreground_interactive=self._foreground_admin()))
         if action in {'delete', 'cancel'}:
             handler = delete_monitor if action == 'delete' else cancel_monitor
-            facts = handler(self.agent, repository, job_id, expected_version, actor=actor)
+            facts = handler(self.agent, repository, job_id, expected_version, actor=actor,
+                host_foreground_interactive=self._foreground_admin())
             return _success(action, {**facts, 'job': _job_projection(facts['job'], include_prompt=True)})
         job = takeover_notifications(self.agent, repository, job_id, expected_version, actor)
         return _success(action, {'job': _job_projection(job, include_prompt=True)})

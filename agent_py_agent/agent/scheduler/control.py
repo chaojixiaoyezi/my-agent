@@ -10,13 +10,24 @@ from .repository import SchedulerConflictError
 
 # LLM: 调用方提供宿主冻结actor与明确动作；原创建者沿旧授权，代清理仅允许当前群成员对已证离群创建者stop/delete，不扩大其它写入。
 # 函数用途: 核对准确owner/原创建者，或已证明离群的必要止损授权；只读查询仅核owner，工具与命令共用。
-def authorize_job(repository, job, actor=None, *, home_root=None, agent=None, operation="manage"):
+def authorize_job(repository, job, actor=None, *, home_root=None, agent=None, operation="manage", host_foreground_interactive: bool = False):
     from .creator_access import local_owner_managed
 
     if job.get('owner') != repository.owner:
         raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
     if operation == 'read':
         return
+    # 前台资格由宿主受理证明传入；仓库 owner 与当前绑定仍在本次写前重新核验。
+    if host_foreground_interactive is True and repository.owner == {'provider': 'local', 'kind': 'main', 'id': 'local/main'}:
+        home = getattr(agent, 'home_paths', None)
+        if (home is not None and home.owner_provider == 'local' and home.owner_kind == 'main'
+                and home.owner_id == 'local/main'):
+            if actor is None:
+                return
+            if (actor.owner_id == repository.owner['id'] and home_root is not None
+                    and find_admin_channel_identity(home_root, actor.channel, actor.actor_id) is not None):
+                return
+            raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
     creator = job.get('creator')
     local = repository.owner['provider'] == 'local' and repository.owner['kind'] == 'main'
     if (creator == {'local': True} or local_owner_managed(repository, job)) and (local or repository.owner['kind'] == 'user' and actor is None):
@@ -35,22 +46,22 @@ def authorize_job(repository, job, actor=None, *, home_root=None, agent=None, op
 
 # LLM: 删除先在原仓库 CAS 关闭未来与 queued/claimed，再请求准确 active run 整树停止；异常保存 requested，不能宣称已退出。
 # 函数用途: 删除已授权监控并回收当前工作；群代清理保留原creator，重复删除沿原tombstone重试未确认取消。
-def delete_monitor(agent, repository, job_id, expected_version, *, actor=None):
-    return _cancel_monitor(agent, repository, job_id, expected_version, actor=actor, delete=True)
+def delete_monitor(agent, repository, job_id, expected_version, *, actor=None, host_foreground_interactive: bool = False):
+    return _cancel_monitor(agent, repository, job_id, expected_version, actor=actor, delete=True, host_foreground_interactive=host_foreground_interactive)
 
 
 # LLM: 取消当前与删除共用原 job/run 控制服务；future schedule 不变，取消意图和历史仍存在原账本。
 # 函数用途: 只停止当前所有规则执行，保留未来周期。
-def cancel_monitor(agent, repository, job_id, expected_version, *, actor=None):
-    return _cancel_monitor(agent, repository, job_id, expected_version, actor=actor, delete=False)
+def cancel_monitor(agent, repository, job_id, expected_version, *, actor=None, host_foreground_interactive: bool = False):
+    return _cancel_monitor(agent, repository, job_id, expected_version, actor=actor, delete=False, host_foreground_interactive=host_foreground_interactive)
 
 
 # LLM: 已授权原 owner/creator 的版本 CAS 是唯一写入入口；坏 run 排除不代表无执行，读取不完整必须保留取消未确认，不猜原身份。
 # 函数用途: 执行当前取消或删除，汇总所有规则的准确取消结果。
-def _cancel_monitor(agent, repository, job_id, expected_version, *, actor, delete):
+def _cancel_monitor(agent, repository, job_id, expected_version, *, actor, delete, host_foreground_interactive=False):
     job = repository.get_job(job_id, include_deleted=delete)
     authorize_job(repository, job, actor, home_root=getattr(getattr(agent, 'home_paths', None), 'root', None),
-                  agent=agent, operation='delete' if delete else 'cancel')
+                  agent=agent, operation='delete' if delete else 'cancel', host_foreground_interactive=host_foreground_interactive)
     before, errors = repository._valid_runs(repository._store_snapshot())
     deleted = (repository.delete_job(job_id, expected_version=expected_version) if delete
         else repository.cancel_job_runs(job_id, expected_version=expected_version))
@@ -191,9 +202,10 @@ def inspect_monitor_execution(agent, repository, job_id, *, actor=None):
 
 # LLM: recovery 只做原死亡证明与同 ID waiting 对账，禁止重开存活执行或借用另一监控；CAS 由原恢复事务复核。
 # 函数用途: 重新核对选定监控的陈旧执行，返回准确恢复和剩余状态，不代替进程迁移。
-def recover_monitor(agent, repository, job_id, expected_version, *, actor=None):
+def recover_monitor(agent, repository, job_id, expected_version, *, actor=None, host_foreground_interactive: bool = False):
     job = repository.get_job(job_id)
-    authorize_job(repository, job, actor, home_root=getattr(getattr(agent, 'home_paths', None), 'root', None))
+    authorize_job(repository, job, actor, home_root=getattr(getattr(agent, 'home_paths', None), 'root', None),
+                  agent=agent if host_foreground_interactive else None, host_foreground_interactive=host_foreground_interactive)
     recovered = repository.recover_interrupted_executions(job_id=job_id, expected_version=expected_version)
     for run in repository.pending_cancellation_runs():
         if run['job_id'] == job_id:
