@@ -1397,3 +1397,53 @@ def test_h09_process_ttl_does_not_delete_other_store_pending_wake(tmp_path, monk
     monkeypatch.setattr(module, "_PROCESS_COMPLETION_PRUNE_TIMES", OrderedDict())
     module._prune_consumed_process_records(store_a, authority)
     assert bool(authority.load("bg-test-other-store").record) is False
+
+
+def test_completion_errors_keep_redacted_refs_and_healthy_successor(tmp_path, monkeypatch, caplog):
+    from agent_py_agent.agent.conversation import process_events as module
+
+    agent, _, authority = _fixture(tmp_path)
+    record = authority.load('bg-test-notice').record
+    error = {'error_type': 'JSONDecodeError', 'context': 'process_session_store.validate',
+             'message': 'invalid JSON Authorization: Bearer private-token-value',
+             'path': str(tmp_path / 'bg-broken.json')}
+    published = []
+    class Authority:
+        def list_pending_completion_records_report(self, **_options):
+            return ProcessSessionListReport([record], [error])
+        def load(self, _session_id):
+            return SimpleNamespace(record=record, load_error=None)
+    monkeypatch.setattr(module, 'ProcessSessionStore', lambda _root: Authority())
+    monkeypatch.setattr(module, '_process_completion_status', lambda *_args, **_kwargs: {'status': 'exited'})
+    monkeypatch.setattr(module, 'publish_process_completion', lambda _store, value: published.append(value['session_id']) or 'notice-healthy')
+    monkeypatch.setattr(module, '_record_completion_notice', lambda *_args: None)
+    monkeypatch.setattr(module, '_prune_consumed_process_records', lambda *_args: None)
+    assert module.reconcile_process_completions(agent) == 1
+    assert published == ['bg-test-notice']
+    text = caplog.text
+    assert 'count=1 shown=1 omitted=0' in text
+    assert 'JSONDecodeError' in text and 'process_session_store.validate' in text and 'bg-broken.json' in text
+    assert 'private-token-value' not in text and 'original_operation_unknown' in text and '不要重放命令' in text
+    assert error['message'].endswith('private-token-value')
+
+
+def test_completion_error_diagnostics_are_bounded_and_preserve_committed_ref(tmp_path, monkeypatch, caplog):
+    from agent_py_agent.agent.contracts.diagnostics import DIAGNOSTIC_DETAILS_MAX_BYTES
+    from agent_py_agent.agent.conversation import process_events as module
+
+    agent, _, _ = _fixture(tmp_path)
+    error = {'error_type': 'ProcessSessionCommitPendingError', 'context': 'process_session_store.list',
+             'message': 'api_key=sk-' + 'x' * 80 + ' ' + '坏' * 5000,
+             'path': '/records/bg-one.json', 'committed': True,
+             'transaction_id': 'transaction-original', 'session_ids': ['bg-one']}
+    class Authority:
+        def list_pending_completion_records_report(self, **_options):
+            return ProcessSessionListReport([], [error] * 1000)
+    monkeypatch.setattr(module, 'ProcessSessionStore', lambda _root: Authority())
+    monkeypatch.setattr(module, '_prune_consumed_process_records', lambda *_args: None)
+    assert module.reconcile_process_completions(agent) == 0
+    message = next(row.getMessage() for row in caplog.records if 'PROCESS_COMPLETION_STORE_ERRORS' in row.getMessage())
+    assert 'count=1000' in message and 'omitted=0 ' not in message
+    assert len(message.encode()) < DIAGNOSTIC_DETAILS_MAX_BYTES + 200
+    assert 'transaction-original' in message and 'bg-one' in message and 'committed_recovery_required' in message
+    assert 'sk-' + 'x' * 80 not in message

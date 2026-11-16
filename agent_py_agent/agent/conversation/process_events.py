@@ -13,6 +13,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
+from ..contracts.diagnostics import DIAGNOSTIC_DETAILS_MAX_BYTES, redact_diagnostic_text
 from ..gateway_parts.multiprocess_executor_identity import process_birth
 from ..gateway_parts.multiprocess_native_host_observation import kernel_terminated, store_birth
 from ..tooling import process_registry as _registry_module
@@ -158,7 +159,27 @@ def reconcile_process_completions(agent: object) -> int:
     report = _pending_completion_report(authority)
     records, errors = report.records, report.load_errors
     if errors:
-        _LOG.warning("PROCESS_COMPLETION_STORE_ERRORS count=%s", len(errors))
+        # 只投影原报告的安全字段，不能因诊断丢掉类型/ref，也不能借读失败判原命令未执行。
+        details = []
+        for error in errors:
+            item = {}
+            for key in ("error_type", "context", "message", "path", "error_code", "category", "transaction_id"):
+                value = error.get(key)
+                if type(value) is str:
+                    # path保留尾部以定位原文件；其它字段保留头部，随后统一脱敏。
+                    limit = DIAGNOSTIC_DETAILS_MAX_BYTES // 32
+                    value = value[-limit:] if key == "path" else value[:DIAGNOSTIC_DETAILS_MAX_BYTES]
+                    item[key] = redact_diagnostic_text(value)[:limit]
+            session_ids = error.get("session_ids")
+            if isinstance(session_ids, (list, tuple)) and session_ids and type(session_ids[0]) is str:
+                item["session_id"] = redact_diagnostic_text(session_ids[0])[:DIAGNOSTIC_DETAILS_MAX_BYTES // 32]
+            item["side_effects"] = "committed_recovery_required" if error.get("committed") is True else "original_operation_unknown"
+            item["next_action"] = "核对所列path/session_id的原记录、redo与退出证明；不要重放命令，健康记录继续处理"
+            if len(json.dumps([*details, item], ensure_ascii=False).encode("utf-8")) > DIAGNOSTIC_DETAILS_MAX_BYTES:
+                break
+            details.append(item)
+        _LOG.warning("PROCESS_COMPLETION_STORE_ERRORS count=%s shown=%s omitted=%s details=%s",
+                     len(errors), len(details), len(errors) - len(details), json.dumps(details, ensure_ascii=False))
     sent = 0
     for payload in records:
         if payload.get("activation_scope") is not None or payload.get("status") == "unknown":
