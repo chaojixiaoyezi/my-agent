@@ -103,7 +103,7 @@ def test_quarantine_bad_and_oversize_records_are_explicit(tmp_path):
     assert page['sampled_bytes'] <= 32768
 
 
-def test_gateway_queue_page_real_tool_preserves_scope_and_unknown_reasons(tmp_path, monkeypatch):
+def test_gateway_queue_page_real_tool_preserves_scope_and_typed_reasons(tmp_path, monkeypatch):
     import os
     import time
 
@@ -131,7 +131,8 @@ def test_gateway_queue_page_real_tool_preserves_scope_and_unknown_reasons(tmp_pa
         rows.extend(result['queue_entries']['entries'])
         cursor = result['queue_entries']['next_cursor']
     assert {row['request_id'] for row in rows} == {'own-request'}
-    assert rows[0]['wait_reason'] == rows[0]['orphan_reason'] == 'unknown'
+    assert rows[0]['wait_reason'] == 'no_terminal_proof' and rows[0]['orphan_reason'] == ''
+    assert rows[0]['state'] == 'pending'
     assert rows[0]['age_seconds'] >= 86000
     assert 'do-not-expose-body' not in json.dumps(own)
     denied = json.loads(tool.execute({'include_log_diagnostics': False, 'include_queue_entries': True,

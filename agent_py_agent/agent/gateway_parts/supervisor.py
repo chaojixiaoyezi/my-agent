@@ -946,7 +946,8 @@ class GatewaySupervisor:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except OSError as error:
-            print(f"supervisor_log_write_failed: {type(error).__name__}; event_not_persisted", file=sys.stderr, flush=True)
+            print(f"SUPERVISOR_LOG_WRITE_FAILED: {type(error).__name__}; errno={error.errno}; event_not_persisted；"
+                  "请核验 supervisor.log 父目录权限及剩余空间；监护继续，勿把日志失败当作服务已停止。", file=sys.stderr, flush=True)
 
     # LLM: 仅转发INFO级别，不建立业务状态。
     # 函数用途: 记录普通监护信息。

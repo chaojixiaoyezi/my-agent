@@ -74,3 +74,12 @@ print('restored-stdout')
     data = ''.join(path.read_text() for path in tmp_path.iterdir() if path.name.startswith('supervisor.log') and not path.name.endswith('.lock'))
     assert data.count('unique-event-one') == data.count('unique-event-two') == 1
     assert 'unique-event-two' in log.read_text()
+
+
+def test_sink_failure_reports_unpersisted_event_and_next_action(tmp_path, capsys):
+    item = object.__new__(module.GatewaySupervisor)
+    item.log_path = tmp_path
+    item._append_log_file('event')
+    error = capsys.readouterr().err
+    assert 'SUPERVISOR_LOG_WRITE_FAILED' in error and 'IsADirectoryError' in error
+    assert 'event_not_persisted' in error and '父目录权限' in error
