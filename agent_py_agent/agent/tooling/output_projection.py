@@ -30,7 +30,11 @@ def tool_output_projection_policy(
     )
 
 
-def redact_tool_output_text(output: object, *, redaction: str) -> str:
+def redact_tool_output_text(output: object, *, redaction: str, host_output_redaction=None) -> str:
+    if host_output_redaction is not None:
+        from .host_output_redaction import redact_host_text
+        return redact_host_text(output, secret_values=host_output_redaction.snapshot.secret_values,
+            code_file=redaction == "source_code" and not host_output_redaction.force_default)
     return redact_sensitive_output_text(output, code_file=redaction == "source_code")
 
 

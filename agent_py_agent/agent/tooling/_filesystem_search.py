@@ -190,6 +190,11 @@ def _observe_search_source(tool, path: Path) -> tuple[int, ...]:
     state = _SEARCH_STATE.get()
     if state is not None:
         state.current_path = path.parent
+    policy = getattr(tool, '_host_output_redaction', None)
+    if policy is not None and any(status.source_path == path for status in policy.snapshot.unavailable_sources):
+        if state is not None:
+            state.mark('credential_source_projection_unavailable')
+        raise _SearchReadAbort('credential_source_projection_unavailable')
     try:
         safe = _safe_discovery_path(tool, path, root=path.parent,
                                     include_ignored=True, ignored_names=())
@@ -388,7 +393,18 @@ class SearchTextTool(FileSystemTool):
         token = _SEARCH_STATE.set(SearchScanState(started_at=time.monotonic(), tool=self,
                                                  current_path=target if target.is_dir() else target.parent))
         try:
-            return self._search_target_run(target, request)
+            outcome = self._search_target_run(target, request)
+            policy = getattr(self, '_host_output_redaction', None)
+            if policy is not None:
+                from .host_output_redaction import (
+                    credential_projection_receipt,
+                    redact_host_tool_outcome,
+                )
+                if any(status.source_path == target for status in policy.snapshot.unavailable_sources):
+                    outcome.output = '(凭据来源正文当前无法安全投影。)'
+                    outcome.result_envelope['credential_redaction'] = credential_projection_receipt(policy.snapshot, withheld=True)
+                outcome = redact_host_tool_outcome(outcome, snapshot=policy.snapshot, force_default=True)
+            return outcome
         finally:
             _SEARCH_STATE.reset(token)
 
@@ -886,12 +902,27 @@ def _matching_line_hit(request: MatchingLineRequest, idx: int, raw_line: str) ->
     return SearchHit(
         rel=request.rel,
         line_number=idx,
-        line=line,
+        line=_safe_search_line(state.tool if (state := _SEARCH_STATE.get()) else None, line),
         context_lines=(),
     )
 
 
+def _safe_search_line(tool, line: str) -> str:
+    policy = getattr(tool, '_host_output_redaction', None)
+    if policy is None:
+        return line
+    from .host_output_redaction import redact_host_text
+    fragments = tuple(part for secret in policy.snapshot.secret_values for part in secret.splitlines() if part)
+    return redact_host_text(line, secret_values=fragments)
+
+
 def _make_snippet(line: str) -> str:
+    state = _SEARCH_STATE.get()
+    policy = getattr(state.tool, '_host_output_redaction', None) if state is not None else None
+    if policy is not None:
+        from .host_output_redaction import redact_host_text
+        fragments = tuple(part for secret in policy.snapshot.secret_values for part in secret.splitlines() if part)
+        line = redact_host_text(line, secret_values=fragments)
     snippet = line.strip()
     if len(snippet) > _MAX_SEARCH_LINE_CHARS:
         snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
@@ -1204,7 +1235,7 @@ def _search_hit_from_rg_event(
             state.mark('line_byte_limit')
         return None
     return SearchHit(rel=_item_relative_path(tool, raw_path, safe_item),
-                     line_number=line_number, line=line, context_lines=())
+                     line_number=line_number, line=_safe_search_line(tool, line), context_lines=())
 
 
 def _rg_event_path(tool: SearchTextTool, path_text: str) -> Path:
@@ -1300,7 +1331,7 @@ def _hydrate_search_page(tool, page: list[SearchHit], request: SearchRequest) ->
                     if windows[window_index][0] <= number <= windows[window_index][1]:
                         if not _retain_search_bytes(len(line.encode('utf-8')) + 64):
                             break
-                        rows[number] = line
+                        rows[number] = _safe_search_line(tool, line)
                     if number >= windows[-1][1]:
                         break
             failed = bool(state and state.limited)

@@ -644,3 +644,22 @@ def test_bounded_redaction_only_suppresses_recursion_and_restores_context():
         redact_sensitive_output_text(BrokenValue())
     assert redact_sensitive_output_text(RecursiveValue(), redacted_marker='[hidden]') == '[hidden]'
     assert redact_sensitive_value({'public': 7, 'password': 'synthetic-secret'}) == {'public': 7, 'password': '<redacted>'}
+
+
+def test_configured_value_log_context_is_private_and_resets():
+    from agent_py_agent.agent.common.log_redaction import configured_secret_redaction
+    secret = 'opaque configured value without recognized shape'
+    with configured_secret_redaction((secret,)):
+        assert secret not in redact_sensitive_text('diagnostic ' + secret)
+        assert 'diagnostic' in redact_sensitive_text('diagnostic ' + secret)
+    assert secret in redact_sensitive_text(secret)
+
+
+def test_configured_value_context_does_not_leak_to_other_threads():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.common.log_redaction import configured_secret_redaction
+    secret = 'opaque-private-synthetic-value'
+    with configured_secret_redaction((secret,)), ThreadPoolExecutor(max_workers=1) as pool:
+        assert secret not in redact_sensitive_text(secret)
+        assert pool.submit(redact_sensitive_text, secret).result(timeout=5) == secret

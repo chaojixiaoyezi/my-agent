@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 
 _ENV_PREFIX = "env:"
@@ -30,7 +30,7 @@ class SecretRefError(ValueError):
 
 # LLM: 只读唯一显式来源；旧调用仍返回空表示缺凭据，事务用 required=True 在提交前显式拒绝，不回退旧来源。
 # 函数用途: 解析受管密钥引用，可选择要求新来源准备成功。
-def resolve_secret_ref(value: str, *, required: bool = False) -> str:
+def resolve_secret_ref(value: str, *, required: bool = False, max_chars: int | None = None) -> str:
     """把密钥引用解析成实际值。``env:NAME`` / ``file:/path`` / 普通字符串(原样)。
     解析失败(env 未设 / 文件读不到)返回空串,由上层按"凭据缺失"处理。"""
     if not isinstance(value, str):
@@ -43,7 +43,14 @@ def resolve_secret_ref(value: str, *, required: bool = False) -> str:
             resolved = os.environ.get(_environment_reference_name(stripped), "")
         else:
             path = stripped[len(_FILE_PREFIX):].strip()
-            resolved = Path(path).expanduser().read_text(encoding="utf-8").strip() if path else ""
+            if path:
+                with Path(path).expanduser().open(encoding="utf-8") as handle:
+                    resolved = handle.read(max_chars + 1 if max_chars is not None else -1)
+                if max_chars is not None and len(resolved) > max_chars:
+                    raise SecretRefError("CREDENTIAL_SOURCE_TOO_LARGE")
+                resolved = resolved.strip()
+            else:
+                resolved = ""
     except (OSError, ValueError, RuntimeError):
         resolved = ""
     if required and not resolved.strip():
@@ -117,3 +124,81 @@ def freeze_managed_secret_environment(config):
 
 
 __all__ = ["resolve_secret_ref", "is_secret_ref", "redact", "managed_secret_environment_names", "freeze_managed_secret_environment"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class CredentialSourceStatus:
+    field_name: str = ""
+    reason_code: str = ""
+    source_path: Path | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class HostCredentialSnapshot:
+    """仅本次调用存活的私有值；禁止序列化该对象。"""
+    secret_values: tuple[str, ...] = field(default=(), repr=False)
+    unavailable_sources: tuple[CredentialSourceStatus, ...] = ()
+    snapshot_error_code: str = ""
+    declared_source_paths: tuple[Path, ...] = field(default=(), repr=False, compare=False)
+
+    @property
+    def coverage(self) -> str:
+        return "partial" if self.unavailable_sources or self.snapshot_error_code else "complete"
+
+
+def configured_credential_snapshot(config: object) -> HostCredentialSnapshot:
+    """只解析 schema 声明的来源，单来源读取有界，不扫描任意宿主根。"""
+    values, unavailable, paths = set(), [], set()
+    if not is_dataclass(config) or isinstance(config, type):
+        return HostCredentialSnapshot(snapshot_error_code="CREDENTIAL_SNAPSHOT_UNAVAILABLE")
+    limit = max(1, int(getattr(config, "tool_read_max_chars", 100000)))
+    sources = getattr(config, "config_sources", {}) or {}
+    for item in fields(config):
+        if not (item.metadata.get("secret_ref") or item.metadata.get("credential_environment_source")):
+            continue
+        raw = getattr(config, item.name, "")
+        source = sources.get(item.name, {}) if isinstance(sources, Mapping) else {}
+        reference = source.get("source", "") if isinstance(source, Mapping) else ""
+        candidates = [raw]
+        if is_secret_ref(reference) and reference != raw:
+            candidates.append(reference)
+        if item.name == "api_key" and getattr(config, "api_key_env", ""):
+            candidates.append("env:" + config.api_key_env)
+        for value in candidates:
+            if not value:
+                continue
+            path = None
+            try:
+                if not isinstance(value, str):
+                    raise ValueError()
+                if value.strip().startswith("file:"):
+                    path = Path(value.strip()[5:].strip()).expanduser().resolve()
+                    paths.add(path)
+                    with path.open(encoding="utf-8") as handle:
+                        text = handle.read(limit + 1)
+                    if len(text) > limit:
+                        unavailable.append(CredentialSourceStatus(field_name=item.name,
+                            reason_code="CREDENTIAL_SOURCE_TOO_LARGE", source_path=path))
+                        continue
+                    resolved = text.strip()
+                else:
+                    resolved = resolve_secret_ref(value, max_chars=limit)
+                if len(resolved) > limit:
+                    code = "CREDENTIAL_SOURCE_TOO_LARGE"
+                elif not resolved:
+                    code = "CREDENTIAL_SOURCE_MISSING"
+                else:
+                    if resolved not in values and sum(len(v.encode('utf-8')) for v in values) + len(resolved.encode('utf-8')) > min(limit * 4, 1024 * 1024):
+                        code = "CREDENTIAL_SOURCE_TOO_LARGE"
+                    else:
+                        values.add(resolved)
+                        continue
+            except FileNotFoundError:
+                code = "CREDENTIAL_SOURCE_MISSING"
+            except (UnicodeError, ValueError, RuntimeError):
+                code = "CREDENTIAL_SOURCE_INVALID"
+            except OSError:
+                code = "CREDENTIAL_SOURCE_UNREADABLE"
+            unavailable.append(CredentialSourceStatus(field_name=item.name, reason_code=code, source_path=path))
+    return HostCredentialSnapshot(secret_values=tuple(sorted(values, key=lambda v: (-len(v), v))),
+        unavailable_sources=tuple(unavailable), declared_source_paths=tuple(sorted(paths)))

@@ -2,10 +2,12 @@
 # 模块用途: 边读 stdout/stderr 边保留有限字节，避免大输出撑满 Gateway 内存或堵住子进程。
 from __future__ import annotations
 
+import codecs
 import os
 import threading
 import time
 
+from .host_output_redaction import HostOutputRedaction, HostOutputStreamRedactor
 from .process_pipe_pump import ProcessPipePump
 
 # 进程输出捕获默认上限 4 MiB：防止后台进程刷屏把内存/磁盘打爆。
@@ -26,7 +28,8 @@ def _retained_text(data: bytes | bytearray) -> tuple[str, bool]:
 class ProcessOutputCapture:
     # LLM: 构造时启动 reader，容量分别限制两条流；不读取 stdin，不创建输出文件或发送模型请求。
     # 函数用途: 开始读取进程管道，默认每条流最多在内存保留 4 MiB。
-    def __init__(self, proc, *, max_bytes: int = DEFAULT_CAPTURE_BYTES):
+    def __init__(self, proc, *, max_bytes: int = DEFAULT_CAPTURE_BYTES,
+                 host_output_redaction: HostOutputRedaction | None = None):
         self._max = max(1, int(max_bytes))
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -34,6 +37,13 @@ class ProcessOutputCapture:
         self._generation = 0
         self._buffers = {"stdout": bytearray(), "stderr": bytearray()}
         self._seen = {"stdout": 0, "stderr": 0}
+        self._discarded = {"stdout": 0, "stderr": 0}
+        self._source_invalid = {"stdout": False, "stderr": False}
+        self._source_decoders = {name: codecs.getincrementaldecoder('utf-8')()
+                                 for name in self._buffers}
+        self._sanitizers = ({name: HostOutputStreamRedactor(
+            secret_values=host_output_redaction.snapshot.secret_values) for name in self._buffers}
+            if host_output_redaction is not None else {})
         self._ended: set[str] = set()
         self._eof: set[str] = set()
         self._errors: dict[str, str] = {}
@@ -132,13 +142,30 @@ class ProcessOutputCapture:
     def record_data(self, name: str, data: bytes) -> None:
         with self._lock:
             self._seen[name] += len(data)
-            remaining = max(0, self._max - len(self._buffers[name]))
-            self._buffers[name].extend(data[:remaining])
+            self._check_source_encoding(name, data)
+            if name in self._sanitizers:
+                data = self._sanitizers[name].feed(data)
+            self._retain(name, data)
+
+    def _check_source_encoding(self, name: str, data: bytes, *, final: bool = False) -> None:
+        if self._source_invalid[name]:
+            return
+        try:
+            self._source_decoders[name].decode(data, final=final)
+        except UnicodeDecodeError:
+            self._source_invalid[name] = True
+            self._source_decoders[name].reset()
+
+    def _retain(self, name: str, data: bytes) -> None:
+        remaining = max(0, self._max - len(self._buffers[name]))
+        self._buffers[name].extend(data[:remaining])
+        self._discarded[name] += max(0, len(data) - remaining)
 
     # LLM: 仅真实零字节读取或None流可记EOF，异常/停止不可调用。
     # 函数用途: 记录一条流的真实末尾。
     def record_eof(self, name: str) -> None:
         with self._changed:
+            self._check_source_encoding(name, b'', final=True)
             self._eof.add(name)
             self._notify()
 
@@ -153,6 +180,9 @@ class ProcessOutputCapture:
     # 函数用途: 记录reader已经退出。
     def record_ended(self, name: str) -> None:
         with self._changed:
+            sanitizer = self._sanitizers.pop(name, None)
+            if sanitizer is not None:
+                self._retain(name, sanitizer.finish())
             self._ended.add(name)
             self._notify()
 
@@ -182,7 +212,7 @@ class ProcessOutputCapture:
         with self._lock:
             decoded = {name: _retained_text(data) for name, data in self._buffers.items()}
             retained = {name: len(data) for name, data in self._buffers.items()}
-            discarded = {name: self._seen[name] - retained[name] for name in retained}
+            discarded = dict(self._discarded)
             streams_truncated = {name: discarded[name] > 0 for name in retained}
             truncated = any(streams_truncated.values())
             facts = {
@@ -193,7 +223,8 @@ class ProcessOutputCapture:
                 "bytes_discarded": discarded,
                 "streams_truncated": streams_truncated,
                 "streams_eof": {name: name in self._eof for name in retained},
-                "streams_invalid_utf8": {name: value[1] for name, value in decoded.items()},
+                "streams_invalid_utf8": {name: value[1] or self._source_invalid[name]
+                                         for name, value in decoded.items()},
                 "errors": dict(self._errors),
                 "limit_bytes_per_stream": self._max,
             }

@@ -25,6 +25,11 @@ from .filesystem_artifact_guard import (
     tool_output_artifact_typo_hint,
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
+from .host_output_redaction import (
+    credential_projection_receipt,
+    redact_host_tool_outcome,
+    redact_source_window,
+)
 from .models import ToolHandlerOutcome
 
 
@@ -104,13 +109,22 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolHandl
         )
     except ValueError as exc:
         return path_resolution_error_outcome("read_file", exc)
-    return _execute_read_file_request(ReadFileRequest(
+    outcome = _execute_read_file_request(ReadFileRequest(
         tool=tool,
         params=params,
         max_chars=max_chars,
         raw_path=raw_path,
         target=target,
     ))
+    policy = getattr(tool, '_host_output_redaction', None)
+    if policy is not None:
+        snapshot = policy.snapshot
+        withheld = any(status.source_path == target for status in snapshot.unavailable_sources)
+        if withheld:
+            outcome.output = '(凭据来源正文当前无法安全投影；原操作结果与来源坐标保留。)'
+            outcome.result_envelope['credential_redaction'] = credential_projection_receipt(snapshot, withheld=True)
+        return redact_host_tool_outcome(outcome, snapshot=snapshot, force_default=True)
+    return outcome
 
 
 # LLM: read_file may expose the exact host-generated child handoff report, but every other
@@ -240,6 +254,10 @@ def _stream_numbered_result(request: ReadFileRequest) -> ToolHandlerOutcome:
             number += int(part.endswith("\n"))
         while number <= min(end, index.total_lines):
             part = handle.readline(limit + 1)
+            policy = getattr(request.tool, '_host_output_redaction', None)
+            if policy is not None:
+                part = redact_source_window(index.read, offset=offset, limit=len(part),
+                    total_chars=index.total_chars, secret_values=policy.snapshot.secret_values)
             prefix = f"{number}: "
             item = prefix + part.rstrip("\n")
             if used + int(bool(rendered)) + len(item) > limit:
@@ -316,7 +334,11 @@ def _char_window_file_result(request: CharWindowFileRequest) -> ToolHandlerOutco
         total_chars = index.total_chars
         if offset > total_chars or (offset == total_chars and total_chars > 0):
             return _offset_out_of_range_result(offset, total_chars)
-        window = index.read(offset, min(limit, request.default_max_chars))
+        policy = getattr(request.tool, '_host_output_redaction', None)
+        window_limit = min(limit, request.default_max_chars)
+        window = (redact_source_window(index.read, offset=offset, limit=window_limit,
+            total_chars=total_chars, secret_values=policy.snapshot.secret_values)
+            if policy is not None else index.read(offset, window_limit))
     except UnicodeDecodeError:
         return _non_text_file_result()
     except ValueError as exc:

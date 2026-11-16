@@ -14,11 +14,24 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 from typing import Any
 
 _REDACTED = "<redacted>"
+_CONFIGURED_SECRET_VALUES: ContextVar[tuple[str, ...]] = ContextVar('configured_secret_values', default=())
+
+
+@contextmanager
+def configured_secret_redaction(secret_values: tuple[str, ...] = ()):
+    """宿主临时绑定当前调用的值；finally 恢复，不污染并行调用或长期日志配置。"""
+    token = _CONFIGURED_SECRET_VALUES.set(tuple(value for value in secret_values if value))
+    try:
+        yield
+    finally:
+        _CONFIGURED_SECRET_VALUES.reset(token)
+
 # 结构化输出与内嵌JSON共用同一条有界遍历；只遮蔽过深/循环的子树，不损伤正常同级字段。
 _REDACTION_FRAME = ContextVar('redaction_frame', default=(0, frozenset()))
 # 结构遍历最多64层；超过时只遮蔽该子树，防止循环或内嵌JSON耗尽解释器栈。
@@ -444,6 +457,8 @@ def redact_sensitive_text(
     """
 
     text = str(value)
+    for secret in sorted(_CONFIGURED_SECRET_VALUES.get(), key=len, reverse=True):
+        text = text.replace(secret, redacted_marker)
     if not text:
         return text
     # 长命令参数先按词边界遮蔽，避免后续通用表达式对同一大段秘密反复扫描。
