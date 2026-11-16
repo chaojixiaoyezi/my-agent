@@ -3917,7 +3917,14 @@ def _consume_observation_batches(
     target_thread_id: str = "",
 ) -> None:
     observation_limit = CONVERSATION_UNHANDLED_OBSERVATION_LIMIT_COUNT
-    pending_observations = scheduler.store.observations.unhandled_requiring_main(limit=0)
+    observations_store = scheduler.store.observations
+    pending_observations = (
+        observations_store.unhandled_requiring_main(
+            limit=0, thread_id=target_thread_id
+        )
+        if target_thread_id
+        else observations_store.unhandled_requiring_main(limit=0)
+    )
     pending_observations = [
         observation
         for observation in pending_observations
