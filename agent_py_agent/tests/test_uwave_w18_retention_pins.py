@@ -240,3 +240,79 @@ def test_scheduled_cleanup_requires_terminal_proof_again_at_apply(tmp_path, monk
     assert result.status == 'state_changed'
     assert path.exists()
     assert len(calls) == 3
+
+
+def test_unrelated_atomic_owner_writes_keep_four_entry_scan_progress(tmp_path):
+    import os
+
+    home, service = runtime(tmp_path)
+    old = Path(home.owner_cache_dir) / 'old.tmp'
+    old.write_bytes(b'cache')
+    os.utime(old, (1, 1))
+    cursor, token, steps = {}, None, 0
+    for tick in range(128):
+        owner = Path(home.owner_home_dir)
+        staging = owner / '.quota-publish'
+        staging.write_text(json.dumps({'revision': tick}))
+        staging.replace(owner / '.owner-quota-ledger.json')
+        budget = RetentionScanBudget(4, 4096, float('inf'))
+        report = scan.build_retention_plan(home=home, candidates=service, now=NOW,
+                                          scan_budget=budget, scan_cursor=cursor)
+        cursor = report.scan_cursor
+        assert not report.errors
+        progress = cursor.get(scan._PIN_CURSOR_KEY)
+        if progress is not None:
+            assert progress['phase'] != 'restart_required'
+            token = progress['token'] if token is None else token
+            assert progress['token'] == token
+            assert progress['steps'] > steps
+            assert progress['slice_entries'] <= 4
+            steps = progress['steps']
+        if not report.scan_partial:
+            assert any(action.path == old for action in report.actions)
+            break
+    else:
+        pytest.fail('独立配额账本的原子写入持续抹掉有界引用进度')
+
+
+def test_new_workspace_is_still_a_relevant_inventory_generation(tmp_path):
+    from agent_py_agent.agent.conversation.models import ConversationThread
+
+    home, _ = runtime(tmp_path)
+    converge(home)
+    previous = scan._CURRENT_PIN_BUILDS[Path(home.owner_home_dir)].token
+    root = Path(home.owner_workspace_dir) / 'runtime/workspaces/new/conversations/threads'
+    root.mkdir(parents=True)
+    thread = ConversationThread(thread_id='new-thread', canonical_user_id='test',
+                                metadata={'source_ref': 'assets/new-workspace.bin'})
+    (root / 'new-thread.json').write_text(json.dumps(thread.to_dict()))
+    pins, _ = converge(home)
+    assert scan._CURRENT_PIN_BUILDS[Path(home.owner_home_dir)].token != previous
+    assert Path(home.owner_home_dir) / 'assets/new-workspace.bin' in pins.paths
+
+
+def test_relevant_source_change_exposes_structured_restart_reason(tmp_path):
+    home, service = runtime(tmp_path)
+    cursor = {}
+    for _ in range(128):
+        report = scan.build_retention_plan(home=home, candidates=service, now=NOW,
+            scan_budget=RetentionScanBudget(4, 4096, float('inf')), scan_cursor=cursor)
+        cursor = report.scan_cursor
+        projection = scan._PIN_BUILDS.get(Path(home.owner_home_dir))
+        if projection is not None and Path(home.owner_memory_candidates_jsonl) in projection.sources:
+            break
+    else:
+        pytest.fail('没有推进到候选来源')
+    Path(home.owner_memory_candidates_jsonl).write_text('{changed\n')
+    for _ in range(128):
+        report = scan.build_retention_plan(home=home, candidates=service, now=NOW,
+            scan_budget=RetentionScanBudget(4, 4096, float('inf')), scan_cursor=cursor)
+        cursor = report.scan_cursor
+        progress = cursor.get(scan._PIN_CURSOR_KEY, {})
+        if progress.get('phase') == 'restart_required':
+            assert progress['change']['code'] == 'MEMORY_RETENTION_PIN_SOURCE_CHANGED'
+            assert progress['change']['source'] == str(Path(home.owner_memory_candidates_jsonl).relative_to(home.owner_home_dir))
+            assert progress['change']['side_effects'] == 'not_started'
+            break
+    else:
+        pytest.fail('真实引用来源变化没有保留准确的失效诊断')

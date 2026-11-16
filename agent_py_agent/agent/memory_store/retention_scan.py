@@ -197,6 +197,9 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
         size = getattr(context.config, "retention_scan_slice_bytes", RETENTION_SCAN_SLICE_BYTES)
         if type(entries) is not int or entries <= 0 or type(size) is not int or size <= 0:
             raise ValueError("invalid_retention_scan_budget")
+        # 显式调用预算也是上界，不能被配置默认128条/8MiB扩大；发现与引用各自保存进度。
+        entries = min(entries, context.scan_budget.max_entries)
+        size = min(size, context.scan_budget.max_bytes)
         pin_context = replace(context, scan_budget=RetentionScanBudget(entries, size, context.scan_budget.deadline),
                               discovery_context=context, errors=[])
         protection, continuation = _budgeted_pin_projection(pin_context)
@@ -285,6 +288,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         self.steps = self._build(context.policy)
         self.budget = context.scan_budget
         self.phase = "build"
+        self.progress_steps = 0
         self.paused = False
         self.index_revisions = []
         self.post_scopes = {}
@@ -348,6 +352,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 self.value, self.pending = self.pending[0], None
                 self.phase = "discovery"
                 break
+            self.progress_steps += 1
             self.budget.charge(entries=1 if entries is None else entries)
         if self.value is None:
             self.paused = True
@@ -377,12 +382,16 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             if not stat.S_ISDIR(parent.stat(follow_symlinks=False).st_mode):
                 raise OSError(22, "unsafe pin source ancestor", str(parent))
 
-    @staticmethod
-    def _stamp(path):
+    def _stamp(self, path):
         try:
-            return reference_pins._metadata_stamp(path.stat(follow_symlinks=False))
+            stamp = reference_pins._metadata_stamp(path.stat(follow_symlinks=False))
         except FileNotFoundError:
             return None
+        if path in self.inventory and stat.S_ISDIR(stamp[2]):
+            # 混合目录的mtime/ctime会被无关WAL、锁、维护回执持续改动；引用代次只认目录身份、
+            # 类型权限与下方相关成员摘要。独立维护不得反复抹掉已经完成的引用扫描进度。
+            return (*stamp[:3], 0, 0, 0)
+        return stamp
 
     def _remember(self, path, stamp, digest):
         observed = (stamp, digest)
@@ -600,9 +609,14 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         with closing(self._directory_members(path, stamp)) as members:
             for name, member in members:
                 scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
-                total = (total + int.from_bytes(hashlib.sha256(
-                    os.fsencode(name) + b"\0" + str(member.st_ino).encode()).digest(), "big")) % (1 << 256)
-                count += 1
+                child = path / name
+                runtime = Path(self.home.owner_workspace_dir) / "runtime/workspaces"
+                selected = (path not in self.inventory or self._pin_related(child)
+                            or path == runtime and stat.S_ISDIR(member.st_mode))
+                if selected:
+                    total = (total + int.from_bytes(hashlib.sha256(
+                        os.fsencode(name) + b"\0" + str(member.st_ino).encode()).digest(), "big")) % (1 << 256)
+                    count += 1
                 if not (stat.S_ISREG(member.st_mode) or stat.S_ISDIR(member.st_mode)):
                     child = path / name
                     if path in self.inventory and not self._pin_related(child):
@@ -1046,7 +1060,11 @@ def _budgeted_pin_projection(context):
             context.pin_projection = snapshot
             if protection is not None:
                 context.errors.extend(snapshot.candidate_errors)
-            context.scan_cursor[_PIN_CURSOR_KEY] = {"token": snapshot.token, "phase": snapshot.phase}
+            context.scan_cursor[_PIN_CURSOR_KEY] = {
+                "token": snapshot.token, "phase": snapshot.phase, "steps": snapshot.progress_steps,
+                "sources": len(snapshot.sources), "slice_entries": snapshot.budget.entries,
+                "slice_bytes": snapshot.budget.size,
+            }
     except (CandidateStoreCorruptError, OSError, ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
         with _PIN_BUILDS_LOCK:
             if _PIN_BUILDS.get(owner) is snapshot:
@@ -1058,6 +1076,14 @@ def _budgeted_pin_projection(context):
                 if isinstance(key, str) and key.startswith(("conversation:", "snapshot:")):
                     context.scan_cursor.pop(key)
             # 任一代次变化均在后续预算切片重新开始，严禁在暂停前退回同步无预算全扫。
+            changed = Path(exc.filename) if exc.filename else None
+            source = (str(changed.relative_to(owner)) if changed is not None and changed.is_relative_to(owner)
+                      else str(changed or ""))
+            context.scan_cursor[_PIN_CURSOR_KEY] = {
+                "phase": "restart_required", "completed_steps": snapshot.progress_steps,
+                "change": {"code": "MEMORY_RETENTION_PIN_SOURCE_CHANGED", "source": source,
+                           "reason": exc.strerror or type(exc).__name__, "side_effects": "not_started"},
+            }
             context.scan_partial = True
             return None, False
         context.errors.append(_pin_source_error(exc))
