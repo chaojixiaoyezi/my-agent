@@ -302,3 +302,25 @@ def test_request_copy_selectively_removes_config_mask_before_sandbox(tmp_path, t
     assert custom in selected.host_exclusive_paths
     assert shell.host_exclusive_paths == (config, source, custom)
     assert selected.path_access_policy.foreground_admin_full_access is grant
+
+
+def test_snapshot_reader_failure_is_partial_without_remasking_or_denial(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+        write_boundary_with_runtime_ledger,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig, secret_ref
+
+    project = tmp_path / 'project'
+    project.mkdir()
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')),
+        root=project)
+    def broken(config):
+        raise OSError('synthetic snapshot source reader failure')
+    monkeypatch.setattr(secret_ref, 'configured_credential_snapshot', broken)
+    boundary = write_boundary_with_runtime_ledger(agent, RunParams(host_foreground_interactive=True))
+    redaction = boundary['_host_output_redaction']
+    assert redaction.snapshot.coverage == 'partial'
+    assert redaction.snapshot.snapshot_error_code == 'CREDENTIAL_SNAPSHOT_UNAVAILABLE'
+    assert boundary['host_foreground_interactive'] is True
+    assert boundary['foreground_admin_full_access'] is False
