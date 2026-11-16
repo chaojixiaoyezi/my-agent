@@ -229,6 +229,11 @@ def test_gateway_owner_maintenance_waits_for_monotonic_startup_grace(tmp_path: P
 
     maintenance_clock.now = started + gateway_loops.STARTUP_GRACE_WINDOW_SECONDS
     assert controller.tick(now=200_000) == {"scanned": 1, "ran": 2, "failed": 0, "refused": 0, "isolated": 0}
+    for tick in range(1, 128):
+        if not old_cache.exists():
+            break
+        maintenance_clock.now += 60
+        controller.tick(now=200_000 + tick * 60)
     assert not old_cache.exists()
     marker = json.loads((owner.data_dir / "maintenance.json").read_text(encoding="utf-8"))
     assert marker["status"] == "success"
@@ -387,7 +392,15 @@ def test_h07_runtime_local_store_respects_owner_protected_refs(tmp_path):
     state = home.owner_tasks_dir / "2026-10-26" / "active-task" / "work" / "state.json"
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"task_id": "active-task", "status": "RUNNING", "source_refs": [rec.id]}), encoding="utf-8")
-    report = _prune_local_store_derived_records(home.owner_home_dir, now=datetime(2026, 10, 26, tzinfo=timezone.utc))
+    cursor = None
+    for _ in range(128):
+        report = _prune_local_store_derived_records(home.owner_home_dir,
+            now=datetime(2026, 10, 26, tzinfo=timezone.utc), cursor=cursor)
+        assert store.get_record(rec.id) is not None
+        if report["executed"]:
+            break
+        assert report.get("partial") is True
+        cursor = report["cursor"]
     assert report["executed"] is True
     assert report["deleted_ids"] == [unreferenced.id]
     assert rec.id not in report["deleted_ids"]

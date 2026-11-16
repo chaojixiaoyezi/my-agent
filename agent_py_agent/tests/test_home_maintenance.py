@@ -305,14 +305,19 @@ def test_home_retention_cli_plans_and_applies_owner_cleanup(tmp_path: Path, caps
 
     assert code == 0
     assert payload["retention"]["applied"] is False
-    assert payload["retention"]["actions"][0]["path"] == str(old_cache)
+    preview = payload["retention"]
+    if preview["scan_partial"]:
+        assert preview["scan_cursor"], "未完成计划必须公开真实续点，不能把partial冒充空计划"
+    else:
+        assert any(action["path"] == str(old_cache) for action in preview["actions"])
     assert old_cache.exists()
 
     code, applied = _run_cli_json(capsys, config_path, "home-retention", "--apply")
 
     assert code == 0
     assert applied["retention"]["applied"] is True
-    assert applied["retention"]["actions"][0]["status"] == "deleted"
+    [action] = [row for row in applied["retention"]["actions"] if row["path"] == str(old_cache)]
+    assert action["status"] == "deleted"
     assert not old_cache.exists()
 
 

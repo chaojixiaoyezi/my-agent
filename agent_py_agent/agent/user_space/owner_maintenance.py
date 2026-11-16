@@ -1101,8 +1101,14 @@ def _run_quota_continuation_slice(state_path, home, previous, current, *, coordi
     )
     # 原延期标记保真，但已接线协调者的领域欠账仍须经同一commit继续，不能只核配额后清掉partial。
     coordinator_lanes = storage.get('coordinator_lanes')
-    if (coordinator and commit_transition is not None and isinstance(coordinator_lanes, dict)
+    lanes_allowed = (coordinator and commit_transition is not None) or not coordinator
+    if (lanes_allowed and isinstance(coordinator_lanes, dict)
             and (coordinator_lanes.get('pending_kinds') or coordinator_lanes.get('errors'))):
+        quota_only = False
+    if (storage.get('retention_deletion_safe') is False
+            and previous.get('apply_outcome') == 'applied' and not previous.get('legal_hold')
+            and not previous.get('retention_scan_partial')
+            and _retention_errors_path_scoped(previous.get('load_errors'))):
         quota_only = False
     if not quota_only:
         retention_stub = SimpleNamespace(
@@ -1414,12 +1420,15 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                 if kind.kind not in {'cache_tmp_trash', 'gateway_terminal', 'session_pair_rate'}}
     adapters.update(cache_tmp_trash=quota_step, gateway_terminal=receipt_step, session_pair_rate=session_pair_step)
     original = {**original, 'schema_generation': expected[0], 'maintenance_epoch': expected[1]}
-    if not original.get('continuation_pending', False):
+    if (not original.get('continuation_pending', False)
+            or original.get('retention_deletion_safe') is False):
         original.pop('pending_kinds', None)
     state = run_storage_maintenance_slice(original, adapters,
         max_items=quota_max_entries + len(adapters) + len(LANE_BINDINGS) * STORAGE_LANE_SLICE_ENTRIES,
         max_seconds=max(0.1, quota_max_ms / 1000 + 0.05) + len(LANE_BINDINGS) * _OWNER_LANE_SLICE_MS / 1000,
         read_fence=read_fence, order=order)
+    state['retention_deletion_safe'] = retention_safe
+    state.pop('deferred_reason', None)
     state['lane_fallback_kinds'] = sorted(set(lane_fallbacks))
     state['lane_reports'] = lane_reports
     state['pressure'] = pressure

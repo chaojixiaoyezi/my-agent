@@ -255,7 +255,10 @@ def test_ledger_gc_wired_into_scheduler_tick(tmp_path):
     )
     store.progress.disable(policy.policy_id, now=now - 8 * 24 * 3600)
     # 首拍沿原owner维护写入口推进，周期及partial续作由其持久marker控制，不再另存进程GC时钟。
-    scheduler.tick(now=now)
+    for _ in range(128):
+        scheduler.tick(now=now)
+        if not store.storage.policy_path(policy.policy_id).exists():
+            break
     assert not store.storage.policy_path(policy.policy_id).exists(), "正式维护lane应归档过期策略"
     import json
 
