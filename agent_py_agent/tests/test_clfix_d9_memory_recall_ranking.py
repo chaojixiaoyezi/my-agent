@@ -53,6 +53,20 @@ def test_scoped_search_keeps_top_lexical_hit_that_fusion_drops(tmp_path):
     assert [record.entry_id for record in selected][:1] == ["target"]
 
 
+# LLM: 候选上限覆盖全部 13 条时目标仍在融合候选里，只是只有词面臂、排在末尾；查询词与所有正文都无子串命中，
+#   rerank 只能靠检索名次。修复后目标按其词面第一名定位，不能因"已在候选里"就留在末尾。
+# 函数用途: 覆盖强词面命中已在融合候选、但被压到末尾且无子串分的情形（真实查询"工作偏好 交付约定…"）。
+def test_scoped_search_lifts_top_lexical_hit_already_low_in_fused_candidates(tmp_path):
+    memory = JsonlMemory(tmp_path / "memory.jsonl", embedder=_MarkerEmbedder())
+    memory.add_record(MemoryRecord("user", "用户偏好：交付时附带功能矩阵", entry_id="target"))
+    for index in range(12):
+        memory.add_record(MemoryRecord("user", f"服务部署记录{index}：交付窗口在周末", entry_id=f"filler-{index:02d}"))
+
+    selected = memory.search_scoped_candidates("工作偏好 交付约定", 5, lambda record: True)
+
+    assert [record.entry_id for record in selected][:1] == ["target"]
+
+
 # LLM: 候选已按检索相关度排好时，词面同分、来源同权先看名次；默认调用保持原"先新后旧"。
 # 函数用途: 直接约束 rerank 新旧两种排序口径。
 def test_rerank_prefers_retrieval_order_over_recency_only_when_ordered():

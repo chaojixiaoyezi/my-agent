@@ -1132,13 +1132,14 @@ class _JsonlMemorySearchMixin:
                 self._remember_cached_vectors(docs, retriever, cached)
             by_id = {record.entry_id: record for record in active}
             order = [entry_id for entry_id, _score in ranked]
-            # 词面臂不设门槛，RRF 却会把只在词面臂靠前、向量臂低于门槛的条目挤出候选；
-            # 按其词面名次补回前 top_k 名，再交给词面优先的 rerank 定序。
-            present = set(order)
+            # 词面臂不设门槛，RRF 却会把只在词面臂靠前、向量臂低于门槛的条目挤出候选或压到候选末尾；
+            # 词面臂前 top_k 名取"融合名次与词面名次中靠前者"定位，再交给词面优先的 rerank 定序。
             for position, entry_id in enumerate(list(getattr(retriever, "last_bm25_order", ()))[:top_k]):
-                if entry_id not in present:
-                    order.insert(min(position, len(order)), entry_id)
-                    present.add(entry_id)
+                current = order.index(entry_id) if entry_id in order else len(order)
+                if current > position:
+                    if current < len(order):
+                        del order[current]
+                    order.insert(position, entry_id)
             keyword = [by_id[entry_id] for entry_id in order if entry_id in by_id]
         else:
             keyword = []
