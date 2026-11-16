@@ -33,7 +33,7 @@ def _regular_identity(path: Path) -> tuple[int, int] | None:
 
 # LLM: 构造与复核共用同一信任门；仅以已打开FD收紧当前用户的.my-agent子树，不改普通私有组祖先。
 # 函数用途: 拒绝非可信属主和非sticky公共可写祖先，兼容当前用户的私有组目录。
-def _ensure_trusted_ancestor(descriptor, current_path: Path, parent_stat):
+def _ensure_trusted_ancestor(descriptor, current_path: Path, parent_stat, *, read_only=False):
     owner = os.geteuid()
     if parent_stat.st_uid not in {0, owner}:
         raise PermissionError("projection ancestor is not a trusted directory")
@@ -43,6 +43,8 @@ def _ensure_trusted_ancestor(descriptor, current_path: Path, parent_stat):
         raise PermissionError("projection ancestor is not a trusted directory")
     if parent_stat.st_mode & 0o020:
         if parent_stat.st_uid == owner and ".my-agent" in current_path.parts:
+            if read_only:
+                raise PermissionError("projection ancestor requires permission repair")
             os.fchmod(descriptor, parent_stat.st_mode & ~0o077)
             return os.fstat(descriptor)
         if parent_stat.st_uid != owner or parent_stat.st_gid != os.getegid():
@@ -53,7 +55,7 @@ def _ensure_trusted_ancestor(descriptor, current_path: Path, parent_stat):
 # LLM: 逐层dir_fd/no-follow保留父链；按共用信任门收紧.my-agent祖先，投影父目录始终要求本人私有。
 # 函数用途: 在SQLite按路径打开之前建立私有父目录，并提供同一目录链的身份复核。
 @contextmanager
-def _projection_directory(path: Path):
+def _projection_directory(path: Path, *, read_only=False):
     if os.open not in os.supports_dir_fd:
         raise OSError(errno.ENOTSUP, "projection requires descriptor-relative directory access")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -63,10 +65,12 @@ def _projection_directory(path: Path):
     chain.append((current, descriptor))
     try:
         for part in path.parent.parts[1:]:
-            _ensure_trusted_ancestor(descriptor, current, os.fstat(descriptor))
+            _ensure_trusted_ancestor(descriptor, current, os.fstat(descriptor), read_only=read_only)
             try:
                 child = os.open(part, flags, dir_fd=descriptor)
             except FileNotFoundError:
+                if read_only:
+                    raise
                 try:
                     os.mkdir(part, 0o700, dir_fd=descriptor)
                 except FileExistsError:
@@ -75,10 +79,12 @@ def _projection_directory(path: Path):
             current = current / part
             descriptor = child
             chain.append((current, descriptor))
-        parent = _ensure_trusted_ancestor(descriptor, current, os.fstat(descriptor))
+        parent = _ensure_trusted_ancestor(descriptor, current, os.fstat(descriptor), read_only=read_only)
         if parent.st_uid != os.geteuid():
             raise PermissionError("projection directory must belong to the current identity")
         if parent.st_mode & 0o077:
+            if read_only:
+                raise PermissionError("projection directory requires permission repair")
             os.fchmod(descriptor, 0o700)
 
         # LLM: 复核所有已打开父节点及相同信任门；不以旧路径stat替代持有FD上的权限事实。
@@ -89,7 +95,7 @@ def _projection_directory(path: Path):
                 if (not stat.S_ISDIR(observed.st_mode)
                         or (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)):
                     raise ValueError("projection parent identity or trust changed")
-                _ensure_trusted_ancestor(held, directory, opened)
+                _ensure_trusted_ancestor(held, directory, opened, read_only=read_only)
             if os.fstat(descriptor).st_mode & 0o077:
                 raise PermissionError("projection directory is no longer private")
 
@@ -103,9 +109,13 @@ def _projection_directory(path: Path):
 # LLM: 仅供可重建投影使用；父链已私有且稳定，不吞损坏、不截断文件、不改变canonical；连接/描述符逐次关闭。
 # 函数用途: 在原路径跨进程锁内安全连接私有SQLite并原子提交单次投影事务。
 @contextmanager
-def private_projection_connection(path: Path, *, blocking: bool = True, deadline: float | None = None):
+def private_projection_connection(path: Path, *, blocking: bool = True, deadline: float | None = None, read_only: bool = False):
     check_io_deadline(deadline)
     path = Path(path).absolute()
+    if read_only:
+        with _readonly_projection_connection(path, blocking=blocking, deadline=deadline) as db:
+            yield db
+        return
     with _projection_directory(path) as (parent_fd, verify), locked_json_path(path, blocking=blocking):
         check_io_deadline(deadline)
         verify()
@@ -139,6 +149,49 @@ def private_projection_connection(path: Path, *, blocking: bool = True, deadline
             if db is not None:
                 db.close()
             os.close(descriptor)
+
+
+class ProjectionReadUnavailableError(OSError):
+    """现存投影无法只读核实；调用方应保留 unknown，不初始化或修复。"""
+
+
+@contextmanager
+def _readonly_projection_connection(path, *, blocking, deadline):
+    db = None
+    try:
+        with _projection_directory(path, read_only=True) as (parent_fd, verify):
+            descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                identity = _regular_identity(path)
+                opened = os.fstat(descriptor)
+                if identity != (opened.st_dev, opened.st_ino):
+                    raise ValueError("projection identity changed before read")
+                sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix))
+                             for suffix in ("-journal", "-wal", "-shm")}
+                # SQLite ro may create missing WAL sidefiles; never permit that repair here.
+                if sidefiles["-wal"] is not None and sidefiles["-shm"] is None:
+                    raise ValueError("projection WAL shared memory is unavailable")
+                timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else 5.0
+                db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                     timeout=timeout if blocking else 0.0)
+                verify()
+                if _regular_identity(path) != identity:
+                    raise ValueError("projection identity changed during read")
+                for suffix, before in sidefiles.items():
+                    if _regular_identity(path.with_name(path.name + suffix)) != before:
+                        raise ValueError("projection sidefile identity changed during read")
+                # Schema is domain-specific; readers validate their own version and tables.
+                yield db
+                check_io_deadline(deadline)
+                verify()
+            finally:
+                if db is not None:
+                    db.close()
+                os.close(descriptor)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise ProjectionReadUnavailableError(
+            f"PROJECTION_READ_UNAVAILABLE: {type(exc).__name__}; effect_outcome=not_started; "
+            "next_action=retain unknown and retry existing projection later") from exc
 
 
 # LLM: cookie保存内核块位置与至多32KiB未解码尾部；每页最多读取一个块、解码128项并关闭FD。
