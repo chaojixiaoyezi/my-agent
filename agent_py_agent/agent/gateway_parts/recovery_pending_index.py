@@ -11,7 +11,6 @@ import sqlite3
 import stat
 import sys
 import time
-import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -43,17 +42,8 @@ def private_projection_connection(path: Path, *, blocking: bool = True, deadline
         verify()
         identity = _regular_identity(path)
         if identity is None:
-            # 关闭的 FD 属于尚未发表、任何 SQLite 连接都看不到的 birth inode。
-            birth = f'.{path.name}.{uuid.uuid4().hex}.birth'
-            descriptor = os.open(birth, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                 0o600, dir_fd=parent_fd)
-            os.close(descriptor)
-            try:
-                os.link(birth, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
-            except FileExistsError:
-                pass
-            finally:
-                os.unlink(birth, dir_fd=parent_fd)
+            from ..io.sqlite_scope import ensure_private_sqlite_birth
+            ensure_private_sqlite_birth(path, parent_fd=parent_fd)
             identity = _regular_identity(path)
         db = None
         try:
