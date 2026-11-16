@@ -117,7 +117,10 @@ def test_file_level_report_blocks_even_when_readable_messages_remain(case, monke
         assert _source_state(case) == before
 
 
-def test_history_pending_commit_is_unknown_until_fresh_complete_read(case, monkeypatch):
+# LLM: 本历史谱系内的未结规范提交在完整重读前仍是未知；其他根任务的进行中提交只属于别的作用域，不阻塞本历史（W4）。
+# 函数用途: 固定读写交错，分别核对同作用域未结提交拒绝、他作用域未结提交放行。
+@pytest.mark.parametrize("pending_scope", ["same_root", "other_root"])
+def test_history_pending_commit_is_unknown_until_fresh_complete_read(case, monkeypatch, pending_scope):
     from threading import Event, Thread, current_thread
 
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
@@ -149,7 +152,7 @@ def test_history_pending_commit_is_unknown_until_fresh_complete_read(case, monke
     def write():
         try:
             assert start.wait(timeout=5)
-            manager.save(second)
+            manager.save(first if pending_scope == "same_root" else second)
         except BaseException as error:
             errors.append(error)
 
@@ -158,10 +161,16 @@ def test_history_pending_commit_is_unknown_until_fresh_complete_read(case, monke
     writer = Thread(target=write, name='history-pending-commit')
     writer.start()
     try:
-        with pytest.raises(BackgroundHistoryUnavailableError) as caught:
-            prepare_background_history_or_raise(case.agent, case.store, case.thread, case.request)
-        assert any(error.get('context') == 'subagents.load_root_index'
-                   and error.get('error_type') == 'SubagentRunIndexUnavailable' for error in caught.value.load_errors)
+        if pending_scope == "same_root":
+            with pytest.raises(BackgroundHistoryUnavailableError) as caught:
+                prepare_background_history_or_raise(case.agent, case.store, case.thread, case.request)
+            assert any(error.get('context') == 'subagents.load_root_index'
+                       and error.get('error_type') == 'SubagentRunIndexUnavailable'
+                       for error in caught.value.load_errors)
+        else:
+            during = prepare_background_history_or_raise(case.agent, case.store, case.thread, case.request)
+            assert during.status == 'ready' and not during.load_errors
+            assert seed_text_messages(during.seed) == case.expected
     finally:
         release.set()
         writer.join(timeout=5)
