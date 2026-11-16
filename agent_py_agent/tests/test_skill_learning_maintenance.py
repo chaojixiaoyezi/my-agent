@@ -1137,3 +1137,177 @@ def test_cap_one_entry_budget_isolates_failed_victim_and_continues_other_skills(
     assert attempts.count('a-failing') == 1
     assert rows['a-failing'].maintenance['ownership'] == 'unknown'
     assert rows['b-safe'].maintenance['state'] == rows['c-safe'].maintenance['state'] == 'archived'
+
+
+def _protection_runtime(tmp_path, *, task_link='missing-link'):
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / 'runtime.db')
+    task = repo.create_task(owner_id='owner', thread_id='missing-thread', conversation_task_id=task_link)
+    run = repo.create_task_run(task_id=task['task_id'], status='created', metadata={'allowed_skills': ['owner:held']})
+    agent_run = repo.create_agent_run(task_run_id=run['task_run_id'], run_id='protection-run')
+    attempt = repo.create_attempt(agent_run['agent_run_id'])
+    repo.settle_agent_attempt(agent_run_id=agent_run['agent_run_id'], attempt_id=attempt['attempt_id'])
+    with repo.transaction() as conn:
+        conn.execute('UPDATE agent_attempts SET metadata_json=? WHERE attempt_id=?', (
+            '{"executor":{"schema_version":"attempt-executor.v1","status":"exited","ended_at":1}}',
+            attempt['attempt_id'],
+        ))
+    agent = SimpleNamespace(runtime_db=repo, conversation_store=ConversationStore(tmp_path/'conversations', initialize=False))
+    return agent, agent_run, attempt
+
+
+def _collect_runtime_protection(agent, *, entries=128):
+    from agent_py_agent.agent.capability.skill_learning_protection import _collect_unsettled_tasks
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+
+    protected = set()
+    complete = _collect_unsettled_tasks(agent, protected, RetentionScanBudget(entries, 8_388_608, time.monotonic()+2))
+    scan = getattr(agent, '_skill_task_protection_scan', {})
+    if not complete and scan.get('complete') and scan.get('cursor'):
+        # 收尾片只登记完整事实，下一片才对当前来源做完整复核。
+        complete = _collect_unsettled_tasks(agent, protected, RetentionScanBudget(entries, 8_388_608, time.monotonic()+2))
+    return complete, protected
+
+
+def test_protection_exited_attempt_does_not_require_missing_thread_or_mutate_taskrun(tmp_path):
+    agent, row, _ = _protection_runtime(tmp_path)
+    assert _collect_runtime_protection(agent) == (True, {'owner:held'})
+    run = agent.runtime_db.get_task_run(row['task_run_id'])
+    assert run['status'] == 'created' and run['closed_at'] == 0
+
+
+@pytest.mark.parametrize('state', ['alive', 'unknown', 'replaced'])
+def test_protection_missing_projection_rejects_live_or_unknown_or_replaced_runner(tmp_path, monkeypatch, state):
+    from agent_py_agent.agent.runtime_db import executor_liveness
+
+    agent, _, attempt = _protection_runtime(tmp_path)
+    with agent.runtime_db.transaction() as conn:
+        conn.execute('UPDATE agent_attempts SET metadata_json=? WHERE attempt_id=?', (
+            '{"runner_pid":123456,"runner_start_time":"old-birth"}', attempt['attempt_id'],
+        ))
+    monkeypatch.setattr(executor_liveness, '_process_state', lambda _pid: 'alive' if state != 'unknown' else 'unknown')
+    monkeypatch.setattr(executor_liveness, 'process_start_time', lambda _pid: 'new-birth' if state == 'replaced' else 'old-birth')
+    assert _collect_runtime_protection(agent) == (False, {'owner:held'})
+
+
+def test_protection_cache_invalidates_current_attempt_and_scope_lock_generation(tmp_path):
+    agent, row, _ = _protection_runtime(tmp_path)
+    assert _collect_runtime_protection(agent)[0]
+    agent.runtime_db.create_attempt(row['agent_run_id'])
+    assert _collect_runtime_protection(agent) == (False, {'owner:held'})
+
+
+def test_protection_temporary_read_failure_retries_without_source_byte_change(tmp_path, monkeypatch):
+    agent, _, _ = _protection_runtime(tmp_path)
+    reader = agent.conversation_store.tasks.load_report
+    monkeypatch.setattr(agent.conversation_store.tasks, 'load_report', lambda _task: (None, {'error_type': 'OSError'}))
+    assert _collect_runtime_protection(agent)[0] is False
+    monkeypatch.setattr(agent.conversation_store.tasks, 'load_report', reader)
+    assert _collect_runtime_protection(agent) == (True, {'owner:held'})
+
+
+def test_protection_unknown_operation_prevents_missing_projection_exemption(tmp_path):
+    agent, row, attempt = _protection_runtime(tmp_path)
+    with agent.runtime_db.transaction() as conn:
+        conn.execute("INSERT INTO tool_operations(operation_id,operation_type,status,attempt_id,agent_run_id,"
+                     "attempt_generation,tool_operation_generation,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                     ('protection-op', 'tool', 'UNKNOWN', attempt['attempt_id'], row['agent_run_id'], 1, 1, 1, 1))
+    assert _collect_runtime_protection(agent) == (False, {'owner:held'})
+
+
+def test_protection_cached_active_task_file_change_invalidates_refs_without_thread_change(tmp_path, monkeypatch):
+    import json
+
+    agent, _, _ = _protection_runtime(tmp_path, task_link='')
+    tasks = agent.conversation_store.tasks
+    path = tasks.storage.task_path('active-link')
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({'allowed_skills': ['owner:first']}))
+    link = SimpleNamespace(task_id='active-link', status='running', to_dict=lambda: json.loads(path.read_text()))
+    monkeypatch.setattr(tasks, '_require_thread', lambda _thread: SimpleNamespace(active_task_ids=('active-link',)))
+    monkeypatch.setattr(tasks, 'active_report', lambda _thread: ([link], []))
+    assert _collect_runtime_protection(agent) == (True, {'owner:held', 'owner:first'})
+    path.write_text(json.dumps({'allowed_skills': ['owner:second']}))
+    assert _collect_runtime_protection(agent) == (True, {'owner:held', 'owner:second'})
+
+
+def test_protection_bounded_scan_resumes_and_new_task_invalidates_prior_complete(tmp_path):
+    agent, _, _ = _protection_runtime(tmp_path)
+    repo = agent.runtime_db
+    for _ in range(3):
+        task = repo.create_task(owner_id='owner')
+        run = repo.create_task_run(task_id=task['task_id'])
+        child = repo.create_agent_run(task_run_id=run['task_run_id'])
+        attempt = repo.create_attempt(child['agent_run_id'])
+        repo.settle_agent_attempt(agent_run_id=child['agent_run_id'], attempt_id=attempt['attempt_id'])
+        with repo.transaction() as conn:
+            conn.execute('UPDATE agent_attempts SET metadata_json=? WHERE attempt_id=?', (
+                '{"executor":{"schema_version":"attempt-executor.v1","status":"exited","ended_at":1}}',
+                attempt['attempt_id'],
+            ))
+    for _ in range(5):
+        complete, protected = _collect_runtime_protection(agent, entries=1)
+        if complete:
+            break
+    assert complete and protected == {'owner:held'}
+    task = repo.create_task(owner_id='owner', conversation_task_id='not-created')
+    run = repo.create_task_run(task_id=task['task_id'], metadata={'allowed_skills': ['owner:new']})
+    child = repo.create_agent_run(task_run_id=run['task_run_id'])
+    repo.create_attempt(child['agent_run_id'])
+    assert _collect_runtime_protection(agent) == (False, {'owner:held', 'owner:new'})
+
+
+def test_protection_active_link_write_between_read_and_stamp_is_partial_then_retried(tmp_path, monkeypatch):
+    import json
+
+    agent, _, _ = _protection_runtime(tmp_path, task_link='')
+    tasks = agent.conversation_store.tasks
+    path = tasks.storage.task_path('active-link')
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({'allowed_skills': ['owner:before']}))
+    monkeypatch.setattr(tasks, '_require_thread', lambda _thread: SimpleNamespace(active_task_ids=('active-link',)))
+    changed = False
+
+    def read_and_change(_thread):
+        nonlocal changed
+        data = json.loads(path.read_text())
+        link = SimpleNamespace(task_id='active-link', status='running', to_dict=lambda: data)
+        if not changed:
+            changed = True
+            path.write_text(json.dumps({'allowed_skills': ['owner:after']}))
+        return [link], []
+
+    monkeypatch.setattr(tasks, 'active_report', read_and_change)
+    assert _collect_runtime_protection(agent) == (False, {'owner:held', 'owner:before'})
+    assert _collect_runtime_protection(agent) == (True, {'owner:held', 'owner:after'})
+
+
+def test_protection_fixed_snapshot_cpu_jitter_resumes_multiple_jobs_without_budget_cliff(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import skill_learning_proposals
+    from agent_py_agent.agent.capability import skill_learning_protection as protection
+
+    agent, _, _ = _protection_runtime(tmp_path)
+    agent.home_paths = SimpleNamespace(owner_home_dir=tmp_path, owner_skill_learning_dir=tmp_path/'data/skill_learning')
+    jobs = [{'allowed_skills': [f'owner:job-{index}']} for index in range(3)]
+    agent.scheduler_repository = SimpleNamespace(list_jobs=lambda **_kw: (jobs, []))
+    agent.subagents = SimpleNamespace(list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[]))
+    monkeypatch.setattr(skill_learning_proposals, 'list_learning_proposals', lambda *_a, **_kw: [])
+    snapshot = protection._runtime_task_ref_snapshot
+
+    def delayed(*args, **kwargs):
+        time.sleep(0.04)
+        return snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(protection, '_runtime_task_ref_snapshot', delayed)
+    results = [protection.learning_protection_for_agent(agent) for _ in range(4)]
+    assert any(result['protection_complete'] for result in results)
+    assert results[-1]['protection_complete']
+    assert set(results[-1]['protected_ids']) == {'owner:held', 'owner:job-0', 'owner:job-1', 'owner:job-2'}
+    # 新监控内容不能沿用已完整消费的旧保护证明。
+    jobs[0] = {'allowed_skills': ['owner:replacement-job']}
+    changed = [protection.learning_protection_for_agent(agent) for _ in range(3)]
+    assert changed[-1]['protection_complete']
+    assert 'owner:replacement-job' in changed[-1]['protected_ids']
+    assert 'owner:job-0' not in changed[-1]['protected_ids']

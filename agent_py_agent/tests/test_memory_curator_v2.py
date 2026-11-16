@@ -438,17 +438,91 @@ def test_curator_rejects_provider_attempt_to_author_quote(tmp_path: Path) -> Non
     assert service.candidate_service.list() == []
 
 
-def test_curator_text_fallback_rejects_sparse_nested_schema(tmp_path: Path) -> None:
+@pytest.mark.parametrize('field', ['artifact_refs', 'decisions', 'lessons', 'next_actions'])
+def test_curator_text_fallback_normalizes_declared_empty_daily_collections(tmp_path: Path, field: str) -> None:
     store, thread, message = _conversation(tmp_path)
     output = _valid_output(thread.thread_id, message.message_id, message.content)
-    del output["daily_events"][0]["decisions"]
-    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+    del output["daily_events"][0][field]
+    backend = _StaticStructuredBackend(output)
+    service = _service(tmp_path, backend, store)
 
     result = service.run(reason="admin")
 
-    assert result.status == "failed"
-    assert result.failure_code == "CURATOR_SCHEMA_INVALID"
-    assert service.state_store.load().per_thread_cursors == {}
+    assert result.status == "succeeded" and backend.calls == 1
+    assert service.state_store.load().per_thread_cursors[thread.thread_id] == message.message_id
+    [warning] = [item for item in service.run_log.list()[-1].warnings if item.startswith('curator_schema_defaults=')]
+    assert json.loads(warning.split('=', 1)[1]) == {
+        'count': 1, 'paths': [f'$.daily_events[0].{field}'], 'omitted': 0,
+    }
+    assert result.daily_events == 1 and result.candidates == 1
+
+
+@pytest.mark.parametrize('field', ['artifact_refs', 'decisions', 'lessons', 'next_actions'])
+@pytest.mark.parametrize('value', [None, {}, ''])
+def test_curator_default_collection_present_bad_type_is_still_rejected(field, value):
+    from agent_py_agent.agent.memory_store.curator_models import parse_curator_extraction
+    from agent_py_agent.agent.memory_store.curator_schema import CuratorOutputViolation
+
+    output = _valid_output('thread-test', 'message-test', '合成消息')
+    output['daily_events'][0][field] = value
+    with pytest.raises(CuratorOutputViolation) as caught:
+        parse_curator_extraction(json.dumps(output))
+    assert (caught.value.violation_code, caught.value.violation_path) == ('invalid_type', f'$.daily_events[0].{field}')
+
+
+@pytest.mark.parametrize('field', ['event_type', 'summary', 'actor', 'origin', 'message_refs', 'tool_refs'])
+def test_curator_default_collections_do_not_fill_required_daily_fact_or_source(field):
+    from agent_py_agent.agent.memory_store.curator_models import parse_curator_extraction
+    from agent_py_agent.agent.memory_store.curator_schema import CuratorOutputViolation
+
+    output = _valid_output('thread-test', 'message-test', '合成消息')
+    del output['daily_events'][0][field]
+    with pytest.raises(CuratorOutputViolation) as caught:
+        parse_curator_extraction(json.dumps(output))
+    assert (caught.value.violation_code, caught.value.violation_path) == ('missing_property', f'$.daily_events[0].{field}')
+
+
+def test_curator_empty_artifact_default_does_not_supply_daily_evidence(tmp_path):
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    daily = output['daily_events'][0]
+    daily.pop('artifact_refs')
+    daily.update(origin='model_inferred', message_refs=[], tool_refs=[])
+    backend = _StaticStructuredBackend(output)
+    service = _service(tmp_path, backend, store)
+    result = service.run(reason='admin')
+    assert result.status == 'succeeded' and backend.calls == 1
+    assert result.daily_events == 0 and result.candidates == 1
+    assert any('daily:daily_without_evidence' in item for item in result.warnings)
+
+
+def test_curator_host_defaults_are_explicit_and_not_sent_to_provider():
+    host = curator_response_schema(include_host_defaults=True)
+    wire = curator_response_schema()
+    daily = host['properties']['daily_events']['items']
+    assert {key for key, value in daily['properties'].items() if 'default' in value} == {
+        'artifact_refs', 'decisions', 'lessons', 'next_actions',
+    }
+    assert all(value['default'] == [] for value in daily['properties'].values() if 'default' in value)
+    assert '"default"' not in json.dumps(wire)
+    assert wire['properties']['daily_events']['items']['required'] == daily['required']
+
+
+def test_curator_default_normalization_diagnostic_has_bounded_paths():
+    from copy import deepcopy
+
+    from agent_py_agent.agent.memory_store.curator_models import parse_curator_extraction
+
+    output = _valid_output('thread-test', 'message-test', '合成消息')
+    daily = output['daily_events'][0]
+    for field in ('artifact_refs', 'decisions', 'lessons', 'next_actions'):
+        daily.pop(field)
+    output['daily_events'] = [deepcopy(daily) for _ in range(100)]
+    extraction = parse_curator_extraction(json.dumps(output))
+    [warning] = [item for item in extraction.warnings if item.startswith('curator_schema_defaults=')]
+    facts = json.loads(warning.split('=', 1)[1])
+    assert len(warning) <= 300 and len(facts['paths']) == 4
+    assert facts['count'] == 400 and facts['omitted'] == 396
 
 
 def test_curator_rejects_provider_task_and_run_id_fields_as_host_owned(

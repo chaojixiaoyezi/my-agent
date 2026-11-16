@@ -21,6 +21,7 @@ from .candidate_models import (
 from .curator_schema import (
     CuratorOutputViolation,
     build_curator_response_schema,
+    normalize_curator_response_defaults,
     validate_curator_response_payload,
 )
 from .daily import DailyMemoryEvent
@@ -463,7 +464,7 @@ def parse_curator_extraction(text: str) -> CuratorExtraction:
     # 结构化生成仍强制主字段;缺失补全是纯宿主侧确定性修复,不引入新权威。
     if missing:
         payload = {**payload, **{key: _EMPTY_FIELD_DEFAULT[key] for key in missing}}
-    # 宿主容错: 仅补齐候选条目及 scope 中偶发省略的可空标量字段，不填补 scope 本身、daily_events 或数组字段。
+    # 宿主容错: 仅补齐候选条目及scope中偶发省略的可空标量字段，不填补scope本身或来源事实。
     if isinstance(payload.get("candidates"), list):
         normalized_candidates: list[object] = []
         for item in payload["candidates"]:
@@ -486,14 +487,22 @@ def parse_curator_extraction(text: str) -> CuratorExtraction:
                 }
             normalized_candidates.append(normalized_item)
         payload["candidates"] = normalized_candidates
-    validate_curator_response_payload(payload, curator_response_schema())
+    schema = curator_response_schema(include_host_defaults=True)
+    payload, normalized_paths, normalized_count = normalize_curator_response_defaults(payload, schema)
+    validate_curator_response_payload(payload, schema)
+    normalization_warnings = ()
+    if normalized_count:
+        normalization_warnings = ("curator_schema_defaults=" + json.dumps({
+            "count": normalized_count, "paths": normalized_paths,
+            "omitted": normalized_count - len(normalized_paths),
+        }, ensure_ascii=False, separators=(",", ":")),)
     return CuratorExtraction(
         daily_events=tuple(_parse_daily_draft(item) for item in _object_array(payload, "daily_events")),
         candidates=tuple(_parse_candidate_observation(item) for item in _object_array(payload, "candidates")),
         processed_message_refs=tuple(normalize_reference_list(payload["processed_message_refs"])),
         processed_audit_refs=tuple(normalize_reference_list(payload["processed_audit_refs"])),
         unresolved_refs=tuple(normalize_reference_list(payload["unresolved_refs"])),
-        warnings=tuple(_short_string_array(payload, "warnings", max_items=32, max_chars=500)),
+        warnings=(*normalization_warnings, *tuple(_short_string_array(payload, "warnings", max_items=32, max_chars=500))),
         next_cursor=_object(payload, "next_cursor"),
     )
 
@@ -602,13 +611,14 @@ def _short_string_array(
 
 # LLM: response_schema 是 provider 输出约束，不授权任何工具或副作用。
 # 函数用途: 提供各 provider 共用的严格顶层 JSON Schema。
-def curator_response_schema() -> dict[str, Any]:
+def curator_response_schema(*, include_host_defaults: bool = False) -> dict[str, Any]:
     return build_curator_response_schema(
         output_version=CURATOR_OUTPUT_SCHEMA_VERSION,
         candidate_types=CANDIDATE_TYPES,
         origins=CURATOR_MODEL_ORIGINS,
         actions=PROPOSED_ACTIONS,
         promotion_targets=PROMOTION_TARGETS,
+        include_host_defaults=include_host_defaults,
     )
 
 

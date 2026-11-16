@@ -89,7 +89,7 @@ def _daily_schema(
     *,
     origins: Collection[str],
 ) -> dict[str, Any]:
-    short_strings = {"type": "array", "items": {"type": "string"}}
+    short_strings = {"type": "array", "items": {"type": "string"}, "default": []}
     properties: dict[str, Any] = {
         "event_type": {"type": "string"},
         "summary": {"type": "string"},
@@ -97,7 +97,8 @@ def _daily_schema(
         "origin": {"type": "string", "enum": sorted(origins)},
         "message_refs": {"type": "array", "items": message_reference},
         "tool_refs": {"type": "array", "items": tool_reference},
-        "artifact_refs": {"type": "array", "items": artifact_reference},
+        # 空集合不声明任何产物事实；消息/工具必需来源仍不能由宿主补造。
+        "artifact_refs": {"type": "array", "items": artifact_reference, "default": []},
         "decisions": short_strings,
         "lessons": short_strings,
         "next_actions": short_strings,
@@ -150,6 +151,7 @@ def build_curator_response_schema(
     origins: Collection[str],
     actions: Collection[str],
     promotion_targets: Collection[str],
+    include_host_defaults: bool = False,
 ) -> dict[str, Any]:
     message_reference = _message_reference_schema()
     tool_reference = _tool_reference_schema()
@@ -189,7 +191,51 @@ def build_curator_response_schema(
         "warnings": {"type": "array", "items": {"type": "string"}},
         "next_cursor": _cursor_schema(),
     }
-    return _strict_object(properties)
+    schema = _strict_object(properties)
+    # provider 仍收到原严格required合同；宿主默认元数据仅服务本地确定性归一化，不依赖供应商支持default。
+    return schema if include_host_defaults else _without_host_defaults(schema)
+
+
+def _without_host_defaults(schema):
+    # 只遍历Schema节点；properties中名为default的真实业务字段不能误当元数据删除。
+    projected = {key: value for key, value in schema.items() if key != "default"}
+    if "properties" in projected:
+        projected["properties"] = {name: _without_host_defaults(child)
+                                   for name, child in projected["properties"].items()}
+    if isinstance(projected.get("items"), dict):
+        projected["items"] = _without_host_defaults(projected["items"])
+    return projected
+
+
+def normalize_curator_response_defaults(payload, schema):
+    """仅缺键时应用Schema显式空集合默认值；路径来自Schema，最多保留四项诊断。"""
+    paths, count = [], 0
+
+    def normalize(value, node, path, depth):
+        nonlocal count
+        if depth > 32 or not isinstance(node, dict):
+            return value
+        if isinstance(value, dict) and node.get("type") == "object":
+            normalized = dict(value)
+            for name, child in node.get("properties", {}).items():
+                if "default" in child:
+                    if child.get("type") != "array" or child["default"] != []:
+                        raise RuntimeError("curator host defaults must be explicitly empty arrays")
+                    if name not in normalized:
+                        normalized[name] = []
+                        count += 1
+                        if len(paths) < 4:
+                            paths.append(f"{path}.{name}")
+                if name in normalized:
+                    normalized[name] = normalize(normalized[name], child, f"{path}.{name}", depth + 1)
+            return normalized
+        if isinstance(value, list) and node.get("type") == "array":
+            return [normalize(item, node.get("items"), f"{path}[{index}]", depth + 1)
+                    for index, item in enumerate(value)]
+        return value
+
+    normalized = normalize(payload, schema, "$", 0)
+    return normalized, tuple(paths), count
 
 
 # LLM: 模型输出不合合同时抛出：仍是 ValueError（curator._failure_code 照旧归 CURATOR_SCHEMA_INVALID，消息原文不变），
@@ -206,7 +252,7 @@ class CuratorOutputViolation(ValueError):
         self.violation_path = path
 
 
-# LLM: Anthropic 兼容供应商可能只通过提示词收到 Schema；宿主必须执行相同递归规则，不能替模型填补漏字段。
+# LLM: Anthropic兼容供应商可能只通过提示词收到Schema；宿主先执行显式默认归一化，再执行同一严格递归规则。
 # 函数用途: 依据 Curator 自有 JSON Schema 校验一次 provider 输出，拒绝缺字段、额外字段和坏类型。
 def validate_curator_response_payload(
     payload: object,
@@ -235,6 +281,7 @@ def _validate_schema_node(
         "required",
         "properties",
         "items",
+        "default",
     }
     unknown = set(schema) - allowed_keywords
     if unknown:
