@@ -20,6 +20,14 @@ def test_owner_maintenance_applies_once_per_configured_interval(tmp_path: Path) 
     home.owner_retention_json.write_text(json.dumps(policy), encoding="utf-8")
 
     first = run_owner_retention_if_due(home, now=200_000)
+    # 同一日的有界通道与配额先续完，节流断言只针对已经完整结清的周期。
+    for _ in range(128):
+        marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+        if not marker.get("maintenance_partial"):
+            break
+        assert run_owner_retention_if_due(home, now=200_000).ran
+    else:
+        pytest.fail("maintenance continuation did not settle")
     throttled = run_owner_retention_if_due(home, now=200_050)
     next_run = run_owner_retention_if_due(home, now=200_101)
 
@@ -429,6 +437,8 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
     from agent_py_agent.tests.test_local_store import _b2_seed_events
 
     with curator_case(tmp_path, monkeypatch, source_kind="maintenance") as (agent, _, _, gate, claim, _):
+        # 本例核读写门归属；显式有限预算让初轮完成引用发现，默认续片另有覆盖。
+        agent.config.retention_scan_slice_entries = 1024
         store = LocalStore(agent.config.local_store_path)
         store.reset()
         _b2_seed_events(store, 25005)
@@ -737,3 +747,53 @@ def test_projection_lanes_bind_default_home_and_reject_explicit_identity_conflic
         assert not report["errors"]
         assert report["continuation_pending"] is False
     assert report["deletion_enabled"] is False
+
+
+def test_coordinator_projection_completion_survives_quota_continuation_and_new_deletion_proof(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+    from agent_py_agent.agent.user_space import storage_lanes
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    calls = []
+    def resolve(kind, *, projection_only=False):
+        def lane(request):
+            calls.append((kind, projection_only))
+            return {"cursor": {"complete": True}, "complete": True, "items": 0, "bytes": 0}
+        return lane
+    monkeypatch.setattr(storage_lanes, "resolve_storage_lane", resolve)
+    monkeypatch.setattr(maintenance, "_deferred_quota_reconciliation", lambda *args, **kwargs: {"complete": False})
+    options = dict(now=200_000, coordinator=True, commit_transition=lambda operation: operation())
+    unsafe = SimpleNamespace(applied=False, legal_hold=False, load_errors=[])
+    first = maintenance.run_owner_storage_maintenance_slice(home, {}, unsafe, **options)
+    assert {kind for kind, _ in calls} == set(storage_lanes.LANE_PROJECTION_BINDINGS)
+    assert first["pending_kinds"] == [] and first["continuation_pending"]
+    calls.clear()
+    second = maintenance.run_owner_storage_maintenance_slice(home, {"storage_maintenance": first}, unsafe, **options)
+    assert calls == [] and second["pending_kinds"] == []
+    safe = SimpleNamespace(applied=True, legal_hold=False, load_errors=[])
+    third = maintenance.run_owner_storage_maintenance_slice(home, {"storage_maintenance": second}, safe, **options)
+    assert {kind for kind, projection in calls if not projection} == set(storage_lanes.LANE_BINDINGS)
+    assert third["pending_kinds"] == [] and third["retention_deletion_safe"] is True
+
+
+def test_derived_reference_pause_preserves_existing_store_cursor(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.local_storage import records
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+
+    root = tmp_path / "owner"
+    databases = [root / f"db-{index}.sqlite3" for index in range(9)]
+    monkeypatch.setattr(maintenance, "_local_store_database_paths", lambda _root: (databases, []))
+    failure = OSError("reference source temporarily unavailable")
+    def paused(*args):
+        raise failure
+    monkeypatch.setattr(records, "owner_protected_ref_ids", paused)
+    cursor = {"after": "db-7.sqlite3", "pending": [], "mode": "all"}
+    report = maintenance._prune_local_store_derived_records(root, now=datetime.now(timezone.utc), cursor=cursor)
+    assert report["partial"] and report["executed"] is False
+    assert report["cursor"] == cursor and report["cursor"] is not cursor
+    assert report["error_message"] == str(failure) and report["next_action"]

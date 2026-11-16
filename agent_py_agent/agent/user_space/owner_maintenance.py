@@ -438,8 +438,13 @@ def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_tran
     try:
         protected_refs = owner_protected_ref_ids(Path(home), now.timestamp())
     except OSError as exc:
-        return {"executed": False, "reason": "error",
-                "error_type": type(exc).__name__, "partial": True}
+        from ..contracts.diagnostics import redact_diagnostic_text
+
+        # 引用证明未完成前没有执行选中库；保留传入续点，不能用尚未执行的position越页或丢回第一页。
+        return {"executed": False, "reason": "error", "cursor": deepcopy(cursor or {}),
+                "error_type": type(exc).__name__, "error_message": redact_diagnostic_text(str(exc))[:1024],
+                "next_action": "保留当前库续点，先续完引用证明或修复对应来源，再继续本轮维护。",
+                "partial": True}
     results = [_prune_derived_store(path, now=now, protected_refs=protected_refs, commit_transition=commit_transition) for path in selected]
     result = results[0] if len(results) == 1 else {
         "executed": any(item["executed"] for item in results),
@@ -908,7 +913,7 @@ def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: 
     if saved_pending is not None and (not isinstance(saved_pending, list)
             or any(key not in kinds for key in saved_pending)):
         raise ValueError('invalid_maintenance_pending_kinds')
-    pending = set(saved_pending if saved_pending else adapters) & set(adapters)
+    pending = set(saved_pending if saved_pending is not None else adapters) & set(adapters)
     items, size = 0, 0
     deadline = time.monotonic() + max_seconds if max_seconds else None
     partial = False
@@ -1279,16 +1284,19 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                              for kind in registry if kind.kind in LANE_BINDINGS
                              and (retention_safe or kind.kind in projection_kinds)
                              and (kind.kind != 'global_indexes' or global_allowed)}
-            # 空适配器的旧延期过渡会清空pending；同轮协调者续作须恢复原集合，不能重开已完成通道。
+            # 同资格续片只恢复原待续集合（空集合也有意义）；删除证明首次完成才纳入尚未合格的领域。
             if original.get('continuation_pending') and isinstance(original.get('coordinator_lanes'), dict):
-                state['pending_kinds'] = list(dict.fromkeys([*(original.get('pending_kinds') or ()),
-                    *(key for key in lane_adapters if key in projection_kinds
-                      and (key not in original.get('cursors', {})
-                           or original.get('cursors', {}).get(key, {}).get('complete') is True))]))
+                pending = set(original.get('pending_kinds') or ()) & lane_adapters.keys()
+                if retention_safe and original.get('retention_deletion_safe') is not True:
+                    pending.update(lane_adapters)
+                state['pending_kinds'] = sorted(pending)
+            else:
+                state.pop('pending_kinds', None)
+            state['retention_deletion_safe'] = retention_safe
             lane_state = run_storage_maintenance_slice(state, lane_adapters,
                 max_items=len(LANE_BINDINGS) * STORAGE_LANE_SLICE_ENTRIES,
                 max_seconds=len(LANE_BINDINGS) * _OWNER_LANE_SLICE_MS / 1000, order=order)
-            for key in ('cursors', 'pending_kinds', 'next_kind', 'completed', 'errors', 'items', 'bytes'):
+            for key in ('cursors', 'pending_kinds', 'next_kind', 'completed', 'errors', 'items', 'bytes', 'unbound_kinds'):
                 state[key] = lane_state[key]
             state['coordinator_lanes'] = {'ran': sorted(lane_reports), 'pending_kinds': lane_state['pending_kinds'],
                 'errors': lane_state['errors'], 'fallback_kinds': sorted(set(lane_fallbacks))}
@@ -1418,7 +1426,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     state['coordinator_deferred'] = ['global_indexes']
     # 无上限owner仍发布观察用量；一旦启动扫描，欠账须续到完成，不能遗留目录流至次日。
     state['continuation_pending'] = bool(state['errors']) or any(
-        key != 'global_indexes'
+        (key != 'global_indexes' or global_allowed)
         for key in state['pending_kinds'])
     state['deletion_enabled'] = False
     return state

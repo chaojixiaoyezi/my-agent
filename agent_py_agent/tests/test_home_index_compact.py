@@ -507,7 +507,13 @@ def test_maintenance_compacts_oversized_index(tmp_path) -> None:
         policy_path.write_text(json.dumps(policy), encoding="utf-8")
 
         marker_before = _latest_unique_refs(tasks_path, key_fields=TASK_KEY, limit=0)
-        run_owner_retention_if_due(home, now=200_000)
+        for _ in range(256):
+            run_owner_retention_if_due(home, now=200_000, include_global_indexes=True)
+            marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+            if "global_indexes" not in marker["storage_maintenance"].get("pending_kinds", []):
+                break
+        else:
+            raise AssertionError("共享索引原预算续扫未完成")
         marker_after = _latest_unique_refs(tasks_path, key_fields=TASK_KEY, limit=0)
     finally:
         mod.COMPACT_MIN_BYTES = original_min
@@ -516,7 +522,7 @@ def test_maintenance_compacts_oversized_index(tmp_path) -> None:
     assert marker_after == marker_before, "压缩改变了读取结果"
 
     state = json.loads((home.owner_data_dir / "maintenance.json").read_text(encoding="utf-8"))
-    assert state.get("indexes_compacted"), "维护状态没有记录压缩摘要"
+    assert state["storage_maintenance"]["lane_reports"]["global_indexes"]["complete"], "维护状态没有记录压缩完成"
 
 
 # ------------------------------------------------------------------ 内存上限（子进程实测）

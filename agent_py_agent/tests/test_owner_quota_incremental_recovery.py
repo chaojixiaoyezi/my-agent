@@ -1174,8 +1174,16 @@ def test_quota_reconcile_runs_when_retention_is_not_safe(tmp_path, reason):
     partial = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000,
                                                               quota_max_entries=1, quota_max_ms=5000, state_locked=True)
     assert partial['quota_reconciliation']['complete'] is False and partial['continuation_pending'] is True
-    result = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000,
-                                                             quota_max_ms=5000, state_locked=True)
+    result = partial
+    for _ in range(64):
+        result = maintenance.run_owner_storage_maintenance_slice(
+            home, {"storage_maintenance": result}, policy, now=2_000_000,
+            quota_max_ms=5000, state_locked=True)
+        assert not result["errors"]
+        if not result["continuation_pending"]:
+            break
+    else:
+        pytest.fail("纯投影和配额的原预算续片未完成")
     assert result['deferred_reason'] == 'retention_not_safe' and result['deletion_enabled'] is False
     assert result['quota_reconciliation']['complete'] is True and result['continuation_pending'] is False
     assert 'cursor' not in result['quota_reconciliation']
@@ -1654,14 +1662,13 @@ def test_r8_public_maintenance_forwards_explicit_quota_budget(tmp_path, monkeypa
 def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatch, quota_enabled, load_error):
     import dataclasses
 
-    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
     from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionError
     from agent_py_agent.agent.user_space import owner_maintenance as maintenance
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
     # 本例核配额续片的日节拍，不要求真实文件系统在25ms内完成保留发现。
     # 默认deadline暂停及保留续片义务由下方独立用例验证，条目/字节预算仍真实生效。
-    monkeypatch.setattr(budgets, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    monkeypatch.setattr(time, 'monotonic', lambda: 0.0)
     _r7_clear_scans()
     home = ensure_my_agent_home(tmp_path / 'home')
     owner = home.owner_home_dir
