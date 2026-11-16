@@ -37,6 +37,7 @@ from ..io.sqlite_scope import scoped_guarded_connection, sqlite_connection_facto
 from .current_obligations import CURRENT_OBLIGATION_INDEX_SQL
 from .maintenance import execute_runtime_statement
 from .recovery_guard import (
+    RuntimeDatabaseDeferred,
     close_runtime_connection,
     guarded_runtime_connect,
     mark_runtime_connection_idle,
@@ -871,10 +872,14 @@ class RuntimeSchemaMixin:
         if self.read_only:
             from ..io.readonly_sqlite import readonly_sqlite_connection
 
-            # 管理预览不进入可创建generation侧车的普通运行连接门；SQLite原生WAL协调仍受安全适配器保护。
+            # 管理预览不创建generation侧车，但仍须服从原恢复意图准入，不能沿只读旁路越过恢复门。
+            if runtime_db_recovery_pending(self.db_path):
+                raise RuntimeDatabaseDeferred('recovery_intent')
             with readonly_sqlite_connection(self.db_path, blocking=False, require_private_directory=False) as conn:
                 conn.row_factory = sqlite3.Row
                 require_runtime_schema_generation(conn)
+                if runtime_db_recovery_pending(self.db_path):
+                    raise RuntimeDatabaseDeferred('recovery_intent')
                 yield conn
             return
         self._heal_runtime_db_before_open()

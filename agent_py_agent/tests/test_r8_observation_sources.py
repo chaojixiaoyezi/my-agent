@@ -410,12 +410,30 @@ def test_partial_execution_window_never_claims_a_missing_tree_root_is_absent(tmp
         case.service.query('agent_tree.get', {'space_id': 'space-a', 'root_agent_id': 'not-in-window'}, actor=case.actor)
 
 
-def test_readonly_runtime_recovery_intent_is_unknown_not_empty_complete(tmp_path):
-    from agent_py_agent.agent.runtime_db.recovery_guard import request_runtime_db_recovery
+def test_readonly_runtime_recovery_intent_is_unknown_not_empty_complete(tmp_path, monkeypatch):
+    from agent_py_agent.agent.runtime_db.recovery_guard import (
+        RuntimeDatabaseDeferred,
+        request_runtime_db_recovery,
+    )
+
     case = observation_case(tmp_path)
+    healthy = case.service.query('executions.list', {}, actor=case.actor)
+    assert len(healthy['items']) == 2 and healthy['coverage'] == 'complete'
     request_runtime_db_recovery(case.runtime.db_path)
+    intent = case.runtime.db_path.with_name(case.runtime.db_path.name + '.recovery-intent.json')
+    protected = [case.runtime.db_path, intent, Path(str(case.runtime.db_path) + '-wal')]
+    before = {path: path.read_bytes() if path.exists() else None for path in protected}
+    names = set(tmp_path.iterdir())
+    def forbid_writer_heal(*_args, **_kwargs):
+        pytest.fail('readonly observation must not enter writer recovery')
+    monkeypatch.setattr(type(case.service.runtime), '_heal_runtime_db_before_open', forbid_writer_heal)
+    with pytest.raises(RuntimeDatabaseDeferred, match='recovery_intent'):
+        with case.service.runtime._runtime_connection():
+            pytest.fail('recovery-pending readonly connection was admitted')
     result = case.service.query('executions.list', {}, actor=case.actor)
     assert result['items'] == [] and result['coverage'] == 'unknown'
+    assert {path: path.read_bytes() if path.exists() else None for path in protected} == before
+    assert set(tmp_path.iterdir()) == names
 
 
 @pytest.mark.parametrize('kind', ['events', 'sources'])
