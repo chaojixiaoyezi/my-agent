@@ -390,8 +390,8 @@ def test_budget_pause_before_manifest_plan_is_partial_without_fabricating_state_
 
     def elapsed_default(cls, config=None):
         budget = original(config)
-        assert (budget.max_entries, budget.max_bytes, budget.deadline) == (128, 8 * 1024 * 1024, .025)
-        clock[0] = .025
+        assert (budget.max_entries, budget.max_bytes, budget.deadline - clock[0]) == (128, 8 * 1024 * 1024, .025)
+        clock[0] = budget.deadline
         return budget
 
     monkeypatch.setattr(budgets.RetentionScanBudget, 'default', classmethod(elapsed_default))

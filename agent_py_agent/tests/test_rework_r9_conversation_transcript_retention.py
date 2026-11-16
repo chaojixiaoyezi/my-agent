@@ -61,6 +61,20 @@ def _owner(tmp_path):
 
 
 
+def _plan_completed(service, *, now):
+    """只读计划按原预算续扫，累积已证明的动作，不把首片partial当空计划。"""
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+
+    cursor, actions = None, {}
+    for _ in range(1024):
+        report = service.plan(now=now, scan_budget=RetentionScanBudget.default(), scan_cursor=cursor)
+        actions.update((action.action_id, action) for action in report.actions)
+        if not report.scan_partial or report.errors or report.legal_hold:
+            return replace(report, actions=tuple(actions.values()))
+        cursor = report.scan_cursor
+    pytest.fail("只读计划在原预算1024片内未收敛")
+
+
 def _apply_completed(service, *, now):
     """沿真实预算apply续扫；错误、法律保留或动作延期立即交还原断言。"""
     actions = {}
@@ -194,7 +208,7 @@ def test_original_rotation_cold_set_is_trashed_then_purged_without_residue(tmp_p
     usage_before = owner_logical_usage_bytes(owner_root, exact=True)
     assert usage_before < enforcer.max_bytes
 
-    plan = service.plan(now=NOW)
+    plan = _plan_completed(service, now=NOW)
     action = _conversation_action(plan, thread.thread_id)
     assert transcript <= set(action.related_paths)
     assert not [error for error in plan.errors if "CONVERSATION" in error.error_code]
@@ -234,7 +248,7 @@ def test_prepared_rotation_is_trashed_as_one_recoverable_set(tmp_path, monkeypat
     assert bool(stages) is (fault != "final_write")
     assert any(item.name.startswith("seg-") for item in transcript)
 
-    plan = service.plan(now=NOW)
+    plan = _plan_completed(service, now=NOW)
     action = _conversation_action(plan, thread.thread_id)
     assert transcript <= set(action.related_paths)
     assert _conversation_action(_apply_completed(service, now=NOW), thread.thread_id).status == "trashed"
@@ -253,7 +267,7 @@ def test_apply_reenumerates_members_and_defers_on_late_cold_member(tmp_path, mon
     home, service = _owner(tmp_path)
     store, thread, path, _original = _rotated_conversation(home, monkeypatch)
     root = store.storage.root.resolve()
-    plan = service.plan(now=NOW)
+    plan = _plan_completed(service, now=NOW)
     action = _conversation_action(plan, thread.thread_id)
     late = root / "messages" / "archive" / thread.thread_id / "index" / "late-node.json"
     late.write_text("{}\n", encoding="utf-8")
@@ -274,7 +288,7 @@ def test_trash_waits_for_message_writer_lock_before_thread_lock(tmp_path, monkey
     home, service = _owner(tmp_path)
     store, thread, path, _original = _rotated_conversation(home, monkeypatch)
     root = store.storage.root.resolve()
-    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    action = _conversation_action(_plan_completed(service, now=NOW), thread.thread_id)
     order = []
     original_json_lock, original_transition = apply.locked_json_path, apply.locked_file_transition
 
@@ -328,7 +342,7 @@ def test_incomplete_cold_layout_defers_with_structured_error(tmp_path, monkeypat
         (archive / "index" / "linked.json").symlink_to(tmp_path / "outside.json")
     before = {item: item.read_bytes() for item in _transcript_files(root, thread.thread_id)}
 
-    plan = service.plan(now=NOW)
+    plan = _plan_completed(service, now=NOW)
     assert not [action for action in plan.actions if action.category == "conversation"]
     assert "MEMORY_RETENTION_CONVERSATION_TRANSCRIPT_INVALID" in {error.error_code for error in plan.errors}
     _apply_completed(service, now=NOW)
@@ -346,7 +360,7 @@ def test_legal_hold_keeps_rotated_transcript(tmp_path, monkeypatch, hold):
     if hold == "task":
         store.tasks.bind({"thread_id": thread.thread_id, "task_id": "held-task", "status": "completed",
                           "now": OLD + 2000})
-    _conversation_action(service.plan(now=NOW), thread.thread_id)
+    _conversation_action(_plan_completed(service, now=NOW), thread.thread_id)
     policy = json.loads(home.owner_retention_json.read_text(encoding="utf-8"))
     if hold == "global":
         policy["legal_hold"] = True
@@ -414,7 +428,7 @@ def test_ledger_retirement_waits_for_real_writer_and_revalidates(tmp_path, monke
 
     home, service = _owner(tmp_path)
     store, thread, _roots, _cold = _retired_ledger_conversation(home)
-    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    action = _conversation_action(_plan_completed(service, now=NOW), thread.thread_id)
     _assert_family_locks_released(store, thread.thread_id)
     before_fd = _fd_count()
     held, retiring, release = threading.Event(), threading.Event(), threading.Event()
@@ -509,7 +523,7 @@ def test_ledger_retirement_waits_for_real_writer_and_revalidates(tmp_path, monke
 def test_ledger_retirement_single_move_failure_restores_family_and_retries(tmp_path, monkeypatch):
     home, service = _owner(tmp_path)
     store, thread, _roots, cold = _retired_ledger_conversation(home)
-    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    action = _conversation_action(_plan_completed(service, now=NOW), thread.thread_id)
     before = _ledger_family_snapshot(store, thread.thread_id)
     _assert_family_locks_released(store, thread.thread_id)
     before_fd = _fd_count()
@@ -577,7 +591,7 @@ def test_ledger_collector_preserves_siblings_locks_and_prepared_members(tmp_path
         assert not any(path.name.endswith(".lock") for path in members)
         assert not set(sibling_before).intersection(members)
         before = {path: path.read_bytes() for path in members}
-        action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+        action = _conversation_action(_plan_completed(service, now=NOW), thread.thread_id)
         assert _conversation_action(_apply_completed(service, now=NOW), thread.thread_id).status == "trashed"
         assert lock.stat().st_ino == inode
         for path, raw in before.items():
@@ -608,7 +622,7 @@ def test_ledger_unsafe_or_unreadable_family_keeps_thread_with_error(tmp_path, mo
             return original(path, *args, **kwargs)
 
         monkeypatch.setattr(scan.os, "walk", unreadable)
-    plan = service.plan(now=NOW)
+    plan = _plan_completed(service, now=NOW)
     assert not any(action.category == "conversation" and action.record_id == thread.thread_id for action in plan.actions)
     assert any("CONVERSATION" in error.error_code for error in plan.errors)
     _apply_completed(service, now=NOW)
@@ -620,7 +634,7 @@ def test_ledger_unsafe_or_unreadable_family_keeps_thread_with_error(tmp_path, mo
 def test_late_ledger_member_requires_new_plan(tmp_path, kind):
     home, service = _owner(tmp_path)
     store, thread, roots, _cold = _retired_ledger_conversation(home)
-    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    action = _conversation_action(_plan_completed(service, now=NOW), thread.thread_id)
     path = roots[0 if kind == "observations" else 1] / ".prepared-late"
     path.write_bytes(b"new ordinary generation\n")
     before = _ledger_family_snapshot(store, thread.thread_id)
@@ -680,12 +694,12 @@ def test_thread_retirement_collects_production_sized_usage_and_observation_famil
     initial = _bytes(cold)
     assert initial > 100 * 1024 * 1024
     assert owner_quota_enforcer_from_policy(Path(home.owner_home_dir)).max_bytes == 1024 ** 3
-    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    action = _conversation_action(_plan_completed(service, now=NOW), thread.thread_id)
     omitted = cold - set(action.related_paths)
     assert _conversation_action(_apply_completed(service, now=NOW), thread.thread_id).status == "trashed"
     _apply_completed(service, now=NOW + timedelta(days=31))
     residual = {path for path in cold if path.exists()}
-    followup = service.plan(now=NOW + timedelta(days=62))
+    followup = _plan_completed(service, now=NOW + timedelta(days=62))
     evidence = {"initial_cold_bytes": initial, "omitted_members": len(omitted), "residual_members": len(residual),
                 "residual_bytes": _bytes(residual), "thread_exists": store.storage.thread_path(thread.thread_id).exists(),
                 "later_conversation_actions": sum(item.category == "conversation" for item in followup.actions)}
@@ -704,7 +718,7 @@ def test_writer_prechecked_before_retirement_cannot_recreate_ledger(tmp_path, mo
     for name in ("channel_bindings.json", "user_latest_threads.json"):
         path = store.storage.root / name
         path.write_text("{}")
-    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    action = _conversation_action(_plan_completed(service, now=NOW), thread.thread_id)
     module, lock_name = ((store_observations, "locked_json_path") if kind == "observations" else
                          (store_usage, "locked_file_transition"))
     original_lock = getattr(module, lock_name)
@@ -794,12 +808,12 @@ def test_thread_retirement_collects_usage_and_observation_cold_segments(tmp_path
         path = store.storage.root / name
         value = json.loads(path.read_text())
         path.write_text(json.dumps({key: item for key, item in value.items() if item != tid}))
-    action = _conversation_action(service.plan(now=NOW), tid)
+    action = _conversation_action(_plan_completed(service, now=NOW), tid)
     omitted = cold - set(action.related_paths)
     assert _conversation_action(_apply_completed(service, now=NOW), tid).status == "trashed"
     _apply_completed(service, now=NOW + timedelta(days=31))
     residual = {path for path in cold if path.exists()}
-    followup = service.plan(now=NOW + timedelta(days=62))
+    followup = _plan_completed(service, now=NOW + timedelta(days=62))
     evidence = {"case": "retired_ledgers", "quota_mib": 1024, "initial_cold_bytes": initial,
                 "omitted_members": len(omitted), "residual_members": len(residual),
                 "residual_bytes": _bytes(residual), "thread_exists": store.storage.thread_path(tid).exists(),

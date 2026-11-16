@@ -6,7 +6,6 @@ from dataclasses import replace
 
 import pytest
 
-from agent_py_agent.agent.memory_store import candidates as candidates_module
 from agent_py_agent.agent.memory_store import retention_scan as scan
 from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.tests.test_memory_retention_wave5 import NOW, old_file, runtime
@@ -35,21 +34,30 @@ def _cold_candidates(tmp_path, count):
 
 def _count_cold_reads(monkeypatch):
     calls = []
-    original = candidates_module._read_cold_records
+    original = scan._PinProjection._rows
 
-    def counted(path, name, **kwargs):
-        calls.append(name)
-        return original(path, name, **kwargs)
+    def counted(self, path, **kwargs):
+        if path.parent.name == "candidates_archive":
+            calls.append(path.name)
+        yield from original(self, path, **kwargs)
 
-    monkeypatch.setattr(candidates_module, "_read_cold_records", counted)
+    monkeypatch.setattr(scan._PinProjection, "_rows", counted)
     return calls
+
+
+def _complete_pins(home, errors):
+    for _ in range(512):
+        pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+        if complete or errors:
+            return pins, complete
+    pytest.fail("冷候选引用在原预算512片内未完成")
 
 
 def test_retention_pins_read_each_cold_month_once(tmp_path, monkeypatch):
     home, _candidates, evidence = _cold_candidates(tmp_path, 6)
     calls = _count_cold_reads(monkeypatch)
     errors = []
-    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    pins, complete = _complete_pins(home, errors)
     assert complete and not errors
     assert all(pins.protects(path, errors) for path in evidence)
     assert len(calls) == len(set(calls)) == 1
@@ -65,6 +73,6 @@ def test_shared_cold_month_damage_still_fails_closed(tmp_path, damage):
         lines = archive.read_text().splitlines(keepends=True)
         archive.write_text("".join(lines[:-1]))
     errors = []
-    _pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    _pins, complete = _complete_pins(home, errors)
     assert not complete and errors
     assert errors[0].error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"

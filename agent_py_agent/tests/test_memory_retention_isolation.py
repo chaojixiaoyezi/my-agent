@@ -387,7 +387,13 @@ def test_apply_refuses_everything_when_candidates_ledger_is_unreadable(tmp_path)
     candidates_path.parent.mkdir(parents=True, exist_ok=True)
     candidates_path.write_text("{not json", encoding="utf-8")
 
-    report = service.apply(now=NOW)
+    for _ in range(128):
+        report = service.apply(now=NOW)
+        assert not report.actions and task_root.exists(), "不完整或损坏来源不得先执行删除"
+        if report.errors:
+            break
+    else:
+        raise AssertionError("候选坏源在原预算续扫内没有回报")
 
     assert report.applied is False, "候选账本读不懂必须整份拒绝"
     assert tuple(report.actions) == (), "整份拒绝时不能执行任何动作"

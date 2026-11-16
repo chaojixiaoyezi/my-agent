@@ -49,8 +49,8 @@ def readers(monkeypatch):
 
     # LLM: Keep the actual snapshot constructor and per-instance chunk cache.
     # 函数用途: 保存真实引用快照及配置身份。
-    def snapshot(self, home, roots, now, builder, *, config=None):
-        original_snapshot(self, home, roots, now, builder, config=config)
+    def snapshot(self, home, roots, now, builder, *, config=None, resumable=False):
+        original_snapshot(self, home, roots, now, builder, config=config, resumable=resumable)
         seen.snapshots.append((config, self))
 
     monkeypatch.setattr(retention_scan_budget.RetentionScanBudget, "default", classmethod(budget))
@@ -69,12 +69,12 @@ def _config_contract(operation):
 
 # LLM: Verify all four knobs reached actual reader results, not just mock call presence.
 # 函数用途: 核对预算三维值、分块大小及同一配置对象。
-def _assert_readers(seen, config):
-    assert len(seen.budgets) == 1 and len(seen.snapshots) == 2
-    received, budget = seen.budgets[0]
-    assert received is config
-    assert (budget.max_entries, budget.max_bytes) == (1, 8388608)
-    assert budget.deadline == pytest.approx(100.025)
+def _assert_readers(seen, config, *, budget_count=2):
+    assert len(seen.budgets) == budget_count and len(seen.snapshots) == 2
+    for received, budget in seen.budgets:
+        assert received is config
+        assert (budget.max_entries, budget.max_bytes) == (1, 8388608)
+        assert budget.deadline == pytest.approx(100.025)
     assert sum(isinstance(snapshot, _PinProjection) for _, snapshot in seen.snapshots) == 1
     assert all(received is config and snapshot.contents["chunk_bytes"] == 4096
                for received, snapshot in seen.snapshots)
@@ -110,7 +110,8 @@ def test_executor_passes_config_to_reference_snapshot(tmp_path, cfg, readers):
     result = retention_apply.execute_retention_plan(home=home, candidates=candidates,
         plan=MemoryRetentionReport(applied=False, actions=()), now=NOW, config=cfg)
     assert result.applied and result.actions == result.errors == ()
-    assert readers.budgets == [] and len(readers.snapshots) == 1
+    assert len(readers.budgets) == 1 and readers.budgets[0][0] is cfg
+    assert len(readers.snapshots) == 1
     assert readers.snapshots[0][0] is cfg
     assert readers.snapshots[0][1].contents["chunk_bytes"] == 4096
 
@@ -126,7 +127,7 @@ def test_due_maintenance_keeps_config_through_transition(tmp_path, cfg, readers,
         options["commit_transition"] = lambda operation: operation()
     result = owner_maintenance.run_owner_retention_if_due(home, now=200_000, config=cfg, **options)
     assert result.ran and result.retention.applied
-    _assert_readers(readers, cfg)
+    _assert_readers(readers, cfg, budget_count=3)
     marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
     assert marker["last_attempt_at"] == 200_000
 

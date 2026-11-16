@@ -117,20 +117,21 @@ def test_storage_lanes_only_defer_unsafe_retention(tmp_path, monkeypatch, path_e
         called.append(request)
         return {"cursor": {}, "complete": True, "items": 0, "bytes": 0}
 
-    monkeypatch.setattr(storage_lanes, "resolve_storage_lane", lambda kind: lane)
+    monkeypatch.setattr(storage_lanes, "resolve_storage_lane", lambda kind, *, projection_only=False: lane)
     transition = (lambda operation: operation()) if coordinator else None
     result = maintenance.run_owner_storage_maintenance_slice(
         home, {}, retention, now=2_000_000, coordinator=coordinator,
         state_locked=not coordinator, commit_transition=transition,
-        quota_max_entries=1, quota_max_ms=5000,
+        quota_max_entries=1, quota_max_ms=5000, include_global_indexes=True,
     )
 
     safe = error_form in {"object", "dict"}
-    assert {request.kind for request in called} == (set(storage_lanes.LANE_BINDINGS) if safe else set())
-    assert all(request.coordinator is coordinator and request.commit is transition for request in called)
+    assert {request.kind for request in called} == (set(storage_lanes.LANE_BINDINGS) if safe else set(storage_lanes.LANE_PROJECTION_BINDINGS))
+    assert all(request.coordinator is (coordinator or request.kind == "global_indexes")
+               and request.commit is transition for request in called)
     if coordinator:
         assert result["deferred_reason"] == "coordinator_adapter_protocol_required"
-        assert ("coordinator_lanes" in result) is safe
+        assert "coordinator_lanes" in result
     else:
         assert (result.get("deferred_reason") == "retention_not_safe") is not safe
     assert result["deletion_enabled"] is False

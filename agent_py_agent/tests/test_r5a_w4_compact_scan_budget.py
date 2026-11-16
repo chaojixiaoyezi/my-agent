@@ -58,7 +58,7 @@ def scans(monkeypatch):
 def _agent(root, *, entries=13, maximum=2):
     directory = root / "threads"
     directory.mkdir(parents=True)
-    store = SimpleNamespace(storage=SimpleNamespace(threads_dir=directory))
+    store = SimpleNamespace(storage=SimpleNamespace(root=root, threads_dir=directory))
     store.threads = SimpleNamespace(load_report=lambda tid: (
         SimpleNamespace(thread_id=tid, owner_home=str(root)), None,
     ))

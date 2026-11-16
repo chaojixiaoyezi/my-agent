@@ -450,6 +450,14 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     store = SkillLearningStore.for_home(fixture.agent.home_paths)
     (store.skills_root.parent / 'quota.json').write_text('{"max_disk_mb": 1024}')
     monkeypatch.setattr(owner_quota, 'time', SimpleNamespace(**{**vars(time), 'monotonic': lambda: 100.0}))
+    # 安装夹具已有超过128项；先由原后台对账建立完整基线，不能把未对账增长拒绝当使用账写入失败。
+    store.directory.mkdir(parents=True, exist_ok=True)
+    for _ in range(128):
+        baseline = owner_quota.reconcile_owner_quota_slice(store.skills_root.parent, max_entries=128, max_ms=2500)
+        if baseline["complete"]:
+            break
+    else:
+        pytest.fail("使用账夹具的原预算配额对账未完成")
     observed = {'locks': 0, 'scans': 0, 'saves': 0}
     state_lock, save = SkillLearningStore.state_lock, usage._save_usage
     snapshot = owner_quota._bounded_quota_snapshot
@@ -473,8 +481,8 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
 
     # LLM: 双文件写入继续使用原函数；异常不得被记为已完成保存，原返回值和异常保持。
     # 函数用途: 只统计实际成功返回的批处理保存。
-    def counted_save(*args):
-        result = save(*args)
+    def counted_save(*args, **kwargs):
+        result = save(*args, **kwargs)
         observed['saves'] += 1
         return result
 
@@ -485,11 +493,9 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     assert result.ok, result.output
     matches = json.loads(result.output)['matches']
     assert len(matches) >= 3
-    assert observed == {'locks': 1, 'scans': 1, 'saves': 1}
-    assert len(snapshots) == 1
-    root, max_entries, max_ms, (_bytes, _inodes, complete) = snapshots[0]
-    assert root == fixture.agent.home_paths.owner_home_dir
-    assert (max_entries, max_ms, complete) == (128, 2500.0, True)
+    # 完整基线已证明大于128项，原准入只核受影响目录，不再重做必然读不完的全新扫描。
+    assert observed == {'locks': 1, 'scans': 0, 'saves': 1}
+    assert snapshots == []
     summary = usage.load_skill_usage_summary(store)
     assert summary['totals']['visible'] == len(matches)
     assert summary['totals']['manual_search'] == len(matches)
