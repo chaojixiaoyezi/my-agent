@@ -64,6 +64,12 @@ def _regular_identity(path: Path, *, require_owner=False) -> tuple[int, int] | N
     return info.st_dev, info.st_ino
 
 
+def _verify_sidefiles(path: Path) -> None:
+    """辅助文件由SQLite原生生命周期管理；每次核实信任，不把inode当代次权威。"""
+    for suffix in ("-journal", "-wal", "-shm"):
+        _regular_identity(path.with_name(path.name + suffix), require_owner=True)
+
+
 # LLM: 构造与复核共用同一信任门；仅以已打开FD收紧当前用户的.my-agent子树，不改普通私有组祖先。
 # 函数用途: 拒绝非可信属主和非sticky公共可写祖先，兼容当前用户的私有组目录。
 def _ensure_trusted_ancestor(descriptor, current_path: Path, parent_stat, *, read_only=False):
@@ -163,8 +169,7 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
             identity = _regular_identity(path, require_owner=True)
             if identity is None:
                 raise FileNotFoundError(errno.ENOENT, 'readonly SQLite database is missing')
-            sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix), require_owner=True)
-                         for suffix in ("-journal", "-wal", "-shm")}
+            _verify_sidefiles(path)
             verify()
             timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else timeout
             db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
@@ -173,18 +178,13 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
                 verify()
                 if _regular_identity(path, require_owner=True) != identity:
                     raise ValueError("projection identity changed during read")
-                for suffix, before in sidefiles.items():
-                    observed = _regular_identity(path.with_name(path.name + suffix), require_owner=True)
-                    if before is not None and observed != before:
-                        raise ValueError("projection sidefile identity changed during read")
-                # connect尚未取得SQLite读锁。短写者可在首次读取等待期间正常回收WAL/SHM；
-                # 先沿SQLite完成读准入，再固定辅助文件身份，不能把该合法生命周期当作换库。
+                _verify_sidefiles(path)
+                # connect尚未取得SQLite读锁；沿SQLite完成真实读准入，不能自行管理WAL代次。
                 db.execute("PRAGMA schema_version").fetchone()
                 verify()
                 if _regular_identity(path, require_owner=True) != identity:
                     raise ValueError("projection identity changed during read")
-                sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix), require_owner=True)
-                             for suffix in ("-journal", "-wal", "-shm")}
+                _verify_sidefiles(path)
                 # Schema is domain-specific; readers validate their own version and tables.
                 try:
                     yield db
@@ -195,10 +195,7 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
                 verify()
                 if _regular_identity(path, require_owner=True) != identity:
                     raise ValueError("projection identity changed after read")
-                for suffix, before in sidefiles.items():
-                    observed = _regular_identity(path.with_name(path.name + suffix), require_owner=True)
-                    if before is not None and observed != before:
-                        raise ValueError("projection sidefile identity changed after read")
+                _verify_sidefiles(path)
             finally:
                 db.close()
     except (OSError, ValueError, sqlite3.Error) as exc:

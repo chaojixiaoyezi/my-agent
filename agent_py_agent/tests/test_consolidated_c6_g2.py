@@ -589,6 +589,80 @@ def test_readonly_runtime_connections_create_no_application_generation_sidecar(t
     assert not lock.exists() and source.read_bytes() == before
 
 
+def test_readonly_runtime_admits_native_sidefile_retirement_before_connect(tmp_path, monkeypatch):
+    from agent_py_agent.agent.io import readonly_sqlite as reader
+
+    source = _source(tmp_path / "runtime.db")
+    identity = runtime_db_identity(source)
+    connect = sqlite3.connect
+    with closing(connect(source)) as writer:
+        writer.execute("INSERT INTO metadata VALUES('native-retirement', 'committed')")
+        writer.commit()
+        assert Path(str(source) + "-wal").exists()
+        opened = []
+
+        def after_last_writer_close(*args, **kwargs):
+            # 在安全元数据预检之后、SQLite实际打开之前，最后一个写者正常退出回收辅助文件。
+            writer.close()
+            assert not Path(str(source) + "-wal").exists()
+            assert not Path(str(source) + "-shm").exists()
+            opened.append(True)
+            return connect(*args, **kwargs)
+
+        monkeypatch.setattr(reader.sqlite3, "connect", after_last_writer_close)
+        with RuntimeRepository(source, read_only=True)._runtime_connection() as conn:
+            assert conn.execute("SELECT value FROM metadata WHERE key='native-retirement'").fetchone()[0] == "committed"
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert opened == [True]
+    assert runtime_db_identity(source) == identity
+
+
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+@pytest.mark.parametrize("phase", ["connect", "after_read"])
+def test_readonly_still_rejects_sidefile_links_at_each_boundary(tmp_path, monkeypatch, suffix, phase):
+    from agent_py_agent.agent.io import readonly_sqlite as reader
+
+    source = tmp_path / "source.db"
+    connect = sqlite3.connect
+    with closing(connect(source)) as writer:
+        writer.execute("CREATE TABLE facts(value)")
+    protected = tmp_path / "protected"
+    protected.write_bytes(b"must remain unchanged")
+    sidefile = Path(str(source) + suffix)
+    if phase == "connect":
+        def inject(*args, **kwargs):
+            os.link(protected, sidefile)
+            return connect(*args, **kwargs)
+        monkeypatch.setattr(reader.sqlite3, "connect", inject)
+    with pytest.raises(ProjectionReadUnavailableError, match="single-link regular"):
+        with reader.readonly_sqlite_connection(source) as conn:
+            assert conn.execute("SELECT count(*) FROM facts").fetchone() == (0,)
+            assert phase == "after_read"
+            os.link(protected, sidefile)
+    assert protected.read_bytes() == b"must remain unchanged"
+
+
+def test_readonly_still_rejects_unknown_main_database_replacement(tmp_path, monkeypatch):
+    from agent_py_agent.agent.io import readonly_sqlite as reader
+
+    source, replacement = tmp_path / "source.db", tmp_path / "replacement.db"
+    connect = sqlite3.connect
+    for path, number in ((source, 1), (replacement, 2)):
+        with closing(connect(path)) as writer:
+            writer.execute("CREATE TABLE facts(value)")
+            writer.execute("INSERT INTO facts VALUES (?)", (number,))
+            writer.commit()
+
+    def replace_main(*args, **kwargs):
+        os.replace(replacement, source)
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(reader.sqlite3, "connect", replace_main)
+    with pytest.raises(ProjectionReadUnavailableError, match="projection identity changed during read"):
+        with reader.readonly_sqlite_connection(source):
+            pytest.fail("只读不得签收未知主库替换")
+
+
 @pytest.fixture
 def damaged(tmp_path):
     source = _source(tmp_path / "source/runtime.db", events=1024)
