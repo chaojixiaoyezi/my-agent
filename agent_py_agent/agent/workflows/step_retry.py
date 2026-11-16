@@ -60,6 +60,24 @@ def _is_transient_error(error_code: str) -> bool:
     return any(indicator in lower for indicator in _TRANSIENT_ERROR_INDICATORS)
 
 
+# 副作用结果已判定、允许按声明重试策略重放的取值（未启动；runner确认的本地确定失败）。
+_REPLAYABLE_EFFECT_OUTCOMES = ('not_started', 'failed')
+
+
+# LLM: 只在声明了重试策略、本次未到上限、错误码按原规则可重试且副作用已判定可重放时返回真；
+#   引擎据此把这次失败先交给重试循环、重试耗尽后再按 on_error 升级；其余情况保持原升级/暂停。
+# 函数用途: 预判当前失败的步骤是否会被重试循环自动重放。
+def retry_will_replay(spec: Any, step: Any) -> bool:
+    policy = _get_spec_val(spec, 'retry_policy')
+    if not isinstance(policy, dict) or not policy or step.attempt_count >= step.max_attempts:
+        return False
+    codes = tuple(policy.get('retryable_codes') or ())
+    error_code = step.error_code or 'STEP_EXECUTION_ERROR'
+    if (error_code not in codes) if codes else not _is_transient_error(error_code):
+        return False
+    return step.escalation_result.get('effect_outcome') in _REPLAYABLE_EFFECT_OUTCOMES
+
+
 def _check_stop_cleanly(engine: Any = None) -> None:
     raise_if_cancelled()
     if is_interrupted():
@@ -170,13 +188,14 @@ def run_step_with_retry(
                 return
 
         # 进程退出不等于业务未写；unknown必须先沿上面的受信水位对账，定义自报幂等不授予重放权。
+        #   runner确认的本地确定失败（failed，见D-11）与未启动同属可判定结果，可按声明的重试策略重放。
         effect_started = step.escalation_result.get('effect_started') is True
         effect_outcome = step.escalation_result.get('effect_outcome')
         if not effect_outcome and isinstance(step.escalation_result.get('tool_receipt'), dict):
             effect_outcome = step.escalation_result['tool_receipt'].get('effect_outcome')
         has_effect_executor = step.mode in _SIDE_EFFECTING_MODES or bool(_get_spec_val(spec, 'script_id'))
         uncertain = effect_outcome == 'unknown' or (
-            effect_started and has_effect_executor and effect_outcome != 'not_started')
+            effect_started and has_effect_executor and effect_outcome not in _REPLAYABLE_EFFECT_OUTCOMES)
         if uncertain:
             step.escalation_result['retry_suppressed_reason'] = 'UNCERTAIN_EFFECT_REPLAY_FORBIDDEN'
             step.escalation_result['retry_recovery_action'] = 'reconcile_original_effect'

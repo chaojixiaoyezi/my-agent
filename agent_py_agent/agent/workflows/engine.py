@@ -1695,6 +1695,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.escalation_result.update(effect_started=False, effect_outcome='not_started')
         elif result.ok:
             record.escalation_result.update(effect_started=True, effect_outcome='confirmed')
+        elif outcome == 'failed':
+            record.escalation_result.update(effect_started=True, effect_outcome='failed')
         else:
             record.escalation_result['effect_outcome'] = 'unknown'
         record.escalation_result['script_execution'] = {
@@ -1744,6 +1746,11 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.status, record.needs_repair = 'skipped', False
             return
         if policy != 'escalate_to_agent':
+            return
+        from .step_retry import retry_will_replay
+
+        if retry_will_replay(spec, record):
+            # D-11：确定失败且声明的重试策略还会重放时先交重试循环，耗尽后再按 on_error 升级。
             return
         record.status = 'paused_for_resume'
         if self.escalation_handler is None:

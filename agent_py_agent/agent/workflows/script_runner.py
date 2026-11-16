@@ -1074,6 +1074,7 @@ class ScriptRunner:
                 write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, entrypoint.name),
                                           metadata['code'], file_mode=0o700)
             net_allowed = _network_access(metadata, network_access)
+            capture['network_access'] = net_allowed
             denied_ports = gateway_bound_ports()
             context = self._work_context(folder)
             target = current_run_out_target(self.owner_home) if self.run_out_quota is not None else None
@@ -1271,7 +1272,10 @@ class ScriptRunner:
                                        bool(error), redact_sensitive_value(context) if error else {})
         result.phase = capture['phase'] if error else 'terminal'
         # 原进程退出只证明执行结束，不能证明写入、扣费或发命令未发生。
-        result.effect_outcome = 'unknown' if capture.get('started') and error else (
+        # D-11：未开网络、无数据源的沙箱本地脚本自行以非零码退出且进程组清理无误时，与 shell 命令非零退出同口径记确定失败。
+        local_failure = (error == 'SCRIPT_EXIT_NONZERO' and capture.get('network_access') is False and not sources
+                         and type(exit_code) is int and exit_code > 0 and not cleanup)
+        result.effect_outcome = ('failed' if local_failure else 'unknown') if capture.get('started') and error else (
             'confirmed' if not error else 'not_started')
         result.execution_definition_ref = capture.get('definition_ref', '')
         result.output_dir, result.output_artifacts = output_dir, output_artifacts
