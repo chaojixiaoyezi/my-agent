@@ -110,7 +110,8 @@ class OriginalRequestWriteSource:
                     or str(record.get("id") or request_path.stem) != request_id
                     or str(record.get("status") or "") != "processing"
                     or str(record.get("execution_attempt_id") or "") != attempt_id
-                    or not (record.get("cancel_requested") is True or turn_phase == "closing")
+                    or record.get("cancel_requested") is not True
+                    or turn_phase not in {"open", "closing"}
                     or gateway_terminal_exists(paths, f"{request_id}.json")
                 ):
                     return False

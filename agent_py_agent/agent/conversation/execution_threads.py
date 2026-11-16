@@ -57,7 +57,7 @@ def _verify_lifecycle_children(store, receiver, thread_id, root_task_id, request
         raise DataCorruptionError('SESSION_TASK_LIFECYCLE_SOURCE_MISSING')
     import json
 
-    from ..common.nofollow_fs import read_bytes_beneath
+    from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath
 
     home = Path(receiver.owner_home).absolute()
     for envelope in selected:
@@ -70,7 +70,15 @@ def _verify_lifecycle_children(store, receiver, thread_id, root_task_id, request
             raise DataCorruptionError('SESSION_TASK_LIFECYCLE_CHILD_MISSING')
         root = Path(child_link.task_path).absolute()
         def read_object(path):
-            raw = read_bytes_beneath(home, path.relative_to(home).parts, max_bytes=4 * 1024 * 1024 + 1)
+            try:
+                raw = read_bytes_beneath(
+                    home,
+                    path.relative_to(home).parts,
+                    max_bytes=4 * 1024 * 1024 + 1,
+                    snapshot_retries=2 if _supports_dir_fd() else 0,
+                )
+            except FileNotFoundError:
+                raw = None
             if raw is None or len(raw) > 4 * 1024 * 1024:
                 raise DataCorruptionError('SESSION_TASK_LIFECYCLE_CHILD_UNREADABLE')
             value = json.loads(raw)
@@ -106,7 +114,7 @@ def lifecycle_session_message_origin(store, thread_id, task_id, wake, *, reason)
     """普通后台消息续片按原handled wake及consumed guidance恢复，不借聊天user行或邻近任务。"""
     import json
 
-    from ..common.nofollow_fs import read_bytes_beneath
+    from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath
     from .models import SUBAGENT_LIFECYCLE_WAKE_REASONS
 
     if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS or not task_id or not isinstance(wake, dict):
@@ -123,7 +131,15 @@ def lifecycle_session_message_origin(store, thread_id, task_id, wake, *, reason)
     path = (store.storage.wake_handled_dir / f'{task_id}.json').absolute()
     if not path.is_relative_to(home):
         return None
-    raw = read_bytes_beneath(home, path.relative_to(home).parts, max_bytes=1024 * 1024)
+    try:
+        raw = read_bytes_beneath(
+            home,
+            path.relative_to(home).parts,
+            max_bytes=1024 * 1024,
+            snapshot_retries=2 if _supports_dir_fd() else 0,
+        )
+    except FileNotFoundError:
+        return None
     if raw is None:
         return None  # 其它类型根仍沿Goal/scheduler/真实对话各自的原合同。
     original = json.loads(raw)

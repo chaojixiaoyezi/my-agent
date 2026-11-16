@@ -28,7 +28,7 @@ from ....common.json_io import (
     read_json_object_report,
     write_private_json_file_atomic,
 )
-from ....common.nofollow_fs import read_bytes_beneath
+from ....common.nofollow_fs import _supports_dir_fd, read_bytes_beneath
 from ....common.opaque_id import validate_opaque_id
 from ....common.request_execution_ports import gateway_short_transaction
 from ....common.value_parsing import sequence_strings
@@ -190,8 +190,37 @@ def _list_runs_for_root_report(
     try:
         identity = service._run_index_identity()
         service.prepare_run_index()
-        selected_ids = service.run_index.request_ids((root_id,), "", None)
-        service._require_run_index_identity(identity)
+        deadline = time.monotonic() + 0.25
+        poll_budget = 25
+        retries_left = 3
+        while True:
+            try:
+                selected_ids = service.run_index.request_ids((root_id,), "", None)
+                service._require_run_index_identity(identity)
+                break
+            except SubagentRunIndexUnavailable as exc:
+                if (
+                    service.read_only
+                    or "pending canonical commits" not in str(exc)
+                    or retries_left <= 0
+                    or poll_budget <= 0
+                    or time.monotonic() >= deadline
+                ):
+                    raise
+                settled = False
+                while poll_budget > 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    poll_budget -= 1
+                    service._require_run_index_identity(identity)
+                    state = service.run_index.readiness()
+                    if not state.get("complete"):
+                        break
+                    if not state.get("pending"):
+                        settled = True
+                        break
+                if not settled:
+                    raise
+                retries_left -= 1
     except Exception as exc:
         report = runtime_error_report(exc, context="subagents.load_root_index")
         report["root_task_id"] = root_id
@@ -783,7 +812,16 @@ def _pending_canonical_task(service, record):
     canonical = canonical_state_path_from_payload(binding)
     if canonical is None:
         raise ValueError("pending canonical path unavailable")
-    content = read_bytes_beneath(canonical.parent, (canonical.name,), require_dir_fd=True)
+    retries = 2 if _supports_dir_fd() else 0
+    try:
+        content = read_bytes_beneath(
+            canonical.parent,
+            (canonical.name,),
+            require_dir_fd=True,
+            snapshot_retries=retries,
+        )
+    except FileNotFoundError:
+        content = None
     if content is None:
         if was_published != 0:
             raise FileNotFoundError("published pending canonical state unavailable")
