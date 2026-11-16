@@ -128,6 +128,22 @@ def test_main_package_pages_keep_original_task_pin_across_real_compact(tmp_path,
 
     def send(request):
         response = original_http(request)
+        if events and events[-1] == 3:
+            # 摘要调用需返回结构化交接摘要，避免回退为大于原工具片段的机械兜底而触发 COMPACT_NO_PROGRESS。
+            handoff = (
+                "[compact-live-handoff.v1]\n"
+                "current_progress: 已读取能力包 story-pages 第一页。\n"
+                "user_constraints: 保持原有任务范围，按分页延续读取。\n"
+                "completed: 已调用 skill_search 获取第一页并保存 continuation。\n"
+                "failures: none\n"
+                "unresolved: 继续调用 skill_search 读取下一页并整理结果。\n"
+                "next_step: 使用上一页返回的 continuation 参数继续读取下一段正文。"
+            )
+            if "system" in request.payload:
+                return {"content": [{"type": "text", "text": handoff}],
+                        "stop_reason": "end_turn", "usage": {"input_tokens": 101, "output_tokens": 5}}
+            return {"choices": [{"message": {"content": handoff}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 101, "completion_tokens": 5}}
         if events and events[-1] in {1, 4}:
             names = [row.get("name") or row.get("function", {}).get("name") for row in request.payload.get("tools", [])]
             if names != ["my_agent_capability_probe"]:
