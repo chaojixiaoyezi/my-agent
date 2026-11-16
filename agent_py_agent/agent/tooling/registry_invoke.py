@@ -844,7 +844,8 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
             ),
             result_envelope={"error_details": details},
             error_code="TOOL_RUNTIME_ERROR",
-            effect_outcome="" if handler_started else "not_started",
+            # 宿主接口错误自带结构化执行结局；明确未开始的拒绝不能被记成未知而停住整轮。
+            effect_outcome="not_started" if not handler_started or _host_error_not_started(exc) else "",
         )
     try:
         return apply_tool_execution_facts(
@@ -1086,3 +1087,11 @@ def _normalized_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
         if path not in resolved:
             resolved.append(path)
     return resolved
+
+
+# LLM: 只认宿主接口错误类型上的结构化 outcome 字段，不从异常文本推断；其他异常保持原未知口径。
+# 函数用途: 判断处理器抛出的宿主接口错误是否明确声明未开始执行。
+def _host_error_not_started(exc: BaseException) -> bool:
+    from ..plugin_host.errors import HostAPIError
+
+    return isinstance(exc, HostAPIError) and exc.outcome == "not_started"
