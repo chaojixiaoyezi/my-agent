@@ -594,8 +594,8 @@ def test_pending_canonical_commit_uses_existing_exact_repair(tmp_path):
     task = manager.create_run(goal="中断的索引提交")
     index = manager.persistence.run_index
     index.mark_pending(task.id, task=task)
-    with pytest.raises(managers.SubagentRunIndexUnavailable):
-        index.recovery_ids(limit=1)
+    # 一条未完成提交只让本页跳过它，不再让整个 owner 的恢复选择失败；精确修复仍由 prepare_run_index 完成。
+    assert index.recovery_ids(limit=1) == ([], "")
     assert [row.id for row in managers.select_recovery_runs(manager)] == [task.id]
     assert index.coverage()["pending"] == 0
 
