@@ -111,6 +111,10 @@ BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
         "Strict allowlist-validated query filter entry point (status/trigger_kind/since/until) "
         "keeps parameter count <= 6 while rejecting unknown filter keys."
     ),
+    "agent_py_agent/agent/observability/task_call_inspector.py:list_task_calls_report": (
+        "Report variant of list_task_calls with the same strict allowlist-validated filter keys "
+        "(status/trigger_kind/since/until); unknown keys still raise ValueError before any read."
+    ),
     "agent_py_agent/agent/observability/telemetry_ledger.py:query_tool_calls": (
         "Strict allowlist-validated telemetry query filter entry point "
         "keeps parameter count <= 6 while rejecting unknown filter keys."

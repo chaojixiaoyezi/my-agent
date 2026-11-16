@@ -401,7 +401,9 @@ class CandidateReadWindow(tuple):
         return value
 
 
-def _window_error(exc, **identity):
+def _window_error(exc, *, candidate_id=None, position=None, offset=None, reason=None):
+    identity = {key: value for key, value in (("candidate_id", candidate_id), ("position", position),
+                                              ("offset", offset), ("reason", reason)) if value is not None}
     return {"code": "CANDIDATE_ROW_UNREADABLE", "error_type": type(exc).__name__,
             "side_effects": "not_started", "next_action": "核对该候选原记录；本轮仅隔离，不补写或授权晋升", **identity}
 
