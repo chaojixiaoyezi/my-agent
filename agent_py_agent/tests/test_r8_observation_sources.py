@@ -517,6 +517,10 @@ def test_tool_page_rejects_actual_source_replacement_or_truncation(tmp_path, mut
     case.service.readers = default_observation_readers(tmp_path, case.owner, case.store, case.runtime)
     first = case.service.query('tool_calls.list', {'limit': 1}, actor=case.actor)
     assert first['next_cursor']
+    scope = case.service.scope_digest('tool_calls.list', {'limit': 1}, case.actor)
+    legacy = case.service.cursor(scope, {'revision': runtime_source_revision(case.runtime.db_path), 'after': 0})
+    with pytest.raises(BusinessError, match='CURSOR_EXPIRED'):
+        case.service.query('tool_calls.list', {'limit': 1, 'cursor': legacy}, actor=case.actor)
     path = case.runtime.db_path
     if mutation == 'replace':
         replacement = tmp_path / 'replacement.db'
