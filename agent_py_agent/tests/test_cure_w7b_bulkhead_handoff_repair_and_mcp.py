@@ -389,8 +389,11 @@ def test_terminate_process_tree_snapshot_retry() -> None:
          patch("agent_py_agent.agent.tooling.process_registry._same_process", return_value=True), \
          patch("agent_py_agent.agent.tooling.process_registry._birth_tokens_match", return_value=True), \
          patch("agent_py_agent.agent.tooling.process_registry._signal_process_snapshot", return_value=set()), \
-         patch("agent_py_agent.agent.tooling.process_registry._wait_process_snapshot_gone", return_value=True):
+         patch("agent_py_agent.agent.tooling.process_registry._wait_process_snapshot_gone", return_value=True), \
+         patch("agent_py_agent.agent.tooling.process_registry._process_instance_terminated", return_value=True):
 
         receipt = terminate_process_tree(1000, None, expected_birth_token="host:1000 1")
         assert receipt.confirmed is True
+        assert receipt.unresolved_pids == ()
+        assert receipt.tree_observation_complete is True
         assert len(calls) == 2  # Proves fresh-snapshot retry loop executed
