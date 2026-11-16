@@ -11,6 +11,7 @@ import tracemalloc
 
 import pytest
 
+from agent_py_agent.agent.common import cache_capacity
 from agent_py_agent.agent.common.json_io import jsonl_lines
 from agent_py_agent.agent.gateway_parts import progress_reader
 from agent_py_agent.agent.gateway_parts.http_handlers import _read_public_progress_events
@@ -21,9 +22,13 @@ from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fi
 @pytest.fixture(autouse=True)
 def _clear_progress_index_cache():
     # 索引是纯缓存：每个用例前后清空，避免跨用例互相影响（与产品"可重建"语义一致）。
-    progress_reader._INDEXES.clear()
+    cache_capacity.reset_for_tests()
+    with progress_reader._INDEX_LOCK:
+        progress_reader._INDEXES.clear()
     yield
-    progress_reader._INDEXES.clear()
+    with progress_reader._INDEX_LOCK:
+        progress_reader._INDEXES.clear()
+    cache_capacity.reset_for_tests()
 
 
 def _row(kind: str, **extra: object) -> bytes:
@@ -354,7 +359,7 @@ def test_empty_poll_peak_memory_is_kilobyte_scale(tmp_path) -> None:
             written += batch
 
     _, first_cursor = read_progress_lines(path, 0)
-    assert first_cursor == 200  # 单次窗口上限；complete_lines 已推进到文件末尾
+    assert first_cursor == 200  # 单次窗口上限；只先扫描前 200 行索引
 
     tracemalloc.start()
     lines, next_again = read_progress_lines(path, repeats)
@@ -397,7 +402,8 @@ def test_copytruncate_growth_rebuilds_previous_offsets(tmp_path):
 def test_boundary_recheck_is_bounded_and_idle_poll_reads_nothing(tmp_path, monkeypatch):
     path = tmp_path / "chunks.jsonl"
     path.write_bytes(_row("assistant_commentary", text="old") * 1000)
-    _, cursor = read_progress_lines(path, 0)
+    _, cursor = read_progress_lines(path, 1000)
+    assert cursor == 1000
     calls = []
     original = progress_reader._boundary_fingerprint
 

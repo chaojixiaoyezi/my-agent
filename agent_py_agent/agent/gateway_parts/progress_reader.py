@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
+from ..common import cache_capacity
+
 logger = logging.getLogger(__name__)
 
 # 缓存文件数上限：IM 并发轮询的会话量级是几十；超出按 LRU 淘汰最旧（索引可重建）。
@@ -44,6 +46,8 @@ class _FileIndex:
     complete_lines: int
     boundary_digest: bytes | None = None
     anchors: list[tuple[int, int]] = field(default_factory=lambda: [(0, 0)])
+    eof_reached: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 _INDEX_LOCK = threading.Lock()
@@ -193,19 +197,22 @@ def _line_text(line: bytes | bytearray | None, over_limit: int, line_no: int, wi
     return _decode_line(line)
 
 
-# LLM: 增量扫描从"已确认位置"读到 EOF：逐行找 LF、更新行数、按间隔记锚点；落在请求窗口内的
-#   新行顺带收集（一遍读完，追加场景不重读旧字节）。未写完的半行不推进（scanned_bytes 停在
-#   它前面），等补齐后再读——这样补齐的末行能被旧游标读到。
-# 函数用途: 从索引已扫描位置增量读到 EOF，返回窗口内收集的新行文本。
-def _scan_new_bytes(f: BinaryIO, index: _FileIndex, since: int, limit: int) -> list[str]:
+# LLM: 增量扫描从"已确认位置"向前扫描至窗口上限（since + limit）或 EOF：逐行找 LF、更新行数、按间隔记锚点；
+#   落在请求窗口内的新行顺带收集（一遍读完，追加场景不重读旧字节）。未写完的半行不推进
+#   （scanned_bytes 停在它前面），等补齐后再读；因窗口上限提前停下时只记录实际扫描字节前缀。
+# 函数用途: 从索引已扫描位置增量扫到窗口末尾或 EOF，返回 (新行列表, 是否到达 EOF)。
+def _scan_new_bytes(f: BinaryIO, index: _FileIndex, since: int, limit: int) -> tuple[list[str], bool]:
     f.seek(index.scanned_bytes)
     line_no = index.complete_lines
     scanned = index.scanned_bytes
     collected: list[str] = []
+    target = since + limit
     window = (since, limit)
-    while True:
+    reached_eof = False
+    while line_no < target:
         line, over_limit = _read_one_line(f)
         if line is None and not over_limit:
+            reached_eof = True
             break
         text = _line_text(line, over_limit, line_no, window)
         if text is not None:
@@ -215,7 +222,7 @@ def _scan_new_bytes(f: BinaryIO, index: _FileIndex, since: int, limit: int) -> l
         _maybe_add_anchor(index, line_no, scanned)
     index.complete_lines = line_no
     index.scanned_bytes = scanned
-    return collected
+    return collected, reached_eof
 
 
 # LLM: 此入口只维护进度文件的可重建位置索引，不授予读权；修改需同步替换、半行及游标回归。
@@ -247,22 +254,31 @@ def _collect_old_line(line: bytes | bytearray | None, over_limit: int, line_no: 
         _collect_decoded(line, out)
 
 
-# LLM: 身份不符（替换）或大小回退（截短）都丢弃旧索引重建——这是"同长度替换也能识别"的
-#   关键；同inode同大小但mtime/ctime变化也重建，覆盖截断重写后大小回到原值。LRU按访问顺序淘汰。
-# 函数用途: 取该路径当前可用的索引（校验身份、截短时重建、超出上限时淘汰最旧）。
+# 函数用途: 索引失效时就地重置状态，保持持有同一 index.lock 的并发调用方锁身份不变。
+def _reset_index(index: _FileIndex, st: os.stat_result) -> None:
+    index.identity = _identity(st)
+    index.observed_size = 0
+    index.observed_version = (st.st_mtime_ns, st.st_ctime_ns)
+    index.scanned_bytes = 0
+    index.complete_lines = 0
+    index.boundary_digest = None
+    index.anchors = [(0, 0)]
+    index.eof_reached = False
+
+
+# LLM: _INDEX_LOCK 仅保护 _INDEXES 字典查找/插入/LRU 淘汰，不跨文件 I/O，也不读取可被流锁改写的字段；
+#   身份/截短/版本校验全部在持有 index.lock 后就地判定，彻底消除无锁读写撕裂与锁序反转。
+# 函数用途: 获取或创建该路径的索引槽位（超出并发容量时按 LRU 淘汰最旧条目）。
 def _lookup_index(path: Path, st: os.stat_result) -> _FileIndex:
     key = str(path)
     index = _INDEXES.get(key)
-    if index is not None and not _matches(index, st):
-        index = None
-    if index is not None and (st.st_size < index.observed_size or (
-        st.st_size == index.observed_size
-        and (st.st_mtime_ns, st.st_ctime_ns) != index.observed_version
-    )):
-        index = None
     if index is None:
         index = _FileIndex(
-            identity=_identity(st), observed_size=0, observed_version=(st.st_mtime_ns, st.st_ctime_ns), scanned_bytes=0, complete_lines=0
+            identity=_identity(st),
+            observed_size=0,
+            observed_version=(st.st_mtime_ns, st.st_ctime_ns),
+            scanned_bytes=0,
+            complete_lines=0,
         )
         _INDEXES[key] = index
         _evict_indexes()
@@ -271,9 +287,10 @@ def _lookup_index(path: Path, st: os.stat_result) -> _FileIndex:
 
 
 # LLM: 此入口只维护进度文件的可重建位置索引，不授予读权；修改需同步替换、半行及游标回归。
-# 函数用途: 超出缓存上限时淘汰最旧的索引（纯缓存，淘汰只影响下次重建成本）。
+# 函数用途: 超出全局在途并发容量（最低保持 _MAX_INDEXED_FILES）时淘汰最旧索引。
 def _evict_indexes() -> None:
-    while len(_INDEXES) > _MAX_INDEXED_FILES:
+    capacity = cache_capacity.global_inflight(_MAX_INDEXED_FILES)
+    while len(_INDEXES) > capacity:
         _INDEXES.popitem(last=False)
 
 
@@ -308,39 +325,63 @@ def _boundary_fingerprint(handle: BinaryIO, end: int) -> bytes:
     return hashlib.sha256(head + tail).digest()
 
 
-# 函数用途: 文件没变化时跳过增量扫描（返回空）；有变化时增量扫描新字节并记下新大小。
+# 函数用途: 确认底层文件是否已被替换、截短、同长重写或边界改写，是则需重置索引。
+def _index_invalidated(f: BinaryIO, index: _FileIndex, st: os.stat_result) -> bool:
+    if not _matches(index, st):
+        return True
+    if st.st_size < index.observed_size or st.st_size < index.scanned_bytes:
+        return True
+    if st.st_size == index.observed_size and (st.st_mtime_ns, st.st_ctime_ns) != index.observed_version:
+        return True
+    return (
+        st.st_size > index.observed_size
+        and index.boundary_digest is not None
+        and _boundary_fingerprint(f, index.scanned_bytes) != index.boundary_digest
+    )
+
+
+# 函数用途: 文件确已扫描至当前末尾或已覆盖目标窗口时跳过扫描；否则增量扫新字节并只记录实际前缀大小。
 def _scan_if_changed(
     f: BinaryIO, index: _FileIndex, st: os.stat_result, window: tuple[int, int]
 ) -> list[str]:
-    if st.st_size == index.observed_size:
+    if st.st_size == index.observed_size and (index.eof_reached or index.scanned_bytes == st.st_size):
         return []
     since, limit = window
-    new_lines = _scan_new_bytes(f, index, since, limit)
-    index.observed_size = st.st_size
+    if index.complete_lines >= since + limit:
+        return []
+    new_lines, reached_eof = _scan_new_bytes(f, index, since, limit)
+    index.eof_reached = reached_eof
+    index.observed_size = st.st_size if reached_eof else index.scanned_bytes
     index.observed_version = (st.st_mtime_ns, st.st_ctime_ns)
-    index.boundary_digest = _boundary_fingerprint(f, index.scanned_bytes)
+    index.boundary_digest = _boundary_fingerprint(f, index.scanned_bytes) if index.scanned_bytes else None
     return new_lines
 
 
-# LLM: 此入口只维护进度文件的可重建位置索引，不授予读权；修改需同步替换、半行及游标回归。
-# 函数用途: 锁内完成一次读取（快路径 → 旧区 → 增量扫描），返回 (行文本 tuple, next 行号)。
+# LLM: _INDEX_LOCK 仅用于查表；每条流的边界核验与文件扫描一律在 index.lock 内串行，绝不借用
+#   json_io.path_thread_lock（写入侧在追加时持有该锁），保证不同流读写互不阻塞。
+# 函数用途: 流锁内完成一次读取（快路径 → 旧区 → 增量扫描），返回 (行文本 tuple, next 行号)。
 def _read_with_index(
     f: BinaryIO, path: Path, st: os.stat_result, window: tuple[int, int]
 ) -> tuple[tuple[str, ...], int]:
     since, limit = window
     with _INDEX_LOCK:
+        index = _lookup_index(path, st)
+    with index.lock:
         try:
-            index = _lookup_index(path, st)
-            if (st.st_size > index.observed_size and index.boundary_digest is not None
-                    and _boundary_fingerprint(f, index.scanned_bytes) != index.boundary_digest):
-                _INDEXES.pop(str(path), None)
-                index = _lookup_index(path, st)
-            if st.st_size == index.observed_size and since >= index.complete_lines:
+            if _index_invalidated(f, index, st):
+                _reset_index(index, st)
+            if (
+                st.st_size == index.observed_size
+                and (index.eof_reached or index.scanned_bytes == st.st_size)
+                and since >= index.complete_lines
+            ):
                 return (), min(index.complete_lines, since + limit)
             old_lines = _read_old_range(f, index, since, limit)
             new_lines = _scan_if_changed(f, index, st, window)
         except OSError:
-            _INDEXES.pop(str(path), None)
+            with _INDEX_LOCK:
+                if _INDEXES.get(str(path)) is index:
+                    _INDEXES.pop(str(path), None)
             return (), since
         return tuple(old_lines + new_lines), min(index.complete_lines, since + limit)
 
