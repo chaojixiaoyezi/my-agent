@@ -1154,3 +1154,20 @@ def test_malformed_pending_ids_are_isolated_without_fabricated_cancellation(tmp_
     repository.record_cancel_cleanup('srun_unknown', confirmed=True)
     assert json.loads(repository.store_path.read_text())['jobs'][job['job_id']] == bad
     assert 'SCHEDULER_JOB_INVALID field=jobs' in caplog.text
+
+
+@pytest.mark.parametrize('invalid', [None, 7, [], 'srun_text'])
+def test_non_object_run_entry_does_not_block_healthy_job_deletion(tmp_path, invalid):
+    repository = _repository(tmp_path)
+    claim = _claimed_due_run(repository)
+    repository.mark_run_running(str(claim['run_id']), str(claim['claim_id']), now=1_002)
+    store = json.loads(repository.store_path.read_text())
+    store['runs']['srun_corrupt'] = invalid
+    repository.store_path.write_text(json.dumps(store))
+    deleted = repository.delete_job(str(claim['job_id']), expected_version=None)
+    assert deleted['status'] == 'deleted'
+    # 正在执行的健康 run 照常记录取消意图；坏条目既不授权取消，也不被改写。
+    assert deleted['cancel_pending_run_ids'] == [claim['run_id']]
+    assert repository.get_active_run(str(claim['run_id']))['cancel_reason'] == 'job_deleted'
+    assert json.loads(repository.store_path.read_text())['runs']['srun_corrupt'] == invalid
+    assert [run['run_id'] for run in repository.pending_cancellation_runs()] == [claim['run_id']]

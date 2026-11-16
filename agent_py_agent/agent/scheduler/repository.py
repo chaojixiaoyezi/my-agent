@@ -554,9 +554,11 @@ class _SchedulerJobOperations:
                 run, _error = self._parse_run(raw)
                 if run is not None and run['job_id'] == job_id and run['status'] in {'running', 'waiting'}:
                     store['runs'][run_id] = {**run, 'cancel_requested_at': current, 'cancel_reason': 'job_deleted'}
+            # 非对象的坏 run 条目原样保留，不阻断健康计划的删除与取消意图记录。
             deleted['cancel_pending_run_ids'] = list(dict.fromkeys([*(job.get('cancel_pending_run_ids') or []),
                 *(row['run_id'] for row in cancelled),
-                *(key for key, row in store['runs'].items() if row.get('job_id') == job_id and row.get('cancel_requested_at'))]))
+                *(key for key, row in store['runs'].items()
+                  if isinstance(row, dict) and row.get('job_id') == job_id and row.get('cancel_requested_at'))]))
             self._write_store_unlocked(store, admission, history_records=cancelled, source_changed_job_ids=(job_id,))
         return deepcopy(deleted)
 
