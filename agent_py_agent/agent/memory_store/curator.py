@@ -770,11 +770,13 @@ class _CuratorLifecycleMixin:
             )
         daily_due = _daily_finalize_due(state, current, live_cfg.daily_finalize_hour)
         # 原两种工作每拍只领一项；日终失败也让下一拍的待办获得机会，不抢当前前台学习。
+        # 任何待办都与日终轮流领拍，持续到来的待办不能把当天收尾挤出时间窗；日终同样守失败退避，退避中的那一拍不占轮次。
         if (daily_due and not foreground_model_active(self.backend)
-                and (not pending or (pending == "pre_compact"
-                                     and getattr(self, "_last_due_work", "") != "daily_finalize"))):
-            self._last_due_work = "daily_finalize"
-            return finish(self.run(reason="daily_finalize", now=current))
+                and (not pending or getattr(self, "_last_due_work", "") != "daily_finalize")):
+            result = self._run_pending_when_due(state, "daily_finalize", current, effective_config=live_cfg)
+            if result.status != "not_due":
+                self._last_due_work = "daily_finalize"
+            return finish(result)
         if pending:
             self._last_due_work = pending
             return finish(self._run_pending_when_due(
@@ -1130,7 +1132,12 @@ class _CuratorExecutionMixin:
         preflight_warnings = (*preflight_warnings, *exclusion_warnings)
         batch = self._execution_batch(context, precollected_batch, excluded_ids)
         if batch.load_errors:
-            raise CuratorInputError(_load_error_code(batch.load_errors), load_errors=batch.load_errors)
+            isolated = _isolate_breaker_load_errors(self.run_log, context, batch)
+            if isolated is None:
+                raise CuratorInputError(_load_error_code(batch.load_errors), load_errors=batch.load_errors)
+            batch, isolation_warning = isolated
+            preflight_warnings = (*preflight_warnings, isolation_warning)
+            context.route["failure_warnings"] = (*context.route.get("failure_warnings", ()), isolation_warning)
         context.route["failure_warnings"] = (*context.route.get("failure_warnings", ()), *_message_read_warnings(batch))
         if not batch.messages and not batch.audit_events:
             if batch.message_scan_partial and not _has_committable_input(batch):
@@ -2328,6 +2335,36 @@ def _quarantine_breaker_floor(batch: CuratorInputBatch) -> tuple[CuratorInputBat
     _LOGGER.warning("memory curator quarantined the breaker floor input: %s", warning)
     return replace(batch, messages=(), audit_events=(), skipped_message_cursors=skipped,
                    skipped_audit_cursor=event[0].event_id if event else batch.skipped_audit_cursor), warning
+
+
+# 审计类输入（审计账、审计会话核对、工具引用）读取错误的上下文前缀；其余增量输入读取错误都归消息类。
+_AUDIT_LOAD_ERROR_CONTEXTS = ("memory_curator.audit", "memory_curator.tool_reference")
+
+
+# LLM: 输入读取失败熔断后原样重放只会每小时同样失败一次、挡住全部新输入。熔断已开、且读取错误只落在审计类或只落在
+#   消息类时，本轮只去掉坏的那一类：它的游标不动、原文不跳过，下轮照常重读；健康的那类照常提炼提交。上一轮刚以同一
+#   警告隔离成功时继续隔离，不必再失败三次、等熔断一小时。两类都坏时没有可推进的部分，仍按原输入失败处理。
+# 函数用途: 判断本轮能否隔离坏的那一类输入，返回隔离后的批次与运行账警告；不能隔离时返回 None。
+def _isolate_breaker_load_errors(run_log: CuratorRunLog, context: _RunContext,
+                                 batch: CuratorInputBatch) -> tuple[CuratorInputBatch, str] | None:
+    audit_errors = sum(str(item.get("context") or "").startswith(_AUDIT_LOAD_ERROR_CONTEXTS) for item in batch.load_errors)
+    if 0 < audit_errors < len(batch.load_errors):
+        return None
+    family = "audit" if audit_errors else "messages"
+    warning = f"curator_replay_breaker_isolated:{family}:{_load_error_code(batch.load_errors)}"[:RUN_WARNING_MAX_CHARS]
+    breaker_open = context.state_before.last_failure_code == CURATOR_REPLAY_BREAKER_OPEN
+    if not breaker_open:
+        try:
+            previous = run_log.recent_finished(1)
+        except Exception:
+            return None
+        if not previous or previous[0].status != "succeeded" or warning not in previous[0].warnings:
+            return None
+    _LOGGER.log(logging.WARNING if breaker_open else logging.DEBUG,
+                "memory curator kept unreadable %s input at its cursor and continued with the rest: %s", family, warning)
+    if family == "audit":
+        return replace(batch, audit_events=(), skipped_audit_cursor="", load_errors=()), warning
+    return replace(batch, messages=(), skipped_message_cursors={}, load_errors=()), warning
 
 
 # LLM: 空批次与正常批次共用提交对象和租约释放；被拒目标绑定独立于学习候选，不获得正式晋升资格。
