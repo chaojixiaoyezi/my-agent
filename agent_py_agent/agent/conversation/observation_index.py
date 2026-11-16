@@ -14,7 +14,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-from ..common.cache_freshness import CACHE_TRUST_AGE_SECONDS
+from ..common.cache_freshness import CACHE_TRUST_AGE_SECONDS, cache_entry_trustworthy
 from ..common.json_io import check_io_deadline, locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
@@ -30,6 +30,8 @@ _INSTALLED_LOCK = threading.Lock()
 _ACK_READ_BYTES = 65536
 # 单次目录增量扫描最多发现的观察文件条目数
 _DISCOVER_ENTRIES_COUNT = 1024
+# 每个索引实例最多记住的空结果查询范围数，超出时淘汰最早记住的
+_QUIET_SCOPE_CACHE_MAX_ENTRIES_COUNT = 512
 
 
 def _directory_stamp(path):
@@ -64,6 +66,16 @@ def _close_failed_factory(conn, error):
 
 def _stat_identity(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+# LLM: 缺失来源（None）之后出生必然改变签名；存在的文件身份/目录代次须 mtime 已离开粗粒度窗口，
+#   空结果才可在单片信任期之外继续命中，同片原子替换仍由窗口挡住。
+# 函数用途: 判断一组来源签名是否都已稳定到可长期信任。
+def _quiet_sources_settled(signature):
+    for item in signature:
+        if item is not None and not cache_entry_trustworthy(item[3] if len(item) == 5 else item[2]):
+            return False
+    return True
 
 
 # LLM: 所有来源拒绝链接及特殊文件，missing 仅代表真实不存在。
@@ -232,7 +244,12 @@ class ObservationIndex:
     def _read_connection(self, *, blocking=True, deadline=None):
         """已安装且 WAL 设施齐备时只读；返回 None 由调用方在退出后进入原写路径。"""
         check_io_deadline(deadline)
-        identity = _identity(self.path)
+        try:
+            identity = _identity(self.path)
+        except ObservationIndexError:
+            # 投影库正经历同目录硬链接出生的瞬时双链接；只读快路让给持锁写路径按原规则核验。
+            yield None
+            return
         key = (str(self.path), *identity[:2]) if identity else None
         with _INSTALLED_LOCK:
             installed = key in _INSTALLED
@@ -298,23 +315,54 @@ class ObservationIndex:
     # LLM: 同一回合轮流询问多个 scope（插话的 thread/request/agent_run/task 目标、观察的不同 wake）；单槽空结果
     #   会被下一个 scope 顶掉，每次询问都重开 SQLite 写事务。按 scope 各留一份，来源签名与可信窗口规则不变；
     #   投影库只比 dev/inode：任一 scope 的空刷新都会改库的 ctime/mtime，重建换 inode 仍失效，内容变化由来源签名覆盖。
-    #   只整份替换、从不原地改，出窗口即丢，规模随近期 scope 数有界。
+    #   只整份替换、从不原地改；来源已稳定的条目按签名长期有效，未稳定的出窗口即丢，总数按最早记住淘汰有界。
     def _quiet_hit(self, scope, signature):
         current = self._quiet
         quiet = current.get(scope) if isinstance(current, dict) else None
-        return bool(quiet and quiet[0] == (signature, (_identity(self.path) or ())[:2])
-                    and 0 <= time.monotonic() - quiet[2] < CACHE_TRUST_AGE_SECONDS
-                    and time.time() < quiet[1])
+        if not quiet or signature is None or time.time() >= quiet[1]:
+            return False
+        try:
+            database = (_identity(self.path) or ())[:2]
+        except ObservationIndexError:
+            return False
+        return quiet[0] == (signature, database) and (
+            quiet[3] or 0 <= time.monotonic() - quiet[2] < CACHE_TRUST_AGE_SECONDS)
+
+    # LLM: 无锁快路遇来源瞬时双链接（同目录硬链接出生窗口）只放弃快路，由持锁路径照原规则核验并报错。
+    # 函数用途: 计算本次查询的来源签名并判断是否命中已记住的空结果。
+    def _quiet_lookup(self, scope):
+        try:
+            signature = self._quiet_signature(scope)
+        except ObservationIndexError:
+            return None, False
+        return signature, self._quiet_hit(scope, signature)
 
     def _remember_quiet(self, scope, before, earliest_due):
         # 不能把查询结束后新到的来源签名配给旧的空结果。
-        after = self._quiet_signature(scope)
+        try:
+            after, database = self._quiet_signature(scope), (_identity(self.path) or ())[:2]
+        except ObservationIndexError:
+            after = database = None
         now, current = time.monotonic(), self._quiet
         quiet = {key: value for key, value in current.items()
-                 if key != scope and 0 <= now - value[2] < CACHE_TRUST_AGE_SECONDS} if isinstance(current, dict) else {}
-        if before == after:
-            quiet[scope] = ((after, (_identity(self.path) or ())[:2]), earliest_due, now)
+                 if key != scope and (value[3] or 0 <= now - value[2] < CACHE_TRUST_AGE_SECONDS)} if isinstance(current, dict) else {}
+        if before is not None and before == after:
+            while len(quiet) >= _QUIET_SCOPE_CACHE_MAX_ENTRIES_COUNT:
+                del quiet[next(iter(quiet))]
+            quiet[scope] = ((after, database), earliest_due, now, self._quiet_settled(after))
         self._quiet = quiet
+
+    # LLM: 观察签名只含目录代次，已有线程账本的追加不改签名，空结果只能在单片信任期内命中；子类签名覆盖追加时可覆写。
+    # 函数用途: 判断一次空结果能否超出单片信任期继续命中。
+    def _quiet_settled(self, signature):
+        return False
+
+    # LLM: 某一 scope 查到待处理项只说明该 scope 不再安静；其他 scope 的条目仍由各自签名把关。
+    # 函数用途: 只撤下一个 scope 的空结果记录。
+    def _forget_quiet(self, scope):
+        current = self._quiet
+        if isinstance(current, dict) and scope in current:
+            self._quiet = {key: value for key, value in current.items() if key != scope}
 
     # LLM: 标量元数据不复制整个历史。
     # 函数用途: 精确读取一个持久游标。
@@ -703,8 +751,8 @@ class ObservationIndex:
     def pending(self, limit, *, wake=None, thread_id=None):
         work = {"bytes_read": 0, "bytes_written": 0, "json_decodes": 0}
         scope = (limit, wake, thread_id)
-        signature = self._quiet_signature(scope)
-        if self._quiet_hit(scope, signature):
+        signature, quiet = self._quiet_lookup(scope)
+        if quiet:
             self.last_work = {**work, "candidate_rows": 0}
             return []
         result, complete = [], False
@@ -750,5 +798,5 @@ class ObservationIndex:
         if not result:
             self._remember_quiet(scope, signature, min((row["due"] for row in rows), default=math.inf))
         else:
-            self._quiet = None
+            self._forget_quiet(scope)
         return result

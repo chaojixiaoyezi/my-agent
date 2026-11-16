@@ -20,9 +20,10 @@ def test_alternating_guidance_targets_stay_quiet_inside_trust_window(tmp_path, m
         for target_type, target_id in _TARGETS:
             assert index.rows(target_type, target_id, 20, False) == ([], [])
     assert calls == []
+    # 来源未变且已稳定（此处均不存在）：空结果按签名继续有效，越过单片窗口也不再取锁（W3）。
     clock["monotonic"] += CACHE_TRUST_AGE_SECONDS
     assert index.rows("thread", "t1", 20, False) == ([], [])
-    assert calls
+    assert calls == []
 
 
 def test_new_guidance_for_one_target_is_visible_while_others_stay_quiet(tmp_path, monkeypatch):

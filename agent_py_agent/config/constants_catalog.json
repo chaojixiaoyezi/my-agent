@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1510,
+  "count": 1511,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4674,6 +4674,14 @@
       "unit": "个",
       "category": "其它",
       "description": "单次目录增量扫描最多发现的观察文件条目数"
+    },
+    {
+      "name": "_QUIET_SCOPE_CACHE_MAX_ENTRIES_COUNT",
+      "file": "agent_py_agent/agent/conversation/observation_index.py",
+      "value": 512,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每个索引实例最多记住的空结果查询范围数，超出时淘汰最早记住的"
     },
     {
       "name": "_PROCESS_COMPLETION_PRUNE_INTERVAL_SECONDS",

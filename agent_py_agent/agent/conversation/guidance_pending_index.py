@@ -30,6 +30,7 @@ from .observation_index import (
     _directory_stamp,
     _identity,
     _legacy_slice,
+    _quiet_sources_settled,
     _reader,
 )
 from .store_guidance_records import _guidance_queue_entry_matches_receipt
@@ -437,8 +438,8 @@ class GuidancePendingIndex(ObservationIndex):
     # 函数用途: 返回有界队列定位与累计坏行报告。
     def rows(self, target_type, target_id, limit, include_delivered):
         scope = (target_type, target_id, limit, include_delivered)
-        signature = self._quiet_signature(scope)
-        if self._quiet_hit(scope, signature):
+        signature, quiet = self._quiet_lookup(scope)
+        if quiet:
             self.last_work = {'bytes_read': 0, 'bytes_written': 0, 'json_decodes': 0}
             return [], []
 
@@ -479,7 +480,7 @@ class GuidancePendingIndex(ObservationIndex):
                             if not read_rows and not errors:
                                 self._remember_quiet(scope, signature, math.inf)
                             else:
-                                self._quiet = None
+                                self._forget_quiet(scope)
                             return list(reversed(read_rows)), errors
             except Exception:
                 pass
@@ -505,7 +506,7 @@ class GuidancePendingIndex(ObservationIndex):
             # 插话没有延迟 due 状态；任何新队列、退休事实或脏标记都会改变签名。
             self._remember_quiet(scope, signature, math.inf)
         else:
-            self._quiet = None
+            self._forget_quiet(scope)
         return list(reversed(rows)), errors
 
     def has_pending(self, target_type=None, target_id=None) -> bool:
@@ -571,6 +572,11 @@ class GuidancePendingIndex(ObservationIndex):
         return (_identity(self.journal_path), _identity(self.storage.guidance_delivered_path),
                 _identity(self.storage.guidance_path(target_type, target_id)),
                 _directory_stamp(self.dirty_dir))
+
+    # LLM: 插话签名含目标队列文件身份、送达日志与脏标记，任何追加、退休或脏标记都会改签名；来源都已稳定时空结果按签名长期有效。
+    # 函数用途: 允许来源已离开粗粒度窗口的空插话结果超出单片信任期继续命中。
+    def _quiet_settled(self, signature):
+        return _quiet_sources_settled(signature)
 
     # LLM: 兼容显式全列表读口，不得在pending/recent或回执热路径调用。
     # 函数用途: 返回已经完整恢复的全部送达事实。
