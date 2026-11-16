@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-
-from ..common.json_io import read_jsonl_objects_report
+from collections.abc import Iterable, Mapping
 
 
 # LLM: 启动复用旧来源迁移与原 scheduler 恢复，不代结 RuntimeDB attempt，也不把来源缺证据猜成当前 actor。
@@ -58,23 +57,77 @@ def recovery_candidates(store: dict, current: float) -> bool:
 
 
 # LLM: 仅采纳同 owner/run/job/thread/claim epoch 的合法终态，防止 history 已提交而 store rename 失败后改写真实结果。
+#   单遍前向流式扫描并仅在精确匹配时覆盖，保持 O(K) 内存且选中最新一条精确匹配终态而非最新原始行。
+# 函数用途: 流式读取一次历史文件，批量提取待结算运行已落盘的最新精确匹配终态回执。
+def existing_terminals(
+    repository,
+    runs: Mapping[str, dict] | Iterable[dict],
+) -> dict[str, dict]:
+    from .repository import _history_membership_fallback
+
+    run_items = runs.values() if isinstance(runs, Mapping) else runs
+    by_id: dict[str, dict] = {}
+    for run in run_items:
+        run_id = run.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            by_id[run_id] = run
+    if not by_id:
+        return {}
+    terminals: dict[str, dict] = {}
+
+    def accept(raw: dict) -> bool:
+        run_id = str(raw.get("run_id") or "")
+        run = by_id.get(run_id)
+        if run is None:
+            return False
+        terminal, _error = repository._parse_run(raw, terminal=True)
+        if (
+            terminal is not None
+            and terminal.get("claim_epoch", 0) == run.get("claim_epoch", 0)
+            and all(
+                terminal.get(key) == run.get(key)
+                for key in ("owner", "run_id", "job_id", "thread_id")
+            )
+        ):
+            terminals[run_id] = terminal
+            return True
+        return False
+
+    _history_membership_fallback(
+        repository.history_path,
+        frozenset(by_id),
+        allow_missing=True,
+        accept=accept,
+    )
+    return terminals
+
+
+# LLM: 保留单条查询兼容入口，直接复用批量流式扫描以保持同等身份核验与有界内存语义。
 # 函数用途: 读取本次恢复候选已落下的历史回执，保留已确认的 done/failed 等终态。
 def existing_terminal(repository, run: dict) -> dict | None:
-    report = read_jsonl_objects_report(repository.history_path, context="scheduler.recovery.history")
-    for raw in reversed(report.records):
-        terminal, _error = repository._parse_run(raw, terminal=True)
-        if (terminal is not None and terminal.get("claim_epoch", 0) == run.get("claim_epoch", 0)
-                and all(terminal.get(key) == run.get(key) for key in ("owner", "run_id", "job_id", "thread_id"))):
-            return terminal
-    return None
+    run_id = run.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    return existing_terminals(repository, (run,)).get(run_id)
 
 
 # LLM: 终态共用 repository 的原落账入口；保存死亡原因和原 claim 引用，不伪造业务成功或额外对外回复。
 # 函数用途: 将已死的 running 或旧 unknown 记录写入历史并从活动账本移出。
-def settle_dead_run(repository, store: dict, run: dict, *, current: float) -> dict:
+def settle_dead_run(
+    repository,
+    store: dict,
+    run: dict,
+    *,
+    current: float,
+    terminal_by_run: Mapping[str, dict] | None = None,
+) -> dict:
     from .repository import SchedulerRunFinish, _terminal_run_payload
 
-    terminal = existing_terminal(repository, run)
+    terminal = (
+        existing_terminal(repository, run)
+        if terminal_by_run is None
+        else terminal_by_run.get(str(run.get("run_id") or ""))
+    )
     if terminal is None:
         ended = float(run.get("ended_at") or current)
         legacy = run["status"] == "unknown"
@@ -108,11 +161,28 @@ def recover_runs(repository, *, current: float, job_id: str = '', expected_versi
                 terminal, _error = repository._parse_run(raw, terminal=True)
                 if terminal is not None:
                     changes[identifier] = terminal
+        dead_originals = {
+            identifier: dict(store["runs"][identifier])
+            for identifier, resolved in changes.items()
+            if resolved["status"] == "unknown"
+        }
+        terminal_by_run = (
+            existing_terminals(repository, dead_originals.values())
+            if dead_originals
+            else {}
+        )
         history = []
         for identifier, resolved in changes.items():
-            original = dict(store["runs"][identifier])
             if resolved["status"] == "unknown":
-                history.append(settle_dead_run(repository, store, original, current=current))
+                history.append(
+                    settle_dead_run(
+                        repository,
+                        store,
+                        dead_originals[identifier],
+                        current=current,
+                        terminal_by_run=terminal_by_run,
+                    )
+                )
             else:
                 store["runs"][identifier] = resolved
             recovered.append(identifier)

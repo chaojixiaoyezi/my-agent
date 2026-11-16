@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
+import agent_py_agent.agent.scheduler.recovery as recovery_module
+import agent_py_agent.agent.scheduler.repository as repository_module
 from agent_py_agent.agent.scheduler.repository import (
     SchedulerConflictError,
     SchedulerJobCreateRequest,
@@ -206,3 +209,236 @@ def test_normal_heartbeat_does_not_query_history(tmp_path, monkeypatch):
 
     monkeypatch.setattr(repository, "_history_membership_unlocked", forbidden)
     assert repository.heartbeat_run(run_id, str(claim["claim_id"]), lease_seconds=30, now=1005)
+
+
+# 函数用途: 构造一条带死亡租约信息的 running 快照，便于测试恢复与身份筛选反例。
+def _mark_running_dead(repository: SchedulerRepository, run_id: str, backup: bytes) -> dict:
+    store = json.loads(backup)
+    run = store["runs"][run_id]
+    run["claim_expires_at"] = 1_005.0
+    run["runner_pid"] = 919191
+    run["runner_start_time"] = "7"
+    repository.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return dict(run)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_response"),
+    [
+        ("later_wrong_epoch", "correct"),
+        ("later_wrong_thread", "correct"),
+        ("later_wrong_job", "correct"),
+        ("later_nonterminal", "correct"),
+        ("later_corrupt_and_invalid", "correct"),
+        ("latest_matching_terminal", "newer"),
+        ("only_wrong_epoch", None),
+        ("only_wrong_thread", None),
+        ("only_wrong_job", None),
+        ("only_nonterminal", None),
+        ("absent", None),
+    ],
+)
+def test_batch_and_single_terminal_selection_match_six_identity_counterexamples(
+    tmp_path, monkeypatch, scenario: str, expected_response: str | None
+) -> None:
+    """流式前向匹配必须与单条筛选完全一致：选中最新精确匹配终态，不被尾部不兼容/非终态/坏行遮蔽。"""
+    repository, _job_id, run_id, backup = _finished_backup(tmp_path, "running")
+    terminal = json.loads(repository.history_path.read_bytes())
+    terminal["response"] = "correct"
+    run = _mark_running_dead(repository, run_id, backup)
+
+    if scenario == "later_wrong_epoch":
+        lines = [
+            json.dumps(terminal),
+            json.dumps({**terminal, "claim_epoch": terminal["claim_epoch"] + 1, "response": "wrong"}),
+        ]
+    elif scenario == "later_wrong_thread":
+        lines = [
+            json.dumps(terminal),
+            json.dumps({**terminal, "thread_id": "thread-other", "response": "wrong"}),
+        ]
+    elif scenario == "later_wrong_job":
+        lines = [
+            json.dumps(terminal),
+            json.dumps({**terminal, "job_id": "job_other", "response": "wrong"}),
+        ]
+    elif scenario == "later_nonterminal":
+        lines = [
+            json.dumps(terminal),
+            json.dumps({**terminal, "status": "running", "response": "wrong"}),
+        ]
+    elif scenario == "later_corrupt_and_invalid":
+        lines = [
+            json.dumps(terminal),
+            "{broken-json",
+            '["not-an-object"]',
+            json.dumps({"run_id": run_id, "status": "done", "response": "wrong"}),
+            json.dumps({**terminal, "owner": {**terminal["owner"], "id": "foreign"}, "response": "wrong"}),
+        ]
+    elif scenario == "latest_matching_terminal":
+        lines = [
+            json.dumps({**terminal, "response": "older"}),
+            json.dumps({**terminal, "response": "newer"}),
+        ]
+    elif scenario == "only_wrong_epoch":
+        lines = [json.dumps({**terminal, "claim_epoch": terminal["claim_epoch"] + 1, "response": "wrong"})]
+    elif scenario == "only_wrong_thread":
+        lines = [json.dumps({**terminal, "thread_id": "thread-other", "response": "wrong"})]
+    elif scenario == "only_wrong_job":
+        lines = [json.dumps({**terminal, "job_id": "job_other", "response": "wrong"})]
+    elif scenario == "only_nonterminal":
+        lines = [json.dumps({**terminal, "status": "running", "response": "wrong"})]
+    else:
+        lines = [json.dumps({**terminal, "run_id": "srun_other", "response": "other"})]
+
+    repository.history_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    single = recovery_module.existing_terminal(repository, run)
+    batch = recovery_module.existing_terminals(repository, {run_id: run}).get(run_id)
+    assert single == batch
+    if expected_response is None:
+        assert single is None
+    else:
+        assert single is not None and single["response"] == expected_response
+
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
+    recovered = recovery_module.recover_runs(repository, current=1_006.0)
+    assert recovered == [run_id]
+    assert repository.get_active_run(run_id) is None
+
+    if expected_response is None:
+        job = repository.get_job(_job_id)
+        assert job["last_run_status"] == "unknown"
+        assert job["last_error_code"] == "SCHEDULER_RUNNER_DIED"
+        persisted = [
+            json.loads(line)
+            for line in repository.history_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("{broken")
+        ]
+        unknown_rows = [
+            row for row in persisted if row.get("run_id") == run_id and row.get("status") == "unknown"
+        ]
+        if scenario == "absent":
+            assert len(unknown_rows) == 1
+            assert unknown_rows[0]["error_code"] == "SCHEDULER_RUNNER_DIED"
+        else:
+            # 历史文件已有同 run_id 干扰行时，保留原 _new_history_rows_unlocked 按 run_id 去重语义
+            assert len(repository.history_path.read_text(encoding="utf-8").splitlines()) == len(lines)
+    else:
+        assert repository.get_job(_job_id)["last_run_status"] == "done"
+        # 不得在已有精确匹配终态时重复追加一条记录
+        assert len(repository.history_path.read_text(encoding="utf-8").splitlines()) == len(lines)
+
+
+@pytest.mark.parametrize("fault", ["unreadable_utf8", "replaced_during_scan"])
+def test_batch_recovery_aborts_before_settlement_on_unreadable_or_replaced_history(
+    tmp_path, monkeypatch, fault: str
+) -> None:
+    """流式扫描期间历史不可读或被替换，必须在任何结算写盘前中止并保留活跃记录。"""
+    repository, _job_id, run_id, backup = _finished_backup(tmp_path, "running")
+    terminal = json.loads(repository.history_path.read_bytes())
+    _mark_running_dead(repository, run_id, backup)
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
+
+    if fault == "unreadable_utf8":
+        with repository.history_path.open("ab") as handle:
+            handle.write(b"\xff\n")
+    else:
+        staged = repository.history_path.with_name("replacement.jsonl")
+        staged.write_text(json.dumps({**terminal, "response": "replaced"}) + "\n", encoding="utf-8")
+        original_parse = repository._parse_run
+        replaced = False
+
+        def _replace_during_scan(raw, *, terminal: bool = False):
+            nonlocal replaced
+            if terminal and not replaced:
+                replaced = True
+                staged.replace(repository.history_path)
+            return original_parse(raw, terminal=terminal)
+
+        monkeypatch.setattr(repository, "_parse_run", _replace_during_scan)
+
+    store_before = repository.store_path.read_bytes()
+    history_before = repository.history_path.read_bytes()
+
+    with pytest.raises(SchedulerStateError) as caught:
+        recovery_module.recover_runs(repository, current=1_006.0)
+    assert caught.value.error_code == "SCHEDULER_HISTORY_READ_FAILED"
+    assert repository.store_path.read_bytes() == store_before
+    if fault == "unreadable_utf8":
+        assert repository.history_path.read_bytes() == history_before
+    assert repository.get_active_run(run_id) is not None
+
+
+def test_partial_index_recovery_preserves_persisted_terminal_and_settles_absent_as_unknown(
+    tmp_path, monkeypatch
+) -> None:
+    """历史索引处于 partial 状态时，不能把未回填区间当成 absent 误写 unknown。"""
+    repository = _repository(tmp_path / "partial" / "data" / "scheduler")
+    for idx in range(2):
+        repository.create_job(
+            SchedulerJobCreateRequest(
+                name=f"job-{idx}",
+                prompt="run",
+                thread_id=f"th-{idx}",
+                source_request_id=f"req-{idx}",
+                schedule={"kind": "every", "every_seconds": 60, "anchor_at": 1000, "timezone": "UTC"},
+                misfire_grace_seconds=600,
+                now=900,
+            )
+        )
+    due = repository.reserve_due_runs(now=1_000.0)
+    assert len(due) == 2
+    runs: list[dict] = []
+    for row in due:
+        claim = repository.claim_run(str(row["run_id"]), lease_seconds=10, now=1_001.0)
+        assert claim is not None
+        repository.mark_run_running(str(row["run_id"]), str(claim["claim_id"]), now=1_002.0)
+        runs.append(repository.get_active_run(str(row["run_id"])))
+
+    backup = repository.store_path.read_bytes()
+    # 先真写入第一条完成历史并保持第二条未完成，再恢复旧 store 且制造 partial 索引状态
+    repository.finish_run(
+        str(runs[0]["run_id"]),
+        str(runs[0]["claim_id"]),
+        SchedulerRunFinish(status="done", response="already-committed", now=1_003.0),
+    )
+    persisted_row = json.loads(repository.history_path.read_text(encoding="utf-8").splitlines()[0])
+    # 写入若干前置填充行 + 尾部的 persisted_row，并将索引置为 partial（只索引前 1 行）
+    pad_row = {**persisted_row, "run_id": "srun_partial_pad"}
+    repository.history_path.write_text(
+        json.dumps(pad_row, sort_keys=True)
+        + "\n"
+        + json.dumps(persisted_row, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    with closing(repository._history_index._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        state = repository._history_index._state(conn)
+        state["cursor"] = 1  # 人为滞后于文件总字节，模拟 partial 索引
+        state["complete"] = False
+        repository._history_index._save(conn, state)
+    assert repository._history_index.membership({str(runs[0]["run_id"])}) == (frozenset(), False)
+
+    store = json.loads(backup)
+    for run in runs:
+        store["runs"][str(run["run_id"])]["claim_expires_at"] = 999.0
+        store["runs"][str(run["run_id"])]["runner_pid"] = 71
+        store["runs"][str(run["run_id"])]["runner_start_time"] = "7"
+    repository.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
+
+    recovered = recovery_module.recover_runs(repository, current=1_006.0)
+    assert sorted(recovered) == sorted([str(runs[0]["run_id"]), str(runs[1]["run_id"])])
+    assert repository.get_job(str(runs[0]["job_id"]))["last_run_status"] == "done"
+    assert repository.get_job(str(runs[1]["job_id"]))["last_run_status"] == "unknown"
+    rows = [json.loads(line) for line in repository.history_path.read_text(encoding="utf-8").splitlines()]
+    by_id = [row for row in rows if row["run_id"] == str(runs[0]["run_id"])]
+    assert len(by_id) == 1 and by_id[0]["status"] == "done"
