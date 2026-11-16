@@ -361,7 +361,9 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
     "BACKGROUND_AGENT_LIMIT_REACHED": ErrorContract(
         code="BACKGROUND_AGENT_LIMIT_REACHED", category="resource", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
-        recovery_hint="后台代理数量达到原策略上限；核对真实在运行任务及额度，不转前台、换owner或停止无关任务绕过限制。",
+        recovery_hint=("后台代理身份数达到原策略上限，未退役的空闲或暂停身份也占名额；同空间工作先用background_agents.list找available助手，"
+                       "以tasks.assign交给它；确需新身份时，对已不再需要的助手执行background_agents.retire(disposition=drain，不取消在途任务)释放名额，"
+                       "退役其它会话创建的助手前先征得用户确认。不转前台、换owner或停止无关任务绕过限制。"),
     ),
     **{code: ErrorContract(
         code=code, category="contract", retryable=False,
