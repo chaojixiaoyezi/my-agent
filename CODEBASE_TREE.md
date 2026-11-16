@@ -1516,6 +1516,7 @@ agent_py_agent/tests/
 |-- test_schedule_admin_cross_entry.py          # 自己的工作跨前台入口管理
 |-- test_schedule_authority_receipts.py         # 调度权限与副作用的准确回执
 |-- test_uwave_w16_storage_wiring.py            # 配置、共享预算与坏记录隔离接线
+|-- test_w16_telemetry_projection_c_maintenance.py # 原 C 维护推进无删除审计投影与追加续扫
 |-- test_uwave_w17_fast_restart.py              # 显式快重启与安全模型交接
 |-- test_uwave_restart_config.py                # 公开默认、非法预算与旧零值语义
 |-- test_uwave_w18_retention_pins.py            # 引用证明有界推进及代次变化
