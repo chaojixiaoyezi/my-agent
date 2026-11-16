@@ -93,11 +93,35 @@ class TaskCallRecord:
     mounted_assets: dict = field(default_factory=dict)
     artifacts: list = field(default_factory=list)
     goal: str = ""
+    status_source: str = "unconfirmed"
+    trigger_kind_source: str = "unconfirmed"
 
     # LLM: 返回深复制，避免调用者在锁外改变持久记录。
     # 函数用途: 输出带 schema 的字典。
     def to_dict(self):
         return {"schema": SCHEMA, **asdict(self)}
+
+
+def _public_task_metadata(row):
+    """遥测默认头不是生命周期证明；没有显式来源时公开未知，绝不推导规范终态。"""
+    if row is None:
+        return None
+    value = dict(row)
+    value['status_source'] = row.get('status_source', 'legacy_record' if row.get('status') in STATUSES - {'running'} else 'unconfirmed')
+    value['trigger_kind_source'] = row.get('trigger_kind_source', 'legacy_record' if row.get('trigger_kind') in {'monitor', 'workflow', 'plugin_api'} else 'unconfirmed')
+    if value['status_source'] not in {'explicit_record', 'legacy_record', 'tool_calls'}:
+        value['status'] = None
+        value['status_source'] = 'unconfirmed'
+    if value['trigger_kind_source'] not in {'explicit_record', 'legacy_record'}:
+        value['trigger_kind'] = None
+        value['trigger_kind_source'] = 'unconfirmed'
+    fields = [key for key in ('status', 'trigger_kind') if value.get(key + '_source') == 'unconfirmed']
+    if fields:
+        value['lifecycle_notice'] = dict(
+            code='TASK_TELEMETRY_LIFECYCLE_UNCONFIRMED', fields=fields,
+            reason='这些字段是遥测头，未提供规范生命周期或触发来源证据；null 不表示工具执行失败。',
+            next_action='取得对应原始 Gateway 请求的准确 request_id 后，调用 audit_records(topic="message_lifecycle", request_id="<准确请求ID>")；只有模型 attempt 标识时保持未确认，禁止重跑任务猜状态。')
+    return value
 
 
 # LLM: 分页走真实账本接口，不把任务文件缺失解释为无调用；不设置历史截断上限。
@@ -212,6 +236,13 @@ class TaskCallInspector:
             raise ValueError("invalid task record")
         if self._owner_id and row["owner_id"] != self._owner_id:
             raise ValueError("owner mismatch")
+        if (not isinstance(row.get('status'), str) or row['status'] not in STATUSES
+                or not isinstance(row.get('trigger_kind'), str)
+                or row['trigger_kind'] not in {'interactive', 'monitor', 'workflow', 'plugin_api'}):
+            raise ValueError('invalid task status or trigger field')
+        for key in ('status_source', 'trigger_kind_source'):
+            if key in row and not isinstance(row[key], str):
+                raise ValueError('invalid task metadata source field: ' + key)
         return hydrate_task_rounds(self._home, row) if include_rounds else row
 
     # LLM: 无目录返回空；列表后文件消失只过滤None，损坏/越权仍沿原异常，不把索引遗漏解释为没有任务。
@@ -265,12 +296,21 @@ class TaskCallInspector:
         rounds_state = data.pop("_rounds", None)
         if data.pop("schema", SCHEMA) != SCHEMA:
             raise ValueError("unsupported schema")
+        # 旧非默认值只能来自显式记录；后续只追加轮次不能抹掉这份来源事实。
+        for key, known in (('status', STATUSES - {'running'}),
+                           ('trigger_kind', {'monitor', 'workflow', 'plugin_api'})):
+            if key + '_source' not in data:
+                data[key + '_source'] = 'legacy_record' if isinstance(data.get(key), str) and data[key] in known else 'unconfirmed'
         item = TaskCallRecord(**data)
         _path(item.task_id)
         if self._owner_id and item.owner_id not in ("", self._owner_id):
             raise ValueError("owner mismatch")
         item.owner_id = item.owner_id or self._owner_id
-        if item.status not in STATUSES or item.trigger_kind not in {"interactive", "monitor", "workflow", "plugin_api"}:
+        if (not isinstance(item.status_source, str) or item.status_source not in {'unconfirmed', 'explicit_record', 'legacy_record'}
+                or not isinstance(item.trigger_kind_source, str) or item.trigger_kind_source not in {'unconfirmed', 'explicit_record', 'legacy_record'}):
+            raise ValueError('invalid task metadata source')
+        if (not isinstance(item.status, str) or item.status not in STATUSES
+                or not isinstance(item.trigger_kind, str) or item.trigger_kind not in {"interactive", "monitor", "workflow", "plugin_api"}):
             raise ValueError("invalid task status or trigger")
         _number(item.started_at)
         _number(item.duration_ms)
@@ -301,6 +341,11 @@ class TaskCallInspector:
         payload = record.to_dict() if isinstance(record, TaskCallRecord) else dict(record)
         payload.pop("_rounds", None)
         payload.pop("rounds_coverage", None)
+        payload.pop("lifecycle_notice", None)
+        if 'status' in payload:
+            payload['status_source'] = 'explicit_record'
+        if 'trigger_kind' in payload:
+            payload['trigger_kind_source'] = 'explicit_record'
         _path(payload.get("task_id"))
         with _lock(self._home):
             existing = self._read(payload["task_id"]) or {}
@@ -338,7 +383,7 @@ class TaskCallInspector:
             row = self._read(task_id)
             if row is None:
                 raise KeyError(task_id)
-            row.update(status=status, ended_at=time.time() if ended_at is None else ended_at)
+            row.update(status=status, status_source="explicit_record", ended_at=time.time() if ended_at is None else ended_at)
             return self._save(row)
 
     def get_task_call_page(self, task_id: str, *, limit: int = 20, cursor: str = '') -> dict:
@@ -350,7 +395,7 @@ class TaskCallInspector:
             return dict(task=None, rows=[], rounds=[], next_cursor=None, total_count=None,
                         coverage=dict(status='unavailable', reason='task_metadata_missing'))
         page = read_task_rounds_page(self._home, task_id, limit=limit, cursor=cursor)
-        return {**page, 'task': redact_sensitive_value(row), 'rounds': page['rows']}
+        return {**page, 'task': redact_sensitive_value(_public_task_metadata(row)), 'rounds': page['rows']}
 
     # LLM: 合并当前任务快照和全部账本任务，排序过滤后分页；不把自动发现的摘要落盘。
     # 函数用途: 分页查询任务记录。
@@ -374,7 +419,8 @@ class TaskCallInspector:
                     groups.setdefault(call['task_id'], []).append(call)
         except OwnerReadUnavailable as error:
             tool_coverage = dict(status=error.coverage.get('status'), reason=error.coverage.get('reason'))
-        rows = [_merge_task(records.get(key), groups.get(key, [])) for key in records.keys() | groups.keys()]
+        rows = [_public_task_metadata(_merge_task(records.get(key), groups.get(key, [])))
+                for key in records.keys() | groups.keys()]
         rows.sort(key=lambda r: (r['started_at'], r['task_id']))
         partial_rounds = sum(1 for row in rows if row.get('rounds_coverage', {}).get('status', 'complete') != 'complete')
         partial = diagnostics['skipped_tasks'] > 0 or partial_rounds > 0 or tool_coverage is not None
@@ -398,8 +444,8 @@ class TaskCallInspector:
         except ValueError:
             if not calls:
                 raise
-            return _merge_task(None, calls)
-        return _merge_task(self._read(task_id, include_rounds=True), calls)
+            return _public_task_metadata(_merge_task(None, calls))
+        return _public_task_metadata(_merge_task(self._read(task_id, include_rounds=True), calls))
 
 
 # LLM: 已有节点非空事实优先，轮次仅补空字段，不把模型调用终态冒充整个运行结束。

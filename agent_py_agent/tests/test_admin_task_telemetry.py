@@ -184,7 +184,8 @@ def test_plugin_task_partial_envelope_real_http_roundtrip(tmp_path):
     from agent_py_agent.tests.test_plugin_host_api import _Ref
 
     task = TaskCallInspector(tmp_path, owner_id='local/main')
-    task.upsert_task_call(dict(task_id='healthy', started_at=1))
+    task.append_round('healthy', dict(round_id='finished-call', status='finished', started_at=1),
+                      create_if_missing=True, include_rounds=False)
     bad = tmp_path / 'data/telemetry/task_calls/bad.json'
     bad.write_bytes(b'{"secret":"do-not-echo",')
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / 'gateway'),
@@ -205,6 +206,10 @@ def test_plugin_task_partial_envelope_real_http_roundtrip(tmp_path):
         assert response.status == 200 and envelope['ok'] is True
         assert isinstance(envelope['data'], list)
         assert [row['task_id'] for row in envelope['data']] == ['healthy']
+        assert envelope['data'][0]['status'] is None
+        assert envelope['data'][0]['trigger_kind'] is None
+        assert envelope['data'][0]['status_source'] == 'unconfirmed'
+        assert 'message_lifecycle' in envelope['data'][0]['lifecycle_notice']['next_action']
         assert envelope['coverage']['status'] == 'partial'
         assert envelope['coverage']['skipped_tasks'] == 1
         assert envelope['diagnostics'][0]['code'] == 'TASK_TELEMETRY_RECORD_UNREADABLE'
@@ -213,3 +218,102 @@ def test_plugin_task_partial_envelope_real_http_roundtrip(tmp_path):
         if connection is not None:
             connection.close()
         server.stop()
+
+
+def test_real_child_runparams_propagate_host_lineage_to_model_and_tool(tmp_path):
+    from agent_py_agent.agent.agent_core.model import call_runtime
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.agent_core.subagent.run_flow import (
+        SubagentModelIteration,
+        _subagent_model_run_params,
+    )
+    from agent_py_agent.agent.observability.telemetry_ledger import ToolTelemetryLedger
+    from agent_py_agent.agent.subagents.context_bundle_refs import runtime_task_attributes
+    from agent_py_agent.agent.subagents.models import SubAgentExecutionContext, SubAgentTask
+    from agent_py_agent.agent.verification.repository import VerificationContext
+    from agent_py_agent.agent.verification.runtime import _record_tool_telemetry
+    from agent_py_agent.tests.test_telemetry_ledger_and_inspector import (
+        _end_model_call,
+        _model_request,
+    )
+    from agent_py_agent.tests.test_verification_runtime import _call, _success
+
+    task = SubAgentTask(id='child-run', goal='核实回执', thought='', plan=[], parent_id='parent-run', root_id='root-run',
+        attributes={'run_id': 'inherited-parent', 'parent_run_id': 'wrong-parent', 'root_run_id': 'wrong-root',
+                    'conversation_thread_id': 'parent-thread'})
+    attrs = runtime_task_attributes(task)
+    context = SubAgentExecutionContext(run_id=task.id, generated_at=1, goal=task.goal, thought='', plan=[],
+                                      parent_id=task.parent_id, root_id=task.root_id)
+    params = _subagent_model_run_params(context=context, prompt='核实回执', attempt_id='exact-child-attempt',
+        task_attributes=attrs, iteration=SubagentModelIteration(SimpleNamespace(injection='', history_seed=[], compact_context=None),
+            [], [], None, []))
+    assert isinstance(params, RunParams)
+    assert (params.request_id, params.run_id, params.task_id) == ('exact-child-attempt', 'child-run', 'root-run')
+    request, _ = _model_request(tmp_path)
+    request.params = params
+    request.agent._current_run_params = params
+    ledger, call_id, _ = call_runtime.start_model_call_record(request,
+        context_snapshot=SimpleNamespace(current_tokens=1, to_public_dict=lambda: {}))
+    _end_model_call(ledger, call_id, 'finished')
+    call = _call('read_file', {'path': 'material.txt'})
+    _record_tool_telemetry(request.agent, VerificationContext('one', 'parent-thread', 'root-run'),
+                          call, _success(call, '已读取', {}))
+    detail = TaskCallInspector(tmp_path, owner_id='one').get_task_call_detail('root-run')
+    model_row = detail['rounds'][0]
+    tool_row = ToolTelemetryLedger(tmp_path, owner_id='one').get_tool_call(call.call_id)
+    for row in (model_row, tool_row):
+        assert (row['run_id'], row['parent_run_id'], row['root_run_id']) == ('child-run', 'parent-run', 'root-run')
+    assert model_row['request_id'] == 'exact-child-attempt'
+    # finished 只说明这次模型调用结束，不能签发 TaskRun closed。
+    assert detail['status'] is None and detail['status_source'] == 'unconfirmed'
+
+
+def test_public_unconfirmed_header_and_explicit_records_do_not_read_runtime_db(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.runtime_db import repository
+
+    def forbid(*args, **kwargs):
+        raise AssertionError('public telemetry must not add per-row canonical DB reads')
+    monkeypatch.setattr(repository, 'RuntimeRepository', forbid)
+    task = TaskCallInspector(tmp_path, owner_id='one')
+    task.append_round('auto', dict(round_id='round', status='finished', started_at=1),
+                      create_if_missing=True, include_rounds=False)
+    raw_path = tmp_path / 'data/telemetry/task_calls/auto.json'
+    raw = json.loads(raw_path.read_text())
+    # 模拟上线前旧遥测头：没有新可选来源字段。
+    raw.pop('status_source')
+    raw.pop('trigger_kind_source')
+    raw_path.write_text(json.dumps(raw))
+    before = raw_path.read_bytes()
+    detail = task.get_task_call_detail('auto')
+    assert detail['status'] is None and detail['trigger_kind'] is None
+    assert detail['lifecycle_notice']['code'] == 'TASK_TELEMETRY_LIFECYCLE_UNCONFIRMED'
+    assert 'message_lifecycle' in detail['lifecycle_notice']['next_action']
+    assert '禁止重跑' in detail['lifecycle_notice']['next_action']
+    assert raw_path.read_bytes() == before
+    task.upsert_task_call(dict(task_id='explicit', started_at=2, status='running', trigger_kind='workflow'))
+    report = task.list_task_calls_report(limit=1, cursor=1)
+    assert report['rows'][0]['task_id'] == 'explicit'
+    assert report['rows'][0]['status'] == 'running'
+    assert report['rows'][0]['trigger_kind'] == 'workflow'
+    assert report['rows'][0]['status_source'] == 'explicit_record'
+    assert task.list_task_calls(status='running')[0]['task_id'] == 'explicit'
+    task.complete_task_call('auto', 'succeeded', ended_at=3)
+    assert task.get_task_call_detail('auto')['status'] == 'succeeded'
+    old = json.loads(raw_path.read_text())
+    old.pop('status_source')
+    old.pop('trigger_kind_source')
+    raw_path.write_text(json.dumps(old))
+    assert task.get_task_call_detail('auto')['status'] == 'succeeded'
+    assert task.get_task_call_detail('auto')['status_source'] == 'legacy_record'
+    task.append_round('auto', dict(round_id='late-call', status='finished'), include_rounds=False)
+    assert task.get_task_call_detail('auto')['status'] == 'succeeded'
+    assert task.get_task_call_detail('auto')['status_source'] == 'legacy_record'
+
+    # 新可选来源字段损坏仍只隔离该项，不把健康列表重新变成全页异常。
+    bad = {**old, 'task_id': 'bad-source', 'status_source': []}
+    (raw_path.parent / 'bad-source.json').write_text(json.dumps(bad))
+    report = task.list_task_calls_report()
+    assert report['coverage']['skipped_tasks'] == 1
+    assert {row['task_id'] for row in report['rows']} == {'auto', 'explicit'}

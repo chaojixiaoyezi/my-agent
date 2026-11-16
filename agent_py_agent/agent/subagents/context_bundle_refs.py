@@ -73,6 +73,10 @@ def runtime_task_attributes(task: SubAgentTask) -> dict[str, object]:
     # 子代理运行期的来源 = 自己的 subagent 投影：trigger 沿 spawn 链继承（自动化禁止来源向后代
     # 传播），run/task 关联累积；父级缺失或坏值时保持原样，由消费侧按不可学处理，不在这里猜来源。
     run_id = str(getattr(task, "id", "") or "").strip()
+    # 当前身份只取已加载的宿主任务，覆盖继承属性中的父级同名字段。
+    result.update(run_id=run_id,
+                  parent_run_id=str(getattr(task, 'parent_id', '') or '').strip(),
+                  root_run_id=str(getattr(task, 'root_id', '') or '').strip() or run_id)
     child_source = child_projection_from_parent(
         result.get("learning_source"),
         run_id=run_id,
