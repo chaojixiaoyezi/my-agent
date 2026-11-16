@@ -272,7 +272,7 @@ def test_deployment_path_only_changes_volatile_context(tmp_path, monkeypatch):
         home_paths=SimpleNamespace(owner_provider="local", owner_kind="main", owner_id="main"),
     )
     request = PromptBuildRequest("继续", [], tools=ToolSections(native_tool_use=True, tool_catalog_section="# Tools\n固定工具说明"),
-                                 workspace_context_override="固定测试工作区")
+                                 workspace_context_override="固定测试工作区", clock_context_override="")
     prepared, layouts = [], []
     roots = [tmp_path / "runtime-step-a-111" / "agent_py_agent", tmp_path / "runtime-step-b-222" / "agent_py_agent"]
     for root in roots:
@@ -357,7 +357,7 @@ registry = ToolRegistry(ToolRegistryParams(workspace_root=workspace, max_chars=1
 builder = PromptBuilder(AgentConfig(access_mode='full-access', self_dev_worktree=str(workspace)), workspace,
     home_paths=SimpleNamespace(owner_provider='local', owner_kind='main', owner_id='main'))
 request = PromptBuildRequest('继续', [], tools=ToolSections(native_tool_use=True, tool_catalog_section=registry.render_catalog_section()),
-    workspace_context_override='固定工作区')
+    workspace_context_override='固定工作区', clock_context_override='')
 prepared = builder.prepare_render_input(request)
 layout = prompt_cache_layout(render_prepared_prompt(prepared))
 package_root = str(_builtin_prompt_root())

@@ -38,9 +38,16 @@ from agent_py_agent.tests.test_tool_presentation_projection import (
 # LLM: 配置/目录/账本全部用原实现和临时文件；仅供应商回答由fixture替换，不调用收费服务。
 # 函数用途: 将真实Skill快照和ToolRegistry接到原设置宿主，便于检验实际输入减量。
 @pytest.fixture
-def surface(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F811
+def surface(tmp_path, tool_surface, skill_catalog_factory, monkeypatch):  # noqa: F811
     registry, _, first, second, _legacy = tool_surface
     catalog, builder = setup_surface(tmp_path, skill_catalog_factory)
+    # W5 将秒级时钟拆入独立 snapshot_clock_context；单测内冻结时钟避免跨秒边界产生假差异。
+    frozen_clock = builder.snapshot_clock_context()
+    monkeypatch.setattr(
+        builder,
+        "snapshot_clock_context",
+        lambda *, facts_only=False: "" if facts_only else frozen_clock,
+    )
     host = host_at(tmp_path / "owner")
     profile, _ = decision(host)
     thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
