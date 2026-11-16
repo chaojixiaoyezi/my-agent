@@ -18,6 +18,7 @@ from ..common.json_io import (
     seal_private_jsonl_tail_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir, open_readonly_file_beneath
+from ..io.sqlite_scope import ensure_private_sqlite_birth
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +95,7 @@ class SchedulerHistoryIndex:
     # 函数用途: 用构造器原有流程创建私有SQLite文件及全部表索引。
     def _install(self):
         ensure_private_dir(self.source.parent)
-        try:
-            descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            os.close(descriptor)
+        ensure_private_sqlite_birth(self.path)
         with closing(self._connect()) as conn, conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("CREATE TABLE IF NOT EXISTS history_state (key TEXT PRIMARY KEY, payload TEXT NOT NULL)")

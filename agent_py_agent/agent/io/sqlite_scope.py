@@ -27,6 +27,41 @@ from ..runtime_db.recovery_guard import (
 from .sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from .sqlite_lease import SQLiteConnectionLease
 
+
+def ensure_private_sqlite_birth(path: Path) -> bool:
+    """只在未发表名字上开关出生FD；发表后的主库永不裸open/close。"""
+    import tempfile
+
+    path = Path(path)
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(existing.st_mode):
+            raise ValueError("SQLITE_BIRTH_INVALID_EXISTING_FILE: require regular database; not_started")
+        return False
+    descriptor, birth_name = tempfile.mkstemp(prefix=f".{path.name}.birth-", dir=path.parent)
+    birth = Path(birth_name)
+    try:
+        # 此时规范路径尚未引用这个inode，任何已打开的SQLite连接都不可能持它的锁。
+        os.close(descriptor)
+        try:
+            os.link(birth, path, follow_symlinks=False)
+        except FileExistsError:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("SQLITE_BIRTH_INVALID_RACING_FILE: require regular database; not_started") from None
+            return False
+        except PermissionError as exc:
+            raise PermissionError(
+                "SQLITE_BIRTH_PUBLICATION_DENIED: database not_started; allow same-directory hard-link "
+                "publication before retry; direct O_EXCL creation is unsafe with concurrent SQLite connections"
+            ) from exc
+        return True
+    finally:
+        birth.unlink(missing_ok=True)
+
+
 # 一个 WAL 库约三个句柄；每作用域八条仅限制闲置缓存，不是进程上限，也不限制在用的嵌套短连接。
 _SQLITE_SCOPE_MAX_CONNECTIONS_COUNT = 8
 

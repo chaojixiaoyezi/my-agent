@@ -24,7 +24,11 @@ from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_connection import sqlite_error_details
 from ..io.sqlite_probe import require_plain_sqlite_files, sqlite_readonly_probe_uri
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
-from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
+from ..io.sqlite_scope import (
+    ensure_private_sqlite_birth,
+    scoped_connection,
+    sqlite_connection_factory,
+)
 from .diagnostics import LocalStoreConnectionTimingStack, local_store_stage
 from .events import rotate_event_jsonl_if_due_unlocked
 
@@ -258,28 +262,9 @@ def _private_sqlite_files(path, *, create=False):
             os.chmod(target, 0o600)
 
 
-# LLM: 调用方持出生锁且主路径尚不存在；优先 link，权限拒绝时仅以 O_EXCL|O_NOFOLLOW 创建，竞争路径交回 lstat 核验，临时名总删除。
-# 函数用途: 以 0600 原子发表一个空主库文件，让 SQLite 随后派生的 WAL/SHM 继承私有权限。
+# 函数用途: 沿共用未发表出生协议创建主库，禁用公开O_EXCL后close的权限降级分支。
 def _create_private_sqlite_file(path):
-    # Born 0600 under an unpublished name; the closed fd belongs to an inode no connection can see yet.
-    birth = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.birth")
-    fd = os.open(birth, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    os.close(fd)
-    try:
-        os.link(birth, path)
-    except FileExistsError:
-        pass
-    except PermissionError:
-        # Seatbelt 可禁止 file-link，但仍允许独占创建；不打开其它进程刚发表的文件或链接。
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            direct_fd = os.open(path, flags, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            os.close(direct_fd)
-    finally:
-        os.unlink(birth)
+    ensure_private_sqlite_birth(path)
 
 
 _LOCAL_MIGRATION_SQL = ("ALTER TABLE agent_runs RENAME TO legacy_agent_runs",)

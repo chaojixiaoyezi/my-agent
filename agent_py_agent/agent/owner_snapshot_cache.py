@@ -10,7 +10,11 @@ from dataclasses import asdict
 from pathlib import Path
 from uuid import uuid4
 
-from .io.sqlite_scope import scoped_connection, sqlite_connection_factory
+from .io.sqlite_scope import (
+    ensure_private_sqlite_birth,
+    scoped_connection,
+    sqlite_connection_factory,
+)
 from .owner_snapshot_index import OwnerStatIndex, StatEntry
 
 
@@ -27,8 +31,7 @@ class OwnerSnapshotIndex(OwnerStatIndex):
             try:
                 info = path.lstat()
             except FileNotFoundError:
-                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                os.close(descriptor)
+                ensure_private_sqlite_birth(path)
             else:
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     raise OSError('owner snapshot index must be regular single-link')
