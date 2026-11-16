@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import sys
 import threading
 import time
+import types
+import weakref
 from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -15,6 +18,7 @@ from typing import Any
 
 from ..concurrency.interrupt import wait_interruptibly
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
+from . import gateway_helpers
 from .base import BackendOptions, BaseBackend, ProviderRequestOptions, _utc_now_iso
 from .errors import (
     ProviderConfigurationError,
@@ -58,9 +62,102 @@ def reset_unaccounted_probe_attempt_count() -> None:
 
 # 进程内有界原生工具能力缓存：仅保存经真实探针验证通过（native_supported=True）的结果，
 # 使 OwnerAgent 空闲释放或同配置重建后端后无需重复发探针；采用小写私有变量名避免触发静态常量表。
-_capability_probe_entries: OrderedDict[tuple[str, str, str, bool, str], ProviderToolCapability] = OrderedDict()
+_capability_probe_entries: OrderedDict[tuple[object, ...], ProviderToolCapability] = OrderedDict()
 _capability_probe_lock = threading.Lock()
 _capability_probe_generation = 0
+_capability_probe_transport_lock = threading.RLock()
+_capability_probe_transport_tokens: dict[int, tuple[weakref.ref[Any], int]] = {}
+_capability_probe_transport_seq = 0
+
+
+def _evict_transport_token(obj_id: int, token: int) -> None:
+    with _capability_probe_transport_lock:
+        current = _capability_probe_transport_tokens.get(obj_id)
+        if current is not None and current[1] == token:
+            _capability_probe_transport_tokens.pop(obj_id, None)
+
+
+def _single_object_identity_token_locked(obj: object) -> int | tuple[int, int]:
+    global _capability_probe_transport_seq
+    if obj is None:
+        return 0
+    obj_id = id(obj)
+    entry = _capability_probe_transport_tokens.get(obj_id)
+    if entry is not None:
+        ref, token = entry
+        if ref() is obj:
+            return token
+    _capability_probe_transport_seq += 1
+    token = _capability_probe_transport_seq
+    try:
+        ref = weakref.ref(
+            obj,
+            lambda _dead_ref, oid=obj_id, tok=token: _evict_transport_token(oid, tok),
+        )
+    except TypeError:
+        return (0, obj_id)
+    _capability_probe_transport_tokens[obj_id] = (ref, token)
+    return token
+
+
+def _capability_probe_transport_identity(backend: object) -> tuple[object, ...]:
+    """Return monotonic identity tokens for active transport callables and class/instance overrides."""
+    backend_cls = type(backend)
+    backend_dict = getattr(backend, "__dict__", None)
+    urllib_mod = getattr(getattr(gateway_helpers, "urllib", None), "request", None)
+    keepalive_mod = getattr(gateway_helpers, "keepalive_transport", None)
+    is_oauth_responses = any(cls.__name__ == "OAuthResponsesBackend" for cls in backend_cls.__mro__)
+    ws_mod = (
+        sys.modules.get("agent_py_agent.agent.backends.responses_websocket")
+        if is_oauth_responses
+        else None
+    )
+    seams: list[object] = [
+        post_json,
+        post_stream,
+        post_stream_iter,
+        getattr(gateway_helpers, "post_json", None),
+        getattr(gateway_helpers, "post_stream", None),
+        getattr(gateway_helpers, "post_stream_iter", None),
+        getattr(gateway_helpers, "_post_stream_lines", None),
+        getattr(gateway_helpers, "_open_gateway_request", None),
+        getattr(gateway_helpers, "_gateway_urlopen", None),
+        getattr(gateway_helpers, "_gateway_urlopen_unlimited", None),
+        getattr(gateway_helpers, "_urllib_request", None),
+        getattr(urllib_mod, "urlopen", None),
+        getattr(urllib_mod, "build_opener", None),
+        getattr(keepalive_mod, "pooled_urlopen", None),
+        getattr(ws_mod, "iter_responses_websocket", None) if ws_mod is not None else None,
+        getattr(backend_cls, "request_json", None),
+        getattr(backend_cls, "request_stream", None),
+        getattr(backend_cls, "request_stream_iter", None),
+        getattr(backend_cls, "_gateway_request", None),
+        getattr(backend_cls, "generate", None),
+        getattr(backend_cls, "_send_responses_request", None),
+    ]
+    if isinstance(backend_dict, Mapping):
+        for attr in (
+            "request_json",
+            "request_stream",
+            "request_stream_iter",
+            "_gateway_request",
+            "_send_responses_request",
+            "_generate_stream",
+            "_generate_non_stream",
+            "_request_messages",
+        ):
+            seams.append(backend_dict.get(attr))
+    tokens: list[object] = []
+    with _capability_probe_transport_lock:
+        for seam in seams:
+            if isinstance(seam, types.MethodType):
+                tokens.append((
+                    _single_object_identity_token_locked(seam.__func__),
+                    _single_object_identity_token_locked(seam.__self__),
+                ))
+            else:
+                tokens.append(_single_object_identity_token_locked(seam))
+    return tuple(tokens)
 
 
 def _credential_fingerprint(backend: object) -> str:
@@ -90,18 +187,23 @@ def _safe_tool_endpoint(backend: object) -> str:
     return str(getattr(backend, "api_base", "") or "")
 
 
-def _capability_probe_key(backend: object) -> tuple[str, str, str, bool, str]:
+def _capability_probe_key(backend: object) -> tuple[object, ...]:
     return (
         type(backend).__qualname__,
         _safe_tool_endpoint(backend),
         str(getattr(backend, "model_name", "") or ""),
         bool(getattr(backend, "stream_enabled", False)),
+        _capability_probe_transport_identity(backend),
         _credential_fingerprint(backend),
     )
 
 
+def _logical_probe_identity(key: tuple[object, ...]) -> tuple[object, ...]:
+    return (key[0], key[1], key[2], key[3], key[-1])
+
+
 def _lookup_capability_probe_memo(
-    key: tuple[str, str, str, bool, str],
+    key: tuple[object, ...],
 ) -> tuple[ProviderToolCapability | None, int]:
     with _capability_probe_lock:
         generation = _capability_probe_generation
@@ -112,7 +214,7 @@ def _lookup_capability_probe_memo(
 
 
 def _store_capability_probe_memo(
-    key: tuple[str, str, str, bool, str], capability: ProviderToolCapability,
+    key: tuple[object, ...], capability: ProviderToolCapability,
 ) -> int:
     with _capability_probe_lock:
         _capability_probe_entries[key] = capability
@@ -130,12 +232,20 @@ def invalidate_capability_probe_memo(backend: HttpBackend | None = None) -> None
             _capability_probe_entries.clear()
             _capability_probe_generation += 1
         return
-    keys = {_capability_probe_key(backend)}
+    target_key = _capability_probe_key(backend)
+    keys = {target_key}
+    logical_targets = {_logical_probe_identity(target_key)}
     previous_key = getattr(backend, "_provider_tool_capability_memo_key", None)
-    if previous_key is not None:
+    if isinstance(previous_key, tuple) and len(previous_key) >= 5:
         keys.add(previous_key)
+        logical_targets.add(_logical_probe_identity(previous_key))
     with _capability_probe_lock:
-        for key in keys:
+        stale = [
+            entry_key
+            for entry_key in _capability_probe_entries
+            if entry_key in keys or _logical_probe_identity(entry_key) in logical_targets
+        ]
+        for key in stale:
             _capability_probe_entries.pop(key, None)
     backend._provider_tool_capability_cache = None
     backend._provider_tool_capability_memo_key = None

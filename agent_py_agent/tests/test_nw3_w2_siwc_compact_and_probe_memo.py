@@ -681,3 +681,104 @@ def test_capability_probe_memo_invalidation_and_rejection_eviction(monkeypatch):
     invalidate_capability_probe_memo()
     assert len(http._capability_probe_entries) == 0
     assert b_keep._cached_instance_capability() is None
+
+
+def test_capability_probe_memo_isolates_monkeypatched_transports_across_gc_and_preserves_same_transport_hits(
+    monkeypatch,
+) -> None:
+    import gc
+
+    invalidate_capability_probe_memo()
+    opts = BackendOptions(
+        api_base="https://probe-transport-iso.example/v1",
+        api_key="sk-transport-iso-secret",
+        model_name="gpt-transport-iso",
+        stream_enabled=False,
+    )
+
+    def _build_handler(calls: list[dict[str, object]], *, native: bool):
+        inner = _wire_probe_json_handler(calls, native=native)
+
+        def _handler(*args: object, **kwargs: object) -> dict[str, object]:
+            return inner(*args, **kwargs)
+
+        return _handler
+
+    calls_one: list[dict[str, object]] = []
+    handler_one = _build_handler(calls_one, native=True)
+    with monkeypatch.context() as mp:
+        mp.setattr(http, "post_json", handler_one)
+        b_one = OpenAICompatibleBackend(opts)
+        assert b_one.probe_tool_capability().native_supported is True
+        assert len(calls_one) == 1
+
+        # Same active transport callable across distinct backend instances hits memo.
+        b_one_reuse = OpenAICompatibleBackend(opts)
+        assert b_one_reuse.probe_tool_capability().native_supported is True
+        assert len(calls_one) == 1
+
+    # Free the first closure and force GC before allocating the next closure to
+    # cover CPython id() address reuse across sequential pytest monkeypatches.
+    del handler_one
+    gc.collect()
+
+    calls_false: list[dict[str, object]] = []
+    handler_false = _build_handler(calls_false, native=False)
+    with monkeypatch.context() as mp:
+        mp.setattr(http, "post_json", handler_false)
+        b_false = OpenAICompatibleBackend(opts)
+        assert b_false.probe_tool_capability().native_supported is False
+        assert len(calls_false) >= 1
+
+    del handler_false
+    gc.collect()
+
+    calls_two: list[dict[str, object]] = []
+    handler_two = _build_handler(calls_two, native=True)
+    with monkeypatch.context() as mp:
+        mp.setattr(http, "post_json", handler_two)
+        b_two = OpenAICompatibleBackend(opts)
+        assert b_two.probe_tool_capability().native_supported is True
+        assert len(calls_two) == 1
+
+        # Repeating under the same second transport hits its own memo entry.
+        b_two_reuse = OpenAICompatibleBackend(opts)
+        assert b_two_reuse.probe_tool_capability().native_supported is True
+        assert len(calls_two) == 1
+
+        # Instance-level request_json override is also isolated per wire callable/self,
+        # while two backends sharing the same bound wire method share a memo hit.
+        wire_calls: list[dict[str, object]] = []
+        wire_inner = _wire_probe_json_handler(wire_calls, native=True)
+        from types import SimpleNamespace
+
+        class _WireTransport:
+            def request_json(
+                self,
+                path: str,
+                payload: dict[str, object],
+                headers: dict[str, str],
+                *,
+                total_deadline_seconds: float | None = None,
+            ) -> dict[str, object]:
+                del path, headers, total_deadline_seconds
+                return wire_inner(SimpleNamespace(payload=payload))
+
+        wire = _WireTransport()
+        b_wire_1 = OpenAICompatibleBackend(opts)
+        b_wire_2 = OpenAICompatibleBackend(opts)
+        mp.setattr(b_wire_1, "request_json", wire.request_json)
+        mp.setattr(b_wire_2, "request_json", wire.request_json)
+        assert b_wire_1.probe_tool_capability().native_supported is True
+        assert len(wire_calls) == 1
+        assert b_wire_2.probe_tool_capability().native_supported is True
+        assert len(wire_calls) == 1
+
+    del handler_two
+    gc.collect()
+
+    # Targeted invalidation after the original patched transport is gone still
+    # clears matching logical memo entries without leaking stale keys.
+    assert len(http._capability_probe_entries) >= 1
+    invalidate_capability_probe_memo(b_one)
+    assert len(http._capability_probe_entries) == 0
