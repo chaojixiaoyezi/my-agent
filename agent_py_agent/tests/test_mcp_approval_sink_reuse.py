@@ -303,3 +303,5 @@ def test_main_session_scope_excludes_private_redaction_but_tracks_permission_bou
     assert _agent_approval_session_scope(world.agent, scope) == first
     value["read_roots"] = ["/synthetic/other"]
     assert _agent_approval_session_scope(world.agent, scope) != first
+    value["read_roots"] = object()
+    assert _agent_approval_session_scope(world.agent, scope) == ""

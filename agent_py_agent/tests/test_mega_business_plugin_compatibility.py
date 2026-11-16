@@ -335,6 +335,7 @@ def test_observation_plugin_sse_survives_short_runtime_write_lock(production_hos
 def test_observation_runtime_reader_wait_budget_preserves_read_only_and_c_short_writes(production_host):
     import sqlite3
 
+    from agent_py_agent.agent.io.readonly_sqlite import ProjectionReadUnavailableError
     from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
     from agent_py_agent.tests.test_mega_business_api_actions import seed_observed_runtime
 
@@ -351,10 +352,14 @@ def test_observation_runtime_reader_wait_budget_preserves_read_only_and_c_short_
         assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 0
     missing = runtime.db_path.parent / 'missing-observation-runtime.db'
     reader = RuntimeRepository(missing, read_only=True)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(ProjectionReadUnavailableError) as unavailable:
         with reader._runtime_connection():
             pytest.fail('只读连接不应创建缺库')
+    assert isinstance(unavailable.value.__cause__, FileNotFoundError)
+    assert 'effect_outcome=not_started' in str(unavailable.value)
     assert not missing.exists()
+    assert not any(missing.with_name(missing.name + suffix).exists()
+                   for suffix in ('-wal', '-shm', '-journal', '.generation.lock'))
 
 
 def scoped_authorized(host, action, payload=None, *, user=None, key=None):
