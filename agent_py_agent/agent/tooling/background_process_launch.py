@@ -2,6 +2,7 @@
 # 模块用途: 冻结归属与寿命，托管启动并交出管道；短命令保留真实退出结果，失败清理尚未交接的资源。
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
@@ -71,6 +72,7 @@ class BackgroundLaunchRequest:
     #   listener_warning 不回收。值在 __post_init__ 规范化，进入 launch spec 与会话记录，host 按真实 socket 表核对。
     listen_scope: str = DEFAULT_LISTEN_SCOPE
     listen_scope_enforce: bool = True
+    host_output_redaction: object | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     # LLM: 先纯校验owner路径再验寿命/通道；历史读取不受影响，共享资源仍附原激活引用，不以展示字段跳过复查。
     # 函数用途: 在创建记录前验证寿命、管道、保留策略、监听范围与可信激活引用；任务启动不加载插件存储。
@@ -182,6 +184,9 @@ def start_background_process(
     session_id = f"bg-{int(time.time())}-{uuid.uuid4().hex[:16]}"
     record = _reservation(request, session_id)
     process, birth = None, ""
+    redaction_read = redaction_write = None
+    if request.host_output_redaction is not None and request.io_mode == "log" and os.name == "posix":
+        redaction_read, redaction_write = os.pipe()
     handed_off = False
     spec_path = store.root / ".launches" / f"{session_id}.json"
     try:
@@ -222,11 +227,13 @@ def start_background_process(
                     session_id,
                     "--spec",
                     str(spec_path),
+                    *(["--redaction-fd", str(redaction_read)] if redaction_read is not None else []),
                 ],
                 stdin=subprocess.PIPE if request.io_mode == "stdio" else subprocess.DEVNULL,
                 stdout=subprocess.PIPE if request.io_mode == "stdio" else subprocess.DEVNULL,
                 stderr=subprocess.PIPE if request.io_mode == "stdio" else subprocess.DEVNULL,
                 env=dict(request.env),
+                **({"pass_fds": (redaction_read,)} if redaction_read is not None else {}),
                 start_new_session=os.name != "nt",
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 if os.name == "nt"
@@ -235,6 +242,13 @@ def start_background_process(
             birth = capture_process_birth_token(process.pid)
             if not birth:
                 raise OSError("managed background host identity unavailable")
+        if redaction_read is not None:
+            os.close(redaction_read)
+            redaction_read = None
+            values = request.host_output_redaction.snapshot.secret_values
+            with os.fdopen(redaction_write, "wb") as transport:
+                redaction_write = None
+                transport.write(json.dumps(values, ensure_ascii=False).encode("utf-8"))
         _observe_startup(store, session_id, process.pid, birth, startup_timeout_seconds)
         with store.transaction() as transaction:
             _require_admission(request)
@@ -264,6 +278,9 @@ def start_background_process(
             raise BackgroundLaunchError(exc, cleanup_exc.record, False, cleanup_exc.report) from exc
         raise BackgroundLaunchError(exc, record, confirmed) from exc
     finally:
+        for descriptor in (redaction_read, redaction_write):
+            if descriptor is not None:
+                os.close(descriptor)
         if process is not None and not handed_off and request.io_mode == "stdio":
             _close_unhanded_pipes(process)
         try:

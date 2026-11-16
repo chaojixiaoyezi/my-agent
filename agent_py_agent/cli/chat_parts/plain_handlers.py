@@ -140,7 +140,7 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
         ctx.local_run.check_admission()
         result = ctx.agent.run(
             ctx.job.user,
-            params=RunParams(conversation_task_binding_callback=ctx.local_run),
+            params=RunParams(host_foreground_interactive=not bool(ctx.job.system_task), conversation_task_binding_callback=ctx.local_run),
             inject=_turn_inject(ctx, include_history=True),
             prompt_files=ctx.job.prompt_files,
             save=not ctx.args.no_save,

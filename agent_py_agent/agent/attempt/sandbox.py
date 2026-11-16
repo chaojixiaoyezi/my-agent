@@ -117,6 +117,7 @@ class SandboxHostPolicy:
     full_access_other_owner_homes: str = field(default="read_only", kw_only=True)
     host_exclusive_paths: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
     exact_read_scope: bool = field(default=False, kw_only=True)
+    foreground_admin_full_access: bool = field(default=False, kw_only=True)
 
 
 class SandboxUnavailableError(SandboxUnavailable):
@@ -205,6 +206,7 @@ class AttemptSandboxSpec:
     owner_home: Path         # owner home 底图（只读；persona 文件强制只读）
     # 网络开关是两个平台共用的通用选项：False 时 Linux bwrap 用 --unshare-net，macOS Seatbelt 在规则最后加 (deny network*)。
     network_access: bool = True
+    foreground_admin_full_access: bool = field(default=False, kw_only=True)
     bwrap_path: str | None = None
     macos_sandbox_exec: str | None = None
     # G6：生产 spawn 接线字段（tooling/shell._sandbox_exec 透传）。
@@ -588,10 +590,14 @@ def build_macos_sandbox_profile(spec: AttemptSandboxSpec) -> str:
     paths = _sandbox_persona_paths(root, all_owners=spec.full_access) if root is not None else ()
     source_paths = frozenset(paths)
     agent = agent_home_root_for_owner(root) if root is not None else None
-    compact = spec.full_access and agent is not None and bool(spec.protected_write_patterns)
+    compact = spec.full_access and agent is not None and bool(spec.protected_write_patterns) and spec.foreground_admin_full_access is not True
     persona_rules: list[str] = []
     readonly_aliases: tuple[Path, ...] = ()
     hidden_aliases: tuple[Path, ...] = ()
+    if spec.foreground_admin_full_access is True and agent is not None:
+        homes = tuple(sorted({home for path in paths if (home := owner_home_containing(path, agent)) is not None
+            and home != agent / "owners" / "local" / "main"}))
+        readonly_aliases, hidden_aliases = macos_host_alias_paths(homes)
     if compact:
         homes = tuple(sorted({home for path in paths if (home := owner_home_containing(path, agent)) is not None}))
         spec = _compact_macos_host_spec(spec, agent, homes)
@@ -691,7 +697,7 @@ def _macos_host_hidden_rules(spec: AttemptSandboxSpec) -> list[str]:
     agent = agent_home_root_for_owner(home) if home is not None else None
     if agent is None:
         return []
-    pattern = macos_hidden_pattern(agent, None if spec.full_access else home)
+    pattern = macos_hidden_pattern(agent, None if spec.full_access else home, foreground_admin_full_access=spec.foreground_admin_full_access)
     return [f"(deny file-read* file-write* (regex {_seatbelt_string_literal(pattern)}))"]
 
 

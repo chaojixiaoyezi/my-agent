@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import ipaddress
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -44,6 +44,7 @@ class PathUrlCommandFacts:
     allowed_commands: Iterable[str] = ()
     # 宿主解析出的数据根（写边界 canonical_owner_home_root 推出）；空时策略退回环境变量（H3 二审）。
     data_root: str = ""
+    foreground_admin_full_access: bool = field(default=False, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
         dangerous_roots=facts.path_dangerous_roots,
         owner_scope_root=facts.owner_scope_root,
         agent_home_root=facts.data_root,
+        foreground_admin_full_access=facts.foreground_admin_full_access,
     )
     findings: list[GateFinding] = []
     _collect_path_findings(data, roots, path_policy, findings)

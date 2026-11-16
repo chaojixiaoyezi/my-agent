@@ -435,6 +435,7 @@ def _path_url_command_decision(
             allow_shell_operators=_shell_operators_allowed(boundary),
             allowed_commands=_controlled_exec_allowed_commands(boundary),
             data_root=str(data_root_from_boundary(boundary) or ""),
+            foreground_admin_full_access=boundary.get("foreground_admin_full_access") is True,
         )
     )
     if decision.allowed:

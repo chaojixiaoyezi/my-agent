@@ -71,6 +71,7 @@ _BOUNDARY_CONTEXT_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES | _SANDBOX_WRITE_
 # 类用途: 固定工具参数、工作区、owner 墙和当前执行权威，在真正启动与交接时仍可核对原调用。
 @dataclass(frozen=True)
 class RegistryToolInvokeRequest:
+    host_output_redaction: object | None = field(default=None, kw_only=True, repr=False, compare=False)
     tool_name: str
     arguments: dict[str, Any]
     tools: dict[str, BaseTool]
@@ -170,6 +171,17 @@ def _read_boundary_denied(
 # LLM: invoke只消费已冻结runtime/handler；先核独立宿主owner身份，再沿原快照/owner墙裁决，不从模型arguments补身份或重选授权。
 # 函数用途: 核对调用绑定、收窄工作目录与读写边界，再执行真实工具；取消上下文随调用传入，实际掉线由绑定的工具返回，不把可用性探针当作撤销。
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutcome:
+    redaction = request.host_output_redaction
+    if redaction is None:
+        return _invoke_registry_tool(request)
+    from ..common.log_redaction import configured_secret_redaction
+    from .host_output_redaction import redact_host_tool_outcome
+    with configured_secret_redaction(redaction.snapshot.secret_values):
+        outcome = _invoke_registry_tool(request)
+        return redact_host_tool_outcome(outcome, snapshot=redaction.snapshot, force_default=redaction.force_default)
+
+
+def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutcome:
     if request.owner_id and request.registry_owner_id and request.owner_id != request.registry_owner_id:
         return apply_tool_execution_facts(
             structured_tool_error(
@@ -247,6 +259,16 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
             handler_executed=False,
         )
 
+    if request.tool_name in {"run_command", "terminal_session"}:
+        from .active_service_guard import active_service_stop_denial
+        root = data_root_from_boundary(request.write_boundary)
+        guard = active_service_stop_denial(str(tool_params.get("command") or ""), data_root=root,
+            foreground_admin_full_access=(request.write_boundary or {}).get("foreground_admin_full_access") is True,
+            service_root=Path((request.write_boundary or {})["host_active_service_root"]) if (request.write_boundary or {}).get("host_active_service_root") else None) if root is not None else None
+        if guard is not None:
+            return apply_tool_execution_facts(ToolHandlerOutcome(request.tool_name, False, guard["next_step"],
+                error_code=guard["error_code"], effect_outcome="not_started", result_envelope=guard),
+                failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False)
     execution_tool = _request_local_tool_for_invocation(
         tool,
         request=request,
@@ -310,8 +332,10 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
     policy = PathAccessPolicy.from_values(mode=request.path_access_mode, dangerous_roots=request.path_dangerous_roots,
                                          owner_scope_root=request.owner_scope_root,
                                          agent_home_root=data_root_from_boundary(request.write_boundary),
-                                         business_aggregate_roots=business_aggregate_paths_from_boundary(request.write_boundary))
+                                         business_aggregate_roots=business_aggregate_paths_from_boundary(request.write_boundary),
+                                         foreground_admin_full_access=(request.write_boundary or {}).get("foreground_admin_full_access") is True)
     return ToolInvocationContext(
+        host_output_redaction=request.host_output_redaction,
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
         pending_input_probe=request.pending_input_probe,
         execution_authority_check=request.execution_authority_check, tool_dispatch=request.tool_dispatch,
@@ -393,8 +417,10 @@ def _request_local_tool_for_invocation(
     if not needs_workspace_copy and not needs_network_copy:
         return tool
     scoped = copy(tool)
+    scoped._host_output_redaction = request.host_output_redaction
     if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):
         scoped.shell_tool = copy(scoped.shell_tool)
+        scoped.shell_tool._host_output_redaction = request.host_output_redaction
     if needs_workspace_copy:
         workspace_target = (
             scoped.shell_tool
@@ -423,14 +449,26 @@ def _request_local_tool_for_invocation(
         dangerous_roots=request.path_dangerous_roots,
         owner_scope_root=effective_owner_scope,
         agent_home_root=getattr(configured_policy, "agent_home_root", None),
+        foreground_admin_full_access=(request.write_boundary or {}).get("foreground_admin_full_access") is True,
+        host_exclusive_roots=getattr(configured_policy, "host_exclusive_roots", ()) ,
         business_aggregate_roots=tuple(dict.fromkeys((*getattr(configured_policy, "business_aggregate_roots", ()),
             *business_aggregate_paths_from_boundary(request.write_boundary)))),
     )
     process_tool = scoped.shell_tool if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool") else scoped
+    if dynamic_policy.foreground_admin_full_access is True:
+        from ..path_access_policy import retained_host_exclusive_paths
+        declared = {Path(value).resolve(strict=False) for value in (request.write_boundary or {}).get("host_foreground_config_sources", ())}
+        custom_hidden = tuple(Path(value).resolve(strict=False) for value in (request.write_boundary or {}).get("host_foreground_custom_hidden_roots", ()))
+        retained = tuple(path for path in retained_host_exclusive_paths(dynamic_policy.host_exclusive_roots,
+            dynamic_policy.agent_home_root, foreground_admin_full_access=True) if path not in declared)
+        dynamic_policy = replace(dynamic_policy, host_exclusive_roots=tuple(dict.fromkeys((*retained, *custom_hidden))))
     if hasattr(process_tool, "host_exclusive_paths"):
         # 私有HOME规则会重新放行owner整根；聚合库沿原hidden_paths在owner放行后拒绝。
-        process_tool.host_exclusive_paths = tuple(dict.fromkeys((*process_tool.host_exclusive_paths,
-            *dynamic_policy.business_aggregate_roots)))
+        paths = tuple(process_tool.host_exclusive_paths)
+        if dynamic_policy.foreground_admin_full_access is True:
+            paths = retained_host_exclusive_paths(paths, dynamic_policy.agent_home_root, foreground_admin_full_access=True)
+            paths = tuple(path for path in paths if Path(path).resolve(strict=False) not in declared)
+        process_tool.host_exclusive_paths = tuple(dict.fromkeys((*paths, *dynamic_policy.business_aggregate_roots, *(custom_hidden if dynamic_policy.foreground_admin_full_access is True else ()))))
     if hasattr(scoped, "path_access_policy"):
         scoped.path_access_policy = dynamic_policy
     if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):
@@ -610,7 +648,8 @@ def _sandbox_read_roots_for_invocation(
         policy = PathAccessPolicy.from_values(mode=request.path_access_mode,
             dangerous_roots=request.path_dangerous_roots, owner_scope_root=owner,
             agent_home_root=getattr(registered_policy, "agent_home_root", None) or data_root_from_boundary(request.write_boundary),
-            business_aggregate_roots=business_aggregate_paths_from_boundary(request.write_boundary))
+            business_aggregate_roots=business_aggregate_paths_from_boundary(request.write_boundary),
+                                         foreground_admin_full_access=(request.write_boundary or {}).get("foreground_admin_full_access") is True)
         external = granted_external_work_roots(request.write_boundary, owner)
         # exact只能收窄owner墙；目录授权也不能包含其它owner或宿主数据根。
         return tuple(root for root in exact if policy.check_with_external_roots(root, external).allowed)

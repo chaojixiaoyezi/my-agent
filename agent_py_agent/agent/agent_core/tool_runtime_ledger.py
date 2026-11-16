@@ -164,6 +164,31 @@ def _nonnegative_int(value: object) -> int:
 def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_attachment_lookup: bool = False, for_artifact_reconciliation: bool = False) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
+    from ..user_space.owner_access import is_foreground_admin_interactive
+
+    merged["host_foreground_interactive"] = is_foreground_admin_interactive(agent, params=params)
+    merged["foreground_admin_full_access"] = False
+    home = getattr(agent, "home_paths", None)
+    actor = getattr(params, "host_channel_actor", None)
+    merged["host_authorization_identity"] = {
+        "owner": str(getattr(home, "owner_id", "") or "unknown"),
+        "actor": str(getattr(actor, "actor_id", "") or ("local" if home is not None else "unknown")),
+        "required_identity": "当前owner的已授权用户",
+        "next_step": "请由当前owner的已授权用户在原会话批准本次操作；未执行，勿原样盲目重试。",
+    }
+    from ..path_access_policy import configured_host_source_paths
+    config = getattr(agent, "config", None)
+    from ..settings.secret_ref import configured_credential_snapshot
+    from ..tooling.host_output_redaction import HostOutputRedaction
+    merged["_host_output_redaction"] = HostOutputRedaction(
+        snapshot=configured_credential_snapshot(config), force_default=False)
+    gateway_root = getattr(config, "gateway_workspace", "")
+    merged.pop("host_active_service_root", None)
+    if isinstance(gateway_root, (str, Path)) and str(gateway_root) and getattr(agent, "root", None):
+        merged["host_active_service_root"] = str((Path(agent.root) / gateway_root).resolve(strict=False))
+    custom = {str(Path(value).expanduser().resolve(strict=False)) for value in getattr(config, "host_exclusive_path_roots", ()) or ()}
+    merged["host_foreground_custom_hidden_roots"] = sorted(custom)
+    merged["host_foreground_config_sources"] = [str(path) for path in configured_host_source_paths(config) if str(path) not in custom]
     _attach_canonical_owner_home_root(merged, agent)
     protected_owner = business_aggregate_owner_root(agent, params)
     if protected_owner is not None:

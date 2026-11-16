@@ -509,6 +509,7 @@ def _command_display(result: subprocess.CompletedProcess[str]) -> dict[str, obje
 def _subprocess_text_env(
     owner_home: object = None, *, hidden_roots: tuple[str, ...] = (), sandboxed: bool = False,
     host_credential_env_names: frozenset[str] = frozenset(),
+    foreground_admin_full_access: bool = False,
 ) -> dict[str, str]:
     from ..path_access_policy import HOST_STATE_READ_ONLY_ENV
 
@@ -523,7 +524,7 @@ def _subprocess_text_env(
     env.setdefault("GIT_PAGER", "cat")
     # H3：沙箱里宿主状态只读，告诉命令里的 my-agent CLI（cli/host_state_guard）；只有宿主能设，不进沙箱的命令不带它。
     env.pop(HOST_STATE_READ_ONLY_ENV, None)
-    if sandboxed:
+    if sandboxed and foreground_admin_full_access is not True:
         env[HOST_STATE_READ_ONLY_ENV] = "1"
     _apply_owner_scoped_pip_env(env, owner_home)
     from ._subprocess_env_scrub import scrub_subprocess_env
@@ -608,11 +609,12 @@ def _communicate_process(
     timeout: int,
     demote_after_seconds: int = 0,
     demoted_nice: int = 15,
+    host_output_redaction: object | None = None,
 ) -> subprocess.CompletedProcess[str]:
     started_at = time.monotonic()
     deadline = started_at + max(0.0, float(timeout))
     birth_token = capture_process_birth_token(proc.pid) if os.name != "nt" else None
-    capture = _start_foreground_capture(proc, birth_token)
+    capture = _start_foreground_capture(proc, birth_token, host_output_redaction=host_output_redaction)
     next_exit_probe = 0.0
     probe_interval = _FOREGROUND_EXIT_PROBE_INITIAL_SECONDS
     demotions = 0
@@ -680,9 +682,9 @@ def _communicate_process(
 
 # LLM: capture初始化可能申请FD/线程失败，业务进程已存在；必须用原出生身份清理，保留首个异常对象。
 # 函数用途: 启动前台采集器，失败也不让命令静默脱离清理范围。
-def _start_foreground_capture(proc, birth_token: str | None) -> ProcessOutputCapture:
+def _start_foreground_capture(proc, birth_token: str | None, *, host_output_redaction=None) -> ProcessOutputCapture:
     try:
-        return ProcessOutputCapture(proc)
+        return ProcessOutputCapture(proc, **({"host_output_redaction": host_output_redaction} if host_output_redaction is not None else {}))
     except BaseException:
         try:
             _kill_process_group(proc, birth_token)
@@ -833,7 +835,8 @@ def _sandbox_exec(
         if anchor.is_dir():
             # 先恢复原声明的私有挂载点，再取按存在性过滤的隐藏投影；内部链接仍须拒绝。
             ensure_private_dir(anchor.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS), canonical_root=anchor)
-    host_paths = _host_sandbox_paths_for(owner_text, persona_text)
+    grant = host_policy.foreground_admin_full_access is True and not owner_text and not host_policy.exact_read_scope
+    host_paths = _host_sandbox_paths_for(owner_text, persona_text, foreground_admin_full_access=grant)
     # Full Access is the absence of an owner wall. Persona and control metadata remain more
     # specific read-only overlays; they must not silently downgrade the rest of the filesystem.
     full_access = not owner_text
@@ -873,6 +876,7 @@ def _sandbox_exec(
         write_scope_denied_roots=protection.denied_roots,
         implicit_attempt_write_roots=write_roots is None and not host_policy.exact_read_scope,
         full_access=full_access and not host_policy.exact_read_scope,
+        foreground_admin_full_access=grant,
         # 精确读合同必须进入平台沙箱；不能因本地管理员或宽 cwd 退回 owner 全读。
         read_only_root=host_policy.exact_read_scope,
         read_mode="allowlist" if host_policy.exact_read_scope else None,
@@ -889,7 +893,7 @@ def _sandbox_exec(
         protected_directory_unlink_patterns=host_paths.directory_unlink_patterns,
         # G4：拒绝模型命令连本机 Gateway 的实际绑定端口（回环）。端口由 Gateway 启动时登记在进程内注册表；
         # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
-        deny_gateway_ports=gateway_bound_ports(),
+        deny_gateway_ports=() if grant else gateway_bound_ports(),
     )
     # Shell 自行启动 argv，须复用与 sandbox.run 相同的cwd准入；授权文件的祖先仅作cwd，不加回内容白名单。
     if host_policy.exact_read_scope and not allowlisted_directory(
@@ -908,7 +912,7 @@ def _sandbox_exec(
 
 # LLM: 只从规范owner锚点推导数据根；非规范布局沿旧语义返回空集合，不增加_sandbox_exec参数。
 # 函数用途: 一次准备获取全部宿主路径保护。
-def _host_sandbox_paths_for(owner_text: str, persona_text: str):
+def _host_sandbox_paths_for(owner_text: str, persona_text: str, *, foreground_admin_full_access: bool = False):
     from ..path_access_policy import HostSandboxPaths, agent_home_root_for_owner, host_sandbox_paths
 
     if (
@@ -933,7 +937,7 @@ def _host_sandbox_paths_for(owner_text: str, persona_text: str):
     if agent_home is None:
         return HostSandboxPaths()
     owner = Path(owner_text).expanduser().resolve(strict=False) if owner_text else None
-    return host_sandbox_paths(agent_home, owner, system=sys.platform)
+    return host_sandbox_paths(agent_home, owner, system=sys.platform, foreground_admin_full_access=foreground_admin_full_access)
 
 
 # LLM: H2：模型命令看不到宿主托管存储（唯一声明 path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS）。owner 隔离时只盖本 owner 的
@@ -1533,7 +1537,8 @@ class ShellTool(BaseTool):
                                                                           self.host_credential_env_names,
                                                                           full_access_other_owner_homes=self.full_access_other_owner_homes,
                                                                           host_exclusive_paths=self.host_exclusive_paths,
-                                                                          exact_read_scope=getattr(self, "_sandbox_exact_read_scope", False)),
+                                                                          exact_read_scope=getattr(self, "_sandbox_exact_read_scope", False),
+                                                                          foreground_admin_full_access=self.path_access_policy.foreground_admin_full_access),
                                             **({"sandbox_factory": self.sandbox_factory} if self.sandbox_factory is not None else {}))
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
@@ -1545,8 +1550,10 @@ class ShellTool(BaseTool):
             log_path.touch(exist_ok=False)
             request = BackgroundLaunchRequest(
                 argv=argv, command=command, cwd=target, log_path=log_path,
+                host_output_redaction=getattr(self, "_host_output_redaction", None),
                 env=_subprocess_text_env(self.path_access_policy.owner_scope_root, hidden_roots=self.host_private_roots,
-                                         sandboxed=True, host_credential_env_names=self.host_credential_env_names),
+                                         sandboxed=True, host_credential_env_names=self.host_credential_env_names,
+                                         foreground_admin_full_access=self.path_access_policy.foreground_admin_full_access),
                 max_log_bytes=_MAX_BG_LOG_BYTES,
                 store_root=session_root,
                 access_scope=access_scope, execution_scope=execution_scope or ProcessExecutionScope(owner_home=access_scope.owner_home),
@@ -2443,7 +2450,8 @@ def _run_shell_command(
                 raise CommandInterruptedError(command)
             return getattr(tool, "executor", None).run(ShellCommandRequest(command, ["powershell.exe", "-NoProfile", "-Command", command],
                 target, timeout, _subprocess_text_env(tool.path_access_policy.owner_scope_root,
-                                                    host_credential_env_names=tool.host_credential_env_names)))
+                                                    host_credential_env_names=tool.host_credential_env_names,
+                                         foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access)))
         proc = subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-Command", command],
             cwd=str(target),
@@ -2454,10 +2462,11 @@ def _run_shell_command(
             encoding="utf-8",
             errors="replace",
             env=_subprocess_text_env(tool.path_access_policy.owner_scope_root,
-                                     host_credential_env_names=tool.host_credential_env_names),
+                                     host_credential_env_names=tool.host_credential_env_names,
+                                         foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access),
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
-        return _communicate_process(proc, command=command, timeout=timeout, **({
+        return _communicate_process(proc, command=command, timeout=timeout, host_output_redaction=getattr(tool, "_host_output_redaction", None), **({
             "demote_after_seconds": getattr(tool, "demote_after_seconds", 0), "demoted_nice": getattr(tool, "demoted_nice", 15),
         } if getattr(tool, "demote_after_seconds", 0) else {}))
     raise SandboxUnavailable(
@@ -2488,7 +2497,8 @@ def _run_attempt_sandboxed_shell_command(
         host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names,
                                       full_access_other_owner_homes=getattr(tool, "full_access_other_owner_homes", "read_only"),
                                       host_exclusive_paths=getattr(tool, 'host_exclusive_paths', ()),
-                                      exact_read_scope=getattr(tool, "_sandbox_exact_read_scope", False)),
+                                      exact_read_scope=getattr(tool, "_sandbox_exact_read_scope", False),
+                                      foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access),
         **({"sandbox_factory": getattr(tool, "sandbox_factory", None)} if getattr(tool, "sandbox_factory", None) is not None else {}),
     )
     deadline = time.monotonic() + max(0.0, float(timeout))
@@ -2502,10 +2512,11 @@ def _run_attempt_sandboxed_shell_command(
         if getattr(tool, "executor", None) is not None:
             completed = getattr(tool, "executor", None).run(ShellCommandRequest(command, exec_arg, target, remaining,
                 _subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots, sandboxed=True,
-                                     host_credential_env_names=tool.host_credential_env_names), use_shell))
+                                     host_credential_env_names=tool.host_credential_env_names,
+                                         foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access), use_shell))
         else:
             proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool)
-            completed = _communicate_process(proc, command=command, timeout=remaining, **({
+            completed = _communicate_process(proc, command=command, timeout=remaining, host_output_redaction=getattr(tool, "_host_output_redaction", None), **({
                 "demote_after_seconds": getattr(tool, "demote_after_seconds", 0), "demoted_nice": getattr(tool, "demoted_nice", 15),
             } if getattr(tool, "demote_after_seconds", 0) else {}))
         if not use_shell and isinstance(exec_arg, list) and completed.returncode != 0 and not completed.stdout and attempt < 3:
@@ -2534,7 +2545,8 @@ def _start_attempt_shell_process(exec_arg, use_shell: bool, target: Path, tool: 
             encoding="utf-8",
             errors="replace",
             env=_subprocess_text_env(tool.path_access_policy.owner_scope_root, hidden_roots=tool.host_private_roots, sandboxed=True,
-                                     host_credential_env_names=tool.host_credential_env_names),
+                                     host_credential_env_names=tool.host_credential_env_names,
+                                         foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access),
             start_new_session=True,
             **({"pass_fds": pass_fds} if pass_fds else {}),
         )

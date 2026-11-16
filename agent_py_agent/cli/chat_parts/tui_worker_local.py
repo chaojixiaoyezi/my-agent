@@ -42,7 +42,7 @@ def _worker_local_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
         control.check_admission()
         result = ctx.cfg.agent.run(
             ctx.job.user,
-            params=RunParams(conversation_task_binding_callback=control),
+            params=RunParams(host_foreground_interactive=not bool(ctx.job.system_task), conversation_task_binding_callback=control),
             inject=ctx.turn_inject,
             prompt_files=ctx.job.prompt_files,
             save=ctx.job.save,

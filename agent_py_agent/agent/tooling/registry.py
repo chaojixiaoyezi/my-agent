@@ -1213,20 +1213,33 @@ class ToolRegistry:
             self.workspace_roots,
             write_boundary,
         )
-        boundary = write_boundary if isinstance(write_boundary, dict) else {}
+        boundary = dict(write_boundary) if isinstance(write_boundary, dict) else {}
         effective_owner_scope = effective_owner_scope_root(write_boundary=boundary, registry_scope=self.owner_scope_root)
+        host_output_redaction = boundary.pop("_host_output_redaction", None)
+        from .runtime_boundary import exact_read_roots
+        approval_state = _registry_approval_state(self, effective_owner_scope, runtime_snapshot.owner_type)
+        boundary["foreground_admin_full_access"] = (
+            boundary.get("host_foreground_interactive") is True
+            and approval_state.get("admin_full_access") is True
+            and not effective_owner_scope
+            and exact_read_roots(boundary, invocation_root) is None
+        )
+        if host_output_redaction is not None:
+            host_output_redaction = replace(host_output_redaction,
+                force_default=boundary["foreground_admin_full_access"])
         return ToolExecutor().execute(
             ToolExecutorRequest(
                 call=call,
+                host_output_redaction=host_output_redaction,
                 runtime_snapshot=runtime_snapshot,
                 workspace_root=invocation_root,
                 workspace_roots=invocation_roots,
                 path_access_mode=self.path_access_mode,
                 path_dangerous_roots=tuple(self.path_dangerous_roots),
                 owner_scope_root=effective_owner_scope,
-                write_boundary=write_boundary,
+                write_boundary=boundary,
                 runtime_guard_policy=self.runtime_guard_policy,
-                **_registry_approval_state(self, effective_owner_scope, runtime_snapshot.owner_type),
+                **approval_state,
                 operation_store=self.operation_store,
                 operation_store_required=self.operation_store_required,
                 operation_owner_id=self.operation_owner_id,

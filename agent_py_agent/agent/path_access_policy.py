@@ -221,6 +221,7 @@ class PathAccessPolicy:
     host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True)
     workspace_roots: tuple[Path, ...] = field(default=(), kw_only=True)
     business_aggregate_roots: tuple[Path, ...] = field(default=(), kw_only=True)
+    foreground_admin_full_access: bool = field(default=False, kw_only=True)
     _workspace_warning_emitted: ClassVar[bool] = False
     _workspace_warning_lock: ClassVar = Lock()
 
@@ -229,7 +230,7 @@ class PathAccessPolicy:
     # 函数用途: 冻结显式工作区及可信 owner 的 workspace；只影响危险根门，不签发 owner 墙外访问权。
     @classmethod
     def from_config(cls, config: object | None, *, agent_home_root: object = None,
-                    owner_scope_root: object = None) -> PathAccessPolicy:
+                    owner_scope_root: object = None, foreground_admin_full_access: bool = False) -> PathAccessPolicy:
         root = _normalized_root(agent_home_root) if agent_home_root else _my_agent_home_root()
         configured = getattr(config, "workspace_root", "")
         workspaces = [configured] if isinstance(configured, str) else list(configured or ())
@@ -241,8 +242,8 @@ class PathAccessPolicy:
             mode=getattr(config, "path_access_mode", DEFAULT_PATH_ACCESS_MODE),
             dangerous_roots=getattr(config, "path_dangerous_roots", DEFAULT_DANGEROUS_PATH_ROOTS),
             agent_home_root=root, owner_scope_root=owner_scope_root,
-            host_exclusive_roots=host_exclusive_paths(root, config) if root is not None else (),
-            workspace_roots=workspaces,
+            host_exclusive_roots=retained_host_exclusive_paths(host_exclusive_paths(root, config), root, config=config, foreground_admin_full_access=foreground_admin_full_access) if root is not None else (),
+            workspace_roots=workspaces, foreground_admin_full_access=foreground_admin_full_access,
         )
         policy._warn_workspace_under_dangerous_root()
         return policy
@@ -283,6 +284,7 @@ class PathAccessPolicy:
         host_exclusive_roots: Iterable[object] = (),
         workspace_roots: Iterable[object] = (),
         business_aggregate_roots: Iterable[object] = (),
+        foreground_admin_full_access: bool = False,
     ) -> PathAccessPolicy:
         normalized_mode = normalize_path_access_mode(mode)
         roots = tuple(_normalized_root(item) for item in (dangerous_roots or DEFAULT_DANGEROUS_PATH_ROOTS))
@@ -303,6 +305,7 @@ class PathAccessPolicy:
         workspaces = tuple(dict.fromkeys(path for value in workspace_roots if (path := _normalized_root(value)) is not None))
         return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope, agent_home_root=data_root,
                    host_exclusive_roots=exclusive, workspace_roots=workspaces,
+                   foreground_admin_full_access=foreground_admin_full_access is True and scope is None,
                    business_aggregate_roots=tuple(dict.fromkeys(root for item in business_aggregate_roots
                        if (root := _aggregate_lexical_root(item)) is not None)))
 
@@ -322,7 +325,7 @@ class PathAccessPolicy:
                 "请用 memory_search(query=...)、remember(action=list) 或 session_search(mode=search, query=...) 按当前结构化范围查询；业务资产用 read_business_asset 按当前获准的精确space/project/asset/version读取；勿改裸路径绕范围。普通工程文件仍可按原授权读取。", str(aggregate))
         # H2：宿主托管存储（插件安装库、包库）不随 owner 墙、Full Access 或数据根豁免开放，最先判定。
         store = self._host_managed_store_of(resolved)
-        if store is not None:
+        if store is not None and not self._foreground_target(resolved):
             return PathAccessDecision(
                 False,
                 "PATH_HOST_MANAGED_STORE_BLOCKED",
@@ -357,18 +360,24 @@ class PathAccessPolicy:
             return asset
         if self.agent_home_root is None:
             return PathAccessDecision(True)
-        return (_host_write_block(resolved, self.agent_home_root)
+        return ((None if self._foreground_target(resolved) and not _foreground_task_record(resolved, self.agent_home_root) else _host_write_block(resolved, self.agent_home_root))
                 or persona_write_decision(resolved, self.agent_home_root, self.owner_scope_root)
                 or PathAccessDecision(True))
 
     # LLM: H3 凭据只在模式已放行之后才拒（owner 墙、危险根等原拒绝码优先）；判定见 host_credential_for_path，只做路径运算。
     # 函数用途: 目标是宿主凭据时返回 PATH_HOST_CREDENTIAL_BLOCKED，提示改用脱敏的 user_config / manage_models。
+    def _foreground_target(self, resolved: Path) -> bool:
+        if self.foreground_admin_full_access is not True or self.agent_home_root is None:
+            return False
+        home = owner_home_containing(resolved, self.agent_home_root)
+        return home is None or home == self.agent_home_root / "owners" / "local" / "main"
+
     def _host_credential_decision(self, resolved: Path) -> PathAccessDecision:
         for source in self.host_exclusive_roots:
             if _host_source_contains(resolved, source):
                 return PathAccessDecision(False, "PATH_HOST_CREDENTIAL_BLOCKED", "宿主专有配置来源不对工作视图开放。", str(source))
         secret = host_credential_for_path(resolved, self.agent_home_root) if self.agent_home_root else None
-        if secret is None:
+        if secret is None or self._foreground_target(resolved):
             return PathAccessDecision(True)
         return PathAccessDecision(
             False,
@@ -1006,8 +1015,25 @@ class HostSandboxPaths:
 #   生产shell保留具体路径合同，最终Seatbelt编译器再压缩；已知owner不枚举他人，Linux挂载保持具体覆盖。
 # 函数用途: 返回本次新鲜路径快照，或调用方明确选择的Darwin固定拒绝投影。
 def host_sandbox_paths(agent_home_root: Path, owner_home: Path | None = None, system: str | None = None,
-                       *, compact: bool = False, config: object | None = None) -> HostSandboxPaths:
+                       *, compact: bool = False, config: object | None = None, foreground_admin_full_access: bool = False) -> HostSandboxPaths:
     mac = (system or platform.system()).casefold() == "darwin"
+    if foreground_admin_full_access is True:
+        own = agent_home_root / "owners" / "local" / "main"
+        prefix = macos_owner_prefix(agent_home_root)
+        others = _macos_non_main_owner_prefix(agent_home_root)
+        homes = () if mac else tuple(home for home in _existing_owner_homes(agent_home_root) if home != own)
+        # own的声明别名也必须解除；其它owner的H2/H3和所有任务核验记录继续保留。
+        readonly = _readonly_from_homes(agent_home_root, homes, include_home=False)
+        hidden = (*_hidden_from_homes(homes), *retained_host_exclusive_paths(
+            host_exclusive_paths(agent_home_root, config), agent_home_root,
+            config=config, foreground_admin_full_access=True))
+        return HostSandboxPaths(
+            readonly=readonly,
+            hidden=tuple(hidden),
+            patterns=(*_foreground_other_owner_patterns(others), *_task_record_patterns(prefix)) if mac else (),
+            directory_write_patterns=tuple(_task_record_patterns(prefix, directory_operation="write")) if mac else (),
+            directory_unlink_patterns=tuple(_task_record_patterns(prefix, directory_operation="unlink")) if mac else (),
+        )
     if compact and mac and owner_home is None:
         result = _macos_all_owner_paths(agent_home_root)
         return replace(result, hidden=tuple(dict.fromkeys((*result.hidden, *host_exclusive_paths(agent_home_root, config)))))
@@ -1031,8 +1057,9 @@ def macos_owner_prefix(agent_home_root: Path) -> str:
 
 # LLM: H2声明的regex投影只增加隐藏，不代替Python裁决或Linux具体挂载；调用者必须放在读allow之后。
 # 函数用途: 生成当前owner或全owner托管存储的拒读写模式，不检查存在性。
-def macos_hidden_pattern(agent_home_root: Path, owner_home: Path | None = None) -> str:
-    prefix = re.escape(str(owner_home.resolve(strict=False))) if owner_home is not None else macos_owner_prefix(agent_home_root)
+def macos_hidden_pattern(agent_home_root: Path, owner_home: Path | None = None, *, foreground_admin_full_access: bool = False) -> str:
+    prefix = (_macos_non_main_owner_prefix(agent_home_root) if foreground_admin_full_access is True else
+        re.escape(str(owner_home.resolve(strict=False))) if owner_home is not None else macos_owner_prefix(agent_home_root))
     parts = "|".join(re.escape("/".join(item)) for item in HOST_MANAGED_OWNER_STORE_PARTS)
     return f"^{prefix}/({parts})(/|$)"
 
@@ -1644,3 +1671,44 @@ def _aggregate_lexical_root(value: object) -> Path | None:
         return None
     root = Path(value)
     return root if root.is_absolute() and ".." not in root.parts else None
+
+
+def _foreground_task_record(path: Path, root: Path) -> bool:
+    home = owner_home_containing(path, root)
+    task = task_root_containing(path, home) if home is not None else None
+    return task is not None and _declared_root_containing(path, task, HOST_STATE_TASK_PARTS) is not None
+
+
+def retained_host_exclusive_paths(paths, root, *, config=None, foreground_admin_full_access=False):
+    """只移除本次声明的配置来源；业务聚合与自定义隐藏根保留。"""
+    if foreground_admin_full_access is not True or root is None:
+        return tuple(paths)
+    declared = set(host_exclusive_paths(root, None))
+    if config is not None:
+        # 自定义隐藏根即使与配置重叠也保持更窄的显式边界。
+        custom = {Path(value).expanduser().resolve(strict=False) for value in getattr(config, 'host_exclusive_path_roots', ()) or ()}
+        declared.update(set(configured_host_source_paths(config)) - custom)
+        declared.difference_update(custom)
+    return tuple(path for path in paths if Path(path).resolve(strict=False) not in declared)
+
+
+def _component_except(names: tuple[str, ...]) -> str:
+    # POSIX ERE 无前瞻：逐前缀允许有限禁名之外的全部组件。
+    prefixes = {name[:size] for name in names for size in range(len(name) + 1)}
+    branches = []
+    for prefix in sorted(prefixes):
+        following = ''.join(sorted({name[len(prefix)] for name in names if name.startswith(prefix) and len(name) > len(prefix)}))
+        if prefix and prefix not in names:
+            branches.append(re.escape(prefix))
+        branches.append(re.escape(prefix) + (f"[^{following}/][^/]*" if following else "[^/]+"))
+    return '(' + '|'.join(branches) + ')'
+
+
+def _macos_non_main_owner_prefix(root: Path) -> str:
+    return re.escape(str(root.resolve(strict=False) / 'owners')) + '/(local/users/[^/]+|local/' + _component_except(('main', 'users')) + '|providers/[^/]+/(users|groups)/[^/]+)'
+
+
+def _foreground_other_owner_patterns(prefix: str) -> tuple[str, ...]:
+    managed = '|'.join(re.escape('/'.join(item)) for item in HOST_MANAGED_OWNER_STORE_PARTS)
+    return (*(_macos_readonly_chunk(prefix, [atom]) for atom in _macos_readonly_atoms()),
+            f"^{prefix}/({managed})(/|$)")

@@ -113,6 +113,7 @@ def is_foreground_admin_interactive(agent: object, *, params: object | None = No
             or getattr(home, "owner_id", None) != "local/main"
             or current_subagent_run_id(agent)
             or getattr(params, "turn_trigger", None) is not None
+            or getattr(params, "context_scope", "default") not in {"default", "conversation"}
             or getattr(params, "source", "") in {"background", "background_main_agent", "scheduler", "system", "plugin", "subagent"}):
         return False
     boundary = getattr(params, "write_boundary", None) or {}

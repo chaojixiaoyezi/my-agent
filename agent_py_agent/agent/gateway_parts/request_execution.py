@@ -414,7 +414,7 @@ def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *
         observer = GatewayModelObservation(context, captured, claim)
         with observer.scope():
             try:
-                conversation = request_context.gateway_conversation_context(replace(load_request, on_thread_loaded=observer, defer_compact=True))
+                conversation = request_context.gateway_conversation_context(replace(load_request, on_thread_loaded=observer, defer_compact=True, allow_history_defer=True))
                 _record_gateway_stage(context.stages, "conversation_prep_ms", _conversation_prep_started)
                 _require_gateway_conversation_ready(request, conversation)
                 from ..gateway_compact_recovery import prepare_gateway_compact_recovery
@@ -1186,6 +1186,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         on_chunk=context.on_chunk,
         root_user_prompt=inputs.prompt,
         task_attributes=attrs,
+        host_foreground_interactive=_gateway_foreground_interactive(inputs, actor),
         host_channel_actor=actor,
         host_session_space=space,
         memory_recall_scope=gateway_memory_recall_scope(context.agent, space,
@@ -1986,3 +1987,20 @@ def _apply_cancelled_gateway_response(response: dict) -> None:
             "channel_delivery": request_history.silent_user_stop_delivery(),
         }
     )
+
+
+def _gateway_foreground_interactive(inputs, actor):
+    """仅原认证会话入口签发本次前台事实，后台/插件请求不能借actor升级。"""
+    from ..conversation.channels import LOCAL_PRIVATE_CHANNELS
+    from ..user_space.owner_access import is_complete_local_admin_owner
+    from .request_worker import _admin_channel_identity_from_config, private_channel_identity
+
+    request, agent, scope = inputs.request, inputs.context.agent, inputs.conversation.scope
+    if (not is_complete_local_admin_owner(agent.home_paths) or scope is None
+            or request.get("system_task") or request.get("host_im_task_ack")
+            or request.get("source") == "plugin"
+            or (request.get("metadata") or {}).get("plugin_execution_policy")):
+        return False
+    if actor is None:
+        return scope.channel in LOCAL_PRIVATE_CHANNELS
+    return private_channel_identity(request) is not None and _admin_channel_identity_from_config(agent.config, agent.home_paths.root, request) is not None

@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import math
 import os
+import select
 import stat
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -64,6 +67,7 @@ class _MonitorPolicy:
     stop_on_launcher_exit: bool = False
     listen_scope: str = "loopback"
     listen_scope_enforce: bool = True
+    source_bytes: object | None = field(default=None, kw_only=True, repr=False)
 
 
 # LLM: 只接收当前 v6 完整字段（含 listen_scope/listen_scope_enforce）；激活引用必须明确有值或 null，环境只继承父进程，
@@ -138,9 +142,10 @@ def _require_reservation(record: dict[str, object] | None) -> None:
 # LLM: 原资源锁内复查安装权威后才提交创建标记和 Popen；撤销后的冻结可看到所有已准入 child，异常保留真实清理事实。
 # 函数用途: 核对激活并启动精确归属命令，协议管道直连 child，终态仍写原资源账。
 def run_background_process_host(
-    store: ProcessSessionStore, session_id: str, spec_path: Path
+    store: ProcessSessionStore, session_id: str, spec_path: Path, *, secret_values: tuple[str, ...] | None = None
 ) -> int:
     child, birth = None, ""
+    capture = None
     try:
         spec = _read_launch_spec(store, session_id, spec_path)
         spec_path.unlink()
@@ -155,12 +160,14 @@ def run_background_process_host(
             _require_activation(spec, record, store)
             record = transaction.write({**record, "child_launch_started": True})
             # 留住未回收 child；短命令的出生身份必须先于任何 poll/wait 采集。
-            with _child_stdio(spec, record) as streams:
+            with _child_stdio(spec, record, sanitized=secret_values is not None) as streams:
                 child = subprocess.Popen(
                     spec["command_argv"], shell=False, cwd=record["cwd"], **streams,
                     env=dict(os.environ), start_new_session=os.name != "nt",
                     creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0,
                 )
+            if secret_values is not None and spec["io_mode"] == "log":
+                capture = _SanitizedBackgroundLog(child, Path(record["output_file"]), secret_values)
             if spec["io_mode"] == "stdio":
                 _release_host_pipes()
             birth = capture_process_birth_token(child.pid)
@@ -178,6 +185,7 @@ def run_background_process_host(
         return _monitor_child(store, session_id, child, birth, spec["max_log_bytes"], _MonitorPolicy(
             deadline_monotonic=spec["deadline_monotonic"], stop_on_launcher_exit=spec["stop_on_launcher_exit"],
             listen_scope=spec["listen_scope"], listen_scope_enforce=spec["listen_scope_enforce"],
+            source_bytes=capture,
         ))
     except Exception as exc:
         receipt = (
@@ -190,6 +198,8 @@ def run_background_process_host(
         _publish_failure(store, session_id, receipt, type(exc).__name__)
         return 1
     finally:
+        if capture is not None:
+            capture.finish()
         try:
             spec_path.unlink(missing_ok=True)
         except OSError:
@@ -217,8 +227,11 @@ def _require_activation(spec: dict, record: dict, store: ProcessSessionStore) ->
 # LLM: stdio 的 None 继承标准端点；日志关闭可抛错，调用方必须在退出上下文前拿到 Popen，保留精确清理权。
 # 函数用途: 为已校验模式准备子进程端点，继承后关闭 host 日志句柄，不转发或解码字节。
 @contextmanager
-def _child_stdio(spec: dict[str, object], record: dict[str, object]):
+def _child_stdio(spec: dict[str, object], record: dict[str, object], *, sanitized: bool = False):
     stdio = spec["io_mode"] == "stdio"
+    if sanitized and not stdio:
+        yield {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+        return
     with (nullcontext() if stdio else Path(record["output_file"]).open("ab")) as log:
         yield {"stdin": None if stdio else subprocess.DEVNULL,
                "stdout": None if stdio else log, "stderr": None if stdio else subprocess.STDOUT}
@@ -359,6 +372,8 @@ def _monitor_child(
         record = report.record
         reason = _stop_reason(record, max_log_bytes, deadline_monotonic=policy.deadline_monotonic,
                               stop_on_launcher_exit=policy.stop_on_launcher_exit)
+        if not reason and max_log_bytes > 0 and policy.source_bytes is not None and policy.source_bytes.bytes_seen > max_log_bytes:
+            reason = "log_limit_exceeded"
         now = time.monotonic()
         elapsed = now - started_monotonic
         if elapsed >= 60.0:
@@ -483,16 +498,69 @@ def _publish_failure(
 
 # LLM: 内部 CLI 只接原 Store、session 和一次性 spec；没有模型可指定的进程实例或任意状态路径。
 # 函数用途: 运行独立后台托管入口。
+
+class _SanitizedBackgroundLog:
+    """每路先净化再追加；计量原始字节，不把凭据写到日志或持久启动信封。"""
+    def __init__(self, child, path, values):
+        from .host_output_redaction import HostOutputStreamRedactor
+        self.bytes_seen = 0
+        self._lock = threading.Lock()
+        self._threads = []
+        self._stop = threading.Event()
+        for stream in (child.stdout, child.stderr):
+            sanitizer = HostOutputStreamRedactor(secret_values=values)
+            thread = threading.Thread(target=self._drain, args=(stream, path, sanitizer), daemon=True)
+            self._threads.append(thread)
+            thread.start()
+
+    def _drain(self, stream, path, sanitizer):
+        with stream, path.open("ab") as output:
+            while not self._stop.is_set():
+                if not select.select([stream], [], [], 0.1)[0]:
+                    continue
+                chunk = os.read(stream.fileno(), 4096)
+                if not chunk:
+                    break
+                safe = sanitizer.feed(chunk)
+                with self._lock:
+                    self.bytes_seen += len(chunk)
+                    output.write(safe)
+                    output.flush()
+            with self._lock:
+                output.write(sanitizer.finish())
+                output.flush()
+
+    def finish(self):
+        deadline = time.monotonic() + 1.0
+        for thread in self._threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(0.25)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--store", required=True)
     parser.add_argument("--session", required=True)
     parser.add_argument("--spec", required=True)
+    parser.add_argument("--redaction-fd", type=int)
     args = parser.parse_args(argv)
+    secrets = None
+    if args.redaction_fd is not None:
+        with os.fdopen(args.redaction_fd, "rb") as transport:
+            raw = transport.read(8 * 1024 * 1024 + 1)
+        if len(raw) > 8 * 1024 * 1024:
+            raise ValueError("HOST_REDACTION_TRANSPORT_TOO_LARGE")
+        values = json.loads(raw)
+        if not isinstance(values, list) or any(type(value) is not str for value in values):
+            raise ValueError("HOST_REDACTION_TRANSPORT_INVALID")
+        secrets = tuple(values)
     return run_background_process_host(
         ProcessSessionStore(args.store),
         validate_session_id(args.session),
         Path(args.spec).resolve(),
+        secret_values=secrets,
     )
 
 

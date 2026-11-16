@@ -147,9 +147,12 @@ class PtySession:
     # 保持 resize 返回原会话的契约；额外携带同一次 FD 借用内的内核读回值。
     resize_readback: tuple[int, int] | None = None
     owner_id: str = ""
+    output_sanitizer: object | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def append(self, chunk: bytes) -> None:
         with self.lock:
+            if self.output_sanitizer is not None:
+                chunk = self.output_sanitizer.feed(chunk)
             self.output.extend(chunk)
             self.next_cursor += len(chunk)
             overflow = len(self.output) - _MAX_BUFFER_BYTES
@@ -181,6 +184,8 @@ class PtyAccessScope:
     write_scope_denied_roots: tuple[str, ...] = ()
     network_access: bool = True
     protected_persona_root: str = ""
+    foreground_admin_full_access: bool = field(default=False, kw_only=True)
+    host_exclusive_paths: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 class _PtyReadableProcess(Protocol):
@@ -224,12 +229,16 @@ class _PtySandboxInputs:
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     protected_persona_root: object = None
     full_access_other_owner_homes: str = "read_only"
+    foreground_admin_full_access: bool = field(default=False, kw_only=True)
+    host_exclusive_paths: tuple[Path, ...] = field(default=(), kw_only=True)
+    host_output_redaction: object | None = field(default=None, kw_only=True, repr=False, compare=False)
 
 
 # LLM: 继承原宿主环境/网络上界，只增加独立人格根与会话空闲超时；由Shell宿主装配，不能从模型参数构造许可。
 # 类用途: 在原host_policy参数内同时携带PTY所需的来源保护根与会话空闲超时，避免继续增长启动参数。
 @dataclass(frozen=True)
 class PtyHostPolicy(SandboxHostPolicy):
+    host_output_redaction: object | None = field(default=None, kw_only=True, repr=False, compare=False)
     protected_persona_root: object = None
     idle_timeout_seconds: float | None = None
     max_sessions: int | None = None
@@ -286,6 +295,8 @@ def _pty_access_scope(
     run_scope: object = None,
     *, write_scope_denied_roots: tuple[Path, ...] = (), network_access: bool = True,
     protected_persona_root: object = None,
+    foreground_admin_full_access: bool = False,
+    host_exclusive_paths: tuple[Path, ...] = (),
 ) -> PtyAccessScope:
     owner = ""
     if owner_home:
@@ -312,6 +323,8 @@ def _pty_access_scope(
         )
     return PtyAccessScope(
         owner_home=owner,
+        foreground_admin_full_access=foreground_admin_full_access is True,
+        host_exclusive_paths=tuple(sorted(str(Path(path).resolve(strict=False)) for path in host_exclusive_paths)) if foreground_admin_full_access is True else (),
         conversation_id=process_access_scope(run_scope, owner).conversation_id,
         write_roots=normalized_roots,
         read_roots=normalized_read_roots,
@@ -428,7 +441,10 @@ class PtySessionRegistry:
             sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protection.absolute_paths,
                                         host_policy.private_roots, protection.denied_roots, host_policy.network_access,
                                         host_policy.host_credential_env_names, getattr(host_policy, "protected_persona_root", None),
-                                        host_policy.full_access_other_owner_homes)
+                                        host_policy.full_access_other_owner_homes,
+                                        foreground_admin_full_access=host_policy.foreground_admin_full_access is True and not owner_home and not host_policy.exact_read_scope,
+                                        host_exclusive_paths=host_policy.host_exclusive_paths if host_policy.foreground_admin_full_access is True else (),
+                                        host_output_redaction=getattr(host_policy, "host_output_redaction", None))
             with source_process_boundary():
                 return self._spawn(session_id, command, target, sandbox, run_scope, idle_timeout_seconds)
         finally:
@@ -460,6 +476,8 @@ class PtySessionRegistry:
             write_scope_denied_roots=sandbox.write_scope_denied_roots,
             network_access=sandbox.network_access,
             protected_persona_root=sandbox.protected_persona_root,
+            foreground_admin_full_access=sandbox.foreground_admin_full_access,
+            host_exclusive_paths=sandbox.host_exclusive_paths,
         )
         exec_arg, use_shell = _sandbox_exec(
             command,
@@ -470,7 +488,10 @@ class PtySessionRegistry:
             read_roots=sandbox.read_roots,
             write_protection=SandboxWriteProtection(tuple(sandbox.protected_write_paths or ()), sandbox.write_scope_denied_roots),
             host_policy=SandboxHostPolicy(sandbox.private_roots, sandbox.network_access,
-                                          full_access_other_owner_homes=sandbox.full_access_other_owner_homes),
+                                          host_credential_env_names=sandbox.host_credential_env_names if sandbox.foreground_admin_full_access else frozenset(),
+                                          full_access_other_owner_homes=sandbox.full_access_other_owner_homes,
+                                          foreground_admin_full_access=sandbox.foreground_admin_full_access,
+                                          host_exclusive_paths=sandbox.host_exclusive_paths),
         )
         with self._lock:
             launch = self._pending_starts[session_id]
@@ -490,7 +511,8 @@ class PtySessionRegistry:
                 start_new_session=True,
                 close_fds=True,
                 env=_subprocess_text_env(owner_home, hidden_roots=tuple(str(root) for root in sandbox.private_roots),
-                                         sandboxed=True, host_credential_env_names=sandbox.host_credential_env_names),
+                                         sandboxed=True, host_credential_env_names=sandbox.host_credential_env_names,
+                                         foreground_admin_full_access=sandbox.foreground_admin_full_access),
             )
         except BaseException:
             os.close(master_fd)
@@ -498,7 +520,11 @@ class PtySessionRegistry:
             raise
         launch.spawned = True
         tail_hold_fd = _hold_slave_for_tail(slave_fd)
+        from .host_output_redaction import HostOutputStreamRedactor
+        redaction = sandbox.host_output_redaction
+        sanitizer = HostOutputStreamRedactor(secret_values=redaction.snapshot.secret_values) if redaction is not None else None
         session = PtySession(
+            output_sanitizer=sanitizer,
             session_id=session_id,
             command=command,
             process=PtyOwnedProcess(process),
@@ -765,6 +791,17 @@ def _prune_finished_sessions(registry: PtySessionRegistry, *, keep_count: int | 
 # LLM: 关闭挡住新写准入并等待全部FD借用；既有写等待输出时仍允许排空，避免双向背压互等。
 # 函数用途: 等实际IO结束后幂等关闭master fd；不以FD关闭冒充进程树退出。
 def _close_session_fd(session: PtySession) -> None:
+    with session.lock:
+        sanitizer = getattr(session, "output_sanitizer", None)
+        if sanitizer is not None:
+            tail = sanitizer.finish()
+            session.output_sanitizer = None
+            session.output.extend(tail)
+            session.next_cursor += len(tail)
+            overflow = len(session.output) - _MAX_BUFFER_BYTES
+            if overflow > 0:
+                del session.output[:overflow]
+                session.base_cursor += overflow
     with session.io_condition:
         if session.closed:
             return
@@ -1003,6 +1040,8 @@ class TerminalSessionTool(BaseTool):
             write_scope_denied_roots=getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ()),
             network_access=getattr(self.shell_tool, "_sandbox_network_access", True),
             protected_persona_root=self.shell_tool.protected_persona_root,
+            foreground_admin_full_access=self.shell_tool.path_access_policy.foreground_admin_full_access,
+            host_exclusive_paths=getattr(self.shell_tool, "host_exclusive_paths", ()) if self.shell_tool.path_access_policy.foreground_admin_full_access is True else (),
         )
 
     # LLM: Action dispatch is the sole model-facing PTY control switch. Keep schema, effect
@@ -1076,6 +1115,9 @@ class TerminalSessionTool(BaseTool):
                     self.shell_tool.host_credential_env_names,
                     self.shell_tool.protected_persona_root,
                     full_access_other_owner_homes=getattr(self.shell_tool, "full_access_other_owner_homes", "read_only"),
+                    foreground_admin_full_access=self.shell_tool.path_access_policy.foreground_admin_full_access,
+                    host_exclusive_paths=getattr(self.shell_tool, "host_exclusive_paths", ()) if self.shell_tool.path_access_policy.foreground_admin_full_access is True else (),
+                    host_output_redaction=getattr(self.shell_tool, "_host_output_redaction", None),
                     idle_timeout_seconds=timeout,
                     max_sessions=getattr(self.shell_tool, "pty_max_sessions", None),
                     max_sessions_per_owner=getattr(self.shell_tool, "pty_max_sessions_per_owner", None),

@@ -101,6 +101,7 @@ class ToolExecution:
 # 类用途: 保存唯一执行器本次调用与宿主权限快照，不执行副作用。
 @dataclass(frozen=True)
 class ToolExecutorRequest:
+    host_output_redaction: object | None = field(default=None, kw_only=True, repr=False, compare=False)
     call: ToolCall
     runtime_snapshot: ToolRuntimeSnapshot
     workspace_root: Path
@@ -158,6 +159,13 @@ class ToolExecutor:
     # LLM: 协议代次只读宿主trusted_run_context；v1归一与已退役叶子别名解码均发生在schema/effect/审批/claim前，不变更调用ID与幂等键。
     # 函数用途: 在唯一执行链前解码旧输入与已退役业务别名，保留原请求迁移事实而不重执行历史。
     def execute(self, request: ToolExecutorRequest) -> ToolExecution:
+        if request.host_output_redaction is None:
+            return self._execute(request)
+        from ..common.log_redaction import configured_secret_redaction
+        with configured_secret_redaction(request.host_output_redaction.snapshot.secret_values):
+            return self._execute(request)
+
+    def _execute(self, request: ToolExecutorRequest) -> ToolExecution:
         from .versioned_input_decoder import (
             dead_business_spaces_redirect,
             decode_retired_tool_call,
@@ -190,7 +198,7 @@ class ToolExecutor:
                 return ToolExecution(
                     original,
                     decision,
-                    _decision_result(original, decision, time.monotonic()),
+                    _decision_result(original, decision, time.monotonic(), host_authorization_identity=(request.write_boundary or {}).get("host_authorization_identity")),
                     ("received", "validation_failed", "projected"),
                 )
             migration = {
@@ -232,7 +240,7 @@ class ToolExecutor:
             return ToolExecution(
                 original,
                 decision,
-                _decision_result(original, decision, time.monotonic()),
+                _decision_result(original, decision, time.monotonic(), host_authorization_identity=(request.write_boundary or {}).get("host_authorization_identity")),
                 ("received", "persisted", "projected"),
             )
 
@@ -261,7 +269,7 @@ class ToolExecutor:
                 return ToolExecution(
                     original,
                     decision,
-                    _decision_result(original, decision, time.monotonic()),
+                    _decision_result(original, decision, time.monotonic(), host_authorization_identity=(request.write_boundary or {}).get("host_authorization_identity")),
                     ("received", "validation_failed", "projected"),
                 )
             if alias_decoded is not None:
@@ -276,7 +284,7 @@ class ToolExecutor:
                     return ToolExecution(
                         original,
                         denial,
-                        _decision_result(original, denial, time.monotonic()),
+                        _decision_result(original, denial, time.monotonic(), host_authorization_identity=(request.write_boundary or {}).get("host_authorization_identity")),
                         ("received", "persisted", "projected"),
                     )
                 prior = dict(original.input_migration) if original.input_migration else {}
@@ -313,7 +321,7 @@ class ToolExecutor:
         runtime = request.runtime_snapshot.runtime(request.call.tool_name)
         if runtime is None:
             decision = _missing_snapshot_runtime_decision(request.runtime_snapshot, request.call.tool_name)
-            result = _decision_result(request.call, decision, started_at)
+            result = _decision_result(request.call, decision, started_at, host_authorization_identity=(request.write_boundary or {}).get("host_authorization_identity"))
             return ToolExecution(
                 request.call,
                 decision,
@@ -337,7 +345,7 @@ class ToolExecutor:
             if normalization_details:
                 evidence["error_details"] = normalization_details
             decision = ActionDecision("deny", (normalization_error,), evidence)
-            result = _decision_result(call, decision, started_at, input_sources=sources)
+            result = _decision_result(call, decision, started_at, input_sources=sources, host_authorization_identity=(request.write_boundary or {}).get("host_authorization_identity"))
             return ToolExecution(call, decision, result, (*states, "persisted", "projected"))
 
         if _cancelled(request):
@@ -388,7 +396,7 @@ class ToolExecutor:
         states.extend(("validated", "authorized"))
         if not decision.allowed:
             states.append("approval_pending" if decision.status == "ask" else "failed")
-            result = _decision_result(call, decision, started_at, input_sources=sources)
+            result = _decision_result(call, decision, started_at, input_sources=sources, host_authorization_identity=(request.write_boundary or {}).get("host_authorization_identity"))
             return ToolExecution(call, decision, result, (*states, "persisted", "projected"))
 
         return _execute_authorized(
@@ -415,7 +423,7 @@ def _execute_authorized(
         if availability is not None:
             denial = _precheck_denial(decision, availability, "post_approval")
             states.append("failed")
-            return ToolExecution(call, denial, _decision_result(call, denial, started_at, input_sources=sources),
+            return ToolExecution(call, denial, _decision_result(call, denial, started_at, input_sources=sources, host_authorization_identity=(request.write_boundary or {}).get("host_authorization_identity")),
                                  (*states, "persisted", "projected"))
         # 审批等待之后、领取与handler之前复核受管原代次；失效时不进入handler。
         generation_outcome = _managed_generation_denial(call.tool_name, "tool_after_approval")
@@ -467,6 +475,10 @@ def _execute_authorized(
         liveness.close()
     states.append("succeeded" if outcome.ok else _outcome_state(outcome))
     states.append("reconciled")
+    if request.host_output_redaction is not None:
+        from .host_output_redaction import redact_host_tool_outcome
+        redaction = request.host_output_redaction
+        outcome = redact_host_tool_outcome(outcome, snapshot=redaction.snapshot, force_default=redaction.force_default)
     projection = _project_output(request, call, runtime, outcome)
     result = _canonical_result(
         call,
@@ -572,6 +584,10 @@ def _pre_handler_failure_execution(
 ) -> ToolExecution:
     states = progress.states
     states.append("failed")
+    if request.host_output_redaction is not None:
+        from .host_output_redaction import redact_host_tool_outcome
+        redaction = request.host_output_redaction
+        outcome = redact_host_tool_outcome(outcome, snapshot=redaction.snapshot, force_default=redaction.force_default)
     projection = _project_output(request, call, runtime, outcome)
     result = _canonical_result(
         call,
@@ -817,6 +833,7 @@ def _decision_result(
     started_at: float,
     *,
     input_sources: tuple[ToolInputSource, ...] = (),
+    host_authorization_identity: dict[str, object] | None = None,
 ) -> ToolResult:
     code = decision.reason_codes[0] if decision.reason_codes else "RUNTIME_GATE_DENIED"
     stage = str(decision.evidence.get("failure_stage") or "authorization")
@@ -832,6 +849,10 @@ def _decision_result(
         err_details = {"issues": decision.evidence["issues"][:8]}
         if isinstance(decision.evidence.get("allowed_parameters"), list):
             err_details["allowed_parameters"] = list(decision.evidence["allowed_parameters"][:32])
+    if status == "approval_required":
+        identity = host_authorization_identity if isinstance(host_authorization_identity, dict) else {}
+        err_details = {**(err_details or {}), **{key: redact_sensitive_text(str(identity.get(key) or "unknown"))[:256]
+            for key in ("actor", "owner", "required_identity", "next_step")}}
     if err_details is not None:
         metadata["error_details"] = err_details
     raw_next = decision.evidence.get("next_action")
@@ -1289,6 +1310,7 @@ def _invoke_request(
     owner_id = trusted.get("owner_id", "")
     return RegistryToolInvokeRequest(
         tool_name=call.tool_name,
+        host_output_redaction=request.host_output_redaction,
         arguments=payload,
         tools=tools,
         workspace_root=request.workspace_root,
@@ -1431,6 +1453,10 @@ def _project_output(
     outcome: ToolHandlerOutcome,
 ) -> ToolOutputProjection:
     """归档后只补安全诊断；失败不再写同一磁盘，不撤销或重放已执行 handler。"""
+    if request.host_output_redaction is not None:
+        from .host_output_redaction import redact_host_tool_outcome
+        redaction = request.host_output_redaction
+        outcome = redact_host_tool_outcome(outcome, snapshot=redaction.snapshot, force_default=redaction.force_default)
     if request.output_archiver is not None:
         try:
             return request.output_archiver(call, outcome)
