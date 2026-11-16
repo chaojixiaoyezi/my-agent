@@ -45,7 +45,7 @@ def test_keyset_cross_instance_sparse_filters_and_canonical_wins(tmp_path):
             cursor = page["next_cursor"]
             if not cursor:
                 break
-    assert ids == [f"r{i:05}" for i in range(7)] and scanned == 7
+    assert ids == [f"r{i:05}" for i in reversed(range(7))] and scanned == 7
     first = GatewayHistoryIndex(paths).audit_page(query(status="failed"))
     assert first["entries"] == [] and first["next_cursor"]
     with pytest.raises(ValueError, match="mismatch"):
@@ -166,3 +166,21 @@ def test_archived_terminal_point_lookup_does_not_rebuild_missing_locator(tmp_pat
     page = request_outcome_records(paths, query(request_id="r00000"))
     assert page["coverage"]["status"] == "partial"
     assert before == {str(path) for path in paths.root.rglob("*")}
+
+
+def test_backfill_quarantines_oversized_row_and_durably_advances(tmp_path):
+    paths = seed(tmp_path, 2)
+    index = GatewayHistoryIndex(paths)
+    with index.connection() as conn:
+        conn.execute("DELETE FROM audit_keys")
+        conn.execute("UPDATE history SET body=? WHERE request_id='r00000'", (json.dumps({"id": "r00000", "goal": "x" * 1000000}),))
+        index._set_meta(conn, "audit_cursor", 0)
+        index._set_meta(conn, "audit_complete", 0)
+    first = index.backfill_audit_step(limit=1)
+    assert first["items"] == 1 and first["bytes"] <= 262145
+    second = GatewayHistoryIndex(paths).backfill_audit_step(limit=1)
+    assert second["cursor"] > first["cursor"]
+    GatewayHistoryIndex(paths).backfill_audit_step(limit=1)
+    page = GatewayHistoryIndex(paths).audit_page(query())
+    assert [row["request_id"] for row in page["entries"]] == ["r00001"]
+    assert page["coverage"]["status"] == "partial"

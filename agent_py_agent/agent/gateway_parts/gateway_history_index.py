@@ -54,9 +54,9 @@ class GatewayHistoryIndex:
                 conn.execute("CREATE TABLE IF NOT EXISTS migration_fragment (singleton INTEGER PRIMARY KEY, body BLOB NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS audit_keys (request_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, thread_id TEXT NOT NULL, recorded_at REAL NOT NULL, status TEXT NOT NULL, error_code TEXT NOT NULL, channel TEXT NOT NULL)")
                 conn.execute("CREATE INDEX IF NOT EXISTS audit_owner ON audit_keys(owner_id,request_id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS audit_time ON audit_keys(recorded_at DESC,request_id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS audit_error ON audit_keys(error_code,recorded_at DESC,request_id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS audit_channel ON audit_keys(channel,recorded_at DESC,request_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS audit_time_seek ON audit_keys(recorded_at DESC,request_id DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS audit_error_seek ON audit_keys(error_code,recorded_at DESC,request_id DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS audit_channel_seek ON audit_keys(channel,recorded_at DESC,request_id DESC)")
                 if self._meta(conn, "initialized") != "1":
                     self._initialize(conn)
                 yield conn
@@ -341,19 +341,28 @@ class GatewayHistoryIndex:
 
     def _backfill_audit_step(self, conn, *, limit):
         after = int(self._meta(conn, "audit_cursor", "0"))
-        rows = conn.execute("SELECT rowid,request_id,body FROM history WHERE rowid>? ORDER BY rowid LIMIT ?",
-                            (after, min(128, max(1, limit)))).fetchall()
-        for row in rows:
+        used, visited, complete = 0, 0, False
+        deadline = time.monotonic() + .05
+        while visited < min(128, max(1, limit)) and used < 1024 * 1024 and time.monotonic() < deadline:
+            row = conn.execute("SELECT rowid,request_id,substr(body,1,262145) AS body FROM history WHERE rowid>? ORDER BY rowid LIMIT 1",
+                               (after,)).fetchone()
+            if row is None:
+                complete = True
+                break
+            visited += 1
+            used += len(row["body"].encode())
             try:
+                if len(row["body"]) >= 262145:
+                    raise ValueError("audit_projection_source_exceeds_slice")
                 self._audit_key(conn, row["request_id"], json.loads(row["body"]))
             except (ValueError, TypeError, AttributeError, OverflowError):
-                self._migration_error(conn, row["rowid"], "audit_projection_row_invalid")
+                self._set_meta(conn, "audit_error_rowid", row["rowid"])
+                self._set_meta(conn, "audit_error_code", "audit_projection_row_invalid_or_oversized")
                 self._set_meta(conn, "audit_invalid", 1)
             after = row["rowid"]
         self._set_meta(conn, "audit_cursor", after)
-        complete = len(rows) < min(128, max(1, limit))
         self._set_meta(conn, "audit_complete", int(complete))
-        return {"items": len(rows), "bytes": sum(len(row["body"].encode()) for row in rows), "complete": complete, "cursor": after}
+        return {"items": visited, "bytes": used, "complete": complete, "cursor": after}
 
     def maintenance_step(self, *, cutoff):
         """原lane的一次写门：先补缺失键，再沿原retention游标执行。"""

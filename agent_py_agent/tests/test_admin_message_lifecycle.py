@@ -13,7 +13,7 @@ def test_recursive_metadata_drops_source_bodies():
     raw = {"task_id": "t1", "title": secret, "goal": secret, "args_summary": secret, "raw_error": secret,
            "reply_receipt_summaries": [{"state": "observed", "recipient": secret, "body": secret,
                                         "components": [{"body": secret}], "duration_ms": 12}],
-           "stages_ms": {"prepare_ms": 3, "error": secret}}
+           "stages_ms": {"prepare_ms": 3, "error": secret, "total_ms": 10 ** 1000}}
     out = metadata_only(raw)
     assert secret not in json.dumps(out)
     assert out["reply_receipt_summaries"] == [{"state": "observed", "duration_ms": 12}]
@@ -79,6 +79,7 @@ def test_tool_calls_use_real_retained_reader_and_do_not_expose_summaries(tmp_pat
     from agent_py_agent.agent.tooling.audit_tool_calls_topic import tool_calls_topic
 
     home = tmp_path / "owner"
+    home.mkdir(mode=0o700)
     ledger = ToolTelemetryLedger(home, owner_id="local/main")
     for i in range(4):
         ledger.record_tool_call({"call_id": f"c{i}", "tool_name": "read", "started_at": i, "ended_at": i + 1,
@@ -99,3 +100,24 @@ def test_tool_calls_use_real_retained_reader_and_do_not_expose_summaries(tmp_pat
     assert parsed[4] == 0
     next_page = tool_calls_topic(agent, replace(q, cursor=token))["tool_calls"]
     assert {row["call_id"] for row in page["entries"]}.isdisjoint(row["call_id"] for row in next_page["entries"])
+
+
+def test_control_operation_reads_original_runtime_binding(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.runtime_db.host_commands import HostCommandRequest
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+    from agent_py_agent.agent.tooling.audit_lifecycle_topic import _runtime_evidence
+
+    home = tmp_path / "owner"
+    home.mkdir(mode=0o700)
+    repo = RuntimeRepository(runtime_db_path(home))
+    request = HostCommandRequest("local/main", "actor", "feishu", "thread", "request", "status", "0" * 64)
+    binding = repo.register_host_command(request)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home, owner_id="local/main"))
+    entry = {"owner_id": "local/main", "operation_id": request.operation_id}
+    result = _runtime_evidence(agent, entry)
+    assert result["control_operation"]["attempt_id"] == binding.attempt_id
+    assert result["attempt"]["status"] == "pending"
+    assert "goal" not in result["task"]

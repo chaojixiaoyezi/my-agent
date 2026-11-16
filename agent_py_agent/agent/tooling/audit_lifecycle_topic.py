@@ -18,18 +18,24 @@ _TIMING_FIELDS = _NUMBERS | frozenset(("prepare_ms", "queue_wait_ms", "agent_ini
     "resume_check_ms", "run_ms", "total_ms", "turn_started_ms", "local_store_read_ms", "local_store_write_ms"))
 
 
+def finite_number(value):
+    """有限标量；过大整数不能让math.isfinite转换溢出。"""
+    return (type(value) is int and value.bit_length() <= 1023
+            or type(value) is float and math.isfinite(value))
+
+
 def metadata_only(value):
     """递归仅保留契约 ID、状态码与有限数值；自由文本和未知对象默认丢弃。"""
     if not isinstance(value, dict):
         return {}
     result = {}
     for key, item in value.items():
-        if key in _IDENTIFIERS and isinstance(item, str) and len(item) <= 256 or key in _NUMBERS and type(item) in (int, float) and math.isfinite(item):
+        if key in _IDENTIFIERS and isinstance(item, str) and len(item) <= 256 or key in _NUMBERS and finite_number(item):
             result[key] = item
         elif key in _CONTAINERS:
             if key in ("timestamps", "request_stage_timing", "stages_ms") and isinstance(item, dict):
                 result[key] = {name: number for name, number in item.items() if name in _TIMING_FIELDS
-                               and type(number) in (int, float) and math.isfinite(number)}
+                               and finite_number(number)}
             elif isinstance(item, list):
                 result[key] = [metadata_only(row) for row in item[:100] if isinstance(row, dict)]
             elif isinstance(item, dict):
@@ -54,6 +60,7 @@ def _runtime_evidence(agent, entry):
     import json
     import sqlite3
 
+    from ..runtime_db.operations import RuntimeConflictError
     from ..runtime_db.repository import RuntimeRepository
     from ..runtime_db.schema import runtime_db_path
 
@@ -100,5 +107,5 @@ def _runtime_evidence(agent, entry):
         else:
             result["model_coverage"] = {"status": "unavailable", "reason": "model_reader_unavailable"}
         return result
-    except (OSError, ValueError, sqlite3.DatabaseError) as error:
+    except (OSError, ValueError, sqlite3.DatabaseError, RuntimeConflictError) as error:
         return {"coverage": {"status": "unavailable", "reason": type(error).__name__}}

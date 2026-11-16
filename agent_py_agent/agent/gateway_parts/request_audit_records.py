@@ -158,18 +158,29 @@ def _outcome_in_scope(payload: dict, owner_id: str, query: OutcomeQuery) -> bool
 #   另附按状态、错误码、渠道的计数。只读，不写任何文件。
 # 函数用途: 读取窗口内的请求结果，回答“哪些请求失败了、为什么、属于谁”。
 def request_outcome_records(paths: object, query: OutcomeQuery) -> dict:
+    import base64
+    import hashlib
+    import json
+    from dataclasses import replace
+
     from .gateway_history_index import GatewayHistoryIndex
 
     _validate_query(query)
-    from dataclasses import replace
+    binding = hashlib.sha256(json.dumps([str(paths.root), sorted(query.allowed_owners) if query.allowed_owners is not None else None,
+        query.thread_id, query.since, query.until, query.limit, query.error_code, query.channel, query.status]).encode()).hexdigest()
+    if query.cursor.startswith("h0:"):
+        try:
+            state = json.loads(base64.urlsafe_b64decode(query.cursor[3:]))
+            if state.get("binding") != binding:
+                raise ValueError("audit.cursor history transition scope/filter/window mismatch; restart without cursor; not_started")
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ValueError("audit.cursor history transition invalid or mismatched; restart without cursor; not_started") from error
     if query.request_id or query.cursor.startswith(("h:", "h0:")):
         page = GatewayHistoryIndex(paths).audit_page(replace(query, cursor=(query.cursor[2:] if query.cursor.startswith("h:") else "")))
         if page.get("next_cursor"):
             page["next_cursor"] = "h:" + page["next_cursor"]
         return page
-    import base64
-    import json
-    history_start = "h0:" + base64.urlsafe_b64encode(json.dumps({"since": query.since, "until": query.until}).encode()).decode()
+    history_start = "h0:" + base64.urlsafe_b64encode(json.dumps({"since": query.since, "until": query.until, "binding": binding}).encode()).decode()
     active = replace(query, cursor=query.cursor[2:] if query.cursor.startswith("q:") else query.cursor)
     for _ in range(2):
         page = request_queue_records(paths, active)
@@ -203,8 +214,7 @@ __all__ = ["UNATTRIBUTED_OWNER", "OutcomeQuery", "decision_observation_records",
 
 def _validate_query(query):
     """直接调用者同样先校验，任意编号不能转换成目录遍历。"""
-    import math
-
+    from ..tooling.audit_lifecycle_topic import finite_number
     from .recovery_pending_index import projection_key
 
     if type(query.limit) is not int or not 1 <= query.limit <= 100:
@@ -221,7 +231,7 @@ def _validate_query(query):
             raise ValueError(f"audit.{field} requires bounded string; not_started")
     for field in ("since", "until", "min_duration_ms"):
         value = getattr(query, field)
-        if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
+        if value is not None and (not finite_number(value) or value < 0):
             raise ValueError(f"audit.{field} requires finite nonnegative number; not_started")
     if query.until is not None and query.until < query.since:
         raise ValueError("audit.until precedes since; not_started")
@@ -285,11 +295,9 @@ def _filtered_entry(paths, request_id, query, budget=None):
 
 
 def _numeric_map(value):
-    import math
-
-    from ..tooling.audit_lifecycle_topic import _TIMING_FIELDS
+    from ..tooling.audit_lifecycle_topic import _TIMING_FIELDS, finite_number
     return {key: item for key, item in value.items() if key in _TIMING_FIELDS
-            and type(item) in (int, float) and math.isfinite(item)} if isinstance(value, dict) else {}
+            and finite_number(item)} if isinstance(value, dict) else {}
 
 
 def _index_audit_page(index, query):
@@ -309,7 +317,8 @@ def _index_audit_page(index, query):
             return _audit_result([entry] if entry else [], scanned=1, complete=bool(entry),
                                  reason="" if entry else "no_authorized_observation")
         except (OSError, ValueError, sqlite3.DatabaseError) as error:
-            return _audit_result(scanned=1, unreadable=1, reason=type(error).__name__)
+            return {**_audit_result(scanned=1, unreadable=1, reason=type(error).__name__),
+                    "read_error": _read_failure(error)}
     fingerprint = hashlib.sha256(json.dumps([sorted(query.allowed_owners) if query.allowed_owners is not None else None,
         query.thread_id, query.since, query.until, query.error_code, query.channel, query.status,
         query.limit], sort_keys=True).encode()).hexdigest()
@@ -328,7 +337,7 @@ def _index_audit_page(index, query):
         with private_projection_connection(index.path, read_only=True, blocking=False, deadline=deadline) as conn:
             conn.row_factory = sqlite3.Row
             conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 500)
-            generation = f"{info.st_dev}:{info.st_ino}:" + index._meta(conn, "audit_revision", "0")
+            generation = f"{info.st_dev}:{info.st_ino}:audit-v2:" + index._meta(conn, "audit_revision", "0")
             if state.get("generation") and state.get("generation") != generation:
                 raise ValueError("audit.cursor source generation changed; restart without cursor; not_started")
             after = state.get("after", "")
@@ -337,8 +346,8 @@ def _index_audit_page(index, query):
             if after:
                 if not isinstance(after, str) or type(after_stamp) not in (int, float):
                     raise ValueError("audit.cursor invalid seek key; restart without cursor; not_started")
-                clauses.append("(recorded_at<? OR (recorded_at=? AND request_id>?))")
-                args.extend((after_stamp, after_stamp, after))
+                clauses.append("(recorded_at,request_id)<(?,?)")
+                args.extend((after_stamp, after))
             if query.until is not None:
                 clauses.append("recorded_at<=?")
                 args.append(query.until)
@@ -348,9 +357,10 @@ def _index_audit_page(index, query):
                 clauses.append(source_field + "=?")
                 args.append(getattr(query, source_field))
             rows = conn.execute("SELECT request_id,recorded_at FROM audit_keys WHERE " + " AND ".join(clauses)
-                                + " ORDER BY recorded_at DESC,request_id LIMIT ?",
+                                + " ORDER BY recorded_at DESC,request_id DESC LIMIT ?",
                                 (*args, min(_SCAN_LIMIT_COUNT, query.limit))).fetchall()
-            complete = index._meta(conn, "audit_complete") == "1" and index._meta(conn, "audit_invalid") != "1"
+            invalid_projection = index._meta(conn, "audit_invalid") == "1"
+            complete = index._meta(conn, "audit_complete") == "1" and not invalid_projection
             if query.since > 0 and conn.execute("SELECT 1 FROM audit_keys WHERE recorded_at=0 LIMIT 1").fetchone():
                 complete = False
             for row in rows:
@@ -372,10 +382,10 @@ def _index_audit_page(index, query):
             stopped = scanned < len(rows)
             return _audit_result(entries, scanned=scanned, unreadable=unreadable, next_cursor=next_cursor,
                 complete=complete and not unreadable and not stopped,
-                reason="source_budget_exhausted" if stopped else "" if complete else "projection_backfill_incomplete")
+                reason="source_budget_exhausted" if stopped else "projection_backfill_invalid_or_oversized" if invalid_projection else "" if complete else "projection_backfill_incomplete")
     except (OSError, sqlite3.DatabaseError) as error:
-        return _audit_result(entries, scanned=scanned, unreadable=unreadable,
-                             reason="projection_unavailable:" + type(error).__name__)
+        return {**_audit_result(entries, scanned=scanned, unreadable=unreadable, next_cursor=query.cursor,
+                             reason="projection_unavailable:" + type(error).__name__), "read_error": _read_failure(error)}
 
 
 def request_queue_records(paths, query):
@@ -445,15 +455,22 @@ def request_queue_records(paths, query):
                     from . import queue_service
                     observe = getattr(queue_service, "observe_pending_request", None)
                     if callable(observe) and folder == paths.inbox:
-                        observation = observe(paths, name[:-5], blocking=False, deadline=deadline)
-                        for field in ("state", "wait_reason", "orphan_reason", "coverage"):
-                            if field in observation:
-                                queue_entry[field] = observation[field]
+                        try:
+                            observation = observe(paths, name[:-5], blocking=False, deadline=deadline)
+                            for field in ("state", "wait_reason", "orphan_reason", "coverage"):
+                                if field in observation:
+                                    queue_entry[field] = observation[field]
+                        except (OSError, ValueError, sqlite3.DatabaseError) as error:
+                            queue_entry["coverage"] = {"status": "partial", "reason": "pending_observation_unavailable"}
+                            queue_entry["read_error"] = _read_failure(error)
                     entries.append(queue_entry)
             except (OSError, ValueError, sqlite3.DatabaseError):
                 unreadable += 1
     except FileNotFoundError:
         complete, generation, tail, end = True, "missing", [], True
+    except OSError as error:
+        return {**_audit_result(entries, scanned=scanned, unreadable=unreadable + 1, next_cursor=query.cursor,
+                               reason="active_source_unavailable"), "read_error": _read_failure(error)}
     if complete and phase == 0:
         phase, cookie, generation, complete = 1, "", "", False
     next_state = {"filter": fingerprint, "phase": phase, "cookie": cookie, "tail": tail, "end": end, "since": query.since, "until": query.until}
@@ -584,3 +601,15 @@ def _archived_request_bytes(paths, path):
     if record.get("path") != relative or record.get("digest") != digest or hashlib.sha256(body).hexdigest() != digest:
         raise ValueError("archive_digest_mismatch")
     return body
+
+
+def _read_failure(error):
+    """异常只公开类型、系统/SQLite编号和JSON位置，不回传文件名或坏正文。"""
+    cause = error.__cause__ or error
+    facts = {"error_type": type(error).__name__, "cause_type": type(cause).__name__,
+             "error_code": getattr(cause, "sqlite_errorname", None) or "AUDIT_SOURCE_READ_UNAVAILABLE",
+             "effect_outcome": "not_started", "next_action": "保留 unknown；核实原索引存在、权限和维护覆盖，再原样重试此只读查询。"}
+    for key in ("errno", "sqlite_errorcode", "lineno", "colno"):
+        if type(getattr(cause, key, None)) is int:
+            facts[key] = getattr(cause, key)
+    return facts
