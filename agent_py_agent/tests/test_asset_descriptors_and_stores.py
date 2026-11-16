@@ -962,7 +962,7 @@ def test_global_lock_conflicts_fail_closed(api, tmp_path, monkeypatch, kind, cha
     user = scoped_store(api, tmp_path / 'owners/local/main', kind)
     if change == 'born_during_read':
         lock.unlink()
-    original_read, original_flock = module._AssetStore._read, module._flock_descriptor
+    original_read, original_flock = module._AssetStore._read, module._flock_shared_descriptor
 
     # LLM: 仅替换测试共享锁的真实inode，保留数据及其它锁不变；复现不能依赖随机sleep。
     # 函数用途: 制造可确定观测到的全局锁身份变化。
@@ -987,7 +987,7 @@ def test_global_lock_conflicts_fail_closed(api, tmp_path, monkeypatch, kind, cha
             replace_lock()
 
     monkeypatch.setattr(module._AssetStore, '_read', read_during_change)
-    monkeypatch.setattr(module, '_flock_descriptor', lock_after_change)
+    monkeypatch.setattr(module, '_flock_shared_descriptor', lock_after_change)
     with pytest.raises(BlockingIOError, match='全局.*锁'):
         getattr(user, f'get_{kind}')('shared')
 

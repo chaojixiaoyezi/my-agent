@@ -12,7 +12,7 @@ from dataclasses import fields, replace
 from pathlib import Path
 
 from ..capability.skills import split_skill_frontmatter
-from ..common.json_io import _flock_descriptor, _funlock_descriptor, locked_json_path
+from ..common.json_io import _flock_shared_descriptor, _funlock_descriptor, locked_json_path
 from ..common.nofollow_fs import (
     NoFollowPathError,
     _supports_dir_fd,
@@ -94,7 +94,7 @@ def _read_lock(root, parts):
         pass
     try:
         if descriptor is not None:
-            _flock_descriptor(descriptor)
+            _flock_shared_descriptor(descriptor)
         _check_lock(root, parts, descriptor)
         try:
             yield

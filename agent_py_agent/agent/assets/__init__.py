@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 
-from ..common.json_io import _flock_descriptor, _funlock_descriptor, locked_json_path
+from ..common.json_io import _flock_shared_descriptor, _funlock_descriptor, locked_json_path
 from ..common.nofollow_fs import (
     _portable_directory,
     _supports_dir_fd,
@@ -241,7 +241,7 @@ class _AssetStore:
                 self._check_readonly_lock(None)
             return
         try:
-            _flock_descriptor(descriptor)
+            _flock_shared_descriptor(descriptor)
             try:
                 self._check_readonly_lock(descriptor)
                 yield

@@ -802,6 +802,15 @@ def _flock_descriptor(descriptor: int, *, blocking: bool = True) -> None:
         warn_file_lock_unavailable_once()
 
 
+# LLM: 只读快照只需与写者互斥，读者之间共享同一锁文件；Windows/无OS锁平台沿原排他协议，解锁仍走 _funlock_descriptor。
+# 函数用途: 在同一锁文件FD上取得POSIX共享锁。
+def _flock_shared_descriptor(descriptor: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+    else:
+        _flock_descriptor(descriptor)
+
+
 # LLM: 并发 + 非阻塞模式下阻塞取锁会把调用方的“立即返回”语义变成挂起，故只在非阻塞失败时抛原竞争错误。
 # LLM: Windows取锁/解锁均定位首字节，不依赖调用者当前文件位置。
 # 函数用途: 释放同一FD上的跨平台排他锁。
