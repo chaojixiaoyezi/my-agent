@@ -12,21 +12,24 @@ REQUEST_SOURCES = ("gateway_request_records", "error_taxonomy")
 # LLM: 线程编号只来自各 owner 自己的会话库（只读打开）；读失败只计数。all_owners 最多覆盖 max_owners 个 owner。
 # 函数用途: 按范围算出允许的 owner 集合与旧记录归属用的线程映射。
 def _scope_owners(agent: object, query: object, max_owners: int) -> tuple[frozenset | None, dict, dict]:
-    from ..user_space.owner_admin_controls import list_owner_home_paths
-    from .audit_records_tool import _owner_host, _thread_ids
-
-    home = agent.home_paths
-    own_id = str(home.owner_id or "local/main")
-    if query.scope != "all_owners":
-        ids, errors = _thread_ids(agent.conversation_store)
-        return frozenset({own_id}), dict.fromkeys(ids, own_id), {"unreadable_thread_records": errors}
-    homes, truncated = list_owner_home_paths(home, limit=max_owners)
-    thread_owners, errors = {}, 0
-    for owner_id, owner_home in homes:
-        ids, failed = _thread_ids(_owner_host(agent, owner_home).conversation_store)
-        errors += failed
-        thread_owners.update(dict.fromkeys(ids, owner_id))
-    return None, thread_owners, {"owners_listed": len(homes), "owners_truncated": truncated, "unreadable_thread_records": errors}
+    own_id = str(agent.home_paths.owner_id or "local/main")
+    # 仅实际候选线程做规范点读；未证归属不猜，不预列所有线程或 owner。
+    class CandidateOwners(dict):
+        def get(self, key, default=""):
+            if key in self:
+                return super().get(key, default)
+            if query.scope == "all_owners":
+                return default
+            thread, error = agent.conversation_store.threads.load_report(key)
+            if thread is None or error is not None:
+                return default
+            self[key] = own_id
+            return own_id
+    mapping = CandidateOwners()
+    if query.thread_id:
+        mapping[query.thread_id] = own_id
+    return (None if query.scope == "all_owners" else frozenset({own_id}), mapping,
+            {"legacy_attribution_coverage": "candidate_point_lookup" if query.scope != "all_owners" else "unknown"})
 
 
 # LLM: 只给本机管理员看，只含布尔与已绑定私聊的渠道、用户编号、绑定时间；读失败报告不可用，不影响其余审计。
@@ -55,14 +58,12 @@ def _admin_identity_facts(agent: object) -> dict | None:
 # LLM: 收集器签名与 audit_records 的 _TOPIC_COLLECTORS 一致 (agent, query)；返回值自带 sources。
 # 函数用途: 按已裁决的范围读取请求结果，并在管理员调用时附带管理员身份事实。
 def requests_topic(agent: object, query: object, *, max_owners: int) -> dict:
-    from ..gateway_parts.request_audit_records import OutcomeQuery
 
     allowed, thread_owners, scope_facts = _scope_owners(agent, query, max_owners)
-    writer = getattr(getattr(agent, "_current_run_params", None), "conversation_task_binding_callback", None)
-    reader = getattr(writer, "request_audit_outcomes", None)
+    reader = request_reader(agent, "request_audit_outcomes")
     if callable(reader):
         try:
-            outcomes = reader(OutcomeQuery(allowed, thread_owners, query.thread_id, query.since, query.limit))
+            outcomes = reader(outcome_query(query, allowed, thread_owners))
         except OSError:
             outcomes = {"available": False, "reason": "request_records_unreadable"}
     else:
@@ -90,3 +91,25 @@ def _admin_hints(scope: str, admin: dict) -> list[str]:
 
 
 __all__ = ["REQUEST_SOURCES", "requests_topic"]
+
+
+def outcome_query(query, allowed, thread_owners):
+    from ..gateway_parts.request_audit_records import OutcomeQuery
+    names = ("request_id", "error_code", "channel", "until", "cursor", "message_ref", "request_ref", "tool_name", "status", "min_duration_ms")
+    return OutcomeQuery(allowed, thread_owners, query.thread_id, query.since, query.limit,
+                        **{name: getattr(query, name, None if name in ("until", "min_duration_ms") else "") for name in names})
+
+
+def request_reader(agent, name):
+    """运行中只信已领取 writer；本机主管理员可沿已配置宿主路径只读查询。"""
+    writer = getattr(getattr(agent, "_current_run_params", None), "conversation_task_binding_callback", None)
+    if writer is not None:
+        return getattr(writer, name, None)
+    from ..user_space.approval_mode import is_permission_admin
+    if str(agent.home_paths.owner_id or "local/main") != "local/main" or not is_permission_admin(agent.home_paths):
+        return None
+    from ..gateway_parts import request_audit_records
+    from ..gateway_parts.paths import gateway_paths
+    function = {"request_audit_outcomes": request_audit_records.request_outcome_records,
+                "message_lifecycle_records": request_audit_records.message_lifecycle_records}.get(name)
+    return (lambda query: function(gateway_paths(agent), query)) if function else None

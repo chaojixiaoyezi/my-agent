@@ -223,6 +223,12 @@ class GatewayTaskBindingWriter:
         paths = gateway_paths_from_root(self.request_path.parent.parent.parent)
         return request_outcome_records(paths, query)
 
+    def message_lifecycle_records(self, query: object) -> dict:
+        """仅从本次领取的 Gateway 根连接原生命周期记录。"""
+        from .request_audit_records import message_lifecycle_records
+        paths = gateway_paths_from_root(self.request_path.parent.parent.parent)
+        return message_lifecycle_records(paths, query)
+
     # LLM: 任务晋升只能回写同一请求；原子持久写成功后再更新共享内存对象，失败不伪造绑定。
     # 函数用途: 接收运行时确认的任务链接，让本轮 Compact 重试和重启恢复使用相同归属。
     def __call__(self, link: object) -> bool:

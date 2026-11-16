@@ -52,6 +52,11 @@ class GatewayHistoryIndex:
                 conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS migration_errors (line_number INTEGER PRIMARY KEY, context TEXT NOT NULL, reason TEXT NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS migration_fragment (singleton INTEGER PRIMARY KEY, body BLOB NOT NULL)")
+                conn.execute("CREATE TABLE IF NOT EXISTS audit_keys (request_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, thread_id TEXT NOT NULL, recorded_at REAL NOT NULL, status TEXT NOT NULL, error_code TEXT NOT NULL, channel TEXT NOT NULL)")
+                conn.execute("CREATE INDEX IF NOT EXISTS audit_owner ON audit_keys(owner_id,request_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS audit_time ON audit_keys(recorded_at DESC,request_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS audit_error ON audit_keys(error_code,recorded_at DESC,request_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS audit_channel ON audit_keys(channel,recorded_at DESC,request_id)")
                 if self._meta(conn, "initialized") != "1":
                     self._initialize(conn)
                 yield conn
@@ -84,7 +89,7 @@ class GatewayHistoryIndex:
             identity, size = f"{info.st_dev}:{info.st_ino}", info.st_size
         for key, value in {"initialized": 1, "legacy_identity": identity, "legacy_limit": size,
                            "cursor": 0, "line": 0, "discard": 0,
-                           "compat": int(size == 0), "compat_count": 0}.items():
+                           "compat": int(size == 0), "compat_count": 0, "audit_complete": int(size == 0)}.items():
             self._set_meta(conn, key, value)
 
     # LLM: 每次append在同一历史锁内查一键；旧回填最多128行/256KiB，新写优先于旧行。
@@ -107,6 +112,7 @@ class GatewayHistoryIndex:
             export_path, offset, mode = self._export_location(conn, row, body)
             conn.execute("INSERT INTO history VALUES (?,?,?,'live',0,1,?,?,?) ON CONFLICT(request_id) DO UPDATE SET body=excluded.body,digest=excluded.digest,origin='live',conflict=0,export_pending=1,export_path=excluded.export_path,export_offset=excluded.export_offset,export_mode=excluded.export_mode",
                          (request_id, body, digest, export_path, offset, mode))
+            self._audit_key(conn, request_id, payload)
             # 意图先耐久；导出失败不能让已提交canonical责任消失，也不靠异常猜是否写成。
             conn.commit()
             self._flush_pending(conn)
@@ -312,6 +318,58 @@ class GatewayHistoryIndex:
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
         conn.execute("INSERT INTO history(request_id,body,digest,origin) VALUES (?,?,?,'legacy') ON CONFLICT(request_id) DO UPDATE SET body=excluded.body,digest=excluded.digest,conflict=1 WHERE history.origin='legacy'", (request_id, body, digest))
 
+    def _audit_key(self, conn, request_id, payload):
+        """白名单键与原历史同事务更新；不形成第二终态权威。"""
+        from .request_audit_records import _outcome_entry, _record_owner
+        entry = _outcome_entry(payload, 0, _record_owner(payload, {}))
+        terminal = payload.get("terminal_response") if isinstance(payload.get("terminal_response"), dict) else {}
+        stamp = terminal.get("ended_at", payload.get("ended_at", payload.get("created_at", 0)))
+        try:
+            stamp = stamp if type(stamp) in (int, float) and math.isfinite(stamp) else 0
+        except OverflowError:
+            stamp = 0
+        claim = payload.get("conversation_claim") if isinstance(payload.get("conversation_claim"), dict) else {}
+        conn.execute("INSERT OR REPLACE INTO audit_keys VALUES (?,?,?,?,?,?,?)",
+                     (request_id, _record_owner(payload, {}), str(claim.get("thread_id") or payload.get("thread_id") or ""),
+                      stamp, entry["status"], entry["error_code"], entry["channel"]))
+        self._set_meta(conn, "audit_revision", int(self._meta(conn, "audit_revision", "0")) + 1)
+
+    def backfill_audit_step(self, *, limit=1):
+        """原维护写门按持久 rowid 前进；前台只读绝不补索引。"""
+        with self.connection() as conn:
+            return self._backfill_audit_step(conn, limit=limit)
+
+    def _backfill_audit_step(self, conn, *, limit):
+        after = int(self._meta(conn, "audit_cursor", "0"))
+        rows = conn.execute("SELECT rowid,request_id,body FROM history WHERE rowid>? ORDER BY rowid LIMIT ?",
+                            (after, min(128, max(1, limit)))).fetchall()
+        for row in rows:
+            try:
+                self._audit_key(conn, row["request_id"], json.loads(row["body"]))
+            except (ValueError, TypeError, AttributeError, OverflowError):
+                self._migration_error(conn, row["rowid"], "audit_projection_row_invalid")
+                self._set_meta(conn, "audit_invalid", 1)
+            after = row["rowid"]
+        self._set_meta(conn, "audit_cursor", after)
+        complete = len(rows) < min(128, max(1, limit))
+        self._set_meta(conn, "audit_complete", int(complete))
+        return {"items": len(rows), "bytes": sum(len(row["body"].encode()) for row in rows), "complete": complete, "cursor": after}
+
+    def maintenance_step(self, *, cutoff):
+        """原lane的一次写门：先补缺失键，再沿原retention游标执行。"""
+        with self.connection() as conn:
+            if self._meta(conn, "audit_complete") != "1":
+                report = self._backfill_audit_step(conn, limit=1)
+                return {**report, "complete": False}
+            if cutoff is None:
+                return {"items": 0, "bytes": 0, "complete": True, "cursor": 0}
+            return self._prune_history_step(conn, cutoff=cutoff, max_rows=1)
+
+    def audit_page(self, query):
+        """有界 keyset 只读；游标绑定来源身份、过滤和投影代次。"""
+        from .request_audit_records import _index_audit_page
+        return _index_audit_page(self, query)
+
     # LLM: 错误保留位置和类别，不保留可能敏感的坏正文。
     # 函数用途: 为一条坏旧行登记可诊断迁移错误。
     def _migration_error(self, conn, line_number, reason):
@@ -341,31 +399,38 @@ class GatewayHistoryIndex:
     def prune_history_step(self, *, cutoff: float, max_rows: int) -> dict:
         """按持久rowid游标检查一小批；删除与游标共事务，正文未知或导出未决均保留。"""
         with self.connection() as conn:
-            cursor = int(self._meta(conn, "retention_cursor", "0"))
-            rows = conn.execute("SELECT rowid,* FROM history WHERE rowid>? ORDER BY rowid LIMIT ?",
-                                (cursor, max(0, max_rows))).fetchall()
-            paths, removed, size = set(), [], 0
-            for row in rows:
-                size += len(row["body"].encode("utf-8"))
-                if row["export_pending"] or not _expired_history_body(row["body"], cutoff):
-                    continue
-                removed.append((row["rowid"],))
-                paths.add(row["export_path"])
-            conn.executemany("DELETE FROM history WHERE rowid=?", removed)
-            today = _day_key(time.time())
-            for export_path in paths:
-                parts = _retention_export_parts(export_path, today)
-                if parts is not None and conn.execute(
-                        "SELECT 1 FROM history WHERE export_path=? LIMIT 1", (export_path,)).fetchone() is None:
-                    # 共用历史锁防止并发append；安全unlink拒绝目录链接，也不触碰JSON锁侧车。
-                    unlink_file_beneath(self.paths.root, parts)
-            if rows:
-                cursor = rows[-1]["rowid"]
-            complete = conn.execute("SELECT 1 FROM history WHERE rowid>? LIMIT 1", (cursor,)).fetchone() is None
-            if complete:
-                cursor = 0
-            self._set_meta(conn, "retention_cursor", cursor)
-            return {"cursor": cursor, "complete": complete, "items": len(rows), "bytes": size}
+            return self._prune_history_step(conn, cutoff=cutoff, max_rows=max_rows)
+
+    def _prune_history_step(self, conn, *, cutoff, max_rows):
+        cursor = int(self._meta(conn, "retention_cursor", "0"))
+        rows = conn.execute("SELECT rowid,* FROM history WHERE rowid>? ORDER BY rowid LIMIT ?",
+                            (cursor, max(0, max_rows))).fetchall()
+        paths, removed, size = set(), [], 0
+        for row in rows:
+            size += len(row["body"].encode("utf-8"))
+            if row["export_pending"] or not _expired_history_body(row["body"], cutoff):
+                continue
+            removed.append((row["rowid"],))
+            paths.add(row["export_path"])
+        for rowid, in removed:
+            conn.execute("DELETE FROM audit_keys WHERE request_id=(SELECT request_id FROM history WHERE rowid=?)", (rowid,))
+        if removed:
+            self._set_meta(conn, "audit_revision", int(self._meta(conn, "audit_revision", "0")) + 1)
+        conn.executemany("DELETE FROM history WHERE rowid=?", removed)
+        today = _day_key(time.time())
+        for export_path in paths:
+            parts = _retention_export_parts(export_path, today)
+            if parts is not None and conn.execute(
+                    "SELECT 1 FROM history WHERE export_path=? LIMIT 1", (export_path,)).fetchone() is None:
+                # 共用历史锁防止并发append；安全unlink拒绝目录链接，也不触碰JSON锁侧车。
+                unlink_file_beneath(self.paths.root, parts)
+        if rows:
+            cursor = rows[-1]["rowid"]
+        complete = conn.execute("SELECT 1 FROM history WHERE rowid>? LIMIT 1", (cursor,)).fetchone() is None
+        if complete:
+            cursor = 0
+        self._set_meta(conn, "retention_cursor", cursor)
+        return {"cursor": cursor, "complete": complete, "items": len(rows), "bytes": size}
 
 
 def _expired_history_body(body: str, cutoff: float) -> bool:
@@ -430,14 +495,12 @@ def maintain_gateway_history_lane(request) -> dict:
     override = policy.payload.get("audit_days")
     if policy.load_error is None and type(override) is int and override <= OWNER_RETENTION_OVERRIDE_MAX_DAYS:
         days = override
-    if days <= 0:
-        return receipt
     budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES,
                                    ms=STORAGE_LANE_SLICE_MS)
     receipt["complete"] = False
     while (not request.budget.exhausted(receipt["items"], receipt["bytes"])
            and not budget.exhausted(receipt["items"], receipt["bytes"])):
-        report = request.run_write(lambda: index.prune_history_step(cutoff=request.now - days * 86400, max_rows=1))
+        report = request.run_write(lambda: index.maintenance_step(cutoff=request.now - days * 86400 if days > 0 else None))
         receipt["cursor"] = {"retention_cursor": report["cursor"]}
         receipt["items"] += report["items"]
         receipt["bytes"] += report["bytes"]

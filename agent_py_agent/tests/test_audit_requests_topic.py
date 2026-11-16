@@ -40,6 +40,12 @@ def _record(root, folder, request_id, *, owner_id="", thread_id="", error="", ag
     path.write_text(json.dumps(payload), encoding="utf-8")
     when = time.time() - age_hours * 3600
     os.utime(path, (when, when))
+    from agent_py_agent.agent.gateway_parts.gateway_history_index import GatewayHistoryIndex
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    index = GatewayHistoryIndex(gateway_paths_from_root(root))
+    index.append({**payload, "ended_at": when})
+    index.backfill_audit_step(limit=128)
+
 
 
 def _in_gateway_turn(agent, root, thread_id=""):
@@ -131,7 +137,7 @@ def test_current_thread_scope_filters_by_claimed_thread(tmp_path, monkeypatch):
 def test_requests_without_gateway_context_are_reported_unavailable(tmp_path, monkeypatch):
     main = _agent(tmp_path, monkeypatch)
     outcome, report = _call(main, {"topic": "requests"})
-    assert outcome.ok and report["requests"] == {"available": False, "reason": "no_gateway_request_context"}
+    assert outcome.ok and report["requests"]["coverage"]["status"] == "partial"
 
 
 def test_gateway_response_owner_id_is_the_executing_owner(tmp_path, monkeypatch):

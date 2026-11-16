@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass
 from types import SimpleNamespace
 
 from ..runtime_context import current_subagent_run_id
@@ -28,7 +28,7 @@ from .models import (
 )
 
 TOOL_NAME = "audit_records"
-_TOPICS = ("decision", "requests")
+_TOPICS = ("decision", "requests", "message_lifecycle", "tool_calls")
 _SCOPES = ("current_thread", "owner", "all_owners")
 _DEFAULT_HOURS, _MAX_HOURS = 24, 24 * 30
 _DEFAULT_LIMIT, _MAX_LIMIT = 20, 100
@@ -62,6 +62,17 @@ class AuditQuery:
     thread_id: str
     since: float
     limit: int
+    _: KW_ONLY
+    request_id: str = ""
+    error_code: str = ""
+    channel: str = ""
+    until: float | None = None
+    cursor: str = ""
+    message_ref: str = ""
+    request_ref: str = ""
+    tool_name: str = ""
+    status: str = ""
+    min_duration_ms: float | None = None
 
 
 # LLM: 线程只取宿主运行上下文（与 user_config 同一裁决函数），不接受模型参数；没有可信会话时返回空。
@@ -187,7 +198,18 @@ def _requests_topic(agent: object, query: AuditQuery) -> dict:
             **requests_topic(agent, query, max_owners=_MAX_OWNERS_COUNT)}
 
 
-_TOPIC_COLLECTORS = {"decision": _decision_topic, "requests": _requests_topic}
+def _lifecycle_topic(agent, query):
+    from .audit_lifecycle_topic import lifecycle_topic
+    return lifecycle_topic(agent, query)
+
+
+def _tool_calls_topic(agent, query):
+    from .audit_tool_calls_topic import tool_calls_topic
+    return tool_calls_topic(agent, query)
+
+
+_TOPIC_COLLECTORS = {"decision": _decision_topic, "requests": _requests_topic,
+                     "message_lifecycle": _lifecycle_topic, "tool_calls": _tool_calls_topic}
 
 
 # LLM: 只做结构校验，越界不夹取；非法参数按 TOOL_INVALID_ARGUMENTS 返回，不读任何记录。
@@ -201,7 +223,38 @@ def _parse(params: dict) -> tuple | ToolHandlerOutcome:
     if not valid:
         return _refuse("invalid_arguments", f"topic 须为 {'/'.join(_TOPICS)}，scope 须为 {'/'.join(_SCOPES)}，"
                                             f"since_hours 为 (0, {_MAX_HOURS}]，limit 为 1 到 {_MAX_LIMIT}。", "TOOL_INVALID_ARGUMENTS")
-    return topic, scope, float(hours), limit
+    import math
+    if not math.isfinite(hours):
+        return _refuse("invalid_arguments", "since_hours 必须是有限数字。", "TOOL_INVALID_ARGUMENTS")
+    fields = ("request_id", "error_code", "channel", "until", "cursor", "message_ref", "request_ref", "tool_name", "status", "min_duration_ms")
+    extra = {key: params[key] for key in fields if key in params}
+    allowed = {"decision": set(), "requests": {"request_id", "error_code", "channel", "until", "cursor", "status"},
+               "message_lifecycle": {"request_id", "message_ref", "request_ref"},
+               "tool_calls": {"tool_name", "status", "error_code", "min_duration_ms", "until", "cursor"}}[topic]
+    if set(extra) - allowed:
+        return _refuse("invalid_arguments", "当前 topic 不支持字段：" + ",".join(sorted(set(extra)-allowed)), "TOOL_INVALID_ARGUMENTS")
+    if topic == "message_lifecycle" and sum(bool(extra.get(key)) for key in ("request_id", "message_ref", "request_ref")) != 1:
+        return _refuse("invalid_arguments", "message_lifecycle 须且只能提供一个 request_id/message_ref/request_ref。", "TOOL_INVALID_ARGUMENTS")
+    since = time.time() - float(hours) * 3600
+    if topic in ("requests", "message_lifecycle") and any(extra.get(key) for key in ("request_id", "message_ref", "request_ref")) and "since_hours" not in params:
+        since = 0
+    if extra.get("cursor") and "since_hours" not in params:
+        import base64
+        try:
+            token = extra["cursor"]
+            if token.startswith(("h:", "q:", "h0:", "t:")):
+                state = json.loads(base64.urlsafe_b64decode(token.split(":", 1)[1]))
+                since = state["since"]
+                if "until" not in params:
+                    extra["until"] = state.get("until")
+        except (ValueError, KeyError, TypeError):
+            return _refuse("invalid_cursor", "cursor 无效；清空 cursor 并重新查询。", "TOOL_INVALID_ARGUMENTS")
+    try:
+        from ..gateway_parts.request_audit_records import OutcomeQuery, _validate_query
+        _validate_query(OutcomeQuery(frozenset(), {}, "", since, limit, **extra))
+    except (ValueError, TypeError) as error:
+        return _refuse("invalid_arguments", str(error), "TOOL_INVALID_ARGUMENTS")
+    return topic, scope, float(hours), limit, since, extra
 
 
 # LLM: 拒绝都在读记录之前（not_started），带稳定原因码；权限类用 AUDIT_ACCESS_DENIED。
@@ -219,7 +272,7 @@ class AuditRecordsTool(BaseTool):
         description=(
             "只读本人结构化运行审计，不读对话/日志正文。topic=decision查决策点有效设置、调用与未触发原因、用量和结果；"
             "解释指标须使用回执中的字段定义、label、coverage和status_note，不把未发送/未覆盖统计当失败或零次。"
-            "topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属。scope默认owner，current_thread限本会话，"
+            "topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属；message_lifecycle用一个精确request_id/message_ref/request_ref查消息链；tool_calls查工具耗时和精确error_code。覆盖不足按next_cursor续查，不能把missing当未发送。scope默认owner，current_thread限本会话，"
             "all_owners仅显式获跨用户审计权限的管理员。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。"
         ),
         input_schema={
@@ -230,6 +283,10 @@ class AuditRecordsTool(BaseTool):
                 "scope": {"type": "string", "enum": list(_SCOPES), "description": "默认 owner（本人全部会话）。"},
                 "since_hours": {"type": "number", "exclusiveMinimum": 0, "maximum": _MAX_HOURS,
                                 "description": f"只看最近多少小时，默认 {_DEFAULT_HOURS}。"},
+                **{key: {"type": "string", "description": "结构化过滤；cursor 须原样使用上一页回执，改变过滤后清空。"}
+                   for key in ("request_id", "error_code", "channel", "cursor", "message_ref", "request_ref", "tool_name", "status")},
+                "until": {"type": "number", "minimum": 0, "description": "时间窗结束 Unix 秒；须不早于起点。"},
+                "min_duration_ms": {"type": "number", "minimum": 0, "description": "tool_calls 最短耗时毫秒，无默认慢调用阈值。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT,
                           "description": f"最多返回多少条观察记录，默认 {_DEFAULT_LIMIT}。"},
             },
@@ -275,7 +332,9 @@ class AuditRecordsTool(BaseTool):
         parsed = _parse(params)
         if isinstance(parsed, ToolHandlerOutcome):
             return parsed
-        topic, scope, hours, limit = parsed
+        if current_subagent_run_id(self._agent):
+            return _refuse("subagent_not_allowed", "仅主会话可读取审计；请由主会话调用。", "AUDIT_ACCESS_DENIED")
+        topic, scope, hours, limit, since, extra = parsed
         home = getattr(self._agent, "home_paths", None)
         controls = read_owner_admin_controls(home)
         if not controls["audit_allowed"]:
@@ -286,8 +345,11 @@ class AuditRecordsTool(BaseTool):
         thread_id = _trusted_thread(self._agent) if scope == "current_thread" else ""
         if scope == "current_thread" and not thread_id:
             return _refuse("no_trusted_thread", "当前运行没有可信会话；请改用 scope=owner。", "TOOL_INVALID_ARGUMENTS")
-        query = AuditQuery(topic, scope, thread_id, time.time() - hours * 3600, limit)
-        result = _TOPIC_COLLECTORS[topic](self._agent, query)
+        query = AuditQuery(topic, scope, thread_id, since, limit, **extra)
+        try:
+            result = _TOPIC_COLLECTORS[topic](self._agent, query)
+        except ValueError as error:
+            return _refuse("invalid_cursor_or_selector", str(error), "TOOL_INVALID_ARGUMENTS")
         report = {"topic": topic, "scope": scope, "window": {"since_hours": hours, "since": round(query.since, 3)},
                   **result, "not_read": "日志与对话/记忆正文不在审计读取范围内"}
         return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(report, ensure_ascii=False))
