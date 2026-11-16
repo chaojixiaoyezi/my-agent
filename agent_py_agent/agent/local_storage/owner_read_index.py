@@ -1184,6 +1184,12 @@ class OwnerReadIndex:
                             if hasher is not None else None)
                 self._save_proof(connection, checkpoint, observed, position, mid_span)
                 return None
+            # 整段一次读全时用 hashlib 核对（与可续摘要器逐位一致）；只有被预算或分块截开的段才走可续的纯 Python 摘要。
+            if position == span_start and len(data) == span_stop - span_start:
+                position, hasher = span_stop, None
+                if not hmac.compare_digest(hashlib.sha256(data).hexdigest(), digest):
+                    return False
+                continue
             hasher.update(data)
             position += len(data)
             if position == span_stop:
