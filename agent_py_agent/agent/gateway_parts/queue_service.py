@@ -311,7 +311,9 @@ def claim_request(
             transport_payload = report.payload
             if claim_mode == "queue_worker" and _is_inline_plugin_execution_record(transport_payload):
                 return None
-            observation = _observe_pending_request_payload(paths, request_path, payload=transport_payload)
+            observation = _observe_pending_request_payload(
+                paths, request_path, payload=transport_payload, claim_mode=claim_mode,
+            )
             if observation['status'] == 'duplicate_terminal':
                 from .recovery import (
                     _commit_gateway_terminal_request,
@@ -551,7 +553,8 @@ def archive_request(
         )
 
 
-def _observe_pending_request_payload(paths, request_path, *, payload=None, blocking=False, deadline=None):
+def _observe_pending_request_payload(paths, request_path, *, payload=None, blocking=False, deadline=None,
+                                     claim_mode="queue_worker"):
     """只读精确单条待办元数据；不领取、修复、返回正文或依赖 age。"""
     from .recovery import _same_gateway_request_identity
     request_path = Path(request_path)
@@ -566,7 +569,7 @@ def _observe_pending_request_payload(paths, request_path, *, payload=None, block
         payload = report.payload
     if not payload:
         return {**result, 'status': 'protected', 'reason': 'pending_unreadable', 'coverage': 'unavailable'}
-    if _is_inline_plugin_execution_record(payload):
+    if claim_mode != "inline_direct" and _is_inline_plugin_execution_record(payload):
         return {**result, 'status': 'protected', 'reason': 'inline_only'}
     from .response_renderer import validate_gateway_terminal_envelope_report
     raw = _pending_observation_report(paths.terminal / request_path.name, deadline=deadline)

@@ -150,6 +150,50 @@ def production_call(host, action, payload=None, *, user=None, key=None, status=2
     return body["data"]
 
 
+@pytest.mark.parametrize("kind", ["tool", "script", "workflow", "workflow_resume"])
+@pytest.mark.parametrize("terminal", ["absent", "same", "foreign_owner", "different_payload", "corrupt"])
+def test_inline_claim_keeps_worker_protection_and_terminal_identity(tmp_path, kind, terminal):
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.queue_service import (
+        claim_request,
+        ensure_gateway_folders,
+        observe_pending_request,
+    )
+    from agent_py_agent.agent.gateway_parts.recovery import _terminal_gateway_request_payload
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    ensure_gateway_folders(paths)
+    source = {"id": "inline-proof", "kind": "ask", "source": "plugin", "goal": "synthetic execution",
+        "host_request_owner.v1": {"provider": "local", "owner_kind": "user", "owner_id": "alice"},
+        "metadata": {"plugin_provenance": {"kind": kind}, "client_input_digest": "a" * 64}}
+    path = paths.inbox / "inline-proof.json"
+    write_json_file_atomic(path, source)
+    if terminal != "absent":
+        original = {**source}
+        if terminal == "foreign_owner":
+            original["host_request_owner.v1"] = {"provider": "local", "owner_kind": "user", "owner_id": "bob"}
+        if terminal == "different_payload":
+            original["metadata"] = {**source["metadata"], "client_input_digest": "b" * 64}
+        saved = _terminal_gateway_request_payload("inline-proof", original,
+            {"id": "inline-proof", "status": "done", "ok": True})
+        if terminal == "corrupt":
+            (paths.terminal / path.name).write_bytes(b"{invalid-json")
+        else:
+            write_json_file_atomic(paths.terminal / path.name, saved)
+    assert observe_pending_request(paths, "inline-proof")["orphan_reason"] == "inline_execution_only"
+    assert claim_request(paths, path) is None
+    assert path.exists() and not (paths.processing / path.name).exists()
+    claimed = claim_request(paths, path, claim_mode="inline_direct")
+    if terminal == "absent":
+        assert claimed is not None and claimed.request_id == "inline-proof"
+        assert not path.exists() and claimed.path.exists()
+    else:
+        assert claimed is None
+        assert not (paths.processing / path.name).exists()
+        assert path.exists() is (terminal != "same")
+
+
 # LLM: 显式空组合仍不可用；只有九个未实现受限异步适配的业务动作可豁免，SSO仍须真实验签器，其余逐项严格断言。
 # 函数用途: 验证完整HTTP目录和逐动作依赖，缺IdP适配器明确不可用、注入后恢复就绪。
 def test_production_gateway_wires_all_actions(production_host):
