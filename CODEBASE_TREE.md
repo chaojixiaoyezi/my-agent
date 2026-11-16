@@ -1522,7 +1522,16 @@ agent_py_agent/tests/
 |-- test_uwave_w18_thread_index.py              # 历史线程索引与调度终态保护
 |-- test_closedloop_f08_wake_isolation.py       # 单条坏唤醒不阻断同页健康记录
 |-- test_closedloop_f09_message_timestamp.py    # 坏时间字段不吞掉已识别消息
-`-- test_f05_session_task_learning_isolation.py # 坏学习元数据保留引用且健康欠账继续
+|-- test_f05_session_task_learning_isolation.py # 坏学习元数据保留引用且健康欠账继续
+|-- test_closedloop_f01_candidate_isolation.py  # 策展坏候选与归档异常隔离、日记整理公平推进
+|-- test_skill_learning_corrupt_isolation.py    # 坏学习材料、草稿和未知托管条目容量边界
+|-- test_uwave_f06_learning_exclusions.py       # 准确来源线程读取及有界学习排除扫描
+|-- test_gateway_exact_bound_background_stop.py # 后台停止沿准确任务权威而非全量任务扫描
+|-- test_f155_w10_closedloop_followup.py        # 派生回执索引损坏保全与已绑定过期输入收口
+|-- test_f155_w10_sqlite_lock_safety.py         # 真实子进程验证只读连接不释放其它连接锁
+|-- test_sqlite_birth_publication.py           # 未发表 SQLite inode 创建与父目录身份保护
+|-- test_readonly_sqlite_portable.py           # 便携只读路径与重解析点拒绝边界
+`-- test_runtime_db_recovery_gate_errors.py    # 恢复未完成的明确非重试回执与副作用状态
 ```
 
 ### 2026-11-13 运行中发现的缺陷与回归
