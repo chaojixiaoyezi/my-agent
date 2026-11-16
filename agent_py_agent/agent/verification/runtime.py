@@ -28,6 +28,9 @@ from .project_facts import (
 )
 from .repository import VerificationContext, VerificationEvidence, VerificationEvidenceRepository
 
+# 已告警过的工具遥测写入失败类型；同类失败每进程只告警一次并附堆栈，之后降为调试日志，避免逐次工具调用刷屏。
+_TELEMETRY_FAILURE_KINDS_WARNED: set[type[BaseException]] = set()
+
 
 # LLM: this is the only runtime integration point for the evidence ledger.  Do
 # not add per-IM or per-tool prompt patches elsewhere.
@@ -106,8 +109,15 @@ def record_tool_verification(
         _record_tool_telemetry(agent, context or _verification_context(agent), call, result)
     except (InterruptedError, KeyboardInterrupt):
         raise
-    except Exception:
-        pass
+    except Exception as exc:
+        # 遥测失败不改变工具结果，但不能静默丢失：同类失败首次告警并附堆栈，重复的降为调试日志。
+        first = type(exc) not in _TELEMETRY_FAILURE_KINDS_WARNED
+        _TELEMETRY_FAILURE_KINDS_WARNED.add(type(exc))
+        logging.getLogger(__name__).log(
+            logging.WARNING if first else logging.DEBUG,
+            "tool telemetry recording failed for %s call %s: %s", call.tool_name, call.call_id, exc,
+            exc_info=first,
+        )
     return result
 
 
@@ -297,7 +307,7 @@ def _record_tool_telemetry(
         "error_code": error_code,
         "args_summary": args,
         "output_bytes": len(str(result.output or "").encode("utf-8", errors="replace")),
-        "artifact_ref": str(result.refs[0].ref_id) if result.refs else "",
+        "artifact_ref": str(result.refs[0].ref) if result.refs else "",
     })
 
 
