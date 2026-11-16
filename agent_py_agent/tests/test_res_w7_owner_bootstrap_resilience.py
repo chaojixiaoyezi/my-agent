@@ -143,15 +143,15 @@ def test_one_unreadable_thread_keeps_healthy_targets(tmp_path, caplog):
 
 def test_thread_error_cannot_leave_same_thread_in_delivery_targets(tmp_path, monkeypatch):
     agent, threads = _delivery_case(tmp_path)
-    monkeypatch.setattr(agent.conversation_store.threads, 'list_report',
-        lambda **_kwargs: (threads, [{'thread_id': threads[1].thread_id}]))
+    monkeypatch.setattr(agent.conversation_store.threads, 'bound_threads_report',
+        lambda: (threads, [{'thread_id': threads[1].thread_id}]))
     assert threads[1].thread_id not in {row['thread_id'] for row in available_delivery_targets(agent)}
 
 
 def test_global_thread_index_failure_still_refuses_delivery(tmp_path, monkeypatch):
     agent, threads = _delivery_case(tmp_path)
-    monkeypatch.setattr(agent.conversation_store.threads, 'list_report',
-        lambda **_kwargs: (threads, [{'thread_id': threads[1].thread_id}, {'context': 'thread-index'}]))
+    monkeypatch.setattr(agent.conversation_store.threads, 'bound_threads_report',
+        lambda: (threads, [{'thread_id': threads[1].thread_id}, {'context': 'thread-index'}]))
     with pytest.raises(ScheduleDeliveryTargetUnauthorized):
         available_delivery_targets(agent)
 

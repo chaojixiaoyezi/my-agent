@@ -462,7 +462,8 @@ def test_migration_checkpoint_retry_with_finite_quota(tmp_path, monkeypatch, mis
         store.transaction('script_runs', too_large, idempotency_key='denied', params_digest='denied')
     assert store.get('script_runs', 'over-limit') is None and store.revision('script_runs') == revision
     assert store.transaction('script_runs', mutate, idempotency_key='new', params_digest='new') == {'done': True}
-    assert calls == 1 and _fds() == before
+    # 测试进程原有描述符可被其它已结束资源的延迟清理关闭；迁移不得留下新增描述符。
+    assert calls == 1 and _fds() <= before
 
 
 # LLM: 旧行回执不能代替目标与修订，丢失canonical元数据不属于首次初始化。

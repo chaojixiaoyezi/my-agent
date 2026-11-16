@@ -911,8 +911,15 @@ def test_every_descendant_is_scope_checked_before_any_cancellation(business_host
         edit_task(store, leaf, lambda task: replace(task, metadata={**task.metadata,
             "business_context": {**task.metadata["business_context"], "space_id": "space-B"}}))
     ready_index(store)
-    with pytest.raises(PermissionError, match="OWNER_MISMATCH|SPACE_MISMATCH"):
+    from agent_py_agent.agent.conversation.business_access import BusinessError
+
+    error_type = PermissionError if conflict == "owner" else BusinessError
+    with pytest.raises(error_type, match="OWNER_MISMATCH|SPACE_MISMATCH") as refused:
         service.cancel_task(root, actor=actor, include_descendants=True)
+    if conflict == "space":
+        assert refused.value.error_code == "SPACE_MISMATCH"
+        assert refused.value.details["side_effect_state"] == "none"
+        assert refused.value.details["next_action"]
     assert [store.session_tasks.require(identifier).status for identifier in (root, child, leaf)] == ["queued"] * 3
 
 
