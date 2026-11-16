@@ -5390,5 +5390,8 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_subagent_input_visible_roots_guidance.py # 子代理输入路径不可见时只列出其真实可读根
 |-- agent_py_agent/tests/test_clfix_d12_vector_store_bounded_commit.py # 记忆向量库新增 id 同文件追加、增量读与整份压实边界
 |-- agent_py_agent/tests/test_clfix_d13_tool_telemetry_coverage.py    # 带结果引用的工具调用写入遥测、写入失败按类型告警
-`-- agent_py_agent/tests/test_opusfix_e_finished_call_provenance.py   # 共享调用账裁掉刚结清的长调用时仍签发来源、完整工具调用照常执行
+|-- agent_py_agent/tests/test_opusfix_e_finished_call_provenance.py   # 共享调用账裁掉刚结清的长调用时仍签发来源、完整工具调用照常执行
+|-- agent_py_agent/tests/test_clfix_curator_daily_finalize_progress.py # 策展日终收尾与任意待办轮流、熔断后只隔离坏的一类输入
+|-- agent_py_agent/tests/test_clfix_d9_memory_recall_ranking.py      # 新记忆按写入时间留热、融合补回强词面命中、跨项目召回需词面证据
+`-- agent_py_agent/tests/test_clfix_d8_skill_learning_convergence.py # 自学技能超额时容量阶段跨片续作、收敛到上限
 ```
