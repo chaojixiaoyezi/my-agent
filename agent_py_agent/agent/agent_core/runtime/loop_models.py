@@ -47,6 +47,7 @@ class RecoveryEligibility:
 # 类用途: 收拢一次代理调用与宿主专有身份；模型可写属性不作认证来源，不执行模型或写文件。
 @dataclass
 class RunParams:
+    host_foreground_interactive: bool = field(default=False, kw_only=True, repr=False, metadata={"host_only": True})
     inject: list[str] | None = None
     prompt_files: list[str] | None = None
     save: bool | None = None

@@ -98,3 +98,35 @@ def apply_other_owner_home_policy(paths, owner_home: str, mode: str):
             selected.append(current)
     field = "readonly" if mode == "read_only" else "hidden"
     return replace(paths, **{field: tuple(dict.fromkeys((*getattr(paths, field), *selected)))})
+
+
+def is_foreground_admin_interactive(agent: object, *, params: object | None = None) -> bool:
+    """每次工具调用重新核验宿主前台事实和当前绑定；不从模型属性恢复授权。"""
+    params = params if params is not None else getattr(agent, "_current_run_params", None)
+    home = getattr(agent, "home_paths", None)
+    from ..runtime_context import current_subagent_run_id
+
+    if (getattr(params, "host_foreground_interactive", False) is not True
+            or not is_complete_local_admin_owner(home)
+            or getattr(home, "owner_provider", None) != "local"
+            or getattr(home, "owner_kind", None) != "main"
+            or getattr(home, "owner_id", None) != "local/main"
+            or current_subagent_run_id(agent)
+            or getattr(params, "turn_trigger", None) is not None
+            or getattr(params, "source", "") in {"background", "background_main_agent", "scheduler", "system", "plugin", "subagent"}):
+        return False
+    boundary = getattr(params, "write_boundary", None) or {}
+    if any(boundary.get(key) for key in ("effective_permissions", "exact_read_roots", "artifact_read_scope_mode")):
+        return False
+    actor = getattr(params, "host_channel_actor", None)
+    if actor is None:
+        return True
+    from ..conversation.host_actor import HostChannelActor, _validate_scope
+    from .admin_channel_identity import find_admin_channel_identity
+    if not isinstance(actor, HostChannelActor) or actor.owner_id != home.owner_id:
+        return False
+    try:
+        _validate_scope(agent, actor.source_thread_id, actor)
+        return find_admin_channel_identity(home.root, actor.channel, actor.actor_id) is not None
+    except (ValueError, OSError, AttributeError):
+        return False
