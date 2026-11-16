@@ -886,7 +886,13 @@ def read_text_lines_cached(path: Path) -> tuple[str, ...]:
         if hit is not None and hit[0] == signature:
             return hit[1]
     lines = read_jsonl_text_lines(path)
-    if not cache_freshness.cache_entry_trustworthy(stat.st_mtime_ns):
+    try:
+        current = path.stat()
+    except OSError:
+        return lines
+    if (cache_stat_signature(current) != signature
+            or current.st_size > text_file_window._CHUNK_BYTES
+            or not cache_freshness.cache_entry_trustworthy(current.st_mtime_ns)):
         return lines
     with _TEXT_LINES_CACHE_GUARD:
         while len(_TEXT_LINES_CACHE) >= _TEXT_LINES_CACHE_MAX_COUNT:

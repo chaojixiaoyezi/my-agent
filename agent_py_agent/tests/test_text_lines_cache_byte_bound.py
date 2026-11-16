@@ -6,11 +6,13 @@ import gc
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.collaboration.store import CollaborationStore
 from agent_py_agent.agent.common import cache_freshness, json_io, text_file_window
 
 pytestmark = pytest.mark.regression
@@ -20,6 +22,15 @@ def _backdate_file(path: Path, *, seconds_ago: int = 10) -> None:
     """将文件 mtime 拨到 2 秒信任窗口之外，确保大小门限是唯一拒绝缓存的原因。"""
     old_ns = time.time_ns() - seconds_ago * 1_000_000_000
     os.utime(path, ns=(old_ns, old_ns))
+
+
+def _cached_utf8_text_bytes() -> int:
+    """计量缓存 tuple 内所有字符串的实际 UTF-8 字节总和，不依赖准入时的 signature.size。"""
+    return sum(
+        len(line.encode("utf-8"))
+        for _signature, lines in json_io._TEXT_LINES_CACHE.values()
+        for line in lines
+    )
 
 
 def _write_sized_jsonl(path: Path, target_bytes: int, *, prefix: str = "line") -> list[str]:
@@ -213,6 +224,236 @@ def test_total_cached_source_bytes_bounded_by_max_count_times_chunk_bytes(
     cached_bytes = sum(signature[2] for signature, _lines in json_io._TEXT_LINES_CACHE.values())
     assert all(signature[2] <= chunk_bytes for signature, _lines in json_io._TEXT_LINES_CACHE.values())
     assert cached_bytes <= json_io._TEXT_LINES_CACHE_MAX_COUNT * chunk_bytes == 4 * 1024 * 1024
+    assert _cached_utf8_text_bytes() <= json_io._TEXT_LINES_CACHE_MAX_COUNT * chunk_bytes == 4 * 1024 * 1024
+
+
+def test_collaboration_store_concurrent_append_100mib_retains_zero_cached_utf8_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实 CollaborationStore 并发交错：读取前 stat 为可信小文件、读取前并发追加 >=100 MiB，结果完整且缓存保留 0 字节。"""
+    store = CollaborationStore(tmp_path / "collaboration")
+    case = store.open_case(
+        {"thread_id": "audit-thread", "task_id": "audit-task", "title": "cache admission contract"}
+    )
+    store.submit_evidence({"case_id": case.case_id, "summary": "initial"})
+    if store._history_worker is not None:
+        store._history_worker.join(10)
+
+    # 自然等待跨过 2 秒缓存信任窗口，不缩小任何配额、不改写 mtime。
+    time.sleep(2.1)
+
+    evidence_path = store._evidence_path(case.case_id)
+    initial_size = evidence_path.stat().st_size
+    assert initial_size <= text_file_window._CHUNK_BYTES
+    assert cache_freshness.cache_entry_trustworthy(evidence_path.stat().st_mtime_ns)
+    json_io._TEXT_LINES_CACHE.clear()
+
+    entered = threading.Event()
+    written = threading.Event()
+    writer_errors: list[str] = []
+    reader_ident = threading.get_ident()
+    real_read = json_io.read_jsonl_text_lines
+    large_summary_len = 100 * 1024 * 1024
+
+    def gated_read(path: Path) -> tuple[str, ...]:
+        if path == evidence_path and threading.get_ident() == reader_ident:
+            entered.set()
+            assert written.wait(30)
+        return real_read(path)
+
+    def concurrent_writer() -> None:
+        try:
+            assert entered.wait(30)
+            store.submit_evidence(
+                {"case_id": case.case_id, "summary": "x" * large_summary_len, "matched": True}
+            )
+        except BaseException as exc:  # pragma: no cover - 失败时转交主线程断言
+            writer_errors.append(f"{type(exc).__name__}: {exc}")
+        finally:
+            written.set()
+
+    monkeypatch.setattr(json_io, "read_jsonl_text_lines", gated_read)
+    writer_thread = threading.Thread(target=concurrent_writer)
+    writer_thread.start()
+    rows, load_errors = store.case_evidence_report(case.case_id)
+    writer_thread.join(30)
+
+    assert not writer_thread.is_alive()
+    assert not writer_errors
+    assert not load_errors
+    assert len(rows) == 2
+    assert rows[0].summary == "initial"
+    assert len(rows[1].summary) == large_summary_len
+    assert evidence_path.stat().st_size > large_summary_len
+
+    del rows
+    del load_errors
+    gc.collect()
+
+    retained_utf8_bytes = _cached_utf8_text_bytes()
+    assert retained_utf8_bytes == 0
+    assert str(evidence_path) not in json_io._TEXT_LINES_CACHE
+
+
+def test_multipath_concurrent_growth_actual_utf8_bytes_bounded_by_4mib(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """多路径并发增长下，按缓存 tuple 内真实 UTF-8 字符串字节统计仍严格不超过 64 * 64 KiB。"""
+    chunk_bytes = text_file_window._CHUNK_BYTES
+    cap_bytes = json_io._TEXT_LINES_CACHE_MAX_COUNT * chunk_bytes
+    assert cap_bytes == 4 * 1024 * 1024
+
+    for idx in range(64):
+        small = tmp_path / f"warm_small_{idx}.jsonl"
+        _write_sized_jsonl(small, chunk_bytes, prefix=f"warm-{idx}")
+        _backdate_file(small)
+        json_io.read_text_lines_cached(small)
+
+    assert len(json_io._TEXT_LINES_CACHE) == 64
+    assert _cached_utf8_text_bytes() <= cap_bytes
+
+    real_read = json_io.read_jsonl_text_lines
+    per_file_append_chars = 4 * 1024 * 1024
+    grown_paths: list[Path] = []
+
+    for idx in range(8):
+        ledger = tmp_path / f"concurrent_grow_{idx}.jsonl"
+        json_io.append_private_jsonl_records(ledger, [{"seq": 0, "tag": f"init-{idx}"}])
+        _backdate_file(ledger)
+        grown_paths.append(ledger)
+
+        entered = threading.Event()
+        written = threading.Event()
+        writer_errors: list[str] = []
+        reader_ident = threading.get_ident()
+
+        def make_gated_read(
+            target: Path,
+            enter_ev: threading.Event,
+            write_ev: threading.Event,
+        ):
+            def _gated(path: Path) -> tuple[str, ...]:
+                if path == target and threading.get_ident() == reader_ident:
+                    enter_ev.set()
+                    assert write_ev.wait(30)
+                return real_read(path)
+
+            return _gated
+
+        def make_writer(
+            target: Path,
+            item_idx: int,
+            enter_ev: threading.Event,
+            write_ev: threading.Event,
+            errs: list[str],
+        ):
+            def _writer() -> None:
+                try:
+                    assert enter_ev.wait(30)
+                    json_io.append_private_jsonl_records(
+                        target,
+                        [{"seq": 1, "tag": f"grown-{item_idx}", "text": "m" * per_file_append_chars}],
+                    )
+                    if item_idx % 2 == 0:
+                        _backdate_file(target)
+                except BaseException as exc:  # pragma: no cover
+                    errs.append(f"{type(exc).__name__}: {exc}")
+                finally:
+                    write_ev.set()
+
+            return _writer
+
+        monkeypatch.setattr(
+            json_io,
+            "read_jsonl_text_lines",
+            make_gated_read(ledger, entered, written),
+        )
+        worker = threading.Thread(
+            target=make_writer(ledger, idx, entered, written, writer_errors)
+        )
+        worker.start()
+        lines = json_io.read_text_lines_cached(ledger)
+        worker.join(30)
+
+        assert not worker.is_alive()
+        assert not writer_errors
+        assert len(lines) == 2
+        assert len(lines[1].encode("utf-8")) > per_file_append_chars
+        del lines
+
+    monkeypatch.setattr(json_io, "read_jsonl_text_lines", real_read)
+    for ledger in grown_paths:
+        ledger.unlink()
+    gc.collect()
+
+    actual_utf8_bytes = _cached_utf8_text_bytes()
+    assert actual_utf8_bytes <= cap_bytes
+    for ledger in grown_paths:
+        assert str(ledger) not in json_io._TEXT_LINES_CACHE
+    assert all(
+        sum(len(line.encode("utf-8")) for line in lines) <= chunk_bytes
+        for _sig, lines in json_io._TEXT_LINES_CACHE.values()
+    )
+
+
+def test_post_read_disappearance_or_replacement_returns_lines_without_caching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """读取完成后文件消失（后置 stat OSError）或被原子换代，仍返回已读到的 tuple 且不写入缓存。"""
+    real_read = json_io.read_jsonl_text_lines
+
+    disappearing = tmp_path / "disappearing.jsonl"
+    disappearing.write_text('{"seq":1}\n{"seq":2}\n', encoding="utf-8")
+    _backdate_file(disappearing)
+
+    def unlink_after_read(path: Path) -> tuple[str, ...]:
+        lines = real_read(path)
+        if path == disappearing and path.exists():
+            path.unlink()
+        return lines
+
+    monkeypatch.setattr(json_io, "read_jsonl_text_lines", unlink_after_read)
+    returned = json_io.read_text_lines_cached(disappearing)
+    assert returned == ('{"seq":1}', '{"seq":2}')
+    assert isinstance(returned, tuple)
+    assert str(disappearing) not in json_io._TEXT_LINES_CACHE
+    assert _cached_utf8_text_bytes() == 0
+
+    # 初始 stat 阶段已不存在的文件仍按原语义抛出 FileNotFoundError。
+    monkeypatch.setattr(json_io, "read_jsonl_text_lines", real_read)
+    with pytest.raises(FileNotFoundError):
+        json_io.read_text_lines_cached(disappearing)
+
+    replaced = tmp_path / "replaced.jsonl"
+    replaced.write_text('{"gen":"v1"}\n', encoding="utf-8")
+    _backdate_file(replaced)
+    replaced_once = False
+
+    def replace_after_read(path: Path) -> tuple[str, ...]:
+        nonlocal replaced_once
+        lines = real_read(path)
+        if path == replaced and not replaced_once:
+            replaced_once = True
+            staged = tmp_path / "replaced.jsonl.tmp"
+            staged.write_text('{"gen":"v2"}\n', encoding="utf-8")
+            os.replace(staged, replaced)
+            _backdate_file(replaced)
+        return lines
+
+    monkeypatch.setattr(json_io, "read_jsonl_text_lines", replace_after_read)
+    first = json_io.read_text_lines_cached(replaced)
+    assert first == ('{"gen":"v1"}',)
+    assert str(replaced) not in json_io._TEXT_LINES_CACHE
+
+    monkeypatch.setattr(json_io, "read_jsonl_text_lines", real_read)
+    second = json_io.read_text_lines_cached(replaced)
+    third = json_io.read_text_lines_cached(replaced)
+    assert second == ('{"gen":"v2"}',)
+    assert third is second
+    assert str(replaced) in json_io._TEXT_LINES_CACHE
 
 
 def test_json_io_and_text_file_window_have_no_import_cycle() -> None:
