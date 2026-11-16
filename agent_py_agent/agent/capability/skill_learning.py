@@ -680,6 +680,11 @@ class SkillLearningService:
             if request.get('asset_evolution_only'):
                 finished = self._finish(path, request, _request_event(EVENT_SKIPPED, '', request))
                 return replace(finished, evolution_notices=tuple(result.get('notices', [])))
+        # 材料故障不能先花模型预算；确定性失败仍沿原 attempts 有界收口。
+        try:
+            material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
+        except (OSError, ValueError, TypeError, SyntaxError, RecursionError) as exc:
+            return self._retry_or_drop(path, request, exc, code="SKILL_LEARNING_MATERIAL_FAILED")
         from .skill_learning_budget import (
             deployment_learning_available,
             reserve_deployment_learning,
@@ -697,7 +702,6 @@ class SkillLearningService:
         if aux_profile and auxiliary_profile_cooldown_remaining(aux_profile) > 0:
             return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
 
-        material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         try:
             response = self._call_model_guarded(material, run_path=path, run_request=request)
             event = self._decide(
@@ -709,6 +713,12 @@ class SkillLearningService:
             )
         except _RetryRunAbort as abort:
             return abort.result
+        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError,
+                OwnerQuotaExceeded, OwnerQuotaUnavailable):
+            raise
+        except (ValueError, TypeError, SyntaxError, RecursionError) as exc:
+            return self._retry_or_drop(path, request, exc, code="SKILL_LEARNING_PROCESSING_FAILED")
         return self._finish(path, request, event)
 
     # LLM: 同时读取 live_cfg 与 guard_config 解析辅助模型 profile，缺省 guard_config 时仍能对齐冷却计数。
@@ -1218,10 +1228,14 @@ def _updatable(store: SkillLearningStore, registry: SkillLearningRegistry, entry
         return None
     if Path(str(getattr(entry, "path", "") or "")).resolve() != path.resolve():
         return None
-    text = path.read_text(encoding="utf-8")
-    if skill_content_sha256(text) != record.sha256:
+    try:
+        text = path.read_text(encoding="utf-8")
+        if skill_content_sha256(text) != record.sha256:
+            return None
+        card = parse_skill_file(path, source="owner", require_frontmatter=True)
+    except (OSError, ValueError) as exc:
+        _LOGGER.warning("跳过不可读 Skill 更新材料 name=%s error=%s", name, type(exc).__name__)
         return None
-    card = parse_skill_file(path, source="owner", require_frontmatter=True)
     return {"name": name, "version": record.version, "revision": record.revision, "sha256": record.sha256,
             "evidence": record.maintenance.get("observations", [])[-10:], "description": card.description,
             "when_to_use": card.when_to_use, "tags": list(card.tags), "body": _body_of(text)}
@@ -1233,13 +1247,17 @@ def _updatable_by_name(store: SkillLearningStore, registry: SkillLearningRegistr
     record = registry.skills.get(name)
     if record is None or owner_layout_exempt(record) or record.maintenance.get("state") == "archived":
         return None
-    text = read_text_beneath(store.skills_root, store.skill_path(name, record=record).relative_to(store.skills_root).parts)
-    if text is None or skill_content_sha256(text) != record.sha256:
+    try:
+        text = read_text_beneath(store.skills_root, store.skill_path(name, record=record).relative_to(store.skills_root).parts)
+        if text is None or skill_content_sha256(text) != record.sha256:
+            return None
+        path = store.skill_path(name)
+        if not path.is_file():
+            return None
+        card = parse_skill_file(path, source="owner", require_frontmatter=True)
+    except (OSError, ValueError) as exc:
+        _LOGGER.warning("跳过不可读 Skill 合并材料 name=%s error=%s", name, type(exc).__name__)
         return None
-    path = store.skill_path(name)
-    if not path.is_file():
-        return None
-    card = parse_skill_file(path, source="owner", require_frontmatter=True)
     return {
         "name": name,
         "version": record.version,
@@ -1354,15 +1372,14 @@ def _similar_managed_skills(
     for rec_name, rec in sorted(managed.items()):
         if rec_name == decision.name:
             continue
-        text = read_text_beneath(store.skills_root, store.skill_path(rec_name, record=rec).relative_to(store.skills_root).parts)
-        if text is None:
-            continue
-        path = store.skill_path(rec_name, record=rec)
-        if not path.is_file():
-            continue
         try:
+            path = store.skill_path(rec_name, record=rec)
+            text = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
+            if text is None or not path.is_file():
+                continue
             card = parse_skill_file(path, source="owner", require_frontmatter=True)
-        except Exception:  # noqa: BLE001 - 单条磁盘卡片解析失败跳过，不阻断其它相似比对。
+        except (OSError, ValueError) as exc:
+            _LOGGER.warning("跳过不可读 Skill 相似材料 name=%s error=%s", rec_name, type(exc).__name__)
             continue
         body_text = _body_of(text)
         rec_fp = (

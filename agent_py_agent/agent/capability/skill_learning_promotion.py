@@ -88,6 +88,7 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
         CODE_LIMIT_REACHED,
         SkillLearningGateError,
         _family_record_locked,
+        _registered_capacity_available,
         _resolve_live_policy,
     )
     from .skill_learning_store import (
@@ -120,13 +121,15 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
     identity = asset_identity('skill', asdict(publish.decision), store.skills_root.parent)
     with store.state_lock():
         registry = store._prepare_clean_registry_locked(store.load_registry())
-        try:
-            managed = store.managed_records(registry, include_archived=False)
-        except SkillLearningStoreError as exc:
-            if exc.code == CODE_EVIDENCE_INCOMPLETE:
-                raise SkillLearningGateError(CODE_EVIDENCE_INCOMPLETE, exc.detail) from exc
-            raise
-        live = registry.live_count(managed_names=managed.keys())
+        live = 0
+        if not _registered_capacity_available(registry, effective_max):
+            try:
+                managed = store.managed_records(registry, include_archived=False)
+            except SkillLearningStoreError as exc:
+                if exc.code == CODE_EVIDENCE_INCOMPLETE:
+                    raise SkillLearningGateError(CODE_EVIDENCE_INCOMPLETE, exc.detail) from exc
+                raise
+            live = registry.live_count(managed_names=managed.keys())
         if (publish.decision.decision == 'create' and effective_max > 0
                 and live >= effective_max and publish.decision.name not in registry.skills):
             if policy_mode == 'observe':
@@ -141,11 +144,12 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
         reusable = _family_record_locked(store, registry, publish) if publish.decision.decision == 'create' else None
     if reusable is not None:
         return SkillLearningEvent('skipped', 'SKILL_LEARNING_FAMILY_REUSED', skill_name=reusable.name)
-    pending = next((row for row in list_learning_proposals(store) if row['status'] == 'pending'
-                    and asset_identity('skill', row['decision'], store.skills_root.parent) == identity), None)
     event = promote_verified_skill(store, publish, verifier, commit=commit) if autonomous_verified else None
     if event is not None:
         return event
+    # 已验证独立发布优先；手动/未通过核验的提案查重继续保持严格读取。
+    pending = next((row for row in list_learning_proposals(store) if row['status'] == 'pending'
+                    and asset_identity('skill', row['decision'], store.skills_root.parent) == identity), None)
     if pending is not None:
         return SkillLearningEvent('skipped', 'SKILL_LEARNING_FAMILY_REUSED', skill_name=pending['decision']['name'])
     event = _commit(commit, lambda: propose_learning(store, publish))

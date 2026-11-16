@@ -665,6 +665,16 @@ def _require_new_name_locked(store: SkillLearningStore, registry: SkillLearningR
         raise SkillLearningGateError(CODE_NAME_TAKEN, {"skill_name": name})
 
 
+def _registered_capacity_available(registry: SkillLearningRegistry, limit: int) -> bool:
+    """登记中的未知条目也计占位；有可证空位时无需核验或选择任何旧条目。"""
+    if limit <= 0:
+        return True
+    if registry.pending_operation is not None and registry.pending_operation.get('phase') in {'prepared', 'moved'}:
+        return False
+    return sum(record.maintenance.get('state') != 'archived'
+               for record in registry.skills.values()) < limit
+
+
 # LLM: 最终容量准入（在 state_lock 内执行）：经 store.managed_records + live_count 验证真实在役机器槽位；
 #   不完整证据、observe 模式与全员受保护各有独立结构化错误码，不再混为一谈。
 # 函数用途: 检查容量或按 R-2 优先级选定一名非受保护的淘汰者。
@@ -676,7 +686,7 @@ def _admit_capacity_or_select_victim_locked(
     maintenance_mode: str = "",
     protection_snapshot: dict | None = None,
 ) -> str | None:
-    if publish.max_skills <= 0:
+    if _registered_capacity_available(registry, publish.max_skills):
         return None
     try:
         managed = store.managed_records(registry, include_archived=False)
