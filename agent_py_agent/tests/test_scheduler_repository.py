@@ -1087,3 +1087,70 @@ def test_candidate_get_and_locked_snapshot_single_deepcopy_on_cache_hit(tmp_path
     assert parsed[-1]["candidate_id"] == second.candidate_id
     with pytest.raises(KeyError):
         service.get("mc_missing")
+
+
+@pytest.mark.parametrize('invalid', [None, 7, [], {'cancel_pending_run_ids': None}])
+def test_bad_job_does_not_block_pending_cancel_or_confirmed_cleanup(tmp_path, caplog, invalid):
+    repository = _repository(tmp_path)
+    claim = _claimed_due_run(repository)
+    terminal = repository.finish_run(str(claim['run_id']), str(claim['claim_id']), SchedulerRunFinish('done', now=1010))
+    store = json.loads(repository.store_path.read_text())
+    store['jobs'][terminal['job_id']]['cancel_pending_run_ids'] = [terminal['run_id']]
+    store['jobs']['job_corrupt'] = invalid
+    repository.store_path.write_text(json.dumps(store))
+    assert [run['run_id'] for run in repository.pending_cancellation_runs()] == [terminal['run_id']]
+    repository.record_cancel_cleanup(terminal['run_id'], confirmed=True)
+    after = json.loads(repository.store_path.read_text())
+    assert after['jobs']['job_corrupt'] == invalid
+    assert after['jobs'][terminal['job_id']]['cancel_pending_run_ids'] == []
+    assert repository.pending_cancellation_runs() == []
+    assert 'SCHEDULER_JOB_INVALID field=jobs' in caplog.text
+    assert 'effect_outcome=not_started' in caplog.text and 'healthy_entries_continue=true' in caplog.text
+
+
+def test_invalid_job_cannot_authorize_history_cancellation_or_be_modified(tmp_path):
+    repository = _repository(tmp_path)
+    claim = _claimed_due_run(repository)
+    terminal = repository.finish_run(str(claim['run_id']), str(claim['claim_id']), SchedulerRunFinish('done', now=1010))
+    store = json.loads(repository.store_path.read_text())
+    bad = dict(store['jobs'][terminal['job_id']], owner={'provider': 'feishu', 'kind': 'user', 'id': 'foreign'},
+        cancel_pending_run_ids=[terminal['run_id']])
+    store['jobs']['job_foreign'] = bad
+    repository.store_path.write_text(json.dumps(store))
+    assert repository.pending_cancellation_runs() == []
+    repository.record_cancel_cleanup(terminal['run_id'], confirmed=True)
+    assert json.loads(repository.store_path.read_text())['jobs']['job_foreign'] == bad
+
+
+def test_null_job_does_not_prevent_dispatch_reserving_healthy_due_run(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.scheduler.dispatch import enqueue_ready_runs
+
+    repository = _repository(tmp_path)
+    job, _ = _create(repository)
+    store = json.loads(repository.store_path.read_text())
+    store['jobs']['job_null'] = None
+    repository.store_path.write_text(json.dumps(store))
+    # 真实派发入口及真实 due 预留；执行接续不属于本缺陷，停在已预留队列边界。
+    monkeypatch.setattr(repository, 'queued_runs', lambda **kwargs: [])
+    service = SimpleNamespace(repository=repository, cancellation_handler=lambda run: pytest.fail('未请求取消的 run 不得获得取消权限'))
+    assert enqueue_ready_runs(service, now=1000) == []
+    runs, errors = repository._valid_runs(repository._store_snapshot(readonly=True))
+    assert not errors and len(runs) == 1 and runs[0]['job_id'] == job['job_id']
+    assert runs[0]['status'] == 'queued'
+    assert json.loads(repository.store_path.read_text())['jobs']['job_null'] is None
+
+
+@pytest.mark.parametrize('pending', [None, 1, 'srun_unknown', [None]])
+def test_malformed_pending_ids_are_isolated_without_fabricated_cancellation(tmp_path, caplog, pending):
+    repository = _repository(tmp_path)
+    job, _ = _create(repository)
+    store = json.loads(repository.store_path.read_text())
+    bad = dict(store['jobs'][job['job_id']], cancel_pending_run_ids=pending)
+    store['jobs'][job['job_id']] = bad
+    repository.store_path.write_text(json.dumps(store))
+    assert repository.pending_cancellation_runs() == []
+    repository.record_cancel_cleanup('srun_unknown', confirmed=True)
+    assert json.loads(repository.store_path.read_text())['jobs'][job['job_id']] == bad
+    assert 'SCHEDULER_JOB_INVALID field=jobs' in caplog.text

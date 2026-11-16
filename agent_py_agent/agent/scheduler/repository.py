@@ -457,8 +457,11 @@ class _SchedulerJobOperations:
             if run is not None and run.get('cancel_requested_at'):
                 store['runs'][run_id] = {**run, 'cancel_cleanup_confirmed': confirmed is True}
             elif confirmed:
-                store['jobs'] = {identifier: {**raw, 'cancel_pending_run_ids': [key for key in raw.get('cancel_pending_run_ids', ()) if key != run_id]}
-                    if run_id in raw.get('cancel_pending_run_ids', ()) else raw for identifier, raw in store['jobs'].items()}
+                for identifier, job in self._cancellation_job_rows(store):
+                    pending = job.get('cancel_pending_run_ids', ())
+                    if run_id in pending:
+                        store['jobs'][identifier] = {**store['jobs'][identifier],
+                            'cancel_pending_run_ids': [key for key in pending if key != run_id]}
             else:
                 return
             self._write_store_unlocked(store, admission)
@@ -469,7 +472,7 @@ class _SchedulerJobOperations:
         store = self._store_snapshot(readonly=True)
         runs, _errors = self._valid_runs(store)
         result = [run for run in runs if run.get('cancel_requested_at')]
-        pending = {key for job in store['jobs'].values()
+        pending = {key for _identifier, job in self._cancellation_job_rows(store)
             for key in job.get('cancel_pending_run_ids', ())}
         if pending:
             active_ids = {row['run_id'] for row in result}
@@ -478,6 +481,23 @@ class _SchedulerJobOperations:
                 if run is not None:
                     result.append(deepcopy(run))
         return result
+
+    def _cancellation_job_rows(self, store):
+        """取消引用只消费同 owner 合法 job；坏记录留在原账，不授权也不阻断健康条目。"""
+        for position, (identifier, raw) in enumerate(store['jobs'].items()):
+            try:
+                job, error = self._parse_job(raw)
+            except (AttributeError, KeyError):
+                # 嵌套旧记录的非法形状也属于该条 schema 错误，不能终止整拍派发。
+                job, error = None, 'SCHEDULER_JOB_INVALID'
+            if job is not None and job['job_id'] != identifier:
+                job, error = None, 'SCHEDULER_JOB_ID_MISMATCH'
+            if job is None:
+                _LOGGER.warning('%s field=jobs entry_position=%d actual_type=%s '
+                    'effect_outcome=not_started next_action=retain_invalid_record_and_repair_schema; '
+                    'healthy_entries_continue=true', error or 'SCHEDULER_JOB_INVALID', position, type(raw).__name__)
+                continue
+            yield identifier, job
 
     # LLM: 原 job CAS 保存通知绑定；调用方已验证认证入口，本方法不接受任意 patch 或改来源，预留 run 不变。
     # 函数用途: 原子保存未来通知接管并增加 job 版本，保留原创建和来源审计。
