@@ -27,6 +27,7 @@ from agent_py_agent.agent.observability.telemetry_ledger import (
     _stats,
 )
 
+from ..local_storage.owner_read_index import OwnerReadUnavailable
 from ..workflows.models import redact_bearer_values as redact_sensitive_value
 from .task_rounds import (
     _append_task_round_unlocked,
@@ -207,7 +208,7 @@ class TaskCallInspector:
         if text is None:
             return missing_task_metadata(self._home, task_id, self._owner_id) if include_rounds else None
         row = json.loads(text)
-        if row.get("schema") != SCHEMA or row.get("task_id") != task_id:
+        if not isinstance(row, dict) or row.get("schema") != SCHEMA or row.get("task_id") != task_id:
             raise ValueError("invalid task record")
         if self._owner_id and row["owner_id"] != self._owner_id:
             raise ValueError("owner mismatch")
@@ -215,7 +216,7 @@ class TaskCallInspector:
 
     # LLM: 无目录返回空；列表后文件消失只过滤None，损坏/越权仍沿原异常，不把索引遗漏解释为没有任务。
     # 函数用途: 安全列举仍存在的任务，避开并发清理留下的空记录。
-    def _records(self):
+    def _records(self, *, diagnostics=None):
         try:
             names = list_names_beneath(self._home, (*PARTS, "task_calls"))
         except FileNotFoundError:
@@ -223,9 +224,24 @@ class TaskCallInspector:
         rows = []
         for name in sorted(names):
             if name.endswith(".json"):
-                loaded = self._read(name[:-5], include_rounds=True)
-                if loaded is not None:
-                    rows.append(loaded)
+                try:
+                    loaded = self._read(name[:-5], include_rounds=True)
+                    if loaded is not None:
+                        if (not isinstance(loaded.get('runs'), list)
+                                or any(not isinstance(run, dict) for run in loaded['runs'])
+                                or not isinstance(loaded.get('mounted_assets'), dict)
+                                or not isinstance(loaded.get('root_run_id'), str)):
+                            raise ValueError('invalid task collection fields')
+                        _number(loaded['started_at'])
+                        rows.append(loaded)
+                except (OSError, ValueError, TypeError, KeyError, RecursionError, OwnerReadUnavailable) as error:
+                    if diagnostics is not None:
+                        # 不复制坏 JSON/异常正文；诊断数量有界，累计遗漏数仍准确。
+                        diagnostics['skipped_tasks'] += 1
+                        if len(diagnostics['errors']) < 16:
+                            diagnostics['errors'].append(dict(code='TASK_TELEMETRY_RECORD_UNREADABLE',
+                                task_id=name[:-5], error_type=type(error).__name__, effect_outcome='not_started',
+                                next_action='核实该 task_id 的任务元数据或轮次源；其它任务可继续查询'))
         return rows
 
     # LLM: 增量更新索引行，缺失或目录文件名不一致时只补读缺失任务，内容未变时不重写索引文件。
@@ -339,16 +355,36 @@ class TaskCallInspector:
     # LLM: 合并当前任务快照和全部账本任务，排序过滤后分页；不把自动发现的摘要落盘。
     # 函数用途: 分页查询任务记录。
     def list_task_calls(self, *, limit=50, cursor=0, **filters):
+        """保留旧列表合同；损坏项只影响自己的结果，不阻断健康任务。"""
+        return self.list_task_calls_report(limit=limit, cursor=cursor, **filters)['rows']
+
+    def list_task_calls_report(self, *, limit=50, cursor=0, **filters):
+        """报告页显式携带部分覆盖与有界诊断；查询不修改或隔离移动源文件。"""
         if filters.keys() - {"status", "trigger_kind", "since", "until"}:
             raise ValueError("unknown filter")
-        records = {r["task_id"]: r for r in self._records()}
+        if type(limit) is not int or type(cursor) is not int or min(limit, cursor) < 0:
+            raise ValueError('invalid pagination')
+        diagnostics = dict(skipped_tasks=0, errors=[])
+        records = {r['task_id']: r for r in self._records(diagnostics=diagnostics)}
         groups = {}
-        for call in _calls(self.ledger):
-            if call["task_id"]:
-                groups.setdefault(call["task_id"], []).append(call)
+        tool_coverage = None
+        try:
+            for call in _calls(self.ledger):
+                if call['task_id']:
+                    groups.setdefault(call['task_id'], []).append(call)
+        except OwnerReadUnavailable as error:
+            tool_coverage = dict(status=error.coverage.get('status'), reason=error.coverage.get('reason'))
         rows = [_merge_task(records.get(key), groups.get(key, [])) for key in records.keys() | groups.keys()]
-        rows.sort(key=lambda r: (r["started_at"], r["task_id"]))
-        return _page((r for r in rows if _matches(r, filters)), limit, cursor)
+        rows.sort(key=lambda r: (r['started_at'], r['task_id']))
+        partial_rounds = sum(1 for row in rows if row.get('rounds_coverage', {}).get('status', 'complete') != 'complete')
+        partial = diagnostics['skipped_tasks'] > 0 or partial_rounds > 0 or tool_coverage is not None
+        coverage = dict(status='partial' if partial else 'complete',
+                        reason='task_sources_incomplete' if partial else 'covered',
+                        skipped_tasks=diagnostics['skipped_tasks'], partial_round_tasks=partial_rounds)
+        if tool_coverage is not None:
+            coverage['tool_calls'] = tool_coverage
+        return dict(rows=_page((r for r in rows if _matches(r, filters)), limit, cursor),
+                    coverage=coverage, diagnostics=diagnostics['errors'])
 
     # LLM: 拒绝跨 home/owner 账本；不透明 ID 只查账本、绝不拼路径，合法文件 ID 才读任务 JSON。
     # 函数用途: 返回任务详情及按开始时间排序的工具调用。

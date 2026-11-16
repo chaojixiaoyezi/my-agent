@@ -134,3 +134,70 @@ def test_changed_source_generation_rejects_locator(tmp_path):
         limit=2, cursor=page['next_cursor'])
     assert resumed['coverage']['status'] == 'unavailable'
     assert resumed['coverage']['reason'] == 'stale_generation'
+
+
+@pytest.mark.parametrize('tail', [b'{"interrupted":', b'\xff\xfe', b'not-json'])
+def test_append_seals_torn_tail_and_preserves_original_evidence(tmp_path, tail):
+    ledger = _ledger(tmp_path, 1)
+    source = tmp_path.joinpath(*PARTS, 'tool_calls.jsonl')
+    original = source.read_bytes()
+    with source.open('ab') as stream:
+        stream.write(tail)
+    ledger.record_tool_call(dict(call_id='after-recovery', owner_id='one', tool_name='read',
+        started_at=3, ended_at=4))
+    rows = ledger.query_tool_calls()
+    assert [row['call_id'] for row in rows] == ['c0', 'after-recovery']
+    assert source.read_bytes().startswith(original)
+    sidecars = list(source.parent.glob('.tool_calls.jsonl.torn-*'))
+    assert len(sidecars) == 1 and sidecars[0].read_bytes() == tail
+    assert sidecars[0].stat().st_mode & 0o777 == 0o600
+    # 重启/再次追加不重放旧残尾，也不让损坏再次粘到后续行。
+    ToolTelemetryLedger(tmp_path, owner_id='one').record_tool_call(dict(
+        call_id='after-restart', tool_name='read', started_at=5, ended_at=6))
+    assert len(ledger.query_tool_calls()) == 3
+
+
+def test_complete_json_tail_gets_newline_without_quarantine(tmp_path):
+    ledger = _ledger(tmp_path, 1)
+    source = tmp_path.joinpath(*PARTS, 'tool_calls.jsonl')
+    source.write_bytes(source.read_bytes().rstrip(b'\n'))
+    ledger.record_tool_call(dict(call_id='second', tool_name='read', started_at=3, ended_at=4))
+    assert [row['call_id'] for row in ledger.query_tool_calls()] == ['c0', 'second']
+    assert not list(source.parent.glob('.tool_calls.jsonl.torn-*'))
+
+
+def test_quarantine_failure_keeps_torn_source_unmodified(tmp_path, monkeypatch):
+    from agent_py_agent.agent.observability import telemetry_ledger as module
+
+    ledger = _ledger(tmp_path, 1)
+    source = tmp_path.joinpath(*PARTS, 'tool_calls.jsonl')
+    with source.open('ab') as stream:
+        stream.write(b'{"interrupted":')
+    before = source.read_bytes()
+    def fail(*args, **kwargs):
+        raise OSError('controlled evidence persistence failure')
+    monkeypatch.setattr(module, 'write_bytes_atomic_beneath', fail)
+    with pytest.raises(OSError, match='evidence persistence failure'):
+        ledger.record_tool_call(dict(call_id='must-not-append', tool_name='read', started_at=3, ended_at=4))
+    assert source.read_bytes() == before
+
+
+@pytest.mark.parametrize('link_kind', ['hardlink', 'symlink'])
+def test_tail_repair_never_mutates_linked_source(tmp_path, link_kind):
+    import os
+
+    home = tmp_path / 'owner'
+    directory = home.joinpath(*PARTS)
+    directory.mkdir(parents=True)
+    outside = tmp_path / 'independent-evidence'
+    outside.write_bytes(b'{"interrupted":')
+    source = directory / 'tool_calls.jsonl'
+    if link_kind == 'hardlink':
+        os.link(outside, source)
+    else:
+        source.symlink_to(outside)
+    before = outside.read_bytes()
+    with pytest.raises(OSError):
+        ToolTelemetryLedger(home).record_tool_call(dict(call_id='forbidden', tool_name='read', started_at=1, ended_at=2))
+    assert outside.read_bytes() == before
+    assert not list(directory.glob('.tool_calls.jsonl.torn-*'))

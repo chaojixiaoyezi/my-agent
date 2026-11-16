@@ -2,6 +2,7 @@
 # 模块用途: 保存脱敏工具调用，提供查询、时间过滤与工具耗时统计。
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -22,13 +23,16 @@ from agent_py_agent.agent.common.nofollow_fs import (
     last_append_pre_stamp,
     list_names_beneath,
     open_directory_beneath,
+    open_private_lock_beneath,
     open_readonly_file_beneath,
     unlink_file_beneath,
+    write_bytes_atomic_beneath,
 )
 
 from ..common.log_redaction import redact_sensitive_value
 from ..local_storage.owner_read_index import (
     _APPEND_WITNESS_FULL_PREFIX_BYTES,
+    _OWNER_INDEX_MAX_ROW_BYTES,
     OwnerReadIndex,
     note_owner_append,
     require_complete,
@@ -84,6 +88,62 @@ def _seal_active_volume(home):
             append_text_beneath(home, (*PARTS, 'tool_calls.jsonl'), '')
     except OSError:
         _LOGGER.warning('遥测卷封存或目录同步失败，保留已完成的追加', exc_info=True)
+
+
+def _seal_tool_jsonl_tail_unlocked(home, known_stamp=None):
+    """复用原 JSONL 封尾规则：完整对象补 LF，残尾先耐久留档再截断；只读既有行预算。"""
+    parts = (*PARTS, 'tool_calls.jsonl')
+    try:
+        descriptor = open_readonly_file_beneath(home, parts)
+    except FileNotFoundError:
+        return
+    try:
+        info = os.fstat(descriptor)
+        stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if not info.st_size or stamp == known_stamp:
+            return
+        last = os.pread(descriptor, 1, info.st_size - 1)
+        if not last:
+            last = os.pread(descriptor, 1, info.st_size - 1)
+        if len(last) != 1:
+            raise OSError('tool telemetry tail point read was short; append not started')
+        if last == b'\n':
+            return
+        start = max(0, info.st_size - _OWNER_INDEX_MAX_ROW_BYTES - 1)
+        suffix = os.pread(descriptor, info.st_size - start, start)
+        if len(suffix) != info.st_size - start:
+            raise OSError('tool telemetry tail read was short; append not started')
+        split = suffix.rfind(b'\n') + 1
+        if not split and start:
+            # 超长残尾无法在一条记录预算内证明边界；封存原卷而不读取或丢弃它。
+            _seal_active_volume(home)
+            current = _append_stamp(home)
+            if current is None or current[:2] == (info.st_dev, info.st_ino):
+                raise OSError('tool telemetry oversized tail sealing failed; original source retained')
+            return
+        end, tail = start + split, suffix[split:]
+        try:
+            completed = isinstance(json.loads(tail.decode('utf-8')), dict)
+        except (ValueError, UnicodeError, RecursionError):
+            completed = False
+        writer = open_private_lock_beneath(home, parts)
+        try:
+            current = os.fstat(writer)
+            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (
+                    info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+                raise OSError('tool telemetry source changed during tail sealing; no truncation performed')
+            if completed:
+                os.lseek(writer, 0, os.SEEK_END)
+                os.write(writer, b'\n')
+            else:
+                sidecar = (*PARTS, '.tool_calls.jsonl.torn-' + hashlib.sha256(tail).hexdigest())
+                write_bytes_atomic_beneath(home, sidecar, tail)
+                os.ftruncate(writer, end)
+            os.fsync(writer)
+        finally:
+            os.close(writer)
+    finally:
+        os.close(descriptor)
 
 
 # LLM: 元数据只从原owner锚定的目录读取；软链接、多链接和非普通文件不获得退休资格。
@@ -332,6 +392,7 @@ class ToolTelemetryLedger:
         self._owner_id = owner_id
         # 同home允许其他owner记录，owner只作精确查询谓词。
         self._read_index = OwnerReadIndex(self._home)
+        self._verified_tail_stamp = None
 
     # LLM: 不修改输入对象；owner 冲突、非法状态和数值写前拒绝，写入使用进程锁。
     # 函数用途: 规范化并耐久追加调用记录。
@@ -358,6 +419,7 @@ class ToolTelemetryLedger:
         line = _encode(item.to_dict())
         encoded_len = len(line.encode('utf-8'))
         with _lock(self._home):
+            _seal_tool_jsonl_tail_unlocked(self._home, self._verified_tail_stamp)
             before = _append_stamp(self._home)
             _LAST_APPEND_PRE_STAMP.set(None)
             append_text_beneath(self._home, (*PARTS, "tool_calls.jsonl"), line)
@@ -371,9 +433,11 @@ class ToolTelemetryLedger:
                         or (pre_stamp is not None and pre_stamp != before)):
                     raw_after = None
                 note_owner_append(self._home, (*PARTS, 'tool_calls.jsonl'), before, after, raw_after=raw_after)
+            self._verified_tail_stamp = after
             sealed = after is not None and after[2] >= TELEMETRY_VOLUME_MAX_BYTES
             if sealed:
                 _seal_active_volume(self._home)
+                self._verified_tail_stamp = None
             _retire_sealed_volumes(self._home, now=time.time(), force=sealed)
         return item
 
@@ -405,6 +469,9 @@ class ToolTelemetryLedger:
         })
         if view is None:
             view = self._read_index.advance('telemetry', (*PARTS, 'tool_calls.jsonl'))
+            checkpoint = getattr(self._read_index, '_last_advance_checkpoint', None)
+            if checkpoint and checkpoint['complete'] and checkpoint['sealed'] == checkpoint['through'] == checkpoint['stamp'][2]:
+                self._verified_tail_stamp = checkpoint['stamp']
         return {**self._read_index.query(view, filters=selected, limit=limit, offset=cursor,
                                          after_cursor=after_cursor, include_total=include_total,
                                          scan_limit=scan_limit), 'view': view}

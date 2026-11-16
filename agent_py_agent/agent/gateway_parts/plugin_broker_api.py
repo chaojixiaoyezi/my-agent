@@ -2,7 +2,7 @@
 # 模块用途: 在固定用户范围包装资产、遥测和受控执行；不安装 HTTP 路由，不自行授予插件执行权。
 import json
 import time
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,6 +16,14 @@ READ_ACTIONS = frozenset(('assets.list', 'assets.get', 'assets.topology',
     'telemetry.tool_calls.get', 'telemetry.tool_stats'))
 WRITE_ACTIONS = frozenset(('assets.save', 'assets.update_sources', 'assets.bind'))
 EXEC_ACTIONS = frozenset(('execute.tool', 'execute.script', 'execute.workflow', 'execute.workflow_resume'))
+
+
+@dataclass(frozen=True)
+class _BrokerReadPage:
+    """仅在宿主内携带读覆盖；公开 data 仍保持原列表，诊断沿原 JSON 信封返回。"""
+    rows: list
+    coverage: dict
+    diagnostics: list
 
 
 # LLM: 公共出口递归转成 JSON 类型并沿宿主规则脱敏；不修改原始数据，不将异常字符串公开。
@@ -198,6 +206,9 @@ class PluginBrokerService:
             if action in EXEC_ACTIONS and not callable(self.invoker):
                 return {'ok': False, 'error_code': 'BROKER_EXECUTION_DENIED'}
             data = self._route(home, owner_id, action, payload)
+            if isinstance(data, _BrokerReadPage):
+                return {'ok': True, 'data': public_payload(data.rows),
+                        'coverage': public_payload(data.coverage), 'diagnostics': public_payload(data.diagnostics)}
             return {'ok': True, 'data': public_payload(data | scope if scope else data)}
         except PermissionError:
             return {'ok': False, 'error_code': 'BROKER_SCOPE_DENIED'}
@@ -347,7 +358,7 @@ def _query_telemetry(home, owner_id, action, payload):
         inspector = TaskCallInspector(home, owner_id=owner_id)
         if action.endswith('.get'):
             return inspector.get_task_call_detail(payload['task_id'], ledger=ledger)
-        return inspector.list_task_calls(**payload)
+        return _BrokerReadPage(**inspector.list_task_calls_report(**payload))
     if action == 'telemetry.tool_calls.get':
         return ledger.get_tool_call(payload['call_id'])
     if action == 'telemetry.tool_stats':

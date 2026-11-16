@@ -136,3 +136,80 @@ def test_task_capacity_retains_existing_evidence(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='capacity_limited'):
         task.append_round('task', dict(round_id='second'), include_rounds=False)
     assert [row['round_id'] for row in task.get_task_call_detail('task')['rounds']] == ['first']
+
+
+def test_bad_task_metadata_isolated_with_partial_diagnostics(tmp_path):
+    import json
+
+    task = _task(tmp_path)
+    directory = tmp_path / 'data/telemetry/task_calls'
+    bad = directory / 'bad.json'
+    bad.write_text('{"secret": "do-not-echo",')
+    before = bad.read_bytes()
+    (directory / 'array.json').write_text('[]')
+    (directory / 'wrong-fields.json').write_text(json.dumps(dict(
+        schema='task_call_telemetry.v1', task_id='wrong-fields', owner_id='one', started_at=1, runs=7)))
+    report = task.list_task_calls_report(limit=1)
+    assert [row['task_id'] for row in report['rows']] == ['task']
+    assert report['coverage']['status'] == 'partial'
+    assert report['coverage']['skipped_tasks'] == 3
+    assert all(row['code'] == 'TASK_TELEMETRY_RECORD_UNREADABLE' for row in report['diagnostics'])
+    assert all(row['effect_outcome'] == 'not_started' for row in report['diagnostics'])
+    assert 'do-not-echo' not in json.dumps(report['diagnostics'])
+    assert bad.read_bytes() == before
+    assert [row['task_id'] for row in task.list_task_calls()] == ['task']
+
+
+def test_task_diagnostics_bounded_without_losing_skipped_count(tmp_path):
+    task = _task(tmp_path)
+    directory = tmp_path / 'data/telemetry/task_calls'
+    for i in range(20):
+        (directory / f'bad-{i}.json').write_bytes(b'{')
+    report = task.list_task_calls_report()
+    assert report['coverage']['skipped_tasks'] == 20
+    assert len(report['diagnostics']) == 16
+    assert [row['task_id'] for row in report['rows']] == ['task']
+
+
+def test_plugin_task_partial_envelope_real_http_roundtrip(tmp_path):
+    import http.client
+    import json
+
+    from agent_py_agent.agent import plugin_host_api as api
+    from agent_py_agent.agent.gateway_parts.http_service import (
+        GatewayHTTPServer,
+        GatewayHTTPServerParams,
+    )
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.tests.test_plugin_host_api import _Ref
+
+    task = TaskCallInspector(tmp_path, owner_id='local/main')
+    task.upsert_task_call(dict(task_id='healthy', started_at=1))
+    bad = tmp_path / 'data/telemetry/task_calls/bad.json'
+    bad.write_bytes(b'{"secret":"do-not-echo",')
+    server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / 'gateway'),
+        params=GatewayHTTPServerParams(agent=SimpleNamespace(home_paths=home_paths(tmp_path))))
+    server.start()
+    connection = None
+    try:
+        port = server.server.server_address[1]
+        ref = _Ref()
+        ref.owner_value = SimpleNamespace(home_dir=tmp_path, owner_id='local/main')
+        env = api.issue_host_api_env(ref, 'harness')
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        connection.request('POST', '/plugin-host/query', json.dumps(dict(
+            action='telemetry.tasks.list', payload=dict(limit=1))),
+            {'Content-Type': 'application/json', 'X-Plugin-Host-Token': env[api.HOST_API_TOKEN_ENV]})
+        response = connection.getresponse()
+        envelope = json.loads(response.read())
+        assert response.status == 200 and envelope['ok'] is True
+        assert isinstance(envelope['data'], list)
+        assert [row['task_id'] for row in envelope['data']] == ['healthy']
+        assert envelope['coverage']['status'] == 'partial'
+        assert envelope['coverage']['skipped_tasks'] == 1
+        assert envelope['diagnostics'][0]['code'] == 'TASK_TELEMETRY_RECORD_UNREADABLE'
+        assert 'do-not-echo' not in json.dumps(envelope['diagnostics'])
+    finally:
+        if connection is not None:
+            connection.close()
+        server.stop()

@@ -1716,6 +1716,7 @@ class OwnerReadIndex:
             )
         finally:
             self._last_advance_work = dict(items=budget.decoded, bytes=budget.read_bytes)
+            self._last_advance_checkpoint = dict(checkpoint) if checkpoint else None
             if descriptor >= 0:
                 os.close(descriptor)
 
