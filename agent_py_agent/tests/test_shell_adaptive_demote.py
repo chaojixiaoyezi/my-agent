@@ -129,7 +129,10 @@ def _wait_fixture(monkeypatch, *, finish_at, eof_at=None, birth="root-birth"):
     monkeypatch.setattr(shell, "time", SimpleNamespace(monotonic=lambda: clock.now,
                         sleep=lambda seconds: setattr(clock, "now", clock.now + seconds)))
     monkeypatch.setattr(shell, "capture_process_birth_token", lambda _pid: birth)
-    monkeypatch.setattr(shell, "_start_foreground_capture", lambda *_args: capture)
+    def start_capture(_proc, _birth, *, host_output_redaction):
+        assert host_output_redaction is None
+        return capture
+    monkeypatch.setattr(shell, "_start_foreground_capture", start_capture)
     monkeypatch.setattr(shell, "register_cancellation_callback", lambda *_args: nullcontext())
     monkeypatch.setattr(shell, "is_interrupted", lambda: False)
     monkeypatch.setattr(shell, "cancellation_requested", lambda: False)
@@ -236,12 +239,15 @@ def test_real_foreground_parent_and_child_priorities(threshold, duration, demote
 
 # LLM: 参数只来自ShellToolOptions，两个前台调用点均须原样透传；0保持旧调用形状，后台/PTY不借此接线。
 # 函数用途: 反证配置虽已保存但前台等待仍只吃默认0的漏接线。
+@pytest.mark.parametrize("with_redaction", [False, True])
 @pytest.mark.parametrize("sandboxed", [True, False])
 @pytest.mark.parametrize("threshold", [0, 7])
-def test_foreground_paths_plumb_options(tmp_path, monkeypatch, sandboxed, threshold):
+def test_foreground_paths_plumb_options(tmp_path, monkeypatch, sandboxed, threshold, with_redaction):
     assert {"demote_after_seconds", "demoted_nice"} <= {item.name for item in fields(shell.ShellToolOptions)}
     tool = shell.ShellTool(tmp_path, options=shell.ShellToolOptions(demote_after_seconds=threshold, demoted_nice=13))
     assert (tool.demote_after_seconds, tool.demoted_nice) == (threshold, 13)
+    redaction = object() if with_redaction else None
+    tool._host_output_redaction = redaction
     proc = SimpleNamespace(pid=ROOT)
     completed = subprocess.CompletedProcess("command", 0, "same-output", "")
     communicate = Mock(return_value=completed)
@@ -255,7 +261,7 @@ def test_foreground_paths_plumb_options(tmp_path, monkeypatch, sandboxed, thresh
         monkeypatch.setattr(shell, "_subprocess_text_env", lambda *_args, **_kwargs: {})
         monkeypatch.setattr(shell.subprocess, "Popen", lambda *_args, **_kwargs: proc)
         result = shell._run_shell_command(tool, "command", tmp_path, 5, None, None, None)
-    expected = {"command": "command", "timeout": 5}
+    expected = {"command": "command", "timeout": 5, "host_output_redaction": redaction}
     if threshold:
         expected.update(demote_after_seconds=threshold, demoted_nice=13)
     communicate.assert_called_once_with(proc, **expected)

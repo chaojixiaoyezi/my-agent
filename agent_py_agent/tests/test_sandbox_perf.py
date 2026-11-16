@@ -353,14 +353,17 @@ def test_prune_transient_sidecar_matches_destination():
 
 # LLM: 仅替换平台构参及Popen/等待出口；调用真实Shell重试控制，不启动平台沙箱。
 # 函数用途: 提供真实裁剪输入和可核对的启动、等待记录。
-@pytest.fixture
-def sidecar_shell(monkeypatch, tmp_path):
+@pytest.fixture(params=[False, True], ids=["ordinary", "foreground-admin"])
+def sidecar_shell(monkeypatch, tmp_path, request):
     argv = ['bwrap', '--ro-bind-try', '/absent-wal', '/absent-wal', '--', 'true']
-    tool = SimpleNamespace(path_access_policy=SimpleNamespace(owner_scope_root=None), protected_persona_root=None,
+    tool = SimpleNamespace(path_access_policy=SimpleNamespace(owner_scope_root=None, foreground_admin_full_access=request.param), protected_persona_root=None,
                            host_private_roots=(), host_credential_env_names=frozenset())
     popen = Mock()
     communicate = Mock()
-    monkeypatch.setattr(shell, '_sandbox_exec', lambda *a, **k: (argv.copy(), False))
+    def sandbox_exec(*args, host_policy, **kwargs):
+        assert host_policy.foreground_admin_full_access is request.param
+        return argv.copy(), False
+    monkeypatch.setattr(shell, '_sandbox_exec', sandbox_exec)
     monkeypatch.setattr(shell.subprocess, 'Popen', popen)
     monkeypatch.setattr(shell, '_communicate_process', communicate)
     return tool, tmp_path, argv, popen, communicate
@@ -598,7 +601,10 @@ def mount_race_shell(sidecar_shell, monkeypatch):
     leaf = target / 'existing.json'
     leaf.write_text('original')
     argv = ['bwrap', '--ro-bind', '/', '/', '--ro-bind', str(leaf), str(leaf), '--', 'bash', '-c', 'python task.py']
-    monkeypatch.setattr(shell, '_sandbox_exec', lambda *a, **k: (argv.copy(), False))
+    def sandbox_exec(*args, host_policy, **kwargs):
+        assert host_policy.foreground_admin_full_access is tool.path_access_policy.foreground_admin_full_access
+        return argv.copy(), False
+    monkeypatch.setattr(shell, '_sandbox_exec', sandbox_exec)
     return tool, target, leaf, argv, popen, communicate
 
 

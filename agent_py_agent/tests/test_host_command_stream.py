@@ -193,11 +193,11 @@ def test_disconnect_cancels_only_original_wait_and_replay_cannot_execute(tmp_pat
                 token.cancel()
                 result = future.result(timeout=10)
                 assert result["state"] == "outcome_unknown" and result["request_id"] == "departed"
+                assert ended.wait(10)  # 先确认原执行线程退出，再读取它的持久终态。
                 closed = wait_until(lambda: (row if (row := client.command("/plugins status departed"))["state"] != "running" else None))
                 assert closed["state"] == "rejected" and closed["error_code"] == "CANCELLED", closed
                 assert runtime.store.snapshot().permission is None
                 assert not source.with_suffix(".calls").exists()
-                assert ended.wait(10)  # 原任务终态与单次连接退出是两个不同事实。
             finally:
                 token.cancel()
                 controller.cancel_pending()

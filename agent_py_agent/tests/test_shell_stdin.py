@@ -42,7 +42,7 @@ def test_batch_shell_never_consumes_host_stdin(tmp_path, monkeypatch, entry, exp
     try:
         if entry == "foreground":
             monkeypatch.setattr(shell, "_sandbox_exec", lambda *a, **k: (argv, False))
-            tool = SimpleNamespace(path_access_policy=SimpleNamespace(owner_scope_root=None), protected_persona_root=None,
+            tool = SimpleNamespace(path_access_policy=SimpleNamespace(owner_scope_root=None, foreground_admin_full_access=False), protected_persona_root=None,
                                    host_private_roots=(), host_credential_env_names=frozenset())
             result = shell._run_attempt_sandboxed_shell_command(tool, command, tmp_path, 5, None, None, None)
             output = result.stdout

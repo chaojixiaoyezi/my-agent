@@ -15,6 +15,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -194,16 +195,21 @@ def test_sidecar_pruning_keeps_helper_and_command(monkeypatch, tmp_path, kind, n
 
 # LLM: 用真实前台 spawn 构参和替身 Popen，观察 pass_fds；不启动任何业务进程。
 # 函数用途: 只在明确采用预建 fd 时透传描述符，保留 stdin/session/env 合同。
+@pytest.mark.parametrize("admin_access", [False, True])
 @pytest.mark.parametrize("fds", [(), (17,)])
-def test_foreground_spawn_passes_only_adopted_fds(monkeypatch, tmp_path, fds):
+def test_foreground_spawn_passes_only_adopted_fds(monkeypatch, tmp_path, fds, admin_access):
     argv = ["/trusted/helper", "--deny", "8420", "--", "/bin/true"]
     adopted = ["/trusted/helper", "--landlock-fd", "17", "--", "/bin/true"] if fds else argv
     seen = []
     monkeypatch.setattr(attempt, "adopt_prebuilt_landlock_ruleset", lambda arg: (adopted, fds), raising=False)
     monkeypatch.setattr(shell.subprocess, "Popen", lambda arg, **kw: seen.append((arg, kw)))
-    tool = SimpleNamespace(path_access_policy=SimpleNamespace(owner_scope_root=None), host_private_roots=(),
+    environment = Mock(wraps=shell._subprocess_text_env)
+    monkeypatch.setattr(shell, "_subprocess_text_env", environment)
+    tool = SimpleNamespace(path_access_policy=SimpleNamespace(owner_scope_root=None, foreground_admin_full_access=admin_access), host_private_roots=(),
                            host_credential_env_names=frozenset())
     shell._start_attempt_shell_process(argv, False, tmp_path, tool)
+    environment.assert_called_once_with(None, hidden_roots=(), sandboxed=True,
+                                        host_credential_env_names=frozenset(), foreground_admin_full_access=admin_access)
     assert seen[0][0] == adopted
     kwargs = seen[0][1]
     assert kwargs["stdin"] == subprocess.DEVNULL and kwargs["start_new_session"] is True

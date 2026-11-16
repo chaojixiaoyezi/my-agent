@@ -391,7 +391,8 @@ def test_callback_and_waiter_keep_first_tree_receipt_without_second_cleanup(monk
     capture = Mock()
     kill = Mock(return_value=receipt)
     monkeypatch.setattr(shell, 'capture_process_birth_token', lambda _: 'original-birth')
-    monkeypatch.setattr(shell, '_start_foreground_capture', lambda *_: capture)
+    start_capture = Mock(return_value=capture)
+    monkeypatch.setattr(shell, '_start_foreground_capture', start_capture)
     monkeypatch.setattr(shell, '_kill_process_group', kill)
     monkeypatch.setattr(shell, 'is_interrupted', lambda: True)
 
@@ -403,6 +404,7 @@ def test_callback_and_waiter_keep_first_tree_receipt_without_second_cleanup(monk
     monkeypatch.setattr(shell, 'register_cancellation_callback', cancellation)
     with pytest.raises(shell.CommandInterruptedError) as error:
         shell._communicate_process(proc, command='native-command', timeout=10)
+    start_capture.assert_called_once_with(proc, 'original-birth', host_output_redaction=None)
     kill.assert_called_once_with(proc, 'original-birth')
     assert error.value.termination is receipt
     assert error.value.termination.confirmed is confirmed
