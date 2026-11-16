@@ -16,7 +16,7 @@ from .task_state import conversation_task_link_is_terminal
 # Only a real absence counts: missing store, empty task id, an unreadable link (DataCorruptionError) or a non-terminal link keep
 # it open. Unknown attempts still block via the repository's tree rule. Side effect: may write task_run.closed.
 # 函数用途: 在代理执行收口或显式恢复之后核对会话任务状态，并幂等关闭整棵任务执行总账；没有会话任务的请求在代理树结束后同样关闭。
-def settle_terminal_task_run(repo: Any, store: Any, *, run_id: str = "", task_id: str = "") -> None:
+def settle_terminal_task_run(repo: Any, store: Any, *, run_id: str = "", task_id: str = "", _task_guard_held: bool = False) -> None:
     if repo is None or store is None:
         return
     run_id = str(run_id or "").strip()
@@ -43,21 +43,92 @@ def settle_terminal_task_run(repo: Any, store: Any, *, run_id: str = "", task_id
         task_run = repo.get_task_run(task_run_id)
         if task_run is None:
             return
-        canonical_task_id = str(task_run["task_id"] or "").strip()
-        if not canonical_task_id:
-            return
-        closeout = _task_run_closeout_reason(store.tasks.load(canonical_task_id))
-        if closeout is None:
-            return
-        operator, reason = closeout
-        repo.settle_task_run_if_agent_tree_terminal(
-            task_run_id=task_run_id,
-            task_id=canonical_task_id,
-            operator=operator,
-            reason=reason,
-        )
+        reconcile_task_run_closeout(repo, store, task_run_id=task_run_id, apply=True, _task_guard_held=_task_guard_held)
     except Exception:  # noqa: BLE001 审计投影失败不反噬已完成的用户任务
         return
+
+
+def reconcile_task_run_closeout(repo, store, *, task_run_id: str, apply: bool = False,
+                               commit_transition=None, empty_reference_guard=None, _task_guard_held: bool = False) -> dict[str, object]:
+    """精确执行账预览/收口；读取失败保留保护，写入在任务锁内复核。"""
+    result = {"task_run_id": task_run_id, "task_id": "", "decision": "protected",
+              "reason_code": "proof_unavailable", "applied": False, "effect_outcome": "not_started"}
+    if repo is None or store is None:
+        return result
+
+    def assess():
+        row = repo.get_task_run(task_run_id)
+        if row is None:
+            return {**result, "reason_code": "no_such_task_run"}
+        task_id = str(row["task_id"] or "")
+        result["task_id"] = task_id
+        if not task_id:
+            return {**result, "reason_code": "missing_task_id"}
+        if float(row["closed_at"] or 0) > 0:
+            return {**result, "decision": "already_terminal", "reason_code": "already_terminal"}
+        reason = _task_run_closeout_reason(store.tasks.load(task_id))
+        if reason is None:
+            return {**result, "reason_code": "durable_task_active"}
+        proof = repo.preview_task_run_agent_tree(task_run_id=task_run_id)
+        if not proof["eligible"]:
+            if proof["reason"] != "no_agent_runs_reference_proof_required" or empty_reference_guard is None:
+                return {**result, "reason_code": proof["reason"]}
+            # 调用方持有所有引用创建门到最终SQL；preview必须使用不建锁、不写文件的只读分支。
+            with empty_reference_guard(dict(row), apply=apply) as absence:
+                expected = {"created_at": row["created_at"], "updated_at": row["updated_at"]}
+                valid = (isinstance(absence, dict)
+                         and absence.get("schema") == "task-run-empty-reference-proof.v1"
+                         and absence.get("task_run_id") == task_run_id
+                         and absence.get("task_id") == task_id
+                         and absence.get("generation") == expected
+                         and all(absence.get(key) is True for key in
+                                 ("coverage_complete", "references_absent", "execution_absent")))
+                if not valid:
+                    return {**result, "reason_code": "empty_reference_coverage_incomplete"}
+                if not apply:
+                    return {**result, "decision": "eligible", "reason_code": "unstarted_no_references"}
+                def close_empty():
+                    return repo.settle_empty_task_run(task_run_id=task_run_id, task_id=task_id,
+                                                      generation=expected)
+                closed = commit_transition(close_empty) if commit_transition else close_empty()
+                success = bool(closed.get("settled"))
+                return {**result, "decision": "eligible" if success else "protected", "applied": success,
+                        "reason_code": "unstarted_no_references" if success else closed["reason"],
+                        "effect_outcome": "succeeded" if success else "not_started"}
+        if not apply:
+            return {**result, "decision": "eligible", "reason_code": reason[1]}
+        def commit():
+            return repo.settle_task_run_if_agent_tree_terminal(
+                task_run_id=task_run_id, task_id=task_id, operator=reason[0], reason=reason[1])
+        settled = commit_transition(commit) if commit_transition is not None else commit()
+        success = bool(settled.get("settled"))
+        return {**result, "decision": "eligible" if success else "protected",
+                "reason_code": reason[1] if success else settled.get("reason", "tree_changed"),
+                "applied": success, "effect_outcome": "succeeded" if success else "not_started"}
+    try:
+        if not apply:
+            return assess()
+        row = repo.get_task_run(task_run_id)
+        if row is None:
+            return {**result, "reason_code": "no_such_task_run"}
+        if _task_guard_held:
+            return assess()
+        with store.tasks.transition_guard(str(row["task_id"] or "")):
+            return assess()
+    except Exception as exc:  # noqa: BLE001 不将读取失败当作不存在
+        from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+        from ..common.request_execution_ports import (
+            RequestExecutionContextUnavailable,
+            RequestExecutionOutcomeUncertainError,
+        )
+        from ..common.tool_write_context import ToolWriteContextUnavailable
+
+        if isinstance(exc, (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
+                            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError)):
+            raise
+        return {**result, "decision": "unknown", "reason_code": "proof_read_failed",
+                "error_type": type(exc).__name__, "effect_outcome": "unknown" if apply else "not_started",
+                "next_action": "核对该 task_run_id 的规范 TaskLink 与执行树读取错误；保持保护，不按缺失盲目关闭"}
 
 
 # LLM: Pure decision for settle_terminal_task_run. `link` is the result of

@@ -165,9 +165,9 @@ def test_apply_settles_hung_runs_by_family_and_records_migration(repo):
         ).fetchone()["value"])
     assert record["migration_id"] == RUN_CLOSEOUT_BACKFILL_KEY
     assert record["settled"] == {"failed": 1, "cancelled": 1, "done": 1}
-    assert record["task_runs_closed"] == 3
+    assert record["task_runs_closed"] == 0
     for rec in (blocked, stopped, finished):
-        assert _task_run_row(repo, rec["task_run_id"])["closed_at"] > 0
+        assert _task_run_row(repo, rec["task_run_id"])["closed_at"] == 0
 
 
 def test_apply_skips_continuable_waiting_and_recent(repo):
@@ -364,3 +364,26 @@ def test_apply_skips_recovered_with_unsettled_or_locked(repo):
     assert _run_status(repo, locked) == "created"
     assert result["skipped"]["unsettled_operations"] == 1
     assert result["skipped"]["active_exec_lock"] == 1
+
+
+def test_backfill_wrapper_closeout_requires_real_readable_store(repo, tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.runtime_db.run_closeout_backfill import _close_touched_task_runs
+
+    rec = _hung_run(repo, "store-proof", {"runtime_status": "ok"})
+    apply_run_closeout_backfill(repo, now=NOW)
+    ids = [rec["task_run_id"]]
+    assert _close_touched_task_runs(repo, ids) == 0
+    store = ConversationStore(tmp_path / "conversations")
+    original = store.tasks.load
+    def corrupt(_):
+        raise ValueError("corrupt link")
+    monkeypatch.setattr(store.tasks, "load", corrupt)
+    assert _close_touched_task_runs(repo, ids, store=store) == 0
+    monkeypatch.setattr(store.tasks, "load", original)
+    import json
+    link_path = store.storage.task_path(rec["task_id"])
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    link_path.write_text(json.dumps({"task_id": rec["task_id"], "thread_id": "thread", "status": "done"}))
+    assert original(rec["task_id"]).status == "done"
+    assert _close_touched_task_runs(repo, ids, store=store) == 1

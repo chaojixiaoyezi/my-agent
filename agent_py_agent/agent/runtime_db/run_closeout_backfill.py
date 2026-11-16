@@ -213,7 +213,7 @@ def _write_backfilled_event(repo: RuntimeRepository, row: Any, decision: tuple[s
 #   对涉及的 task_run 补关，最后写迁移记录。重复调用是空操作；中途崩溃后重跑只补剩余
 #   （处理幂等），结果计数如实写进迁移记录与返回值。
 # 函数用途: 对一个 owner 的 runtime.db 执行一次历史悬挂补收口迁移。
-def apply_run_closeout_backfill(repo: RuntimeRepository, *, now: float | None = None, commit_transition=None) -> dict[str, Any]:
+def apply_run_closeout_backfill(repo: RuntimeRepository, *, now: float | None = None, commit_transition=None, store=None) -> dict[str, Any]:
     current = float(now if now is not None else time.time())
     if _migration_record(repo) is not None:
         return {"executed": False, "reason": "already_migrated", "migration_id": RUN_CLOSEOUT_BACKFILL_KEY}
@@ -243,7 +243,7 @@ def apply_run_closeout_backfill(repo: RuntimeRepository, *, now: float | None = 
         task_run_id = str(row["task_run_id"] or "")
         if task_run_id and task_run_id not in touched_task_runs:
             touched_task_runs.append(task_run_id)
-    task_runs_closed = _close_touched_task_runs(repo, touched_task_runs, commit_transition=commit_transition)
+    task_runs_closed = _close_touched_task_runs(repo, touched_task_runs, commit_transition=commit_transition, store=store)
     record = {
         "migration_id": RUN_CLOSEOUT_BACKFILL_KEY,
         "executed_at": current,
@@ -270,21 +270,14 @@ def _commit_step(operation, transition):
 #   不阻断其余 task_run 与迁移记录。link 闸不在本模块做（没有会话存储访问），
 #   活跃 link 的 task_run 由发现层的补关通道按原口径处理。
 # 函数用途: 对本次补收口涉及的 task_run 尝试关闭，返回实际关掉的条数。
-def _close_touched_task_runs(repo: RuntimeRepository, task_run_ids: list[str], *, commit_transition=None) -> int:
-    closed = 0
-    for task_run_id in task_run_ids:
-        try:
-            result = _commit_step(
-                lambda: repo.settle_task_run_if_agent_tree_terminal(task_run_id=task_run_id), commit_transition)
-        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
-                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
-            raise
-        except Exception:  # noqa: BLE001 单条 task_run 失败不影响迁移记录
-            _LOGGER.warning("task_run 补关失败：task_run_id=%s", task_run_id, exc_info=True)
-            continue
-        if bool(result.get("settled")):
-            closed += 1
-    return closed
+def _close_touched_task_runs(repo: RuntimeRepository, task_run_ids: list[str], *, commit_transition=None, store=None) -> int:
+    from ..conversation.task_run_closeout import reconcile_task_run_closeout
+
+    if store is None:
+        return 0
+    return sum(bool(reconcile_task_run_closeout(repo, store, task_run_id=task_run_id,
+                    apply=True, commit_transition=commit_transition)["applied"])
+               for task_run_id in task_run_ids)
 
 
 # LLM: 迁移记录只读 metadata 键；坏 JSON 或非对象视为无记录（按未迁移处理，重跑幂等）。

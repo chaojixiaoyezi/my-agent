@@ -161,6 +161,14 @@ _QUIESCENT_ATTEMPT_STATUSES = _ATTEMPT_TERMINAL_STATUSES - {ATTEMPT_STATUS_UNKNO
 #   task_run.closed 留证。判定可逆：静止子 run 之后 create_attempt 会经 _reopen_task_run_for_attempt_conn 重开 TaskRun。
 #   改判据要同步 test_task_run_settle_quiescent_children。
 # 函数用途: 判断一棵代理树是否都已结束或静止，并列出靠“attempt 已结算且无锁”判定的子 run。
+def _task_tree_has_unsettled_effects(conn, task_run_id):
+    """历史未知副作用仍属原树；终态标签不能覆盖未核实外部效果。"""
+    return conn.execute(
+        "SELECT 1 FROM agent_runs ar JOIN tool_operations op ON op.agent_run_id=ar.agent_run_id "
+        "WHERE ar.task_run_id=? AND (op.status IN (?,?) OR (op.status=? AND op.handler_started_at>0)) LIMIT 1",
+        (task_run_id, OP_EXECUTING, OP_UNKNOWN, OP_CLAIMED)).fetchone() is not None
+
+
 def _quiescent_nonterminal_agent_runs(conn: sqlite3.Connection, agents: list[sqlite3.Row]) -> list[str] | None:
     quiescent: list[str] = []
     for row in agents:
@@ -823,6 +831,75 @@ class RuntimeRepository(
         with self._runtime_connection() as conn:
             rows = conn.execute(query, params).fetchall()
         return list(rows)
+
+    def open_task_runs_page(self, *, after_created_at: float = 0.0,
+                            after_task_run_id: str = "", limit: int | None = None) -> dict[str, object]:
+        from ..settings.defaults import default_config_int
+
+        size = max(1, int(default_config_int("retention_scan_slice_entries") if limit is None else limit))
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM task_runs WHERE closed_at=0 AND (created_at,task_run_id) > (?,?) "
+                "ORDER BY created_at,task_run_id LIMIT ?",
+                (float(after_created_at), str(after_task_run_id), size + 1)).fetchall()
+        items = list(rows[:size])
+        partial = len(rows) > size
+        cursor = ({"after_created_at": items[-1]["created_at"],
+                   "after_task_run_id": items[-1]["task_run_id"]} if items and partial else None)
+        return {"items": items, "next_cursor": cursor, "partial": partial}
+
+    def next_open_task_runs_reconcile_page(self) -> list[sqlite3.Row]:
+        """发现轮转游标只保存进度；受保护对象下一轮绕回重试，不扫描终态历史。"""
+        key = "task_run_closeout.cursor"
+        with self._runtime_connection() as conn:
+            row = conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+        try:
+            cursor = json.loads(row["value"]) if row else {}
+        except (ValueError, TypeError):
+            cursor = {}
+        page = self.open_task_runs_page(**cursor)
+        with self.transaction() as conn:
+            conn.execute("INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE "
+                         "SET value=excluded.value", (key, json.dumps(page["next_cursor"] or {})))
+        return page["items"]
+
+    def settle_empty_task_run(self, *, task_run_id: str, task_id: str,
+                              generation: dict[str, object]) -> dict[str, object]:
+        """调用者已持全部引用创建门；数据库最终复核空树与准确代次。"""
+        now = time.time()
+        with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE task_runs SET status='cancelled',closed_at=?,updated_at=? "
+                "WHERE task_run_id=? AND task_id=? AND closed_at=0 AND created_at=? AND updated_at=? "
+                "AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE task_run_id=?)",
+                (now, now, task_run_id, task_id, generation["created_at"], generation["updated_at"],
+                 task_run_id)).rowcount
+            if not changed:
+                return {"settled": False, "reason": "empty_task_run_generation_changed"}
+            self._append_event_conn(conn, event_type="task_run.closed", attempt_id="", agent_run_id="",
+                                    task_run_id=task_run_id, payload={"status": "cancelled", "task_id": task_id,
+                                    "reason": "unstarted_no_references", "operator": "conversation-runtime"})
+        return {"settled": True}
+
+    def preview_task_run_agent_tree(self, *, task_run_id: str) -> dict[str, object]:
+        """只读复用原树判据；真正写入仍在独立事务重新核验。"""
+        with self._runtime_connection() as conn:
+            agents = conn.execute(
+                "SELECT ar.agent_run_id, ar.parent_agent_run_id, ar.status, aa.status AS attempt_status "
+                "FROM agent_runs ar LEFT JOIN agent_attempts aa ON aa.attempt_id=ar.current_attempt_id "
+                "WHERE ar.task_run_id=?", (task_run_id,)).fetchall()
+            if not agents:
+                return {"eligible": False, "reason": "no_agent_runs_reference_proof_required"}
+            if _task_tree_has_unsettled_effects(conn, task_run_id):
+                return {"eligible": False, "reason": "execution_effect_unknown"}
+            if any(str(row["attempt_status"] or "") == "unknown" for row in agents):
+                return {"eligible": False, "reason": "attempt_unknown"}
+            if _quiescent_nonterminal_agent_runs(conn, agents) is None:
+                return {"eligible": False, "reason": "agent_tree_active"}
+            if len([row for row in agents if not row["parent_agent_run_id"]]) != 1:
+                return {"eligible": False, "reason": "invalid_agent_tree"}
+        return {"eligible": True, "reason": "agent_tree_terminal"}
 
     # ------------------------------------------------------------ AgentRun
     # LLM: RuntimeDB 新 AgentRun 以空 current 和初始 epoch 入库并提交；父为空表示根，只有后续 create_attempt 才获取执行权。
@@ -3142,6 +3219,10 @@ class RuntimeRepository(
             ).fetchall()
             if not agents:
                 return {"settled": False, "reason": "no_agent_runs"}
+            if _task_tree_has_unsettled_effects(conn, selected_run):
+                return {"settled": False, "reason": "execution_effect_unknown"}
+            if any(str(row["attempt_status"] or "") == "unknown" for row in agents):
+                return {"settled": False, "reason": "agent_tree_active"}
             quiescent = _quiescent_nonterminal_agent_runs(conn, agents)
             if quiescent is None:
                 return {"settled": False, "reason": "agent_tree_active"}
@@ -3720,6 +3801,23 @@ class RuntimeRepository(
     # -------------------------------------------------------- RuntimeEvents
     # LLM: RuntimeDB 公共事件入口独立插入并提交 append-only 事件，再回读结构化结果；必须由调用方提供真实 attempt/run 绑定，正文不驱动状态。
     # 函数用途: 保存一条可追溯到执行轮的运行事件，并返回事件投影。
+    def append_conflict_once(self, *, agent_run_id: str, attempt_id: str,
+                             source_generation: str, reason: str, task_id: str) -> None:
+        """原事件表确定性身份去重；代次变化后允许记录新诊断。"""
+        import hashlib
+
+        payload = {"reason": "ledger_stale_after_terminal", "reason_code": reason,
+                   "task_id": task_id, "source": "unfinished_task_ids",
+                   "source_generation": source_generation}
+        identity = json.dumps([agent_run_id, attempt_id, reason, source_generation], separators=(",", ":"))
+        event_id = "ledger-conflict-" + hashlib.sha256(identity.encode()).hexdigest()
+        with self._runtime_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO runtime_events(event_id,event_type,attempt_id,agent_run_id,"
+                "task_run_id,payload_json,created_at) VALUES (?,'status_conflict',?,?, '',?,?)",
+                (event_id, attempt_id, agent_run_id, json.dumps(payload), time.time()))
+            conn.commit()
+
     def append_event(
         self,
         *,

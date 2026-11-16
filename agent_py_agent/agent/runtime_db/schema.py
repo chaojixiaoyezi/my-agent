@@ -506,6 +506,7 @@ _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 _RUNTIME_MIGRATION_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease ON wake_queue(status, lease_until)",
     "CREATE INDEX IF NOT EXISTS idx_task_runs_closed_at ON task_runs(closed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_task_runs_open_page ON task_runs(closed_at, created_at, task_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_run_id ON agent_runs(run_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_current_attempt ON agent_runs(current_attempt_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_attempts_status_ended ON agent_attempts(status, ended_at)",
@@ -867,6 +868,15 @@ class RuntimeSchemaMixin:
     # 函数用途: 借用原库连接，C现存库写入结束即关闭，正常请求仍用原F1作用域。
     @contextmanager
     def _runtime_connection(self) -> Iterator[sqlite3.Connection]:
+        if self.read_only:
+            from ..io.readonly_sqlite import readonly_sqlite_connection
+
+            # 管理预览不进入可创建generation侧车的普通运行连接门；SQLite原生WAL协调仍受安全适配器保护。
+            with readonly_sqlite_connection(self.db_path, blocking=False, require_private_directory=False) as conn:
+                conn.row_factory = sqlite3.Row
+                require_runtime_schema_generation(conn)
+                yield conn
+            return
         self._heal_runtime_db_before_open()
         identity = runtime_db_identity(self.db_path)
         try:

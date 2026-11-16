@@ -45,7 +45,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
@@ -1739,7 +1739,7 @@ def _reconcile_terminal_conversation_task_runs(
     link_scans: tuple[_DirectoryProjection, ...] = (),
 ) -> None:
     try:
-        open_runs = repo.open_task_runs()
+        open_runs = repo.next_open_task_runs_reconcile_page()
     except Exception:  # noqa: BLE001 恢复投影失败不能阻断 owner 发现
         return
     for task_run in open_runs:
@@ -1754,12 +1754,27 @@ def _reconcile_terminal_conversation_task_runs(
         if not reason:
             continue
         try:
-            repo.settle_task_run_if_agent_tree_terminal(
-                task_run_id=str(task_run["task_run_id"] or ""),
-                task_id=task_id,
-                operator="wake-discovery-task-run-reconcile",
-                reason=reason,
-            )
+            from .conversation.store import ConversationStore
+
+            if link_dirs is None:
+                continue
+            with ExitStack() as stack:
+                for directory in sorted(set(link_dirs)):
+                    store = ConversationStore(directory.parent, initialize=False)
+                    stack.enter_context(store.tasks.transition_guard(task_id))
+                # 扫描状态只作候选；锁内重新读取每个规范关联文件，不复用旧状态授权。
+                current_statuses = set()
+                for directory in link_dirs:
+                    selected_store = ConversationStore(directory.parent, initialize=False)
+                    path = selected_store.storage.task_path(task_id)
+                    link = selected_store.tasks.load(task_id) if path.exists() or path.is_symlink() else None
+                    if link is not None:
+                        current_statuses.add(str(link.status))
+                reason = _task_run_reconcile_reason(repo, task_id, current_statuses, link_dirs)
+                if reason:
+                    repo.settle_task_run_if_agent_tree_terminal(
+                        task_run_id=str(task_run["task_run_id"] or ""), task_id=task_id,
+                        operator="wake-discovery-task-run-reconcile", reason=reason)
         except Exception:  # noqa: BLE001 单条坏账不影响其它 owner 任务发现
             continue
 
@@ -1892,22 +1907,47 @@ def _filter_by_runtime_authority(
             projected = False
             if status == "cancelled":
                 link_path = (links_by_task or {}).get(task_id)
-                projected = _project_task_ledger_terminal(
-                    owner_home, repo, task_id, row, link_path,
-                )
+                try:
+                    projected = _project_task_ledger_terminal(
+                        owner_home, repo, task_id, row, link_path,
+                    )
+                except Exception:  # noqa: BLE001 单条坏关联保留保护，继续处理其它候选
+                    projected = False
             # 诊断只覆盖「cancelled 投影失败」：done/failed 有意不投影（轮间形态，
             # link active 是持续任务正常生命周期），不是冲突——写诊断会把
             # 正常形态每 tick 记成 ledger_stale_after_terminal 无限洪泛。
             if status == "cancelled" and not projected:
                 try:
-                    repo.append_event(
-                        event_type="status_conflict",
-                        attempt_id="",
+                    link_path = (links_by_task or {}).get(task_id)
+                    try:
+                        stat = link_path.stat() if link_path else None
+                        generation = f"{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}" if stat else "missing"
+                    except OSError:
+                        generation = "unreadable"
+                    reason_code = "locator_unresolved"
+                    current = repo.main_agent_run_for_task(task_id)
+                    if current is None or any(current[key] != row[key] for key in
+                                             ("agent_run_id", "current_attempt_id", "current_attempt_generation")):
+                        reason_code = "generation_changed"
+                    elif link_path is None or not link_path.is_file():
+                        reason_code = "task_link_missing"
+                    else:
+                        try:
+                            raw = json.loads(link_path.read_text(encoding="utf-8"))
+                            if not isinstance(raw, dict):
+                                reason_code = "task_link_corrupt"
+                            else:
+                                tree = repo.preview_task_run_agent_tree(task_run_id=str(row["task_run_id"]))
+                                if not tree["eligible"]:
+                                    reason_code = str(tree["reason"])
+                        except (ValueError, OSError, UnicodeError):
+                            reason_code = "task_link_unreadable"
+                    repo.append_conflict_once(
                         agent_run_id=str(row["agent_run_id"]),
-                        payload={"status": status, "source": "unfinished_task_ids",
-                                 "reason": "ledger_stale_after_terminal",
-                                 "task_id": task_id},
-                    )
+                        attempt_id=str(row["current_attempt_id"] or ""),
+                        source_generation=f"{row['current_attempt_generation']}:{generation}",
+                        reason=reason_code, task_id=task_id)
+
                 except Exception:  # noqa: BLE001 事件写失败不反噬
                     pass
             continue  # 权威终态 → 排除（自愈成功不驱动；失败保留诊断）
@@ -2017,6 +2057,9 @@ def _project_task_ledger_terminal_locked(
     task_root = _task_root_for_link(owner_home, link_payload, task_id)
     if task_root is None:
         return False
+    tree = repo.preview_task_run_agent_tree(task_run_id=str(run_row["task_run_id"]))
+    if not tree["eligible"]:
+        return False  # UNKNOWN/活跃子树不得先写取消投影，再等待树收口。
     # ① link status → 'cancelled'（生命周期权威终态，保留其余字段）
     if str(link_payload.get("status") or "").strip().lower() == THREAD_TASK_LINK_ACTIVE_STATUS:
         def updater(data: dict[str, Any]) -> dict[str, Any]:
@@ -2057,16 +2100,15 @@ def _project_task_ledger_terminal_locked(
         return False
     # ③ task_run 终态化（closed_at CAS 幂等；与 agent_run.completed 对称可审计）
     try:
-        result = repo.settle_task_run_terminal(
+        result = repo.settle_task_run_if_agent_tree_terminal(
             task_run_id=str(run_row["task_run_id"] or ""),
             task_id=task_id,
-            status="cancelled",
             operator="wake-discovery-ledger-heal",
             reason=_ledger_heal_reason(repo, run_row),
         )
     except Exception:  # noqa: BLE001
         return False
-    return bool(result.get("settled"))
+    return bool(result.get("settled")) or result.get("reason") == "already_terminal"
 
 
 def _task_root_for_link(owner_home: Path, link_payload: dict, task_id: str) -> Path | None:

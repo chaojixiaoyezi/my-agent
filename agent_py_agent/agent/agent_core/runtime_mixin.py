@@ -505,7 +505,7 @@ def _acknowledge_foreground_recovery_notice(agent, params: RunParams, result) ->
 #   Compact 再入仍按消息编号发布宿主凭据。同步检查跨身份续跑与工具权威门测试。
 #   仅显式前台首片在原挂载闸前按CAS解除unknown并注入核实提示；后台与Compact拒绝语义不变。
 # 函数用途: 让前台新消息接手未知核实，再登记成对执行身份；凭据保存失败不进入模型。
-def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
+def _bind_main_agent_authority(agent, params: RunParams, *, _task_guard_held: bool = False) -> RunParams:
     """MANAGED 下主代理 run 登记权威链（seq 255 单一闭合：root/main AgentRun）。
 
     主代理与子代理共用 agent.run：子代理 run 的权威链由 create_run
@@ -616,6 +616,8 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
                     runtime_reason="runtime_authority_publish_failed",
                 ),
             )
+            settle_terminal_task_run(repo, getattr(agent, "conversation_store", None),
+                                     run_id=authority_run_id, task_id=task_id, _task_guard_held=_task_guard_held)
             raise
     bound = replace(params, run_id=authority_run_id, attempt_id=attempt_id)
     return bound
@@ -918,7 +920,7 @@ def _bind_main_agent_turn_params(
         link = loader(task_id) if task_id and callable(loader) else None
         if link is not None and getattr(link, "status", "") in {"interrupted", "cancelled"}:
             raise InterruptedError("当前任务已停止，未创建新执行轮")
-        bound = _bind_main_agent_authority(agent, params)
+        bound = _bind_main_agent_authority(agent, params, _task_guard_held=bool(task_id and callable(guard)))
         try:
             bound = _restore_business_execution_context(agent, bound)
             return attach_run_task_workspace_context(agent, bound, user_prompt)
@@ -931,6 +933,9 @@ def _bind_main_agent_turn_params(
                         runtime_reason="workspace_preparation_failed",
                     ),
                 )
+                settle_terminal_task_run(getattr(getattr(agent, "subagents", None), "runtime_db", None), store,
+                                         run_id=bound.run_id, task_id=bound.task_id,
+                                         _task_guard_held=bool(task_id and callable(guard)))
             raise
 
 
