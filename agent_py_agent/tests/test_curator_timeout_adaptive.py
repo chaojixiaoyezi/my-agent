@@ -52,6 +52,7 @@ from agent_py_agent.agent.memory_store.curator_models import (
 from agent_py_agent.agent.memory_store.curator_run_log import CuratorRunLog
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
 from agent_py_agent.agent.memory_store.daily import DailyMemoryStore
+from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
 
 _THREAD_ID = "thread-1"
 # LLM: 缩批测试统一使用"预算余量充足"的配置:timeout_seconds=1 让测试快,max_retries=2 让
@@ -247,6 +248,11 @@ def _conversation(tmp_path: Path, count: int):
         )
         for index in range(count)
     ]
+    store.threads.page_report(
+        budget=RetentionScanBudget.default(
+            MemoryCuratorConfig(retention_scan_slice_ms=5_000)
+        )
+    )
     return store, thread, messages
 
 
@@ -265,6 +271,7 @@ def _service(
             turn_threshold=1,
             timeout_seconds=1,
             max_retries=2,
+            retention_scan_slice_ms=5_000,
         ),
         dependencies=MemoryCuratorDependencies(
             backend=backend,
