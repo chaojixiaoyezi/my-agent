@@ -125,6 +125,11 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
     if commit is not None and commit.outbox_frozen:
         service.park_waiting(claim,response=output,delivery_status=commit.delivery_status,delivery_reason='tool_rule_result',now=now)
         return
+    if commit is not None and commit.delivery_status == 'failed' and not code:
+        from ..conversation.background_receipt_contract import scheduled_explicit_public_receipt
+        # 零模型结果没有结构化公开回执，显式回执合同按原设计判为未投递；历史记已登记码而非空失败。
+        if scheduled_explicit_public_receipt(agent, _run_request(kwargs)):
+            code = 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
     service.finish(claim, status='done' if confirmed else 'failed', response=output,
         delivery_status=commit.delivery_status if commit is not None else 'suppressed',
         delivery_reason='tool_rule_result' if commit is not None else 'tool_only_internal_result',
