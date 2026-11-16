@@ -207,5 +207,70 @@ def test_scheduled_isolated_proof_requires_exact_owner_and_run(tmp_path):
     thread = ConversationThread(canonical_user_id='test', thread_id=run['thread_id'],
         owner_id=home.owner_id, owner_home=str(home.owner_home_dir),
         metadata={'thread_kind': 'scheduled', 'scheduler_run_id': run['run_id']})
-    assert scheduled_thread_terminal_proof(home, thread, 2000)['status'] == 'settled'
+    import time
+
+    from agent.memory_store.retention_scan_budget import RetentionScanBudget
+
+    budget = RetentionScanBudget(10, 1048576, time.monotonic() + 10)
+    proof = scheduled_thread_terminal_proof(home, thread, 2000, scan_budget=budget)
+    assert proof['status'] == 'settled'
+    assert proof['bytes_read'] == budget.size > 0
     assert scheduled_thread_terminal_proof(home, replace(thread, owner_id='other'), 2000)['status'] == 'unknown'
+
+
+def test_scheduler_proof_accounts_snapshots_and_shares_byte_budget(tmp_path):
+    import time
+
+    from agent.memory_store.retention_scan_budget import RetentionScanBudget
+    from agent.scheduler.history_index import SchedulerHistoryIndex
+
+    from agent_py_agent.agent.scheduler.repository import SchedulerRunFinish
+    from agent_py_agent.tests.test_scheduler_repository import _claimed_due_run, _repository
+
+    repository = _repository(tmp_path)
+    claim = _claimed_due_run(repository)
+    repository.finish_run(claim['run_id'], claim['claim_id'],
+                          SchedulerRunFinish('done', delivery_status='suppressed', now=1010))
+    index = SchedulerHistoryIndex(repository.history_path, repository.owner, repository._parse_run, read_only=True)
+    size = repository.history_path.stat().st_size
+    expected = 4 * min(4096, size) + size
+    budget = RetentionScanBudget(10, expected, time.monotonic() + 10)
+    proof = index.terminal_run_proof(claim['run_id'], thread_id=claim['thread_id'], cutoff=2000,
+                                     scan_budget=budget)
+    assert proof['status'] == 'settled'
+    assert proof['bytes_read'] == budget.size == expected
+    assert proof['byte_scope'] == 'canonical_source'
+    second = index.terminal_run_proof(claim['run_id'], thread_id=claim['thread_id'], cutoff=2000,
+                                      scan_budget=budget)
+    assert second['status'] == 'unknown'
+    assert second['reason'] == 'SCHEDULER_PROOF_BUDGET_EXHAUSTED'
+    assert second['bytes_read'] == 0
+    assert budget.size == expected
+
+
+def test_scheduler_proof_partial_reads_charge_and_deadline_never_reset(tmp_path):
+    import time
+
+    from agent.memory_store.retention_scan_budget import RetentionScanBudget
+    from agent.scheduler.history_index import SchedulerHistoryIndex
+
+    from agent_py_agent.agent.scheduler.repository import SchedulerRunFinish
+    from agent_py_agent.tests.test_scheduler_repository import _claimed_due_run, _repository
+
+    repository = _repository(tmp_path)
+    claim = _claimed_due_run(repository)
+    repository.finish_run(claim['run_id'], claim['claim_id'],
+                          SchedulerRunFinish('done', delivery_status='suppressed', now=1010))
+    index = SchedulerHistoryIndex(repository.history_path, repository.owner, repository._parse_run, read_only=True)
+    size = repository.history_path.stat().st_size
+    budget = RetentionScanBudget(10, 4 * min(4096, size), time.monotonic() + 10)
+    result = index.terminal_run_proof(claim['run_id'], thread_id=claim['thread_id'], cutoff=2000,
+                                      scan_budget=budget)
+    assert result['status'] == 'unknown'
+    assert result['reason'] == 'SCHEDULER_PROOF_BUDGET_EXHAUSTED'
+    assert result['bytes_read'] == budget.size == 2 * min(4096, size)
+    expired = RetentionScanBudget(10, 1048576, time.monotonic() - 1)
+    result = index.terminal_run_proof(claim['run_id'], thread_id=claim['thread_id'], cutoff=2000,
+                                      scan_budget=expired, deadline=time.monotonic() + 10)
+    assert result['reason'] == 'SCHEDULER_PROOF_BUDGET_EXHAUSTED'
+    assert result['bytes_read'] == expired.size == 0

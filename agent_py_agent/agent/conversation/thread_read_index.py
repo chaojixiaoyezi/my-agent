@@ -185,7 +185,7 @@ def maintain_thread_index_lane(request):
     return {"cursor": state, "complete": False, "items": budget.entries, "bytes": budget.size}
 
 
-def scheduled_thread_terminal_proof(home, thread, cutoff, *, max_bytes=1048576, deadline=None):
+def scheduled_thread_terminal_proof(home, thread, cutoff, *, max_bytes=1048576, deadline=None, scan_budget=None):
     """准确原调度历史行只证明终态；引用、活跃claim/wake及正式历史仍归原留存门。"""
     from types import SimpleNamespace
 
@@ -193,7 +193,8 @@ def scheduled_thread_terminal_proof(home, thread, cutoff, *, max_bytes=1048576, 
     from ..scheduler.repository import _SchedulerRecordParsing
 
     run_id = thread.metadata.get("scheduler_run_id")
-    unknown = {"status": "unknown", "reason": "SCHEDULER_THREAD_IDENTITY_INVALID", "side_effects": "not_started"}
+    unknown = {"status": "unknown", "reason": "SCHEDULER_THREAD_IDENTITY_INVALID", "side_effects": "not_started",
+               "bytes_read": 0, "byte_scope": "canonical_source"}
     if (thread.metadata.get("thread_kind") != "scheduled" or not isinstance(run_id, str)
             or thread.thread_id != "thread-" + run_id or thread.owner_id != home.owner_id
             or thread.owner_home != str(home.owner_home_dir) or thread.channel_bindings or thread.active_task_ids):
@@ -208,7 +209,8 @@ def scheduled_thread_terminal_proof(home, thread, cutoff, *, max_bytes=1048576, 
     except ValueError:
         return unknown
     index = SchedulerHistoryIndex(history, owner, parse, read_only=True)
-    proof = index.terminal_run_proof(run_id, thread_id=thread.thread_id, cutoff=cutoff, max_bytes=max_bytes, deadline=deadline)
+    proof = index.terminal_run_proof(run_id, thread_id=thread.thread_id, cutoff=cutoff, max_bytes=max_bytes, deadline=deadline,
+                                     scan_budget=scan_budget)
     if proof.get("status") == "settled" and proof.get("execution_mode") != "isolated":
-        return {**unknown, "reason": "SCHEDULER_THREAD_EXECUTION_NOT_ISOLATED"}
+        return {**proof, "status": "unknown", "reason": "SCHEDULER_THREAD_EXECUTION_NOT_ISOLATED"}
     return proof

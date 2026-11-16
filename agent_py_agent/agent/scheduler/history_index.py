@@ -7,6 +7,7 @@ import logging
 import os
 import sqlite3
 import stat
+import time
 from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
@@ -23,7 +24,38 @@ logger = logging.getLogger(__name__)
 
 # LLM: 文件身份和首尾有界锚点只证明投影来源，不签发调度或投递权限。
 # 函数用途: 在不整读历史的情况下取得稳定来源版本，prefix用于复核追加前的已覆盖范围。
-def _snapshot(path, *, prefix=None):
+class _ProofBudgetExceeded(OSError):
+    """本轮canonical读取额度不足；保持unknown，不能重新签发一份独立额度。"""
+
+
+class _ProofReadBudget:
+    def __init__(self, maximum, deadline, shared, receipt):
+        self.maximum, self.deadline, self.shared, self.receipt = maximum, deadline, shared, receipt
+        self.used = 0
+        if shared is not None:
+            self.deadline = min(deadline, shared.deadline) if deadline is not None else shared.deadline
+
+    def remaining(self):
+        if (self.deadline is not None and time.monotonic() >= self.deadline
+                or self.shared is not None and self.shared.exhausted()):
+            raise _ProofBudgetExceeded("共享调度终态证明预算已耗尽；保留候选并在下一维护片续验。")
+        available = self.maximum - self.used
+        if self.shared is not None:
+            available = min(available, self.shared.max_bytes - self.shared.size)
+        return max(0, available)
+
+    def read(self, handle, count):
+        if count > self.remaining():
+            raise _ProofBudgetExceeded("本轮剩余canonical字节额度不足以完成源快照；保留候选，不扩大预算。")
+        raw = handle.read(count)
+        self.used += len(raw)
+        self.receipt["bytes_read"] = self.used
+        if self.shared is not None:
+            self.shared.charge(size=len(raw))
+        return raw
+
+
+def _snapshot(path, *, prefix=None, read_budget=None):
     try:
         descriptor = open_readonly_file_beneath(path.parent, (path.name,))
     except FileNotFoundError:
@@ -31,9 +63,11 @@ def _snapshot(path, *, prefix=None):
     with os.fdopen(descriptor, "rb") as handle:
         before = os.fstat(handle.fileno())
         size = before.st_size if prefix is None else min(prefix, before.st_size)
-        head = handle.read(min(4096, size))
+        head = (handle.read(min(4096, size)) if read_budget is None
+                else read_budget.read(handle, min(4096, size)))
         handle.seek(max(0, size - 4096))
-        tail = handle.read(min(4096, size))
+        tail = (handle.read(min(4096, size)) if read_budget is None
+                else read_budget.read(handle, min(4096, size)))
         after = os.fstat(handle.fileno())
         stamp = [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns]
         check = [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns]
@@ -282,25 +316,31 @@ class SchedulerHistoryIndex:
             return frozenset(), False
 
 
-    def terminal_run_proof(self, run_id, *, thread_id, cutoff, max_bytes=1048576, deadline=None):
+    def terminal_run_proof(self, run_id, *, thread_id, cutoff, max_bytes=1048576, deadline=None, scan_budget=None):
         """点查仅作定位，按末字节位置重读原行；不创建索引、不回填、不用投影签发删除权。"""
         import math
 
         unknown = {"status": "unknown", "run_id": run_id, "thread_id": thread_id,
-                   "side_effects": "not_started"}
+                   "side_effects": "not_started", "bytes_read": 0, "byte_scope": "canonical_source"}
         if (not isinstance(run_id, str) or not run_id.startswith("srun_")
-                or type(max_bytes) is not int or max_bytes <= 0):
+                or type(max_bytes) is not int or max_bytes < 0):
             return {**unknown, "reason": "SCHEDULER_PROOF_ARGUMENT_INVALID"}
+        meter = _ProofReadBudget(max_bytes, deadline, scan_budget, unknown)
+        try:
+            if meter.remaining() <= 0:
+                raise _ProofBudgetExceeded("canonical证明读取字节额度为零；保留候选等待下一维护片。")
+        except _ProofBudgetExceeded as exc:
+            return {**unknown, "reason": "SCHEDULER_PROOF_BUDGET_EXHAUSTED", "message": str(exc)}
         try:
             from ..io.readonly_sqlite import readonly_sqlite_connection
         except ImportError as exc:
             return {**unknown, "reason": "SCHEDULER_PROOF_READONLY_SQLITE_UNAVAILABLE",
                     "error_type": type(exc).__name__, "message": str(exc)}
         try:
-            with readonly_sqlite_connection(self.path, blocking=False, deadline=deadline) as conn:
+            with readonly_sqlite_connection(self.path, blocking=False, deadline=meter.deadline) as conn:
                 conn.row_factory = sqlite3.Row
                 conn.execute("BEGIN")
-                state, snapshot = self._state(conn), _snapshot(self.source)
+                state, snapshot = self._state(conn), _snapshot(self.source, read_budget=meter)
                 size = snapshot["stamp"][2] if snapshot["stamp"] else 0
                 if (state.get("owner") != self.owner or not size
                         or any(state.get(key) != snapshot[key] for key in ("stamp", "head", "tail"))
@@ -313,19 +353,23 @@ class SchedulerHistoryIndex:
                 position = row["position"]
                 if type(position) is not int or not 0 < position <= size:
                     return {**unknown, "reason": "SCHEDULER_PROOF_POSITION_INVALID"}
-                count = min(position, max_bytes + 1)
+                # 留出第二次源快照的准确head/tail额度；不得读完行后才发现本片已超支。
+                count = min(position, 1048577, meter.remaining() - 2 * min(4096, size))
+                if count <= 0:
+                    raise _ProofBudgetExceeded("剩余额度不足以同时重读原行及复核源快照；保留候选。")
                 descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
                 with os.fdopen(descriptor, "rb") as handle:
                     handle.seek(position - count)
-                    raw = handle.read(count)
+                    raw = meter.read(handle, count)
                 if not raw.endswith(b"\n"):
                     return {**unknown, "reason": "SCHEDULER_PROOF_ROW_BOUNDARY_INVALID"}
                 content = raw[:-1]
                 boundary = content.rfind(b"\n")
                 if boundary < 0 and position > count:
-                    return {**unknown, "reason": "SCHEDULER_PROOF_ROW_TOO_LARGE"}
+                    return {**unknown, "reason": ("SCHEDULER_PROOF_ROW_TOO_LARGE" if count == 1048577
+                                                 else "SCHEDULER_PROOF_BUDGET_EXHAUSTED")}
                 payload = json.loads(content[boundary + 1:])
-                if payload != json.loads(row["payload"]) or _snapshot(self.source) != snapshot:
+                if payload != json.loads(row["payload"]) or _snapshot(self.source, read_budget=meter) != snapshot:
                     return {**unknown, "reason": "SCHEDULER_PROOF_SOURCE_CHANGED"}
                 parsed, error = self.parser(payload, terminal=True)
                 if error or parsed is None:
@@ -339,11 +383,13 @@ class SchedulerHistoryIndex:
                         or parsed.get("cancel_requested_at") and parsed.get("cancel_cleanup_confirmed") is not True
                         or any(parsed.get(key) for key in ("delivery_pending", "consume_pending", "callback_pending"))):
                     return {**unknown, "reason": "SCHEDULER_PROOF_NOT_SETTLED"}
-                return {"status": "settled", "run_id": run_id, "thread_id": thread_id,
+                return {**unknown, "status": "settled", "run_id": run_id, "thread_id": thread_id,
                         "owner": dict(self.owner), "terminal_status": parsed["status"], "ended_at": ended,
                         "execution_mode": (parsed.get("execution") or {}).get("mode", "followup"),
                         "source_generation": state["generation"], "source_stamp": snapshot["stamp"],
                         "source_position": position, "side_effects": "not_started"}
+        except _ProofBudgetExceeded as exc:
+            return {**unknown, "reason": "SCHEDULER_PROOF_BUDGET_EXHAUSTED", "message": str(exc)}
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError) as exc:
             return {**unknown, "reason": "SCHEDULER_PROOF_READ_FAILED", "error_type": type(exc).__name__,
                     "message": str(exc)}
