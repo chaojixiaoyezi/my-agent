@@ -276,3 +276,30 @@ def test_main_foreground_original_writer_scope_is_reusable(tmp_path):
     world = _foreground(tmp_path)
     scope = tool_approval_scope(world.agent, "durable-task")
     assert _agent_approval_session_scope(world.agent, scope)
+
+
+def test_main_session_scope_excludes_private_redaction_but_tracks_permission_boundary(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core import tool_runtime_ledger
+    from agent_py_agent.agent.conversation.agent_tool_approval import _agent_approval_session_scope
+    from agent_py_agent.agent.conversation.tool_approval_scope import tool_approval_scope
+    from agent_py_agent.agent.settings.secret_ref import HostCredentialSnapshot
+    from agent_py_agent.agent.tooling.host_output_redaction import HostOutputRedaction
+    from agent_py_agent.tests.test_tool_approval_foreground_scope import _foreground
+
+    world = _foreground(tmp_path)
+    scope = tool_approval_scope(world.agent, "durable-task")
+    original = tool_runtime_ledger.write_boundary_with_runtime_ledger
+    value = {"secret": "synthetic-private-value-one", "read_roots": ["/synthetic/allowed"]}
+
+    def boundary(*args, **kwargs):
+        return {**original(*args, **kwargs), "read_roots": value["read_roots"],
+            "_host_output_redaction": HostOutputRedaction(snapshot=HostCredentialSnapshot(
+                secret_values=(value["secret"],)))}
+
+    monkeypatch.setattr(tool_runtime_ledger, "write_boundary_with_runtime_ledger", boundary)
+    first = _agent_approval_session_scope(world.agent, scope)
+    assert first and value["secret"] not in first
+    value["secret"] = "synthetic-private-value-two"
+    assert _agent_approval_session_scope(world.agent, scope) == first
+    value["read_roots"] = ["/synthetic/other"]
+    assert _agent_approval_session_scope(world.agent, scope) != first

@@ -1539,7 +1539,10 @@ def _main_approval_session_projection(agent, scope):
                 or authority.get("invocation_run_id") != current.request_id
                 or any(authority.get(key) != value for key, value in execution.items())):
             return None
-    return write_boundary_with_runtime_ledger(agent, current), execution
+    boundary = dict(write_boundary_with_runtime_ledger(agent, current) or {})
+    # 输出脱敏对象只持有本次调用的私有凭据，不是权限范围；禁止把它或凭据值序列化进会话键。
+    boundary.pop("_host_output_redaction", None)
+    return boundary, execution
 
 
 # LLM: 缓存沿前台的精确工具名与参数哈希；原Agent缓存另以canonical执行和权限scope隔离，不能跨执行或参数扩权。

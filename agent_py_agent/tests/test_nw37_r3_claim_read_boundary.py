@@ -27,6 +27,7 @@ from agent_py_agent.agent.conversation.store_claims import (
     ClaimStore,
     _read_claim_report,
 )
+from agent_py_agent.agent.conversation.store_threads import _drop_cached_thread
 
 
 def _fd_count() -> int | None:
@@ -60,8 +61,9 @@ def _setup_native_claim(
         }
     )
     assert claim is not None
-    # 普通写回线程使进程内只读缓存失效，确保后续续租真正走磁盘读取路径。
     store.threads.write(thread)
+    # 写后索引发表会回填线程缓存；故障注入必须从冷读开始，才能真正覆盖磁盘 EIO。
+    _drop_cached_thread(store.storage.thread_path(thread.thread_id))
     heartbeat = ConversationRunClaimHeartbeat(
         {
             "store": store,
@@ -327,6 +329,7 @@ def test_store_io_and_claim_reader_py314_stat_semantics_and_classification(
     thread = store.threads.create(canonical_user_id="r3-owner", owner_id="r3-owner")
     store.threads.write(thread)
     thread_file = store.storage.thread_path(thread.thread_id)
+    _drop_cached_thread(thread_file)
     original_stat = Path.stat
     counts = {"stats": 0, "errors": 0}
 
@@ -439,6 +442,7 @@ def test_direct_claim_store_fallback_interleaving_and_stop_rearm(
     assert claim is not None
     store.threads.write(thread)
     thread_file = store.storage.thread_path(thread.thread_id)
+    _drop_cached_thread(thread_file)
     original_read = Path.read_text
     entered, release = threading.Event(), threading.Event()
     calls = {"n": 0}
