@@ -2,7 +2,7 @@
 # 模块用途: 按唤醒事实和策略计算续跑可见工具，保持终端操作可续接；修改时联合后台运行、快照和工具回归。
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..subagents.role_templates import (
@@ -174,6 +174,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
 class BackgroundToolPolicyRequest:
     """Facts used to choose the background main-agent control tool profile."""
 
+    business_controller: bool = field(default=False, kw_only=True)
     reason: str = ""
     wake_signal: dict[str, Any] | None = None
     config: object | None = None
@@ -360,7 +361,8 @@ def _default_profile_for_request(
         return "subagent_integration", SUBAGENT_INTEGRATION_ALLOWED_TOOLS
     # 会话间派活：目标会话要接单、干活、回报，必须拿到会话互通那组工具。
     if _is_session_task_wake(request):
-        return "session_task", SESSION_TASK_WAKE_ALLOWED_TOOLS
+        return "session_task", (*SESSION_TASK_WAKE_ALLOWED_TOOLS,
+            *(("business_execution:background_agents.create",) if request.business_controller else ()))
     if _is_urgent_wake(request):
         return "urgent", DEFAULT_BACKGROUND_ALLOWED_TOOLS
     if _is_scheduled_progress(request):

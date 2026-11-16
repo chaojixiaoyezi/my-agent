@@ -24,8 +24,18 @@ class BusinessAssetService:
         return {key: _copy(row[key]) for key in ('asset_id', 'space_id', 'project_ref', 'name', 'kind', 'revision', 'accepted_version')}
 
     def _artifact(self, ref, *, actor, space_id, project_ref):
-        original = self.spaces.reference('artifact_version', ref['version_ref'], actor=actor,
-                                         space_id=space_id, project_ref=project_ref)
+        try:
+            original = self.spaces.reference('artifact_version', ref['version_ref'], actor=actor,
+                                             space_id=space_id, project_ref=project_ref)
+        except BusinessError as error:
+            if error.code != 'REFERENCE_NOT_FOUND':
+                raise
+            original = self.spaces.reference('artifact', ref['artifact_id'], actor=actor,
+                                             space_id=space_id, project_ref=project_ref)
+            if original.get('space_id') != space_id or original.get('project_ref') != project_ref:
+                raise BusinessError('SPACE_SCOPE_MISMATCH', details={
+                    'reason': 'NATIVE_ARTIFACT_SCOPE_MISMATCH', 'side_effect_state': 'none',
+                    'next_action': '使用原产物冻结的space_id和project_ref登记，不通过资产关联改变产物归属。'}) from None
         if (original.get('artifact_id') != ref['artifact_id'] or original.get('version_ref') != ref['version_ref']
                 or original['state'] != 'available' or 'content_sha256' in ref and original.get('content_sha256') != ref['content_sha256']):
             raise BusinessError('REFERENCE_NOT_FOUND')

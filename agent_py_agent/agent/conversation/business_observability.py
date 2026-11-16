@@ -962,7 +962,30 @@ class BusinessObservationService:
             raise BusinessError('CURSOR_EXPIRED')
         # next_cursor 始终表示更早记录；合页工作片内部也从尾向前切，页内保原canonical顺序。
         end = len(page.rows) - offset
-        selected = page.rows[max(0, end - params.get('limit', 50)):end]
+        # 只在已读取工作片内按原公开角色筛选；游标仍消费原始行。授权洞不触发补读。
+        def public_row(row):
+            if row.role not in ({'user', 'assistant', 'host', 'display'} if child
+                                else {'user', 'assistant', 'tool', 'host', 'display'}):
+                return False
+            if row.role != 'display':
+                return True
+            if params.get('include_display') is not True:
+                return False
+            from .background_transcript import public_workflow_step_display
+            from .display_checkpoint import display_checkpoint_event
+
+            event = display_checkpoint_event(row)
+            return bool(event and event['phase'] == 'completed' and (
+                event['kind'] == 'assistant_completed' or event['kind'] == 'system_message'
+                and public_workflow_step_display(event['payload'].get('workflow_step'))))
+
+        start, selected = end, []
+        while start > 0 and len(selected) < params.get('limit', 50):
+            start -= 1
+            row = page.rows[start]
+            if public_row(row):
+                selected.append(row)
+        selected.reverse()
         items, display_events = [], []
         execution_links = _message_execution_links(self, selected, thread, actor)
         filtered = False
@@ -1012,12 +1035,13 @@ class BusinessObservationService:
                 'text': text, 'occurred_at': _timestamp(row.created_at),
                 'source': public_message_origin(self, row, actor), 'artifact_refs': [],
                 **execution_links[row.message_id]})
-        offset += len(selected)
+        offset += end - start
         next_position = ({'before': page.after, 'offset': offset, 'bound_limit': bound_limit} if offset < len(page.rows)
             else {'before': page.before, 'offset': 0, 'bound_limit': bound_limit} if page.before else None)
         if next_position is not None:
             next_position.update(generation=generation, order='older_pages_v2')
-        coverage = 'unknown' if child and info is None else 'partial' if next_position or filtered else 'complete'
+        coverage = ('unknown' if child and info is None else 'partial'
+                    if next_position or filtered or page.rows and not items else 'complete')
         return {**({'display_events': display_events} if params.get('include_display') is True else {}),
             'items': items, 'next_cursor': self.cursor(scope, next_position) if next_position else None,
             'coverage': coverage, 'history_boundary': {
@@ -1642,7 +1666,7 @@ class BusinessObservationService:
         native_execution = 'executions' not in self.readers
         limit = params.get('limit', 50)
         filter_space = (params.get('filter') or {}).get('space_id')
-        scan_limit = max(50, limit) if filter_space else limit
+        scan_limit = max(50, limit)
         if self.runtime is not None and generation != 'unavailable':
             with self.runtime._runtime_connection() as conn:
                 if native_execution:

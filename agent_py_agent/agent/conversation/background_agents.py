@@ -601,24 +601,29 @@ class BackgroundAgentService:
         with quota.guard() if action == "restore" else nullcontext():
             thread = self._mutate(resolved_id, actor=actor, action=action, changes=changes,
                                   expected_revision=expected_revision, idempotency_key=idempotency_key)
-        refs, tasks = identity_outstanding(self.host, thread)
-        if action == "retire":
-            if disposition == "cancel_tasks":
-                for task in tasks:
-                    self.cancel_task(task.task_id, actor=actor, include_descendants=True)
-            elif disposition == "drain":
-                self._republish_pending_work(thread, tasks, actor=actor)
-            thread = reconcile_background_identity(self.host, resolved_id)
-            refs, _ = identity_outstanding(self.host, thread)
-            if not refs and background_identity(thread).identity_state == "retiring":
-                # 取消后的首个索引回填可能partial；上面的新完整遍历追平后，再走原锁内CAS，不把新空账配给旧身份。
+        try:
+            refs, tasks = identity_outstanding(self.host, thread)
+            if action == "retire":
+                if disposition == "cancel_tasks":
+                    for task in tasks:
+                        self.cancel_task(task.task_id, actor=actor, include_descendants=True)
+                elif disposition == "drain":
+                    self._republish_pending_work(thread, tasks, actor=actor)
                 thread = reconcile_background_identity(self.host, resolved_id)
-                if background_identity(thread).identity_state == "retiring":
-                    refs, _ = identity_outstanding(self.host, thread)
-            return {"agent": self._agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "outstanding_refs": refs[:100]}
-        if action in {"resume", "restore"}:
-            self._republish_pending_work(thread, tasks, actor=actor)
-        return {"agent": self._agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "state": "completed"}
+                refs, _ = identity_outstanding(self.host, thread)
+                if not refs and background_identity(thread).identity_state == "retiring":
+                    # 取消后的首个索引回填可能partial；上面的新完整遍历追平后，再走原锁内CAS，不把新空账配给旧身份。
+                    thread = reconcile_background_identity(self.host, resolved_id)
+                    if background_identity(thread).identity_state == "retiring":
+                        refs, _ = identity_outstanding(self.host, thread)
+                return {"agent": self._agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "outstanding_refs": refs[:100]}
+            if action in {"resume", "restore"}:
+                self._republish_pending_work(thread, tasks, actor=actor)
+            return {"agent": self._agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "state": "completed"}
+        except BusinessError as error:
+            if action == "retire" and disposition == "cancel_tasks":
+                error.effect_outcome = "unknown"
+            raise
 
     # LLM: 只读一次原claim及精确owner/run/attempt关联；空串表示无执行，None表示未知责任，不能靠空root猜SessionTask。
     # 函数用途: 找到当前助手真正执行的派活任务，读取或身份异常时保守阻止重发。

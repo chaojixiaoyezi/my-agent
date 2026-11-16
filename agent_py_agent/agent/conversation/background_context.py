@@ -969,7 +969,9 @@ def tool_policy_request(
     goal_id = str(wake_meta.get("goal_id") or "").strip() if isinstance(wake_meta, dict) else ""
     if _has_plugin_zero_tool_goal(store, thread_id, goal_id, task_id):
         snapshot = {**snapshot, "tool_policy": "none"}
+    thread = store.threads.load(thread_id) if store is not None and thread_id else None
     return BackgroundToolPolicyRequest(
+        business_controller=bool(thread is not None and thread.metadata.get("business_controller") is True),
         reason=str(getattr(request, "reason", "") or ""),
         wake_signal=getattr(request, "wake_signal", None),
         config=getattr(agent, "config", None),

@@ -204,7 +204,9 @@ class _BusinessBackgroundService(BackgroundAgentService):
         task, _ = self._owned_task(task_id, actor)
         return cancel_owned_session_task(self.host, task, include_descendants=include_descendants,
             authorize_task=lambda canonical_task: self.call_context.check('tasks.cancel',
-                {'owner_id': self.call_context.owner_id, 'task_id': canonical_task.task_id}))
+                {'owner_id': self.call_context.owner_id, 'task_id': canonical_task.task_id,
+                 **{key: (canonical_task.metadata.get('business_context') or {}).get(key)
+                    for key in ('space_id', 'project_ref')}}))
 
     # LLM: 单次原派发失败仍携原outcome/身份；不解析异常文字，也不重派可能已发表的任务。
     # 函数用途: 把准确业务上下文接入原SessionTask派发，并保留未知回执。
@@ -733,7 +735,9 @@ class BusinessServices:
             task, _ = original._owned_task(task_id, actor)
             return cancel_owned_session_task(host, task, include_descendants=True,
                 authorize_task=lambda canonical_task: context.check('tasks.cancel',
-                    {'owner_id': context.owner_id, 'task_id': canonical_task.task_id}))
+                    {'owner_id': context.owner_id, 'task_id': canonical_task.task_id,
+                     **{key: (canonical_task.metadata.get('business_context') or {}).get(key)
+                        for key in ('space_id', 'project_ref')}}))
 
         local = copy(service)
         local.agent_steps = copy(service.agent_steps)

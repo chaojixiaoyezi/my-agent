@@ -262,8 +262,13 @@ def _validate_cancellation_task(host, current, binding, root_context):
         context = BusinessExecutionContext.from_dict(raw)
         if context.owner_id != owner or context.task_id != current.task_id:
             raise PermissionError("OWNER_MISMATCH")
+    owner_controller = (root_context is not None and root_context.get("space_id") is None
+                        and root_context.get("project_ref") is None
+                        and store.threads.require(host.conversation_store.session_tasks.require(
+                            root_context["task_id"]).target_thread_id).metadata.get("business_controller") is True)
+    scope_keys = ("owner_id",) if owner_controller else ("owner_id", "space_id", "project_ref")
     if root_context is not None and (raw is None or any(
-            raw.get(key) != root_context.get(key) for key in ("owner_id", "space_id", "project_ref"))):
+            raw.get(key) != root_context.get(key) for key in scope_keys)):
         raise PermissionError("SPACE_MISMATCH")
     return current
 
@@ -414,12 +419,13 @@ def _settle_cancelled_task_body(host, binding, root_context, *, reject_pending=F
 # 函数用途: 在已核规范任务上重新取得本次调用的实时取消许可。
 def _authorize_cancellation_task(task, authorize_task):
     from ..plugin_host.errors import HostAPIError
+    from .business_access import BusinessError
 
     if authorize_task is None:
         return
     try:
         allowed = authorize_task(task)
-    except HostAPIError:
+    except (HostAPIError, BusinessError):
         raise
     except (OSError, ValueError) as error:
         # 外层沿用原存储错误收口；这两类授权异常必须越过该收口并中止。
@@ -544,66 +550,81 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False, au
 def cancel_owned_session_task(host, task, *, include_descendants=False, authorize_task=None):
     from ..plugin_host.errors import HostAPIError
     from .background_team_lifecycle import SessionTaskCoverageUnknown
+    from .business_access import BusinessError
     from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
 
-    store, binding = host.conversation_store, _cancellation_binding(task)
-    root_context = task.metadata.get("business_context")
-    current = _validate_cancellation_task(host, store.session_tasks.require(task.task_id), binding, root_context)
-    _authorize_cancellation_task(current, authorize_task)
-    control = current.metadata.get("cancellation_control", {})
-    prior = control.get("outstanding_refs", [])
     try:
-        selected = _cancellation_closure(host, current, root_context) if include_descendants else [binding]
-    except PermissionError:
-        raise
-    except (SessionTaskCoverageUnknown, OSError, ValueError):
-        refs = _save_cancellation_control(host, binding, root_context,
-            [*prior, "descendants:coverage_unknown"], descendants=include_descendants)
-        return {"operation_id": task.task_id, "state": "pending", "outstanding_refs": refs}
-
-    # 完整闭包逐条预检先于任何控制写入；拒绝后代不能被静默剔除。
-    for selected_binding in selected:
-        selected_task = _validate_cancellation_task(host, store.session_tasks.require(selected_binding[0]),
-            selected_binding, root_context)
-        _authorize_cancellation_task(selected_task, authorize_task)
-
-    # 在第一条副作用前把责任存回原根；中断/异常不能留下“根已终态，因此不用再核后代”的空窗。
-    pending = list(prior)
-    if current.status not in SESSION_TASK_TERMINAL_STATUSES:
-        pending.append(current.conversation_request_id or current.task_id)
-    if include_descendants:
-        pending.append("descendants:pending")
-    _save_cancellation_control(host, binding, root_context, pending, descendants=include_descendants)
-    resolved, descendant_refs, outstanding = set(), {}, []
-    if include_descendants:
-        resolved.update({"descendants:coverage_unknown", "descendants:pending", "descendants:unresolved_scope"})
-    for selected_binding in selected:
+        store, binding = host.conversation_store, _cancellation_binding(task)
+        root_context = task.metadata.get("business_context")
+        current = _validate_cancellation_task(host, store.session_tasks.require(task.task_id), binding, root_context)
+        _authorize_cancellation_task(current, authorize_task)
+        control = current.metadata.get("cancellation_control", {})
+        prior = control.get("outstanding_refs", [])
         try:
+            selected = _cancellation_closure(host, current, root_context) if include_descendants else [binding]
+        except PermissionError:
+            raise
+        except (SessionTaskCoverageUnknown, OSError, ValueError):
+            refs = _save_cancellation_control(host, binding, root_context,
+                [*prior, "descendants:coverage_unknown"], descendants=include_descendants)
+            return {"operation_id": task.task_id, "state": "pending", "outstanding_refs": refs}
+
+        # 完整闭包逐条预检先于任何控制写入；拒绝后代不能被静默剔除。
+        for selected_binding in selected:
             selected_task = _validate_cancellation_task(host, store.session_tasks.require(selected_binding[0]),
                 selected_binding, root_context)
-            resolved.update((selected_binding[0], selected_task.conversation_request_id))
-            selected_control = selected_task.metadata.get("cancellation_control", {})
-            if selected_control.get("execution_ref"):
-                resolved.update(selected_control.get("execution_outstanding_refs", selected_control.get("outstanding_refs", [])))
-            # 根只保存可见未确认引用的出处；重试仍读原后代控制账，不把聚合副本当执行权威。
-            resolved.update(control.get("descendant_refs", {}).get(selected_binding[0], ()))
-            refs = _cancel_selected_session_task(host, selected_binding, root_context,
-                root=selected_binding[0] == task.task_id, authorize_task=authorize_task)
-            outstanding.extend(refs)
-            if selected_binding[0] != task.task_id and refs:
-                descendant_refs[selected_binding[0]] = refs
-        except (PermissionError, HostAPIError):
+            _authorize_cancellation_task(selected_task, authorize_task)
+
+    except PermissionError as error:
+        if error.args != ("SPACE_MISMATCH",):
             raise
-        except (OSError, ValueError):
-            outstanding.append(selected_binding[0])
-    outstanding.extend(ref for ref in prior if ref not in resolved)
-    selected_ids = {item[0] for item in selected}
-    for identifier, values in control.get("descendant_refs", {}).items():
-        if identifier not in selected_ids:
-            descendant_refs[identifier] = values
-    refs = _save_cancellation_control(host, binding, root_context, outstanding, descendants=include_descendants,
-        descendant_refs=descendant_refs if include_descendants else None, resolved_refs=resolved)
-    return {"operation_id": task.task_id, "state": "pending" if refs else "completed", "outstanding_refs": refs}
+        raise BusinessError("SPACE_MISMATCH", details={
+            "reason": "CANCELLATION_SCOPE_MISMATCH", "side_effect_state": "none",
+            "next_action": "核对根任务与后代的原空间/项目范围；使用具有各空间授权的总控任务取消。"}) from error
+    try:
+        # 在第一条副作用前把责任存回原根；中断/异常不能留下“根已终态，因此不用再核后代”的空窗。
+        pending = list(prior)
+        if current.status not in SESSION_TASK_TERMINAL_STATUSES:
+            pending.append(current.conversation_request_id or current.task_id)
+        if include_descendants:
+            pending.append("descendants:pending")
+        _save_cancellation_control(host, binding, root_context, pending, descendants=include_descendants)
+        resolved, descendant_refs, outstanding = set(), {}, []
+        if include_descendants:
+            resolved.update({"descendants:coverage_unknown", "descendants:pending", "descendants:unresolved_scope"})
+        for selected_binding in selected:
+            try:
+                selected_task = _validate_cancellation_task(host, store.session_tasks.require(selected_binding[0]),
+                    selected_binding, root_context)
+                resolved.update((selected_binding[0], selected_task.conversation_request_id))
+                selected_control = selected_task.metadata.get("cancellation_control", {})
+                if selected_control.get("execution_ref"):
+                    resolved.update(selected_control.get("execution_outstanding_refs", selected_control.get("outstanding_refs", [])))
+                # 根只保存可见未确认引用的出处；重试仍读原后代控制账，不把聚合副本当执行权威。
+                resolved.update(control.get("descendant_refs", {}).get(selected_binding[0], ()))
+                refs = _cancel_selected_session_task(host, selected_binding, root_context,
+                    root=selected_binding[0] == task.task_id, authorize_task=authorize_task)
+                outstanding.extend(refs)
+                if selected_binding[0] != task.task_id and refs:
+                    descendant_refs[selected_binding[0]] = refs
+            except (PermissionError, HostAPIError, BusinessError):
+                raise
+            except (OSError, ValueError):
+                outstanding.append(selected_binding[0])
+        outstanding.extend(ref for ref in prior if ref not in resolved)
+        selected_ids = {item[0] for item in selected}
+        for identifier, values in control.get("descendant_refs", {}).items():
+            if identifier not in selected_ids:
+                descendant_refs[identifier] = values
+        refs = _save_cancellation_control(host, binding, root_context, outstanding, descendants=include_descendants,
+            descendant_refs=descendant_refs if include_descendants else None, resolved_refs=resolved)
+        return {"operation_id": task.task_id, "state": "pending" if refs else "completed", "outstanding_refs": refs}
+    except BusinessError as error:
+        error.effect_outcome = "unknown"
+        raise
+    except HostAPIError as error:
+        error.outcome = "unknown"
+        raise
 
 
 def queue_owned_background_message(host, *, actor, target, text, operation_key, input_kind):

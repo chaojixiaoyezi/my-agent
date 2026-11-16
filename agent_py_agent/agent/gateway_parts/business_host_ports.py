@@ -428,6 +428,39 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                 }
             return None
 
+        # 原生登记只核元数据与原执行归属，不读取内容或扩展到任务声明产物。
+        if kind == 'artifact':
+            from ..conversation.business_access import BusinessActor, BusinessError, require_actor
+            from ..conversation.registered_artifact_observation import registered_artifact
+            from ..conversation.workflow_artifact_observation import workflow_artifact
+            from .business_api_v13_readers import _OwnerReaders
+
+            require_actor(actor)
+            if actor.owner_id != owner_id or owner_home_path is None:
+                return None
+            from .business_api import _local_business_services
+
+            observation = _local_business_services(host).observation
+            store, runtime = observation.store, observation.runtime
+            if store is None or runtime is None:
+                raise BusinessError('HOST_NOT_READY', details={
+                    'reason': 'NATIVE_ARTIFACT_AUTHORITY_UNAVAILABLE',
+                    'side_effect_state': 'none',
+                    'next_action': '恢复当前Owner的原会话存储与运行库后重试登记；不要把来源缺失当作产物不存在。'})
+            observer = BusinessActor(owner_id, actor.subject_id, observation, actor.authorize)
+            source = _OwnerReaders(owner_home_path, owner_id, store, runtime,
+                workspace_task_path_template=getattr(host.config, 'workspace_task_path_template', None))
+            reader = workflow_artifact if ref_id.startswith('wfart-') else registered_artifact
+            found = reader(source, ref_id, with_content=False, authority=(observation, observer, 'artifacts.get'))
+            if found is None:
+                return None
+            facts, record, _ = found
+            if not facts.value['available']:
+                return None
+            return {'owner_id': owner_id, 'ref': ref_id, 'artifact_id': ref_id,
+                'version_ref': facts.value['version_ref'], 'content_sha256': record.sha256,
+                'space_id': facts.space_id, 'project_ref': facts.project_ref, 'state': 'available'}
+
         # 5. artifact_version: 产物版本文件
         if kind == 'artifact_version':
             if owner_home_path is not None:
