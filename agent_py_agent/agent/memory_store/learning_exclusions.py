@@ -7,6 +7,8 @@ from __future__ import annotations
 #   channel_conversation_id，绝不解析消息正文。
 # 模块用途: 把 owner 学习排除名单同步成候选账本上的持久标记，并提供共享的会话排除判定。
 
+from copy import deepcopy
+
 from ..user_space.owner_policy import read_learning_exclusions, read_learning_exclusions_revision
 
 # 候选被学习来源排除时写入的结构化原因码；promote(automatic=True) 会原样返回它并保持候选状态。
@@ -38,10 +40,8 @@ def thread_is_excluded(thread: object, excluded_conversation_ids: frozenset[str]
     )
 
 
-# LLM: 同步只做两件结构化事：把名单映射成被排除的 thread_id 集合，再给来源命中这些 thread 且尚未打上同原因排除标记的
-#   pending/approved 候选写排除标记；已带相同标记的候选不重复进写锁，候选状态、人工审核路径和名单外的会话都不受影响。
-# LLM: 只读扫描优先借候选元组，覆盖list/load仍由仓库回退；这里只提取标量ID，修改仍走原批量写锁。
-# 函数用途: 不复制全账本地同步学习排除标记，返回标记与检查计数。
+# LLM: 原候选窗口公平推进，每片只核本页引用；只有canonical绑定确证命中才持久标记，unknown仅留诊断。
+# 函数用途: 有界同步历史待定候选排除标记，保持原批量写锁与幂等入口。
 def sync_learning_exclusion_marks(
     *,
     conversation_store: object,
@@ -50,29 +50,34 @@ def sync_learning_exclusion_marks(
 ) -> dict[str, object]:
     if not excluded_conversation_ids:
         return {"marked": 0, "checked": 0}
-    thread_ids = excluded_thread_ids(conversation_store, excluded_conversation_ids)
-    if not thread_ids:
-        return {"marked": 0, "checked": 0}
-    rows = getattr(candidate_service, "readonly_rows", candidate_service.list)(statuses={"pending_review", "approved"}, limit=0)
-    targets = [
-        row.candidate_id
-        for row in rows
-        if _row_excluded(row, thread_ids)
-        and str(getattr(row, "promotion_exclusion", "") or "").strip() != LEARNING_SOURCE_EXCLUDED
-    ]
-    marked = (
-        candidate_service.mark_promotion_excluded(
-            targets, reason=LEARNING_SOURCE_EXCLUDED
-        )
-        if targets
-        else 0
-    )
-    return {"marked": marked, "checked": len(rows), "excluded_threads": len(thread_ids)}
+    window_reader = getattr(candidate_service, "readonly_window", None)
+    if not callable(window_reader):
+        return {"marked": 0, "checked": 0, "coverage": "unknown",
+                "errors": ({"code": "LEARNING_EXCLUSION_CANDIDATE_WINDOW_UNAVAILABLE",
+                            "side_effects": "not_started", "next_action": "为候选仓库提供readonly_window有界读口。"},)}
+    state = getattr(candidate_service, "_learning_exclusion_scan", {})
+    signature = tuple(sorted(excluded_conversation_ids))
+    cursor = state.get("cursor", {}) if state.get("excluded_ids") == signature else {}
+    window = window_reader(deepcopy(cursor), max_records=128)
+    rows, _refs, next_cursor, wrapped = window
+    pending = [row for row in rows if getattr(row, "status", "") in {"pending_review", "approved"}
+               and str(getattr(row, "promotion_exclusion", "") or "").strip() != LEARNING_SOURCE_EXCLUDED]
+    report = candidate_exclusion_report(conversation_store=conversation_store, rows=pending,
+                                       excluded_conversation_ids=excluded_conversation_ids)
+    targets = sorted(report["excluded_candidate_ids"])
+    marked = candidate_service.mark_promotion_excluded(targets, reason=LEARNING_SOURCE_EXCLUDED) if targets else 0
+    # 公平调度续点不授学习/删除权；写标记失败保留原页，下次仍由canonical重验。
+    candidate_service._learning_exclusion_scan = {"excluded_ids": signature, "cursor": deepcopy(next_cursor)}
+    errors = (*getattr(window, "errors", ()), *report["errors"])
+    return {"marked": marked, "checked": len(rows), "excluded_threads": report["checked_threads"],
+            "coverage": "partial" if errors or not wrapped else "complete", "errors": errors,
+            "unknown_candidate_ids": tuple(sorted(report["unknown_candidate_ids"]))}
+
 
 
 # LLM: 映射方向只有 thread→channel 一种：排除名单按 channel_conversation_id，候选与 audit 引用按
 #   thread_id，所以先把名单翻译成被排除的 thread_id 集合，消息/audit/候选判定全部走同一集合。
-# 函数用途: 把排除会话 ID 集合翻译成对应的 thread_id 集合。
+# 函数用途: 显式完整清单导出；后台同步和候选准入不得调用此穷举入口。
 def excluded_thread_ids(
     conversation_store: object,
     excluded_conversation_ids: frozenset[str],
@@ -88,58 +93,89 @@ def excluded_thread_ids(
     }
 
 
-# LLM: 候选来源只看它自己保存的消息引用里的 thread_id；引用里没有 thread_id 的旧候选无法证明
-#   来自名单会话，按不排除处理（宁可少标也不误标）。
-# 函数用途: 判断一条候选是否来自被排除的会话。
-def _row_excluded(row: object, excluded_thread_ids: set[str]) -> bool:
-    refs = getattr(row, "source_message_refs", ()) or ()
-    return any(
-        str(ref.get("thread_id") or "").strip() in excluded_thread_ids
-        for ref in refs
-        if isinstance(ref, dict)
-    )
+def candidate_exclusion_report(
+    *, conversation_store: object, rows: object,
+    excluded_conversation_ids: frozenset[str], max_thread_reads: int = 128,
+) -> dict[str, object]:
+    """批内共享精确来源快照；缺失、坏来源和超预算只阻断关联候选，不扫描历史或冒充排除事实。"""
+    if type(max_thread_reads) is not int or max_thread_reads < 0:
+        raise ValueError("max_thread_reads必须为非负整数")
+    excluded, unknown, errors = set(), set(), []
+    result = {"excluded_candidate_ids": excluded, "unknown_candidate_ids": unknown,
+              "errors": errors, "checked_threads": 0}
+    if not excluded_conversation_ids:
+        result["errors"] = ()
+        return result
+    reader = getattr(getattr(conversation_store, "threads", None), "load_report", None)
+    observations = {}
+    for row in rows or ():
+        candidate_id = str(getattr(row, "candidate_id", "") or "")
+        refs = getattr(row, "source_message_refs", ()) or ()
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            thread_id = str(ref.get("thread_id") or "").strip()
+            if not thread_id:
+                continue  # 无thread_id的旧引用保持原语义；其它宿主来源/证据门仍负责可学资格。
+            if thread_id not in observations:
+                reason, detail, error_type = "", "", ""
+                thread = None
+                if not callable(reader):
+                    reason = "THREAD_SOURCE_READ_API_UNAVAILABLE"
+                elif result["checked_threads"] >= max_thread_reads:
+                    reason = "THREAD_SOURCE_READ_BUDGET_EXHAUSTED"
+                else:
+                    result["checked_threads"] += 1
+                    try:
+                        thread, error = reader(thread_id)
+                    except InterruptedError:
+                        raise
+                    except (OSError, ValueError, TypeError) as exc:
+                        reason, detail, error_type = "THREAD_SOURCE_UNREADABLE", str(exc), type(exc).__name__
+                    else:
+                        if error:
+                            reason, detail = "THREAD_SOURCE_UNREADABLE", str(error.get("message") or error.get("error") or error)
+                            error_type = str(error.get("error_type") or error.get("code") or "")
+                        elif thread is None:
+                            reason = "THREAD_SOURCE_MISSING"
+                        elif str(getattr(thread, "thread_id", "")) != thread_id:
+                            reason = "THREAD_SOURCE_IDENTITY_MISMATCH"
+                observations[thread_id] = "unknown" if reason else (
+                    "excluded" if thread_is_excluded(thread, excluded_conversation_ids) else "allowed")
+                if reason:
+                    errors.append({"code": reason, "thread_id": thread_id, "error_type": error_type,
+                                   "message": detail or "无法核实候选引用的canonical线程来源。",
+                                   "side_effects": "not_started",
+                                   "next_action": "保留该候选；核对准确thread_id及原线程读口，下一维护片重验，不按缺失来源放行。"})
+            observation = observations[thread_id]
+            if observation == "excluded":
+                excluded.add(candidate_id)
+                unknown.discard(candidate_id)
+                break  # 一项确证排除已足以否决，不再读取无关引用。
+            if observation == "unknown":
+                unknown.add(candidate_id)
+                if not callable(reader) or result["checked_threads"] >= max_thread_reads:
+                    break  # 该候选已经unknown；不再为未读取的长引用列表制造无界诊断。
+    unknown.difference_update(excluded)
+    result["errors"] = tuple(errors)
+    return result
 
 
-# LLM: 仅当候选确实携带非空消息 thread_id 引用时才需要扫描会话存储；无消息引用的候选不可能命中会话排除。
-# 函数用途: 判断一条候选是否携带可参与会话排除匹配的 thread_id 引用。
-def _row_has_thread_ref(row: object) -> bool:
-    refs = getattr(row, "source_message_refs", ()) or ()
-    return any(
-        bool(str(ref.get("thread_id") or "").strip())
-        for ref in refs
-        if isinstance(ref, dict)
-    )
-
-
-# LLM: 定向判定用于补晋升路径：只对给定候选做结构化命中检查，不扫描全账本、不写标记；
-#   给定候选均无消息 thread_id 引用时直接返回空集，省去无意义的会话全表扫描；
-#   名单不可读的 fail-closed 由调用方处理（这里只处理非空名单的纯读判定）。
-# 函数用途: 返回给定候选中来源命中排除名单的候选 ID 集合。
 def excluded_candidate_ids(
-    *,
-    conversation_store: object,
-    rows: object,
+    *, conversation_store: object, rows: object,
     excluded_conversation_ids: frozenset[str],
 ) -> set[str]:
-    if not excluded_conversation_ids:
-        return set()
-    candidate_rows = tuple(rows or ())
-    if not candidate_rows or not any(_row_has_thread_ref(row) for row in candidate_rows):
-        return set()
-    thread_ids = excluded_thread_ids(conversation_store, excluded_conversation_ids)
-    if not thread_ids:
-        return set()
-    return {
-        str(getattr(row, "candidate_id", "") or "")
-        for row in candidate_rows
-        if _row_excluded(row, thread_ids)
-    }
+    """兼容原集合调用；仅作本次保守gate，unknown不是可持久化的排除事实。"""
+    report = candidate_exclusion_report(conversation_store=conversation_store, rows=rows,
+                                        excluded_conversation_ids=excluded_conversation_ids)
+    return report["excluded_candidate_ids"] | report["unknown_candidate_ids"]
 
 
 __all__ = [
     "LEARNING_SOURCE_EXCLUDED",
     "curator_learning_exclusions",
     "curator_learning_exclusions_revision",
+    "candidate_exclusion_report",
     "excluded_candidate_ids",
     "excluded_thread_ids",
     "sync_learning_exclusion_marks",
