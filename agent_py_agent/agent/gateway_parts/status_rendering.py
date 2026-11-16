@@ -16,6 +16,8 @@ from __future__ import annotations
 
 """Gateway status and liveness rendering helpers."""
 
+import base64
+import hashlib
 import json
 import math
 import os
@@ -171,7 +173,20 @@ def gateway_runtime_snapshot(
     log_source: str = "gateway",
     log_scope: str = "current_lifecycle",
     log_query: str = "",
+    include_queue_entries: bool = False,
+    queue_limit: int = 20,
+    queue_cursor: str = "",
+    queue_scope: str = "owner",
+    include_quarantined_wakes: bool = False,
+    quarantined_limit: int = 20,
+    quarantined_cursor: str = "",
+    log_offset_bytes: int | None = None,
+    log_since: float | None = None,
+    log_until: float | None = None,
+    log_cursor: str = "",
 ) -> dict[str, object]:
+    if include_queue_entries and (queue_scope not in ("owner", "all_owners") or type(queue_limit) is not int or not 1 <= queue_limit <= 100):
+        raise ValueError("queue_scope requires owner/all_owners; queue_limit requires integer 1..100")
     running = gateway_running_report(paths)
     state_report = read_json_file_report(paths.state, context="gateway.runtime_snapshot.state.read")
     heartbeat_report = read_json_file_report(
@@ -217,13 +232,44 @@ def gateway_runtime_snapshot(
             paths.log,
             start_offset_bytes=_int_value(state.get("log_start_offset_bytes")),
         )
-    if include_log_tail:
+    if include_queue_entries:
+        snapshot["queue_entries"] = _queue_entries(agent, paths, queue_scope, queue_limit, queue_cursor)
+    if include_quarantined_wakes:
+        snapshot["quarantined_wake_entries"] = agent.conversation_store.wakes.attempts.quarantined_page(
+            limit=quarantined_limit, cursor=quarantined_cursor)
+    if log_offset_bytes is not None or log_since is not None or log_until is not None or log_cursor:
+        snapshot["log_pages"] = gateway_log_page(paths, state, log_source=log_source, log_scope=log_scope,
+            log_query=log_query, log_offset_bytes=log_offset_bytes, log_since=log_since,
+            log_until=log_until, log_cursor=log_cursor, line_limit=log_tail_lines)
+    elif include_log_tail:
         diagnostics = snapshot.setdefault("log_diagnostics", {})
         diagnostics["raw_log_included"] = True
         diagnostics["log_tail"] = _gateway_log_tails(paths, state, log_source=log_source,
             log_scope=log_scope, log_tail_lines=log_tail_lines, log_query=log_query)
     return snapshot
 
+
+
+def _queue_entries(agent, paths, scope: str, limit: int, cursor: str) -> dict:
+    """复用原审计授权；新页只读请求索引，不列举历史线程。"""
+    from ..user_space.owner_admin_controls import (
+        cross_owner_audit_allowed,
+        read_owner_admin_controls,
+    )
+    from .request_audit_records import OutcomeQuery, request_queue_records
+
+    home = agent.home_paths
+    if not read_owner_admin_controls(home)["audit_allowed"] or (scope == "all_owners" and not cross_owner_audit_allowed(home)):
+        return {"available": False, "error_code": "AUDIT_ACCESS_DENIED", "effect_outcome": "not_started",
+                "next_action": "请在 admin_controls 核验 audit_allowed 与跨用户审计授权。"}
+    allowed = None if scope == "all_owners" else frozenset({str(home.owner_id or "local/main")})
+    try:
+        return request_queue_records(paths, OutcomeQuery(allowed, {}, "", 0.0, limit, cursor=cursor))
+    except (OSError, ValueError) as error:
+        return {"available": False, "error_code": "QUEUE_PAGE_CURSOR_INVALID" if isinstance(error, ValueError) else "QUEUE_PAGE_UNAVAILABLE",
+                "field": "queue_cursor" if isinstance(error, ValueError) else "queue_source",
+                "cause": type(error).__name__, "coverage": "unavailable", "effect_outcome": "not_started",
+                "next_action": "保持原范围并清空 queue_cursor 重新开始；若源仍不可读，请核验规范请求目录，不要据此结清或重放请求。"}
 
 # LLM: Gateway服务多owner；只增加规范supervisor日志定位，不添读取或模型权威，caller模型仍由执行快照提供。
 # 函数用途: 组装原健康事实及两个服务日志位置，不新增I/O或推断实际外部可达性。
@@ -314,6 +360,185 @@ def _gateway_log_tails(paths: GatewayPaths, state: dict, *, log_source: str, log
     return {source: _service_log_tail(paths.log if source == "gateway" else paths.root / "supervisor.log",
         source, state, scope=log_scope, line_limit=limit, byte_limit=byte_limit, query=log_query) for source in sources}
 
+
+
+def _log_cursor_encode(payload: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+
+
+def gateway_log_page(paths: GatewayPaths, state: dict[str, object], *, log_source: str = "gateway",
+                     log_scope: str = "current_lifecycle", log_query: str = "",
+                     log_offset_bytes: int | None = None, log_since: float | None = None,
+                     log_until: float | None = None, log_cursor: str = "", line_limit: int = 80,
+                     byte_limit: int = _GATEWAY_LOG_TAIL_MAX_BYTES) -> dict[str, object]:
+    """按真实字节推进有界页；游标仅携带已校验来源、代次、过滤器及固定窗口。"""
+    if log_source not in ("gateway", "supervisor", "both") or log_scope not in ("current_lifecycle", "full_file"):
+        raise ValueError("日志来源或范围无效")
+    sources = ("gateway", "supervisor") if log_source == "both" else (log_source,)
+    budget = max(1, min(_GATEWAY_LOG_TAIL_MAX_BYTES, int(byte_limit)))
+    if budget < len(sources):
+        raise ValueError("log_byte_budget_requires_at_least_one_byte_per_source")
+    binding = hashlib.sha256(json.dumps([log_source, log_scope, log_query, log_since, log_until,
+        state.get("started_at") if log_scope == "current_lifecycle" else None,
+        state.get("log_start_offset_bytes") if log_scope == "current_lifecycle" else None]).encode()).hexdigest()
+    previous = {}
+    if log_cursor:
+        try:
+            if len(log_cursor) > 8192:
+                raise ValueError("cursor_too_large")
+            previous = json.loads(base64.urlsafe_b64decode(log_cursor.encode()))
+            if not isinstance(previous, dict) or previous.get("binding") != binding or not isinstance(previous.get("sources"), dict):
+                raise ValueError("cursor_filter_changed")
+            if any(not isinstance(value, dict) for value in previous["sources"].values()):
+                raise ValueError("cursor_source_requires_object")
+        except (ValueError, TypeError, KeyError) as error:
+            return {"status": "invalid_cursor", "error_code": "LOG_CURSOR_INVALID", "lines": [],
+                    "next_action": "保留原过滤参数续页，或清空 log_cursor 开始新窗口。", "cause": type(error).__name__}
+    pages, continuation = {}, {}
+    for source in sources:
+        path = paths.log if source == "gateway" else paths.root / "supervisor.log"
+        page, next_state = _forward_log_source(path, source, state, scope=log_scope, query=log_query,
+            offset=log_offset_bytes, since=log_since, until=log_until,
+            previous=previous.get("sources", {}).get(source), line_limit=max(1, min(200, line_limit)),
+            byte_limit=budget // len(sources))
+        pages[source] = page
+        continuation[source] = next_state
+    pending = any(page.get("truncated") for page in pages.values())
+    return {"sources": pages, "sampled_bytes": sum(page.get("sampled_bytes", 0) for page in pages.values()),
+            "byte_limit": budget, "truncated": pending,
+            "next_cursor": _log_cursor_encode({"binding": binding, "sources": continuation}) if pending else "",
+            "coverage": "partial" if pending or any(page.get("coverage") != "complete" for page in pages.values()) else "complete"}
+
+
+def _forward_log_source(path, source, state, *, scope, query, offset, since, until, previous, line_limit, byte_limit):
+    result = {"lines": [], "sampled_bytes": 0, "next_offset_bytes": None, "truncated": False,
+              "rotated": False, "coverage": "partial", "omitted_lines": 0, "ambiguous_lines": 0}
+    start = 0
+    if scope == "current_lifecycle" and source == "gateway":
+        start = state.get("log_start_offset_bytes")
+        if type(start) is not int or start < 0:
+            return {**result, "status": "lifecycle_unconfirmed"}, {}
+    if scope == "current_lifecycle" and source == "supervisor" and _float_value(state.get("started_at")) <= 0:
+        return {**result, "status": "lifecycle_unconfirmed"}, {}
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise OSError("service_log_not_single_regular_file")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        try:
+            opened = os.fstat(descriptor)
+            _require_same_log_file(before, opened, path.lstat())
+            generation = [opened.st_dev, opened.st_ino]
+            if previous:
+                if (previous.get("generation") != generation or type(previous.get("end")) is not int
+                        or opened.st_size < previous["end"]):
+                    return {**result, "status": "source_rotated", "rotated": True,
+                            "error_code": "LOG_SOURCE_CHANGED", "next_action": "清空游标重新选择窗口；旧偏移未应用到新日志。"}, {}
+                end, position = previous["end"], previous.get("offset")
+                if type(position) is not int or not start <= position <= end <= opened.st_size:
+                    raise ValueError("invalid_log_cursor_range")
+                if any(type(previous.get(key, 0)) is not int or previous.get(key, 0) < 0 for key in ("omitted", "ambiguous")):
+                    raise ValueError("invalid_log_cursor_coverage")
+                dropping = previous.get("dropping") is True
+                pem = previous.get("pem") is True
+                anchor = previous.get("anchor")
+                if (not isinstance(anchor, dict) or type(anchor.get("offset")) is not int
+                        or type(anchor.get("length")) is not int or not 0 <= anchor["length"] <= min(32, byte_limit // 8)
+                        or not 0 <= anchor["offset"] <= end - anchor["length"]):
+                    raise ValueError("invalid_log_cursor_anchor")
+                os.lseek(descriptor, anchor["offset"], os.SEEK_SET)
+                checked = os.read(descriptor, anchor["length"])
+                result["sampled_bytes"] += len(checked)
+                if hashlib.sha256(checked).hexdigest() != anchor.get("sha256"):
+                    return {**result, "status": "source_rotated", "rotated": True,
+                            "error_code": "LOG_SOURCE_CHANGED", "next_action": "清空游标重新选择窗口；原内容锚点已改变。"}, {}
+            else:
+                end, position = opened.st_size, max(start, offset if offset is not None else start)
+                if position > end:
+                    return {**result, "status": "offset_outside_source", "rotated": True}, {}
+                dropping, pem = False, False
+                if position > start and byte_limit > 1:
+                    os.lseek(descriptor, position - 1, os.SEEK_SET)
+                    dropping = os.read(descriptor, 1) != b"\n"
+                    result["sampled_bytes"] = 1
+            os.lseek(descriptor, position, os.SEEK_SET)
+            raw = os.read(descriptor, max(0, min(byte_limit - result["sampled_bytes"], end - position)))
+            if not previous:
+                sample = raw[:min(32, byte_limit // 8)]
+                anchor = {"offset": position, "length": len(sample), "sha256": hashlib.sha256(sample).hexdigest()}
+            _require_same_log_file(opened, os.fstat(descriptor), path.lstat())
+            if os.fstat(descriptor).st_size < end:
+                raise OSError("service_log_truncated_during_read")
+        finally:
+            os.close(descriptor)
+        result["sampled_bytes"] += len(raw)
+        consumed, used = 0, 0
+        for chunk in raw.splitlines(keepends=True):
+            complete = chunk.endswith(b"\n") or position + consumed + len(chunk) == end
+            text = chunk.decode("utf-8", "replace")
+            began, ended = "-----BEGIN " in text and "PRIVATE KEY-----" in text, "-----END " in text and "PRIVATE KEY-----" in text
+            if not complete:
+                if consumed:
+                    break
+                # 超长/截断行整段丢弃并续记丢弃态，绝不回传无标签后半段。
+                consumed += len(chunk)
+                dropping = True
+                pem = (pem or began or text.lstrip().startswith("-----")) and not ended
+                result["omitted_lines"] += 1
+                break
+            if dropping:
+                dropping = False
+                consumed += len(chunk)
+                pem = (pem or began) and not ended
+                result["omitted_lines"] += 1
+                continue
+            scrubbed = ["<redacted-private-key>"] if pem or began or ended else _scrub_log_tail(chunk)
+            line = "\n".join(scrubbed)
+            timestamp = _log_line_timestamp(line)
+            lower = max(since or 0, _float_value(state.get("started_at")) if source == "supervisor" and scope == "current_lifecycle" else 0)
+            uncertain = (lower > 0 or until is not None) and timestamp is None
+            match = not uncertain and (not lower or timestamp is not None and timestamp >= lower) and (until is None or timestamp is not None and timestamp <= until)
+            match = match and (not query or query.casefold() in line.casefold())
+            size = len(line.encode()) + bool(result["lines"])
+            if match and size > byte_limit:
+                consumed += len(chunk)
+                result["omitted_lines"] += 1
+                pem = (pem or began) and not ended
+                continue
+            if match and (len(result["lines"]) >= line_limit or used + size > byte_limit):
+                break
+            consumed += len(chunk)
+            pem = (pem or began) and not ended
+            if uncertain:
+                result["ambiguous_lines"] += 1
+            if match:
+                result["lines"].append(line)
+                used += size
+        next_offset = position + consumed
+        omitted = (previous.get("omitted", 0) if previous else 0) + result["omitted_lines"]
+        ambiguous = (previous.get("ambiguous", 0) if previous else 0) + result["ambiguous_lines"]
+        next_state = {"generation": generation, "end": end, "offset": next_offset, "dropping": dropping,
+                      "pem": pem, "anchor": anchor, "omitted": omitted, "ambiguous": ambiguous}
+        result.update(status="ok", source_generation=generation, source_segment="active",
+                      evidence_scope="bounded_retained_window_not_full_file_search", window_end_offset_bytes=end,
+                      sample_start_offset_bytes=position, next_offset_bytes=next_offset,
+                      truncated=next_offset < end,
+                      coverage="complete" if next_offset == end and not ambiguous and not omitted else "partial",
+                      omitted_lines_in_window=omitted, ambiguous_lines_in_window=ambiguous,
+                      timestamp_coverage="partial" if ambiguous else "observed_lines_only")
+        return result, next_state
+    except (OSError, ValueError, TypeError) as error:
+        return {**result, "status": "unavailable", "load_error": runtime_error_report(error, context="gateway.log_page.read")}, {}
+
+
+def _log_line_timestamp(line: str) -> float | None:
+    match = re.match(r"^\[?(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)", line)
+    if match:
+        try:
+            return datetime.fromisoformat(match[1].replace("Z", "+00:00")).timestamp()
+        except (ValueError, OverflowError, OSError):
+            pass
+    return None
 
 # LLM: 原FD前后核单链接regular叶；截窗时从同一预算预留1字节确认行界，不额外超读，也不以叶检查冒充祖先全链保护。
 # 函数用途: 有界读原日志，保留已确认完整的首行，丢弃失去凭据标签的首段；不创建或替换文件。

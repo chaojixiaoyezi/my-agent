@@ -131,6 +131,34 @@ def _record_supervisor_fault(supervisor, reason: str, *, recovered: bool = False
         return
 
 
+def _observe_supervisor_failure(supervisor, reason: str = "") -> None:
+    """记录实际观察，不触发告警，也不从 PID 缺失推断退出码。"""
+    try:
+        path = supervisor._paths.supervisor_state
+        previous = read_json_file_report(path, context="supervisor.observation.read").payload or {}
+        fields = {"first_failure_reason": "", "first_failure_at": None,
+                  "last_failure_reason": "", "last_failure_at": None,
+                  "last_exit_code": None, **previous,
+                  "restart_attempts": int(getattr(supervisor, "_restart_count", 0))}
+        if reason:
+            now = time.time()
+            fields.update(last_failure_reason=reason, last_failure_at=now)
+            if not fields.get("first_failure_reason"):
+                fields.update(first_failure_reason=reason, first_failure_at=now)
+        from .supervisor_generation import SpawnedGateway
+
+        child = getattr(supervisor, "_gateway_child", None)
+        if (type(child) is SpawnedGateway and child is getattr(supervisor, "_gateway_child_origin", None)
+                and type(child.process) is subprocess.Popen and child.parent_pid == os.getpid()):
+            code = child.process.poll()
+            if type(code) is int:
+                fields.update(last_exit_code=code, last_exit_pid=child.process.pid,
+                              last_exit_observed_at=time.time())
+        write_json_file_atomic(path, fields)
+    except Exception:  # noqa: BLE001 诊断失败不能改变重启与告警策略
+        return
+
+
 # LLM: 只比较结构化时间；坏值、非有限值及未来时间不能延长交接宽限，不读日志或mtime。
 # 函数用途: 检查一个交接时间是否落在给定的最近窗口内。
 def _recent_handover_timestamp(value: object, now: float, grace: float) -> bool:
@@ -300,6 +328,7 @@ def start_gateway(supervisor) -> int | None:
         return None
     report = get_running_pid_report(supervisor._paths.pid, cleanup_stale=False)
     if report.pid is not None or report.load_error is not None:
+        _observe_supervisor_failure(supervisor, "gateway_start_identity_unconfirmed")
         supervisor._log_error("Gateway已有进程或身份无法确认；请先用原Gateway状态/停止入口核验，不重复启动。")
         return None
     try:
@@ -307,6 +336,7 @@ def start_gateway(supervisor) -> int | None:
 
         require_startable_generation(supervisor)
     except (OSError, ValueError) as error:
+        _observe_supervisor_failure(supervisor, "gateway_generation_not_closed")
         supervisor._log_error(f"Gateway旧代关闭未确认：{type(error).__name__}")
         return None
     cmd = [sys.executable, "-m", "agent_py_agent", "--config", supervisor.config_path, "gateway", "run"]
@@ -315,6 +345,7 @@ def start_gateway(supervisor) -> int | None:
         process = _spawn_gateway_process(supervisor, cmd, creationflags, start_new_session)
     except OSError as exc:
         supervisor._log_error(f"Gateway子进程启动失败：{type(exc).__name__}")
+        _observe_supervisor_failure(supervisor, "gateway_spawn_failed")
         return None
     from .supervisor_generation import retain_spawned_gateway
 
@@ -356,6 +387,7 @@ def _wait_for_gateway_start(supervisor, process) -> int | None:
     attempt = 0
     while time.monotonic() < deadline:
         if process.poll() is not None:
+            _observe_supervisor_failure(supervisor, "gateway_start_child_exited")
             supervisor._log_error("Gateway子进程在就绪前已退出。")
             return None
         if supervisor._is_gateway_healthy(quiet_unconfirmed=True):
@@ -367,6 +399,7 @@ def _wait_for_gateway_start(supervisor, process) -> int | None:
         time.sleep(min(0.5, 0.05 * (2 ** min(attempt, 4))))
         attempt += 1
     supervisor._is_gateway_healthy(quiet_unconfirmed=False)
+    _observe_supervisor_failure(supervisor, "gateway_start_timeout")
     supervisor._log_error("Gateway在120秒内未确认就绪；保留进程与记录供原状态入口核验。")
     return None
 
@@ -589,6 +622,7 @@ def _restart_gateway_attempt(supervisor) -> bool:
         supervisor._log_error(f"旧代恢复身份未确认：{type(error).__name__}")
         return False
     supervisor._restart_count += 1
+    _observe_supervisor_failure(supervisor, "gateway_restart_attempt")
     supervisor._last_restart_at = time.time()
     supervisor._log_warn(
         f"Gateway unhealthy. Restarting (attempt {supervisor._restart_count}/{supervisor.max_restart_attempts})..."
@@ -655,6 +689,7 @@ def run_supervisor_loop(supervisor) -> int:
     if read_maintenance_lock(supervisor._paths) is not None:
         supervisor._log_info("Supervisor paused: maintenance lock active")
     elif not _planned_restart_handover_active(supervisor, time.time()) and not supervisor._is_gateway_healthy():
+        _observe_supervisor_failure(supervisor, "gateway_initial_health_unconfirmed")
         supervisor._start_gateway()
     _log_supervisor_active(supervisor)
     _monitor_until_stopped(supervisor)
@@ -681,6 +716,12 @@ def _write_supervisor_state(supervisor, identity: dict, status: str) -> None:
         **previous,
         "role": "supervisor", "status": status, "pid": identity["pid"],
         "process_identity": identity, "updated_at": _utc_now_iso(),
+        "first_failure_reason": previous.get("first_failure_reason", ""),
+        "first_failure_at": previous.get("first_failure_at"),
+        "last_failure_reason": previous.get("last_failure_reason", ""),
+        "last_failure_at": previous.get("last_failure_at"),
+        "last_exit_code": previous.get("last_exit_code"),
+        "restart_attempts": int(getattr(supervisor, "_restart_count", 0)),
     })
 
 
@@ -734,6 +775,7 @@ def _run_health_check(supervisor, consecutive_failures: int) -> int:
         if not adapter_healthy and read_adapter_state(supervisor._paths.root / "adapter_state.json").get("state") == "running":
             supervisor._restart_adapter()
         return 0
+    _observe_supervisor_failure(supervisor, "gateway_health_unconfirmed")
     consecutive_failures += 1
     supervisor._log_warn(
         f"Gateway health check failed (consecutive={consecutive_failures}): "
@@ -760,6 +802,7 @@ def _reset_stable_restart_budget(supervisor, now: float) -> None:
     healthy_anchor = max(last_restart_at, last_unhealthy_at, healthy_since)
     if restart_count > 0 and healthy_anchor > 0.0 and now - healthy_anchor >= RESTART_BUDGET_RESET_SECONDS:
         supervisor._restart_count = 0
+        _observe_supervisor_failure(supervisor)
         supervisor._last_unhealthy_at = 0.0
         supervisor._healthy_since_at = 0.0
         supervisor._log_info("Gateway已稳定健康运行满600秒，重置监护重启计数。")
@@ -877,6 +920,8 @@ class GatewaySupervisor:
     def _resolve_agent_and_paths(self):
         if self._paths is None:
             self._paths = gateway_paths(self._agent)
+            if self.log_path is None:
+                self.log_path = self._paths.root / "supervisor.log"
 
     # LLM: 统一日志格式并可选追加文件；日志不充当运行状态权威。
     # 函数用途: 输出一条带时间和级别的监护日志。
@@ -884,7 +929,12 @@ class GatewaySupervisor:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] [{level}] {msg}"
         print(line, flush=True)
-        self._append_log_file(line)
+        try:
+            same_sink = self.log_path is not None and os.fstat(sys.stdout.fileno()).st_ino == self.log_path.stat().st_ino and os.fstat(sys.stdout.fileno()).st_dev == self.log_path.stat().st_dev
+        except (OSError, ValueError):
+            same_sink = False
+        if not same_sink:
+            self._append_log_file(line)
 
     # LLM: 文件日志失败不改变监护生命周期，保留原尽力写策略。
     # 函数用途: 把监护日志追加到可选文件。
@@ -895,8 +945,8 @@ class GatewaySupervisor:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
-        except OSError:
-            pass
+        except OSError as error:
+            print(f"supervisor_log_write_failed: {type(error).__name__}; event_not_persisted", file=sys.stderr, flush=True)
 
     # LLM: 仅转发INFO级别，不建立业务状态。
     # 函数用途: 记录普通监护信息。

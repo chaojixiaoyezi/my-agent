@@ -10,6 +10,9 @@
 # 模块用途: 记录一条后台唤醒每次被领取的结果，在反复同因失败时把它结案、不再领取，并支持管理员人工重放。
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import os
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -299,6 +302,89 @@ class WakeAttemptStore:
         errors.extend(_unreadable_source_report(path) for path in
                       (sorted(unreadable.glob("*.json")) if unreadable.is_dir() else ()))
         return rows, errors
+
+    def quarantined_page(self, *, limit: int, cursor: str = "") -> dict:
+        """只走一片目录；坏行、超大行和未覆盖来源明确报告，不写索引。"""
+        from ..common.nofollow_fs import open_readonly_file_beneath
+        from ..gateway_parts.status_rendering import _GATEWAY_LOG_TAIL_MAX_BYTES
+        from ..user_space.directory_paging import directory_page
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("quarantined_limit_requires_1_to_100")
+        binding = hashlib.sha256(str(self.storage.root.absolute()).encode()).hexdigest()
+        position = {}
+        try:
+            if cursor:
+                if len(cursor) > 65536:
+                    raise ValueError("cursor_too_large")
+                position = json.loads(base64.urlsafe_b64decode(cursor))
+                if not isinstance(position, dict) or position.get("binding") != binding or not isinstance(position.get("scan"), dict):
+                    raise ValueError("cursor_scope_changed")
+            if type(position.get("unreadable_seen", 0)) is not int or position.get("unreadable_seen", 0) < 0:
+                raise ValueError("invalid_cursor_unreadable_count")
+            phase = position.get("phase", "quarantine")
+            if phase not in ("quarantine", "unreadable"):
+                raise ValueError("invalid_cursor_phase")
+            directory = self.storage.wake_quarantine_dir if phase == "quarantine" else self.storage.wake_quarantine_unreadable_dir
+            parts = directory.relative_to(self.storage.root).parts
+            pending = position.get("pending", [])
+            if (not isinstance(pending, list) or len(pending) > 100
+                    or any(not isinstance(name, str) or len(name) > 256 or any(char in name for char in ("/", "\\", "\0"))
+                           or name in ("", ".", "..") for name in pending)):
+                raise ValueError("invalid_cursor_pending_names")
+            if pending:
+                names, scan, complete = pending, position.get("scan", {}), position.get("complete") is True
+            else:
+                names, scan, complete = directory_page(self.storage.root, parts, position.get("scan", {}), limit, require_dir_fd=False)
+            names, remaining = names[:limit], names[limit:]
+        except (OSError, ValueError, TypeError) as error:
+            return {"items": [], "unreadable": 1, "coverage": "unavailable", "truncated": False,
+                    "next_cursor": "", "error_code": "WAKE_PAGE_UNAVAILABLE", "cause": type(error).__name__,
+                    "next_action": "核验本owner结案目录及游标；不要把不可读当作零条。"}
+        rows, errors, sampled = [], [], 0
+        for index, name in enumerate(names):
+            if not name.endswith(".json"):
+                continue
+            if phase == "unreadable":
+                errors.append({"wake_signal_id": name[:-5], "error_code": WAKE_REPLAY_SOURCE_UNREADABLE})
+                continue
+            try:
+                descriptor = open_readonly_file_beneath(self.storage.root, (*parts, name))
+                try:
+                    size = os.fstat(descriptor).st_size
+                    if size > _GATEWAY_LOG_TAIL_MAX_BYTES:
+                        raise ValueError("wake_record_exceeds_page_byte_budget")
+                    if size > _GATEWAY_LOG_TAIL_MAX_BYTES - sampled:
+                        remaining = names[index:] + remaining
+                        break
+                    raw = os.read(descriptor, size)
+                    sampled += len(raw)
+                    if len(raw) != size or os.fstat(descriptor).st_size != size:
+                        raise ValueError("wake_record_changed_during_read")
+                finally:
+                    os.close(descriptor)
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    raise ValueError("quarantined_wake_requires_object")
+                row = _quarantine_row(payload)
+                for key in ("same_cause_count", "total_count", "quarantined_at", "replay_count"):
+                    if type(row[key]) not in (int, float):
+                        row[key] = None
+                rows.append(row)
+            except (OSError, ValueError, UnicodeError) as error:
+                errors.append({"wake_signal_id": name[:-5], "error_code": "WAKE_RECORD_UNREADABLE", "cause": type(error).__name__})
+        finished = complete and not remaining and phase == "unreadable"
+        unreadable_seen = position.get("unreadable_seen", 0) + len(errors)
+        next_position = {"binding": binding, "unreadable_seen": unreadable_seen,
+                         "phase": "unreadable" if complete and not remaining else phase,
+                         "scan": {} if complete and not remaining else scan,
+                         "pending": remaining, "complete": complete}
+        next_cursor = "" if finished else base64.urlsafe_b64encode(json.dumps(next_position).encode()).decode()
+        return {"items": rows, "next_cursor": next_cursor, "truncated": not finished,
+                "unreadable": len(errors), "unreadable_in_window": unreadable_seen,
+                "load_errors": errors, "sampled_bytes": sampled,
+                "visited": min(limit, scan.get("last_scanned", len(names))),
+                "coverage": "complete" if finished and not unreadable_seen else "partial"}
 
     # LLM: 纯读、不取锁；判定在模块函数 wake_replay_source，replay（在锁内）与 /wakes replay 预览共用同一口径。
     # 函数用途: 读出一条已结案唤醒的结案记录，读不到时说明原因。

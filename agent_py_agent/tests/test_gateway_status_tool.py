@@ -220,3 +220,25 @@ def test_gateway_run_state_persists_model_endpoint_and_log_boundary(tmp_path: Pa
     assert state["http_bind_host"] == "127.0.0.1"
     assert state["http_port"] == 8420
     assert state["log_start_offset_bytes"] == 4321
+
+
+def test_forward_page_tool_uses_real_snapshot_and_metadata_suppresses_body(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import status_rendering
+
+    agent, paths = _running_gateway(tmp_path)
+    paths.log.write_text("historical-event\n" + "later-event\n" * 4000)
+    result = GatewayStatusTool(agent).execute({"include_log_diagnostics": False,
+        "log_offset_bytes": 0, "log_scope": "full_file", "log_tail_lines": 1})
+    page = json.loads(result.output)
+    assert page["log_pages"]["sources"]["gateway"]["lines"] == ["historical-event"]
+    monkeypatch.setattr(status_rendering, "gateway_log_page", lambda *a, **k: (_ for _ in ()).throw(AssertionError("body read")))
+    safe = GatewayStatusTool(agent).execute({"metadata_only": True, "log_offset_bytes": 0})
+    assert safe.ok and "log_pages" not in json.loads(safe.output)
+
+
+def test_page_parameter_rejection_reports_no_side_effect_and_correction(tmp_path):
+    agent, _ = _running_gateway(tmp_path)
+    result = GatewayStatusTool(agent).execute({"queue_limit": True})
+    assert not result.ok
+    error = json.loads(result.output)
+    assert error["effect_outcome"] == "not_started" and error["next_action"]

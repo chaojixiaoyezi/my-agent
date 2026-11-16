@@ -44,8 +44,8 @@ def test_fresh_public_supervisor_start_prepares_private_gateway_parent_before_lo
     assert len(case.agents) == len(case.spawned) == 1
     agent = case.agents[0]
     paths = gateway_paths(agent)
-    assert paths.log.is_file() and paths.log.stat().st_size == 0
-    assert case.spawned[0][1] == str(paths.log)
+    assert (paths.root / "supervisor.log").is_file() and (paths.root / "supervisor.log").stat().st_size == 0
+    assert case.spawned[0][1] == str(paths.root / "supervisor.log")
     assert case.spawned[0][0][-2:] == ['gateway', 'supervisor']
     assert case.spawned[0][0][case.spawned[0][0].index('--config') + 1] == str(case.config)
     assert agent.config.gateway_worker_process_count == count
@@ -121,8 +121,8 @@ def test_fresh_public_supervisor_start_preserves_explicit_absolute_service_overr
     assert main(case.argv) == 0
     assert len(case.agents) == len(case.spawned) == 1
     paths = gateway_paths(case.agents[0])
-    assert paths.root == service and paths.log.is_file()
-    assert case.spawned[0][1] == str(service / 'gateway.log')
+    assert paths.root == service and (paths.root / "supervisor.log").is_file()
+    assert case.spawned[0][1] == str(service / 'supervisor.log')
     assert not service.is_relative_to(case.agents[0].root)
     if os.name != 'nt':
         assert stat.S_IMODE(service.stat().st_mode) == 0o700

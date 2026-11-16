@@ -36,12 +36,14 @@ def test_run_cli_constructs_exactly_one_original_agent_and_runtime_reuses_it(tmp
         supervisor._resolve_agent_and_paths()
         assert supervisor._paths == gateway_paths(agents[0])
         assert agents[0].workspace_roots == [Path(args.workspace_root).resolve()]
+        supervisor._log_info("direct-service-evidence")
         return 23
 
     monkeypatch.setattr(cli, 'make_agent', construct)
     monkeypatch.setattr(runtime.GatewaySupervisor, 'run', controlled_loop)
     assert cli.cmd_supervisor_run(args) == 23
     assert len(agents) == 1
+    assert (gateway_paths(agents[0]).root / "supervisor.log").read_text().count("direct-service-evidence") == 1
 
 
 @pytest.mark.parametrize('count', [0, 2])

@@ -8,6 +8,7 @@ from __future__ import annotations
 # 模块用途: 让本机管理员读唯一Gateway权威健康；默认有限安全摘要，显式诊断可取脱敏有界日志尾。
 
 import json
+import math
 from typing import Any
 
 from ..gateway_parts.paths import gateway_paths
@@ -38,7 +39,7 @@ class GatewayStatusTool(BaseTool):
             "也不要把 /health 当作状态端点，HTTP 状态端点由结果中的 status_path 给出。"
             "诊断日志读取被保护、native物化或执行异常时仍用本工具：返回本代最多8条安全阶段、错误码和有限资源分类，"
             "不读出原始正文；具体用户请求归属用audit_records及原跨用户审计授权核验，不从全局日志猜归属。"
-            "明确需要排查日志时可include_log_tail=true读取脱敏有界片段；full_file仅解除本代边界，不代表遍历全文件。"
+            "明确需要排查日志时可include_log_tail=true读取脱敏有界片段；log_offset_bytes/log_since/log_cursor可向前分页历史，每页最多32768字节。full_file仅解除本代边界，不代表一次遍历全文件。"
             "本次模型只看 caller_model.model_name，不使用训练记忆或旧历史回答当前模型名称。"
             "模型名是请求配置，不是供应商内部模型身份的独立鉴定；不要改写版本号。"
         ),
@@ -56,8 +57,19 @@ class GatewayStatusTool(BaseTool):
                 "include_log_tail": {"type": "boolean", "description": "显式读取脱敏日志尾，默认false；metadata_only=true时始终不读。"},
                 "log_tail_lines": {"type": "integer", "description": "每个日志最多返回多少行，默认80，夹取到1..200；所有来源共用32768字节采样及返文上限。"},
                 "log_source": {"type": "string", "enum": ["gateway", "supervisor", "both"], "description": "日志来源，默认gateway；不能传文件路径。"},
-                "log_scope": {"type": "string", "enum": ["current_lifecycle", "full_file"], "description": "默认current_lifecycle；full_file可回看跨重启记录，仍只检索有界尾窗，不是全文件搜索。"},
+                "log_scope": {"type": "string", "enum": ["current_lifecycle", "full_file"], "description": "默认current_lifecycle；full_file可回看跨重启记录，默认尾窗，显式offset/time/cursor按有界页向前读，不是一次全文件搜索。"},
                 "log_query": {"type": "string", "description": "可选不区分大小写的关键词，只在脱敏后的有界采样行中过滤，默认空。"},
+                "include_queue_entries": {"type": "boolean", "description": "显式读取有界队列元数据页，默认false；需原审计授权。"},
+                "queue_limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "队列页条数，默认20，上限沿原审计100。"},
+                "queue_cursor": {"type": "string", "description": "原 queue_entries.next_cursor；保留同范围续页。"},
+                "queue_scope": {"type": "string", "enum": ["owner", "all_owners"], "description": "默认owner；all_owners须原跨用户审计授权。"},
+                "include_quarantined_wakes": {"type": "boolean", "description": "显式读取本owner结案唤醒元数据页，不读取正文。"},
+                "quarantined_limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "唤醒页条数，默认20，上限100。"},
+                "quarantined_cursor": {"type": "string", "description": "原 quarantined_wake_entries.next_cursor。"},
+                "log_offset_bytes": {"type": "integer", "minimum": 0, "description": "显式前向日志字节起点；每页共用原32768字节预算。"},
+                "log_since": {"type": "number", "description": "可选Unix秒起点，只过滤本次有界窗口；无匹配不代表全文件无匹配。"},
+                "log_until": {"type": "number", "description": "可选Unix秒终点，缺时间戳行计入unknown覆盖。"},
+                "log_cursor": {"type": "string", "description": "原 log_pages.next_cursor；保持来源、范围及时间/关键词过滤器不变。轮转后清空重新开始。"},
             },
             "additionalProperties": False,
         },
@@ -114,7 +126,16 @@ class GatewayStatusTool(BaseTool):
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         metadata_only = params.get("metadata_only", False)
         if not isinstance(metadata_only, bool) or not _valid_log_tail_parameters(params):
-            return ToolHandlerOutcome("gateway_status", False, '{"error_code":"TOOL_INVALID_ARGUMENTS"}', error_code="TOOL_INVALID_ARGUMENTS")
+            invalid = [key for key, value in params.items() if not _valid_log_tail_parameters({key: value})]
+            if not isinstance(metadata_only, bool):
+                invalid.append("metadata_only")
+            if not invalid:
+                invalid = ["log_since", "log_until"]
+            details = {"error_code": "TOOL_INVALID_ARGUMENTS", "effect_outcome": "not_started",
+                       "invalid_fields": [{"field": key, "actual_type": type(params.get(key)).__name__} for key in invalid],
+                       "reason": "gateway_status 参数类型、枚举、页大小或时间范围不符合 input_schema。",
+                       "next_action": "按 schema 修正参数；例如 {\"include_queue_entries\":true,\"queue_limit\":20,\"queue_scope\":\"owner\"}。日志续页保持原过滤条件。"}
+            return ToolHandlerOutcome("gateway_status", False, json.dumps(details, ensure_ascii=False), error_code="TOOL_INVALID_ARGUMENTS")
         try:
             snapshot = self._snapshot(params, metadata_only=metadata_only)
         except Exception:  # noqa: BLE001 - 元数据诊断不能从错误出口回显私有路径
@@ -132,6 +153,17 @@ class GatewayStatusTool(BaseTool):
             log_options = {"include_log_tail": True, "log_tail_lines": params.get("log_tail_lines", 80),
                            "log_source": params.get("log_source", "gateway"),
                            "log_scope": params.get("log_scope", "current_lifecycle"), "log_query": params.get("log_query", "")}
+        for key in ("include_queue_entries", "queue_limit", "queue_cursor", "queue_scope",
+                    "include_quarantined_wakes", "quarantined_limit", "quarantined_cursor"):
+            if key in params:
+                log_options[key] = params[key]
+        if not metadata_only:
+            for key in ("log_offset_bytes", "log_since", "log_until", "log_cursor"):
+                if key in params:
+                    log_options[key] = params[key]
+            if any(key in params for key in ("log_offset_bytes", "log_since", "log_until", "log_cursor")):
+                for key, default in (("log_source", "gateway"), ("log_scope", "current_lifecycle"), ("log_query", ""), ("log_tail_lines", 80)):
+                    log_options[key] = params.get(key, default)
         snapshot = gateway_runtime_snapshot(
             self.agent,
             gateway_paths(self.agent),
@@ -164,7 +196,14 @@ def _valid_log_tail_parameters(params: dict) -> bool:
             and type(params.get("log_tail_lines", 80)) is int
             and params.get("log_source", "gateway") in ("gateway", "supervisor", "both")
             and params.get("log_scope", "current_lifecycle") in ("current_lifecycle", "full_file")
-            and isinstance(params.get("log_query", ""), str))
+            and isinstance(params.get("log_query", ""), str)
+            and all(type(params.get(key, False)) is bool for key in ("include_queue_entries", "include_quarantined_wakes"))
+            and all(type(params.get(key, 20)) is int and 1 <= params.get(key, 20) <= 100 for key in ("queue_limit", "quarantined_limit"))
+            and all(isinstance(params.get(key, ""), str) for key in ("queue_cursor", "quarantined_cursor", "log_cursor"))
+            and params.get("queue_scope", "owner") in ("owner", "all_owners")
+            and (params.get("log_offset_bytes") is None or type(params["log_offset_bytes"]) is int and params["log_offset_bytes"] >= 0)
+            and all(params.get(key) is None or type(params[key]) in (int, float) and math.isfinite(params[key]) for key in ("log_since", "log_until"))
+            and (params.get("log_since") is None or params.get("log_until") is None or params["log_since"] <= params["log_until"]))
 
 
 # LLM: 嵌套对象逐字段白名单；只透传已有数值用量及组装/轮间耗时，新增正文、地址、错误或日志不会自动泄漏。
@@ -173,6 +212,9 @@ def _metadata_projection(snapshot: dict) -> dict:
     result = {key: snapshot.get(key) for key in (
         "schema", "status", "alive", "uptime_seconds", "quarantined_wakes",
     )}
+    for key in ("queue_entries", "quarantined_wake_entries"):
+        if key in snapshot:
+            result[key] = snapshot[key]
     result["metadata_only"] = True
     for group, keys in (
         ("identity", ("pid", "process_start_time")),

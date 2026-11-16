@@ -262,7 +262,7 @@ def cmd_supervisor_start(args) -> int:
     ensure_private_dir(paths.root, canonical_root=paths.root.anchor)
     supervisor_pid_path = paths.supervisor_pid
     cmd = [sys.executable, "-m", "agent_py_agent", "--config", args.config, "gateway", "supervisor"]
-    process = _spawn_daemon(cmd, paths.log)
+    process = _spawn_daemon(cmd, paths.root / "supervisor.log")
 
     deadline = time.time() + 10.0
     if _wait_for_supervisor_start(supervisor_pid_path, process, deadline):
@@ -277,19 +277,23 @@ def cmd_supervisor_start(args) -> int:
 # LLM: 唯一CLI组合根沿make_agent解析YAML/环境/owner与工作区一次，延迟本监护进程不用的MCP；runtime只消费这个真实Agent，不能注入任意factory或Count0默认。
 # 函数用途: 装配实际Agent后进入原监护循环，配置失败仍沿原CLI错误出口。
 def cmd_supervisor_run(args) -> int:
-    from ..agent.observability.log_volume_rotation import install_daemon_log_rotation
+    from ..agent.observability.log_volume_rotation import (
+        install_daemon_log_rotation,
+        supervisor_log_sink,
+    )
     install_daemon_log_rotation(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
     args._defer_mcp_connect = True
     try:
         agent = make_agent(args)
-        return run_supervisor(
-            agent.config.config_path,
-            agent=agent,
-            heartbeat_timeout=getattr(args, "heartbeat_timeout", 120.0),
-            check_interval=getattr(args, "check_interval", 10.0),
-            max_restart_attempts=getattr(args, "max_restart_attempts", 5),
-            restart_cooldown=getattr(args, "restart_cooldown", 30.0),
-        )
+        with supervisor_log_sink(gateway_paths(agent).root / "supervisor.log"):
+            return run_supervisor(
+                agent.config.config_path,
+                agent=agent,
+                heartbeat_timeout=getattr(args, "heartbeat_timeout", 120.0),
+                check_interval=getattr(args, "check_interval", 10.0),
+                max_restart_attempts=getattr(args, "max_restart_attempts", 5),
+                restart_cooldown=getattr(args, "restart_cooldown", 30.0),
+            )
     except Exception as exc:
         print(f"supervisor error: {exc}", file=sys.stderr)
         return 2
@@ -347,7 +351,7 @@ def cmd_start_all(args) -> int:
         print("supervisor 已有运行记录或身份待核验；未重复启动，请用 gateway supervisor-status 核验。")
     else:
         cmd = _supervisor_daemon_cmd(args.config)
-        _spawn_daemon(cmd, paths.log)
+        _spawn_daemon(cmd, paths.root / "supervisor.log")
         print("supervisor 启动中...")
 
     result = _wait_for_gateway_ready(paths, agent)

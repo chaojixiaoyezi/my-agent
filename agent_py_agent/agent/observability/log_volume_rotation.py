@@ -13,6 +13,7 @@ import stat
 import sys
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 # 原生 daemon 日志单卷封口前的最大字节数。
@@ -28,12 +29,14 @@ _LOGGER = logging.getLogger(__name__)
 _INSTALL_PID = os.getpid()
 _INSTALL_LOCK = threading.Lock()
 _INSTALL_THREAD: threading.Thread | None = None
+_INSTALL_STOP: threading.Event | None = None
+_STDIO_LOCK = threading.RLock()
 
 
 # LLM: 仅实际stdout与指定日志同inode才安装；fork后重建本进程守卫，终端/管道不重定向；无导入期I/O。
 # 函数用途: 为真实daemon安装一个定期轮转线程，重复调用不叠加线程。
 def install_daemon_log_rotation(log_path: str | None) -> bool:
-    global _INSTALL_PID, _INSTALL_LOCK, _INSTALL_THREAD
+    global _INSTALL_PID, _INSTALL_LOCK, _INSTALL_THREAD, _INSTALL_STOP, _STDIO_LOCK
     if os.name == 'nt' or not log_path:
         return False
     try:
@@ -44,11 +47,13 @@ def install_daemon_log_rotation(log_path: str | None) -> bool:
     pid = os.getpid()
     if pid != _INSTALL_PID:
         # fork只留下调用者线程，不能沿用父进程可能被其它线程持有的安装锁。
-        _INSTALL_PID, _INSTALL_LOCK, _INSTALL_THREAD = pid, threading.Lock(), None
+        _INSTALL_PID, _INSTALL_LOCK, _INSTALL_THREAD, _INSTALL_STOP = pid, threading.Lock(), None, None
+        _STDIO_LOCK = threading.RLock()
     with _INSTALL_LOCK:
         if _INSTALL_THREAD is not None and _INSTALL_THREAD.is_alive():
             return True
-        thread = threading.Thread(target=_rotation_loop, args=(Path(log_path),),
+        _INSTALL_STOP = threading.Event()
+        thread = threading.Thread(target=_rotation_loop, args=(Path(log_path), _INSTALL_STOP),
                                   name='daemon-log-rotation', daemon=True)
         thread.start()
         _INSTALL_THREAD = thread
@@ -57,16 +62,19 @@ def install_daemon_log_rotation(log_path: str | None) -> bool:
 
 # LLM: 诊断设施失败不终止业务；每小时至多一条告警，原异常不被宣称已成功处理。
 # 函数用途: 在后台周期性尝试轮转与重开，不给每次stdout写入增加工作。
-def _rotation_loop(log_path):
+def _rotation_loop(log_path, stop=None):
     next_warning = 0.0
-    while True:
+    while stop is None or not stop.is_set():
         try:
-            rotate_log_volumes_once(log_path, now=time.time())
+            rotate_log_volumes_once(log_path, now=time.time(), stop_event=stop)
         except Exception:
             if time.monotonic() >= next_warning:
                 next_warning = time.monotonic() + 3600
                 _LOGGER.warning('daemon日志轮转失败，保留原日志并等待下一拍', exc_info=True)
-        time.sleep(DAEMON_LOG_CHECK_INTERVAL_SECONDS)
+        if stop is not None:
+            stop.wait(DAEMON_LOG_CHECK_INTERVAL_SECONDS)
+        else:
+            time.sleep(DAEMON_LOG_CHECK_INTERVAL_SECONDS)
 
 
 # LLM: 仅比较内核文件身份，不从路径字符串或长度推测重开是否完成。
@@ -86,7 +94,15 @@ def _stdio_matches(info):
 
 # LLM: 只在永久日志锁内调用；两条流先flush，再替换进程FD；不修改Python流对象或其它FD。
 # 函数用途: 把本进程stdout/stderr接到当前追加卷，崩溃后路径缺失时新建。
-def _reopen_stdio(log_path):
+def _reopen_stdio(log_path, *, stop_event=None):
+    with _STDIO_LOCK:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        _replace_stdio(log_path)
+        return True
+
+
+def _replace_stdio(log_path):
     sys.stdout.flush()
     sys.stderr.flush()
     descriptor = os.open(log_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
@@ -127,7 +143,7 @@ def _prune_sealed(log_path, now):
 
 # LLM: .rotate.lock永不删除，非阻塞flock后重核锁inode；各写者比较自身FD并重开，不只rename假装完成。
 # 函数用途: 执行一拍daemon封卷、重开与退休，返回真实删除字节；锁忙零副作用留待下一拍。
-def rotate_log_volumes_once(log_path: Path, *, now: float) -> dict:
+def rotate_log_volumes_once(log_path: Path, *, now: float, stop_event=None) -> dict:
     report = {'rotated': False, 'reopened': False, 'deleted': 0, 'freed_bytes': 0, 'total_bytes': 0}
     if os.name == 'nt':
         return report
@@ -162,8 +178,7 @@ def rotate_log_volumes_once(log_path: Path, *, now: float) -> dict:
             report['rotated'] = True
             active = None
         if active is None or not _stdio_matches(active):
-            _reopen_stdio(log_path)
-            report['reopened'] = True
+            report['reopened'] = _reopen_stdio(log_path, stop_event=stop_event)
         report['deleted'], report['freed_bytes'], report['total_bytes'] = _prune_sealed(log_path, now)
         return report
     finally:
@@ -172,3 +187,40 @@ def rotate_log_volumes_once(log_path: Path, *, now: float) -> dict:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+
+
+@contextmanager
+def supervisor_log_sink(log_path: Path):
+    """直接服务与 daemon 使用同一实际 FD；退出时还原调用者的流。"""
+    global _INSTALL_THREAD, _INSTALL_STOP
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    saved = []
+    created_thread = None
+    prior_thread = _INSTALL_THREAD
+    try:
+        for fd in (1, 2):
+            saved.append(os.dup(fd))
+    except BaseException:
+        for original in saved:
+            os.close(original)
+        raise
+    try:
+        _reopen_stdio(log_path)
+        install_daemon_log_rotation(str(log_path))
+        created_thread = _INSTALL_THREAD if _INSTALL_THREAD is not prior_thread else None
+        yield
+    finally:
+        if created_thread is not None:
+            _INSTALL_STOP.set()
+            created_thread.join(timeout=1.0)
+            _INSTALL_THREAD, _INSTALL_STOP = None, None
+        with _STDIO_LOCK, ExitStack() as cleanup:
+            for original in saved:
+                cleanup.callback(os.close, original)
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            finally:
+                for fd, original in zip((1, 2), saved):
+                    os.dup2(original, fd)
