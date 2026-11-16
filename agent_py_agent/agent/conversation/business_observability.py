@@ -918,7 +918,13 @@ class BusinessObservationService:
                 return {'items': [], 'next_cursor': None, 'coverage': 'unknown', 'history_boundary': {
                     'first_message_id': None, 'last_message_id': None, 'coverage': 'unknown', 'reason_code': str(error)}}
         else:
-            thread = _observation_thread(self.store, target['id'])
+            try:
+                thread = _observation_thread(self.store, target['id'])
+            except KeyError as error:
+                # 不存在的节点ID是确定参数事实而非宿主未就绪；与下方非后台/非总控线程同码，原样重试无意义。
+                raise BusinessError('OBSERVATION_NOT_FOUND', details={'reason': 'MESSAGE_TARGET_NOT_FOUND',
+                    'side_effect_state': 'none', 'next_action': 'target.id须逐字用background_agents.list、'
+                    'subagents.list或controllers.get返回的agent_id/thread_id；普通会话之间的消息不在本读口。'}) from error
         if thread.owner_id != self.owner_id:
             raise BusinessError('BUSINESS_ACCESS_DENIED')
         identity = background_identity(thread)
