@@ -29,8 +29,8 @@ from ..tool_runtime_ledger import write_boundary_with_runtime_ledger
 INPUT_PATH_NOT_VISIBLE_ERROR_CODE = "SUBAGENT_INPUT_PATH_NOT_VISIBLE"
 # 用户指定的大白话提示：父代理看到后应先把文件放进工作区或把内容直接写进任务。
 INPUT_PATH_NOT_VISIBLE_HINT = (
-    "该路径不在子代理可见范围（只能访问你的工作区和 shared 区），"
-    "请先把需要的文件放进工作区，或直接把内容写进任务。"
+    "该路径不在子代理可见范围（子代理只能读 visible_roots 列出的目录，不继承父级 Full Access 的读取范围），"
+    "请先把需要的文件复制到 visible_roots 内的目录再引用新路径，或直接把内容写进任务。"
 )
 # 回执里单个路径文本的长度上限，以及最多列出的不可见输入条数；超出只计数，不塞进回执。
 _REF_TEXT_LIMIT_CHARS = 300
@@ -81,10 +81,14 @@ class ChildReadScope:
         return resolved, self.policy.check_with_external_roots(resolved, self.granted_roots)
 
     # LLM: 只列出本 scope 已冻结的根，供回执告诉父代理可以把文件放到哪里；不是新的授权。
+    #   allowed_read_inputs 只在真实可读范围内收窄：墙外的约束项本身读不到，不能当可见根回给父级；全部读不到时给真实根供复制。
     # 函数用途: 返回子代理可访问的根目录列表（自己的工作区、shared 区和已授权的墙外根）。
     def visible_roots(self) -> list[str]:
         if self.allowed_read_inputs:
-            return list(dict.fromkeys(str(p) for p in self.allowed_read_inputs))
+            readable = [str(path) for path in self.allowed_read_inputs
+                        if self.policy.check_with_external_roots(path, self.granted_roots).allowed]
+            if readable:
+                return list(dict.fromkeys(readable))
         roots = [str(self.owner_root)]
         home = self.policy.agent_home_root
         if home is not None:

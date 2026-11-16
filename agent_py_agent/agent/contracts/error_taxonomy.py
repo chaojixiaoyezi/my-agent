@@ -973,7 +973,8 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="permission",
         retryable=False,
         recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
-        recovery_hint="当前 owner 只能访问自己的目录和 shared 公共区；改用本 owner 的工作区路径。",
+        recovery_hint=("当前 owner 只能访问自己的目录和 shared 公共区；改用本 owner 的工作区路径。若你是子代理，"
+                       "读不到父级给的墙外路径时请回报父级，由父级复制到你的工作区或 shared 区后再给新路径；不要换路径写法重试。"),
     ),
     "PATH_CROSS_OWNER_BLOCKED": ErrorContract(
         code="PATH_CROSS_OWNER_BLOCKED",
@@ -1612,8 +1613,8 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint=(
-            "该路径不在子代理可见范围（只能访问你的工作区和 shared 区），请先把需要的文件放进工作区，"
-            "或直接把内容写进任务；本批没有创建任何子代理，修正 invisible_inputs 后整批重试。"
+            "该路径不在子代理可见范围：子代理只能读 invisible_inputs[].visible_roots 列出的目录，不继承父级 Full Access 的读取范围；"
+            "请把需要的文件复制到其中后改用新路径，或直接把内容写进任务；本批没有创建任何子代理，修正 invisible_inputs 后整批重试。"
         ),
     ),
     "SUBAGENT_REPLACEMENT_RECORD_FAILED": ErrorContract(
