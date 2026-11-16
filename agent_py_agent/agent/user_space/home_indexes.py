@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
-    append_private_jsonl_records,
+    append_private_jsonl_records_unlocked,
     locked_json_path,
     read_jsonl_objects_report,
     write_private_text_file_atomic_unlocked,
@@ -473,7 +473,7 @@ def _agent_payload(ref: AgentIndexRef) -> dict[str, Any]:
 # LLM: This process-local fingerprint cache is bounded and excludes timestamps.
 # The file append happens while holding the cache lock so concurrent identical
 # updates cannot race into duplicate rows; failures never poison the cache.
-#   索引文件本身带任务/代理/运行标识与标题，必须与锁同口径私有：走 append_private_jsonl_records
+#   索引文件本身带任务/代理/运行标识与标题，必须与锁同口径私有：走原私有JSONL追加叶
 #   （文件 0600、目录 0700、已有 0644 下次追加即收紧），不再用跟随 umask 的 append_jsonl。
 # 函数用途: 只有索引里的实际字段发生变化时才追加一行，并限制去重缓存自身的大小。
 def _append_changed_index_record(
@@ -490,8 +490,13 @@ def _append_changed_index_record(
         if cached is not None and cached[0] is generation and cached[1] == fingerprint:
             _INDEX_WRITE_CACHE.move_to_end(cache_key)
             return False
-        append_private_jsonl_records(path, [payload], sort_keys=True)
-        _remember_index_fingerprint(cache_key, fingerprint, generation=generation)
+        ensure_private_dir(path.parent)
+        with locked_json_path(path):
+            # 锁外指纹只用于快速去重。等待原文件锁时其它写者可能替换/截断，
+            # 必须在同一临界区重新绑定代次，再追加并签收本次水位。
+            generation = _index_file_generation(cache_key[0])
+            append_private_jsonl_records_unlocked(path, [payload], sort_keys=True)
+            _remember_index_fingerprint(cache_key, fingerprint, generation=generation)
     return True
 
 

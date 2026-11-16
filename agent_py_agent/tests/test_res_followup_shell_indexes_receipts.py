@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import shutil
 import stat
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Event
 
 import pytest
 
@@ -188,3 +190,52 @@ def test_projection_fingerprint_and_file_generation_caches_are_bounded(tmp_path,
         assert path.read_bytes() == before
         assert len(indexes._INDEX_WRITE_CACHE) <= 3
         assert len(indexes._INDEX_WRITE_FILES) <= 3
+
+
+@pytest.mark.parametrize('mutation', ['replace', 'truncate'])
+def test_index_change_between_cache_sample_and_append_invalidates_other_entities(
+    tmp_path, monkeypatch, mutation,
+):
+    from agent_py_agent.agent.common.json_io import (
+        locked_json_path,
+        write_private_text_file_atomic_unlocked,
+    )
+
+    home, refs, path, register = _registrations(tmp_path, 'tasks')
+    register()
+    changed = replace(refs['tasks'][1], status='done')
+    sampled, published = Event(), Event()
+    original_generation = indexes._index_file_generation
+
+    def generation_after_sample(source):
+        generation = original_generation(source)
+        if not sampled.is_set():
+            sampled.set()
+            assert published.wait(5), '并发写者未发表变更'
+        return generation
+
+    monkeypatch.setattr(indexes, '_index_file_generation', generation_after_sample)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(indexes.register_task_ref, home, changed)
+        try:
+            assert sampled.wait(5), '追加者未完成锁外文件采样'
+            # 另一个规范写者在缓存采样后、追加取得同一sidecar锁前发表新文件。
+            with locked_json_path(path):
+                if mutation == 'replace':
+                    write_private_text_file_atomic_unlocked(path, '')
+                else:
+                    with path.open('wb'):
+                        pass
+        finally:
+            published.set()
+        pending.result(timeout=5)
+
+    indexes.register_task_ref(home, refs['tasks'][0])
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(row['owner_id'], row['status']) for row in rows] == [
+        (changed.owner_id, 'done'), (refs['tasks'][0].owner_id, 'running'),
+    ]
+    before = path.read_bytes()
+    indexes.register_task_ref(home, changed)
+    indexes.register_task_ref(home, refs['tasks'][0])
+    assert path.read_bytes() == before
