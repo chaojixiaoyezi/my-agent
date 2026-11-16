@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -122,9 +123,14 @@ def _thread_owners(homes, config, host, unavailable):
 def _native_rows(source, paths, thread_owners, allowed, since, unavailable):
     try:
         if source == 'decision':
-            report = decision_observation_records(paths, thread_owners=thread_owners, since=since, limit=3000)
+            report = decision_observation_records(paths, thread_owners=thread_owners, since=since, limit=100)
         else:
-            report = request_outcome_records(paths, OutcomeQuery(allowed, thread_owners, '', since, 3000))
+            query = OutcomeQuery(allowed, thread_owners, '', since, 100)
+            report = request_outcome_records(paths, query)
+            # 空控制页沿原续点最多补读一次，避免聚合耗时随队列规模增长；有扫描或坏来源即保留部分覆盖。
+            if (report.get('available') and not report.get('entries') and not report.get('scanned')
+                    and not report.get('unreadable') and report.get('next_cursor')):
+                report = request_outcome_records(paths, replace(query, cursor=report['next_cursor']))
         if not report.get('available'):
             raise OSError('source')
         if report.get('truncated') or report.get('unreadable'):

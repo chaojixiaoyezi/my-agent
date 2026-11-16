@@ -2057,10 +2057,17 @@ def test_discovery_projects_models_mcp_plugins_usage_with_risk(unit_call, tmp_pa
     host.config.mcp_servers = {"asset-01": {"command": "fixture-command", "args": ["TEST_ARG_SECRET"],
         "env": {"KEY": "TEST_ENV_SECRET"}}, "remote": {"url": "https://user:TEST_MCP_SECRET@mcp.example.test/rpc?token=TEST_QUERY_SECRET"}}
     plugin = seed_plugin(tmp_path)
-    seed_usage(unit_call)
-    before = {str(p): p.read_bytes() for p in host.home_paths.root.rglob("*") if p.is_file()}
+    usage = seed_usage(unit_call)
+    from agent_py_agent.agent.conversation.thread_read_index import ThreadReadIndex
+
+    # 只豁免既有线程定位投影的 SQLite 三件套；其它文件（含规范线程和锁）仍须逐字节不变。
+    projection = ThreadReadIndex(usage.threads).path
+    projection_paths = {projection, Path(str(projection) + "-wal"), Path(str(projection) + "-shm")}
+    before = {str(p): p.read_bytes() for p in host.home_paths.root.rglob("*")
+              if p.is_file() and p not in projection_paths}
     rows, complete = assets._discover(unit_call)
-    after = {str(p): p.read_bytes() for p in host.home_paths.root.rglob("*") if p.is_file()}
+    after = {str(p): p.read_bytes() for p in host.home_paths.root.rglob("*")
+             if p.is_file() and p not in projection_paths}
     assert before == after and complete
     by_id = {row["asset_id"]: assets._view(row) for row in rows}
     assert {row["kind"] for row in by_id.values()} == {"model_endpoint", "mcp_server", "agent_plugin", "external_service"}

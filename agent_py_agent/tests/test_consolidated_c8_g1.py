@@ -13,6 +13,7 @@ import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +49,7 @@ from agent_py_agent.agent.gateway_parts.business_api_v13 import (
     v13_action_spec,
     v13_action_specs,
 )
+from agent_py_agent.agent.gateway_parts.gateway_history_index import GatewayHistoryIndex
 from agent_py_agent.agent.gateway_parts.owner_conversation_store import (
     owner_conversation_store_from_config,
 )
@@ -93,14 +95,16 @@ def audit_home(tmp_path):
     thread = conversations.threads.create(owner_id=base.owner_id)
     host = SimpleNamespace(home_paths=base, config=config, conversation_store=conversations)
     paths = gateway_paths_from_root(tmp_path / 'queue')
-    paths.done.mkdir(parents=True)
+    for folder in (paths.done, paths.inbox, paths.processing):
+        folder.mkdir(parents=True, exist_ok=True)
     payload = {'id': 'request-one', 'conversation_claim': {'thread_id': thread.thread_id},
-               'owner_id': base.owner_id, 'status': 'completed',
+               'owner_id': base.owner_id, 'status': 'completed', 'ended_at': 1700000020,
                MODEL_OBSERVATION_KEY: {'status': 'selected', 'reason': 'synthetic'},
                'prompt': 'private synthetic content', 'metadata': {'channel': 'chat'}}
     request = paths.done / 'request-one.json'
     request.write_text(json.dumps(payload))
     os.utime(request, (1700000020, 1700000020))
+    GatewayHistoryIndex(paths).append(payload)
     # LLM: 写入指定临时 owner 的真实事务，以固定主体和时钟生成可追溯审计。
     # 函数用途: 使用正式事务写审计，而非手工拼造 v13 审计文件。
     def seed(home, subject, at, key):
@@ -112,7 +116,9 @@ def audit_home(tmp_path):
     alice.owner_home_dir.mkdir(parents=True)
     seed(alice.owner_home_dir, 'alice-actor', 1700000040, 'alice-job')
     foreign = paths.done / 'request-alice.json'
-    foreign.write_text(json.dumps({'id': 'request-alice', 'owner_id': alice.owner_id, 'status': 'failed'}))
+    foreign_payload = {'id': 'request-alice', 'owner_id': alice.owner_id, 'status': 'failed', 'ended_at': 1700000010}
+    foreign.write_text(json.dumps(foreign_payload))
+    GatewayHistoryIndex(paths).append(foreign_payload)
     os.utime(foreign, (1700000010, 1700000010))
     middleware = AuthMiddleware(AuthManager(), auth_token='synthetic-gateway-credential')
     handler = SimpleNamespace(_auth_middleware=middleware,
@@ -134,6 +140,67 @@ def test_audit_merges_native_sources_and_v13_newest_first(audit_home):
     selected = audit_records(data.base.owner_home_dir, data.base.owner_id, host=data.host,
                              actor='main-actor', since='2023-11-14T22:13:45Z', until='2023-11-14T22:14:00Z')
     assert len(selected['records']) == 1 and selected['records'][0]['source'] == 'v13'
+
+# 来源游标是不透明结构；聚合层只转交，不解析、不重置为首查。
+def test_audit_empty_native_transition_preserves_cursor(audit_home, monkeypatch):
+    data = audit_home
+    queries = []
+
+    def request_page(paths, query):
+        queries.append(query)
+        assert query.limit == 100
+        if len(queries) == 1:
+            assert query.cursor == ''
+            return {'available': True, 'entries': [], 'scanned': 0, 'unreadable': 0,
+                    'next_cursor': 'synthetic-transition', 'truncated': True}
+        assert query.cursor == 'synthetic-transition'
+        return GatewayHistoryIndex(paths).audit_page(replace(query, cursor=''))
+
+    monkeypatch.setattr(module_w0_audit, 'request_outcome_records', request_page)
+    page = audit_records(data.base.owner_home_dir, data.base.owner_id, host=data.host)
+    assert len(queries) == 2
+    assert page['coverage'] == 'complete' and page['unavailable'] == []
+    assert [row['source'] for row in page['records']] == ['v13', 'request', 'decision']
+
+
+@pytest.mark.parametrize('scanned,unreadable,expected_calls', [(0, 0, 2), (1, 0, 1), (0, 1, 1)])
+def test_audit_native_transition_never_drains_unbounded_pages(audit_home, monkeypatch, scanned, unreadable, expected_calls):
+    calls = []
+
+    def request_page(paths, query):
+        calls.append(query)
+        return {'available': True, 'entries': [], 'scanned': scanned, 'unreadable': unreadable,
+                'next_cursor': 'synthetic-unfinished', 'truncated': True}
+
+    monkeypatch.setattr(module_w0_audit, 'request_outcome_records', request_page)
+    data = audit_home
+    page = audit_records(data.base.owner_home_dir, data.base.owner_id, host=data.host)
+    assert len(calls) == expected_calls and all(query.limit == 100 for query in calls)
+    assert page['coverage'] == 'partial'
+    assert {'source': 'request', 'reason_code': 'SOURCE_PARTIAL'} in page['unavailable']
+    assert any(row['source'] == 'v13' for row in page['records'])
+
+
+# 原生来源只返回一页；超过公开单页上限时必须暴露部分覆盖，不能转成 HOST_NOT_READY 或完整空集。
+def test_audit_native_page_overflow_stays_explicitly_partial(audit_home):
+    data = audit_home
+    template = json.loads(data.request.read_text())
+    history = GatewayHistoryIndex(data.paths)
+    for number in range(101):
+        payload = {**template, 'id': f'bounded-{number:03d}', 'ended_at': 1700000021 + number}
+        request = data.paths.done / (payload['id'] + '.json')
+        request.write_text(json.dumps(payload))
+        os.utime(request, (payload['ended_at'], payload['ended_at']))
+        history.append(payload)
+    page = audit_records(data.base.owner_home_dir, data.base.owner_id, host=data.host, limit=100)
+    assert page['records'] and len(page['records']) <= 100
+    assert page['coverage'] == 'partial'
+    assert {'source': 'request', 'reason_code': 'SOURCE_PARTIAL'} in page['unavailable']
+    assert {'source': 'decision', 'reason_code': 'SOURCE_PARTIAL'} in page['unavailable']
+    assert all(item['reason_code'] != 'HOST_NOT_READY' for item in page['unavailable'])
+    assert all(set(row) == {'record_id', 'at', 'actor', 'action', 'outcome', 'source'} for row in page['records'])
+    assert 'private synthetic content' not in json.dumps(page)
+
 
 # LLM: host 查询只能使用仍有效的原生管理员身份，改坏合成凭据后须立即拒绝跨 owner 读取。
 # 函数用途: 管理员重验来自原生中间件，不接受 actor、对象属性或撤销后的旧身份。
@@ -183,6 +250,8 @@ def test_audit_cursor_hmac_binding_filters_owner_and_revision(audit_home):
 def test_failed_and_unreadable_sources_are_explicit(audit_home, monkeypatch):
     data = audit_home
     bad = data.paths.done / 'bad.json'
+    GatewayHistoryIndex(data.paths).append({'id': 'bad', 'owner_id': data.base.owner_id,
+                                           'status': 'failed', 'ended_at': 1700000020})
     bad.write_text('{bad')
     os.utime(bad, (1700000020, 1700000020))
     page = audit_records(data.base.owner_home_dir, data.base.owner_id, host=data.host)
