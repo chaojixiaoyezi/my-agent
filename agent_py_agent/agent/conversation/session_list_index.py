@@ -142,7 +142,7 @@ class SessionListIndex:
     def _filter_field(self):
         return {"session": "user_id", "session_task": "target_thread_id", "thread": "owner_id"}[self.kind]
 
-    # LLM: 仅在未覆写 _record 的基类/同类子类重建批内复用未变 stamp；覆写 _record 的子类须维护自有引用表。
+    # LLM: 仅在未覆写 _record 的基类/同类子类重建批内复用未变 stamp（session_task 存在 artifact_errors 行时仍走 _record 重读）；覆写 _record 的子类须维护自有引用表。
     # 函数用途: 有界重建期间按文件身份决定仅推进代次还是全量重读。
     def _refresh_entry(self, conn, path: Path, generation: int) -> None:
         if type(self)._record is SessionListIndex._record:
@@ -152,7 +152,12 @@ class SessionListIndex:
                 return
             version = _stamp(path)
             known = conn.execute("SELECT stamp FROM entries WHERE path=?", (relative,)).fetchone()
-            if known is not None and known[0] == version:
+            retry_source = False
+            if self.kind == "session_task":
+                retry_source = conn.execute(
+                    "SELECT 1 FROM artifact_errors WHERE task_path=?", (relative,)
+                ).fetchone() is not None
+            if known is not None and known[0] == version and not retry_source:
                 conn.execute("UPDATE entries SET generation=? WHERE path=?", (generation, relative))
                 return
         self._record(conn, path, generation)
