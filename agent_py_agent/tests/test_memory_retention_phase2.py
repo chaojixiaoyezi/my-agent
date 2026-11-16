@@ -779,3 +779,35 @@ def _trash_tool_manifests(home, service, names):
     assert report.ok and all(action.status == "trashed" for action in moved)
     assert all(not action.path.exists() and action.destination.is_dir() for action in moved)
     return sorted(moved, key=lambda action: str(action.destination))
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_reference_snapshot_distinguishes_pending_from_unreadable(tmp_path, unreadable):
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinScanPending, ReferencePinSnapshot
+    from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionError
+
+    home, _, _ = runtime(tmp_path)
+    ready, calls = [False], []
+
+    def builder(home, roots, errors, *, now):
+        calls.append(True)
+        if unreadable:
+            errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", str(home.owner_retention_json),
+                "PermissionError: source permission denied; not_started; inspect source permissions"))
+        return scan._RetentionPins(Path(home.owner_home_dir), complete=ready[0]), ready[0]
+
+    snapshot = ReferencePinSnapshot(home, (), NOW, builder)
+    errors = []
+    if unreadable:
+        with pytest.raises(OSError) as caught:
+            snapshot.current(errors)
+        assert not isinstance(caught.value, ReferencePinScanPending) and errors
+    else:
+        with pytest.raises(ReferencePinScanPending) as caught:
+            snapshot.current(errors)
+        assert caught.value.code == "MEMORY_RETENTION_PIN_SCAN_PENDING"
+        assert caught.value.side_effects == "not_started" and not errors
+        ready[0] = True
+        assert snapshot.current(errors)[1]
+        assert snapshot.current(errors)[1]
+        assert len(calls) == 2  # 同一snapshot稳定完成后继续复用原结果，不按fact重建。

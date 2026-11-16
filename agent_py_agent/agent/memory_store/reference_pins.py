@@ -696,7 +696,7 @@ class ReferencePinSnapshot:
                 return self.value
             if stable is False and _post_verification_pending(sources):
                 self.pending = (result, dict(sources))
-                raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
+                raise ReferencePinScanPending()
         self.value = None
         _close_source_descriptors(self.contents["fds"])
         self.contents["files"].clear()
@@ -722,6 +722,8 @@ class ReferencePinSnapshot:
         if stable is False and result[1] and _post_verification_pending(sources):
             self.pending = (result, dict(sources))
         if self.value is None:
+            if not errors and (not result[1] or self.pending is not None):
+                raise ReferencePinScanPending()
             raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         return self.value
 
