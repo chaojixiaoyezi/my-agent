@@ -40,7 +40,7 @@ class ProcessOutputCapture:
         self._discarded = {"stdout": 0, "stderr": 0}
         self._source_invalid = {"stdout": False, "stderr": False}
         self._source_decoders = {name: codecs.getincrementaldecoder('utf-8')()
-                                 for name in self._buffers}
+                                 for name in self._buffers} if host_output_redaction is not None else {}
         self._sanitizers = ({name: HostOutputStreamRedactor(
             secret_values=host_output_redaction.snapshot.secret_values) for name in self._buffers}
             if host_output_redaction is not None else {})
@@ -148,7 +148,7 @@ class ProcessOutputCapture:
             self._retain(name, data)
 
     def _check_source_encoding(self, name: str, data: bytes, *, final: bool = False) -> None:
-        if self._source_invalid[name]:
+        if name not in self._source_decoders or self._source_invalid[name]:
             return
         try:
             self._source_decoders[name].decode(data, final=final)
