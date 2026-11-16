@@ -1066,3 +1066,29 @@ def test_f06_after_pause_policy_publication_defers_and_converges(tmp_path, monke
             lingering = scan._PIN_BUILDS.pop(owner, None)
         if lingering is not None:
             lingering.close()
+
+
+@pytest.mark.parametrize("transition", [False, True])
+def test_execution_continuation_loss_restarts_discovery_without_losing_actions(tmp_path, monkeypatch, transition):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    home, service = _runtime(tmp_path)
+    paths = [_thread(home, f"thread-{index:04d}")[1] for index in range(3)]
+    monkeypatch.setattr(budgets.RetentionScanBudget, "default",
+        classmethod(lambda cls, config=None: cls(2, 1000000, float("inf"))))
+    options = {"commit_transition": lambda operation: operation()} if transition else {}
+    for _ in range(256):
+        report = service.apply(now=NOW, **options)
+        if scan._EXECUTION_CURSOR_KEY in report.scan_cursor:
+            break
+    assert report.scan_partial and all(path.exists() for path in paths)
+    assert any(action.status == "not_started" for action in report.actions)
+    # 模拟进程丢失临时执行阶段；持久续点不能把已发现但尚未执行的对象跳过去。
+    with scan._PIN_BUILDS_LOCK:
+        scan._EXECUTION_PLANS.pop(Path(home.owner_home_dir))
+    for _ in range(512):
+        report = service.apply(now=NOW, **options)
+        if not report.scan_partial:
+            break
+    assert not report.scan_partial and report.scan_cursor == {}
+    assert not any(path.exists() for path in paths)

@@ -85,6 +85,8 @@ _PIN_CURSOR_KEY = "pins:projection"
 _PIN_BUILDS = OrderedDict()
 _PIN_BUILDS_LOCK = threading.Lock()
 _CURRENT_PIN_BUILDS = OrderedDict()
+_EXECUTION_CURSOR_KEY = "execution:pending"
+_EXECUTION_PLANS = OrderedDict()
 
 
 # LLM: plan纯读取；预算覆盖引用投影与会话/快照发现，输入游标深复制，错误及策略指纹门保持。
@@ -105,7 +107,9 @@ def build_retention_plan(
         if scan_cursor is None:
             with _PIN_BUILDS_LOCK:
                 resident = _PIN_BUILDS.get(Path(home.owner_home_dir))
-                scan_cursor = deepcopy(resident.context.scan_cursor) if resident is not None else {}
+                execution = _EXECUTION_PLANS.get(Path(home.owner_home_dir))
+                scan_cursor = deepcopy(execution[1].scan_cursor if execution is not None else
+                                       resident.context.scan_cursor if resident is not None else {})
     remaining = max(0.0, scan_budget.deadline - retention_scan_budget.time.monotonic()) if scan_budget is not None else None
     current = _normalize_now(now)
     policy_path = Path(home.owner_retention_json)
@@ -142,6 +146,7 @@ def build_retention_plan(
         scan_cursor=deepcopy(scan_cursor) if scan_budget is not None and isinstance(scan_cursor, dict) else {},
         config=config,
     )
+    context.policy_fingerprint = fingerprint
     context.requested_roots = tuple(dict.fromkeys((*(Path(root).absolute() for root in conversation_roots),
                                                    Path(home.owner_home_dir) / "conversations")))
     # 策略、根发现和游标准备属于固定前奏；只给实际条目扫描保留调用入口剩余的时间，不重置条目/字节账。
@@ -178,6 +183,7 @@ class _RetentionScanContext:
     discovery_actions: list = field(default_factory=list)
     pin_projection: object = None
     requested_roots: tuple[Path, ...] | None = None
+    policy_fingerprint: str = ""
 
     # LLM: 法律保留任务 ID 从已解析策略转成统一集合，供所有扫描器按精确身份复用。
     # 函数用途: 返回禁止清理的任务编号集合。
@@ -189,6 +195,9 @@ class _RetentionScanContext:
 # LLM: 先完成可续引用构建/复核，再执行发现；预算暂停不生成删除动作，执行端仍按原严格来源复核。
 # 函数用途: 按任务保护关系组合会话、候选、运行记录、回收站与过期快照/工具清单的清理动作。
 def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRetentionAction]:
+    resumed = _resume_execution_actions(context)
+    if resumed is not None:
+        return resumed
     protection = None
     pin_errors: list[MemoryRetentionError] = []
     if context.scan_budget is not None:
@@ -243,6 +252,55 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
     )
     actions = [action for action in actions if _reference_action_allowed(protection, action)]
     return actions if _finish_pin_cycle(context) else []
+
+
+
+def _resume_execution_actions(context):
+    """执行未开始的原动作先续办；下一片不能用重新规划抹掉其引用核验进度。"""
+    owner = Path(context.home.owner_home_dir)
+    cursor = context.scan_cursor.get(_EXECUTION_CURSOR_KEY)
+    with _PIN_BUILDS_LOCK:
+        pending = _EXECUTION_PLANS.get(owner)
+        if pending is not None:
+            token, plan, roots, chunk = pending
+            if (cursor != token or plan.policy_fingerprint != context.policy_fingerprint
+                    or roots != context.requested_roots or chunk != getattr(context.config,
+                        "memory_reference_pin_chunk_bytes", reference_pins._PIN_SOURCE_CHUNK_BYTES)):
+                _EXECUTION_PLANS.pop(owner)
+                pending = None
+            else:
+                _EXECUTION_PLANS.move_to_end(owner)
+    if pending is None:
+        if cursor is not None:
+            # 临时阶段被淘汰/进程重启只允许保守重扫，不能把丢掉的待办宣告完成。
+            context.scan_cursor.clear()
+        return None
+    context.scan_cursor = deepcopy(plan.scan_cursor)
+    context.scan_partial = plan.scan_partial
+    context.errors.extend(plan.errors)
+    return list(plan.actions)
+
+
+def retain_execution_actions(home, plan, results, *, roots=(), config=None):
+    """只保留明确未执行及尚未到达的动作；权限、策略和真实目标仍由执行器逐次复核。"""
+    handled = {action.action_id for action in results if action.status != "not_started"}
+    pending = tuple(action for action in plan.actions if action.action_id not in handled)
+    owner = Path(home.owner_home_dir)
+    cursor = deepcopy(plan.scan_cursor)
+    with _PIN_BUILDS_LOCK:
+        previous = _EXECUTION_PLANS.pop(owner, None)
+        if pending:
+            token = previous[0] if previous is not None else secrets.token_hex(16)
+            cursor[_EXECUTION_CURSOR_KEY] = token
+            continuation = replace(plan, actions=pending, scan_cursor=cursor)
+            canonical_roots = tuple(dict.fromkeys((*(Path(root).absolute() for root in roots), owner / "conversations")))
+            _EXECUTION_PLANS[owner] = (token, continuation, canonical_roots, getattr(config,
+                "memory_reference_pin_chunk_bytes", reference_pins._PIN_SOURCE_CHUNK_BYTES))
+            while len(_EXECUTION_PLANS) > _pin_capacity():
+                _EXECUTION_PLANS.popitem(last=False)
+        else:
+            cursor.pop(_EXECUTION_CURSOR_KEY, None)
+    return cursor, bool(pending)
 
 
 def _reference_action_allowed(protection, action):

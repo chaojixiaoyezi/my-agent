@@ -783,7 +783,10 @@ def _trash_tool_manifests(home, service, names):
 
 @pytest.mark.parametrize("unreadable", [False, True])
 def test_reference_snapshot_distinguishes_pending_from_unreadable(tmp_path, unreadable):
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinScanPending, ReferencePinSnapshot
+    from agent_py_agent.agent.memory_store.reference_pins import (
+        ReferencePinScanPending,
+        ReferencePinSnapshot,
+    )
     from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionError
 
     home, _, _ = runtime(tmp_path)

@@ -165,8 +165,8 @@ class MemoryRetentionService:
                 allowed_external_roots=self.conversation_roots,
                 config=self.config,
             )
-            applied = replace(applied, scan_partial=plan.scan_partial or applied.scan_partial, scan_cursor=plan.scan_cursor)
-            budgets.save_scan_cursor(self.home, plan.scan_cursor)
+            applied = replace(applied, scan_partial=plan.scan_partial or applied.scan_partial)
+            budgets.save_scan_cursor(self.home, applied.scan_cursor)
             # 执行期错误 + 被隔离保护的扫描错误一起回执：执行过什么、还护着什么，都要看得见。
             if plan.errors and applied.errors != plan.errors:
                 return replace(applied, errors=(*applied.errors, *plan.errors))

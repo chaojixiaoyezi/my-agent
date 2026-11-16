@@ -145,6 +145,11 @@ def execute_retention_plan(
                 )
             )
         results.append(result)
+    from .retention_scan import retain_execution_actions
+
+    scan_cursor, pending_execution = retain_execution_actions(home, plan, results,
+        roots=allowed_external_roots, config=config)
+    scan_partial |= pending_execution
     for root in (home.owner_tmp_dir, home.owner_cache_dir):
         _prune_empty_ephemeral_dirs(Path(root), now=now.timestamp(), commit_transition=commit_transition)
     report = MemoryRetentionReport(
@@ -154,7 +159,7 @@ def execute_retention_plan(
         policy_fingerprint=plan.policy_fingerprint,
         isolated_errors=plan.isolated_errors,
         scan_partial=scan_partial,
-        scan_cursor=plan.scan_cursor,
+        scan_cursor=scan_cursor,
     )
     _commit_step(lambda: _append_retention_audit(home, report=report, now=now), audit_transition)
     return report
