@@ -961,7 +961,11 @@ def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: 
             code = getattr(exc, 'code', '')
             if isinstance(exc, ValueError) and exc.args == ('MAINTENANCE_FENCE_CONFLICT',):
                 code = 'MAINTENANCE_FENCE_CONFLICT'
+            from ..contracts.diagnostics import redact_diagnostic_text
+
             errors.append({'kind': key, 'error_type': type(exc).__name__, 'error_code': code,
+                           'error_message': redact_diagnostic_text(str(exc))[:1024],
+                           'next_action': '核对该通道原始来源与游标后续扫；副作用未知时禁止原样盲重放。',
                            'side_effects_unknown': True})
             partial = True
             # 失败前可能已消耗额度；未知效果不能视为零并重新分给后续类别。
@@ -1202,6 +1206,14 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         resolve_storage_lane,
         validate_lane_receipt,
     )
+
+    # 基础Home的默认身份元数据可为空；只按原解析器的精确local/main路径补齐，显式冲突仍由下方门拒绝。
+    if isinstance(home, MyAgentHomePaths) and not home.owner_id:
+        from .owner_resolver import home_paths_with_owner, resolve_owner_home
+
+        default_owner = resolve_owner_home(home.root)
+        if home.owner_home_dir == default_owner.home_dir:
+            home = home_paths_with_owner(home, default_owner)
 
     scan_limits = RetentionScanBudget.default(config)
     lane_ms = max(0.0, (scan_limits.deadline - time.monotonic()) * 1000)

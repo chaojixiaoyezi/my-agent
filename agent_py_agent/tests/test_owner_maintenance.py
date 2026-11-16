@@ -695,3 +695,45 @@ def test_started_quota_observation_continues_and_releases_directory_stream(tmp_p
     ledger = quota._read_quota_ledger(home.owner_home_dir)
     assert ledger["reconcile_cursor"]["complete"] is True
     assert all((home.owner_cache_dir / f"keep-{number}").read_text() == "synthetic" for number in range(24))
+
+
+@pytest.mark.parametrize("conflicting_identity", [False, True])
+def test_projection_lanes_bind_default_home_and_reject_explicit_identity_conflict(
+    tmp_path, monkeypatch, conflicting_identity,
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.user_space import owner_maintenance, storage_lanes
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    if conflicting_identity:
+        home = replace(home, owner_id="local/another")
+    called = []
+
+    def resolve(kind, *, projection_only=False):
+        assert projection_only
+        assert kind in storage_lanes.LANE_PROJECTION_BINDINGS
+        def lane(request):
+            called.append(request.home)
+            return {"cursor": {}, "complete": True, "items": 0, "bytes": 0}
+        return lane
+
+    monkeypatch.setattr(storage_lanes, "resolve_storage_lane", resolve)
+    report = owner_maintenance.run_owner_storage_maintenance_slice(
+        home, {}, SimpleNamespace(applied=False, legal_hold=False, load_errors=[]),
+        now=200_000, state_locked=True, include_global_indexes=True,
+    )
+    if conflicting_identity:
+        assert not called
+        assert report["errors"][0]["error_message"] == "CANONICAL_OWNER_SCOPE_REQUIRED"
+        assert report["errors"][0]["side_effects_unknown"] is True
+        assert report["errors"][0]["next_action"]
+    else:
+        assert len(called) == len(storage_lanes.LANE_PROJECTION_BINDINGS)
+        assert all(value.owner_id == "local/main" and value.owner_home_dir == home.owner_home_dir
+                   for value in called)
+        assert not report["errors"]
+        assert report["continuation_pending"] is False
+    assert report["deletion_enabled"] is False

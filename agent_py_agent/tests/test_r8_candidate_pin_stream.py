@@ -51,16 +51,24 @@ def test_pin_readers_keep_only_current_candidate_alive(tmp_path, monkeypatch, co
         return row
     monkeypatch.setattr(candidates, '_parse_candidate_line', parse)
     if consumer == 'slice':
-        def read(source):
-            yield None
-            return source.read_bytes()
-        projection = SimpleNamespace(_read=read)
-        rows = scan._PinProjection._candidate_rows(projection, path)
-        selected = [row['candidate_id'] for row in rows if row is not None]
-        assert len(set(selected)) == 256
+        projection, _context = _projection(tmp_path)
+        projection.contents["pass_token"] = object()
+        from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+        projection.budget = RetentionScanBudget(128, 8 * 1024 * 1024, float("inf"))
+        try:
+            selected = [row['candidate_id'] for row in projection._candidate_rows(path) if row is not None]
+            assert len(set(selected)) == 256
+        finally:
+            projection.close()
     else:
         errors = []
-        pins, complete = scan.current_retention_pins(home, (), errors, now=datetime.now(timezone.utc))
+        from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+        for _ in range(1024):
+            pins, complete = scan.current_retention_pins(home, (), errors, now=datetime.now(timezone.utc),
+                scan_budget=RetentionScanBudget(128, 8 * 1024 * 1024, float("inf")))
+            assert not errors
+            if complete:
+                break
         assert complete and not errors
         assert {'message-0', 'message-255'} <= pins.ids
     assert len(parsed) == 256 and max(peak) <= 3
@@ -73,7 +81,7 @@ def _projection(tmp_path):
     context = Context()
     context.__dict__.update(home=home_paths(tmp_path / 'home'), conversation_roots=(),
         now=datetime.now(timezone.utc), policy=MemoryRetentionPolicy(), config=None,
-        scan_budget=None, discovery_context=None)
+        scan_budget=None, discovery_context=None, requested_roots=None)
     snapshot = scan._PinProjection(context)
     context.pin_projection = snapshot
     return snapshot, context

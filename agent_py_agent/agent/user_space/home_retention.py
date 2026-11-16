@@ -159,6 +159,7 @@ _PRESERVATION_ANCHORS = {
     'process_sessions': 'owner_data_dir', 'legacy_layout': 'owner_home_dir',
     'display_archives': 'owner_workspace_dir', 'conversation_ledgers': 'owner_workspace_dir',
     'asset_auxiliary': 'owner_data_dir', 'session_task_payloads': 'owner_workspace_dir',
+    'task_call_telemetry': 'owner_data_dir', 'thread_index': 'owner_workspace_dir',
     'runtime_history': 'owner_home_dir', 'gateway_history': 'owner_workspace_dir', 'gateway_input_refs': 'owner_workspace_dir', 'usage_sources': 'owner_workspace_dir',
 }
 
