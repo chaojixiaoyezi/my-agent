@@ -1131,10 +1131,18 @@ class _JsonlMemorySearchMixin:
                 _query_vector(self, query, retriever.last_query_vector)
                 self._remember_cached_vectors(docs, retriever, cached)
             by_id = {record.entry_id: record for record in active}
-            keyword = [by_id[entry_id] for entry_id, _score in ranked if entry_id in by_id]
+            order = [entry_id for entry_id, _score in ranked]
+            # 词面臂不设门槛，RRF 却会把只在词面臂靠前、向量臂低于门槛的条目挤出候选；
+            # 按其词面名次补回前 top_k 名，再交给词面优先的 rerank 定序。
+            present = set(order)
+            for position, entry_id in enumerate(list(getattr(retriever, "last_bm25_order", ()))[:top_k]):
+                if entry_id not in present:
+                    order.insert(min(position, len(order)), entry_id)
+                    present.add(entry_id)
+            keyword = [by_id[entry_id] for entry_id in order if entry_id in by_id]
         else:
             keyword = []
-        selected = _rerank_memory_records(keyword, query, top_k)
+        selected = _rerank_memory_records(keyword, query, top_k, retrieval_ordered=True)
         if record_access:
             for record in selected:
                 self._note_access(record.entry_id)
@@ -2512,7 +2520,7 @@ def _rerank_memory_records(
     records: list[MemoryRecord],
     query: str,
     top_k: int,
-    *, lexical=None,
+    *, lexical=None, retrieval_ordered: bool = False,
 ) -> list[MemoryRecord]:
     """Deterministically rank recalled facts without another model call."""
 
@@ -2538,9 +2546,26 @@ def _rerank_memory_records(
                 record,
             )
         )
-    ranked.sort(key=lambda item: item[:4], reverse=True)
+    if not retrieval_ordered:
+        ranked.sort(key=lambda item: item[:4], reverse=True)
+        return _select_diverse_memory_records(
+            [record for _score, _trust, _updated, _rank, record in ranked],
+            top_k,
+        )
+    # 候选已按混合检索相关度排好时，同词面分、同来源先看检索名次再看新旧；否则子串零命中的候选只按新旧排，
+    # 最新写入的无关记忆会压过真正相关的旧偏好。同一显式 subject 的多条事实仍按原口径（词面、来源、新旧）选代表，
+    # 代表只占该组最靠前的检索名次，免得较短的旧版本靠检索名次压过同主题的新版本。
+    ranked.sort(key=lambda item: (item[0], item[1], item[3], item[2]), reverse=True)
+    representative: dict[str, tuple[int, int, float, int, MemoryRecord]] = {}
+    markers: list[str] = []
+    for item in ranked:
+        identity = _memory_subject_identity(item[4])
+        marker = "\x1f".join(identity) if identity[0] else ""
+        markers.append(marker)
+        if marker and (marker not in representative or item[:4] > representative[marker][:4]):
+            representative[marker] = item
     return _select_diverse_memory_records(
-        [record for _score, _trust, _updated, _rank, record in ranked],
+        [representative[marker][4] if marker else item[4] for item, marker in zip(ranked, markers)],
         top_k,
     )
 

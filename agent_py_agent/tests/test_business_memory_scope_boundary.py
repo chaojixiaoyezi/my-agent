@@ -62,7 +62,11 @@ def test_nonbusiness_scope_keeps_existing_project_recall():
     agent = SimpleNamespace(
         _current_run_params=SimpleNamespace(task_id="task-A", task_attributes={})
     )
-    assert _scope_predicate(agent, memory, "")(_record("project", "project:project-B"))
+    # D-9：普通对话兼容并入的其它项目事实仍可召回，但需查询与正文共享词元，无关查询不再带出。
+    related = SimpleNamespace(attributes={"scope_type": "project", "scope_key": "project:project-B"},
+                              kind="fact", content="project-B 的发布计划在周五")
+    assert _scope_predicate(agent, memory, "", "发布计划")(related)
+    assert not _scope_predicate(agent, memory, "", "rust tokenizer benchmark")(related)
 
 
 def test_automatic_recall_receives_frozen_business_scope():

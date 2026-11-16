@@ -45,6 +45,8 @@ class HybridRetriever:
         self.last_retrieval_mode = "none"
         self.last_fallback_reason = ""
         self.last_query_vector = None
+        # 本轮词面臂（BM25）完整命中顺序；只是观察事实，供调用方补回被融合挤出的强词面命中，不参与本类排序。
+        self.last_bm25_order: list[str] = []
 
     # LLM: 排序结果与降级规则不变；只额外记下 last_retrieval_mode/last_fallback_reason，供记忆检索报告如实回给模型。
     # LLM: latency_safe禁网络；缺查询或文档缓存报告bm25_fallback，已有文档仍可参与语义臂。
@@ -64,12 +66,14 @@ class HybridRetriever:
         self.last_retrieval_mode, self.last_fallback_reason = "none", ""
         self.last_fresh_doc_vectors = {}
         self.last_query_vector = None
+        self.last_bm25_order = []
         if not docs:
             return []
         ids = [d[0] for d in docs]
         texts = [d[1] for d in docs]
 
         bm25_order = [ids[i] for i in bm25_rank(query, texts)]
+        self.last_bm25_order = list(bm25_order)
 
         if latency_safe or not embed_missing:
             return self._rank_cached(ids, bm25_order, cached_vectors or {},

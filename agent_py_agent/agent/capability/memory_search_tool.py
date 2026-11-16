@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from ..conversation.host_actor import HostActorError, model_long_term_scope
 from ..memory_store.recall import (
     formal_recall_suppressed,
-    long_term_record_matches_scope,
+    runtime_recall_predicate,
 )
 from ..tooling.models import (
     BaseTool,
@@ -115,7 +115,7 @@ class MemorySearchTool(BaseTool):
         if not query:
             return _error("query 不能为空", "TOOL_INVALID_ARGUMENTS")
         try:
-            predicate = _scope_predicate(self.agent, memory, str(params.get("kind") or "").strip())
+            predicate = _scope_predicate(self.agent, memory, str(params.get("kind") or "").strip(), query)
         except HostActorError as exc:
             return _error(f"{exc} 本次未读取记忆。请在原聊天核对绑定后重新发起检索。", exc.error_code)
         try:
@@ -134,11 +134,11 @@ class MemorySearchTool(BaseTool):
         return ToolHandlerOutcome("memory_search", True, json.dumps(payload, ensure_ascii=False))
 
 
-# LLM: 范围与自动召回同一规则（runtime_long_term_scope）；kind 非空时只留 kind 完全相同的条目，不认别名。
+# LLM: 范围与自动召回同一规则（runtime_long_term_scope + runtime_recall_predicate）；kind 非空时只留 kind 完全相同的条目，不认别名。
 # 函数用途: 生成本次检索的过滤条件（当前 owner 记忆 + 本轮适用范围 + 可选类型）。
-def _scope_predicate(agent: object, memory: object, kind: str):
+def _scope_predicate(agent: object, memory: object, kind: str, query: str = ""):
     scope = model_long_term_scope(agent, memory)
-    return lambda record: long_term_record_matches_scope(record, scope) and (not kind or record.kind == kind)
+    return runtime_recall_predicate(scope, query, kind=kind)
 
 
 # LLM: schema 已限 1..MEMORY_SEARCH_MAX_COUNT；这里再收一次，保证直接调用处理函数时条数也有界。

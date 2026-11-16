@@ -98,7 +98,8 @@ def partition_records(records, max_chars, *, cold_ids=(), pinned_ids=()):
                       or (r.attributes or {}).get("hot_placement") == "pinned")
     active = {r.entry_id: r for r in records if r.entry_id not in cold_ids or r.entry_id in pinned_ids}
     size = sum(len(r.content) for r in active.values())
-    for record in sorted(active.values(), key=lambda r: (float(r.last_accessed_at or 0),
+    # 从未被召回的记录以写入时间计最近使用；按 0 计会让每条新记忆（含用户显式偏好）一写入就先被挤进 cold。
+    for record in sorted(active.values(), key=lambda r: (float(r.last_accessed_at or r.updated_at or r.created_at or 0),
                          float(r.updated_at or 0), r.entry_id)):
         if size <= max_chars:
             break

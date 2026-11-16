@@ -27,6 +27,7 @@ from .recall import (
     long_term_record_matches_scope,
     routed_lesson_records,
     runtime_long_term_scope,
+    runtime_recall_predicate,
 )
 from .retention import (
     RETENTION_SCHEMA_VERSION,
@@ -58,4 +59,5 @@ __all__ = [
     "long_term_record_matches_scope",
     "routed_lesson_records",
     "runtime_long_term_scope",
+    "runtime_recall_predicate",
 ]

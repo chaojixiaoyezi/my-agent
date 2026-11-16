@@ -5,8 +5,8 @@ from __future__ import annotations
 # LLM: Recall 只能消费 active long-term、正式 lesson 和正式 HOT；Candidate/Daily/Ops 不得从这里进入 Prompt。
 # 模块用途: 从运行时结构化字段解析适用范围，并把三个正式来源投影成同一种 MemoryRecord。
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .jsonl import MemoryRecord
@@ -24,6 +24,8 @@ from .lessons import (
 @dataclass(frozen=True)
 class MemoryRecallScope:
     keys: tuple[tuple[str, str], ...]
+    # 普通对话为兼容召回并入的其它 project 范围（keys 的子集，不是本轮上下文自身范围）；不参与相等比较。
+    compat_keys: tuple[tuple[str, str], ...] = field(default=(), compare=False)
 
     # LLM: personal/global 是 owner 内固定范围；其余范围必须由 task/runtime 的结构化字段显式提供。
     # 函数用途: 从 task_id 和 task_attributes 构造本轮精确适用范围。
@@ -114,7 +116,41 @@ def runtime_long_term_scope(
         return scope
     if not project_pairs:
         return scope
-    return MemoryRecallScope(tuple(dict.fromkeys([*scope.keys, *project_pairs])))
+    compat = tuple(pair for pair in dict.fromkeys(project_pairs) if pair not in scope.keys)
+    return MemoryRecallScope(tuple(dict.fromkeys([*scope.keys, *project_pairs])), compat_keys=compat)
+
+
+# LLM: 只收窄、不扩大范围：本轮自身范围照常按 typed key 匹配；普通对话兼容并入的其它项目范围，
+#   只在查询与条目正文/英文关键词至少共享一个非停用词元（与 BM25 同一分词，停用词沿工具检索既有词表）时入选，
+#   免得与查询无关的项目记忆挤进结果。自动召回与只读检索工具共用此判定；kind 非空时只留 kind 完全相同的条目。
+# 函数用途: 生成本轮长期记忆检索的范围判定，兼容并入的项目范围需要查询词面证据。
+def runtime_recall_predicate(scope: MemoryRecallScope, query: str, *,
+                             kind: str = "") -> Callable[[MemoryRecord], bool]:
+    from ..retrieval.lexical import tokenize
+    from ..retrieval.text_vector_cache import index_text
+
+    compat = set(scope.compat_keys)
+    query_tokens: set[str] = set()
+    if compat:
+        from ..tooling.models import CHINESE_LOW_SIGNAL_TOKENS, _english_stopwords
+
+        query_tokens = {token for token in tokenize(str(query or ""))
+                        if token not in _english_stopwords and token not in CHINESE_LOW_SIGNAL_TOKENS}
+
+    # 函数用途: 判断一条正式长期记录是否进入本次检索候选。
+    def matches(record: MemoryRecord) -> bool:
+        if not long_term_record_matches_scope(record, scope) or (kind and record.kind != kind):
+            return False
+        if not compat:
+            return True
+        attributes = record.attributes if isinstance(record.attributes, dict) else {}
+        pair = (str(attributes.get("scope_type") or "").strip().lower(), str(attributes.get("scope_key") or "").strip())
+        if pair not in compat:
+            return True
+        return not query_tokens.isdisjoint(tokenize(index_text(str(getattr(record, "content", "") or ""),
+                                                                record.attributes)))
+
+    return matches
 
 
 # LLM: 只通过 JsonlMemory 有界 generation-aware scope_pairs 读取项目作用域，禁止退回全库扫描。
@@ -379,4 +415,5 @@ __all__ = [
     "hot_memory_records",
     "long_term_record_matches_scope",
     "routed_lesson_records",
+    "runtime_recall_predicate",
 ]
