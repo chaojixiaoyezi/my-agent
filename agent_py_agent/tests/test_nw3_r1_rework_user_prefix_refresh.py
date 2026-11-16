@@ -6,6 +6,7 @@ import errno
 import json
 import logging
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -643,3 +644,167 @@ def test_user_scope_validation_unavailable_preserves_pending_then_healthy_turn_r
     assert refreshed["sections"]["user"]
     assert refreshed["sections"]["agents"] == original["sections"]["agents"]
     assert refreshed["sections"]["soul"] == original["sections"]["soul"]
+
+
+def _advance_epoch(scope: ThreadPersonaScope, transition: str) -> ThreadPersonaScope:
+    if transition == "compact_generation":
+        return replace(scope, compact_generation=scope.compact_generation + 1)
+    if transition == "model_profile_id":
+        return replace(scope, model_profile_id="m2")
+    raise ValueError(f"unsupported transition: {transition}")
+
+
+@pytest.mark.parametrize("transition", ["compact_generation", "model_profile_id"])
+@pytest.mark.parametrize("unavailable_kind", ["io", "security"])
+def test_epoch_transition_with_unavailable_user_read_preserves_pending_and_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transition: str,
+    unavailable_kind: str,
+) -> None:
+    scene = _build_scene(tmp_path, with_agents_source=True)
+    core = _seed_large_user_profile(scene.user_path)
+    thread_id = f"thread-epoch-{transition}-{unavailable_kind}"
+    request = _prompt_request(thread_id=thread_id)
+    _prefix_and_updates(scene.builder, request)
+    snap_path = scene.owner_home / "persona" / "thread_prefix" / f"{thread_id}.json"
+    original = json.loads(snap_path.read_text(encoding="utf-8"))
+
+    report = run_user_profile_dream_if_due(
+        owner_home=scene.owner_home,
+        persona_repository=scene.repo,
+        long_term_store=scene.long_term,
+        config=AgentConfig(),
+        now=datetime(2026, 11, 15, 14, tzinfo=timezone.utc),
+    )
+    assert report["status"] == "consolidated"
+    assert report["expired_thread_prefixes"] == 1
+    assert scene.repo.quota_enforcer.max_bytes == 1024 * 1024 * 1024
+    retained = scene.repo.load("user").content
+    assert len(retained) > PERSONA_UPDATES_MAX_CHARS
+    assert all(line in retained for line in core)
+    pending = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert pending["user_refresh_pending"] is True
+    assert pending["sections"]["user"] == ""
+
+    persona_epoch = _read_persona_epoch(scene.owner_home)
+    assert request.thread_persona is not None
+    next_scope = _advance_epoch(request.thread_persona, transition)
+    request.thread_persona = next_scope
+    expected_epoch = {
+        "compact_generation": next_scope.compact_generation,
+        "model_profile_id": next_scope.model_profile_id,
+        "protocol": list(next_scope.protocol),
+    }
+
+    error_count = 0
+    orig_read_bytes = Path.read_bytes
+    orig_path_for = PersonaRepository.path_for
+
+    def one_user_io_error(path: Path) -> bytes:
+        nonlocal error_count
+        if path == scene.user_path and error_count == 0:
+            error_count += 1
+            raise OSError(errno.EIO, "simulated I/O error")
+        return orig_read_bytes(path)
+
+    def one_user_scope_error(repo: PersonaRepository, target: str) -> Path:
+        nonlocal error_count
+        if repo is scene.repo and target == "user" and error_count == 0:
+            error_count += 1
+            raise PersonaSecurityError("scope validation unavailable")
+        return orig_path_for(repo, target)
+
+    with monkeypatch.context() as patch_context:
+        if unavailable_kind == "io":
+            patch_context.setattr(Path, "read_bytes", one_user_io_error)
+        else:
+            patch_context.setattr(PersonaRepository, "path_for", one_user_scope_error)
+        _prefix_and_updates(scene.builder, request)
+
+    assert error_count == 1
+    after_fault = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert after_fault["epoch"] == expected_epoch
+    assert after_fault["user_refresh_pending"] is True
+    assert after_fault["sections"]["user"] == ""
+    assert _read_persona_epoch(scene.owner_home) == persona_epoch
+    assert after_fault["sections"]["agents"] == original["sections"]["agents"]
+    assert after_fault["sections"]["soul"] == original["sections"]["soul"]
+    assert {k: v for k, v in after_fault["agents_source"].items() if k != "snapshot"} == {
+        k: v for k, v in original["agents_source"].items() if k != "snapshot"
+    }
+    assert {
+        k: v for k, v in after_fault["agents_source"]["snapshot"].items() if k != "fetched_at"
+    } == {
+        k: v for k, v in original["agents_source"]["snapshot"].items() if k != "fetched_at"
+    }
+
+    prefix, updates = _prefix_and_updates(scene.builder, request)
+    assert sum(line in prefix for line in core) == 48
+    assert sum(line in updates for line in core) == 0
+    assert "## user" not in updates
+    assert "变化超过尾部预算" not in updates
+
+    refreshed = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert "user_refresh_pending" not in refreshed
+    assert refreshed["epoch"] == expected_epoch
+    assert len(refreshed["sections"]["user"]) > PERSONA_UPDATES_MAX_CHARS
+    assert refreshed["sections"]["agents"] == after_fault["sections"]["agents"]
+    assert refreshed["sections"]["soul"] == after_fault["sections"]["soul"]
+    assert refreshed["agents_source"] == after_fault["agents_source"]
+
+    repeated_prefix, repeated_updates = _prefix_and_updates(scene.builder, request)
+    assert repeated_prefix == prefix
+    assert repeated_updates == updates
+
+
+@pytest.mark.parametrize("transition", ["compact_generation", "model_profile_id"])
+def test_epoch_transition_with_readable_empty_user_consumes_pending(
+    tmp_path: Path,
+    transition: str,
+) -> None:
+    scene = _build_scene(tmp_path, with_agents_source=True)
+    _seed_large_user_profile(scene.user_path, core_count=0, episodic_count=71)
+    thread_id = f"thread-epoch-empty-{transition}"
+    request = _prompt_request(thread_id=thread_id)
+    _prefix_and_updates(scene.builder, request)
+    snap_path = scene.owner_home / "persona" / "thread_prefix" / f"{thread_id}.json"
+    original = json.loads(snap_path.read_text(encoding="utf-8"))
+
+    report = run_user_profile_dream_if_due(
+        owner_home=scene.owner_home,
+        persona_repository=scene.repo,
+        long_term_store=scene.long_term,
+        config=AgentConfig(),
+        now=datetime(2026, 11, 15, 14, tzinfo=timezone.utc),
+    )
+    assert report["status"] == "consolidated"
+    assert report["expired_thread_prefixes"] == 1
+    assert report["entry_count_after"] == 0
+
+    scene.user_path.write_text("", encoding="utf-8")
+    assert scene.repo.load("user").diagnostic.state == "ok"
+    assert json.loads(snap_path.read_text(encoding="utf-8"))["user_refresh_pending"] is True
+
+    assert request.thread_persona is not None
+    next_scope = _advance_epoch(request.thread_persona, transition)
+    request.thread_persona = next_scope
+    expected_epoch = {
+        "compact_generation": next_scope.compact_generation,
+        "model_profile_id": next_scope.model_profile_id,
+        "protocol": list(next_scope.protocol),
+    }
+
+    prefix, updates = _prefix_and_updates(scene.builder, request)
+    refreshed = json.loads(snap_path.read_text(encoding="utf-8"))
+    assert "user_refresh_pending" not in refreshed
+    assert refreshed["epoch"] == expected_epoch
+    assert refreshed["sections"]["user"] == ""
+    assert "## user" not in updates
+    assert "变化超过尾部预算" not in updates
+    assert refreshed["sections"]["agents"] == original["sections"]["agents"]
+    assert refreshed["sections"]["soul"] == original["sections"]["soul"]
+
+    repeated_prefix, repeated_updates = _prefix_and_updates(scene.builder, request)
+    assert repeated_prefix == prefix
+    assert repeated_updates == updates
