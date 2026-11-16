@@ -907,15 +907,21 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                 if monotonic() >= deadline:
                     break
                 report["scanned"] += 1
-                reason, freed, age = _maintain_sent_receipt(self, name, cutoff)
+                diagnostics = {}
+                reason, freed, age = _maintain_sent_receipt(self, name, cutoff, diagnostics=diagnostics)
                 report["oldest_due_age_seconds"] = max(report["oldest_due_age_seconds"], age)
-                if reason == "deleted":
+                if reason in {"deleted", "deleted_cleanup_failed"}:
                     report["deleted"] += 1
                     report["freed_bytes"] += freed
                 else:
                     report["kept"][reason] = report["kept"].get(reason, 0) + 1
-                if reason in {"lock_busy", "io_error", "identity_changed"}:
-                    break
+                # 本项保留不等于整片未访问：推进原窗口，下一轮完整 sweep 再核该项。
+                if reason in {"lock_busy", "io_error", "identity_changed", "deleted_cleanup_failed"}:
+                    report["deferred"] = report.get("deferred", 0) + 1
+                    report.setdefault("deferred_records", []).append({
+                        "record_ref": hashlib.sha256(name.encode()).hexdigest()[:16], "code": "SENT_RECEIPT_" + reason.upper(),
+                        "effect_outcome": "preserved", "next_action": "retry_next_sweep_after_identity_and_lock_recheck",
+                        **diagnostics})
                 self._sent_cursor = name
                 decided += 1
             complete = self._sent_window_complete and decided == len(window)
@@ -1482,6 +1488,7 @@ class GatewayReplyDeliveryWorker(
         self._thread: threading.Thread | None = None
         # 投递循环异常日志的限频状态：只在投递线程内访问，不需要加锁。
         self._loop_error_last = ""
+        self._loop_error_key = ""
         self._loop_error_log_at = 0.0
         self._loop_error_suppressed = 0
 
@@ -1542,7 +1549,15 @@ class GatewayReplyDeliveryWorker(
             now = time.time()
             records = list(self.store.pending())
             self._sync_hub_subscriptions(records)
-            delivered = sum(self._process_record(record, now) for record in records)
+            delivered = 0
+            for record in records:
+                try:
+                    delivered += self._process_record(record, now)
+                except InterruptedError:
+                    raise
+                except Exception as exc:
+                    # 这里只隔离当前规范项；未知外发意图留给原 claim/dispatch 恢复协议核验。
+                    self._log_record_error(record, exc, stage="processing", delivery_outcome="unknown")
             try:
                 self.store.maintain_sent_receipts(now=now)
             except InterruptedError:
@@ -1560,12 +1575,18 @@ class GatewayReplyDeliveryWorker(
             return 0  # 显式宿主投递只由原操作续收，不让 IM watcher 猜测正文或自动重发。
         if self._stop.is_set() or record.next_delivery_at > now:
             return 0
-        claimed = self.store.claim(
-            record,
-            owner=self._claim_owner,
-            now=now,
-            ttl=self._claim_ttl,
-        )
+        try:
+            claimed = self.store.claim(
+                record,
+                owner=self._claim_owner,
+                now=now,
+                ttl=self._claim_ttl,
+            )
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            self._log_record_error(record, exc, stage="claim", delivery_outcome="not_started")
+            return 0
         if claimed is None:
             return 0
         claimed, reconciled = self._reconcile_dispatch(claimed)
@@ -1719,13 +1740,26 @@ class GatewayReplyDeliveryWorker(
             subscription.close()
         self._hub_subscriptions.clear()
 
+    def _log_record_error(self, record: PendingGatewayReply, exc: BaseException, *, stage: str, delivery_outcome: str) -> None:
+        """每项每拍最多一次尝试；复用原日志限频，不保存无界坏项字典或异常正文。"""
+        error_number = getattr(exc, "errno", None)
+        error_number = error_number if type(error_number) is int else None
+        details = (f"code=GATEWAY_REPLY_RECORD_{stage.upper()}_FAILED "
+                   f"record_ref={_record_key(record.stable_id)[:16]} stage={stage} "
+                   f"error_type={type(exc).__name__} errno={error_number} "
+                   f"delivery_outcome={delivery_outcome} storage_outcome=unknown "
+                   "next_action=verify_original_claim_receipt_and_sidecar_before_next_poll; "
+                   "recovery_authority=canonical_claim_dispatch_receipt siblings_continue=true")
+        self._log_loop_error(RuntimeError(details), key=f"record:{stage}:{type(exc).__name__}:{error_number}:{delivery_outcome}")
+
     # LLM: 同类异常按时间窗限频：轮询约每秒一轮，持续失败时不能一秒一条 warning 刷日志；
     #   窗口内相同异常只累计计数，下一次真正记录时先输出被抑制的次数。只在投递线程内调用，不加锁。
     # 函数用途: 记录投递循环的意外异常，并对持续重复的同一异常限频。
-    def _log_loop_error(self, exc: BaseException) -> None:
+    def _log_loop_error(self, exc: BaseException, *, key: str = "") -> None:
         now = time.monotonic()
         message = f"{type(exc).__name__}: {exc}"
-        if message == self._loop_error_last and now - self._loop_error_log_at < _LOOP_ERROR_LOG_INTERVAL_SECONDS:
+        error_key = key or message
+        if error_key == self._loop_error_key and now - self._loop_error_log_at < _LOOP_ERROR_LOG_INTERVAL_SECONDS:
             self._loop_error_suppressed += 1
             return
         if self._loop_error_suppressed:
@@ -1736,6 +1770,7 @@ class GatewayReplyDeliveryWorker(
             )
         _LOGGER.warning("gateway reply delivery loop error: %s", message)
         self._loop_error_last = message
+        self._loop_error_key = error_key
         self._loop_error_log_at = now
         self._loop_error_suppressed = 0
 
@@ -1868,9 +1903,10 @@ def _sent_receipt_window(store: GatewayReplyDeliveryStore, deadline: float) -> l
 
 # LLM: Only the existing pending-lock holder may unlink a receipt and then its own lock name.
 # 函数用途: 核验文件、活跃 pending 和终态后才删除，未知或隔离回执永久保留。
-def _maintain_sent_receipt(store: GatewayReplyDeliveryStore, name: str, cutoff: float) -> tuple[str, int, float]:
+def _maintain_sent_receipt(store: GatewayReplyDeliveryStore, name: str, cutoff: float, *, diagnostics: dict | None = None) -> tuple[str, int, float]:
     assert store.root is not None
     path, pending = store.root / "sent" / name, store.root / "pending" / name
+    deleted_size = None
     try:
         before = path.lstat()
         if not stat.S_ISREG(before.st_mode):
@@ -1907,18 +1943,23 @@ def _maintain_sent_receipt(store: GatewayReplyDeliveryStore, name: str, cutoff: 
             if (final.st_dev, final.st_ino) != (current.st_dev, current.st_ino):
                 return "identity_changed", 0, 0.0
             path.unlink()
+            deleted_size = final.st_size
             cleanup()
             return "deleted", final.st_size, max(0.0, cutoff - sent_at)
-    except BlockingIOError:
-        return "lock_busy", 0, 0.0
     except InterruptedError:
         raise
-    except FileNotFoundError:
-        return "missing", 0, 0.0
-    except (ValueError, UnicodeDecodeError, OverflowError):
-        return "unreadable", 0, 0.0
-    except OSError:
-        return "io_error", 0, 0.0
+    except (OSError, ValueError, UnicodeDecodeError, OverflowError) as exc:
+        if diagnostics is not None:
+            diagnostics.update(error_type=type(exc).__name__, errno=getattr(exc, "errno", None))
+            if deleted_size is not None:
+                diagnostics.update(effect_outcome="receipt_deleted_sidecar_cleanup_failed",
+                                   next_action="verify_sidecar_identity_before_any_cleanup")
+        if deleted_size is not None:
+            return "deleted_cleanup_failed", deleted_size, 0.0
+        reason = ("lock_busy" if isinstance(exc, BlockingIOError) else
+                  "missing" if isinstance(exc, FileNotFoundError) else
+                  "io_error" if isinstance(exc, OSError) else "unreadable")
+        return reason, 0, 0.0
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:

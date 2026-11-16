@@ -147,7 +147,7 @@ def test_pending_unknown_and_quarantined_receipts_are_protected(tmp_path, clock,
     assert all(path.exists() for path in paths)
 
 
-def test_busy_lock_does_not_advance_cursor_past_undecided_receipt(tmp_path, clock, monkeypatch):
+def test_busy_lock_preserves_receipt_and_retries_on_next_sweep(tmp_path, clock, monkeypatch):
     store, _, _ = _delivered(tmp_path / "reply", 1, clock, monkeypatch)
     path = next((store.root / "sent").glob("*.json"))
     held, release = threading.Event(), threading.Event()
@@ -164,13 +164,14 @@ def test_busy_lock_does_not_advance_cursor_past_undecided_receipt(tmp_path, cloc
         clock.now += 8 * 24 * 60 * 60
         report = store.maintain_sent_receipts(now=clock.now, force=True)
         assert report["kept"] == {"lock_busy": 1}
-        assert not report["complete"] and store._sent_cursor == ""
+        assert report["complete"] and store._sent_cursor == ""
+        assert report["deferred"] == 1
         assert path.exists()
     finally:
         release.set()
         thread.join(10)
     assert not thread.is_alive()
-    assert store.maintain_sent_receipts(now=clock.now)["deleted"] == 1
+    assert store.maintain_sent_receipts(now=clock.now, force=True)["deleted"] == 1
 
 
 def test_three_hundred_receipts_progress_128_at_a_time(tmp_path, clock, monkeypatch):
@@ -450,3 +451,137 @@ def test_maintenance_io_error_keeps_delivery_count_and_worker_usable(tmp_path, c
         assert worker.run_once() == 1
         assert store.was_sent(f"after-maintenance-{index}")
     assert len(deliveries) == 3
+
+
+@pytest.mark.parametrize("bad_lock", ["directory", "symlink"])
+def test_bad_claim_sidecar_preserves_item_and_delivers_healthy_siblings(tmp_path, caplog, bad_lock):
+    store = GatewayReplyDeliveryStore(tmp_path / "reply")
+    deliveries = []
+    worker = _worker(store, deliveries)
+    bad = PendingGatewayReply("bad-claim", "fixture", "user", "message-bad", created_at=1)
+    worker.enqueue(bad)
+    for index in range(23):
+        worker.enqueue(PendingGatewayReply(f"healthy-{index}", "fixture", "user", f"m-{index}", created_at=2))
+    lock = store._pending_path(bad.stable_id).with_suffix(".json.lock")
+    lock.unlink()
+    protected = tmp_path / "do-not-follow"
+    protected.write_text("secret-provider-detail")
+    if bad_lock == "directory":
+        lock.mkdir()
+    else:
+        lock.symlink_to(protected)
+    before = store._pending_path(bad.stable_id).read_bytes()
+    assert worker.run_once() == 23
+    for _ in range(2):
+        assert worker.run_once() == 0
+    assert len(deliveries) == 23
+    assert store._pending_path(bad.stable_id).read_bytes() == before
+    assert not store.was_sent(bad.stable_id)
+    assert protected.read_text() == "secret-provider-detail"
+    diagnostics = [item.message for item in caplog.records if 'code=GATEWAY_REPLY_RECORD_CLAIM_FAILED' in item.message]
+    assert len(diagnostics) == 1  # 原限频作用于错误类别，持续坏项每拍只尝试一次。
+    assert 'delivery_outcome=not_started' in diagnostics[0]
+    assert 'storage_outcome=unknown' in diagnostics[0]
+    assert 'secret-provider-detail' not in diagnostics[0] and str(lock) not in diagnostics[0]
+    if bad_lock == "directory":
+        lock.rmdir()
+    else:
+        lock.unlink()
+    assert worker.run_once() == 1
+    assert len(deliveries) == 24
+    assert store.was_sent(bad.stable_id)
+    assert worker.run_once() == 0
+
+
+def test_bad_retirement_sidecar_advances_window_and_retries_next_sweep(tmp_path, clock, monkeypatch):
+    store, _, _ = _delivered(tmp_path / "reply", 130, clock, monkeypatch)
+    paths = sorted((store.root / "sent").glob("*.json"))
+    fault = paths[0]
+    before = fault.read_bytes()
+    lock = (store.root / "pending" / fault.name).with_suffix(".json.lock")
+    lock.mkdir()
+    clock.now += 8 * 24 * 60 * 60
+    first = store.maintain_sent_receipts(now=clock.now, force=True)
+    assert first['scanned'] == 128 and first['deleted'] == 127
+    assert first['kept'] == {'io_error': 1}
+    assert first['deferred_records'][0]['effect_outcome'] == 'preserved'
+    assert first['deferred_records'][0]['error_type'] == 'NoFollowPathError'
+    assert first['deferred_records'][0]['errno'] is None
+    assert store._sent_cursor == paths[127].name
+    second = store.maintain_sent_receipts(now=clock.now, force=True)
+    assert second['deleted'] == 2 and second['complete']
+    assert fault.read_bytes() == before
+    assert list((store.root / 'sent').glob('*.json')) == [fault]
+    again = store.maintain_sent_receipts(now=clock.now, force=True)
+    assert again['scanned'] == 1 and again['deleted'] == 0
+    assert again['kept'] == {'io_error': 1}
+    lock.rmdir()
+    assert store.maintain_sent_receipts(now=clock.now, force=True)['deleted'] == 1
+
+
+@pytest.mark.parametrize("signal", [InterruptedError, KeyboardInterrupt, SystemExit])
+def test_claim_interruption_is_not_isolated_as_bad_item(tmp_path, monkeypatch, signal):
+    store = GatewayReplyDeliveryStore(tmp_path / 'reply')
+    worker = _worker(store, [])
+    worker.enqueue(PendingGatewayReply('stop', 'fixture', 'user', 'm'))
+
+    def stop(*args, **kwargs):
+        raise signal('host cancellation')
+
+    monkeypatch.setattr(store, 'claim', stop)
+    with pytest.raises(signal):
+        worker.run_once()
+    assert store._pending_path('stop').exists()
+    assert not store.was_sent('stop')
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, BlockingIOError, FileNotFoundError])
+def test_post_retirement_sidecar_error_reports_committed_receipt_deletion(tmp_path, clock, monkeypatch, error_type):
+    store, _, _ = _delivered(tmp_path / 'reply', 1, clock, monkeypatch)
+    path = next((store.root / 'sent').glob('*.json'))
+    pending_lock = (store.root / 'pending' / path.name).with_suffix('.json.lock')
+    original = Path.unlink
+
+    def fail_sidecar(candidate, *args, **kwargs):
+        if candidate == pending_lock:
+            raise error_type(13, 'simulated sidecar unlink denied')
+        return original(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', fail_sidecar)
+    clock.now += 8 * 24 * 60 * 60
+    report = store.maintain_sent_receipts(now=clock.now, force=True)
+    assert report['deleted'] == 1
+    assert report['deferred'] == 1
+    assert not path.exists() and pending_lock.exists()
+    failure = report['deferred_records'][0]
+    assert failure['code'] == 'SENT_RECEIPT_DELETED_CLEANUP_FAILED'
+    assert failure['effect_outcome'] == 'receipt_deleted_sidecar_cleanup_failed'
+    assert failure['error_type'] == error_type.__name__ and failure['errno'] == 13
+
+
+def test_post_claim_failure_does_not_abort_sibling_delivery_or_clear_claim(tmp_path, caplog):
+    store = GatewayReplyDeliveryStore(tmp_path / 'reply')
+    deliveries = []
+    bad = PendingGatewayReply('release-failure', 'fixture', 'user', 'm-bad', created_at=1)
+    good = PendingGatewayReply('healthy-after-release', 'fixture', 'user', 'm-good', created_at=2)
+
+    def poll(record):
+        if record.stable_id == bad.stable_id:
+            lock = store._pending_path(record.stable_id).with_suffix('.json.lock')
+            lock.unlink()
+            lock.mkdir()  # 故障注入发生在真实 claim 提交之后、原 release CAS 之前。
+            return None
+        return 'healthy response'
+
+    worker = GatewayReplyDeliveryWorker(store, poll_response=poll,
+        deliver_response=lambda record, text: deliveries.append(record.stable_id) or True)
+    worker.enqueue(bad)
+    worker.enqueue(good)
+    assert worker.run_once() == 1
+    assert deliveries == [good.stable_id]
+    current = PendingGatewayReply.from_dict(json.loads(store._pending_path(bad.stable_id).read_text()))
+    assert current.claim_owner == worker._claim_owner and current.claim_epoch == 1
+    assert not store.was_sent(bad.stable_id)
+    messages = [item.message for item in caplog.records if 'GATEWAY_REPLY_RECORD_PROCESSING_FAILED' in item.message]
+    assert len(messages) == 1 and 'delivery_outcome=unknown' in messages[0]
+    assert 'storage_outcome=unknown' in messages[0]
