@@ -310,6 +310,13 @@ class SkillSearchTool(BaseTool):
             "body": body,
             "bound_methods": _bound_methods(tree, f"skill:{entry.stable_id}"),
         }
+        if entry.frozen_path:
+            # 自学Skill沿self_map同一生命周期读口只读附登记version/revision；普通Skill字节不变，读不到记null。
+            from .skill_learning_versions import frozen_learned_metadata
+            try:
+                payload["lifecycle"] = frozen_learned_metadata(entry)
+            except (OSError, ValueError):
+                payload["lifecycle"] = None
         outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         record_method_read(self.agent, entry)
         from .method_usage import record_read
