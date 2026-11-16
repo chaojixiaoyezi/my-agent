@@ -95,9 +95,9 @@ def _daily_schema(
         "summary": {"type": "string"},
         "actor": {"type": "string"},
         "origin": {"type": "string", "enum": sorted(origins)},
-        "message_refs": {"type": "array", "items": message_reference},
-        "tool_refs": {"type": "array", "items": tool_reference},
-        # 空集合不声明任何产物事实；消息/工具必需来源仍不能由宿主补造。
+        # 缺集合只表示未声明该类证据；origin对应的真实来源及至少一条证据仍由宿主逐项核验。
+        "message_refs": {"type": "array", "items": message_reference, "default": []},
+        "tool_refs": {"type": "array", "items": tool_reference, "default": []},
         "artifact_refs": {"type": "array", "items": artifact_reference, "default": []},
         "decisions": short_strings,
         "lessons": short_strings,
@@ -126,9 +126,10 @@ def _candidate_schema(
         "subject_key": {"type": "string"},
         "scope": _scope_schema(),
         "origin": {"type": "string", "enum": sorted(origins)},
-        "source_message_refs": {"type": "array", "items": message_reference},
-        "source_tool_refs": {"type": "array", "items": tool_reference},
-        "source_artifact_refs": {"type": "array", "items": artifact_reference},
+        # 空集合不贡献来源、目标版本或操作授权；剩余全部真实引用仍由候选证据门完整核验。
+        "source_message_refs": {"type": "array", "items": message_reference, "default": []},
+        "source_tool_refs": {"type": "array", "items": tool_reference, "default": []},
+        "source_artifact_refs": {"type": "array", "items": artifact_reference, "default": []},
         "observed_at": nullable_string,
         "valid_from": nullable_string,
         "valid_until": nullable_string,

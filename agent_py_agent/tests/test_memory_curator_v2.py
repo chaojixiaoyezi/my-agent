@@ -438,7 +438,7 @@ def test_curator_rejects_provider_attempt_to_author_quote(tmp_path: Path) -> Non
     assert service.candidate_service.list() == []
 
 
-@pytest.mark.parametrize('field', ['artifact_refs', 'decisions', 'lessons', 'next_actions'])
+@pytest.mark.parametrize('field', ['tool_refs', 'artifact_refs', 'decisions', 'lessons', 'next_actions'])
 def test_curator_text_fallback_normalizes_declared_empty_daily_collections(tmp_path: Path, field: str) -> None:
     store, thread, message = _conversation(tmp_path)
     output = _valid_output(thread.thread_id, message.message_id, message.content)
@@ -457,7 +457,7 @@ def test_curator_text_fallback_normalizes_declared_empty_daily_collections(tmp_p
     assert result.daily_events == 1 and result.candidates == 1
 
 
-@pytest.mark.parametrize('field', ['artifact_refs', 'decisions', 'lessons', 'next_actions'])
+@pytest.mark.parametrize('field', ['message_refs', 'tool_refs', 'artifact_refs', 'decisions', 'lessons', 'next_actions'])
 @pytest.mark.parametrize('value', [None, {}, ''])
 def test_curator_default_collection_present_bad_type_is_still_rejected(field, value):
     from agent_py_agent.agent.memory_store.curator_models import parse_curator_extraction
@@ -470,7 +470,7 @@ def test_curator_default_collection_present_bad_type_is_still_rejected(field, va
     assert (caught.value.violation_code, caught.value.violation_path) == ('invalid_type', f'$.daily_events[0].{field}')
 
 
-@pytest.mark.parametrize('field', ['event_type', 'summary', 'actor', 'origin', 'message_refs', 'tool_refs'])
+@pytest.mark.parametrize('field', ['event_type', 'summary', 'actor', 'origin'])
 def test_curator_default_collections_do_not_fill_required_daily_fact_or_source(field):
     from agent_py_agent.agent.memory_store.curator_models import parse_curator_extraction
     from agent_py_agent.agent.memory_store.curator_schema import CuratorOutputViolation
@@ -482,12 +482,13 @@ def test_curator_default_collections_do_not_fill_required_daily_fact_or_source(f
     assert (caught.value.violation_code, caught.value.violation_path) == ('missing_property', f'$.daily_events[0].{field}')
 
 
-def test_curator_empty_artifact_default_does_not_supply_daily_evidence(tmp_path):
+def test_curator_empty_reference_defaults_do_not_supply_daily_evidence(tmp_path):
     store, thread, message = _conversation(tmp_path)
     output = _valid_output(thread.thread_id, message.message_id, message.content)
     daily = output['daily_events'][0]
-    daily.pop('artifact_refs')
-    daily.update(origin='model_inferred', message_refs=[], tool_refs=[])
+    for field in ('message_refs', 'tool_refs', 'artifact_refs'):
+        daily.pop(field)
+    daily['origin'] = 'model_inferred'
     backend = _StaticStructuredBackend(output)
     service = _service(tmp_path, backend, store)
     result = service.run(reason='admin')
@@ -496,14 +497,122 @@ def test_curator_empty_artifact_default_does_not_supply_daily_evidence(tmp_path)
     assert any('daily:daily_without_evidence' in item for item in result.warnings)
 
 
+@pytest.mark.parametrize('origin,expected_count', [('tool_verified', 1), ('user_explicit', 0)])
+def test_curator_tool_only_daily_missing_message_refs_requires_origin_evidence(tmp_path, origin, expected_count):
+    store = ConversationStore(tmp_path / 'conversations')
+    audit_id = 'audit-tool-only'
+    audit_dir = tmp_path / 'audit'
+    audit_dir.mkdir()
+    (audit_dir / '1970-01-01.jsonl').write_text(json.dumps({
+        'event_id': audit_id, 'action': 'tool_call', 'created_at': '1970-01-01T00:00:12+00:00',
+        'status': 'ok', 'tool_name': 'read_file', 'tool_call_id': 'call-tool-only',
+        'operation_id': 'operation-tool-only', 'tool_success': True, 'effect_outcome': 'applied',
+    }) + '\n')
+    output = _valid_output('unused-thread', 'unused-message', '合成工具经历')
+    output['daily_events'][0].pop('message_refs')
+    output['daily_events'][0].update(origin=origin, tool_refs=[{'event_id': audit_id}])
+    output.update(candidates=[], processed_message_refs=[], processed_audit_refs=[{'event_id': audit_id}],
+        next_cursor={'per_thread_cursors': [], 'last_audit_event_id': audit_id})
+    backend = _StaticStructuredBackend(output)
+    service = _service(tmp_path, backend, store)
+    result = service.run(reason='admin')
+    assert result.status == 'succeeded' and backend.calls == 1
+    assert result.processed_messages == 0 and result.processed_audit_events == 1
+    assert result.daily_events == expected_count and service.state_store.load().per_thread_cursors == {}
+    if expected_count:
+        [daily] = service.daily_store.list(day='1970-01-01')
+        assert daily.message_refs == () and daily.tool_refs[0]['event_id'] == audit_id
+    else:
+        assert any('daily_user_explicit_without_user_message' in item for item in result.warnings)
+
+
+def test_curator_tool_verified_missing_tool_refs_cannot_borrow_user_evidence(tmp_path):
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    output['daily_events'][0].pop('tool_refs')
+    output['daily_events'][0]['origin'] = 'tool_verified'
+    backend = _StaticStructuredBackend(output)
+    service = _service(tmp_path, backend, store)
+    result = service.run(reason='admin')
+    assert result.status == 'succeeded' and backend.calls == 1
+    assert result.daily_events == 0 and result.candidates == 1
+    assert any('daily_tool_verified_without_tool' in item for item in result.warnings)
+
+
+@pytest.mark.parametrize('field', ['source_message_refs', 'source_tool_refs', 'source_artifact_refs'])
+def test_curator_candidate_missing_reference_collection_keeps_other_verified_source(tmp_path, field):
+    store, thread, message = _conversation(tmp_path)
+    audit_id, operation_id = 'audit-candidate-ref', 'operation-candidate-ref'
+    _record_curator_tool_success(tmp_path, operation_id)
+    audit_dir = tmp_path / 'audit'
+    audit_dir.mkdir()
+    (audit_dir / '1970-01-01.jsonl').write_text(json.dumps({
+        'event_id': audit_id, 'action': 'tool_call', 'created_at': '1970-01-01T00:00:12+00:00',
+        'status': 'ok', 'tool_name': 'read_file', 'tool_call_id': 'call-candidate-ref',
+        'operation_id': operation_id, 'tool_success': True, 'effect_outcome': 'applied',
+        'run_id': 'run-1', 'task_id': 'task-1',
+    }) + '\n')
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    candidate = output['candidates'][0]
+    candidate['source_tool_refs'] = [{'event_id': audit_id}]
+    candidate.pop(field)
+    if field == 'source_message_refs':
+        candidate['origin'] = 'tool_verified'
+    output['processed_audit_refs'] = [{'event_id': audit_id}]
+    output['next_cursor']['last_audit_event_id'] = audit_id
+    backend = _StaticStructuredBackend(output)
+    service = _service(tmp_path, backend, store, owner_id='local/test')
+    result = service.run(reason='admin')
+    assert result.status == 'succeeded' and backend.calls == 1 and result.candidates == 1
+    [stored] = service.candidate_service.list()
+    assert getattr(stored, field) == []
+    assert stored.source_message_refs or stored.source_tool_refs
+
+
+@pytest.mark.parametrize('origin,missing,expected', [
+    ('model_inferred', ('source_message_refs', 'source_tool_refs', 'source_artifact_refs'), 'candidate_without_evidence'),
+    ('user_explicit', ('source_message_refs',), 'candidate_user_explicit_without_quote'),
+    ('tool_verified', ('source_tool_refs',), 'candidate_tool_verified_without_tool'),
+])
+def test_curator_candidate_empty_reference_defaults_never_supply_required_evidence(tmp_path, origin, missing, expected):
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    candidate = output['candidates'][0]
+    candidate['origin'] = origin
+    for field in missing:
+        candidate.pop(field)
+    backend = _StaticStructuredBackend(output)
+    service = _service(tmp_path, backend, store)
+    result = service.run(reason='admin')
+    assert result.status == 'succeeded' and backend.calls == 1
+    assert result.candidates == 0 and result.daily_events == 1 and not service.candidate_service.list()
+    assert any(expected in item for item in result.warnings)
+
+
+@pytest.mark.parametrize('field', ['source_message_refs', 'source_tool_refs', 'source_artifact_refs'])
+def test_curator_candidate_present_null_reference_collection_is_not_defaulted(field):
+    from agent_py_agent.agent.memory_store.curator_models import parse_curator_extraction
+    from agent_py_agent.agent.memory_store.curator_schema import CuratorOutputViolation
+
+    output = _valid_output('thread-test', 'message-test', '合成消息')
+    output['candidates'][0][field] = None
+    with pytest.raises(CuratorOutputViolation) as caught:
+        parse_curator_extraction(json.dumps(output))
+    assert (caught.value.violation_code, caught.value.violation_path) == ('invalid_type', f'$.candidates[0].{field}')
+
+
 def test_curator_host_defaults_are_explicit_and_not_sent_to_provider():
     host = curator_response_schema(include_host_defaults=True)
     wire = curator_response_schema()
     daily = host['properties']['daily_events']['items']
     assert {key for key, value in daily['properties'].items() if 'default' in value} == {
-        'artifact_refs', 'decisions', 'lessons', 'next_actions',
+        'message_refs', 'tool_refs', 'artifact_refs', 'decisions', 'lessons', 'next_actions',
     }
     assert all(value['default'] == [] for value in daily['properties'].values() if 'default' in value)
+    candidate = host['properties']['candidates']['items']
+    assert {key for key, value in candidate['properties'].items() if 'default' in value} == {
+        'source_message_refs', 'source_tool_refs', 'source_artifact_refs',
+    }
     assert '"default"' not in json.dumps(wire)
     assert wire['properties']['daily_events']['items']['required'] == daily['required']
 
