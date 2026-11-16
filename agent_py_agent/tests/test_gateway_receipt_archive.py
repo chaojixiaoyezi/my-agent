@@ -245,3 +245,260 @@ def test_default_maintenance_small_quota_budget_reports_partial(tmp_path):
     assert state['maintenance_partial'] is True
     assert state['storage_maintenance']['continuation_pending'] is True
     assert state['storage_maintenance']['cursors']['cache_tmp_trash']['complete'] is False
+
+
+def _write_oversized_chunk(chunk_path, target_bytes: int) -> int:
+    line = b'{"kind":"progress","text":"' + b'x' * 2000 + b'"}\n'
+    repeats = target_bytes // len(line) + 1
+    with chunk_path.open('wb') as handle:
+        handle.write(line * repeats)
+    return chunk_path.stat().st_size
+
+
+def test_gateway_receipt_archive_defers_oversized_chunk_and_seals_followers(tmp_path, monkeypatch):
+    import os
+
+    from agent_py_agent.agent.gateway_parts.io import read_json_file
+
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    large_payload, large_response, large_chunk = _settled(paths, 'oversize-first')
+    chunk_bytes = _write_oversized_chunk(large_chunk, 100 * 1024 * 1024)
+    assert chunk_bytes > 100 * 1024 * 1024
+    followers = {f'tail-{idx:04d}': _settled(paths, f'tail-{idx:04d}') for idx in range(20)}
+
+    def ordered_entries(folder):
+        with os.scandir(folder) as stream:
+            rows = sorted(stream, key=lambda entry: (entry.name != 'oversize-first.json', entry.name))
+        yield from rows
+
+    monkeypatch.setattr(archive, '_receipt_scan_entries', ordered_entries)
+    try:
+        report = _sealer()(paths, before=100, max_entries=128, max_ms=5000)
+    finally:
+        for it in archive._RECEIPT_SCANS.values():
+            it.close()
+        archive._RECEIPT_SCANS.clear()
+
+    assert report['complete'] is True
+    assert report['errors'] == []
+    assert report['resume_after'] == ''
+    assert report['sealed_requests'] == 20
+    assert report['deferred_requests'] == [{
+        'request_id': 'oversize-first',
+        'entry': 'oversize-first.json',
+        'path': 'requests/done/oversize-first.chunks.jsonl',
+        'reason': 'source_exceeds_read_limit',
+    }]
+    assert (paths.terminal / 'oversize-first.json').exists()
+    assert (paths.done / 'oversize-first.json').exists()
+    assert (paths.responses / 'oversize-first.json').exists()
+    assert large_chunk.stat().st_size == chunk_bytes
+    assert read_json_file(paths.terminal / 'oversize-first.json') == large_payload
+    assert read_json_file(paths.responses / 'oversize-first.json') == large_response
+    for key, (payload, response, chunk) in followers.items():
+        assert not (paths.terminal / f'{key}.json').exists()
+        assert not chunk.exists()
+        assert archive.gateway_terminal_exists(paths, f'{key}.json')
+        assert read_json_file(paths.terminal / f'{key}.json') == payload
+        assert read_json_file(paths.responses / f'{key}.json') == response
+
+    # 对照：仅将超大流缩回 1 MiB 以内后，下一拍可干净封存该请求。
+    large_chunk.write_bytes(b'{"event":"delta","text":"answer"}\n')
+    followup = _sealer()(paths, before=100, max_entries=128, max_ms=1000)
+    assert followup['complete'] is True
+    assert followup['errors'] == []
+    assert followup['deferred_requests'] == []
+    assert followup['sealed_requests'] == 1
+    assert not large_chunk.exists()
+    assert read_json_file(paths.responses / 'oversize-first.json') == large_response
+
+
+def test_gateway_receipt_archive_defers_oversized_bundle_but_pauses_on_small_byte_budget(tmp_path, monkeypatch):
+    import os
+
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    _settled(paths, 'bundle-big')
+    payload_chunk = b'{"x":"' + b'y' * (archive._RECEIPT_MAX_FILE_BYTES - 16) + b'"}\n'
+    assert len(payload_chunk) <= archive._RECEIPT_MAX_FILE_BYTES
+    paths.failed.mkdir(parents=True, exist_ok=True)
+    for folder in (paths.done, paths.failed, paths.responses):
+        (folder / 'bundle-big.chunks.jsonl').write_bytes(payload_chunk)
+    (paths.failed / 'bundle-big.json').write_bytes(payload_chunk)
+    _settled(paths, 'tail-0')
+
+    def ordered_entries(folder):
+        with os.scandir(folder) as stream:
+            rows = sorted(stream, key=lambda entry: (entry.name != 'bundle-big.json', entry.name))
+        yield from rows
+
+    monkeypatch.setattr(archive, '_receipt_scan_entries', ordered_entries)
+    try:
+        report = _sealer()(paths, before=100, max_entries=16, max_ms=1000)
+    finally:
+        for it in archive._RECEIPT_SCANS.values():
+            it.close()
+        archive._RECEIPT_SCANS.clear()
+
+    assert report['complete'] is True and report['errors'] == []
+    assert report['sealed_requests'] == 1
+    assert [item['request_id'] for item in report['deferred_requests']] == ['bundle-big']
+    assert report['deferred_requests'][0]['reason'] == 'bundle_exceeds_segment_budget'
+    assert (paths.terminal / 'bundle-big.json').exists()
+    assert not (paths.terminal / 'tail-0.json').exists()
+
+    # 小于单条正常记录的 slice max_bytes 属于预算耗尽，不应错当成 source deferral 跳过。
+    small_paths = gateway_paths_from_root(tmp_path / 'gateway-small')
+    _settled(small_paths, 'ordinary-small')
+    paused = _sealer()(small_paths, before=100, max_entries=16, max_bytes=100, max_ms=1000)
+    assert paused['complete'] is False
+    assert paused['sealed_requests'] == 0
+    assert paused['deferred_requests'] == []
+    assert (small_paths.terminal / 'ordinary-small.json').exists()
+
+
+@pytest.mark.parametrize('protection', ['young', 'settlement', 'processing', 'unknown'])
+def test_gateway_receipt_archive_protects_oversized_unsettled_or_active(tmp_path, protection):
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    _, _, chunk = _settled(paths, completed_at=1000 if protection == 'young' else 1, pending=protection == 'settlement')
+    _write_oversized_chunk(chunk, archive._RECEIPT_MAX_FILE_BYTES + 4096)
+    if protection == 'processing':
+        write_json_file_atomic(paths.processing / 'request-a.json', {'id': 'request-a', 'status': 'processing'})
+    if protection == 'unknown':
+        row = read_json_file(paths.terminal / 'request-a.json')
+        row['execution_unknown'] = True
+        write_json_file_atomic(paths.terminal / 'request-a.json', row)
+    report = _sealer()(paths, before=100, max_entries=4, max_ms=1000)
+    assert report['complete'] is True and report['errors'] == []
+    assert report['sealed_requests'] == 0 and report['deferred_requests'] == []
+    assert (paths.terminal / 'request-a.json').exists() and chunk.exists()
+
+
+@pytest.mark.parametrize('fail_target', ['segment', 'manifest'])
+def test_gateway_receipt_archive_publish_error_preserves_all_with_deferred_present(tmp_path, monkeypatch, fail_target):
+    import os
+
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    _, _, large_chunk = _settled(paths, 'oversize-first')
+    _write_oversized_chunk(large_chunk, archive._RECEIPT_MAX_FILE_BYTES + 4096)
+    for idx in range(5):
+        _settled(paths, f'tail-{idx:02d}')
+
+    def ordered_entries(folder):
+        with os.scandir(folder) as stream:
+            rows = sorted(stream, key=lambda entry: (entry.name != 'oversize-first.json', entry.name))
+        yield from rows
+
+    original_write = archive.write_bytes_atomic_beneath
+
+    def fail_write(root, parts, data, **kwargs):
+        if fail_target == 'segment' and parts[-1].startswith('receipts-seg-'):
+            raise OSError('simulated segment publish error')
+        if fail_target == 'manifest' and parts[-1] == 'receipts-manifest.json':
+            raise OSError('simulated manifest publish error')
+        return original_write(root, parts, data, **kwargs)
+
+    monkeypatch.setattr(archive, '_receipt_scan_entries', ordered_entries)
+    monkeypatch.setattr(archive, 'write_bytes_atomic_beneath', fail_write)
+    try:
+        report = _sealer()(paths, before=100, max_entries=32, max_ms=1000)
+    finally:
+        for it in archive._RECEIPT_SCANS.values():
+            it.close()
+        archive._RECEIPT_SCANS.clear()
+
+    assert report['complete'] is False
+    assert report['sealed_requests'] == 0
+    assert report['resume_after'] == ''
+    assert len(report['errors']) == 1 and report['errors'][0]['error_type'] == 'OSError'
+    assert report['errors'][0]['side_effects_unknown'] is True
+    assert (paths.terminal / 'oversize-first.json').exists() and large_chunk.exists()
+    for idx in range(5):
+        assert (paths.terminal / f'tail-{idx:02d}.json').exists()
+        assert (paths.responses / f'tail-{idx:02d}.json').exists()
+
+
+def test_owner_maintenance_advances_runtime_phases_past_deferred_oversized_receipt(tmp_path, monkeypatch):
+    import os
+
+    from agent_py_agent.agent.gateway_parts import input_delivery_service as inputs
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import (
+        owner_maintenance_due,
+        run_owner_retention_if_due,
+    )
+    from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    paths = gateway_paths_from_root(runtime_paths_for_agent(None, home.owner_home_dir, home)['gateway_workspace'])
+    _, _, large_chunk = _settled(paths, 'oversize-first')
+    chunk_size = _write_oversized_chunk(large_chunk, archive._RECEIPT_MAX_FILE_BYTES + 4096)
+    for idx in range(20):
+        _settled(paths, f'tail-{idx:04d}')
+
+    prepared = {'id': 'input-a', 'kind': 'ask', 'goal': 'bounded input',
+                'metadata': {'client_input_digest': 'digest-input-a'}}
+    input_row = inputs.GatewayInputReceipt('input-a', 'digest-input-a', 'input-a', 'consumed', prepared,
+        inputs._prepared_payload_digest(prepared), 'input-a', updated_at=1)
+    input_path = inputs.gateway_input_receipt_path(paths, 'input-a')
+    write_json_file_atomic(input_path, input_row.to_dict())
+    outbox_path = paths.root / 'client_outbox' / 'empty.json'
+    write_json_file_atomic(outbox_path, {'schema_version': 'tui_active_input_outbox.v3', 'entries': {}, 'updated_at': 1})
+
+    def ordered_entries(folder):
+        with os.scandir(folder) as stream:
+            rows = sorted(stream, key=lambda entry: (entry.name != 'oversize-first.json', entry.name))
+        yield from rows
+
+    monkeypatch.setattr(archive, '_receipt_scan_entries', ordered_entries)
+    state = {}
+    for tick in range(10):
+        result = run_owner_retention_if_due(home, now=2_000_000 + tick, include_global_indexes=False,
+                                            quota_max_entries=4096, quota_max_ms=1000)
+        assert result.ran
+        state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+        if not state['maintenance_partial']:
+            break
+
+    assert state['maintenance_partial'] is False
+    assert state['storage_maintenance']['errors'] == []
+    assert state['storage_maintenance']['continuation_pending'] is False
+    gt_cursor = state['storage_maintenance']['cursors']['gateway_terminal']
+    assert gt_cursor['complete'] is True
+    assert [item['request_id'] for item in gt_cursor['deferred_requests']] == ['oversize-first']
+    assert not owner_maintenance_due(home.owner_home_dir, now=2_000_100)
+    assert (paths.terminal / 'oversize-first.json').exists() and large_chunk.stat().st_size == chunk_size
+    assert all(not (paths.terminal / f'tail-{idx:04d}.json').exists() for idx in range(20))
+    assert all(archive.gateway_terminal_exists(paths, f'tail-{idx:04d}.json') for idx in range(20))
+    assert not input_path.exists() and (paths.root / 'archive/input_receipts/197001/input-a.json').is_file()
+    assert not outbox_path.exists() and (paths.root / 'archive/client_outbox/197001/empty.json').is_file()
+
+
+def test_owner_maintenance_fatal_publish_error_still_blocks_runtime_phases(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import input_delivery_service as inputs
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    paths = gateway_paths_from_root(runtime_paths_for_agent(None, home.owner_home_dir, home)['gateway_workspace'])
+    _settled(paths, 'ordinary-a')
+    prepared = {'id': 'input-a', 'kind': 'ask', 'goal': 'bounded input',
+                'metadata': {'client_input_digest': 'digest-input-a'}}
+    input_row = inputs.GatewayInputReceipt('input-a', 'digest-input-a', 'input-a', 'consumed', prepared,
+        inputs._prepared_payload_digest(prepared), 'input-a', updated_at=1)
+    input_path = inputs.gateway_input_receipt_path(paths, 'input-a')
+    write_json_file_atomic(input_path, input_row.to_dict())
+    outbox_path = paths.root / 'client_outbox' / 'empty.json'
+    write_json_file_atomic(outbox_path, {'schema_version': 'tui_active_input_outbox.v3', 'entries': {}, 'updated_at': 1})
+
+    monkeypatch.setattr(archive, '_publish_receipt_segment', lambda *a, **kw: (_ for _ in ()).throw(OSError('publish fail')))
+    assert run_owner_retention_if_due(home, now=2_000_000, include_global_indexes=False,
+                                      quota_max_entries=4096, quota_max_ms=1000).ran
+    state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+    gt_cursor = state['storage_maintenance']['cursors']['gateway_terminal']
+    assert gt_cursor['complete'] is False
+    assert gt_cursor['errors'] and gt_cursor['errors'][0]['error_type'] == 'OSError'
+    assert 'runtime_directory' not in gt_cursor
+    assert state['maintenance_partial'] is True
+    assert (paths.terminal / 'ordinary-a.json').exists()
+    assert input_path.exists() and outbox_path.exists()

@@ -236,6 +236,135 @@ def test_owner_lane_cursor_persists_the_resume_anchor(tmp_path, monkeypatch):
     assert 'resume_after' in cursor['gateway_terminal']
 
 
+def test_sealer_resumes_past_oversized_record_without_prefix_rescan_loop(tmp_path, monkeypatch):
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    for idx in range(200):
+        _settled(paths, f'young-{idx:04d}', completed_at=10_000)
+    _, _ = _settled(paths, 'oversize-old')
+    chunk = paths.done / 'oversize-old.chunks.jsonl'
+    line = b'{"kind":"progress","text":"' + b'x' * 2000 + b'"}\n'
+    chunk.write_bytes(line * (archive._RECEIPT_MAX_FILE_BYTES // len(line) + 5))
+    for idx in range(20):
+        _settled(paths, f'tail-{idx:04d}')
+
+    visited = [0]
+
+    def counting_sorted_scan(directory):
+        with os.scandir(directory) as stream:
+            rows = sorted(
+                stream,
+                key=lambda entry: (0 if entry.name.startswith('young-') else (1 if entry.name.startswith('oversize-') else 2), entry.name),
+            )
+        for row in rows:
+            visited[0] += 1
+            yield row
+
+    monkeypatch.setattr(archive, '_receipt_scan_entries', counting_sorted_scan)
+    try:
+        cursor, passes = '', []
+        for _ in range(10):
+            report = archive.seal_gateway_receipts_slice(paths, before=100, max_entries=128, max_ms=1000, resume_after=cursor)
+            passes.append(report)
+            cursor = report['resume_after']
+            if report['complete']:
+                break
+        assert passes[-1]['complete'] is True and passes[-1]['resume_after'] == ''
+        assert all(not row['errors'] for row in passes)
+        assert sum(row['sealed_requests'] for row in passes) == 20
+        assert [item['request_id'] for row in passes for item in row['deferred_requests']] == ['oversize-old']
+        # 单轮全扫目录条目不超过一次全量（含锁旁车），不能在 oversize 处跌回 O(P*N) 重扫前缀。
+        assert visited[0] <= 2 * 225
+
+        # 第二周期重新从头扫描同样一次走完，不会卡死或反复重扫。
+        expected_entries = len(list(paths.terminal.iterdir()))
+        visited[0] = 0
+        cursor, second_cycle = '', []
+        for _ in range(10):
+            report = archive.seal_gateway_receipts_slice(paths, before=100, max_entries=128, max_ms=1000, resume_after=cursor)
+            second_cycle.append(report)
+            cursor = report['resume_after']
+            if report['complete']:
+                break
+        assert second_cycle[-1]['complete'] is True and not any(row['errors'] for row in second_cycle)
+        assert [item['request_id'] for row in second_cycle for item in row['deferred_requests']] == ['oversize-old']
+        assert visited[0] == expected_entries
+
+        # 逐条换出迭代器场景：defer 后 resume_after 必须越过 oversize-old 推进到底。
+        archive._RECEIPT_SCANS.clear()
+        for idx in range(5):
+            _settled(paths, f'tail-evict-{idx:02d}')
+        anchor, evict_reports = '', []
+        for _ in range(250):
+            archive._RECEIPT_SCANS.clear()
+            report = archive.seal_gateway_receipts_slice(paths, before=100, max_entries=1, max_ms=1000, resume_after=anchor)
+            evict_reports.append(report)
+            anchor = report['resume_after']
+            if report['complete']:
+                break
+        assert evict_reports[-1]['complete'] is True and evict_reports[-1]['resume_after'] == ''
+        assert sum(row['sealed_requests'] for row in evict_reports) == 5
+        assert (paths.terminal / 'oversize-old.json').exists() and chunk.exists()
+    finally:
+        for it in archive._RECEIPT_SCANS.values():
+            it.close()
+        archive._RECEIPT_SCANS.clear()
+
+
+def test_owner_lane_persists_deferred_requests_across_sliced_terminal_passes(tmp_path, monkeypatch):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
+
+    original = archive.seal_gateway_receipts_slice
+
+    def sliced(*args, **kwargs):
+        archive._RECEIPT_SCANS.clear()
+        return original(*args, **{**kwargs, 'max_entries': 1, 'max_ms': 1000})
+
+    monkeypatch.setattr(archive, 'seal_gateway_receipts_slice', sliced)
+    monkeypatch.setattr(archive, '_receipt_scan_entries', _sorted_scan)
+    home = ensure_my_agent_home(tmp_path / 'home')
+    paths = gateway_paths_from_root(runtime_paths_for_agent(None, home.owner_home_dir, home)['gateway_workspace'])
+    _settled(paths, 'a-oversize')
+    chunk = paths.done / 'a-oversize.chunks.jsonl'
+    line = b'{"kind":"progress","text":"' + b'x' * 2000 + b'"}\n'
+    chunk.write_bytes(line * (archive._RECEIPT_MAX_FILE_BYTES // len(line) + 5))
+    for idx in range(3):
+        _settled(paths, f'b-tail-{idx}')
+    outbox_path = paths.root / 'client_outbox' / 'empty.json'
+    write_json_file_atomic(outbox_path, {'schema_version': 'tui_active_input_outbox.v3', 'entries': {}, 'updated_at': 1})
+
+    state = {}
+    for tick in range(12):
+        run_owner_retention_if_due(home, now=2_000_000 + tick, include_global_indexes=False,
+                                   quota_max_entries=4096, quota_max_ms=1000)
+        state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+        if not state['maintenance_partial']:
+            break
+
+    assert state['maintenance_partial'] is False
+    gt_cursor = state['storage_maintenance']['cursors']['gateway_terminal']
+    assert gt_cursor['complete'] is True and gt_cursor['errors'] == []
+    assert [item['request_id'] for item in gt_cursor['deferred_requests']] == ['a-oversize']
+    assert all(archive.gateway_terminal_exists(paths, f'b-tail-{idx}.json') for idx in range(3))
+    assert not outbox_path.exists() and (paths.root / 'archive/client_outbox/197001/empty.json').is_file()
+
+    # 下一日周期若大 chunk 已缩小，应自动封存并清空 deferred_requests。
+    chunk.write_bytes(b'{"kind":"progress","text":"small"}\n')
+    for tick in range(8):
+        result = run_owner_retention_if_due(home, now=2_086_401 + tick, include_global_indexes=False,
+                                            quota_max_entries=4096, quota_max_ms=1000)
+        if not result.ran:
+            break
+        state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+        if not state['maintenance_partial']:
+            break
+    assert state['maintenance_partial'] is False
+    assert state['storage_maintenance']['cursors']['gateway_terminal']['deferred_requests'] == []
+    assert not (paths.terminal / 'a-oversize.json').exists()
+    assert archive.gateway_terminal_exists(paths, 'a-oversize.json')
+
+
 # 函数用途: 带本机凭据发一次本机GET并解析JSON。
 def _get(port, path, credential):
     connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
