@@ -128,7 +128,7 @@ def send_gateway_draft(service: object, pending: object, text: str, *, final: bo
     from ..delivery.service import ChannelDeliveryContext as DeliveryContext
 
     context = DeliveryContext(channel=pending.channel, target=pending.user_id, mode="reply",
-        reply_to=pending.message_id, request_id=pending.request_id,
+        reply_to=pending.message_id, request_id=pending.request_id, target_turn_id=pending.target_turn_id,
         idempotency_key=str(pending.dispatch.get("message_key") or ""),
         reply_policy=pending.reply_policy, provider_thread_id=pending.provider_thread_id,
         root_id=pending.root_id, parent_id=pending.parent_id)

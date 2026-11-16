@@ -60,7 +60,7 @@ def test_periodic_worker_retention_and_replay_match_cold_restart(tmp_path, clock
     store, worker, deliveries = _delivered(tmp_path / "reply", 1, clock, monkeypatch)
     path = next((store.root / "sent").glob("*.json"))
     lock = (store.root / "pending" / path.name).with_suffix(".json.lock")
-    assert lock.exists()
+    assert not lock.exists()
     clock.now += 8 * 24 * 60 * 60
     entry = _combined(tmp_path / "ingress", worker) if combined else worker
     assert entry.run_once() == 0
@@ -400,7 +400,8 @@ def test_late_old_inode_waiter_cannot_enter_beside_new_pending_lock(tmp_path, cl
     receipt = next((store.root / "sent").glob("*.json"))
     pending = store.root / "pending" / receipt.name
     lock = pending.with_suffix(".json.lock")
-    stale = os.open(lock, os.O_RDWR)
+    # 模拟升级前保留的孤儿 sidecar；新发送已主动清除。
+    stale = json_io._open_private_lock_descriptor(lock)
     clock.now += 8 * 24 * 60 * 60
     assert store.maintain_sent_receipts(now=clock.now)["deleted"] == 1
     assert not lock.exists()

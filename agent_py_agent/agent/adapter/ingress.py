@@ -616,7 +616,7 @@ class GatewayIngressStore:
             cookie = ""
         if not cookie:
             audit_due = time.time() >= float(self._index.get(f"scan_after_{kind}", "0"))
-            if stamp == self._index.get(key) and self._index.get("legacy") != "1" and not audit_due:
+            if stamp == self._index.get(key) and self._index.get("legacy") != "1" and self._index.get("correlation_legacy") != "1" and not audit_due:
                 return
             self._index.set(f"pass_stamp_{kind}", stamp)
         names, position, complete = directory_page(directory, cookie)
@@ -641,6 +641,7 @@ class GatewayIngressStore:
             self._index.set(f"scan_after_{kind}", str(time.time() + 3600))
             if kind == "records":
                 self._index.set("legacy", "0")
+                self._index.set("correlation_legacy", "0")
 
     # LLM: 目录戳仅决定是否需要发现新文件，绝不决定是否可执行消息。
     # 函数用途: 读取目录变化标记，不枚举文件。

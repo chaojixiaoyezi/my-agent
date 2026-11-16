@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from time import monotonic
 
-from ..common.json_io import locked_json_path
+from ..common.json_io import locked_json_path, terminal_json_path
 
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA_VERSION = 8
@@ -156,11 +156,23 @@ def _dispatch_marker(record: PendingGatewayReply, text: str, message: tuple[str,
     }
 
 
+def _correlation_fields(record) -> dict[str, object]:
+    from .protocol import provider_message_reference
+    start, end = record.dispatch.get("started_at"), record.dispatch.get("completed_at")
+    duration = max(0.0, end - start) if type(start) in (int, float) and type(end) in (int, float) else None
+    return {"message_ref": provider_message_reference(record.message_id),
+            "request_ref": provider_message_reference(record.request_id),
+            "target_turn_id": record.target_turn_id,
+            "dispatch_started_at": record.dispatch.get("started_at"),
+            "dispatch_completed_at": end, "dispatch_duration_seconds": duration}
+
+
 # LLM: 只装配原 sent 回执字段，持久化与 epoch CAS 仍由 store 负责，不产生另一份事实源。
 # 函数用途: 集中构造当前逻辑消息的终态回执，避免写盘方法混入字段装配而越过尺寸边界。
 def _terminal_claim_receipt(record: PendingGatewayReply, disposition: str, reason: str) -> dict[str, object]:
     receipt: dict[str, object] = {
         "schema_version": _SCHEMA_VERSION,
+        **_correlation_fields(record),
         "request_id": record.request_id,
         "operation_id": record.operation_id,
         "sent_at": time.time(),
@@ -288,6 +300,7 @@ class PendingGatewayReply:
     provider_thread_id: str = field(default='', kw_only=True)
     root_id: str = field(default='', kw_only=True)
     parent_id: str = field(default='', kw_only=True)
+    target_turn_id: str = field(default='', kw_only=True)
 
     # LLM: watch_kind 是结构化监听阶段；dispatch 身份损坏必须拒绝，不能丢掉外发意图后重新发送。
     # 函数用途: 在持久化或轮询前校验监听阶段、原路由和外发身份。
@@ -369,6 +382,7 @@ class PendingGatewayReply:
             provider_thread_id=str(data.get('provider_thread_id') or ''),
             root_id=str(data.get('root_id') or ''),
             parent_id=str(data.get('parent_id') or ''),
+            target_turn_id=str(data.get('target_turn_id') or ''),
         )
 
     # LLM: Control operations are keyed by their independent operation receipt, never by the target
@@ -699,11 +713,12 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             self._volatile_durable_at.pop(stable_id, None)
             self._ensure_dirs()
             pending_path = self._pending_path(stable_id)
-            with locked_json_path(pending_path):
+            with terminal_json_path(pending_path) as cleanup:
                 _atomic_write_json(
                     self._sent_path(stable_id),
                     {
                         "schema_version": _SCHEMA_VERSION,
+                        **_correlation_fields(record),
                         "request_id": record.request_id,
                         "operation_id": record.operation_id,
                         "sent_at": time.time(),
@@ -712,6 +727,7 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                 self._volatile_durable_at.pop(stable_id, None)
                 self._volatile_durable_at[stable_id] = time.time()
                 pending_path.unlink(missing_ok=True)
+                cleanup()
 
     # LLM: A discard receipt is terminal delivery state for one interrupted request, preventing restart replay.
     # 函数用途: 持久标记中断请求的迟到回复已丢弃，避免重启后再发给用户。
@@ -732,11 +748,12 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             self._volatile_durable_at.pop(stable_id, None)
             self._ensure_dirs()
             pending_path = self._pending_path(stable_id)
-            with locked_json_path(pending_path):
+            with terminal_json_path(pending_path) as cleanup:
                 _atomic_write_json(
                     self._sent_path(stable_id),
                     {
                         "schema_version": _SCHEMA_VERSION,
+                        **_correlation_fields(record),
                         "request_id": record.request_id,
                         "operation_id": record.operation_id,
                         "sent_at": time.time(),
@@ -747,6 +764,7 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                 self._volatile_durable_at.pop(stable_id, None)
                 self._volatile_durable_at[stable_id] = time.time()
                 pending_path.unlink(missing_ok=True)
+                cleanup()
 
     # LLM: 原 sent 回执保留逻辑消息序号和实际 claim epoch；旧 owner/epoch 不能覆盖新的 unknown/sent。
     # 函数用途: 以同一文件 CAS 提交外发终态及其消息身份，成功后删除 pending。
@@ -776,7 +794,7 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                 return True
             self._ensure_dirs()
             pending_path = self._pending_path(stable_id)
-            with locked_json_path(pending_path):
+            with terminal_json_path(pending_path) as cleanup:
                 if self.was_sent(stable_id):
                     return False
                 current = self._read_pending(pending_path) if pending_path.exists() else None
@@ -786,6 +804,7 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                 self._volatile_durable_at.pop(stable_id, None)
                 self._volatile_durable_at[stable_id] = time.time()
                 pending_path.unlink(missing_ok=True)
+                cleanup()
                 self._volatile_sent.add(stable_id)
                 self._volatile_receipts[stable_id] = dict(receipt)
                 return True
@@ -803,6 +822,30 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return None
         return payload if isinstance(payload, dict) else None
+
+    def terminal_receipt_report(self, stable_id: str) -> dict[str, object]:
+        """缺失只代表诊断证据不足，绝不授权再次发送。"""
+        if self.root is None:
+            value = self.terminal_receipt(stable_id)
+        else:
+            from ..common.nofollow_fs import read_bytes_beneath
+            try:
+                raw = read_bytes_beneath(self.root, ('sent', _record_key(stable_id) + '.json'), max_bytes=1024 * 1024)
+                if raw is None:
+                    return {'state': 'missing', 'delivery_outcome': 'unknown', 'next_step': '核对原 provider 回执；禁止仅凭缺失重发'}
+                value = json.loads(raw)
+            except (ValueError, UnicodeError):
+                return {'state': 'malformed', 'delivery_outcome': 'unknown', 'next_step': '核对规范回执格式；禁止盲目重发'}
+            except OSError as exc:
+                return {'state': 'unreadable', 'error_type': type(exc).__name__, 'delivery_outcome': 'unknown',
+                        'next_step': '恢复 spool 可读性后重新核对；禁止盲目重发'}
+        if not isinstance(value, dict):
+            return {'state': 'malformed' if value is not None else 'missing', 'delivery_outcome': 'unknown'}
+        disposition = str(value.get('disposition') or 'sent')
+        stamp = value.get('sent_at')
+        expired = type(stamp) in (int, float) and stamp < time.time() - _SENT_RECEIPT_RETENTION_SECONDS
+        return {'state': 'expired' if expired else disposition if disposition in {'sent', 'discarded'} else 'unknown',
+                'delivery_outcome': disposition if disposition in {'sent', 'discarded'} else 'unknown'}
 
     # LLM: Retry backoff is a CAS transition so a stale failed sender cannot roll back a watcher
     # switch, progress cursor, or newer retry deadline written by another worker.
@@ -1349,7 +1392,10 @@ class _GatewayReplyDispatchWorkerMixin:
                 if committed is None:
                     return None, bool(result)
                 started = committed
-            return started, bool(result)
+            finished = replace(started, dispatch={**started.dispatch, 'completed_at': time.time()})
+            committed = self.store.commit_claim(started, finished, owner=self._claim_owner,
+                                                epoch=started.claim_epoch, release=False)
+            return committed, bool(result)
         except Exception as exc:
             _LOGGER.warning("gateway reply dispatch failed request_id=%s error_type=%s", record.request_id, type(exc).__name__)
             return started, False
@@ -1830,15 +1876,16 @@ def _maintain_sent_receipt(store: GatewayReplyDeliveryStore, name: str, cutoff: 
         if not stat.S_ISREG(before.st_mode):
             return "not_regular", 0, 0.0
         if before.st_mtime >= cutoff:
-            return "young", 0, 0.0
-        with store._lock, locked_json_path(pending, blocking=False):
+            try:
+                pending.with_suffix(pending.suffix + ".lock").lstat()
+            except FileNotFoundError:
+                return "young", 0, 0.0
+        with store._lock, terminal_json_path(pending, blocking=False) as cleanup:
             current = path.lstat()
             if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino) or not stat.S_ISREG(current.st_mode):
                 return "identity_changed", 0, 0.0
             if pending.exists() or pending.is_symlink():
                 return "pending_active", 0, 0.0
-            if current.st_mtime >= cutoff:
-                return "young", 0, 0.0
             if current.st_size > 64 * 1024:
                 return "oversized", 0, 0.0
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -1854,12 +1901,13 @@ def _maintain_sent_receipt(store: GatewayReplyDeliveryStore, name: str, cutoff: 
             stamp = payload.get("sent_at")
             sent_at = stamp if type(stamp) in (int, float) and math.isfinite(stamp) else current.st_mtime
             if sent_at > cutoff:
+                cleanup()
                 return "young", 0, 0.0
             final = path.lstat()
             if (final.st_dev, final.st_ino) != (current.st_dev, current.st_ino):
                 return "identity_changed", 0, 0.0
             path.unlink()
-            pending.with_suffix(pending.suffix + ".lock").unlink(missing_ok=True)
+            cleanup()
             return "deleted", final.st_size, max(0.0, cutoff - sent_at)
     except BlockingIOError:
         return "lock_busy", 0, 0.0
@@ -1908,7 +1956,7 @@ def deliver_host_envelope(service, store, context, envelope, *, reply_policy: st
             component_receipts=tuple(terminal.get('component_receipts') or ()))
     pending = PendingGatewayReply(stable_id, context.channel, context.target, context.reply_to,
         conversation_id=context.conversation_id, watch_kind='host_delivery', created_at=time.time(),
-        reply_policy=reply_policy, progress_draft={'host_payload_sha256': digest})
+        reply_policy=reply_policy, target_turn_id=context.target_turn_id, progress_draft={'host_payload_sha256': digest})
     current, _created = store.put_if_absent(pending)
     if current is None or current.progress_draft.get('host_payload_sha256') != digest:
         return base

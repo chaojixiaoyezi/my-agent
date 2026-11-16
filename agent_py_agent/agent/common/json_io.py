@@ -707,6 +707,34 @@ def _locked_file_path(path: Path, *, blocking: bool = True, birth_commit: Callab
         os.close(descriptor)
 
 
+@contextmanager
+def terminal_json_path(path: Path, *, blocking: bool = True):
+    """终态提交后显式申请清除 sidecar；实际脱链是退出前最后一个受保护动作。"""
+    from ..concurrency.lock_order import category_for_path, ordered_lock
+
+    handle = path_thread_lock(path)
+    requested = []
+    with ordered_lock(category_for_path(path, None), handle.lock, blocking=blocking) as acquired:
+        if not acquired:
+            raise BlockingIOError("共享文件线程锁繁忙")
+        descriptor = _acquire_verified_lock_descriptor(path, blocking=blocking)
+        try:
+            yield lambda: requested.append(True)
+            if requested:
+                lock_path = path.with_name(path.name + ".lock")
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    if _descriptor_matches_lock_path(descriptor, lock_path):
+                        observed = lock_path.lstat()
+                        current = os.fstat(descriptor)
+                        if stat.S_ISREG(observed.st_mode) and (observed.st_dev, observed.st_ino) == (current.st_dev, current.st_ino):
+                            lock_path.unlink()
+        finally:
+            _funlock_descriptor(descriptor)
+            os.close(descriptor)
+
+
 # LLM: 取锁重试循环独立成函数（压平临界区的嵌套）：每轮"打开→取锁→核对身份"；身份不符说明锁文件
 #   被清理器换掉，关闭后重开重试；取锁本身异常时关闭描述符再冒泡；超上限抛 BlockingIOError。
 # LLM: 每轮重开都重新调用原birth_commit；不扩大原5次身份重试、不在callback内flock或校验。

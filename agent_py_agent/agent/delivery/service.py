@@ -335,12 +335,15 @@ class DeliveryService:
             if state is not None and any(not item for item in state.receipts.values()):
                 return 'unknown', 'CHANNEL_SEND_FAILED'
             _LOGGER.warning(
-                "NATIVE_CHANNEL_SEND_OK channel=%s target=***%s content_len=%d attachments=%d mode=%s",
+                "NATIVE_CHANNEL_SEND_OK channel=%s target=***%s content_len=%d attachments=%d mode=%s message_ref=%s request_ref=%s target_turn_id=%s",
                 attempt.context.channel,
                 str(attempt.context.target)[-6:],
                 len(attempt.content),
                 len(attempt.envelope.attachments),
                 attempt.context.mode,
+                hashlib.sha256(attempt.context.reply_to.encode()).hexdigest()[:16] if attempt.context.reply_to else "",
+                hashlib.sha256(attempt.context.request_id.encode()).hexdigest()[:16] if attempt.context.request_id else "",
+                attempt.context.target_turn_id,
             )
             return "sent", ""
         except Exception as exc:

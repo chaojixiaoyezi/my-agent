@@ -274,6 +274,7 @@ class DeliveryContext:
     provider_thread_id: str = field(default="", kw_only=True)
     root_id: str = field(default="", kw_only=True)
     parent_id: str = field(default="", kw_only=True)
+    target_turn_id: str = field(default="", kw_only=True)
 
 
 # LLM: 回复信封只描述用户可见正文与已校验附件，不携带收件人；路由权威必须留在 DeliveryContext。

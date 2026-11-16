@@ -137,6 +137,11 @@ def test_feishu_transport_recovery_is_live_and_stop_remains_lifecycle():
     transport.update(status="healthy", reason_code="FEISHU_WS_CONNECTED")
     assert registry.runtime_snapshot()[0].health.state == "healthy"
     assert registry.runtime_snapshot()[0].state == "healthy_not_bound"
+    diagnostic = registry.runtime_snapshot()[0].to_dict()
+    assert diagnostic['service_health']['state'] == 'healthy'
+    assert diagnostic['binding_scope'] == 'none'
+    assert diagnostic['ready_scope'] == 'current_delivery_context'
+    assert diagnostic['ready'] is False
     adapter._running = False
     assert registry.runtime_snapshot()[0].health.state == "stopped"
 

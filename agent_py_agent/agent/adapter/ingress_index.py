@@ -40,6 +40,17 @@ class IngressIndex:
                 CREATE INDEX IF NOT EXISTS quarantine_expires ON quarantine(expires_at, name);
         """)
         db.execute("INSERT OR IGNORE INTO meta VALUES ('legacy', ?)", ("1" if legacy else "0",))
+        correlation_new = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingress_correlation'").fetchone() is None
+        # 独立的同库查找投影从空表建索引，避免升级时扫描整张历史 ingress 表。
+        db.execute("CREATE TABLE IF NOT EXISTS ingress_correlation (ingress_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, message_ref TEXT NOT NULL, request_id TEXT NOT NULL, request_ref TEXT NOT NULL, target_turn_id TEXT NOT NULL)")
+        for name in ('message_ref', 'request_id', 'request_ref'):
+            db.execute(f"CREATE INDEX IF NOT EXISTS correlation_{name} ON ingress_correlation({name}, ingress_id)")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('correlation_legacy', ?)", ("1" if legacy else "0",))
+        if correlation_new and legacy:
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('correlation_legacy','1')")
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('cookie_records','')")
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('scan_after_records','0')")
+
 
     # LLM: 首次传入legacy；缺meta表默认重建回填责任，每连接一次header探针，显式close合同不变。
     # 函数用途: 以耐久事务打开一个短生命周期连接。
@@ -67,13 +78,20 @@ class IngressIndex:
         with self.connect() as db:
             if record is None:
                 db.execute("DELETE FROM ingress WHERE ingress_id = ?", (ingress_id,))
+                db.execute("DELETE FROM ingress_correlation WHERE ingress_id = ?", (ingress_id,))
             else:
                 due = max(record.created_at, record.next_attempt_at, record.claim_expires_at if record.claim_owner else 0.0)
                 expires = record.updated_at + 7 * 24 * 60 * 60 if record.state == "completed" else None
-                db.execute("INSERT INTO ingress VALUES (?, ?, ?, ?, ?) ON CONFLICT(ingress_id) "
+                db.execute("INSERT INTO ingress(ingress_id,state,created_at,due_at,expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(ingress_id) "
                     "DO UPDATE SET state=excluded.state, created_at=excluded.created_at, "
                     "due_at=excluded.due_at, expires_at=excluded.expires_at",
                     (ingress_id, record.state, record.created_at, due, expires))
+                from .protocol import provider_message_reference
+                submission = record.submission or {}
+                request_id = str(submission.get('request_id') or '')
+                db.execute("INSERT OR REPLACE INTO ingress_correlation(ingress_id,owner_id,message_ref,request_id,request_ref,target_turn_id) VALUES (?,?,?,?,?,?)",
+                    (ingress_id, record.owner_id, provider_message_reference(record.provider_message_id), request_id,
+                     provider_message_reference(request_id), str(submission.get('target_turn_id') or '')))
             if unreadable:
                 db.execute("INSERT OR IGNORE INTO intents VALUES (?)", (ingress_id,))
             else:

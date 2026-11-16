@@ -76,7 +76,7 @@ def _log_feishu_ingress_stage(record: GatewayIngressRecord | None, phase: str, *
     if submission is not None:
         facts.update(request_ref=provider_message_reference(submission.request_id),
                      submission_status=submission.status, submission_ok=submission.ok,
-                     input_state=submission.input_state)
+                     input_state=submission.input_state, target_turn_id=submission.target_turn_id)
     logger.info('feishu_ingress_stage %s', json.dumps(facts, separators=(',', ':')))
 
 
@@ -210,6 +210,7 @@ def _deliver_gateway_message(
         reply_to=msg.message_id,
         progress_handle=handle,
         request_id=request_id,
+        target_turn_id=str(metadata.get('target_turn_id') or ''),
         reply_policy=str(metadata.get('reply_policy') or ''),
         provider_thread_id=str(metadata.get('feishu_thread_id') or ''),
         root_id=str(metadata.get('feishu_root_id') or ''),
@@ -236,7 +237,7 @@ def _pending_gateway_message(pending: PendingGatewayReply) -> IncomingMessage:
         content="",
         message_id=pending.message_id,
         conversation_id=pending.conversation_id,
-        metadata={'reply_policy': pending.reply_policy, 'feishu_chat_type': pending.channel_chat_type,
+        metadata={'target_turn_id': pending.target_turn_id, 'reply_policy': pending.reply_policy, 'feishu_chat_type': pending.channel_chat_type,
             'feishu_chat_id': pending.channel_chat_id, 'feishu_thread_id': pending.provider_thread_id,
             'feishu_root_id': pending.root_id, 'feishu_parent_id': pending.parent_id},
     )
@@ -654,7 +655,7 @@ class _ChannelIngressCoordinator:
     def handoff_reply(self, record: GatewayIngressRecord) -> None:
         submission = _gateway_ingress_submission(record)
         channel_chat_type, channel_chat_id = _gateway_ingress_channel_identity(record)
-        route_facts = {'reply_policy': str(record.metadata.get('reply_policy') or ''),
+        route_facts = {'target_turn_id': submission.target_turn_id, 'reply_policy': str(record.metadata.get('reply_policy') or ''),
             'provider_thread_id': str(record.metadata.get('feishu_thread_id') or ''),
             'root_id': str(record.metadata.get('feishu_root_id') or ''),
             'parent_id': str(record.metadata.get('feishu_parent_id') or '')}
