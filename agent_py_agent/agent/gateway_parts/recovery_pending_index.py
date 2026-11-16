@@ -169,7 +169,9 @@ def _readonly_projection_connection(path, *, blocking, deadline):
                 sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix))
                              for suffix in ("-journal", "-wal", "-shm")}
                 # SQLite ro may create missing WAL sidefiles; never permit that repair here.
-                if sidefiles["-wal"] is not None and sidefiles["-shm"] is None:
+                header = os.pread(descriptor, 20, 0)
+                wal_mode = len(header) >= 20 and header[18:20] == b"\x02\x02"
+                if wal_mode and (sidefiles["-wal"] is None or sidefiles["-shm"] is None):
                     raise ValueError("projection WAL shared memory is unavailable")
                 timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else 5.0
                 db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
