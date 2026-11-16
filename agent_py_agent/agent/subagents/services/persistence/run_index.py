@@ -26,6 +26,7 @@ from ....common.nofollow_fs import (
 from ....common.opaque_id import validate_opaque_id
 from ....common.value_parsing import text_value
 from ....conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+from ....runtime_errors import RecoverableRuntimeError
 from ...model_capabilities import capability_request_requires_parent_resolution
 from ...models import (
     SUBAGENT_ENDED_STATUSES,
@@ -42,7 +43,7 @@ from ..contract_identity import (
 logger = logging.getLogger(__name__)
 
 
-class SubagentRunIndexUnavailable(RuntimeError):
+class SubagentRunIndexUnavailable(RecoverableRuntimeError):
     """索引或候选 canonical 尚不可用，不能当作空的当前集合。"""
 
     error_code = "SUBAGENT_RUN_INDEX_UNAVAILABLE"

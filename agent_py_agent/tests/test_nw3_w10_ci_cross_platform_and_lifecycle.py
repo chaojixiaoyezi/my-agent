@@ -204,6 +204,155 @@ def test_ci10b_probe_returns_false_on_same_claim_stop_and_rejects_mismatched_cla
             source.probe(agent, params)
 
 
+def test_ci10b_noncancelled_closing_claim_raises_outcome_uncertain_on_probe_and_short_scope(worker) -> None:
+    with real_worker_case(worker) as (source, params, agent, claim, _paths, _receipt, _p3):
+        row = read_json_file(claim.path)
+        updated = {key: value for key, value in row.items() if key != "cancel_requested"}
+        updated["turn_phase"] = "closing"
+        write_json_file_atomic(claim.path, updated)
+        with pytest.raises(RequestExecutionOutcomeUncertainError):
+            source.probe(agent, params)
+        with pytest.raises(RequestExecutionOutcomeUncertainError):
+            with gateway_short_transaction("tool_result"):
+                pytest.fail("closing noncancelled short_scope must not enter body")
+
+
+def test_ci2a_execution_threads_snapshot_retries_and_missing_wake_dir(tmp_path, monkeypatch) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.execution_threads import (
+        _verify_lifecycle_children,
+        lifecycle_session_message_origin,
+    )
+
+    home = tmp_path / "owner_home"
+    child_dir = home / "tasks" / "child-1"
+    child_dir.mkdir(parents=True)
+    payload = {
+        "id": "child-1",
+        "owner": "owner-1",
+        "parent_id": "root-1",
+        "root_id": "root-1",
+        "attributes": {
+            "conversation_thread_id": "thr-1",
+            "conversation_request_id": "root-1",
+        },
+    }
+    write_json_file_atomic(child_dir / "task.json", payload)
+
+    receiver = SimpleNamespace(owner_home=str(home), owner_id="owner-1")
+    store = SimpleNamespace(
+        tasks=SimpleNamespace(
+            link_report=lambda _tid, _cid: (SimpleNamespace(task_path=str(child_dir), status="active"), None)
+        ),
+        threads=SimpleNamespace(require=lambda _tid: receiver),
+        storage=SimpleNamespace(wake_handled_dir=home / "missing_wake_handled"),
+    )
+    wake = {
+        "reason": "subagent_done",
+        "source_agent_id": "child-1",
+        "parent_agent_id": "root-1",
+        "root_task_id": "root-1",
+        "metadata": {"conversation_request_id": "root-1"},
+    }
+
+    seen_calls = []
+    real_read_bytes_beneath = nofollow_fs.read_bytes_beneath
+
+    def tracked_read_bytes_beneath(*args, **kwargs):
+        seen_calls.append(kwargs)
+        if kwargs.get("snapshot_retries", 0) > 0 and len(seen_calls) == 1:
+            # 模拟读取与原子替换并发重排；read_bytes_beneath 内部重试应恢复。
+            write_json_file_atomic(child_dir / "task.json", payload)
+        return real_read_bytes_beneath(*args, **kwargs)
+
+    monkeypatch.setattr(nofollow_fs, "read_bytes_beneath", tracked_read_bytes_beneath)
+    _verify_lifecycle_children(store, receiver, "thr-1", "root-1", "root-1", wake)
+    expected_retries = 2 if nofollow_fs._supports_dir_fd() else 0
+    assert seen_calls and seen_calls[0]["snapshot_retries"] == expected_retries
+
+    assert (
+        lifecycle_session_message_origin(
+            store,
+            "thr-1",
+            "root-1",
+            {"root_task_id": "root-1"},
+            reason="subagent_done",
+        )
+        is None
+    )
+    assert json.loads((child_dir / "task.json").read_text(encoding="utf-8"))["id"] == "child-1"
+
+
+def test_ci2a_subagent_run_index_unavailable_recoverable_and_transient_pending_retry(tmp_path) -> None:
+    import time
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.runtime_errors import runtime_error_report
+    from agent_py_agent.agent.subagents.services.persistence.run_index import (
+        SubagentRunIndexUnavailable,
+    )
+    from agent_py_agent.agent.subagents.services.persistence.service import (
+        SubAgentPersistenceService,
+        _list_runs_for_root_report,
+    )
+
+    err = SubagentRunIndexUnavailable("subagent run index has pending canonical commits")
+    report = runtime_error_report(err, context="subagents.load_root_index")
+    assert report["category"] == "recoverable_runtime"
+    assert report["recoverable"] is True
+
+    workspace = tmp_path / "subagents"
+    workspace.mkdir(parents=True)
+    manager = SimpleNamespace(workspace=workspace, creation_guard=nullcontext)
+    service = SubAgentPersistenceService(manager, read_only=False)
+    try:
+        state = {"calls": 0, "ready_checks": 0}
+        real_readiness = service.run_index.readiness
+        real_request_ids = service.run_index.request_ids
+
+        def fake_readiness():
+            state["ready_checks"] += 1
+            if state["calls"] >= 1 and state["ready_checks"] == 2:
+                return {"complete": True, "pending": True}
+            return real_readiness()
+
+        def fake_request_ids(scope_ids, request_key, epoch):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise SubagentRunIndexUnavailable("subagent run index has pending canonical commits")
+            return real_request_ids(scope_ids, request_key, epoch)
+
+        service.run_index.readiness = fake_readiness
+        service.run_index.request_ids = fake_request_ids
+
+        report_ok = _list_runs_for_root_report(service, "root-task-1")
+        assert report_ok.load_errors == []
+        assert state["calls"] == 2
+
+        persistent_calls = {"count": 0}
+
+        def always_pending_request_ids(scope_ids, request_key, epoch):
+            persistent_calls["count"] += 1
+            raise SubagentRunIndexUnavailable("subagent run index has pending canonical commits")
+
+        service.run_index.readiness = lambda: {"complete": True, "pending": True}
+        service.run_index.request_ids = always_pending_request_ids
+        started = time.monotonic()
+        report_fail = _list_runs_for_root_report(service, "root-task-1")
+        elapsed = time.monotonic() - started
+        assert persistent_calls["count"] == 1
+        assert elapsed < 1.0
+        assert len(report_fail.load_errors) == 1
+        assert report_fail.load_errors[0]["category"] == "recoverable_runtime"
+        assert report_fail.load_errors[0]["error_type"] == "SubagentRunIndexUnavailable"
+    finally:
+        if service._run_index_maintenance_thread is not None:
+            service._run_index_maintenance_thread.join(timeout=2)
+
+
 def test_ci10b_foreground_short_scope_preserves_interrupted_only_for_cancelled_same_attempt(worker) -> None:
     with real_worker_case(worker) as (_source, _params, _agent, claim, paths, _receipt, _p3):
         row = read_json_file(claim.path)

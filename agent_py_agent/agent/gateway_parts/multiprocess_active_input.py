@@ -109,16 +109,18 @@ class OriginalPendingTurnInput:
         if deadline is not None and time.monotonic() >= deadline:
             raise self.retry_exhausted(agent)
 
-    # LLM: 原processing/fence/owner/route和同会话claim共同核；probe/append只open，固定finish才可重进自身closing；缺/过期仍unknown，原T/P3不放宽。
+    # LLM: 原processing/fence/owner/route和同会话claim共同核；probe在同attempt显式cancel时可只读退回False，纯closing/finish后仍报unknown；固定finish才可重进自身closing；缺/过期仍unknown，原T/P3不放宽。
     # 函数用途: 只读确认这仍是捕获的同一次前台执行。
-    def _current(self, *, finishing=False):
+    def _current(self, *, finishing=False, allow_cancelled=False):
         payload = target_record(self.claim.path)
         check_worker_transition(self.execution, payload)
         expected = {'schema_version': 'gateway_conversation_claim.v1', 'request_id': self.claim.request_id,
                     'thread_id': self.thread_id, 'task_id': 'gateway:' + self.claim.request_id}
-        phases = {'open', 'closing'} if finishing else {'open'}
+        cancelled = payload.get('cancel_requested') is True
+        allow_closing = finishing or (allow_cancelled and cancelled)
+        phases = {'open', 'closing'} if allow_closing else {'open'}
         if (payload.get('conversation_claim') != expected or payload.get('turn_phase') not in phases
-                or payload.get('cancel_requested') and not finishing):
+                or payload.get('cancel_requested') and not allow_closing):
             raise self.source.rejection('input.transport.target')
         claim = target_record(self.agent.conversation_store.storage.background_claim_path(self.thread_id))
         if (not _claim_is_current(claim, self.thread_id) or claim.get('reason') != 'gateway_foreground_turn'
@@ -130,10 +132,10 @@ class OriginalPendingTurnInput:
     # 函数用途: 只观察自己已发布的输入引用，不扫描共享历史或别的owner回执。
     # LLM: 本次deadline显式贯穿读后与末writer；source先核，资源busy退出全部门再等待，None低层调用不刷新预算。
     # 函数用途: 保持原固定动作及部分事实，不在已过期时开始下一副作用。
-    def _receipts(self, agent, *, finishing=False, deadline=None, abort_on_closing=False):
+    def _receipts(self, agent, *, finishing=False, deadline=None, abort_on_cancel=False):
         self._require_budget(agent, deadline)
-        payload, claim = self._current(finishing=finishing or abort_on_closing)
-        if abort_on_closing and (payload.get('cancel_requested') or payload.get('turn_phase') == 'closing'):
+        payload, claim = self._current(finishing=finishing, allow_cancelled=abort_on_cancel)
+        if abort_on_cancel and payload.get('cancel_requested') is True:
             self._require_budget(agent, deadline)
             return
         self._require_budget(agent, deadline)
@@ -188,7 +190,7 @@ class OriginalPendingTurnInput:
         self._require_budget(agent, deadline)
         self._require_params(params)
         pending = False
-        for receipt in self._receipts(agent, deadline=deadline, abort_on_closing=True):
+        for receipt in self._receipts(agent, deadline=deadline, abort_on_cancel=True):
             row = original_input_guidance(agent.conversation_store, receipt)
             if row is None or row.status == 'pending' and guidance_not_yet_injected(params, [row.entry]):
                 pending = True
