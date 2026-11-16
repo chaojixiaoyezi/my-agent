@@ -43,7 +43,7 @@ from .candidates import (
     CandidateService,
     candidate_retention_eligible,
 )
-from .reference_pins import ReferencePinSnapshot
+from .reference_pins import ReferencePinScanPending, ReferencePinSnapshot
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
     MemoryRetentionAction,
@@ -99,7 +99,8 @@ def execute_retention_plan(
 ) -> MemoryRetentionReport:
     results, errors = _commit_step(lambda: _apply_candidate_phase(candidates, plan, now=now), commit_transition)
     manifest_references = None
-    pin_snapshot = ReferencePinSnapshot(home, allowed_external_roots, now, current_retention_pins, config=config)
+    scan_partial = plan.scan_partial
+    pin_snapshot = ReferencePinSnapshot(home, allowed_external_roots, now, current_retention_pins, config=config, resumable=True)
     for action in plan.actions:
         if action.operation == "candidate_delete":
             continue
@@ -117,6 +118,11 @@ def execute_retention_plan(
         except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                 ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError, RetentionPolicyChangedError):
             raise
+        except ReferencePinScanPending as exc:
+            # 本片没有删除该目标；保留原动作供下一维护轮重新验证，不能伪装失败或空引用。
+            results.append(replace(action, status="not_started", reason=str(exc)))
+            scan_partial = True
+            break
         except Exception as exc:  # noqa: BLE001 - one failed target is reported without hiding later independent targets.
             result = replace(
                 action,
@@ -147,7 +153,7 @@ def execute_retention_plan(
         errors=tuple(errors),
         policy_fingerprint=plan.policy_fingerprint,
         isolated_errors=plan.isolated_errors,
-        scan_partial=plan.scan_partial,
+        scan_partial=scan_partial,
         scan_cursor=plan.scan_cursor,
     )
     _commit_step(lambda: _append_retention_audit(home, report=report, now=now), audit_transition)
@@ -313,7 +319,9 @@ def _apply_action(
                 _audit_parent_current(action.path, trusted_root, parent)
                 write_private_text_file_atomic_unlocked(action.path, content)
         return replace(action, status="compacted" if removed else "state_changed")
-    if action.category in {"daily", "compact", "curator_run", "trash"}:
+    if action.category in {"completed_task", "tool_output", "subagent_scratch"} and not _authority_still_eligible(action):
+        return replace(action, status="state_changed")
+    if action.category in {"daily", "compact", "curator_run", "trash", "conversation", "completed_task", "tool_output", "subagent_scratch"}:
         pin_errors: list[MemoryRetentionError] = []
         pins, complete = (pin_snapshot.current(pin_errors, target=action.path if action.category == "trash" else None) if pin_snapshot is not None else
                           current_retention_pins(home, allowed_external_roots, pin_errors, now=now))
@@ -321,7 +329,11 @@ def _apply_action(
             complete = pins.complete_for(action.path, pin_errors)
         if not complete:
             raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
-        protected = (trash_payload_pinned(pins, action.path, pin_errors) if action.category == "trash"
+        protected = ((action.record_id in pins.ids or action.path.name in pins.ids
+                      or any(pins.paths.overlaps(path.resolve(strict=False))
+                             for path in (action.path, *action.related_paths)))
+                     if action.category in {"conversation", "completed_task", "tool_output", "subagent_scratch"} else
+                     trash_payload_pinned(pins, action.path, pin_errors) if action.category == "trash"
                      else pins.protects(action.path, pin_errors))
         if protected:
             return replace(action, status="state_changed")
@@ -346,7 +358,8 @@ def _apply_action(
     if action.operation == "delete_tree":
         return _delete_tree(action)
     if action.operation == "conversation_trash":
-        return _trash_conversation(home=home, action=action, now=now)
+        return _trash_conversation(home=home, action=action, now=now,
+                                   scan_budget=pin_snapshot.scan_budget if pin_snapshot is not None else None)
     raise ValueError(f"unsupported retention operation: {action.operation}")
 
 
@@ -737,6 +750,7 @@ def _trash_conversation(
     home: object,
     action: MemoryRetentionAction,
     now: datetime,
+    scan_budget=None,
 ) -> MemoryRetentionAction:
     if not action.path.exists():
         return replace(action, status="missing")
@@ -760,6 +774,14 @@ def _trash_conversation(
             or not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(action.path))
         ):
             return replace(action, status="state_changed")
+        if thread.metadata.get("thread_kind") == "scheduled":
+            from ..conversation.thread_read_index import scheduled_thread_terminal_proof
+
+            if scan_budget is not None and scan_budget.exhausted():
+                raise ReferencePinScanPending()
+            proof = scheduled_thread_terminal_proof(home, thread, action.cutoff_timestamp, scan_budget=scan_budget)
+            if proof.get("status") != "settled":
+                return replace(action, status="state_changed")
         # 先拒绝已知不安全的家族目录，避免为外部链接目标创建锁侧车；取得原写锁后再完整复读。
         observation, usage = _conversation_ledger_active_paths(root, thread.thread_id)
         member_errors = []

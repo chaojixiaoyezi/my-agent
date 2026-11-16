@@ -632,14 +632,27 @@ def rebaseline_watched_pin_source(path):
 
 # LLM: 对象仅在一次apply内使用；旧视图必须逐源重核，变化/错误完整重建且保留原complete门，不跨owner缓存。
 # 类用途: 在同阶段复用引用解析结果，保留执行前新引用与坏源的关闭式防线。
+class ReferencePinScanPending(OSError):
+    """本片引用证明未完成，工具主体尚未执行；下一维护片续扫。"""
+
+    code = "MEMORY_RETENTION_PIN_SCAN_PENDING"
+    side_effects = "not_started"
+
+    def __init__(self):
+        super().__init__("MEMORY_RETENTION_PIN_SCAN_PENDING: not_started; continue next maintenance slice")
+
+
 class ReferencePinSnapshot:
     # LLM: 构造校验可选config但不读写文件；块大小只属于本snapshot，待发布pins、原总预算与FD隔离不变。
     # 函数用途: 绑定本次owner和严格扫描器，准备有界热源块缓存。
-    def __init__(self, home, roots, now, builder, *, config=None):
+    def __init__(self, home, roots, now, builder, *, config=None, resumable=False):
         chunk_bytes = getattr(config, "memory_reference_pin_chunk_bytes", _PIN_SOURCE_CHUNK_BYTES)
         if type(chunk_bytes) is not int or chunk_bytes <= 0:
             raise ValueError("invalid_memory_reference_pin_chunk_bytes")
         self.home, self.roots, self.now, self.builder = home, roots, now, builder
+        self.config, self.resumable = config, resumable
+        from .retention_scan_budget import RetentionScanBudget
+        self.scan_budget = RetentionScanBudget.default(config) if resumable else None
         self.sources, self.value = {}, None
         self.pending = None
         self.contents = {"files": {}, "fds": {}, "bytes": 0, "digest_bytes": {}, "verified": {}, "recheck": set(),
@@ -649,6 +662,12 @@ class ReferencePinSnapshot:
     # LLM: 每current重置字节预算、小文件摘要和pass；热源post只认本pass读到的片，已发布视图下一current必须重开内容验证。
     # 函数用途: 在本次引用复核中启用有界热源字节对照。
     def current(self, errors, *, target=None):
+        if self.resumable:
+            result = self.builder(self.home, self.roots, errors, now=self.now, config=self.config,
+                                  scan_budget=self.scan_budget)
+            if not result[1]:
+                raise ReferencePinScanPending()
+            return result
         self.contents["digest_bytes"] = {}
         self.contents["verified"] = {}
         self.contents["recheck"] = set()

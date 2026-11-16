@@ -30,6 +30,40 @@ NOW = datetime(2026, 8, 4, tzinfo=timezone.utc)
 OLD = "2024-01-01T00:00:00+00:00"
 
 
+def _apply_complete(service, *, now):
+    """固定墙钟只消除IO吞吐噪声；保留实际条目/字节切片，有限轮数驱动真实维护收敛。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    actions, errors = {}, {}
+    with pytest.MonkeyPatch.context() as clock:
+        clock.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+        for _ in range(100):
+            result = service.apply(now=now)
+            for action in result.actions:
+                actions[action.action_id] = action
+            for error in result.errors:
+                errors[(error.error_code, error.path, error.message)] = error
+            if not result.scan_partial:
+                return replace(result, actions=tuple(actions.values()), errors=tuple(errors.values()))
+    pytest.fail("有界维护100片后仍未完成；不能把无进展当成正常partial")
+
+
+def _plan_complete(service, *, now):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    with pytest.MonkeyPatch.context() as clock:
+        clock.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+        for _ in range(100):
+            result = service.plan(now=now)
+            if not result.scan_partial:
+                return result
+    pytest.fail("有界只读规划100片后仍未完成")
+
+
 # LLM: 测试向量仅按输入长度确定性生成，不调用模型或网络，不承担正式语义嵌入能力。
 # 类用途: 为硬删除回归提供可重现的本地向量生成器。
 class _Embedder:
@@ -184,7 +218,7 @@ def test_retention_v2_default_policy_has_all_required_periods(tmp_path: Path):
     assert policy["curator_run_days"] == 90
     assert policy["compact_days"] == 365
     assert policy["completed_task_days"] == 365
-    assert service.plan(now=NOW).ok is True
+    assert _plan_complete(service, now=NOW).ok is True
 
 
 # LLM: 同一临时文件树先比较规划前后字节，再执行真实清理；活跃、法律保留及原始 audit 必须保留，不能全停假通过。
@@ -267,7 +301,7 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
     ]
     before = _state(tracked)
 
-    plan = service.plan(now=NOW)
+    plan = _plan_complete(service, now=NOW)
 
     assert plan.ok is True
     assert plan.applied is False
@@ -291,7 +325,7 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
     # 默认条目/字节预算与真实apply保持；默认deadline暂停另由W2的独立行为测试守住。
     with monkeypatch.context() as completion_clock:
         completion_clock.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
-        applied = service.apply(now=NOW)
+        applied = _apply_complete(service, now=NOW)
 
     assert not applied.scan_partial and applied.scan_cursor == {}
     assert applied.ok is True
@@ -324,8 +358,8 @@ def test_global_legal_hold_prevents_every_retention_action(tmp_path: Path):
     old_audit = _old_file(home.owner_audit_dir / "2024-01-01.jsonl", "{}\n")
     _set_policy(home, audit_days=1, legal_hold=True)
 
-    plan = service.plan(now=NOW)
-    applied = service.apply(now=NOW)
+    plan = _plan_complete(service, now=NOW)
+    applied = _apply_complete(service, now=NOW)
 
     assert plan.legal_hold is True
     assert plan.actions == ()
@@ -341,7 +375,7 @@ def test_corrupt_policy_fails_closed_but_single_bad_task_is_isolated(tmp_path: P
     old_audit = _old_file(home.owner_audit_dir / "2024-01-01.jsonl", "{}\n")
     policy = _set_policy(home, audit_days="30")
 
-    invalid_policy = service.apply(now=NOW)
+    invalid_policy = _apply_complete(service, now=NOW)
 
     assert invalid_policy.applied is False
     assert {error.error_code for error in invalid_policy.errors} == {
@@ -357,7 +391,7 @@ def test_corrupt_policy_fails_closed_but_single_bad_task_is_isolated(tmp_path: P
 
     # R4（dev 2026-09-28 裁定）：单棵任务的 state 损坏只保护那一棵，不再连累整份计划——
     # 否则生产上会被少数坏目录永久卡住（真机已 29/29 次整份被拒）。policy 级失败仍整份拒绝（上面那条）。
-    isolated_state = service.apply(now=NOW)
+    isolated_state = _apply_complete(service, now=NOW)
 
     assert isolated_state.applied is True
     assert "MEMORY_RETENTION_TASK_STATE_INVALID" in {
@@ -391,6 +425,8 @@ def test_apply_revalidates_terminal_state_changed_after_plan(
     # LLM: 只在执行接缝前真实改写测试任务状态，随后仍调用原执行器，不替换其状态与指纹复核。
     # 函数用途: 制造任务从已完成变为运行中的规划后竞争。
     def _change_then_execute(**kwargs):
+        if kwargs["plan"].scan_partial:
+            return original(**kwargs)
         state_path.write_text(
             json.dumps(
                 {
@@ -404,7 +440,7 @@ def test_apply_revalidates_terminal_state_changed_after_plan(
         return original(**kwargs)
 
     monkeypatch.setattr(retention_module, "execute_retention_plan", _change_then_execute)
-    result = service.apply(now=NOW)
+    result = _apply_complete(service, now=NOW)
 
     assert result.applied is True
     assert result.ok is False
@@ -424,8 +460,8 @@ def test_nonterminal_task_protects_tool_outputs_even_when_files_are_old(tmp_path
     os.utime(output, (1, 1))
     _set_policy(home, tool_output_days_after_terminal=1)
 
-    plan = service.plan(now=NOW)
-    applied = service.apply(now=NOW)
+    plan = _plan_complete(service, now=NOW)
+    applied = _apply_complete(service, now=NOW)
 
     assert not any(action.category == "tool_output" for action in plan.actions)
     assert applied.ok is True
@@ -548,11 +584,11 @@ def test_retention_cleans_all_old_unpromoted_drafts(tmp_path):
     _home, candidates, _memory, service = _runtime(tmp_path)
     rows, expected = _retention_drafts(candidates)
     before = candidates.path.read_bytes()
-    plan = service.plan(now=NOW)
+    plan = _plan_complete(service, now=NOW)
     assert plan.ok
     assert {action.record_id for action in plan.actions if action.operation == "candidate_delete"} == expected
     assert candidates.path.read_bytes() == before
-    applied = service.apply(now=NOW)
+    applied = _apply_complete(service, now=NOW)
     assert applied.ok and applied.applied
     assert {action.record_id for action in applied.actions if action.status == "deleted"} == expected
     assert {row.candidate_id: row.to_record() for row in candidates.list()} == {
@@ -590,7 +626,7 @@ def test_retention_draft_binding_becomes_superseded_tombstone(tmp_path, status):
                   status_history=[{**row.status_history[-1], "status": status}])
     old = replace(old, learning_source_coverage=initial_source_coverage(old))
     candidates.path.write_text(json.dumps(old.to_record()) + "\n", encoding="utf-8")
-    applied = service.apply(now=NOW)
+    applied = _apply_complete(service, now=NOW)
     if status == "approved":
         assert applied.ok and not applied.actions
         assert candidates.get(row.candidate_id).content == old.content
@@ -614,7 +650,7 @@ def test_retention_draft_change_after_plan_is_preserved(tmp_path):
 
     home, candidates, _memory, service = _runtime(tmp_path)
     rows, _expected = _retention_drafts(candidates)
-    plan = service.plan(now=NOW)
+    plan = _plan_complete(service, now=NOW)
     fresh = [replace(row, updated_at=NOW.isoformat()) for row in rows]
     candidates.path.write_text("".join(json.dumps(row.to_record()) + "\n" for row in fresh), encoding="utf-8")
     before = candidates.path.read_bytes()
@@ -631,7 +667,7 @@ def test_retention_skips_candidate_updated_between_unlocked_read_and_locked_dele
         subject_key="retention.atomic", scope=MemoryScope("personal", "personal"), origin="model_inferred",
         promotion_target="lesson"))
     candidates.path.write_text(json.dumps(replace(row, updated_at=OLD, last_observed_at=OLD).to_record()) + "\n", encoding="utf-8")
-    plan = service.plan(now=NOW)
+    plan = _plan_complete(service, now=NOW)
     assert [action.record_id for action in plan.actions] == [row.candidate_id]
     original = candidates.delete_terminal
     approved_state = []
@@ -644,7 +680,7 @@ def test_retention_skips_candidate_updated_between_unlocked_read_and_locked_dele
         return original(candidate_ids, **kwargs)
 
     monkeypatch.setattr(candidates, "delete_terminal", _approve_before_delete)
-    result = service.apply(now=NOW)
+    result = _apply_complete(service, now=NOW)
     remaining = {item.candidate_id: item for item in candidates.list()}
     assert row.candidate_id in remaining
     assert remaining[row.candidate_id].status == "approved"
@@ -670,7 +706,7 @@ def test_retention_atomic_snapshot_skip_does_not_block_unchanged_candidates(tmp_
         return original(candidate_ids, **kwargs)
 
     monkeypatch.setattr(candidates, "delete_terminal", _approve_one_before_delete)
-    result = service.apply(now=NOW)
+    result = _apply_complete(service, now=NOW)
     statuses = {action.record_id: action.status for action in result.actions}
     assert statuses == {cid: "state_changed" if cid == changed.candidate_id else "deleted" for cid in old_ids}
     assert len(result.actions) == len(old_ids)
@@ -716,7 +752,7 @@ def test_perf_e_cold_candidate_readers_do_not_copy_ledger(tmp_path, monkeypatch,
         elif operation == "retention":
             assert set(candidates.retention_candidates(before=NOW - timedelta(days=30))) == old_ids
         elif operation == "plan":
-            assert service.plan(now=NOW).ok
+            assert _plan_complete(service, now=NOW).ok
         else:
             thread = SimpleNamespace(thread_id="excluded-thread", channel_bindings=[
                 SimpleNamespace(channel_conversation_id="excluded-chat")])
@@ -850,7 +886,7 @@ def test_perf_e_retention_preserves_fresh_deleted_file_ancestors(tmp_path, categ
     root = home.owner_tmp_dir if category == "tmp" else home.owner_cache_dir
     old = _old_file(root / "old-parent" / "child" / "old.tmp")
     _set_policy(home, tmp_days=1, cache_days=1)
-    assert service.apply(now=NOW).applied
+    assert _apply_complete(service, now=NOW).applied
     assert not old.exists()
     assert old.parent.is_dir() and list(old.parent.iterdir()) == []
     assert (root / "old-parent").is_dir()
@@ -874,7 +910,7 @@ def test_perf_e_sweep_preserves_old_empty_dirs_beneath_fresh_ancestor(tmp_path, 
         os.utime(directory, (1, 1))
     fresh = (outer, middle)[fresh_depth]
     os.utime(fresh, (NOW.timestamp(), NOW.timestamp()))
-    report = service.apply(now=NOW)
+    report = _apply_complete(service, now=NOW)
     assert report.applied and report.ok
     assert all(directory.is_dir() for directory in (root, outer, middle, target))
     assert not sibling.exists()
@@ -911,7 +947,7 @@ def test_perf_e_retention_prunes_only_aged_empty_dirs_without_following_links(tm
     (external / "old-empty").mkdir(parents=True)
     os.utime(external / "old-empty", (1, 1))
     (root / "link").symlink_to(external, target_is_directory=True)
-    assert service.apply(now=NOW).applied
+    assert _apply_complete(service, now=NOW).applied
     assert not stale.exists()
     assert all(path.exists() for path in (root, fresh, occupied, external / "old-empty", root / "link"))
 
@@ -924,7 +960,7 @@ def test_perf_e_legal_hold_does_not_prune_empty_directories(tmp_path):
     stale.mkdir()
     os.utime(stale, (1, 1))
     _set_policy(home, legal_hold=True)
-    assert not service.apply(now=NOW).applied
+    assert not _apply_complete(service, now=NOW).applied
     assert stale.is_dir()
 
 

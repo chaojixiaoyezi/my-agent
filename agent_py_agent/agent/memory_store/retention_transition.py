@@ -46,7 +46,7 @@ def apply_with_transition(service, plan, now, transition, *, scan_cursor=None):
     applied = execute_retention_plan(home=service.home, candidates=service.candidates, plan=executable,
         now=now, allowed_external_roots=service.conversation_roots, commit_transition=commit,
         audit_transition=commit, config=getattr(service, "config", None))
-    applied = replace(applied, scan_partial=plan.scan_partial, scan_cursor=plan.scan_cursor)
+    applied = replace(applied, scan_partial=plan.scan_partial or applied.scan_partial, scan_cursor=plan.scan_cursor)
     if scan_cursor is not None:
         commit(lambda: budgets.save_scan_cursor(service.home, scan_cursor))
     if plan.errors and applied.errors != plan.errors:
