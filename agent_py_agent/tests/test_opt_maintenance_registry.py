@@ -14,9 +14,10 @@ def test_maintenance_registry_covers_current_storage_kinds():
     registry = getattr(retention, 'storage_kind_registry', None)
     assert callable(registry), 'storage kinds must be declared in the existing retention facade'
     kinds = registry()
-    assert len(kinds) == len({kind.kind for kind in kinds}) == 40
+    assert len(kinds) == len({kind.kind for kind in kinds}) == 42
     assert {'gateway_active', 'gateway_terminal', 'outbox_delivery', 'legacy_layout', 'session_pair_rate',
-            'runtime_history', 'gateway_history', 'gateway_input_refs', 'usage_sources'} <= {
+            'runtime_history', 'gateway_history', 'gateway_input_refs', 'usage_sources',
+            'global_indexes', 'thread_index', 'task_call_telemetry'} <= {
         kind.kind for kind in kinds}
     for kind in kinds:
         assert kind.scope and kind.authority and kind.policy_ref and kind.protected_refs
@@ -195,20 +196,25 @@ def test_maintenance_rejects_noninteger_count_budget(name, value):
 # LLM: 所有本地类别须绑定，host共享投影须显式延期；保留核验不能冒充业务内容清理。
 # 函数用途: 验证默认入口没有悬空类别并返回真实的保留核验范围。
 def test_default_adapters_bind_every_kind_with_explicit_preservation(tmp_path):
+    from dataclasses import replace
     from types import SimpleNamespace
 
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
-    home = ensure_my_agent_home(tmp_path / 'home')
+    home = replace(ensure_my_agent_home(tmp_path / 'home'), owner_id='local/main')
     policy = SimpleNamespace(load_errors=[], applied=True, legal_hold=False)
     state = maintenance.run_owner_storage_maintenance_slice(
         home, {}, policy, now=2_000_000, quota_max_ms=1000, quota_max_entries=4096)
+    actual_lanes = set(state.get('lane_reports', {}))
     for _ in range(8):
         if not state['continuation_pending']:
             break
         state = maintenance.run_owner_storage_maintenance_slice(
             home, {'storage_maintenance': state}, policy, now=2_000_000,
             quota_max_ms=1000, quota_max_entries=4096)
+        actual_lanes.update(state.get('lane_reports', {}))
+    assert {'thread_index', 'task_call_telemetry'} <= actual_lanes
+    assert not ({'thread_index', 'task_call_telemetry'} & set(state.get('lane_fallback_kinds', ())))
     assert state['unbound_kinds'] == []
     assert set(state['cursors']) == {kind.kind for kind in retention.storage_kind_registry()}
     assert state['coordinator_deferred'] == ['global_indexes']
@@ -276,20 +282,25 @@ def test_new_cycle_budget_exhaustion_keeps_pending_despite_old_complete():
 # LLM: 默认入口必须消费本周期pending集合，不能用旧cursor complete掩盖尚未执行的配额和回执。
 # 函数用途: 在真实默认适配器入口验证新周期零预算仍要求立即续作。
 def test_default_new_cycle_zero_work_is_pending(tmp_path, monkeypatch):
+    from dataclasses import replace
     from types import SimpleNamespace
 
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
-    home = ensure_my_agent_home(tmp_path / 'home')
+    home = replace(ensure_my_agent_home(tmp_path / 'home'), owner_id='local/main')
     policy = SimpleNamespace(load_errors=[], applied=True, legal_hold=False)
     state = maintenance.run_owner_storage_maintenance_slice(
         home, {}, policy, now=2_000_000, quota_max_ms=1000, quota_max_entries=4096)
+    actual_lanes = set(state.get('lane_reports', {}))
     for _ in range(8):
         if not state['continuation_pending']:
             break
         state = maintenance.run_owner_storage_maintenance_slice(
             home, {'storage_maintenance': state}, policy, now=2_000_000,
             quota_max_ms=1000, quota_max_entries=4096)
+        actual_lanes.update(state.get('lane_reports', {}))
+    assert {'thread_index', 'task_call_telemetry'} <= actual_lanes
+    assert not ({'thread_index', 'task_call_telemetry'} & set(state.get('lane_fallback_kinds', ())))
     assert not state['continuation_pending']
     original = maintenance.run_storage_maintenance_slice
 

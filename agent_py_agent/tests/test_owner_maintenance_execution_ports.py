@@ -48,16 +48,31 @@ def test_actual_c_maintenance_source_reaches_original_retention_and_owner_state(
     with curator_case(tmp_path, monkeypatch, source_kind='maintenance') as (agent, _, _, gate, claim, _):
         stale = agent.home_paths.owner_cache_dir / 'old.tmp'
         assert stale.read_bytes() == b'old-cache'
+        agent.config.retention_scan_slice_entries = 4
+        agent.config.retention_scan_slice_ms = 100
         response = run_original(agent, gate, claim)
         assert response['ok'] is True
         result = response['background_result']
         assert result['source_kind'] == 'maintenance' and result['outcome'] == 'handled'
         assert result['ran'] is True and result['status'] == 'success'
-        assert result['apply_outcome'] == 'applied' and not stale.exists()
+        assert result['apply_outcome'] == 'applied'
         marker = json.loads((agent.home_paths.owner_data_dir / 'maintenance.json').read_text())
         assert marker['schema_version'] == 'owner-maintenance.v1'
         assert marker['indexes_compacted'] == marker['indexes_compact_failed'] == []
         assert 'run_closeout_backfill' in marker and 'memory_archive_permissions' in marker
+
+    # 初拍刻意使用极小额度留下partial；后继采用显式有界配置继续原入口，不放宽删除证明。
+    assert marker.get('maintenance_partial') is True
+    agent.config.retention_scan_slice_entries = 128
+    for _ in range(128):
+        if not stale.exists():
+            break
+        assert marker.get('maintenance_partial') is True
+        continued = run_owner_retention_if_due(agent.home_paths, now=200_000, include_global_indexes=False,
+                                              config=agent.config)
+        assert continued.ran
+        marker = json.loads((agent.home_paths.owner_data_dir / 'maintenance.json').read_text())
+    assert not stale.exists()
 
 
 # LLM: 只保存本次真实维护state的存在/完整字节，不读取其它owner或把摘要作准入。

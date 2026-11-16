@@ -88,7 +88,8 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     if _quota_only_continuation_due(home.owner_home_dir, header, now):
         return _run_quota_continuation_slice(
             path, home, header, now, coordinator=True, commit_transition=commit,
-            runtime_cleanup=runtime_cleanup, quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
+            runtime_cleanup=runtime_cleanup, quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries,
+            config=config, include_global_indexes=True)
     retention = _call_retention_callback(apply_owner_retention, home, now=datetime.fromtimestamp(now, timezone.utc),
         commit_transition=commit, expected_policy_fingerprint=policy, config=config, scan_budget=True)
     derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
@@ -102,7 +103,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     backfill = _backfill_hung_runs(home, now=now, commit_transition=commit)
     local_events = (_maintain_local_store_events(home, now=now, commit_transition=commit,
                                                  cursor=_partial_store_cursor(header, "local_store_events_maintenance"))
-                    if retention.applied and not retention.legal_hold else
+                    if _retention_deletion_safe(retention) else
                     {"executed": False, "reason": "legal_hold" if retention.legal_hold else "retention_refused"})
     effects = {"text_vector_cache_reclaimed": reclaimed, "text_vector_cache_reclaim_error": error,
                "indexes_compacted": [], "indexes_compact_failed": [],
@@ -111,7 +112,8 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
                "runtime_cleanup": runtime_cleanup,
                "storage_maintenance": run_owner_storage_maintenance_slice(
                    home, json.loads(before) if before else {}, retention, now=now, coordinator=True,
-                   quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, commit_transition=commit)}
+                   quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, commit_transition=commit,
+                   config=config, include_global_indexes=True)}
 
     if projection is not None:
         effects['local_store_fts_upgrade'] = projection
