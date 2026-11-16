@@ -14,7 +14,9 @@ from agent_py_agent.agent.capability.decision_recommendation import (
     recommend_capabilities,
 )
 from agent_py_agent.tests.test_decision_capability_consumer import model_input
-from agent_py_agent.tests.test_decision_capability_consumer import surface as surface  # noqa: F401
+from agent_py_agent.tests.test_decision_capability_consumer import (
+    surface as _consumer_surface,
+)
 from agent_py_agent.tests.test_decision_model_profiles import decision
 from agent_py_agent.tests.test_decision_settings import patch
 from agent_py_agent.tests.test_tool_presentation_projection import (
@@ -85,6 +87,19 @@ def capability_http():
         server.server_close()
         worker.join(2)
         assert not worker.is_alive() and not state.failures
+
+
+# LLM: W5 将秒级时钟拆入独立 snapshot_clock_context；固定单测内时钟避免跨秒边界产生假差异。
+# 函数用途: 复用消费者宿主并在单个用例内冻结 prompt 时钟快照，保留对真实提示与 schema 的精确字节比对。
+@pytest.fixture
+def surface(_consumer_surface, monkeypatch):  # noqa: F811
+    frozen_clock = _consumer_surface.host.prompts.snapshot_clock_context()
+    monkeypatch.setattr(
+        _consumer_surface.host.prompts,
+        "snapshot_clock_context",
+        lambda *, facts_only=False: "" if facts_only else frozen_clock,
+    )
+    return _consumer_surface
 
 
 # LLM: 只经原模型目录和字段 patch 指向本地测试服务，保持原消费者 fixture 的真实快照与 runner 身份。
