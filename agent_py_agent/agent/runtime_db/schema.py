@@ -61,6 +61,11 @@ def runtime_db_identity(path: Path) -> tuple[int, int] | None:
 
 
 def runtime_db_corruption_details(error: BaseException) -> dict[str, object]:
+    from ..io.readonly_sqlite import ProjectionReadUnavailableError
+
+    # 安全读适配器的准入异常保留原SQLite cause；诊断读取数值码，不解析展示文案。
+    if isinstance(error, ProjectionReadUnavailableError) and isinstance(error.__cause__, sqlite3.Error):
+        error = error.__cause__
     details = sqlite_error_details(error)
     if details.get("sqlite_primary_code") in CORRUPTION_RESULT_CODES:
         return details
@@ -869,22 +874,23 @@ class RuntimeSchemaMixin:
     # 函数用途: 借用原库连接，C现存库写入结束即关闭，正常请求仍用原F1作用域。
     @contextmanager
     def _runtime_connection(self) -> Iterator[sqlite3.Connection]:
-        if self.read_only:
-            from ..io.readonly_sqlite import readonly_sqlite_connection
-
-            # 管理预览不创建generation侧车，但仍须服从原恢复意图准入，不能沿只读旁路越过恢复门。
-            if runtime_db_recovery_pending(self.db_path):
-                raise RuntimeDatabaseDeferred('recovery_intent')
-            with readonly_sqlite_connection(self.db_path, blocking=False, require_private_directory=False) as conn:
-                conn.row_factory = sqlite3.Row
-                require_runtime_schema_generation(conn)
-                if runtime_db_recovery_pending(self.db_path):
-                    raise RuntimeDatabaseDeferred('recovery_intent')
-                yield conn
-            return
-        self._heal_runtime_db_before_open()
+        if not self.read_only:
+            self._heal_runtime_db_before_open()
         identity = runtime_db_identity(self.db_path)
         try:
+            if self.read_only:
+                from ..io.readonly_sqlite import readonly_sqlite_connection
+
+                # 预览不创建应用锁；保留原30秒SQLite读取预算，不能继承C短写的零等待。
+                if runtime_db_recovery_pending(self.db_path):
+                    raise RuntimeDatabaseDeferred('recovery_intent')
+                with readonly_sqlite_connection(self.db_path, timeout=30.0, require_private_directory=False) as conn:
+                    conn.row_factory = sqlite3.Row
+                    require_runtime_schema_generation(conn)
+                    if runtime_db_recovery_pending(self.db_path):
+                        raise RuntimeDatabaseDeferred('recovery_intent')
+                    yield conn
+                return
             with self._runtime_connection_scope() as conn:
                 yield conn
         except BaseException as error:

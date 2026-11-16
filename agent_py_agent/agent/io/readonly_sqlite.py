@@ -151,7 +151,7 @@ class ProjectionReadUnavailableError(OSError):
 
 @contextmanager
 def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: float | None = None,
-                               require_private_directory: bool = True):
+                               require_private_directory: bool = True, timeout: float = 5.0):
     check_io_deadline(deadline)
     path = Path(path).absolute()
     db = None
@@ -166,7 +166,7 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
             sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix), require_owner=True)
                          for suffix in ("-journal", "-wal", "-shm")}
             verify()
-            timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else 5.0
+            timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else timeout
             db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
                                  timeout=timeout if blocking else 0.0)
             try:
@@ -177,6 +177,14 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
                     observed = _regular_identity(path.with_name(path.name + suffix), require_owner=True)
                     if before is not None and observed != before:
                         raise ValueError("projection sidefile identity changed during read")
+                # connect尚未取得SQLite读锁。短写者可在首次读取等待期间正常回收WAL/SHM；
+                # 先沿SQLite完成读准入，再固定辅助文件身份，不能把该合法生命周期当作换库。
+                db.execute("PRAGMA schema_version").fetchone()
+                verify()
+                if _regular_identity(path, require_owner=True) != identity:
+                    raise ValueError("projection identity changed during read")
+                sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix), require_owner=True)
+                             for suffix in ("-journal", "-wal", "-shm")}
                 # Schema is domain-specific; readers validate their own version and tables.
                 try:
                     yield db

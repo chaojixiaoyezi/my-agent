@@ -75,6 +75,7 @@ from agent_py_agent.agent.gateway_parts.http_service import (
 )
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.ingestion import source_worker as source
+from agent_py_agent.agent.io.readonly_sqlite import ProjectionReadUnavailableError
 from agent_py_agent.agent.io.sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from agent_py_agent.agent.io.sqlite_scope import (
     retire_scoped_database,
@@ -536,7 +537,9 @@ def test_limited_runtime_missing_source_creates_no_sidecar(tmp_path, read_only, 
         path.parent.mkdir()
     before = set(tmp_path.rglob("*"))
     repo = RuntimeRepository(path, read_only=read_only, existing_only=not read_only)
-    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+    error_type = ProjectionReadUnavailableError if read_only else sqlite3.OperationalError
+    reason = "FileNotFoundError" if read_only else "unable to open database file"
+    with pytest.raises(error_type, match=reason):
         repo.get_task("absent")
     assert set(tmp_path.rglob("*")) == before
 
@@ -549,7 +552,7 @@ def _blocked(path):
             pytest.fail("物理连接仍存活，不能放行换库")
 
 
-@pytest.mark.parametrize("mode", ["existing_only", "transaction", "read_only", "source"])
+@pytest.mark.parametrize("mode", ["existing_only", "transaction", "source"])
 def test_real_runtime_connections_block_ex_until_physical_close(tmp_path, monkeypatch, mode):
     source = _source(tmp_path / "runtime.db")
     if mode == "source":
@@ -568,6 +571,22 @@ def test_real_runtime_connections_block_ex_until_physical_close(tmp_path, monkey
             _blocked(source)
     with guard.runtime_db_generation_guard(source, exclusive=True):
         pass
+
+
+def test_readonly_runtime_connections_create_no_application_generation_sidecar(tmp_path, monkeypatch):
+    source = _source(tmp_path / "runtime.db")
+    lock = source.with_name(source.name + ".generation.lock")
+    guard.retire_idle_runtime_connections(source)
+    lock.unlink(missing_ok=True)
+    before = source.read_bytes()
+    monkeypatch.setattr(guard, "runtime_db_generation_guard",
+                        lambda *a, **kw: pytest.fail("只读预检不得创建应用代次锁"))
+    with RuntimeRepository(source, read_only=True)._runtime_connection() as conn:
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("INSERT INTO metadata VALUES('readonly-proof', 'forbidden')")
+    assert not lock.exists() and source.read_bytes() == before
 
 
 @pytest.fixture
@@ -639,6 +658,21 @@ def test_readers_report_corruption_without_recovery_writes(damaged, monkeypatch,
             conn.execute("SELECT * FROM runtime_events").fetchall()
     assert caught.value.runtime_db_recovery["status"] == "requires_recovery"
     assert not _request(damaged).exists() and not guard.runtime_db_recovery_pending(damaged)
+
+
+def test_readonly_open_corruption_reports_numeric_cause_without_recovery_writes(tmp_path, monkeypatch):
+    source = _source(tmp_path / "runtime.db")
+    with source.open("r+b") as stream:
+        stream.write(b"not a sqlite header!")
+    before = source.read_bytes()
+    monkeypatch.setattr(salvage, "recover_runtime_database",
+                        lambda *a, **kw: pytest.fail("只读准入损坏不能启动恢复"))
+    with pytest.raises(ProjectionReadUnavailableError) as caught:
+        RuntimeRepository(source, read_only=True).get_task("absent")
+    assert caught.value.__cause__.sqlite_errorcode & 0xFF == sqlite3.SQLITE_NOTADB
+    assert caught.value.runtime_db_recovery["status"] == "requires_recovery"
+    assert source.read_bytes() == before
+    assert not _request(source).exists() and not guard.runtime_db_recovery_pending(source)
 
 
 @pytest.mark.parametrize("table", [None, "tasks"])
