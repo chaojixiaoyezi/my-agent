@@ -624,12 +624,13 @@ class OwnerReadIndex:
         finally:
             os.close(check)
 
-    # LLM: 缓存必须私有且属于当前宿主用户；不自动 chmod 他人或既有文件。
-    # 函数用途: 验证缓存目录或文件的权限和链接属性。
+    # cache 是多个模块共用的历史目录，可为0755；内容仍由0600数据库保护。
+    # 目录必须归宿主所有且不可被其它用户写入，不修改既有目录权限。
     def _private(self, info, *, directory=False):
         correct_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+        forbidden_permissions = 0o022 if directory else 0o077
         if (
-            not correct_type or stat.S_IMODE(info.st_mode) & 0o077
+            not correct_type or stat.S_IMODE(info.st_mode) & forbidden_permissions
             or (hasattr(os, "getuid") and info.st_uid != os.getuid())
             or (not directory and info.st_nlink != 1)
         ):

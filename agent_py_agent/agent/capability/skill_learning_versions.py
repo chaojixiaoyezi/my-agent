@@ -27,6 +27,7 @@ from .skill_learning_store import (
     SkillLearningRegistry,
     SkillLearningStore,
     SkillLearningStoreError,
+    owner_layout_exempt,
 )
 from .skill_snapshot import skill_content_sha256
 
@@ -100,7 +101,7 @@ def _is_missing_stat(sig: tuple) -> bool:
 
 def _is_exempt_record(record: LearnedSkill) -> bool:
     ownership = record.maintenance.get("ownership")
-    return record.layout == "owner" or ownership in {"owner_layout", "user_modified"}
+    return owner_layout_exempt(record) or ownership in {"owner_layout", "user_modified"}
 
 
 def _persisted_usage_binding(record: LearnedSkill) -> dict[str, object] | None:

@@ -38,6 +38,8 @@ from ..capability.skill_proposals import (
     SkillProposalOutcome,
     SkillProposalService,
 )
+from ..common.log_redaction import redact_sensitive_text
+from ..conversation.channels import redact_host_absolute_paths
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import resolve_gateway_scope_owner
@@ -57,7 +59,7 @@ _FAILURE_HINTS = {
 }
 # 会改提案或 Skill 的子命令：改动可能在异常前已经生效（例如删除后追加账本失败），回执不能承诺“没有改动”。
 _WRITE_OPERATIONS = frozenset({"confirm", "reject", "learned_revert", "learned_remove", "using_remove", "learning_proposal", "learning_maintenance", "transfer"})
-_READ_FAILURE = "技能提案或自动 Skill 暂时读不到，请稍后重试。"
+_READ_FAILURE = "技能读取失败；此次为只读，没有修改 Skill。请检查下面的原因，修复后用 /skills learned 重新查看。"
 _WRITE_UNCONFIRMED = "这次操作的结果没能完整确认，可能已经生效；请先发 /skills 或 /skills learned 查看当前状态，再决定是否重试。"
 
 
@@ -169,9 +171,14 @@ def execute_skill_control(base_agent: object, command: ConversationControlComman
         return ConversationControlResult(_KIND, False, _FAILURE_HINTS.get(exc.code, f"操作未完成（{exc.code}）。"))
     except (SkillLearningGateError, SkillLearningStoreError) as exc:
         return ConversationControlResult(_KIND, False, f"操作未完成（{getattr(exc, 'code', type(exc).__name__)}）。")
-    except Exception:  # noqa: BLE001 - 控制回执不能带堆栈或本机路径。
+    except Exception as exc:  # noqa: BLE001 - 保留脱敏后的具体原因，不输出堆栈或本机路径。
+        diagnostic = redact_host_absolute_paths(redact_sensitive_text(
+            f"{type(exc).__name__}: {str(exc)[:2000]}"))[:400]
+        code = "SKILL_CONTROL_WRITE_UNCONFIRMED" if command.operation in _WRITE_OPERATIONS else "SKILL_CONTROL_READ_FAILED"
         return ConversationControlResult(
-            _KIND, False, _WRITE_UNCONFIRMED if command.operation in _WRITE_OPERATIONS else _READ_FAILURE)
+            _KIND, False,
+            f"{_WRITE_UNCONFIRMED if command.operation in _WRITE_OPERATIONS else _READ_FAILURE}\n"
+            f"{code}：{diagnostic}")
     return ConversationControlResult(_KIND, True, text)
 
 

@@ -35,6 +35,7 @@ from .skill_learning_store import (
     SkillLearningStore,
     SkillLearningStoreError,
     is_proven_stable_version,
+    owner_layout_exempt,
     replace_skill_file,
     skill_family_fingerprint,
     utc_now,
@@ -275,7 +276,7 @@ def _create_locked(
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
     current = _owned_record(store, registry, publish.decision.name)
-    if publish.promotion_authority == 'autonomous_verified' and current.layout != 'learned':
+    if publish.promotion_authority == 'autonomous_verified' and owner_layout_exempt(current):
         raise SkillLearningGateError(CODE_NOT_LEARNED)
     if current.maintenance.get("state") in {"disabled", "archived"}:
         raise SkillLearningGateError("SKILL_LEARNING_TARGET_DISABLED")
@@ -752,7 +753,7 @@ def _victim_rank_key(name: str, record: LearnedSkill) -> tuple[int, float, int, 
     proven_never_used = (
         not has_activity
         and maint.get("independent_uses_coverage") == "exact"
-        and maint.get("ever_used") in (False, None)
+        and maint.get("ever_used") is False
     )
     created_ts = _iso_ts(record.created_at)
     baseline_ts = float(maint.get("baseline_at") or 0.0) or created_ts

@@ -26,6 +26,7 @@ from typing import Any
 from ..audit.paths import audit_segment_day, audit_segment_paths
 from ..common import cache_capacity
 from ..common.json_io import read_json_object_report, read_jsonl_objects_report
+from ..common.log_redaction import redact_sensitive_text
 from ..common.nofollow_fs import (
     open_directory_beneath,
     read_bytes_beneath,
@@ -122,8 +123,7 @@ def build_retention_plan(
         roots = _conversation_roots(home, conversation_roots)
     except OSError as exc:
         return MemoryRetentionReport(applied=False, actions=(), policy_fingerprint=fingerprint,
-            errors=(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE",
-                    str(getattr(exc, "filename", "") or ""), type(exc).__name__),))
+            errors=(_pin_source_error(exc),))
     context = _RetentionScanContext(
         home=home,
         candidates=candidates,
@@ -959,8 +959,7 @@ def _budgeted_pin_projection(context):
             # 任一代次变化均在后续预算切片重新开始，严禁在暂停前退回同步无预算全扫。
             context.scan_partial = True
             return None, False
-        context.errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE",
-            str(getattr(exc, "filename", "") or ""), type(exc).__name__))
+        context.errors.append(_pin_source_error(exc))
         return (_RetentionPins(owner, complete=False), False), False
     if protection is None:
         context.scan_partial = True
@@ -3287,15 +3286,14 @@ def current_retention_pins(home: object, roots: tuple[Path, ...], errors: list[M
             if attempt < 3:
                 time.sleep(0.01)
                 continue
-            errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", str(exc.filename or ""),
-                                              "pin file remained unstable after three retries"))
+            errors.append(_pin_source_error(exc))
     # LLM: 仅由已证实代次竞争触发，不为坏JSON或权限错误增设重试；作用域限定本次调用与owner。
     # 函数用途: 在目标需要判定时严格重读全体来源一次。
     def rebuild(target_errors):
         try:
             return _current_retention_pins_once(home, roots, target_errors, now=now)
         except _PinReadChanged as exc:
-            target_errors.append(_state_error("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", Path(exc.filename or home.owner_home_dir)))
+            target_errors.append(_pin_source_error(exc))
             return _RetentionPins(Path(home.owner_home_dir), complete=False), False
 
     return _RetentionPins(Path(home.owner_home_dir), complete=False, target_rebuild=rebuild), False
@@ -3350,8 +3348,7 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
     except _PinReadChanged:
         raise
     except (CandidateStoreCorruptError, OSError, ValueError, TypeError, KeyError, IndexError) as exc:
-        errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", str(getattr(exc, "filename", "") or ""),
-                                          type(exc).__name__))
+        errors.append(_pin_source_error(exc))
         pins.complete = False
         return pins, False
     return pins, True
@@ -3411,6 +3408,26 @@ def _mtime(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return float("inf")
+
+
+# 引用读取失败只说明引用视图不完整，不能抹去已执行的其它独立清理，也不能将未知引用当空。
+def _pin_source_error(exc: Exception) -> MemoryRetentionError:
+    """保留精确来源和脱敏异常原因，明确本次拒绝范围及完整性恢复动作。"""
+    chain = []
+    path = ""
+    current = exc
+    for _ in range(4):
+        if current is None:
+            break
+        path = path or str(getattr(current, "filename", "") or "")
+        chain.append(f"{type(current).__name__}: {redact_sensitive_text(str(current))[:200]}")
+        current = current.__cause__
+    return MemoryRetentionError(
+        "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", path,
+        "; ".join(chain) + "；引用视图不完整，依赖该视图的删除未获准，其它动作结果见 actions。"
+        "下一步：核实 path 对应来源及其权威根引用，恢复来源完整性后重跑 retention；"
+        "不得删除未知引用或将损坏来源当空。",
+    )
 
 
 # LLM: 状态错误保持稳定 code/path，不泄露状态文件正文。

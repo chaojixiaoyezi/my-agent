@@ -80,6 +80,7 @@ from .curator_inputs import (
     _collect_messages,
     attach_candidate_anchors,
     collect_curator_inputs,
+    split_message_load_errors,
 )
 from .curator_models import (
     CURATOR_MODEL_NOT_CONFIGURED,
@@ -208,7 +209,18 @@ def _maintenance_error_code(exc: BaseException) -> str:
 # LLM: 输入权威损坏与供应商或 Schema 失败须分开分类；输入无法安全读取时始终阻止游标推进。
 # 类用途: 表示 ConversationStore、audit 或正式记忆输入无法安全读取。
 class CuratorInputError(RuntimeError):
-    pass
+    """保留原失败码，并单独携带无正文、无路径的输入诊断。"""
+
+    def __init__(self, code: str, *, load_errors=()) -> None:
+        super().__init__(code)
+        self.input_diagnostic = {}
+        if load_errors:
+            first = load_errors[0]
+            self.input_diagnostic = {
+                "input_error_type": str(first.get("error_type") or "unknown")[:60],
+                "input_context": str(first.get("context") or "unknown")[:64],
+                "input_error_count": len(load_errors),
+            }
 
 
 # LLM: 服务实例的运行身份不可变，并出现在每份结果与审计中；模型切换必须显式可见，无需改变 Schema。
@@ -1098,7 +1110,8 @@ class _CuratorExecutionMixin:
         preflight_warnings = (*preflight_warnings, *exclusion_warnings)
         batch = self._execution_batch(context, precollected_batch, excluded_ids)
         if batch.load_errors:
-            raise CuratorInputError(_load_error_code(batch.load_errors))
+            raise CuratorInputError(_load_error_code(batch.load_errors), load_errors=batch.load_errors)
+        context.route["failure_warnings"] = (*context.route.get("failure_warnings", ()), *_message_read_warnings(batch))
         if not batch.messages and not batch.audit_events:
             if batch.message_scan_partial and not _has_committable_input(batch):
                 # 原_run_leased先停心跳再释放本lease；pending原因及全部消费游标保留。
@@ -1227,6 +1240,7 @@ class _CuratorExecutionMixin:
                 budget=scan_budget,
                 scan_state=scan_state,
             )
+            message_errors, isolated_message_errors = split_message_load_errors(message_errors)
             batch = CuratorInputBatch(
                 messages=tuple(messages),
                 audit_events=(),
@@ -1236,6 +1250,7 @@ class _CuratorExecutionMixin:
                 skipped_message_cursors=skipped_message_cursors,
                 message_scan_partial=bool(scan_state["partial"]),
                 message_scan_reasons=tuple(scan_state["reasons"]),
+                isolated_message_errors=isolated_message_errors,
             )
         if formal_memory_errors:
             batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
@@ -1272,6 +1287,7 @@ class _CuratorExecutionMixin:
         extra_warnings: tuple[str, ...] = (),
     ) -> CuratorRunResult:
         # LLM: 先统一提取候选的落点输出（含来源/身份事实），再做身份冲突过滤；两步都在租约内完成。
+        extra_warnings = (*extra_warnings, *_message_read_warnings(batch))
         if batch.message_scan_partial:
             # 通过原reason代次保留续办义务；成功只提交本批确已读取的其它线程，不签全部扫描完成。
             self.state_store.request(context.reason)
@@ -2437,6 +2453,8 @@ def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     解析失败另记响应字符数、是否截断、结束原因和输出 token。
     """
     diagnostic: dict[str, object] = {"error_type": type(exc).__name__}
+    if isinstance(exc, CuratorInputError):
+        diagnostic.update(exc.input_diagnostic)
     if isinstance(exc, ModelNotConfiguredError) and exc.profile_reason:
         diagnostic.update(profile_id=exc.profile_id, profile_reason=exc.profile_reason)
     for attr in ("http_status", "status_code"):
@@ -2515,6 +2533,7 @@ def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
         text = _encode_failure_diagnostic(trimmed)
     if len(text) > 300:
         violation = {key: diagnostic[key] for key in ("violation_code", "violation_path") if key in diagnostic}
+        violation.update({key: diagnostic[key] for key in ("input_error_type", "input_context", "input_error_count") if key in diagnostic})
         limit = 100 if violation else 200
         text = _encode_failure_diagnostic({"error_type": str(diagnostic.get("error_type") or "")[:limit], **violation})
     return text
@@ -2712,6 +2731,17 @@ def _pending_reason(reasons: list[str]) -> str:
 # 函数用途: 判断增量输入是否达到时间触发条件。
 def _message_scan_warnings(batch: CuratorInputBatch) -> tuple[str, ...]:
     return ("message_scan_partial", *(f"message_scan_partial:{reason}" for reason in batch.message_scan_reasons))
+
+
+def _message_read_warnings(batch: CuratorInputBatch) -> tuple[str, ...]:
+    """坏线程不进模型且消费位置不动；原有界运行账明确提示修复原来源后重试。"""
+    return tuple("curator_message_read_isolated=" + json.dumps({
+        "thread_id": str(item["thread_id"])[:64],
+        "error_type": str(item.get("error_type") or "unknown")[:32],
+        "error_code": str(item.get("error_code") or "MESSAGE_SOURCE_UNREADABLE")[:32],
+        "effect_outcome": "not_started",
+        "next_action": "repair_source_then_retry",
+    }, ensure_ascii=False, separators=(",", ":")) for item in batch.isolated_message_errors[:16])
 
 
 def _has_committable_input(batch: CuratorInputBatch) -> bool:

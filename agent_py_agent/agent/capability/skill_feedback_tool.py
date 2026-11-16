@@ -48,6 +48,7 @@ from .skill_learning_store import (
     CODE_EVIDENCE_INCOMPLETE,
     SkillLearningStore,
     SkillLearningStoreError,
+    owner_layout_exempt,
 )
 from .skill_search_tool import _snapshot_for
 from .skill_usage_ledger import learning_usage_binding, load_usage_evidence
@@ -234,10 +235,9 @@ def _lifecycle_from_record(
 
     ts = time.time() if now is None else float(now)
     maint = dict(getattr(record, "maintenance", {}) or {})
-    layout = str(getattr(record, "layout", "learned") or "learned")
     ownership = str(maint.get("ownership") or "")
     raw_state = str(maint.get("state") or "trial")
-    if layout == "owner" or ownership == "user_modified":
+    if owner_layout_exempt(record) or ownership == "user_modified":
         state = "user_owned"
     elif raw_state in {"trial", "active", "cooled", "archived", "disabled", "retired"}:
         state = raw_state
@@ -311,10 +311,11 @@ def _lifecycle_from_record(
     cool_seconds = _config_non_neg_int(cfg, "self_learning_cool_seconds", 604800)
     archive_seconds = _config_non_neg_int(cfg, "self_learning_archive_seconds", 1296000)
     evict_seconds = _config_non_neg_int(cfg, "self_learning_evict_seconds", 1296000)
-    last_activity = (
-        _as_non_neg_float(maint.get("last_used_at"))
-        or _as_non_neg_float(maint.get("baseline_at"))
-        or 0.0
+    last_activity = max(
+        _as_non_neg_float(maint.get("last_used_at")) or 0.0,
+        _as_non_neg_float(maint.get("baseline_at")) or 0.0,
+        _as_non_neg_float(maint.get("restored_at")) or 0.0,
+        _as_non_neg_float(maint.get("legacy_last_activity_upper_bound")) or 0.0,
     )
     archived_at = _as_non_neg_float(maint.get("archived_at")) or 0.0
     pinned = bool(maint.get("pinned"))
@@ -792,7 +793,7 @@ def _adopt_feedback(agent: object, store: SkillLearningStore, reference: str) ->
         )
     registry = store.load_registry()
     record = registry.skills.get(entry.name)
-    if record is None or record.layout == "owner":
+    if record is None or owner_layout_exempt(record):
         return _error_outcome(
             action="adopted",
             error_code="CANNOT_REMOVE_NON_LEARNED_SKILL",
@@ -936,7 +937,7 @@ def _remove_feedback(agent: object, store: SkillLearningStore, reference: str) -
         )
 
     managed = store.managed_records(registry, include_archived=True)
-    if record.layout == "owner" or record.maintenance.get("ownership") in {"owner_layout", "user_modified"} or name not in managed:
+    if owner_layout_exempt(record) or record.maintenance.get("ownership") in {"owner_layout", "user_modified"} or name not in managed:
         manual = _safe_owner_manual_path(agent, store.skill_path(name, record=record))
         return _error_outcome(
             action="remove",
@@ -1070,7 +1071,7 @@ def _ineffective_feedback(agent: object, store: SkillLearningStore, reference: s
             next_action="调用 skill_feedback(action='status') 查看已登记的自学技能列表。",
             skill_id=cleaned,
         )
-    if record.layout == "owner" or record.maintenance.get("ownership") == "user_modified":
+    if owner_layout_exempt(record) or record.maintenance.get("ownership") == "user_modified":
         return _error_outcome(
             action="ineffective",
             error_code="CANNOT_REMOVE_NON_LEARNED_SKILL",

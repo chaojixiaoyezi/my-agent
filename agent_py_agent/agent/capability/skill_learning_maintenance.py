@@ -38,6 +38,7 @@ from .skill_learning_store import (
     SkillLearningStore,
     SkillLearningStoreError,
     is_proven_stable_version,
+    owner_layout_exempt,
 )
 from .skill_snapshot import skill_content_sha256
 from .skill_usage_ledger import load_usage_evidence
@@ -733,7 +734,7 @@ def _is_proven_never_used(record: LearnedSkill) -> bool:
 def recommended_learning(registry, limit=50, *, explore_percent=0) -> set[str]:
     eligible = [
         row for row in registry.skills.values()
-        if row.layout != "owner"
+        if not owner_layout_exempt(row)
         and row.name not in getattr(registry, "blocked_names", ())
         and row.maintenance.get("ownership") not in {"owner_layout", "user_modified"}
         and row.maintenance.get("state") not in {"disabled", "archived", "cooled"}
@@ -809,7 +810,7 @@ def _fold_skill_usage(
     ts: float,
 ) -> tuple[SkillLearningRegistry, LearnedSkill, str]:
     """将单条Skill的UsageEvidence安全合入维护投影，返回(registry, updated_or_same, outcome_tag)。"""
-    if current.layout == "owner" or current.maintenance.get("ownership") in {"owner_layout", "user_modified"}:
+    if owner_layout_exempt(current) or current.maintenance.get("ownership") in {"owner_layout", "user_modified"}:
         return registry, current, "skipped"
 
     maint = dict(current.maintenance)
@@ -926,13 +927,14 @@ def _fold_skill_usage(
 
 def _verify_single_ownership(store: SkillLearningStore, current: LearnedSkill) -> str:
     """只核验一条托管记录在磁盘上的真实所有权；任何读取异常标为unknown而不中断整批维护。"""
-    if current.layout == "owner" or current.maintenance.get("ownership") == "owner_layout":
+    if owner_layout_exempt(current) or current.maintenance.get("ownership") == "owner_layout":
         return "owner_layout"
     if current.maintenance.get("ownership") == "user_modified":
         return "user_modified"
     is_archived = current.maintenance.get("state") == "archived"
     anchor = store.directory if is_archived else store.skills_root
-    dir_parts = ("archived", current.name) if is_archived else ("learned", current.name)
+    dir_parts = (("archived", current.name) if is_archived else
+                 store.skill_path(current.name, record=current).parent.relative_to(store.skills_root).parts)
     dir_exists, has_extra = _has_extra_dir_entries(anchor, dir_parts)
     if dir_exists and has_extra:
         return "user_modified"
@@ -1073,6 +1075,7 @@ def maintain_learning(
             },
             "receipts_scanned": receipts_scanned,
             "receipts_deleted": receipts_deleted,
+            "usage_warnings": list(evidence.get("warnings") or []),
         }
 
     with store.state_lock():
@@ -1097,9 +1100,11 @@ def maintain_learning(
                         last_used = max(last_used, float(ev["last_real_used_at"]))
                 baseline = float(maint.get("baseline_at") or ts)
                 restored = float(maint.get("restored_at") or 0.0)
-                idle = ts - max(baseline, last_used, restored)
+                idle = ts - max(baseline, last_used, restored,
+                                float(maint.get("legacy_last_activity_upper_bound") or 0.0),
+                                float(ev.get("last_activity_at_upper_bound") or 0.0) if isinstance(ev, dict) else 0.0)
                 is_prot = (
-                    current.layout == "owner"
+                    owner_layout_exempt(current)
                     or maint.get("ownership") in {"owner_layout", "user_modified", "unknown"}
                     or maint.get("pinned") is True
                     or "*" in protected
@@ -1196,7 +1201,7 @@ def maintain_learning(
                     owned_status = _verify_single_ownership(store, current)
                     inc_id = str(current.maintenance.get("incarnation_id") or "").strip()
                     act_id = str(current.maintenance.get("activation_id") or "").strip()
-                    if current.layout != "owner" and owned_status == "machine" and (not inc_id or not act_id):
+                    if not owner_layout_exempt(current) and owned_status == "machine" and (not inc_id or not act_id):
                         # 仅在写授权的维护路径内为仍属机器托管的遗留记录补齐唯一标识，不伪造历史精确计数
                         next_maint = dict(current.maintenance)
                         hurt_raw = next_maint.get("hurt_count")
@@ -1257,7 +1262,7 @@ def maintain_learning(
 
                     ownership = str(maint.get("ownership") or "machine")
                     is_protected = (
-                        current.layout == "owner"
+                        owner_layout_exempt(current)
                         or ownership in {"owner_layout", "user_modified", "unknown"}
                         or maint.get("pinned") is True
                         or "*" in protected
@@ -1274,6 +1279,7 @@ def maintain_learning(
                     last_activity = max(
                         float(maint.get("baseline_at") or 0.0),
                         float(maint.get("last_used_at") or 0.0),
+                        float(maint.get("legacy_last_activity_upper_bound") or 0.0),
                         float(maint.get("restored_at") or 0.0),
                     )
                     idle = ts - last_activity
@@ -1327,7 +1333,7 @@ def maintain_learning(
             if max_skills > 0 and protection_complete and usage_sufficient:
                 partial_managed: dict[str, LearnedSkill] = {}
                 for cname, rec in sorted(registry.skills.items()):
-                    if rec.layout == "owner" or rec.maintenance.get("state") == "archived":
+                    if owner_layout_exempt(rec) or rec.maintenance.get("state") == "archived":
                         continue
                     if rec.maintenance.get("ownership") in {"owner_layout", "user_modified", "unknown"}:
                         continue
@@ -1337,7 +1343,7 @@ def maintain_learning(
                 live_count = registry.live_count(
                     managed_names={
                         cname for cname, rec in registry.skills.items()
-                        if rec.layout != "owner"
+                        if not owner_layout_exempt(rec)
                         and rec.maintenance.get("state") != "archived"
                         and rec.maintenance.get("ownership") not in {"owner_layout", "user_modified"}
                     }
@@ -1365,11 +1371,20 @@ def maintain_learning(
                         changed.append(victim)
                         partial_managed.pop(victim, None)
                         live_count -= 1
-                        did_any_work = True
-                        budget.charge(entries=1, size=256)
-                    except SkillLearningStoreError:
+                    except SkillLearningStoreError as exc:
+                        logging.getLogger(__name__).warning("cap archive skipped for %s: %s", victim, exc)
                         partial_managed.pop(victim, None)
                         registry = store.load_registry()
+                        failed = registry.skills.get(victim)
+                        if failed is not None and failed.maintenance.get("ownership") == "machine":
+                            # 归档前后的事实不再完整时先隔离本条；游标续跑不能每批都重试同一坏条而饿死其它条目。
+                            failed = replace(failed, maintenance={**failed.maintenance, "ownership": "unknown"})
+                            registry = replace(registry, skills={**registry.skills, victim: failed})
+                            store.save_registry(registry)
+                    finally:
+                        # 失败的对象也消耗本轮预算，防止坏记录把有界维护变成无界重试。
+                        did_any_work = True
+                        budget.charge(entries=1, size=256)
 
             phase = "versions"
             after_name = ""

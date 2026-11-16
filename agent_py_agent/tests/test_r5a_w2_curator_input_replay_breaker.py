@@ -88,3 +88,35 @@ def test_the_rule_counts_input_failures_but_not_transient_ones():
     assert not curator_replay_breaker_tripped("CURATOR_MODEL_FAILED", cursor, same)
     moved = [row("CURATOR_INPUT_READ_FAILED"), row("CURATOR_INPUT_READ_FAILED", {"per_thread_cursors": {}, "last_audit_event_id": ""})]
     assert not curator_replay_breaker_tripped("CURATOR_INPUT_READ_FAILED", cursor, moved)
+
+
+def test_input_failure_audit_preserves_typed_cause_without_source_body_or_path(tmp_path):
+    import json
+
+    backend = _NeverCalledBackend()
+    service = _service_with_unreadable_audit(tmp_path, backend)
+    result = service.run(reason='admin')
+    [warning] = [item for item in service.run_log.list()[-1].warnings if item.startswith('failure_diagnostic=')]
+    facts = json.loads(warning.split('=', 1)[1])
+    assert result.status == 'failed' and backend.calls == 0
+    assert facts['input_error_type'] == 'JSONDecodeError'
+    assert facts['input_context'] == 'memory_curator.audit_read' and facts['input_error_count'] == 1
+    assert len(warning) <= 300 and str(tmp_path) not in warning and '坏行' not in warning
+
+
+def test_isolated_message_diagnostic_is_bounded_and_keeps_corrective_action():
+    import json
+
+    from agent_py_agent.agent.memory_store.curator import _message_read_warnings
+    from agent_py_agent.agent.memory_store.curator_inputs import CuratorInputBatch
+
+    batch = CuratorInputBatch((), (), isolated_message_errors=tuple({
+        'thread_id': 't' * 200, 'error_type': 'E' * 200, 'error_code': 'C' * 200,
+        'path': '/private/source', 'message': 'private source body',
+    } for _ in range(100)))
+    warnings = _message_read_warnings(batch)
+    assert len(warnings) == 16 and all(len(item) <= 300 for item in warnings)
+    for item in warnings:
+        facts = json.loads(item.split('=', 1)[1])
+        assert facts['next_action'] == 'repair_source_then_retry' and facts['effect_outcome'] == 'not_started'
+        assert '/private/source' not in item and 'private source body' not in item

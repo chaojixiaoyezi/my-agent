@@ -243,6 +243,8 @@ class CuratorInputBatch:
     candidate_anchors: tuple[dict[str, object], ...] = ()
     message_scan_partial: bool = False
     message_scan_reasons: tuple[str, ...] = ()
+    # 只有原消息读取调用已绑定的线程可独立隔离；正文和游标不发送模型，诊断随原运行账保存。
+    isolated_message_errors: tuple[dict[str, object], ...] = ()
 
     # LLM: 原始消息/游标完整保留，仅模型视图聚合跨线程广播；标签和关系仍核原来源hash与正式版本。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
@@ -402,6 +404,7 @@ def collect_curator_inputs(
         skipped_cursors=skipped_message_cursors,
         budget=scan_budget, scan_state=scan_state,
     )
+    message_errors, isolated_message_errors = split_message_load_errors(message_errors)
     remaining_chars = max(
         1_000,
         config.max_input_chars
@@ -441,6 +444,7 @@ def collect_curator_inputs(
         skipped_message_cursors=skipped_message_cursors,
         message_scan_partial=scan_state["partial"],
         message_scan_reasons=scan_state["reasons"],
+        isolated_message_errors=isolated_message_errors,
     )
     if tool_reference_source is not None:
         from .task_file_evidence import attach_task_file_evidence
@@ -803,8 +807,16 @@ def _collect_thread_messages(state: dict[str, object], thread: object, cursor: s
             state["scan_partial"] = bool(state["scan_partial"] or partial)
         else:
             entries, load_errors = after_report(thread_id, after_message_id=scan_cursor, limit=page_limit)  # type: ignore[operator]
-        errors.extend(dict(item) for item in load_errors)
         if load_errors:
+            # 归属取自本次已调用的原线程读口，不能从错误路径或正文猜；不符的自报身份仍整批拒绝。
+            for item in load_errors:
+                report = dict(item)
+                if report.get("thread_id", thread_id) == thread_id:
+                    report.update(thread_id=thread_id, scope_resolution="thread_read_isolated")
+                errors.append(report)
+            # 某后续页失败时，连同该线程此前本批材料撤回，防其它线程的提交跨过未知消息。
+            selected[:] = [item for item in selected if item.thread_id != thread_id]
+            state["used_chars"] = sum(len(json.dumps(item.to_model(), ensure_ascii=False)) for item in selected)
             if skipped_cursors is not None:
                 skipped_cursors.pop(thread_id, None)
             break
@@ -820,6 +832,15 @@ def _collect_thread_messages(state: dict[str, object], thread: object, cursor: s
         if stopped or len(entries) < page_limit or not scan_cursor or scan_cursor in seen_cursors:
             break
         seen_cursors.add(scan_cursor)
+
+
+def split_message_load_errors(errors):
+    """只拆出原线程调用已核实的局部读错；全局、无身份及错身份错误继续阻断。"""
+    blocking, isolated = [], []
+    for error in errors:
+        target = isolated if error.get("scope_resolution") == "thread_read_isolated" and error.get("thread_id") else blocking
+        target.append(error)
+    return tuple(blocking), tuple(isolated)
 
 
 # LLM: 处理单页返回的消息：严格跳过 learning_excluded=True 并按字符/条数预算收口。

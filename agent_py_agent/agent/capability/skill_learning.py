@@ -65,6 +65,7 @@ from .skill_learning_store import (
     SkillLearningRegistry,
     SkillLearningStore,
     SkillLearningStoreError,
+    owner_layout_exempt,
     request_key,
     skill_family_fingerprint,
     utc_now,
@@ -1230,9 +1231,9 @@ def _updatable(store: SkillLearningStore, registry: SkillLearningRegistry, entry
 # 函数用途: 按技能名读取可更新的自学 Skill 材料。
 def _updatable_by_name(store: SkillLearningStore, registry: SkillLearningRegistry, name: str) -> dict[str, object] | None:
     record = registry.skills.get(name)
-    if record is None or record.layout == "owner" or record.maintenance.get("state") == "archived":
+    if record is None or owner_layout_exempt(record) or record.maintenance.get("state") == "archived":
         return None
-    text = read_text_beneath(store.skills_root, ("learned", name, "SKILL.md"))
+    text = read_text_beneath(store.skills_root, store.skill_path(name, record=record).relative_to(store.skills_root).parts)
     if text is None or skill_content_sha256(text) != record.sha256:
         return None
     path = store.skill_path(name)
@@ -1332,7 +1333,7 @@ def _similar_managed_skills(
         managed = {
             name: rec
             for name, rec in registry.skills.items()
-            if rec.layout != "owner" and rec.maintenance.get("state") != "archived"
+            if not owner_layout_exempt(rec) and rec.maintenance.get("state") != "archived"
         }
     if not managed:
         return []
@@ -1353,10 +1354,10 @@ def _similar_managed_skills(
     for rec_name, rec in sorted(managed.items()):
         if rec_name == decision.name:
             continue
-        text = read_text_beneath(store.skills_root, ("learned", rec_name, "SKILL.md"))
+        text = read_text_beneath(store.skills_root, store.skill_path(rec_name, record=rec).relative_to(store.skills_root).parts)
         if text is None:
             continue
-        path = store.skill_path(rec_name)
+        path = store.skill_path(rec_name, record=rec)
         if not path.is_file():
             continue
         try:

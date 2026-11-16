@@ -151,6 +151,122 @@ def test_expired_budget_performs_no_source_open(tmp_path, monkeypatch):
     assert result.partial and not result.rows and not result.load_errors
 
 
+@pytest.mark.parametrize('at_frontier', [False, True])
+def test_snapshot_open_budget_deferral_stays_partial_and_resumes(tmp_path, monkeypatch, at_frontier):
+    from agent_py_agent.agent.conversation import message_scan
+    from agent_py_agent.tests.test_rework_r9_conversation_transcript_retention import (
+        _owner,
+        _rotated_conversation,
+    )
+
+    home, _retention = _owner(tmp_path)
+    store, thread, path, original = _rotated_conversation(home, monkeypatch)
+    source = [json.loads(line) for line in original.splitlines()]
+    frontier = message_scan.transcript_manifest(path)['hot_frontier']['bytes']
+    assert frontier > 1
+    cursor = source[0]['message_id']
+    before = path.read_bytes()
+    result = store.messages.after_slice_report(thread.thread_id, after_message_id=cursor,
+        limit=1, budget=budget(size=frontier if at_frontier else frontier - 1))
+    assert result.partial and result.reason == 'slice_budget'
+    assert not result.load_errors and not result.rows and not result.continuation
+    resumed = store.messages.after_slice_report(thread.thread_id, after_message_id=cursor,
+        limit=1, budget=budget())
+    assert not resumed.load_errors and resumed.rows[0].message_id == source[1]['message_id']
+    assert path.read_bytes() == before
+
+
+def test_audit_continues_while_message_snapshot_open_is_deferred(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import message_scan
+    from agent_py_agent.agent.memory_store.curator_inputs import collect_curator_inputs
+    from agent_py_agent.agent.memory_store.curator_models import (
+        MemoryCuratorConfig,
+        MemoryCuratorState,
+    )
+    from agent_py_agent.tests.test_rework_r9_conversation_transcript_retention import (
+        _owner,
+        _rotated_conversation,
+    )
+
+    home, _retention = _owner(tmp_path)
+    store, thread, path, original = _rotated_conversation(home, monkeypatch)
+    source = [json.loads(line) for line in original.splitlines()]
+    frontier = message_scan.transcript_manifest(path)['hot_frontier']['bytes']
+    state = MemoryCuratorState(per_thread_cursors={thread.thread_id: source[0]['message_id']})
+    audit_dir = tmp_path / 'audit'
+    audit_dir.mkdir()
+    (audit_dir / '2026-11-16.jsonl').write_text(json.dumps({'event_id': 'independent-event'}) + '\n')
+    snapshot = state.to_dict()
+    batch = collect_curator_inputs(message_source=CuratorMessageSource(store), audit_dir=audit_dir,
+        state=state, config=MemoryCuratorConfig(), scan_budget=budget(size=frontier - 1))
+    assert not batch.load_errors and batch.message_scan_partial and not batch.messages
+    assert [event.event_id for event in batch.audit_events] == ['independent-event']
+    assert state.to_dict() == snapshot
+
+
+@pytest.mark.parametrize('damage', ['bad_row', 'bad_manifest'])
+def test_bad_message_thread_isolated_while_healthy_thread_commits_and_source_can_recover(tmp_path, damage):
+    from agent_py_agent.tests.test_memory_curator_v2 import (
+        _service,
+        _StaticStructuredBackend,
+        _valid_output,
+    )
+
+    store, tid, rows = make_messages(tmp_path, count=2)
+    path = store.storage.message_path(tid)
+    original = path.read_bytes()
+    if damage == 'bad_row':
+        path.write_bytes(b'{broken-row}\n')
+        damaged_path = path
+    else:
+        damaged_path = path.with_suffix('.manifest.json')
+        damaged_path.write_text('{"schema":"invalid"}\n')
+    damaged_bytes = damaged_path.read_bytes()
+    fast = store.threads.get_or_create({'canonical_user_id': 'synthetic-owner', 'channel': 'chat',
+        'channel_user_id': 'synthetic-owner', 'channel_conversation_id': 'healthy', 'now': 3.0})
+    message = store.messages.append({'thread_id': fast.thread_id, 'role': 'user', 'content': '我的个人电脑使用 macOS。'})
+    backend = _StaticStructuredBackend(_valid_output(fast.thread_id, message.message_id, message.content))
+    service = _service(tmp_path, backend, store)
+    _seed_cursor(service, {tid: rows[0].message_id})
+    result = service.run(reason='admin')
+    state = service.state_store.load()
+    assert result.status == 'succeeded' and backend.calls == 1
+    assert state.per_thread_cursors[tid] == rows[0].message_id
+    assert state.per_thread_cursors[fast.thread_id] == message.message_id
+    warnings = [item for item in service.run_log.list()[-1].warnings if item.startswith('curator_message_read_isolated=')]
+    assert len(warnings) == 1 and len(warnings[0]) <= 300
+    diagnostic = json.loads(warnings[0].split('=', 1)[1])
+    assert diagnostic['thread_id'] == tid and diagnostic['effect_outcome'] == 'not_started'
+    assert diagnostic['error_type'] == 'DataCorruptionError'
+    assert diagnostic['next_action'] == 'repair_source_then_retry'
+    assert tid not in backend.prompts[0] and damaged_path.read_bytes() == damaged_bytes
+    # 只修测试夹具的规范来源；恢复后原保存位置后面的消息重新出现，不需要重置策展状态或熔断。
+    if damage == 'bad_row':
+        path.write_bytes(original)
+    else:
+        damaged_path.unlink()
+    batch = service._collect(state, include_formal=False)
+    assert not batch.load_errors and not batch.isolated_message_errors
+    assert any(item.message_id == rows[1].message_id for item in batch.messages)
+
+
+def test_foreign_message_error_identity_stays_blocking(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.message_cursor_slice import MessageReadOutcome
+    from agent_py_agent.agent.memory_store.curator_inputs import collect_curator_inputs
+    from agent_py_agent.agent.memory_store.curator_models import (
+        MemoryCuratorConfig,
+        MemoryCuratorState,
+    )
+
+    store, _tid, _rows = make_messages(tmp_path, count=1)
+    monkeypatch.setattr(store.messages, 'after_slice_report', lambda *a, **k: MessageReadOutcome(load_errors=({
+        'thread_id': 'foreign-thread', 'error_type': 'DataCorruptionError', 'context': 'conversation.messages.after',
+    },)))
+    batch = collect_curator_inputs(message_source=CuratorMessageSource(store), audit_dir=tmp_path / 'audit',
+        state=MemoryCuratorState(), config=MemoryCuratorConfig(), scan_budget=budget())
+    assert batch.load_errors and not batch.isolated_message_errors and not batch.messages
+
+
 def _seed_cursor(service, cursors):
     from agent_py_agent.agent.common.json_io import locked_json_path
     with locked_json_path(service.state_store.path):

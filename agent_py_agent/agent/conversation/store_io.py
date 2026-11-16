@@ -386,7 +386,11 @@ class ImmutableJsonIndex:
                 read_budget.charge(size=1)
             raw = read_bytes_beneath(self.root, (*self.parts, ref['ref']), max_bytes=size)
         if raw is None:
-            raise ImmutableIndexNodeMissing('immutable index node is missing')
+            # 保留准确缺失节点，调用方才能定位坏引用；不得把缺源降级为空索引。
+            raise ImmutableIndexNodeMissing(
+                errno.ENOENT, 'immutable index node is missing',
+                str(self.root.joinpath(*self.parts, ref['ref'])),
+            )
         if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
             raise OSError('immutable index node digest or length mismatches')
         try:

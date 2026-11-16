@@ -1,6 +1,7 @@
 """仅在临时真实会话中注入坏行或冷层丢失，显式历史与身份校验继续拒绝。"""
 from __future__ import annotations
 
+import errno
 import json
 import shutil
 from types import SimpleNamespace
@@ -156,6 +157,8 @@ def test_missing_index_node_is_distinct_from_corruption(tmp_path):
     with pytest.raises(FileNotFoundError, match='immutable index node is missing') as failure:
         index.get(root, 'key')
     assert type(failure.value).__name__ == 'ImmutableIndexNodeMissing'
+    assert failure.value.errno == errno.ENOENT
+    assert failure.value.filename == str(node)
     node.write_bytes(original.replace(b'value', b'other'))
     with pytest.raises(OSError) as corrupt:
         index.get(root, 'key')

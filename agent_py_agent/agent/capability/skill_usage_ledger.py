@@ -25,7 +25,7 @@ from ..local_storage.owner_read_index import (
     require_complete,
 )
 from ..user_space.owner_quota import OwnerQuotaChange
-from .skill_learning_store import SkillLearningStore, SkillLearningStoreError
+from .skill_learning_store import SkillLearningStore, SkillLearningStoreError, owner_layout_exempt
 from .skill_usage_receipts import (
     canonical_task_key,
     read_usage_aggregate,
@@ -321,7 +321,7 @@ def learning_usage_binding(agent: object, entry: object) -> dict[str, object]:
         if not store.registry_path.exists():
             return result
         record = store.load_registry().skills.get(name)
-        if record is None or record.layout == "owner":
+        if record is None or owner_layout_exempt(record):
             return result
         if sha and str(record.sha256 or "").lower() != sha:
             return result
@@ -377,7 +377,7 @@ def _record_exact_and_reheat_locked(store: SkillLearningStore, events: list[dict
         if not name:
             continue
         current = registry.skills.get(name)
-        if current is None or current.layout == "owner" or name in registry.blocked_names:
+        if current is None or owner_layout_exempt(current) or name in registry.blocked_names:
             continue
         if current.maintenance.get("ownership") == "user_modified":
             continue
@@ -464,7 +464,7 @@ def load_usage_evidence(store_or_home, *, after_sequence: int = 0) -> dict[str, 
             except SkillLearningStoreError:
                 _warn("registry_partial")
                 for skill_name, rec in sorted(registry.skills.items()):
-                    if rec.layout == "owner" or rec.maintenance.get("ownership") in {"owner_layout", "user_modified", "unknown"}:
+                    if owner_layout_exempt(rec) or rec.maintenance.get("ownership") in {"owner_layout", "user_modified", "unknown"}:
                         continue
                     managed[skill_name] = rec
         except Exception:  # noqa: BLE001 - 注册表不可读时保持保守降级，不中断读路径

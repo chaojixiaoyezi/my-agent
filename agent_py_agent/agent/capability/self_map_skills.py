@@ -11,7 +11,7 @@ from ..tooling.self_map_registry import SectionDescriptor, SectionProjection, ma
 from ..user_space.self_map_paths import location_items
 from .learned_metadata_projection import metadata_from_registry
 from .skill_learning_maintenance import MAX_STRIKE_COUNT
-from .skill_learning_store import SkillLearningStore, SkillLearningStoreError
+from .skill_learning_store import SkillLearningStore, SkillLearningStoreError, owner_layout_exempt
 from .skill_learning_versions import frozen_learned_metadata_batch, learned_store
 
 
@@ -184,12 +184,12 @@ def skill_telemetry(
         cooled_count = sum(
             1
             for row in owner_registry.skills.values()
-            if row.layout != "owner" and row.maintenance.get("state") == "cooled"
+            if not owner_layout_exempt(row) and row.maintenance.get("state") == "cooled"
         )
         archived_count = sum(
             1
             for row in owner_registry.skills.values()
-            if row.layout != "owner" and row.maintenance.get("state") == "archived"
+            if not owner_layout_exempt(row) and row.maintenance.get("state") == "archived"
         )
         try:
             managed = owner_store.managed_records(owner_registry, include_archived=False)
@@ -229,7 +229,7 @@ def skill_telemetry(
                     rec = skills_map.get(entry.name)
                     if (
                         rec is None
-                        or rec.layout == "owner"
+                        or owner_layout_exempt(rec)
                         or rec.maintenance.get("ownership") in {"owner_layout", "user_modified"}
                     ):
                         user_owned += 1

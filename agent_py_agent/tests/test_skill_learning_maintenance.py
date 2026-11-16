@@ -872,3 +872,268 @@ def test_c4r_legacy_usage_keys_merge_before_replay_without_inflating_totals(tmp_
     assert saved['by_skill']['builtin:method']['manual_search'] == 1
     assert saved['by_skill']['builtin:method']['manual_get'] == 1
     assert usage.load_skill_usage_summary(store) == saved
+
+
+def _legacy_auto_lesson(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_store import (
+        LearnedSkill,
+        SkillLearningStore,
+    )
+    from agent_py_agent.tests.test_skill_proposals import _proposal_ctx
+
+    ctx = _proposal_ctx(tmp_path)
+    with ctx.service._locked():
+        committed = ctx.service._commit_locked(
+            ctx.service.directory / f'{ctx.proposal.proposal_id}.json', ctx.proposal, 'auto',
+        ).proposal
+    store = SkillLearningStore.for_home(ctx.home)
+    name = committed.target.skill_name
+    record = LearnedSkill(
+        name, 1, committed.draft.sha256, committed.created_at, committed.updated_at,
+        tuple(committed.source.run_ids), layout='owner',
+        maintenance={'state': 'trial', 'baseline_at': 1.0, 'ownership': 'owner_layout',
+                     'source_proposal_id': committed.proposal_id},
+    )
+    with store.state_lock():
+        registry = store.load_registry()
+        store.save_registry(replace(registry, skills={name: record}))
+    return ctx, store, record
+
+
+def test_existing_auto_confirmed_lesson_enters_lifecycle_preserving_path_and_identity(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_migration import adopt_committed_lessons
+
+    ctx, store, original = _legacy_auto_lesson(tmp_path)
+    path = store.skill_path(original.name)
+    before = path.read_bytes()
+    assert adopt_committed_lessons(store, ctx.service) == [original.name]
+    row = store.load_registry().skills[original.name]
+    assert row.layout == 'owner' and row.sha256 == original.sha256
+    assert store.skill_path(row.name) == path and path.read_bytes() == before
+    assert row.maintenance['ownership'] == 'machine'
+    assert row.maintenance['lifecycle_adoption']['proposal_id'] == ctx.proposal.proposal_id
+    assert adopt_committed_lessons(store, ctx.service) == []
+    assert row.name in store.managed_records(store.load_registry())
+    maintain_learning(store, mode='autonomous', archive_seconds=1, now=time.time(),
+                      protection_complete=True, batch_ms=5000)
+    archived = store.load_registry().skills[row.name]
+    assert archived.maintenance['state'] == 'archived'
+    assert not path.exists() and store.canonical_skill_path(row.name, record=archived).read_bytes() == before
+    control_learning(store, row.name, operation='restore')
+    assert path.read_bytes() == before
+    assert store.load_registry().skills[row.name].layout == 'owner'
+
+
+@pytest.mark.parametrize('mutate', ['body', 'extra_file', 'manual', 'source_hash', 'registered_source'])
+def test_legacy_adoption_never_takes_over_user_or_unverified_files(tmp_path, mutate):
+    import json
+
+    from agent_py_agent.agent.capability.skill_learning_migration import adopt_committed_lessons
+
+    ctx, store, original = _legacy_auto_lesson(tmp_path)
+    path = store.skill_path(original.name)
+    proposal_path = ctx.service.directory / f'{ctx.proposal.proposal_id}.json'
+    payload = json.loads(proposal_path.read_text())
+    if mutate == 'body':
+        path.write_text(path.read_text() + '\n用户补充\n')
+    elif mutate == 'extra_file':
+        (path.parent / 'notes.txt').write_text('用户附件')
+    elif mutate == 'manual':
+        payload['receipt']['confirmed_by'] = 'user'
+    elif mutate == 'source_hash':
+        payload['source']['content_hash'] = '0' * 64
+    else:
+        with store.state_lock():
+            registry = store.load_registry()
+            changed = replace(original, source_run_ids=('unrelated-run',))
+            store.save_registry(replace(registry, skills={original.name: changed}))
+    proposal_path.write_text(json.dumps(payload))
+    before = path.read_bytes()
+    if mutate == 'source_hash':
+        from agent_py_agent.agent.capability.skill_learning import _adopt_committed_lessons_isolated
+        _adopt_committed_lessons_isolated(store, ctx.service)
+    else:
+        assert adopt_committed_lessons(store, ctx.service) == []
+    assert path.read_bytes() == before
+    assert store.load_registry().skills[original.name].maintenance['ownership'] == 'owner_layout'
+
+
+def test_cap_progresses_past_unknown_skill_and_keeps_archive_recoverable(tmp_path):
+    from agent_py_agent.agent.capability.skill_usage_ledger import load_usage_evidence
+
+    ctx, store, original = _legacy_auto_lesson(tmp_path)
+    from agent_py_agent.agent.capability.skill_learning_migration import adopt_committed_lessons
+    adopt_committed_lessons(store, ctx.service)
+    # 同一机器来源的其它记录仅用于模拟混合所有权库，未知项不能按从未使用淘汰。
+    with store.state_lock():
+        registry = store.load_registry()
+        row = registry.skills[original.name]
+        for name in ('a-unknown', 'b-safe', 'c-safe'):
+            record = replace(row, name=name, layout='learned')
+            target = store.learned_root / name / 'SKILL.md'
+            target.parent.mkdir(parents=True)
+            target.write_bytes(store.skill_path(row.name).read_bytes())
+            registry = replace(registry, skills={**registry.skills, name: record})
+        store.save_registry(registry)
+    unknown = store.learned_root / 'a-unknown' / 'SKILL.md'
+    unknown.unlink()
+    unknown.symlink_to(tmp_path / 'outside')
+    result = maintain_learning(store, mode='autonomous', max_skills=1,
+                               protection_complete=True, batch_ms=5000)
+    registry = store.load_registry()
+    assert registry.skills['a-unknown'].maintenance['ownership'] == 'unknown'
+    assert registry.skills['a-unknown'].maintenance.get('ever_used') is False
+    assert len([r for r in registry.skills.values()
+                if r.maintenance.get('ownership') == 'machine' and r.maintenance['state'] != 'archived']) == 0
+    assert any(r.maintenance['state'] == 'archived' for r in registry.skills.values())
+    assert result['coverage']['usage_sufficient'] is True
+    assert load_usage_evidence(store)['coverage']['lifetime_summary'] == 'complete'
+
+
+def test_registered_legacy_receipt_survives_source_retention_and_restarts_usage_scan(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_migration import adopt_committed_lessons
+
+    ctx, store, original = _legacy_auto_lesson(tmp_path)
+    # 指向明确不存在的来源库，模拟历史候选被保留策略清理，不改原提案来源。
+    ctx.service.candidates_path = tmp_path / 'source-retained-missing.jsonl'
+    with store.state_lock():
+        registry = store.load_registry()
+        store.save_registry(replace(registry, maintenance_cursor={
+            'phase': 'usage', 'after_name': 'zz-last', 'started_at': time.time(),
+        }))
+    assert adopt_committed_lessons(store, ctx.service) == [original.name]
+    registry = store.load_registry()
+    assert registry.maintenance_cursor == {}
+    assert registry.skills[original.name].maintenance['lifecycle_adoption']['source_verification'] == 'committed_receipt_source_missing'
+
+
+def test_unregistered_missing_source_does_not_gain_machine_ownership_from_receipt(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_migration import adopt_committed_lessons
+
+    ctx, store, original = _legacy_auto_lesson(tmp_path)
+    ctx.service.candidates_path = tmp_path / 'source-retained-missing.jsonl'
+    with store.state_lock():
+        registry = store.load_registry()
+        store.save_registry(replace(registry, skills={}))
+    before = store.skill_path(original.name, record=original).read_bytes()
+    assert adopt_committed_lessons(store, ctx.service) == []
+    assert store.load_registry().skills == {}
+    assert store.skill_path(original.name, record=original).read_bytes() == before
+
+
+def test_cap_rank_does_not_classify_unknown_lifetime_as_never_used(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_publish import _victim_rank_key
+
+    _, _, row = _legacy_auto_lesson(tmp_path)
+    unknown = replace(row, maintenance={'ever_used': None, 'independent_uses_coverage': 'exact'})
+    never_used = replace(row, maintenance={'ever_used': False, 'independent_uses_coverage': 'exact'})
+    assert _victim_rank_key(row.name, unknown)[0] != 0
+    assert _victim_rank_key(row.name, never_used)[0] == 0
+
+
+def test_legacy_activity_upper_bound_delays_idle_archive_without_inventing_real_use(tmp_path):
+    ctx = _learned(tmp_path)
+    now = time.time()
+    with ctx.store.state_lock():
+        registry = ctx.store.load_registry()
+        row = registry.skills[NAME]
+        row = replace(row, maintenance={**row.maintenance, 'baseline_at': now - 100})
+        ctx.store.save_registry(replace(registry, skills={NAME: row}))
+    def evidence(_store):
+        return {'coverage': {'lifetime_summary': 'complete'}, 'by_skill': {
+            NAME: {'ever_used': True, 'last_activity_at_upper_bound': now - 5},
+        }}
+    maintain_learning(ctx.store, mode='autonomous', archive_seconds=20, now=now,
+                      protection_complete=True, usage_loader=evidence, batch_ms=5000)
+    maint = ctx.store.load_registry().skills[NAME].maintenance
+    assert maint['state'] == 'trial'
+    assert float(maint.get('last_used_at') or 0) == 0
+    assert maint['legacy_last_activity_upper_bound'] == now - 5
+
+
+def test_adopted_owner_layout_remains_managed_after_verified_revision(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_migration import adopt_committed_lessons
+    from agent_py_agent.agent.capability.skill_learning_prompt import parse_skill_learning_decision
+    from agent_py_agent.agent.capability.skill_learning_publish import (
+        PublishRequest,
+        _update_locked,
+    )
+
+    ctx, store, original = _legacy_auto_lesson(tmp_path)
+    adopt_committed_lessons(store, ctx.service)
+    before = store.load_registry().skills[original.name]
+    request = PublishRequest(
+        parse_skill_learning_decision(_output(name=original.name), frozenset()),
+        expected_revision=before.revision, expected_sha256=before.sha256,
+        promotion_authority='autonomous_verified',
+    )
+    with store.state_lock():
+        _update_locked(store, store.load_registry(), request)
+    row = store.load_registry().skills[original.name]
+    assert row.sha256 != before.sha256 and row.layout == 'owner'
+    assert row.maintenance['lifecycle_adoption'] == before.maintenance['lifecycle_adoption']
+    assert row.name in store.managed_records(store.load_registry())
+
+
+def test_legacy_adoption_service_proxy_includes_existing_owner_and_similarity_reads_its_path(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning import (
+        _adopt_committed_lessons_isolated,
+        _similar_managed_skills,
+    )
+    from agent_py_agent.agent.capability.skill_learning_prompt import parse_skill_learning_decision
+
+    ctx, store, original = _legacy_auto_lesson(tmp_path)
+    _adopt_committed_lessons_isolated(store, ctx.service)
+    assert store.load_registry().skills[original.name].maintenance['ownership'] == 'machine'
+    decision = parse_skill_learning_decision(
+        _output(name='same-procedure-new-name', body=ctx.proposal.draft.body), frozenset(),
+    )
+    matches = _similar_managed_skills(store, decision, threshold_percent=70)
+    assert matches == [{
+        'name': original.name, 'similarity_percent': 100,
+        'description': ctx.proposal.draft.description,
+        'when_to_use': ctx.proposal.draft.when_to_use,
+    }]
+
+
+def test_cap_one_entry_budget_isolates_failed_victim_and_continues_other_skills(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability.skill_learning_store import (
+        CODE_EVIDENCE_INCOMPLETE,
+        SkillLearningStoreError,
+    )
+
+    ctx = _learned(tmp_path)
+    store = ctx.store
+    with store.state_lock():
+        registry = store.load_registry()
+        source = registry.skills[NAME]
+        records = {}
+        for name in ('a-failing', 'b-safe', 'c-safe'):
+            row = replace(source, name=name, maintenance={**source.maintenance,
+                          'ownership': 'machine', 'ever_used': False})
+            target = store.learned_root / name / 'SKILL.md'
+            target.parent.mkdir(parents=True)
+            target.write_bytes(store.skill_path(NAME).read_bytes())
+            records[name] = row
+        store.save_registry(replace(registry, skills=records, maintenance_cursor={
+            'phase': 'lifecycle', 'after_name': 'zz-last', 'started_at': time.time(),
+        }))
+    archive = store._transition_archive_locked
+    attempts = []
+
+    def fail_one(registry, name, **kwargs):
+        attempts.append(name)
+        if name == 'a-failing':
+            raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, 'synthetic transient read failure')
+        return archive(registry, name, **kwargs)
+
+    monkeypatch.setattr(store, '_transition_archive_locked', fail_one)
+    for _ in range(20):
+        result = maintain_learning(store, mode='autonomous', max_skills=1,
+                                   protection_complete=True, batch_count=1, batch_ms=5000)
+        if not result['backlog']:
+            break
+    rows = store.load_registry().skills
+    assert attempts.count('a-failing') == 1
+    assert rows['a-failing'].maintenance['ownership'] == 'unknown'
+    assert rows['b-safe'].maintenance['state'] == rows['c-safe'].maintenance['state'] == 'archived'

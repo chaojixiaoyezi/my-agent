@@ -12,7 +12,7 @@ from .skill_learning_maintenance import (
     observe_learning,
 )
 from .skill_learning_publish import SkillLearningGateError
-from .skill_learning_store import SkillLearningStore, SkillLearningStoreError
+from .skill_learning_store import SkillLearningStore, SkillLearningStoreError, owner_layout_exempt
 from .skill_usage_receipts import candidate_delivery_task_keys, has_body_delivery_receipt
 
 _TARGET_KEYS = ('skill_id','skill_name','target_skill_id','asset_id','asset_ref','method_id','target_skill_ids')
@@ -122,7 +122,7 @@ def _observe(agent, params, outcome, receipt, evidence=None, *, allow_body_deliv
     candidates: list[tuple[object, list[dict], bool]] = []
     body_receipt_pairs: set[tuple[str, str]] = set()
     for row in registry.skills.values():
-        if row.layout == 'owner':
+        if owner_layout_exempt(row):
             continue
         adoptions = [
             fact

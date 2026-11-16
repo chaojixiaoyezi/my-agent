@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadIndex
 from agent_py_agent.agent.observability.telemetry_ledger import ToolCallRecord
 
@@ -140,6 +142,41 @@ def test_owner_index_refuses_linked_database_without_touching_target(tmp_path):
     assert view['status'] == 'unavailable'
     assert foreign.read_bytes() == b'foreign-owner-content'
     assert index.query(view)['total_count'] is None
+
+
+def test_owner_index_accepts_existing_readable_cache_without_chmod(tmp_path):
+    import stat
+
+    source(tmp_path)
+    cache = tmp_path / 'cache'
+    cache.mkdir()
+    cache.chmod(0o755)
+    index = OwnerReadIndex(tmp_path)
+    view = index.advance('telemetry', PARTS)
+    assert view['status'] == 'complete'
+    assert index.query(view)['total_count'] == 5
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o755
+    database = cache / 'owner_read_index.sqlite3'
+    assert stat.S_IMODE(database.stat().st_mode) == 0o600
+    database.chmod(0o644)
+    refused = OwnerReadIndex(tmp_path).advance('telemetry', PARTS)
+    assert refused['status'] == 'unavailable'
+    assert refused['reason'] == 'unsafe_cache_permissions'
+
+
+@pytest.mark.parametrize('mode', [0o775, 0o777])
+def test_owner_index_still_refuses_cache_writable_by_others(tmp_path, mode):
+    import stat
+
+    source(tmp_path)
+    cache = tmp_path / 'cache'
+    cache.mkdir()
+    cache.chmod(mode)
+    view = OwnerReadIndex(tmp_path).advance('telemetry', PARTS)
+    assert view['status'] == 'unavailable'
+    assert view['reason'] == 'unsafe_cache_permissions'
+    assert stat.S_IMODE(cache.stat().st_mode) == mode
+    assert not (cache / 'owner_read_index.sqlite3').exists()
 
 
 # LLM: 临时store原路径是owner根推导，不用runtime配置或真实用户数据。

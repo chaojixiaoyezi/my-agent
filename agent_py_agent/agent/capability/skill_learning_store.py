@@ -208,6 +208,20 @@ class LearnedSkill:
                    _text(payload, "updated_at"), tuple(runs), revision, raw_op_id or "", maint, str(payload.get("layout") or "learned"))
 
 
+def owner_layout_exempt(record: LearnedSkill) -> bool:
+    """布局只决定路径；经提案来源与正文核验并登记采纳事实的旧条目仍受机器维护。"""
+    adoption = record.maintenance.get("lifecycle_adoption")
+    adopted = (
+        isinstance(adoption, dict)
+        and adoption.get("schema") == "committed_proposal.v1"
+        and bool(adoption.get("proposal_id"))
+        and adoption.get("proposal_id") == record.maintenance.get("source_proposal_id")
+        and isinstance(adoption.get("original_sha256"), str)
+        and _SHA256_RE.fullmatch(adoption["original_sha256"]) is not None
+    )
+    return record.layout == "owner" and not adopted
+
+
 # LLM: skills 是自学 Skill 的唯一登记；blocked_names 是用户删过的名字，自动流程永不再新建；
 #   blocked_task_families 保存用户/三次负反馈永久停用的同类方法指纹；pending_operation 记录可恢复目录转换意图；
 #   usage_watermark 与 runtime receipt sequence 属于不同域，绝不混用比较。
@@ -730,7 +744,7 @@ class SkillLearningStore:
             if is_archived and not include_archived:
                 continue
             ownership = maint.get("ownership")
-            if record.layout == "owner" or ownership in {"owner_layout", "user_modified"}:
+            if owner_layout_exempt(record) or ownership in {"owner_layout", "user_modified"}:
                 continue
             if ownership == "unknown":
                 raise SkillLearningStoreError(
@@ -739,7 +753,8 @@ class SkillLearningStore:
                     detail={"skill_name": name, "reason": "ownership_unknown"},
                 )
             anchor = self.directory if is_archived else self.skills_root
-            rel_parts = ("archived", name, "SKILL.md") if is_archived else (LEARNED_DIR_NAME, name, "SKILL.md")
+            rel_parts = (("archived", name, "SKILL.md") if is_archived else
+                         self.skill_path(name, record=record).relative_to(self.skills_root).parts)
             try:
                 text = _read_managed_skill_text_strict(anchor, rel_parts, skill_name=name)
             except SkillLearningStoreError as exc:
@@ -829,7 +844,7 @@ class SkillLearningStore:
     # LLM: 按给定登记事实返回当前物理正文应驻留的规范 SKILL.md 路径（已归档则在 archived/，否则为在役路径）。
     # 函数用途: 根据布局与维护状态返回 Skill 正文规范路径。
     def canonical_skill_path(self, name: str, *, record: LearnedSkill) -> Path:
-        if record.layout != "owner" and record.maintenance.get("state") == "archived":
+        if record.maintenance.get("state") == "archived":
             return self.archived_skill_path(name)
         return self.skill_path(name, record=record)
 
@@ -941,7 +956,7 @@ class SkillLearningStore:
     ) -> tuple[SkillLearningRegistry, LearnedSkill]:
         registry = self._prepare_clean_registry_locked(registry, now=now)
         current = registry.skills.get(name)
-        if current is None or current.layout == "owner" or current.maintenance.get("state") == "archived":
+        if current is None or owner_layout_exempt(current) or current.maintenance.get("state") == "archived":
             raise SkillLearningStoreError(
                 CODE_EVIDENCE_INCOMPLETE,
                 f"skill {name} is not an active learned skill eligible for archive",
@@ -949,7 +964,7 @@ class SkillLearningStore:
             )
         ts = time.time() if now is None else float(now)
         op_id = uuid.uuid4().hex
-        src_rel = self._encode_rel("skills", (LEARNED_DIR_NAME, name))
+        src_rel = self._encode_rel("skills", self.skill_path(name, record=current).parent.relative_to(self.skills_root).parts)
         dst_rel = self._encode_rel("store", ("archived", name))
         ver_rel = self._encode_rel("store", ("versions", name))
         op: dict[str, object] = {
@@ -1027,7 +1042,7 @@ class SkillLearningStore:
     ) -> tuple[SkillLearningRegistry, LearnedSkill]:
         registry = self._prepare_clean_registry_locked(registry, now=now)
         current = registry.skills.get(name)
-        if current is None or current.layout == "owner" or current.maintenance.get("state") != "archived":
+        if current is None or owner_layout_exempt(current) or current.maintenance.get("state") != "archived":
             raise SkillLearningStoreError(
                 CODE_EVIDENCE_INCOMPLETE,
                 f"skill {name} is not an archived learned skill",
@@ -1036,7 +1051,7 @@ class SkillLearningStore:
         ts = time.time() if now is None else float(now)
         op_id = uuid.uuid4().hex
         src_rel = self._encode_rel("store", ("archived", name))
-        dst_rel = self._encode_rel("skills", (LEARNED_DIR_NAME, name))
+        dst_rel = self._encode_rel("skills", self.skill_path(name, record=current).parent.relative_to(self.skills_root).parts)
         ver_rel = self._encode_rel("store", ("versions", name))
         op: dict[str, object] = {
             "operation_id": op_id,
@@ -1105,7 +1120,7 @@ class SkillLearningStore:
     ) -> tuple[SkillLearningRegistry, LearnedSkill, LearnedSkill]:
         registry = self._prepare_clean_registry_locked(registry, now=now)
         victim = registry.skills.get(victim_name)
-        if victim is None or victim.layout == "owner" or victim.maintenance.get("state") == "archived":
+        if victim is None or owner_layout_exempt(victim) or victim.maintenance.get("state") == "archived":
             raise SkillLearningStoreError(
                 CODE_EVIDENCE_INCOMPLETE,
                 f"victim {victim_name} is not an active learned skill",
@@ -1113,7 +1128,7 @@ class SkillLearningStore:
             )
         ts = time.time() if now is None else float(now)
         op_id = uuid.uuid4().hex
-        src_rel = self._encode_rel("skills", (LEARNED_DIR_NAME, victim_name))
+        src_rel = self._encode_rel("skills", self.skill_path(victim_name, record=victim).parent.relative_to(self.skills_root).parts)
         dst_rel = self._encode_rel("store", ("archived", victim_name))
         stage_rel = self._encode_rel("store", ("tx_stage", op_id))
         ver_rel = self._encode_rel("store", ("versions", candidate_record.name))
@@ -1249,7 +1264,7 @@ class SkillLearningStore:
     ) -> SkillLearningRegistry:
         registry = self._prepare_clean_registry_locked(registry, now=now)
         current = registry.skills.get(name)
-        if current is None or current.layout == "owner":
+        if current is None or owner_layout_exempt(current):
             raise SkillLearningStoreError(
                 CODE_EVIDENCE_INCOMPLETE,
                 f"skill {name} is not an eligible learned skill for eviction",
@@ -2118,10 +2133,10 @@ class SkillLearningStore:
         return _callback
 
     def _skill_dir_location(self, name: str, *, record: LearnedSkill | None) -> tuple[Path, tuple[str, ...]]:
-        if record and record.layout == "owner":
-            return self.skills_root, (name,)
         if record and record.maintenance.get("state") == "archived":
             return self.directory, ("archived", name)
+        if record and record.layout == "owner":
+            return self.skills_root, (name,)
         return self.skills_root, (LEARNED_DIR_NAME, name)
 
     def _store_rel_prefix_parts(self) -> tuple[str, ...]:

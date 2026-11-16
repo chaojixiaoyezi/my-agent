@@ -174,7 +174,23 @@ def test_a_failure_after_the_change_does_not_claim_nothing_changed(tmp_path, mon
 
     monkeypatch.setattr(module, "learned_skills_report", _registry_unreadable)
     unreadable = _run(monkeypatch, ctx.home, "/skills learned")
-    assert unreadable.ok is False and unreadable.message == "技能提案或自动 Skill 暂时读不到，请稍后重试。"
+    assert unreadable.ok is False and "SKILL_CONTROL_READ_FAILED" in unreadable.message
+    assert "RuntimeError: registry unreadable" in unreadable.message
+    assert "没有修改 Skill" in unreadable.message and "/skills learned" in unreadable.message
+
+
+def test_skill_read_error_preserves_reason_without_secret_or_host_path(tmp_path, monkeypatch):
+    ctx = _learning_runtime(tmp_path, _output())
+
+    def unavailable(*_args):
+        raise OSError("permission denied /Users/private-owner/skills token=supersecret123")
+
+    monkeypatch.setattr(module, "learned_skills_report", unavailable)
+    result = _run(monkeypatch, ctx.home, "/skills learned")
+    assert not result.ok
+    assert "OSError" in result.message and "permission denied" in result.message
+    assert "supersecret123" not in result.message and "/Users/private-owner" not in result.message
+    assert "没有修改 Skill" in result.message
 
 
 # LLM: 真实候选通过原propose保存，测试不直接伪造正式Skill或绕过确认链。

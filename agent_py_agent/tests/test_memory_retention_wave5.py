@@ -2172,3 +2172,55 @@ def test_r8_cold_detail_parse_aba_is_bound_by_content_address(tmp_path, monkeypa
     assert fired and path.read_text() == payload
     pins, complete = _r5_finish_verification(snapshot, [])
     assert complete and pins.protects(evidence, []) and not pins.protects(control, [])
+
+
+@pytest.mark.parametrize("budgeted", [False, True])
+def test_missing_candidate_index_reports_source_and_recovers_without_discarding_pins(tmp_path, budgeted):
+    """真实索引缺叶须具体报错并保护引用；恢复原字节后新扫描自行恢复。"""
+    from agent_py_agent.agent.memory_store.candidate_ledger import read_manifest
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+
+    home, candidates, service = runtime(tmp_path)
+    target = _expired_pin_target(home, "referenced-cache.jsonl")
+    cache = old_file(home.owner_cache_dir / "independent-cache.jsonl")
+    candidates.observe(CandidateObservation(
+        candidate_type="lesson", content="保留证据的候选", subject_key="missing-index", origin="model_inferred",
+        scope=MemoryScope("personal", "personal"), evidence_refs=({"path": str(target)},),
+    ))
+    header = read_manifest(candidates.path)
+    missing = candidates.path.parent / (candidates.path.name + ".records") / header["root"]["ref"]["ref"]
+    original = missing.read_bytes()
+    missing.unlink()
+
+    def plan():
+        budget = RetentionScanBudget(10000, 8 * 1024 * 1024, float("inf")) if budgeted else None
+        return service.plan(now=NOW, scan_budget=budget)
+
+    report = plan()
+    pin_error = next(error for error in report.errors if error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
+    assert pin_error.path == str(missing)
+    assert "ImmutableIndexNodeMissing" in pin_error.message
+    assert "immutable index node is missing" in pin_error.message
+    assert "下一步" in pin_error.message and "其它动作结果见 actions" in pin_error.message
+    assert not [action for action in report.actions if action.path == target]
+    assert any(action.path == cache for action in report.actions)
+    assert target.exists() and cache.exists()  # dry-run 未产生删除副作用。
+
+    missing.write_bytes(original)
+    recovered = plan()
+    assert not recovered.errors
+    assert not [action for action in recovered.actions if action.path == target]
+    assert any(action.path == cache for action in recovered.actions)
+
+
+def test_pin_source_error_retains_cause_path_and_redacts_secrets():
+    secret = "sk-" + "a" * 48
+    cause = FileNotFoundError(errno.ENOENT, f"missing source token={secret}", "/owner/memory/index/node.json")
+    error = ValueError("candidate source wrapper")
+    error.__cause__ = cause
+    result = scan._pin_source_error(error)
+    assert result.path == cause.filename
+    assert "ValueError: candidate source wrapper" in result.message
+    assert "FileNotFoundError" in result.message and secret not in result.message
+    assert "恢复来源完整性后重跑 retention" in result.message

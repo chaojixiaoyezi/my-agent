@@ -211,7 +211,13 @@ def read_after_slice(path: Path, target: str, limit: int, budget: MessageScanBud
         return MessageReadOutcome(partial=True, reason="slice_budget")
     key = (*cursor_key(path, target), 'bounded-read')
     saved = cursor_io._MESSAGE_CURSORS.get(key)
-    with TranscriptReader(path, read_budget=budget) as reader:
+    # 前缀完整性核验和尾界检查也会耗尽本片预算；尚未取得快照时只能续办，不能报成坏账或EOF。
+    # TranscriptReader 构造失败负责关闭已打开FD；这里不发布定位提示或推进消费游标。
+    try:
+        reader = TranscriptReader(path, read_budget=budget)
+    except MessageReadDeferred:
+        return MessageReadOutcome(partial=True, reason="slice_budget")
+    with reader:
         info = os.fstat(reader.hot.fileno())
         stamp = file_stamp(info)
         changed_ns = file_descriptor_change_ns(reader.hot.fileno(), info)
