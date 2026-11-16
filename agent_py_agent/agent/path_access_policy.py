@@ -1534,7 +1534,7 @@ def _persona_owner_directories(directory: Path) -> tuple[Path, ...]:
         return ()
     if not stat.S_ISDIR(metadata.st_mode):
         raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: owner directory")
-    children = tuple(directory.iterdir())
+    children = tuple(path for path in directory.iterdir() if _canonical_owner_segment(path.name))
     if any(path.is_symlink() for path in children):
         raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: owner symlink")
     return tuple(path for path in children if path.is_dir())
@@ -1712,3 +1712,9 @@ def _foreground_other_owner_patterns(prefix: str) -> tuple[str, ...]:
     managed = '|'.join(re.escape('/'.join(item)) for item in HOST_MANAGED_OWNER_STORE_PARTS)
     return (*(_macos_readonly_chunk(prefix, [atom]) for atom in _macos_readonly_atoms()),
             f"^{prefix}/({managed})(/|$)")
+
+
+def _canonical_owner_segment(name: str) -> bool:
+    # 与OwnerIdentity的safe_path_segment原样映射相同；本模块也发布为无宿主依赖SDK，保持纯路径判断。
+    # 点/横线/下划线边缘在canonical编码中会消失，故产品辅助目录不属于owner，未知合法编号仍受保护。
+    return bool(name) and name == name.strip('.-_/') and all(char.isalnum() or char in {'_', '-', '.'} for char in name)

@@ -468,7 +468,13 @@ def _request_local_tool_for_invocation(
         if dynamic_policy.foreground_admin_full_access is True:
             paths = retained_host_exclusive_paths(paths, dynamic_policy.agent_home_root, foreground_admin_full_access=True)
             paths = tuple(path for path in paths if Path(path).resolve(strict=False) not in declared)
-        process_tool.host_exclusive_paths = tuple(dict.fromkeys((*paths, *dynamic_policy.business_aggregate_roots, *(custom_hidden if dynamic_policy.foreground_admin_full_access is True else ()))))
+        unavailable = ()
+        if dynamic_policy.foreground_admin_full_access is True and request.host_output_redaction is not None:
+            # 仅保留本次未解析来源的精确文件，不能恢复配置父目录整根遮罩或阻断健康诊断。
+            unavailable = tuple(status.source_path for status in request.host_output_redaction.snapshot.unavailable_sources
+                if status.source_path is not None)
+        process_tool.host_exclusive_paths = tuple(dict.fromkeys((*paths, *dynamic_policy.business_aggregate_roots,
+            *(custom_hidden if dynamic_policy.foreground_admin_full_access is True else ()), *unavailable)))
     if hasattr(scoped, "path_access_policy"):
         scoped.path_access_policy = dynamic_policy
     if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):

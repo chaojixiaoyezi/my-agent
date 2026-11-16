@@ -324,3 +324,101 @@ def test_snapshot_reader_failure_is_partial_without_remasking_or_denial(tmp_path
     assert redaction.snapshot.snapshot_error_code == 'CREDENTIAL_SNAPSHOT_UNAVAILABLE'
     assert boundary['host_foreground_interactive'] is True
     assert boundary['foreground_admin_full_access'] is False
+
+
+@pytest.mark.parametrize('tool_name', ['run_command', 'terminal_session'])
+def test_native_unavailable_opaque_source_stays_exactly_hidden(tmp_path, tool_name):
+    import shlex
+    import time
+
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.settings.secret_ref import configured_credential_snapshot
+    from agent_py_agent.agent.tooling.host_output_redaction import HostOutputRedaction
+    from agent_py_agent.agent.tooling.pty_sessions import (
+        PtyHostPolicy,
+        PtySessionRegistry,
+        TerminalSessionTool,
+    )
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        RegistryToolInvokeRequest,
+        _request_local_tool_for_invocation,
+    )
+    from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions, _run_shell_command
+
+    root = tmp_path / 'home'
+    own = root / 'owners/local/main'
+    own.mkdir(parents=True)
+    source = tmp_path / 'oversized-opaque-source'
+    source.write_text('abcdefghijklmnop')
+    healthy = root / 'config/agent_config.yaml'
+    healthy.parent.mkdir(parents=True)
+    healthy.write_text('healthy-diagnostic')
+    config = AgentConfig(api_key='file:' + str(source), tool_read_max_chars=8)
+    snapshot = configured_credential_snapshot(config)
+    assert snapshot.coverage == 'partial' and not snapshot.secret_values
+    policy = HostOutputRedaction(snapshot=snapshot, force_default=True)
+    shell = ShellTool(own, options=ShellToolOptions(path_access_mode='full', access_mode='full-access',
+        protected_persona_root=str(own), host_exclusive_paths=(healthy.parent, source)))
+    tool = TerminalSessionTool(shell) if tool_name == 'terminal_session' else shell
+    boundary = {'foreground_admin_full_access': True, 'host_foreground_config_sources': [str(source)]}
+    request = RegistryToolInvokeRequest(tool_name=tool_name, arguments={}, tools={tool_name: tool},
+        workspace_root=own, workspace_roots=[own], allowed_tools=None, write_boundary=boundary,
+        path_access_mode='full', host_output_redaction=policy)
+    copied = _request_local_tool_for_invocation(tool, request=request, workspace_roots=[own])
+    selected = getattr(copied, 'shell_tool', copied)
+    assert source in selected.host_exclusive_paths and healthy.parent not in selected.host_exclusive_paths
+    command = 'cat ' + shlex.quote(str(source)) + '; cat ' + shlex.quote(str(healthy))
+    if tool_name == 'run_command':
+        result = _run_shell_command(selected, command, own, 5, None, None, None)
+        output = result.stdout
+    else:
+        registry = PtySessionRegistry()
+        session = registry.start(command, own, host_policy=PtyHostPolicy(protected_persona_root=own,
+            foreground_admin_full_access=True, host_exclusive_paths=selected.host_exclusive_paths,
+            host_output_redaction=policy))
+        try:
+            deadline = time.monotonic() + 5
+            while not session.closed and time.monotonic() < deadline:
+                time.sleep(.01)
+            output = session.read(0, 100000)[0].decode()
+        finally:
+            registry.clear()
+    assert 'abcdefghijklmnop' not in output
+    assert 'healthy-diagnostic' in output
+
+
+def test_product_auxiliary_directory_is_not_an_owner_but_canonical_symlink_is_rejected(tmp_path):
+    import time
+
+    from agent_py_agent.agent.path_access_policy import (
+        AgentsSourceProtectionError,
+        _persona_owner_homes,
+    )
+    from agent_py_agent.agent.tooling.process_session_store import (
+        ProcessSessionStore,
+        process_session_store_root,
+    )
+    from agent_py_agent.agent.tooling.pty_sessions import PtyHostPolicy, PtySessionRegistry
+
+    root = tmp_path / 'home'
+    own = root / 'owners/local/main'
+    own.mkdir(parents=True)
+    with ProcessSessionStore(process_session_store_root(own, own)).transaction():
+        pass
+    assert (own.parent / '.my-agent-runtime').is_dir()
+    assert _persona_owner_homes(root) == (own,)
+    registry = PtySessionRegistry()
+    session = registry.start("printf 'auxiliary-safe\\n'", own,
+        host_policy=PtyHostPolicy(protected_persona_root=own, foreground_admin_full_access=True))
+    try:
+        deadline = time.monotonic() + 5
+        while not session.closed and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert b'auxiliary-safe' in session.read(0, 10000)[0]
+    finally:
+        registry.clear()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (own.parent / 'canonical-user').symlink_to(outside, target_is_directory=True)
+    with pytest.raises(AgentsSourceProtectionError, match='owner symlink'):
+        _persona_owner_homes(root)
