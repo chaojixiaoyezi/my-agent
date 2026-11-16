@@ -144,3 +144,17 @@ def test_cancelled_future_drain_keeps_service_then_exact_completion_allows_retry
     finally:
         release.set()
         worker.join(5)
+
+
+# 函数用途: 取消报告带出已发表的原因与未结清项数；旧状态没有原因时保持原句。
+@pytest.mark.parametrize('reason, refs, expected', [
+    ('background_unsettled', [{'reason': 'background_operation_unsettled'}] * 2,
+     '排空已取消（原因 background_unsettled，未结清 2 项），尚未开始服务收尾；原进程仍存活，未更新。后台工作结清后可再试。'),
+    ('stop_requested', [], '排空已取消（原因 stop_requested），尚未开始服务收尾；原进程仍存活，未更新。请用'),
+    ('', None, '排空已取消，尚未开始服务收尾；原进程仍存活，未更新。请用'),
+])
+def test_cancelled_drain_report_names_reason_and_unsettled_count(capsys, reason, refs, expected):
+    drain = {'phase': 'cancelled', 'service_cleanup_started': False, 'reason': reason,
+             'unresolved_operation_refs': refs}
+    handover._report_unsuccessful_drain(drain, os.getpid())
+    assert expected in capsys.readouterr().err

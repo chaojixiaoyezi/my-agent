@@ -481,7 +481,13 @@ def safe_stop_for_update(agent,paths,pid):
 def _report_unsuccessful_drain(drain: dict, pid: int) -> None:
     """只报告已发表的生命周期阶段，不把取消意图或 PID 存活当作服务就绪。"""
     if drain.get('phase') == 'cancelled' and drain.get('service_cleanup_started') is False and is_pid_alive(pid):
-        print('排空已取消，尚未开始服务收尾；原进程仍存活，未更新。请用 my-agent gateway status 核验服务就绪。',
+        # 取消原因与未结清项数取自已发表的排空状态，让用户知道为何未切换以及何时可以再试。
+        reason = str(drain.get('reason') or '')
+        refs = drain.get('unresolved_operation_refs')
+        count = len(refs) if isinstance(refs, list) else 0
+        detail = f'（原因 {reason}' + (f'，未结清 {count} 项' if count else '') + '）' if reason else ''
+        hint = '后台工作结清后可再试。' if reason == 'background_unsettled' else ''
+        print(f'排空已取消{detail}，尚未开始服务收尾；原进程仍存活，未更新。{hint}请用 my-agent gateway status 核验服务就绪。',
               file=sys.stderr)
     else:
         print('排空未完整确认，未更新；原实例可能已进入不可逆收尾或退出。请用 my-agent gateway status 核验，'
