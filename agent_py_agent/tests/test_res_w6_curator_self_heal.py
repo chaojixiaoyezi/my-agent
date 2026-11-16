@@ -175,14 +175,26 @@ def test_unidentified_thread_list_errors_still_block_message_collection(error):
     assert messages == [] and errors == [error]
 
 
-def test_unreadable_thread_transcript_still_blocks_curator(tmp_path):
+def test_unreadable_thread_transcript_is_isolated_without_consuming_source(tmp_path):
     store, thread, _message = _conversation(tmp_path)
     store.storage.message_path(thread.thread_id).write_bytes(b"invalid transcript\n")
     service = _service(tmp_path, _OkBackend(), store)
     result = service.run(reason="admin")
-    assert result.status == "failed" and result.failure_code.startswith("CURATOR_INPUT_")
+    assert result.status == "succeeded" and not result.failure_code
     assert service.state_store.load().per_thread_cursors == {}
     assert service.backend.calls == 0
+    assert store.storage.message_path(thread.thread_id).read_bytes() == b"invalid transcript\n"
+    assert service.candidate_service.list() == []
+    [record] = service.run_log.list()
+    [warning] = [item for item in record.warnings if item.startswith("curator_message_read_isolated=")]
+    diagnostic = json.loads(warning.split("=", 1)[1])
+    assert diagnostic == {
+        "thread_id": thread.thread_id,
+        "error_type": "JSONDecodeError",
+        "error_code": "MESSAGE_SOURCE_UNREADABLE",
+        "effect_outcome": "not_started",
+        "next_action": "repair_source_then_retry",
+    }
 
 
 @pytest.mark.parametrize("migration_complete", [False, True])

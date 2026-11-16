@@ -82,7 +82,9 @@ def _conversation(tmp_path: Path):
 # 函数用途: 造真实 state/daily/candidate/run-log 权威上的 Curator 服务（max_retries=0：解析失败只调一次）。
 def _service(tmp_path: Path, backend: object, store: ConversationStore) -> MemoryCuratorService:
     config = MemoryCuratorConfig(interval_seconds=60, turn_threshold=1, batch_message_limit=80, max_input_chars=40000,
-                                 timeout_seconds=1, max_retries=0, daily_finalize_hour=23)
+                                 timeout_seconds=1, max_retries=0, daily_finalize_hour=23,
+                                 # 身份回归不测墙钟性能；真实读口仍保留条数、字节和时间上界。
+                                 retention_scan_slice_ms=10_000)
     return MemoryCuratorService(config=config, dependencies=MemoryCuratorDependencies(
         backend=backend, conversation_store=store, audit_dir=tmp_path / "audit",
         state_store=MemoryCuratorStateStore(tmp_path / "memory" / "curator" / "state.json"),
@@ -161,11 +163,47 @@ def test_replaying_an_unclaimed_message_with_the_same_content_does_not_duplicate
     mango = _candidate(message.message_id, "用户对芒果过敏。", "health.allergy")
     backend = _Backend(_output(message, [peanut, mango], {"processed": False}), _output(message, [peanut, mango]))
     service = _service(tmp_path, backend, store)
-    assert service.run(reason="admin").processed_messages == 0
+    first = service.run(reason="admin")
+    assert first.status == "succeeded" and first.processed_messages == 0
+    assert backend.calls == 1
     assert service.run(reason="admin").processed_messages == 1
     assert service.state_store.load().per_thread_cursors == {thread.thread_id: message.message_id}
     candidates = service.candidate_service.list()
     assert len(candidates) == 2 and all(item.occurrence_count == 1 for item in candidates)
+
+
+def test_scan_deferral_does_not_consume_the_unclaimed_observation_output(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+
+    store, thread, message = _conversation(tmp_path)
+    peanut = _candidate(message.message_id, "用户对花生过敏。", "health.allergy")
+    backend = _Backend(_output(message, [peanut], {"processed": False}), _output(message, [peanut]))
+    service = _service(tmp_path, backend, store)
+    original = RetentionScanBudget.default
+    budgets = 0
+
+    def first_expired(config=None):
+        nonlocal budgets
+        budgets += 1
+        budget = original(config)
+        if budgets == 1:
+            budget.deadline = float("-inf")
+        return budget
+
+    monkeypatch.setattr(RetentionScanBudget, "default", staticmethod(first_expired))
+    deferred = service.run(reason="admin")
+    assert deferred.status == "busy" and deferred.processed_messages == 0
+    assert backend.calls == 0 and service.candidate_service.list() == []
+    assert service.state_store.load().per_thread_cursors == {}
+    unclaimed = service.run(reason="admin")
+    assert unclaimed.status == "succeeded" and unclaimed.processed_messages == 0
+    assert backend.calls == 1 and service.state_store.load().per_thread_cursors == {}
+    completed = service.run(reason="admin")
+    assert completed.status == "succeeded" and completed.processed_messages == 1
+    assert backend.calls == 2
+    assert service.state_store.load().per_thread_cursors == {thread.thread_id: message.message_id}
+    [candidate] = service.candidate_service.list()
+    assert candidate.occurrence_count == 1 and len(candidate.observation_keys) == 1
 
 
 def test_paraphrase_of_the_same_subject_in_one_batch_is_a_separate_candidate(tmp_path):
