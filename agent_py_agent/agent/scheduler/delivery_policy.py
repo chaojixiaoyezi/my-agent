@@ -129,7 +129,7 @@ def available_delivery_targets(agent):
 
     home = agent.home_paths
     threads = agent.conversation_store.threads
-    rows, errors = threads.list_report(limit=0)
+    rows, errors = threads.bound_threads_report()
     if any(not error.get('thread_id') for error in errors):
         raise ScheduleDeliveryTargetUnauthorized()
     skipped_thread_ids = {str(error['thread_id']) for error in errors}
@@ -142,10 +142,6 @@ def available_delivery_targets(agent):
         if thread.owner_id != home.owner_id or thread.owner_home != str(home.owner_home_dir):
             continue
         for binding in thread.channel_bindings:
-            current, error = threads.resolve_report(channel=binding.channel,
-                channel_user_id=binding.channel_user_id, channel_conversation_id=binding.channel_conversation_id)
-            if error or current is None or current.thread_id != thread.thread_id:
-                continue
             stamp = None
             local = supports_transcript_delivery(binding.channel) or binding.channel == 'web'
             if not local:

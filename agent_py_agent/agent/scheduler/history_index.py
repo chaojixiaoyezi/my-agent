@@ -50,10 +50,11 @@ def _snapshot(path, *, prefix=None):
 class SchedulerHistoryIndex:
     # LLM: 只建本owner同目录的投影；SQLite文件私有创建，拒绝链接及非常规文件。
     # 函数用途: 初始化可重建索引，不读取历史正文。
-    def __init__(self, source: Path, owner: dict, parser):
+    def __init__(self, source: Path, owner: dict, parser, *, read_only: bool = False):
         self.source, self.owner, self.parser = Path(source), dict(owner), parser
         self.path = self.source.with_suffix(".index.sqlite3")
-        self._install()
+        if not read_only:
+            self._install()
 
     # LLM: 安装只补齐本owner缺失的投影文件和既有schema，不读取、删除或改写规范历史。
     # 函数用途: 用构造器原有流程创建私有SQLite文件及全部表索引。
@@ -279,3 +280,70 @@ class SchedulerHistoryIndex:
                 return frozenset(found), True
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
             return frozenset(), False
+
+
+    def terminal_run_proof(self, run_id, *, thread_id, cutoff, max_bytes=1048576, deadline=None):
+        """点查仅作定位，按末字节位置重读原行；不创建索引、不回填、不用投影签发删除权。"""
+        import math
+
+        unknown = {"status": "unknown", "run_id": run_id, "thread_id": thread_id,
+                   "side_effects": "not_started"}
+        if (not isinstance(run_id, str) or not run_id.startswith("srun_")
+                or type(max_bytes) is not int or max_bytes <= 0):
+            return {**unknown, "reason": "SCHEDULER_PROOF_ARGUMENT_INVALID"}
+        try:
+            from ..io.readonly_sqlite import readonly_sqlite_connection
+        except ImportError as exc:
+            return {**unknown, "reason": "SCHEDULER_PROOF_READONLY_SQLITE_UNAVAILABLE",
+                    "error_type": type(exc).__name__, "message": str(exc)}
+        try:
+            with readonly_sqlite_connection(self.path, blocking=False, deadline=deadline) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN")
+                state, snapshot = self._state(conn), _snapshot(self.source)
+                size = snapshot["stamp"][2] if snapshot["stamp"] else 0
+                if (state.get("owner") != self.owner or not size
+                        or any(state.get(key) != snapshot[key] for key in ("stamp", "head", "tail"))
+                        or state.get("cursor") != size or state.get("pending") or state.get("skipping")):
+                    return {**unknown, "reason": "SCHEDULER_HISTORY_INDEX_INCOMPLETE"}
+                row = conn.execute("SELECT payload,position FROM history_effects WHERE generation=? AND run_id=?",
+                                   (state["generation"], run_id)).fetchone()
+                if row is None:
+                    return {**unknown, "reason": "SCHEDULER_PROOF_RUN_MISSING"}
+                position = row["position"]
+                if type(position) is not int or not 0 < position <= size:
+                    return {**unknown, "reason": "SCHEDULER_PROOF_POSITION_INVALID"}
+                count = min(position, max_bytes + 1)
+                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                with os.fdopen(descriptor, "rb") as handle:
+                    handle.seek(position - count)
+                    raw = handle.read(count)
+                if not raw.endswith(b"\n"):
+                    return {**unknown, "reason": "SCHEDULER_PROOF_ROW_BOUNDARY_INVALID"}
+                content = raw[:-1]
+                boundary = content.rfind(b"\n")
+                if boundary < 0 and position > count:
+                    return {**unknown, "reason": "SCHEDULER_PROOF_ROW_TOO_LARGE"}
+                payload = json.loads(content[boundary + 1:])
+                if payload != json.loads(row["payload"]) or _snapshot(self.source) != snapshot:
+                    return {**unknown, "reason": "SCHEDULER_PROOF_SOURCE_CHANGED"}
+                parsed, error = self.parser(payload, terminal=True)
+                if error or parsed is None:
+                    return {**unknown, "reason": error or "SCHEDULER_PROOF_SCHEMA_INVALID"}
+                ended = parsed.get("ended_at")
+                if (parsed.get("run_id") != run_id or parsed.get("thread_id") != thread_id
+                        or parsed.get("owner") != self.owner
+                        or parsed.get("status") not in {"done", "failed", "cancelled", "skipped"}
+                        or parsed.get("delivery_status") not in {"sent", "suppressed", "local_only", "no_channel"}
+                        or type(ended) not in (int, float) or not math.isfinite(ended) or not 0 < ended < cutoff
+                        or parsed.get("cancel_requested_at") and parsed.get("cancel_cleanup_confirmed") is not True
+                        or any(parsed.get(key) for key in ("delivery_pending", "consume_pending", "callback_pending"))):
+                    return {**unknown, "reason": "SCHEDULER_PROOF_NOT_SETTLED"}
+                return {"status": "settled", "run_id": run_id, "thread_id": thread_id,
+                        "owner": dict(self.owner), "terminal_status": parsed["status"], "ended_at": ended,
+                        "execution_mode": (parsed.get("execution") or {}).get("mode", "followup"),
+                        "source_generation": state["generation"], "source_stamp": snapshot["stamp"],
+                        "source_position": position, "side_effects": "not_started"}
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+            return {**unknown, "reason": "SCHEDULER_PROOF_READ_FAILED", "error_type": type(exc).__name__,
+                    "message": str(exc)}

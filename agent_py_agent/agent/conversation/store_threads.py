@@ -582,7 +582,11 @@ class ThreadStore:
     def list_report(
         self, *, limit: int = 100, workspace_dir: str | None = None
     ) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
-        return _workspace_thread_report(self, limit=limit, workspace_dir=workspace_dir)
+        if limit <= 0:
+            return _workspace_thread_report(self, limit=limit, workspace_dir=workspace_dir)
+        from .thread_read_index import ThreadReadIndex
+
+        return ThreadReadIndex(self).report(limit=limit, workspace_dir=workspace_dir)
 
     def page_report(self, *, cursor: dict | None = None, limit: int = 16, budget):
         """后台只分页发现规范ID；正文由同一Store的快照读口在剩余预算读取。"""
@@ -978,6 +982,8 @@ class ThreadStore:
             write_json_file_atomic(path, thread.to_dict(), **({} if blocking else {"blocking": False}))
         finally:
             _drop_cached_thread(path)
+        from .thread_read_index import publish_thread
+        publish_thread(self, path)
 
     # LLM: Compact/设置/选择沿原锁与CAS，C显式非阻塞不变；锁已在writer返回时释放，只失效缓存避免并发旧值配新指纹。
     # 函数用途: 原子更新线程，返回独立对象；下一次读取重新缓存真实文件。
@@ -994,8 +1000,30 @@ class ThreadStore:
                                               require_existing=True, **({} if blocking else {"blocking": False}))
         finally:
             _drop_cached_thread(path)
+        from .thread_read_index import publish_thread
+        publish_thread(self, path)
         thread = ConversationThread.from_dict(payload)
         return _clone_cached_thread(thread)
+
+    def bound_threads_report(self):
+        """只读当前绑定所指的精确线程；历史孤立线程不参与通知目录。"""
+        bindings, error = self._read_bindings_report()
+        if error:
+            return [], [error]
+        rows, errors = [], []
+        for thread_id in dict.fromkeys(bindings.values()):
+            try:
+                thread, error = self.load_report(thread_id)
+            except ValueError as exc:
+                error = runtime_error_report(exc, context="conversation.bindings.read")
+                thread = None
+            if error:
+                errors.append(error)
+            elif thread is not None:
+                rows.append(replace(thread, channel_bindings=tuple(binding for binding in thread.channel_bindings
+                    if bindings.get(_binding_key(binding.channel, binding.channel_conversation_id,
+                                                 binding.channel_user_id)) == thread.thread_id)))
+        return rows, errors
 
     def _read_binding_report(self, binding_key: str) -> tuple[str, dict[str, Any] | None]:
         """缓存精确键的稳定文件观察；每次仍实时加载线程及继任指针。"""
@@ -1388,6 +1416,8 @@ def create_thread_atomic(threads: ThreadStore, thread: ConversationThread) -> Co
 
     try:
         result = update_json_file_atomic(path, create)
+        from .thread_read_index import publish_thread
+        publish_thread(threads, path)
         return ConversationThread.from_dict(result)
     finally:
         _drop_cached_thread(path)

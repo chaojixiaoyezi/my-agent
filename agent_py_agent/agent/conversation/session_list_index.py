@@ -45,9 +45,9 @@ class SessionListIndex:
         self.scope = hashlib.sha256(f"{self.root.resolve()}:{kind}".encode()).hexdigest()[:24]
 
     @contextmanager
-    def _connection(self):
+    def _connection(self, *, blocking=True):
         ensure_private_dir(self.path.parent)
-        with locked_json_path(self.path):
+        with locked_json_path(self.path, **({} if blocking else {"blocking": False})):
             if not self.path.exists():
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 os.close(fd)
@@ -55,7 +55,7 @@ class SessionListIndex:
             info = self.path.lstat()
             if info.st_nlink != 1:
                 raise ValueError("list projection hardlink rejected")
-            with scoped_connection(self.path, False, self._open_projection,
+            with scoped_connection(self.path, False, self._open_projection if blocking else lambda: self._open_projection(timeout=0),
                                    rebuild_projection=self._projection_rebuild_proof) as conn:
                 try:
                     yield conn
@@ -69,17 +69,18 @@ class SessionListIndex:
 
     # LLM: 两个排序索引分别服务过滤和无过滤 keyset 查询，按原建库路径幂等升级。
     # 函数用途: 打开私有列表投影并补齐有界分页所需索引。
-    def _open_projection(self):
-        conn = connect_projection_sqlite(self.path, timeout=5.0)
+    def _open_projection(self, *, timeout=5.0):
+        conn = connect_projection_sqlite(self.path, timeout=timeout)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-1024")
             conn.execute("CREATE TABLE IF NOT EXISTS entries (path TEXT PRIMARY KEY, sort_at REAL, filter_key TEXT, stamp TEXT, generation INTEGER)")
             conn.execute("CREATE INDEX IF NOT EXISTS list_order ON entries(filter_key, sort_at DESC, path DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS list_order_all ON entries(sort_at DESC, path DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS list_generation ON entries(generation,path)")
             conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
             conn.execute("INSERT OR IGNORE INTO meta VALUES ('revision', ?)", (str(time.time_ns()),))
             if self.kind == 'session_task':
@@ -164,7 +165,7 @@ class SessionListIndex:
 
     # LLM: 重建和游标版本在同一连接事务提交；每批成员变化都废弃前一批的游标。
     # 函数用途: 有界补齐定位记录，防止后续批次插入到已越过的排序区间。
-    def _refresh(self, conn) -> bool:
+    def _refresh(self, conn, *, budget=None) -> bool:
         current = _stamp(self.root)
         if self._meta(conn, "directory") != current:
             self._put_meta(conn, "directory", current)
@@ -174,7 +175,8 @@ class SessionListIndex:
             self._put_meta(conn, "generation", int(self._meta(conn, "generation", "0")) + 1)
             self._put_meta(conn, "revision", int(self._meta(conn, "revision", "0")) + 1)
         if self._meta(conn, "complete", "0") == "1":
-            return not self._probe_file_identities(conn)
+            return not (self._probe_file_identities(conn) if budget is None
+                        else self._probe_file_identities(conn, budget=budget))
         cursor_raw = self._meta(conn, "directory_cursor")
         cursor: dict = {}
         valid_cursor = False
@@ -190,10 +192,22 @@ class SessionListIndex:
         enumerated = int(self._meta(conn, "offset", "0") or 0) if valid_cursor else 0
         generation = int(self._meta(conn, "generation", "0"))
         before = conn.total_changes
-        names, cursor, exhausted = directory_page(
-            self.root, (), cursor, _REBUILD_BATCH, require_dir_fd=False,
-        )
-        for name in names:
+        pending = cursor.pop("list_pending", [])
+        if pending:
+            names, exhausted = pending, bool(cursor.pop("list_exhausted", False))
+        else:
+            count = min(_REBUILD_BATCH, max(0, budget.max_entries - budget.entries)) if budget is not None else _REBUILD_BATCH
+            names, cursor, exhausted = directory_page(
+                self.root, (), cursor, count, require_dir_fd=False,
+            )
+        for position, name in enumerate(names):
+            if budget is not None and budget.exhausted():
+                cursor["list_pending"] = names[position:]
+                cursor["list_exhausted"] = exhausted
+                exhausted = False
+                break
+            if budget is not None:
+                budget.charge(entries=1)
             if self.kind != "session" and not name.endswith(".json"):
                 continue
             path = self.root / name
@@ -207,6 +221,9 @@ class SessionListIndex:
                 path /= "session.json"
             elif not stat.S_ISREG(mode):
                 continue
+            record_bytes = path.stat(follow_symlinks=False).st_size
+            if budget is not None:
+                budget.charge(size=record_bytes)
             self._refresh_entry(conn, path, generation)
         changed = conn.total_changes > before
         complete = exhausted and current == _stamp(self.root)
@@ -214,14 +231,27 @@ class SessionListIndex:
         self._put_meta(conn, "offset", enumerated + len(names))
         self._put_meta(conn, "complete", int(complete))
         if complete:
-            removed = conn.execute("DELETE FROM entries WHERE generation<>?", (generation,)).rowcount
+            stale = conn.execute("SELECT path FROM entries WHERE generation<? ORDER BY generation,path LIMIT ?",
+                                 (generation, _REBUILD_BATCH)).fetchall()
+            removed = 0
+            for row in stale:
+                if budget is not None and budget.exhausted():
+                    complete = False
+                    self._put_meta(conn, "complete", 0)
+                    break
+                if budget is not None:
+                    budget.charge(entries=1)
+                removed += conn.execute("DELETE FROM entries WHERE path=?", (row[0],)).rowcount
+            if len(stale) == _REBUILD_BATCH:
+                complete = False
+                self._put_meta(conn, "complete", 0)
             changed = changed or removed > 0
         # entries 的写入或最终清理与版本一起提交，不能签发跨批仍有效的旧游标。
         if changed:
             self._put_meta(conn, "revision", int(self._meta(conn, "revision", "0")) + 1)
         return complete
 
-    def _probe_file_identities(self, conn):
+    def _probe_file_identities(self, conn, *, budget=None):
         # 老写者可原位改正文而不改变目录mtime。每页只stat两个引用，循环游标落原投影；
         # 发现变化才读正文修位置。稳定页不全目录遍历、不把未抽中的可变对象当权限依据。
         after = self._meta(conn, "probe_after")
@@ -229,12 +259,20 @@ class SessionListIndex:
         if not rows:
             rows = conn.execute("SELECT path,stamp FROM entries ORDER BY path LIMIT 2").fetchall()
         changed = False
+        checked = []
         for row in rows:
+            if budget is not None and budget.exhausted():
+                break
+            checked.append(row)
+            if budget is not None:
+                budget.charge(entries=1)
             path = self.root / row["path"]
             if _stamp(path) != row["stamp"]:
+                if budget is not None and path.exists():
+                    budget.charge(size=path.stat(follow_symlinks=False).st_size)
                 self._record(conn, path, int(self._meta(conn, "generation", "0")))
                 changed = True
-        self._put_meta(conn, "probe_after", rows[-1]["path"] if rows else "")
+        self._put_meta(conn, "probe_after", checked[-1]["path"] if checked else "")
         if changed:
             self._put_meta(conn, "revision", int(self._meta(conn, "revision")) + 1)
         return changed
