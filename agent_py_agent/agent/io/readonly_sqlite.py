@@ -12,6 +12,43 @@ from pathlib import Path
 from ..common.json_io import check_io_deadline
 
 
+def _windows_sqlite_platform():
+    return os.name == "nt"
+
+
+def _reject_reparse(info):
+    if getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        raise ValueError("readonly SQLite path contains a reparse point")
+
+
+@contextmanager
+def _portable_read_directory(path):
+    """复用仓内Windows逐层nofollow检查；复核身份，不冒充POSIX dirfd原子保证或ACL校验。"""
+    from ..common.nofollow_fs import _portable_directory
+
+    anchor, parts = Path(path.anchor), path.parent.parts[1:]
+    _portable_directory(anchor, parts, create=False)
+
+    def snapshot():
+        result = []
+        for depth in range(len(parts) + 1):
+            directory = anchor.joinpath(*parts[:depth])
+            info = directory.lstat()
+            _reject_reparse(info)
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise ValueError("readonly SQLite parent is not a regular directory")
+            result.append((info.st_dev, info.st_ino, info.st_mode))
+        return tuple(result)
+
+    expected = snapshot()
+    def verify():
+        _portable_directory(anchor, parts, create=False)
+        if snapshot() != expected:
+            raise ValueError("readonly SQLite parent identity changed")
+    verify()
+    yield None, verify
+
+
 # LLM: 投影数据库必须在私有、无链接目录内；连接前后核同一普通文件，侧车不能沿链接产生副作用。
 # 函数用途: 拒绝链接、硬链接和特殊文件，取得已存在文件身份。
 def _regular_identity(path: Path, *, require_owner=False) -> tuple[int, int] | None:
@@ -19,7 +56,8 @@ def _regular_identity(path: Path, *, require_owner=False) -> tuple[int, int] | N
         info = path.lstat()
     except FileNotFoundError:
         return None
-    if require_owner and info.st_uid != os.geteuid():
+    _reject_reparse(info)
+    if require_owner and not _windows_sqlite_platform() and info.st_uid != os.geteuid():
         raise PermissionError("readonly SQLite file must belong to current identity")
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ValueError(f"projection requires a single-link regular file: {path}")
@@ -51,6 +89,11 @@ def _ensure_trusted_ancestor(descriptor, current_path: Path, parent_stat, *, rea
 # 函数用途: 在SQLite按路径打开之前建立私有父目录，并提供同一目录链的身份复核。
 @contextmanager
 def _projection_directory(path: Path, *, read_only=False, require_private_directory=True):
+    if read_only and _windows_sqlite_platform():
+        # Windows没有POSIX uid/mode和dir_fd；不建目录、不改ACL，沿原portable契约拒绝全部reparse。
+        with _portable_read_directory(path) as state:
+            yield state
+        return
     if os.open not in os.supports_dir_fd:
         raise OSError(errno.ENOTSUP, "projection requires descriptor-relative directory access")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
