@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+import agent_py_agent.agent.scheduler.recovery as recovery_module
 import agent_py_agent.agent.scheduler.repository as repository_module
 from agent_py_agent.agent.scheduler.repository import (
     SchedulerConflictError,
@@ -265,3 +266,263 @@ def test_unverifiable_oserror_keeps_state_fail_closed(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(repository_module.os, "kill", _raising_kill)
     assert repo.recover_interrupted_executions(now=1_006.0) == []
     assert repo.get_active_run(run_id)["status"] == "claimed"  # fail-closed 保持
+
+
+def _prepare_dead_running_batch(repo: SchedulerRepository, count: int) -> tuple[dict, list[str]]:
+    """创建一条样本终态记录，以及 count 个租约过期并进入 running 的运行记录。"""
+    repo.create_job(
+        SchedulerJobCreateRequest(
+            name="seed",
+            prompt="run",
+            thread_id="th-seed",
+            source_task_id="t-seed",
+            source_request_id="req-seed",
+            schedule=_every(anchor=1_000, seconds=600),
+            now=999.0,
+        )
+    )
+    seed_run = repo.reserve_due_runs(now=1_000.0)[0]
+    seed_claim = repo.claim_run(str(seed_run["run_id"]), lease_seconds=10, now=1_001.0)
+    assert seed_claim is not None
+    repo.mark_run_running(str(seed_run["run_id"]), str(seed_claim["claim_id"]), now=1_002.0)
+    seed_terminal = repo.finish_run(
+        str(seed_run["run_id"]),
+        str(seed_claim["claim_id"]),
+        SchedulerRunFinish(status="done", response="seed-done", now=1_003.0),
+    )
+
+    for idx in range(count):
+        repo.create_job(
+            SchedulerJobCreateRequest(
+                name=f"worker-{idx}",
+                prompt="run",
+                thread_id=f"th-{idx}",
+                source_task_id=f"t-{idx}",
+                source_request_id=f"req-batch-{idx}",
+                schedule=_every(anchor=1_061, seconds=60),
+                now=1_060.0,
+            )
+        )
+    due = repo.reserve_due_runs(now=1_061.0, limit=count + 5)
+    assert len(due) == count
+    run_ids: list[str] = []
+    for row in due:
+        run_id = str(row["run_id"])
+        claim = repo.claim_run(run_id, lease_seconds=10, now=1_062.0)
+        assert claim is not None
+        repo.mark_run_running(run_id, str(claim["claim_id"]), now=1_063.0)
+        run_ids.append(run_id)
+
+    store = json.loads(repo.store_path.read_text(encoding="utf-8"))
+    for run_id in run_ids:
+        store["runs"][run_id]["claim_expires_at"] = 1_005.0
+        store["runs"][run_id]["runner_pid"] = 71
+        store["runs"][run_id]["runner_start_time"] = "7"
+    repo.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return seed_terminal, run_ids
+
+
+@pytest.mark.parametrize("dead_count", [20, 40])
+def test_batch_dead_running_recovery_streams_history_once_with_bounded_matches(
+    tmp_path, monkeypatch, dead_count: int
+) -> None:
+    """批量恢复 20/40 个已开跑死亡运行时，仅流式扫描一次历史且保留 O(K) 匹配结果。"""
+    repo = _repository(tmp_path)
+    seed_terminal, dead_run_ids = _prepare_dead_running_batch(repo, dead_count)
+
+    history_rows = 3_000
+    with repo.history_path.open("w", encoding="utf-8") as handle:
+        for idx in range(history_rows):
+            handle.write(
+                json.dumps(
+                    {**seed_terminal, "run_id": f"srun_hist_{idx:05d}"},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
+    assert not hasattr(recovery_module, "read_jsonl_objects_report")
+
+    fallback_accept_calls: list[int] = []
+    accept_invocations: list[str] = []
+    batch_sizes: list[int] = []
+    single_calls: list[str] = []
+
+    original_fallback = repository_module._history_membership_fallback
+    original_existing_terminals = recovery_module.existing_terminals
+    original_existing_terminal = recovery_module.existing_terminal
+
+    def _spy_fallback(path, requested, *, allow_missing, accept=None):
+        if accept is not None:
+            fallback_accept_calls.append(len(requested))
+
+            def _wrapped_accept(raw):
+                accept_invocations.append(str(raw.get("run_id") or ""))
+                return accept(raw)
+
+            return original_fallback(
+                path, requested, allow_missing=allow_missing, accept=_wrapped_accept
+            )
+        return original_fallback(path, requested, allow_missing=allow_missing, accept=None)
+
+    def _spy_existing_terminals(repository_arg, runs_arg):
+        result = original_existing_terminals(repository_arg, runs_arg)
+        batch_sizes.append(len(result))
+        return result
+
+    def _spy_existing_terminal(repository_arg, run_arg):
+        single_calls.append(str(run_arg.get("run_id") or ""))
+        return original_existing_terminal(repository_arg, run_arg)
+
+    monkeypatch.setattr(repository_module, "_history_membership_fallback", _spy_fallback)
+    monkeypatch.setattr(recovery_module, "existing_terminals", _spy_existing_terminals)
+    monkeypatch.setattr(recovery_module, "existing_terminal", _spy_existing_terminal)
+
+    recovered = repo.recover_interrupted_executions(now=1_006.0)
+
+    assert sorted(recovered) == sorted(dead_run_ids)
+    assert single_calls == []
+    assert fallback_accept_calls == [dead_count]
+    assert accept_invocations == []  # 3000 条无关历史行不得触发 accept 解析
+    assert batch_sizes == [0]
+    assert json.loads(repo.store_path.read_text(encoding="utf-8"))["runs"] == {}
+
+    persisted = [
+        json.loads(line)
+        for line in repo.history_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(persisted) == history_rows + dead_count
+    by_id = {row["run_id"]: row for row in persisted}
+    for run_id in dead_run_ids:
+        assert by_id[run_id]["status"] == "unknown"
+        assert by_id[run_id]["error_code"] == "SCHEDULER_RUNNER_DIED"
+        assert by_id[run_id]["claim_epoch"] == 1
+
+
+def test_batch_recover_runs_preserves_persisted_terminals_in_single_scan_and_dedupes(
+    tmp_path, monkeypatch
+) -> None:
+    """同批 20 个死亡运行中部分已有持久化终态时，仅扫描一次且不重复追加已存在终态。"""
+    repo = _repository(tmp_path)
+    seed_terminal, dead_run_ids = _prepare_dead_running_batch(repo, 20)
+    store = json.loads(repo.store_path.read_text(encoding="utf-8"))
+    persisted_ids = dead_run_ids[:2]
+    persisted_rows = [
+        {
+            **store["runs"][run_id],
+            "status": "done",
+            "ended_at": 1_004.0,
+            "updated_at": 1_004.0,
+            "claim_id": "",
+            "claim_expires_at": 0.0,
+            "response": f"persisted-{idx}",
+        }
+        for idx, run_id in enumerate(persisted_ids)
+    ]
+    with repo.history_path.open("w", encoding="utf-8") as handle:
+        for idx in range(2_500):
+            handle.write(
+                json.dumps({**seed_terminal, "run_id": f"srun_pad_{idx:05d}"}, sort_keys=True) + "\n"
+            )
+            if idx == 500:
+                handle.write(json.dumps(persisted_rows[0], sort_keys=True) + "\n")
+            if idx == 1_500:
+                handle.write(json.dumps(persisted_rows[1], sort_keys=True) + "\n")
+                # 后面的错 epoch 行不得覆盖前面精确匹配的终态
+                handle.write(
+                    json.dumps(
+                        {**persisted_rows[1], "claim_epoch": 2, "response": "wrong-epoch"},
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
+    accept_calls: list[int] = []
+    accept_rows: list[str] = []
+    original_fallback = repository_module._history_membership_fallback
+
+    def _spy_fallback(path, requested, *, allow_missing, accept=None):
+        if accept is not None:
+            accept_calls.append(len(requested))
+
+            def _wrapped(raw):
+                accept_rows.append(str(raw.get("run_id") or ""))
+                return accept(raw)
+
+            return original_fallback(path, requested, allow_missing=allow_missing, accept=_wrapped)
+        return original_fallback(path, requested, allow_missing=allow_missing, accept=None)
+
+    monkeypatch.setattr(repository_module, "_history_membership_fallback", _spy_fallback)
+    recovered = recovery_module.recover_runs(repo, current=1_006.0)
+
+    assert sorted(recovered) == sorted(dead_run_ids)
+    assert accept_calls == [20]
+    assert sorted(accept_rows) == sorted([persisted_ids[0], persisted_ids[1], persisted_ids[1]])
+
+    lines = [
+        json.loads(line)
+        for line in repo.history_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    # 2500 条填充 + 2 条既有终态 + 1 条错 epoch 干扰 + 18 条新落盘 unknown（2 条已存在不得重复追加）
+    assert len(lines) == 2_500 + 3 + 18
+    counts = {}
+    for row in lines:
+        counts[row["run_id"]] = counts.get(row["run_id"], 0) + 1
+    assert counts[persisted_ids[0]] == 1
+    assert counts[persisted_ids[1]] == 2  # 原 epoch=1 与干扰 epoch=2 各一条，未追加 unknown
+
+
+def test_settle_dead_run_single_run_backward_compatibility_and_empty_map(tmp_path, monkeypatch) -> None:
+    """单条 settle_dead_run(repo, store, run, current=...) 向后兼容，且显式空映射 {} 不退回扫盘。"""
+    repo = _repository(tmp_path / "single")
+    run_id = _make_claimed_run(repo)
+    first = repo.get_active_run(run_id)
+    repo.mark_run_running(run_id, str(first["claim_id"]), now=1_063.0)
+
+    store = repo._store_snapshot()
+    run = dict(store["runs"][run_id])
+    terminal = recovery_module.settle_dead_run(repo, store, run, current=1_090.0)
+    assert terminal["status"] == "unknown"
+    assert terminal["error_code"] == "SCHEDULER_RUNNER_DIED"
+    assert run_id not in store["runs"]
+
+    # 历史中已有精确终态时，不传 terminal_by_run 的单条调用也应命中该终态
+    repo2 = _repository(tmp_path / "hit")
+    run_id2 = _make_claimed_run(repo2)
+    claim2 = repo2.get_active_run(run_id2)
+    repo2.mark_run_running(run_id2, str(claim2["claim_id"]), now=1_063.0)
+    store2 = repo2._store_snapshot()
+    run2 = dict(store2["runs"][run_id2])
+    persisted = {
+        **run2,
+        "status": "done",
+        "ended_at": 1_064.0,
+        "updated_at": 1_064.0,
+        "claim_id": "",
+        "claim_expires_at": 0.0,
+        "response": "single-hit",
+    }
+    repo2.history_path.write_text(json.dumps(persisted, sort_keys=True) + "\n", encoding="utf-8")
+    res_hit = recovery_module.settle_dead_run(repo2, store2, run2, current=1_090.0)
+    assert res_hit["status"] == "done" and res_hit["response"] == "single-hit"
+
+    # 显式传入 terminal_by_run={}（falsy 非 None）时，不得再触发 existing_terminal 扫盘
+    monkeypatch.setattr(
+        recovery_module,
+        "existing_terminal",
+        lambda *_args, **_kwargs: pytest.fail("empty terminal_by_run map must not trigger rescan"),
+    )
+    store3 = repo2._store_snapshot()
+    res_empty_map = recovery_module.settle_dead_run(
+        repo2, store3, run2, current=1_090.0, terminal_by_run={}
+    )
+    assert res_empty_map["status"] == "unknown"
+    assert res_empty_map["error_code"] == "SCHEDULER_RUNNER_DIED"
