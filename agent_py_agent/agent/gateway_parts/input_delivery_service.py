@@ -19,7 +19,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -640,14 +640,30 @@ def gateway_input_guidance_binding(
 # LLM: 状态迁移始终在原输入T；v3冻结运输缺guidance仍pending，不能按旧v2缺席queue；恢复关联owner/actor/thread由原source核，typed拒绝不改unknown回执。
 # LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
 # LLM: queued且原请求已归档、无热队列时须结算；canonical终态不能单独证明消息被消费，仍以原guidance为准。
+@contextmanager
+def _bound_input_transition(paths, request_id, *, nonblocking=False):
+    if not nonblocking:
+        with gateway_input_transition(paths, request_id):
+            yield
+        return
+    from .io import try_gateway_turn_transition
+    with try_gateway_turn_transition(paths, request_id) as acquired:
+        if not acquired:
+            raise BlockingIOError('input reconcile target transition busy')
+        yield
+
+
 def reconcile_gateway_input_request(
     paths: GatewayPaths,
     *,
     request_id: str,
     conversation_store: object,
     target_terminal: bool = False,
+    _commit_scope=None,
 ) -> str:
-    with gateway_input_transition(paths, request_id):
+    with _bound_input_transition(paths, request_id, nonblocking=_commit_scope is not None), ExitStack() as authority:
+        if _commit_scope is not None:
+            authority.enter_context(_commit_scope())
         receipt = read_gateway_input_receipt(paths, request_id)
         if receipt is None:
             return ""
@@ -684,6 +700,11 @@ def reconcile_gateway_input_request(
             return "terminal_unknown"
         if guidance is None:
             if receipt.transport is not None:
+                if target_terminal and receipt.transport.get('schema_version') == 'gateway_input_transport.v2':
+                    from .input_target_observation import ended_background_input_slice
+                    if ended_background_input_slice(paths, conversation_store, receipt):
+                        queued, _created = queue_gateway_input_locked(paths, receipt)
+                        return queued.state
                 return receipt.state
             if receipt.state == "pending" and not receipt.target_turn_id:
                 queued, _created = queue_gateway_input_locked(paths, receipt)
@@ -820,6 +841,7 @@ def reconcile_gateway_input_receipts(
         # 供 raise_if_input_reconcile_unsettled 抛给循环守卫，进 loop_health 与日志，不再静默。
         "terminal_unknown_errors": 0,
         "last_terminal_unknown_error": {},
+        "last_error": {},
         "quarantined": 0,
     }
     last_path: Path | None = None
@@ -847,6 +869,9 @@ def reconcile_gateway_input_receipts(
             except Exception as exc:
                 _raise_input_transport_uncertain(exc)
                 summary["errors"] += 1
+                summary["last_error"] = {"request_id": path.stem, "stage": "receipt",
+                    "error_type": type(exc).__name__, "category": "io" if isinstance(exc, OSError) else "data_corruption",
+                    "context": "gateway.input.reconcile.receipt"}
                 failure_type = type(exc).__name__ if not isinstance(exc, OSError) else "OSError"
             if summary["terminal_unknown_errors"] > before_errors[1]:
                 failure_type = summary["last_terminal_unknown_error"].get("error_type", "")
@@ -866,6 +891,9 @@ def reconcile_gateway_input_receipts(
                     raise pending_error from (pending_error.__cause__ if getattr(pending_error, "__cause__", None) is not None else exc)
                 _raise_input_transport_uncertain(exc)
                 summary["errors"] += 1
+                summary["last_error"] = {"request_id": "<cursor_commit>", "stage": "cursor_commit",
+                    "error_type": type(exc).__name__, "category": "io" if isinstance(exc, OSError) else "data_corruption",
+                    "context": "gateway.input.reconcile.cursor"}
     return summary
 
 
@@ -1008,7 +1036,7 @@ def _reconcile_unsettled_receipt(
 # 函数用途: 周期对账与请求收尾结算同一原目标，先释放目标T/M再取入口T。
 # LLM: 目标T改由同一原输入/恢复producer取得；同typed未知不补绑定、不得转读失败后继续排队。
 # LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
-def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayInputReceipt) -> str:
+def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayInputReceipt, *, _commit_scope=None) -> str:
     try:
         binding = gateway_input_guidance_binding(receipt, store)
     except Exception as exc:
@@ -1019,23 +1047,44 @@ def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayI
     target_type = str(getattr(entry, "target_type", "") or "")
     target_id = str(getattr(entry, "target_id", "") or "")
     turn_id = binding[1] if binding is not None else ""
+    if binding is None and receipt.transport is not None:
+        from .input_transport import validated_input_transport
+        target = validated_input_transport(receipt.transport)['target']
+        if target['kind'] == 'task':
+            target_type, target_id, turn_id = 'task', target['task_id'], target['turn_id']
     lifecycle = "unknown"
     if turn_id and target_type in {"request", "task"} and target_id:
         with ExitStack() as locks:
-            locks.enter_context(gateway_input_transition(paths, turn_id))
-            locks.enter_context(store.guidance.ledger.turn_guard(turn_id))
+            locks.enter_context(_bound_input_transition(paths, turn_id, nonblocking=_commit_scope is not None))
+            locks.enter_context(store.guidance.ledger.turn_guard(turn_id, blocking=_commit_scope is None))
             if target_type == "task":
-                locks.enter_context(store.tasks.transition_guard(target_id))
+                if _commit_scope is None:
+                    locks.enter_context(store.tasks.transition_guard(target_id))
+                else:
+                    from .input_target_observation import input_background_task_guard
+                    locks.enter_context(input_background_task_guard(store, target_id))
             lifecycle = _input_target_lifecycle(paths, store, target_id, target_type=target_type)
+            if target_type == "task" and receipt.transport is not None:
+                from .input_target_observation import ended_background_input_slice
+                if ended_background_input_slice(paths, store, receipt):
+                    lifecycle = "terminal"
             if lifecycle == "terminal":
-                store.guidance.recovery.settle_turn_locked(
-                    turn_id, TurnEndSettlement(reject_reserved=True, target=(target_type, target_id)),
-                )
+                with ExitStack() as authority:
+                    if _commit_scope is not None:
+                        authority.enter_context(_commit_scope())
+                    store.guidance.recovery.settle_turn_locked(
+                        turn_id, TurnEndSettlement(reject_reserved=True, settle_dead_submissions=False, target=(target_type, target_id)),
+                    )
+    if (target_type == 'task' and receipt.transport is not None
+            and receipt.transport.get('schema_version') == 'gateway_input_transport.v2'
+            and lifecycle != 'terminal' and (binding is None or getattr(binding[0], 'status', '') != 'consumed')):
+        return receipt.state
     return reconcile_gateway_input_request(
         paths,
         request_id=receipt.request_id,
         conversation_store=store,
         target_terminal=(lifecycle == "terminal"),
+        _commit_scope=_commit_scope,
     )
 
 
@@ -1050,9 +1099,10 @@ def _note_terminal_unknown_error(paths: GatewayPaths, request_id: str, summary: 
         return
     summary["terminal_unknown_errors"] += 1
     summary["last_terminal_unknown_error"] = {
-        "request_id": request_id,
+        "request_id": request_id, "stage": "terminal_unknown",
         **{key: str(error.get(key) or "") for key in ("error_type", "category", "context")},
     }
+    summary["last_error"] = dict(summary["last_terminal_unknown_error"])
 
 
 # LLM: 对账结果里的错误必须让循环守卫看见（loop_health 计数 + 限流打印），否则坏账回执只会每轮被静默重读。
@@ -1061,7 +1111,7 @@ def _note_terminal_unknown_error(paths: GatewayPaths, request_id: str, summary: 
 # 类用途: 表示一轮对账里有回执因错误无法收口，携带结构化 summary。
 class GatewayInputReconcileUnsettledError(RecoverableRuntimeError):
     def __init__(self, summary: dict[str, Any]) -> None:
-        last = summary.get("last_terminal_unknown_error") or {}
+        last = summary.get("last_error") or summary.get("last_terminal_unknown_error") or {"request_id": "<reconcile>", "error_type": "UnclassifiedReconcileError"}
         self.summary = dict(summary)
         self.category = str(last.get("category") or "") or "recoverable_runtime"
         super().__init__(

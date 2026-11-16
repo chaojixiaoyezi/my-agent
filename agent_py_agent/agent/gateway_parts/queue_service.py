@@ -276,7 +276,7 @@ def claim_request(
     # unrelated requests never wait on a shared process-global claim lock.
     with gateway_turn_transition(paths, request_path.stem), ExitStack() as claim_scopes:
         canonical = paths.terminal / request_path.name
-        if not request_path.exists() or processing_path.exists() or canonical.exists():
+        if not request_path.exists() or processing_path.exists():
             return None
         from .multiprocess_mode import current_worker_partition
 
@@ -293,6 +293,9 @@ def claim_request(
             context="gateway.claim.request.read",
         )
         if report.load_error is not None or not report.payload:
+            from .owner_retention import gateway_terminal_exists
+            if gateway_terminal_exists(paths, request_path.name):
+                return None
             try:
                 request_path.replace(processing_path)
             except OSError as exc:
@@ -307,6 +310,23 @@ def claim_request(
         else:
             transport_payload = report.payload
             if claim_mode == "queue_worker" and _is_inline_plugin_execution_record(transport_payload):
+                return None
+            observation = _observe_pending_request_payload(paths, request_path, payload=transport_payload)
+            if observation['status'] == 'duplicate_terminal':
+                from .recovery import (
+                    _commit_gateway_terminal_request,
+                    gateway_terminal_projection_folder,
+                )
+                from .response_renderer import read_gateway_terminal_envelope_report
+                terminal = read_gateway_terminal_envelope_report(canonical, request_id=request_path.stem,
+                                                               include_sealed=True)
+                if terminal.load_error is not None:
+                    return None
+                row = terminal.payload
+                _commit_gateway_terminal_request(paths, request_path,
+                    gateway_terminal_projection_folder(paths, row['terminal_response']), request_path.stem, row)
+                return None
+            if observation['status'] == 'protected':
                 return None
             try:
                 transport_payload = _gateway_claim_transport_payload(
@@ -529,3 +549,106 @@ def archive_request(
             GatewayArchiveDisposition.RETRYABLE_IO,
             error=str(exc),
         )
+
+
+def _observe_pending_request_payload(paths, request_path, *, payload=None, blocking=False, deadline=None):
+    """只读精确单条待办元数据；不领取、修复、返回正文或依赖 age。"""
+    from .recovery import _same_gateway_request_identity
+    request_path = Path(request_path)
+    result = {'request_id': request_path.stem, 'status': 'pending',
+              'reason': 'no_terminal_proof', 'coverage': 'exact'}
+    if (paths.processing / request_path.name).exists():
+        return {**result, 'status': 'protected', 'reason': 'active_processing'}
+    if payload is None:
+        report = _pending_observation_report(request_path, deadline=deadline)
+        if report.load_error is not None or not report.payload:
+            return {**result, 'status': 'protected', 'reason': 'pending_unreadable', 'coverage': 'unavailable'}
+        payload = report.payload
+    if not payload:
+        return {**result, 'status': 'protected', 'reason': 'pending_unreadable', 'coverage': 'unavailable'}
+    if _is_inline_plugin_execution_record(payload):
+        return {**result, 'status': 'protected', 'reason': 'inline_only'}
+    from .response_renderer import validate_gateway_terminal_envelope_report
+    raw = _pending_observation_report(paths.terminal / request_path.name, deadline=deadline)
+    if not raw.payload and raw.load_error is None:
+        return result
+    report = raw if raw.load_error else validate_gateway_terminal_envelope_report(
+        raw.payload, request_id=request_path.stem)
+    if report.load_error is not None or not report.payload:
+        return {**result, 'status': 'protected', 'reason': 'terminal_unreadable', 'coverage': 'unavailable'}
+    from .request_owner_binding import frozen_request_owner
+    try:
+        owner_matches = frozen_request_owner(report.payload) == frozen_request_owner(payload)
+    except DataCorruptionError:
+        owner_matches = False
+    route_matches = 'route' not in payload or payload['route'] == report.payload.get('route')
+    if not owner_matches or not route_matches:
+        return {**result, 'status': 'protected', 'reason': 'immutable_identity_mismatch'}
+    if not _same_gateway_request_identity(report.payload, payload, request_id=request_path.stem):
+        return {**result, 'status': 'protected', 'reason': 'immutable_identity_mismatch'}
+    return {**result, 'status': 'duplicate_terminal', 'reason': 'canonical_terminal_identity'}
+
+
+def observe_pending_request(paths: GatewayPaths, request_id: str, *, blocking: bool = False,
+                            deadline: float | None = None) -> dict[str, object]:
+    """展示精确已知待办的归属和等待原因，不返回请求正文或初始化目录。"""
+    from .recovery_pending_index import projection_key
+    request_id = projection_key(request_id)
+    path = paths.inbox / (request_id + '.json')
+    report = _pending_observation_report(path, deadline=deadline)
+    row = report.payload if report.load_error is None else {}
+    observed = _observe_pending_request_payload(paths, path, payload=row, blocking=blocking, deadline=deadline)
+    reasons = {'active_processing': 'processing_active', 'inline_only': 'inline_execution_only',
+               'terminal_unreadable': 'authority_unavailable', 'pending_unreadable': 'authority_unavailable',
+               'immutable_identity_mismatch': 'identity_mismatch'}
+    reason = reasons.get(observed['reason'], observed['reason'])
+    from .request_owner_binding import frozen_request_owner
+    try:
+        owner = frozen_request_owner(row) if row else None
+    except DataCorruptionError:
+        owner = None
+        observed.update(status='protected', coverage='unavailable')
+        reason = 'identity_mismatch'
+    conversation = row.get('conversation') if isinstance(row.get('conversation'), dict) else {}
+    return {'request_id': request_id, 'owner_id': owner.owner_id if owner else '',
+            'thread_id': str(conversation.get('thread_id') or ''), 'request_ref': str(path),
+            'state': observed['status'], 'wait_reason': reason,
+            'orphan_reason': reason if observed['status'] == 'protected' else '',
+            'coverage': observed['coverage']}
+
+
+def _pending_observation_report(path, *, deadline=None):
+    """原子 JSON 的只读快照；不创建读锁侧车，单条过大或换代返回不可观察。"""
+    import json
+    import os
+    import stat
+
+    from ..common.json_io import check_io_deadline
+    from .io import GatewayJsonReadReport, lookup_gateway_receipt_bytes
+    check_io_deadline(deadline)
+    try:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            raw = lookup_gateway_receipt_bytes(path, no_repair=True)
+            return GatewayJsonReadReport(json.loads(raw) if raw is not None else {})
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 8 * 1024 * 1024:
+                raise ValueError('pending observation requires bounded single-link regular JSON')
+            with os.fdopen(os.dup(descriptor), 'rb') as stream:
+                raw = stream.read(8 * 1024 * 1024 + 1)
+            after = path.lstat()
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                raise ValueError('pending observation identity changed')
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError('pending observation JSON root must be object')
+            check_io_deadline(deadline)
+            return GatewayJsonReadReport(payload)
+        finally:
+            os.close(descriptor)
+    except (OSError, ValueError, UnicodeError, DataCorruptionError) as exc:
+        return GatewayJsonReadReport({}, {'error_type': type(exc).__name__,
+            'category': 'observation_unavailable', 'context': 'gateway.pending.observe'})

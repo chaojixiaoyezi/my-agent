@@ -59,13 +59,13 @@ class GuidanceLedger:
 
     # LLM: GuidanceLedger：运行循环与终态结算共用精确回合锁；不得改变与 Gateway 外锁、回执锁的获取顺序。
     # 函数用途: 返回一个精确活动回合的补充消息状态转换锁。
-    def turn_guard(self, expected_turn_id: str):
+    def turn_guard(self, expected_turn_id: str, *, blocking: bool = True):
         turn_id = str(expected_turn_id or "").strip()
         if not turn_id:
             raise ValueError("guidance turn transition requires expected_turn_id")
         digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
         return locked_file_transition(
-            self.storage.guidance_turn_index_dir / f".{digest}.transition"
+            self.storage.guidance_turn_index_dir / f".{digest}.transition", blocking=blocking
         )
 
     # LLM: GuidanceLedger：调用方已持有回执锁；坏账与缺失分开，旧版迁移会写回，不得把旧送达标记当成模型确认。

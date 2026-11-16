@@ -225,3 +225,39 @@ def _observe_background_input_target(control, receipt, scope, store, thread, cla
             or not active_text_options_match(receipt.prepared_request, payload)):
         return 'unknown', None, None
     return 'exact', transport, (store, claim_path, claim, path, payload, task_path, task_raw, thread_path, thread_raw)
+
+
+def ended_background_input_slice(paths, store, receipt):
+    """只认原 claim 的同运输/attempt 终态；持久 TaskLink 的 active 不阻挡片段结算。"""
+    from .input_transport import validated_input_transport
+    value = validated_input_transport(receipt.transport)
+    if value.get('schema_version') != 'gateway_input_transport.v2':
+        return False
+    ref = value['claim_transport_reference']
+    claim_path = store.storage.background_claim_path(ref['thread_id'])
+    claim = target_record(claim_path)
+    if (claim.get('schema_version') != 'background_run_claim.v1'
+            or claim.get('status') not in {'finished', 'failed', 'cancelled'}
+            or claim.get('thread_id') != ref['thread_id']
+            or claim.get('claim_scope_id') != ref['thread_id']
+            or claim.get('claim_id') != ref['claim_id']
+            or claim.get('task_id') != ref['core_task_id']
+            or claim.get('gateway_transport_reference') != ref
+            or claim.get('runtime_authority') != value['target']['runtime_authority']):
+        return False
+    path = paths.processing / (ref['request_id'] + '.json')
+    payload = target_record(path)
+    if not payload:
+        from .response_renderer import read_gateway_terminal_envelope_report
+        report = read_gateway_terminal_envelope_report(paths.terminal / path.name,
+            request_id=ref['request_id'], include_sealed=True)
+        inputs._raise_for_input_read_report(report, 'background original transport unavailable')
+        payload = report.payload
+    fence = value['gateway_claim']
+    if (not payload or payload.get('id') != ref['request_id']
+            or any(payload.get(k) != v for k, v in fence.items() if k != 'request_id')
+            or payload.get('route') != value['route']
+            or frozen_request_owner(payload) is None
+            or frozen_request_owner(payload) != frozen_request_owner(receipt.prepared_request)):
+        return False
+    return target_record(claim_path) == claim

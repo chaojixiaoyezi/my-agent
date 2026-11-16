@@ -1,5 +1,6 @@
 # LLM: 仅实际BG binder/current claim安装本栈opaque来源；v2投影只定位，所有追加和最终claim结算仍过原Gateway T/P3/P5，Count0不查询来源。
 # 模块用途: 为主后台会话提供纯文字安全点与仍活claim的最终收件结算，不关闭整个Gateway或新建恢复队列。
+from contextlib import nullcontext
 from dataclasses import replace
 
 from ..common.json_io import serialize_private_json_no_newline
@@ -265,6 +266,21 @@ class BackgroundPendingInput:
                 if result is None:
                     raise self.source.rejection('input.background.finish_cas')
                 self._terminal = _identity_bytes(result)
+            # 实际 finish CAS 已证明本 slice 结束，先沿原 M 状态机结算，再投影入口 T。
+            from ..conversation.store_guidance_recovery import TurnEndSettlement
+            store = self.agent.conversation_store
+            if rows:
+                # 原短事务已持运输 T；业务 invocation 恰好同键时不能重入。
+                transition = (nullcontext(True) if self.invocation_id == _transport['gateway_claim']['request_id']
+                              else try_gateway_turn_transition(self.paths, self.invocation_id))
+                with transition as acquired:
+                    if not acquired:
+                        raise BlockingIOError('background target transition busy')
+                    with store.guidance.ledger.turn_guard(self.invocation_id, blocking=False):
+                        if all(exact for _receipt, exact in rows):
+                            store.guidance.recovery.settle_turn_locked(self.invocation_id,
+                                TurnEndSettlement(reject_reserved=True, settle_dead_submissions=False,
+                                                  target=('task', _transport['target']['task_id'])))
             for receipt, _exact in rows:
                 self._settle_input(receipt, deadline)
             self._budget(deadline)
@@ -282,8 +298,9 @@ class BackgroundPendingInput:
                 if row is not None:
                     if row.status == 'consumed':
                         self._project_consumed(receipt, deadline)
-                    return
-                if receipt.state != 'pending' or receipt.target_turn_id:
+                    if row.status != 'rejected':
+                        return
+                if row is None and (receipt.state != 'pending' or receipt.target_turn_id):
                     return
                 expected = _identity_bytes(receipt.prepared_request)
                 # LLM: 原materializer固定同步writer，末核完整payload/路径/source；不返回任意写许可。

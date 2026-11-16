@@ -161,12 +161,14 @@ def _rebuild_receipt_index(paths, index):
 
 # LLM: 正常读不取维护锁；缺库/缺schema时非阻塞竞选，锁内重核，写者必须已持同一维护锁。
 # 函数用途: 打开同一Gateway归档索引，必要时从已提交段一次性恢复定位投影。
-def _receipt_index(paths, *, writable=False):
+def _receipt_index(paths, *, writable=False, no_repair=False, connection=None):
     index = paths.root / 'archive' / 'receipts-index.sqlite3'
     if index.is_symlink() or index.parent.is_symlink():
         raise DataCorruptionError('gateway_archive_index_symlink')
+    if no_repair and not index.exists():
+        raise DataCorruptionError('GATEWAY_ARCHIVE_INDEX_UNAVAILABLE: missing index; effect_outcome=not_started; next_action=run authorized archive maintenance')
     if index.exists():
-        connection = sqlite3.connect(index.absolute().as_uri() + ('?mode=rw' if writable else '?mode=ro'),
+        connection = connection or sqlite3.connect(index.absolute().as_uri() + ('?mode=rw' if writable else '?mode=ro'),
                                      uri=True, timeout=0.05)
         try:
             columns = {row[1] for row in connection.execute('PRAGMA table_info(receipts)')}
@@ -176,6 +178,8 @@ def _receipt_index(paths, *, writable=False):
         if {'path', 'segment', 'offset', 'length', 'digest'} <= columns:
             return connection
         connection.close()
+        if no_repair:
+            raise DataCorruptionError('GATEWAY_ARCHIVE_INDEX_UNAVAILABLE: incompatible schema; effect_outcome=not_started; next_action=run authorized archive maintenance')
     if (index.parent / 'receipts-manifest.json').exists():
         if writable:
             _rebuild_receipt_index(paths, index)
@@ -198,18 +202,26 @@ def _receipt_index(paths, *, writable=False):
 
 # LLM: 查段前校验规范相对路径和有界长度，FD逐层nofollow；记录path及正文hash必须与索引一致。
 # 函数用途: 从已提交分段中准确读取原文件字节，不全段扫描或创建热文件。
-def lookup_sealed_receipt(paths, relative: str) -> bytes | None:
+def lookup_sealed_receipt(paths, relative: str, *, no_repair: bool = False) -> bytes | None:
     parts = Path(relative).parts
     if not parts or any(part in ('..', '.') for part in parts) or Path(relative).is_absolute():
         raise ValueError('invalid_gateway_receipt_path')
     manifest = paths.root / 'archive' / 'receipts-manifest.json'
     if not manifest.exists():
         return None
-    connection = _receipt_index(paths)
-    try:
-        row = connection.execute('SELECT segment,offset,length,digest FROM receipts WHERE path=?', (relative,)).fetchone()
-    finally:
-        connection.close()
+    from contextlib import ExitStack
+
+    from ..io.readonly_sqlite import readonly_sqlite_connection
+    with ExitStack() as reads:
+        existing = reads.enter_context(readonly_sqlite_connection(
+            paths.root / 'archive' / 'receipts-index.sqlite3', blocking=False,
+            require_private_directory=False)) if no_repair else None
+        connection = _receipt_index(paths, no_repair=no_repair, connection=existing)
+        try:
+            row = connection.execute('SELECT segment,offset,length,digest FROM receipts WHERE path=?', (relative,)).fetchone()
+        finally:
+            if existing is None:
+                connection.close()
     if row is None:
         return None
     segment, offset, length, digest = row

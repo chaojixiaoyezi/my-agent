@@ -222,7 +222,7 @@ def read_json_file_report(path: Path, *, context: str = "gateway.json.read", blo
 
 # LLM: 只由已知Gateway队列/response布局定位同根段库，不扫描其他owner，也不创建缺失根。
 # 函数用途: 对已封存的规范文件路径提供精确字节读口。
-def lookup_gateway_receipt_bytes(path: Path) -> bytes | None:
+def lookup_gateway_receipt_bytes(path: Path, *, no_repair: bool = False) -> bytes | None:
     from .owner_retention import lookup_sealed_receipt
     from .paths import gateway_paths_from_root
 
@@ -233,7 +233,7 @@ def lookup_gateway_receipt_bytes(path: Path) -> bytes | None:
         root = path.parent.parent.parent
     else:
         return None
-    return lookup_sealed_receipt(gateway_paths_from_root(root), str(path.relative_to(root)))
+    return lookup_sealed_receipt(gateway_paths_from_root(root), str(path.relative_to(root)), no_repair=no_repair)
 
 
 # LLM: Gateway 读取错误沿通用运行错误报告附加目标路径，只构造诊断、不写文件；保持 context 与异常分类供上层识别。

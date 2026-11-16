@@ -157,6 +157,25 @@ class _QueuedInputSource:
             finally:
                 self._window = None
 
+    def repair_bound(self, receipt):
+        """原 C 生命周期守写门；目标 T/M 与入口 T 在领域函数内依次释放，不嵌套。"""
+        from .input_target_observation import input_owner_store
+        self.require_original()
+        store = input_owner_store(self.control, receipt)
+        expected = _identity_bytes(receipt.to_dict())
+
+        @contextmanager
+        def commit_scope():
+            # 领域先取得目标/输入锁，再进短 Root 门，绝不门内等待领域锁。
+            with self.controller._mutex, self.lease._lifecycle_gate, self.runtime._gate:
+                self.require_original()
+                current = inputs.read_gateway_input_receipt(self.paths, receipt.request_id, blocking=False)
+                if current is None or _identity_bytes(current.to_dict()) != expected:
+                    raise _missing_source()
+                yield
+                self.require_original()
+        return inputs._reconcile_bound_input(self.paths, store, receipt, _commit_scope=commit_scope)
+
     # LLM: 只补已有canonical v3的同一个by_turn查找投影；原C/Root/gate及完整raw CAS都须当前，不据引用重签目标/ACK或迁移旧无transport。
     # 函数用途: 在原独立扫描中修复已提交运输的漏定位，旧目标晚于封口仍保持原待恢复责任。
     def repair_transport_locator(self, receipt):
@@ -231,22 +250,32 @@ def _reconcile_input_row(source, paths, path, summary):
         else:
             if receipt.transport is not None:
                 source.repair_transport_locator(receipt)
+                state = source.repair_bound(receipt)
+                if state in {'queued', 'consumed'}:
+                    summary[state] += 1
+                    return
             summary['deferred'] += 1
             states = summary['unsupported_states']
             states[receipt.state] = states.get(receipt.state, 0) + 1
     except _STOP_SCAN:
         advance = False
         raise
-    except Exception:
+    except Exception as exc:
         summary['errors'] += 1
+        summary['last_error'] = {'request_id': path.stem, 'stage': 'receipt',
+            'error_type': type(exc).__name__, 'category': 'io' if isinstance(exc, OSError) else 'state',
+            'context': 'gateway.input.coordinator.reconcile'}
     finally:
         if advance:
             try:
                 source.commit_cursor(path)
             except _STOP_SCAN:
                 raise
-            except Exception:
+            except Exception as exc:
                 summary['errors'] += 1
+                summary['last_error'] = {'request_id': '<cursor_commit>', 'stage': 'cursor_commit',
+                    'error_type': type(exc).__name__, 'category': 'io' if isinstance(exc, OSError) else 'state',
+                    'context': 'gateway.input.coordinator.cursor'}
 
 
 # LLM: 沿原普通坏行错误与本片明确延期让独立段退避；不重建typed异常、不把deferred并入已结计数或更改receipt。
