@@ -5389,5 +5389,6 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_messages_list_unknown_target.py          # messages.list 未知目标返回 OBSERVATION_NOT_FOUND
 |-- agent_py_agent/tests/test_subagent_input_visible_roots_guidance.py # 子代理输入路径不可见时只列出其真实可读根
 |-- agent_py_agent/tests/test_clfix_d12_vector_store_bounded_commit.py # 记忆向量库新增 id 同文件追加、增量读与整份压实边界
-`-- agent_py_agent/tests/test_clfix_d13_tool_telemetry_coverage.py    # 带结果引用的工具调用写入遥测、写入失败按类型告警
+|-- agent_py_agent/tests/test_clfix_d13_tool_telemetry_coverage.py    # 带结果引用的工具调用写入遥测、写入失败按类型告警
+`-- agent_py_agent/tests/test_opusfix_e_finished_call_provenance.py   # 共享调用账裁掉刚结清的长调用时仍签发来源、完整工具调用照常执行
 ```

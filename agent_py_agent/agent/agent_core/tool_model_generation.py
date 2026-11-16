@@ -1018,11 +1018,13 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
         response.request_token_budget = getattr(state, "token_budget", None)
     _publish_provider_thinking(request, state, response)
     state.chunk_filter.finish()
-    record_model_call_finished(state.ledger, state.call_id, response)
-    from .model.response_provenance import stamp_response_provenance
+    # 结清后本调用不再算在途：同一 owner 账本上别的会话一开新调用就可能把明细裁掉，签发来源和统计读完前须保留。
+    with state.ledger.retain_call(state.call_id):
+        record_model_call_finished(state.ledger, state.call_id, response)
+        from .model.response_provenance import stamp_response_provenance
 
-    stamp_response_provenance(request.params, state.ledger, state.call_id, response)
-    publish_model_metrics(request.agent, request.params, pending=False, response=response, call_id=state.call_id)
+        stamp_response_provenance(request.params, state.ledger, state.call_id, response)
+        publish_model_metrics(request.agent, request.params, pending=False, response=response, call_id=state.call_id)
     record_provider_context_observation(
         request.agent,
         request.params,
