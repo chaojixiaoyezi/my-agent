@@ -115,7 +115,13 @@ def _read_or_freeze_snapshot(
     with locked_json_path(path):
         saved = _read_snapshot(path)
         if saved is None or saved["epoch"] != epoch:
+            carry_user_refresh = (
+                saved is not None and saved.get("user_refresh_pending") is True
+                and "user" in current.unavailable_targets
+            )
             saved = _snapshot_record(epoch, current)
+            if carry_user_refresh:
+                saved["user_refresh_pending"] = True
             write_private_text_file_atomic_unlocked(path, json.dumps(saved, ensure_ascii=False))
         elif (
             saved.get("user_refresh_pending") is True
