@@ -85,12 +85,12 @@ def test_budget_omission_keeps_generic_guidance_once_and_searchable_packages(tmp
 
 
 @pytest.mark.parametrize("selected,digest", [
-    (None, "630ed877495e944f907937c93ed96a72af7b34f796748a72f34b8f25159ae222"),
+    (None, "c6bfe05456cec06333f897246e0eec04d52636845e115e75895efbc40260a4ce"),
     ((), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
     (("builtin:ordinary",), "df75146213b83f696b710502c14c1c1bdcf378ff530984dca90f0ff1ebd53597"),
 ])
 def test_no_package_keeps_frozen_ordinary_skill_prompt_bytes(selected, digest):
-    # 此字节基线采自修改前的 36439d633，覆盖默认、空选择和显式选择三个公开 Skill 视图。
+    # 默认视图基线于 W6 (483595df7) 同步 `_SKILL_USAGE_INSTRUCTIONS` 瘦身，空选择与显式选择沿用 36439d633 基线。
     entry = SkillSnapshotEntry("builtin:ordinary", "ordinary", "核对资料与保留来源", "/unused/ordinary/SKILL.md",
                                "builtin", "general", "a" * 64)
     router = CapabilityRouter(skill_snapshot=SkillSnapshot((entry,), (), "fixture", "local/main", "/unused"))
