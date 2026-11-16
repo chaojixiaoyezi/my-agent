@@ -77,18 +77,20 @@ def test_projection_read_wal_without_schema_or_file_mutation(tmp_path):
         writer.execute('CREATE TABLE facts (value TEXT)')
         writer.execute("INSERT INTO facts VALUES ('committed')")
         writer.commit()
-        before = {p.name: (p.stat().st_mode, p.stat().st_ino, p.read_bytes()) for p in directory.iterdir()}
+        before = {p.name: (p.stat().st_mode, p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns)
+                  for p in directory.iterdir()}
         with private_projection_connection(path, read_only=True, blocking=False) as db:
             assert db.execute('SELECT value FROM facts').fetchall() == [('committed',)]
             with pytest.raises(sqlite3.OperationalError):
                 db.execute("INSERT INTO facts VALUES ('forbidden')")
-        after = {p.name: (p.stat().st_mode, p.stat().st_ino, p.read_bytes()) for p in directory.iterdir()}
+        after = {p.name: (p.stat().st_mode, p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns)
+                 for p in directory.iterdir()}
         assert before.keys() == after.keys()
         for name in before:
             if name.endswith('-shm'):
                 # SQLite 原生读锁可更新 read-mark；不改变文件身份、权限或尺寸。
                 assert before[name][:2] == after[name][:2]
-                assert len(before[name][2]) == len(after[name][2])
+                assert before[name][2] == after[name][2]
             else:
                 assert before[name] == after[name]
     finally:

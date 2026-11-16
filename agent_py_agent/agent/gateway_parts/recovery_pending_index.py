@@ -11,6 +11,7 @@ import sqlite3
 import stat
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -40,17 +41,28 @@ def private_projection_connection(path: Path, *, blocking: bool = True, deadline
     with _projection_directory(path) as (parent_fd, verify), locked_json_path(path, blocking=blocking):
         check_io_deadline(deadline)
         verify()
-        _regular_identity(path)
-        descriptor = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+        identity = _regular_identity(path)
+        if identity is None:
+            # 关闭的 FD 属于尚未发表、任何 SQLite 连接都看不到的 birth inode。
+            birth = f'.{path.name}.{uuid.uuid4().hex}.birth'
+            descriptor = os.open(birth, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=parent_fd)
+            os.close(descriptor)
+            try:
+                os.link(birth, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+            except FileExistsError:
+                pass
+            finally:
+                os.unlink(birth, dir_fd=parent_fd)
+            identity = _regular_identity(path)
         db = None
         try:
-            opened = os.fstat(descriptor)
-            identity = (opened.st_dev, opened.st_ino)
-            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or _regular_identity(path) != identity:
-                raise ValueError("projection identity changed before connect")
+            if identity is None:
+                raise ValueError("projection identity missing before connect")
             for suffix in ("-journal", "-wal", "-shm"):
                 _regular_identity(path.with_name(path.name + suffix))
-            os.fchmod(descriptor, 0o600)
+            # 权限收紧只操作元数据，不能为已打开库另开关裸 FD。
+            os.chmod(path.name, 0o600, dir_fd=parent_fd, follow_symlinks=False)
             verify()
             timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else 5.0
             db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=timeout if blocking else 0.0)
@@ -69,7 +81,6 @@ def private_projection_connection(path: Path, *, blocking: bool = True, deadline
         finally:
             if db is not None:
                 db.close()
-            os.close(descriptor)
 
 
 # LLM: cookie保存内核块位置与至多32KiB未解码尾部；每页最多读取一个块、解码128项并关闭FD。

@@ -114,18 +114,19 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
     db = None
     caller_error = False
     try:
-        with _projection_directory(path, read_only=True, require_private_directory=require_private_directory) as (parent_fd, verify):
-            descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        with _projection_directory(path, read_only=True, require_private_directory=require_private_directory) as (_parent_fd, verify):
+            # POSIX 下关闭任一同 inode 裸 FD 会释放本进程全部 SQLite record locks。
+            # 主库只能由 SQLite 打开/关闭；nofollow 检查仅用受信父链和 lstat 身份。
+            identity = _regular_identity(path, require_owner=True)
+            if identity is None:
+                raise FileNotFoundError(errno.ENOENT, 'readonly SQLite database is missing')
+            sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix), require_owner=True)
+                         for suffix in ("-journal", "-wal", "-shm")}
+            verify()
+            timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else 5.0
+            db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                 timeout=timeout if blocking else 0.0)
             try:
-                identity = _regular_identity(path, require_owner=True)
-                opened = os.fstat(descriptor)
-                if identity != (opened.st_dev, opened.st_ino):
-                    raise ValueError("projection identity changed before read")
-                sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix), require_owner=True)
-                             for suffix in ("-journal", "-wal", "-shm")}
-                timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else 5.0
-                db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
-                                     timeout=timeout if blocking else 0.0)
                 verify()
                 if _regular_identity(path, require_owner=True) != identity:
                     raise ValueError("projection identity changed during read")
@@ -148,9 +149,7 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
                     if before is not None and observed != before:
                         raise ValueError("projection sidefile identity changed after read")
             finally:
-                if db is not None:
-                    db.close()
-                os.close(descriptor)
+                db.close()
     except (OSError, ValueError, sqlite3.Error) as exc:
         if caller_error:
             raise
