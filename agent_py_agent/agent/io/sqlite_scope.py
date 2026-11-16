@@ -28,28 +28,45 @@ from .sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from .sqlite_lease import SQLiteConnectionLease
 
 
-def ensure_private_sqlite_birth(path: Path) -> bool:
-    """只在未发表名字上开关出生FD；发表后的主库永不裸open/close。"""
+def ensure_private_sqlite_birth(path: Path, *, parent_fd: int | None = None) -> bool:
+    """未发表出生FD先关闭再发表；已存在主库只核身份。
+
+    parent_fd 非空时它是唯一父目录权威，path 只贡献叶子名，不重开或跟随 path.parent。
+    两者前后位置一致性由调用者原 verify 边界核验；本函数不签发路径或 owner 权限。
+    """
+    import secrets
     import tempfile
 
     path = Path(path)
+    if path.name in {"", ".", ".."}:
+        raise ValueError("SQLITE_BIRTH_INVALID_LEAF: path must name a database leaf; not_started")
+    if parent_fd is not None and (type(parent_fd) is not int or parent_fd < 0):
+        raise ValueError("SQLITE_BIRTH_INVALID_PARENT_FD: parent_fd must be a nonnegative integer; not_started")
+    target = path if parent_fd is None else path.name
+    parent_args = {} if parent_fd is None else {"dir_fd": parent_fd}
     try:
-        existing = path.lstat()
+        existing = os.stat(target, follow_symlinks=False, **parent_args)
     except FileNotFoundError:
         pass
     else:
         if not stat.S_ISREG(existing.st_mode):
             raise ValueError("SQLITE_BIRTH_INVALID_EXISTING_FILE: require regular database; not_started")
         return False
-    descriptor, birth_name = tempfile.mkstemp(prefix=f".{path.name}.birth-", dir=path.parent)
-    birth = Path(birth_name)
+    if parent_fd is None:
+        descriptor, birth = tempfile.mkstemp(prefix=f".{path.name}.birth-", dir=path.parent)
+        link_args = {}
+    else:
+        birth = f".{path.name}.birth-{secrets.token_hex(16)}"
+        descriptor = os.open(birth, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                             0o600, dir_fd=parent_fd)
+        link_args = {"src_dir_fd": parent_fd, "dst_dir_fd": parent_fd}
     try:
         # 此时规范路径尚未引用这个inode，任何已打开的SQLite连接都不可能持它的锁。
         os.close(descriptor)
         try:
-            os.link(birth, path, follow_symlinks=False)
+            os.link(birth, target, follow_symlinks=False, **link_args)
         except FileExistsError:
-            if not stat.S_ISREG(path.lstat().st_mode):
+            if not stat.S_ISREG(os.stat(target, follow_symlinks=False, **parent_args).st_mode):
                 raise ValueError("SQLITE_BIRTH_INVALID_RACING_FILE: require regular database; not_started") from None
             return False
         except PermissionError as exc:
@@ -59,7 +76,10 @@ def ensure_private_sqlite_birth(path: Path) -> bool:
             ) from exc
         return True
     finally:
-        birth.unlink(missing_ok=True)
+        try:
+            os.unlink(birth, **parent_args)
+        except FileNotFoundError:
+            pass
 
 
 # 一个 WAL 库约三个句柄；每作用域八条仅限制闲置缓存，不是进程上限，也不限制在用的嵌套短连接。

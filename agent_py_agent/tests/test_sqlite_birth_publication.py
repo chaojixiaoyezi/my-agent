@@ -110,3 +110,22 @@ def test_racing_publication_preserves_winning_inode(tmp_path, monkeypatch):
     monkeypatch.setattr(os, 'link', winner)
     assert ensure_private_sqlite_birth(path) is False
     assert path.read_bytes() == b'winning canonical bytes'
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd or os.link not in os.supports_dir_fd,
+                    reason='platform has no descriptor-relative directory publication API')
+def test_birth_publication_keeps_supplied_parent_descriptor_anchor(tmp_path):
+    parent = tmp_path / 'parent'
+    parent.mkdir()
+    descriptor = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    moved = tmp_path / 'moved'
+    try:
+        parent.rename(moved)
+        parent.mkdir()
+        assert ensure_private_sqlite_birth(parent / 'main.sqlite3', parent_fd=descriptor)
+        assert (moved / 'main.sqlite3').is_file()
+        assert not (parent / 'main.sqlite3').exists()
+        assert not list(moved.glob('.main.sqlite3.birth-*'))
+        assert ensure_private_sqlite_birth(parent / 'main.sqlite3', parent_fd=descriptor) is False
+    finally:
+        os.close(descriptor)
