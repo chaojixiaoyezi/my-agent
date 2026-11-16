@@ -920,7 +920,8 @@ def _bind_main_agent_turn_params(
         link = loader(task_id) if task_id and callable(loader) else None
         if link is not None and getattr(link, "status", "") in {"interrupted", "cancelled"}:
             raise InterruptedError("当前任务已停止，未创建新执行轮")
-        bound = _bind_main_agent_authority(agent, params, _task_guard_held=bool(task_id and callable(guard)))
+        bound = (_bind_main_agent_authority(agent, params, _task_guard_held=True)
+                 if task_id and callable(guard) else _bind_main_agent_authority(agent, params))
         try:
             bound = _restore_business_execution_context(agent, bound)
             return attach_run_task_workspace_context(agent, bound, user_prompt)
