@@ -141,7 +141,9 @@ class HostOutputStreamRedactor:
         return self._generic_feed(bytes(output))
 
     def finish(self) -> bytes:
-        tail = bytes(self._pending)
+        # EOF、取消或读错都不能证明这个前缀不是凭据；收尾只释放原长遮蔽值。
+        # 普通非敏感尾部早已通过前缀状态机交给 generic 行缓冲，不受此处影响。
+        tail = bytes(byte if byte in (10, 13) else 42 for byte in self._pending)
         self._pending.clear()
         self._state = 0
         return self._generic_feed(tail, final=True)

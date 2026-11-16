@@ -115,3 +115,109 @@ def test_real_file_pages_keep_offsets_and_withhold_missing_source(tmp_path):
     withheld = tool.execute({'path': str(source)})
     assert withheld.ok and 'SECRET' not in withheld.output
     assert withheld.result_envelope['credential_redaction']['content_status'] == 'withheld'
+
+
+
+def test_ordinary_tier_source_code_policy_survives_private_snapshot(tmp_path):
+    from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
+    from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
+    source = tmp_path / 'ordinary.py'
+    source.write_text('password = "illustrative literal"\nmarker = "opaque-known"\n')
+    policy = HostOutputRedaction(snapshot=HostCredentialSnapshot(secret_values=('opaque-known',)))
+    reader = ReadFileTool(tmp_path, max_chars=1000)
+    reader._host_output_redaction = policy
+    result = reader.execute({'path': str(source)})
+    assert 'illustrative literal' in result.output
+    assert 'opaque-known' not in result.output
+    assert result.result_envelope['tool_output_policy']['redaction'] == 'source_code'
+    search = SearchTextTool(tmp_path, max_matches=10)
+    search._host_output_redaction = policy
+    result = search.execute({'path': str(source), 'query': 'password', 'literal': True})
+    assert 'illustrative literal' in result.output
+    assert result.result_envelope['tool_output_policy']['redaction'] == 'source_code'
+    reader._host_output_redaction = HostOutputRedaction(snapshot=policy.snapshot, force_default=True)
+    assert 'illustrative literal' not in reader.execute({'path': str(source)}).output
+
+
+
+def test_finish_masks_every_unresolved_known_prefix_but_keeps_ordinary_tail():
+    secret = 'SYNTHETIC_credential_123456'
+    for length in range(1, len(secret)):
+        stream = HostOutputStreamRedactor(secret_values=(secret,))
+        output = stream.feed(b'ordinary diagnostic ' + secret[:length].encode()) + stream.finish()
+        assert output == b'ordinary diagnostic ' + b'*' * length
+        assert stream.finish() == b''
+    stream = HostOutputStreamRedactor(secret_values=(secret,))
+    assert stream.feed(b'ordinary unfinished tail') + stream.finish() == b'ordinary unfinished tail'
+
+
+def test_capture_cancel_flush_masks_unresolved_known_prefix():
+    import time
+    secret = 'SYNTHETIC_credential_123456'
+    prefix = secret[:14]
+    proc = subprocess.Popen([sys.executable, '-c',
+        "import os,time; os.write(1,b'ordinary diagnostic SYNTHETIC_cred'); time.sleep(30)"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    capture = ProcessOutputCapture(proc, host_output_redaction=HostOutputRedaction(
+        snapshot=HostCredentialSnapshot(secret_values=(secret,))))
+    try:
+        deadline = time.monotonic() + 5
+        while capture.result()[2]['bytes_seen']['stdout'] < len('ordinary diagnostic ' + prefix):
+            assert time.monotonic() < deadline
+            capture.wait_changed(0.01, generation=capture.generation)
+        proc.terminate()
+        proc.wait(timeout=5)
+        assert capture.finish(5)
+        output, _, facts = capture.result()
+        assert prefix not in output
+        assert output == 'ordinary diagnostic ' + '*' * len(prefix)
+        assert facts['bytes_seen']['stdout'] == len('ordinary diagnostic ' + prefix)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        capture.finish(1)
+
+
+def test_native_pty_eof_flush_masks_unresolved_known_prefix():
+    import errno
+    import os
+
+    import pytest
+    if os.name != 'posix':
+        pytest.skip('需要原生 POSIX PTY')
+    import pty
+    secret = 'SYNTHETIC_credential_123456'
+    prefix = secret[:14]
+    master, slave = pty.openpty()
+    proc = subprocess.Popen([sys.executable, '-c',
+        "import os; os.write(1,b'ordinary diagnostic SYNTHETIC_cred')"],
+        stdout=slave, stderr=slave, close_fds=True)
+    stream = HostOutputStreamRedactor(secret_values=(secret,))
+    output = bytearray()
+    source_seen = 0
+    try:
+        while True:
+            try:
+                chunk = os.read(master, 7)
+            except OSError as exc:
+                assert exc.errno == errno.EIO
+                break
+            if not chunk:
+                break
+            source_seen += len(chunk)
+            output.extend(stream.feed(chunk))
+            if source_seen == len('ordinary diagnostic ' + prefix):
+                proc.wait(timeout=5)
+                os.close(slave)
+                slave = -1
+        output.extend(stream.finish())
+        assert prefix.encode() not in output
+        assert output == b'ordinary diagnostic ' + b'*' * len(prefix)
+    finally:
+        os.close(master)
+        if slave >= 0:
+            os.close(slave)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)

@@ -403,7 +403,13 @@ class SearchTextTool(FileSystemTool):
                 if any(status.source_path == target for status in policy.snapshot.unavailable_sources):
                     outcome.output = '(凭据来源正文当前无法安全投影。)'
                     outcome.result_envelope['credential_redaction'] = credential_projection_receipt(policy.snapshot, withheld=True)
-                outcome = redact_host_tool_outcome(outcome, snapshot=policy.snapshot, force_default=True)
+                from .models import output_policy_for_outcome
+                canonical_policy = output_policy_for_outcome(self.runtime_policy, outcome)
+                outcome.result_envelope['tool_output_policy'] = {
+                    **outcome.result_envelope.get('tool_output_policy', {}),
+                    'trust': canonical_policy.trust, 'redaction': canonical_policy.redaction}
+                outcome = redact_host_tool_outcome(outcome, snapshot=policy.snapshot,
+                    force_default=policy.force_default or target in policy.snapshot.declared_source_paths)
             return outcome
         finally:
             _SEARCH_STATE.reset(token)
@@ -913,7 +919,7 @@ def _safe_search_line(tool, line: str) -> str:
         return line
     from .host_output_redaction import redact_host_text
     fragments = tuple(part for secret in policy.snapshot.secret_values for part in secret.splitlines() if part)
-    return redact_host_text(line, secret_values=fragments)
+    return redact_host_text(line, secret_values=fragments, code_file=not policy.force_default)
 
 
 def _make_snippet(line: str) -> str:
@@ -922,7 +928,7 @@ def _make_snippet(line: str) -> str:
     if policy is not None:
         from .host_output_redaction import redact_host_text
         fragments = tuple(part for secret in policy.snapshot.secret_values for part in secret.splitlines() if part)
-        line = redact_host_text(line, secret_values=fragments)
+        line = redact_host_text(line, secret_values=fragments, code_file=not policy.force_default)
     snippet = line.strip()
     if len(snippet) > _MAX_SEARCH_LINE_CHARS:
         snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"

@@ -30,7 +30,7 @@ from .host_output_redaction import (
     redact_host_tool_outcome,
     redact_source_window,
 )
-from .models import ToolHandlerOutcome
+from .models import ToolHandlerOutcome, output_policy_for_outcome
 
 
 class TextReadSnapshot(Protocol):
@@ -123,7 +123,12 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolHandl
         if withheld:
             outcome.output = '(凭据来源正文当前无法安全投影；原操作结果与来源坐标保留。)'
             outcome.result_envelope['credential_redaction'] = credential_projection_receipt(snapshot, withheld=True)
-        return redact_host_tool_outcome(outcome, snapshot=snapshot, force_default=True)
+        canonical_policy = output_policy_for_outcome(tool.runtime_policy, outcome)
+        outcome.result_envelope['tool_output_policy'] = {
+            **outcome.result_envelope.get('tool_output_policy', {}),
+            'trust': canonical_policy.trust, 'redaction': canonical_policy.redaction}
+        return redact_host_tool_outcome(outcome, snapshot=snapshot,
+            force_default=policy.force_default or target in snapshot.declared_source_paths)
     return outcome
 
 
