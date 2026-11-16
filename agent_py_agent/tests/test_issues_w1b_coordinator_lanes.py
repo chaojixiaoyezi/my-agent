@@ -271,6 +271,8 @@ def test_original_entry_retries_lane_on_next_tick(lane_home, monkeypatch, coordi
 @pytest.mark.parametrize('coordinator', [False, True])
 @pytest.mark.parametrize('level', ['high', 'critical'])
 def test_original_entry_pressure_redue_runs_lanes_again(lane_home, monkeypatch, coordinator, level):
+    # 固定单调时钟（与 test_issues_w1_lane_framework 一致），避免 CI 调度抖动超过 350ms 切片阈值引发偶发 partial。
+    monkeypatch.setattr(owner_maintenance.time, 'monotonic', lambda: 100.0)
     received = []
 
     # 函数用途: 观察每次真正进入领域的时刻，不产生领域写入。

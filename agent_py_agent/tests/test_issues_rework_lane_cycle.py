@@ -39,6 +39,27 @@ from agent_py_agent.tests.test_issues_w3_transcript_index_gc import rotation
 compact_case = _compact_case
 
 
+@pytest.fixture(autouse=True)
+def _stop_leaked_harvester_threads():
+    """清理同批前序测试遗留的 watch-harvester 线程，防止异步重连抖动进程级 FD 计数。"""
+    from agent_py_agent.agent.ingestion import harvester as hv
+    from agent_py_agent.agent.ingestion import watch_state as ws
+
+    def _drain() -> None:
+        with hv.harvesters._lock:
+            handles = list(hv.harvesters._handles.values())
+        for handle in handles:
+            hv.stop_harvester(handle.watch_id, handle.owner_home)
+        for watch_id in list(ws.registry.ids()):
+            hv.stop_harvester(watch_id)
+        for handle in handles:
+            handle.thread.join(timeout=2.0)
+
+    _drain()
+    yield
+    _drain()
+
+
 def _rotations(case, monkeypatch, count=2):
     """使用真实消息写者产生各自的索引和孤儿，不伪造可达性证明。"""
     cases = [case]
