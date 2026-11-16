@@ -101,11 +101,16 @@ def execute_running_stop(agent, paths, scope, command):
         _execution_changed_result,
         _stop_active_task,
         _stop_live_window_request,
+        _stop_requeued_exact_turn,
     )
 
     target, active = resolve_execution_control(agent, paths, scope)
     if target is None or active is None:
-        return _execution_changed_result("stop", str(scope.metadata.get("expected_turn_id") or "")) if "expected_execution" in scope.metadata else None
+        if "expected_execution" not in scope.metadata:
+            return None
+        # 无活动执行者时，用户快照里的同一回合可能刚被租约回收重排；精确命中才停，否则保持原拒绝。
+        requeued = _stop_requeued_exact_turn(paths, scope) if command.operation != "interrupt" else None
+        return requeued or _execution_changed_result("stop", str(scope.metadata.get("expected_turn_id") or ""))
     bound = bind_execution_scope(scope, target)
     if bound is None:
         if "expected_execution" in scope.metadata:

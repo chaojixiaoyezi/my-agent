@@ -2113,6 +2113,30 @@ def _steer_active_request(
     )
 
 
+# LLM: 租约回收把同一回合重排回 inbox 时没有活动执行者；只认同认证会话、精确回合号且带恢复标记的排队记录，
+#   沿原取消事务标记，worker 认领时按原取消路径收成 cancelled，不重跑目标；另按用户快照里的原 claim 名中断残留旧执行。
+# 函数用途: 停止一个已被重排、尚未重新认领的精确回合；不匹配时返回空交给原拒绝。
+def _stop_requeued_exact_turn(paths: GatewayPaths, scope: GatewayControlScope) -> ConversationControlResult | None:
+    expected = GatewayExecutionTarget.from_dict(scope.metadata.get("expected_execution"))
+    turn_id = _steer_expected_turn_id(scope) or (expected.turn_id if expected is not None else "")
+    if expected is None or expected.kind != "request" or not turn_id or expected.turn_id != turn_id:
+        return None
+    path = paths.inbox / f"{turn_id}.json"
+    with gateway_turn_transition(paths, turn_id):
+        report = read_json_file_report(path, context="gateway.control.requeued_stop.read")
+        record = _GatewayRequestRecord(path, dict(report.payload))
+        if (report.load_error is not None or _record_id(record) != turn_id
+                or not isinstance(record.payload.get("active_turn_recovery"), dict)
+                or not _request_matches_scope(record.payload, scope)):
+            return None
+        marked, _message, _committed = _mark_request_stopping_locked(record, scope)
+    if expected.claim_id:
+        interrupt_by_name(conversation_claim_interrupt_name(expected.claim_id))
+    if not marked:
+        return None
+    return ConversationControlResult("stop", True, "已停止当前会话正在执行的内容。", request_id=turn_id)
+
+
 # LLM: 过期控制只返回明确拒绝，不改写为当前目标、不猜下一轮。
 # 函数用途: 告知客户端原执行已经切换，保留用户发出操作时的目标编号。
 def _execution_changed_result(kind: str, turn_id: str) -> ConversationControlResult:
