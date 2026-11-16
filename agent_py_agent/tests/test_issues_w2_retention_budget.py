@@ -682,3 +682,310 @@ def test_budget_factory_internal_typeerror_is_not_retried(tmp_path, monkeypatch,
         service.apply(now=NOW, **options)
     assert raised.value is error and calls == [None]
     assert path.exists() and not (home.owner_data_dir / 'retention_scan_cursor.json').exists()
+
+
+def _pin_trash_container(home, name, *, source_name):
+    container = Path(home.owner_trash_dir) / 'retention' / '2020-01-01' / name
+    container.mkdir(parents=True, exist_ok=True)
+    payload_file = container / 'payload'
+    payload_file.write_bytes(b'{"id": "sample"}\n')
+    source_path = Path(home.owner_cache_dir) / source_name
+    write_private_json_file_atomic(
+        container / 'tombstone.json',
+        {
+            'schema_version': 'my-agent.memory-retention-tombstone.v2',
+            'status': 'trashed',
+            'category': 'cache',
+            'source_path': str(source_path),
+            'payload_path': str(payload_file),
+            'moved_at': (NOW - timedelta(days=60)).isoformat(),
+        },
+    )
+    return container, source_path
+
+
+# LLM: 预算切片内无论首次暂停前还是暂停后发生策略原子替换，均不得退回无预算全量扫描或授权删除；
+#   来源稳定后必须在既有 retention_scan_slice_entries/bytes/ms 预算内收敛并保护引用目标。
+# 函数用途: 回归 GPT-6 Pro F06：验证首次暂停前（默认 128/8MiB/25ms 预算）策略发布不触发无预算全扫、零删除且稳定后收敛。
+def test_f06_before_first_pause_policy_publication_defers_and_converges_under_default_budget(
+    tmp_path, monkeypatch, entry_budget_clock
+):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+    from agent_py_agent.agent.memory_store.jsonl import MemoryRecord
+
+    home, service = _runtime(tmp_path)
+    pinned_trash, pinned_source = _pin_trash_container(home, 'pinned-box', source_name='pinned.jsonl')
+    unpinned_trash, _ = _pin_trash_container(home, 'unpinned-box', source_name='unpinned.jsonl')
+    _, expired_thread = _thread(home, 'thread-expired')
+    expired_cache = Path(home.owner_cache_dir) / 'expired-cache.jsonl'
+    expired_cache.parent.mkdir(parents=True, exist_ok=True)
+    expired_cache.write_text('stale\n', encoding='utf-8')
+    os.utime(expired_cache, (1, 1))
+
+    formal = Path(home.owner_memory_long_term_jsonl)
+    formal.parent.mkdir(parents=True, exist_ok=True)
+    with formal.open('w', encoding='utf-8') as handle:
+        for index in range(500):
+            refs = [str(pinned_source)] if index == 0 else []
+            record = MemoryRecord(
+                role='user',
+                content=f'fact-{index}: ' + ('x' * 200),
+                kind='fact',
+                tags=[],
+                created_at=1.0,
+                entry_id=f'f06-mem-{index}',
+                action='add',
+                version=1,
+                attributes={'source_refs': refs} if refs else {},
+            )
+            handle.write(record.to_json() + '\n')
+
+    policy_path = Path(home.owner_retention_json)
+    policy_payload = json.loads(policy_path.read_text(encoding='utf-8'))
+    staged_policy = policy_path.with_name('retention-staged.json')
+    write_private_json_file_atomic(
+        staged_policy,
+        {**policy_payload, 'trash_days': int(policy_payload['trash_days']) + 1},
+    )
+
+    owner = Path(home.owner_home_dir)
+    original_read = scan._PinProjection._read
+    original_rows = scan._pin_rows
+    original_full = scan.current_retention_pins
+    publications, fallback_rows, full_calls = [], [], []
+
+    def publish_before_first_pause(self, path, *args, **kwargs):
+        if path == policy_path and not publications:
+            assert not self.paused
+            os.replace(staged_policy, policy_path)
+            publications.append(path)
+        return (yield from original_read(self, path, *args, **kwargs))
+
+    def counted_fallback_rows(path, *args, **kwargs):
+        for row in original_rows(path, *args, **kwargs):
+            if path == formal:
+                fallback_rows.append(1)
+            yield row
+
+    def counted_full(*args, **kwargs):
+        full_calls.append(1)
+        return original_full(*args, **kwargs)
+
+    monkeypatch.setattr(scan._PinProjection, '_read', publish_before_first_pause)
+    monkeypatch.setattr(scan, '_pin_rows', counted_fallback_rows)
+    monkeypatch.setattr(scan, 'current_retention_pins', counted_full)
+
+    try:
+        # 1) plan() 首片在第一次暂停前遇到策略发布：关闭投影、清空游标、零动作、零无预算全扫。
+        drift_plan = service.plan(
+            now=NOW,
+            scan_budget=budgets.RetentionScanBudget.default(),
+            scan_cursor={'conversation:conversations': {'after': 'thread-0000.json'}},
+        )
+        assert len(publications) == 1
+        assert full_calls == [] and fallback_rows == []
+        assert drift_plan.scan_partial and drift_plan.actions == () and not drift_plan.errors
+        assert scan._PIN_CURSOR_KEY not in drift_plan.scan_cursor
+        assert not any(k.startswith(('conversation:', 'snapshot:')) for k in drift_plan.scan_cursor)
+        assert owner not in scan._PIN_BUILDS
+
+        plan_cursor = copy.deepcopy(drift_plan.scan_cursor)
+        for _ in range(32):
+            budget = budgets.RetentionScanBudget.default()
+            step = service.plan(now=NOW, scan_budget=budget, scan_cursor=plan_cursor)
+            assert budget.entries <= 128 and budget.size <= 8 * 1024 * 1024
+            assert not step.errors
+            plan_cursor = copy.deepcopy(step.scan_cursor)
+            if not step.scan_partial:
+                break
+        else:
+            pytest.fail(f'F06 plan did not converge within default budget: {plan_cursor}')
+        assert full_calls == [] and fallback_rows == []
+        planned_paths = {action.path for action in step.actions}
+        assert pinned_trash not in planned_paths
+        assert {unpinned_trash, expired_thread, expired_cache} <= planned_paths
+
+        # 2) 完整 service.apply() 路径：发生策略漂移的切片零删除，随后稳定在默认预算内完成。
+        write_private_json_file_atomic(
+            staged_policy,
+            {**json.loads(policy_path.read_text(encoding='utf-8')), 'trash_days': 35},
+        )
+        publications.clear()
+        drift_apply = service.apply(now=NOW)
+        assert len(publications) == 1
+        assert full_calls == [] and fallback_rows == []
+        assert drift_apply.scan_partial and drift_apply.actions == () and not drift_apply.errors
+        assert scan._PIN_CURSOR_KEY not in drift_apply.scan_cursor
+        assert owner not in scan._PIN_BUILDS
+        assert all(p.exists() for p in (pinned_trash, unpinned_trash, expired_thread, expired_cache))
+
+        final_actions = []
+        for _ in range(32):
+            applied = service.apply(now=NOW)
+            assert not applied.errors
+            final_actions.extend(applied.actions)
+            if not applied.scan_partial:
+                break
+        else:
+            pytest.fail('F06 apply did not converge within default budget')
+
+        assert pinned_trash.exists()
+        assert not unpinned_trash.exists()
+        assert not expired_thread.exists()
+        assert not expired_cache.exists()
+        assert any(a.path == unpinned_trash and a.status == 'deleted' for a in final_actions)
+        assert not any(a.path == pinned_trash for a in final_actions)
+    finally:
+        with scan._PIN_BUILDS_LOCK:
+            lingering = scan._PIN_BUILDS.pop(owner, None)
+        if lingering is not None:
+            lingering.close()
+
+
+# LLM: 第一次暂停后进入验证阶段时发布新策略，同样必须丢弃旧投影并延迟重建，不得退回全扫或授权删除。
+# 函数用途: 回归 GPT-6 Pro F06：验证首次暂停后策略发布在完整 plan/apply 下同样零全量回退且稳定收敛。
+def test_f06_after_pause_policy_publication_defers_and_converges(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+    from agent_py_agent.agent.memory_store.jsonl import MemoryRecord
+
+    home, service = _runtime(tmp_path)
+    service.config = SimpleNamespace(
+        retention_scan_slice_entries=1,
+        retention_scan_slice_bytes=8 * 1024 * 1024,
+        retention_scan_slice_ms=10_000,
+    )
+    pinned_trash, pinned_source = _pin_trash_container(home, 'pinned-box', source_name='pinned.jsonl')
+    unpinned_trash, _ = _pin_trash_container(home, 'unpinned-box', source_name='unpinned.jsonl')
+    _, expired_thread = _thread(home, 'thread-expired')
+    expired_cache = Path(home.owner_cache_dir) / 'expired-cache.jsonl'
+    expired_cache.parent.mkdir(parents=True, exist_ok=True)
+    expired_cache.write_text('stale\n', encoding='utf-8')
+    os.utime(expired_cache, (1, 1))
+
+    formal = Path(home.owner_memory_long_term_jsonl)
+    formal.parent.mkdir(parents=True, exist_ok=True)
+    with formal.open('w', encoding='utf-8') as handle:
+        for index in range(10):
+            refs = [str(pinned_source)] if index == 0 else []
+            record = MemoryRecord(
+                role='user',
+                content=f'fact-{index}',
+                kind='fact',
+                tags=[],
+                created_at=1.0,
+                entry_id=f'f06-after-{index}',
+                action='add',
+                version=1,
+                attributes={'source_refs': refs} if refs else {},
+            )
+            handle.write(record.to_json() + '\n')
+
+    policy_path = Path(home.owner_retention_json)
+    staged_policy = policy_path.with_name('retention-staged.json')
+    owner = Path(home.owner_home_dir)
+    original_full = scan.current_retention_pins
+    full_calls = []
+
+    def counted_full(*args, **kwargs):
+        full_calls.append(1)
+        return original_full(*args, **kwargs)
+
+    monkeypatch.setattr(scan, 'current_retention_pins', counted_full)
+
+    try:
+        # 1) plan() 路径：推进到首次暂停后的 verify 阶段，再原子替换策略文件。
+        cursor = {}
+        for _ in range(32):
+            step = service.plan(
+                now=NOW,
+                scan_budget=budgets.RetentionScanBudget.default(service.config),
+                scan_cursor=cursor,
+            )
+            assert step.scan_partial and step.actions == () and not step.errors
+            cursor = copy.deepcopy(step.scan_cursor)
+            if cursor.get(scan._PIN_CURSOR_KEY, {}).get('phase') == 'verify':
+                break
+        else:
+            pytest.fail(f'F06 plan did not reach verify pause: {cursor}')
+
+        paused_snapshot = scan._PIN_BUILDS[owner]
+        assert paused_snapshot.paused
+        policy_payload = json.loads(policy_path.read_text(encoding='utf-8'))
+        write_private_json_file_atomic(
+            staged_policy,
+            {**policy_payload, 'trash_days': int(policy_payload['trash_days']) + 1},
+        )
+        os.replace(staged_policy, policy_path)
+
+        drift_plan = service.plan(
+            now=NOW,
+            scan_budget=budgets.RetentionScanBudget.default(service.config),
+            scan_cursor=cursor,
+        )
+        assert full_calls == []
+        assert drift_plan.scan_partial and drift_plan.actions == () and not drift_plan.errors
+        assert scan._PIN_CURSOR_KEY not in drift_plan.scan_cursor
+        assert owner not in scan._PIN_BUILDS
+        assert paused_snapshot.closed
+
+        plan_cursor = copy.deepcopy(drift_plan.scan_cursor)
+        for _ in range(32):
+            budget = budgets.RetentionScanBudget.default(service.config)
+            step = service.plan(now=NOW, scan_budget=budget, scan_cursor=plan_cursor)
+            assert budget.entries <= 1 and not step.errors
+            plan_cursor = copy.deepcopy(step.scan_cursor)
+            if not step.scan_partial:
+                break
+        else:
+            pytest.fail(f'F06 after-pause plan did not converge: {plan_cursor}')
+        assert full_calls == []
+        planned_paths = {action.path for action in step.actions}
+        assert pinned_trash not in planned_paths
+        assert {unpinned_trash, expired_thread, expired_cache} <= planned_paths
+
+        # 2) apply() 路径：在暂停后的 verify 阶段替换策略，本拍零删除，稳定后完成。
+        for _ in range(32):
+            first_apply = service.apply(now=NOW)
+            assert first_apply.scan_partial and first_apply.actions == () and not first_apply.errors
+            if first_apply.scan_cursor.get(scan._PIN_CURSOR_KEY, {}).get('phase') == 'verify':
+                break
+        else:
+            pytest.fail('F06 apply did not reach verify pause')
+
+        paused_apply_snapshot = scan._PIN_BUILDS[owner]
+        assert paused_apply_snapshot.paused
+        write_private_json_file_atomic(
+            staged_policy,
+            {**json.loads(policy_path.read_text(encoding='utf-8')), 'trash_days': 35},
+        )
+        os.replace(staged_policy, policy_path)
+
+        drift_apply = service.apply(now=NOW)
+        assert full_calls == []
+        assert drift_apply.scan_partial and drift_apply.actions == () and not drift_apply.errors
+        assert scan._PIN_CURSOR_KEY not in drift_apply.scan_cursor
+        assert owner not in scan._PIN_BUILDS
+        assert paused_apply_snapshot.closed
+        assert all(p.exists() for p in (pinned_trash, unpinned_trash, expired_thread, expired_cache))
+
+        final_actions = []
+        for _ in range(32):
+            applied = service.apply(now=NOW)
+            assert not applied.errors
+            final_actions.extend(applied.actions)
+            if not applied.scan_partial:
+                break
+        else:
+            pytest.fail('F06 after-pause apply did not converge')
+
+        assert pinned_trash.exists()
+        assert not unpinned_trash.exists()
+        assert not expired_thread.exists()
+        assert not expired_cache.exists()
+        assert any(a.path == unpinned_trash and a.status == 'deleted' for a in final_actions)
+        assert not any(a.path == pinned_trash for a in final_actions)
+    finally:
+        with scan._PIN_BUILDS_LOCK:
+            lingering = scan._PIN_BUILDS.pop(owner, None)
+        if lingering is not None:
+            lingering.close()

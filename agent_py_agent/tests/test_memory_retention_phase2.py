@@ -65,33 +65,48 @@ def test_task_state_discovery_never_rglobs_scratch(tmp_path, monkeypatch):
     service.plan(now=NOW)
 
 
-# LLM: 首次读取后真实append制造代次漂移；第二次稳定才可接受，持续漂移有界关闭。
-# 函数用途: 验证追加竞态重试与失败不阻断独立task tmp。
+# LLM: 预算路径上持续append代次漂移须安全延迟、零无预算全扫、稳定后收敛；显式无预算路径保留3次重试与目标域隔离合同。
+# 函数用途: 验证预算延迟收敛与无预算追加竞态重试及失败不阻断独立task tmp。
 def test_pin_append_retry_and_domain_isolation(tmp_path, monkeypatch):
-    home, _candidates, service = runtime(tmp_path)
+    from dataclasses import replace
+    from itertools import count
+
+    from agent_py_agent.agent.memory_store import retention_apply as apply
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+    from agent_py_agent.agent.memory_store.retention import _without_errored_subtrees
+
+    home, _candidates, service = runtime(tmp_path / "budgeted")
     path = home.owner_memory_curator_runs_dir / "racing.jsonl"
     old_file(path)
     scratch = old_file(home.owner_tasks_dir / "2026-10-01" / "sample" / "tmp" / "x")
+    unbudgeted_home, unbudgeted_candidates, unbudgeted_service = runtime(tmp_path / "unbudgeted")
+    unbudgeted_path = unbudgeted_home.owner_memory_curator_runs_dir / "racing.jsonl"
+    old_file(unbudgeted_path)
+    unbudgeted_scratch = old_file(unbudgeted_home.owner_tasks_dir / "2026-10-01" / "sample" / "tmp" / "x")
+
     original = scan._fingerprint_source
-    calls = []
+    original_full = scan.current_retention_pins
+    calls, full_calls, racing = [], [], [True]
 
     # _pin_rows使用TextIOWrapper，底层read1是实际读取口；每次打开后直接append一次，可靠触发首末FD变化。
-    # LLM: 保留真实FD读写与异常，只有指定来源在打开后真实追加。
+    # LLM: 保留真实FD读写与异常，只有指定来源在打开后按开关真实追加。
     # 函数用途: 确定性制造pin读取前后的代次漂移。
     def racing_open(target):
         source = original(target)
-        if target == path:
+        if racing[0] and target in {path, unbudgeted_path}:
             calls.append(target)
-            with path.open("ab") as writer:
+            with target.open("ab") as writer:
                 writer.write(b"{}\n")
         return source
 
-    from itertools import count
-
-    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+    def counted_full(*args, **kwargs):
+        full_calls.append(True)
+        return original_full(*args, **kwargs)
 
     monkeypatch.setattr(scan, "_fingerprint_source", racing_open)
-    # 先让真实 apply 耗尽第一片并保存续点，不能要求已暂停的扫描报告尚未观察到的竞争。
+    monkeypatch.setattr(scan, "current_retention_pins", counted_full)
+
+    # 1) 预算路径：首片暂停前/后遭遇代次漂移均延迟重建，零无预算全量回退、零删除；停止漂移后按预算收敛。
     with monkeypatch.context() as first_slice:
         ticks = iter((0.0,))
         first_slice.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: next(ticks, 1.0)))
@@ -99,19 +114,44 @@ def test_pin_append_retry_and_domain_isolation(tmp_path, monkeypatch):
     assert pending.applied and pending.scan_partial and pending.scan_cursor and not pending.errors
     assert budgets.load_scan_cursor(home) == pending.scan_cursor
 
-    # 后续预算时钟单调推进，不把 CI 调度延迟当成文件竞争；条目和字节预算、FD 与实际追加均保留。
     ticks_after_resume = count()
     monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: next(ticks_after_resume) / 1_000_000))
     for _ in range(3):
         report = service.apply(now=NOW)
-        if report.errors:
-            break
-        # 跨片来源变化可丢弃旧续点、下一片重建；这一步仍不是完成。
         assert report.applied and report.scan_partial
+        assert not report.errors and report.actions == ()
+        assert scan._PIN_CURSOR_KEY not in report.scan_cursor
         assert budgets.load_scan_cursor(home) == report.scan_cursor
-    assert report.applied and report.errors
-    assert not scratch.exists(), "unrelated task tmp must not be blocked by racing pin"
+        assert scratch.exists()
+    assert full_calls == []
+    assert len(calls) >= 3, "budgeted slices did not exercise racing append"
+
+    racing[0] = False
+    for _ in range(16):
+        report = service.apply(now=NOW)
+        assert not report.errors
+        if not report.scan_partial:
+            break
+    else:
+        pytest.fail(f"budgeted apply did not converge after racing stopped: {report.scan_cursor}")
+    assert report.applied and not scratch.exists()
+
+    # 2) 显式无预算路径：持续append触发current_retention_pins三次重试报错，target_pin_read()仍放行无关task tmp。
+    calls.clear()
+    racing[0] = True
+    plan = unbudgeted_service.plan(now=NOW, scan_budget=None)
+    assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in plan.errors)
     assert len(calls) >= 3, "concurrent append was not retried"
+    assert any(action.path == unbudgeted_scratch.parent for action in plan.actions)
+    executed = apply.execute_retention_plan(
+        home=unbudgeted_home,
+        candidates=unbudgeted_candidates,
+        plan=replace(_without_errored_subtrees(plan), isolated_errors=plan.errors),
+        now=NOW,
+    )
+    assert executed.applied and not unbudgeted_scratch.exists(), (
+        "unrelated task tmp must not be blocked by racing pin on unbudgeted path"
+    )
 
 
 # LLM: 使用产品runtime schema建临时库；RUNNING档案的终态只可由规范DB精确身份证明。
