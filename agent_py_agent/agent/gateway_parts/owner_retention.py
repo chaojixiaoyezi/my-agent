@@ -13,6 +13,7 @@ import stat
 import sys
 import tempfile
 import time
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 
@@ -107,7 +108,7 @@ def _glibc_malloc_trim():
 
 # LLM: 调用方已持维护锁；仅投影manifest连续序号覆盖的不可变段，完整提交后原子发布，失败不改原段或manifest。
 # 函数用途: 从已提交分段重建私有回执定位器，不收录未提交孤儿段。
-def _rebuild_receipt_index(paths, index):
+def _rebuild_receipt_index(paths, index, *, corrupt_identity=None):
     raw = read_bytes_beneath(paths.root, ('archive', 'receipts-manifest.json'),
                              max_bytes=_RECEIPT_MAX_FILE_BYTES, require_dir_fd=True)
     manifest = json.loads(raw) if raw is not None else {}
@@ -152,11 +153,54 @@ def _rebuild_receipt_index(paths, index):
             connection.close()
         if index.is_symlink() or index.parent.is_symlink():
             raise DataCorruptionError('gateway_archive_index_symlink')
+        if corrupt_identity is not None:
+            _quarantine_receipt_index(paths, index, corrupt_identity)
         os.replace(temporary, index)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise DataCorruptionError('gateway_archive_segment_invalid') from exc
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def _quarantine_receipt_index(paths, index, expected_identity):
+    """原维护锁内保留确认损坏的派生库族；不打开主库 FD，不碰规范分段。"""
+    from ..io.sqlite_probe import _require_no_local_database_handles
+
+    _require_no_local_database_handles(index)
+    parent = open_directory_beneath(paths.root, ('archive',), require_dir_fd=True)
+    day = destination = -1
+    try:
+        sources = []
+        for suffix in ('-wal', '-shm', '-journal', ''):
+            name = index.name + suffix
+            try:
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                if not suffix:
+                    raise BlockingIOError('receipt index disappeared before quarantine') from None
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+                raise DataCorruptionError('GATEWAY_ARCHIVE_INDEX_QUARANTINE_UNSAFE: require owned single-link regular index family; effect_outcome=not_started; next_action=inspect index paths')
+            identity = info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+            if not suffix and identity != expected_identity:
+                raise BlockingIOError('receipt index changed before quarantine')
+            sources.append((name, identity))
+        day = open_directory_beneath(paths.root, ('archive', 'receipts-index-quarantine',
+            time.strftime('%Y-%m-%d', time.gmtime())), create=True, mode=0o700, require_dir_fd=True)
+        token = uuid.uuid4().hex
+        os.mkdir(token, mode=0o700, dir_fd=day)
+        destination = os.open(token, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=day)
+        for name, identity in sources:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != identity:
+                raise BlockingIOError('receipt index family changed before quarantine')
+            os.rename(name, name, src_dir_fd=parent, dst_dir_fd=destination)
+        os.fsync(destination)
+        os.fsync(parent)
+    finally:
+        for descriptor in (destination, day, parent):
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 # LLM: 正常读不取维护锁；缺库/缺schema时非阻塞竞选，锁内重核，写者必须已持同一维护锁。
@@ -168,12 +212,30 @@ def _receipt_index(paths, *, writable=False, no_repair=False, connection=None):
     if no_repair and not index.exists():
         raise DataCorruptionError('GATEWAY_ARCHIVE_INDEX_UNAVAILABLE: missing index; effect_outcome=not_started; next_action=run authorized archive maintenance')
     if index.exists():
-        connection = connection or sqlite3.connect(index.absolute().as_uri() + ('?mode=rw' if writable else '?mode=ro'),
-                                     uri=True, timeout=0.05)
+        from ..io.sqlite_probe import require_plain_sqlite_files
+        require_plain_sqlite_files(index, beneath=paths.root)
+        info = index.lstat()
+        identity = info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
         try:
+            connection = connection or sqlite3.connect(index.absolute().as_uri() + ('?mode=rw' if writable else '?mode=ro'),
+                                         uri=True, timeout=0.05)
             columns = {row[1] for row in connection.execute('PRAGMA table_info(receipts)')}
+        except sqlite3.DatabaseError as error:
+            if connection is not None:
+                connection.close()
+            code = getattr(error, 'sqlite_errorcode', None)
+            if type(code) is not int or code & 0xFF not in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+                raise
+            if no_repair or not writable:
+                raise DataCorruptionError(f'GATEWAY_ARCHIVE_INDEX_CORRUPT: sqlite_code={code}; effect_outcome=not_started; next_action=run authorized archive maintenance') from error
+            if not (index.parent / 'receipts-manifest.json').exists():
+                raise DataCorruptionError('GATEWAY_ARCHIVE_INDEX_REBUILD_SOURCE_UNAVAILABLE: committed manifest missing; effect_outcome=not_started; next_action=preserve index and inspect canonical archive') from error
+            # 先完整核验并构建规范分段投影，再隔离坏库并发表；重建失败不动原坏证据。
+            _rebuild_receipt_index(paths, index, corrupt_identity=identity)
+            return sqlite3.connect(index.absolute().as_uri() + '?mode=rw', uri=True, timeout=0.05)
         except BaseException:
-            connection.close()
+            if connection is not None:
+                connection.close()
             raise
         if {'path', 'segment', 'offset', 'length', 'digest'} <= columns:
             return connection

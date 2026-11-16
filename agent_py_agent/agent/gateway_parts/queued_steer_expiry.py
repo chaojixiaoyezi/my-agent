@@ -122,7 +122,8 @@ def project_expired_steer(paths: GatewayPaths, request_id: str, *, admission_gat
         receipt = inputs.read_gateway_input_receipt(paths, request_id)
         settled = not related and not summary["errors"]
         if receipt is not None:
-            if receipt.state == "queued" and not receipt.target_turn_id:
+            if receipt.state == "queued" and (not receipt.target_turn_id
+                    or _queued_receipt_target_ended(paths, receipt, canonical)):
                 # 从未执行的运输不能证明消息消费；复用原terminal_unknown，不新增输入状态或伪造consumed。
                 inputs._write_terminal_unknown(paths, receipt, None)
             elif receipt.state not in {"consumed", "terminal_unknown"} or receipt.reconcile_error:
@@ -131,6 +132,27 @@ def project_expired_steer(paths: GatewayPaths, request_id: str, *, admission_gat
         if settled and current.payload:
             path.unlink()
         return settled
+
+
+def _queued_receipt_target_ended(paths, receipt, canonical):
+    """已排队的绑定输入只按原目标终态过期；不推断 pending/未知输入已结算。"""
+    target = receipt.target_turn_id
+    expected = canonical['terminal_response'].get('expected_turn_id')
+    if (not isinstance(target, str) or not target or target != expected
+            or target in {'.', '..'} or any(char in target for char in ('/', '\\', '\x00'))):
+        return False
+    if ((paths.processing / (target + '.json')).exists()
+            or (paths.inbox / (target + '.json')).exists()):
+        return False
+    report = read_gateway_terminal_envelope_report(paths.terminal / (target + '.json'),
+        request_id=target, include_sealed=True)
+    if report.load_error is not None or not report.payload:
+        return False
+    _require_same_scope(receipt.prepared_request, report.payload)
+    response = report.payload['terminal_response']
+    return (report.payload.get('turn_phase') == 'closed'
+            and report.payload.get('status') == response.get('status')
+            and response.get('status') in {'done', 'failed', 'cancelled', 'stopped', 'interrupted'})
 
 
 # LLM: 指纹不含顶层宿主owner/owner_id/route，须额外精确核对；canonical补交不依赖旧目标重查。
