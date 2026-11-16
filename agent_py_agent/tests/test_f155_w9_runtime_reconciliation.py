@@ -201,3 +201,21 @@ def test_capability_byte_budget_rejects_before_reading_large_state(tmp_path):
     assert page['items'][0]['reason_code'] == 'CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED'
     assert not page['items'][0]['repaired']
     assert _files(agent.home_paths.owner_home_dir) == before
+
+
+def test_terminal_runtime_with_live_conversation_claim_remains_protected(tmp_path):
+    agent = _agent(tmp_path)
+    store, repo = agent.conversation_store, agent.subagents.runtime_db
+    thread = store.threads.create()
+    root = 'root-with-live-claim'
+    created = repo.record_run_creation(owner_id=agent.home_paths.owner_id, conversation_task_id=root,
+        thread_id=thread.thread_id, run_id=root, role='main', attempt_status='pending')
+    task_id = created['task_id']
+    store.tasks.bind({'thread_id': thread.thread_id, 'task_id': task_id, 'goal': '合成任务'})
+    claim = store.claims.acquire({'thread_id': thread.thread_id, 'task_id': task_id, 'reason': 'test-live-claim'})
+    assert claim
+    store.tasks.update_status({'task_id': task_id, 'status': 'completed', 'expected_status': 'active'})
+    attempt = repo.create_attempt(created['agent_run_id'], reuse_pending=True)
+    repo.settle_agent_run(agent_run_id=created['agent_run_id'], status='done', attempt_id=attempt['attempt_id'])
+    proof = inspect_parent_terminal(agent, root)
+    assert not proof['eligible'] and proof['reason_code'] == 'CURRENT_ATTEMPT_ACTIVE', proof
