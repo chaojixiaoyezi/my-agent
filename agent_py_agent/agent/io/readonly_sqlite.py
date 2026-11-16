@@ -48,7 +48,7 @@ def _ensure_trusted_ancestor(descriptor, current_path: Path, parent_stat, *, rea
 # LLM: 逐层dir_fd/no-follow保留父链；按共用信任门收紧.my-agent祖先，投影父目录始终要求本人私有。
 # 函数用途: 在SQLite按路径打开之前建立私有父目录，并提供同一目录链的身份复核。
 @contextmanager
-def _projection_directory(path: Path, *, read_only=False):
+def _projection_directory(path: Path, *, read_only=False, require_private_directory=True):
     if os.open not in os.supports_dir_fd:
         raise OSError(errno.ENOTSUP, "projection requires descriptor-relative directory access")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -75,7 +75,8 @@ def _projection_directory(path: Path, *, read_only=False):
         parent = _ensure_trusted_ancestor(descriptor, current, os.fstat(descriptor), read_only=read_only)
         if parent.st_uid != os.geteuid():
             raise PermissionError("projection directory must belong to the current identity")
-        if parent.st_mode & 0o077:
+        forbidden = 0o077 if require_private_directory else 0o022
+        if parent.st_mode & forbidden:
             if read_only:
                 raise PermissionError("projection directory requires permission repair")
             os.fchmod(descriptor, 0o700)
@@ -89,7 +90,7 @@ def _projection_directory(path: Path, *, read_only=False):
                         or (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)):
                     raise ValueError("projection parent identity or trust changed")
                 _ensure_trusted_ancestor(held, directory, opened, read_only=read_only)
-            if os.fstat(descriptor).st_mode & 0o077:
+            if os.fstat(descriptor).st_mode & forbidden:
                 raise PermissionError("projection directory is no longer private")
 
         verify()
@@ -104,12 +105,14 @@ class ProjectionReadUnavailableError(OSError):
 
 
 @contextmanager
-def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: float | None = None):
+def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: float | None = None,
+                               require_private_directory: bool = True):
     check_io_deadline(deadline)
     path = Path(path).absolute()
     db = None
+    caller_error = False
     try:
-        with _projection_directory(path, read_only=True) as (parent_fd, verify):
+        with _projection_directory(path, read_only=True, require_private_directory=require_private_directory) as (parent_fd, verify):
             descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
             try:
                 identity = _regular_identity(path)
@@ -129,7 +132,11 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
                     if before is not None and observed != before:
                         raise ValueError("projection sidefile identity changed during read")
                 # Schema is domain-specific; readers validate their own version and tables.
-                yield db
+                try:
+                    yield db
+                except BaseException:
+                    caller_error = True
+                    raise
                 check_io_deadline(deadline)
                 verify()
                 if _regular_identity(path) != identity:
@@ -143,6 +150,8 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
                     db.close()
                 os.close(descriptor)
     except (OSError, ValueError, sqlite3.Error) as exc:
+        if caller_error:
+            raise
         raise ProjectionReadUnavailableError(
             f"PROJECTION_READ_UNAVAILABLE: {type(exc).__name__}; effect_outcome=not_started; "
             "next_action=retain unknown and retry existing projection later") from exc
