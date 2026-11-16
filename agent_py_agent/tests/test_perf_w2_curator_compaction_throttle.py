@@ -1,10 +1,7 @@
-# LLM: PERF-W2 回归：维护拍不得每60秒整表重解析候选账本；终态冷归档按策展周期节流，失败下一拍立即重试。
-# 模块用途: 固定 run_if_due 的终态归档节流与失败重试合同。
+# LLM: PERF-W2 回归：维护拍不得每60秒整表重解析候选账本；终态冷归档按策展周期节流，失败沿原周期重试。
+# 模块用途: 固定 run_if_due 的终态归档节流与失败欠账合同。
 from __future__ import annotations
 
-import pytest
-
-from agent_py_agent.agent.memory_store.curator import CuratorInputError
 from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig
 from agent_py_agent.tests.test_memory_curator_v2 import (
     _conversation,
@@ -41,9 +38,21 @@ def test_terminal_compaction_runs_once_per_curator_interval(tmp_path, monkeypatc
     assert len(calls) == 2
 
 
-def test_failed_terminal_compaction_is_retried_next_tick(tmp_path, monkeypatch):
+def test_failed_terminal_compaction_is_throttled_and_healthy_work_continues(tmp_path, monkeypatch):
     service, calls = _counting_service(tmp_path, monkeypatch, fail_first=True)
-    with pytest.raises(CuratorInputError):
-        service.run_if_due()
-    service.run_if_due()
-    assert len(calls) == 2
+    service.request("pre_compact")
+    processed = []
+    def pending(*_args, **_kwargs):
+        processed.append(True)
+        return service._result(status="succeeded", reason="pre_compact")
+    monkeypatch.setattr(service, "_run_pending_when_due", pending)
+    first = service.run_if_due()
+    second = service.run_if_due()
+    assert len(calls) == 1 and len(processed) == 2
+    assert first.status == second.status == "succeeded"
+    assert "CURATOR_CANDIDATE_ARCHIVE_FAILED:OSError" in first.warnings
+    assert first.warnings == second.warnings
+    service._terminal_compaction_at -= 3601
+    third = service.run_if_due()
+    assert len(calls) == 2 and len(processed) == 3
+    assert not third.warnings

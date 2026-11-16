@@ -392,6 +392,20 @@ def seal_cleanup(writes, cleanup):
     return {'ref': name, 'sha256': digest, 'byte_length': len(raw)}
 
 
+class CandidateReadWindow(tuple):
+    """保留四元组合同，逐条读取覆盖另以结构化诊断披露；不授任何审核或删除权。"""
+    def __new__(cls, rows, references, cursor, wrapped, *, errors=()):
+        value = super().__new__(cls, (tuple(rows), tuple(references), cursor, wrapped))
+        value.errors = tuple(errors)
+        value.partial = bool(errors)
+        return value
+
+
+def _window_error(exc, **identity):
+    return {"code": "CANDIDATE_ROW_UNREADABLE", "error_type": type(exc).__name__,
+            "side_effects": "not_started", "next_action": "核对该候选原记录；本轮仅隔离，不补写或授权晋升", **identity}
+
+
 def read_candidate_window(path, manifest, cursor=None, *, references=(), max_records=128):
     """规范位置/字节续点只作公平调度；每片正文有界，返回记录仍须原审核与CAS。"""
     import os
@@ -401,16 +415,21 @@ def read_candidate_window(path, manifest, cursor=None, *, references=(), max_rec
         file_identity_snapshot,
         open_readonly_file_beneath,
     )
-    from .candidates import _parse_candidate_line
+    from .candidates import CandidateStoreCorruptError, _parse_candidate_line
 
     if type(max_records) is not int or not 1 <= max_records <= 128:
         raise ValueError('candidate window limit is invalid')
     cursor = cursor or {}
-    rows, refs = [], []
+    rows, refs, errors = [], [], []
     if manifest is not None:
         source = CandidateRows(path, _validate_manifest(manifest))
         if references:
-            positions = [(source.index_for(ref['candidate_id'], None), ref['candidate_id']) for ref in references]
+            positions = []
+            for ref in references[:max_records]:
+                try:
+                    positions.append((source.index_for(ref['candidate_id'], None), ref['candidate_id']))
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    errors.append(_window_error(exc, candidate_id=ref.get('candidate_id', '') if isinstance(ref, dict) else ''))
             next_cursor, wrapped = cursor, cursor.get("wrapped", False)
         else:
             start = cursor.get('position', 0) if cursor.get('kind') == 'indexed' else 0
@@ -421,17 +440,22 @@ def read_candidate_window(path, manifest, cursor=None, *, references=(), max_rec
             next_cursor = {'kind': 'indexed', 'position': 0 if wrapped else end, 'wrapped': wrapped}
         for position, identifier in positions[:max_records]:
             if position is None:
+                errors.append(_window_error(KeyError(), candidate_id=identifier or '', reason="candidate_missing"))
                 continue
-            row = source[position]
-            if identifier is not None and identifier != row.candidate_id:
-                raise ValueError('candidate scheduling identity changed')
+            try:
+                row = source[position]
+                if identifier is not None and identifier != row.candidate_id:
+                    raise ValueError('candidate scheduling identity changed')
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError, CandidateStoreCorruptError) as exc:
+                errors.append(_window_error(exc, position=position, candidate_id=identifier or ''))
+                continue
             rows.append(row)
             refs.append({'candidate_id': row.candidate_id})
-        return tuple(rows), tuple(refs), next_cursor, wrapped
+        return CandidateReadWindow(rows, refs, next_cursor, wrapped, errors=errors)
     try:
         fd = open_readonly_file_beneath(path.parent, (path.name,))
     except FileNotFoundError:
-        return (), (), {}, True
+        return CandidateReadWindow((), (), {}, True)
     with os.fdopen(fd, 'rb') as stream:
         before = os.fstat(fd)
         stamp = [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
@@ -444,6 +468,7 @@ def read_candidate_window(path, manifest, cursor=None, *, references=(), max_rec
         offsets = [ref['offset'] for ref in references] if valid_refs else None
         offset = cursor.get('offset', 0) if cursor.get('kind') == 'legacy' and trusted and cursor.get('source') == stamp else 0
         stream.seek(offset if offsets is None else 0)
+        discarding = bool(offsets is None and offset and cursor.get('discard_row'))
         spent = 0
         for index in range(max_records):
             if offsets is not None:
@@ -457,16 +482,25 @@ def read_candidate_window(path, manifest, cursor=None, *, references=(), max_rec
                 if start > (offset if offsets is None else offsets[0]):
                     stream.seek(start)
                     break
-                raise ValueError('candidate source row exceeds bounded read window')
+                errors.append(_window_error(ValueError(), offset=start, reason="row_exceeds_window"))
+                discarding = not raw.endswith(b'\n')
+                break
             if not raw:
                 break
+            if discarding:
+                discarding = not raw.endswith(b'\n')
+                continue
             if not raw.strip():
                 continue
             if not raw.endswith(b'\n') and stream.tell() != before.st_size:
                 raise ValueError('candidate source row is incomplete')
-            row = _parse_candidate_line(raw.decode('utf-8'))
-            if offsets is not None and row.candidate_id != references[index]['candidate_id']:
-                raise ValueError('candidate scheduling identity changed')
+            try:
+                row = _parse_candidate_line(raw.decode('utf-8'))
+                if offsets is not None and row.candidate_id != references[index]['candidate_id']:
+                    raise ValueError('candidate scheduling identity changed')
+            except (ValueError, TypeError, KeyError, UnicodeError, CandidateStoreCorruptError) as exc:
+                errors.append(_window_error(exc, offset=start))
+                continue
             rows.append(row)
             refs.append({'candidate_id': row.candidate_id, 'offset': start, 'source': stamp})
         end = stream.tell()
@@ -477,5 +511,6 @@ def read_candidate_window(path, manifest, cursor=None, *, references=(), max_rec
                 or changed != stamp[-1] or file_descriptor_change_ns(fd, after) != changed):
             raise ValueError('candidate source changed during window')
         wrapped = cursor.get('wrapped', False) if offsets is not None else end == before.st_size
-        next_cursor = cursor if offsets is not None else {'kind': 'legacy', 'offset': 0 if wrapped else end, 'source': stamp, 'wrapped': wrapped}
-        return tuple(rows), tuple(refs), next_cursor, wrapped
+        next_cursor = cursor if offsets is not None else {'kind': 'legacy', 'offset': 0 if wrapped else end, 'source': stamp, 'wrapped': wrapped,
+                                                                       **({'discard_row': True} if discarding and not wrapped else {})}
+        return CandidateReadWindow(rows, refs, next_cursor, wrapped, errors=errors)

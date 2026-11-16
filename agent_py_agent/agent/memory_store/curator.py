@@ -124,7 +124,7 @@ from .curator_state import (
 )
 from .curator_validation import CuratorCursorAdvance, next_cursors, validate_extraction
 from .daily import DailyMemoryEvent, DailyMemoryStore
-from .learning_exclusions import excluded_candidate_ids, sync_learning_exclusion_marks
+from .learning_exclusions import sync_learning_exclusion_marks
 from .lessons import _MAX_HOT_RULE_CHARS, _evidence_groups, _has_evidence
 
 if TYPE_CHECKING:
@@ -145,8 +145,8 @@ _REASON_PRIORITY = (
 )
 
 
-# LLM: 只节流维护性终态冷归档，不改变到期判定、pending原因或真实run的提交路径；首拍与失败后仍立即执行。
-# 函数用途: 判断本策展实例距上次成功终态归档是否已满一个策展周期。
+# LLM: 只节流维护性终态冷归档，不改变到期判定、pending原因或真实run的提交路径；首拍执行，普通失败也沿原周期节流；未知执行不记完成。
+# 函数用途: 判断本策展实例距上次已知终态归档尝试是否已满一个策展周期。
 def _terminal_compaction_due(curator: object) -> bool:
     last = getattr(curator, "_terminal_compaction_at", None)
     eff = getattr(curator, "_effective_config", None)
@@ -726,7 +726,7 @@ class _CuratorLifecycleMixin:
             return self._result(status="busy", reason=pending or "interval")
         # 维护只冷归档已冷却终态详情；pending/approved、人格和正式长期记忆均不参与。
         # archive-first及原quota→candidate顺序由唯一候选仓库负责，失败不得伪装成not_due。
-        # 30天冷却的归档晚一个策展周期无害：同实例按memory_curator_interval_seconds节流，失败不记时下拍重试。
+        # 普通失败不改归档文件，只记维护欠账并节流；健康策展继续，未知执行仍原样上抛。
         if _terminal_compaction_due(self):
             try:
                 with gateway_short_transaction("compact_terminal_candidates"):
@@ -734,8 +734,19 @@ class _CuratorLifecycleMixin:
             except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
                 raise
             except Exception as exc:
-                raise CuratorInputError("CURATOR_CANDIDATE_ARCHIVE_FAILED") from exc
+                from .promotion import _UNCERTAIN_PROMOTION_ERRORS
+                if isinstance(exc, (*_UNCERTAIN_PROMOTION_ERRORS, CuratorLeaseLostError)):
+                    raise
+                self._terminal_compaction_warning = (f"CURATOR_CANDIDATE_ARCHIVE_FAILED:{type(exc).__name__}",)
+                _LOGGER.warning("memory_curator_archive_skipped:%s", self._terminal_compaction_warning[0])
+            else:
+                self._terminal_compaction_warning = ()
             self._terminal_compaction_at = time.monotonic()
+
+        def finish(result):
+            warnings = getattr(self, "_terminal_compaction_warning", ())
+            return replace(result, warnings=tuple(dict.fromkeys((*result.warnings, *warnings)))) if warnings else result
+
         try:
             self.run_maintenance_if_due(now=current)
         except Exception as exc:
@@ -756,26 +767,32 @@ class _CuratorLifecycleMixin:
                 "memory_curator_maintenance_skipped:%s",
                 _maintenance_error_code(exc),
             )
+        daily_due = _daily_finalize_due(state, current, live_cfg.daily_finalize_hour)
+        # 原两种工作每拍只领一项；日终失败也让下一拍的待办获得机会，不抢当前前台学习。
+        if (daily_due and not foreground_model_active(self.backend)
+                and (not pending or (pending == "pre_compact"
+                                     and getattr(self, "_last_due_work", "") != "daily_finalize"))):
+            self._last_due_work = "daily_finalize"
+            return finish(self.run(reason="daily_finalize", now=current))
         if pending:
-            return self._run_pending_when_due(
+            self._last_due_work = pending
+            return finish(self._run_pending_when_due(
                 state, pending, current, effective_config=live_cfg
-            )
-        if _daily_finalize_due(state, current, live_cfg.daily_finalize_hour):
-            return self.run(reason="daily_finalize", now=current)
+            ))
         from .curator_due import candidate_scan_deadline, candidate_source_present
         scan_deadline = candidate_scan_deadline(state, live_cfg.interval_seconds,
             source_present=not state.candidate_scan_cursor and candidate_source_present(self.candidate_service.path)
         ) if self._promotion_backlog_enabled(effective_config=live_cfg) else None
         if scan_deadline is not None and current.timestamp() >= scan_deadline:
-            return self._resume_candidate_promotions(current, effective_config=live_cfg)
+            return finish(self._resume_candidate_promotions(current, effective_config=live_cfg))
         # due 判定也遵守学习排除名单：名单不可读时按 fail-closed 不收集任何消息（不会因名单
         # 会话的旧消息误触发一次运行）；快照进入 _execute 后复核再复用。不可读的诊断要随
         # not_due 一起返回，不能显示成没有原因的普通 not_due（mc4-3106）。
         excluded_ids, exclusion_warnings = self._learning_exclusions_for_run()
         if excluded_ids is None:
-            return self._result(
+            return finish(self._result(
                 status="not_due", reason="interval", warnings=exclusion_warnings
-            )
+            ))
         config_revision = live_cfg.revision()
         exclusions_revision = self._read_exclusions_revision()
         interval_due_elapsed = interval_elapsed(state, current, live_cfg.interval_seconds)
@@ -796,15 +813,15 @@ class _CuratorLifecycleMixin:
             )
         precollected = _PrecollectedBatch(batch, state, config_revision, excluded_ids, exclusions_revision)
         if batch.load_errors:
-            return self.run(reason="interval", now=current, precollected_batch=precollected)
+            return finish(self.run(reason="interval", now=current, precollected_batch=precollected))
         if batch.message_scan_partial and not _has_committable_input(batch):
-            return self._result(status="busy", reason="interval", warnings=_message_scan_warnings(batch))
+            return finish(self._result(status="busy", reason="interval", warnings=_message_scan_warnings(batch)))
         if batch.user_turns() >= live_cfg.turn_threshold:
-            return self.run(reason="turn_threshold", now=current, precollected_batch=precollected)
+            return finish(self.run(reason="turn_threshold", now=current, precollected_batch=precollected))
         if _interval_due(batch, state, current, live_cfg.interval_seconds):
-            return self.run(reason="interval", now=current, precollected_batch=precollected)
-        return self._result(status="busy" if batch.message_scan_partial else "not_due", reason="interval",
-                            warnings=_message_scan_warnings(batch) if batch.message_scan_partial else ())
+            return finish(self.run(reason="interval", now=current, precollected_batch=precollected))
+        return finish(self._result(status="busy" if batch.message_scan_partial else "not_due", reason="interval",
+                            warnings=_message_scan_warnings(batch) if batch.message_scan_partial else ()))
 
     def _resume_candidate_promotions(
         self,
@@ -829,11 +846,13 @@ class _CuratorLifecycleMixin:
             try:
                 with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(live_cfg)):
                     next_cursor = {}
+                    read_warnings = []
                     identifiers = self._pending_promotable_candidate_ids(
                         limit=32,
                         lease_id=context.lease_id,
                         scanned_at=context.started_at,
                         cursor_out=next_cursor,
+                        warnings_out=read_warnings,
                         effective_config=live_cfg,
                     )
                     promoted, warnings, receipts = self._call_promote_eligible(
@@ -843,7 +862,7 @@ class _CuratorLifecycleMixin:
                 release_curator_lease(self.state_store, context.lease_id)
                 from .curator_promotion_receipts import promotion_counts
                 return CuratorRunResult(run_id=context.run_id, status="succeeded", reason="interval",
-                    provider="", model="", warnings=warnings, promotion_results=receipts, **promotion_counts(receipts))
+                    provider="", model="", warnings=tuple(dict.fromkeys((*read_warnings, *warnings))), promotion_results=receipts, **promotion_counts(receipts))
             except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
                 raise
             except Exception as exc:
@@ -1372,12 +1391,14 @@ class _CuratorExecutionMixin:
             != "agents"
         ]
         next_cursor = {}
+        read_warnings = []
         backlog = (
             self._pending_promotable_candidate_ids(
                 limit=32,
                 lease_id=context.lease_id,
                 scanned_at=context.started_at,
                 cursor_out=next_cursor,
+                warnings_out=read_warnings,
                 effective_config=live_cfg,
             )
             if self._promotion_backlog_enabled(effective_config=live_cfg)
@@ -1399,6 +1420,7 @@ class _CuratorExecutionMixin:
                 for item in batch.formal_memory_errors
             ),
             *promotion_warnings,
+            *read_warnings,
         )
         if promoted:
             warnings = (*warnings, f"auto_promoted:{promoted}")
@@ -1432,17 +1454,25 @@ class _CuratorExclusionMixin:
 
     # LLM: 名单不可读时返回空（宁可不晋升也不误晋升）；判定只读结构化 refs 与通道绑定，不写标记。
     # 函数用途: 从待晋升候选里剔除来源命中学习排除名单的条目。
-    def _drop_excluded_promotable(self, rows: list) -> list:
+    def _drop_excluded_promotable(self, rows: list, *, warnings_out: list[str] | None = None,
+                                   unknown_out: set[str] | None = None) -> list:
         excluded_ids, unreadable = self._learning_exclusions_for_run()
         if unreadable:
+            if warnings_out is not None:
+                warnings_out.extend(unreadable)
+            if unknown_out is not None:
+                unknown_out.update(row.candidate_id for row in rows)
             return []
         if not excluded_ids:
             return rows
-        hit_ids = excluded_candidate_ids(
-            conversation_store=self.conversation_store,
-            rows=rows,
-            excluded_conversation_ids=excluded_ids,
-        )
+        from .learning_exclusions import candidate_exclusion_report
+        report = candidate_exclusion_report(conversation_store=self.conversation_store, rows=rows,
+                                            excluded_conversation_ids=excluded_ids)
+        hit_ids = report["excluded_candidate_ids"] | report["unknown_candidate_ids"]
+        if unknown_out is not None:
+            unknown_out.update(report["unknown_candidate_ids"])
+        if warnings_out is not None:
+            warnings_out.extend(item["code"] for item in report["errors"])
         if not hit_ids:
             return rows
         return [
@@ -1484,7 +1514,8 @@ class _CuratorExclusionMixin:
             except Exception:
                 return ("learning_exclusion_sync_failed",)
             marked = int(report.get("marked") or 0)
-            return (f"learning_exclusion_marked:{marked}",) if marked else ()
+            diagnostics = tuple(item["code"] for item in report.get("errors", ()))
+            return (*((f"learning_exclusion_marked:{marked}",) if marked else ()), *diagnostics)
 
 
 # LLM: 仅用 MemoryCandidate 正式字段做结构性否决；临时范围只认 scope/valid_until，HOT与精确目标门与Promotion一致。
@@ -1554,7 +1585,7 @@ class _CuratorPromotionMixin:
         return any(isinstance(ref, dict) and bool(str(ref.get("thread_id") or "").strip())
                    for ref in (getattr(row, "source_message_refs", None) or ()))
 
-    # LLM: 读取失败必须以稳定诊断阻止成功收尾，未结执行原样透传；筛选与正式写入的权限边界保持不变。
+    # LLM: 单条读取坏项以partial诊断隔离并公平续扫；整源不可核实与未结执行仍失败，正式写入权限边界保持。
     # 函数用途: 为积压晋升排序，不把候选账本损坏伪装成没有待办。
     def _pending_promotable_candidate_ids(
         self,
@@ -1563,9 +1594,10 @@ class _CuratorPromotionMixin:
         lease_id: str = "",
         scanned_at: str = "",
         cursor_out: dict | None = None,
+        warnings_out: list[str] | None = None,
         effective_config: MemoryCuratorConfig | None = None,
     ) -> list[str]:
-        """已落库、待自主晋升或待门槛重试的候选 ID；读取失败显式报错。
+        """已落库、待自主晋升或待门槛重试的候选 ID；坏项披露partial，整源失败显式报错。
 
         这里只筛结构与排队次序；真实来源、证据、目标版本和最终提交仍由PromotionService复核。
         """
@@ -1573,9 +1605,18 @@ class _CuratorPromotionMixin:
         try:
             scan = self.state_store.load().candidate_scan_cursor if lease_id else getattr(self, "_candidate_scan_cursor", {})
             pending = scan.get("pending", [])
+            source_cursor = scan.get("scan") or {}
+            # 同一轮的未覆盖事实跨pending/后续页保留；回到规范起点后重新核整轮，不永久屏蔽。
+            carry_partial = bool(scan.get("partial") is True and (pending or
+                                 source_cursor.get("position", source_cursor.get("offset", 0))))
+            read_partial = False
             if limit > 0:
-                rows, refs, next_scan, wrapped = self.candidate_service.readonly_window(
-                    scan.get("scan"), references=pending[:128])
+                window = self.candidate_service.readonly_window(scan.get("scan"), references=pending[:128])
+                rows, refs, next_scan, wrapped = window
+                read_partial = bool(getattr(window, "partial", False))
+                if warnings_out is not None:
+                    warnings_out.extend(f"CURATOR_CANDIDATE_READ_PARTIAL:{item['code']}:{item['error_type']}"
+                                        for item in getattr(window, "errors", ()))
                 references = {row.candidate_id: ref for row, ref in zip(rows, refs)}
             else:
                 rows = self.candidate_service.readonly_rows(statuses={"pending_review", "approved"}, limit=0)
@@ -1592,7 +1633,8 @@ class _CuratorPromotionMixin:
                 and (projection_is_learnable(row.learning_source) if getattr(row, "learning_source", None)
                      else self._can_backfill_empty_source(row))
             ]
-            eligible = self._drop_excluded_promotable(eligible)
+            unknown_sources = set()
+            eligible = self._drop_excluded_promotable(eligible, warnings_out=warnings_out, unknown_out=unknown_sources)
 
             # LLM: 使用同一次实际门槛与宿主来源；sort稳定保各档内原顺序，不把计数就绪当正式授权。
             # 函数用途: 将可立即提交、可学首次审核和可补旧来源分为0/1/2三档。
@@ -1605,8 +1647,9 @@ class _CuratorPromotionMixin:
             eligible.sort(key=lambda row: (_queue_priority_tier(row), row.created_at, row.candidate_id))
             if limit > 0:
                 remaining = [references[row.candidate_id] for row in eligible[limit:]]
-                cursor = {"scan": next_scan, "pending": remaining, "active": self._promotion_backlog_enabled(effective_config=live_cfg) and (bool(remaining) or not wrapped),
-                          "last_at": scanned_at or utc_now_iso()}
+                partial = carry_partial or read_partial or bool(unknown_sources)
+                cursor = {"scan": next_scan, "pending": remaining, "active": self._promotion_backlog_enabled(effective_config=live_cfg) and (bool(remaining) or not wrapped or partial),
+                          "last_at": scanned_at or utc_now_iso(), **({"partial": True} if partial else {})}
                 # 生产调用先尝试原晋升再发布；异常/退出时保留旧页，正式 CAS 负责幂等重验。
                 if cursor_out is not None:
                     cursor_out.update(cursor)
@@ -1619,6 +1662,9 @@ class _CuratorPromotionMixin:
         except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError, CuratorLeaseLostError):
             raise
         except Exception as exc:
+            from .promotion import _UNCERTAIN_PROMOTION_ERRORS
+            if isinstance(exc, _UNCERTAIN_PROMOTION_ERRORS):
+                raise
             raise CuratorInputError("CURATOR_CANDIDATE_READ_FAILED") from exc
 
     def _promotion_backlog_enabled(self, *, effective_config: MemoryCuratorConfig | None = None):
@@ -1731,16 +1777,20 @@ class _CuratorPromotionMixin:
             return False, []
         try:
             row = self.candidate_service.get(candidate_id)
-        except Exception:
+        except Exception as exc:
+            from .promotion import _UNCERTAIN_PROMOTION_ERRORS
+            if isinstance(exc, (*_UNCERTAIN_PROMOTION_ERRORS, CuratorLeaseLostError)):
+                raise
             return True, ["CURATOR_AUTO_PROMOTION_FAILED"]
-        hits = excluded_candidate_ids(
-            conversation_store=self.conversation_store,
-            rows=[row],
-            excluded_conversation_ids=excluded_ids,
-        )
-        if not hits:
-            return False, []
-        warnings = list(self._sync_learning_exclusions(excluded_ids))
+        from .learning_exclusions import candidate_exclusion_report
+        report = candidate_exclusion_report(conversation_store=self.conversation_store, rows=[row],
+                                            excluded_conversation_ids=excluded_ids)
+        diagnostics = [item["code"] for item in report["errors"]]
+        if candidate_id in report["unknown_candidate_ids"]:
+            return True, diagnostics
+        if candidate_id not in report["excluded_candidate_ids"]:
+            return False, diagnostics
+        warnings = [*diagnostics, *self._sync_learning_exclusions(excluded_ids)]
         revision = self._read_exclusions_revision()
         if revision:
             warnings.append(f"learning_exclusions_revision:{revision}")
