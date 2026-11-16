@@ -316,8 +316,9 @@ def _project(job):
 # LLM: 在原 owner 仓库锁内分配展示别名，已删除的监控也占编号；别名不是授权或跨 owner 身份。
 # 函数用途: 为新监控分配稳定递增编号，避免用户指令误操作重用编号。
 def next_alias(store):
-    numbers = [int(alias[3:]) for row in store['jobs'].values()
-               if (alias := str(row.get('alias') or '')).startswith('job') and alias[3:].isdigit()]
+    # 非对象的坏 job 条目读不出编号，跳过且原样保留，不阻断健康监控的新建与安装。
+    numbers = [int(alias[3:]) for row in store['jobs'].values() if isinstance(row, dict)
+               and (alias := str(row.get('alias') or '')).startswith('job') and alias[3:].isdigit()]
     return f"job{max(numbers, default=0) + 1:02d}"
 
 

@@ -1171,3 +1171,16 @@ def test_non_object_run_entry_does_not_block_healthy_job_deletion(tmp_path, inva
     assert repository.get_active_run(str(claim['run_id']))['cancel_reason'] == 'job_deleted'
     assert json.loads(repository.store_path.read_text())['runs']['srun_corrupt'] == invalid
     assert [run['run_id'] for run in repository.pending_cancellation_runs()] == [claim['run_id']]
+
+
+@pytest.mark.parametrize('invalid', [None, 7, [], 'job09'])
+def test_non_object_job_entry_does_not_block_alias_allocation(tmp_path, invalid):
+    repository = _repository(tmp_path)
+    first, _ = _create(repository)
+    store = json.loads(repository.store_path.read_text())
+    store['jobs']['sjob_corrupt'] = invalid
+    repository.store_path.write_text(json.dumps(store))
+    second, deduplicated = _create(repository, name='second', source_request_id='request:second')
+    # 坏条目读不出编号：新监控照常按健康条目续编，坏条目原样保留。
+    assert (first['alias'], second['alias'], deduplicated) == ('job01', 'job02', False)
+    assert json.loads(repository.store_path.read_text())['jobs']['sjob_corrupt'] == invalid
