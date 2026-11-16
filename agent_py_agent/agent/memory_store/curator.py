@@ -53,6 +53,7 @@ from .curator_backend import (
     extraction_budget_seconds,
     fit_batch_to_input_budget,
     last_model_attempts,
+    shrink_batch_for_timeout,
 )
 from .curator_commit import (
     CuratorBatchCommit,
@@ -1145,12 +1146,23 @@ class _CuratorExecutionMixin:
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
         live_cfg = _context_config(self, context)
         batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=live_cfg.max_input_chars)
-        preflight_warnings = (*preflight_warnings, *fit_warnings)
+        batch, at_floor, breaker_warnings = _breaker_replay_batch(context, batch)
+        preflight_warnings = (*preflight_warnings, *fit_warnings, *breaker_warnings)
+        context.route["failure_warnings"] = (*context.route.get("failure_warnings", ()), *breaker_warnings)
         annotate = self.dependencies.annotate_batch
         if annotate is not None:
             batch, decision_warnings = annotate(batch, context.run_id, _annotation_deadline(context, live_cfg))
             preflight_warnings = (*preflight_warnings, *decision_warnings)
-        attempt, validated = self._extract_for_route(context, batch)
+        try:
+            attempt, validated = self._extract_for_route(context, batch)
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
+        except Exception as exc:
+            # 熔断重放已缩到下限仍解析失败：只隔离这一条队首输入并提交跳过游标，其余输入与日终收尾继续。
+            if not at_floor or _failure_code(exc) != "CURATOR_SCHEMA_INVALID":
+                raise
+            quarantined, warning = _quarantine_breaker_floor(batch)
+            return self._commit_batch(context, quarantined, None, extra_warnings=(*preflight_warnings, warning))
         if attempt.shrink_attempts:
             preflight_warnings = (
                 *preflight_warnings,
@@ -2289,6 +2301,33 @@ def _replay_breaker(run_log: CuratorRunLog, context: _RunContext, failure_code: 
     _LOGGER.warning("memory curator replay breaker open: the same input failed %d times in a row (%s)",
                     CURATOR_REPLAY_BREAKER_FAILURE_COUNT, failure_code)
     return CURATOR_REPLAY_BREAKER_OPEN, (f"curator_replay_breaker_open:{failure_code}",)
+
+
+# LLM: 熔断后的每次重放复用超时缩批前缀，按连续失败次数逐次加深；游标只推进成功前缀，舍弃的尾部留在原游标后零丢失。
+# 函数用途: 让熔断中的同一批输入以更短前缀重试而不是原样重放整批，并返回是否已到每类一条的下限。
+def _breaker_replay_batch(context: _RunContext, batch: CuratorInputBatch) -> tuple[CuratorInputBatch, bool, tuple[str, ...]]:
+    state = context.state_before
+    if state.last_failure_code != CURATOR_REPLAY_BREAKER_OPEN:
+        return batch, False, ()
+    shrunk = batch
+    for _ in range(max(1, int(state.consecutive_failures or 0) - CURATOR_REPLAY_BREAKER_FAILURE_COUNT + 1)):
+        shrunk = shrink_batch_for_timeout(shrunk) or shrunk
+    return shrunk, shrink_batch_for_timeout(shrunk) is None, (
+        f"curator_replay_breaker_shrunk:messages={len(batch.messages)}->{len(shrunk.messages)},"
+        f"audit={len(batch.audit_events)}->{len(shrunk.audit_events)}",)
+
+
+# LLM: 仅用于下限批仍解析失败：队首消息/审计按既有跳过游标提交，原文仍留在会话与审计账，运行账记准确身份供复核。
+# 函数用途: 把下限批改成跳过队首的空批次，返回待提交批次与无正文警告。
+def _quarantine_breaker_floor(batch: CuratorInputBatch) -> tuple[CuratorInputBatch, str]:
+    head, event = batch.messages[:1], batch.audit_events[:1]
+    skipped = {**batch.skipped_message_cursors, **{item.thread_id: item.message_id for item in head}}
+    warning = ("curator_replay_breaker_quarantined:"
+               + ",".join([*(f"message={item.thread_id}/{item.message_id}" for item in head),
+                           *(f"audit={item.event_id}" for item in event)]))[:RUN_WARNING_MAX_CHARS]
+    _LOGGER.warning("memory curator quarantined the breaker floor input: %s", warning)
+    return replace(batch, messages=(), audit_events=(), skipped_message_cursors=skipped,
+                   skipped_audit_cursor=event[0].event_id if event else batch.skipped_audit_cursor), warning
 
 
 # LLM: 空批次与正常批次共用提交对象和租约释放；被拒目标绑定独立于学习候选，不获得正式晋升资格。
