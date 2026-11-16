@@ -215,7 +215,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "7481e80f7796ed6ff4598ef4d737f52c45cdd555b2bcceb51228403de455827a",
+    "body_hash": "c8f5a8e630dac2b83c92c914a6d6002ac8b25962020b0a8cb519a54b772efaf2",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -1455,7 +1455,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -1471,7 +1471,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -1574,7 +1574,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {
@@ -2553,7 +2553,7 @@
     "timestamp": 1,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "e66dbe9afbc11b0a6bddb0b84ed2e792854ffbeb16dadb5af9d6e1b02cf1e465",
+    "body_hash": "be006a3b0a630c0e2dd50654613887b86dd468179740bea7f608f76f6d5afaa7",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -3821,7 +3821,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -3837,7 +3837,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -3940,7 +3940,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {
@@ -4672,7 +4672,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "bf8274bff162717c7f9c19210057a55a371eddd00e86ee5f8475cce16cda62dc",
+    "body_hash": "470530013b3b1ace3b2049bcdcfadc2c7dec227136023ff85c970afa0fd1f092",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -5912,7 +5912,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -5928,7 +5928,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -6031,7 +6031,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {
@@ -6756,7 +6756,7 @@
     "timestamp": 3,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "dc805d147fe6cf76b64252c9d3891046271d1dddcdbae2f0d8a73e8aaa9b087f",
+    "body_hash": "44656842aa3cc368feaffdc0a58257f76c20d3184099904f07cd38e53d534a00",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -8031,7 +8031,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -8047,7 +8047,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -8150,7 +8150,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {
@@ -10254,7 +10254,7 @@
     "timestamp": 3,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "7fcf8d916710d6a064e738b3f67ffd9dc8c6d9032423578f5db255ad3c3b1f8a",
+    "body_hash": "3c71b21904b85e9d9acf9895d42f1f1437e7fa8573b2354ed78b0d3c275687be",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -11494,7 +11494,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -11510,7 +11510,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -11613,7 +11613,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {
@@ -12561,7 +12561,7 @@
     "timestamp": 4,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "8c34ff5e0767f306f63413fc78ccb58f25b522b81dd5f989c2f381ec590b91d5",
+    "body_hash": "609aa4a5f767e7274fe374fa45c0ac5eee276169c58dbca6feda0b383027f14a",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -13880,7 +13880,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -13896,7 +13896,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -13999,7 +13999,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {
@@ -14810,7 +14810,7 @@
     "timestamp": 6,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "8c34ff5e0767f306f63413fc78ccb58f25b522b81dd5f989c2f381ec590b91d5",
+    "body_hash": "609aa4a5f767e7274fe374fa45c0ac5eee276169c58dbca6feda0b383027f14a",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -16129,7 +16129,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -16145,7 +16145,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -16248,7 +16248,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {

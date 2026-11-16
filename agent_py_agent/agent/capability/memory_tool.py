@@ -107,8 +107,9 @@ def _remember_scope_schema() -> dict[str, object]:
             "scope_key": {
                 "type": "string",
                 "description": (
-                    "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；"
-                    "global 只能写 global；公司、项目等使用 company:<id>、project:<id>。"
+                    "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀："
+                    "global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），"
+                    "id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。"
                 ),
             },
             "applies_when": {
@@ -215,7 +216,7 @@ def _remember_parameter_descriptions() -> dict[str, str]:
         "scope": (
             "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。"
             "当前会话只写 scope_type=session，宿主绑定真实 thread；"
-            "只有公司、项目、任务类型或临时范围才需要显式 scope_key。"
+            "global、公司、项目、任务类型和临时范围都须显式 scope_key。"
         ),
         "valid_from": "可选带时区 ISO 生效时间。",
         "valid_until": (
@@ -757,7 +758,8 @@ def _remember_scope_repair_hint() -> str:
     return (
         "个人记忆请省略 scope；当前会话记忆只写 "
         '{"scope_type":"session"}，两者身份都由宿主绑定；'
-        "session 不填写 valid_from/valid_until；项目/公司等非个人范围才提供对应 typed scope_key。"
+        "session 不填写 valid_from/valid_until；其余范围须带 typed scope_key：global 写 \"global\"，"
+        "项目写 \"project:<id>\"（公司/任务类型/临时范围同理）；范围按事实本身选，不要改存 personal。"
     )
 
 

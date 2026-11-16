@@ -177,7 +177,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "7481e80f7796ed6ff4598ef4d737f52c45cdd555b2bcceb51228403de455827a",
+    "body_hash": "c8f5a8e630dac2b83c92c914a6d6002ac8b25962020b0a8cb519a54b772efaf2",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -1417,7 +1417,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -1433,7 +1433,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -1536,7 +1536,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {
@@ -2445,7 +2445,7 @@
     "timestamp": 1,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "bf7220059c36f4f58d2f623792baf58c5ec5e0533b424197c23fc1a0d553b38c",
+    "body_hash": "e550654e0490efe656c06ea607df2c192a833b59d5f02e15a402c58829618bbe",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -3685,7 +3685,7 @@
                 },
                 "scope": {
                   "additionalProperties": false,
-                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；global、公司、项目、任务类型和临时范围都须显式 scope_key。",
                   "properties": {
                     "scope_type": {
                       "description": "适用范围类型；不能用正文或时间猜范围。",
@@ -3701,7 +3701,7 @@
                       "type": "string"
                     },
                     "scope_key": {
-                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                       "type": "string"
                     },
                     "applies_when": {
@@ -3804,7 +3804,7 @@
                             "type": "string"
                           },
                           "scope_key": {
-                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                            "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；其余类型必填且带类型前缀：global 写 global，company/project/task_class/temporary 写 <类型>:<id>（如 project:moneywise），id 只用字母、数字和 _ . - /；只写 id 或省略会被拒绝。",
                             "type": "string"
                           },
                           "applies_when": {
