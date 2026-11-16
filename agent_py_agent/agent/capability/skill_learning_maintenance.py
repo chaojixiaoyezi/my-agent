@@ -26,6 +26,7 @@ from .skill_learning_publish import (
     _cfg_lookup,
     _historical_adoptions,
     _owned_record,
+    _registered_capacity_available,
     _retire_third_strike_locked,
     _rollback_to_proven_stable_locked,
     _victim_rank_key,
@@ -656,7 +657,7 @@ def control_learning(
                     {"skill_name": name, "state": "user_modified", "reason": "extra_files_in_archive"},
                 )
 
-            if eff_max > 0:
+            if not _registered_capacity_available(registry, eff_max):
                 try:
                     managed = store.managed_records(registry, include_archived=False)
                 except SkillLearningStoreError as exc:

@@ -150,3 +150,44 @@ def test_post_model_decode_failure_advances_attempts_but_write_uncertainty_does_
     pending = store.pending_requests()
     assert len(pending) == 1
     assert store.read_request(pending[0]).get('attempts', 0) == 0
+
+
+
+@pytest.mark.parametrize('limit, expired, changed', [(50, False, False), (1, False, False),
+                                                    (50, True, False), (50, False, True)])
+def test_restore_with_spare_registered_capacity_retains_ownership_hash_and_grace_guards(
+        tmp_path, limit, expired, changed):
+    from agent_py_agent.agent.capability.skill_learning_maintenance import control_learning
+    from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStoreError
+    store = _store(tmp_path)
+    _seed(store, 'archived-method')
+    sibling = _seed(store, 'unknown-method')
+    with store.state_lock():
+        registry, _ = store._transition_archive_locked(store.load_registry(), 'archived-method', now=1000)
+        row = registry.skills['unknown-method']
+        store.save_registry(replace(registry, skills={**registry.skills,
+            row.name: replace(row, maintenance={**row.maintenance, 'ownership': 'unknown'})}))
+    archive = store.directory / 'archived' / 'archived-method' / 'SKILL.md'
+    original_archive = archive.read_bytes()
+    original_sibling = sibling.read_bytes()
+    if changed:
+        archive.write_bytes(b'user changed archived method')
+    if limit == 50 and not expired and not changed:
+        result = control_learning(store, 'archived-method', operation='restore',
+            max_skills=limit, now=1001, evict_seconds=10)
+        assert result['maintenance']['state'] in {'active', 'trial'}
+        assert store.skill_path('archived-method').read_bytes() == original_archive
+        assert not archive.exists()
+    else:
+        with pytest.raises((SkillLearningGateError, SkillLearningStoreError)) as exc:
+            control_learning(store, 'archived-method', operation='restore', max_skills=limit,
+                now=1011 if expired else 1001, evict_seconds=10)
+        if expired:
+            assert exc.value.code == 'SKILL_LEARNING_ARCHIVE_EXPIRED'
+        elif limit == 1:
+            assert exc.value.code == 'SKILL_LEARNING_EVIDENCE_INCOMPLETE'
+        else:
+            assert exc.value.code == 'SKILL_LEARNING_USER_MODIFIED'
+        assert archive.exists() and not store.skill_path('archived-method').exists()
+    assert sibling.read_bytes() == original_sibling
+    assert store.load_registry().skills['unknown-method'].maintenance['ownership'] == 'unknown'
