@@ -34,6 +34,7 @@ from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
     ToolOperationAuthorityRequest,
 )
+from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred, RuntimeDatabaseRecoveryRequired
 from .action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
 from .event_observation import ToolEventObservation
 from .liveness import ActivityHeartbeat
@@ -1171,15 +1172,33 @@ def _require_operation_authority(
             handler_executed=False,
         )
     except Exception as exc:  # noqa: BLE001 - 权威门故障 fail-closed
+        details = sqlite_error_details(exc)
+        code = "TOOL_OPERATION_STORE_UNAVAILABLE"
+        output = "权威门故障，无法验证执行授权（fail-closed，拒绝执行）"
+        next_action = ""
+        if isinstance(exc, RuntimeDatabaseRecoveryRequired):
+            code = exc.code
+            next_action = "停止本轮工具重试；由宿主保留故障库与恢复回执，离线核验恢复；禁止原样盲重试或绕过权威账本"
+            # 公开固定结构摘要，不回显可能包含个人路径或凭据的原异常正文；完整结构码仍留原envelope。
+            output = (f"{type(exc).__name__}: {code}; SQLITE_CORRUPT(11); "
+                      f"权威运行库结构损坏，自动恢复未安全完成；本次handler未执行，effect_outcome=not_started。{next_action}")
+        elif isinstance(exc, RuntimeDatabaseDeferred):
+            code = exc.code
+            next_action = "保留同一执行身份，等待宿主原短暂退避后重试；不要换工具或绕过权威账本"
+            summary = "generation_busy" if exc.reason == "generation_busy" else "运行库恢复协调暂时延迟"
+            output = (f"{type(exc).__name__}: {code}; {summary}; "
+                      f"本次handler未执行，effect_outcome=not_started。{next_action}")
         return apply_tool_execution_facts(
             ToolHandlerOutcome(
                 call.tool_name,
                 False,
-                "权威门故障，无法验证执行授权（fail-closed，拒绝执行）",
-                error_code="TOOL_OPERATION_STORE_UNAVAILABLE",
+                output,
+                error_code=code,
                 failure_stage=ToolFailureStage.RUNTIME_GATE.value,
                 handler_executed=False,
-                result_envelope={"storage_error": sqlite_error_details(exc)},
+                effect_outcome="not_started",
+                next_action=next_action,
+                result_envelope={"storage_error": details},
             ),
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,

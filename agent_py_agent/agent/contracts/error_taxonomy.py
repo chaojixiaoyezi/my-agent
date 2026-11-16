@@ -274,13 +274,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
     "RUNTIME_DB_RECOVERY_DEFERRED": ErrorContract(
         code="RUNTIME_DB_RECOVERY_DEFERRED", category="resource", retryable=True,
         recommended_action=RecoveryAction.RETRY.value,
-        recovery_hint="运行时数据库正在执行短暂恢复维护且本轮尚未开始；等待维护完成后重试，不修改持久状态。",
+        recovery_hint="运行时数据库代次或恢复协调暂时繁忙，本次执行前拒绝的工具没有运行；保留同一执行身份并按宿主原短暂退避重试，不换工具绕过权威门。",
     ),
     "RUNTIME_DB_RECOVERY_REQUIRED": ErrorContract(
         code="RUNTIME_DB_RECOVERY_REQUIRED", category="storage", retryable=False,
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint=(
-            "运行时数据库存在结构性损坏且自动抢救未完成；已保留原始库与备份文件，请停止写入与重试，"
+            "运行时数据库存在结构性损坏且自动抢救未安全完成；本次执行前拒绝的工具没有运行，历史 UNKNOWN 动作仍须独立核对。已保留原始库与恢复回执，禁止原样盲重试或绕过权威账本；由宿主离线核验，"
             "使用 scripts/runtime_db_salvage.py 指定 --source 只读原 runtime.db 与 --target 全新目标路径完成离线抢救。"
         ),
     ),
