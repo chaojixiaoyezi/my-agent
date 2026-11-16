@@ -144,3 +144,47 @@ def test_replacing_one_index_does_not_disable_dedupe_for_another(tmp_path):
 
     assert home.global_index_active_tasks_jsonl.is_file()
     assert home.global_index_active_runs_jsonl.read_bytes() == run_before
+
+
+@pytest.mark.parametrize('kind', ['owners', 'tasks', 'runs', 'agents'])
+def test_same_inode_rewrite_invalidates_every_entity_fingerprint(tmp_path, kind):
+    _home, _refs, path, register = _registrations(tmp_path, kind)
+    expected = register()
+    identity = path.stat()
+    # 保留 inode 的截断也必须失效，不能只核文件是否被替换。
+    path.write_bytes(b'')
+    assert path.stat().st_ino == identity.st_ino
+    register()
+    actual = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [{k: v for k, v in row.items() if k != 'updated_at'} for row in actual] == [
+        {k: v for k, v in row.items() if k != 'updated_at'} for row in expected
+    ]
+    before = path.read_bytes()
+    for _ in range(20):
+        register()
+    assert path.read_bytes() == before
+
+
+def test_one_entity_change_preserves_other_entities_dedupe(tmp_path):
+    home, refs, path, register = _registrations(tmp_path, 'tasks')
+    register()
+    changed = indexes.TaskIndexRef(**{**refs['tasks'][1].__dict__, 'status': 'done'})
+    indexes.register_task_ref(home, changed)
+    before = path.read_bytes()
+    for _ in range(20):
+        indexes.register_task_ref(home, refs['tasks'][0])
+        indexes.register_task_ref(home, changed)
+    assert path.read_bytes() == before
+    assert len(before.splitlines()) == 3
+
+
+def test_projection_fingerprint_and_file_generation_caches_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(indexes, '_INDEX_WRITE_CACHE_CAPACITY_COUNT', 3)
+    for number in range(8):
+        _home, _refs, path, register = _registrations(tmp_path / str(number), 'tasks')
+        register()
+        before = path.read_bytes()
+        register()
+        assert path.read_bytes() == before
+        assert len(indexes._INDEX_WRITE_CACHE) <= 3
+        assert len(indexes._INDEX_WRITE_FILES) <= 3

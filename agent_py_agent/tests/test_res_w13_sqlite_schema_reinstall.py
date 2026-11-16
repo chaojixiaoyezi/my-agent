@@ -18,6 +18,7 @@ from agent_py_agent.agent.collaboration.history_index import CollaborationHistor
 from agent_py_agent.agent.collaboration.models import AgentCapability
 from agent_py_agent.agent.collaboration.store import CollaborationStore
 from agent_py_agent.agent.common.nofollow_fs import NoFollowPathError
+from agent_py_agent.agent.io.readonly_sqlite import ProjectionReadUnavailableError
 from agent_py_agent.agent.local_storage.store import LocalStore
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.session_lock.store import SessionLockStore
@@ -172,8 +173,14 @@ def test_runtime_observation_never_recreates_deleted_database(tmp_path, mode):
     observer = RuntimeRepository(path, **{mode: True})
     _family(path)
     for live in (observer, RuntimeRepository(path, **{mode: True})):
-        with pytest.raises(sqlite3.OperationalError):
+        expected = ProjectionReadUnavailableError if mode == 'read_only' else sqlite3.OperationalError
+        with pytest.raises(expected) as caught:
             live.get_task('missing')
+        if mode == 'read_only':
+            assert isinstance(caught.value.__cause__, FileNotFoundError)
+            assert 'PROJECTION_READ_UNAVAILABLE' in str(caught.value)
+            assert 'effect_outcome=not_started' in str(caught.value)
+            assert 'next_action=' in str(caught.value)
         assert not path.exists()
 
 

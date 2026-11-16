@@ -34,9 +34,10 @@ from ..common.nofollow_fs import (
 from .home_layout import MyAgentHomePaths, home_paths
 from .owner_resolver import OwnerHomeResult
 
-# 写缓存最多缓存 5 万条索引键（个数）：批量写入前先攒内存，满了强制刷盘防失控。
+# 实体指纹和文件代次各自有界；缓存逐出只会多写一条投影，不影响原件。
 _INDEX_WRITE_CACHE_CAPACITY_COUNT = 50_000
-_INDEX_WRITE_CACHE: OrderedDict[tuple[str, ...], tuple[int, int, int, int, str]] = OrderedDict()
+_INDEX_WRITE_CACHE: OrderedDict[tuple[str, ...], tuple[object, str]] = OrderedDict()
+_INDEX_WRITE_FILES: OrderedDict[str, tuple[tuple[int, ...] | None, object]] = OrderedDict()
 _INDEX_WRITE_LOCK = threading.Lock()
 
 
@@ -484,21 +485,13 @@ def _append_changed_index_record(
     cache_key = _index_cache_key(path, payload, key_fields)
     fingerprint = _index_fingerprint(payload)
     with _INDEX_WRITE_LOCK:
+        generation = _index_file_generation(cache_key[0])
         cached = _INDEX_WRITE_CACHE.get(cache_key)
-        if cached is not None:
-            try:
-                identity = path.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                _forget_index_path(path)
-            else:
-                # 投影被删除/替换后，旧进程的所有实体指纹都不再证明该文件包含记录。
-                if cached[:4] != (identity.st_dev, identity.st_ino, identity.st_size, identity.st_mtime_ns):
-                    _forget_index_path(path)
-                elif cached[4] == fingerprint:
-                    _INDEX_WRITE_CACHE.move_to_end(cache_key)
-                    return False
+        if cached is not None and cached[0] is generation and cached[1] == fingerprint:
+            _INDEX_WRITE_CACHE.move_to_end(cache_key)
+            return False
         append_private_jsonl_records(path, [payload], sort_keys=True)
-        _remember_index_fingerprint(cache_key, fingerprint)
+        _remember_index_fingerprint(cache_key, fingerprint, generation=generation)
     return True
 
 
@@ -588,22 +581,44 @@ def _index_fingerprint(payload: dict[str, Any]) -> str:
 # LLM: Fingerprint retention is bounded LRU state only; evicting an entry may
 # cause one harmless extra append, never loss of canonical task data.
 # 函数用途: 记住最近写入指纹，并限制去重缓存的内存占用。
-def _remember_index_fingerprint(cache_key: tuple[str, ...], fingerprint: str) -> None:
-    identity = Path(cache_key[0]).stat(follow_symlinks=False)
-    _INDEX_WRITE_CACHE[cache_key] = (identity.st_dev, identity.st_ino, identity.st_size, identity.st_mtime_ns, fingerprint)
+def _remember_index_fingerprint(
+    cache_key: tuple[str, ...], fingerprint: str, *, generation: object | None = None,
+) -> None:
+    if generation is None:
+        generation = _index_file_generation(cache_key[0])
+    # 本进程追加只推进文件水位，不能让同文件其它实体的指纹一起失效。
+    _INDEX_WRITE_FILES[cache_key[0]] = (_index_file_stamp(cache_key[0]), generation)
+    _INDEX_WRITE_CACHE[cache_key] = (generation, fingerprint)
     _INDEX_WRITE_CACHE.move_to_end(cache_key)
     while len(_INDEX_WRITE_CACHE) > _INDEX_WRITE_CACHE_CAPACITY_COUNT:
         _INDEX_WRITE_CACHE.popitem(last=False)
+
+
+def _index_file_stamp(path: str) -> tuple[int, ...] | None:
+    try:
+        identity = Path(path).stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return (identity.st_dev, identity.st_ino, identity.st_size, identity.st_mtime_ns, identity.st_ctime_ns)
+
+
+def _index_file_generation(path: str) -> object:
+    """外部替换/改写使整份投影换代；旧实体通过代次比较失效，不扫描全局缓存。"""
+    stamp = _index_file_stamp(path)
+    cached = _INDEX_WRITE_FILES.get(path)
+    generation = cached[1] if cached is not None and cached[0] == stamp else object()
+    _INDEX_WRITE_FILES[path] = (stamp, generation)
+    _INDEX_WRITE_FILES.move_to_end(path)
+    while len(_INDEX_WRITE_FILES) > _INDEX_WRITE_CACHE_CAPACITY_COUNT:
+        _INDEX_WRITE_FILES.popitem(last=False)
+    return generation
 
 
 # LLM: Snapshot replacement invalidates all cached fingerprints for that exact
 # projection before reseeding them from the compacted records.
 # 函数用途: 清掉某份索引文件对应的旧去重记录。
 def _forget_index_path(path: Path) -> None:
-    prefix = str(path.resolve())
-    for cache_key in tuple(_INDEX_WRITE_CACHE):
-        if cache_key and cache_key[0] == prefix:
-            _INDEX_WRITE_CACHE.pop(cache_key, None)
+    _INDEX_WRITE_FILES.pop(str(path.resolve()), None)
 
 
 def latest_owner_refs(home: MyAgentHomePaths, *, limit: int = 20) -> list[dict[str, Any]]:

@@ -106,6 +106,18 @@ def _rebuild_temporary_files(paths):
     return [item for item in archive.iterdir() if item.name.startswith('.runtime-files.sqlite3.rebuild-')]
 
 
+def _patch_archive_index_link(monkeypatch, callback):
+    real_link = os.link
+
+    def archive_link(source, destination, *args, **kwargs):
+        # os 模块全局共享；其它 SQLite 投影的 dir_fd/nofollow 建库仍由原实现完成。
+        if Path(destination).name != 'runtime-files.sqlite3':
+            return real_link(source, destination, *args, **kwargs)
+        return callback(source, destination)
+
+    monkeypatch.setattr(retention.os, 'link', archive_link)
+
+
 @pytest.fixture
 def runtime_index_link(monkeypatch, tmp_path):
     """Use a real hard link when supported; emulate link publication in restricted test runners."""
@@ -132,7 +144,7 @@ def runtime_index_link(monkeypatch, tmp_path):
         calls.append((source_path, destination_path))
         return publish(source_path, destination_path)
 
-    monkeypatch.setattr(retention.os, 'link', recording_link)
+    _patch_archive_index_link(monkeypatch, recording_link)
     return calls
 
 
@@ -283,7 +295,7 @@ def test_concurrent_index_winner_is_kept_and_rebuild_temp_is_removed(tmp_path, m
             connection.execute('PRAGMA user_version=73')
         raise FileExistsError(destination)
 
-    monkeypatch.setattr(retention.os, 'link', racing_link)
+    _patch_archive_index_link(monkeypatch, racing_link)
     reports = _archive(paths, 'client_outbox')
 
     assert not any(report['errors'] for report in reports), reports
@@ -308,7 +320,7 @@ def test_rebuild_destination_disappearance_never_creates_empty_index(tmp_path, m
         destination.write_bytes(Path(source).read_bytes())
         destination.unlink()
 
-    monkeypatch.setattr(retention.os, 'link', vanishing_link)
+    _patch_archive_index_link(monkeypatch, vanishing_link)
     with caplog.at_level(logging.WARNING, logger=retention.__name__):
         reports = _archive(paths, 'client_outbox')
 
@@ -336,7 +348,7 @@ def test_concurrent_symlink_index_winner_fails_closed(tmp_path, monkeypatch, cap
         Path(destination).symlink_to(winner)
         raise FileExistsError(destination)
 
-    monkeypatch.setattr(retention.os, 'link', symlink_winner)
+    _patch_archive_index_link(monkeypatch, symlink_winner)
     with caplog.at_level(logging.WARNING, logger=retention.__name__):
         reports = _archive(paths, 'client_outbox')
 
@@ -358,7 +370,7 @@ def test_rebuild_link_permission_failure_preserves_source_and_cleans_temp(tmp_pa
     def denied_link(_source, _destination):
         raise PermissionError('hard links unavailable')
 
-    monkeypatch.setattr(retention.os, 'link', denied_link)
+    _patch_archive_index_link(monkeypatch, denied_link)
     with caplog.at_level(logging.WARNING, logger=retention.__name__):
         reports = _archive(paths, 'client_outbox')
 
