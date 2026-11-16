@@ -272,20 +272,30 @@ class AuditRecordsTool(BaseTool):
         description=(
             "只读本人结构化运行审计，不读对话/日志正文。topic=decision查决策点有效设置、调用与未触发原因、用量和结果；"
             "解释指标须使用回执中的字段定义、label、coverage和status_note，不把未发送/未覆盖统计当失败或零次。"
-            "topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属；message_lifecycle用一个精确request_id/message_ref/request_ref查消息链；tool_calls查工具耗时和精确error_code。覆盖不足按next_cursor续查，不能把missing当未发送。scope默认owner，current_thread限本会话，"
-            "all_owners仅显式获跨用户审计权限的管理员。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。"
+            "topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属；message_lifecycle用一个精确request_id/message_ref/request_ref查消息链；tool_calls查工具耗时和精确error_code。"
+            "decision/requests/message_lifecycle 的 scope 默认owner，current_thread限本会话，all_owners仅显式获跨用户审计权限的管理员。"
+            "tool_calls 仅支持scope=owner（本人全部会话）；current_thread/all_owners返回未开始读取的partial和改用owner的调用示例，不自动扩大范围，不能把owner结果当作当前线程或全部用户。"
+            "覆盖不足按next_cursor续查，不能把missing当未发送。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。"
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "topic": {"type": "string", "enum": list(_TOPICS),
-                          "description": "审计主题：decision（决策模型使用）或 requests（请求成败与错误码）。"},
-                "scope": {"type": "string", "enum": list(_SCOPES), "description": "默认 owner（本人全部会话）。"},
+                          "description": "decision查决策，requests查请求，message_lifecycle精确查消息链，tool_calls查工具遥测（仅支持scope=owner）。"},
+                "scope": {"type": "string", "enum": list(_SCOPES), "description": "默认owner（本人全部会话）。decision/requests/message_lifecycle可用current_thread；all_owners须原管理员跨用户许可。tool_calls仅支持owner，其它scope返回partial与明确纠正示例，不自动改范围。"},
                 "since_hours": {"type": "number", "exclusiveMinimum": 0, "maximum": _MAX_HOURS,
                                 "description": f"只看最近多少小时，默认 {_DEFAULT_HOURS}。"},
-                **{key: {"type": "string", "description": "结构化过滤；cursor 须原样使用上一页回执，改变过滤后清空。"}
-                   for key in ("request_id", "error_code", "channel", "cursor", "message_ref", "request_ref", "tool_name", "status")},
-                "until": {"type": "number", "minimum": 0, "description": "时间窗结束 Unix 秒；须不早于起点。"},
+                **{key: {"type": "string", "description": description} for key, description in {
+                    "request_id": "仅requests/message_lifecycle：精确请求编号。",
+                    "error_code": "仅requests/tool_calls：精确错误码，如TOOL_TIMEOUT；独立于status。",
+                    "channel": "仅requests：精确渠道标识。",
+                    "cursor": "仅requests/tool_calls：原样使用上一页next_cursor并保持筛选；改scope/筛选后清空。",
+                    "message_ref": "仅message_lifecycle：消息短引用；与request_id/request_ref只能提供一个。",
+                    "request_ref": "仅message_lifecycle：请求短引用；与request_id/message_ref只能提供一个。",
+                    "tool_name": "仅tool_calls且scope=owner：精确工具名。",
+                    "status": "仅requests/tool_calls：精确协议状态，不把错误码当作status。",
+                }.items()},
+                "until": {"type": "number", "minimum": 0, "description": "仅requests/tool_calls：时间窗结束Unix秒，须不早于起点。"},
                 "min_duration_ms": {"type": "number", "minimum": 0, "description": "tool_calls 最短耗时毫秒，无默认慢调用阈值。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT,
                           "description": f"最多返回多少条观察记录，默认 {_DEFAULT_LIMIT}。"},

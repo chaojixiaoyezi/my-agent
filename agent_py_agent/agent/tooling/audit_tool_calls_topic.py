@@ -7,8 +7,17 @@ def tool_calls_topic(agent, query):
     from .audit_lifecycle_topic import metadata_only
 
     if query.scope in ("all_owners", "current_thread"):
-        return {"tool_calls": {"entries": [], "coverage": {"status": "partial", "reason": "owner_scoped_telemetry_only"}},
-                "sources": ["tool_telemetry_ledger"]}
+        return {"tool_calls": {
+                    "entries": [], "coverage": {"status": "partial", "reason": "owner_scoped_telemetry_only"},
+                    "error_code": "AUDIT_TOPIC_SCOPE_UNSUPPORTED", "requested_scope": query.scope,
+                    "supported_scopes": ["owner"], "effect_outcome": "not_started", "read_only": True,
+                    "source_read_started": False,
+                    "next_action": "tool_calls 仅支持 scope=owner；本次未读取工具记录、未写入任何状态。"
+                                   "如可接受查询本人全部会话，请显式复制 retry_example 调用；示例采用最近24小时，"
+                                   "需要其它筛选时请重新明确填写，并清空旧 cursor。空 entries 不表示没有工具调用，"
+                                   "owner 结果也不能声称仅覆盖当前线程或全部用户。",
+                    "retry_example": {"topic": "tool_calls", "scope": "owner", "since_hours": 24, "limit": query.limit},
+                }, "sources": ["tool_telemetry_ledger"]}
     ledger = ToolTelemetryLedger(agent.home_paths.owner_home_dir, owner_id=str(agent.home_paths.owner_id or "local/main"))
     reader = getattr(ledger, "query_retained_tool_calls_page", None)
     if reader is None:

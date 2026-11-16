@@ -121,3 +121,53 @@ def test_control_operation_reads_original_runtime_binding(tmp_path):
     assert result["control_operation"]["attempt_id"] == binding.attempt_id
     assert result["attempt"]["status"] == "pending"
     assert "goal" not in result["task"]
+
+
+def test_tool_calls_unsupported_scopes_offer_valid_explicit_owner_retry():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.observability.telemetry_ledger import ToolTelemetryLedger
+    from agent_py_agent.agent.tooling.audit_tool_calls_topic import tool_calls_topic
+
+    for scope in ("current_thread", "all_owners"):
+        q = AuditQuery("tool_calls", scope, "trusted-thread", 0, 20)
+        # 没有home/config也可返回拒绝范围的事实；不构造/读取原账或写索引。
+        with patch.object(ToolTelemetryLedger, "__init__", side_effect=AssertionError("source must not start")):
+            report = tool_calls_topic(SimpleNamespace(), q)["tool_calls"]
+        assert report["coverage"] == {"status": "partial", "reason": "owner_scoped_telemetry_only"}
+        assert report["requested_scope"] == scope and report["supported_scopes"] == ["owner"]
+        assert report["effect_outcome"] == "not_started" and report["read_only"] is True
+        assert report["source_read_started"] is False and report["entries"] == []
+        assert report["error_code"] == "AUDIT_TOPIC_SCOPE_UNSUPPORTED"
+        assert "本人全部会话" in report["next_action"] and "空 entries 不表示没有" in report["next_action"]
+        retry = report["retry_example"]
+        assert retry == {"topic": "tool_calls", "scope": "owner", "since_hours": 24, "limit": 20}
+        assert isinstance(_parse(retry), tuple)
+
+
+def test_tool_calls_scope_guidance_preserves_cross_owner_permission_gate():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.audit_records_tool import AuditRecordsTool
+
+    agent = SimpleNamespace(home_paths=object())
+    with (patch("agent_py_agent.agent.tooling.audit_records_tool.current_subagent_run_id", return_value=""),
+          patch("agent_py_agent.agent.user_space.owner_admin_controls.read_owner_admin_controls",
+                return_value={"audit_allowed": True}),
+          patch("agent_py_agent.agent.user_space.owner_admin_controls.cross_owner_audit_allowed", return_value=False)):
+        result = AuditRecordsTool(agent).execute({"topic": "tool_calls", "scope": "all_owners"})
+    assert not result.ok and result.error_code == "AUDIT_ACCESS_DENIED"
+    assert json.loads(result.output)["reason"] == "cross_owner_not_allowed"
+    assert result.effect_outcome == "not_started"
+
+
+def test_audit_schema_explains_topic_scope_differences():
+    from agent_py_agent.agent.tooling.audit_records_tool import AuditRecordsTool
+
+    spec = AuditRecordsTool.model_spec
+    assert "tool_calls 仅支持scope=owner" in spec.description
+    properties = spec.input_schema["properties"]
+    assert "tool_calls仅支持owner" in properties["scope"]["description"]
+    assert "message_lifecycle" in properties["topic"]["description"]
+    assert "仅requests/tool_calls" in properties["cursor"]["description"]
+    assert "仅tool_calls且scope=owner" in properties["tool_name"]["description"]
