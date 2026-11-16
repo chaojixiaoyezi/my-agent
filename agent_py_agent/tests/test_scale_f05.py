@@ -206,8 +206,8 @@ def test_failed_canonical_commit_leaves_capacity_unavailable(tmp_path, monkeypat
         manager.save(task)
     index = getattr(manager.persistence, "run_index", None)
     assert index is not None
-    with pytest.raises(RuntimeError, match="pending"):
-        index.active_counts()
+    # 未发表的 DONE 不投影进容量：pending 行保持原 active 占位，直到精确恢复。
+    assert index.active_counts() == (1, 0)
     monkeypatch.setattr(service, "write_agent_run_state", original)
     with monkeypatch.context() as recovery:
         recovery.setattr(os, "scandir", _unexpected_scan)
@@ -776,8 +776,10 @@ def test_prepare_pending_recovery_has_fixed_batch_and_zero_fd_delta(tmp_path, mo
         report = manager.persistence.prepare_run_index()
         assert report["discarded"] == 64 and report["pending"] == 1
         assert not report["errors"]
+        # 剩余未知占位仍按 active 计入容量，并阻止任何作用域的请求选择，直到下一轮续修。
+        assert index.active_counts() == (1, 0)
         with pytest.raises(RuntimeError, match="pending"):
-            index.active_counts()
+            index.request_ids(("any-root",), "", None)
         assert _fd_count() == before
         report = manager.persistence.prepare_run_index()
         assert report["discarded"] == 1 and report["pending"] == 0
@@ -803,8 +805,7 @@ def test_pending_published_state_is_not_discarded_on_invalid_canonical(tmp_path,
         canonical.unlink()
     report = manager.persistence.prepare_run_index()
     assert report["errors"] and report["pending"] == 1
-    with pytest.raises(RuntimeError, match="pending"):
-        manager.persistence.run_index.active_counts()
+    assert manager.persistence.run_index.active_counts() == (1, 0)
     canonical.write_bytes(original)
     report = manager.persistence.prepare_run_index()
     assert not report["errors"] and report["pending"] == 0
@@ -961,8 +962,7 @@ def test_legacy_committed_row_is_not_treated_as_unpublished(tmp_path, monkeypatc
     index.mark_pending(task.id, task=task)
     report = manager.persistence.prepare_run_index()
     assert report["errors"] and report["discarded"] == 0 and report["pending"] == 1
-    with pytest.raises(RuntimeError, match="pending"):
-        index.active_counts()
+    assert index.active_counts() == (1, 0)
 
 
 # LLM: v1 的 complete/offset 不能证明新增 lookup 覆盖；升级必须重新核 canonical，不能信旧容量零值。

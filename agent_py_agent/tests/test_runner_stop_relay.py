@@ -50,27 +50,30 @@ def ready_stop_control(monkeypatch):
     signals, refusals = [], []
     denied = threading.Event()
     signal = cancellation.signal_runner_attempt
-    require_complete = SubagentRunIndex._require_complete
 
     def observed_signal(run_id, attempt_id):
         signals.append((run_id, attempt_id))
         return signal(run_id, attempt_id)
 
-    def observed_complete(index, db):
-        try:
-            return require_complete(index, db)
-        except SubagentRunIndexUnavailable as error:
-            # request_ids已BEGIN；同一快照内采样，不能拿后来的就绪状态猜原错误原因。
-            error.stop_test_index_state = {
-                'complete': db.execute("SELECT value FROM meta WHERE key='complete'").fetchone() == (1,),
-                'pending': db.execute('SELECT 1 FROM runs WHERE pending=1 LIMIT 1').fetchone() is not None,
-            }
-            refusals.append(error.stop_test_index_state)
-            denied.set()
-            raise
+    # 整库门与按作用域门（request_ids）都要观察：两者拒绝时同样只在原读事务内采样。
+    def observed_gate(gate):
+        def observed(index, db, *scope):
+            try:
+                return gate(index, db, *scope)
+            except SubagentRunIndexUnavailable as error:
+                # request_ids已BEGIN；同一快照内采样，不能拿后来的就绪状态猜原错误原因。
+                error.stop_test_index_state = {
+                    'complete': db.execute("SELECT value FROM meta WHERE key='complete'").fetchone() == (1,),
+                    'pending': db.execute('SELECT 1 FROM runs WHERE pending=1 LIMIT 1').fetchone() is not None,
+                }
+                refusals.append(error.stop_test_index_state)
+                denied.set()
+                raise
+        return observed
 
     monkeypatch.setattr(cancellation, 'signal_runner_attempt', observed_signal)
-    monkeypatch.setattr(SubagentRunIndex, '_require_complete', observed_complete)
+    for name in ('_require_complete', '_require_scope_complete'):
+        monkeypatch.setattr(SubagentRunIndex, name, observed_gate(getattr(SubagentRunIndex, name)))
 
     def prepare(agent, requests):
         deadline = time.monotonic() + 5
@@ -247,7 +250,8 @@ def test_cancel_between_control_read_and_heartbeat_write_is_still_relayed(runnin
     assert not runner.is_alive()
 
 
-def test_pending_sibling_commit_refuses_before_broadcast_and_retries_exact_attempt(running, ready_stop_control, monkeypatch):
+# LLM: 另一作用域的进行中规范提交不再整库拦截停止选择；停止在该提交仍挂起时一次完成，只广播精确 attempt。
+def test_pending_commit_in_another_scope_does_not_block_exact_stop(running, ready_stop_control, monkeypatch):
     from agent_py_agent.agent.subagents.services.persistence import service
 
     manager, tasks = running
@@ -284,7 +288,7 @@ def test_pending_sibling_commit_refuses_before_broadcast_and_retries_exact_attem
         request = CancelSubagentTaskRequest(tasks[1], 'test', kill_process=False)
         batch = ready_stop_control.prepare(SimpleNamespace(subagents=manager), [request])
         assert not batch.unconfirmed
-        assert ready_stop_control.refusals == [{'complete': True, 'pending': True}]
+        assert ready_stop_control.refusals == [] and not ready_stop_control.denied.is_set()
         assert ready_stop_control.signals == [(tasks[1].id, tasks[1].runner_active_attempt_id)]
         assert runner_attempt_cancelled(manager, tasks[1].id, tasks[1].runner_active_attempt_id)
         assert not runner_attempt_cancelled(manager, tasks[0].id, tasks[0].runner_active_attempt_id)
