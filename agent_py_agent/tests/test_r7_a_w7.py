@@ -121,9 +121,12 @@ def test_configured_stream_preserves_live_refs_across_historical_source_pages(tm
     monkeypatch.setattr(scan.reference_pins.time, "time_ns", lambda: settled)
     original, sizes, snapshots = scan._fingerprint_source, [], []
     constructor = scan.reference_pins.ReferencePinSnapshot.__init__
+    resumable_modes = []
 
-    def configured(self, home, roots, now, builder, *, config=None):
-        constructor(self, home, roots, now, builder, config=config)
+    def configured(self, home, roots, now, builder, *, config=None, resumable=False):
+        constructor(self, home, roots, now, builder, config=config, resumable=resumable)
+        assert self.resumable is resumable
+        resumable_modes.append(resumable)
         snapshots.append((config, self))
 
     class Stream:
@@ -153,6 +156,7 @@ def test_configured_stream_preserves_live_refs_across_historical_source_pages(tm
     assert snapshots and all(received is config and snapshot.contents["chunk_bytes"] == 4096
                              for received, snapshot in snapshots)
     assert any(isinstance(snapshot, scan._PinProjection) for _, snapshot in snapshots)
+    assert set(resumable_modes) == {False, True}
     assert any(type(snapshot) is scan.reference_pins.ReferencePinSnapshot for _, snapshot in snapshots)
 
 

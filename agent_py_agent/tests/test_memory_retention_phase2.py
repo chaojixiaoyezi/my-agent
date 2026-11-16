@@ -15,6 +15,46 @@ from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPo
 from agent_py_agent.tests.test_memory_retention_wave5 import NOW, old_file, runtime
 
 
+@pytest.fixture(autouse=True)
+def deterministic_retention_clock(monkeypatch):
+    # 此文件验证安全与状态，不把宿主磁盘吞吐纳入25ms时钟合同；条目/字节上界保持原值。
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+    monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+
+
+def _complete_plan(service, *, now):
+    from dataclasses import replace
+    cursor, actions, errors = {}, [], []
+    for _ in range(256):
+        report = service.plan(now=now, scan_cursor=cursor)
+        actions.extend(report.actions)
+        errors.extend(report.errors)
+        cursor = report.scan_cursor
+        if not report.scan_partial:
+            return replace(report, actions=tuple(actions), errors=tuple(errors))
+    pytest.fail(f"bounded plan failed to finish: {cursor}")
+
+
+def _complete_apply(service, *, now):
+    from dataclasses import replace
+    actions, errors = [], []
+    for _ in range(256):
+        report = service.apply(now=now)
+        actions.extend(report.actions)
+        errors.extend(report.errors)
+        if not report.scan_partial:
+            return replace(report, actions=tuple(actions), errors=tuple(errors))
+    pytest.fail(f"bounded apply failed to finish: {report.scan_cursor}")
+
+
+def _complete_pins(home, roots, errors, *, now):
+    for _ in range(256):
+        pins, complete = scan.current_retention_pins(home, roots, errors, now=now)
+        if complete or errors:
+            return pins, complete
+    pytest.fail("bounded reference proof made no complete result")
+
+
 # LLM: 默认值兼容旧策略，显式值必须严格非负整数。
 # 函数用途: 验证task tmp新策略的缺省及坏值门。
 def test_task_tmp_policy_defaults_and_strict_values():
@@ -39,9 +79,9 @@ def test_stateless_task_tmp_cleans_only_idle_scratch(tmp_path, fresh):
     if fresh:
         os.utime(scratch, (NOW.timestamp(), NOW.timestamp()))
     before = {path: path.read_bytes() for path in sentinels}
-    planned = service.plan(now=NOW)
+    planned = _complete_plan(service, now=NOW)
     assert bool([a for a in planned.actions if a.category == "task_tmp"]) is not fresh
-    service.apply(now=NOW)
+    _complete_apply(service, now=NOW)
     assert scratch.exists() is fresh
     if not fresh:
         assert not list((task / "tmp").iterdir())
@@ -62,27 +102,20 @@ def test_task_state_discovery_never_rglobs_scratch(tmp_path, monkeypatch):
         return original(path, pattern, *args, **kwargs)
 
     monkeypatch.setattr(Path, "rglob", guarded)
-    service.plan(now=NOW)
+    _complete_plan(service, now=NOW)
 
 
-# LLM: 预算路径上持续append代次漂移须安全延迟、零无预算全扫、稳定后收敛；显式无预算路径保留3次重试与目标域隔离合同。
-# 函数用途: 验证预算延迟收敛与无预算追加竞态重试及失败不阻断独立task tmp。
+# 持续append必须结构化报告restart_required且零删除；停止漂移后沿原预算完成。
+# 不再把scan_budget=None解释成另一条同步全扫路径。
 def test_pin_append_retry_and_domain_isolation(tmp_path, monkeypatch):
-    from dataclasses import replace
     from itertools import count
 
-    from agent_py_agent.agent.memory_store import retention_apply as apply
     from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
-    from agent_py_agent.agent.memory_store.retention import _without_errored_subtrees
 
     home, _candidates, service = runtime(tmp_path / "budgeted")
     path = home.owner_memory_curator_runs_dir / "racing.jsonl"
     old_file(path)
     scratch = old_file(home.owner_tasks_dir / "2026-10-01" / "sample" / "tmp" / "x")
-    unbudgeted_home, unbudgeted_candidates, unbudgeted_service = runtime(tmp_path / "unbudgeted")
-    unbudgeted_path = unbudgeted_home.owner_memory_curator_runs_dir / "racing.jsonl"
-    old_file(unbudgeted_path)
-    unbudgeted_scratch = old_file(unbudgeted_home.owner_tasks_dir / "2026-10-01" / "sample" / "tmp" / "x")
 
     original = scan._fingerprint_source
     original_full = scan.current_retention_pins
@@ -93,7 +126,7 @@ def test_pin_append_retry_and_domain_isolation(tmp_path, monkeypatch):
     # 函数用途: 确定性制造pin读取前后的代次漂移。
     def racing_open(target):
         source = original(target)
-        if racing[0] and target in {path, unbudgeted_path}:
+        if racing[0] and target == path:
             calls.append(target)
             with target.open("ab") as writer:
                 writer.write(b"{}\n")
@@ -120,7 +153,8 @@ def test_pin_append_retry_and_domain_isolation(tmp_path, monkeypatch):
         report = service.apply(now=NOW)
         assert report.applied and report.scan_partial
         assert not report.errors and report.actions == ()
-        assert scan._PIN_CURSOR_KEY not in report.scan_cursor
+        assert report.scan_cursor[scan._PIN_CURSOR_KEY]["phase"] == "restart_required"
+        assert report.scan_cursor[scan._PIN_CURSOR_KEY]["change"]["side_effects"] == "not_started"
         assert budgets.load_scan_cursor(home) == report.scan_cursor
         assert scratch.exists()
     assert full_calls == []
@@ -136,22 +170,6 @@ def test_pin_append_retry_and_domain_isolation(tmp_path, monkeypatch):
         pytest.fail(f"budgeted apply did not converge after racing stopped: {report.scan_cursor}")
     assert report.applied and not scratch.exists()
 
-    # 2) 显式无预算路径：持续append触发current_retention_pins三次重试报错，target_pin_read()仍放行无关task tmp。
-    calls.clear()
-    racing[0] = True
-    plan = unbudgeted_service.plan(now=NOW, scan_budget=None)
-    assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in plan.errors)
-    assert len(calls) >= 3, "concurrent append was not retried"
-    assert any(action.path == unbudgeted_scratch.parent for action in plan.actions)
-    executed = apply.execute_retention_plan(
-        home=unbudgeted_home,
-        candidates=unbudgeted_candidates,
-        plan=replace(_without_errored_subtrees(plan), isolated_errors=plan.errors),
-        now=NOW,
-    )
-    assert executed.applied and not unbudgeted_scratch.exists(), (
-        "unrelated task tmp must not be blocked by racing pin on unbudgeted path"
-    )
 
 
 # LLM: 使用产品runtime schema建临时库；RUNNING档案的终态只可由规范DB精确身份证明。
@@ -184,7 +202,7 @@ def test_running_run_state_reconciles_terminal_db_for_scratch(tmp_path, active):
     output = old_file(root / "output" / "result.txt", "keep")
     db = terminal_db(home, active=active)
     before = db.read_bytes(), state.read_bytes(), output.read_bytes()
-    service.apply(now=NOW)
+    _complete_apply(service, now=NOW)
     assert scratch.exists() is active
     assert (db.read_bytes(), state.read_bytes(), output.read_bytes()) == before
 
@@ -199,7 +217,7 @@ def test_run_reactivation_after_plan_preserves_scratch(tmp_path):
     old_file(root / "work/state.json", json.dumps({"task_id": "task-1", "run_id": "run-1", "status": "RUNNING", "updated_at": 1}))
     scratch = old_file(root / "tmp/x")
     db = terminal_db(home)
-    plan = service.plan(now=NOW)
+    plan = _complete_plan(service, now=NOW)
     assert [a for a in plan.actions if a.category == "run_scratch"]
     with sqlite3.connect(db) as connection:
         connection.execute("UPDATE agent_runs SET status='running'")
@@ -217,7 +235,7 @@ def test_json_terminal_run_respects_lock_added_after_plan(tmp_path):
     old_file(root / "work/state.json", json.dumps({"task_id": "task-1", "run_id": "run-1", "status": "DONE", "updated_at": NOW.timestamp() - 20 * 86400}))
     scratch = old_file(root / "tmp/x")
     db = terminal_db(home)
-    plan = service.plan(now=NOW)
+    plan = _complete_plan(service, now=NOW)
     assert [a for a in plan.actions if a.category == "run_scratch"]
     with sqlite3.connect(db) as connection:
         connection.execute("INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance, attempt_id, attempt_generation, workspace_epoch, lease_expires_at, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -253,7 +271,7 @@ def test_scratch_ancestor_swap_cannot_redirect_unlink_into_output(tmp_path, monk
 
     monkeypatch.setattr(apply, "open_directory_beneath", swapping)
     for _ in range(64):
-        report = service.apply(now=NOW)
+        report = _complete_apply(service, now=NOW)
         if swapped or not report.scan_partial:
             break
     assert swapped, "must actually inject the ancestor replacement"
@@ -299,13 +317,13 @@ def test_obligated_scratch_evidence_is_pinned_in_plan_and_apply(tmp_path, kind, 
         root = task / "work/blobs/tool_outputs"
     evidence = old_file(root / "nested/proof.bin", "proof bytes")
     old_file(root / "control.bin", "unreferenced")
-    plan = service.plan(now=NOW)
+    plan = _complete_plan(service, now=NOW)
     assert [a for a in plan.actions if a.path == root and a.category == kind]
     obligated_evidence(candidates, evidence, status)
-    pins, complete = scan.current_retention_pins(home, (), [], now=NOW)
+    pins, complete = _complete_pins(home, (), [], now=NOW)
     assert complete and pins.protects(root, []) and pins.protects(evidence, [])
     if not late:
-        plan = service.plan(now=NOW)
+        plan = _complete_plan(service, now=NOW)
         assert not [a for a in plan.actions if a.path == root]
     report = execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
     assert evidence.read_text() == "proof bytes"
@@ -320,10 +338,10 @@ def test_corrupt_candidate_pins_preserve_scratch(tmp_path, late):
 
     home, candidates, service = runtime(tmp_path)
     evidence = old_file(home.owner_tasks_dir / "2026-10-01/sample/tmp/x", "keep")
-    plan = service.plan(now=NOW)
+    plan = _complete_plan(service, now=NOW)
     old_file(candidates.path, "{broken\n")
     if not late:
-        plan = service.plan(now=NOW)
+        plan = _complete_plan(service, now=NOW)
         assert not [a for a in plan.actions if a.path == evidence.parent]
     report = execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
     assert evidence.read_text() == "keep" and (plan.errors or report.errors)
@@ -354,7 +372,7 @@ def test_move_after_per_member_open_preserves_output(tmp_path, monkeypatch, dire
         return descriptor
 
     monkeypatch.setattr(apply, "open_directory_beneath", moving)
-    report = service.apply(now=NOW)
+    report = _complete_apply(service, now=NOW)
     assert moved.exists(), calls
     if directory:
         assert (moved / "nested").is_dir()
@@ -393,14 +411,16 @@ def test_first_state_publication_invalidates_next_action_snapshot(tmp_path, monk
     monkeypatch.setattr(apply, "_apply_action", publish)
     actions = []
     for _ in range(64):
-        report = service.apply(now=later)
+        report = _complete_apply(service, now=later)
         actions.extend(report.actions)
         if not report.scan_partial:
             break
     else:
         pytest.fail("retention did not finish within bounded continuation")
     assert published and not first.destination.exists() and second.destination.exists()
-    assert next(a for a in actions if a.path == second.destination).status == "state_changed"
+    blocked = next(a for a in actions if a.path == second.destination)
+    assert blocked.status == "not_started"
+    assert "PIN_SCAN_PENDING" in blocked.reason
 
 
 # LLM: 仅日期/任务目录的scandir失败，必须真的经过注入且complete=False，不靠chmod行为猜权限。
@@ -412,17 +432,9 @@ def test_unreadable_task_discovery_is_incomplete(tmp_path, monkeypatch, level):
     task = home.owner_tasks_dir / "2026-10-01/sample"
     old_file(task / "work/state.json", json.dumps({"task_id": "sample", "status": "RUNNING",
         "updated_at": NOW.timestamp(), "source_refs": [str(target)]}))
-    original, calls = os.scandir, []
+    calls = []
     original_stat = Path.stat
     blocked = task.parent if level == "date" else task
-
-    # LLM: 精确拒绝选中的发现目录，其它文件系统读取原样执行。
-    # 函数用途: 注入不会被Path.glob吞掉的目录权限错误。
-    def denied(path):
-        if level == "date" and Path(path) == blocked:
-            calls.append(path)
-            raise PermissionError(13, "denied", str(path))
-        return original(path)
 
     # LLM: 精确任务后缀stat模拟真实父目录搜索权不足，不要求发现器为列名额外递归任务内容。
     # 函数用途: 注入规范work父链不可读取的失败。
@@ -432,10 +444,18 @@ def test_unreadable_task_discovery_is_incomplete(tmp_path, monkeypatch, level):
             raise PermissionError(13, "denied", str(path))
         return original_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "scandir", denied)
+    original_members = scan._PinProjection._directory_members
+
+    def denied_members(self, path, stamp):
+        if level == "date" and path == blocked:
+            calls.append(path)
+            raise PermissionError(13, "denied", str(path))
+        yield from original_members(self, path, stamp)
+
+    monkeypatch.setattr(scan._PinProjection, "_directory_members", denied_members)
     monkeypatch.setattr(Path, "stat", denied_stat)
     errors = []
-    _pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    _pins, complete = _complete_pins(home, (), errors, now=NOW)
     assert calls and not complete and errors
 
 
@@ -451,7 +471,7 @@ def test_trash_scoped_pins_revalidate_racing_source(tmp_path, monkeypatch, sourc
     moved, = _trash_tool_manifests(home, service, ["expired"])
     source, destination = moved.path, moved.destination
     later = NOW + timedelta(days=31)
-    old_plan = service.plan(now=later)
+    old_plan = _complete_plan(service, now=later)
     assert [a for a in old_plan.actions if a.path == destination]
     path = home.owner_memory_curator_runs_dir / "racing.jsonl"
     content = json.dumps({"source_refs": [str(source)]}) if source_kind == "referenced" else "{}"
@@ -502,12 +522,17 @@ def test_trash_scoped_pins_revalidate_racing_source(tmp_path, monkeypatch, sourc
 
     monkeypatch.setattr(scan, "_fingerprint_source", racing)
     plan = service.plan(now=later)
-    assert bool([a for a in plan.actions if a.path == destination]) is (source_kind == "unrelated")
+    assert not any(a.path == destination for a in plan.actions)
     report = execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=later)
-    assert calls
-    assert destination.exists() is (source_kind != "unrelated")
+    assert calls and destination.exists()
     action = next(a for a in report.actions if a.path == destination)
-    assert (action.status == "deleted") is (source_kind == "unrelated")
+    assert action.status != "deleted"
+    # 停止写入后才可能建立完整代次；无关正常源必须最终放行，相关/坏源继续保护。
+    monkeypatch.setattr(scan, "_fingerprint_source", original)
+    settled = _complete_apply(service, now=later)
+    assert destination.exists() is (source_kind in {"referenced", "corrupt"})
+    if source_kind in {"unrelated", "mid_read", "unreadable"}:
+        assert any(a.path == destination and a.status == "deleted" for a in settled.actions)
 
 
 # LLM: DB终态只解除非hold运行的隐式活跃保护；法律保留仍保护整棵规范恢复根。
@@ -521,7 +546,7 @@ def test_terminal_db_reconciliation_preserves_held_run_pin(tmp_path):
     terminal_db(home)
     policy = json.loads(home.owner_retention_json.read_text())
     home.owner_retention_json.write_text(json.dumps({**policy, "legal_hold_task_ids": ["task-1"]}))
-    pins, complete = scan.current_retention_pins(home, (), [], now=NOW)
+    pins, complete = _complete_pins(home, (), [], now=NOW)
     assert complete and pins.protects(target, [])
 
 
@@ -533,43 +558,18 @@ def test_disappearing_discovery_member_does_not_hide_active_sibling(tmp_path, mo
     target = old_file(home.owner_memory_daily_dir / "active.jsonl")
     old_file(date / "sample/work/state.json", json.dumps({"task_id": "sample", "status": "RUNNING",
         "updated_at": NOW.timestamp(), "source_refs": [str(target)]}))
-    original, calls = os.scandir, []
+    gone = date / "gone"
+    gone.mkdir()
+    original, calls = Path.stat, []
 
-    # LLM: 模拟枚举后恰好消失的兄弟条目，不改变活跃任务本身。
-    # 类用途: 提供明确ENOENT的目录成员元数据。
-    class Vanished:
-        # LLM: 不提供不存在对象的身份，精确报告本次成员消失。
-        # 函数用途: 制造局部而非整层目录缺失。
-        def stat(self, **kwargs):
-            calls.append(True)
-            raise FileNotFoundError(2, "gone", str(date / "gone"))
+    def disappearing(path, *args, **kwargs):
+        if path == gone and not calls:
+            gone.rmdir()
+            calls.append(path)
+        return original(path, *args, **kwargs)
 
-    # LLM: 管理真实scandir寿命，仅在真实成员之前插入一个消失对象。
-    # 类用途: 保留全部真实任务枚举结果并注入局部竞态。
-    class Entries:
-        # LLM: 构造仅借用既有目录读取器。
-        # 函数用途: 保存实际scandir对象。
-        def __init__(self, raw):
-            self.raw = raw
-
-        # LLM: 真实条目完整保留，不能借测试替身抹掉后续活跃状态。
-        # 函数用途: 在枚举首项制造已消失成员。
-        def __enter__(self):
-            return iter([Vanished(), *self.raw.__enter__()])
-
-        # LLM: 原上下文负责关闭目录流，不吞异常。
-        # 函数用途: 释放真实scandir句柄。
-        def __exit__(self, *args):
-            return self.raw.__exit__(*args)
-
-    # LLM: 仅选中日期层包装，根及其它目录仍沿原os.scandir。
-    # 函数用途: 注入一个目录成员消失，不制造真实权限故障。
-    def vanishing(path):
-        raw = original(path)
-        return Entries(raw) if Path(path) == date else raw
-
-    monkeypatch.setattr(os, "scandir", vanishing)
-    pins, complete = scan.current_retention_pins(home, (), [], now=NOW)
+    monkeypatch.setattr(Path, "stat", disappearing)
+    pins, complete = _complete_pins(home, (), [], now=NOW)
     assert calls and complete and pins.protects(target, [])
 
 
@@ -585,13 +585,13 @@ def test_internal_directory_names_are_legal_task_names(tmp_path, task_name):
     moved, = _trash_tool_manifests(home, service, ["2000-01-01"])
     source, target = moved.path, moved.destination
     later = NOW + timedelta(days=31)
-    old_plan = service.plan(now=later)
+    old_plan = _complete_plan(service, now=later)
     assert any(action.path == target and action.operation == "delete_tree" for action in old_plan.actions)
     old_file(home.owner_tasks_dir / "2026-10-01" / task_name / "work/state.json", json.dumps({
         "task_id": task_name, "status": "RUNNING", "updated_at": later.timestamp(), "source_refs": [str(source)]}))
-    pins, complete = scan.current_retention_pins(home, (), [], now=later)
+    pins, complete = _complete_pins(home, (), [], now=later)
     assert complete and pins.protects(source, [])
-    assert not any(action.path == target for action in service.plan(now=later).actions)
+    assert not any(action.path == target for action in _complete_plan(service, now=later).actions)
     execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=later)
     assert target.exists()
 
@@ -601,7 +601,7 @@ def test_internal_directory_names_are_legal_task_names(tmp_path, task_name):
 def test_plan_builds_reference_pins_once(tmp_path, monkeypatch):
     home, _candidates, service = runtime(tmp_path)
     old_file(home.owner_tasks_dir / "2026-10-01/sample/tmp/x")
-    original, calls = scan.current_retention_pins, []
+    original, calls = scan._PinProjection.__init__, []
 
     # LLM: 原扫描完整执行，额外记录次数用于防止按类别重复解析与重复报错。
     # 函数用途: 观察本次规划的pin构建次数。
@@ -609,8 +609,8 @@ def test_plan_builds_reference_pins_once(tmp_path, monkeypatch):
         calls.append(True)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(scan, "current_retention_pins", counted)
-    plan = service.plan(now=NOW)
+    monkeypatch.setattr(scan._PinProjection, "__init__", counted)
+    plan = _complete_plan(service, now=NOW)
     assert any(action.category == "task_tmp" for action in plan.actions)
     assert len(calls) == 1
 
@@ -632,14 +632,15 @@ def test_scratch_revalidates_pin_generation_once_per_action(tmp_path, monkeypatc
         root = task / "tmp"
     for number in range(32):
         old_file(root / "nested" / f"{number}.bin")
-    plan = service.plan(now=NOW)
+    plan = _complete_plan(service, now=NOW)
     assert len([action for action in plan.actions if action.path == root]) == 1
     original, calls = ReferencePinSnapshot.current, []
 
     # LLM: 真实快照仍验证全部来源，计数不得替代原执行结果断言。
     # 函数用途: 记录单个动作触发的来源代次复核。
     def counted(self, *args, **kwargs):
-        calls.append(True)
+        if not isinstance(self, scan._PinProjection):
+            calls.append(True)
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(ReferencePinSnapshot, "current", counted)
@@ -685,19 +686,19 @@ def test_id_only_tool_evidence_pins_run_scratch(tmp_path, late, owner_identity):
     verified = verifier.verify(ref)
     assert verified is not None and verified.successful
     before = {path: path.read_bytes() for path in (index, envelope, root / "control.bin")}
-    plan = service.plan(now=NOW)
+    plan = _complete_plan(service, now=NOW)
     assert any(action.path == root and action.category == "run_scratch" for action in plan.actions)
     row = candidates.observe(CandidateObservation(candidate_type="lesson", content="仅ID引用也必须保留真实工具证据",
         subject_key="scratch.id.evidence", scope=MemoryScope("personal", "personal"),
         origin="tool_verified", promotion_target="lesson", source_tool_refs=(ref,)))
     candidates.transition(row.candidate_id, "approved", reviewer="test")
     errors = []
-    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    pins, complete = _complete_pins(home, (), errors, now=NOW)
     assert complete and not errors
     assert pins.protects(index, []) and pins.protects(envelope, [])
     assert not pins.protects(root, []), "fixture must not accidentally contain a directory path pin"
     if not late:
-        plan = service.plan(now=NOW)
+        plan = _complete_plan(service, now=NOW)
         assert not any(action.path == root for action in plan.actions)
     report = execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
     assert not any(action.path == root and action.status == "deleted" for action in report.actions)
@@ -717,14 +718,14 @@ def test_id_only_task_tmp_member_protects_whole_tree(tmp_path, late):
     root = home.owner_tasks_dir / "2026-10-01/sample/tmp"
     evidence = old_file(root / "nested/proof.json", json.dumps({"artifact_id": "artifact-proof"}))
     control = old_file(root / "a-control.bin", "whole tree must survive")
-    plan = service.plan(now=NOW)
+    plan = _complete_plan(service, now=NOW)
     assert any(action.path == root for action in plan.actions)
     row = candidates.observe(CandidateObservation(candidate_type="lesson", content="任务子证据按ID保护",
         subject_key="scratch.task.id", scope=MemoryScope("personal", "personal"),
         origin="model_inferred", promotion_target="lesson", evidence_refs=({"artifact_id": "artifact-proof"},)))
     candidates.transition(row.candidate_id, "approved", reviewer="test")
     if not late:
-        plan = service.plan(now=NOW)
+        plan = _complete_plan(service, now=NOW)
         assert not any(action.path == root for action in plan.actions)
     execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
     assert json.loads(evidence.read_text()) == {"artifact_id": "artifact-proof"}
@@ -772,7 +773,7 @@ def _trash_tool_manifests(home, service, names):
     # 原默认条目/字节预算与真实执行保留，退出本块立即恢复，后续引用/腐坏复核沿真实时钟。
     with pytest.MonkeyPatch.context() as preparation:
         preparation.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
-        report = service.apply(now=NOW)
+        report = _complete_apply(service, now=NOW)
     assert not report.scan_partial and report.scan_cursor == {}
     moved = [next(action for action in report.actions if action.path == source) for source in sources]
     assert report.ok and all(action.status == "trashed" for action in moved)

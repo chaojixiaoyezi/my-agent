@@ -651,8 +651,9 @@ class ReferencePinSnapshot:
             raise ValueError("invalid_memory_reference_pin_chunk_bytes")
         self.home, self.roots, self.now, self.builder = home, roots, now, builder
         self.config, self.resumable = config, resumable
+        from .retention import _call_retention_callback
         from .retention_scan_budget import RetentionScanBudget
-        self.scan_budget = RetentionScanBudget.default(config) if resumable else None
+        self.scan_budget = _call_retention_callback(RetentionScanBudget.default, config=config) if resumable else None
         self.sources, self.value = {}, None
         self.pending = None
         self.contents = {"files": {}, "fds": {}, "bytes": 0, "digest_bytes": {}, "verified": {}, "recheck": set(),

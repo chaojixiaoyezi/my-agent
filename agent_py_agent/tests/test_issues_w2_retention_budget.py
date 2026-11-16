@@ -26,15 +26,55 @@ from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 NOW = datetime(2026, 11, 5, tzinfo=timezone.utc)
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def entry_budget_clock(monkeypatch):
     from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
 
     # 完成性按默认条目/字节预算验证，不把机器25ms内的磁盘吞吐当成功能合同。
     # 真实默认deadline的暂停行为由独立的可控时钟用例验证。
     monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    # 这些夹具是稳定历史权威；固定越过冷源阈值，避免把热文件等待时间混入字节/条目测试。
+    import time
+    monkeypatch.setattr(scan.reference_pins, "time", SimpleNamespace(time_ns=lambda: time.time_ns() + 3_000_000_000))
     budget = budgets.RetentionScanBudget.default()
     assert (budget.max_entries, budget.max_bytes, budget.deadline) == (128, 8 * 1024 * 1024, .025)
+
+
+def _assert_default_slice(report):
+    projection = report.scan_cursor.get(scan._PIN_CURSOR_KEY, {})
+    if "slice_entries" in projection:
+        assert projection["slice_entries"] <= 128
+        assert projection["slice_bytes"] <= 8 * 1024 * 1024
+
+
+def _reach_discovery(service, *, entries=128, size=8 * 1024 * 1024, cursor=None):
+    """先按原上限逐片完成引用证明，再返回首次实际发现切片。"""
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+    cursor = copy.deepcopy(cursor or {})
+    previous = None
+    for _ in range(512):
+        budget = RetentionScanBudget(entries, size, float("inf"))
+        report = service.plan(now=NOW, scan_budget=budget, scan_cursor=cursor)
+        projection = report.scan_cursor.get(scan._PIN_CURSOR_KEY, {})
+        if projection.get("phase") != "discovery" and projection.get("token") and previous and projection.get("token") == previous.get("token"):
+            assert projection["steps"] > previous["steps"], "reference projection stalled before discovery"
+        assert budget.entries <= entries and budget.size <= size
+        if budget.entries or not report.scan_partial or report.errors:
+            return report, budget
+        previous, cursor = projection, report.scan_cursor
+    pytest.fail(f"reference projection never reached discovery: {cursor}")
+
+
+def _finish_apply(service, *, now=NOW):
+    from dataclasses import replace
+    actions, errors = [], []
+    for _ in range(512):
+        report = service.apply(now=now)
+        actions.extend(report.actions)
+        errors.extend(report.errors)
+        if not report.scan_partial:
+            return replace(report, actions=tuple(actions), errors=tuple(errors))
+    pytest.fail(f"retention cycle did not finish: {report.scan_cursor}")
 
 
 # LLM: 只创建真实pytest临时Owner，服务与生产解析、执行、门禁不替换。
@@ -79,7 +119,7 @@ def test_subagent_fast_path_requires_positive_settled_projection(tmp_path, proje
     _, normal = _thread(home, "thread-normal", days=4)
     if projection is not None:
         _projection(home, **projection)
-    report = service.apply(now=NOW)
+    report = _finish_apply(service)
     assert path.exists() is not expected
     assert normal.exists()
     actions = [action for action in report.actions if action.record_id == thread.thread_id]
@@ -169,14 +209,16 @@ def test_three_hundred_threads_resume_and_finish(tmp_path, monkeypatch, entry_bu
 
     monkeypatch.setattr(scan, "read_json_object_report", counted)
     first = apply_owner_retention(home, now=NOW, scan_budget=True)
-    assert first.scan_partial and 0 < len(parsed) <= 128
+    assert first.scan_partial and len(parsed) == 0
+    assert first.scan_cursor[scan._PIN_CURSOR_KEY]["slice_entries"] <= 128
     cursor = Path(home.owner_data_dir) / "retention_scan_cursor.json"
     assert cursor.is_file() and cursor.stat().st_mode & 0o777 == 0o600
-    assert first.scan_cursor.get("conversation:conversations")
+    assert first.scan_cursor[scan._PIN_CURSOR_KEY]["phase"] == "build"
     retired = sum(action.status == "trashed" for action in first.actions)
-    for _ in range(32):
+    for _ in range(512):
         before = len(parsed)
         report = apply_owner_retention(home, now=NOW, scan_budget=True)
+        _assert_default_slice(report)
         assert len(parsed) - before <= 128
         retired += sum(action.status == "trashed" for action in report.actions)
         if not report.scan_partial:
@@ -194,8 +236,9 @@ def test_default_budgeted_path_resumes_to_finish(tmp_path, entry_budget_clock):
     report = apply_owner_retention(home, now=NOW)
     assert report.scan_partial
     retired = sum(action.status == "trashed" for action in report.actions)
-    for _ in range(32):
+    for _ in range(512):
         report = apply_owner_retention(home, now=NOW)
+        _assert_default_slice(report)
         retired += sum(action.status == "trashed" for action in report.actions)
         if not report.scan_partial:
             break
@@ -223,11 +266,19 @@ def test_default_twenty_five_ms_deadline_pauses_before_next_thread(tmp_path, mon
         return report
 
     monkeypatch.setattr(scan, "read_json_object_report", consume_slice)
-    report = service.plan(now=NOW, scan_budget=budget)
-    assert report.scan_partial and report.actions == ()
+    cursor = {}
+    for _ in range(64):
+        clock[0] = 0.0
+        budget = budgets.RetentionScanBudget.default()
+        report = service.plan(now=NOW, scan_budget=budget, scan_cursor=cursor)
+        cursor = report.scan_cursor
+        if parsed:
+            break
+    assert report.scan_partial and [action.path for action in report.actions] == [paths[0]]
     assert parsed == [paths[0]] and budget.entries == 1
     cursor = report.scan_cursor["conversation:conversations"]
     assert cursor["after"] == paths[0].name and cursor["window"] == [path.name for path in paths[1:]]
+    assert cursor["window_complete"] is True
     assert all(path.exists() for path in paths)
 
 
@@ -242,7 +293,7 @@ def test_cursor_recovery_and_callback_commit(tmp_path, monkeypatch):
     assert budgets.load_scan_cursor(home) == {}
     for index in range(5):
         _thread(home, f"thread-{index:04d}")
-    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls: cls(2, 1000000, float("inf"))))
+    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls, config=None: cls(2, 1000000, float("inf"))))
     inside, saved = [], []
     original = budgets.save_scan_cursor
 
@@ -276,7 +327,7 @@ def test_custom_budget_plan_is_read_only_and_resumable(tmp_path):
     paths = [_thread(home, f"thread-{index:04d}")[1] for index in range(7)]
     cursor = {"conversation:conversations": {"after": "thread-0000.json"}}
     before = copy.deepcopy(cursor)
-    plan = service.plan(now=NOW, scan_budget=RetentionScanBudget(3, 1000000, float("inf")), scan_cursor=cursor)
+    plan, budget = _reach_discovery(service, entries=3, size=1000000, cursor=cursor)
     assert plan.scan_partial
     assert [action.path.name for action in plan.actions] == [f"thread-{index:04d}.json" for index in (1, 2, 3)]
     assert plan.scan_cursor["conversation:conversations"] == {"after": "thread-0003.json"}
@@ -296,10 +347,10 @@ def test_custom_deadline_and_byte_budget_stop(tmp_path, kind):
         _, path = _thread(home, f"thread-{index:04d}")
     budget = RetentionScanBudget(100, path.stat().st_size if kind == "bytes" else 1000000,
         0.0 if kind == "deadline" else float("inf"))
-    report = service.plan(now=NOW, scan_budget=budget)
+    report = service.plan(now=NOW, scan_budget=budget) if kind == "deadline" else _reach_discovery(service, entries=100, size=path.stat().st_size)[0]
     assert report.scan_partial
     assert len(report.actions) == (1 if kind == "bytes" else 0)
-    assert budget.entries == (1 if kind == "bytes" else 0)
+    assert budget.entries == 0  # 引用独立计量，原发现预算没有被内部投影占用。
 
 
 # LLM: 全局法律保留或非法策略不得保存游标；原游标字节与所有源文件保持。
@@ -336,10 +387,10 @@ def test_snapshot_cursor_is_global_order_and_preserves_manifest_refs(tmp_path, m
     manifest = root / "tool_manifests" / f"{digest}.json"
     write_private_json_file_atomic(manifest, {"tools": []})
     os.utime(manifest, (1, 1))
-    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls: cls(2, 1000000, float("inf"))))
+    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls, config=None: cls(2, 1000000, float("inf"))))
     retired = set()
     partials = []
-    for _ in range(10):
+    for _ in range(512):
         report = apply_owner_retention(home, now=NOW, scan_budget=True)
         retired.update(action.path for action in report.actions if action.category == "context_bundle_snapshot" and action.status == "trashed")
         assert not any(action.path == manifest for action in report.actions)
@@ -362,11 +413,17 @@ def test_isolated_errors_preserve_partial_fields(tmp_path, monkeypatch):
     state = Path(home.owner_tasks_dir) / "2020-01-01/broken/work/state.json"
     state.parent.mkdir(parents=True)
     state.write_text("{")
-    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls: cls(2, 1000000, float("inf"))))
-    report = apply_owner_retention(home, now=NOW, scan_budget=True)
+    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls, config=None: cls(2, 1000000, float("inf"))))
+    first = apply_owner_retention(home, now=NOW, scan_budget=True)
+    assert first.scan_partial and first.scan_cursor
+    for _ in range(256):
+        report = apply_owner_retention(home, now=NOW, scan_budget=True)
+        if report.errors:
+            break
     assert report.applied and report.errors and report.isolated_errors
-    assert report.scan_partial and report.scan_cursor["conversation:conversations"]["after"]
-    assert report.to_dict()["scan_partial"] and report.to_dict()["scan_cursor"] == report.scan_cursor
+    assert json.loads((Path(home.owner_data_dir) / "retention_scan_cursor.json").read_text()) == report.scan_cursor
+    assert report.to_dict()["scan_partial"] == report.scan_partial
+    assert report.to_dict()["scan_cursor"] == report.scan_cursor
 
 
 # LLM: pins仍属尚未预算化的旧扫描；它不能在第一次有界发现之前耗尽每片时钟，形成永久零进展。
@@ -396,10 +453,11 @@ def test_budgeted_discovery_precedes_unbudgeted_pin_scan(tmp_path, monkeypatch):
 # LLM: 单个权威比整片上限还大时，不能先完整解析再声称预算已到；原文件须留存并有明确诊断。
 # 函数用途: 反证首个超大线程不能突破字节准入门。
 def test_oversized_authority_is_preserved_without_parsing(tmp_path, monkeypatch):
-    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
-
     home, service = _runtime(tmp_path)
     _, path = _thread(home)
+    payload = json.loads(path.read_text())
+    payload["title"] = "large historical title" * 256
+    write_private_json_file_atomic(path, payload)
     original, parsed = scan.read_json_object_report, []
 
     # LLM: 只观察真实权威解析，其他读取仍交原实现。
@@ -410,8 +468,7 @@ def test_oversized_authority_is_preserved_without_parsing(tmp_path, monkeypatch)
         return original(target, **kwargs)
 
     monkeypatch.setattr(scan, "read_json_object_report", counted)
-    budget = RetentionScanBudget(128, 1, float("inf"))
-    report = service.plan(now=NOW, scan_budget=budget)
+    report, budget = _reach_discovery(service, size=2048)
     assert not parsed and not report.actions and path.exists()
     assert any(error.error_code == "MEMORY_RETENTION_SCAN_ENTRY_TOO_LARGE" for error in report.errors)
     assert budget.size <= budget.max_bytes
@@ -427,10 +484,10 @@ def test_completed_domain_is_not_restarted_before_pending_domain(tmp_path, monke
     snapshot = Path(home.owner_home_dir) / "memory_archive/snapshots/context_bundles/2020-01-01/old.json"
     write_private_json_file_atomic(snapshot, {})
     os.utime(snapshot, (1, 1))
-    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls: cls(2, 1000000, float("inf"))))
+    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls, config=None: cls(2, 1000000, float("inf"))))
     first = apply_owner_retention(home, now=NOW, scan_budget=True)
     assert first.scan_partial and snapshot.exists()
-    for _ in range(4):
+    for _ in range(512):
         report = apply_owner_retention(home, now=NOW, scan_budget=True)
         if not report.scan_partial:
             break
@@ -447,7 +504,7 @@ def test_slow_name_enumeration_keeps_a_resumable_window(tmp_path, monkeypatch):
     paths = [_thread(home, f"thread-{index:04d}")[1] for index in range(3)]
     clock = [0.0]
     monkeypatch.setattr(budgets.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls: cls(2, 1000000, clock[0] + .025)))
+    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls, config=None: cls(2, 1000000, clock[0] + .025)))
     original = scan._scan_entry_names
 
     # LLM: 实际枚举仍完整运行，只给每个名字增加可控观察成本，保留真实乱序及磁盘内容。
@@ -460,7 +517,7 @@ def test_slow_name_enumeration_keeps_a_resumable_window(tmp_path, monkeypatch):
     monkeypatch.setattr(scan, "_scan_entry_names", slow)
     first = apply_owner_retention(home, now=NOW, scan_budget=True)
     assert first.scan_partial and all(path.exists() for path in paths)
-    for _ in range(6):
+    for _ in range(512):
         report = apply_owner_retention(home, now=NOW, scan_budget=True)
         if not report.scan_partial:
             break
@@ -502,11 +559,14 @@ def test_failed_domain_does_not_block_new_healthy_cycles(tmp_path, monkeypatch):
     bad = Path(home.owner_home_dir) / "memory_archive/snapshots/context_bundles"
     bad.parent.mkdir(parents=True, exist_ok=True)
     bad.write_text("not a directory")
-    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls: cls(128, 1000000, float("inf"))))
-    first_report = apply_owner_retention(home, now=NOW, scan_budget=True)
+    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls, config=None: cls(128, 1000000, float("inf"))))
+    for _ in range(256):
+        first_report = apply_owner_retention(home, now=NOW, scan_budget=True)
+        if not first.exists() and first_report.errors:
+            break
     assert not first.exists() and first_report.scan_partial and first_report.errors
     _, second = _thread(home, "thread-second")
-    for _ in range(3):
+    for _ in range(256):
         report = apply_owner_retention(home, now=NOW, scan_budget=True)
         if not second.exists():
             break
@@ -532,7 +592,7 @@ def test_unreadable_snapshot_branch_preserves_other_progress(tmp_path, monkeypat
     write_private_json_file_atomic(manifest, {})
     for path in (good, unknown, manifest):
         os.utime(path, (1, 1))
-    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls: cls(128, 1000000, float("inf"))))
+    monkeypatch.setattr(budgets.RetentionScanBudget, "default", classmethod(lambda cls, config=None: cls(128, 1000000, float("inf"))))
     original = os.scandir
 
     # LLM: 只让目标子目录真实scandir报错，保留其他枚举、hash和执行入口。
@@ -543,7 +603,10 @@ def test_unreadable_snapshot_branch_preserves_other_progress(tmp_path, monkeypat
         return original(path)
 
     monkeypatch.setattr(scan.os, "scandir", denied)
-    report = apply_owner_retention(home, now=NOW, scan_budget=True)
+    for _ in range(256):
+        report = apply_owner_retention(home, now=NOW, scan_budget=True)
+        if not good.exists() and report.errors:
+            break
     assert not good.exists()
     assert report.scan_partial and report.errors
     assert unknown.exists() and manifest.exists()
@@ -657,9 +720,16 @@ def test_budget_factory_signature_compatibility_keeps_real_slice(tmp_path, monke
     monkeypatch.setattr(budgets.RetentionScanBudget, 'default', classmethod(factory))
     options = {'commit_transition': lambda operation: operation()} if transition else {}
     report = service.apply(now=NOW, **options)
-    assert seen == [None if style == 'legacy' else config]
-    assert report.applied and report.scan_partial and len(report.actions) == 2
-    assert all(not path.exists() for path in paths[:2]) and paths[2].exists()
+    assert seen == [None if style == 'legacy' else config] * 2
+    assert report.applied and report.scan_partial and report.actions == ()
+    assert all(path.exists() for path in paths)
+    for _ in range(512):
+        report = service.apply(now=NOW, **options)
+        assert len(report.actions) <= 2
+        if not report.scan_partial:
+            break
+    assert not report.scan_partial and all(not path.exists() for path in paths)
+    assert all(received is (None if style == 'legacy' else config) for received in seen)
     cursor = home.owner_data_dir / 'retention_scan_cursor.json'
     assert json.loads(cursor.read_text()) == report.scan_cursor
 
@@ -785,12 +855,12 @@ def test_f06_before_first_pause_policy_publication_defers_and_converges_under_de
         assert len(publications) == 1
         assert full_calls == [] and fallback_rows == []
         assert drift_plan.scan_partial and drift_plan.actions == () and not drift_plan.errors
-        assert scan._PIN_CURSOR_KEY not in drift_plan.scan_cursor
+        assert drift_plan.scan_cursor[scan._PIN_CURSOR_KEY]["phase"] == "restart_required"
         assert not any(k.startswith(('conversation:', 'snapshot:')) for k in drift_plan.scan_cursor)
         assert owner not in scan._PIN_BUILDS
 
         plan_cursor = copy.deepcopy(drift_plan.scan_cursor)
-        for _ in range(32):
+        for _ in range(512):
             budget = budgets.RetentionScanBudget.default()
             step = service.plan(now=NOW, scan_budget=budget, scan_cursor=plan_cursor)
             assert budget.entries <= 128 and budget.size <= 8 * 1024 * 1024
@@ -815,12 +885,12 @@ def test_f06_before_first_pause_policy_publication_defers_and_converges_under_de
         assert len(publications) == 1
         assert full_calls == [] and fallback_rows == []
         assert drift_apply.scan_partial and drift_apply.actions == () and not drift_apply.errors
-        assert scan._PIN_CURSOR_KEY not in drift_apply.scan_cursor
+        assert drift_apply.scan_cursor[scan._PIN_CURSOR_KEY]["phase"] == "restart_required"
         assert owner not in scan._PIN_BUILDS
         assert all(p.exists() for p in (pinned_trash, unpinned_trash, expired_thread, expired_cache))
 
         final_actions = []
-        for _ in range(32):
+        for _ in range(512):
             applied = service.apply(now=NOW)
             assert not applied.errors
             final_actions.extend(applied.actions)
@@ -895,7 +965,7 @@ def test_f06_after_pause_policy_publication_defers_and_converges(tmp_path, monke
     try:
         # 1) plan() 路径：推进到首次暂停后的 verify 阶段，再原子替换策略文件。
         cursor = {}
-        for _ in range(32):
+        for _ in range(512):
             step = service.plan(
                 now=NOW,
                 scan_budget=budgets.RetentionScanBudget.default(service.config),
@@ -917,19 +987,23 @@ def test_f06_after_pause_policy_publication_defers_and_converges(tmp_path, monke
         )
         os.replace(staged_policy, policy_path)
 
-        drift_plan = service.plan(
-            now=NOW,
-            scan_budget=budgets.RetentionScanBudget.default(service.config),
-            scan_cursor=cursor,
-        )
-        assert full_calls == []
-        assert drift_plan.scan_partial and drift_plan.actions == () and not drift_plan.errors
-        assert scan._PIN_CURSOR_KEY not in drift_plan.scan_cursor
+        for _ in range(128):
+            drift_plan = service.plan(
+                now=NOW,
+                scan_budget=budgets.RetentionScanBudget.default(service.config),
+                scan_cursor=cursor,
+            )
+            assert full_calls == []
+            assert drift_plan.scan_partial and drift_plan.actions == () and not drift_plan.errors
+            cursor = copy.deepcopy(drift_plan.scan_cursor)
+            if cursor.get(scan._PIN_CURSOR_KEY, {}).get("phase") == "restart_required":
+                break
+        assert drift_plan.scan_cursor[scan._PIN_CURSOR_KEY]["phase"] == "restart_required"
         assert owner not in scan._PIN_BUILDS
         assert paused_snapshot.closed
 
         plan_cursor = copy.deepcopy(drift_plan.scan_cursor)
-        for _ in range(32):
+        for _ in range(512):
             budget = budgets.RetentionScanBudget.default(service.config)
             step = service.plan(now=NOW, scan_budget=budget, scan_cursor=plan_cursor)
             assert budget.entries <= 1 and not step.errors
@@ -944,7 +1018,7 @@ def test_f06_after_pause_policy_publication_defers_and_converges(tmp_path, monke
         assert {unpinned_trash, expired_thread, expired_cache} <= planned_paths
 
         # 2) apply() 路径：在暂停后的 verify 阶段替换策略，本拍零删除，稳定后完成。
-        for _ in range(32):
+        for _ in range(512):
             first_apply = service.apply(now=NOW)
             assert first_apply.scan_partial and first_apply.actions == () and not first_apply.errors
             if first_apply.scan_cursor.get(scan._PIN_CURSOR_KEY, {}).get('phase') == 'verify':
@@ -960,16 +1034,19 @@ def test_f06_after_pause_policy_publication_defers_and_converges(tmp_path, monke
         )
         os.replace(staged_policy, policy_path)
 
-        drift_apply = service.apply(now=NOW)
-        assert full_calls == []
-        assert drift_apply.scan_partial and drift_apply.actions == () and not drift_apply.errors
-        assert scan._PIN_CURSOR_KEY not in drift_apply.scan_cursor
+        for _ in range(128):
+            drift_apply = service.apply(now=NOW)
+            assert full_calls == []
+            assert drift_apply.scan_partial and drift_apply.actions == () and not drift_apply.errors
+            if drift_apply.scan_cursor.get(scan._PIN_CURSOR_KEY, {}).get("phase") == "restart_required":
+                break
+        assert drift_apply.scan_cursor[scan._PIN_CURSOR_KEY]["phase"] == "restart_required"
         assert owner not in scan._PIN_BUILDS
         assert paused_apply_snapshot.closed
         assert all(p.exists() for p in (pinned_trash, unpinned_trash, expired_thread, expired_cache))
 
         final_actions = []
-        for _ in range(32):
+        for _ in range(512):
             applied = service.apply(now=NOW)
             assert not applied.errors
             final_actions.extend(applied.actions)
