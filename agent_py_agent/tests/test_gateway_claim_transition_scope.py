@@ -196,3 +196,270 @@ def test_actual_c_background_gate_consumes_real_claim_scope(c_actual):
     context = {"agent": agent, "request": request, "request_path": claim.path, "request_id": claim.request_id}
     with coordinator_execution_scope(gate, claim, agent), bridge.background_request_scope(context):
         assert bridge.require_background_model_admission() is None
+
+
+def test_unrelated_owner_claim_does_not_wait_on_blocked_request_transition(tmp_path, monkeypatch):
+    import threading
+
+    from agent_py_agent.agent.gateway_parts import queue_service
+    from agent_py_agent.agent.gateway_parts.io import gateway_turn_transition, write_gateway_request
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    queue_service.ensure_gateway_folders(paths)
+    req_a = write_gateway_request(paths, {"id": "request-a", "user_id": "owner-a", "prompt": "a", "status": "pending", "created_at": 1.0})
+    req_b = write_gateway_request(paths, {"id": "request-b", "user_id": "owner-b", "prompt": "b", "status": "pending", "created_at": 1.0})
+
+    a_transition_held = threading.Event()
+    a_claimer_waiting = threading.Event()
+    release_a_transition = threading.Event()
+    done_a = threading.Event()
+    done_b = threading.Event()
+    claims = {}
+    errors = []
+    original_transition = queue_service.gateway_turn_transition
+
+    def observed_transition(gw_paths, request_id, *, blocking=True):
+        if request_id == "request-a":
+            a_claimer_waiting.set()
+        return original_transition(gw_paths, request_id, blocking=blocking)
+
+    monkeypatch.setattr(queue_service, "gateway_turn_transition", observed_transition)
+
+    def hold_a():
+        try:
+            with gateway_turn_transition(paths, "request-a"):
+                a_transition_held.set()
+                assert release_a_transition.wait(5)
+        except BaseException as exc:  # pragma: no cover - surfaced by errors assertion
+            errors.append(("holder_a", repr(exc)))
+
+    def claim_a():
+        try:
+            claims["a"] = queue_service.claim_request(paths, req_a)
+        except BaseException as exc:  # pragma: no cover - surfaced by errors assertion
+            errors.append(("claim_a", repr(exc)))
+        finally:
+            done_a.set()
+
+    def claim_b():
+        try:
+            claims["b"] = queue_service.claim_request(paths, req_b)
+        except BaseException as exc:  # pragma: no cover - surfaced by errors assertion
+            errors.append(("claim_b", repr(exc)))
+        finally:
+            done_b.set()
+
+    t_hold = threading.Thread(target=hold_a)
+    t_a = threading.Thread(target=claim_a)
+    t_b = threading.Thread(target=claim_b)
+    t_hold.start()
+    try:
+        assert a_transition_held.wait(5)
+        t_a.start()
+        assert a_claimer_waiting.wait(5)
+        assert not done_a.is_set()
+
+        t_b.start()
+        assert done_b.wait(5), "unrelated owner B claim waited on owner A transition"
+        assert not done_a.is_set()
+        assert claims["b"] is not None
+        assert claims["b"].request_id == "request-b"
+        assert claims["b"].lease_epoch == 1
+        assert claims["b"].execution_attempt_id
+        assert (paths.processing / "request-b.json").is_file()
+        assert not req_b.exists()
+    finally:
+        release_a_transition.set()
+        for worker in (t_hold, t_a, t_b):
+            if worker.is_alive() or worker.ident is not None:
+                worker.join(timeout=5)
+                assert not worker.is_alive()
+
+    assert errors == []
+    assert done_a.is_set()
+    assert claims["a"] is not None
+    assert claims["a"].request_id == "request-a"
+    assert claims["a"].lease_epoch == 1
+    assert (paths.processing / "request-a.json").is_file()
+    assert not req_a.exists()
+
+
+def test_concurrent_claims_for_same_request_yield_at_most_one_winner_and_exact_epoch(tmp_path):
+    import threading
+
+    from agent_py_agent.agent.gateway_parts import queue_service
+    from agent_py_agent.agent.gateway_parts.io import read_json_file_report, write_gateway_request
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    queue_service.ensure_gateway_folders(paths)
+    req_path = write_gateway_request(
+        paths,
+        {
+            "id": "shared-req",
+            "user_id": "owner-a",
+            "prompt": "race",
+            "status": "pending",
+            "lease_epoch": 2,
+            "created_at": 1.0,
+            "route": {"worker": "C", "c_run_id": "run-1"},
+        },
+    )
+
+    worker_count = 8
+    barrier = threading.Barrier(worker_count)
+    results = [None] * worker_count
+    errors = []
+
+    def racer(idx):
+        try:
+            barrier.wait(timeout=5)
+            results[idx] = queue_service.claim_request(paths, req_path)
+        except BaseException as exc:  # pragma: no cover - surfaced by errors assertion
+            errors.append((idx, repr(exc)))
+
+    threads = [threading.Thread(target=racer, args=(i,)) for i in range(worker_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+        assert not t.is_alive()
+
+    assert errors == []
+    winners = [claim for claim in results if claim is not None]
+    assert len(winners) == 1
+    winner = winners[0]
+    assert winner.request_id == "shared-req"
+    assert winner.lease_epoch == 3
+    assert winner.execution_attempt_id.startswith("gateway-attempt-")
+    assert winner.lease_owner == winner.execution_attempt_id
+    assert not req_path.exists()
+
+    persisted = read_json_file_report(paths.processing / "shared-req.json").payload
+    assert persisted["status"] == "processing"
+    assert persisted["lease_epoch"] == 3
+    assert persisted["execution_attempt_id"] == winner.execution_attempt_id
+    assert persisted["attempts"] == 1
+    assert "queue_transport_source" not in persisted
+
+    # Terminal existence check still blocks claiming even if a duplicate inbox file exists.
+    term_req = write_gateway_request(paths, {"id": "term-req", "user_id": "owner-a", "prompt": "done", "status": "pending", "created_at": 1.0})
+    (paths.terminal / "term-req.json").write_text('{"id": "term-req", "status": "done"}', encoding="utf-8")
+    assert queue_service.claim_request(paths, term_req) is None
+    assert term_req.exists()
+
+
+def test_claim_request_preserves_transition_before_json_body_lock_order(tmp_path, monkeypatch):
+    from agent_py_agent.agent.concurrency import lock_order
+    from agent_py_agent.agent.concurrency.lock_order import LockLevel
+    from agent_py_agent.agent.gateway_parts import queue_service
+    from agent_py_agent.agent.gateway_parts.io import write_gateway_request
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    queue_service.ensure_gateway_folders(paths)
+    req_path = write_gateway_request(
+        paths,
+        {
+            "id": "ordered-req",
+            "user_id": "owner-a",
+            "prompt": "order",
+            "status": "pending",
+            "created_at": 1.0,
+            "route": {"worker": "C", "c_run_id": "run-1"},
+        },
+    )
+
+    observed_locks = []
+    original_read = queue_service.read_json_file_report
+    original_write = queue_service.write_json_file_atomic
+
+    def traced_read(path, *args, **kwargs):
+        observed_locks.append(("read", path.name, [entry.level for entry in lock_order.held_locks()]))
+        return original_read(path, *args, **kwargs)
+
+    def traced_write(path, payload, *args, **kwargs):
+        observed_locks.append(("write", path.name, [entry.level for entry in lock_order.held_locks()]))
+        return original_write(path, payload, *args, **kwargs)
+
+    monkeypatch.setattr(queue_service, "read_json_file_report", traced_read)
+    monkeypatch.setattr(queue_service, "write_json_file_atomic", traced_write)
+
+    before_violations = lock_order.lockdep_snapshot()["violations"]
+    claim = queue_service.claim_request(paths, req_path)
+    assert claim is not None
+    assert lock_order.lockdep_snapshot()["violations"] == before_violations
+    assert [(op, name) for op, name, _ in observed_locks] == [
+        ("read", "ordered-req.json"),
+        ("write", "ordered-req.json"),
+        ("write", "ordered-req.json"),
+    ]
+    for _op, _name, held_levels in observed_locks:
+        assert LockLevel.T in held_levels
+
+
+def test_claim_request_rollback_on_atomic_write_oserror_allows_subsequent_clean_claim(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import queue_service
+    from agent_py_agent.agent.gateway_parts.io import read_json_file_report, write_gateway_request
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    queue_service.ensure_gateway_folders(paths)
+    req_path = write_gateway_request(
+        paths,
+        {
+            "id": "rollback-req",
+            "user_id": "owner-a",
+            "prompt": "rollback",
+            "status": "pending",
+            "created_at": 1.0,
+            "route": {"worker": "C", "c_run_id": "run-1"},
+        },
+    )
+    processing_path = paths.processing / "rollback-req.json"
+    original_write = queue_service.write_json_file_atomic
+
+    def failing_processing_write(path, payload, *args, **kwargs):
+        if path == processing_path:
+            raise OSError("simulated I/O error")
+        return original_write(path, payload, *args, **kwargs)
+
+    monkeypatch.setattr(queue_service, "write_json_file_atomic", failing_processing_write)
+    assert queue_service.claim_request(paths, req_path) is None
+    assert req_path.exists()
+    assert not processing_path.exists()
+    rolled_back = read_json_file_report(req_path).payload
+    assert "queue_transport_source" not in rolled_back
+    assert rolled_back["status"] == "pending"
+
+    monkeypatch.undo()
+    claim = queue_service.claim_request(paths, req_path)
+    assert claim is not None
+    assert claim.lease_epoch == 1
+    assert processing_path.is_file()
+    assert not req_path.exists()
+
+
+def test_claim_transition_weak_locks_do_not_leak_after_distinct_requests(tmp_path):
+    import gc
+    import hashlib
+
+    from agent_py_agent.agent.common import json_io
+    from agent_py_agent.agent.gateway_parts import queue_service
+    from agent_py_agent.agent.gateway_parts.io import write_gateway_request
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    queue_service.ensure_gateway_folders(paths)
+    transition_keys = []
+    for idx in range(20):
+        req_id = f"weak-req-{idx}"
+        req_path = write_gateway_request(paths, {"id": req_id, "user_id": f"owner-{idx}", "prompt": "hi", "status": "pending", "created_at": 1.0})
+        claim = queue_service.claim_request(paths, req_path)
+        assert claim is not None and claim.request_id == req_id
+        digest = hashlib.sha256(req_id.encode("utf-8")).hexdigest()
+        transition_keys.append(str((paths.root / "turn_transitions" / f"{digest}.transition").resolve()))
+
+    gc.collect()
+    assert all(key not in json_io._JSON_FILE_LOCKS for key in transition_keys)

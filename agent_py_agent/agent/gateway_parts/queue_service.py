@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from agent_py_agent.agent.core import SimpleAgent
 
 import sqlite3
-import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -47,7 +46,6 @@ from .status_rendering import (
     wait_for_gateway_running,
 )
 
-_CLAIM_LOCK = threading.Lock()
 _CLAIM_MODES = frozenset({"queue_worker", "inline_direct"})
 _PLUGIN_INLINE_EXECUTION_KINDS = frozenset({"tool", "script", "workflow", "workflow_resume"})
 
@@ -273,82 +271,84 @@ def claim_request(
         )
     processing_path = paths.processing / request_path.name
     claim: GatewayClaim | None = None
-    with _CLAIM_LOCK:
-        with gateway_turn_transition(paths, request_path.stem), ExitStack() as claim_scopes:
-            canonical = paths.terminal / request_path.name
-            if not request_path.exists() or processing_path.exists() or canonical.exists():
+    # Per-request serialization is enforced by gateway_turn_transition (LockLevel.T:
+    # per-request weak path_thread_lock -> OS flock) before any request JSON body lock;
+    # unrelated requests never wait on a shared process-global claim lock.
+    with gateway_turn_transition(paths, request_path.stem), ExitStack() as claim_scopes:
+        canonical = paths.terminal / request_path.name
+        if not request_path.exists() or processing_path.exists() or canonical.exists():
+            return None
+        from .multiprocess_mode import current_worker_partition
+
+        if claim_mode == "queue_worker" and (worker_snapshot is not None or current_worker_partition() is not None):
+            from .multiprocess_queue import require_worker_claim_locked
+
+            require_worker_claim_locked(paths, request_path, worker_snapshot)
+        if coordinator_snapshot is not None:
+            from .multiprocess_coordinator_claim import coordinator_claim_scope
+
+            claim_scopes.enter_context(coordinator_claim_scope(paths, request_path, coordinator_snapshot))
+        report = read_json_file_report(
+            request_path,
+            context="gateway.claim.request.read",
+        )
+        if report.load_error is not None or not report.payload:
+            try:
+                request_path.replace(processing_path)
+            except OSError as exc:
+                _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
                 return None
-            from .multiprocess_mode import current_worker_partition
-
-            if claim_mode == "queue_worker" and (worker_snapshot is not None or current_worker_partition() is not None):
-                from .multiprocess_queue import require_worker_claim_locked
-
-                require_worker_claim_locked(paths, request_path, worker_snapshot)
-            if coordinator_snapshot is not None:
-                from .multiprocess_coordinator_claim import coordinator_claim_scope
-
-                claim_scopes.enter_context(coordinator_claim_scope(paths, request_path, coordinator_snapshot))
-            report = read_json_file_report(
-                request_path,
-                context="gateway.claim.request.read",
+            _report_gateway_side_effect_error(
+                "claim_gateway_request",
+                request_path.stem,
+                OSError(f"gateway claim payload is unreadable: {request_path.stem}"),
             )
-            if report.load_error is not None or not report.payload:
-                try:
-                    request_path.replace(processing_path)
-                except OSError as exc:
-                    _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
-                    return None
+            claim = GatewayClaim(processing_path, processing_path.stem, "", 0, "")
+        else:
+            transport_payload = report.payload
+            if claim_mode == "queue_worker" and _is_inline_plugin_execution_record(transport_payload):
+                return None
+            try:
+                transport_payload = _gateway_claim_transport_payload(
+                    report.payload,
+                    processing_path,
+                )
+                if transport_payload is not report.payload:
+                    write_json_file_atomic(request_path, transport_payload)
+                request_path.replace(processing_path)
+                claimed_payload = _gateway_claim_payload(
+                    transport_payload,
+                    processing_path,
+                )
+                write_json_file_atomic(processing_path, claimed_payload)
+            except OSError as exc:
                 _report_gateway_side_effect_error(
                     "claim_gateway_request",
                     request_path.stem,
-                    OSError(f"gateway claim payload is unreadable: {request_path.stem}"),
+                    exc,
                 )
-                claim = GatewayClaim(processing_path, processing_path.stem, "", 0, "")
-            else:
-                transport_payload = report.payload
-                if claim_mode == "queue_worker" and _is_inline_plugin_execution_record(transport_payload):
-                    return None
                 try:
-                    transport_payload = _gateway_claim_transport_payload(
-                        report.payload,
-                        processing_path,
-                    )
-                    if transport_payload is not report.payload:
-                        write_json_file_atomic(request_path, transport_payload)
-                    request_path.replace(processing_path)
-                    claimed_payload = _gateway_claim_payload(
-                        transport_payload,
-                        processing_path,
-                    )
-                    write_json_file_atomic(processing_path, claimed_payload)
-                except OSError as exc:
+                    if processing_path.exists() and not request_path.exists():
+                        processing_path.replace(request_path)
+                    if transport_payload is not report.payload and request_path.exists():
+                        write_json_file_atomic(request_path, report.payload)
+                except OSError as rollback_exc:
                     _report_gateway_side_effect_error(
-                        "claim_gateway_request",
+                        "rollback_gateway_request_claim",
                         request_path.stem,
-                        exc,
+                        rollback_exc,
                     )
-                    try:
-                        if processing_path.exists() and not request_path.exists():
-                            processing_path.replace(request_path)
-                        if transport_payload is not report.payload and request_path.exists():
-                            write_json_file_atomic(request_path, report.payload)
-                    except OSError as rollback_exc:
-                        _report_gateway_side_effect_error(
-                            "rollback_gateway_request_claim",
-                            request_path.stem,
-                            rollback_exc,
-                        )
-                    return None
-                claim = GatewayClaim(
-                    path=processing_path,
-                    request_id=str(claimed_payload.get("id") or processing_path.stem),
-                    execution_attempt_id=str(
-                        claimed_payload.get("execution_attempt_id") or ""
-                    ).strip(),
-                    lease_epoch=_gateway_claim_epoch(claimed_payload),
-                    lease_owner=str(claimed_payload.get("lease_owner") or "").strip(),
-                    coordinator_snapshot=coordinator_snapshot,
-                )
+                return None
+            claim = GatewayClaim(
+                path=processing_path,
+                request_id=str(claimed_payload.get("id") or processing_path.stem),
+                execution_attempt_id=str(
+                    claimed_payload.get("execution_attempt_id") or ""
+                ).strip(),
+                lease_epoch=_gateway_claim_epoch(claimed_payload),
+                lease_owner=str(claimed_payload.get("lease_owner") or "").strip(),
+                coordinator_snapshot=coordinator_snapshot,
+            )
     from ..observability.concurrency_metrics import gateway_request_claimed
 
     gateway_request_claimed()  # §6-A 认领计数(enqueued 涨而这个不跟=worker 槽饿死排队)
