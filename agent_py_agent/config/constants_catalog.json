@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1511,
+  "count": 1512,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -6154,6 +6154,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "慢速重启发生后的退避秒数。"
+    },
+    {
+      "name": "_UNSETTLED_OPERATION_LIST_MAX_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/turn_recovery_control.py",
+      "value": 10,
+      "unit": "个",
+      "category": "比例阈值",
+      "description": "无阻塞时 /recover 最多逐条列出的本线程未结清未知工具操作条数，其余只报总数。"
     },
     {
       "name": "_QUARANTINED_LIST_LIMIT_COUNT",

@@ -26,6 +26,7 @@ from ..runtime_db.child_recovery import (
     recover_child_attempt_unknown,
     recover_thread_attempt_unknown,
     unknown_child_attempts_for_thread,
+    unknown_thread_operations,
 )
 from ..runtime_db.operations import ATTEMPT_EFFECT_DISPOSITIONS, ATTEMPT_STATUS_UNKNOWN
 from ..runtime_db.owner_recovery import (
@@ -65,6 +66,8 @@ _REFUSAL_LABELS = {
 _NO_OPERATIONS = "没有记录到进行中的工具操作；执行者中途退出，结果无法自动确认。"
 _OWNER_ADMIN_REQUIRED = "只有完整可信的本机 local/main 管理员身份能查看和处置 owner 历史未知执行轮。"
 _OWNER_NO_TARGETS = "本 owner 没有不挂会话线程、等待人工核对的历史未知执行轮。"
+# 无阻塞时 /recover 最多逐条列出的本线程未结清未知工具操作条数，其余只报总数。
+_UNSETTLED_OPERATION_LIST_MAX_COUNT = 10
 
 
 # LLM: owner_agent/thread 由控制面按已认证 scope 解析后传入；本函数不创建线程，只有 apply/owner_apply 写运行库。
@@ -91,7 +94,25 @@ def execute_turn_recovery_control(
         return _execute_main_recovery(repo, block, command, len(children))
     if children:
         return _execute_child_recovery(owner_agent, repo, children, command)
-    return ConversationControlResult("recover", True, _NO_BLOCK)
+    return _no_block_result(repo, thread_id)
+
+
+# LLM: 没有阻塞时仍如实列出本线程未结清的未知工具操作（只读、不处置、不重做），不能只回“无需恢复”。
+# 函数用途: 生成无阻塞 /recover 回执，附带待人工核对的未知工具操作清单。
+def _no_block_result(repo: object, thread_id: str) -> ConversationControlResult:
+    total, operations = unknown_thread_operations(repo, thread_id, _UNSETTLED_OPERATION_LIST_MAX_COUNT)
+    if not total:
+        return ConversationControlResult("recover", True, _NO_BLOCK)
+    lines = [_NO_BLOCK, f"另有 {total} 条工具操作结果未知、尚未核对；它们不阻塞会话，系统也不会自动重做："]
+    lines.extend(f"{_operation_line(item)}｜操作 {item['operation_id']}" for item in operations)
+    if total > len(operations):
+        lines.append(f"（仅列出最近 {len(operations)} 条）")
+    lines.append("请核对这些操作在外部是否已经生效；需要重做时，在新消息里明确说明要重做哪一步。")
+    return ConversationControlResult(
+        "recover", True, "\n".join(lines),
+        details={"unsettled_operation_count": total,
+                 "unsettled_operation_ids": [item["operation_id"] for item in operations]},
+    )
 
 
 # LLM: 目标编号只来自已通过 opaque 校验的解析字段；写入口在锁内复核 thread/open TaskRun/current unknown，
