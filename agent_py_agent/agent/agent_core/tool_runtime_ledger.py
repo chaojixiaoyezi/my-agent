@@ -178,10 +178,13 @@ def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_att
     }
     from ..path_access_policy import configured_host_source_paths
     config = getattr(agent, "config", None)
-    from ..settings.secret_ref import configured_credential_snapshot
+    from ..settings.secret_ref import HostCredentialSnapshot, configured_credential_snapshot
     from ..tooling.host_output_redaction import HostOutputRedaction
-    merged["_host_output_redaction"] = HostOutputRedaction(
-        snapshot=configured_credential_snapshot(config), force_default=False)
+    try:
+        credential_snapshot = configured_credential_snapshot(config)
+    except Exception:  # noqa: BLE001 - 凭据覆盖失败仅降级coverage，不阻断无关宿主诊断。
+        credential_snapshot = HostCredentialSnapshot(snapshot_error_code="CREDENTIAL_SNAPSHOT_UNAVAILABLE")
+    merged["_host_output_redaction"] = HostOutputRedaction(snapshot=credential_snapshot, force_default=False)
     gateway_root = getattr(config, "gateway_workspace", "")
     merged.pop("host_active_service_root", None)
     if isinstance(gateway_root, (str, Path)) and str(gateway_root) and getattr(agent, "root", None):
