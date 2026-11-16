@@ -1072,8 +1072,14 @@ def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayI
                 with ExitStack() as authority:
                     if _commit_scope is not None:
                         authority.enter_context(_commit_scope())
+                    keys = None
+                    if receipt.transport is not None:
+                        from .input_guidance_payload import original_input_guidance
+                        original_input_guidance(store, receipt)
+                        keys = frozenset({receipt.guidance_dedupe_key})
                     store.guidance.recovery.settle_turn_locked(
-                        turn_id, TurnEndSettlement(reject_reserved=True, settle_dead_submissions=False, target=(target_type, target_id)),
+                        turn_id, TurnEndSettlement(reject_reserved=True, settle_dead_submissions=False,
+                            target=(target_type, target_id), dedupe_keys=keys),
                     )
     if (target_type == 'task' and receipt.transport is not None
             and receipt.transport.get('schema_version') == 'gateway_input_transport.v2'

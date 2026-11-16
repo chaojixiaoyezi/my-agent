@@ -277,10 +277,11 @@ class BackgroundPendingInput:
                     if not acquired:
                         raise BlockingIOError('background target transition busy')
                     with store.guidance.ledger.turn_guard(self.invocation_id, blocking=False):
-                        if all(exact for _receipt, exact in rows):
-                            store.guidance.recovery.settle_turn_locked(self.invocation_id,
-                                TurnEndSettlement(reject_reserved=True, settle_dead_submissions=False,
-                                                  target=('task', _transport['target']['task_id'])))
+                        keys = frozenset(receipt.guidance_dedupe_key for receipt, exact in rows if exact
+                            and original_input_guidance(store, receipt, deadline=deadline) is not None)
+                        store.guidance.recovery.settle_turn_locked(self.invocation_id,
+                            TurnEndSettlement(reject_reserved=True, settle_dead_submissions=False,
+                                              target=('task', _transport['target']['task_id']), dedupe_keys=keys))
             for receipt, _exact in rows:
                 self._settle_input(receipt, deadline)
             self._budget(deadline)

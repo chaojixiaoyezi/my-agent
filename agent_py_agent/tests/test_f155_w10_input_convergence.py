@@ -126,3 +126,53 @@ def test_counted_ordinary_failure_has_typed_bounded_stage(tmp_path, monkeypatch,
     with pytest.raises(inputs.GatewayInputReconcileUnsettledError) as error:
         inputs.raise_if_input_reconcile_unsettled(summary)
     assert 'last=:' not in str(error.value)
+
+
+def test_mixed_attempt_selector_preserves_old_and_submitted_inputs(transport_case, context, tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.runtime import guidance
+    from agent_py_agent.agent.gateway_parts import multiprocess_mode
+    from agent_py_agent.agent.gateway_parts.multiprocess_background_input import (
+        BackgroundPendingInput,
+    )
+    from agent_py_agent.tests.test_gateway_background_active_input import loop_params
+    kind, case = transport_case
+    _origin, _gateway_claim, agent, store, thread, *_ = case
+    thread = store.threads.get_or_create({'canonical_user_id': 'owner', 'channel': 'internal',
+        'channel_conversation_id': 'transport', 'channel_user_id': 'owner'})
+    case = (*case[:4], thread, *case[5:])
+    receipts, attempts = [], []
+    def action(bound):
+        attempts.append(bound.attempt_id)
+        if len(attempts) == 1:
+            unknown = prepared_input(case, bound, message='submitted')
+            receipts.append(unknown)
+            bound.pending_turn_input_source.drain(agent, bound)
+            params = loop_params(bound, thread)
+            assert guidance.inject_pending_turn_input(agent, params)
+            assert guidance.mark_injected_turn_input_submitted(agent, params, provider_call_id='mixed-call') == 1
+        receipt = prepared_input(case, bound, message='old' if len(attempts) == 1 else 'current')
+        receipts.append(receipt)
+        bound.pending_turn_input_source.drain(agent, bound)
+        return 'result'
+    params = model_runner(case, tmp_path, monkeypatch, action)
+    def run_twice(_):
+        execution._run_background_model_attempt(agent, '任务', params)
+        execution._run_background_model_attempt(agent, '继续', params)
+        return 'done'
+    deps, args, row, _policy = claimed(case, run_twice)
+    monkeypatch.setattr(BackgroundPendingInput, '_settle_input', lambda *_: None)
+    with gateway_scope(kind, case):
+        assert claims.run_with_heartbeat(deps, row['claim_id'], args, claim_scope_id=row['claim_scope_id']) == 'done'
+    assert attempts[0] != attempts[1]
+    monkeypatch.setattr(multiprocess_mode, '_WORKER_PARTITION', None)
+    before = {r.request_id: store.guidance.receipt(r.guidance_dedupe_key).status for r in receipts}
+    assert before == {'submitted': 'submitted', 'old': 'pending', 'current': 'rejected'}
+    for receipt in receipts:
+        current = inputs.read_gateway_input_receipt(bound_paths(case), receipt.request_id)
+        inputs._reconcile_bound_input(bound_paths(case), store, current)
+    after = {r.request_id: store.guidance.receipt(r.guidance_dedupe_key).status for r in receipts}
+    assert after == before
+    assert (bound_paths(case).inbox / 'current.json').exists()
+    assert not (bound_paths(case).inbox / 'old.json').exists()
+    assert not (bound_paths(case).inbox / 'submitted.json').exists()
+    assert store.tasks.load('ports-task').status == 'active'

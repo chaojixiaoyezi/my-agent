@@ -386,7 +386,9 @@ class GuidanceRecovery:
         summary["errors"] += self.acknowledgements.repair_locked(turn_id)
         turn_digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
         index_dir = self.storage.guidance_turn_index_dir / turn_digest
-        for index_path in sorted(index_dir.glob("*.json")):
+        indexes = (sorted(index_dir.glob("*.json")) if settlement.dedupe_keys is None else
+                   tuple(self.storage.guidance_turn_index_path(turn_id, key) for key in sorted(settlement.dedupe_keys)))
+        for index_path in indexes:
             index_report = read_json_file_report(
                 index_path,
                 context="conversation.guidance_turn_index.read",
@@ -394,6 +396,8 @@ class GuidanceRecovery:
             dedupe_key = str(index_report.payload.get("dedupe_key") or "").strip()
             if index_report.load_error is not None or not dedupe_key:
                 summary["errors"] += 1
+                continue
+            if settlement.dedupe_keys is not None and dedupe_key not in settlement.dedupe_keys:
                 continue
             try:
                 outcomes = self._settle_turn_receipt(dedupe_key, turn_id, settlement)
@@ -406,6 +410,8 @@ class GuidanceRecovery:
         # Internal non-idempotent request guidance has no receipt state. The
         # delivered projection is its only durable retirement fact, so close it
         # under the same exact-turn guard instead of letting stop replay it.
+        if settlement.dedupe_keys is not None:
+            return summary
         entries, load_errors = self._recent_report(
             "request",
             turn_id,
@@ -650,6 +656,8 @@ class TurnEndSettlement:
     count_release: bool = False
     settle_dead_submissions: bool = False
     target: tuple[str, str] | None = None
+    # None 保留整回合语义；显式键集只结算调用方在同 M 锁内确证的原回执。
+    dedupe_keys: frozenset[str] | None = None
 
 
 # reject_pending 返回的计数项：原有各终态计数，加上续跑上限收口时的 dead_submissions（收口的已提交未确认插话）、
