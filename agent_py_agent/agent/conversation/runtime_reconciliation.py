@@ -188,6 +188,50 @@ def canonical_parent_terminal_reason(agent, root_id: str) -> str | None:
     return proof['terminal_reason'] if proof['eligible'] else None
 
 
+def _capability_loader(agent, budget):
+    """在原 owner 下限量读取 locator/canonical，再复用原模型 normalizer。"""
+    import os
+
+    from ..common.nofollow_fs import open_readonly_file_beneath
+    from ..subagents.services.agent_run_state import (
+        canonical_state_path_from_payload,
+        is_agent_state_locator,
+    )
+    from ..subagents.services.persistence.service import task_from_payload
+    root = Path(agent.home_paths.owner_home_dir)
+    consumed = 0
+    ceiling = budget.max_bytes if budget is not None else None
+    ceiling = ceiling or getattr(agent.config, 'retention_scan_slice_bytes', 8 * 1024 * 1024) or 8 * 1024 * 1024
+    def read(path):
+        nonlocal consumed
+        relative = Path(path).relative_to(root)
+        descriptor = open_readonly_file_beneath(root, relative.parts)
+        with os.fdopen(descriptor, 'rb') as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if size > ceiling - consumed or (budget is not None and budget.exhausted(size=consumed)):
+                raise ValueError('CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED')
+            raw = stream.read(ceiling - consumed + 1)
+            consumed += len(raw)
+            if consumed > ceiling:
+                raise ValueError('CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED')
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError('CAPABILITY_RECORD_INVALID')
+        return data
+    def load(run_id):
+        if not _segment(run_id):
+            raise ValueError('CAPABILITY_RUN_ID_INVALID')
+        path = Path(agent.subagents.workspace) / run_id / 'task.json'
+        data = read(path)
+        canonical = canonical_state_path_from_payload(data, workspace=root)
+        if canonical and canonical != path:
+            data = read(canonical)
+        elif is_agent_state_locator(data):
+            raise ValueError('CAPABILITY_CANONICAL_STATE_UNAVAILABLE')
+        return task_from_payload(data)
+    return load
+
+
 def reconcile_capability_page(agent, *, apply=False, after='', limit=100, run_ids=(), commit_transition=None, budget=None, older_than_seconds=None):
     """一页 canonical 申请，冻结准确申请集合，在原创建锁内重核全部父级证明。"""
     from ..subagents.capability_request_expiry import (
@@ -197,11 +241,11 @@ def reconcile_capability_page(agent, *, apply=False, after='', limit=100, run_id
     from ..subagents.model_capabilities import capability_request_counts_as_open
     from ..subagents.models import task_has_ended_status
     from ..subagents.services.persistence.run_index import SubagentRunIndex
-    from ..subagents.services.persistence.service import load_subagent_task
     subagents = getattr(agent, 'subagents', None)
     if subagents is None:
         return {'items': [], 'next_after': '', 'errors': [{'reason_code': 'AUTHORITY_MISSING'}]}
     items, errors = [], []
+    load_run = _capability_loader(agent, budget)
     if run_ids:
         ids = sorted(set(run_ids))
         ids = [rid for rid in ids if rid > after]
@@ -220,7 +264,7 @@ def reconcile_capability_page(agent, *, apply=False, after='', limit=100, run_id
             break
         item = {'kind': 'capability', 'run_id': rid, 'repaired': False, 'eligible': False, 'reason_code': 'PARENT_TERMINAL_UNPROVEN'}
         try:
-            run = load_subagent_task(subagents.workspace, rid)
+            run = load_run(rid)
             if older_than_seconds is not None and time.time() - max(run.created_at, run.updated_at) < older_than_seconds:
                 items.append({**item, 'reason_code': 'OLDER_THAN_FILTER'})
                 continue
@@ -231,7 +275,7 @@ def reconcile_capability_page(agent, *, apply=False, after='', limit=100, run_id
                 if current.owner != agent.home_paths.owner_id or current.status != 'BLOCKED' or current.failure_type != 'capability_request' or current.runner_active_attempt_id or not selected:
                     return False
                 if current.parent_id != current.root_id:
-                    parent = load_subagent_task(subagents.workspace, current.parent_id)
+                    parent = load_run(current.parent_id)
                     if parent.owner != current.owner or parent.root_id != current.root_id or not task_has_ended_status(parent):
                         return False
                 return inspect_parent_terminal(agent, current.root_id)['eligible'] is True
@@ -241,7 +285,7 @@ def reconcile_capability_page(agent, *, apply=False, after='', limit=100, run_id
                     def commit():
                         task_id = proof['observed_identity'].get('task_id') or run.root_id
                         with subagents.creation_guard(), agent.conversation_store.tasks.transition_guard(task_id):
-                            current = load_subagent_task(subagents.workspace, rid)
+                            current = load_run(rid)
                             # 精确 revision/attempt/申请代次变化一律留待新预览。
                             if current != run or not eligible(current):
                                 return False
