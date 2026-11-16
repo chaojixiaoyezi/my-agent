@@ -6,11 +6,24 @@ import hashlib
 from .session_list_index import SessionListIndex, _stamp
 
 
+class LearningDebtShapeError(ValueError):
+    """学习债务字段损坏不能被解释为没有债务。"""
+
+    def __init__(self, field, value):
+        self.field, self.actual_type = field, type(value).__name__
+        super().__init__(f"SESSION_TASK_LEARNING_METADATA_INVALID: {field} requires object; "
+                         f"actual_type={self.actual_type}")
+
+
 # LLM: 只选未发布 wake 或需要修旧读取器的完成任务，不把所有终态放入维护热集合。
 # 函数用途: 判断 canonical 任务是否仍欠一次学习交接修复。
 def learning_repair_owed(payload):
-    metadata = payload.get("metadata") or {}
-    enqueue = metadata.get("task_learning_enqueue") or {}
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise LearningDebtShapeError("metadata", metadata)
+    enqueue = metadata.get("task_learning_enqueue", {})
+    if not isinstance(enqueue, dict):
+        raise LearningDebtShapeError("metadata.task_learning_enqueue", enqueue)
     return payload.get("status") == "done" and (
         enqueue.get("status") == "pending" and not metadata.get("task_learning_wake_id")
         or enqueue.get("status") == "ineligible" and enqueue.get("reason") == "canonical_completion_reader_unbound")
@@ -22,7 +35,20 @@ class SessionTaskPendingIndex(SessionListIndex):
     # LLM: 与公开任务列表分库，不能污染其过滤键、游标或排序合同。
     # 函数用途: 绑定同一 canonical 目录的独立待办索引。
     def __init__(self, root, *, reader):
-        super().__init__(root, kind="session_task", reader=reader)
+        def read_learning(path):
+            payload, error = reader(path)
+            if error is not None:
+                return payload, error
+            try:
+                learning_repair_owed(payload)
+            except LearningDebtShapeError as exc:
+                return {}, {"code": "SESSION_TASK_LEARNING_METADATA_INVALID", "path": str(path),
+                            "field": exc.field, "expected_type": "object", "actual_type": exc.actual_type,
+                            "effect_outcome": "not_started",
+                            "next_action": "修复该任务规范 JSON 中的字段类型后重试；保留待办引用，不按无债务删除"}
+            return payload, None
+
+        super().__init__(root, kind="session_task", reader=read_learning)
         self.path = self.root.parent / f".{self.root.name}-learning-pending.sqlite3"
         self.scope = hashlib.sha256(str(self.path.resolve()).encode()).hexdigest()[:24]
 
@@ -33,8 +59,9 @@ class SessionTaskPendingIndex(SessionListIndex):
         try:
             conn.execute("CREATE TABLE IF NOT EXISTS task_references "
                          "(path TEXT PRIMARY KEY, stamp TEXT, generation INTEGER)")
-            if self._meta(conn, "references_schema") != "1":
-                self._put_meta(conn, "references_schema", 1)
+            # v2沿原有界回填重验学习字段，找回旧版曾将False/None等坏标量当作无债务的记录。
+            if self._meta(conn, "references_schema") != "2":
+                self._put_meta(conn, "references_schema", 2)
                 self._put_meta(conn, "directory", "")
                 self._put_meta(conn, "complete", 0)
                 self._put_meta(conn, "offset", 0)
