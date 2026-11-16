@@ -184,29 +184,49 @@ def test_retention_reuses_pin_snapshot_for_unchanged_sources(tmp_path, monkeypat
     home, _candidates, service = runtime(tmp_path)
     moved = _trash_tool_manifests(home, service, [f"expired-{i}" for i in range(3)])
     paths = [action.destination for action in moved]
+    from agent_py_agent.agent.memory_store import retention_scan
+
+    original, builds = retention_scan._PinProjection._formal, []
+
+    def formal(projection, pins):
+        builds.append(projection)
+        yield from original(projection, pins)
+
+    monkeypatch.setattr(retention_scan._PinProjection, "_formal", formal)
     with patch.object(retention_apply, "current_retention_pins", wraps=retention_apply.current_retention_pins) as scan:
-        report = service.apply(now=NOW + timedelta(days=31))
-    assert report.ok and all(not path.exists() for path in paths)
-    assert scan.call_count == 1
+        for _ in range(512):
+            report = service.apply(now=NOW + timedelta(days=31))
+            assert report.ok
+            if all(not path.exists() for path in paths):
+                break
+            assert report.scan_partial
+    assert all(not path.exists() for path in paths)
+    assert scan.call_count >= len(paths)
+    assert builds and len({id(projection) for projection in builds}) == len(builds)
 
 
 # LLM: 实际CandidateService发表新引用后旧投影必须失效；坏源不得复用旧complete结果，不假装跨进程原子。
 # 函数用途: 验证阶段内新增pin与损坏来源不会被快照缓存吞掉。
 def test_pin_snapshot_reloads_real_candidate_publication_and_rejects_damage(tmp_path):
     from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
     from agent_py_agent.agent.memory_store.retention_scan import current_retention_pins
-    from agent_py_agent.tests.test_memory_retention_wave5 import NOW, old_file, runtime
+    from agent_py_agent.tests.test_memory_retention_wave5 import (
+        NOW,
+        _ProjectionSnapshot,
+        _r5_finish_verification,
+        old_file,
+        runtime,
+    )
 
     home, candidates, _service = runtime(tmp_path)
     evidence = old_file(home.owner_memory_daily_dir / "newly-pinned.jsonl")
-    snapshot = ReferencePinSnapshot(home, (), NOW, current_retention_pins)
+    snapshot = _ProjectionSnapshot(home, (), NOW, current_retention_pins)
     errors = []
-    assert not snapshot.current(errors)[0].protects(evidence, errors)
+    assert not _r5_finish_verification(snapshot, errors)[0].protects(evidence, errors)
     candidates.observe(CandidateObservation(candidate_type="lesson", content="阶段内新增引用",
         subject_key="pin.new", scope=MemoryScope("personal", "personal"), origin="model_inferred",
         promotion_target="lesson", evidence_refs=({"path": str(evidence)},)))
-    assert snapshot.current(errors)[0].protects(evidence, errors)
+    assert _r5_finish_verification(snapshot, errors)[0].protects(evidence, errors)
     candidates.path.write_text('{broken\n', encoding="utf-8")
     with pytest.raises(OSError, match="PIN_SOURCE_UNREADABLE"):
         snapshot.current(errors)

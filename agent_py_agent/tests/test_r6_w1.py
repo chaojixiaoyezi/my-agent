@@ -225,15 +225,15 @@ def test_deadline_starts_after_fixed_discovery_prelude(tmp_path, monkeypatch, ex
     home, _candidates, service = runtime(tmp_path)
     service.config = SimpleNamespace(retention_scan_slice_entries=1, retention_scan_slice_bytes=4096)
     clock = [0.0]
-    original = scan._conversation_roots
+    original = scan._load_policy
 
     def slow_prelude(*args):
-        roots = original(*args)
+        result = original(*args)
         clock[0] += 1.0
-        return roots
+        return result
 
     monkeypatch.setattr(scan.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(scan, "_conversation_roots", slow_prelude)
+    monkeypatch.setattr(scan, "_load_policy", slow_prelude)
     budget = RetentionScanBudget(1, 4096, -1 if expired else .025)
     plan = service.plan(now=NOW, scan_budget=budget)
     assert plan.scan_partial and not plan.actions
@@ -433,7 +433,7 @@ def test_hot_object_changed_during_cold_post_is_revalidated_before_publish(tmp_p
     memory.add("user", "formal fact", attributes={"source_refs": ["evidence/old"]})
     original = memory.path.read_text()
     _freeze_pin_file_stat(monkeypatch, memory.path)
-    hot = scan._PinProjection._stamp(memory.path)
+    hot = scan.reference_pins._metadata_stamp(memory.path.stat(follow_symlinks=False))
     cold = old_file(home.owner_memory_curator_runs_dir / "large.jsonl", json.dumps({"note": "x" * 32768}) + "\n")
     # 固定粗时钟边界：旧来源已稳定，唯一刚写的正式对象仍须同片复核。
     monkeypatch.setattr(scan.reference_pins, "_is_settled", lambda stamp: stamp != hot)
@@ -626,12 +626,12 @@ def test_one_unusable_resident_releases_only_derived_state(tmp_path, monkeypatch
     else:
         original = scan._PinProjection._stamp
 
-        def uncertain(path):
+        def uncertain(projection, path):
             if path == home.owner_home_dir:
                 raise OSError("single root read error")
-            return original(path)
+            return original(projection, path)
 
-        monkeypatch.setattr(scan._PinProjection, "_stamp", staticmethod(uncertain))
+        monkeypatch.setattr(scan._PinProjection, "_stamp", uncertain)
     before = policy_path.read_text() if policy_path.exists() else None
     waiting, candidates, _ = runtime(tmp_path / "waiting")
     context, result = projection_step(waiting, candidates, entries=1)

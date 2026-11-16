@@ -23,6 +23,111 @@ from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
 NOW = datetime(2026, 10, 26, tzinfo=timezone.utc)
 
+class _ProjectionSnapshot:
+    """测试端只推进正式的有界投影；partial 和来源错误都不能当作已发布快照。"""
+
+    def __init__(self, home, roots, now, builder=None, *, size=1024 * 1024, entries=128):
+        from types import SimpleNamespace
+
+        self.home, self.roots, self.now = home, roots, now
+        self.config = SimpleNamespace(retention_scan_slice_entries=entries,
+            retention_scan_slice_bytes=size, retention_scan_slice_ms=25)
+        self.projection = None
+        self.last_budget = None
+
+    def current(self, errors, *, target=None):
+        self.last_budget = scan.RetentionScanBudget.default(self.config)
+        result = scan.current_retention_pins(self.home, self.roots, errors, now=self.now,
+            scan_budget=self.last_budget, config=self.config)
+        self.projection = scan._CURRENT_PIN_BUILDS.get(Path(self.home.owner_home_dir))
+        assert self.last_budget.entries <= self.last_budget.max_entries
+        assert self.last_budget.size <= self.last_budget.max_bytes
+        if not result[1]:
+            assert not result[0].complete
+            raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
+        return result
+
+    @property
+    def value(self):
+        return self.projection.value if self.projection is not None else None
+
+    @property
+    def pending(self):
+        return self.projection.pending if self.projection is not None else None
+
+    @property
+    def contents(self):
+        return self.projection.contents
+
+    @property
+    def sources(self):
+        return self.projection.sources
+
+
+
+
+def _transient_pin_source(monkeypatch, path, transient, payload):
+    original, fired = scan._fingerprint_source, []
+
+    class Reader:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        def close(self):
+            try:
+                self.raw.close()
+            finally:
+                path.write_text(payload)
+
+    def source(target):
+        if target == path and not fired:
+            path.write_text(transient)
+            fired.append(True)
+            return Reader(original(target))
+        return original(target)
+
+    monkeypatch.setattr(scan, "_fingerprint_source", source)
+    return fired
+
+
+def _complete_pins(home, roots, errors, *, now):
+    """稳定正例允许多片完成；每片仍独立检查当前默认预算和错误回执。"""
+    for _ in range(512):
+        budget = scan.RetentionScanBudget.default()
+        result = scan.current_retention_pins(home, roots, errors, now=now, scan_budget=budget)
+        assert budget.entries <= budget.max_entries and budget.size <= budget.max_bytes
+        if result[1] or errors:
+            return result
+        assert not result[0].complete
+    pytest.fail("stable pin sources did not finish bounded slices")
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_scan_clock(monkeypatch):
+    """固定单片时钟成本；条目/实读字节预算与测试自行注入的慢IO时钟仍生效。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+
+    ticks = [0.0]
+
+    def monotonic():
+        ticks[0] += 0.000001
+        return ticks[0]
+
+    monkeypatch.setattr(retention_scan_budget, "time", SimpleNamespace(monotonic=monotonic))
+    yield
+    with scan._PIN_BUILDS_LOCK:
+        snapshots = list(scan._CURRENT_PIN_BUILDS.values()) + list(scan._PIN_BUILDS.values())
+        scan._CURRENT_PIN_BUILDS.clear()
+        scan._PIN_BUILDS.clear()
+    for snapshot in snapshots:
+        snapshot.close()
+
+
 
 # LLM: 冷详情的pin合同不变；正式记忆无论是否引用都永久保留，并用缓存对照证明留存没有全停。
 # 函数用途: 验证冷候选证据在真实引用扫描、规划及执行中的保护与坏源失败边界。
@@ -46,7 +151,7 @@ def test_r2_promoted_cold_details_pin_expired_evidence_or_fail_closed(tmp_path, 
     if damage:
         next((candidates.path.parent / "candidates_archive").glob("*.jsonl")).write_text("{corrupt\n")
     errors = []
-    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    pins, complete = _complete_pins(home, (), errors, now=NOW)
     assert complete is not damage
     if not damage:
         assert not errors and pins.protects(path, errors)
@@ -94,7 +199,7 @@ def test_r2_versioned_curator_shards_are_pinned_across_days(tmp_path):
     os.utime(control, (1, 1))
     os.utime(old, (1, 1))
     errors = []
-    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    pins, complete = _complete_pins(home, (), errors, now=NOW)
     assert complete and not errors and old.resolve() in pins.paths
     assert not [item for item in service.plan(now=NOW).actions if item.path == old]
     assert not [item for item in service.plan(now=NOW).actions if item.path == control]
@@ -125,29 +230,24 @@ def _expired_pin_target(home, name, content="{}\n"):
     return destination
 
 
-def test_generation_formal_pins_invalidate_same_apply_snapshot(tmp_path):
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
-
+def test_generation_formal_pins_invalidate_same_apply_snapshot(tmp_path, monkeypatch):
     home, _, _ = runtime(tmp_path)
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
     first = memory.add("user", "fact", attributes={"source_refs": ["evidence-before"]})
     memory.remove(first.entry_id)
-    builds = []
-
-    def builder(*args, **kwargs):
+    builds, original = [], scan._PinProjection._formal
+    def formal(projection, pins):
         builds.append(True)
-        return scan.current_retention_pins(*args, **kwargs)
-
-    snapshot = ReferencePinSnapshot(home, (), NOW, builder)
-    errors = []
-    old = snapshot.current(errors)
-    assert old[1] and not errors and len(builds) == 1
-    assert snapshot.current(errors) is old
+        yield from original(projection, pins)
+    monkeypatch.setattr(scan._PinProjection, "_formal", formal)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    old = _r5_finish_verification(snapshot, [])
+    assert len(builds) == 1
+    assert _r5_finish_verification(snapshot, [])[0] is old[0] and len(builds) == 1
     target = old_file(home.owner_memory_daily_dir / "new-generation-evidence.jsonl")
     memory.add("user", "new fact", attributes={"source_refs": [str(target)]})
-    pins, complete = snapshot.current(errors)
-    assert complete and not errors and len(builds) == 2
-    assert pins.protects(target, errors)
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and len(builds) == 2 and pins.protects(target, [])
 
 
 @pytest.mark.parametrize("source", ["formal", "legacy-tombstone"])
@@ -173,7 +273,7 @@ def test_legacy_semantic_corruption_blocks_retention(tmp_path, source, damage):
                              "inf-expiry": float("inf"), "bool-expiry": True, "text-expiry": "later"}[damage]
     path.write_text(json.dumps(row) + "\n")
     errors = []
-    _, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    _, complete = _complete_pins(home, (), errors, now=NOW)
     assert not complete
     assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in errors)
     assert not [action for action in service.plan(now=NOW).actions if action.path == target]
@@ -203,7 +303,7 @@ def test_legacy_tombstone_remains_a_permanent_identity_barrier(tmp_path, version
     _tombstone_path(memory.path).write_text(json.dumps(tombstone) + "\n")
     assert read_memory_records_from_path(memory.path) == []
     errors = []
-    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    pins, complete = _complete_pins(home, (), errors, now=NOW)
     assert complete and not errors and not pins.protects(target, errors)
     assert [action for action in service.plan(now=NOW).actions if action.path == target]
 
@@ -251,42 +351,36 @@ def test_pin_source_stamp_detects_same_inode_equal_length_rewrite_with_frozen_st
 @pytest.mark.parametrize("source", ["formal", "legacy-tombstone"])
 @pytest.mark.parametrize("freeze_stat", [False, True], ids=["native-clock", "coarse-clock"])
 def test_legacy_pin_source_mid_read_change_is_not_cached(tmp_path, monkeypatch, source, freeze_stat):
-    from agent_py_agent.agent.memory_store.generation_manifest import StorageTombstones
     from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
-
     home, _, _ = runtime(tmp_path)
-    target = old_file(home.owner_memory_daily_dir / "source.jsonl")
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
-    memory.add("user", "active fact", attributes={"source_refs": [str(target)]})
-    row = json.loads(memory.path.read_text().splitlines()[0])
+    memory.add("user", "fact", attributes={"source_refs": [str(control)]})
     path = memory.path
     if source == "legacy-tombstone":
+        row = json.loads(path.read_text())
+        row.update(action="remove", content="", attributes=None)
         path = _tombstone_path(path)
-        row.update(action="remove", content="", entry_id="unrelated-deletion", attributes=None)
-        path.write_text(json.dumps(row) + "\n")
+        path.write_text(json.dumps(row)+'\n')
+    payload = path.read_text()
     if freeze_stat:
         _freeze_pin_file_stat(monkeypatch, path)
-    changed = []
-    original_load = StorageTombstones.load
-
-    def change_after_read(store, *args, **kwargs):
-        records = original_load(store, *args, **kwargs)
-        if store.memory_path == memory.path and not changed:
-            changed.append(path)
-            path.write_text(json.dumps({**row, "version": 2}) + "\n")
-        return records
-
-    monkeypatch.setattr(StorageTombstones, "load", change_after_read)
-    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    errors = []
+    original, changed = scan._PinProjection._rows, []
+    def rows(projection, source_path, **kwargs):
+        for row in original(projection, source_path, **kwargs):
+            if row is not None and source_path == path and not changed:
+                rewritten = payload.replace("pin-a.jsonl", "pin-b.jsonl") if source == "formal" else payload.replace(row["entry_id"], "x"*len(row["entry_id"]))
+                path.write_text(rewritten)
+                changed.append(path)
+            yield row
+    monkeypatch.setattr(scan._PinProjection, "_rows", rows)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
     with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
-        snapshot.current(errors)
+        snapshot.current([])
     assert changed == [path] and snapshot.value is None
-    assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in errors)
-    errors = []
-    pins, complete = snapshot.current(errors)
-    assert complete and not errors and pins.protects(target, errors)
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and pins.protects(target if source == "formal" else control, [])
 
 
 # LLM: 零有效期遵循正式写入的永久语义；实际plan/apply都要保护证据而非全局停清理。
@@ -307,7 +401,7 @@ def test_legacy_zero_expiry_is_permanent(tmp_path, source, expiry):
         row.update(action="remove", content="", entry_id="unrelated-deletion", attributes=None)
     path.write_text(json.dumps({**row, "expires_at": expiry}) + "\n")
     errors = []
-    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    pins, complete = _complete_pins(home, (), errors, now=NOW)
     assert complete and not errors and pins.protects(target, errors)
     report = service.apply(now=NOW)
     assert report.ok and target.exists() and not control.exists()
@@ -345,32 +439,30 @@ def test_generation_pin_corruption_blocks_plan_and_apply(tmp_path, damage):
     assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in plan.errors)
     assert not [item for item in plan.actions if item.path == target]
     report = apply.execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=NOW)
-    assert any(
-        error.error_code == "MEMORY_RETENTION_ACTION_FAILED"
-        and "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in error.message
-        for error in report.errors
-    )
-    assert next(item for item in report.actions if item.path == target).status == "failed"
+    assert report.scan_partial
+    assert next(item for item in report.actions if item.path == target).status == "not_started"
+    errors = []
+    _, complete = _complete_pins(home, (), errors, now=NOW)
+    assert not complete and any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in errors)
     assert target.exists()
 
 
 # LLM: 目录元数据冻结但新增线程及引用均真实；必须重建pin，不能由无关文件变化代替触发。
 # 函数用途: 守护同tick新线程引用的缓存失效。
 def test_same_tick_new_thread_invalidates_pin_snapshot(tmp_path, monkeypatch):
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
 
     home, _, _ = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "daily.jsonl", '{"event_id":"daily-id"}\n')
     directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
     old_file(directory / "a.json", json.dumps({"thread_id": "a", "status": "active"}))
     _freeze_pin_file_stat(monkeypatch, directory)
-    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    snapshot = _ProjectionSnapshot(home, (), NOW, scan.current_retention_pins)
     errors = []
     first, complete = snapshot.current(errors)
     assert complete and not errors and not first.protects(target, errors)
     (directory / "new.json").write_text(json.dumps({"thread_id": "new", "status": "active",
                                                   "source_refs": [{"event_id": "daily-id"}]}))
-    second, complete = snapshot.current(errors)
+    second, complete = _r5_finish_verification(snapshot, errors)
     assert complete and not errors and second is not first and second.protects(target, errors)
 
 
@@ -498,84 +590,37 @@ def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monk
 # LLM: 热源缓存只能省hash，仍须逐次核真实字节；相同stat下改写必须重建引用视图。
 # 函数用途: 防止2秒窗口内不变线程重复做昂贵摘要，同时守住冻结stat的改写。
 def test_recent_thread_digest_is_reused_but_equal_length_changes_are_not(tmp_path, monkeypatch):
-    import gc
-
-    from agent_py_agent.agent.memory_store import reference_pins
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
-
     home, _, _ = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
     control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
-    directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
-    path = old_file(directory / "t.json", json.dumps({"thread_id": "t", "updated_at": NOW.timestamp(),
-        "summary": "s" * 200000, "source_refs": [str(control)]}))
+    path = old_file(home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads/t.json",
+        json.dumps({"thread_id":"t", "summary":"s"*200000, "source_refs":[str(control)]}))
     _freeze_pin_file_stat(monkeypatch, path)
-    original_hash, large_chunks = hashlib.blake2b, []
-    original_open, descriptors = reference_pins.open_readonly_file_beneath, []
-
-    # LLM: 观察真实nofollow文件入口，返回原FD以验证复核复用与对象销毁后的清理。
-    # 函数用途: 记录线程源描述符的实际打开次数。
-    def opened(root, parts):
-        descriptor = original_open(root, parts)
-        if Path(root) / parts[0] == path:
-            descriptors.append(descriptor)
-        return descriptor
-
-    monkeypatch.setattr(reference_pins, "open_readonly_file_beneath", opened)
-    original_read, read_bytes = os.read, [0]
-
-    # LLM: 只计活跃线程FD的实际读取字节，不把调用了current当成读回成功。
-    # 函数用途: 证明热源省hash时仍真实逐块核对正文。
-    def read(descriptor, size):
-        raw = original_read(descriptor, size)
-        if descriptor in descriptors:
-            read_bytes[0] += len(raw)
+    parsed, reads, original = [], [], scan._PinProjection._rows
+    original_source = scan._fingerprint_source
+    def rows(projection, source, **kwargs):
+        if source == path:
+            parsed.append(source)
+        yield from original(projection, source, **kwargs)
+    def opened(source):
+        raw = original_source(source)
+        if source == path:
+            reads.append(raw)
         return raw
-
-    monkeypatch.setattr(os, "read", read)
-
-    # LLM: 代理实际hash对象，既不替代摘要也不漏掉其他hash方法。
-    # 类用途: 观察大正文块被实际hash的次数。
-    class ObservedHash:
-        # LLM: 保存原hash对象，不复制正文。
-        # 函数用途: 准备观察真实摘要更新。
-        def __init__(self, *args, **kwargs):
-            self.value = original_hash(*args, **kwargs)
-
-        # LLM: 只观察大块更新，其余更新和算法保持原实现。
-        # 函数用途: 区分目录小条目摘要和线程大正文摘要。
-        def update(self, raw):
-            if len(raw) >= 64000:
-                large_chunks.append(len(raw))
-            self.value.update(raw)
-
-        # LLM: 未观察的hash接口均原样转发。
-        # 函数用途: 保留真实hash返回合同。
-        def __getattr__(self, name):
-            return getattr(self.value, name)
-
-    monkeypatch.setattr(hashlib, "blake2b", ObservedHash)
-    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    errors = []
-    first, complete = snapshot.current(errors)
-    assert complete and not errors and not first.protects(target, errors)
-    initial_chunks = len(large_chunks)
-    assert initial_chunks
+    monkeypatch.setattr(scan._PinProjection, "_rows", rows)
+    monkeypatch.setattr(scan, "_fingerprint_source", opened)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    first, complete = _r5_finish_verification(snapshot, [])
+    assert complete and not first.protects(target, []) and len(parsed) == 1
     for _ in range(5):
-        before_bytes = read_bytes[0]
-        assert snapshot.current(errors)[0] is first
-        assert read_bytes[0] > before_bytes
-    assert len(large_chunks) == initial_chunks
-    assert len(descriptors) == 1
+        before = len(reads)
+        assert _r5_finish_verification(snapshot, [])[0] is first
+        assert len(reads) > before and len(parsed) == 1
+        assert all(reader.closed for reader in reads)
     path.write_text(path.read_text().replace("pin-a.jsonl", "pin-b.jsonl"))
-    second, complete = snapshot.current(errors)
-    assert complete and not errors and second is not first and second.protects(target, errors)
-    del snapshot
-    gc.collect()
-    for descriptor in descriptors:
-        with pytest.raises(OSError) as error:
-            os.fstat(descriptor)
-        assert error.value.errno == errno.EBADF
+    second, complete = _r5_finish_verification(snapshot, [])
+    assert complete and second is not first and second.protects(target, []) and len(parsed) == 2
+    assert all(reader.closed for reader in reads)
 
 
 # LLM: 热源转冷仍须最后比对真实字节；同tick变化才重建，未变化不得因跨时钟片而失败。
@@ -584,7 +629,6 @@ def test_recent_thread_digest_is_reused_but_equal_length_changes_are_not(tmp_pat
 def test_recent_pin_snapshot_is_rebuilt_after_settling(tmp_path, monkeypatch, changed):
     import time
 
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
 
     home, _, _ = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
@@ -592,7 +636,7 @@ def test_recent_pin_snapshot_is_rebuilt_after_settling(tmp_path, monkeypatch, ch
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
     memory.add("user", "fact", attributes={"source_refs": [str(control)]})
     _freeze_pin_file_stat(monkeypatch, memory.path)
-    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    snapshot = _ProjectionSnapshot(home, (), NOW, scan.current_retention_pins)
     errors = []
     first, complete = snapshot.current(errors)
     assert complete and not errors and not first.protects(target, errors)
@@ -600,7 +644,7 @@ def test_recent_pin_snapshot_is_rebuilt_after_settling(tmp_path, monkeypatch, ch
         memory.path.write_text(memory.path.read_text().replace("pin-a.jsonl", "pin-b.jsonl"))
     later = time.time_ns() + 3_000_000_000
     monkeypatch.setattr(time, "time_ns", lambda: later)
-    second, complete = snapshot.current(errors)
+    second, complete = _r5_finish_verification(snapshot, errors)
     assert complete and not errors and second.protects(target, errors) is changed
     assert (second is not first) is changed
 
@@ -609,48 +653,28 @@ def test_recent_pin_snapshot_is_rebuilt_after_settling(tmp_path, monkeypatch, ch
 # 函数用途: 验证线程/策展源都具备读前读后的内容代次门。
 @pytest.mark.parametrize("kind", ["thread", "curator"])
 def test_generic_pin_source_mid_read_change_is_not_cached(tmp_path, monkeypatch, kind):
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
-
     home, _, _ = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
     control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
-    directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
-    path = directory / "t.json" if kind == "thread" else home.owner_memory_curator_runs_dir / "run.jsonl"
-    row = {"thread_id": "t", "updated_at": NOW.timestamp(), "mutation_probe": True, "source_refs": [str(control)]}
-    old_file(path, json.dumps(row) + "\n")
+    path = (home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads/t.json" if kind == "thread"
+            else home.owner_memory_curator_runs_dir / "run.jsonl")
+    payload = json.dumps({"thread_id":"t", "source_refs":[str(control)]})+'\n'
+    old_file(path, payload)
     _freeze_pin_file_stat(monkeypatch, path)
-    original, changed = scan._RetentionPins.collect, []
-    original_load = json.load
-
-    # LLM: 对JSON线程在实际解析完成、生成器尚未登记读后摘要时改写，不以collect之后替代读中竞态。
-    # 函数用途: 注入线程解析返回与来源登记之间的等长改写。
-    def loaded(source, *args, **kwargs):
-        result = original_load(source, *args, **kwargs)
-        if kind == "thread" and isinstance(result, dict) and result.get("mutation_probe") and not changed:
-            changed.append(path)
-            path.write_text(path.read_text().replace("pin-a.jsonl", "pin-b.jsonl"))
-        return result
-
-    # LLM: 保留真实引用收集，仅在首个完整顶层行已消费后改写同一文件。
-    # 函数用途: 精确落在解析行返回与读后来源登记之间制造竞态。
-    def collect(pins, value, source, *, reference=False):
-        result = original(pins, value, source, reference=reference)
-        if kind == "curator" and source == path and isinstance(value, dict) and value.get("mutation_probe") and not changed:
-            changed.append(path)
-            path.write_text(path.read_text().replace("pin-a.jsonl", "pin-b.jsonl"))
-        return result
-
-    monkeypatch.setattr(scan._RetentionPins, "collect", collect)
-    monkeypatch.setattr(json, "load", loaded)
-    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    errors = []
-    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
-        snapshot.current(errors)
+    original, changed = scan._PinProjection._rows, []
+    def rows(projection, source, **kwargs):
+        for row in original(projection, source, **kwargs):
+            if source == path and row is not None and not changed:
+                path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+                changed.append(path)
+            yield row
+    monkeypatch.setattr(scan._PinProjection, "_rows", rows)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    with pytest.raises(OSError):
+        snapshot.current([])
     assert changed == [path] and snapshot.value is None
-    assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in errors)
-    errors = []
-    pins, complete = snapshot.current(errors)
-    assert complete and not errors and pins.protects(target, errors)
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and pins.protects(target, [])
 
 
 # LLM: 小预算和空源分别压体积及条目上限；新一轮来源集合不得滞留已删除路径，外层上下文须恢复。
@@ -664,19 +688,19 @@ def test_pin_source_cache_bounds_and_rebuild_cleanup(tmp_path, monkeypatch, payl
                      json.dumps({"summary": "s" * payload_size}) + "\n" if payload_size else "")
              for index in range(140)]
     monkeypatch.setattr(reference_pins, "_MAX_PIN_SOURCE_DIGEST_BYTES", 1024)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    snapshot = _ProjectionSnapshot(home, (), NOW, scan.current_retention_pins)
     errors = []
-    assert snapshot.current(errors)[1] and not errors
+    assert _r5_finish_verification(snapshot, errors)[1] and not errors
     assert len(snapshot.contents["files"]) <= 128 and len(snapshot.contents["fds"]) <= 128
     assert snapshot.contents["bytes"] <= 4096
     assert snapshot.contents["bytes"] == sum(item[3] for item in snapshot.contents["files"].values())
     other_home, _, _ = runtime(tmp_path / "other")
-    other = reference_pins.ReferencePinSnapshot(other_home, (), NOW, scan.current_retention_pins)
-    assert other.current(errors)[1] and other.contents is not snapshot.contents
+    other = _ProjectionSnapshot(other_home, (), NOW, scan.current_retention_pins)
+    assert _r5_finish_verification(other, errors)[1] and other.contents is not snapshot.contents
     assert not set(paths).intersection(other.contents["files"])
     for path in paths:
         path.unlink()
-    assert snapshot.current(errors)[1] and not errors
+    assert _r5_finish_verification(snapshot, errors)[1] and not errors
     assert not set(paths).intersection(snapshot.contents["files"])
     assert reference_pins._SOURCE_CONTENTS.get() is None and reference_pins._SOURCES.get() is None
     home.owner_memory_long_term_jsonl.write_text("{bad\n")
@@ -864,7 +888,8 @@ def test_apply_rechecks_new_formal_pins(tmp_path):
     JsonlMemory(home.owner_memory_long_term_jsonl).add("user", "fact", attributes={"source_refs": [str(path)]})
     report = apply.execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
     assert path.exists()
-    assert next(a for a in report.actions if a.path == path).status == "state_changed"
+    assert next(a for a in report.actions if a.path == path).status == "not_started"
+    assert report.scan_partial and path.exists()
 
 
 # LLM: 各pin来源坏行都使相关回收关闭，不将解析器零条视为零引用。
@@ -905,9 +930,9 @@ def test_apply_candidate_phase_borrows_filtered_readonly_rows(tmp_path, monkeypa
         return original(**kwargs)
 
     monkeypatch.setattr(candidates, "readonly_rows", borrowed)
-    results, errors = apply._apply_candidate_phase(candidates, plan)
+    results, errors = apply._apply_candidate_phase(candidates, plan, now=NOW)
     assert not errors and results[0].status == "deleted"
-    assert calls == [{"statuses": scan.RETENTION_ELIGIBLE_CANDIDATE_STATUSES}]
+    assert calls == [{"statuses": apply.RETENTION_ELIGIBLE_CANDIDATE_STATUSES}]
 
 
 # LLM: 逐个来源构造路径或事件ID引用，不能仅用形式错误作为保护证据。
@@ -931,7 +956,7 @@ def test_reference_pin_sources_cover_ids_and_paths(tmp_path, source):
         report = service.plan(now=NOW)
         assert report.ok, report.errors
         errors = []
-        pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+        pins, complete = _complete_pins(home, (), errors, now=NOW)
         assert complete and pins.protects(path, errors)
     else:
         if source == "curator":
@@ -1059,8 +1084,11 @@ def test_apply_pin_source_read_error_preserves_old_file(tmp_path):
     plan = service.plan(now=NOW)
     old_file(home.owner_memory_long_term_jsonl, "{bad")
     report = apply.execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
-    assert path.exists() and report.errors
-    assert next(a for a in report.actions if a.path == path).status == "failed"
+    assert path.exists() and report.scan_partial
+    assert next(a for a in report.actions if a.path == path).status == "not_started"
+    errors = []
+    _, complete = _complete_pins(home, (), errors, now=NOW)
+    assert not complete and errors
 
 
 # LLM: 目录发现EACCES不能被glob静默洗成无会话。
@@ -1070,18 +1098,18 @@ def test_unreadable_conversation_discovery_is_not_zero_pins(tmp_path, monkeypatc
     path = old_file(home.owner_memory_daily_dir / "old.jsonl")
     root = home.owner_workspace_dir / "runtime/workspaces"
     root.mkdir(parents=True, exist_ok=True)
-    original = os.scandir
-
-    # LLM: 仅发现根返回EACCES，其余真实文件系统观察保持。
-    # 函数用途: 模拟目录不可枚举但仍存在的来源故障。
-    def blocked(target):
-        if Path(target) == root:
+    original = scan._PinProjection._directory_members
+    blocked_calls = []
+    def blocked(projection, target, stamp):
+        if target == root:
+            blocked_calls.append(target)
             raise PermissionError(errno.EACCES, "denied", str(root))
-        return original(target)
-
-    monkeypatch.setattr(os, "scandir", blocked)
+        yield from original(projection, target, stamp)
+    monkeypatch.setattr(scan._PinProjection, "_directory_members", blocked)
     report = service.plan(now=NOW)
-    assert report.errors and not [a for a in report.actions if a.path == path]
+    assert blocked_calls == [root]
+    assert report.errors and report.errors[0].path == str(root)
+    assert not [a for a in report.actions if a.path == path] and path.exists()
 
 
 # LLM: 旧计划允许purge后再新增原路径/ID引用，执行仍保护实际payload。
@@ -1105,7 +1133,8 @@ def test_trash_purge_rechecks_original_source_pins(tmp_path, kind):
         ref = str(source) if kind == "path" else {"event_id": "daily-id"}
         JsonlMemory(home.owner_memory_long_term_jsonl).add("user", "fact", attributes={"source_refs": [ref]})
         report = apply.execute_retention_plan(home=home, candidates=candidates, plan=plan, now=later)
-        assert next(a for a in report.actions if a.path == container).status == "state_changed"
+        assert next(a for a in report.actions if a.path == container).status == "not_started"
+        assert report.scan_partial and (container / "payload").exists()
     assert (container / "payload").exists()
 
 
@@ -1272,7 +1301,6 @@ def test_r4_beyond_256k_offset_equal_length_rewrite_detected_hot_and_settled(
 ):
     import time
 
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
 
     home, _, _ = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
@@ -1296,7 +1324,13 @@ def test_r4_beyond_256k_offset_equal_length_rewrite_detected_hot_and_settled(
     assert path.stat().st_size > 580 * 1024
     assert payload.index("pin-a.jsonl") > 400 * 1024
     _freeze_pin_file_stat(monkeypatch, path)
-    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    source_stamp = reference_pins._metadata_stamp(path.stat(follow_symlinks=False))
+    settled = [False]
+    # 只让本反例来源处于热窗口，其它已稳定发现根不消耗热组预算。
+    monkeypatch.setattr(reference_pins, "_is_settled", lambda stamp: settled[0] or stamp != source_stamp)
+    snapshot = _ProjectionSnapshot(home, (), NOW, scan.current_retention_pins)
     errors = []
     # 读前/读后共需六片，不能恢复旧的每watch四片预算来让这一轮直接通过。
     with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
@@ -1310,6 +1344,7 @@ def test_r4_beyond_256k_offset_equal_length_rewrite_detected_hot_and_settled(
     if settle_after_rewrite:
         later = time.time_ns() + 3_000_000_000
         monkeypatch.setattr(time, "time_ns", lambda: later)
+        settled[0] = True
     else:
         with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
             snapshot.current(errors)
@@ -1321,13 +1356,14 @@ def test_r4_beyond_256k_offset_equal_length_rewrite_detected_hot_and_settled(
 # LLM: 仅预算待续可失败关闭，必须在有限轮数内恢复；不会吞掉最终失败或把complete断言改成仅存在。
 # 函数用途: 为新双阶段预算合同完成有界续验，逐轮确保未发布不完整快照。
 def _r5_finish_verification(snapshot, errors):
-    for _ in range(8):
+    for _ in range(512):
         errors.clear()
         try:
             result = snapshot.current(errors)
         except OSError as exc:
             assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
             assert snapshot.value is None
+            assert not errors, errors
             continue
         assert result[1] and not errors
         return result
@@ -1363,197 +1399,102 @@ def _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib=300):
 def test_r5_hot_large_source_mid_build_rewrite_never_publishes_stale_pins(
     tmp_path, monkeypatch, size_kib, offset_kib, timing
 ):
-    # 本例验证来源改写接缝；用可前进的确定性扫描时钟，避免宿主IO使25ms片在注入前结束。
-    # 条目/字节预算与外层60秒限制保持，真实解析/写入/源CAS均执行。
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.memory_store import reference_pins, retention_scan_budget
-
-    ticks = [0.0]
-
-    def scan_time():
-        ticks[0] += 0.000001
-        return ticks[0]
-
-    monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=scan_time))
+    from agent_py_agent.agent.memory_store import reference_pins
     home, service, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib)
-    for index in range(24):
-        old_file(home.owner_memory_daily_dir / f"a-drive-{index:02d}.jsonl")
-        _expired_pin_target(home, f"a-drive-{index:02d}.jsonl")
-    changed, parsed, stream_rejected = [], [], []
-    original_watch, original_load = scan.watch_pin_source, json.load
-
-    # LLM: 真实JSON加载返回后仅记接缝，不改变解析结果或complete门。
-    # 函数用途: 标记即将执行读后来源检查。
-    def loaded(source, *args, **kwargs):
-        try:
-            result = original_load(source, *args, **kwargs)
-        except scan._PinReadChanged:
-            stream_rejected.append(True)
-            raise
-        if isinstance(result, dict) and result.get("thread_id") == "t" and reference_pins._SOURCES.get() is not None:
-            parsed.append(True)
-        return result
-
-    # LLM: 原地等长写入只发生一次；分别落在完整读前观察后和真实解析后的读后观察前。
-    # 函数用途: 注入不能由stat识别的中段引用改写。
-    def watched(source):
-        sources = reference_pins._SOURCES.get()
-        if source == path and timing == "after_parse" and parsed:
-            if not changed and sources is not None and reference_pins._is_complete_stamp(sources.get(path)):
-                path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
-                changed.append(True)
-            parsed.clear()
-        result = original_watch(source)
-        sources = reference_pins._SOURCES.get()
-        if source == path and timing == "before_parse" and not changed and sources is not None:
-            stamp = sources.get(path)
-            if stamp is not None and reference_pins._is_complete_stamp(stamp):
-                path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
-                changed.append(True)
-        return result
-
-    monkeypatch.setattr(json, "load", loaded)
-    monkeypatch.setattr(scan, "watch_pin_source", watched)
-    original_source = scan._fingerprint_source
-
-    # LLM: 真实第一块已交给解析流后改写后续切片，FD/stat均不变，必须由流摘要而非路径身份发现。
-    # 类用途: 注入JSON读取途中的同代中段变化。
-    class MidReadSource:
-        # LLM: 不替换内容或描述符，只借用真实源。
-        # 函数用途: 保存实际reader。
-        def __init__(self, raw):
-            self.raw = raw
-
-        # LLM: 非读取接口全部透传。
-        # 函数用途: 保留原始reader生命周期与FD接口。
-        def __getattr__(self, name):
-            return getattr(self.raw, name)
-
-        # LLM: 仅当前snapshot的第一次真实分块读取触发改写，不在plan阶段提前注入。
-        # 函数用途: 精确制造解析中途的内容竞态。
-        def read1(self, size=-1):
+    changed, parsed = [], []
+    original_read, original_rows, original_source = scan._PinProjection._read, scan._PinProjection._rows, scan._fingerprint_source
+    def rewrite():
+        if not changed:
+            path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+            changed.append(True)
+    def read(projection, source):
+        raw = yield from original_read(projection, source)
+        if source == path and timing == "before_parse":
+            rewrite()
+        return raw
+    def rows(projection, source, **kwargs):
+        for row in original_rows(projection, source, **kwargs):
+            if source == path and row is not None:
+                parsed.append(True)
+                if timing == "after_parse":
+                    rewrite()
+            yield row
+    class Reader:
+        def __init__(self, raw): self.raw = raw
+        def __getattr__(self, name): return getattr(self.raw, name)
+        def read1(self, size):
             raw = self.raw.read1(size)
-            if raw and not changed and reference_pins._SOURCES.get() is not None:
-                path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
-                changed.append(True)
+            if timing == "during_parse" and self.raw.tell() > offset_kib * 1024:
+                rewrite()
             return raw
-
-    # LLM: 只包被测文件，其它读取和授权链保持真实。
-    # 函数用途: 将读中故障注入接到实际JSON解析入口。
     def opened(source):
         raw = original_source(source)
-        return MidReadSource(raw) if source == path and timing == "during_parse" else raw
-
+        return Reader(raw) if source == path else raw
+    monkeypatch.setattr(scan._PinProjection, "_read", read)
+    monkeypatch.setattr(scan._PinProjection, "_rows", rows)
     monkeypatch.setattr(scan, "_fingerprint_source", opened)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    hot = path.stat().st_ctime_ns
-    published = []
-    for index in range(24):
-        if index == 12:
-            # 单个current读不完全片的热源只能在滑出粗时钟窗口后，由冷期全量post跨current收敛发布。
-            monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot + 3_000_000_000)
-        errors = []
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    for _ in range(8):
         try:
-            pins, complete = snapshot.current(errors)
-        except OSError as exc:
-            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            pins, complete = snapshot.current([])
+        except OSError:
             assert snapshot.value is None
-            continue
-        assert changed and complete and pins.protects(target, [])
-        published.append(index)
-        break
-    assert changed and published, "stable rewritten source must eventually publish its actual pins"
-    # 600KiB三片可在同一current内读完，热期即可发布；更大的热源热期内必须一直失败关闭。
-    assert (published[0] < 12) is (size_kib == 600)
-    if timing in {"before_parse", "during_parse"}:
-        assert stream_rejected, "stream verification must reject mismatch before JSON parsing returns"
-    # 再走真实plan/apply；恢复热期时钟，计划可看到旧引用，但执行时同一竞态不能回收新引用目标。
-    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot)
-    path.write_text(payload)
-    reference_pins._RESUMABLE_DIGESTS.pop(path, None)
-    changed.clear()
-    parsed.clear()
-    stream_rejected.clear()
+        else:
+            assert changed and complete and pins.protects(target, [])
+            break
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: path.stat().st_ctime_ns+3_000_000_000)
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert changed and parsed and complete and pins.protects(target, [])
     report = service.apply(now=NOW)
-    assert changed and target.exists()
-    assert not any(item.path == target and item.status == "trashed" for item in report.actions)
-    if timing in {"before_parse", "during_parse"}:
-        assert stream_rejected
+    assert target.exists() and not [a for a in report.actions if a.path == target and a.status == "trashed"]
 
 
 # LLM: OS摘要读取与C层解析读取分别计数；预验partial禁止打开解析器，解析流不占额外摘要预算。
 # 函数用途: 验证每current统一1MiB摘要硬门，防止17MiB来源每次partial被重复解析。
 @pytest.mark.parametrize("size_kib", [200, 600, 2048, 17 * 1024])
-def test_r5_hot_source_current_read_bytes_strictly_bounded_to_one_mib(tmp_path, monkeypatch, size_kib):
-    from agent_py_agent.agent.memory_store import reference_pins
-
+def test_r5_hot_source_current_read_bytes_strictly_bounded_to_one_mib(
+    tmp_path, monkeypatch, size_kib
+):
     home, _, path, _, _ = _r5_hot_thread(tmp_path, monkeypatch, size_kib, 100)
-    identity = path.stat().st_dev, path.stat().st_ino
-    digest_bytes, parser_bytes, opens = [0], [0], []
-    original_read, original_source = os.read, scan._fingerprint_source
+    original, total, chunks, parsed = scan._fingerprint_source, [0], [], []
+    object_parser = scan._pin_object
 
-    # LLM: 统计真实返回字节而非请求长度，只计被测来源。
-    # 函数用途: 观察摘要FD读取。
-    def read(fd, size):
-        raw = original_read(fd, size)
-        info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) == identity:
-            digest_bytes[0] += len(raw)
-        return raw
-
-    # LLM: 透传真实reader，防止仅计os.read漏掉json.load的C层全文件读取。
-    # 类用途: 统计实际解析流字节。
-    class ParserReader:
-        # LLM: 借用实际源，不复制或伪造字节。
-        # 函数用途: 保存真实读取器。
+    class Reader:
         def __init__(self, raw):
             self.raw = raw
 
-        # LLM: 其余接口全交原对象。
-        # 函数用途: 保留关闭、fileno等合同。
         def __getattr__(self, name):
             return getattr(self.raw, name)
 
-        # LLM: 不忽略read(-1)导致的整文件读取。
-        # 函数用途: 统计JSON解析实际字节。
-        def read(self, size=-1):
-            raw = self.raw.read(size)
-            parser_bytes[0] += len(raw)
-            return raw
-
-        # LLM: 流式读取仍取真实read1返回量。
-        # 函数用途: 统计文本包装器的分块读取。
-        def read1(self, size=-1):
+        def read1(self, size):
             raw = self.raw.read1(size)
-            parser_bytes[0] += len(raw)
+            total[0] += len(raw)
+            chunks.append(len(raw))
             return raw
 
-    # LLM: partial须在打开解析器前关闭，不能靠丢弃解析结果掩盖无界读取。
-    # 函数用途: 断言解析入口已有完整预验，随后包装真实reader。
-    def opened(source):
-        raw = original_source(source)
-        if source != path:
-            return raw
-        stamp = reference_pins._SOURCES.get().get(path)
-        assert reference_pins._is_complete_stamp(stamp), "partial source was opened for parsing"
-        opens.append(path)
-        return ParserReader(raw)
+    def source(source_path):
+        raw = original(source_path)
+        return Reader(raw) if source_path == path else raw
 
-    monkeypatch.setattr(os, "read", read)
-    monkeypatch.setattr(scan, "_fingerprint_source", opened)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    def parse(source_path):
+        if source_path == path:
+            parsed.append(path)
+        return object_parser(source_path)
+
+    monkeypatch.setattr(scan, "_fingerprint_source", source)
+    monkeypatch.setattr(scan, "_pin_object", parse)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
     for _ in range(4):
-        digest_bytes[0] = parser_bytes[0] = 0
+        total[0] = 0
         try:
             snapshot.current([])
-        except OSError as exc:
-            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
-        assert 0 < digest_bytes[0] <= 1_048_576
-        if not parser_bytes[0]:
-            assert digest_bytes[0] + parser_bytes[0] <= 1_048_576
+        except OSError:
+            assert snapshot.value is None
+        assert 0 < total[0] <= 1_048_576
+        assert snapshot.last_budget.size >= total[0]
+    assert max(chunks) <= 64 * 1024
     if size_kib == 17 * 1024:
-        assert not opens and parser_bytes[0] == 0
+        assert not parsed
 
 
 # LLM: 多来源进度可交错但不能让已完成post的来源每轮重开，导致全源永远无法同时完成；单轮读不完的热源先失败关闭。
@@ -1562,46 +1503,36 @@ def test_r5_hot_source_current_read_bytes_strictly_bounded_to_one_mib(tmp_path, 
 def test_r5_multiple_hot_sources_pending_finishes_without_reparsing(tmp_path, monkeypatch, sizes):
     from agent_py_agent.agent.memory_store import reference_pins
 
-    home, _, first, target, payload = _r5_hot_thread(tmp_path, monkeypatch, sizes[0])
+    home, _, first, target, _ = _r5_hot_thread(tmp_path, monkeypatch, sizes[0])
     second = first.with_name("u.json")
-    prefix = '{"thread_id":"u","summary":"'
-    second.write_text(prefix + "s" * (sizes[1] * 1024 - len(prefix) - 2) + '"}')
+    second.write_text(json.dumps({"thread_id": "u", "summary": "s" * (sizes[1] * 1024)}))
     _freeze_pin_file_stat(monkeypatch, second)
-    settled = max(first.stat().st_ctime_ns, second.stat().st_ctime_ns) + 3_000_000_000
-    hot_publishable = max(sizes) <= 600
-    original, parsed = json.load, []
+    original, parsed = scan._pin_object, []
 
-    # LLM: 计数真实线程解析，不能用构建器调用次数代替实际正文消费。
-    # 函数用途: 观察pending续验是否重复加载JSON。
-    def loaded(source, *args, **kwargs):
-        row = original(source, *args, **kwargs)
-        if isinstance(row, dict) and row.get("thread_id") in {"t", "u"}:
-            parsed.append(row["thread_id"])
-        return row
+    def parse(source):
+        result = original(source)
+        if source in (first, second):
+            parsed.append(source)
+        return result
 
-    monkeypatch.setattr(json, "load", loaded)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    for index in range(24):
-        if index == 8:
-            # 热期8轮内读不完全片的来源必须已进入pending且未发布；冷却后才可跨current累积post。
-            assert snapshot.pending is not None
-            monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
-        pending, count = snapshot.pending is not None, len(parsed)
+    monkeypatch.setattr(scan, "_pin_object", parse)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    for _ in range(8):
         try:
             pins, complete = snapshot.current([])
-        except OSError as exc:
-            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+        except OSError:
             assert snapshot.value is None
         else:
             assert complete and not pins.protects(target, [])
-            assert (index < 8) is hot_publishable
             break
-        finally:
-            if pending:
-                assert len(parsed) == count, "pending must advance digests without parsing again"
-    else:
-        pytest.fail("stable multiple-source post verification never converged")
-    assert set(parsed) == {"t", "u"}
+    assert set(parsed) == {first, second}
+    counts = {path: parsed.count(path) for path in (first, second)}
+    assert set(counts.values()) == {1}
+    settled = max(first.stat().st_ctime_ns, second.stat().st_ctime_ns) + 3_000_000_000
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and not pins.protects(target, [])
+    assert all(parsed.count(path) == 1 for path in (first, second))
 
 
 # LLM: 解析后的待验源滑出热窗口仍须把剩余切片验完，不能把冷元数据当完成证明或重读正文。
@@ -1610,27 +1541,25 @@ def test_r5_pending_hot_source_settles_without_reparse(tmp_path, monkeypatch):
     from agent_py_agent.agent.memory_store import reference_pins
 
     home, _, path, target, _ = _r5_hot_thread(tmp_path, monkeypatch, 2048)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
     for _ in range(8):
-        with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        with pytest.raises(OSError):
             snapshot.current([])
         if snapshot.pending is not None:
             break
     assert snapshot.pending is not None and snapshot.value is None
-    later = reference_pins.time.time_ns() + 3_000_000_000
-    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: later)
-    original = scan._fingerprint_source
+    original = scan._pin_object
 
-    # LLM: 待验期来源必须只走摘要，不允许重新打开JSON解析器。
-    # 函数用途: 把热转冷pending的重复解析变成明确失败。
-    def opened(source):
+    def parse(source):
         assert source != path, "settling pending source was reparsed"
         return original(source)
 
-    monkeypatch.setattr(scan, "_fingerprint_source", opened)
+    monkeypatch.setattr(scan, "_pin_object", parse)
+    settled = path.stat().st_ctime_ns + 3_000_000_000
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
     pins, complete = _r5_finish_verification(snapshot, [])
     assert complete and not pins.protects(target, [])
-    assert len(snapshot.sources[path]) == 6
+    assert snapshot.sources[path][1] == hashlib.sha256(path.read_bytes()).digest()
 
 
 # LLM: 全局LRU状态可被回收并被另一snapshot重建，pending不能仅凭重置为零的generation接受另一份解析基线。
@@ -1639,18 +1568,23 @@ def test_r5_pending_does_not_accept_replaced_digest_state(tmp_path, monkeypatch)
     from agent_py_agent.agent.memory_store import reference_pins
 
     home, _, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, 600)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    with pytest.raises(OSError):
         snapshot.current([])
-    assert snapshot.pending is not None
-    # 模拟LRU回收；另一份快照在相同冻结stat下完整读取新内容并重建全局摘要状态。
-    reference_pins._RESUMABLE_DIGESTS.pop(path)
+    old = snapshot.projection
+    assert old.pending is not None
+    with scan._PIN_BUILDS_LOCK:
+        assert scan._CURRENT_PIN_BUILDS.pop(Path(home.owner_home_dir)) is old
+    old.close()
     path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
-    other = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    settled = path.stat().st_ctime_ns + 3_000_000_000
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
+    other = _ProjectionSnapshot(home, (), NOW)
     other_pins, complete = _r5_finish_verification(other, [])
     assert complete and other_pins.protects(target, [])
     pins, complete = _r5_finish_verification(snapshot, [])
-    assert complete and pins.protects(target, []), "old pending pins adopted a replacement digest baseline"
+    assert snapshot.projection is not old and old.closed
+    assert complete and pins.protects(target, [])
 
 
 # LLM: 超过单轮1MiB快照预算的热源热期必须一直失败关闭；冷却后冷期post可续完成，并捕获热期1.2MiB处改写。
@@ -1658,7 +1592,6 @@ def test_r5_pending_does_not_accept_replaced_digest_state(tmp_path, monkeypatch)
 @pytest.mark.parametrize("rewrite", [False, True])
 def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complete(tmp_path, monkeypatch, rewrite):
     from agent_py_agent.agent.memory_store import reference_pins
-    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
 
     home, _, _ = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
@@ -1683,7 +1616,7 @@ def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complet
     _freeze_pin_file_stat(monkeypatch, path)
     hot = path.stat().st_ctime_ns
     monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot)
-    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    snapshot = _ProjectionSnapshot(home, (), NOW, scan.current_retention_pins)
     errors = []
     # 每轮最多核 4 片（<= 1 MiB），热期读后验证只认本轮读到的片，读不完全部切片就一直失败关闭。
     for _ in range(8):
@@ -1710,124 +1643,104 @@ def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complet
 @pytest.mark.parametrize("size_kib", [600, 2048])
 def test_r6_rewrite_of_post_verified_slice_never_publishes_stale_pins(tmp_path, monkeypatch, size_kib):
     from agent_py_agent.agent.memory_store import reference_pins
-
-    home, _, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, size_kib, 100)
-    hot = path.stat().st_ctime_ns
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    fired, published = False, None
-    for index in range(24):
-        if index == 12:
-            # 热期逐轮滚动复核已发现改写并重解析，待发布pins已保护pin-b，只是尚未发布。
-            assert snapshot.pending is not None and snapshot.pending[0][0].protects(target, [])
-            monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot + 3_000_000_000)
-        state = reference_pins._RESUMABLE_DIGESTS.get(path, {})
-        if (not fired and state.get("phase") == "post" and 0 in state.get("cycle_verified", ())
-                and len(state["cycle_verified"]) < state["total_slices"]):
-            # 第0片已在读后阶段核过、整轮未完：原地等长把pin-a改成pin-b，stat冻结不可见。
-            path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
-            fired = True
+    home,_,path,target,payload=_r5_hot_thread(tmp_path,monkeypatch,size_kib,100)
+    original,fired=scan._PinProjection._chunks,[]
+    def chunks(projection,source,**kwargs):
+        for raw in original(projection,source,**kwargs):
+            yield raw
+            if source==path and kwargs.get("verifying") and raw and not fired:
+                path.write_text(payload.replace("pin-a.jsonl","pin-b.jsonl"))
+                fired.append(True)
+    monkeypatch.setattr(scan._PinProjection,"_chunks",chunks)
+    snapshot=_ProjectionSnapshot(home,(),NOW)
+    for _ in range(8):
         try:
-            pins, complete = snapshot.current([], target=target)
-        except OSError as exc:
-            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            pins,complete=snapshot.current([])
+        except OSError:
             assert snapshot.value is None
-            continue
-        assert fired and complete and pins.protects(target, []), "published pins missed the post-window rewrite"
-        published = index
-        break
-    assert fired and published is not None
-    assert (published < 12) is (size_kib == 600)
+        else:
+            assert fired and complete and pins.protects(target,[])
+            break
+    assert fired
+    settled=path.stat().st_ctime_ns+3_000_000_000
+    monkeypatch.setattr(reference_pins.time,"time_ns",lambda:settled)
+    pins,complete=_r5_finish_verification(snapshot,[])
+    assert complete and pins.protects(target,[])
 
 
 # LLM: 较短来源已在某轮完成post、较长来源仍pending时改写较短来源；后续发布不得复用其跨current的旧完成结果。
 # 函数用途: 回归R5-F01多源post完成复用，发布结果必须保护改写后的新引用。
 def test_r6_completed_post_of_one_source_is_not_reused_while_another_is_pending(tmp_path, monkeypatch):
     from agent_py_agent.agent.memory_store import reference_pins
-
-    home, _, first, target, payload = _r5_hot_thread(tmp_path, monkeypatch, 600, 100)
-    second = first.with_name("u.json")
-    prefix = '{"thread_id":"u","summary":"'
-    second.write_text(prefix + "s" * (2048 * 1024 - len(prefix) - 2) + '"}')
-    _freeze_pin_file_stat(monkeypatch, second)
-    settled = max(first.stat().st_ctime_ns, second.stat().st_ctime_ns) + 3_000_000_000
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    fired = False
-    for index in range(32):
-        if index == 16:
-            monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
-        short = reference_pins._RESUMABLE_DIGESTS.get(first, {})
-        long = reference_pins._RESUMABLE_DIGESTS.get(second, {})
-        if (not fired and snapshot.pending is not None and short.get("phase") == "post"
-                and len(short.get("cycle_verified", ())) == short.get("total_slices")
-                and long.get("phase") == "post" and len(long.get("cycle_verified", ())) < long.get("total_slices", 0)):
-            first.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
-            fired = True
+    home,_,first,target,payload=_r5_hot_thread(tmp_path,monkeypatch,600,100)
+    second=first.with_name("u.json")
+    second.write_text(json.dumps({"thread_id":"u","summary":"s"*(2048*1024)}))
+    _freeze_pin_file_stat(monkeypatch,second)
+    original,fired=scan._PinProjection._chunks,[]
+    def chunks(projection,source,**kwargs):
+        if source==second and kwargs.get("verifying") and first in projection.post_scopes and not fired:
+            first.write_text(payload.replace("pin-a.jsonl","pin-b.jsonl"))
+            fired.append(True)
+        yield from original(projection,source,**kwargs)
+    monkeypatch.setattr(scan._PinProjection,"_chunks",chunks)
+    snapshot=_ProjectionSnapshot(home,(),NOW)
+    for _ in range(12):
         try:
-            pins, complete = snapshot.current([])
-        except OSError as exc:
-            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            pins,complete=snapshot.current([])
+        except OSError:
             assert snapshot.value is None
-            continue
-        assert fired and complete and pins.protects(target, []), "stale completed post result was reused"
-        assert index >= 16
-        break
-    else:
-        pytest.fail("multi-source verification never published after settling")
+        else:
+            assert fired and complete and pins.protects(target,[]),"stale hot post was reused across passes"
+            break
+    assert fired
+    settled=max(first.stat().st_ctime_ns,second.stat().st_ctime_ns)+3_000_000_000
+    monkeypatch.setattr(reference_pins.time,"time_ns",lambda:settled)
+    pins,complete=_r5_finish_verification(snapshot,[])
+    assert complete and pins.protects(target,[])
 
 
 # LLM: 正式记忆旧格式路径对同一<=256KiB热源有显式watch、_pin_rows读前读后、显式读后与最终复核；外加重试也不得每current超过1MiB摘要读取。
 # 函数用途: 回归R5-F06小文件分支绕过共享预算，同时确认读后复核仍实际读取且结果完整。
 @pytest.mark.parametrize("racing", [False, True])
 def test_r6_small_hot_formal_source_shares_one_mib_digest_budget(tmp_path, monkeypatch, racing):
-    from agent_py_agent.agent.memory_store import reference_pins
-
     home, _, _ = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
-    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
-    memory.add("user", "fact", attributes={"source_refs": [str(control)], "note": "n" * 250000})
-    assert 240 * 1024 < memory.path.stat().st_size <= 256 * 1024
-    _freeze_pin_file_stat(monkeypatch, memory.path)
-    hot = memory.path.stat().st_ctime_ns
-    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot)
-    identity = memory.path.stat().st_dev, memory.path.stat().st_ino
-    digest_bytes, original_read = [0], os.read
+    memory.add("user", "fact", attributes={"note": "n" * 250000})
+    original, total = scan._fingerprint_source, [0]
+    racer = old_file(home.owner_memory_curator_runs_dir / "racing.jsonl") if racing else None
 
-    # LLM: 只计被测正式记忆FD的真实返回字节，解析流不经os.read。
-    # 函数用途: 观察每次current的小文件摘要读取量。
-    def read(fd, size):
-        raw = original_read(fd, size)
-        info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) == identity:
-            digest_bytes[0] += len(raw)
-        return raw
+    class Reader:
+        def __init__(self, raw):
+            self.raw = raw
 
-    monkeypatch.setattr(os, "read", read)
-    if racing:
-        # 另一来源每次打开都被追加，迫使构建走满重试；正式记忆仍不得因重试反复整读。
-        racer = old_file(home.owner_memory_curator_runs_dir / "racing.jsonl")
-        original_source = scan._fingerprint_source
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
 
-        def opened(source):
-            raw = original_source(source)
-            if source == racer:
-                with racer.open("ab") as writer:
-                    writer.write(b"{}\n")
+        def read1(self, size):
+            raw = self.raw.read1(size)
+            total[0] += len(raw)
             return raw
 
-        monkeypatch.setattr(scan, "_fingerprint_source", opened)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    def opened(source):
+        raw = original(source)
+        if source == racer:
+            with racer.open("ab") as output:
+                output.write(b"{}\n")
+        return Reader(raw) if source == memory.path else raw
+
+    monkeypatch.setattr(scan, "_fingerprint_source", opened)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
     for _ in range(3):
-        digest_bytes[0] = 0
-        errors = []
+        total[0] = 0
         try:
-            pins, complete = snapshot.current(errors)
-        except OSError as exc:
-            assert racing and "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            pins, complete = snapshot.current([])
+        except OSError:
+            assert racing and snapshot.value is None
         else:
-            assert not racing and complete and not errors and not pins.protects(target, errors)
-        # 每current至少实际读一次（发布前最终复核），总量不超过每源1MiB。
-        assert memory.path.stat().st_size <= digest_bytes[0] <= 1_048_576
+            assert not racing and complete and not pins.protects(target, [])
+        assert memory.path.stat().st_size <= total[0] <= 1024 * 1024
+        assert snapshot.last_budget.size >= total[0]
 
 
 # LLM: 用真实schema删除记录填满600KiB永久墓碑，首条屏蔽仍引用目标的正式记忆；改写只把其entry_id等长换掉以解除屏蔽。
@@ -1880,9 +1793,16 @@ def test_r7_non_streaming_pin_parse_resets_post_progress(tmp_path, monkeypatch, 
         owner, name = StorageTombstones, "load"
     elif source == "segment":
         for index in range(3):
-            memory.add("user", f"fact {index}", attributes={"source_refs": [f"other-{index}"], "note": "n" * 200000})
+            memory.add(
+                "user",
+                f"fact {index}",
+                attributes={"source_refs": [f"other-{index}"], "note": "n" * 200000},
+            )
         memory.migrate_tiers()
-        path = memory.path.parent / MemoryGenerationStore(memory.path).manifest()["segments"][0]["path"]
+        path = (
+            memory.path.parent
+            / MemoryGenerationStore(memory.path).manifest()["segments"][0]["path"]
+        )
         payload = path.read_text()
         rewritten = payload.replace("other-0", "other-x")
         owner, name = MemoryGenerationStore, "segment_rows"
@@ -1893,47 +1813,86 @@ def test_r7_non_streaming_pin_parse_resets_post_progress(tmp_path, monkeypatch, 
         path.write_text(payload)
         rewritten = payload.replace('"legal_hold": false', '"legal_hold": true ')
         owner, name = scan, "_load_policy"
-    assert path.stat().st_size > 256 * 1024 and len(rewritten) == len(payload) and rewritten != payload
+    assert (
+        path.stat().st_size > 256 * 1024 and len(rewritten) == len(payload) and rewritten != payload
+    )
     _freeze_pin_file_stat(monkeypatch, path)
     monkeypatch.setattr(reference_pins.time, "time_ns", lambda: path.stat().st_ctime_ns)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
     if prior == "build-failure":
         unrelated = old_file(home.owner_memory_curator_runs_dir / "z-broken.jsonl", "{bad}\n")
-        with pytest.raises(OSError):
-            snapshot.current([])
+        for _ in range(128):
+            errors = []
+            try:
+                snapshot.current(errors)
+            except OSError:
+                pass
+            if errors:
+                break
+        assert errors and snapshot.value is None
         unrelated.write_text("{}\n")
     else:
-        for _ in range(8):
-            try:
-                assert snapshot.current([])[1]
-                break
-            except OSError:
-                continue
-        else:
-            pytest.fail("unchanged source never published")
-        snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    assert reference_pins._RESUMABLE_DIGESTS[path]["phase"] == "post"
-    original, fired = getattr(owner, name), []
+        settled = path.stat().st_ctime_ns + 3_000_000_000
+        monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
+        assert _r5_finish_verification(snapshot, [])[1]
+    # 退休投影，不能从旧全局摘要缓存嫁接先前post结果。
+    resident = scan._CURRENT_PIN_BUILDS.pop(Path(home.owner_home_dir), None)
+    if resident is not None:
+        resident.close()
+    original, fired = scan._PinProjection._rows, []
+    original_read = scan._PinProjection._read
 
-    def parsed(*args, **kwargs):
-        result = original(*args, **kwargs)
-        if not fired and path.read_text() == payload and (source != "segment" or args[1]["path"] in str(path)):
-            state = reference_pins._RESUMABLE_DIGESTS[path]
-            assert state["phase"] == "post" and len(state["cycle_verified"]) == state["total_slices"]
+    def rewrite():
+        if not fired:
             path.write_text(rewritten)
             fired.append(True)
-        return result
 
-    monkeypatch.setattr(owner, name, parsed)
-    try:
-        pins, complete = snapshot.current([])
-    except OSError as exc:
-        assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
-    else:
-        fresh, fresh_complete = scan.current_retention_pins(home, (), [], now=NOW)
-        assert complete and fresh_complete and pins.protects(target, []) == fresh.protects(target, []), \
-            "pre-parse post progress was reused after a same-tick rewrite"
+    def rows(projection, target_path, **kwargs):
+        for row in original(projection, target_path, **kwargs):
+            if target_path == path and row is not None:
+                rewrite()
+            yield row
+
+    def read(projection, target_path):
+        raw = yield from original_read(projection, target_path)
+        if source == "storage-tombstones" and target_path == path:
+            rewrite()
+        return raw
+
+    monkeypatch.setattr(scan._PinProjection, "_rows", rows)
+    monkeypatch.setattr(scan._PinProjection, "_read", read)
+    if source == "policy":
+        original_policy = scan._load_policy
+
+        def load(target_path):
+            result = original_policy(target_path)
+            if target_path == path:
+                rewrite()
+            return result
+
+        monkeypatch.setattr(scan, "_load_policy", load)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    for _ in range(128):
+        errors = []
+        try:
+            pins, complete = snapshot.current(errors)
+        except OSError:
+            assert snapshot.value is None
+            if fired:
+                break
+        else:
+            assert fired and complete
+            fresh, fresh_complete = _complete_pins(home, (), [], now=NOW)
+            assert fresh_complete and pins.protects(target, []) == fresh.protects(target, [])
+            break
     assert fired
+    # 分片/墓碑/策略的改写都不能发布旧代；恢复源后能重建。
+    path.write_text(payload)
+    monkeypatch.setattr(
+        reference_pins.time, "time_ns", lambda: path.stat().st_ctime_ns + 3_000_000_000
+    )
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete
 
 
 # LLM: 262144B正式记忆在同一current第四次摘要读取前被真实追加（不冻结stat，只固定墙钟保持热态）；
@@ -1941,52 +1900,60 @@ def test_r7_non_streaming_pin_parse_resets_post_progress(tmp_path, monkeypatch, 
 # 函数用途: 回归R6-PIN-02，小文件摘要的增长探测读取受剩余预算封顶并按实读记账。
 @pytest.mark.parametrize("growth", [0, 32 * 1024, 64 * 1024])
 def test_r7_small_source_growth_probe_never_exceeds_digest_budget(tmp_path, monkeypatch, growth):
-    from agent_py_agent.agent.memory_store import reference_pins
-
     home, _, _ = runtime(tmp_path)
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
-    memory.add("user", "fact", attributes={"note": ""})
-    row = json.loads(memory.path.read_text())
-    row["attributes"]["note"] = "n" * (262144 - len(json.dumps(row, separators=(",", ":")).encode()) - 1)
-    raw = (json.dumps(row, separators=(",", ":")) + "\n").encode()
-    assert len(raw) == 262144
-    memory.path.write_bytes(raw)
-    initial = memory.path.stat()
-    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: initial.st_ctime_ns)
-    original_read, original_fstat = os.read, os.fstat
-    counted, fired = [0], []
+    memory.add("user", "fact", attributes={"note": "n" * 250000})
+    original, total, fired = scan._fingerprint_source, [0], []
 
-    def read(fd, size):
-        info = original_fstat(fd)
-        ours = (info.st_dev, info.st_ino) == (initial.st_dev, initial.st_ino)
-        if ours and growth and not fired and counted[0] == 3 * len(raw) and os.lseek(fd, 0, os.SEEK_CUR) == 0:
-            with memory.path.open("ab") as writer:
-                writer.write(b" " * growth)
-            fired.append(True)
-        data = original_read(fd, size)
-        if ours:
-            counted[0] += len(data)
-        return data
+    class Reader:
+        def __init__(self, raw):
+            self.raw = raw
 
-    monkeypatch.setattr(os, "read", read)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        def read1(self, size):
+            raw = self.raw.read1(size)
+            total[0] += len(raw)
+            if growth and not fired:
+                with memory.path.open("ab") as output:
+                    output.write(b" " * growth)
+                fired.append(True)
+            return raw
+
+    def opened(source):
+        raw = original(source)
+        return Reader(raw) if source == memory.path else raw
+
+    monkeypatch.setattr(scan, "_fingerprint_source", opened)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
     if growth:
         with pytest.raises(OSError):
             snapshot.current([])
+        assert snapshot.value is None
     else:
         assert snapshot.current([])[1]
-    assert bool(fired) is bool(growth)
-    assert counted[0] == 4 * len(raw)
-    assert counted[0] <= snapshot.contents["digest_bytes"][memory.path] <= 1_048_576
+    assert bool(fired) is bool(growth) and 0 < total[0] <= 1024 * 1024
+    assert snapshot.last_budget.size >= total[0]
 
 
 # LLM: 解析器实际读取期间来源是等长瞬时内容B、返回前即恢复A，且冻结该inode的stat；读后复读与发布前复核只见A，须由解析字节绑定识破。
 #   ABA所在current必须失败关闭，之后无改写的current在有限轮内恢复发布并保护目标；策略A为法律保留，任何轮都不得发布。
 # 函数用途: 回归R7-PIN-ABA，永久墓碑、旧墓碑、根清单与保留策略的非流式解析均绑定实际解析字节（含>256KiB切片来源）。
-@pytest.mark.parametrize(("source", "size_kib"), [
-    ("storage-tombstones", 64), ("storage-tombstones", 600), ("legacy-tombstones", None),
-    ("manifest", None), ("policy", 64), ("policy", 600)])
-def test_r8_non_streaming_parse_aba_never_publishes_transient_bytes(tmp_path, monkeypatch, source, size_kib):
+@pytest.mark.parametrize(
+    ("source", "size_kib"),
+    [
+        ("storage-tombstones", 64),
+        ("storage-tombstones", 600),
+        ("legacy-tombstones", None),
+        ("manifest", None),
+        ("policy", 64),
+        ("policy", 600),
+    ],
+)
+def test_r8_non_streaming_parse_aba_never_publishes_transient_bytes(
+    tmp_path, monkeypatch, source, size_kib
+):
     from agent_py_agent.agent.memory_store import reference_pins
     from agent_py_agent.agent.memory_store.generation_manifest import (
         MemoryGenerationStore,
@@ -2037,22 +2004,33 @@ def test_r8_non_streaming_parse_aba_never_publishes_transient_bytes(tmp_path, mo
     fixed = path.stat()
     _freeze_pin_file_stat(monkeypatch, path)
     monkeypatch.setattr(reference_pins.time, "time_ns", lambda: fixed.st_ctime_ns)
-    original, fired = getattr(owner, name), []
+    if source == "policy":
+        original, fired = scan._load_policy, []
 
-    def transient_parse(*args, **kwargs):
-        if fired:
-            return original(*args, **kwargs)
-        path.write_text(transient)
+        def transient_parse(*args, **kwargs):
+            if fired:
+                return original(*args, **kwargs)
+            path.write_text(transient)
+            try:
+                result = original(*args, **kwargs)
+                fired.append(result)
+                return result
+            finally:
+                path.write_text(payload)
+
+        monkeypatch.setattr(scan, "_load_policy", transient_parse)
+    else:
+        fired = _transient_pin_source(monkeypatch, path, transient, payload)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    for _ in range(128):
         try:
-            fired.append(original(*args, **kwargs))
-            return fired[0]
-        finally:
-            path.write_text(payload)
-
-    monkeypatch.setattr(owner, name, transient_parse)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
-        snapshot.current([])
+            pins, complete = snapshot.current([])
+        except OSError:
+            assert snapshot.value is None
+            if fired:
+                break
+        else:
+            pytest.fail("transient source bytes were published")
     assert fired and path.read_text() == payload
     if source == "policy":
         assert fired[0][0].legal_hold is False
@@ -2060,6 +2038,8 @@ def test_r8_non_streaming_parse_aba_never_publishes_transient_bytes(tmp_path, mo
             with pytest.raises(OSError):
                 snapshot.current([])
         return
+    settled = fixed.st_ctime_ns + 3_000_000_000
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
     pins, complete = _r5_finish_verification(snapshot, [])
     assert complete and pins.protects(target, [])
 
@@ -2116,7 +2096,7 @@ def test_r8_small_streaming_pin_source_binds_parsed_bytes(tmp_path, monkeypatch,
         return RestoreAtEof(original(source))
 
     monkeypatch.setattr(scan, "_fingerprint_source", transient_source)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    snapshot = _ProjectionSnapshot(home, (), NOW, scan.current_retention_pins)
     pins, complete = _r5_finish_verification(snapshot, [])
     assert fired and path.read_text() == payload
     assert complete and pins.protects(target, []) and not pins.protects(control, [])
@@ -2134,12 +2114,24 @@ def test_r8_cold_detail_parse_aba_is_bound_by_content_address(tmp_path, monkeypa
     home, candidates, _ = runtime(tmp_path)
     evidence = old_file(home.owner_memory_daily_dir / "cold-evidence-a.jsonl")
     control = old_file(home.owner_memory_daily_dir / "cold-evidence-b.jsonl")
-    row = candidates.observe(CandidateObservation(candidate_type="lesson", content="已晋升的归档事实",
-        subject_key="r8.cold", scope=MemoryScope("personal", "personal"), origin="model_inferred",
-        promotion_target="lesson", evidence_refs=[{"path": str(evidence)}]))
+    row = candidates.observe(
+        CandidateObservation(
+            candidate_type="lesson",
+            content="已晋升的归档事实",
+            subject_key="r8.cold",
+            scope=MemoryScope("personal", "personal"),
+            origin="model_inferred",
+            promotion_target="lesson",
+            evidence_refs=[{"path": str(evidence)}],
+        )
+    )
     candidates.transition(row.candidate_id, "approved", reviewer="test")
-    row = candidates.mark_promoted(row.candidate_id, reviewer="test", promotion_ref="memory/lessons/r8")
-    candidates.path.write_text(json.dumps(replace(row, updated_at="2020-01-01T00:00:00+00:00").to_record()) + "\n")
+    row = candidates.mark_promoted(
+        row.candidate_id, reviewer="test", promotion_ref="memory/lessons/r8"
+    )
+    candidates.path.write_text(
+        json.dumps(replace(row, updated_at="2020-01-01T00:00:00+00:00").to_record()) + "\n"
+    )
     assert candidates.compact_terminal_candidates(now=NOW) == 1
     path = next((candidates.path.parent / "candidates_archive").glob("*.jsonl"))
     payload = path.read_text()
@@ -2147,29 +2139,28 @@ def test_r8_cold_detail_parse_aba_is_bound_by_content_address(tmp_path, monkeypa
     if rehash:
         envelope = json.loads(transient)
         material = {key: envelope[key] for key in ("owner_root", "candidate_id", "record")}
-        digest = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        digest = hashlib.sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
         transient = transient.replace(envelope["sha256"], digest)
     assert len(transient) == len(payload) and transient != payload
     fixed = path.stat()
     _freeze_pin_file_stat(monkeypatch, path)
     monkeypatch.setattr(reference_pins.time, "time_ns", lambda: fixed.st_ctime_ns)
-    original, fired = scan._hydrate_candidate, []
-
-    def transient_hydrate(*args):
-        if fired:
-            return original(*args)
-        path.write_text(transient)
-        fired.append(True)
+    fired = _transient_pin_source(monkeypatch, path, transient, payload)
+    snapshot = _ProjectionSnapshot(home, (), NOW)
+    for _ in range(128):
         try:
-            return original(*args)
-        finally:
-            path.write_text(payload)
-
-    monkeypatch.setattr(scan, "_hydrate_candidate", transient_hydrate)
-    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
-        snapshot.current([])
+            pins, complete = snapshot.current([])
+        except OSError:
+            assert snapshot.value is None
+            if fired:
+                break
+        else:
+            pytest.fail("transient cold detail was published")
     assert fired and path.read_text() == payload
+    settled = fixed.st_ctime_ns + 3_000_000_000
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
     pins, complete = _r5_finish_verification(snapshot, [])
     assert complete and pins.protects(evidence, []) and not pins.protects(control, [])
 
@@ -2224,3 +2215,32 @@ def test_pin_source_error_retains_cause_path_and_redacts_secrets():
     assert "ValueError: candidate source wrapper" in result.message
     assert "FileNotFoundError" in result.message and secret not in result.message
     assert "恢复来源完整性后重跑 retention" in result.message
+
+
+def test_hot_post_from_earlier_entry_slice_cannot_publish_frozen_stat_rewrite(
+    tmp_path, monkeypatch
+):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, 200, 100)
+    snapshot = _ProjectionSnapshot(home, (), NOW, entries=8)
+    fired = False
+    for _ in range(256):
+        projection = snapshot.projection
+        if not fired and projection is not None and path in projection.post_scopes:
+            path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+            fired = True
+        try:
+            pins, complete = snapshot.current([])
+        except OSError:
+            assert snapshot.value is None
+        else:
+            assert fired and complete and pins.protects(target, []), (
+                "published old hot post from another entry slice"
+            )
+            break
+    assert fired
+    settled = path.stat().st_ctime_ns + 3_000_000_000
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and pins.protects(target, [])

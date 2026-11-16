@@ -451,6 +451,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 received = 0
                 while received < window:
                     raw = source.read1(min(window - received, self.contents["chunk_bytes"]))
+                    self.budget.charge(size=len(raw))
                     if not raw:
                         raise _PinReadChanged(11, "pin source ended before its verified size", str(path))
                     parts.append(raw)
@@ -464,7 +465,6 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     raise _PinReadChanged(11, "pin source changed while reading", str(path))
                 self._check_parents(path)
             checked = True
-            self.budget.charge(size=received)
             if not received:
                 break
             offset += received
@@ -492,8 +492,13 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             raise ValueError("candidate immutable reference is invalid")
         path = directory / name
         raw = yield from self._read(path)
+        if raw is None:
+            # 分片读口也保留原不可变索引的精确缺叶原因，不能把缺失洗成无路径摘要错误。
+            from ..conversation.store_io import ImmutableIndexNodeMissing
+
+            raise ImmutableIndexNodeMissing(2, "immutable index node is missing", str(path))
         if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
-            raise ValueError("candidate immutable source length or digest mismatches")
+            raise OSError(22, "candidate immutable source length or digest mismatches", str(path))
         # 内容寻址对象由唯一manifest封印；不把每条历史节点放进逐动作复核集合。
         self.sources.pop(path, None)
         return raw
@@ -522,6 +527,13 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         return None
 
     def _candidate_rows(self, path):
+        try:
+            yield from self._candidate_rows_unchecked(path)
+        except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
+            # 候选账的格式/协议损坏仍沿原整份拒绝合同；缺叶等I/O原因保留独立pin诊断。
+            raise _CandidatePinSourceUnreadable(22, "candidate ledger is unreadable", str(path)) from exc
+
+    def _candidate_rows_unchecked(self, path):
         from .candidate_ledger import FORMAT, _validate_manifest
         from .candidates import _parse_candidate_line
 
@@ -646,7 +658,12 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                         or self._stamp(path) != stamp):
                     raise _PinReadChanged(11, "pin directory changed", str(path))
                 for name in names:
-                    yield name, (path / name).stat(follow_symlinks=False)
+                    try:
+                        member = (path / name).stat(follow_symlinks=False)
+                    except FileNotFoundError as exc:
+                        # 成员已被真实写者移走时本代失效；下一片重建，绝不当作空目录发布。
+                        raise _PinReadChanged(11, "pin directory member disappeared", str(path / name)) from exc
+                    yield name, member
             return
         # 非原生平台保留原枚举及nofollow成员语义；所有拥有者显式close，不依赖GC。
         with os.scandir(path) as members:
@@ -684,16 +701,29 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 yield 1
             else:
                 yield from self._verify_source(path)
-        # 冷源续验完成后才读热源，避免冷源暂停期间沿用先前片的热对象；按文件保持原字节代次校验。
-        for path in hot:
-            yield from self._verify_source(path)
+        # 先完成可跨片的冷源末门，再处理热组。热组的任一来源若在较早current完成，
+        # 仍须重核整个热组；只查冻结stat不能证明那些旧字节仍是当前发布代次。
+        hot_set = set(hot)
         for path, (stamp, _digest) in self.sources.items():
+            if path in hot_set:
+                continue
             if (stamp is not None and reference_pins._is_settled(stamp)
                     and self.post_scopes.get(path) not in (None, "settled")):
                 yield from self._verify_source(path)
             if self._stamp(path) != stamp:
                 raise _PinReadChanged(11, "pin source generation changed", str(path))
             yield 1
+        while hot:
+            for path in hot:
+                yield from self._verify_source(path)
+            current_pass = self.contents["pass_token"]
+            if all(self.post_scopes.get(path) in ("settled", current_pass) for path in hot):
+                break
+            # 本片装不下完整热组时保持pending；来源冷却后允许逐源有界续验。
+            yield 1
+        for path in hot:
+            if self._stamp(path) != self.sources[path][0]:
+                raise _PinReadChanged(11, "pin source generation changed", str(path))
         for index, revision in self.index_revisions:
             with index.snapshot(minimum_revision=revision) as snapshot:
                 if snapshot.revision != revision:
@@ -926,7 +956,10 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             if row is None:
                 yield 1
                 continue
-            candidate = MemoryCandidate.from_record(row)
+            try:
+                candidate = MemoryCandidate.from_record(row)
+            except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
+                raise _CandidatePinSourceUnreadable(22, "candidate record is invalid", str(candidate_path)) from exc
             if candidate.candidate_id in seen:
                 raise ValueError("duplicate candidate pin source")
             seen.add(candidate.candidate_id)
@@ -1189,7 +1222,16 @@ def _finish_pin_cycle(context):
     retired = []
     with _PIN_BUILDS_LOCK:
         old = _CURRENT_PIN_BUILDS.pop(owner, None)
-        if old is not None and old is not snapshot:
+        if (old is not None and old is not snapshot and not old.closed and old.value is None
+                and old.pending is not None and old.phase == "verify"
+                and old.requested_roots == snapshot.requested_roots
+                and old.context.policy == snapshot.context.policy
+                and old.contents["chunk_bytes"] == snapshot.contents["chunk_bytes"]):
+            # 执行前的分片复核可能长于一轮规划；新规划不得抹掉其已核进度。
+            # 旧投影仍须自行通过完整来源代次门，不能以新规划为其补签complete。
+            retired.append(snapshot)
+            snapshot = old
+        elif old is not None and old is not snapshot:
             retired.append(old)
         while len(_CURRENT_PIN_BUILDS) >= _pin_capacity():
             _, old = _CURRENT_PIN_BUILDS.popitem(last=False)
@@ -3193,6 +3235,10 @@ class _PinReadChanged(OSError):
     pass
 
 
+class _CandidatePinSourceUnreadable(OSError):
+    """候选权威账格式损坏；维护入口必须保留原整份拒绝边界。"""
+
+
 # LLM: 借用真实二进制源，仅对解析已读取的字节做摘要；不额外读文件，不把读前完成当作读后完成。
 # 类用途: 比对JSON解析流和读前观察（小文件整份、大文件切片），抓住预验后或读中的粗时钟改写。
 class _PinDigestReader(io.RawIOBase):
@@ -3448,7 +3494,8 @@ def _pin_source_error(exc: Exception) -> MemoryRetentionError:
         chain.append(f"{type(current).__name__}: {redact_sensitive_text(str(current))[:200]}")
         current = current.__cause__
     return MemoryRetentionError(
-        "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", path,
+        ("MEMORY_RETENTION_CANDIDATES_UNREADABLE" if isinstance(exc, _CandidatePinSourceUnreadable)
+         else "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"), path,
         "; ".join(chain) + "；引用视图不完整，依赖该视图的删除未获准，其它动作结果见 actions。"
         "下一步：核实 path 对应来源及其权威根引用，恢复来源完整性后重跑 retention；"
         "不得删除未知引用或将损坏来源当空。",
