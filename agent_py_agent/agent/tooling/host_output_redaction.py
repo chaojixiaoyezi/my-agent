@@ -110,7 +110,7 @@ class HostOutputStreamRedactor:
         encoded = safe.encode('utf-8')
         if not encoded.startswith(self._line_emitted):
             # 后续字符改变先前模式边界时不公开无法证明安全的续段。
-            return b''
+            return b'\n' if complete and text.endswith(('\n', '\r')) else b''
         output = encoded[len(self._line_emitted):]
         self._line_emitted = encoded
         return output

@@ -663,3 +663,20 @@ def test_configured_value_context_does_not_leak_to_other_threads():
     with configured_secret_redaction((secret,)), ThreadPoolExecutor(max_workers=1) as pool:
         assert secret not in redact_sensitive_text(secret)
         assert pool.submit(redact_sensitive_text, secret).result(timeout=5) == secret
+
+
+
+def test_configured_exception_is_scrubbed_before_queued_record_retention():
+    from agent_py_agent.agent.common.log_redaction import configured_secret_redaction
+    secret = 'synthetic opaque exception credential'
+    install_log_redaction()
+    with configured_secret_redaction((secret,)):
+        try:
+            raise ValueError(secret)
+        except ValueError:
+            import sys
+            record = logging.getLogRecordFactory()('synthetic', logging.ERROR, __file__, 1,
+                'failure', (), sys.exc_info())
+    assert record.exc_info is None
+    assert secret not in record.exc_text
+    assert 'ValueError' in record.exc_text

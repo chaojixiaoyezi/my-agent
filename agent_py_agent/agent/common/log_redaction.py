@@ -638,6 +638,13 @@ def install_log_redaction() -> None:
         record = current_factory(name, level, pathname, lineno, msg, args, exc_info, func, sinfo)
         record.msg = redact_sensitive_value(record.msg)
         record.args = redact_sensitive_value(record.args)
+        if _CONFIGURED_SECRET_VALUES.get():
+            # 队列处理器可能在调用上下文退出后才格式化；异常正文先脱敏再保留。
+            if record.exc_info:
+                record.exc_text = redact_sensitive_text(logging.Formatter().formatException(record.exc_info))
+                record.exc_info = None
+            if record.stack_info:
+                record.stack_info = redact_sensitive_text(record.stack_info)
         return record
 
     _redacting_factory._my_agent_secret_redactor = True  # type: ignore[attr-defined]
