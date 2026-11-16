@@ -189,3 +189,15 @@ def test_coordinator_reuses_real_w7_exact_closeout_and_w8_index_page(tmp_path):
     indexed = reconcile_owner_runtime(agent, cursor=json.dumps(token), limit=10)
     assert indexed['items'][0]['kind'] == 'indexes', indexed
     assert 'owner_id' in indexed['items'][0]
+
+
+def test_capability_byte_budget_rejects_before_reading_large_state(tmp_path):
+    from agent_py_agent.agent.user_space.storage_lanes import StorageLaneBudget
+
+    agent = _agent(tmp_path)
+    child, _ = _make_blocked_run(agent, parent_id='root', root_id='root', depth=1)
+    before = _files(agent.home_paths.owner_home_dir)
+    page = reconcile_capability_page(agent, run_ids=(child.id,), budget=StorageLaneBudget(10, 1, None))
+    assert page['items'][0]['reason_code'] == 'CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED'
+    assert not page['items'][0]['repaired']
+    assert _files(agent.home_paths.owner_home_dir) == before

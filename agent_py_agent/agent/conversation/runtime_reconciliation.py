@@ -15,6 +15,10 @@ from ..settings.defaults import default_config_int
 from ..user_space.storage_lanes import StorageLaneBudget
 
 
+class ReconciliationBudgetExhausted(ValueError):
+    error_code = 'CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED'
+
+
 @contextmanager
 def _snapshot(db):
     """复用原生只读 SQLite；只容 WAL/SHM 协调，固定原业务文件代次。"""
@@ -152,6 +156,17 @@ def inspect_parent_terminal(agent, root_id: str) -> dict[str, object]:
                             return {**result, 'reason_code': 'PARENT_MISMATCH'}
                         if not conversation_task_link_is_terminal(link.status):
                             return {**result, 'reason_code': 'DURABLE_TASK_ACTIVE'}
+                        from ..scheduler.active_run_closeout import _claim_may_still_execute
+                        from .run_claim import detached_task_claim_scope_id
+                        if link.cancellation_scope == 'foreground':
+                            scope_id = ''
+                        elif link.cancellation_scope == 'detached':
+                            scope_id = detached_task_claim_scope_id(link.thread_id, row['task_id'])
+                        else:
+                            return {**result, 'reason_code': 'PROOF_INCOMPLETE'}
+                        claim, claim_error = agent.conversation_store.claims.load_report(link.thread_id, claim_scope_id=scope_id)
+                        if claim_error or (claim and _claim_may_still_execute(claim, link.thread_id, row['task_id'], scope_id)):
+                            return {**result, 'reason_code': 'CURRENT_ATTEMPT_ACTIVE'}
         # 定时运行必须精确查 effect_run；无记录不能借 srun 前缀猜已结束。
         scheduler = getattr(agent, 'scheduler_repository', None)
         scheduled = _scheduler_effect_readonly(scheduler, root_id) if scheduler is not None else None
@@ -209,11 +224,11 @@ def _capability_loader(agent, budget):
         with os.fdopen(descriptor, 'rb') as stream:
             size = os.fstat(stream.fileno()).st_size
             if size > ceiling - consumed or (budget is not None and budget.exhausted(size=consumed)):
-                raise ValueError('CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED')
+                raise ReconciliationBudgetExhausted('CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED')
             raw = stream.read(ceiling - consumed + 1)
             consumed += len(raw)
             if consumed > ceiling:
-                raise ValueError('CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED')
+                raise ReconciliationBudgetExhausted('CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED')
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError('CAPABILITY_RECORD_INVALID')
@@ -299,7 +314,8 @@ def reconcile_capability_page(agent, *, apply=False, after='', limit=100, run_id
             else:
                 item['reason_code'] = 'OWNER_MISMATCH' if run.owner != agent.home_paths.owner_id else proof['reason_code'] if not proof['eligible'] else 'PARENT_MISMATCH'
         except (OSError, ValueError, RuntimeError, AttributeError, TypeError) as exc:
-            item.update(reason_code='PROOF_INCOMPLETE', error_type=type(exc).__name__)
+            item.update(reason_code=getattr(exc, 'error_code', 'PROOF_INCOMPLETE'), error_type=type(exc).__name__,
+                next_step='保留原申请与执行账；核对当前权威源。字节预算不足时缩小页或单独选定 run_ids，未知外部操作不得重放。')
             if apply:
                 item['effect_outcome'] = 'unknown'
         items.append(item)
