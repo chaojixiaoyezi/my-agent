@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..runtime_errors import runtime_error_report
 from ..settings.defaults import default_config_float
 from .audit_service import audit_heartbeat_abandoned
 from .io import (
@@ -60,6 +61,8 @@ class _HeartbeatLoopContext:
 class LeaseRefreshReport:
     ok: bool
     load_error: dict | None = None
+    # LLM: 回合锁或请求文件锁暂时忙只是本拍让路，不是租约丢失；心跳线程据此继续下一拍且不计失败。
+    busy: bool = False
 
 
 def get_active_heartbeat_request_ids() -> set[str]:
@@ -140,12 +143,12 @@ def refresh_processing_lease_report(
 
     if acquired_context is None:
         # 回合转换锁当前由其他操作持有；非阻塞跳过本拍心跳，避免线程拥塞
-        return LeaseRefreshReport(False)
+        return LeaseRefreshReport(False, busy=True)
 
     try:
         read_report = read_json_file_report(request_path, context="gateway.lease.request.read")
         if read_report.load_error is not None:
-            return LeaseRefreshReport(False, read_report.load_error)
+            return LeaseRefreshReport(False, read_report.load_error, busy=read_report.lock_busy)
         if not _lease_payload_matches_request(
             read_report.payload,
             request_path,
@@ -173,9 +176,14 @@ def refresh_processing_lease_report(
 
         try:
             update_json_file_atomic(request_path, refresh, require_existing=True)
+        except FileNotFoundError:
+            return LeaseRefreshReport(False)
+        except (BlockingIOError, InterruptedError):
+            return LeaseRefreshReport(False, busy=True)
         except OSError as exc:
             _report_gateway_side_effect_error("gateway_lease_heartbeat", request_id, exc)
-            return LeaseRefreshReport(False)
+            error = runtime_error_report(exc, context="gateway.lease.request.update")
+            return LeaseRefreshReport(False, {**error, "path": str(request_path)})
         return LeaseRefreshReport(matched_ref[0])
     finally:
         acquired_context.__exit__(None, None, None)
@@ -364,9 +372,12 @@ def _refresh_or_count_failure(
             execution_attempt_id=execution_attempt_id,
             lease_epoch=lease_epoch,
         )
+        # LLM: 锁忙只跳过本拍，保留失败计数继续心跳；读写错误累计到原三次阈值，租约不匹配仍立即退出。
+        if report.busy:
+            return True, consecutive_failures
         if not report.ok:
             _report_lease_load_error(request_id, report.load_error)
-            return False, 0
+            return False, 0 if report.load_error is None else consecutive_failures + 1
         return True, 0
     except Exception as exc:
         _report_gateway_side_effect_error("heartbeat", request_id, exc)

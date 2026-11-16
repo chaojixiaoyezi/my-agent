@@ -1785,6 +1785,10 @@ def _terminalize_gateway_request_locked(paths, path, target_dir, turn_id, conver
                 f"gateway processing and canonical terminal request are missing: {turn_id}"
             )
         if terminal_response is not None and canonical_response != terminal_response:
+            # LLM: 规范终态由另一执行代次（回收副本或租约过期终结）提交时，迟到旧代次只是过期认领，不是数据冲突。
+            expected_attempt = str(expected["expected_execution_attempt_id"] or "").strip()
+            if expected_attempt and expected_attempt != str(canonical_report.payload.get("execution_attempt_id") or "").strip():
+                raise InterruptedError(f"gateway terminal committed by another attempt: {turn_id}")
             raise DataCorruptionError(
                 f"gateway terminal replay conflicts with canonical outcome: {turn_id}"
             )
