@@ -238,15 +238,30 @@ def _parse(params: dict) -> tuple | ToolHandlerOutcome:
     since = time.time() - float(hours) * 3600
     if topic in ("requests", "message_lifecycle") and any(extra.get(key) for key in ("request_id", "message_ref", "request_ref")) and "since_hours" not in params:
         since = 0
-    if extra.get("cursor") and "since_hours" not in params:
-        import base64
+    if extra.get("cursor"):
         try:
-            token = extra["cursor"]
-            if token.startswith(("h:", "q:", "h0:", "t:")):
-                state = json.loads(base64.urlsafe_b64decode(token.split(":", 1)[1]))
+            state = _cursor_window(extra["cursor"])
+            if state is not None:
+                original_hours = state.get("since_hours")
+                if original_hours is not None:
+                    if type(original_hours) not in (int, float) or not 0 < original_hours <= _MAX_HOURS or not math.isfinite(original_hours):
+                        raise ValueError("invalid cursor since_hours")
+                    if "since_hours" in params and float(hours) != original_hours:
+                        return _refuse("cursor_window_mismatch",
+                            f"since_hours 实际为 {hours}，游标原窗口为 {original_hours}；本次未读取记录。"
+                            "续页请省略或重复原 since_hours；要换窗口请清空 cursor 后重新查询。", "TOOL_INVALID_ARGUMENTS")
+                    hours = float(original_hours)
+                elif "since_hours" in params:
+                    return _refuse("cursor_window_unknown",
+                        "旧 cursor 未记录原 since_hours，不能猜测是否与当前值一致；本次未读取记录。"
+                        "续页请省略 since_hours 并保留原 cursor/其它筛选；要换窗口请清空 cursor。", "TOOL_INVALID_ARGUMENTS")
                 since = state["since"]
-                if "until" not in params:
-                    extra["until"] = state.get("until")
+                original_until = state.get("until")
+                if "until" in params and params["until"] != original_until:
+                    return _refuse("cursor_window_mismatch",
+                        f"until 实际为 {params['until']}，游标原值为 {original_until}；本次未读取记录。"
+                        "续页请省略或保留原 until；要换窗口请清空 cursor。", "TOOL_INVALID_ARGUMENTS")
+                extra["until"] = original_until
         except (ValueError, KeyError, TypeError):
             return _refuse("invalid_cursor", "cursor 无效；清空 cursor 并重新查询。", "TOOL_INVALID_ARGUMENTS")
     try:
@@ -255,6 +270,34 @@ def _parse(params: dict) -> tuple | ToolHandlerOutcome:
     except (ValueError, TypeError) as error:
         return _refuse("invalid_arguments", str(error), "TOOL_INVALID_ARGUMENTS")
     return topic, scope, float(hours), limit, since, extra
+
+
+def _cursor_window(cursor: str) -> dict | None:
+    """公开游标只承载原窗口描述；权限和source/filter绑定仍由原读取器核验。"""
+    import base64
+
+    if not cursor.startswith(("h:", "q:", "h0:", "t:")):
+        return None
+    state = json.loads(base64.urlsafe_b64decode(cursor.split(":", 1)[1]))
+    if not isinstance(state, dict):
+        raise ValueError("invalid cursor window state")
+    return state
+
+
+def _bind_cursor_window(result: dict, topic: str, hours: float | None) -> None:
+    """下一页保存首查相对时长，重传相同小时数仍使用原绝对起点；旧游标不补猜测值。"""
+    import base64
+
+    page = result.get(topic)
+    if not isinstance(page, dict) or hours is None:
+        return
+    cursor = page.get("next_cursor")
+    if not isinstance(cursor, str) or not cursor:
+        return
+    state = _cursor_window(cursor)
+    if state is not None:
+        state["since_hours"] = hours
+        page["next_cursor"] = cursor.split(":", 1)[0] + ":" + base64.urlsafe_b64encode(json.dumps(state).encode()).decode()
 
 
 # LLM: 拒绝都在读记录之前（not_started），带稳定原因码；权限类用 AUDIT_ACCESS_DENIED。
@@ -284,7 +327,7 @@ class AuditRecordsTool(BaseTool):
                           "description": "decision查决策，requests查请求，message_lifecycle精确查消息链，tool_calls查工具遥测（仅支持scope=owner）。"},
                 "scope": {"type": "string", "enum": list(_SCOPES), "description": "默认owner（本人全部会话）。decision/requests/message_lifecycle可用current_thread；all_owners须原管理员跨用户许可。tool_calls仅支持owner，其它scope返回partial与明确纠正示例，不自动改范围。"},
                 "since_hours": {"type": "number", "exclusiveMinimum": 0, "maximum": _MAX_HOURS,
-                                "description": f"只看最近多少小时，默认 {_DEFAULT_HOURS}。"},
+                                "description": f"首查最近多少小时，默认 {_DEFAULT_HOURS}；续页省略或重复游标内已记录的原小时数。改值须先清空cursor；旧游标缺少原时长时须省略此字段续页。"},
                 **{key: {"type": "string", "description": description} for key, description in {
                     "request_id": "仅requests/message_lifecycle：精确请求编号。",
                     "error_code": "仅requests/tool_calls：精确错误码，如TOOL_TIMEOUT；独立于status。",
@@ -360,7 +403,10 @@ class AuditRecordsTool(BaseTool):
             result = _TOPIC_COLLECTORS[topic](self._agent, query)
         except ValueError as error:
             return _refuse("invalid_cursor_or_selector", str(error), "TOOL_INVALID_ARGUMENTS")
-        report = {"topic": topic, "scope": scope, "window": {"since_hours": hours, "since": round(query.since, 3)},
+        incoming_window = _cursor_window(extra["cursor"]) if extra.get("cursor") else None
+        window_hours = hours if not extra.get("cursor") else incoming_window.get("since_hours") if incoming_window else None
+        _bind_cursor_window(result, topic, window_hours)
+        report = {"topic": topic, "scope": scope, "window": {"since_hours": window_hours, "since": round(query.since, 3)},
                   **result, "not_read": "日志与对话/记忆正文不在审计读取范围内"}
         return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(report, ensure_ascii=False))
 

@@ -171,3 +171,70 @@ def test_audit_schema_explains_topic_scope_differences():
     assert "message_lifecycle" in properties["topic"]["description"]
     assert "仅requests/tool_calls" in properties["cursor"]["description"]
     assert "仅tool_calls且scope=owner" in properties["tool_name"]["description"]
+
+
+def test_public_audit_cursor_repeated_same_hours_keeps_original_window(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadIndex
+    from agent_py_agent.agent.observability.telemetry_ledger import PARTS, ToolTelemetryLedger
+    from agent_py_agent.agent.tooling.audit_records_tool import AuditRecordsTool
+
+    home = tmp_path / "owner"
+    home.mkdir(mode=0o700)
+    ledger = ToolTelemetryLedger(home, owner_id="local/main")
+    for i in range(4):
+        ledger.record_tool_call({"call_id": f"c{i}", "tool_name": "read", "started_at": 999000 + i,
+                                 "ended_at": 999001 + i, "status": "ok"})
+    ledger._read_index.advance("telemetry", (*PARTS, "tool_calls.jsonl"))
+    monkeypatch.setattr(OwnerReadIndex, "advance", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read advanced index")))
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home, owner_id="local/main"),
+                            config=SimpleNamespace(retention_scan_slice_entries=2))
+    with (patch("agent_py_agent.agent.tooling.audit_records_tool.current_subagent_run_id", return_value=""),
+          patch("agent_py_agent.agent.user_space.owner_admin_controls.read_owner_admin_controls",
+                return_value={"audit_allowed": True})):
+        with patch("time.time", return_value=1000000):
+            first = AuditRecordsTool(agent).execute({"topic": "tool_calls", "scope": "owner", "since_hours": 24, "limit": 2})
+        assert first.ok, first.output
+        page1 = json.loads(first.output)
+        cursor = page1["tool_calls"]["next_cursor"]
+        assert cursor
+        with patch("time.time", return_value=1001000):
+            second = AuditRecordsTool(agent).execute({"topic": "tool_calls", "scope": "owner", "since_hours": 24,
+                                                      "limit": 2, "cursor": cursor})
+    assert second.ok, second.output
+    page2 = json.loads(second.output)
+    assert page1["window"] == page2["window"]
+    assert [row["call_id"] for row in page1["tool_calls"]["entries"]] == ["c0", "c1"]
+    assert [row["call_id"] for row in page2["tool_calls"]["entries"]] == ["c2", "c3"]
+
+
+def test_cursor_explicit_changed_window_refuses_before_source():
+    import base64
+
+    state = {"token": "opaque-provider-token", "since": 900000, "until": None, "since_hours": 24}
+    token = "t:" + base64.urlsafe_b64encode(json.dumps(state).encode()).decode()
+    changed = _parse({"topic": "tool_calls", "cursor": token, "since_hours": 12})
+    assert not changed.ok and changed.effect_outcome == "not_started"
+    assert json.loads(changed.output)["reason"] == "cursor_window_mismatch"
+    changed_until = _parse({"topic": "tool_calls", "cursor": token, "until": 999999})
+    assert not changed_until.ok and json.loads(changed_until.output)["reason"] == "cursor_window_mismatch"
+    omitted = _parse({"topic": "tool_calls", "cursor": token})
+    assert omitted[2] == 24 and omitted[4] == 900000
+
+
+def test_legacy_cursor_missing_duration_requires_omission_and_never_guesses():
+    import base64
+
+    from agent_py_agent.agent.tooling.audit_records_tool import _bind_cursor_window
+
+    token = "t:" + base64.urlsafe_b64encode(json.dumps({"token": "old", "since": 900000, "until": None}).encode()).decode()
+    explicit = _parse({"topic": "tool_calls", "cursor": token, "since_hours": 24})
+    assert not explicit.ok and explicit.effect_outcome == "not_started"
+    assert json.loads(explicit.output)["reason"] == "cursor_window_unknown"
+    assert "省略 since_hours" in json.loads(explicit.output)["message"]
+    omitted = _parse({"topic": "tool_calls", "cursor": token})
+    assert isinstance(omitted, tuple) and omitted[4] == 900000
+    page = {"tool_calls": {"next_cursor": token}}
+    _bind_cursor_window(page, "tool_calls", None)
+    assert page["tool_calls"]["next_cursor"] == token
