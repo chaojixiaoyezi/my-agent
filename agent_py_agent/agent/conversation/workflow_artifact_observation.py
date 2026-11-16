@@ -111,22 +111,29 @@ def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=Tru
         context = BusinessExecutionContext.from_dict(run.get('business_context'))
     except (ValueError, TypeError) as error:
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_CONTEXT_UNREADABLE', '原运行冻结业务上下文无效；未推断其它任务或读取内容。') from error
-    try:
-        task = _observation_task(source.store, context.task_id)
-    except (OSError, ValueError, TypeError, KeyError) as error:
-        raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_TASK_SOURCE_UNREADABLE', '原规范任务无法读取；覆盖未知，恢复原记录后重试。') from error
-    if (context.owner_id != source.owner or task is None or task.task_id != context.task_id
+    # 原生workflows.run的运行级上下文与来源标记同次冻结，逻辑task_id即本运行ID：无SessionTask可核，
+    #   只按冻结Owner/空间/项目授权，task_id/thread_id如实为空，不冒作任何订单。
+    run_scope = (context.task_id == run_id
+                 and (run.get('workflow_snapshot') or {}).get('_business_context_origin') == 'workflow_run')
+    task = None
+    if not run_scope:
+        try:
+            task = _observation_task(source.store, context.task_id)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_TASK_SOURCE_UNREADABLE', '原规范任务无法读取；覆盖未知，恢复原记录后重试。') from error
+    if context.owner_id != source.owner or not run_scope and (task is None or task.task_id != context.task_id
             or task.metadata.get('business_context') != context.to_dict()):
         raise _error('OBSERVATION_NOT_FOUND', 'WORKFLOW_ARTIFACT_TASK_SCOPE_MISMATCH', '原冻结上下文未绑定同一规范业务任务；不将其它任务或纯运行级上下文冒作订单。')
     try:
         threads = [_observation_thread(source.store, identifier)
-            for identifier in (task.sender_thread_id, task.target_thread_id)]
+            for identifier in ((task.sender_thread_id, task.target_thread_id) if task is not None else ())]
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_THREAD_SOURCE_UNREADABLE', '原发送与接收线程无法核验；未读取内容，恢复原线程记录后重试。') from error
     if any(thread.owner_id != source.owner for thread in threads):
         raise _error('OBSERVATION_NOT_FOUND', 'WORKFLOW_ARTIFACT_THREAD_OWNER_MISMATCH', '原发送或接收线程属于其它Owner；禁止导出。')
     facts = ObservationRecord({}, source.owner, context.space_id, context.project_ref,
-        task.task_id, task.target_thread_id, run_id, attempt_id)
+        task.task_id if task is not None else None, task.target_thread_id if task is not None else None,
+        run_id, attempt_id)
     if not check_artifact_access(facts, authority=authority):
         return None
     if run.get('ephemeral_debug') is not False:
@@ -215,11 +222,11 @@ def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=Tru
     if not check_artifact_access(facts, authority=authority):
         return None
     # 仅构造现有transport所需的原清单视图，不追加第二份registry。
-    record = ArtifactRegistryRecord('artifact_registry.v1', artifact_id, run_id, task.task_id, source.owner,
+    record = ArtifactRegistryRecord('artifact_registry.v1', artifact_id, run_id, facts.task_id or '', source.owner,
         'file', mimetypes.guess_type(path.name)[0] or 'application/octet-stream', str(path), digest, size,
         'ready', 'workflow_run_out', 'workflow', step.get('ended_at') or 0.0,
         {'workflow_run_id': run_id, 'step_id': step_id, 'attempt_id': attempt_id})
     value = {'artifact_id': artifact_id, 'version_ref': digest, 'name': path.name, 'mime_type': record.mime_type,
-        'size_bytes': size, 'content_sha256': digest, 'task_id': task.task_id, 'space_id': context.space_id, 'available': present}
+        'size_bytes': size, 'content_sha256': digest, 'task_id': facts.task_id, 'space_id': context.space_id, 'available': present}
     return ObservationRecord(value, facts.owner_id, facts.space_id, facts.project_ref,
         facts.task_id, facts.thread_id, facts.run_id, facts.attempt_id), record, content
