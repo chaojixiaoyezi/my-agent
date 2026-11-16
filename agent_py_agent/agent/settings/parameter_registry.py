@@ -74,6 +74,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "owner_agent_pool_max_agents", "owner_agent_idle_seconds", "input_media_max_bytes",
     "input_media_max_files", "input_image_max_pixels", "owner_maintenance_scan_interval_seconds",
     "gateway_ready_timeout_seconds", "gateway_restart_turn_wait_seconds", "gateway_restart_drain_timeout_seconds",
+    "gateway_restart_mode", "gateway_restart_fast_timeout_seconds",
     "gateway_restart_force_on_drain_timeout", "gateway_restart_cooldown_seconds", "gateway_port",
     "gateway_per_user_owner_scoping", "admin_channel_identity_enabled", "gateway_bind_host", "gateway_auth_token",
     "adapter_workspace", "feishu_app_id", "feishu_app_secret", "feishu_verification_token", "feishu_encrypt_key",

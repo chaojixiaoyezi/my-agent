@@ -1020,6 +1020,9 @@ agent_py_agent/
 
 ### 关键文件说明
 
+- `docs/design/UWAVE_ADMIN_OPS.md`：当前 18 分片的统一边界；源码、组件测试、真实 LLM 与部署状态分开记录。原始故障和复验不能互相覆盖。
+- `io/readonly_sqlite.py`、`storage_lanes.py`：分别提供数据库只读连接边界与原维护预算/写门传递，不能因诊断或索引维护生成第二份权威。
+
 - 模型传输额度和后台压缩分别沿真实请求的启闭及原任务唤醒收口。空间记忆读口只接收宿主保存的范围。对应入口和回归见本页“运行中发现的缺陷与回归”。
 
 - `test_r8_candidate_pin_stream.py`：只读候选流保持原正文校验和全量覆盖，验证候选对象及时释放及 closed 投影不可继续使用。
@@ -1472,6 +1475,55 @@ agent_py_agent/
 # Codebase Tree
 
 ## Tree
+
+### 2026-11-16 飞书、管理员运维与长期运行治理
+
+```text
+agent_py_agent/agent/
+|-- adapter/lifecycle_records.py               # 只读关联原飞书接入与投递记录并标明覆盖范围
+|-- conversation/runtime_reconciliation.py     # 按准确任务、执行与能力请求事实预检或修复
+|-- conversation/thread_read_index.py          # 历史线程有界发现与渐进索引维护
+|-- io/readonly_sqlite.py                      # 共享现存数据库只读连接与身份核验边界
+|-- observability/task_call_retention.py       # 按原 owner 策略分拍治理调用遥测归档
+|-- tooling/active_service_guard.py            # 根据真实服务进程身份保护当前服务
+|-- tooling/audit_lifecycle_topic.py           # 将单条消息的已有生命周期证据组合成有界报告
+|-- tooling/audit_tool_calls_topic.py          # 按授权范围分页查询工具耗时与明确不可用原因
+`-- tooling/host_output_redaction.py           # 在宿主输出保留前过滤当前调用凭据及未决前缀
+docs/design/
+`-- UWAVE_ADMIN_OPS.md                         # 18 分片行为、配置、安全与真实验收边界
+agent_py_agent/tests/
+|-- test_f155_w1_native_asset_register.py       # 原生与工作流资产真实 HTTP 登记回归
+|-- test_f155_w2_deferred_reply_order_drain.py  # 延迟消息顺序与初次准入竞争回归
+|-- test_f155_w3_controller_tree_cancel.py      # 后代取消逐项授权与未知副作用保护
+|-- test_f155_w4_messages_page_fill.py          # 可见消息分页与原游标边界
+|-- test_f155_w5_controller_create_grant.py     # 真实后台 wake 的控制者工具上界
+|-- test_foreground_admin_host_access.py        # 前台宿主权限、平台沙箱和子代理隔离
+|-- test_foreground_admin_output_redaction.py   # 流、读取、归档与取消收尾凭据过滤
+|-- test_foreground_admin_service_guard.py      # 当前真实服务进程自停保护
+|-- test_f155_w7_task_run_convergence.py        # 准确执行树与任务链接收口
+|-- test_f155_w8_index_convergence.py           # 分拍索引修复、物理压缩与代次保护
+|-- test_f155_w9_runtime_reconciliation.py      # 预检/执行、身份未知和写门回归
+|-- test_f155_w10_input_convergence.py          # 后台输入精确 attempt 结算
+|-- test_f155_w10_pending_duplicate.py          # 原消息身份与持久重复输入保护
+|-- test_admin_audit_cursor.py                 # 审计查询有界游标及覆盖边界
+|-- test_admin_message_lifecycle.py            # 精确消息关联与缺证诊断
+|-- test_admin_adapter_lifecycle.py            # 飞书生命周期来源与服务根查询
+|-- test_uwave_w12_lock_sidecar.py              # 终态 sidecar 同 inode 清理与等待者重验
+|-- test_admin_status_pages.py                 # 队列、隔离项与日志有界分页
+|-- test_supervisor_diagnostic_persistence.py   # 监督器首故障与真实退出码落盘
+|-- test_admin_task_telemetry.py                # owner 遥测归属及留存
+|-- test_telemetry_bounded_scan.py              # 稀疏历史工具记录有界查询
+|-- test_schedule_admin_cross_entry.py          # 自己的工作跨前台入口管理
+|-- test_schedule_authority_receipts.py         # 调度权限与副作用的准确回执
+|-- test_uwave_w16_storage_wiring.py            # 配置、共享预算与坏记录隔离接线
+|-- test_uwave_w17_fast_restart.py              # 显式快重启与安全模型交接
+|-- test_uwave_restart_config.py                # 公开默认、非法预算与旧零值语义
+|-- test_uwave_w18_retention_pins.py            # 引用证明有界推进及代次变化
+|-- test_uwave_w18_thread_index.py              # 历史线程索引与调度终态保护
+|-- test_closedloop_f08_wake_isolation.py       # 单条坏唤醒不阻断同页健康记录
+|-- test_closedloop_f09_message_timestamp.py    # 坏时间字段不吞掉已识别消息
+`-- test_f05_session_task_learning_isolation.py # 坏学习元数据保留引用且健康欠账继续
+```
 
 ### 2026-11-13 运行中发现的缺陷与回归
 

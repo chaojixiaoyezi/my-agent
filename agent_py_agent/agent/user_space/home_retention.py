@@ -127,6 +127,10 @@ _STORAGE_LIFECYCLES = (
     ('gateway_input_refs', 'gateway', 'input turn lookup projections', 'consumed closed turn seven day lifecycle', 'active/unknown turn and ref birth locks', ('preserve', 'policy-delete')),
     ('usage_sources', 'workspace', 'conversation.model_usage canonical ledger', 'bounded source projection maintenance',
      'pending append/source revision/coverage', ('preserve', 'index')),
+    ('task_call_telemetry', 'owner', 'observability.task_call_inspector', 'audit_days after canonical terminal',
+     'active/UNKNOWN/legal_hold/current source generation', ('preserve', 'index', 'policy-delete')),
+    ('thread_index', 'owner', 'conversation.ThreadStore', 'bounded derived index maintenance',
+     'canonical thread identity/current generation', ('preserve', 'index')),
 )
 
 

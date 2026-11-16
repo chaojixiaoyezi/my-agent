@@ -10,7 +10,7 @@ import os
 import stat
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
@@ -48,12 +48,16 @@ LANE_BINDINGS: dict[str, str] = {
     "gateway_history": "gateway_parts.gateway_history_index:maintain_gateway_history_lane",
     "gateway_input_refs": "gateway_parts.input_turn_retention:maintain_input_turn_refs_lane",
     "usage_sources": "conversation.usage_source_maintenance:maintain_usage_sources_lane",
+    "global_indexes": "user_space.home_indexes:maintain_home_indexes_lane",
+    "task_call_telemetry": "observability.task_call_retention:maintain_task_call_telemetry_lane",
+    "thread_index": "conversation.thread_read_index:maintain_thread_index_lane",
 }
 # 压力只调整既有合格候选的通道次序，不缩短保留期。
 LANE_EVICTION_ORDER = (
     "display_archives", "conversation_messages", "compact_checkpoints", "local_events",
     "conversation_ledgers", "tool_outputs", "subagents", "asset_auxiliary",
     "session_task_payloads", "process_sessions", "runtime_history", "gateway_history", "gateway_input_refs", "usage_sources",
+    "global_indexes", "task_call_telemetry", "thread_index",
 )
 # 回执必须提供的计量和续点字段。
 _RECEIPT_REQUIRED = ("cursor", "complete", "items", "bytes")
@@ -89,9 +93,9 @@ class StorageLaneBudget:
     # 函数用途: 为本次领域调用派生封顶预算。
     def capped(self, *, items: int, size: int, ms: float) -> StorageLaneBudget:
         return StorageLaneBudget(
-            min(self.max_items or items, items),
-            min(self.max_bytes or size, size),
-            min(self.deadline or math.inf, time.monotonic() + ms / 1000),
+            min(items if self.max_items is None else self.max_items, items),
+            min(size if self.max_bytes is None else self.max_bytes, size),
+            min(math.inf if self.deadline is None else self.deadline, time.monotonic() + ms / 1000),
         )
 
 
@@ -108,6 +112,8 @@ class StorageLaneRequest:
     coordinator: bool
     pressure: dict | None
     commit: Callable[[Callable[[], T]], T] | None
+    # 只透传原已解析配置；领域通道不能另读配置或重开一份扫描预算。
+    config: object = field(default=None, kw_only=True)
 
     # LLM: 仅由调用方有真实变更时调用；协调器写门的返回值和异常原样透传。
     # 函数用途: 在既有写门内执行一个变更批次。

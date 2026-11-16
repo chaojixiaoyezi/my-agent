@@ -622,6 +622,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 否则降为匿名 USER。默认空时使用持久 G1 本机凭据，回环地址本身不授予身份。
     gateway_auth_token: str = ""
     gateway_ready_timeout_seconds: int = 3
+    # fast 仅用于计划重启；graceful 沿用原回合/工具排空策略，安装更新停机仍走原安全交接。
+    gateway_restart_mode: str = "fast"
+    # 快速重启副作用关口的排空预算；不含新进程冷启动，超时保留未知操作，不盲目重放。
+    gateway_restart_fast_timeout_seconds: float = field(default=2.0, metadata={"bounds": (0, None), "exclusive_minimum": True})
     # 安全重启第一段：停领新请求后，等本进程在跑回合结束的上限秒数；超时后关闭工具关口，停在工具前的回合由接班进程续跑。
     gateway_restart_turn_wait_seconds: int = 300
     # 安全重启第二段：等执行中的副作用工具归零的上限秒数，0=不限；超时后按 gateway_restart_force_on_drain_timeout 决定强制换进程或取消。

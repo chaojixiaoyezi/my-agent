@@ -483,6 +483,7 @@ def _normalize_runtime_bools(out: dict[str, object], defaults: object) -> list[s
 def _normalize_runtime_choices(out: dict[str, object], defaults: object) -> list[str]:
     maintenance_warnings = _apply_choice_field(out, defaults, "self_learning_maintenance_mode", ("observe","autonomous"))
     maintenance_warnings.extend(_apply_choice_field(out, defaults, "scale_owner_snapshot_mode", ("full", "delta_compat", "delta")))
+    maintenance_warnings.extend(_apply_choice_field(out, defaults, "gateway_restart_mode", ("fast", "graceful")))
     value, warn = CoercionService.coerce_choice(
         "log_level", out.get("log_level"), defaults.log_level,
         choices=("debug", "info", "warning", "error", "critical"),
