@@ -31,7 +31,7 @@ from ..conversation.authority import (
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
     conversation_execution_cwd,
 )
-from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
+from ..user_space.home_indexes import publish_workspace_refs
 from ..user_space.run_workspace import (
     EnsureRunWorkspaceRequest,
     FinishRunWorkspaceRequest,
@@ -447,26 +447,9 @@ def _register_finished_run_task_ref(
     run_id = str(request.run_id or request.request_id or task_id).strip()
     if home_paths is None or not task_id or not run_id:
         return
-    index_status = str(request.status or "").lower()
-    register_task_ref(
-        home_paths,
-        TaskIndexRef(
-            owner_id=str(getattr(home_paths, "owner_id", "") or ""),
-            task_id=task_id,
-            task_path=result.root,
-            status=index_status,
-            title=_authoritative_task_title(agent, params, task_id),
-        ),
-    )
-    register_run_ref(
-        home_paths,
-        RunIndexRef(
-            owner_id=str(getattr(home_paths, "owner_id", "") or ""),
-            run_id=run_id,
-            task_id=task_id,
-            run_path=result.work_dir,
-            status=index_status,
-        ),
+    publish_workspace_refs(
+        home_paths, task_id=task_id, run_id=run_id, root=result.root,
+        title=_authoritative_task_title(agent, params, task_id),
     )
 
 
@@ -478,25 +461,10 @@ def register_saved_run_task_ref(agent, result, params) -> None:
     if not task_id:
         return
     try:
-        register_task_ref(
-            home_paths,
-            TaskIndexRef(
-                owner_id=str(getattr(home_paths, "owner_id", "") or ""),
-                task_id=task_id,
-                task_path=result.root,
-                status="active",
-                title=_authoritative_task_title(agent, params, task_id),
-            ),
-        )
-        register_run_ref(
-            home_paths,
-            RunIndexRef(
-                owner_id=str(getattr(home_paths, "owner_id", "") or ""),
-                run_id=str(params.run_id or params.run_request_id or task_id),
-                task_id=str(task_id),
-                run_path=result.work_dir,
-                status="active",
-            ),
+        publish_workspace_refs(
+            home_paths, task_id=str(task_id),
+            run_id=str(params.run_id or params.run_request_id or task_id),
+            root=result.root, title=_authoritative_task_title(agent, params, task_id),
         )
         _sync_conversation_task_workspace(agent, params, task_id, result.root)
     except OSError:

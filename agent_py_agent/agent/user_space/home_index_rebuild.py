@@ -54,6 +54,9 @@ class HomeIndexRebuildResult:
 # disposable global projections instead of appending another copy of every ref.
 # 函数用途: 从真实用户目录重建全局索引；应用时会把膨胀旧索引压成当前状态快照。
 def rebuild_home_indexes(home: MyAgentHomePaths, *, apply: bool = False) -> HomeIndexRebuildResult:
+    source_paths = (home.global_index_owners_jsonl, home.global_index_active_tasks_jsonl,
+                    home.global_index_active_runs_jsonl, home.global_index_active_agents_jsonl)
+    source_stamps = {str(path): _index_source_stamp(path) for path in source_paths}
     owners = tuple(_owner_records(home))
     task_refs: list[TaskIndexRef] = []
     run_refs: list[RunIndexRef] = []
@@ -68,20 +71,21 @@ def rebuild_home_indexes(home: MyAgentHomePaths, *, apply: bool = False) -> Home
         load_errors.extend(error for _path, _payload, error in task_states if error is not None)
         load_errors.extend(agent_report.load_errors)
     result = HomeIndexRebuildResult(
-        applied=bool(apply),
+        applied=bool(apply and not load_errors),
         owners=owners,
         task_refs=tuple(task_refs),
         run_refs=tuple(run_refs),
         agent_refs=tuple(agent_refs),
         load_errors=tuple(load_errors),
     )
-    if apply:
+    if apply and not load_errors:
         replace_home_index_snapshots(
             home,
             owners=owners,
             task_refs=tuple(task_refs),
             run_refs=tuple(run_refs),
             agent_refs=tuple(agent_refs),
+            expected_source_stamps=source_stamps,
         )
     return result
 
@@ -265,3 +269,176 @@ def _agent_ref_dict(ref: AgentIndexRef) -> dict[str, object]:
 
 
 __all__ = ["HomeIndexRebuildResult", "rebuild_home_indexes"]
+
+
+def reconcile_home_index_page(home, *, owner_id: str, apply: bool = False,
+                              cursor: str = "", limit: int | None = None,
+                              config=None, budget=None, commit_transition=None) -> dict[str, object]:
+    """按原索引字节游标校正位置引用；未覆盖、坏状态均不构成删除证明。"""
+    import time
+    from dataclasses import replace
+
+    from .home_indexes import publish_workspace_refs, workspace_index_statuses
+    from .storage_lanes import StorageLaneBudget
+
+    if apply:
+        from .home_index_compact import _require_coordinator_writer
+        _require_coordinator_writer()
+
+    result = dict(owner_id=owner_id, items=0, bytes=0, repaired=0, protected=0,
+                  unknown=0, errors=[], next_cursor="", partial=True, effect_outcome="not_started")
+    parts = Path(owner_id).parts
+    if (not owner_id or Path(owner_id).is_absolute() or '..' in parts
+            or not ((len(parts) == 2 and parts[0] == 'local')
+                    or (len(parts) == 4 and parts[0] == 'providers' and parts[2] in ('users', 'groups')))):
+        result['errors'] = [{'code': 'INVALID_OWNER_ID'}]
+        return result
+    owner_root = home.root / 'owners' / owner_id
+    scoped = replace(home, owner_id=owner_id)
+    if budget is None:
+        budget = StorageLaneBudget(
+            getattr(config, 'retention_scan_slice_entries', 128),
+            getattr(config, 'retention_scan_slice_bytes', 8388608),
+            time.monotonic() + getattr(config, 'retention_scan_slice_ms', 25) / 1000,
+        )
+    cap = min(limit or budget.max_items or 128, budget.max_items or 128)
+    try:
+        progress = json.loads(cursor) if cursor else {'owner': owner_id, 'phase': 0, 'offset': 0}
+        if progress.get('owner') != owner_id:
+            raise ValueError('owner_cursor_mismatch')
+        phase = int(progress['phase'])
+        offset = int(progress['offset'])
+        if phase not in (0, 1) or offset < 0:
+            raise ValueError('invalid_cursor_boundary')
+    except (ValueError, TypeError, KeyError):
+        result['errors'] = [{'code': 'INVALID_INDEX_CURSOR'}]
+        return result
+    paths = (home.global_index_active_tasks_jsonl, home.global_index_active_runs_jsonl)
+    while phase < len(paths) and result['items'] < cap and not budget.exhausted(result['items'], result['bytes']):
+        path = paths[phase]
+        try:
+            with path.open('rb') as source:
+                stamp = source.fileno()
+                import os
+                st = os.fstat(stamp)
+                identity = [st.st_dev, st.st_ino]
+                if progress.get('identity') and progress['identity'] != identity:
+                    result['errors'].append({'code': 'INDEX_SOURCE_CHANGED'})
+                    break
+                end = int(progress.get('end', st.st_size))
+                source.seek(offset)
+                while offset < end and result['items'] < cap and not budget.exhausted(result['items'], result['bytes']):
+                    remaining = (budget.max_bytes - result['bytes']) if budget.max_bytes is not None else 8388608
+                    raw = source.readline(max(1, min(remaining, end - offset)))
+                    result['bytes'] += len(raw)
+                    if not raw or not raw.endswith(b'\n'):
+                        result['unknown'] += 1
+                        result['errors'].append({'code': 'INDEX_ROW_EXCEEDS_SLICE_OR_INCOMPLETE'})
+                        break
+                    offset = source.tell()
+                    result['items'] += 1
+                    try:
+                        row = json.loads(raw)
+                        if row.get('owner_id') != owner_id:
+                            continue
+                        root = Path(row['task_path']) if phase == 0 else Path(row['run_path']).parent
+                        root.resolve().relative_to(owner_root.resolve())
+                        state_path = root / 'work' / 'state.json'
+                        state_path.resolve().relative_to(owner_root.resolve())
+                        # 单一状态文件也纳入同拍字节预算，不把巨型损坏记录读入内存。
+                        remaining = (budget.max_bytes - result['bytes']) if budget.max_bytes is not None else 8388608
+                        with state_path.open('rb') as state_source:
+                            if os.fstat(state_source.fileno()).st_size > remaining:
+                                raise ValueError('canonical_record_exceeds_budget')
+                            state_raw = state_source.read(max(0, remaining))
+                        result['bytes'] += min(len(state_raw), max(0, remaining))
+                        if len(state_raw) > remaining:
+                            raise ValueError('canonical_record_exceeds_budget')
+                        state = json.loads(state_raw)
+                        if state.get('task_id') != row.get('task_id'):
+                            raise ValueError('canonical_task_identity_mismatch')
+                        run_id = str(state.get('primary_run_id') or state.get('run_id') or '')
+                        if phase == 1 and row.get('run_id') != run_id:
+                            result['protected'] += 1
+                            continue
+                        statuses = workspace_index_statuses(state, run_id)
+                        desired = statuses[phase]
+                        if desired == 'unknown' or not run_id:
+                            raise ValueError('canonical_status_or_run_unknown')
+                        if str(row.get('status') or '').lower() == desired:
+                            continue
+                        result['repaired'] += 1
+                        if apply:
+                            if budget.max_bytes is not None and result['bytes'] + len(state_raw) > budget.max_bytes:
+                                result['unknown'] += 1
+                                continue
+                            result['bytes'] += len(state_raw)
+                            def operation():
+                                return publish_workspace_refs(scoped, task_id=state['task_id'], run_id=run_id, root=root, title=str(state.get('task_name') or row.get('title') or state['task_id']), max_bytes=len(state_raw))
+                            prior_effect = result['effect_outcome']
+                            result['effect_outcome'] = 'unknown'
+                            receipt = commit_transition(operation) if commit_transition else operation()
+                            if receipt.get('status') == 'published':
+                                result['effect_outcome'] = 'applied'
+                            else:
+                                result['effect_outcome'] = prior_effect
+                                result['protected'] += 1
+                    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                        result['unknown'] += 1
+                        if len(result['errors']) < 16:
+                            result['errors'].append({'code': 'CANONICAL_INDEX_SOURCE_UNAVAILABLE', 'reason': type(exc).__name__})
+                progress = dict(owner=owner_id, phase=phase, offset=offset, identity=identity, end=end)
+                if offset < end:
+                    break
+        except FileNotFoundError:
+            result['unknown'] += 1
+            if len(result['errors']) < 16:
+                result['errors'].append({'code': 'INDEX_SOURCE_MISSING'})
+        except OSError as exc:
+            result['errors'].append({'code': 'INDEX_SOURCE_UNREADABLE', 'reason': type(exc).__name__})
+            break
+        phase += 1
+        offset = 0
+        progress = dict(owner=owner_id, phase=phase, offset=0)
+    result['partial'] = phase < len(paths) or bool(result['unknown']) or bool(result['errors'])
+    result['next_cursor'] = json.dumps(progress, separators=(',', ':')) if phase < len(paths) else ''
+    return result
+
+
+def maintain_home_indexes_lane(request) -> dict:
+    """协调器沿原提交门处理当前 owner；不枚举其它 owner 或启动 Agent。"""
+    if request.kind != 'global_indexes' or request.coordinator is not True:
+        return dict(cursor=request.cursor, complete=False, items=0, bytes=0,
+                    deferred_reason='coordinator_required')
+    if 'compact' in request.cursor:
+        from .home_index_compact import compact_index_page
+        phase = int(request.cursor.get('file', 0))
+        paths = (request.home.global_index_active_tasks_jsonl, request.home.global_index_active_runs_jsonl)
+        if phase not in (0, 1):
+            return dict(cursor={}, complete=False, items=0, bytes=0,
+                        errors=[{'code': 'INVALID_COMPACT_FILE_CURSOR'}])
+        receipt = request.run_write(lambda: compact_index_page(
+            paths[phase], cursor=request.cursor.get('compact') or {}, budget=request.budget,
+        ))
+        if receipt['complete']:
+            receipt['complete'] = phase == 1
+            receipt['cursor'] = {} if phase == 1 else {'compact': {}, 'file': 1}
+        else:
+            receipt['cursor'] = {'compact': receipt['cursor'], 'file': phase}
+        return receipt
+    report = reconcile_home_index_page(
+        request.home, owner_id=request.home.owner_id, apply=True,
+        cursor=str(request.cursor.get('page') or ''), budget=request.budget,
+        commit_transition=request.run_write,
+    )
+    return dict(cursor={'page': report['next_cursor']} if report['next_cursor'] else {'compact': {}, 'file': 0},
+                complete=False, items=report['items'], bytes=report['bytes'],
+                protected=report['protected'], errors=report['errors'])
+
+
+def _index_source_stamp(path):
+    try:
+        st = path.stat(follow_symlinks=False)
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    except FileNotFoundError:
+        return None

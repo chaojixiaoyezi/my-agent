@@ -292,6 +292,7 @@ def sync_task_workspace_status(
                 _sync_task_workspace_summary_status(
                     task_root, state_path.parent / "summaries" / "current_summary.md", existing_raw,
                 )
+                _publish_task_workspace_index(task_root, Path(owner_path), existing_raw)
                 return
         updated_state = update_json_file_atomic(state_path, updater, require_existing=True)
         _sync_task_workspace_summary_status(
@@ -299,6 +300,7 @@ def sync_task_workspace_status(
             state_path.parent / "summaries" / "current_summary.md",
             updated_state,
         )
+        _publish_task_workspace_index(task_root, Path(owner_path), updated_state)
     except (DataCorruptionError, OSError, TypeError, ValueError) as exc:
         _STORE_LOGGER.warning(
             "task workspace state sync failed(task=%s,status=%s): %s",
@@ -306,6 +308,31 @@ def sync_task_workspace_status(
             projected_status,
             exc,
         )
+
+
+def _publish_task_workspace_index(task_root: Path, owner_root: Path, state: dict) -> None:
+    """任务状态原提交边刷新共享投影；未知 owner 布局不猜全局根。"""
+    from dataclasses import replace
+
+    from ..user_space.home_indexes import publish_workspace_refs
+    from ..user_space.home_layout import home_paths
+
+    for ancestor in owner_root.parents:
+        if ancestor.name != "owners":
+            continue
+        owner_id = owner_root.relative_to(ancestor).as_posix()
+        parts = Path(owner_id).parts
+        if not ((len(parts) == 2 and parts[0] == "local") or
+                (len(parts) == 4 and parts[0] == "providers" and parts[2] in ("users", "groups"))):
+            return
+        run_id = str(state.get("primary_run_id") or state.get("run_id") or "")
+        if run_id:
+            publish_workspace_refs(
+                replace(home_paths(ancestor.parent), owner_id=owner_id),
+                task_id=str(state.get("task_id") or ""), run_id=run_id,
+                root=task_root, title=str(state.get("task_name") or ""),
+            )
+        return
 
 
 # LLM: current_summary.md is a derived human/model view of canonical state.json. This writer may

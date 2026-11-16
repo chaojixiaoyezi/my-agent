@@ -36,7 +36,7 @@ from .owner_resolver import OwnerHomeResult
 
 # 写缓存最多缓存 5 万条索引键（个数）：批量写入前先攒内存，满了强制刷盘防失控。
 _INDEX_WRITE_CACHE_CAPACITY_COUNT = 50_000
-_INDEX_WRITE_CACHE: OrderedDict[tuple[str, ...], tuple[int, int, str]] = OrderedDict()
+_INDEX_WRITE_CACHE: OrderedDict[tuple[str, ...], tuple[int, int, int, int, str]] = OrderedDict()
 _INDEX_WRITE_LOCK = threading.Lock()
 
 
@@ -492,9 +492,9 @@ def _append_changed_index_record(
                 _forget_index_path(path)
             else:
                 # 投影被删除/替换后，旧进程的所有实体指纹都不再证明该文件包含记录。
-                if cached[:2] != (identity.st_dev, identity.st_ino):
+                if cached[:4] != (identity.st_dev, identity.st_ino, identity.st_size, identity.st_mtime_ns):
                     _forget_index_path(path)
-                elif cached[2] == fingerprint:
+                elif cached[4] == fingerprint:
                     _INDEX_WRITE_CACHE.move_to_end(cache_key)
                     return False
         append_private_jsonl_records(path, [payload], sort_keys=True)
@@ -514,6 +514,7 @@ def replace_home_index_snapshots(
     task_refs: tuple[TaskIndexRef, ...],
     run_refs: tuple[RunIndexRef, ...],
     agent_refs: tuple[AgentIndexRef, ...],
+    expected_source_stamps: dict | None = None,
 ) -> None:
     from ..common.global_write_guard import require_global_writer
 
@@ -540,14 +541,23 @@ def replace_home_index_snapshots(
             key_fields_for_index_file(home.global_index_active_agents_jsonl),
         ),
     )
-    with _INDEX_WRITE_LOCK:
+    from contextlib import ExitStack
+
+    from .home_index_rebuild import _index_source_stamp
+
+    with _INDEX_WRITE_LOCK, ExitStack() as locks:
+        for path, _records, _fields in snapshots:
+            locks.enter_context(locked_json_path(path))
+        if expected_source_stamps is not None:
+            for path, _records, _fields in snapshots:
+                if _index_source_stamp(path) != expected_source_stamps[str(path)]:
+                    raise RuntimeError("INDEX_REBUILD_SOURCE_CHANGED: no snapshots replaced; rerun preview")
         for path, records, key_fields in snapshots:
             content = "".join(
                 json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
                 for record in records
             )
-            with locked_json_path(path):
-                write_private_text_file_atomic_unlocked(path, content)
+            write_private_text_file_atomic_unlocked(path, content)
             _forget_index_path(path)
             for record in records:
                 _remember_index_fingerprint(
@@ -580,7 +590,7 @@ def _index_fingerprint(payload: dict[str, Any]) -> str:
 # 函数用途: 记住最近写入指纹，并限制去重缓存的内存占用。
 def _remember_index_fingerprint(cache_key: tuple[str, ...], fingerprint: str) -> None:
     identity = Path(cache_key[0]).stat(follow_symlinks=False)
-    _INDEX_WRITE_CACHE[cache_key] = (identity.st_dev, identity.st_ino, fingerprint)
+    _INDEX_WRITE_CACHE[cache_key] = (identity.st_dev, identity.st_ino, identity.st_size, identity.st_mtime_ns, fingerprint)
     _INDEX_WRITE_CACHE.move_to_end(cache_key)
     while len(_INDEX_WRITE_CACHE) > _INDEX_WRITE_CACHE_CAPACITY_COUNT:
         _INDEX_WRITE_CACHE.popitem(last=False)
@@ -805,3 +815,50 @@ __all__ = [
     "register_task_ref",
     "replace_home_index_snapshots",
 ]
+
+
+def publish_workspace_refs(home, *, task_id: str, run_id: str, root: Path, title: str = "", max_bytes: int | None = None) -> dict:
+    """原状态锁内发布已提交身份；迟到归档不得覆盖下一轮运行的投影。"""
+    state_path = Path(root) / "work" / "state.json"
+    if Path(root).is_symlink() or state_path.parent.is_symlink() or state_path.is_symlink():
+        return {"status": "unknown", "code": "UNSAFE_CANONICAL_WORKSPACE_PATH"}
+    with locked_json_path(state_path):
+        try:
+            with state_path.open("rb") as source:
+                if max_bytes is not None:
+                    import os
+                    if os.fstat(source.fileno()).st_size > max_bytes:
+                        return {"status": "unknown", "code": "CANONICAL_STATE_EXCEEDS_BUDGET"}
+                raw = source.read() if max_bytes is None else source.read(max_bytes)
+            state = json.loads(raw)
+        except (OSError, ValueError, UnicodeError) as exc:
+            return {"status": "unknown", "code": type(exc).__name__}
+        if not isinstance(state, dict) or str(state.get("task_id") or "") != task_id:
+            return {"status": "unknown", "code": "TASK_IDENTITY_MISMATCH"}
+        current_run = str(state.get("primary_run_id") or state.get("run_id") or "")
+        if current_run and current_run != run_id:
+            return {"status": "protected", "code": "RUN_GENERATION_CHANGED"}
+        task_status, run_status = workspace_index_statuses(state, run_id)
+        register_task_ref(home, TaskIndexRef(
+            owner_id=home.owner_id, task_id=task_id, task_path=Path(root),
+            status=task_status, title=title or str(state.get("task_name") or task_id),
+        ))
+        register_run_ref(home, RunIndexRef(
+            owner_id=home.owner_id, task_id=task_id, run_id=run_id,
+            run_path=Path(root) / "work", status=run_status,
+        ))
+        return {"status": "published"}
+
+
+def workspace_index_statuses(state: dict, run_id: str) -> tuple[str, str]:
+    """任务生命周期与同身份执行回执分别投影；旧执行证明不能套用到新一代。"""
+    task_status = str(state.get("status") or "UNKNOWN").lower()
+    task_status = "active" if task_status == "running" else task_status
+    run_status = str(state.get("run_status") or task_status).lower()
+    if state.get("terminal_run_id") == run_id and state.get("finished_at"):
+        runtime = str(state.get("runtime_status") or "").lower()
+        outcomes = {"ok": "done", "cancelled": "cancelled", "failed": "failed",
+                    "blocked": "blocked", "context_overflow": "blocked", "unfinished": "blocked",
+                    "needs_user_input": "blocked", "approval_required": "blocked"}
+        run_status = outcomes.get(runtime, "unknown")
+    return task_status, run_status

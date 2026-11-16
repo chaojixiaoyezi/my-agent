@@ -337,7 +337,8 @@ def _still_same_file(target: Path, stat0: object, prefix_len: int) -> bool:
         stat1 = target.stat()
     except OSError:
         return False
-    return stat1.st_ino == stat0.st_ino and stat1.st_size >= prefix_len
+    return (stat1.st_ino == stat0.st_ino and
+            stat1.st_dev == getattr(stat0, "st_dev", stat1.st_dev) and stat1.st_size >= prefix_len)
 
 
 # LLM: 第三遍（很轻）——**在锁内**再核一次身份，然后接上窗口期追加、原子替换。
@@ -519,3 +520,125 @@ __all__ = [
     "save_compact_state",
     "should_compact",
 ]
+
+
+def compact_index_page(target: Path, *, cursor: dict, budget, commit_transition=None) -> dict:
+    """分拍物理压缩；SQLite 仅保存可丢弃的扫描暂存，原 JSONL 始终是权威。"""
+    import sqlite3
+    from contextlib import closing
+
+    from .home_indexes import key_fields_for_index_file
+
+    _require_coordinator_writer()
+    target = Path(target)
+    state = dict(cursor)
+    receipt = dict(cursor=state, complete=False, items=0, bytes=0)
+    if budget.exhausted():
+        return receipt
+    try:
+        stat0 = target.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return dict(cursor={}, complete=True, items=0, bytes=0)
+    generation = [stat0.st_dev, stat0.st_ino, stat0.st_size, stat0.st_mtime_ns]
+    token = state.get('token')
+    if token is None:
+        token = uuid4().hex
+        state = dict(token=token, generation=generation, phase='scan', offset=0, written=-1)
+        receipt['cursor'] = state
+    if (not isinstance(token, str) or len(token) != 32
+            or any(ch not in '0123456789abcdef' for ch in token)):
+        return dict(cursor={}, complete=False, items=0, bytes=0,
+                    errors=[{'code': 'INVALID_COMPACT_CURSOR'}])
+    staging = target.with_name('.' + target.name + '.' + token + '.stage.sqlite3')
+    output = target.with_name('.' + target.name + '.' + token + '.stage.jsonl')
+    if staging.is_symlink() or output.is_symlink():
+        return dict(cursor={}, complete=False, items=0, bytes=0,
+                    errors=[{'code': 'INDEX_COMPACTION_UNSAFE_STAGING_PATH'}])
+    original = state.get('generation', [])
+    # 文件替换/截断时丢弃暂存；同 inode 的追加允许留到原锁内拼接。
+    if (len(original) != 4 or generation[:2] != original[:2]
+            or generation[2] < original[2]
+            or (generation[2] == original[2] and generation[3] != original[3])):
+        _discard(staging)
+        _discard(output)
+        return dict(cursor={}, complete=False, items=0, bytes=0,
+                    errors=[{'code': 'INDEX_COMPACTION_GENERATION_CHANGED'}])
+    if cursor and not staging.exists():
+        return dict(cursor={}, complete=False, items=0, bytes=0,
+                    deferred_reason='compaction_staging_missing_restart_scan')
+    # 暂存只持派生行，0600；数据库连接和源句柄每拍关闭。
+    fd = os.open(staging, os.O_CREAT | os.O_RDWR, 0o600)
+    os.close(fd)
+    with closing(sqlite3.connect(staging)) as conn:
+        conn.execute('PRAGMA journal_mode=DELETE')
+        conn.execute('CREATE TABLE IF NOT EXISTS kept (key TEXT PRIMARY KEY, offset INTEGER NOT NULL, raw BLOB NOT NULL)')
+        conn.execute('CREATE INDEX IF NOT EXISTS kept_offset ON kept(offset)')
+        if state['phase'] == 'scan':
+            with target.open('rb') as source:
+                source.seek(state['offset'])
+                while source.tell() < original[2] and not budget.exhausted(receipt['items'], receipt['bytes']):
+                    remaining = budget.max_bytes - receipt['bytes'] if budget.max_bytes is not None else 8388608
+                    offset = source.tell()
+                    raw = source.readline(max(1, min(remaining, original[2] - offset)))
+                    receipt['bytes'] += len(raw)
+                    if not raw.endswith(b'\n'):
+                        conn.rollback()
+                        receipt['errors'] = [{'code': 'INDEX_COMPACT_ROW_EXCEEDS_SLICE_OR_INCOMPLETE'}]
+                        return receipt
+                    key = _record_key(raw, key_fields_for_index_file(target))
+                    # 坏行原字节保留，不以未知数据授权删除。
+                    encoded = json.dumps(key) if key is not None and all(key) else 'bad:' + str(offset)
+                    conn.execute('INSERT INTO kept VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET offset=excluded.offset,raw=excluded.raw',
+                                 (encoded, offset, raw))
+                    state['offset'] = source.tell()
+                    receipt['items'] += 1
+            conn.commit()
+            if state['offset'] >= original[2]:
+                state['phase'] = 'write'
+            return receipt
+        if state['phase'] == 'write':
+            if not output.exists():
+                state.update(written=-1, output_bytes=0)
+            fd = os.open(output, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+            # 每拍先恢复已确认长度；崩溃留下的未提交输出尾部不重复拼入。
+            with output.open('r+b') as sink:
+                sink.truncate(int(state.get('output_bytes', 0)))
+                sink.seek(0, os.SEEK_END)
+                while not budget.exhausted(receipt['items'], receipt['bytes']):
+                    row = conn.execute('SELECT offset,raw FROM kept WHERE offset>? ORDER BY offset LIMIT 1',
+                                       (state['written'],)).fetchone()
+                    if row is None:
+                        state['phase'] = 'commit'
+                        break
+                    offset, raw = row
+                    if budget.max_bytes is not None and receipt['bytes'] + len(raw) > budget.max_bytes:
+                        break
+                    sink.write(raw)
+                    receipt['items'] += 1
+                    receipt['bytes'] += len(raw)
+                    state['written'] = offset
+                    state['output_bytes'] = sink.tell()
+            return receipt
+    if state['phase'] == 'commit':
+        remaining = budget.max_bytes if budget.max_bytes is not None else 8388608
+        current = target.stat(follow_symlinks=False)
+        if current.st_size - original[2] > remaining:
+            state.update(phase='scan', offset=original[2], written=-1, output_bytes=0,
+                         generation=[current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns])
+            return receipt
+        # 原函数在索引锁内核 inode、保留扫描窗口之后追加的完整尾部。
+        class SourceIdentity:
+            st_dev, st_ino, st_size, st_mtime_ns = original
+        def operation():
+            return _append_tail_and_replace(
+                target, output, original[2], SourceIdentity(),
+                validate_sources=lambda: target.stat().st_size - original[2] <= remaining,
+            )
+        value, reason = commit_transition(operation) if commit_transition else operation()
+        if value is None:
+            receipt['errors'] = [{'code': 'INDEX_COMPACTION_' + reason.upper()}]
+            return receipt
+        _discard(staging)
+        return dict(cursor={}, complete=True, items=0, bytes=max(0, value - int(state.get('output_bytes', 0))))
+    return receipt
