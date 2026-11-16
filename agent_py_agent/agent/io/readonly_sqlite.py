@@ -154,8 +154,11 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
     except (OSError, ValueError, sqlite3.Error) as exc:
         if caller_error:
             raise
+        reason = str(getattr(exc, 'strerror', None) or exc)
+        reason = reason.replace(str(path), '<database>').replace(str(path.parent), '<directory>')
+        reason = ' '.join(reason.split())[:160]
         raise ProjectionReadUnavailableError(
-            f"PROJECTION_READ_UNAVAILABLE: {type(exc).__name__}; effect_outcome=not_started; "
+            f"PROJECTION_READ_UNAVAILABLE: {type(exc).__name__}: {reason}; effect_outcome=not_started; "
             "next_action=retain unknown and retry existing projection later") from exc
 
 

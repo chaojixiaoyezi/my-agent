@@ -105,3 +105,24 @@ def test_unsettled_error_never_has_blank_identity():
         'request_id': '<cursor_commit>', 'error_type': 'PermissionError', 'category': 'io',
         'context': 'gateway.input.reconcile.cursor', 'stage': 'cursor_commit'}})
     assert 'last=<cursor_commit>:PermissionError' in str(error)
+
+
+@pytest.mark.parametrize('stage', ['receipt', 'cursor_commit'])
+def test_counted_ordinary_failure_has_typed_bounded_stage(tmp_path, monkeypatch, stage):
+    from agent_py_agent.tests.test_steer_delivery_recovery import _background_input
+    agent, paths, request_id = _background_input(tmp_path, 'original-target')
+    def fail(*_args, **_kwargs):
+        raise PermissionError('secret message must not appear in summary')
+    if stage == 'receipt':
+        monkeypatch.setattr(inputs, '_reconcile_receipt_path', fail)
+    else:
+        monkeypatch.setattr(inputs, '_commit_reconcile_cursor', fail)
+    summary = inputs.reconcile_gateway_input_receipts(paths, agent)
+    assert summary['errors'] > 0
+    assert summary['last_error']['stage'] == stage
+    assert summary['last_error']['error_type'] == 'PermissionError'
+    assert summary['last_error']['request_id'] == (request_id if stage == 'receipt' else '<cursor_commit>')
+    assert 'secret' not in str(summary)
+    with pytest.raises(inputs.GatewayInputReconcileUnsettledError) as error:
+        inputs.raise_if_input_reconcile_unsettled(summary)
+    assert 'last=:' not in str(error.value)
