@@ -1092,6 +1092,8 @@ def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, mon
     # 会话账本 lane 继续把同一绝对期限交给底层 GC，测试时钟必须一致。
     from agent_py_agent.agent.conversation import ledger_gc
     monkeypatch.setattr(ledger_gc, "time", clock)
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+    monkeypatch.setattr(retention_scan_budget, "time", clock)
     home, store = _r3_owner_store(tmp_path, layout)
     options = {"include_global_indexes": False}
     if transition:
@@ -1104,12 +1106,18 @@ def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, mon
     effect = marker.get("local_store_events_maintenance", {})
     assert effect.get("executed") is True and effect["deleted_db"] == 5000 and effect["deleted_jsonl"] == 0
     assert len(store.events_path.read_bytes().splitlines()) == 25005
-    # W6的dirty周期还需一次清洁观察，才能证明无积压并恢复日常节流。
+    # 日周期中的各领域保留原预算逐拍续扫，清洁观察完成后才恢复日常节流。
     assert marker["maintenance_partial"] is True
-    assert run_owner_retention_if_due(home, now=200_001, **options).ran
-    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
-    assert marker["maintenance_partial"] is False
-    assert run_owner_retention_if_due(home, now=200_002, **options).status == "not_due"
+    for step in range(1, 129):
+        assert run_owner_retention_if_due(home, now=200_000 + step, **options).ran
+        marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+        with sqlite3.connect(store.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == STEADY_STATE_EVENTS_KEEP_LAST
+        if not marker["maintenance_partial"]:
+            break
+    else:
+        pytest.fail("真实owner后台维护未在128个预算切片内收敛")
+    assert run_owner_retention_if_due(home, now=200_001 + step, **options).status == "not_due"
     with sqlite3.connect(store.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == STEADY_STATE_EVENTS_KEEP_LAST
 

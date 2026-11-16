@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -1059,6 +1060,36 @@ def _reference_case(tmp_path, *, count=1, extra_refs=()):
         state=home.owner_tasks_dir / '2026-11-07/active-task/work/state.json')
 
 
+@pytest.fixture
+def reference_scan_clock(monkeypatch):
+    """本组按默认条目/字节预算验证续扫，所有共享绝对期限使用同一确定时钟。"""
+    from agent_py_agent.agent.conversation import ledger_gc, session_pair_rate
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+    from agent_py_agent.agent.user_space import owner_maintenance, owner_quota, storage_lanes
+
+    clock = SimpleNamespace(monotonic=lambda: 0.0, time=time.time, sleep=time.sleep)
+    for module in (retention_scan_budget, owner_maintenance, owner_quota, storage_lanes,
+                   ledger_gc, session_pair_rate):
+        monkeypatch.setattr(module, 'time', clock)
+
+
+def _complete_reference_projection(case):
+    """故障注入前通过原只读入口建完真实投影，不把首次 partial 误当成来源读取失败。"""
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.memory_store.retention_scan import current_retention_pins
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+
+    for _ in range(32):
+        errors = []
+        _pins, complete = current_retention_pins(case.home, (), errors,
+            now=datetime.fromtimestamp(NOW, timezone.utc), scan_budget=RetentionScanBudget.default())
+        assert not errors
+        if complete:
+            return
+    pytest.fail('四个真实任务状态的引用投影未在32个默认预算切片内完成')
+
+
 def _source_failure(monkeypatch, case, timing, error=None):
     from agent_py_agent.agent.local_storage import records
     from agent_py_agent.agent.memory_store import retention_scan
@@ -1089,19 +1120,41 @@ def _source_failure(monkeypatch, case, timing, error=None):
     return calls
 
 
-def _maintain_reference_case(case, transition, *, now=NOW, config=None):
+def _maintain_reference_case(case, transition, *, now=NOW, config=None, settle=True, until=None):
     from agent_py_agent.agent.settings.config import AgentConfig
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
 
-    # 显式给足单拍留存扫描时间预算，避免高负载 CI 调度抖动触发默认 25ms 分片暂停。
-    effective_config = AgentConfig(retention_scan_slice_ms=30_000) if config is None else config
+    effective_config = AgentConfig() if config is None else config
     options = {'commit_transition': lambda operation: operation()} if transition else {}
-    return run_owner_retention_if_due(case.home, now=now, include_global_indexes=False,
-        quota_max_ms=5000, config=effective_config, **options)
+    for _ in range(32 if settle else 1):
+        result = run_owner_retention_if_due(case.home, now=now, include_global_indexes=False,
+            quota_max_ms=5000, config=effective_config, **options)
+        assert result.ran
+        _assert_reference_records(case)
+        marker = _reference_marker(case)
+        pending = any(error['error_code'] == 'MEMORY_RETENTION_PIN_SCAN_PENDING'
+                      for error in marker.get('load_errors') or ())
+        # 轻量续扫只更新原marker，retention=None不等于原保留证明丢失。
+        if not settle or (until(marker) if until is not None else not (
+                marker.get('retention_scan_partial') or pending)):
+            return result
+        assert marker['maintenance_partial'] is True
+    pytest.fail('真实owner引用维护未在32个默认预算切片内完成')
 
 
 def _reference_marker(case):
     return json.loads((case.home.owner_data_dir / 'maintenance.json').read_text(encoding='utf-8'))
+
+
+def _assert_reference_failure(marker, cursor):
+    result = marker['derived_records_pruned']
+    assert {key: value for key, value in result.items()
+            if key not in ('cursor', 'error_message', 'next_action')} == {
+        'executed': False, 'reason': 'error', 'error_type': 'OSError', 'partial': True}
+    assert result['cursor'] == cursor
+    assert 'MEMORY_RETENTION_PIN_SOURCE_UNREADABLE' in result['error_message']
+    assert isinstance(result['next_action'], str) and result['next_action']
+    assert marker['maintenance_partial'] is True
 
 
 def _assert_reference_records(case):
@@ -1122,7 +1175,7 @@ def _assert_reference_records(case):
 @pytest.mark.parametrize('transition', [False, True])
 @pytest.mark.parametrize('timing', ['healthy', 'report', 'later', 'supplementary'])
 def test_gptpro_r1_real_maintenance_keeps_referenced_results(
-    tmp_path, monkeypatch, reference_fd_guard, transition, timing
+    tmp_path, monkeypatch, reference_fd_guard, reference_scan_clock, transition, timing
 ):
     case = _reference_case(tmp_path)
     calls = _source_failure(monkeypatch, case, timing) if timing != 'healthy' else []
@@ -1146,18 +1199,17 @@ def test_gptpro_r1_real_maintenance_keeps_referenced_results(
             assert marker['derived_records_pruned'] == {'executed': False, 'reason': 'retention_not_safe'}
         else:
             assert not result.retention.load_errors
-            assert marker['derived_records_pruned'] == {
-                'executed': False, 'reason': 'error', 'error_type': 'OSError', 'partial': True}
-            assert marker['maintenance_partial'] is True
+            _assert_reference_failure(marker, {})
 
 
 @pytest.mark.parametrize('transition', [False, True])
 @pytest.mark.parametrize('timing', ['later', 'supplementary'])
 def test_gptpro_r1_real_nine_store_continuation_rechecks_sources(
-    tmp_path, monkeypatch, reference_fd_guard, transition, timing
+    tmp_path, monkeypatch, reference_fd_guard, reference_scan_clock, transition, timing
 ):
     case = _reference_case(tmp_path, count=9)
-    assert _maintain_reference_case(case, transition).ran
+    assert _maintain_reference_case(case, transition,
+        until=lambda marker: 'stores' in marker['derived_records_pruned']).ran
     initial = _reference_marker(case)
     assert not initial['load_errors'] and initial['apply_outcome'] == 'applied'
     assert initial['derived_records_pruned']['partial'] is True
@@ -1167,21 +1219,17 @@ def test_gptpro_r1_real_nine_store_continuation_rechecks_sources(
 
     with monkeypatch.context() as patch:
         calls = _source_failure(patch, case, timing)
-        assert _maintain_reference_case(case, transition, now=NOW + 1).ran
+        assert _maintain_reference_case(case, transition, now=NOW + 1,
+            until=lambda _marker: bool(calls)).ran
         assert calls
     assert [ids(row[0]) for row in case.entries] == before
     _assert_reference_records(case)
     failed = _reference_marker(case)
-    assert failed['derived_records_pruned'] == {
-        'executed': False, 'reason': 'error', 'error_type': 'OSError', 'partial': True}
-    assert failed['maintenance_partial'] is True
+    _assert_reference_failure(failed, initial['derived_records_pruned']['cursor'])
 
-    for step in range(3):
-        assert _maintain_reference_case(case, transition, now=NOW + 2 + step).ran
-        if not _reference_marker(case)['derived_records_pruned'].get('partial'):
-            break
-    else:
-        pytest.fail('真实引用源恢复后，九库派生清理未完成续扫')
+    assert _maintain_reference_case(case, transition, now=NOW + 2,
+        until=lambda marker: not marker['derived_records_pruned'].get('partial')).ran
+    assert not _reference_marker(case)['derived_records_pruned'].get('partial')
     _assert_reference_records(case)
     assert all(row[0].get_record(row[3].id) is None for row in case.entries)
 
@@ -1189,9 +1237,10 @@ def test_gptpro_r1_real_nine_store_continuation_rechecks_sources(
 @pytest.mark.parametrize('error_type', [PermissionError, FileNotFoundError, NotADirectoryError,
     ValueError, TypeError, KeyError, IndexError])
 def test_gptpro_r1_known_task_read_error_preserves_cause_and_content(
-    tmp_path, monkeypatch, reference_fd_guard, error_type
+    tmp_path, monkeypatch, reference_fd_guard, reference_scan_clock, error_type
 ):
     case = _reference_case(tmp_path)
+    _complete_reference_projection(case)
     error = error_type('known task source unreadable')
     calls = _source_failure(monkeypatch, case, 'supplementary', error)
     store = case.entries[0][0]
@@ -1205,11 +1254,12 @@ def test_gptpro_r1_known_task_read_error_preserves_cause_and_content(
 
 @pytest.mark.parametrize('existing_file', [False, True])
 def test_gptpro_r1_expected_missing_non_task_state_allows_cleanup(
-    tmp_path, reference_fd_guard, existing_file
+    tmp_path, reference_fd_guard, reference_scan_clock, existing_file
 ):
     case = _reference_case(tmp_path, extra_refs=['data/non-task.json'])
     if existing_file:
         (case.home.owner_data_dir / 'non-task.json').write_text('{}', encoding='utf-8')
+    _complete_reference_projection(case)
     store, _explicit, _inferred, expired = case.entries[0]
     assert prune(store, now=NOW)['deleted_ids'] == [expired.id]
     _assert_reference_records(case)
@@ -1218,11 +1268,13 @@ def test_gptpro_r1_expected_missing_non_task_state_allows_cleanup(
 @pytest.mark.parametrize('via_maintenance', [False, True])
 @pytest.mark.parametrize('kind', ['runtime', 'request', 'context', 'write', 'bounded'])
 def test_gptpro_r1_execution_uncertainty_propagates_exact_original(
-    tmp_path, monkeypatch, reference_fd_guard, via_maintenance, kind
+    tmp_path, monkeypatch, reference_fd_guard, reference_scan_clock, via_maintenance, kind
 ):
     from agent_py_agent.agent.user_space import owner_maintenance as maintenance
 
     case = _reference_case(tmp_path)
+    if not via_maintenance:
+        _complete_reference_projection(case)
     error = {
         'runtime': RuntimeError('original uncertainty'),
         'request': maintenance.RequestExecutionOutcomeUncertainError(
@@ -1247,7 +1299,7 @@ def test_gptpro_r1_execution_uncertainty_propagates_exact_original(
 
 @pytest.mark.parametrize('transition', [False, True])
 def test_paused_retention_slice_still_preserves_expired_and_resumes_pin_error_report(
-    tmp_path, monkeypatch, reference_fd_guard, transition
+    tmp_path, monkeypatch, reference_fd_guard, reference_scan_clock, transition
 ):
     from agent_py_agent.agent.settings.config import AgentConfig
 
@@ -1257,14 +1309,15 @@ def test_paused_retention_slice_still_preserves_expired_and_resumes_pin_error_re
 
     paused = _maintain_reference_case(
         case, transition, now=NOW,
-        config=AgentConfig(retention_scan_slice_entries=1, retention_scan_slice_ms=30_000),
+        config=AgentConfig(retention_scan_slice_entries=1), settle=False,
     )
     assert paused.ran and paused.retention.scan_partial
-    assert calls and store.get_record(expired.id) is not None
+    assert store.get_record(expired.id) is not None
     assert _reference_marker(case)['maintenance_partial'] is True
 
     settled = _maintain_reference_case(case, transition, now=NOW + 1)
     assert settled.ran and not settled.retention.scan_partial
+    assert calls
     assert store.get_record(expired.id) is not None
     assert any(error['error_code'] == 'MEMORY_RETENTION_PIN_SOURCE_UNREADABLE'
                and error['path'] == str(case.state) for error in settled.retention.load_errors)
