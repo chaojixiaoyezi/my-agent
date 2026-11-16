@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import cache_freshness
+from . import cache_freshness, text_file_window
 from .cache_freshness import cache_stat_signature
 from .nofollow_fs import (
     ensure_private_dir,
@@ -869,12 +869,18 @@ _TEXT_LINES_CACHE_MAX_COUNT = 64
 
 
 # LLM: 只在文件代次指纹未变时命中；近期写入（窗口内）读到的行不入缓存，下一次调用必然重读。
+#   单文件超过 text_file_window._CHUNK_BYTES（64 KiB）时直接走磁盘读取并清除旧缓存项，把缓存文本总量封顶在 64×64 KiB=4 MiB。
 #   读取失败与 read_text 同语义上抛，不吞异常、不改返回类型；改动须同步 test_common_safe_id_and_paths。
-# 函数用途: 读一个 JSONL 文件的记录列表，文件没换代时走进程内缓存；文件刚写过时不缓存本次结果。
+# 函数用途: 读一个 JSONL 文件的记录列表，小文件未换代时走进程内缓存；刚写过或超 64 KiB 时不缓存本次结果。
 def read_text_lines_cached(path: Path) -> tuple[str, ...]:
     stat = path.stat()
-    signature = cache_stat_signature(stat)
     key = str(path)
+    if stat.st_size > text_file_window._CHUNK_BYTES:
+        # 原先缓存过的小文件一旦长超 64 KiB，顺手摘除旧条目，避免死条目占用名额。
+        with _TEXT_LINES_CACHE_GUARD:
+            _TEXT_LINES_CACHE.pop(key, None)
+        return read_jsonl_text_lines(path)
+    signature = cache_stat_signature(stat)
     with _TEXT_LINES_CACHE_GUARD:
         hit = _TEXT_LINES_CACHE.get(key)
         if hit is not None and hit[0] == signature:
