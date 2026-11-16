@@ -14,11 +14,13 @@ from ..common.json_io import check_io_deadline
 
 # LLM: 投影数据库必须在私有、无链接目录内；连接前后核同一普通文件，侧车不能沿链接产生副作用。
 # 函数用途: 拒绝链接、硬链接和特殊文件，取得已存在文件身份。
-def _regular_identity(path: Path) -> tuple[int, int] | None:
+def _regular_identity(path: Path, *, require_owner=False) -> tuple[int, int] | None:
     try:
         info = path.lstat()
     except FileNotFoundError:
         return None
+    if require_owner and info.st_uid != os.geteuid():
+        raise PermissionError("readonly SQLite file must belong to current identity")
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ValueError(f"projection requires a single-link regular file: {path}")
     return info.st_dev, info.st_ino
@@ -115,20 +117,20 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
         with _projection_directory(path, read_only=True, require_private_directory=require_private_directory) as (parent_fd, verify):
             descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
             try:
-                identity = _regular_identity(path)
+                identity = _regular_identity(path, require_owner=True)
                 opened = os.fstat(descriptor)
                 if identity != (opened.st_dev, opened.st_ino):
                     raise ValueError("projection identity changed before read")
-                sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix))
+                sidefiles = {suffix: _regular_identity(path.with_name(path.name + suffix), require_owner=True)
                              for suffix in ("-journal", "-wal", "-shm")}
                 timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else 5.0
                 db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
                                      timeout=timeout if blocking else 0.0)
                 verify()
-                if _regular_identity(path) != identity:
+                if _regular_identity(path, require_owner=True) != identity:
                     raise ValueError("projection identity changed during read")
                 for suffix, before in sidefiles.items():
-                    observed = _regular_identity(path.with_name(path.name + suffix))
+                    observed = _regular_identity(path.with_name(path.name + suffix), require_owner=True)
                     if before is not None and observed != before:
                         raise ValueError("projection sidefile identity changed during read")
                 # Schema is domain-specific; readers validate their own version and tables.
@@ -139,10 +141,10 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
                     raise
                 check_io_deadline(deadline)
                 verify()
-                if _regular_identity(path) != identity:
+                if _regular_identity(path, require_owner=True) != identity:
                     raise ValueError("projection identity changed after read")
                 for suffix, before in sidefiles.items():
-                    observed = _regular_identity(path.with_name(path.name + suffix))
+                    observed = _regular_identity(path.with_name(path.name + suffix), require_owner=True)
                     if before is not None and observed != before:
                         raise ValueError("projection sidefile identity changed after read")
             finally:
