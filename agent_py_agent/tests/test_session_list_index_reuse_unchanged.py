@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -228,7 +231,7 @@ def test_non_refresh_callers_still_reread_and_artifact_errors_survive_unchanged_
     assert set(reads) >= {"t0.json", "t_bad.json"}
     assert art_page["coverage"] == "partial"
 
-    # 4. 添加新文件触发重建：未变化的文件（含坏文件 t_bad.json）不重读，但 artifact_errors 与 artifact_refs 必须完整保留。
+    # 4. 添加新文件触发重建：未变化的健康文件（t0.json）不重读，位于 artifact_errors 的记录（t_bad.json）每轮重建重读一次并在仍不可解析时保留其错误行。
     (root / "t1.json").write_text(
         json.dumps(_make_task_payload("t1", 2.0, artifact_id="art-1")),
         encoding="utf-8",
@@ -253,7 +256,7 @@ def test_non_refresh_callers_still_reread_and_artifact_errors_survive_unchanged_
     index._refresh = tracked_refresh  # type: ignore[method-assign]
     index.reader = spy_reader
     assert index.page(limit=10)["coverage"] == "complete"
-    assert refresh_reads == ["t1.json"]
+    assert sorted(refresh_reads) == ["t1.json", "t_bad.json"]
     assert index.artifact_tasks("art-0")["coverage"] == "partial"
     assert index.artifact_tasks("art-1")["items"][0]["task_id"] == "t1"
     with index._connection() as conn:
@@ -383,3 +386,203 @@ def test_refresh_entry_skips_unchanged_while_non_refresh_callers_reread_and_subc
         refs = {row[0]: row[1] for row in conn.execute("SELECT path, generation FROM task_references")}
         gen = int(pending._meta(conn, "generation", "0"))
     assert refs == {"pt0.json": gen, "pt1.json": gen}
+
+
+def test_single_transient_read_error_on_final_publish_heals_on_next_rebuild(tmp_path: Path) -> None:
+    root = tmp_path / "tasks"
+    root.mkdir()
+    payload = _make_task_payload("t0", 1.0, artifact_id="art-0")
+    (root / "t0.json").write_text(json.dumps(payload), encoding="utf-8")
+    (root / "t1.json").write_text(json.dumps(_make_task_payload("t1", 2.0, artifact_id="art-1")), encoding="utf-8")
+    fail_once: set[str] = set()
+    reads: list[str] = []
+
+    def reader(path: Path):
+        reads.append(path.name)
+        if path.name in fail_once:
+            fail_once.discard(path.name)  # one simulated I/O error; the file is readable afterwards
+            return {}, {"code": "SESSION_TASK_READ_FAILED", "path": str(path)}
+        return json.loads(path.read_text(encoding="utf-8")), None
+
+    index = SessionListIndex(root, kind="session_task", reader=reader)
+    assert index.artifact_tasks("art-0")["coverage"] == "complete"
+
+    # Final canonical write (atomic replace, as SessionTaskStore does); its list-index publish hits one read error.
+    staged = root / "t0.json.tmp"
+    staged.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(staged, root / "t0.json")
+    fail_once.add("t0.json")
+    index.publish(root / "t0.json")
+    with index._connection() as conn:
+        assert [row[0] for row in conn.execute("SELECT task_path FROM artifact_errors")] == ["t0.json"]
+    info = root.stat()  # deterministic rebuild trigger on coarse-timestamp filesystems
+    os.utime(root, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+
+    reads.clear()
+    healed = index.artifact_tasks("art-0")
+    assert healed["coverage"] == "complete"
+    assert [item["task_id"] for item in healed["items"]] == ["t0"]
+    assert "t1.json" not in reads  # the healthy unchanged row is still not re-read
+    assert index.artifact_tasks("art-1")["coverage"] == "complete"
+    with index._connection() as conn:
+        assert conn.execute("SELECT 1 FROM artifact_errors LIMIT 1").fetchone() is None
+
+
+def test_canonical_reply_linkage_single_read_error_converges_via_directory_refresh(tmp_path: Path) -> None:
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+    from agent_py_agent.agent.common.json_io import write_json_file_atomic
+    from agent_py_agent.agent.conversation import ConversationStore, session_tasks
+    from agent_py_agent.agent.conversation.business_access import BusinessActor
+    from agent_py_agent.agent.conversation.business_observability import ObservationSourceError
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft, SessionTaskUpdate
+    from agent_py_agent.agent.conversation.task_artifact_observation import task_artifact
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_quota import owner_quota_enforcer_from_policy
+
+    home = ensure_my_agent_home(tmp_path / "app")
+    owner = home.owner_home_dir
+    owner_id = owner.relative_to(home.owners_dir).as_posix()
+    policy = json.loads(home.owner_quota_json.read_text(encoding="utf-8"))
+    policy["max_disk_mb"] = 1024
+    write_json_file_atomic(home.owner_quota_json, policy)
+    assert owner_quota_enforcer_from_policy(owner).max_bytes == 1024 * 1024 * 1024
+
+    store = ConversationStore(owner / "conversations")
+    service = SimpleNamespace(owner_id=owner_id)
+    authority = (service, BusinessActor(owner_id, "audit-observer", service, lambda *_: True), "artifacts.get")
+    thread = store.threads.create(owner_id=owner_id)
+
+    task = store.session_tasks.create(SessionTaskDraft(thread.thread_id, thread.thread_id, "produce artifact"))
+    store.session_tasks.advance(task.task_id, SessionTaskUpdate(status="accepted"))
+    assert store.session_tasks._list_index().artifact_tasks("absent")["coverage"] == "complete"
+
+    task_root = owner / "tasks" / task.task_id
+    artifact_path = task_root / "output.txt"
+    task_root.mkdir(parents=True)
+    artifact_path.write_text("verified output\n", encoding="utf-8")
+    artifact = register_artifact(
+        ArtifactRegistration(
+            task_root,
+            artifact_path,
+            artifact_id="artifact-under-review",
+            task_id=task.task_id,
+            mime_type="text/plain",
+            source="write_file",
+            status="ready",
+        )
+    )
+    store.tasks.bind(
+        {"thread_id": thread.thread_id, "task_id": task.task_id, "goal": task.goal, "task_path": str(task_root)}
+    )
+    completed = store.session_tasks.advance(
+        task.task_id,
+        SessionTaskUpdate(
+            status="done",
+            result_refs=(str(artifact_path),),
+            result_artifacts=(
+                {
+                    "path": str(artifact_path),
+                    "artifact_id": artifact.artifact_id,
+                    "sha256": artifact.sha256,
+                    "size_bytes": artifact.size_bytes,
+                },
+            ),
+        ),
+    )
+
+    healthy = store.session_tasks.create(SessionTaskDraft(thread.thread_id, thread.thread_id, "independent artifact"))
+    store.session_tasks.advance(healthy.task_id, SessionTaskUpdate(status="accepted"))
+    healthy_root = owner / "tasks" / healthy.task_id
+    healthy_root.mkdir(parents=True)
+    healthy_path = healthy_root / "output.txt"
+    healthy_path.write_text("independent verified output\n", encoding="utf-8")
+    healthy_artifact = register_artifact(
+        ArtifactRegistration(
+            healthy_root,
+            healthy_path,
+            artifact_id="healthy-artifact",
+            task_id=healthy.task_id,
+            mime_type="text/plain",
+            source="write_file",
+            status="ready",
+        )
+    )
+    store.tasks.bind(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": healthy.task_id,
+            "goal": healthy.goal,
+            "task_path": str(healthy_root),
+        }
+    )
+    store.session_tasks.advance(
+        healthy.task_id,
+        SessionTaskUpdate(
+            status="done",
+            result_refs=(str(healthy_path),),
+            result_artifacts=(
+                {
+                    "path": str(healthy_path),
+                    "artifact_id": healthy_artifact.artifact_id,
+                    "sha256": healthy_artifact.sha256,
+                    "size_bytes": healthy_artifact.size_bytes,
+                },
+            ),
+        ),
+    )
+
+    ready = task_artifact(store, owner, owner_id, artifact.artifact_id, authority=authority)
+    assert ready[0] and ready[1]["available"]
+    healthy_ready = task_artifact(store, owner, owner_id, healthy_artifact.artifact_id, authority=authority)
+    assert healthy_ready[0] and healthy_ready[1]["available"]
+
+    index = store.session_tasks._list_index()
+    with index._connection() as conn:
+        assert index._meta(conn, "artifact_backfill_complete") == "1"
+
+    original_read_bytes = session_tasks.read_bytes_beneath
+    error_count = 0
+    target = store.session_tasks._path(task.task_id)
+
+    def one_source_error(root_dir, parts, **kwargs):
+        nonlocal error_count
+        if Path(root_dir) / Path(*parts) == target and error_count == 0:
+            error_count += 1
+            raise OSError(5, "simulated I/O error")
+        return original_read_bytes(root_dir, parts, **kwargs)
+
+    with patch.object(session_tasks, "read_bytes_beneath", one_source_error):
+        settled = store.session_tasks.record_turn_reply_linkage(
+            task.task_id,
+            reply_message_id="delivered-reply",
+            result_report_receipt="settled-receipt",
+        )
+    assert error_count == 1
+    assert completed.status == "done" and settled is not None and settled.status == "done"
+    assert settled.metadata.get("reply_message_id") == "delivered-reply"
+    assert settled.metadata.get("result_report_receipt") == "settled-receipt"
+    canonical_bytes = target.read_bytes()
+
+    with index._connection() as conn:
+        assert [row[0] for row in conn.execute("SELECT task_path FROM artifact_errors")] == [target.name]
+
+    def observe(identifier: str) -> dict[str, object]:
+        try:
+            result = task_artifact(store, owner, owner_id, identifier, authority=authority)
+            return {"found": result[0], "available": result[1]["available"] if result[1] else None}
+        except ObservationSourceError as error:
+            return {"error": error.code, "reason": error.details.get("reason")}
+
+    for number in range(8):
+        store.session_tasks.create(SessionTaskDraft(thread.thread_id, thread.thread_id, f"independent {number}"))
+        page = store.session_tasks.list_page(limit=100)
+        assert page["coverage"] == "complete"
+        assert page["load_errors"] == []
+
+    assert error_count == 1
+    assert target.read_bytes() == canonical_bytes
+    assert observe(artifact.artifact_id) == {"found": True, "available": True}
+    assert observe(healthy_artifact.artifact_id) == {"found": True, "available": True}
+    with index._connection() as conn:
+        assert conn.execute("SELECT count(*) FROM artifact_errors").fetchone()[0] == 0
+        assert index._meta(conn, "artifact_backfill_complete") == "1"
