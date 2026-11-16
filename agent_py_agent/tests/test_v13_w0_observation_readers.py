@@ -145,9 +145,16 @@ def test_envelope_fields_closed(background_http):
     assert status == 200 and first['state'] == 'completed' and first['error'] is None, first
     assert set(first) == {'request_id', 'operation_id', 'state', 'data', 'error', 'allowed_actions', 'warnings', 'effect_outcome'}
     assert first['data']['next_cursor'] and first['data']['coverage'] == 'partial'
+    # 普通运行状态写与新增工具记录发生在页间；历史keyset页仍应稳定，且不混入新增行。
+    with runtime._runtime_connection() as connection:
+        connection.execute("UPDATE agent_runs SET updated_at=updated_at+1 WHERE agent_run_id=?", (run['agent_run_id'],))
+        connection.commit()
+    appended = runtime.create_tool_operation(agent_run_id=run['agent_run_id'],
+        attempt_id=run['attempt_id'], operation_type='read_file')
     status, second = background_call(background_http, 'tool_calls.list', {'limit': 1, 'cursor': first['data']['next_cursor']})
     assert status == 200 and second['data']['next_cursor'] is None, second
     assert first['data']['items'][0]['operation_id'] != second['data']['items'][0]['operation_id']
+    assert second['data']['items'][0]['operation_id'] != appended['operation_id']
     status, detail = background_call(background_http, 'tool_calls.get', {'operation_id': operations[0]})
     assert status == 200, detail
     assert 'synthetic-secret' not in json.dumps(detail)
@@ -166,6 +173,9 @@ def test_selected_runtime_tools_show_latest_page_and_exact_attempt(background_ht
     status, second = background_call(background_http, 'tool_calls.list', {**params, 'cursor': first['data']['next_cursor']})
     assert status == 200 and [r['operation_id'] for r in second['data']['items']] == [operations[0]], second
     assert not second['data']['next_cursor']
+    status, changed = background_call(background_http, 'tool_calls.list', {
+        'filter': {'run_id': run_id}, 'limit': 1, 'cursor': first['data']['next_cursor']})
+    assert status == 410 and changed['error']['code'] == 'CURSOR_EXPIRED'
     status, wrong = background_call(background_http, 'tool_calls.list', {
         'filter': {'run_id': 'foreign-run', 'attempt_id': run['attempt_id']}, 'limit': 1})
     assert status == 200 and wrong['data']['items'] == [] and not wrong['data']['next_cursor']

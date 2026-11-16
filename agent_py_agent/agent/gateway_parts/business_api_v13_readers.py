@@ -714,23 +714,50 @@ class _OwnerReaders:
                 'WHERE ' + condition + ' ORDER BY x.rowid' + (' LIMIT ?' if bound is not None else ''),
                 [*values, bound] if bound is not None else values).fetchall()
 
+    def _tool_call_window(self, position=None):
+        """固定规范行ID上界与末行锚点；无关WAL写和后续追加不使历史页失效。"""
+        try:
+            info = self.repo.db_path.stat()
+        except FileNotFoundError:
+            raise BusinessError('CURSOR_EXPIRED', details={'reason': 'TOOL_CURSOR_SOURCE_MISSING'}) from None
+        revision = _digest(['tool_operations.keyset.v1', info.st_dev, info.st_ino])
+        if position is None:
+            with self.repo._runtime_connection() as conn:
+                tail = conn.execute('SELECT rowid,operation_id FROM tool_operations ORDER BY rowid DESC LIMIT 1').fetchone()
+            return dict(revision=revision, through=tail[0] if tail else 0,
+                        tail_ref=tail[1] if tail else '', source_size=info.st_size)
+        if (type(position) is not dict or position.get('revision') != revision
+                or type(position.get('through')) is not int or not 0 <= position['through'] < (1 << 63)
+                or type(position.get('tail_ref')) is not str
+                or type(position.get('source_size')) is not int or not 0 <= position['source_size'] <= info.st_size):
+            raise BusinessError('CURSOR_EXPIRED', details={'reason': 'TOOL_CURSOR_SOURCE_OR_WINDOW_CHANGED'})
+        if position['through']:
+            with self.repo._runtime_connection() as conn:
+                tail = conn.execute('SELECT operation_id FROM tool_operations WHERE rowid=?', (position['through'],)).fetchone()
+            if tail is None or tail[0] != position['tail_ref']:
+                raise BusinessError('CURSOR_EXPIRED', details={'reason': 'TOOL_CURSOR_BOUNDARY_RETIRED'})
+        elif position['tail_ref']:
+            raise BusinessError('CURSOR_EXPIRED', details={'reason': 'TOOL_CURSOR_WINDOW_INVALID'})
+        return {key: position[key] for key in ('revision', 'through', 'tail_ref', 'source_size')}
+
     # LLM: handler开始与嵌套outcome为执行事实；点详情限制源SQL，成功状态不等于副作用已提交。
     # 函数用途: 将runtime工具账投影为工具调用视图，保留既有结算协议。
     @bounded_observation_reader
     def tool_calls(self, params, *, source_page=None):
         records = []
         request = source_page or ObservationSourcePage(limit=100)
-        revision = runtime_source_revision(self.repo.db_path)
         filters = params.get('filter') or {}
         scoped_recent = bool(filters.get('run_id') or filters.get('attempt_id'))
-        if scoped_recent and request.position is not None:
+        boundary = self._tool_call_window(request.position)
+        revision, through = boundary['revision'], boundary['through']
+        key = 'before' if scoped_recent else 'after'
+        after = 0
+        if request.position is not None:
             position = request.position
-            if (type(position) is not dict or set(position) != {'revision', 'before'}
-                    or position['revision'] != revision or type(position['before']) is not int or position['before'] < 1):
+            if (set(position) != {*boundary, key} or type(position[key]) is not int
+                    or not (1 if scoped_recent else 0) <= position[key] <= through):
                 raise BusinessError('CURSOR_EXPIRED')
-            after = position['before']
-        else:
-            after = source_after(request, revision)
+            after = position[key]
         next_position = None
         if 'operation_id' in params:
             selected = self.joined('tool_operations', operation_id=params['operation_id'])
@@ -752,12 +779,13 @@ class _OwnerReaders:
                 if scope:
                     # 选中执行时从这个run或attempt最新工具向前翻页，旧ASC游标到升级后显式过期。
                     positions = conn.execute('SELECT rowid FROM tool_operations WHERE ' + scope +
-                        'rowid<? ORDER BY rowid DESC LIMIT ?', (*values, after or (1 << 63) - 1, limit + 1)).fetchall()
+                        'rowid<=?' + (' AND rowid<?' if after else '') + ' ORDER BY rowid DESC LIMIT ?',
+                        (*values, through, *([after] if after else []), limit + 1)).fetchall()
                 else:
-                    positions = conn.execute('SELECT rowid FROM tool_operations WHERE rowid>? ORDER BY rowid LIMIT ?',
-                                             (after, limit + 1)).fetchall()
+                    positions = conn.execute('SELECT rowid FROM tool_operations WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?',
+                                             (after, through, limit + 1)).fetchall()
             if len(positions) > limit:
-                next_position = {'revision': revision, 'before' if scope else 'after': positions[limit - 1][0]}
+                next_position = {**boundary, 'before' if scope else 'after': positions[limit - 1][0]}
             selected = self.joined('tool_operations', rowids=[row[0] for row in positions[:limit]])
             if scope:
                 selected.reverse()
@@ -817,8 +845,7 @@ class _OwnerReaders:
             record = self.record(value, row)
             value['task_id'] = record.task_id
             records.append(record)
-        if runtime_source_revision(self.repo.db_path) != revision:
-            raise BusinessError('CURSOR_EXPIRED')
+        self._tool_call_window(boundary)
         return ObservationPage(tuple(records), 'partial' if next_position is not None else 'complete',
                                revision, True, next_position)
 

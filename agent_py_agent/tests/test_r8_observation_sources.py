@@ -361,7 +361,7 @@ def test_tool_deep_page_vm_steps_are_bounded(tmp_path, monkeypatch, record_prope
     source = case.service.readers['tool_calls'].__self__
     params = {'limit': 10}
     scope = case.service.scope_digest('tool_calls.list', params, case.actor)
-    cursor = case.service.cursor(scope, {'revision': runtime_source_revision(case.runtime.db_path), 'after': last - 3})
+    cursor = case.service.cursor(scope, {**source._tool_call_window(), 'after': last - 3})
     with _sql_work(source.repo, monkeypatch) as work:
         result = case.service.query('tool_calls.list', dict(params, cursor=cursor), actor=case.actor)
     assert len(result['items']) == 3 and result['next_cursor'] is None
@@ -499,3 +499,32 @@ def test_usage_rebuild_proof_retains_cold_manifest_when_active_leaf_is_deleted(t
     (archive / 'manifest.json').write_text('{}')
     proof = index._projection_rebuild_proof()
     assert proof['active'] is None and proof['archive'][1] is not None
+
+
+@pytest.mark.parametrize('mutation', ['replace', 'truncate'])
+def test_tool_page_rejects_actual_source_replacement_or_truncation(tmp_path, mutation):
+    import os
+    import sqlite3
+
+    from agent_py_agent.agent.gateway_parts.business_api_v13_readers import (
+        default_observation_readers,
+    )
+
+    case = observation_case(tmp_path)
+    for _ in range(3):
+        case.runtime.create_tool_operation(agent_run_id=case.root['agent_run_id'],
+            attempt_id=case.root['attempt_id'], operation_type='read_file')
+    case.service.readers = default_observation_readers(tmp_path, case.owner, case.store, case.runtime)
+    first = case.service.query('tool_calls.list', {'limit': 1}, actor=case.actor)
+    assert first['next_cursor']
+    path = case.runtime.db_path
+    if mutation == 'replace':
+        replacement = tmp_path / 'replacement.db'
+        with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as source, sqlite3.connect(replacement) as target:
+            source.backup(target)
+        os.replace(replacement, path)
+    else:
+        with path.open('r+b') as file:
+            file.truncate(0)
+    with pytest.raises(BusinessError, match='CURSOR_EXPIRED'):
+        case.service.query('tool_calls.list', {'limit': 1, 'cursor': first['next_cursor']}, actor=case.actor)
