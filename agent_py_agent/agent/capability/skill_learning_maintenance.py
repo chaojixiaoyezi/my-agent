@@ -1331,6 +1331,23 @@ def maintain_learning(
             store.save_registry(registry)
 
             # Cap enforcement after idle lifecycle pass
+            cap_names = {
+                cname for cname, rec in registry.skills.items()
+                if not owner_layout_exempt(rec)
+                and rec.maintenance.get("state") != "archived"
+                and rec.maintenance.get("ownership") not in {"owner_layout", "user_modified"}
+            }
+            if (max_skills > 0 and not (protection_complete and usage_sufficient)
+                    and registry.live_count(managed_names=cap_names) > max_skills):
+                # 超额但本片保护或使用证据不完整：停在容量阶段等下一片重试，不清游标重跑整轮，也不放宽保护。
+                next_cur = _checkpoint_cursor(
+                    store,
+                    registry,
+                    phase="lifecycle",
+                    after_name=after_name,
+                    started_at=started_at,
+                )
+                return _result(backlog=True, next_cursor=next_cur)
             if max_skills > 0 and protection_complete and usage_sufficient:
                 partial_managed: dict[str, LearnedSkill] = {}
                 for cname, rec in sorted(registry.skills.items()):
@@ -1341,14 +1358,7 @@ def maintain_learning(
                     if rec.maintenance.get("ever_used") is None:
                         continue
                     partial_managed[cname] = rec
-                live_count = registry.live_count(
-                    managed_names={
-                        cname for cname, rec in registry.skills.items()
-                        if not owner_layout_exempt(rec)
-                        and rec.maintenance.get("state") != "archived"
-                        and rec.maintenance.get("ownership") not in {"owner_layout", "user_modified"}
-                    }
-                )
+                live_count = registry.live_count(managed_names=cap_names)
                 while live_count > max_skills:
                     if _hit_budget(did_any_work):
                         next_cur = _checkpoint_cursor(
