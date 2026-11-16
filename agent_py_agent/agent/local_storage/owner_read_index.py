@@ -15,6 +15,7 @@ import stat
 import struct
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from concurrent.futures import CancelledError
 from contextlib import contextmanager
@@ -64,8 +65,21 @@ _APPEND_WITNESS_WINDOW_BYTES = 8 * 1024
 _APPEND_WITNESS_FULL_PREFIX_BYTES = 256 * _APPEND_WITNESS_WINDOW_BYTES
 _PROCESS_MEMOS = OrderedDict()
 _PROCESS_MEMO_LOCK = threading.RLock()
-_PROCESS_ADVANCE_LOCK = threading.RLock()
+# 按 owner home 弱引用分片的可重入推进锁，避免跨用户队头阻塞并在无持有/等待者时由 GC 自动回收。
+_PROCESS_ADVANCE_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
+_PROCESS_ADVANCE_LOCKS_GUARD = threading.Lock()
 _PROCESS_APPENDS = OrderedDict()
+
+
+# 函数用途: 获取或创建指定 owner home 的可重入推进锁；调用方必须在临界区持有返回的强引用。
+def _home_advance_lock(home: object) -> threading.RLock:
+    key = str(home)
+    with _PROCESS_ADVANCE_LOCKS_GUARD:
+        lock = _PROCESS_ADVANCE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PROCESS_ADVANCE_LOCKS[key] = lock
+        return lock
 
 
 # writer持领域锁提供稳定历史窗口；任何无效见证均撤销旧链，未知前缀仍走预算内完整复核。
@@ -1546,7 +1560,8 @@ class OwnerReadIndex:
             raise ValueError("unsupported domain")
         parts = _parts(relative_parts)
         sid = self._source_id(domain, parts)
-        with _PROCESS_ADVANCE_LOCK:
+        lock = _home_advance_lock(self._home)
+        with lock:
             try:
                 with self._database(write=True, deadline=_Budget().deadline) as connection:
                     connection.execute("BEGIN IMMEDIATE")
@@ -1580,11 +1595,12 @@ class OwnerReadIndex:
         self, domain, relative_parts, *, validator=None,
         max_rows=25000, max_bytes=33554432, max_ms=1500,
     ):
-        with _PROCESS_ADVANCE_LOCK:
+        lock = _home_advance_lock(self._home)
+        with lock:
             return self._advance(domain, relative_parts, validator=validator,
                                  max_rows=max_rows, max_bytes=max_bytes, max_ms=max_ms)
 
-    # LLM: 进程内写推进由可重入锁串行；进程间仍以SQLite事务和revision比较发布。
+    # LLM: 进程内写推进由同 owner home 的可重入锁串行；进程间仍以SQLite事务和revision比较发布。
     # 函数用途: 执行锁内一次真实来源解析及检查点发布。
     def _advance(
         self, domain, relative_parts, *, validator=None,
