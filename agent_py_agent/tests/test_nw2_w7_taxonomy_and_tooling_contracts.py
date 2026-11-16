@@ -80,12 +80,14 @@ def test_runtime_db_recovery_required_exception_and_taxonomy_contract(tmp_path: 
     assert contract.retryable is False
     assert contract.recommended_action == RecoveryAction.MANUAL_REVIEW.value
     assert "scripts/runtime_db_salvage.py" in contract.recovery_hint
-    assert "备份" in contract.recovery_hint
+    assert "已保留原始库与恢复回执" in contract.recovery_hint
+    assert "--source" in contract.recovery_hint and "--target 全新目标路径" in contract.recovery_hint
     assert "<" not in contract.recovery_hint and ">" not in contract.recovery_hint
 
     client_msg = gateway_client_error_message("RUNTIME_DB_RECOVERY_REQUIRED")
     assert "scripts/runtime_db_salvage.py" in client_msg
-    assert "备份" in client_msg
+    assert "已保留原始库与备份文件" in client_msg
+    assert "--source" in client_msg and "--target 全新路径" in client_msg
     assert "稍后重试" not in client_msg
 
 

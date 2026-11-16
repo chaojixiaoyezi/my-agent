@@ -156,10 +156,11 @@ def test_lane_hook_observes_once_and_preserves_original_model_and_request(tmp_pa
     events = []
     original_repair = request_context.request_history.repair_gateway_conversation_messages
 
-    def repair(*args):
-        assert len(backend.calls) == 1
+    def repair(*args, **kwargs):
+        # 历史准备完成后才允许决策调用，未就绪历史不得消耗决策预算。
+        assert not backend.calls
         events.append("repair")
-        return original_repair(*args)
+        return original_repair(*args, **kwargs)
 
     monkeypatch.setattr(request_context.request_history, "repair_gateway_conversation_messages", repair)
     assert request_execution._run_gateway_ask(fixture.context) == "original-main"
@@ -302,10 +303,11 @@ def test_preparation_failure_settles_original_decision_usage(tmp_path, monkeypat
     fixture = prepared(tmp_path)
     backend = install_backend(monkeypatch, fixture)
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise OSError("history unavailable")
 
-    monkeypatch.setattr(request_context.request_history, "repair_gateway_conversation_messages", fail)
+    # 故障点放在决策之后的索引准备，继续验证已发生决策的原用量结算。
+    monkeypatch.setattr(request_context.request_history, "ensure_gateway_conversation_index", fail)
     with pytest.raises(OSError, match="history unavailable"):
         request_execution._run_gateway_ask(fixture.context)
     events, errors = fixture.agent.conversation_store.model_usage.events_report(fixture.thread_id)
@@ -551,3 +553,19 @@ def test_selection_input_drops_landmarks_bounds_text_and_states_candidate_facts_
                                         "tool_support": "unknown_until_original_probe"}
     assert "capacity_status" not in json.dumps(body["questions"], ensure_ascii=False)
     assert completeness["full_history"] == "unknown"
+
+
+def test_history_repair_failure_never_starts_decision_or_main(tmp_path, monkeypatch):
+    fixture = prepared(tmp_path)
+    backend = install_backend(monkeypatch, fixture)
+    main = capture_main(monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise OSError("history unavailable")
+
+    monkeypatch.setattr(request_context.request_history, "repair_gateway_conversation_messages", fail)
+    with pytest.raises(OSError, match="history unavailable"):
+        request_execution._run_gateway_ask(fixture.context)
+    assert not backend.calls and not main
+    events, errors = fixture.agent.conversation_store.model_usage.events_report(fixture.thread_id)
+    assert not errors and not events

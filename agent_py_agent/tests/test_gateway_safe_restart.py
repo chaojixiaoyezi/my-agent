@@ -664,7 +664,7 @@ def test_incident_background_slice_finishes_log_before_tool_drain(tmp_path, monk
     from agent_py_agent.agent.conversation.background_shutdown import BackgroundShutdown
     from agent_py_agent.agent.tooling.gateway_restart_tool import RestartGatewayTool
 
-    agent = _agent(tmp_path, gateway_restart_turn_wait_seconds=2, gateway_restart_drain_timeout_seconds=1)
+    agent = _agent(tmp_path, gateway_restart_mode="graceful", gateway_restart_turn_wait_seconds=2, gateway_restart_drain_timeout_seconds=1)
     paths, shutdown = gateway_paths(agent), BackgroundShutdown()
     context = SimpleNamespace(paths=paths, agent=agent, process_started_at=1, background_shutdown=shutdown)
     ready, turn_wait, logged = threading.Event(), threading.Event(), threading.Event()

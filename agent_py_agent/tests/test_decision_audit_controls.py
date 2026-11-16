@@ -85,7 +85,7 @@ def _request_record(root, request_id, thread_id, age_hours=0.0):
     path = root / "requests" / "done" / f"{request_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
-        "id": request_id, "kind": "ask", "goal": "SECRET-PROMPT-TEXT",
+        "ended_at": time.time() - age_hours * 3600, "id": request_id, "kind": "ask", "goal": "SECRET-PROMPT-TEXT",
         "conversation_claim": {"schema_version": "gateway_conversation_claim.v1", "request_id": request_id,
                                "thread_id": thread_id, "task_id": f"gateway:{request_id}"},
         "model_selection_observation": {"schema": "gateway_model_selection_observation.v1", "thread_id": thread_id,
@@ -104,6 +104,12 @@ def _request_record(root, request_id, thread_id, age_hours=0.0):
 # LLM: 写入器只借请求路径推出队列根目录；其余字段与真实 Gateway 一致，不执行任何回合。
 # 函数用途: 让 Agent 处在一个 Gateway 回合里，审计工具可以经宿主写入器读取请求记录。
 def _in_gateway_turn(agent, root, thread_id):
+    from agent_py_agent.agent.gateway_parts.gateway_history_index import GatewayHistoryIndex
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    index = GatewayHistoryIndex(gateway_paths_from_root(root))
+    for path in sorted((root / "requests" / "done").glob("*.json")):
+        index.append(json.loads(path.read_text(encoding="utf-8")))
     writer = GatewayTaskBindingWriter(request_path=root / "requests" / "processing" / "current.json", request_id="current")
     agent._current_run_params = SimpleNamespace(conversation_task_binding_callback=writer,
                                                 task_attributes={"conversation_thread_id": thread_id})

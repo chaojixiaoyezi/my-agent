@@ -19,6 +19,7 @@ test_r103_run_reuse_no_split 的成熟替身模式）；执行错误走真实
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -36,7 +37,7 @@ def repo(tmp_path):
 
 def _agent(repo):
     """Gateway 回合最小 agent 替身：权威运行库 + 已终态会话任务关联（task_run 可关）。"""
-    store = SimpleNamespace(tasks=SimpleNamespace(load=lambda task_id: SimpleNamespace(
+    store = SimpleNamespace(tasks=SimpleNamespace(transition_guard=lambda _task_id: nullcontext(), load=lambda task_id: SimpleNamespace(
         task_id=task_id, status="completed",
     )))
     return SimpleNamespace(

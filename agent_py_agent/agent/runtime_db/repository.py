@@ -162,10 +162,17 @@ _QUIESCENT_ATTEMPT_STATUSES = _ATTEMPT_TERMINAL_STATUSES - {ATTEMPT_STATUS_UNKNO
 #   改判据要同步 test_task_run_settle_quiescent_children。
 # 函数用途: 判断一棵代理树是否都已结束或静止，并列出靠“attempt 已结算且无锁”判定的子 run。
 def _task_tree_has_unsettled_effects(conn, task_run_id):
-    """历史未知副作用仍属原树；终态标签不能覆盖未核实外部效果。"""
+    """历史未知效果须保留；只认可准确恢复事件覆盖之前的操作，晚到更新仍保护。"""
     return conn.execute(
         "SELECT 1 FROM agent_runs ar JOIN tool_operations op ON op.agent_run_id=ar.agent_run_id "
-        "WHERE ar.task_run_id=? AND (op.status IN (?,?) OR (op.status=? AND op.handler_started_at>0)) LIMIT 1",
+        "WHERE ar.task_run_id=? AND (op.status IN (?,?) OR (op.status=? AND op.handler_started_at>0)) "
+        "AND NOT EXISTS (SELECT 1 FROM agent_attempts aa JOIN runtime_events e "
+        "ON e.attempt_id=aa.attempt_id AND e.agent_run_id=aa.agent_run_id "
+        "WHERE aa.attempt_id=op.attempt_id AND aa.agent_run_id=op.agent_run_id AND aa.status='recovered' "
+        "AND e.event_type='attempt_recovered' AND json_extract(e.payload_json,'$.status')='recovered' "
+        "AND json_extract(e.payload_json,'$.operator') != '' "
+        "AND json_extract(e.payload_json,'$.effect_disposition') IN ('confirmed_noop','recorded','abandoned') "
+        "AND e.created_at >= max(op.created_at,op.updated_at,op.handler_started_at)) LIMIT 1",
         (task_run_id, OP_EXECUTING, OP_UNKNOWN, OP_CLAIMED)).fetchone() is not None
 
 

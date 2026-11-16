@@ -11278,3 +11278,283 @@ ERROR_CONTRACTS.update({
         recovery_hint='根任务或直属父级终态尚未通过权威状态源证实，能力请求保持 OPEN 未提前结算；请先核实或等待父级终态确认。',
     ),
 })
+
+
+# 有界维护与恢复保留精确原因；分类不授予清理、重放或跨 owner 权限。
+ERROR_CONTRACTS.update({
+    "ATTEMPT_UNKNOWN": ErrorContract(
+        code="ATTEMPT_UNKNOWN", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="父级执行轮为 unknown，未结算能力请求；先核对原 attempt 的副作用，再沿原恢复入口明确处置，勿自动重放。",
+    ),
+    "ATTEMPT_UNKNOWN_OR_ACTIVE": ErrorContract(
+        code="ATTEMPT_UNKNOWN_OR_ACTIVE", category="state", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="准确执行轮尚未终结或结果未知，未取消该运行；先查询原 attempt 状态，活动轮等待，未知轮沿原恢复入口核对。",
+    ),
+    "AUDIT_SOURCE_READ_UNAVAILABLE": ErrorContract(
+        code="AUDIT_SOURCE_READ_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="本页审计来源读取失败，未修改原记录；检查回执 cause 与来源可用性，保持未读范围为 unknown，勿把空页当作无事件。",
+    ),
+    "AUTHORITY_MISSING": ErrorContract(
+        code="AUTHORITY_MISSING", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="缺少该请求的规范父级执行身份，未结算；核对原 request/run/task/attempt 绑定，不能用正文或最新记录补造身份。",
+    ),
+    "CANONICAL_INDEX_SOURCE_UNAVAILABLE": ErrorContract(
+        code="CANONICAL_INDEX_SOURCE_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="规范索引来源无法打开，未据此删除投影；核对原来源路径与权限后续扫，不能把读取失败当成来源消失。",
+    ),
+    "CANONICAL_OWNER_SCOPE_REQUIRED": ErrorContract(
+        code="CANONICAL_OWNER_SCOPE_REQUIRED", category="authorization", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="维护入口未取得与 owner_id 对应的规范 owner 根，未获准执行领域维护；修正 HomePaths 的 owner_id/root/owner_home_dir 一致性，勿扩大范围。",
+    ),
+    "CANONICAL_STATE_EXCEEDS_BUDGET": ErrorContract(
+        code="CANONICAL_STATE_EXCEEDS_BUDGET", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="规范状态超过本页读取预算，未判定为可清理；沿原有界分页或提高显式单页预算重新核验，保留当前记录。",
+    ),
+    "CAPABILITY_CANONICAL_STATE_UNAVAILABLE": ErrorContract(
+        code="CAPABILITY_CANONICAL_STATE_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="能力请求的规范状态不可读取，未结算；核对该请求原文件与精确执行绑定，不以索引状态代替规范记录。",
+    ),
+    "CAPABILITY_INDEX_UNAVAILABLE": ErrorContract(
+        code="CAPABILITY_INDEX_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="能力请求索引当前不可用，本页未取得完整覆盖；检查 errors 中异常类型，沿原索引恢复流程处理后续页，不直接遍历全部历史。",
+    ),
+    "CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED": ErrorContract(
+        code="CAPABILITY_PAGE_BYTE_BUDGET_EXHAUSTED", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="能力请求页达到字节或时限预算，尚未遍历的记录未裁决；使用回执游标继续，缩小准确编号集合，勿重复整页或跳过未知记录。",
+    ),
+    "CAPABILITY_RECORD_INVALID": ErrorContract(
+        code="CAPABILITY_RECORD_INVALID", category="validation", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="能力请求规范行格式无效，未结算该条；检查该请求的 schema/字段与持久化回执，修复来源后从原游标继续，勿伪造终态。",
+    ),
+    "CAPABILITY_RUN_ID_INVALID": ErrorContract(
+        code="CAPABILITY_RUN_ID_INVALID", category="validation", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="能力请求中的 run_id 不是合法单段编号，未读取目标执行；核对原请求绑定并修正编号，禁止路径跳转或猜测其它执行。",
+    ),
+    "CREDENTIAL_SNAPSHOT_UNAVAILABLE": ErrorContract(
+        code="CREDENTIAL_SNAPSHOT_UNAVAILABLE", category="credential", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主凭据快照读取失败，脱敏覆盖不可确认；核对宿主显式凭据来源及配置回执，勿打印密钥或从任务正文补凭据。",
+    ),
+    "CURRENT_ATTEMPT_ACTIVE": ErrorContract(
+        code="CURRENT_ATTEMPT_ACTIVE", category="state", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="当前执行轮仍活动，能力请求未提前结算；等待同一 attempt 终态后再核验，不因年龄或旧执行状态取消。",
+    ),
+    "DURABLE_TASK_ACTIVE": ErrorContract(
+        code="DURABLE_TASK_ACTIVE", category="state", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="规范 TaskLink 仍活动，本次未关闭执行账；先读取原任务及关联运行状态，等待明确终态，勿用模型完成文字代替。",
+    ),
+    "GATEWAY_HISTORY_ROOT_MISSING": ErrorContract(
+        code="GATEWAY_HISTORY_ROOT_MISSING", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPAIR.value,
+        recovery_hint="会话存储缺少规范 storage.root，历史修复未开始；修正宿主 ConversationStore 装配后重新加载原线程，勿新建旁路历史。",
+    ),
+    "GATEWAY_REPAIR_QUARANTINE_FAILED": ErrorContract(
+        code="GATEWAY_REPAIR_QUARANTINE_FAILED", category="storage", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="坏历史修复包的隔离失败，原包仍须保留且不能当作已消费；核对修复目录权限和错误回执，先完成隔离再继续该包。",
+    ),
+    "GATEWAY_RESTART_POLICY_INVALID": ErrorContract(
+        code="GATEWAY_RESTART_POLICY_INVALID", category="validation", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="重启排空策略无效，未开始交接；设置 gateway_restart_mode 为 fast 或 graceful，fast_timeout_seconds 为正有限数后重新请求。",
+    ),
+    "GATEWAY_RESTART_WRITES_UNSETTLED": ErrorContract(
+        code="GATEWAY_RESTART_WRITES_UNSETTLED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="重启等待结束时工具写入仍未退，已撤销本次交接并复位准入；核对原未结操作与进程身份，禁止把超时当作零副作用或盲目再重启。",
+    ),
+    "INDEX_COMPACTION_GENERATION_CHANGED": ErrorContract(
+        code="INDEX_COMPACTION_GENERATION_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="索引压缩期间来源代次变化，候选未获准替换规范索引；保留原库，清空旧压缩游标后按新来源重新预览。",
+    ),
+    "INDEX_COMPACTION_UNSAFE_STAGING_PATH": ErrorContract(
+        code="INDEX_COMPACTION_UNSAFE_STAGING_PATH", category="path", retryable=False,
+        recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
+        recovery_hint="索引压缩暂存路径未通过安全核验，未获准替换；检查规范 owner 目录及链接形状，使用原安全暂存地址重开压缩，不绕过 no-follow 门。",
+    ),
+    "INDEX_COMPACT_ROW_EXCEEDS_SLICE_OR_INCOMPLETE": ErrorContract(
+        code="INDEX_COMPACT_ROW_EXCEEDS_SLICE_OR_INCOMPLETE", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="单条索引数据超过压缩片预算或来源未完整，候选未发布；检查准确行和来源覆盖，使用显式预算或恢复来源后重新预览。",
+    ),
+    "INDEX_ROW_EXCEEDS_SLICE_OR_INCOMPLETE": ErrorContract(
+        code="INDEX_ROW_EXCEEDS_SLICE_OR_INCOMPLETE", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="索引来源行超过本页预算或未完整读取，尚未认定该页完成；保留原游标和未读范围，核对该行大小与来源覆盖后有界续扫。",
+    ),
+    "INDEX_SOURCE_CHANGED": ErrorContract(
+        code="INDEX_SOURCE_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="索引重建来源身份已变化，旧游标未应用到新来源；重新读取规范来源后从空游标预览，勿把旧覆盖结论带入新代。",
+    ),
+    "INDEX_SOURCE_MISSING": ErrorContract(
+        code="INDEX_SOURCE_MISSING", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPAIR.value,
+        recovery_hint="规范索引来源确实缺失，本页未据此证明历史可删除；核对原目录是否被手动删除，并沿原索引重建入口恢复。",
+    ),
+    "INDEX_SOURCE_UNREADABLE": ErrorContract(
+        code="INDEX_SOURCE_UNREADABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="规范索引来源存在但无法读取，未当作空；检查错误类型及权限，修复来源可读性后沿原入口重建。",
+    ),
+    "INVALID_COMPACT_CURSOR": ErrorContract(
+        code="INVALID_COMPACT_CURSOR", category="validation", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="索引压缩游标格式或范围不匹配，未执行该游标；清空 cursor 重新预览，随后原样运输同 owner 的返回游标。",
+    ),
+    "INVALID_COMPACT_FILE_CURSOR": ErrorContract(
+        code="INVALID_COMPACT_FILE_CURSOR", category="validation", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="文件压缩游标无效，未按该位置推进；清空 cursor 从规范 owner 文件源重新预览，不修改游标内字段。",
+    ),
+    "INVALID_INDEX_CURSOR": ErrorContract(
+        code="INVALID_INDEX_CURSOR", category="validation", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="索引维护游标无效或不属当前来源，未应用该页；从空 cursor 重新预览，同一来源后续页原样使用返回值。",
+    ),
+    "INVALID_OWNER_ID": ErrorContract(
+        code="INVALID_OWNER_ID", category="authorization", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="owner_id 不是合法规范身份，未跨 owner 维护；使用当前已认证 HomePaths.owner_id，勿使用任意路径或显示名。",
+    ),
+    "LOG_CURSOR_INVALID": ErrorContract(
+        code="LOG_CURSOR_INVALID", category="validation", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="日志窗口游标无效，未按该偏移读取；清空 cursor 重新选择有界窗口，后续原样使用返回游标。",
+    ),
+    "LOG_SOURCE_CHANGED": ErrorContract(
+        code="LOG_SOURCE_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="日志来源代次已变化，旧偏移未应用到新卷；清空 cursor 重新选择窗口，不合并不同日志代次的覆盖事实。",
+    ),
+    "OLDER_THAN_FILTER": ErrorContract(
+        code="OLDER_THAN_FILTER", category="state", retryable=False,
+        recommended_action=RecoveryAction.NONE.value,
+        recovery_hint="该能力请求未达到本次年龄过滤条件，未结算且不代表任务失败；保留原请求，需要核验时调整显式过滤条件，年龄仍不构成终态证明。",
+    ),
+    "PARENT_MISMATCH": ErrorContract(
+        code="PARENT_MISMATCH", category="authorization", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="能力请求的父级身份与规范执行链不符，未结算；核对准确 parent_run_id/root_task_id 与原请求绑定，不猜其它父级。",
+    ),
+    "PARENT_TERMINAL_PROVEN": ErrorContract(
+        code="PARENT_TERMINAL_PROVEN", category="state", retryable=False,
+        recommended_action=RecoveryAction.NONE.value,
+        recovery_hint="原规范父级终态已通过结构化来源核实；这只是核验结果，是否已结算仍读取 applied/effect_outcome，不重放原业务。",
+    ),
+    "PROJECTION_INSPECTION_BUDGET_EXHAUSTED": ErrorContract(
+        code="PROJECTION_INSPECTION_BUDGET_EXHAUSTED", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="投影检查达到本页字节或时限预算，未取得完整清理证明；缩小精确 run_ids 或沿返回游标继续，保留未核投影。",
+    ),
+    "PROOF_INCOMPLETE": ErrorContract(
+        code="PROOF_INCOMPLETE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="父级终态或执行身份的证明不完整，未结算请求；核对回执缺失字段与原权威来源，unknown 保持保护，不用正文补证。",
+    ),
+    "QUEUE_PAGE_CURSOR_INVALID": ErrorContract(
+        code="QUEUE_PAGE_CURSOR_INVALID", category="validation", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="队列页游标格式或作用域无效，未按该位置读取；清空 cursor 重新读取当前队列页，原样传回同过滤条件的后续游标。",
+    ),
+    "QUEUE_PAGE_UNAVAILABLE": ErrorContract(
+        code="QUEUE_PAGE_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="队列页读取失败，未取得该范围完整状态；检查结构化 cause 和原队列可用性，勿将返回空 entries 当作队列已清空。",
+    ),
+    "RECONCILIATION_SOURCE_UNAVAILABLE": ErrorContract(
+        code="RECONCILIATION_SOURCE_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="运行对账页的原来源不可读取，本页未完成核验；按 errors 的异常类型修复来源后使用原游标续作，禁止自动关闭未知记录。",
+    ),
+    "ROOT_ACTIVE": ErrorContract(
+        code="ROOT_ACTIVE", category="state", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="根执行仍活动，子级能力请求未提前结算；等待根执行明确终态，不能只因子级结束或超龄而取消。",
+    ),
+    "RUN_GENERATION_CHANGED": ErrorContract(
+        code="RUN_GENERATION_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="规范运行代次已变化，旧投影未获清理；重新读取同 run_id 的准确代次并预览，勿将旧证明用于新 attempt。",
+    ),
+    "SCHEDULER_LEASE_ACTIVE": ErrorContract(
+        code="SCHEDULER_LEASE_ACTIVE", category="state", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="原定时运行租约仍有效，未结算其能力请求；等待准确 lease 终结并复读持久执行事实，不能按时间猜测僵尸。",
+    ),
+    "SESSION_TASK_LEARNING_METADATA_INVALID": ErrorContract(
+        code="SESSION_TASK_LEARNING_METADATA_INVALID", category="validation", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="会话任务的学习元数据格式无效，本条来源未获学习或清理许可；核对该 TaskLink 的结构化字段与错误回执，勿把坏数据当作无候选。",
+    ),
+    "SKILL_CONTROL_READ_FAILED": ErrorContract(
+        code="SKILL_CONTROL_READ_FAILED", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="Skill 控制读取失败，当前状态未确认；核对原操作和脱敏异常回执，保持 unknown，勿根据空结果重复安装或删除。",
+    ),
+    "SKILL_CONTROL_WRITE_UNCONFIRMED": ErrorContract(
+        code="SKILL_CONTROL_WRITE_UNCONFIRMED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="Skill 控制写入是否生效未确认，可能已有副作用；先读取原 Skill 登记和操作回执核实，禁止原样重复写入。",
+    ),
+    "SOURCE_CHANGED": ErrorContract(
+        code="SOURCE_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="本次操作的冻结来源与当前来源不一致，未获准沿旧快照提交；重新读取原来源代次后规划，不按异常文字猜可重试。",
+    ),
+    "TASK_IDENTITY_MISMATCH": ErrorContract(
+        code="TASK_IDENTITY_MISMATCH", category="authorization", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="规范状态的 task_id/归属与待核投影不符，未清理目标；核对准确任务和运行绑定，勿借路径名称补身份。",
+    ),
+    "THREAD_INDEX_CONFIG_SCOPE_MISMATCH": ErrorContract(
+        code="THREAD_INDEX_CONFIG_SCOPE_MISMATCH", category="authorization", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="线程索引配置的 owner 范围与维护请求不符，未维护该索引；使用同 owner 的正式配置与 HomePaths，不复用其它 owner 配置。",
+    ),
+    "THREAD_INDEX_MAINTENANCE_DEFERRED": ErrorContract(
+        code="THREAD_INDEX_MAINTENANCE_DEFERRED", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="线程索引本拍维护延期，未声明索引完整；核对回执 error_type，按原游标与预算后续维护，不把延期当作无会话。",
+    ),
+    "THREAD_INDEX_PARTIAL": ErrorContract(
+        code="THREAD_INDEX_PARTIAL", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CONTINUE.value,
+        recovery_hint="线程列表只覆盖当前有限页，未读线程仍未知；按 next_cursor 继续读取并合并结构化覆盖，勿提前报告完整列表。",
+    ),
+    "THREAD_INDEX_RECORD_TOO_LARGE": ErrorContract(
+        code="THREAD_INDEX_RECORD_TOO_LARGE", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该线程规范元数据超过索引单条读取预算，未将它当作不存在；核对准确 thread_id 的记录大小，修复来源或显式预算后重建。",
+    ),
+    "UNSAFE_CANONICAL_WORKSPACE_PATH": ErrorContract(
+        code="UNSAFE_CANONICAL_WORKSPACE_PATH", category="path", retryable=False,
+        recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
+        recovery_hint="规范工作区路径未通过安全边界核验，未读取或删除目标；检查原 owner 工作区的链接与父链，修复规范路径后重新预览。",
+    ),
+    "WAKE_PAGE_UNAVAILABLE": ErrorContract(
+        code="WAKE_PAGE_UNAVAILABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="唤醒页读取失败，本页未取得完整唤醒状态；核对 cause 及原唤醒目录，沿正式恢复流程处理，不补发或删除未知信号。",
+    ),
+    "WAKE_RECORD_UNREADABLE": ErrorContract(
+        code="WAKE_RECORD_UNREADABLE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="准确唤醒记录无法读取，未认定其已消费；核对 wake_signal_id 对应原记录与 cause，保留信号并修复读取，勿重复发起业务。",
+    ),
+})

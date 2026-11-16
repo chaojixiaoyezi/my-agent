@@ -178,7 +178,8 @@ def rotate_log_volumes_once(log_path: Path, *, now: float, stop_event=None) -> d
             report['rotated'] = True
             active = None
         if active is None or not _stdio_matches(active):
-            report['reopened'] = _reopen_stdio(log_path, stop_event=stop_event)
+            # 已封卷必须补建活动卷；停止只能拒绝尚未开始的重开，不能留下半个rename事务。
+            report['reopened'] = _reopen_stdio(log_path, stop_event=None if report['rotated'] else stop_event)
         report['deleted'], report['freed_bytes'], report['total_bytes'] = _prune_sealed(log_path, now)
         return report
     finally:

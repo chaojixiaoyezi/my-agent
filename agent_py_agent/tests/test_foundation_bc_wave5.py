@@ -529,7 +529,8 @@ def test_c3_cli_settle_does_not_prompt(tmp_path, monkeypatch, capsys):
     from agent_py_agent.cli import home_runtime_commands as commands
 
     repo, run = _runtime_record(tmp_path, orphan=True)
-    agent = SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo))
+    agent = SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo),
+        home_paths=SimpleNamespace(owner_id="local/main", owner_home_dir=tmp_path))
     monkeypatch.setattr(commands, "make_agent", lambda args: agent)
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("unexpected interactive confirmation"))
     args = SimpleNamespace(settle=True, older_than_days=0, json=True)
@@ -640,7 +641,8 @@ def test_w3_cli_stale_hint_matches_cancelled_settlement(tmp_path, monkeypatch, c
         conn.execute("UPDATE agent_attempts SET metadata_json=? WHERE agent_run_id=?",
                      (json.dumps({"runner_pid": 123, "runner_start_time": "birth"}), run))
     monkeypatch.setattr(module, "holder_is_alive", lambda *_: True)
-    monkeypatch.setattr(commands, "make_agent", lambda _: SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)))
+    monkeypatch.setattr(commands, "make_agent", lambda _: SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo),
+        home_paths=SimpleNamespace(owner_id="local/main", owner_home_dir=tmp_path)))
     monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("unexpected confirmation"))
     assert commands.cmd_runtime_stale_attempts(SimpleNamespace(settle=True, older_than_days=0, json=False)) == 0
     text = capsys.readouterr().out

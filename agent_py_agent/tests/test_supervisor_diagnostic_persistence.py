@@ -58,6 +58,8 @@ from pathlib import Path
 from agent_py_agent.agent.observability import log_volume_rotation as r
 from agent_py_agent.agent.gateway_parts.supervisor import GatewaySupervisor
 path = Path(sys.argv[1])
+# 本场景只控制下方那一次显式轮转；自动线程的真实FD覆盖在W11单独验证。
+r.install_daemon_log_rotation = lambda _path: False
 with r.supervisor_log_sink(path):
     obj = object.__new__(GatewaySupervisor)
     obj.log_path = path
@@ -83,3 +85,31 @@ def test_sink_failure_reports_unpersisted_event_and_next_action(tmp_path, capsys
     error = capsys.readouterr().err
     assert 'SUPERVISOR_LOG_WRITE_FAILED' in error and 'IsADirectoryError' in error
     assert 'event_not_persisted' in error and '父目录权限' in error
+
+
+def test_rotation_completes_active_volume_if_stop_arrives_after_seal(tmp_path, monkeypatch):
+    """在 rename 的确定性交错点停止，已开始的封卷仍须补建活动卷。"""
+    import threading
+
+    from agent_py_agent.agent.observability import log_volume_rotation as rotation
+
+    log = tmp_path / "supervisor.log"
+    log.write_text("original-event\n")
+    if os.name == "nt":
+        result = rotation.rotate_log_volumes_once(log, now=0)
+        assert not result["rotated"] and not result["reopened"]
+        assert log.read_text() == "original-event\n"
+        return
+    stop = threading.Event()
+    original = rotation.os.rename
+
+    def seal_and_stop(source, target):
+        original(source, target)
+        stop.set()
+
+    monkeypatch.setattr(rotation.os, "rename", seal_and_stop)
+    monkeypatch.setattr(rotation, "DAEMON_LOG_VOLUME_MAX_BYTES", 1)
+    # 不替换测试进程真实 FD，只隔离最终重开副作用；仍执行真实stop条件与rename。
+    monkeypatch.setattr(rotation, "_replace_stdio", lambda path: path.touch())
+    result = rotation.rotate_log_volumes_once(log, now=0, stop_event=stop)
+    assert result["rotated"] and result["reopened"] and log.is_file()

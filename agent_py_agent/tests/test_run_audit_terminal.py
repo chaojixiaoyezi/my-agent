@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -251,7 +252,7 @@ def test_settle_event_falls_back_to_latest_attempt(repo):
 
 
 def _agent(repo, *, link_status: str = "active"):
-    store = SimpleNamespace(tasks=SimpleNamespace(load=lambda task_id: SimpleNamespace(
+    store = SimpleNamespace(tasks=SimpleNamespace(transition_guard=lambda _task_id: nullcontext(), load=lambda task_id: SimpleNamespace(
             task_id=task_id,
             status=link_status,
         )))
@@ -402,7 +403,8 @@ def test_task_run_closeout_preserves_unknown_tool_operation(repo):
         task_id=rec["task_id"],
     )
 
-    assert result["settled"] is True
+    assert result == {"settled": False, "reason": "execution_effect_unknown"}
+    assert _task_run_row(repo, rec["task_run_id"])["closed_at"] == 0
     operation = repo._runtime_connect().execute(
         "SELECT status FROM tool_operations WHERE operation_id = ?",
         (operation_id,),
@@ -1009,3 +1011,40 @@ def test_protocol_violation_no_repo_is_silent(repo):
         "SELECT * FROM runtime_events WHERE event_type = 'protocol_violation'"
     ).fetchall()
     assert len(rows) == 0
+
+
+@pytest.mark.parametrize("disposition", ["confirmed_noop", "recorded", "abandoned"])
+@pytest.mark.parametrize("proof_case", ["exact", "wrong_attempt", "stale_operation", "late_handler", "missing_operator"])
+def test_task_run_closeout_requires_exact_recovery_covering_operation(repo, disposition, proof_case):
+    """人工确认只覆盖原轮已有操作；历史 UNKNOWN 审计不改写，晚到效果继续保护。"""
+    rec = _record(repo)
+    operation_id = _insert_unknown_tool_operation(repo, rec)
+    with repo.transaction() as conn:
+        conn.execute("UPDATE agent_attempts SET status='unknown' WHERE attempt_id=?", (rec["attempt_id"],))
+        conn.execute("UPDATE agent_runs SET status='unknown' WHERE agent_run_id=?", (rec["agent_run_id"],))
+    recovered = repo.recover_attempt_unknown(rec["attempt_id"], operator="test-explicit-review",
+        effect_disposition=disposition, reason="已核对本轮外部效果")
+    assert recovered["recovered"]
+    repo.settle_agent_run(agent_run_id=rec["agent_run_id"], status="done", attempt_id=rec["attempt_id"])
+    with repo.transaction() as conn:
+        event = conn.execute("SELECT event_id,created_at,payload_json FROM runtime_events "
+            "WHERE attempt_id=? AND event_type='attempt_recovered'", (rec["attempt_id"],)).fetchone()
+        if proof_case == "wrong_attempt":
+            conn.execute("UPDATE runtime_events SET attempt_id='other-attempt' WHERE event_id=?", (event["event_id"],))
+        elif proof_case == "stale_operation":
+            conn.execute("UPDATE tool_operations SET updated_at=? WHERE operation_id=?", (event["created_at"] + 1, operation_id))
+        elif proof_case == "late_handler":
+            conn.execute("UPDATE tool_operations SET handler_started_at=? WHERE operation_id=?", (event["created_at"] + 1, operation_id))
+        elif proof_case == "missing_operator":
+            payload = json.loads(event["payload_json"])
+            payload["operator"] = ""
+            conn.execute("UPDATE runtime_events SET payload_json=? WHERE event_id=?", (json.dumps(payload), event["event_id"]))
+    eligible = proof_case == "exact"
+    assert repo.preview_task_run_agent_tree(task_run_id=rec["task_run_id"])["eligible"] is eligible
+    closed = repo.settle_task_run_if_agent_tree_terminal(task_run_id=rec["task_run_id"])
+    assert closed["settled"] is eligible
+    if not eligible:
+        assert closed["reason"] == "execution_effect_unknown"
+    with repo._runtime_connection() as conn:
+        operation = conn.execute("SELECT status FROM tool_operations WHERE operation_id=?", (operation_id,)).fetchone()
+    assert operation["status"] == "UNKNOWN"
