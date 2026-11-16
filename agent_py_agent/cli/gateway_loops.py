@@ -1335,15 +1335,45 @@ class _BackgroundOwnerPlannerMixin:
         wait = not reset and time.monotonic() < checks.get(key, 0.0)
         return wait, cap, signature, reset
 
-    # LLM: 可运行的来源不能被空闲退避盖住；已在普通失败冷却的线程不因同一份 pending 来源强制每秒重规划。
+    # LLM: 只有与就绪扫描同一套只读准入放行的待处理唤醒才取消空闲退避；被延后/退避/恢复阻断的唤醒保持指数降频。
     # 函数用途: 将指数退避限制在原有待办的最早可行动时间以内。
     def _owner_plan_idle_delay(
         self, scheduler: object, delay: float, planned_at: float, cooling: frozenset[str],
     ) -> float:
         store = getattr(scheduler, "store", None)
-        pending = getattr(getattr(store, "wakes", None), "pending", None)
-        if callable(pending) and any(getattr(signal, "thread_id", None) not in cooling for signal in pending(limit=1)):
-            return 0.0
+        wakes = getattr(store, "wakes", None)
+        pending = getattr(wakes, "pending", None)
+        if callable(pending):
+            from ..agent.conversation.runtime import _wake_waits_this_tick
+
+            backoff = getattr(scheduler, "_supply_backoff", None)
+            guard = getattr(scheduler, "_recovery_guard", None)
+            runtime = getattr(scheduler, "runtime", None)
+            can_defer_check = (
+                runtime is not None
+                and hasattr(runtime, "agent")
+                and hasattr(scheduler, "_wake_retry_after")
+                and getattr(wakes, "attempts", None) is not None
+            )
+            for signal in pending():
+                thread_id = str(getattr(signal, "thread_id", "") or "").strip()
+                if not thread_id or thread_id in cooling:
+                    continue
+                if (
+                    can_defer_check
+                    and all(
+                        hasattr(signal, attr)
+                        for attr in ("wake_signal_id", "reason", "root_task_id", "metadata", "created_at")
+                    )
+                    and _wake_waits_this_tick(scheduler, signal, planned_at)
+                ):
+                    continue
+                if backoff is not None and not backoff.should_attempt(thread_id, planned_at):
+                    continue
+                task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+                if guard is not None and guard.block_for_task(task_id) is not None:
+                    continue
+                return 0.0
         report = getattr(getattr(store, "progress", None), "list_report", None)
         if callable(report):
             policies, errors = report(enabled_only=True)
