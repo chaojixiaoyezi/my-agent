@@ -102,9 +102,20 @@ def freeze(value):
     return value
 
 
+_THAW_SCALAR_TYPES = frozenset({str, int, float, bool, type(None)})
+
+
 # LLM: 返回独立可序列化副本，不泄露可变DTO内部引用。
 # 函数用途: 把冻结结构投影为普通JSON类型。
 def thaw(value):
+    # 精确类型先走快路，避免 ABC isinstance 在自由线程下的缓存争用；其余类型仍走原判定，输出不变。
+    kind = type(value)
+    if kind is dict or kind is MappingProxyType:
+        return {key: thaw(item) for key, item in value.items()}
+    if kind is tuple or kind is list:
+        return [thaw(item) for item in value]
+    if kind in _THAW_SCALAR_TYPES:
+        return value
     if isinstance(value, Mapping):
         return {key: thaw(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):

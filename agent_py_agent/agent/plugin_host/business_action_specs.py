@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cache, lru_cache
 from types import MappingProxyType
 
 from .errors import HostAPIError
@@ -135,10 +135,28 @@ class BusinessActionSpec:
 
     def validate_result(self, value: object, *, accepted: bool = False) -> dict:
         """调用者按请求 action/实际阶段选择；202 不能冒充 completed DTO。"""
-        schema = self.accepted_result_schema if accepted else self.result_schema
+        schema = _validation_schema(self._record_json, accepted)
         if schema is None:
             raise HostAPIError("INVALID_SCHEMA")
         return validate_object(value, schema)
+
+
+# LLM: 冻结记录在进程内不变；只读校验复用同一 schema 闭包，公开属性仍返回独立解冻副本。
+#   键是冻结记录正文本身，测试或替身构造的记录各自独立；键空间受冻结动作目录约束。
+# 函数用途: 按冻结动作记录缓存结果或受理结果的独立校验 schema。
+@cache
+def _validation_schema(record_json: str, accepted: bool) -> dict | None:
+    record = json.loads(record_json)
+    schema = record.get("accepted_result_schema") if accepted else record["result_schema"]
+    return standalone_schema(schema) if schema is not None else None
+
+
+# LLM: 只供只读形状校验（如业务目录坏记录检查），调用方不得修改返回值；冻结目录不变，按动作/字段缓存。
+# 函数用途: 返回某动作结果中一个字段（或其数组元素）的独立 schema 闭包。
+@cache
+def business_result_field_schema(action: str, field_name: str, items: bool = False) -> dict:
+    shape = business_action_spec(action).result_schema["properties"][field_name]
+    return standalone_schema(shape["items"] if items else shape)
 
 
 @lru_cache(maxsize=1)

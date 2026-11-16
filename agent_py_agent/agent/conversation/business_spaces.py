@@ -20,7 +20,7 @@ from ..plugin_host.business_action_specs import (
     BUSINESS_LIST_DEFAULT_ROWS,
     BUSINESS_LIST_MAX_ROWS,
     business_action_spec,
-    standalone_schema,
+    business_result_field_schema,
 )
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.schemas import validate_object
@@ -132,8 +132,7 @@ class BusinessSpaceService:
             for collection, action, field_name, private in routes:
                 if not value[collection]:
                     continue
-                shape = business_action_spec(action).result_schema['properties'][field_name]
-                schema = standalone_schema(shape['items'] if field_name == 'items' else shape)
+                schema = business_result_field_schema(action, field_name, field_name == 'items')
                 for row in value[collection].values():
                     validate_object({k: v for k, v in row.items() if k not in private}, schema)
                     if collection == 'bindings':
@@ -143,8 +142,7 @@ class BusinessSpaceService:
                         if (row['state'] not in ('linked', 'unlinked') or row['space_id'] not in value['spaces']
                                 or type(row['versions']) is not list or not row['versions']):
                             raise ValueError('asset structure')
-                        version_shape = business_action_spec('assets.versions.list').result_schema['properties']['items']['items']
-                        version_schema = standalone_schema(version_shape)
+                        version_schema = business_result_field_schema('assets.versions.list', 'items', True)
                         for version in row['versions']:
                             validate_object(version, version_schema)
                             if version['artifact_ref']['version_ref'] != version['version_ref']:
