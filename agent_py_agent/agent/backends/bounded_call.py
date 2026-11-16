@@ -68,6 +68,7 @@ class BoundedCallBusyError(RuntimeError):
 class _Call:
     call_id: str
     interrupt: InterruptHandle
+    purpose: str = "unknown"
     wake: threading.Event = field(default_factory=threading.Event)
     starting: bool = True
     worker: threading.Thread | None = None
@@ -83,6 +84,8 @@ class _Call:
     # LLM: 原取消句柄、Context及自产错误都是一次绑定事实；普通字段赋值不能重签原物理身份或另一个错误，不增加登记表。
     # 函数用途: 保护原引用不被替换，可见 worker/observation 变化仍由统一身份门报告 unknown。
     def __setattr__(self, name, value):
+        if name == "purpose" and name in self.__dict__:
+            raise AttributeError("有界调用用途不能重新签发")
         if (name in ("interrupt_origin", "_worker_observation_origin", "_context_origin", "_exit_error_origin", "_exit_reason_origin")
                 and self.__dict__.get(name) is not None
                 and value is not self.__dict__[name]):
@@ -121,6 +124,7 @@ class _Call:
 
 
 # LLM: 稳定资源键/绝对期限/原ContextVar传播不变；同一次Context只保在原Call供错误出处核对，wait_for_exit在T外且不增加模型准入/重试。
+# purpose 由宿主调用点声明且出生后不可改；默认 unknown，不从函数名、请求正文或异常文字推断。
 # 函数用途: 默认有界消费且不 join；显式收尾只在原期限内等原 worker/清理，未确认抛独立错误并保留责任。
 def call_with_deadline(
     operation: Callable[[], _Result],
@@ -130,6 +134,7 @@ def call_with_deadline(
     interrupt_handle: InterruptHandle | None = None,
     optional: bool = False,
     wait_for_exit: bool = False,
+    purpose: str = "unknown",
 ) -> _Result:
     _validate_call(deadline, optional)
     if type(wait_for_exit) is not bool:
@@ -138,7 +143,7 @@ def call_with_deadline(
     _check_cancelled(handle)
     if deadline <= time.monotonic():
         raise BoundedCallTimeoutError("调用总期限已耗尽")
-    call = _claim_call(resource_key, handle, optional)
+    call = _claim_call(resource_key, handle, optional, purpose=purpose)
     try:
         context = contextvars.copy_context()
         call.bind_context(context)
@@ -238,7 +243,7 @@ def _validate_call(deadline: float, optional: bool) -> None:
 
 # LLM: 同资源、全进程上限及普通调用预留在同一锁内裁决；句柄只能认领一次，不创建第二池。
 # 函数用途: 无等待领取一次调用保留，拒绝尚未退出的旧请求与容量超限。
-def _claim_call(key: Hashable, handle: InterruptHandle, optional: bool) -> _Call:
+def _claim_call(key: Hashable, handle: InterruptHandle, optional: bool, *, purpose: str = "unknown") -> _Call:
     with _CALL_LOCK:
         _reap_calls_locked()
         if key in _CALLS:
@@ -246,7 +251,7 @@ def _claim_call(key: Hashable, handle: InterruptHandle, optional: bool) -> _Call
         if len(_CALLS) >= _MAX_RETAINED_CALL_COUNT - int(optional):
             raise BoundedCallBusyError("capacity_exhausted")
         handle.claim()
-        call = _Call(f"bounded-call:{uuid.uuid4().hex}", handle)
+        call = _Call(f"bounded-call:{uuid.uuid4().hex}", handle, purpose=purpose)
         _CALLS[key] = call
         return call
 

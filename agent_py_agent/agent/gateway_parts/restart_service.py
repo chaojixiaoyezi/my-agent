@@ -6,6 +6,7 @@
 # 模块用途: 让代理、/restart 和终端都能安全地安排 Gateway 重启：先排空再换进程，重启后由新进程续跑并通知发起方。
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -213,13 +214,21 @@ def run_restart_drain(
     turn_wait_seconds: float,
     drain_timeout_seconds: float,
     force_on_drain_timeout: bool = False,
+    mode: str = "graceful",
+    fast_timeout_seconds: float = 2.0,
     stop_requested: Callable[[], bool] = lambda: False,
     on_progress: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
     request_id = str(request.get("request_id") or "")
+    # fast 只适用于计划重启；旧 drain_timeout=0 仍然是不限等待。
+    fast = mode == "fast" and str(request.get("operation") or "restart") == "restart"
+    if mode not in {"fast", "graceful"} or (fast and (not math.isfinite(fast_timeout_seconds) or fast_timeout_seconds <= 0)):
+        return {"ok": False, "reason": "invalid_restart_policy", "request_id": request_id,
+                "error_code": "GATEWAY_RESTART_POLICY_INVALID", "side_effect_state": "not_started",
+                "next_step": "设置 gateway_restart_mode=fast|graceful，fast_timeout_seconds 必须为正有限秒数"}
     _set_phase("turn_wait", request_id)
     report = on_progress or (lambda _facts: None)
-    deadline = time.monotonic() + max(0.0, float(turn_wait_seconds or 0.0))
+    deadline = time.monotonic() + (0.0 if fast else max(0.0, float(turn_wait_seconds or 0.0)))
     turns = int(active_turns())
     report({"phase": "turn_wait", "active_turns": turns})
     while turns > 0 and time.monotonic() < deadline and not stop_requested():
@@ -234,17 +243,22 @@ def run_restart_drain(
     if stop_requested():
         reset_restart_drain_state()
         return {"ok": False, "reason": "stop_requested", "request_id": request_id}
-    timeout = float(drain_timeout_seconds or 0.0)
+    timeout = float(fast_timeout_seconds) if fast else float(drain_timeout_seconds or 0.0)
     drained = wait_until_no_executing_tools(timeout if timeout > 0 else None)
     if stop_requested():
         reset_restart_drain_state()
         return {"ok": False, "reason": "stop_requested", "request_id": request_id}
-    if not drained and not force_on_drain_timeout:
+    if not drained and (fast or not force_on_drain_timeout):
         executing = executing_tool_count()
         reset_restart_drain_state()
-        return {"ok": False, "reason": "drain_timeout", "executing": executing, "request_id": request_id}
+        return {"ok": False, "reason": "drain_timeout", "executing": executing, "request_id": request_id,
+                **({"error_code": "GATEWAY_RESTART_WRITES_UNSETTLED", "side_effect_state": "unknown",
+                    "executing_tools": executing_tool_snapshot(limit=None),
+                    "next_step": "核对原工具操作回执后重新安排重启；不要重放未确认写入"} if fast else {})}
     _set_phase("exiting", request_id)
     result = {"ok": True, "request_id": request_id, "active_turns_at_exit": turns}
+    if fast:
+        result["restart_mode"] = "fast"
     if not drained:
         snapshot = executing_tool_snapshot(limit=None)
         result.update(forced_after_drain_timeout=True, executing_tools_at_exit=len(snapshot),
@@ -312,6 +326,7 @@ def cancel_restart_request(paths: GatewayPaths, request: dict[str, object], resu
         lambda state: {**state, "schema": STATE_SCHEMA, "last_cancelled": {
             "request_id": str(request.get("request_id") or ""),
             "reason": str(result.get("reason") or ""),
+            **{key: result[key] for key in ("error_code", "side_effect_state", "next_step") if key in result},
             "executing": int(result.get("executing") or 0),
             **({"executing_tools": snapshot} if snapshot else {}),
             "cancelled_at": time.time(),
@@ -337,8 +352,11 @@ def consume_restart_marker(
     if old_pid <= 0 or old_pid_alive(old_pid):
         return None
     cleanup = marker.get("cleanup_result")
-    if isinstance(cleanup, dict) and (cleanup.get("status") not in {"clean_drain", "forced_after_drain_timeout"}
+    if isinstance(cleanup, dict) and (cleanup.get("status") not in {"clean_drain", "forced_after_drain_timeout", "safe_model_handoff"}
                                       or cleanup.get("handover_allowed") is not True):
+        return None
+    if (isinstance(cleanup, dict) and cleanup.get("status") == "safe_model_handoff"
+            and (marker.get("restart_mode") != "fast" or cleanup.get("predecessor_exit_required") is not True)):
         return None
     if consume:
         try:
@@ -395,6 +413,8 @@ def append_restart_cancellation(
     summary = (
         f"Gateway 安全重启已取消（请求 {request.get('request_id') or ''}，原因 {result.get('reason') or ''}，"
         f"仍在执行的副作用工具 {int(result.get('executing') or 0)} 个）。"
+        + (f"错误码 {result['error_code']}，副作用状态 {result.get('side_effect_state') or 'unknown'}。"
+           f"{result.get('next_step') or ''}。" if result.get("error_code") else "")
         + ("最终收尾未完成，已阻止接班，未确认操作仍保持未知。" if result.get("reason") == "drain_incomplete"
            else "Gateway 没有重启、照常服务。") +
         "不要立刻重复安排；先告诉用户哪些工作还在跑，由用户决定等它结束后再重启还是放弃。"

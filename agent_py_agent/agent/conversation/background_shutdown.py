@@ -321,7 +321,7 @@ def model_shutdown_blockers():
 
     rows = [{'reason':'model_call_retained', 'ref':record.call_id}
             for _ledger, record, _retained in model_call_drain_snapshot()]
-    rows.extend({'reason':'bounded_call_retained', 'ref':call.call_id}
+    rows.extend({'reason':'bounded_call_retained', 'ref':call.call_id, 'purpose':call.purpose}
                 for call in bounded_call_drain_snapshot())
     return rows
 

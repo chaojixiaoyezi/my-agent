@@ -634,7 +634,7 @@ def _start_gateway_http(agent, paths, http_port: int, control_plane=None, drain_
         raise
 
 
-# LLM: 只负责收三条循环并报告仍存活的线程名；未启动线程（ident 为 None）跳过 join，每条最多等 2 秒。
+# LLM: 只负责收三条循环并报告仍存活的线程名；未启动线程（ident 为 None）跳过 join，共享两秒预算。
 # 函数用途: Gateway 收尾时等 heartbeat/request/background 三条循环退出，返回还活着的线程名列表。
 def _join_gateway_loops(request: GatewayRunCleanupRequest) -> list[str]:
     threads = {
@@ -642,11 +642,13 @@ def _join_gateway_loops(request: GatewayRunCleanupRequest) -> list[str]:
         "request": request.request_thread,
         "background": request.background_thread,
     }
+    # 同一轮收尾共用预算，避免三个挂起循环把两秒放大为六秒。
+    deadline = time.monotonic() + 2.0
     for thread in threads.values():
         if thread.ident is None:
             # 未启动的线程（HTTP bind 失败时 heartbeat 线程还没 start）不能 join
             continue
-        thread.join(timeout=2)
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
     return [name for name, thread in threads.items() if thread.is_alive()]
 
 

@@ -82,7 +82,7 @@ def invoke_decision_model_call(
         try:
             response = call_with_deadline(
                 lambda: _invoke_worker(agent, params, operation, ledger, record.call_id, deadline),
-                deadline=deadline, resource_key=resource_key, interrupt_handle=interrupt_handle, optional=True,
+                purpose="model", deadline=deadline, resource_key=resource_key, interrupt_handle=interrupt_handle, optional=True,
             )
             _check_active(deadline, interrupt_handle)
             record_model_call_finished(ledger, record.call_id, response)

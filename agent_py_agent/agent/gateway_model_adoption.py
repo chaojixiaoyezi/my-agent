@@ -169,7 +169,7 @@ class GatewayModelAdoption:
                                     provider_history_messages=deepcopy(params.provider_history_messages),
                                     tool_context=deepcopy(params.tool_context), live_archive_state=deepcopy(params.live_archive_state))
             candidate_params, payload, validation = call_with_deadline(
-                lambda: self._prepare(agent, frozen_params, prepared, dependencies), deadline=self.outcome.deadline,
+                lambda: self._prepare(agent, frozen_params, prepared, dependencies), purpose="model", deadline=self.outcome.deadline,
                 resource_key=("gateway_model_probe", self.stage.owner_ref, self.generation.profile_id,
                               self.generation.catalog_generation, self.generation.shared_generation), optional=True,
             )

@@ -457,7 +457,7 @@ def call_backend_with_timeout(
             try:
                 return call_with_deadline(
                     _run_transport,
-                    deadline=deadline,
+                    purpose="model", deadline=deadline,
                     resource_key=_CuratorBackendResource(backend),
                     wait_for_exit=wait_for_exit,
                 )

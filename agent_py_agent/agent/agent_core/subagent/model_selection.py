@@ -427,7 +427,7 @@ def _prepare_candidate(agent: object, params: object, preparation: SubagentFirst
     probe = _CandidateProbe(dependencies, params, deadline)
     candidate_params, request_input, validation = call_with_deadline(
         lambda: _candidate_request_input(agent, preparation, probe),
-        deadline=deadline, resource_key=("subagent_model_probe", advice["source_owner_ref"], generation.profile_id,
+        purpose="model", deadline=deadline, resource_key=("subagent_model_probe", advice["source_owner_ref"], generation.profile_id,
                                          generation.catalog_generation, generation.shared_generation), optional=True,
     )
     return _CandidateRequest(thread, advice, generation, _child_fingerprint(SubagentModelInput({}, task)),

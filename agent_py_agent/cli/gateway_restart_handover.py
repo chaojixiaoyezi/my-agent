@@ -85,6 +85,8 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
     result = run_restart_drain(
         request,
         active_turns=active_turns,
+        mode=str(getattr(config, "gateway_restart_mode", "graceful")),
+        fast_timeout_seconds=float(getattr(config, "gateway_restart_fast_timeout_seconds", 2.0)),
         turn_wait_seconds=float(config.gateway_restart_turn_wait_seconds),
         drain_timeout_seconds=float(config.gateway_restart_drain_timeout_seconds),
         force_on_drain_timeout=(str(request.get("operation") or "restart") == "restart"
@@ -128,7 +130,7 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
 # 函数用途: 保存排空交接结果并生成主循环的重启结束报告。
 def _mark_drained_restart(context, request: dict, result: dict) -> dict:
     marker = mark_restart_drained(
-        context.paths, request, old_pid=os.getpid(),
+        context.paths, {**request, **({"restart_mode": result["restart_mode"]} if "restart_mode" in result else {})}, old_pid=os.getpid(),
         old_process_started_at=float(context.process_started_at or 0.0),
         active_turns_at_exit=int(result.get("active_turns_at_exit") or 0),
         forced_after_drain_timeout=bool(result.get("forced_after_drain_timeout")),
@@ -162,14 +164,26 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
     continuation = [row for row in refs if isinstance(row, dict)
                     and row.get("reason") == "foreground_turn_unsettled" and row.get("ref") == "gateway_admission"]
     refs = [row for row in refs if row not in continuation]
-    forced = marker.get("forced_after_drain_timeout") is True and marker.get("operation", "restart") == "restart"
-    settled = not cleanup.get("alive_threads") and not cleanup.get("background_blockers")
+    # 模型网络调用自身不能执行工具写入；fast 允许它与原前台请求一起随旧进程退出。
+    # 保留物理责任引用，接班仍必须等旧 PID 真正死亡；通用 bounded-call 与后台 claim 不享此许可。
+    model_continuations = ([row for row in refs if isinstance(row, dict)
+                            and (row.get("reason") == "model_call_retained"
+                                 or (row.get("reason") == "bounded_call_retained" and row.get("purpose") == "model"))]
+                           if marker.get("restart_mode") == "fast" else [])
+    refs = [row for row in refs if row not in model_continuations]
+    continuation.extend(model_continuations)
+    effective_background = [row for row in cleanup.get("background_blockers") or []
+                            if row not in model_continuations]
+    forced = (marker.get("forced_after_drain_timeout") is True and marker.get("operation", "restart") == "restart"
+              and marker.get("restart_mode") != "fast")
+    settled = not cleanup.get("alive_threads") and not effective_background
     clean = not refs and (cleanup.get("drain_complete") is True or (bool(continuation) and settled))
     allowed = (clean or forced) and not cleanup.get("cleanup_error")
-    status = ("forced_after_drain_timeout" if forced else "clean_drain") if allowed else "incomplete"
+    status = ("forced_after_drain_timeout" if forced else "safe_model_handoff" if model_continuations else "clean_drain") if allowed else "incomplete"
     result = {**cleanup, "status": status, "handover_allowed": bool(allowed),
               "forced_after_drain_timeout": forced, "unresolved_operation_refs": refs,
-              "continuation_refs": continuation}
+              "continuation_refs": continuation,
+              **({"predecessor_exit_required": True} if model_continuations else {})}
     identity = marker.get("old_process_identity")
     binding = ("request_id", "old_pid", "old_process_identity", "old_process_started_at")
 
