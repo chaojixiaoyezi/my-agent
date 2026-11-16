@@ -61,9 +61,8 @@ def test_actual_c_maintenance_source_reaches_original_retention_and_owner_state(
         assert marker['indexes_compacted'] == marker['indexes_compact_failed'] == []
         assert 'run_closeout_backfill' in marker and 'memory_archive_permissions' in marker
 
-    # 初拍刻意使用极小额度留下partial；后继采用显式有界配置继续原入口，不放宽删除证明。
+    # 每拍沿用相同极小额度续作；不能把partial当已删，也不能重开更大预算掩盖卡住。
     assert marker.get('maintenance_partial') is True
-    agent.config.retention_scan_slice_entries = 128
     for _ in range(128):
         if not stale.exists():
             break
