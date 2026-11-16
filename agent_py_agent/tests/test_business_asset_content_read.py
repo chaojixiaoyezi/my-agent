@@ -288,3 +288,12 @@ def test_changed_registry_rejects_old_page_but_fresh_same_version_recovers(mater
     assert fresh['version_ref'] == first['version_ref'] and fresh['next_cursor']
     next_page = m.tool.read_page({**m.params, 'cursor': fresh['next_cursor'], 'max_bytes': 4})
     assert next_page['content'].encode() == m.body[4:8]
+
+
+# 函数用途: 项目不一致的拒绝在下一步提示里给出已授权资产的准确归属，模型无需猜测或翻源码。
+def test_project_mismatch_hint_names_the_assets_exact_project_ref(material):
+    m = material
+    result = m.tool.execute({**m.params, 'project_ref': 'other-project'})
+    assert not result.ok and result.error_code == 'ASSET_SCOPE_MISMATCH'
+    error = json.loads(result.output)
+    assert '无归属项目（省略 project_ref 或传 JSON null）' in error['next_action'] and 'content' not in error

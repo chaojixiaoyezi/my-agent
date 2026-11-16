@@ -127,8 +127,10 @@ class ReadBusinessAssetTool(BaseTool):
             {'space_id': params['space_id'], 'asset_id': params['asset_id']}, actor=actor)
         row = state['assets'][params['asset_id']]
         if row['project_ref'] != project:
+            # 资产归属来自已通过 assets.get 授权的同一行，回显它不扩大范围，只免去模型反复猜测。
+            owned = '无归属项目（省略 project_ref 或传 JSON null）' if row['project_ref'] is None else f"project_ref={row['project_ref']}"
             _reject('ASSET_SCOPE_MISMATCH', '$.project_ref', '显式项目与已授权资产归属不一致。',
-                '从已授权assets.get读取准确project_ref后调用，不扩大当前范围。', 403)
+                f'从已授权assets.get读取准确project_ref后调用，不扩大当前范围；该资产{owned}。', 403)
         versions = [v for v in row['versions'] if v['version_ref'] == params['version_ref']]
         if len(versions) != 1:
             raise HostAPIError('RESOURCE_NOT_FOUND', 404)
