@@ -33,7 +33,8 @@ def scene(tmp_path):
 
 
 def request(generation=0, profile="m1", thread="thread-one", protocol="responses"):
-    value = PromptBuildRequest("继续", [], tools=ToolSections(native_tool_use=True), workspace_context_override="固定工作区")
+    value = PromptBuildRequest("继续", [], tools=ToolSections(native_tool_use=True),
+                             workspace_context_override="固定工作区", clock_context_override="")
     # 先用结构相同的轻量事实对象，让未实现版本也能运行到真实字节断言。
     value.thread_persona = SimpleNamespace(thread_id=thread, compact_generation=generation,
                                           model_profile_id=profile, protocol=(protocol, "native"))

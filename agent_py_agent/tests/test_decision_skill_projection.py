@@ -35,15 +35,17 @@ def build(builder, selected=None, required=(), *, request=False, scope="default"
                             tool_recommendations_section="# Recommended Tools\n原工具推荐",
                             selected_skill_ids=selected, required_skill_ids=required)
     if request:
-        return builder.build(request=PromptBuildRequest("核对来源", [], tools=sections, context_scope=scope, workspace_context_override="固定工作区"))
-    return builder.build("核对来源", [], tools=sections, context_scope=scope, workspace_context_override="固定工作区")
+        return builder.build(request=PromptBuildRequest("核对来源", [], tools=sections, context_scope=scope,
+                                                      workspace_context_override="固定工作区", clock_context_override=""))
+    return builder.build("核对来源", [], tools=sections, context_scope=scope,
+                         workspace_context_override="固定工作区", clock_context_override="")
 
 
 def test_none_retains_original_layout_and_does_not_consume_required_projection(tmp_path, skill_catalog_factory):
     catalog, builder = setup_surface(tmp_path, skill_catalog_factory, 3)
     original = builder.build("核对来源", [], tools=ToolSections(
         native_tool_use=True, tool_catalog_section="# Tools\n原工具目录", tool_recommendations_section="# Recommended Tools\n原工具推荐"),
-        workspace_context_override="固定工作区")
+        workspace_context_override="固定工作区", clock_context_override="")
     for actual in (build(builder), build(builder, required=("workspace:method-001",), request=True)):
         assert str(actual) == str(original)
         assert prompt_cache_layout(actual) == prompt_cache_layout(original)

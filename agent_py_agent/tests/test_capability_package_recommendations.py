@@ -105,7 +105,7 @@ def _prepared(agent, *, protocol="native", selected=None, scope="default"):
     # 运行时工具协议仍只有 native；text 只覆盖既有纯文本提示及 provider 装配，不复活旧文本调用协议。
     catalog, recommendations = _sections(agent, selected=selected, scope=scope)
     return agent.prompts.prepare_render_input(PromptBuildRequest(
-        _QUERY, [], context_scope=scope, workspace_context_override="固定工作区",
+        _QUERY, [], context_scope=scope, workspace_context_override="固定工作区", clock_context_override="",
         tools=ToolSections(tool_catalog_section=catalog, tool_recommendations_section=recommendations,
                            native_tool_use=protocol == "native", selected_skill_ids=selected),
     ))
