@@ -269,6 +269,15 @@ def gateway_terminal_exists(paths, name: str) -> bool:
     return sealed_receipt_exists(paths, str((paths.terminal / name).relative_to(paths.root)))
 
 
+# 仅供发布前按单条记录隔离超大源文件，不得用于掩盖段发表、索引或系统调用错误。
+class _ReceiptSourceDeferred(Exception):
+    def __init__(self, request_id: str, reason: str, relative: str) -> None:
+        super().__init__(reason)
+        self.request_id = request_id
+        self.reason = reason
+        self.relative = relative
+
+
 # LLM: 原terminal schema、指纹、投影stamp与settlement事实共同准入；未知/在途/年轻对象一律保留。
 # 函数用途: 在原请求T内捕获一组可封存文件的准确前像。
 def _receipt_bundle(paths, canonical, before):
@@ -294,7 +303,10 @@ def _receipt_bundle(paths, canonical, before):
     bundle = []
     for path in candidates:
         relative = path.relative_to(paths.root)
-        raw = read_bytes_beneath(paths.root, relative.parts, max_bytes=_RECEIPT_MAX_FILE_BYTES, require_dir_fd=True)
+        try:
+            raw = read_bytes_beneath(paths.root, relative.parts, max_bytes=_RECEIPT_MAX_FILE_BYTES, require_dir_fd=True)
+        except ValueError as exc:
+            raise _ReceiptSourceDeferred(key, 'source_exceeds_read_limit', str(relative)) from exc
         if raw is not None:
             bundle.append((str(relative), raw))
     return key, bundle
@@ -375,8 +387,8 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
             or type(max_ms) not in (int, float) or not math.isfinite(max_ms) or max_ms <= 0
             or type(before) not in (int, float) or not math.isfinite(before) or type(resume_after) is not str):
         raise ValueError('invalid_gateway_receipt_budget')
-    result = {'sealed_requests': 0, 'archived_requests': 0, 'scanned_entries': 0, 'bytes': 0, 'errors': [], 'complete': False,
-              'resume_after': ''}
+    result = {'sealed_requests': 0, 'archived_requests': 0, 'scanned_entries': 0, 'bytes': 0,
+              'deferred_requests': [], 'errors': [], 'complete': False, 'resume_after': ''}
     if not paths.terminal.is_dir() and not (paths.root / 'archive' / 'receipts-manifest.json').exists():
         return {**result, 'complete': True}
     deadline = time.monotonic() + max_ms / 1000
@@ -414,13 +426,30 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
                     continue
                 result['scanned_entries'] += 1
                 examined.append(entry.name)
-                with processing_metadata_scope(paths, Path(entry.name).stem):
-                    bundle = _receipt_bundle(paths, Path(entry.path), before)
+                try:
+                    with processing_metadata_scope(paths, Path(entry.name).stem):
+                        bundle = _receipt_bundle(paths, Path(entry.path), before)
+                except _ReceiptSourceDeferred as deferred:
+                    result['deferred_requests'].append({
+                        'request_id': deferred.request_id,
+                        'entry': entry.name,
+                        'path': deferred.relative,
+                        'reason': deferred.reason,
+                    })
+                    continue
                 if bundle is None:
                     continue
                 if not remove_loose and all(lookup_sealed_receipt(paths, relative) == raw for relative, raw in bundle[1]):
                     continue
                 weight = sum(len(raw) for relative, raw in bundle[1])
+                if weight > _RECEIPT_MAX_SEGMENT_BYTES // 2:
+                    result['deferred_requests'].append({
+                        'request_id': bundle[0],
+                        'entry': entry.name,
+                        'path': str(Path(entry.path).relative_to(paths.root)),
+                        'reason': 'bundle_exceeds_segment_budget',
+                    })
+                    continue
                 if size + weight > min(max_bytes, _RECEIPT_MAX_SEGMENT_BYTES // 2):
                     examined.pop()
                     result['complete'] = False
@@ -433,7 +462,10 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
                 for key, bundle in bundles:
                     with processing_metadata_scope(paths, key):
                         # 发布是门外长IO；重新取得原T后必须重核在途/结算等保护事实。
-                        current = _receipt_bundle(paths, paths.terminal / f'{key}.json', before)
+                        try:
+                            current = _receipt_bundle(paths, paths.terminal / f'{key}.json', before)
+                        except _ReceiptSourceDeferred:
+                            current = None
                         if remove_loose and current == (key, bundle) and _remove_sealed_bundle(paths, bundle):
                             result['sealed_requests'] += 1
                             removed.add(f'{key}.json')

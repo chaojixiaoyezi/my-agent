@@ -1280,7 +1280,17 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         report = seal_gateway_receipts_slice(paths, before=now - 7 * 86400, max_entries=budget['items'],
                                             max_bytes=budget['bytes'], max_ms=min(25, remaining_ms), remove_loose=True,
                                             resume_after=str(cursor.get('resume_after') or ''))
-        position = {'complete': report['complete'], 'errors': report['errors'], 'resume_after': report['resume_after'],
+        prior_deferred = (cursor.get('deferred_requests') or ()
+                          if (not cursor.get('complete') and cursor.get('runtime_directory') is None
+                              and cursor.get('resume_after') and (report['complete'] or report['resume_after']))
+                          else ())
+        deferred_by_id = {}
+        for item in (*prior_deferred, *report.get('deferred_requests', ())):
+            if isinstance(item, dict):
+                deferred_by_id[str(item.get('request_id') or item.get('entry') or len(deferred_by_id))] = item
+        position = {'complete': report['complete'], 'errors': report['errors'],
+                    'deferred_requests': list(deferred_by_id.values()),
+                    'resume_after': report['resume_after'],
                     'reader_cutover_required': False, 'archived_requests': report['archived_requests']}
         runtime_pending = any(_real_owner_directory(home, paths.root / name)
                               for name in ('input_receipts', 'client_outbox'))
