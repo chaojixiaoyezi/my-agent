@@ -1831,7 +1831,11 @@ def _background_preload_tool_names(params: object, attrs: dict) -> set[str]:
         trigger.reason if isinstance(trigger, TurnTrigger) else ""
     ) or wake.get("reason") or ("thread_goal_continue" if attrs.get("thread_goal_id") else ""))
     allowed = getattr(params, "allowed_tools", None)
+    # 执行上界已由原wake构造方从持久线程核准；这里只保留该精确action的展示，
+    # 不从attrs的controller标签扩权，后续仍与同一allowed_tools相交。
+    controller_create = "business_execution:background_agents.create" in (allowed or ())
     request = background_tool_policy.BackgroundToolPolicyRequest(
+        business_controller=controller_create,
         reason=reason, wake_signal=wake, active_goal=bool(attrs.get("thread_goal_id")),
         goal_subagent_phase=str(attrs.get("goal_subagent_phase") or ""),
         allowed_tools=tuple(allowed) if allowed is not None else None,

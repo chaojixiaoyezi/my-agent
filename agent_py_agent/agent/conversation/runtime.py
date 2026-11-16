@@ -2420,6 +2420,7 @@ def _run_params(
     thread: ConversationThread | None = None,
     history_seed: object | None = None,
 ) -> RunParams:
+    from .background_context import tool_policy_request
     from .host_actor import background_host_actor
 
     config = getattr(agent, "config", None)
@@ -2470,11 +2471,9 @@ def _run_params(
         allowed_tools=_background_run_allowed_tools(
             agent,
             config,
-            BackgroundToolPolicyRequest(
-                reason=request.reason,
-                wake_signal=request.wake_signal,
-                config=config,
-                owner_policy=getattr(agent, "owner_policy", None),
+            replace(
+                tool_policy_request(agent, request,
+                    proactive_delivery_available=proactive_delivery_available),
                 policy_snapshot=_background_policy_snapshot(
                     request,
                     resolved_goal_context.goal,
@@ -2482,7 +2481,6 @@ def _run_params(
                 ),
                 active_goal=resolved_goal_context.goal is not None,
                 goal_subagent_phase=resolved_goal_context.subagent_phase,
-                proactive_delivery_available=proactive_delivery_available,
             ),
         ),
         root_user_prompt=(
