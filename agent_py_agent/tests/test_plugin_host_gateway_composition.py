@@ -194,6 +194,37 @@ def test_inline_claim_keeps_worker_protection_and_terminal_identity(tmp_path, ki
         assert path.exists() is (terminal != "same")
 
 
+@pytest.mark.parametrize("storage", ["loose", "archived"])
+@pytest.mark.parametrize("claim_mode", ["queue_worker", "inline_direct"])
+@pytest.mark.parametrize("raw", [b"{}", b"[]", b'{"id":"terminal-proof"}', b"{invalid-json", b""])
+def test_claim_preserves_unavailable_terminal_proof(tmp_path, storage, claim_mode, raw):
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    from agent_py_agent.agent.gateway_parts.owner_retention import _publish_receipt_segment
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.queue_service import (
+        claim_request,
+        ensure_gateway_folders,
+    )
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    ensure_gateway_folders(paths)
+    pending = paths.inbox / "terminal-proof.json"
+    source = {"id": "terminal-proof", "kind": "ask", "goal": "synthetic execution", "source": "test"}
+    if claim_mode == "inline_direct":
+        source.update(source="plugin", metadata={"plugin_provenance": {"kind": "script"}})
+    write_json_file_atomic(pending, source)
+    terminal = paths.terminal / pending.name
+    if storage == "archived":
+        # 用原段发布器落盘不可信正文，模拟已归档记录损坏；读口与定位器均保持生产实现。
+        _publish_receipt_segment(paths, [("terminal-proof", [(str(terminal.relative_to(paths.root)), raw)])])
+        assert not terminal.exists()
+    else:
+        terminal.write_bytes(raw)
+    assert claim_request(paths, pending, claim_mode=claim_mode) is None
+    assert json.loads(pending.read_bytes()) == source
+    assert not (paths.processing / pending.name).exists()
+
+
 # LLM: 显式空组合仍不可用；只有九个未实现受限异步适配的业务动作可豁免，SSO仍须真实验签器，其余逐项严格断言。
 # 函数用途: 验证完整HTTP目录和逐动作依赖，缺IdP适配器明确不可用、注入后恢复就绪。
 def test_production_gateway_wires_all_actions(production_host):

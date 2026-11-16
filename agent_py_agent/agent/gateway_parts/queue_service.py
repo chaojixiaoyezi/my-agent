@@ -634,7 +634,12 @@ def _pending_observation_report(path, *, deadline=None):
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
             raw = lookup_gateway_receipt_bytes(path, no_repair=True)
-            return GatewayJsonReadReport(json.loads(raw) if raw is not None else {})
+            if raw is None:
+                return GatewayJsonReadReport({})
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or not payload:
+                raise ValueError('archived pending observation JSON root must be a non-empty object') from None
+            return GatewayJsonReadReport(payload)
         try:
             before = os.fstat(descriptor)
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 8 * 1024 * 1024:
@@ -646,8 +651,9 @@ def _pending_observation_report(path, *, deadline=None):
                     after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
                 raise ValueError('pending observation identity changed')
             payload = json.loads(raw)
-            if not isinstance(payload, dict):
-                raise ValueError('pending observation JSON root must be object')
+            # 已存在的空对象也是坏记录；只有普通文件与归档均缺失才可表示没有终态证明。
+            if not isinstance(payload, dict) or not payload:
+                raise ValueError('pending observation JSON root must be a non-empty object')
             check_io_deadline(deadline)
             return GatewayJsonReadReport(payload)
         finally:
