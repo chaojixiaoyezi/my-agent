@@ -34,8 +34,8 @@ def test_known_ids_during_pending_commit_retains_reservation_without_recovery(tm
         reader = SubagentRunIndex(tmp_path, read_only=True)
         assert reader.known_ids(["reserved", "missing", "reserved"]) == {"reserved"}
         assert index.readiness() == {"complete": True, "pending": True}
-        with pytest.raises(SubagentRunIndexUnavailable, match="pending canonical"):
-            reader.active_counts()
+        # 未结新建占位按 active=1 计入总量（容量只高估），不再整库拒绝（W4）。
+        assert reader.active_counts() == (1, 0)
     finally:
         release.set()
         writer.join(10)

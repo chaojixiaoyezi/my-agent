@@ -379,6 +379,19 @@ class SubagentRunIndex:
         if db.execute("SELECT 1 FROM runs WHERE pending=1 LIMIT 1").fetchone():
             raise SubagentRunIndexUnavailable("subagent run index has pending canonical commits")
 
+    # LLM: 只拦本谱系/请求成员的未结提交，以及首次提交前尚无成员行、归属未知的新 run；其他作用域的进行中提交不阻塞本作用域。
+    # 函数用途: 校验覆盖完整且所选作用域没有未结规范提交。
+    def _require_scope_complete(self, db, scope_ids, request_key) -> None:
+        self._require_coverage(db)
+        scopes = sorted(scope_ids)
+        placeholders = ",".join("?" for _ in scopes)
+        if db.execute(
+                "SELECT 1 FROM runs r WHERE r.pending=1 AND (NOT EXISTS (SELECT 1 FROM membership m WHERE m.run_id=r.run_id) "
+                "OR EXISTS (SELECT 1 FROM membership m WHERE m.run_id=r.run_id AND "
+                f"((m.kind='lineage' AND m.scope_id IN ({placeholders})) OR (m.kind='request' AND m.scope_id=?)))) LIMIT 1",
+                [*scopes, request_key]).fetchone():
+            raise SubagentRunIndexUnavailable("subagent run index has pending canonical commits")
+
     def readiness(self) -> dict[str, object]:
         """热准入只核固定元数据和 pending 存在性，不统计历史 backfill 库存。"""
         with self.connect() as db:
@@ -412,11 +425,12 @@ class SubagentRunIndex:
         return sql, params
 
     # LLM: 容量从活跃索引出发，对每个活跃 run 点查成员关系；不能先 UNION 同请求的全部终态历史。
+    #   未结提交不再整库拒绝：新建占位已按 active=1 计入总数，归属未知的新 run 另计入本树，容量只会高估。
     # 函数用途: 在一个读事务中返回 owner 与当前请求树的活跃数量。
     def active_counts(self, scope_ids=(), request_key="", epoch=None) -> tuple[int, int]:
         with self.connect() as db:
             db.execute("BEGIN")
-            self._require_complete(db)
+            self._require_coverage(db)
             total = db.execute("SELECT count(*) FROM runs WHERE active=1").fetchone()[0]
             if not scope_ids:
                 return total, 0
@@ -431,14 +445,16 @@ class SubagentRunIndex:
                 sql += " AND r.audit_epoch=?"
                 params.append(epoch)
             selected = db.execute(sql, params).fetchone()[0]
-            return total, selected
+            unknown = db.execute("SELECT count(*) FROM runs r INDEXED BY runs_pending WHERE r.pending=1 AND NOT EXISTS "
+                                 "(SELECT 1 FROM membership m WHERE m.run_id=r.run_id)").fetchone()[0]
+            return total, selected + unknown
 
     # LLM: 历史仅选精确 id；调用方仍逐 id 读 canonical 并应用原末次身份校验。
     # 函数用途: 返回指定请求或根任务的候选 id，不枚举其它树的历史。
     def request_ids(self, scope_ids, request_key, epoch) -> list[str]:
         with self.connect() as db:
             db.execute("BEGIN")
-            self._require_complete(db)
+            self._require_scope_complete(db, scope_ids, request_key)
             sql, params = self._selection(scope_ids, request_key, epoch)
             return [row[0] for row in db.execute(sql + " ORDER BY r.updated DESC,r.run_id", params)]
 
@@ -448,12 +464,14 @@ class SubagentRunIndex:
             raise ValueError("recovery page limit must be positive")
         with self.connect() as db:
             db.execute("BEGIN")
-            self._require_complete(db)
+            # 进行中的提交只跳过本轮，提交完成后下一轮恢复扫描再取；覆盖不完整仍拒绝。
+            self._require_coverage(db)
             rows = [row[0] for row in db.execute(
-                "SELECT run_id FROM runs WHERE active=1 AND run_id>? UNION "
+                "SELECT run_id FROM (SELECT run_id FROM runs WHERE active=1 AND run_id>? UNION "
                 "SELECT run_id FROM membership WHERE scope_id='' AND kind='closeout' AND run_id>? UNION "
                 "SELECT run_id FROM membership WHERE scope_id='' AND kind='source_lifecycle' AND run_id>? UNION "
-                "SELECT run_id FROM membership WHERE scope_id='' AND kind='parent_wait' AND run_id>? "
+                "SELECT run_id FROM membership WHERE scope_id='' AND kind='parent_wait' AND run_id>?) "
+                "WHERE run_id NOT IN (SELECT run_id FROM runs WHERE pending=1) "
                 "ORDER BY run_id LIMIT ?", (after, after, after, after, limit + 1))]
         return rows[:limit], rows[limit - 1] if len(rows) > limit else ""
 
