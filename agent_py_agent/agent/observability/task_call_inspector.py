@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -10,8 +11,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from agent_py_agent.agent.common.nofollow_fs import (
+    append_text_beneath,
     list_names_beneath,
-    read_text_beneath,
+    open_readonly_file_beneath,
     write_text_atomic_beneath,
 )
 from agent_py_agent.agent.observability.telemetry_ledger import (
@@ -186,8 +188,22 @@ class TaskCallInspector:
 
     # LLM: 从固定文件安全读取，不相信索引携带的路径或身份。
     # 函数用途: 读取任务元数据；只有显式完整详情才组装追加源。
-    def _read(self, task_id, *, include_rounds=False):
-        text = read_text_beneath(self._home, _path(task_id))
+    def _read(self, task_id, *, include_rounds=False, _max_bytes=None):
+        from ..local_storage.owner_read_index import _OWNER_INDEX_MAX_DOCUMENT_BYTES
+
+        try:
+            descriptor = open_readonly_file_beneath(self._home, _path(task_id))
+        except FileNotFoundError:
+            text = None
+        else:
+            try:
+                ceiling = _OWNER_INDEX_MAX_DOCUMENT_BYTES if _max_bytes is None else min(_max_bytes, _OWNER_INDEX_MAX_DOCUMENT_BYTES)
+                raw = os.pread(descriptor, ceiling + 1, 0)
+                if len(raw) > ceiling:
+                    raise ValueError('task metadata exceeds document byte budget')
+                text = raw.decode('utf-8')
+            finally:
+                os.close(descriptor)
         if text is None:
             return missing_task_metadata(self._home, task_id, self._owner_id) if include_rounds else None
         row = json.loads(text)
@@ -216,31 +232,15 @@ class TaskCallInspector:
     # 函数用途: 维护任务索引投影，避免每次追加模型轮次时重读全部历史任务JSON。
     def _write_index(self, row):
         keys = ("task_id", "owner_id", "title", "status", "trigger_kind", "started_at", "ended_at")
-        try:
-            names = [name[:-5] for name in sorted(list_names_beneath(self._home, (*PARTS, "task_calls"))) if name.endswith(".json")]
-        except FileNotFoundError:
-            names = [row["task_id"]]
-        existing_text = read_text_beneath(self._home, (*PARTS, "task_calls_index.jsonl"))
-        by_id = {}
-        if existing_text:
-            try:
-                for line in existing_text.splitlines():
-                    if not line.strip():
-                        continue
-                    item = json.loads(line)
-                    if isinstance(item, dict) and isinstance(item.get("task_id"), str) and all(k in item for k in keys):
-                        by_id[item["task_id"]] = {k: item[k] for k in keys}
-            except ValueError:
-                by_id = {}
-        by_id[row["task_id"]] = {k: row[k] for k in keys}
-        for tid in names:
-            if tid not in by_id:
-                loaded = self._read(tid)
-                if loaded is not None:
-                    by_id[tid] = {k: loaded[k] for k in keys}
-        index = "".join(_encode(by_id[tid]) for tid in names if tid in by_id)
-        if existing_text != index:
-            write_text_atomic_beneath(self._home, (*PARTS, "task_calls_index.jsonl"), index)
+        summary = redact_sensitive_value({key: row[key] for key in keys})
+        from ..local_storage.owner_read_index import _OWNER_INDEX_MAX_ROW_BYTES
+        blob = _encode(summary)
+        if len(blob.encode('utf-8')) > _OWNER_INDEX_MAX_ROW_BYTES:
+            raise ValueError('task summary exceeds index row budget')
+        from .task_call_retention import rotate_task_summary
+
+        rotate_task_summary(self._home)
+        append_text_beneath(self._home, (*PARTS, "task_calls_index.jsonl"), blob)
 
     # LLM: 保存前验证并递归脱敏；JSON 原子提交后按需同步索引，追加轮次且索引已存在时不重扫目录。
     # 函数用途: 在原锁内验证并保存元数据，轮次的单一追加源按需迁移与组装。
@@ -271,7 +271,7 @@ class TaskCallInspector:
         if item.rounds or replace_rounds:
             row = prepare_task_rounds(self._home, row, replace=replace_rounds)
         write_text_atomic_beneath(self._home, _path(item.task_id), _encode(row))
-        if sync_index or (include_rounds and self._index_missing()):
+        if sync_index:
             self._write_index(row)
         return hydrate_task_rounds(self._home, row) if include_rounds else None
 
@@ -324,6 +324,17 @@ class TaskCallInspector:
                 raise KeyError(task_id)
             row.update(status=status, ended_at=time.time() if ended_at is None else ended_at)
             return self._save(row)
+
+    def get_task_call_page(self, task_id: str, *, limit: int = 20, cursor: str = '') -> dict:
+        """只读一个任务及有限轮次，不自动关联全量工具历史。"""
+        from .task_rounds import read_task_rounds_page
+
+        row = self._read(task_id)
+        if row is None:
+            return dict(task=None, rows=[], rounds=[], next_cursor=None, total_count=None,
+                        coverage=dict(status='unavailable', reason='task_metadata_missing'))
+        page = read_task_rounds_page(self._home, task_id, limit=limit, cursor=cursor)
+        return {**page, 'task': redact_sensitive_value(row), 'rounds': page['rows']}
 
     # LLM: 合并当前任务快照和全部账本任务，排序过滤后分页；不把自动发现的摘要落盘。
     # 函数用途: 分页查询任务记录。
@@ -402,7 +413,7 @@ def _model_scope_identity(agent, params):
 def bind_model_call_telemetry(ledger: object, call_id: str, agent: object, params: object) -> None:
     try:
         paths = getattr(agent, "home_paths", None)
-        home = getattr(paths, "home_dir", None)
+        home = getattr(paths, "owner_home_dir", None)
         task_id = str(getattr(params, "task_id", "") or "")
         if not home or not Path(home).is_dir():
             return
@@ -432,7 +443,7 @@ def record_model_call_telemetry(ledger: object, record: object) -> None:
             return
         prompt_tokens = max(0, int(record.accounted_input_tokens if record.status == "finished" else record.input_tokens))
         cached_tokens = max(0, int(record.cached_input_tokens))
-        data = dict(round_id=record.call_id, run_id=record.run_id, parent_run_id=scope["parent_run_id"],
+        data = dict(round_id=record.call_id, request_id=str(getattr(record, "request_id", "") or ""), run_id=record.run_id, parent_run_id=scope["parent_run_id"],
                     root_run_id=scope["root_run_id"], thread_id=scope["thread_id"], model=record.model, backend=record.backend,
                     purpose=str(record.metadata.get("purpose") or "main"), status=record.status,
                     started_at=float(scope["wall_started_at"]), duration_ms=round(max(0.0, float(record.total_latency_seconds or 0.0)) * 1000, 3),
@@ -444,6 +455,13 @@ def record_model_call_telemetry(ledger: object, record: object) -> None:
                     completion_tokens=max(0, int(record.output_tokens)), cached_tokens=cached_tokens,
                     uncached_tokens=max(0, prompt_tokens - cached_tokens),
                     error_code=str(record.error_code or ""), stop_reason=str(record.stop_reason or ""))
+        for key in ('request_prepare_ms', 'pre_call_housekeeping_ms', 'supervision_sweep_ms'):
+            value = record.metadata.get(key)
+            data[key] = round(max(0.0, _number(value)), 3) if type(value) in (int, float) else None
+        stages = record.metadata.get('stages_ms', {})
+        if isinstance(stages, dict):
+            data['stages_ms'] = {key: max(0.0, _number(value)) for key, value in stages.items()
+                                 if isinstance(key, str) and type(value) in (int, float)}
         TaskCallInspector(scope["home_dir"], owner_id=scope["owner_id"]).append_round(
             scope["task_id"], data, create_if_missing=True, include_rounds=False,
         )

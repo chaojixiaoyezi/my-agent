@@ -380,7 +380,7 @@ class ToolTelemetryLedger:
     # LLM: 空字符串和None保持未指定口径，非空owner只匹配完全相同身份。
     # 函数用途: 校验公开过滤键并补充本账本owner谓词。
     def _query_filters(self, filters):
-        allowed = {"task_id", "run_id", "workflow_run_id", "tool_name", "status", "min_duration_ms", "since", "until"}
+        allowed = {"task_id", "run_id", "workflow_run_id", "tool_name", "status", "error_code", "min_duration_ms", "since", "until"}
         if filters.keys() - allowed:
             raise ValueError("unknown filter")
         result = {key: value for key, value in filters.items() if value is not None and value != ''}
@@ -396,16 +396,81 @@ class ToolTelemetryLedger:
         run_id: str | None = None, workflow_run_id: str | None = None,
         tool_name: str | None = None, status: str | None = None,
         min_duration_ms: float | None = None, since: float | None = None, until: float | None = None,
+        error_code: str | None = None, include_total: bool = True, scan_limit: int | None = None,
     ) -> dict[str, Any]:
         selected = self._query_filters({
             'task_id': task_id, 'run_id': run_id, 'workflow_run_id': workflow_run_id,
             'tool_name': tool_name, 'status': status, 'min_duration_ms': min_duration_ms,
-            'since': since, 'until': until,
+            'since': since, 'until': until, 'error_code': error_code,
         })
         if view is None:
             view = self._read_index.advance('telemetry', (*PARTS, 'tool_calls.jsonl'))
         return {**self._read_index.query(view, filters=selected, limit=limit, offset=cursor,
-                                         after_cursor=after_cursor), 'view': view}
+                                         after_cursor=after_cursor, include_total=include_total,
+                                         scan_limit=scan_limit), 'view': view}
+
+    def query_retained_tool_calls_page(
+        self, *, limit=20, cursor='', task_id=None, run_id=None, workflow_run_id=None,
+        tool_name=None, status=None, error_code=None, min_duration_ms=None,
+        since=None, until=None, scan_limit=None,
+    ):
+        """原账本当前/封口卷的只读页；源游标独立于实例签名。"""
+        import base64
+        import hashlib
+
+        filters = self._query_filters(dict(task_id=task_id, run_id=run_id, workflow_run_id=workflow_run_id,
+            tool_name=tool_name, status=status, error_code=error_code, min_duration_ms=min_duration_ms,
+            since=since, until=until))
+        binding = hashlib.sha256(_encode([str(self._home), self._owner_id, filters, scan_limit]).encode()).hexdigest()
+        from ..local_storage.owner_read_index import _OWNER_INDEX_MAX_PAGE_ROWS
+        from ..user_space.directory_paging import directory_page
+
+        mode = _OWNER_INDEX_MAX_PAGE_ROWS if scan_limit is None else scan_limit
+        if type(mode) is not int or not 1 <= mode <= _OWNER_INDEX_MAX_PAGE_ROWS:
+            raise ValueError('invalid telemetry scan_limit')
+        source, inner, position, pending, done = '', '', {}, [], False
+        if cursor:
+            try:
+                if not isinstance(cursor, str) or len(cursor) > 32768:
+                    raise ValueError()
+                value = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+                if set(value) != {'binding', 'source', 'inner', 'position', 'pending', 'done'} or value['binding'] != binding:
+                    raise ValueError()
+                source, inner, position, pending, done = (value[key] for key in
+                    ('source', 'inner', 'position', 'pending', 'done'))
+                if (not isinstance(source, str) or not isinstance(inner, str) or not isinstance(position, dict)
+                        or not isinstance(pending, list) or len(pending) > mode or type(done) is not bool):
+                    raise ValueError()
+                for name in [source, *pending]:
+                    if name and name != 'tool_calls.jsonl' and (not isinstance(name, str) or _SEALED.fullmatch(name) is None):
+                        raise ValueError()
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise ValueError('invalid retained telemetry cursor') from None
+        def encode(next_source, next_inner):
+            return base64.urlsafe_b64encode(_encode(dict(binding=binding, source=next_source,
+                inner=next_inner, position=position, pending=pending, done=done)).encode()).decode()
+        examined = 0
+        if not source:
+            if not pending and not done:
+                names, position, done = directory_page(self._home, PARTS, position, mode)
+                examined = position.pop('last_scanned', len(names))
+                pending = [name for name in names if name == 'tool_calls.jsonl' or _SEALED.fullmatch(name)]
+            source = pending.pop(0) if pending else ''
+            if not source:
+                return dict(rows=[], total_count=None, scanned=examined,
+                    next_cursor=encode('', '') if not done else None,
+                    coverage=dict(status='complete' if done else 'partial', reason='source_discovery'))
+        page = self._read_index.query_readonly_page('telemetry', (*PARTS, source),
+            filters=filters, limit=limit, cursor=inner, scan_limit=mode)
+        next_inner = page['next_cursor']
+        if next_inner:
+            page['next_cursor'] = encode(source, next_inner)
+        elif page['coverage']['status'] == 'complete':
+            page['next_cursor'] = encode('', '') if pending or not done else None
+        page['coverage']['source'] = source
+        page['coverage']['retention_days'] = TELEMETRY_RETENTION_DAYS
+        page['source_entries_scanned'] = examined
+        return page
 
     # LLM: 原cursor为过滤后偏移，大页拆成同一固定view的SQL页，未知不转成成功空值。
     # 函数用途: 保持旧list返回合同及明确分页校验。

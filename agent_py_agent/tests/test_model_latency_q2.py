@@ -161,7 +161,7 @@ def _call_case(tmp_path, monkeypatch):
     clock = [10.0]
     ledger = ModelCallLedger(context=ModelCallLedgerContext(now=lambda: clock[0]))
     agent._model_call_ledger = ledger
-    agent.home_paths = SimpleNamespace(home_dir=tmp_path, owner_id="one")
+    agent.home_paths = _real_home(tmp_path)
     params.context_scope = "isolated"
     params.task_id = "task-q2"
     params.task_attributes = {"conversation_thread_id": "thread-q2"}
@@ -531,3 +531,11 @@ def test_w21_projection_borrowed_prior_placeholder_and_midflight_mutation_guard(
     assert getattr(tool_ir_history._PROJECTION_TLS, "observed_key", None) is None
     assert getattr(tool_ir_history._PROJECTION_TLS, "post_key", None) is None
     assert getattr(cd._DIGEST_TLS, "observed_key", None) is None
+
+
+def _real_home(path):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+
+    return replace(home_paths(path), owner_home_dir=path, owner_id='one')

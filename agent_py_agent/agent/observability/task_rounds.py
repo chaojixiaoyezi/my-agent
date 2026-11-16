@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..common.nofollow_fs import (
     append_text_beneath,
+    open_directory_beneath,
     open_private_lock_beneath,
     open_readonly_file_beneath,
     read_bytes_beneath,
@@ -28,7 +29,13 @@ from ..local_storage.owner_read_index import (
     require_complete,
 )
 from ..workflows.models import redact_bearer_values as redact
-from .telemetry_ledger import _encode, _lock, _number
+from .telemetry_ledger import (
+    TELEMETRY_TOTAL_MAX_BYTES,
+    TELEMETRY_VOLUME_MAX_BYTES,
+    _encode,
+    _lock,
+    _number,
+)
 
 _SCHEMA = "task_rounds.v1"
 
@@ -70,8 +77,8 @@ def _validate_frame(frame):
         _validate_round(frame.get("row"))
 
 
-def _snapshot(home, task_id):
-    descriptor = open_readonly_file_beneath(home, _parts(task_id))
+def _snapshot(home, task_id, parts=None):
+    descriptor = open_readonly_file_beneath(home, parts or _parts(task_id))
     try:
         info = os.fstat(descriptor)
         raw = os.pread(descriptor, _HEADER_BYTES, 0)
@@ -86,9 +93,53 @@ def _snapshot(home, task_id):
         os.close(descriptor)
 
 
-def _reference(home, task_id, count):
+def _reference(home, task_id, count, previous=None):
     generation, stamp = _snapshot(home, task_id)
-    return dict(generation=generation, count=count, stamp=stamp)
+    return {**(previous or {}), **dict(generation=generation, count=count, stamp=stamp)}
+
+
+def _segment_parts(task_id, generation):
+    if not isinstance(generation, str) or len(generation) != 64 or any(c not in '0123456789abcdef' for c in generation):
+        raise ValueError('invalid task round segment generation')
+    parts = _parts(task_id)
+    return (*parts[:-1], parts[-1][:-6] + '.' + generation + '.jsonl')
+
+
+def _rotate_rounds(home, metadata):
+    """保留旧代源后切活动卷；元数据落盘前中断可从原 generation 精确恢复。"""
+    reference = metadata['_rounds']
+    task_id = metadata['task_id']
+    target = _segment_parts(task_id, reference['generation'])
+    try:
+        generation, stamp = _snapshot(home, task_id)
+    except FileNotFoundError:
+        generation, stamp = None, None
+    segments = list(reference.get('segments', []))
+    if generation == reference['generation'] and stamp[2] < TELEMETRY_VOLUME_MAX_BYTES:
+        return
+    if generation == reference['generation']:
+        if os.rename in os.supports_dir_fd:
+            descriptor = open_directory_beneath(home, _parts(task_id)[:-1])
+            try:
+                os.rename(_parts(task_id)[-1], target[-1], src_dir_fd=descriptor, dst_dir_fd=descriptor)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        else:
+            from ..common.nofollow_fs import _portable_directory
+            directory = _portable_directory(home, _parts(task_id)[:-1], create=False)
+            os.rename(directory / _parts(task_id)[-1], directory / target[-1])
+        generation = None
+    # 只认元数据原代次对应的封卷，不枚举目录或推测其它历史。
+    sealed_generation, sealed_stamp = _snapshot(home, task_id, target)
+    if sealed_generation != reference['generation'] or sealed_stamp[:3] != reference['stamp'][:3]:
+        raise ValueError('task round rotation source conflict')
+    if not generation:
+        write_text_atomic_beneath(home, _parts(task_id), _encode(_frame(secrets.token_hex(32), 0, None)))
+    segments.append(dict(generation=sealed_generation, stamp=sealed_stamp))
+    metadata['_rounds'] = _reference(home, task_id, reference['count'], {**reference, 'segments': segments})
+    _write_metadata(home, metadata)
+
 
 
 def prepare_task_rounds(home, row, *, replace=False):
@@ -131,7 +182,7 @@ def _apply_round(home, row, data):
     usage = _usage(data.get("token_usage", data))
     row["token_usage"] = {key: row["token_usage"][key] + usage[key] for key in usage}
     row["root_run_id"] = row.get("root_run_id") or str(data.get("root_run_id") or "")
-    row["_rounds"] = _reference(home, row["task_id"], row["_rounds"]["count"] + 1)
+    row["_rounds"] = _reference(home, row["task_id"], row["_rounds"]["count"] + 1, row["_rounds"])
 
 
 def append_task_round(owner_home: Path, task_id: str, row: dict[str, object]) -> None:
@@ -154,6 +205,13 @@ def _append_task_round_unlocked(owner_home, task_id, row):
     if not metadata.get("_rounds"):
         metadata = prepare_task_rounds(owner_home, metadata)
         _write_metadata(owner_home, metadata)
+    reference = metadata['_rounds']
+    total = reference['stamp'][2] + sum(segment['stamp'][2] for segment in reference.get('segments', []))
+    if total >= TELEMETRY_TOTAL_MAX_BYTES:
+        metadata['_rounds']['capacity_limited'] = True
+        _write_metadata(owner_home, metadata)
+        raise ValueError('task round capacity_limited; existing evidence retained')
+    _rotate_rounds(owner_home, metadata)
     generation, stamp = _snapshot(owner_home, task_id)
     reference = metadata["_rounds"]
     if (generation != reference["generation"] or stamp[:2] != reference["stamp"][:2]
@@ -188,7 +246,7 @@ def _append_task_round_unlocked(owner_home, task_id, row):
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-            metadata["_rounds"] = _reference(owner_home, task_id, reference["count"])
+            metadata["_rounds"] = _reference(owner_home, task_id, reference["count"], reference)
             recovered = None
         else:
             if recovered["generation"] != generation or recovered["sequence"] != reference["count"] + 1:
@@ -213,27 +271,36 @@ def _append_task_round_unlocked(owner_home, task_id, row):
 
 def read_task_rounds(owner_home: Path, task_id: str) -> list[dict[str, object]]:
     """显式详情才推进/遍历完整读投影；坏源或无法完成的预算不能伪装成空历史。"""
-    generation, _ = _snapshot(owner_home, task_id)
-    index = OwnerReadIndex(owner_home)
-    view = index.advance("task_rounds", _parts(task_id), validator=_validate_frame)
-    while view["status"] == "partial":
-        progress = index._advance_progress(view)
-        view = index.advance("task_rounds", _parts(task_id), validator=_validate_frame)
-        if index._advance_progress(view) <= progress:
-            break
-    require_complete({"coverage": view})
-    rows, cursor, sequence = [], None, 0
-    while True:
-        page = require_complete(index.query(view, limit=_OWNER_INDEX_MAX_PAGE_ROWS, after_cursor=cursor))
-        for frame in page["rows"]:
-            if frame["generation"] != generation or frame["sequence"] != sequence:
-                raise OwnerReadUnavailable(dict(status="unavailable", reason="round_sequence_conflict"))
-            if sequence:
-                rows.append(frame["row"])
-            sequence += 1
-        cursor = page["next_cursor"]
-        if cursor is None:
-            return rows
+    from .task_call_inspector import _path
+
+    metadata = json.loads(read_text_beneath(owner_home, _path(task_id)))
+    sources = [_segment_parts(task_id, item['generation']) for item in metadata['_rounds'].get('segments', [])]
+    sources.append(_parts(task_id))
+    rows, sequence = [], 1
+    for parts in sources:
+        _snapshot(owner_home, task_id, parts)
+        index = OwnerReadIndex(owner_home)
+        view = index.advance('task_rounds', parts, validator=_validate_frame)
+        while view['status'] == 'partial':
+            progress = index._advance_progress(view)
+            view = index.advance('task_rounds', parts, validator=_validate_frame)
+            if index._advance_progress(view) <= progress:
+                break
+        require_complete({'coverage': view})
+        cursor = None
+        while True:
+            page = require_complete(index.query(view, limit=_OWNER_INDEX_MAX_PAGE_ROWS, after_cursor=cursor))
+            for frame in page['rows']:
+                if not frame['sequence']:
+                    continue
+                if frame['sequence'] != sequence:
+                    raise OwnerReadUnavailable(dict(status='unavailable', reason='round_sequence_conflict'))
+                rows.append(frame['row'])
+                sequence += 1
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+    return rows
 
 
 def hydrate_task_rounds(home, row):
@@ -241,6 +308,10 @@ def hydrate_task_rounds(home, row):
     from .task_call_inspector import _append_model_run, _sum_usage
 
     reference = row.pop("_rounds", None)
+    if reference and reference.get('retired'):
+        row['rounds'] = []
+        row['rounds_coverage'] = dict(status='partial', reason='task_rounds_retired')
+        return row
     if reference is None:
         try:
             _snapshot(home, row["task_id"])
@@ -276,3 +347,43 @@ def missing_task_metadata(home, task_id, owner_id):
     row = TaskCallRecord(task_id, owner_id=owner_id).to_dict()
     row.update(status=None, rounds_coverage=dict(status="unavailable", reason="task_metadata_missing"))
     return row
+
+
+def read_task_rounds_page(owner_home: Path, task_id: str, *, limit: int = 20, cursor: str = '') -> dict[str, object]:
+    """精确任务的只读轮次页；首行头部仅是投影元数据，不对外当模型轮次。"""
+    import base64
+
+    from .task_call_inspector import _path
+
+    metadata = json.loads(read_text_beneath(owner_home, _path(task_id)))
+    reference = metadata.get('_rounds', {})
+    if reference.get('retired'):
+        return dict(rows=[], total_count=None, scanned=0, next_cursor=None,
+                    coverage=dict(status='partial', reason='task_rounds_retired'))
+    sources = [_segment_parts(task_id, item['generation']) for item in reference.get('segments', [])]
+    sources.append(_parts(task_id))
+    source, inner = 0, ''
+    if cursor:
+        try:
+            if not isinstance(cursor, str) or len(cursor) > 32768:
+                raise ValueError()
+            value = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+            source, inner = value['source'], value['inner']
+            if (set(value) != {'source', 'inner', 'task', 'home'} or value['task'] != task_id
+                    or value['home'] != hashlib.sha256(str(Path(owner_home).absolute()).encode()).hexdigest()
+                    or type(source) is not int or not 0 <= source < len(sources) or not isinstance(inner, str)):
+                raise ValueError()
+        except (ValueError, KeyError, TypeError):
+            raise ValueError('invalid task round cursor') from None
+    page = OwnerReadIndex(owner_home).query_readonly_page(
+        'task_rounds', sources[source], validator=_validate_frame, limit=limit, cursor=inner,
+        filters={'since': 1})
+    page['rows'] = [frame['row'] for frame in page['rows'] if frame['sequence'] > 0]
+    next_inner = page['next_cursor']
+    if not next_inner and page['coverage']['status'] == 'complete':
+        source += 1
+    if next_inner or source < len(sources) and page['coverage']['status'] == 'complete':
+        page['next_cursor'] = base64.urlsafe_b64encode(_encode(dict(source=source, inner=next_inner or '',
+            task=task_id, home=hashlib.sha256(str(Path(owner_home).absolute()).encode()).hexdigest())).encode()).decode()
+    page['coverage']['capacity_limited'] = bool(reference.get('capacity_limited'))
+    return page

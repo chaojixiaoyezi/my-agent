@@ -1608,6 +1608,7 @@ class OwnerReadIndex:
         max_rows=25000, max_bytes=33554432, max_ms=1500,
     ):
         budget = _Budget(max_rows, max_bytes, max_ms)
+        self._last_advance_work = dict(items=0, bytes=0)
         if domain not in _TABLES:
             raise ValueError("unsupported domain")
         try:
@@ -1714,8 +1715,92 @@ class OwnerReadIndex:
                 domain, parts, sid, checkpoint, status, reason, observed[2],
             )
         finally:
+            self._last_advance_work = dict(items=budget.decoded, bytes=budget.read_bytes)
             if descriptor >= 0:
                 os.close(descriptor)
+
+    def capture_view(self, domain, relative_parts, *, validator=None,
+                     generation=None, through=None, deadline=None):
+        """只捕获已存在的投影；缺失和滞后不会触发修复或创建。"""
+        if domain not in _TABLES:
+            raise ValueError("unsupported domain")
+        parts = _parts(relative_parts)
+        sid = self._source_id(domain, parts)
+        checkpoint, descriptor = None, -1
+        try:
+            checkpoint = self._existing_checkpoint(sid, domain, parts, deadline)
+            descriptor, observed, parents = self._open_source(parts)
+            if checkpoint is None:
+                return self._view(domain, parts, sid, None, "unavailable", "index_missing", observed[2])
+            if checkpoint['validation'] != self._validator_tag(validator):
+                raise _Issue('validator_changed')
+            if generation is not None and generation != checkpoint['generation']:
+                raise _Issue('stale_generation')
+            if through is not None and (type(through) is not int or not 0 <= through <= checkpoint['through']):
+                raise _Issue('invalid_cursor_boundary')
+            # 老边界只能来自真实完整记录的 stop；不接受任意字节截断。
+            if through is not None and through != checkpoint['through']:
+                if through and os.pread(descriptor, 1, through - 1) != b'\n':
+                    raise _Issue('cursor_boundary_unproved', 'partial')
+            view = self._view(domain, parts, sid, checkpoint,
+                              'complete' if checkpoint['complete'] and observed == checkpoint['stamp'] else 'partial',
+                              'covered' if observed == checkpoint['stamp'] else 'index_stale', observed[2])
+            if through is not None:
+                view = self._sign({**view, 'through': through})
+            # 使用同一只读前缀证明与来源 fence；本路径不调用 advance。
+            with self._reading(view):
+                pass
+            self._check_source(descriptor, parts, observed, parents)
+            return view
+        except FileNotFoundError:
+            return self._view(domain, parts, sid, checkpoint, 'unavailable',
+                              'source_deleted' if checkpoint else 'source_missing')
+        except (_Issue, OSError, sqlite3.Error, ValueError, TypeError) as error:
+            status, reason = _failure(error)
+            return self._view(domain, parts, sid, checkpoint, status, reason)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def query_readonly_page(self, domain, relative_parts, *, validator=None, filters=None,
+                            limit=100, descending=False, cursor='', scan_limit=None):
+        """可跨实例的定位游标不携带权限；每次从可信来源重建本实例签名。"""
+        import base64
+
+        parts = _parts(relative_parts)
+        extra, args = self._filters(domain, filters)
+        mode = _OWNER_INDEX_MAX_PAGE_ROWS if scan_limit is None else scan_limit
+        scope = hashlib.sha256(_json([str(self._home), self._owner_id]).encode()).hexdigest()
+        binding = hashlib.sha256(_json([extra, args, descending, mode]).encode()).hexdigest()
+        locator = None
+        if cursor:
+            try:
+                if not isinstance(cursor, str) or len(cursor) > 16384:
+                    raise ValueError()
+                locator = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+                if (set(locator) != {'v', 'scope', 'source', 'generation', 'through', 'filter', 'keys'}
+                        or locator['v'] != 1 or locator['scope'] != scope
+                        or locator['source'] != self._source_id(domain, parts) or locator['filter'] != binding
+                        or not isinstance(locator['generation'], str)):
+                    raise ValueError()
+            except (ValueError, TypeError, KeyError):
+                raise ValueError('invalid portable cursor scope/filter/source') from None
+        view = self.capture_view(domain, parts, validator=validator,
+                                 generation=locator['generation'] if locator else None,
+                                 through=locator['through'] if locator else None)
+        after = None
+        if locator:
+            internal_binding = self._cursor_binding(view, extra, args, descending) + ':bounded:' + str(mode)
+            after = self._sign(dict(cursor_version=1, binding=internal_binding, keys=locator['keys']))
+        page = self.query(view, filters=filters, limit=limit, descending=descending,
+                          after_cursor=after, include_total=False, scan_limit=mode)
+        internal = page.get('next_cursor')
+        if internal:
+            value = dict(v=1, scope=scope, source=view['source_id'], generation=view['generation'],
+                         through=view['through'], filter=binding, keys=internal['keys'])
+            page['next_cursor'] = base64.urlsafe_b64encode(_json(value).encode()).decode()
+        page['scan_cursor'] = page['next_cursor']
+        return page
 
     # LLM: 固定through与检查点、count、page、聚合共享一个读事务；源变化仍须前后复核。
     # 函数用途: 为查询建立来源fence与一致SQLite读快照。
@@ -1954,7 +2039,7 @@ class OwnerReadIndex:
     # 函数用途: 查询一个固定 view 的过滤分页。
     def query(
         self, view, *, filters=None, limit=100, offset=0, descending=False,
-        after_cursor=None,
+        after_cursor=None, include_total=True, scan_limit=None,
     ):
         if (
             type(limit) is not int or not 0 <= limit <= _OWNER_INDEX_MAX_PAGE_ROWS
@@ -1964,24 +2049,61 @@ class OwnerReadIndex:
             raise ValueError("invalid pagination")
         if after_cursor is not None and offset:
             raise ValueError('after_cursor cannot be combined with offset')
+        if type(include_total) is not bool or (scan_limit is not None and
+                (type(scan_limit) is not int or not 1 <= scan_limit <= _OWNER_INDEX_MAX_PAGE_ROWS or offset)):
+            raise ValueError('invalid bounded pagination')
         checked = None
         try:
             checked, _ = self._validate_view(view)
             extra, filter_args = self._filters(checked["domain"], filters)
             keys = self._seek_keys(checked['domain'], descending)
             binding = self._cursor_binding(checked, extra, filter_args, descending)
+            if scan_limit is not None:
+                binding += ':bounded:' + str(scan_limit)
             seek, seek_args = self._seek_clause(after_cursor, binding, keys)
             with self._reading(checked) as (current, connection, _checkpoint):
                 if connection is None:
                     return {
-                        "rows": [], "total_count": 0, 'next_cursor': None,
+                        "rows": [], "total_count": 0 if include_total else None, 'next_cursor': None, "scanned": 0,
                         "coverage": self._coverage(current, "complete", "source_absent"),
                     }
                 table, condition, args = self._visible(current)
+                if scan_limit is not None:
+                    if limit == 0:
+                        return dict(rows=[], total_count=None, scanned=0, scan_cursor=None, next_cursor=None,
+                                    coverage=self._coverage(current))
+                    selected = ','.join(f'{expression} AS _key{n}' for n, (expression, _) in enumerate(keys))
+                    # LIMIT 先截取候选窗口，稀疏谓词只在窗口内求值。
+                    candidates = connection.execute(
+                        f"WITH candidates AS (SELECT r.rowid AS _candidate_rowid FROM {table} r WHERE {condition}{seek} ORDER BY "
+                        + self._order(current['domain'], descending)
+                        + " LIMIT ?) SELECT r.payload," + selected + ", (1" + extra
+                        + f") AS _match FROM candidates c JOIN {table} r ON r.rowid=c._candidate_rowid ORDER BY " + self._order(current['domain'], descending),
+                        [*args, *seek_args, scan_limit + 1, *filter_args])
+                    records, scanned, last, more, size = [], 0, None, False, 0
+                    byte_limited = False
+                    for record in candidates:
+                        if scanned >= scan_limit or len(records) >= limit:
+                            more = True
+                            break
+                        cost = len(record['payload'].encode('utf-8'))
+                        if size + cost > _OWNER_INDEX_MAX_RESULT_BYTES:
+                            more, byte_limited = True, True
+                            break
+                        size += cost
+                        scanned += 1
+                        last = record
+                        if record['_match']:
+                            records.append(record)
+                    next_cursor = self._sign(dict(cursor_version=1, binding=binding,
+                        keys=[last[f'_key{n}'] for n in range(len(keys))])) if more and last else None
+                    return dict(rows=self._payloads(records), total_count=None, scanned=scanned,
+                                scan_cursor=next_cursor, next_cursor=next_cursor, coverage=self._coverage(
+                                    current, 'partial', 'scan_byte_budget') if byte_limited else self._coverage(current))
                 condition += extra
                 args.extend(filter_args)
                 total = None
-                if current["captured_status"] == "complete":
+                if include_total and current["captured_status"] == "complete":
                     count_key = ('count', binding)
                     total = self._memo_get(count_key)
                     if total is None:
@@ -2023,7 +2145,7 @@ class OwnerReadIndex:
                 )
             else:
                 coverage = self._coverage(checked, status, reason)
-            return {"rows": [], "total_count": None, "coverage": coverage, 'next_cursor': None}
+            return {"rows": [], "total_count": None, "coverage": coverage, 'next_cursor': None, "scanned": 0, "scan_cursor": None}
 
     # LLM: 输入只保留本批 ID；超过上限显式拒绝，不构造或复制历史全集。
     # 函数用途: 规范化有界批量查找参数。

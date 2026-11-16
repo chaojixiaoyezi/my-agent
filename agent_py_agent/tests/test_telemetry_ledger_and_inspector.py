@@ -621,7 +621,7 @@ def test_runtime_identity_does_not_mix_different_runs():
 # 函数用途: 构造可从开始驱动到终态的临时Owner请求。
 def _model_request(home):
     clock = [100.0]
-    agent = SimpleNamespace(home_paths=SimpleNamespace(home_dir=home, owner_id="one"),
+    agent = SimpleNamespace(home_paths=_real_home(home),
                             backend=SimpleNamespace(name="test-backend", model_name="test-model", max_tokens=128),
                             config=SimpleNamespace(), _model_call_ledger=ModelCallLedger(context=ModelCallLedgerContext(now=lambda: clock[0])))
     params = SimpleNamespace(task_id="model-task", run_id="child", request_id="request", context_scope="isolated",
@@ -1166,3 +1166,11 @@ def test_verification_runtime_seals_telemetry_and_preserves_receipt(tmp_path, mo
     assert len(sealed) == 1
     assert json.loads(sealed[0].read_text())['call_id'] == 'call-1'
     assert (root / 'tool_calls.jsonl').is_file()
+
+
+def _real_home(path):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+
+    return replace(home_paths(path), owner_home_dir=path, owner_id='one')
