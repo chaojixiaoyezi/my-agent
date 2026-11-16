@@ -96,7 +96,7 @@ def _advance(request, owner, domain, parts, *, validator=None, remaining_bytes):
 def maintain_task_call_telemetry_lane(request: StorageLaneRequest) -> dict:
     """每个目录项一拍，游标由原 maintenance.json 发布；未知只保护相应任务。"""
     cursor = dict(request.cursor)
-    result = dict(cursor=cursor, complete=False, items=0, bytes=0, protected=0, deleted_items=0, freed_bytes=0)
+    result = dict(cursor=cursor, complete=False, items=0, bytes=0, protected=0, deleted_items=0)
     if request.budget.exhausted():
         result['deferred_reason'] = 'budget'
         return result
@@ -241,16 +241,18 @@ def maintain_task_call_telemetry_lane(request: StorageLaneRequest) -> dict:
                     return 0
                 if position == len(targets):
                     return 0
+                deleted = 0
                 try:
                     unlink_file_beneath(owner, targets[position])
+                    deleted = 1
+                    result['deleted_items'] += 1
                 except FileNotFoundError:
                     pass
                 current['_rounds'] = {**current.get('_rounds', {}), 'retired': True,
                                       'retire_position': position + 1}
                 inspector._save(current, sync_index=False, include_rounds=False)
-                return 1
+                return deleted
         count = request.run_write(retire)
-        result['deleted_items'] += count
         result['protected'] += int(not count)
     except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
         result['protected'] += 1
