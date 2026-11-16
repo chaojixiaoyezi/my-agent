@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import itertools
 import json
 import os
 import sqlite3
@@ -19,6 +18,7 @@ from pathlib import Path
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
+from ..user_space.directory_paging import directory_page
 from .observation_index import _close_failed_factory
 
 _REBUILD_BATCH = 128
@@ -142,35 +142,71 @@ class SessionListIndex:
     def _filter_field(self):
         return {"session": "user_id", "session_task": "target_thread_id", "thread": "owner_id"}[self.kind]
 
+    # LLM: 仅在未覆写 _record 的基类/同类子类重建批内复用未变 stamp；覆写 _record 的子类须维护自有引用表。
+    # 函数用途: 有界重建期间按文件身份决定仅推进代次还是全量重读。
+    def _refresh_entry(self, conn, path: Path, generation: int) -> None:
+        if type(self)._record is SessionListIndex._record:
+            relative = str(path.relative_to(self.root))
+            if not path.exists():
+                conn.execute("DELETE FROM entries WHERE path=?", (relative,))
+                return
+            version = _stamp(path)
+            known = conn.execute("SELECT stamp FROM entries WHERE path=?", (relative,)).fetchone()
+            if known is not None and known[0] == version:
+                conn.execute("UPDATE entries SET generation=? WHERE path=?", (generation, relative))
+                return
+        self._record(conn, path, generation)
+
     # LLM: 重建和游标版本在同一连接事务提交；每批成员变化都废弃前一批的游标。
     # 函数用途: 有界补齐定位记录，防止后续批次插入到已越过的排序区间。
     def _refresh(self, conn) -> bool:
         current = _stamp(self.root)
         if self._meta(conn, "directory") != current:
             self._put_meta(conn, "directory", current)
+            self._put_meta(conn, "directory_cursor", "{}")
             self._put_meta(conn, "offset", 0)
             self._put_meta(conn, "complete", 0)
             self._put_meta(conn, "generation", int(self._meta(conn, "generation", "0")) + 1)
             self._put_meta(conn, "revision", int(self._meta(conn, "revision", "0")) + 1)
         if self._meta(conn, "complete", "0") == "1":
             return not self._probe_file_identities(conn)
-        offset = int(self._meta(conn, "offset", "0"))
+        cursor_raw = self._meta(conn, "directory_cursor")
+        cursor: dict = {}
+        valid_cursor = False
+        if cursor_raw:
+            try:
+                parsed = json.loads(cursor_raw)
+                if isinstance(parsed, dict):
+                    cursor = parsed
+                    valid_cursor = True
+            except (ValueError, TypeError):
+                cursor = {}
+        # 仅维护兼容进度计数；严禁把历史数字 offset 当作目录 cookie 重放。
+        enumerated = int(self._meta(conn, "offset", "0") or 0) if valid_cursor else 0
         generation = int(self._meta(conn, "generation", "0"))
-        selected = []
         before = conn.total_changes
-        if self.root.exists():
-            with os.scandir(self.root) as entries:
-                selected = list(itertools.islice(entries, offset, offset + _REBUILD_BATCH + 1))
-            for entry in selected[:_REBUILD_BATCH]:
-                path = Path(entry.path) / "session.json" if self.kind == "session" else Path(entry.path)
-                if self.kind == "session" and not entry.is_dir(follow_symlinks=False):
+        names, cursor, exhausted = directory_page(
+            self.root, (), cursor, _REBUILD_BATCH, require_dir_fd=False,
+        )
+        for name in names:
+            if self.kind != "session" and not name.endswith(".json"):
+                continue
+            path = self.root / name
+            try:
+                mode = path.stat(follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                continue
+            if self.kind == "session":
+                if not stat.S_ISDIR(mode):
                     continue
-                if self.kind != "session" and (not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False)):
-                    continue
-                self._record(conn, path, generation)
+                path /= "session.json"
+            elif not stat.S_ISREG(mode):
+                continue
+            self._refresh_entry(conn, path, generation)
         changed = conn.total_changes > before
-        complete = len(selected) <= _REBUILD_BATCH and current == _stamp(self.root)
-        self._put_meta(conn, "offset", offset + min(len(selected), _REBUILD_BATCH))
+        complete = exhausted and current == _stamp(self.root)
+        self._put_meta(conn, "directory_cursor", json.dumps(cursor))
+        self._put_meta(conn, "offset", enumerated + len(names))
         self._put_meta(conn, "complete", int(complete))
         if complete:
             removed = conn.execute("DELETE FROM entries WHERE generation<>?", (generation,)).rowcount
