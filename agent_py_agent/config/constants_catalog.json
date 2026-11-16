@@ -8548,6 +8548,22 @@
       "description": "不如整串出现可靠——整串在行内出现时给固定加成。"
     },
     {
+      "name": "_VECTOR_APPEND_MAX_TAIL_PERCENT",
+      "file": "agent_py_agent/agent/retrieval/vector_store.py",
+      "value": 25,
+      "unit": "%",
+      "category": "比例阈值",
+      "description": "追加段累计将超过快照字节数的这个百分比时整份压实一次，限定冷启动多读的字节和压实摊销。"
+    },
+    {
+      "name": "_VECTOR_APPEND_MIN_BASE_BYTES",
+      "file": "agent_py_agent/agent/retrieval/vector_store.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "其它",
+      "description": "快照小于这个字节数时整份重写本来就便宜，继续保持单个 JSON 文档（旧版本照常读）；达到后新增 id 才走追加。"
+    },
+    {
       "name": "_MAX_FACT_FILES",
       "file": "agent_py_agent/agent/run_intent.py",
       "value": 12,
