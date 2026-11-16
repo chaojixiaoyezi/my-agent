@@ -94,6 +94,7 @@ def maintenance_policy(home, max_bytes):
 def maintenance_due(state, policy, now, *, owner_home=None, quota_pending=False):
     from ..user_space import owner_quota
     from ..user_space.home_retention import maintenance_fence
+    from ..user_space.owner_maintenance import _partial_continuation_due
 
     if state:
         if state.get("schema_version") != "owner-maintenance.v1":
@@ -121,7 +122,9 @@ def maintenance_due(state, policy, now, *, owner_home=None, quota_pending=False)
         if owner_home is None
         else owner_quota.owner_quota_reconcile_pending(owner_home, require_ledger=True)
     )
-    return (partial or pending) and now > last and owner_quota.time.time() > last
+    # 无进展partial与领域执行层同一节拍：距上次尝试满压力重排间隔才续作。
+    continuation = partial and _partial_continuation_due(state, now, last)
+    return (continuation or pending) and now > last and owner_quota.time.time() > last
 
 
 # LLM: 复用原严格no-follow普通单链接fd；同一次读取绑定完整字节及mtime，竞态/超预算拒绝，不跟链接或创建来源文件。

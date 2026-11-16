@@ -5,7 +5,9 @@
 # 模块用途: 保留Count0原维护；后台按原claim逐写私有状态及有界LocalStore事件裁剪，W不压shared索引。
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import os
 import time
 from copy import deepcopy
@@ -217,14 +219,43 @@ def _retention_maintenance_due(
     ).payload
     maintenance_fence(marker)
     maintenance_fence(marker.get('storage_maintenance', {}))
-    if marker.get('maintenance_partial') is True or owner_quota_reconcile_pending(home, require_ledger=True):
-        return True
     last_attempt = _timestamp(marker.get("last_attempt_at"))
     current = float(now if now is not None else time.time())
+    if _partial_continuation_due(marker, current, last_attempt) or owner_quota_reconcile_pending(home, require_ledger=True):
+        return True
     if (current - last_attempt >= _OWNER_MAINTENANCE_PRESSURE_REDUE_SECONDS
             and (_owner_pressure_for_root(home) or {}).get('level') in ('high', 'critical')):
         return True
     return last_attempt <= 0 or current - last_attempt >= interval
+
+
+# LLM: 上轮partial确有推进（或旧状态无该键）照旧逐拍续作；连续两轮续点全同的partial距上次尝试满压力重排间隔才再续，
+#   不改partial本身、配额待续或日周期规则。
+# 函数用途: 判断已提交的未完成维护本拍是否该续作。
+def _partial_continuation_due(marker: dict[str, Any], current: float, last_attempt: float) -> bool:
+    if marker.get('maintenance_partial') is not True:
+        return False
+    return (marker.get('maintenance_partial_stalled') is not True
+            or current - last_attempt >= _OWNER_MAINTENANCE_PRESSURE_REDUE_SECONDS)
+
+
+# LLM: 只取本轮可观察的推进事实：保留扫描游标、动作数、storage各通道游标/完成集/待续集/本轮计数与三类分页维护回执；
+#   时刻键（*_at）、维护代次与压力快照不算推进。摘要只供到期判断比对，不作删除许可或领域状态。
+# 函数用途: 把partial维护本轮的推进事实压成可比对的摘要。
+def _partial_progress_token(retention: OwnerRetentionPlan, payload: dict[str, Any]) -> str:
+    def settled(value):
+        if isinstance(value, dict):
+            return {key: settled(item) for key, item in value.items() if not (isinstance(key, str) and (
+                key.endswith('_at') or key in ('maintenance_epoch', 'pressure')))}
+        if isinstance(value, (list, tuple)):
+            return [settled(item) for item in value]
+        return value
+
+    facts = {'scan_cursor': getattr(retention, 'scan_cursor', {}), 'actions': len(getattr(retention, 'actions', ())),
+             **{key: payload.get(key) for key in ('storage_maintenance', 'derived_records_pruned',
+                                                  'local_store_events_maintenance', 'workflow_maintenance')}}
+    material = json.dumps(settled(facts), sort_keys=True, default=str, separators=(',', ':'))
+    return hashlib.sha256(material.encode('utf-8')).hexdigest()
 
 
 # LLM: Gateway只依赖owner维护领域入口；可注入操作仍归原维护写者，签名适配不提供准入、重试或新写门。
@@ -526,6 +557,10 @@ def _write_maintenance_result(state_path, retention, previous, current, effects)
         payload['maintenance_partial'] = True
     payload['retention_scan_partial'] = bool(getattr(retention, 'scan_partial', False))
     payload['retention_policy_fingerprint'] = getattr(retention, 'policy_fingerprint', '')
+    # 连续两轮partial推进事实全同即记无进展，到期判断据此改按压力重排间隔续作。
+    progress = _partial_progress_token(retention, payload) if payload.get('maintenance_partial') is True else ''
+    payload['maintenance_partial_progress'] = progress
+    payload['maintenance_partial_stalled'] = bool(progress) and progress == previous.get('maintenance_partial_progress')
     write_json_file_atomic_unlocked(state_path, payload)
     # 维护状态在配额准入外写入；写完按当前内容核过data与root目录行并采纳新目录戳（锁忙或核验不过即留给准入核验）。
     refresh_owner_quota_host_rows(state_path.parent.parent, ('data', ''))
