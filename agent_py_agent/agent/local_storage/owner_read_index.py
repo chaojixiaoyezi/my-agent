@@ -541,6 +541,8 @@ class OwnerReadIndex:
             "status": status,
             "captured_status": status,
             "reason": reason,
+            "skipped_records": checkpoint.get("skipped_records", 0),
+            "record_errors": checkpoint.get("record_errors", []),
         })
 
     # LLM: 临时复核不足不能篡改原始捕获范围或完整性证据。
@@ -905,6 +907,18 @@ class OwnerReadIndex:
         if not valid:
             raise _Issue("corrupt_checkpoint")
         value["stamp"] = source_stamp
+        issues = connection.execute('SELECT value FROM ori_meta WHERE key=?', ('issues:' + sid,)).fetchone()
+        if issues:
+            try:
+                diagnostics = json.loads(issues[0])
+                if (not isinstance(diagnostics, dict) or type(diagnostics.get('count')) is not int
+                        or diagnostics['count'] < 0 or not isinstance(diagnostics.get('samples'), list)
+                        or len(diagnostics['samples']) > 16):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise _Issue('corrupt_record_diagnostics') from None
+            if diagnostics.get('generation') == value['generation']:
+                value.update(skipped_records=diagnostics['count'], record_errors=diagnostics['samples'])
         return value
 
     # LLM: 首次无来源不能因探测缓存而创建目录、种子或数据库。
@@ -1322,6 +1336,7 @@ class OwnerReadIndex:
     # LLM: 每次真实 JSON 解码成功后恰调用一次 validator；取消异常不能变成假空。
     # 函数用途: 解码一条新记录并生成独立的缓存正文及 typed 值。
     def _decode(self, raw, domain, document, validator, budget):
+        budget.decoded += 1
         try:
             text = raw.decode("utf-8", errors="strict")
         except UnicodeDecodeError:
@@ -1330,7 +1345,6 @@ class OwnerReadIndex:
             row = json.loads(text, parse_constant=_reject_constant)
         except (ValueError, RecursionError):
             raise _Issue("invalid_json") from None
-        budget.decoded += 1
         if validator is not None:
             try:
                 accepted = validator(copy.deepcopy(row))
@@ -1352,7 +1366,7 @@ class OwnerReadIndex:
 
     # LLM: 无 LF 末行可见但保留其起点；追加后重读该行，并保留旧 through 可见版本。
     # 函数用途: 按真实 byte offset 解析有限新记录，返回可提交前缀及未解码片段。
-    def _parse(self, descriptor, checkpoint, observed, document, validator, budget):
+    def _parse(self, descriptor, checkpoint, observed, document, validator, budget, *, skip_invalid_records=False):
         domain = checkpoint["domain"]
         start = 0 if document else checkpoint["sealed"]
         if not document and checkpoint["sealed"] == checkpoint["through"]:
@@ -1375,6 +1389,8 @@ class OwnerReadIndex:
         records = []
         committed = bytearray()
         error = None
+        skipped = 0
+        samples = []
         while budget.active():
             if document:
                 if len(buffer) < target:
@@ -1426,8 +1442,18 @@ class OwnerReadIndex:
                     raw, domain, False, validator, budget,
                 )
             except _Issue as failure:
-                error = failure.reason
-                break
+                if not skip_invalid_records or not has_lf:
+                    error = failure.reason
+                    break
+                skipped += 1
+                if len(samples) < 16:
+                    samples.append({'offset': cursor, 'stop': cursor + length, 'code': failure.reason})
+                # 已知坏行仅跳过投影，原字节仍进入同代次前缀证明；健康后继可继续推进。
+                committed.extend(raw)
+                del buffer[:length]
+                cursor += length
+                through = sealed = cursor
+                continue
             stop = cursor + length
             records.append((cursor, stop, payload, typed))
             committed.extend(raw)
@@ -1449,6 +1475,8 @@ class OwnerReadIndex:
             "sealed": sealed,
             "fragment": bytes(buffer),
             "error": error,
+            "skipped_records": skipped,
+            "record_errors": samples,
         }
 
     # LLM: 哈希和大正文准备均在 SQL 事务及内存锁外完成。
@@ -1543,6 +1571,14 @@ class OwnerReadIndex:
                     updated["sealed"], updated["complete"],
                 ),
             )
+            issue_count = checkpoint.get('skipped_records', 0) + parsed.get('skipped_records', 0)
+            issue_samples = (checkpoint.get('record_errors', []) + parsed.get('record_errors', []))[:16]
+            updated.update(skipped_records=issue_count, record_errors=issue_samples)
+            if issue_count:
+                connection.execute('INSERT INTO ori_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                    ('issues:' + updated['sid'], _json(dict(generation=updated['generation'], count=issue_count, samples=issue_samples))))
+            else:
+                connection.execute('DELETE FROM ori_meta WHERE key=?', ('issues:' + updated['sid'],))
             # 水位和代次已在同一事务更新，旧基线追加状态不再有效。
             connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + updated['sid'],))
             connection.commit()
@@ -1593,7 +1629,7 @@ class OwnerReadIndex:
                     try:
                         connection.execute(f"DELETE FROM {_TABLES[domain]} WHERE sid=?", (sid,))
                         connection.execute("DELETE FROM ori_spans WHERE sid=?", (sid,))
-                        connection.execute("DELETE FROM ori_meta WHERE key IN (?,?)", ("append:" + sid, "proof:" + sid))
+                        connection.execute("DELETE FROM ori_meta WHERE key IN (?,?,?)", ("append:" + sid, "proof:" + sid, "issues:" + sid))
                         deleted = connection.execute("DELETE FROM ori_sources WHERE sid=?", (sid,)).rowcount
                         connection.commit()
                     except BaseException:
@@ -1618,20 +1654,23 @@ class OwnerReadIndex:
     # 函数用途: 有界推进一个固定领域和相对来源的读投影。
     def advance(
         self, domain, relative_parts, *, validator=None,
-        max_rows=25000, max_bytes=33554432, max_ms=1500,
+        max_rows=25000, max_bytes=33554432, max_ms=1500, skip_invalid_records=False, deadline=None,
     ):
         lock = _home_advance_lock(self._home)
         with lock:
             return self._advance(domain, relative_parts, validator=validator,
-                                 max_rows=max_rows, max_bytes=max_bytes, max_ms=max_ms)
+                                 max_rows=max_rows, max_bytes=max_bytes, max_ms=max_ms,
+                                 skip_invalid_records=skip_invalid_records, deadline=deadline)
 
     # LLM: 进程内写推进由同 owner home 的可重入锁串行；进程间仍以SQLite事务和revision比较发布。
     # 函数用途: 执行锁内一次真实来源解析及检查点发布。
     def _advance(
         self, domain, relative_parts, *, validator=None,
-        max_rows=25000, max_bytes=33554432, max_ms=1500,
+        max_rows=25000, max_bytes=33554432, max_ms=1500, skip_invalid_records=False, deadline=None,
     ):
         budget = _Budget(max_rows, max_bytes, max_ms)
+        if deadline is not None:
+            budget.deadline = min(budget.deadline, deadline)
         self._last_advance_work = dict(items=0, bytes=0)
         if domain not in _TABLES:
             raise ValueError("unsupported domain")
@@ -1716,6 +1755,7 @@ class OwnerReadIndex:
                     )
                 parsed = self._parse(
                     descriptor, checkpoint, observed, document, validator, budget,
+                    skip_invalid_records=skip_invalid_records,
                 )
                 self._check_source(descriptor, parts, observed, parents)
                 checkpoint = self._publish(

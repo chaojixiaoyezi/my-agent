@@ -48,10 +48,17 @@ LANE_BINDINGS: dict[str, str] = {
     "gateway_history": "gateway_parts.gateway_history_index:maintain_gateway_history_lane",
     "gateway_input_refs": "gateway_parts.input_turn_retention:maintain_input_turn_refs_lane",
     "usage_sources": "conversation.usage_source_maintenance:maintain_usage_sources_lane",
-    "global_indexes": "user_space.home_indexes:maintain_home_indexes_lane",
+    "global_indexes": "user_space.home_index_rebuild:maintain_home_indexes_lane",
     "task_call_telemetry": "observability.task_call_retention:maintain_task_call_telemetry_lane",
     "thread_index": "conversation.thread_read_index:maintain_thread_index_lane",
 }
+# 无删除投影入口与原retire通道分开登记，不能因projection资格放行原删除动作。
+LANE_PROJECTION_BINDINGS = {
+    "global_indexes": LANE_BINDINGS["global_indexes"],
+    "thread_index": LANE_BINDINGS["thread_index"],
+    "task_call_telemetry": "observability.telemetry_ledger:maintain_tool_call_projection_lane",
+}
+
 # 压力只调整既有合格候选的通道次序，不缩短保留期。
 LANE_EVICTION_ORDER = (
     "display_archives", "conversation_messages", "compact_checkpoints", "local_events",
@@ -181,8 +188,8 @@ def validate_lane_receipt(receipt: object) -> dict:
 
 # LLM: 仅入口或其包父级缺失才回退；领域模块自身依赖失败必须交给调度器记录。
 # 函数用途: 惰性解析冻结映射中的领域通道入口。
-def resolve_storage_lane(kind: str) -> Callable[[StorageLaneRequest], dict] | None:
-    target = LANE_BINDINGS.get(kind)
+def resolve_storage_lane(kind: str, *, projection_only: bool = False) -> Callable[[StorageLaneRequest], dict] | None:
+    target = (LANE_PROJECTION_BINDINGS if projection_only else LANE_BINDINGS).get(kind)
     if target is None:
         return None
     module, attribute = target.split(":")

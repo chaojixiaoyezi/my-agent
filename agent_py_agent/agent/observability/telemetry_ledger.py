@@ -588,3 +588,66 @@ class ToolTelemetryLedger:
     # 函数用途: 保持工具统计成功形状。
     def aggregate_tool_stats(self, *, since=None, until=None):
         return require_complete(self.aggregate_tool_stats_report(since=since, until=until))['value']
+
+
+def maintain_tool_call_projection_lane(request) -> dict:
+    """每个既有维护tick先增量推进当前卷，再用剩余额度分页封口卷；绝不退役原账。"""
+    from ..user_space.directory_paging import directory_page
+
+    cursor = dict(request.cursor)
+    result = dict(cursor=cursor, complete=False, items=0, bytes=0, errors=[])
+    if request.budget.exhausted():
+        return result
+    if cursor.get('complete'):
+        cursor.clear()
+    owner = Path(request.home.owner_home_dir)
+    if cursor.get('phase', 'active') not in {'active', 'sealed'}:
+        raise ValueError('INVALID_TELEMETRY_PROJECTION_PHASE')
+
+    def project(source):
+        remaining_items = None if request.budget.max_items is None else request.budget.max_items - result['items']
+        remaining_bytes = None if request.budget.max_bytes is None else request.budget.max_bytes - result['bytes']
+        remaining_ms = request.budget.remaining_ms()
+
+        def operation():
+            index = OwnerReadIndex(owner)
+            view = index.advance('telemetry', (*PARTS, source),
+                max_rows=128 if remaining_items is None else remaining_items,
+                max_bytes=8388608 if remaining_bytes is None else remaining_bytes,
+                max_ms=1500 if math.isinf(remaining_ms) else max(1, int(remaining_ms)),
+                skip_invalid_records=True, deadline=request.budget.deadline)
+            return view, index._last_advance_work
+
+        view, work = request.run_write(operation)
+        result['items'] += work['items']
+        result['bytes'] += work['bytes']
+        result['errors'] = (result['errors'] + [
+            {'code': 'TELEMETRY_RECORD_SKIPPED', 'record_code': error['code'],
+             'offset': error['offset'], 'stop': error['stop']}
+            for error in view.get('record_errors', [])])[:16]
+        if view['status'] not in {'complete', 'partial'} and len(result['errors']) < 16:
+            result['errors'].append({'code': 'TELEMETRY_PROJECTION_UNAVAILABLE', 'reason': view['reason']})
+        return view
+
+    # 完成cursor只代表上一轮来源目录访问；原index generation/offset永远由OwnerReadIndex续接。
+    active = project('tool_calls.jsonl')
+    if active['status'] != 'complete' or request.budget.exhausted(result['items'], result['bytes']):
+        return result
+    prior_scan = dict(cursor.get('scan', {}))
+    names, position, done = directory_page(owner, PARTS, prior_scan, 1)
+    result['items'] += position.pop('last_scanned', len(names))
+    cursor.update(phase='sealed', scan=position)
+    if not names:
+        result['complete'] = done
+        if done:
+            cursor['complete'] = True
+        return result
+    source = names[0]
+    if _SEALED.fullmatch(source) is None:
+        return result
+    if request.budget.exhausted(result['items'], result['bytes']):
+        cursor['scan'] = prior_scan
+        return result
+    if project(source)['status'] != 'complete':
+        cursor['scan'] = prior_scan
+    return result

@@ -1160,6 +1160,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     from .storage_lanes import (
         LANE_BINDINGS,
         LANE_EVICTION_ORDER,
+        LANE_PROJECTION_BINDINGS,
         STORAGE_LANE_SLICE_ENTRIES,
         StorageLaneBudget,
         StorageLaneRequest,
@@ -1170,7 +1171,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     scan_limits = RetentionScanBudget.default(config)
     lane_ms = max(0.0, (scan_limits.deadline - time.monotonic()) * 1000)
     registry = storage_kind_registry()
-    projection_kinds = {'global_indexes', 'thread_index'}
+    projection_kinds = set(LANE_PROJECTION_BINDINGS)
     from ..gateway_parts.multiprocess_mode import current_worker_partition
 
     global_allowed = (coordinator or include_global_indexes) and current_worker_partition() is None
@@ -1199,7 +1200,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                 if (not valid_identity or not owner_id or Path(home.owner_home_dir) != Path(home.root) / 'owners' / owner_id
                         or '..' in Path(owner_id).parts or Path(owner_id).is_absolute()):
                     raise ValueError('CANONICAL_OWNER_SCOPE_REQUIRED')
-            lane = resolve_storage_lane(kind.kind)
+            lane = resolve_storage_lane(kind.kind, projection_only=not retention_safe)
             if lane is None:
                 lane_fallbacks.append(kind.kind)
                 return preservation_receipt(kind, home, cursor, budget)
@@ -1233,7 +1234,10 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                              and (kind.kind != 'global_indexes' or global_allowed)}
             # 空适配器的旧延期过渡会清空pending；同轮协调者续作须恢复原集合，不能重开已完成通道。
             if original.get('continuation_pending') and isinstance(original.get('coordinator_lanes'), dict):
-                state['pending_kinds'] = original.get('pending_kinds')
+                state['pending_kinds'] = list(dict.fromkeys([*(original.get('pending_kinds') or ()),
+                    *(key for key in lane_adapters if key in projection_kinds
+                      and (key not in original.get('cursors', {})
+                           or original.get('cursors', {}).get(key, {}).get('complete') is True))]))
             lane_state = run_storage_maintenance_slice(state, lane_adapters,
                 max_items=len(LANE_BINDINGS) * STORAGE_LANE_SLICE_ENTRIES,
                 max_seconds=len(LANE_BINDINGS) * _OWNER_LANE_SLICE_MS / 1000, order=order)

@@ -34,19 +34,19 @@ def test_memory_error_does_not_block_non_destructive_lanes(tmp_path, monkeypatch
         request.run_write(lambda: commits.append(request.kind))
         return dict(cursor={}, complete=True, items=1, bytes=2)
 
-    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', lambda kind: lane)
+    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', lambda kind, **kwargs: lane)
     state = maintenance.run_owner_storage_maintenance_slice(
         home, {}, retention, now=1, coordinator=True, config=config,
         commit_transition=lambda op: op())
-    assert {request.kind for request in requests} == {'global_indexes', 'thread_index'}
-    assert set(commits) == {'global_indexes', 'thread_index'}
+    assert {request.kind for request in requests} == {'global_indexes', 'thread_index', 'task_call_telemetry'}
+    assert set(commits) == {'global_indexes', 'thread_index', 'task_call_telemetry'}
     assert state['deletion_enabled'] is False
     assert state['deferred_reason'] == 'coordinator_adapter_protocol_required'
 
 
 def test_outer_exhausted_zero_is_not_reopened(tmp_path, monkeypatch):
     home, config, retention = setup_wiring(tmp_path, monkeypatch)
-    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', lambda kind: pytest.fail('zero budget must not resolve lane'))
+    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', lambda kind, **kwargs: pytest.fail('zero budget must not resolve lane'))
     original = maintenance.run_storage_maintenance_slice
 
     def exhausted(previous, adapters, **kwargs):
@@ -64,7 +64,7 @@ def test_outer_exhausted_zero_is_not_reopened(tmp_path, monkeypatch):
 def test_canonical_owner_required_without_guessing(tmp_path, monkeypatch):
     home, config, retention = setup_wiring(tmp_path, monkeypatch)
     home = replace(home, owner_id='')
-    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', lambda kind: pytest.fail('invalid scope must not resolve lane'))
+    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', lambda kind, **kwargs: pytest.fail('invalid scope must not resolve lane'))
     state = maintenance.run_owner_storage_maintenance_slice(home, {}, retention, now=1,
         coordinator=True, config=config, commit_transition=lambda op: op())
     assert state['errors'][0]['error_type'] == 'ValueError'
