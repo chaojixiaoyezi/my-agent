@@ -497,17 +497,17 @@ def advance_pending_closeout(
     *, save_task: Callable[[SubAgentTask], object], notify_result: CloseoutNotifier,
 ) -> dict[str, Any]:
     with gateway_short_transaction('child_advance_pending_closeout_commit'):
+        remaining = _closeout_retry_backoff_remaining(fact, time.time())
+        if remaining > 0:
+            # LLM: 退避窗口内不读盘、不重试、不刷新事实、不写事件——避免每次巡检重复读取解码
+            #   结果文件以及每 60 秒一次的无谓 settle 与诊断洪泛；窗口到期后自然回到正常推进链。
+            return {"advanced": False, "state": "backoff_wait",
+                    "retry_after_seconds": round(remaining, 3)}
         params = _CloseoutReplayParams(fact)
         result = _load_persisted_runner_result(fact)
         if result is None:
             # runner_result 落盘缺失说明事实与持久化结果不一致：保持事实并留诊断，绝不伪造结论。
             return {"advanced": False, "state": "runner_result_missing"}
-        remaining = _closeout_retry_backoff_remaining(fact, time.time())
-        if remaining > 0:
-            # LLM: 退避窗口内不重试、不刷新事实、不写事件——避免每 60 秒一次的无谓 settle 与
-            #   诊断洪泛；窗口到期后自然回到正常推进链，/recover 改变 run 状态后同样如此。
-            return {"advanced": False, "state": "backoff_wait",
-                    "retry_after_seconds": round(remaining, 3)}
         outcome = settle_runtime_run_for_result(repo, params=params, task=task, result=result)
         if outcome.get("state") in REJECTED_CLOSEOUT_STATES:
             # LLM: 被拒（与权威终态冲突 / 已换代）不是"以后可能成"——重试永远不会成功。

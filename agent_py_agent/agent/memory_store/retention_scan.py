@@ -956,12 +956,9 @@ def _budgeted_pin_projection(context):
             for key in tuple(context.scan_cursor):
                 if isinstance(key, str) and key.startswith(("conversation:", "snapshot:")):
                     context.scan_cursor.pop(key)
-            if snapshot.paused:
-                # 跨片旧代次只丢弃并重建；不能在恢复入口偷偷退回无预算全扫。
-                context.scan_partial = True
-                return None, False
-            # 保留原代次竞争的有界重试/目标隔离合同；预算暂停从不进入这个异常分支。
-            return current_retention_pins(context.home, context.conversation_roots, context.errors, now=context.now), False
+            # 任一代次变化均在后续预算切片重新开始，严禁在暂停前退回同步无预算全扫。
+            context.scan_partial = True
+            return None, False
         context.errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE",
             str(getattr(exc, "filename", "") or ""), type(exc).__name__))
         return (_RetentionPins(owner, complete=False), False), False
