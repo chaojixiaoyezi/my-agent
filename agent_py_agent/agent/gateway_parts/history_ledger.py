@@ -193,10 +193,10 @@ _DISCOVERY = OrderedDict()
 _DISCOVERY_LOCK = threading.Lock()
 
 
-def legacy_repair_page(directory, limit=1000):
+def legacy_repair_page(directory, limit=1000, *, progress=None):
     key = str(directory)
     stamp = directory.stat()
-    identity = (stamp.st_dev, stamp.st_ino)
+    identity = (stamp.st_dev, stamp.st_ino, stamp.st_mtime_ns, stamp.st_ctime_ns)
     now = time.monotonic()
     with _DISCOVERY_LOCK:
         for stale_key, item in list(_DISCOVERY.items()):
@@ -221,12 +221,31 @@ def legacy_repair_page(directory, limit=1000):
                 rows.append(next(item[2]))
         except StopIteration:
             item[1].close()
+            if progress is not None:
+                progress.update(legacy_entries_advanced=len(rows), legacy_source_stamp=identity)
             return rows, True
         except BaseException:
             item[1].close()
             raise
         _DISCOVERY[key] = (item[0], item[1], item[2], now)
+        if progress is not None:
+            progress.update(legacy_entries_advanced=len(rows), legacy_source_stamp=identity)
         return rows, False
+
+
+def acknowledge_legacy_repair_page(directory, *, succeeded):
+    """原账锁内确认本轮删除；失败必须从头重验，不能丢掉失败页。"""
+    key = str(directory)
+    with _DISCOVERY_LOCK:
+        item = _DISCOVERY.pop(key, None)
+        if item is None:
+            return
+        if not succeeded or not directory.exists():
+            item[1].close()
+            return
+        stamp = directory.stat()
+        identity = (stamp.st_dev, stamp.st_ino, stamp.st_mtime_ns, stamp.st_ctime_ns)
+        _DISCOVERY[key] = (identity, item[1], item[2], item[3])
 
 
 def _close_discovery():

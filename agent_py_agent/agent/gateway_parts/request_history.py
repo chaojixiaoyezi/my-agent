@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,7 @@ from ..conversation.learning_source import (
     thread_source_projection,
     user_dialogue_projection,
 )
+from ..conversation.message_scan import TRANSCRIPT_MAX_SEGMENT_BYTES
 from ..conversation.native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     canonical_native_messages_envelope,
@@ -44,7 +46,12 @@ from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..tooling.operation_verification import public_operation_verification
 from ..turn_end import normalize_turn_end_reason, result_turn_end_reason
 from . import request_binding
-from .history_ledger import GatewayHistoryLedger, HistoryIndexPending, legacy_repair_page
+from .history_ledger import (
+    GatewayHistoryLedger,
+    HistoryIndexPending,
+    acknowledge_legacy_repair_page,
+    legacy_repair_page,
+)
 from .io import (
     read_json_file_report,
 )
@@ -604,8 +611,30 @@ def append_gateway_conversation_message(
     try:
         ledger = GatewayHistoryLedger(store)
         progress = {}
+        if role == 'user' and (ledger.path.exists() or (Path(store.storage.root) / 'message_repairs').exists()):
+            repair_gateway_conversation_messages(store, conversation.thread_id, [], progress=progress)
+            snapshot = getattr(conversation, 'history_repair_progress', {})
+            changed = (progress.get('transcript_appended', 0) > 0 or
+                       bool(snapshot) and snapshot.get('legacy_source_stamp') != progress.get('legacy_source_stamp'))
+            if not history_repair_ready(progress) or changed:
+                pending = GatewayHistoryPreparationPending(request, conversation.thread_id, progress)
+                if defer_index_pending and pending.progressed:
+                    raise pending
+                raise HistoryIndexPending('GATEWAY_HISTORY_CONTEXT_CHANGED: user append not_started; reload context before execution')
         with ledger.connection() as ledger_conn:
             ready = ledger.catch_up(ledger_conn, conversation.thread_id, progress=progress)
+            if role == 'user':
+                source = getattr(conversation, 'history_repair_progress', {}) or progress
+                remaining = ledger_conn.execute("SELECT 1 FROM repairs WHERE thread=? LIMIT 1", (conversation.thread_id,)).fetchone()
+                changed = source.get('legacy_source_stamp') != _legacy_source_stamp(Path(store.storage.root) / 'message_repairs')
+                if remaining or changed:
+                    # 已持有原账锁，复用连接完成一片补交；不能递归获取非重入锁。
+                    race_progress = {}
+                    _repair_gateway_conversation_messages(store, conversation.thread_id, [],
+                        progress=race_progress, connection=ledger_conn)
+                    ledger_conn.commit()
+                    progress.update(race_progress)
+                    ready = False
             if ready:
                 normalized_part_id = (
                     str(assistant_part_id or "final").strip() or "final" if role == "assistant" else ""
@@ -778,73 +807,117 @@ def _queue_gateway_conversation_repair(
 # LLM: 原锁内封口后按thread/request/part补交；隔离失败也降级，坏包不占100个可读包预算，去重仍保守，不重做工具。
 # 函数用途: 在加载历史前修复半行和该线程延迟消息，坏修复包不阻断其他线程。
 def repair_gateway_conversation_messages(
-    store: object,
-    thread_id: str,
-    load_errors: list[dict],
+    store: object, thread_id: str, load_errors: list[dict], *,
+    progress=None, limit=None, max_bytes=None, deadline=None, migrate_only=False,
 ) -> None:
-    try:
-        store.messages.seal_torn_tail(thread_id)
-    except Exception as exc:
-        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.tail_seal"))
+    _repair_gateway_conversation_messages(store, thread_id, load_errors, progress=progress,
+        limit=limit, max_bytes=max_bytes, deadline=deadline, migrate_only=migrate_only)
+
+
+def _repair_gateway_conversation_messages(
+    store, thread_id, load_errors, *, progress=None, limit=None,
+    max_bytes=None, deadline=None, migrate_only=False, connection=None,
+):
+    report = dict(repair_thread_id=thread_id, legacy_complete=False,
+                  legacy_source_stamp=None, legacy_entries_advanced=0, repairs_imported=0,
+                  repairs_consumed=0, transcript_appended=0, repairs_remaining=True,
+                  index_ready=False, repair_error=False, repair_error_code="", visited_entries=0, visited_bytes=0)
+    budget = 1000 if limit is None else max(0, limit)
+    byte_budget = TRANSCRIPT_MAX_SEGMENT_BYTES if max_bytes is None else max(0, max_bytes)
     root = getattr(getattr(store, "storage", None), "root", None)
-    repair_dir = Path(root) / "message_repairs" if root else None
-    if repair_dir is None:
+    if root is None:
+        report.update(repair_error=True, repair_error_code="GATEWAY_HISTORY_ROOT_MISSING")
+        if progress is not None:
+            progress.update(report)
         return
+    repair_dir = Path(root) / "message_repairs"
     ledger = GatewayHistoryLedger(store)
-    # 旧目录仅做有界迁移入口。提交队列后才删旧文件，崩溃重入按原路径去重。
-    # 尚未迁移完整时不消费部分队列，避免文件枚举顺序抢先决定成功 attempt。
-    exhausted = False
-    candidates = []
-    exhausted = True
-    if repair_dir.exists():
-        candidates, exhausted = legacy_repair_page(repair_dir)
-    for entry in candidates:
-        if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
-            continue
-        path = Path(entry.path)
-        report = read_json_file_report(path, context="gateway.conversation.repair.read")
-        if report.load_error is not None:
-            try:
-                archived = archive_ledger_file(path, repair_dir / LEDGER_ARCHIVE_DIR)
-            except Exception as exc:
-                archived = False
-                _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.repair.quarantine"))
-            _degrade(load_errors, report.load_error)
-            logger.warning("GATEWAY_REPAIR_FILE_QUARANTINED path=%s archived=%s", path, archived)
-            continue
-        try:
-            with ledger.connection() as conn:
-                # 锁内重读同名包，防排队者在首读后原子替换，再被迁移误删。
-                if not path.exists():
-                    continue
-                current = read_json_file_report(path, context="gateway.conversation.repair.read")
-                if current.load_error is not None:
-                    raise DataCorruptionError(str(current.load_error))
-                ledger.import_repair(conn, entry.name, current.payload, path.stat().st_mtime_ns)
-                conn.commit()
-                path.unlink(missing_ok=True)
-        except Exception as exc:
-            load_errors.append(runtime_error_report(exc, context="gateway.conversation.repair.import"))
-            exhausted = False
-    if not exhausted:
-        _degrade(load_errors, runtime_error_report(
-            HistoryIndexPending("GATEWAY_REPAIR_MIGRATION_PENDING: bounded import incomplete; no transcript append, retry"),
-            context="gateway.conversation.repair.migration"))
-        return
+    append_attempted = False
     try:
-        with ledger.connection() as conn:
-            if conn.execute("SELECT 1 FROM repairs WHERE thread=? LIMIT 1", (thread_id,)).fetchone() is None:
+        if thread_id and not migrate_only:
+            try:
+                store.messages.seal_torn_tail(thread_id)
+            except Exception as exc:
+                report.update(repair_error=True, repair_error_code=type(exc).__name__)
+                _degrade(load_errors, runtime_error_report(exc, context='gateway.conversation.tail_seal'))
                 return
-            if not ledger.catch_up(conn, thread_id):
+        with (ledger.connection() if connection is None else nullcontext(connection)) as conn:
+            discovery = {}
+            candidates, exhausted = legacy_repair_page(repair_dir, budget, progress=discovery) if repair_dir.exists() else ([], True)
+            report['visited_entries'] = len(candidates)
+            expected_stamp = _legacy_source_stamp(repair_dir)
+            imported = visited = used = 0
+            quarantine_failed = False
+            succeeded = False
+            try:
+                for entry in candidates:
+                    if _legacy_source_stamp(repair_dir) != expected_stamp:
+                        raise DataCorruptionError('GATEWAY_REPAIR_SOURCE_CHANGED: discard discovery cursor and reconcile fresh source')
+                    if deadline is not None and time.monotonic() >= deadline:
+                        exhausted = False
+                        break
+                    visited += 1
+                    if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+                        continue
+                    path = Path(entry.path)
+                    size = path.stat().st_size
+                    if used + size > byte_budget:
+                        visited -= 1
+                        exhausted = False
+                        break
+                    used += size
+                    current = read_json_file_report(path, context="gateway.conversation.repair.read")
+                    if current.load_error is not None:
+                        try:
+                            archived = archive_ledger_file(path, repair_dir / LEDGER_ARCHIVE_DIR)
+                        except Exception as exc:
+                            archived = False
+                            _degrade(load_errors, runtime_error_report(exc, context='gateway.conversation.repair.quarantine'))
+                        expected_stamp = _legacy_source_stamp(repair_dir)
+                        quarantine_failed |= not archived
+                        _degrade(load_errors, current.load_error)
+                        logger.warning('GATEWAY_REPAIR_FILE_QUARANTINED path=%s archived=%s', path, archived)
+                        continue
+                    ledger.import_repair(conn, entry.name, current.payload, path.stat().st_mtime_ns)
+                    conn.commit()
+                    imported += 1
+                    path.unlink(missing_ok=True)
+                    expected_stamp = _legacy_source_stamp(repair_dir)
+                if _legacy_source_stamp(repair_dir) != expected_stamp:
+                    raise DataCorruptionError('GATEWAY_REPAIR_SOURCE_CHANGED: discard discovery cursor and reconcile fresh source')
+                conn.commit()
+                succeeded = visited == len(candidates) and not quarantine_failed
+            finally:
+                acknowledge_legacy_repair_page(repair_dir, succeeded=succeeded)
+            report.update(legacy_complete=exhausted and succeeded,
+                          legacy_entries_advanced=visited if not exhausted or imported else 0, repairs_imported=imported,
+                          legacy_source_stamp=_legacy_source_stamp(repair_dir),
+                          visited_entries=len(candidates), visited_bytes=used)
+            if quarantine_failed:
+                report.update(repair_error=True, repair_error_code='GATEWAY_REPAIR_QUARANTINE_FAILED')
+            if not report["legacy_complete"] and not (exhausted and quarantine_failed):
                 _degrade(load_errors, runtime_error_report(
-                    HistoryIndexPending("GATEWAY_HISTORY_INDEX_PENDING: canonical index incomplete; no transcript append, retry"),
-                    context="gateway.conversation.repair.index"))
+                    HistoryIndexPending('GATEWAY_REPAIR_MIGRATION_PENDING: bounded import incomplete; no transcript append, retry'),
+                    context='gateway.conversation.repair.migration'))
+                return
+            if migrate_only:
+                return
+            report["index_ready"] = ledger.catch_up(conn, thread_id, progress=report)
+            if not report["index_ready"]:
                 return
             pending = conn.execute(
-                "SELECT id,payload FROM repairs WHERE thread=? ORDER BY queued,id LIMIT 100",
-                (thread_id,),
+                "SELECT id,length(CAST(payload AS BLOB)) FROM repairs WHERE thread=? ORDER BY queued,id LIMIT ?",
+                (thread_id, min(100, max(0, budget - visited))),
             ).fetchall()
-            for repair_id, raw in pending:
+            report['visited_entries'] += len(pending)
+            consumed = 0
+            for repair_id, size in pending:
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                if used + size > byte_budget:
+                    break
+                used += size
+                raw = conn.execute('SELECT payload FROM repairs WHERE id=?', (repair_id,)).fetchone()[0]
                 payload = json.loads(raw)
                 metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
                 if not ledger.matches(
@@ -855,15 +928,40 @@ def repair_gateway_conversation_messages(
                     execution_attempt_id=str(metadata.get("gateway_execution_attempt_id") or ""),
                     turn_end_reason=str(metadata.get("turn_end_reason") or ""),
                 ):
+                    append_attempted = True
                     store.messages.append(payload)
+                    report["transcript_appended"] += 1
                     if not ledger.catch_up(conn, thread_id):
                         raise HistoryIndexPending("GATEWAY_HISTORY_INDEX_PENDING: append committed, indexing pending; retry safely")
                 conn.execute("DELETE FROM repairs WHERE id=?", (repair_id,))
+                consumed += 1
+                report['visited_bytes'] = used
+            conn.commit()
+            report["repairs_consumed"] = consumed
+            report["repairs_remaining"] = conn.execute("SELECT 1 FROM repairs WHERE thread=? LIMIT 1", (thread_id,)).fetchone() is not None
     except Exception as exc:
-        error = runtime_error_report(exc, context="gateway.conversation.repair.append")
-        error.update(transcript_side_effects="unknown",
-                     next_action="Retry reconciliation against canonical history; do not rerun model or tools")
+        report.update(repair_error=True, repair_error_code=type(exc).__name__,
+                      legacy_entries_advanced=0, repairs_imported=0, repairs_consumed=0)
+        error = runtime_error_report(exc, context="gateway.conversation.repair")
+        error.update(transcript_side_effects='unknown' if append_attempted else 'not_started',
+                     next_action='Reconcile canonical history and queue; do not rerun model or tools')
         load_errors.append(error)
+    finally:
+        if progress is not None:
+            progress.update(report)
+
+
+def _legacy_source_stamp(directory):
+    try:
+        info = directory.stat()
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def history_repair_ready(progress):
+    return (progress.get("legacy_complete") is True and progress.get("repairs_remaining") is False
+            and progress.get("index_ready") is True and progress.get("repair_error") is False)
 
 
 # LLM: Dedupe uses request plus a host-authored assistant part id. Legacy assistant rows without

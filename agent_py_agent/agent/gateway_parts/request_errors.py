@@ -49,6 +49,11 @@ class GatewayHistoryPreparationPending(RuntimeError):
 
     @property
     def progressed(self):
+        if self.progress.get('repair_error') is True:
+            return False
+        if any(type(self.progress.get(key)) is int and self.progress[key] > 0
+               for key in ('legacy_entries_advanced', 'repairs_imported', 'repairs_consumed')):
+            return True
         before, after = self.progress.get('cursor_before'), self.progress.get('cursor_after')
         removed, end = self.progress.get('reset_removed'), self.progress.get('source_end')
         return (type(end) is int and end >= 0 and (

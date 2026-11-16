@@ -85,6 +85,7 @@ class GatewayWorkspaceSelection:
 # 类用途: 保存本轮会话、工作目录与可选只读压缩来源，展示历史不能取代原文来源。
 @dataclass(frozen=True)
 class GatewayConversationContext:
+    history_repair_progress: dict[str, object] = field(default_factory=dict, kw_only=True, repr=False)
     thread_id: str = ""
     cwd: str = ""
     runtime_workspace_roots: tuple[str, ...] = ()
@@ -166,6 +167,7 @@ class GatewayConversationLoadRequest:
     model_surface: ConversationCompactModelSurface | None = None
     on_thread_loaded: Callable[[object], None] | None = None
     defer_compact: bool = False
+    allow_history_defer: bool = field(default=False, kw_only=True)
 
 
 # LLM: 压缩开始先按捕获代次CAS把数值遥测存入准确线程，再发布事件；该数据只用于展示，不是历史、计费或压缩权威。
@@ -266,9 +268,17 @@ def gateway_conversation_context(
             load_errors=(thread_error or {"error_code": "thread_unavailable"},)
         )
     _bind_gateway_stream_identity(inputs, thread, include_model=True)
+    repair_progress = {}
+    request_history.repair_gateway_conversation_messages(store, thread.thread_id, load_errors, progress=repair_progress)
+    if not request_history.history_repair_ready(repair_progress):
+        from .request_errors import ConversationPersistenceError, GatewayHistoryPreparationPending
+        pending = GatewayHistoryPreparationPending(inputs.request, thread.thread_id, repair_progress)
+        if inputs.allow_history_defer and pending.progressed:
+            raise pending
+        raise ConversationPersistenceError(
+            "GATEWAY_HISTORY_REPAIR_UNSETTLED: history not ready; do not replay model/tools; reconcile history first")
     if inputs.on_thread_loaded is not None and not force_compact:
         inputs.on_thread_loaded(thread)
-    request_history.repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
     scope = conversation_scope(agent, thread, spec)
     request_history.ensure_gateway_conversation_index(agent, store, thread.thread_id)
     thread, history_rows, _history_token_budget, recent_operation_evidence, compact_source, compact_context = (
@@ -320,6 +330,7 @@ def gateway_conversation_context(
             if str(item or "").strip()
         ),
         learning_source=_gateway_effective_learning_source(agent, thread),
+        history_repair_progress=repair_progress,
         compact_summary=compact_context.view.summary,
         compact_operation_evidence=dict(compact_context.view.operation_evidence),
         compact_operation_evidence_ref=(

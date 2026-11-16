@@ -8,6 +8,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 from ..common.cancellation import ToolCancelled
@@ -614,9 +615,13 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
     agents_by_key = {str(item.home_paths.owner_home_dir): item for item in candidates}
     agents = list(agents_by_key.values())
     owner_keys = frozenset(agents_by_key)
+    positions = cursor.setdefault('repair_threads', {})
+    for key in positions.keys() - owner_keys:
+        positions.pop(key)
     position = int(cursor.get("owner", 0))
     config = getattr(base_agent, "config", None)
     remaining = getattr(config, "retention_scan_slice_entries", default_config_int("retention_scan_slice_entries"))
+    remaining_bytes = getattr(config, 'retention_scan_slice_bytes', default_config_int('retention_scan_slice_bytes'))
     deadline = time.monotonic() + getattr(config, "retention_scan_slice_ms", default_config_int("retention_scan_slice_ms")) / 1000
     report = {"checked": 0, "compacted": 0, "failed": 0}
     maximum = getattr(getattr(base_agent, "config", None), "memory_compact_idle_max_per_tick", 2)
@@ -646,6 +651,46 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
             if store is None:
                 continue
             key = str(agent.home_paths.owner_home_dir)
+            # 每个 owner 一片迁移，再按索引轮转线程；忙线程也推进游标。
+            from . import request_history
+            from .history_ledger import GatewayHistoryLedger
+            ledger = GatewayHistoryLedger(store)
+            repair_thread = None
+            if ledger.path.exists() or (Path(store.storage.root) / 'message_repairs').exists():
+                pin = pool.pin(agent, touch=False) if pool is not None and agent is not base_agent else nullcontext()
+                with pin:
+                    migration = {}
+                    request_history.repair_gateway_conversation_messages(
+                        store, '', [], limit=min(remaining, 1000), deadline=deadline, max_bytes=remaining_bytes, migrate_only=True, progress=migration)
+                    remaining -= migration.get('visited_entries', 0)
+                    remaining_bytes -= migration.get('visited_bytes', 0)
+                    with ledger.connection() as conn:
+                        found = conn.execute('SELECT thread FROM repairs WHERE thread > ? ORDER BY thread LIMIT 1',
+                                             (positions.get(key, ''),)).fetchone()
+                    if found:
+                        repair_thread = found[0]
+                        positions[key] = repair_thread
+                    else:
+                        positions[key] = ''
+            if repair_thread is not None:
+                remaining -= 1
+                thread_id = repair_thread
+                row, error = store.threads.load_report(thread_id)
+                report['checked'] += 1
+                if error or row is None:
+                    report['failed'] += 1
+                    continue
+                if not idle_compact_busy_state(agent, store, row):
+                    pin = pool.pin(agent, touch=False) if pool is not None and agent is not base_agent else nullcontext()
+                    with pin:
+                        errors = []
+                        repair_progress = {}
+                        request_history.repair_gateway_conversation_messages(store, thread_id, errors, limit=max(0, remaining),
+                            deadline=deadline, max_bytes=max(0, remaining_bytes), progress=repair_progress)
+                        remaining -= repair_progress.get('visited_entries', 0)
+                        remaining_bytes -= repair_progress.get('visited_bytes', 0)
+                    report['failed'] += bool(errors)
+                continue
             scan = scans.setdefault(key, DirectoryCursor())
             while remaining > 0 and time.monotonic() < deadline:
                 remaining -= 1
