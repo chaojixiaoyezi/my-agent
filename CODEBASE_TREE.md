@@ -5366,3 +5366,26 @@ agent_py_agent/
 ```
 
 关键文件说明：`feishu_agent_panel.py` 为飞书平台提供任务总览与子代理层级控制卡片，支持个人私聊、群聊公开摘要及群任务私聊详情三种受众模式，集成 14 天自动换卡机制与双重会话锁保护。
+
+## 2026-11-16 闭环全量修复与真实模型复验回归入口
+
+```text
+|-- agent_py_agent/tests/test_clfix_w1_lease_busy_beat.py              # 租约心跳忙拍不计失败、被接替尝试的迟到归档判为陈旧认领
+|-- agent_py_agent/tests/test_clfix_d1_stop_requeued_turn.py           # /stop 按快照精确停止被租约恢复重排入队的原回合
+|-- agent_py_agent/tests/test_clfix_w2_asset_shared_read_lock.py       # 资产只读快照共享读锁、写者仍互斥与锁身份核验
+|-- agent_py_agent/tests/test_clfix_w3_quiet_cache_trust.py            # 静默空结果缓存按来源稳定时间信任、逐范围失效与瞬时双链接
+|-- agent_py_agent/tests/test_clfix_w4_run_index_pending_scope.py      # 子代理索引未完成提交只影响本范围读取
+|-- agent_py_agent/tests/test_clfix_w5_business_schema_cache.py        # 业务结果校验冻结 Schema 闭包缓存与精确类型解冻
+|-- agent_py_agent/tests/test_clfix_w6_script_local_failure_outcome.py # 本地脚本已观测非零退出记为确定失败并按声明重试
+|-- agent_py_agent/tests/test_clfix_d4_host_error_not_started.py       # 宿主错误声明未开始时工具结果保留 not_started
+|-- agent_py_agent/tests/test_clfix_d3_maintenance_partial_pacing.py   # 无进展的未完成 owner 维护按压力重排间隔续作
+|-- agent_py_agent/tests/test_clfix_d7_recover_unsettled_operations.py # /recover 无阻塞时只读列出本线程未结清的未知工具操作
+|-- agent_py_agent/tests/test_d2_curator_breaker_shrink_quarantine.py  # 策展熔断后缩小批次并隔离确定性坏项
+|-- agent_py_agent/tests/test_workflow_run_scope_asset_register.py     # 空间工作流运行产物的读取与业务资产登记
+|-- agent_py_agent/tests/test_scheduler_tool_rule_receipt_code.py      # 零模型工具规则投递失败记录回执合同错误码
+|-- agent_py_agent/tests/test_skill_search_learned_lifecycle.py        # skill_search get 返回自学技能版本与修订
+|-- agent_py_agent/tests/test_remember_scope_key_guidance.py           # remember 作用域键的合法形态说明与修复提示
+|-- agent_py_agent/tests/test_background_agent_limit_guidance.py       # 后台代理名额上限提示复用与 drain 退役
+|-- agent_py_agent/tests/test_messages_list_unknown_target.py          # messages.list 未知目标返回 OBSERVATION_NOT_FOUND
+`-- agent_py_agent/tests/test_subagent_input_visible_roots_guidance.py # 子代理输入路径不可见时只列出其真实可读根
+```
