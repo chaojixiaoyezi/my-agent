@@ -290,8 +290,11 @@ class TaskCallInspector:
         append_text_beneath(self._home, (*PARTS, "task_calls_index.jsonl"), blob)
 
     # LLM: 保存前验证并递归脱敏；JSON 原子提交后按需同步索引，追加轮次且索引已存在时不重扫目录。
+    #   元数据是遥测投影不是权威：原子替换但不刷盘（durable=False），读者对坏/缺文件已按缺失处理。
+    #   redact_payload=False 只给轮次追加：已存元数据在首次保存时已脱敏，新增内容只来自已脱敏的新轮次行。
     # 函数用途: 在原锁内验证并保存元数据，轮次的单一追加源按需迁移与组装。
-    def _save(self, payload, *, sync_index: bool = True, include_rounds: bool = True, replace_rounds: bool = False):
+    def _save(self, payload, *, sync_index: bool = True, include_rounds: bool = True, replace_rounds: bool = False,
+              redact_payload: bool = True, write: bool = True):
         data = dict(payload)
         rounds_state = data.pop("_rounds", None)
         if data.pop("schema", SCHEMA) != SCHEMA:
@@ -321,12 +324,14 @@ class TaskCallInspector:
         if any(not isinstance(v, list) for v in (item.runs, item.rounds, item.artifacts)) or not isinstance(item.mounted_assets, dict):
             raise ValueError("invalid task collections")
         item.token_usage = _sum_usage(item.rounds) if item.rounds else _usage(item.token_usage)
-        row = redact_sensitive_value(item.to_dict())
+        row = redact_sensitive_value(item.to_dict()) if redact_payload else item.to_dict()
         if rounds_state is not None:
             row["_rounds"] = rounds_state
+        if not write:
+            return row
         if item.rounds or replace_rounds:
             row = prepare_task_rounds(self._home, row, replace=replace_rounds)
-        write_text_atomic_beneath(self._home, _path(item.task_id), _encode(row))
+        write_text_atomic_beneath(self._home, _path(item.task_id), _encode(row), durable=False)
         if sync_index:
             self._write_index(row)
         return hydrate_task_rounds(self._home, row) if include_rounds else None
@@ -352,6 +357,8 @@ class TaskCallInspector:
             return self._save({**existing, **payload}, replace_rounds="rounds" in payload)
 
     # LLM: 原 owner 锁串行源与摘要；两者不是跨文件原子事务，详情明确披露未追平的摘要。
+    #   已读到的元数据直接交给追加（不再二次读与解析）；新任务先只在内存规范化/脱敏，由追加在建好轮次源后
+    #   第一次写入带水位的元数据（省掉一次不带水位的中间写），中断后仍按原确定性代次复用同一轮次源。
     # 函数用途: 追加模型轮次、补齐对应运行节点并刷新累计用量。
     def append_round(self, task_id, round_data, *, create_if_missing: bool = False, include_rounds: bool = True) -> dict | None:
         _path(task_id)
@@ -367,9 +374,9 @@ class TaskCallInspector:
                                      thread_id=str(round_data.get("thread_id") or ""),
                                      started_at=float(round_data.get("started_at") or time.time()),
                                      root_run_id=str(round_data.get("root_run_id") or "")).to_dict()
-                self._save(row, sync_index=include_rounds, include_rounds=False)
-            _append_task_round_unlocked(self._home, task_id, data)
-            if include_rounds and self._index_missing():
+                row = self._save(row, sync_index=False, include_rounds=False, write=False)
+            _append_task_round_unlocked(self._home, task_id, data, metadata=row)
+            if include_rounds and (created or self._index_missing()):
                 self._write_index(self._read(task_id))
             return self._read(task_id, include_rounds=True) if include_rounds else None
 

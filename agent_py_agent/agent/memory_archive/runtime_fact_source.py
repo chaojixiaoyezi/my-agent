@@ -16,12 +16,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import locked_json_path, write_private_text_file_atomic
+from ..common.json_io import (
+    locked_json_path,
+    private_text_file_matches,
+    write_private_text_file_atomic,
+)
 from ..common.nofollow_fs import ensure_private_dir
 from ..common.safe_id import safe_id
 from ..common.value_parsing import dedupe_strings
 from ..run_intent import _MAX_FACT_FILES, build_run_intent, run_intent_payload
-from ..run_intent_index import update_locator
+from ..run_intent_index import read_locator, update_locator
 from .runtime_workspace_outputs import run_intent_has_desired_outputs, runtime_desired_outputs
 
 
@@ -49,6 +53,8 @@ class RuntimeFactSourceRequest:
     incremental: bool = False
     recent_tests_limit: int | None = None
     cached_run_intent: dict[str, Any] | None = None
+    # 开始/收尾事实是恢复权威，默认耐久；只有工具循环进度投影显式传 False（原子替换、不刷盘、同字节跳过）。
+    durable: bool = True
 
 
 @dataclass(frozen=True)
@@ -78,6 +84,8 @@ def _runtime_fact_fence_path(facts_dir: Path) -> Path:
 
 
 # LLM: 同一owner/task-local根内先发布原子事实，再原子更新有界locator；不改变请求公开签名。
+#   request.durable=False 只用于进度投影：与磁盘逐字节相同且locator已指向当前版本时整次跳过；否则两处都原子替换但不刷盘。
+#   开始/收尾（默认 durable=True）从不跳过，保证非耐久进度之后的权威事实一定重新落盘。坏/缺 task.json 由读者按缺失处理。
 # 函数用途: 写本轮事实并让写工具能直接定位运行意图。
 def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     if not request.request_id:
@@ -88,9 +96,30 @@ def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
         ensure_private_dir(root)
         previous = _read_json_dict(root / "task.json") if request.incremental else None
         fact_doc = _runtime_fact_payload(request, previous=previous)
-        _write_json_atomic(root / "task.json", fact_doc)
-        update_locator(root.parent, root.name, fact_doc, limit=_MAX_FACT_FILES)
+        if request.durable:
+            _write_json_atomic(root / "task.json", fact_doc)
+        elif _progress_unchanged(root, _fact_text(fact_doc)):
+            return str(root)
+        else:
+            _write_json_atomic(root / "task.json", fact_doc, durable=False)
+        update_locator(root.parent, root.name, fact_doc, limit=_MAX_FACT_FILES, durable=request.durable)
     return str(root)
+
+
+# LLM: 只在同字节、0600单链接普通文件且locator已有本目录同一mtime行时判定未变；任一条件不满足都重写，不猜测。
+# 函数用途: 判断一次进度写是否完全不改变磁盘上的事实与定位页。
+def _progress_unchanged(root: Path, text: str) -> bool:
+    path = root / "task.json"
+    if not private_text_file_matches(path, text):
+        return False
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        return False
+    rows, errors = read_locator(root.parent, limit=_MAX_FACT_FILES)
+    return not errors and any(
+        row.get("directory") == root.name and row.get("updated_at_ns") == mtime_ns for row in rows
+    )
 
 
 # LLM: 终态保留原进度及意图，更新locator仍限定在同一事实根，不搜索别的运行。
@@ -271,10 +300,17 @@ def _phase_from_status(status: str) -> str:
     return "running"
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+def _write_json_atomic(path: Path, payload: dict[str, Any], *, durable: bool = True) -> None:
     # LLM: 运行时事实含会话正文，落盘一律走私有原子写（0600/0700）；输出字节与原实现一致（无尾换行）。
+    #   durable 默认 True；只有工具循环进度投影显式传 False。
     # 函数用途: 以仅本人可读写的权限原子替换一个 JSON 文件（写文件、可能 chmod 目录）。
-    write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    write_private_text_file_atomic(path, _fact_text(payload), durable=durable)
+
+
+# LLM: 事实文件唯一序列化口径；同字节跳过与真正写入必须共用它，任何一边单独改参数都会让跳过判断失真。
+# 函数用途: 把事实载荷序列化为落盘的精确文本（无尾换行）。
+def _fact_text(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _utc_timestamp() -> str:

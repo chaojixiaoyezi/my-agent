@@ -48,7 +48,7 @@ def read_locator(facts_dir: Path, *, limit: int):
 
 # LLM: 原事实文件已先原子发布；固定小页在同一locator锁下更新，失败不伪造事实未写入。
 # 函数用途: 发布最近运行身份，后续反馈只读取少数精确文件。
-def update_locator(facts_dir: Path, directory: str, payload: dict, *, limit: int):
+def update_locator(facts_dir: Path, directory: str, payload: dict, *, limit: int, durable: bool = True):
     if not _directory(directory):
         raise ValueError("invalid runtime fact directory")
     path = _locator_path(facts_dir)
@@ -59,7 +59,9 @@ def update_locator(facts_dir: Path, directory: str, payload: dict, *, limit: int
                "updated_at_ns": (facts_dir / directory / "task.json").stat().st_mtime_ns}
         rows = [row, *(old for old in rows if old["directory"] != directory)]
         rows.sort(key=lambda item: item.get("updated_at_ns", 0), reverse=True)
-        write_private_text_file_atomic_unlocked(path, json.dumps({"schema_version":"run_intent_locator.v1", "entries":rows[:limit]}, ensure_ascii=False))
+        # durable=False 只跟随非耐久的进度事实（同一可重建投影）；默认耐久不变。
+        write_private_text_file_atomic_unlocked(path, json.dumps({"schema_version":"run_intent_locator.v1", "entries":rows[:limit]}, ensure_ascii=False),
+                                                durable=durable)
 
 
 # LLM: 只在工具冷装配时迁移可证明完整的微型旧事实集；最多观察B+1目录项，大目录不建不完整locator。

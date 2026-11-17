@@ -13,6 +13,7 @@ from ..common.json_io import (
     write_private_json_file_atomic,
     write_private_json_file_atomic_unlocked,
     write_private_text_file_atomic,
+    write_private_text_file_if_changed,
 )
 from ..common.nofollow_fs import ensure_private_dir
 from ..contracts.state_machine import REGISTERED_STATES, VERIFICATION_STATES
@@ -337,7 +338,7 @@ def _run_workspace_paths_for_root(root: Path) -> RunWorkspacePaths:
     )
 
 
-# LLM: task.yaml 走私有写（0600/0700）；YAML 序列化与旧实现逐字节一致。
+# LLM: task.yaml 走私有写（0600/0700）；YAML 序列化与旧实现逐字节一致；同一执行重复激活时字节相同则不重写不刷盘。
 # 函数用途: 把运行工作区请求写成 task.yaml。
 def _write_task_yaml(path: Path, request: EnsureRunWorkspaceRequest) -> None:
     # task_id 是机器身份，task_title 才是人类标题；两者不能再互相兜底。
@@ -352,7 +353,7 @@ def _write_task_yaml(path: Path, request: EnsureRunWorkspaceRequest) -> None:
         f'owner_home: "{_yaml_escape(request.owner_home)}"\n'
         f'source: "{_yaml_escape(request.source)}"\n'
     )
-    write_private_text_file_atomic(path, text)
+    write_private_text_file_if_changed(path, text)
 
 
 def _workspace_identity_payload(request: EnsureRunWorkspaceRequest, paths: RunWorkspacePaths) -> dict[str, object]:

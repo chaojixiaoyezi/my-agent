@@ -15,7 +15,7 @@ from ..common.json_io import (
     PrivateDirectoryChainResult,
     ensure_private_directory_chain,
     read_json_object_report,
-    write_private_text_file_atomic,
+    write_private_text_file_if_changed,
 )
 from ..common.tool_output_paths import tool_output_index_marks, tool_output_root
 from ..memory_archive.compact_tool_output_refs import CarriedIndexSource
@@ -296,7 +296,8 @@ def _snapshot_paths(
 
 
 # LLM: 快照的最终字节只由定稿后的 bundle 决定；json/md 与两个 latest 副本都用内存文本各写一遍，不读回、不重写。
-# 函数用途: 把定稿后的快照 JSON/Markdown 与 latest 副本各写一遍（私有原子写）。
+#   同一 stem 重建出逐字节相同的快照时（磁盘已是同内容的私有文件）跳过替换与刷盘，磁盘内容不变即崩溃语义不变。
+# 函数用途: 把定稿后的快照 JSON/Markdown 与 latest 副本各写一遍（私有原子写，内容未变则跳过）。
 def _write_bundle_files(
     json_path: Path,
     markdown_path: Path,
@@ -305,13 +306,13 @@ def _write_bundle_files(
 ) -> None:
     json_text = json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True)
     markdown_text = render_markdown_bundle(bundle, json_path=str(json_path))
-    write_private_text_file_atomic(json_path, json_text, ensure_parent_private=False)
-    write_private_text_file_atomic(markdown_path, markdown_text, ensure_parent_private=False)
+    write_private_text_file_if_changed(json_path, json_text, ensure_parent_private=False)
+    write_private_text_file_if_changed(markdown_path, markdown_text, ensure_parent_private=False)
     _write_latest_copies(directory_result, json_text, markdown_text)
 
 
 # LLM: latest 副本直接写内存文本，不把刚写的文件读回来；准备结果显式携带归档根，不遍历或 chmod 目录链。
-# 函数用途: 用同一份内存文本刷新两个 latest 文件，只做私有原子写。
+# 函数用途: 用同一份内存文本刷新两个 latest 文件，只做私有原子写（内容未变则跳过）。
 def _write_latest_copies(
     directory_result: PrivateDirectoryChainResult,
     json_text: str,
@@ -320,8 +321,8 @@ def _write_latest_copies(
     relative_base = directory_result.directory.relative_to(directory_result.root)
     latest_json = directory_result.root / relative_base / "latest_context_bundle.json"
     latest_markdown = directory_result.root / relative_base / "latest_context_bundle.md"
-    write_private_text_file_atomic(latest_json, json_text, ensure_parent_private=False)
-    write_private_text_file_atomic(latest_markdown, markdown_text, ensure_parent_private=False)
+    write_private_text_file_if_changed(latest_json, json_text, ensure_parent_private=False)
+    write_private_text_file_if_changed(latest_markdown, markdown_text, ensure_parent_private=False)
 
 
 def _memory_archive_root(home_paths: Any) -> Path:

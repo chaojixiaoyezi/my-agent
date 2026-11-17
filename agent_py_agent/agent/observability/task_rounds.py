@@ -165,15 +165,20 @@ def prepare_task_rounds(home, row, *, replace=False):
     if existing is not None and existing != blob.encode("utf-8"):
         raise ValueError("task round migration CAS conflict")
     if existing is None:
-        write_text_atomic_beneath(home, _parts(task_id), blob)
+        # 轮次源是遥测投影：原子发布但不刷盘；随后的轮次追加仍逐行 fsync。
+        write_text_atomic_beneath(home, _parts(task_id), blob, durable=False)
     return {**row, "rounds": [], "token_usage": _sum_usage(rounds),
             "_rounds": _reference(home, task_id, len(rounds))}
 
 
+# LLM: 轮次追加/封卷只改水位、用量和根运行号，这些都来自已脱敏的新行；已存元数据首次保存时已脱敏，
+#   所以这里不再整份重复脱敏，仍走原 _save 的结构校验与非耐久原子写。
+# 函数用途: 在原 owner 锁内提交轮次摘要与 CAS 水位。
 def _write_metadata(home, row):
     from .task_call_inspector import TaskCallInspector
 
-    TaskCallInspector(home, owner_id=row["owner_id"])._save(row, sync_index=False, include_rounds=False)
+    TaskCallInspector(home, owner_id=row["owner_id"])._save(row, sync_index=False, include_rounds=False,
+                                                            redact_payload=False)
 
 
 def _apply_round(home, row, data):
@@ -191,15 +196,23 @@ def append_task_round(owner_home: Path, task_id: str, row: dict[str, object]) ->
         _append_task_round_unlocked(owner_home, task_id, row)
 
 
-def _append_task_round_unlocked(owner_home, task_id, row):
-    """在调用方持有的原 owner 锁内追加一轮；水位之后最多有本次单行事务的恢复量。"""
+def _append_task_round_unlocked(owner_home, task_id, row, *, metadata=None):
+    """在调用方持有的原 owner 锁内追加一轮；水位之后最多有本次单行事务的恢复量。
+
+    ``metadata`` 是调用方刚在同一把锁内读到（或为新任务在内存规范化）的元数据，所有权移交给本函数；
+    缺省时按原路径读取。只脱敏本次新增的轮次行，已存元数据不重复脱敏。
+    """
     from .task_call_inspector import _path
 
     _validate_round(row)
-    raw = read_text_beneath(owner_home, _path(task_id))
-    if raw is None:
-        raise KeyError(task_id)
-    metadata, row = redact(json.loads(raw)), redact(dict(row))
+    if metadata is None:
+        raw = read_text_beneath(owner_home, _path(task_id))
+        if raw is None:
+            raise KeyError(task_id)
+        metadata = json.loads(raw)
+    row = redact(dict(row))
+    if not isinstance(metadata, dict):
+        raise ValueError("invalid task record")
     if metadata.get("schema") != "task_call_telemetry.v1" or metadata.get("task_id") != task_id:
         raise ValueError("invalid task record")
     if not metadata.get("_rounds"):

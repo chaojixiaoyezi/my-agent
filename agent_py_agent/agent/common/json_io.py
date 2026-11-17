@@ -341,7 +341,9 @@ def _atomic_write_text_unlocked(path: Path, content: str) -> None:
 #   replace_once仅供固定C写叶显式限制替换次数，不证明来源或权限；联验test_common_single_replace与私有写回归。
 # LLM: preserve_bytes显式用于原流水裁剪，surrogateescape及禁换行翻译使坏UTF8/CRLF可原样往返；默认编码/换行不变。
 # LLM: 私有写须先flush/fsync临时FD，再replace并同步父目录；失败不向调用方发布缓存成功。
-# 函数用途: 在既有锁内耐久替换0600正文，保留原字节及单次替换选项。
+# LLM: durable=False 只给非权威投影（遥测元数据、运行事实进度）：仍是同目录原子 replace，读者只会看到旧或新完整内容，
+#   但不 fsync 临时文件与父目录，断电后可能回到旧版本或留下不可解析文件，调用方读者必须把它当作缺失；默认 True 不变。
+# 函数用途: 在既有锁内替换0600正文（默认耐久），保留原字节及单次替换选项。
 def write_private_text_file_atomic_unlocked(
     path: Path,
     content: str,
@@ -349,6 +351,7 @@ def write_private_text_file_atomic_unlocked(
     ensure_parent_private: bool = True,
     replace_once: bool = False,
     preserve_bytes: bool = False,
+    durable: bool = True,
 ) -> None:
     if ensure_parent_private:
         ensure_private_dir(path.parent)
@@ -360,14 +363,52 @@ def write_private_text_file_atomic_unlocked(
             os.chmod(tmp, 0o600)
             handle.write(content)
             handle.flush()
-            os.fsync(handle.fileno())
+            if durable:
+                os.fsync(handle.fileno())
         if replace_once:
             _replace_with_retry(tmp, path, keep_mode=False, replace_once=True)
         else:
             _replace_with_retry(tmp, path, keep_mode=False)
-        _sync_parent_directory(path)
+        if durable:
+            _sync_parent_directory(path)
     finally:
         _unlink_tmp_file(tmp)
+
+
+# LLM: 只有目标已是单链接普通文件、权限已收紧到0600且字节与待写正文完全相同才算“未变”；链接、宽权限、
+#   大小不同或读失败一律按“已变”交给原耐久写，所以跳过时磁盘内容与权限都和重写后相同，崩溃语义不变。
+# 函数用途: 判断私有文本文件当前字节是否已等于待写正文，供每轮投影写做内容幂等跳过。
+def private_text_file_matches(path: Path, content: str) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077:
+        return False
+    expected = content.encode("utf-8")
+    if info.st_size != len(expected):
+        return False
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(len(expected) + 1) == expected
+    except OSError:
+        return False
+
+
+# LLM: 调用方须已持原路径锁；未变时不写不刷盘，已变时走原耐久私有写，返回值只表示是否发生替换。
+# 函数用途: 在既有锁内做内容幂等的私有原子写。
+def write_private_text_file_if_changed_unlocked(path: Path, content: str, *, ensure_parent_private: bool = True) -> bool:
+    if private_text_file_matches(path, content):
+        return False
+    write_private_text_file_atomic_unlocked(path, content, ensure_parent_private=ensure_parent_private)
+    return True
+
+
+# LLM: 与 write_private_text_file_atomic 同一把锁；比较与替换在同一临界区，避免比较后被并发写者改动。
+# 函数用途: 自取锁做内容幂等的私有原子写，返回是否发生替换。
+def write_private_text_file_if_changed(path: Path, content: str, *, ensure_parent_private: bool = True) -> bool:
+    with _locked_json_path(path):
+        return write_private_text_file_if_changed_unlocked(path, content, ensure_parent_private=ensure_parent_private)
 
 
 # LLM: 仅在 memory_archive 锚点下逐级确保目录存在（缺失按 0700 逐级新建、已存在一律不动）；发现符号链接时保留目标权限并返回结构化原因码，调用方仍可私有写文件。
@@ -411,18 +452,21 @@ def _skip_private_directory_chain(
 
 
 # LLM: 使用与 write_text_file_atomic 相同的 per-path 线程锁 + fcntl；父目录确保可由显式参数关闭，防止链接目标被改动。
+#   durable 只透传给锁内写叶（默认 True 保持耐久）；非耐久只供非权威投影显式选择。
 # 函数用途: 自取锁，以 0600 文件原子替换文本；仅在 ensure_parent_private 为真时确保直接父目录存在（缺失 0700 逐级新建）。
 def write_private_text_file_atomic(
     path: Path,
     content: str,
     *,
     ensure_parent_private: bool = True,
+    durable: bool = True,
 ) -> None:
     with _locked_json_path(path):
         write_private_text_file_atomic_unlocked(
             path,
             content,
             ensure_parent_private=ensure_parent_private,
+            durable=durable,
         )
 
 
@@ -431,17 +475,20 @@ def write_private_text_file_atomic(
 # 函数用途: 以仅本人可读写的权限原子替换一个 JSON 文件（自取锁）。
 # LLM: 可选blocking只透传原锁，默认True和字节/权限不变；C锁忙异常不能当成未需要的写。
 # 函数用途: 让原私有写者可立即拒绝争用，仍使用同一序列化和原子落盘。
-def write_private_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True, blocking: bool = True) -> None:
+def write_private_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True, blocking: bool = True,
+                                   durable: bool = True) -> None:
     with _locked_json_path(path, blocking=blocking):
-        write_private_json_file_atomic_unlocked(path, payload, sort_keys=sort_keys)
+        write_private_json_file_atomic_unlocked(path, payload, sort_keys=sort_keys, durable=durable)
 
 
-# LLM: 与 write_json_file_atomic_unlocked 同格式；调用方须已持有 locked_json_path(path)。
+# LLM: 与 write_json_file_atomic_unlocked 同格式；调用方须已持有 locked_json_path(path)；durable 默认 True。
 # 函数用途: 持锁场景下以仅本人可读写的权限原子替换一个 JSON 文件。
-def write_private_json_file_atomic_unlocked(path: Path, payload: object, *, sort_keys: bool = True) -> None:
+def write_private_json_file_atomic_unlocked(path: Path, payload: object, *, sort_keys: bool = True,
+                                            durable: bool = True) -> None:
     write_private_text_file_atomic_unlocked(
         path,
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys) + "\n",
+        durable=durable,
     )
 
 

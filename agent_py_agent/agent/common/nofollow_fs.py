@@ -530,7 +530,8 @@ def regular_file_exists_beneath(
 
 
 # LLM: 文本状态文件与二进制共用同目录原子替换；替换后异常不证明未提交，调用方须按自己的提交标识读回。
-# 函数用途: 在受信根内原子写入一个 UTF-8 状态文件，并把文件和父目录都刷盘。
+#   durable 默认 True（文件与父目录都刷盘）；False 只给非权威投影，原 no-follow 链与原子替换不变。
+# 函数用途: 在受信根内原子写入一个 UTF-8 状态文件，默认把文件和父目录都刷盘。
 def write_text_atomic_beneath(
     root: str | Path,
     relative_parts: tuple[str, ...],
@@ -538,6 +539,7 @@ def write_text_atomic_beneath(
     *,
     directory_mode: int = 0o700,
     file_mode: int = 0o600,
+    durable: bool = True,
 ) -> None:
     write_bytes_atomic_beneath(
         root,
@@ -545,11 +547,13 @@ def write_text_atomic_beneath(
         text.encode("utf-8"),
         directory_mode=directory_mode,
         file_mode=file_mode,
+        durable=durable,
     )
 
 
 # LLM: 候选文件先以私有权限完整写入并刷盘，再同目录替换；本函数不拥有领域锁或跨文件事务。
-# 函数用途: 安全原子保存宿主二进制文件；POSIX 刷父目录，portable 分支不承诺相同的目录耐久性。
+#   durable=False 只省去文件与父目录 fsync：读者仍只见旧或新完整内容，断电后可能回旧版或不可解析，调用方须当缺失处理。
+# 函数用途: 安全原子保存宿主二进制文件；POSIX 默认刷父目录，portable 分支不承诺相同的目录耐久性。
 def write_bytes_atomic_beneath(
     root: str | Path,
     relative_parts: tuple[str, ...],
@@ -557,10 +561,11 @@ def write_bytes_atomic_beneath(
     *,
     directory_mode: int = 0o700,
     file_mode: int = 0o600,
+    durable: bool = True,
 ) -> None:
     _validate_relative_parts(relative_parts)
     if not _supports_dir_fd():
-        _write_bytes_portable(root, relative_parts, payload, file_mode)
+        _write_bytes_portable(root, relative_parts, payload, file_mode, durable=durable)
         return
     parent_fd = open_directory_beneath(
         root,
@@ -583,7 +588,8 @@ def write_bytes_atomic_beneath(
             if written <= 0:
                 raise OSError("short write while replacing managed file")
             view = view[written:]
-        os.fsync(descriptor)
+        if durable:
+            os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
         _reject_unsafe_existing_leaf(parent_fd, relative_parts[-1])
@@ -593,7 +599,8 @@ def write_bytes_atomic_beneath(
             src_dir_fd=parent_fd,
             dst_dir_fd=parent_fd,
         )
-        os.fsync(parent_fd)
+        if durable:
+            os.fsync(parent_fd)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -1100,7 +1107,7 @@ def _read_descriptor(descriptor: int, max_bytes: int | None) -> bytes:
 # LLM: 临时文件创建即为指定私有权限；原子替换前拒绝链接，异常可能发生在替换后，不能推断未提交。
 # 函数用途: 在没有 dir_fd 的平台保存完整二进制内容并清理暂存文件。
 def _write_bytes_portable(
-    root: str | Path, parts: tuple[str, ...], payload: bytes, file_mode: int
+    root: str | Path, parts: tuple[str, ...], payload: bytes, file_mode: int, *, durable: bool = True
 ) -> None:
     target = _portable_path(root, parts, create=True)
     temporary = target.with_name(f".{target.name}.tmp-{secrets.token_hex(16)}")
@@ -1109,7 +1116,8 @@ def _write_bytes_portable(
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
             stream.flush()
-            os.fsync(stream.fileno())
+            if durable:
+                os.fsync(stream.fileno())
         if target.is_symlink() or (target.exists() and not target.is_file()):
             raise NoFollowPathError("managed destination is not a regular file")
         os.replace(temporary, target)

@@ -90,6 +90,7 @@ def archive_assistant_tool_round_if_enabled(
 ) -> None:
     if not _live_archive_enabled(agent, params):
         return
+    _open_runtime_fact_round(params, tool_round)
     try:
         for root in runtime_archive_roots(agent):
             archive_assistant_tool_round(
@@ -152,12 +153,43 @@ def archive_tool_call_if_enabled(
         _record_live_archive_error(params, exc, context="live_archive.tool_call")
 
 
+# LLM: 只有模型工具轮在轮首经 archive_assistant_tool_round_if_enabled 打开本轮标记；宿主工具路径没有轮首/轮末，
+#   标记不存在时每次调用照旧立即写。标记只存在本次 params 的 live_archive_state，不落盘、不是权威。
+# 函数用途: 记录本轮已开始及轮首时的工具记录数，供轮内逐工具进度合并到轮末一次写。
+def _open_runtime_fact_round(params: object, tool_round: int) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    calls = getattr(params, "archive_tool_calls", None) or ()
+    state["runtime_fact_round_open"] = (str(getattr(params, "request_id", "") or ""), tool_round)
+    state["runtime_fact_round_seen_calls"] = len(calls) if isinstance(calls, (list, tuple)) else len(list(calls))
+
+
+# LLM: 轮内逐工具调用（刚追加一条工具记录）只记待写，不推进已提交游标；轮末调用（自上次以来没有新记录）一次写出
+#   全部增量。轮被异常打断时，待写增量由下一次写、终态写前的补写或收尾全量写覆盖，不会丢；进度是非耐久投影。
+# 函数用途: 把每个工具轮的运行事实进度写合并为一次，宿主工具路径保持逐次写。
 def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, tool_round: int) -> None:
     if not _live_archive_enabled(agent, params):
         return
     request_id = str(getattr(params, "request_id", "") or "")
     if not request_id:
         return
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict) and state.get("runtime_fact_round_open") == (request_id, tool_round):
+        calls = getattr(params, "archive_tool_calls", None) or ()
+        total_calls = len(calls) if isinstance(calls, (list, tuple)) else len(list(calls))
+        if total_calls != state.get("runtime_fact_round_seen_calls"):
+            state["runtime_fact_round_seen_calls"] = total_calls
+            state["runtime_fact_progress_pending"] = tool_round
+            return
+        state.pop("runtime_fact_round_open", None)
+    _write_runtime_fact_progress(agent, params, tool_round=tool_round)
+
+
+# LLM: 原进度写正文不变，只改为非耐久（原子替换、不刷盘、同字节跳过）；全部根写成功才推进游标并清待写标记。
+# 函数用途: 按增量游标把当前运行进度写入每个运行事实根。
+def _write_runtime_fact_progress(agent: object, params: object, *, tool_round: int) -> None:
+    request_id = str(getattr(params, "request_id", "") or "")
     try:
         recent_tests_limit = _runtime_fact_recent_tests_limit(agent)
         raw_calls = getattr(params, "archive_tool_calls", None) or ()
@@ -264,6 +296,7 @@ def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, to
                     incremental=incremental,
                     recent_tests_limit=recent_tests_limit,
                     cached_run_intent=cached_intent,
+                    durable=False,
                 )
             )
             if isinstance(intent_cache, dict) and computed_intent is not None:
@@ -277,6 +310,7 @@ def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, to
         if state_dict is not None:
             state_dict["runtime_fact_call_cursor"] = total_calls
             state_dict["runtime_fact_executed_cursor"] = total_executed
+            state_dict.pop("runtime_fact_progress_pending", None)
     except Exception as exc:
         _record_live_archive_error(params, exc, context="live_archive.runtime_fact.progress")
 
@@ -294,6 +328,11 @@ def update_runtime_fact_terminal_if_enabled(
         return
     status = "cancelled" if isinstance(exc, InterruptedError) else "failed"
     error = runtime_error_report(exc, context="agent.run")
+    state = getattr(params, "live_archive_state", None)
+    pending_round = state.get("runtime_fact_progress_pending") if isinstance(state, dict) else None
+    if pending_round is not None:
+        # 轮被打断时先补写已合并但未落盘的进度，终态才能保留与逐工具写相同的已执行事实。
+        _write_runtime_fact_progress(agent, params, tool_round=pending_round)
     try:
         for root in runtime_archive_roots(agent):
             update_runtime_fact_terminal(
