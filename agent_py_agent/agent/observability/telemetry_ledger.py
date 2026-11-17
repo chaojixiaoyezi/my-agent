@@ -590,6 +590,47 @@ class ToolTelemetryLedger:
         return require_complete(self.aggregate_tool_stats_report(since=since, until=until))['value']
 
 
+def _tool_call_projection_source_revision(home):
+    """只读固定目录成员代次与当前卷身份；封口卷由原只追加/不可变写者通过成员变化发表。"""
+    from ..common.nofollow_fs import _portable_directory, _supports_dir_fd
+
+    owner = Path(home.owner_home_dir)
+    def stamp(info):
+        return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+    def active_stamp(info):
+        if info is not None and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+            raise OSError(22, 'TELEMETRY_PROJECTION_SOURCE_UNSAFE', str(owner.joinpath(*PARTS, 'tool_calls.jsonl')))
+        return stamp(info) if info is not None else None
+    try:
+        if not _supports_dir_fd():
+            # 与原遥测写者共用逐级lstat的跨平台路径合同；不创建目录、不打开原账或索引。
+            directory = _portable_directory(owner, PARTS, create=False)
+            before = directory.lstat()
+            try:
+                active = (directory / 'tool_calls.jsonl').lstat()
+            except FileNotFoundError:
+                active = None
+            result = [stamp(before), active_stamp(active)]
+            if stamp(_portable_directory(owner, PARTS, create=False).lstat()) != result[0]:
+                raise OSError(11, 'TELEMETRY_PROJECTION_SOURCE_CHANGED', str(directory))
+            return result
+        descriptor = open_directory_beneath(owner, PARTS, require_dir_fd=True)
+    except FileNotFoundError:
+        return ['missing']
+    try:
+        directory = os.fstat(descriptor)
+        try:
+            active = os.stat('tool_calls.jsonl', dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            active = None
+        result = [stamp(directory), active_stamp(active)]
+        if stamp(os.fstat(descriptor)) != result[0]:
+            raise OSError(11, 'TELEMETRY_PROJECTION_SOURCE_CHANGED', str(owner.joinpath(*PARTS)))
+        return result
+    finally:
+        os.close(descriptor)
+
+
 def maintain_tool_call_projection_lane(request) -> dict:
     """每个既有维护tick先增量推进当前卷，再用剩余额度分页封口卷；绝不退役原账。"""
     from ..user_space.directory_paging import directory_page
@@ -599,10 +640,15 @@ def maintain_tool_call_projection_lane(request) -> dict:
     if request.budget.exhausted():
         return result
     if cursor.get('complete'):
-        cursor.clear()
+        cursor.pop('complete', None)
     owner = Path(request.home.owner_home_dir)
     if cursor.get('phase', 'active') not in {'active', 'sealed'}:
         raise ValueError('INVALID_TELEMETRY_PROJECTION_PHASE')
+    membership = _tool_call_projection_source_revision(request.home)[0]
+    if cursor.get('source_membership_revision') != membership:
+        # 只有成员代次变化才废弃目录续点；活动卷追加继续原index offset，不重扫封口历史前缀。
+        cursor.pop('scan', None)
+        cursor.update(phase='active', source_membership_revision=membership)
 
     def project(source):
         remaining_items = None if request.budget.max_items is None else request.budget.max_items - result['items']
@@ -651,3 +697,7 @@ def maintain_tool_call_projection_lane(request) -> dict:
     if project(source)['status'] != 'complete':
         cursor['scan'] = prior_scan
     return result
+
+
+# 原维护调度消费可选只读来源代次协议；函数不授予写权，也不初始化投影数据库。
+maintain_tool_call_projection_lane.maintenance_source_revision = _tool_call_projection_source_revision

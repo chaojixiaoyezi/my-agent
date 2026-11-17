@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadIndex
 from agent_py_agent.agent.observability.telemetry_ledger import (
     PARTS,
@@ -166,3 +168,171 @@ def test_partial_retention_pending_resumes_completed_projection_on_next_real_tic
     page = ToolTelemetryLedger(home.owner_home_dir).query_retained_tool_calls_page()
     assert [row['call_id'] for row in page['rows']] == ['new']
     assert state['deletion_enabled'] is False
+
+
+def _projection_maintenance(tmp_path, monkeypatch, *, intercept=None):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.user_space import storage_lanes
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import (
+        run_owner_storage_maintenance_slice,
+    )
+
+    home = replace(ensure_my_agent_home(tmp_path / 'home'), owner_id='local/main')
+    original = storage_lanes.resolve_storage_lane
+    def resolve(kind, *, projection_only=False):
+        if kind == 'global_indexes':
+            return lambda request: dict(cursor=request.cursor, complete=False, items=0, bytes=0)
+        lane = original(kind, projection_only=projection_only)
+        return intercept(lane) if intercept is not None and kind == 'task_call_telemetry' else lane
+    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', resolve)
+    config = SimpleNamespace(retention_scan_slice_entries=128, retention_scan_slice_bytes=8192,
+                             retention_scan_slice_ms=1000)
+    retention = SimpleNamespace(applied=False, legal_hold=False, load_errors=[], scan_partial=True)
+    def tick(state=None):
+        return run_owner_storage_maintenance_slice(home, {'storage_maintenance': state} if state else {},
+            retention, now=200_000, coordinator=True, commit_transition=lambda op: op(), config=config)
+    return home, tick
+
+
+def _finish_projection(tick, state=None):
+    for _ in range(32):
+        state = tick(state)
+        assert not state['errors']
+        if state['cursors'].get('task_call_telemetry', {}).get('complete'):
+            return state
+    raise AssertionError('原128条/8192字节投影预算未完成')
+
+
+def _retained_call_ids(ledger):
+    cursor, found = '', set()
+    for _ in range(32):
+        page = ledger.query_retained_tool_calls_page(cursor=cursor)
+        assert page['coverage']['status'] == 'complete'
+        found.update(row['call_id'] for row in page['rows'])
+        cursor = page['next_cursor']
+        if cursor is None:
+            return found
+    raise AssertionError('规范遥测卷分页未结束')
+
+
+def test_projection_generation_only_resumes_changed_active_or_sealed_sources(tmp_path, monkeypatch):
+    home, tick = _projection_maintenance(tmp_path, monkeypatch)
+    ledger = ToolTelemetryLedger(home.owner_home_dir)
+    ledger.record_tool_call(ToolCallRecord(call_id='first', tool_name='read_file'))
+    state = _finish_projection(tick)
+    proof = json.loads(json.dumps(state['projection_source_revisions']))
+    unchanged = tick(state)
+    assert 'task_call_telemetry' not in unchanged['coordinator_lanes']['ran']
+    assert unchanged['projection_source_revisions'] == proof
+    assert unchanged['pending_kinds'] == ['global_indexes']
+    ledger.record_tool_call(ToolCallRecord(call_id='appended', tool_name='read_file'))
+    appended = tick(unchanged)
+    assert 'task_call_telemetry' in appended['coordinator_lanes']['ran']
+    assert _retained_call_ids(ledger) == {'first', 'appended'}
+    state = _finish_projection(tick, appended)
+    sealed = home.owner_home_dir.joinpath(*PARTS, 'tool_calls.0000000000000000001.jsonl')
+    sealed.write_text(json.dumps(ToolCallRecord(call_id='sealed', tool_name='read_file').to_dict()) + '\n')
+    changed = tick(state)
+    assert 'task_call_telemetry' in changed['coordinator_lanes']['ran']
+    state = _finish_projection(tick, changed)
+    assert _retained_call_ids(ledger) == {'first', 'appended', 'sealed'}
+    assert state['deletion_enabled'] is False and sealed.exists()
+    assert 'task_call_telemetry' not in tick(state)['coordinator_lanes']['ran']
+
+
+def test_projection_completion_does_not_save_a_generation_changed_inside_lane(tmp_path, monkeypatch):
+    appended = []
+    def intercept(lane):
+        def advance(request):
+            receipt = lane(request)
+            if receipt['complete'] and not appended:
+                request.run_write(lambda: ToolTelemetryLedger(request.home.owner_home_dir).record_tool_call(
+                    ToolCallRecord(call_id='racing-append', tool_name='read_file')))
+                appended.append(True)
+            return receipt
+        advance.maintenance_source_revision = lane.maintenance_source_revision
+        return advance
+    home, tick = _projection_maintenance(tmp_path, monkeypatch, intercept=intercept)
+    ToolTelemetryLedger(home.owner_home_dir).record_tool_call(ToolCallRecord(call_id='original', tool_name='read_file'))
+    state = None
+    for _ in range(32):
+        state = tick(state)
+        if appended:
+            break
+    assert appended and 'task_call_telemetry' in state['pending_kinds']
+    assert 'task_call_telemetry' not in state['projection_source_revisions']
+    final = _finish_projection(tick, state)
+    assert 'task_call_telemetry' in final['projection_source_revisions']
+    assert {row['call_id'] for row in ToolTelemetryLedger(home.owner_home_dir).query_retained_tool_calls_page()['rows']} == {
+        'original', 'racing-append'}
+
+
+@pytest.mark.parametrize("portable", [False, True])
+def test_projection_generation_probe_is_readonly_and_does_not_create_missing_sources(tmp_path, monkeypatch, portable):
+    from agent_py_agent.agent.observability.telemetry_ledger import (
+        maintain_tool_call_projection_lane,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    if portable:
+        from agent_py_agent.agent.common import nofollow_fs
+        monkeypatch.setattr(nofollow_fs, '_supports_dir_fd', lambda: False)
+    monkeypatch.setattr(OwnerReadIndex, '__init__', lambda *args, **kwargs: pytest.fail('probe cannot open or create index'))
+    probe = maintain_tool_call_projection_lane.maintenance_source_revision
+    assert probe(home) == ['missing']
+    assert not home.owner_home_dir.joinpath(*PARTS).exists()
+    source = home.owner_home_dir.joinpath(*PARTS, 'tool_calls.jsonl')
+    source.parent.mkdir(parents=True)
+    source.write_text('immutable fixture')
+    before = source.read_bytes()
+    stamp = probe(home)
+    assert probe(home) == stamp and source.read_bytes() == before
+    assert not (home.owner_cache_dir / 'owner_read_index.sqlite3').exists()
+
+
+def test_projection_probe_failure_stays_pending_without_following_a_symlink(tmp_path, monkeypatch):
+    home, tick = _projection_maintenance(tmp_path, monkeypatch)
+    outside = tmp_path / 'outside'
+    outside.write_text('private outside contents')
+    source = home.owner_home_dir.joinpath(*PARTS, 'tool_calls.jsonl')
+    source.parent.mkdir(parents=True)
+    source.symlink_to(outside)
+    state = tick()
+    assert state['continuation_pending'] and 'task_call_telemetry' in state['pending_kinds']
+    assert 'task_call_telemetry' not in state['projection_source_revisions']
+    error = next(row for row in state['errors'] if row['kind'] == 'task_call_telemetry')
+    assert 'TELEMETRY_PROJECTION_SOURCE_UNSAFE' in error['error_message']
+    assert outside.read_text() == 'private outside contents'
+    assert not (home.owner_cache_dir / 'owner_read_index.sqlite3').exists()
+
+
+def test_projection_directory_continuation_restarts_only_after_membership_change(tmp_path, monkeypatch):
+    from agent_py_agent.agent.observability.telemetry_ledger import (
+        maintain_tool_call_projection_lane,
+    )
+    from agent_py_agent.agent.user_space.storage_lanes import StorageLaneBudget, StorageLaneRequest
+
+    home, _tick = _projection_maintenance(tmp_path, monkeypatch)
+    owner = home.owner_home_dir
+    ToolTelemetryLedger(owner).record_tool_call(ToolCallRecord(call_id='active', tool_name='read_file'))
+    def advance(cursor):
+        return maintain_tool_call_projection_lane(StorageLaneRequest('task_call_telemetry', home, 200_000,
+            cursor, StorageLaneBudget(128, 8192, None), False, True, None, lambda op: op()))
+    first = advance({})
+    assert not first['complete'] and first['cursor']['scan']
+    unchanged = advance(first['cursor'])
+    assert unchanged['cursor']['source_membership_revision'] == first['cursor']['source_membership_revision']
+    sealed = owner.joinpath(*PARTS, 'tool_calls.0000000000000000002.jsonl')
+    sealed.write_text(json.dumps(ToolCallRecord(call_id='late-sealed', tool_name='read_file').to_dict()) + '\n')
+    newer = advance(unchanged['cursor'])
+    assert newer['cursor']['source_membership_revision'] != first['cursor']['source_membership_revision']
+    for _ in range(32):
+        if newer['complete']:
+            break
+        newer = advance(newer['cursor'])
+    assert newer['complete']
+    assert _retained_call_ids(ToolTelemetryLedger(owner)) == {'active', 'late-sealed'}

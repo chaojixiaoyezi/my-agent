@@ -1268,6 +1268,27 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     order = (LANE_EVICTION_ORDER + tuple(kind.kind for kind in registry if kind.kind not in LANE_EVICTION_ORDER)
              if pressure and pressure.get('level') in ('high', 'critical') else None)
     lane_reports, lane_fallbacks = {}, []
+    source_revisions = deepcopy(previous.get('storage_maintenance', {}).get('projection_source_revisions', {}))
+    if not isinstance(source_revisions, dict):
+        raise ValueError('INVALID_PROJECTION_SOURCE_REVISIONS')
+    # 可选只读协议由领域入口提供；只查固定数量的已登记投影，不扫描历史或从名称猜来源。
+    projection_probes = {}
+    for key in projection_kinds:
+        projection = resolve_storage_lane(key, projection_only=True)
+        probe = getattr(projection, 'maintenance_source_revision', None)
+        if callable(probe):
+            projection_probes[key] = probe
+
+    def changed_projection_kinds():
+        changed = set()
+        for key, probe in projection_probes.items():
+            try:
+                if key not in source_revisions or probe(home) != source_revisions[key]:
+                    changed.add(key)
+            except (OSError, ValueError, TypeError):
+                # 保持待续；真正调用时由原通道错误回执保留具体原因，不据未知代次宣布完成。
+                changed.add(key)
+        return changed
 
     # LLM: 仅解析冻结入口并透传原写门；未合入时保留，领域异常由原调度器处理。
     # 函数用途: 将领域通道接到原调度器，未合入的入口只做保留核验。
@@ -1297,7 +1318,17 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                 budget=bounded, legal_hold=bool(retention.legal_hold),
                 coordinator=coordinator or (kind.kind == 'global_indexes' and global_allowed),
                 pressure=pressure, commit=commit, config=config)
+            probe = projection_probes.get(kind.kind)
+            before = probe(home) if probe is not None else None
             receipt = validate_lane_receipt(lane(request))
+            if probe is not None:
+                after = probe(home)
+                if receipt['complete'] and before == after:
+                    source_revisions[kind.kind] = after
+                elif before != after:
+                    source_revisions.pop(kind.kind, None)
+                    receipt['complete'] = False
+                    receipt['deferred_reason'] = 'projection_source_changed'
             lane_reports[kind.kind] = {key: value for key, value in receipt.items() if key != 'cursor'}
             return {key: receipt[key] for key in ('cursor', 'complete', 'items', 'bytes')}
         return step
@@ -1325,6 +1356,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
             # 同资格续片只恢复原待续集合（空集合也有意义）；删除证明首次完成才纳入尚未合格的领域。
             if original.get('continuation_pending') and isinstance(original.get('coordinator_lanes'), dict):
                 pending = set(original.get('pending_kinds') or ()) & lane_adapters.keys()
+                pending.update(changed_projection_kinds() & lane_adapters.keys())
                 if retention_safe and original.get('retention_deletion_safe') is not True:
                     pending.update(lane_adapters)
                 state['pending_kinds'] = sorted(pending)
@@ -1341,6 +1373,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
             state['continuation_pending'] = (state['continuation_pending'] or bool(lane_state['pending_kinds'])
                                              or bool(lane_state['errors']))
         state['pressure'] = pressure
+        state['projection_source_revisions'] = source_revisions
         return state
     if not state_locked:
         with locked_json_path(_maintenance_state_path(home.owner_home_dir)):
@@ -1459,11 +1492,14 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     if (not original.get('continuation_pending', False)
             or original.get('retention_deletion_safe') is False):
         original.pop('pending_kinds', None)
+    elif isinstance(original.get('pending_kinds'), list):
+        original['pending_kinds'] = sorted(set(original['pending_kinds']) | changed_projection_kinds())
     state = run_storage_maintenance_slice(original, adapters,
         max_items=quota_max_entries + len(adapters) + len(LANE_BINDINGS) * STORAGE_LANE_SLICE_ENTRIES,
         max_seconds=max(0.1, quota_max_ms / 1000 + 0.05) + len(LANE_BINDINGS) * _OWNER_LANE_SLICE_MS / 1000,
         read_fence=read_fence, order=order)
     state['retention_deletion_safe'] = retention_safe
+    state['projection_source_revisions'] = source_revisions
     state.pop('deferred_reason', None)
     state['lane_fallback_kinds'] = sorted(set(lane_fallbacks))
     state['lane_reports'] = lane_reports
