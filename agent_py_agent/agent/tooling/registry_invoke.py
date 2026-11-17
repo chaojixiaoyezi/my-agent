@@ -260,9 +260,9 @@ def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutc
         )
 
     if request.tool_name in {"run_command", "terminal_session"}:
-        from .active_service_guard import active_service_stop_denial
+        from .active_service_guard import active_service_stop_denial, guarded_command_text
         root = data_root_from_boundary(request.write_boundary)
-        guard = active_service_stop_denial(str(tool_params.get("command") or ""), data_root=root,
+        guard = active_service_stop_denial(guarded_command_text(request.tool_name, tool_params), data_root=root,
             foreground_admin_full_access=(request.write_boundary or {}).get("foreground_admin_full_access") is True,
             service_root=Path((request.write_boundary or {})["host_active_service_root"]) if (request.write_boundary or {}).get("host_active_service_root") else None) if root is not None else None
         if guard is not None:
