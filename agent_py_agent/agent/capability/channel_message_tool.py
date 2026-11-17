@@ -297,12 +297,14 @@ class SendMessageTool(BaseTool):
             attachments=attachments,
             evidence_refs=tuple(evidence_refs),
         )
+        preserve_host_paths = _turn_preserves_host_paths(self.agent, provider, target)
         base_context = DeliveryContext(
             channel=provider,
             target=target,
             mode="proactive",
             request_id=str(scope.get("request_id") or ""),
             task_id=str(scope.get("task_id") or scope.get("run_id") or ""),
+            preserve_host_paths=preserve_host_paths,
         )
         receipt_key = self.business_idempotency_key(params) or _receipt_key(
             base_context,
@@ -316,6 +318,7 @@ class SendMessageTool(BaseTool):
             request_id=base_context.request_id,
             task_id=base_context.task_id,
             idempotency_key=receipt_key,
+            preserve_host_paths=preserve_host_paths,
         )
         receipt = _deliver_with_scheduler_scope(self.agent, self._delivery, delivery_context, envelope)
         if isinstance(receipt, ToolHandlerOutcome):
@@ -358,7 +361,23 @@ class SendMessageTool(BaseTool):
             payload,
             evidence_refs=evidence_refs,
             reply_binding=_source_reply_binding(self.agent, scope, delivery_context),
+            preserve_host_paths=preserve_host_paths,
         )
+
+
+# LLM: S12 只读本轮 RunParams 里宿主冻结的事实：on_chunk 是本请求的流写入器（preserve_host_paths 由受理时冻结的
+#   host_path_display 决定），host_channel_actor 是本请求的来源会话；只有发回这条来源私聊时沿用 full，
+#   其它目标、无来源会话或无冻结事实一律 basename。不读模型参数、正文或最新绑定。
+# 函数用途: 判断本次消息工具外发是否保留宿主完整路径。
+def _turn_preserves_host_paths(agent, provider: str, target: str) -> bool:
+    from ..conversation.channels import binding_delivery_target
+    from ..conversation.host_actor import HostChannelActor
+
+    params = getattr(agent, '_current_run_params', None)
+    actor = getattr(params, 'host_channel_actor', None)
+    return (getattr(getattr(params, 'on_chunk', None), 'preserve_host_paths', False) is True
+            and isinstance(actor, HostChannelActor) and actor.channel == provider
+            and binding_delivery_target(actor.channel, actor.actor_id, actor.conversation_id) == target)
 
 
 # LLM: 仅捕获实际宿主参数及运输目标，不读模型metadata；不完整旧调用仍可发送，但不能认领当前回复槽。
@@ -895,7 +914,7 @@ def _success_payload(
 
 
 # LLM: 成功外发必须同时返回一份结构化 delivery evidence，供本轮唯一回复出口判断是否还需自动发送；
-#   不能让上层从模型最终正文或日志文本猜测“是不是已经发过”。
+#   不能让上层从模型最终正文或日志文本猜测“是不是已经发过”。evidence 正文与实际外发同读一个路径展示开关。
 # 函数用途: 构造带真实owner回复来源的成功工具结果；绑定仅内部归档，公开output不暴露owner路径。
 def _success_result(
     provider: str,
@@ -905,6 +924,7 @@ def _success_result(
     *,
     evidence_refs: list[str],
     reply_binding: dict[str, str] | None = None,
+    preserve_host_paths: bool = False,
 ) -> ToolHandlerOutcome:
     output = dict(payload)
     return ToolHandlerOutcome(
@@ -919,7 +939,7 @@ def _success_result(
                 **({"reply_binding": reply_binding} if reply_binding else {}),
                 "channel": provider,
                 "content": project_message_paths_for_channel(
-                    project_user_reply(message).content, provider
+                    project_user_reply(message).content, provider, preserve_host_paths=preserve_host_paths
                 ),
                 "receipt_id": str(payload.get("receipt_id") or ""),
                 "evidence_refs": list(evidence_refs),

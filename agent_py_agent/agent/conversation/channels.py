@@ -229,7 +229,8 @@ def redact_structured_identifiers(
 
 
 # LLM: DeliveryContext 是主动/回复投递的唯一可信路由，出口遮蔽只能从这里取值，不能从正文反推收件人。
-# 函数用途: 去掉正文复述的内部路由编号；本机私有回复仍保留含这些编号的可复制文件路径。
+#   完整路径展示只读上下文上宿主冻结的 preserve_host_paths（S12），缺省或非 True 都按 basename 规则处理。
+# 函数用途: 去掉正文复述的内部路由编号；本机私有回复和冻结完整路径的回复仍保留含这些编号的可复制文件路径。
 def redact_delivery_context_identifiers(text: str, context: DeliveryContext) -> str:
     return redact_structured_identifiers(
         text,
@@ -243,6 +244,7 @@ def redact_delivery_context_identifiers(text: str, context: DeliveryContext) -> 
             (context.task_id, "当前任务"),
         ),
         channel=context.channel,
+        preserve_host_paths=getattr(context, "preserve_host_paths", False) is True,
     )
 
 
@@ -275,6 +277,9 @@ class DeliveryContext:
     root_id: str = field(default="", kw_only=True)
     parent_id: str = field(default="", kw_only=True)
     target_turn_id: str = field(default="", kw_only=True)
+    # 只由宿主按本次外发所属请求/投递的冻结 host_path_display=full 设置（S12 管理员私聊）；缺省按通道收敛为 basename，
+    # 凭据遮蔽不受影响。模型参数和正文不能设置它。
+    preserve_host_paths: bool = field(default=False, kw_only=True)
 
 
 # LLM: 回复信封只描述用户可见正文与已校验附件，不携带收件人；路由权威必须留在 DeliveryContext。

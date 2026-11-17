@@ -57,7 +57,9 @@ def safe_card_element_id(prefix: str, raw_key: str = "") -> str:
     return f"{clean[:6]}_{digest}"
 
 
-def render_progress_card(snapshot: Mapping) -> dict:
+# LLM: 步骤展示文本沿 step_display_text 统一净化；preserve_host_paths 只由投递服务按上下文冻结事实传入（S12），缺省 basename。
+# 函数用途: 把执行快照渲染成飞书进度卡片，超预算时按既有顺序裁剪。
+def render_progress_card(snapshot: Mapping, *, preserve_host_paths: bool = False) -> dict:
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
     raw_steps = snapshot.get("steps", ())
     raw_steps = raw_steps if isinstance(raw_steps, (list, tuple)) else ()
@@ -75,7 +77,7 @@ def render_progress_card(snapshot: Mapping) -> dict:
     footer = _plain(f"状态：{state}{total_text}")
     footer["element_id"] = "status_footer"
 
-    elements = [_step_element(step, idx) for idx, step in enumerate(steps)]
+    elements = [_step_element(step, idx, preserve_host_paths=preserve_host_paths) for idx, step in enumerate(steps)]
     done_count = sum(1 for s in steps if s.get("phase") in ("finished", "completed", "succeeded") or s.get("ok") is True)
     if observed == 0:
         panel_title = "工具执行步骤（暂无工具调用）"
@@ -420,8 +422,11 @@ def _plain(text: str) -> dict:
     return {"tag": "div", "text": {"tag": "plain_text", "content": text}}
 
 
-def _step_element(step: Mapping, idx: int = 0) -> dict:
-    tool = bounded_text(step_display_text(step.get("tool_name"), max_chars=120), max_bytes=120)
+# LLM: 只展示结构化步骤字段，全部文本经 step_display_text；路径展示开关原样透传，不从步骤内容推断。
+# 函数用途: 生成一个步骤的折叠面板。
+def _step_element(step: Mapping, idx: int = 0, *, preserve_host_paths: bool = False) -> dict:
+    keep = preserve_host_paths is True
+    tool = bounded_text(step_display_text(step.get("tool_name"), max_chars=120, preserve_host_paths=keep), max_bytes=120)
     name = _TOOL_LABELS.get(tool, tool or "工具")
     phase = step.get("phase")
     state = _PHASE_LABELS.get(phase, "状态未知") if isinstance(phase, str) else "状态未知"
@@ -431,7 +436,7 @@ def _step_element(step: Mapping, idx: int = 0) -> dict:
     execution = "已执行" if executed is True else "未执行" if executed is False else "执行情况未确认"
     duration = step.get("duration_ms")
     elapsed = f"{duration}ms" if type(duration) is int and duration >= 0 else "耗时未知"
-    label = bounded_text(step_display_text(step.get("label"), max_chars=240), max_bytes=240)
+    label = bounded_text(step_display_text(step.get("label"), max_chars=240, preserve_host_paths=keep), max_bytes=240)
     heading = f"{name} · {state} · {elapsed}"
     if executed is False:
         heading += " · 未执行"
@@ -442,16 +447,16 @@ def _step_element(step: Mapping, idx: int = 0) -> dict:
     details.append("结果核验：成功" if outcome is True else "结果核验：失败" if outcome is False else "结果未确认")
     if label:
         details.append("操作：" + label)
-    excerpt = step_display_text(step.get("result_excerpt"), max_chars=60)
+    excerpt = step_display_text(step.get("result_excerpt"), max_chars=60, preserve_host_paths=keep)
     if excerpt:
         details.append("结果摘要：" + excerpt)
     batch_index, batch_total = step.get("batch_index"), step.get("batch_total")
     if type(batch_index) is int and type(batch_total) is int and 0 <= batch_index <= batch_total and batch_total > 0:
         details.append(f"批次：{batch_index}/{batch_total}")
-    reference = bounded_text(step_display_text(step.get("detail_ref"), max_chars=160), max_bytes=160)
+    reference = bounded_text(step_display_text(step.get("detail_ref"), max_chars=160, preserve_host_paths=keep), max_bytes=160)
     if reference:
         details.append("详情引用：" + reference)
-    step_id = bounded_text(step_display_text(step.get("step_id"), max_chars=120), max_bytes=120)
+    step_id = bounded_text(step_display_text(step.get("step_id"), max_chars=120, preserve_host_paths=keep), max_bytes=120)
     if step_id:
         details.append("记录编号：" + step_id)
     raw_step_id = str(step.get("step_id", ""))

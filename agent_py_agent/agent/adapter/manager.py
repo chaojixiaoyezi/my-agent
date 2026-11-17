@@ -116,6 +116,8 @@ class GatewayAskSubmission:
     operation_id: str = ""
     receipt_id: str = ""
     control_state: str = ""
+    # Gateway 受理时冻结的路径展示事实（只认 "full"，S12）；适配层只转存，不重新判定。
+    host_path_display: str = ""
 
 
 # LLM: adapter registry 的健康时间统一使用带时区 UTC ISO，便于跨进程状态投影比较。
@@ -184,6 +186,7 @@ def _gateway_delivery_key(
 
 
 # LLM: Gateway 回复仍经过唯一 DeliveryService；本 helper 只组装可信入站路由和逻辑消息身份。
+#   完整路径展示只认宿主从 pending 写入的 host_path_display=full（受理回执冻结，S12），入站正文不能设置。
 # 函数用途: 在不扩张 ChannelManager 职责的前提下投递一条 Gateway 进度或最终回复。
 def _deliver_gateway_message(
     delivery_service: DeliveryService,
@@ -215,6 +218,7 @@ def _deliver_gateway_message(
         provider_thread_id=str(metadata.get('feishu_thread_id') or ''),
         root_id=str(metadata.get('feishu_root_id') or ''),
         parent_id=str(metadata.get('feishu_parent_id') or ''),
+        preserve_host_paths=metadata.get('host_path_display') == 'full',
         idempotency_key=(
             str(idempotency_key or "").strip()
             or _gateway_delivery_key(
@@ -228,7 +232,7 @@ def _deliver_gateway_message(
     return receipt.delivery_status == "sent"
 
 
-# LLM: durable pending 记录是后台回复路由的唯一事实，不从响应正文或当前会话状态重建身份。
+# LLM: durable pending 记录是后台回复路由的唯一事实，不从响应正文或当前会话状态重建身份；冻结的路径展示事实同样只取自记录。
 # 函数用途: 把待回送记录还原为统一的可信入站路由对象。
 def _pending_gateway_message(pending: PendingGatewayReply) -> IncomingMessage:
     return IncomingMessage(
@@ -239,7 +243,8 @@ def _pending_gateway_message(pending: PendingGatewayReply) -> IncomingMessage:
         conversation_id=pending.conversation_id,
         metadata={'target_turn_id': pending.target_turn_id, 'reply_policy': pending.reply_policy, 'feishu_chat_type': pending.channel_chat_type,
             'feishu_chat_id': pending.channel_chat_id, 'feishu_thread_id': pending.provider_thread_id,
-            'feishu_root_id': pending.root_id, 'feishu_parent_id': pending.parent_id},
+            'feishu_root_id': pending.root_id, 'feishu_parent_id': pending.parent_id,
+            'host_path_display': getattr(pending, 'host_path_display', '')},
     )
 
 
@@ -314,6 +319,7 @@ def _gateway_ingress_submission(record: GatewayIngressRecord) -> GatewayAskSubmi
         operation_id=str(payload.get("operation_id") or "").strip(),
         receipt_id=str(payload.get("receipt_id") or "").strip(),
         control_state=str(payload.get("control_state") or "").strip().lower(),
+        host_path_display=str(payload.get("host_path_display") or "").strip().lower(),
     )
 
 
@@ -658,7 +664,8 @@ class _ChannelIngressCoordinator:
         route_facts = {'target_turn_id': submission.target_turn_id, 'reply_policy': str(record.metadata.get('reply_policy') or ''),
             'provider_thread_id': str(record.metadata.get('feishu_thread_id') or ''),
             'root_id': str(record.metadata.get('feishu_root_id') or ''),
-            'parent_id': str(record.metadata.get('feishu_parent_id') or '')}
+            'parent_id': str(record.metadata.get('feishu_parent_id') or ''),
+            'host_path_display': submission.host_path_display}
         if submission.status == "control":
             _validate_control_receipt_submission(submission)
             request_id = submission.request_id or submission.target_turn_id
@@ -980,7 +987,9 @@ class _GatewayReplyPollClient:
         return GatewayProgressBatch(tuple(messages), max(pending.progress_cursor, int(body.get("next") or 0)), mode,
                                     any(isinstance(e, dict) and e.get("kind") in {"tool_liveness", "model_liveness"} for e in source_events),
                                     limits[-1] if limits else None, updates[-1] if updates else "",
-                                    steps=tuple(project_execution_view(source_events, request_id=pending.request_id)['steps']),
+                                    steps=tuple(project_execution_view(
+                                        source_events, request_id=pending.request_id,
+                                        preserve_host_paths=getattr(pending, 'host_path_display', '') == 'full')['steps']),
                                     render_kind=('text' if verbose_level == 'off' else getattr(self, 'progress_render_kind', 'text')),
                                     verbose_level=verbose_level,
                                     source_revision=max(pending.progress_cursor, int(body.get('next') or 0)))
@@ -1503,6 +1512,7 @@ class ChannelManager:
             operation_id=str(result.get("operation_id") or "").strip(),
             receipt_id=str(result.get("receipt_id") or "").strip(),
             control_state=str(result.get("control_state") or "").strip().lower(),
+            host_path_display=str(result.get("host_path_display") or "").strip().lower(),
         )
 
     # LLM: 最终回复与显式消息共用 DeliveryService；当前 channel/user/reply_to 只能取入站可信结构。

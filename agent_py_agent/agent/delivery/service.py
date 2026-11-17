@@ -137,6 +137,7 @@ class DeliveryService:
         return deliver_control_card(self, context, card, summary=summary)
 
     # LLM: 进度和最终回复共用相同路由/净化/能力前置门；message_id 只可来自 pending 回执，编辑失败不新发替代消息。
+    #   卡片步骤标签与正文同读 context.preserve_host_paths，不另设展示判据。
     # 函数用途: 首次创建一条进度消息，以后编辑同一条；进度不附路径说明，返回 provider 消息 ID 供原投递账本耐久保存。
     def deliver_progress(self, context: DeliveryContext, envelope: ReplyEnvelope, *, message_id: str = '',
                          render_kind: str = 'text', snapshot: dict | None = None, reply_policy: str | None = None):
@@ -160,7 +161,8 @@ class DeliveryService:
         card_snapshot = dict(snapshot or {})
         card_snapshot.pop('final_text', None)
         try:
-            options = {'render_kind': 'card', 'card': render_progress_card(card_snapshot)} if render_kind == 'card' else {}
+            options = {'render_kind': 'card', 'card': render_progress_card(
+                card_snapshot, preserve_host_paths=getattr(context, 'preserve_host_paths', False) is True)} if render_kind == 'card' else {}
         except ProgressCardOverflow:
             return ProgressDeliveryReceipt(False, message_id, 'CHANNEL_PROGRESS_CARD_OVERFLOW', 'permanent')
         create_options = {'reply_in_thread': True} if policy == 'thread' and attempt.capabilities.reply_policy else {}
@@ -226,6 +228,7 @@ class DeliveryService:
             component_receipts=state.snapshot())
 
     # LLM: 只认宿主typed附件并先拒JSON伪造；净化和能力前检不触碰adapter，失败在provider网络副作用前返回。
+    #   路径展示只读 context.preserve_host_paths（宿主按冻结请求事实设置），不从正文或通道名推断。
     # 函数用途: 规范化 context/envelope 并生成待解析投递，进度只做路径净化，最终消息保留说明，或返回无需发送的终态回执。
     def _prepare(
         self, context: DeliveryContext, envelope: ReplyEnvelope, *, progress: bool = False
@@ -244,8 +247,10 @@ class DeliveryService:
         if context.mode == "proactive" and raw_content.strip() and leads_with_internal_signal(raw_content):
             return replace(receipt, delivery_status="suppressed")
         projection = project_user_reply(raw_content, finalized=True)
+        # S12：完整路径只看上下文上宿主冻结的事实；凭据遮蔽已在 project_user_reply 完成，不受影响。
         content = redact_delivery_context_identifiers(
-            (project_host_paths_for_channel if progress else project_message_paths_for_channel)(projection.content, channel),
+            (project_host_paths_for_channel if progress else project_message_paths_for_channel)(
+                projection.content, channel, preserve_host_paths=getattr(context, "preserve_host_paths", False) is True),
             context,
         )
         receipt = replace(receipt, content=content)

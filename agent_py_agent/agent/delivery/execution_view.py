@@ -17,9 +17,11 @@ _CONFIRMED_RESULT_STATUSES = frozenset({"succeeded", "failed", "cancelled", "ski
 
 
 # LLM: 仅接受原 ToolCall/ToolResult 或宿主结构化 progress；最多观察2000事件，结果不授予操作身份或写入任何状态。
+#   preserve_host_paths 只由调用方按本请求冻结的 host_path_display 传入（S12），缺省按 basename 展示。
 # 函数用途: 生成按首次观察排序的有界步骤；终态冻结，未知总量不从已观察数反推。
 def project_execution_view(events, *, request_id: str, source_revision: int | None = None,
-                           total_steps: int | None = None, max_steps: int = 50) -> dict:
+                           total_steps: int | None = None, max_steps: int = 50,
+                           preserve_host_paths: bool = False) -> dict:
     limit = max(1, min(MAX_EXECUTION_STEPS_COUNT, max_steps))
     steps, seen = {}, set()
     request_phase, events_truncated = "unknown", False
@@ -69,12 +71,12 @@ def project_execution_view(events, *, request_id: str, source_revision: int | No
             "handler_executed": (facts["handler_executed"] if type(facts.get("handler_executed")) is bool
                                  else previous.get("handler_executed")),
             "duration_ms": duration if type(duration) is int and duration >= 0 else previous.get("duration_ms"),
-            "label": _step_label(facts, previous),
+            "label": _step_label(facts, previous, preserve_host_paths=preserve_host_paths),
             "_terminal": bool(facts.get("_terminal")) or phase in _TERMINAL_PHASES,
         }
         excerpt = facts.get('result_excerpt', previous.get('result_excerpt'))
         if isinstance(excerpt, str):
-            step['result_excerpt'] = step_display_text(excerpt, max_chars=60)
+            step['result_excerpt'] = step_display_text(excerpt, max_chars=60, preserve_host_paths=preserve_host_paths)
         batch_index = facts.get('batch_index', previous.get('batch_index'))
         batch_total = facts.get('batch_total', previous.get('batch_total'))
         if type(batch_index) is int and type(batch_total) is int and 0 <= batch_index <= batch_total and batch_total > 0:
@@ -139,24 +141,27 @@ def _tool_facts(event: object) -> dict | None:
 
 # LLM: 显式 display 字段是脱敏展示提示，不读取 arguments/output 或自然语言声明来创建执行事实。
 # 函数用途: 汇总连接器、接口路径与关键子命令，保留旧标签回退。
-def _step_label(facts, previous):
+def _step_label(facts, previous, *, preserve_host_paths=False):
     display = facts.get('display')
     if isinstance(display, Mapping):
-        values = [step_display_text(display.get(key), max_chars=80)
+        values = [step_display_text(display.get(key), max_chars=80, preserve_host_paths=preserve_host_paths)
                   for key in ('connector_id', 'endpoint_path', 'command_name', 'subcommand')]
         if any(values):
             return bounded_text(' '.join(value for value in values if value), max_bytes=MAX_LABEL_BYTES)
     value = facts.get('label', facts.get('detail', previous.get('label', facts['tool_name'])))
-    return bounded_text(step_display_text(value, max_chars=240), max_bytes=MAX_LABEL_BYTES)
+    return bounded_text(step_display_text(value, max_chars=240, preserve_host_paths=preserve_host_paths),
+                        max_bytes=MAX_LABEL_BYTES)
 
 
 # LLM: 展示文本先走统一凭据与宿主路径投影；仅展示有界纯文本，不从中解析状态或控制。
+#   preserve_host_paths 只来自宿主冻结的请求事实（S12）；凭据遮蔽在任何取值下都生效。
 # 函数用途: 生成单行的结果节选或步骤标签。
-def step_display_text(value, *, max_chars=60):
+def step_display_text(value, *, max_chars=60, preserve_host_paths=False):
     from ..conversation.channels import project_host_paths_for_channel, project_user_reply
 
     text = value if isinstance(value, str) else ''
-    text = project_host_paths_for_channel(project_user_reply(text[:4096]).content, 'feishu')
+    text = project_host_paths_for_channel(project_user_reply(text[:4096]).content, 'feishu',
+                                          preserve_host_paths=preserve_host_paths is True)
     return ' '.join(text.split())[:max_chars]
 
 

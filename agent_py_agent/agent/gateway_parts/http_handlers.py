@@ -60,6 +60,7 @@ from ..conversation.agent_control import (
 )
 from ..conversation.background_transcript import read_background_transcript_events
 from ..conversation.channels import (
+    PROACTIVE_PUSH_CHANNELS,
     host_paths_visible_to_viewer,
     project_host_paths_for_channel,
     project_user_reply,
@@ -485,7 +486,8 @@ def _continuation_result_projection(agent: object | None, request_id: str) -> di
 #   记录不存在回 404、存在但无权限保持 403，与 /result、/input-status 同口径；两种拒绝都经
 #   _denial_body 补"缺本机凭据"码，客户端不再需要从 403 里猜"记录不存在"。
 # 函数用途: 按行游标返回当前 request 已启用的 typed 工具进度。
-# LLM: 轮询者的当前权限只解析一次，展示标志不继承被读请求的管理员能力，也不改变读取ACL。
+# LLM: 轮询者的当前权限只解析一次，展示标志不继承被读请求的管理员能力，也不改变读取ACL；
+#   唯一例外是 IM 查看者就是该请求自己的通道和用户，且请求受理时冻结了 host_path_display=full（S12）。
 # 函数用途: 按本次查看者投影有界进度事件。
 def handle_progress(handler, server) -> None:
     parsed = urlsplit(handler.path)
@@ -527,7 +529,8 @@ def handle_progress(handler, server) -> None:
     channel = _request_channel(handler)[1]
     preserve_host_paths = host_paths_visible_to_viewer(
         channel, can_access_all_users=permission is None or permission.can_access_all_users,
-        chat_type=(getattr(handler, "headers", {}) or {}).get("X-Channel-Chat-Type", ""))
+        chat_type=(getattr(handler, "headers", {}) or {}).get("X-Channel-Chat-Type", "")
+    ) or _progress_viewer_keeps_frozen_host_paths(server.paths, request_id, user_id, channel)
     events, next_cursor = _read_public_progress_events(
         actual_path, since, channel=channel, include=include, preserve_host_paths=preserve_host_paths,
     )
@@ -535,6 +538,27 @@ def handle_progress(handler, server) -> None:
         200,
         {"request_id": request_id, "events": events, "next": next_cursor},
     )
+
+
+# LLM: S12 只读被读请求受理时冻结的 host_path_display；仅对 IM 主动通道（查看者规则在这里恒为 basename）且查看者
+#   就是该请求自己的通道和用户（IM 适配层替原私聊轮询）时沿用 full。本机/HTTP 查看者仍只按当前查看者裁决，
+#   不继承历史请求资格。记录缺失、读不出或身份不同一律按否；读取 ACL 不变。
+# 函数用途: 判断一次进度读取是否沿用请求冻结的完整路径展示。
+def _progress_viewer_keeps_frozen_host_paths(paths, request_id: str, user_id: str, channel: str) -> bool:
+    from .request_history import gateway_request_preserves_host_paths
+
+    if str(channel or "").strip().lower() not in PROACTIVE_PUSH_CHANNELS:
+        return False
+    for folder in (paths.processing, paths.inbox, paths.done, paths.failed, paths.terminal):
+        request_path = folder / f"{request_id}.json"
+        if not request_path.exists():
+            continue
+        payload, load_error = _read_payload_report(request_path, context="gateway.http_progress_display.read")
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        return (load_error is None and gateway_request_preserves_host_paths(payload)
+                and str(metadata.get("channel") or "").strip().lower() == str(channel or "").strip().lower()
+                and str(payload.get("user_id") or "").strip() == str(user_id or "").strip())
+    return False
 
 
 # LLM: /progress 只公开白名单事件：模型过程说明、请求尚未返回的数值等待、按档位的工具进度和工具审批（只含工具名与已脱敏摘要，

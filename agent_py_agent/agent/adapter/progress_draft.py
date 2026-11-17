@@ -122,6 +122,7 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
 
 
 # LLM: 原 pending 提供可信回复路由与已发送 ID；所有净化、目标校验和 provider 调用留在唯一 DeliveryService。
+#   完整路径展示只读 pending 里受理回执冻结的 host_path_display（S12），不重新判定。
 # 函数用途: 将原进度账的消息身份与内容交给统一渠道服务，不启动另一会话。
 def send_gateway_draft(service: object, pending: object, text: str, *, final: bool = False):
     from ..delivery import ReplyEnvelope
@@ -131,7 +132,8 @@ def send_gateway_draft(service: object, pending: object, text: str, *, final: bo
         reply_to=pending.message_id, request_id=pending.request_id, target_turn_id=pending.target_turn_id,
         idempotency_key=str(pending.dispatch.get("message_key") or ""),
         reply_policy=pending.reply_policy, provider_thread_id=pending.provider_thread_id,
-        root_id=pending.root_id, parent_id=pending.parent_id)
+        root_id=pending.root_id, parent_id=pending.parent_id,
+        preserve_host_paths=getattr(pending, 'host_path_display', '') == 'full')
     options = {}
     draft = pending.progress_draft
     if draft.get('render_kind') == 'card':

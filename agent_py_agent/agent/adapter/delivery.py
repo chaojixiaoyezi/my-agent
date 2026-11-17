@@ -301,6 +301,8 @@ class PendingGatewayReply:
     root_id: str = field(default='', kw_only=True)
     parent_id: str = field(default='', kw_only=True)
     target_turn_id: str = field(default='', kw_only=True)
+    # Gateway 受理回执里冻结的路径展示事实（S12，只认 "full"）；旧记录缺省为空，按 basename 回送。
+    host_path_display: str = field(default='', kw_only=True)
 
     # LLM: watch_kind 是结构化监听阶段；dispatch 身份损坏必须拒绝，不能丢掉外发意图后重新发送。
     # 函数用途: 在持久化或轮询前校验监听阶段、原路由和外发身份。
@@ -383,6 +385,7 @@ class PendingGatewayReply:
             root_id=str(data.get('root_id') or ''),
             parent_id=str(data.get('parent_id') or ''),
             target_turn_id=str(data.get('target_turn_id') or ''),
+            host_path_display=str(data.get('host_path_display') or ''),
         )
 
     # LLM: Control operations are keyed by their independent operation receipt, never by the target

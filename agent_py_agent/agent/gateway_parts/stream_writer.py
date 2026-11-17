@@ -386,7 +386,9 @@ class BufferedChunkStreamWriter(StreamLiveness):
                 summary = next((inputs[key] for key in ("command", "path", "url", "query")
                                 if isinstance(inputs.get(key), str) and inputs[key].strip()), "")
                 if summary:
-                    progress["label"] = step_display_text(summary, max_chars=240)
+                    # 标签路径展示只读本请求冻结的 preserve_host_paths（S12），凭据遮蔽照常。
+                    progress["label"] = step_display_text(summary, max_chars=240,
+                                                          preserve_host_paths=self.preserve_host_paths)
         if self._verbose_level != "full":
             progress.pop("input", None)
             progress.pop("input_truncated", None)

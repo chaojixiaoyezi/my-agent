@@ -1135,9 +1135,12 @@ def raise_if_input_reconcile_unsettled(summary: dict[str, Any]) -> None:
 
 
 # LLM: HTTP status projection exposes stable ingress identity and exact target separately. It never
-# treats terminal_unknown as rejection or success.
+# treats terminal_unknown as rejection or success. 受理时冻结的 host_path_display=full（S12）原样随回执返回，
+# IM 适配层回送本请求时只转存这一事实；其它取值不出字段，不在这里重新判定。
 # 函数用途: 把普通消息回执转换成 TUI、飞书和 Web 共用的结构化状态。
 def gateway_input_status_payload(receipt: GatewayInputReceipt) -> dict[str, object]:
+    from .request_history import gateway_request_preserves_host_paths
+
     delivery_status = {
         "consumed": "accepted",
         "queued": "accepted",
@@ -1146,7 +1149,7 @@ def gateway_input_status_payload(receipt: GatewayInputReceipt) -> dict[str, obje
         "terminal_unknown": "unknown",
     }[receipt.state]
     disposition = "queued" if receipt.state == "queued" else "active_turn_input"
-    return {
+    payload: dict[str, object] = {
         "request_id": receipt.request_id,
         "target_turn_id": receipt.target_turn_id,
         "status": (
@@ -1160,6 +1163,9 @@ def gateway_input_status_payload(receipt: GatewayInputReceipt) -> dict[str, obje
         "delivery_status": delivery_status,
         "input_state": receipt.state,
     }
+    if gateway_request_preserves_host_paths(receipt.prepared_request):
+        payload["host_path_display"] = "full"
+    return payload
 
 
 # LLM: 原by_turn仅查找投影不是权限；C可在transport前显式传target，不改canonical binding/ACK；默认参数完整保Count0，固定末门只试原锁。
