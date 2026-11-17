@@ -2425,13 +2425,14 @@ def _tool_step_or_limit(agent, request: _ToolStepRequest):
 
 
 # LLM: 工具结果已落账、下一次模型调用之前的安全点（S11）；表达阶段待完成时不让出，免得吞掉必要回复。
+#   让出前仍持车道时先标记停放，排队的用户回合拿到车道后才读线程，不会接管这条仍 active 的定时任务。
 # 函数用途: 判断这片后台定时工作是否在此把会话车道让给排队的用户消息。
 def _yield_lane_to_user_input(agent, params: ToolLoopExecuteParams) -> bool:
     if pending_natural_user_reply(params) is not None:
         return False
-    from ..conversation.technical_continuation import yields_to_user_input
+    from ..conversation.technical_continuation import park_for_user_input, yields_to_user_input
 
-    return yields_to_user_input(agent, params)
+    return yields_to_user_input(agent, params) and park_for_user_input(agent, params)
 
 
 # LLM: 宿主自写的让出结束，不调用模型、不带正文；unfinished 保持任务 active，续跑由定时收口发表的唤醒接着做。

@@ -1,7 +1,8 @@
 """宿主技术截断的有界续跑：回执与结束原因同存原任务，唤醒只引用回执。"""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import logging
+from dataclasses import asdict, dataclass, replace
 
 from ..gateway_parts.io import update_json_file_atomic
 from ..turn_end import result_turn_end_reason
@@ -310,3 +311,67 @@ def user_input_yield_wake_valid(store, signal) -> bool:
     link = store.tasks.load(task_id)
     return bool(link is not None and link.status == "active" and link.thread_id == signal.thread_id
                 and not link.superseded_by_task_id)
+
+
+# 线程元数据里记录“哪个定时执行正为用户回合让出车道”的键；只存任务编号，不存正文。
+USER_INPUT_YIELD_PARKED_KEY = "user_input_yield.v1"
+
+
+# LLM: 让出片仍持车道时写入，排队的用户回合拿到车道后才构造会话上下文，必然看到这条标记；停放中的定时任务
+#   仍是 active，前台用户回合不能把它当成本轮任务接管（否则用户回合会替定时任务干活、收口它）。续跑开始时清除。
+# 函数用途: 在会话线程上标记一个为用户回合让出车道、等待续跑的定时执行。
+def mark_user_input_yield_parked(store, thread_id: str, task_id: str) -> bool:
+    def update(current):
+        if user_input_yield_parked_task_id(current) == task_id:
+            return current
+        metadata = dict(current.metadata or {})
+        metadata[USER_INPUT_YIELD_PARKED_KEY] = {"task_id": task_id}
+        return replace(current, metadata=metadata)
+
+    return _update_thread(store, thread_id, update)
+
+
+# LLM: 只清除同一任务的标记；别的任务后来写下的标记原样保留。清除失败不影响续跑，标记只对仍 active 的链接起作用。
+# 函数用途: 续跑开始时撤下一个定时执行的让出标记。
+def clear_user_input_yield_parked(store, thread_id: str, task_id: str) -> bool:
+    def update(current):
+        if user_input_yield_parked_task_id(current) != task_id:
+            return current
+        metadata = dict(current.metadata or {})
+        metadata.pop(USER_INPUT_YIELD_PARKED_KEY, None)
+        return replace(current, metadata=metadata)
+
+    return _update_thread(store, thread_id, update)
+
+
+# LLM: 标记只影响前台回合是否接管停放任务；写不进去时退回原有选择，不能让让出或续跑本身失败。
+# 函数用途: 在线程锁内应用一次元数据更新，失败返回 False。
+def _update_thread(store, thread_id: str, update) -> bool:
+    if store is None or not thread_id:
+        return False
+    try:
+        store.threads.update_atomic(thread_id, update)
+    except Exception:  # noqa: BLE001 - 标记是接管保护的提示，失败时调用方记日志并照常继续。
+        return False
+    return True
+
+
+# LLM: 只在 yields_to_user_input 为真之后、仍持车道时调用；标记写不进去就不让出，本片照旧跑完，
+#   宁可用户多等一片，也不让用户回合接管停放中的定时任务。
+# 函数用途: 让出车道前把本定时执行标记为停放，返回能否让出。
+def park_for_user_input(agent, params) -> bool:
+    attrs = getattr(params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    task_id = str(attrs.get("conversation_task_id") or "").strip()
+    if mark_user_input_yield_parked(getattr(agent, "conversation_store", None), thread_id, task_id):
+        return True
+    logging.getLogger(__name__).warning("USER_INPUT_YIELD_PARK_FAILED thread=%s task=%s", thread_id, task_id)
+    return False
+
+
+# 函数用途: 读出线程上正为用户回合停放的定时执行编号，没有时为空串。
+def user_input_yield_parked_task_id(thread) -> str:
+    metadata = getattr(thread, "metadata", None)
+    entry = metadata.get(USER_INPUT_YIELD_PARKED_KEY) if isinstance(metadata, dict) else None
+    return str(entry.get("task_id") or "").strip() if isinstance(entry, dict) else ""

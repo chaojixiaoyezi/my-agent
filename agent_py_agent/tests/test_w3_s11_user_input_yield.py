@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -27,9 +28,14 @@ from agent_py_agent.agent.conversation.runtime import (
 from agent_py_agent.agent.conversation.technical_continuation import (
     USER_INPUT_YIELD_REASON,
     USER_INPUT_YIELD_WAKE_REASON,
+    clear_user_input_yield_parked,
+    mark_user_input_yield_parked,
+    park_for_user_input,
+    user_input_yield_parked_task_id,
     yields_to_user_input,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import request_context
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 from agent_py_agent.tests.test_scheduler_runtime import _create_job, _RetryDelivery
@@ -170,6 +176,8 @@ def test_a_waiting_user_turn_gets_the_lane_within_one_tool_round(tmp_path, monke
         [wake] = _yield_wakes(case)
         assert wake.root_task_id == case.run_id and wake.thread_id == case.thread.thread_id
         assert wake.metadata["scheduler_run_id"] == case.run_id and "owner_delivery" not in wake.metadata
+        # 让出片仍持车道时已把本执行标记为停放：排队的用户回合随后读到的线程带着这条标记。
+        assert user_input_yield_parked_task_id(case.store.threads.require(case.thread.thread_id)) == case.run_id
         # 用户回合还在车道上：续跑不领取、不消费。
         case.scheduler.tick(now=1_002)
         assert len(case.calls) == 2 and _yield_wakes(case) == [wake]
@@ -187,6 +195,8 @@ def test_a_waiting_user_turn_gets_the_lane_within_one_tool_round(tmp_path, monke
     assert case.store.tasks.load(case.run_id).status != "active"
     assert _run_status(case) == "done"
     assert len(case.channels.attempts) == 1 and _yield_wakes(case) == []
+    # 续跑片没再让出：停放标记撤下。
+    assert user_input_yield_parked_task_id(case.store.threads.require(case.thread.thread_id)) == ""
     history, errors = case.agent.scheduler_repository.history(limit=10)
     [row] = [item for item in history if item["run_id"] == case.run_id]
     # 定时执行的最终回执是续跑片的真实回复，不是让出片的空正文。
@@ -230,3 +240,59 @@ def test_yield_does_not_count_as_a_technical_cutoff(reason):
     from agent_py_agent.agent.conversation.technical_continuation import _SOURCES
 
     assert (reason in _SOURCES) is (reason != USER_INPUT_YIELD_REASON)
+
+
+# 函数用途: 按网关普通回合的方式（无精确绑定、无 Goal）为线程选择本轮工作区任务。
+def _select_workspace(store, thread_id, **request):
+    errors = request_context._GatewayLoadErrors()
+    selected = request_context._gateway_workspace_task(store, store.threads.require(thread_id), None, errors,
+                                                       **request)
+    assert not errors
+    return selected
+
+
+def test_a_parked_scheduled_task_is_not_adopted_by_the_next_user_turn(tmp_path):
+    agent = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = _thread(agent)
+    workspace = tmp_path / "srun-workspace"
+    workspace.mkdir()
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "srun_p", "goal": "执行 p", "now": 1_000,
+                      "task_path": str(workspace)})
+    # 原行为：线程上唯一的 active 定时链接会被下一条普通用户回合当成本轮任务接管。
+    assert _select_workspace(store, thread.thread_id).task_id == "srun_p"
+    assert mark_user_input_yield_parked(store, thread.thread_id, "srun_p") is True
+    # 停放期间普通用户回合不接管它；用户回合自己建任务，定时执行等续跑接着做。
+    assert _select_workspace(store, thread.thread_id) is None
+    assert store.tasks.load("srun_p").status == "active"
+    # 精确绑定到该任务的请求（恢复、重放）照旧选中。
+    exact = {"id": "req-1", "conversation_runtime": {"request_id": "req-1", "thread_id": thread.thread_id,
+                                                     "task_id": "srun_p"}}
+    assert _select_workspace(store, thread.thread_id, request=exact, request_id="req-1").task_id == "srun_p"
+    # 只撤下同一任务的标记。
+    assert clear_user_input_yield_parked(store, thread.thread_id, "srun_other") is True
+    assert _select_workspace(store, thread.thread_id) is None
+    assert clear_user_input_yield_parked(store, thread.thread_id, "srun_p") is True
+    assert user_input_yield_parked_task_id(store.threads.require(thread.thread_id)) == ""
+    assert _select_workspace(store, thread.thread_id).task_id == "srun_p"
+
+
+def test_a_slice_that_cannot_record_the_park_does_not_yield(tmp_path, monkeypatch, caplog):
+    agent = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = _thread(agent)
+    params = _slice_params(thread.thread_id, "srun_1", run_id="srun_1")
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("thread file unavailable")
+
+    monkeypatch.setattr(store.threads, "update_atomic", refuse)
+    from agent_py_agent.agent.agent_core._tool_loop_service import _yield_lane_to_user_input
+
+    with _user_turn_waiting(store, thread.thread_id), caplog.at_level(
+            logging.WARNING, logger="agent_py_agent.agent.conversation.technical_continuation"):
+        assert yields_to_user_input(agent, params) is True
+        # 写不下停放标记就不让出：本片照旧跑完，用户回合不会接管一条没有标记的 active 定时任务。
+        assert park_for_user_input(agent, params) is False
+        assert _yield_lane_to_user_input(agent, params) is False
+    assert "USER_INPUT_YIELD_PARK_FAILED" in caplog.text

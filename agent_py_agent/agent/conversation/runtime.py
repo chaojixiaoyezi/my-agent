@@ -4771,13 +4771,20 @@ class _BackgroundSchedulerWakeMixin:
         finally:
             if claim_state.heartbeat is not None:
                 claim_state.heartbeat.stop()
+        yielded = False
         if report is not None:
             from .technical_continuation import publish_user_input_yield
 
             # 让出片的续跑唤醒须先于定时收口的后续工作判定发表，执行才停在 waiting（S11）。
-            if publish_user_input_yield(self.store, signal, report):
+            yielded = publish_user_input_yield(self.store, signal, report)
+            if yielded:
                 _HEARTBEAT_LOGGER.info("USER_INPUT_YIELD thread=%s task=%s yielded_wake=%s",
                                        signal.thread_id, signal.root_task_id, signal.wake_signal_id)
+        if lifecycle_reason == USER_INPUT_YIELD_WAKE_REASON and not yielded:
+            from .technical_continuation import clear_user_input_yield_parked
+
+            # 续跑片没再让出：任务已不再停放，撤下标记。车道已释放，其间进来的用户回合只会看到标记、不接管，方向保守。
+            clear_user_input_yield_parked(self.store, signal.thread_id, str(signal.root_task_id or ""))
         report = _finish_scheduler_wake_claim(
             self,
             signal,
