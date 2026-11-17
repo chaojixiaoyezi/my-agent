@@ -57,3 +57,11 @@ def test_cause_message_is_trimmed_before_dropping_the_shape() -> None:
     text = _failure_diagnostic_warning({**diagnostic, "message": "m" * 200})
     parsed = json.loads(text.split("=", 1)[1])
     assert len(text) <= 300 and parsed["cause_type"] == "ValueError" and parsed["cause_message"].startswith("x")
+
+
+def test_cause_message_is_not_repeated_when_the_outer_message_already_says_it() -> None:
+    try:
+        raise RuntimeError("模型调用失败：服务商需要会话编号") from ValueError("服务商需要会话编号")
+    except RuntimeError as exc:
+        diagnostic = _failure_diagnostic(exc)
+    assert diagnostic["cause_type"] == "ValueError" and "cause_message" not in diagnostic

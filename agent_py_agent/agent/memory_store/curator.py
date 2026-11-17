@@ -2597,7 +2597,11 @@ def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     message = redact_sensitive_text(str(exc or ""))[:200]
     if message:
         diagnostic["message"] = message
-    diagnostic.update(_cause_facts(exc))
+    cause = _cause_facts(exc)
+    if cause.get("cause_message") and str(cause["cause_message"]) in str(diagnostic.get("message") or ""):
+        # 外层 message 已含同一根因文本（模型调用失败常直接沿用根因消息）时不重复记录。
+        del cause["cause_message"]
+    diagnostic.update(cause)
     diagnostic.update(_violation_facts(exc))
     facts = getattr(exc, "response_facts", None)
     if isinstance(facts, dict):
