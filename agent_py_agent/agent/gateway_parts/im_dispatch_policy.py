@@ -11,6 +11,7 @@ from ..capability.runtime_config_reload import (
 )
 from ..conversation.channels import supports_transcript_delivery
 from ..conversation.route_mode import route_setting_for_paths, route_thread_for_paths
+from ..runtime_errors import DataCorruptionError
 from ..settings.config import AgentConfig
 from ..user_space.home_layout import MyAgentHomePaths
 from ..user_space.home_layout import home_paths as resolve_home_paths
@@ -51,20 +52,24 @@ def capture_gateway_input_context(base_agent, scope) -> tuple[dict | None, dict 
         return capture_gateway_input_context_for_owner(home_paths=home, config=config,
             scope=replace(scope, resolved_owner=owner), capability_root=base_agent.root,
             capability_config_path=getattr(base_agent, 'capability_config_path', None))
-    if local_transcript and not _space_enabled(agent.config):
-        return None, None
     store = getattr(agent, "conversation_store", None)
-    if store is not None:
-        thread, error = store.threads.resolve_report(channel=scope.channel,
-            channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
-        if error:
-            raise ValueError("route thread binding is unreadable")
-    else:
-        thread = route_thread_for_paths(agent.home_paths, agent.config, scope)
+    try:
+        if store is not None:
+            thread, error = store.threads.resolve_report(channel=scope.channel,
+                channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+            if error:
+                raise ValueError("route thread binding is unreadable")
+        else:
+            thread = route_thread_for_paths(agent.home_paths, agent.config, scope)
+    except (DataCorruptionError, OSError, PermissionError, ValueError):
+        # 本地通道原先不读线程；读不到时保持原无快照受理，IM 通道仍按原合同报错。
+        if local_transcript and not _space_enabled(agent.config):
+            return None, None
+        raise
     from .request_space import capture_request_space
 
     space = capture_request_space(agent.home_paths, thread, actor_id=scope.user_id) if _space_enabled(agent.config) else None
-    dispatch = None if local_transcript else _capture_snapshot(
+    dispatch = None if local_transcript and not _local_route_requested(agent.home_paths, thread, scope) else _capture_snapshot(
         agent.home_paths, agent.config, scope, capability_config_for_agent(agent),
         live_policy=getattr(agent, "owner_policy", None), thread=thread,
     )
@@ -88,11 +93,14 @@ def capture_gateway_input_context_for_owner(
     from .request_space import capture_request_space
 
     local_transcript = supports_transcript_delivery(scope.channel)
-    if local_transcript and not _space_enabled(config):
-        return None, None
-    thread = route_thread_for_paths(home_paths, config, scope)
+    try:
+        thread = route_thread_for_paths(home_paths, config, scope)
+    except (DataCorruptionError, OSError, PermissionError, ValueError):
+        if local_transcript and not _space_enabled(config):
+            return None, None
+        raise
     space = capture_request_space(home_paths, thread, actor_id=scope.user_id) if _space_enabled(config) else None
-    dispatch = None if local_transcript else _capture_snapshot(
+    dispatch = None if local_transcript and not _local_route_requested(home_paths, thread, scope) else _capture_snapshot(
         home_paths, config, scope,
         capability_config_for_paths(root=capability_root, user_path=capability_config_path),
         thread=thread,
@@ -128,6 +136,19 @@ def _require_scope_owner(home: MyAgentHomePaths, scope: GatewayControlScope) -> 
     expected = home_paths_with_owner(resolve_home_paths(home.root), resolve_owner_home(home.root, canonical))
     if canonical != owner or home != expected:
         raise ValueError("IM 委派 owner 与规范路径不一致")
+
+
+# LLM: 本地 transcript 通道（TUI/CLI 的 chat 等）原先从不冻结路由快照，/route true 写入后对新请求没有任何效果。
+#   只在当前发送者在该线程显式开启 route 时才为本地通道冻结快照；未开启保持原无快照受理形状；
+#   读设置失败按未开启处理，不因坏设置阻断本地受理（IM 通道仍按原合同报错）。
+# 函数用途: 判断本地通道的这条新请求是否要按 /route 冻结路由快照。
+def _local_route_requested(home, thread, scope) -> bool:
+    if thread is None:
+        return False
+    try:
+        return route_setting_for_paths(home, thread, actor_id=scope.user_id)["enabled"] is True
+    except (DataCorruptionError, PermissionError, ValueError):
+        return False
 
 
 # LLM: 唯一route设置决定新请求，能力/owner只收窄；结构化覆盖仅影响本轮mode，原route值仍冻结。

@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ...agent.concurrency.interrupt import interrupt_by_name
 from ...agent.conversation.control_commands import (
@@ -456,8 +456,12 @@ def _execute_local_control(
             from ...agent.conversation.route_mode import execute_route_control
 
             thread = _chat_existing_thread(execution.agent, state.session_id)
-            return execute_route_control(execution.agent, command, thread,
-                                         actor_id=str(getattr(thread, 'canonical_user_id', '') or ''), channel='chat')
+            result = execute_route_control(execution.agent, command, thread,
+                                           actor_id=str(getattr(thread, 'canonical_user_id', '') or ''), channel='chat')
+            if result.ok:
+                # 本地直连模式不经 Gateway 受理，设置照常保存，但只有经 Gateway 的新请求才会按它委派。
+                result = replace(result, message=result.message + '本地直连模式不经 Gateway 受理：设置已保存，经 Gateway 的新请求才按它委派。')
+            return result
         except (ImportError, OSError, ValueError, TypeError, AttributeError, RuntimeError):
             return ConversationControlResult('route', False, '当前会话路由控制不可用，设置结果未确认。',
                                              delivery_status='unknown')
