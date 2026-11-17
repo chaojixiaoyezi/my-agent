@@ -806,6 +806,48 @@ def prune_transient_bwrap_sidecar_mounts(argv: list[str], stderr: str) -> list[s
     return pruned if matched_stderr and len(pruned) < len(argv) else None
 
 
+# LLM: 只删最终 argv 中可证明不改视图的同源瞬时侧车 try-bind：其后有确定生效的同位/祖先挂载（如最终隐藏 tmpfs）把它整体盖住，
+#   或它之前的有效覆盖是同源硬 RO 祖先；名下另有挂载、父目录可写或异源时一律保留逐项只读，try 失败仍走裁剪重试。
+# 函数用途: 省略父目录已只读或已隐藏的数据库侧车/锁文件挂载，减少 exec 前侧车消失导致的 bwrap 失败与重试。
+def _without_redundant_sidecar_mounts(argv: list[str]) -> list[str]:
+    mounts: list[tuple[int, str, str, tuple[str, ...]]] = []
+    for index, flag in enumerate(argv):
+        if flag in {"--bind", "--ro-bind", "--ro-bind-try", "--dev-bind", "--symlink"}:
+            mounts.append((index, flag, os.fspath(Path(argv[index + 2])), tuple(argv[index:index + 3])))
+        elif flag in {"--tmpfs", "--proc", "--dev"}:
+            mounts.append((index, flag, os.fspath(Path(argv[index + 1])), ()))
+    candidates = {position for position, (_, flag, target, arguments) in enumerate(mounts)
+                  if flag == "--ro-bind-try" and os.fspath(Path(arguments[1])) == target
+                  and _is_ephemeral_readonly_sidecar(Path(target))}
+    if not candidates:
+        return argv
+    # 任何挂载（含 try/symlink）落在侧车名之下时，省略会改变其挂载点所在文件系统，保守保留。
+    nested = {parent for _, _, target, _ in mounts for parent in _str_parents(target)}
+    # 后发 try-bind 源缺失会被 bwrap 跳过，symlink 不是挂载，二者都不能证明盖住了先前侧车。
+    shadowed: set[int] = set()
+    covered_later: set[str] = set()
+    for position in range(len(mounts) - 1, -1, -1):
+        _, flag, target, _ = mounts[position]
+        if position in candidates and (target in covered_later
+                                       or any(parent in covered_later for parent in _str_parents(target))):
+            shadowed.add(position)
+        if flag in {"--bind", "--ro-bind", "--dev-bind", "--tmpfs", "--proc", "--dev"}:
+            covered_later.add(target)
+    removed: set[int] = set()
+    latest: dict[str, int] = {}
+    for position, (index, _, target, _) in enumerate(mounts):
+        if position in candidates and target not in nested:
+            cover = max((latest.get(path, -1) for path in (target, *_str_parents(target))), default=-1)
+            _, cover_flag, cover_target, cover_arguments = mounts[cover] if cover >= 0 else (0, "", "", ())
+            same_source_readonly_parent = (cover_flag == "--ro-bind" and cover_target != target
+                                           and os.fspath(Path(cover_arguments[1])) == cover_target)
+            if position in shadowed or same_source_readonly_parent:
+                removed.update(range(index, index + 3))
+                continue
+        latest[target] = position
+    return [value for index, value in enumerate(argv) if index not in removed] if removed else argv
+
+
 # LLM: 缺失项快跳；瞬时侧车try-bind容忍exec前删除，持久路径仍硬RO；列表追加同次投影，有效同源硬RO祖先才覆盖去重，不跨调用缓存权限。
 # 函数用途: 将存在的绝对保护路径只读覆盖到沙箱，省略精确或祖先仍生效的重复挂载。
 def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
@@ -1640,8 +1682,10 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     _defer_strict_hidden_mounts(argv, spec)
     placeholders = _append_persona_readonly_mounts(argv, authority_root, spec, mounts_snapshot=mounts)
     _append_final_mount_protections(argv, spec)
-    masks = _hidden_file_masks([*argv, *placeholders], spec.hidden_paths)
-    return wrap_resource_command([*argv, *placeholders, *masks, *chdir], spec.resource_limits)
+    # 父目录已只读或最终被隐藏覆盖的侧车 try-bind 不改变视图：先省略，单文件遮罩再按最终挂载计算。
+    mounted = _without_redundant_sidecar_mounts([*argv, *placeholders])
+    masks = _hidden_file_masks(mounted, spec.hidden_paths)
+    return wrap_resource_command([*mounted, *masks, *chdir], spec.resource_limits)
 
 
 # LLM: CLI必须等所有argv构造器完成定义再启动；只移动启动时机，不把binary成功升级成完整隔离成功。
