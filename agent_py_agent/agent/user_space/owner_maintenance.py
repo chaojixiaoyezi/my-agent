@@ -1270,7 +1270,9 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     lane_reports, lane_fallbacks = {}, []
     source_revisions = deepcopy(previous.get('storage_maintenance', {}).get('projection_source_revisions', {}))
     if not isinstance(source_revisions, dict):
-        raise ValueError('INVALID_PROJECTION_SOURCE_REVISIONS')
+        raise ValueError('INVALID_PROJECTION_SOURCE_REVISIONS: '
+                         'storage_maintenance.projection_source_revisions requires JSON object; '
+                         f'actual_type={type(source_revisions).__name__}; storage lanes not started')
     projection_check_only = set()
 
     def projection_check_candidates():

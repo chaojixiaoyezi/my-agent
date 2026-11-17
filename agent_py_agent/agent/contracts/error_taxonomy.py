@@ -11312,6 +11312,21 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="维护入口未取得与 owner_id 对应的规范 owner 根，未获准执行领域维护；修正 HomePaths 的 owner_id/root/owner_home_dir 一致性，勿扩大范围。",
     ),
+    "INVALID_PROJECTION_SOURCE_REVISIONS": ErrorContract(
+        code="INVALID_PROJECTION_SOURCE_REVISIONS", category="validation", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_STRUCTURED_CHECKPOINT_JSON.value,
+        recovery_hint="维护状态 storage_maintenance.projection_source_revisions 必须为 JSON 对象；本次存储车道尚未启动，先前维护动作以原回执为准。保留原状态并核对该 owner 的 maintenance.json 字段类型，由宿主维护修复该派生游标；不要删除原账、记忆或原样盲重试。",
+    ),
+    "TELEMETRY_PROJECTION_SOURCE_UNSAFE": ErrorContract(
+        code="TELEMETRY_PROJECTION_SOURCE_UNSAFE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="遥测活动卷不是普通单链接文件，本次代次探针未读取正文或写入投影；保留原账，核对回执路径的文件类型和链接数并修复来源布局，勿沿链接读取、删除原账或原样重试。",
+    ),
+    "TELEMETRY_PROJECTION_SOURCE_CHANGED": ErrorContract(
+        code="TELEMETRY_PROJECTION_SOURCE_CHANGED", category="state", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="读取固定遥测元数据期间目录成员代次发生变化，本次探针没有发布完成证明或写入投影；保留原游标，沿下一次有界维护重新核对当前来源，不重放工具或把覆盖当作完整。",
+    ),
     "CANONICAL_STATE_EXCEEDS_BUDGET": ErrorContract(
         code="CANONICAL_STATE_EXCEEDS_BUDGET", category="resource", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,

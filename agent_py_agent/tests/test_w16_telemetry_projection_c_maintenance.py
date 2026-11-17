@@ -206,6 +206,32 @@ def _finish_projection(tick, state=None):
     raise AssertionError('原128条/8192字节投影预算未完成')
 
 
+@pytest.mark.parametrize('invalid', [None, [], 'invalid', False])
+def test_invalid_projection_revision_state_preserves_source_and_explains_repair(tmp_path, monkeypatch, invalid):
+    from agent_py_agent.agent.contracts.error_taxonomy import classify_error
+    from agent_py_agent.agent.contracts.recovery import RecoveryAction
+    from agent_py_agent.agent.user_space import storage_lanes
+
+    home, tick = _projection_maintenance(tmp_path, monkeypatch)
+    ledger = ToolTelemetryLedger(home.owner_home_dir)
+    ledger.record_tool_call(ToolCallRecord(call_id='preserved', tool_name='read_file'))
+    source = home.owner_home_dir.joinpath(*PARTS, 'tool_calls.jsonl')
+    before = source.read_bytes()
+    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane',
+                        lambda *args, **kwargs: pytest.fail('invalid state must not start storage lanes'))
+    with pytest.raises(ValueError, match='^INVALID_PROJECTION_SOURCE_REVISIONS:') as caught:
+        tick({'projection_source_revisions': invalid})
+    message = str(caught.value)
+    assert 'storage_maintenance.projection_source_revisions' in message
+    assert f'actual_type={type(invalid).__name__}' in message
+    assert 'storage lanes not started' in message and source.read_bytes() == before
+    contract = classify_error(message)
+    assert contract.code == 'INVALID_PROJECTION_SOURCE_REVISIONS'
+    assert contract.category == 'validation' and contract.retryable is False
+    assert contract.recommended_action == RecoveryAction.REPAIR_STRUCTURED_CHECKPOINT_JSON.value
+    assert 'maintenance.json' in contract.recovery_hint and '尚未启动' in contract.recovery_hint
+
+
 def _retained_call_ids(ledger):
     cursor, found = '', set()
     for _ in range(32):
