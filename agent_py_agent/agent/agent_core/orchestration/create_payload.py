@@ -96,6 +96,14 @@ def _auto_start_payload(auto_start: dict[str, object] | None) -> dict[str, objec
         "started_run_ids",
         "failed_run_ids",
         "warnings",
+        # blocked/failed/延期时的确切生命周期闸门原因，模型据此决定等待、重派或停止。
+        "reason",
+        "reason_code",
+        "error_code",
+        "deferred_reason",
+        "skipped_run_ids",
+        "conversation_gate",
+        "error",
     }
     payload = {key: auto_start[key] for key in allowed if key in auto_start}
     if str(payload.get("status") or "") == "started":

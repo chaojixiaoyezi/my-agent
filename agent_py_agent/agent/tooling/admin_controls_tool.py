@@ -372,7 +372,13 @@ def _user_control(agent, params):
     except OwnerAdminControlsError as exc:
         return _refuse(exc.reason, "用户控制无效，未完成操作。")
     except HostAPIError as exc:
-        return ToolHandlerOutcome(TOOL_NAME, False, "用户管理未完成，请查询当前状态。", error_code=exc.code, effect_outcome="unknown")
+        # 宿主4xx结构化拒绝（如USER_NOT_FOUND）发生在写入前，按其not_started如实回报；5xx（如建号物化失败
+        #   已保存失败记录后再报STORE_UNAVAILABLE）或非not_started结局仍可能已写入，沿同文件治理动作保持unknown。
+        outcome = "not_started" if exc.status < 500 and exc.outcome == "not_started" else "unknown"
+        hint = "用 list_users 核对本地账号及当前状态，再决定是否改用正确的 user_id 重试。"
+        report = {"ok": False, "action": params["action"], "error": exc.to_payload(), "next_action": hint}
+        return ToolHandlerOutcome(TOOL_NAME, False, json.dumps(report, ensure_ascii=False), error_code=exc.code,
+                                  effect_outcome=outcome, next_action=hint)
     except ValueError:
         return _refuse("invalid_changes", "用户名、密码、配额或其它参数无效。")
     except OSError:

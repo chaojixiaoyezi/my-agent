@@ -19,6 +19,7 @@ from ..conversation.authority import (
 )
 from ..memory_store.security import scan_memory_content
 from ..tooling.models import (
+    ApprovalPolicy,
     BaseTool,
     EffectResolverPolicy,
     IdempotencyPolicy,
@@ -209,6 +210,8 @@ class UpdatePersonaTool(BaseTool):
                 for action in ("", "add", "replace", "remove", "batch", "rollback")
             ),
         ),
+        # SOUL写入即使在auto审批模式下也须本人确认；USER写入与只读动作仍按原mutating/read_only放行。
+        approval_policy=ApprovalPolicy("always", always_effects=("dangerous",)),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(parameter_names=("target", "entry_id"),
             parameter_kinds={"target": "logical", "entry_id": "logical"}),

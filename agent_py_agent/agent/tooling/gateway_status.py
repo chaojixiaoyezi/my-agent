@@ -268,7 +268,8 @@ def _request_timeline(agent: object, candidates: tuple) -> dict | None:
 
     try:
         root = gateway_paths(agent).root
-        owner_home = Path(agent.root)
+        # 轮次遥测与runtime.db都在owner home下；工作区根agent.root不是owner home。
+        owner_home = Path(agent.home_paths.owner_home_dir)
         for request_id in candidates:
             if not isinstance(request_id, str) or not request_id:
                 continue

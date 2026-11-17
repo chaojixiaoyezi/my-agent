@@ -91,11 +91,16 @@ class StopNamedWorkTool(BaseTool):
                 name=name,
                 error_code="CONVERSATION_CONTEXT_REQUIRED",
             )
+        # 本轮自己的可中断名：在目标自己的后台轮内停止它时，正在生成的这条回复不能被自身打断。
+        current_request = str(getattr(run_params, "request_id", "") or "").strip()
         stopped = stop_named_conversation_work(
             self.agent,
             thread_id=thread_id,
             kind=kind,
             name=name,
+            spare_interrupt_name=(
+                conversation_request_interrupt_name(current_request) if current_request else ""
+            ),
         )
         return _tool_result(
             stopped.ok,
@@ -111,6 +116,7 @@ def stop_named_conversation_work(
     thread_id: str,
     kind: str,
     name: str,
+    spare_interrupt_name: str = "",
 ) -> NamedWorkStopResult:
     """Stop one owner/thread-scoped work item selected by exact structured fields."""
     selected_kind = str(kind or "").strip().lower()
@@ -167,6 +173,7 @@ def stop_named_conversation_work(
                 agent,
                 task_id=task_id,
                 kind=selected_kind,
+                spare_interrupt_name=spare_interrupt_name,
             )
         return NamedWorkStopResult(True, selected_kind, selected_name, task_id=task_id)
     except Exception:
@@ -387,12 +394,16 @@ def stop_named_work_runtime(
     *,
     task_id: str,
     kind: str,
+    spare_interrupt_name: str = "",
 ) -> tuple[str, ...]:
     selected_task = str(task_id or "").strip()
     selected_kind = str(kind or "").strip().lower()
     if not selected_task or selected_kind not in {"audit", "goal"}:
         return ()
-    interrupt_by_name(conversation_request_interrupt_name(selected_task))
+    target = conversation_request_interrupt_name(selected_task)
+    # 工具在目标自己的回合内调用时跳过本轮自身；/stop控制路径不传该名，照常中断。
+    if target != spare_interrupt_name:
+        interrupt_by_name(target)
     _interrupt_registry(agent, selected_task)
     closed_watches = (
         close_named_audit_watches(agent, selected_task)
