@@ -116,6 +116,12 @@ def maintain_task_call_telemetry_lane(request: StorageLaneRequest) -> dict:
     if cursor.get('complete'):
         cursor.clear()
     phase = cursor.get('phase', 'tasks')
+    if phase in {'active', 'sealed'}:
+        # LLM: 同名投影通道（telemetry_ledger.maintain_tool_call_projection_lane）与本通道共用
+        #   task_call_telemetry 游标；retention 可删与不可删在拍间切换时，留下的是对方的续点。live 克隆实测
+        #   对方的 'sealed' 让本通道每拍都抛错、永不完成。对方续点不属于本通道：从头扫描（幂等），其余未知值照旧报错。
+        cursor.clear()
+        phase = 'tasks'
     if phase not in {'tasks', 'tools'}:
         raise ValueError('invalid task telemetry maintenance phase')
     if 'repair_summaries' not in cursor:

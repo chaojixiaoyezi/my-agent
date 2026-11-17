@@ -642,6 +642,10 @@ def maintain_tool_call_projection_lane(request) -> dict:
     if cursor.get('complete'):
         cursor.pop('complete', None)
     owner = Path(request.home.owner_home_dir)
+    if cursor.get('phase', 'active') in {'tasks', 'tools'}:
+        # 同名 retire 通道（task_call_retention）的续点不属于本投影：丢弃后按成员代次重新定位，
+        # 原 index generation/offset 仍由 OwnerReadIndex 续接；其余未知值照旧报错。
+        cursor.clear()
     if cursor.get('phase', 'active') not in {'active', 'sealed'}:
         raise ValueError('INVALID_TELEMETRY_PROJECTION_PHASE')
     membership = _tool_call_projection_source_revision(request.home)[0]
