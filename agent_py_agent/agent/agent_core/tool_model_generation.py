@@ -138,6 +138,8 @@ class ModelGenerateParams:
     request_prepare_started_at: float = 0.0
     pre_call_housekeeping_ms: float | None = None
     supervision_sweep_ms: float | None = None
+    assembly_ms: float | None = None
+    generate_started_at: float = 0.0
     token_budget: RequestTokenBudget | None = None
     context_snapshot: object | None = field(default=None, repr=False, compare=False)
     budget_input_identity: str = ""

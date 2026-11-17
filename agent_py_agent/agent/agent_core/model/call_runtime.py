@@ -37,6 +37,7 @@ from ...conversation.context_usage import (
 )
 from ...conversation.model_metrics import publish_model_metrics
 from ...memory_archive import estimate_tokens
+from ...observability import gc_pause_meter
 from ...observability.task_call_inspector import (
     bind_model_call_telemetry,
     record_model_call_telemetry,
@@ -87,6 +88,8 @@ def start_model_call_record(
     *,
     context_snapshot: object | None = None,
 ) -> tuple[ModelCallLedger, str, object]:
+    record_entered = time.monotonic()
+    gc_pause_meter.install()
     agent = getattr(request, "agent", None)
     ledger = model_call_ledger(agent)
     prompt = getattr(request, "prompt", "") or ""
@@ -142,6 +145,7 @@ def start_model_call_record(
                 "inter_round_gap_ms": _model_call_inter_round_gap_ms(ledger, params),
                 "estimated_input_tokens": input_tokens,
                 "server_managed_output": bool(getattr(getattr(request, "token_budget", None), "server_managed_output", False)),
+                "stages_ms": _model_call_stages_ms(request, record_entered, prepared_finished, prepared_started),
             },
         ))
     with suppress(Exception):
@@ -150,6 +154,27 @@ def start_model_call_record(
                                  binding=getattr(context_snapshot, "usage_binding", None))
     publish_model_metrics(agent, params, pending=True)
     return ledger, call_id, estimate
+
+
+# LLM: 只放已测到的数值（未知的阶段不写，不伪造零）。assembly/supervision/housekeeping 来自本轮提示组装计时；
+#   request_build_ms 是 _generate_prepared 入口到本函数入口，start_record_ms 是本函数入口到登记前（快照、首 token 估算、
+#   逻辑编号与 physical_attempt 扫描，账本上限 max_records 条），gc_pause_ms 是准备起点到登记前整个进程的 GC 停顿。
+#   context_assembly_ms 维持原口径，便于前后对比。
+# 函数用途: 生成模型调用记录的 stages_ms 分段耗时（S7）。
+def _model_call_stages_ms(request: object, entered: float, finished: float, prepared_started: float) -> dict[str, float]:
+    stages: dict[str, float] = {}
+    for key in ("assembly_ms", "supervision_sweep_ms", "pre_call_housekeeping_ms"):
+        value = getattr(request, key, None)
+        if type(value) in (int, float) and value >= 0:
+            stages[key] = round(float(value), 3)
+    generate_started = float(getattr(request, "generate_started_at", 0.0) or 0.0)
+    if 0.0 < generate_started <= entered:
+        stages["request_build_ms"] = round((entered - generate_started) * 1000.0, 3)
+    stages["start_record_ms"] = round(max(0.0, finished - entered) * 1000.0, 3)
+    gc_ms = gc_pause_meter.pause_ms_between(prepared_started, finished)
+    if gc_ms is not None:
+        stages["gc_pause_ms"] = gc_ms
+    return stages
 
 
 # LLM: 用该账本的时钟与原终态点相减，兼容注入时钟；没有可靠前序或时钟倒退保持None，不伪造首轮零间隔。

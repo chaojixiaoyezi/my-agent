@@ -1816,6 +1816,7 @@ def _request_tool_loop_model_response(
     def _generate_prepared(prompt):
         from .model.context_estimate_cache import estimate_memo_for
 
+        generate_started = time.monotonic()
         memo = estimate_memo_for(model_params)
         phase = memo.prompt_timings() if memo is not None else None
         phase = phase if phase is not None and phase["started_at"] >= prepare_box[0] else {}
@@ -1824,7 +1825,8 @@ def _request_tool_loop_model_response(
             agent=agent, params=model_params, prompt=prompt, tool_rounds=tool_rounds,
             context_assembly_started_at=assembly_start, request_prepare_started_at=prepare_box[0],
             pre_call_housekeeping_ms=phase.get("pre_call_housekeeping_ms"),
-            supervision_sweep_ms=phase.get("supervision_sweep_ms")))
+            supervision_sweep_ms=phase.get("supervision_sweep_ms"),
+            assembly_ms=phase.get("assembly_ms"), generate_started_at=generate_started))
 
     return request_model_response(
         build_prompt=_rebuild_with_timer if first_prompt is None else _prebuilt_prompt_first(first_prompt, _rebuild_with_timer),

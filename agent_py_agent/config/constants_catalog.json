@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1514,
+  "count": 1515,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -7762,6 +7762,14 @@
       "unit": "",
       "category": "其它",
       "description": "迁移串行化用的 PG 事务级 advisory lock key（固定常量）；保证多进程迁移互斥（无物理单位）。"
+    },
+    {
+      "name": "_RECENT_PAUSE_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/observability/gc_pause_meter.py",
+      "value": 512,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "只保留最近这么多次回收的单调起止时刻，足够覆盖一次模型请求的准备窗口；更早的停顿只留在累计和直方图里。"
     },
     {
       "name": "DAEMON_LOG_CHECK_INTERVAL_SECONDS",
