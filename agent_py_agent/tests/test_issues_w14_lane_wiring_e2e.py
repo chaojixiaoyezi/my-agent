@@ -522,7 +522,7 @@ def test_settled_fd_delta_detects_persistent_growth(tmp_path):
     assert _settled_fd_delta(before_fds, root=tmp_path) <= 0
 
 
-def _lane_service_clock(monkeypatch):
+def _lane_service_clock(monkeypatch, *, on_lane=None):
     """预算钟只按真实车道推进，避免宿主磁盘抖动改变完整轮次；墙钟限额另计。"""
     wall_clock = time.monotonic
     spent = [wall_clock()]
@@ -535,7 +535,10 @@ def _lane_service_clock(monkeypatch):
 
         def execute(request):
             try:
-                return lane(request)
+                receipt = lane(request)
+                if on_lane is not None:
+                    on_lane(request)
+                return receipt
             finally:
                 # 不替换车道结果、计数或写门，只让一轮确定性分片，不能依赖机器恰好够快。
                 spent[0] += 0.040
@@ -552,15 +555,24 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
     before = owner_logical_usage_bytes(world.home.owner_home_dir, exact=True)
     seen, revisited = set(), set()
     first_round_complete = repeated_all = False
-    _lane_service_clock(monkeypatch)
+    observed = set()
+
+    def observe_lane(request):
+        if request.home.owner_home_dir == world.home.owner_home_dir:
+            observed.add(request.kind)
+
+    _lane_service_clock(monkeypatch, on_lane=observe_lane)
     gc.collect()
     before_fds = _fd_count(root=world.home.root)
     # R2 的 complete 表示扫描一轮完成，不表示 pending 宽限证明已消费；继续驱动后续周期。
     now = world.now
     for tick in range(24):
+        observed.clear()
         summary = controller.tick(now=now)
         assert summary['failed'] == summary['refused'] == summary['isolated'] == 0
-        marker, kinds = _observe_state(world.home, coordinator=False)
+        marker, _ = _observe_state(world.home, coordinator=False)
+        # 持久投影可保留上拍字段；覆盖只认本owner本拍实际成功调用，不把旧回执当新执行。
+        kinds = set(observed)
         if first_round_complete:
             revisited.update(kinds)
         seen.update(kinds)
@@ -571,6 +583,7 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
                 repeated_all = revisited == set(LANE_BINDINGS)
             elif seen == set(LANE_BINDINGS):
                 first_round_complete = True
+        # 在实际完整周期结束时收口；下一拍可能合法开新周期，不能用新周期partial否认本轮完成。
         if not marker['maintenance_partial'] and not world.orphan.exists() and repeated_all:
             break
         # 完整一轮后遵守原一天维护间隔；未完成片只推进一秒，不缩短七天宽限期。
@@ -581,5 +594,6 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
     assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all, '首轮真正完成后，必须再逐片走完全部车道并完成第二轮'
+    assert marker['maintenance_partial'] is False
     _assert_retired(world)
     assert owner_logical_usage_bytes(world.home.owner_home_dir, exact=True) < before

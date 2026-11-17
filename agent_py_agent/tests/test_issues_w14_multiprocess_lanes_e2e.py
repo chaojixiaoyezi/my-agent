@@ -299,6 +299,10 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
 
     from agent_py_agent.agent.gateway_parts import input_delivery_service
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.observability.telemetry_ledger import (
+        ToolCallRecord,
+        ToolTelemetryLedger,
+    )
     from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
     from agent_py_agent.tests.test_r8_input_turn_retention import _case
 
@@ -309,6 +313,12 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
     retired_ref = gateway_root / seeded_ref.relative_to(seeded_paths.root)
     assert input_delivery_service.read_gateway_input_receipt(
         gateway_paths_from_root(gateway_root), receipt.request_id) is not None
+    # 遥测投影车道也需真实来源；空目录应零写，不能依赖多跑一轮偶然建索引来证明写门。
+    telemetry = ToolTelemetryLedger(world.home.owner_home_dir, owner_id=world.home.owner_id)
+    telemetry.record_tool_call(ToolCallRecord(call_id='lane-wiring-call', tool_name='read_file',
+        owner_id=world.home.owner_id, task_id='unsettled-telemetry-task', started_at=world.now, ended_at=world.now))
+    telemetry_path = world.home.owner_home_dir / 'data/telemetry/tool_calls.jsonl'
+    telemetry_raw = telemetry_path.read_bytes()
     transition = _RecordingTransition(world.home)
     before = owner_logical_usage_bytes(world.home.owner_home_dir, exact=True)
     seen, revisited = set(), set()
@@ -351,6 +361,7 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
     assert repeated_all
     # LocalStore 经 global_write_commit_scope 使用相同原写门；含真实过期历史的其余车道均经 run_write。
     assert lane_writes == set(LANE_BINDINGS) - {'local_events'}
+    assert telemetry_path.read_bytes() == telemetry_raw
     assert not retired_ref.exists()
     assert transition.commits.count('state') == tick + 1
     assert len(state_writes) == tick + 1
