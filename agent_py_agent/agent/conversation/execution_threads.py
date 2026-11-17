@@ -258,6 +258,7 @@ def ensure_execution_thread(agent: object, source_thread_id: str, operation_key:
                 raise DataCorruptionError("后台执行会话身份冲突")
             return existing
         current = now()
+        cwd, roots = _execution_workspace(source, kind, owner_home)
         thread = ConversationThread(
             thread_id=thread_id, canonical_user_id=source.canonical_user_id,
             owner_id=owner_id, owner_home=owner_home, model_profile_id=source.model_profile_id,
@@ -265,11 +266,23 @@ def ensure_execution_thread(agent: object, source_thread_id: str, operation_key:
             model_selection_source="inherited" if source.model_profile_id else "unknown",
             reasoning_effort=source.reasoning_effort, verbose_level=source.verbose_level,
             title=source.title, created_at=current, updated_at=current,
-            cwd=owner_home, runtime_workspace_roots=(owner_home,),
+            cwd=cwd, runtime_workspace_roots=roots,
             metadata={**inherited_verbose_metadata(source), "thread_kind": "background", EXECUTION_ORIGIN_KEY: identity},
         )
         store.write(thread)
         return thread
+
+
+# LLM: 委派工作沿来源会话已保存的可信工作目录（TUI/CLI 的 --dir 或 /dir），否则孩子会把“当前目录”落到 owner home；
+#   只复制线程既有事实，不扩展路径权限（外部目录仍由原 Tool Gateway owner/Full Access 门裁决）。
+#   定时线程与来源未设目录时保持原 owner home 形状。
+# 函数用途: 返回新执行线程的 cwd 与运行工作根。
+def _execution_workspace(source: ConversationThread, kind: str, owner_home: str) -> tuple[str, tuple[str, ...]]:
+    cwd = str(source.cwd or "").strip()
+    if kind != "delegated" or not cwd:
+        return owner_home, (owner_home,)
+    roots = tuple(str(root) for root in (source.runtime_workspace_roots or ()) if str(root or "").strip())
+    return cwd, roots or (cwd,)
 
 
 # LLM: 只在当前 owner 的线程库解析准确来源；缺失/改归属拒绝回送，不返回跨用户地址或启动聊天。

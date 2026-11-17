@@ -99,10 +99,13 @@ def prepare_delegated_execution(agent, params):
     if resolved is None:
         return
     thread, policy, task = resolved
-    from ..agent_core.runtime.guidance import inject_pending_guidance
+    from ..agent_core.runtime.guidance import inject_pending_turn_input
     from ..agent_core.tool_ir_history import record_runtime_facts_turn_ir
 
-    inject_pending_guidance(agent, params)
+    # LLM: 本片的零工具表达轮不经过提示组装，若只注入插话，孩子在表达轮期间结束留下的生命周期事件永远“未注入”，
+    #   每次回复都被待处理输入作废，直到连续作废上限把本已成功的委派判失败（真机 2026-11-16 22:00，9 轮）。
+    #   这里与普通安全点同一入口一并吸收插话和本任务孩子事件；下方事实本就读孩子 canonical 状态，事件随本轮回复确认。
+    inject_pending_turn_input(agent, params)
 
     child_ids = policy.get("child_run_ids")
     if child_ids is None:

@@ -2007,7 +2007,33 @@ def _wake_signal_is_stale(
         "subagent_runner_finished",
     } and _source_child_awaits_parent_decision(agent, signal):
         return False
+    if _delegated_session_task_closed(agent, store, signal):
+        return True
     return _signal_task_link_is_terminal(agent, store, signal, reason)
+
+
+# LLM: 委派根的终态权威是 canonical SessionTask；它 failed/cancelled 后 TaskLink 可能仍 active，孩子迟到的生命周期
+#   唤醒没有接收方，lifecycle_session_task_origin 会按身份无效拒绝，5 次后被隔离成“数据损坏”（真机 2026-11-16 22:08）。
+#   只读精确任务；读失败、非本线程任务或仍欠原 sender 结果回报时按未终态处理，原补账入口不受影响。
+# 函数用途: 判断生命周期唤醒所属的委派会话任务是否已失败或取消且无待补回报。
+def _delegated_session_task_closed(agent: object, store: ConversationStore, signal: WakeSignal) -> bool:
+    task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    tasks = getattr(store, "session_tasks", None)
+    if not task_id or tasks is None:
+        return False
+    try:
+        task = tasks.load(task_id)
+    except Exception:  # noqa: BLE001 - 读不到原任务时保持原判定，不放宽也不丢唤醒
+        return False
+    if (task is None or str(getattr(task, "target_thread_id", "") or "") != str(signal.thread_id or "")
+            or str(getattr(task, "status", "") or "") not in {"failed", "cancelled"}):
+        return False
+    from .session_task_report import delegated_result_report_pending
+
+    try:
+        return not delegated_result_report_pending(agent, signal.thread_id, task_id=task_id)
+    except Exception:  # noqa: BLE001 - 回报状态未知时保留唤醒，交原补账路径处理
+        return False
 
 
 # LLM: 从唤醒信号的源子代理读结构化申请状态；读不到一律返回 False（保持原过期判定，不放宽唤醒）。
