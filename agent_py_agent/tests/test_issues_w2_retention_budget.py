@@ -1144,3 +1144,36 @@ def test_own_retirement_delta_does_not_hide_a_concurrent_new_reference(tmp_path,
     assert not any(action.path == second and action.status == "trashed" for action in report.actions)
     _finish_apply(service)
     assert second.exists()
+
+
+
+def test_cold_leaf_metadata_from_a_previous_pass_cannot_authorize_publication(tmp_path):
+    home, service = _runtime(tmp_path)
+    _, leaf = _thread(home, "thread-active", days=0)
+    _, gone = _thread(home, "thread-retired")
+    plan, _ = _reach_discovery(service)
+    report = apply.execute_retention_plan(home=home, candidates=service.candidates, plan=plan, now=NOW)
+    assert any(action.path == gone and action.status == "trashed" for action in report.actions)
+    snapshot = scan._CURRENT_PIN_BUILDS[Path(home.owner_home_dir)]
+    before = snapshot._stamp(leaf)
+    parent_before = leaf.parent.stat()
+    stream = snapshot._verify()
+    try:
+        for _ in range(128):
+            next(stream)
+            if leaf in snapshot.metadata_checks:
+                break
+        assert leaf in snapshot.metadata_checks
+        # 下一次current会更换pass。真实原地更新只改变叶metadata，父成员名字/inode集合完全不变。
+        snapshot.contents["pass_token"] = object()
+        payload = json.loads(leaf.read_text())
+        payload["metadata"]["source_refs"] = ["evidence/new-reference"]
+        leaf.write_text(json.dumps(payload))
+        after = leaf.parent.stat()
+        assert (after.st_ino, after.st_mtime_ns, after.st_ctime_ns) == (
+            parent_before.st_ino, parent_before.st_mtime_ns, parent_before.st_ctime_ns)
+        assert snapshot._stamp(leaf) != before
+        with pytest.raises(scan._PinReadChanged):
+            list(stream)
+    finally:
+        stream.close()

@@ -740,7 +740,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
                 child = path / name
                 if verifying:
-                    self.metadata_checks[child] = reference_pins._metadata_stamp(member)
+                    self.metadata_checks[child] = (reference_pins._metadata_stamp(member), self.contents["pass_token"])
                 runtime = Path(self.home.owner_workspace_dir) / "runtime/workspaces"
                 selected = (path not in self.inventory or self._pin_related(child)
                             or path == runtime and stat.S_ISDIR(member.st_mode))
@@ -861,8 +861,9 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             elif stamp is not None and (not self.published or self.post_scopes.get(path) != "settled"):
                 # 首次发布须绑定解析字节与真实复读；热转冷也必须补完一次字节复核，不能只信相同stat。
                 yield from self._verify_source(path)
-            elif path in self.metadata_checks:
-                if self.metadata_checks[path] != stamp:
+            elif (path in self.metadata_checks
+                  and self.metadata_checks[path][1] is self.contents["pass_token"]):
+                if self.metadata_checks[path][0] != stamp:
                     raise _PinReadChanged(11, "pin source generation changed", str(path))
                 yield 0  # 同一目录页已计量并取得该冷文件的完整stat，不再读一次。
             else:
