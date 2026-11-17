@@ -504,7 +504,10 @@ def test_index_preparation_never_defers_real_failure_or_no_progress(runtime, mon
 
 
 def test_gateway_tool_effect_then_unsettled_refresh_never_requeues_business(tmp_path, monkeypatch):
-    """受控正文执行器产生工具副作用后溢出，真实Gateway刷新不能伪装成未执行重领。"""
+    """受控正文执行器产生工具副作用后溢出，真实Gateway刷新不能伪装成未执行重领。
+
+    索引在刷新时停滞（无推进）才会失败；仍在推进的整理由同轮刷新追平，见 test_w3_flive3_overflow_history_repair。
+    """
     import json
 
     from agent_py_agent.agent.backends import get_backend
@@ -554,6 +557,7 @@ def test_gateway_tool_effect_then_unsettled_refresh_never_requeues_business(tmp_
         for index in range(101):
             history._queue_gateway_conversation_repair(agent, {}, conversation,
                 request_id=f'old-reply-{index}', role='assistant', content=f'old reply {index}')
+        monkeypatch.setattr(history.GatewayHistoryLedger, 'catch_up', lambda *a, **k: False)
         return SimpleNamespace(runtime_status='context_overflow', runtime_source='tool_context_overflow',
             archive_tool_calls=[], active_turn_user_inputs=[])
     monkeypatch.setattr(agent, 'run', tool_then_overflow)
@@ -573,6 +577,7 @@ def test_gateway_tool_effect_then_unsettled_refresh_never_requeues_business(tmp_
         channel_conversation_id='refresh-effect', channel_user_id='local-agent')
     ledger = history.GatewayHistoryLedger(agent.conversation_store)
     with ledger.connection() as conn:
-        assert conn.execute('SELECT COUNT(*) FROM repairs WHERE thread=?', (thread.thread_id,)).fetchone()[0] == 1
+        # 停滞的索引不推进，补交队列原样保留，留给下一条消息先整理。
+        assert conn.execute('SELECT COUNT(*) FROM repairs WHERE thread=?', (thread.thread_id,)).fetchone()[0] == 101
     rows = agent.conversation_store.messages.recent(thread.thread_id, limit=200)
     assert sum(row.role == 'user' and row.metadata.get('gateway_request_id') == request_id for row in rows) == 1

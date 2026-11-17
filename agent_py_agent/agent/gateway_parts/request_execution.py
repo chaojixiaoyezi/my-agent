@@ -1617,6 +1617,10 @@ def _apply_gateway_request_failure(agent, context, response, error):
         error.__cause__, (OSError, sqlite3.Error, DataCorruptionError)
     ):
         response["user_error"] = sanitize_credentials(str(error))
+    from .request_errors import GatewayHistoryRepairUnsettledError
+
+    if isinstance(error, GatewayHistoryRepairUnsettledError):
+        response["user_error"] = error.user_message
     from .request_space import GatewayMemoryScopeError
 
     if isinstance(error, GatewayMemoryScopeError):

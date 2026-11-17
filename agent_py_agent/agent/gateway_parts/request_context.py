@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -245,6 +246,25 @@ def preflight_gateway_conversation(
     )
 
 
+# LLM: 首片沿原有界切片；可延期的首次加载照旧只跑一片再交回队列。已运行模型/工具的同轮重载不能延期，
+#   只在每片都有结构化推进、无阻断错误、未被停止且未到时限时继续同一修复；就绪判据不放宽，
+#   中间片的“未追平”告警不带进已就绪的上下文。
+# 函数用途: 运行会话历史修复并返回最后一片进度，让同轮溢出重载不因可追平的索引重建而整轮失败。
+def _repair_gateway_history(inputs, store, thread_id, load_errors, *, budget_seconds=30.0):
+    from .request_errors import GatewayHistoryPreparationPending
+
+    deadline = time.monotonic() + budget_seconds
+    while True:
+        slice_errors, progress = _GatewayLoadErrors(), {}
+        request_history.repair_gateway_conversation_messages(store, thread_id, slice_errors, progress=progress)
+        if (request_history.history_repair_ready(progress) or inputs.allow_history_defer or slice_errors
+                or not GatewayHistoryPreparationPending(inputs.request, thread_id, progress).progressed
+                or is_interrupted() or time.monotonic() >= deadline):
+            load_errors.extend(slice_errors)
+            load_errors.warnings.extend(slice_errors.warnings)
+            return progress
+
+
 # LLM: thread读取后按原repair/索引/来源/作用域顺序准备；同一view供摘要、原文与工具覆盖，defer仅推迟摘要及提交。
 # 函数用途: 组装本轮历史、交付和目录；恢复轮带回已绑定范围的来源，候选不重复调用本入口。
 def gateway_conversation_context(
@@ -268,14 +288,18 @@ def gateway_conversation_context(
             load_errors=(thread_error or {"error_code": "thread_unavailable"},)
         )
     _bind_gateway_stream_identity(inputs, thread, include_model=True)
-    repair_progress = {}
-    request_history.repair_gateway_conversation_messages(store, thread.thread_id, load_errors, progress=repair_progress)
+    repair_progress = _repair_gateway_history(inputs, store, thread.thread_id, load_errors)
     if not request_history.history_repair_ready(repair_progress):
-        from .request_errors import ConversationPersistenceError, GatewayHistoryPreparationPending
+        from .request_errors import (
+            ConversationPersistenceError,
+            GatewayHistoryPreparationPending,
+            GatewayHistoryRepairUnsettledError,
+        )
         pending = GatewayHistoryPreparationPending(inputs.request, thread.thread_id, repair_progress)
         if inputs.allow_history_defer and pending.progressed:
             raise pending
-        raise ConversationPersistenceError(
+        unsettled = GatewayHistoryRepairUnsettledError if pending.progressed else ConversationPersistenceError
+        raise unsettled(
             "GATEWAY_HISTORY_REPAIR_UNSETTLED: history not ready; do not replay model/tools; reconcile history first")
     if inputs.on_thread_loaded is not None and not force_compact:
         inputs.on_thread_loaded(thread)

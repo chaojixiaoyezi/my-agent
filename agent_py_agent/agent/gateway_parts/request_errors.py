@@ -33,6 +33,16 @@ class ConversationPersistenceError(RuntimeError):
     error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
 
 
+# LLM: 只在已运行模型/工具的同轮重载里使用：历史修复每片都有推进但到时限仍未追平。错误码不变；
+#   user_message 是固定公开文案（不含路径/异常正文），告诉用户已做的工作保留、下一条消息会先完成整理。
+# 类用途: 区分“仍在推进的历史整理”与真正读写失败，让界面给出可行动的继续提示而不是空回复。
+class GatewayHistoryRepairUnsettledError(ConversationPersistenceError):
+    user_message = (
+        "本轮已执行的步骤和文件都已保存，但会话历史仍在整理，最终回复没能生成。"
+        "发送下一条消息即可继续：系统会先完成整理再接着处理；不要重做已完成的操作。"
+    )
+
+
 class GatewayHistoryPreparationPending(RuntimeError):
     """用户回合正文执行前，严格去重索引已推进但本片尚未追平。"""
 
