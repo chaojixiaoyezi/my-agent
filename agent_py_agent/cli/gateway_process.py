@@ -1398,7 +1398,10 @@ def cmd_gateway_run(args) -> int:
     args = frozen_gateway_arguments(args)
     mark_hosting_gateway_process()
     from ..agent.observability.log_volume_rotation import install_daemon_log_rotation
+    from .gateway_log_stamp import install_gateway_log_timestamps
+
     install_daemon_log_rotation(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
+    install_gateway_log_timestamps(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
     predecessor_exited = wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
     count = args._gateway_worker_count
     from ..agent.gateway_parts.standalone_lifecycle import (

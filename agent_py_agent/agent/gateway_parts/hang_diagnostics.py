@@ -12,6 +12,7 @@ import stat
 import threading
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
@@ -332,6 +333,10 @@ def capture_gateway_hang_facts(paths_or_root: object, pid: int, *, stage: str = 
         with _open_dump(root) as handle:
             _write_record(handle, facts)
             if pid == os.getpid() and not send_sigusr1:
+                # 原始栈没有时间；先写一行带毫秒时区时间的标题，便于按时间窗定位。
+                stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+                handle.write(f"--- {stamp} thread dump pid={pid} stage={stage} ---\n")
+                handle.flush()
                 faulthandler.dump_traceback(file=handle, all_threads=True)
     except (OSError, ValueError) as error:
         return {**facts, "sigusr1_sent": False, "write_error": type(error).__name__}
