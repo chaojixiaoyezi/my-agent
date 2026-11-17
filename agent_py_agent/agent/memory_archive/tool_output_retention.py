@@ -410,7 +410,7 @@ def _retire_fact_dir(parent, name, cutoff, task_path: Path, pin_snapshot, pin_er
 # 函数用途: 分片回收Owner根下过期且未受保护的终态运行事实目录。
 def _retire_runtime_facts(request, days, cursor=None):
     from ..common.nofollow_fs import _supports_dir_fd, open_directory_beneath
-    from ..memory_store.reference_pins import ReferencePinSnapshot
+    from ..memory_store.reference_pins import ReferencePinScanPending, ReferencePinSnapshot
     from ..memory_store.retention_scan import current_retention_pins
     from ..run_intent import _MAX_FACT_FILES
     from ..run_intent_index import read_locator
@@ -477,6 +477,12 @@ def _retire_runtime_facts(request, days, cursor=None):
                         removed.add(entry.name)
                         report['deleted'] += 1
                         report['freed_bytes'] += freed
+                except ReferencePinScanPending:
+                    # 本候选尚未获得引用证明，不能越过名称锚点或登记一小时休息；下一片沿原证明续扫。
+                    examined.pop()
+                    finished = False
+                    report['deferred_reason'] = ReferencePinScanPending.code
+                    break
                 except FileNotFoundError:
                     continue
                 except (OSError, ValueError):
@@ -501,12 +507,15 @@ def _with_runtime_facts(receipt, facts):
         receipt['freed_bytes'] = receipt.get('freed_bytes', 0) + facts['freed_bytes']
     if facts['errors']:
         receipt['errors'] = [*receipt.get('errors', []), *facts['errors']][:16]
+    if facts.get('deferred_reason'):
+        receipt.setdefault('deferred_reason', facts['deferred_reason'])
     return receipt
 
 
 # LLM: 调度器拥有游标和写门；pin每片只取一次，耗时后仍推进首项，未决名称不越过连续前缀。
 # 函数用途: 在Owner规范根有界退休终态attempt的到期工具正文。
 def maintain_owner_tool_outputs_lane(request) -> dict:
+    from ..memory_store.reference_pins import ReferencePinScanPending
     from ..memory_store.retention_scan import current_retention_pins
     from ..user_space.storage_lanes import (
         STORAGE_LANE_SLICE_BYTES,
@@ -599,7 +608,7 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
             else:
                 candidates.append(item)
         if candidates:
-            pins, _ = current_retention_pins(request.home, owner_conversation_roots(request.home), pin_errors,
+            pins, pins_complete = current_retention_pins(request.home, owner_conversation_roots(request.home), pin_errors,
                                              now=datetime.fromtimestamp(request.now, timezone.utc))
             for item in candidates:
                 path = tool_output_root(home) / item['name']
@@ -607,13 +616,16 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
                 paths = (path, path.with_name(blob)) if blob else (path,)
                 reason = None
                 if not all(pins.complete_for(target, pin_errors) for target in paths):
-                    reason = 'pins_incomplete'
+                    reason = 'pin_scan_pending' if not pins_complete and not pin_errors else 'pins_incomplete'
                 elif any(pins.protects(target, pin_errors) for target in paths):
                     reason = 'pinned'
                 if reason:
                     _skip(skipped, reason)
                     receipt['protected'] += 1
-                    decided.add(item['name'])
+                    if reason == 'pin_scan_pending':
+                        receipt['deferred_reason'] = ReferencePinScanPending.code
+                    else:
+                        decided.add(item['name'])
                 else:
                     eligible.append(item)
     _pin_error_rows(pin_errors, errors)
@@ -636,7 +648,7 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
     pending = [item['name'] for item in due if item['name'] not in decided]
     if pending and budget.remaining_ms() <= 0:
         cursor['retry_name'] = min(pending)
-        receipt['deferred_reason'] = 'budget_exhausted'
+        receipt.setdefault('deferred_reason', 'budget_exhausted')
     if due:
         receipt['oldest_due_age_seconds'] = max(0, request.now - min(_instant(item['value']['created_at']).timestamp() for item in due))
     complete = len(window) < STORAGE_LANE_SLICE_ENTRIES and all(name in decided for name in window)
@@ -655,5 +667,7 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
     receipt['deleted_items'] += facts['deleted']
     receipt['freed_bytes'] += facts['freed_bytes']
     errors.extend(facts['errors'][:max(0, 16 - len(errors))])
+    if facts.get('deferred_reason'):
+        receipt.setdefault('deferred_reason', facts['deferred_reason'])
     receipt.update(cursor=cursor, complete=complete and facts['complete'])
     return validate_lane_receipt(receipt)

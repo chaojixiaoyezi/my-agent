@@ -148,6 +148,31 @@ def test_owner_retention_override_is_applied_even_while_tool_outputs_rest(owner)
     assert not directory.exists()
 
 
+@pytest.mark.parametrize('resting', [False, True])
+def test_pending_fact_pin_proof_keeps_candidate_and_resumes_without_cooldown(owner, monkeypatch, resting):
+    directory = fact(owner, 'pending-proof')
+    fresh_locator(owner)
+    original = reference_pins.ReferencePinSnapshot.current
+    observed = []
+
+    def pending_once(snapshot, errors, *, target=None):
+        if target is not None:
+            observed.append(target)
+            if len(observed) == 1:
+                raise reference_pins.ReferencePinScanPending()
+        return original(snapshot, errors, target=target)
+
+    monkeypatch.setattr(reference_pins.ReferencePinSnapshot, 'current', pending_once)
+    first = retention.maintain_owner_tool_outputs_lane(request(owner, cursor=None if resting else {}))
+    assert directory.exists() and not first.get('deleted_items') and not first.get('errors')
+    assert first['complete'] is False and first['cursor'].get('facts_after', '') == ''
+    assert first['cursor'].get('facts_due_at', 0) <= owner[1]
+    assert first['deferred_reason'] == reference_pins.ReferencePinScanPending.code
+    resumed = lane_pass(owner, cursor=first['cursor'])
+    assert not directory.exists() and sum(row.get('deleted_items', 0) for row in resumed) == 1
+    assert observed == [directory / 'task.json', directory / 'task.json']
+
+
 @pytest.mark.parametrize('items', [7, STORAGE_LANE_SLICE_ENTRIES])
 def test_bounded_calls_drain_three_hundred_facts_only_inside_run_write(owner, monkeypatch, items):
     directories = [fact(owner, f'old-{index}') for index in range(300)]
@@ -293,7 +318,7 @@ def no_fd_growth():
 
 @pytest.mark.parametrize('resting', [False, True])
 @pytest.mark.parametrize('reference', ['path', 'member', 'request_id', 'run_id', 'task_id'])
-def test_formal_memory_refs_protect_old_facts(owner, reference, resting):
+def test_formal_memory_refs_protect_old_facts(owner, monkeypatch, reference, resting):
     directory = fact(owner, 'referenced', run_id='retained-run', task_id='retained-task')
     control = fact(owner, 'unreferenced')
     fresh_locator(owner)
@@ -303,10 +328,17 @@ def test_formal_memory_refs_protect_old_facts(owner, reference, resting):
     value = {'path': str(task), 'member': str(member), 'request_id': directory.name,
              'run_id': 'retained-run', 'task_id': 'retained-task'}[reference]
     JsonlMemory(owner[0].owner_memory_long_term_jsonl).add('user', '保留来源', attributes={'source_refs': [value]})
-    errors = []
-    pins, complete = retention_scan.current_retention_pins(owner[0], owner_conversation_roots(owner[0]), errors,
-        now=datetime.fromtimestamp(owner[1], timezone.utc))
-    assert complete and pins.protects(directory if reference == 'member' else task, errors) and not errors
+    original, proofs = retention_scan.current_retention_pins, []
+
+    def observed_proof(home, roots, errors, **options):
+        result = original(home, roots, errors, **options)
+        if result[1]:
+            assert not errors
+            proofs.append(result[0])
+        return result
+
+    # 引用证明允许分片完成；观察退休器实际消费的完整证明，不要求第一片25ms必已扫完。
+    monkeypatch.setattr(retention_scan, 'current_retention_pins', observed_proof)
     rows, errors = read_locator(directory.parent, limit=_MAX_FACT_FILES)
     assert not errors and directory.name not in {row['directory'] for row in rows}
     before = {path.name: path.read_bytes() for path in directory.iterdir()}
@@ -314,6 +346,9 @@ def test_formal_memory_refs_protect_old_facts(owner, reference, resting):
     with no_fd_growth():
         receipts = lane_pass(owner, cursor=None if resting else {})
 
+    proof_errors = []
+    assert proofs and any(pins.protects(directory if reference == 'member' else task, proof_errors) for pins in proofs)
+    assert not proof_errors
     assert directory.exists() and {path.name: path.read_bytes() for path in directory.iterdir()} == before
     assert not control.exists() and sum(row.get('deleted_items', 0) for row in receipts) == 1
     assert not any(row.get('errors') for row in receipts)
@@ -367,14 +402,14 @@ def test_unreadable_pin_sources_preserve_facts_and_diagnostics(owner, monkeypatc
     if damage == 'malformed':
         memory.path.write_text('{', encoding='utf-8')
     else:
-        original = retention_scan._pin_rows
+        original = retention_scan._fingerprint_source
 
         def unreadable(path, *args, **kwargs):
             if path == memory.path:
                 raise PermissionError('private pin source detail')
-            yield from original(path, *args, **kwargs)
+            return original(path, *args, **kwargs)
 
-        monkeypatch.setattr(retention_scan, '_pin_rows', unreadable)
+        monkeypatch.setattr(retention_scan, '_fingerprint_source', unreadable)
     before = [(directory / 'task.json').read_bytes() for directory in directories]
 
     with no_fd_growth():
@@ -407,8 +442,10 @@ def test_reference_published_in_write_gate_is_checked_under_fact_locks(owner, mo
                 held_locks.pop()
 
     def current(snapshot, errors, *, target=None):
-        assert inside and len(held_locks) == 2 and held_locks[-1] == directory / 'task.json'
-        observed.append(target)
+        # 原生有界来源投影也复用此基类；这里只记录携带明确目标的执行前复核。
+        if target is not None:
+            assert inside and len(held_locks) == 2 and held_locks[-1] == directory / 'task.json'
+            observed.append(target)
         return original_current(snapshot, errors, target=target)
 
     def commit(operation):

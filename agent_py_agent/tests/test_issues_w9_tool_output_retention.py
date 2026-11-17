@@ -182,6 +182,32 @@ def test_conversation_pin_then_unpin(setup):
     assert not path.exists() and sum(row['deleted_items'] for row in second) == 1
 
 
+@pytest.mark.parametrize('blob', [False, True])
+def test_pending_pin_proof_keeps_same_output_cursor_and_resumes(setup, monkeypatch, blob):
+    from agent_py_agent.agent.memory_store import retention_scan
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinScanPending
+
+    path, _ = artifact(setup, 'pending-proof', blob=blob)
+    original = retention_scan.current_retention_pins
+    calls = []
+
+    def pending_once(home, roots, errors, **options):
+        calls.append(True)
+        if len(calls) == 1:
+            return retention_scan._RetentionPins(Path(home.owner_home_dir), complete=False), False
+        return original(home, roots, errors, **options)
+
+    monkeypatch.setattr(retention_scan, 'current_retention_pins', pending_once)
+    first = retention.maintain_owner_tool_outputs_lane(request(setup))
+    assert path.exists() and first['deleted_items'] == 0 and first['errors'] == []
+    assert first['complete'] is False and first['cursor'].get('after', '') == ''
+    assert first['cursor'].get('next_pass_at', 0) <= setup[2].timestamp()
+    assert first['deferred_reason'] == ReferencePinScanPending.code
+    assert first['skipped']['pin_scan_pending'] == first['backlog'] == 1
+    resumed = drain(setup, cursor=json.loads(json.dumps(first['cursor'])))
+    assert not path.exists() and sum(row['deleted_items'] for row in resumed) == 1
+
+
 # LLM: 故障发生在真实blob unlink之后；包装尚在也必须由已刷盘账本报告expired。
 # 函数用途: 验证中断后读取语义及重启幂等回收。
 def test_interruption_after_blob_unlink(setup, monkeypatch):
