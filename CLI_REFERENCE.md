@@ -45,7 +45,7 @@ python -m agent_py_agent --help
 
 全局参数放在根命令前。兼容器只定位真正的根命令，不扫描配置路径、目录、业务正文或 `--` 后的文本寻找旧名字；未知参数交给同一解析树拒绝。根选项当前只有零值或单值形式，新增多值形式必须先扩展明确的解码合同，不能猜值的边界。未带命令时保持原交互入口，不把合成分组误当成启动聊天。
 
-## 27 个规范根
+## 28 个规范根
 
 | 根 | 当前入口 | 用途 |
 |---|---|---|
@@ -57,6 +57,7 @@ python -m agent_py_agent --help
 | `collaboration` | `my-agent collaboration` | 原协作控制 |
 | `config` | `my-agent config` | 受限配置读取与设置 |
 | `context` | `my-agent context` | 上下文包 |
+| `credentials` | `my-agent credentials` | 私人凭据记录的列出、查询与撤销（只显示元数据，不解密、不显示秘密） |
 | `dev` | `my-agent dev` | 开发探针、合同与隔离场景 |
 | `feishu` | `my-agent feishu` | 飞书接入 |
 | `gateway` | `my-agent gateway` | Gateway 与监督进程控制 |
@@ -301,6 +302,7 @@ Probe 输出每次样本、时间、Python 峰值内存与列明文件的源码�
 | `my-agent gateway logs` | `--help`, `--lines`, `-h` |
 | `my-agent gateway run` | `--after-pid`, `--help`, `--workspace-root`, `-h` |
 | `my-agent gateway status` | `--help`, `-h` |
+| `my-agent gateway timeline` | `--help`, `--json`, `-h` |
 | `my-agent gateway ask` | `--help`, `--inject`, `--json`, `--no-resume-context`, `--no-save`, `--no-wait`, `--prompt-file`, `--resume-context`, `--show-prompt`, `--timeout`, `-h` |
 | `my-agent gateway result` | `--help`, `--json`, `--show-prompt`, `-h` |
 | `my-agent gateway supervisor` | `--check-interval`, `--heartbeat-timeout`, `--help`, `--max-restart-attempts`, `--restart-cooldown`, `--workspace-root`, `-h` |
@@ -348,6 +350,10 @@ Probe 输出每次样本、时间、Python 峰值内存与列明文件的源码�
 | `my-agent admin identities` | `--help`, `-h` |
 | `my-agent admin identities list` | `--help`, `--json`, `-h` |
 | `my-agent admin identities remove` | `--help`, `-h` |
+| `my-agent credentials` | `--help`, `-h` |
+| `my-agent credentials list` | `--help`, `--json`, `--owner`, `-h` |
+| `my-agent credentials status` | `--help`, `--json`, `--owner`, `-h` |
+| `my-agent credentials revoke` | `--help`, `--json`, `--owner`, `-h` |
 | `my-agent space` | `--help`, `-h` |
 | `my-agent team` | `--help`, `-h` |
 | `my-agent workflow` | `--help`, `-h` |
