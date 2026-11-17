@@ -8,7 +8,7 @@ from hashlib import sha256
 from ..common.log_redaction import redact_sensitive_text
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.control_commands import ConversationControlResult
-from ..memory_store.promotion import _promotion_target
+from ..memory_store.promotion import _absolute_authority_block, _promotion_target
 from .memory_candidate_control import memory_control_failure
 
 
@@ -27,6 +27,14 @@ _MEMORY_CANDIDATE_PREVIEW_SECONDS = 600
 # 字节；超过可完整展示的上限时不提供确认。
 _DISPLAY_BYTES = 12_000
 _SCHEMA = 'memory_candidate_preview.v1'
+# LLM: 这几类候选按 promotion._absolute_authority_block 的规则人工确认也不能晋升；live 实测预览照样给出 confirm，
+#   确认后只回"正式内容未提交"，用户无从得知原因。预览改为只给 reject/cancel 并说明原因。
+# 常量用途: 绝对权威阻塞码到用户说明的映射。
+_ABSOLUTE_BLOCK_TEXT = {
+    'MODEL_INFERRED_FORMAL_AUTHORITY_FORBIDDEN': '这条是模型推断的内容，按规则人工确认也不能成为正式事实或资料',
+    'PERSONA_USER_EXPLICIT_REQUIRED': '写入 USER/SOUL 需要你本人的明确表述，人工确认不能代替',
+    'TEMPORARY_USER_PROFILE_FORBIDDEN': '会话或临时范围的内容不能写成长期用户资料',
+}
 
 
 # LLM: 只计算完整记录的确定指纹，不把时间相近或同状态当同版本，不持久第二候选正文。
@@ -92,10 +100,16 @@ def _preview(services, paths, command, scope, thread_id):
             thread_id=thread_id, issued_at=now, expires_at=now + _MEMORY_CANDIDATE_PREVIEW_SECONDS)
         for action in ('confirm', 'reject', 'cancel', 'receipt'):
             details[action + '_command'] = '/memory candidates ' + action + ' ' + nonce
+    blocked = _absolute_authority_block(candidate)
     message = '完整候选；尚未正式保存。\n版本SHA：' + details['version'] + '\n正文SHA：' + details['content_sha256']
     message += '\n' + json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if blocked:
+        details['confirm_blocked_reason'] = blocked
+        message += ('\n不能确认保存（' + blocked + '）：' + _ABSOLUTE_BLOCK_TEXT.get(blocked, '按规则不能晋升为正式记忆')
+                    + '。如果内容属实，请用你自己的话直接说明后再保存；否则可以拒绝。')
     if command.operation == 'preview':
-        message += '\n' + '\n'.join(details[key + '_command'] for key in ('confirm', 'reject', 'cancel'))
+        actions = ('reject', 'cancel') if blocked else ('confirm', 'reject', 'cancel')
+        message += '\n' + '\n'.join(details[key + '_command'] for key in actions)
     return _result(True, message, details)
 
 
@@ -126,6 +140,9 @@ def _preview_receipt_result(details, *, error=''):
                'completed': '已按预览确认正式保存。', 'rejected': '已拒绝该候选，未提交正式内容。',
                'cancelled': '已取消本次预览，候选保持原状态。',
                'not_committed': '正式内容未提交，请核对原因后重新预览。'}[state]
+    reason = (details.get('promotion') or {}).get('reason_code') or error
+    if state == 'not_committed' and reason:
+        message = '正式内容未提交（' + str(reason) + '），请核对原因后重新预览。'
     return _result(state != 'consumed_unknown' and not error, message, details, error)
 
 
