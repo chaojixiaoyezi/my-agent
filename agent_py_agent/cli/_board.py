@@ -125,10 +125,22 @@ def _goal_preview(value: object) -> str:
     return truncate_display(text, _BOARD_GOAL_PREVIEW_CHARS).rstrip() + "..."
 
 
+# LLM: 只把“运行记录不存在”转成中文原因、查看命令与退出码 2；其它读取故障照常上抛，不吞成“不存在”。
+# 函数用途: 读取单个子代理运行记录；记录不存在时打印提示并返回 None，调用方据此返回 2。
+def load_cli_subagent_task(agent, run_id: str):
+    try:
+        return agent.subagents.load(run_id)
+    except FileNotFoundError:
+        print(f"子代理运行记录不存在：{run_id}。可运行 `my-agent subagents --all` 查看全部运行 ID。")
+        return None
+
+
 def cmd_subagent_detail(args) -> int:
 
     agent = make_agent(args)
-    task = agent.subagents.load(args.run_id)
+    task = load_cli_subagent_task(agent, args.run_id)
+    if task is None:
+        return 2
     print(
         json.dumps(
             _task_jsonable(task), ensure_ascii=False, indent=2,

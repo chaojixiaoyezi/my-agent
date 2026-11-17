@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
@@ -210,17 +210,24 @@ class TestCmdSubagentsPlanActions:
         args.root_id = "root-a"
         args.skill_dir = None
 
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+        from agent_py_agent.agent.subagents.services.board.service import SubAgentBoardService
+
+        # 严格替身：管理器上不存在的方法直接 AttributeError；board 等服务是实例属性，按真实服务类单独装上。
         mock_agent = MagicMock()
+        mock_agent.subagents = create_autospec(SubAgentManager, instance=True)
+        mock_agent.subagents.board = create_autospec(SubAgentBoardService, instance=True)
+        mock_agent.subagents.workspace = tmp_path
         mock_report = MagicMock()
         mock_report.summary = {"total": 0}
         mock_report.actions = []
-        mock_agent.subagents.write_action_plan.return_value = mock_report
+        mock_agent.subagents.board.write_action_plan.return_value = mock_report
 
         with patch("agent_py_agent.cli._actions.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli._actions.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_plan_actions(args)
             assert result == 0
-            call_kwargs = mock_agent.subagents.write_action_plan.call_args.kwargs
+            call_kwargs = mock_agent.subagents.board.write_action_plan.call_args.kwargs
             assert call_kwargs["params"].root_id == "root-a"
 
 

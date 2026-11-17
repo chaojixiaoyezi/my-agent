@@ -16,6 +16,7 @@ from ..agent.subagents.test_failure_classification import (
     classify_test_execution_report,
     write_test_failure_classification,
 )
+from ._board import load_cli_subagent_task
 from .common import make_agent
 from .models import SubagentsTestsOptions
 
@@ -23,7 +24,9 @@ from .models import SubagentsTestsOptions
 def cmd_subagents_tests(args, make_agent_fn=make_agent) -> int:
     agent = make_agent_fn(args)
     options = _subagents_tests_options(args)
-    task = agent.subagents.load(options.run_id)
+    task = load_cli_subagent_task(agent, options.run_id)
+    if task is None:
+        return 2
     report_path = Path(task.reports_dir) / "test_execution.json"
 
     if options.re_run:

@@ -17,7 +17,7 @@ def cmd_subagents_plan_actions(args) -> int:
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
     options = _subagents_plan_actions_options(args, agent=agent)
-    report = agent.subagents.write_action_plan(
+    report = agent.subagents.board.write_action_plan(
         params=SubAgentPlanActionsOptions(
             config=capability_config,
             write_report=True,

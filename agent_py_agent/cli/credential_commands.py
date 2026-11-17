@@ -40,7 +40,12 @@ def cmd_credentials(args) -> int:
     owner_id = str(getattr(args, "owner", "") or "local/main")
     try:
         root = home_paths()
-        scoped = home_paths_with_owner(root, resolve_owner_home(root.root, owner_identity_from_owner_id(owner_id)))
+        try:
+            identity = owner_identity_from_owner_id(owner_id)
+        except ValueError:
+            # --owner 写法不合法同样是找不到这个 owner，不报成凭据管理失败。
+            raise LookupError("owner id format invalid") from None
+        scoped = home_paths_with_owner(root, resolve_owner_home(root.root, identity))
         if str(scoped.owner_id) != owner_id or not Path(scoped.owner_home_dir).is_dir():
             raise LookupError("owner not found")
         if action == "list":
@@ -60,11 +65,17 @@ def cmd_credentials(args) -> int:
     return 0 if result.get("ok") else 1
 
 
-# LLM: 纯渲染，只打印公开元数据字段。
+# LLM: 纯渲染，只打印公开元数据字段；失败行带异常类型，找不到 owner 时给出 --owner 写法示例。
 # 函数用途: 把 credentials 结果渲染为人读文本。
 def _render(action: str, result: dict) -> str:
     if not result.get("ok"):
-        return f"credentials {action} owner={result.get('owner_id')} error={result.get('error_code')}"
+        line = f"credentials {action} owner={result.get('owner_id')} error={result.get('error_code')}"
+        if result.get("error_type"):
+            line += f" error_type={result['error_type']}"
+        if result.get("error_code") == "OWNER_NOT_FOUND":
+            line += ("\n找不到这个 owner：--owner 写法如 local/main（本机主用户）、local/<用户ID> 或 "
+                     "providers/<平台>/users/<用户ID>，且该 owner 已在本机建立过目录。")
+        return line
     rows = result.get("credentials") if action == "list" else [result]
     lines = [f"credentials {action} owner={result.get('owner_id')} count={len(rows)}"
              + (f" unreadable={result['unreadable']}" if result.get("unreadable") else "")]

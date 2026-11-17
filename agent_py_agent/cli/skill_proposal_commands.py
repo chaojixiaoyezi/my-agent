@@ -12,12 +12,15 @@ from typing import Any
 
 from ..agent.capability.skill_proposals import (
     CODE_COMMITTED,
+    CODE_INVALID_ID,
+    CODE_NOT_FOUND,
     PROPOSAL_PENDING,
     PROPOSAL_STATUSES,
     SkillProposalError,
     SkillProposalOutcome,
     SkillProposalService,
 )
+from ..agent.contracts.error_taxonomy import error_contract
 from ..agent.settings import load_config
 from ..agent.settings.services.runtime_config_env import apply_runtime_config_environment
 from ..agent.user_space.home_layout import home_paths
@@ -210,12 +213,19 @@ def _print_payload(payload: dict[str, object], *, json_output: bool) -> None:
     print("\n".join(_human_lines(payload)))
 
 
-# LLM: 只做展示分派，不改变结果。
+# LLM: 只做展示分派，不改变结果；失败时附已登记错误码的恢复提示，编号类错误再给出编号格式和查看命令。
 # 函数用途: 按命令结果选择中文展示内容。
 def _human_lines(payload: dict[str, object]) -> list[str]:
     if not payload.get("ok"):
+        code = str(payload.get("error_code") or "")
         detail = json.dumps(payload.get("detail") or {}, ensure_ascii=False, sort_keys=True)
-        return [f"操作未完成：{payload.get('error_code')}", f"细节：{detail}"]
+        lines = [f"操作未完成：{code}", f"细节：{detail}"]
+        contract = error_contract(code)
+        if contract.code == code:
+            lines.append(f"处理建议：{contract.recovery_hint}")
+        if code in {CODE_INVALID_ID, CODE_NOT_FOUND}:
+            lines.append("提案编号是 24 位小写十六进制字符；可运行 `my-agent skills proposals list` 查看当前 owner 的提案编号。")
+        return lines
     if "proposals" in payload:
         return _list_lines(payload)
     proposal = payload.get("proposal") or {}

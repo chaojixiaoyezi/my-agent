@@ -29,7 +29,7 @@ def cmd_subagents_leadership_recovery_plan(args) -> int:
             "subagent_hierarchy_max_children_per_tool_call",
         ),
     )
-    report = agent.subagents.write_leadership_recovery_plan(params=params)
+    report = agent.subagents.hierarchy.write_leadership_recovery_plan(params=params)
     if args.json:
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
         return 0
@@ -67,7 +67,7 @@ def cmd_subagents_leadership_recovery_apply(args) -> int:
             "subagent_hierarchy_max_children_per_tool_call",
         ),
     )
-    report = agent.subagents.write_leadership_recovery_apply(params=params)
+    report = agent.subagents.hierarchy.write_leadership_recovery_apply(params=params)
     if args.json:
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
         return 0

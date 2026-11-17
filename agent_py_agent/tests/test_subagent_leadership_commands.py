@@ -6,7 +6,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
+
+
+# 函数用途: 建严格 Agent 替身——管理器上不存在的方法直接 AttributeError；hierarchy 服务是实例属性，按真实服务类装上。
+def _strict_agent(workspace: Path) -> MagicMock:
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.agent.subagents.services.hierarchy.service import SubAgentHierarchyService
+
+    agent = MagicMock()
+    agent.subagents = create_autospec(SubAgentManager, instance=True)
+    agent.subagents.hierarchy = create_autospec(SubAgentHierarchyService, instance=True)
+    agent.subagents.workspace = workspace
+    return agent
 
 
 class TestCmdSubagentsLeadershipRecoveryPlan:
@@ -24,19 +36,19 @@ class TestCmdSubagentsLeadershipRecoveryPlan:
         args.max_children_per_leader = 3
         args.json = False
 
-        mock_agent = MagicMock()
+        mock_agent = _strict_agent(tmp_path)
         mock_report = MagicMock()
         mock_report.summary = {"assignments": 0, "assigned_children": 0, "unassigned_children": 0}
         mock_report.assignments = []
         mock_report.unassigned = []
-        mock_agent.subagents.write_leadership_recovery_plan.return_value = mock_report
+        mock_agent.subagents.hierarchy.write_leadership_recovery_plan.return_value = mock_report
 
         with patch("agent_py_agent.cli._leadership.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli._leadership.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_leadership_recovery_plan(args)
 
         assert result == 0
-        call_kwargs = mock_agent.subagents.write_leadership_recovery_plan.call_args.kwargs
+        call_kwargs = mock_agent.subagents.hierarchy.write_leadership_recovery_plan.call_args.kwargs
         assert call_kwargs["params"].root_id == "root-a"
         assert call_kwargs["params"].leader_ids == ["leader-a", "leader-b"]
         assert call_kwargs["params"].max_children_per_leader == 3
@@ -55,17 +67,17 @@ class TestCmdSubagentsLeadershipRecoveryPlan:
         args.apply = True
         args.json = False
 
-        mock_agent = MagicMock()
+        mock_agent = _strict_agent(tmp_path)
         mock_report = MagicMock()
         mock_report.summary = {"total": 1, "ok": 1, "applied": 1, "moved_children": 2}
         mock_report.records = []
-        mock_agent.subagents.write_leadership_recovery_apply.return_value = mock_report
+        mock_agent.subagents.hierarchy.write_leadership_recovery_apply.return_value = mock_report
 
         with patch("agent_py_agent.cli._leadership.make_agent", return_value=mock_agent):
             result = cmd_subagents_leadership_recovery_apply(args)
 
         assert result == 0
-        call_kwargs = mock_agent.subagents.write_leadership_recovery_apply.call_args.kwargs
+        call_kwargs = mock_agent.subagents.hierarchy.write_leadership_recovery_apply.call_args.kwargs
         assert call_kwargs["params"].root_id == "root-a"
         assert call_kwargs["params"].coordinator_id == "coord-a"
         assert call_kwargs["params"].leader_id == "leader-a"

@@ -861,7 +861,8 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "skills":
         # value 是解析器规范化后的完整参数，Gateway 端按同一解析器重新解析。
         return f"/skills {command.value}".rstrip()
-    if command.kind in {"agents", "memory", "schedule", "group", "sessions", "help"}:
+    if command.kind in {"agents", "memory", "schedule", "group", "sessions", "help", "delegate"}:
+        # /delegate 已退役、本地即给迁移提示，仍原样带回参数，保证解析→传输文本→解析往返一致。
         return f"/{command.kind} {command.value}".rstrip()
     if command.kind == "settings":
         # set 的值保留原样（可含空格与中文），Gateway 端按同一解析器重新解析。

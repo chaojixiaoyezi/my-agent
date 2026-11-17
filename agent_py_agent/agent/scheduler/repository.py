@@ -3035,13 +3035,19 @@ def _terminal_run_payload(
     }
 
 
+# LLM: 一次性计划过了补跑宽限就不能直接恢复；拒绝原因写清目标时刻、当前时刻、宽限秒数和下一步，供模型与用户直接照做。
+# 函数用途: 计算恢复后的下一次执行时刻；一次性计划已过宽限时拒绝恢复。
 def _resume_next_run(job: dict[str, object], current: float) -> float:
     schedule = validate_schedule(job["schedule"])
     if schedule["kind"] == "at":
         target = schedule_timestamp(schedule)
-        if current - target > int(job["misfire_grace_seconds"]):
+        grace = int(job["misfire_grace_seconds"])
+        if current - target > grace:
+            target_iso = datetime.fromtimestamp(target, timezone.utc).isoformat().replace("+00:00", "Z")
+            current_iso = datetime.fromtimestamp(current, timezone.utc).isoformat().replace("+00:00", "Z")
             raise ScheduleValidationError(
-                "one-shot time is outside its misfire grace; update the schedule first"
+                f"一次性计划的执行时间 {target_iso} 已超过补跑宽限 {grace} 秒（当前时间 {current_iso}），不能直接恢复。"
+                "下一步：用 schedule 的 update 把 at 改成未来的绝对时间（ISO-8601）后再恢复，或删除这条计划。"
             )
         return max(target, current + _MANUAL_DISPATCH_DELAY_SECONDS)
     return float(compute_next_run(schedule, after=current) or 0.0)

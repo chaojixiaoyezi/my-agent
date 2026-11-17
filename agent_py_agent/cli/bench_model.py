@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..agent.model_speed import load_speed_profile, run_speed_benchmark, save_speed_profile
 from ..agent.settings import load_config
+from ..agent.settings.model_profiles import selected_model_config
 from .common import DEFAULT_CONFIG, make_agent, resolve_workspace_root
 
 
@@ -15,7 +16,7 @@ def cmd_bench_model(args) -> int:
     speed_profile_path = _speed_profile_path(args, config)
     if args.show:
         return _show_speed_profile(speed_profile_path)
-    return _run_speed_benchmark(args, config, config_path, speed_profile_path)
+    return _run_speed_benchmark(args, config_path, speed_profile_path)
 
 
 def _speed_profile_path(args, config) -> Path:
@@ -40,14 +41,17 @@ def _show_speed_profile(speed_profile_path: Path) -> int:
     return 0
 
 
-def _run_speed_benchmark(args, config, config_path: str | Path, speed_profile_path: Path) -> int:
+# LLM: 测速对象是 owner 当前选定的对话模型（模型目录解析结果），不是部署配置里的占位模型；展示、测速与保存用同一份配置。
+# 函数用途: 对当前选定模型跑速度基准并保存速度档案。
+def _run_speed_benchmark(args, config_path: str | Path, speed_profile_path: Path) -> int:
+    agent = make_agent(args)
+    selected = selected_model_config(agent)
     print(f"Config: {config_path}")
-    print(f"Backend: {config.model_backend}")
-    print(f"Model: {config.model_name}")
+    print(f"Backend: {selected.model_backend}")
+    print(f"Model: {selected.model_name}")
     print()
 
-    make_agent(args)
-    profile = run_speed_benchmark(config)
+    profile = run_speed_benchmark(selected)
     if not profile.samples:
         print("Speed benchmark failed: no samples were generated.")
         return 1

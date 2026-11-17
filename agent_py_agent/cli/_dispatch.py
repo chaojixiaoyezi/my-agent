@@ -16,6 +16,7 @@ from ..agent.agent_core.runner.gate import get_task_timeout, resolve_runner_conf
 from ..agent.agent_core.runner.worker import RunSubagentWorkerParams, _run_subagent_worker
 from ..agent.agent_core.subagent import SubagentRunParams
 from ..agent.capability.config import load_capability_config
+from ._board import load_cli_subagent_task
 from .common import make_agent, make_capability_router
 from .dispatch_background import BackgroundLaunchUpdate, mark_background_launch
 from .models import SubagentsDispatchOptions
@@ -281,7 +282,13 @@ def cmd_subagent_run(args) -> int:
     run_args = _deferred_mcp_arguments(args) if bool(getattr(args, 'execute', False)) else args
     agent = make_agent(run_args)
     try:
-        result = _execute_subagent_run_cli(agent, args)
+        try:
+            result = _execute_subagent_run_cli(agent, args)
+        except FileNotFoundError:
+            # dry-run 与 --execute 都会先读运行记录；确认正是记录本身不存在时给出中文提示，其它缺文件照常上抛。
+            if load_cli_subagent_task(agent, args.run_id) is None:
+                return 2
+            raise
         mode = "execute" if args.execute else "dry-run"
         status = "OK" if result.ok else "FAIL"
         print("SUBAGENT RUNNER")
