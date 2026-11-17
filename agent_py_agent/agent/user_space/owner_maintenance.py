@@ -1275,10 +1275,13 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                          f'actual_type={type(source_revisions).__name__}; storage lanes not started')
     carried_checks = previous.get('storage_maintenance', {}).get('projection_check_pending', [])
     if (not isinstance(carried_checks, list)
+            or len(carried_checks) > len(projection_kinds)
             or any(not isinstance(key, str) or key not in projection_kinds for key in carried_checks)):
         raise ValueError('INVALID_PROJECTION_SOURCE_REVISIONS: '
                          'storage_maintenance.projection_check_pending requires registered projection kind list; '
-                         'storage lanes not started')
+                         f'actual_type={type(carried_checks).__name__}; '
+                         f'count={len(carried_checks) if isinstance(carried_checks, list) else "unavailable"}; '
+                         f'max_count={len(projection_kinds)}; storage lanes not started')
     projection_check_only = set()
 
     def projection_check_candidates():

@@ -11315,7 +11315,7 @@ ERROR_CONTRACTS.update({
     "INVALID_PROJECTION_SOURCE_REVISIONS": ErrorContract(
         code="INVALID_PROJECTION_SOURCE_REVISIONS", category="validation", retryable=False,
         recommended_action=RecoveryAction.REPAIR_STRUCTURED_CHECKPOINT_JSON.value,
-        recovery_hint="维护状态 storage_maintenance.projection_source_revisions 必须为 JSON 对象；本次存储车道尚未启动，先前维护动作以原回执为准。保留原状态并核对该 owner 的 maintenance.json 字段类型，由宿主维护修复该派生游标；不要删除原账、记忆或原样盲重试。",
+        recovery_hint="维护状态的投影证明格式无效：storage_maintenance.projection_source_revisions 必须为 JSON 对象，projection_check_pending 必须为已登记投影名称的有界列表；按回执字段路径、actual_type及count核对。本次存储车道尚未启动，先前维护动作以原回执为准。保留该 owner 的 maintenance.json，由宿主维护修复该派生游标；不要删除原账、记忆或原样盲重试。",
     ),
     "TELEMETRY_PROJECTION_SOURCE_UNSAFE": ErrorContract(
         code="TELEMETRY_PROJECTION_SOURCE_UNSAFE", category="storage", retryable=False,

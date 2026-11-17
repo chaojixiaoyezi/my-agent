@@ -206,8 +206,17 @@ def _finish_projection(tick, state=None):
     raise AssertionError('原128条/8192字节投影预算未完成')
 
 
-@pytest.mark.parametrize('invalid', [None, [], 'invalid', False])
-def test_invalid_projection_revision_state_preserves_source_and_explains_repair(tmp_path, monkeypatch, invalid):
+@pytest.mark.parametrize('field,invalid', [
+    ('projection_source_revisions', None),
+    ('projection_source_revisions', []),
+    ('projection_source_revisions', 'invalid'),
+    ('projection_source_revisions', False),
+    ('projection_check_pending', None),
+    ('projection_check_pending', 'invalid'),
+    ('projection_check_pending', ['unregistered']),
+    ('projection_check_pending', ['thread_index'] * 4),
+])
+def test_invalid_projection_revision_state_preserves_source_and_explains_repair(tmp_path, monkeypatch, field, invalid):
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error
     from agent_py_agent.agent.contracts.recovery import RecoveryAction
     from agent_py_agent.agent.user_space import storage_lanes
@@ -220,9 +229,9 @@ def test_invalid_projection_revision_state_preserves_source_and_explains_repair(
     monkeypatch.setattr(storage_lanes, 'resolve_storage_lane',
                         lambda *args, **kwargs: pytest.fail('invalid state must not start storage lanes'))
     with pytest.raises(ValueError, match='^INVALID_PROJECTION_SOURCE_REVISIONS:') as caught:
-        tick({'projection_source_revisions': invalid})
+        tick({field: invalid})
     message = str(caught.value)
-    assert 'storage_maintenance.projection_source_revisions' in message
+    assert f'storage_maintenance.{field}' in message
     assert f'actual_type={type(invalid).__name__}' in message
     assert 'storage lanes not started' in message and source.read_bytes() == before
     contract = classify_error(message)
