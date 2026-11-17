@@ -189,3 +189,29 @@ def test_reconcile_cursor_survives_the_model_facing_credential_mask(tmp_path):
     encoded = base64.urlsafe_b64encode(json.dumps(
         {"phase": "task_runs", "after": "tr_1", "owner": "local/main", "signature": _SIG}).encode()).decode()
     assert _exempt_cursor(encoded) == encoded
+
+
+def test_reconcile_cursor_survives_the_host_output_redaction_between_pages(tmp_path):
+    # R04: Full Access admin turns pass every tool result through redact_host_tool_outcome before the model
+    # sees it; the next_cursor taken from that redacted page 1 must still open page 2.
+    from agent_py_agent.agent.settings.secret_ref import HostCredentialSnapshot
+    from agent_py_agent.agent.tooling.host_output_redaction import redact_host_tool_outcome
+
+    agent = _agent(tmp_path)
+    created = [_terminal_root(agent, root=f"host-masked-{index}") for index in range(3)]
+    tool = RuntimeGovernanceTool(agent, is_admin=True)
+    snapshot = HostCredentialSnapshot(secret_values=("unrelated-host-value",))
+    seen, cursor, pages = [], "", 0
+    for _ in range(5):
+        outcome = tool.execute({"action": "reconcile_preview", "limit": 1, **({"cursor": cursor} if cursor else {})})
+        safe = redact_host_tool_outcome(outcome, snapshot=snapshot, force_default=True)
+        body = json.loads(safe.output)
+        assert safe.ok and not body["errors"], body
+        pages += 1
+        seen += [row["task_run_id"] for row in body["items"] if row.get("kind") == "task_run"]
+        cursor = body["next_cursor"]
+        assert "<redacted>" not in cursor and "[REDACTED]" not in cursor
+        if not cursor or decode_reconcile_cursor(cursor)["phase"] != "task_runs":
+            break
+    assert pages >= 2
+    assert sorted(seen) == sorted(row["task_run_id"] for row in created)
