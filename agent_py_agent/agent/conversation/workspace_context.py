@@ -86,13 +86,20 @@ def execute_workspace_control(store, command, *, thread_id: str, owner_home: Pat
         if thread.owner_home and Path(thread.owner_home).resolve(strict=False) != owner_home.resolve(strict=False):
             raise WorkspaceDirectoryError("会话不属于当前用户的家目录")
         if command.kind == "fork":
-            from .thread_fork_service import ConversationForkError, fork_conversation_thread
+            from .thread_fork_service import (
+                ConversationForkError,
+                fork_conversation_thread,
+                fork_cutoff_for_user_message,
+            )
 
             explicit = getattr(command, 'message_id_explicit', False)
             if explicit and not command.value:
                 raise ConversationForkError('FORK_MESSAGE_NOT_FOUND')
+            cutoff = command.value if explicit or command.value else None
+            if getattr(command, 'fork_at', 0):
+                cutoff = fork_cutoff_for_user_message(store, thread_id, command.fork_at)
             details = fork_conversation_thread(store, source_thread_id=thread_id,
-                up_to_message_id=command.value if explicit or command.value else None, title=command.name or None,
+                up_to_message_id=cutoff, title=command.name or None,
                 owner_home=owner_home, is_admin=is_admin)
             return ConversationControlResult("fork", True, "已创建独立分叉会话", details=details)
         if command.value:

@@ -14,6 +14,7 @@ from __future__ import annotations
 """
 
 import json
+import shlex
 import threading
 import time
 import urllib.error
@@ -787,7 +788,8 @@ def _recover_command_text(command: ConversationControlCommand) -> str:
 
 
 # LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 委托专用还原器保留作用域，/model 保留 default 前缀，
-#   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀。
+#   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀；
+#   /dir 目录、/fork 截止消息与标题、/restart 原因同样要带上，否则 Gateway 只收到裸命令。
 # 函数用途: 还原服务端控制协议，保留/new标题、/compact status与threshold前缀、用户管理和候选原参数，仅用于活请求运输。
 def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == 'route':
@@ -864,6 +866,17 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "settings":
         # set 的值保留原样（可含空格与中文），Gateway 端按同一解析器重新解析。
         return f"/settings {command.value}".rstrip()
+    if command.kind == "dir":
+        # 目录与分叉截止点、标题都按 shlex 引用还原，Gateway 端同一解析器按 shlex 重新切分。
+        return f"/dir {shlex.quote(command.value)}" if command.value else "/dir"
+    if command.kind == "fork":
+        cutoff = f" {shlex.quote(command.value)}" if command.value else ""
+        if getattr(command, "fork_at", 0):
+            cutoff = f" --at {command.fork_at}"
+        title = f" --title {shlex.quote(command.name)}" if command.name else ""
+        return f"/fork{cutoff}{title}"
+    if command.kind == "restart":
+        return f"/restart {command.value}".rstrip()
     if command.kind == "unsupported":
         return f"/{command.operation or 'unsupported'}"
     return f"/{command.kind}"

@@ -416,6 +416,19 @@ def fork_untrusted_context(store, thread_id, snapshot, push_id):
             dedupe_key=f"remote-push-context:{push_id}:{index}")
 
 
+# LLM: 序号只数本会话的 user 行；截止到下一条 user 行之前，回合闭合仍由 _safe_prefix 裁定。
+# 函数用途: 把 /fork --at N 换算成第 N 条用户消息所在回合最后一行的消息ID；越界不产生分叉。
+def fork_cutoff_for_user_message(store: ConversationStore, thread_id: str, position: int) -> str:
+    rows, errors = store.messages.recent_report(thread_id, limit=0)
+    if errors:
+        raise ConversationForkError("FORK_TRANSCRIPT_INVALID")
+    starts = [index for index, row in enumerate(rows) if row.role == "user"]
+    if position < 1 or position > len(starts):
+        raise ConversationForkError("FORK_MESSAGE_NOT_FOUND", f"本会话共 {len(starts)} 条用户消息")
+    end = starts[position] if position < len(starts) else len(rows)
+    return rows[end - 1].message_id
+
+
 # LLM: 只分叉主会话，不复用源线程任务/通道/运行身份；参数与返回dict是CLI、Host复用的公共合同。
 # 函数用途: 从最新或指定消息安全分叉，复制历史设置、压缩基线和冻结人格，源线程零修改。
 def fork_conversation_thread(

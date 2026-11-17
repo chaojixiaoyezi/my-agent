@@ -95,6 +95,8 @@ class ConversationControlCommand:
     confirmation_code: str = ""
     # 仅表示消息ID参数是否显式出现；不保存第二份ID，不能把显式空值当作最新位置。
     message_id_explicit: bool = False
+    # /fork --at N：第 N 条用户消息（从 1 计）连同其回复为分叉截止点；0 表示未给出。
+    fork_at: int = 0
 
 
 # LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
@@ -1062,7 +1064,7 @@ def _workspace_control_command(raw: str) -> ConversationControlCommand | None:
     if match is None:
         return None
     kind, trailing = match.group(1).lower(), match.group(2) or ""
-    usage = "用法：/dir [目录]" if kind == "dir" else "用法：/fork [消息ID] [--title 标题]"
+    usage = "用法：/dir [目录]" if kind == "dir" else "用法：/fork [--at 序号|消息ID] [--title 标题]"
     try:
         parts = shlex.split(trailing)
         if kind == "dir":
@@ -1077,6 +1079,12 @@ def _workspace_control_command(raw: str) -> ConversationControlCommand | None:
                 raise ValueError("标题需要一个参数且位于末尾")
             title = parts[index + 1]
             parts = parts[:index]
+        fork_at = 0
+        if parts[:1] == ["--at"]:
+            # 序号只按 ASCII 正整数接受，且不能与消息ID同时给出。
+            if len(parts) != 2 or re.fullmatch(r"[1-9][0-9]{0,8}", parts[1]) is None:
+                raise ValueError("序号必须是唯一的正整数")
+            fork_at, parts = int(parts[1]), []
         if parts[:1] == ['--from-message']:
             parts = parts[1:]
             if not parts:
@@ -1086,7 +1094,7 @@ def _workspace_control_command(raw: str) -> ConversationControlCommand | None:
         if parts and not parts[0].strip():
             raise ValueError('FORK_MESSAGE_NOT_FOUND')
         return ConversationControlCommand("fork", value=parts[0] if parts else "", name=title,
-            operation="fork", usage=usage, message_id_explicit=bool(parts))
+            operation="fork", usage=usage, message_id_explicit=bool(parts), fork_at=fork_at)
     except ValueError:
         return ConversationControlCommand(kind, valid=False, usage=usage, message_id_explicit=kind == 'fork')
 
