@@ -33,7 +33,11 @@ from types import EllipsisType
 from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
-from ..io.sqlite_scope import scoped_guarded_connection, sqlite_connection_factory
+from ..io.sqlite_scope import (
+    current_commit_durability,
+    scoped_guarded_connection,
+    sqlite_connection_factory,
+)
 from .current_obligations import CURRENT_OBLIGATION_INDEX_SQL
 from .maintenance import execute_runtime_statement
 from .recovery_guard import (
@@ -579,6 +583,7 @@ class RuntimeWriteFence:
             require_runtime_schema_generation(self._connection)
             return None
         if not self._connection.in_transaction:
+            self._apply_commit_durability()
             cursor = self._connection.execute('BEGIN IMMEDIATE')
             try:
                 require_runtime_schema_generation(self._connection)
@@ -588,6 +593,25 @@ class RuntimeWriteFence:
             if command == 'BEGIN':
                 return cursor
         return None
+
+    # LLM: synchronous 只能在事务外切换；按物理连接记忆原等级，未声明的事务恢复原等级，复用连接不把上一事务等级带入下一事务。
+    # 函数用途: 在开始写事务前把物理连接切到本事务声明的落盘等级（从未切换且未声明时不发语句）。
+    def _apply_commit_durability(self):
+        durability = current_commit_durability()
+        physical = getattr(self._connection, '_target', self._connection)
+        # 标准库连接无属性字典且从不跨借用复用，由本次栅栏记忆；可复用的跟踪连接记在物理对象上。
+        holder = physical if hasattr(physical, '__dict__') else self
+        state = holder.__dict__.get('_runtime_synchronous')
+        if durability is None and state is None:
+            return
+        if state is None:
+            level = int(self._connection.execute('PRAGMA synchronous').fetchone()[0])
+            original = ('OFF', 'NORMAL', 'FULL', 'EXTRA')[level]
+            state = holder.__dict__['_runtime_synchronous'] = [original, original]
+        wanted = durability.value if durability is not None else state[0]
+        if state[1] != wanted:
+            self._connection.execute(f'PRAGMA synchronous={wanted}')
+            state[1] = wanted
 
     # LLM: 每次提交/回滚后下一首写重新走栅栏；业务参数原样传给SQLite。
     # 函数用途: 在原execute入口保护事务开头。
@@ -911,18 +935,23 @@ class RuntimeSchemaMixin:
             finally:
                 _close_runtime_after_error(conn, original)
             return
+        # 本次借用若刚新开物理连接，_runtime_connect 已在同一连接核过代际；复用缓存连接时仍逐借用重核。
+        fresh = []
+
         def connect():
             try:
-                return self._runtime_connect()
+                conn = self._runtime_connect()
             except sqlite3.Error as error:
                 if self.read_only:
                     raise _RuntimeReadError(error) from None
                 raise
+            fresh.append(conn)
+            return conn
 
         try:
             with scoped_guarded_connection(self.db_path, self.read_only, connect) as conn:
                 try:
-                    if not self.read_only:
+                    if not self.read_only and not fresh:
                         require_runtime_schema_generation(conn)
                     yield conn if self.read_only else RuntimeWriteFence(conn)
                 except sqlite3.Error as error:

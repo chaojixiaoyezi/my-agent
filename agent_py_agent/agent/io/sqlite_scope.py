@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import enum
 import os
 import sqlite3
 import stat
@@ -26,6 +27,39 @@ from ..runtime_db.recovery_guard import (
 )
 from .sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from .sqlite_lease import SQLiteConnectionLease
+
+
+# LLM: 落盘等级按事务的恢复职责选择而非配置：效果前事实必须随提交同步；效果后观察可由下一次同步或检查点带走，丢失时恢复仍保守。
+# 类用途: 声明一次写事务提交时 SQLite 的 synchronous 等级（值即 PRAGMA 取值）。
+class SQLiteCommitDurability(enum.Enum):
+    # “可能已执行”的事实（工具 claim→EXECUTING）：断电不得丢，UNKNOWN 恢复依赖它。
+    PRE_EFFECT = "FULL"
+    # 结算/事件/观察行：断电丢失时行停在 EXECUTING，由恢复按 UNKNOWN 保守收口。
+    POST_EFFECT = "NORMAL"
+
+
+# 当前上下文声明的写事务落盘等级；None 表示未声明，写栅栏沿连接自身默认等级。
+_SQLITE_COMMIT_DURABILITY: ContextVar[SQLiteCommitDurability | None] = ContextVar(
+    "sqlite_commit_durability", default=None)
+
+
+# LLM: 只设置本上下文后续开始的写事务等级，不打开连接、不提交；退出无条件恢复外层声明，未声明者沿连接默认等级。
+# 函数用途: 为一段代码中的运行库写事务声明落盘等级。
+@contextmanager
+def sqlite_commit_durability(durability: SQLiteCommitDurability) -> Iterator[None]:
+    if not isinstance(durability, SQLiteCommitDurability):
+        raise TypeError("sqlite commit durability must be a SQLiteCommitDurability member")
+    token = _SQLITE_COMMIT_DURABILITY.set(durability)
+    try:
+        yield
+    finally:
+        _SQLITE_COMMIT_DURABILITY.reset(token)
+
+
+# LLM: 只读当前上下文声明，None 表示调用方未声明、写栅栏须恢复连接自身默认等级。
+# 函数用途: 返回当前写事务应使用的落盘等级。
+def current_commit_durability() -> SQLiteCommitDurability | None:
+    return _SQLITE_COMMIT_DURABILITY.get()
 
 
 def ensure_private_sqlite_birth(path: Path, *, parent_fd: int | None = None) -> bool:
@@ -280,6 +314,18 @@ def sqlite_connection_scope(enabled: bool = False) -> Iterator[None]:
         raise
     finally:
         _cleanup_preserving_error(lambda: _finish_scope(scope, token), body_error)
+
+
+# LLM: 本线程已有有效作用域时只并入（寿命与清理仍归原创建者），否则为本段新开并在退出时回收；不跨线程、不持事务。
+# 函数用途: 让一次工具领取→执行→结算或一次调用记账共用同一条物理连接。
+@contextmanager
+def sqlite_connection_reuse() -> Iterator[None]:
+    scope = _SQLITE_ACTIVE_SCOPE.get()
+    if scope is not None and _scope_owned(scope):
+        yield
+        return
+    with sqlite_connection_scope(True):
+        yield
 
 
 # LLM: 未启用、容量满、同库在用或跨线程均由原工厂开关连接；不自动提交业务事务。

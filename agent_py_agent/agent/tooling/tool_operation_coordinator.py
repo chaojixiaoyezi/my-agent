@@ -34,6 +34,7 @@ from ..common.request_execution_ports import (
 from ..common.tool_write_context import ToolWriteContextUnavailable, tool_write_claim_scope
 from ..concurrency.restart_gate import tool_execution_admission
 from ..io.sqlite_connection import sqlite_error_details
+from ..io.sqlite_scope import sqlite_connection_reuse
 from ..local_storage import (
     TOOL_OPERATION_FAILED,
     TOOL_OPERATION_SUCCEEDED,
@@ -174,7 +175,9 @@ def execute_tool_operation(
     }) as admitted:
         if not admitted:
             return _restart_gate_not_started(request)
-        return _execute_admitted_tool_operation(request)
+        # 领取→执行→结算共用一条运行库连接（并入调用方已有作用域）；每次借用归还前结束事务，handler 期间不持事务。
+        with sqlite_connection_reuse():
+            return _execute_admitted_tool_operation(request)
 
 
 # LLM: 仅等待中断时使用，工具未领取执行权；对象及宿主JSON同带专用reported码，保留CANCELLED分类，不绕过全局错误目录。

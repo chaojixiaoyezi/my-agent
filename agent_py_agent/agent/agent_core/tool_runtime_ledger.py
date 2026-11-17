@@ -15,6 +15,11 @@ from ..conversation.authority import (
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
 )
+from ..io.sqlite_scope import (
+    SQLiteCommitDurability,
+    sqlite_commit_durability,
+    sqlite_connection_reuse,
+)
 from ..local_storage import RuntimeGateLedgerRecord
 from ..path_access_policy import effective_owner_scope_root, inheritable_declared_work_roots
 from ..plugin_observation import (
@@ -37,15 +42,17 @@ from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_rec
 #   门决定只在此顺序追加一次，读取同一归档envelope；以后新增决定写入调用点前必须先加入幂等键。
 # 函数用途: 把一次已归档的工具调用记进 legacy 门账本（有门时）与权威事件流（总是）。
 def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]) -> None:
-    store = getattr(agent, "local_store", None)
-    record = runtime_gate_ledger_record_from_archive(archive_record)
-    if record is not None and hasattr(store, "record_runtime_gate_ledger"):
-        _best_effort_control_plane_write(lambda: store.record_runtime_gate_ledger(record))
-    # A.3：工具完成事件写入权威 runtime_events（agent_events 可从中重建），
-    # 与 legacy 台账并行 —— 权威事件流是审计/重建的单一事实源。
-    _append_runtime_event(agent, archive_record)
-    # B5 第 5 段：一次调用命中几个插件门就写几条 plugin_gate.decided（设计第 9 节），挂在同一 attempt/run 上。
-    _append_plugin_gate_decisions(agent, archive_record)
+    # 记账的查找与追加共用一条连接；完成事件是效果后观察，断电丢失不改变操作账本的恢复结论。
+    with sqlite_connection_reuse(), sqlite_commit_durability(SQLiteCommitDurability.POST_EFFECT):
+        store = getattr(agent, "local_store", None)
+        record = runtime_gate_ledger_record_from_archive(archive_record)
+        if record is not None and hasattr(store, "record_runtime_gate_ledger"):
+            _best_effort_control_plane_write(lambda: store.record_runtime_gate_ledger(record))
+        # A.3：工具完成事件写入权威 runtime_events（agent_events 可从中重建），
+        # 与 legacy 台账并行 —— 权威事件流是审计/重建的单一事实源。
+        _append_runtime_event(agent, archive_record)
+        # B5 第 5 段：一次调用命中几个插件门就写几条 plugin_gate.decided（设计第 9 节），挂在同一 attempt/run 上。
+        _append_plugin_gate_decisions(agent, archive_record)
 
 
 # LLM: 只有本次调用真的命中插件门（executor 在 ActionDecision.evidence 里放了决定条目）才写；无门时一条不写，

@@ -34,8 +34,9 @@ def test_storage_diagnostic_measures_actual_calls_and_preserves_facts(tmp_path):
     # 每拍两臂均推进一次 scheduler history 索引；另外 off 有两个 runtime 读口，on 只有一次候选探针。
     assert off["sqlite_connections"] == 3 * owner_ticks
     assert on["sqlite_connections"] == 2 * owner_ticks
-    assert off["sql_statements"] == 6 * owner_ticks
-    assert on["sql_statements"] == 3 * owner_ticks
+    # 每个 runtime 读口只剩业务查询本身：新开连接已由 _runtime_connect 核过代际，借用不再重复两条代际探针（S1）。
+    assert off["sql_statements"] == 2 * owner_ticks
+    assert on["sql_statements"] == owner_ticks
     # SW-W1已退役scheduler/process慢路；两臂预热后都必须复用可信投影，不清缓存凑旧次数。
     assert off["scheduler_reads"] == on["scheduler_reads"] == 0
     assert off["scheduler_read_bytes"] == on["scheduler_read_bytes"] == 0

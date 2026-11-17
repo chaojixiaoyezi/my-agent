@@ -39,6 +39,7 @@ from typing import Any
 
 from ..common.strict_json import load_strict_json
 from ..io.sqlite_connection import sqlite_error_details
+from ..io.sqlite_scope import SQLiteCommitDurability, sqlite_commit_durability
 from ..local_storage.tool_operations import (
     TOOL_OPERATION_CANCELLED,
     TOOL_OPERATION_FAILED,
@@ -231,7 +232,9 @@ class ManagedOperationStore:
             raise AuthorityContextMissing(
                 f"MANAGED 工具调用缺少调用者 attempt: {request.run_id}"
             )
-        with self._repo._runtime_connection() as conn:
+        # 效果前事实：EXECUTING 必须随提交同步落盘，断电后 UNKNOWN 恢复才看得到“可能已执行”。
+        with (sqlite_commit_durability(SQLiteCommitDurability.PRE_EFFECT),
+              self._repo._runtime_connection() as conn):
             conn.execute("BEGIN IMMEDIATE")
             now = float(request.now or time.time())
             # attempt 锚定（seq 248 #1/#4）：调用者 attempt 经 agent_attempts
@@ -1513,7 +1516,8 @@ def _settle_operation_via_repo(
     # 进 payload，settle 同事务与当前 agent_runs.workspace_epoch 比较。
     expected_holder = str(details.pop("_holder_id", "") or "")
     expected_generation = details.pop("_expected_generation", None)
-    with repo._runtime_connection() as conn:
+    # 效果后结算：断电丢失时行停在 EXECUTING，恢复按 UNKNOWN 收口，不需要逐次同步。
+    with sqlite_commit_durability(SQLiteCommitDurability.POST_EFFECT), repo._runtime_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """
@@ -1654,7 +1658,8 @@ def _mark_unknown_single_transaction(
     由 reconcile 重开处理）。
     """
     now = time.time()
-    with repo._runtime_connection() as conn:
+    # 效果后收口：丢失时行仍为 EXECUTING，恢复同样落到 UNKNOWN，不弱化“可能已执行”的事实。
+    with sqlite_commit_durability(SQLiteCommitDurability.POST_EFFECT), repo._runtime_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """
