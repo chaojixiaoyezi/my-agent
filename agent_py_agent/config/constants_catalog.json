@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1512,
+  "count": 1514,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -10721,7 +10721,7 @@
       "value": 50000,
       "unit": "个",
       "category": "其它",
-      "description": "写缓存最多缓存 5 万条索引键（个数）：批量写入前先攒内存，满了强制刷盘防失控。"
+      "description": "实体指纹和文件代次各自有界；缓存逐出只会多写一条投影，不影响原件。"
     },
     {
       "name": "_MAX_BINDING_BYTES",

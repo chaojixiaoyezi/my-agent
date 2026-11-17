@@ -63,7 +63,8 @@ def test_outer_exhausted_zero_is_not_reopened(tmp_path, monkeypatch):
 
 def test_canonical_owner_required_without_guessing(tmp_path, monkeypatch):
     home, config, retention = setup_wiring(tmp_path, monkeypatch)
-    home = replace(home, owner_id='')
+    # 默认local/main规范路径已有明确身份；负例须为既无身份也非规范默认根的来源。
+    home = replace(home, owner_id='', owner_home_dir=home.root / 'unresolved-owner')
     monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', lambda kind, **kwargs: pytest.fail('invalid scope must not resolve lane'))
     state = maintenance.run_owner_storage_maintenance_slice(home, {}, retention, now=1,
         coordinator=True, config=config, commit_transition=lambda op: op())
