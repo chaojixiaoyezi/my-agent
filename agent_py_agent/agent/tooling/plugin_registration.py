@@ -11,6 +11,7 @@ from dataclasses import replace
 from ..common import cache_capacity
 from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.log_redaction import redact_sensitive_text
+from ..plugin_activation_record import PluginActivation
 from ..plugin_activation_ref import remember_available_installations
 from ..plugin_install_store import PluginInstallStore
 from ..plugin_runtime import PluginMCPClient, PluginProxyTool
@@ -90,7 +91,11 @@ def _remember_missing_environment(key: tuple, *, error: BaseException | None = N
             cache.popitem(last=False)
 
 
-# LLM: 仅承认原 Store 对准确旧代提交的 release；该 CAS 已核验完整清理再删环境，缺目录、换代或普通 revoke 都不是退出证明。
+# LLM: 仅承认原 Store 对准确旧代提交的 release；该 CAS 已核验完整清理再删环境，缺目录或普通 revoke 都不是退出证明。
+#   换代只在一种情形算证明：同一插件的安装记录已持有另一个程序激活。准备新一代要求原激活位为空
+#   （plugin_activation._validate_transition），而清空只能经核验清理后的 release，卸载也要求先释放；所以新一代存在时
+#   旧代必已释放。release 提交随后被升级、退回、重新启用覆盖时，原精确回执不在 last_commit 上，客户端没有别的证据可等。
+#   调用方只在原会话记录已被消费（authority_missing）时问这里；记录还在而停止未确认时照旧保留责任。
 # 函数用途: 核对旧客户端的清理责任是否已交给原管理释放操作，不制造新的进程停止回执。
 def _client_activation_released(owner, client, rows) -> bool:
     previous = client.installation
@@ -100,11 +105,14 @@ def _client_activation_released(owner, client, rows) -> bool:
     revoked_digest = replace(previous.activation, phase="revoked").content_sha256
     return any(
         row.manifest.plugin_id == previous.manifest.plugin_id
-        and row.package_sha256 == previous.package_sha256
-        and row.activation is None
-        and row.last_commit.action == "release"
-        and row.last_commit.before_revision >= previous.revision
-        and row.last_commit.activation_sha256 == revoked_digest
+        and ((row.package_sha256 == previous.package_sha256
+              and row.activation is None
+              and row.last_commit.action == "release"
+              and row.last_commit.before_revision >= previous.revision
+              and row.last_commit.activation_sha256 == revoked_digest)
+             or (isinstance(previous.activation, PluginActivation)
+                 and isinstance(row.activation, PluginActivation)
+                 and row.activation_id != previous.activation_id))
         for row in rows
     )
 
