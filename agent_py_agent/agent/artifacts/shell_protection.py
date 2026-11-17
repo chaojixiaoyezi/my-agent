@@ -53,7 +53,7 @@ _ACTIVE_OPERATION_LOCK = threading.RLock()
 # 已备份、尚未进入 executing 的操作清单只暂存在本进程（prepared 与 executing 合并为一次耐久写）；键为 operation key。
 _PENDING_MANIFESTS: dict[str, dict[str, Any]] = {}
 # 本进程暂存清单的条数上限；超出时丢弃最旧的，对应 mark 找不到清单即失败关闭（命令不启动），只多一次重试成本。
-_PENDING_MANIFEST_MAX = 256
+_PENDING_MANIFEST_MAX_ENTRIES = 256
 # 复用区目录名：位于 owner 备份根 v1/ 下，停放上一次命令确认未变化的前像；点前缀不可能等于 64 位十六进制操作键，
 # 操作清理与修剪不会进入。
 _REUSE_DIRNAME = ".reuse"
@@ -878,7 +878,7 @@ def _write_shell_operation_state(
     with _ACTIVE_OPERATION_LOCK:
         _PENDING_MANIFESTS.pop(operation_key, None)
         _PENDING_MANIFESTS[operation_key] = payload
-        while len(_PENDING_MANIFESTS) > _PENDING_MANIFEST_MAX:
+        while len(_PENDING_MANIFESTS) > _PENDING_MANIFEST_MAX_ENTRIES:
             _PENDING_MANIFESTS.pop(next(iter(_PENDING_MANIFESTS)))
 
 

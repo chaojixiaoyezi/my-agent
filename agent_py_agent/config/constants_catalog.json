@@ -1204,10 +1204,10 @@
       "description": "同线程历史附件定位最多核验的已完成请求数；不足时明确partial，不扩扫全历史。"
     },
     {
-      "name": "_PENDING_MANIFEST_MAX",
+      "name": "_PENDING_MANIFEST_MAX_ENTRIES",
       "file": "agent_py_agent/agent/artifacts/shell_protection.py",
       "value": 256,
-      "unit": "",
+      "unit": "条",
       "category": "上限预算",
       "description": "本进程暂存清单的条数上限；超出时丢弃最旧的，对应 mark 找不到清单即失败关闭（命令不启动），只多一次重试成本。"
     },
@@ -9012,10 +9012,10 @@
       "description": "部署策略源文件允许安全读取的最大字节数。"
     },
     {
-      "name": "_POLICY_CACHE_MAX_ROOTS",
+      "name": "_POLICY_CACHE_MAX_ROOTS_COUNT",
       "file": "agent_py_agent/agent/settings/deployment_policy.py",
       "value": 16,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "进程内按宿主根缓存已解析部署策略的根数上限；超出时逐出最久未用的根，未命中只是重新读取解析。"
     },

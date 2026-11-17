@@ -23,7 +23,7 @@ _SCHEMA = "deployment-policy.v1"
 # 部署策略源文件允许安全读取的最大字节数。
 _MAX_DEPLOYMENT_POLICY_SOURCE_BYTES = 1024 * 1024
 # 进程内按宿主根缓存已解析部署策略的根数上限；超出时逐出最久未用的根，未命中只是重新读取解析。
-_POLICY_CACHE_MAX_ROOTS = 16
+_POLICY_CACHE_MAX_ROOTS_COUNT = 16
 # 宿主根 -> (源文件代次指纹, 冻结的已解析策略)；只放读前后指纹一致的成功解析结果。
 _POLICY_CACHE: OrderedDict[str, tuple[tuple, DeploymentPolicy]] = OrderedDict()
 _POLICY_CACHE_LOCK = threading.Lock()
@@ -342,7 +342,7 @@ def load_deployment_policy(*, trusted_host_paths: MyAgentHomePaths) -> Deploymen
         with _POLICY_CACHE_LOCK:
             _POLICY_CACHE[key] = (signature, policy)
             _POLICY_CACHE.move_to_end(key)
-            while len(_POLICY_CACHE) > _POLICY_CACHE_MAX_ROOTS:
+            while len(_POLICY_CACHE) > _POLICY_CACHE_MAX_ROOTS_COUNT:
                 _POLICY_CACHE.popitem(last=False)
     return policy
 
