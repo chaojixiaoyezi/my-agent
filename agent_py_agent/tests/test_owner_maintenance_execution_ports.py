@@ -45,6 +45,12 @@ def test_count0_original_leaf_can_skip_shared_indexes_without_changing_retention
 
 
 def test_actual_c_maintenance_source_reaches_original_retention_and_owner_state(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    # 此例核4条预算在原C写门下的状态衔接；冻结扫描钟，保留4条/字节额度与128片上限。
+    monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
     with curator_case(tmp_path, monkeypatch, source_kind='maintenance') as (agent, _, _, gate, claim, _):
         stale = agent.home_paths.owner_cache_dir / 'old.tmp'
         assert stale.read_bytes() == b'old-cache'
@@ -311,7 +317,7 @@ def test_original_jsonl_cache_callback_keeps_actual_error(tmp_path, monkeypatch,
 @pytest.mark.parametrize('change', ['policy', 'state'])
 def test_source_change_after_retention_keeps_partial_effects_but_never_overwrites_new_state(tmp_path, monkeypatch, change):
     # 本例验证来源改写接缝；用可前进的确定性扫描时钟，避免宿主IO使25ms片在注入前结束。
-    # 条目/字节预算与外层60秒限制保持，真实解析/写入/源CAS均执行。
+    # 本例用显式有限条目额度到达“删除后”接缝，默认小片收敛由独立用例验证；字节预算和源CAS不变。
     from types import SimpleNamespace
 
     from agent_py_agent.agent.gateway_parts.io import gateway_turn_transition
@@ -327,6 +333,7 @@ def test_source_change_after_retention_keeps_partial_effects_but_never_overwrite
 
     monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=scan_time))
     with curator_case(tmp_path, monkeypatch, source_kind='maintenance') as (agent, _, _, gate, claim, _):
+        agent.config.retention_scan_slice_entries = 1024
         original = owner_maintenance._reclaim_text_vector_cache_orphans
         stale = agent.home_paths.owner_cache_dir / 'old.tmp'
         p3 = reservation_file(gate.paths, claim.request_id)

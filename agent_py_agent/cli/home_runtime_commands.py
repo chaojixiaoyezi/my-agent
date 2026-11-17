@@ -134,15 +134,30 @@ def cmd_home_status(args) -> int:
     return 0
 
 
+def _merge_retention_actions(actions, waiting, page):
+    """仅折叠同一来源动作的未开始占位；已执行失败或未知证明始终保留在汇总中。"""
+    for action in page:
+        # 完整不可变计划身份含路径、源/权威指纹、cutoff及关联文件；不凭action_id跨代次覆盖。
+        identity = replace(action, status="planned", reason="")
+        pending_index = waiting.pop(identity, None)
+        if pending_index is None:
+            actions.append(action)
+            pending_index = len(actions) - 1
+        else:
+            actions[pending_index] = action
+        if action.status == "not_started":
+            waiting[identity] = pending_index
+
+
 # LLM: 显式apply透传可信Agent配置并沿同一owner持久续点逐片完成；来源错误/法律保留不无限重试，回执保留所有已执行动作。
 # 函数用途: 预览保留计划，或用有界扫描完成显式清理并汇总结果。
 def cmd_home_retention(args) -> int:
     agent = make_agent(args)
     if bool(getattr(args, "apply", False)):
-        actions = []
+        actions, waiting = [], {}
         while True:
             result = apply_owner_retention(agent.home_paths, config=getattr(agent, "config", None))
-            actions.extend(result.actions)
+            _merge_retention_actions(actions, waiting, result.actions)
             # scan_partial也包含不可读来源的重试续点；有错时原样交还诊断，不把重试当预算推进。
             if not result.scan_partial or not result.applied or not result.ok:
                 break

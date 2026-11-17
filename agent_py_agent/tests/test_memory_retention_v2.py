@@ -57,10 +57,13 @@ def _plan_complete(service, *, now):
 
     with pytest.MonkeyPatch.context() as clock:
         clock.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+        cursor, actions = None, {}
         for _ in range(100):
-            result = service.plan(now=now)
+            result = service.plan(now=now, scan_budget=budgets.RetentionScanBudget.default(), scan_cursor=cursor)
+            actions.update((action.action_id, action) for action in result.actions)
             if not result.scan_partial:
-                return result
+                return replace(result, actions=tuple(actions.values()))
+            cursor = result.scan_cursor
     pytest.fail("有界只读规划100片后仍未完成")
 
 

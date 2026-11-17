@@ -77,7 +77,8 @@ def test_settle_finishes_three_pages_without_one_large_transaction(
 
     monkeypatch.setattr(repo, "transaction", observed)
     monkeypatch.setattr(commands, "make_agent", lambda _: SimpleNamespace(
-        subagents=SimpleNamespace(runtime_db=repo)))
+        subagents=SimpleNamespace(runtime_db=repo),
+        home_paths=ensure_my_agent_home(tmp_path / "home")))
     args = build_parser().parse_args(["runtime-stale-attempts", "--settle", "--json"])
     assert args.func(args) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -107,12 +108,12 @@ def test_retention_apply_always_budgets_and_saves_its_cursor(tmp_path, monkeypat
     home = ensure_my_agent_home(tmp_path / "home")
     paths = _threads(home, 5)
     monkeypatch.setattr(budgets.RetentionScanBudget, "default",
-        classmethod(lambda cls: cls(2, 1000000, float("inf"))))
+        classmethod(lambda cls, config=None: cls(2, 1000000, float("inf"))))
     options = {} if scan_budget is None else {"scan_budget": scan_budget}
     report = apply_owner_retention(home, **options)
     assert report.scan_partial and report.scan_cursor
-    assert len(report.actions) == 2 and all(not path.exists() for path in paths[:2])
-    assert all(path.exists() for path in paths[2:])
+    # 共享两条预算先用于引用证明；首片不得跳过未完成的来源核验直接删除线程。
+    assert report.actions == () and all(path.exists() for path in paths)
     cursor = home.owner_data_dir / "retention_scan_cursor.json"
     assert json.loads(cursor.read_text()) == report.scan_cursor
 
@@ -121,7 +122,7 @@ def test_home_retention_cli_finishes_budgeted_pages_and_reports_all_actions(tmp_
     home = ensure_my_agent_home(tmp_path / "home")
     paths = _threads(home, 7)
     monkeypatch.setattr(budgets.RetentionScanBudget, "default",
-        classmethod(lambda cls: cls(2, 1000000, float("inf"))))
+        classmethod(lambda cls, config=None: cls(2, 1000000, float("inf"))))
     reports = []
 
     def applied(*args, **kwargs):
@@ -163,3 +164,37 @@ def test_home_retention_cli_keeps_retry_errors_partial_without_spinning(tmp_path
     report = json.loads(capsys.readouterr().out)["retention"]
     assert report["errors"] and report["scan_partial"] and report["scan_cursor"]
     assert not report["ok"] and broken.read_text() == "not a directory"
+
+
+@pytest.mark.parametrize("earlier", ["failed", "unknown", "side_effect_unknown"])
+def test_cli_retention_summary_preserves_executed_or_unknown_proofs(tmp_path, earlier):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionAction
+
+    action = MemoryRetentionAction("same-id", "cache", "delete_file", tmp_path / "cache", "expired",
+        source_fingerprint="source-one", authority_fingerprint="authority-one")
+    actions, waiting = [], {}
+    commands._merge_retention_actions(actions, waiting, (replace(action, status=earlier),))
+    commands._merge_retention_actions(actions, waiting, (replace(action, status="deleted"),))
+    assert [row.status for row in actions] == [earlier, "deleted"]
+
+
+def test_cli_retention_summary_replaces_only_same_unstarted_action(tmp_path):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionAction
+
+    action = MemoryRetentionAction("same-id", "cache", "delete_file", tmp_path / "cache", "expired",
+        source_fingerprint="source-one", authority_fingerprint="authority-one")
+    actions, waiting = [], {}
+    commands._merge_retention_actions(actions, waiting, (replace(action, status="not_started"),))
+    commands._merge_retention_actions(actions, waiting, (replace(action, status="not_started", reason="still pending"),))
+    commands._merge_retention_actions(actions, waiting, (replace(action, status="deleted"),))
+    assert len(actions) == 1 and actions[0].status == "deleted" and not waiting
+    # 同ID而源代次不同的占位不能被后一条动作吞掉。
+    other = replace(action, source_fingerprint="source-two", status="not_started")
+    commands._merge_retention_actions(actions, waiting, (other,))
+    commands._merge_retention_actions(actions, waiting, (replace(action, status="deleted"),))
+    assert [row.source_fingerprint for row in actions] == ["source-one", "source-two", "source-one"]
+    assert actions[1].status == "not_started"
