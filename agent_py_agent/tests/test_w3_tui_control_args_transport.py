@@ -89,3 +89,22 @@ def test_fork_at_past_the_last_user_message_creates_nothing(tmp_path) -> None:
                                        thread_id=thread.thread_id, owner_home=home)
     assert not result.ok and result.error_code == "FORK_MESSAGE_NOT_FOUND"
     assert set(store.storage.threads_dir.glob("*.json")) == before
+
+
+def test_fork_at_counts_turns_not_mid_turn_guidance(tmp_path) -> None:
+    # Live clone (2026-11-17): a message sent while turn 2 was still running is stored as active_turn_user_input
+    # and answered by that turn's reply; counting it as the next user message cut the branch before the reply.
+    store, thread, home = _turns(tmp_path, 0)
+    for role, content, metadata in (("user", "user-1", {}), ("user", "guidance-1", {"kind": "active_turn_user_input"}),
+                                    ("assistant", "assistant-1", {}), ("user", "user-2", {}),
+                                    ("assistant", "assistant-2", {})):
+        store.messages.append({"thread_id": thread.thread_id, "role": role, "content": content,
+                               "metadata": metadata, "now": 1300.0})
+    result = execute_workspace_control(store, parse_conversation_control("/fork --at 1"),
+                                       thread_id=thread.thread_id, owner_home=home)
+    assert result.ok, result
+    rows, errors = store.messages.recent_report(result.details["new_thread_id"], limit=0)
+    assert not errors and [row.content for row in rows] == ["user-1", "guidance-1", "assistant-1"]
+    past_end = execute_workspace_control(store, parse_conversation_control("/fork --at 3"),
+                                         thread_id=thread.thread_id, owner_home=home)
+    assert not past_end.ok and past_end.error_code == "FORK_MESSAGE_NOT_FOUND"

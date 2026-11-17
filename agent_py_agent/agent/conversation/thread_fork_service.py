@@ -416,15 +416,18 @@ def fork_untrusted_context(store, thread_id, snapshot, push_id):
             dedupe_key=f"remote-push-context:{push_id}:{index}")
 
 
-# LLM: 序号只数本会话的 user 行；截止到下一条 user 行之前，回合闭合仍由 _safe_prefix 裁定。
-# 函数用途: 把 /fork --at N 换算成第 N 条用户消息所在回合最后一行的消息ID；越界不产生分叉。
+# LLM: 序号只数开启回合的 user 行；截止到下一条开启回合的 user 行之前，回合闭合仍由 _safe_prefix 裁定。
+#   回合进行中补发的消息（active_turn_user_input）由同一回合的回复作答，不另起回合；live 实测把它当成
+#   新的一条，分叉就停在该回合回复之前，分支末尾留下一条没有回复的用户消息。
+# 函数用途: 把 /fork --at N 换算成第 N 轮用户消息所在回合最后一行的消息ID；越界不产生分叉。
 def fork_cutoff_for_user_message(store: ConversationStore, thread_id: str, position: int) -> str:
     rows, errors = store.messages.recent_report(thread_id, limit=0)
     if errors:
         raise ConversationForkError("FORK_TRANSCRIPT_INVALID")
-    starts = [index for index, row in enumerate(rows) if row.role == "user"]
+    starts = [index for index, row in enumerate(rows) if row.role == "user"
+              and (row.metadata or {}).get("kind") != "active_turn_user_input"]
     if position < 1 or position > len(starts):
-        raise ConversationForkError("FORK_MESSAGE_NOT_FOUND", f"本会话共 {len(starts)} 条用户消息")
+        raise ConversationForkError("FORK_MESSAGE_NOT_FOUND", f"本会话共 {len(starts)} 轮用户消息")
     end = starts[position] if position < len(starts) else len(rows)
     return rows[end - 1].message_id
 
