@@ -2,12 +2,26 @@
 from __future__ import annotations
 
 import codecs
+import hashlib
+import secrets
+import threading
+import weakref
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 from ..common.log_redaction import redact_sensitive_output_text
 from ..settings.secret_ref import HostCredentialSnapshot
+
+# 宿主脱敏会处理的结果字段；封记摘要只覆盖这些字段，任何一个变化都会重新脱敏。
+_REDACTED_OUTCOME_FIELDS = (
+    'output', 'result_envelope', 'recommended_action', 'recovery_hint', 'host_error',
+    'source_effect', 'next_action', 'component_receipts')
+# 已脱敏结果上的封记属性名：保存 (快照令牌, force_default, 字段内容摘要)，不含任何凭据或其摘要。
+_REDACTION_SEAL_ATTR = '_host_redaction_seal'
+# 凭据快照 -> 本进程随机令牌；快照对象释放即失效，序列化后的封记在别处永远匹配不上。
+_SNAPSHOT_TOKENS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_SNAPSHOT_TOKENS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -179,10 +193,55 @@ def credential_projection_receipt(snapshot: HostCredentialSnapshot, *, withheld:
     return result
 
 
+# LLM: 同一凭据快照、同一 force_default 下，内容与上次脱敏输出逐字段一致（摘要相同）的结果直接返回，不再重复整轮
+#   正则；结果被替换字段或原位改写任何受脱敏字段后摘要失配，照旧完整脱敏。保留所有调用点，任何一层都不靠外部证明。
+# 函数用途: 对一次工具结果做宿主凭据脱敏，并为输出打上内容封记。
 def redact_host_tool_outcome(outcome, *, snapshot: HostCredentialSnapshot | None = None,
         force_default: bool = False):
     if snapshot is None:
         return outcome
+    token = _snapshot_token(snapshot)
+    seal = getattr(outcome, _REDACTION_SEAL_ATTR, None)
+    if (token and isinstance(seal, tuple) and seal[:2] == (token, bool(force_default))
+            and seal[2:] == (_outcome_digest(outcome),)):
+        return outcome
+    result = _redact_host_tool_outcome(outcome, snapshot=snapshot, force_default=force_default)
+    digest = _outcome_digest(result)
+    if token and digest:
+        try:
+            object.__setattr__(result, _REDACTION_SEAL_ATTR, (token, bool(force_default), digest))
+        except (AttributeError, TypeError):
+            pass
+    return result
+
+
+# LLM: 令牌只是本进程随机串，与凭据值无关；不可弱引用的快照返回空串（永不封记，照旧每次脱敏）。
+# 函数用途: 取得某个凭据快照在本进程内的封记令牌。
+def _snapshot_token(snapshot: HostCredentialSnapshot) -> str:
+    try:
+        with _SNAPSHOT_TOKENS_LOCK:
+            token = _SNAPSHOT_TOKENS.get(snapshot)
+            if token is None:
+                token = secrets.token_hex(16)
+                _SNAPSHOT_TOKENS[snapshot] = token
+            return token
+    except TypeError:
+        return ''
+
+
+# LLM: 摘要基于受脱敏字段的 repr；repr 失败（自定义对象异常、过深嵌套）返回空串，调用方不封记也不跳过。
+# 函数用途: 计算结果受脱敏字段的内容摘要。
+def _outcome_digest(outcome) -> str:
+    try:
+        values = tuple(getattr(outcome, name) for name in _REDACTED_OUTCOME_FIELDS)
+        return hashlib.sha256(repr(values).encode('utf-8', 'surrogatepass')).hexdigest()
+    except Exception:  # noqa: BLE001 - 摘要失败只放弃跳过，不能改变脱敏结果
+        return ''
+
+
+# LLM: 原逐字段脱敏实现；字符串走宿主凭据替换与通用模式，容器递归，其他值原样保留。
+# 函数用途: 生成一份脱敏后的工具结果副本。
+def _redact_host_tool_outcome(outcome, *, snapshot: HostCredentialSnapshot, force_default: bool):
     def clean(value):
         if isinstance(value, str):
             return redact_host_text(value, secret_values=snapshot.secret_values,

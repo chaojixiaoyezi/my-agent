@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1518,
+  "count": 1519,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -9010,6 +9010,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "部署策略源文件允许安全读取的最大字节数。"
+    },
+    {
+      "name": "_POLICY_CACHE_MAX_ROOTS",
+      "file": "agent_py_agent/agent/settings/deployment_policy.py",
+      "value": 16,
+      "unit": "",
+      "category": "上限预算",
+      "description": "进程内按宿主根缓存已解析部署策略的根数上限；超出时逐出最久未用的根，未命中只是重新读取解析。"
     },
     {
       "name": "BROWSER_LOGIN_SECONDS",

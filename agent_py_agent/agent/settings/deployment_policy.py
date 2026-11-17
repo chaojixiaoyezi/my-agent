@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import stat
+import threading
+from collections import OrderedDict
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from functools import cache
 from pathlib import Path
@@ -11,12 +15,18 @@ from types import UnionType
 from typing import get_args, get_origin, get_type_hints
 
 from ..common import nofollow_fs
+from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.nofollow_fs import read_bytes_beneath
 from ..user_space.home_layout import MyAgentHomePaths
 
 _SCHEMA = "deployment-policy.v1"
 # 部署策略源文件允许安全读取的最大字节数。
 _MAX_DEPLOYMENT_POLICY_SOURCE_BYTES = 1024 * 1024
+# 进程内按宿主根缓存已解析部署策略的根数上限；超出时逐出最久未用的根，未命中只是重新读取解析。
+_POLICY_CACHE_MAX_ROOTS = 16
+# 宿主根 -> (源文件代次指纹, 冻结的已解析策略)；只放读前后指纹一致的成功解析结果。
+_POLICY_CACHE: OrderedDict[str, tuple[tuple, DeploymentPolicy]] = OrderedDict()
+_POLICY_CACHE_LOCK = threading.Lock()
 
 
 # LLM: 错误只使用固定文案及固定原因码，不能带入原策略内容、凭据或任意路径。
@@ -314,9 +324,59 @@ def _read_deployment_policy_source(trusted_host_paths: MyAgentHomePaths, *, snap
 
 
 # LLM: no-follow 有界读；唯有不存在可用 typed 默认，损坏/权限/未知版本及解码递归异常都明确失败，不写文件。
+#   同一宿主根下源文件代次指纹（含 config 目录身份）未变且已离开粗粒度时间窗时复用同一份冻结解析结果；读前后指纹
+#   一致才入缓存，失败从不缓存。返回的是共享冻结对象，调用方要改私有元数据必须先复制（runtime_guard_policy 已复制）。
 # 函数用途: 加载指定受信宿主的唯一部署策略。
 def load_deployment_policy(*, trusted_host_paths: MyAgentHomePaths) -> DeploymentPolicy:
     deployment_policy_path(trusted_host_paths)
+    key = str(trusted_host_paths.root)
+    signature = _policy_source_signature(trusted_host_paths)
+    if signature is not None:
+        with _POLICY_CACHE_LOCK:
+            cached = _POLICY_CACHE.get(key)
+            if cached is not None and cached[0] == signature:
+                _POLICY_CACHE.move_to_end(key)
+                return cached[1]
+    policy = _load_deployment_policy_uncached(trusted_host_paths)
+    if signature is not None and _policy_source_signature(trusted_host_paths) == signature:
+        with _POLICY_CACHE_LOCK:
+            _POLICY_CACHE[key] = (signature, policy)
+            _POLICY_CACHE.move_to_end(key)
+            while len(_POLICY_CACHE) > _POLICY_CACHE_MAX_ROOTS:
+                _POLICY_CACHE.popitem(last=False)
+    return policy
+
+
+# LLM: 只认宿主根下真实 config 目录与单链接普通文件；文件或目录不存在记为固定“缺失”代次（出现即失配）；
+#   链接、非普通文件、多链接叶、lstat 错误或 mtime/ctime 仍在粗粒度时间窗内都返回 None：本次不查也不写缓存，
+#   照旧完整读取并由原 loader 裁决（包括拒绝链接）。
+# 函数用途: 计算部署策略源文件的缓存代次指纹。
+def _policy_source_signature(trusted_host_paths: MyAgentHomePaths) -> tuple | None:
+    config_dir = trusted_host_paths.root / "config"
+    try:
+        directory = os.lstat(config_dir)
+    except FileNotFoundError:
+        return ("absent",)
+    except OSError:
+        return None
+    if stat.S_ISLNK(directory.st_mode) or not stat.S_ISDIR(directory.st_mode):
+        return None
+    try:
+        leaf = os.lstat(config_dir / "deployment_policy.json")
+    except FileNotFoundError:
+        return ("absent", directory.st_dev, directory.st_ino)
+    except OSError:
+        return None
+    if not stat.S_ISREG(leaf.st_mode) or leaf.st_nlink != 1:
+        return None
+    if not cache_entry_trustworthy(max(leaf.st_mtime_ns, leaf.st_ctime_ns)):
+        return None
+    return (directory.st_dev, directory.st_ino, *cache_stat_signature(leaf))
+
+
+# LLM: 原 loader 主体：no-follow 有界读；不存在用 typed 默认，其余错误统一为固定原因码。
+# 函数用途: 不经缓存读取并解析部署策略。
+def _load_deployment_policy_uncached(trusted_host_paths: MyAgentHomePaths) -> DeploymentPolicy:
     try:
         raw = _read_deployment_policy_source(trusted_host_paths)
         if raw is None:

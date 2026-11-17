@@ -2,6 +2,7 @@
 # 模块用途: 为现有运行调用方提供同一部署策略的只读访问与准确来源，不创建第二份配置权威。
 from __future__ import annotations
 
+import copy
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from .deployment_policy import (
 
 
 # LLM: 显式宿主根来自启动解析；路径参数仅核对唯一来源，根与路径对象冲突直接拒绝，不接受任务临时覆盖。
+#   部署策略可能来自按文件指纹复用的共享冻结对象；这里浅复制守卫快照后再写来源元数据，每次调用仍得到独立对象。
 # 函数用途: 从受信宿主策略生成隔离的运行守卫快照，损坏配置直接报错。
 def runtime_guard_policy(path: Path | str | None = None, *,
                          trusted_host_paths: MyAgentHomePaths | None = None,
@@ -26,7 +28,7 @@ def runtime_guard_policy(path: Path | str | None = None, *,
     if path is not None and Path(path).expanduser().resolve() != canonical.resolve():
         raise DeploymentPolicyError("deployment_policy_source_invalid")
     deployment = load_deployment_policy(trusted_host_paths=paths)
-    policy = deployment.runtime_guards
+    policy = copy.copy(deployment.runtime_guards)
     configured = set(deployment.to_dict().get("runtime_guards", {}))
     object.__setattr__(policy, "_source_path", str(canonical))
     object.__setattr__(policy, "_loaded_at", time.time())
