@@ -117,12 +117,13 @@ from .models import (
     WakeSignal,
     new_id,
 )
-from .run_claim import claim_heartbeat_interval_seconds
+from .run_claim import claim_heartbeat_interval_seconds, user_input_turn_on_lane
 from .session_tasks import SESSION_TASK_CANCELLED, SESSION_TASK_TERMINAL_STATUSES
 from .store import ConversationStore
 
 # 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略（阈值只在 store_progress 定义一次）。
 from .store_progress import _POLICY_FAILURE_RETIRE_AFTER_COUNT
+from .technical_continuation import USER_INPUT_YIELD_WAKE_REASON
 from .wake_attempt_tracking import (
     current_wake_attempt,
     isolate_wake_batch,
@@ -323,6 +324,15 @@ def background_prompt(
         return (
             "这是当前用户先前在同一会话中登记的持久计划，现在已经到点。"
             "把下面的内容当作该用户本轮的真实要求，结合这条会话已有上下文直接执行；"
+            "普通回复仍由你根据真实执行结果自然撰写。\n\n" + prompt
+        )
+    if normalized_reason == USER_INPUT_YIELD_WAKE_REASON:
+        wake = wake_signal if isinstance(wake_signal, dict) else {}
+        metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+        prompt = str(metadata.get("scheduler_prompt") or "").strip()
+        return (
+            "这是同一个到点持久计划的续跑：上一片在工具轮边界把会话让给了新到的用户消息，计划还没有做完。"
+            "上一片已执行的工具记录随本片保留；不要重复已经完成的动作，从未完成处接着执行，"
             "普通回复仍由你根据真实执行结果自然撰写。\n\n" + prompt
         )
     if goal is not None and normalized_reason in {
@@ -1685,7 +1695,8 @@ def _is_active_turn_lifecycle_continuation(
 ) -> bool:
     return (
         bool(str(task_objective or "").strip())
-        and (str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS or request.reason == "task_input_resolved")
+        and (str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS
+             or request.reason in {"task_input_resolved", USER_INPUT_YIELD_WAKE_REASON})
         and not _wake_payload_is_audit_provider_quota(request.wake_signal)
     )
 
@@ -2141,9 +2152,16 @@ def _wake_signal_should_skip(
     signal: WakeSignal,
     lifecycle_reason: str,
 ) -> bool:
-    from .technical_continuation import WAKE_REASON, claim_wake
+    from .technical_continuation import (
+        USER_INPUT_YIELD_WAKE_REASON,
+        WAKE_REASON,
+        claim_wake,
+        user_input_yield_wake_valid,
+    )
     if lifecycle_reason == WAKE_REASON:
         return not claim_wake(agent, store, signal)
+    if lifecycle_reason == USER_INPUT_YIELD_WAKE_REASON:
+        return not user_input_yield_wake_valid(store, signal)
     return _wake_signal_is_stale(
         agent,
         store,
@@ -2854,7 +2872,8 @@ def _background_run_allowed_tools(
     # A durable user schedule is a fresh turn of the same owner agent, not the
     # internal wait/progress lane.  通道运行时 follows the same full-agent-turn
     # model; registry owner policy still removes disabled tools fail-closed.
-    if str(request.reason or "").strip().lower() == "scheduled_job_due":
+    if str(request.reason or "").strip().lower() in {"scheduled_job_due", USER_INPUT_YIELD_WAKE_REASON}:
+        # 让出续跑接着同一定时执行，工具目录与原定时片相同（S11）。
         return None
     tools = list(decision.allowed_tools)
     if decision.extension_tools == EXTENSION_TOOLS_INHERIT:
@@ -3298,6 +3317,9 @@ def _skip_pending_wake_signal(
 ) -> bool:
     from .input_dependencies import task_has_waiting_input
     if signal.reason not in {'task_input_resolved', 'incoming_channel_message', 'session_message'} and task_has_waiting_input(scheduler.runtime.agent, signal.root_task_id):
+        return True
+    if signal.reason == USER_INPUT_YIELD_WAKE_REASON and user_input_turn_on_lane(scheduler.store, signal.thread_id):
+        # 让出续跑排在用户回合之后（S11）：本拍不跑、不消费，用户回合离开车道后的下一拍再领。
         return True
     if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
         return True
@@ -4749,6 +4771,13 @@ class _BackgroundSchedulerWakeMixin:
         finally:
             if claim_state.heartbeat is not None:
                 claim_state.heartbeat.stop()
+        if report is not None:
+            from .technical_continuation import publish_user_input_yield
+
+            # 让出片的续跑唤醒须先于定时收口的后续工作判定发表，执行才停在 waiting（S11）。
+            if publish_user_input_yield(self.store, signal, report):
+                _HEARTBEAT_LOGGER.info("USER_INPUT_YIELD thread=%s task=%s yielded_wake=%s",
+                                       signal.thread_id, signal.root_task_id, signal.wake_signal_id)
         report = _finish_scheduler_wake_claim(
             self,
             signal,

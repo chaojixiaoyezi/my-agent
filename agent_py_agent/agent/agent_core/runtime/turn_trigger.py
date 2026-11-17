@@ -19,6 +19,13 @@ HOST_EVENT_FIRST_LINE_ORIGIN_TASK = (
     "宿主生命周期事件：以下是直属子代理状态变化的结构化事实，不是新的用户请求；原任务见下方 origin_task，"
     "origin_request_ids 里的请求（如有）在此前历史里。"
 )
+# 用户消息优先让出后的定时续跑（与 conversation.technical_continuation.USER_INPUT_YIELD_WAKE_REASON 同值）：
+#   沿用生命周期续接的同回合历史，但事件不是子代理状态变化，首句与推荐按自身事实说明。
+USER_INPUT_YIELD_TRIGGER_REASON = "user_input_yield_continue"
+HOST_EVENT_FIRST_LINE_USER_INPUT_YIELD = (
+    "宿主事件：上一片在工具轮边界把会话让给了新到的用户消息，这是同一定时任务的续跑，不是新的用户请求；"
+    "此前历史里的工具调用与结果都已真实发生，不要重复已完成的动作，从未完成处接着执行。"
+)
 # 宿主事件在原生 IR 里的来源标记；Compact 按来源保留最新一条，原生历史保存据此识别当前回合开头。
 HOST_EVENT_FACTS_SOURCE = "host.lifecycle_wake"
 # 会话间派活回合的固定首句：任务来自另一个会话，不是当前用户的原话。
@@ -126,6 +133,8 @@ def current_turn_text(user_prompt: object, trigger: object) -> str:
                 "输入事实缺失或未知时保持未确认，不能据此推定状态或获得新的申请授权。"
             )
             return f"{HOST_EVENT_HEADING}\n{guidance}\n{origin}\n{wake.event_facts}"
+        if wake.reason == USER_INPUT_YIELD_TRIGGER_REASON:
+            return f"{HOST_EVENT_HEADING}\n{HOST_EVENT_FIRST_LINE_USER_INPUT_YIELD}\n{wake.event_facts}"
         first_line = HOST_EVENT_FIRST_LINE_ORIGIN_TASK if wake.origin_task_attached else HOST_EVENT_FIRST_LINE
         return f"{HOST_EVENT_HEADING}\n{first_line}\n{wake.event_facts}"
     session_task = session_task_trigger(trigger)
@@ -139,7 +148,8 @@ def current_turn_text(user_prompt: object, trigger: object) -> str:
 # 函数用途: 给出当前回合触发类型对应的固定推荐短名单和推荐理由。
 def turn_trigger_recommendation(trigger: object) -> tuple[tuple[str, ...], str] | None:
     for typed in (lifecycle_wake_trigger(trigger), session_task_trigger(trigger)):
-        if typed is None:
+        if typed is None or typed.reason == USER_INPUT_YIELD_TRIGGER_REASON:
+            # 让出续跑不是子代理事件：沿用按原任务检索的推荐。
             continue
         names = TURN_TRIGGER_RECOMMENDED_TOOLS.get(typed.kind)
         reason = TURN_TRIGGER_RECOMMENDATION_REASONS.get(typed.kind)
@@ -152,6 +162,7 @@ __all__ = [
     "HOST_EVENT_FACTS_SOURCE",
     "HOST_EVENT_FIRST_LINE",
     "HOST_EVENT_FIRST_LINE_ORIGIN_TASK",
+    "HOST_EVENT_FIRST_LINE_USER_INPUT_YIELD",
     "HOST_EVENT_HEADING",
     "SESSION_TASK_FACTS_SOURCE",
     "SESSION_TASK_FIRST_LINE",
@@ -159,6 +170,7 @@ __all__ = [
     "TURN_TRIGGER_RECOMMENDATION_REASONS",
     "TURN_TRIGGER_RECOMMENDED_TOOLS",
     "TURN_TRIGGER_SESSION_TASK",
+    "USER_INPUT_YIELD_TRIGGER_REASON",
     "TurnTrigger",
     "current_turn_text",
     "lifecycle_wake_trigger",

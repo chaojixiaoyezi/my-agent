@@ -7,6 +7,15 @@ from ..gateway_parts.io import update_json_file_atomic
 from ..turn_end import result_turn_end_reason
 
 WAKE_REASON = "technical_cutoff_continue"
+# 用户消息优先（S11）：定时执行的后台工作片在已完成的工具轮边界看到同会话有用户回合排队时，不再调用模型，
+#   以宿主原因结束本片，同一定时执行由下面的续跑唤醒接着做；这条路不发技术截断回执，也不占技术续跑次数。
+USER_INPUT_YIELD_REASON = "USER_INPUT_YIELD"
+USER_INPUT_YIELD_SOURCE = "lane_yield"
+USER_INPUT_YIELD_WAKE_REASON = "user_input_yield_continue"
+# 续跑唤醒只复制原定时执行的结构化身份与计划正文；冻结投递缓存、批次等字段属于原唤醒，不复制。
+_YIELD_CARRIED_METADATA = (
+    "scheduler_run_id", "scheduler_job_id", "scheduler_trigger", "scheduler_skill_refs", "scheduler_prompt",
+)
 # 同一未完成任务遇到有进展的技术截断后允许连续唤醒的最大次数。
 _MAX_CONTINUATION_COUNT = 3
 _SOURCES = {
@@ -243,3 +252,61 @@ def suppress_intermediate(store, *, task_id, run_id, attempt_id) -> bool:
     receipt = receipt_for(store.tasks.load(task_id))
     return bool(receipt and receipt.status == "pending" and receipt.run_id == run_id
                 and receipt.attempt_id == attempt_id and receipt.reason in _SOURCES)
+
+
+# LLM: 只对定时执行的主代理工作片生效（任务号就是定时执行号）；前台、子代理、技术续跑链和 Goal 片照旧跑完：
+#   技术续跑链的回执会被新用户消息作废（_valid 比对 last_user_message_id），让出后没有可续的权威。
+#   技术续跑开关是总开关；车道登记是进程内 O(1) 读取，不碰租约文件。
+# 函数用途: 判断当前后台工作片是否应在本工具轮边界把会话车道让给排队的用户消息。
+def yields_to_user_input(agent, params) -> bool:
+    if (not _enabled(agent) or str(getattr(params, "source", "") or "") != "background_main_agent"
+            or str(getattr(params, "context_scope", "") or "").strip().lower() == "task_local"):
+        return False
+    attrs = getattr(params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    task_id = str(attrs.get("conversation_task_id") or "").strip()
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not thread_id or not task_id or str(attrs.get("scheduler_run_id") or "").strip() != task_id:
+        return False
+    from .run_claim import user_input_turn_on_lane
+
+    return user_input_turn_on_lane(store, thread_id)
+
+
+# LLM: 让出片的正文为空、不交付；只在本片唤醒已确认、任务仍 active 时发表一次同任务续跑唤醒，去重键带被让出的唤醒号，
+#   同一片重入不会重复发表。调用方须在定时收口判定后续工作之前调用：这条待处理唤醒就是会自己推进的后续工作，
+#   收口据此把定时执行停在 waiting，而不是结算成受阻。
+# 函数用途: 为让出车道的定时工作片发表续跑唤醒，返回是否发表。
+def publish_user_input_yield(store, signal, report) -> bool:
+    if (str(getattr(report, "runtime_reason", "") or "") != USER_INPUT_YIELD_REASON
+            or getattr(report, "wake_handled", False) is not True
+            or str(getattr(report, "task_status", "") or "").strip().lower() != "active"):
+        return False
+    task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    if not task_id or str(metadata.get("scheduler_run_id") or "").strip() != task_id:
+        return False
+    from .authority import CONVERSATION_REQUEST_ID_ATTR
+
+    carried = {key: metadata[key] for key in _YIELD_CARRIED_METADATA if key in metadata}
+    store.wakes.raise_signal({
+        "thread_id": signal.thread_id, "root_task_id": task_id, "urgency": "normal",
+        "reason": USER_INPUT_YIELD_WAKE_REASON, "summary": "用户消息处理完后，继续让出车道前的同一定时任务。",
+        "dedupe_key": f"user-input-yield:{task_id}:{signal.wake_signal_id}",
+        "metadata": {**carried, CONVERSATION_REQUEST_ID_ATTR: task_id,
+                     "yielded_wake_signal_id": signal.wake_signal_id},
+    })
+    return True
+
+
+# LLM: 续跑唤醒只认宿主写下的同一定时执行身份；原任务已结束、换代或换线程时作废，不复活。
+# 函数用途: 判断一条用户让出续跑唤醒是否仍能接着原定时任务执行。
+def user_input_yield_wake_valid(store, signal) -> bool:
+    task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    if not task_id or str(metadata.get("scheduler_run_id") or "").strip() != task_id:
+        return False
+    link = store.tasks.load(task_id)
+    return bool(link is not None and link.status == "active" and link.thread_id == signal.thread_id
+                and not link.superseded_by_task_id)

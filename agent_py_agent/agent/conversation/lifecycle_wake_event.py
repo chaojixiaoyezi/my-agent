@@ -7,7 +7,11 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
-from ..agent_core.runtime.turn_trigger import TURN_TRIGGER_LIFECYCLE_WAKE, TurnTrigger
+from ..agent_core.runtime.turn_trigger import (
+    TURN_TRIGGER_LIFECYCLE_WAKE,
+    USER_INPUT_YIELD_TRIGGER_REASON,
+    TurnTrigger,
+)
 
 # 唤醒信封顶层与 metadata 里进入宿主事件的字段；原始结果 JSON、去重键等宿主内部字段不在名单里。
 # takeover_hint 是执行器退出后的结构化接替提示（C4，开关 subagent_takeover_hint_enabled 开时宿主才写入）。
@@ -50,8 +54,10 @@ def lifecycle_wake_turn_trigger(
         "reason": normalized_reason,
         "origin_request_ids": list(origins),
         **_picked(signal, _SIGNAL_FIELDS),
-        "child": _picked(metadata, _CHILD_FIELDS),
     }
+    if normalized_reason != USER_INPUT_YIELD_TRIGGER_REASON:
+        # 让出续跑没有子代理事实，不放空的 child 段误导模型。
+        facts["child"] = _picked(metadata, _CHILD_FIELDS)
     input_facts = _input_resolution_facts(normalized_reason, signal, metadata)
     if input_facts:
         facts['input_dependency'] = input_facts

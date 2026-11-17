@@ -2419,7 +2419,36 @@ def _tool_step_or_limit(agent, request: _ToolStepRequest):
             runtime_reason="TOOL_ACTION_NOT_REQUIRED",
         )
         return final_prompt, final_response, next_round
+    if final_response is None and _yield_lane_to_user_input(agent, request.params):
+        return request.current_prompt, _user_input_yield_response(agent), next_round
     return request.current_prompt, final_response, next_round
+
+
+# LLM: 工具结果已落账、下一次模型调用之前的安全点（S11）；表达阶段待完成时不让出，免得吞掉必要回复。
+# 函数用途: 判断这片后台定时工作是否在此把会话车道让给排队的用户消息。
+def _yield_lane_to_user_input(agent, params: ToolLoopExecuteParams) -> bool:
+    if pending_natural_user_reply(params) is not None:
+        return False
+    from ..conversation.technical_continuation import yields_to_user_input
+
+    return yields_to_user_input(agent, params)
+
+
+# LLM: 宿主自写的让出结束，不调用模型、不带正文；unfinished 保持任务 active，续跑由定时收口发表的唤醒接着做。
+# 函数用途: 生成让出车道时的本片结束回复。
+def _user_input_yield_response(agent) -> ModelResponse:
+    from ..conversation.technical_continuation import (
+        USER_INPUT_YIELD_REASON,
+        USER_INPUT_YIELD_SOURCE,
+    )
+
+    return ModelResponse(
+        text="",
+        backend=str(getattr(getattr(agent, "backend", None), "name", "") or "tool_loop"),
+        runtime_status="unfinished",
+        runtime_reason=USER_INPUT_YIELD_REASON,
+        runtime_source=USER_INPUT_YIELD_SOURCE,
+    )
 
 
 # LLM: 执行普通工具轮后只处理真实转换；创建子代理不会再触发隐式等待或按产物推断轮结束。
