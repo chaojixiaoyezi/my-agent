@@ -724,7 +724,9 @@ def _record_adopted_usage(
 
 # LLM: adopted/ineffective 要把反馈归到一个持久任务上。普通对话回合在第一个工作工具之前还没有任务链接（读正文的
 #   skill_search get 不晋升），这两个动作因此一律报“任务身份不可用”（R-17）。这里走首个工作工具的同一晋升事务；
-#   已有任务时原样返回，晋升不了就保持原样，由随后的执行权核对照旧拒绝。remove/restore 不归因到任务，不在此晋升。
+#   已有任务时原样返回，晋升不了就保持原样，由随后的执行权核对照旧拒绝。remove 同样要先有任务链接才能核对执行权，
+#   用户在普通对话里要求归档时它常是本回合第一个工具，因此也在此晋升；remove 不读保护证据，晋升不改变它的裁决。
+#   restore 不在此晋升：晋升后本回合未收口的运行行会让满额恢复把保护证据判为不完整。
 # 函数用途: 登记学习反馈前确保当前主会话回合已有持久任务。
 def _bind_turn_task(agent: object, current: object) -> None:
     from ..conversation.task_promotion import promote_conversation_task_for_run
@@ -879,7 +881,7 @@ def _adopt_feedback(agent: object, store: SkillLearningStore, reference: str) ->
 
 
 def _remove_feedback(agent: object, store: SkillLearningStore, reference: str) -> ToolHandlerOutcome:
-    _main_write_claim(agent)
+    _main_write_claim(agent, bind_turn_task=True)
     cfg = _refresh_agent_config(agent)
     cleaned = reference.strip()
     prefix = _non_owner_prefix(cleaned)

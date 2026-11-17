@@ -186,7 +186,8 @@ def _list_lines(payload: dict[str, object]) -> list[str]:
     limit = payload.get("daily_limit") or "不限"
     overflow = int(payload.get("overflow_requests") or 0)
     usage = payload.get("skill_usage") if isinstance(payload.get("skill_usage"), dict) else {}
-    effective = int(usage.get("effective_uses") or 0)
+    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
+    effective = int(totals.get("effective_uses") or 0)
     lines = [
         f"自动总结的 Skill（owner {payload.get('owner_id')}，共 {payload.get('count')} 个；自学习开关：{switch}）",
         f"待处理请求 {payload.get('pending_requests')} 条（溢出 {overflow} 条）；今日总结调用 {payload.get('calls_today')}/{limit} 次；累计有效使用 {effective} 次",

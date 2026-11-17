@@ -397,7 +397,8 @@ def _learned(host: SkillControlHost, tokens: list[str]) -> str:
     limit = report["daily_limit"] or "不限"
     overflow = int(report.get("overflow_requests") or 0)
     usage = report.get("skill_usage") if isinstance(report.get("skill_usage"), dict) else {}
-    effective = int(usage.get("effective_uses") or 0)
+    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
+    effective = int(totals.get("effective_uses") or 0)
     lines = [f"自动总结的 Skill：{report['count']} 个（自学习：{switch}；待处理请求 {report['pending_requests']} 条，溢出 {overflow} 条；"
              f"今日总结 {report['calls_today']}/{limit} 次；有效使用 {effective} 次）"]
     if not report["skills"]:
