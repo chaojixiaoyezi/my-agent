@@ -41,7 +41,8 @@ from .models import (
 
 PROC_ROOT = Path('/proc')
 TOOL_NAME = 'runtime_governance'
-WRITES = ('set_maintenance_lock', 'clear_maintenance_lock', 'terminate_orphan', 'configure_watchdog_service', 'reconcile_apply')
+WRITES = ('set_maintenance_lock', 'clear_maintenance_lock', 'terminate_orphan', 'configure_watchdog_service', 'reconcile_apply',
+          'quarantined_wakes_dismiss', 'quarantined_wakes_replay')
 DENIED = 'PERMISSION_DENIED: Watchdog and runtime control actions require admin identity and explicit admin_authorized=True.'
 MARKER = '.my-agent-private-install.json'
 DEFAULT_UNIT = 'my-agent-gw-supervisor.service'
@@ -78,10 +79,42 @@ def _write(root, name, data):
     write_text_atomic_beneath(root, (name,), text)
 
 
+_reconcile_cursor_keys = frozenset(('phase', 'after', 'created_at', 'owner', 'signature'))
+_reconcile_cursor_phases = frozenset(('capabilities', 'task_runs', 'indexes', 'projections'))
+_wake_cursor_keys = frozenset(('binding', 'unreadable_seen', 'phase', 'scan', 'pending', 'complete'))
+
+
+# LLM: 续页游标里的64位摘要只是owner/过滤/代次的绑定值，不是凭据；仅当整体符合两种已知游标文法、且除绑定摘要外其余字段
+#   脱敏前后不变时才原样放行，其它形状照常脱敏。
+# 函数用途: 判断next_cursor能否免于脱敏原样返回。
+def _exempt_cursor(value):
+    import base64
+
+    if not isinstance(value, str) or not value or len(value) > 65536:
+        return None
+    try:
+        if value.startswith('{'):
+            token, keys, digest = json.loads(value), _reconcile_cursor_keys, 'signature'
+            valid = isinstance(token, dict) and token.get('phase') in _reconcile_cursor_phases
+        else:
+            token, keys, digest = json.loads(base64.urlsafe_b64decode(value)), _wake_cursor_keys, 'binding'
+            valid = isinstance(token, dict) and token.get('phase') in ('quarantine', 'unreadable')
+    except (ValueError, TypeError):
+        return None
+    if not valid or not set(token) <= keys or not re.fullmatch(r'[0-9a-f]{64}', str(token.get(digest) or '')):
+        return None
+    rest = {key: item for key, item in token.items() if key != digest}
+    return value if redact_bearer_values(rest) == rest else None
+
+
 # LLM: 所有公开字段走工作流共用的递归脱敏；宿主结果使用现有ToolHandlerOutcome，不引入平行ToolResult协议。
+#   唯一例外是通过文法核验的next_cursor（见 _exempt_cursor），否则第二页永远验不过绑定摘要。
 # 函数用途: 生成结构化治理回执和明确失败状态。
 def _reply(data, error='', *, effect='not_started'):
+    cursor = _exempt_cursor(data.get('next_cursor')) if isinstance(data, dict) else None
     data = redact_bearer_values(data)
+    if cursor is not None:
+        data['next_cursor'] = cursor
     return ToolHandlerOutcome(TOOL_NAME, not error, json.dumps(data, ensure_ascii=False),
                               error_code='ADMIN_CONTROL_DENIED' if error == 'PERMISSION_DENIED' else error, reported_error_code=error,
                               effect_outcome=effect if error else '', result_envelope={TOOL_NAME: data})
@@ -250,6 +283,45 @@ def _unit_text(tool, prefix):
     return command, '[Unit]\nDescription=my-agent Gateway supervisor\n[Service]\nType=simple\n' + extra + 'ExecStart=' + quoted + '\nRestart=always\nRestartSec=5\n[Install]\nWantedBy=default.target\n'
 
 
+# LLM: 只接受规范owner编号形状（local/<id>、providers/<p>/users|groups/<id>），逐段经原安全段校验；不接受路径。
+# 函数用途: 把owner编号解析为原owner身份。
+def _owner_identity(owner_id):
+    from ..user_space.owner_resolver import OwnerIdentity
+
+    parts = owner_id.split('/') if isinstance(owner_id, str) else []
+    if len(parts) == 2 and parts[0] == 'local':
+        return OwnerIdentity.local_main() if parts[1] == 'main' else OwnerIdentity.local_user(parts[1])
+    if len(parts) == 4 and parts[0] == 'providers' and parts[2] in ('users', 'groups'):
+        return (OwnerIdentity.provider_user if parts[2] == 'users' else OwnerIdentity.provider_group)(parts[1], parts[3])
+    raise ValueError('owner_id 必须是 local/<id> 或 providers/<provider>/users|groups/<id>')
+
+
+# LLM: 经原resolver得到目标owner规范home，不创建目录；只读视图只给库路径，收口视图才打开可写运行库；会话库不初始化。
+# 函数用途: 为管理员跨owner对账或唤醒治理组装目标owner的最小宿主视图。
+def _owner_view(agent, owner_id, *, writable):
+    from types import SimpleNamespace
+
+    from ..gateway_parts.owner_conversation_store import owner_conversation_store
+    from ..runtime_db.schema import runtime_db_path
+    from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+
+    scoped = home_paths_with_owner(agent.home_paths, resolve_owner_home(agent.home_paths.root, _owner_identity(owner_id)))
+    home = Path(scoped.owner_home_dir)
+    if str(scoped.owner_id) != owner_id or home.is_symlink() or not home.is_dir():
+        raise ValueError('目标 owner 不存在；请核对 owner_id')
+    database = runtime_db_path(home)
+    if writable:
+        from ..runtime_db.repository import RuntimeRepository
+
+        if database.is_symlink() or not database.is_file():
+            raise ValueError('目标 owner 没有运行库；不在其目录下新建')
+        repo = RuntimeRepository(database)
+    else:
+        repo = SimpleNamespace(db_path=database)
+    return SimpleNamespace(config=agent.config, home_paths=scoped, root=home, subagents=SimpleNamespace(runtime_db=repo),
+                           conversation_store=owner_conversation_store(agent, scoped, initialize=False))
+
+
 # LLM: 身份/路径只由宿主构造，所有写动作须管理员与显式True双门且保留原审批；不注册为脚本执行拦截器。
 # 类用途: 提供运行状态、维护锁、准确孤儿清理与用户级看门狗配置。
 class RuntimeGovernanceTool(BaseTool):
@@ -261,12 +333,17 @@ class RuntimeGovernanceTool(BaseTool):
             'properties': {
                 'action': {
                     'type': 'string',
-                    'enum': ['status', 'reconcile_preview', *WRITES],
+                    'enum': ['status', 'reconcile_preview', 'quarantined_wakes_preview', *WRITES],
                     'description': 'status 只读查看三层看门狗、发行版本和未受管进程；其余写动作须管理员身份且显式传 admin_authorized=true。',
                 },
                 'cursor': {'type': 'string', 'maxLength': 8192, 'description': '上一页 next_cursor；首次使用空字符串，绑定当前 owner 与过滤。'},
                 'limit': {'type': 'integer', 'minimum': 1, 'description': '本次最多处理的条目数；不传使用 retention_scan_slice_entries。'},
                 'run_ids': {'type': 'array', 'items': {'type': 'string', 'minLength': 1}, 'description': '可选准确子代理编号；不接受其他 owner 或路径。'},
+                'owner_id': {'type': 'string', 'minLength': 1, 'maxLength': 300,
+                             'description': '可选目标 owner（如 local/main、providers/feishu/users/<id>、providers/feishu/groups/<id>）；'
+                                            '仅本机管理员前台可用，跨 owner 对账只处理执行账。'},
+                'wake_signal_ids': {'type': 'array', 'minItems': 1, 'maxItems': 20, 'items': {'type': 'string', 'minLength': 1},
+                                    'description': 'quarantined_wakes_dismiss / quarantined_wakes_replay 的准确唤醒编号。'},
                 'admin_authorized': {
                     'type': 'boolean',
                     'description': '管理员明确授权本次控制动作，不替代宿主审批',
@@ -319,7 +396,8 @@ class RuntimeGovernanceTool(BaseTool):
         ),
     )
     runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy('dangerous', by_parameter=(('action', (('status', 'read_only'), ('reconcile_preview', 'read_only'), ('reconcile_apply', 'dangerous'))),)),
+        effect_resolver=EffectResolverPolicy('dangerous', by_parameter=(('action', (('status', 'read_only'), ('reconcile_preview', 'read_only'), ('reconcile_apply', 'dangerous'),
+                                                                                     ('quarantined_wakes_preview', 'read_only'))),)),
         approval_policy=ApprovalPolicy('always', always_effects=('dangerous',)), sandbox_policy=SandboxPolicy('none'),
         concurrency_policy=ConcurrencyPolicy('serial'), idempotency_policy=IdempotencyPolicy('operation'),
         resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('runtime_governance:installation',)))
@@ -365,17 +443,24 @@ class RuntimeGovernanceTool(BaseTool):
         if not validate_tool_input(params, self.model_spec.input_schema).ok:
             return _reply({'error': '参数不符合治理工具Schema'}, 'TOOL_INVALID_ARGUMENTS')
         try:
-            if action in {'reconcile_preview', 'reconcile_apply'}:
-                from ..conversation.runtime_reconciliation import reconcile_owner_runtime
+            if action in {'reconcile_preview', 'reconcile_apply', 'quarantined_wakes_preview', 'quarantined_wakes_dismiss',
+                          'quarantined_wakes_replay'}:
                 if self.agent is None:
                     return _reply({'error': '缺少当前 owner 宿主上下文；请从管理员前台重试。', 'effect_outcome': 'not_started'}, 'RECONCILIATION_CONTEXT_REQUIRED')
-                if action == 'reconcile_apply':
-                    from ..user_space.owner_access import is_foreground_admin_interactive
-                    if not is_foreground_admin_interactive(self.agent):
-                        return _reply({'error': '当前调用没有本机管理员前台受理证明；请从本机前台或当前绑定管理员私聊发起。',
-                                       'effect_outcome': 'not_started'}, 'ADMIN_CONTROL_DENIED')
-                report = reconcile_owner_runtime(self.agent, apply=action == 'reconcile_apply',
-                    cursor=params.get('cursor', ''), limit=params.get('limit'), run_ids=tuple(params.get('run_ids', ())))
+                from ..user_space.owner_access import is_foreground_admin_interactive
+                own = str(getattr(getattr(self.agent, 'home_paths', None), 'owner_id', '') or '')
+                cross = bool(params.get('owner_id')) and params.get('owner_id') != own
+                if (action in WRITES or cross) and not is_foreground_admin_interactive(self.agent):
+                    return _reply({'error': '当前调用没有本机管理员前台受理证明；请从本机前台或当前绑定管理员私聊发起。',
+                                   'effect_outcome': 'not_started'}, 'ADMIN_CONTROL_DENIED')
+                if cross and not self._admin():
+                    return _reply({'error': DENIED}, 'PERMISSION_DENIED')
+                target = _owner_view(self.agent, params['owner_id'], writable=action == 'reconcile_apply') if cross else self.agent
+                if action.startswith('quarantined_wakes_'):
+                    return _reply(_wake_governance(target, action, params, actor=self.owner_id or own))
+                from ..conversation.runtime_reconciliation import reconcile_owner_runtime
+                report = reconcile_owner_runtime(target, apply=action == 'reconcile_apply', cursor=params.get('cursor', ''),
+                    limit=params.get('limit'), run_ids=tuple(params.get('run_ids', ())), task_runs_only=cross)
                 return _reply(report, 'RECONCILIATION_PARTIAL' if report['errors'] else '', effect=report['effect_outcome'])
             if action == 'status':
                 return _reply(self._status())
@@ -448,10 +533,55 @@ class RuntimeGovernanceTool(BaseTool):
     def effective_write_roots(self, arguments, write_boundary, workspace_root):
         if arguments.get('action') not in WRITES:
             return ()
-        if arguments.get('action') == 'reconcile_apply':
+        if arguments.get('action') in {'reconcile_apply', 'quarantined_wakes_dismiss', 'quarantined_wakes_replay'}:
             root = getattr(getattr(self.agent, 'home_paths', None), 'owner_home_dir', None)
+            owner_id = arguments.get('owner_id')
+            if owner_id and owner_id != getattr(getattr(self.agent, 'home_paths', None), 'owner_id', None):
+                from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+
+                home = self.agent.home_paths
+                root = home_paths_with_owner(home, resolve_owner_home(home.root, _owner_identity(owner_id))).owner_home_dir
             return (str(root),) if root is not None else ()
         roots = [str(self.workspace)] if self.workspace is not None else []
         if arguments.get('action') == 'configure_watchdog_service':
             roots.append(str(Path.home() / '.config/systemd/user'))
         return tuple(roots)
+
+
+# LLM: 预览只读分页并附最近错误事实；撤销只归档不执行；重放沿 /wakes 同一入口（来源、pending 冲突、领域终态在结案锁内复核）。
+#   每个编号独立处理，一个失败不影响其它；结果只含结构化码与编号。
+# 函数用途: 执行已结案后台唤醒的预览、撤销或重放。
+def _wake_governance(target, action, params, *, actor):
+    from functools import partial
+
+    from ..conversation.wake_domain_closeout import wake_domain_terminal
+
+    store = target.conversation_store
+    attempts = store.wakes.attempts
+    owner_id = str(getattr(target.home_paths, 'owner_id', '') or '')
+    if action == 'quarantined_wakes_preview':
+        limit = params.get('limit') or 20
+        page = attempts.quarantined_page(limit=min(int(limit), 100), cursor=params.get('cursor', ''))
+        for row in page.get('items', []):
+            context = attempts.quarantined_error_context(row.get('wake_signal_id') or '')
+            if context:
+                row['last_error'] = context
+        return {'owner_id': owner_id, 'quarantined_count': attempts.quarantined_count(), **page}
+    ids = list(params.get('wake_signal_ids') or [])
+    if not ids:
+        raise ValueError('wake_signal_ids 必须给出至少一个准确唤醒编号')
+    now = time.time()
+    results = []
+    for wake_signal_id in ids:
+        if action == 'quarantined_wakes_dismiss':
+            results.append(attempts.dismiss(wake_signal_id, now=now, actor=actor, reason=str(params.get('reason') or '')))
+            continue
+        try:
+            outcome = attempts.replay(wake_signal_id, now=now, domain_terminal=partial(wake_domain_terminal, store))
+        except ValueError:
+            results.append({'wake_signal_id': '', 'replayed': False, 'error_code': 'WAKE_SIGNAL_ID_INVALID'})
+            continue
+        results.append({'wake_signal_id': wake_signal_id, 'replayed': bool(outcome.ok), 'error_code': outcome.error_code or ''})
+    done = sum(1 for row in results if row.get('dismissed') or row.get('replayed'))
+    return {'owner_id': owner_id, 'action': action, 'results': results, 'applied': done,
+            'quarantined_count': attempts.quarantined_count(), 'effect_outcome': 'succeeded' if done else 'not_started'}

@@ -259,6 +259,13 @@ def cmd_runtime_stale_attempts(args) -> int:
         )
     if remaining and not settled:
         print("剩余记录可能仍活跃、身份不可核验或指针损坏；可安全结清的运行会取消并解除 unknown 阻塞。")
+    reconciliation = result["runtime_reconciliation"]
+    counts = reconciliation.get("reason_counts") or {}
+    if counts or reconciliation.get("next_cursor"):
+        # 本命令只看运行轮；仍开着的执行账按原因分类，续页与收口走对账工具。
+        print("open task runs (first page): " + " ".join(f"{code}={count}" for code, count in sorted(counts.items())))
+        print('next: runtime_governance {"action":"reconcile_preview"} 按原因与样本逐页核对；'
+              '只有 eligible 的执行账会被 {"action":"reconcile_apply","admin_authorized":true} 收口。')
     return 0
 
 

@@ -20,6 +20,14 @@ _PERMISSION_ERRNOS = frozenset({errno.EPERM, errno.EACCES, errno.EROFS})
 _SQLITE_PERMISSION_CODES = frozenset({3, 8, 14})
 # 常量用途: 结构化错误码，写在 stderr 的一行里，模型和人都按它判断。
 CLI_HOST_STATE_READ_ONLY = "CLI_HOST_STATE_READ_ONLY"
+# 沙箱里起不来的宿主状态子命令 → 可直接照抄的内置工具调用；按顺序取第一条全部词都出现在命令行里的映射，未列出的保持通用提示。
+_tool_hints = (
+    (("runtime-stale-attempts", "--settle"), 'runtime_governance {"action":"reconcile_apply","admin_authorized":true}'),
+    (("runtime-stale-attempts",), 'runtime_governance {"action":"reconcile_preview"}'),
+    (("home-retention",), 'runtime_governance {"action":"reconcile_preview"}'),
+    (("home-index-rebuild",), 'runtime_governance {"action":"reconcile_preview"}'),
+    (("gateway", "status"), 'gateway_status {}'),
+)
 
 
 # LLM: 包住非交互命令的整个执行（启动和命令本身）：沙箱里命令真要写宿主状态时同样给这个码，不崩出堆栈。退出码 1。
@@ -32,9 +40,21 @@ def host_state_read_only_guard() -> Iterator[None]:
         if not _host_state_permission_failure(exc):
             raise
         path = str(getattr(exc, "filename", "") or "")
+        hint = _tool_hint(sys.argv[1:])
+        advice = f"请改用内置工具：{hint}" if hint else "请改用对应的内置工具。"
         print(f"my-agent: error_code={CLI_HOST_STATE_READ_ONLY} path={path} "
-              "在模型命令的沙箱里宿主状态只读，my-agent CLI 起不来；请改用对应的内置工具。", file=sys.stderr)
+              f"在模型命令的沙箱里宿主状态只读，my-agent CLI 起不来；{advice}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+
+# LLM: 只比对命令行里的固定子命令词，不解析参数值；无匹配返回空串，调用方退回通用提示。
+# 函数用途: 为沙箱里起不来的子命令给出准确的内置工具调用。
+def _tool_hint(argv: list[str]) -> str:
+    words = set(argv)
+    for required, hint in _tool_hints:
+        if all(word in words for word in required):
+            return hint
+    return ""
 
 
 # LLM: 只认宿主设的标记 "1" 和结构化错误码；Python 3.10 的 sqlite 异常没有 sqlite_errorcode，按不是权限失败处理（原样抛出）。

@@ -396,6 +396,25 @@ class WakeAttemptStore:
     def quarantined_count(self) -> int:
         return quarantined_wake_count(self.storage)
 
+    # LLM: 撤销只归档、不执行；与 replay/归档共用同一结案锁（见 store_wake_quarantine_archive.dismiss_quarantined_wake）。
+    # 函数用途: 管理员撤销一条已结案唤醒，返回结构化回执。
+    def dismiss(self, wake_signal_id: str, *, now: float, actor: str = "", reason: str = "") -> dict[str, Any]:
+        from .store_wake_quarantine_archive import dismiss_quarantined_wake
+
+        return dismiss_quarantined_wake(self.storage, wake_signal_id, now=now, actor=actor, reason=reason)
+
+    # LLM: 只读一条结案记录的最近错误结构化事实（类型、类别、错误码、截断消息），供管理员决定撤销或重放；读不到返回空。
+    # 函数用途: 取一条已结案唤醒的最近错误上下文。
+    def quarantined_error_context(self, wake_signal_id: str) -> dict[str, Any]:
+        try:
+            payload, error = read_json_object_report(self.storage.wake_quarantine_path(wake_signal_id),
+                                                     context="conversation.wake_quarantine.preview")
+        except ValueError:
+            return {}
+        facts = payload.get("quarantine") if error is None and isinstance(payload.get("quarantine"), dict) else {}
+        last = facts.get("last_error") if isinstance(facts.get("last_error"), dict) else {}
+        return {key: str(last.get(key) or "") for key in ("type", "category", "error_code", "message") if last.get(key)}
+
     # LLM: 在结案记录的锁内完成：来源状态经 replay_source 判定（已归档、读不出、不存在各自拒绝），再核对 pending 没有
     #   同 ID 文件、领域未终态（由调用方传入判定），然后按原 ID 和冻结内容写回 pending，结案记录移入
     #   replayed/<id>/<n>.json 留档，尝试账清零。领域判定为 None 表示调用方不做领域检查。任何拒绝都不改文件，不抛异常。

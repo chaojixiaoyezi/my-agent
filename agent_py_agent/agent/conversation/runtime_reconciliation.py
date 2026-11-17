@@ -346,14 +346,48 @@ def _settle_capability_runtime(agent, run_id, item, commit_transition):
             task_run_id=row['task_run_id'], apply=True, commit_transition=commit_transition)
 
 
+# 每类保护原因对应的现有处置入口；只给方向，不新增强制结案路径。
+_REASON_GUIDANCE = {
+    'durable_task_active': '会话任务仍为活动状态；先用 /tasks 核对或结束该任务，结束后再预览。本工具不强制结案。',
+    'execution_effect_unknown': '存在未确认副作用的托管操作；按 /recover 记录处置（confirmed_noop/recorded/abandoned）后再预览。',
+    'attempt_unknown': '运行轮状态未知；先按 /recover 核对该运行，再预览。',
+    'agent_tree_active': '代理树仍有活动或挂起的运行；先核对这些运行是否仍在执行。',
+    'invalid_agent_tree': '代理树结构不完整；保留原记录并人工核对。',
+}
+
+
+# LLM: 只读补充管理员决定所需事实（任务状态、最近活动、未确认操作编号），不改判定；读失败只省略补充字段。
+# 函数用途: 为不可收口的执行账条目附上处置所需的事实。
+def _task_run_decision_facts(item, row, reader_path, store):
+    facts = {'last_activity_at': row['updated_at']}
+    reason = item.get('reason_code')
+    try:
+        if reason == 'durable_task_active':
+            task = store.tasks.load(str(item.get('task_id') or row['task_id']))
+            facts['task_status'] = str(getattr(task, 'status', '') or (task.get('status') if isinstance(task, dict) else '') or '')
+        elif reason in {'execution_effect_unknown', 'attempt_unknown'}:
+            with _snapshot(reader_path) as conn:
+                facts['unknown_operation_ids'] = [str(op[0]) for op in conn.execute(
+                    "SELECT op.operation_id FROM agent_runs ar JOIN tool_operations op ON op.agent_run_id=ar.agent_run_id "
+                    "WHERE ar.task_run_id=? AND op.status IN ('EXECUTING','UNKNOWN','CLAIMED') ORDER BY op.created_at LIMIT 5",
+                    (row['task_run_id'],))]
+    except Exception:  # noqa: BLE001 - 补充事实尽力读取，不影响判定
+        pass
+    return facts
+
+
 def _readonly_repository(path):
     from ..runtime_db.repository import RuntimeRepository
     return RuntimeRepository(path, read_only=True)
 
 
 def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', limit: int | None = None,
-                            older_than_seconds: float | None = None, run_ids: tuple[str, ...] = (), commit_transition=None) -> dict[str, object]:
-    """每次只处理一个领域页；续点绑定 owner、过滤和源身份，不写第二份进度账。"""
+                            older_than_seconds: float | None = None, run_ids: tuple[str, ...] = (), commit_transition=None,
+                            task_runs_only: bool = False) -> dict[str, object]:
+    """每次只处理一个领域页；续点绑定 owner、过滤和源身份，不写第二份进度账。
+
+    task_runs_only 用于管理员对其他 owner 的只读/收口视图：只走执行账一相，结束后不进入能力、索引与投影相。
+    """
     config = getattr(agent, 'config', None)
     owner = str(agent.home_paths.owner_id)
     count = getattr(config, 'retention_scan_slice_entries', default_config_int('retention_scan_slice_entries')) if limit is None else limit
@@ -373,7 +407,10 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
         generation = (Path(repo_path).stat().st_dev, Path(repo_path).stat().st_ino) if repo_path else None
     except FileNotFoundError:
         generation = None
-    signature = hashlib.sha256(json.dumps([str(agent.home_paths.owner_home_dir), owner, generation, sorted(set(run_ids)), older_than_seconds]).encode()).hexdigest()
+    signature = hashlib.sha256(json.dumps([str(agent.home_paths.owner_home_dir), owner, generation, sorted(set(run_ids)), older_than_seconds]
+                                          + (['task_runs_only'] if task_runs_only else [])).encode()).hexdigest()
+    if task_runs_only and run_ids:
+        raise ValueError('跨 owner 视图只处理执行账，不接受 run_ids')
     state = {'phase': 'capabilities' if run_ids else 'task_runs', 'after': ''}
     if cursor:
         if len(cursor) > 8192:
@@ -381,7 +418,8 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
         token = json.loads(cursor)
         if not isinstance(token, dict):
             raise ValueError('cursor 必须是上一页原样返回的 JSON 对象；请从空 cursor 重新预览')
-        if token.get('owner') != owner or token.get('signature') != signature or token.get('phase') not in {'capabilities', 'task_runs', 'indexes', 'projections'}:
+        allowed = {'task_runs'} if task_runs_only else {'capabilities', 'task_runs', 'indexes', 'projections'}
+        if token.get('owner') != owner or token.get('signature') != signature or token.get('phase') not in allowed:
             raise ValueError('cursor owner/过滤不匹配，请对当前 owner 使用空 cursor 重新预览')
         state = token
     slice_ms = float(getattr(config, 'retention_scan_slice_ms', 50))
@@ -419,6 +457,8 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
                     continue
                 item = reconcile_task_run_closeout(repo if apply else reader, agent.conversation_store,
                     task_run_id=row['task_run_id'], apply=apply, commit_transition=commit_transition)
+                if item.get('decision') == 'protected':
+                    item = {**item, **_task_run_decision_facts(item, row, repo.db_path, agent.conversation_store)}
                 result['items'].append({'kind': 'task_run', **item})
                 visited.append(row)
             if visited and (len(rows) >= count or len(visited) < len(rows)):
@@ -426,7 +466,7 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
             elif rows and not visited:
                 next_state = state
             else:
-                next_state = {'phase': 'capabilities', 'after': ''}
+                next_state = None if task_runs_only else {'phase': 'capabilities', 'after': ''}
         elif phase == 'indexes':
             from ..user_space.home_index_rebuild import reconcile_home_index_page
             page = reconcile_home_index_page(agent.home_paths, owner_id=owner, apply=apply, cursor=after,
@@ -445,13 +485,20 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
     except (OSError, ValueError, RuntimeError, sqlite3.Error, AttributeError, TypeError, KeyError) as exc:
         result['errors'].append({'reason_code': 'RECONCILIATION_SOURCE_UNAVAILABLE', 'error_type': type(exc).__name__,
             'next_step': '保留原记录；核对当前 owner 权威源后重新预览，未知外部操作不得原样重放。'})
-        following = {'task_runs': 'capabilities', 'capabilities': 'indexes', 'indexes': 'projections'}.get(state['phase'])
+        following = None if task_runs_only else {'task_runs': 'capabilities', 'capabilities': 'indexes', 'indexes': 'projections'}.get(state['phase'])
         result['next_cursor'] = json.dumps(dict(phase=following, after='', owner=owner, signature=signature), separators=(',', ':')) if following else ''
         result['effect_outcome'] = 'unknown' if apply else 'not_started'
     result['repaired'] = sum(int(row.get('repaired') or row.get('applied') or row.get('closed') or row.get('archived_dirs') or 0) for row in result['items'])
     result['unknown'] = len(result['errors']) + sum(int(row.get('unknown', 0)) + int(row.get('decision') == 'unknown' or row.get('reason_code') in {'PROOF_INCOMPLETE', 'AUTHORITY_MISSING', 'ATTEMPT_UNKNOWN'}) for row in result['items'])
     result['protected'] = sum(int(row.get('protected', row.get('protected_dirs', 0))) + int(row.get('eligible') is False or row.get('decision') == 'protected') for row in result['items'])
     result['partial'] = bool(result['next_cursor'] or result['errors'] or result['unknown'])
+    counts: dict[str, int] = {}
+    for row in result['items']:
+        code = row.get('reason_code')
+        if isinstance(code, str) and code:
+            counts[code] = counts.get(code, 0) + 1
+    result['reason_counts'] = counts
+    result['reason_guidance'] = {code: _REASON_GUIDANCE[code] for code in counts if code in _REASON_GUIDANCE}
     if any(row.get('effect_outcome') == 'unknown' for row in result['items']):
         result['effect_outcome'] = 'unknown'
     if apply and result['effect_outcome'] != 'unknown' and result['repaired']:

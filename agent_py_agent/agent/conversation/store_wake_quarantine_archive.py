@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..gateway_parts.io import locked_file_transition
+from ..gateway_parts.io import locked_file_transition, write_json_file_atomic
 from .store_io import read_json_object_report
 from .store_layout import ConversationStorage
 
@@ -114,7 +114,40 @@ def _json_files(directory: Path) -> list[Path]:
     return sorted(path for path in directory.glob("*.json") if path.is_file()) if directory.is_dir() else []
 
 
+# LLM: 管理员显式撤销一条已结案唤醒：在它自己的结案锁里把结案记录（或读不出的信封留档）原样移进 archive/，坏账留档一并移走，
+#   再写 archive/dismissed/<id>.json 回执；从不写回 pending、不执行它。归档后重放按 WAKE_REPLAY_ARCHIVED 拒绝，同键再发布
+#   返回原结案信号，后续由会话侧账留存通道照常清理。归档位置已有同名文件时不覆盖、不写回执。
+# 函数用途: 立即归档一条已结案唤醒并留下撤销回执；会移动文件并写回执。
+def dismiss_quarantined_wake(storage: ConversationStorage, wake_signal_id: str, *, now: float,
+                             actor: str = "", reason: str = "") -> dict[str, Any]:
+    try:
+        source = storage.wake_quarantine_path(wake_signal_id)
+    except ValueError:
+        return {"wake_signal_id": "", "dismissed": False, "error_code": "WAKE_SIGNAL_ID_INVALID"}
+    archive = storage.wake_quarantine_archive_dir
+    unreadable = storage.wake_quarantine_unreadable_path(wake_signal_id)
+    with locked_file_transition(source):
+        if source.exists():
+            kind, moved = "record", _archive_move(source, storage.wake_quarantine_archive_path(wake_signal_id))
+        elif unreadable.exists():
+            kind, moved = "unreadable", _archive_move(unreadable, archive / "unreadable" / source.name)
+        else:
+            archived = (storage.wake_quarantine_archive_path(wake_signal_id).exists()
+                        or (archive / "unreadable" / source.name).exists())
+            return {"wake_signal_id": wake_signal_id, "dismissed": False,
+                    "error_code": "WAKE_REPLAY_ARCHIVED" if archived else "WAKE_REPLAY_NOT_FOUND"}
+        if not moved:
+            return {"wake_signal_id": wake_signal_id, "dismissed": False, "error_code": "WAKE_DISMISS_ARCHIVE_CONFLICT"}
+        if kind == "record":
+            _archive_move(storage.wake_quarantine_ledger_path(wake_signal_id), archive / "ledger" / source.name)
+        write_json_file_atomic(archive / "dismissed" / source.name,
+                               {"schema": "wake-dismissal.v1", "wake_signal_id": wake_signal_id, "source": kind,
+                                "dismissed_at": now, "actor": str(actor or ""), "reason": str(reason or "")})
+    return {"wake_signal_id": wake_signal_id, "dismissed": True, "source": kind, "executed": False}
+
+
 __all__ = [
     "WAKE_QUARANTINE_ARCHIVE_AFTER_SECONDS",
     "archive_stale_wake_quarantine",
+    "dismiss_quarantined_wake",
 ]
