@@ -881,10 +881,11 @@ class RuntimeSchemaMixin:
             if self.read_only:
                 from ..io.readonly_sqlite import readonly_sqlite_connection
 
-                # 预览不创建应用锁；保留原30秒SQLite读取预算，不能继承C短写的零等待。
+                # 普通预览保留30秒读取预算；显式existing_only控制面读写均零等待，不创建应用锁。
                 if runtime_db_recovery_pending(self.db_path):
                     raise RuntimeDatabaseDeferred('recovery_intent')
-                with readonly_sqlite_connection(self.db_path, timeout=30.0, require_private_directory=False) as conn:
+                timeout = 0.0 if self.existing_only else 30.0
+                with readonly_sqlite_connection(self.db_path, timeout=timeout, require_private_directory=False) as conn:
                     conn.row_factory = sqlite3.Row
                     require_runtime_schema_generation(conn)
                     if runtime_db_recovery_pending(self.db_path):

@@ -179,13 +179,7 @@ def readonly_sqlite_connection(path: Path, *, blocking: bool = True, deadline: f
                 if _regular_identity(path, require_owner=True) != identity:
                     raise ValueError("projection identity changed during read")
                 _verify_sidefiles(path)
-                # connect尚未取得SQLite读锁；沿SQLite完成真实读准入，不能自行管理WAL代次。
-                db.execute("PRAGMA schema_version").fetchone()
-                verify()
-                if _regular_identity(path, require_owner=True) != identity:
-                    raise ValueError("projection identity changed during read")
-                _verify_sidefiles(path)
-                # Schema is domain-specific; readers validate their own version and tables.
+                # Schema与SQLite数值错误分类归领域读者；适配器不抢先执行SQL，避免越过原诊断入口。
                 try:
                     yield db
                 except BaseException:

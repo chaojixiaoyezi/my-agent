@@ -573,7 +573,8 @@ def test_real_runtime_connections_block_ex_until_physical_close(tmp_path, monkey
         pass
 
 
-def test_readonly_runtime_connections_create_no_application_generation_sidecar(tmp_path, monkeypatch):
+@pytest.mark.parametrize("existing_only", [False, True])
+def test_readonly_runtime_connections_create_no_application_generation_sidecar(tmp_path, monkeypatch, existing_only):
     source = _source(tmp_path / "runtime.db")
     lock = source.with_name(source.name + ".generation.lock")
     guard.retire_idle_runtime_connections(source)
@@ -581,9 +582,9 @@ def test_readonly_runtime_connections_create_no_application_generation_sidecar(t
     before = source.read_bytes()
     monkeypatch.setattr(guard, "runtime_db_generation_guard",
                         lambda *a, **kw: pytest.fail("只读预检不得创建应用代次锁"))
-    with RuntimeRepository(source, read_only=True)._runtime_connection() as conn:
+    with RuntimeRepository(source, read_only=True, existing_only=existing_only)._runtime_connection() as conn:
         assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == (0 if existing_only else 30000)
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             conn.execute("INSERT INTO metadata VALUES('readonly-proof', 'forbidden')")
     assert not lock.exists() and source.read_bytes() == before
@@ -741,9 +742,9 @@ def test_readonly_open_corruption_reports_numeric_cause_without_recovery_writes(
     before = source.read_bytes()
     monkeypatch.setattr(salvage, "recover_runtime_database",
                         lambda *a, **kw: pytest.fail("只读准入损坏不能启动恢复"))
-    with pytest.raises(ProjectionReadUnavailableError) as caught:
+    with pytest.raises(sqlite3.DatabaseError) as caught:
         RuntimeRepository(source, read_only=True).get_task("absent")
-    assert caught.value.__cause__.sqlite_errorcode & 0xFF == sqlite3.SQLITE_NOTADB
+    assert caught.value.sqlite_errorcode & 0xFF == sqlite3.SQLITE_NOTADB
     assert caught.value.runtime_db_recovery["status"] == "requires_recovery"
     assert source.read_bytes() == before
     assert not _request(source).exists() and not guard.runtime_db_recovery_pending(source)
