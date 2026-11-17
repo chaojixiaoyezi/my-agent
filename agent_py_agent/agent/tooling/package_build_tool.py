@@ -7,6 +7,7 @@
 # 模块用途: 让 my-agent 把学来的方法或自己写的小工具打成可安装的包，并告诉用户接下来怎么装。
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -173,6 +174,8 @@ def _parse(params: dict, run_id: str) -> _BuildRequest:
     if kind == KIND_PLUGIN and any(key in declaration for key in _V8_KEYS):
         raise PackageBuildError("PACKAGE_BUILD_KIND_UNSUPPORTED",
                                 "第一期她自己做的插件只支持文件型 v6 包，声明里不能有 events、tool_gates、permissions。")
+    if kind == KIND_PLUGIN:
+        declaration = _restore_serialized_empties(declaration)
     if not isinstance(declaration.get("version"), str) or _VERSION.fullmatch(declaration["version"]) is None:
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "version 只能用字母、数字和 . + - _，最多 64 个字符。")
     if not _declared_texts_ok(declaration):
@@ -186,6 +189,36 @@ def _parse(params: dict, run_id: str) -> _BuildRequest:
     if kind == KIND_CAPABILITY_PACK:
         declaration = {"settings_schema": _EMPTY_SETTINGS, **declaration}
     return _BuildRequest(kind, Path(raw_dir).expanduser(), declaration, BuildProvenance(origin, license_name, run_id))
+
+
+# LLM: 插件声明在工具参数里是无类型对象。实测 MiniMax-M2.7 的工具调用把其中的空数组、空对象写成空字符串，并省略值为 null 的键
+#   （用户明确要求写 [] 和 {} 后仍如此）；宿主读包器只回"声明集合必须是数组"或"声明字段不完整"，她改不过来就去翻宿主源码。
+#   这里只在协议里确定是集合的位置把空字符串恢复成对应的空集合，动作参数缺 default 时按 ArgumentSpec 的默认值补 null；
+#   其它类型错误、缺字段与多字段照旧交给原校验拒绝。纯函数，不改传入对象。
+# 函数用途: 恢复模型工具调用序列化丢掉的空集合与空默认值。
+def _restore_serialized_empties(declaration: dict) -> dict:
+    restored = copy.deepcopy(declaration)
+
+    def restore(container: object, key: str, empty: object) -> None:
+        if isinstance(container, dict) and container.get(key) == "":
+            container[key] = copy.deepcopy(empty)
+
+    def records(value: object) -> list[dict]:
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    for key in ("files", "platforms", "actions", "tools"):
+        restore(restored, key, [])
+    restore(restored.get("entry"), "args", [])
+    for schema in (restored.get("settings_schema"), *(tool.get("input_schema") for tool in records(restored.get("tools")))):
+        restore(schema, "properties", {})
+        restore(schema, "required", [])
+    for action in records(restored.get("actions")):
+        restore(action, "arguments", [])
+        for argument in records(action.get("arguments")):
+            restore(argument, "options", [])
+            restore(argument, "choices", [])
+            argument.setdefault("default", None)
+    return restored
 
 
 # LLM: 比包清单展示文字（plugin_manifest._text：非空、无控制字符）更严：再挡 C1 控制、格式字符（如改显示方向）、行/段落分隔符和
