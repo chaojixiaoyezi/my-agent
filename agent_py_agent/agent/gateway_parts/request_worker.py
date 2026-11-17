@@ -1982,7 +1982,15 @@ def _finish_claimed_gateway_request(
     # responses 是 canonical terminal 的可修复投影；合法但陈旧的独立 JSON 也必须覆盖，
     # 不能因“文件存在”反过来成为终态权威。
     write_json_file_atomic(response_path, response)
-    append_gateway_history_once(paths, response)
+    try:
+        append_gateway_history_once(paths, response)
+    except Exception as exc:
+        # 历史库是可重建投影、不是完成权威（gateway_history_index）。2026-11-17 W3：库头损坏时每个已封口回合都在这里
+        # 抛 DatabaseError，打断本轮队列扫描。现在只报副作用错误，并且不写完成标记，让后台 projector 之后补这一行。
+        from .logging import _report_gateway_side_effect_error
+
+        _report_gateway_side_effect_error("archive_gateway_history", request_id, exc)
+        return
     try:
         mark_gateway_terminal_projection_complete(paths, request_id, response)
     except Exception as exc:
