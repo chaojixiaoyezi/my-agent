@@ -103,12 +103,15 @@ def build_send_message_model_spec() -> ToolModelSpec:
 # 类用途: 校验当前用户和产物后，通过飞书等已连接通道发送消息及附件。
 class SendMessageTool(BaseTool):
     # LLM: 每个 owner agent 各持有自己的 adapter hub；跨 owner 隔离由 owner registry 和操作账本共同保证。
+    #   发送是实际外部动作，且发送前的委派来源核验要读本轮 TaskLink，所以和其它工作工具一样先晋升任务；
+    #   否则首个工具就是 send_message 的 IM 回合会因 TaskLink 未建而报结果未知。
     # 函数用途: 创建当前 agent 的原生消息发送工具。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.model_spec = build_send_message_model_spec()
         self.runtime_policy = ToolRuntimePolicy(
             effect_resolver=EffectResolverPolicy("mutating"),
+            promotes_task=True,
             idempotency_policy=IdempotencyPolicy("business"),
             resource_scopes=ResourceScopePolicy(
                 mode="declared",
