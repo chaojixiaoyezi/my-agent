@@ -1273,6 +1273,12 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         raise ValueError('INVALID_PROJECTION_SOURCE_REVISIONS: '
                          'storage_maintenance.projection_source_revisions requires JSON object; '
                          f'actual_type={type(source_revisions).__name__}; storage lanes not started')
+    carried_checks = previous.get('storage_maintenance', {}).get('projection_check_pending', [])
+    if (not isinstance(carried_checks, list)
+            or any(not isinstance(key, str) or key not in projection_kinds for key in carried_checks)):
+        raise ValueError('INVALID_PROJECTION_SOURCE_REVISIONS: '
+                         'storage_maintenance.projection_check_pending requires registered projection kind list; '
+                         'storage lanes not started')
     projection_check_only = set()
 
     def projection_check_candidates():
@@ -1314,6 +1320,8 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                         and previous_source.get('supported') is True
                         and previous_source.get('revision') == before):
                     return {'cursor': cursor, 'complete': True, 'items': 0, 'bytes': 0}
+            # 已确认需要实际刷新才转入领域待办；预算/yield前未到达的check必须跨拍保持只检查身份。
+            projection_check_only.discard(kind.kind)
             lane = (projection if kind.kind in projection_kinds and not retention_safe
                     else resolve_storage_lane(kind.kind, projection_only=not retention_safe))
             if lane is None:
@@ -1360,7 +1368,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
             if original.get('continuation_pending') and isinstance(original.get('coordinator_lanes'), dict):
                 pending = set(original.get('pending_kinds') or ()) & lane_adapters.keys()
                 candidates = projection_check_candidates() & lane_adapters.keys()
-                projection_check_only.update(candidates - pending)
+                projection_check_only.update((candidates - pending) | (set(carried_checks) & pending))
                 pending.update(candidates)
                 if retention_safe and original.get('retention_deletion_safe') is not True:
                     pending.update(lane_adapters)
@@ -1380,6 +1388,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                                              or bool(lane_state['errors']))
         state['pressure'] = pressure
         state['projection_source_revisions'] = source_revisions
+        state['projection_check_pending'] = sorted(projection_check_only & set(state['pending_kinds']))
         return state
     if not state_locked:
         with locked_json_path(_maintenance_state_path(home.owner_home_dir)):
@@ -1500,7 +1509,8 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         original.pop('pending_kinds', None)
     elif isinstance(original.get('pending_kinds'), list):
         candidates = projection_check_candidates()
-        projection_check_only.update(candidates - set(original['pending_kinds']))
+        projection_check_only.update((candidates - set(original['pending_kinds']))
+                                     | (set(carried_checks) & set(original['pending_kinds'])))
         original['pending_kinds'] = sorted(set(original['pending_kinds']) | candidates)
     state = run_storage_maintenance_slice(original, adapters,
         max_items=quota_max_entries + len(adapters) + len(LANE_BINDINGS) * STORAGE_LANE_SLICE_ENTRIES,
@@ -1508,6 +1518,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         read_fence=read_fence, order=order)
     state['retention_deletion_safe'] = retention_safe
     state['projection_source_revisions'] = source_revisions
+    state['projection_check_pending'] = sorted(projection_check_only & set(state['pending_kinds']))
     state.pop('deferred_reason', None)
     state['lane_fallback_kinds'] = sorted(set(lane_fallbacks))
     state['lane_reports'] = lane_reports

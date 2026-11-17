@@ -134,7 +134,15 @@ def test_owner_maintenance_publishes_both_real_history_lane_receipts(tmp_path, m
 
     # 只提供已完成的保留报告；调度、领域策略、数据库写入和回执校验均用真实实现。
     retention = SimpleNamespace(applied=True, legal_hold=False, load_errors=[])
-    previous = {"storage_maintenance": {"continuation_pending": True, "pending_kinds": list(_HISTORY_LANES)}}
+    # 本例只续3个真实history域；已完成投影的能力/来源证明来自当前真实只读协议，而非省略后触发补读。
+    projection_sources = {}
+    for kind in storage_lanes.LANE_PROJECTION_BINDINGS:
+        lane = storage_lanes.resolve_storage_lane(kind, projection_only=True)
+        probe = getattr(lane, 'maintenance_source_revision', None)
+        projection_sources[kind] = ({'supported': True, 'revision': probe(home)}
+                                    if callable(probe) else {'supported': False})
+    previous = {"storage_maintenance": {"continuation_pending": True, "pending_kinds": list(_HISTORY_LANES),
+                                        "projection_source_revisions": projection_sources}}
     if single_adapter_slice:
         run_slice = owner_maintenance.run_storage_maintenance_slice
         def yielded_slice(*args, **kwargs):
@@ -173,3 +181,53 @@ def test_owner_maintenance_publishes_both_real_history_lane_receipts(tmp_path, m
     assert all(receipt['complete'] for receipt in reports.values())
     assert runtime_totals['slimmed'] == runtime_totals['deleted_events'] == runtime_totals['deleted_llm_records'] == 1
     assert runtime_totals['bytes'] > 0
+
+
+@pytest.mark.parametrize('coordinator', [False, True])
+def test_projection_check_only_survives_outer_yield_without_running_completed_domains(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    home = home_paths_with_owner(home, resolve_owner_home(home.root))
+    called = []
+    def resolve(kind, **kwargs):
+        def lane(request):
+            called.append(kind)
+            return {'cursor': {}, 'complete': True, 'items': 1, 'bytes': 0}
+        return lane
+    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', resolve)
+    monkeypatch.setattr(owner_maintenance, '_owner_pressure', lambda home: None)
+    monkeypatch.setattr(owner_maintenance, '_deferred_quota_reconciliation', lambda *args, **kwargs: {'complete': True})
+    retention = SimpleNamespace(applied=True, legal_hold=False, load_errors=[])
+    config = SimpleNamespace(retention_scan_slice_entries=128, retention_scan_slice_bytes=8192,
+                             retention_scan_slice_ms=1000)
+    previous = {'storage_maintenance': {'continuation_pending': True, 'pending_kinds': list(_HISTORY_LANES),
+                                       'retention_deletion_safe': True,
+                                       'coordinator_lanes': {'pending_kinds': list(_HISTORY_LANES)}}}
+    run_slice = owner_maintenance.run_storage_maintenance_slice
+    def one_adapter(*args, **kwargs):
+        checks = 0
+        def should_yield():
+            nonlocal checks
+            checks += 1
+            return checks > 1
+        return run_slice(*args, **kwargs, should_yield=should_yield)
+    options = dict(now=200_000, config=config, coordinator=coordinator,
+                   state_locked=not coordinator, include_global_indexes=True,
+                   commit_transition=(lambda operation: operation()) if coordinator else None)
+    with monkeypatch.context() as small:
+        small.setattr(owner_maintenance, 'run_storage_maintenance_slice', one_adapter)
+        first = owner_maintenance.run_owner_storage_maintenance_slice(home, previous, retention, **options)
+    assert not first['errors'] and called == []
+    assert {'task_call_telemetry', 'thread_index'} <= set(first['projection_check_pending'])
+    second = owner_maintenance.run_owner_storage_maintenance_slice(
+        home, {'storage_maintenance': first}, retention, **options)
+    assert not second['errors'] and not second['continuation_pending']
+    assert second['projection_check_pending'] == []
+    assert set(called) == set(_HISTORY_LANES) and len(called) == len(_HISTORY_LANES)
+    ran = second['coordinator_lanes']['ran'] if coordinator else second['lane_reports']
+    assert not set(storage_lanes.LANE_PROJECTION_BINDINGS).intersection(ran)
+    assert second['deletion_enabled'] is False
