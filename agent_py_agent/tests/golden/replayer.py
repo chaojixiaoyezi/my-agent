@@ -106,6 +106,14 @@ def _gateway_main():
 
 
 class ReplayGatewayProcess(GatewayProcess):
+    def __init__(self, root, provider, parameters, overrides=None):
+        super().__init__(root, provider, parameters, overrides)
+        from agent_py_agent.tests.support.ci_authenticated_gateway import seed_gateway_credential
+
+        # 回放宿主先沿正式生成入口准备私有凭据，客户端不能仅凭匿名/status成功推断它已存在。
+        # 子进程仍幂等读取同一文件，请求照常经真实认证，不在读取失败时临时补发或降级。
+        seed_gateway_credential(self.home)
+
     def _command(self):
         command = super()._command()
         calendar_day = self.parameters["calendar_day"]

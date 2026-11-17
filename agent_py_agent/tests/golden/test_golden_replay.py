@@ -273,3 +273,25 @@ def test_child_terminal_state_waits_for_exact_owned_worker_exit():
         if process.stdin is not None and not process.stdin.closed:
             process.stdin.close()
         process.wait(timeout=5)
+
+
+def test_replay_gateway_prepares_real_private_credential_before_start(tmp_path, golden_parameters):
+    from agent_py_agent.agent.gateway_parts.local_client_token import (
+        load_local_client_credential,
+        local_client_credential_path,
+    )
+    from agent_py_agent.tests.support.ci_authenticated_gateway import seed_gateway_credential
+
+    player = Replayer(tmp_path, SCENARIOS[0], golden_parameters)
+    try:
+        player.provider.start()
+        gateway = ReplayGatewayProcess(tmp_path / "gateway", player.provider, golden_parameters)
+        assert gateway.proc is None
+        path = local_client_credential_path(gateway.home)
+        before = path.read_bytes()
+        credential = load_local_client_credential(gateway.home)
+        assert gateway.headers()["X-Gateway-Token"] == credential
+        assert seed_gateway_credential(gateway.home) == credential
+        assert path.read_bytes() == before, "宿主重复准备不得轮换凭据"
+    finally:
+        player.provider.close()

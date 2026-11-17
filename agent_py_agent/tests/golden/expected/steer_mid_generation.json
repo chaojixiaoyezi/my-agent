@@ -165,7 +165,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "c8f5a8e630dac2b83c92c914a6d6002ac8b25962020b0a8cb519a54b772efaf2",
+    "body_hash": "09f70277860bc2b94cde34a49838804df7eeb187bf7107b02f67065dbc6d105e",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -833,20 +833,22 @@
           "type": "function",
           "function": {
             "name": "audit_records",
-            "description": "只读本人结构化运行审计，不读对话/日志正文。topic=decision查决策点有效设置、调用与未触发原因、用量和结果；解释指标须使用回执中的字段定义、label、coverage和status_note，不把未发送/未覆盖统计当失败或零次。topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属。scope默认owner，current_thread限本会话，all_owners仅显式获跨用户审计权限的管理员。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。",
+            "description": "只读本人结构化运行审计，不读对话/日志正文。topic=decision查决策点有效设置、调用与未触发原因、用量和结果；解释指标须使用回执中的字段定义、label、coverage和status_note，不把未发送/未覆盖统计当失败或零次。topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属；message_lifecycle用一个精确request_id/message_ref/request_ref查消息链；tool_calls查工具耗时和精确error_code。decision/requests/message_lifecycle 的 scope 默认owner，current_thread限本会话，all_owners仅显式获跨用户审计权限的管理员。tool_calls 仅支持scope=owner（本人全部会话）；current_thread/all_owners返回未开始读取的partial和改用owner的调用示例，不自动扩大范围，不能把owner结果当作当前线程或全部用户。覆盖不足按next_cursor续查，不能把missing当未发送。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。",
             "parameters": {
               "additionalProperties": false,
               "properties": {
                 "topic": {
-                  "description": "审计主题：decision（决策模型使用）或 requests（请求成败与错误码）。",
+                  "description": "decision查决策，requests查请求，message_lifecycle精确查消息链，tool_calls查工具遥测（仅支持scope=owner）。",
                   "enum": [
                     "decision",
-                    "requests"
+                    "requests",
+                    "message_lifecycle",
+                    "tool_calls"
                   ],
                   "type": "string"
                 },
                 "scope": {
-                  "description": "默认 owner（本人全部会话）。",
+                  "description": "默认owner（本人全部会话）。decision/requests/message_lifecycle可用current_thread；all_owners须原管理员跨用户许可。tool_calls仅支持owner，其它scope返回partial与明确纠正示例，不自动改范围。",
                   "enum": [
                     "current_thread",
                     "owner",
@@ -855,9 +857,51 @@
                   "type": "string"
                 },
                 "since_hours": {
-                  "description": "只看最近多少小时，默认 24。",
+                  "description": "首查最近多少小时，默认 24；续页省略或重复游标内已记录的原小时数。改值须先清空cursor；旧游标缺少原时长时须省略此字段续页。",
                   "exclusiveMinimum": 0,
                   "maximum": 720,
+                  "type": "number"
+                },
+                "request_id": {
+                  "description": "仅requests/message_lifecycle：精确请求编号。",
+                  "type": "string"
+                },
+                "error_code": {
+                  "description": "仅requests/tool_calls：精确错误码，如TOOL_TIMEOUT；独立于status。",
+                  "type": "string"
+                },
+                "channel": {
+                  "description": "仅requests：精确渠道标识。",
+                  "type": "string"
+                },
+                "cursor": {
+                  "description": "仅requests/tool_calls：原样使用上一页next_cursor并保持筛选；改scope/筛选后清空。",
+                  "type": "string"
+                },
+                "message_ref": {
+                  "description": "仅message_lifecycle：消息短引用；与request_id/request_ref只能提供一个。",
+                  "type": "string"
+                },
+                "request_ref": {
+                  "description": "仅message_lifecycle：请求短引用；与request_id/message_ref只能提供一个。",
+                  "type": "string"
+                },
+                "tool_name": {
+                  "description": "仅tool_calls且scope=owner：精确工具名。",
+                  "type": "string"
+                },
+                "status": {
+                  "description": "仅requests/tool_calls：精确协议状态，不把错误码当作status。",
+                  "type": "string"
+                },
+                "until": {
+                  "description": "仅requests/tool_calls：时间窗结束Unix秒，须不早于起点。",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "min_duration_ms": {
+                  "description": "tool_calls 最短耗时毫秒，无默认慢调用阈值。",
+                  "minimum": 0,
                   "type": "number"
                 },
                 "limit": {
@@ -2249,7 +2293,7 @@
     "timestamp": 3,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "f6c119905bec2ac5db53801164a45a1f249bfaa9c99a39a27c0be8518e2b88d3",
+    "body_hash": "9327edd742b61dfa66b7d1e83d8ee8bfd5645b8301cb2afa33f9ca950fd15152",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -2921,20 +2965,22 @@
           "type": "function",
           "function": {
             "name": "audit_records",
-            "description": "只读本人结构化运行审计，不读对话/日志正文。topic=decision查决策点有效设置、调用与未触发原因、用量和结果；解释指标须使用回执中的字段定义、label、coverage和status_note，不把未发送/未覆盖统计当失败或零次。topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属。scope默认owner，current_thread限本会话，all_owners仅显式获跨用户审计权限的管理员。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。",
+            "description": "只读本人结构化运行审计，不读对话/日志正文。topic=decision查决策点有效设置、调用与未触发原因、用量和结果；解释指标须使用回执中的字段定义、label、coverage和status_note，不把未发送/未覆盖统计当失败或零次。topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属；message_lifecycle用一个精确request_id/message_ref/request_ref查消息链；tool_calls查工具耗时和精确error_code。decision/requests/message_lifecycle 的 scope 默认owner，current_thread限本会话，all_owners仅显式获跨用户审计权限的管理员。tool_calls 仅支持scope=owner（本人全部会话）；current_thread/all_owners返回未开始读取的partial和改用owner的调用示例，不自动扩大范围，不能把owner结果当作当前线程或全部用户。覆盖不足按next_cursor续查，不能把missing当未发送。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。",
             "parameters": {
               "additionalProperties": false,
               "properties": {
                 "topic": {
-                  "description": "审计主题：decision（决策模型使用）或 requests（请求成败与错误码）。",
+                  "description": "decision查决策，requests查请求，message_lifecycle精确查消息链，tool_calls查工具遥测（仅支持scope=owner）。",
                   "enum": [
                     "decision",
-                    "requests"
+                    "requests",
+                    "message_lifecycle",
+                    "tool_calls"
                   ],
                   "type": "string"
                 },
                 "scope": {
-                  "description": "默认 owner（本人全部会话）。",
+                  "description": "默认owner（本人全部会话）。decision/requests/message_lifecycle可用current_thread；all_owners须原管理员跨用户许可。tool_calls仅支持owner，其它scope返回partial与明确纠正示例，不自动改范围。",
                   "enum": [
                     "current_thread",
                     "owner",
@@ -2943,9 +2989,51 @@
                   "type": "string"
                 },
                 "since_hours": {
-                  "description": "只看最近多少小时，默认 24。",
+                  "description": "首查最近多少小时，默认 24；续页省略或重复游标内已记录的原小时数。改值须先清空cursor；旧游标缺少原时长时须省略此字段续页。",
                   "exclusiveMinimum": 0,
                   "maximum": 720,
+                  "type": "number"
+                },
+                "request_id": {
+                  "description": "仅requests/message_lifecycle：精确请求编号。",
+                  "type": "string"
+                },
+                "error_code": {
+                  "description": "仅requests/tool_calls：精确错误码，如TOOL_TIMEOUT；独立于status。",
+                  "type": "string"
+                },
+                "channel": {
+                  "description": "仅requests：精确渠道标识。",
+                  "type": "string"
+                },
+                "cursor": {
+                  "description": "仅requests/tool_calls：原样使用上一页next_cursor并保持筛选；改scope/筛选后清空。",
+                  "type": "string"
+                },
+                "message_ref": {
+                  "description": "仅message_lifecycle：消息短引用；与request_id/request_ref只能提供一个。",
+                  "type": "string"
+                },
+                "request_ref": {
+                  "description": "仅message_lifecycle：请求短引用；与request_id/message_ref只能提供一个。",
+                  "type": "string"
+                },
+                "tool_name": {
+                  "description": "仅tool_calls且scope=owner：精确工具名。",
+                  "type": "string"
+                },
+                "status": {
+                  "description": "仅requests/tool_calls：精确协议状态，不把错误码当作status。",
+                  "type": "string"
+                },
+                "until": {
+                  "description": "仅requests/tool_calls：时间窗结束Unix秒，须不早于起点。",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "min_duration_ms": {
+                  "description": "tool_calls 最短耗时毫秒，无默认慢调用阈值。",
+                  "minimum": 0,
                   "type": "number"
                 },
                 "limit": {
