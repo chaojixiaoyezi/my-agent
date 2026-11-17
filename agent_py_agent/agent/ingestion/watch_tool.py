@@ -15,7 +15,7 @@ import re
 import time
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -357,12 +357,14 @@ class WatchStreamTool(BaseTool):
                     "协调代理仍可 list/status/inspect/close。",
                     "TOOL_PERMISSION_DENIED",
                     reported_code="AUDIT_COORDINATOR_SOURCE_ACTION_FORBIDDEN",
+                    effect_outcome="not_started",
                 )
             return _err(
                 "来源子代理只能执行当前结构化阶段允许的 watch 动作："
                 "绑定前只能打开/查看来源，绑定后只能消费、签收和只读检查自己的 watch；"
                 "配置和关闭由 Audit 协调层负责。",
                 "TOOL_PERMISSION_DENIED",
+                effect_outcome="not_started",
             )
         return handler(owner_home, params)
 
@@ -467,6 +469,7 @@ class WatchStreamTool(BaseTool):
                 "watch_stream close 不会关闭它，也不会丢弃待判记录。",
                 "TOOL_PERMISSION_DENIED",
                 reported_code="AUDIT_NAMED_CLEAR_REQUIRED",
+                effect_outcome="not_started",
             )
         from .watch_state import close_watch_state
 
@@ -1047,6 +1050,8 @@ def _prepare_open_watch(
         adapter_facts=adapter_facts,
         audit_id=probe_audit_id,
     )
+    # 只有探针明确未发出请求时才记 not_started；已触达来源的失败仍按未知处理，禁止盲重做。
+    not_sent = "not_started" if envelope.get("probe_sent") is False else ""
     probe_error_code = str(envelope.get("probe_error_code") or "").strip().upper()
     if probe_error_code:
         probe_error = str(
@@ -1059,9 +1064,10 @@ def _prepare_open_watch(
             probe_error,
             control_code,
             reported_code=reported_code,
+            effect_outcome=not_sent,
         )
     if not _is_structural_source_envelope(envelope):
-        return _err(_source_envelope_error(envelope), "SOURCE_ENVELOPE_INVALID")
+        return _err(_source_envelope_error(envelope), "SOURCE_ENVELOPE_INVALID", effect_outcome=not_sent)
     state.source_envelope = envelope
     if envelope.get("mode") in {"cursor", "poll", "adapter"}:
         state.source_mode = "" if envelope["mode"] == "cursor" else str(envelope["mode"])
@@ -1393,7 +1399,9 @@ def _resolve_open_source(
         decision = _file_access_policy(tool).check(file_path_of(url))
         if not decision.allowed:
             return _err(
-                f"文件路径访问被拒: {decision.message or decision.code}", "TOOL_PERMISSION_DENIED"
+                f"文件路径访问被拒: {decision.message or decision.code}",
+                "TOOL_PERMISSION_DENIED",
+                effect_outcome="not_started",
             )
         return normalized
     gate_error = _network_safety_error(
@@ -1407,7 +1415,8 @@ def _resolve_open_source(
         ),
     )
     if gate_error is not None:
-        return gate_error
+        # 网络闸在创建 watch 之前拒绝，零副作用；否则账本会把它记成结果未知。
+        return gate_error if gate_error.effect_outcome else replace(gate_error, effect_outcome="not_started")
     return normalized
 
 
@@ -1662,17 +1671,20 @@ def _state_for(
         return _err(
             "这个旧 watch 缺少可核对的命名 Audit 归属，当前任务不能访问。",
             "TOOL_PERMISSION_DENIED",
+            effect_outcome="not_started",
         )
     if state_audit_scope and (not current_audit or state_audit_scope != current_audit):
         return _err(
             "这个 watch 属于另一条 Audit，当前任务不能消费或修改。",
             "TOOL_PERMISSION_DENIED",
+            effect_outcome="not_started",
         )
     assigned_watch = _source_worker_watch_id(tool.agent)
     if assigned_watch and state.watch_id != assigned_watch:
         return _err(
             "来源子代理只能访问结构化绑定的那一条 watch。",
             "TOOL_PERMISSION_DENIED",
+            effect_outcome="not_started",
         )
     return state
 
@@ -1940,7 +1952,8 @@ def _probe_adapter_source_envelope(
         "valid": False,
     }
     if not audit_id:
-        return {**base, "invalid_reason": "动态来源适配器缺少准确的命名 Audit 归属"}
+        # probe_sent=False 是结构化事实：此处尚未发出任何来源请求，open 失败可如实记为 not_started。
+        return {**base, "invalid_reason": "动态来源适配器缺少准确的命名 Audit 归属", "probe_sent": False}
     checkpoint: dict[str, Any] = {}
     request_count = 0
     query_observations = []
@@ -2040,6 +2053,7 @@ def _probe_http_source_envelope(
             "invalid_reason": f"来源请求无法构造: {exc}",
             "probe_error_code": "SOURCE_REQUEST_INVALID",
             "probe_error": f"来源请求无法构造: {exc}",
+            "probe_sent": False,
         }
     ok, payload, code = fetch_json(request)
     if not ok:
@@ -4198,12 +4212,16 @@ def _err(
         body["effect_outcome"] = effect_outcome
     if next_action:
         body["next_action"] = next_action
+    # 操作账本只认结构化字段，正文里的 effect_outcome 不参与裁决；
+    # 只透传合法取值，其余仍按通用错误合同处理。
+    structured_effect = effect_outcome if effect_outcome in {"not_started", "failed", "unknown"} else ""
     return ToolHandlerOutcome(
         _TOOL_NAME,
         False,
         json.dumps(body, ensure_ascii=False),
         error_code=code,
         reported_error_code=reported_code,
+        effect_outcome=structured_effect,
     )
 
 
