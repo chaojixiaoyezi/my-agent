@@ -4,6 +4,7 @@ import gc
 import json
 import multiprocessing
 import os
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -28,7 +29,7 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
     write_approved_runtime_fact_source,
     write_runtime_fact_source,
 )
-from agent_py_agent.agent.memory_store import reference_pins, retention_scan
+from agent_py_agent.agent.memory_store import reference_pins, retention_scan, retention_scan_budget
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPolicy
 from agent_py_agent.agent.run_intent import _MAX_FACT_FILES
@@ -84,12 +85,12 @@ def test_old_terminal_facts_are_deleted_with_exact_metrics(owner, phase, resting
     directory = fact(owner, 'expired', phase=phase)
     fresh_locator(owner)
     size = sum(path.stat().st_size for path in directory.iterdir())
-    result = retention.maintain_owner_tool_outputs_lane(request(owner, cursor=None if resting else {}))
-    validate_lane_receipt(result)
+    receipts = lane_pass(owner, cursor=None if resting else {})
     assert not directory.exists()
-    assert result['items'] == result['deleted_items'] == 1
-    assert result['freed_bytes'] == size > 0
-    assert result['bytes'] == 0
+    deleted = [row for row in receipts if row.get('deleted_items', 0)]
+    assert len(deleted) == 1 and deleted[0]['items'] == deleted[0]['deleted_items'] == 1
+    assert deleted[0]['freed_bytes'] == size > 0
+    assert all(row['bytes'] == 0 and not row.get('errors') for row in receipts)
 
 
 @pytest.mark.parametrize('reason', ['running', 'approved', 'young', 'protected', 'symlink', 'nested', 'many_files'])
@@ -126,9 +127,10 @@ def test_legal_hold_and_task_local_facts_are_untouched(owner):
     result = retention.maintain_owner_tool_outputs_lane(request(owner, hold=True, commit=commits.append))
     assert result['deferred_reason'] == 'legal_hold'
     assert directory.exists() and task_fact.exists() and commits == []
-    result = retention.maintain_owner_tool_outputs_lane(request(owner))
+    receipts = lane_pass(owner)
     assert not directory.exists() and task_fact.exists()
-    assert result['deleted_items'] == 1
+    assert sum(row.get('deleted_items', 0) for row in receipts) == 1
+    assert not any(row.get('errors') for row in receipts)
 
 
 def test_owner_retention_override_is_applied_even_while_tool_outputs_rest(owner):
@@ -144,8 +146,9 @@ def test_owner_retention_override_is_applied_even_while_tool_outputs_rest(owner)
     assert kept['cursor']['next_pass_at'] == owner[1] + 3600 and kept['cursor']['facts_after'] == ''
     assert directory.exists()
     write_private_text_file_atomic(policy, json.dumps({**payload, 'tool_output_days': 30}))
-    assert retention.maintain_owner_tool_outputs_lane(request(owner))['deleted_items'] == 1
-    assert not directory.exists()
+    receipts = lane_pass(owner)
+    assert sum(row.get('deleted_items', 0) for row in receipts) == 1
+    assert not directory.exists() and not any(row.get('errors') for row in receipts)
 
 
 @pytest.mark.parametrize('resting', [False, True])
@@ -179,6 +182,7 @@ def test_bounded_calls_drain_three_hundred_facts_only_inside_run_write(owner, mo
     fresh_locator(owner)
     # 这里只验证条数上限，独立的过期预算用例验证真实时间门。
     monkeypatch.setattr(StorageLaneBudget, 'remaining_ms', lambda self: 1000.0)
+    monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=lambda: 100.0))
     commits, receipts = [], []
     inside = False
     retire = retention._retire_fact_dir
@@ -243,10 +247,11 @@ def test_missing_locator_is_allowed_but_invalid_locator_fails_closed(owner, inva
         write_private_text_file_atomic(locator, '{}')
     else:
         locator.unlink()
-    result = retention.maintain_owner_tool_outputs_lane(request(owner))
+    receipts = lane_pass(owner)
     assert directory.exists() is invalid
-    assert result.get('errors', []) == ([{'code': 'runtime_facts_locator_invalid'}] if invalid else [])
-    assert result.get('deleted_items', 0) == (0 if invalid else 1)
+    assert [error for row in receipts for error in row.get('errors', [])] == (
+        [{'code': 'runtime_facts_locator_invalid'}] if invalid else [])
+    assert sum(row.get('deleted_items', 0) for row in receipts) == (0 if invalid else 1)
 
 
 def test_busy_task_lock_is_preserved(owner):
@@ -478,6 +483,7 @@ def test_stable_fact_candidates_reuse_one_full_pin_build(owner, monkeypatch):
     monkeypatch.setattr(retention_scan, 'current_retention_pins', counted)
     # 本例只核对一次切片的解析次数；时间预算仍用原计算，冻结时钟避免调度延迟拆成两片。
     monkeypatch.setattr(storage_lanes, 'time', SimpleNamespace(monotonic=lambda: 100.0))
+    monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=lambda: 100.0))
     with no_fd_growth():
         receipts = lane_pass(owner)
     assert len(receipts) == 1 and receipts[0]['items'] == 2 and builds == [True]
@@ -542,6 +548,14 @@ def test_approved_writer_and_retirement_share_cross_process_exclusion(owner, mon
         str(owner[0].owner_home_dir), ready, proceed, attempted, blocked, completed, results))
     child.start()
     observed = []
+    pin_current = reference_pins.ReferencePinSnapshot.current
+    pending_injected = []
+
+    def pending_once(snapshot, errors, *, target=None):
+        if not writer_first and target == directory / 'task.json' and not pending_injected:
+            pending_injected.append(target)
+            raise reference_pins.ReferencePinScanPending()
+        return pin_current(snapshot, errors, target=target)
 
     @contextmanager
     def ordered_scan(path):
@@ -575,8 +589,9 @@ def test_approved_writer_and_retirement_share_cross_process_exclusion(owner, mon
         observed_os.scandir, observed_os.unlink = ordered_scan, interleaved_unlink
         with monkeypatch.context() as patch:
             patch.setattr(retention, 'os', observed_os)
-            receipt = retention.maintain_owner_tool_outputs_lane(request(owner, commit=commit))
-        assert receipt['items'] > 0, '必须经过真实候选复核，不能因能力检测变化而跳过'
+            patch.setattr(reference_pins.ReferencePinSnapshot, 'current', pending_once)
+            receipts = lane_pass(owner, commit=commit)
+        assert sum(row['items'] for row in receipts) > 0, '必须经过真实候选复核，不能因能力检测变化而跳过'
         proceed.set()
         assert completed.wait(10)
         child.join(10)
@@ -584,11 +599,15 @@ def test_approved_writer_and_retirement_share_cross_process_exclusion(owner, mon
         result = results.get(timeout=5)
         assert result == {'path': str(directory), 'source': 'approved_runtime_fact_source'}
         assert json.loads((directory / 'task.json').read_text())['source'] == 'approved_runtime_fact_source'
-        assert not receipt.get('errors')
-        assert receipt.get('deleted_items', 0) == (0 if writer_first else 1)
+        assert not any(row.get('errors') for row in receipts)
+        assert sum(row.get('deleted_items', 0) for row in receipts) == (0 if writer_first else 1)
         if not writer_first:
+            assert pending_injected == [directory / 'task.json']
+            assert receipts[0]['complete'] is False and receipts[0].get('deleted_items', 0) == 0
+            assert receipts[0]['deferred_reason'] == reference_pins.ReferencePinScanPending.code
             assert observed == ['task.json.lock'] and blocked.is_set()
     finally:
+        primary_error = sys.exc_info()[1]
         proceed.set()
         child.join(2)
         if child.is_alive():
@@ -605,4 +624,7 @@ def test_approved_writer_and_retirement_share_cross_process_exclusion(owner, mon
             if fd_delta == 0 or time.monotonic() >= deadline:
                 break
             time.sleep(0.01)
-        assert fd_delta == 0
+        if fd_delta and primary_error is not None:
+            primary_error.add_note(f'跨进程资源收尾同时发现 FD 净增 {fd_delta}；原始失败保留。')
+        else:
+            assert fd_delta == 0

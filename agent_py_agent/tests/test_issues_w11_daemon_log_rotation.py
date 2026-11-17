@@ -34,6 +34,26 @@ if mode == 'stream':
     print('CURRENT-FINAL', flush=True)
     a, b = os.fstat(1), path.stat()
     result = {'same': (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)}
+elif mode == 'shared-controlled':
+    # 由父进程安排真实公开轮转调用，避免后台调度和退休后的卷数混淆轮转证据。
+    for line in sys.stdin.buffer:
+        command = json.loads(line)
+        if command['action'] == 'write':
+            payload = ('writer=' + os.environ['WRITER'] + ' ').encode().ljust(command['size'] - 1, b'x') + b'\n'
+            result = {'written': os.write(1, payload)}
+        elif command['action'] == 'rotate':
+            result = rotation.rotate_log_volumes_once(path, now=command['now'])
+        elif command['action'] == 'inspect':
+            result = {'stdio': [rotation._identity(os.fstat(fd)) for fd in (1, 2)],
+                      'active': rotation._identity(path.stat())}
+        elif command['action'] == 'stop':
+            result = {'same': rotation._stdio_matches(path.stat())}
+        response = Path(os.environ['RESULT'] + '.' + str(command['id']))
+        temporary = response.with_name(response.name + '.tmp')
+        temporary.write_text(json.dumps(result))
+        temporary.replace(response)
+        if command['action'] == 'stop':
+            break
 elif mode == 'pipe':
     result = {'installed': rotation.install_daemon_log_rotation(str(path))}
 elif mode == 'missing':
@@ -90,6 +110,7 @@ def _env(log, result, mode, **extra):
 def _start(log, result, mode='stream', **extra):
     with log.open('ab') as handle:
         return subprocess.Popen([sys.executable, '-c', _SCRIPT], stdout=handle,
+                                stdin=subprocess.PIPE if mode == 'shared-controlled' else None,
                                 stderr=subprocess.STDOUT, env=_env(log, result, mode, **extra))
 
 
@@ -137,13 +158,58 @@ def test_live_child_rotates_without_restart_and_old_volumes_stop_growing(tmp_pat
     assert (tmp_path / 'daemon.log.rotate.lock').exists()
 
 
-# LLM: 两个独立实际进程继承同一活动路径，结束时均须回到当前inode。
-# 函数用途: 验证共享日志写者都会重开。
+# 子进程的stdio始终是真实追加FD，控制命令仅走独立stdin；每次回应原子发表到本测试私有文件。
+def _shared_command(child, output, log, sequence, action, **options):
+    child.stdin.write((json.dumps({'id': sequence, 'action': action, **options}) + '\n').encode())
+    child.stdin.flush()
+    response = Path(str(output) + '.' + str(sequence))
+    deadline = time.monotonic() + 10
+    while not response.exists():
+        assert child.poll() is None, log.read_text()
+        assert time.monotonic() < deadline, f'共享写者未完成控制动作 {action}: {log.read_text()}'
+        time.sleep(0.01)
+    return json.loads(response.read_text())
+
+
+# 两次真实封卷各自核两写者的stdout/stderr inode；存留卷数归容量退休，不能拿它当历史轮转次数。
 def test_two_writers_both_reopen_shared_log(tmp_path):
     log = tmp_path / 'shared.log'
     outputs = [tmp_path / f'result-{i}.json' for i in range(2)]
-    children = [_start(log, result, WRITER=str(i)) for i, result in enumerate(outputs)]
+    children = [_start(log, result, 'shared-controlled', WRITER=str(i)) for i, result in enumerate(outputs)]
+    sequence = 0
+
+    def command(index, action, **options):
+        nonlocal sequence
+        sequence += 1
+        return _shared_command(children[index], outputs[index], log, sequence, action, **options)
+
+    rotations = []
     try:
+        initial = [command(index, 'inspect') for index in range(2)]
+        previous = initial[0]['active']
+        assert all(row['stdio'] == [previous, previous] and row['active'] == previous for row in initial)
+        started = time.time()
+        # 首卷模拟一个检查间隔中的合法突发超量；次卷与既有总量限制共同证明退休不等于少转了一次。
+        for round_number, size in enumerate((8192, 1024)):
+            for index in range(2):
+                assert command(index, 'write', size=size) == {'written': size}
+            report = command(0, 'rotate', now=started + round_number)
+            assert report['rotated'] and report['reopened']
+            rotations.append(report)
+            leader = command(0, 'inspect')
+            active = leader['active']
+            assert active != previous and leader['stdio'] == [active, active]
+            follower = command(1, 'inspect')
+            assert follower['active'] == active and follower['stdio'] == [previous, previous]
+            reopened = command(1, 'rotate', now=started + round_number)
+            assert reopened['reopened'] and not reopened['rotated']
+            assert command(1, 'inspect') == {'active': active, 'stdio': [active, active]}
+            previous = active
+        assert len(rotations) == 2
+        assert rotations[1]['deleted'] == 1 and rotations[1]['freed_bytes'] == 2 * 8192
+        assert len(_sealed(log)) == 1  # 原容量治理确实退休了首卷，但两次真实换代已逐轮验证。
+        for index in range(2):
+            assert command(index, 'stop') == {'same': True}
         for child in children:
             _finish(child, log)
     finally:
@@ -151,7 +217,7 @@ def test_two_writers_both_reopen_shared_log(tmp_path):
             if child.poll() is None:
                 child.terminate()
                 child.wait(timeout=5)
-    assert len(_sealed(log)) >= 2
+            child.stdin.close()
     assert all(json.loads(path.read_text())['same'] for path in outputs)
     assert sum(path.stat().st_size for path in [log, *_sealed(log)]) <= 8192 + 4 * 2048
 
