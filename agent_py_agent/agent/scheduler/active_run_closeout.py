@@ -412,6 +412,35 @@ def _warn_unreadable(run_id: str, facts: FollowUpFacts, now: float) -> None:
 # LLM: 只在任务仍为 active 时 CAS 成 blocked（blocked 可由用户恢复，不属于不可复活终态）；成功后给该会话排一条
 #   来源为 scheduler:<job_id> 的宿主提示（同一 job 只保留最新一条，不刷屏）。提示写不进去时 queue_host_notice 返回 False，不影响结算。
 # 函数用途: 把没做完又没有后续工作的定时任务标为受阻，并告诉用户需要人工处理；会写任务状态和线程待送达提示。
+# LLM: 定时执行抛出非瞬态异常、scheduler 已把这次 run 记成 failed 之后调用。只收这次 run 自己的 TaskLink
+#   （task_id == run_id、同线程、仍 active），且后续工作事实读全并确认不存在；CAS active→failed 后按原代理树规则
+#   （settle_terminal_task_run：整树终态、无 UNKNOWN）收口 TaskRun。有后续工作、读不出、链接不符或 CAS 失败都保持原状，交给既有对账。
+# 函数用途: 让异常结束的定时执行（如公开回执合同拒绝）不在 task_runs 留下永远 created 的执行总账；会写任务状态。
+def close_failed_run_task(
+    service: SchedulerService, run: dict[str, object], *, runtime_db: object,
+    ignore_wake_ids: Iterable[str] = (), now: float | None = None,
+) -> bool:
+    facts = _follow_up(service, run, ignore_wake_ids, now=now)
+    if facts is None or facts.present or facts.unreadable:
+        return False
+    run_id = str(run["run_id"])
+    store = service.conversation_store
+    try:
+        link, error = store.tasks.load_report(run_id)
+        if error is not None or link is None or link.thread_id != run.get("thread_id") or link.status != "active":
+            return False
+        if store.tasks.update_status(
+                {"task_id": run_id, "status": "failed", "expected_status": "active", "now": now}) is None:
+            return False
+    except Exception:  # noqa: BLE001 - 任务权威读写失败不结算，交给后续对账
+        logger.warning("failed scheduled task could not be closed", extra={"run_id": run_id}, exc_info=True)
+        return False
+    from ..conversation.task_run_closeout import settle_terminal_task_run
+
+    settle_terminal_task_run(runtime_db, store, task_id=run_id)
+    return True
+
+
 def _block_task(service: SchedulerService, run: dict[str, object], code: str, *, now: float | None) -> bool:
     from ..conversation.host_notices import host_notice, queue_host_notice
 
@@ -439,6 +468,7 @@ __all__ = [
     "SchedulerFollowUpPolicy",
     "SchedulerRunOutcome",
     "close_active_run",
+    "close_failed_run_task",
     "settle_stale_waiting",
     "waiting_grace_seconds",
 ]

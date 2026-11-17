@@ -19,7 +19,9 @@ from .backends.errors import (
     is_provider_transient_error,
     provider_error_http_status,
 )
+from .contracts.background_public_receipt import BackgroundPublicReceiptError
 from .contracts.diagnostics import DiagnosticEnvelope, redact_diagnostic_text
+from .contracts.error_taxonomy import error_contract
 from .contracts.model_call_ledger import (
     ModelCallAdmissionClosedError,
     find_model_call_admission_error,
@@ -211,6 +213,20 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
             ),
             context=context,
         )
+    if isinstance(exc, BackgroundPublicReceiptError):
+        # 已登记的后台完成合同拒绝：模型收口没满足冻结的公开回执合同，不是代码异常；提示取自错误合同表。
+        report = _report(
+            exc,
+            _template(
+                "background_receipt_contract",
+                error_contract(exc.error_code).recovery_hint,
+                "scheduled/background public receipt contract refused delivery",
+                recoverable=False,
+            ),
+            context=context,
+        )
+        report["error_code"] = exc.error_code
+        return report
     report = _report(
         exc,
         RuntimeErrorTemplate(

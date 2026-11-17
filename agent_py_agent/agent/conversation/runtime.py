@@ -5024,6 +5024,16 @@ def _handle_nonquota_wake_error(
                     signal.wake_signal_id,
                     now=observed_at,
                 )
+                # 这次 run 已记 failed：它专属的 TaskLink 若无后续工作就结束，执行总账随代理树收口，不留 created。
+                from ..scheduler.active_run_closeout import close_failed_run_task
+
+                run = getattr(claim, "run", None)
+                if isinstance(run, dict):
+                    close_failed_run_task(
+                        scheduler.scheduler_service, run,
+                        runtime_db=getattr(getattr(scheduler.runtime.agent, "subagents", None), "runtime_db", None),
+                        ignore_wake_ids=(signal.wake_signal_id,), now=observed_at,
+                    )
     if lifecycle_reason != "thread_goal_continue":
         return
     if is_provider_transient_error(error) and not is_provider_usage_limit_error(error):
