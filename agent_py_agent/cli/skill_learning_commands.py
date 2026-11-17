@@ -17,6 +17,7 @@ from ..agent.capability.skill_learning_report import (
     apply_learned_skill_action,
     learned_skill_detail,
     learned_skills_report,
+    proposal_coverage_line,
 )
 from ..agent.capability.skill_learning_store import (
     EVENT_REMOVED,
@@ -192,6 +193,8 @@ def _list_lines(payload: dict[str, object]) -> list[str]:
         f"自动总结的 Skill（owner {payload.get('owner_id')}，共 {payload.get('count')} 个；自学习开关：{switch}）",
         f"待处理请求 {payload.get('pending_requests')} 条（溢出 {overflow} 条）；今日总结调用 {payload.get('calls_today')}/{limit} 次；累计有效使用 {effective} 次",
     ]
+    if proposal_coverage_line(payload):
+        lines.append(proposal_coverage_line(payload))
     for item in payload.get("skills") or []:
         state = _STATE_LABELS.get(item["state"], item["state"])
         lines.append(f"- {item['name']} 第 {item['version']} 版 [{state}] 更新于 {item['updated_at']}")

@@ -21,6 +21,7 @@ from ..capability.skill_learning_report import (
     apply_learned_skill_action,
     learned_skill_detail,
     learned_skills_report,
+    proposal_coverage_line,
 )
 from ..capability.skill_learning_store import (
     EVENT_REMOVED,
@@ -401,6 +402,8 @@ def _learned(host: SkillControlHost, tokens: list[str]) -> str:
     effective = int(totals.get("effective_uses") or 0)
     lines = [f"自动总结的 Skill：{report['count']} 个（自学习：{switch}；待处理请求 {report['pending_requests']} 条，溢出 {overflow} 条；"
              f"今日总结 {report['calls_today']}/{limit} 次；有效使用 {effective} 次）"]
+    if proposal_coverage_line(report):
+        lines.append(proposal_coverage_line(report))
     if not report["skills"]:
         return "\n".join(lines + ["还没有自动总结的 Skill。"])
     for index, item in enumerate(report["skills"], 1):

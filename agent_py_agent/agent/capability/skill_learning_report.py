@@ -68,12 +68,14 @@ def learned_skills_report(store: SkillLearningStore, config: object) -> dict[str
             "code": exc.code,
             "detail": dict(exc.detail),
         }
+    pending_proposals, proposal_coverage = _pending_proposal_count(store)
     return {
         "self_learning_enabled": bool(getattr(config, "enable_self_learning", False)),
         "learned_root": str(store.learned_root),
         "pending_requests": len(store.pending_requests(refill=False)),
         "overflow_requests": len(store.overflow_requests()),
-        "pending_proposals": _pending_proposal_count(store),
+        "pending_proposals": pending_proposals,
+        "proposal_coverage": proposal_coverage,
         "calls_today": registry.daily_calls if registry.daily_date == today else 0,
         "daily_history": dict(registry.daily_history),
         "skill_usage": load_skill_usage_summary(store),
@@ -87,11 +89,28 @@ def learned_skills_report(store: SkillLearningStore, config: object) -> dict[str
 
 
 # LLM: 活跃和溢出候选均来自同一canonical读取入口；只统计仍pending的项，不把superseded当待确认。
-# 函数用途: 展示全部可确认候选积压，不进行回填、确认或发布。
-def _pending_proposal_count(store: SkillLearningStore) -> int:
-    from .skill_learning_proposals import list_learning_proposals
+#   单个候选文件坏了时计数不可得，但不拖垮整份只读报告：计数为 None，另给指名该文件的单项诊断；严格读取本身不变。
+# 函数用途: 展示全部可确认候选积压及读取是否完整，不进行回填、确认或发布。
+def _pending_proposal_count(store: SkillLearningStore) -> tuple[int | None, dict[str, object]]:
+    from .skill_learning_proposals import LearningProposalUnreadable, list_learning_proposals
 
-    return sum(row.get("status") == "pending" for row in list_learning_proposals(store, include_overflow=True))
+    try:
+        rows = list_learning_proposals(store, include_overflow=True)
+    except LearningProposalUnreadable as exc:
+        return None, {"status": "unavailable", "code": exc.code,
+                      "detail": {"folder": exc.folder, "file": exc.file_name, "error": exc.error}}
+    return sum(row.get("status") == "pending" for row in rows), {"status": "complete"}
+
+
+# LLM: chat /skills learned 与 CLI learned list 共用这一行措辞；候选读取完整时返回空串，不改动其它行。
+# 函数用途: 把报告里的候选读取诊断渲染成一行中文提示。
+def proposal_coverage_line(report: dict[str, object]) -> str:
+    coverage = report.get("proposal_coverage") if isinstance(report.get("proposal_coverage"), dict) else {}
+    if coverage.get("status") != "unavailable":
+        return ""
+    detail = coverage.get("detail") if isinstance(coverage.get("detail"), dict) else {}
+    return (f"学习候选读取失败（{coverage.get('code')}）：{detail.get('folder')}/{detail.get('file')}（{detail.get('error')}）；"
+            "已发布的 Skill 照常列出，修复或移走这个文件之前，学习候选暂不能查看或确认。")
 
 
 # LLM: 名字先在登记表里精确查找，不在表里就抛 CODE_NOT_LEARNED，不用它拼路径；事件只含结构化字段与有界 reason。只读。
@@ -135,4 +154,5 @@ __all__ = [
     "learned_skill_detail",
     "learned_skill_row",
     "learned_skills_report",
+    "proposal_coverage_line",
 ]

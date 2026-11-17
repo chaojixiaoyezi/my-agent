@@ -52,6 +52,17 @@ _S3_PRUNE_MAX_INTENT_CHANGES_COUNT = 200
 _META = frozenset({'revision','status','created_at_ns','archived_at_ns','superseded_by'})
 
 
+# LLM: 严格读取照旧拒绝坏候选（仍是 ValueError，原有 except ValueError 不变），只额外带出固定目录名、文件名和错误类型，
+#   让只读报告给出单项诊断；不跳过、不吞错，消息里没有本机绝对路径。
+# 类用途: 一份学习候选文件不可读或没通过校验。
+class LearningProposalUnreadable(ValueError):
+    code = 'SKILL_LEARNING_PROPOSAL_UNREADABLE'
+
+    def __init__(self, folder, file_name, cause):
+        self.folder, self.file_name, self.error = folder, file_name, type(cause).__name__
+        super().__init__(f'学习候选文件不可读：{folder}/{file_name}（{self.error}）')
+
+
 # LLM: 只接受宿主安全编号，不允许模型提供文件路径；候选在同owner学习目录，非正式Skill目录。
 # 函数用途: 校验一个学习候选的稳定标识。
 def _proposal_name(proposal_id):
@@ -137,7 +148,10 @@ def _physical_proposals(store):
         for name in list_names_beneath(store.directory,(folder,)):
             if not name.startswith('learning-proposal-') or not name.endswith('.json'):
                 continue
-            row = _read_proposal(store,folder,name[:-5])
+            try:
+                row = _read_proposal(store,folder,name[:-5])
+            except ValueError as exc:
+                raise LearningProposalUnreadable(folder,name,exc) from exc
             if row is None:
                 raise ValueError('学习候选不存在、重复或已损坏')
             rows.append((folder,row))
