@@ -284,3 +284,100 @@ def test_message_tool_keeps_full_paths_only_for_the_turns_own_frozen_chat(tmp_pa
     assert target == "ou_current_user" and (_PATH in text) is full and "lexer.py" in text
     evidence = result.result_envelope["delivery_evidence"]["content"]
     assert (_PATH in evidence) is full
+
+
+# 函数用途: 写一条正在等待审批的进行中请求；display 为受理时冻结的路径展示事实。
+def _waiting_request(paths, request_id, *, display, channel="feishu", user="ou_admin", conversation="oc_p2p"):
+    import time
+
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    record = paths.processing / f"{request_id}.json"
+    record.write_text(json.dumps({
+        "id": request_id, "request_id": request_id, "kind": "ask", "status": "processing", "turn_phase": "open",
+        "user_id": user, "lease_started_at": time.time() - 5,
+        "metadata": {"user_id": user, "channel": channel, "channel_chat_type": "p2p", "host_path_display": display},
+        "conversation": {"channel": channel, "channel_conversation_id": conversation, "channel_user_id": user,
+                         "canonical_user_id": user},
+    }), encoding="utf-8")
+    return record
+
+
+@pytest.mark.parametrize(("display", "full"), [("full", True), ("basename", False)])
+def test_deny_reply_follows_the_target_requests_frozen_display(tmp_path, display, full):
+    from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+    from agent_py_agent.agent.gateway_parts.control_operation_service import (
+        execute_gateway_control_operation,
+        gateway_control_operation_status_payload,
+    )
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.tests.test_admin_identity_gateway import (
+        _agent,
+        _permission,
+        _scope,
+        _start_waiting,
+    )
+
+    agent = _agent(tmp_path)
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    bind_admin_channel_identity(agent.home_paths.root, "feishu", "ou_admin")
+    record = _waiting_request(paths, "req-deny-s12b", display=display)
+    thread, result = _start_waiting(record, "req-deny-s12b", _permission("req-deny-s12b"))
+    command = parse_conversation_control("/deny", reject_unknown_slash=True)
+    receipt = execute_gateway_control_operation(agent, paths, command, _scope(message_id="om-deny-s12b"),
+                                                command_text="/deny")
+    thread.join(timeout=2.0)
+    assert result["decision"] == "denied"
+    payload = gateway_control_operation_status_payload(receipt)
+    assert ("/Users/alice/private/build" in payload["message"]) is full and "build" in payload["message"]
+    assert payload.get("host_path_display") == ("full" if full else None)
+
+
+def test_cross_entry_deny_of_a_local_session_keeps_basenames(tmp_path):
+    from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+    from agent_py_agent.agent.gateway_parts.admin_control_service import (
+        execute_admin_channel_control,
+    )
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.tests.test_admin_identity_gateway import (
+        _agent,
+        _permission,
+        _scope,
+        _start_waiting,
+    )
+
+    agent = _agent(tmp_path)
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    bind_admin_channel_identity(agent.home_paths.root, "feishu", "ou_admin")
+    record = _waiting_request(paths, "req-tui-s12b", display="full", channel="chat", user="local-agent",
+                              conversation="tui-session")
+    thread, result = _start_waiting(record, "req-tui-s12b", _permission("req-tui-s12b"))
+    local = GatewayControlScope(user_id="local-agent", channel="chat", conversation_id="tui-session", metadata={})
+    denied = execute_admin_channel_control(agent, paths, parse_conversation_control("/deny", reject_unknown_slash=True),
+                                           _scope(message_id="om-cross-s12b"), approval_scope=local)
+    thread.join(timeout=2.0)
+    assert denied.ok is True and result["decision"] == "denied", denied
+    assert "/Users/alice/private/build" not in denied.message and "build" in denied.message
+    assert "host_path_display" not in denied.to_dict(), "本机会话的冻结展示不随 IM 回执外带"
+
+
+@pytest.mark.parametrize(("display", "full"), [("full", True), ("", False)])
+def test_sensitive_control_reply_keeps_the_receipts_frozen_display(tmp_path, display, full):
+    from unittest.mock import patch
+
+    from agent_py_agent.agent.adapter.manager import GatewayAskSubmission
+    from agent_py_agent.tests.test_admin_identity_clients import _manager, _message, _wait_for_reply
+
+    manager, adapter = _manager(tmp_path)
+
+    def submit(payload, _msg):
+        assert "host_path_display" not in payload["metadata"], "回执事实不回流进请求正文"
+        return GatewayAskSubmission("", status="control", kind="deny", ok=True,
+                                    message=f"已拒绝本次操作：run_command(rm -r {_PATH})。",
+                                    operation_id="gwctl-msg-" + "0" * 32,
+                                    **({"host_path_display": display} if display else {}))
+
+    with patch.object(manager, "_submit_gateway_payload", side_effect=submit):
+        assert manager.route_message(_message("/deny")) is True
+        text = _wait_for_reply(adapter)
+    assert (_PATH in text) is full and "lexer.py" in text

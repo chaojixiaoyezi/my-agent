@@ -72,6 +72,8 @@ _CONTROL_RESULT_PROJECTION_FIELDS = {
     "error_code",
     "task_status",
     "details",
+    # 目标请求冻结的完整路径展示事实（S12），只在 full 时出现，IM 适配层回送本条控制回复时沿用。
+    "host_path_display",
 }
 
 

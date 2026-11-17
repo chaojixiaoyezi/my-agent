@@ -71,6 +71,8 @@ class PendingToolApproval:
     request_id: str
     chunk_path: Path
     request: ToolApprovalRequest
+    # 目标请求受理时冻结了 host_path_display=full，且其通道与用户就是查询作用域自己的（S12）；其它情形为 False。
+    preserve_host_paths: bool = False
 
 
 # LLM: 先核作用域（非本机通道、功能开启、一对一私聊），再按 kind 分派；/approve 另需当前身份已绑定管理员并校验密码，
@@ -106,7 +108,9 @@ def execute_admin_channel_control(
         return _refusal(command.kind, _NO_PENDING, "APPROVAL_NOT_PENDING")
     if len(pending) > 1:
         return _refusal(command.kind, _AMBIGUOUS, "APPROVAL_AMBIGUOUS")
-    return _decide_pending_approval(home_root, command, identity, pending[0])
+    # 跨入口目标（本人 TUI 会话）的冻结展示属于本机查看者，回到 IM 时一律按 basename。
+    return _decide_pending_approval(home_root, command, identity, pending[0],
+                                    preserve_host_paths=approval_scope is None and pending[0].preserve_host_paths)
 
 
 # LLM: 只读：从本会话仍开放的精确前台回合里找未决审批；请求 owner 必须与控制作用域 owner 一致，请求号必须等于回合号，
@@ -134,8 +138,9 @@ def pending_tool_approvals(
         if not request_id or record.path is None or request_owner != scope_owner:
             continue
         chunk_path = claimed_request_chunk_path(record.path, request_id)
+        keep = _request_keeps_host_paths(record.payload, scope)
         pending.extend(
-            PendingToolApproval(request_id, chunk_path, request)
+            PendingToolApproval(request_id, chunk_path, request, keep)
             for request in _unresolved_permission_requests(chunk_path, _lease_started_at(record.payload))
             if request.request_id == request_id
             and not gateway_permission_decision_path(chunk_path, request).exists()
@@ -192,13 +197,28 @@ def _execute_admin_identity(
     return ConversationControlResult("admin", True, _LOGIN_DONE + _DELETE_HINT)
 
 
+# LLM: 只读目标请求受理时冻结的 host_path_display（S12），不重新判定资格；通道和用户都须是查询作用域自己的，
+#   记录缺字段或身份不同一律按否（basename）。
+# 函数用途: 判断一条待决审批的回执摘要能否沿用目标请求冻结的完整路径展示。
+def _request_keeps_host_paths(payload: dict, scope: GatewayControlScope) -> bool:
+    from .request_history import gateway_request_preserves_host_paths
+
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return (gateway_request_preserves_host_paths(payload)
+            and str(metadata.get("channel") or "").strip().lower() == str(scope.channel or "").strip().lower()
+            and str(payload.get("user_id") or "").strip() == str(scope.user_id or "").strip())
+
+
 # LLM: 有副作用：/approve 先校验密码（失败计入节流），通过后与 /deny 一样只原子写一份精确决定文件；原等待方负责消费并执行或拒绝。
+#   preserve_host_paths 只由调用方按目标请求冻结事实传入（S12），结果随回执带回 host_path_display=full 供 IM 出口沿用。
 # 函数用途: 对唯一的待决审批写入“仅本次批准”或“拒绝”。
 def _decide_pending_approval(
     home_root: object,
     command: ConversationControlCommand,
     identity: tuple[str, str],
     target: PendingToolApproval,
+    *,
+    preserve_host_paths: bool = False,
 ) -> ConversationControlResult:
     approving = command.kind == "approve"
     if approving:
@@ -207,9 +227,10 @@ def _decide_pending_approval(
             return refusal
     decision = ToolApprovalDecision(target.request.permission_id, "approved" if approving else "denied")
     write_gateway_permission_decision(target.chunk_path, target.request, decision)
-    summary = _approval_summary(target.request, identity[0])
+    summary = _approval_summary(target.request, identity[0], preserve_host_paths=preserve_host_paths)
     message = f"已批准本次操作：{summary}。{_DELETE_HINT}" if approving else f"已拒绝本次操作：{summary}。"
-    return ConversationControlResult(command.kind, True, message, request_id=target.request_id)
+    return ConversationControlResult(command.kind, True, message, request_id=target.request_id,
+                                     host_path_display="full" if preserve_host_paths is True else "")
 
 
 # LLM: 节流键是可信渠道身份；节流或密码存储不可用时按拒绝处理（不放行），文案不区分密码错与锁定。
@@ -274,9 +295,11 @@ def _event_time(row: dict) -> float:
 
 
 # LLM: 摘要只用审批请求里已脱敏的 description，再按渠道收敛宿主路径并限长；不读工具参数原文。
+#   preserve_host_paths 只来自目标请求冻结的展示事实（S12）；凭据遮蔽在任何取值下都生效。
 # 函数用途: 生成回复里展示的工具操作摘要。
-def _approval_summary(request: ToolApprovalRequest, channel: str) -> str:
-    projected = project_host_paths_for_channel(project_user_reply(request.description or request.tool_name).content, channel)
+def _approval_summary(request: ToolApprovalRequest, channel: str, *, preserve_host_paths: bool = False) -> str:
+    projected = project_host_paths_for_channel(project_user_reply(request.description or request.tool_name).content, channel,
+                                               preserve_host_paths=preserve_host_paths is True)
     text = " ".join(projected.split()) or request.tool_name
     return text if len(text) <= _SUMMARY_MAX_CHARS else text[: _SUMMARY_MAX_CHARS - 1] + "…"
 

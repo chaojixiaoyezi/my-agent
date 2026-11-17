@@ -874,11 +874,14 @@ def _bridge_topic_context(manager, msg, original_content):
 
 
 # LLM: 敏感提交不落盘、不重试；G2b 开关打开时凭据拒绝只返回安全原因，网络错误只记类型，不把密码或 token 带入日志。
+#   Gateway 回执里冻结的路径展示事实（S12）覆盖写入本条入站消息的路由元数据，供同一条回复出口沿用；失败路径保持 basename。
 # 函数用途: 执行一次敏感控制提交，给原通道投递返回安全文案和编号。
 def _sensitive_gateway_submission(manager: ChannelManager, msg: IncomingMessage) -> tuple[str, str]:
     reply_id = f"control-{msg.message_id}"
+    msg.metadata["host_path_display"] = ""
     try:
         submission = manager._submit_gateway_ask(msg)
+        msg.metadata["host_path_display"] = submission.host_path_display
         return submission.operation_id or reply_id, submission.message or "系统命令没有返回结果。"
     except LocalClientCredentialError as exc:
         return reply_id, str(exc)

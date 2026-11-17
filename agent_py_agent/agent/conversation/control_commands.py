@@ -178,6 +178,8 @@ class ConversationControlResult:
     control_state: str = ""
     error_code: str = ""
     details: dict[str, object] | None = None
+    # 只由宿主按目标请求冻结的 host_path_display=full 设置（S12 审批回执）；其它取值不出字段，IM 出口按 basename。
+    host_path_display: str = ""
 
     # LLM: HTTP及IM边界只接收普通类型化投影，不接收数据类的 repr 展示字符串。
     # 函数用途:把控制结果转换成可以安全跨进程传输的普通字典。
@@ -200,6 +202,8 @@ class ConversationControlResult:
             payload["error_code"] = self.error_code
         if self.details is not None:
             payload["details"] = dict(self.details)
+        if self.host_path_display == "full":
+            payload["host_path_display"] = "full"
         if self.status is not None:
             task_status = asdict(self.status)
             task_status["task"] = redact_host_absolute_paths(str(task_status.get("task") or ""))
