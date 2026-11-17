@@ -1797,6 +1797,28 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="只有本机管理员（或已绑定为管理员的 IM 身份）可以用 /wakes 查看或重放已结案的后台唤醒；请联系管理员处理。",
     ),
+    "WAKE_SIGNAL_ID_INVALID": ErrorContract(
+        code="WAKE_SIGNAL_ID_INVALID",
+        category="validation",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="唤醒编号格式不合法，未重放也未撤销；先用结案列表核对准确的 wake_signal_id，不要猜 ID 重试。",
+    ),
+    "WAKE_DISMISS_ARCHIVE_CONFLICT": ErrorContract(
+        code="WAKE_DISMISS_ARCHIVE_CONFLICT",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="归档目录里已有这条唤醒的同名文件，未覆盖、未写撤销回执，原结案记录保持原样；先人工核对两份留档再处理。",
+    ),
+    # S11：定时后台片在工具轮边界把车道让给同会话排队的用户回合；同一定时执行停在 waiting，由续跑唤醒接着做。
+    "USER_INPUT_YIELD": ErrorContract(
+        code="USER_INPUT_YIELD",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.CONTINUE.value,
+        recovery_hint="定时任务为先处理新到的用户消息暂时让出会话，用户回合结束后会自动接着执行，不占技术续跑次数；无需重新触发。",
+    ),
     "SESSION_TASK_RATE_LIMIT": ErrorContract(
         code="SESSION_TASK_RATE_LIMIT",
         category="orchestration",
@@ -4851,6 +4873,7 @@ ERROR_CONTRACTS.update({
             ('CREDENTIAL_TASK_NOT_ACTIVE', 'state', '原任务已结束或尚未活动，未发卡；只在原活动任务申请，不冒用其它任务。'),
             ('CREDENTIAL_CHANNEL_UNAVAILABLE', 'configuration', '原通道无法提供私人凭据交互；不能改发群内明文或借管理员身份。'),
             ('CREDENTIAL_NOT_AUTHORIZED', 'permission', '当前原发起人无此凭据任务或监控授权；不得改用其它 owner 或引用。'),
+            ('CREDENTIAL_NOT_FOUND', 'state', '当前 owner 下没有这条凭据记录；先用凭据列表核对 credential_ref，不猜引用或改查其它 owner。'),
             ('CREDENTIAL_CARD_NOT_DELIVERED', 'network', '私人卡片没有可核验送达事实；先核查原发送，不重复外发或降级明文。'),
             ('CREDENTIAL_ENCRYPTION_UNAVAILABLE', 'configuration', '宿主加密依赖不可用，未发卡；请管理员修复依赖，不能保存明文。'),
             ('CREDENTIAL_BINDING_INVALID', 'state', '目标、参数或原任务绑定不符，未完成卡片操作；按原任务核对，不猜新身份。'),
