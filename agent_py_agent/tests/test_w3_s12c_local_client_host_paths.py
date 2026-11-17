@@ -51,7 +51,8 @@ def test_tui_local_committed_reply_and_public_stream_keep_the_full_path():
     _assert_full_and_masked(_assistant_text(streamed))
 
 
-def test_plain_chat_final_expand_and_commentary_keep_the_full_path(capsys):
+def test_plain_chat_final_expand_and_commentary_keep_the_full_path(capsys, monkeypatch):
+    from agent_py_agent.cli.chat_parts import rendering
     from agent_py_agent.cli.chat_parts.plain_ui import (
         AssistantResponseRenderRequest,
         _handle_expand_command,
@@ -59,6 +60,8 @@ def test_plain_chat_final_expand_and_commentary_keep_the_full_path(capsys):
         _render_assistant_response,
     )
 
+    # TUI 输出槽是进程级全局，其它测试可能留下；清空后 _cprint 才写到被捕获的 stdout。
+    monkeypatch.setattr(rendering, "_TUI_OUTPUT_SINK", None)
     history: list[str] = []
     _render_assistant_response(AssistantResponseRenderRequest(_TEXT, history, "agent", preview_lines=50,
                                                               preview_chars=5000))
