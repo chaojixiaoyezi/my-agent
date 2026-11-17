@@ -4,7 +4,9 @@
 # 模块用途: 为内置文件工具装配配置、解析路径和检查读写边界，不拥有插件或任务状态。
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -24,6 +26,7 @@ from ..user_space.owner_quota import (
     OwnerQuotaEnforcer,
     OwnerQuotaExceeded,
     OwnerQuotaUnavailable,
+    reconcile_owner_quota_slice,
 )
 from ._filesystem_helpers import (
     _normalized_workspace_roots,
@@ -167,6 +170,20 @@ def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolHandlerO
     )
 
 
+# LLM: 与后台维护调用同一个 reconcile_owner_quota_slice；只在原准入锁外调用，总时长约 200 毫秒、每片至多 4096 项。
+#   大owner走不完就返回 False，由调用方照旧拒绝，后台维护继续推进同一扫描。
+# 函数用途: 前台有界补一次 owner 配额对账，走完返回 True。
+def _reconcile_owner_quota_inline(owner_root: Path) -> bool:
+    deadline = time.monotonic() + 0.2
+    while (remaining_ms := (deadline - time.monotonic()) * 1000) > 0:
+        try:
+            if reconcile_owner_quota_slice(owner_root, max_entries=4096, max_ms=remaining_ms)["complete"]:
+                return True
+        except (OwnerQuotaUnavailable, OSError, ValueError):
+            return False
+    return False
+
+
 # LLM: 工作区和已授权外部根由 registry 注入；路径决定共用 PathAccessPolicy，语法观察只读宿主开关，不从模型参数生成权限。
 # 类用途: 为内置读写工具提供路径解析、权限核对、诊断配置和输出路径展示。
 class FileSystemTool(BaseTool):
@@ -230,12 +247,26 @@ class FileSystemTool(BaseTool):
             return self.model_spec
         return replace(self.model_spec, description=self.path_scope_description_base + self.path_scope_notes[regime])
 
+    # LLM: 有限配额owner的任务目录由宿主在准入外建好、shell也会在准入外写文件，逐目录表随即过期，前台准入按
+    #   reconciliation_pending 拒绝增长，要等下一拍后台对账（至多一分钟）。2026-11-17 W3 live：普通用户u1的网页任务里
+    #   write_file 连拒三次，模型只能改用shell。这里只对该原因，在原准入之外跑一次同一对账入口（有界），走完才重试一次；
+    #   对账没走完或重试仍拒绝就照旧抛原错误。配额公式、锁顺序和失败即拒绝都不变，准外写入先被计量才放行。
+    # 函数用途: 为三写入口预留配额，对账挂起时就地补一次有界对账再重试。
+    @contextmanager
     def quota_changes(self, changes: list[OwnerQuotaChange]):
         if self.owner_quota is None:
-            from contextlib import nullcontext
-
-            return nullcontext(None)
-        return self.owner_quota.reserve(changes)
+            yield None
+            return
+        stack = ExitStack()
+        try:
+            projection = stack.enter_context(self.owner_quota.reserve(changes))
+        except OwnerQuotaUnavailable as error:
+            if error.reason_code != "reconciliation_pending" or not _reconcile_owner_quota_inline(
+                    self.owner_quota.owner_root):
+                raise
+            projection = stack.enter_context(self.owner_quota.reserve(changes))
+        with stack:
+            yield projection
 
     # LLM: 原路径拒绝码始终保留；建议只核对存在性和同一策略，不自动访问或授权猜测目标。
     # 函数用途: 解析并裁决原路径，拒绝时最多附带已经核实的拼写候选。
