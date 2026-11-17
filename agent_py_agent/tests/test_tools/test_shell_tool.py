@@ -1587,7 +1587,13 @@ def test_shell_perf_snapshot_directory_work_is_constant(tmp_path: Path) -> None:
         assert hashlib.sha256(backup.read_bytes()).hexdigest() == snapshot.sha256
         if os.name == "posix":
             assert backup.stat().st_mode & 0o777 == 0o600
-    assert protection.read_operation_manifest(store, snapshots[0].operation_key)["state"] == "prepared"
+    # S4: prepared is staged in-process; the first durable manifest is the merged executing write.
+    assert protection.read_operation_manifest(store, snapshots[0].operation_key) is None
+    key = protection.mark_shell_artifact_operation_executing(store, snapshots)
+    protection.release_shell_artifact_operation(key)
+    manifest = protection.read_operation_manifest(store, key)
+    assert manifest["state"] == "executing"
+    assert {item["state"] for item in manifest["items"]} == {"prepared"}
 
 
 # LLM: Empty and unchanged postimages need no validator copy; changed nonempty bytes still use the real validator.

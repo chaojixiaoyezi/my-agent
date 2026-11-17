@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1515,
+  "count": 1518,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1202,6 +1202,30 @@
       "unit": "个请求",
       "category": "上限预算",
       "description": "同线程历史附件定位最多核验的已完成请求数；不足时明确partial，不扩扫全历史。"
+    },
+    {
+      "name": "_PENDING_MANIFEST_MAX",
+      "file": "agent_py_agent/agent/artifacts/shell_protection.py",
+      "value": 256,
+      "unit": "",
+      "category": "上限预算",
+      "description": "本进程暂存清单的条数上限；超出时丢弃最旧的，对应 mark 找不到清单即失败关闭（命令不启动），只多一次重试成本。"
+    },
+    {
+      "name": "_REUSE_MAX_BYTES",
+      "file": "agent_py_agent/agent/artifacts/shell_protection.py",
+      "value": 268435456,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "每个 owner 停放前像的总字节上限；超出时逐出最早记录的条目，限制为复用而长期保留的副本体积。"
+    },
+    {
+      "name": "_REUSE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/artifacts/shell_protection.py",
+      "value": 1024,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "每个 owner 复用索引的条目上限；超出时逐出最早记录的条目，被逐出的产物下次命令只是重新复制。"
     },
     {
       "name": "MAX_ASSET_BYTES",

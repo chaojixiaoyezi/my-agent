@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 import secrets
 import stat
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from agent_py_agent.agent.common.json_io import locked_json_path
+from agent_py_agent.agent.common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 from agent_py_agent.agent.contracts.artifact_acceptance import (
     ArtifactAcceptanceRequest,
     validate_artifact,
@@ -46,6 +50,27 @@ _BACKUP_REF_PREFIX = "owner-artifact-backup:"
 _BACKUP_SCHEMA = "v1"
 _ACTIVE_OPERATION_KEYS: set[str] = set()
 _ACTIVE_OPERATION_LOCK = threading.RLock()
+# 已备份、尚未进入 executing 的操作清单只暂存在本进程（prepared 与 executing 合并为一次耐久写）；键为 operation key。
+_PENDING_MANIFESTS: dict[str, dict[str, Any]] = {}
+# 本进程暂存清单的条数上限；超出时丢弃最旧的，对应 mark 找不到清单即失败关闭（命令不启动），只多一次重试成本。
+_PENDING_MANIFEST_MAX = 256
+# 复用区目录名：位于 owner 备份根 v1/ 下，停放上一次命令确认未变化的前像；点前缀不可能等于 64 位十六进制操作键，
+# 操作清理与修剪不会进入。
+_REUSE_DIRNAME = ".reuse"
+# 复用索引文件名：非权威缓存，丢失、损坏或断电回退只会让下一次命令退回完整复制与哈希。
+_REUSE_INDEX_NAME = "index.json"
+# 复用索引格式标识；格式变化时换值，旧索引整体按空处理。
+_REUSE_SCHEMA = "shell_preimage_reuse.v1"
+# 文件系统时钟探针文件名：只用来取得与产物 ctime 同源的当前文件系统时间，内容恒为空。
+_REUSE_CLOCK_NAME = "clock"
+# 停放前像后缀：与操作目录里的 .blob 区分，操作级清理、遍历与计数不会误删或误计停放副本。
+_REUSE_BLOB_SUFFIX = ".preimage"
+# 每个 owner 复用索引的条目上限；超出时逐出最早记录的条目，被逐出的产物下次命令只是重新复制。
+_REUSE_MAX_ENTRIES = 1024
+# 每个 owner 停放前像的总字节上限；超出时逐出最早记录的条目，限制为复用而长期保留的副本体积。
+_REUSE_MAX_BYTES = 256 * 1024 * 1024
+# 本进程身份：快照/复核记下的指纹凭据只在同一进程内可信（同进程内不会跨断电）；重启或崩溃后的恢复进程一律整份哈希。
+_PROCESS_TOKEN = secrets.token_hex(16)
 
 
 # LLM: Snapshot exposes only an owner-local opaque backup ref; never add a host absolute backup path.
@@ -125,6 +150,9 @@ class OpenedArtifactSource:
 
 # LLM: 备份只覆盖受信根内存在的普通文件；过时/越界 registry 引用不是当前命令的执行前置条件。selection_counts 只写计数，不泄露路径。
 # 批量备份仍逐个同步 blob 内容，只把目录初始化及目录同步合并到清单发布前。
+#   指纹与本进程上一次复核记录一致且非 racy 的产物，把复用区里已刷盘的同一前像改名移入本操作目录（不复制、不哈希、
+#   不刷 blob），其余照旧复制；清单只在本进程暂存，由 mark_shell_artifact_operation_executing 以 executing 状态一次
+#   耐久写入（命令启动前完成）。复用索引与时钟探针在首个产物打开、私有目录建好之后才读取，零产物命令不触碰磁盘。
 # 函数用途: 为当前可保护产物建立私有前像；跳过不存在或权限外的旧引用，保留真正备份失败和 no-follow 防护。
 def snapshot_ready_artifacts(
     workspace_root: str | Path,
@@ -172,6 +200,9 @@ def snapshot_ready_artifacts(
     )
     operation_dir = store_root / _BACKUP_SCHEMA / operation_key
     snapshots: list[ShellArtifactSnapshot] = []
+    hints: list[dict[str, Any]] = []
+    reuse_index: dict[str, dict[str, Any]] | None = None
+    clock: tuple[int, int] | None = None
     try:
         for record in ready:
             opened = _open_snapshot_candidate(record.path, trusted_roots, selection_counts)
@@ -180,16 +211,28 @@ def snapshot_ready_artifacts(
             try:
                 if not snapshots:
                     _prepare_backup_directory(operation_dir)
-                snapshots.append(
-                    _copy_ready_snapshot(record, opened, operation_dir, store_root)
-                )
+                if reuse_index is None:
+                    reuse_index = _read_reuse_index(store_root)
+                    # 时钟下界必须早于本批所有 fstat；之后观测到的指纹才能按 racy 规则判断。
+                    clock = _filesystem_clock(store_root)
+                fingerprint = _stat_fingerprint(os.fstat(opened.descriptor))
+                entry = reuse_index.get(str(opened.path))
+                snapshot = _reuse_ready_snapshot(record, opened, operation_dir, store_root, entry, fingerprint)
+                if snapshot is None:
+                    snapshot = _copy_ready_snapshot(record, opened, operation_dir, store_root)
+                    # 复制已断言前后 stat 稳定，复制后的指纹就是这份前像字节的指纹。
+                    hint = _fingerprint_hint(_stat_fingerprint(os.fstat(opened.descriptor)), clock)
+                else:
+                    # 复用项沿用索引里那份已可信的凭据；稳态下复核回报的凭据与索引逐字段相同，索引无需重写。
+                    hint = dict(entry["fingerprint"])
+                snapshots.append(snapshot)
+                hints.append(hint)
             finally:
                 opened.close()
         if not snapshots:
             return []
         _fsync_directory(operation_dir)
         _write_shell_operation_state(
-            store_root,
             operation_key,
             _ShellOperationStateRequest(
                 workspace_root=root,
@@ -200,6 +243,7 @@ def snapshot_ready_artifacts(
                 snapshots=snapshots,
                 source_roots=trusted_roots,
             ),
+            hints,
         )
     except BaseException:
         for snapshot in snapshots:
@@ -552,12 +596,13 @@ def _rmtree_at(
 
 # LLM: `executing` is written durably before spawn and also tracked in-process. Reconciliation in
 # the same live Gateway must not inspect a command that is still mutating its artifacts.
+#   prepared 只在本进程暂存，这里一次耐久写出 executing（合并原两次清单写），命令启动前完成；写失败时命令不启动。
 # 函数用途: 把已完成预备份的 operation 原子推进到“命令可能已经执行”，并登记本进程活跃身份。
 def mark_shell_artifact_operation_executing(
     backup_store_root: str | Path,
     snapshots: list[ShellArtifactSnapshot],
 ) -> str:
-    operation_key, manifest = _manifest_for_snapshots(backup_store_root, snapshots)
+    operation_key, manifest, staged = _prepared_manifest_for_snapshots(backup_store_root, snapshots)
     if str(manifest.get("state") or "") != "prepared":
         raise OSError("shell artifact operation is not prepared")
     with _ACTIVE_OPERATION_LOCK:
@@ -570,8 +615,53 @@ def mark_shell_artifact_operation_executing(
         write_operation_manifest(backup_store_root, operation_key, manifest)
     except BaseException:
         release_shell_artifact_operation(operation_key)
+        if staged:
+            _discard_unpublished_snapshots(backup_store_root, operation_key, snapshots)
         raise
     return operation_key
+
+
+# LLM: 暂存清单必须与这批快照逐字段一致；本进程没有暂存时只接受磁盘上已发布的 prepared 清单（旧版本写入），否则失败关闭。
+# 函数用途: 取得待进入 executing 的清单，并标明它是否来自本进程暂存。
+def _prepared_manifest_for_snapshots(
+    backup_store_root: str | Path,
+    snapshots: list[ShellArtifactSnapshot],
+) -> tuple[str, dict[str, Any], bool]:
+    if snapshots:
+        with _ACTIVE_OPERATION_LOCK:
+            manifest = _PENDING_MANIFESTS.pop(snapshots[0].operation_key, None)
+        if manifest is not None:
+            expected = [snapshot.to_dict() for snapshot in snapshots]
+            if manifest.get("snapshots") != expected or any(
+                snapshot.operation_key != snapshots[0].operation_key
+                or not _backup_ref_belongs_to_operation(snapshot.backup_ref, snapshot.operation_key)
+                for snapshot in snapshots
+            ):
+                raise OSError("shell artifact snapshots do not match staged manifest")
+            return snapshots[0].operation_key, manifest, True
+    operation_key, manifest = _manifest_for_snapshots(backup_store_root, snapshots)
+    return operation_key, manifest, False
+
+
+# LLM: 只在清单确实没有发布时删除本次移入或复制的前像；无法确认（读清单失败）时保留，宁可留私有残片也不丢恢复依据。
+# 函数用途: executing 清单写入失败后回收未被任何清单引用的本次前像。
+def _discard_unpublished_snapshots(
+    backup_store_root: str | Path,
+    operation_key: str,
+    snapshots: list[ShellArtifactSnapshot],
+) -> None:
+    try:
+        if read_operation_manifest(backup_store_root, operation_key) is not None:
+            return
+    except (OSError, ValueError):
+        return
+    store_root = _lexical_absolute_path(backup_store_root)
+    for snapshot in snapshots:
+        try:
+            _discard_backup(store_root, snapshot.backup_ref)
+        except (OSError, ValueError):
+            continue
+    _prune_empty_backup_dirs(store_root / _BACKUP_SCHEMA / operation_key, store_root / _BACKUP_SCHEMA)
 
 
 # LLM: The completed handler result closes the crash window between ShellTool return and the
@@ -773,14 +863,29 @@ def _manifest_for_snapshots(
     return operation_key, manifest
 
 
-# LLM: Manifest creation captures only host-owned identity and the already-authorized source roots;
-# no command text or model prose participates in recovery decisions.
-# 函数用途: 持久化 shell 产物保护阶段、快照、工作区身份和结构化运行身份。
+# LLM: 记录的是与原 prepared 清单完全相同的载荷，外加每项快照时的指纹凭据（指纹、观测前时钟下界、本进程身份，
+#   供同进程复核免哈希）；只暂存在本进程，由 mark 以 executing 一次耐久发布；有界，超过上限丢最旧的，其 mark 会因
+#   找不到清单失败关闭（命令不启动）。
+# 函数用途: 记录待 executing 的 prepared 状态，不做任何磁盘写。
 def _write_shell_operation_state(
-    backup_store_root: Path,
     operation_key: str,
     request: _ShellOperationStateRequest,
+    hints: list[dict[str, Any]],
 ) -> None:
+    payload = _shell_operation_state_payload(request)
+    for item, hint in zip(payload["items"], hints):
+        item["fingerprint"] = dict(hint)
+    with _ACTIVE_OPERATION_LOCK:
+        _PENDING_MANIFESTS.pop(operation_key, None)
+        _PENDING_MANIFESTS[operation_key] = payload
+        while len(_PENDING_MANIFESTS) > _PENDING_MANIFEST_MAX:
+            _PENDING_MANIFESTS.pop(next(iter(_PENDING_MANIFESTS)))
+
+
+# LLM: Manifest creation captures only host-owned identity and the already-authorized source roots;
+# no command text or model prose participates in recovery decisions.
+# 函数用途: 生成 shell 产物保护阶段、快照、工作区身份和结构化运行身份的清单载荷。
+def _shell_operation_state_payload(request: _ShellOperationStateRequest) -> dict[str, Any]:
     identity = _path_identity(request.workspace_root)
     scope = request.run_scope if isinstance(request.run_scope, dict) else {}
     payload = {
@@ -804,7 +909,7 @@ def _write_shell_operation_state(
         ],
         "updated_at": time.time(),
     }
-    write_operation_manifest(backup_store_root, operation_key, payload)
+    return payload
 
 
 # LLM: Reconciliation must bind the private manifest back to the current canonical operation and
@@ -894,6 +999,9 @@ def _path_identity(path: Path) -> tuple[int, int]:
 
 # LLM: Scan durable operation/ref rows once before observation; changed items still commit individually.
 # Batch unchanged observations before deleting any blob, then persist cleanup debt/completion together.
+#   快照时的可信指纹凭据与命令后实测完全一致时不再哈希；指纹变化、racy、异进程（重启/断电后的恢复）或缺失（旧清单）
+#   照旧整份哈希。观测屏障落盘后先把可信凭据非耐久地写入复用索引（已变更的产物从索引移除），再在逐项清理里把这些
+#   未变化前像改名停放进复用区代替删除；清理顺序、屏障与债务语义不变。
 # 函数用途: 幂等复核所有产物，逐项保存变更，并用两个耐久阶段批量清理未变化前像。
 def reconcile_shell_artifact_operation_items(
     workspace_root: str | Path,
@@ -923,6 +1031,9 @@ def reconcile_shell_artifact_operation_items(
         },
     )
     observed_unchanged = False
+    store_root = _lexical_absolute_path(backup_store_root)
+    post_clock = _filesystem_clock(store_root)
+    observed_fingerprints: dict[str, dict[str, Any]] = {}
     for item, snapshot in zip(items, snapshots):
         state = str(item.get("state") or "")
         if state in {"registered", "unchanged", "unchanged_observed", "cleanup_pending"}:
@@ -953,6 +1064,9 @@ def reconcile_shell_artifact_operation_items(
                 backup_store_root=backup_store_root,
                 source_roots=source_roots,
                 defer_unchanged_cleanup=True,
+                fingerprint_hints={snapshot.artifact_id: item.get("fingerprint")},
+                clock=post_clock,
+                observed_fingerprints=observed_fingerprints,
             )
             if summary.get("changed"):
                 item["state"] = "registered"
@@ -967,7 +1081,15 @@ def reconcile_shell_artifact_operation_items(
     if observed_unchanged:
         manifest["updated_at"] = time.time()
         write_operation_manifest(backup_store_root, operation_key, manifest)
-    _retry_manifest_cleanup(backup_store_root, operation_key, manifest, snapshots)
+    parkable = _record_reuse_entries(store_root, items, snapshots, observed_fingerprints)
+    _retry_manifest_cleanup(
+        backup_store_root,
+        operation_key,
+        manifest,
+        snapshots,
+        park=(lambda snapshot: _park_preimage(store_root, snapshot)) if parkable else None,
+        parkable=parkable,
+    )
     aggregate = _empty_reconciliation_summary(len(snapshots))
     for item in items:
         _merge_reconciliation_summary(aggregate, item.get("summary"))
@@ -1004,14 +1126,20 @@ def _merge_reconciliation_summary(
 
 # LLM: The durable `unchanged_observed` phase always precedes blob deletion. This helper can be
 # replayed after a crash without reopening or reclassifying the live artifact.
+#   park 只由同进程的操作级复核传入：先把前像改名停放进复用区（等同从本操作移走），再走原删除；删除失败时把停放的
+#   前像移回原位，债务项仍指向一份真实存在的前像，与原语义一致。
 # 函数用途: 清理一份已确认无变化的前像，失败时返回需要后续重试的 opaque ref。
 def _finish_unchanged_item_cleanup(
     backup_store_root: str | Path,
     snapshot: ShellArtifactSnapshot,
+    park: Callable[[ShellArtifactSnapshot], Callable[[], None] | None] | None = None,
 ) -> list[str]:
+    restore = park(snapshot) if park is not None else None
     try:
         _discard_backup(backup_store_root, snapshot.backup_ref)
     except (OSError, ValueError):
+        if restore is not None:
+            restore()
         return [snapshot.backup_ref]
     return []
 
@@ -1037,12 +1165,16 @@ def _unchanged_item_summary(snapshot: ShellArtifactSnapshot) -> dict[str, Any]:
 
 # LLM: Only durably observed refs may be cleaned; batch all resulting transitions into one write.
 # Used after observation commit and for terminal cleanup debt; never revalidate live bytes or rerun shell.
+#   park/parkable 只由同进程操作级复核传入（parkable 为已写入复用索引的 artifact_id）；重放与结算路径照旧只删除。
 # 函数用途: 批量清理已落盘的无变化前像，并一次保存成功状态或待重试债务。
 def _retry_manifest_cleanup(
     backup_store_root: str | Path,
     operation_key: str,
     manifest: dict[str, Any],
     snapshots: list[ShellArtifactSnapshot],
+    *,
+    park: Callable[[ShellArtifactSnapshot], Callable[[], None] | None] | None = None,
+    parkable: frozenset[str] = frozenset(),
 ) -> None:
     items = manifest.get("items")
     if not isinstance(items, list) or len(items) != len(snapshots):
@@ -1055,7 +1187,11 @@ def _retry_manifest_cleanup(
             "unchanged_observed",
         }:
             continue
-        deferred = _finish_unchanged_item_cleanup(backup_store_root, snapshot)
+        deferred = _finish_unchanged_item_cleanup(
+            backup_store_root,
+            snapshot,
+            park if snapshot.artifact_id in parkable else None,
+        )
         item["state"] = "cleanup_pending" if deferred else "unchanged"
         summary = item.get("summary")
         summary = dict(summary) if isinstance(summary, dict) else _unchanged_item_summary(snapshot)
@@ -1070,6 +1206,7 @@ def _retry_manifest_cleanup(
 
 
 # LLM: Reconciliation owns backup retention: unchanged preimages are deleted, changed/unknown preimages remain durable.
+#   fingerprint_hints/clock/observed_fingerprints 只由操作级复核传入：命中可信指纹凭据免哈希，并回报可记入复用索引的凭据。
 # 函数用途: 复核 shell 前后产物，更新登记状态并清理没有发生变化的临时恢复副本。
 def reconcile_shell_artifacts(
     workspace_root: str | Path,
@@ -1078,6 +1215,9 @@ def reconcile_shell_artifacts(
     backup_store_root: str | Path,
     source_roots: tuple[str | Path, ...] | None = (),
     defer_unchanged_cleanup: bool = False,
+    fingerprint_hints: dict[str, object] | None = None,
+    clock: tuple[int, int] | None = None,
+    observed_fingerprints: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Update registry entries for shell-changed artifacts and return a prompt-safe summary."""
 
@@ -1099,6 +1239,9 @@ def reconcile_shell_artifacts(
             snapshot,
             trusted_roots,
             _lexical_absolute_path(backup_store_root),
+            fingerprint_hint=(fingerprint_hints or {}).get(snapshot.artifact_id),
+            clock=clock,
+            observed_fingerprints=observed_fingerprints,
         )
         if observation.change_status == "unchanged":
             unchanged.append(
@@ -1194,6 +1337,7 @@ def shell_artifact_protection_note(summary: dict[str, Any]) -> str:
 
 # LLM: Post-check compares against the exact copied preimage, not a possibly stale registry digest.
 # Hash stable authorized bytes first; only changed nonempty content needs a private validation copy.
+#   仅当调用方给出本进程快照时的可信指纹凭据且与现在完全相同才免哈希；否则行为与原实现一致。
 # 函数用途: 判断 shell 是否删除、破坏、修改或保持了某份已登记产物。
 def _post_shell_status(
     path: Path,
@@ -1201,6 +1345,10 @@ def _post_shell_status(
     snapshot: ShellArtifactSnapshot,
     source_roots: tuple[Path, ...] | None = (),
     backup_store_root: Path | None = None,
+    *,
+    fingerprint_hint: object = None,
+    clock: tuple[int, int] | None = None,
+    observed_fingerprints: dict[str, dict[str, Any]] | None = None,
 ) -> ShellArtifactObservation:
     try:
         opened = _open_regular_source(path, source_roots)
@@ -1217,8 +1365,19 @@ def _post_shell_status(
     try:
         if backup_store_root is None:
             raise OSError("canonical owner artifact backup root is unavailable")
+        fingerprint = _stat_fingerprint(os.fstat(opened.descriptor))
+        # 本进程快照时的凭据可信且与现在逐字段相等：命令期间任何改写都会推进 ctime，内容必然未变。
+        if _hint_matches(fingerprint_hint, fingerprint):
+            if observed_fingerprints is not None and isinstance(fingerprint_hint, dict):
+                observed_fingerprints[snapshot.artifact_id] = dict(fingerprint_hint)
+            return ShellArtifactObservation("unchanged", [], snapshot.sha256, snapshot.size_bytes)
         current_sha, current_size = _sha256_opened_source(opened)
         if current_sha == snapshot.sha256:
+            if observed_fingerprints is not None:
+                hint = _fingerprint_hint(fingerprint, clock)
+                # 哈希前后的 fstat 都等于 fingerprint（_sha256_opened_source 已断言稳定），哈希到的就是这份指纹的内容。
+                if _hint_matches(hint, _stat_fingerprint(os.fstat(opened.descriptor))):
+                    observed_fingerprints[snapshot.artifact_id] = hint
             return ShellArtifactObservation("unchanged", [], current_sha, current_size)
         if current_size == 0:
             return ShellArtifactObservation(
@@ -1763,6 +1922,275 @@ def _prune_empty_backup_dirs(start: Path, stop: Path) -> None:
 def _chmod_private(path: Path, *, directory: bool) -> None:
     if os.name == "posix":
         path.chmod(0o700 if directory else 0o600)
+
+
+# LLM: 指纹固定为 (st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)：原子替换换 inode、追加改大小，普通进程无法把 ctime 调回。
+# 函数用途: 从 stat 结果取出产物内容身份指纹。
+def _stat_fingerprint(info: os.stat_result) -> list[int]:
+    return [int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns), int(info.st_ctime_ns)]
+
+
+# LLM: 凭据 = 指纹 + 观测前取得的文件系统时钟（探针设备号, 时间）+ 本进程身份；时钟不可得时记 None，永不可信。
+# 函数用途: 生成可随清单与复用索引保存的指纹凭据。
+def _fingerprint_hint(fingerprint: list[int], clock: tuple[int, int] | None) -> dict[str, Any]:
+    return {
+        "stat": list(fingerprint),
+        "clock": list(clock) if clock is not None else None,
+        "process": _PROCESS_TOKEN,
+    }
+
+
+# LLM: git racy 规则（取观测前的下界时钟）：只有本进程记录（同进程内不会跨断电，内核视图一致）、产物与时钟探针同设备
+#   （同一文件系统时钟与精度）、指纹 ctime 严格早于下界，且与 current 逐字段相等时才可信；任何改写都会把 ctime 推进到
+#   下界之后。格式不符、异进程或缺失一律不可信，调用方退回哈希或复制。
+# 函数用途: 判断一份指纹凭据能否证明产物内容自记录以来未变。
+def _hint_matches(hint: object, current: list[int]) -> bool:
+    if not isinstance(hint, dict) or hint.get("process") != _PROCESS_TOKEN:
+        return False
+    fingerprint = hint.get("stat")
+    clock = hint.get("clock")
+    return (
+        isinstance(fingerprint, list)
+        and len(fingerprint) == 5
+        and all(type(value) is int for value in fingerprint)
+        and isinstance(clock, list)
+        and len(clock) == 2
+        and all(type(value) is int for value in clock)
+        and fingerprint == current
+        and fingerprint[0] == clock[0]
+        and fingerprint[4] < clock[1]
+    )
+
+
+# 函数用途: 返回 owner 备份根下复用区目录的路径（不创建）。
+def _reuse_directory(store_root: Path) -> Path:
+    return store_root / _BACKUP_SCHEMA / _REUSE_DIRNAME
+
+
+# LLM: 只在已由 _prepare_backup_directory 建好的私有 v1 下新建复用区（不带 parents，避免以默认权限补建上级目录）；
+#   目录为 0700，已存在但权限过宽时收紧。
+# 函数用途: 确保复用区目录存在且私有。
+def _ensure_reuse_directory(store_root: Path) -> Path:
+    directory = _reuse_directory(store_root)
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = directory.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise OSError("shell preimage reuse directory is not a regular directory")
+    if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
+        os.chmod(directory, 0o700)
+    return directory
+
+
+# LLM: 触碰复用区里的空探针文件，让内核用与产物 ctime 相同的文件系统时钟盖章后读回；返回 (设备号, ctime_ns)。
+#   任何失败返回 None，使本批所有凭据不可信（退回哈希/复制）。
+# 函数用途: 取得不晚于随后各次 stat 的文件系统时间下界，供 racy 判断。
+def _filesystem_clock(store_root: Path) -> tuple[int, int] | None:
+    try:
+        probe = _ensure_reuse_directory(store_root) / _REUSE_CLOCK_NAME
+        descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            if os.utime in os.supports_fd:
+                os.utime(descriptor)
+            else:
+                os.utime(probe)
+            info = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        return None
+    return int(info.st_dev), int(info.st_ctime_ns)
+
+
+# 函数用途: 判断字符串是否为小写 64 位 sha256 十六进制摘要。
+def _is_sha256_hex(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+# LLM: 停放名与操作目录 blob 同样由 artifact_id 摘要与内容摘要组成，只换后缀；同产物同内容恒为同一名字。
+# 函数用途: 返回某产物某版本前像在复用区里的文件名。
+def _parked_preimage_name(artifact_id: str, digest: str) -> str:
+    artifact_key = hashlib.sha256(str(artifact_id).encode()).hexdigest()[:16]
+    return f"{artifact_key}-{digest}{_REUSE_BLOB_SUFFIX}"
+
+
+# LLM: 索引只是加速缓存：经 no-follow 链读取，整体或单条结构不符都按缺失处理；它从不单独授予复用，复用前仍核对
+#   实时指纹凭据与停放前像。
+# 函数用途: 读取 owner 的复用索引（键为产物词法绝对路径，按记录先后排序）。
+def _read_reuse_index(store_root: Path) -> dict[str, dict[str, Any]]:
+    try:
+        text = read_text_beneath(store_root, (_BACKUP_SCHEMA, _REUSE_DIRNAME, _REUSE_INDEX_NAME))
+        payload = json.loads(text) if text is not None else None
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema") != _REUSE_SCHEMA:
+        return {}
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        key: value
+        for key, value in entries.items()
+        if isinstance(key, str)
+        and isinstance(value, dict)
+        and isinstance(value.get("artifact_id"), str)
+        and _is_sha256_hex(value.get("sha256"))
+        and type(value.get("size_bytes")) is int
+        and value["size_bytes"] >= 0
+        and isinstance(value.get("fingerprint"), dict)
+    }
+
+
+# LLM: 同路径同产物、实时指纹与索引凭据逐字段相等且可信时，才把停放前像改名移入本操作目录；移入后再核对是 0600、
+#   单链接、同大小的普通文件，否则删掉移入物退回复制。改名失败（并发操作已取走、被逐出、跨设备）同样退回复制，
+#   前像可信度不降低。前像字节在首次复制时已刷盘；新目录项由调用方发布清单前的那次目录 fsync 覆盖。
+# 函数用途: 尝试复用本进程上一次复核确认内容未变的前像，免去复制、哈希和 blob 刷盘。
+def _reuse_ready_snapshot(
+    record: ArtifactRegistryRecord,
+    opened: OpenedArtifactSource,
+    operation_dir: Path,
+    store_root: Path,
+    entry: dict[str, Any] | None,
+    fingerprint: list[int],
+) -> ShellArtifactSnapshot | None:
+    if not entry or entry.get("artifact_id") != record.artifact_id:
+        return None
+    if not _hint_matches(entry.get("fingerprint"), fingerprint) or entry.get("size_bytes") != fingerprint[2]:
+        return None
+    digest = str(entry["sha256"])
+    size_bytes = int(entry["size_bytes"])
+    name = _parked_preimage_name(record.artifact_id, digest)
+    target = operation_dir / f"{name[: -len(_REUSE_BLOB_SUFFIX)]}.blob"
+    try:
+        os.replace(_reuse_directory(store_root) / name, target)
+    except OSError:
+        return None
+    try:
+        info = os.lstat(target)
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or int(info.st_size) != size_bytes
+        or int(info.st_nlink) != 1
+        or (os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077)
+    ):
+        target.unlink(missing_ok=True)
+        return None
+    return ShellArtifactSnapshot(
+        artifact_id=record.artifact_id,
+        run_id=record.run_id,
+        task_id=record.task_id,
+        agent_id=record.agent_id,
+        kind=record.kind,
+        mime_type=record.mime_type,
+        path=str(opened.path),
+        sha256=digest,
+        size_bytes=size_bytes,
+        backup_ref=_backup_ref(store_root, target),
+        operation_key=operation_dir.name,
+    )
+
+
+# LLM: 观测屏障落盘之后、逐项清理之前调用：可信的未变化项写入/刷新索引，已登记变更的产物移出索引。先写索引再停放，
+#   并发操作的清扫因此不会删掉刚停放的前像；索引未变化时不写盘。返回已在索引中、可以停放的 artifact_id。
+#   任何失败只放弃本次复用（返回空集，清理照旧删除）。
+# 函数用途: 由操作级复核结果更新复用索引并给出可停放集合。
+def _record_reuse_entries(
+    store_root: Path,
+    items: list[dict[str, Any]],
+    snapshots: list[ShellArtifactSnapshot],
+    observed_fingerprints: dict[str, dict[str, Any]],
+) -> frozenset[str]:
+    updates: dict[str, dict[str, Any] | None] = {}
+    for item, snapshot in zip(items, snapshots):
+        state = str(item.get("state") or "") if isinstance(item, dict) else ""
+        hint = observed_fingerprints.get(snapshot.artifact_id)
+        if state == "unchanged_observed" and hint is not None:
+            updates[snapshot.path] = {
+                "artifact_id": snapshot.artifact_id,
+                "sha256": snapshot.sha256,
+                "size_bytes": snapshot.size_bytes,
+                "fingerprint": dict(hint),
+            }
+        elif state == "registered":
+            updates[snapshot.path] = None
+    if not updates:
+        return frozenset()
+    try:
+        directory = _ensure_reuse_directory(store_root)
+        with locked_json_path(directory / _REUSE_INDEX_NAME):
+            original = _read_reuse_index(store_root)
+            entries = dict(original)
+            for key, entry in updates.items():
+                if entry is None:
+                    entries.pop(key, None)
+                elif entries.get(key) != entry:
+                    entries.pop(key, None)
+                    entries[key] = entry
+            entries = _bounded_reuse_entries(entries)
+            if list(entries.items()) != list(original.items()):
+                write_text_atomic_beneath(
+                    store_root,
+                    (_BACKUP_SCHEMA, _REUSE_DIRNAME, _REUSE_INDEX_NAME),
+                    json.dumps({"schema": _REUSE_SCHEMA, "entries": entries}, ensure_ascii=False),
+                    durable=False,
+                )
+                _sweep_parked_preimages(directory, entries)
+    except (OSError, ValueError):
+        return frozenset()
+    return frozenset(
+        entry["artifact_id"]
+        for key, entry in updates.items()
+        if entry is not None and entries.get(key) == entry
+    )
+
+
+# LLM: 从最近记录往前保留，超过条目或字节上限的旧条目被逐出（逐出项的前像由随后的清扫删除，下次命令只是重新复制）。
+# 函数用途: 把复用索引限制在条目数与总字节上限内，保持原有先后顺序。
+def _bounded_reuse_entries(entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    kept: list[tuple[str, dict[str, Any]]] = []
+    total_bytes = 0
+    for key, entry in reversed(list(entries.items())):
+        size_bytes = int(entry["size_bytes"])
+        if len(kept) >= _REUSE_MAX_ENTRIES or total_bytes + size_bytes > _REUSE_MAX_BYTES:
+            continue
+        kept.append((key, entry))
+        total_bytes += size_bytes
+    return dict(reversed(kept))
+
+
+# LLM: 只在持有索引锁、刚写完索引时调用：复用区里不被任何条目引用的停放前像（被替换、移除、逐出，或崩溃遗留）一律删除；
+#   不触碰时钟探针、索引与锁文件。并发操作改名取走的文件按已不存在处理。
+# 函数用途: 删除复用区内无主的停放前像，使磁盘占用始终受索引上限约束。
+def _sweep_parked_preimages(directory: Path, entries: dict[str, dict[str, Any]]) -> None:
+    keep = {_parked_preimage_name(entry["artifact_id"], entry["sha256"]) for entry in entries.values()}
+    for name in os.listdir(directory):
+        if name.endswith(_REUSE_BLOB_SUFFIX) and name not in keep:
+            (directory / name).unlink(missing_ok=True)
+
+
+# LLM: 把已确认未变化的本操作前像改名停放进复用区（同名即同内容，覆盖无害），返回撤销函数供删除失败时移回原位；
+#   任何失败返回 None，调用方照旧删除。停放不刷盘：断电丢失只让下一次命令退回复制。
+# 函数用途: 以改名代替删除，把未变化前像留给下一次命令复用。
+def _park_preimage(store_root: Path, snapshot: ShellArtifactSnapshot) -> Callable[[], None] | None:
+    try:
+        backup = resolve_shell_artifact_backup(store_root, snapshot.backup_ref)
+        parked = _reuse_directory(store_root) / _parked_preimage_name(snapshot.artifact_id, snapshot.sha256)
+        os.replace(backup, parked)
+    except (OSError, ValueError):
+        return None
+
+    # 函数用途: 删除步骤失败时把停放的前像移回本操作目录，保持债务项引用的前像真实存在。
+    def restore() -> None:
+        try:
+            os.replace(parked, backup)
+        except OSError:
+            return
+
+    return restore
 
 
 # LLM: Directory fsync closes the rename durability window where supported; unsupported platforms degrade explicitly.
