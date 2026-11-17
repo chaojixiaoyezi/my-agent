@@ -74,6 +74,7 @@ from ..conversation.control_commands import (
 )
 from ..conversation.message_stream import NoticeDisplayCapabilities
 from ..conversation.store_usage import unknown_purpose_key_counts
+from ..plugin_host.errors import HostAPIError
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .channel_health import adapter_process_facts
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
@@ -1181,6 +1182,10 @@ def _handle_idempotent_ordinary_ask(
                         )
             elif (created and receipt.state == "pending") or receipt.state == "queued":
                 receipt, _created = queue_gateway_input_locked(server.paths, receipt)
+    except HostAPIError as exc:
+        # 宿主结构化拒绝（如已登记普通用户不走本入口）同为ValueError子类，须先于幂等冲突按原状态码返回。
+        handler._send_json(exc.status, {"error_code": exc.code, "error": exc.to_payload(), "request_id": request_id})
+        return
     except ValueError as exc:
         handler._send_json(
             409,

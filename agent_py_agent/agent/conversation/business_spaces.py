@@ -24,7 +24,11 @@ from ..plugin_host.business_action_specs import (
 )
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.schemas import validate_object
-from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
+from ..user_space.owner_quota import (
+    OwnerQuotaChange,
+    OwnerQuotaUnavailable,
+    owner_quota_enforcer_from_policy,
+)
 from .business_access import (
     BusinessError,
     governance_call,
@@ -52,6 +56,21 @@ def _identifier(value):
     if type(value) is not str or not value or len(value.encode('utf-8')) > 128:
         raise BusinessError('INVALID_SCHEMA')
     return value
+
+
+# LLM: 只包装提交日志写入前的配额检查：此时本笔变更尚未落盘，可如实报告not_started并允许同参重试。
+# 函数用途: 把配额对账未完成或用量暂不可读转成结构化HOST_NOT_READY。
+def _quota_check(admission, changes):
+    try:
+        return admission.check(changes)
+    except OwnerQuotaUnavailable as exc:
+        raise BusinessError('HOST_NOT_READY', effect_outcome='not_started', details={
+            'reason': 'owner_quota_' + (getattr(exc, 'reason_code', '') or 'unavailable'),
+            'side_effect_state': 'not_started',
+            'retry_same_arguments': True,
+            'next_action': '当前用户的磁盘用量正在对账或暂不可读，本次未写入任何内容；'
+                           '请稍后用相同的 request_id 和幂等键原样重试。',
+        }) from exc
 
 
 class BusinessSpaceService:
@@ -289,6 +308,10 @@ class BusinessSpaceService:
         gate = owner_quota_enforcer_from_policy(self.owner_root)
         rows = ReceiptRows(self)
         with gate.admission() as admission:
+            # 目录锁首次会新建data/business及锁文件；先在同一准入内声明，逐目录基线才不把它当准入外写入。
+            if not os.path.lexists(self.owner_root.joinpath('data', 'business')):
+                _quota_check(admission, [OwnerQuotaChange(
+                    self.owner_root.joinpath('data', 'business', '.catalog.lock'), final_size=0)])
             with locked_private_directory(self.owner_root, relative_parts=('data', 'business'), lock_name='.catalog.lock'):
                 rows.recover(admission)
                 state = self.authorize_call(action, params, actor=actor)
@@ -313,14 +336,14 @@ class BusinessSpaceService:
                            'state': state, 'key': key, 'receipt': receipt}
                 raw = (json.dumps(pending, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
                 payloads = rows.materialized(pending)
-                admission.check([OwnerQuotaChange(self.owner_root.joinpath(*path), final_size=len(data))
-                                 for path, data in [*payloads, (rows.journal, raw)]])
+                _quota_check(admission, [OwnerQuotaChange(self.owner_root.joinpath(*path), final_size=len(data))
+                                         for path, data in [*payloads, (rows.journal, raw)]])
                 self.authorize_call(action, params, actor=actor, state=state)
                 if commit_guard is not None:
                     commit_guard()
                 write_bytes_atomic_beneath(self.owner_root, rows.journal, raw)
-                rows.write(payloads, admission)
-                write_bytes_atomic_beneath(self.owner_root, rows.journal, b'{}\n')
+                # 物化的check会结算上一段：日志复位须同批声明并最后写入，否则结算时成了准入外写入、逐目录基线每次都失效。
+                rows.write([*payloads, (rows.journal, b'{}\n')], admission)
                 # fsync/配额结算失败可发生在替换后；不伪称未提交，同键重放只读同笔回执。
                 return _copy(result)
 

@@ -1190,7 +1190,13 @@ def native_business_context(handler, server):
             raise HostAPIError('HOST_NOT_READY', 503)
         if source is None:
             if resolve_business_action_spec(action).metadata['effect'] == 'read':
-                raise BusinessError('ACTOR_REQUIRED')
+                # 只读请求不代建会话线程；说明缺什么、未发生副作用以及可用的下一步。
+                raise BusinessError('ACTOR_REQUIRED', details={
+                    'reason': 'conversation_thread_not_bound',
+                    'side_effect_state': 'not_started',
+                    'next_action': '当前通道会话尚未绑定对话线程，本次未读取也未创建任何内容；'
+                                   '请在已绑定的 TUI 或 Web 会话内用 /team list 查看后台代理。',
+                })
             source = store.threads.get_or_create({**binding, 'canonical_user_id': user_id,
                 'owner_id': home.owner_id, 'owner_home': str(home.owner_home_dir)})
         if source.owner_id != home.owner_id or source.owner_home != str(home.owner_home_dir):

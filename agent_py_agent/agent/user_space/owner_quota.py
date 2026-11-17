@@ -1646,6 +1646,9 @@ def _quota_declared_rows(root, dirs, before_children, *, limit=None, create=True
             # 只有声明过的目录且完整旧摘要已由逐项前像减到零，才能退休该辅助行。
             # 只声明父目录不能掩盖未声明的子项删除；未知/部分扫描行仍使基线失效。
             declared = before_children.get(('/'.join(parts[:-1]), parts[-1])) if parts else None
+            if row is None and declared and declared[1] and declared[0] is None:
+                # 声明时不存在、结算时仍未创建的目录（分段准入由后一段才写入）：目录项无增删，也不产生行。
+                continue
             if (not declared or not declared[1] or declared[0] is None
                     or not _valid_quota_row(row) or limit is not None):
                 raise

@@ -1,18 +1,35 @@
 """OpenAI 兼容协议的薄运输层；身份和执行仍沿原 Gateway owner/租约。"""
 from __future__ import annotations
 
+import json
+import sys
 from contextlib import ExitStack
 
 from ..plugin_host.errors import HostAPIError
+from ..runtime_errors import runtime_error_report
 
 
-def send_error(handler, status, code):
-    """只返回固定结构码，绝不把后端异常文本、请求正文或凭据写回。"""
+def send_error(handler, status, code, details=None):
+    """只返回固定结构码，绝不把后端异常文本、请求正文或凭据写回；details仅放宿主选定的标量。"""
     category = {400: 'invalid_request_error', 401: 'authentication_error', 403: 'permission_error',
         404: 'not_found_error', 429: 'rate_limit_error'}.get(status, 'api_error')
     if status == 413:
         category = 'invalid_request_error'
-    handler._send_json(status, {'error': {'message': code, 'type': category, 'code': code, 'param': None}})
+    error = {'message': code, 'type': category, 'code': code, 'param': None}
+    if details:
+        error['details'] = details
+    handler._send_json(status, {'error': error})
+
+
+# LLM: 与后台循环同一行前缀与报告结构，进入/status噪声统计；打印失败不得影响已决定的错误响应。
+# 函数用途: 把兼容入口的未预期异常写成宿主stderr结构化诊断。
+def _report_unexpected_error(exc):
+    try:
+        report = runtime_error_report(exc, context='gateway.openai_compat')
+        report['worker_id'] = 'http'
+        print('[gateway-loop-error] ' + json.dumps(report, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+    except Exception:
+        pass
 
 
 def reject_untrusted(handler, middleware):
@@ -69,8 +86,9 @@ def _handle(handler, server, *, testing=False):
         send_error(handler, error.status, error.code)
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         return
-    except Exception:
-        send_error(handler, 500, 'HOST_NOT_READY')
+    except Exception as exc:
+        _report_unexpected_error(exc)
+        send_error(handler, 500, 'HOST_NOT_READY', details={'exception_type': type(exc).__name__})
 
 
 def _send_stream(handler, result):

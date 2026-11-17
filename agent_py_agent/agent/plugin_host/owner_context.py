@@ -78,7 +78,8 @@ def require_unmanaged_pool_owner(config, owner):
     store = LocalUserStore(root)
     if store.get(uid) is not None:
         store.require_enabled(uid)
-        raise HostAPIError("HOST_NOT_READY", 503)
+        raise HostAPIError("HOST_NOT_READY", 503, message=(
+            "已登记的普通用户请在 Web 业务界面 /client/business/ui 中使用；本入口不为其创建通用会话，本次未执行。"))
 
 
 # LLM: A侧核验后投影的原来源，不含token；本数据本身不是授权凭证。

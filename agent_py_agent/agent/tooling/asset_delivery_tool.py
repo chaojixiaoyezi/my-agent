@@ -260,6 +260,8 @@ class AssetDeliveryTool(BaseTool):
                 next_action=_delivery_next_action(action, operation, read_only=(effect == 'not_started')))
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
             exc_type = type(exc).__name__
+            # 结构化原因（如配额对账未完成）只取异常显式字符串属性，不解析异常正文。
+            reason_code = getattr(exc, 'reason_code', '')
             effect = 'not_started' if read_only else 'unknown'
             next_step = _delivery_next_action(action, operation, read_only=read_only)
             envelope = {
@@ -274,6 +276,7 @@ class AssetDeliveryTool(BaseTool):
                     **({'operation': operation} if action == 'blocklist' else {}),
                     'exception_type': exc_type,
                     'read_only_action': read_only,
+                    'reason_code': reason_code if isinstance(reason_code, str) else '',
                 },
             }
             return _outcome('asset_delivery', envelope, False, 'ASSET_DELIVERY_FAILED',
