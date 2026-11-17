@@ -146,7 +146,7 @@ from .tooling.package_install_tool import PackageInstallTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.skill_summarize_tool import SkillSummarizeTool
 from .tooling.user_config_tool import UserConfigTool
-from .user_space.approval_mode import is_permission_admin
+from .user_space.approval_mode import is_permission_admin, permission_config
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home, home_paths
 from .user_space.home_root import ConfiguredHomeSnapshot, configured_home_root
@@ -1229,8 +1229,20 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
 
 # LLM: 计算机使用 MCP 装配（含只看档收窄）单独成函数，保持 _build_tool_registry 在函数硬阈值内；
 #   总开关关、只开观察时仍装配同一个服务，但只交出 observe_window，不 import 上游执行器。
-# 函数用途: 按配置和 owner 身份组装计算机使用 MCP 服务表，交给工具注册参数。
+#   /permissions 只改owner策略文件，同一owner agent不重建；构造时冻结的 access_mode 会让降级后的 computer_use 一直挂着
+#   （2026-11-17 W3 live：Full Access 切到默认确认后 move_mouse 仍不经确认又执行两次）。所以每个运行边界经同一个
+#   permission_config 映射重求访问模式；策略读不出时按非 full-access（不挂载）。没有owner策略文件的调用方照旧用传入值。
+# 函数用途: 按配置、owner 身份和本轮权限模式组装计算机使用 MCP 服务表，交给工具注册参数。
 def _tool_registry_mcp_servers(agent: SimpleAgent, config: AgentConfig, access_mode: str):
+    home = getattr(agent, "home_paths", None)
+    if hasattr(home, "owner_tool_policy_json"):
+        try:
+            live = permission_config(config, home)
+        except ValueError:
+            access_mode = "workspace-write"
+        else:
+            if live is not config:
+                access_mode = resolve_owner_scope_and_access(home, live, getattr(agent, "owner_policy", None))[1]
     return _live_tool_registry_mcp_servers(agent, config, access_mode)
 
 
