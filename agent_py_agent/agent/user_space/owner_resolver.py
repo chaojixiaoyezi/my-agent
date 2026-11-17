@@ -150,6 +150,17 @@ def ensure_owner_home(root: str | Path, identity: OwnerIdentity | None = None) -
     return result
 
 
+# LLM: 只接受规范owner编号形状（local/<id>、providers/<p>/users|groups/<id>），逐段经原安全段校验；不接受路径或别名。
+# 函数用途: 把完整owner编号解析为原owner身份，纯解析不读写文件。
+def owner_identity_from_owner_id(owner_id: str) -> OwnerIdentity:
+    parts = owner_id.split('/') if isinstance(owner_id, str) else []
+    if len(parts) == 2 and parts[0] == 'local':
+        return OwnerIdentity.local_main() if parts[1] == 'main' else OwnerIdentity.local_user(parts[1])
+    if len(parts) == 4 and parts[0] == 'providers' and parts[2] in ('users', 'groups'):
+        return (OwnerIdentity.provider_user if parts[2] == 'users' else OwnerIdentity.provider_group)(parts[1], parts[3])
+    raise ValueError('owner_id 必须是 local/<id> 或 providers/<provider>/users|groups/<id>')
+
+
 def owner_identity_from_config(config: Any) -> OwnerIdentity:
     provider = safe_path_segment(getattr(config, "my_agent_owner_provider", "local"))
     kind = safe_path_segment(getattr(config, "my_agent_owner_kind", "main"))

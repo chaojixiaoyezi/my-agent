@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import os
 import time
 import uuid
 from contextlib import contextmanager
@@ -496,8 +497,12 @@ def _credential_headers_from_values(row, value):
 # 函数用途: 核对具体凭据授权；HTTP需自动择取时先走_credential_for_use，状态/配置/撤销只裁决原引用。
 def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, operation='use'):
     channel, actor = approval_recipient(agent,scope)
+    # 查询/撤销是管理动作：本人或核验过的本机管理员前台可在任何后续任务里执行，不要求原任务仍在运行；
+    # 解密使用（use）仍严格限定在原任务内。
+    manage = operation in ('status', 'revoke')
+    admin = manage and _manages_as_foreground_admin(agent)
     if (not row or row.get('owner') != asdict(owner_identity_from_config(agent.config))
-            or row['channel'] != channel or row['origin'] != (credential_origin(url) if url else '')):
+            or (row['channel'] != channel and not admin) or row['origin'] != (credential_origin(url) if url else '')):
         raise ValueError('凭据不属于此调用或接口')
     if row.get('schema_version', 'task_credential.v1') not in {'task_credential.v1', 'task_credential.v2'}:
         raise ValueError('凭据不属于此调用或接口')
@@ -507,6 +512,8 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, oper
     if group_credential_access(agent, row, scope, operation=operation):
         return
     if row.get('access_scope') == 'owner':
+        if admin:
+            return
         if (
             row.get('schema_version') != 'task_credential.v2'
             or owner_identity_from_config(agent.config).owner_kind == 'group'
@@ -515,7 +522,11 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, oper
         ):
             raise ValueError('凭据不属于此调用或接口')
         return
-    if row.get('access_scope', 'task') != 'task' or row['actor_id'] != actor:
+    if row.get('access_scope', 'task') != 'task':
+        raise ValueError('凭据不属于此调用或接口')
+    if manage and (admin or actor in (row.get('actor_id'), row.get('submitter_actor_id'))):
+        return
+    if row['actor_id'] != actor:
         raise ValueError('凭据不属于此调用或接口')
     if row['job_id']:
         run = agent.scheduler_repository.get_active_run(scope.root_task_id)
@@ -523,6 +534,17 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, oper
             raise ValueError('凭据不属于此监控')
     elif scope.root_task_id!=row['scope']['root_task_id']:
         raise ValueError('凭据不属于此任务')
+
+
+# LLM: 只认宿主前台事实与当前绑定的本机管理员身份（每次调用重新核验）；任何读取异常都按非管理员处理。
+# 函数用途: 判断本次凭据管理是否由核验过的本机管理员前台发起。
+def _manages_as_foreground_admin(agent):
+    from .owner_access import is_foreground_admin_interactive
+
+    try:
+        return is_foreground_admin_interactive(agent)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
 
 
 # LLM: 通知资格读取原runner和当前凭据投影；已成功替换的群旧ref、旧代/撤销/跨owner不得再发提醒，不解密。
@@ -557,20 +579,111 @@ def manage_credential(agent, reference, *, operation):
         row = read_json_object_report(path,context='credentials.manage').payload
         _assert_credential_unchanged(agent, observed, row, scope)
         if operation == 'revoke':
-            row.update(status='revoked',revoked_at=time.time())
-            row.pop('ciphertext',None)
-            row.pop('session_ciphertext',None)
-            _save_credential_row(admission,path,row)
+            _shred_credential_row(admission, path, row)
         elif operation != 'status':
             raise ValueError('凭据管理动作无效')
-    status = row['status']
+    usable = operation == 'status' and credential_usable_in_task(agent, row, scope)
+    return credential_public_view(row, reference, usable=usable, revoked_now=operation == 'revoke')
+
+
+# LLM: 撤销在调用方持有的配额与记录锁内删除全部密文（含登录会话密文）并标 revoked；记录本身留作审计与查询。
+# 函数用途: 原子撤销一条凭据记录的秘密材料。
+def _shred_credential_row(admission, path, row):
+    row.update(status='revoked', revoked_at=time.time())
+    row.pop('ciphertext', None)
+    row.pop('session_ciphertext', None)
+    _save_credential_row(admission, path, row)
+
+
+# LLM: 复用原解密使用门（operation='use'）只求布尔结论；不解密、不写记录，任何拒绝都算不可用。
+# 函数用途: 判断一条凭据在当前任务里能否被使用，供查询与列表如实说明。
+def credential_usable_in_task(agent, row, scope):
+    try:
+        _assert_credential_scope(agent, row, scope, row.get('origin') or None, operation='use')
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+# LLM: 只投影非秘密标量；origin_task_id 来自原卡绑定；usable 由调用方用原使用门算出（无任务上下文时不给），从不含账号或密文。
+# 函数用途: 生成凭据查询/撤销/列表共用的公开元数据。
+def credential_public_view(row, reference, *, usable=None, revoked_now=False):
+    status = row.get('status', 'unknown')
     if status == 'ready' and credential_ready_expired(row, now=time.time()):
         status = 'expired'
-    return {'credential_ref':reference,'status':status,'origin':row['origin'],
-            'expires_at':row.get('ready_expires_at',row['expires_at']),
-            'authentication':row.get('authentication','collected'),
-            'authentication_configured':row.get('authentication') in ('basic','bearer','header','signature','login'),
-            'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
+    bound = row.get('scope') if isinstance(row.get('scope'), dict) else {}
+    view = {'credential_ref': reference, 'status': status, 'origin': row.get('origin', ''),
+            'expires_at': row.get('ready_expires_at', row.get('expires_at')),
+            'authentication': row.get('authentication', 'collected'),
+            'authentication_configured': row.get('authentication') in ('basic', 'bearer', 'header', 'signature', 'login'),
+            'verification_status': row.get('verification_status', 'unverified'), 'replaces_ref': row.get('replaces_ref', ''),
+            'access_scope': row.get('access_scope', 'task'), 'origin_task_id': str(bound.get('root_task_id') or ''),
+            'secret_present': bool(row.get('ciphertext') or row.get('session_ciphertext'))}
+    if usable is not None:
+        view['usable_in_current_task'] = bool(usable)
+    if revoked_now:
+        view.update(revoked=True, deleted=True)
+    return view
+
+
+# LLM: 宿主 CLI 管理入口：不需要任务上下文，调用方（本机 owner 的 CLI）已决定目标 owner；在该 owner 的配额与记录锁内执行，
+#   复用同一撤销与公开投影；不解密、不打印秘密。
+# 函数用途: 无任务上下文地查询或撤销指定 owner 的一条凭据。
+def manage_credential_for_owner(home_paths, reference, *, operation):
+    from contextlib import nullcontext
+
+    from ..memory_store.owner_resources import build_owner_memory_quota
+    from .owner_policy import resolve_effective_owner_policy
+
+    if operation not in ('status', 'revoke'):
+        raise ValueError('凭据管理动作无效')
+    path = credential_path(home_paths.owner_home_dir, reference)
+    if not read_credential_row(path, stage='management_preflight'):
+        raise CredentialInputError('CREDENTIAL_NOT_FOUND', '没有这条凭据记录。', stage='management_preflight')
+    quota = build_owner_memory_quota(home_paths, resolve_effective_owner_policy(home_paths)) if operation == 'revoke' else None
+    with (quota.admission() if quota is not None else nullcontext()) as admission:
+        with locked_json_path(path):
+            row = read_json_object_report(path, context='credentials.manage').payload
+            if not isinstance(row, dict) or row.get('kind') != 'task_credential' or row.get('credential_ref') != reference:
+                raise ValueError('凭据记录无效')
+            if operation == 'revoke':
+                if admission is None:
+                    raise ValueError('目标 owner 配额不可用，未撤销')
+                _shred_credential_row(admission, path, row)
+    return credential_public_view(row, reference, revoked_now=operation == 'revoke')
+
+
+# LLM: 只列目标 owner 私密交互目录里的凭据记录元数据；坏记录计数不展开，不解密、不输出密文或账号。
+# 函数用途: 为宿主 CLI 列出一个 owner 的全部凭据公开元数据。
+def list_credentials_for_owner(home_paths):
+    from ..common.nofollow_fs import open_directory_beneath, read_text_beneath
+
+    owner_home = home_paths.owner_home_dir
+    try:
+        descriptor = open_directory_beneath(owner_home, PRIVATE_INTERACTIONS_OWNER_PARTS)
+    except FileNotFoundError:
+        return {'credentials': [], 'unreadable': 0}
+    try:
+        names = sorted(os.listdir(descriptor))
+    finally:
+        os.close(descriptor)
+    rows, unreadable = [], 0
+    for name in names:
+        if len(name) != 42 or not name.startswith('cred_') or not name.endswith('.json'):
+            continue
+        try:
+            row = json.loads(read_text_beneath(owner_home, (*PRIVATE_INTERACTIONS_OWNER_PARTS, name)) or 'null')
+        except (OSError, UnicodeError, ValueError):
+            unreadable += 1
+            continue
+        if not isinstance(row, dict) or row.get('kind') != 'task_credential' or row.get('credential_ref') != name[:-5]:
+            unreadable += 1
+            continue
+        view = credential_public_view(row, name[:-5])
+        view.update(channel=str(row.get('channel') or ''), submitted_at=row.get('submitted_at'),
+                    name=str(row.get('credential_name') or '')[:128])
+        rows.append(view)
+    return {'credentials': rows, 'unreadable': unreadable}
 
 
 # LLM: 仅比较同次锁外观察的权限/密文事实，session缓存变化不授予权限；原scope必须仍current，不查网络或解密。

@@ -170,6 +170,7 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
         from .task_credential_forms import assert_credential_record_signature
 
         owner_rows = []
+        task_rows = []
         for file_name in names:
             if re.fullmatch(r'cred_[0-9a-f]{32}\.json', file_name) is None:
                 continue
@@ -186,6 +187,17 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
             if not isinstance(row, dict):
                 continue
             if row.get('kind') != 'task_credential':
+                continue
+            if row.get('access_scope', 'task') == 'task':
+                # 本人的任务级卡片只在 list 中投影元数据（不可被 find 选中、不解密），便于在后续任务里查询或撤销。
+                if (operation == 'list' and row.get('owner') == owner and row.get('channel') == channel
+                        and actor_id in (row.get('actor_id'), row.get('submitter_actor_id'))
+                        and row.get('credential_ref', '') + '.json' == file_name):
+                    try:
+                        assert_credential_record_signature(agent, row)
+                    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+                        continue
+                    task_rows.append(row)
                 continue
             if _access_scope(row) != 'owner':
                 continue
@@ -227,13 +239,24 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
         )
     )
     active_refs = {r['credential_ref'] for r in active}
+    from .task_credentials import credential_public_view, credential_usable_in_task
+
+    task_visible = [r for r in task_rows if (not origin or r.get('origin') == origin)
+                    and (not name or r.get('credential_name') == name)]
+    # 任务级条目的 usable 只表示“当前任务能否使用”（原使用门裁决）；它们不参与 find 自动选择与 usable_count。
+    task_entries = [{**_summary(r, actor_id), 'usable': credential_usable_in_task(agent, r, scope),
+                     'submitted_at': r.get('submitted_at'),
+                     **{key: value for key, value in credential_public_view(r, r['credential_ref']).items()
+                        if key in ('expires_at', 'origin_task_id', 'secret_present')}}
+                    for r in _stable(task_visible)]
     return {
         'status': 'ok',
         'operation': operation,
         'access_scope': 'owner',
         'origin': origin,
         'query_name': name,
-        'total_count': len(visible),
+        'total_count': len(visible) + len(task_visible),
+        'task_scoped_count': len(task_visible),
         'usable_count': len(usable_candidates),
         'own_credential_present': own_present,
         'selected_credential_ref': selected,
@@ -246,7 +269,7 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
                 'expires_at': r.get('ready_expires_at', r.get('expires_at')),
             }
             for r in _stable(visible)
-        ],
+        ] + task_entries,
     }
 
 

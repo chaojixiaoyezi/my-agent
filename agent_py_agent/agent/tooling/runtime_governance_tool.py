@@ -283,19 +283,6 @@ def _unit_text(tool, prefix):
     return command, '[Unit]\nDescription=my-agent Gateway supervisor\n[Service]\nType=simple\n' + extra + 'ExecStart=' + quoted + '\nRestart=always\nRestartSec=5\n[Install]\nWantedBy=default.target\n'
 
 
-# LLM: 只接受规范owner编号形状（local/<id>、providers/<p>/users|groups/<id>），逐段经原安全段校验；不接受路径。
-# 函数用途: 把owner编号解析为原owner身份。
-def _owner_identity(owner_id):
-    from ..user_space.owner_resolver import OwnerIdentity
-
-    parts = owner_id.split('/') if isinstance(owner_id, str) else []
-    if len(parts) == 2 and parts[0] == 'local':
-        return OwnerIdentity.local_main() if parts[1] == 'main' else OwnerIdentity.local_user(parts[1])
-    if len(parts) == 4 and parts[0] == 'providers' and parts[2] in ('users', 'groups'):
-        return (OwnerIdentity.provider_user if parts[2] == 'users' else OwnerIdentity.provider_group)(parts[1], parts[3])
-    raise ValueError('owner_id 必须是 local/<id> 或 providers/<provider>/users|groups/<id>')
-
-
 # LLM: 经原resolver得到目标owner规范home，不创建目录；只读视图只给库路径，收口视图才打开可写运行库；会话库不初始化。
 # 函数用途: 为管理员跨owner对账或唤醒治理组装目标owner的最小宿主视图。
 def _owner_view(agent, owner_id, *, writable):
@@ -303,9 +290,13 @@ def _owner_view(agent, owner_id, *, writable):
 
     from ..gateway_parts.owner_conversation_store import owner_conversation_store
     from ..runtime_db.schema import runtime_db_path
-    from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+    from ..user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_owner_id,
+        resolve_owner_home,
+    )
 
-    scoped = home_paths_with_owner(agent.home_paths, resolve_owner_home(agent.home_paths.root, _owner_identity(owner_id)))
+    scoped = home_paths_with_owner(agent.home_paths, resolve_owner_home(agent.home_paths.root, owner_identity_from_owner_id(owner_id)))
     home = Path(scoped.owner_home_dir)
     if str(scoped.owner_id) != owner_id or home.is_symlink() or not home.is_dir():
         raise ValueError('目标 owner 不存在；请核对 owner_id')
@@ -537,10 +528,14 @@ class RuntimeGovernanceTool(BaseTool):
             root = getattr(getattr(self.agent, 'home_paths', None), 'owner_home_dir', None)
             owner_id = arguments.get('owner_id')
             if owner_id and owner_id != getattr(getattr(self.agent, 'home_paths', None), 'owner_id', None):
-                from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+                from ..user_space.owner_resolver import (
+                    home_paths_with_owner,
+                    owner_identity_from_owner_id,
+                    resolve_owner_home,
+                )
 
                 home = self.agent.home_paths
-                root = home_paths_with_owner(home, resolve_owner_home(home.root, _owner_identity(owner_id))).owner_home_dir
+                root = home_paths_with_owner(home, resolve_owner_home(home.root, owner_identity_from_owner_id(owner_id))).owner_home_dir
             return (str(root),) if root is not None else ()
         roots = [str(self.workspace)] if self.workspace is not None else []
         if arguments.get('action') == 'configure_watchdog_service':

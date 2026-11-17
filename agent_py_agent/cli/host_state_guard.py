@@ -27,6 +27,9 @@ _tool_hints = (
     (("home-retention",), 'runtime_governance {"action":"reconcile_preview"}'),
     (("home-index-rebuild",), 'runtime_governance {"action":"reconcile_preview"}'),
     (("gateway", "status"), 'gateway_status {}'),
+    (("credentials", "revoke"), 'request_credentials {"operation":"revoke","credential_ref":"<cred_ 引用>"}'),
+    (("credentials", "status"), 'request_credentials {"operation":"status","credential_ref":"<cred_ 引用>"}'),
+    (("credentials",), 'request_credentials {"operation":"list"}'),
 )
 
 

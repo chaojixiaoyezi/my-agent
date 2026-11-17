@@ -84,6 +84,9 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     add_config_subcommands(subparsers)
     add_feishu_subcommands(subparsers)
     add_admin_identity_subcommands(subparsers)
+    from .credential_commands import add_credential_subcommands
+
+    add_credential_subcommands(subparsers)
     from .space_commands import cmd_space
     from .team_commands import cmd_team
     from .workflow_commands import cmd_workflow
