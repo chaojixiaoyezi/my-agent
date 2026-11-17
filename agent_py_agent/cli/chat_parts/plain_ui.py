@@ -13,6 +13,7 @@ import sys
 import threading
 from dataclasses import dataclass
 
+from ...agent.conversation.channels import LOCAL_CHAT_CHANNEL
 from ...agent.gateway_parts.stream_events import committed_model_events, public_model_text
 from .plain_state import PLAIN_CHAT_PROMPT
 from .renderer import strip_ansi
@@ -68,9 +69,10 @@ def _make_chunk_handler(agent_name: str, next_message_id: int, *, preview_chars:
         return remaining > 0
 
     # LLM: 只读已sealed response的typed投影，按真实call去重；不按正文猜来源，不打印终答以免与原完整renderer重复。
+    #   按本机私有通道（chat）投影：完整宿主路径保留，凭据遮蔽不变。
     # 函数用途: 在local真实工具边界显示已验过程说明，支持流式和非流式后端。
     def commit_model_response(payload: dict) -> None:
-        events = committed_model_events(payload)
+        events = committed_model_events(payload, delivery_channel=LOCAL_CHAT_CHANNEL)
         call_id = (payload.get('source') or {}).get('call_id')
         if not events or call_id in committed_calls:
             return
@@ -105,9 +107,10 @@ def _normalized_progress_chunk(chunk: str) -> str:
 
 
 # LLM: 内部response完整净化后才折叠和保存expand列表；空公开投影不伪造回复，不改变内部任务状态。
+#   本机普通聊天是私有通道（chat）：完整宿主路径保留，凭据遮蔽不变。
 # 函数用途: 显示一次安全终答并保存可展开公开正文。
 def _render_assistant_response(request: AssistantResponseRenderRequest) -> None:
-    text = public_model_text(request.text, max_chars=0, delivery_channel="", identifiers=())
+    text = public_model_text(request.text, max_chars=0, delivery_channel=LOCAL_CHAT_CHANNEL, identifiers=())
     if not text:
         return
     preview, collapsed = collapse_response_text(
@@ -144,7 +147,7 @@ def _handle_expand_command(raw: str, assistant_outputs: list[str]) -> None:
         print(f"没有编号为 {index} 的助手回复。当前共有 {len(assistant_outputs)} 条。")
         return
     print(f"===== ASSISTANT RESPONSE #{index} =====")
-    print(public_model_text(assistant_outputs[index - 1], max_chars=0, delivery_channel="", identifiers=()))
+    print(public_model_text(assistant_outputs[index - 1], max_chars=0, delivery_channel=LOCAL_CHAT_CHANNEL, identifiers=()))
     print("===== END RESPONSE =====")
 
 

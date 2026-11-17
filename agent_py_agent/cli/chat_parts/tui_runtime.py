@@ -2441,6 +2441,7 @@ class TuiTurnEventAdapter:
         return self.write_model(chunk)
 
     # LLM: public_stream仅由原完整committed fallback传入，是已确认传输事实而非权限配置；本地和旧Gateway raw均只计量，正文等原commit/summary。
+    #   本机 TUI 是私有通道（"tui"）：宿主完整路径照原样展示（Gateway 已按查看者裁决），凭据遮蔽不变。
     # 函数用途: 记录模型输出估计，并只展示宿主已公开的增量，防止未闭合凭据在batch脱敏生效前短暂泄漏。
     def write_model(self, chunk: str, *, public_stream: bool = False) -> bool:
         from ...agent.gateway_parts.stream_events import public_model_text
@@ -2456,7 +2457,7 @@ class TuiTurnEventAdapter:
                 return bool(text.strip())
             self._ensure_assistant_started()
             self._model_candidate_text += text
-            visible = public_model_text(self._model_candidate_text, max_chars=0, delivery_channel="", identifiers=())
+            visible = public_model_text(self._model_candidate_text, max_chars=0, delivery_channel="tui", identifiers=())
             payload = ({"text": visible[len(self._assistant_text):]} if visible.startswith(self._assistant_text)
                        else {"text": visible, "replace_text": True})
             self._publish(
@@ -2471,11 +2472,12 @@ class TuiTurnEventAdapter:
         return bool(text.strip())
 
     # LLM: 同次已验response替换候选即清私有候选全文；只沿原Gateway适配器，不从旧call恢复原文或扩大工具/控制语义。
+    #   按本机私有通道（"tui"）投影：完整宿主路径保留，凭据遮蔽不变。
     # 函数用途: 为本地TUI显示流式或非流式模型确认消息，并防同调用重复提交。
     def commit_model_response(self, payload: dict) -> None:
         from ...agent.gateway_parts.stream_events import committed_model_events
 
-        events = committed_model_events(payload)
+        events = committed_model_events(payload, delivery_channel="tui")
         call_id = (payload.get("source") or {}).get("call_id")
         with self._lock:
             if not events or call_id in self._committed_model_calls:
@@ -2941,11 +2943,12 @@ class TuiTurnEventAdapter:
     # LLM: committed final 采用 summary 完整正文覆盖 active delta；无 active 时创建并立即冻结新 segment。
     # 函数用途: 发布最终助手正文且不产生重复块。
     # LLM: 内部summary先完整公开净化再比较/唯一freeze；typed final仍active，已stable不重写，不能用原文恢复被拒正文。
+    #   净化按本机私有通道（"tui"）：完整宿主路径保留（Gateway 已按查看者裁决），凭据遮蔽不变。
     # 函数用途: 在原summary边界安全固定同一活动块，保show-prompt和原终态更正顺序。
     def _finalize_assistant_text(self, text: str) -> None:
         from ...agent.gateway_parts.stream_events import public_model_text
 
-        text = public_model_text(text, max_chars=0, delivery_channel="", identifiers=())
+        text = public_model_text(text, max_chars=0, delivery_channel="tui", identifiers=())
         if not text:
             if self._assistant_block_id:
                 self._publish("assistant_delta", "updated", self._assistant_block_id,

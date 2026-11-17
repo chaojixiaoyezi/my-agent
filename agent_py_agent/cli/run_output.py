@@ -41,11 +41,12 @@ class _LocalRunChunkWriter:
         self.spinner.stop()
 
     # LLM: 已验消息沿共用净化再stdout；final不在此打印，避免与原print_run_result重复，工具账不受影响。
+    #   按本机私有通道（"cli"）投影：完整宿主路径保留，凭据遮蔽不变。
     # 函数用途: 按真实调用幂等显示过程说明，非流式也能使用同一入口。
     def commit_model_response(self, payload: dict) -> None:
         from ..agent.gateway_parts.stream_events import committed_model_events
 
-        events = committed_model_events(payload)
+        events = committed_model_events(payload, delivery_channel="cli")
         call_id = (payload.get("source") or {}).get("call_id")
         if not events or call_id in self._committed_calls:
             return
@@ -142,11 +143,12 @@ def _unstreamed_final_response(result: object, streamed_text: str) -> str:
     """
     from ..agent.gateway_parts.stream_events import public_model_text
 
-    response = public_model_text(getattr(result, "response", ""), max_chars=0, delivery_channel="", identifiers=())
+    # 本机 CLI 是私有通道（"cli"）：完整宿主路径保留，凭据遮蔽不变。
+    response = public_model_text(getattr(result, "response", ""), max_chars=0, delivery_channel="cli", identifiers=())
     if not response:
         return ""
-    model_response = public_model_text(getattr(result, "model_response", ""), max_chars=0, delivery_channel="", identifiers=()).rstrip()
-    delivered = public_model_text(streamed_text, max_chars=0, delivery_channel="", identifiers=()).rstrip()
+    model_response = public_model_text(getattr(result, "model_response", ""), max_chars=0, delivery_channel="cli", identifiers=()).rstrip()
+    delivered = public_model_text(streamed_text, max_chars=0, delivery_channel="cli", identifiers=()).rstrip()
     if (
         model_response
         and delivered.endswith(model_response)
