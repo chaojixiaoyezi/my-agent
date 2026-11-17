@@ -109,7 +109,7 @@ class ToolSectionsRequest:
     in_use_method_ids: tuple[str, ...] = field(default=(), kw_only=True)
 
 
-# LLM: 原拒绝/展示/Compact及opaque输入source只沿宿主参数链传递；不序列化或恢复身份，同片失效不得再决策，批准归原精确调用。
+# LLM: 原拒绝/展示/Compact、opaque输入source及前台事实/渠道actor只沿宿主参数链传递；不序列化或恢复身份，同片失效不得再决策，批准归原精确调用。
 # 函数用途: 把已准备上下文、冻结摘要视图和宿主状态传给公共工具循环，不写盘。
 def _runtime_loop_params(
     user_prompt: str,
@@ -145,6 +145,8 @@ def _runtime_loop_params(
         runtime_rejected_actions=params.runtime_rejected_actions,
         active_turn_transition_callback=params.active_turn_transition_callback,
         pending_turn_input_source=params.pending_turn_input_source,
+        host_foreground_interactive=params.host_foreground_interactive is True,
+        host_channel_actor=params.host_channel_actor,
         tool_runtime_snapshot=prepared.tool_runtime_snapshot,
         tool_protocol_snapshot=prepared.tool_protocol_snapshot,
         conversation_history_seed=params.conversation_history_seed,
@@ -1654,7 +1656,7 @@ def _validate_native_input_media(agent, params, protocol):
         raise InputMediaError("当前模型档案明确不支持本次附件模态；请显式选择支持该模态的模型。")
 
 
-# LLM: opaque pending source沿同一invocation透传，不授权、不持久化； Resume reconstruction has two projections: the complete owner archive restores budgets,
+# LLM: opaque pending source沿同一invocation透传，不授权、不持久化；前台事实/渠道actor只复制宿主原值，不新增授权； Resume reconstruction has two projections: the complete owner archive restores budgets,
 # dedupe and effect state, while the explicit applied view hides only its own source refs.
 # Never use the bounded model projection as runtime authority. Exact rejection memory
 # remains the same host-owned list across automatic continuations, independent of model history.
@@ -1754,6 +1756,8 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         active_turn_user_inputs=active_turn_user_inputs,
         active_turn_transition_callback=params.active_turn_transition_callback,
         pending_turn_input_source=params.pending_turn_input_source,
+        host_foreground_interactive=params.host_foreground_interactive is True,
+        host_channel_actor=params.host_channel_actor,
         runtime_rejected_actions=params.runtime_rejected_actions,
         conversation_history_seed=params.conversation_history_seed,
         compact_context=params.compact_context,

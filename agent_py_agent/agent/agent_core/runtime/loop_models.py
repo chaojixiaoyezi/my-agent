@@ -202,6 +202,11 @@ class RuntimeLoopParams:
     active_turn_transition_callback: object = None
     # 原Gateway宿主仅在实际invocation绑定；不序列化、不从task_attributes/模型恢复，不授新权限。
     pending_turn_input_source: object = field(default=None, repr=False, compare=False)
+    # LLM: 同RunParams的宿主前台事实与渠道actor，只由_runtime_loop_params复制；不序列化、不从模型或
+    #   task_attributes恢复，不授新权限。
+    # 字段用途: 把本次宿主签发的前台事实与发起人原样交给工具循环参数。
+    host_foreground_interactive: bool = field(default=False, repr=False, compare=False)
+    host_channel_actor: HostChannelActor | None = field(default=None, repr=False, compare=False)
     tool_runtime_snapshot: object = None
     tool_protocol_snapshot: object = None
     conversation_history_seed: object = None
