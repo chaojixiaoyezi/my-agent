@@ -12,6 +12,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
     gateway_short_transaction,
 )
+from ..contracts.diagnostics import redact_diagnostic_text
 from ..conversation.learning_source import projection_is_learnable
 from .candidate_models import (
     CandidateObservation,
@@ -2603,10 +2605,15 @@ def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     return diagnostic
 
 
-# LLM: 只沿显式 __cause__ 链(raise ... from ...)取最底层根因,最多 8 层,不读隐式 __context__。只记根因类名和
+# 诊断里的路径一律换成 <path>（含 ~ 与盘符开头、至少两段的路径）。
+_DIAGNOSTIC_PATH = re.compile(r"(?:~|[A-Za-z]:)?(?:[/\\][^\s'\"()\[\]{}<>,;]+){2,}")
+
+
+# LLM: 只沿显式 __cause__ 链(raise ... from ...)取最底层根因,最多 8 层,不读隐式 __context__。记根因类名、
 #   两个标准库结构化属性:OSError.errno(如磁盘满 28)、JSONDecodeError.pos(出错位置,与 response_chars
-#   对照可分辨截断/空响应/中途格式坏)。根因正文不入账,它可能带文件路径或响应片段。
-# 函数用途: 从包装异常(如 CuratorBatchCommitError)里取出被包住的根因类名、错误号和解析出错位置。
+#   对照可分辨截断/空响应/中途格式坏)。两者都没有时补安全根因消息 cause_message:先 redact_diagnostic_text
+#   脱敏凭据(含裸 Bearer),再把路径换成 <path>,最多 120 字(R-05:只有 cause_type=ValueError 时无法归因)。
+# 函数用途: 从包装异常(如 CuratorBatchCommitError)里取出被包住的根因类名、错误号、解析出错位置和脱敏消息。
 def _cause_facts(exc: BaseException) -> dict[str, object]:
     root = exc.__cause__
     for _ in range(8):
@@ -2620,6 +2627,11 @@ def _cause_facts(exc: BaseException) -> dict[str, object]:
         facts["cause_errno"] = root.errno
     if isinstance(root, json.JSONDecodeError):
         facts["cause_pos"] = root.pos
+    if len(facts) == 1:
+        # 没有 errno/pos 这类结构化事实时（如裸 ValueError），类名不足以归因，才补脱敏消息。
+        message = _DIAGNOSTIC_PATH.sub("<path>", redact_diagnostic_text(str(root) or "")).strip()[:120]
+        if message:
+            facts["cause_message"] = message
     return facts
 
 
@@ -2650,13 +2662,16 @@ def _violation_facts(exc: BaseException) -> dict[str, object]:
 # 函数用途: 把失败诊断编码为一条稳定、有界、可解析的 warning 文本，供运维读账定位。
 def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
     text = _encode_failure_diagnostic(diagnostic)
-    overflow = len(text) - 300
-    message = str(diagnostic.get("message") or "")
-    if overflow > 0 and message:
-        trimmed = {**diagnostic, "message": message[: max(0, len(message) - overflow)]}
-        if not trimmed["message"]:
-            del trimmed["message"]
-        text = _encode_failure_diagnostic(trimmed)
+    trimmed = diagnostic
+    # 超长时先裁外层 message，再裁根因 cause_message；都裁完仍超长才退回最小形状。
+    for key in ("message", "cause_message"):
+        overflow = len(text) - 300
+        value = str(trimmed.get(key) or "")
+        if overflow > 0 and value:
+            trimmed = {**trimmed, key: value[: max(0, len(value) - overflow)]}
+            if not trimmed[key]:
+                del trimmed[key]
+            text = _encode_failure_diagnostic(trimmed)
     if len(text) > 300:
         violation = {key: diagnostic[key] for key in ("violation_code", "violation_path") if key in diagnostic}
         violation.update({key: diagnostic[key] for key in ("input_error_type", "input_context", "input_error_count") if key in diagnostic})
