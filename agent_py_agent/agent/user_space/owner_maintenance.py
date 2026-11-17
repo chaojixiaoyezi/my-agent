@@ -1010,11 +1010,38 @@ def _compact_quota_maintenance_cursor(cursor):
             if k not in ('dir_stamps', 'base_rows', 'scan_rows', 'dir_batch', 'prep', 'orphans')}
 
 
+def _reuse_completed_quota_observation(home, previous):
+    """同一维护周期仅复用已完成且经原有界元数据核验的配额观察；未知仍回到原续扫。"""
+    if not isinstance(previous, dict) or previous.get('complete') is not True:
+        return None
+    from .owner_quota import (
+        _QUOTA_LOCK_BASENAME,
+        _locked_owner_quota,
+        _quota_cursor_table,
+        _read_quota_ledger,
+        _verified_quota_baseline,
+        _write_quota_ledger,
+    )
+
+    root = Path(home.owner_home_dir)
+    with _locked_owner_quota(root / _QUOTA_LOCK_BASENAME, blocking=False):
+        ledger = _read_quota_ledger(root)
+        cursor = ledger.get('reconcile_cursor')
+        if (not isinstance(cursor, dict) or cursor.get('complete') is not True
+                or _quota_cursor_table(cursor) is None
+                or not _verified_quota_baseline(root, ledger, touched=('', 'data'))):
+            return None
+        # 原核验推进有界轮转位置；仍沿原配额锁/写者持久化，不能跨片只反复核表前缀。
+        _write_quota_ledger(root, ledger)
+        return {'complete': True, 'scanned_entries': 0, 'used_bytes': ledger['used_bytes'],
+                'inode_count': ledger['inode_count'], 'cursor': cursor, 'reused_completed': True}
+
+
 # LLM: 配额对账只读元数据并在原配额锁内写配额账，不删除任何owner内容，因此不随保留策略不安全而停摆；
 #   沿原quota锁非阻塞获取，避免maintenance→quota与既有quota→JSON锁序死锁。C/W必须经原transition提交，非C/W需已持原state锁。
 # 函数用途: 在保留或回执适配被延期时仍推进一片配额对账，返回不含目录表的简短回执。
 def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, state_locked, max_entries, max_ms,
-                                   include_cursor=False):
+                                   include_cursor=False, previous=None):
     from .owner_quota import (
         OwnerQuotaLockContention,
         OwnerQuotaUnavailable,
@@ -1028,8 +1055,9 @@ def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, stat
 
     # 函数用途: 执行一片非阻塞配额对账。
     def operation():
-        return reconcile_owner_quota_slice(home.owner_home_dir, max_entries=max_entries, max_ms=max_ms,
-                                           blocking=False)
+        completed = _reuse_completed_quota_observation(home, previous)
+        return completed if completed is not None else reconcile_owner_quota_slice(
+            home.owner_home_dir, max_entries=max_entries, max_ms=max_ms, blocking=False)
     try:
         report = commit_transition(operation) if coordinator else operation()
     except OwnerQuotaLockContention:
@@ -1038,6 +1066,8 @@ def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, stat
         return {'complete': False, 'deferred_reason': 'quota_unavailable'}
     summary = {'complete': report['complete'], 'scanned_entries': report['scanned_entries'],
                'used_bytes': report['used_bytes'], 'inode_count': report['inode_count']}
+    if report.get('reused_completed') is True:
+        summary['reused_completed'] = True
     if include_cursor:
         summary['cursor'] = _compact_quota_maintenance_cursor(report['cursor'])
     return summary
@@ -1128,7 +1158,8 @@ def _run_quota_continuation_slice(state_path, home, previous, current, *, coordi
         report = _deferred_quota_reconciliation(
             home, coordinator=coordinator, commit_transition=commit_transition,
             state_locked=not coordinator, max_entries=quota_max_entries, max_ms=quota_max_ms,
-            include_cursor=not storage.get('deferred_reason'))
+            include_cursor=not storage.get('deferred_reason'),
+            previous=storage.get('quota_reconciliation') or storage.get('cursors', {}).get('cache_tmp_trash'))
         continuation = (report['complete'] is False
                         and report.get('deferred_reason') not in (
                             'coordinator_adapter_protocol_required', 'retention_not_safe'))
@@ -1280,7 +1311,8 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         state = run_storage_maintenance_slice(original, {})
         reconciliation = _deferred_quota_reconciliation(
             home, coordinator=coordinator, commit_transition=commit_transition,
-            state_locked=state_locked, max_entries=quota_max_entries, max_ms=quota_max_ms)
+            state_locked=state_locked, max_entries=quota_max_entries, max_ms=quota_max_ms,
+            previous=original.get('quota_reconciliation') if original.get('continuation_pending') else None)
         state.update(continuation_pending=reconciliation['complete'] is False and reconciliation.get(
                          'deferred_reason') not in ('coordinator_adapter_protocol_required', 'retention_not_safe'),
                      deletion_enabled=False, quota_reconciliation=reconciliation,
@@ -1333,8 +1365,12 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     def quota_step(cursor, budget):
         remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
         try:
-            report = reconcile_owner_quota_slice(home.owner_home_dir, max_entries=min(quota_max_entries, budget['items']),
-                                                 max_ms=min(quota_max_ms, remaining_ms), blocking=False)
+            report = (_reuse_completed_quota_observation(home, cursor)
+                      if original.get('continuation_pending') else None)
+            if report is None:
+                report = reconcile_owner_quota_slice(home.owner_home_dir,
+                    max_entries=min(quota_max_entries, budget['items']),
+                    max_ms=min(quota_max_ms, remaining_ms), blocking=False)
         except OwnerQuotaLockContention:
             return {'cursor': {**cursor, 'complete': False, 'deferred_reason': 'quota_busy'},
                     'complete': False, 'items': 0, 'bytes': 0}

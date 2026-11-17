@@ -797,3 +797,31 @@ def test_derived_reference_pause_preserves_existing_store_cursor(tmp_path, monke
     assert report["partial"] and report["executed"] is False
     assert report["cursor"] == cursor and report["cursor"] is not cursor
     assert report["error_message"] == str(failure) and report["next_action"]
+
+
+def test_completed_quota_observation_revalidates_before_reuse_and_detects_external_write(tmp_path, monkeypatch):
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+    from agent_py_agent.agent.user_space import owner_quota
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    options = dict(coordinator=False, commit_transition=None, state_locked=True, max_entries=8, max_ms=5000)
+    previous = None
+    for _ in range(128):
+        previous = maintenance._deferred_quota_reconciliation(home, previous=previous, **options)
+        if previous["complete"]:
+            break
+    else:
+        pytest.fail("原8条配额预算未完成基线")
+    calls, original = [], owner_quota.reconcile_owner_quota_slice
+    def observed(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(owner_quota, "reconcile_owner_quota_slice", observed)
+    reused = maintenance._deferred_quota_reconciliation(home, previous=previous, **options)
+    assert reused["complete"] and reused["reused_completed"] and calls == []
+    # 未声明外写改变根成员：原元数据门必须拒绝复用，重新进入相同8条预算的真实扫描。
+    (home.owner_home_dir / "external-evidence").write_text("new data")
+    changed = maintenance._deferred_quota_reconciliation(home, previous=reused, **options)
+    assert calls == [True] and changed["complete"] is False
+    assert "reused_completed" not in changed
