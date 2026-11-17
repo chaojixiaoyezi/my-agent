@@ -94,11 +94,14 @@ def _exempt_cursor(value):
         return None
     try:
         if value.startswith('{'):
-            token, keys, digest = json.loads(value), _reconcile_cursor_keys, 'signature'
-            valid = isinstance(token, dict) and token.get('phase') in _reconcile_cursor_phases
+            token, reconcile = json.loads(value), True
         else:
-            token, keys, digest = json.loads(base64.urlsafe_b64decode(value)), _wake_cursor_keys, 'binding'
-            valid = isinstance(token, dict) and token.get('phase') in ('quarantine', 'unreadable')
+            # 对账游标与唤醒游标都以 base64url 输出；按解出的 phase 选择各自文法。
+            token = json.loads(base64.urlsafe_b64decode(value))
+            reconcile = isinstance(token, dict) and token.get('phase') in _reconcile_cursor_phases
+        keys, digest = (_reconcile_cursor_keys, 'signature') if reconcile else (_wake_cursor_keys, 'binding')
+        phases = _reconcile_cursor_phases if reconcile else ('quarantine', 'unreadable')
+        valid = isinstance(token, dict) and token.get('phase') in phases
     except (ValueError, TypeError):
         return None
     if not valid or not set(token) <= keys or not re.fullmatch(r'[0-9a-f]{64}', str(token.get(digest) or '')):

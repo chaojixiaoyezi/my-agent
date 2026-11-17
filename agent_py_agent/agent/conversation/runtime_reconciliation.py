@@ -1,6 +1,7 @@
 """显式管理员对账：只组合原执行账、索引及投影服务，不启动模型或推断未知副作用。"""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -381,6 +382,19 @@ def _readonly_repository(path):
     return RuntimeRepository(path, read_only=True)
 
 
+# LLM: 续页游标对模型是不透明串；明文 JSON 里的 "signature" 字段会被模型侧凭据遮蔽改写成 [REDACTED]，
+#   第二页因此永远验不过绑定摘要（live 2026-11-17）。输出用 base64url 包装，输入仍接受旧的明文 JSON。
+# 函数用途: 把续页状态编码成不会被文本脱敏改写的游标。
+def _encode_reconcile_cursor(state: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(state, separators=(',', ':')).encode()).decode()
+
+
+# 函数用途: 还原上一页游标；格式不对时抛 ValueError，由调用方提示从空 cursor 重新预览。
+def decode_reconcile_cursor(cursor: str) -> object:
+    text = cursor if cursor.lstrip().startswith('{') else base64.urlsafe_b64decode(cursor.encode()).decode()
+    return json.loads(text)
+
+
 def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', limit: int | None = None,
                             older_than_seconds: float | None = None, run_ids: tuple[str, ...] = (), commit_transition=None,
                             task_runs_only: bool = False) -> dict[str, object]:
@@ -415,7 +429,7 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
     if cursor:
         if len(cursor) > 8192:
             raise ValueError('cursor 超出上限，请从空 cursor 重新预览')
-        token = json.loads(cursor)
+        token = decode_reconcile_cursor(cursor)
         if not isinstance(token, dict):
             raise ValueError('cursor 必须是上一页原样返回的 JSON 对象；请从空 cursor 重新预览')
         allowed = {'task_runs'} if task_runs_only else {'capabilities', 'task_runs', 'indexes', 'projections'}
@@ -481,12 +495,12 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
             result['items'] = [{'kind': 'projections', **page}]
             next_state = {'phase': phase, 'after': page['next_after']} if not page.get('page_complete') else None
         if next_state:
-            result['next_cursor'] = json.dumps(dict(next_state, owner=owner, signature=signature), separators=(',', ':'))
+            result['next_cursor'] = _encode_reconcile_cursor(dict(next_state, owner=owner, signature=signature))
     except (OSError, ValueError, RuntimeError, sqlite3.Error, AttributeError, TypeError, KeyError) as exc:
         result['errors'].append({'reason_code': 'RECONCILIATION_SOURCE_UNAVAILABLE', 'error_type': type(exc).__name__,
             'next_step': '保留原记录；核对当前 owner 权威源后重新预览，未知外部操作不得原样重放。'})
         following = None if task_runs_only else {'task_runs': 'capabilities', 'capabilities': 'indexes', 'indexes': 'projections'}.get(state['phase'])
-        result['next_cursor'] = json.dumps(dict(phase=following, after='', owner=owner, signature=signature), separators=(',', ':')) if following else ''
+        result['next_cursor'] = _encode_reconcile_cursor(dict(phase=following, after='', owner=owner, signature=signature)) if following else ''
         result['effect_outcome'] = 'unknown' if apply else 'not_started'
     result['repaired'] = sum(int(row.get('repaired') or row.get('applied') or row.get('closed') or row.get('archived_dirs') or 0) for row in result['items'])
     result['unknown'] = len(result['errors']) + sum(int(row.get('unknown', 0)) + int(row.get('decision') == 'unknown' or row.get('reason_code') in {'PROOF_INCOMPLETE', 'AUTHORITY_MISSING', 'ATTEMPT_UNKNOWN'}) for row in result['items'])

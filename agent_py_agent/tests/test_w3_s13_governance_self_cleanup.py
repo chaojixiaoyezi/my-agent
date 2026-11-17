@@ -10,7 +10,10 @@ import pytest
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.conversation.models import ConversationThread
-from agent_py_agent.agent.conversation.runtime_reconciliation import reconcile_owner_runtime
+from agent_py_agent.agent.conversation.runtime_reconciliation import (
+    decode_reconcile_cursor,
+    reconcile_owner_runtime,
+)
 from agent_py_agent.agent.conversation.store_wake_attempts import WAKE_REPLAY_ARCHIVED
 from agent_py_agent.agent.path_access_policy import HOST_STATE_READ_ONLY_ENV
 from agent_py_agent.agent.tooling.runtime_governance_tool import (
@@ -68,7 +71,7 @@ def test_reconcile_preview_pages_through_the_tool_and_reports_reasons(tmp_path):
         for code, count in body["reason_counts"].items():
             counts[code] = counts.get(code, 0) + count
         cursor = body["next_cursor"]
-        if not cursor or json.loads(cursor)["phase"] != "task_runs":
+        if not cursor or decode_reconcile_cursor(cursor)["phase"] != "task_runs":
             break
     assert sorted(seen) == sorted(row["task_run_id"] for row in created)
     assert sum(counts.values()) == 3, counts
@@ -162,3 +165,27 @@ def test_sandbox_hint_names_the_exact_tool_call(monkeypatch, capsys):
         with host_state_guard.host_state_read_only_guard():
             raise PermissionError(errno.EROFS, "ro", "/x")
     assert "请改用对应的内置工具。" in capsys.readouterr().err
+
+
+def test_reconcile_cursor_survives_the_model_facing_credential_mask(tmp_path):
+    # Live 2026-11-17: the JSON cursor's "signature" field reached the model as [REDACTED] through
+    # sanitize_credentials, so the second page failed with "cursor owner/过滤不匹配".
+    from agent_py_agent.agent.tooling.mcp_client import sanitize_credentials
+
+    agent = _agent(tmp_path)
+    created = [_terminal_root(agent, root=f"masked-{index}") for index in range(3)]
+    tool = RuntimeGovernanceTool(agent, is_admin=True)
+    seen, cursor = [], ""
+    for _ in range(5):
+        outcome = tool.execute({"action": "reconcile_preview", "limit": 1, **({"cursor": cursor} if cursor else {})})
+        body = json.loads(sanitize_credentials(outcome.output))
+        assert outcome.ok and not body["errors"], body
+        seen += [row["task_run_id"] for row in body["items"] if row.get("kind") == "task_run"]
+        cursor = body["next_cursor"]
+        assert "[REDACTED]" not in cursor
+        if not cursor or decode_reconcile_cursor(cursor)["phase"] != "task_runs":
+            break
+    assert sorted(seen) == sorted(row["task_run_id"] for row in created)
+    encoded = base64.urlsafe_b64encode(json.dumps(
+        {"phase": "task_runs", "after": "tr_1", "owner": "local/main", "signature": _SIG}).encode()).decode()
+    assert _exempt_cursor(encoded) == encoded

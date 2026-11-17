@@ -9,6 +9,7 @@ import pytest
 
 from agent_py_agent.agent.conversation.runtime_reconciliation import (
     _snapshot,
+    decode_reconcile_cursor,
     inspect_parent_terminal,
     reconcile_capability_page,
     reconcile_owner_runtime,
@@ -122,7 +123,7 @@ def test_public_actions_have_distinct_effects_and_cannot_model_forge_foreground(
 def test_cursor_bound_to_owner_filter_and_page_budget(tmp_path):
     agent = _agent(tmp_path)
     result = reconcile_owner_runtime(agent, run_ids=('missing-child',), limit=1)
-    token = json.loads(result['next_cursor'])
+    token = decode_reconcile_cursor(result['next_cursor'])
     token['owner'] = 'different-owner'
     with pytest.raises(ValueError, match='cursor owner'):
         reconcile_owner_runtime(agent, run_ids=('missing-child',), limit=1, cursor=json.dumps(token))
@@ -184,7 +185,7 @@ def test_coordinator_reuses_real_w7_exact_closeout_and_w8_index_page(tmp_path):
     applied = reconcile_owner_runtime(agent, apply=True, limit=10)
     assert applied['repaired'] >= 1, applied
     assert repo.get_task_run(created['task_run_id'])['closed_at'] > 0
-    token = json.loads(preview['next_cursor'])
+    token = decode_reconcile_cursor(preview['next_cursor'])
     token['phase'], token['after'] = 'indexes', ''
     indexed = reconcile_owner_runtime(agent, cursor=json.dumps(token), limit=10)
     assert indexed['items'][0]['kind'] == 'indexes', indexed
