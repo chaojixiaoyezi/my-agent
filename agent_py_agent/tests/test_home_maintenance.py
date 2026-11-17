@@ -246,20 +246,27 @@ def test_owner_retention_preserves_held_task_and_all_cleanup_on_legal_hold(tmp_p
     assert old_cache.exists()
 
 
-def test_owner_retention_moves_only_terminal_subagent_scratch(tmp_path: Path) -> None:
+def test_owner_retention_moves_only_terminal_subagent_scratch(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.home_retention import apply_owner_retention
 
+    # 本例核终态/活跃scratch隔离；固定扫描钟去除磁盘吞吐抖动，原条目/字节预算与64片上限保持。
+    monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
     home = ensure_my_agent_home(tmp_path)
-    task = _task_workspace(home.owner_tasks_dir, "active-task", "RUNNING", "2026-05-30T00:00:00+00:00")
+    task = _task_workspace(home.owner_tasks_dir, "retained-task", "DONE", "2026-05-30T00:00:00+00:00")
     done_run = _subagent_workspace(task, "done-run", "DONE", 1_735_689_600.0)
     active_run = _subagent_workspace(task, "active-run", "RUNNING", 1_735_689_600.0)
-    _set_retention(home.owner_retention_json, subagent_scratch_days=30)
+    _set_retention(home.owner_retention_json, subagent_scratch_days=30, completed_task_days=10_000)
 
     scratch_actions = []
     for _ in range(64):
         result = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
-        scratch_actions.extend(action for action in result.actions if action.category == "subagent_scratch")
+        assert not result.errors
+        scratch_actions.extend(action for action in result.actions
+                               if action.category == "subagent_scratch" and action.status != "not_started")
         if all(not (done_run / part).exists()
                for part in ("inbox", "outbox", "compactions", "artifacts/tool_outputs")):
             break
@@ -274,6 +281,30 @@ def test_owner_retention_moves_only_terminal_subagent_scratch(tmp_path: Path) ->
     assert not (done_run / "compactions").exists()
     assert not (done_run / "artifacts" / "tool_outputs").exists()
     assert (active_run / "inbox").exists()
+
+
+def test_active_parent_reference_protects_terminal_subagent_scratch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.home_retention import apply_owner_retention
+
+    monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    home = ensure_my_agent_home(tmp_path)
+    task = _task_workspace(home.owner_tasks_dir, "active-task", "RUNNING", "2026-05-30T00:00:00+00:00")
+    child = _subagent_workspace(task, "done-run", "DONE", 1_735_689_600.0)
+    _set_retention(home.owner_retention_json, subagent_scratch_days=30)
+    for _ in range(64):
+        report = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
+        assert not report.errors
+        assert not [row for row in report.actions if row.category == "subagent_scratch"]
+        assert all((child / part / "scratch.txt").read_text() == "scratch"
+                   for part in ("inbox", "outbox", "compactions", "artifacts/tool_outputs"))
+        if not report.scan_partial:
+            break
+    else:
+        raise AssertionError("活跃父任务引用保护的原预算核验未完成")
 
 
 def test_owner_retention_fails_closed_for_corrupt_policy(tmp_path: Path) -> None:
