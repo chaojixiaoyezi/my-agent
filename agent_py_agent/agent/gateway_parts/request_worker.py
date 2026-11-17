@@ -1194,19 +1194,26 @@ def _admin_channel_identity_from_config(config, home_root, request_payload: dict
 
 
 # LLM: 只认服务端核实的管理员私聊绑定（_admin_channel_identity_from_config，同 /admin 与交互审批的唯一读口）和
-#   本机主 owner 的有效访问模式（resolve_owner_scope_and_access 对 local/main 的同一规则）；读不出绑定一律按否（显示 basename）。
+#   本机主 owner 的有效访问模式：local/main 的 /permissions 选择先经 permission_config 覆盖 config.access_mode（与回合工具
+#   同一映射，默认确认/自主工作不是 full-access），再走 resolve_owner_scope_and_access 对 local/main 的同一规则；
+#   读不出绑定或权限配置一律按否（显示 basename）。
 #   binding_snapshot 是调用方本次已读的绑定快照（C 受理），给了就不再读文件。不读正文、不建目录、不物化 Agent。
 # 函数用途: 判断一条 IM 请求是否来自已绑定管理员私聊、且本机主 owner 处于 full-access（S12 路径展示例外的前提）。
 def admin_private_full_access_from_config(config, home_root, request_payload: dict, *, binding_snapshot=None) -> bool:
     from types import SimpleNamespace
 
+    from ..user_space.approval_mode import permission_config
     from ..user_space.owner_access import resolve_owner_scope_and_access
+    from ..user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 
     try:
         if _admin_channel_identity_from_config(
                 config, home_root, request_payload, binding_snapshot=binding_snapshot) is None:
             return False
-    except (OSError, RuntimeError, ValueError):
+        main_owner = resolve_owner_home(home_root, OwnerIdentity.local_main())
+        config = permission_config(config, SimpleNamespace(
+            owner_provider="local", owner_kind="main", owner_tool_policy_json=main_owner.tool_policy_json))
+    except (OSError, RuntimeError, TypeError, ValueError):
         return False
     local_main = SimpleNamespace(owner_provider="local", owner_kind="main", owner_home_dir="")
     return resolve_owner_scope_and_access(local_main, config)[1] == "full-access"
