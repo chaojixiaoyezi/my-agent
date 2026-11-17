@@ -223,8 +223,17 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+# LLM: 非文件工具（如委托约束）同样会收到模型复用的展示别名；只按调用方给定的 owner 家目录还原，不授予权限。
+# 函数用途: 把 ~/.my-agent/owner 别名地址还原为该 owner 家目录下的路径；不是别名时返回空串。
+def resolve_owner_home_alias(raw: object, owner_home: str) -> str:
+    if not str(owner_home or "").strip():
+        return ""
+    return _task_workspace_relative_path(raw, {"canonical_owner_home_root": owner_home})
+
+
 __all__ = [
     "canonicalize_owner_home_arguments",
     "exact_read_boundary_error",
     "exact_read_roots",
+    "resolve_owner_home_alias",
 ]

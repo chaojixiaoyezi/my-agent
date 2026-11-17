@@ -688,6 +688,29 @@ def _bind_host_owned_selection(attrs: dict[str, object], raw_params: dict[str, o
     inherit_reasoning_effort(attrs, agent, raw_params.get("effort"))
 
 
+# LLM: 模型看到的 ~/.my-agent/owner 只是宿主展示别名；上界比较与冻结前按当前 owner 家目录还原，
+# 非别名路径原样保留，是否越权仍由父级写根裁决（live 2026-11-17：别名任务目录被当成越权拒绝）。
+# 函数用途: 把委托约束里的展示别名路径还原为当前 owner 家目录下的真实路径。
+def _owner_alias_resolved_constraints(constraints, agent):
+    from dataclasses import replace
+
+    from ...tooling.runtime_boundary import resolve_owner_home_alias
+
+    owner_home = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
+    if constraints is None or not owner_home:
+        return constraints
+
+    def resolved(values):
+        return tuple(resolve_owner_home_alias(value, owner_home) or value for value in values)
+
+    return replace(
+        constraints,
+        exact_write_set=resolved(constraints.exact_write_set),
+        allowed_read_inputs=resolved(constraints.allowed_read_inputs),
+        allowed_output_dirs=resolved(constraints.allowed_output_dirs),
+    )
+
+
 # LLM: 提取并效验结构化委托约束，确保不超越父级范围并如实上报原生能力。
 # 函数用途: 在构造子代理属性时校验上界并冻结 delegation_constraints。
 def _bind_delegation_constraints(attrs: dict[str, object], raw_params: dict[str, object], agent) -> None:
@@ -702,7 +725,7 @@ def _bind_delegation_constraints(attrs: dict[str, object], raw_params: dict[str,
         validate_delegation_constraints_upper_bound,
     )
 
-    constraints = extract_delegation_constraints(raw_params)
+    constraints = _owner_alias_resolved_constraints(extract_delegation_constraints(raw_params), agent)
     parent_constraints = extract_delegation_constraints(None, agent=agent) if agent else None
 
     if constraints is None and parent_constraints is not None:
