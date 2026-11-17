@@ -456,6 +456,30 @@ class CandidateService:
         records = _candidate_read_slice(source_rows, statuses, limit)
         return deepcopy(records)
 
+    # LLM: 只给 /memory candidates 列表做只读兜底：整表严格解析因单条正文读不出（缺失、摘要不符、非 UTF-8）失败时，
+    #   逐位读取，读不出的条目只记位置、编号和原因，原字节不动。写入、规划、晋升和策展仍走严格解析，不能拿本结果改写账本。
+    # 函数用途: 返回可读候选（按创建时间排序的副本）和读不出条目的诊断，让一条坏正文不挡住其余候选的查看。
+    def readable_rows_isolating_unreadable(self) -> tuple[list[MemoryCandidate], list[dict[str, object]]]:
+        with self._locked_candidates():
+            header = read_manifest(self.path)
+            if header is None:
+                return deepcopy(list(self._load_unlocked())), []
+            rows = CandidateRows(self.path, header)
+            readable: list[MemoryCandidate] = []
+            unreadable: list[dict[str, object]] = []
+            for position in range(len(rows)):
+                try:
+                    readable.append(rows[position])
+                except (OSError, ValueError, TypeError, KeyError, CandidateStoreCorruptError) as error:
+                    try:
+                        identifier = str(rows.index.get(rows.root, 'pos/' + str(position)) or '')
+                    except (OSError, ValueError, TypeError, KeyError):
+                        identifier = ''
+                    unreadable.append({'position': position, 'candidate_id': identifier,
+                                       'reason': 'body_unreadable', 'error_type': type(error).__name__})
+        readable.sort(key=lambda row: (row.created_at, row.candidate_id))
+        return deepcopy(readable), unreadable
+
     # LLM: 仅内部消费者只读提取字段，不得修改候选或嵌套字段；实例/子类覆盖list或load时调用原覆盖入口。
     # 函数用途: 在原文件锁内生成只读扫描元组，避免保留规划和学习排除复制全账本。
     def readonly_rows(self, *, statuses: set[str] | frozenset[str] | None = None,

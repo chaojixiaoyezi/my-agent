@@ -8,6 +8,7 @@ from hashlib import sha256
 from ..common.log_redaction import redact_sensitive_text
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.control_commands import ConversationControlResult
+from ..memory_store.candidates import CandidateStoreCorruptError
 from ..memory_store.promotion import _absolute_authority_block, _promotion_target
 from .memory_candidate_control import memory_control_failure
 
@@ -64,7 +65,13 @@ def candidate_display(candidate):
 # LLM: 列表仅投影编号和结构化状态，不展示正文或把候选误报正式记忆；原memory搜索仍保持不变。
 # 函数用途: 分页查看本人唯一候选库，并给出可复制的精确预览命令。
 def _list_candidates(services, command):
-    rows = services.candidates.list(limit=0)
+    unreadable = []
+    try:
+        rows = services.candidates.list(limit=0)
+    except (ValueError, OSError, CandidateStoreCorruptError):
+        # 2026-11-17 W3 F01 实测：一条候选正文字节损坏，整张列表就只回 MEMORY_CONTROL_UNAVAILABLE；
+        # 现在只跳过读不出的那一条并点名，原字节不动。
+        rows, unreadable = services.candidates.readable_rows_isolating_unreadable()
     offset = int(command.target_id or 0)
     items = [{'candidate_id': row.candidate_id, 'status': row.status, 'candidate_type': row.candidate_type,
               'promotion_target': _promotion_target(row)} for row in rows[offset:offset + 20]]
@@ -74,6 +81,10 @@ def _list_candidates(services, command):
     lines = ['记忆候选（尚未确认的内容不会正式保存）：']
     lines += [row['candidate_id'] + ' ' + row['status'] + ' ' + row['promotion_target']
               + '\n/memory candidates preview ' + row['candidate_id'] for row in items]
+    if unreadable:
+        details['unreadable'] = unreadable
+        names = '、'.join(str(item['candidate_id'] or '#' + str(item['position'])) for item in unreadable[:5])
+        lines.append(f'另有 {len(unreadable)} 条候选正文读不出，已跳过（原数据保留未改动）：{names}')
     return _result(True, '\n'.join(lines + ([details['next_command']] if 'next_command' in details else [])), details)
 
 
