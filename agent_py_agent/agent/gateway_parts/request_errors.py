@@ -360,7 +360,10 @@ def gateway_client_error_message(error_code: object) -> str:
             "当前会话记录无法可靠读取或保存，本轮已停止，避免在缺少上下文时继续执行。"
             "请查看运行诊断后再恢复。"
         ),
-        "INPUT_MEDIA_INVALID": "附件无效、已改变或超过限制，请重新添加图片/视频。",
+        "INPUT_MEDIA_INVALID": (
+            "附件无效、已改变、超过限制，或当前模型不支持这类附件（例如视频），本次没有发给模型。"
+            "请重新添加图片/视频，或用 /model 换用支持该类附件的模型。"
+        ),
         "SUBAGENT_INPUT_MEDIA_DISABLED": (
             "当前未开启向子代理转交图片/视频，本次未创建子代理。"
             "请联系管理员检查附件转交设置后再继续。"

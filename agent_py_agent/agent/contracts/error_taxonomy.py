@@ -908,8 +908,9 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
         recovery_hint=(
-            "附件引用无效、原件已改变、不属于当前用户或超过数量/字节上限；本次请求没有发给模型。"
-            "不要去掉附件改发纯文字，也不要原样重放；请用户重新添加图片/视频或调整附件限制。"
+            "附件引用无效、原件已改变、不属于当前用户、超过数量/字节上限，或当前模型档案未声明该附件模态；"
+            "本次请求没有发给模型。不要去掉附件改发纯文字，也不要原样重放；"
+            "请用户重新添加图片/视频、调整附件限制，或改用声明了该模态的模型。"
         ),
     ),
     "PATH_INVALID": ErrorContract(
