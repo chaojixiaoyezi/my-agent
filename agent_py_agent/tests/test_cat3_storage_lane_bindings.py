@@ -184,7 +184,10 @@ def test_owner_maintenance_publishes_both_real_history_lane_receipts(tmp_path, m
 
 
 @pytest.mark.parametrize('coordinator', [False, True])
-def test_projection_check_only_survives_outer_yield_without_running_completed_domains(tmp_path, monkeypatch, coordinator):
+@pytest.mark.parametrize('zero_budget', [False, True])
+def test_projection_check_only_survives_outer_yield_without_running_completed_domains(
+    tmp_path, monkeypatch, coordinator, zero_budget,
+):
     from agent_py_agent.agent.user_space.owner_resolver import (
         home_paths_with_owner,
         resolve_owner_home,
@@ -192,8 +195,9 @@ def test_projection_check_only_survives_outer_yield_without_running_completed_do
 
     home = ensure_my_agent_home(tmp_path / 'home')
     home = home_paths_with_owner(home, resolve_owner_home(home.root))
-    called = []
+    called, resolved = [], []
     def resolve(kind, **kwargs):
+        resolved.append(kind)
         def lane(request):
             called.append(kind)
             return {'cursor': {}, 'complete': True, 'items': 1, 'bytes': 0}
@@ -209,6 +213,13 @@ def test_projection_check_only_survives_outer_yield_without_running_completed_do
                                        'coordinator_lanes': {'pending_kinds': list(_HISTORY_LANES)}}}
     run_slice = owner_maintenance.run_storage_maintenance_slice
     def one_adapter(*args, **kwargs):
+        if zero_budget and args[1]:
+            for kind, step in args[1].items():
+                if kind not in storage_lanes.LANE_PROJECTION_BINDINGS:
+                    continue
+                receipt = step({}, {'items': 0, 'bytes': 0, 'deadline': float('inf')})
+                assert receipt == {'cursor': {}, 'complete': False, 'items': 0, 'bytes': 0}
+            return run_slice(*args, **kwargs, should_yield=lambda: True)
         checks = 0
         def should_yield():
             nonlocal checks
@@ -222,6 +233,8 @@ def test_projection_check_only_survives_outer_yield_without_running_completed_do
         small.setattr(owner_maintenance, 'run_storage_maintenance_slice', one_adapter)
         first = owner_maintenance.run_owner_storage_maintenance_slice(home, previous, retention, **options)
     assert not first['errors'] and called == []
+    if zero_budget:
+        assert resolved == [], '外层零额度不得提前发现来源协议或解析领域'
     assert {'task_call_telemetry', 'thread_index'} <= set(first['projection_check_pending'])
     second = owner_maintenance.run_owner_storage_maintenance_slice(
         home, {'storage_maintenance': first}, retention, **options)
