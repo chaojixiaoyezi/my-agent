@@ -385,7 +385,7 @@ def _observe_state(home, *, coordinator):
     marker = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
     state = marker['storage_maintenance']
     assert state['errors'] == []
-    if 'coordinator_lanes' in state:
+    if coordinator or state['retention_deletion_safe'] is False:
         assert state['coordinator_lanes']['fallback_kinds'] == []
         assert state['coordinator_lanes']['errors'] == []
         if not coordinator:
