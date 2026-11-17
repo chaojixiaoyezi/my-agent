@@ -381,6 +381,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         self.removed_roots = set()
         self.directory_removals = {}
         self.metadata_checks = {}
+        self.verified_leaves = set()
         self.source_children = {}
         self.source_directories = {}
         self.source_leaves = {}
@@ -433,6 +434,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     self.removed_roots.clear()
                     self.directory_removals.clear()
                     self.metadata_checks.clear()
+                    self.verified_leaves.clear()
                     self.source_children.clear()
                     self.source_directories.clear()
                     self.source_leaves.clear()
@@ -717,6 +719,17 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 raise ValueError("pin source contains non-object rows")
             yield row
 
+    def _verify_directory_leaf(self, path, member):
+        expected = self.sources.get(path)
+        if (not self.published or expected is None or expected[0] is None
+                or not stat.S_ISREG(member.st_mode) or self.post_scopes.get(path) != "settled"
+                or not reference_pins._is_settled(expected[0])):
+            return
+        # 与目录页真实stat处于同一调用栈；在交出预算续点前完成此冷叶的比较，不能留旧观测等未来签收。
+        if reference_pins._metadata_stamp(member) != expected[0]:
+            raise _PinReadChanged(11, "pin source generation changed", str(path))
+        self.verified_leaves.add(path)
+
     def _entries(self, path, *, verifying=False):
         try:
             self._check_parents(path)
@@ -741,6 +754,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 child = path / name
                 if verifying:
                     self.metadata_checks[child] = (reference_pins._metadata_stamp(member), self.contents["pass_token"])
+                    self._verify_directory_leaf(child, member)
                 runtime = Path(self.home.owner_workspace_dir) / "runtime/workspaces"
                 selected = (path not in self.inventory or self._pin_related(child)
                             or path == runtime and stat.S_ISDIR(member.st_mode))
@@ -841,6 +855,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
     def _verify(self):
         hot = []
         self.metadata_checks = {}
+        self.verified_leaves = set()
         for path in chain(self.source_directories, self.source_leaves):
             stamp, _digest = self.sources[path]
             if any(parent in self.removed_roots for parent in (path, *path.parents)):
@@ -858,6 +873,8 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     yield from self._verify_source(path)
                 else:
                     yield 1
+            elif path in self.verified_leaves:
+                yield 0  # 已在本轮目录页真实stat后立即完成，不再重新计同一份验证工作。
             elif stamp is not None and (not self.published or self.post_scopes.get(path) != "settled"):
                 # 首次发布须绑定解析字节与真实复读；热转冷也必须补完一次字节复核，不能只信相同stat。
                 yield from self._verify_source(path)

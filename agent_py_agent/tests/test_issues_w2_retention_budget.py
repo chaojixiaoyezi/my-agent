@@ -1147,7 +1147,7 @@ def test_own_retirement_delta_does_not_hide_a_concurrent_new_reference(tmp_path,
 
 
 
-def test_cold_leaf_metadata_from_a_previous_pass_cannot_authorize_publication(tmp_path):
+def test_cold_leaf_metadata_from_a_previous_pass_cannot_authorize_publication(tmp_path, monkeypatch):
     home, service = _runtime(tmp_path)
     _, leaf = _thread(home, "thread-active", days=0)
     _, gone = _thread(home, "thread-retired")
@@ -1155,6 +1155,8 @@ def test_cold_leaf_metadata_from_a_previous_pass_cannot_authorize_publication(tm
     report = apply.execute_retention_plan(home=home, candidates=service.candidates, plan=plan, now=NOW)
     assert any(action.path == gone and action.status == "trashed" for action in report.actions)
     snapshot = scan._CURRENT_PIN_BUILDS[Path(home.owner_home_dir)]
+    # 单独验证只提供观测、不消费叶工作时的fallback；性能优化不可替代此跨pass关闭门。
+    monkeypatch.setattr(snapshot, "_verify_directory_leaf", lambda path, member: None)
     before = snapshot._stamp(leaf)
     parent_before = leaf.parent.stat()
     stream = snapshot._verify()
@@ -1175,5 +1177,41 @@ def test_cold_leaf_metadata_from_a_previous_pass_cannot_authorize_publication(tm
         assert snapshot._stamp(leaf) != before
         with pytest.raises(scan._PinReadChanged):
             list(stream)
+    finally:
+        stream.close()
+
+
+
+def test_directory_leaf_generation_is_checked_before_yielding_its_budget_step(tmp_path, monkeypatch):
+    home, service = _runtime(tmp_path)
+    _, leaf = _thread(home, "thread-active", days=0)
+    _, gone = _thread(home, "thread-retired")
+    plan, _ = _reach_discovery(service)
+    report = apply.execute_retention_plan(home=home, candidates=service.candidates, plan=plan, now=NOW)
+    assert any(action.path == gone and action.status == "trashed" for action in report.actions)
+    snapshot = scan._CURRENT_PIN_BUILDS[Path(home.owner_home_dir)]
+    original, changed = Path.stat, []
+
+    def rewrite_before_stat(path, *args, **kwargs):
+        if path == leaf and not changed:
+            payload = json.loads(leaf.read_text())
+            payload["metadata"]["source_refs"] = ["evidence/new-reference"]
+            leaf.write_text(json.dumps(payload))
+            changed.append(True)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", rewrite_before_stat)
+    stream = snapshot._verify()
+    try:
+        for _ in range(128):
+            try:
+                next(stream)
+            except scan._PinReadChanged as error:
+                assert error.filename == str(leaf) and changed
+                break
+            assert not changed, "changed leaf yielded before its real generation was checked"
+        else:
+            pytest.fail("directory verification never inspected the real cold leaf")
+        assert leaf not in snapshot.verified_leaves
     finally:
         stream.close()
