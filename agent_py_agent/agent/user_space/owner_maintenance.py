@@ -1271,24 +1271,13 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     source_revisions = deepcopy(previous.get('storage_maintenance', {}).get('projection_source_revisions', {}))
     if not isinstance(source_revisions, dict):
         raise ValueError('INVALID_PROJECTION_SOURCE_REVISIONS')
-    # 可选只读协议由领域入口提供；只查固定数量的已登记投影，不扫描历史或从名称猜来源。
-    projection_probes = {}
-    for key in projection_kinds:
-        projection = resolve_storage_lane(key, projection_only=True)
-        probe = getattr(projection, 'maintenance_source_revision', None)
-        if callable(probe):
-            projection_probes[key] = probe
+    projection_check_only = set()
 
-    def changed_projection_kinds():
-        changed = set()
-        for key, probe in projection_probes.items():
-            try:
-                if key not in source_revisions or probe(home) != source_revisions[key]:
-                    changed.add(key)
-            except (OSError, ValueError, TypeError):
-                # 保持待续；真正调用时由原通道错误回执保留具体原因，不据未知代次宣布完成。
-                changed.add(key)
-        return changed
+    def projection_check_candidates():
+        # 声明已无probe的入口不重复发现；已声明或尚无证明者只安排合法adapter内的轻量检查。
+        return {key for key in projection_kinds
+                if not isinstance(source_revisions.get(key), dict)
+                or source_revisions[key].get('supported') is not False}
 
     # LLM: 仅解析冻结入口并透传原写门；未合入时保留，领域异常由原调度器处理。
     # 函数用途: 将领域通道接到原调度器，未合入的入口只做保留核验。
@@ -1310,7 +1299,21 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                 if (not valid_identity or not owner_id or Path(home.owner_home_dir) != Path(home.root) / 'owners' / owner_id
                         or '..' in Path(owner_id).parts or Path(owner_id).is_absolute()):
                     raise ValueError('CANONICAL_OWNER_SCOPE_REQUIRED')
-            lane = resolve_storage_lane(kind.kind, projection_only=not retention_safe)
+            projection = (resolve_storage_lane(kind.kind, projection_only=True)
+                          if kind.kind in projection_kinds else None)
+            probe = getattr(projection, 'maintenance_source_revision', None)
+            probe = probe if callable(probe) else None
+            before = probe(home) if probe is not None else None
+            previous_source = source_revisions.get(kind.kind, {})
+            if kind.kind in projection_kinds and probe is None:
+                source_revisions[kind.kind] = {'supported': False}
+            if kind.kind in projection_check_only:
+                if probe is None or (isinstance(previous_source, dict)
+                        and previous_source.get('supported') is True
+                        and previous_source.get('revision') == before):
+                    return {'cursor': cursor, 'complete': True, 'items': 0, 'bytes': 0}
+            lane = (projection if kind.kind in projection_kinds and not retention_safe
+                    else resolve_storage_lane(kind.kind, projection_only=not retention_safe))
             if lane is None:
                 lane_fallbacks.append(kind.kind)
                 return preservation_receipt(kind, home, cursor, budget)
@@ -1318,13 +1321,11 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                 budget=bounded, legal_hold=bool(retention.legal_hold),
                 coordinator=coordinator or (kind.kind == 'global_indexes' and global_allowed),
                 pressure=pressure, commit=commit, config=config)
-            probe = projection_probes.get(kind.kind)
-            before = probe(home) if probe is not None else None
             receipt = validate_lane_receipt(lane(request))
             if probe is not None:
                 after = probe(home)
                 if receipt['complete'] and before == after:
-                    source_revisions[kind.kind] = after
+                    source_revisions[kind.kind] = {'supported': True, 'revision': after}
                 elif before != after:
                     source_revisions.pop(kind.kind, None)
                     receipt['complete'] = False
@@ -1356,9 +1357,12 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
             # 同资格续片只恢复原待续集合（空集合也有意义）；删除证明首次完成才纳入尚未合格的领域。
             if original.get('continuation_pending') and isinstance(original.get('coordinator_lanes'), dict):
                 pending = set(original.get('pending_kinds') or ()) & lane_adapters.keys()
-                pending.update(changed_projection_kinds() & lane_adapters.keys())
+                candidates = projection_check_candidates() & lane_adapters.keys()
+                projection_check_only.update(candidates - pending)
+                pending.update(candidates)
                 if retention_safe and original.get('retention_deletion_safe') is not True:
                     pending.update(lane_adapters)
+                    projection_check_only.clear()
                 state['pending_kinds'] = sorted(pending)
             else:
                 state.pop('pending_kinds', None)
@@ -1493,7 +1497,9 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
             or original.get('retention_deletion_safe') is False):
         original.pop('pending_kinds', None)
     elif isinstance(original.get('pending_kinds'), list):
-        original['pending_kinds'] = sorted(set(original['pending_kinds']) | changed_projection_kinds())
+        candidates = projection_check_candidates()
+        projection_check_only.update(candidates - set(original['pending_kinds']))
+        original['pending_kinds'] = sorted(set(original['pending_kinds']) | candidates)
     state = run_storage_maintenance_slice(original, adapters,
         max_items=quota_max_entries + len(adapters) + len(LANE_BINDINGS) * STORAGE_LANE_SLICE_ENTRIES,
         max_seconds=max(0.1, quota_max_ms / 1000 + 0.05) + len(LANE_BINDINGS) * _OWNER_LANE_SLICE_MS / 1000,
