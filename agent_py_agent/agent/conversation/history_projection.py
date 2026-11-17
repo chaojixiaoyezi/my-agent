@@ -67,7 +67,8 @@ def _history_row_visible_in_work_scope(
 # LLM: 唯一的单行选择规则：只看结构化 role、请求身份、Audit 投递标记与工作范围，不读正文判断；
 # Gateway/后台的具体投影与只读来源种子必须共用它，不能另抄一套选择算法。
 # 函数用途: 判断一条原始会话记录是否进入本轮模型历史。
-def history_row_selected(row: object, *, current_request_id: str, work_scope: dict[str, object] | None) -> bool:
+def history_row_selected(row: object, *, current_request_id: str, work_scope: dict[str, object] | None,
+                         parked_task_id: str = "") -> bool:
     role = str(getattr(row, "role", "") or "").strip().lower()
     metadata = getattr(row, "metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -81,6 +82,9 @@ def history_row_selected(row: object, *, current_request_id: str, work_scope: di
         or metadata.get("gateway_request_id") == current_request_id
         or (is_audit_background_transcript_entry(row) and not delivered)
         or not _history_row_visible_in_work_scope(metadata, work_scope)
+        # S11：为用户回合让出车道的定时执行还没写完，它的半程记录留给续跑，不进用户回合的历史，
+        #   免得模型把别人的半截工作当成本轮要接着做的事。续跑结束撤下标记后照常可见。
+        or (bool(parked_task_id) and metadata.get("task_id") == parked_task_id)
     )
 
 

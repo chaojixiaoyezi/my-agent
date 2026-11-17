@@ -313,8 +313,11 @@ def gateway_conversation_context(
             force=force_compact,
         )
     )
+    from ..conversation.technical_continuation import user_input_yield_parked_task_id
+
     history_source = _gateway_history_source(
         history_rows, inputs.request_id, request_binding.gateway_message_work_scope(inputs.request),
+        parked_task_id=user_input_yield_parked_task_id(thread),
     )
     recent_artifacts = request_history.gateway_recent_artifacts(agent, thread.thread_id, inputs.request_id, load_errors)
     thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
@@ -1035,9 +1038,12 @@ def _gateway_history_source(
     history_rows: object,
     request_id: str,
     work_scope: dict[str, object] | None,
+    *,
+    parked_task_id: str = "",
 ) -> ConversationHistorySource:
     return freeze_history_source(
         history_rows,
         project_row=history_projection.project_history_row,
-        select=partial(history_projection.history_row_selected, current_request_id=request_id, work_scope=work_scope),
+        select=partial(history_projection.history_row_selected, current_request_id=request_id, work_scope=work_scope,
+                       parked_task_id=parked_task_id),
     )

@@ -49,8 +49,12 @@ def prepare_gateway_compact_recovery(context, conversation, *, force=True, trigg
 def _project_recovery_candidate(context, conversation, params, frozen, view):
     if not view.is_candidate:
         return CompactRecoveryMaterial(conversation, params, frozen, project_tool_loop_request(frozen))
+    from .conversation.technical_continuation import user_input_yield_parked_task_id
+
     work_scope = request_binding.gateway_message_work_scope(context.request)
-    history_source = request_context._gateway_history_source(view.messages, context.request_id, work_scope)
+    parked = user_input_yield_parked_task_id(getattr(getattr(conversation, "compact_source", None), "thread", None))
+    history_source = request_context._gateway_history_source(view.messages, context.request_id, work_scope,
+                                                             parked_task_id=parked)
     root = str(getattr(getattr(context.agent, "home_paths", None), "owner_compact_dir", "") or "")
     if not root:
         raise ConversationCompactError("缺少原 Compact 证据地址", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")

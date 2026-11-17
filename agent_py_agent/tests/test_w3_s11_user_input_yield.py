@@ -296,3 +296,25 @@ def test_a_slice_that_cannot_record_the_park_does_not_yield(tmp_path, monkeypatc
         assert park_for_user_input(agent, params) is False
         assert _yield_lane_to_user_input(agent, params) is False
     assert "USER_INPUT_YIELD_PARK_FAILED" in caplog.text
+
+
+def _history_row(message_id, role, content, **metadata):
+    return SimpleNamespace(message_id=message_id, role=role, content=content, metadata=metadata, channel_message_id="")
+
+
+def test_the_parked_run_partial_rows_stay_out_of_the_user_turn_history():
+    from agent_py_agent.agent.conversation.history_projection import history_row_selected
+
+    rows = [
+        _history_row("m1", "user", "之前的问题"),
+        _history_row("m2", "assistant", "已读取 sample_01，继续读 sample_02。", task_id="srun_p",
+                     conversation_request_id="background-turn-1"),
+        _history_row("m3", "assistant", "上一次定时执行的结论。", task_id="srun_done"),
+    ]
+    parked = request_context._gateway_history_source(rows, "gwreq-user", None, parked_task_id="srun_p")
+    assert [row.message_id for row in parked.rows] == ["m1", "m3"]
+    # 没有停放标记（或续跑结束撤下标记）时，同一条记录照常进入历史。
+    plain = request_context._gateway_history_source(rows, "gwreq-user", None)
+    assert [row.message_id for row in plain.rows] == ["m1", "m2", "m3"]
+    assert history_row_selected(rows[1], current_request_id="gwreq-user", work_scope=None) is True
+    assert history_row_selected(rows[1], current_request_id="gwreq-user", work_scope=None, parked_task_id="srun_p") is False
