@@ -313,11 +313,11 @@ def gateway_conversation_context(
             force=force_compact,
         )
     )
-    from ..conversation.technical_continuation import user_input_yield_parked_task_id
+    from ..conversation.technical_continuation import active_user_input_yield_parked_task_id
 
     history_source = _gateway_history_source(
         history_rows, inputs.request_id, request_binding.gateway_message_work_scope(inputs.request),
-        parked_task_id=user_input_yield_parked_task_id(thread),
+        parked_task_id=active_user_input_yield_parked_task_id(store, thread),
     )
     recent_artifacts = request_history.gateway_recent_artifacts(agent, thread.thread_id, inputs.request_id, load_errors)
     thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
@@ -836,6 +836,7 @@ def _gateway_workspace_task(
         thread_goal=thread_goal,
         request=request,
         request_id=request_id,
+        store=store,
     )
     if selected is None:
         return None
@@ -884,6 +885,7 @@ def _select_gateway_workspace_link(
     thread_goal: dict[str, object] | None,
     request: object,
     request_id: str,
+    store: object = None,
 ) -> tuple[object | None, bool]:
     allowed = {
         str(getattr(link, "task_id", "") or "").strip(): link for link in selectable
@@ -909,10 +911,10 @@ def _select_gateway_workspace_link(
     if goal_task_id:
         allowed.pop(goal_task_id, None)
         selectable = [link for link in selectable if getattr(link, "task_id", "") != goal_task_id]
-    from ..conversation.technical_continuation import user_input_yield_parked_task_id
+    from ..conversation.technical_continuation import active_user_input_yield_parked_task_id
 
     # 为用户回合让出车道的定时执行仍是 active，等续跑接着做；隐式选择不接管它（S11）。
-    parked_task_id = user_input_yield_parked_task_id(thread)
+    parked_task_id = active_user_input_yield_parked_task_id(store, thread)
     if parked_task_id:
         allowed.pop(parked_task_id, None)
         selectable = [link for link in selectable if getattr(link, "task_id", "") != parked_task_id]

@@ -571,11 +571,13 @@ def _compact_idle_candidate(agent, store, thread, *, now=None):
         return {**result, "reason": "already_compacted"}
     usage = inspect_conversation_context(agent, store, latest)
     used, window = usage.projected_tokens, usage.context_window_tokens
-    # 闲置水位相对于同次普通压缩的生效预算，整数比较保留精确边界。
-    effective_trigger = policy["effective_trigger_percent"]
-    if window <= 0 or used * 10000 < window * effective_trigger * idle_threshold:
+    # 闲置水位相对于同次普通压缩的真实触发线（已含 memory_compact_auto_trigger_max_tokens 与容量封顶），
+    # 整数比较保留精确边界；不带触发线的用量对象沿用窗口×生效百分比。
+    trigger = getattr(usage, "trigger_tokens", None)
+    trigger = int(window * policy["effective_trigger_percent"] // 100 if trigger is None else trigger or 0)
+    if window <= 0 or trigger <= 0 or used * 100 < trigger * idle_threshold:
         return {**result, "reason": "below_threshold"}
-    if (used * 100 >= window * policy["effective_trigger_percent"]
+    if (used >= trigger
             and metadata.get("last_compacted_user_activity_gen") == generation
             and metadata.get("last_compacted_message_tail") == marker):
         return {**result, "reason": "regular_compacted"}

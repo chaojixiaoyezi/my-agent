@@ -13,6 +13,7 @@ from functools import partial
 from pathlib import Path
 
 from ...backends.bounded_call import BoundedCallExitUnconfirmedError
+from ...common.audit_activation import AUDIT_ATTR
 from ...common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     RequestExecutionOutcomeUncertainError,
@@ -191,13 +192,19 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
                 bundle.prompt,
             )
         )
+    # 命名 Audit 的子代理沿用宿主写入的 Audit 根任务编号作谱系，来源开启与父任务复核都按它查；
+    # 其它子代理仍以本次 attempt 编号作会话请求编号。
+    keep_audit_lineage = (task_attributes.get(AUDIT_ATTR) is True
+                          and bool(str(task_attributes.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()))
     task_attributes.update(
         {
             # 会话运行时 会给每个 child 新建 thread，同时单独保留 parent_thread_id 谱系。
             # 本项目继承的 conversation_thread_id 继续拥有父 workspace/task link，
             # 只有 agent_thread_id 才拥有 child 自己的模型 transcript。
             AGENT_THREAD_ID_ATTR: thread.thread_id,
-            CONVERSATION_REQUEST_ID_ATTR: bundle.active_attempt_id,
+            CONVERSATION_REQUEST_ID_ATTR: (
+                task_attributes[CONVERSATION_REQUEST_ID_ATTR] if keep_audit_lineage else bundle.active_attempt_id
+            ),
             CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
         }
     )

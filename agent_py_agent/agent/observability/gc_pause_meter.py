@@ -50,12 +50,18 @@ def install() -> None:
 
 
 # LLM: 按与 [started, finished] 的重叠部分求和；未安装或窗口无效时返回 None（未知，不是零）。
+#   自由线程运行时快照可能撞上别的线程的回收回调正在追加，deque 报“迭代中被修改”时同样如实返回未知；
+#   不改用 _recent.copy()，它在高频回收下拖慢吞吐。
 # 函数用途: 返回某段单调时间窗口内整个进程的 GC 停顿毫秒数。
 def pause_ms_between(started: float, finished: float) -> float | None:
     if not _state["installed"] or not finished > started > 0.0:
         return None
+    try:
+        recent = tuple(_recent)
+    except RuntimeError:
+        return None
     total = sum(max(0.0, min(end, finished) - max(begin, started))
-                for begin, end in tuple(_recent) if end > started and begin < finished)
+                for begin, end in recent if end > started and begin < finished)
     return round(total * 1000.0, 3)
 
 

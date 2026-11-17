@@ -1562,6 +1562,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
             owner_slots = max(0, owner_limit - len(active_threads))
             if owner_slots <= 0:
                 continue
+            cap, signature = 0.0, None
             try:
                 agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
                 active = bool(active_threads) or id(agent) in active_agents
@@ -1598,6 +1599,11 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                     f"background-main:{owner_key}",
                     exc,
                 )
+                if cap > 0:
+                    # 规划失败与空闲同样按封顶指数退避（上限沿用 background_idle_owner_max_backoff_seconds），
+                    # 已删除或读不出的 owner 不再每拍重复同一条错误；cap=0 仍每拍规划。
+                    streak = self._owner_idle_streaks.get(owner_key, 0) + 1
+                    self._note_owner_plan(owner_key, signature, min(cap, 0.5 * (2 ** min(streak, 5))), planned_mono)
                 continue
             pending = [thread_id for thread_id in ready if thread_id not in active_threads
                        and self._thread_lane_can_retry(scheduler, str(owner_key), thread_id)]

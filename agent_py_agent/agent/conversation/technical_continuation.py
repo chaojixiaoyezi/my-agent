@@ -375,3 +375,17 @@ def user_input_yield_parked_task_id(thread) -> str:
     metadata = getattr(thread, "metadata", None)
     entry = metadata.get(USER_INPUT_YIELD_PARKED_KEY) if isinstance(metadata, dict) else None
     return str(entry.get("task_id") or "").strip() if isinstance(entry, dict) else ""
+
+
+# LLM: 停放标记只对仍 active 的任务链接生效；任务已停止、删除或结束而标记没撤下时，读方当它不存在，
+#   不再挡住用户回合的历史与工作区选择。链接读不出不能证明任务已结束，按原标记处理（不接管，方向保守）。
+# 函数用途: 读出线程上仍在停放的定时执行编号；任务链接不存在或已不是 active 时为空串。
+def active_user_input_yield_parked_task_id(store, thread) -> str:
+    task_id = user_input_yield_parked_task_id(thread)
+    if not task_id:
+        return ""
+    try:
+        link = store.tasks.load(task_id)
+    except Exception:  # noqa: BLE001 - 读失败不是任务已结束的证据，保留原标记的保护。
+        return task_id
+    return task_id if link is not None and link.status == "active" else ""

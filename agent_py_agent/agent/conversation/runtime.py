@@ -3346,6 +3346,11 @@ def _skip_pending_wake_signal(
         completion = process_completion_delivery_state(scheduler.runtime.agent, signal)
         if not completion:
             # Ordinary late child lifecycle signals cannot revive an inactive root.
+            if signal.reason == USER_INPUT_YIELD_WAKE_REASON:
+                from .technical_continuation import clear_user_input_yield_parked
+
+                # 停放的定时执行已不再 active（停止、结束、删除或暂停计划之后）：续跑不会再来，先撤下同任务的停放标记（S11）。
+                clear_user_input_yield_parked(scheduler.store, signal.thread_id, str(signal.root_task_id or ""))
             scheduler._mark_signal(signal, current, handled)
             return True
         if completion != "ready":
@@ -4890,6 +4895,11 @@ def _execute_wake_signal(
     ):
         if claim is not None:
             scheduler.scheduler_service.release(claim, now=now)
+        if lifecycle_reason == USER_INPUT_YIELD_WAKE_REASON:
+            from .technical_continuation import clear_user_input_yield_parked
+
+            # 续跑唤醒作废（停止、结束、删除或暂停计划、重启核对、隔离之后）：停放的定时执行不会再续跑，先撤下同任务的停放标记。
+            clear_user_input_yield_parked(scheduler.store, signal.thread_id, str(signal.root_task_id or ""))
         scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
     if _is_legacy_per_source_audit_capacity_signal(signal):
