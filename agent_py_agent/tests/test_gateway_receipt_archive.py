@@ -166,9 +166,16 @@ def test_default_owner_maintenance_runs_protected_storage_adapters(tmp_path, hol
     assert result.ran
     marker = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
     storage = marker.get('storage_maintenance', {})
-    assert {'gateway_terminal', 'cache_tmp_trash'} <= set(storage.get('cursors', {}))
-    assert storage['unbound_kinds'] == []
-    assert storage['coordinator_deferred'] == ['global_indexes']
+    if hold:
+        # 法律保留只推进无删除投影与配额观察，不能为满足旧游标形状调用封存写者。
+        assert storage['retention_deletion_safe'] is False
+        assert storage['deferred_reason'] == 'retention_not_safe'
+        assert 'gateway_terminal' not in storage.get('cursors', {})
+        assert 'quota_reconciliation' in storage
+    else:
+        assert {'gateway_terminal', 'cache_tmp_trash'} <= set(storage.get('cursors', {}))
+        assert storage['unbound_kinds'] == []
+        assert storage['coordinator_deferred'] == ['global_indexes']
     assert (home.owner_home_dir / '.owner-quota-ledger.json').is_file()
     assert bool(list((paths.root / 'archive').glob('receipts-seg-*.jsonl'))) is not hold
     assert (paths.terminal / 'request-a.json').exists() is hold
@@ -185,29 +192,34 @@ def test_default_maintenance_archive_is_idempotent_without_busy_partial(tmp_path
         run_owner_retention_if_due,
     )
     from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
+    from agent_py_agent.agent.user_space.storage_lanes import LANE_BINDINGS
 
     home = ensure_my_agent_home(tmp_path / 'home')
     paths = gateway_paths_from_root(runtime_paths_for_agent(None, home.owner_home_dir, home)['gateway_workspace'])
     _settled(paths)
-    for tick in range(8):
-        now = 2_000_000 + tick
-        assert run_owner_retention_if_due(home, now=now, include_global_indexes=False,
-            quota_max_ms=1000, quota_max_entries=4096).ran
-        state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
-        if not state['maintenance_partial']:
-            break
+
+    def cycle(start):
+        # 新投影各有扫描/修复阶段；按原注册车道数给有限片数，不把首片或旧八片当完整周期。
+        for tick in range(len(LANE_BINDINGS)):
+            now = start + tick
+            assert run_owner_retention_if_due(home, now=now, include_global_indexes=False,
+                quota_max_ms=1000, quota_max_entries=4096).ran
+            state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+            if not state['maintenance_partial']:
+                return state, now
+        pytest.fail('registered maintenance lanes did not settle within one bounded fixture cycle')
+
+    state, _ = cycle(2_000_000)
     assert state['maintenance_partial'] is False
     assert state['storage_maintenance']['continuation_pending'] is False
-    assert run_owner_retention_if_due(home, now=2_086_401, include_global_indexes=False,
-        quota_max_ms=1000, quota_max_entries=4096).ran
+    state, completed_at = cycle(2_086_401)
     manifest = json.loads((paths.root / 'archive' / 'receipts-manifest.json').read_text())
     assert manifest['segment_count'] == 1
-    state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
     assert state['storage_maintenance']['partial'] is True
     assert state['maintenance_partial'] is False
     assert state['storage_maintenance']['cursors']['gateway_terminal']['archived_requests'] == 0
     assert state['storage_maintenance']['continuation_pending'] is False
-    assert not owner_maintenance_due(home.owner_home_dir, now=2_086_402)
+    assert not owner_maintenance_due(home.owner_home_dir, now=completed_at + 1)
 
 
 # LLM: C/W原transition不能被新adapter绕过；策略损坏也不能被当默认许可写账或归档。
