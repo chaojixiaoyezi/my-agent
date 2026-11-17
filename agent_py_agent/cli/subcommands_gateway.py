@@ -31,6 +31,7 @@ from .gateway_process import (
     cmd_gateway_stop,
     cmd_gateway_uninstall,
 )
+from .gateway_timeline import cmd_gateway_timeline
 from .supervisor import (
     cmd_maintenance_lock,
     cmd_maintenance_unlock,
@@ -151,6 +152,10 @@ def _add_gateway_run_subcommand(gateway_sub):
 
     gateway_status = gateway_sub.add_parser("status", help="查看 gateway 状态")
     gateway_status.set_defaults(func=cmd_gateway_status)
+    timeline = gateway_sub.add_parser("timeline", help="只读查看一条请求从平台创建到回复送达的阶段耗时")
+    timeline.add_argument("request_id", nargs="?", default="", help="Gateway 请求编号；省略时取最近结束的一条")
+    timeline.add_argument("--json", action="store_true", help="输出完整 JSON")
+    timeline.set_defaults(func=cmd_gateway_timeline)
     migration = gateway_sub.add_parser('migrate-single-process', help='证明旧执行者退出后迁移为单进程')
     migration.add_argument('--dry-run', action='store_true', help='只读预览，不创建锁、日志或目录')
     migration.set_defaults(func=cmd_gateway_migrate_single_process)

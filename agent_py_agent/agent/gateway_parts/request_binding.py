@@ -57,6 +57,13 @@ def record_gateway_request_stage(path: Path, request: dict, stage: str, *, at: f
     expected = (str(request.get("id") or path.stem), str(request.get("execution_attempt_id") or ""), request.get("lease_epoch", 0))
     observed = time.time() if at is None else float(at)
     result = {}
+    root = path.parent.parent.parent
+    ingress = {}
+    if stage == "dispatched_at":
+        from ..observability.message_stage_timeline import ingress_times
+
+        # 入站记录会被清理；派发时把平台创建与适配器接收时间抄进请求记录，时间线以后仍可读。
+        ingress = ingress_times(root, request)
 
     # LLM: 原子更新内重核准确代次，旧 worker 不得把阶段覆盖到新 lease；遥测不授控制权。
     # 函数用途: 合并当前代的单个时间点和已经可算的阶段耗时。
@@ -71,15 +78,21 @@ def record_gateway_request_stage(path: Path, request: dict, stage: str, *, at: f
         accepted = current.get("created_at") or current.get("submitted_at")
         result.setdefault("accepted_at", float(accepted) if accepted else None)
         result.setdefault(stage, observed)
-        for key, start, end in (("queue_wait_ms", "accepted_at", "dispatched_at"),
+        for key, value in ingress.items():
+            result.setdefault(key, value)
+        for key, start, end in (("adapter_to_accept_ms", "adapter_received_at", "accepted_at"),
+                                ("queue_wait_ms", "accepted_at", "dispatched_at"),
                                 ("agent_init_ms", "dispatched_at", "owner_agent_ready_at"),
                                 ("lock_wait_ms", "lock_wait_started_at", "lock_acquired_at")):
             if result.get(start) is not None and result.get(end) is not None:
                 result[key] = max(0.0, (result[end] - result[start]) * 1000.0)
+        if result.get("provider_created_at") is not None and result.get("adapter_received_at") is not None:
+            # 平台时钟与本机时钟不同源，保留带符号差值；负数表示平台时钟领先本机。
+            result["provider_to_adapter_ms"] = (result["adapter_received_at"] - result["provider_created_at"]) * 1000.0
         current["request_stage_timing"] = result
         return current
 
-    paths = gateway_paths_from_root(path.parent.parent.parent)
+    paths = gateway_paths_from_root(root)
     with gateway_turn_transition(paths, expected[0]):
         update_json_file_atomic(path, update, require_existing=True)
     if result:

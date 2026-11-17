@@ -203,6 +203,17 @@ def canonical_payload_digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# LLM: 唯一的入站身份算法；落盘记录名与只读时间线按通道+平台消息编号定位同一记录，不得各自复制公式。
+# 函数用途: 计算一条平台消息的稳定入站记录编号。
+def gateway_ingress_id(channel: str, provider_message_id: str) -> str:
+    anchor = json.dumps(
+        [str(channel or "").strip(), str(provider_message_id or "").strip()],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(anchor.encode("utf-8")).hexdigest()
+
+
 # LLM: One provider message has one stable adapter identity. User/conversation/content stay in the
 # canonical digest so a replay with changed authenticated facts is quarantined under that identity.
 # 函数用途: 从可信通道消息字段创建首次落盘的 prepared 记录。
@@ -219,12 +230,7 @@ def build_gateway_ingress_record(
 ) -> GatewayIngressRecord:
     normalized_channel = str(channel or "").strip()
     normalized_message_id = str(provider_message_id or "").strip()
-    ingress_anchor = json.dumps(
-        [normalized_channel, normalized_message_id],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    ingress_id = hashlib.sha256(ingress_anchor.encode("utf-8")).hexdigest()
+    ingress_id = gateway_ingress_id(normalized_channel, normalized_message_id)
     canonical = canonical_ingress_payload(
         channel=normalized_channel,
         user_id=user_id,

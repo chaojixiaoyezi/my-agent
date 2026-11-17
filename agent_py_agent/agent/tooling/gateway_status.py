@@ -186,6 +186,9 @@ class GatewayStatusTool(BaseTool):
             from ..settings.model_scope import thread_model_execution_status
 
             snapshot["model_selection"] = thread_model_execution_status(self.agent, thread_id)
+            last = (snapshot["model_selection"] or {}).get("last_request") if isinstance(snapshot["model_selection"], dict) else None
+            if isinstance(last, dict):
+                snapshot["request_timeline"] = _request_timeline(self.agent, (last.get("task_id"), last.get("request_id")))
         return _metadata_projection(snapshot) if metadata_only else snapshot
 
 
@@ -243,7 +246,38 @@ def _metadata_projection(snapshot: dict) -> dict:
         ):
             row = selection.get(group)
             result["model_selection"][group] = {key: row.get(key) for key in keys} if isinstance(row, dict) else None
+    timeline = snapshot.get("request_timeline")
+    if isinstance(timeline, dict):
+        # 时间线摘要只含编号、阶段耗时数值与固定代码，无正文、路径或错误文本。
+        summary = timeline.get("summary") if isinstance(timeline.get("summary"), dict) else {}
+        result["request_timeline"] = {
+            "request_id": timeline.get("request_id"), "ok": timeline.get("ok"), "request_state": timeline.get("request_state"),
+            "summary": {key: value for key, value in summary.items()
+                        if (isinstance(value, (int, float)) and not isinstance(value, bool)) or key == "end_to_end_origin"},
+            "coverage": dict(timeline.get("coverage") or {}), "warnings": list(timeline.get("warnings") or []),
+        }
     return result
+
+
+# LLM: 依次尝试会话task_id与调用request_id，首个解析为本Gateway请求的才返回；只读，任何异常都降为None。
+# 函数用途: 为状态面附上最近一次请求的阶段耗时摘要，不含逐阶段明细。
+def _request_timeline(agent: object, candidates: tuple) -> dict | None:
+    from pathlib import Path
+
+    from ..observability.message_stage_timeline import message_stage_timeline
+
+    try:
+        root = gateway_paths(agent).root
+        owner_home = Path(agent.root)
+        for request_id in candidates:
+            if not isinstance(request_id, str) or not request_id:
+                continue
+            result = message_stage_timeline(gateway_root=root, request_id=request_id, owner_home=owner_home)
+            if result.get("ok"):
+                return {key: result[key] for key in ("request_id", "ok", "request_state", "summary", "coverage", "warnings")}
+    except Exception:  # noqa: BLE001 - 状态面尽力附加，不得因诊断失败
+        return None
+    return None
 
 
 # LLM: 只数调用方 owner 的结案目录文件（store.wakes.attempts.quarantined_count，不读内容、不含归档）；读不到会话存储时
