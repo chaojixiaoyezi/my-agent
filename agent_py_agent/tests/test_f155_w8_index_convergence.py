@@ -2,6 +2,8 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.user_space.home_index_rebuild import (
     maintain_home_indexes_lane,
     reconcile_home_index_page,
@@ -167,9 +169,65 @@ def test_compaction_discards_replaced_source_generation(tmp_path):
     replacement.replace(path)
     before = path.read_bytes()
     rejected = compact_index_page(path, cursor=receipt['cursor'], budget=StorageLaneBudget(2, 4096, None))
-    assert rejected['errors'][0]['code'] == 'INDEX_COMPACTION_GENERATION_CHANGED'
+    assert rejected['complete'] is False and rejected['cursor'] == {}
+    assert rejected.get('errors', []) == []
+    assert rejected['skipped'] == {'source_generation_changed': 1}
+    assert rejected['deferred_reason'] == 'compaction_source_generation_changed_restart_scan'
+    assert validate_lane_receipt(rejected) == rejected
     assert path.read_bytes() == before
     assert not list(path.parent.glob('*.stage.sqlite3'))
+    cursor = rejected['cursor']
+    for _ in range(8):
+        resumed = compact_index_page(path, cursor=cursor, budget=StorageLaneBudget(2, 4096, None))
+        cursor = resumed['cursor']
+        assert resumed.get('errors', []) == []
+        if resumed['complete']:
+            break
+    else:
+        pytest.fail('来源稳定后压缩未在原预算内完成重扫')
+    assert path.read_bytes() == before
+
+
+def test_owner_compactions_share_source_without_identical_replacement_churn(tmp_path):
+    from agent_py_agent.agent.user_space.home_index_compact import compact_index_page
+
+    home, _ = setup_workspace(tmp_path)
+    path = home.global_index_active_tasks_jsonl
+    path.parent.mkdir(parents=True)
+    rows = [dict(owner_id='local/main', task_id=str(n % 3), status=str(n)) for n in range(12)]
+    path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    cursors = [{}, {}]
+    done = [False, False]
+    deferred = []
+    for _ in range(32):
+        for owner in range(2):
+            if done[owner]:
+                continue
+            result = compact_index_page(path, cursor=cursors[owner], budget=StorageLaneBudget(2, 4096, None))
+            assert result['items'] <= 2 and result['bytes'] <= 4096
+            assert result.get('errors', []) == []
+            if result.get('deferred_reason'):
+                deferred.append(result['deferred_reason'])
+            cursors[owner] = result['cursor']
+            done[owner] = result['complete']
+        if all(done):
+            break
+    else:
+        pytest.fail('两个owner的真实分片压缩未收敛')
+    assert deferred == ['compaction_source_generation_changed_restart_scan']
+    assert [json.loads(raw) for raw in path.read_text().splitlines()] == rows[-3:]
+    identity = path.stat()
+    cursor = {}
+    for _ in range(16):
+        result = compact_index_page(path, cursor=cursor, budget=StorageLaneBudget(2, 4096, None))
+        cursor = result['cursor']
+        if result['complete']:
+            break
+    else:
+        pytest.fail('无重复记录的下一轮压缩未完成')
+    assert path.stat().st_ino == identity.st_ino
+    assert not list(path.parent.glob('*.stage.sqlite3'))
+    assert not list(path.parent.glob('*.stage.jsonl'))
 
 
 def test_external_append_cannot_leave_old_publisher_cache_authoritative(tmp_path):

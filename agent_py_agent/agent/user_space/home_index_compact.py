@@ -562,7 +562,8 @@ def compact_index_page(target: Path, *, cursor: dict, budget, commit_transition=
         _discard(staging)
         _discard(output)
         return dict(cursor={}, complete=False, items=0, bytes=0,
-                    errors=[{'code': 'INDEX_COMPACTION_GENERATION_CHANGED'}])
+                    skipped={'source_generation_changed': 1},
+                    deferred_reason='compaction_source_generation_changed_restart_scan')
     if cursor and not staging.exists():
         return dict(cursor={}, complete=False, items=0, bytes=0,
                     deferred_reason='compaction_staging_missing_restart_scan')
@@ -621,6 +622,12 @@ def compact_index_page(target: Path, *, cursor: dict, budget, commit_transition=
                     state['output_bytes'] = sink.tell()
             return receipt
     if state['phase'] == 'commit':
+        if int(state.get('output_bytes', 0)) == original[2]:
+            # 所有原始行都被原字节保留时无需替换同字节文件；多owner共用全局源，
+            # 空压缩若也换inode，会反复使其它owner的有界续点失效。
+            _discard(staging)
+            _discard(output)
+            return dict(cursor={}, complete=True, items=0, bytes=0)
         remaining = budget.max_bytes if budget.max_bytes is not None else 8388608
         current = target.stat(follow_symlinks=False)
         if current.st_size - original[2] > remaining:
