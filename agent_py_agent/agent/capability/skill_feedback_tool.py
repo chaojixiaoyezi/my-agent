@@ -722,7 +722,22 @@ def _record_adopted_usage(
         logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
 
 
-def _main_write_claim(agent: object):
+# LLM: adopted/ineffective 要把反馈归到一个持久任务上。普通对话回合在第一个工作工具之前还没有任务链接（读正文的
+#   skill_search get 不晋升），这两个动作因此一律报“任务身份不可用”（R-17）。这里走首个工作工具的同一晋升事务；
+#   已有任务时原样返回，晋升不了就保持原样，由随后的执行权核对照旧拒绝。remove/restore 不归因到任务，不在此晋升。
+# 函数用途: 登记学习反馈前确保当前主会话回合已有持久任务。
+def _bind_turn_task(agent: object, current: object) -> None:
+    from ..conversation.task_promotion import promote_conversation_task_for_run
+
+    try:
+        promote_conversation_task_for_run(agent, current)
+    except InterruptedError:
+        raise
+    except Exception:  # noqa: BLE001 - 晋升失败由随后的执行权核对给出原拒绝码，不在此吞成成功。
+        logging.getLogger(__name__).warning("SKILL_FEEDBACK_TASK_BIND_FAILED", exc_info=True)
+
+
+def _main_write_claim(agent: object, *, bind_turn_task: bool = False):
     from ..conversation.tool_approval_scope import (
         ToolApprovalScopeUnavailable,
         tool_approval_scope,
@@ -735,6 +750,8 @@ def _main_write_claim(agent: object):
     run_id = str(getattr(current, "run_id", "") or getattr(current, "task_id", "") or "").strip()
     if not run_id:
         raise _FeedbackClaimError("当前缺少主会话运行身份，未写入学习记录。")
+    if bind_turn_task:
+        _bind_turn_task(agent, current)
     try:
         scope = tool_approval_scope(agent, run_id)
     except (ToolApprovalScopeUnavailable, ValueError) as exc:
@@ -765,7 +782,7 @@ def _safe_owner_manual_path(agent: object, candidate: Path | str | None) -> str 
 
 
 def _adopt_feedback(agent: object, store: SkillLearningStore, reference: str) -> ToolHandlerOutcome:
-    current, scope, attributes = _main_write_claim(agent)
+    current, scope, attributes = _main_write_claim(agent, bind_turn_task=True)
     cfg = _refresh_agent_config(agent)
     if getattr(cfg, "enable_self_learning", False) is not True:
         return _error_outcome(
@@ -1041,7 +1058,7 @@ def _restore_feedback(agent: object, store: SkillLearningStore, reference: str) 
 
 
 def _ineffective_feedback(agent: object, store: SkillLearningStore, reference: str) -> ToolHandlerOutcome:
-    current, scope, attributes = _main_write_claim(agent)
+    current, scope, attributes = _main_write_claim(agent, bind_turn_task=True)
     cfg = _refresh_agent_config(agent)
     cleaned = reference.strip()
     prefix = _non_owner_prefix(cleaned)
