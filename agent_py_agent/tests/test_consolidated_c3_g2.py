@@ -379,11 +379,14 @@ def test_partial_directory_iteration_has_no_live_directory_descriptors(tmp_path)
     entries = projection._entries(work)
     try:
         seen = []
-        for _ in range(260):
-            child, directory = next(entries)
+        for child, directory in entries:
+            assert _target_fds(work) == []
+            # 原生分页也交出无成员的预算续点；它不能占用目录FD或冒充实际成员。
+            if child is None:
+                assert not directory
+                continue
             seen.append(child.name)
             assert not directory
-            assert _target_fds(work) == []
         with pytest.raises(StopIteration):
             next(entries)
         assert len(set(seen)) == 260
@@ -402,7 +405,8 @@ def test_close_explicitly_closes_nested_directory_generators_with_retained_refer
     projection, _context = _projection(tmp_path)
     projection.contents["pass_token"] = "test-pass"
     projection.budget = SimpleNamespace(max_entries=128, entries=0)
-    root = Path(projection.home.owner_home_dir)
+    # 通用目录生命周期使用明确的测试来源，避开owner规范库存对无关名字的过滤。
+    root = Path(projection.home.owner_home_dir) / 'directory-source'
     root.mkdir(parents=True)
     (root / 'child').mkdir()
     original = projection._entries
@@ -428,7 +432,7 @@ def test_long_directory_native_cursor_reads_each_member_once(tmp_path, monkeypat
     projection, _context = _projection(tmp_path)
     projection.contents['pass_token'] = 'test-pass'
     projection.budget = SimpleNamespace(max_entries=128, entries=0)
-    root = Path(projection.home.owner_home_dir)
+    root = Path(projection.home.owner_home_dir) / 'directory-source'
     root.mkdir(parents=True)
     for number in range(4096):
         (root / str(number)).touch()
@@ -439,7 +443,7 @@ def test_long_directory_native_cursor_reads_each_member_once(tmp_path, monkeypat
         return value
     monkeypatch.setattr(owner_quota._QuotaDirectoryStream, '__next__', advance)
     try:
-        assert len(list(projection._entries(root))) == 4096
+        assert sum(child is not None for child, _ in projection._entries(root)) == 4096
         assert count[0] == 4096, 'native cursor replayed a previous directory prefix'
         assert _target_fds(root) == []
     finally:
