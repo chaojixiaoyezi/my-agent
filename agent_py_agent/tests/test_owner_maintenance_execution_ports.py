@@ -45,12 +45,16 @@ def test_count0_original_leaf_can_skip_shared_indexes_without_changing_retention
 
 
 def test_actual_c_maintenance_source_reaches_original_retention_and_owner_state(tmp_path, monkeypatch):
+    import time
     from types import SimpleNamespace
 
+    from agent_py_agent.agent.memory_store import reference_pins
     from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
 
-    # 此例核4条预算在原C写门下的状态衔接；冻结扫描钟，保留4条/字节额度与128片上限。
+    # 此例核已稳定来源在原C写门下的4条状态衔接；条目/字节额度与128片上限保持。
+    # 热源2秒安全窗口独立于扫描单调钟；沿原W2稳定历史夹具显式表达冷源，不让宿主吞吐决定测试结论。
     monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    monkeypatch.setattr(reference_pins, "time", SimpleNamespace(time_ns=lambda: time.time_ns() + 3_000_000_000))
     with curator_case(tmp_path, monkeypatch, source_kind='maintenance') as (agent, _, _, gate, claim, _):
         stale = agent.home_paths.owner_cache_dir / 'old.tmp'
         assert stale.read_bytes() == b'old-cache'
