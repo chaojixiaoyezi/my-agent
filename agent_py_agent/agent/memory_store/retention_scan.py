@@ -20,6 +20,7 @@ from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -281,6 +282,31 @@ def _resume_execution_actions(context):
     return list(plan.actions)
 
 
+def record_retention_removals(home, action, result):
+    """仅登记真实成功且已消失的原路径，后续目录证明仍须精确核对成员差分。"""
+    if result.status not in {"trashed", "deleted"}:
+        return
+    owner = Path(home.owner_home_dir)
+    with _PIN_BUILDS_LOCK:
+        snapshot = _CURRENT_PIN_BUILDS.get(owner)
+    if snapshot is None or not snapshot.lock.acquire(blocking=False):
+        return
+    try:
+        if snapshot.closed:
+            return
+        paths = action.related_paths if action.category == "conversation" else (action.path,)
+        for path in paths:
+            old = snapshot.sources.get(path)
+            if old is None or old[0] is None or snapshot._stamp(path) is not None:
+                continue
+            snapshot.removed_roots.add(path)
+            parent = path.parent
+            if parent in snapshot.sources:
+                snapshot.directory_removals.setdefault(parent, set()).add((path.name, old[0][1]))
+    finally:
+        snapshot.lock.release()
+
+
 def retain_execution_actions(home, plan, results, *, roots=(), config=None):
     """只保留明确未执行及尚未到达的动作；权限、策略和真实目标仍由执行器逐次复核。"""
     handled = {action.action_id for action in results if action.status != "not_started"}
@@ -340,6 +366,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
     def __init__(self, context):
         super().__init__(context.home, context.conversation_roots, context.now, current_retention_pins,
                          config=context.config)
+        self.thread_directories = {root / "threads" for root in self.roots}
         self.requested_roots = context.conversation_roots if context.requested_roots is None else context.requested_roots
         self.token = secrets.token_hex(16)
         self.lock = threading.Lock()
@@ -348,8 +375,15 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         self.phase = "build"
         self.progress_steps = 0
         self.paused = False
+        self.published = False
         self.index_revisions = []
         self.post_scopes = {}
+        self.removed_roots = set()
+        self.directory_removals = {}
+        self.metadata_checks = {}
+        self.source_children = {}
+        self.source_directories = {}
+        self.source_leaves = {}
         self.context = context
         self.discovery_done = context.discovery_context is None
         self.queued_actions = {}
@@ -396,6 +430,13 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     self.candidate_actions.clear()
                     self.candidate_errors.clear()
                     self.post_scopes.clear()
+                    self.removed_roots.clear()
+                    self.directory_removals.clear()
+                    self.metadata_checks.clear()
+                    self.source_children.clear()
+                    self.source_directories.clear()
+                    self.source_leaves.clear()
+                    self.thread_directories.clear()
                     self.index_revisions.clear()
 
     def _current(self, errors, *, target=None):
@@ -409,6 +450,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             except StopIteration:
                 self.value, self.pending = self.pending[0], None
                 self.phase = "discovery"
+                self.published = True
                 break
             self.progress_steps += 1
             self.budget.charge(entries=1 if entries is None else entries)
@@ -455,7 +497,21 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         observed = (stamp, digest)
         if path in self.sources and self.sources[path] != observed:
             raise _PinReadChanged(11, "pin source changed while reading", str(path))
+        if path not in self.sources:
+            self.source_children.setdefault(path.parent, set()).add(path)
+            index = self.source_directories if stamp is not None and stat.S_ISDIR(stamp[2]) else self.source_leaves
+            index[path] = None
         self.sources[path] = observed
+
+    def _forget_source(self, path):
+        self.sources.pop(path, None)
+        self.source_directories.pop(path, None)
+        self.source_leaves.pop(path, None)
+        siblings = self.source_children.get(path.parent)
+        if siblings is not None:
+            siblings.discard(path)
+            if not siblings:
+                self.source_children.pop(path.parent, None)
 
     def _chunks(self, path, *, required=False, verifying=False):
         try:
@@ -558,7 +614,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
             raise OSError(22, "candidate immutable source length or digest mismatches", str(path))
         # 内容寻址对象由唯一manifest封印；不把每条历史节点放进逐动作复核集合。
-        self.sources.pop(path, None)
+        self._forget_source(path)
         return raw
 
     def _candidate_lookup(self, directory, reference, key):
@@ -678,8 +734,13 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
         with closing(self._directory_members(path, stamp)) as members:
             for name, member in members:
+                if name is None:
+                    yield None, False
+                    continue
                 scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
                 child = path / name
+                if verifying:
+                    self.metadata_checks[child] = reference_pins._metadata_stamp(member)
                 runtime = Path(self.home.owner_workspace_dir) / "runtime/workspaces"
                 selected = (path not in self.inventory or self._pin_related(child)
                             or path == runtime and stat.S_ISDIR(member.st_mode))
@@ -696,7 +757,21 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 yield path / name, stat.S_ISDIR(member.st_mode)
         if self._stamp(path) != stamp:
             raise _PinReadChanged(11, "pin directory changed", str(path))
-        self._remember(path, stamp, (total, count))
+        removals = self.directory_removals.get(path)
+        if verifying and removals:
+            previous_stamp, previous_digest = self.sources[path]
+            expected_total, expected_count = previous_digest
+            for name, inode in removals:
+                expected_total = (expected_total - int.from_bytes(hashlib.sha256(
+                    os.fsencode(name) + b"\0" + str(inode).encode()).digest(), "big")) % (1 << 256)
+                expected_count -= 1
+            if previous_stamp[:3] != stamp[:3] or (total, count) != (expected_total, expected_count):
+                raise _PinReadChanged(11, "pin directory has changes beyond completed removals", str(path))
+            # 只有实际成员摘要准确等于原集合减本次已完成动作，才接受目录的新代次。
+            self.sources[path] = (stamp, (total, count))
+            self.directory_removals.pop(path)
+        else:
+            self._remember(path, stamp, (total, count))
         if verifying:
             self.post_scopes[path] = scope or self.contents["pass_token"]
 
@@ -716,17 +791,29 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                         or self._stamp(path) != stamp):
                     raise _PinReadChanged(11, "pin directory changed", str(path))
                 for name in names:
+                    if (path in self.inventory
+                            and path != Path(self.home.owner_workspace_dir) / "runtime/workspaces"
+                            and not self._pin_related(path / name)):
+                        continue
+                    if path in self.thread_directories and not name.endswith(".json"):
+                        continue
                     try:
                         member = (path / name).stat(follow_symlinks=False)
                     except FileNotFoundError as exc:
                         # 成员已被真实写者移走时本代失效；下一片重建，绝不当作空目录发布。
                         raise _PinReadChanged(11, "pin directory member disappeared", str(path / name)) from exc
                     yield name, member
+                yield None, None  # 原生页即使只有非权威侧车也计量，不能在单片内无界扫空名。
             return
         # 非原生平台保留原枚举及nofollow成员语义；所有拥有者显式close，不依赖GC。
         with os.scandir(path) as members:
-            for member in members:
-                yield member.name, member.stat(follow_symlinks=False)
+            for index, member in enumerate(members, 1):
+                related = (path not in self.inventory or path == Path(self.home.owner_workspace_dir) / "runtime/workspaces"
+                           or self._pin_related(path / member.name))
+                if related and (path not in self.thread_directories or member.name.endswith(".json")):
+                    yield member.name, member.stat(follow_symlinks=False)
+                if index % RETENTION_SCAN_SLICE_ENTRIES == 0:
+                    yield None, None
 
     def _walk(self, root, *, recursive=True):
         with closing(self._entries(root)) as stream:
@@ -739,7 +826,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
 
     def _verify_source(self, path):
         stamp, _digest = self.sources[path]
-        if self._stamp(path) != stamp:
+        if self._stamp(path) != stamp and path not in self.directory_removals:
             raise _PinReadChanged(11, "pin source generation changed", str(path))
         if stamp is not None:
             if stat.S_ISDIR(stamp[2]):
@@ -753,24 +840,36 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
 
     def _verify(self):
         hot = []
-        for path, (stamp, _digest) in self.sources.items():
-            if stamp is not None and not reference_pins._is_settled(stamp):
+        self.metadata_checks = {}
+        for path in chain(self.source_directories, self.source_leaves):
+            stamp, _digest = self.sources[path]
+            if any(parent in self.removed_roots for parent in (path, *path.parents)):
+                if self._stamp(path) is not None:
+                    raise _PinReadChanged(11, "removed pin source reappeared", str(path))
+                self.sources[path] = (None, None)
+                yield 1
+            elif stamp is not None and not reference_pins._is_settled(stamp):
                 hot.append(path)
                 yield 1
+            elif stamp is not None and stat.S_ISDIR(stamp[2]):
+                # 混合inventory的stamp屏蔽mtime，必须核成员；普通冷目录仅在完整metadata漂移/本次删除时重枚举。
+                if (not self.published or self.post_scopes.get(path) != "settled"
+                        or path in self.inventory or path in self.directory_removals or self._stamp(path) != stamp):
+                    yield from self._verify_source(path)
+                else:
+                    yield 1
+            elif stamp is not None and (not self.published or self.post_scopes.get(path) != "settled"):
+                # 首次发布须绑定解析字节与真实复读；热转冷也必须补完一次字节复核，不能只信相同stat。
+                yield from self._verify_source(path)
+            elif path in self.metadata_checks:
+                if self.metadata_checks[path] != stamp:
+                    raise _PinReadChanged(11, "pin source generation changed", str(path))
+                yield 0  # 同一目录页已计量并取得该冷文件的完整stat，不再读一次。
             else:
-                yield from self._verify_source(path)
-        # 先完成可跨片的冷源末门，再处理热组。热组的任一来源若在较早current完成，
-        # 仍须重核整个热组；只查冻结stat不能证明那些旧字节仍是当前发布代次。
-        hot_set = set(hot)
-        for path, (stamp, _digest) in self.sources.items():
-            if path in hot_set:
-                continue
-            if (stamp is not None and reference_pins._is_settled(stamp)
-                    and self.post_scopes.get(path) not in (None, "settled")):
-                yield from self._verify_source(path)
-            if self._stamp(path) != stamp:
-                raise _PinReadChanged(11, "pin source generation changed", str(path))
-            yield 1
+                if self._stamp(path) != stamp:
+                    raise _PinReadChanged(11, "pin source generation changed", str(path))
+                yield 1
+        # 热组仍须在同一次current完成真实内容复核，不能借冷源的metadata信任放宽。
         while hot:
             for path in hot:
                 yield from self._verify_source(path)
@@ -782,6 +881,18 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         for path in hot:
             if self._stamp(path) != self.sources[path][0]:
                 raise _PinReadChanged(11, "pin source generation changed", str(path))
+        for root in tuple(self.removed_roots):
+            parent = self.sources.get(root.parent)
+            if parent is None or parent[0] is None or root.parent in self.directory_removals:
+                continue
+            # 父目录已准确核验删除差分后，旧叶不再重复作为负向来源驻留；新建成员仍由父集合门发现。
+            pending = [root]
+            while pending:
+                path = pending.pop()
+                pending.extend(self.source_children.get(path, ()))
+                self._forget_source(path)
+                yield 1
+            self.removed_roots.discard(root)
         for index, revision in self.index_revisions:
             with index.snapshot(minimum_revision=revision) as snapshot:
                 if snapshot.revision != revision:
@@ -997,6 +1108,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     conversation = workspace / "conversations"
                     if conversation not in self.roots:
                         self.roots = (*self.roots, conversation)
+                        self.thread_directories.add(conversation / "threads")
                         self.pin_roots.add(conversation / "threads")
                         self.pin_ancestors.update((conversation / "threads", *(conversation / "threads").parents))
                     with closing(self._entries(workspace)) as stream:

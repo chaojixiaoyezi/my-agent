@@ -144,6 +144,9 @@ def execute_retention_plan(
                     "target changed after planning; deletion skipped",
                 )
             )
+        from .retention_scan import record_retention_removals
+
+        record_retention_removals(home, action, result)
         results.append(result)
     from .retention_scan import retain_execution_actions
 

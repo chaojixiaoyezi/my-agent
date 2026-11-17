@@ -1092,3 +1092,55 @@ def test_execution_continuation_loss_restarts_discovery_without_losing_actions(t
             break
     assert not report.scan_partial and report.scan_cursor == {}
     assert not any(path.exists() for path in paths)
+
+
+def test_cold_inventory_still_rechecks_new_workspace_references(tmp_path):
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+
+    home, _ = _runtime(tmp_path)
+    inventory = home.owner_workspace_dir / "runtime/workspaces"
+    inventory.mkdir(parents=True, exist_ok=True)
+    target = Path(home.owner_cache_dir) / "referenced-proof.json"
+    write_private_json_file_atomic(target, {})
+    for _ in range(128):
+        pins, complete = scan.current_retention_pins(home, (), [], now=NOW,
+            scan_budget=RetentionScanBudget(128, 8 * 1024 * 1024, float("inf")))
+        if complete:
+            break
+    assert complete and not pins.paths.overlaps(target)
+    # inventory的stamp忽略mtime/ctime；新增规范workspace仍必须由成员摘要发现。
+    source = inventory / "new-workspace/conversations/threads/new-thread.json"
+    thread = ConversationThread(thread_id="new-thread", canonical_user_id="test",
+        updated_at=NOW.timestamp(), metadata={"source_refs": [str(target)]})
+    write_private_json_file_atomic(source, thread.to_dict())
+    for _ in range(128):
+        pins, complete = scan.current_retention_pins(home, (), [], now=NOW,
+            scan_budget=RetentionScanBudget(128, 8 * 1024 * 1024, float("inf")))
+        if complete:
+            break
+    assert complete and pins.paths.overlaps(target)
+
+
+def test_own_retirement_delta_does_not_hide_a_concurrent_new_reference(tmp_path, monkeypatch):
+    home, service = _runtime(tmp_path)
+    _, first = _thread(home, "thread-0000")
+    _, second = _thread(home, "thread-0001")
+    plan, _ = _reach_discovery(service)
+    assert {first, second} <= {action.path for action in plan.actions}
+    original, published = apply._apply_action, []
+
+    def publish(**kwargs):
+        result = original(**kwargs)
+        if result.path == first and result.status == "trashed":
+            active = ConversationThread(thread_id="thread-new", canonical_user_id="test",
+                updated_at=NOW.timestamp(), metadata={"source_refs": [str(second)]})
+            write_private_json_file_atomic(second.with_name("thread-new.json"), active.to_dict())
+            published.append(True)
+        return result
+
+    monkeypatch.setattr(apply, "_apply_action", publish)
+    report = apply.execute_retention_plan(home=home, candidates=service.candidates, plan=plan, now=NOW)
+    assert published and not first.exists() and second.exists()
+    assert not any(action.path == second and action.status == "trashed" for action in report.actions)
+    _finish_apply(service)
+    assert second.exists()
