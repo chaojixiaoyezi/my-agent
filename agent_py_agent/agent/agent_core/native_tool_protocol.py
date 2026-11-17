@@ -6,6 +6,7 @@ from __future__ import annotations
 
 """Run-fixed tool protocol capability, selection and provider schema surface."""
 
+from copy import deepcopy
 from typing import Any
 
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice, ToolProtocolSnapshot
@@ -122,7 +123,16 @@ def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] 
                            if hasattr(params, "loaded_tool_names") else None),
         runtime_snapshot=snapshot,
     )
+    memo = getattr(params, "_native_tools_memo", None)
+    cached = memo.get("entry") if isinstance(memo, dict) else None
+    # 同一请求每轮要算 6 次（S3）：可见 spec 是同一批对象时复用上次转换，返回深拷贝，调用方改动不回写缓存。
+    #   spec 冻结、schema 首次转换时已核 hash；快照重建或能力刷新换出新 spec 对象时自然重算并重核。
+    if (isinstance(cached, tuple) and len(cached[0]) == len(specs)
+            and all(left is right for left, right in zip(cached[0], specs, strict=True))):
+        return deepcopy(cached[1]) or None
     tools = tool_model_specs_to_anthropic_tools(specs)
+    if isinstance(memo, dict):
+        memo["entry"] = (tuple(specs), deepcopy(tools))
     return tools or None
 
 

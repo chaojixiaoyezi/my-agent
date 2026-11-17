@@ -110,6 +110,8 @@ class ToolLoopExecuteParams:
     live_archive_state: dict[str, object] = field(default_factory=dict)
     # 请求局部纯数字缓存与同步对象不进入归档state，replace沿本轮共用；不同请求各自创建。
     _context_estimate_memo: ContextEstimateMemo = field(default_factory=ContextEstimateMemo, repr=False, compare=False)
+    # 本请求的原生工具表转换缓存（S3）：只存（同一批 spec 对象, 转换结果），replace 沿本轮共用，不进归档。
+    _native_tools_memo: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
     # 本轮写入与 run_command 共用的决策请求去重；不持久化、不写归档、不挪用工具执行幂等集合。
     delivery_review_requested_records: set[str] = field(default_factory=set)
     # LLM: 空正文预算的进展事实：本轮「本次实际执行成功、非重放」的工具名（executed_tools 的

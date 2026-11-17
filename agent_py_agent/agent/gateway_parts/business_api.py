@@ -2714,6 +2714,19 @@ def _execute_registered_business_request(host, tool_name: str, spec, params: dic
     )
 
 
+# LLM: 与 register_business_tools 登记循环的跳过判据逐条一致：注册表已有同名工具且就绪动作相同，或注册表声明已含该名。
+#   只读注册表，不改登记；判不出时按“有变化”照常构造，由原登记循环裁决。
+# 函数用途: 判断某个业务工具本轮是否无需重建。
+def _business_tool_unchanged(agent, name: str, ready_action_names: tuple) -> bool:
+    tools_obj = getattr(agent, 'tools', None)
+    if tools_obj is None:
+        return False
+    inner_tools = getattr(tools_obj, 'tools', None)
+    if isinstance(inner_tools, dict) and name in inner_tools:
+        return getattr(inner_tools[name], '_ready_action_names', None) == ready_action_names
+    return hasattr(type(tools_obj), '__contains__') and name in tools_obj
+
+
 def register_business_tools(agent):
     """只向原Registry登记已接通的3个业务域工具与独立资产采用工具；原执行、审批、归档和诊断链保持唯一。"""
     if not bool(getattr(agent.config, 'business_spaces_enabled', False)):
@@ -2890,9 +2903,11 @@ def register_business_tools(agent):
                 and services.ready(act)
             )
         )
-        if ready_specs:
+        # 已登记且就绪动作不变时，下面的登记循环本就丢弃新建工具；这里先跳过构造，免得每轮重建整份领域 Schema（S3）。
+        if ready_specs and not _business_tool_unchanged(agent, domain_name, tuple(s.action for s in ready_specs)):
             candidates.append(BusinessDomainTool(domain_name, ready_specs))
-    if services.ready('assets.versions.accept'):
+    if services.ready('assets.versions.accept') and not _business_tool_unchanged(
+            agent, 'business_assets_versions_accept', ('assets.versions.accept',)):
         candidates.append(BusinessAcceptTool(spec_by_action['assets.versions.accept']))
 
     tools_obj = getattr(agent, 'tools', None)

@@ -1380,8 +1380,8 @@ class ToolRuntimeSnapshot:
     def specs(self) -> tuple[ToolModelSpec, ...]:
         """Derived model specs; the runtime bindings remain the authority."""
 
-        for runtime in self.runtimes:
-            runtime.model_spec.assert_schema_hash()
+        # 快照构造时已逐个核对 schema hash；这里每轮被读十余次，不再重复整份规范化哈希（S3）。
+        # 按名查找 runtime() 与转换成供应商 Schema 时仍各自重核，原地篡改照旧在使用前被拒。
         return tuple(runtime.model_spec for runtime in self.runtimes)
 
     def runtime(self, name: str) -> ToolRuntime | None:

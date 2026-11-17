@@ -373,11 +373,20 @@ class GuidancePendingIndex(ObservationIndex):
     # LLM: 一次调用只推进一个切片；未知回执在原锁内复读，缺失或损坏只报错，不重放提交未知消息。
     # 函数用途: 恢复一个目标的退休事实和队列状态，返回是否完整。
     def refresh(self, target_type, target_id):
+        return self._refresh(target_type, target_id)[0]
+
+    # LLM: 同一切片规则；给出 read 且首个事务内已追平、无未知回执时，就在该事务里读出结果并提交，
+    #   不再为复核和读取各开一次写事务。否则照原序在事务外发布未知回执、另开事务复核，结果为 None。
+    # 函数用途: 推进一个目标的恢复切片，返回(是否完整, 已就地读出的结果或 None)。
+    def _refresh(self, target_type, target_id, read=None):
         dirty_complete = self._repair_dirty(target=(target_type, target_id))
         with self._connection() as conn:
             ack_complete = self._prepare_acks(conn)
             queue_complete = self._queue_slice(conn, target_type, target_id)
             rows = conn.execute("SELECT e.* FROM entries e JOIN pending p ON e.id=p.id WHERE p.target_type=? AND p.target_id=? AND p.status='unknown' ORDER BY p.sequence LIMIT 64", (target_type, target_id)).fetchall()
+            if (read is not None and not rows and dirty_complete and ack_complete and queue_complete
+                    and not conn.execute("SELECT 1 FROM pending WHERE target_type=? AND target_id=? AND status='unknown' LIMIT 1", (target_type, target_id)).fetchone()):
+                return True, read(conn)
         for row in rows:
             path = self.storage.guidance_dedupe_path(row['dedupe'])
             with locked_file_transition(path.with_name(f'.{path.name}.transition')):
@@ -387,7 +396,7 @@ class GuidancePendingIndex(ObservationIndex):
                 self.publish(receipt)
         with self._connection() as conn:
             unknown = conn.execute("SELECT 1 FROM pending WHERE target_type=? AND target_id=? AND status='unknown' LIMIT 1", (target_type, target_id)).fetchone()
-        return bool(dirty_complete and ack_complete and queue_complete and not unknown)
+        return bool(dirty_complete and ack_complete and queue_complete and not unknown), None
 
     # LLM: 原queue锁保留；先有界定位后精确复读，不能为去重扫描全queue；未追平时显式partial。
     # 函数用途: 在原队列中幂等追加一条规范entry。
@@ -485,29 +494,38 @@ class GuidancePendingIndex(ObservationIndex):
             except Exception:
                 pass
 
-        complete = self.refresh(target_type, target_id)
+        complete, found = self._refresh(
+            target_type, target_id,
+            read=lambda conn: self._target_rows(conn, target_type, target_id, limit, include_delivered))
         if not complete:
             raise GuidanceIndexIncomplete('guidance index recovery is partial; retry continues its cursor')
-        with self._connection() as conn:
-            args = [target_type, target_id]
-            if include_delivered:
-                sql = 'SELECT * FROM entries WHERE target_type=? AND target_id=? ORDER BY sequence DESC'
-            else:
-                sql = "SELECT e.* FROM pending p JOIN entries e ON e.id=p.id WHERE p.target_type=? AND p.target_id=? AND p.status='pending' ORDER BY p.sequence DESC"
-            if limit > 0:
-                sql += ' LIMIT ?'
-                args.append(limit)
-            rows = conn.execute(sql, args).fetchall()
-            path = self.storage.guidance_path(target_type, target_id)
-            errors = [{'code': 'GUIDANCE_QUEUE_INVALID', 'context': 'conversation.guidance.read',
-                       'path': str(path), 'offset': row[0], 'message': row[1]}
-                      for row in conn.execute('SELECT offset,error FROM errors WHERE path=? ORDER BY offset', (str(path),))]
+        if found is None:
+            with self._connection() as conn:
+                found = self._target_rows(conn, target_type, target_id, limit, include_delivered)
+        rows, errors = found
         if not rows and not errors:
             # 插话没有延迟 due 状态；任何新队列、退休事实或脏标记都会改变签名。
             self._remember_quiet(scope, signature, math.inf)
         else:
             self._forget_quiet(scope)
         return list(reversed(rows)), errors
+
+    # 函数用途: 在给定事务里读出一个目标的候选行（按次序倒排、有界）与累计坏行报告。
+    def _target_rows(self, conn, target_type, target_id, limit, include_delivered):
+        args = [target_type, target_id]
+        if include_delivered:
+            sql = 'SELECT * FROM entries WHERE target_type=? AND target_id=? ORDER BY sequence DESC'
+        else:
+            sql = "SELECT e.* FROM pending p JOIN entries e ON e.id=p.id WHERE p.target_type=? AND p.target_id=? AND p.status='pending' ORDER BY p.sequence DESC"
+        if limit > 0:
+            sql += ' LIMIT ?'
+            args.append(limit)
+        rows = conn.execute(sql, args).fetchall()
+        path = self.storage.guidance_path(target_type, target_id)
+        errors = [{'code': 'GUIDANCE_QUEUE_INVALID', 'context': 'conversation.guidance.read',
+                   'path': str(path), 'offset': row[0], 'message': row[1]}
+                  for row in conn.execute('SELECT offset,error FROM errors WHERE path=? ORDER BY offset', (str(path),))]
+        return rows, errors
 
     def has_pending(self, target_type=None, target_id=None) -> bool:
         """Fast lock-free check for pending guidance entries."""
