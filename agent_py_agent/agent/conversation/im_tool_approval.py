@@ -80,8 +80,9 @@ def approval_recipient(agent, scope) -> tuple[str, str]:
 
 # LLM: 显示正文只经原公开投影，按钮只带宿主签名引用及固定决定；未包含原参数或秘密。
 # 函数用途: 构造本次调用的允许、拒绝与独立取消审批卡，点击后仍需验证当前执行与私人卡片来源。
-def approval_card(reference: str, request, scope) -> tuple[dict, str]:
-    summary = project_host_paths_for_channel(project_user_reply(request.description).content, "feishu")[:240]
+def approval_card(reference: str, request, scope, *, preserve_host_paths: bool = False) -> tuple[dict, str]:
+    summary = project_host_paths_for_channel(project_user_reply(request.description).content, "feishu",
+                                             preserve_host_paths=preserve_host_paths)[:240]
     text = f"{scope.agent_name}申请执行 {request.tool_name}\n{summary}\n请在本次确认截止前处理，超时将拒绝当前操作。"
     buttons = [{"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": color,
                 "value": {"kind": "my_agent_tool_approval", "reference": reference, "decision": decision}}
@@ -119,7 +120,12 @@ def publish_im_tool_approval(agent, handle) -> None:
             write_json_file_atomic(handle.path, {**row, "im_control": transport})
         if transport.get("delivery_status") == "sent":
             return
-    card, summary = approval_card(transport["reference"], handle.request, handle.scope)
+    from ..gateway_parts.request_worker import admin_private_full_access_from_config
+
+    # 审批卡只发到审批人的私聊；仅已绑定管理员私聊且本机主 owner 为 full-access 时保留完整路径（S12）。
+    preserve = admin_private_full_access_from_config(agent.config, agent.home_paths.root, {
+        "user_id": actor, "metadata": {"channel": channel, "channel_chat_type": "p2p"}})
+    card, summary = approval_card(transport["reference"], handle.request, handle.scope, preserve_host_paths=preserve)
     context = DeliveryContext(channel=channel, target=actor, mode="reply", thread_id=handle.scope.thread_id,
         task_id=handle.scope.run_id, idempotency_key=f"tool-approval:{handle.scope.run_id}:{handle.request.permission_id}")
     receipt = service.deliver_control_card(context, card, summary=summary)

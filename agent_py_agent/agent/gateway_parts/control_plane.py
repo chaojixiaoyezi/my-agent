@@ -62,7 +62,7 @@ class GatewayControlPlane:
         )
         from .multiprocess_takeover_runtime import CoordinatorTakeover
         from .request_owner_binding import REQUEST_OWNER_KEY, frozen_request_owner
-        from .request_worker import _resolve_request_owner_from_config
+        from .request_worker import _resolve_request_owner_from_config, admin_private_host_paths
 
         lease = getattr(self, '_coordinator_role_lease', None)
         controller = self.controller()
@@ -82,6 +82,9 @@ class GatewayControlPlane:
             validated_gateway_request_fingerprint(result, result['id'])
             snapshot = read_admin_channel_identity_snapshot(self.home_root)
             owner = _resolve_request_owner_from_config(self.config, result, self.home_root, binding_snapshot=snapshot)
+            # S12：管理员私聊 + 本机 full-access 时冻结完整路径展示；用同一次绑定快照，且必须在指纹之前。
+            if admin_private_host_paths(self.config, self.home_root, result, binding_snapshot=snapshot):
+                metadata['host_path_display'] = 'full'
             encoded_owner = asdict(owner)
             expected = metadata.get(REQUEST_OWNER_KEY)
             if expected is not None and expected != encoded_owner:

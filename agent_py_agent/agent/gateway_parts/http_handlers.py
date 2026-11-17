@@ -1219,6 +1219,7 @@ def _prepare_http_gateway_input(server, scope, payload):
     from .multiprocess_route import OwnerRouteMismatchError
     from .request_owner_binding import bind_request_owner, frozen_request_owner
     from .request_space import REQUEST_SPACE_KEY
+    from .request_worker import admin_private_host_paths
 
     if REQUEST_SPACE_KEY in payload:
         raise ValueError("客户端不能指定宿主受理空间快照")
@@ -1227,6 +1228,10 @@ def _prepare_http_gateway_input(server, scope, payload):
         if coordinator.coordinator_role_present(server.paths.root, context=server.paths):
             raise OwnerRouteMismatchError("coordinator_input_source_changed")
         prepared = bind_request_owner(server.agent, payload)
+        # S12：首次受理才核对管理员私聊 + full-access；C 路径在 prepare_input 内用同一次绑定快照做同样的事。
+        if server.agent is not None and admin_private_host_paths(
+                server.agent.config, server.agent.home_paths.root, prepared):
+            prepared = {**prepared, "metadata": {**prepared["metadata"], "host_path_display": "full"}}
         snapshot, space = capture_gateway_input_context(server.agent, replace(scope, resolved_owner=frozen_request_owner(prepared)))
     else:
         from ..owner_scoped_pool import _config_with_owner

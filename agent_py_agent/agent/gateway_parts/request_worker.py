@@ -1193,6 +1193,35 @@ def _admin_channel_identity_from_config(config, home_root, request_payload: dict
     return find_admin_channel_identity(home_root, *identity)
 
 
+# LLM: 只认服务端核实的管理员私聊绑定（_admin_channel_identity_from_config，同 /admin 与交互审批的唯一读口）和
+#   本机主 owner 的有效访问模式（resolve_owner_scope_and_access 对 local/main 的同一规则）；读不出绑定一律按否（显示 basename）。
+#   binding_snapshot 是调用方本次已读的绑定快照（C 受理），给了就不再读文件。不读正文、不建目录、不物化 Agent。
+# 函数用途: 判断一条 IM 请求是否来自已绑定管理员私聊、且本机主 owner 处于 full-access（S12 路径展示例外的前提）。
+def admin_private_full_access_from_config(config, home_root, request_payload: dict, *, binding_snapshot=None) -> bool:
+    from types import SimpleNamespace
+
+    from ..user_space.owner_access import resolve_owner_scope_and_access
+
+    try:
+        if _admin_channel_identity_from_config(
+                config, home_root, request_payload, binding_snapshot=binding_snapshot) is None:
+            return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    local_main = SimpleNamespace(owner_provider="local", owner_kind="main", owner_home_dir="")
+    return resolve_owner_scope_and_access(local_main, config)[1] == "full-access"
+
+
+# LLM: 只在首次受理时调用（Count0 的 _prepare_http_gateway_input、C 的 prepare_input 指纹之前）；重放沿已保存的冻结请求，
+#   不再读绑定。只把明确 p2p 的 basename 升为 full，群聊、未知会话类型和其它取值都不动。
+# 函数用途: 判断这条待冻结的请求是否应把 host_path_display 从 basename 升为 full（S12）。
+def admin_private_host_paths(config, home_root, payload: dict, *, binding_snapshot=None) -> bool:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return (metadata.get("host_path_display") == "basename"
+            and str(metadata.get("channel_chat_type") or "").strip().lower() == "p2p"
+            and admin_private_full_access_from_config(config, home_root, payload, binding_snapshot=binding_snapshot))
+
+
 _ADMIN_BINDING_HINT = (
     "如果你是这台电脑的 my-agent 管理员：在与机器人的一对一私聊里发送 /admin <管理员密码>，"
     "验证后本私聊会使用管理员的模型和设置；发完请撤回那条含密码的消息。"
