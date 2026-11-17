@@ -491,12 +491,43 @@ def reconcile_gateway_steer_delivery(
 # 原管理员绑定/审批服务自己裁决私聊、密码和角色；不能被目录的通用拒绝替换成不可行动的提示。
 # 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，保留原管理员批准的精确安全门和恢复提示。
 # LLM: 各控制共用目录鉴权；delivery在活动任务路径前只交可信root/owner，不构造Agent；Memory人工确认仍须原活封印。
+#   S12 只按看这条回复的人判定一次（_control_reply_keeps_host_paths）；审批类回执（admin/approve/deny）沿目标请求
+#   冻结的展示值，这里不升级。
 # 函数用途: 按准确身份分派即时命令和资产投递，不把控制输入交给普通任务。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
+) -> ConversationControlResult:
+    keep = _control_reply_keeps_host_paths(agent, scope)
+    result = _dispatch_gateway_conversation_control(agent, paths, command, scope, preserve_host_paths=keep)
+    if keep and result.kind not in {"admin", "approve", "deny"}:
+        return replace(result, host_path_display="full")
+    return result
+
+
+# LLM: 与普通 /ask 受理同一判据（admin_private_host_paths：已核实的管理员私聊绑定 + 本机主 owner 的有效
+#   full-access），群聊、非管理员、非 full-access、本机通道和读不出的绑定都按 basename；不读正文、不建目录。
+# 函数用途: 判断这条控制回复的查看者能否按 S12 看到完整宿主路径。
+def _control_reply_keeps_host_paths(agent: object, scope: GatewayControlScope) -> bool:
+    from .request_worker import admin_private_host_paths
+
+    payload = _scope_request_payload(scope)
+    payload["metadata"]["host_path_display"] = "basename"
+    return admin_private_host_paths(getattr(agent, "config", None),
+                                    getattr(getattr(agent, "home_paths", None), "root", None), payload)
+
+
+# LLM: preserve_host_paths 只由上面的入口或 /sessions control 按本次查看者传入，只影响状态正文里的宿主路径展示。
+# 函数用途: 分派一条已鉴权的会话控制命令，返回未带 S12 展示标记的原结果。
+def _dispatch_gateway_conversation_control(
+    agent: object,
+    paths: GatewayPaths,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+    *,
+    preserve_host_paths: bool = False,
 ) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
@@ -692,7 +723,7 @@ def execute_gateway_conversation_control(
 
         status = _gateway_task_status(agent, paths, scope, active)
         diagnostics = lockdep_snapshot()
-        message = render_conversation_task_status(status)
+        message = render_conversation_task_status(status, preserve_host_paths=preserve_host_paths)
         if diagnostics["violations"] or diagnostics["handler_overruns"]:
             message += f"\n锁顺序违反：{diagnostics['violations']}；邮箱处理超时：{diagnostics['handler_overruns']}。"
         return ConversationControlResult(

@@ -178,7 +178,8 @@ class ConversationControlResult:
     control_state: str = ""
     error_code: str = ""
     details: dict[str, object] | None = None
-    # 只由宿主按目标请求冻结的 host_path_display=full 设置（S12 审批回执）；其它取值不出字段，IM 出口按 basename。
+    # 只由宿主按 S12 事实设置为 full：审批回执沿目标请求的冻结值，其它控制回复按本次查看者（已核实管理员私聊 +
+    #   full-access）；其它取值不出字段，任务状态里的路径也按 basename，IM 出口同样按 basename。
     host_path_display: str = ""
 
     # LLM: HTTP及IM边界只接收普通类型化投影，不接收数据类的 repr 展示字符串。
@@ -206,10 +207,9 @@ class ConversationControlResult:
             payload["host_path_display"] = "full"
         if self.status is not None:
             task_status = asdict(self.status)
-            task_status["task"] = redact_host_absolute_paths(str(task_status.get("task") or ""))
-            task_status["recent_progress"] = redact_host_absolute_paths(
-                str(task_status.get("recent_progress") or "")
-            )
+            for key in ("task", "recent_progress"):
+                text = str(task_status.get(key) or "")
+                task_status[key] = text if self.host_path_display == "full" else redact_host_absolute_paths(text)
             payload["task_status"] = task_status
         return payload
 
@@ -920,8 +920,10 @@ def conversation_compact_interrupt_name(
 
 
 # LLM: 状态仅渲染结构化运行事实；监控坏记录保留未知而不补零，guidance和历史正文不参与裁决。
+#   preserve_host_paths 只由宿主按本次查看者的 S12 事实传入（已核实管理员私聊 + full-access），缺省按 basename 展示。
 # 函数用途:把原任务状态、后台运行和不占执行资源的待输入整理成可读文本，不泄露内部命令、路径或秘密。
-def render_conversation_task_status(status: ConversationTaskStatus) -> str:
+def render_conversation_task_status(status: ConversationTaskStatus, *, preserve_host_paths: bool = False) -> str:
+    keep = preserve_host_paths is True
     labels = {
         "idle": "空闲",
         "queued": "排队中",
@@ -934,11 +936,11 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
     if status.permission_mode:
         lines.append(f"执行权限：{status.permission_mode}")
     if status.task:
-        lines.append(f"任务：{_short_text(redact_host_absolute_paths(status.task), 160)}")
+        lines.append(f"任务：{_short_text(status.task if keep else redact_host_absolute_paths(status.task), 160)}")
     if status.elapsed_seconds > 0:
         lines.append(f"已运行：{_duration_text(status.elapsed_seconds)}")
     if status.recent_progress:
-        lines.append(f"最近进展：{redact_host_absolute_paths(status.recent_progress)}")
+        lines.append(f"最近进展：{status.recent_progress if keep else redact_host_absolute_paths(status.recent_progress)}")
     lines.append(
         f"执行情况：主代理 {'1' if status.state in {'running', 'stopping'} else '0'}；"
         f"子代理 {status.subagent_total}（运行 {status.subagent_running}，"

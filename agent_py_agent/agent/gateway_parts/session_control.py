@@ -14,7 +14,11 @@ _OPERATIONS={'status','context','stop','steer','recover','compact','endtask','wa
 # LLM: 列表只包含当前 owner 的线程编号、类型和状态，不读取消息正文；控制资格必须在服务端复核管理员身份。
 # 函数用途: 处理原 sessions 命令的本人查询及准确会话控制，错误不会回退成模型聊天。
 def execute_session_control(base,paths,command,scope):
-    from .control_service import _request_agent_for_scope, execute_gateway_conversation_control
+    from .control_service import (
+        _control_reply_keeps_host_paths,
+        _dispatch_gateway_conversation_control,
+        _request_agent_for_scope,
+    )
     try:
         agent=_request_agent_for_scope(base,scope)
         if command.operation!='control':
@@ -39,7 +43,9 @@ def execute_session_control(base,paths,command,scope):
             from .admin_control_service import execute_admin_channel_control
             result=execute_admin_channel_control(base,paths,inner,scope,approval_scope=selected)
         else:
-            result=execute_gateway_conversation_control(base,paths,inner,selected)
+            # S12 的查看者是发命令的人（scope），不是转交目标会话的绑定；回执标记由外层入口统一加。
+            result=_dispatch_gateway_conversation_control(base,paths,inner,selected,
+                preserve_host_paths=_control_reply_keeps_host_paths(base,scope))
         return replace(result,details={**(result.details or {}),'target_thread_id':thread.thread_id,'cross_entry':True})
     except (OSError,KeyError,ValueError,RuntimeError,AttributeError):
         return _failed('原会话暂时不可管理，请刷新线程列表。','CONTROL_TARGET_UNAVAILABLE')

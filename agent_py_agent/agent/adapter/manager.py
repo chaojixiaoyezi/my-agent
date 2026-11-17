@@ -635,6 +635,8 @@ class _ChannelIngressCoordinator:
                 )
                 return GatewayIngressAdvance("completed")
             reply_id = submission.operation_id or request_id
+            # S12：控制回执里宿主给出的路径展示事实覆盖本条入站消息的路由元数据，同敏感命令出口。
+            msg.metadata["host_path_display"] = submission.host_path_display
             sent = self._manager._send_gateway_reply(
                 msg,
                 reply_id,
