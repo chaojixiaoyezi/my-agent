@@ -499,3 +499,157 @@ def test_should_yield_after_deferred_busy_preserves_cursor_progress(tmp_path: Pa
     assert second["consumed"] == 1
     assert second["yielded"] is False
     assert second["errors"] == 0
+
+
+@pytest.mark.parametrize("receipt_kind", ["active_pending", "queued"])
+def test_periodic_reconcile_skips_contended_entry_transition_lock_before_release(
+    tmp_path: Path, receipt_kind: str
+) -> None:
+    if receipt_kind == "active_pending":
+        agent, paths, request_id = _background_input(tmp_path, "entry-busy-task")
+        store = agent.conversation_store
+    else:
+        agent = object()
+        store = None
+        paths = gateway_paths_from_root(tmp_path / "gateway")
+        paths.inbox.mkdir(parents=True, exist_ok=True)
+        paths.processing.mkdir(parents=True, exist_ok=True)
+        paths.terminal.mkdir(parents=True, exist_ok=True)
+        paths.done.mkdir(parents=True, exist_ok=True)
+        paths.failed.mkdir(parents=True, exist_ok=True)
+        request_id = "gwreq-queued-entry-busy"
+        write_json_file_atomic(
+            delivery.gateway_input_receipt_path(paths, request_id),
+            _valid_receipt_dict(request_id, state="queued"),
+        )
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_entry_lock() -> None:
+        with delivery.gateway_input_transition(paths, request_id):
+            held.set()
+            release.wait(10)
+
+    worker = threading.Thread(target=hold_entry_lock)
+    worker.start()
+    assert held.wait(5)
+    try:
+        if store is not None:
+            receipt = delivery.read_gateway_input_receipt(paths, request_id)
+            assert receipt is not None
+            with pytest.raises(BlockingIOError):
+                delivery.reconcile_gateway_input_request(
+                    paths, request_id=request_id, conversation_store=store, busy_skip=True
+                )
+            with pytest.raises(BlockingIOError):
+                delivery._reconcile_bound_input(paths, store, receipt, busy_skip=True)
+
+        started = time.monotonic()
+        busy_summary = delivery.reconcile_gateway_input_receipts(
+            paths, agent, should_yield=lambda: True
+        )
+        elapsed = time.monotonic() - started
+        assert worker.is_alive() and not release.is_set()
+        assert elapsed < 1.0
+        assert busy_summary["deferred_busy"] == 1
+        assert busy_summary["yielded"] is True
+        assert busy_summary["errors"] == 0
+        assert busy_summary["quarantined"] == 0
+        with delivery._ReceiptFailureCache.lock:
+            assert not delivery._ReceiptFailureCache.entries
+        assert [key for key, _ in RecoveryPendingIndex(paths.root).page("receipt")] == [request_id]
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+
+    if store is not None:
+        store.tasks.update_status({"task_id": "entry-busy-task", "status": "completed"})
+    settled = delivery.reconcile_gateway_input_receipts(paths, agent)
+    assert settled["deferred_busy"] == 0
+    assert settled["errors"] == 0
+    assert settled["queued"] == 1
+    assert (paths.inbox / f"{request_id}.json").is_file()
+
+
+def test_576_corrupt_receipts_reach_durable_quarantine_without_growing_cache(tmp_path: Path) -> None:
+    assert delivery._ReceiptFailureCache.max_entries == 512
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    receipt_dir = paths.root / "input_receipts"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx in range(576):
+        req_id = f"gwreq-corrupt-{idx:04d}"
+        broken = _valid_receipt_dict(req_id, state="consumed")
+        broken["prepared_request"]["id"] = ""
+        (receipt_dir / f"{req_id}.json").write_text(
+            json.dumps(broken, ensure_ascii=False), encoding="utf-8"
+        )
+
+    index = RecoveryPendingIndex(paths.root)
+    for _ in range(45):
+        summary = delivery.reconcile_gateway_input_receipts(paths, object(), quarantine_after_failures=3)
+        with delivery._ReceiptFailureCache.lock:
+            assert len(delivery._ReceiptFailureCache.entries) <= 512
+        assert delivery._ReceiptFailureCache.max_entries == 512
+        if index.quarantined_count("receipt") == 576 and index.caught_up("receipt"):
+            break
+    else:
+        raise AssertionError(
+            f"expected all 576 corrupt receipts to quarantine, got {index.quarantined_count('receipt')}"
+        )
+
+    assert index.page("receipt") == ()
+    _clear_receipt_caches()
+    post_restart = delivery.reconcile_gateway_input_receipts(paths, object(), quarantine_after_failures=3)
+    assert post_restart["checked"] == 0
+    assert post_restart["errors"] == 0
+    assert post_restart["quarantined"] == 576
+
+
+def test_full_unquarantined_failure_cache_admits_new_entry_when_oldest_changes_or_disappears(
+    tmp_path: Path,
+) -> None:
+    assert delivery._ReceiptFailureCache.max_entries == 512
+    items: list[Path] = []
+    for idx in range(512):
+        path = tmp_path / f"item-{idx:04d}.json"
+        path.write_text("{}", encoding="utf-8")
+        stamp = delivery._receipt_failure_stamp(path)
+        assert not delivery._record_receipt_failure(path, stamp, "DataCorruptionError", 3)
+        items.append(path)
+
+    extra_blocked = tmp_path / "item-extra-blocked.json"
+    extra_blocked.write_text("{}", encoding="utf-8")
+    assert not delivery._record_receipt_failure(
+        extra_blocked, delivery._receipt_failure_stamp(extra_blocked), "DataCorruptionError", 3
+    )
+    with delivery._ReceiptFailureCache.lock:
+        assert str(extra_blocked) not in delivery._ReceiptFailureCache.entries
+        assert str(items[0]) in delivery._ReceiptFailureCache.entries
+        assert len(delivery._ReceiptFailureCache.entries) == 512
+
+    # 最旧文件消失时，应淘汰该失效最旧项并接纳新项。
+    items[0].unlink()
+    extra_after_unlink = tmp_path / "item-after-unlink.json"
+    extra_after_unlink.write_text("{}", encoding="utf-8")
+    assert not delivery._record_receipt_failure(
+        extra_after_unlink, delivery._receipt_failure_stamp(extra_after_unlink), "DataCorruptionError", 3
+    )
+    with delivery._ReceiptFailureCache.lock:
+        assert str(items[0]) not in delivery._ReceiptFailureCache.entries
+        assert str(extra_after_unlink) in delivery._ReceiptFailureCache.entries
+        assert len(delivery._ReceiptFailureCache.entries) == 512
+
+    # 最旧文件内容变化（stamp 变化）时，同样应淘汰该旧指纹项并接纳新项。
+    items[1].write_text('{"changed": 1}', encoding="utf-8")
+    extra_after_edit = tmp_path / "item-after-edit.json"
+    extra_after_edit.write_text("{}", encoding="utf-8")
+    assert not delivery._record_receipt_failure(
+        extra_after_edit, delivery._receipt_failure_stamp(extra_after_edit), "DataCorruptionError", 3
+    )
+    with delivery._ReceiptFailureCache.lock:
+        assert str(items[1]) not in delivery._ReceiptFailureCache.entries
+        assert str(extra_after_edit) in delivery._ReceiptFailureCache.entries
+        assert len(delivery._ReceiptFailureCache.entries) == 512

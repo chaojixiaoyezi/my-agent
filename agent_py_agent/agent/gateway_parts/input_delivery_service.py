@@ -703,8 +703,11 @@ def reconcile_gateway_input_request(
     conversation_store: object,
     target_terminal: bool = False,
     _commit_scope=None,
+    busy_skip: bool = False,
 ) -> str:
-    with _bound_input_transition(paths, request_id, nonblocking=_commit_scope is not None), ExitStack() as authority:
+    with _bound_input_transition(
+        paths, request_id, nonblocking=busy_skip or _commit_scope is not None
+    ), ExitStack() as authority:
         if _commit_scope is not None:
             authority.enter_context(_commit_scope())
         receipt = read_gateway_input_receipt(paths, request_id)
@@ -897,6 +900,11 @@ def _record_receipt_failure(
         if not deterministic or stamp is None or _receipt_failure_stamp(path) != stamp:
             _ReceiptFailureCache.entries.pop(key, None)
             return False
+        while previous is None and len(_ReceiptFailureCache.entries) >= _ReceiptFailureCache.max_entries > 0:
+            oldest_key, oldest = next(iter(_ReceiptFailureCache.entries.items()))
+            if not oldest.quarantined and _receipt_failure_stamp(Path(oldest_key)) == oldest.stamp:
+                return False
+            _ReceiptFailureCache.entries.popitem(last=False)
         count = (previous.count if previous is not None and previous.stamp == stamp else 0) + 1
         quarantined = count >= max(1, threshold)
         _ReceiptFailureCache.entries[key] = _ReceiptFailure(
@@ -1144,7 +1152,7 @@ def _reconcile_receipt_path(paths: GatewayPaths, agent: object, path: Path, summ
         return
     summary["checked"] += 1
     if receipt.state == "queued":
-        with gateway_input_transition(paths, receipt.request_id):
+        with _bound_input_transition(paths, receipt.request_id, nonblocking=_periodic_reconcile_busy_skip.get()):
             materialized = _materialize_prepared_request_locked(paths, receipt)
         if not materialized and _terminal_request_without_hot(paths, receipt.request_id):
             _reconcile_unsettled_receipt(paths, agent, receipt, summary)
@@ -1269,6 +1277,7 @@ def _reconcile_bound_input(
         conversation_store=store,
         target_terminal=(lifecycle == "terminal"),
         _commit_scope=_commit_scope,
+        busy_skip=busy_skip,
     )
 
 

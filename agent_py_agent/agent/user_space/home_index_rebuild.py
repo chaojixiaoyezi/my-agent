@@ -326,15 +326,30 @@ def reconcile_home_index_page(home, *, owner_id: str, apply: bool = False,
                 import os
                 st = os.fstat(stamp)
                 identity = [st.st_dev, st.st_ino]
-                if progress.get('identity') and progress['identity'] != identity:
-                    result['errors'].append({'code': 'INDEX_SOURCE_CHANGED'})
-                    break
+                saved_end = progress.get('end')
+                if (progress.get('identity') and progress['identity'] != identity) or st.st_size < offset or (
+                    saved_end is not None and st.st_size < int(saved_end)
+                ):
+                    if len(result['errors']) < 16:
+                        result['errors'].append({'code': 'INDEX_SOURCE_CHANGED'})
+                    offset = 0
+                    progress = {'owner': owner_id, 'phase': phase, 'offset': 0}
                 end = int(progress.get('end', st.st_size))
                 source.seek(offset)
                 while offset < end and result['items'] < cap and not spent():
                     remaining = (budget.max_bytes - result['bytes']) if budget.max_bytes is not None else 8388608
-                    raw = source.readline(max(1, min(remaining, end - offset)))
+                    read_limit = max(1, min(remaining, end - offset))
+                    raw = source.readline(read_limit)
                     result['bytes'] += len(raw)
+                    if not raw.endswith(b'\n') and len(raw) < read_limit:
+                        if len(result['errors']) < 16:
+                            result['errors'].append({'code': 'INDEX_SOURCE_CHANGED'})
+                        new_size = os.fstat(stamp).st_size
+                        end = len(raw) if offset == 0 and new_size >= end else new_size
+                        offset = 0
+                        progress = {'owner': owner_id, 'phase': phase, 'offset': 0}
+                        source.seek(0)
+                        continue
                     if progress.get('discard'):
                         # 上页遇到超整页预算的单行：只丢弃到下一个换行，不解析、不当删除证明。
                         offset += len(raw)
