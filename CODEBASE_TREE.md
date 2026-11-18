@@ -1476,18 +1476,28 @@ agent_py_agent/
 
 ## Tree
 
-### 2026-11-18 飞书凭据卡直连脚本/浏览器/HTTP 与一审返工加固（FC1–FC3 & pp1118 R1–R5）
+### 2026-11-18 飞书凭据卡直连脚本/浏览器/HTTP 与二审收口加固（FC1–FC3 & pp1118 R1–R5 & R2-1..6）
 
 ```text
-agent_py_agent/agent/
-`-- user_space/task_credential_material.py             # 携卡子进程无名只读 FD 传递（先 unlink 后写入）、回合授权绑定与清理遥测
-agent_py_agent/tests/
-|-- test_pp1118_r1_waiting_and_slice_bytes.py          # 等待态定时任务后置验收、nofollow 只读 FD 身份核验与分片字节上限接线回归
-|-- test_pp1118_r1_scheduler_rules_and_retries.py      # 复合监控逐规则后置验收/连续失败状态、未知副作用禁自动重试与事件批次重试回归
-|-- test_fc1_credential_continuation.py                # 飞书同人同线程凭据续用、collected 发现、两阶段断点恢复与单次唤醒回归
-|-- test_fc2_credential_shell_boundary.py              # 前台携卡子进程只读 FD 隔离、跨块全变体脱敏、流式/投递/日志边界回归
-|-- test_fc2_card_script_sites.py                      # 凭据卡直连标准 Token 站与客户端变换表单站端到端受保护查询回归
-`-- test_fc3_card_browser_http.py                      # browser-lite 两阶段同源凭据填表、会话隔离与声明式 HTTP 表单编码/预检回归
+agent_py_agent/
+|-- agent/
+|   |-- common/credential_artifact_paths.py             # 携卡回合脚本产物、消息附件与后台投递共用的词界调试名判定与路径回显校验
+|   `-- user_space/task_credential_material.py          # 携卡子进程无名只读 FD 传递（先 unlink 后写入）、回合授权绑定与清理遥测
+|-- config/
+|   `-- builtin_browser_lite_manifest.json              # 宿主随包内置 browser-lite 与插件 SDK 成员 SHA-256 权威清单
+`-- tests/
+    |-- test_pp1118_r1_waiting_and_slice_bytes.py       # 等待态定时任务后置验收、nofollow 只读 FD 身份核验与分片字节上限接线回归
+    |-- test_pp1118_r1_scheduler_rules_and_retries.py   # 复合监控逐规则后置验收/连续失败状态、未知副作用禁自动重试与事件批次重试回归
+    |-- test_fc1_credential_continuation.py             # 飞书同人同线程凭据续用、collected 发现、两阶段断点恢复与单次唤醒回归
+    |-- test_fc2_credential_shell_boundary.py           # 前台携卡子进程只读 FD 隔离、跨块全变体脱敏、流式/投递/日志边界回归
+    |-- test_fc2_card_script_sites.py                   # 凭据卡直连标准 Token 站与客户端变换表单站端到端受保护查询回归
+    |-- test_fc3_card_browser_http.py                   # browser-lite 两阶段同源凭据填表、会话隔离与声明式 HTTP 表单编码/预检回归
+    |-- test_pp1118_r2_turn_credential_scope.py         # 回合脱敏器不可哈希持有者引用计数、索引淘汰不擦除活跃脱敏与原子配额预检回归
+    |-- test_pp1118_r2_credential_cleanup.py            # Python 3.11/3.12 清理兼容、共享父目录并发重试、移交前预算门与执行后回执回归
+    |-- test_pp1118_r2_http_credential_boundary.py      # 声明式 HTTP 经 C1 授权、发包前脱敏登记与登录后会话值预注册回归
+    |-- test_pp1118_r2_installed_browser_trust.py       # 独立宿主包下 browser-lite 与 SDK 全成员摘要核验及跨调用零变体留存回归
+    |-- test_pp1118_r2_background_credential_redaction.py # 后台活动与转录接收器绑定回合脱敏器、流式思考尾部冲刷与快照净化回归
+    `-- test_pp1118_r2_credential_artifact_publication.py # 携卡脚本 run_out 先清单后读取、词界调试名判定与后台未核验外发阻断回归
 ```
 
 ### 2026-11-18 定时产物后置验收、连续失败排查与运行时契约加固（pro-pack-20261118：W0–W10）
@@ -2304,6 +2314,8 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+- `agent_py_agent/agent/common/credential_artifact_paths.py` 与 `agent_py_agent/config/builtin_browser_lite_manifest.json`：前者为固化脚本 `run_out`、显式 `send_message` 附件与后台投递提供统一的词界调试/会话文件名分类及全路径段敏感回显检测；后者作为宿主随包构建并自校验的内置 `browser-lite` 及插件 SDK 全成员 SHA-256 权威清单，确保无源码目录的独立安装环境同样执行逐字节来源核验。
 
 - `agent_py_agent/agent/user_space/task_credential_material.py`：在已授权工具执行期内衔接 `task_credentials.authorized_credential_material`，以先解除目录链接再写入密文 JSON 的无名只读 FD 向 macOS Seatbelt（`/dev/fd/<fd>`）或 Linux `bwrap`（`--ro-bind-data`）同步子进程提供 `MY_AGENT_CREDENTIAL_FILE`，并在首个输出字节前注册全回合脱敏快照与进程树回收确认。
 
