@@ -232,6 +232,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     ) -> None:
         self.agent = agent
         self.thread_id = str(thread_id or "").strip()
+        self.conversation_thread_id = self.thread_id
         self.channel = thread_channel(
             getattr(agent, "conversation_store", None), self.thread_id
         )
@@ -249,6 +250,9 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             BackgroundTurnHistory(self.thread_id, self.task_id, self.request_id)
             if event_writer is None else None
         )
+        self._turn_redaction: object | None = None
+        self._credential_stream_filter: object | None = None
+        self._thinking_filter_pending = False
         self._assistant_index = 0
         self._thinking_index = 0
         self._thinking_block_id = ""
@@ -271,6 +275,66 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         self._tool_attempt = 0
         self._retry_index = 0
         self._active_input_index = 0
+
+    def bind_credential_redaction(self, turn_redaction: object) -> None:
+        """幂等绑定当前回合凭据脱敏器，并为增量思考块维护持久跨块流过滤器。"""
+        if turn_redaction is None or self._turn_redaction is turn_redaction:
+            return
+        if self._credential_stream_filter is not None and callable(
+            getattr(self._credential_stream_filter, "discard", None)
+        ):
+            self._credential_stream_filter.discard()
+        self._thinking_filter_pending = False
+        self._turn_redaction = turn_redaction
+        new_filter = getattr(turn_redaction, "new_stream_filter", None)
+        self._credential_stream_filter = new_filter() if callable(new_filter) else None
+
+    def _redaction_active(self) -> bool:
+        turn_red = self._turn_redaction
+        return turn_red is not None and bool(getattr(turn_red, "active", True))
+
+    def _scrub_text(self, value: object) -> str:
+        text = str(value or "")
+        if self._redaction_active():
+            public_text = getattr(self._turn_redaction, "public_text", None)
+            if callable(public_text):
+                return str(public_text(text))
+        return text
+
+    def _flush_thinking_stream_tail(self, *, force_delta: bool = False) -> None:
+        if not self._thinking_filter_pending or self._credential_stream_filter is None:
+            return
+        self._thinking_filter_pending = False
+        tail = _feed_credential_stream_filter(self._credential_stream_filter, "", final=True)
+        discard_fn = getattr(self._credential_stream_filter, "discard", None)
+        if callable(discard_fn):
+            discard_fn()
+        content = ""
+        if tail:
+            remaining = BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS - len(self._thinking_text)
+            if remaining <= 0:
+                self._thinking_truncated = True
+            else:
+                raw = redact_host_absolute_paths(tail)
+                content = raw[:remaining]
+                if content:
+                    self._ensure_thinking_started()
+                    self._thinking_truncated = self._thinking_truncated or len(raw) > remaining
+                    self._thinking_text += content
+        if force_delta:
+            batch = self._thinking_delta_batcher.pending + content
+            self._thinking_delta_batcher.reset()
+        elif content:
+            batch = self._thinking_delta_batcher.append(content)
+        else:
+            batch = ""
+        if batch and self._thinking_active:
+            self._event(
+                "thinking_delta",
+                "delta",
+                self._thinking_block_id,
+                {"text": batch},
+            )
 
     # LLM: 插话令旧候选失效，但公开片段需在显示账本封口；不得写入正式 assistant 历史。
     # client ids 仅用于关联，正式投递与消费仍以 ConversationStore 的结构化记录为准。
@@ -331,7 +395,15 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         if remaining <= 0:
             self._thinking_truncated = True
             return False
-        raw = redact_host_absolute_paths(str(text or ""))
+        incoming = str(text or "")
+        if not incoming:
+            return False
+        if self._credential_stream_filter is not None and self._redaction_active():
+            self._thinking_filter_pending = True
+            incoming = _feed_credential_stream_filter(self._credential_stream_filter, incoming, final=False)
+            if not incoming:
+                return False
+        raw = redact_host_absolute_paths(incoming)
         content = raw[:remaining]
         if not content:
             return False
@@ -353,18 +425,20 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0,
                        display_archive_ref: dict | None = None,
                        history_incomplete: bool = False) -> bool:
+        self._flush_thinking_stream_tail()
+        safe_text = self._scrub_text(text)
         if not self._thinking_active and self._late_thinking_completion_expected:
             self._late_thinking_completion_expected = False
-            full = public_background_transcript_text(text, limit=0, channel=self.channel)
+            full = public_background_transcript_text(safe_text, limit=0, channel=self.channel)
             extra = ({"display_archive_ref": display_archive_ref} if display_archive_ref
                      else {} if history_incomplete else _thinking_archive_payload(self, full))
             if extra.get("display_archive_ref") and self._closed_thinking_block_id:
                 self._event("thinking_completed", "completed", self._closed_thinking_block_id, {
-                    "text": public_background_transcript_text(text, channel=self.channel), **extra,
+                    "text": public_background_transcript_text(safe_text, channel=self.channel), **extra,
                 })
             return False
-        full_content = public_background_transcript_text(text, limit=0, channel=self.channel)
-        content = public_background_transcript_text(text, channel=self.channel)
+        full_content = public_background_transcript_text(safe_text, limit=0, channel=self.channel)
+        content = public_background_transcript_text(safe_text, channel=self.channel)
         if not content and not self._thinking_active:
             return False
         self._ensure_thinking_started()
@@ -401,9 +475,14 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             for key in _TOOL_PAYLOAD_FIELDS
             if key in progress
         }
+        if self._redaction_active():
+            public = _scrub_turn_payload(self._turn_redaction, public)
         block_id = self._tool_block_id(progress)
         from .background_im_progress import update_background_progress
-        update_background_progress(self._im_progress, progress)
+        update_background_progress(
+            self._im_progress,
+            {**dict(progress), **public} if self._redaction_active() else progress,
+        )
         phase = str(progress.get("phase") or "updated").strip().lower()
         if phase == "started":
             self._close_thinking_boundary()
@@ -524,6 +603,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             self._workflow_progress_closed = True
         close_background_progress(self._im_progress)
         self._clear_tool_input_progress()
+        self._flush_thinking_stream_tail(force_delta=True)
         if self._thinking_active:
             self.write_thinking(self._thinking_text, history_incomplete=self._thinking_truncated)
         self._model_text = ""
@@ -541,7 +621,20 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     # LLM: 只返回显示副本；runtime 必须随同 canonical final 提交，不能用于模型上下文或机器状态。
     # 函数用途: 取得不受临时环裁剪影响的完整工作片展示。
     def display_history_snapshot(self) -> dict:
-        return self._display_history.snapshot() if self._display_history is not None else {}
+        if self._display_history is None:
+            return {}
+        snapshot = self._display_history.snapshot()
+        if not self._redaction_active():
+            return snapshot
+        events = snapshot.get("events")
+        if isinstance(events, list):
+            snapshot["events"] = [
+                {**item, "payload": _scrub_turn_payload(self._turn_redaction, item["payload"])}
+                if isinstance(item, dict) and isinstance(item.get("payload"), Mapping)
+                else item
+                for item in events
+            ]
+        return snapshot
 
     # LLM: 同一工作片 Compact 重调 agent.run 时轮号会重置，宿主 attempt 序号必须进入工具块身份。
     # 函数用途: 切换模型批次时关闭旧思考，防止压缩后同号工具或新思考覆盖旧显示。
@@ -552,6 +645,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     # LLM: 仅真实工具/attempt边界调用；不根据文本推断是否结束，不触碰模型输入。
     # 函数用途: 冻结尚未收到终态的思考，让下一次delta创建新块并保留真实事件顺序。
     def _close_thinking_boundary(self) -> None:
+        self._flush_thinking_stream_tail(force_delta=True)
         if self._thinking_active:
             self._closed_thinking_block_id = self._thinking_block_id
             self.write_thinking(self._thinking_text, history_incomplete=self._thinking_truncated,
@@ -562,7 +656,9 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     # callers persist it before the terminal response using typed assistant part ids.
     # 函数用途: 返回本轮已经确认的过程回复，供主/子代理会话在下一轮继续看到完整上下文。
     def assistant_commentary_messages(self) -> tuple[str, ...]:
-        return tuple(self._committed_commentary)
+        if not self._redaction_active():
+            return tuple(self._committed_commentary)
+        return tuple(self._scrub_text(item) for item in self._committed_commentary)
 
     # LLM: Failure follows the same display cleanup as finish. Runtime exception
     # classification and recovery remain in the background scheduler.
@@ -595,7 +691,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     # 函数用途: 把工具调用前的模型说明冻结成完整灰色过程消息并登记为正式 commentary。
     def _flush_model_commentary(self, *, canonical_message_id: str = "") -> None:
         content = public_background_transcript_text(
-            self._model_text, limit=0, channel=self.channel
+            self._scrub_text(self._model_text), limit=0, channel=self.channel
         )
         self._model_text = ""
         if not content:
@@ -638,6 +734,8 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         block_id: str,
         payload: Mapping[str, object],
     ) -> None:
+        if self._redaction_active():
+            payload = _scrub_turn_payload(self._turn_redaction, payload)
         # 已提交assistant正文也须在易失预览裁剪前发表可分页全文；环形缓存不是全文权威。
         text = payload.get("text")
         if (kind == "assistant_completed" and type(text) is str
@@ -713,7 +811,7 @@ def _emit_active_input_consumed(
         }
         for raw_id, raw_text in tuple(client_messages or ())
         if (message_id := str(raw_id or "").strip()) in accepted
-        and (text := str(raw_text or ""))
+        and (text := sink._scrub_text(raw_text))
     ]
     sink._active_input_index += 1
     sink._event(
@@ -750,7 +848,7 @@ def _emit_active_input_submitted(
         }
         for raw_id, raw_text in tuple(client_messages or ())
         if (message_id := str(raw_id or "").strip()) in accepted
-        and (text := str(raw_text or ""))
+        and (text := sink._scrub_text(raw_text))
     ]
     sink._active_input_index += 1
     sink._event(
@@ -771,7 +869,7 @@ def _freeze_input_boundary_candidate(sink: BackgroundTranscriptSink) -> None:
     if sink._model_text:
         sink._assistant_index += 1
         sink._event("assistant_completed", "completed", f"{sink.request_id}:assistant:{sink._assistant_index}", {
-            "text": public_background_transcript_text(sink._model_text, limit=0, channel=sink.channel),
+            "text": public_background_transcript_text(sink._scrub_text(sink._model_text), limit=0, channel=sink.channel),
             "process": True,
         })
 
@@ -785,7 +883,7 @@ def _record_active_input_display(sink: BackgroundTranscriptSink, message_ids: tu
         if message_id not in accepted:
             continue
         block_id = f"{sink.request_id}:input-message:{message_id}"
-        payload = {"text": public_background_transcript_text(text, limit=0, channel=sink.channel),
+        payload = {"text": public_background_transcript_text(sink._scrub_text(text), limit=0, channel=sink.channel),
                    "message_id": message_id, "input_state": "submitted"}
         if sink._display_history is not None:
             sink._display_history.record("user_message", "completed", block_id, payload)
@@ -1154,11 +1252,59 @@ __all__ = [
 ]
 
 
+def _feed_credential_stream_filter(stream_filter: object, text: str, *, final: bool = False) -> str:
+    feed_fn = getattr(stream_filter, "feed_text", None) or getattr(stream_filter, "feed", None)
+    if callable(feed_fn):
+        return str(feed_fn(text, final=final) or "")
+    return text
+
+
+def _scrub_turn_payload(turn_red: object, payload: Mapping[str, object]) -> dict[str, object]:
+    base = dict(payload)
+    if turn_red is None or not bool(getattr(turn_red, "active", True)):
+        return base
+    redact_value = getattr(turn_red, "redact_value", None)
+    if callable(redact_value):
+        redacted = redact_value(base)
+        if isinstance(redacted, dict):
+            return redacted
+    public_text = getattr(turn_red, "public_text", None)
+    if callable(public_text) and not bool(getattr(turn_red, "withheld", False)):
+        return {key: (str(public_text(val)) if isinstance(val, str) else val) for key, val in base.items()}
+    placeholder = str(public_text("")) if callable(public_text) else "[REDACTED]"
+    out: dict[str, object] = {"text": placeholder, "history_incomplete": True}
+    if isinstance(base.get("process"), bool):
+        out["process"] = base["process"]
+    return out
+
+
 # LLM: 只由原sink方法调用，同一实例状态保存原call幂等和显示档位；拆出以保持类尺寸，不新增账或入口。
 # 函数用途: 将已净化的完整响应提交到原后台详情页，丢弃旧候选并复用原通道净化。
 def _commit_model_response(sink: BackgroundTranscriptSink, payload: dict) -> None:
     from ..gateway_parts.stream_events import committed_model_events
 
+    if isinstance(payload, dict) and sink._redaction_active():
+        rows = payload.get("messages")
+        payload = {
+            **payload,
+            **(
+                {
+                    "messages": [
+                        {**row, "text": sink._scrub_text(row.get("text", ""))}
+                        if isinstance(row, dict) and "text" in row
+                        else row
+                        for row in rows
+                    ]
+                }
+                if isinstance(rows, list)
+                else {}
+            ),
+            **(
+                {"final_text": sink._scrub_text(payload["final_text"])}
+                if isinstance(payload.get("final_text"), str)
+                else {}
+            ),
+        }
     events = committed_model_events(payload, delivery_channel=sink.channel)
     call_id = (payload.get("source") or {}).get("call_id")
     if not events or call_id in sink._committed_model_calls:
@@ -1176,7 +1322,7 @@ def _commit_model_response(sink: BackgroundTranscriptSink, payload: dict) -> Non
 # LLM: 与原finish/commit共用同一实例来源；仅按本次真实call幂等，旧无来源路径保原兼容显示，不发IM或改任务。
 # 函数用途: 在原后台详情页发布最终正文，避免过程同文吞掉不同来源终答。
 def _publish_committed_final(sink: BackgroundTranscriptSink, text: str) -> None:
-    content = public_background_transcript_text(text, limit=0, channel=sink.channel)
+    content = public_background_transcript_text(sink._scrub_text(text), limit=0, channel=sink.channel)
     if not content or (not sink._terminal_model_call and content in sink._committed_commentary):
         return
     if sink._terminal_model_call and sink._published_model_final == sink._terminal_model_call:

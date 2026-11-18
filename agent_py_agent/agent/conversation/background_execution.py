@@ -213,6 +213,7 @@ def invoke_background_turn(
         execution.agent,
         thread_id=thread.thread_id,
         task_id=request.task_id,
+        lifetime_owner=request,
     )
     try:
         result = run_background_turn_with_compact(

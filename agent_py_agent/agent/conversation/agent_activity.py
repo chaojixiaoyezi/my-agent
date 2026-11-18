@@ -83,10 +83,20 @@ class BackgroundMainActivitySink:
     # LLM: Construction registers one exact thread/task identity; later updates
     # may replace only that thread's display row under the agent-owned lock.
     # 函数用途: 建立后台主代理活动接收器，并立即显示“整理任务上下文”。
-    def __init__(self, agent: object, *, thread_id: str, task_id: str) -> None:
+    def __init__(
+        self,
+        agent: object,
+        *,
+        thread_id: str,
+        task_id: str,
+        lifetime_owner: object | None = None,
+    ) -> None:
         self.agent = agent
         self.thread_id = str(thread_id or "").strip()
+        self.conversation_thread_id = self.thread_id
         self.task_id = str(task_id or "").strip()
+        self._turn_lifetime_owner = lifetime_owner
+        self._turn_redaction: object | None = None
         self.started_at = time.time()
         self._transcript = BackgroundTranscriptSink(
             agent,
@@ -94,6 +104,23 @@ class BackgroundMainActivitySink:
             task_id=self.task_id,
         )
         self._publish("running", "整理任务上下文", begin=True)
+
+    def bind_credential_redaction(self, turn_redaction: object) -> None:
+        """幂等绑定当前回合凭据脱敏器，并转发至底层后台转录接收器。"""
+        if turn_redaction is None:
+            return
+        if self._turn_redaction is not turn_redaction:
+            self._turn_redaction = turn_redaction
+        self._transcript.bind_credential_redaction(turn_redaction)
+
+    def _scrub_text(self, value: object) -> str:
+        text = str(value or "")
+        turn_red = self._turn_redaction
+        if turn_red is not None and bool(getattr(turn_red, "active", True)):
+            public_text = getattr(turn_red, "public_text", None)
+            if callable(public_text):
+                return str(public_text(text))
+        return text
 
     # LLM: Plain callback compatibility records only a generic phase; arbitrary
     # legacy text is never parsed into status or echoed into the public panel.
@@ -140,7 +167,7 @@ class BackgroundMainActivitySink:
             return False
         published = self._transcript.write_tool_input_progress(public)
         if published and str(public.get("phase") or "") != "ready":
-            tool = _bounded_text(public.get("tool"), limit=80) or "工具"
+            tool = _bounded_text(self._scrub_text(public.get("tool")), limit=80) or "工具"
             self._publish("thinking", f"正在准备 {tool} 参数")
         return published
 
@@ -149,7 +176,7 @@ class BackgroundMainActivitySink:
     # 函数用途: 把后台主代理最近一段真实思考显示在 main 行，避免用户误判卡死。
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
         self._transcript.write_thinking(text, duration_seconds=duration_seconds)
-        activity = _bounded_text(text, limit=_ACTIVITY_TEXT_LIMIT_CHARS)
+        activity = _bounded_text(self._scrub_text(text), limit=_ACTIVITY_TEXT_LIMIT_CHARS)
         self._publish("thinking", activity or "思考中")
 
     # LLM: 数字来自同一 provider-preflight schema，前后台共用发布函数；更新数字不改变活动阶段。
@@ -170,7 +197,7 @@ class BackgroundMainActivitySink:
     # 函数用途: 后台主代理调用工具时更新 main 行，并把公开结果送入正文工具卡片。
     def write_progress(self, progress: dict[str, object], _legacy_text: str = "") -> None:
         self._transcript.write_progress(progress)
-        tool = _bounded_text(progress.get("tool"), limit=80)
+        tool = _bounded_text(self._scrub_text(progress.get("tool")), limit=80)
         phase = str(progress.get("phase") or "").strip().lower()
         if tool and phase in {"finished", "completed", "succeeded", "failed"}:
             activity = f"已完成 {tool}"
@@ -294,7 +321,7 @@ class BackgroundMainActivitySink:
             self._publish("failed", f"{code} · {detail}。本次业务请求尚未发送。请在原任务查看退避重试进度。")
             return
         # 展示异常须和公共诊断使用同一脱敏器；权限与是否可重试均不由此显示字符串决定。
-        detail = _public_agent_text(redact_diagnostic_text(str(error)), limit=88)
+        detail = _public_agent_text(redact_diagnostic_text(self._scrub_text(str(error))), limit=88)
         if code.startswith("COMPACT_"):
             from ..gateway_parts.request_errors import gateway_client_error_message
 
@@ -306,12 +333,13 @@ class BackgroundMainActivitySink:
     # LLM: 前后台只写同一 owner Agent 的线程级快照；不得为后台另设状态源。
     # 函数用途: 将后台真实阶段交给共用的 main 显示发布入口。
     def _publish(self, phase: str, activity: str, *, begin: bool = False) -> None:
+        safe_activity = self._scrub_text(activity)
         pulse = getattr(self._transcript, "_im_progress", None)
         if pulse is not None:
-            pulse.update(activity)
+            pulse.update(safe_activity)
         publish_main_activity(
             self.agent, MainActivitySource(self.thread_id, self.task_id, self.started_at, self._transcript.request_id),
-            phase=phase, activity=activity, begin=begin,
+            phase=phase, activity=safe_activity, begin=begin,
         )
 
 
