@@ -1,3 +1,9 @@
+## 2026-11-18 定时任务产物后置验收（postcheck）与连续失败自动排查（on_failure）（本地候选）
+
+- **锁外纯结构化产物验收（`scheduler/postcheck.py`）**：定时任务新增可选 `postcheck` 契约（1～8 个相对根路径产物断言，支持字节数、行数、最大陈旧秒数与 JSON Pointer 标量/下界比较）。`SchedulerService.finish` 在获取 `SchedulerRepository._mutation_scope` 之前按 `retention_scan_slice_bytes` 与单目录 64 项上限执行只读校验，并将结果映射为 `SCHEDULER_POSTCHECK_FAILED`（`business`）、`SCHEDULER_OUTPUT_STALLED`（`stalled`）或 `SCHEDULER_POSTCHECK_UNAVAILABLE`（`unknown`）；观测回执仅保留数值计数，不落盘文件正文或宿主绝对路径。
+- **连续失败单次自动排查与确定性重试预约（`policy.on_failure`）**：调度策略新增可选 `on_failure`（`investigate`、`after_failures`、`retry_once`、`prompt`）。非排查运行进入 `failed` 或 `unknown` 时在原终态事务内维护 `job.failure_streak`，下一次常规运行 `done` 时清零；达到 `after_failures` 阈值且本轮连续失败尚未生成排查时，同事务仅预约一条 `trigger="failure_investigation"` 模型排查运行（即使同事务达到 `failure_pause_after` 暂停任务仍允许该次排查派发），排查运行自身终态只登记排查结果而不重置失败计数或退避；`retry_once` 仅在连续失败首拍且状态明确为 `failed`（不含副作用未知的 `unknown`）时预约单次 `failure_retry`。
+- **结构化排查上下文与历史过滤**：排查运行在 `execution.py` 注入有界 `failure_context` JSON 块仅供模型排障参考，运行时不反向解析模型自然语言输出；`SchedulerRepository.history` 与 `schedule` 工具 `history` 动作支持按 `status`、`since`、`until`、`trigger` 过滤并投影 `duration_seconds`、`failure_kind`、`postcheck_status` 与 `target_exit_code`。
+
 ## 2026-11-16 当前主线 CI 修复合同（实现候选）
 
 - 同步插件领取显式保留 `inline_direct`；后台消费者与观察入口继续保护内联任务。存在但为空或损坏的终态不是“没有执行过”的证明，禁止自动重放。

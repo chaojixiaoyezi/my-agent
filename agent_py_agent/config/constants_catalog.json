@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1519,
+  "count": 1522,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5978,6 +5978,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "一条请求最多保留 8 条能力观测记录：正常每轮一次，防异常循环撑爆。"
+    },
+    {
+      "name": "_CONTEXT_PREP_SLOW_LOG_MS",
+      "file": "agent_py_agent/agent/gateway_parts/request_context.py",
+      "value": 1000,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "会话上下文准备总耗时达到或超过该毫秒数时记录慢准备警告日志（1 秒）。"
     },
     {
       "name": "_MAX_RECENT_TASK_WORKSPACES_COUNT",
@@ -11978,6 +11986,22 @@
       "unit": "个",
       "category": "其它",
       "description": "每拍后台维护最多冷构造的策展器数量，热实例不占此额度。"
+    },
+    {
+      "name": "_COLD_OWNER_BUILDS_PER_TICK_COUNT",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "每拍后台同步调度器最多冷构造的硬 owner Agent 数量，热实例不占此额度。"
+    },
+    {
+      "name": "_DISPATCH_SEGMENT_SLOW_LOG_SECONDS",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "派发段或后台维护单拍超过该阈值时输出慢执行告警日志，只做观测不改行为。"
     },
     {
       "name": "_HEARTBEAT_INTERVAL_SECONDS",

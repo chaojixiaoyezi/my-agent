@@ -1476,6 +1476,25 @@ agent_py_agent/
 
 ## Tree
 
+### 2026-11-18 定时产物后置验收、连续失败排查与运行时契约加固（pro-pack-20261118：W0–W10）
+
+```text
+agent_py_agent/agent/
+`-- scheduler/postcheck.py                             # 定时任务运行产物结构化后置校验契约与纯文件系统有界评估器
+agent_py_agent/tests/
+|-- test_pp1118_w0_error_contracts.py                  # 新增业务/存储/数据损坏错误码字典登记与旧混用索引码退役校验
+|-- test_pp1118_w1_reconcile_forward_progress.py       # 运行时对账与主目录索引重建单页游标严格前向推进回归
+|-- test_pp1118_w2_receipt_diagnostics.py              # 网关入站回执字段级诊断、持久隔离状态与非阻塞让出对账回归
+|-- test_pp1118_w3_usage_checkpoint.py                 # 逐次模型调用累计用量幂等落盘检查点与基线修订 CAS 回归
+|-- test_pp1118_w4_probe_cache_identity.py             # OAuth 凭据指纹稳定化与工具能力探针未命中原因记录回归
+|-- test_pp1118_w5_ops_contracts.py                    # SQLite 数据损坏分类、治理只读/写入说明与网关状态忽略参数提示
+|-- test_pp1118_w6_text_delta_prefix_safety.py         # 流式增量脱敏保留窗口前缀安全性多粒度分块性质测试
+|-- test_pp1118_w7a_postcheck.py                       # 定时任务产物后置校验 Schema 归一与有界文件扫描评估单测
+|-- test_pp1118_w7b_failure_investigation.py           # 定时后置验收接线、连续失败单次自动排查/重试预约与历史筛选回归
+|-- test_pp1118_w8_dispatch_head_of_line.py            # 派发循环维护段间重派发、段级慢日志遥测与冷 Owner 构建限额回归
+`-- test_pp1118_w10_context_prep_timing.py             # 会话上下文准备分段耗时、窗口覆盖非降级分类与任务链接记忆化回归
+```
+
 ### 2026-11-16 飞书、管理员运维与长期运行治理
 
 ```text
@@ -2271,6 +2290,8 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+- `agent_py_agent/agent/scheduler/postcheck.py`：提供定时任务完成后的产物结构化验收（`POSTCHECK_SCHEMA`、`normalize_postcheck`、`evaluate_postcheck`），在调度仓库变更锁外按有界目录项与字节预算校验相对路径产物尺寸、行数、时效与 JSON 指针断言，仅输出数值观测摘要而不包含文件正文或绝对路径。
 
 - `docs/design/TOOL_SURFACE_ERROR_CONTRACT.md` 与 `agent_py_agent/tests/test_tool_slimming_w0..w6_*.py`：记录业务工具 `104 -> 3` 分域归并、独立 `business_assets_versions_accept` 真人确认、可信双版本输入解码与共享操作幂等身份、单调 `tool:action` 动作上界、确定性 `effect_outcome` / `next_action` 重放以及原生 `# Recommended Tools` 去重的完整设计与回归矩阵。
 
