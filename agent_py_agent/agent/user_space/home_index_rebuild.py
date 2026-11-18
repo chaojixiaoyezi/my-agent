@@ -314,7 +314,11 @@ def reconcile_home_index_page(home, *, owner_id: str, apply: bool = False,
         result['errors'] = [{'code': 'INVALID_INDEX_CURSOR'}]
         return result
     paths = (home.global_index_active_tasks_jsonl, home.global_index_active_runs_jsonl)
-    while phase < len(paths) and result['items'] < cap and not budget.exhausted(result['items'], result['bytes']):
+    # 预算只在本页已前进至少一行后生效；否则时间片在首行前耗尽会让同一游标永远原样返回。
+    def spent():
+        return bool(result['items']) and budget.exhausted(result['items'], result['bytes'])
+
+    while phase < len(paths) and result['items'] < cap and not spent():
         path = paths[phase]
         try:
             with path.open('rb') as source:
@@ -327,14 +331,32 @@ def reconcile_home_index_page(home, *, owner_id: str, apply: bool = False,
                     break
                 end = int(progress.get('end', st.st_size))
                 source.seek(offset)
-                while offset < end and result['items'] < cap and not budget.exhausted(result['items'], result['bytes']):
+                while offset < end and result['items'] < cap and not spent():
                     remaining = (budget.max_bytes - result['bytes']) if budget.max_bytes is not None else 8388608
                     raw = source.readline(max(1, min(remaining, end - offset)))
                     result['bytes'] += len(raw)
+                    if progress.get('discard'):
+                        # 上页遇到超整页预算的单行：只丢弃到下一个换行，不解析、不当删除证明。
+                        offset += len(raw)
+                        result['items'] += 1
+                        if raw.endswith(b'\n'):
+                            progress = {key: value for key, value in progress.items() if key != 'discard'}
+                        continue
                     if not raw or not raw.endswith(b'\n'):
+                        if raw and offset + len(raw) >= end:
+                            # 冻结 end 处没有换行的尾行（撕裂写或写入中）：越过它，留给下一轮新游标重读。
+                            code, offset = 'INDEX_TAIL_INCOMPLETE', end
+                        elif result['items'] == 0:
+                            # 单行超过整页字节预算：跨页丢弃到换行，保证游标前进。
+                            code, offset = 'INDEX_ROW_EXCEEDS_SLICE', offset + len(raw)
+                            progress = dict(progress, discard=True)
+                        else:
+                            break  # 本页剩余字节不够读完下一行；下页从同一偏移继续，不算错误。
+                        result['items'] += 1
                         result['unknown'] += 1
-                        result['errors'].append({'code': 'INDEX_ROW_EXCEEDS_SLICE_OR_INCOMPLETE'})
-                        break
+                        if len(result['errors']) < 16:
+                            result['errors'].append({'code': code, 'phase': phase, 'offset': offset})
+                        continue
                     offset = source.tell()
                     result['items'] += 1
                     try:
@@ -387,7 +409,8 @@ def reconcile_home_index_page(home, *, owner_id: str, apply: bool = False,
                         result['unknown'] += 1
                         if len(result['errors']) < 16:
                             result['errors'].append({'code': 'CANONICAL_INDEX_SOURCE_UNAVAILABLE', 'reason': type(exc).__name__})
-                progress = dict(owner=owner_id, phase=phase, offset=offset, identity=identity, end=end)
+                progress = dict(owner=owner_id, phase=phase, offset=offset, identity=identity, end=end,
+                                **({'discard': True} if progress.get('discard') else {}))
                 if offset < end:
                     break
         except FileNotFoundError:

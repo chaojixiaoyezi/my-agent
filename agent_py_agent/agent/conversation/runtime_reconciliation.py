@@ -275,8 +275,9 @@ def reconcile_capability_page(agent, *, apply=False, after='', limit=100, run_id
         except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
             return {'items': [], 'next_after': after, 'errors': [{'reason_code': 'CAPABILITY_INDEX_UNAVAILABLE', 'error_type': type(exc).__name__}]}
     for visited, rid in enumerate(ids):
-        if budget is not None and budget.exhausted(visited):
-            next_after = ids[visited - 1] if visited else after
+        # 至少核对一条再看预算：首条前耗尽会在 after 为空时把整个能力相静默跳过，非空时原样返回同一游标。
+        if visited and budget is not None and budget.exhausted(visited):
+            next_after = ids[visited - 1]
             break
         item = {'kind': 'capability', 'run_id': rid, 'repaired': False, 'eligible': False, 'reason_code': 'PARENT_TERMINAL_UNPROVEN'}
         try:
@@ -456,9 +457,13 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
             # W7 的页合同同时支持带 next_cursor 的结构化回执。
             if isinstance(rows, dict):
                 rows = rows.get('items', rows.get('rows', []))
+            # 让出时间只计逐行核对；打开权威库和取页本身已受 LIMIT 约束，不能在第一行之前就把本页耗光。
+            budget = StorageLaneBudget(budget.max_items, budget.max_bytes,
+                                       time.monotonic() + slice_ms / 1000 if slice_ms else None)
             visited = []
             for row in rows:
-                if budget.exhausted(len(visited)):
+                # 每页至少核对一行再看预算，保证游标单调前进（live 2026-11-18：三页同一游标）。
+                if visited and budget.exhausted(len(visited)):
                     break
                 if older_than_seconds is not None and time.time() - max(row['created_at'], row['updated_at']) < older_than_seconds:
                     result['items'].append({'kind': 'task_run', 'task_run_id': row['task_run_id'], 'eligible': False, 'reason_code': 'OLDER_THAN_FILTER'})
@@ -477,8 +482,6 @@ def reconcile_owner_runtime(agent, *, apply: bool = False, cursor: str = '', lim
                 visited.append(row)
             if visited and (len(rows) >= count or len(visited) < len(rows)):
                 next_state = {'phase': phase, 'after': visited[-1]['task_run_id'], 'created_at': visited[-1]['created_at']}
-            elif rows and not visited:
-                next_state = state
             else:
                 next_state = None if task_runs_only else {'phase': 'capabilities', 'after': ''}
         elif phase == 'indexes':
