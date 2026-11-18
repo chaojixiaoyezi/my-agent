@@ -169,6 +169,20 @@ def _run_out_error(error):
     return RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED')
 
 
+# LLM: 统一封装清单元数据准入与脱敏错误映射，供正式暂存和携卡归档前置核验共用。
+# 函数用途: 读取并校验 run_out 有界文件清单，任何路径或元数据错误均映射为脱敏 RunOutError。
+def read_run_out_manifest(scratch, *, max_files, max_bytes):
+    try:
+        return _manifest(scratch, max_files, max_bytes)
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as error:
+        failure = _run_out_error(error)
+        if not failure.archive_phase:
+            failure.archive_phase, failure.path_role = 'manifest_read', 'run_out_dir'
+        if failure is error:
+            raise
+        raise failure from error
+
+
 # LLM: 暂存身份和最终集合属于一次attempt；只有整个发表及配额结算成功后才返回引用。
 # 类用途: 持有一次暂存归档，支持清理失败与发布异常时的无部分集合回滚。
 class RunArtifactBatch:
@@ -231,14 +245,7 @@ class RunArtifactBatch:
         try:
             if Path(self.quota.owner_root).resolve(strict=False) != self.target.owner_home.resolve(strict=False):
                 raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED')
-            try:
-                manifest = _manifest(scratch, max_files, max_bytes)
-            except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as error:
-                failure = _run_out_error(error)
-                failure.archive_phase, failure.path_role = 'manifest_read', 'run_out_dir'
-                if failure is error:
-                    raise
-                raise failure from error
+            manifest = read_run_out_manifest(scratch, max_files=max_files, max_bytes=max_bytes)
             if not manifest:
                 return False
             with self.quota.admission() as admission:
@@ -255,7 +262,11 @@ class RunArtifactBatch:
                         for parts, size in manifest))
                     artifacts = []
                     for parts, size in manifest:
-                        data = read_bytes_beneath(scratch, parts, max_bytes=size, require_dir_fd=True)
+                        try:
+                            data = read_bytes_beneath(scratch, parts, max_bytes=size, require_dir_fd=True)
+                        except ValueError as error:
+                            raise RunOutError('SCRIPT_RUN_OUT_LIMIT_EXCEEDED', archive_phase='stage_copy',
+                                              path_role='run_out_file') from error
                         if data is None or len(data) != size:
                             raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED')
                         relative = parts[1:]

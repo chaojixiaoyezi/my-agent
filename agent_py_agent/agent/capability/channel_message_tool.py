@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..artifacts.registry import ArtifactRegistryRecord
+from ..common.credential_artifact_paths import (
+    is_blocked_credential_debug_path,
+    path_contains_credential_echo,
+    relative_artifact_path_parts,
+    user_artifact_subpath_parts,
+)
 from ..conversation.channels import (
     project_message_paths_for_channel,
     project_user_reply,
@@ -270,6 +276,9 @@ class SendMessageTool(BaseTool):
         task_root = params.get("__artifact_task_root") or params.get("__artifact_registry_root")
         registry_root = params.get("__artifact_registry_root")
         current_roots = (Path(str(registry_root)),) if registry_root else ()
+        active_reds = _active_credential_redactions_for_send(self.agent, scope)
+        if active_reds and any(path_contains_credential_echo(ref, active_reds) for ref in attachment_refs):
+            return _credential_attachment_withheld_outcome("CREDENTIAL_ECHO_IN_ATTACHMENT")
         registry_reports = {}
         attachments = _resolve_attachments(owner_root, attachment_refs, task_root=task_root,
             verified_host_roots=current_roots, registry_reports=registry_reports)
@@ -297,35 +306,18 @@ class SendMessageTool(BaseTool):
                     "ARTIFACT_NOT_REGISTERED", coverage={"scope": "current_and_recent_verified", "complete": False,
                     "reason": "recent_registry_unresolved" if qualified else "structured_ref_required"})
         if isinstance(attachments, ToolHandlerOutcome):
+            if active_reds:
+                safe_out = attachments.output
+                for tr in active_reds:
+                    safe_out = tr.public_text(safe_out)
+                attachments.output = safe_out
             return attachments
-        active_reds = _active_credential_redactions_for_send(self.agent, scope)
         if active_reds:
             for tr in active_reds:
                 message = tr.public_text(message)
             attachments, block_reason = _sanitize_or_block_credential_send_attachments(attachments, active_reds)
             if block_reason is not None:
-                return ToolHandlerOutcome(
-                    "send_message",
-                    False,
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "error": "携卡回合禁止外发包含调试/会话/二进制或凭据回显的附件，消息未发送。",
-                            "error_code": "CREDENTIAL_ATTACHMENT_WITHHELD",
-                            "failure_stage": "runtime_gate",
-                            "effect_outcome": "not_started",
-                            "reason_code": block_reason,
-                            "next_action": "请移除受限附件，仅外发已净化的业务文本摘要或纯净业务文本文件。",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    error_code="ARTIFACT_VALIDATION_FAILED",
-                    reported_error_code="CREDENTIAL_ATTACHMENT_WITHHELD",
-                    effect_outcome="not_started",
-                    failure_stage="runtime_gate",
-                    effect_source_ref="send_message_credential_attachment_gate",
-                    next_action="请移除受限附件，仅外发已净化的业务文本摘要或纯净业务文本文件。",
-                )
+                return _credential_attachment_withheld_outcome(block_reason)
         envelope = ReplyEnvelope(
             content=message,
             attachments=attachments,
@@ -1028,12 +1020,29 @@ def _error(
     )
 
 
-_SEND_CREDENTIAL_BLOCKED_EXTS = frozenset({
-    ".tmp", ".bak", ".swp", ".har", ".pcap", ".cookie", ".cookies", ".dump",
-    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".sqlite", ".sqlite3",
-    ".db", ".bin", ".pkl", ".pickle",
-})
-_SEND_CREDENTIAL_BLOCKED_TOKENS = ("cookie", "debug", "trace", "har", "dump")
+def _credential_attachment_withheld_outcome(block_reason: str) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        "send_message",
+        False,
+        json.dumps(
+            {
+                "ok": False,
+                "error": "携卡回合禁止外发包含调试/会话/二进制或凭据回显的附件，消息未发送。",
+                "error_code": "CREDENTIAL_ATTACHMENT_WITHHELD",
+                "failure_stage": "runtime_gate",
+                "effect_outcome": "not_started",
+                "reason_code": block_reason,
+                "next_action": "请移除受限附件，仅外发已净化的业务文本摘要或纯净业务文本文件。",
+            },
+            ensure_ascii=False,
+        ),
+        error_code="ARTIFACT_VALIDATION_FAILED",
+        reported_error_code="CREDENTIAL_ATTACHMENT_WITHHELD",
+        effect_outcome="not_started",
+        failure_stage="runtime_gate",
+        effect_source_ref="send_message_credential_attachment_gate",
+        next_action="请移除受限附件，仅外发已净化的业务文本摘要或纯净业务文本文件。",
+    )
 
 
 def _active_credential_redactions_for_send(agent: object, scope: dict[str, object]) -> tuple[Any, ...]:
@@ -1084,28 +1093,31 @@ def _sanitize_or_block_credential_send_attachments(
     from dataclasses import replace as _dc_replace
 
     cleaned: list[ChannelAttachment] = []
+    max_verify_bytes = 8 * 1024 * 1024
     for item in attachments:
-        lowered = item.name.lower()
-        ext = Path(lowered).suffix
-        stem = Path(lowered).stem
-        if (
-            item.name.startswith(".")
-            or ext in _SEND_CREDENTIAL_BLOCKED_EXTS
-            or any(tok in stem for tok in _SEND_CREDENTIAL_BLOCKED_TOKENS)
-        ):
+        rel_parts = relative_artifact_path_parts(item.path, base_root=item.owner_root)
+        sub_parts = user_artifact_subpath_parts(rel_parts) if item.owner_root else ((Path(item.path).name,) if item.path else ())
+        if is_blocked_credential_debug_path(item.name) or (sub_parts and is_blocked_credential_debug_path(sub_parts)):
             return (), "CREDENTIAL_DEBUG_OR_BINARY_ATTACHMENT_BLOCKED"
+        if path_contains_credential_echo(item.name, active_redactions) or (
+            rel_parts and path_contains_credential_echo(rel_parts, active_redactions)
+        ):
+            return (), "CREDENTIAL_ECHO_IN_ATTACHMENT"
         try:
             p = Path(item.path)
             st = p.stat()
-            if st.st_size > 8 * 1024 * 1024:
+            if st.st_size > max_verify_bytes:
                 return (), "CREDENTIAL_ATTACHMENT_SIZE_UNVERIFIABLE"
-            data = p.read_bytes()
+            with p.open("rb") as fh:
+                data = fh.read(max_verify_bytes + 1)
+            if len(data) > max_verify_bytes:
+                return (), "CREDENTIAL_ATTACHMENT_SIZE_UNVERIFIABLE"
             if b"\x00" in data:
                 return (), "CREDENTIAL_BINARY_ATTACHMENT_BLOCKED"
             text = data.decode("utf-8", errors="strict")
         except (OSError, UnicodeDecodeError):
             return (), "CREDENTIAL_ATTACHMENT_UNVERIFIABLE"
-        if any(tr.contains_credential_echo(text) or tr.contains_credential_echo(item.name) for tr in active_redactions):
+        if any(tr.contains_credential_echo(text) for tr in active_redactions):
             return (), "CREDENTIAL_ECHO_IN_ATTACHMENT"
         safe_name = item.name
         for tr in active_redactions:

@@ -11,6 +11,7 @@ import math
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,14 +39,20 @@ from ..attempt.sandbox import (
     system_read_roots_for_platform,
 )
 from ..common.cancellation import raise_if_cancelled
+from ..common.credential_artifact_paths import (
+    is_blocked_credential_debug_path,
+    path_contains_credential_echo,
+)
 from ..common.log_redaction import redact_sensitive_value
 from ..common.managed_owner_generation import (
     ManagedOwnerGenerationError,
     require_managed_owner_generation,
 )
 from ..common.nofollow_fs import (
+    NoFollowPathError,
     ensure_private_dir,
     open_directory_beneath,
+    read_bytes_beneath,
     read_text_beneath,
     write_text_atomic_beneath,
 )
@@ -63,7 +70,12 @@ from .datasource_runtime import (
     sdk_preload_bootstrap,
 )
 from .models import ScriptExecutionResult, payload, safe_path
-from .run_artifacts import RunArtifactBatch, RunOutError, current_run_out_target
+from .run_artifacts import (
+    RunArtifactBatch,
+    RunOutError,
+    current_run_out_target,
+    read_run_out_manifest,
+)
 
 # 原生工作流脚本标准输出与错误流保留的最大字节数。
 MAX_OUTPUT_BYTES = 1024 * 1024
@@ -520,54 +532,95 @@ class ScriptCredentialLease:
             raise _HistorySnapshotMissing("script_definition_drift_during_credential_run")
 
 
-_BLOCKED_CREDENTIAL_ARTIFACT_EXTS = frozenset({
-    ".tmp", ".bak", ".swp", ".har", ".pcap", ".cookie", ".cookies", ".dump",
-    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".pdf", ".zip", ".tar",
-    ".gz", ".tgz", ".bz2", ".xz", ".bin", ".sqlite", ".sqlite3", ".db",
-    ".pkl", ".pickle", ".npy", ".npz", ".parquet",
-})
-_BLOCKED_CREDENTIAL_ARTIFACT_STEM_TOKENS = ("cookie", "debug", "trace", "har", "dump")
-
-
-def _sanitize_or_block_credential_run_out(folder: Path, cred_lease: ScriptCredentialLease) -> None:
-    """拦截携卡脚本输出目录中的临时材料、调试/二进制文件，并在暂存归档前净化合法文本产物。"""
-    from ..common.nofollow_fs import read_bytes_beneath
-
+def _sanitize_or_block_credential_run_out(
+    folder: Path,
+    cred_lease: ScriptCredentialLease,
+    *,
+    max_files: int = 64,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> None:
+    """先经有界清单核验数量与字节上限，再拦截调试/敏感路径组件并净化合法文本产物。"""
     run_out_dir = folder / "run_out"
-    if not run_out_dir.exists() and not run_out_dir.is_symlink():
+    try:
+        dir_stat = run_out_dir.lstat()
+    except FileNotFoundError:
         return
-    if run_out_dir.is_symlink() or not run_out_dir.is_dir():
-        raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_dir")
+    if stat.S_ISLNK(dir_stat.st_mode) or not stat.S_ISDIR(dir_stat.st_mode):
+        raise RunOutError(
+            "SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED",
+            archive_phase="credential_artifact_gate",
+            path_role="run_out_dir",
+        )
+    manifest = read_run_out_manifest(folder, max_files=max_files, max_bytes=max_bytes)
+    if not manifest:
+        return
     turn_red = getattr(cred_lease.credential_use, "turn_redaction", None)
-    for dirpath, dirnames, filenames in os.walk(run_out_dir, followlinks=False):
-        curr_dir = Path(dirpath)
-        for dname in dirnames:
-            dpath = curr_dir / dname
-            if dname.startswith(".") or dpath.is_symlink():
-                raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_subdir")
-        for fname in filenames:
-            fpath = curr_dir / fname
-            lowered = fname.lower()
-            ext = Path(lowered).suffix
-            stem = Path(lowered).stem
-            if (
-                fname.startswith(".")
-                or fpath.is_symlink()
-                or ext in _BLOCKED_CREDENTIAL_ARTIFACT_EXTS
-                or any(tok in stem for tok in _BLOCKED_CREDENTIAL_ARTIFACT_STEM_TOKENS)
-            ):
-                raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_file")
-            rel_parts = fpath.relative_to(folder).parts
-            raw_bytes = read_bytes_beneath(folder, rel_parts)
-            if b"\x00" in raw_bytes:
-                raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_binary")
-            try:
-                text = raw_bytes.decode("utf-8", errors="strict")
-            except UnicodeDecodeError as exc:
-                raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_binary") from exc
-            safe_text = turn_red.public_text(text) if turn_red is not None else str(redact_sensitive_value(text))
-            if safe_text != text:
-                write_text_atomic_beneath(folder, rel_parts, safe_text, file_mode=0o600)
+    redactions = (turn_red,) if turn_red is not None else ()
+    for parts, _size in manifest:
+        rel_parts = parts[1:]
+        parent_parts = rel_parts[:-1]
+        if parent_parts and is_blocked_credential_debug_path(parent_parts):
+            raise RunOutError(
+                "SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_subdir",
+            )
+        if is_blocked_credential_debug_path(rel_parts):
+            raise RunOutError(
+                "SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_file",
+            )
+        if path_contains_credential_echo(rel_parts, redactions):
+            raise RunOutError(
+                "SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_name",
+            )
+    for parts, size in manifest:
+        try:
+            raw_bytes = read_bytes_beneath(folder, parts, max_bytes=size)
+        except NoFollowPathError as exc:
+            raise RunOutError(
+                "SCRIPT_RUN_OUT_LINK_REJECTED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_file",
+            ) from exc
+        except ValueError as exc:
+            raise RunOutError(
+                "SCRIPT_RUN_OUT_LIMIT_EXCEEDED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_file",
+            ) from exc
+        except OSError as exc:
+            raise RunOutError(
+                "SCRIPT_RUN_OUT_HARVEST_FAILED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_file",
+            ) from exc
+        if raw_bytes is None or len(raw_bytes) != size:
+            raise RunOutError(
+                "SCRIPT_RUN_OUT_HARVEST_FAILED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_file",
+            )
+        if b"\x00" in raw_bytes:
+            raise RunOutError(
+                "SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_binary",
+            )
+        try:
+            text = raw_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise RunOutError(
+                "SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED",
+                archive_phase="credential_artifact_gate",
+                path_role="run_out_binary",
+            ) from exc
+        safe_text = turn_red.public_text(text) if turn_red is not None else str(redact_sensitive_value(text))
+        if safe_text != text:
+            write_text_atomic_beneath(folder, parts, safe_text, file_mode=0o600)
 
 
 # LLM: 权威入口沿宿主workspace覆盖与nofollow；项目根只读代码，Owner仍为执行/权限根；缺失才读旧Owner格式。
@@ -1409,7 +1462,12 @@ class ScriptRunner:
                     envelope_parsed = True
                     if not error:
                         if cred_lease is not None:
-                            _sanitize_or_block_credential_run_out(Path(execution[1]), cred_lease)
+                            _sanitize_or_block_credential_run_out(
+                                Path(execution[1]),
+                                cred_lease,
+                                max_files=self.RUN_OUT_MAX_FILES,
+                                max_bytes=self.RUN_OUT_MAX_BYTES,
+                            )
                         batch = RunArtifactBatch(capture['run_out_target'], self.run_out_quota)
                         batch.stage(Path(execution[1]), max_files=self.RUN_OUT_MAX_FILES, max_bytes=self.RUN_OUT_MAX_BYTES)
             if cleanup:
@@ -1474,6 +1532,8 @@ class ScriptRunner:
                 stderr = turn_red.public_text(stderr)
                 cleanup = turn_red.redact_value(cleanup)
                 execution_error = turn_red.redact_value(execution_error)
+                inputs = turn_red.redact_value(inputs)
+                sources = turn_red.redact_value(sources)
                 delivery_receipts = list(turn_red.redact_value(delivery_receipts))
         ended_at, elapsed = time.time(), (time.monotonic() - timer) * 1000
         context = {'script_id': script_id, 'error_code': error, 'exit_code': exit_code,
