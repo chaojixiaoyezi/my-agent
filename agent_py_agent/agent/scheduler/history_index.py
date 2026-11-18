@@ -238,19 +238,41 @@ class SchedulerHistoryIndex:
 
     # LLM: 双排序索引覆盖有/无job两种页；B+1只在本页解码，不做SQL临时排序。
     # 函数用途: 构造可被EXPLAIN核验的索引分页语句。
-    def page_queries(self, *, job_id, limit, generation=1):
+    def page_queries(self, *, job_id, limit, generation=1, since=None, until=None):
         sql = "SELECT payload FROM history_rows WHERE generation=?"
         args = [generation]
         if job_id:
             sql += " AND job_id=?"
             args.append(job_id)
+        if since is not None:
+            sql += " AND ended_at>=?"
+            args.append(float(since))
+        if until is not None:
+            sql += " AND ended_at<=?"
+            args.append(float(until))
         sql += " ORDER BY ended_at DESC,run_id DESC LIMIT ?"
         args.append(limit + 1)
         return [(sql, tuple(args))]
 
+    @property
+    def last_read_coverage(self) -> str:
+        """返回当前线程最近一次 read() 调用的窗口覆盖说明（如 'window_200' 或 ''）。"""
+        local_state = getattr(self, "_last_coverage_local", None)
+        return str(getattr(local_state, "value", "")) if local_state is not None else ""
+
+    def _set_last_read_coverage(self, value: str) -> None:
+        local_state = getattr(self, "_last_coverage_local", None)
+        if local_state is None:
+            import threading
+
+            local_state = threading.local()
+            self._last_coverage_local = local_state
+        local_state.value = value
+
     # LLM: 仅校验有界锚点，不同步回填；不完整索引只返回已覆盖结果并披露原因，版本不符不返回旧投影。
     # 函数用途: 在同一SQLite读快照中取当前页或准确run。
-    def read(self, *, job_id="", limit=50, run_id=None):
+    def read(self, *, job_id="", limit=50, run_id=None, statuses=(), since=None, until=None, trigger=""):
+        self._set_last_read_coverage("")
         try:
             with locked_json_path(self.source), closing(self._connect(read_only=True)) as conn:
                 conn.execute("BEGIN")
@@ -265,10 +287,33 @@ class SchedulerHistoryIndex:
                 if run_id is not None:
                     rows = conn.execute("SELECT payload FROM history_effects WHERE generation=? AND run_id=?",
                                         (state["generation"], run_id)).fetchall()
-                else:
-                    sql, args = self.page_queries(job_id=job_id, limit=limit, generation=state["generation"])[0]
-                    rows = conn.execute(sql, args).fetchall()
-                return [json.loads(row[0]) for row in rows], sorted(set(errors))
+                    return [json.loads(row[0]) for row in rows], sorted(set(errors))
+                filtering = bool(statuses) or bool(trigger)
+                query_limit = 200 if filtering else limit
+                sql, args = self.page_queries(
+                    job_id=job_id,
+                    limit=query_limit,
+                    generation=state["generation"],
+                    since=since,
+                    until=until,
+                )[0]
+                rows = conn.execute(sql, args).fetchall()
+                decoded = [json.loads(row[0]) for row in rows]
+                if not filtering:
+                    return decoded, sorted(set(errors))
+                window_exhausted = len(decoded) > 200
+                candidates = decoded[:200]
+                allowed_statuses = {str(item) for item in statuses if item}
+                trigger_value = str(trigger or "")
+                filtered = [
+                    item
+                    for item in candidates
+                    if (not allowed_statuses or item.get("status") in allowed_statuses)
+                    and (not trigger_value or str(item.get("trigger") or "") == trigger_value)
+                ]
+                if window_exhausted:
+                    self._set_last_read_coverage("window_200")
+                return filtered[: limit + 1], sorted(set(errors))
         except (OSError, sqlite3.Error, ValueError) as exc:
             return [], ["SCHEDULER_HISTORY_READ_FAILED", type(exc).__name__]
 

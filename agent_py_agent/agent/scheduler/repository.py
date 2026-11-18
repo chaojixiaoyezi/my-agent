@@ -72,6 +72,7 @@ from .monitor_state import (
 )
 from .notification_binding import normalize_notification_binding
 from .policy import apply_run_policy, normalize_policy
+from .postcheck import normalize_postcheck
 from .run_preparation import SchedulerRunPreparation
 from .schedule import (
     ScheduleValidationError,
@@ -260,6 +261,7 @@ class SchedulerJobCreateRequest:
     creator: object = None
     execution_target: object = field(default=None, kw_only=True)
     business_context: object = field(default=None, kw_only=True, metadata={"host_only": True})
+    postcheck: object = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", str(self.thread_id or "").strip())
@@ -280,6 +282,8 @@ class SchedulerRunFinish:
     error_message: str = ""
     now: float | None = None
     model_call_count: int | None = field(default=None, kw_only=True)
+    postcheck_observation: dict[str, object] | None = field(default=None, kw_only=True)
+    failure_kind: str = field(default="", kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", str(self.status or "").strip().lower())
@@ -921,7 +925,15 @@ class _SchedulerRunOperations:
         job_id = str(run["job_id"])
         job, _error = self._parse_job(store["jobs"].get(job_id))
         if job is not None:
-            store["jobs"][job_id] = _job_after_run(job, terminal, now=now)
+            updated_job = _job_after_run(job, terminal, now=now)
+            store["jobs"][job_id] = _apply_failure_streak_and_followups(
+                store, updated_job, terminal, now=now
+            )
+
+    @property
+    def last_history_coverage(self) -> str:
+        """返回最近一次 history() 查询的窗口覆盖说明（如 'window_200' 或 ''）。"""
+        return str(getattr(self._history_index, "last_read_coverage", ""))
 
     # LLM: 只解码索引B+1行并沿原owner/schema校验；覆盖不足披露errors，不在读路径回填或全扫。
     # 函数用途: 保持原排序和公开签名，按有界页查询当前owner历史。
@@ -930,17 +942,44 @@ class _SchedulerRunOperations:
         *,
         job_id: str = "",
         limit: int = 50,
+        statuses: tuple[str, ...] | list[str] = (),
+        since: float | None = None,
+        until: float | None = None,
+        trigger: str = "",
     ) -> tuple[list[dict[str, object]], list[str]]:
         page_limit = max(1, min(int(limit or 50), 200))
-        raw_rows, errors = self._history_index.read(job_id=job_id, limit=page_limit)
+        status_tuple = tuple(str(item) for item in (statuses or ()) if str(item))
+        trigger_str = str(trigger or "")
+        if status_tuple or since is not None or until is not None or trigger_str:
+            raw_rows, errors = self._history_index.read(
+                job_id=job_id,
+                limit=page_limit,
+                statuses=status_tuple,
+                since=since,
+                until=until,
+                trigger=trigger_str,
+            )
+        else:
+            raw_rows, errors = self._history_index.read(job_id=job_id, limit=page_limit)
+        status_set = set(status_tuple)
         selected = []
         for raw in raw_rows:
             run, error = self._parse_run(raw, terminal=True)
             if error:
                 errors.append(error)
                 continue
-            if run is not None and (not job_id or run["job_id"] == job_id):
-                selected.append(run)
+            if run is None or (job_id and run["job_id"] != job_id):
+                continue
+            if status_set and run.get("status") not in status_set:
+                continue
+            if trigger_str and str(run.get("trigger") or "") != trigger_str:
+                continue
+            ended_value = float(run.get("ended_at") or run.get("created_at") or 0.0)
+            if since is not None and ended_value < float(since):
+                continue
+            if until is not None and ended_value > float(until):
+                continue
+            selected.append(run)
         return deepcopy(selected[:page_limit]), sorted(set(errors))
 
     # LLM: 只供启动与原scheduler tick的有界维护，失败保留进度及不完整诊断，不妨碍其他原job判断。
@@ -1765,6 +1804,7 @@ class _SchedulerRecordParsing:
 
             normalize_business_context(raw.get('business_context'), self.owner['id'])
             normalize_precheck(raw.get("precheck"))
+            normalize_postcheck(raw.get("postcheck"))
             normalize_delivery(raw.get("delivery"))
             from .event_source_lifecycle import validate_event_run
             validate_event_run(raw)
@@ -2730,6 +2770,7 @@ def _new_job_payload(
     if normalized_schedule['kind'] == 'event_source':
         execution = {**execution, 'mode': 'isolated'}
     precheck = normalize_precheck(request.precheck)
+    postcheck = normalize_postcheck(request.postcheck)
     delivery = normalize_delivery(request.delivery)
     thread = request.thread_id
     if not thread:
@@ -2749,6 +2790,7 @@ def _new_job_payload(
                 "execution_target": target,
                 **({'business_context': business} if business is not None else {}),
                 "precheck": precheck,
+                **({"postcheck": postcheck} if postcheck is not None else {}),
                 "delivery": delivery,
             },
             ensure_ascii=False,
@@ -2778,6 +2820,7 @@ def _new_job_payload(
         "policy": policy,
         "execution": execution,
         "precheck": precheck,
+        "postcheck": postcheck,
         "execution_target": target,
         "consecutive_failures": 0,
         "backoff_until": 0.0,
@@ -2831,6 +2874,7 @@ def _updated_job(
         "execution": {**normalize_execution(patch.get("execution") if "execution" in patch else job.get("execution")),
             **({'mode': 'isolated'} if schedule['kind'] == 'event_source' else {})},
         "precheck": normalize_precheck(patch.get("precheck") if "precheck" in patch else job.get("precheck")),
+        "postcheck": normalize_postcheck(patch.get("postcheck") if "postcheck" in patch else job.get("postcheck")),
         "execution_target": normalize_execution_target(patch.get('execution_target') if 'execution_target' in patch else job.get('execution_target')),
         "delivery": normalize_delivery(patch.get("delivery") if "delivery" in patch else job.get("delivery")),
         "updated_at": now,
@@ -2867,6 +2911,7 @@ def _reserved_run(
         "source_thread_id": str(job.get("source_thread_id") or job["thread_id"]),
         "execution": execution,
         "precheck": deepcopy(job.get("precheck")),
+        "postcheck": deepcopy(job.get("postcheck")),
         "execution_target": deepcopy(job.get('execution_target')),
         "execution_definition_ref": deepcopy((job.get('execution_target') or {}).get('execution_definition_ref')),
         "delivery": normalize_delivery(job.get("delivery")),
@@ -3032,7 +3077,160 @@ def _terminal_run_payload(
         "error_code": result.error_code[:120],
         "error_message": result.error_message[:500],
         **({'model_call_count': result.model_call_count} if result.model_call_count is not None else {}),
+        **({'failure_kind': result.failure_kind} if result.failure_kind else {}),
+        **({'postcheck_observation': bounded_obs}
+           if (bounded_obs := _bounded_postcheck_observation(result.postcheck_observation)) is not None
+           else {}),
     }
+
+
+def _bounded_postcheck_observation(observation: object) -> dict[str, object] | None:
+    """裁切 postcheck_observation，确保检查结果列表不超过 8 条。"""
+    if not isinstance(observation, dict):
+        return None
+    bounded = dict(observation)
+    checks = bounded.get("checks")
+    if isinstance(checks, (list, tuple)):
+        bounded["checks"] = list(checks)[:8]
+    return bounded
+
+
+def _bounded_failure_context(terminal: dict[str, object], streak_count: int) -> dict[str, object]:
+    """构造单次 failure_investigation 所需的有界（<= 4096 字节）失败上下文。"""
+    observation = terminal.get("postcheck_observation")
+    if isinstance(observation, dict):
+        postcheck_summary: dict[str, object] = {
+            "status": str(observation.get("status") or ""),
+            "failure_kind": str(observation.get("failure_kind") or ""),
+            "checks": list(observation.get("checks") or [])[:4],
+        }
+    else:
+        postcheck_summary = {}
+    context: dict[str, object] = {
+        "failed_run_id": str(terminal.get("run_id") or ""),
+        "error_code": str(terminal.get("error_code") or "")[:128],
+        "failure_kind": str(terminal.get("failure_kind") or "")[:64],
+        "status": str(terminal.get("status") or ""),
+        "streak_count": int(streak_count),
+        "postcheck_summary": postcheck_summary,
+    }
+    raw = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    if len(raw.encode("utf-8")) > 4096 and postcheck_summary:
+        context["postcheck_summary"] = {
+            "status": postcheck_summary.get("status", ""),
+            "failure_kind": postcheck_summary.get("failure_kind", ""),
+            "checks": [],
+        }
+    return context
+
+
+def _apply_failure_streak_and_followups(
+    store: dict[str, object],
+    job: dict[str, object],
+    terminal: dict[str, object],
+    *,
+    now: float,
+) -> dict[str, object]:
+    """在终态事务内维护连续失败计数，并按配置原子预约最多一次调查与单次重试。"""
+    updated = dict(job)
+    trigger = str(terminal.get("trigger") or "")
+    status = str(terminal.get("status") or "")
+    run_id = str(terminal.get("run_id") or "")
+    existing_streak = updated.get("failure_streak")
+    if trigger == "failure_investigation":
+        if isinstance(existing_streak, dict) and existing_streak.get("investigation_run_id") == run_id:
+            updated["failure_streak"] = {**existing_streak, "investigation_status": status}
+        return updated
+    if status == "done":
+        if "failure_streak" in updated:
+            updated["failure_streak"] = None
+        return updated
+    if status not in ("failed", "unknown"):
+        return updated
+
+    if isinstance(existing_streak, dict) and int(existing_streak.get("count") or 0) > 0:
+        streak: dict[str, object] = {
+            "started_run_id": str(existing_streak.get("started_run_id") or run_id),
+            "first_failed_at": float(existing_streak.get("first_failed_at") or now),
+            "last_failed_at": float(now),
+            "count": int(existing_streak.get("count") or 0) + 1,
+            "investigation_run_id": str(existing_streak.get("investigation_run_id") or ""),
+            "investigation_status": str(existing_streak.get("investigation_status") or ""),
+            "retry_run_id": str(existing_streak.get("retry_run_id") or ""),
+        }
+    else:
+        streak = {
+            "started_run_id": run_id,
+            "first_failed_at": float(now),
+            "last_failed_at": float(now),
+            "count": 1,
+            "investigation_run_id": "",
+            "investigation_status": "",
+            "retry_run_id": "",
+        }
+
+    policy = updated.get("policy") if isinstance(updated.get("policy"), dict) else {}
+    on_failure = policy.get("on_failure") if isinstance(policy, dict) else None
+    runs_map = store.setdefault("runs", {})
+    if isinstance(on_failure, dict) and str(updated.get("status") or "") != "deleted":
+        if (
+            on_failure.get("investigate")
+            and int(streak["count"]) >= int(on_failure.get("after_failures") or 1)
+            and not streak["investigation_run_id"]
+        ):
+            inv_run = _reserved_run(
+                updated,
+                trigger="failure_investigation",
+                scheduled_for=float(now),
+                dispatch_after=float(now),
+                now=float(now),
+            )
+            inv_prompt = str(on_failure.get("prompt") or "").strip() or (
+                "调查定时任务连续失败原因并给出只读核查结论与修复建议，不主动重跑原业务副作用。"
+            )
+            inv_run.update(
+                {
+                    "use_llm": True,
+                    "tool": None,
+                    "execution_target": None,
+                    "execution_definition_ref": None,
+                    "precheck": None,
+                    "postcheck": None,
+                    "prompt": inv_prompt,
+                    "failure_context": _bounded_failure_context(terminal, int(streak["count"])),
+                }
+            )
+            inv_run.pop("event_source", None)
+            inv_run.pop("event_batch", None)
+            runs_map[str(inv_run["run_id"])] = inv_run
+            streak["investigation_run_id"] = str(inv_run["run_id"])
+            streak["investigation_status"] = "queued"
+
+        # 仅当连续失败第 1 次且终态为确定失败 (failed，绝不用于 unknown) 且任务未暂停时预约单次重试。
+        if (
+            on_failure.get("retry_once")
+            and int(streak["count"]) == 1
+            and not streak["retry_run_id"]
+            and status == "failed"
+            and str(updated.get("status") or "") == "active"
+        ):
+            backoff_seconds = int(policy.get("failure_backoff_seconds") or 0)
+            retry_at = float(now) + float(max(backoff_seconds, 60))
+            retry_run = _reserved_run(
+                updated,
+                trigger="failure_retry",
+                scheduled_for=retry_at,
+                dispatch_after=retry_at,
+                now=float(now),
+            )
+            queue_timeout = int(policy.get("queue_timeout_seconds") or 0)
+            if queue_timeout > 0:
+                retry_run["queue_deadline_at"] = retry_at + float(queue_timeout)
+            runs_map[str(retry_run["run_id"])] = retry_run
+            streak["retry_run_id"] = str(retry_run["run_id"])
+
+    updated["failure_streak"] = streak
+    return updated
 
 
 # LLM: 一次性计划过了补跑宽限就不能直接恢复；拒绝原因写清目标时刻、当前时刻、宽限秒数和下一步，供模型与用户直接照做。
@@ -3204,6 +3402,7 @@ def parse_scheduler_job(raw, owner):
 
         normalize_business_context(raw.get('business_context'), owner['id'])
         normalize_precheck(raw.get("precheck"))
+        normalize_postcheck(raw.get("postcheck"))
         normalize_delivery(raw.get("delivery"))
         binding = normalize_notification_binding(raw.get('notification_binding'))
         normalize_execution_target(raw.get('execution_target'))

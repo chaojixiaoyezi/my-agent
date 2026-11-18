@@ -51,6 +51,7 @@ from .execution_policy import (
     validate_execution_for_agent,
 )
 from .policy import normalize_policy
+from .postcheck import POSTCHECK_SCHEMA, normalize_postcheck
 from .repository import (
     SchedulerConflictError,
     SchedulerJobCreateRequest,
@@ -58,7 +59,7 @@ from .repository import (
     SchedulerRepositoryError,
 )
 from .rules import RULES_SCHEMA
-from .schedule import ScheduleValidationError, build_schedule, iso_from_timestamp
+from .schedule import ScheduleValidationError, build_schedule, iso_from_timestamp, parse_instant
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -296,7 +297,19 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                         "misfire": {"type": "string", "enum": ["skip", "coalesce"], "description": "错过执行窗口后的处理策略：skip 跳过逾期周期，coalesce 合并补跑一次。"},
                         "queue_timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "预留后最长排队时间；0 不限制。"},
                         "failure_pause_after": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "连续失败多少次后暂停；0 不自动暂停。"},
-                        "failure_backoff_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "连续失败指数退避基数，最长七天；0 不退避。"}},
+                        "failure_backoff_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "连续失败指数退避基数，最长七天；0 不退避。"},
+                        "on_failure": {
+                            "type": ["object", "null"],
+                            "description": "可选：连续失败后的单次调查与单次重试策略，或传 null 关闭。",
+                            "properties": {
+                                "investigate": {"type": "boolean", "description": "达到连续失败次数后是否自动触发一次只读 failure_investigation。"},
+                                "after_failures": {"type": "integer", "minimum": 1, "maximum": 100, "description": "触发 failure_investigation 的连续失败阈值（1 到 100，默认 1）。"},
+                                "retry_once": {"type": "boolean", "description": "首次确定失败 (failed，不含 unknown) 且任务仍激活时是否自动延迟重试 1 次。"},
+                                "prompt": {"type": "string", "maxLength": 2000, "description": "可选：failure_investigation 专属只读调查提示词（最多 2000 字符）。"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
                     "additionalProperties": False},
                 "skill_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "固定到计划的当前可用 Skill 稳定 ID。"},
                 "rules": subschemas["rules"],
@@ -304,10 +317,22 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "execution": subschemas["execution"],
                 "execution_target": subschemas["execution_target"],
                 "precheck": PRECHECK_SCHEMA,
+                "postcheck": POSTCHECK_SCHEMA,
                 "delivery": subschemas["delivery"],
                 "delivery_policy": subschemas["delivery_policy"],
                 "notify_mode": {"enum": ["origin", "local", "none"], "description": "旧通知模式输入，与delivery_policy冲突时拒绝。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "list/history 的返回条数。"},
+                "status": {
+                    "type": ["string", "array"],
+                    "items": {
+                        "type": "string",
+                        "enum": ["queued", "claimed", "running", "waiting", "done", "failed", "unknown", "cancelled", "skipped", "superseded"],
+                    },
+                    "description": "history 过滤状态，可传单个状态字符串或状态数组。",
+                },
+                "since": {"type": "string", "description": "history 过滤起始时间（ISO-8601 字符串，ended_at >= since）。"},
+                "until": {"type": "string", "description": "history 过滤结束时间（ISO-8601 字符串，ended_at <= until）。"},
+                "trigger": {"type": "string", "description": "history 过滤触发类型（如 due、manual、event、failure_investigation、failure_retry）。"},
                 "metadata_only": {"type": "boolean", "description": "list/get/history/status 只输出状态、时间和编号，排除名字、提示词、回复预览及原始错误正文。"},
             },
             "required": ["action"],
@@ -537,15 +562,32 @@ class ScheduleTool(BaseTool):
                 },
             )
         if action == "history":
-            rows, errors = repository.history(job_id=job_id, limit=_limit(params))
-            return _success(
-                action,
-                {
-                    "job_id": job_id,
-                    "runs": [_run_projection(row, metadata_only=metadata_only) for row in rows],
-                    "load_error_codes": errors,
-                },
+            statuses = _parse_history_statuses(params.get("status"))
+            since = _parse_history_time_bound(params.get("since"), field_name="since")
+            until = _parse_history_time_bound(params.get("until"), field_name="until")
+            if since is not None and until is not None and since > until:
+                raise ScheduleValidationError("history 过滤时间范围无效: since 不能晚于 until")
+            raw_trigger = params.get("trigger")
+            if raw_trigger is not None and not isinstance(raw_trigger, str):
+                raise ScheduleValidationError("history.trigger 必须是字符串")
+            trigger_filter = str(raw_trigger or "").strip()
+            rows, errors = repository.history(
+                job_id=job_id,
+                limit=_limit(params),
+                statuses=statuses,
+                since=since,
+                until=until,
+                trigger=trigger_filter,
             )
+            payload: dict[str, object] = {
+                "job_id": job_id,
+                "runs": [_run_projection(row, metadata_only=metadata_only) for row in rows],
+                "load_error_codes": errors,
+            }
+            coverage = repository.last_history_coverage
+            if coverage:
+                payload["coverage"] = coverage
+            return _success(action, payload)
         prepared = prepare_event_sources(self.agent, params) if action in {'create', 'update'} else None
         with _monitor_work_guard(self.agent, action):
             if action == "create":
@@ -639,6 +681,7 @@ class ScheduleTool(BaseTool):
         execution = validate_execution_for_agent(self.agent, params.get("execution"))
         policy = normalize_policy(params.get("policy"))
         precheck = normalize_precheck(params.get("precheck"))
+        postcheck = normalize_postcheck(params.get("postcheck"))
         delivery = validate_delivery_targets(self.agent, creation_delivery(self.agent, thread_id, delivery_from_params(params)))
         from .execution_policy import schedule_execution_thread, schedule_source_thread_id
 
@@ -663,6 +706,7 @@ class ScheduleTool(BaseTool):
                 policy=policy,
                 execution=execution,
                 precheck=precheck,
+                postcheck=postcheck,
                 delivery=delivery,
                 rules=rules,
                 creator=creator,
@@ -678,7 +722,7 @@ class ScheduleTool(BaseTool):
     # 函数用途: 将公开policy别名转换成唯一delivery字段，并在原CAS前验证目标，保留null关闭预检的含义。
     def _update_patch(self, params: dict[str, object], prepared) -> dict[str, object] | ToolHandlerOutcome:
         patch: dict[str, object] = {}
-        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "execution_target", "precheck", "delivery", "rules"):
+        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "execution_target", "precheck", "postcheck", "delivery", "rules"):
             if key in params:
                 patch[key] = params[key]
         delivery = delivery_from_params(params)
@@ -895,7 +939,9 @@ def _job_projection(
         "delivery": normalize_delivery(job.get("delivery")),
         "notification_binding_version": int((job.get('notification_binding') or {}).get('version') or 0),
         "precheck_enabled": job.get("precheck") is not None,
+        "postcheck_enabled": job.get("postcheck") is not None,
         "consecutive_failures": job.get("consecutive_failures", 0),
+        "failure_streak": _failure_streak_projection(job.get("failure_streak")),
         "backoff_until": iso_from_timestamp(job.get("backoff_until")),
         "current_run": _run_projection(active_run, metadata_only=metadata_only) if active_run is not None else None,
     }
@@ -907,6 +953,7 @@ def _job_projection(
     payload["name"] = job["name"]
     payload["creator_display"] = job.get("creator_display") or "创建者身份待核验"
     payload["precheck"] = job.get("precheck")
+    payload["postcheck"] = job.get("postcheck")
     payload['execution_target'] = job.get('execution_target')
     payload['definition_generation'] = job.get('definition_generation')
     payload["skill_refs"] = job.get("skill_refs") or []
@@ -919,7 +966,96 @@ def _job_projection(
 
 # LLM: 白名单读取 run 状态、时间及预检原工具原因码；不读取回复/错误正文，执行成功不推导交付成功。
 # 函数用途: 展示执行、交付和预检错误来源；纯元数据模式排除自由文本。
+def _failure_streak_projection(streak: object) -> dict[str, object] | None:
+    """将任务连续失败状态裁剪为可暴露的结构化只读投影。"""
+    if not isinstance(streak, dict):
+        return None
+    return {
+        "started_run_id": str(streak.get("started_run_id") or ""),
+        "first_failed_at": streak.get("first_failed_at"),
+        "last_failed_at": streak.get("last_failed_at"),
+        "count": int(streak.get("count") or 0),
+        "investigation_run_id": str(streak.get("investigation_run_id") or ""),
+        "investigation_status": str(streak.get("investigation_status") or ""),
+        "retry_run_id": str(streak.get("retry_run_id") or ""),
+    }
+
+
+def _parse_history_statuses(value: object) -> tuple[str, ...]:
+    """校验并规范化 schedule(action='history') 的 status 过滤参数。"""
+    allowed = frozenset(
+        {"queued", "claimed", "running", "waiting", "done", "failed", "unknown", "cancelled", "skipped", "superseded"}
+    )
+    if value is None or value == "":
+        return ()
+    raw_items = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple)) else None
+    if raw_items is None:
+        raise ScheduleValidationError(f"history.status 必须是字符串或状态列表，仅支持 {sorted(allowed)}")
+    cleaned: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, str) or not item.strip():
+            raise ScheduleValidationError(f"history.status 元素必须是非空字符串，仅支持 {sorted(allowed)}")
+        normalized = item.strip()
+        if normalized not in allowed:
+            raise ScheduleValidationError(f"history.status 含不支持的状态 '{normalized}'，仅支持 {sorted(allowed)}")
+        if normalized not in cleaned:
+            cleaned.append(normalized)
+    return tuple(cleaned)
+
+
+def _parse_history_time_bound(value: object, *, field_name: str) -> float | None:
+    """解析 schedule(action='history') 的 since/until 时间边界为 Unix 秒数。"""
+    if value is None or value == "":
+        return None
+    try:
+        return float(parse_instant(value).timestamp())
+    except (ScheduleValidationError, ValueError, TypeError) as exc:
+        raise ScheduleValidationError(
+            f"history.{field_name} 时间格式无效（请传 ISO-8601 字符串，如 2026-11-18T00:00:00Z）: {exc}"
+        ) from exc
+
+
+def _run_target_exit_code(run: dict[str, object]) -> int | None:
+    """从 target_outcome 或执行目标 JSON 响应中提取整数 exit_code（无则返回 None）。"""
+    target_outcome = run.get("target_outcome")
+    if isinstance(target_outcome, dict):
+        code = target_outcome.get("exit_code")
+        if type(code) is int:
+            return code
+        raw_resp = target_outcome.get("response")
+        if isinstance(raw_resp, str) and raw_resp.strip().startswith("{"):
+            try:
+                parsed = json.loads(raw_resp)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict) and type(parsed.get("exit_code")) is int:
+                return int(parsed["exit_code"])
+    if run.get("execution_target") is not None:
+        raw_run_resp = run.get("response")
+        if isinstance(raw_run_resp, str) and raw_run_resp.strip().startswith("{"):
+            try:
+                parsed = json.loads(raw_run_resp)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict) and type(parsed.get("exit_code")) is int:
+                return int(parsed["exit_code"])
+    return None
+
+
 def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> dict[str, object]:
+    postcheck_obs = (
+        run.get("postcheck_observation")
+        if isinstance(run.get("postcheck_observation"), dict)
+        else {}
+    )
+    started_ts = run.get("started_at")
+    ended_ts = run.get("ended_at")
+    duration_seconds = (
+        round(max(0.0, float(ended_ts) - float(started_ts)), 3)
+        if started_ts and ended_ts
+        else None
+    )
+    target_exit_code = _run_target_exit_code(run)
     payload = {
         "execution": normalize_execution(run.get("execution")),
         "origin_thread_id": run.get("origin_thread_id", run.get("thread_id")),
@@ -927,6 +1063,10 @@ def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> d
         "precheck_status": (run.get("precheck_observation") or {}).get("status", "pending" if run.get("precheck") else "disabled"),
         "precheck_observation": {key: value for key, value in (run.get("precheck_observation") or {}).items()
                                  if key in {"status", "call_id", "observed_at", "error_code", "error_type", "tool_error_code"}},
+        "postcheck_status": postcheck_obs.get("status", "pending" if run.get("postcheck") else "disabled"),
+        "failure_kind": str(run.get("failure_kind") or postcheck_obs.get("failure_kind") or ""),
+        "duration_seconds": duration_seconds,
+        "target_exit_code": target_exit_code,
         "rule_id": run.get("rule_id", "rule1"),
         "use_llm": run.get("use_llm", True),
         "run_id": run["run_id"],
@@ -952,6 +1092,7 @@ def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> d
             'execution_definition_ref': run.get('execution_definition_ref'),
             'definition_generation': run.get('definition_generation'),
             'model_call_count': run.get('model_call_count'),
+            "postcheck_checks": list(postcheck_obs.get("checks") or [])[:8],
             "delivery_reason": run.get("delivery_reason") or "",
             "error_message": run.get("error_message") or "",
             "response_preview": str(run.get("response") or "")[:500],

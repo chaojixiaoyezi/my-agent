@@ -52,9 +52,10 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         if not claim.run.get("use_llm", True):
             from .tool_work import execute_scheduled_tool
             return execute_scheduled_tool(agent, service, claim, signal, kwargs, notify=dependencies.run_once)
-        admission = admit_prechecked_work(agent, service, claim, signal, run_kwargs=kwargs, now=now, notify=dependencies.run_once)
+        work_kwargs = _inject_failure_investigation_context(kwargs, claim.run)
+        admission = admit_prechecked_work(agent, service, claim, signal, run_kwargs=work_kwargs, now=now, notify=dependencies.run_once)
         if admission is True:
-            return dependencies.run_once(kwargs)
+            return dependencies.run_once(work_kwargs)
         return admission if admission is not False else None
 
     def run_once(kwargs):
@@ -71,6 +72,37 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         return dependencies.terminal_task(kwargs)
 
     return replace(dependencies, run_once=run_once, terminal_task=terminal_task)
+
+
+def _inject_failure_investigation_context(kwargs: dict, run: dict) -> dict:
+    """为 failure_investigation 唤醒注入有界（<= 4096 字节）失败上下文到模型提示中。"""
+    if str(run.get("trigger") or "") != "failure_investigation":
+        return kwargs
+    failure_context = run.get("failure_context")
+    if not isinstance(failure_context, dict):
+        return kwargs
+    raw = json.dumps(failure_context, ensure_ascii=False, indent=2)
+    encoded = raw.encode("utf-8")
+    if len(encoded) > 4096:
+        raw = encoded[:4096].decode("utf-8", errors="ignore")
+    updated = dict(kwargs)
+    wake = updated.get("wake_signal")
+    block = (
+        "\n\n[failure_context]\n"
+        f"{raw}\n"
+        "请只读核查上述失败上下文、历史日志与相关产物，总结根因与修复建议，不要重跑原业务副作用。"
+    )
+    if isinstance(wake, dict):
+        metadata = dict(wake.get("metadata") or {})
+        base_prompt = str(metadata.get("scheduler_prompt") or run.get("prompt") or "").strip()
+        metadata["scheduler_prompt"] = f"{base_prompt}{block}".strip()
+        updated["wake_signal"] = {**wake, "metadata": metadata}
+    elif hasattr(wake, "metadata") and isinstance(wake.metadata, dict):
+        metadata = dict(wake.metadata)
+        base_prompt = str(metadata.get("scheduler_prompt") or run.get("prompt") or "").strip()
+        metadata["scheduler_prompt"] = f"{base_prompt}{block}".strip()
+        updated["wake_signal"] = replace(wake, metadata=metadata)
+    return updated
 
 
 def _queue_completed_delivery(agent, run, signal, receipt):
@@ -404,9 +436,11 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
             raise
         parsed = output
     message = str(parsed.get('error_message') or parsed.get('stderr_preview') or '') if isinstance(parsed, dict) else str(output or '')
+    exit_code = parsed.get('exit_code') if isinstance(parsed, dict) and type(parsed.get('exit_code')) is int else None
     outcome = {'schema': 'scheduler.target-outcome.v1', 'run_id': claim.run_id,
         'status': 'succeeded' if ok else 'failed', 'response': output,
-        'error_code': '' if ok else code or 'SCHEDULER_EXECUTION_TARGET_FAILED', 'error_message': message if not ok else ''}
+        'error_code': '' if ok else code or 'SCHEDULER_EXECUTION_TARGET_FAILED', 'error_message': message if not ok else '',
+        **({'exit_code': exit_code} if exit_code is not None else {})}
     if not ok and isinstance(parsed, dict) and parsed.get('reason_code') == 'prior_run_unsettled':
         for extra_key in ('reason_code', 'running_run_id', 'effect_outcome', 'next_action', 'holder_phase'):
             if extra_key in parsed:

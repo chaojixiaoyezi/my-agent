@@ -11,12 +11,14 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 from ..conversation.learning_source import LEARNING_SOURCE_KEY, schedule_projection
 from .active_run_closeout import settle_stale_waiting, waiting_completion_pending
+from .postcheck import evaluate_postcheck
 from .recovery import fail_unstarted, prepare_repository
 from .repository import (
     SchedulerConflictError,
@@ -306,6 +308,43 @@ class SchedulerService:
             lease_seconds=lease_seconds,
         )
 
+    def _postcheck_root(self, run: dict[str, object]) -> Path:
+        """定位运行时的工作区根目录（依次读取 execution.cwd、线程 cwd、owner_root、store 父目录）。"""
+        exec_cfg = run.get("execution")
+        if isinstance(exec_cfg, dict):
+            cwd_text = str(exec_cfg.get("cwd") or "").strip()
+            if cwd_text:
+                return Path(cwd_text)
+        if self.conversation_store is not None:
+            for key in ("thread_id", "origin_thread_id"):
+                thread_id = str(run.get(key) or "").strip()
+                if not thread_id:
+                    continue
+                try:
+                    thread = self.conversation_store.threads.load(thread_id)
+                except (OSError, ValueError):
+                    thread = None
+                cwd_text = str(getattr(thread, "cwd", "") or "").strip() if thread is not None else ""
+                if cwd_text:
+                    return Path(cwd_text)
+        owner_root = getattr(getattr(self.repository, "quota_enforcer", None), "owner_root", None)
+        if owner_root:
+            return Path(owner_root)
+        return self.repository.store_path.parent
+
+    def _postcheck_read_bytes(self) -> int:
+        """读取单次 postcheck 内容检查字节预算，优先复用 retention_scan_slice_bytes 配置。"""
+        for carrier in (self, self.repository, self.conversation_store):
+            cfg = getattr(carrier, "config", None)
+            if cfg is not None and hasattr(cfg, "retention_scan_slice_bytes"):
+                try:
+                    value = int(cfg.retention_scan_slice_bytes)
+                except (TypeError, ValueError):
+                    continue
+                if value >= 1024:
+                    return value
+        return 8388608
+
     def finish(
         self,
         claim: SchedulerRunClaim,
@@ -318,20 +357,58 @@ class SchedulerService:
         error_message: str = "",
         now: float | None = None,
         model_call_count: int | None = None,
+        failure_kind: str = "",
+        postcheck_observation: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
+        final_status = status
+        final_error_code = error_code
+        final_error_message = error_message
+        final_failure_kind = failure_kind
+        final_postcheck_observation = postcheck_observation
+        postcheck_spec = claim.run.get("postcheck")
+        # 严格在获取 _mutation_scope 锁之前执行后验文件/输出检查，避免文件 I/O 阻塞调度主锁。
+        if final_status == "done" and isinstance(postcheck_spec, dict):
+            eval_now = _current_timestamp(now)
+            root = self._postcheck_root(claim.run)
+            read_bytes = self._postcheck_read_bytes()
+            eval_result = evaluate_postcheck(
+                postcheck_spec,
+                root=root,
+                now=eval_now,
+                read_bytes=read_bytes,
+            )
+            final_postcheck_observation = _bound_postcheck_observation(eval_result)
+            eval_status = str(eval_result.get("status") or "")
+            if eval_status == "failed":
+                final_status = "failed"
+                final_error_code = final_error_code or "SCHEDULER_POSTCHECK_FAILED"
+                final_failure_kind = str(eval_result.get("failure_kind") or "business")
+                final_error_message = final_error_message or _format_postcheck_message(eval_result)
+            elif eval_status == "stalled":
+                final_status = "failed"
+                final_error_code = final_error_code or "SCHEDULER_OUTPUT_STALLED"
+                final_failure_kind = str(eval_result.get("failure_kind") or "stalled")
+                final_error_message = final_error_message or _format_postcheck_message(eval_result)
+            elif eval_status != "passed":
+                final_status = "unknown"
+                final_error_code = final_error_code or "SCHEDULER_POSTCHECK_UNAVAILABLE"
+                final_failure_kind = str(eval_result.get("failure_kind") or "postcheck_unavailable")
+                final_error_message = final_error_message or _format_postcheck_message(eval_result)
         try:
             return self.repository.finish_run(
                 claim.run_id,
                 claim.claim_id,
                 SchedulerRunFinish(
-                    status=status,
+                    status=final_status,
                     response=response,
                     delivery_status=delivery_status,
                     delivery_reason=delivery_reason,
-                    error_code=error_code,
-                    error_message=error_message,
+                    error_code=final_error_code,
+                    error_message=final_error_message,
                     now=now,
                     model_call_count=model_call_count,
+                    failure_kind=final_failure_kind,
+                    postcheck_observation=final_postcheck_observation,
                 ),
             )
         except (SchedulerConflictError, SchedulerNotFoundError):
@@ -482,6 +559,35 @@ class SchedulerService:
 
 # LLM: 来源仅由持久scheduler run构造；定时唤醒不可学习，模型字段不能覆盖，保留main的任务/权限元数据。
 # 函数用途: 把定时运行事实投影到当前后台唤醒元数据。
+def _current_timestamp(now: float | None) -> float:
+    """返回显式时间戳或当前挂钟时间。"""
+    return time.time() if now is None else float(now)
+
+
+def _bound_postcheck_observation(observation: object) -> dict[str, object] | None:
+    """保留有界的 postcheck 观测结果（checks 最多 8 条）。"""
+    if not isinstance(observation, dict):
+        return None
+    bounded = dict(observation)
+    checks = bounded.get("checks")
+    if isinstance(checks, (list, tuple)):
+        bounded["checks"] = list(checks)[:8]
+    return bounded
+
+
+def _format_postcheck_message(eval_result: dict[str, object]) -> str:
+    """将 postcheck 失败或停滞摘要整理为可操作的具体中文说明。"""
+    status = str(eval_result.get("status") or "unknown")
+    failure_kind = str(eval_result.get("failure_kind") or "")
+    checks = [
+        f"{item.get('path', '?')}:{item.get('code', '?')}"
+        for item in list(eval_result.get("checks") or [])[:4]
+        if isinstance(item, dict)
+    ]
+    detail = f" ({', '.join(checks)})" if checks else ""
+    return f"postcheck 未通过: status={status}, failure_kind={failure_kind or 'unknown'}{detail}"
+
+
 def _wake_metadata(run: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": "scheduler_wake.v1",
