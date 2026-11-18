@@ -2,6 +2,7 @@
 # 模块用途: 维护后台回复原投递及冻结重投；多线沿同一sender逐目标记回执，不以部分成功确认整条wake。
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -83,13 +84,14 @@ def record_background_response(
     route_supports_transcript: bool | None = None,
     frozen_retry: FrozenOwnerDelivery | None = None,
     local_transcript_only: bool = False,
+    tool_call_count: int | None = None,
 ) -> BackgroundDeliveryCommit:
     # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
     # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
     if (internal := _record_delegated_internal_response(
         delivery, request, delivery_context, internal_content, delivery_artifacts=delivery_artifacts,
         assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot, frozen_retry=frozen_retry,
-        operation_verification=operation_verification,
+        operation_verification=operation_verification, tool_call_count=tool_call_count,
     )) is not None:
         return internal
     from ..scheduler.alert_delivery import record_alert_delivery
@@ -98,7 +100,7 @@ def record_background_response(
         operation_verification=operation_verification, assistant_commentaries=assistant_commentaries,
         display_snapshot=display_snapshot, deliver=deliver, delivery_reason=delivery_reason,
         route_supports_transcript=route_supports_transcript, frozen_retry=frozen_retry,
-        local_transcript_only=local_transcript_only)
+        local_transcript_only=local_transcript_only, tool_call_count=tool_call_count)
     multi = record_alert_delivery(delivery, request, delivery_context, internal_content,
         record_one=_record_background_owner_response, options=options)
     if multi is not None:
@@ -108,7 +110,7 @@ def record_background_response(
         delivery_artifacts=delivery_artifacts, operation_verification=operation_verification,
         assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot,
         deliver=deliver, delivery_reason=delivery_reason, route_supports_transcript=route_supports_transcript,
-        frozen_retry=frozen_retry, local_transcript_only=local_transcript_only)
+        frozen_retry=frozen_retry, local_transcript_only=local_transcript_only, tool_call_count=tool_call_count)
 
 
 # LLM: 原owner信封提交保留冻结回执、代次、渠道与canonical的完整顺序；仅由上层排除未外发委派内部结果。
@@ -132,6 +134,7 @@ def _record_background_owner_response(
     delivery_observer: Callable | None = None,
     delivery_target_key: str = "",
     delivery_event_key: str = "",
+    tool_call_count: int | None = None,
 ) -> BackgroundDeliveryCommit:
     local_transcript_only = local_transcript_only or scheduled_local_delivery(delivery.agent, request)
     (
@@ -152,6 +155,7 @@ def _record_background_owner_response(
         display_snapshot=display_snapshot,
         frozen_retry=frozen_retry,
         operation_verification=operation_verification,
+        tool_call_count=tool_call_count,
     )
     if block := public_receipt_delivery_block(delivery.agent, request, public_receipt, internal_content,
                                               has_attachments=bool(_channel_attachments(delivery_artifacts)), frozen_retry=frozen_retry):
@@ -265,7 +269,7 @@ def _record_background_owner_response(
 # 函数用途: 保存执行线程自己的模型结果；终态回报与主会话通知由原SessionTask/guidance/wake负责。
 def _record_delegated_internal_response(delivery, request, context, content, *,
         delivery_artifacts, assistant_commentaries, display_snapshot, frozen_retry,
-        operation_verification=None):
+        operation_verification=None, tool_call_count=None):
     if frozen_retry is not None and frozen_retry.external_sent:
         return None
     from .im_delegation_delivery import delegated_delivery_task
@@ -291,6 +295,7 @@ def _record_delegated_internal_response(delivery, request, context, content, *,
         display_snapshot=display_snapshot,
         frozen_retry=frozen_retry,
         operation_verification=operation_verification,
+        tool_call_count=tool_call_count,
     )
     internal_context = replace(context, channel="internal", target="", thread_id=request.thread_id)
     return _commit_background_response(delivery, request, internal_context,
@@ -1324,9 +1329,7 @@ def _filter_background_credential_artifacts(
     return tuple(safe_items), withheld
 
 
-def _unverified_credential_delivery_withheld(
-    display_snapshot: dict[str, object] | None,
-) -> tuple[
+def _unverified_credential_delivery_withheld() -> tuple[
     str,
     dict[str, object] | None,
     tuple[dict[str, object], ...],
@@ -1335,12 +1338,13 @@ def _unverified_credential_delivery_withheld(
     bool,
     dict[str, object],
 ]:
+    # 扣留时显示快照一并置空：canonical 行、历史回放与冻结载荷都不携带未核验事件、嵌套内容或归档引用。
     return (
         "[内容因重启后凭据脱敏状态无法核验已安全扣留]",
         None,
         (),
         (),
-        display_snapshot,
+        None,
         True,
         {
             "credential_delivery_withheld": {
@@ -1352,21 +1356,14 @@ def _unverified_credential_delivery_withheld(
 
 
 def _zero_tool_turn_exempt(
-    bound_tr: object,
-    turn_redaction_cls: type,
+    tool_call_count: int | None,
     operation_verification: dict[str, object] | None,
     display_snapshot: dict[str, object] | None,
     delivery_artifacts: tuple[dict[str, object], ...],
 ) -> bool:
-    if delivery_artifacts:
+    # 空的回合脱敏对象不证明零工具：只认本片权威归档计数为 0，且无附件、零副作用、完整显示无工具事件。
+    if type(tool_call_count) is not int or tool_call_count != 0 or delivery_artifacts:
         return False
-    if bound_tr is not None:
-        return (
-            isinstance(bound_tr, turn_redaction_cls)
-            and not getattr(bound_tr, "_closed", True)
-            and not bool(getattr(bound_tr, "withheld", False))
-            and not bool(getattr(bound_tr, "active", False))
-        )
     if not isinstance(operation_verification, dict) or operation_verification.get("schema") != "operation_verification.public.v1":
         return False
     try:
@@ -1392,6 +1389,7 @@ def _prepare_credential_safe_background_inputs(
     display_snapshot: dict[str, object] | None,
     frozen_retry: FrozenOwnerDelivery | None,
     operation_verification: dict[str, object] | None = None,
+    tool_call_count: int | None = None,
 ) -> tuple[
     str,
     dict[str, object] | None,
@@ -1409,19 +1407,23 @@ def _prepare_credential_safe_background_inputs(
     home = getattr(delivery.agent, "home_paths", None)
     owner_dir = str(getattr(home, "owner_home_dir", "") or "")
     conv_root = getattr(getattr(delivery.store, "storage", None), "root", None)
-    found = list(
-        active_turn_redactions_for_scope(
-            owner_key=owner_dir,
-            conversation_root=conv_root,
-            thread_id=str(request.thread_id or ""),
-            turn_keys=(str(request.conversation_turn_id or ""), str(request.task_id or "")),
-        )
-    )
+    has_cred_provenance = _request_has_credential_provenance(request, frozen_retry)
+    scope: dict[str, Any] = {"owner_key": owner_dir, "conversation_root": conv_root,
+                             "thread_id": str(request.thread_id or "")}
+    if has_cred_provenance:
+        # 凭据来源只认本次执行的精确回合：有回合号时不用多回合共用的 task_id，也不借同线程其他回合的绑定。
+        wanted_turn = str(request.conversation_turn_id or "").strip() or str(request.task_id or "").strip()
+        if "exact_only" in inspect.signature(active_turn_redactions_for_scope).parameters:
+            scope["exact_only"] = True
+        found = [item for item in active_turn_redactions_for_scope(turn_keys=(wanted_turn,), **scope)
+                 if item.turn_key == wanted_turn]
+    else:
+        found = list(active_turn_redactions_for_scope(
+            turn_keys=(str(request.conversation_turn_id or ""), str(request.task_id or "")), **scope))
     bound_tr = getattr(request, "_turn_credential_redaction", None)
     if isinstance(bound_tr, TurnCredentialRedaction) and bound_tr.active and bound_tr not in found:
         found.append(bound_tr)
     active = tuple(found)
-    has_cred_provenance = _request_has_credential_provenance(request, frozen_retry)
 
     if frozen_retry is not None:
         if frozen_retry.credential_redaction_verified:
@@ -1435,7 +1437,7 @@ def _prepare_credential_safe_background_inputs(
                 {},
             )
         if has_cred_provenance and not active:
-            return _unverified_credential_delivery_withheld(display_snapshot)
+            return _unverified_credential_delivery_withheld()
         if not active:
             return (
                 internal_content,
@@ -1449,9 +1451,9 @@ def _prepare_credential_safe_background_inputs(
 
     if not active:
         if has_cred_provenance and not _zero_tool_turn_exempt(
-            bound_tr, TurnCredentialRedaction, operation_verification, display_snapshot, delivery_artifacts
+            tool_call_count, operation_verification, display_snapshot, delivery_artifacts
         ):
-            return _unverified_credential_delivery_withheld(display_snapshot)
+            return _unverified_credential_delivery_withheld()
         return (
             internal_content,
             public_receipt,

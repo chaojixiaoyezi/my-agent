@@ -721,6 +721,8 @@ class _BackgroundSlicePlan:
     runtime_reason: str = ""
     local_transcript_only: bool = False
     public_receipt: dict[str, object] | None = None
+    # 本片权威工具调用归档计数；恢复或未知结果保持 None，凭据投递门不据此豁免。
+    archived_tool_call_count: int | None = None
 
 
 # LLM: 空转片判定与熔断完全同源：复用 goal_progress_fuse.slice_has_progress（工具调用数、
@@ -811,6 +813,7 @@ def _complete_background_slice(
             delivery_reason=plan.delivery_reason,
             route_supports_transcript=plan.route_supports_transcript,
             local_transcript_only=plan.local_transcript_only,
+            tool_call_count=plan.archived_tool_call_count,
         )
         reported_content = commit.content
         delivery_status = commit.delivery_status
@@ -1207,6 +1210,7 @@ class BackgroundMainAgentRuntime:
                 runtime_status=execution_result.runtime_status,
                 runtime_reason=execution_result.runtime_reason,
                 local_transcript_only=local_transcript_only,
+                archived_tool_call_count=getattr(execution_result, "archived_tool_call_count", None),
             ),
         )
 

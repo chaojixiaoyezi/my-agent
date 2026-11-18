@@ -720,7 +720,8 @@ def test_non_frozen_first_background_delivery_with_provenance_and_no_active_reda
     assert receipt_out is None
     assert arts_out == ()
     assert comm_out == ()
-    assert snap_out == {"request_id": "bg-snap-1"}
+    # 扣留时不保留未核验的显示快照（R3-P1-05）。
+    assert snap_out is None
     assert verified_out is True
     assert diag_out == {
         "credential_delivery_withheld": {
@@ -809,8 +810,10 @@ def test_non_frozen_first_background_delivery_with_provenance_and_no_active_reda
     assert normal_commit.delivery_status == "sent"
     assert "NORMAL_DELIVERY_OK_01" in normal_commit.content
 
-    # 4. Provably 0-tool live turn (via live unclosed 0-value TurnCredentialRedaction on request OR 0-tool snapshot) delivers cleanly,
-    #    whereas a closed TurnCredentialRedaction on request fails closed with UNVERIFIED_CREDENTIAL_FROZEN_DELIVERY.
+    # 4. A live unclosed 0-value TurnCredentialRedaction on the request does not prove a zero-tool turn (R3-P1-04):
+    #    without the live slice's authoritative tool count it fails closed, and a closed binding fails closed too.
+    #    The authoritative zero-count exemption is covered by
+    #    test_unknown_tool_count_withheld_while_authoritative_zero_tool_turn_delivers.
     zero_tool_tr = TurnCredentialRedaction(owner_key="owner-zero", thread_id=thread.thread_id, turn_key="turn-zero")
     live_zero_req = SimpleNamespace(
         thread_id=thread.thread_id,
@@ -820,18 +823,19 @@ def test_non_frozen_first_background_delivery_with_provenance_and_no_active_reda
         wake_signal=cred_wake.to_dict(),
         _turn_credential_redaction=zero_tool_tr,
     )
-    ok_zero_prepared = _prepare_credential_safe_background_inputs(
+    empty_binding_prepared = _prepare_credential_safe_background_inputs(
         deps,
         live_zero_req,
-        "零工具回合安全回复：ZERO_TOOL_SAFE_01",
+        raw_sensitive,
         public_receipt={"status": "ok"},
         delivery_artifacts=(),
         assistant_commentaries=(),
         display_snapshot=None,
         frozen_retry=None,
     )
-    assert ok_zero_prepared[0] == "零工具回合安全回复：ZERO_TOOL_SAFE_01"
-    assert ok_zero_prepared[6] == {}
+    assert "已安全扣留" in empty_binding_prepared[0]
+    assert raw_sensitive not in empty_binding_prepared[0]
+    assert empty_binding_prepared[6]["credential_delivery_withheld"]["reason_code"] == "UNVERIFIED_CREDENTIAL_FROZEN_DELIVERY"
 
     zero_tool_tr.close()
     closed_tr_prepared = _prepare_credential_safe_background_inputs(
@@ -847,3 +851,351 @@ def test_non_frozen_first_background_delivery_with_provenance_and_no_active_reda
     assert "已安全扣留" in closed_tr_prepared[0]
     assert raw_sensitive not in closed_tr_prepared[0]
     assert closed_tr_prepared[6]["credential_delivery_withheld"]["reason_code"] == "UNVERIFIED_CREDENTIAL_FROZEN_DELIVERY"
+
+
+_WITHHELD_DIAGNOSTICS = {
+    "credential_delivery_withheld": {
+        "reason_code": "UNVERIFIED_CREDENTIAL_FROZEN_DELIVERY",
+        "action": "withheld",
+    }
+}
+_ZERO_OPERATIONS = {"schema": "operation_verification.public.v1", "status": "none", "operation_count": 0}
+
+
+def _credential_delivery_case(tmp_path: Path) -> SimpleNamespace:
+    from agent_py_agent.agent.conversation.background_delivery import BackgroundDeliveryDependencies
+    from agent_py_agent.agent.delivery import (
+        ChannelAdapterRegistry,
+        ChannelCapabilities,
+        DeliveryService,
+    )
+    from agent_py_agent.tests.test_fc2_credential_shell_boundary import _active, _agent
+    from agent_py_agent.tests.test_im_progress_draft import Adapter
+
+    agent = _agent(tmp_path, "user", full=False)
+    thread, actor, _claim = _active(agent)
+    adapter = Adapter()
+    reg = ChannelAdapterRegistry()
+    reg.register_adapter("feishu", adapter, capabilities=ChannelCapabilities(proactive=True, reply=True))
+    deps = BackgroundDeliveryDependencies(
+        agent=agent,
+        store=agent.conversation_store,
+        channels=DeliveryService(reg),
+        task_status=lambda _r: "active",
+    )
+    return SimpleNamespace(
+        agent=agent,
+        thread=thread,
+        actor=actor,
+        adapter=adapter,
+        deps=deps,
+        task_id=agent._current_run_params.task_id,
+        owner_key=str(agent.home_paths.owner_home_dir),
+        conversation_root=str(agent.conversation_store.storage.root),
+    )
+
+
+def _credential_request(case: SimpleNamespace, turn_id: str, *, bound: object = None) -> SimpleNamespace:
+    wake = case.agent.conversation_store.wakes.raise_signal(
+        {
+            "thread_id": case.thread.thread_id,
+            "root_task_id": case.task_id,
+            "reason": "task_input_resolved",
+            "metadata": {"input_provider": "credential", "credential_ref": "cred_" + uuid.uuid4().hex},
+        }
+    )
+    request = SimpleNamespace(
+        thread_id=case.thread.thread_id,
+        task_id=case.task_id,
+        reason="task_input_resolved",
+        conversation_turn_id=turn_id,
+        wake_signal=wake.to_dict(),
+    )
+    if bound is not None:
+        request._turn_credential_redaction = bound
+    return request
+
+
+def _display_snapshot(case: SimpleNamespace, *events: dict[str, object]) -> dict[str, object]:
+    request_id = f"bg-main:{case.thread.thread_id}:1"
+    return {
+        "schema_version": "background_display_turn.v1",
+        "thread_id": case.thread.thread_id,
+        "task_id": case.task_id,
+        "request_id": request_id,
+        "complete": True,
+        "events": [
+            {"request_id": request_id, "block_id": f"{request_id}:block:{index}", **event}
+            for index, event in enumerate(events, start=1)
+        ],
+    }
+
+
+def _prepare_first_delivery(
+    case: SimpleNamespace,
+    request: SimpleNamespace,
+    content: str,
+    *,
+    snapshot: dict[str, object] | None,
+    tool_call_count: int | None = None,
+) -> tuple:
+    from agent_py_agent.agent.conversation.background_delivery import (
+        _prepare_credential_safe_background_inputs,
+    )
+
+    # 未知计数不传参，与 direct/recovery 调用方一致（默认 None）。
+    count_option = {} if tool_call_count is None else {"tool_call_count": tool_call_count}
+    return _prepare_credential_safe_background_inputs(
+        case.deps,
+        request,
+        content,
+        public_receipt={"status": "ok"},
+        delivery_artifacts=(),
+        assistant_commentaries=("过程说明",),
+        display_snapshot=snapshot,
+        frozen_retry=None,
+        operation_verification=_ZERO_OPERATIONS,
+        **count_option,
+    )
+
+
+def _assert_withheld(prepared: tuple, raw: str) -> None:
+    content, receipt, artifacts, commentaries, snapshot, verified, diagnostics = prepared
+    assert "已安全扣留" in content and raw not in content
+    assert (receipt, artifacts, commentaries, snapshot, verified) == (None, (), (), None, True)
+    assert diagnostics == _WITHHELD_DIAGNOSTICS
+
+
+_TOOL_EVENT = {"kind": "tool_completed", "phase": "completed", "payload": {"tool": "web_fetch"}}
+
+
+@pytest.mark.parametrize(
+    ("tool_call_count", "events"),
+    [(1, ()), (None, (_TOOL_EVENT,)), (0, (_TOOL_EVENT,))],
+    ids=["positive_count", "unknown_count_tool_event", "zero_count_tool_event"],
+)
+def test_empty_request_bound_redactor_does_not_prove_zero_tool_turn(
+    tmp_path: Path, tool_call_count: int | None, events: tuple
+) -> None:
+    case = _credential_delivery_case(tmp_path)
+    empty_tr = TurnCredentialRedaction(
+        owner_key=case.owner_key, thread_id=case.thread.thread_id, turn_key="turn-empty-" + uuid.uuid4().hex[:8]
+    )
+    try:
+        assert not empty_tr.active and not empty_tr.withheld
+        request = _credential_request(case, "gwreq-empty-" + uuid.uuid4().hex[:8], bound=empty_tr)
+        raw = "EMPTY_BINDING_RAW_MARKER_6601"
+        prepared = _prepare_first_delivery(
+            case, request, raw, snapshot=_display_snapshot(case, *events), tool_call_count=tool_call_count
+        )
+        _assert_withheld(prepared, raw)
+    finally:
+        empty_tr.close()
+
+
+@pytest.mark.parametrize("neighbor_task", ["shared_task_id", "other_task_id"])
+@pytest.mark.parametrize("current_binding", ["missing", "closed", "exact_scope_active", "request_bound_active"])
+def test_neighbor_turn_redactor_in_same_thread_never_verifies_current_turn(
+    tmp_path: Path, neighbor_task: str, current_binding: str
+) -> None:
+    from agent_py_agent.agent.tooling.host_output_redaction import turn_credential_redaction
+
+    case = _credential_delivery_case(tmp_path)
+    neighbor_params = SimpleNamespace(
+        request_id="gwreq-neighbor-" + uuid.uuid4().hex[:8],
+        run_id="",
+        task_id=case.task_id if neighbor_task == "shared_task_id" else "task-neighbor-" + uuid.uuid4().hex[:8],
+        conversation_turn_id="",
+        thread_id=case.thread.thread_id,
+        task_attributes={},
+    )
+    neighbor = turn_credential_redaction(case.agent, neighbor_params)
+    neighbor.register_values(("NeighborTurnSecret_7702",))
+    current_turn = "gwreq-current-" + uuid.uuid4().hex[:8]
+    current_secret = "CurrentTurnSecret_7703"
+    current = TurnCredentialRedaction(
+        owner_key=case.owner_key,
+        conversation_root=case.conversation_root,
+        thread_id=case.thread.thread_id,
+        # 请求上直接绑定的对象沿宿主请求号，可与 conversation_turn_id 不同；索引查找只认精确回合号。
+        turn_key=current_turn if current_binding == "exact_scope_active" else "gwreq-bound-" + uuid.uuid4().hex[:8],
+    )
+    try:
+        assert neighbor.active and neighbor.thread_id == case.thread.thread_id
+        assert (case.task_id in neighbor._turn_aliases) is (neighbor_task == "shared_task_id")
+        if current_binding != "missing":
+            current.register_values((current_secret,))
+        if current_binding == "closed":
+            current.close()
+        bound = current if current_binding in {"closed", "request_bound_active"} else None
+        request = _credential_request(case, current_turn, bound=bound)
+        snapshot = _display_snapshot(
+            case, {"kind": "tool_completed", "phase": "completed", "payload": {"tool": "web_fetch", "text": f"抓取 {current_secret}"}}
+        )
+        raw = f"后台结果 {current_secret}"
+        prepared = _prepare_first_delivery(case, request, raw, snapshot=snapshot)
+        if current_binding in {"missing", "closed"}:
+            _assert_withheld(prepared, raw)
+        else:
+            content, _receipt, _artifacts, _commentaries, safe_snapshot, _verified, diagnostics = prepared
+            assert diagnostics == {"credential_delivery_scoped": True}
+            assert "后台结果" in content and current_secret not in content
+            # 已验证投递保留完整显示快照，只做脱敏。
+            assert isinstance(safe_snapshot, dict) and len(safe_snapshot["events"]) == 1
+            assert current_secret not in json.dumps(safe_snapshot, ensure_ascii=False)
+    finally:
+        current.close()
+        neighbor.close()
+
+
+@pytest.mark.parametrize("tool_call_count", [1, None], ids=["read_only_call", "unknown_count"])
+def test_read_only_tool_turn_with_zero_side_effect_operations_and_no_binding_is_withheld(
+    tmp_path: Path, tool_call_count: int | None
+) -> None:
+    case = _credential_delivery_case(tmp_path)
+    request = _credential_request(case, "gwreq-read-only-" + uuid.uuid4().hex[:8])
+    # 只读 web_fetch 不计入副作用 operation_count；未保存终态的工具块在显示快照里只剩 system_message。
+    snapshot = _display_snapshot(
+        case, {"kind": "system_message", "phase": "completed", "payload": {"text": "web_fetch：本工作片没有保存完整终态。"}}
+    )
+    raw = "READ_ONLY_FETCH_RAW_MARKER_6603"
+    _assert_withheld(_prepare_first_delivery(case, request, raw, snapshot=snapshot, tool_call_count=tool_call_count), raw)
+
+
+def test_unknown_tool_count_withheld_while_authoritative_zero_tool_turn_delivers(tmp_path: Path) -> None:
+    from agent_py_agent.agent.conversation.background_delivery import record_background_response
+    from agent_py_agent.agent.delivery import DeliveryContext
+
+    case = _credential_delivery_case(tmp_path)
+    # 实时路径的请求带着未登记值的空回合绑定；结论只取决于本片权威计数。
+    empty_tr = TurnCredentialRedaction(
+        owner_key=case.owner_key, thread_id=case.thread.thread_id, turn_key="turn-live-" + uuid.uuid4().hex[:8]
+    )
+
+    def deliver(text: str, key: str, count: int | None):
+        count_option = {} if count is None else {"tool_call_count": count}
+        return record_background_response(
+            case.deps,
+            _credential_request(case, f"gwreq-{key}-" + uuid.uuid4().hex[:8], bound=empty_tr),
+            DeliveryContext(
+                channel="feishu",
+                target=case.actor.actor_id,
+                thread_id=case.thread.thread_id,
+                task_id=case.task_id,
+                mode="reply",
+                idempotency_key=f"bg-r3-3-{key}",
+            ),
+            text,
+            operation_verification=_ZERO_OPERATIONS,
+            display_snapshot=_display_snapshot(case),
+            deliver=True,
+            delivery_reason="task_input_resolved",
+            **count_option,
+        )
+
+    unknown_text = "UNKNOWN_COUNT_RAW_MARKER_6604"
+    zero_text = "零工具回合安全回复：ZERO_TOOL_SAFE_02"
+    try:
+        unknown = deliver(unknown_text, "unknown", None)
+        zero = deliver(zero_text, "zero", 0)
+    finally:
+        empty_tr.close()
+    assert "已安全扣留" in unknown.content and unknown_text not in unknown.content
+    assert zero.delivery_status == "sent" and zero_text in zero.content
+    sent = [content for _target, content in case.adapter.finals]
+    assert all(unknown_text not in content for content in sent) and any(zero_text in content for content in sent)
+    finals = [
+        row
+        for row in case.agent.conversation_store.messages.history_page_report(case.thread.thread_id, limit=20).rows
+        if row.metadata.get("assistant_part_id") == "final"
+    ]
+    assert finals[-2].metadata["credential_delivery_withheld"] == _WITHHELD_DIAGNOSTICS["credential_delivery_withheld"]
+    assert "credential_delivery_withheld" not in finals[-1].metadata
+    assert zero_text in finals[-1].content
+
+
+def test_withheld_delivery_keeps_real_sink_display_events_out_of_user_history(tmp_path: Path) -> None:
+    from agent_py_agent.agent.conversation.agent_activity import BackgroundMainActivitySink
+    from agent_py_agent.agent.conversation.background_delivery import (
+        cached_owner_delivery,
+        record_background_response,
+    )
+    from agent_py_agent.agent.conversation.background_history import (
+        background_display_turn_from_row,
+    )
+    from agent_py_agent.agent.delivery import DeliveryContext
+
+    case = _credential_delivery_case(tmp_path)
+    marker = "SINK_AUDIT_LABEL_7705"
+    operations = {"schema": "operation_verification.public.v1", "status": "succeeded", "operation_count": 1}
+
+    def sink_snapshot(request: SimpleNamespace) -> dict[str, object]:
+        sink = BackgroundMainActivitySink(
+            case.agent, thread_id=case.thread.thread_id, task_id=request.task_id, lifetime_owner=request
+        )
+        sink.write_thinking(f"核对审计标签 {marker}", duration_seconds=1)
+        sink.write_progress(
+            {"round": 1, "call_index": 1, "tool": "web_fetch", "phase": "completed", "ok": True, "output": f"抓取 {marker}"}
+        )
+        sink.finish()
+        snapshot = sink.display_history_snapshot()
+        assert snapshot["complete"] is True and marker in json.dumps(snapshot, ensure_ascii=False)
+        return snapshot
+
+    # 已有 operation 且无可核验绑定：无论计数如何都应扣留，这里不传计数。
+    def deliver(request: SimpleNamespace, key: str, text: str):
+        return record_background_response(
+            case.deps,
+            request,
+            DeliveryContext(
+                channel="feishu",
+                target=case.actor.actor_id,
+                thread_id=case.thread.thread_id,
+                task_id=case.task_id,
+                mode="reply",
+                idempotency_key=f"bg-r3-3-sink-{key}",
+            ),
+            text,
+            display_snapshot=sink_snapshot(request),
+            operation_verification=operations,
+            deliver=True,
+            delivery_reason="task_input_resolved",
+        )
+
+    def last_final_row():
+        rows = case.agent.conversation_store.messages.history_page_report(case.thread.thread_id, limit=20).rows
+        return [row for row in rows if row.metadata.get("assistant_part_id") == "final"][-1]
+
+    # 1. Withheld (no exact binding): adapter message, canonical final row, its replay projection and the frozen
+    #    payload hold no marker. (Live display checkpoint rows are written by the sink itself, outside delivery.)
+    withheld_request = _credential_request(case, "gwreq-sink-withheld-" + uuid.uuid4().hex[:8])
+    withheld = deliver(withheld_request, "withheld", f"后台汇总 {marker}")
+    assert "已安全扣留" in withheld.content
+    assert case.adapter.finals and all(marker not in str(item) for item in case.adapter.finals)
+    row = last_final_row()
+    assert row.metadata["credential_delivery_withheld"] == _WITHHELD_DIAGNOSTICS["credential_delivery_withheld"]
+    assert "background_display_turn" not in row.metadata
+    assert marker not in json.dumps({"content": row.content, "metadata": row.metadata}, ensure_ascii=False, default=str)
+    assert background_display_turn_from_row(row) is None
+    pending = case.agent.conversation_store.wakes.pending_one(withheld_request.wake_signal["wake_signal_id"])
+    frozen = cached_owner_delivery(pending) if pending is not None else None
+    assert frozen is None or marker not in json.dumps(frozen, ensure_ascii=False, default=str)
+
+    # 2. Verified (exact current-turn binding): the full display snapshot stays replayable.
+    verified_turn = "gwreq-sink-verified-" + uuid.uuid4().hex[:8]
+    exact_tr = TurnCredentialRedaction(
+        owner_key=case.owner_key,
+        conversation_root=case.conversation_root,
+        thread_id=case.thread.thread_id,
+        turn_key=verified_turn,
+    )
+    exact_tr.register_values(("ExactTurnSecret_7706",))
+    try:
+        verified = deliver(_credential_request(case, verified_turn), "verified", "后台汇总已核验：VERIFIED_SINK_OK")
+    finally:
+        exact_tr.close()
+    assert verified.delivery_status == "sent" and "VERIFIED_SINK_OK" in verified.content
+    verified_row = last_final_row()
+    assert verified_row.metadata.get("credential_delivery_scoped") is True
+    replay = background_display_turn_from_row(verified_row)
+    assert replay is not None and marker in json.dumps(replay, ensure_ascii=False)

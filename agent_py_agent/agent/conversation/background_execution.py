@@ -85,6 +85,8 @@ class BackgroundExecutionResult:
     # 来自本片实际消费的用户输入；普通后台事件不创建公开回复义务。
     user_reply_accepted: bool = False
     delivery_artifact_diagnostics: tuple[dict[str, object], ...] = ()
+    # 仅本片真实 archive_tool_calls 列表的调用数；恢复结果或缺少归档时为 None（未知），不能当作零工具证明。
+    archived_tool_call_count: int | None = None
 
 
 # LLM: 仅在同片八次 Compact 都推进 canonical 代次后让出；调度器必须单独处理，不将其记为失败。
@@ -576,7 +578,8 @@ def collect_background_execution_result(
     agent: object, result: object, display_snapshot: dict[str, object],
     *, execution_identity: dict[str, str] | None = None,
 ) -> BackgroundExecutionResult:
-    calls = [item for item in (getattr(result, "archive_tool_calls", None) or []) if isinstance(item, dict)]
+    raw_calls = getattr(result, "archive_tool_calls", None)
+    calls = [item for item in (raw_calls or []) if isinstance(item, dict)]
     successes = sum(1 for item in calls if item.get("ok") is True)
     material_progress = material_tool_success_count(agent, calls)
     artifacts = tuple(dict(item) for item in (getattr(result, "delivery_artifacts", None) or []) if isinstance(item, dict))
@@ -602,4 +605,5 @@ def collect_background_execution_result(
             isinstance(packet, dict) and packet.get("user_reply_accepted") is True
             for packet in (getattr(result, "active_turn_user_inputs", None) or ())
         ),
+        archived_tool_call_count=len(raw_calls) if isinstance(raw_calls, list) else None,
     )
