@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -64,6 +65,7 @@ _RECEIPT_DIR_CACHE_LOCK = threading.Lock()
 _RECEIPT_DIR_CACHE_MAX_COUNT = 32
 _receipt_page_versions: ContextVar[tuple[str, tuple[tuple[str, int], ...]] | None] = ContextVar("receipt_page_versions", default=None)
 _receipt_consumer_ack: ContextVar[bool] = ContextVar("receipt_consumer_ack", default=False)
+_periodic_reconcile_busy_skip: ContextVar[bool] = ContextVar("periodic_reconcile_busy_skip", default=False)
 _RECEIPT_DIR_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], tuple[str, ...], tuple[Path, ...]]] = OrderedDict()
 _INPUT_RECEIPT_STATES = {
     "pending",
@@ -124,13 +126,19 @@ class GatewayInputReceipt:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatewayInputReceipt:
         schema = str(data.get("schema_version") or "").strip()
+        raw_state = str(data.get("state") or "").strip()
         transport = None
         if schema == "gateway_input_receipt.v3":
             from .input_transport import validated_input_transport
 
             transport = validated_input_transport(data.get("transport"))
         elif "transport" in data:
-            raise DataCorruptionError("gateway input transport requires v3 receipt")
+            raise _receipt_corruption(
+                "gateway input transport requires v3 receipt",
+                "INPUT_RECEIPT_TRANSPORT_REQUIRES_V3",
+                "transport",
+                raw_state,
+            )
         if schema == "gateway_input_receipt.v1":
             legacy_disposition = str(data.get("disposition") or "pending").strip()
             state = {
@@ -150,7 +158,7 @@ class GatewayInputReceipt:
             client_message_id = ""
             target_turn_id = str(data.get("target_turn_id") or "").strip()
         elif schema in {_INPUT_RECEIPT_SCHEMA, "gateway_input_receipt.v3"}:
-            state = str(data.get("state") or "").strip()
+            state = raw_state
             prepared = data.get("prepared_request")
             prepared_request = dict(prepared) if isinstance(prepared, dict) else {}
             prepared_payload_digest = str(data.get("prepared_payload_digest") or "").strip()
@@ -160,22 +168,44 @@ class GatewayInputReceipt:
             raw_migration = data.get("migration")
             migration = dict(raw_migration) if isinstance(raw_migration, dict) else {}
         else:
-            state = ""
-            prepared_request = {}
-            prepared_payload_digest = ""
-            guidance_key = ""
-            client_message_id = ""
-            target_turn_id = ""
-            migration = {}
+            raise _receipt_corruption(
+                "gateway input receipt is invalid",
+                "INPUT_RECEIPT_SCHEMA_UNSUPPORTED",
+                "schema_version",
+                raw_state,
+            )
+        if state not in _INPUT_RECEIPT_STATES:
+            raise _receipt_corruption(
+                "gateway input receipt is invalid",
+                "INPUT_RECEIPT_STATE_INVALID",
+                "state",
+            )
         request_id = str(data.get("request_id") or "").strip()
+        if not request_id:
+            raise _receipt_corruption(
+                "gateway input receipt is invalid",
+                "INPUT_RECEIPT_REQUEST_ID_MISSING",
+                "request_id",
+                state,
+            )
         digest = str(data.get("client_input_digest") or "").strip()
-        if not request_id or not digest or state not in _INPUT_RECEIPT_STATES:
-            raise DataCorruptionError("gateway input receipt is invalid")
+        if not digest:
+            raise _receipt_corruption(
+                "gateway input receipt is invalid",
+                "INPUT_RECEIPT_CLIENT_DIGEST_MISSING",
+                "client_input_digest",
+                state,
+            )
         raw_error = data.get("reconcile_error")
         try:
             updated_at = float(data.get("updated_at") or 0.0)
         except (TypeError, ValueError) as exc:
-            raise DataCorruptionError("gateway input receipt timestamp is invalid") from exc
+            raise _receipt_corruption(
+                "gateway input receipt timestamp is invalid",
+                "INPUT_RECEIPT_TIMESTAMP_INVALID",
+                "updated_at",
+                state,
+            ) from exc
         return cls(
             request_id=request_id,
             client_input_digest=digest,
@@ -237,7 +267,7 @@ def _raise_for_input_read_report(report, corruption_message: str) -> None:
                 'OSError', 'PermissionError', 'BlockingIOError', 'TimeoutError', 'FileNotFoundError',
                 'InterruptedError', 'IsADirectoryError', 'NotADirectoryError'}):
             raise OSError("gateway input receipt IO unavailable")
-        raise DataCorruptionError(corruption_message)
+        raise _receipt_corruption(corruption_message, "INPUT_RECEIPT_UNREADABLE", "<json>")
 
 
 # 已归档consumed回执仍是同id重试的权威；只在热文件明确缺失且无读错误时按索引回落。
@@ -301,7 +331,11 @@ def load_or_prepare_gateway_input_request_locked(paths: GatewayPaths, request: G
     _raise_for_input_read_report(report, "gateway input receipt is unreadable")
     if not report.payload:
         if path.exists():
-            raise DataCorruptionError("gateway input receipt is empty or invalid")
+            raise _receipt_corruption(
+                "gateway input receipt is empty or invalid",
+                "INPUT_RECEIPT_EMPTY",
+                "<file>",
+            )
         receipt = GatewayInputReceipt(
             request_id=request_id,
             client_input_digest=client_input_digest,
@@ -368,10 +402,19 @@ def read_gateway_input_receipt(
     _raise_for_input_read_report(report, "gateway input receipt is unreadable")
     if not report.payload:
         if path.exists():
-            raise DataCorruptionError("gateway input receipt is empty or invalid")
+            raise _receipt_corruption(
+                "gateway input receipt is empty or invalid",
+                "INPUT_RECEIPT_EMPTY",
+                "<file>",
+            )
         return None
-    if report.payload.get("schema_version") not in {_INPUT_RECEIPT_SCHEMA, "gateway_input_receipt.v3"}:
-        raise DataCorruptionError("legacy gateway input receipt requires same-input retry migration")
+    if report.payload.get("schema_version") == "gateway_input_receipt.v1":
+        raise _receipt_corruption(
+            "legacy gateway input receipt requires same-input retry migration",
+            "INPUT_RECEIPT_LEGACY_SCHEMA",
+            "schema_version",
+            str(report.payload.get("state") or "").strip(),
+        )
     receipt = GatewayInputReceipt.from_dict(report.payload)
     _validate_prepared_request(receipt)
     return receipt
@@ -764,6 +807,32 @@ def _settle_terminal_queued_input(paths: GatewayPaths, receipt: GatewayInputRece
     return "terminal_unknown"
 
 
+_RECEIPT_NEXT_STEPS = {
+    "consumed": "already_consumed_no_replay",
+    "terminal_unknown": "check_message_lifecycle_before_any_replay",
+}
+
+
+# 函数用途: 生成带稳定原因码、出错字段与回执自身状态的损坏异常；类型名仍是 DataCorruptionError，隔离分类与上抛语义不变。
+def _receipt_corruption(message: str, code: str, field: str, receipt_state: str = "") -> DataCorruptionError:
+    error = DataCorruptionError(message)
+    error.reason_code, error.field = code, field
+    error.receipt_state = receipt_state if receipt_state in _INPUT_RECEIPT_STATES else ""
+    return error
+
+
+# 函数用途: 把一次回执失败投影成结构化诊断；只有本文件校验抛出的（读前、未写）才标 not_started。
+def _receipt_failure_detail(exc: BaseException) -> dict[str, str]:
+    state = str(getattr(exc, "receipt_state", "") or "")
+    return {
+        "reason_code": str(getattr(exc, "reason_code", "") or "INPUT_RECEIPT_UNCLASSIFIED"),
+        "field": str(getattr(exc, "field", "") or ""),
+        "receipt_state": state,
+        "effect": "not_started" if getattr(exc, "reason_code", "") else "unknown",
+        "next_step": _RECEIPT_NEXT_STEPS.get(state, "inspect_receipt_fields_read_only"),
+    }
+
+
 # 隔离是有界调度提示，不改回执或结算事实；原文件变化立即重试。
 @dataclass(frozen=True)
 class _ReceiptFailure:
@@ -771,6 +840,7 @@ class _ReceiptFailure:
     count: int
     error_type: str
     quarantined: bool = False
+    detail: dict[str, str] = field(default_factory=dict)
 
 
 class _ReceiptFailureCache:
@@ -799,10 +869,29 @@ def _receipt_is_quarantined(path: Path, stamp: tuple[int, int] | None) -> bool:
 
 
 # 明确非瞬态类型才隔离；包括无errno的OSError在内的IO失败都保留重试。
-def _record_receipt_failure(path: Path, stamp: tuple[int, int] | None,
-                            error_type: str, threshold: int) -> bool:
+def _record_receipt_failure(
+    path: Path,
+    stamp: tuple[int, int] | None,
+    error_type: str,
+    threshold: int,
+    *,
+    detail: dict[str, Any] | None = None,
+) -> bool:
     deterministic = error_type in {"DataCorruptionError", "ValueError", "TypeError", "JSONDecodeError"}
     key = str(path)
+    normalized = {
+        "reason_code": str((detail or {}).get("reason_code") or "INPUT_RECEIPT_UNCLASSIFIED"),
+        "field": str((detail or {}).get("field") or ""),
+        "receipt_state": str((detail or {}).get("receipt_state") or ""),
+        "effect": str((detail or {}).get("effect") or "unknown"),
+        "next_step": str(
+            (detail or {}).get("next_step")
+            or _RECEIPT_NEXT_STEPS.get(
+                str((detail or {}).get("receipt_state") or ""), "inspect_receipt_fields_read_only"
+            )
+        ),
+    }
+    stored_detail = {str(k): str(v) for k, v in detail.items()} if isinstance(detail, dict) else {}
     with _ReceiptFailureCache.lock:
         previous = _ReceiptFailureCache.entries.get(key)
         if not deterministic or stamp is None or _receipt_failure_stamp(path) != stamp:
@@ -810,16 +899,46 @@ def _record_receipt_failure(path: Path, stamp: tuple[int, int] | None,
             return False
         count = (previous.count if previous is not None and previous.stamp == stamp else 0) + 1
         quarantined = count >= max(1, threshold)
-        _ReceiptFailureCache.entries[key] = _ReceiptFailure(stamp, count, error_type, quarantined)
+        _ReceiptFailureCache.entries[key] = _ReceiptFailure(
+            stamp, count, error_type, quarantined, detail=stored_detail
+        )
         _ReceiptFailureCache.entries.move_to_end(key)
         while len(_ReceiptFailureCache.entries) > _ReceiptFailureCache.max_entries:
             _ReceiptFailureCache.entries.popitem(last=False)
     if quarantined and not (previous is not None and previous.quarantined):
         logging.getLogger(__name__).warning(
-            "GATEWAY_INPUT_RECEIPT_QUARANTINED path=%s mtime_ns=%s size=%s error_type=%s failures=%s",
-            path, stamp[0], stamp[1], error_type, count,
+            "GATEWAY_INPUT_RECEIPT_QUARANTINED path=%s mtime_ns=%s size=%s error_type=%s failures=%s "
+            "reason_code=%s field=%s receipt_state=%s effect=%s next_step=%s",
+            path,
+            stamp[0],
+            stamp[1],
+            error_type,
+            count,
+            normalized["reason_code"],
+            normalized["field"],
+            normalized["receipt_state"],
+            normalized["effect"],
+            normalized["next_step"],
         )
     return quarantined
+
+
+# 函数用途: 把本页领取版本的隔离事实落到原恢复投影；失败只记日志，进程内缓存仍挡住本进程重试。
+def _persist_receipt_quarantine(paths: GatewayPaths, path: Path) -> bool:
+    captured = _receipt_page_versions.get()
+    version = dict(captured[1]).get(path.stem) if captured is not None and captured[0] == str(paths.root) else None
+    if version is None:
+        return False
+    stamp = projection_file_stamp(path)
+    if stamp in {"missing", "invalid"}:
+        return False
+    try:
+        return RecoveryPendingIndex(paths.root).quarantine("receipt", path.stem, version, stamp)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        logging.getLogger(__name__).warning(
+            "GATEWAY_INPUT_RECEIPT_QUARANTINE_NOT_PERSISTED error_type=%s", type(exc).__name__
+        )
+        return False
 
 
 # LLM: 逐条恢复仍经原owner和guidance权威；完整无待办目录可按代次短路，不能只凭首批consumed跳过后页。
@@ -834,6 +953,7 @@ def reconcile_gateway_input_receipts(
     *,
     limit: int = 64,
     quarantine_after_failures: int = 3,
+    should_yield: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "checked": 0, "consumed": 0, "queued": 0, "terminal_unknown": 0, "errors": 0,
@@ -843,6 +963,8 @@ def reconcile_gateway_input_receipts(
         "last_terminal_unknown_error": {},
         "last_error": {},
         "quarantined": 0,
+        "deferred_busy": 0,
+        "yielded": False,
     }
     last_path: Path | None = None
     pending_error: BaseException | None = None
@@ -851,38 +973,74 @@ def reconcile_gateway_input_receipts(
         page = _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1)))
     finally:
         _receipt_consumer_ack.reset(token)
+    busy_token = _periodic_reconcile_busy_skip.set(True)
     try:
         for path in page:
             stamp = _receipt_failure_stamp(path)
             if _receipt_is_quarantined(path, stamp):
                 summary["quarantined"] += 1
                 last_path = path
+                if should_yield is not None and should_yield():
+                    summary["yielded"] = True
+                    break
                 continue
             before_errors = summary["errors"], summary["terminal_unknown_errors"]
             failure_type = ""
+            failure_detail: dict[str, str] | None = None
             try:
                 _reconcile_receipt_path(paths, agent, path, summary)
                 if (summary["errors"], summary["terminal_unknown_errors"]) == before_errors:
                     _ack_reconciled_receipt(paths, agent, path)
             except RequestExecutionOutcomeUncertainError:
                 raise
+            except BlockingIOError:
+                summary["deferred_busy"] += 1
+                last_path = path
+                if should_yield is not None and should_yield():
+                    summary["yielded"] = True
+                    break
+                continue
             except Exception as exc:
                 _raise_input_transport_uncertain(exc)
                 summary["errors"] += 1
-                summary["last_error"] = {"request_id": path.stem, "stage": "receipt",
-                    "error_type": type(exc).__name__, "category": "io" if isinstance(exc, OSError) else "data_corruption",
-                    "context": "gateway.input.reconcile.receipt"}
+                failure_detail = _receipt_failure_detail(exc)
+                summary["last_error"] = {
+                    "request_id": path.stem,
+                    "stage": "receipt",
+                    "error_type": type(exc).__name__,
+                    "category": "io" if isinstance(exc, OSError) else "data_corruption",
+                    "context": "gateway.input.reconcile.receipt",
+                    **failure_detail,
+                }
                 failure_type = type(exc).__name__ if not isinstance(exc, OSError) else "OSError"
             if summary["terminal_unknown_errors"] > before_errors[1]:
                 failure_type = summary["last_terminal_unknown_error"].get("error_type", "")
-            if _record_receipt_failure(path, stamp, failure_type, int(quarantine_after_failures)):
+                if failure_detail is None:
+                    failure_detail = {
+                        "reason_code": "INPUT_RECEIPT_UNCLASSIFIED",
+                        "field": "",
+                        "receipt_state": "terminal_unknown",
+                        "effect": "unknown",
+                        "next_step": _RECEIPT_NEXT_STEPS["terminal_unknown"],
+                    }
+            was_quarantined = _receipt_is_quarantined(path, stamp)
+            if _record_receipt_failure(
+                path, stamp, failure_type, int(quarantine_after_failures), detail=failure_detail
+            ):
                 summary["errors"], summary["terminal_unknown_errors"] = before_errors
-                summary["quarantined"] += 1
+                if was_quarantined or not _persist_receipt_quarantine(paths, path):
+                    summary["quarantined"] += 1
             last_path = path
+            if should_yield is not None and should_yield():
+                summary["yielded"] = True
+                break
+        if (paths.root / "projection_state" / "recovery_pending.sqlite3").is_file():
+            summary["quarantined"] += RecoveryPendingIndex(paths.root).quarantined_count("receipt")
     except BaseException as exc:
         pending_error = exc
         raise
     finally:
+        _periodic_reconcile_busy_skip.reset(busy_token)
         if last_path is not None:
             try:
                 _commit_reconcile_cursor(paths, last_path)
@@ -975,7 +1133,13 @@ def _reconcile_receipt_path(paths: GatewayPaths, agent: object, path: Path, summ
                 summary["checked"] += 1
                 summary["consumed"] += 1
                 return
-    receipt = read_gateway_input_receipt(paths, path.stem)
+    try:
+        receipt = read_gateway_input_receipt(paths, path.stem)
+    except BlockingIOError as exc:
+        if _periodic_reconcile_busy_skip.get():
+            # 回执自身读取失败仍按可重试 I/O 错误记账，仅目标业务锁争用跳过并计数 deferred_busy。
+            raise OSError(str(exc)) from exc
+        raise
     if receipt is None:
         return
     summary["checked"] += 1
@@ -1018,12 +1182,18 @@ def _is_settled_terminal_unknown(paths: GatewayPaths, agent: object, receipt: Ga
 #   test_steer_delivery_recovery 与 test_guidance_receipt_digest_compat。
 # 函数用途: reconcile_gateway_input_receipts 的单条回执处理，把"解析目标 -> 拒绝 -> 状态迁移 -> 计数"从循环里拆出来。
 def _reconcile_unsettled_receipt(
-    paths: GatewayPaths, agent: object, receipt: GatewayInputReceipt, summary: dict[str, Any]
+    paths: GatewayPaths,
+    agent: object,
+    receipt: GatewayInputReceipt,
+    summary: dict[str, Any],
+    *,
+    busy_skip: bool = False,
 ) -> None:
     from .request_worker import _resolve_request_agent
 
     scoped = _resolve_request_agent(agent, receipt.prepared_request)
-    state = _reconcile_bound_input(paths, scoped.conversation_store, receipt)
+    effective_busy_skip = busy_skip or _periodic_reconcile_busy_skip.get()
+    state = _reconcile_bound_input(paths, scoped.conversation_store, receipt, busy_skip=effective_busy_skip)
     if state in summary:
         summary[state] += 1
     if state == "terminal_unknown":
@@ -1036,7 +1206,14 @@ def _reconcile_unsettled_receipt(
 # 函数用途: 周期对账与请求收尾结算同一原目标，先释放目标T/M再取入口T。
 # LLM: 目标T改由同一原输入/恢复producer取得；同typed未知不补绑定、不得转读失败后继续排队。
 # LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
-def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayInputReceipt, *, _commit_scope=None) -> str:
+def _reconcile_bound_input(
+    paths: GatewayPaths,
+    store: object,
+    receipt: GatewayInputReceipt,
+    *,
+    _commit_scope=None,
+    busy_skip: bool = False,
+) -> str:
     try:
         binding = gateway_input_guidance_binding(receipt, store)
     except Exception as exc:
@@ -1053,12 +1230,13 @@ def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayI
         if target['kind'] == 'task':
             target_type, target_id, turn_id = 'task', target['task_id'], target['turn_id']
     lifecycle = "unknown"
+    nonblocking = busy_skip or _commit_scope is not None
     if turn_id and target_type in {"request", "task"} and target_id:
         with ExitStack() as locks:
-            locks.enter_context(_bound_input_transition(paths, turn_id, nonblocking=_commit_scope is not None))
-            locks.enter_context(store.guidance.ledger.turn_guard(turn_id, blocking=_commit_scope is None))
+            locks.enter_context(_bound_input_transition(paths, turn_id, nonblocking=nonblocking))
+            locks.enter_context(store.guidance.ledger.turn_guard(turn_id, blocking=not nonblocking))
             if target_type == "task":
-                if _commit_scope is None:
+                if not nonblocking:
                     locks.enter_context(store.tasks.transition_guard(target_id))
                 else:
                     from .input_target_observation import input_background_task_guard
@@ -1124,7 +1302,7 @@ class GatewayInputReconcileUnsettledError(RecoverableRuntimeError):
             "gateway input receipts could not be settled: "
             f"terminal_unknown_errors={int(summary.get('terminal_unknown_errors') or 0)} "
             f"errors={int(summary.get('errors') or 0)} "
-            f"last={last.get('request_id', '')}:{last.get('error_type', '')}"
+            f"last={last.get('request_id', '')}:{last.get('error_type', '')}:{last.get('reason_code') or ''}"
         )
 
 
@@ -1297,16 +1475,45 @@ def _validate_prepared_request(receipt: GatewayInputReceipt) -> None:
     from .request_owner_binding import REQUEST_OWNER_KEY, frozen_request_owner
 
     metadata = receipt.prepared_request.get("metadata")
-    if (isinstance(metadata, dict) and metadata.get(REQUEST_OWNER_KEY) is not None
-            and frozen_request_owner(receipt.prepared_request)
-            != frozen_request_owner({REQUEST_OWNER_KEY: metadata[REQUEST_OWNER_KEY]})):
-        raise DataCorruptionError("gateway input prepared owner identity is invalid")
-    if (
-        str(receipt.prepared_request.get("id") or "") != receipt.request_id
-        or _prepared_request_digest(receipt.prepared_request) != receipt.client_input_digest
-        or _prepared_payload_digest(receipt.prepared_request) != receipt.prepared_payload_digest
-    ):
-        raise DataCorruptionError("gateway input prepared request identity is invalid")
+    if isinstance(metadata, dict) and metadata.get(REQUEST_OWNER_KEY) is not None:
+        try:
+            top_owner = frozen_request_owner(receipt.prepared_request)
+            meta_owner = frozen_request_owner({REQUEST_OWNER_KEY: metadata[REQUEST_OWNER_KEY]})
+        except DataCorruptionError as exc:
+            raise _receipt_corruption(
+                "gateway input prepared owner identity is invalid",
+                "INPUT_RECEIPT_OWNER_BINDING_INVALID",
+                "prepared_request.host_request_owner.v1",
+                receipt.state,
+            ) from exc
+        if top_owner != meta_owner:
+            raise _receipt_corruption(
+                "gateway input prepared owner identity is invalid",
+                "INPUT_RECEIPT_OWNER_BINDING_MISMATCH",
+                "prepared_request.host_request_owner.v1",
+                receipt.state,
+            )
+    if str(receipt.prepared_request.get("id") or "") != receipt.request_id:
+        raise _receipt_corruption(
+            "gateway input prepared request identity is invalid",
+            "INPUT_RECEIPT_PREPARED_ID_MISMATCH",
+            "prepared_request.id",
+            receipt.state,
+        )
+    if _prepared_request_digest(receipt.prepared_request) != receipt.client_input_digest:
+        raise _receipt_corruption(
+            "gateway input prepared request identity is invalid",
+            "INPUT_RECEIPT_CLIENT_DIGEST_MISMATCH",
+            "prepared_request.metadata.client_input_digest",
+            receipt.state,
+        )
+    if _prepared_payload_digest(receipt.prepared_request) != receipt.prepared_payload_digest:
+        raise _receipt_corruption(
+            "gateway input prepared request identity is invalid",
+            "INPUT_RECEIPT_PAYLOAD_DIGEST_MISMATCH",
+            "prepared_payload_digest",
+            receipt.state,
+        )
 
 
 # LLM: 唯一比较基准是原receipt已保存的输入；owner由main codec解码，owner_id逐类型/值核对，完整metadata/actor/media仍用原摘要，运行字段不参与。

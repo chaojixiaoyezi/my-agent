@@ -193,6 +193,13 @@ class RecoveryPendingIndex:
         db.execute("INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value "
                    "WHERE meta.value!=excluded.value", (key, str(value)))
 
+    # LLM: 在同一个SQLite投影事务内维护O(1)隔离计数，下限归零，不改表结构。
+    # 函数用途: 增减某种恢复投影当前的隔离计数元数据。
+    def _adjust_quarantined_count(self, db, kind: str, delta: int) -> None:
+        key = f"quarantined_{kind}"
+        current = int(self._get(db, key, "0") or "0")
+        self._set(db, key, max(0, current + delta))
+
     # LLM: 序号在同一跨进程投影事务内增长，旧tick不能确认更晚的canonical变化。
     # 函数用途: 取得一个耐久单调变更序号。
     def _next(self, db) -> int:
@@ -211,6 +218,9 @@ class RecoveryPendingIndex:
         request_id = projection_key(request_id)
         if kind not in {"terminal", "receipt"}:
             raise ValueError("invalid recovery projection kind")
+        row = db.execute("SELECT pending FROM entries WHERE kind=? AND request_id=?", (kind, request_id)).fetchone()
+        if row is not None and row[0] == 2:
+            self._adjust_quarantined_count(db, kind, -1)
         version = self._next(db)
         db.execute("INSERT INTO entries VALUES (?,?,?,1,'') ON CONFLICT(kind,request_id) "
                    "DO UPDATE SET version=excluded.version,pending=1", (kind, request_id, version))
@@ -223,6 +233,8 @@ class RecoveryPendingIndex:
                          (kind, request_id)).fetchone()
         if row is not None and row[2] == stamp:
             return row[0], row[1]
+        if row is not None and row[1] == 2:
+            self._adjust_quarantined_count(db, kind, -1)
         version = self._next(db)
         db.execute("INSERT INTO entries VALUES (?,?,?,1,?) ON CONFLICT(kind,request_id) "
                    "DO UPDATE SET version=excluded.version,pending=1,stamp=excluded.stamp",
@@ -303,24 +315,77 @@ class RecoveryPendingIndex:
     # LLM: 调用方在canonical原锁内已复核当前权威；只确认领取版本，不能清掉tick期间更晚的写前登记。
     # 函数用途: CAS确认单条恢复投影，保留并发提交的新责任。
     def acknowledge(self, kind: str, request_id: str, version: int, stamp: str) -> bool:
+        key = projection_key(request_id)
         with self.connect() as db:
+            row = db.execute("SELECT pending FROM entries WHERE kind=? AND request_id=? AND version=?",
+                             (kind, key, version)).fetchone()
             result = db.execute("UPDATE entries SET pending=0,stamp=? WHERE kind=? AND request_id=? AND version=?",
-                                (stamp, kind, projection_key(request_id), version))
+                                (stamp, kind, key, version))
+            if result.rowcount == 1 and row is not None and row[0] == 2:
+                self._adjust_quarantined_count(db, kind, -1)
             return result.rowcount == 1
 
     # LLM: 仅用于原路径锁内已确认不存在的松散规范文件，不删除任何历史或封存账；新版本CAS不匹配则保留。
     # 函数用途: 去掉已经不存在文件的调度引用。
     def forget(self, kind: str, request_id: str, version: int) -> None:
+        key = projection_key(request_id)
         with self.connect() as db:
-            db.execute("DELETE FROM entries WHERE kind=? AND request_id=? AND version=?",
-                       (kind, projection_key(request_id), version))
+            row = db.execute("SELECT pending FROM entries WHERE kind=? AND request_id=? AND version=?",
+                             (kind, key, version)).fetchone()
+            result = db.execute("DELETE FROM entries WHERE kind=? AND request_id=? AND version=?",
+                                (kind, key, version))
+            if result.rowcount == 1 and row is not None and row[0] == 2:
+                self._adjust_quarantined_count(db, kind, -1)
 
     # LLM: 标记/答复损坏只唤醒已知键；不构造终态、不发业务IO、不清其它待办。
     # 函数用途: 将已知完成投影重新排入有界恢复队列。
     def wake(self, kind: str, request_id: str, version: int) -> None:
+        key = projection_key(request_id)
         with self.connect() as db:
-            db.execute("UPDATE entries SET pending=1 WHERE kind=? AND request_id=? AND version=?",
-                       (kind, projection_key(request_id), version))
+            row = db.execute("SELECT pending FROM entries WHERE kind=? AND request_id=? AND version=?",
+                             (kind, key, version)).fetchone()
+            result = db.execute("UPDATE entries SET pending=1 WHERE kind=? AND request_id=? AND version=?",
+                                (kind, key, version))
+            if result.rowcount == 1 and row is not None and row[0] == 2:
+                self._adjust_quarantined_count(db, kind, -1)
+
+    # LLM: 隔离只更新本页领取版本且仍待核的记录；同一事务维护O(1)隔离计数，不升schema版以保回滚兼容。
+    # 函数用途: CAS把连续确定性坏账的待核项移出活跃页，等待文件指纹变化后再唤醒。
+    def quarantine(self, kind: str, request_id: str, version: int, stamp: str) -> bool:
+        if kind not in {"terminal", "receipt"}:
+            raise ValueError("invalid recovery projection kind")
+        key = projection_key(request_id)
+        with self.connect() as db:
+            result = db.execute(
+                "UPDATE entries SET pending=2,stamp=? WHERE kind=? AND request_id=? AND version=? AND pending=1",
+                (stamp, kind, key, version),
+            )
+            if result.rowcount == 1:
+                self._adjust_quarantined_count(db, kind, 1)
+                return True
+            return False
+
+    # LLM: 仅读meta中持久化的O(1)计数，不扫描entries表；未知kind立即拒绝。
+    # 函数用途: 常数时间返回当前处于隔离态的恢复项总数。
+    def quarantined_count(self, kind: str) -> int:
+        if kind not in {"terminal", "receipt"}:
+            raise ValueError("invalid recovery projection kind")
+        with self.connect() as db:
+            return max(0, int(self._get(db, f"quarantined_{kind}", "0") or "0"))
+
+    # LLM: 仅按严格递增keyset前向分页，不回绕；未知kind立即拒绝。
+    # 函数用途: 取得至多128个处于隔离态的恢复键及其当前版本。
+    def quarantined_page(self, kind: str, *, after: str = "", limit: int = 128) -> tuple[tuple[str, int], ...]:
+        if kind not in {"terminal", "receipt"}:
+            raise ValueError("invalid recovery projection kind")
+        count = max(0, min(128, int(limit)))
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT request_id,version FROM entries WHERE kind=? AND pending=2 "
+                "AND request_id>? ORDER BY request_id LIMIT ?",
+                (kind, after, count),
+            ).fetchall()
+            return tuple((projection_key(key), version) for key, version in rows)
 
     # LLM: 追平只表示当前已知pending为空且发现页已到EOF，不是业务全部成功的证明。
     # 函数用途: 返回本根本类发现与恢复队列的当前排空提示。
