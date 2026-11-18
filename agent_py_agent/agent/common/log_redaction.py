@@ -24,6 +24,8 @@ _REDACTED = "<redacted>"
 _CREDENTIAL_REDACTED = "[REDACTED]"
 _CONFIGURED_SECRET_VALUES: ContextVar[tuple[str, ...]] = ContextVar('configured_secret_values', default=())
 _CONFIGURED_CREDENTIAL_VALUES: ContextVar[tuple[str, ...]] = ContextVar('configured_credential_values', default=())
+# 当前上下文已进入的 configured_secret_redaction 帧层数；0 表示没有会在退出时复原绑定值的拥有帧。
+_CONFIGURED_REDACTION_DEPTH: ContextVar[int] = ContextVar('configured_redaction_depth', default=0)
 _ACTIVE_TURN_LOG_LOCK = threading.Lock()
 _ACTIVE_TURN_LOG_SECRETS: dict[str, tuple[str, ...]] = {}
 _ACTIVE_TURN_LOG_FLAT: tuple[str, ...] = ()
@@ -54,9 +56,12 @@ def configured_secret_redaction(secret_values: tuple[str, ...] = ()):
     merged_creds = tuple(dict.fromkeys((*_CONFIGURED_CREDENTIAL_VALUES.get(), *cred_extra)))
     token = _CONFIGURED_SECRET_VALUES.set(merged_secrets)
     cred_token = _CONFIGURED_CREDENTIAL_VALUES.set(merged_creds)
+    # 帧内 bind_active_credential_log_values 追加的变体随上面两个令牌复原；深度令牌标记本帧拥有权。
+    depth_token = _CONFIGURED_REDACTION_DEPTH.set(_CONFIGURED_REDACTION_DEPTH.get() + 1)
     try:
         yield
     finally:
+        _CONFIGURED_REDACTION_DEPTH.reset(depth_token)
         _CONFIGURED_CREDENTIAL_VALUES.reset(cred_token)
         _CONFIGURED_SECRET_VALUES.reset(token)
 
@@ -64,7 +69,8 @@ def configured_secret_redaction(secret_values: tuple[str, ...] = ()):
 def bind_active_credential_log_values(values: tuple[str, ...]) -> None:
     """在当前已激活的 configured_secret_redaction 栈帧内追加本调用新解密的凭据变体。"""
     extra = tuple(v for v in values if v)
-    if not extra:
+    # 无拥有帧时不写线程上下文：无人复原会滞留到同线程后续任务；回合日志由进程级登记覆盖到 close()。
+    if not extra or _CONFIGURED_REDACTION_DEPTH.get() <= 0:
         return
     _CONFIGURED_CREDENTIAL_VALUES.set(tuple(dict.fromkeys((*_CONFIGURED_CREDENTIAL_VALUES.get(), *extra))))
     _CONFIGURED_SECRET_VALUES.set(tuple(dict.fromkeys((*_CONFIGURED_SECRET_VALUES.get(), *extra))))

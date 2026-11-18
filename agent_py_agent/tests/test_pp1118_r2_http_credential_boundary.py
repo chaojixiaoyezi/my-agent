@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,8 +22,12 @@ import pytest
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+from agent_py_agent.agent.common import log_redaction
 from agent_py_agent.agent.common.json_io import locked_json_path, read_json_object_report
-from agent_py_agent.agent.common.log_redaction import RedactingFormatter
+from agent_py_agent.agent.common.log_redaction import (
+    RedactingFormatter,
+    configured_secret_redaction,
+)
 from agent_py_agent.agent.conversation.host_actor import actor_from_scope
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.delivery import ChannelCapabilities
@@ -46,6 +51,7 @@ from agent_py_agent.agent.user_space.task_credentials import (
     manage_credential,
     request_credential_card,
 )
+from agent_py_agent.agent.workflows import WorkflowEngine
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
@@ -971,3 +977,120 @@ def test_direct_execute_401_refresh_overflow_and_non_card_compatibility(
         json.dumps({"output": refresh_res.output, "envelope": refresh_res.result_envelope}, ensure_ascii=False),
         ("RefreshUser-11", "RefreshPass-22", "FirstIssuedTok-101", "SecondIssuedTokOverflow-202"),
     )
+
+
+def test_direct_execute_restores_log_contextvars_for_same_worker_thread_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    loopback_sites,
+) -> None:
+    primary, _secondary = loopback_sites
+    agent = _build_real_agent(tmp_path)
+    web_tool = agent.tools.tools["web_fetch"]
+    web_tool.allow_private_resolution = True
+    web_tool.allowed_private_hosts = ("127.0.0.1",)
+    # 卡片账号值与后续工作流 owner 同名：线程上下文一旦滞留该值，owner 就会被打码成 [REDACTED]。
+    owner_name = "user"
+    login_secret = "ContextRestoreLoginPass-6201!"
+    target_url = primary.origin + "/json-protected"
+    orig_fetch_raw = web_fetch_tools.fetch_raw_response
+    transport: dict[str, object] = {"mode": "pass", "in_flight": []}
+
+    def switchable_transport(request, **kwargs):
+        bound = log_redaction._CONFIGURED_CREDENTIAL_VALUES.get()
+        transport["in_flight"].append((
+            transport["mode"],
+            log_redaction._CONFIGURED_REDACTION_DEPTH.get(),
+            owner_name in bound and login_secret in bound,
+        ))
+        if transport["mode"] == "reset":
+            raise ConnectionResetError(54, "synthetic loopback reset")
+        if transport["mode"] == "crash":
+            raise RuntimeError("synthetic transport crash")
+        return orig_fetch_raw(request, **kwargs)
+
+    monkeypatch.setattr(web_fetch_tools, "fetch_raw_response", switchable_transport)
+
+    def contextvar_state() -> tuple[object, ...]:
+        return (
+            log_redaction._CONFIGURED_SECRET_VALUES.get(),
+            log_redaction._CONFIGURED_CREDENTIAL_VALUES.get(),
+            log_redaction._CONFIGURED_REDACTION_DEPTH.get(),
+        )
+
+    def credential_phase() -> int:
+        before = contextvar_state()
+        _start_turn(agent)
+        try:
+            ref, _ = _issue_submitted_card(
+                agent,
+                target_url,
+                authentication="login",
+                fields_spec=[{"name": "username", "label": "账号"}, {"name": "secret", "label": "密码"}],
+                fields_values={"username": owner_name, "secret": login_secret},
+                auth_config={
+                    "url": primary.origin + "/login-json",
+                    "body_fields": {"u": "username", "p": "secret"},
+                    "token_path": ["access_token"],
+                },
+            )
+            args = {"url": target_url, "credential_ref": ref, "mode": "text"}
+            # 1) 直接 execute 正常 GET：返回后线程上下文逐值回到调用前。
+            ok_res = web_tool.execute(args)
+            assert ok_res.ok is True and primary.record_marker in ok_res.output
+            assert contextvar_state() == before
+            # 2) 传输异常被转成失败回执：同样零滞留。
+            transport["mode"] = "reset"
+            reset_res = web_tool.execute(args)
+            assert reset_res.ok is False and reset_res.error_code == "NETWORK_REQUEST_FAILED"
+            assert contextvar_state() == before
+            # 3) 嵌套在外层脱敏帧且异常穿出 execute：只回到外层帧原值，外层退出后回到调用前。
+            transport["mode"] = "crash"
+            with configured_secret_redaction(("OuterFrameOnlySecret-6202",)):
+                outer_state = contextvar_state()
+                with pytest.raises(RuntimeError, match="synthetic transport crash"):
+                    web_tool.execute(args)
+                assert contextvar_state() == outer_state
+            assert contextvar_state() == before
+        finally:
+            transport["mode"] = "pass"
+            turn_credential_redaction(agent, agent._current_run_params).close()
+            del agent._current_run_params
+        assert contextvar_state() == before
+        # 发包当刻拥有帧已绑定卡值（直接调用深度 1，嵌套深度 2），在途日志仍被遮蔽。
+        in_flight = transport["in_flight"]
+        assert {mode for mode, _depth, _bound in in_flight} == {"pass", "reset", "crash"}
+        assert all(depth == (2 if mode == "crash" else 1) and bound for mode, depth, bound in in_flight)
+        return threading.get_ident()
+
+    def workflow_phase() -> int:
+        wf_home = tmp_path / "workflow_owner_home"
+        script_dir = wf_home / "scripts" / "collect"
+        script_dir.mkdir(parents=True)
+        (script_dir / "script.json").write_text(json.dumps({
+            "id": "collect", "kind": "script", "name": "collect", "owner_id": owner_name,
+            "io_contract": {"outputs": ["value"]}, "entrypoint": "main.py",
+            "interpreter": "python3", "timeout_seconds": 10,
+        }))
+        (script_dir / "main.py").write_text(
+            'import json,sys; print(json.dumps({"value": json.load(sys.stdin)["number"]+1}))'
+        )
+        definition = {
+            "descriptor": {"id": "owner-flow", "kind": "workflow", "name": "owner-flow", "owner_id": owner_name},
+            "steps": [
+                {"step_id": "collect", "name": "collect", "mode": "deterministic_script", "script_id": "collect"},
+                {"step_id": "second", "name": "second", "mode": "deterministic_script", "script_id": "collect",
+                 "inputs_map": {"number": {"step_id": "collect", "key": "value"}}},
+            ],
+        }
+        run = WorkflowEngine(wf_home).run_workflow(definition, {"number": 1}, owner_id=owner_name)
+        assert run.status == "succeeded" and run.owner_id == owner_name
+        assert [s.status for s in run.steps] == ["succeeded", "succeeded"]
+        assert run.final_output == {"value": 3}
+        return threading.get_ident()
+
+    # 单工作线程池复用同一线程：凭据阶段若滞留 owner 值，随后的工作流会报 WORKFLOW_OWNER_MISMATCH。
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        credential_thread = pool.submit(credential_phase).result(timeout=60)
+        workflow_thread = pool.submit(workflow_phase).result(timeout=60)
+    assert credential_thread == workflow_thread

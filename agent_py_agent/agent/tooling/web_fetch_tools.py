@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import quote, quote_plus, urlsplit
 
 from ..common.cancellation import cancellation_requested
+from ..common.log_redaction import configured_secret_redaction
 from ..contracts.gates.network_safety import (
     GatewayEndpointConfig,
     NetworkSafetySettings,
@@ -161,7 +162,9 @@ class WebFetchTool(BaseTool):
             self._allowed_private_hosts = items
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
-        return self._execute_with_context(params, None)
+        # 直接调用不经注册表脱敏帧；自建拥有帧，发包期追加的凭据变体在返回或异常时随令牌复原。
+        with configured_secret_redaction():
+            return self._execute_with_context(params, None)
 
     def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
         return self._execute_with_context(params, getattr(context, "credential_use", None))
