@@ -121,15 +121,46 @@ def official_browser_bundle(tmp_path_factory) -> Path:
         pb_mod.build_wheel, api_mod.build_wheel, pkg_mod.build_wheel = orig_pb, orig_api, orig_pkg
 
 
+_SKIP_WALK_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        ".eggs",
+        "node_modules",
+    }
+)
+_AUDIT_ROOT_EXTRAS = frozenset({"git_diff.patch", "SUMMARY.md", "evidence.md", "run_review.py"})
+
+
 def _stage_repo_tree(dest: Path) -> Path:
     """将仓库受控文件复制到临时构建目录，确保测试构建 wheel 绝不向工作树写入临时文件。"""
     listed = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=ROOT,
-        check=True,
+        check=False,
         capture_output=True,
     )
-    rel_paths = {os.fsdecode(raw) for raw in listed.stdout.split(b"\0") if raw}
+    if listed.returncode == 0:
+        rel_paths = {os.fsdecode(raw) for raw in listed.stdout.split(b"\0") if raw}
+    else:
+        rel_paths = set()
+        for dirpath, dirnames, filenames in os.walk(ROOT, followlinks=False):
+            dirnames[:] = [
+                d for d in dirnames if d not in _SKIP_WALK_DIRS and not d.endswith(".egg-info")
+            ]
+            current = Path(dirpath)
+            for fname in filenames:
+                if fname == ".DS_Store" or fname.endswith((".pyc", ".pyo")):
+                    continue
+                rel = (current / fname).relative_to(ROOT).as_posix()
+                if rel in _AUDIT_ROOT_EXTRAS:
+                    continue
+                rel_paths.add(rel)
     rel_paths.add("agent_py_agent/config/builtin_browser_lite_manifest.json")
     for rel in sorted(rel_paths):
         src = ROOT / rel
