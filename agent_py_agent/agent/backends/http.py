@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 import sys
 import threading
@@ -62,9 +63,12 @@ def reset_unaccounted_probe_attempt_count() -> None:
 
 # 进程内有界原生工具能力缓存：仅保存经真实探针验证通过（native_supported=True）的结果，
 # 使 OwnerAgent 空闲释放或同配置重建后端后无需重复发探针；采用小写私有变量名避免触发静态常量表。
+_logger = logging.getLogger(__name__)
 _capability_probe_entries: OrderedDict[tuple[object, ...], ProviderToolCapability] = OrderedDict()
+_capability_probe_miss_reasons: OrderedDict[tuple[object, ...], str] = OrderedDict()
 _capability_probe_lock = threading.Lock()
 _capability_probe_generation = 0
+_probe_key_field_names = ("backend_type", "endpoint", "model", "stream", "transport", "credential")
 _capability_probe_transport_lock = threading.RLock()
 _capability_probe_transport_tokens: dict[int, tuple[weakref.ref[Any], int]] = {}
 _capability_probe_transport_seq = 0
@@ -165,10 +169,11 @@ def _credential_fingerprint(backend: object) -> str:
     auth_ref = getattr(backend, "auth_ref", None)
     if isinstance(auth_ref, Mapping):
         auth_part = json.dumps(dict(auth_ref), sort_keys=True, default=str, ensure_ascii=True)
-    elif auth_ref:
-        auth_part = str(auth_ref)
-    else:
-        auth_part = ""
+        # 登录身份由 auth_ref（含每次登录新发的 generation）唯一确定；访问令牌按到期自动轮换，
+        #   计入指纹会让每次续期都把能力缓存判失效、重发阻塞探针，还让每次查缓存都去取锁读凭据文件。
+        material = f"{auth_part}\n".encode("utf-8", errors="surrogatepass")
+        return hashlib.sha256(material).hexdigest()[:16]
+    auth_part = str(auth_ref) if auth_ref else ""
     try:
         api_key = str(getattr(backend, "api_key", "") or "")
     except Exception:  # noqa: BLE001 未初始化或动态凭据读取失败时回退静态字段计算指纹
@@ -213,24 +218,55 @@ def _lookup_capability_probe_memo(
         return entry, generation
 
 
+def _record_capability_probe_miss_reason_locked(
+    logical_key: tuple[object, ...],
+    reason: str,
+) -> None:
+    _capability_probe_miss_reasons[logical_key] = reason
+    _capability_probe_miss_reasons.move_to_end(logical_key)
+    while len(_capability_probe_miss_reasons) > 256:
+        _capability_probe_miss_reasons.popitem(last=False)
+
+
+def _describe_key_change(
+    old_key: tuple[object, ...],
+    new_key: tuple[object, ...],
+) -> str:
+    changed = [
+        name
+        for name, old_value, new_value in zip(_probe_key_field_names, old_key, new_key)
+        if old_value != new_value
+    ]
+    return "key_changed:" + ",".join(changed) if changed else "key_changed:unknown"
+
+
 def _store_capability_probe_memo(
     key: tuple[object, ...], capability: ProviderToolCapability,
 ) -> int:
+    logical_key = _logical_probe_identity(key)
     with _capability_probe_lock:
         _capability_probe_entries[key] = capability
         _capability_probe_entries.move_to_end(key)
         while len(_capability_probe_entries) > 256:
             _capability_probe_entries.popitem(last=False)
+        _capability_probe_miss_reasons.pop(logical_key, None)
         return _capability_probe_generation
 
 
-def invalidate_capability_probe_memo(backend: HttpBackend | None = None) -> None:
+def invalidate_capability_probe_memo(
+    backend: HttpBackend | None = None,
+    *,
+    reason: str = "explicit",
+) -> None:
     """清空全部或按后端键驱逐进程内原生工具能力探针缓存。"""
     global _capability_probe_generation
+    normalized_reason = str(reason or "").strip() or "explicit"
     if backend is None:
         with _capability_probe_lock:
             _capability_probe_entries.clear()
             _capability_probe_generation += 1
+            _capability_probe_miss_reasons.clear()
+            _record_capability_probe_miss_reason_locked(("*",), normalized_reason)
         return
     target_key = _capability_probe_key(backend)
     keys = {target_key}
@@ -247,8 +283,21 @@ def invalidate_capability_probe_memo(backend: HttpBackend | None = None) -> None
         ]
         for key in stale:
             _capability_probe_entries.pop(key, None)
+        for logical_key in logical_targets:
+            _record_capability_probe_miss_reason_locked(logical_key, normalized_reason)
     backend._provider_tool_capability_cache = None
     backend._provider_tool_capability_memo_key = None
+    backend._provider_tool_capability_miss_reason = None
+
+
+def _http_rejection_reason(exc: BaseException, request_body: object = None) -> str:
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        if status_code in (401, 403):
+            return f"http_{status_code}"
+        if status_code == 400 and _is_tool_rejection_error(exc, request_body):
+            return "http_400_tool"
+    return ""
 
 
 def _is_tool_rejection_error(exc: BaseException, request_body: object = None) -> bool:
@@ -301,7 +350,13 @@ def bounded_output_tokens(configured: int, requested: int | None, *,
 #   每次真实 generate 一条记录（重试也算），成功用供应商 usage 收尾，失败记 failed。
 #   无 scope（直调、测试替身）直接返回空 call_id，不产生任何账本副作用。
 # 函数用途: 登记一次工具能力探测的模型调用开始（输入按实际发送的提示估算），返回本次探测的记账 id。
-def _start_probe_call(scope: object | None, backend: object, prompt: str) -> str:
+def _start_probe_call(
+    scope: object | None,
+    backend: object,
+    prompt: str,
+    *,
+    cache_miss_reason: str = "",
+) -> str:
     if scope is None:
         return ""
     from ..contracts.model_call_ledger import ModelCallStartedParams
@@ -318,7 +373,11 @@ def _start_probe_call(scope: object | None, backend: object, prompt: str) -> str
             request_id=str(getattr(scope, "request_id", "") or ""),
             run_id=str(getattr(scope, "run_id", "") or ""),
             is_probe=True,
-            metadata={"purpose": "probe:tool_capability", "logical_call_id": call_id},
+            metadata={
+                "purpose": "probe:tool_capability",
+                "logical_call_id": call_id,
+                "cache_miss_reason": str(cache_miss_reason or ""),
+            },
         )
     )
     return call_id
@@ -475,6 +534,7 @@ class HttpBackend(BaseBackend):
         # 当成 provider 事实。新代码应读取 configured_context_window_tokens。
         self.context_window_tokens = self.configured_context_window_tokens
         self._provider_tool_capability_cache: ProviderToolCapability | None = None
+        self._provider_tool_capability_miss_reason: str | None = None
         self._provider_tool_capability_lock = threading.Lock()
         self._provider_context_window_cache: int | None = None
         self.model_metadata: dict[str, Any] = {}
@@ -555,21 +615,34 @@ class HttpBackend(BaseBackend):
         if generation is not None and generation != _capability_probe_generation:
             self._provider_tool_capability_cache = None
             self._provider_tool_capability_memo_key = None
+            self._provider_tool_capability_miss_reason = "generation_changed"
             return None
         memo_key = getattr(self, "_provider_tool_capability_memo_key", None)
-        if memo_key is not None and memo_key != _capability_probe_key(self):
-            self._provider_tool_capability_cache = None
-            self._provider_tool_capability_memo_key = None
-            return None
+        if memo_key is not None:
+            current_key = _capability_probe_key(self)
+            if memo_key != current_key:
+                self._provider_tool_capability_cache = None
+                self._provider_tool_capability_memo_key = None
+                self._provider_tool_capability_miss_reason = _describe_key_change(memo_key, current_key)
+                return None
         return cached
 
     def _invalidate_memo_on_http_rejection(self, exc: BaseException, request_body: object = None) -> None:
-        status_code = getattr(exc, "status_code", None)
-        if isinstance(status_code, int) and (
-            status_code in (401, 403)
-            or (status_code == 400 and _is_tool_rejection_error(exc, request_body))
-        ):
-            invalidate_capability_probe_memo(self)
+        reason = _http_rejection_reason(exc, request_body)
+        if reason:
+            invalidate_capability_probe_memo(self, reason=reason)
+
+    def _resolve_capability_probe_miss_reason(self, key: tuple[object, ...]) -> str:
+        instance_reason = getattr(self, "_provider_tool_capability_miss_reason", None)
+        if instance_reason:
+            return str(instance_reason)
+        logical_key = _logical_probe_identity(key)
+        with _capability_probe_lock:
+            return (
+                _capability_probe_miss_reasons.get(logical_key)
+                or _capability_probe_miss_reasons.get(("*",))
+                or "cold_process"
+            )
 
     def probe_tool_capability(self) -> ProviderToolCapability:
         """有界探测原生工具能力；只缓存成功事实，失败允许之后重新探测。"""
@@ -582,6 +655,7 @@ class HttpBackend(BaseBackend):
             self._provider_tool_capability_cache = memo_hit
             self._provider_tool_capability_memo_key = key
             self._provider_tool_capability_generation = generation
+            self._provider_tool_capability_miss_reason = None
             return memo_hit
         # 同一 Gateway/owner 的 Agent 会被多个请求线程复用。探针必须 single-flight，
         # 否则冷启动并发会重复烧请求，并让一个成功、一个失败的结果互相打架。
@@ -599,20 +673,38 @@ class HttpBackend(BaseBackend):
                 self._provider_tool_capability_cache = memo_hit
                 self._provider_tool_capability_memo_key = key
                 self._provider_tool_capability_generation = generation
+                self._provider_tool_capability_miss_reason = None
                 return memo_hit
+            miss_reason = self._resolve_capability_probe_miss_reason(key)
+            probe_started = time.monotonic()
+            self._active_probe_cache_miss_reason = miss_reason
             try:
                 capability = self._probe_tool_capability_uncached()
-            except ProviderConfigurationError:
-                invalidate_capability_probe_memo(self)
+            except ProviderConfigurationError as exc:
+                invalidate_capability_probe_memo(
+                    self,
+                    reason=_http_rejection_reason(exc) or "provider_configuration",
+                )
                 raise
+            finally:
+                self._active_probe_cache_miss_reason = None
             if isinstance(capability, ProviderToolCapability):
+                duration_ms = max(0, int((time.monotonic() - probe_started) * 1000))
+                _logger.warning(
+                    "PROVIDER_TOOL_PROBE_UNCACHED reason=%s model=%s duration_ms=%d native=%s",
+                    miss_reason,
+                    str(getattr(self, "model_name", "") or ""),
+                    duration_ms,
+                    capability.native_supported,
+                )
                 if capability.native_supported:
                     generation = _store_capability_probe_memo(key, capability)
                     self._provider_tool_capability_cache = capability
                     self._provider_tool_capability_memo_key = key
                     self._provider_tool_capability_generation = generation
+                    self._provider_tool_capability_miss_reason = None
                 else:
-                    invalidate_capability_probe_memo(self)
+                    invalidate_capability_probe_memo(self, reason="negative_result")
             return capability
         finally:
             self._provider_tool_capability_lock.release()
@@ -627,6 +719,7 @@ class HttpBackend(BaseBackend):
             raise ValueError(
                 "api_key 为空：无法执行工具能力探针（检查 AGENT_API_KEY 环境变量或配置）"
             )
+        cache_miss_reason = str(getattr(self, "_active_probe_cache_miss_reason", "") or "")
         evidence = ""
         for _attempt in range(1, _PROBE_MAX_ATTEMPT_COUNT + 1):
             nonce = secrets.token_hex(8)
@@ -658,7 +751,7 @@ class HttpBackend(BaseBackend):
                 wait_interruptibly(0)
                 provider_request_timeout(30)
                 scope = current_probe_accounting()
-                call_id = _start_probe_call(scope, self, prompt)
+                call_id = _start_probe_call(scope, self, prompt, cache_miss_reason=cache_miss_reason)
                 if scope is None:
                     # 未绑定账本的真实探测仍保留原诊断计数，排队失败不增加它。
                     _count_unaccounted_probe_attempt()
