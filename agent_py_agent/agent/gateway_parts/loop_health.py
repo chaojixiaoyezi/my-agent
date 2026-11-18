@@ -31,14 +31,18 @@ def evaluate_dispatcher_stall(snapshot: dict[str, object], *, now: float | None 
     finished_key = "dispatch_tick_finished_monotonic" if monotonic else "last_dispatch_tick_at"
     started = float(snapshot.get(started_key, 0) or 0)
     finished = float(snapshot.get(finished_key, 0) or 0)
+    scan_monotonic = float(snapshot.get("last_dispatch_scan_monotonic", 0) or 0) if monotonic else 0.0
+    use_scan = monotonic and scan_monotonic > 0 and math.isfinite(scan_monotonic)
     inflight = bool(snapshot["dispatch_tick_inflight"]) if monotonic else started > finished
     reason, age = "", 0.0
-    if (snapshot.get("dispatcher_state") == "running" and started > 0 and stall_timeout_s > 0
+    if (snapshot.get("dispatcher_state") == "running" and (started > 0 or use_scan) and stall_timeout_s > 0
             and all(math.isfinite(value) for value in (now, started, finished, stall_timeout_s))):
-        if inflight and now - started >= stall_timeout_s:
+        if inflight and started > 0 and now - started >= stall_timeout_s:
             reason, age = "tick_wedged", now - started
-        elif pending_count > 0 and now - max(started, finished) >= stall_timeout_s:
-            reason, age = "pending_starved", now - max(started, finished)
+        elif pending_count > 0:
+            baseline = scan_monotonic if use_scan else max(started, finished)
+            if now - baseline >= stall_timeout_s:
+                reason, age = "pending_starved", now - baseline
     return {**snapshot, "dispatcher_state": "stalled" if reason else snapshot.get("dispatcher_state"),
         "dispatcher_stalled": bool(reason), "dispatcher_stall_reason": reason,
         "dispatcher_stall_age_s": age, "dispatcher_stall_timeout_s": stall_timeout_s}
@@ -108,7 +112,11 @@ class GatewayLoopHealth:
         self._tick_finished_at = 0.0
         self._tick_started_monotonic = 0.0
         self._tick_finished_monotonic = 0.0
+        self._last_dispatch_scan_monotonic = 0.0
         self._tick_inflight = False
+        self._dispatch_segment = ""
+        self._last_segment_ms = 0.0
+        self._max_segment_ms = 0.0
         self._tick_count = 0
         self._last_tick_dispatched = 0
         self._loop_errors: dict[str, int] = {}
@@ -151,8 +159,29 @@ class GatewayLoopHealth:
             self._tick_finished_at = time.time()
             self._tick_finished_monotonic = time.monotonic()
             self._tick_inflight = False
+            self._dispatch_segment = ""
             self._tick_count += 1
             self._last_tick_dispatched = int(dispatched)
+
+    # 函数用途: 记录最近一次派发扫描返回的单调时刻，供饥饿检测衡量真实扫描间隔。
+    def note_dispatch_scan(self) -> None:
+        with self._lock:
+            self._last_dispatch_scan_monotonic = time.monotonic()
+
+    # 函数用途: 进入维护段时登记当前段名（elapsed_ms 为 None），退出时清除段名并更新本段与最大耗时。
+    def note_segment(self, name: str, elapsed_ms: float | None) -> None:
+        with self._lock:
+            if elapsed_ms is None:
+                self._dispatch_segment = str(name or "")
+                return
+            self._dispatch_segment = ""
+            value = float(elapsed_ms)
+            if not math.isfinite(value):
+                return
+            value = max(0.0, value)
+            self._last_segment_ms = value
+            if value > self._max_segment_ms:
+                self._max_segment_ms = value
 
     # LLM: 每一次被守卫接住的异常都记（打印限流不影响计数），按 loop id 分开计数，所以 loop_error_counts 是各循环的真实次数；
     #   派发循环（loop="dispatcher"）同时投影成 dispatch_tick_errors/last_dispatch_tick_error 两个对外字段。
@@ -200,7 +229,11 @@ class GatewayLoopHealth:
                 "last_dispatch_tick_at": self._tick_finished_at,
                 "dispatch_tick_started_monotonic": self._tick_started_monotonic,
                 "dispatch_tick_finished_monotonic": self._tick_finished_monotonic,
+                "last_dispatch_scan_monotonic": self._last_dispatch_scan_monotonic,
                 "dispatch_tick_inflight": self._tick_inflight,
+                "dispatch_segment": self._dispatch_segment,
+                "last_segment_ms": self._last_segment_ms,
+                "max_segment_ms": self._max_segment_ms,
                 "last_dispatch_tick_dispatched": self._last_tick_dispatched,
                 "dispatch_tick_count": self._tick_count,
                 "dispatch_tick_errors": self._loop_errors.get("dispatcher", 0),

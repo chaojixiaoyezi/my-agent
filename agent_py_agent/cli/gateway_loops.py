@@ -117,6 +117,11 @@ BACKGROUND_OWNER_WAKE_RESCAN_SECONDS = 120.0  # 磁盘级 owner 唤醒发现整�
 STARTUP_GRACE_WINDOW_SECONDS = 180.0
 # 每拍后台维护最多冷构造的策展器数量，热实例不占此额度。
 _COLD_CURATOR_BUILDS_PER_TICK_COUNT = 2
+# 每拍后台同步调度器最多冷构造的硬 owner Agent 数量，热实例不占此额度。
+_COLD_OWNER_BUILDS_PER_TICK_COUNT = 2
+# 派发段或后台维护单拍超过该阈值时输出慢执行告警日志，只做观测不改行为。
+_DISPATCH_SEGMENT_SLOW_LOG_SECONDS = 1.0
+_BACKGROUND_TICK_PHASES = ("seed", "collect", "retire", "sync", "watch", "curators", "submit")
 
 
 # LLM: 只节流非紧急维护，不用于取消、fencing、权限撤销、租约或未知结果恢复。
@@ -408,6 +413,41 @@ class _RequestDispatcher:
         self._reconcile_backoff = LoopErrorBackoff()
         self._lock_cleanup_backoff = LoopErrorBackoff()
         self._next_lock_cleanup_at = 0.0
+        self._redispatched = 0
+        self._tick_inbox_stamp: int | None = None
+
+    # 函数用途: 复用扫描门的目录 mtime_ns 读取逻辑作为收件箱变化标记；缺少 inbox 目录字段时返回 None。
+    def _current_inbox_stamp(self) -> int | None:
+        inbox = getattr(getattr(self, "paths", None), "inbox", None)
+        return None if inbox is None else GatewayInboxScanGate._inbox_mtime_ns(inbox)
+
+    # 函数用途: 比较当前收件箱目录 mtime_ns 与本拍入口快照，供输入对账判断何时让出线程。
+    def _inbox_changed_since_tick_start(self) -> bool:
+        inbox = getattr(getattr(self, "paths", None), "inbox", None)
+        if inbox is None:
+            return False
+        return GatewayInboxScanGate._inbox_mtime_ns(inbox) != getattr(self, "_tick_inbox_stamp", None)
+
+    # 函数用途: 维护段之间先给新到的交互请求一次派发机会；收件箱未变时只是一次 stat，不重复扫描。
+    def _redispatch_if_inbox_changed(self) -> int:
+        if getattr(self, "tick_failed", False) or restart_draining():
+            return 0
+        try:
+            claimed = dispatch_pending_requests(
+                self.paths,
+                self.limits,
+                self._submit,
+                scan_gate=getattr(self, "_scan_gate", None),
+                admission_gate=getattr(self, "_admission_gate", None),
+            )
+        except Exception as exc:
+            self.tick_failed = True
+            _note_loop_tick_error(_DISPATCH_SEGMENT_SITE, exc, self.backoff)
+            return 0
+        loop_health.note_dispatch_scan()
+        self._tick_inbox_stamp = self._current_inbox_stamp()
+        self._redispatched = getattr(self, "_redispatched", 0) + claimed
+        return claimed
 
 
     # LLM: 原P6已停止出生则不再认领；Count0/原组件缺Root只读内存默认None，安全重启仍按原结构化等待，原T/P3/恢复与终态投影不变。
@@ -418,6 +458,8 @@ class _RequestDispatcher:
         # reconciliation scans must never sit in front of an interactive request.
         self._collect_request_futures()
         self.tick_failed = False
+        self._redispatched = 0
+        self._tick_inbox_stamp = self._current_inbox_stamp()
         runtime = getattr(self, '_drain_runtime', None)
         if runtime is not None and runtime._closing:
             return 0
@@ -434,34 +476,41 @@ class _RequestDispatcher:
                 hold_reason=RESTART_DRAIN_HOLD_REASON if restart_draining() else "",
                 admission_gate=self._admission_gate,
             )
+            loop_health.note_dispatch_scan()
+            self._tick_inbox_stamp = self._current_inbox_stamp()
         except Exception as exc:
             # 只有派发段自己失败才让外层守卫退避（没请求可派时）；账本记在 loop "dispatcher" 下，打印按循环退避限流。
             self.tick_failed = True
             _note_loop_tick_error(_DISPATCH_SEGMENT_SITE, exc, self.backoff)
         # Recovery and projections are independent durability domains. One
         # damaged receipt must not starve normal jobs or another repair domain.
+        # _CLOSING_SITE 紧跟首轮派发且受 50ms 有界控制，段间重派发放在后续各维护段进入前，避免无段间隙时双扫。
         self._note_segment_progress()
         closing_backoff = self.__dict__.setdefault("_closing_backoff", LoopErrorBackoff())
         self._run_segment(_CLOSING_SITE, closing_backoff, self._closing_deadline_once)
         if self._recover_throttle.due():
             self._note_segment_progress()
+            self._redispatch_if_inbox_changed()
             self._recover_throttle.defer(self._run_segment(_RECOVERY_SITE, self._recovery_backoff, self._recover_once))
         now = time.monotonic()
         if now >= self._next_terminal_projection_at:
             self._note_segment_progress()
+            self._redispatch_if_inbox_changed()
             delay = self._run_segment(_PROJECTION_SITE, self._projection_backoff, self._project_terminals_once)
             self._next_terminal_projection_at = now + max(0.75, delay, self._projection_idle_delay())
         if now >= self._next_input_reconcile_at:
             self._note_segment_progress()
+            self._redispatch_if_inbox_changed()
             delay = self._run_segment(_RECONCILE_SITE, self._reconcile_backoff, self._reconcile_inputs_once)
             self._next_input_reconcile_at = now + max(0.75, delay)
         if now >= self._next_lock_cleanup_at:
             self._note_segment_progress()
+            self._redispatch_if_inbox_changed()
             delay = self._run_segment(
                 _LOCK_SIDECAR_CLEANUP_SITE, self._lock_cleanup_backoff, self._cleanup_lock_sidecars_once
             )
             self._next_lock_cleanup_at = now + max(_LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS, delay)
-        return dispatched
+        return dispatched + self._redispatched
 
 
     # LLM: 相邻维护段切换时同步刷新loop_health在途单调钟与faulthandler看门狗预算；裸调tick不在途时不武装看门狗。
@@ -473,15 +522,27 @@ class _RequestDispatcher:
 
     # LLM: 后台修复段的统一跑法：成功清零该段退避并返回 0；失败记账（loop "dispatcher"）、按该段自己的退避限流打印，
     #   返回该段应额外推迟的秒数——只推迟这一段的下次到期，不碰派发轮询，也不置 tick_failed。
-    # 函数用途: 跑一个后台修复段，返回它下次到期要额外等的秒数。
+    # 函数用途: 跑一个后台修复段，记录段耗时与慢日志，返回它下次到期要额外等的秒数。
     def _run_segment(self, site: _LoopSite, backoff: LoopErrorBackoff, operation: Callable[[], object]) -> float:
+        started = time.monotonic()
+        loop_health.note_segment(site.context, None)
         try:
             operation()
         except Exception as exc:
             _note_loop_tick_error(site, exc, backoff)
             return backoff.delay()
-        backoff.record_success()
-        return 0.0
+        else:
+            backoff.record_success()
+            return 0.0
+        finally:
+            elapsed = max(0.0, time.monotonic() - started)
+            loop_health.note_segment(site.context, elapsed * 1000.0)
+            if elapsed >= _DISPATCH_SEGMENT_SLOW_LOG_SECONDS:
+                logging.getLogger(__name__).warning(
+                    "GATEWAY_DISPATCH_SEGMENT_SLOW segment=%s elapsed_ms=%d",
+                    site.context,
+                    round(elapsed * 1000),
+                )
 
     # LLM: closing催收有界且独立于恢复退避，每拍检查硬期限；不代执行器结算，不释放claim。
     # 函数用途: 撤销超时回合的原审批等待并重发协作中断。
@@ -569,7 +630,12 @@ class _RequestDispatcher:
             )
             return
         raise_if_input_reconcile_unsettled(
-            reconcile_gateway_input_receipts(self.paths, self.bootstrap_agent, limit=64)
+            reconcile_gateway_input_receipts(
+                self.paths,
+                self.bootstrap_agent,
+                limit=64,
+                should_yield=self._inbox_changed_since_tick_start,
+            )
         )
 
     # LLM: 锁 sidecar 清扫段：只删数据文件已不存在、超过 24 小时宽限、且非阻塞拿得到 flock 的 <name>.lock；
@@ -1820,6 +1886,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._owner_next_check_at: dict[object, float] = {}
         self._owner_plan_signatures: dict[object, tuple | None] = {}
         self._next_owner_retire_at = 0.0
+        self._owner_build_cursor = 0
         # 后台整合按 owner + thread 分车道。持久 run claim 保证同会话单飞，
         # 进程内 in-flight 去重防止同一 thread 重复提交；不同 thread 可在有界池中并发。
         self._executor: object | None = None
@@ -1909,19 +1976,54 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
 
         self._maybe_write_heartbeat()
         draining = restart_draining()
-        if not draining:
-            self._maybe_seed_wake_pending_owners()
-        reports = self._collect_finished_ticks()
-        if not draining:
+        phases = dict.fromkeys(_BACKGROUND_TICK_PHASES, 0)
+        tick_started = cursor = time.monotonic()
+        completed = False
+        reports: list[object] = []
+        try:
+            if not draining:
+                self._maybe_seed_wake_pending_owners()
             now = time.monotonic()
-            if now >= self._next_owner_retire_at:
-                release_idle_owner_agents(self)
-                self._release_idle_managed_owner_agents()
-                self._next_owner_retire_at = now + 5.0
-            self._sync_owner_schedulers()
-            self._recover_active_watch_harvesters()
-            self._run_due_curators()
-            self._submit_ready_thread_ticks()
+            phases["seed"] = round(max(0.0, (now - cursor) * 1000))
+            cursor = now
+            reports = self._collect_finished_ticks()
+            now = time.monotonic()
+            phases["collect"] = round(max(0.0, (now - cursor) * 1000))
+            cursor = now
+            if not draining:
+                if cursor >= self._next_owner_retire_at:
+                    release_idle_owner_agents(self)
+                    self._release_idle_managed_owner_agents()
+                    self._next_owner_retire_at = cursor + 5.0
+                now = time.monotonic()
+                phases["retire"] = round(max(0.0, (now - cursor) * 1000))
+                cursor = now
+                self._sync_owner_schedulers()
+                now = time.monotonic()
+                phases["sync"] = round(max(0.0, (now - cursor) * 1000))
+                cursor = now
+                self._recover_active_watch_harvesters()
+                now = time.monotonic()
+                phases["watch"] = round(max(0.0, (now - cursor) * 1000))
+                cursor = now
+                self._run_due_curators()
+                now = time.monotonic()
+                phases["curators"] = round(max(0.0, (now - cursor) * 1000))
+                cursor = now
+                self._submit_ready_thread_ticks()
+                now = time.monotonic()
+                phases["submit"] = round(max(0.0, (now - cursor) * 1000))
+                cursor = now
+            completed = True
+        finally:
+            end = cursor if completed else time.monotonic()
+            total = max(0.0, end - tick_started)
+            if total >= _DISPATCH_SEGMENT_SLOW_LOG_SECONDS:
+                logging.getLogger(__name__).warning(
+                    "GATEWAY_BACKGROUND_TICK_SLOW total_ms=%d phases=%s",
+                    round(total * 1000),
+                    ",".join(f"{name}:{phases[name]}" for name in _BACKGROUND_TICK_PHASES),
+                )
         if not reports:
             return False
         _record_background_main_reports(self._base_agent, reports)
@@ -1996,16 +2098,30 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # 纯 curator 软 owner 不需要会话 scheduler，也不能在这里批量构建完整 Agent；
         # 它们只在 _run_due_curators 真正拿到有限 worker 时临时进入池。
         managed = self._ensure_managed_owner_pool()
-        for owner in self._registry.hard_snapshot():
-            try:
-                if managed is not None and managed.handles(owner):
-                    # 旧直写库派单先按原身份持久交接到规范库，再取独立准入的受管Agent；Count0原提交即直调。
-                    managed.reconcile(owner, commit_transition=lambda operation: operation())
-                    managed.get(owner)
-                else:
-                    pool.get(owner, hard=True, touch=False)
-            except Exception as exc:
-                _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
+        owners = self._registry.hard_snapshot()
+        if owners:
+            start = int(getattr(self, "_owner_build_cursor", 0) or 0) % len(owners)
+            rotated = [*owners[start:], *owners[:start]]
+            builds = 0
+            next_cursor = (start + 1) % len(owners)
+            peek = getattr(pool, "peek", None)
+            for offset, owner in enumerate(rotated):
+                index = (start + offset) % len(owners)
+                try:
+                    if managed is not None and managed.handles(owner):
+                        # 旧直写库派单先按原身份持久交接到规范库，再取独立准入的受管Agent；Count0原提交即直调。
+                        managed.reconcile(owner, commit_transition=lambda operation: operation())
+                        managed.get(owner)
+                    else:
+                        if callable(peek) and peek(owner) is None:
+                            if builds >= _COLD_OWNER_BUILDS_PER_TICK_COUNT:
+                                continue
+                            builds += 1
+                            next_cursor = (index + 1) % len(owners)
+                        pool.get(owner, hard=True, touch=False)
+                except Exception as exc:
+                    _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
+            self._owner_build_cursor = next_cursor
         active = {id(agent): agent for agent in pool.hard_agents()}
         if managed is not None:
             active.update((id(agent), agent) for agent in managed.hard_agents())
