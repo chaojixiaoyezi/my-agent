@@ -1476,6 +1476,20 @@ agent_py_agent/
 
 ## Tree
 
+### 2026-11-18 飞书凭据卡直连脚本/浏览器/HTTP 与一审返工加固（FC1–FC3 & pp1118 R1–R5）
+
+```text
+agent_py_agent/agent/
+`-- user_space/task_credential_material.py             # 携卡子进程无名只读 FD 传递（先 unlink 后写入）、回合授权绑定与清理遥测
+agent_py_agent/tests/
+|-- test_pp1118_r1_waiting_and_slice_bytes.py          # 等待态定时任务后置验收、nofollow 只读 FD 身份核验与分片字节上限接线回归
+|-- test_pp1118_r1_scheduler_rules_and_retries.py      # 复合监控逐规则后置验收/连续失败状态、未知副作用禁自动重试与事件批次重试回归
+|-- test_fc1_credential_continuation.py                # 飞书同人同线程凭据续用、collected 发现、两阶段断点恢复与单次唤醒回归
+|-- test_fc2_credential_shell_boundary.py              # 前台携卡子进程只读 FD 隔离、跨块全变体脱敏、流式/投递/日志边界回归
+|-- test_fc2_card_script_sites.py                      # 凭据卡直连标准 Token 站与客户端变换表单站端到端受保护查询回归
+`-- test_fc3_card_browser_http.py                      # browser-lite 两阶段同源凭据填表、会话隔离与声明式 HTTP 表单编码/预检回归
+```
+
 ### 2026-11-18 定时产物后置验收、连续失败排查与运行时契约加固（pro-pack-20261118：W0–W10）
 
 ```text
@@ -2290,6 +2304,8 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+- `agent_py_agent/agent/user_space/task_credential_material.py`：在已授权工具执行期内衔接 `task_credentials.authorized_credential_material`，以先解除目录链接再写入密文 JSON 的无名只读 FD 向 macOS Seatbelt（`/dev/fd/<fd>`）或 Linux `bwrap`（`--ro-bind-data`）同步子进程提供 `MY_AGENT_CREDENTIAL_FILE`，并在首个输出字节前注册全回合脱敏快照与进程树回收确认。
 
 - `agent_py_agent/agent/scheduler/postcheck.py`：提供定时任务完成后的产物结构化验收（`POSTCHECK_SCHEMA`、`normalize_postcheck`、`evaluate_postcheck`），在调度仓库变更锁外按有界目录项与字节预算校验相对路径产物尺寸、行数、时效与 JSON 指针断言，仅输出数值观测摘要而不包含文件正文或绝对路径。
 

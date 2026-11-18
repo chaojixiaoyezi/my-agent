@@ -1,3 +1,9 @@
+## 2026-11-18 飞书凭据卡直连同步脚本、受控浏览器与 HTTP 表单续跑（本地候选）
+
+- **单点凭据授权、发现与重放安全唤醒（`FC1`）**：`task_credentials.authorized_credential_material` 作为唯一宿主凭据解密入口，支持飞书同一已验证 `owner/actor/thread` 跨新根任务的 `task` 卡续用（子代理、异线程、异成员与旧 attempt 仍关闭拒绝），并在 `discover_owner_credentials` / `discover_group_credentials` 中统一暴露可用 `collected` 卡及可选消费方式；卡提交通过 `input_dependencies.resolve(..., credential_result=...)` 原子落盘可公开引用、规范 `origin` 与代次，覆盖密文保存后与唤醒信号发布前的两处崩溃恢复点并预载 `request_credentials`、`run_command`、`web_fetch`。
+- **同步子进程无名只读 FD 与全回合输出脱敏（`FC2`）**：`run_command(credential_ref=...)` 与 `scripts(action="run", credential_ref=...)` 通过 `task_credential_material.credential_file_for_child` 先 `unlink` 临时文件并清理空目录后再写入 JSON，仅向当前沙箱子进程（macOS Seatbelt `/dev/fd/<fd>`、Linux `bwrap --ro-bind-data`）传递只读描述符；`TurnCredentialRedaction` 在首个明文出口前注册原值及 JSON/URL/Base64/Basic 编码变体，统一覆盖进程流、`StreamWriter`、`MessageStore`、后台冻结投递、显式 `send_message`（阻断携卡受限附件 `CREDENTIAL_ATTACHMENT_WITHHELD`）与脚本 `run_out` 归档门（`SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED`）。
+- **两阶段同源浏览器填表与声明式 HTTP 表单编码（`FC3`）**：内置 `browser-lite` `fill` 支持与字面 `value` 互斥的 `credential_ref` + `field` 两阶段私有 `_meta.credential_fill`（`inspect` 核验当前文档 `origin` 与安装包/激活绑定后，在同一执行上下文 `apply` 填表并在后续 `read`/候选/诊断中隐藏控件值，同时按 `(owner, actor, thread, generation)` 隔离浏览器上下文）；`task_credential_http` 新增 `auth_config.body_encoding`（默认 `json`，可选 `form`）及未配置 `collected` 零外发预检指引与 HTTP `415` 副作用保真提示。
+
 ## 2026-11-18 定时任务产物后置验收（postcheck）与连续失败自动排查（on_failure）（本地候选）
 
 - **锁外纯结构化产物验收（`scheduler/postcheck.py`）**：定时任务新增可选 `postcheck` 契约（1～8 个相对根路径产物断言，支持字节数、行数、最大陈旧秒数与 JSON Pointer 标量/下界比较）。`SchedulerService.finish` 在获取 `SchedulerRepository._mutation_scope` 之前按 `retention_scan_slice_bytes` 与单目录 64 项上限执行只读校验，并将结果映射为 `SCHEDULER_POSTCHECK_FAILED`（`business`）、`SCHEDULER_OUTPUT_STALLED`（`stalled`）或 `SCHEDULER_POSTCHECK_UNAVAILABLE`（`unknown`）；观测回执仅保留数值计数，不落盘文件正文或宿主绝对路径。

@@ -177,7 +177,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "09f70277860bc2b94cde34a49838804df7eeb187bf7107b02f67065dbc6d105e",
+    "body_hash": "77724e13b41dbfb67083d3313efb9c7dc6e7d480d1a6e79928ae98a2216d4a4f",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -671,6 +671,11 @@
                     "loopback",
                     "lan"
                   ],
+                  "type": "string"
+                },
+                "credential_ref": {
+                  "description": "同步脚本读 MY_AGENT_CREDENTIAL_FILE；工具参数只填宿主引用。",
+                  "pattern": "^cred_[0-9a-f]{32}$",
                   "type": "string"
                 }
               },
@@ -1632,7 +1637,7 @@
           "type": "function",
           "function": {
             "name": "request_credentials",
-            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用交web_fetch，避免发卡打扰用户。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅当find为空或遇到明确HTTP 401（verification_status=rejected）时才request；个人来源绑定URL时默认owner跨任务同站点复用，无URL为task，群新卡默认group本群共享。request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。",
+            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用，避免发卡打扰用户。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅当find为空或遇到明确HTTP 401（verification_status=rejected）时才request；个人来源绑定URL时默认owner跨任务同站点复用，无URL为task，群新卡默认group本群共享。request已指定basic/bearer等方案时保存后可直接交web_fetch；collected可直接把credential_ref交给前台同步run_command（读取MY_AGENT_CREDENTIAL_FILE）或受控浏览器fill(credential_ref,field)，也可先configure（login支持auth_config.body_encoding=json|form）后交web_fetch。job_id仅绑定已有本人监控。",
             "parameters": {
               "additionalProperties": false,
               "anyOf": [
@@ -1726,7 +1731,7 @@
                   "type": "string"
                 },
                 "authentication": {
-                  "description": "认证注入方案枚举：collected仅安全保存秘密（使用前需configure绑定方案）；basic/bearer/header/login/signature由宿主向同origin请求注入秘密。",
+                  "description": "认证注入方案枚举：collected安全保存原始秘密字段（可直接传给run_command的credential_ref、browser-lite的fill(credential_ref,field)，或configure后再交web_fetch）；basic/bearer/header/login/signature由宿主向同origin请求注入秘密。",
                   "enum": [
                     "collected",
                     "basic",
@@ -1776,7 +1781,18 @@
                   "type": "array"
                 },
                 "auth_config": {
-                  "description": "可选。与authentication配套的非秘密结构化认证参数对象（如login/signature所需的同源登录路径、表单键名映射等；严禁填入明文密码或密钥）。",
+                  "description": "可选。与authentication配套的非秘密结构化认证参数对象（如login所需的同源url、body_fields、可选body_encoding=json|form、cookies/token_path，或signature配置；严禁填入明文密码或密钥）。",
+                  "properties": {
+                    "body_encoding": {
+                      "default": "json",
+                      "description": "仅authentication=login时可选：登录请求体编码，json（默认application/json）或form（application/x-www-form-urlencoded）。",
+                      "enum": [
+                        "json",
+                        "form"
+                      ],
+                      "type": "string"
+                    }
+                  },
                   "type": "object"
                 },
                 "ttl_seconds": {

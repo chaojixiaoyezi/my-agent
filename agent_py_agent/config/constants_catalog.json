@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1522,
+  "count": 1527,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8516,6 +8516,14 @@
       "description": "程序文件摘要每次读入的块大小（字节）。"
     },
     {
+      "name": "_MAX_CREDENTIAL_SESSION_BINDINGS_COUNT",
+      "file": "agent_py_agent/agent/plugin_runtime.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单个插件代理实例最多保留的携卡浏览器会话绑定数上限。"
+    },
+    {
       "name": "_BUILTIN_PROMPT_CACHE_MAX_ENTRIES",
       "file": "agent_py_agent/agent/prompting_parts/builder.py",
       "value": 64,
@@ -9738,6 +9746,38 @@
       "unit": "个",
       "category": "上限预算",
       "description": "近名匹配建议最多 2 条：够提示又不刷屏。"
+    },
+    {
+      "name": "_MAX_ACTIVE_SCOPES_COUNT",
+      "file": "agent_py_agent/agent/tooling/host_output_redaction.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "进程内同时保留的活动会话脱敏作用域上限。"
+    },
+    {
+      "name": "_MAX_ACTIVE_TURNS_PER_SCOPE_COUNT",
+      "file": "agent_py_agent/agent/tooling/host_output_redaction.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单个会话作用域内同时保留的活动回合脱敏桶上限。"
+    },
+    {
+      "name": "_MAX_TURN_RAW_BYTES",
+      "file": "agent_py_agent/agent/tooling/host_output_redaction.py",
+      "value": 524288,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单回合脱敏器累计接收的原始敏感值字节上限。"
+    },
+    {
+      "name": "_MAX_TURN_RAW_VALUES_COUNT",
+      "file": "agent_py_agent/agent/tooling/host_output_redaction.py",
+      "value": 256,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单回合脱敏器最多登记的原始敏感值数量上限。"
     },
     {
       "name": "_LSOF_TIMEOUT_SECONDS",

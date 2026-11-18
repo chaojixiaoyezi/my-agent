@@ -39,10 +39,14 @@ _SNAPSHOT_TOKENS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _SNAPSHOT_TOKENS_LOCK = threading.Lock()
 _CREDENTIAL_REDACTED_BYTES = _CREDENTIAL_REDACTED.encode('utf-8')
 _TURN_REDACTION_ATTR = '_turn_credential_redaction'
-_MAX_TURN_RAW_VALUES = 256
+# 单回合脱敏器最多登记的原始敏感值数量上限。
+_MAX_TURN_RAW_VALUES_COUNT = 256
+# 单回合脱敏器累计接收的原始敏感值字节上限。
 _MAX_TURN_RAW_BYTES = 512 * 1024
-_MAX_ACTIVE_TURNS_PER_SCOPE = 64
-_MAX_ACTIVE_SCOPES = 1024
+# 单个会话作用域内同时保留的活动回合脱敏桶上限。
+_MAX_ACTIVE_TURNS_PER_SCOPE_COUNT = 64
+# 进程内同时保留的活动会话脱敏作用域上限。
+_MAX_ACTIVE_SCOPES_COUNT = 1024
 _UNICODE_ESCAPE_RE = re.compile(r'\\u([0-9a-f]{4})')
 _PERCENT_HEX_RE = re.compile(r'%[0-9A-F]{2}')
 
@@ -582,7 +586,7 @@ def _register_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item:
             if bucket is None:
                 bucket = OrderedDict()
                 _ACTIVE_TURN_SCOPES[scope_key] = bucket
-                while len(_ACTIVE_TURN_SCOPES) > _MAX_ACTIVE_SCOPES:
+                while len(_ACTIVE_TURN_SCOPES) > _MAX_ACTIVE_SCOPES_COUNT:
                     _, dropped_bucket = _ACTIVE_TURN_SCOPES.popitem(last=False)
                     for dropped in dropped_bucket.values():
                         dropped._clear_secrets_unlocked()
@@ -591,7 +595,7 @@ def _register_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item:
                 _ACTIVE_TURN_SCOPES.move_to_end(scope_key)
             bucket[turn_key] = item
             bucket.move_to_end(turn_key)
-            while len(bucket) > _MAX_ACTIVE_TURNS_PER_SCOPE:
+            while len(bucket) > _MAX_ACTIVE_TURNS_PER_SCOPE_COUNT:
                 _, evicted = bucket.popitem(last=False)
                 evicted._clear_secrets_unlocked()
                 evicted_log_keys.append(f"{evicted.owner_key}::{evicted.turn_key}")
@@ -694,7 +698,7 @@ class TurnCredentialRedaction:
                 if not isinstance(raw, str) or not raw or not raw.strip() or raw in seen:
                     continue
                 size = len(raw.encode('utf-8'))
-                if len(self._raw_values) + 1 > _MAX_TURN_RAW_VALUES or self._raw_bytes + size > _MAX_TURN_RAW_BYTES:
+                if len(self._raw_values) + 1 > _MAX_TURN_RAW_VALUES_COUNT or self._raw_bytes + size > _MAX_TURN_RAW_BYTES:
                     self._withheld = True
                     self._version += 1
                     break

@@ -1071,7 +1071,7 @@ def test_registered_scripts_action_run_with_credential_ref_and_artifact_gate(tmp
 def test_session_scope_cli_non_task_graceful_and_turn_eviction_clears_log_secrets(tmp_path):
     from agent_py_agent.agent.common import log_redaction as log_red_mod
     from agent_py_agent.agent.tooling.host_output_redaction import (
-        _MAX_ACTIVE_TURNS_PER_SCOPE,
+        _MAX_ACTIVE_TURNS_PER_SCOPE_COUNT,
         TurnCredentialRedaction,
     )
 
@@ -1092,7 +1092,7 @@ def test_session_scope_cli_non_task_graceful_and_turn_eviction_clears_log_secret
     # Evicting oldest turn from scope bucket also unregisters its _ACTIVE_TURN_LOG_SECRETS entry
     turns: list[TurnCredentialRedaction] = []
     evicted_secret = "SYNTHETIC_EVICTED_LOG_SECRET_0001"
-    for idx in range(_MAX_ACTIVE_TURNS_PER_SCOPE + 2):
+    for idx in range(_MAX_ACTIVE_TURNS_PER_SCOPE_COUNT + 2):
         tr = TurnCredentialRedaction(owner_key="evict-owner", thread_id="thr-evict", turn_key=f"turn-{idx}")
         tr.register_values((evicted_secret if idx == 0 else f"SYNTHETIC_TURN_SECRET_{idx:04d}",))
         turns.append(tr)

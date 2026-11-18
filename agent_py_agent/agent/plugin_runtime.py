@@ -82,7 +82,8 @@ PACK_MCP_CONNECT_TIMEOUT_SECONDS: float = float("10.0")
 CREDENTIAL_FILL_EXTENSION = "credential_fill"
 CREDENTIAL_FILL_VERSION = "1"
 _CREDENTIAL_REF_RE = re.compile(r"cred_[0-9a-f]{32}\Z")
-_MAX_CREDENTIAL_SESSION_BINDINGS = 64
+# 单个插件代理实例最多保留的携卡浏览器会话绑定数上限。
+_MAX_CREDENTIAL_SESSION_BINDINGS_COUNT = 64
 
 
 # LLM: 仅解析能力包连接阶段的宿主预算；无效、非有限或非正值保留旧值，不扩展外层 deadline。
@@ -1405,7 +1406,7 @@ def _remember_credential_session(
             "variants": tuple(variants),
         }
         bindings.move_to_end(scope_key)
-        while len(bindings) > _MAX_CREDENTIAL_SESSION_BINDINGS:
+        while len(bindings) > _MAX_CREDENTIAL_SESSION_BINDINGS_COUNT:
             bindings.popitem(last=False)
 
 

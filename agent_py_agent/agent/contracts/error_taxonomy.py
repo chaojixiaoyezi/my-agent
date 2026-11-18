@@ -11381,6 +11381,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="能力请求中的 run_id 不是合法单段编号，未读取目标执行；核对原请求绑定并修正编号，禁止路径跳转或猜测其它执行。",
     ),
+    "CREDENTIAL_ATTACHMENT_WITHHELD": ErrorContract(
+        code="CREDENTIAL_ATTACHMENT_WITHHELD", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="携卡回合禁止外发包含调试、会话、二进制或凭据回显的附件，本次消息未发送；移除受限附件，仅发送已净化的业务文本摘要或纯净业务文本文件。",
+    ),
     "CREDENTIAL_SNAPSHOT_UNAVAILABLE": ErrorContract(
         code="CREDENTIAL_SNAPSHOT_UNAVAILABLE", category="credential", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
@@ -11636,6 +11641,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="定时任务产物 postcheck 因文件不可读、路径越界或扫描超预算而未能核验，本次结果保留为 unknown；用 schedule action=history 检查 postcheck_checks 后修复可读性与路径约束，稍后再核验，不可盲目重放写操作。",
     ),
+    "SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED": ErrorContract(
+        code="SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="携卡运行的脚本在 run_out 产出了隐藏项、符号链接、二进制、会话或调试类受限产物，归档已被阻断；修改脚本仅写出已净化的 UTF-8 纯业务文本结果，不输出凭据、会话或二进制文件。",
+    ),
     "SESSION_TASK_LEARNING_METADATA_INVALID": ErrorContract(
         code="SESSION_TASK_LEARNING_METADATA_INVALID", category="validation", retryable=False,
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
@@ -11685,6 +11695,11 @@ ERROR_CONTRACTS.update({
         code="UNSAFE_CANONICAL_WORKSPACE_PATH", category="path", retryable=False,
         recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
         recovery_hint="规范工作区路径未通过安全边界核验，未读取或删除目标；检查原 owner 工作区的链接与父链，修复规范路径后重新预览。",
+    ),
+    "UNVERIFIED_CREDENTIAL_FROZEN_DELIVERY": ErrorContract(
+        code="UNVERIFIED_CREDENTIAL_FROZEN_DELIVERY", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="携卡后台回合的待投递快照缺少当前版本脱敏核验标记，已扣留且未外发；在当前版本核实安全正文后再生成业务结果投递，勿强制重放旧冻结快照。",
     ),
     "WAKE_PAGE_UNAVAILABLE": ErrorContract(
         code="WAKE_PAGE_UNAVAILABLE", category="storage", retryable=False,

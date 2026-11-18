@@ -397,7 +397,7 @@ class HostCredentialUse:
         consumer: str,
         target_url: str | None = None,
         expected_generation: int | None = None,
-        **extra: Any,
+        browser_consumer: Mapping[str, str] | None = None,
     ) -> Iterator[Any]:
         if not self._armed:
             raise CredentialInputError(
@@ -415,14 +415,6 @@ class HostCredentialUse:
             )
         from .task_credentials import authorized_credential_material
 
-        unexpected = set(extra) - {"browser_consumer"}
-        if unexpected:
-            raise CredentialInputError(
-                "TOOL_INVALID_ARGUMENTS",
-                f"不支持的凭据授权参数：{sorted(unexpected)!r}。",
-                stage="validation",
-                effect_outcome="not_started",
-            )
         with self._bound_run_params():
             with authorized_credential_material(
                 self._agent,
@@ -430,7 +422,7 @@ class HostCredentialUse:
                 consumer=consumer,
                 target_url=target_url,
                 expected_generation=expected_generation,
-                browser_consumer=extra.get("browser_consumer"),
+                browser_consumer=browser_consumer,
             ) as material:
                 # 在任何工具副作用与首个明文出口之前完成回合级与调用级净化绑定。
                 updated_redaction = self._turn_redaction.register(material)

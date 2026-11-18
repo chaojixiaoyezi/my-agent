@@ -233,10 +233,18 @@ def _bind_pinned_tool(handler, target, definition):
 
 # LLM: 原ScriptTool已校验并授权；宿主固定pin只传给已有数据源执行seam，runner选项仍来自原宿主。
 # 函数用途: 在脚本工具的单次run中传递历史代码身份。
-def _pinned_script_dispatch(tool, target, params):
+def _pinned_script_dispatch(tool, target, params, *, context=None):
     from ..tooling.scripts_tool import _plain
+    from ..user_space.task_credential_storage import CredentialInputError
     from ..workflows.datasource_runtime import run_script_with_datasources
     from ..workflows.script_runner import ScriptRunner
+    if params.get('credential_ref') is not None:
+        raise CredentialInputError(
+            'CREDENTIAL_NOT_AUTHORIZED',
+            '定时任务固定版本脚本运行不直接消费交互式凭据引用，未解密且未启动。',
+            stage='authorization',
+            effect_outcome='not_started',
+        )
     if params.get('action') != 'run' or params.get('script_id') != target['asset_id']:
         raise ValueError('scheduled script target mismatch')
     runner = tool.runner

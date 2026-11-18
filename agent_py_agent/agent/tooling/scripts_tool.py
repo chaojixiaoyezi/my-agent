@@ -48,7 +48,7 @@ def _dispatch(tool, params, *, context=None):
     notifier = getattr(tool, 'im_notifier', None)
     ctx = (bind_asset_im_notifier(tool.owner_home, notifier)
            if callable(notifier) and _ASSET_IM_NOTIFIER.get() is None else nullcontext())
-    dispatch_kwargs = {'context': context} if context is not None else {}
+    dispatch_kwargs = {'context': context} if (context is not None and params.get('credential_ref') is not None) else {}
     with ctx:
         if params['action'] in ('list', 'get', 'preview', 'run', 'resume', 'inspect_run', 'check_sources',
                                 'versions', 'diff', 'impact', 'status'):
