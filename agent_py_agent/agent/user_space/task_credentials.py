@@ -10,10 +10,12 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit
+from types import MappingProxyType
+from urllib.parse import urlsplit, urlunsplit
 
 from ..capability.runtime_config_reload import capability_config_for_agent
 from ..common.json_io import (
@@ -70,6 +72,133 @@ def credential_path(home, reference):
     if any(c not in '0123456789abcdef' for c in reference[5:]):
         raise ValueError('凭据引用无效')
     return Path(home).joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS, reference+'.json')
+
+
+@dataclass(frozen=True)
+class CredentialMaterial:
+    """宿主单次授权后向受控处理器移交的不可变凭据材料；repr/str 排除所有敏感字段。"""
+
+    credential_ref: str
+    generation: int
+    origin: str = field(repr=False)
+    target_url: str = field(repr=False)
+    values: Mapping[str, str] = field(repr=False)
+    requested_credential_ref: str = field(default='', repr=False)
+    access_scope: str = field(default='task', repr=False)
+    owner_id: str = field(default='', repr=False)
+    actor_id: str = field(default='', repr=False)
+    thread_id: str = field(default='', repr=False)
+    browser_consumer: Mapping[str, str] | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.credential_ref, str)
+            or not self.credential_ref.startswith('cred_')
+            or len(self.credential_ref) != 37
+            or any(ch not in '0123456789abcdef' for ch in self.credential_ref[5:])
+        ):
+            raise ValueError('凭据材料引用无效')
+        if type(self.generation) is not int or self.generation < 1:
+            raise ValueError('凭据材料代次无效')
+        if not isinstance(self.origin, str) or not self.origin:
+            raise ValueError('凭据材料 origin 无效')
+        if not isinstance(self.target_url, str) or not self.target_url:
+            raise ValueError('凭据材料 target_url 无效')
+        if not isinstance(self.values, Mapping) or any(
+            not isinstance(k, str) or not isinstance(v, str)
+            for k, v in self.values.items()
+        ):
+            raise ValueError('凭据材料字段值无效')
+        object.__setattr__(self, 'values', MappingProxyType(dict(self.values)))
+        if self.browser_consumer is not None:
+            if not isinstance(self.browser_consumer, Mapping):
+                raise ValueError('凭据浏览器消费者绑定无效')
+            object.__setattr__(
+                self,
+                'browser_consumer',
+                MappingProxyType({str(k): str(v) for k, v in self.browser_consumer.items()}),
+            )
+
+
+def _public_credential_target_url(url: str, origin: str) -> str:
+    """将原任务已公开声明的请求 URL 去掉 query/fragment 后保留路径；不可判定时退回规范 origin。"""
+    if not isinstance(url, str) or not url.strip():
+        return ''
+    parts = urlsplit(url.strip())
+    if parts.username or parts.password or not parts.hostname or parts.scheme not in {'http', 'https'}:
+        return origin
+    if credential_origin(urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))) != origin:
+        return origin
+    if not parts.path or parts.path == '/':
+        return origin
+    netloc = f'{parts.hostname.lower()}:{parts.port}' if parts.port else parts.hostname.lower()
+    return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
+
+
+def _approved_browser_consumer(agent) -> dict[str, str] | None:
+    """读取宿主已批准且激活的 browser-lite fill 绑定，未安装或未激活返回 None，不创建目录。"""
+    config = getattr(agent, 'config', None)
+    if config is not None and (
+        not getattr(config, 'enable_plugins', True)
+        or not getattr(config, 'enable_tools', True)
+    ):
+        return None
+    home_paths = getattr(agent, 'home_paths', None)
+    root = getattr(home_paths, 'root', None)
+    if home_paths is None or root is None:
+        return None
+    try:
+        from ..plugin_activation_ref import PluginActivationRef
+        from ..plugin_install_store import PluginInstallStore
+        from ..plugin_runtime import plugin_tool_name
+        from .owner_policy import resolve_effective_owner_policy
+        from .owner_resolver import OwnerIdentity, resolve_owner_home
+
+        fill_tool_name = plugin_tool_name('browser-lite', 'fill')
+        disabled = set(getattr(resolve_effective_owner_policy(home_paths), 'disabled_tools', ()) or ())
+        if fill_tool_name in disabled or 'browser-lite' in disabled:
+            return None
+        candidate_owners = []
+        reg_owner = getattr(getattr(agent, 'tools', None), '_plugin_owner', None)
+        if reg_owner is not None:
+            candidate_owners.append(reg_owner)
+        main_owner = resolve_owner_home(root, OwnerIdentity.local_main())
+        if all(item.home_dir != main_owner.home_dir for item in candidate_owners):
+            candidate_owners.append(main_owner)
+        if getattr(home_paths, 'owner_provider', '') == 'local' and getattr(home_paths, 'owner_kind', '') == 'user':
+            priv_owner = resolve_owner_home(
+                root,
+                OwnerIdentity(home_paths.owner_provider, home_paths.owner_kind, home_paths.owner_id),
+            )
+            if all(item.home_dir != priv_owner.home_dir for item in candidate_owners):
+                candidate_owners.append(priv_owner)
+        for plugin_owner in candidate_owners:
+            table_path = plugin_owner.plugins_dir / 'installations.json'
+            if not table_path.is_file():
+                continue
+            for entry in PluginInstallStore(plugin_owner).snapshot():
+                if (
+                    entry.manifest.plugin_id != 'browser-lite'
+                    or not entry.enabled
+                    or entry.manifest.is_content_only
+                    or not entry.activation_id
+                ):
+                    continue
+                if not any(tool.name == 'fill' for tool in getattr(entry.manifest, 'tools', ())):
+                    continue
+                ref = PluginActivationRef.from_owner(
+                    plugin_owner, 'browser-lite', entry.activation_id, config=config,
+                )
+                verified = ref.require()
+                return {
+                    'installation_ref': verified.installation_ref,
+                    'package_sha256': verified.package_sha256,
+                    'activation_id': verified.activation_id,
+                    'tool': 'fill',
+                }
+    except (OSError, PermissionError, RuntimeError, TypeError, ValueError):
+        return None
+    return None
 
 
 # LLM: 认证方案只是受控配置和输入字段描述，不承载秘密；变化时同步卡片、工具 schema 与生命周期测试。
@@ -134,6 +263,8 @@ def request_credential_card(agent, *, url='', authentication='collected', header
     from ..conversation.im_tool_approval import _scope_identity
     if authentication == 'login' and origin and credential_origin(auth_config['url']) != origin:
         raise ValueError('登录地址必须属于同一接口 origin')
+    browser_consumer = _approved_browser_consumer(agent)
+    public_target_url = _public_credential_target_url(url, origin) if origin else ''
     with credential_stage("key_reference", key_validation=True):
         identity = json.dumps({'scope':_scope_identity(scope),'call_id':call_id},sort_keys=True).encode()
         reference = refresh_ref or 'cred_'+(hmac.digest(interaction_key(home,create=True),identity,'sha256').hex()[:32] if call_id else uuid.uuid4().hex)
@@ -143,6 +274,8 @@ def request_credential_card(agent, *, url='', authentication='collected', header
                    'access_scope':access_scope}
         if schema_version == 'task_credential.v2':
             payload.update(schema_version=schema_version, origin=origin, collection_mode=options.collection_mode)
+        if browser_consumer is not None:
+            payload['browser_consumer'] = browser_consumer
         owner = owner_identity_from_config(agent.config)
         if owner.owner_kind == 'group':
             payload.update(presentation={'kind':'group','chat_id':owner.owner_id}, submitter_policy='current_group_member')
@@ -151,6 +284,8 @@ def request_credential_card(agent, *, url='', authentication='collected', header
            'origin':origin,'target_url':url,'collection_mode':options.collection_mode,'authentication':authentication,
            'header_name':header_name,'job_id':job_id,'fields':fields,'auth_config':auth_config,
            'ttl_seconds':ttl_seconds,'generation':1,'delivery_state':'not_started'}
+    if public_target_url:
+        row['public_target_url'] = public_target_url
     path, previous, reused = _persist_credential_request(agent, row, scope, refresh_ref)
     if reused:
         return row['credential_ref'], scope
@@ -196,7 +331,7 @@ def _persist_credential_request(agent, row, scope, refresh_ref):
             row['input_id'] = credential_input_id(row['credential_ref'],row['generation'])
             signed_fields = {key:row[key] for key in ('kind','owner','channel','actor_id','expires_at','credential_ref','scope','generation')}
             signed_fields.update({key:row[key] for key in ('presentation','submitter_policy','access_scope',
-                'replaces_ref','replaces_generation','previous_submitter_actor_id') if key in row})
+                'replaces_ref','replaces_generation','previous_submitter_actor_id','browser_consumer') if key in row})
             if row.get('schema_version') == 'task_credential.v2':
                 signed_fields.update({key: row[key] for key in ('schema_version', 'origin', 'collection_mode') if key in row})
             row['reference'] = sign_interaction_reference(home, signed_fields)
@@ -351,6 +486,7 @@ def _save_credential_row(admission,path,row):
 # LLM: 展示只读原access_scope和结构字段；username为text，其它凭据password且无default，show_icon不控制明文眼睛；提交仍经原MAC/成员门。
 # 函数用途: 在原表单说明使用范围；账号为普通文本、其它凭据遮蔽且从不预填，内部控件名不与业务字段冲突。
 def credential_card(row):
+    browser_hint = '\n已绑定供此浏览器填表及当前获准工具使用。' if row.get('browser_consumer') else ''
     is_owner = row.get('access_scope') == 'owner'
     if is_owner:
         inputs = [{
@@ -375,7 +511,10 @@ def credential_card(row):
             'value': {'kind': 'my_agent_task_credential', 'reference': row['reference'], 'decision': 'cancel'},
         }
         site_target = row.get('origin') or row.get('target_url') or ''
-        div_text = f"站点凭据安全填写：{site_target}\n保存后仅绑定到你的个人账号与该站点，跨任务可自动复用；输入不会进入聊天、模型或记忆。"
+        div_text = (
+            f"站点凭据安全填写：{site_target}\n"
+            f"保存后仅绑定到你的个人账号与该站点，跨任务可自动复用；输入不会进入聊天、模型或记忆。{browser_hint}"
+        )
         return {
             'config': {'wide_screen_mode': True, 'update_multi': True},
             'elements': [
@@ -418,7 +557,7 @@ def credential_card(row):
     return {
         'config': {'wide_screen_mode': True, 'update_multi': True},
         'elements': [
-            {'tag': 'div', 'text': {'tag': 'plain_text', 'content': f"{target}需要接口凭据：{row.get('target_url') or row['origin'] or '请填写目标链接'}\n{usage}\n输入不进入聊天、模型或记忆。"}},
+            {'tag': 'div', 'text': {'tag': 'plain_text', 'content': f"{target}需要接口凭据：{row.get('target_url') or row['origin'] or '请填写目标链接'}\n{usage}\n输入不进入聊天、模型或记忆。{browser_hint}"}},
             {'tag': 'form', 'name': '_credential_form', 'elements': [*inputs, submit]},
             {'tag': 'action', 'actions': [cancel]},
         ],
@@ -441,6 +580,464 @@ def submit_credential_card(agent, payload, body):
         audit=lambda actor: record_interaction_actor(agent,payload,decision='cancel',actor=actor),
         publish=lambda row: publish_credential_resolution(agent,row),
         retire=lambda row: retire_credential_input(agent,row))
+
+
+def _runner_scope_is_current(agent, scope) -> bool:
+    """核对当前 runner 的真实活动执行身份与代次；子代理或过期 attempt 不继承主回合扩展。"""
+    current = getattr(agent, '_current_run_params', None)
+    if current is None or not scope.active or not scope.thread_id:
+        return False
+    if str(getattr(current, 'task_id', '') or '') != scope.root_task_id:
+        return False
+    if scope.agent_kind == 'subagent':
+        if (
+            str(getattr(current, 'run_id', '') or '') != scope.run_id
+            or not scope.execution_attempt_id
+            or str(getattr(current, 'attempt_id', '') or '') != scope.execution_attempt_id
+        ):
+            return False
+    else:
+        if str(getattr(current, 'run_id', '') or '') != scope.run_id:
+            return False
+        if (scope.execution_attempt_id or getattr(current, 'attempt_id', '')) and (
+            str(getattr(current, 'attempt_id', '') or '') != scope.execution_attempt_id
+        ):
+            return False
+    return bool(tool_approval_scope_is_current(agent, scope))
+
+
+def current_credential_actor_scope(agent) -> tuple[str, str, str]:
+    """从当前活动 runner 解析 (owner_key, actor_id, canonical_thread_id)，不读取或解密凭据。"""
+    from ..conversation.host_actor import HostActorError
+    from ..conversation.tool_approval_scope import ToolApprovalScopeUnavailable
+
+    current = getattr(agent, '_current_run_params', None)
+    if current is None:
+        raise CredentialInputError(
+            'CREDENTIAL_NOT_AUTHORIZED',
+            '当前调用缺少活动任务上下文，未使用凭据。',
+            stage='execution_scope',
+            effect_outcome='not_started',
+        )
+    try:
+        scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
+    except ToolApprovalScopeUnavailable:
+        raise CredentialInputError(
+            'CREDENTIAL_TASK_NOT_ACTIVE',
+            '当前任务执行范围不可用，未使用凭据。',
+            stage='execution_scope',
+            effect_outcome='not_started',
+        ) from None
+    if not _runner_scope_is_current(agent, scope):
+        raise CredentialInputError(
+            'CREDENTIAL_NOT_AUTHORIZED',
+            '原任务执行已失效或代次已变化，未使用凭据。',
+            stage='execution_scope',
+            effect_outcome='not_started',
+        )
+    try:
+        _channel, actor = approval_recipient(agent, scope)
+    except HostActorError as exc:
+        raise CredentialInputError(
+            exc.error_code,
+            str(exc),
+            stage='authorization',
+            effect_outcome='not_started',
+        ) from None
+    except ValueError:
+        raise CredentialInputError(
+            'CREDENTIAL_NOT_AUTHORIZED',
+            '当前调用缺少可核验的通道发起人，未使用凭据。',
+            stage='authorization',
+            effect_outcome='not_started',
+        ) from None
+    owner = owner_identity_from_config(agent.config)
+    canonical_thread = scope.thread_id
+    if scope.agent_kind == 'subagent':
+        link, err = agent.conversation_store.tasks.load_report(scope.root_task_id)
+        if err or link is None or not link.thread_id:
+            raise CredentialInputError(
+                'CREDENTIAL_NOT_AUTHORIZED',
+                '当前子执行缺少原主会话归属，未使用凭据。',
+                stage='execution_scope',
+                effect_outcome='not_started',
+            )
+        canonical_thread = link.thread_id
+    return f'{owner.provider}/{owner.owner_kind}/{owner.owner_id}', actor, canonical_thread
+
+
+def _same_actor_feishu_thread_continuation(agent, row, scope, *, channel: str, actor: str) -> bool:
+    """核验普通非 job 的 task 卡在同 Feishu 主对话内由原本人跨 root 延续使用的全部条件。"""
+    from ..conversation.host_actor import background_host_actor, resolve_host_actor
+    from .group_authorization import group_chat_id
+    from .group_authorization_context import current_group_authority, group_operation_actor
+    from .task_credential_forms import assert_credential_record_signature
+
+    if scope.agent_kind != 'main' or not _runner_scope_is_current(agent, scope):
+        return False
+    if channel != 'feishu' or row.get('channel') != 'feishu' or not actor or row.get('actor_id') != actor:
+        return False
+    submitter = row.get('submitter_actor_id')
+    if submitter is not None:
+        if submitter != actor:
+            return False
+    elif row.get('status') == 'ready':
+        return False
+    original_scope = row.get('scope')
+    if not isinstance(original_scope, dict) or original_scope.get('agent_kind') != 'main':
+        return False
+    original_thread_id = str(original_scope.get('thread_id') or '').strip()
+    original_root_id = str(original_scope.get('root_task_id') or '').strip()
+    if not original_thread_id or not original_root_id or scope.thread_id != original_thread_id:
+        return False
+    try:
+        assert_credential_record_signature(agent, row)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+    store = getattr(agent, 'conversation_store', None)
+    if store is None:
+        return False
+    try:
+        current_link, link_err = store.tasks.load_report(scope.root_task_id)
+        thread, thread_err = store.threads.load_report(scope.thread_id)
+        if (
+            link_err
+            or thread_err
+            or current_link is None
+            or thread is None
+            or current_link.status != 'active'
+            or current_link.thread_id != original_thread_id
+        ):
+            return False
+        host_actor = resolve_host_actor(agent, scope.thread_id)
+        owner_id = str(getattr(getattr(agent, 'home_paths', None), 'owner_id', '') or '')
+        if (
+            host_actor is None
+            or host_actor.channel != 'feishu'
+            or host_actor.actor_id != actor
+            or host_actor.source_thread_id != original_thread_id
+            or (owner_id and host_actor.owner_id != owner_id)
+        ):
+            return False
+        orig_link, orig_err = store.tasks.load_report(original_root_id)
+        if orig_err:
+            return False
+        if orig_link is not None:
+            if orig_link.thread_id != original_thread_id:
+                return False
+            orig_actor = background_host_actor(agent, orig_link.thread_id, original_root_id)
+            if (
+                orig_actor is None
+                or orig_actor.channel != 'feishu'
+                or orig_actor.actor_id != actor
+                or orig_actor.source_thread_id != original_thread_id
+                or orig_actor.conversation_id != host_actor.conversation_id
+            ):
+                return False
+        elif not row.get('chat_id'):
+            return False
+        owner = owner_identity_from_config(agent.config)
+        presentation = row.get('presentation')
+        is_group = owner.owner_kind == 'group' or (
+            isinstance(presentation, dict) and presentation.get('kind') == 'group'
+        )
+        if is_group:
+            if owner.owner_kind != 'group' or not isinstance(presentation, dict) or presentation.get('kind') != 'group':
+                return False
+            chat = group_chat_id(agent.home_paths)
+            if presentation.get('chat_id') != chat or (row.get('chat_id') and row.get('chat_id') != chat):
+                return False
+            group_actor = group_operation_actor(agent, scope.thread_id)
+            if (group_actor.channel, group_actor.actor_id) != ('feishu', actor):
+                return False
+            snapshot = current_group_authority(agent)
+            if not _runner_scope_is_current(agent, scope) or actor not in snapshot.member_ids:
+                return False
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return True
+
+
+class _CredentialUnavailableError(ValueError):
+    """凭据未就绪、已过期、已被拒绝或无可用候选的结构化异常（保持 ValueError 调用兼容）。"""
+
+    error_code = 'CREDENTIAL_INPUT_UNAVAILABLE'
+
+
+def _map_credential_use_error(exc: ValueError) -> CredentialInputError:
+    """按结构化异常类型与显式 error_code 归一凭据使用错误，不匹配自然语言文案。"""
+    if isinstance(exc, CredentialInputError):
+        return exc
+    from ..conversation.host_actor import HostActorError
+
+    if isinstance(exc, HostActorError):
+        return CredentialInputError(exc.error_code, str(exc), stage='authorization', effect_outcome='not_started')
+    if isinstance(exc, _CredentialUnavailableError) or getattr(exc, 'error_code', '') == 'CREDENTIAL_INPUT_UNAVAILABLE':
+        return CredentialInputError(
+            'CREDENTIAL_INPUT_UNAVAILABLE',
+            '凭据当前不可用（未就绪、已过期、已被拒绝或已撤销）；请用 request_credentials(operation="status") 核实并由本人更新，勿在聊天发送密码。',
+            stage='credential_use',
+            effect_outcome='not_started',
+        )
+    return CredentialInputError(
+        'CREDENTIAL_NOT_AUTHORIZED',
+        '当前调用者、会话或目标站点无权使用该凭据；请回到原发起会话或改用已获授权的引用，勿在聊天发送密码。',
+        stage='authorization',
+        effect_outcome='not_started',
+    )
+
+
+@contextmanager
+def authorized_credential_material(
+    agent,
+    reference: str,
+    *,
+    consumer: str,
+    target_url: str | None = None,
+    expected_generation: int | None = None,
+    browser_consumer: Mapping[str, str] | None = None,
+) -> Iterator[CredentialMaterial]:
+    """逐次验证当前 runner 身份、范围、签名、代次与有效期后解密，不在锁内或跨调用缓存明文。"""
+    from .task_credential_forms import (
+        assert_credential_record_signature,
+        valid_browser_consumer_binding,
+    )
+    from .task_credential_groups import group_credential_access
+
+    if not isinstance(consumer, str) or consumer not in {'shell', 'browser', 'http'}:
+        raise CredentialInputError(
+            'TOOL_INVALID_ARGUMENTS',
+            '凭据消费方参数无效：consumer 仅支持受控的 shell、browser 或 http。',
+            stage='preflight',
+            effect_outcome='not_started',
+            diagnostic={'field': 'consumer'},
+        )
+    home_paths = getattr(agent, 'home_paths', None)
+    if home_paths is None:
+        raise CredentialInputError(
+            'CREDENTIAL_NOT_AUTHORIZED',
+            '当前执行缺少受管用户目录上下文，未使用凭据。',
+            stage='execution_scope',
+            effect_outcome='not_started',
+        )
+    home = home_paths.owner_home_dir
+    try:
+        requested_path = credential_path(home, reference)
+    except ValueError:
+        raise CredentialInputError(
+            'TOOL_INVALID_ARGUMENTS',
+            'credential_ref 格式无效，请传入宿主返回的 cred_<32位十六进制> 引用。',
+            stage='preflight',
+            effect_outcome='not_started',
+            diagnostic={'field': 'credential_ref'},
+        ) from None
+    if expected_generation is not None and (type(expected_generation) is not int or expected_generation < 1):
+        raise CredentialInputError(
+            'TOOL_INVALID_ARGUMENTS',
+            'expected_generation 必须是正整数。',
+            stage='preflight',
+            effect_outcome='not_started',
+            diagnostic={'field': 'expected_generation'},
+        )
+    if consumer == 'shell':
+        if target_url is not None:
+            raise CredentialInputError(
+                'TOOL_INVALID_ARGUMENTS',
+                'shell 凭据授权不接受外部 target_url 参数；站点绑定直接取自已认证凭据记录。',
+                stage='preflight',
+                effect_outcome='not_started',
+                diagnostic={'field': 'target_url'},
+            )
+    else:
+        if not isinstance(target_url, str) or not target_url.strip():
+            raise CredentialInputError(
+                'TOOL_INVALID_ARGUMENTS',
+                f'{consumer} 凭据授权必须提供真实目标 URL 以核对同源范围。',
+                stage='preflight',
+                effect_outcome='not_started',
+                diagnostic={'field': 'target_url'},
+            )
+        try:
+            credential_origin(target_url)
+        except ValueError:
+            raise CredentialInputError(
+                'TOOL_INVALID_ARGUMENTS',
+                '目标 URL 格式无效，无法核验凭据同源范围。',
+                stage='preflight',
+                effect_outcome='not_started',
+                diagnostic={'field': 'target_url'},
+            ) from None
+    if browser_consumer is not None and (
+        consumer != 'browser' or not valid_browser_consumer_binding(dict(browser_consumer))
+    ):
+        raise CredentialInputError(
+            'CREDENTIAL_NOT_AUTHORIZED',
+            '浏览器消费者绑定无效或与消费方类型不匹配，未使用凭据。',
+            stage='authorization',
+            effect_outcome='not_started',
+        )
+    capability = capability_config_for_agent(agent)
+    if capability is None or not capability.im_task_credentials_enabled:
+        raise CredentialInputError(
+            'TOOL_UNAVAILABLE',
+            '当前未启用私人凭据输入。',
+            stage='configuration',
+            effect_outcome='not_started',
+        )
+    owner_key, actor_id, canonical_thread = current_credential_actor_scope(agent)
+    current = agent._current_run_params
+    scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
+    initial_row = read_credential_row(requested_path, stage='credential_use')
+    if not initial_row:
+        raise CredentialInputError(
+            'CREDENTIAL_INPUT_UNAVAILABLE',
+            '未找到对应的凭据记录；请用 request_credentials 查询可用引用，勿在聊天发送密码。',
+            stage='credential_use',
+            effect_outcome='not_started',
+        )
+    try:
+        assert_credential_record_signature(agent, initial_row)
+    except ValueError:
+        raise CredentialInputError(
+            'CREDENTIAL_NOT_AUTHORIZED',
+            '原凭据卡签名无法核验，未使用凭据。',
+            stage='authorization',
+            effect_outcome='not_started',
+        ) from None
+    lookup_url = target_url if consumer != 'shell' else (initial_row.get('origin') or '')
+    try:
+        if initial_row.get('access_scope') != 'group':
+            _assert_credential_scope(agent, initial_row, scope, lookup_url, require_ready=False, operation='use')
+        elif not lookup_url:
+            group_credential_access(agent, initial_row, scope, operation='status')
+            raise CredentialInputError(
+                'CREDENTIAL_INPUT_UNAVAILABLE',
+                '群凭据尚未填写完成，不能使用。',
+                stage='credential_use',
+                effect_outcome='not_started',
+            )
+        if not lookup_url:
+            raise CredentialInputError(
+                'CREDENTIAL_INPUT_UNAVAILABLE',
+                '凭据尚未填写完成或缺少目标站点，不能使用。',
+                stage='credential_use',
+                effect_outcome='not_started',
+            )
+        observed = _credential_for_use(agent, reference, scope, lookup_url)
+        assert_credential_record_signature(agent, observed)
+    except ValueError as exc:
+        raise _map_credential_use_error(exc) from None
+    if expected_generation is not None and observed.get('generation', 1) != expected_generation:
+        raise CredentialInputError(
+            'CREDENTIAL_INPUT_UNAVAILABLE',
+            '凭据代次已变化，请用 request_credentials(operation="status") 重新核对后再执行。',
+            stage='credential_use',
+            effect_outcome='not_started',
+        )
+    signed_browser = observed.get('browser_consumer')
+    if consumer == 'browser' and signed_browser is not None:
+        if not valid_browser_consumer_binding(signed_browser):
+            raise CredentialInputError(
+                'CREDENTIAL_NOT_AUTHORIZED',
+                '原凭据卡的浏览器绑定无效，未使用凭据。',
+                stage='authorization',
+                effect_outcome='not_started',
+            )
+        actual_browser = dict(browser_consumer) if browser_consumer is not None else _approved_browser_consumer(agent)
+        if actual_browser != signed_browser:
+            raise CredentialInputError(
+                'CREDENTIAL_NOT_AUTHORIZED',
+                '当前浏览器插件安装或激活代次与原凭据卡绑定不符，未使用凭据。',
+                stage='authorization',
+                effect_outcome='not_started',
+            )
+    effective_path = credential_path(home, observed['credential_ref'])
+    raw_values: dict[str, str] | None = None
+    with locked_json_path(effective_path):
+        locked_row = read_credential_row(effective_path, stage='credential_use')
+        try:
+            _assert_credential_unchanged(agent, observed, locked_row, scope)
+        except ValueError:
+            raise CredentialInputError(
+                'CREDENTIAL_INPUT_UNAVAILABLE',
+                '凭据记录或当前任务执行在核验期间已变化，未使用凭据。',
+                stage='credential_use',
+                effect_outcome='not_started',
+            ) from None
+        if (
+            locked_row.get('status') != 'ready'
+            or locked_row.get('verification_status') == 'rejected'
+            or credential_ready_expired(locked_row, now=time.time())
+            or not isinstance(locked_row.get('ciphertext'), str)
+            or not locked_row['ciphertext']
+        ):
+            raise CredentialInputError(
+                'CREDENTIAL_INPUT_UNAVAILABLE',
+                '凭据未就绪、已过期、已被拒绝或已撤销，未使用凭据。',
+                stage='credential_use',
+                effect_outcome='not_started',
+            )
+        with credential_stage('decryption', key_validation=True):
+            decrypted = _cipher(home, existing_only=True).decrypt(locked_row['ciphertext'].encode())
+            decoded = json.loads(decrypted.decode('utf-8'))
+        declared_names = {
+            field_spec['name']
+            for field_spec in locked_row.get('fields', ())
+            if isinstance(field_spec, dict) and isinstance(field_spec.get('name'), str)
+        }
+        if (
+            not isinstance(decoded, dict)
+            or not declared_names
+            or set(decoded) != declared_names
+            or any(not isinstance(k, str) or not isinstance(v, str) for k, v in decoded.items())
+        ):
+            raise CredentialInputError(
+                'CREDENTIAL_RECORD_INVALID',
+                '凭据密文字段与声明结构不一致，未使用凭据。',
+                stage='decryption',
+                effect_outcome='not_started',
+            )
+        raw_values = dict(decoded)
+        normalized_origin = credential_origin(locked_row['origin'])
+        private_target = str(locked_row.get('target_url') or normalized_origin)
+        effective_generation = int(locked_row.get('generation', 1))
+        effective_ref = str(locked_row['credential_ref'])
+        effective_scope = str(locked_row.get('access_scope', 'task'))
+        effective_browser = (
+            dict(signed_browser)
+            if signed_browser is not None
+            else (dict(browser_consumer) if browser_consumer is not None else None)
+        )
+    try:
+        if locked_row.get('access_scope') == 'group':
+            try:
+                group_credential_access(agent, locked_row, scope, operation='use')
+            except ValueError as exc:
+                raise _map_credential_use_error(exc) from None
+        if not _runner_scope_is_current(agent, scope):
+            raise CredentialInputError(
+                'CREDENTIAL_NOT_AUTHORIZED',
+                '原任务执行在凭据移交前已结束，未使用凭据。',
+                stage='execution_scope',
+                effect_outcome='not_started',
+            )
+        material = CredentialMaterial(
+            credential_ref=effective_ref,
+            generation=effective_generation,
+            origin=normalized_origin,
+            target_url=private_target,
+            values=raw_values,
+            requested_credential_ref=reference,
+            access_scope=effective_scope,
+            owner_id=owner_key,
+            actor_id=actor_id,
+            thread_id=canonical_thread,
+            browser_consumer=effective_browser,
+        )
+        yield material
+    finally:
+        if raw_values is not None:
+            raw_values.clear()
 
 
 # LLM: 私密凭据守原根，group由同群当前成员按实际提供者择取；仅此入口解密，不能把引用作为跨群授权。
@@ -466,7 +1063,7 @@ def _credential_for_use(agent, reference, scope, url):
                 or row.get('access_scope') != 'group' or row.get('origin') != credential_origin(url)
                 or row.get('status') != 'ready' or row.get('verification_status') == 'rejected'
                 or credential_ready_expired(row, now=time.time())):
-            raise ValueError('本群没有本次可使用的站点凭据')
+            raise _CredentialUnavailableError('本群没有本次可使用的站点凭据')
     else:
         _assert_credential_scope(agent, row, scope, url)
     import logging
@@ -507,7 +1104,7 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, oper
     if row.get('schema_version', 'task_credential.v1') not in {'task_credential.v1', 'task_credential.v2'}:
         raise ValueError('凭据不属于此调用或接口')
     if require_ready and (row.get('verification_status') == 'rejected' or row.get('status')!='ready' or credential_ready_expired(row, now=time.time())):
-        raise ValueError('凭据未就绪、已过期或已撤销，请重新申请私人输入')
+        raise _CredentialUnavailableError('凭据未就绪、已过期或已撤销，请重新申请私人输入')
     from .task_credential_groups import group_credential_access
     if group_credential_access(agent, row, scope, operation=operation):
         return
@@ -533,7 +1130,8 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, oper
         if (run or {}).get('job_id')!=row['job_id'] and scope.root_task_id!=row['scope']['root_task_id']:
             raise ValueError('凭据不属于此监控')
     elif scope.root_task_id!=row['scope']['root_task_id']:
-        raise ValueError('凭据不属于此任务')
+        if not _same_actor_feishu_thread_continuation(agent, row, scope, channel=channel, actor=actor):
+            raise ValueError('凭据不属于此任务')
 
 
 # LLM: 只认宿主前台事实与当前绑定的本机管理员身份（每次调用重新核验）；任何读取异常都按非管理员处理。
@@ -691,7 +1289,8 @@ def list_credentials_for_owner(home_paths):
 def _assert_credential_unchanged(agent, observed, current, scope):
     keys = ('schema_version', 'owner', 'channel', 'actor_id', 'submitter_actor_id', 'scope', 'job_id',
             'origin', 'access_scope', 'generation', 'status', 'verification_status', 'ready_expires_at',
-            'expires_at', 'reference', 'ciphertext', 'authentication', 'auth_config', 'header_name')
+            'expires_at', 'reference', 'ciphertext', 'authentication', 'auth_config', 'header_name',
+            'browser_consumer')
     if (not tool_approval_scope_is_current(agent, scope)
             or any(observed.get(key) != current.get(key) for key in keys)):
         raise ValueError('凭据或执行已变化，请重新查询后操作')
@@ -777,7 +1376,15 @@ def submit_credential_card_for_owner(home, capability, inputs, payload, body, *,
         }
     elif action is True or (isinstance(action, bool) and action):
         if publish is None:
-            inputs.resolve(row.get('input_id',row['credential_ref']),status=row['status'],result_refs=[row['credential_ref']])
+            from ..conversation.input_dependencies import credential_wake_projection
+
+            projection = credential_wake_projection(row) if row.get('status') == 'ready' else None
+            inputs.resolve(
+                row.get('input_id', row['credential_ref']),
+                status=row['status'],
+                result_refs=[row['credential_ref']] if row.get('status') == 'ready' else [],
+                credential_result=projection or None,
+            )
         else:
             publish(row)
     from .interaction_cancellation import credential_cancel_result

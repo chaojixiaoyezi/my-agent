@@ -106,33 +106,148 @@ def resolve_group_credential(agent, row, scope, *, origin) -> dict:
 # LLM: 摘要只白名单标量，不复制headers/query/note/用户名/密文/任意metadata；name筛选不能把本人不可用误判成没有本人凭据。
 # 函数用途: 让原凭据工具列出本群安全摘要或推荐同origin引用；不执行认证、不发送卡片。
 def discover_group_credentials(agent, *, url='', name='', operation='list') -> dict:
+    from .task_credential_forms import assert_credential_record_signature
+    from .task_credentials import credential_usable_in_task
+
     if operation not in {'list', 'find'} or not isinstance(name, str) or len(name) > 128:
         _denied('群凭据发现参数无效。')
-    actor, owner, chat = _context(agent, require_enabled=operation != 'list')
+    current = getattr(agent, '_current_run_params', None)
+    if current is None:
+        _denied('当前凭据调用已失效。')
+    scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
+    actor, owner, chat = _context(agent, scope, require_enabled=False)
     origin = _origin(url) if url else ''
     if operation == 'find' and not origin:
         _denied('查找凭据需要准确的接口地址。')
     all_rows = _rows(agent, owner, chat, include_task=True)
     rows = [row for row in all_rows if _access_scope(row) == 'group']
+    signed_own_tasks = []
+    for row in all_rows:
+        if _access_scope(row) != 'task' or row.get('submitter_actor_id') != actor.actor_id:
+            continue
+        try:
+            assert_credential_record_signature(agent, row)
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            continue
+        signed_own_tasks.append(row)
     active = _current_rows(rows)
+    active_combined_refs = {row['credential_ref'] for row in _current_rows([*rows, *signed_own_tasks])}
+    active_own_tasks = [row for row in signed_own_tasks if row['credential_ref'] in active_combined_refs]
     enabled = getattr(capability_config_for_agent(agent), 'im_group_shared_credentials_enabled', False) is True
-    candidates, own_present = _candidates(rows, actor.actor_id, origin) if origin else (
-        [], bool(_own_rows(active, actor.actor_id, None)))
-    visible = [row for row in rows if (not origin or row['origin'] == origin)
-        and (not name or row.get('credential_name') == name)]
-    candidates = [row for row in candidates if enabled and (not name or row.get('credential_name') == name)]
-    selected = _stable(candidates)[0]['credential_ref'] if candidates else ''
+    usable_own_tasks = [
+        row for row in active_own_tasks
+        if origin and row['origin'] == origin and _usable(row) and credential_usable_in_task(agent, row, scope)
+    ]
+    own_scope_tasks = [
+        row for row in active_own_tasks
+        if (not origin or row['origin'] == origin)
+        and row.get('status') != 'pending'
+        and row.get('status') not in _RETIRED
+        and (
+            credential_usable_in_task(agent, row, scope)
+            or (
+                isinstance(row.get('scope'), dict)
+                and row['scope'].get('thread_id') == scope.thread_id
+                and row.get('actor_id') == actor.actor_id
+            )
+        )
+    ]
+    if enabled:
+        group_candidates, group_own_present = (
+            _candidates(rows, actor.actor_id, origin)
+            if origin
+            else ([], bool(_own_rows(active, actor.actor_id, None)))
+        )
+        own_present = group_own_present or bool(own_scope_tasks)
+        if origin:
+            pool = (
+                [row for row in group_candidates if row.get('submitter_actor_id') == actor.actor_id] + usable_own_tasks
+                if own_present
+                else group_candidates
+            )
+        else:
+            pool = []
+        candidates = [row for row in pool if not name or row.get('credential_name') == name]
+        visible_group = [
+            row for row in rows
+            if (not origin or row['origin'] == origin) and (not name or row.get('credential_name') == name)
+        ]
+        visible_own_tasks = [
+            row for row in usable_own_tasks
+            if operation == 'find' and (not name or row.get('credential_name') == name)
+        ]
+    else:
+        own_present = bool(own_scope_tasks)
+        candidates = (
+            [row for row in usable_own_tasks if not name or row.get('credential_name') == name]
+            if (operation == 'find' and origin)
+            else []
+        )
+        visible_group = (
+            [
+                row for row in rows
+                if (not origin or row['origin'] == origin) and (not name or row.get('credential_name') == name)
+            ]
+            if operation == 'list'
+            else []
+        )
+        visible_own_tasks = (
+            [row for row in own_scope_tasks if not name or row.get('credential_name') == name]
+            if operation == 'find'
+            else []
+        )
+    selected_row = _stable(candidates)[0] if candidates else None
+    selected = selected_row['credential_ref'] if selected_row is not None else ''
     reason = ('own_credential' if own_present else 'group_credential') if selected else (
-        'group_sharing_disabled' if not enabled else 'list_only' if not origin else
+        'group_sharing_disabled' if (not enabled and not own_present) else 'list_only' if not origin else
         'own_credential_unavailable' if own_present else 'no_usable_credential')
     active_refs = {row['credential_ref'] for row in active}
-    return {'credentials': [_summary(row, actor.actor_id, superseded=row['credential_ref'] not in active_refs)
-                            for row in _stable(visible)],
-        'shareable_credentials': [_summary(row, actor.actor_id) for row in _stable(all_rows)
-            if enabled and _access_scope(row) == 'task' and (not origin or row['origin'] == origin)
-            and (not name or row.get('credential_name') == name) and _shareable(agent, row, actor.actor_id)],
-        'selected_credential_ref': selected, 'selection_reason': reason, 'own_credential_present': own_present,
-        'group_sharing_enabled': enabled}
+    group_entries = [
+        _summary(
+            row,
+            actor.actor_id,
+            superseded=row['credential_ref'] not in active_refs,
+            usable_override=enabled and row['credential_ref'] in active_refs and _usable(row),
+        )
+        for row in _stable(visible_group)
+    ]
+    task_entries = [
+        _summary(
+            row,
+            actor.actor_id,
+            superseded=row['credential_ref'] not in active_combined_refs,
+            usable_override=(
+                row['credential_ref'] in active_combined_refs
+                and _usable(row)
+                and credential_usable_in_task(agent, row, scope)
+            ),
+        )
+        for row in _stable(visible_own_tasks)
+    ]
+    return {
+        'credentials': group_entries + task_entries,
+        'shareable_credentials': [
+            _summary(row, actor.actor_id)
+            for row in _stable(all_rows)
+            if enabled
+            and _access_scope(row) == 'task'
+            and (not origin or row['origin'] == origin)
+            and (not name or row.get('credential_name') == name)
+            and _shareable(agent, row, actor.actor_id)
+        ],
+        'selected_credential_ref': selected,
+        'authentication': selected_row['authentication'] if selected_row is not None else '',
+        'authentication_configured': (
+            selected_row['authentication'] in ('basic', 'bearer', 'header', 'signature', 'login')
+            if selected_row is not None
+            else False
+        ),
+        'usable_in_current_task': selected_row is not None,
+        'available_consumers': _available_consumers(selected_row, usable=True) if selected_row is not None else [],
+        'selection_reason': reason,
+        'own_credential_present': own_present,
+        'group_sharing_enabled': enabled,
+    }
 
 
 # LLM: 个人站点凭据按owner/actor/origin发现，不跨人/跨群，支持list和find操作，不返回密码或密文。
@@ -189,11 +304,13 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
             if row.get('kind') != 'task_credential':
                 continue
             if row.get('access_scope', 'task') == 'task':
-                # 本人的任务级卡片只在 list 中投影元数据（不可被 find 选中、不解密），便于在后续任务里查询或撤销。
-                if (operation == 'list' and row.get('owner') == owner and row.get('channel') == channel
+                if (row.get('owner') == owner and row.get('channel') == channel
                         and actor_id in (row.get('actor_id'), row.get('submitter_actor_id'))
+                        and isinstance(row.get('origin'), str)
                         and row.get('credential_ref', '') + '.json' == file_name):
                     try:
+                        if row['origin']:
+                            _origin(row['origin'])
                         assert_credential_record_signature(agent, row)
                     except (KeyError, OSError, RuntimeError, TypeError, ValueError):
                         continue
@@ -214,21 +331,49 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
             except (KeyError, OSError, RuntimeError, TypeError, ValueError):
                 continue
             owner_rows.append(row)
+    from .task_credentials import credential_public_view, credential_usable_in_task
+
     active = _current_rows(owner_rows)
+    active_combined = _current_rows([*owner_rows, *[r for r in task_rows if r.get('origin')]])
+    active_refs = {r['credential_ref'] for r in active}
+    active_all_refs = {r['credential_ref'] for r in active_combined}
     own = _own_rows(active, actor_id, origin or None)
-    usable_candidates = [
+    own_task_scope = [
+        r for r in task_rows
+        if r['credential_ref'] in active_all_refs
+        and (not origin or r.get('origin') == origin)
+        and r.get('submitter_actor_id') == actor_id
+        and r.get('status') != 'pending'
+        and r.get('status') not in _RETIRED
+        and (
+            credential_usable_in_task(agent, r, scope)
+            or (isinstance(r.get('scope'), dict) and r['scope'].get('thread_id') == scope.thread_id)
+        )
+    ]
+    usable_owner = [
         r for r in active
         if (not origin or r.get('origin') == origin)
         and (not name or r.get('credential_name') == name)
         and _usable(r)
     ]
+    usable_task = [
+        r for r in task_rows
+        if r['credential_ref'] in active_all_refs
+        and r.get('origin')
+        and (not origin or r.get('origin') == origin)
+        and (not name or r.get('credential_name') == name)
+        and _usable(r)
+        and credential_usable_in_task(agent, r, scope)
+    ]
+    usable_candidates = [*usable_owner, *usable_task]
     visible = [
         r for r in owner_rows
         if (not origin or r.get('origin') == origin)
         and (not name or r.get('credential_name') == name)
     ]
-    selected = _stable(usable_candidates)[0]['credential_ref'] if (operation == 'find' and usable_candidates) else ''
-    own_present = bool(own)
+    selected_row = _stable(usable_candidates)[0] if (operation == 'find' and usable_candidates) else None
+    selected = selected_row['credential_ref'] if selected_row is not None else ''
+    own_present = bool(own or own_task_scope)
     reason = (
         'own_selected'
         if selected
@@ -238,17 +383,48 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
             else ('own_unavailable' if own_present else 'none')
         )
     )
-    active_refs = {r['credential_ref'] for r in active}
-    from .task_credentials import credential_public_view, credential_usable_in_task
-
-    task_visible = [r for r in task_rows if (not origin or r.get('origin') == origin)
-                    and (not name or r.get('credential_name') == name)]
-    # 任务级条目的 usable 只表示“当前任务能否使用”（原使用门裁决）；它们不参与 find 自动选择与 usable_count。
-    task_entries = [{**_summary(r, actor_id), 'usable': credential_usable_in_task(agent, r, scope),
-                     'submitted_at': r.get('submitted_at'),
-                     **{key: value for key, value in credential_public_view(r, r['credential_ref']).items()
-                        if key in ('expires_at', 'origin_task_id', 'secret_present')}}
-                    for r in _stable(task_visible)]
+    if operation == 'list':
+        task_visible = [
+            r for r in task_rows
+            if (not origin or r.get('origin') == origin)
+            and (not name or r.get('credential_name') == name)
+        ]
+    else:
+        task_visible = [
+            r for r in task_rows
+            if (not origin or r.get('origin') == origin)
+            and (not name or r.get('credential_name') == name)
+            and (
+                r in usable_task
+                or (
+                    r['credential_ref'] in active_all_refs
+                    and isinstance(r.get('scope'), dict)
+                    and r['scope'].get('thread_id') == scope.thread_id
+                )
+            )
+        ]
+    task_entries = []
+    for r in _stable(task_visible):
+        superseded = r['credential_ref'] not in active_all_refs if r.get('origin') else False
+        task_usable = not superseded and _usable(r) and credential_usable_in_task(agent, r, scope)
+        task_entries.append({
+            **_summary(r, actor_id, superseded=superseded, usable_override=task_usable),
+            'submitted_at': r.get('submitted_at'),
+            **{
+                key: value
+                for key, value in credential_public_view(r, r['credential_ref']).items()
+                if key in ('expires_at', 'origin_task_id', 'secret_present')
+            },
+        })
+    owner_entries = []
+    for r in _stable(visible):
+        superseded = r['credential_ref'] not in active_refs
+        owner_usable = not superseded and _usable(r)
+        owner_entries.append({
+            **_summary(r, actor_id, superseded=superseded, usable_override=owner_usable),
+            'submitted_at': r.get('submitted_at'),
+            'expires_at': r.get('ready_expires_at', r.get('expires_at')),
+        })
     return {
         'status': 'ok',
         'operation': operation,
@@ -260,16 +436,16 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
         'usable_count': len(usable_candidates),
         'own_credential_present': own_present,
         'selected_credential_ref': selected,
+        'authentication': selected_row['authentication'] if selected_row is not None else '',
+        'authentication_configured': (
+            selected_row['authentication'] in ('basic', 'bearer', 'header', 'signature', 'login')
+            if selected_row is not None
+            else False
+        ),
+        'usable_in_current_task': selected_row is not None,
+        'available_consumers': _available_consumers(selected_row, usable=True) if selected_row is not None else [],
         'selection_reason': reason,
-        'credentials': [
-            {
-                **_summary(r, actor_id, superseded=r['credential_ref'] not in active_refs),
-                'usable': r['credential_ref'] in active_refs and _usable(r),
-                'submitted_at': r.get('submitted_at'),
-                'expires_at': r.get('ready_expires_at', r.get('expires_at')),
-            }
-            for r in _stable(visible)
-        ] + task_entries,
+        'credentials': owner_entries + task_entries,
     }
 
 
@@ -406,10 +582,22 @@ def _own_rows(rows, actor_id, origin):
 # 函数用途: 判断原共享row当前是否可交给既有HTTP认证器，不发网络验证。
 def _usable(row):
     return (row.get('status') == 'ready' and row.get('verification_status') in ('unverified', 'verified')
-        and row.get('authentication') in ('basic', 'bearer', 'header', 'signature', 'login')
+        and row.get('authentication') in ('collected', 'basic', 'bearer', 'header', 'signature', 'login')
         and isinstance(row.get('submitter_actor_id'), str) and bool(row['submitter_actor_id'])
         and isinstance(row.get('ciphertext'), str) and bool(row['ciphertext'])
         and not credential_ready_expired(row, now=time.time()))
+
+
+def _available_consumers(row, *, usable: bool) -> list[str]:
+    """根据认证配置状态返回当前引用可安全交给的受控消费入口列表。"""
+    if not usable:
+        return []
+    auth = row.get('authentication')
+    if auth in ('basic', 'bearer', 'header', 'signature', 'login'):
+        return ['web_fetch', 'run_command', 'browser_fill']
+    if auth == 'collected':
+        return ['run_command', 'browser_fill']
+    return []
 
 
 # LLM: 使用门和发现共用own池裁决，不能先过滤失效/名称后把本人记录变成不存在。
@@ -493,15 +681,22 @@ def _origin(url):
 
 # LLM: 只投影明确公开的标量；名称属于用户非秘密标签，其余任意metadata不透传；认证方式仅放行已知枚举，未知记录标unknown。
 # 函数用途: 为群成员展示引用、origin、可用状态、认证方式与本人/管理资格，不暴露账号或密文。
-def _summary(row, actor_id, *, superseded=False):
+def _summary(row, actor_id, *, superseded=False, usable_override=None):
     name = row.get('credential_name', '')
+    usable = (
+        bool(usable_override)
+        if usable_override is not None
+        else (_access_scope(row) == 'group' and not superseded and _usable(row))
+    )
     return {'credential_ref': row['credential_ref'], 'access_scope': _access_scope(row), 'origin': row['origin'],
         'name': name[:128] if isinstance(name, str) else '',
         'status': row.get('status') if row.get('status') in ('pending', 'ready', 'expired', 'revoked', 'cancelled', 'failed') else 'unknown',
         'verification_status': row.get('verification_status') if row.get('verification_status') in ('unverified', 'verified', 'rejected') else 'unknown',
         'authentication': row.get('authentication') if row.get('authentication') in ('collected', 'basic', 'bearer', 'header', 'signature', 'login') else 'unknown',
         'authentication_configured': row.get('authentication') in ('basic', 'bearer', 'header', 'signature', 'login'),
-        'usable': _access_scope(row) == 'group' and not superseded and _usable(row), 'own': row.get('submitter_actor_id') == actor_id,
+        'usable': usable, 'usable_in_current_task': usable,
+        'available_consumers': _available_consumers(row, usable=usable),
+        'own': row.get('submitter_actor_id') == actor_id,
         'superseded': superseded, 'can_manage': actor_id in (row.get('actor_id'), row.get('submitter_actor_id'))}
 
 

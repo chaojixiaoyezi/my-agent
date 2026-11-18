@@ -227,6 +227,42 @@ def background_allowed_tools(
     return list(background_tool_policy_decision(config, request=request).allowed_tools)
 
 
+CREDENTIAL_INPUT_PRELOAD_TOOLS: tuple[str, ...] = (
+    "request_credentials",
+    "run_command",
+    "web_fetch",
+)
+
+
+def credential_wake_preload_tools(wake: object, *, reason: str = "") -> tuple[str, ...]:
+    """仅当结构化唤醒为已验证 ready 凭据结算时返回三个目标预载工具。"""
+    if not isinstance(wake, dict):
+        return ()
+    effective_reason = str(reason or wake.get("reason") or "").strip().lower()
+    if effective_reason != "task_input_resolved":
+        return ()
+    metadata = wake.get("metadata")
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("schema_version") != "task-input-event.v1"
+        or metadata.get("input_provider") != "credential"
+        or metadata.get("input_status") != "ready"
+    ):
+        return ()
+    from .input_dependencies import _validated_credential_result
+
+    cred = _validated_credential_result(metadata.get("credential_result"))
+    refs = wake.get("evidence_refs")
+    clean_refs = (
+        {ref.strip() for ref in refs if isinstance(ref, str) and ref.strip()}
+        if isinstance(refs, (list, tuple))
+        else set()
+    )
+    if cred is None or (clean_refs and cred["credential_ref"] not in clean_refs):
+        return ()
+    return CREDENTIAL_INPUT_PRELOAD_TOOLS
+
+
 # LLM: 初次展示取原授权闭包与显式运行上界交集；记忆/画像等重工具只按结构化唤醒预载，授权仍可按需发现，不解析正文。
 # 函数用途: 为后台首次模型请求选择所需工具，未展示的允许工具仍能按需发现。
 def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -> frozenset[str]:
@@ -238,13 +274,14 @@ def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -
         return allowed
     heavy = {"watch_stream", "schedule", "package_build", "package_install", "remember", "update_persona"}
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    reason = str(request.reason or wake.get("reason") or "").strip().lower()
     raw_targets = [
         *tool_names(wake.get("tool_names")),
         *tool_names(wake.get("required_tools")),
         *tool_names(wake.get("tool_name")),
+        *credential_wake_preload_tools(wake, reason=reason),
     ]
     targets = {item for item in normalize_tool_grants(raw_targets) if ":" not in item}
-    reason = str(request.reason or wake.get("reason") or "").strip().lower()
     if reason in heavy:
         targets.add(reason)
     if reason in {"audit_finding", "audit_continue", "audit_source"}:

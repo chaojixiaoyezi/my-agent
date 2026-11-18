@@ -2758,11 +2758,18 @@ def _apply_background_wake_attributes(
     if not wake_signal_id:
         return
     attributes["background_wake_signal_id"] = wake_signal_id
-    wake_tools_only = {
+    wake_tools_only: dict[str, object] = {
         key: wake[key]
         for key in ("tool_names", "required_tools", "tool_name")
         if wake.get(key)
     }
+    from .background_tool_policy import credential_wake_preload_tools, tool_names
+
+    cred_preload = credential_wake_preload_tools(wake, reason=lifecycle_reason)
+    if cred_preload:
+        wake_tools_only["tool_names"] = list(
+            dict.fromkeys([*tool_names(wake_tools_only.get("tool_names")), *cred_preload])
+        )
     if wake_tools_only:
         attributes["background_wake_signal"] = wake_tools_only
     if not task_id or lifecycle_reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
@@ -4508,6 +4515,35 @@ class _BackgroundSchedulerTickMixin:
             unfinished = set(unfinished_task_ids(Path(owner_home), conversation_tasks_dir=tasks_dir))
             pending = repo.list_pending_wakes(limit=1000)
             pending_tasks = {str(row.get("root_task_id") or "") for row in pending}
+            deadline_tasks = {
+                str(row.get("root_task_id") or "")
+                for row in pending
+                if row.get("kind") == "task_input_deadline" and row.get("root_task_id")
+            }
+            from .input_dependencies import (
+                _schedule_input_deadline,
+                reconcile_input_dependencies,
+                task_has_waiting_input,
+            )
+
+            store = getattr(agent, "conversation_store", None)
+            tasks_store = getattr(store, "tasks", None)
+            active_input_tasks: set[str] = set()
+            if tasks_store is not None and callable(getattr(tasks_store, "load_report", None)):
+                for candidate_id in unfinished | deadline_tasks:
+                    link, link_error = tasks_store.load_report(candidate_id)
+                    if link_error:
+                        if link_error.get("error_type") != "FileNotFoundError":
+                            active_input_tasks.add(candidate_id)
+                        continue
+                    if link is not None and getattr(link, "input_dependency_refs", ()):
+                        reconcile_input_dependencies(agent, task_id=candidate_id, now=now, schedule=True)
+                    if (
+                        link is not None
+                        and link.status == THREAD_TASK_LINK_ACTIVE_STATUS
+                        and task_has_waiting_input(agent, candidate_id)
+                    ):
+                        active_input_tasks.add(candidate_id)
             # EXEC-39(owner 拍板): 普通任务不自动续跑——字条只给有 active goal
             # 授权的任务补(goal 任务自动续跑合法, 与 _auto_resume_authorized
             # 同源); 普通任务只在模型自己 sleep 时短期待机, 不靠对账自动唤醒。
@@ -4516,8 +4552,7 @@ class _BackgroundSchedulerTickMixin:
             # 已有 pending 字条的任务不重写到期时间——否则每 5min 对账都会把
             # 闹钟往后推, 永远不响(对账只补缺失, 不续命)。
             for task_id in unfinished:
-                from .input_dependencies import _schedule_input_deadline, task_has_waiting_input
-                if task_has_waiting_input(agent, task_id):
+                if task_id in active_input_tasks or task_has_waiting_input(agent, task_id):
                     _schedule_input_deadline(agent, task_id)
                     continue
                 if task_id in pending_tasks:
@@ -4533,7 +4568,7 @@ class _BackgroundSchedulerTickMixin:
                 )
             for row in pending:
                 tid = str(row.get("root_task_id") or "")
-                if tid and tid not in unfinished:
+                if tid and tid not in unfinished and tid not in active_input_tasks:
                     repo.cancel_wakes_for_task(tid)  # 已终结 → 清字条(僵尸不累积)
         except Exception:
             _HEARTBEAT_LOGGER.warning("wake queue reconcile failed", exc_info=True)

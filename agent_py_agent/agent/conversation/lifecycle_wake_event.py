@@ -72,11 +72,12 @@ def lifecycle_wake_turn_trigger(
         origin_request_ids=origins,
         event_facts=json.dumps(facts, ensure_ascii=False, sort_keys=True, indent=2),
         origin_task_attached=attached,
+        credential_ready=bool(input_facts.get("credential")),
     )
 
 
-# LLM: 仅原 task-input-event.v1 的终态标量进入输入事实；结果只投影原 evidence_refs 的存在布尔值，不复制引用或表单。
-# 函数用途: 让恢复模型知道原输入已经结算，避免把 ready 当成尚需填写；不改变原 Wake 调度和子代理事实。
+# LLM: 仅原 task-input-event.v1 的终态标量进入输入事实；凭据 ready 仅投影已校验公开元数据，绝不复制秘密或私填路径。
+# 函数用途: 让恢复模型知道原输入已经结算及可用凭据引用，避免把 ready 当成尚需填写；不改变原 Wake 调度和子代理事实。
 def _input_resolution_facts(reason, signal, metadata):
     if reason != 'task_input_resolved' or metadata.get('schema_version') != 'task-input-event.v1':
         return {}
@@ -87,10 +88,26 @@ def _input_resolution_facts(reason, signal, metadata):
            for key in ('input_id', 'input_provider')):
         return {}
     refs = signal.get('evidence_refs')
-    available = isinstance(refs, (list, tuple)) and any(isinstance(ref, str) and ref.strip() for ref in refs)
-    return {'input_id': metadata['input_id'][:_WAKE_FACT_TEXT_LIMIT_CHARS],
+    clean_refs = (
+        {ref.strip() for ref in refs if isinstance(ref, str) and ref.strip()}
+        if isinstance(refs, (list, tuple))
+        else set()
+    )
+    available = status == 'ready' and bool(clean_refs)
+    facts: dict[str, object] = {
+        'input_id': metadata['input_id'][:_WAKE_FACT_TEXT_LIMIT_CHARS],
         'provider': metadata['input_provider'][:_WAKE_FACT_TEXT_LIMIT_CHARS],
-        'status': status, 'result_available': status == 'ready' and available, 'user_input_required': False}
+        'status': status,
+        'result_available': available,
+        'user_input_required': False,
+    }
+    if available and metadata['input_provider'] == 'credential':
+        from .input_dependencies import _validated_credential_result
+
+        cred = _validated_credential_result(metadata.get('credential_result'))
+        if cred is not None and cred['credential_ref'] in clean_refs:
+            facts['credential'] = cred
+    return facts
 
 
 # LLM: 只取名单内且有值的字段（布尔与数字 0 也算有值），逐个做有界投影；不读名单外的键。

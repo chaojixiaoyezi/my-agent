@@ -58,6 +58,22 @@ TURN_TRIGGER_RECOMMENDATION_REASONS: dict[str, str] = {
 }
 
 
+CREDENTIAL_INPUT_RECOMMENDED_TOOLS: tuple[str, ...] = (
+    "request_credentials",
+    "run_command",
+    "web_fetch",
+)
+CREDENTIAL_INPUT_RECOMMENDATION_REASON = (
+    "凭据输入就绪事件的固定推荐：使用已保存的 credential_ref 完成登录与受保护数据查询，再将核实结果回复原聊天"
+)
+CREDENTIAL_READY_CONTINUATION_GUIDANCE = (
+    "本次凭据卡已保存就绪（详见下方 input_dependency.credential 的 credential_ref、origin、target_url 与 "
+    "authentication_configured）：请直接使用该 credential_ref 执行目标登录（已配置认证用 web_fetch；未配置 collected "
+    "可按目标站点选择前台 run_command(credential_ref=...)、受控浏览器 fill(credential_ref=..., field=...) 或 "
+    "configure 后 web_fetch），完成受保护业务数据查询并确认拿到真实业务记录后直接回复原聊天，无需让用户再发“继续”。"
+)
+
+
 # LLM: 冻结值对象；kind 之外的字段都是唤醒信封里已有的结构化身份，event_facts 是已排序、有界的 JSON 文本。
 #   origin_request_ids 只含会话历史里真有用户消息的请求；origin_task_attached 表示事实里附了原任务原文（原任务不在历史里）。
 # 类用途: 描述当前回合由什么触发，普通用户轮不创建它。
@@ -70,6 +86,7 @@ class TurnTrigger:
     origin_request_ids: tuple[str, ...] = ()
     event_facts: str = ""
     origin_task_attached: bool = False
+    credential_ready: bool = False
 
 
 # LLM: 只按类型和 kind 判断，不看 event_facts 正文；非 TurnTrigger 一律视为普通用户轮。
@@ -132,6 +149,8 @@ def current_turn_text(user_prompt: object, trigger: object) -> str:
                 "其它终态不表示收到输入，应如实说明当前状态和缺口，不能虚构填写内容。"
                 "输入事实缺失或未知时保持未确认，不能据此推定状态或获得新的申请授权。"
             )
+            if wake.credential_ready:
+                guidance = f"{guidance}{CREDENTIAL_READY_CONTINUATION_GUIDANCE}"
             return f"{HOST_EVENT_HEADING}\n{guidance}\n{origin}\n{wake.event_facts}"
         if wake.reason == USER_INPUT_YIELD_TRIGGER_REASON:
             return f"{HOST_EVENT_HEADING}\n{HOST_EVENT_FIRST_LINE_USER_INPUT_YIELD}\n{wake.event_facts}"
@@ -151,6 +170,10 @@ def turn_trigger_recommendation(trigger: object) -> tuple[tuple[str, ...], str] 
         if typed is None or typed.reason == USER_INPUT_YIELD_TRIGGER_REASON:
             # 让出续跑不是子代理事件：沿用按原任务检索的推荐。
             continue
+        if typed.reason == "task_input_resolved":
+            if typed.credential_ready:
+                return CREDENTIAL_INPUT_RECOMMENDED_TOOLS, CREDENTIAL_INPUT_RECOMMENDATION_REASON
+            return None
         names = TURN_TRIGGER_RECOMMENDED_TOOLS.get(typed.kind)
         reason = TURN_TRIGGER_RECOMMENDATION_REASONS.get(typed.kind)
         if names and reason:

@@ -8,14 +8,17 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from ..common.json_io import (
     locked_json_path,
@@ -147,12 +150,144 @@ def arm_input_dependency(agent, input_id):
     return _publish_resolution(agent, row)
 
 
+def _sanitize_public_target_url(candidate: object, origin: str) -> str:
+    """校验公开目标 URL 无 userinfo/query/fragment 且与规范 origin 一致，否则降至 origin。"""
+    from ..user_space.task_credentials import credential_origin
+
+    if not isinstance(candidate, str) or not candidate.strip() or len(candidate) > 2048:
+        return origin
+    raw = candidate.strip()
+    parts = urlsplit(raw)
+    if (
+        parts.scheme not in {'http', 'https'}
+        or not parts.hostname
+        or parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+    ):
+        return origin
+    try:
+        if credential_origin(raw) != origin:
+            return origin
+    except ValueError:
+        return origin
+    if not parts.path or parts.path == '/':
+        return origin
+    netloc = f'{parts.hostname.lower()}:{parts.port}' if parts.port else parts.hostname.lower()
+    return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
+
+
+def credential_wake_projection(row: Mapping[str, object]) -> dict[str, object]:
+    """从已就绪凭据记录纯计算可公开的唤醒元数据，绝不包含秘密值、userinfo、query 或卡内私填路径。"""
+    from ..user_space.task_credentials import credential_origin
+
+    if not isinstance(row, Mapping) or row.get('status') != 'ready':
+        return {}
+    ref = row.get('credential_ref')
+    if not isinstance(ref, str) or re.fullmatch(r'cred_[0-9a-f]{32}', ref) is None:
+        return {}
+    generation = row.get('generation', 1)
+    if type(generation) is not int or generation < 1:
+        return {}
+    raw_origin = row.get('origin')
+    if not isinstance(raw_origin, str) or not raw_origin:
+        return {}
+    try:
+        origin = credential_origin(raw_origin)
+    except ValueError:
+        return {}
+    auth = row.get('authentication', 'collected')
+    if not isinstance(auth, str) or auth not in {
+        'collected', 'basic', 'bearer', 'header', 'signature', 'login',
+    }:
+        return {}
+    public_candidate = row.get('public_target_url')
+    if (
+        not public_candidate
+        and row.get('access_scope') == 'owner'
+        and row.get('schema_version') == 'task_credential.v2'
+        and isinstance(row.get('target_url'), str)
+    ):
+        raw_target = row['target_url'].strip()
+        parts = urlsplit(raw_target)
+        if not parts.username and not parts.password and parts.hostname and parts.scheme in {'http', 'https'}:
+            netloc = f'{parts.hostname.lower()}:{parts.port}' if parts.port else parts.hostname.lower()
+            public_candidate = urlunsplit((parts.scheme, netloc, parts.path, '', ''))
+    public_target = _sanitize_public_target_url(public_candidate, origin)
+    return {
+        'credential_ref': ref,
+        'generation': generation,
+        'origin': origin,
+        'target_url': public_target,
+        'authentication': auth,
+        'authentication_configured': auth in {'basic', 'bearer', 'header', 'signature', 'login'},
+    }
+
+
+def _validated_credential_result(value: object) -> dict[str, object] | None:
+    """严格校验输入依赖与唤醒信封上的 credential_result 六字段结构。"""
+    from ..user_space.task_credentials import credential_origin
+
+    if not isinstance(value, Mapping):
+        return None
+    if set(value) != {
+        'credential_ref',
+        'generation',
+        'origin',
+        'target_url',
+        'authentication',
+        'authentication_configured',
+    }:
+        return None
+    ref = value.get('credential_ref')
+    generation = value.get('generation')
+    raw_origin = value.get('origin')
+    raw_target = value.get('target_url')
+    auth = value.get('authentication')
+    configured = value.get('authentication_configured')
+    if (
+        not isinstance(ref, str)
+        or re.fullmatch(r'cred_[0-9a-f]{32}', ref) is None
+        or type(generation) is not int
+        or generation < 1
+        or not isinstance(raw_origin, str)
+        or not isinstance(raw_target, str)
+        or not isinstance(auth, str)
+        or auth not in {'collected', 'basic', 'bearer', 'header', 'signature', 'login'}
+        or type(configured) is not bool
+    ):
+        return None
+    try:
+        origin = credential_origin(raw_origin)
+    except ValueError:
+        return None
+    if origin != raw_origin:
+        return None
+    expected_configured = auth in {'basic', 'bearer', 'header', 'signature', 'login'}
+    if configured != expected_configured:
+        return None
+    sanitized_target = _sanitize_public_target_url(raw_target, origin)
+    if sanitized_target != raw_target:
+        return None
+    return {
+        'credential_ref': ref,
+        'generation': generation,
+        'origin': origin,
+        'target_url': sanitized_target,
+        'authentication': auth,
+        'authentication_configured': configured,
+    }
+
+
 # LLM: 终态单调，重复同决定只补原 Wake；不同决定不能覆盖，超期不能接受 ready。
 # 函数用途: 保存输入完成、取消或到期事实，成功后恢复原任务一次。
 # LLM: 同原终态/期限/锁和Wake顺序，不吞部分提交失败或生成替代决定。
 # 函数用途: 沿原领域事务保存输入决定。
-def resolve_input_dependency(agent, input_id, *, status='ready', result_refs=()):
-    return input_dependency_access(agent).resolve(input_id, status=status, result_refs=result_refs)
+def resolve_input_dependency(agent, input_id, *, status='ready', result_refs=(), credential_result=None):
+    return input_dependency_access(agent).resolve(
+        input_id, status=status, result_refs=result_refs, credential_result=credential_result,
+    )
 
 
 # LLM: 仅armed终态发布原去重Wake；终态移除refs放槽，提前结果仍能在归档arming后沿canonical重放。
@@ -205,8 +340,14 @@ def task_has_waiting_input(agent, task_id):
 # LLM: 凭据成功 refs 只是 opaque cref，取消不会给模型任何认证值；原 Wake 是唯一续跑出口。
 # 函数用途: 把私卡结果提交给通用任务输入恢复。
 def publish_credential_resolution(agent, row):
-    return resolve_input_dependency(agent, row.get('input_id', row['credential_ref']), status=row['status'],
-                                    result_refs=(row['credential_ref'],) if row['status'] == 'ready' else ())
+    projection = credential_wake_projection(row) if row.get('status') == 'ready' else None
+    return resolve_input_dependency(
+        agent,
+        row.get('input_id', row['credential_ref']),
+        status=row['status'],
+        result_refs=(row['credential_ref'],) if row['status'] == 'ready' else (),
+        credential_result=projection or None,
+    )
 
 
 # LLM: 宿主准确停止任务后调用，不解析用户文字；原输入状态取消且移除投影，未知外部工具操作不被重写为未执行。
@@ -245,6 +386,8 @@ def validate_input_dependency_record(row, owner, input_id, *, task_id=''):
             or not math.isfinite(row['expires_at'])
             or (task_id and scope['root_task_id'] != task_id)):
         raise ValueError('输入依赖规范记录不可核验')
+    if row.get('credential_result') is not None and _validated_credential_result(row.get('credential_result')) is None:
+        raise ValueError('输入依赖凭据结果不可核验')
     return row
 
 
@@ -253,11 +396,24 @@ def validate_input_dependency_record(row, owner, input_id, *, task_id=''):
 class InputDependencyAccess:
     # LLM: owner/store/子任务reader/upsert及同一个repo都由原组合根提供；repo只用于精确deadline/CAS收口，构造无I/O或新增权限。
     # 函数用途: 保存原输入依赖所需的最小领域资源。
-    def __init__(self, store, owner, quota, load_child, upsert_wake, *, commit=None, blocking=True, runtime_db=None):
+    def __init__(
+        self,
+        store,
+        owner,
+        quota,
+        load_child,
+        upsert_wake,
+        *,
+        commit=None,
+        blocking=True,
+        runtime_db=None,
+        owner_home=None,
+    ):
         self.store, self.owner, self.quota = store, owner, quota
         self.load_child, self.upsert_wake = load_child, upsert_wake
         self.commit, self.blocking = commit, blocking
         self.runtime_db = runtime_db
+        self.owner_home = Path(owner_home) if owner_home is not None else None
 
     # LLM: 有commit必须每次消费原门；默认Count0直接调用，不从对象字段推断许可。
     # 函数用途: 在本次真实提交入口中完成一个原同步RMW。
@@ -334,6 +490,68 @@ class InputDependencyAccess:
                 return None
             raise
 
+    def _recover_pending_credential_row(self, row, current: float):
+        """定点读取同代已落盘凭据行，修复“密文保存后、依赖结算前”的中断断点，不扫描目录。"""
+        if (
+            self.owner_home is None
+            or row.get('provider') != 'credential'
+            or row.get('status') != 'pending'
+        ):
+            return None
+        reference = row.get('reference')
+        if not isinstance(reference, str) or re.fullmatch(r'cred_[0-9a-f]{32}', reference) is None:
+            return None
+        from ..user_space.task_credential_forms import verify_credential_row_signature_for_home
+        from ..user_space.task_credential_schema import credential_ready_expired
+        from ..user_space.task_credential_storage import read_credential_row
+        from ..user_space.task_credentials import credential_path
+
+        try:
+            cred_row = read_credential_row(
+                credential_path(self.owner_home, reference), stage='input_reconcile_read',
+            )
+            if not cred_row or cred_row.get('kind') != 'task_credential':
+                return None
+            if (
+                cred_row.get('owner') != row.get('owner')
+                or cred_row.get('credential_ref') != reference
+                or cred_row.get('input_id', reference) != row.get('input_id')
+            ):
+                return None
+            cred_scope = cred_row.get('scope')
+            dep_scope = row.get('scope')
+            if not isinstance(cred_scope, dict) or not isinstance(dep_scope, dict):
+                return None
+            if any(dep_scope.get(key) != value for key, value in cred_scope.items()):
+                return None
+            verify_credential_row_signature_for_home(self.owner_home, cred_row)
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return None
+        cred_status = cred_row.get('status')
+        if cred_status == 'cancelled':
+            return ('retire', cred_row, None)
+        if cred_status != 'ready':
+            return None
+        if (
+            not isinstance(cred_row.get('ciphertext'), str)
+            or not cred_row['ciphertext']
+            or not isinstance(cred_row.get('submitter_actor_id'), str)
+            or not cred_row['submitter_actor_id']
+        ):
+            return None
+        if not self.current(row):
+            return ('retire', cred_row, None) if cred_row.get('access_scope') == 'owner' else None
+        if (
+            current >= row['expires_at']
+            or time.time() >= row['expires_at']
+            or credential_ready_expired(cred_row, now=current)
+        ):
+            return None
+        projection = credential_wake_projection(cred_row)
+        if not projection:
+            return None
+        return ('ready', cred_row, projection)
+
     # LLM: 只读准确task refs，Count0/W共用；到期只resolve原输入，无新线程或范围，整拍最后重排deadline。
     # 函数用途: 对账一项任务已登记的必要输入，并补原恢复投影。
     def reconcile(self, task_id, *, now=None, schedule=True, admission=None):
@@ -347,6 +565,26 @@ class InputDependencyAccess:
             return
         for input_id in link.input_dependency_refs:
             row = self.read(input_id,task_id=task_id)
+            if row['status'] == 'pending':
+                recovered = self._recover_pending_credential_row(row, current)
+                if recovered is not None:
+                    mode, cred_row, projection = recovered
+                    if mode == 'retire':
+                        from ..user_space.task_credential_forms import (
+                            retire_credential_input_from_access,
+                        )
+
+                        retire_credential_input_from_access(self, cred_row)
+                    else:
+                        self.resolve(
+                            input_id,
+                            status='ready',
+                            result_refs=[cred_row['credential_ref']],
+                            reschedule=False,
+                            admission=admission,
+                            credential_result=projection,
+                        )
+                    continue
             if row['status'] == 'pending' and (current >= row['expires_at'] or not self.current(row)):
                 self.resolve(input_id,status='expired' if current >= row['expires_at'] else 'cancelled',reschedule=False,admission=admission)
             elif row.get('armed') and row['status'] != 'pending':
@@ -356,9 +594,25 @@ class InputDependencyAccess:
 
     # LLM: 原row终态单调；ready仍在锁内核期限和current，成功才发布原输入，不生成新任务或执行。
     # 函数用途: 保存原决定并补齐既有恢复投影。
-    def resolve(self, input_id, *, status='ready', result_refs=(), reschedule=True, admission=None):
+    def resolve(
+        self,
+        input_id,
+        *,
+        status='ready',
+        result_refs=(),
+        reschedule=True,
+        admission=None,
+        credential_result=None,
+    ):
         if status not in _TERMINAL_INPUT_STATUSES:
             raise ValueError('输入决定无效')
+        validated_cred = None
+        if credential_result is not None:
+            if status != 'ready':
+                raise ValueError('非就绪输入不能携带凭据恢复投影')
+            validated_cred = _validated_credential_result(credential_result)
+            if validated_cred is None:
+                raise ValueError('凭据恢复投影结构无效')
         # LLM: 同决定重放不改期限/结果，异决定拒绝。
         # 函数用途: 在原记录锁内推进一次原终态。
         def update(row):
@@ -367,10 +621,21 @@ class InputDependencyAccess:
             if row['status'] != 'pending':
                 if row['status'] != status:
                     raise ValueError('原输入依赖已结束')
+                if validated_cred is not None and row.get('credential_result') is None:
+                    return {**row, 'credential_result': validated_cred}
+                if (
+                    validated_cred is not None
+                    and row.get('credential_result') is not None
+                    and row.get('credential_result') != validated_cred
+                ):
+                    raise ValueError('原输入凭据恢复投影冲突')
                 return row
             if status == 'ready' and (time.time() >= row['expires_at'] or not self.current(row)):
                 raise ValueError('原任务或输入期限已失效')
-            return {**row,'status':status,'resolved_at':time.time(),'result_refs':list(result_refs)}
+            settled = {**row,'status':status,'resolved_at':time.time(),'result_refs':list(result_refs)}
+            if validated_cred is not None:
+                settled['credential_result'] = validated_cred
+            return settled
         return self.publish(self.mutate(input_id, update, admission=admission), reschedule=reschedule)
 
     # LLM: 原armed/current才去重发布；Wake成功后refs/deadline仍各自原提交，失败保部分事实供同键重放。
@@ -382,11 +647,21 @@ class InputDependencyAccess:
             if scope['agent_kind'] == 'subagent':
                 link, _ = self.store.tasks.load_report(scope['root_task_id'])
                 thread_id = link.thread_id
+            metadata = {
+                'schema_version': 'task-input-event.v1',
+                'input_id': row['input_id'],
+                'input_status': row['status'],
+                'input_provider': row['provider'],
+                'input_run_id': scope['run_id'],
+                'conversation_request_id': row.get('conversation_request_id', scope['run_id']),
+            }
+            if row.get('provider') == 'credential' and row['status'] == 'ready':
+                cred_meta = _validated_credential_result(row.get('credential_result'))
+                if cred_meta is not None:
+                    metadata['credential_result'] = cred_meta
             request = {'thread_id':thread_id, 'root_task_id':scope['root_task_id'], 'reason':'task_input_resolved',
                 'source_agent_id':scope['run_id'], 'evidence_refs':row.get('result_refs',[]),
-                'metadata':{'schema_version':'task-input-event.v1','input_id':row['input_id'],
-                    'input_status':row['status'],'input_provider':row['provider'],'input_run_id':scope['run_id'],
-                    'conversation_request_id':row.get('conversation_request_id',scope['run_id'])},
+                'metadata':metadata,
                 'dedupe_key':'task-input:'+row['input_id'],'retain_handled':True}
             self.perform(lambda:self.store.wakes.raise_signal(request, blocking=self.blocking))
         if row['status'] != 'pending':
@@ -425,8 +700,9 @@ class InputDependencyAccess:
 def input_dependency_access(agent):
     manager = getattr(agent,'subagents',None)
     repo = getattr(manager,'runtime_db',None)
+    owner_home = getattr(getattr(agent, 'home_paths', None), 'owner_home_dir', None)
     return InputDependencyAccess(agent.conversation_store, owner_identity_from_config(agent.config), getattr(agent,'owner_quota',None),
-        getattr(manager,'load',None), getattr(repo,'upsert_wake',None), runtime_db=repo)
+        getattr(manager,'load',None), getattr(repo,'upsert_wake',None), runtime_db=repo, owner_home=owner_home)
 
 
 # LLM: store/owner/路径由调用方原来源冻结；只组装既有配额、canonical child loader和existing-only RuntimeDB，不创建Agent/owner/新库；commit逐次原位验权。
@@ -442,7 +718,7 @@ def input_dependency_owner_resources(store, owner, *, owner_home, subagent_works
     quota = owner_quota_enforcer_from_policy(owner_home)
     repo = RuntimeRepository(runtime_db_path(owner_home), existing_only=True)
     access = InputDependencyAccess(store, owner, quota, partial(load_subagent_task, subagent_workspace),
-        repo.upsert_wake, commit=commit, blocking=blocking, runtime_db=repo)
+        repo.upsert_wake, commit=commit, blocking=blocking, runtime_db=repo, owner_home=owner_home)
     return access, repo
 
 

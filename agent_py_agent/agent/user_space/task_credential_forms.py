@@ -257,9 +257,34 @@ def assert_credential_reissue_scope(agent, row, scope):
     assert_credential_record_signature(agent, row)
 
 
-# LLM: 只核原row的宿主MAC和完整身份，不解密、不读取模型字段、不改变授权；旧缺access_scope严格按task。
-# 函数用途: 为更新及旧群卡显式共享复用同一原卡来源证明。
-def assert_credential_record_signature(agent, row):
+def valid_browser_consumer_binding(value: object) -> bool:
+    """校验原卡可选 browser_consumer 绑定的四字段结构，不读取安装库。"""
+    import re
+
+    if not isinstance(value, dict) or set(value) != {
+        'installation_ref',
+        'package_sha256',
+        'activation_id',
+        'tool',
+    }:
+        return False
+    if value.get('tool') != 'fill':
+        return False
+    for digest_key in ('installation_ref', 'package_sha256'):
+        digest = value.get(digest_key)
+        if not isinstance(digest, str) or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+            return False
+    activation_id = value.get('activation_id')
+    return (
+        isinstance(activation_id, str)
+        and 0 < len(activation_id) <= 128
+        and '\r' not in activation_id
+        and '\n' not in activation_id
+    )
+
+
+def verify_credential_row_signature_for_home(owner_home, row):
+    """按 owner 私密目录的现有交互密钥核验凭据记录签名与可选消费者绑定，不创建密钥。"""
     import base64
     import hmac
     import json
@@ -270,7 +295,7 @@ def assert_credential_record_signature(agent, row):
         prefix, encoded, signature = row['reference'].split('.')
         raw = base64.b64decode(encoded + '=' * (-len(encoded) % 4), altchars=b'-_', validate=True)
         payload = json.loads(raw)
-        expected = hmac.digest(interaction_key(agent.home_paths.owner_home_dir), b'im-interaction-v1\0' + raw, 'sha256').hex()
+        expected = hmac.digest(interaction_key(owner_home), b'im-interaction-v1\0' + raw, 'sha256').hex()
         keys = ('owner', 'channel', 'actor_id', 'scope', 'credential_ref', 'expires_at')
         valid = isinstance(payload, dict) and prefix == 'ir1' and hmac.compare_digest(signature, expected) and payload.get('kind') == 'task_credential'
         valid = valid and all(payload.get(key) == row.get(key) for key in keys)
@@ -278,10 +303,22 @@ def assert_credential_record_signature(agent, row):
         valid = valid and payload.get('access_scope', 'task') == row.get('access_scope', 'task')
         if isinstance(payload, dict) and (row.get('schema_version') == 'task_credential.v2' or payload.get('schema_version') == 'task_credential.v2'):
             valid = valid and all(payload.get(k) == row.get(k) for k in ('schema_version', 'origin', 'collection_mode'))
+        if isinstance(payload, dict) and ('browser_consumer' in row or 'browser_consumer' in payload):
+            valid = (
+                valid
+                and valid_browser_consumer_binding(row.get('browser_consumer'))
+                and payload.get('browser_consumer') == row.get('browser_consumer')
+            )
     except (KeyError, TypeError, ValueError, UnicodeError):
         valid = False
     if not valid:
         raise ValueError('原凭据卡身份无法核验')
+
+
+# LLM: 只核原row的宿主MAC和完整身份，不解密、不读取模型字段、不改变授权；旧缺access_scope严格按task。
+# 函数用途: 为更新及旧群卡显式共享复用同一原卡来源证明。
+def assert_credential_record_signature(agent, row):
+    verify_credential_row_signature_for_home(agent.home_paths.owner_home_dir, row)
 
 
 # LLM: 只允许原群卡的原请求人/实际提供者显式升级，私聊不迁移；成员查询锁外、原row CAS锁内，不复制密文或放开管理权。

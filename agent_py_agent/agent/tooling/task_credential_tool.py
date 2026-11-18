@@ -39,14 +39,14 @@ class RequestCredentialsTool(BaseTool):
             '用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；'
             'authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。'
             '已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。'
-            '群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用交web_fetch，避免发卡打扰用户。'
+            '群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用，避免发卡打扰用户。'
             '本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。'
             '仅当find为空或遇到明确HTTP 401（verification_status=rejected）时才request；个人来源绑定URL时默认owner跨任务同站点复用，无URL为task，群新卡默认group本群共享。'
-            'request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。'),
-            input_schema={'type':'object','properties':{'url':{'type':'string','description':'find须提供真实目标URL，按同origin发现；不得编造占位URL代查已有引用，已有ref用status。'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature'],'description':'认证注入方案枚举：collected仅安全保存秘密（使用前需configure绑定方案）；basic/bearer/header/login/signature由宿主向同origin请求注入秘密。'},
+            'request已指定basic/bearer等方案时保存后可直接交web_fetch；collected可直接把credential_ref交给前台同步run_command（读取MY_AGENT_CREDENTIAL_FILE）或受控浏览器fill(credential_ref,field)，也可先configure（login支持auth_config.body_encoding=json|form）后交web_fetch。job_id仅绑定已有本人监控。'),
+            input_schema={'type':'object','properties':{'url':{'type':'string','description':'find须提供真实目标URL，按同origin发现；不得编造占位URL代查已有引用，已有ref用status。'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature'],'description':'认证注入方案枚举：collected安全保存原始秘密字段（可直接传给run_command的credential_ref、browser-lite的fill(credential_ref,field)，或configure后再交web_fetch）；basic/bearer/header/login/signature由宿主向同origin请求注入秘密。'},
             'collection_mode':{'type':'string','enum':['username_password','password'], 'description':'常规账号密码或仅密码使用本项；宿主自动生成相应秘密字段，以及缺失的目标链接、可选名称和备注。'},'header_name':{'type':'string','description':'HTTP认证请求头名称（默认Authorization；如authentication=header时可填X-API-Key等单行头名）。'},'job_id':{'type':'string','description':'可选。绑定当前请求者名下已存在定时监控任务的精确job_id。'},
             'fields':{'type':'array','description':'需要自定义秘密字段时才传；常规账号密码优先使用collection_mode。目标链接、可选名称和备注由宿主表单提供，不要在此重复声明。', 'items':{'type':'object','properties':{'name':{'type':'string','description':'自定义秘密输入项的稳定字段键名（单行机器标识符，如api_key，严禁填入秘密值）。'},'label':{'type':'string','description':'安全输入卡向用户展示的可读字段标题（如API密钥）。'}},'required':['name','label'],'additionalProperties':False}},
-            'auth_config':{'type':'object','description':'可选。与authentication配套的非秘密结构化认证参数对象（如login/signature所需的同源登录路径、表单键名映射等；严禁填入明文密码或密钥）。'},'ttl_seconds':{'type':'integer','anyOf':[{'const':0},{'minimum':60,'maximum':31536000}], 'description':'保存后有效秒数；0持续复用直到认证拒绝或撤销，缺省使用能力配置（默认0）。不改变卡片填写期限。'},
+            'auth_config':{'type':'object','properties':{'body_encoding':{'type':'string','enum':['json','form'],'default':'json','description':'仅authentication=login时可选：登录请求体编码，json（默认application/json）或form（application/x-www-form-urlencoded）。'}},'description':'可选。与authentication配套的非秘密结构化认证参数对象（如login所需的同源url、body_fields、可选body_encoding=json|form、cookies/token_path，或signature配置；严禁填入明文密码或密钥）。'},'ttl_seconds':{'type':'integer','anyOf':[{'const':0},{'minimum':60,'maximum':31536000}], 'description':'保存后有效秒数；0持续复用直到认证拒绝或撤销，缺省使用能力配置（默认0）。不改变卡片填写期限。'},
             'operation':{'type':'string','enum':['request','status','update','configure','revoke','list','find','share'],'description':'凭据操作枚举：request发安全输入卡（缺省默认）、find按真实URL同origin查找可用引用、list列已授权引用、status查credential_ref状态、configure为已存引用绑定认证方案、update更新原引用、share共享本人旧群卡、revoke撤销引用。'},'credential_ref':{'type':'string','description':'宿主返回的不透明引用，不是账号、密码或其它内容；查询原卡保存状态用status。find不能携带本字段。'},
             'credential_name':{'type':'string','description':'find可选名称筛选；名称只是查找元数据，不能扩大权限或绕过本人账号优先。'},
             'access_scope':{'type':'string','enum':['owner','group','task'],'description':'新卡使用范围；省略由原宿主决定：个人来源绑定URL时默认owner（本人跨任务同站点复用，无URL时为task），群新卡默认group本群共享。个人来源不能选group。'}},
@@ -61,7 +61,8 @@ class RequestCredentialsTool(BaseTool):
             hints=ToolModelHints(category='orchestration',
                 use_cases=('明确要新的账号密码、输入卡或安全表单时，用request申请宿主安全输入卡；默认仅收集可不传URL，发卡不访问网站，无须先找模板或历史。',
                     '已有引用查保存状态用status；find仅用于真实URL同origin发现，空匹配不能推断原引用未填写。',
-                    '群聊与个人私聊在访问需认证站点前，必须先调用operation=find与目标URL查已授权凭据；selected_credential_ref非空直接复用在web_fetch中，无需发新卡；仅find为空或明确HTTP 401（verification_status=rejected）才request。',
+                    '群聊与个人私聊在访问需认证站点前，必须先调用operation=find与目标URL查已授权凭据；selected_credential_ref非空直接复用（已配置交web_fetch，collected交run_command/browser-lite.fill或configure后交web_fetch），无需发新卡；仅find为空或明确HTTP 401（verification_status=rejected）才request。',
+                    'HTTP表单登录站可在configure(authentication=login)时传auth_config.body_encoding=form；网页JS加密站或自定义脚本直接携同卡credential_ref走browser-lite.fill或run_command。',
                     '旧task群卡不会自动共享；用户明确要求共享本人旧群卡时才share，再find，无须重新填写；新增或换账号仍明确request。',
                     '本人认证失败由用户决定，不静默换他人账号；明确撤销本人引用后再find本群其它账号。'),
                 keywords=('凭据', '已保存账号', '群共享', '认证', 'credential', '复用账号', '账号密码', '输入卡', '安全表单', '凭据卡'),
