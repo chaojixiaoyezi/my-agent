@@ -170,11 +170,14 @@ class SendMessageTool(BaseTool):
             refs,
             evidence_refs,
         )
+        msg_text = str(params.get("message") or "").strip()
+        for tr in _active_credential_redactions_for_send(self.agent, scope):
+            msg_text = tr.public_text(msg_text)
         payload = {
             "provider": provider,
             "target": target,
             "request_scope": request_scope,
-            "message": str(params.get("message") or "").strip(),
+            "message": msg_text,
             "attachments": refs,
             "evidence_refs": evidence_refs,
         }
@@ -295,6 +298,34 @@ class SendMessageTool(BaseTool):
                     "reason": "recent_registry_unresolved" if qualified else "structured_ref_required"})
         if isinstance(attachments, ToolHandlerOutcome):
             return attachments
+        active_reds = _active_credential_redactions_for_send(self.agent, scope)
+        if active_reds:
+            for tr in active_reds:
+                message = tr.public_text(message)
+            attachments, block_reason = _sanitize_or_block_credential_send_attachments(attachments, active_reds)
+            if block_reason is not None:
+                return ToolHandlerOutcome(
+                    "send_message",
+                    False,
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": "携卡回合禁止外发包含调试/会话/二进制或凭据回显的附件，消息未发送。",
+                            "error_code": "CREDENTIAL_ATTACHMENT_WITHHELD",
+                            "failure_stage": "runtime_gate",
+                            "effect_outcome": "not_started",
+                            "reason_code": block_reason,
+                            "next_action": "请移除受限附件，仅外发已净化的业务文本摘要或纯净业务文本文件。",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    error_code="ARTIFACT_VALIDATION_FAILED",
+                    reported_error_code="CREDENTIAL_ATTACHMENT_WITHHELD",
+                    effect_outcome="not_started",
+                    failure_stage="runtime_gate",
+                    effect_source_ref="send_message_credential_attachment_gate",
+                    next_action="请移除受限附件，仅外发已净化的业务文本摘要或纯净业务文本文件。",
+                )
         envelope = ReplyEnvelope(
             content=message,
             attachments=attachments,
@@ -472,7 +503,18 @@ def deliver_host_script_intent(
     attachments = _script_delivery_attachments(owner_root, envelope.attachments)
     if attachments is None or not context.idempotency_key or not (str(envelope.content or "").strip() or attachments):
         return _script_delivery_refused("SCRIPT_DELIVERY_REQUEST_INVALID")
-    envelope = ReplyEnvelope(content=envelope.content, attachments=attachments, format=envelope.format,
+    safe_content = str(envelope.content or "")
+    active_reds = _active_credential_redactions_for_send(
+        agent,
+        {"request_id": context.request_id, "task_id": context.task_id, "session_id": context.thread_id},
+    )
+    if active_reds:
+        for tr in active_reds:
+            safe_content = tr.public_text(safe_content)
+        attachments, block_reason = _sanitize_or_block_credential_send_attachments(attachments, active_reds)
+        if block_reason is not None:
+            return _script_delivery_refused("CREDENTIAL_ATTACHMENT_WITHHELD")
+    envelope = ReplyEnvelope(content=safe_content, attachments=attachments, format=envelope.format,
                              evidence_refs=tuple(envelope.evidence_refs))
     store = GatewayReplyDeliveryStore(owner_root / "data" / "channel-delivery")
     operation_ref = "host-delivery:" + context.idempotency_key
@@ -984,6 +1026,92 @@ def _error(
         effect_outcome=effect_outcome,
         effect_source_ref=effect_source_ref,
     )
+
+
+_SEND_CREDENTIAL_BLOCKED_EXTS = frozenset({
+    ".tmp", ".bak", ".swp", ".har", ".pcap", ".cookie", ".cookies", ".dump",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".sqlite", ".sqlite3",
+    ".db", ".bin", ".pkl", ".pickle",
+})
+_SEND_CREDENTIAL_BLOCKED_TOKENS = ("cookie", "debug", "trace", "har", "dump")
+
+
+def _active_credential_redactions_for_send(agent: object, scope: dict[str, object]) -> tuple[Any, ...]:
+    from ..tooling.host_output_redaction import (
+        active_turn_redactions_for_scope,
+        turn_credential_redaction,
+    )
+
+    home = getattr(agent, "home_paths", None)
+    owner_dir = str(getattr(home, "owner_home_dir", "") or "")
+    store = getattr(agent, "conversation_store", None)
+    conv_root = getattr(getattr(store, "storage", None), "root", None)
+    params = getattr(agent, "_current_run_params", None)
+    attrs = getattr(params, "task_attributes", None) if params is not None else None
+    thread_id = str(
+        scope.get("session_id")
+        or (attrs.get("conversation_thread_id") if isinstance(attrs, dict) else "")
+        or getattr(params, "thread_id", "")
+        or ""
+    ).strip()
+    turn_keys = (
+        str(scope.get("request_id") or ""),
+        str(scope.get("run_id") or ""),
+        str(scope.get("task_id") or ""),
+        str(getattr(params, "request_id", "") or ""),
+        str(getattr(params, "run_id", "") or ""),
+        str(getattr(params, "task_id", "") or ""),
+    )
+    found = list(
+        active_turn_redactions_for_scope(
+            owner_key=owner_dir,
+            conversation_root=conv_root,
+            thread_id=thread_id,
+            turn_keys=turn_keys,
+        )
+    )
+    if params is not None:
+        direct = turn_credential_redaction(agent, params)
+        if direct.active and direct not in found:
+            found.append(direct)
+    return tuple(found)
+
+
+def _sanitize_or_block_credential_send_attachments(
+    attachments: tuple[ChannelAttachment, ...],
+    active_redactions: tuple[Any, ...],
+) -> tuple[tuple[ChannelAttachment, ...], str | None]:
+    from dataclasses import replace as _dc_replace
+
+    cleaned: list[ChannelAttachment] = []
+    for item in attachments:
+        lowered = item.name.lower()
+        ext = Path(lowered).suffix
+        stem = Path(lowered).stem
+        if (
+            item.name.startswith(".")
+            or ext in _SEND_CREDENTIAL_BLOCKED_EXTS
+            or any(tok in stem for tok in _SEND_CREDENTIAL_BLOCKED_TOKENS)
+        ):
+            return (), "CREDENTIAL_DEBUG_OR_BINARY_ATTACHMENT_BLOCKED"
+        try:
+            p = Path(item.path)
+            st = p.stat()
+            if st.st_size > 8 * 1024 * 1024:
+                return (), "CREDENTIAL_ATTACHMENT_SIZE_UNVERIFIABLE"
+            data = p.read_bytes()
+            if b"\x00" in data:
+                return (), "CREDENTIAL_BINARY_ATTACHMENT_BLOCKED"
+            text = data.decode("utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError):
+            return (), "CREDENTIAL_ATTACHMENT_UNVERIFIABLE"
+        if any(tr.contains_credential_echo(text) or tr.contains_credential_echo(item.name) for tr in active_redactions):
+            return (), "CREDENTIAL_ECHO_IN_ATTACHMENT"
+        safe_name = item.name
+        for tr in active_redactions:
+            safe_name = tr.public_text(safe_name)
+        cleaned.append(_dc_replace(item, name=safe_name))
+    return tuple(cleaned), None
 
 
 __all__ = ["SendMessageTool", "build_send_message_model_spec", "deliver_host_script_intent"]

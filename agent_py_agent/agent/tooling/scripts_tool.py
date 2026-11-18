@@ -43,15 +43,16 @@ from .tool_spec import _spec
 
 # LLM: 独立动作锁仅包管理动作；源检查与其它只读入口不建资产动作目录，绑定另归Store集合锁。
 # 函数用途: 串行化同Owner同类资产的管理动作，防止增量更新或Skill绑定丢失。
-def _dispatch(tool, params):
+def _dispatch(tool, params, *, context=None):
     from ..workflows.datasource_runtime import _ASSET_IM_NOTIFIER, bind_asset_im_notifier
     notifier = getattr(tool, 'im_notifier', None)
     ctx = (bind_asset_im_notifier(tool.owner_home, notifier)
            if callable(notifier) and _ASSET_IM_NOTIFIER.get() is None else nullcontext())
+    dispatch_kwargs = {'context': context} if context is not None else {}
     with ctx:
         if params['action'] in ('list', 'get', 'preview', 'run', 'resume', 'inspect_run', 'check_sources',
                                 'versions', 'diff', 'impact', 'status'):
-            return tool._dispatch(params)
+            return tool._dispatch(params, **dispatch_kwargs)
         tool.owner_home.mkdir(parents=True, exist_ok=True)
         collection = tool.model_spec.name
         from ..assets import _verify_directory_beneath
@@ -62,7 +63,7 @@ def _dispatch(tool, params):
                 summary = 'promoted_from_draft=' + params['draft_id']
             with version_operation(summary_line=summary,
                     restored_from=params.get('to_version') if params['action'] == 'rollback' else None) as state:
-                data = tool._dispatch(params)
+                data = tool._dispatch(params, **dispatch_kwargs)
                 return {**data, 'version_recording': state['recording']} if isinstance(data, dict) and state['recording'] else data
 
 
@@ -94,6 +95,28 @@ def _validate(tool, params):
                             effect_outcome='not_started',
                             next_action='请传入合法的 Skill 稳定引用（先通过 skill_search 查询准确 skill_id）。')
     action = params['action']
+    if 'credential_ref' in params and params.get('credential_ref') is not None:
+        if name != 'scripts' or action != 'run':
+            advice = (
+                'credential_ref 仅允许在 scripts(action="run", script_id="...", credential_ref="cred_...") '
+                '单次受控运行时传入；注册、更新或查询动作禁止传入 credential_ref 且不会解密凭据。'
+            )
+            return _outcome(
+                name,
+                {
+                    'error': 'credential_ref 仅支持 action="run"',
+                    'error_code': 'TOOL_INVALID_ARGUMENTS',
+                    'failure_stage': 'validation',
+                    'effect_outcome': 'not_started',
+                    'field': 'credential_ref',
+                    'next_action': advice,
+                },
+                False,
+                'TOOL_INVALID_ARGUMENTS',
+                effect_outcome='not_started',
+                failure_stage='validation',
+                next_action=advice,
+            )
     descriptor = params.get('descriptor')
     if (name == 'scripts' and isinstance(descriptor, dict) and 'kind' in descriptor
             and descriptor['kind'] != 'script'):
@@ -148,7 +171,7 @@ def _plain(value):
 
 # LLM: 两工具共用错误出口；明确提交后读回事实优先于异常类型，进程清理未确认仍保留unknown。
 # 函数用途: 将动作结果转换为宿主结果，运行失败也附完整业务回执与精确副作用状态。
-def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage='', next_action=''):
+def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage='', next_action='', reported_error_code=''):
     if isinstance(data, dict) and data.get('effect_outcome'):
         effect_outcome = data['effect_outcome']
     if not ok and not effect_outcome:
@@ -159,6 +182,7 @@ def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage='
         effect_outcome = 'unknown' if cleanup_unverified else ('not_started' if code == 'TOOL_INVALID_ARGUMENTS' else 'failed')
     plain = _plain(data)
     outcome = ToolHandlerOutcome(name, ok, json.dumps(plain, ensure_ascii=False), error_code=code,
+        reported_error_code=reported_error_code,
         result_envelope=plain if isinstance(plain, dict) else {},
         effect_outcome='' if ok else effect_outcome, failure_stage=failure_stage,
         next_action='' if ok else next_action)
@@ -430,7 +454,9 @@ class ScriptsTool(BaseTool):
                 'description': '增量移除的标签或关联引用字符串数组。'},
             'override_data_sources': {'type': ['object', 'array'], 'description': '仅本次传给runner，绝不写回资产'},
             'timeout_seconds': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 3600,
-                'description': 'run 单次受控运行超时秒数（0 到 3600 秒之间）。'}})
+                'description': 'run 单次受控运行超时秒数（0 到 3600 秒之间）。'},
+            'credential_ref': {'type': 'string', 'pattern': '^cred_[0-9a-f]{32}$',
+                'description': '仅 action="run" 可选传入宿主凭据引用（同步脚本从 MY_AGENT_CREDENTIAL_FILE 单次打开只读读入内存，因 /dev/fd 描述符共享偏移量勿重复打开；其它动作不接受且不解密）。'}})
     model_spec = _typed_descriptor_spec(model_spec)
     runtime_policy = _policy('scripts', ('list', 'get', 'check_sources', 'versions', 'diff'), ('run', 'delete'))
 
@@ -488,31 +514,105 @@ class ScriptsTool(BaseTool):
     def _store(self):
         return self.store if self.store is not None else ScriptStore(self.owner_home, workspace_root=self._workspace_root())
 
+    def execute_scoped(self, params, context):
+        return self.execute(params, context=context)
+
     # LLM: 提交后错误优先；CAS冲突单独结构化，运行保留领域源错误码，不从普通文本推导执行权。
     # 函数用途: 路由结构化脚本动作并返回JSON或原失败事实。
-    def execute(self, params):
-        invalid = self.validate_invocation(params, None)
+    def execute(self, params, *, context=None):
+        from ..user_space.task_credential_material import (
+            build_credential_telemetry,
+            classify_credential_exception,
+        )
+        from ..user_space.task_credential_storage import CredentialInputError
+        from .sandbox import SandboxUnavailable
+
+        invalid = self.validate_invocation(params, context)
         if invalid is not None:
             return invalid
         try:
-            data = _dispatch(self, params)
+            data = _dispatch(self, params, context=context)
             ok = params['action'] != 'run' or data.get('ok') is True
-            return _outcome('scripts', data, ok, 'TOOL_EXECUTION_FAILED' if not ok else '')
+            next_act = ''
+            err_code = 'TOOL_EXECUTION_FAILED' if not ok else ''
+            rep_code = ''
+            if not ok and params.get('credential_ref'):
+                eff = str(data.get('effect_outcome') or '')
+                if data.get('error_code') == 'SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED':
+                    err_code = 'ARTIFACT_VALIDATION_FAILED'
+                    rep_code = 'SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED'
+                next_act = (
+                    '携卡固化脚本未启动，外部请求未发出；请核实凭据状态与沙箱条件后再试。'
+                    if eff == 'not_started'
+                    else '携卡固化脚本已启动并结束，外部请求可能已发出；请先依据净化后的输出核实远端业务状态，禁止盲目重放非幂等 POST 请求。'
+                )
+            return _outcome('scripts', data, ok, err_code, next_action=next_act, reported_error_code=rep_code)
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('scripts', exc, params=params)
         except AssetActionError as exc:
             return _outcome('scripts', exc.data, False, exc.code, effect_outcome='not_started')
+        except (CredentialInputError, SandboxUnavailable) as exc:
+            cred_ref = str(params.get('credential_ref') or '')
+            classified = classify_credential_exception(
+                exc,
+                tool_name='scripts',
+                credential_ref=cred_ref,
+                default_stage='authorization',
+                effect_outcome='not_started',
+            )
+            err_body = {
+                'error': classified['message'],
+                'error_code': classified['error_code'],
+                'failure_stage': classified['failure_stage'],
+                'effect_outcome': classified['effect_outcome'],
+                'next_action': classified['next_action'],
+                'credential_execution': build_credential_telemetry(
+                    credential_ref=cred_ref,
+                    status_code=classified['error_code'],
+                    failure_stage=classified['failure_stage'],
+                    effect_outcome=classified['effect_outcome'],
+                ),
+            }
+            return _outcome(
+                'scripts',
+                err_body,
+                False,
+                classified['error_code'],
+                effect_outcome=classified['effect_outcome'],
+                failure_stage=classified['failure_stage'],
+                next_action=classified['next_action'],
+            )
         except (ValueError, TypeError, KeyError) as exc:
             if str(exc).startswith('ASSET_REVISION_CONFLICT:'):
                 return _outcome('scripts', {'error_code': 'ASSET_REVISION_CONFLICT', 'error': str(exc)},
                                 False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
+            if params.get('credential_ref') and (getattr(exc, 'error_code', None) or getattr(exc, 'code', None)):
+                cred_ref = str(params.get('credential_ref') or '')
+                classified = classify_credential_exception(
+                    exc, tool_name='scripts', credential_ref=cred_ref, effect_outcome='not_started'
+                )
+                return _outcome(
+                    'scripts',
+                    {
+                        'error': classified['message'],
+                        'error_code': classified['error_code'],
+                        'failure_stage': classified['failure_stage'],
+                        'effect_outcome': classified['effect_outcome'],
+                        'next_action': classified['next_action'],
+                    },
+                    False,
+                    classified['error_code'],
+                    effect_outcome=classified['effect_outcome'],
+                    failure_stage=classified['failure_stage'],
+                    next_action=classified['next_action'],
+                )
             return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
         except (OSError, RuntimeError, ImportError) as exc:
             return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
 
     # LLM: action精确枚举；check_sources刷新而get稳定，运行仍经源硬门；workspace/runner仅取原宿主绑定。
     # 函数用途: 将公开动作交给原领域存储、实时检查或执行器。
-    def _dispatch(self, params):
+    def _dispatch(self, params, *, context=None):
         action, store = params['action'], self._store()
         if action == 'list':
             return {'scripts': _plain(store.list_scripts())}
@@ -543,10 +643,15 @@ class ScriptsTool(BaseTool):
         if action in ('update_sources', 'record_candidate'):
             return self._sources(params, old)
         if action == 'run':
+            from copy import copy as _shallow_copy
+
+            from ..assets.descriptor import execution_definition_ref
+            from ..user_space.task_credential_storage import CredentialInputError
             from ..workflows.datasource_runtime import run_script_with_datasources
+            from ..workflows.script_runner import ScriptCredentialLease, ScriptRunner
+
             runner = self.runner
             if runner is None and self.runner_options_provider is not None:
-                from ..workflows.script_runner import ScriptRunner
                 runner = ScriptRunner(self.owner_home, workspace_root=self._workspace_root(), **self.runner_options_provider())
             options = {}
             if params.get('version') is not None:
@@ -556,9 +661,74 @@ class ScriptsTool(BaseTool):
                 options['expected_script_pin'] = {'script_id': script_id, 'revision': record['storage_revision'],
                     'code_sha256': record['code_sha256'], 'source_scope': 'owner',
                     'execution_definition_ref': record['execution_definition_ref']}
-            return _plain(run_script_with_datasources(self.owner_home, script_id, params.get('inputs', {}),
+            cred_ref = params.get('credential_ref')
+            if cred_ref is not None:
+                if context is None or getattr(context, 'credential_use', None) is None:
+                    raise CredentialInputError(
+                        'CREDENTIAL_NOT_AUTHORIZED',
+                        '当前固化脚本运行缺少宿主授权凭据上下文，未解密且未启动。',
+                        stage='authorization',
+                        effect_outcome='not_started',
+                    )
+                if callable(getattr(context, 'execution_authority_check', None)):
+                    context.execution_authority_check()
+                desc_payload = _raw(old)
+                raw_refs = (desc_payload.get('descriptor') or desc_payload).get('credential_refs') or ()
+                declared_refs = {
+                    str(item.get('credential_ref')).strip()
+                    for item in raw_refs
+                    if isinstance(item, dict) and str(item.get('credential_ref') or '').strip()
+                }
+                if declared_refs and cred_ref not in declared_refs:
+                    raise CredentialInputError(
+                        'CREDENTIAL_NOT_AUTHORIZED',
+                        '传入的 credential_ref 不在该固化脚本 descriptor.credential_refs 允许列表中，未解密。',
+                        stage='authorization',
+                        effect_outcome='not_started',
+                    )
+                raw_targets = (desc_payload.get('descriptor') or desc_payload).get('access_targets') or ()
+                declared_origins: list[str] = []
+                from ..user_space.task_credentials import credential_origin
+
+                for tgt in raw_targets:
+                    url_candidate = ''
+                    if isinstance(tgt, dict):
+                        url_candidate = str(tgt.get('url') or tgt.get('origin') or tgt.get('target') or '').strip()
+                    elif isinstance(tgt, str):
+                        url_candidate = tgt.strip()
+                    if url_candidate.startswith(('http://', 'https://')):
+                        try:
+                            declared_origins.append(credential_origin(url_candidate))
+                        except ValueError:
+                            pass
+                if 'expected_script_pin' not in options and type(desc_payload.get('revision')) is int and desc_payload['revision'] >= 1 and desc_payload.get('code_sha256'):
+                    options['expected_script_pin'] = {
+                        'script_id': script_id,
+                        'revision': desc_payload['revision'],
+                        'code_sha256': desc_payload['code_sha256'],
+                        'source_scope': str(desc_payload.get('source_scope') or 'owner'),
+                        'execution_definition_ref': execution_definition_ref(desc_payload, kind='script'),
+                    }
+                base_runner = runner or ScriptRunner(self.owner_home, workspace_root=self._workspace_root())
+                runner = _shallow_copy(base_runner)
+                runner._credential_lease = ScriptCredentialLease(
+                    credential_ref=str(cred_ref),
+                    credential_use=context.credential_use,
+                    authority_check=getattr(context, 'execution_authority_check', None),
+                    expected_definition_ref=str((options.get('expected_script_pin') or {}).get('execution_definition_ref') or ''),
+                    declared_origins=tuple(dict.fromkeys(declared_origins)),
+                )
+            run_data = _plain(run_script_with_datasources(self.owner_home, script_id, params.get('inputs', {}),
                 runner=runner, workspace_root=self._workspace_root(),
                 timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources'), **options))
+            if cred_ref is not None and context is not None and getattr(context, 'credential_use', None) is not None:
+                turn_red = getattr(context.credential_use, 'turn_redaction', None)
+                if turn_red is not None and isinstance(run_data, dict):
+                    run_data = turn_red.redact_value(run_data)
+                telemetry = getattr(runner, '_last_credential_telemetry', None)
+                if isinstance(telemetry, dict) and isinstance(run_data, dict):
+                    run_data = {**run_data, 'credential_execution': telemetry}
+            return run_data
         raise ValueError('未知脚本action')
 
     # LLM: update只继承原正式字段和代码；完整定义沿资产领域校验，不写回实时投影，CAS仍由Store原锁检查。

@@ -6,6 +6,7 @@
 # 模块用途: 在用户权限内执行命令并说明凭据请求边界，收回前台资源、整理输出及产物记录，保留原退出码和真实清理缺口。
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -16,7 +17,8 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -636,48 +638,56 @@ def _communicate_process(
             capture.wake()
 
     with register_cancellation_callback(cancel_wait):
-        while True:
-            generation = getattr(capture, "generation", 0)
-            if is_interrupted() or cancellation_requested():
-                termination = cancel_process()
-                capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
-                raise CommandInterruptedError(command, termination=termination, pid=proc.pid, birth_token=birth_token or "")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                termination = _kill_process_group(proc, birth_token)
-                drained = capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
-                out, err, facts = capture.result()
-                error = CommandTimeoutError(command, timeout, out, err, termination, drained)
-                error.capture = facts
-                raise error
-            code, termination = None, None
-            done = capture.done()
-            if done and time.monotonic() >= next_exit_probe:
-                code, termination = finish_foreground_process(proc, expected_birth_token=birth_token)
-                next_exit_probe = time.monotonic() + probe_interval
-                probe_interval = min(_FOREGROUND_EXIT_PROBE_SECONDS, probe_interval * 2)
-            if code is not None:
-                out, err, facts = capture.result()
-                if cancellation_requested():
-                    raise CommandInterruptedError(command, termination=stop_receipt or termination, pid=proc.pid, birth_token=birth_token or "")
-                result = subprocess.CompletedProcess(command, code, out, err)
-                result.capture = facts
-                result.termination = termination
-                return result
-            next_demote = (started_at + demote_after_seconds * (demotions + 1)
-                           if demote_after_seconds > 0 and birth_token and demotions < 2 else None)
-            if next_demote is not None and time.monotonic() >= next_demote:
-                renice_process_tree(proc.pid, birth_token, demoted_nice)
-                demotions += 1
-                next_demote = started_at + demote_after_seconds * 2 if demotions < 2 else None
-            wait = max(0.0, next_exit_probe - time.monotonic()) if done else 0.1
-            wait_step = min(remaining, wait, 0.02 if done else 0.1)
-            if next_demote is not None:
-                wait_step = min(wait_step, max(0.0, next_demote - time.monotonic()))
-            if not done and hasattr(capture, "wait_changed"):
-                capture.wait_changed(wait_step, generation=generation)
-            else:
-                time.sleep(wait_step)
+        try:
+            while True:
+                generation = getattr(capture, "generation", 0)
+                if is_interrupted() or cancellation_requested():
+                    termination = cancel_process()
+                    capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
+                    raise CommandInterruptedError(command, termination=termination, pid=proc.pid, birth_token=birth_token or "")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    termination = _kill_process_group(proc, birth_token)
+                    drained = capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
+                    out, err, facts = capture.result()
+                    error = CommandTimeoutError(command, timeout, out, err, termination, drained)
+                    error.capture = facts
+                    raise error
+                code, termination = None, None
+                done = capture.done()
+                if done and time.monotonic() >= next_exit_probe:
+                    code, termination = finish_foreground_process(proc, expected_birth_token=birth_token)
+                    next_exit_probe = time.monotonic() + probe_interval
+                    probe_interval = min(_FOREGROUND_EXIT_PROBE_SECONDS, probe_interval * 2)
+                if code is not None:
+                    out, err, facts = capture.result()
+                    if cancellation_requested():
+                        raise CommandInterruptedError(command, termination=stop_receipt or termination, pid=proc.pid, birth_token=birth_token or "")
+                    result = subprocess.CompletedProcess(command, code, out, err)
+                    result.capture = facts
+                    result.termination = termination
+                    return result
+                next_demote = (started_at + demote_after_seconds * (demotions + 1)
+                               if demote_after_seconds > 0 and birth_token and demotions < 2 else None)
+                if next_demote is not None and time.monotonic() >= next_demote:
+                    renice_process_tree(proc.pid, birth_token, demoted_nice)
+                    demotions += 1
+                    next_demote = started_at + demote_after_seconds * 2 if demotions < 2 else None
+                wait = max(0.0, next_exit_probe - time.monotonic()) if done else 0.1
+                wait_step = min(remaining, wait, 0.02 if done else 0.1)
+                if next_demote is not None:
+                    wait_step = min(wait_step, max(0.0, next_demote - time.monotonic()))
+                if not done and hasattr(capture, "wait_changed"):
+                    capture.wait_changed(wait_step, generation=generation)
+                else:
+                    time.sleep(wait_step)
+        except (CommandInterruptedError, CommandTimeoutError):
+            raise
+        except BaseException:
+            cancel_process()
+            capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
+            _close_foreground_pipes(proc)
+            raise
 
 
 # LLM: capture初始化可能申请FD/线程失败，业务进程已存在；必须用原出生身份清理，保留首个异常对象。
@@ -804,6 +814,7 @@ def _sandbox_exec(
     *,
     host_policy: SandboxHostPolicy | None = None,
     sandbox_factory: SandboxFactory | None = None,
+    credential_file: Any | None = None,
 ) -> tuple[Any, bool]:
     """把命令包进 attempt 沙箱（G6 接线）。
 
@@ -835,11 +846,17 @@ def _sandbox_exec(
         if anchor.is_dir():
             # 先恢复原声明的私有挂载点，再取按存在性过滤的隐藏投影；内部链接仍须拒绝。
             ensure_private_dir(anchor.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS), canonical_root=anchor)
-    grant = host_policy.foreground_admin_full_access is True and not owner_text and not host_policy.exact_read_scope
+    grant = (
+        host_policy.foreground_admin_full_access is True
+        and not owner_text
+        and not host_policy.exact_read_scope
+        and credential_file is None
+    )
     host_paths = _host_sandbox_paths_for(owner_text, persona_text, foreground_admin_full_access=grant)
     # Full Access is the absence of an owner wall. Persona and control metadata remain more
     # specific read-only overlays; they must not silently downgrade the rest of the filesystem.
-    full_access = not owner_text
+    # Credentialed subprocesses always enforce strict read-only workspace + private scratch write root.
+    full_access = (not owner_text) and credential_file is None
     if full_access:
         from ..user_space.owner_access import apply_other_owner_home_policy
 
@@ -883,10 +900,10 @@ def _sandbox_exec(
         system_read_roots=system_read_roots_for_platform() if host_policy.exact_read_scope else (),
         network_access=host_policy.network_access,
         host_credential_env_names=host_policy.host_credential_env_names,
-        # 只在 owner 隔离时生效：Full Access 没有 owner 墙，也就没有私有目录读拒绝。
+        # 只在 owner 隔离或携卡私有隔离时生效：普通 Full Access 没有 owner 墙，也就没有私有目录读拒绝。
         private_read_roots=tuple(
             Path(str(root)).expanduser().resolve(strict=False) for root in host_policy.private_roots if str(root or "").strip()
-        ) if owner_text else (),
+        ) if (owner_text or credential_file is not None) else (),
         hidden_paths=tuple(dict.fromkeys((*host_paths.hidden, *(getattr(host_policy, "host_exclusive_paths", ()) or ())))),
         protected_write_patterns=host_paths.patterns,
         protected_directory_write_patterns=host_paths.directory_write_patterns,
@@ -894,6 +911,7 @@ def _sandbox_exec(
         # G4：拒绝模型命令连本机 Gateway 的实际绑定端口（回环）。端口由 Gateway 启动时登记在进程内注册表；
         # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
         deny_gateway_ports=() if grant else gateway_bound_ports(),
+        credential_file=credential_file,
     )
     # Shell 自行启动 argv，须复用与 sandbox.run 相同的cwd准入；授权文件的祖先仅作cwd，不加回内容白名单。
     if host_policy.exact_read_scope and not allowlisted_directory(
@@ -902,6 +920,8 @@ def _sandbox_exec(
     ):
         raise SandboxUnavailable("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
     sandbox = (AttemptExecutionSandbox if sandbox_factory is None else sandbox_factory)(spec)
+    if credential_file is not None and getattr(sandbox, "supports_credential_file", False) is not True:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: CREDENTIAL_FD_ISOLATION_UNPROVEN")
     if sandbox_factory is not None:
         sandbox.require_ready()
     # Attempt 网关的 SandboxUnavailableError 继承 SandboxUnavailable，
@@ -1103,6 +1123,11 @@ def _build_shell_tool_model_spec(
                         "the local network; the first such call asks the user once and can be remembered for this owner."
                     ),
                 },
+                "credential_ref": {
+                    "type": "string",
+                    "pattern": "^cred_[0-9a-f]{32}$",
+                    "description": "同步脚本读 MY_AGENT_CREDENTIAL_FILE；工具参数只填宿主引用。",
+                },
             },
             "required": ["command"],
             "additionalProperties": False,
@@ -1121,7 +1146,7 @@ def _build_shell_tool_model_spec(
                 "Avoid for interactive terminal workflows.",
                 "Never append shell '&' or use 'nohup ... &' for a service; remove those wrappers, set run_in_background=true, then use process_session to wait, inspect, or stop it.",
                 "Do not append '; echo $?' or another successful command to inspect status; run_command already reports the final return_code, and such suffixes hide earlier failures.",
-                "Prefer write_file for file changes instead of shell redirection.", "需要宿主凭据（credential_ref）的 HTTP/API 请求必须使用 web_fetch，禁止用 curl/shell 拼接占位账号或探测受保护接口。",
+                "Prefer write_file for file changes instead of shell redirection.", "需要宿主凭据（credential_ref）的标准 HTTP/API 请求优先使用 web_fetch；需同步脚本自定义协议时通过 run_command(credential_ref=...) 读取 MY_AGENT_CREDENTIAL_FILE（单次打开读入内存，因 /dev/fd 描述符共享偏移量，勿重复 open 读取），禁止在命令文本中拼接明文或占位账号，也禁止后台携卡运行。",
                 "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
                 "Files written under /tmp inside the owner-scoped sandbox are kept in the task workspace .sandbox-tmp directory and survive across tool calls and requests; still keep final deliverables in the selected workspace, not in /tmp.",
                 "Do not run sleep or polling commands for subagent progress; end the turn and let the host lifecycle event resume the direct parent.",
@@ -1316,6 +1341,42 @@ class ShellTool(BaseTool):
             error_code="SANDBOX_UNAVAILABLE",
         )
 
+    def validate_invocation(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext | None = None,
+    ) -> ToolHandlerOutcome | None:
+        _ = context
+        if "credential_ref" not in params or params.get("credential_ref") is None:
+            return None
+        from ..user_space.task_credential_material import is_valid_credential_ref
+
+        raw_ref = params.get("credential_ref")
+        if not is_valid_credential_ref(raw_ref):
+            return _shell_credential_prestart_error(
+                self.model_spec.name,
+                error_code="TOOL_INVALID_ARGUMENTS",
+                failure_stage="validation",
+                message="credential_ref 参数无效：必须为形如 cred_<32位小写十六进制> 的宿主凭据引用，未启动子进程。",
+                next_action=(
+                    '请改用有效的宿主凭据引用，例如 run_command(command="python3 query.py", '
+                    'credential_ref="cred_0123456789abcdef0123456789abcdef")；无需携卡时请省略 credential_ref。'
+                ),
+                field_name="credential_ref",
+            )
+        if _wants_background(params):
+            return _shell_credential_prestart_error(
+                self.model_spec.name,
+                error_code="TOOL_INVALID_ARGUMENTS",
+                failure_stage="validation",
+                message="run_command 携卡执行不支持 run_in_background=true 后台会话，未解密且未启动子进程。",
+                next_action=(
+                    f'请移除 run_in_background 参数，以前台同步方式调用 run_command(command="python3 query.py", credential_ref="{raw_ref}")。'
+                ),
+                field_name="run_in_background",
+            )
+        return None
+
     # LLM: callback 属于当前不可变调用上下文，不能写共享 handler 或注入模型参数。
     # 函数用途: 将原执行权限复查交给后台启动，在预留和交接时重新确认当前调用仍有效。
     def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
@@ -1324,6 +1385,9 @@ class ShellTool(BaseTool):
     # LLM: shell 自带 & 不得进入执行；deadline 已过等前置拒绝必须声明 not_started，不能遗留 UNKNOWN。
     # 函数用途: 校验并执行命令，未启动与执行后失败分账；长期进程统一登记为受管后台会话。
     def execute(self, params: dict[str, Any], *, context: ToolInvocationContext | None = None) -> ToolHandlerOutcome:
+        invalid_cred = self.validate_invocation(params, context)
+        if invalid_cred is not None:
+            return invalid_cred
         command_result = parse_shell_command(self.model_spec.name, params.get("command", ""))
         if isinstance(command_result, ToolHandlerOutcome):
             return command_result
@@ -1380,6 +1444,16 @@ class ShellTool(BaseTool):
                 execution_scope=ProcessExecutionScope.from_run_scope(params.get("__run_scope"), self.path_access_policy.owner_scope_root),
                 context=context,
                 listen_scope=_background_listen_scope(params),
+            )
+        if params.get("credential_ref") is not None:
+            return _execute_credentialed_shell_command(
+                tool=self,
+                params=params,
+                command=command,
+                target=target,
+                timeout=timeout,
+                sandbox_roots=(sandbox_write_roots, sandbox_read_roots, sandbox_protected_paths),
+                context=context,
             )
         return _execute_with_artifact_protection(
             _ShellArtifactExecutionRequest(
@@ -2486,6 +2560,7 @@ def _run_attempt_sandboxed_shell_command(
     sandbox_protected_paths: tuple[Path, ...] | None,
 ) -> subprocess.CompletedProcess[str]:
     owner_home = tool.path_access_policy.owner_scope_root
+    cred_runtime: _ShellCredentialRuntime | None = getattr(tool, "_credential_runtime", None)
     exec_arg, use_shell = _sandbox_exec(
         command,
         target,
@@ -2499,6 +2574,7 @@ def _run_attempt_sandboxed_shell_command(
                                       host_exclusive_paths=getattr(tool, 'host_exclusive_paths', ()),
                                       exact_read_scope=getattr(tool, "_sandbox_exact_read_scope", False),
                                       foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access),
+        credential_file=cred_runtime.cred_file if cred_runtime is not None else None,
         **({"sandbox_factory": getattr(tool, "sandbox_factory", None)} if getattr(tool, "sandbox_factory", None) is not None else {}),
     )
     deadline = time.monotonic() + max(0.0, float(timeout))
@@ -2506,16 +2582,21 @@ def _run_attempt_sandboxed_shell_command(
     for attempt in range(4):
         if is_interrupted() or cancellation_requested():
             raise CommandInterruptedError(command)
+        if attempt > 0 and cred_runtime is not None:
+            cred_runtime.reverify()
+            cred_runtime.cred_file.rewind()
         remaining = timeout if attempt == 0 else max(0.0, deadline - time.monotonic())
         if completed is not None and remaining <= 0:
             return completed
         if getattr(tool, "executor", None) is not None:
+            if cred_runtime is not None:
+                raise SandboxUnavailable("SANDBOX_UNAVAILABLE: CREDENTIAL_EXECUTOR_UNSUPPORTED")
             completed = getattr(tool, "executor", None).run(ShellCommandRequest(command, exec_arg, target, remaining,
                 _subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots, sandboxed=True,
                                      host_credential_env_names=tool.host_credential_env_names,
                                          foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access), use_shell))
         else:
-            proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool)
+            proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool, cred_runtime=cred_runtime)
             completed = _communicate_process(proc, command=command, timeout=remaining, host_output_redaction=getattr(tool, "_host_output_redaction", None), **({
                 "demote_after_seconds": getattr(tool, "demote_after_seconds", 0), "demoted_nice": getattr(tool, "demoted_nice", 15),
             } if getattr(tool, "demote_after_seconds", 0) else {}))
@@ -2529,10 +2610,36 @@ def _run_attempt_sandboxed_shell_command(
 
 # LLM: 前台spawn单独采用预建Landlock fd，只传给可信helper并由其exec前关闭；原argv供裁剪重试，保持权限/session/env及错误映射。
 # 函数用途: 以关闭stdin和捕获管道的方式启动本次attempt命令。
-def _start_attempt_shell_process(exec_arg, use_shell: bool, target: Path, tool: ShellTool) -> subprocess.Popen:
+def _start_attempt_shell_process(
+    exec_arg,
+    use_shell: bool,
+    target: Path,
+    tool: ShellTool,
+    *,
+    cred_runtime: _ShellCredentialRuntime | None = None,
+) -> subprocess.Popen:
     from ..attempt.sandbox import adopt_prebuilt_landlock_ruleset
 
     exec_arg, pass_fds = adopt_prebuilt_landlock_ruleset(exec_arg) if isinstance(exec_arg, list) else (exec_arg, ())
+    env = _subprocess_text_env(
+        tool.path_access_policy.owner_scope_root,
+        hidden_roots=tool.host_private_roots,
+        sandboxed=True,
+        host_credential_env_names=tool.host_credential_env_names,
+        foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access,
+    )
+    if cred_runtime is not None:
+        if use_shell or not isinstance(exec_arg, list):
+            raise SandboxUnavailable("SANDBOX_UNAVAILABLE: CREDENTIAL_SHELL_ARGV_REQUIRED")
+        scratch_str = str(cred_runtime.scratch_dir)
+        env = {
+            **env,
+            "MY_AGENT_CREDENTIAL_FILE": str(cred_runtime.cred_file.env_path),
+            "TMPDIR": scratch_str,
+            "TMP": scratch_str,
+            "TEMP": scratch_str,
+        }
+        pass_fds = tuple(dict.fromkeys((*pass_fds, int(cred_runtime.cred_file.read_fd))))
     try:
         return subprocess.Popen(
             exec_arg,
@@ -2544,11 +2651,323 @@ def _start_attempt_shell_process(exec_arg, use_shell: bool, target: Path, tool: 
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_subprocess_text_env(tool.path_access_policy.owner_scope_root, hidden_roots=tool.host_private_roots, sandboxed=True,
-                                     host_credential_env_names=tool.host_credential_env_names,
-                                         foreground_admin_full_access=tool.path_access_policy.foreground_admin_full_access),
+            env=env,
             start_new_session=True,
             **({"pass_fds": pass_fds} if pass_fds else {}),
         )
     except OSError as exc:
         raise SandboxUnavailable(f"BWRAP_EXEC_FAILED:{exc}") from exc
+
+
+@dataclass(frozen=True)
+class _ShellCredentialRuntime:
+    cred_file: Any
+    scratch_dir: Path
+    reverify: Callable[[], None]
+
+
+def _shell_credential_prestart_error(
+    tool_name: str,
+    *,
+    error_code: str,
+    failure_stage: str,
+    message: str,
+    next_action: str,
+    field_name: str = "",
+    credential_ref: str = "",
+) -> ToolHandlerOutcome:
+    from ..user_space.task_credential_material import build_credential_telemetry
+
+    err_payload: dict[str, object] = {
+        "error_code": error_code,
+        "failure_stage": failure_stage,
+        "effect_outcome": "not_started",
+        "message": message,
+        "next_action": next_action,
+    }
+    if field_name:
+        err_payload["field"] = field_name
+    envelope: dict[str, object] = {
+        "credential_error": err_payload,
+        "credential_execution": build_credential_telemetry(
+            credential_ref=credential_ref,
+            status_code=error_code,
+            failure_stage=failure_stage,
+            effect_outcome="not_started",
+            fd_closed=True,
+            scratch_cleaned=True,
+            process_tree_reaped=True,
+        ),
+        "process": {"status": "not_started", "reason": error_code.lower()},
+    }
+    return ToolHandlerOutcome(
+        tool_name,
+        False,
+        json.dumps(err_payload, ensure_ascii=False),
+        result_envelope=envelope,
+        error_code=error_code,
+        effect_outcome="not_started",
+        failure_stage=failure_stage,
+        next_action=next_action,
+    )
+
+
+def _preflight_credential_shell_sandbox(tool: ShellTool, target: Path) -> None:
+    import platform as _platform
+
+    from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
+    from .sandbox import require_bwrap_credential_support
+
+    if os.name != "posix":
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: CREDENTIAL_POSIX_REQUIRED")
+    if getattr(tool, "executor", None) is not None:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: CREDENTIAL_CUSTOM_EXECUTOR_UNSUPPORTED")
+    sys_name = _platform.system()
+    if sys_name not in {"Darwin", "Linux"}:
+        raise SandboxUnavailable(f"SANDBOX_UNAVAILABLE: CREDENTIAL_PLATFORM_UNSUPPORTED:{sys_name}")
+    owner_text = str(tool.path_access_policy.owner_scope_root or "").strip()
+    base = Path(owner_text or target).expanduser().resolve(strict=False)
+    spec = AttemptSandboxSpec(
+        attempt_view=target,
+        staging_root=target,
+        shared_workspace=base,
+        owner_home=base,
+        protected_persona_root=(
+            Path(tool.protected_persona_root).expanduser().resolve(strict=False)
+            if tool.protected_persona_root
+            else None
+        ),
+        full_access=False,
+        network_access=getattr(tool, "_sandbox_network_access", True),
+    )
+    sbx = (AttemptExecutionSandbox if tool.sandbox_factory is None else tool.sandbox_factory)(spec)
+    if getattr(sbx, "supports_credential_file", False) is not True:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: CREDENTIAL_SANDBOX_FACTORY_UNPROVEN")
+    sbx.require_ready()
+    if sys_name == "Linux":
+        require_bwrap_credential_support(sbx.spec.bwrap_path)
+
+
+def _execute_credentialed_shell_command(
+    *,
+    tool: ShellTool,
+    params: dict[str, Any],
+    command: str,
+    target: Path,
+    timeout: int,
+    sandbox_roots: _ShellSandboxRoots,
+    context: ToolInvocationContext | None,
+) -> ToolHandlerOutcome:
+    import copy as _copy
+    import platform as _platform
+
+    from ..user_space.task_credential_material import (
+        build_credential_telemetry,
+        classify_credential_exception,
+        credential_file_for_child,
+        credential_scratch_dir,
+        credential_scratch_parent,
+        credential_staging_root,
+    )
+    from .host_output_redaction import redact_host_tool_outcome
+
+    cred_ref = str(params.get("credential_ref") or "")
+    tool_call_id = str(params.get("__tool_call_id") or "")
+    run_scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
+    req_id = str((run_scope or {}).get("request_id") or (run_scope or {}).get("run_id") or "")
+
+    if is_interrupted() or cancellation_requested():
+        return _shell_credential_prestart_error(
+            tool.model_spec.name,
+            error_code="CANCELLED",
+            failure_stage="runtime_gate",
+            message="任务已取消，携卡命令未解密且未启动。",
+            next_action="停止派发新命令并保留已有结构化结果。",
+            credential_ref=cred_ref,
+        )
+    if context is None or context.credential_use is None:
+        return _shell_credential_prestart_error(
+            tool.model_spec.name,
+            error_code="CREDENTIAL_NOT_AUTHORIZED",
+            failure_stage="authorization",
+            message="当前调用缺少宿主授权凭据上下文，拒绝在未受控入口解密凭据。",
+            next_action="请通过标准已授权会话工具链调用 run_command，禁止直接构造未授权处理器调用。",
+            credential_ref=cred_ref,
+        )
+    try:
+        if callable(context.execution_authority_check):
+            context.execution_authority_check()
+        _preflight_credential_shell_sandbox(tool, target)
+    except BaseException as pre_exc:
+        if isinstance(pre_exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        if is_interrupted() or cancellation_requested():
+            return _shell_credential_prestart_error(
+                tool.model_spec.name,
+                error_code="CANCELLED",
+                failure_stage="runtime_gate",
+                message="任务已取消，携卡命令未解密且未启动。",
+                next_action="停止派发新命令并保留已有结构化结果。",
+                credential_ref=cred_ref,
+            )
+        classified = classify_credential_exception(
+            pre_exc,
+            tool_name=tool.model_spec.name,
+            credential_ref=cred_ref,
+            default_stage="runtime_gate",
+            effect_outcome="not_started",
+        )
+        return _shell_credential_prestart_error(
+            tool.model_spec.name,
+            error_code=classified["error_code"],
+            failure_stage=classified["failure_stage"],
+            message=classified["message"],
+            next_action=classified["next_action"],
+            credential_ref=cred_ref,
+        )
+
+    cred_use = context.credential_use
+    try:
+        cm = cred_use(cred_ref, consumer="shell")
+        material_stack = contextlib.ExitStack()
+        material = material_stack.enter_context(cm)
+    except BaseException as auth_exc:
+        if isinstance(auth_exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        classified = classify_credential_exception(
+            auth_exc,
+            tool_name=tool.model_spec.name,
+            credential_ref=cred_ref,
+            default_stage="authorization",
+            effect_outcome="not_started",
+        )
+        return _shell_credential_prestart_error(
+            tool.model_spec.name,
+            error_code=classified["error_code"],
+            failure_stage=classified["failure_stage"],
+            message=classified["message"],
+            next_action=classified["next_action"],
+            credential_ref=cred_ref,
+        )
+
+    sandbox_write_roots, sandbox_read_roots, sandbox_protected_paths = sandbox_roots
+    fd_closed = False
+    scratch_cleaned = False
+    try:
+        with material_stack:
+            with credential_scratch_dir() as (cred_scratch, scratch_state):
+                with credential_file_for_child(material, sandbox_backend=_platform.system()) as cred_file:
+                    def _reverify_before_retry() -> None:
+                        if callable(context.execution_authority_check):
+                            context.execution_authority_check()
+                        verify_fn = getattr(cred_use, "verify_execution_current", None)
+                        if callable(verify_fn):
+                            verify_fn(
+                                credential_ref=str(getattr(material, "credential_ref", "") or cred_ref),
+                                expected_generation=int(getattr(material, "generation", 1)),
+                            )
+
+                    cred_tool = _copy.copy(tool)
+                    cred_tool._host_output_redaction = getattr(cred_use, "redaction", getattr(tool, "_host_output_redaction", None))
+                    cred_tool.path_access_policy = replace(cred_tool.path_access_policy, foreground_admin_full_access=False)
+                    cred_tool.host_exclusive_paths = tuple(
+                        dict.fromkeys((*cred_tool.host_exclusive_paths, credential_staging_root()))
+                    )
+                    cred_tool.host_private_roots = tuple(
+                        dict.fromkeys((*cred_tool.host_private_roots, str(credential_scratch_parent())))
+                    )
+                    cred_tool._credential_runtime = _ShellCredentialRuntime(
+                        cred_file=cred_file,
+                        scratch_dir=cred_scratch,
+                        reverify=_reverify_before_retry,
+                    )
+                    ro_inputs = tuple(
+                        dict.fromkeys(
+                            Path(p).expanduser().resolve(strict=False)
+                            for p in (
+                                target,
+                                tool.workspace_root,
+                                *(tool.workspace_roots or ()),
+                                *(sandbox_read_roots or ()),
+                                *(sandbox_write_roots or ()),
+                            )
+                        )
+                    )
+                    outcome = _execute_with_artifact_protection(
+                        _ShellArtifactExecutionRequest(
+                            tool=cred_tool,
+                            command=command,
+                            target=target,
+                            timeout=timeout,
+                            sandbox_roots=((cred_scratch,), ro_inputs, sandbox_protected_paths),
+                            effective_access_mode=_effective_access_mode(
+                                cred_tool.access_mode,
+                                params.get("__access_mode"),
+                            ),
+                            artifact_registry_root=(
+                                Path(params["__artifact_registry_root"])
+                                if params.get("__artifact_registry_root")
+                                else cred_tool.workspace_root
+                            ),
+                            run_scope=params.get("__run_scope"),
+                            tool_call_id=tool_call_id,
+                            operation_id=str(params.get("__operation_id") or ""),
+                            operation_managed=params.get("__operation_managed") is True,
+                            task_records=str(params.get("__sandbox_task_records") or ""),
+                        )
+                    )
+                fd_closed = cred_file.fd_closed
+            scratch_cleaned = bool(scratch_state.get("scratch_cleaned", False))
+    except BaseException as run_exc:
+        if isinstance(run_exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        classified = classify_credential_exception(
+            run_exc,
+            tool_name=tool.model_spec.name,
+            credential_ref=cred_ref,
+            default_stage="runtime_gate",
+            effect_outcome="not_started",
+        )
+        return _shell_credential_prestart_error(
+            tool.model_spec.name,
+            error_code=classified["error_code"],
+            failure_stage=classified["failure_stage"],
+            message=classified["message"],
+            next_action=classified["next_action"],
+            credential_ref=cred_ref,
+        )
+
+    active_redaction = getattr(cred_use, "redaction", None)
+    if active_redaction is not None:
+        outcome = redact_host_tool_outcome(
+            outcome,
+            snapshot=active_redaction.snapshot,
+            force_default=active_redaction.force_default,
+        )
+    process_facts = outcome.result_envelope.get("process")
+    reaped = not (isinstance(process_facts, dict) and process_facts.get("cleanup_confirmed") is False)
+    if not outcome.ok:
+        if not outcome.failure_stage:
+            outcome.failure_stage = "runtime_gate" if outcome.effect_outcome == "not_started" else "execution"
+        if not outcome.next_action:
+            outcome.next_action = (
+                "携卡命令未启动，外部请求未发出；请修正隔离或参数问题后再试。"
+                if outcome.effect_outcome == "not_started"
+                else "携卡子进程已启动并结束（或超时中止），登录或业务请求可能已发出；请先根据已净化输出核实远端状态，禁止盲目重放非幂等 POST 请求。"
+            )
+    outcome.result_envelope["credential_execution"] = build_credential_telemetry(
+        request_id=req_id,
+        call_id=tool_call_id,
+        credential_ref=cred_ref,
+        effective_credential_ref=str(getattr(material, "credential_ref", "") or cred_ref),
+        generation=int(getattr(material, "generation", 1)),
+        access_scope=str(getattr(material, "access_scope", "") or ""),
+        origin=str(getattr(material, "origin", "") or ""),
+        status_code="OK" if outcome.ok else str(outcome.error_code or "COMMAND_FAILED"),
+        failure_stage="" if outcome.ok else str(outcome.failure_stage or "execution"),
+        effect_outcome="succeeded" if outcome.ok else str(outcome.effect_outcome or "failed"),
+        fd_closed=fd_closed,
+        scratch_cleaned=scratch_cleaned,
+        process_tree_reaped=reaped,
+    )
+    return outcome

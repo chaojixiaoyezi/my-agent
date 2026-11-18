@@ -49,6 +49,7 @@ if not _IS_RESOURCE_LAUNCHER:
 
     # 按 stat 键记忆成功的 bwrap --version 探测结果（容量上限 16），避免同一二进制在每次 availability() 重复派生子进程。
     _bwrap_binary_probe_entries: OrderedDict[tuple[str, int, int, int, int], SandboxReadiness] = OrderedDict()
+    _bwrap_credential_probe_entries: OrderedDict[tuple[str, int, int, int, int], bool] = OrderedDict()
     _bwrap_binary_probe_lock = threading.Lock()
 
 # 仓库内置 bwrap(随 my-agent 分发,内网装不了包也自带)。
@@ -334,6 +335,8 @@ class SandboxSpec:
     preserve_public_read_root_aliases: bool = False
     # H2：最后以只读空 tmpfs 隐藏宿主目录；模型命令隐藏托管存储，G1 整根只读插件形态隐藏宿主凭据 secrets 目录。
     hidden_paths: tuple[Path, ...] = ()
+    # C4：仅当前受控子进程可见的无名只读凭据 FD 绑定（默认 None 保持既有 argv 逐字节不变）。
+    credential_file: object | None = field(default=None, kw_only=True, repr=False)
     # 父进程冻结配置；启动器只给本次命令施加限制，不改变宿主或其它owner。
     resource_limits: ResourceLimits | None = None
 
@@ -1060,6 +1063,82 @@ def _bwrap_binary_stat_key(bwrap: str) -> tuple[str, int, int, int, int] | None:
 def _reset_bwrap_binary_probe_state() -> None:
     with _bwrap_binary_probe_lock:
         _bwrap_binary_probe_entries.clear()
+        _bwrap_credential_probe_entries.clear()
+
+
+def require_bwrap_credential_support(bwrap_path: str | None = None, *, timeout: float = 5.0) -> str:
+    """核验实际使用的 bwrap 二进制支持 --ro-bind-data 与 --perms，不支持时在 spawn 前失败关闭。"""
+    bwrap = bwrap_path or find_bwrap()
+    if not bwrap:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: BWRAP_NOT_FOUND")
+    stat_key = _bwrap_binary_stat_key(bwrap)
+    if stat_key is not None:
+        with _bwrap_binary_probe_lock:
+            cached = _bwrap_credential_probe_entries.get(stat_key)
+            if cached is True:
+                _bwrap_credential_probe_entries.move_to_end(stat_key)
+                return bwrap
+    try:
+        completed = subprocess.run(
+            [bwrap, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SandboxUnavailable(f"SANDBOX_UNAVAILABLE: BWRAP_CREDENTIAL_PROBE_FAILED:{exc}") from exc
+    help_text = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    supported = (
+        completed.returncode == 0
+        and "--ro-bind-data" in help_text
+        and "--perms" in help_text
+    )
+    if not supported:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: BWRAP_CREDENTIAL_BIND_UNSUPPORTED")
+    if stat_key is not None and _bwrap_binary_stat_key(bwrap) == stat_key:
+        with _bwrap_binary_probe_lock:
+            _bwrap_credential_probe_entries[stat_key] = True
+            _bwrap_credential_probe_entries.move_to_end(stat_key)
+            while len(_bwrap_credential_probe_entries) > 16:
+                _bwrap_credential_probe_entries.popitem(last=False)
+    return bwrap
+
+
+def _credential_file_bwrap_mounts(bwrap_path: str | None, credential_file: object | None) -> list[str]:
+    """在沙箱私有 /dev/shm 内为当前进程挂载 0600 只读凭据文件视图，绝不挂入宿主凭据目录。"""
+    if credential_file is None:
+        return []
+    bwrap = require_bwrap_credential_support(bwrap_path)
+    if not bwrap:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: BWRAP_NOT_FOUND")
+    read_fd = getattr(credential_file, "read_fd", None)
+    target = str(getattr(credential_file, "child_mount", None) or getattr(credential_file, "env_path", "") or "")
+    target_path = Path(target)
+    if (
+        type(read_fd) is not int
+        or read_fd < 3
+        or not target.startswith("/dev/shm/")
+        or ".." in target_path.parts
+        or target_path.parent == Path("/dev/shm")
+    ):
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: CREDENTIAL_FD_MOUNT_SPEC_INVALID")
+    parent_dir = os.fspath(target_path.parent)
+    return [
+        "--tmpfs",
+        "/dev/shm",
+        "--dir",
+        parent_dir,
+        "--tmpfs",
+        parent_dir,
+        "--perms",
+        "0600",
+        "--ro-bind-data",
+        str(read_fd),
+        target,
+        "--remount-ro",
+        parent_dir,
+    ]
 
 
 # LLM: 版本读取只证明二进制可加载；full probe 还必须执行 namespace/mount 行为验证。
@@ -1266,6 +1345,7 @@ __all__ = [
     "find_bwrap",
     "probe_sandbox",
     "prune_transient_bwrap_sidecar_mounts",
+    "require_bwrap_credential_support",
     "require_sandbox_ready",
     "wrap_resource_command",
     "wrap_shell_command",
@@ -1311,6 +1391,9 @@ def _mount_snapshot(argv: list[str]) -> tuple[_MountProjection, ...]:
     for index, flag in enumerate(argv):
         if flag in {"--bind", "--ro-bind", "--ro-bind-try", "--dev-bind"}:
             mounts.append(_MountProjection(Path(argv[index + 1]), Path(argv[index + 2]), flag not in {"--ro-bind", "--ro-bind-try"},
+                                           arguments=tuple(argv[index:index + 3])))
+        elif flag == "--ro-bind-data":
+            mounts.append(_MountProjection(None, Path(argv[index + 2]), writable=False,
                                            arguments=tuple(argv[index:index + 3])))
         elif flag == "--symlink":
             mounts.append(_MountProjection(Path(argv[index + 1]), Path(argv[index + 2]), alias=True,
@@ -1685,7 +1768,8 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     # 父目录已只读或最终被隐藏覆盖的侧车 try-bind 不改变视图：先省略，单文件遮罩再按最终挂载计算。
     mounted = _without_redundant_sidecar_mounts([*argv, *placeholders])
     masks = _hidden_file_masks(mounted, spec.hidden_paths)
-    return wrap_resource_command([*mounted, *masks, *chdir], spec.resource_limits)
+    cred_mounts = _credential_file_bwrap_mounts(spec.bwrap_path, spec.credential_file)
+    return wrap_resource_command([*mounted, *masks, *cred_mounts, *chdir], spec.resource_limits)
 
 
 # LLM: CLI必须等所有argv构造器完成定义再启动；只移动启动时机，不把binary成功升级成完整隔离成功。

@@ -1430,6 +1430,7 @@ def _tool_runtime_snapshot_hash(
 @dataclass(frozen=True)
 class ToolInvocationContext:
     host_output_redaction: object | None = field(default=None, kw_only=True, repr=False, compare=False)
+    credential_use: object | None = field(default=None, kw_only=True, repr=False, compare=False)
     runtime_snapshot: ToolRuntimeSnapshot
     cancellation_token: object | None = None
     execution_authority_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)

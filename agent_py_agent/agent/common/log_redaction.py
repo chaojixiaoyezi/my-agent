@@ -13,6 +13,7 @@ handler.
 import json
 import logging
 import re
+import threading
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -20,17 +21,76 @@ from functools import wraps
 from typing import Any
 
 _REDACTED = "<redacted>"
+_CREDENTIAL_REDACTED = "[REDACTED]"
 _CONFIGURED_SECRET_VALUES: ContextVar[tuple[str, ...]] = ContextVar('configured_secret_values', default=())
+_CONFIGURED_CREDENTIAL_VALUES: ContextVar[tuple[str, ...]] = ContextVar('configured_credential_values', default=())
+_ACTIVE_TURN_LOG_LOCK = threading.Lock()
+_ACTIVE_TURN_LOG_SECRETS: dict[str, tuple[str, ...]] = {}
+_ACTIVE_TURN_LOG_FLAT: tuple[str, ...] = ()
+_PROTOCOL_CONTROL_KEYS = frozenset({
+    "action", "attempt_id", "call_id", "channel", "cleanup_confirmed", "code",
+    "command_succeeded", "complete", "content_status", "coverage", "credential_applied",
+    "credential_execution", "credential_redaction", "credential_ref", "display",
+    "duration_ms", "effect_outcome", "effect_source_ref", "error", "error_category",
+    "error_code", "exit_code", "failure_stage", "fd_closed", "filled", "generation",
+    "handler_executed", "hint", "host_error", "idempotency_key", "kind", "level",
+    "message_id", "mode", "model_call_id", "next_action", "ok", "operation_id",
+    "origin", "output", "phase", "process", "progress", "reason", "reason_code",
+    "recommended_action", "recovery_hint", "replace_candidate", "reported_error_code",
+    "request_id", "result", "result_envelope", "retryable", "return_code", "run_id",
+    "sandbox", "schema", "schema_version", "scratch_cleaned", "seq", "session_id",
+    "source_effect", "stage", "status", "stderr", "stderr_chars", "stderr_lines",
+    "stderr_truncated", "stdout", "stdout_chars", "stdout_lines", "stdout_truncated",
+    "t", "task_id", "text", "thread_id", "tool", "tool_output_policy", "type",
+    "unavailable_sources", "verbose_level", "workflow_id", "workflow_run_id",
+})
 
 
 @contextmanager
 def configured_secret_redaction(secret_values: tuple[str, ...] = ()):
     """宿主临时绑定当前调用的值；finally 恢复，不污染并行调用或长期日志配置。"""
-    token = _CONFIGURED_SECRET_VALUES.set(tuple(value for value in secret_values if value))
+    cred_extra = tuple(v for v in getattr(secret_values, "credential_values", ()) if v)
+    merged_secrets = tuple(dict.fromkeys((*_CONFIGURED_SECRET_VALUES.get(), *(value for value in secret_values if value))))
+    merged_creds = tuple(dict.fromkeys((*_CONFIGURED_CREDENTIAL_VALUES.get(), *cred_extra)))
+    token = _CONFIGURED_SECRET_VALUES.set(merged_secrets)
+    cred_token = _CONFIGURED_CREDENTIAL_VALUES.set(merged_creds)
     try:
         yield
     finally:
+        _CONFIGURED_CREDENTIAL_VALUES.reset(cred_token)
         _CONFIGURED_SECRET_VALUES.reset(token)
+
+
+def bind_active_credential_log_values(values: tuple[str, ...]) -> None:
+    """在当前已激活的 configured_secret_redaction 栈帧内追加本调用新解密的凭据变体。"""
+    extra = tuple(v for v in values if v)
+    if not extra:
+        return
+    _CONFIGURED_CREDENTIAL_VALUES.set(tuple(dict.fromkeys((*_CONFIGURED_CREDENTIAL_VALUES.get(), *extra))))
+    _CONFIGURED_SECRET_VALUES.set(tuple(dict.fromkeys((*_CONFIGURED_SECRET_VALUES.get(), *extra))))
+
+
+def register_active_turn_log_values(scope_id: str, values: tuple[str, ...]) -> None:
+    """向进程级网关日志边界登记活动携卡回合的凭据变体（仅作用于 LogRecord，不跨 owner 影响业务正文）。"""
+    global _ACTIVE_TURN_LOG_FLAT
+    if not scope_id:
+        return
+    cleaned = tuple(v for v in values if v)
+    if not cleaned:
+        return
+    with _ACTIVE_TURN_LOG_LOCK:
+        _ACTIVE_TURN_LOG_SECRETS[scope_id] = cleaned
+        _ACTIVE_TURN_LOG_FLAT = tuple(dict.fromkeys(v for seq in _ACTIVE_TURN_LOG_SECRETS.values() for v in seq))
+
+
+def unregister_active_turn_log_values(scope_id: str) -> None:
+    """在携卡回合结束时立即移除日志边界凭据变体，保证字典零滞留。"""
+    global _ACTIVE_TURN_LOG_FLAT
+    if not scope_id:
+        return
+    with _ACTIVE_TURN_LOG_LOCK:
+        if _ACTIVE_TURN_LOG_SECRETS.pop(scope_id, None) is not None:
+            _ACTIVE_TURN_LOG_FLAT = tuple(dict.fromkeys(v for seq in _ACTIVE_TURN_LOG_SECRETS.values() for v in seq))
 
 # 结构化输出与内嵌JSON共用同一条有界遍历；只遮蔽过深/循环的子树，不损伤正常同级字段。
 _REDACTION_FRAME = ContextVar('redaction_frame', default=(0, frozenset()))
@@ -239,7 +299,10 @@ def _strip_wrapping_quote(value: str) -> str:
 # LLM: 调用方决定是否为源码；插值内字面量和实际 URL 凭证仍须遮蔽，已知密钥扫描始终执行。
 # 函数用途: 打码一个被赋值/跟随的秘密值；整段只是纯变量引用时原样返回，其余照旧遮蔽。
 def _mask_secret_value(value: str, marker: str) -> str:
-    return value if _PURE_VARIABLE_REFERENCE_RE.fullmatch(_strip_wrapping_quote(value)) else marker
+    stripped = _strip_wrapping_quote(value)
+    if stripped == _CREDENTIAL_REDACTED:
+        return value
+    return value if _PURE_VARIABLE_REFERENCE_RE.fullmatch(stripped) else marker
 
 
 # LLM: 键名判定从正则搬进回调，是为了让正则保持单量词、不回溯（见 _SECRET_ASSIGNMENT_RE 注释）。
@@ -461,8 +524,13 @@ def redact_sensitive_text(
     """
 
     text = str(value)
+    cred_secrets = _CONFIGURED_CREDENTIAL_VALUES.get()
+    cred_set = frozenset(cred_secrets) if cred_secrets else frozenset()
+    for secret in sorted(cred_secrets, key=len, reverse=True):
+        text = text.replace(secret, _CREDENTIAL_REDACTED)
     for secret in sorted(_CONFIGURED_SECRET_VALUES.get(), key=len, reverse=True):
-        text = text.replace(secret, redacted_marker)
+        if secret not in cred_set:
+            text = text.replace(secret, redacted_marker)
     if not text:
         return text
     # 长命令参数先按词边界遮蔽，避免后续通用表达式对同一大段秘密反复扫描。
@@ -557,6 +625,9 @@ def redact_sensitive_value(
     """Recursively redact strings and values under credential-named fields."""
 
     if _field_is_sensitive(field_name):
+        cred_secrets = _CONFIGURED_CREDENTIAL_VALUES.get()
+        if cred_secrets and isinstance(value, str) and any(secret in value for secret in cred_secrets):
+            return _CREDENTIAL_REDACTED
         return redacted_marker
     if isinstance(value, str):
         return redact_sensitive_output_text(value, code_file=code_file, redacted_marker=redacted_marker,
@@ -565,16 +636,27 @@ def redact_sensitive_value(
         return redact_sensitive_text(value, code_file=code_file, redacted_marker=redacted_marker,
             redact_assignment_labels=redact_assignment_labels, redaction_events=redaction_events)
     if isinstance(value, Mapping):
-        return {
-            key: redact_sensitive_value(
+        cred_secrets = _CONFIGURED_CREDENTIAL_VALUES.get()
+        host_secrets = _CONFIGURED_SECRET_VALUES.get()
+        has_configured = bool(cred_secrets or host_secrets)
+        cred_set = frozenset(cred_secrets) if cred_secrets else frozenset()
+        out = {}
+        for key, item in value.items():
+            safe_key = key
+            if has_configured and isinstance(key, str) and key not in _PROTOCOL_CONTROL_KEYS:
+                for secret in sorted(cred_secrets, key=len, reverse=True):
+                    safe_key = safe_key.replace(secret, _CREDENTIAL_REDACTED)
+                for secret in sorted(host_secrets, key=len, reverse=True):
+                    if secret not in cred_set:
+                        safe_key = safe_key.replace(secret, redacted_marker)
+            out[safe_key] = redact_sensitive_value(
                 item,
                 field_name=str(key),
                 code_file=code_file,
                 redacted_marker=redacted_marker, redact_assignment_labels=redact_assignment_labels,
                 redaction_events=redaction_events,
             )
-            for key, item in value.items()
-        }
+        return out
     if isinstance(value, tuple):
         return tuple(
             redact_sensitive_value(item, code_file=code_file, redacted_marker=redacted_marker,
@@ -621,6 +703,45 @@ def _field_is_sensitive(name: str) -> bool:
     return normalized in _SENSITIVE_FIELD_NAMES or _is_credential_key_name(normalized)
 
 
+def _apply_log_record_redaction(record: logging.LogRecord) -> None:
+    active_turn_creds = _ACTIVE_TURN_LOG_FLAT
+    cred_token = None
+    sec_token = None
+    if active_turn_creds:
+        cred_token = _CONFIGURED_CREDENTIAL_VALUES.set(
+            tuple(dict.fromkeys((*_CONFIGURED_CREDENTIAL_VALUES.get(), *active_turn_creds)))
+        )
+        sec_token = _CONFIGURED_SECRET_VALUES.set(
+            tuple(dict.fromkeys((*_CONFIGURED_SECRET_VALUES.get(), *active_turn_creds)))
+        )
+    try:
+        safe_args = redact_sensitive_value(record.args)
+        if safe_args and isinstance(record.msg, str):
+            try:
+                interpolated = record.msg % safe_args
+            except (TypeError, ValueError):
+                record.msg = redact_sensitive_value(record.msg)
+                record.args = safe_args
+            else:
+                record.msg = redact_sensitive_text(interpolated)
+                record.args = None
+        else:
+            record.msg = redact_sensitive_value(record.msg)
+            record.args = safe_args
+        if _CONFIGURED_SECRET_VALUES.get():
+            # 队列处理器可能在调用上下文退出后才格式化；异常正文先脱敏再保留。
+            if record.exc_info:
+                record.exc_text = redact_sensitive_text(logging.Formatter().formatException(record.exc_info))
+                record.exc_info = None
+            if record.stack_info:
+                record.stack_info = redact_sensitive_text(record.stack_info)
+    finally:
+        if cred_token is not None:
+            _CONFIGURED_CREDENTIAL_VALUES.reset(cred_token)
+        if sec_token is not None:
+            _CONFIGURED_SECRET_VALUES.reset(sec_token)
+
+
 def install_log_redaction() -> None:
     """Install the idempotent process-wide LogRecord redaction factory."""
 
@@ -640,15 +761,7 @@ def install_log_redaction() -> None:
         sinfo: str | None = None,
     ) -> logging.LogRecord:
         record = current_factory(name, level, pathname, lineno, msg, args, exc_info, func, sinfo)
-        record.msg = redact_sensitive_value(record.msg)
-        record.args = redact_sensitive_value(record.args)
-        if _CONFIGURED_SECRET_VALUES.get():
-            # 队列处理器可能在调用上下文退出后才格式化；异常正文先脱敏再保留。
-            if record.exc_info:
-                record.exc_text = redact_sensitive_text(logging.Formatter().formatException(record.exc_info))
-                record.exc_info = None
-            if record.stack_info:
-                record.stack_info = redact_sensitive_text(record.stack_info)
+        _apply_log_record_redaction(record)
         return record
 
     _redacting_factory._my_agent_secret_redactor = True  # type: ignore[attr-defined]
@@ -659,7 +772,23 @@ class RedactingFormatter(logging.Formatter):
     """Defense-in-depth formatter for handlers created by my-agent."""
 
     def format(self, record: logging.LogRecord) -> str:
-        return redact_sensitive_text(super().format(record))
+        active_turn_creds = _ACTIVE_TURN_LOG_FLAT
+        cred_token = None
+        sec_token = None
+        if active_turn_creds:
+            cred_token = _CONFIGURED_CREDENTIAL_VALUES.set(
+                tuple(dict.fromkeys((*_CONFIGURED_CREDENTIAL_VALUES.get(), *active_turn_creds)))
+            )
+            sec_token = _CONFIGURED_SECRET_VALUES.set(
+                tuple(dict.fromkeys((*_CONFIGURED_SECRET_VALUES.get(), *active_turn_creds)))
+            )
+        try:
+            return redact_sensitive_text(super().format(record))
+        finally:
+            if cred_token is not None:
+                _CONFIGURED_CREDENTIAL_VALUES.reset(cred_token)
+            if sec_token is not None:
+                _CONFIGURED_SECRET_VALUES.reset(sec_token)
 
 
 __all__ = [

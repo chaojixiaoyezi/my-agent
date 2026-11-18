@@ -127,6 +127,24 @@ def _record_background_owner_response(
     delivery_event_key: str = "",
 ) -> BackgroundDeliveryCommit:
     local_transcript_only = local_transcript_only or scheduled_local_delivery(delivery.agent, request)
+    (
+        internal_content,
+        public_receipt,
+        delivery_artifacts,
+        assistant_commentaries,
+        display_snapshot,
+        cred_verified,
+        cred_diagnostics,
+    ) = _prepare_credential_safe_background_inputs(
+        delivery,
+        request,
+        internal_content,
+        public_receipt=public_receipt,
+        delivery_artifacts=delivery_artifacts,
+        assistant_commentaries=assistant_commentaries,
+        display_snapshot=display_snapshot,
+        frozen_retry=frozen_retry,
+    )
     if block := public_receipt_delivery_block(delivery.agent, request, public_receipt, internal_content,
                                               has_attachments=bool(_channel_attachments(delivery_artifacts)), frozen_retry=frozen_retry):
         return _uncommitted_delivery("", block)
@@ -172,6 +190,10 @@ def _record_background_owner_response(
         message_metadata["scheduler_delivery_target_key"] = delivery_target_key
     if delivery_event_key:
         message_metadata["scheduler_delivery_event_key"] = delivery_event_key
+    if cred_diagnostics:
+        message_metadata.update(cred_diagnostics)
+    if cred_verified:
+        message_metadata["credential_redaction_verified"] = True
     route = _local_only_route(_background_delivery_route(
         delivery.channels,
         delivery_context,
@@ -197,7 +219,8 @@ def _record_background_owner_response(
         delivery_artifacts=delivery_artifacts, assistant_commentaries=assistant_commentaries,
         evidence_refs=evidence_refs, message_metadata=message_metadata, delivery_status=delivery_status,
         receipt_id=str(getattr(receipt, 'receipt_id', '') or ''), target=delivery_context.target,
-        ownership=route.ownership, canonical_record=bool(route.canonical_record and origin_valid or delivery_status == 'sent'), persisted=False)
+        ownership=route.ownership, canonical_record=bool(route.canonical_record and origin_valid or delivery_status == 'sent'),
+        persisted=False, credential_redaction_verified=cred_verified)
     if delivery_observer is not None:
         delivery_observer(freeze)
     if (delivery_status == 'sent' or freeze.canonical_record) and delivery_observer is None:
@@ -241,13 +264,31 @@ def _record_delegated_internal_response(delivery, request, context, content, *,
     delegated = delegated_delivery_task(delivery.agent, request.thread_id, task_id=request.task_id)
     if delegated is None:
         return None
+    (
+        content,
+        _unused_receipt,
+        delivery_artifacts,
+        assistant_commentaries,
+        display_snapshot,
+        _cred_verified,
+        cred_diagnostics,
+    ) = _prepare_credential_safe_background_inputs(
+        delivery,
+        request,
+        content,
+        public_receipt=None,
+        delivery_artifacts=delivery_artifacts,
+        assistant_commentaries=assistant_commentaries,
+        display_snapshot=display_snapshot,
+        frozen_retry=frozen_retry,
+    )
     internal_context = replace(context, channel="internal", target="", thread_id=request.thread_id)
     return _commit_background_response(delivery, request, internal_context,
         receipt=SimpleNamespace(content=content), delivery_status="local_only",
         committed_content=project_user_reply(content).content,
         canonical_record=True, transcript_route=True, evidence_refs=(),
         message_metadata={"session_task_id": delegated.task_id, "delivery_reason": "delegated_internal_result",
-                          "delivery_artifacts": list(delivery_artifacts)},
+                          "delivery_artifacts": list(delivery_artifacts), **cred_diagnostics},
         assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot)
 
 
@@ -275,6 +316,7 @@ class FrozenOwnerDelivery:
     external_sent: bool = False
     receipt_id: str = ""
     ownership: str = ""
+    credential_redaction_verified: bool = True
 
 
 # LLM: 冻结判定所需的全部事实；target 必须用已解析的投递目标，不能回读 request.route_target。
@@ -293,6 +335,7 @@ class _OwnerDeliveryFreeze:
     canonical_record: bool
     persisted: bool
     receipt_id: str = ""
+    credential_redaction_verified: bool = True
 
 
 # LLM: 外发义务未完成、应有 canonical 记录未提交，或容量报告要求保留时，冻结完整载荷。
@@ -341,6 +384,7 @@ def _freeze_pending_owner_delivery(
             "receipt_id": freeze.receipt_id,
             "ownership": freeze.ownership,
             "last_delivery_status": status,
+            "credential_redaction_verified": bool(freeze.credential_redaction_verified),
             "created_at": time.time(),
         },
     )
@@ -354,6 +398,8 @@ def frozen_owner_delivery(payload: dict[str, object]) -> FrozenOwnerDelivery:
     commentaries = payload.get("assistant_commentaries")
     refs = payload.get("evidence_refs")
     metadata = payload.get("message_metadata")
+    meta_dict = dict(metadata) if isinstance(metadata, dict) else {}
+    verified = payload.get("credential_redaction_verified") is True or meta_dict.get("credential_redaction_verified") is True
     return FrozenOwnerDelivery(
         content=str(payload.get("content") or ""),
         delivery_artifacts=tuple(
@@ -369,10 +415,11 @@ def frozen_owner_delivery(payload: dict[str, object]) -> FrozenOwnerDelivery:
         evidence_refs=tuple(str(item) for item in refs if isinstance(item, str) and item.strip())
         if isinstance(refs, list)
         else (),
-        message_metadata=dict(metadata) if isinstance(metadata, dict) else {},
+        message_metadata=meta_dict,
         external_sent=payload.get("external_sent") is True,
         receipt_id=str(payload.get("receipt_id") or ""),
         ownership=str(payload.get("ownership") or ""),
+        credential_redaction_verified=verified,
     )
 
 
@@ -1177,3 +1224,186 @@ def _channel_declares_proactive(channels: object, channel: str) -> bool:
     if callable(probe):
         return bool(probe(channel))
     return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
+
+
+_CREDENTIAL_BLOCKED_ATTACHMENT_EXTS = frozenset({
+    ".tmp", ".bak", ".swp", ".har", ".pcap", ".cookie", ".cookies", ".dump",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".sqlite", ".sqlite3",
+    ".db", ".bin", ".pkl", ".pickle",
+})
+_CREDENTIAL_BLOCKED_ATTACHMENT_TOKENS = ("cookie", "debug", "trace", "har", "dump")
+
+
+def _request_has_credential_provenance(
+    request: BackgroundDeliveryRequest,
+    frozen_retry: FrozenOwnerDelivery | None,
+) -> bool:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    meta = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    if str(meta.get("input_provider") or "").strip().lower() == "credential":
+        return True
+    if isinstance(meta.get("credential_result"), dict) or meta.get("credential_ref"):
+        return True
+    if frozen_retry is not None and isinstance(frozen_retry.message_metadata, dict):
+        fmeta = frozen_retry.message_metadata
+        if fmeta.get("credential_delivery_scoped") is True:
+            return True
+    return False
+
+
+def _filter_background_credential_artifacts(
+    artifacts: tuple[dict[str, object], ...],
+    active_redactions: tuple[Any, ...],
+) -> tuple[tuple[dict[str, object], ...], list[dict[str, str]]]:
+    safe_items: list[dict[str, object]] = []
+    withheld: list[dict[str, str]] = []
+    for raw_item in artifacts:
+        if not isinstance(raw_item, dict):
+            continue
+        name = str(raw_item.get("name") or Path(str(raw_item.get("path") or "")).name or "")
+        lowered = name.lower()
+        ext = Path(lowered).suffix
+        stem = Path(lowered).stem
+        art_id = str(raw_item.get("artifact_id") or "")
+        if (
+            name.startswith(".")
+            or ext in _CREDENTIAL_BLOCKED_ATTACHMENT_EXTS
+            or any(tok in stem for tok in _CREDENTIAL_BLOCKED_ATTACHMENT_TOKENS)
+        ):
+            withheld.append({"artifact_id": art_id, "reason": "CREDENTIAL_DEBUG_OR_BINARY_ATTACHMENT_BLOCKED"})
+            continue
+        raw_path = str(raw_item.get("path") or "")
+        echo_hit = False
+        if raw_path:
+            try:
+                p = Path(raw_path)
+                if p.is_file():
+                    size = p.stat().st_size
+                    if size > 8 * 1024 * 1024:
+                        withheld.append({"artifact_id": art_id, "reason": "CREDENTIAL_ATTACHMENT_SIZE_UNVERIFIABLE"})
+                        continue
+                    data = p.read_bytes()
+                    if b"\x00" in data:
+                        withheld.append({"artifact_id": art_id, "reason": "CREDENTIAL_BINARY_ATTACHMENT_BLOCKED"})
+                        continue
+                    text = data.decode("utf-8", errors="strict")
+                    if any(tr.contains_credential_echo(text) for tr in active_redactions):
+                        echo_hit = True
+            except (OSError, UnicodeDecodeError):
+                withheld.append({"artifact_id": art_id, "reason": "CREDENTIAL_ATTACHMENT_UNVERIFIABLE"})
+                continue
+        if echo_hit or any(tr.contains_credential_echo(name) for tr in active_redactions):
+            withheld.append({"artifact_id": art_id, "reason": "CREDENTIAL_ECHO_IN_ATTACHMENT"})
+            continue
+        cleaned: Any = dict(raw_item)
+        for tr in active_redactions:
+            cleaned["name"] = tr.public_text(str(cleaned.get("name") or name))
+        safe_items.append(cleaned)
+    return tuple(safe_items), withheld
+
+
+def _prepare_credential_safe_background_inputs(
+    delivery: BackgroundDeliveryDependencies,
+    request: BackgroundDeliveryRequest,
+    internal_content: str,
+    *,
+    public_receipt: dict[str, object] | None,
+    delivery_artifacts: tuple[dict[str, object], ...],
+    assistant_commentaries: tuple[str, ...],
+    display_snapshot: dict[str, object] | None,
+    frozen_retry: FrozenOwnerDelivery | None,
+) -> tuple[
+    str,
+    dict[str, object] | None,
+    tuple[dict[str, object], ...],
+    tuple[str, ...],
+    dict[str, object] | None,
+    bool,
+    dict[str, object],
+]:
+    from ..tooling.host_output_redaction import active_turn_redactions_for_scope
+
+    home = getattr(delivery.agent, "home_paths", None)
+    owner_dir = str(getattr(home, "owner_home_dir", "") or "")
+    conv_root = getattr(getattr(delivery.store, "storage", None), "root", None)
+    active = active_turn_redactions_for_scope(
+        owner_key=owner_dir,
+        conversation_root=conv_root,
+        thread_id=str(request.thread_id or ""),
+        turn_keys=(str(request.conversation_turn_id or ""), str(request.task_id or "")),
+    )
+    has_cred_provenance = _request_has_credential_provenance(request, frozen_retry)
+
+    if frozen_retry is not None:
+        if frozen_retry.credential_redaction_verified:
+            return (
+                internal_content,
+                public_receipt,
+                delivery_artifacts,
+                assistant_commentaries,
+                display_snapshot,
+                True,
+                {},
+            )
+        if has_cred_provenance and not active:
+            return (
+                "[内容因重启后凭据脱敏状态无法核验已安全扣留]",
+                None,
+                (),
+                (),
+                display_snapshot,
+                True,
+                {
+                    "credential_delivery_withheld": {
+                        "reason_code": "UNVERIFIED_CREDENTIAL_FROZEN_DELIVERY",
+                        "action": "withheld",
+                    }
+                },
+            )
+        if not active:
+            return (
+                internal_content,
+                public_receipt,
+                delivery_artifacts,
+                assistant_commentaries,
+                display_snapshot,
+                True,
+                {},
+            )
+
+    if not active:
+        return (
+            internal_content,
+            public_receipt,
+            delivery_artifacts,
+            assistant_commentaries,
+            display_snapshot,
+            True,
+            {},
+        )
+
+    safe_content = str(internal_content or "")
+    safe_commentaries = tuple(str(c or "") for c in assistant_commentaries)
+    safe_receipt: Any = dict(public_receipt) if isinstance(public_receipt, dict) else public_receipt
+    safe_snapshot: Any = dict(display_snapshot) if isinstance(display_snapshot, dict) else display_snapshot
+    for tr in active:
+        safe_content = tr.public_text(safe_content)
+        safe_commentaries = tuple(tr.public_text(c) for c in safe_commentaries)
+        if safe_receipt is not None:
+            safe_receipt = tr.redact_value(safe_receipt)
+        if safe_snapshot is not None:
+            safe_snapshot = tr.redact_value(safe_snapshot)
+
+    safe_artifacts, withheld = _filter_background_credential_artifacts(delivery_artifacts, active)
+    diagnostics: dict[str, object] = {"credential_delivery_scoped": True}
+    if withheld:
+        diagnostics["withheld_credential_attachments"] = withheld
+    return (
+        safe_content,
+        safe_receipt if isinstance(safe_receipt, dict) else None,
+        safe_artifacts,
+        safe_commentaries,
+        safe_snapshot if isinstance(safe_snapshot, dict) else None,
+        True,
+        diagnostics,
+    )

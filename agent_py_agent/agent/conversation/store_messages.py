@@ -424,6 +424,48 @@ def _message_entry_unfinished_tail(path: Path, target: str):
 
 # LLM: 消息追加、幂等提交和游标读取；只显式调用线程校验与活动更新，保留原 JSONL 和 display 边界；修改须核对直接调用方与原子存储测试。
 # 类用途: 消息追加、幂等提交和游标读取；只显式调用线程校验与活动更新，保留原 JSONL 和 display 边界。
+def _sanitize_message_request_for_turn(storage_root: Path, request: dict) -> dict:
+    from ..tooling.host_output_redaction import active_turn_redactions_for_scope
+
+    thread_id = str(request.get("thread_id") or "").strip()
+    meta = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+    turn_keys = (
+        str(meta.get("conversation_request_id") or ""),
+        str(meta.get("request_id") or ""),
+        str(meta.get("run_id") or ""),
+        str(meta.get("task_id") or ""),
+    )
+    active = active_turn_redactions_for_scope(
+        conversation_root=storage_root,
+        thread_id=thread_id,
+        turn_keys=turn_keys,
+    )
+    if not active:
+        return request
+    content = str(request.get("content") or "")
+    safe_meta: Any = dict(meta)
+    for turn_red in active:
+        content = turn_red.public_text(content)
+        safe_meta = turn_red.redact_value(safe_meta)
+    return {
+        **request,
+        "content": content,
+        "metadata": safe_meta if isinstance(safe_meta, dict) else {},
+    }
+
+
+def _sanitize_checkpoint_metadata_for_turn(storage_root: Path, thread_id: str, metadata: dict) -> dict:
+    from ..tooling.host_output_redaction import active_turn_redactions_for_scope
+
+    active = active_turn_redactions_for_scope(conversation_root=storage_root, thread_id=thread_id)
+    if not active or not isinstance(metadata, dict):
+        return metadata
+    safe_meta: Any = dict(metadata)
+    for turn_red in active:
+        safe_meta = turn_red.redact_value(safe_meta)
+    return safe_meta if isinstance(safe_meta, dict) else metadata
+
+
 class MessageStore:
     # LLM: 与原消息文件同源，不丢错误；此读口不取会创建sidecar的锁，提交端须在原append锁内重核。
     # 函数用途: 只读消息尾部指纹，损坏或并发读变更时返回错误而不是空消息证明。
@@ -477,6 +519,7 @@ class MessageStore:
     # LLM: 仅供已持原消息锁的普通/幂等入口调用；消息写入与活动合并使用原方向，不递归获取非重入消息锁。
     # 函数用途: 创建并追加真实消息，再合并当前线程活动时间。
     def _append_unlocked(self, request: dict) -> MessageLogEntry:
+        request = _sanitize_message_request_for_turn(self.storage.root, request)
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         entry = MessageLogEntry(
@@ -514,6 +557,7 @@ class MessageStore:
     # 函数用途: 逐块保存已公开过程；失败向上报告，不能把这类记录当助手回复或用来凑最近对话条数。
     def append_display_checkpoint(self, thread_id: str, metadata: dict) -> MessageLogEntry:
         thread = self._require_thread(thread_id)
+        metadata = _sanitize_checkpoint_metadata_for_turn(self.storage.root, thread.thread_id, metadata)
         entry = MessageLogEntry(
             message_id=new_id("msg"),
             thread_id=thread.thread_id,
@@ -536,6 +580,7 @@ class MessageStore:
     # 函数用途: 在原幂等锁内核对 dedupe_key 与输入内容，只首次追加消息并刷新活动时间。
     def append_once(self, request: dict, *, dedupe_key: str) -> MessageLogEntry:
         """Append one transcript event exactly once across retries and process restarts."""
+        request = _sanitize_message_request_for_turn(self.storage.root, request)
         thread_id = str(request.get("thread_id") or "").strip()
         key = str(dedupe_key or "").strip()
         if not thread_id or not key:

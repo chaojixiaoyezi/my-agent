@@ -43,7 +43,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from ..user_space.task_credential_material import ChildCredentialFile
 
 from ..common.cancellation import raise_if_cancelled
 from ..path_access_policy import (
@@ -247,6 +250,8 @@ class AttemptSandboxSpec:
     deny_gateway_ports: tuple[int, ...] = ()
     # 仅宿主源配置投影，同步 run 默认环境必须剥离这些准确来源，不影响文件/网络授权。
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+    # C4：仅当前受控子进程可见的只读无名凭据 FD 绑定（默认 None 保持既有规则逐字节不变）。
+    credential_file: ChildCredentialFile | None = field(default=None, kw_only=True, repr=False)
 
 
 class SandboxBackend(Protocol):
@@ -276,6 +281,7 @@ class AttemptExecutionSandbox:
     每次重复 subprocess 试跑。
     """
 
+    supports_credential_file: bool = True
     _READINESS_CACHE: dict[tuple, SandboxReadiness] = {}
 
     def __init__(self, spec: AttemptSandboxSpec):
@@ -448,6 +454,7 @@ class AttemptExecutionSandbox:
             hidden_paths=((*self.spec.private_read_roots, *self.spec.hidden_paths)
                           if self.spec.read_only_root and self.spec.read_mode != "allowlist"
                           else self.spec.hidden_paths),
+            credential_file=self.spec.credential_file,
         )
         argv = build_bwrap_argv(spec)
         _require_linux_file_isolation(spec.hidden_paths, argv)
@@ -509,6 +516,8 @@ class AttemptExecutionSandbox:
         argv = self.build_argv(command_argv)
         options = SandboxProcessOptions(timeout, grace_seconds, capture_output,
                                         _sandbox_process_cwd(self.spec, self._platform), self.spec.host_credential_env_names)
+        if self.spec.credential_file is not None:
+            return _run_credentialed_sandbox_process(argv, options, self.spec.credential_file)
         return run_sandbox_process(argv, options)
 
     # ------------------------------------------------------ macOS SBPL 构造
@@ -623,8 +632,13 @@ def build_macos_sandbox_profile(spec: AttemptSandboxSpec) -> str:
         write_denies.append("(deny file-link)")
     rules = (base, *_spec_rules(spec, persona_paths=(*paths, *readonly_aliases, *hidden_aliases),
                                write_denies=tuple(write_denies)), *_hidden_path_rules(hidden_aliases))
+    cred_key = (
+        (spec.credential_file.read_fd, spec.credential_file.env_path)
+        if spec.credential_file is not None
+        else None
+    )
     key = (spec.attempt_view.resolve(strict=False), root.resolve(strict=False) if root is not None else None,
-           tuple(path.resolve(strict=False) for path in spec.extra_write_roots), spec.network_access)
+           tuple(path.resolve(strict=False) for path in spec.extra_write_roots), spec.network_access, cred_key)
     profile = _cached_macos_profile(key, rules)
     if root is not None and source_paths != frozenset(_sandbox_persona_paths(root, all_owners=spec.full_access)):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: PATH_AGENTS_SOURCE_PROTECTION_INVALID: changed protection")
@@ -897,6 +911,89 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
 #   隐藏路径排在读放行之后，断网与端口拒绝排最后（Seatbelt 后写覆盖先写；两条 deny 先后不影响结果）。上级目录规则只拒写，
 #   不影响前面的读规则。G4 的端口拒绝只在 deny_gateway_ports 非空时出现，空时逐字节不变。
 # 函数用途: 按owner墙、private/授权读边界、绝对拒写、Git保护、祖先、隐藏和网络顺序汇总规则。
+def _macos_credential_fd_rules(spec: AttemptSandboxSpec) -> list[str]:
+    cred_file = spec.credential_file
+    if cred_file is None:
+        return []
+    read_fd = getattr(cred_file, "read_fd", None)
+    env_path = str(getattr(cred_file, "env_path", "") or "")
+    if type(read_fd) is not int or read_fd < 3 or env_path != f"/dev/fd/{read_fd}":
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: CREDENTIAL_FD_SPEC_INVALID")
+    fd_literal = _seatbelt_string_literal(env_path)
+    return [
+        '(allow file-read-metadata (literal "/dev") (literal "/dev/fd"))',
+        f"(allow file-read* (literal {fd_literal}))",
+        f"(deny file-write* (literal {fd_literal}))",
+    ]
+
+
+def _run_credentialed_sandbox_process(
+    argv: list[str],
+    options: SandboxProcessOptions,
+    credential_file: ChildCredentialFile,
+) -> subprocess.CompletedProcess:
+    from ..common.cancellation import register_cancellation_callback
+    from ..tooling._subprocess_env_scrub import scrub_subprocess_env
+    from ..tooling.process_output_capture import ProcessOutputCapture
+    from ..tooling.sandbox import prune_transient_bwrap_sidecar_mounts
+    from .process_run import (
+        _close_process_pipes,
+        _drain_stopped_process,
+        _ProcessRun,
+        _wait_for_process,
+    )
+
+    deadline = time.monotonic() + max(0.0, options.timeout)
+    current_argv = argv
+    result = None
+    for attempt in range(4):
+        raise_if_cancelled()
+        remaining = options.timeout if attempt == 0 else max(0.0, deadline - time.monotonic())
+        if result is not None and remaining <= 0:
+            return result
+        if attempt > 0:
+            credential_file.rewind()
+        spawn_argv, landlock_fds = adopt_prebuilt_landlock_ruleset(current_argv)
+        child_env = scrub_subprocess_env(
+            dict(os.environ),
+            host_credential_env_names=options.host_credential_env_names,
+        )
+        child_env["MY_AGENT_CREDENTIAL_FILE"] = str(credential_file.env_path)
+        pass_fds = tuple(dict.fromkeys((*landlock_fds, int(credential_file.read_fd))))
+        proc = subprocess.Popen(
+            spawn_argv,
+            cwd=options.cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if options.capture_output else None,
+            stderr=subprocess.PIPE if options.capture_output else None,
+            start_new_session=True,
+            env=child_env,
+            pass_fds=pass_fds,
+        )
+        state = _ProcessRun(proc, options.grace_seconds)
+        try:
+            if options.capture_output:
+                state.capture = ProcessOutputCapture(proc)
+            with register_cancellation_callback(state.stop):
+                result = _wait_for_process(state, argv, remaining)
+        except BaseException:
+            state.stop()
+            _drain_stopped_process(state)
+            raise
+        finally:
+            state.close()
+            if state.capture is not None:
+                state.capture.finish(0)
+            _close_process_pipes(proc)
+        result.args = argv
+        if options.capture_output and result.returncode not in (0, 143) and not result.stdout and attempt < 3:
+            pruned = prune_transient_bwrap_sidecar_mounts(current_argv, result.stderr or "")
+            if pruned is not None:
+                current_argv = pruned
+                continue
+        return result
+
+
 def _spec_rules(spec: AttemptSandboxSpec, *, persona_paths: tuple[Path, ...] | None = None,
                 write_denies: tuple[str, ...] = ()) -> list[str]:
     read_rules = _allowlist_read_rules(spec) if spec.read_mode == "allowlist" else _private_read_rules(spec)
@@ -904,7 +1001,8 @@ def _spec_rules(spec: AttemptSandboxSpec, *, persona_paths: tuple[Path, ...] | N
             *_ancestor_write_denies(spec, persona_paths=persona_paths), *_pattern_write_denies(spec.protected_write_patterns),
             *_pattern_write_denies(spec.protected_directory_write_patterns, directories=True),
             *_pattern_write_denies(spec.protected_directory_unlink_patterns, directories=True, unlink_only=True),
-            *_macos_host_hidden_rules(spec), *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access),
+            *_macos_host_hidden_rules(spec), *_hidden_path_rules(spec.hidden_paths),
+            *_macos_credential_fd_rules(spec), *_network_rules(spec.network_access),
             *_gateway_port_denies(spec.deny_gateway_ports)]
 
 

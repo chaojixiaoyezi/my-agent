@@ -105,6 +105,7 @@ def _init_guard():
     allow_net = bool(cfg.get("network_access", False))
     denied_ports = {int(p) for p in cfg.get("denied_ports", ()) if int(p) > 0}
     block_subproc = bool(cfg.get("block_subprocess", False))
+    cred_file_raw = str(cfg.get("credential_read_file") or "")
     _guard_tls = threading.local()
     fsdecode = os.fsdecode
     perm_err = PermissionError
@@ -179,9 +180,26 @@ def _init_guard():
         finally:
             _guard_tls.active = previous
 
+    cred_file_paths = (
+        frozenset({Path(cred_file_raw), _resolve(cred_file_raw)})
+        if cred_file_raw
+        else frozenset()
+    )
+
+    def _is_cred_file(target, raw):
+        if not cred_file_paths:
+            return False
+        try:
+            raw_path = Path(fsdecode(raw))
+        except Exception:
+            raw_path = None
+        return target in cred_file_paths or (raw_path is not None and raw_path in cred_file_paths)
+
     # LLM: 已解析的路径只消费冻结根，不重复跟随lstat允许观察的symlink叶节点；宿主专有来源最先拒，owner墙先于正根附加授权。
     # 函数用途: 执行私有读取限制的路径裁决。
     def _check_read_target(target, raw):
+        if _is_cred_file(target, raw):
+            return
         if _protected(target, exclusive_roots) or _owner_denied(target):
             raise perm_err(eacces, "Permission denied", str(raw))
         if _under(target, denied_roots) and not _under(target, (*read_roots, *runtime_roots)):
@@ -198,6 +216,8 @@ def _init_guard():
     # 函数用途: 让Python回退同样保住冻结范围与任务保护，最具体规则生效且同层deny胜。
     def _check_write(raw, *, directory=False, unlink=False):
         target = _resolve(raw)
+        if _is_cred_file(target, raw):
+            raise perm_err(eacces, "Permission denied", str(raw))
         if (_protected(target, (*protected_paths, *exclusive_roots))
                 or tuple(part.casefold() for part in target.parts) in protected_nodes
                 or any(pattern.search(str(target)) for pattern in write_patterns)):
@@ -466,6 +486,90 @@ class _HistorySnapshotMissing(ValueError):
     """历史查找后、物化前blob失效，仍按原pin漂移合同失败关闭。"""
 
 
+class ScriptCredentialLease:
+    """固化脚本单次运行的不可序列化宿主凭据租约；每次真实尝试独立校验权限与版本。"""
+
+    def __init__(
+        self,
+        *,
+        credential_ref: str,
+        credential_use: object,
+        authority_check=None,
+        expected_definition_ref: str = "",
+        declared_origins: tuple[str, ...] = (),
+    ) -> None:
+        self.credential_ref = str(credential_ref or "")
+        self.credential_use = credential_use
+        self.authority_check = authority_check
+        self.expected_definition_ref = str(expected_definition_ref or "")
+        self.declared_origins = tuple(str(o) for o in declared_origins if str(o))
+
+    def __repr__(self) -> str:
+        return "ScriptCredentialLease()"
+
+    def __reduce__(self):
+        raise TypeError("ScriptCredentialLease is non-serializable")
+
+    def verify_before_attempt(self, actual_definition_ref: str = "") -> None:
+        if callable(self.authority_check):
+            self.authority_check()
+        verify_fn = getattr(self.credential_use, "verify_execution_current", None)
+        if callable(verify_fn):
+            verify_fn()
+        if self.expected_definition_ref and actual_definition_ref and actual_definition_ref != self.expected_definition_ref:
+            raise _HistorySnapshotMissing("script_definition_drift_during_credential_run")
+
+
+_BLOCKED_CREDENTIAL_ARTIFACT_EXTS = frozenset({
+    ".tmp", ".bak", ".swp", ".har", ".pcap", ".cookie", ".cookies", ".dump",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".pdf", ".zip", ".tar",
+    ".gz", ".tgz", ".bz2", ".xz", ".bin", ".sqlite", ".sqlite3", ".db",
+    ".pkl", ".pickle", ".npy", ".npz", ".parquet",
+})
+_BLOCKED_CREDENTIAL_ARTIFACT_STEM_TOKENS = ("cookie", "debug", "trace", "har", "dump")
+
+
+def _sanitize_or_block_credential_run_out(folder: Path, cred_lease: ScriptCredentialLease) -> None:
+    """拦截携卡脚本输出目录中的临时材料、调试/二进制文件，并在暂存归档前净化合法文本产物。"""
+    from ..common.nofollow_fs import read_bytes_beneath
+
+    run_out_dir = folder / "run_out"
+    if not run_out_dir.exists() and not run_out_dir.is_symlink():
+        return
+    if run_out_dir.is_symlink() or not run_out_dir.is_dir():
+        raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_dir")
+    turn_red = getattr(cred_lease.credential_use, "turn_redaction", None)
+    for dirpath, dirnames, filenames in os.walk(run_out_dir, followlinks=False):
+        curr_dir = Path(dirpath)
+        for dname in dirnames:
+            dpath = curr_dir / dname
+            if dname.startswith(".") or dpath.is_symlink():
+                raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_subdir")
+        for fname in filenames:
+            fpath = curr_dir / fname
+            lowered = fname.lower()
+            ext = Path(lowered).suffix
+            stem = Path(lowered).stem
+            if (
+                fname.startswith(".")
+                or fpath.is_symlink()
+                or ext in _BLOCKED_CREDENTIAL_ARTIFACT_EXTS
+                or any(tok in stem for tok in _BLOCKED_CREDENTIAL_ARTIFACT_STEM_TOKENS)
+            ):
+                raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_file")
+            rel_parts = fpath.relative_to(folder).parts
+            raw_bytes = read_bytes_beneath(folder, rel_parts)
+            if b"\x00" in raw_bytes:
+                raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_binary")
+            try:
+                text = raw_bytes.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise RunOutError("SCRIPT_CREDENTIAL_ARTIFACT_BLOCKED", archive_phase="credential_artifact_gate", path_role="run_out_binary") from exc
+            safe_text = turn_red.public_text(text) if turn_red is not None else str(redact_sensitive_value(text))
+            if safe_text != text:
+                write_text_atomic_beneath(folder, rel_parts, safe_text, file_mode=0o600)
+
+
 # LLM: 权威入口沿宿主workspace覆盖与nofollow；项目根只读代码，Owner仍为执行/权限根；缺失才读旧Owner格式。
 # 函数用途: 取得脚本配置和冻结代码，返回目录仅供兼容调用方展示。
 def load_script(owner_home, script_id, *, workspace_root=None):
@@ -650,19 +754,36 @@ def _cleanup_process(process):
 
 # LLM: 原始失败及清理事实写入调用方持有的 capture，输出读取或关闭异常也不能丢失硬失败。
 # 函数用途: 真正启动脚本并返回退出码、输出及超时或输出超限标记。
-def _execute(command, folder, environment, input_json, timeout, capture):
+def _execute(command, folder, environment, input_json, timeout, capture, *, cred_file=None, cred_redaction=None):
     # 连同数据源/守卫/继承环境与 argv 一起检查；不能截断环境或误报进程已启动。
+    cred_file = cred_file if cred_file is not None else (capture.get('cred_file') if isinstance(capture, dict) else None)
+    cred_redaction = cred_redaction if cred_redaction is not None else (capture.get('cred_redaction') if isinstance(capture, dict) else None)
     size = sum(len((str(key) + '=' + str(value)).encode('utf-8')) + 1 for key, value in environment.items())
     size += sum(len(str(arg).encode('utf-8')) + 1 for arg in command)
     if size > SCRIPT_ENVIRONMENT_MAX_BYTES:
         raise ScriptInputTransportError('SCRIPT_ENVIRONMENT_LIMIT')
+    spawn_cmd = command
+    pass_fds: tuple[int, ...] = ()
+    if cred_file is not None:
+        from ..attempt.sandbox import adopt_prebuilt_landlock_ruleset
+
+        spawn_cmd, landlock_fds = adopt_prebuilt_landlock_ruleset(command) if isinstance(command, list) else (command, ())
+        pass_fds = tuple(dict.fromkeys((*landlock_fds, int(cred_file.read_fd))))
     with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         stdin.write(input_json.encode('utf-8'))
         stdin.seek(0)
         raise_if_cancelled()
         launching = time.monotonic()
-        process = subprocess.Popen(command, cwd=folder, env=environment, stdin=stdin,
-                                   stdout=stdout, stderr=stderr, start_new_session=os.name == 'posix')
+        process = subprocess.Popen(
+            spawn_cmd,
+            cwd=folder,
+            env=environment,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=os.name == 'posix',
+            **({'pass_fds': pass_fds} if pass_fds else {}),
+        )
         running = time.monotonic()
         capture['started'] = True
         capture['phase'] = 'started'
@@ -688,7 +809,22 @@ def _execute(command, folder, environment, input_json, timeout, capture):
         capture['error_code'] = error
         stdout.seek(0)
         stderr.seek(0)
-        return process.returncode, stdout.read(MAX_OUTPUT_BYTES).decode('utf-8', 'replace'), stderr.read(PREVIEW_CHARS * 4).decode('utf-8', 'replace'), error, cleanup
+        raw_out = stdout.read(MAX_OUTPUT_BYTES)
+        raw_err = stderr.read(PREVIEW_CHARS * 4)
+        if cred_redaction is not None:
+            from ..tooling.host_output_redaction import HostOutputStreamRedactor
+
+            out_redactor = HostOutputStreamRedactor(secret_values=cred_redaction.snapshot.secret_values)
+            err_redactor = HostOutputStreamRedactor(secret_values=cred_redaction.snapshot.secret_values)
+            raw_out = out_redactor.feed(raw_out) + out_redactor.finish()
+            raw_err = err_redactor.feed(raw_err) + err_redactor.finish()
+        return (
+            process.returncode,
+            raw_out.decode('utf-8', 'replace'),
+            raw_err.decode('utf-8', 'replace'),
+            error,
+            cleanup,
+        )
 
 
 # LLM: 解析前限制 JSON 结构深度，忽略字符串中的括号；不依赖解释器不稳定的 C 栈上限。
@@ -1031,11 +1167,23 @@ class ScriptRunner:
     # 函数用途: 冻结代码、绑定连接，投影宿主及人格保护并清理本次临时目录。
     @contextmanager
     def _prepare(self, script_id, inputs, timeout_seconds, override_data_sources, network_access, *, capture=None):
+        import platform as _platform
+        from contextlib import ExitStack
+
         capture = capture if capture is not None else {}
+        cred_lease: ScriptCredentialLease | None = getattr(self, '_credential_lease', None)
         timings = capture.setdefault('timings', dict.fromkeys(_TIMING_FIELDS, 0.0))
         clock = time.monotonic()
         _, metadata = load_script(self.owner_home, script_id, workspace_root=self.workspace_root)
         capture['definition_ref'] = execution_definition_ref(metadata, kind='script')
+        if cred_lease is not None:
+            cred_lease.verify_before_attempt(capture['definition_ref'])
+            if not self.use_sandbox or os.name != 'posix' or sys.platform not in ('darwin', 'linux'):
+                raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: SCRIPT_CREDENTIAL_SANDBOX_REQUIRED')
+            if sys.platform == 'linux':
+                from ..tooling.sandbox import require_bwrap_credential_support
+
+                require_bwrap_credential_support()
         output_contract_fields(metadata.get('io_contract', {}))
         if metadata.get('enabled', True) is False:
             raise AssetDisabledError('script', script_id)
@@ -1062,6 +1210,8 @@ class ScriptRunner:
         staging_root = Path(tempfile.mkdtemp(prefix=f'{script_id}_', dir=root))
         folder = staging_root
         ds_runtime = None
+        cred_stack = ExitStack()
+        cred_file = None
         try:
             history = script_history_record(self.owner_home, script_id, self.workspace_root)
             if history is not None:
@@ -1095,13 +1245,40 @@ class ScriptRunner:
                 env['MY_AGENT_RUN_OUT'] = str(folder / 'run_out')
             ds_runtime = ScriptDatasourceRuntime(self.owner_home, metadata, folder, env, timeout,
                 capture if capture is not None else {}, workspace_root=self.workspace_root)
-            private_roots = _script_private_roots(self.owner_home, self.workspace_root) if self.restrict_to_roots else ()
+            private_roots = _script_private_roots(self.owner_home, self.workspace_root) if (self.restrict_to_roots or cred_lease is not None) else ()
             host = self.host_path_protection
             protected_paths = tuple(dict.fromkeys((*self.write_protection.absolute_paths, *host.readonly)))
             # 数据源写者复核依赖的精确规格/闸门叶：沙箱与Python守卫都按只读保护，更宽写根下也不可改写；不单独改变守卫启用条件。
             readonly_paths = tuple(dict.fromkeys((*protected_paths, *ds_runtime.readonly_control_paths)))
             denied_write_roots = tuple(dict.fromkeys((*private_roots, *self.write_protection.denied_roots)))
             hidden_paths = tuple(dict.fromkeys((*host.hidden, *self.host_exclusive_paths)))
+            if cred_lease is not None:
+                from ..user_space.task_credential_material import (
+                    CREDENTIAL_FILE_ENV,
+                    credential_file_for_child,
+                    credential_staging_root,
+                )
+
+                hidden_paths = tuple(dict.fromkeys((*hidden_paths, credential_staging_root())))
+                material = cred_stack.enter_context(
+                    cred_lease.credential_use(cred_lease.credential_ref, consumer='shell')
+                )
+                if cred_lease.declared_origins and str(getattr(material, 'origin', '') or '') not in cred_lease.declared_origins:
+                    from ..user_space.task_credential_storage import CredentialInputError
+
+                    raise CredentialInputError(
+                        'CREDENTIAL_BINDING_INVALID',
+                        '凭据卡绑定的站点 origin 不在该固化脚本声明的 access_targets 范围内，未向子进程下发凭据。',
+                        stage='authorization',
+                        effect_outcome='not_started',
+                    )
+                cred_file = cred_stack.enter_context(
+                    credential_file_for_child(material, sandbox_backend=_platform.system())
+                )
+                env[CREDENTIAL_FILE_ENV] = str(cred_file.env_path)
+                capture['cred_material'] = material
+                capture['cred_file'] = cred_file
+                capture['cred_redaction'] = getattr(cred_lease.credential_use, 'redaction', None)
             command = [executable, '-I', '-B', str(entrypoint)] if interpreter == 'python3' else [executable, str(entrypoint)]
             applied_sandbox = False
             exact_read_scope = self.read_scope_mode == 'exact'
@@ -1112,7 +1289,7 @@ class ScriptRunner:
                 _validate_exact_owner_roots((*runtime_read_roots, *ds_runtime.read_roots),
                                            self.owner_scope_root, self.agent_home_root)
             if self.use_sandbox:
-                shared_root = folder if self.restrict_to_roots else self.owner_home
+                shared_root = folder if (self.restrict_to_roots or cred_lease is not None) else self.owner_home
                 sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
                     attempt_view=folder, staging_root=folder, shared_workspace=shared_root, owner_home=shared_root,
                     extra_write_roots=(folder, *self.extra_write_roots, *ds_runtime.write_roots),
@@ -1125,14 +1302,17 @@ class ScriptRunner:
                     protected_write_patterns=host.patterns,
                     protected_directory_write_patterns=host.directory_write_patterns,
                     protected_directory_unlink_patterns=host.directory_unlink_patterns,
-                    implicit_attempt_write_roots=not exact_read_scope,
+                    implicit_attempt_write_roots=not exact_read_scope and cred_lease is None,
                     read_only_root=exact_read_scope,
                     read_mode='allowlist' if exact_read_scope else None,
                     system_read_roots=system_read_roots,
-                    network_access=net_allowed, deny_gateway_ports=denied_ports if net_allowed else ()))
-                if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
+                    network_access=net_allowed,
+                    deny_gateway_ports=denied_ports if net_allowed else (),
+                    credential_file=cred_file,
+                ))
+                if _can_apply_sandbox(sandbox, strict=self.strict_sandbox or cred_lease is not None):
                     applied_sandbox = True
-            enforces_scope = exact_read_scope or self.restrict_to_roots or bool(self.owner_scope_root or hidden_paths or protected_paths
+            enforces_scope = exact_read_scope or self.restrict_to_roots or cred_lease is not None or bool(self.owner_scope_root or hidden_paths or protected_paths
                 or denied_write_roots or host.patterns or host.directory_write_patterns or host.directory_unlink_patterns)
             guarded = enforces_scope and interpreter == 'python3'
             if guarded:
@@ -1142,7 +1322,7 @@ class ScriptRunner:
                 resolved_folder = folder.resolve(strict=False)
                 write_roots = (resolved_folder, *self.extra_write_roots, *ds_runtime.write_roots, Path('/dev'))
                 persona_paths = tuple(path.resolve(strict=False) for path in persona_process_protected_paths(self.owner_home))
-                env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps({
+                guard_cfg = {
                     'read_scope_mode': self.read_scope_mode,
                     'read_roots': [str(p) for p in (resolved_folder, *self.public_read_roots, *self.extra_write_roots, *ds_runtime.read_roots)],
                     'runtime_read_roots': [str(p) for p in (*runtime_read_roots, *system_read_roots)],
@@ -1159,7 +1339,10 @@ class ScriptRunner:
                     'network_access': net_allowed,
                     'denied_ports': list(denied_ports),
                     'block_subprocess': not applied_sandbox,
-                })
+                }
+                if cred_file is not None:
+                    guard_cfg['credential_read_file'] = str(cred_file.env_path)
+                env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps(guard_cfg)
                 command = [executable, '-I', '-B', str(guard), str(entrypoint)]
             elif enforces_scope and not applied_sandbox:
                 raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: NESTED_SHELL_SANDBOX_UNAVAILABLE')
@@ -1172,30 +1355,42 @@ class ScriptRunner:
             yield metadata, sources, (command, str(folder), env, input_json, timeout)
         finally:
             try:
-                if ds_runtime is not None:
-                    try:
-                        ds_runtime.close()
-                    except Exception as exc:
-                        if capture.get('run_out_target') is not None:
-                            raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='data_source_close',
-                                              path_role='datasource_manifest') from exc
-                        raise
+                cred_stack.close()
+                if cred_file is not None:
+                    capture['cred_fd_closed'] = cred_file.fd_closed
             finally:
-                if capture.get('run_out_target') is None:
-                    shutil.rmtree(staging_root, ignore_errors=True)
-                else:
-                    try:
-                        shutil.rmtree(staging_root)
-                    except OSError as exc:
-                        raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='scratch_cleanup',
-                                          path_role='staging_root') from exc
+                try:
+                    if ds_runtime is not None:
+                        try:
+                            ds_runtime.close()
+                        except Exception as exc:
+                            if capture.get('run_out_target') is not None:
+                                raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='data_source_close',
+                                                  path_role='datasource_manifest') from exc
+                            raise
+                finally:
+                    if capture.get('run_out_target') is None:
+                        shutil.rmtree(staging_root, ignore_errors=True)
+                        capture['cred_scratch_cleaned'] = not staging_root.exists()
+                    else:
+                        try:
+                            shutil.rmtree(staging_root)
+                            capture['cred_scratch_cleaned'] = True
+                        except OSError as exc:
+                            capture['cred_scratch_cleaned'] = False
+                            raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='scratch_cleanup',
+                                              path_role='staging_root') from exc
 
     # LLM: 原摘要/超时/沙箱链不变；run-out清理前暂存、清理后发表；归档异常硬失败并透传有界脱敏首因。
     # 函数用途: 执行脚本并返回结构化结果，单步调试可显式禁止资产摘要写入。
     def run_script(self, script_id, inputs=None, *, timeout_seconds: int | float | None = None,
                    override_data_sources=None, network_access: bool | None = None, record_summary: bool = True):
+        from ..tooling.sandbox import SandboxUnavailable
+        from ..user_space.task_credential_storage import CredentialInputError
+
         if type(record_summary) is not bool:
             raise ValueError('record_summary必须是布尔值')
+        cred_lease: ScriptCredentialLease | None = getattr(self, '_credential_lease', None)
         started_at, timer = time.time(), time.monotonic()
         metadata, sources, output, stdout, stderr, error, exit_code = {}, {}, {}, '', '', '', None
         cleanup, capture, execution_error = {}, {'phase': 'preflight', 'timings': dict.fromkeys(_TIMING_FIELDS, 0.0)}, {}
@@ -1213,6 +1408,8 @@ class ScriptRunner:
                     output, intents, error = _parse_result_envelope(stdout, metadata.get('io_contract', {}))
                     envelope_parsed = True
                     if not error:
+                        if cred_lease is not None:
+                            _sanitize_or_block_credential_run_out(Path(execution[1]), cred_lease)
                         batch = RunArtifactBatch(capture['run_out_target'], self.run_out_quota)
                         batch.stage(Path(execution[1]), max_files=self.RUN_OUT_MAX_FILES, max_bytes=self.RUN_OUT_MAX_BYTES)
             if cleanup:
@@ -1226,12 +1423,23 @@ class ScriptRunner:
             if cleanup:
                 error = error or 'SCRIPT_CLEANUP_ERROR'
             if not error:
+                if cred_lease is not None:
+                    turn_red = getattr(cred_lease.credential_use, 'turn_redaction', None)
+                    if turn_red is not None:
+                        output = turn_red.redact_value(output)
+                        intents = turn_red.redact_value(intents)
                 self._admit_delivery(intents, output, metadata, capture.get('work_context'), receipts=delivery_receipts)
                 if batch is not None and batch.artifacts:
                     output_dir, output_artifacts = batch.publish()
-        except SandboxUnavailableError:
+        except (SandboxUnavailableError, SandboxUnavailable, CredentialInputError):
+            if cred_lease is not None and not capture.get('started'):
+                raise
             raise
         except (OSError, ValueError, KeyError, TypeError) as exc:
+            if cred_lease is not None and not capture.get('started') and not isinstance(
+                exc, (_EntrypointMissing, _HistorySnapshotMissing, AssetDisabledError, ScriptInputTransportError, RunOutError)
+            ) and any(tok in str(exc) for tok in ('凭据', '不属于', '身份无法核验', '无权', '已过期', '已撤销', '未就绪')):
+                raise
             cleanup = capture.get('cleanup_error', cleanup)
             exit_code = capture.get('exit_code', exit_code)
             error = capture.get('error_code') or ('SCRIPT_CLEANUP_ERROR' if cleanup else 'SCRIPT_CONFIGURATION_ERROR')
@@ -1258,6 +1466,15 @@ class ScriptRunner:
             stderr += '\n进程组清理失败: ' + cleanup['message']
         output, stdout, stderr, cleanup, execution_error, inputs, sources = redact_datasource_values(
             [output, stdout, stderr, cleanup, execution_error, inputs, sources], capture.get('datasource_secrets', ()))
+        if cred_lease is not None:
+            turn_red = getattr(cred_lease.credential_use, 'turn_redaction', None)
+            if turn_red is not None:
+                output = turn_red.redact_value(output)
+                stdout = turn_red.public_text(stdout)
+                stderr = turn_red.public_text(stderr)
+                cleanup = turn_red.redact_value(cleanup)
+                execution_error = turn_red.redact_value(execution_error)
+                delivery_receipts = list(turn_red.redact_value(delivery_receipts))
         ended_at, elapsed = time.time(), (time.monotonic() - timer) * 1000
         context = {'script_id': script_id, 'error_code': error, 'exit_code': exit_code,
                    'stderr_preview': stderr[:PREVIEW_CHARS], 'stdout_tail': stdout[:PREVIEW_CHARS],
@@ -1281,6 +1498,23 @@ class ScriptRunner:
         result.output_dir, result.output_artifacts = output_dir, output_artifacts
         result.preparation_timings = capture['timings']
         result.delivery_receipts = tuple(delivery_receipts)
+        if cred_lease is not None:
+            from ..user_space.task_credential_material import build_credential_telemetry
+
+            mat = capture.get('cred_material')
+            self._last_credential_telemetry = build_credential_telemetry(
+                credential_ref=cred_lease.credential_ref,
+                effective_credential_ref=str(getattr(mat, 'credential_ref', '') or cred_lease.credential_ref),
+                generation=int(getattr(mat, 'generation', 1)) if mat is not None else 0,
+                access_scope=str(getattr(mat, 'access_scope', '') or ''),
+                origin=str(getattr(mat, 'origin', '') or ''),
+                status_code='OK' if result.ok else str(error or 'SCRIPT_FAILED'),
+                failure_stage='' if result.ok else ('runtime_gate' if result.effect_outcome == 'not_started' else 'execution'),
+                effect_outcome='succeeded' if result.ok else str(result.effect_outcome or 'unknown'),
+                fd_closed=bool(capture.get('cred_fd_closed', True)),
+                scratch_cleaned=bool(capture.get('cred_scratch_cleaned', True)),
+                process_tree_reaped=not bool(cleanup),
+            )
         if record_summary:
             _record_summary(self.owner_home, result)
         return result

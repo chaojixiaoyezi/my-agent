@@ -178,7 +178,18 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
     from .host_output_redaction import redact_host_tool_outcome
     with configured_secret_redaction(redaction.snapshot.secret_values):
         outcome = _invoke_registry_tool(request)
-        return redact_host_tool_outcome(outcome, snapshot=redaction.snapshot, force_default=redaction.force_default)
+        effective_redaction = redaction
+        cred_use = getattr(redaction, "_credential_use", None)
+        turn_red = getattr(cred_use, "turn_redaction", None)
+        if turn_red is not None and getattr(turn_red, "active", False):
+            effective_redaction = redaction.with_credential_values(
+                getattr(turn_red.redaction.snapshot.secret_values, "credential_values", ())
+            )
+        return redact_host_tool_outcome(
+            outcome,
+            snapshot=effective_redaction.snapshot,
+            force_default=effective_redaction.force_default,
+        )
 
 
 def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutcome:
@@ -759,8 +770,21 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
     if denial is not None:
         return denial
     handler_started = False
+    armed_cred_use = None
+    invocation_context = request.invocation_context
+    raw_redaction = invocation_context.host_output_redaction
+    base_cred_use = invocation_context.credential_use or getattr(raw_redaction, "_credential_use", None)
+    if base_cred_use is not None:
+        begin_fn = getattr(base_cred_use, "begin_invocation", None)
+        if callable(begin_fn):
+            from .host_output_redaction import HostOutputRedaction
+
+            armed_cred_use = begin_fn(raw_redaction or HostOutputRedaction())
+            invocation_context = replace(invocation_context, credential_use=armed_cred_use)
+        elif invocation_context.credential_use is None:
+            invocation_context = replace(invocation_context, credential_use=base_cred_use)
     try:
-        token = request.invocation_context.cancellation_token
+        token = invocation_context.cancellation_token
         cancel = getattr(token, "cancel", None)
         interrupt_callback = (
             (lambda: cancel("interrupted")) if callable(cancel) else (lambda: None)
@@ -783,7 +807,7 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
                 params = _tool_params_with_runtime_boundary(request)
                 handler_started = True
                 _notify_handler_started(request)
-                result = request.tool.execute_scoped(params, request.invocation_context)
+                result = request.tool.execute_scoped(params, invocation_context)
             if not isinstance(result, ToolHandlerOutcome):
                 stage = ToolFailureStage.EXECUTION.value if handler_started else ToolFailureStage.RUNTIME_GATE.value
                 summary = f"invalid handler return type: {type(result).__name__}"
@@ -846,6 +870,20 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
             error_code="TOOL_RUNTIME_ERROR",
             # 宿主接口错误自带结构化执行结局；明确未开始的拒绝不能被记成未知而停住整轮。
             effect_outcome="not_started" if not handler_started or _host_error_not_started(exc) else "",
+        )
+    finally:
+        if armed_cred_use is not None:
+            disarm_fn = getattr(armed_cred_use, "disarm", None)
+            if callable(disarm_fn):
+                disarm_fn()
+    active_cred_redaction = getattr(armed_cred_use, "redaction", None)
+    if active_cred_redaction is not None and getattr(getattr(active_cred_redaction.snapshot, "secret_values", None), "credential_values", ()):
+        from .host_output_redaction import redact_host_tool_outcome
+
+        result = redact_host_tool_outcome(
+            result,
+            snapshot=active_cred_redaction.snapshot,
+            force_default=active_cred_redaction.force_default,
         )
     try:
         return apply_tool_execution_facts(
@@ -1093,5 +1131,8 @@ def _normalized_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
 # 函数用途: 判断处理器抛出的宿主接口错误是否明确声明未开始执行。
 def _host_error_not_started(exc: BaseException) -> bool:
     from ..plugin_host.errors import HostAPIError
+    from ..user_space.task_credential_storage import CredentialInputError
 
+    if isinstance(exc, CredentialInputError):
+        return exc.effect_outcome == "not_started"
     return isinstance(exc, HostAPIError) and exc.outcome == "not_started"

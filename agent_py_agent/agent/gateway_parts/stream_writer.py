@@ -162,6 +162,9 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _workflow_sequences: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     conversation_thread_id: str = field(default="", init=False)
     _conversation_identity: dict[str, object] = field(default_factory=dict, init=False, repr=False)
+    _turn_credential_redaction: object | None = field(default=None, init=False, repr=False)
+    _model_credential_filters: dict[str, object] = field(default_factory=dict, init=False, repr=False)
+    _thinking_credential_filter: object | None = field(default=None, init=False, repr=False)
 
     # LLM: 审批组件只持有同请求的路径和同步输出回调；不会建立新线程、缓存或持久账本。
     # 函数用途: 连接审批交互与本请求的流式发布和刷新边界。
@@ -170,6 +173,38 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self._approval = StreamApproval(self.chunk_path, self._write_event, self._prepare_permission_request)
         self._text_delta = TextDeltaBuffer(holdback_chars=self.text_delta_holdback_chars,
                                           project=self._project_stream_text)
+
+    def bind_credential_redaction(self, turn_redaction: object) -> None:
+        """显式绑定当前回合的凭据跨块净化对象，不依赖跨线程未继承的 ContextVar。"""
+        with self._commit_lock:
+            self._turn_credential_redaction = turn_redaction
+
+    def _credential_filter_for_call(self, model_call_id: str):
+        turn_red = self._turn_credential_redaction
+        if turn_red is None or not getattr(turn_red, "active", False):
+            return None
+        flt = self._model_credential_filters.get(model_call_id)
+        if flt is None:
+            while len(self._model_credential_filters) >= 32:
+                _, evicted = next(iter(self._model_credential_filters.items()))
+                self._model_credential_filters.pop(next(iter(self._model_credential_filters)), None)
+                discard_fn = getattr(evicted, "discard", None)
+                if callable(discard_fn):
+                    discard_fn()
+            flt = turn_red.new_stream_filter()
+            self._model_credential_filters[model_call_id] = flt
+        return flt
+
+    def _discard_credential_filters_unlocked(self, model_call_id: str = "") -> None:
+        if model_call_id:
+            flt = self._model_credential_filters.pop(model_call_id, None)
+            if flt is not None and callable(getattr(flt, "discard", None)):
+                flt.discard()
+            return
+        for flt in self._model_credential_filters.values():
+            if callable(getattr(flt, "discard", None)):
+                flt.discard()
+        self._model_credential_filters.clear()
 
     # LLM: 真实等待前按原次序刷新宿主进度；模型说明已由原工具准入前sealed-call hook提交，不从审批边界确认raw。
     # 函数用途: 在审批请求发布之前排空宿主缓冲，使客户端保持原事件顺序。
@@ -198,6 +233,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
         with self._commit_lock:
             if self._verbose_level != "stream" or getattr(self, "_liveness_closed", False) or not model_call_id:
                 return
+            flt = self._credential_filter_for_call(model_call_id)
+            if flt is not None:
+                text = flt.feed_text(text, final=False)
+                if not text:
+                    return
             self._text_delta.identifiers = self._identifier_redactions
             self._write_text_events(self._text_delta.append(text, model_call_id=model_call_id))
 
@@ -217,6 +257,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # 函数用途: 在重试、取消和工具边界收起失效正文。
     def reset_model_text(self, reason: str, *, model_call_id: str = "") -> None:
         with self._commit_lock:
+            self._discard_credential_filters_unlocked(model_call_id)
             self._write_text_events(self._text_delta.reset(reason, model_call_id=model_call_id))
 
     def _write_text_events(self, events: list[dict[str, object]]) -> None:
@@ -229,6 +270,9 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def _project_stream_text(self, text: str) -> str:
         from ..conversation.channels import project_user_reply
 
+        turn_red = self._turn_credential_redaction
+        if turn_red is not None and getattr(turn_red, "active", False):
+            text = turn_red.public_text(text)
         return redact_structured_identifiers(
             project_host_paths_for_channel(project_user_reply(text).content, self.delivery_channel,
                 preserve_host_paths=self.preserve_host_paths),
@@ -425,6 +469,9 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self._thinking_emitted = False
         if not self.rich_transcript:
             return
+        turn_red = self._turn_credential_redaction
+        if turn_red is not None and getattr(turn_red, "active", False):
+            text = turn_red.public_text(text)
         payload = thinking_event(text, duration_seconds=duration_seconds, delivery_channel=self.delivery_channel,
                                  identifiers=self._identifier_redactions, transcript_sink=self.transcript_sink,
                                  preserve_host_paths=self.preserve_host_paths)
@@ -463,11 +510,21 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # 函数用途: 将待发思考合成一条安全增量，经原chunk和sink出口按序发布。
     def flush_thinking_delta(self, *, final: bool = True) -> None:
         batch = begin_thinking_flush(self, time.monotonic(), final=final)
-        if not batch:
+        turn_red = self._turn_credential_redaction
+        cred_active = turn_red is not None and getattr(turn_red, "active", False)
+        if not batch and not (final and cred_active and self._thinking_credential_filter is not None):
             drain_orphaned_deferred_events(self, _publish_writer_event)
             return
         try:
             raw_joined, _ = "".join(batch), batch.clear()
+            if cred_active:
+                with self._commit_lock:
+                    if self._thinking_credential_filter is None:
+                        self._thinking_credential_filter = turn_red.new_stream_filter()
+                    t_flt = self._thinking_credential_filter
+                raw_joined = t_flt.feed_text(raw_joined, final=final)
+                if final:
+                    t_flt.discard()
             if content := drain_thinking_delta_text(self, raw_joined, final=final):
                 self._thinking_emitted = True
                 self._write_event({"kind": "thinking_delta", "text": content})
@@ -677,6 +734,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
             self.flush()
             wait_thinking_flush_idle(self, _publish_writer_event)
         finally:
+            with self._commit_lock:
+                self._discard_credential_filters_unlocked()
+                if self._thinking_credential_filter is not None and callable(getattr(self._thinking_credential_filter, "discard", None)):
+                    self._thinking_credential_filter.discard()
             if not claim_deferred_closeout(self, close_sinks=True):
                 close_writer_sinks_now(self)
 
@@ -723,6 +784,9 @@ def _publish_writer_event(writer: BufferedChunkStreamWriter, event: dict[str, ob
                 _publish_writer_event(writer, {"kind": "process_settings", "verbose_level": writer._verbose_level})
                 writer._settings_pending = False
     writer._published_any = True
+    turn_red = writer._turn_credential_redaction
+    if turn_red is not None and getattr(turn_red, "active", False):
+        event = turn_red.redact_value(event)
     event = redact_sensitive_value(event)
     if writer._verbose_level == "stream" and not writer.rich_transcript:
         event = {**event, "preview_max_chars": writer._im_preview_max_chars}
@@ -784,6 +848,9 @@ def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> 
     call_id = committed_model_call_id(payload)
     if not call_id:
         return
+    turn_red = writer._turn_credential_redaction
+    if turn_red is not None and getattr(turn_red, "active", False):
+        payload = turn_red.redact_value(dict(payload))
     events = committed_model_events(payload, delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions,
                                     preserve_host_paths=writer.preserve_host_paths)
     with writer._commit_lock:
@@ -794,7 +861,12 @@ def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> 
             if payload.get("boundary") == "tools":
                 writer.reset_model_text("tool_call", model_call_id=call_id)
             else:
+                flt = writer._model_credential_filters.pop(call_id, None)
+                if flt is not None and callable(getattr(flt, "discard", None)):
+                    flt.discard()
                 writer._write_text_events(writer._text_delta.finish(call_id, text=str(payload.get("final_text") or "")))
+        else:
+            writer._discard_credential_filters_unlocked(call_id)
         for event in events:
             if event["kind"] == "assistant_commentary":
                 if not event.get("canonical_message_id"):
