@@ -1,6 +1,7 @@
 """PP1118 Round-2 Slice 1: 回合级凭据脱敏作用域绑定、不可哈希宿主生命周期租约、索引淘汰与原子容量预检测试。"""
 from __future__ import annotations
 
+import contextvars
 import copy
 import gc
 import logging
@@ -18,6 +19,7 @@ from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_w
 from agent_py_agent.agent.common import log_redaction as log_red_mod
 from agent_py_agent.agent.common.log_redaction import install_log_redaction
 from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 from agent_py_agent.agent.tooling import host_output_redaction as hor_mod
 from agent_py_agent.agent.tooling.host_output_redaction import (
@@ -244,7 +246,7 @@ def test_128_sequential_unhashable_run_params_reclaim_on_gc_preserving_concurren
     assert long_secret not in log_red_mod._ACTIVE_TURN_LOG_FLAT
 
 
-def test_65_simultaneous_turns_across_threads_preserve_live_turn_zero_and_log_until_all_buckets_orphaned(
+def test_65_simultaneous_turns_across_threads_preserve_leased_turn_zero_and_log_after_lru_eviction(
     tmp_path: Path,
 ) -> None:
     install_log_redaction()
@@ -306,7 +308,7 @@ def test_65_simultaneous_turns_across_threads_preserve_live_turn_zero_and_log_un
         assert secret_0 not in rec.getMessage()
         assert "[REDACTED]" in rec.getMessage()
 
-        # 再向同一线程 thr-0 与同一 conv_root 填入 64 个新回合，使 turn-0 从其全部 _scope_keys() 分桶溢出成为真孤儿。
+        # 再向同一线程 thr-0 与同一 conv_root 填入 64 个新回合，使 turn-0 从其全部 _scope_keys() LRU 分桶溢出。
         thr0_extra_params: list[RunParams] = []
         thr0_extra_turns: list[TurnCredentialRedaction] = []
         for extra_idx in range(_MAX_ACTIVE_TURNS_PER_SCOPE_COUNT):
@@ -320,11 +322,16 @@ def test_65_simultaneous_turns_across_threads_preserve_live_turn_zero_and_log_un
             thr0_extra_turns.append(etr)
 
         try:
-            # 成为真孤儿后日志表已卸载避免无界滞留，但仍在运行的 turn_0 自身句柄绝不被清空或关闭！
-            assert f"{owner_dir}::turn-0" not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
-            assert secret_0 not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+            # turn_0 的 RunParams 仍在 live_params 中持有租约：LRU 溢出只挤出缓存，租约索引保留精确检索与日志变体。
+            with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
+                assert not any(turn_0 in bucket.values() for bucket in hor_mod._ACTIVE_TURN_SCOPES.values())
+            assert f"{owner_dir}::turn-0" in log_red_mod._ACTIVE_TURN_LOG_SECRETS
+            assert secret_0 in log_red_mod._ACTIVE_TURN_LOG_FLAT
             assert turn_0.active is True
             assert turn_0.public_text(f"live_handle={secret_0}") == "live_handle=[REDACTED]"
+            assert active_turn_redactions_for_scope(
+                owner_key=owner_dir, thread_id="thr-0", turn_keys=("turn-0",), exact_only=True
+            ) == (turn_0,)
         finally:
             thr0_extra_params.clear()
             for etr in thr0_extra_turns:
@@ -338,6 +345,7 @@ def test_65_simultaneous_turns_across_threads_preserve_live_turn_zero_and_log_un
     assert not any(k.startswith(f"{owner_dir}::") for k in log_red_mod._ACTIVE_TURN_LOG_SECRETS)
     with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
         assert not any(scope_k[0] == f"owner:{owner_dir}" for scope_k in hor_mod._ACTIVE_TURN_SCOPES)
+        assert not any(scope_k[0] == f"owner:{owner_dir}" for scope_k in hor_mod._LEASED_ACTIVE_TURNS)
 
 
 def test_outer_turn_lifetime_owner_survives_inner_run_params_replace_copy_gc_and_closes_on_owner_gc(
@@ -581,3 +589,256 @@ def test_scope_count_1024_eviction_and_zero_holder_direct_writer_close_invariant
     finally:
         for tr in scope_turns:
             tr.close()
+
+
+def test_257_concurrent_leased_owners_keep_owner_zero_message_store_and_worker_log_redaction(
+    tmp_path: Path,
+) -> None:
+    install_log_redaction()
+    # 每个 owner 的回合占 4 个作用域键；257 × 4 = 1028 > 1024，owner #0 的全部 LRU 分桶都会被淘汰。
+    owner_count = _MAX_ACTIVE_SCOPES_COUNT // 4 + 1
+    store_0 = ConversationStore(tmp_path / "conv-0")
+    thread_0 = store_0.threads.get_or_create({"canonical_user_id": "owner-leased-0"})
+    secret_0 = "SYNTHETIC_LEASED_OWNER_ZERO_SECRET_2570"
+
+    def _open_leased_turns() -> tuple[list[RunParams], list[TurnCredentialRedaction]]:
+        params_list: list[RunParams] = []
+        turns: list[TurnCredentialRedaction] = []
+        for idx in range(owner_count):
+            store = store_0 if idx == 0 else SimpleNamespace(storage=SimpleNamespace(root=tmp_path / f"conv-{idx}"))
+            agent = SimpleNamespace(
+                home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / f"owner-{idx}"), owner_id=f"owner-{idx}"),
+                conversation_store=store,
+            )
+            params = RunParams(
+                request_id=f"req-leased-{idx}",
+                run_id=f"run-leased-{idx}",
+                task_attributes={"conversation_thread_id": thread_0.thread_id if idx == 0 else f"thr-leased-{idx}"},
+            )
+            turn = turn_credential_redaction(agent, params)
+            turn.register_values((secret_0 if idx == 0 else f"SYNTHETIC_LEASED_OWNER_SECRET_{idx:04d}",))
+            params_list.append(params)
+            turns.append(turn)
+        return params_list, turns
+
+    # 在独立上下文中登记，避免把 257 组变体绑定进主线程 ContextVar 而影响后续用例。
+    live_params, turns = contextvars.copy_context().run(_open_leased_turns)
+    turn_0 = turns[0]
+    all_scope_keys = {key for turn in turns for key in turn._scope_keys()}
+    assert len(turn_0._scope_keys()) == 4
+    assert len(all_scope_keys) == owner_count * 4 > _MAX_ACTIVE_SCOPES_COUNT
+    worker_check: dict[str, object] = {}
+
+    def _owner_zero_worker() -> None:
+        entry = store_0.messages.append({
+            "thread_id": thread_0.thread_id,
+            "role": "assistant",
+            "content": f"回执：{secret_0}",
+            "metadata": {"request_id": "req-leased-0"},
+        })
+        worker_check["content"] = entry.content
+        record = logging.getLogger("test.r3.leased_owner_zero").makeRecord(
+            "test.r3.leased_owner_zero", logging.INFO, __file__, 1, "diag=%s", (secret_0,), None
+        )
+        worker_check["log"] = record.getMessage()
+        worker_check["lookup"] = active_turn_redactions_for_scope(
+            conversation_root=store_0.storage.root,
+            thread_id=thread_0.thread_id,
+            turn_keys=("req-leased-0",),
+            exact_only=True,
+        )
+
+    try:
+        assert all(turn.active for turn in turns)
+        with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
+            assert not any(turn_0 in bucket.values() for bucket in hor_mod._ACTIVE_TURN_SCOPES.values())
+        worker = threading.Thread(target=_owner_zero_worker)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+        # owner #0 已被挤出全部 LRU 分桶但仍持租约：MessageStore.append 与工作线程 LogRecord 均保持脱敏。
+        assert secret_0 not in str(worker_check["content"])
+        assert "[REDACTED]" in str(worker_check["content"])
+        assert secret_0 not in str(worker_check["log"])
+        assert "[REDACTED]" in str(worker_check["log"])
+        assert f"{turn_0.owner_key}::req-leased-0" in log_red_mod._ACTIVE_TURN_LOG_SECRETS
+        assert worker_check["lookup"] == (turn_0,)
+        with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
+            for key in turn_0._scope_keys():
+                assert hor_mod._LEASED_ACTIVE_TURNS[key][turn_0.turn_key] is turn_0
+    finally:
+        live_params.clear()
+        gc.collect()
+
+    # 宿主租约全部释放并 GC 后：回合自动关闭，租约索引、LRU 与日志表中这些 owner 的登记归零。
+    assert not any(turn.active for turn in turns)
+    with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
+        assert all_scope_keys.isdisjoint(hor_mod._LEASED_ACTIVE_TURNS)
+        assert all_scope_keys.isdisjoint(hor_mod._ACTIVE_TURN_SCOPES)
+    owner_keys = {turn.owner_key for turn in turns}
+    assert not any(key.split("::", 1)[0] in owner_keys for key in log_red_mod._ACTIVE_TURN_LOG_SECRETS)
+    assert secret_0 not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+
+
+def test_exact_only_lookup_returns_empty_for_mismatched_turn_keys_despite_active_neighbors(
+    tmp_path: Path,
+) -> None:
+    conv_root = tmp_path / "conv-exact"
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "owner-exact"), owner_id="owner-exact"),
+        conversation_store=SimpleNamespace(storage=SimpleNamespace(root=conv_root)),
+    )
+    leased_params = RunParams(
+        request_id="req-exact-leased",
+        run_id="run-exact-leased",
+        task_attributes={"conversation_thread_id": "thr-exact"},
+    )
+    leased_turn = turn_credential_redaction(agent, leased_params)
+    neighbor_turn = TurnCredentialRedaction(
+        owner_key=leased_turn.owner_key,
+        conversation_root=str(conv_root),
+        thread_id="thr-exact",
+        turn_key="turn-exact-neighbor",
+    )
+    try:
+        leased_turn.register_values(("SYNTHETIC_EXACT_LEASED_SECRET_6160",))
+        neighbor_turn.register_values(("SYNTHETIC_EXACT_NEIGHBOR_SECRET_5150",))
+        by_owner = {"owner_key": leased_turn.owner_key, "thread_id": "thr-exact"}
+        by_conv = {"conversation_root": conv_root, "thread_id": "thr-exact"}
+        # 默认模式保持既有合同：精确 turn_key 未命中时回退到同线程全部活动回合。
+        fallback = active_turn_redactions_for_scope(**by_owner, turn_keys=("req-other",))
+        assert set(fallback) == {leased_turn, neighbor_turn}
+        for scope in (by_owner, by_conv):
+            # exact_only：未命中或 turn_keys 为空都返回 ()，绝不回退到同线程仍活动的邻近回合。
+            assert active_turn_redactions_for_scope(
+                **scope, turn_keys=("req-other", "run-other"), exact_only=True
+            ) == ()
+            assert active_turn_redactions_for_scope(**scope, exact_only=True) == ()
+            assert active_turn_redactions_for_scope(
+                **scope, turn_keys=("turn-exact-neighbor",), exact_only=True
+            ) == (neighbor_turn,)
+            # 租约回合的 run_id 别名同样算精确命中。
+            assert active_turn_redactions_for_scope(
+                **scope, turn_keys=("run-exact-leased",), exact_only=True
+            ) == (leased_turn,)
+    finally:
+        neighbor_turn.close()
+        leased_turn.close()
+
+
+def test_reverse_order_concurrent_try_register_publishes_latest_union_to_process_log(monkeypatch) -> None:
+    turn = TurnCredentialRedaction(owner_key="publish-owner", thread_id="thr-publish", turn_key="turn-publish")
+    log_key = "publish-owner::turn-publish"
+    older_secret = "SYNTHETIC_PUBLISH_OLDER_SNAPSHOT_A1"
+    newer_secret = "SYNTHETIC_PUBLISH_NEWER_SNAPSHOT_B2"
+    older_mutated = threading.Event()
+    newer_published = threading.Event()
+    real_bind = hor_mod.bind_active_credential_log_values
+    results: dict[str, object] = {}
+
+    def _hold_older_publisher(values: tuple[str, ...]) -> None:
+        # 旧快照已写入回合状态、尚未发布到进程日志表时停住，让新快照先完成发布（逆序发布）。
+        if threading.current_thread().name == "older-publisher":
+            older_mutated.set()
+            assert newer_published.wait(timeout=10)
+        real_bind(values)
+
+    def _register(name: str, secret: str) -> None:
+        results[name] = turn.try_register_values((secret,))
+
+    monkeypatch.setattr(hor_mod, "bind_active_credential_log_values", _hold_older_publisher)
+    older = threading.Thread(target=_register, args=("older", older_secret), name="older-publisher")
+    newer = threading.Thread(target=_register, args=("newer", newer_secret), name="newer-publisher")
+    try:
+        older.start()
+        assert older_mutated.wait(timeout=10)
+        newer.start()
+        newer.join(timeout=10)
+        assert not newer.is_alive()
+        newer_published.set()
+        older.join(timeout=10)
+        assert not older.is_alive()
+        assert isinstance(results.get("older"), HostOutputRedaction)
+        assert isinstance(results.get("newer"), HostOutputRedaction)
+        # 迟到的旧快照发布者必须发布最新单调并集，不能把新快照覆盖回旧值。
+        published = log_red_mod._ACTIVE_TURN_LOG_SECRETS[log_key]
+        assert older_secret in published
+        assert newer_secret in published
+        assert {older_secret, newer_secret} <= set(log_red_mod._ACTIVE_TURN_LOG_FLAT)
+    finally:
+        newer_published.set()
+        turn.close()
+    assert log_key not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
+
+
+def test_delayed_publisher_after_close_cannot_resurrect_log_or_scope_registration(monkeypatch) -> None:
+    turn = TurnCredentialRedaction(owner_key="resurrect-owner", thread_id="thr-resurrect", turn_key="turn-resurrect")
+    log_key = "resurrect-owner::turn-resurrect"
+    late_secret = "SYNTHETIC_LATE_PUBLISHER_SECRET_C3"
+    late_mutated = threading.Event()
+    turn_closed = threading.Event()
+    real_bind = hor_mod.bind_active_credential_log_values
+    results: dict[str, object] = {}
+
+    def _hold_late_publisher(values: tuple[str, ...]) -> None:
+        if threading.current_thread().name == "late-publisher":
+            late_mutated.set()
+            assert turn_closed.wait(timeout=10)
+        real_bind(values)
+
+    def _late_register() -> None:
+        results["late"] = turn.try_register_values((late_secret,))
+
+    monkeypatch.setattr(hor_mod, "bind_active_credential_log_values", _hold_late_publisher)
+    late = threading.Thread(target=_late_register, name="late-publisher")
+    try:
+        late.start()
+        assert late_mutated.wait(timeout=10)
+        turn.close()
+    finally:
+        turn_closed.set()
+    late.join(timeout=10)
+    assert not late.is_alive()
+    assert isinstance(results.get("late"), HostOutputRedaction)
+    # close() 之后才轮到的发布者读到 closed 快照，既不复活日志变体，也不复活作用域索引。
+    assert turn.active is False
+    assert log_key not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
+    assert late_secret not in log_red_mod._ACTIVE_TURN_LOG_FLAT
+    with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
+        for index in (hor_mod._ACTIVE_TURN_SCOPES, hor_mod._LEASED_ACTIVE_TURNS):
+            assert not any(turn in bucket.values() for bucket in index.values())
+
+
+def test_first_lease_on_active_direct_turn_promotes_into_leased_index_and_republishes_log() -> None:
+    owner = "promote-owner"
+    promoted = TurnCredentialRedaction(owner_key=owner, thread_id="thr-promote", turn_key="turn-promote-0")
+    promoted_secret = "SYNTHETIC_PROMOTED_TURN_SECRET_8080"
+    fillers: list[TurnCredentialRedaction] = []
+    try:
+        promoted.register_values((promoted_secret,))
+        # 0 持有者的直接实例照旧受 LRU 约束：同作用域再塞 64 个回合后被淘汰，日志变体一并卸载。
+        for idx in range(_MAX_ACTIVE_TURNS_PER_SCOPE_COUNT):
+            filler = TurnCredentialRedaction(owner_key=owner, thread_id="thr-promote", turn_key=f"turn-fill-{idx}")
+            filler.register_values((f"SYNTHETIC_PROMOTE_FILLER_SECRET_{idx:04d}",))
+            fillers.append(filler)
+        assert f"{owner}::turn-promote-0" not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
+
+        holder = RunParams(request_id="turn-promote-0")
+        assert promoted._attach_lifetime_holder(holder) is not None
+        # 首个租约挂到已活动回合：晋升进租约索引并按最新快照重新发布日志变体。
+        assert f"{owner}::turn-promote-0" in log_red_mod._ACTIVE_TURN_LOG_SECRETS
+        assert promoted_secret in log_red_mod._ACTIVE_TURN_LOG_FLAT
+        with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
+            for key in promoted._scope_keys():
+                assert hor_mod._LEASED_ACTIVE_TURNS[key]["turn-promote-0"] is promoted
+
+        del holder
+        gc.collect()
+        assert promoted.active is False
+        assert f"{owner}::turn-promote-0" not in log_red_mod._ACTIVE_TURN_LOG_SECRETS
+        with hor_mod._ACTIVE_TURN_SCOPES_LOCK:
+            assert not any(promoted in bucket.values() for bucket in hor_mod._LEASED_ACTIVE_TURNS.values())
+    finally:
+        promoted.close()
+        for filler in fillers:
+            filler.close()

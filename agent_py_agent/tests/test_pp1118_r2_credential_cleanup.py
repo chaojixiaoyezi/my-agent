@@ -272,7 +272,8 @@ def test_concurrent_scratch_and_fd_staging_survive_empty_parent_rmdir_race(tmp_p
     st2.join(timeout=10)
 
     assert not stage_errors, stage_errors
-    assert stage_enoent_count == 1
+    # FD 交接与 ExitStack 退出都会裁剪空的共享父目录，并发重试次数至少 1 次（3.11 下可能更多）。
+    assert stage_enoent_count >= 1
     assert stage_payloads[1]["values"] == {"secret": "SYNTH_STAGE_ONE"}
     assert stage_payloads[2]["values"] == {"secret": "SYNTH_STAGE_TWO"}
     assert set(os.listdir(stage_tmp)) == set()

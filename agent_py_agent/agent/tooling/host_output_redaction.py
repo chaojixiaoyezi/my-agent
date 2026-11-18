@@ -570,6 +570,8 @@ class TurnCredentialStreamFilter:
 # 按 (scope_root, thread_id) 隔离的活动回合表；两级有界 OrderedDict + 引用计数宿主租约释放。
 _ACTIVE_TURN_SCOPES_LOCK = threading.RLock()
 _ACTIVE_TURN_SCOPES: OrderedDict[tuple[str, str], OrderedDict[str, TurnCredentialRedaction]] = OrderedDict()
+# 持有宿主租约且未关闭的活动回合索引：不受上面 LRU 淘汰影响，只在 close()/末个租约释放时同步移除。
+_LEASED_ACTIVE_TURNS: dict[tuple[str, str], dict[str, TurnCredentialRedaction]] = {}
 _PARAMS_TURN_REDACTIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _turn_holder_box_attr = '_turn_credential_holder_box'
 _instance_seq = itertools.count(1)
@@ -616,15 +618,23 @@ def _normalize_scope_path(value: object) -> str:
         return text
 
 
+def _scope_buckets_unlocked(scope_keys: Iterable[tuple[str, str]]) -> list[dict[str, TurnCredentialRedaction]]:
+    """按作用域顺序列出 LRU 缓存桶与租约索引桶（同一作用域先 LRU 后租约）；调用方须持有作用域锁。"""
+    buckets: list[dict[str, TurnCredentialRedaction]] = []
+    for scope_key in scope_keys:
+        for index in (_ACTIVE_TURN_SCOPES, _LEASED_ACTIVE_TURNS):
+            bucket = index.get(scope_key)
+            if bucket:
+                buckets.append(bucket)
+    return buckets
+
+
 def _is_indexed_in_any_scope_unlocked(item: TurnCredentialRedaction) -> bool:
-    for scope_key in item._scope_keys():
-        bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
-        if bucket is not None and bucket.get(item.turn_key) is item:
-            return True
-    return False
+    return any(bucket.get(item.turn_key) is item for bucket in _scope_buckets_unlocked(item._scope_keys()))
 
 
-def _register_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item: TurnCredentialRedaction) -> None:
+def _register_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item: TurnCredentialRedaction,
+        *, leased: bool = False) -> None:
     orphan_log_keys: list[str] = []
     with _redaction_op_guard():
         with _ACTIVE_TURN_SCOPES_LOCK:
@@ -632,6 +642,8 @@ def _register_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item:
             for scope_key in keys:
                 if not scope_key[0]:
                     continue
+                if leased:
+                    _LEASED_ACTIVE_TURNS.setdefault(scope_key, {})[turn_key] = item
                 bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
                 if bucket is None:
                     bucket = OrderedDict()
@@ -656,23 +668,26 @@ def _register_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item:
                 seen_evicted.add(id(candidate))
                 if (candidate.owner_key, candidate.turn_key) == (item.owner_key, item.turn_key):
                     continue
-                if not _is_indexed_in_any_scope_unlocked(candidate):
+                # 仍持租约的回合只是被 LRU 挤出缓存，日志变体必须保留到 close()。
+                if not _is_indexed_in_any_scope_unlocked(candidate) and not candidate._has_live_holders():
                     orphan_log_keys.append(f"{candidate.owner_key}::{candidate.turn_key}")
-        for log_key in orphan_log_keys:
-            unregister_active_turn_log_values(log_key)
+            # 持作用域锁卸载：并发晋升/重发布须先重新登记作用域，其日志登记只会落在这次卸载之后。
+            for log_key in orphan_log_keys:
+                unregister_active_turn_log_values(log_key)
 
 
 def _unregister_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item: TurnCredentialRedaction) -> None:
     with _redaction_op_guard():
         with _ACTIVE_TURN_SCOPES_LOCK:
             for scope_key in keys:
-                bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
-                if bucket is None:
-                    continue
-                if bucket.get(turn_key) is item:
-                    bucket.pop(turn_key, None)
-                if not bucket:
-                    _ACTIVE_TURN_SCOPES.pop(scope_key, None)
+                for index in (_ACTIVE_TURN_SCOPES, _LEASED_ACTIVE_TURNS):
+                    bucket = index.get(scope_key)
+                    if bucket is None:
+                        continue
+                    if bucket.get(turn_key) is item:
+                        bucket.pop(turn_key, None)
+                    if not bucket:
+                        index.pop(scope_key, None)
 
 
 class TurnCredentialRedaction:
@@ -695,6 +710,8 @@ class TurnCredentialRedaction:
         self._turn_aliases: set[str] = {self.turn_key} if self.turn_key else set()
         self._lineage_ids: set[int] = set()
         self._lock = threading.RLock()
+        # 串行化作用域/日志发布；只在 self._lock 之外获取，且总在操作守卫内（终结器触发的 close 会延后）。
+        self._publish_lock = threading.Lock()
         self._base = base_redaction or HostOutputRedaction()
         self._current = self._base
         self._raw_values: list[str] = []
@@ -730,6 +747,15 @@ class TurnCredentialRedaction:
         return tuple(dict.fromkeys(keys))
 
     def _attach_lifetime_holder(self, holder: object) -> Callable[[], None] | None:
+        with self._lock:
+            promote = not self._live_holders and self.active
+        fin = self._attach_lease(holder)
+        if promote and fin is not None:
+            # 首个租约挂到已活动回合：晋升进租约索引，并按最新快照重新发布日志变体。
+            self._publish_active_state()
+        return fin
+
+    def _attach_lease(self, holder: object) -> Callable[[], None] | None:
         if holder is None:
             return None
         with self._lock:
@@ -776,10 +802,27 @@ class TurnCredentialRedaction:
             return fin
 
     def _attach_holder_if_managed(self, holder: object) -> Callable[[], None] | None:
-        with self._lock:
+        # 守卫让持锁期间触发的终结器 close 延后执行，close 不会在 self._lock 内抢发布锁。
+        with _redaction_op_guard(), self._lock:
             if not self._live_holders or self._closed:
                 return None
-            return self._attach_lifetime_holder(holder)
+            return self._attach_lease(holder)
+
+    def _has_live_holders(self) -> bool:
+        with self._lock:
+            return bool(self._live_holders) and not self._closed
+
+    def _publish_active_state(self) -> None:
+        """串行发布最新快照的作用域索引与进程日志变体；关闭后才到达的迟滞发布者不会复活已清理的登记。"""
+        with _redaction_op_guard(), self._publish_lock:
+            with self._lock:
+                if self._closed or not (self._variants or self._withheld):
+                    return
+                leased = self._has_live_holders()
+                variants = self._variants
+            _register_active_scope(self._scope_keys(), self.turn_key, self, leased=leased)
+            if variants:
+                register_active_turn_log_values(f"{self.owner_key}::{self.turn_key}", variants)
 
     def _release_lifetime_holder(self, lease_token: int) -> None:
         should_close = False
@@ -861,9 +904,8 @@ class TurnCredentialRedaction:
                 variants = self._variants
                 current = self._current
             if variants:
-                _register_active_scope(self._scope_keys(), self.turn_key, self)
                 bind_active_credential_log_values(variants)
-                register_active_turn_log_values(f"{self.owner_key}::{self.turn_key}", variants)
+                self._publish_active_state()
             return current
 
     def register_values(self, values: Iterable[str]) -> HostOutputRedaction:
@@ -890,11 +932,10 @@ class TurnCredentialRedaction:
                 variants = self._variants
                 withheld = self._withheld
                 current = self._current
-            if variants or withheld:
-                _register_active_scope(self._scope_keys(), self.turn_key, self)
             if variants:
                 bind_active_credential_log_values(variants)
-                register_active_turn_log_values(f"{self.owner_key}::{self.turn_key}", variants)
+            if variants or withheld:
+                self._publish_active_state()
             return current
 
     def public_text(self, text: str) -> str:
@@ -937,7 +978,7 @@ class TurnCredentialRedaction:
         self._version += 1
 
     def close(self) -> None:
-        with _redaction_op_guard():
+        with _redaction_op_guard(), self._publish_lock:
             keys = self._scope_keys()
             log_key = f"{self.owner_key}::{self.turn_key}"
             with self._lock:
@@ -1122,10 +1163,8 @@ def turn_credential_redaction(agent: object, params: object = None) -> TurnCrede
             )
             lineage_id = id(lineage_obj) if lineage_obj is not None else None
             with _ACTIVE_TURN_SCOPES_LOCK:
-                for cand_tid in ((thread_id, '') if thread_id else ('',)):
-                    bucket = _ACTIVE_TURN_SCOPES.get((f'owner:{owner_key}', cand_tid))
-                    if bucket is None:
-                        continue
+                owner_scopes = [(f'owner:{owner_key}', tid) for tid in ((thread_id, '') if thread_id else ('',))]
+                for bucket in _scope_buckets_unlocked(owner_scopes):
                     if turn_key:
                         found = bucket.get(turn_key)
                         if found is not None and not found._closed:
@@ -1166,8 +1205,8 @@ def turn_credential_redaction(agent: object, params: object = None) -> TurnCrede
             if c_owner == owner_key and turn_key and c_turn == turn_key:
                 _attach_holder_and_attr(current_run_params, existing)
         _bind_writer_if_present(resolved_params, existing)
-        if scope_upgraded and existing.active:
-            _register_active_scope(existing._scope_keys(), existing.turn_key, existing)
+        if scope_upgraded:
+            existing._publish_active_state()
         return existing
 
 
@@ -1190,8 +1229,12 @@ def active_turn_redactions_for_scope(
     conversation_root: str | Path | None = None,
     thread_id: str = '',
     turn_keys: Iterable[str] = (),
+    exact_only: bool = False,
 ) -> tuple[TurnCredentialRedaction, ...]:
-    """按严格 owner/存储根和线程检索活动中的凭据脱敏绑定（O(1) 内存查找，零磁盘扫描，跨 owner 绝对隔离）。"""
+    """按严格 owner/存储根和线程检索活动中的凭据脱敏绑定（O(1) 内存查找，零磁盘扫描，跨 owner 绝对隔离）。
+
+    同时查询租约索引与 LRU 缓存；exact_only=True 只返回精确命中 turn_keys 的回合，绝不回退到同线程邻近回合。
+    """
     with _redaction_op_guard():
         conv = _normalize_scope_path(conversation_root)
         candidate_scopes: list[tuple[str, str]] = []
@@ -1207,10 +1250,7 @@ def active_turn_redactions_for_scope(
         matched: list[TurnCredentialRedaction] = []
         exact_turn_matched: list[TurnCredentialRedaction] = []
         with _ACTIVE_TURN_SCOPES_LOCK:
-            for scope_key in candidate_scopes:
-                bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
-                if not bucket:
-                    continue
+            for bucket in _scope_buckets_unlocked(candidate_scopes):
                 for t_key, item in list(bucket.items()):
                     if not item.active:
                         continue
@@ -1224,6 +1264,8 @@ def active_turn_redactions_for_scope(
                         and item not in exact_turn_matched
                     ):
                         exact_turn_matched.append(item)
+        if exact_only:
+            return tuple(exact_turn_matched)
         return tuple(exact_turn_matched or matched)
 
 
