@@ -11,6 +11,10 @@ from ..conversation.channels import _HOST_ABSOLUTE_PATH_RE
 # 沿用共用秘密语法，只补流切点，不另设一套凭据识别口径。
 _OPEN_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s]*\Z")
 _KEY_TOKEN = re.compile(r"(?<![\w.-])([A-Za-z0-9_.-]+)")
+_UNCLOSED_XML_TOOL_BLOCK_RE = re.compile(
+    r"<(?:tool_calls?|tool_results?|function_calls?|function_responses?|function)\b[^>]*>.*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 # LLM: 每条请求单独持有；候选有内存上限，所有公开字符串先走原脱敏，终态仍由 result 决定。
@@ -180,11 +184,16 @@ def _safe_cut(raw: str, limit: int, identifiers: tuple) -> int:
             cut = min(cut, match.start())
     # 与原公开正文共用协议语法：成对块不能切开，未闭方括号块等完整后再投影，不能先泄露参数。
     for pattern in (user_visible_text._BRACKET_TOOL_BLOCK_RE, user_visible_text._FENCED_TOOL_BLOCK_RE,
-                    user_visible_text._XML_TOOL_BLOCK_RE, user_visible_text._UNCLOSED_XML_TOOL_BLOCK_RE,
-                    user_visible_text._BARE_FUNCTION_BLOCK_RE, user_visible_text._MEMORY_CONTEXT_BLOCK_RE):
+                    user_visible_text._XML_TOOL_BLOCK_RE, user_visible_text._BARE_FUNCTION_BLOCK_RE,
+                    user_visible_text._MEMORY_CONTEXT_BLOCK_RE):
         for match in pattern.finditer(raw):
             if match.start() < cut < match.end():
                 cut = match.start()
+    unclosed_xml_probe = user_visible_text._XML_TOOL_BLOCK_RE.sub(
+        lambda match: " " * (match.end() - match.start()), raw
+    )
+    if (match := _UNCLOSED_XML_TOOL_BLOCK_RE.search(unclosed_xml_probe)) and match.start() < cut < match.end():
+        cut = match.start()
     folded = raw.casefold()
     for marker in user_visible_text._LINE_LEADING_TOOL_MARKERS:
         if marker.startswith("[/"):
@@ -194,17 +203,25 @@ def _safe_cut(raw: str, limit: int, identifiers: tuple) -> int:
             if closing_start < match.end():
                 cut = min(cut, match.start())
                 break
-    for needle, _ in identifiers:
-        if not isinstance(needle, str) or not needle:
-            continue
-        position = raw.find(needle)
-        while position >= 0:
-            if position < cut < position + len(needle):
-                cut = position
-            position = raw.find(needle, position + len(needle))
+    literals = tuple(
+        needle
+        for needle in (*(needle for needle, _ in identifiers), *log_redaction._CONFIGURED_SECRET_VALUES.get())
+        if isinstance(needle, str) and needle
+    )
+    for needle in literals:
         for length in range(1, min(len(needle), len(raw) + 1)):
             if raw.endswith(needle[:length]):
                 cut = min(cut, len(raw) - length)
+    previous_cut = -1
+    while previous_cut != cut:
+        previous_cut = cut
+        for needle in literals:
+            position = raw.find(needle)
+            while 0 <= position < cut:
+                if cut < position + len(needle):
+                    cut = position
+                    break
+                position = raw.find(needle, position + len(needle))
     # 复用投影路径语法；虚拟末段只补齐未完整的POSIX首段或末尾斜杠，不进入实际投影。
     path_probe = raw + ("_" if raw.endswith("/") else "/_")
     for match in _HOST_ABSOLUTE_PATH_RE.finditer(path_probe):
