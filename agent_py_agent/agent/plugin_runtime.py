@@ -38,7 +38,13 @@ from .plugin_entry import FILES_DIRECTORY
 from .plugin_host_api import HOST_API_READ, issue_host_api_env
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallation
-from .plugin_manifest import PluginToolDeclaration, canonical_plugin_settings
+from .plugin_manifest import PluginPackageError, PluginToolDeclaration, canonical_plugin_settings
+from .plugin_package import (
+    PackageReadLimits,
+    archive_path_key,
+    inspect_plugin_package,
+    read_zip_member,
+)
 from .plugin_permissions.records import validate_activation_permission
 from .plugin_permissions.sandbox import LegacyLaunchDenied, legacy_launch_policy
 from .plugin_runtime_facts import verified_runtime_command
@@ -51,6 +57,7 @@ from .plugin_sandbox import (
     plugin_v8_sandbox_options,
     sandboxed_plugin_argv,
 )
+from .plugin_wheels import inspect_plugin_wheels
 from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import (
     MCPError,
@@ -284,9 +291,18 @@ class PluginProxyTool(MCPProxyTool):
         merged_meta = extra_meta
         if session_meta is not None:
             merged_meta = {**(extra_meta or {}), CREDENTIAL_FILL_EXTENSION: session_meta}
-        outcome = self._execute_with_meta(call_params, context, merged_meta)
-        scrubbed = _scrub_plugin_outcome(outcome, context=context, extra_variants=variants)
+        try:
+            outcome = self._execute_with_meta(call_params, context, merged_meta)
+            scrubbed = _scrub_plugin_outcome(outcome, context=context, extra_variants=variants)
+        finally:
+            variants = ()
         if not scrubbed.ok:
+            if self.remote_tool != "open":
+                parsed_err = _parse_remote_json_result(outcome.output)
+                if str((parsed_err or {}).get("code") or "") == "NO_PAGE":
+                    _, scope_key = _extract_session_scope(getattr(context, "credential_use", None))
+                    if scope_key != ("", "", ""):
+                        _forget_credential_session(self.client, scope_key)
             return _normalize_browser_session_remote_error(scrubbed)
         return scrubbed
 
@@ -372,7 +388,6 @@ class PluginProxyTool(MCPProxyTool):
                 browser_consumer=actual_consumer,
             ) as material:
                 variants = _credential_variants_from_values(material.values.values())
-                bound["variants"] = variants
         except (CredentialInputError, PermissionError, ValueError, OSError) as exc:
             self._revoke_remote_browser_session(scope_payload, scope_key)
             code = exc.code if isinstance(exc, CredentialInputError) else "CREDENTIAL_INPUT_UNAVAILABLE"
@@ -392,7 +407,7 @@ class PluginProxyTool(MCPProxyTool):
                 "credential_ref": ref_str,
                 "generation": int(bound["generation"]),
             },
-        }, None, tuple(bound.get("variants") or ())
+        }, None, variants
 
     def _execute_credential_fill(
         self,
@@ -466,118 +481,126 @@ class PluginProxyTool(MCPProxyTool):
                 effect_outcome="not_started",
                 next_action="请先用 open 打开目标 http(s) 登录页并确认加载完成后再执行 fill。",
             )
+        field_value = ""
+        variants: tuple[str, ...] = ()
         try:
-            with credential_use(
-                credential_ref,
-                consumer="browser",
-                target_url=origin,
-                browser_consumer=actual_consumer,
-            ) as material:
-                card_consumer = getattr(material, "browser_consumer", None)
-                if card_consumer is not None and dict(card_consumer) != actual_consumer:
-                    raise CredentialInputError(
-                        "CREDENTIAL_NOT_AUTHORIZED",
-                        "原凭据卡绑定的浏览器插件安装或激活代次与当前实例不一致，拒绝跨代继承授权。",
-                        stage="browser_consumer_check",
-                        effect_outcome="not_started",
-                    )
-                if material.origin != origin:
-                    raise CredentialInputError(
-                        "CREDENTIAL_NOT_AUTHORIZED",
-                        "浏览器当前页面 origin 与凭据绑定站点不一致，未发送秘密。",
-                        stage="browser_origin_check",
-                        effect_outcome="not_started",
-                    )
-                if field_name not in material.values:
-                    available = list(material.values.keys())
-                    secret_hint = (
-                        "；内置账号密码卡的密码键名为 'secret'（而非 'password'），请改传 field='secret'"
-                        if field_name == "password" and "secret" in material.values
-                        else ""
-                    )
-                    return ToolHandlerOutcome(
-                        self.model_spec.name,
-                        False,
-                        json.dumps(
-                            {
-                                "error": f"凭据卡中不存在字段 '{field_name}'（可用字段键：{available}）{secret_hint}。",
-                                "missing_field": field_name,
-                                "available_fields": available,
+            try:
+                with credential_use(
+                    credential_ref,
+                    consumer="browser",
+                    target_url=origin,
+                    browser_consumer=actual_consumer,
+                ) as material:
+                    card_consumer = getattr(material, "browser_consumer", None)
+                    if card_consumer is not None and dict(card_consumer) != actual_consumer:
+                        raise CredentialInputError(
+                            "CREDENTIAL_NOT_AUTHORIZED",
+                            "原凭据卡绑定的浏览器插件安装或激活代次与当前实例不一致，拒绝跨代继承授权。",
+                            stage="browser_consumer_check",
+                            effect_outcome="not_started",
+                        )
+                    if material.origin != origin:
+                        raise CredentialInputError(
+                            "CREDENTIAL_NOT_AUTHORIZED",
+                            "浏览器当前页面 origin 与凭据绑定站点不一致，未发送秘密。",
+                            stage="browser_origin_check",
+                            effect_outcome="not_started",
+                        )
+                    if field_name not in material.values:
+                        available = list(material.values.keys())
+                        secret_hint = (
+                            "；内置账号密码卡的密码键名为 'secret'（而非 'password'），请改传 field='secret'"
+                            if field_name == "password" and "secret" in material.values
+                            else ""
+                        )
+                        return ToolHandlerOutcome(
+                            self.model_spec.name,
+                            False,
+                            json.dumps(
+                                {
+                                    "error": f"凭据卡中不存在字段 '{field_name}'（可用字段键：{available}）{secret_hint}。",
+                                    "missing_field": field_name,
+                                    "available_fields": available,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            error_code="TOOL_INVALID_ARGUMENTS",
+                            effect_outcome="not_started",
+                            next_action=f"未执行填表（effect_outcome=not_started）。请将 field 改为 {available} 中的准确键名{secret_hint}。",
+                        )
+                    field_value = str(material.values[field_name])
+                    effective_ref = str(material.credential_ref)
+                    effective_gen = int(material.generation)
+                    variants = _credential_variants_from_values(material.values.values())
+                    # 发送 apply 前最后复核固定插件激活、原连接与运行执行权，避免 inspect 期间停用或撤权。
+                    if (self.client.activation_ref.require() != current_installation
+                            or not self.client.is_running()
+                            or self.client.connection() is not self.transport):
+                        raise CredentialInputError(
+                            "PLUGIN_ACTIVATION_UNAVAILABLE",
+                            "browser-lite 激活或固定连接在检查后已变化，本次未发送凭据字段。",
+                            stage="browser_pre_apply",
+                            effect_outcome="not_started",
+                        )
+                    if context is not None and context.execution_authority_check is not None:
+                        context.execution_authority_check()
+                    apply_meta = {
+                        **(extra_meta or {}),
+                        CREDENTIAL_FILL_EXTENSION: {
+                            "version": CREDENTIAL_FILL_VERSION,
+                            "phase": "apply",
+                            "origin": origin,
+                            "target_id": target_id,
+                            "document_id": document_id,
+                            "generation": generation,
+                            "field_value": field_value,
+                            "session_scope": scope_payload,
+                            "credential_binding": {
+                                "credential_ref": effective_ref,
+                                "generation": effective_gen,
                             },
-                            ensure_ascii=False,
-                        ),
-                        error_code="TOOL_INVALID_ARGUMENTS",
-                        effect_outcome="not_started",
-                        next_action=f"未执行填表（effect_outcome=not_started）。请将 field 改为 {available} 中的准确键名{secret_hint}。",
-                    )
-                field_value = str(material.values[field_name])
-                effective_ref = str(material.credential_ref)
-                effective_gen = int(material.generation)
-                variants = _credential_variants_from_values(material.values.values())
-                # 发送 apply 前最后复核固定插件激活、原连接与运行执行权，避免 inspect 期间停用或撤权。
-                if (self.client.activation_ref.require() != current_installation
-                        or not self.client.is_running()
-                        or self.client.connection() is not self.transport):
-                    raise CredentialInputError(
-                        "PLUGIN_ACTIVATION_UNAVAILABLE",
-                        "browser-lite 激活或固定连接在检查后已变化，本次未发送凭据字段。",
-                        stage="browser_pre_apply",
-                        effect_outcome="not_started",
-                    )
-                if context is not None and context.execution_authority_check is not None:
-                    context.execution_authority_check()
-                apply_meta = {
-                    **(extra_meta or {}),
-                    CREDENTIAL_FILL_EXTENSION: {
-                        "version": CREDENTIAL_FILL_VERSION,
-                        "phase": "apply",
-                        "origin": origin,
-                        "target_id": target_id,
-                        "document_id": document_id,
-                        "generation": generation,
-                        "field_value": field_value,
-                        "session_scope": scope_payload,
-                        "credential_binding": {
-                            "credential_ref": effective_ref,
-                            "generation": effective_gen,
                         },
-                    },
-                }
-                apply_outcome = self._execute_with_meta(params, context, apply_meta)
-        except CredentialInputError as exc:
-            bound = _get_credential_session(self.client, scope_key)
-            if bound is not None and bound.get("credential_ref") == credential_ref:
-                self._revoke_remote_browser_session(scope_payload, scope_key)
-            code = "TOOL_UNAVAILABLE" if exc.code == "PLUGIN_ACTIVATION_UNAVAILABLE" else exc.code
-            return ToolHandlerOutcome(
-                self.model_spec.name,
-                False,
-                json.dumps({"error": str(exc)}, ensure_ascii=False),
-                error_code=code,
-                reported_error_code=exc.code,
-                effect_outcome=exc.effect_outcome,
-                result_envelope={"credential_error": {"stage": exc.stage, "error_code": exc.code}},
-                next_action=f"{exc}（effect_outcome={exc.effect_outcome}）请核对站点、原授权会话或凭据状态，不要盲目重试。",
-            )
-        except (PermissionError, ValueError, OSError) as exc:
-            bound = _get_credential_session(self.client, scope_key)
-            if bound is not None and bound.get("credential_ref") == credential_ref:
-                self._revoke_remote_browser_session(scope_payload, scope_key)
-            message = str(exc) or "凭据授权校验未通过"
-            explicit_code = str(getattr(exc, "error_code", "") or "")
-            if explicit_code in {"CREDENTIAL_INPUT_UNAVAILABLE", "CREDENTIAL_NOT_AUTHORIZED", "CREDENTIAL_BINDING_INVALID"}:
-                code = explicit_code
-            else:
-                code = "CREDENTIAL_NOT_AUTHORIZED" if isinstance(exc, PermissionError) else "CREDENTIAL_INPUT_UNAVAILABLE"
-            return ToolHandlerOutcome(
-                self.model_spec.name,
-                False,
-                json.dumps({"error": message}, ensure_ascii=False),
-                error_code=code,
-                effect_outcome="not_started",
-                next_action=f"{message}（effect_outcome=not_started）请在原授权会话对匹配的同源页面使用该凭据，不要重复发卡。",
-            )
-        scrubbed = _scrub_plugin_outcome(apply_outcome, context=context, extra_variants=variants)
+                    }
+                    field_value = ""
+                    apply_outcome = self._execute_with_meta(params, context, apply_meta)
+                    apply_meta = {}
+            except CredentialInputError as exc:
+                bound = _get_credential_session(self.client, scope_key)
+                if bound is not None and bound.get("credential_ref") == credential_ref:
+                    self._revoke_remote_browser_session(scope_payload, scope_key)
+                code = "TOOL_UNAVAILABLE" if exc.code == "PLUGIN_ACTIVATION_UNAVAILABLE" else exc.code
+                return ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    json.dumps({"error": str(exc)}, ensure_ascii=False),
+                    error_code=code,
+                    reported_error_code=exc.code,
+                    effect_outcome=exc.effect_outcome,
+                    result_envelope={"credential_error": {"stage": exc.stage, "error_code": exc.code}},
+                    next_action=f"{exc}（effect_outcome={exc.effect_outcome}）请核对站点、原授权会话或凭据状态，不要盲目重试。",
+                )
+            except (PermissionError, ValueError, OSError) as exc:
+                bound = _get_credential_session(self.client, scope_key)
+                if bound is not None and bound.get("credential_ref") == credential_ref:
+                    self._revoke_remote_browser_session(scope_payload, scope_key)
+                message = str(exc) or "凭据授权校验未通过"
+                explicit_code = str(getattr(exc, "error_code", "") or "")
+                if explicit_code in {"CREDENTIAL_INPUT_UNAVAILABLE", "CREDENTIAL_NOT_AUTHORIZED", "CREDENTIAL_BINDING_INVALID"}:
+                    code = explicit_code
+                else:
+                    code = "CREDENTIAL_NOT_AUTHORIZED" if isinstance(exc, PermissionError) else "CREDENTIAL_INPUT_UNAVAILABLE"
+                return ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    json.dumps({"error": message}, ensure_ascii=False),
+                    error_code=code,
+                    effect_outcome="not_started",
+                    next_action=f"{message}（effect_outcome=not_started）请在原授权会话对匹配的同源页面使用该凭据，不要重复发卡。",
+                )
+            scrubbed = _scrub_plugin_outcome(apply_outcome, context=context, extra_variants=variants)
+        finally:
+            field_value = ""
+            variants = ()
         if not scrubbed.ok:
             return _normalize_credential_fill_remote_error(scrubbed, phase="apply")
         _remember_credential_session(
@@ -587,7 +610,6 @@ class PluginProxyTool(MCPProxyTool):
             generation=effective_gen,
             origin=origin,
             consumer=actual_consumer,
-            variants=variants,
         )
         return scrubbed
 
@@ -1142,6 +1164,19 @@ class PluginMCPClient(MCPStdioClient):
         self.publish_tools(transport, publish)
 
 
+    def stop(self):
+        with self._credential_session_lock:
+            self._credential_session_bindings.clear()
+        return super().stop()
+
+    def disconnect(self, *, transport):
+        with self._state_lock:
+            is_current = transport is self._transport
+        if is_current:
+            with self._credential_session_lock:
+                self._credential_session_bindings.clear()
+        return super().disconnect(transport=transport)
+
     # LLM: 原重连仍先核旧树清理；外层锁固定为来源→连接，避免set_source通知与基类重连反序死锁。
     # 函数用途: 清退失效来源连接，再由原MCP创建最新策略的固定transport。
     def reconnect(self):
@@ -1200,30 +1235,282 @@ class PluginMCPClient(MCPStdioClient):
             raise AgentsContractError("AGENTS_SOURCE_RESOURCE_UNCONFIRMED", "plugin_resource")
 
 
-def _verify_builtin_browser_lite_wheel(archive_bytes: bytes, entry_wheel: str) -> bool:
-    """核对已安装压缩包内的 browser_lite wheel 成员与宿主内置源码一致，拦截同名第三方伪装包。"""
-    builtin_dir = Path(__file__).resolve().parents[2] / "plugins" / "browser-lite" / "src" / "browser_lite"
+_BUILTIN_BROWSER_MANIFEST_SCHEMA = "my-agent.builtin-browser-lite-manifest.v1"
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}\Z")
+_SDK_CANONICAL_SOURCES = (
+    ("my_agent_plugin_api/nofollow_fs.py", ("agent", "common", "nofollow_fs.py")),
+    ("my_agent_plugin_api/path_access_policy.py", ("agent", "path_access_policy.py")),
+    ("my_agent_plugin_api/workspace_read_context.py", ("agent", "workspace_read_context.py")),
+    ("my_agent_plugin_api/workspace_write_context.py", ("agent", "workspace_write_context.py")),
+)
+_DISALLOWED_DIST_INFO_SUFFIXES = (
+    ".pth", ".py", ".pyc", ".pyo", ".so", ".pyd", ".dylib", ".dll", ".exe", ".sh", ".whl", ".zip",
+)
+
+
+def _validated_digest_map(
+    raw: object,
+    *,
+    prefix: str,
+    required: tuple[str, ...],
+) -> dict[str, str] | None:
+    if not isinstance(raw, dict) or not raw:
+        return None
+    cleaned: dict[str, str] = {}
+    for name, digest in raw.items():
+        if (
+            not isinstance(name, str)
+            or not name.startswith(prefix)
+            or name.endswith("/")
+            or name.lower().endswith(".pth")
+            or any(part in {"", ".", ".."} for part in name.split("/"))
+            or any(ch in name for ch in ("\\", ":", "\x00"))
+            or not isinstance(digest, str)
+            or not _SHA256_HEX_RE.fullmatch(digest)
+        ):
+            return None
+        cleaned[name] = digest
+    if any(req not in cleaned for req in required):
+        return None
+    return cleaned
+
+
+def _parse_builtin_browser_manifest_doc(
+    raw_bytes: bytes,
+) -> tuple[dict[str, str], dict[str, str]] | None:
     try:
-        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as outer:
-            wheel_bytes = outer.read(entry_wheel)
-        with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
-            members = {
-                name: wheel.read(name)
-                for name in wheel.namelist()
-                if name.startswith("browser_lite/") and not name.endswith("/")
-            }
-    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
-        return False
-    if not members:
-        return False
-    if not builtin_dir.is_dir():
-        return "browser_lite/server.py" in members and "browser_lite/declaration.json" in members
-    expected = {
-        "browser_lite/" + path.name: path.read_bytes()
-        for path in builtin_dir.iterdir()
-        if path.is_file() and path.suffix in {".py", ".json"}
+        manifest_doc = load_strict_json(raw_bytes)
+    except (UnicodeError, ValueError, TypeError, RecursionError):
+        return None
+    expected_keys = {
+        "schema_version",
+        "plugin_id",
+        "entry_distribution",
+        "sdk_distribution",
+        "entry_members",
+        "sdk_members",
     }
-    return bool(expected) and members == expected
+    if (
+        not isinstance(manifest_doc, dict)
+        or set(manifest_doc) != expected_keys
+        or manifest_doc.get("schema_version") != _BUILTIN_BROWSER_MANIFEST_SCHEMA
+        or manifest_doc.get("plugin_id") != "browser-lite"
+        or manifest_doc.get("entry_distribution") != "my-agent-browser-lite"
+        or manifest_doc.get("sdk_distribution") != "my-agent-plugin-api"
+    ):
+        return None
+    entry_members = _validated_digest_map(
+        manifest_doc.get("entry_members"),
+        prefix="browser_lite/",
+        required=("browser_lite/server.py", "browser_lite/declaration.json"),
+    )
+    sdk_members = _validated_digest_map(
+        manifest_doc.get("sdk_members"),
+        prefix="my_agent_plugin_api/",
+        required=("my_agent_plugin_api/__init__.py",),
+    )
+    if entry_members is None or sdk_members is None:
+        return None
+    return entry_members, sdk_members
+
+
+def _load_canonical_browser_lite_digests(
+    *,
+    package_root: Path | None = None,
+) -> tuple[dict[str, str], dict[str, str]] | None:
+    """从宿主自身权威来源加载 browser_lite 与 my_agent_plugin_api 的完整运行时成员摘要。"""
+    pkg_root = package_root if package_root is not None else Path(__file__).resolve().parents[1]
+    repo_root = pkg_root.parent
+    browser_src_dir = repo_root / "plugins" / "browser-lite" / "src" / "browser_lite"
+    manifest_path = pkg_root / "config" / "builtin_browser_lite_manifest.json"
+    try:
+        if browser_src_dir.exists() or browser_src_dir.is_symlink():
+            if browser_src_dir.is_symlink() or not browser_src_dir.is_dir():
+                return None
+            repo_entry: dict[str, str] = {}
+            for child in sorted(browser_src_dir.rglob("*")):
+                if child.is_dir() and not child.is_symlink():
+                    continue
+                rel_parts = child.relative_to(browser_src_dir).parts
+                if (
+                    any(part == "__pycache__" or part.endswith(".egg-info") for part in rel_parts)
+                    or child.name == ".DS_Store"
+                    or child.name.startswith("._")
+                    or child.suffix in {".pyc", ".pyo"}
+                ):
+                    continue
+                if child.is_symlink() or not child.is_file():
+                    return None
+                rel_name = "browser_lite/" + child.relative_to(browser_src_dir).as_posix()
+                if rel_name.lower().endswith(".pth"):
+                    return None
+                repo_entry[rel_name] = hashlib.sha256(child.read_bytes()).hexdigest()
+            if "browser_lite/server.py" not in repo_entry or "browser_lite/declaration.json" not in repo_entry:
+                return None
+            repo_sdk: dict[str, str] = {
+                "my_agent_plugin_api/__init__.py": hashlib.sha256(b"").hexdigest(),
+            }
+            for member_name, rel_parts in _SDK_CANONICAL_SOURCES:
+                src = pkg_root.joinpath(*rel_parts)
+                if src.is_symlink() or not src.is_file():
+                    return None
+                repo_sdk[member_name] = hashlib.sha256(src.read_bytes()).hexdigest()
+            if manifest_path.exists() or manifest_path.is_symlink():
+                if manifest_path.is_symlink() or not manifest_path.is_file():
+                    return None
+                parsed = _parse_builtin_browser_manifest_doc(manifest_path.read_bytes())
+                if parsed is None or parsed != (repo_entry, repo_sdk):
+                    return None
+            return repo_entry, repo_sdk
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return None
+        return _parse_builtin_browser_manifest_doc(manifest_path.read_bytes())
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _is_benign_wheel_dist_info_member(member_name: str, dist_info: str) -> bool:
+    if not member_name.startswith(f"{dist_info}/"):
+        return False
+    sub = member_name[len(dist_info) + 1:]
+    if not sub or sub.lower().endswith(_DISALLOWED_DIST_INFO_SUFFIXES):
+        return False
+    if sub in {"METADATA", "WHEEL", "RECORD", "top_level.txt"}:
+        return True
+    leaf = ""
+    if "/" not in sub:
+        leaf = sub
+    elif sub.startswith("licenses/") and sub.count("/") == 1:
+        leaf = sub.removeprefix("licenses/")
+    return bool(leaf and leaf.startswith(("LICENSE", "COPYING", "NOTICE")))
+
+
+def _extract_verified_wheel_runtime_members(
+    wheel_snapshot: object,
+    *,
+    allowed_package_prefix: str,
+    expected_members: Mapping[str, str],
+    seen_across_wheels: set[str],
+    member_limit: int,
+) -> dict[str, str] | None:
+    if not getattr(wheel_snapshot, "purelib", False) or getattr(wheel_snapshot, "entry_points", b""):
+        return None
+    dist_info = str(getattr(wheel_snapshot, "dist_info", "") or "")
+    raw_content = getattr(wheel_snapshot, "content", b"")
+    if not dist_info or not isinstance(raw_content, bytes):
+        return None
+    allowed_dirs = {f"{dist_info}/", f"{dist_info}/licenses/", allowed_package_prefix}
+    seen_in_wheel_raw: set[str] = set()
+    seen_in_wheel_folded: set[str] = set()
+    seen_dirs: set[str] = set()
+    runtime_digests: dict[str, str] = {}
+    with zipfile.ZipFile(io.BytesIO(raw_content)) as zf:
+        for info in zf.infolist():
+            name = info.filename
+            if (
+                not name
+                or name != info.orig_filename
+                or name.startswith("/")
+                or any(ch in name for ch in ("\\", ":", "\x00"))
+                or any(part in {".", ".."} for part in name.rstrip("/").split("/"))
+            ):
+                return None
+            if info.is_dir():
+                dir_key = archive_path_key(name)
+                if (
+                    not name.endswith("/")
+                    or info.file_size != 0
+                    or dir_key in seen_dirs
+                    or (name not in allowed_dirs and not any(exp.startswith(name) for exp in expected_members))
+                ):
+                    return None
+                seen_dirs.add(dir_key)
+                continue
+            if name.endswith("/") or name.lower().endswith(".pth") or name.split("/", 1)[0].endswith(".data"):
+                return None
+            file_key = archive_path_key(name)
+            if name in seen_in_wheel_raw or file_key in seen_in_wheel_folded or file_key in seen_across_wheels:
+                return None
+            seen_in_wheel_raw.add(name)
+            seen_in_wheel_folded.add(file_key)
+            seen_across_wheels.add(file_key)
+            content = read_zip_member(zf, info, member_limit)
+            if name.startswith(f"{dist_info}/"):
+                if not _is_benign_wheel_dist_info_member(name, dist_info):
+                    return None
+                if name == f"{dist_info}/top_level.txt":
+                    top_levels = [line.strip() for line in content.decode("utf-8").splitlines() if line.strip()]
+                    if top_levels != [allowed_package_prefix.rstrip("/")]:
+                        return None
+                continue
+            if not name.startswith(allowed_package_prefix):
+                return None
+            runtime_digests[name] = hashlib.sha256(content).hexdigest()
+    return runtime_digests
+
+
+def _verify_builtin_browser_lite_wheel(
+    archive_bytes: bytes,
+    entry_wheel: str,
+    *,
+    _package_root: Path | None = None,
+) -> bool:
+    """按宿主自身权威来源校验已安装 browser-lite 全量 wheel 集合与可执行成员，拦截伪装包或附加启动代码。"""
+    canonical = _load_canonical_browser_lite_digests(package_root=_package_root)
+    if canonical is None:
+        return False
+    expected_entry_digests, expected_sdk_digests = canonical
+    member_limit = PackageReadLimits().member_bytes
+    try:
+        package = inspect_plugin_package(archive_bytes)
+        manifest = package.manifest
+        if (
+            manifest.plugin_id != "browser-lite"
+            or manifest.entry_module != "browser_lite"
+            or manifest.entry is not None
+            or manifest.is_capability_pack
+            or manifest.entry_wheel != entry_wheel
+            or not entry_wheel.startswith("wheels/my_agent_browser_lite-")
+        ):
+            return False
+        wheels = inspect_plugin_wheels(package)
+        if not (1 <= len(wheels) <= 2) or len(wheels) != len(manifest.wheels):
+            return False
+        entry_matches = [item for item in wheels if item.declaration.path == entry_wheel]
+        if len(entry_matches) != 1 or entry_matches[0].name != "my-agent-browser-lite":
+            return False
+        other_wheels = [item for item in wheels if item.declaration.path != entry_wheel]
+        if len(other_wheels) > 1:
+            return False
+        sdk_snapshot = other_wheels[0] if other_wheels else None
+        if sdk_snapshot is not None and (
+            sdk_snapshot.name != "my-agent-plugin-api"
+            or not sdk_snapshot.declaration.path.startswith("wheels/my_agent_plugin_api-")
+        ):
+            return False
+        seen_across_wheels: set[str] = set()
+        actual_entry = _extract_verified_wheel_runtime_members(
+            entry_matches[0],
+            allowed_package_prefix="browser_lite/",
+            expected_members=expected_entry_digests,
+            seen_across_wheels=seen_across_wheels,
+            member_limit=member_limit,
+        )
+        if actual_entry is None or actual_entry != expected_entry_digests:
+            return False
+        if sdk_snapshot is not None:
+            actual_sdk = _extract_verified_wheel_runtime_members(
+                sdk_snapshot,
+                allowed_package_prefix="my_agent_plugin_api/",
+                expected_members=expected_sdk_digests,
+                seen_across_wheels=seen_across_wheels,
+                member_limit=member_limit,
+            )
+            if actual_sdk is None or actual_sdk != expected_sdk_digests:
+                return False
+        return True
+    except (PluginPackageError, OSError, KeyError, ValueError, TypeError, UnicodeError, zipfile.BadZipFile):
+        return False
 
 
 def _extract_session_scope(credential_use: object) -> tuple[dict[str, object], tuple[str, str, str]]:
@@ -1391,19 +1678,19 @@ def _remember_credential_session(
     generation: int,
     origin: str,
     consumer: dict[str, str],
-    variants: tuple[str, ...],
+    variants: tuple[str, ...] = (),
 ) -> None:
+    _ = variants
     lock = getattr(client, "_credential_session_lock", None)
     bindings = getattr(client, "_credential_session_bindings", None)
     if lock is None or not isinstance(bindings, OrderedDict):
         return
     with lock:
         bindings[scope_key] = {
-            "credential_ref": credential_ref,
-            "generation": generation,
-            "origin": origin,
+            "credential_ref": str(credential_ref),
+            "generation": int(generation),
+            "origin": str(origin),
             "consumer": dict(consumer),
-            "variants": tuple(variants),
         }
         bindings.move_to_end(scope_key)
         while len(bindings) > _MAX_CREDENTIAL_SESSION_BINDINGS_COUNT:

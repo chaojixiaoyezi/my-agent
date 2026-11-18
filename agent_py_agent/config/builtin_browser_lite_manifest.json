@@ -1,0 +1,27 @@
+{
+  "entry_distribution": "my-agent-browser-lite",
+  "entry_members": {
+    "browser_lite/__init__.py": "65ec5da074918f36a3afd6dc0855126449ca78bd434a1fec80d8ca7c1eb19243",
+    "browser_lite/__main__.py": "47ce5573f4a514eaaabf1ffa1673855c4e10920edc860aeb10989931f788420a",
+    "browser_lite/access.py": "741630db4537bfe1bd67ca4eb7389875aa2f4f04e8330138537577cc577febe0",
+    "browser_lite/cdp.py": "3407afe4b1ef4903941a1c6cfd5cd573545c567a8be3e70e54e670d7fcc12872",
+    "browser_lite/declaration.json": "48bbacf90503ad7989990eb5e3ec686b06926adef499d209be6d6a875926e64d",
+    "browser_lite/declarations.py": "5cbf700fa1e517a72a3d8e57fb9e7f25473ca832765e5b035fa81c2c4593fdd3",
+    "browser_lite/errors.py": "3a2474471160a504d77097cb63b7e62a3d2b8098a3e941c71b0021f4af7c08cd",
+    "browser_lite/launcher.py": "b88b12a343488da25ed32b35dbfb57ee29c4026877a4387158df3d4c0fb33c82",
+    "browser_lite/page.py": "0b4d701cfb77440146c79bd9719c2c547fa5e3421fc074f162133d45934641df",
+    "browser_lite/server.py": "d001bec75da8722e11bfd09af568e8e66fa67d0f220ef937869ea82b466599f2",
+    "browser_lite/session.py": "31bd2c4ac04b2902bcf08d4997911d5f86c394690fdaf2333c040a2a65fa43f7",
+    "browser_lite/websocket.py": "0510f3facbba1ffbb4f7057e14ac3de5736f5471bca38e7f35bcecba30a56689"
+  },
+  "plugin_id": "browser-lite",
+  "schema_version": "my-agent.builtin-browser-lite-manifest.v1",
+  "sdk_distribution": "my-agent-plugin-api",
+  "sdk_members": {
+    "my_agent_plugin_api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "my_agent_plugin_api/nofollow_fs.py": "41705c430309f2220789c826a7c0396ae0e62f0f70a65c39c0941f7b5e68a262",
+    "my_agent_plugin_api/path_access_policy.py": "27adb3bbf9ada5751d19b461c8317eaf48401886c098cc19018ace7e9630f9b4",
+    "my_agent_plugin_api/workspace_read_context.py": "e9160b6888f84f6e7c156a916165004906d4857258a9f00467cd675c945e447f",
+    "my_agent_plugin_api/workspace_write_context.py": "9783b614c1d8f15974e2f593d2d639c66c6e464e37eb0a52b80f7d8941e6f03c"
+  }
+}
