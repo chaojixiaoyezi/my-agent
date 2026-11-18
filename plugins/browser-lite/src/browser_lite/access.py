@@ -14,14 +14,37 @@ from .errors import BrowserError
 BLANK_URL = "about:blank"
 
 
+# LLM: 规范化 http(s) origin（scheme://host:port），拒绝内嵌账号密码或非 http(s) 协议；允许页面当前地址带 hash/query。
+# 函数用途: 计算浏览器页面或请求目标的标准同源标识，非合法 http(s) 地址返回 None。
+def http_origin(url: str) -> str | None:
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or not host or parts.username or parts.password:
+        return None
+    resolved_port = port or (443 if scheme == "https" else 80)
+    return f"{scheme}://{host}:{resolved_port}"
+
+
 # LLM: 一次工具调用一个实例；读取上下文来自宿主本次 _meta，主机名单来自已校验设置，均不缓存到下一次调用。
+#   已绑定受保护凭据的会话额外携带 allowed_origins，防止跳到同主机其它端口或 file 页面。
 # 类用途: 本次调用的地址守卫。
 class UrlGuard:
     # LLM: 主机名统一小写比较；不接受通配符。
-    # 函数用途: 绑定读取上下文和允许的主机名单。
-    def __init__(self, context: WorkspaceReadContext, hosts: list[str]):
+    # 函数用途: 绑定读取上下文、允许的主机名单与可选同源集合。
+    def __init__(self, context: WorkspaceReadContext, hosts: list[str], *,
+                 allowed_origins: set[str] | frozenset[str] | None = None):
         self.context = context
         self.hosts = {host.lower() for host in hosts}
+        self.allowed_origins = frozenset(allowed_origins) if allowed_origins else frozenset()
+
+    # 函数用途: 生成限定到已授权凭据 origin 集合的新守卫副本，不修改原守卫。
+    def with_allowed_origins(self, origins: set[str] | frozenset[str]) -> UrlGuard:
+        return UrlGuard(self.context, list(self.hosts), allowed_origins=origins)
 
     # LLM: 返回拒绝原因（中文）或 None；file 路径先 unquote 再交给 SDK check（check 内会 resolve 符号链接）。
     # 函数用途: 裁决一个地址是否允许浏览器访问。
@@ -33,8 +56,16 @@ class UrlGuard:
             return "地址格式无效"
         scheme = parts.scheme.lower()
         if scheme in ("http", "https"):
-            return None if host in self.hosts else f"主机 {host or '(空)'} 不在设置 allowed_hosts 里"
+            if host not in self.hosts:
+                return f"主机 {host or '(空)'} 不在设置 allowed_hosts 里"
+            if self.allowed_origins:
+                origin = http_origin(url)
+                if origin is None or origin not in self.allowed_origins:
+                    return f"地址 {origin or url[:120]} 不属于当前凭据会话绑定的同源站点"
+            return None
         if scheme == "file":
+            if self.allowed_origins:
+                return "已绑定凭据的浏览器会话不允许切换到本地 file 页面"
             path = Path(unquote(parts.path))
             if parts.netloc not in ("", "localhost") or not path.is_absolute():
                 return "file 地址必须是本机绝对路径"

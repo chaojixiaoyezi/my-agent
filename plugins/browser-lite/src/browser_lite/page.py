@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from .access import BLANK_URL, UrlGuard
+from .access import BLANK_URL, UrlGuard, http_origin
 from .cdp import PageConnection
 from .errors import BrowserError
 
@@ -16,20 +16,23 @@ SETTLE_SECONDS = 0.5
 _STATE_JS = """() => ({url: location.href, title: document.title,
   text: (document.body ? document.body.innerText : "").slice(0, %d)})""" % TEXT_LIMIT
 
-_READ_JS = """(selector) => {
+_READ_JS = """(selector, hidePasswords) => {
   let list;
   try { list = document.querySelectorAll(selector || "input, textarea, select, button"); }
   catch (error) { return {invalid: true}; }
+  const marked = window.__myAgentCredentialElements;
   const items = Array.from(list).slice(0, 50).map((el) => {
     const tag = el.tagName.toLowerCase();
+    const kind = (el.type || "").toLowerCase();
+    const secret = Boolean((marked && marked.has(el)) || (hidePasswords && tag === "input" && kind === "password"));
     const box = el.getBoundingClientRect();
     const style = getComputedStyle(el);
-    const item = {tag, text: (el.innerText || el.textContent || "").trim().slice(0, 200),
+    const item = {tag, text: secret ? "" : (el.innerText || el.textContent || "").trim().slice(0, 200),
       name: el.getAttribute("name") || "", id: el.id || "",
       visible: box.width > 0 && box.height > 0 && style.visibility !== "hidden" && style.display !== "none"};
-    if (["input", "textarea", "select"].includes(tag)) item.value = String(el.value);
+    if (["input", "textarea", "select"].includes(tag) && !secret) item.value = String(el.value);
     if (["input", "button"].includes(tag)) item.type = el.type || "";
-    if (tag === "select") item.options = Array.from(el.options).slice(0, 50).map((o) => ({value: o.value, text: o.text.trim()}));
+    if (tag === "select" && !secret) item.options = Array.from(el.options).slice(0, 50).map((o) => ({value: o.value, text: o.text.trim()}));
     return item;
   });
   return {count: list.length, items};
@@ -85,6 +88,71 @@ _FILL_JS = """(selector, value) => {
 
 _FILL_NTH_JS = "(selector, index, expected, value) => {\n" + _NTH_PREFIX + _FILL_BODY
 
+_INSPECT_ORIGIN_JS = """() => {
+  if (window !== window.top) return {top: false, href: ""};
+  return {top: true, href: String(window.location.href || "")};
+}"""
+
+_CREDENTIAL_ORIGIN_CHECK = """  if (window !== window.top) return {origin_mismatch: true};
+  let docUrl;
+  try { docUrl = new URL(window.location.href); } catch (e) { return {origin_mismatch: true}; }
+  if ((docUrl.protocol !== "http:" && docUrl.protocol !== "https:") || docUrl.username || docUrl.password)
+    return {origin_mismatch: true};
+  const docPort = docUrl.port || (docUrl.protocol === "https:" ? "443" : "80");
+  const actualOrigin = docUrl.protocol + "//" + docUrl.hostname.toLowerCase() + ":" + docPort;
+  if (actualOrigin !== expectedOrigin) return {origin_mismatch: true};
+"""
+
+_CREDENTIAL_FILL_BODY = """  if (el.ownerDocument !== document) return {document_mismatch: true};
+  const tag = el.tagName.toLowerCase();
+  const kind = (el.type || "").toLowerCase();
+  const fixed = ["checkbox", "radio", "file", "submit", "button", "reset", "image", "hidden"];
+  if (!["input", "textarea", "select"].includes(tag) || (tag === "input" && fixed.includes(kind)))
+    return {count: 1, unfillable: tag + (kind ? "[type=" + kind + "]" : "")};
+  if (el.form && el.form.getAttribute("action")) {
+    let actionUrl;
+    try { actionUrl = new URL(el.form.action, window.location.href); }
+    catch (e) { return {cross_origin_form_action: true}; }
+    if ((actionUrl.protocol !== "http:" && actionUrl.protocol !== "https:") || actionUrl.username || actionUrl.password)
+      return {cross_origin_form_action: true};
+    const actionPort = actionUrl.port || (actionUrl.protocol === "https:" ? "443" : "80");
+    const actionOrigin = actionUrl.protocol + "//" + actionUrl.hostname.toLowerCase() + ":" + actionPort;
+    if (actionOrigin !== expectedOrigin) return {cross_origin_form_action: true};
+  }
+  if (tag === "select") {
+    const options = Array.from(el.options);
+    const match = options.find((o) => o.value === value) || options.find((o) => o.text.trim() === value);
+    if (!match) return {count: 1, option_not_found: true};
+    value = match.value;
+  }
+  window.__myAgentCredentialElements = window.__myAgentCredentialElements || new WeakSet();
+  window.__myAgentCredentialElements.add(el);
+  el.focus();
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value");
+  if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+  el.dispatchEvent(new Event("input", {bubbles: true}));
+  el.dispatchEvent(new Event("change", {bubbles: true}));
+  return {count: 1, tag};
+}"""
+
+_CREDENTIAL_FILL_JS = (
+    "(selector, value, expectedOrigin) => {\n"
+    + _CREDENTIAL_ORIGIN_CHECK
+    + """  let list;
+  try { list = document.querySelectorAll(selector); } catch (error) { return {invalid: true}; }
+  if (list.length !== 1) return {count: list.length};
+  const el = list[0];
+"""
+    + _CREDENTIAL_FILL_BODY
+)
+
+_CREDENTIAL_FILL_NTH_JS = (
+    "(selector, index, expected, value, expectedOrigin) => {\n"
+    + _CREDENTIAL_ORIGIN_CHECK
+    + _NTH_PREFIX
+    + _CREDENTIAL_FILL_BODY
+)
+
 # read 不给 selector 时的默认查询，必须与 _READ_JS 里的回退串逐字相同，观察候选才能按同一选择器解析回元素
 DEFAULT_READ_SELECTOR = "input, textarea, select, button"
 
@@ -97,6 +165,28 @@ def evaluate(page: PageConnection, function: str, *arguments: object) -> object:
                                             "returnByValue": True, "awaitPromise": True})
     if "exceptionDetails" in result:
         raise BrowserError("SCRIPT_FAILED", "页面脚本执行失败。")
+    return (result.get("result") or {}).get("value")
+
+
+# 函数用途: 锁定特定顶层执行上下文执行同步 DOM 脚本；上下文已销毁立即转成 DOCUMENT_CHANGED，绝不在新文档执行。
+def evaluate_in_context(page: PageConnection, context_id: int, function: str, *arguments: object) -> object:
+    literal = ", ".join(json.dumps(item, ensure_ascii=True) for item in arguments)
+    try:
+        result = page.call(
+            "Runtime.evaluate",
+            {
+                "expression": f"({function})({literal})",
+                "contextId": context_id,
+                "returnByValue": True,
+                "awaitPromise": False,
+            },
+        )
+    except BrowserError as exc:
+        if exc.code == "CDP_ERROR":
+            raise BrowserError("DOCUMENT_CHANGED", "页面执行上下文已变化，本次未填入凭据。", side_effect="not_applied") from exc
+        raise
+    if "exceptionDetails" in result:
+        raise BrowserError("SCRIPT_FAILED", "页面脚本执行失败。", side_effect="not_applied")
     return (result.get("result") or {}).get("value")
 
 
@@ -134,12 +224,122 @@ def open_page(page: PageConnection, guard: UrlGuard, value: str) -> dict:
     return require_current(page, guard)
 
 
-# LLM: 只读；不给 selector 时列表单控件与按钮。最多返回 50 个元素，count 是真实匹配总数。
+# LLM: 只读；不给 selector 时列表单控件与按钮。最多返回 50 个元素，count 是真实匹配总数；受保护控件不返回 value。
 # 函数用途: 读取当前页面匹配元素的标签、文字、value、name/id 和可见性。
-def read_elements(page: PageConnection, guard: UrlGuard, selector: str | None) -> dict:
+def read_elements(page: PageConnection, guard: UrlGuard, selector: str | None, *, hide_passwords: bool = False) -> dict:
     state = require_current(page, guard)
-    found = _checked(evaluate(page, _READ_JS, selector or ""))
+    found = _checked(evaluate(page, _READ_JS, selector or "", bool(hide_passwords)))
     return {"url": state["url"], "title": state["title"], "count": found["count"], "items": found["items"]}
+
+
+# 函数用途: C7 第一阶段只读检查：核对顶层 frame、loaderId、执行上下文与真实 http(s) origin，不读取或修改表单值。
+def inspect_credential_page(page: PageConnection, guard: UrlGuard) -> dict:
+    require_current(page, guard)
+    frame_tree = page.call("Page.getFrameTree").get("frameTree") or {}
+    frame = frame_tree.get("frame") or {}
+    frame_id = str(frame.get("id") or "")
+    loader_id = str(frame.get("loaderId") or "")
+    context_id = page.main_context_id
+    if (not frame_id or frame_id != page.main_frame or frame.get("parentId")
+            or not loader_id or type(context_id) is not int or not page.target_id):
+        raise BrowserError("DOCUMENT_UNVERIFIED", "当前页面缺少可核验的顶层文档身份，请重新 open 目标登录页。",
+                           side_effect="not_applied")
+    origin = http_origin(str(frame.get("url") or ""))
+    if origin is None:
+        raise BrowserError("URL_NOT_ALLOWED", "凭据填表仅允许已授权的 http(s) 页面，不支持空白页或本地文件页面。",
+                           side_effect="not_applied")
+    probe = evaluate_in_context(page, context_id, _INSPECT_ORIGIN_JS)
+    if not isinstance(probe, dict) or probe.get("top") is not True or http_origin(str(probe.get("href") or "")) != origin:
+        raise BrowserError("ORIGIN_MISMATCH", "页面执行上下文与顶层文档 origin 不一致，未执行填表。",
+                           side_effect="not_applied")
+    return {
+        "origin": origin,
+        "target_id": page.target_id,
+        "document_id": f"{frame_id}:{loader_id}:{context_id}",
+    }
+
+
+# 函数用途: C7 第二阶段受控填表：在同一冻结顶层文档与执行上下文再次核验 origin/form action，仅返回控件标签与成功标志。
+def fill_from_credential(
+    page: PageConnection,
+    guard: UrlGuard,
+    target,
+    *,
+    field_value: str,
+    expected_origin: str,
+    document_id: str,
+) -> dict:
+    parts = document_id.split(":") if isinstance(document_id, str) else []
+    if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2].isdigit():
+        raise BrowserError("INVALID_CONTEXT", "宿主文档标识无效，本次未填入凭据。", side_effect="not_applied")
+    frame_id, loader_id, context_id = parts[0], parts[1], int(parts[2])
+    if frame_id != page.main_frame or page.main_context_id != context_id:
+        raise BrowserError("DOCUMENT_CHANGED", "页面已切换或重新加载，本次未填入凭据。", side_effect="not_applied")
+    require_current(page, guard)
+    frame = (page.call("Page.getFrameTree").get("frameTree") or {}).get("frame") or {}
+    if str(frame.get("id") or "") != frame_id or str(frame.get("loaderId") or "") != loader_id or frame.get("parentId"):
+        raise BrowserError("DOCUMENT_CHANGED", "顶层文档已变化，本次未填入凭据。", side_effect="not_applied")
+    if http_origin(str(frame.get("url") or "")) != expected_origin:
+        raise BrowserError("ORIGIN_MISMATCH", "页面当前 origin 与凭据授权站点不一致，本次未填入凭据。",
+                           side_effect="not_applied")
+    if isinstance(target, str):
+        raw = evaluate_in_context(page, context_id, _CREDENTIAL_FILL_JS, target, field_value, expected_origin)
+        found = _credential_checked(raw, unique=True)
+    elif isinstance(target, dict) and "index" in target and "expected" in target:
+        raw = evaluate_in_context(
+            page,
+            context_id,
+            _CREDENTIAL_FILL_NTH_JS,
+            str(target["selector"]),
+            int(target["index"]),
+            int(target["expected"]),
+            field_value,
+            expected_origin,
+        )
+        found = _credential_checked(raw, unique=False)
+    elif isinstance(target, dict) and isinstance(target.get("selector"), str) and target["selector"]:
+        raw = evaluate_in_context(page, context_id, _CREDENTIAL_FILL_JS, target["selector"], field_value, expected_origin)
+        found = _credential_checked(raw, unique=True)
+    else:
+        raise BrowserError("INVALID_ARGUMENTS", "请提供 selector，或填 read 结果里的 candidate_id。", side_effect="not_applied")
+    return {"filled": found["tag"], "credential_applied": True}
+
+
+def _credential_checked(found: object, *, unique: bool) -> dict:
+    if not isinstance(found, dict):
+        raise BrowserError("SCRIPT_FAILED", "页面脚本返回值无效。", side_effect="not_applied")
+    if found.get("origin_mismatch"):
+        raise BrowserError("ORIGIN_MISMATCH", "页面实时 origin 与授权站点不一致，本次未填入凭据。", side_effect="not_applied")
+    if found.get("document_mismatch"):
+        raise BrowserError("DOCUMENT_CHANGED", "目标元素不属于当前顶层文档，本次未填入凭据。", side_effect="not_applied")
+    if found.get("cross_origin_form_action"):
+        raise BrowserError("CROSS_ORIGIN_FORM_ACTION", "目标表单 action 指向跨源地址，已拒绝填入凭据。",
+                           side_effect="not_applied")
+    if found.get("invalid"):
+        raise BrowserError("INVALID_SELECTOR", "CSS 选择器语法无效。", side_effect="not_applied")
+    if not unique and found.get("mismatch"):
+        raise BrowserError(
+            "OBSERVATION_NOT_FOUND",
+            "观察过的元素已变化或不存在，请重新 read 后再操作。",
+            my_agent_observation_error={"code": "not_found"},
+            side_effect="not_applied",
+        )
+    if unique:
+        if found.get("count") == 0:
+            raise BrowserError("SELECTOR_NOT_FOUND", "选择器没有匹配到元素。", count=0, side_effect="not_applied")
+        if found.get("count") != 1:
+            raise BrowserError(
+                "SELECTOR_AMBIGUOUS",
+                f"选择器匹配到 {found.get('count')} 个元素，只能操作唯一元素。",
+                count=found.get("count"),
+                side_effect="not_applied",
+            )
+    if "unfillable" in found:
+        raise BrowserError("NOT_FILLABLE", f"匹配元素是 {found['unfillable']}，只能填写 input/textarea/select。",
+                           side_effect="not_applied")
+    if found.get("option_not_found"):
+        raise BrowserError("OPTION_NOT_FOUND", "下拉框中没有匹配该凭据字段值的选项。", side_effect="not_applied")
+    return found
 
 
 # LLM: 只点唯一匹配元素；点击后 500ms 内出现主 frame 导航就等 load（受命令超时约束），否则视为已稳定。

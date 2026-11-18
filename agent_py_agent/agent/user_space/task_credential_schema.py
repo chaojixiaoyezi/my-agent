@@ -87,12 +87,26 @@ def credential_auth_config(authentication: str, value: object, fields: list[dict
     raise ValueError("认证方式无效")
 
 
-# LLM: login URL 的 origin 由记录入口再次验证；令牌路径只读取 JSON 字段，不运行表达式。
-# 函数用途: 校验 JSON 登录、可选 Cookie/CSRF 和有限期会话缓存。
+# LLM: login URL 的 origin 由记录入口再次验证；令牌路径只读取 JSON 字段，不运行表达式；缺省 JSON 与旧记录字节等价。
+# 函数用途: 校验 JSON/form 登录、可选 Cookie/CSRF 和有限期会话缓存。
 def _login_config(config: dict, names: set[str]) -> dict:
-    allowed = {"url", "body_fields", "token_path", "token_header", "token_prefix", "cookies", "csrf_cookie", "csrf_header", "session_seconds"}
+    allowed = {
+        "url",
+        "body_fields",
+        "body_encoding",
+        "token_path",
+        "token_header",
+        "token_prefix",
+        "cookies",
+        "csrf_cookie",
+        "csrf_header",
+        "session_seconds",
+    }
     if set(config) - allowed or not isinstance(config.get("url"), str):
         raise ValueError("登录方案字段无效")
+    encoding = config.get("body_encoding", "json")
+    if not isinstance(encoding, str) or encoding not in {"json", "form"}:
+        raise ValueError("登录请求体编码方式无效，仅支持 json 或 form")
     mapping = config.get("body_fields")
     if not isinstance(mapping, dict) or not mapping or any(not isinstance(k, str) or not _NAME.fullmatch(k) or v not in names for k, v in mapping.items()):
         raise ValueError("登录字段必须引用表单字段")
@@ -108,11 +122,20 @@ def _login_config(config: dict, names: set[str]) -> dict:
     csrf = config.get("csrf_cookie", "")
     if csrf and (not cookies or not isinstance(csrf, str) or not _NAME.fullmatch(csrf)):
         raise ValueError("CSRF Cookie 无效")
-    return {"url": config["url"], "body_fields": dict(mapping), "token_path": list(path),
-            "token_header": credential_header_name(config.get("token_header", "Authorization")),
-            "token_prefix": prefix, "cookies": cookies, "csrf_cookie": csrf,
-            "csrf_header": credential_header_name(config.get("csrf_header", "X-CSRF-Token")),
-            "session_seconds": credential_seconds(config.get("session_seconds"), default=300, maximum=86400)}
+    result = {
+        "url": config["url"],
+        "body_fields": dict(mapping),
+        "token_path": list(path),
+        "token_header": credential_header_name(config.get("token_header", "Authorization")),
+        "token_prefix": prefix,
+        "cookies": cookies,
+        "csrf_cookie": csrf,
+        "csrf_header": credential_header_name(config.get("csrf_header", "X-CSRF-Token")),
+        "session_seconds": credential_seconds(config.get("session_seconds"), default=300, maximum=86400),
+    }
+    if encoding == "form":
+        result["body_encoding"] = "form"
+    return result
 
 
 # LLM: 签名只读取准确声明的原始字段和本次 HTTP 请求事实，输出固定头；不会提供签名 oracle 给任意目标。

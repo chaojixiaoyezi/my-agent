@@ -23,16 +23,18 @@ _GUARDED_SCHEMES = {"http", "https", "file"}
 class PageConnection:
     # LLM: 只保存连接与超时；事件队列有上限，丢弃最旧事件而不是无界增长。
     # 函数用途: 绑定已握手的 WebSocket 和命令超时。
-    def __init__(self, ws: WebSocketClient, timeout: float):
+    def __init__(self, ws: WebSocketClient, timeout: float, *, target_id: str = ""):
         self.ws = ws
         self.timeout = timeout
+        self.target_id = target_id
         self.guard: Callable[[str], str | None] | None = None
         self.blocked: list[str] = []
         self.events: deque[dict] = deque(maxlen=1000)
         self.main_frame = ""
+        self.main_context_id: int | None = None
         self._next_id = 1
 
-    # LLM: 有副作用：建立 WebSocket、开启 Page/Inspector 事件和全量请求拦截，并记录主 frame id。失败时关闭连接。
+    # LLM: 有副作用：建立 WebSocket、开启 Page/Inspector/Runtime 事件和全量请求拦截，并记录主 frame 与主执行上下文。失败时关闭连接。
     # 函数用途: 连接页面目标并完成本插件需要的 CDP 初始化。
     @classmethod
     def open(cls, port: int, path: str, timeout: float) -> PageConnection:
@@ -40,12 +42,14 @@ class PageConnection:
             ws = WebSocketClient.connect("127.0.0.1", port, path, timeout)
         except (OSError, WebSocketError) as exc:
             raise BrowserError("BROWSER_DISCONNECTED", "无法连接浏览器调试端口。") from exc
-        page = cls(ws, timeout)
+        target_id = path.rsplit("/", 1)[-1] if "/" in path else path
+        page = cls(ws, timeout, target_id=target_id)
         try:
             page.call("Page.enable")
             page.call("Inspector.enable")
             page.call("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
             page.main_frame = page.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+            page.call("Runtime.enable")
         except BaseException:
             page.close()
             raise
@@ -110,9 +114,25 @@ class PageConnection:
             raise BrowserError("PAGE_CRASHED", "页面崩溃，浏览器已关闭；请重新 open。")
         if method == "Fetch.requestPaused":
             self._decide(message.get("params") or {})
+        elif method in ("Runtime.executionContextCreated", "Runtime.executionContextDestroyed", "Runtime.executionContextsCleared"):
+            self._track_execution_context(method, message.get("params") or {})
         elif method:
             self.events.append(message)
         return message if isinstance(message, dict) else {}
+
+    # 函数用途: 跟踪顶层主 frame 默认执行上下文 ID，换文档或清空时立即失效，防止向新文档重播秘密。
+    def _track_execution_context(self, method: str, params: dict) -> None:
+        if method == "Runtime.executionContextCreated":
+            ctx = params.get("context") or {}
+            aux = ctx.get("auxData") or {}
+            ctx_id = ctx.get("id")
+            if aux.get("isDefault") is True and (not self.main_frame or aux.get("frameId") == self.main_frame) and type(ctx_id) is int:
+                self.main_context_id = ctx_id
+        elif method == "Runtime.executionContextDestroyed":
+            if params.get("executionContextId") == self.main_context_id:
+                self.main_context_id = None
+        elif method == "Runtime.executionContextsCleared":
+            self.main_context_id = None
 
     # LLM: 受控协议的请求由 guard 裁决，被拒的地址记入 blocked（供上层报告“跳到不允许地址”）并以 BlockedByClient 失败；
     #   没有 guard 时一律拦截，宁可失败也不放行。

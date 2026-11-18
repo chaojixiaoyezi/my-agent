@@ -192,7 +192,7 @@
     },
     {
       "name": "fill",
-      "description": "填写当前页面里唯一匹配的 input/textarea/select（下拉可按选项 value 或文字），并触发 input/change 事件；也可以只填 candidate_id，按上一次 read 的观察候选操作。",
+      "description": "填写当前页面里唯一匹配的 input/textarea/select（下拉可按选项 value 或文字），并触发 input/change 事件；可填普通字面值 value（允许空串），或填宿主凭据引用 credential_ref 加字段键名 field（严格二选一，严禁在 value 中传入密码明文）；也可以填 candidate_id 按上一次 read 的观察候选操作。",
       "requested_effect": "mutating",
       "input_schema": {
         "type": "object",
@@ -207,7 +207,18 @@
             "type": "string",
             "minLength": 0,
             "maxLength": 10000,
-            "description": "要填写的文本或下拉选项"
+            "description": "要填写的普通文本或下拉选项（允许空串；与 credential_ref/field 互斥）"
+          },
+          "credential_ref": {
+            "type": "string",
+            "pattern": "^cred_[0-9a-f]{32}$",
+            "description": "宿主不透明凭据引用（cred_<32位十六进制>）；须与 field 同时提供，与 value 互斥"
+          },
+          "field": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "凭据卡中的字段键名（内置账号密码卡密码键为 secret、账号键为 username，自定义卡为原声明键名）；须与 credential_ref 同时提供"
           },
           "candidate_id": {
             "type": "string",
@@ -216,8 +227,16 @@
             "description": "宿主在 read 结果里给出的候选 ID（cand-…）；填了它就按观察候选执行，可不填 selector"
           }
         },
-        "required": [
-          "value"
+        "required": [],
+        "x-exclusive-argument-groups": [
+          [
+            "value",
+            "credential_ref"
+          ],
+          [
+            "value",
+            "field"
+          ]
         ],
         "additionalProperties": false
       },

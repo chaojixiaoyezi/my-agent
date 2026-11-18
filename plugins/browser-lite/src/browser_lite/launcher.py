@@ -84,17 +84,19 @@ class BrowserProcess:
         if self.profile.is_symlink():
             raise BrowserError("UNSAFE_PROFILE", "插件 profile 目录是符号链接，已拒绝启动浏览器。")
         self.profile.mkdir(parents=True, exist_ok=True)
+        _disable_profile_password_saving(self.profile)
         port_file = self.profile / "DevToolsActivePort"
         port_file.unlink(missing_ok=True)
         arguments = [str(self.executable), f"--user-data-dir={self.profile}", "--headless=new",
                      "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check",
                      "--disable-extensions", "--disable-background-networking", "--disable-sync",
                      "--disable-component-update", "--use-mock-keychain", "--password-store=basic",
-                     "--disable-features=MacAppCodeSignClone", "about:blank"]
+                     "--disable-save-password-bubble", "--disable-features=MacAppCodeSignClone", "about:blank"]
         try:
             self.process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                             stderr=subprocess.DEVNULL, close_fds=True)
         except OSError as exc:
+            clear_profile(self.profile)
             raise BrowserError("BROWSER_START_FAILED", "浏览器启动失败，请检查 chrome_path 是否为可执行的 Chrome/Chromium。") from exc
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline and self.process.poll() is None:
@@ -242,6 +244,28 @@ def _process_group(proc_root: Path, name: str) -> int | None:
         return None
 
 
+# 函数用途: 写入默认 profile 偏好以彻底禁用密码管理与表单自动保存，不跟随符号链接。
+def _disable_profile_password_saving(profile: Path) -> None:
+    if profile.is_symlink():
+        return
+    default_dir = profile / "Default"
+    if default_dir.is_symlink():
+        raise BrowserError("UNSAFE_PROFILE", "插件 profile 子目录是符号链接，已拒绝启动浏览器。")
+    default_dir.mkdir(parents=True, exist_ok=True)
+    prefs = default_dir / "Preferences"
+    if prefs.is_symlink():
+        raise BrowserError("UNSAFE_PROFILE", "插件 Preferences 是符号链接，已拒绝启动浏览器。")
+    prefs.write_text(
+        json.dumps({
+            "credentials_enable_service": False,
+            "credentials_enable_autosignin": False,
+            "profile": {"password_manager_enabled": False},
+            "autofill": {"profile_enabled": False, "credit_card_enabled": False},
+        }),
+        encoding="utf-8",
+    )
+
+
 # LLM: 只删 profile 目录里的条目；目录本身是符号链接或不存在时什么也不做。rmtree 不跟随子目录符号链接。
 # 函数用途: 清空专属 profile 下的缓存和状态文件。
 def clear_profile(profile: Path) -> None:
@@ -255,3 +279,14 @@ def clear_profile(profile: Path) -> None:
                 child.unlink()
             except OSError:
                 pass
+
+
+# 函数用途: 清空并删除隔离凭据会话的临时 profile 目录。
+def remove_profile_dir(profile: Path) -> None:
+    if profile.is_symlink() or not profile.exists():
+        return
+    clear_profile(profile)
+    try:
+        profile.rmdir()
+    except OSError:
+        pass

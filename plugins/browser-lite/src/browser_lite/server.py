@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import sys
 from importlib.metadata import version
@@ -22,6 +23,10 @@ from .declarations import declaration, fields
 
 # 宿主在动作调用 _meta 里附观察候选事实用的扩展键（与宿主 plugin_observation.OBSERVATION_META_EXTENSION 一致）
 OBSERVATION_META_EXTENSION = "my-agent/observation"
+# C7 两阶段受控凭据填表与隔离会话私有 _meta 扩展
+CREDENTIAL_FILL_EXTENSION = "credential_fill"
+CREDENTIAL_FILL_VERSION = "1"
+_CREDENTIAL_REF_RE = re.compile(r"cred_[0-9a-f]{32}\Z")
 from .errors import BrowserError
 from .launcher import find_browser
 from .session import BrowserSession
@@ -59,10 +64,17 @@ class BrowserServer:
             return self.error(request_id, -32602, "参数格式无效。")
         if method == "initialize":
             self.initialized = True
-            result = {"protocolVersion": "2024-11-05", "serverInfo": {
-                "name": "browser-lite", "version": version("my-agent-browser-lite")},
-                "capabilities": {"tools": {}, "experimental": {
-                    WORKSPACE_READ_EXTENSION: {"versions": [WORKSPACE_READ_VERSION]}}}}
+            result = {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "browser-lite", "version": version("my-agent-browser-lite")},
+                "capabilities": {
+                    "tools": {},
+                    "experimental": {
+                        WORKSPACE_READ_EXTENSION: {"versions": [WORKSPACE_READ_VERSION]},
+                        CREDENTIAL_FILL_EXTENSION: {"versions": [CREDENTIAL_FILL_VERSION]},
+                    },
+                },
+            }
         elif not self.initialized:
             return self.error(request_id, -32000, "请先初始化连接。")
         elif method == "ping":
@@ -77,29 +89,101 @@ class BrowserServer:
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
     # LLM: 每个工具先确认浏览器可执行文件存在（找不到即“浏览器不可用”，不假装成功）；除 close 外都要求宿主读取上下文，
-    #   权限只从 _meta 取得，arguments 不能冒充上下文。
+    #   权限与两阶段凭据上下文只从 _meta 取得，arguments 不能冒充上下文。
     # 函数用途: 验证参数和上下文后执行浏览器动作，所有失败都转成中文错误结果。
     def call(self, params: dict) -> dict:
         try:
             name = params.get("name")
             if not isinstance(name, str) or name not in self.tools:
                 raise BrowserError("UNKNOWN_TOOL", "工具不存在。")
+            metadata = params.get("_meta")
+            raw_cred = metadata.get(CREDENTIAL_FILL_EXTENSION) if isinstance(metadata, dict) else None
+            if isinstance(raw_cred, dict) and raw_cred.get("session_revoked") is True:
+                self.session.revoke_scope(raw_cred)
             arguments = fields(params.get("arguments", {}), self.tools[name]["input_schema"])
+            credential_meta = self._credential_meta(name, arguments, metadata)
             find_browser(self.settings["chrome_path"])
             if name == "close":
-                return self.result(self.session.close_browser(), False)
-            metadata = params.get("_meta")
+                return self.result(self.session.close_browser(credential_meta), False)
             if not isinstance(metadata, dict) or WORKSPACE_READ_EXTENSION not in metadata:
                 raise BrowserError("MISSING_CONTEXT", "缺少宿主逐次工作区读取上下文。")
             context = WorkspaceReadContext.from_payload(metadata[WORKSPACE_READ_EXTENSION])
             guard = UrlGuard(context, self.settings["allowed_hosts"])
-            return self.result(self.session.run(name, arguments, guard, observation=self._observation(name, arguments, metadata)), False)
+            return self.result(
+                self.session.run(
+                    name,
+                    arguments,
+                    guard,
+                    observation=self._observation(name, arguments, metadata),
+                    credential_meta=credential_meta,
+                ),
+                False,
+            )
         except BrowserError as exc:
             return self.result({"code": exc.code, "message": str(exc), **exc.extra}, True)
         except OSError:
             return self.result({"code": "IO_FAILED", "message": "浏览器或 profile 目录读写失败，请稍后重试。"}, True)
         except (ValueError, TypeError, KeyError):
             return self.result({"code": "INVALID_CONTEXT", "message": "宿主工作区上下文或浏览器响应无效。"}, True)
+
+    # 函数用途: 强制 fill 参数组合互斥（value 与 credential_ref+field 严格二选一）并核对私有 _meta.credential_fill。
+    def _credential_meta(self, name: str, arguments: dict, metadata: object) -> dict | None:
+        raw = metadata.get(CREDENTIAL_FILL_EXTENSION) if isinstance(metadata, dict) else None
+        if raw is not None and not isinstance(raw, dict):
+            raise BrowserError("INVALID_CONTEXT", "宿主凭据上下文格式无效。")
+        if name != "fill":
+            if isinstance(raw, dict) and raw.get("phase") not in (None, "", "session"):
+                raise BrowserError("INVALID_CONTEXT", "非 fill 工具不接受两阶段填表上下文。")
+            return raw
+        has_value = "value" in arguments
+        has_ref = "credential_ref" in arguments
+        has_field = "field" in arguments
+        if has_value and (has_ref or has_field):
+            raise BrowserError(
+                "INVALID_ARGUMENTS",
+                "参数互斥冲突：value 与 credential_ref/field 严格二选一，不能同时传入。",
+                conflicting=["value", *(k for k in ("credential_ref", "field") if k in arguments)],
+                side_effect="not_applied",
+            )
+        if has_value:
+            if isinstance(raw, dict) and raw.get("phase") in ("inspect", "apply"):
+                raise BrowserError("INVALID_CONTEXT", "普通 value 填表不能携带宿主凭据填表阶段。", side_effect="not_applied")
+            return raw
+        if has_ref and not has_field:
+            raise BrowserError(
+                "INVALID_ARGUMENTS",
+                "缺少参数 field：使用 credential_ref 填表时必须同时提供 field（常规账号密码卡为 'username' 或 'secret'）。",
+                missing="field",
+                side_effect="not_applied",
+            )
+        if has_field and not has_ref:
+            raise BrowserError(
+                "INVALID_ARGUMENTS",
+                "缺少参数 credential_ref：传入 field 时必须同时提供有效的 credential_ref（cred_<32位十六进制>），普通文本请改用 value。",
+                missing="credential_ref",
+                side_effect="not_applied",
+            )
+        if not has_ref and not has_field:
+            raise BrowserError(
+                "INVALID_ARGUMENTS",
+                "缺少填写内容参数：请提供 value（普通文本，允许空串），或同时提供 credential_ref 与 field。",
+                missing="value_or_credential_ref",
+                side_effect="not_applied",
+            )
+        if not _CREDENTIAL_REF_RE.fullmatch(arguments["credential_ref"]):
+            raise BrowserError(
+                "INVALID_ARGUMENTS",
+                "参数 credential_ref 格式无效，应为 cred_<32位小写十六进制>。",
+                field="credential_ref",
+                side_effect="not_applied",
+            )
+        if not isinstance(raw, dict) or raw.get("phase") not in ("inspect", "apply"):
+            raise BrowserError(
+                "MISSING_CONTEXT",
+                "凭据填表只能由宿主经受控两阶段 _meta.credential_fill 调用。",
+                side_effect="not_applied",
+            )
+        return raw
 
     # LLM: 只有声明了 observation_ref 的工具、且模型填了该参数时才要求 _meta 带宿主观察上下文；候选事实只从 _meta 取，
     #   arguments 里的 candidate_id 本身不解析（宿主已复核并换成了 key 与代次）。没填参数返回 None，沿 selector 路径。

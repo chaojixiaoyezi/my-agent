@@ -28,6 +28,7 @@ from .models import (
     ResourceScopePolicy,
     TimeoutPolicy,
     ToolHandlerOutcome,
+    ToolInvocationContext,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
@@ -159,6 +160,12 @@ class WebFetchTool(BaseTool):
             self._allowed_private_hosts = items
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        return self._execute_with_context(params, None)
+
+    def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
+        return self._execute_with_context(params, getattr(context, "credential_use", None))
+
+    def _execute_with_context(self, params: dict[str, Any], credential_use: object | None) -> ToolHandlerOutcome:
         try:
             max_chars = self.response_preview_chars(params, self.max_chars)
             mode = str(params.get("mode", params.get("format", "auto")) or "auto").strip().lower()
@@ -168,10 +175,11 @@ class WebFetchTool(BaseTool):
                 return _execute_extract(self, params, max_chars)
             request = self._request_parts(params, mode, max_chars)
         except ValueError as exc:
-            return ToolHandlerOutcome("web_fetch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("web_fetch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS",
+                effect_outcome="not_started")
         # 网络安全门已下沉到 _resolve_pin(逐跳:初始 URL + 每个重定向都校验+pin)。不再单独 pre-check——
         # 否则一次 execute 内 pre-check 与 resolve_pin 二次解析,对 DNS 翻转的判定会不一致。
-        return _execute_single_request(self, request, max_chars)
+        return _execute_single_request(self, request, max_chars, credential_use=credential_use)
 
     # LLM: 每跳重查端点；字面 IP 直接 canonical，不接受 resolver 对已审计地址的替换。
     # 函数用途: 解析 URL 并读取工具副本当前授权，逐跳检查后返回固定 IP 或结构化拒绝。
@@ -208,41 +216,73 @@ class WebFetchTool(BaseTool):
 
     # LLM: 凭据错误保留宿主code/stage，不混成发卡等待；净化覆盖成功/失败正文且在归档前，传输仍逐跳pin。
     # 函数用途: 发起一次HTTP请求，保留可行动的群凭据拒绝原因并移除秘密回显。
-    def _fetch_raw_request(self, request: _WebFetchRequest) -> RawResponseParts | ToolHandlerOutcome:
+    def _fetch_raw_request(
+        self,
+        request: _WebFetchRequest,
+        *,
+        credential_use: object | None = None,
+    ) -> RawResponseParts | ToolHandlerOutcome:
         raw = FetchRawRequest(tool="web_fetch", url=request.url, method=request.method,
             headers={"User-Agent": "MyAgent-WebFetch/1.0", **request.headers},
             data=None if request.body_text is None else request.body_text.encode("utf-8"), timeout=self.timeout)
         resolved_by_host: dict[str, tuple[str, ...]] = {}
+        sent_requests = 0
+
         # LLM: send 固定原逐跳 pin，不接受任意脚本、库或模型提供的请求回调。
         # 函数用途: 为宿主登录和业务请求复用本工具的实际网络许可。
         def send(raw_request):
+            nonlocal sent_requests
+            sent_requests += 1
             return self._raw_response(
                 raw_request,
                 format_http_error=self.format_http_error,
                 resolve_pin=lambda hop_url: self._resolve_pin(hop_url, resolved_by_host=resolved_by_host),
             )
+
         try:
             if request.credential_ref and getattr(self, "credential_authenticator", None):
                 response, secrets = self.credential_authenticator(request.credential_ref, raw, send)
                 request = replace(request, secrets_to_redact=secrets)
+                register_values = getattr(credential_use, "register_values", None)
+                if callable(register_values) and secrets:
+                    register_values(secrets)
             else:
                 response = send(raw)
         except CredentialInputError as exc:
-            return ToolHandlerOutcome('web_fetch', False, str(exc), error_code=exc.code,
-                effect_outcome=exc.effect_outcome, result_envelope={'credential_error': {'stage': exc.stage, 'error_code': exc.code}})
-        except (ValueError, KeyError, TypeError):
-            return ToolHandlerOutcome("web_fetch", False, "私人认证未完成、已失效或方案无效。", error_code="CREDENTIAL_INPUT_UNAVAILABLE")
+            return ToolHandlerOutcome(
+                'web_fetch',
+                False,
+                str(exc),
+                error_code=exc.code,
+                effect_outcome=exc.effect_outcome,
+                result_envelope={'credential_error': {'stage': exc.stage, 'error_code': exc.code}},
+            )
+        except (PermissionError, ValueError) as exc:
+            return _credential_value_error_outcome(exc, sent_requests=sent_requests)
+        except (KeyError, TypeError):
+            effect = "not_started" if sent_requests == 0 else "failed"
+            return ToolHandlerOutcome(
+                "web_fetch",
+                False,
+                "私人认证记录字段缺失或类型不匹配，无法完成 HTTP 注入；请用 request_credentials(operation=\"status\") 核对原引用。",
+                error_code="CREDENTIAL_INPUT_UNAVAILABLE",
+                effect_outcome=effect,
+            )
         if isinstance(response, ToolHandlerOutcome) and request.secrets_to_redact:
-            response = replace(response,
+            response = replace(
+                response,
                 output=_redact_secret_echo(response.output, request.secrets_to_redact),
-                result_envelope=_redact_secret_echo(response.result_envelope, request.secrets_to_redact))
+                result_envelope=_redact_secret_echo(response.result_envelope, request.secrets_to_redact),
+                next_action=_redact_secret_echo(response.next_action, request.secrets_to_redact),
+            )
         elif isinstance(response, RawResponseParts) and request.secrets_to_redact:
+            variants = _secret_echo_variants(request.secrets_to_redact)
             body = response.body
-            for secret in _secret_echo_variants(request.secrets_to_redact):
+            for secret in variants:
                 body = body.replace(secret.encode("utf-8"), b"[private]")
             headers = {str(k): str(v) for k, v in response.headers.items()}
             for key, value in headers.items():
-                for secret in _secret_echo_variants(request.secrets_to_redact):
+                for secret in variants:
                     value = value.replace(secret, "[private]")
                 headers[key] = value
             response = replace(response, body=body, headers=headers)
@@ -342,31 +382,84 @@ class _WebFetchRequest:
     credential_ref: str = ""
 
 
-# LLM: 只净化本调用已知凭据的原文、JSON、URL/表单及常见 Base64 回显；须在格式化、归档和模型前调用，不能猜任意外部字符串是密钥。
+def _credential_value_error_outcome(exc: Exception, *, sent_requests: int) -> ToolHandlerOutcome:
+    """将宿主凭据预检或登录阶段的异常按结构化异常类型转为带副作用事实与下一步建议的回执，不匹配自然语言正文。"""
+    effect = "not_started" if sent_requests == 0 else "failed"
+    explicit_code = str(getattr(exc, "error_code", "") or "")
+    if explicit_code in {"CREDENTIAL_INPUT_UNAVAILABLE", "CREDENTIAL_NOT_AUTHORIZED", "CREDENTIAL_BINDING_INVALID"}:
+        code = explicit_code
+    elif isinstance(exc, PermissionError):
+        code = "CREDENTIAL_NOT_AUTHORIZED"
+    else:
+        code = "CREDENTIAL_INPUT_UNAVAILABLE"
+    if code == "CREDENTIAL_NOT_AUTHORIZED":
+        hint = "当前会话、发起人或目标站点与凭据授权范围不符；请核对目标 URL origin 或在原授权会话调用，不要猜其它引用。"
+    else:
+        hint = "请用 request_credentials(operation=\"status\") 检查原引用状态与认证参数（是否过期、已撤销或配置冲突），不要盲目原样重试。"
+    message = str(exc)
+    detail = message if message else "私人认证未完成、已失效或方案无效。"
+    return ToolHandlerOutcome(
+        "web_fetch",
+        False,
+        detail,
+        error_code=code,
+        effect_outcome=effect,
+        result_envelope={
+            "credential_error": {
+                "stage": "http_preflight" if sent_requests == 0 else "http_login",
+                "error_code": code,
+                "side_effect_state": effect,
+            }
+        },
+        next_action=f"{detail}（effect_outcome={effect}）{hint}",
+    )
+
+
+# LLM: 优先委派 C5 共享变体函数，合入前保留同构本地回退；只净化已知凭据的原文、JSON、URL/表单及常见 Base64 回显。
 # 函数用途: 生成本次秘密的有限编码变体，先替换长串；不改变实际请求或增加跨 owner 的秘密表。
 def _secret_echo_variants(secrets):
-    values=set()
+    from . import host_output_redaction
+
+    shared = getattr(host_output_redaction, "credential_echo_variants", None)
+    if callable(shared):
+        return list(shared(secrets))
+    values = set()
     for value in secrets:
         if not value:
             continue
-        values.update((value,json.dumps(value,ensure_ascii=True)[1:-1],
-            json.dumps(value,ensure_ascii=False)[1:-1],quote(value,safe=''),quote_plus(value,safe='')))
+        values.update((
+            value,
+            json.dumps(value, ensure_ascii=True)[1:-1],
+            json.dumps(value, ensure_ascii=False)[1:-1],
+            quote(value, safe=""),
+            quote_plus(value, safe=""),
+        ))
         for encoder in (base64.b64encode, base64.urlsafe_b64encode):
-            encoded = encoder(value.encode('utf-8')).decode('ascii')
-            values.update((encoded, encoded.rstrip('=')))
-    return sorted(values,key=len,reverse=True)
+            encoded = encoder(value.encode("utf-8")).decode("ascii")
+            values.update((encoded, encoded.rstrip("=")))
+    return sorted(values, key=len, reverse=True)
 
 
-# LLM: 保持错误信封结构，只替换字符串值；不把外部响应当控制字段，也不泄露 HTTP 失败的认证回显。
+# LLM: 保持错误信封结构，只替换字符串值（保留旧 HTTP 对外标记 [private] 兼容）；不把外部响应当控制字段，也不泄露认证回显。
 # 函数用途: 清理单条错误文字及嵌套错误证据里的本次秘密，不写文件或发送请求。
 def _redact_secret_echo(value, secrets):
+    variants = tuple(_secret_echo_variants(secrets))
+    if not variants:
+        return value
+    return _replace_variants(value, variants, "[private]")
+
+
+def _replace_variants(value, variants: tuple[str, ...], marker: str):
     if isinstance(value, str):
-        for secret in _secret_echo_variants(secrets):
-            value = value.replace(secret, "[private]")
-    elif isinstance(value, dict):
-        return {key: _redact_secret_echo(item, secrets) for key, item in value.items()}
-    elif isinstance(value, list):
-        return [_redact_secret_echo(item, secrets) for item in value]
+        for secret in variants:
+            value = value.replace(secret, marker)
+        return value
+    if isinstance(value, dict):
+        return {_replace_variants(key, variants, marker): _replace_variants(item, variants, marker) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_variants(item, variants, marker) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_replace_variants(item, variants, marker) for item in value)
     return value
 
 
@@ -376,6 +469,8 @@ def _execute_single_request(
     tool: WebFetchTool,
     request: _WebFetchRequest,
     max_chars: int,
+    *,
+    credential_use: object | None = None,
 ) -> ToolHandlerOutcome:
     cache_key = request.method == "GET" and not request.headers and request.body_text is None and not request.credential_ref
     cached = _cache_get(tool, request.url, request.fmt) if cache_key and not request.refresh else None
@@ -385,7 +480,7 @@ def _execute_single_request(
             pin = tool._resolve_pin(url)
             if pin.error is not None:
                 return pin.error
-    response = cached or tool._fetch_raw_request(request)
+    response = cached or tool._fetch_raw_request(request, credential_use=credential_use)
     if isinstance(response, ToolHandlerOutcome):
         return response
     if cache_key and not cache_hit:

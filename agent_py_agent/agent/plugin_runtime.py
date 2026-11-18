@@ -3,15 +3,22 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
 import math
 import os
+import re
 import threading
 import time
+import zipfile
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 from .attempt.sandbox import SandboxUnavailableError
 from .capability._agents_contract_fields import AgentsContractError
@@ -29,8 +36,10 @@ from .plugin_activation_record import installation_tool_declarations, pinned_cat
 from .plugin_activation_ref import PluginActivationRef
 from .plugin_entry import FILES_DIRECTORY
 from .plugin_host_api import HOST_API_READ, issue_host_api_env
+from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallation
 from .plugin_manifest import PluginToolDeclaration, canonical_plugin_settings
+from .plugin_permissions.records import validate_activation_permission
 from .plugin_permissions.sandbox import LegacyLaunchDenied, legacy_launch_policy
 from .plugin_runtime_facts import verified_runtime_command
 from .plugin_sandbox import (
@@ -64,11 +73,16 @@ from .tooling.models import (
 )
 from .tooling.observation_binding import ObservationBinding
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
+from .user_space.task_credential_storage import CredentialInputError
 from .workspace_read_context import WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION
 from .workspace_write_context import WORKSPACE_WRITE_EXTENSION, WORKSPACE_WRITE_VERSION
 
 # 能力包握手等待上限（秒）；仍在来源边界内，D9 后续再缩小锁的持有范围。
 PACK_MCP_CONNECT_TIMEOUT_SECONDS: float = float("10.0")
+CREDENTIAL_FILL_EXTENSION = "credential_fill"
+CREDENTIAL_FILL_VERSION = "1"
+_CREDENTIAL_REF_RE = re.compile(r"cred_[0-9a-f]{32}\Z")
+_MAX_CREDENTIAL_SESSION_BINDINGS = 64
 
 
 # LLM: 仅解析能力包连接阶段的宿主预算；无效、非有限或非正值保留旧值，不扩展外层 deadline。
@@ -124,12 +138,110 @@ class PluginProxyTool(MCPProxyTool):
             return ToolAvailability.unavailable("原插件已停用或激活不可用", error_code="PLUGIN_ACTIVATION_UNAVAILABLE")
         return super().precheck_availability()
 
+    # 函数用途: 校验 browser-lite.fill 的 value 与 credential_ref+field 严格二选一及选择器/候选存在性。
+    def validate_invocation(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext,
+    ) -> ToolHandlerOutcome | None:
+        _ = context
+        if not self._is_browser_lite_fill():
+            return None
+        return self._validate_browser_fill_params(params or {})
+
+    def _is_browser_lite_fill(self) -> bool:
+        manifest = getattr(getattr(self.client, "installation", None), "manifest", None)
+        return getattr(manifest, "plugin_id", "") == "browser-lite" and self.remote_tool == "fill"
+
+    def _validate_browser_fill_params(self, params: Mapping[str, Any]) -> ToolHandlerOutcome | None:
+        has_value = "value" in params
+        has_ref = "credential_ref" in params
+        has_field = "field" in params
+        if has_value and (has_ref or has_field):
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                '{"error": "参数互斥冲突：value 与 credential_ref/field 严格二选一，不能同时传入。"}',
+                error_code="TOOL_INVALID_ARGUMENTS",
+                effect_outcome="not_started",
+                next_action="普通字面值请只传 value；凭据卡填表请只传 credential_ref 与 field（如 field='secret'），不要混用。",
+            )
+        if not has_value:
+            if has_ref and not has_field:
+                return ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    '{"error": "缺少参数 field：使用 credential_ref 填表时必须同时提供 field（常规账号密码卡为 username 或 secret）。"}',
+                    error_code="TOOL_INVALID_ARGUMENTS",
+                    effect_outcome="not_started",
+                    next_action="请补充 field 参数（内置账号密码卡的密码键为 'secret'，账号键为 'username'）。",
+                )
+            if has_field and not has_ref:
+                return ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    '{"error": "缺少参数 credential_ref：传入 field 时必须同时提供有效的 credential_ref（cred_<32位十六进制>）。"}',
+                    error_code="TOOL_INVALID_ARGUMENTS",
+                    effect_outcome="not_started",
+                    next_action="凭据填表须同时传入 credential_ref 与 field；若是普通非秘密文本，请改用 value 参数。",
+                )
+            if not has_ref and not has_field:
+                return ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    '{"error": "缺少填写内容参数：请提供 value（允许空串），或同时提供 credential_ref 与 field。"}',
+                    error_code="TOOL_INVALID_ARGUMENTS",
+                    effect_outcome="not_started",
+                    next_action="请传入 value（普通文本）或 credential_ref + field（宿主凭据卡字段）。",
+                )
+            ref_text = params.get("credential_ref")
+            field_text = params.get("field")
+            if not isinstance(ref_text, str) or not _CREDENTIAL_REF_RE.fullmatch(ref_text):
+                return ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    '{"error": "参数 credential_ref 格式无效，应为 cred_<32位小写十六进制>。"}',
+                    error_code="TOOL_INVALID_ARGUMENTS",
+                    effect_outcome="not_started",
+                    next_action="请使用 request_credentials 返回或发现的真实 credential_ref，不要传入明文或占位符。",
+                )
+            if not isinstance(field_text, str) or not field_text.strip() or field_text != field_text.strip():
+                return ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    '{"error": "参数 field 无效，必须是非空凭据字段键名（如 username 或 secret）。"}',
+                    error_code="TOOL_INVALID_ARGUMENTS",
+                    effect_outcome="not_started",
+                    next_action="请填写凭据卡声明的精确字段名（内置账号密码卡密码键为 'secret'）。",
+                )
+        elif not isinstance(params.get("value"), str):
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                '{"error": "参数 value 必须是字符串（允许空串）。"}',
+                error_code="TOOL_INVALID_ARGUMENTS",
+                effect_outcome="not_started",
+                next_action="请将 value 修正为字符串。",
+            )
+        selector = params.get("selector")
+        candidate_id = params.get("candidate_id")
+        if not (isinstance(selector, str) and selector) and not (isinstance(candidate_id, str) and candidate_id.strip()):
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                '{"error": "缺少定位参数：请提供 selector，或提供上一次 read 返回的 candidate_id。"}',
+                error_code="TOOL_INVALID_ARGUMENTS",
+                effect_outcome="not_started",
+                next_action="请提供唯一匹配表单控件的 CSS selector 或有效的 candidate_id。",
+            )
+        return None
+
     # LLM: 免审批调用不经过执行器复核，而 MCPProxyTool 先看连接再做发送准入：停用把连接关掉后，旧快照调用会先撞上
     #   MCP_CONNECTION_CLOSED（映射为可重试的 TOOL_EXECUTION_FAILED），结果码随清理快慢摆动。这里在发送前先鲜活复核原激活，
     #   撤销一律报 TOOL_UNAVAILABLE、effect_outcome=not_started，与审批前/批准后复核同一事实源；
     #   这是生命周期第 6 条"旧快照在执行门检查撤销"的落点。不启动进程、不追随新代次。观察三件套在
     #   tooling/observation_binding.ObservationBinding（与 MCPProxyTool 共用），这里只按声明构造绑定。
-    # 函数用途: 停用后的插件调用固定报不可用且未执行；有观察声明的工具走共用的观察执行链，否则原样发送。
+    # 函数用途: 停用后的插件调用固定报不可用且未执行；有观察声明的工具走共用的观察执行链，并接入 C7 两阶段凭据填表。
     def _execute(self, params: dict[str, object], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
         if self._activation_revoked():
             return ToolHandlerOutcome(
@@ -138,8 +250,436 @@ class PluginProxyTool(MCPProxyTool):
                 effect_outcome="not_started",
             )
         if self.observation_binding is None:
-            return self._execute_with_meta(params, context, None)
-        return self.observation_binding.execute(params, context, self._execute_with_meta)
+            return self._send_plugin_call(params, context, None)
+        return self.observation_binding.execute(params, context, self._send_plugin_call)
+
+    def _send_plugin_call(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext | None,
+        extra_meta: dict[str, object] | None,
+    ) -> ToolHandlerOutcome:
+        call_params = params or {}
+        if "credential_ref" in call_params or "field" in call_params:
+            if not self._is_browser_lite_fill():
+                return ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    '{"error": "仅宿主核准的内置 browser-lite fill 工具支持凭据引用填表，第三方或其它插件无权使用凭据。"}',
+                    error_code="CREDENTIAL_NOT_AUTHORIZED",
+                    effect_outcome="not_started",
+                    next_action="请改用已核准的内置 browser-lite fill、web_fetch(credential_ref=...) 或同步 run_command(credential_ref=...)。",
+                )
+            return self._execute_credential_fill(call_params, context, extra_meta)
+        if self._is_browser_lite_fill():
+            invalid = self._validate_browser_fill_params(call_params)
+            if invalid is not None:
+                return invalid
+        if not self._negotiated(CREDENTIAL_FILL_EXTENSION, CREDENTIAL_FILL_VERSION):
+            return self._execute_with_meta(call_params, context, extra_meta)
+        session_meta, early_error, variants = self._prepare_browser_session_meta(context)
+        if early_error is not None:
+            return early_error
+        merged_meta = extra_meta
+        if session_meta is not None:
+            merged_meta = {**(extra_meta or {}), CREDENTIAL_FILL_EXTENSION: session_meta}
+        outcome = self._execute_with_meta(call_params, context, merged_meta)
+        scrubbed = _scrub_plugin_outcome(outcome, context=context, extra_variants=variants)
+        if not scrubbed.ok:
+            return _normalize_browser_session_remote_error(scrubbed)
+        return scrubbed
+
+    def _revoke_remote_browser_session(
+        self,
+        scope_payload: dict[str, object],
+        scope_key: tuple[str, str, str],
+    ) -> None:
+        _forget_credential_session(self.client, scope_key)
+        revoked_meta = {
+            "version": CREDENTIAL_FILL_VERSION,
+            "phase": "session",
+            "session_scope": scope_payload,
+            "session_revoked": True,
+        }
+        try:
+            self.client.call_tool(self.remote_tool, {}, request_meta={CREDENTIAL_FILL_EXTENSION: revoked_meta})
+        except MCPError:
+            pass
+
+    def _prepare_browser_session_meta(
+        self,
+        context: ToolInvocationContext | None,
+    ) -> tuple[dict[str, object] | None, ToolHandlerOutcome | None, tuple[str, ...]]:
+        credential_use = getattr(context, "credential_use", None)
+        if credential_use is None:
+            if _has_credential_sessions(self.client):
+                return None, ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    '{"error": "当前浏览器存在已绑定凭据的受保护会话，拒绝缺少宿主会话凭据上下文的访问。"}',
+                    error_code="CREDENTIAL_NOT_AUTHORIZED",
+                    effect_outcome="not_started",
+                    next_action="请在原授权用户与原会话内经标准工具执行器访问该浏览器会话，或另启独立授权会话。",
+                ), ()
+            return None, None, ()
+        scope_payload, scope_key = _extract_session_scope(credential_use)
+        if scope_key == ("", "", ""):
+            if _has_credential_sessions(self.client):
+                return None, ToolHandlerOutcome(
+                    self.model_spec.name,
+                    False,
+                    '{"error": "当前浏览器含受保护凭据会话，拒绝缺少有效 owner/actor/thread 绑定的调用。"}',
+                    error_code="CREDENTIAL_NOT_AUTHORIZED",
+                    effect_outcome="not_started",
+                    next_action="请在原授权会话内执行操作，不能无绑定接管已登录页面。",
+                ), ()
+            return None, None, ()
+        if self.remote_tool == "close":
+            _forget_credential_session(self.client, scope_key)
+            return {"version": CREDENTIAL_FILL_VERSION, "phase": "session", "session_scope": scope_payload}, None, ()
+        bound = _get_credential_session(self.client, scope_key)
+        if bound is None:
+            if not scope_payload.get("active", False):
+                if _has_credential_sessions(self.client):
+                    return None, ToolHandlerOutcome(
+                        self.model_spec.name,
+                        False,
+                        '{"error": "当前运行作用域已失效，无法访问受保护浏览器环境。"}',
+                        error_code="CREDENTIAL_NOT_AUTHORIZED",
+                        effect_outcome="not_started",
+                        next_action="请回到当前活动会话重新执行。",
+                    ), ()
+                return None, None, ()
+            return {"version": CREDENTIAL_FILL_VERSION, "phase": "session", "session_scope": scope_payload}, None, ()
+        # 已绑定凭据的会话：每次后续 open/read/click/fill 前通过 C1 鲜活复核凭据未撤销、未过期、未换代且消费者仍匹配。
+        ref_str = str(bound["credential_ref"])
+        try:
+            current, actual_consumer = self._verify_browser_lite_consumer(ref_str, require_fill_tool=False)
+            if actual_consumer != bound["consumer"]:
+                raise CredentialInputError(
+                    "CREDENTIAL_NOT_AUTHORIZED",
+                    "browser-lite 安装或激活代次已变化，旧浏览器会话不再继承原凭据授权。",
+                    stage="browser_session_recheck",
+                    effect_outcome="not_started",
+                )
+            _ = current
+            with credential_use(
+                ref_str,
+                consumer="browser",
+                target_url=str(bound["origin"]),
+                expected_generation=int(bound["generation"]),
+                browser_consumer=actual_consumer,
+            ) as material:
+                variants = _credential_variants_from_values(material.values.values())
+                bound["variants"] = variants
+        except (CredentialInputError, PermissionError, ValueError, OSError) as exc:
+            self._revoke_remote_browser_session(scope_payload, scope_key)
+            code = exc.code if isinstance(exc, CredentialInputError) else "CREDENTIAL_INPUT_UNAVAILABLE"
+            return None, ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                json.dumps({"error": f"受保护浏览器会话绑定的凭据已失效或撤销，浏览器会话已关闭并清理：{exc}"}, ensure_ascii=False),
+                error_code=code,
+                effect_outcome="not_started",
+                next_action="已绑定凭据已失效或被撤销，受保护会话已回收；请用 request_credentials(operation='status') 核对或由本人更新凭据。",
+            ), ()
+        return {
+            "version": CREDENTIAL_FILL_VERSION,
+            "phase": "session",
+            "session_scope": scope_payload,
+            "credential_binding": {
+                "credential_ref": ref_str,
+                "generation": int(bound["generation"]),
+            },
+        }, None, tuple(bound.get("variants") or ())
+
+    def _execute_credential_fill(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext | None,
+        extra_meta: dict[str, object] | None,
+    ) -> ToolHandlerOutcome:
+        invalid = self._validate_browser_fill_params(params)
+        if invalid is not None:
+            return invalid
+        credential_ref = str(params["credential_ref"])
+        field_name = str(params["field"])
+        try:
+            current_installation, actual_consumer = self._verify_browser_lite_consumer(credential_ref)
+        except CredentialInputError as exc:
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                json.dumps({"error": str(exc)}, ensure_ascii=False),
+                error_code=exc.code,
+                effect_outcome="not_started",
+                result_envelope={"credential_error": {"stage": exc.stage, "error_code": exc.code}},
+                next_action=(
+                    f"当前浏览器插件未获准执行凭据填表（effect_outcome=not_started）。"
+                    f"可复用同一引用 {credential_ref} 改走同步脚本 run_command(credential_ref=\"{credential_ref}\") "
+                    f"或声明式 HTTP web_fetch(credential_ref=\"{credential_ref}\")。"
+                ),
+            )
+        credential_use = getattr(context, "credential_use", None)
+        if credential_use is None or not callable(credential_use):
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                '{"error": "当前调用缺少宿主凭据授权上下文（credential_use），未执行解密或填表。"}',
+                error_code="CREDENTIAL_NOT_AUTHORIZED",
+                effect_outcome="not_started",
+                next_action=f"请通过宿主受控工具执行器在原授权会话调用，或复用 {credential_ref} 走 web_fetch / run_command。",
+            )
+        scope_payload, scope_key = _extract_session_scope(credential_use)
+        if not scope_payload.get("active", False) or not all(scope_key):
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                '{"error": "当前会话或发起人身份无效（缺少有效 owner/actor/thread），无法绑定隔离凭据浏览器会话。"}',
+                error_code="CREDENTIAL_NOT_AUTHORIZED",
+                effect_outcome="not_started",
+                next_action="请回到原发起人的活动会话执行凭据填表。",
+            )
+        inspect_meta = {
+            **(extra_meta or {}),
+            CREDENTIAL_FILL_EXTENSION: {
+                "version": CREDENTIAL_FILL_VERSION,
+                "phase": "inspect",
+                "session_scope": scope_payload,
+            },
+        }
+        inspect_outcome = self._execute_with_meta(params, context, inspect_meta)
+        if not inspect_outcome.ok:
+            return _normalize_credential_fill_remote_error(inspect_outcome, phase="inspect")
+        inspected = _parse_remote_json_result(inspect_outcome.output)
+        origin = str((inspected or {}).get("origin") or "")
+        target_id = str((inspected or {}).get("target_id") or "")
+        document_id = str((inspected or {}).get("document_id") or "")
+        generation = str((inspected or {}).get("generation") or "")
+        if not origin or not target_id or not document_id or not generation:
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                '{"error": "浏览器文档检查未返回完整的 origin/target_id/document_id/generation，未读取凭据。"}',
+                error_code="TOOL_EXECUTION_FAILED",
+                effect_outcome="not_started",
+                next_action="请先用 open 打开目标 http(s) 登录页并确认加载完成后再执行 fill。",
+            )
+        try:
+            with credential_use(
+                credential_ref,
+                consumer="browser",
+                target_url=origin,
+                browser_consumer=actual_consumer,
+            ) as material:
+                card_consumer = getattr(material, "browser_consumer", None)
+                if card_consumer is not None and dict(card_consumer) != actual_consumer:
+                    raise CredentialInputError(
+                        "CREDENTIAL_NOT_AUTHORIZED",
+                        "原凭据卡绑定的浏览器插件安装或激活代次与当前实例不一致，拒绝跨代继承授权。",
+                        stage="browser_consumer_check",
+                        effect_outcome="not_started",
+                    )
+                if material.origin != origin:
+                    raise CredentialInputError(
+                        "CREDENTIAL_NOT_AUTHORIZED",
+                        "浏览器当前页面 origin 与凭据绑定站点不一致，未发送秘密。",
+                        stage="browser_origin_check",
+                        effect_outcome="not_started",
+                    )
+                if field_name not in material.values:
+                    available = list(material.values.keys())
+                    secret_hint = (
+                        "；内置账号密码卡的密码键名为 'secret'（而非 'password'），请改传 field='secret'"
+                        if field_name == "password" and "secret" in material.values
+                        else ""
+                    )
+                    return ToolHandlerOutcome(
+                        self.model_spec.name,
+                        False,
+                        json.dumps(
+                            {
+                                "error": f"凭据卡中不存在字段 '{field_name}'（可用字段键：{available}）{secret_hint}。",
+                                "missing_field": field_name,
+                                "available_fields": available,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        error_code="TOOL_INVALID_ARGUMENTS",
+                        effect_outcome="not_started",
+                        next_action=f"未执行填表（effect_outcome=not_started）。请将 field 改为 {available} 中的准确键名{secret_hint}。",
+                    )
+                field_value = str(material.values[field_name])
+                effective_ref = str(material.credential_ref)
+                effective_gen = int(material.generation)
+                variants = _credential_variants_from_values(material.values.values())
+                # 发送 apply 前最后复核固定插件激活、原连接与运行执行权，避免 inspect 期间停用或撤权。
+                if (self.client.activation_ref.require() != current_installation
+                        or not self.client.is_running()
+                        or self.client.connection() is not self.transport):
+                    raise CredentialInputError(
+                        "PLUGIN_ACTIVATION_UNAVAILABLE",
+                        "browser-lite 激活或固定连接在检查后已变化，本次未发送凭据字段。",
+                        stage="browser_pre_apply",
+                        effect_outcome="not_started",
+                    )
+                if context is not None and context.execution_authority_check is not None:
+                    context.execution_authority_check()
+                apply_meta = {
+                    **(extra_meta or {}),
+                    CREDENTIAL_FILL_EXTENSION: {
+                        "version": CREDENTIAL_FILL_VERSION,
+                        "phase": "apply",
+                        "origin": origin,
+                        "target_id": target_id,
+                        "document_id": document_id,
+                        "generation": generation,
+                        "field_value": field_value,
+                        "session_scope": scope_payload,
+                        "credential_binding": {
+                            "credential_ref": effective_ref,
+                            "generation": effective_gen,
+                        },
+                    },
+                }
+                apply_outcome = self._execute_with_meta(params, context, apply_meta)
+        except CredentialInputError as exc:
+            bound = _get_credential_session(self.client, scope_key)
+            if bound is not None and bound.get("credential_ref") == credential_ref:
+                self._revoke_remote_browser_session(scope_payload, scope_key)
+            code = "TOOL_UNAVAILABLE" if exc.code == "PLUGIN_ACTIVATION_UNAVAILABLE" else exc.code
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                json.dumps({"error": str(exc)}, ensure_ascii=False),
+                error_code=code,
+                reported_error_code=exc.code,
+                effect_outcome=exc.effect_outcome,
+                result_envelope={"credential_error": {"stage": exc.stage, "error_code": exc.code}},
+                next_action=f"{exc}（effect_outcome={exc.effect_outcome}）请核对站点、原授权会话或凭据状态，不要盲目重试。",
+            )
+        except (PermissionError, ValueError, OSError) as exc:
+            bound = _get_credential_session(self.client, scope_key)
+            if bound is not None and bound.get("credential_ref") == credential_ref:
+                self._revoke_remote_browser_session(scope_payload, scope_key)
+            message = str(exc) or "凭据授权校验未通过"
+            explicit_code = str(getattr(exc, "error_code", "") or "")
+            if explicit_code in {"CREDENTIAL_INPUT_UNAVAILABLE", "CREDENTIAL_NOT_AUTHORIZED", "CREDENTIAL_BINDING_INVALID"}:
+                code = explicit_code
+            else:
+                code = "CREDENTIAL_NOT_AUTHORIZED" if isinstance(exc, PermissionError) else "CREDENTIAL_INPUT_UNAVAILABLE"
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                json.dumps({"error": message}, ensure_ascii=False),
+                error_code=code,
+                effect_outcome="not_started",
+                next_action=f"{message}（effect_outcome=not_started）请在原授权会话对匹配的同源页面使用该凭据，不要重复发卡。",
+            )
+        scrubbed = _scrub_plugin_outcome(apply_outcome, context=context, extra_variants=variants)
+        if not scrubbed.ok:
+            return _normalize_credential_fill_remote_error(scrubbed, phase="apply")
+        _remember_credential_session(
+            self.client,
+            scope_key,
+            credential_ref=effective_ref,
+            generation=effective_gen,
+            origin=origin,
+            consumer=actual_consumer,
+            variants=variants,
+        )
+        return scrubbed
+
+    def _verify_browser_lite_consumer(
+        self,
+        credential_ref: str,
+        *,
+        require_fill_tool: bool = True,
+    ) -> tuple[PluginInstallation, dict[str, str]]:
+        if (not isinstance(self.client, PluginMCPClient)
+                or self.transport is None
+                or (require_fill_tool and self.remote_tool != "fill")
+                or self.remote_tool not in {"open", "read", "click", "fill", "close"}):
+            raise CredentialInputError(
+                "CREDENTIAL_NOT_AUTHORIZED",
+                "当前工具不是宿主托管的固定激活 browser-lite 连接，已拒绝移交凭据。",
+                stage="browser_consumer_verify",
+                effect_outcome="not_started",
+            )
+        if not self._negotiated(CREDENTIAL_FILL_EXTENSION, CREDENTIAL_FILL_VERSION):
+            raise CredentialInputError(
+                "TOOL_UNAVAILABLE",
+                f"当前 browser-lite 版本未声明 credential_fill v1 扩展，无法安全填表；请改用 run_command(credential_ref=\"{credential_ref}\") 或 web_fetch(credential_ref=\"{credential_ref}\")。",
+                stage="browser_consumer_verify",
+                effect_outcome="not_started",
+            )
+        try:
+            current = self.client.activation_ref.require()
+            owner = self.client.activation_ref.owner()
+        except (OSError, ValueError, PermissionError) as exc:
+            raise CredentialInputError(
+                "PLUGIN_ACTIVATION_UNAVAILABLE",
+                "browser-lite 插件未启用或固定激活已失效，本次未读取凭据。",
+                stage="browser_consumer_verify",
+                effect_outcome="not_started",
+            ) from exc
+        if (current != self.client.installation
+                or not current.enabled
+                or current.activation is None
+                or not self.client.is_running()):
+            raise CredentialInputError(
+                "PLUGIN_ACTIVATION_UNAVAILABLE",
+                "browser-lite 激活状态已变化或服务未运行，本次未读取凭据。",
+                stage="browser_consumer_verify",
+                effect_outcome="not_started",
+            )
+        try:
+            if self.client.connection() is not self.transport:
+                raise ValueError("transport changed")
+        except (MCPError, ValueError) as exc:
+            raise CredentialInputError(
+                "PLUGIN_ACTIVATION_UNAVAILABLE",
+                "browser-lite 固定连接已失效，不向重连实例转交凭据。",
+                stage="browser_consumer_verify",
+                effect_outcome="not_started",
+            ) from exc
+        manifest = current.manifest
+        server_info = getattr(self.transport, "server_info", None) or {}
+        if (manifest.plugin_id != "browser-lite"
+                or manifest.entry_module != "browser_lite"
+                or manifest.entry is not None
+                or not manifest.entry_wheel.startswith("wheels/my_agent_browser_lite-")
+                or server_info.get("name") != "browser-lite"):
+            raise CredentialInputError(
+                "CREDENTIAL_NOT_AUTHORIZED",
+                "仅宿主核准的内置 browser-lite 包可执行凭据填表，同名或第三方插件无此权限。",
+                stage="browser_consumer_verify",
+                effect_outcome="not_started",
+            )
+        try:
+            validate_activation_permission(current.activation)
+            legacy_launch_policy(owner, current)
+            archive_bytes = PluginInstallStore(owner).package_bytes(current)
+        except (OSError, ValueError) as exc:
+            raise CredentialInputError(
+                "CREDENTIAL_NOT_AUTHORIZED",
+                "browser-lite 安装包摘要或持久授权校验未通过，未读取凭据。",
+                stage="browser_consumer_verify",
+                effect_outcome="not_started",
+            ) from exc
+        if not _verify_builtin_browser_lite_wheel(archive_bytes, manifest.entry_wheel):
+            raise CredentialInputError(
+                "CREDENTIAL_NOT_AUTHORIZED",
+                "当前 browser-lite wheel 内容与宿主内置包来源不一致，拒绝向非内置实现移交凭据。",
+                stage="browser_consumer_verify",
+                effect_outcome="not_started",
+            )
+        return current, {
+            "installation_ref": current.installation_ref,
+            "package_sha256": current.package_sha256,
+            "activation_id": current.activation_id,
+            "tool": "fill",
+        }
 
     # LLM: MCPProxyTool 的构造钩子：公开属性 observation_binding 在构造时按安装描述设好（与普通 MCP 代理同名同义，决策点的自动执行
     #   规划只读这个属性）。身份全部取宿主：provider_id 是 plugin:<id>，activation 来自固定 client 的激活代次，复核库是
@@ -329,6 +869,8 @@ class PluginMCPClient(MCPStdioClient):
         self.runtime_repo = runtime_repo
         self.lazy = bool(getattr(installation.manifest, "has_mcp_runtime", False))
         self._lazy_lock = threading.Lock()
+        self._credential_session_lock = threading.Lock()
+        self._credential_session_bindings: OrderedDict[tuple[str, str, str], dict[str, object]] = OrderedDict()
         self.attempts, self.retry_at = 0, 0.0
         self.drift = False
         self._in_flight = 0
@@ -655,3 +1197,243 @@ class PluginMCPClient(MCPStdioClient):
         receipt = self.disconnect(transport=transport)
         if not receipt.confirmed:
             raise AgentsContractError("AGENTS_SOURCE_RESOURCE_UNCONFIRMED", "plugin_resource")
+
+
+def _verify_builtin_browser_lite_wheel(archive_bytes: bytes, entry_wheel: str) -> bool:
+    """核对已安装压缩包内的 browser_lite wheel 成员与宿主内置源码一致，拦截同名第三方伪装包。"""
+    builtin_dir = Path(__file__).resolve().parents[2] / "plugins" / "browser-lite" / "src" / "browser_lite"
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as outer:
+            wheel_bytes = outer.read(entry_wheel)
+        with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
+            members = {
+                name: wheel.read(name)
+                for name in wheel.namelist()
+                if name.startswith("browser_lite/") and not name.endswith("/")
+            }
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        return False
+    if not members:
+        return False
+    if not builtin_dir.is_dir():
+        return "browser_lite/server.py" in members and "browser_lite/declaration.json" in members
+    expected = {
+        "browser_lite/" + path.name: path.read_bytes()
+        for path in builtin_dir.iterdir()
+        if path.is_file() and path.suffix in {".py", ".json"}
+    }
+    return bool(expected) and members == expected
+
+
+def _extract_session_scope(credential_use: object) -> tuple[dict[str, object], tuple[str, str, str]]:
+    """从宿主 credential_use 读取已核验的 (owner_id, actor_id, thread_id) 会话隔离身份。"""
+    reader = getattr(credential_use, "session_scope", None)
+    raw = reader() if callable(reader) else {}
+    if not isinstance(raw, Mapping):
+        return {"active": False}, ("", "", "")
+    owner_id = str(raw.get("owner_id") or "").strip()
+    actor_id = str(raw.get("actor_id") or "").strip()
+    thread_id = str(raw.get("thread_id") or "").strip()
+    active = raw.get("active") is True
+    payload = {
+        "active": active,
+        "owner_id": owner_id,
+        "actor_id": actor_id,
+        "thread_id": thread_id,
+    }
+    if not owner_id or not (actor_id or thread_id):
+        return payload, ("", "", "")
+    return payload, (owner_id, actor_id, thread_id)
+
+
+def _parse_remote_json_result(output: str) -> dict[str, Any] | None:
+    try:
+        outer = json.loads(output)
+        inner = outer.get("result") if isinstance(outer, dict) else None
+        parsed = json.loads(inner) if isinstance(inner, str) else inner
+        return parsed if isinstance(parsed, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_browser_session_remote_error(outcome: ToolHandlerOutcome) -> ToolHandlerOutcome:
+    """将浏览器受保护会话跨 actor/无绑定隔离拒绝统一映射为 CREDENTIAL_NOT_AUTHORIZED 且 not_started。"""
+    parsed = _parse_remote_json_result(outcome.output)
+    remote_code = str((parsed or {}).get("code") or "")
+    remote_message = str((parsed or {}).get("message") or "")
+    if remote_code != "CREDENTIAL_SESSION_ISOLATED":
+        return outcome
+    envelope = dict(outcome.result_envelope)
+    envelope["credential_error"] = {
+        "stage": "browser_session_isolation",
+        "error_code": "CREDENTIAL_NOT_AUTHORIZED",
+        "reported_cause": remote_code,
+        "side_effect_state": "not_started",
+    }
+    return replace(
+        outcome,
+        error_code="CREDENTIAL_NOT_AUTHORIZED",
+        reported_error_code=remote_code,
+        effect_outcome="not_started",
+        result_envelope=envelope,
+        next_action=(
+            f"{remote_message or '当前浏览器会话与原授权用户及原会话隔离'}（effect_outcome=not_started）；"
+            "请回到原发起人会话，或在本人获授权会话中先调用 open 另启独立浏览器会话。"
+        ),
+    )
+
+
+def _normalize_credential_fill_remote_error(outcome: ToolHandlerOutcome, *, phase: str) -> ToolHandlerOutcome:
+    """将两阶段填表中未产生表单写入的远端拒绝精确标为 effect_outcome=not_started，并给出具体下一步。"""
+    parsed = _parse_remote_json_result(outcome.output)
+    remote_code = str((parsed or {}).get("code") or "")
+    remote_message = str((parsed or {}).get("message") or "")
+    not_applied = phase == "inspect" or (parsed or {}).get("side_effect") == "not_applied"
+    if remote_code in {"OBSERVATION_STALE", "OBSERVATION_NOT_FOUND"}:
+        return outcome
+    if not not_applied:
+        return outcome
+    error_code = outcome.error_code
+    if remote_code in {"INVALID_ARGUMENTS", "INVALID_SELECTOR", "SELECTOR_NOT_FOUND", "SELECTOR_AMBIGUOUS", "NOT_FILLABLE", "OPTION_NOT_FOUND"}:
+        error_code = "TOOL_INVALID_ARGUMENTS"
+    elif remote_code == "CREDENTIAL_SESSION_ISOLATED":
+        error_code = "CREDENTIAL_NOT_AUTHORIZED"
+    elif remote_code in {"URL_NOT_ALLOWED", "ORIGIN_MISMATCH", "CROSS_ORIGIN_FORM_ACTION"}:
+        error_code = "TOOL_PERMISSION_DENIED"
+    elif remote_code in {"NO_PAGE", "DOCUMENT_UNVERIFIED", "DOCUMENT_CHANGED"}:
+        error_code = "TOOL_EXECUTION_FAILED"
+    envelope = dict(outcome.result_envelope)
+    envelope["error_details"] = {
+        "stage": f"credential_fill_{phase}",
+        "reported_cause": remote_code or outcome.reported_error_code or "MCP_REMOTE_ERROR",
+        "side_effect_state": "not_started",
+    }
+    hint = (
+        f"凭据填表在 {phase} 阶段未写入页面（{remote_code or 'MCP_REMOTE_ERROR'}，effect_outcome=not_started）："
+        f"{remote_message or '请先用 read/open 核对当前受控登录页面与控件选择器后再操作，不要盲目重试。'}"
+    )
+    return replace(
+        outcome,
+        error_code=error_code,
+        reported_error_code=remote_code or outcome.reported_error_code,
+        effect_outcome="not_started",
+        result_envelope=envelope,
+        next_action=hint,
+    )
+
+
+def _credential_variants_from_values(values: Iterable[str]) -> tuple[str, ...]:
+    """优先复用 C5 共享 credential_echo_variants，单测独立运行期保留同构本地变体计算。"""
+    from .tooling import host_output_redaction
+
+    shared = getattr(host_output_redaction, "credential_echo_variants", None)
+    if callable(shared):
+        return tuple(shared(values))
+    expanded: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str) or not raw:
+            continue
+        expanded.update((
+            raw,
+            json.dumps(raw, ensure_ascii=True)[1:-1],
+            json.dumps(raw, ensure_ascii=False)[1:-1],
+            quote(raw, safe=""),
+            quote_plus(raw, safe=""),
+        ))
+        for encoder in (base64.b64encode, base64.urlsafe_b64encode):
+            encoded = encoder(raw.encode("utf-8")).decode("ascii")
+            expanded.update((encoded, encoded.rstrip("=")))
+    return tuple(sorted((v for v in expanded if v), key=len, reverse=True))
+
+
+def _scrub_plugin_outcome(
+    outcome: ToolHandlerOutcome,
+    *,
+    context: ToolInvocationContext | None,
+    extra_variants: tuple[str, ...] = (),
+) -> ToolHandlerOutcome:
+    """在观察候选铸造与公开结果返回前净化所有已知凭据变体（替换为 [REDACTED]）。"""
+    credential_use = getattr(context, "credential_use", None)
+    turn_redaction = getattr(credential_use, "turn_redaction", None)
+    public_text = getattr(turn_redaction, "public_text", None)
+
+    def clean(item: Any) -> Any:
+        if isinstance(item, str):
+            text = public_text(item) if callable(public_text) else item
+            for variant in extra_variants:
+                if variant:
+                    text = text.replace(variant, "[REDACTED]")
+            return text
+        if isinstance(item, dict):
+            return {clean(k): clean(v) for k, v in item.items()}
+        if isinstance(item, list):
+            return [clean(v) for v in item]
+        if isinstance(item, tuple):
+            return tuple(clean(v) for v in item)
+        return item
+
+    if not callable(public_text) and not extra_variants:
+        return outcome
+    return replace(
+        outcome,
+        output=clean(outcome.output),
+        result_envelope=clean(outcome.result_envelope),
+        next_action=clean(outcome.next_action),
+    )
+
+
+def _remember_credential_session(
+    client: object,
+    scope_key: tuple[str, str, str],
+    *,
+    credential_ref: str,
+    generation: int,
+    origin: str,
+    consumer: dict[str, str],
+    variants: tuple[str, ...],
+) -> None:
+    lock = getattr(client, "_credential_session_lock", None)
+    bindings = getattr(client, "_credential_session_bindings", None)
+    if lock is None or not isinstance(bindings, OrderedDict):
+        return
+    with lock:
+        bindings[scope_key] = {
+            "credential_ref": credential_ref,
+            "generation": generation,
+            "origin": origin,
+            "consumer": dict(consumer),
+            "variants": tuple(variants),
+        }
+        bindings.move_to_end(scope_key)
+        while len(bindings) > _MAX_CREDENTIAL_SESSION_BINDINGS:
+            bindings.popitem(last=False)
+
+
+def _get_credential_session(client: object, scope_key: tuple[str, str, str]) -> dict[str, object] | None:
+    lock = getattr(client, "_credential_session_lock", None)
+    bindings = getattr(client, "_credential_session_bindings", None)
+    if lock is None or not isinstance(bindings, OrderedDict):
+        return None
+    with lock:
+        entry = bindings.get(scope_key)
+        if entry is not None:
+            bindings.move_to_end(scope_key)
+        return dict(entry) if isinstance(entry, dict) else None
+
+
+def _forget_credential_session(client: object, scope_key: tuple[str, str, str]) -> None:
+    lock = getattr(client, "_credential_session_lock", None)
+    bindings = getattr(client, "_credential_session_bindings", None)
+    if lock is None or not isinstance(bindings, OrderedDict):
+        return
+    with lock:
+        bindings.pop(scope_key, None)
+
+
+def _has_credential_sessions(client: object) -> bool:
+    lock = getattr(client, "_credential_session_lock", None)
+    bindings = getattr(client, "_credential_session_bindings", None)
+    if lock is None or not isinstance(bindings, OrderedDict):
+        return False
+    with lock:
+        return bool(bindings)
