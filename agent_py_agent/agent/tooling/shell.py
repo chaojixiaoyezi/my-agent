@@ -2853,10 +2853,19 @@ def _execute_credentialed_shell_command(
     sandbox_write_roots, sandbox_read_roots, sandbox_protected_paths = sandbox_roots
     fd_closed = False
     scratch_cleaned = False
+    entered_execution = False
+    inside_scratch_body = False
+    outcome: ToolHandlerOutcome | None = None
+    cred_file_ref: Any = None
+    scratch_state_ref: dict[str, bool] | None = None
+    post_exec_exc: BaseException | None = None
     try:
         with material_stack:
             with credential_scratch_dir() as (cred_scratch, scratch_state):
+                scratch_state_ref = scratch_state
+                inside_scratch_body = True
                 with credential_file_for_child(material, sandbox_backend=_platform.system()) as cred_file:
+                    cred_file_ref = cred_file
                     def _reverify_before_retry() -> None:
                         if callable(context.execution_authority_check):
                             context.execution_authority_check()
@@ -2893,6 +2902,7 @@ def _execute_credentialed_shell_command(
                             )
                         )
                     )
+                    entered_execution = True
                     outcome = _execute_with_artifact_protection(
                         _ShellArtifactExecutionRequest(
                             tool=cred_tool,
@@ -2916,25 +2926,69 @@ def _execute_credentialed_shell_command(
                             task_records=str(params.get("__sandbox_task_records") or ""),
                         )
                     )
-                fd_closed = cred_file.fd_closed
+                fd_closed = bool(cred_file.fd_closed)
+                inside_scratch_body = False
             scratch_cleaned = bool(scratch_state.get("scratch_cleaned", False))
     except BaseException as run_exc:
         if isinstance(run_exc, (KeyboardInterrupt, SystemExit)):
             raise
-        classified = classify_credential_exception(
-            run_exc,
-            tool_name=tool.model_spec.name,
-            credential_ref=cred_ref,
-            default_stage="runtime_gate",
-            effect_outcome="not_started",
-        )
-        return _shell_credential_prestart_error(
+        if not entered_execution and outcome is None:
+            classified = classify_credential_exception(
+                run_exc,
+                tool_name=tool.model_spec.name,
+                credential_ref=cred_ref,
+                default_stage="runtime_gate",
+                effect_outcome="not_started",
+            )
+            return _shell_credential_prestart_error(
+                tool.model_spec.name,
+                error_code=classified["error_code"],
+                failure_stage=classified["failure_stage"],
+                message=classified["message"],
+                next_action=classified["next_action"],
+                credential_ref=cred_ref,
+            )
+        post_exec_exc = run_exc
+        if not fd_closed and cred_file_ref is not None:
+            fd_closed = bool(cred_file_ref.fd_closed)
+        if inside_scratch_body and not scratch_cleaned and scratch_state_ref is not None:
+            scratch_cleaned = bool(scratch_state_ref.get("scratch_cleaned", False))
+        if outcome is not None:
+            logger.warning(
+                "credentialed shell post-execution cleanup failed (%s)",
+                type(run_exc).__name__,
+            )
+
+    if outcome is None:
+        reason_name = type(post_exec_exc).__name__ if post_exec_exc is not None else "missing_outcome"
+        err_payload: dict[str, object] = {
+            "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+            "failure_stage": "execution",
+            "effect_outcome": "unknown",
+            "message": (
+                f"携卡子进程已进入执行阶段，但宿主未取得确定结果（{reason_name}），"
+                "外部登录或业务请求是否已生效未知；请先核实远端状态，禁止盲目自动重放。"
+            ),
+            "next_action": (
+                "携卡子进程可能已发出请求，结果状态未知；请先通过只读查询核实远端业务状态，不要原样盲目重跑非幂等命令。"
+            ),
+        }
+        outcome = ToolHandlerOutcome(
             tool.model_spec.name,
-            error_code=classified["error_code"],
-            failure_stage=classified["failure_stage"],
-            message=classified["message"],
-            next_action=classified["next_action"],
-            credential_ref=cred_ref,
+            False,
+            json.dumps(err_payload, ensure_ascii=False),
+            result_envelope={
+                "credential_error": err_payload,
+                "process": {
+                    "status": "unknown",
+                    "reason": reason_name,
+                    "cleanup_confirmed": False,
+                },
+            },
+            error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+            effect_outcome="unknown",
+            failure_stage="execution",
+            next_action=str(err_payload["next_action"]),
         )
 
     active_redaction = getattr(cred_use, "redaction", None)

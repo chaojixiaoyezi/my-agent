@@ -10,7 +10,6 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -49,6 +48,7 @@ from agent_py_agent.agent.user_space.task_credentials import (
     request_credential_card,
 )
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+from agent_py_agent.tests.golden.replayer import _shell_python
 from agent_py_agent.tests.test_im_progress_draft import Adapter
 from agent_py_agent.tests.test_ingestion_task_credential_scope import _active, _agent
 
@@ -418,17 +418,54 @@ def test_sm4_gmt_0002_2012_vector_and_end_to_end_dual_loopback_sites_zero_leak(t
     sm4_client_script.write_text(
         "import base64, http.cookiejar, json, os, sys, urllib.parse, urllib.request\n"
         "from pathlib import Path\n"
-        "from cryptography.hazmat.primitives import padding\n"
-        "from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\n"
+        "def _sm4_cbc_encrypt_bytes(raw_bytes, key_bytes, iv_bytes):\n"
+        "    try:\n"
+        "        from cryptography.hazmat.primitives import padding\n"
+        "        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\n"
+        "        padder = padding.PKCS7(128).padder()\n"
+        "        padded = padder.update(raw_bytes) + padder.finalize()\n"
+        "        enc = Cipher(algorithms.SM4(key_bytes), modes.CBC(iv_bytes)).encryptor()\n"
+        "        return enc.update(padded) + enc.finalize()\n"
+        "    except ImportError:\n"
+        "        sbox = bytes.fromhex(\n"
+        "            'd690e9fecce13db716b614c228fb2c052b679a762abe04c3aa44132649860699'\n"
+        "            '9c4250f491ef987a33540b43edcfac62e4b31ca9c908e89580df94fa758f3fa6'\n"
+        "            '4707a7fcf37317ba83593c19e6854fa8686b81b27164da8bf8eb0f4b70569d35'\n"
+        "            '1e240e5e6358d1a225227c3b01217887d40046579fd327524c3602e7a0c4c89e'\n"
+        "            'eabf8ad240c738b5a3f7f2cef96115a1e0ae5da49b341a55ad933230f58cb1e3'\n"
+        "            '1df6e22e8266ca60c02923ab0d534e6fd5db3745defd8e2f03ff6a726d6c5b51'\n"
+        "            '8d1baf92bbddbc7f11d95c411f105ad80ac13188a5cd7bbd2d74d012b8e5b4b0'\n"
+        "            '8969974a0c96777e65b9f109c56ec68418f07dec3adc4d2079ee5f3ed7cb3948'\n"
+        "        )\n"
+        "        rotl = lambda x, n: ((x << n) | (x >> (32 - n))) & 0xffffffff\n"
+        "        tau = lambda a: (sbox[(a >> 24) & 0xff] << 24) | (sbox[(a >> 16) & 0xff] << 16) | (sbox[(a >> 8) & 0xff] << 8) | sbox[a & 0xff]\n"
+        "        fk = (0xa3b1bac6, 0x56aa3350, 0x677d9197, 0xb27022dc)\n"
+        "        k = [int.from_bytes(key_bytes[i*4:i*4+4], 'big') ^ fk[i] for i in range(4)]\n"
+        "        rk = []\n"
+        "        for i in range(32):\n"
+        "            ck = int.from_bytes(bytes(((4*i + j) * 7) & 0xff for j in range(4)), 'big')\n"
+        "            b = tau(k[1] ^ k[2] ^ k[3] ^ ck)\n"
+        "            rk.append(k[0] ^ b ^ rotl(b, 13) ^ rotl(b, 23))\n"
+        "            k = [k[1], k[2], k[3], rk[-1]]\n"
+        "        pad_len = 16 - (len(raw_bytes) % 16)\n"
+        "        padded = raw_bytes + bytes([pad_len] * pad_len)\n"
+        "        prev, out = iv_bytes, bytearray()\n"
+        "        for off in range(0, len(padded), 16):\n"
+        "            blk = bytes(a ^ b for a, b in zip(padded[off:off+16], prev))\n"
+        "            x = [int.from_bytes(blk[i*4:i*4+4], 'big') for i in range(4)]\n"
+        "            for r in rk:\n"
+        "                b = tau(x[1] ^ x[2] ^ x[3] ^ r)\n"
+        "                x = [x[1], x[2], x[3], x[0] ^ b ^ rotl(b, 2) ^ rotl(b, 10) ^ rotl(b, 18) ^ rotl(b, 24)]\n"
+        "            prev = b''.join(v.to_bytes(4, 'big') for v in reversed(x))\n"
+        "            out.extend(prev)\n"
+        "        return bytes(out)\n"
         "base_url, key_hex, iv_hex, emit_canary = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == '1'\n"
         "with open(os.environ['MY_AGENT_CREDENTIAL_FILE'], encoding='utf-8') as fh:\n"
         "    cred = json.load(fh)\n"
         "vals = cred['values']\n"
         "user_val, pw_val = vals['username'], vals['secret']\n"
-        "padder = padding.PKCS7(128).padder()\n"
-        "padded = padder.update(pw_val.encode('utf-8')) + padder.finalize()\n"
-        "enc = Cipher(algorithms.SM4(bytes.fromhex(key_hex)), modes.CBC(bytes.fromhex(iv_hex))).encryptor()\n"
-        "b64_ct = base64.b64encode(enc.update(padded) + enc.finalize()).decode('ascii')\n"
+        "ct_bytes = _sm4_cbc_encrypt_bytes(pw_val.encode('utf-8'), bytes.fromhex(key_hex), bytes.fromhex(iv_hex))\n"
+        "b64_ct = base64.b64encode(ct_bytes).decode('ascii')\n"
         "shifted = b64_ct[4:] + b64_ct[:4]\n"
         "cookie_file = Path(os.environ['TMPDIR']) / 'portal_cookies.txt'\n"
         "jar = http.cookiejar.MozillaCookieJar(str(cookie_file))\n"
@@ -531,10 +568,11 @@ def test_sm4_gmt_0002_2012_vector_and_end_to_end_dual_loopback_sites_zero_leak(t
                 submitted_fields={"username": sm4_user, "secret": sm4_pass},
             )
 
+            shell_py = _shell_python()
             # Warm runtime.db authority chain once, then verify 0 FD leak across all 3 credentialed runs
             warmup_res = _invoke_run_command(
                 agent,
-                f"{shlex.quote(sys.executable)} {shlex.quote(str(std_client_script))} {shlex.quote(std_url)} X-Service-Token",
+                f"{shlex.quote(shell_py)} {shlex.quote(str(std_client_script))} {shlex.quote(std_url)} X-Service-Token",
                 credential_ref=std_ref,
             )
             assert warmup_res.ok, warmup_res.output
@@ -542,7 +580,7 @@ def test_sm4_gmt_0002_2012_vector_and_end_to_end_dual_loopback_sites_zero_leak(t
 
             std_res = _invoke_run_command(
                 agent,
-                f"{shlex.quote(sys.executable)} {shlex.quote(str(std_client_script))} {shlex.quote(std_url)} X-Service-Token",
+                f"{shlex.quote(shell_py)} {shlex.quote(str(std_client_script))} {shlex.quote(std_url)} X-Service-Token",
                 credential_ref=std_ref,
             )
             assert std_res.ok, std_res.output
@@ -552,7 +590,7 @@ def test_sm4_gmt_0002_2012_vector_and_end_to_end_dual_loopback_sites_zero_leak(t
             sm4_res = _invoke_run_command(
                 agent,
                 (
-                    f"{shlex.quote(sys.executable)} {shlex.quote(str(sm4_client_script))} "
+                    f"{shlex.quote(shell_py)} {shlex.quote(str(sm4_client_script))} "
                     f"{shlex.quote(sm4_url)} {_SM4_TEST_KEY_HEX} {_SM4_TEST_IV_HEX} 0"
                 ),
                 credential_ref=sm4_ref,
@@ -584,7 +622,7 @@ def test_sm4_gmt_0002_2012_vector_and_end_to_end_dual_loopback_sites_zero_leak(t
             canary_res = _invoke_run_command(
                 agent,
                 (
-                    f"{shlex.quote(sys.executable)} {shlex.quote(str(sm4_client_script))} "
+                    f"{shlex.quote(shell_py)} {shlex.quote(str(sm4_client_script))} "
                     f"{shlex.quote(sm4_url)} {_SM4_TEST_KEY_HEX} {_SM4_TEST_IV_HEX} 1"
                 ),
                 credential_ref=sm4_ref,

@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping
@@ -97,26 +98,64 @@ def _try_prune_empty_dir(path: Path) -> None:
         os.rmdir(path)
 
 
+def _allocate_private_child_dir(
+    parent_path: Path,
+    *,
+    prefix: str,
+    resolve_child: bool = False,
+) -> tuple[Path, Path]:
+    """核验共享 0700 父目录并分配唯一 0700 子目录；并发兄弟正常回收空父目录引发 ENOENT 时有界重试。"""
+    for attempt in range(8):
+        child: Path | None = None
+        try:
+            parent = _ensure_private_host_dir(parent_path)
+            raw_child = Path(tempfile.mkdtemp(prefix=prefix, dir=os.fspath(parent)))
+            child = raw_child.resolve(strict=False) if resolve_child else raw_child
+            os.chmod(child, 0o700)
+            return parent, child
+        except OSError as exc:
+            if child is not None:
+                _try_prune_empty_dir(child)
+                _try_prune_empty_dir(parent_path)
+            if exc.errno != errno.ENOENT or attempt == 7:
+                raise
+    raise RuntimeError("unreachable")
+
+
 def _force_rmtree(path: Path) -> bool:
-    """回收携卡子进程私有临时目录（处理子进程可能创建的只读子文件），返回是否已确认不存在。"""
+    """回收携卡子进程私有临时目录（处理子进程可能创建的只读子目录或文件），返回是否已确认不存在。"""
+    root = path.resolve(strict=False)
+
     def _on_err(func, target, _exc_info):
         with contextlib.suppress(OSError):
-            os.chmod(target, 0o700)
+            target_path = Path(target)
+            parent = target_path.parent
+            if (parent == root or root in parent.parents) and not parent.is_symlink():
+                os.chmod(parent, 0o700)
+            if not target_path.is_symlink():
+                os.chmod(target_path, 0o700)
+            if func in (os.open, os.scandir, os.listdir) and not target_path.is_symlink() and target_path.is_dir():
+                shutil.rmtree(target_path, **callback)
+                return
             func(target)
 
+    callback = {"onexc": _on_err} if sys.version_info >= (3, 12) else {"onerror": _on_err}
     if path.exists() or path.is_symlink():
-        with contextlib.suppress(OSError):
-            os.chmod(path, 0o700)
-        shutil.rmtree(path, onexc=_on_err)
+        if not path.is_symlink():
+            with contextlib.suppress(OSError):
+                os.chmod(path, 0o700)
+        shutil.rmtree(path, **callback)
     return not path.exists() and not path.is_symlink()
 
 
 @contextmanager
 def credential_scratch_dir() -> Iterator[tuple[Path, dict[str, bool]]]:
     """为单次携卡子进程分配独立 0700 临时写区，退出后立即递归删除并回收空父目录。"""
-    parent = _ensure_private_host_dir(credential_scratch_parent())
-    scratch = Path(tempfile.mkdtemp(prefix="run-", dir=os.fspath(parent))).resolve(strict=False)
-    os.chmod(scratch, 0o700)
+    parent, scratch = _allocate_private_child_dir(
+        credential_scratch_parent(),
+        prefix="run-",
+        resolve_child=True,
+    )
     state = {"scratch_cleaned": False}
     try:
         yield scratch, state
@@ -168,9 +207,10 @@ def credential_file_for_child(
         ensure_ascii=False,
     ).encode("utf-8")
 
-    stage_root = _ensure_private_host_dir(credential_staging_root())
-    stage_dir = Path(tempfile.mkdtemp(prefix="fd-", dir=os.fspath(stage_root)))
-    os.chmod(stage_dir, 0o700)
+    stage_root, stage_dir = _allocate_private_child_dir(
+        credential_staging_root(),
+        prefix="fd-",
+    )
     write_fd: int | None = None
     read_fd: int | None = None
     file_path: str | None = None
@@ -424,8 +464,24 @@ class HostCredentialUse:
                 expected_generation=expected_generation,
                 browser_consumer=browser_consumer,
             ) as material:
-                # 在任何工具副作用与首个明文出口之前完成回合级与调用级净化绑定。
-                updated_redaction = self._turn_redaction.register(material)
+                # 在任何工具副作用与首个明文出口之前完成回合级与调用级净化绑定；脱敏额度耗尽时拒绝移交凭据。
+                if bool(getattr(self._turn_redaction, "withheld", False)):
+                    updated_redaction = None
+                else:
+                    try_reg = getattr(self._turn_redaction, "try_register", None)
+                    if callable(try_reg):
+                        updated_redaction = try_reg(material)
+                    else:
+                        updated_redaction = self._turn_redaction.register(material)
+                        if bool(getattr(self._turn_redaction, "withheld", False)):
+                            updated_redaction = None
+                if updated_redaction is None or bool(getattr(self._turn_redaction, "withheld", False)):
+                    raise CredentialInputError(
+                        "CREDENTIAL_INPUT_UNAVAILABLE",
+                        "当前回合凭据脱敏额度（256 项 / 512 KiB）已满，本次未向执行器移交凭据且未启动执行；请开启新回合后继续。",
+                        stage="runtime_gate",
+                        effect_outcome="not_started",
+                    )
                 self._redaction = self._redaction.with_credential_values(
                     getattr(updated_redaction.snapshot.secret_values, "credential_values", ())
                 )

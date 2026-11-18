@@ -6,9 +6,9 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -71,6 +71,7 @@ from agent_py_agent.agent.user_space.task_credentials import (
 from agent_py_agent.agent.workflows.run_artifacts import bind_run_out_target
 from agent_py_agent.agent.workflows.script_runner import ScriptRunner
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+from agent_py_agent.tests.golden.replayer import _shell_python
 from agent_py_agent.tests.test_im_progress_draft import Adapter
 from agent_py_agent.tests.test_ingestion_task_credential_scope import _active, _agent
 
@@ -264,7 +265,7 @@ def test_real_seatbelt_subprocess_reads_verbatim_unicode_custom_fields_and_enfor
         agent,
         "run_command",
         {
-            "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(probe_script))}",
+            "command": f"{shlex.quote(_shell_python())} {shlex.quote(str(probe_script))}",
             "credential_ref": ref,
         },
     )
@@ -865,20 +866,39 @@ def test_two_concurrent_barrier_cards_and_unauthorized_actor_creates_zero_files(
     for agent_obj in (agent_1, agent_2):
         agent_obj.config.additional_write_roots = [str(sync_dir)]
 
+    host_scratch_parent = cred_mat_mod._ensure_private_host_dir(cred_mat_mod.credential_scratch_parent())
+    neighbor_dir = host_scratch_parent / f"neighbor-{uuid.uuid4().hex[:8]}"
+    neighbor_dir.mkdir(mode=0o700)
+    neighbor_sentinel = neighbor_dir / "sentinel.txt"
+    neighbor_sentinel.write_text("HOST_NEIGHBOR_SENTINEL", encoding="utf-8")
+
     worker_code = (
-        "import hashlib, json, os, time\n"
+        "import hashlib, json, os, sys, time\n"
         "from pathlib import Path\n"
         "p = os.environ['MY_AGENT_CREDENTIAL_FILE']\n"
         "val = json.load(open(p, encoding='utf-8'))['values']['secret']\n"
         "digest = hashlib.sha256(val.encode('utf-8')).hexdigest()\n"
-        "scratch_parent = Path(os.environ['TMPDIR']).parent\n"
+        "own_scratch = Path(os.environ['TMPDIR'])\n"
+        "scratch_parent = own_scratch.parent\n"
         "parent_list_blocked = False\n"
+        "parent_entries = []\n"
         "try:\n"
-        "    os.listdir(scratch_parent)\n"
+        "    parent_entries = sorted(os.listdir(scratch_parent))\n"
         "except OSError:\n"
         "    parent_list_blocked = True\n"
+        "neighbor_read_blocked = False\n"
+        "try:\n"
+        "    Path(sys.argv[1]).read_text(encoding='utf-8')\n"
+        "except OSError:\n"
+        "    neighbor_read_blocked = True\n"
         "time.sleep(0.15)\n"
-        "print(json.dumps({'sha256': digest, 'parent_list_blocked': parent_list_blocked}))\n"
+        "print(json.dumps({\n"
+        "    'sha256': digest,\n"
+        "    'own_scratch_name': own_scratch.name,\n"
+        "    'parent_list_blocked': parent_list_blocked,\n"
+        "    'parent_entries': parent_entries,\n"
+        "    'neighbor_read_blocked': neighbor_read_blocked,\n"
+        "}))\n"
     )
     for idx, ag in enumerate((agent_1, agent_2), start=1):
         ag.tools.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -888,6 +908,7 @@ def test_two_concurrent_barrier_cards_and_unauthorized_actor_creates_zero_files(
     params_2 = agent_2._current_run_params
     barrier = threading.Barrier(2)
     results: dict[int, object] = {}
+    shell_py = _shell_python()
 
     def _run_worker(slot: int, ag, run_params, ref: str) -> None:
         ag._current_run_params = run_params
@@ -897,17 +918,21 @@ def test_two_concurrent_barrier_cards_and_unauthorized_actor_creates_zero_files(
             ag,
             "run_command",
             {
-                "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(script_path))}",
+                "command": f"{shlex.quote(shell_py)} {shlex.quote(str(script_path))} {shlex.quote(str(neighbor_sentinel))}",
                 "credential_ref": ref,
             },
         )
 
-    t1 = threading.Thread(target=_run_worker, args=(1, agent_1, params_1, ref_1))
-    t2 = threading.Thread(target=_run_worker, args=(2, agent_2, params_2, ref_2))
-    t1.start()
-    t2.start()
-    t1.join(timeout=20)
-    t2.join(timeout=20)
+    try:
+        t1 = threading.Thread(target=_run_worker, args=(1, agent_1, params_1, ref_1))
+        t2 = threading.Thread(target=_run_worker, args=(2, agent_2, params_2, ref_2))
+        t1.start()
+        t2.start()
+        t1.join(timeout=20)
+        t2.join(timeout=20)
+    finally:
+        shutil.rmtree(neighbor_dir, ignore_errors=True)
+        cred_mat_mod._try_prune_empty_dir(host_scratch_parent)
 
     out_1, out_2 = results[1], results[2]
     assert out_1.ok and out_2.ok, (out_1.output, out_2.output)
@@ -915,8 +940,11 @@ def test_two_concurrent_barrier_cards_and_unauthorized_actor_creates_zero_files(
 
     rep_1 = _extract_json_report(out_1.output)
     rep_2 = _extract_json_report(out_2.output)
-    assert rep_1 == {"sha256": hashlib.sha256(sec_1.encode()).hexdigest(), "parent_list_blocked": True}
-    assert rep_2 == {"sha256": hashlib.sha256(sec_2.encode()).hexdigest(), "parent_list_blocked": True}
+    assert rep_1["sha256"] == hashlib.sha256(sec_1.encode()).hexdigest()
+    assert rep_2["sha256"] == hashlib.sha256(sec_2.encode()).hexdigest()
+    for rep in (rep_1, rep_2):
+        assert rep["parent_list_blocked"] is True or rep["parent_entries"] == [rep["own_scratch_name"]]
+        assert rep["neighbor_read_blocked"] is True
     _assert_zero_secret_hits(out_1.output, (sec_1, sec_2))
     _assert_zero_secret_hits(out_2.output, (sec_1, sec_2))
 
