@@ -312,6 +312,7 @@ def test_single_failure_investigation_per_streak_and_reset_on_done(tmp_path) -> 
     assert inv_run["precheck"] is None
     assert inv_run["postcheck"] is None
     assert inv_run["failure_context"]["failed_run_id"] == run2["run_id"]
+    assert inv_run["failure_context"]["effect_unknown"] is False
     assert inv_run["failure_context"]["streak_count"] == 2
 
     # Completing the failure_investigation run does NOT reset consecutive_failures or trigger recursion.
@@ -494,7 +495,7 @@ def test_retry_once_only_on_first_failed_never_on_unknown(tmp_path) -> None:
     assert state_a2["failure_streak"]["retry_run_id"] == retry_id
     _assert_no_pending_runs(repository)
 
-    # Job B: first terminal status is "unknown" -> NEVER schedules failure_retry.
+    # Job B: first terminal status is "unknown" -> NEVER schedules failure_retry, sets effect_unknown=True.
     job_b, _ = repository.create_job(
         SchedulerJobCreateRequest(
             name="no-retry-on-unknown",
@@ -502,7 +503,7 @@ def test_retry_once_only_on_first_failed_never_on_unknown(tmp_path) -> None:
             thread_id="thread-1",
             schedule={"kind": "every", "every_seconds": 600, "anchor_at": 2000.0},
             now=2000.0,
-            policy={"on_failure": {"investigate": False, "retry_once": True}},
+            policy={"on_failure": {"investigate": True, "after_failures": 1, "retry_once": True}},
         )
     )
     run_b1 = repository.reserve_manual_run(job_b["job_id"], now=2010.0)
@@ -512,7 +513,11 @@ def test_retry_once_only_on_first_failed_never_on_unknown(tmp_path) -> None:
     assert state_b1 is not None
     assert state_b1["failure_streak"]["count"] == 1
     assert state_b1["failure_streak"]["retry_run_id"] == ""
-    _assert_no_pending_runs(repository)
+    inv_b1_id = state_b1["failure_streak"]["investigation_run_id"]
+    assert inv_b1_id
+    inv_b1 = repository.get_active_run(inv_b1_id)
+    assert inv_b1 is not None
+    assert inv_b1["failure_context"]["effect_unknown"] is True
 
 
 def test_with_scheduled_work_injects_bounded_context_and_target_exit_code(tmp_path, monkeypatch) -> None:

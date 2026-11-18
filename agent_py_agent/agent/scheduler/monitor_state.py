@@ -9,10 +9,11 @@ from .rules import normalize_rules
 from .schedule import ScheduleValidationError
 
 _RUNTIME_FIELDS = frozenset({'next_run_at', 'last_run_at', 'last_run_status', 'last_error_code',
-    'run_count', 'consecutive_failures', 'backoff_until', 'precheck_checkpoint', 'result', 'definition_generation'})
-_ACTION_FIELDS = frozenset({'prompt', 'schedule', 'execution', 'execution_target', 'precheck', 'policy'})
+    'run_count', 'consecutive_failures', 'backoff_until', 'precheck_checkpoint', 'result',
+    'definition_generation', 'failure_streak'})
+_ACTION_FIELDS = frozenset({'prompt', 'schedule', 'execution', 'execution_target', 'precheck', 'postcheck', 'policy'})
 _DEFINITION_FIELDS = ('schedule', 'prompt', 'use_llm', 'tool', 'execution', 'execution_target',
-    'precheck', 'policy', 'delivery', 'enabled', 'depends_on', 'condition', 'skill_refs',
+    'precheck', 'postcheck', 'policy', 'delivery', 'enabled', 'depends_on', 'condition', 'skill_refs',
     'misfire_grace_seconds', 'notification_binding')
 
 
@@ -136,6 +137,7 @@ def update_monitor(job, patch, now):
             **{key: deepcopy(job[key]) for key in _RUNTIME_FIELDS if key in job})]
         for key in _ACTION_FIELDS:
             migrated.pop(key, None)
+        migrated.pop('failure_streak', None)
         migrated.update(monitor_schema='scheduler_monitor.v1', migration={'from': 'scheduler_job.v1', 'at': now})
         job = migrated
     old = {rule['id']: rule for rule in job['rules']}
@@ -202,6 +204,7 @@ def rule_enable_patch(job,identifier,enabled):
 # 函数用途: 把规则转换为原 scheduler run 接受的临时形态。
 def _view(job, rule):
     return {**job, **rule, 'name': job['name'], 'rule_id': rule['id'],
+        'failure_streak': deepcopy(rule.get('failure_streak')),
         'delivery': job['delivery'] if job['delivery']['mode']=='none' else (rule.get('delivery') or job['delivery']),
         'execution': {**rule['execution'], 'mode': 'isolated'}}
 
@@ -234,19 +237,38 @@ def record_start(job, run, now):
 
 # LLM: 旧版本运行不能改新规则定义；结果只来自已成功的工具 JSON，不从 LLM 文案猜条件。
 # 函数用途: 将真实终态和确认结果合回规则，原 history 仍保存每次完整运行。
-def finish_rule(job, run, now):
-    from .repository import _job_after_run
+def finish_rule(job, run, now, *, store=None):
+    from .repository import _apply_failure_streak_and_followups, _job_after_run
 
     candidates = [rule for rule in job['rules'] if rule['id'] == run.get('rule_id')]
-    if not candidates or not run_matches_definition(_view(job, candidates[0]), run):
+    if not candidates:
         return {**job, 'last_run_status': run['status'], 'last_error_code': run.get('error_code', '')}
     view = _view(job, candidates[0])
     view.pop('rules', None)
+    matched = run_matches_definition(view, run)
+    if not matched:
+        if store is not None and run.get('trigger') == 'failure_investigation':
+            investigated = _apply_failure_streak_and_followups(
+                store, view, run, now=now, matched_definition=False
+            )
+            if (candidates[0].get('schedule') or {}).get('kind') == 'event_source':
+                investigated.pop('definition_generation', None)
+            if investigated.get('failure_streak') != view.get('failure_streak'):
+                result = merge_rule_view(job, {**investigated, 'status': job['status'], 'updated_at': now})
+                result.update(last_run_status=run['status'], last_error_code=run.get('error_code', ''))
+                return result
+        return {**job, 'last_run_status': run['status'], 'last_error_code': run.get('error_code', '')}
     updated = _job_after_run(view, run, now=now)
     updated['last_run_at'] = candidates[0].get('last_run_at', 0)
     if run.get('structured_result') is not None and run['status'] == 'done':
         updated['result'] = {'value': deepcopy(run['structured_result']), 'confirmed_at': now,
             'run_id': run['run_id'], 'definition_generation': run.get('definition_generation', 1)}
+    if store is not None:
+        updated = _apply_failure_streak_and_followups(
+            store, updated, run, now=now, matched_definition=matched
+        )
+    if (candidates[0].get('schedule') or {}).get('kind') == 'event_source':
+        updated.pop('definition_generation', None)
     result = merge_rule_view(job, updated)
     result.update(last_run_status=run['status'], last_error_code=run.get('error_code', ''))
     return result

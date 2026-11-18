@@ -925,10 +925,16 @@ class _SchedulerRunOperations:
         job_id = str(run["job_id"])
         job, _error = self._parse_job(store["jobs"].get(job_id))
         if job is not None:
-            updated_job = _job_after_run(job, terminal, now=now)
-            store["jobs"][job_id] = _apply_failure_streak_and_followups(
-                store, updated_job, terminal, now=now
-            )
+            if job.get("rules") is not None:
+                from .monitor_state import finish_rule
+
+                store["jobs"][job_id] = finish_rule(job, terminal, now, store=store)
+            else:
+                matched = run_matches_definition(job, terminal)
+                updated_job = _job_after_run(job, terminal, now=now)
+                store["jobs"][job_id] = _apply_failure_streak_and_followups(
+                    store, updated_job, terminal, now=now, matched_definition=matched
+                )
 
     @property
     def last_history_coverage(self) -> str:
@@ -3095,6 +3101,32 @@ def _bounded_postcheck_observation(observation: object) -> dict[str, object] | N
     return bounded
 
 
+def _is_effect_unknown(terminal: dict[str, object]) -> bool:
+    """结构化判定本次终态是否属于副作用结果未知（保留只读调查，但禁止自动重跑业务副作用）。"""
+    from .active_run_closeout import (
+        _TOOL_OUTCOME_UNKNOWN_REASON,
+        SCHEDULED_TASK_FOLLOW_UP_UNREADABLE,
+        SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN,
+    )
+
+    if str(terminal.get("status") or "") == "unknown":
+        return True
+    error_code = str(terminal.get("error_code") or "")
+    if error_code in {
+        SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN,
+        _TOOL_OUTCOME_UNKNOWN_REASON,
+        SCHEDULED_TASK_FOLLOW_UP_UNREADABLE,
+        "OUTCOME_UNKNOWN",
+        "RUN_OUTCOME_UNKNOWN",
+        "SCHEDULER_RUN_OUTCOME_UNKNOWN",
+        "SCHEDULER_RUNNER_DIED",
+        "SCHEDULER_POSTCHECK_UNAVAILABLE",
+    }:
+        return True
+    target_outcome = terminal.get("target_outcome")
+    return isinstance(target_outcome, dict) and target_outcome.get("effect_outcome") == "unknown"
+
+
 def _bounded_failure_context(terminal: dict[str, object], streak_count: int) -> dict[str, object]:
     """构造单次 failure_investigation 所需的有界（<= 4096 字节）失败上下文。"""
     observation = terminal.get("postcheck_observation")
@@ -3111,6 +3143,7 @@ def _bounded_failure_context(terminal: dict[str, object], streak_count: int) -> 
         "error_code": str(terminal.get("error_code") or "")[:128],
         "failure_kind": str(terminal.get("failure_kind") or "")[:64],
         "status": str(terminal.get("status") or ""),
+        "effect_unknown": _is_effect_unknown(terminal),
         "streak_count": int(streak_count),
         "postcheck_summary": postcheck_summary,
     }
@@ -3130,6 +3163,7 @@ def _apply_failure_streak_and_followups(
     terminal: dict[str, object],
     *,
     now: float,
+    matched_definition: bool = True,
 ) -> dict[str, object]:
     """在终态事务内维护连续失败计数，并按配置原子预约最多一次调查与单次重试。"""
     updated = dict(job)
@@ -3140,6 +3174,8 @@ def _apply_failure_streak_and_followups(
     if trigger == "failure_investigation":
         if isinstance(existing_streak, dict) and existing_streak.get("investigation_run_id") == run_id:
             updated["failure_streak"] = {**existing_streak, "investigation_status": status}
+        return updated
+    if not matched_definition:
         return updated
     if status == "done":
         if "failure_streak" in updated:
@@ -3169,6 +3205,7 @@ def _apply_failure_streak_and_followups(
             "retry_run_id": "",
         }
 
+    effect_unknown = _is_effect_unknown(terminal)
     policy = updated.get("policy") if isinstance(updated.get("policy"), dict) else {}
     on_failure = policy.get("on_failure") if isinstance(policy, dict) else None
     runs_map = store.setdefault("runs", {})
@@ -3206,13 +3243,15 @@ def _apply_failure_streak_and_followups(
             streak["investigation_run_id"] = str(inv_run["run_id"])
             streak["investigation_status"] = "queued"
 
-        # 仅当连续失败第 1 次且终态为确定失败 (failed，绝不用于 unknown) 且任务未暂停时预约单次重试。
+        # 仅当连续失败第 1 次、终态为明确业务失败（排除 unknown 及未知副作用码）且任务仍激活时预约单次重试。
         if (
             on_failure.get("retry_once")
             and int(streak["count"]) == 1
             and not streak["retry_run_id"]
             and status == "failed"
+            and not effect_unknown
             and str(updated.get("status") or "") == "active"
+            and bool(updated.get("enabled", True))
         ):
             backoff_seconds = int(policy.get("failure_backoff_seconds") or 0)
             retry_at = float(now) + float(max(backoff_seconds, 60))
@@ -3223,6 +3262,20 @@ def _apply_failure_streak_and_followups(
                 dispatch_after=retry_at,
                 now=float(now),
             )
+            if isinstance(terminal.get("event_source"), dict):
+                frozen_source = deepcopy(terminal["event_source"])
+                batch = deepcopy(list(terminal.get("event_batch") or []))
+                rendered_prompt = str(terminal.get("prompt") or "")
+                if batch and '"event_batch":' not in rendered_prompt:
+                    from .event_sources import event_model_prompt
+
+                    rendered_prompt = event_model_prompt(str(retry_run.get("prompt") or ""), batch)
+                retry_run["event_source"] = frozen_source
+                retry_run["event_batch"] = batch
+                if type(frozen_source.get("generation")) is int and frozen_source["generation"] >= 1:
+                    retry_run["definition_generation"] = frozen_source["generation"]
+                if rendered_prompt:
+                    retry_run["prompt"] = rendered_prompt
             queue_timeout = int(policy.get("queue_timeout_seconds") or 0)
             if queue_timeout > 0:
                 retry_run["queue_deadline_at"] = retry_at + float(queue_timeout)

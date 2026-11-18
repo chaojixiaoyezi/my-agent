@@ -12,9 +12,10 @@ from .execution_policy import (
     normalize_precheck,
 )
 from .policy import normalize_policy
+from .postcheck import POSTCHECK_SCHEMA, normalize_postcheck
 from .schedule import ScheduleValidationError, validate_schedule
 
-_RULE_FIELDS = frozenset({"id", "name", "enabled", "schedule", "use_llm", "prompt", "tool", "execution", "execution_target", "policy", "precheck", "delivery", "depends_on", "condition"})
+_RULE_FIELDS = frozenset({"id", "name", "enabled", "schedule", "use_llm", "prompt", "tool", "execution", "execution_target", "policy", "precheck", "postcheck", "delivery", "depends_on", "condition"})
 _CONDITION_OPERATORS = frozenset({"eq", "ne", "exists", "truthy"})
 
 
@@ -68,6 +69,7 @@ def _normalize_rule(raw: object) -> dict:
         "schedule": validate_schedule(raw.get("schedule")), "prompt": prompt.strip(), "tool": tool,
         "execution": normalize_execution(raw.get("execution")), "policy": normalize_policy(raw.get("policy")),
         "precheck": normalize_precheck(raw.get("precheck")),
+        "postcheck": normalize_postcheck(raw.get("postcheck")),
         "delivery": normalize_delivery(raw["delivery"]) if raw.get("delivery") is not None else None,
         "execution_target": target, "depends_on": list(dependencies), "condition": condition}
 
@@ -126,7 +128,7 @@ RULES_SCHEMA = {'type':'array','minItems':1,'items':{'type':'object','additional
             'anchor_at':{},'at':{'type':'string'},'expression':{'type':'string'},'timezone':{'type':'string'}},'required':['kind']},
         'prompt':{'type':'string'},'tool':{'type':'object','additionalProperties':False,
             'properties':{'name':{'type':'string'},'arguments':{'type':'object'}},'required':['name','arguments']},
-        'execution':{'type':'object'},'execution_target':EXECUTION_TARGET_SCHEMA,'policy':{'type':'object'},'precheck':{'type':['object','null']},
+        'execution':{'type':'object'},'execution_target':EXECUTION_TARGET_SCHEMA,'policy':{'type':'object'},'precheck':{'type':['object','null']},'postcheck':deepcopy(POSTCHECK_SCHEMA),
         'delivery':{'type':['object','null'],'properties':{'mode':{'type':'string','enum':['origin','local','none']}}},
         'depends_on':{'type':'array','items':{'type':'string'}},'condition':{'type':['object','null'],'additionalProperties':False,
             'properties':{'rule_id':{'type':'string'},'pointer':{'type':'string'},'op':{'type':'string','enum':['eq','ne','exists','truthy']},
