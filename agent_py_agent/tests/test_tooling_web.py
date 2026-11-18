@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import json
 import threading
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError
 
 import pytest
 
@@ -59,6 +62,104 @@ class TestWebSearchTool:
         assert payload["engine"] == "good"
         assert payload["provider_failures"][0]["provider"] == "broken"
         assert payload["results"][0]["url"] == "https://example.com/result"
+
+    def test_official_search_posts_with_current_owner_key_and_projects_results(self, tmp_path, monkeypatch):
+        from agent_py_agent.agent.settings import model_profiles
+        from agent_py_agent.agent.settings.model_credentials import deepseek_search_api_key
+        from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
+        from agent_py_agent.agent.tooling import web_search
+
+        def save(owner_id, providers):
+            home = SimpleNamespace(config_dir=tmp_path, owner_provider="local", owner_kind="user", owner_id=owner_id)
+            path = model_profiles.model_profiles_path(home)
+            path.parent.mkdir(exist_ok=True)
+            catalog = model_profiles.read_model_profiles(path)
+            catalog["providers"] = providers
+            model_profiles._save_profiles(path, catalog)
+            return home
+
+        official = {"display_name": "官方", "api_base": "https://api.deepseek.com/v1"}
+        opencode = {"display_name": "DeepSeek", "api_base": "https://opencode.ai/zen/v1", "api_key": "other-fixture"}
+        user = save("user-a", {"opencode": opencode, "official": {**official, "api_key_ref": "env:DEEPSEEK_API_KEY"}})
+        other = save("user-b", {"opencode": opencode})
+        save("user-c", {"official": {**official, "api_key": "different-owner-fixture"}})
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "official-fixture")
+        with pytest.raises(ModelProfileError, match="未找到可用"):
+            deepseek_search_api_key(user)
+
+        seen = []
+        payload = {"results": [
+            {"title": "官网", "url": "https://docs.example.com/tool", "snippet": "test official-fixture"},
+            {"title": "非白名单", "url": "https://example.com.other.test/other", "snippet": "elsewhere"},
+        ]}
+
+        def open_request(request, timeout):
+            seen.append((request.full_url, request.method, json.loads(request.data), timeout))
+            assert request.get_header("Authorization") == "Bearer official-fixture"
+            assert request.get_header("Content-type") == "application/json"
+            return BytesIO(json.dumps(payload).encode())
+
+        def build_opener(redirect_handler):
+            assert redirect_handler.redirect_request(None, None, 307, "", {}, "https://other.test") is None
+            return SimpleNamespace(open=open_request)
+
+        monkeypatch.setattr(web_search.urllib.request, "build_opener", build_opener)
+        tool = web_search.WebSearchTool(timeout=9, deepseek_credential=lambda: deepseek_search_api_key(user, protected_env_names=frozenset({"DEEPSEEK_API_KEY"})))
+        outcome = tool.execute({"provider": "deepseek", "query": "官方资料", "limit": 2, "allowed_domains": ["example.com"]})
+        assert outcome.ok
+        assert seen == [(
+            "https://api.deepseek.com/v1/tools/search", "POST",
+            {"query": "官方资料", "count": 2, "need_content": False}, 9,
+        )]
+        payload = json.loads(outcome.output)
+        assert payload["engine"] == "deepseek"
+        assert payload["query_evidence"]["conditions"]["provider"] == "deepseek"
+        assert payload["results"] == [
+            {"title": "官网", "url": "https://docs.example.com/tool", "snippet": "test [已隐藏]", "source": "deepseek"},
+        ]
+
+        other_tool = web_search.WebSearchTool(timeout=9, deepseek_credential=lambda: deepseek_search_api_key(other))
+        denied = other_tool.execute({"provider": "deepseek", "query": "官方资料"})
+        assert not denied.ok and denied.effect_outcome == "not_started"
+        assert "credential_missing" in denied.output
+        assert len(seen) == 1
+
+    def test_official_search_validates_before_resolving_credentials(self):
+        from agent_py_agent.agent.tooling.web_search import WebSearchTool
+
+        credential = MagicMock(side_effect=AssertionError("preflight must run before credentials"))
+        config = SimpleNamespace(enabled=False)
+        tool = WebSearchTool(timeout=9, deepseek_credential=credential, deepseek_enabled=lambda: config.enabled)
+        denied = tool.execute({"provider": "deepseek", "query": "官方资料"})
+        assert not denied.ok and denied.effect_outcome == "not_started"
+        assert "tool_deepseek_search_enabled=false" in denied.output
+
+        config.enabled = True
+        long_query = tool.execute({"provider": "deepseek", "query": "长" * 129})
+        assert not long_query.ok and long_query.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert long_query.effect_outcome == "not_started"
+        assert "129" in long_query.output and "128" in long_query.output
+        invalid = tool.execute({"provider": "opencode", "query": "官方资料"})
+        assert not invalid.ok and invalid.error_code == "TOOL_INVALID_ARGUMENTS"
+        credential.assert_not_called()
+
+    def test_official_search_http_error_keeps_status_and_never_uses_default_provider(self, monkeypatch):
+        from agent_py_agent.agent.tooling import web_search
+
+        stream = BytesIO(b'{"message":"official-fixture"}')
+        opener = MagicMock(side_effect=HTTPError(web_search.DEEPSEEK_SEARCH_URL, 401, "", {}, stream))
+        monkeypatch.setattr(web_search.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=opener))
+        default = MagicMock()
+        tool = web_search.WebSearchTool(timeout=9, providers=[default], deepseek_credential=lambda: "official-fixture")
+        outcome = tool.execute({"provider": "deepseek", "query": "官方资料"})
+        assert not outcome.ok and not outcome.retryable
+        assert outcome.effect_outcome == "failed"
+        assert outcome.reported_error_code == "DEEPSEEK_SEARCH_HTTP_401"
+        assert "HTTP 401" in outcome.output and "official-fixture" not in outcome.output
+        assert "/model" in outcome.next_action
+        assert stream.closed
+        opener.assert_called_once()
+        default.search.assert_not_called()
 
     @patch("urllib.request.urlopen")
     def test_web_search_decodes_duckduckgo_results(self, mock_urlopen, tmp_path: Path):
@@ -287,3 +388,177 @@ class TestUrlValidation:
 
         # 通过 mock 验证截断行为
         # 由于这个测试需要真实的网络调用，我们跳过
+
+
+def test_core_owner_http_dispatch_checks_actual_ports_and_blocks_unmanaged_paths(tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.settings.model_profiles import (
+        _save_profiles,
+        model_profiles_path,
+        read_model_profiles,
+    )
+    from agent_py_agent.agent.tooling import web_search
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+    from agent_py_agent.agent.user_space.owner_egress import (
+        OwnerEgressEndpoint,
+        OwnerEgressPolicy,
+        OwnerEgressPolicyStore,
+    )
+
+    requests = []
+    redirect = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            requests.append((self.server.server_port, self.path, "GET"))
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", redirect["url"])
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"allowed endpoint content")
+
+        def do_POST(self):
+            content = self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append((self.server.server_port, self.path, "POST", json.loads(content)))
+            assert self.headers["Authorization"] == "Bearer owner-search-fixture"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"results":[{"title":"official","url":"https://example.org","snippet":"fixture"}]}')
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as allowed, ThreadingHTTPServer(("127.0.0.1", 0), Handler) as denied:
+        threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (allowed, denied)]
+        try:
+            for thread in threads:
+                thread.start()
+            accepted_url = f"http://127.0.0.1:{allowed.server_port}"
+            redirect["url"] = f"http://127.0.0.1:{denied.server_port}/blocked"
+            policy = OwnerEgressPolicy("allowlist", (OwnerEgressEndpoint("127.0.0.1", allowed.server_port),))
+            owner_reads = []
+
+            def read_policy(_store, owner_id):
+                owner_reads.append(owner_id)
+                return policy
+
+            monkeypatch.setattr(OwnerEgressPolicyStore, "get_effective", read_policy)
+            agent = SimpleAgent(AgentConfig(
+                my_agent_home=str(tmp_path / "home"), my_agent_owner_kind="user", my_agent_owner_id="fixture",
+                allowed_private_hosts=["127.0.0.1"], enable_plugins=False, model_backend="echo",
+            ), tmp_path)
+            registry = agent.tools
+            path = model_profiles_path(agent.home_paths)
+            path.parent.mkdir(exist_ok=True)
+            catalog = read_model_profiles(path)
+            catalog["providers"] = {"deepseek": {
+                "display_name": "官方", "api_base": "https://api.deepseek.com", "api_key": "owner-search-fixture",
+            }}
+            _save_profiles(path, catalog)
+
+            snapshot = registry.runtime_snapshot(run_id="run-egress-test")
+            authority = agent.subagents.runtime_db.record_run_creation(
+                owner_id=agent.home_paths.owner_id, run_id=snapshot.run_id, role="assistant",
+                goal="测试业务网页出站", conversation_task_id="task-egress-test", thread_id="thread-egress-test",
+            )
+
+            def invoke(name, arguments, suffix):
+                runtime = snapshot.runtime(name)
+                assert runtime is not None, name
+                call = ToolCall(
+                    "call-" + suffix, name, arguments, "native", runtime.model_spec.schema_hash,
+                    snapshot.run_id, "turn-egress-test", authority["attempt_id"],
+                )
+                return registry.execute_tool(call, write_boundary=None, runtime_snapshot=snapshot).result
+
+            result = invoke("web_fetch", {"url": accepted_url + "/ok"}, "allowed")
+            assert result.ok, result
+            assert "allowed endpoint content" in result.output
+            result = invoke("web_fetch", {"url": redirect["url"]}, "blocked")
+            assert not result.ok and result.reported_error_code == "OWNER_EGRESS_ENDPOINT_DENIED"
+            result = invoke("web_fetch", {"url": accepted_url + "/redirect"}, "redirect")
+            assert not result.ok and result.reported_error_code == "OWNER_EGRESS_ENDPOINT_DENIED"
+            assert result.effect_outcome == "unknown"
+
+            # DeepSeek 的实际 HTTP 传输走同一 pin。原官方目标及 G4 均已有独立断言，
+            # 此处仅替换测试目标与 G4 的本地回环许可，让真实 socket 可在本机复现。
+            monkeypatch.setattr(web_search, "DEEPSEEK_SEARCH_URL", accepted_url + "/v1/tools/search")
+            monkeypatch.setattr(web_search, "_network_safety_error", lambda *_: None)
+            result = invoke("web_search", {"provider": "deepseek", "query": "fixture"}, "official")
+            assert result.ok and '"engine": "deepseek"' in result.output
+            monkeypatch.setattr(web_search, "DEEPSEEK_SEARCH_URL", redirect["url"])
+            result = invoke("web_search", {"provider": "deepseek", "query": "fixture"}, "official-blocked")
+            assert not result.ok and result.reported_error_code == "OWNER_EGRESS_ENDPOINT_DENIED"
+
+            progress = invoke("task_progress", {"action": "read"}, "local-progress")
+            assert progress.ok and progress.handler_executed, progress
+            runtime = snapshot.runtime("create_subagents")
+            assert runtime is not None
+            child_view = registry.with_access_policy(
+                access_mode="workspace-write", path_access_mode="normal", owner_scope_root=registry.owner_scope_root,
+            )
+            try:
+                child_snapshot = child_view.runtime_snapshot(allowed_tools=["web_fetch"], run_id="child")
+                assert child_snapshot.owner_egress_policy is snapshot.owner_egress_policy
+            finally:
+                child_view.close_mcp_clients()
+
+            # 未登记宿主传输的远端工具必须在 handler 前被拒绝。
+            result = invoke("remote_agent_push", {
+                "target_owner": "local/target", "instruction": "fixture", "idempotency_key": "fixture",
+            }, "unmanaged")
+            assert not result.ok
+            assert result.reported_error_code == "OWNER_EGRESS_TRANSPORT_UNAVAILABLE"
+            assert requests == [
+                (allowed.server_port, "/ok", "GET"), (allowed.server_port, "/redirect", "GET"),
+                (allowed.server_port, "/v1/tools/search", "POST", {"query": "fixture", "count": 10, "need_content": False}),
+            ]
+            assert set(owner_reads) == {"local/fixture"}
+        finally:
+            for server in (allowed, denied):
+                server.shutdown()
+            for thread in threads:
+                thread.join(timeout=3)
+
+
+def test_core_protects_dormant_deployment_provider_custom_env_name(tmp_path, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.settings.model_credentials import deepseek_search_api_key
+    from agent_py_agent.agent.settings.model_profiles import _save_profiles, read_model_profiles
+    from agent_py_agent.agent.settings.shared_model_catalog import _admin_profiles_path
+    from agent_py_agent.agent.tooling._subprocess_env_scrub import scrub_subprocess_env
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+
+    deploy_home = tmp_path / "home"
+    path = _admin_profiles_path(home_paths(deploy_home))
+    path.parent.mkdir(parents=True)
+    catalog = read_model_profiles(path)
+    catalog["providers"] = {"deepseek": {
+        "display_name": "官方", "api_base": "https://api.deepseek.com", "api_key_ref": "env:DEPLOY_SEARCH_AUTH",
+    }}
+    _save_profiles(path, catalog)
+    monkeypatch.setenv("DEPLOY_SEARCH_AUTH", "official-search-only-fixture")
+
+    admin = SimpleAgent(AgentConfig(my_agent_home=str(deploy_home), enable_plugins=False), tmp_path)
+    assert deepseek_search_api_key(
+        admin.home_paths, protected_env_names=admin.tools._construction_params.host_credential_env_names,
+    ) == "official-search-only-fixture"
+    other = SimpleAgent(AgentConfig(
+        my_agent_home=str(deploy_home), my_agent_owner_kind="user", my_agent_owner_id="another",
+        enable_plugins=False,
+    ), tmp_path)
+    assert "DEPLOY_SEARCH_AUTH" not in scrub_subprocess_env(
+        {"DEPLOY_SEARCH_AUTH": "official-search-only-fixture"},
+        passthrough=frozenset({"DEPLOY_SEARCH_AUTH"}),
+        host_credential_env_names=other.tools._construction_params.host_credential_env_names,
+    )
+    assert "DEPLOY_SEARCH_AUTH" in other.tools._construction_params.host_credential_env_names

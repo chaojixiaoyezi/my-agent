@@ -31,5 +31,9 @@ def consume_runtime_wake(inputs, wake, *, now, complete, task_link_status):
         if error:
             raise ValueError('输入任务记录不可读')
         if link is not None:
-            inputs.schedule(task_id)
+            try:
+                if getattr(inputs, 'poll_device_inputs', None) is not None:
+                    inputs.poll_device_inputs(task_id)
+            finally:
+                inputs.schedule(task_id)
     return True

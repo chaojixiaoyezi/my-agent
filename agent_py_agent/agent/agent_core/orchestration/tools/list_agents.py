@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 # projection resolves current_subagent_run_id before model parameters.
 # 类用途: 返回当前任务代理树或一个已知 run 的子树快照，供模型回答“谁还在跑”。
 class ListAgentsTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_list_agents_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),

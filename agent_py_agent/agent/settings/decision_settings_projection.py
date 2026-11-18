@@ -63,6 +63,9 @@ def decision_profile(context: object, data: dict, profile_id: str, *, require_en
         return resolve_shared_model(context.home_paths, profile_id, capability="decision", require_enabled=require_enabled)
     if profile_id not in data["profiles"]:
         raise ModelProfileError("决策模型引用不存在，请重新选择已保存的 Decision 模型。")
+    from .model_profiles import require_private_provider_transport
+
+    require_private_provider_transport(context.home_paths)
     return resolved_model(data, profile_id, capability="decision", require_enabled=require_enabled)
 
 

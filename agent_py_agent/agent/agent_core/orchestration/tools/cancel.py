@@ -84,6 +84,7 @@ class _StatusFilterResult:
 # 批量取消仍由下面的宿主级 canonical primitive 保留，不能重新暴露进模型 schema。
 # 类用途: 让当前代理按名字停止自己的一个或多个直接子代理。
 class CancelSubagentsTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_cancel_subagents_model_spec()
     runtime_policy = ToolRuntimePolicy(
         # LLM: Model calls always perform a real direct-child interruption;

@@ -32,6 +32,7 @@ class NamedWorkStopResult:
 
 
 class StopNamedWorkTool(BaseTool):
+    owner_egress_local = True
     """Let the main agent honor an ordinary-language request to stop one named item."""
 
     model_spec = ToolModelSpec(

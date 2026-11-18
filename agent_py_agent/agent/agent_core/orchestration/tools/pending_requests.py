@@ -35,6 +35,7 @@ _ERROR_CODES = {"TOOL_INVALID_ARGUMENTS": "TOOL_INVALID_ARGUMENTS", "CURSOR_SCOP
 # LLM: 管理身份只来自 management_continuity；模型参数只有游标、条数和是否含已处理，不能指定父级或子代理。
 # 类用途: 只读列出当前代理（含已证明的定时续查父任务）直属下级的能力申请。
 class ListPendingRequestsTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_list_pending_requests_model_spec()
     # B1-R3：开关关着时连名字/类别/原因都不进模型可见的发现面（注册表按这个结构属性过滤）。
     hidden_when_unavailable = True

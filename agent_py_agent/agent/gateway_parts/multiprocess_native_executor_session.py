@@ -11,7 +11,11 @@ from .io import read_json_file_report
 from .multiprocess_commit_session import _request_identity
 from .multiprocess_executor_original_source import OriginalCExecutorSource
 from .multiprocess_executor_runtime import _reservation
-from .multiprocess_executor_start import ExecutorStartObserver, start_executor
+from .multiprocess_executor_start import (
+    ExecutorStartObserver,
+    bind_executor_egress_namespace,
+    start_executor,
+)
 from .multiprocess_kernel_message import KernelMessageSender
 from .multiprocess_native_commit_session import NativeCommitSession, _decode_packet
 from .multiprocess_route import owner_digest, validate_worker_route
@@ -102,6 +106,7 @@ class NativeExecutorSession(NativeCommitSession):
 
         owner, epoch = transition('executor_commit', select_owner)
         source = OriginalCExecutorSource(issuer, owner, transition=transition)
+        command = bind_executor_egress_namespace(command, source)
 
         # LLM: 原pin创立与记住在同一T/C段，先于所有P1/物理执行；异常保留原关联而不是自动撤销。
         # 函数用途: 让失败或迟到回执仍可精确finish。

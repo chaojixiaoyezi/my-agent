@@ -334,9 +334,10 @@ def test_permission_help_uses_current_app_without_secret_network_or_token(ctx, m
     assert ctx.agent.config.feishu_app_secret not in json.dumps(result)
 
 
-def test_permission_help_remains_discoverable_without_oauth_configuration(ctx):
+def test_permission_help_remains_discoverable_without_application_credentials(ctx):
     before_cards = len(ctx.cards)
     ctx.oauth_config.feishu_oauth_redirect_uri = ''
+    ctx.agent.config.feishu_app_secret = ''
     tool = ctx.agent.tools.tools['feishu_auth']
     assert tool.availability().available
     result = tool.execute({'action': 'permissions'})
@@ -618,3 +619,196 @@ def test_unsupported_token_type_is_not_used_as_bearer(ctx, monkeypatch, token_ty
     with pytest.raises(ValueError):
         oauth.complete_oauth(ctx.agent, payload, state, 'Synthetic-Code')
     assert _row(ctx)['status'] == 'failed'
+
+
+def _armed_device(ctx, monkeypatch):
+    ctx.oauth_config.feishu_oauth_redirect_uri = ''
+    grant = oauth.device.DeviceGrant('test-device', 'https://accounts.feishu.cn/device', 'TEST-ONLY', 600, 5)
+    monkeypatch.setattr(oauth.device, 'start_device_authorization', lambda *_: grant)
+    dep = oauth.request_oauth(ctx.agent)
+    arm_input_dependency(ctx.agent, dep['input_id'])
+    assert ctx.cards[-1]['elements'][1]['actions'][0]['url'] == grant.url
+    assert grant.code not in json.dumps(_row(ctx))
+    return dep
+
+
+def _tick_device(ctx):
+    path = oauth.oauth_path(ctx.agent, 'ou_synthetic')
+    path.write_text(json.dumps({**_row(ctx), 'next_poll_at': time.time() - 1}))
+    oauth.poll_device_inputs(ctx.agent, ctx.task_id)
+
+
+def _device_result(ctx):
+    return {'access_token': 'unit-access', 'expires_in': 3600, 'refresh_token': 'unit-refresh',
+            'refresh_token_expires_in': 7200, 'token_type': 'Bearer',
+            'scope': ' '.join([*ctx.oauth_config.feishu_oauth_scopes, 'im:chat:update', 'im:chat.members:write_only'])}
+
+
+def test_device_waits_then_reuses_grant_refreshes_and_revokes_original_owner(ctx, monkeypatch):
+    _armed_device(ctx, monkeypatch)
+    steps = iter(('authorization_pending', 'slow_down', 'approved'))
+
+    def exchange(app, secret, code):
+        assert code == 'test-device'
+        step = next(steps)
+        if step != 'approved':
+            raise oauth.device.DeviceOAuthError(400, step)
+        return _device_result(ctx)
+
+    monkeypatch.setattr(oauth.device, 'exchange_device_token', exchange)
+    _api(ctx, monkeypatch)
+    for interval in (5, 10):
+        _tick_device(ctx)
+        assert _row(ctx)['status'] == 'pending' and _row(ctx)['poll_interval'] == interval
+    _tick_device(ctx)
+    assert _row(ctx)['status'] == 'ready' and not task_has_waiting_input(ctx.agent, ctx.task_id)
+    assert set(_row(ctx)['granted_scopes'].split()) == set(ctx.oauth_config.feishu_oauth_scopes)
+    assert _row(ctx)['ignored_provider_scope_count'] == 2
+    with pytest.raises(oauth.OAuthCheckError, match='未包括'):
+        oauth.user_access_token(ctx.agent, scope_groups=(('im:chat:update',),))
+    assert len(ctx.store.wakes.pending(limit=0)) == 1
+    card_count = len(ctx.cards)
+    assert oauth.request_oauth(ctx.agent) == {'status': 'ready', 'identity': 'current_user', 'new_card_sent': False}
+    assert len(ctx.cards) == card_count
+    first = _row(ctx)
+    path = oauth.oauth_path(ctx.agent, 'ou_synthetic')
+    path.write_text(json.dumps({**first, 'ready_expires_at': time.time() - 1}))
+    monkeypatch.setattr(oauth.device, 'refresh_device_token',
+                        lambda *_: {**_device_result(ctx), 'access_token': 'unit-renewed'})
+    assert oauth.user_access_token(ctx.agent, scope_groups=(('im:chat:read',),)) == 'unit-renewed'
+    assert _row(ctx)['authorized_at'] == first['authorized_at']
+    revoked = []
+    def revoke(app, secret, value, token_type):
+        assert _row(ctx)['status'] == 'revoked' and not _row(ctx)['ciphertext']
+        revoked.append(token_type)
+    monkeypatch.setattr(oauth.device, 'revoke_device_token', revoke)
+    assert oauth.oauth_status(ctx.agent, revoke=True)['provider_revocation']['status'] == 'acknowledged'
+    assert revoked == ['refresh_token', 'access_token']
+    with pytest.raises(ValueError):
+        oauth.user_access_token(ctx.agent)
+
+
+@pytest.mark.parametrize('failure', ['access_denied', 'actor_mismatch', 'invalid_token_lifetime'])
+def test_device_distinguishes_denial_from_local_validation_and_drops_failed_credentials(ctx, monkeypatch, failure):
+    _armed_device(ctx, monkeypatch)
+    def exchange(*_):
+        if failure == 'access_denied':
+            raise oauth.device.DeviceOAuthError(403, failure)
+        return {**_device_result(ctx), 'expires_in': -1 if failure == 'invalid_token_lifetime' else 3600}
+    monkeypatch.setattr(oauth.device, 'exchange_device_token', exchange)
+    _api(ctx, monkeypatch, actor='ou_wrong')
+    _tick_device(ctx)
+    row = _row(ctx)
+    assert (row['status'], row['ciphertext'], row['provider_error']) == ('failed', '', failure)
+    assert row['provider_http_status'] == (403 if failure == 'access_denied' else 200)
+    if failure == 'invalid_token_lifetime':
+        assert row['validation_facts']['field'] == 'expires_in'
+
+
+def test_consent_lifetime_is_frozen_on_start_and_refresh_does_not_extend_it(ctx, monkeypatch):
+    config = ctx.oauth_config
+    monkeypatch.setattr(oauth, '_frozen_consent_policy', None)
+    oauth.freeze_consent_policy(ctx.agent.home_paths)
+    row = {'authorized_at': time.time() - 25 * 3600}
+    config.feishu_oauth_reauthorize_hours = 24
+    assert oauth._consent_current(ctx.agent, row)
+    oauth.freeze_consent_policy(ctx.agent.home_paths)
+    assert not oauth._consent_current(ctx.agent, row)
+
+
+def test_old_overgranted_device_failure_recommends_new_card_without_scope_changes(ctx, monkeypatch):
+    from agent_py_agent.agent.user_space.feishu_authorization import authorization_guidance
+    _armed_device(ctx, monkeypatch)
+    p = oauth.oauth_path(ctx.agent, 'ou_synthetic')
+    p.write_text(json.dumps({**_row(ctx), 'status': 'failed', 'ciphertext': '',
+                             'provider_error': 'unexpected_granted_scopes',
+                             'validation_facts': {'extra_scope_count': 2}}))
+    guidance = authorization_guidance(ctx.agent)
+    error = guidance['last_authorization_error']
+    assert not error['change_application_permissions'] and error['applies_to'] == 'previous_attempt'
+    assert error['next_call'] == {'tool': 'feishu_auth', 'arguments': {'action': 'authorize'}}
+    assert guidance['oauth_status'] == 'failed' and not _row(ctx)['ciphertext']
+
+
+def test_ready_device_with_unreadable_cipher_allows_new_authorization_card(ctx, monkeypatch):
+    _armed_device(ctx, monkeypatch)
+    monkeypatch.setattr(oauth.device, 'exchange_device_token', lambda *_: _device_result(ctx))
+    _api(ctx, monkeypatch)
+    _tick_device(ctx)
+    old = _row(ctx)
+    assert old['status'] == 'ready'
+    path = oauth.oauth_path(ctx.agent, 'ou_synthetic')
+    path.write_text(json.dumps({**old, 'ciphertext': 'corrupt-cipher'}))
+    cards = len(ctx.cards)
+    next_input = oauth.request_oauth(ctx.agent)
+    assert len(ctx.cards) == cards + 1
+    assert _row(ctx)['status'] == 'pending' and next_input['input_id'] != old['input_id']
+
+
+def test_revocation_during_unexpired_device_use_is_observed_before_release(ctx, monkeypatch):
+    _armed_device(ctx, monkeypatch)
+    monkeypatch.setattr(oauth.device, 'exchange_device_token', lambda *_: _device_result(ctx))
+    monkeypatch.setattr(oauth.device, 'revoke_device_token', lambda *_: None)
+    _api(ctx, monkeypatch)
+    _tick_device(ctx)
+    checks = []
+
+    def revalidate():
+        checks.append(True)
+        if len(checks) == 2:
+            outcome = oauth.oauth_status(ctx.agent, revoke=True)
+            assert outcome['status'] == 'revoked'
+
+    with pytest.raises(ValueError, match='取用期间本人授权已变化'):
+        oauth._user_access_token_with_authority(ctx.agent, 'ou_synthetic', revalidate=revalidate,
+                                              scope_groups=(('im:chat:read',),))
+    assert len(checks) == 2 and _row(ctx)['ciphertext'] == ''
+
+
+@pytest.mark.parametrize(('error', 'http', 'needs_new_card'), [
+    ('invalid_grant', 400, True), ('transport_unavailable', 0, False), ('temporarily_unavailable', 503, False),
+])
+def test_explicit_new_device_grant_after_provider_rejects_refresh(ctx, monkeypatch, error, http, needs_new_card):
+    _armed_device(ctx, monkeypatch)
+    monkeypatch.setattr(oauth.device, 'exchange_device_token', lambda *_: _device_result(ctx))
+    _api(ctx, monkeypatch)
+    _tick_device(ctx)
+    row = _row(ctx)
+    path = oauth.oauth_path(ctx.agent, 'ou_synthetic')
+    path.write_text(json.dumps({**row, 'ready_expires_at': time.time() - 1}))
+
+    def reject(*_):
+        raise oauth.device.DeviceOAuthError(http, error)
+
+    monkeypatch.setattr(oauth.device, 'refresh_device_token', reject)
+    with pytest.raises(oauth.OAuthCheckError if needs_new_card else oauth.device.DeviceOAuthError):
+        oauth.user_access_token(ctx.agent, scope_groups=(('im:chat:read',),))
+    assert oauth.oauth_status(ctx.agent)['status'] == ('reauthorization_required' if needs_new_card else 'expired')
+    cards = len(ctx.cards)
+    response = oauth.request_oauth(ctx.agent)
+    assert len(ctx.cards) == cards + int(needs_new_card)
+    if needs_new_card:
+        assert response['input_id'] != row['input_id']
+    else:
+        assert response['status'] == 'ready'
+
+
+def test_old_rejected_refresh_preserves_successful_concurrent_rotation(ctx, monkeypatch):
+    _armed_device(ctx, monkeypatch)
+    monkeypatch.setattr(oauth.device, 'exchange_device_token', lambda *_: _device_result(ctx))
+    _api(ctx, monkeypatch)
+    _tick_device(ctx)
+    path = oauth.oauth_path(ctx.agent, 'ou_synthetic')
+    path.write_text(json.dumps({**_row(ctx), 'ready_expires_at': time.time() - 1}))
+
+    def old_response(*_):
+        monkeypatch.setattr(oauth.device, 'refresh_device_token',
+                            lambda *_: {**_device_result(ctx), 'access_token': 'rotated-access'})
+        assert oauth.user_access_token(ctx.agent, scope_groups=(('im:chat:read',),)) == 'rotated-access'
+        raise oauth.device.DeviceOAuthError(400, 'invalid_grant')
+
+    monkeypatch.setattr(oauth.device, 'refresh_device_token', old_response)
+    with pytest.raises(oauth.OAuthCheckError, match='本次续期'):
+        oauth.user_access_token(ctx.agent, scope_groups=(('im:chat:read',),))
+    assert oauth.oauth_status(ctx.agent)['status'] == 'ready'
+    assert oauth.user_access_token(ctx.agent, scope_groups=(('im:chat:read',),)) == 'rotated-access'

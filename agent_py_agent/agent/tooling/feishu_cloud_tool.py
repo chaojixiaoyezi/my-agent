@@ -245,10 +245,14 @@ class FeishuCloudTool(BaseTool):
                     return _failure('FEISHU_USER_AUTH_REQUIRED', '本人身份需要已配置的受控CLI后端。')
                 from functools import partial
 
-                from ..user_space.feishu_oauth import user_access_token
+                from ..user_space.feishu_oauth import OAuthCheckError, user_access_token
                 try:
-                    user_token = user_access_token(self.agent)
+                    operation = CLOUD_OPERATIONS[params['action']]
+                    user_token = user_access_token(self.agent, scope_groups=operation.user_scope_groups(
+                        params.get('resource_type', operation.resource_type)))
                     cloud_request = partial(cloud_request, user_token=user_token)
+                except OAuthCheckError as exc:
+                    return _failure('FEISHU_USER_AUTH_REQUIRED', str(exc), facts={'reason': exc.code, **exc.facts})
                 except (OSError, ValueError, TypeError):
                     return _failure('FEISHU_USER_AUTH_REQUIRED', '本人飞书授权不可用；请在私人助手会话通过feishu_auth授权。')
             read_resource_grants(self.agent.home_paths)

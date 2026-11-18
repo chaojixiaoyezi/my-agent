@@ -56,6 +56,7 @@ class _SendInput:
 #   权限判定在 conversation.session_messaging，存储与唤醒分别复用 guidance 与 wake 领域组件。
 # 类用途: 把一条来源结构化、可幂等重试的会话消息写入目标会话，并按目标忙/闲决定是否唤醒。
 class SendSessionMessageTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),

@@ -136,11 +136,19 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     from .remote_agent_push_tool import RemoteAgentPushTool
 
     registry.register(RemoteAgentPushTool(getattr(params, "remote_push_agent", None), timeout=params.http_timeout))
-    registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
+    owner_egress = getattr(params, "owner_egress_policy", None)
+    registry.register(WebSearchTool(
+        owner_egress=owner_egress,
+        max_results=params.max_matches,
+        timeout=params.http_timeout,
+        deepseek_credential=getattr(params, "deepseek_search_credential", None),
+        deepseek_enabled=lambda: getattr(getattr(params, "live_config", None), "tool_deepseek_search_enabled", True) is True,
+    ))
     hosts_provider = getattr(params, "allowed_private_hosts_provider", None)
     owner_root = getattr(params, "artifact_root", None)
     registry.register(
         WebFetchTool(
+            owner_egress=owner_egress,
             max_chars=params.web_max_chars,
             timeout=params.http_timeout,
             # 产物根只取宿主给定的 owner 根并沿用 artifacts/web 布局，不回落进程级环境覆盖；

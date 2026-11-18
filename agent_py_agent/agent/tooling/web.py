@@ -244,10 +244,12 @@ class WebFetchTool(_WebFetchTool):
         allowed_private_hosts: Iterable[str] = (),
         allow_private_resolution: bool | None = None,
         gateway_endpoint_config: GatewayEndpointConfig | None = None,
+        owner_egress=None,
     ):
         provider = allowed_private_hosts if callable(allowed_private_hosts) else None
         initial_hosts = tuple(provider() or ()) if callable(provider) else allowed_private_hosts
         super().__init__(WebRuntimeDeps(
+            owner_egress=owner_egress,
             max_chars=max_chars,
             timeout=timeout,
             resolver=resolver or _default_network_resolver,

@@ -114,3 +114,25 @@ def test_history_default_never_expands_restricted_background_profiles(restrictio
     request = policy.BackgroundToolPolicyRequest(**options)
     assert 'session_search' not in policy.background_allowed_tools(request=request)
     assert 'session_search' not in initial(request)
+
+
+def test_feishu_input_wake_selects_consumers_only_for_the_original_ready_reference():
+    ref = 'oauth_' + 'a' * 32
+    meta = {'schema_version': 'task-input-event.v1', 'input_provider': 'feishu_oauth',
+            'input_id': ref, 'input_status': 'ready'}
+    wake = {'reason': 'task_input_resolved', 'metadata': meta, 'evidence_refs': [ref]}
+    assert set(policy.credential_wake_preload_tools(wake)) == {'channel_messages', 'feishu_auth', 'feishu_cloud'}
+    assert not policy.credential_wake_preload_tools({**wake, 'evidence_refs': ['other']})
+    assert not policy.credential_wake_preload_tools({**wake, 'metadata': {**meta, 'input_id': 'oauth_bad'}})
+    assert policy.credential_wake_preload_tools({**wake, 'metadata': {**meta, 'input_status': 'failed'}}) == ('feishu_auth',)
+    ordinary = policy.BackgroundToolPolicyRequest(reason='task_input_resolved', wake_signal=wake)
+    assert 'channel_messages' in policy.background_allowed_tools(request=ordinary)
+    assert 'feishu_auth' not in policy.background_allowed_tools(request=ordinary)
+    blocked = policy.BackgroundToolPolicyRequest(reason='task_input_resolved', wake_signal=wake,
+                                                 owner_policy=SimpleNamespace(disabled_tools=('channel_messages',)))
+    assert 'channel_messages' not in policy.background_allowed_tools(request=blocked)
+    configured = policy.BackgroundToolPolicyRequest(reason='task_input_resolved', wake_signal=wake,
+        config=SimpleNamespace(background_main_agent_allowed_tools=['read_file']))
+    assert 'channel_messages' not in policy.background_allowed_tools(request=configured)
+    request = policy.BackgroundToolPolicyRequest(wake_signal=wake, allowed_tools=['tool_search', 'read_file'])
+    assert initial(request) <= {'tool_search', 'read_file'}

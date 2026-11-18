@@ -51,6 +51,7 @@ class _GuidanceInput:
 # priority 或 delivery 等模型控制面。底层 ConversationStore 仍可服务用户输入与 CLI。
 # 类用途: 把一条补充要求安全写入指定下级的消息箱，并返回可追踪的 guidance_id。
 class SendGuidanceTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),

@@ -18,6 +18,18 @@ class CloudOperation:
     resource_type: str
     write: bool
 
+    def user_scope_groups(self, source_type: str):
+        """每个分组至少取得一项；通过知识库定位其它云对象时还须允许节点读取。"""
+        if self.resource_type == 'sheet':
+            options = ('sheets:spreadsheet',) if self.write else ('sheets:spreadsheet:readonly', 'sheets:spreadsheet')
+        elif self.resource_type == 'docx':
+            options = ('docx:document',) if self.write else ('docx:document:readonly', 'docx:document')
+        else:
+            options = ('wiki:wiki:readonly', 'wiki:wiki', 'wiki:node:read')
+        if source_type == 'wiki' and self.resource_type != 'wiki':
+            return (options, ('wiki:wiki:readonly', 'wiki:wiki', 'wiki:node:read'))
+        return (options,)
+
 
 CLOUD_OPERATIONS = {op.action: op for op in (
     CloudOperation('sheet_meta', 'sheet', False),

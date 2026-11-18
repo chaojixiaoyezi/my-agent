@@ -24,10 +24,18 @@ class UserHistoryIdentity:
         self.agent = agent
         self.identity = None
         self.binding = None
+        self.scope_groups = (('im:chat:read', 'im:chat:readonly'),)
 
     def check(self):
         from ..conversation.tool_approval_scope import tool_approval_scope
-        from ..user_space.feishu_oauth import _assert_network, oauth_actor, user_access_token
+        from ..user_space.feishu_device_oauth import DeviceOAuthError
+        from ..user_space.feishu_oauth import (
+            OAuthCheckError,
+            _application_credentials,
+            _assert_network,
+            oauth_actor,
+            user_access_token,
+        )
         from .feishu_cli import UserCloudIdentity
 
         home = self.agent.home_paths
@@ -45,16 +53,27 @@ class UserHistoryIdentity:
         except (OSError, ValueError, TypeError):
             raise ChannelMessageHistoryError('NETWORK_DISABLED') from None
         try:
-            token = user_access_token(self.agent)
+            token = user_access_token(self.agent, scope_groups=self.scope_groups)
             current = self.agent._current_run_params
             scope = tool_approval_scope(self.agent, str(current.run_id or current.task_id))
             actor = oauth_actor(self.agent, scope)
-            self.identity = UserCloudIdentity(self.agent.config.feishu_app_id, self.agent.config.feishu_app_secret, token, actor)
+            self.identity = UserCloudIdentity(*_application_credentials(self.agent), token, actor)
             binding = ('user', home.owner_id, self.identity.app_id, actor)
             if self.binding is not None and binding != self.binding:
                 raise ChannelMessageHistoryError('FEISHU_USER_AUTH_REQUIRED')
             self.binding = binding
             return binding
+        except OAuthCheckError as exc:
+            if exc.code == 'operation_scope_not_granted':
+                raise ChannelMessageHistoryError('FEISHU_USER_OPERATION_SCOPE_REQUIRED') from None
+            if exc.code == 'execution_scope_inactive':
+                raise ChannelMessageHistoryError('FEISHU_USER_EXECUTION_INACTIVE') from None
+            if exc.code == 'refresh_rejected':
+                raise ChannelMessageHistoryError('FEISHU_USER_REFRESH_REJECTED') from None
+            raise ChannelMessageHistoryError('FEISHU_USER_AUTH_REQUIRED') from None
+        except DeviceOAuthError as exc:
+            raise ChannelMessageHistoryError('FEISHU_USER_REFRESH_UNAVAILABLE', http_status=exc.http_status,
+                                             provider_error=exc.code) from None
         except (OSError, ValueError, TypeError, AttributeError):
             raise ChannelMessageHistoryError('FEISHU_USER_AUTH_REQUIRED') from None
 
@@ -65,10 +84,14 @@ class UserHistoryIdentity:
             data = request_cli_cloud_api(self.identity, 'GET', path, user_token=self.identity.token, read_only=True, timeout=min(remaining, 25))
         except FeishuCloudError as error:
             if error.code in {'FEISHU_USER_AUTH_REQUIRED', 'FEISHU_CLOUD_AUTH_INVALID', 'FEISHU_CREDENTIAL_UNAVAILABLE'}:
-                raise ChannelMessageHistoryError('FEISHU_USER_AUTH_REQUIRED') from None
-            if error.code in {'FEISHU_CLOUD_SCOPE_REQUIRED', 'FEISHU_CLOUD_RESOURCE_FORBIDDEN'} or error.provider_code == 230027:
-                raise ChannelMessageHistoryError('FEISHU_PROVIDER_SCOPE_REQUIRED') from None
-            raise ChannelMessageHistoryError('FEISHU_PROVIDER_UNAVAILABLE') from None
+                code = 'FEISHU_USER_AUTH_REQUIRED'
+            elif error.provider_code == 230002:
+                code = 'FEISHU_BOT_GROUP_MEMBERSHIP_REQUIRED'
+            elif error.code in {'FEISHU_CLOUD_SCOPE_REQUIRED', 'FEISHU_CLOUD_RESOURCE_FORBIDDEN'} or error.provider_code == 230027:
+                code = 'FEISHU_PROVIDER_SCOPE_REQUIRED'
+            else:
+                code = 'FEISHU_PROVIDER_UNAVAILABLE'
+            raise ChannelMessageHistoryError(code, provider_code=error.provider_code, http_status=error.http_status) from None
         # 原CLI公开投影将非秘密page_token改名，内部reader恢复同一供应商续点，不当作授权。
         if 'next_cursor' in data:
             data = {**data, 'page_token': data['next_cursor']}
@@ -100,8 +123,6 @@ def list_user_messages(
 
     def check():
         nonlocal mode
-        from .feishu_provider_facts import FeishuProviderFactError, _provider, _read
-
         authority = identity.check()
         def remaining():
             amount = deadline - time.monotonic()
@@ -114,19 +135,12 @@ def list_user_messages(
         if current_mode not in {'p2p', 'group', 'topic'} or mode is not None and mode != current_mode:
             raise ChannelMessageHistoryError('FEISHU_PROVIDER_RESPONSE_INVALID')
         mode = current_mode
+        identity.scope_groups = (('im:chat:read', 'im:chat:readonly'), ('im:message:readonly', 'im:message'),
+                                 ('im:message.p2p_msg:get_as_user' if mode == 'p2p' else 'im:message.group_msg:get_as_user',))
         if mode != 'p2p':
             own = identity.read(path + '/members/is_in_chat', remaining())
             if own.get('is_in_chat') is not True:
                 raise ChannelMessageHistoryError('FEISHU_USER_AUTH_REQUIRED')
-            try:
-                adapter, token = _provider(agent)
-                if adapter.app_id != identity.identity.app_id:
-                    raise ChannelMessageHistoryError('FEISHU_PROVIDER_AUTH_UNAVAILABLE')
-                bot = _read(token, path + '/members/is_in_chat', timeout=min(5.0, remaining()), stage='bot_membership')
-            except FeishuProviderFactError as error:
-                raise ChannelMessageHistoryError(error.reason_code) from None
-            if bot.get('is_in_chat') is not True:
-                raise ChannelMessageHistoryError('FEISHU_BOT_GROUP_MEMBERSHIP_REQUIRED')
         if identity.check() != authority:
             raise ChannelMessageHistoryError('FEISHU_USER_AUTH_REQUIRED')
         return (*authority, mode)
@@ -147,6 +161,7 @@ def validate_user_chat_query(*, cursor='', limit=50, chat_types=('p2p', 'group')
 def list_user_chats(agent, *, cursor='', limit=50, chat_types=('p2p', 'group')):
     types = validate_user_chat_query(cursor=cursor, limit=limit, chat_types=chat_types)
     identity = UserHistoryIdentity(agent)
+    identity.scope_groups = (('im:chat:read',),)
     authority = identity.check()
     binding = {'selector': 'user', 'action': 'list_chats', 'authority': list(authority), 'chat_types': types}
     token = _decode_cursor(cursor, binding)

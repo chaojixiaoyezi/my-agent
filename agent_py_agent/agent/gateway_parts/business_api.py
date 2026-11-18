@@ -53,6 +53,40 @@ _COMPLETE_HOST_ACTIONS = frozenset({
 })
 
 
+# 只收录不直接外联的状态、会话和原 owner 派发动作；未来同命名空间的连接器默认不开。
+_OWNER_EGRESS_LOCAL_ACTIONS = frozenset({
+    'system.capabilities', 'model_profiles.list', 'spaces.list', 'spaces.get', 'spaces.create',
+    'sessions.list', 'sessions.get', 'sessions.space.get', 'sessions.space.set',
+    'tasks.assign', 'tasks.cancel', 'tasks.follow_up', 'tasks.get', 'tasks.list', 'tasks.submit',
+    'background_agents.create', 'background_agents.get', 'background_agents.list',
+    'background_agents.messages.send', 'background_agents.model.get', 'background_agents.model.set',
+    'background_agents.restore', 'background_agents.resume', 'background_agents.retire',
+    'background_agents.suspend', 'background_agents.update',
+    'controllers.ensure', 'controllers.get',
+    'executions.cancel', 'executions.get', 'executions.list',
+    'subagents.cancel', 'subagents.get', 'subagents.list', 'subagents.messages.send',
+    'messages.list', 'events.list', 'approvals.get', 'approvals.list', 'approvals.decide',
+})
+
+
+def _require_business_egress_transport(context, spec) -> None:
+    if spec.action in _OWNER_EGRESS_LOCAL_ACTIONS:
+        return
+    from ..tooling.web_fetch_runtime import unmanaged_owner_egress_error
+    from ..user_space.owner_egress import bound_owner_egress_policy
+
+    home = context.host.home_paths
+    root = getattr(home, "root", None)
+    if root is None:
+        return
+    policy = bound_owner_egress_policy(root, owner_id=home.owner_id, owner_kind=home.owner_kind)
+    denial = unmanaged_owner_egress_error("business_execution", policy)
+    if denial is not None:
+        raise HostAPIError(
+            "CAPABILITY_DENIED", 403, message=f"{denial.reported_error_code} {denial.output} {denial.next_action}",
+        )
+
+
 @dataclass(frozen=True, eq=False)
 class BusinessCallContext:
     host: object = field(repr=False)
@@ -1011,6 +1045,7 @@ def execute_business(request, context, services):
         facts = {'owner_id': services.owner_id, **request['params']}
         stage = 'check_access'
         context.check(spec.action, facts)
+        _require_business_egress_transport(context, spec)
         stage = 'check_readiness'
         if not services.ready(spec.action):
             raise HostAPIError('HOST_NOT_READY', 503, message=(
@@ -2777,6 +2812,7 @@ def register_business_tools(agent):
                 idempotency_policy=IdempotencyPolicy('operation'),
                 output_policy=OutputPolicy(trust='runtime'),
                 resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)),
+                owner_egress_local_actions=frozenset(s.action for s in self._ready_specs if s.action in _OWNER_EGRESS_LOCAL_ACTIONS),
             )
 
         def operation_identity_for(self, arguments):

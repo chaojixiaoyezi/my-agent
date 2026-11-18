@@ -230,6 +230,7 @@ def _remember_parameter_descriptions() -> dict[str, str]:
 # LLM: 记忆工具只能调用装配好的候选/晋升服务；新增只候选，正式保存须经原用户审核链，恢复不新授权。
 # 类用途: 连接统一工具运行时与 Memory 候选/晋升服务。
 class RememberTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_remember_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(

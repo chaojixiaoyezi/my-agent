@@ -59,6 +59,7 @@ class SelfMapResponseTooLarge(ValueError):
 # LLM: provider 由 composition root 注入；handler 不保存库存、原始对象或 loaded，每调用只做临时投影。
 # 类用途: 为主会话提供常驻的统一自我目录入口。
 class SelfMapTool(BaseTool):
+    owner_egress_local = True
     _base_spec = ToolModelSpec(
         name="self_map", description="查询自己的目录、工具、能力、模型、权限和工作状态；business 分块介绍业务空间与后台代理内置工具。无参数总览，section 分块，cursor 翻页。",
         input_schema={"type": "object", "properties": {

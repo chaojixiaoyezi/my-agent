@@ -523,10 +523,25 @@ def _resolved_profile_for_home(home_paths: object, data: dict, selected: str, *,
         return resolve_shared_model(home_paths, selected, capability=capability)
     if selected not in data["profiles"]:
         raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。", reason="profile_not_found")
+    provider = data["providers"][data["profiles"][selected]["provider_id"]]
+    if provider.get("transport") != "offline":
+        require_private_provider_transport(home_paths)
     row = resolved_model(data, selected, capability=capability)
     if row.get("model_auth_ref"):
         row["model_auth_ref"]["path"] = str(model_profiles_path(home_paths))
     return row
+
+
+def require_private_provider_transport(home_paths) -> None:
+    from ..user_space.approval_mode import is_permission_admin
+    from ..user_space.owner_egress_gateway import deployment_requires_managed_owner
+
+    root = getattr(home_paths, "root", None)
+    if root is not None and not is_permission_admin(home_paths) and deployment_requires_managed_owner(root):
+        raise ModelProfileError(
+            "当前部署的自定义服务商网络请求未纳入 owner 出站限制，未发送请求。请选择管理员明确共享的模型档案。",
+            reason="private_provider_egress_unmanaged",
+        )
 
 
 # LLM: 子代理 model 只解析有权引用的 agentic 用途；decision 同名不制造歧义，显式错误编号不能换选。

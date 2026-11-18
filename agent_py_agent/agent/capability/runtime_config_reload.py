@@ -26,7 +26,7 @@ _LEGACY_WARNING_CACHE_MAX_SIZE = 64
 
 DEPLOYMENT_CAPABILITY_KEYS = frozenset({
     "owner_default_permission_mode", "tool_approval_timeout_seconds", "feishu_cli_backend_enabled",
-    "feishu_user_oauth_enabled", "feishu_oauth_redirect_uri", "feishu_oauth_scopes",
+    "feishu_user_oauth_enabled", "feishu_oauth_redirect_uri", "feishu_oauth_scopes", "feishu_oauth_reauthorize_hours",
     "im_model_cards_enabled",
     "im_group_authorization_required", "feishu_bot_subscriptions_enabled",
     "feishu_user_subscriptions_enabled",

@@ -24,6 +24,7 @@ from .program_data import DataBudget, project, resolve
 # LLM: 只对本次ToolInvocationContext的派发器开放；开关由宿主能力配置决定，不从参数、文件或旧快照恢复。
 # 类用途: 给所有已授权owner提供渐进加载的有限只读编排工具。
 class ToolProgramTool(BaseTool):
+    owner_egress_local = True
     model_spec = ToolModelSpec(name='tool_program', description=(
         '有限只读批量取数和整理。steps最多16项，每项id唯一：tool+arguments调用已加载只读工具；'
         '可foreach引用此前数组（最多32次总调用），when为{value:显式引用,equals:值}；'

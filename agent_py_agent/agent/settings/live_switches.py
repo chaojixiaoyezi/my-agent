@@ -31,6 +31,7 @@ SELF_LEARNING_LIVE_POLICY_KEYS = frozenset({
 })
 
 DEPLOY_LIVE_SWITCH_KEYS = frozenset({
+    "tool_deepseek_search_enabled",
     "gateway_edge_identity_required", "owner_epoch_fence_enabled",
     "admin_channel_identity_enabled", "audit_enabled", "auth_enabled",
     "daemon_mutate_state", "daemon_start_runners", "enable_gateway_memory_diagnostics",

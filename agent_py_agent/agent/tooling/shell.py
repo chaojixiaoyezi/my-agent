@@ -2008,6 +2008,7 @@ def _build_protected_shell_outcome(
             )
         ),
         effect_source_ref=prepared.operation_ref,
+        next_action=str(process_facts.get("next_action", "")),
     )
     return outcome
 
@@ -2276,6 +2277,8 @@ def _run_shell_process_text(
     sandbox_read_roots: tuple[Path, ...] | None,
     sandbox_protected_paths: tuple[Path, ...] | None,
 ) -> tuple[str, bool, str, dict[str, object]]:
+    from ..user_space.owner_egress import OwnerEgressPolicyError
+
     search_backoff = _runtime_search_backoff(tool, command, target, timeout)
     if search_backoff is not None:
         timeout = min(timeout, _RUNTIME_SEARCH_MAX_SECONDS)
@@ -2345,6 +2348,9 @@ def _run_shell_process_text(
              **({"cleanup_schema": "foreground-process-cleanup.v1", "termination": asdict(termination), "pid": exc.pid, "birth_token": exc.birth_token}
                 if termination is not None else {})},
         )
+    except OwnerEgressPolicyError as exc:
+        status = "not_started" if exc.side_effect == "not_started" else "unknown"
+        return str(exc), False, exc.code, {"status": status, "next_action": exc.next_action}
     except SandboxUnavailable as exc:
         return (
             f"SANDBOX_UNAVAILABLE: {exc}",
@@ -2451,7 +2457,16 @@ def _background_start_outcome(
 # LLM: 业务创建标记和终态决定副作用结果，不能因异常或清理完成就假装没有启动。
 # 函数用途: 将启动失败映射为工具回执，保留原句柄、取消类型和清理是否确认。
 def _background_launch_failure(tool_name: str, error: BackgroundLaunchError) -> ToolHandlerOutcome:
+    from ..user_space.owner_egress import OwnerEgressPolicyError
+
     record = error.record
+    if isinstance(error.cause, OwnerEgressPolicyError):
+        cause = error.cause
+        effect = "not_started" if cause.side_effect == "not_started" and error.cleanup_confirmed else "unknown"
+        return ToolHandlerOutcome(tool_name, False, str(cause), error_code=cause.code, effect_outcome=effect,
+                                  next_action=cause.next_action, result_envelope={"process": {
+                                      "session_id": record.get("session_id"), "cleanup_confirmed": error.cleanup_confirmed,
+                                  }})
     status = str(record.get("status") or "unknown")
     effect = "unknown"
     if error.cleanup_confirmed:
@@ -2640,8 +2655,11 @@ def _start_attempt_shell_process(
             "TEMP": scratch_str,
         }
         pass_fds = tuple(dict.fromkeys((*pass_fds, int(cred_runtime.cred_file.read_fd))))
+    from ..user_space.owner_egress_linux import launch_owner_egress_process
+
     try:
-        return subprocess.Popen(
+        return launch_owner_egress_process(
+            tool.path_access_policy.owner_scope_root or None,
             exec_arg,
             shell=use_shell,
             cwd=str(target),

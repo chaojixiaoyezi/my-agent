@@ -139,6 +139,7 @@ def build_session_search_model_spec() -> ToolModelSpec:
 # LLM: 六模式复用当前owner原索引与可信会话reader，不在handler猜旧参数优先级。
 # 类用途: 提供严格字段组合验证及唯一历史只读分派。
 class SessionSearchTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_session_search_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),

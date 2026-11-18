@@ -72,6 +72,7 @@ class _LessonTarget:
 # LLM: 工具实例只持有 agent 引用；每次调用都重新读 runner 上下文，不缓存任何 run 身份。
 # 类用途: record_lesson 工具的注册实现，声明模型 Schema 与运行策略。
 class RecordLessonTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),

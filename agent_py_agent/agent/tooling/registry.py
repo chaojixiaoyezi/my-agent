@@ -184,6 +184,8 @@ class ToolRegistryParams:
     owner_type: str = "main_agent"
     protected_persona_root: str = ""  # 三份 Persona 只走专用入口；admin bypass 也不清空
     remote_push_agent: object | None = field(default=None, repr=False, compare=False)
+    deepseek_search_credential: Callable[[], str] | None = field(default=None, repr=False, compare=False)
+    owner_egress_policy: Callable[[], object] | None = field(default=None, repr=False, compare=False)
     # owner 隔离时 Shell 沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录）
     host_private_roots: tuple[str, ...] = ()
     full_access_other_owner_homes: str = "read_only"
@@ -303,6 +305,7 @@ def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
 # LLM: tool_search 只能在请求快照中检索；命中即为下一模型回合展开并在同线程累计 Schema，但永远不能扩大 allowed_tools 或恢复不可用工具。
 # 类用途: 从本轮已授权且已就绪的 deferred 工具中搜索，并按原线程发现账持久保留命中工具，当前授权变更仍逐轮过滤。
 class ToolSearchTool(BaseTool):
+    owner_egress_local = True
     """会话运行时 discovery for tools that are registered but not initially exposed."""
 
     _DEFAULT_SEARCH_LIMIT = 3
@@ -1653,6 +1656,7 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
         owner_type=registry.owner_type, catalog_specs=tuple(catalog_specs),
         deferred_categories=tuple(sorted(registry.catalog_deferred_categories)),
         default_deferral_enabled=True,
+        owner_egress_policy=getattr(registry._construction_params, "owner_egress_policy", None),
     )
 
 
@@ -1784,6 +1788,8 @@ def _execution_workspace_roots(
 # LLM: 初连与运行准备共用原锁/池/关闭事件；初连只向原owner发表目录，后继调用等发现完成后投影，不另建连接。
 # 函数用途: 为公开ensure入口完成唯一首次MCP连接，保留默认eager、失败退避和关闭不复活语义。
 def _ensure_registry_mcp_connected(registry: ToolRegistry) -> bool:
+    if _registry_mcp_egress_blocked(registry):
+        return False
     _ensure_registry_lifecycle_fields(registry)
     if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
         return False
@@ -1836,7 +1842,17 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
 
 # LLM: 原锁内同步资源写Schema与连接；旧装配只恢复原客户端，退休资源不重连，旧快照不原位修改。
 # 函数用途: 为新运行准备MCP连接并投影视图，保留旧宿主装配的退避与关闭语义。
+def _registry_mcp_egress_blocked(registry: ToolRegistry) -> bool:
+    from .web_fetch_runtime import unmanaged_owner_egress_error
+
+    return unmanaged_owner_egress_error(
+        "mcp", getattr(registry._construction_params, "owner_egress_policy", None),
+    ) is not None
+
+
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
+    if _registry_mcp_egress_blocked(registry):
+        return
     if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
         return
     initial_connect = False

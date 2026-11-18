@@ -139,6 +139,52 @@ def test_local_owner_listing(admin):
     assert [ref for ref, _ in short] == ["local/main", "local/alice"] and more
 
 
+def test_egress_lists_only_real_users_with_stable_ids_and_separate_feishu_names(admin):
+    from agent_py_agent.agent.user_space.owner_egress_admin import manage_owner_egress
+
+    home = admin.home_paths
+    seed_user(home.root)
+    (home.owners_dir / 'providers/feishu/users/ou_example').mkdir(parents=True)
+    (home.owners_dir / 'providers/feishu/groups/oc_example').mkdir(parents=True)
+    home.provider_identity_dir.mkdir(parents=True, exist_ok=True)
+    (home.provider_identity_dir / 'feishu.jsonl').write_text(json.dumps({
+        'provider': 'feishu', 'provider_subject_id': 'ou_example', 'owner_kind': 'user',
+        'owner_id': 'ou_example', 'display_name': '同名用户',
+    }) + '\n', encoding='utf-8')
+    seen = []
+    cursor = None
+    for _ in range(6):
+        params = {'action': 'egress_list_users', 'limit': 1}
+        if cursor:
+            params['cursor'] = list(cursor)
+        page = manage_owner_egress(home, params)
+        seen.extend(page['users'])
+        cursor = page['next_cursor']
+        if cursor is None:
+            break
+    assert cursor is None and {r['owner_id'] for r in seen} == {'local/alice', 'providers/feishu/users/ou_example'}
+    assert next(r for r in seen if r['provider'] == 'feishu') == {
+        'owner_id': 'providers/feishu/users/ou_example', 'provider': 'feishu', 'display_name': '同名用户',
+        'feishu_open_id': 'ou_example'}
+
+
+def test_egress_bulk_validates_all_targets_before_writing_and_denies_other_users(admin):
+    from agent_py_agent.agent.user_space.owner_egress import OwnerEgressPolicyError
+    from agent_py_agent.agent.user_space.owner_egress_admin import manage_owner_egress
+
+    home = admin.home_paths
+    seed_user(home.root)
+    for forbidden in ('local/main', 'local/users/alice', 'providers/feishu/users/unknown'):
+        with pytest.raises(OwnerEgressPolicyError, match='owner_id'):
+            manage_owner_egress(home, {'action': 'egress_set_users', 'updates': [
+                {'owner_id': 'local/alice', 'mode': 'unrestricted'}, {'owner_id': forbidden, 'mode': 'inherit'}]})
+    assert manage_owner_egress(home, {'action': 'egress_get', 'owner_id': 'local/alice'})['policy']['mode'] == 'inherit'
+    normal = owner_home_paths_by_id(home, 'local/alice')
+    with pytest.raises(OwnerEgressPolicyError) as denied:
+        manage_owner_egress(normal, {'action': 'egress_list_users'})
+    assert denied.value.code == 'EGRESS_ADMIN_REQUIRED'
+
+
 # LLM: 无效 UID 不得经过 safe_path_segment 的宽松替换认领其它用户。
 # 函数用途: 拒绝本地目录穿越、main 别名及链接。
 @pytest.mark.parametrize("ref", ["local/users/main", "local/..", "local/a/b", "local/.hidden", "local/linked"])

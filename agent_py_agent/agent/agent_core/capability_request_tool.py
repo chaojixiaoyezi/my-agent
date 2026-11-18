@@ -53,6 +53,7 @@ class CapabilityRequestToolInput:
 
 
 class CapabilityRequestTool(BaseTool):
+    owner_egress_local = True
 
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),

@@ -1026,6 +1026,14 @@ class PluginMCPClient(MCPStdioClient):
     # LLM: 先拿来源协调锁、再由原MCP取连接锁；只在无旧transport时从未包装argv重建最新投影，不重绑活连接。
     # 函数用途: 鲜活复核固定激活和来源版本后启动插件，旧策略失效须原资源清理再重连。
     def start(self):
+        from .tooling.web_fetch_runtime import unmanaged_owner_egress_error
+        from .user_space.owner_egress import bound_owner_egress_policy
+
+        owner = self.activation_ref.owner()
+        egress = bound_owner_egress_policy(owner.root, owner_id=owner.owner_id, owner_kind=owner.identity.owner_kind)
+        denial = unmanaged_owner_egress_error("mcp", egress)
+        if denial is not None:
+            raise MCPError(f"{denial.output} {denial.next_action}", code=denial.reported_error_code)
         with source_process_boundary():
             self._require_legacy_launch_facts()
             if self.is_running() and not self._source_configurations_current():

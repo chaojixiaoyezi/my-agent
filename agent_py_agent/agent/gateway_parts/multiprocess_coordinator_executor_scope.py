@@ -11,7 +11,7 @@ from ..common.executor_registration import (
 )
 from .multiprocess_coordinator_execution import CoordinatorExecution
 from .multiprocess_executor_runtime import _command, _reservation
-from .multiprocess_executor_start import start_executor
+from .multiprocess_executor_start import bind_executor_egress_namespace, start_executor
 from .multiprocess_route import owner_digest
 
 
@@ -48,7 +48,7 @@ class _CoordinatorExecutorLauncher:
                    'execution_attempt_id': claim.execution_attempt_id, 'lease_epoch': claim.lease_epoch,
                    'tool_call_id': call_id}
         row = _reservation(source, binding, kind, 'exec-' + uuid.uuid4().hex)
-        command = _command(argv, options)
+        command = bind_executor_egress_namespace(_command(argv, options), source)
         try:
             if options.delegate is not None:
                 from .multiprocess_native_coordinator_host import launch_coordinator_native_host

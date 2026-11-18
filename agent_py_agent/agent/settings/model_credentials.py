@@ -34,6 +34,66 @@ def provider_api_key(provider: Mapping, *, environ: Mapping | None = None) -> st
     return value.strip() if type(value) is str and value.strip() else provider.get("api_key", "")
 
 
+
+def deployment_profile_environment_names(home_paths: object) -> frozenset[str]:
+    """只从宿主管理的值解析准确变量名，供同一部署的子进程过滤。"""
+    from .model_provider_schema import ModelProfileError
+    from .shared_model_catalog import _admin_profiles
+
+    try:
+        providers = _admin_profiles(home_paths)["providers"]
+    except (ModelProfileError, OSError):
+        # 当前目录错误仍由使用该档案的调用报告；启动不写回坏目录。
+        return frozenset()
+    return frozenset(
+        name for row in providers.values() if (name := provider_environment_name(row.get("api_key_ref")))
+    )
+
+
+def deepseek_search_api_key(
+    home_paths: object, *, protected_env_names: frozenset[str] = frozenset(),
+) -> str:
+    """只解析当前用户私有目录里的官方服务商，搜索用途不继承共享模型凭据。"""
+    from urllib.parse import urlsplit
+
+    from .model_profiles import model_profiles_path, read_model_profiles
+    from .model_provider_schema import ModelProfileError
+
+    data = read_model_profiles(model_profiles_path(home_paths))
+    official = []
+    for provider in data["providers"].values():
+        if not provider["enabled"] or provider.get("auth"):
+            continue
+        endpoint = urlsplit(provider["api_base"])
+        if (endpoint.scheme == "https" and endpoint.hostname == "api.deepseek.com"
+                and endpoint.port in (None, 443) and endpoint.path in {
+                    "", "/v1", "/chat/completions", "/v1/chat/completions",
+                    "/responses", "/v1/responses", "/anthropic", "/anthropic/v1", "/anthropic/v1/messages",
+                }):
+            official.append(provider)
+    # 未登记为宿主凭据的变量不能用于搜索，避免业务子进程继承其明文。
+    keys = set()
+    for provider in official:
+        name = provider_environment_name(provider.get("api_key_ref"))
+        env = None if name in protected_env_names else {}
+        if key := provider_api_key(provider, environ=env):
+            keys.add(key)
+    if not keys:
+        raise ModelProfileError(
+            "未找到可用的 DeepSeek 官方密钥。请在当前用户的 /model 中保存并启用 https://api.deepseek.com 的 API Key 服务商。",
+            reason="credential_missing",
+        )
+    if len(keys) != 1:
+        raise ModelProfileError(
+            "当前用户保存了多个不同的 DeepSeek 官方密钥。请在 /model 中保留一个启用的官方密钥后重试。",
+            reason="credential_ambiguous",
+        )
+    key = keys.pop()
+    if not key.isascii() or any(not 33 <= ord(character) <= 126 for character in key):
+        raise ModelProfileError("DeepSeek 官方密钥格式无效。请在 /model 更新该服务商密钥。", reason="credential_invalid")
+    return key
+
+
 # LLM: 仅显式离线迁移使用，environ 由宿主提供；合法环境名即保留引用，暂空可存历史静态后备，不建新仓库。
 # 函数用途: 把原静态值与环境名称转换为可以存回原 provider 的凭据字段。
 def legacy_provider_credential(inline: str, environment_name: str, *, environ: Mapping) -> dict:

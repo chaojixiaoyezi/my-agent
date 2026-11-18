@@ -159,6 +159,37 @@ def _add_gateway_run_subcommand(gateway_sub):
     migration = gateway_sub.add_parser('migrate-single-process', help='证明旧执行者退出后迁移为单进程')
     migration.add_argument('--dry-run', action='store_true', help='只读预览，不创建锁、日志或目录')
     migration.set_defaults(func=cmd_gateway_migrate_single_process)
+    takeover = gateway_sub.add_parser("egress-prepare-takeover", help="为已有 Linux Gateway 原地部署出站治理准备冷启动凭据")
+    takeover.set_defaults(func=cmd_gateway_egress_prepare_takeover)
+
+
+def cmd_gateway_egress_prepare_takeover(args):
+    """Stopped Gateway 与原地接管计划共享生命周期锁，不启动、退出或更改用户任务。"""
+    import json
+
+    from ..agent.gateway_parts.standalone_lifecycle import (
+        StandaloneLifecycleUnavailable,
+        standalone_lifecycle_guard,
+    )
+    from ..agent.user_space.home_layout import home_paths
+    from ..agent.user_space.home_root import configured_home_root
+    from ..agent.user_space.owner_egress import OwnerEgressPolicyError
+    from ..agent.user_space.owner_egress_gateway import prepare_owner_egress_cold_takeover
+    from .common import frozen_gateway_arguments
+    from .gateway_coordinated_run import _cold_gateway_paths, coordinated_refusal
+
+    args = frozen_gateway_arguments(args)
+    try:
+        paths = _cold_gateway_paths(args)
+        root = home_paths(configured_home_root(args._gateway_frozen_config)).root
+        with standalone_lifecycle_guard(paths.root) as lifecycle:
+            report = prepare_owner_egress_cold_takeover(root, paths.root, lifecycle)
+    except OwnerEgressPolicyError as error:
+        return coordinated_refusal(error.code, reason=str(error), action=error.next_action)
+    except (StandaloneLifecycleUnavailable, OSError, ValueError) as error:
+        return coordinated_refusal("EGRESS_PREDECESSOR_UNPROVEN", reason=str(error))
+    print(json.dumps(report, ensure_ascii=False))
+    return 0
 
 
 def cmd_gateway_migrate_single_process(args):

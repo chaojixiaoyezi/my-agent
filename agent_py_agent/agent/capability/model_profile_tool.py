@@ -311,6 +311,7 @@ def build_manage_models_model_spec() -> ToolModelSpec:
 #   dangerous 门，因此只有删服务商需要用户确认，其余由 owner 审批模式统一裁决。不得按自然语言猜测用户授权。
 # 类用途: 把 TUI /model 的全部管理动作暴露给主会话代理，用户口头要求即可增删改切模型。
 class ManageModelsTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_manage_models_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(

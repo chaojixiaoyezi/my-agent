@@ -369,6 +369,7 @@ BOUNDARY_KEYS: dict[str, str] = {
     "tool_approval_timeout_seconds": "工具确认绝对截止；模型不能延长或关闭保护",
     "feishu_cli_backend_enabled": "决定宿主飞书请求后端；模型不能自行切换执行后端",
     "feishu_user_oauth_enabled": "本人OAuth功能的部署开关，模型不能自行启用",
+    "feishu_oauth_reauthorize_hours": "本人授权复用小时数仅部署者可改，重启 Gateway 生效",
     "feishu_oauth_redirect_uri": "OAuth准确回调地址，模型不能修改认证去向",
     "feishu_oauth_scopes": "部署允许申请的本人飞书授权范围，模型不能扩权",
     "skill_transfers_enabled": "跨owner内容导出/接收控制面开关；模型不能自行启用或代替双端本人确认",

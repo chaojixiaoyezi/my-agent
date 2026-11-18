@@ -1438,6 +1438,11 @@ agent_py_agent/
 |-- agent_py_agent/agent/user_space/task_credential_schema.py # 私人密文字段及有效期合同
 |-- agent_py_agent/agent/user_space/task_credential_http.py # 原宿主HTTP的引用登录、会话与签名
 |-- agent_py_agent/agent/user_space/feishu_oauth.py # 当前本人授权、密文token和刷新
+|-- agent_py_agent/agent/user_space/feishu_device_oauth.py # 单机设备授权、等待、续期和平台撤销
+|-- agent_py_agent/agent/user_space/owner_egress.py # 普通用户的出站默认、覆盖规则和策略持久化
+|-- agent_py_agent/agent/user_space/owner_egress_admin.py # 管理员分页选人及单人、批量设置出站规则
+|-- agent_py_agent/agent/user_space/owner_egress_linux.py # 核验专属 Linux 网络命名空间并更新内核放行规则
+|-- agent_py_agent/agent/user_space/owner_egress_gateway.py # 启动时固定用户隔离范围，核对旧进程和内核规则，发布管理员热更新
 |-- agent_py_agent/agent/user_space/feishu_authorization.py # 飞书功能权限、应用后台链接与本人授权配置事实
 |-- agent_py_agent/agent/adapter/feishu_user_history.py # 本人OAuth可见私聊/群会话发现与有界历史读取
 |-- agent_py_agent/agent/scheduler/source_authorization.py # 持久本人规则的来源授权与原OAuth续权复核
@@ -1459,6 +1464,9 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_task_credential_http.py # 引用登录、CSRF、签名和同源边界
 |-- agent_py_agent/tests/test_feishu_cli_backend.py # 私有运输、停止与未知写入
 |-- agent_py_agent/tests/test_feishu_oauth.py # 本人授权回调、撤销与身份负例
+|-- agent_py_agent/tests/test_owner_egress_policy.py # 逐用户出站策略的存取、继承及权限校验
+|-- agent_py_agent/tests/test_owner_egress_gateway.py # 实例接管、热改发布与内核回读
+|-- agent_py_agent/tests/test_owner_egress_linux.py # Linux 命名空间、网络规则及受限执行体出生
 |-- agent_py_agent/tests/test_feishu_user_history.py # 本人历史真实HTTP往返、分页绑定和撤权负例
 |-- agent_py_agent/tests/test_r10_feishu_progress_default.py # 默认过程卡、显式关闭和安装迁移
 |-- agent_py_agent/tests/test_r9_feishu_user_event_sources.py # 指定群成员订阅、入站预筛和宿主租约
@@ -1466,6 +1474,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r10_feishu_source_projection_recovery.py # 两种运行模式丢索引及epoch交错恢复
 |-- agent_py_agent/tests/test_r10_feishu_sheet_structure.py # 建子表/重命名的编辑权限与未知写入不重放
 |-- docs/design/FEISHU_USER_MESSAGE_HISTORY.md # 本人可见会话、授权范围和部分覆盖说明
+|-- docs/design/OWNER_EGRESS_GOVERNANCE.md # 普通用户 IP 及端口策略的 Linux 部署、名单设置与生效核对
 |-- docs/design/FEISHU_GROUP_EVENT_SUBSCRIPTIONS.md # 本人与机器人共同所在群的消息订阅合同
 `-- docs/design/IM_UNATTENDED_IMPLEMENTATION.md # 本期实施合同、部署和验收边界
 ```

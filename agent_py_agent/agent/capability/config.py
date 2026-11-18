@@ -61,6 +61,8 @@ class CapabilityConfig:
     # 本人 OAuth 只使用此部署回调及 scopes；空回调明确未配置，不借管理员登录。
     feishu_user_oauth_enabled: bool = True
     feishu_oauth_redirect_uri: str = ""
+    # 部署级互动授权最长复用小时数，Gateway 启动时固定，刷新不能续长。
+    feishu_oauth_reauthorize_hours: int = 8760
     feishu_oauth_scopes: list[str] = field(default_factory=lambda: list(DEFAULT_FEISHU_OAUTH_SCOPES))
     # 无 TUI 的主子代理工具审批发到原发起人的私人卡片；具体批准仍回原请求/claim/attempt。
     im_tool_approvals_enabled: bool = True
@@ -217,6 +219,10 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
     if field_name == "max_parallel_tool_calls_global":
         if type(value) is not int or value < 0:
             raise ValueError("max_parallel_tool_calls_global 必须为非负整数。")
+        return value
+    if field_name == "feishu_oauth_reauthorize_hours":
+        if type(value) is not int or value < 1:
+            raise ValueError("feishu_oauth_reauthorize_hours 必须为正整数小时。")
         return value
     if field_name == "tool_approval_timeout_seconds":
         if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).isdigit() or int(value) <= 0:

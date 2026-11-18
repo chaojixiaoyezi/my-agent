@@ -84,7 +84,8 @@ def authorize_personal_source(agent, repository, job, rule_id, generation, sourc
 
     revalidate = personal_source_revalidator(agent, repository, job, rule_id, generation, source)
     actor = source['subscriber_actor_id']
-    token = _user_access_token_with_authority(agent, actor, revalidate=revalidate)
+    token = _user_access_token_with_authority(agent, actor, revalidate=revalidate,
+                                             scope_groups=(('im:chat:read', 'im:chat:readonly'),))
     # token 不保存到事件、模型或投影；本人 Get 和 bot 成员事实必须指向同一准确群。
     from urllib.parse import quote
 

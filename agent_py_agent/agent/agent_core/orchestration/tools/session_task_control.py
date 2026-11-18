@@ -54,6 +54,7 @@ class _TaskFailure:
 # LLM: 只读工具：返回任务的权威状态、正文引用与结果 refs；不改任何状态。
 # 类用途: 查询一条会话任务的当前状态。
 class GetSessionTaskTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
@@ -91,6 +92,7 @@ class GetSessionTaskTool(BaseTool):
 #   已经是终态时按幂等处理——返回当前状态，不改写（状态机保证终态不被覆盖）。
 # 类用途: 取消一条尚未结束的会话任务，并通知派活的会话。
 class CancelSessionTaskTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),

@@ -3,10 +3,11 @@
 import json
 import os
 import selectors
+import stat
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 
 from . import multiprocess_executor_fds as descriptor_plan
@@ -37,17 +38,29 @@ def spawn_waiting(command) -> WaitingExecutor:
     pinned = descriptor_plan.pin_descriptors(command.io)
     descriptors = list(pinned.owned)
     try:
+        egress = command.egress_namespace
+        if egress is not None:
+            from ..user_space.owner_egress import OwnerEgressPolicyError
+
+            if any(stream is None for stream in pinned.stdio) or any(
+                stat.S_ISSOCK(os.fstat(fd).st_mode) for fd in pinned.owned
+            ):
+                raise OwnerEgressPolicyError(
+                    "EGRESS_INHERITED_SOCKET_UNVERIFIED", "隔离业务进程的标准流须显式，且不能继承宿主套接字。",
+                    next_action="以明确的管道、文件或 DEVNULL 传递标准流和业务数据。",
+                )
         release_read, release_write = os.pipe()
         descriptors.extend((release_read, release_write))
         ready_read, ready_write = os.pipe()
         descriptors.extend((ready_read, ready_write))
-        with _native_birth(command.native_domain) as domain:
+        egress_context = nullcontext(([], ())) if egress is None else egress.command_prefix()
+        with egress_context as (prefix, namespace_fds), _native_birth(command.native_domain) as domain:
             process = subprocess.Popen(
-                [sys.executable, "-I", "-S", shim.__file__, str(release_read), str(ready_write),
+                [*prefix, sys.executable, "-I", "-S", shim.__file__, str(release_read), str(ready_write),
                  json.dumps(pinned.allowed)],
                 stdin=pinned.stdio[0], stdout=pinned.stdio[1], stderr=pinned.stdio[2],
                 cwd="/", env={}, close_fds=True, start_new_session=True,
-                pass_fds=(release_read, ready_write, *(fd for fd, _ in pinned.allowed)),
+                pass_fds=(release_read, ready_write, *(fd for fd, _ in pinned.allowed), *namespace_fds),
                 **(command.io.text.popen_options() if command.io.text is not None else {}),
             )
             if domain is not None:

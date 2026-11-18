@@ -410,6 +410,7 @@ class ScheduleTool(BaseTool):
             resource_scopes=ResourceScopePolicy(parameter_names=("job_id",),
             parameter_kinds={"job_id": "logical"}),
             input_policy=ToolInputPolicy(internal_parameters=("__tool_call_id", "__run_scope")),
+            owner_egress_local_actions=frozenset(_ACTIONS),
         )
 
     def _foreground_admin(self):

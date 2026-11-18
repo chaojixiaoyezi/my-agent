@@ -1118,6 +1118,8 @@ tool_web_max_chars: 100000
 
 # web_search / web_fetch 工具默认超时秒数
 tool_http_timeout: 30
+# 允许显式指定 web_search(provider="deepseek")，使用当前用户保存的 DeepSeek 官方凭据。官方 API 可能计费。
+tool_deepseek_search_enabled: true
 
 # 路径访问策略，主代理和所有子代理共用：
 # - normal：默认模式；在 WorkspaceOnly 的 owner home 内可使用用户自己的全部文件（包括自己的配置文件），

@@ -125,6 +125,10 @@ def execute_provider_network(agent: object, data: dict, operation: str, payload:
     identity = str(payload.get("session_id") or payload.get("conversation_id") or "model-menu")
     if operation == "probe" and shared_profile_key(payload.get("profile_id")):
         data = _shared_probe_data(agent, data, str(payload["profile_id"]))
+    else:
+        from .model_profiles import require_private_provider_transport
+
+        require_private_provider_transport(agent.home_paths)
     target = data["profiles"].get(str(payload.get("profile_id") or ""), {}).get("provider_id") if operation == "probe" else payload.get("provider_id")
     data = _network_credential_snapshot(data, provider_ids={str(target)} if target else set())
     started = time.monotonic()

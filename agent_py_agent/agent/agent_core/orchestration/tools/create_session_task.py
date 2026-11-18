@@ -53,6 +53,7 @@ class _CreateTaskInput:
 # LLM: 这是会话间派活的唯一模型入口；不要在这里加轮询、推进或子代理语义。
 # 类用途: 校验、授权并把一条任务派给另一个本地会话，同时落权威记录与投递正文。
 class CreateSessionTaskTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),

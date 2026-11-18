@@ -109,6 +109,7 @@ def build_skill_search_model_spec() -> ToolModelSpec:
 # LLM: 同一快照承接公开 Skill 与显式包范围；未声明成员仅给同代建议，成功读取后才固定原引用，真实失效不降为参数错。
 # 类用途: 为模型提供方法检索、路径纠错和分页正文读取，引用写入不代表执行或扩权。
 class SkillSearchTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_skill_search_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),

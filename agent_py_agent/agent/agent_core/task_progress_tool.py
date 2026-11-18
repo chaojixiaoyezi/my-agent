@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 # LLM: 此模型工具仅负责原软进度账的校验和投影，不调度下一回合，也不决定业务任务是否完成。
 # 类用途: 提供软进度清单的读写入口，不负责催办、续跑或验收。
 class TaskProgressTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_task_progress_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(

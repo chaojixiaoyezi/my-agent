@@ -57,6 +57,7 @@ def list_owner_sessions_tool_visible(home_paths: object, config: CapabilityConfi
 # LLM: 只读、可并行；资源域是当前 owner 的会话清单，不写任何状态。
 # 类用途: 列出本 owner 的其他会话，供 send_session_message / create_session_task 选目标。
 class ListOwnerSessionsTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),

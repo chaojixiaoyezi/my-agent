@@ -44,6 +44,7 @@ from .runtime_boundary import (
     exact_read_boundary_error,
     exact_read_roots,
 )
+from .web_fetch_runtime import unmanaged_owner_egress_error
 from .workspace_read_scope import build_workspace_read_context
 from .workspace_write_scope import build_workspace_write_context
 from .write_boundary import (
@@ -218,6 +219,12 @@ def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutc
             handler_executed=False,
         )
     tool = runtime.handler
+    egress = request.runtime_snapshot.owner_egress_policy
+    if egress is not None and not _owner_egress_admitted_tool(tool, request):
+        egress_denial = unmanaged_owner_egress_error(request.tool_name, egress)
+        if egress_denial is not None:
+            return apply_tool_execution_facts(egress_denial,
+                failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False)
 
     tool_params = _tool_params_for_execution(
         request.tool_name,
@@ -333,6 +340,45 @@ def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutc
         if isinstance(observation, dict):
             outcome.result_envelope["progress_observation"] = observation
     return outcome
+
+
+
+def _owner_egress_admitted_tool(tool: BaseTool, request: RegistryToolInvokeRequest) -> bool:
+    # 未声明的连接器默认拒绝。已核验的本地动作和原 owner 派工仍通过各自既有授权。
+    from ._filesystem_edit import EditFileTool
+    from ._filesystem_find import FindFilesTool
+    from ._filesystem_list import ListFilesTool
+    from ._filesystem_patch import ApplyPatchTool
+    from ._filesystem_read import ReadFileTool
+    from ._filesystem_search import SearchTextTool
+    from ._filesystem_write import WriteFileTool
+    from .artifact import ReadArtifactTool
+    from .process_sessions import ProcessSessionTool
+    from .pty_sessions import TerminalSessionTool
+    from .web import WebFetchTool
+    from .web_search import WebSearchTool
+
+    if getattr(type(tool), "owner_egress_local", False) is True or type(tool) in {
+        WebFetchTool, WebSearchTool, EditFileTool, FindFilesTool, ListFilesTool,
+        ApplyPatchTool, ReadArtifactTool, ReadFileTool, SearchTextTool,
+    }:
+        return True
+    action = request.arguments.get("action")
+    if isinstance(action, str) and action in tool.runtime_policy.owner_egress_local_actions:
+        return True
+    if type(tool) is WriteFileTool and "source_ref" not in request.arguments:
+        return True
+    owner_policy = request.runtime_snapshot.owner_egress_policy
+    attached = getattr(owner_policy, "has_managed_namespace", None)
+    if attached is not None and attached():
+        from .scripts_tool import ScriptsTool
+        from .shell import ShellTool
+
+        if type(tool) in {ShellTool, ProcessSessionTool, TerminalSessionTool, ScriptsTool}:
+            return True
+    # 允许已有进程沿原授权停止，防止限制生效后无法停止。
+    return ((type(tool) is ProcessSessionTool and request.arguments.get("action") == "stop")
+            or (type(tool) is TerminalSessionTool and request.arguments.get("action") == "close"))
 
 
 # LLM: 读取/写入范围只读当前请求的宿主字段，与业务 arguments 分离；沿原墙外授权派生，不按 workspace 列表猜权限。

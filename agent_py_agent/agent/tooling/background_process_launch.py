@@ -189,6 +189,8 @@ def start_background_process(
         redaction_read, redaction_write = os.pipe()
     handed_off = False
     spec_path = store.root / ".launches" / f"{session_id}.json"
+    from ..user_space.owner_egress_linux import stage_owner_egress_process
+
     try:
         with store.transaction() as transaction:
             _require_admission(request)
@@ -210,12 +212,8 @@ def start_background_process(
                     "activation": request.activation.to_payload() if request.activation is not None else None,
                 },
             )
-        with store.transaction() as transaction:
-            _require_admission(request)
-            current = transaction.load(session_id)
-            if current is None or current["stop_requested"] or current["status"] != "starting":
-                raise RuntimeError("managed background reservation revoked")
-            process = subprocess.Popen(
+        with stage_owner_egress_process(
+                request.access_scope.owner_home or None,
                 [
                     sys.executable,
                     "-u",
@@ -238,10 +236,16 @@ def start_background_process(
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 if os.name == "nt"
                 else 0,
-            )
-            birth = capture_process_birth_token(process.pid)
-            if not birth:
-                raise OSError("managed background host identity unavailable")
+        ) as launch:
+            with store.transaction() as transaction:
+                _require_admission(request)
+                current = transaction.load(session_id)
+                if current is None or current["stop_requested"] or current["status"] != "starting":
+                    raise RuntimeError("managed background reservation revoked")
+                process = launch()
+                birth = capture_process_birth_token(process.pid)
+                if not birth:
+                    raise OSError("managed background host identity unavailable")
         if redaction_read is not None:
             os.close(redaction_read)
             redaction_read = None

@@ -31,6 +31,7 @@ from ..capability.agents_source_processes import (
 )
 from ..common.cancellation import ToolCancelled, cancellation_requested, raise_if_cancelled
 from ..contracts.gates.command_policy import evaluate_command_policy
+from ..user_space.owner_egress import OwnerEgressPolicyError
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -498,10 +499,13 @@ class PtySessionRegistry:
             if launch.cancelled:
                 raise ToolCancelled("PTY 启动已被取消")
         raise_if_cancelled()
+        from ..user_space.owner_egress_linux import launch_owner_egress_process
+
         master_fd, slave_fd = pty.openpty()
         try:
             os.set_blocking(master_fd, False)
-            process = subprocess.Popen(
+            process = launch_owner_egress_process(
+                owner_home or None,
                 exec_arg,
                 shell=use_shell,
                 cwd=str(target),
@@ -1127,6 +1131,12 @@ class TerminalSessionTool(BaseTool):
             return self._error("SANDBOX_UNAVAILABLE", exc.code)
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))
+        except OwnerEgressPolicyError as exc:
+            effect = "not_started" if exc.side_effect == "not_started" else "unknown"
+            return ToolHandlerOutcome(
+                self.model_spec.name, False, str(exc), error_code=exc.code,
+                effect_outcome=effect, next_action=exc.next_action,
+            )
         except PtySessionLimitError as exc:
             reported_code = (
                 "PTY_OWNER_SESSION_LIMIT_REACHED"

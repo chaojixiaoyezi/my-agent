@@ -282,7 +282,7 @@ def test_personal_oauth_permission_queries_and_business_share_same_identity(tmp_
     server.members['sheet_one'] = [_member('openid', 'ou_one', 'full_access')]
     adapter = agent.channel_registry.adapter_for('feishu')
     monkeypatch.setattr(adapter, '_get_tenant_access_token', lambda: pytest.fail('personal request borrowed application identity'))
-    monkeypatch.setattr(feishu_oauth, 'user_access_token', lambda _agent: server.expected_token)
+    monkeypatch.setattr(feishu_oauth, 'user_access_token', lambda _agent, *, scope_groups: server.expected_token)
     monkeypatch.setattr(feishu_cli, 'cli_binary', lambda: __file__)
     seen = []
 

@@ -2,6 +2,7 @@
 # 模块用途: 按唤醒事实和策略计算续跑可见工具，保持终端操作可续接；修改时联合后台运行、快照和工具回归。
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -235,19 +236,25 @@ CREDENTIAL_INPUT_PRELOAD_TOOLS: tuple[str, ...] = (
 
 
 def credential_wake_preload_tools(wake: object, *, reason: str = "") -> tuple[str, ...]:
-    """仅当结构化唤醒为已验证 ready 凭据结算时返回三个目标预载工具。"""
+    """本人授权或任务凭据就绪时预载原许可内的消费工具，失败时仅提示状态查询入口。"""
     if not isinstance(wake, dict):
         return ()
     effective_reason = str(reason or wake.get("reason") or "").strip().lower()
     if effective_reason != "task_input_resolved":
         return ()
     metadata = wake.get("metadata")
-    if (
-        not isinstance(metadata, dict)
-        or metadata.get("schema_version") != "task-input-event.v1"
-        or metadata.get("input_provider") != "credential"
-        or metadata.get("input_status") != "ready"
-    ):
+    if not isinstance(metadata, dict) or metadata.get("schema_version") != "task-input-event.v1":
+        return ()
+    if metadata.get("input_provider") == "feishu_oauth":
+        input_id = metadata.get("input_id")
+        if isinstance(input_id, str) and re.fullmatch(r"oauth_[0-9a-f]{32}", input_id):
+            refs = wake.get("evidence_refs")
+            if metadata.get("input_status") == "ready" and isinstance(refs, (list, tuple)) and input_id in refs:
+                return ("channel_messages", "feishu_auth", "feishu_cloud")
+            if metadata.get("input_status") in {"failed", "revoked", "expired", "cancelled"}:
+                return ("feishu_auth",)
+        return ()
+    if metadata.get("input_provider") != "credential" or metadata.get("input_status") != "ready":
         return ()
     from .input_dependencies import _validated_credential_result
 
@@ -332,6 +339,14 @@ def background_tool_policy_decision(
         profile, default_tools = _default_profile_for_request(request)
         tools = list(dict.fromkeys((*default_tools, *_BACKGROUND_MANAGEMENT_TOOLS)))
         sources = [f"default_profile:{profile}"]
+        # 授权回来是原任务的续轮。展示层无法恢复被默认目录删除的工具。
+        # channel_messages 自带只读 status 和历史查询，原任务、owner 和显式配置仍可收紧。
+        wake = request.wake_signal
+        if isinstance(wake, dict) and wake_meta.get("input_provider") == "feishu_oauth":
+            consumers = credential_wake_preload_tools(wake, reason=request.reason)
+            if "channel_messages" in consumers:
+                tools.append("channel_messages")
+                sources.append("task_input.feishu_oauth")
     tools = active_model_subagent_tools(tools)
     tools, removed = _apply_policy_limits(tools, request)
     if removed:

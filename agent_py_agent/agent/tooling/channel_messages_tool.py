@@ -152,6 +152,22 @@ _FAILURE_SPECS = {
         "current_group_chat_unverified",
         '确认当前对话发生在已接入飞书群内，或在私人助手会话改用 selector="user" 配合 list_chats。',
     ),
+    "FEISHU_BOT_GROUP_MEMBERSHIP_REQUIRED": (
+        "读取目标群历史需要机器人在群内，本次未返回聊天记录。",
+        "feishu_bot_group_membership_required",
+        '确认目标群及机器人入群状态，入群后按原 chat_id 重试。平台返回的 HTTP 状态和错误码请见 error_details。'),
+    "FEISHU_USER_OPERATION_SCOPE_REQUIRED": (
+        "本次本人授权未覆盖这个会话读取动作，未调用消息接口。", "operation_scope_not_granted",
+        '调用 feishu_auth(action="permissions") 核对该动作所需权限，在飞书申请并发布后再通过本人授权卡补授权。'),
+    "FEISHU_USER_EXECUTION_INACTIVE": (
+        "本次读取没有有效的本人任务执行权，未请求飞书历史接口。", "execution_scope_inactive",
+        '在当前用户的活动私人任务中调用 channel_messages(action="list_chats", selector="user")；无需为已结束的旧任务重发授权卡。'),
+    "FEISHU_USER_REFRESH_UNAVAILABLE": (
+        "本人凭据续期接口未能返回有效响应，原授权仍保存，本次未调用消息接口。", "user_refresh_unavailable",
+        '查看 error_details 中的 provider_error 和 http_status。连接或限流问题恢复后重试；invalid_client 请部署者核对应用配置。'),
+    "FEISHU_USER_REFRESH_REJECTED": (
+        "飞书拒绝了本次本人凭据续期，未请求消息接口。", "refresh_rejected",
+        '调用 feishu_auth(action="status")。若状态为 reauthorization_required，请在本人私聊用 feishu_auth(action="authorize") 重新授权；若为 ready，可用已轮换的新凭据查询。'),
     "FEISHU_USER_AUTH_REQUIRED": (
         "当前用户本人飞书 OAuth 授权缺失、已撤销或配置发生变更，未读取本人可见会话历史。",
         "feishu_user_oauth_required",
@@ -320,6 +336,7 @@ class ChannelMessagesTool(BaseTool):
                 facts = _permission_facts(self.agent, 'user', params.get('action', 'list'))
                 envelope = dict(result.result_envelope or {})
                 envelope['authorization'] = facts
+                envelope['error_details'] = {**envelope.get('error_details', {}), **exc.provider_facts}
                 result.result_envelope = envelope
                 result.output = json.dumps(
                     {

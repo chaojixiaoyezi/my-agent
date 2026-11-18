@@ -408,11 +408,13 @@ class InputDependencyAccess:
         blocking=True,
         runtime_db=None,
         owner_home=None,
+        poll_device_inputs=None,
     ):
         self.store, self.owner, self.quota = store, owner, quota
         self.load_child, self.upsert_wake = load_child, upsert_wake
         self.commit, self.blocking = commit, blocking
         self.runtime_db = runtime_db
+        self.poll_device_inputs = poll_device_inputs
         self.owner_home = Path(owner_home) if owner_home is not None else None
 
     # LLM: 有commit必须每次消费原门；默认Count0直接调用，不从对象字段推断许可。
@@ -686,7 +688,11 @@ class InputDependencyAccess:
         for input_id in getattr(link,'input_dependency_refs',()):
             row = self.read(input_id,task_id=task_id)
             if row['status'] == 'pending':
-                pending.append(row['expires_at'])
+                if row['provider'] == 'feishu_oauth' and row.get('metadata', {}).get('flow') == 'device':
+                    from ..user_space.feishu_oauth import device_poll_due
+                    pending.append(device_poll_due(self.owner_home, row))
+                else:
+                    pending.append(row['expires_at'])
         if pending and self.upsert_wake is not None:
             self.perform(lambda:self.upsert_wake(root_task_id=task_id, root_thread_id=link.thread_id,
                 next_due_at=min(pending), kind='task_input_deadline'))
@@ -698,11 +704,16 @@ class InputDependencyAccess:
 # LLM: 旧入口仅取原Agent依赖，不物化新对象；Count0原callback/初始化/缺repo语义保持。
 # 函数用途: 让原调用方复用唯一输入事务实现。
 def input_dependency_access(agent):
+    from functools import partial
+
+    from ..user_space.feishu_oauth import poll_device_inputs
+
     manager = getattr(agent,'subagents',None)
     repo = getattr(manager,'runtime_db',None)
     owner_home = getattr(getattr(agent, 'home_paths', None), 'owner_home_dir', None)
     return InputDependencyAccess(agent.conversation_store, owner_identity_from_config(agent.config), getattr(agent,'owner_quota',None),
-        getattr(manager,'load',None), getattr(repo,'upsert_wake',None), runtime_db=repo, owner_home=owner_home)
+        getattr(manager,'load',None), getattr(repo,'upsert_wake',None), runtime_db=repo, owner_home=owner_home,
+        poll_device_inputs=partial(poll_device_inputs, agent))
 
 
 # LLM: store/owner/路径由调用方原来源冻结；只组装既有配额、canonical child loader和existing-only RuntimeDB，不创建Agent/owner/新库；commit逐次原位验权。

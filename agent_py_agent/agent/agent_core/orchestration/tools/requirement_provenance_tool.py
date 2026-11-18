@@ -275,6 +275,7 @@ def _provenance_failure(
 # LLM: 需求溯源操作模型工具类（实现 BaseTool 与 execute_scoped）。
 # 类用途: 处理来自模型或协调层的结构化需求溯源动作请求。
 class RequirementProvenanceTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         approval_policy=ApprovalPolicy("never"),

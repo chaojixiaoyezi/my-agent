@@ -1,3 +1,9 @@
+## 2026-11-18 本人授权、搜索与普通用户出站
+
+- 飞书私聊可使用官方设备授权，小时上限随服务启动读取。业务工具遵守每次实际授予的权限交集；见[飞书本人会话与历史读取](docs/design/FEISHU_USER_MESSAGE_HISTORY.md)。
+- `web_search` 可显式选择 `provider=deepseek` 使用当前用户的官方 DeepSeek 档案搜索。聊天模型选择和默认搜索路径分别配置；首次设置无需重复向模型提供已有凭据。
+- 管理员可通过 `admin_controls` 查找规范用户编号并管理全局默认和逐用户覆盖。Linux 测试 Gateway 已核对同一后台脚本、既有 TCP 连接在撤销后的流量，以及另外两名用户的连接。首次绑定、原地接管和内核规则回读见[普通用户业务出站治理](docs/design/OWNER_EGRESS_GOVERNANCE.md)。
+
 ## 2026-11-18 飞书凭据卡直连同步脚本、受控浏览器与 HTTP 表单续跑（本地候选）
 
 - **单点凭据授权、发现与重放安全唤醒（`FC1`）**：`task_credentials.authorized_credential_material` 作为唯一宿主凭据解密入口，支持飞书同一已验证 `owner/actor/thread` 跨新根任务的 `task` 卡续用（子代理、异线程、异成员与旧 attempt 仍关闭拒绝），并在 `discover_owner_credentials` / `discover_group_credentials` 中统一暴露可用 `collected` 卡及可选消费方式；卡提交通过 `input_dependencies.resolve(..., credential_result=...)` 原子落盘可公开引用、规范 `origin` 与代次，覆盖密文保存后与唤醒信号发布前的两处崩溃恢复点并预载 `request_credentials`、`run_command`、`web_fetch`。

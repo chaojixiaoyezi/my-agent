@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.error
 import zlib
+from contextlib import nullcontext
 from dataclasses import InitVar, dataclass, replace
 from hashlib import sha256
 from pathlib import Path
@@ -25,7 +26,8 @@ from ..common.cancellation import (
     cancellation_requested,
     register_cancellation_callback,
 )
-from .models import ToolHandlerOutcome
+from ..user_space.owner_egress import OwnerEgressEndpoint, OwnerEgressPolicyError
+from .models import ToolHandlerOutcome, ToolInvocationContext
 from .web_html_preview import is_html_response, visible_html_text
 from .web_http_helpers import MIN_RESPONSE_PREVIEW_CHARS
 from .web_markdown import html_to_markdown
@@ -65,6 +67,7 @@ class FetchRawRequest:
     timeout: int
     max_bytes: int | None = None
     authorization_origin: str = ""
+    follow_redirects: bool = True
     config: InitVar[object | None] = None
 
     # LLM: 缺失或无效配置沿旧百万字节兜底；不接受 bool、非整数或非正预算，不改调用者显式覆盖。
@@ -103,6 +106,71 @@ class PinResult:
 
     ip: str | None
     error: ToolHandlerOutcome | None
+    restricted: bool = False
+
+
+def invocation_network_denial(tool: str, context: ToolInvocationContext) -> ToolHandlerOutcome | None:
+    if (context.execution_permission_context or {}).get("network_enabled") is not False:
+        return None
+    return ToolHandlerOutcome(
+        tool, False, "当前执行范围已禁用联网，未发送请求。",
+        error_code="TOOL_PERMISSION_DENIED", reported_error_code="OWNER_NETWORK_DISABLED",
+        effect_outcome="not_started", next_action="请在拥有联网权限的会话或任务中重试。",
+    )
+
+
+def egress_runtime_denial(tool: str, exc: OwnerEgressPolicyError) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        tool, False, str(exc), error_code="TOOL_UNAVAILABLE", reported_error_code=exc.code,
+        effect_outcome="not_started", next_action=exc.next_action,
+    )
+
+
+def owner_http_scope(policy_provider):
+    bind = getattr(policy_provider, "http_scope", None)
+    return bind() if bind is not None else nullcontext()
+
+
+def unmanaged_owner_egress_error(tool, policy_provider) -> ToolHandlerOutcome | None:
+    if policy_provider is None:
+        return None
+    try:
+        managed = getattr(policy_provider, "requires_managed_transport", None)
+        blocked = (managed is not None and managed()) or policy_provider().mode != "unrestricted"
+    except OwnerEgressPolicyError as exc:
+        return egress_runtime_denial(tool, exc)
+    if not blocked:
+        return None
+    return ToolHandlerOutcome(
+        tool, False, "当前 owner 使用出站白名单，此工具没有可核验的宿主管控路径，未执行。",
+        error_code="TOOL_PERMISSION_DENIED", reported_error_code="OWNER_EGRESS_TRANSPORT_UNAVAILABLE",
+        effect_outcome="not_started", next_action="请使用受出站策略约束的 web_fetch 或 web_search 发起网页请求。",
+    )
+
+
+def owner_egress_pin(tool, url, resolved_ips, policy_provider) -> PinResult:
+    """在原网络安全门之后，从同一组解析结果选出 owner 允许连接的地址。"""
+    if policy_provider is None:
+        return PinResult(resolved_ips[0] if resolved_ips else None, None)
+    try:
+        policy = policy_provider()
+    except OwnerEgressPolicyError as exc:
+        return PinResult(None, ToolHandlerOutcome(
+            tool, False, str(exc), error_code="TOOL_UNAVAILABLE", reported_error_code=exc.code,
+            effect_outcome="not_started", next_action=exc.next_action,
+        ), restricted=True)
+    if policy.mode == "unrestricted":
+        return PinResult(resolved_ips[0] if resolved_ips else None, None)
+
+    target = _target_for(url, "")
+    for ip in resolved_ips:
+        if policy.permits(ip, target.port):
+            return PinResult(ip, None, restricted=True)
+    return PinResult(None, ToolHandlerOutcome(
+        tool, False, f"当前 owner 出站白名单未允许目标 {target.host}:{target.port} 的已解析地址。",
+        error_code="TOOL_PERMISSION_DENIED", reported_error_code="OWNER_EGRESS_ENDPOINT_DENIED",
+        effect_outcome="not_started", next_action="请让管理员核对目标 IP 与端口的出站策略。",
+    ), restricted=True)
 
 
 @dataclass(frozen=True)
@@ -111,6 +179,7 @@ class _Target:
     host: str
     port: int
     ip: str
+    verify_peer: bool = False
 
 
 @dataclass(frozen=True)
@@ -128,15 +197,33 @@ class _HopOutcome:
     status: int = 0
 
 
+class _OwnerEgressPeerMismatch(OSError):
+    pass
+
+
+def _connect_pinned(target: _Target, timeout: float) -> socket.socket:
+    sock = socket.create_connection((target.ip, target.port), timeout)
+    if not target.verify_peer:
+        return sock
+    try:
+        peer = sock.getpeername()
+        if OwnerEgressEndpoint(peer[0], peer[1]) != OwnerEgressEndpoint(target.ip, target.port):
+            raise _OwnerEgressPeerMismatch()
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """连到网关校验过的 IP,但 Host 头/TLS SNI 用原主机名——杜绝连接层重解析 DNS(防 rebinding/TOCTOU)。"""
 
     def __init__(self, target: _Target, timeout: int, context: ssl.SSLContext) -> None:
         super().__init__(target.host, target.port, timeout=timeout, context=context)
-        self._pin_ip = target.ip
+        self._target = target
 
     def connect(self) -> None:
-        self.sock = socket.create_connection((self._pin_ip, self.port), self.timeout)
+        self.sock = _connect_pinned(self._target, self.timeout)
         if self._tunnel_host:
             self._tunnel()
         self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
@@ -145,19 +232,19 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     def __init__(self, target: _Target, timeout: int) -> None:
         super().__init__(target.host, target.port, timeout=timeout)
-        self._pin_ip = target.ip
+        self._target = target
 
     def connect(self) -> None:
-        self.sock = socket.create_connection((self._pin_ip, self.port), self.timeout)
+        self.sock = _connect_pinned(self._target, self.timeout)
         if self._tunnel_host:
             self._tunnel()
 
 
-def _target_for(url: str, pin_ip: str) -> _Target:
+def _target_for(url: str, pin_ip: str, *, verify_peer: bool = False) -> _Target:
     parts = urlsplit(url)
     scheme = (parts.scheme or "http").lower()
     port = parts.port or (443 if scheme == "https" else 80)
-    return _Target(scheme, parts.hostname or "", port, pin_ip)
+    return _Target(scheme, parts.hostname or "", port, pin_ip, verify_peer)
 
 
 def _request_path(url: str) -> str:
@@ -208,14 +295,16 @@ def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_p
             return _network_failure(request.tool, ToolCancelled("cancelled"))
         pin = resolve_pin(url)
         if pin.error is not None:
-            return pin.error  # 初始或某重定向目标没过网关
+            # 后续跳被拦时，之前的业务请求已经发出。
+            return replace(pin.error, effect_outcome="unknown") if _hop else pin.error
         if not pin.ip:
             return ToolHandlerOutcome(request.tool, False, "主机解析失败", error_code="NETWORK_REQUEST_FAILED")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return _network_failure(request.tool, TimeoutError())
         request = replace(request, timeout=remaining)
-        outcome = _do_hop(_HopReq(_target_for(url, pin.ip), request, url, body), format_http_error)
+        target = _target_for(url, pin.ip, verify_peer=pin.restricted)
+        outcome = _do_hop(_HopReq(target, request, url, body), format_http_error)
         if outcome.redirect_to:
             if request.authorization_origin:
                 from ..user_space.task_credentials import credential_origin
@@ -237,13 +326,19 @@ def _do_hop(hop: _HopReq, format_http_error) -> _HopOutcome:
         with register_cancellation_callback(lambda: _abort_connection(conn)):
             if cancellation_requested():
                 raise ToolCancelled("cancelled")
-            location = _redirect_target(resp, hop.url)
+            location = _redirect_target(resp, hop.url) if hop.request.follow_redirects else ""
             if location:
                 return _HopOutcome(location, None, resp.status)
             result = _finalize_hop(hop, resp, format_http_error)
             if _connection_timed_out(conn):
                 raise TimeoutError()
             return _HopOutcome("", result)
+    except _OwnerEgressPeerMismatch:
+        return _HopOutcome("", ToolHandlerOutcome(
+            hop.request.tool, False, "实际连接端点与 owner 授权的 IP 和端口不一致，未发送 HTTP 请求。",
+            error_code="TOOL_PERMISSION_DENIED", reported_error_code="OWNER_EGRESS_PEER_MISMATCH",
+            effect_outcome="not_started", next_action="请让管理员检查宿主的连接路由和出站策略。",
+        ))
     except (ToolCancelled, TimeoutError, OSError, ssl.SSLError, http.client.HTTPException) as exc:
         # 连接或读取被取消/超时/断流时使用同一结构化网络结果。
         return _HopOutcome("", _network_failure(hop.request.tool, TimeoutError() if _connection_timed_out(conn) else exc))

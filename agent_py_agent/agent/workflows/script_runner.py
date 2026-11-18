@@ -64,6 +64,7 @@ from ..path_access_policy import (
 from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling._subprocess_env_scrub import scrub_subprocess_env
 from ..tooling.write_boundary import SandboxWriteProtection, ordered_write_scope_roots
+from ..user_space.owner_egress import OwnerEgressPolicyError, require_owner_process_egress
 from .datasource_runtime import (
     ScriptDatasourceRuntime,
     script_history_record,
@@ -827,16 +828,18 @@ def _execute(command, folder, environment, input_json, timeout, capture, *, cred
         stdin.seek(0)
         raise_if_cancelled()
         launching = time.monotonic()
-        process = subprocess.Popen(
-            spawn_cmd,
-            cwd=folder,
-            env=environment,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            start_new_session=os.name == 'posix',
-            **({'pass_fds': pass_fds} if pass_fds else {}),
-        )
+        opts = {'cwd': folder, 'env': environment, 'stdin': stdin, 'stdout': stdout, 'stderr': stderr,
+                'start_new_session': os.name == 'posix'}
+        if pass_fds:
+            opts['pass_fds'] = pass_fds
+        owner_home = capture.get('owner_home_for_egress')
+        if owner_home is None:
+            process = subprocess.Popen(spawn_cmd, **opts)
+        else:
+            from ..user_space.owner_egress_linux import launch_owner_egress_process
+
+            process = launch_owner_egress_process(owner_home, spawn_cmd, authority_root=capture['egress_authority_root'],
+                                                  **opts)
         running = time.monotonic()
         capture['started'] = True
         capture['phase'] = 'started'
@@ -1450,11 +1453,16 @@ class ScriptRunner:
         delivery_receipts = []
         batch, envelope_parsed, output_dir, output_artifacts = None, False, '', ()
         try:
+            require_owner_process_egress(self.owner_home, self.agent_home_root)
             inputs = payload({} if inputs is None else inputs)
             with self._prepare(script_id, inputs, timeout_seconds, override_data_sources, network_access, capture=capture) as prepared:
                 metadata, sources, execution = prepared
                 # 原生脚本进程启动前复核受管原代次；失效时进程未启动。
                 require_managed_owner_generation("native_script_launch")
+                require_owner_process_egress(self.owner_home, self.agent_home_root)
+                # 复用原沙箱审批、标准流和凭据 FD；归属只取宿主构造的 ScriptRunner。
+                capture['owner_home_for_egress'] = self.owner_home
+                capture['egress_authority_root'] = self.agent_home_root
                 exit_code, stdout, stderr, error, cleanup = _execute(*execution, capture)
                 if capture.get('run_out_target') is not None and not error and exit_code == 0 and not cleanup:
                     capture['phase'] = 'finalize'
@@ -1509,8 +1517,12 @@ class ScriptRunner:
                 error = exc.error_code
             if isinstance(exc, (ScriptInputTransportError, ManagedOwnerGenerationError, RunOutError)):
                 error = exc.error_code
+            if isinstance(exc, OwnerEgressPolicyError):
+                error = exc.code
             stderr = str(exc)
             execution_error = {'exception_type': type(exc).__name__, 'errno': getattr(exc, 'errno', None), 'message': str(exc)}
+            if isinstance(exc, OwnerEgressPolicyError):
+                execution_error.update(side_effect=exc.side_effect, next_action=exc.next_action)
             if isinstance(exc, RunOutError):
                 execution_error.update(exc.diagnostics())
         finally:

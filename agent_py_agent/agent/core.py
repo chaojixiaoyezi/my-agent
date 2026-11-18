@@ -931,6 +931,7 @@ def _initialize_agent_construction(agent, config: AgentConfig, root, worker_boot
         require_worker_construction,
         require_worker_workspace,
     )
+    from .settings.model_credentials import deployment_profile_environment_names
     from .settings.secret_ref import freeze_managed_secret_environment
     require_worker_construction(worker_bootstrap, config)
     if worker_bootstrap is not None:
@@ -940,8 +941,9 @@ def _initialize_agent_construction(agent, config: AgentConfig, root, worker_boot
         agent._gateway_worker_partition = worker_bootstrap.launch.partition
     config = freeze_managed_secret_environment(config)
     host = home_paths(configured_home_root(config))
+    protected_names = frozenset(config.host_credential_env_names) | deployment_profile_environment_names(host)
     frozen_guard = runtime_guard_policy(home_root=host.root)
-    config = replace(config, my_agent_home=str(host.root),
+    config = replace(config, my_agent_home=str(host.root), host_credential_env_names=tuple(sorted(protected_names)),
                      host_home_snapshot=ConfiguredHomeSnapshot(host.root, str(host.root)),
                      runtime_guard_policy=frozen_guard)
     agent.config = config
@@ -1147,6 +1149,13 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
     # 这里只绑定解析入口；使用时仍由原能力授权核验，构造不启动插件。
     source_resolver = partial(resolve_package_resource, agent)
     source_ref_schema = package_resource_reference_schema()
+    from .settings.model_credentials import deepseek_search_api_key
+    from .user_space.owner_egress import bound_owner_egress_policy
+
+    owner = agent.home_paths
+    owner_egress_policy = bound_owner_egress_policy(
+        owner.root, owner_id=owner.owner_id, owner_kind=owner.owner_kind,
+    )
     return ToolRegistry(
         ToolRegistryParams(
             live_config=config,
@@ -1157,6 +1166,10 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
             owner_type=_tool_registry_owner_type(agent),
             protected_persona_root=_protected_persona_root(agent),
             remote_push_agent=agent,
+            deepseek_search_credential=partial(
+                deepseek_search_api_key, owner, protected_env_names=managed_secret_environment_names(config),
+            ),
+            owner_egress_policy=owner_egress_policy,
             # 沙箱只在 owner 隔离时用它拒绝读取其它 owner 与配置（开关打开时对非本机管理员还有用户家目录）；
             # full access 视图不生效，所以这里无条件给出。
             host_private_roots=owner_hidden_host_roots(

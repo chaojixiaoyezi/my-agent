@@ -523,6 +523,7 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
             "stream_enabled",
             "tool_catalog_include_examples",
             "tool_vector_search_enabled",
+            "tool_deepseek_search_enabled",
             "computer_use_enabled",
             "computer_use_observation_enabled",
             "background_public_receipt_contract_enabled",

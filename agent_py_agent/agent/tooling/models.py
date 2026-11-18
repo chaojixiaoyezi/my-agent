@@ -612,6 +612,8 @@ class ToolRuntimePolicy:
     # 声明 False 即豁免执行锁,不再维护手写工具名名单(新写工具在注册处声明)。
     mutates_workspace: bool = False
     promotes_task_when: tuple[ToolParameterCondition, ...] = ()
+    # 由宿主工具定义列出经过核验的本地动作，用户参数只选择一个已知动作。
+    owner_egress_local_actions: frozenset[str] = frozenset()
 
     # LLM: 条件必须不可变且均为宿主构造；空集合维持原 promotes_task 开关，不作为真命题自动晋升。
     # 函数用途: 验证条件集合并拒绝同参数的矛盾重复定义。
@@ -1274,6 +1276,8 @@ class ToolRuntimeSnapshot:
     catalog_specs: tuple[ToolModelSpec, ...] = ()
     deferred_categories: tuple[str, ...] = ()
     default_deferral_enabled: bool = False
+    # 调用时重新读取原 owner 策略，不进入模型投影或快照指纹。
+    owner_egress_policy: Callable[[], object] | None = field(default=None, kw_only=True, repr=False, compare=False)
     _runtime_by_name: Mapping[str, ToolRuntime] = field(init=False, repr=False, compare=False)
 
     # LLM: 仅校验名称子集、不可变类型与原发现入口；有序加载/预载只是展示事实，不扩权或产生新注册代次。
@@ -1572,6 +1576,9 @@ class HybridToolRetriever:
 # LLM: 普通 handler 实现 execute；Registry 只调用 execute_scoped，默认委托是基类适配而非第二条执行链。
 # 类用途: 定义工具执行、无副作用就绪检查和请求上下文调用三个稳定底层合同。
 class BaseTool:
+    # 只能由宿主工具实现声明；插件清单和模型输入不能更改此字段。
+    owner_egress_local = False
+
     model_spec: ToolModelSpec
     runtime_policy: ToolRuntimePolicy
 

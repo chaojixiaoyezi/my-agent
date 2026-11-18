@@ -21,6 +21,7 @@ from ..contracts.gates.network_safety import (
     NetworkSafetySettings,
     _canonical_ip,
 )
+from ..user_space.owner_egress import OwnerEgressPolicy, OwnerEgressPolicyError
 from ..user_space.task_credential_storage import CredentialInputError
 from .models import (
     BaseTool,
@@ -41,10 +42,14 @@ from .web_fetch_runtime import (
     PinResult,
     RawResponseParts,
     default_artifact_root,
+    egress_runtime_denial,
     fetch_raw_response,
     format_fetch_result,
+    invocation_network_denial,
     normalize_fetch_format,
     normalize_url_list,
+    owner_egress_pin,
+    owner_http_scope,
     page_payload_from_response,
 )
 from .web_http_helpers import (
@@ -77,6 +82,7 @@ class WebRuntimeDeps:
     # 仅可信宿主传输：每跳必须使用宿主 resolve_pin 的 IP，并遵守 timeout/max_bytes/取消。
     # 不接收插件/模型代码；外层事后校验不能中断任意 Python 实现，不能据此宣称可隔离恶意传输。
     raw_fetcher: Callable[..., RawResponseParts] | None = None
+    owner_egress: Callable[[], OwnerEgressPolicy] | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,7 @@ class WebFetchTool(BaseTool):
         self.allow_private_resolution = deps.allow_private_resolution
         self.gateway_endpoint_config = deps.gateway_endpoint_config
         self.raw_fetcher = deps.raw_fetcher
+        self.owner_egress = deps.owner_egress
         self._cache: OrderedDict[tuple[object, ...], CachedFetch] = OrderedDict()
         self._cache_lock = threading.Lock()
         self.model_spec = _web_fetch_model_spec()
@@ -167,9 +174,17 @@ class WebFetchTool(BaseTool):
             return self._execute_with_context(params, None)
 
     def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
-        return self._execute_with_context(params, getattr(context, "credential_use", None))
+        denial = invocation_network_denial("web_fetch", context)
+        return denial if denial is not None else self._execute_with_context(params, context.credential_use)
 
     def _execute_with_context(self, params: dict[str, Any], credential_use: object | None) -> ToolHandlerOutcome:
+        try:
+            with owner_http_scope(self.owner_egress):
+                return self._execute_http(params, credential_use)
+        except OwnerEgressPolicyError as exc:
+            return egress_runtime_denial("web_fetch", exc)
+
+    def _execute_http(self, params: dict[str, Any], credential_use: object | None) -> ToolHandlerOutcome:
         try:
             max_chars = self.response_preview_chars(params, self.max_chars)
             mode = str(params.get("mode", params.get("format", "auto")) or "auto").strip().lower()
@@ -206,7 +221,7 @@ class WebFetchTool(BaseTool):
             return PinResult(None, err)
         if resolved_by_host is not None and host and not literal_ip and resolved:
             resolved_by_host.setdefault(host, resolved)
-        return PinResult(resolved[0] if resolved else None, None)
+        return owner_egress_pin("web_fetch", url, resolved, self.owner_egress)
 
     # LLM: registry 会在每次调用前把授权注入到工具副本属性；检查前必须从这些当前属性重建设置。
     # 函数用途: 生成这一跳使用的私网授权快照，不复用构造时的旧授权。
@@ -547,6 +562,9 @@ def _execute_single_request(
             pin = tool._resolve_pin(url)
             if pin.error is not None:
                 return pin.error
+            if pin.restricted:
+                cached = None
+        cache_hit = cached is not None
     response = cached or tool._fetch_raw_request(request, credential_use=credential_use)
     if isinstance(response, ToolHandlerOutcome):
         return response

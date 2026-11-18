@@ -40,8 +40,8 @@ def _available_auth_entry_advice(agent, guidance: dict, *, group_owner: bool = F
         url_hint = f"（开发者后台权限页：{url}）" if url else ""
         return (
             'feishu_auth(action="permissions")',
-            f'宿主尚未完成本人 OAuth 应用凭据或 HTTPS 回调配置（未发起请求）：当前仅可调用只读 feishu_auth(action="permissions") 查看所需权限与配置说明{url_hint}，'
-            '请先由部署者配置 feishu_app_id/feishu_app_secret 与 /feishu/oauth/callback 后再发起 authorize。',
+            f'宿主的飞书应用或本人授权配置未就绪。先调用 feishu_auth(action="permissions") 查看配置状态和所需权限{url_hint}。'
+            '请部署者核对应用凭据和授权开关。使用设备授权时将 feishu_oauth_redirect_uri 留空。',
         )
     if guidance.get("oauth_status") == "current_personal_identity_required":
         return (
@@ -56,6 +56,10 @@ def _available_auth_entry_advice(agent, guidance: dict, *, group_owner: bool = F
 
 
 def _classify_oauth_runtime_failure(agent, action: str, exc: Exception, guidance: dict) -> tuple[str, str, str, dict]:
+    from ..user_space.feishu_device_oauth import DeviceOAuthError
+    if isinstance(exc, DeviceOAuthError):
+        return (str(exc), 'failed', '请核对该应用已发布的用户权限、应用凭据和出站 HTTPS，修正后再发起本人授权。',
+                {'reason_code': 'FEISHU_DEVICE_AUTH_REJECTED', 'provider_code': exc.code, 'http_status': exc.http_status, 'action': action})
     text = str(exc) if isinstance(exc, ValueError) else ""
     if "已有待处理请求" in text:
         return (
@@ -117,8 +121,8 @@ class FeishuAuthTool(BaseTool):
     model_spec = ToolModelSpec(name="feishu_auth", description=(
         "查询当前飞书应用所需权限和直达开发者后台的申请链接，或发起/撤销本人OAuth。"
         "permissions查询私聊、群历史等能力的权限清单、后台链接和配置阻塞；status同时报告本人授权状态。"
-        "用户问如何开权限时先调用本工具，不猜应用ID或声称已经授权。authorize向原发起人私聊发送登录授权卡，"
-        "revoke撤销宿主保存的本人授权。无需用户发送应用密钥或token；群共享资源用feishu_cloud应用身份。"
+        "用户问如何开权限时先调用本工具，不猜应用ID或声称已经授权。authorize向原发起人私聊发送自己的飞书账号授权卡。留空回调时使用飞书设备授权。"
+        "revoke撤销宿主保存的本人授权，设备授权也向飞书请求撤销。第三方网站账号密码卡使用request_credentials。群共享资源用feishu_cloud应用身份。"
         "authorize会将任务保存为待输入并释放执行资源，填写后恢复原任务。"),
         input_schema={"type": "object", "properties": {
             "action": {"type": "string", "enum": ["permissions", "status", "authorize", "revoke"],
@@ -166,7 +170,7 @@ class FeishuAuthTool(BaseTool):
             oauth_configuration(self.agent)
             _application_credentials(self.agent)
         except (OSError, ValueError, TypeError):
-            return ToolAvailability.unavailable("本人飞书授权尚未配置，请部署者登记回调和应用用户权限。")
+            return ToolAvailability.unavailable("本人飞书授权尚未配置，请部署者核对应用凭据、用户权限和本人授权开关。留空回调使用设备授权。")
         return ToolAvailability.ready()
 
     # LLM: 返回仅有状态/引用，无state链接或密码；等待依赖让原模型循环在完整归档后结束。
@@ -234,6 +238,9 @@ class FeishuAuthTool(BaseTool):
                         next_action='当前任务禁用外网请求（未发送登录卡）：可先调用只读 feishu_auth(action="permissions") 查看权限要求，或在允许网络的私人助手会话中发起 authorize。',
                     )
                 dependency = request_oauth(self.agent, invocation_mode=params.get("__network_access_mode"))
+                if dependency["status"] == "ready":
+                    return ToolHandlerOutcome("feishu_auth", True, json.dumps(dependency, ensure_ascii=False),
+                                              result_envelope={"authorization": dependency})
                 return ToolHandlerOutcome("feishu_auth", True, json.dumps(dependency, ensure_ascii=False),
                                            result_envelope={"input_dependency": dependency})
             return ToolHandlerOutcome("feishu_auth", True, json.dumps(

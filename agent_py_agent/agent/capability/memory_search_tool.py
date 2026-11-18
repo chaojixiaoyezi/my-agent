@@ -82,6 +82,7 @@ def build_memory_search_model_spec() -> ToolModelSpec:
 #   子代理 task_local / control_plane 回合与 owner 记忆总闸关闭时不可用。
 # 类用途: 主模型的只读长期记忆检索工具，只在 enable_memory_search_tool 开着时由 core 注册。
 class MemorySearchTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_memory_search_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),

@@ -209,6 +209,7 @@ def _unproven_requester_failure() -> ToolHandlerOutcome:
 # LLM: 原生交接板管理工具实体，处理发布、ACK、证据提交、终审验收与外部邮箱同步。
 # 类用途: 暴露交接板管理能力的 BaseTool 子类。
 class ManageHandoffBoardTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_manage_handoff_board_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),

@@ -95,10 +95,12 @@ def authorization_guidance(agent):
         feishu_oauth._application_credentials(agent)
     except (OSError, ValueError, TypeError):
         result['required_action'] = 'configure_application_oauth'
-        result['setup_instructions'] = '部署者配置应用凭据与准确的 HTTPS OAuth 回调，并在开发者后台登记回调；随后发起本人授权。'
+        result['setup_instructions'] = '部署者检查飞书应用凭据、本人授权开关及申请的用户权限。单机可留空回调，用飞书设备授权，仅需出站 HTTPS。'
         result['capabilities'] = features
         return result
     result['configuration_status'] = 'configured'
+    result['authorization_flow'] = 'redirect_pkce' if _uri else 'device'
+    result['outbound_hosts'] = ['accounts.feishu.cn', 'open.feishu.cn']
     result['missing_requested_scopes'] = sorted(set(required) - set(scopes))
     if result['missing_requested_scopes']:
         result['required_action'] = 'configure_requested_scopes'
@@ -111,8 +113,21 @@ def authorization_guidance(agent):
         result['capabilities'] = features
         return result
     result['oauth_status'] = status['status']
+    if status.get('provider_error'):
+        result['last_authorization_error'] = {key: status.get(key) for key in
+                                            ('provider_error', 'provider_http_status', 'validation_phase', 'validation_facts')}
+        facts = status.get('validation_facts') or {}
+        if (status['status'] == 'failed' and status.get('flow') == 'device'
+                and status['provider_error'] == 'unexpected_granted_scopes'
+                and type(facts.get('extra_scope_count')) is int and facts['extra_scope_count'] > 0
+                and not result['missing_requested_scopes']):
+            result['last_authorization_error'].update(
+                applies_to='previous_attempt', change_application_permissions=False,
+                next_call={'tool': 'feishu_auth', 'arguments': {'action': 'authorize'}},
+                explanation='上次设备授权因平台附带额外权限被旧校验拒绝，未保存凭据。当前版本只采用本次请求的权限交集，请直接发一张新的本人授权卡。')
+
     result['granted_scopes'] = status['granted_scopes'].split()
-    if status['status'] == 'ready' and not result['missing_requested_scopes']:
+    if (status['status'] == 'ready' or status.get('refreshable')) and not result['missing_requested_scopes']:
         result['required_action'] = ('none' if set(required).issubset(result['granted_scopes'])
                                      else 'reauthorize_current_user')
     result['capabilities'] = features

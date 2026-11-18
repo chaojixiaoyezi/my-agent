@@ -36,7 +36,7 @@ class RequestCredentialsTool(BaseTool):
     def __init__(self,agent):
         self.agent = agent
         self.model_spec = ToolModelSpec(name='request_credentials', description=(
-            '用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；'
+            '为目标网站发账号密码安全卡。读取本人飞书会话所需的授权卡请调用feishu_auth(action="authorize")。禁止要求在普通聊天填写秘密；发卡不访问目标。request常规账号密码用collection_mode=username_password；'
             'authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。'
             '已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。'
             '群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用，避免发卡打扰用户。'

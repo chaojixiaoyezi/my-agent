@@ -257,6 +257,7 @@ def _not_started_create_result(exc: Exception) -> ToolHandlerOutcome:
 #   在快照读取时确定；执行时仍由 bind_subagent_input_media 鲜活复核，不保存构造期开关。
 # 类用途: 暴露创建直属孩子的统一工具，复用原服务校验、幂等、保存和启动链。
 class CreateSubagentsTool(BaseTool):
+    owner_egress_local = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),

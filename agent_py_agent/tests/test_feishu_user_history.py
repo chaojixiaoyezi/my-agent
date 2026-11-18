@@ -286,10 +286,10 @@ def test_remaining_history_budget_reaches_process_timeout_and_cleanup(authorized
 
 @pytest.mark.parametrize('mode,user_member,bot_member,allowed', [
     ('group', True, True, True), ('topic', True, True, True),
-    ('group', False, True, False), ('group', True, False, False),
+    ('group', False, True, False), ('group', True, False, True),
     ('p2p', False, False, True),
 ])
-def test_user_history_requires_both_group_members_but_not_p2p(authorized, mode, user_member, bot_member, allowed):
+def test_user_history_checks_signed_in_user_membership_independently_of_bot(authorized, mode, user_member, bot_member, allowed):
     ctx = authorized
     ctx.chat_mode, ctx.user_in_chat, ctx.bot_in_chat = mode, user_member, bot_member
     ctx.history_replies.append({'items': [message(chat='oc_ab')], 'has_more': False, 'page_token': ''})
@@ -305,16 +305,15 @@ def test_user_history_requires_both_group_members_but_not_p2p(authorized, mode, 
     if mode == 'p2p':
         assert not membership
     elif allowed:
-        assert [row[1] for row in membership] == ['Bearer Synthetic-Access-Token', 'Bearer Synthetic-Bot-Token'] * 2
+        assert [row[1] for row in membership] == ['Bearer Synthetic-Access-Token'] * 2
 
 
-@pytest.mark.parametrize('member', ['user', 'bot'])
-def test_group_member_leaving_between_pages_discards_buffer(authorized, member):
+def test_user_leaving_group_between_pages_discards_buffer(authorized):
     ctx = authorized
     ctx.chat_mode = 'group'
     ctx.history_replies.append({'items': [message(chat='oc_ab')], 'has_more': True, 'page_token': 'later'})
     def leave():
-        setattr(ctx, member + '_in_chat', False)
+        ctx.user_in_chat = False
     ctx.history_hook = leave
     result = ChannelMessagesTool(ctx.agent).execute({'action': 'list', 'selector': 'user', 'chat_id': 'oc_ab',
         'start_time': 100, 'end_time': 200})
@@ -322,7 +321,7 @@ def test_group_member_leaving_between_pages_discards_buffer(authorized, member):
     assert 'om_1' not in result.output and 'channel_messages' not in (result.result_envelope or {})
 
 
-def test_unknown_chat_mode_and_wrong_bot_application_never_read_history(authorized, monkeypatch):
+def test_unknown_chat_mode_rejected_and_separate_bot_not_used_by_user_channel(authorized, monkeypatch):
     from agent_py_agent.agent.adapter import feishu_provider_facts
     ctx = authorized
     tool = ChannelMessagesTool(ctx.agent)
@@ -333,6 +332,27 @@ def test_unknown_chat_mode_and_wrong_bot_application_never_read_history(authoriz
     monkeypatch.setattr(feishu_provider_facts, '_provider', lambda agent: (
         SimpleNamespace(app_id='other-synthetic-app'), 'Synthetic-Bot-Token'))
     result = tool.execute(query)
-    assert not result.ok and result.error_code == 'FEISHU_PROVIDER_AUTH_UNAVAILABLE'
-    assert not ctx.history_calls
+    assert result.ok and len(ctx.history_calls) == 1
     assert all(token != 'Bearer Synthetic-Bot-Token' for _, token in ctx.authority_calls)
+
+
+def test_provider_outside_group_denial_is_returned_in_user_mode(authorized, monkeypatch):
+    from agent_py_agent.agent.adapter import feishu_cli
+    from agent_py_agent.agent.adapter.feishu_cloud import FeishuCloudError
+    ctx = authorized
+    ctx.chat_mode = 'group'
+    read = feishu_cli.request_cli_cloud_api
+
+    def platform(adapter, method, path, **kwargs):
+        if path.startswith('/im/v1/messages?'):
+            raise FeishuCloudError('FEISHU_CLOUD_RESOURCE_FORBIDDEN', '拒绝读取',
+                                   provider_code=230002, http_status=400)
+        return read(adapter, method, path, **kwargs)
+
+    monkeypatch.setattr(feishu_cli, 'request_cli_cloud_api', platform)
+    result = ChannelMessagesTool(ctx.agent).execute({'action': 'list', 'selector': 'user', 'chat_id': 'oc_ab',
+                                                    'start_time': 100, 'end_time': 200})
+    assert not result.ok and result.error_code == 'FEISHU_BOT_GROUP_MEMBERSHIP_REQUIRED'
+    assert result.result_envelope['error_details']['provider_code'] == 230002
+    assert result.result_envelope['error_details']['http_status'] == 400
+    assert not ctx.history_calls

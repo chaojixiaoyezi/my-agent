@@ -244,6 +244,7 @@ class _ToolConfigFields:
     tool_search_max_matches: int = 50
     tool_web_max_chars: int = 100_000
     tool_http_timeout: int = 30
+    tool_deepseek_search_enabled: bool = field(default=True, metadata={"effect": "immediate"})
     path_access_mode: str = DEFAULT_PATH_ACCESS_MODE
     path_dangerous_roots: list[str] = field(default_factory=lambda: list(DEFAULT_DANGEROUS_PATH_ROOTS))
     access_mode: str = DEFAULT_COMMAND_ACCESS_MODE

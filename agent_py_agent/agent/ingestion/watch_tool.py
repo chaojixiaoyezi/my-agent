@@ -779,6 +779,19 @@ def _fetch_json_pinned(
     )
 
     authority = getattr(tool, '_source_request_authority', None)
+    agent = authority.agent if authority is not None else tool.agent
+    from ..tooling.web_fetch_runtime import unmanaged_owner_egress_error
+    from ..user_space.owner_egress import OwnerEgressPolicyError, bound_owner_egress_policy
+
+    home = getattr(agent, "home_paths", None)
+    if home is not None and getattr(home, "root", None) is not None:
+        try:
+            policy = bound_owner_egress_policy(home.root, owner_id=home.owner_id, owner_kind=home.owner_kind)
+            denial = unmanaged_owner_egress_error(_TOOL_NAME, policy)
+        except OwnerEgressPolicyError as exc:
+            return False, str(exc), exc.code
+        if denial is not None:
+            return False, denial.output, denial.reported_error_code
     original_url = request.url
     try:
         if not _source_network_allowed(tool, authority):

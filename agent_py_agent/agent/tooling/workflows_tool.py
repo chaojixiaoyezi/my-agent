@@ -628,8 +628,11 @@ class WorkflowsTool(BaseTool):
             'updated_data_sources': {'type': ['object', 'array'], 'description': '断点续跑时更新的数据源配置'},
             'inputs': {'type': 'object', 'description': '工作流运行输入参数字典（可在step的condition或inputs_map中用step_id="$inputs"引用）'}})
     model_spec = _schema_save_source(_typed_definition_spec(model_spec))
-    runtime_policy = _policy('workflows', READ_ONLY_ACTIONS, ('run', 'resume', 'delete', 'workflows.run',
-        'workflow_runs.resume', 'workflow_runs.cancel', 'workflows.recycle', 'workflows.cleanup.run'))
+    runtime_policy = replace(
+        _policy('workflows', READ_ONLY_ACTIONS, ('run', 'resume', 'delete', 'workflows.run',
+            'workflow_runs.resume', 'workflow_runs.cancel', 'workflows.recycle', 'workflows.cleanup.run')),
+        owner_egress_local_actions=frozenset(READ_ONLY_ACTIONS) | {'save', 'cancel', 'delete'},
+    )
 
     # LLM: Owner与项目/快照/模型提供者仅由可信宿主注入，模型实参不能替换；无分析器不注入假实现。
     # 函数用途: 固定当前Owner及运行时依赖，构造阶段不执行资产。

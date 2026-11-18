@@ -186,6 +186,9 @@ def _gateway_start_options_from_args(args, *, workspace_root: str | Path = "") -
 # 函数用途: 为本次服务保存原Agent、路径、进程身份和可选协调者引用。
 def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayRunContext:
     args = request.args
+    from ..agent.user_space.feishu_oauth import freeze_consent_policy
+
+    freeze_consent_policy(request.agent.home_paths)
     return GatewayRunContext(
         agent=request.agent,
         paths=request.paths,
@@ -1408,6 +1411,10 @@ def cmd_gateway_run(args) -> int:
         StandaloneLifecycleUnavailable,
         standalone_lifecycle_guard,
     )
+    from ..agent.user_space.home_layout import home_paths
+    from ..agent.user_space.home_root import configured_home_root
+    from ..agent.user_space.owner_egress import OwnerEgressPolicyError
+    from ..agent.user_space.owner_egress_gateway import bind_gateway_owner_egress
     from .gateway_coordinated_run import _cold_gateway_paths, coordinated_refusal
 
     if not predecessor_exited:
@@ -1457,8 +1464,14 @@ def cmd_gateway_run(args) -> int:
                 args._gateway_memory_trace = memory_tracing
                 from ..agent.llm_scale.gateway_transport_admission import gateway_transport_binding
                 frozen = args._gateway_frozen_config
-                with gateway_transport_binding(paths.root, getattr(frozen, 'gateway_llm_inflight_limit', 0)):
+                authority_root = home_paths(configured_home_root(frozen)).root
+                with (
+                    gateway_transport_binding(paths.root, getattr(frozen, 'gateway_llm_inflight_limit', 0)),
+                    bind_gateway_owner_egress(authority_root, paths.root, lifecycle),
+                ):
                     return _run_standalone_gateway(args, lifecycle)
+    except OwnerEgressPolicyError as exc:
+        return coordinated_refusal(exc.code, reason=str(exc), action=exc.next_action)
     except StandaloneLifecycleUnavailable as exc:
         return coordinated_refusal(exc.error_code, reason=str(exc))
 

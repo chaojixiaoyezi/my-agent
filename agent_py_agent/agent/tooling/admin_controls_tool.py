@@ -23,6 +23,13 @@ from ..user_space.owner_admin_controls import (
     read_owner_admin_controls,
     set_owner_admin_controls,
 )
+from ..user_space.owner_egress import OwnerEgressPolicyError
+from ..user_space.owner_egress_admin import (
+    EGRESS_ACTIONS,
+    EGRESS_FIELDS,
+    EGRESS_READ,
+    manage_owner_egress,
+)
 from .models import (
     ApprovalPolicy,
     BaseTool,
@@ -134,6 +141,7 @@ class AdminControlsTool(BaseTool):
         description=(
             "管理员专用：查看或修改各用户的 Jev 决策模型使用权（decision_model_allowed）、审计工具使用权（audit_allowed），"
             "以及是否允许 my-agent 跨用户审计（cross_owner_audit_allowed，只能写在 owner_id=local/main 名下）。"
+            "egress_list_users 分页查找普通用户和飞书身份；egress_get/egress_get_default 查询，egress_set_users 按 owner_id 单选或多选，egress_set_default 设置全局出站默认。"
             "list_owners/get 查询；set_controls 修改 controls，旧 list/set/changes 仍可用。"
             "create_user/list_users/get_user/set_user_password/enable_user/disable_user 管理本地账号。"
             "user_overview/set_governance_policy/get_user_persona/set_user_persona/list_user_memories/mutate_user_memory、"
@@ -150,8 +158,9 @@ class AdminControlsTool(BaseTool):
             "properties": {
                 "action": {"type": "string", "enum": ["get", "list_owners", "set_controls", "grant_resource", "revoke_resource",
                     "create_user", "list_users", "get_user", "set_user_password", "enable_user", "disable_user",
-                    "list", "set", "resources", "resource_grant", "resource_revoke", *GOVERNANCE_TOOL_ACTIONS], "description": "管理账号、控制、受管治理和准确资源许可，兼容旧动作。"},
+                    "list", "set", "resources", "resource_grant", "resource_revoke", *GOVERNANCE_TOOL_ACTIONS, *EGRESS_ACTIONS], "description": "管理账号、控制、受管治理和准确资源许可，兼容旧动作。"},
                 **_described_governance_schema(),
+                **EGRESS_FIELDS,
                 "owner_id": {"type": "string", "description": "set 必填：list 返回的规范 owner_id，例如 local/main 或 providers/feishu/users/<id>。"},
                 "user_id": {"type": "string", "description": "本地普通用户名，可由 owner_id 推导。"},
                 "password": {"type": "string", "description": "初始或新密码，至少8位且含大小写字母与数字，不回显。"},
@@ -213,7 +222,7 @@ class AdminControlsTool(BaseTool):
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("action", tuple((action, "read_only") for action in
-            ("list", "resources", "get", "list_owners", "list_users", "get_user", *GOVERNANCE_READ_ACTIONS))),)),
+            ("list", "resources", "get", "list_owners", "list_users", "get_user", *GOVERNANCE_READ_ACTIONS, *EGRESS_READ))),)),
         approval_policy=ApprovalPolicy("never"),
         sandbox_policy=SandboxPolicy("none"),
         concurrency_policy=ConcurrencyPolicy("serial"),
@@ -252,6 +261,22 @@ class AdminControlsTool(BaseTool):
         if (current_subagent_run_id(self._agent)
                 or getattr(getattr(self._agent, "tools", None), "owner_type", "main_agent") != "main_agent"):
             return _refuse("not_admin", "用户授权只能由管理员主会话管理。")
+        if action in EGRESS_ACTIONS:
+            try:
+                report = manage_owner_egress(home, params)
+            except OwnerEgressPolicyError as exc:
+                canonical = (
+                    'TOOL_PARTIAL_COMMIT' if exc.details.get('policy_committed') or exc.code == 'EGRESS_BATCH_PARTIAL_COMMIT'
+                    else {400: 'TOOL_INVALID_ARGUMENTS', 403: 'TOOL_PERMISSION_DENIED'}.get(exc.status_code, 'TOOL_UNAVAILABLE')
+                )
+                return ToolHandlerOutcome(
+                    TOOL_NAME, False, str(exc), error_code=canonical, reported_error_code=exc.code,
+                    effect_outcome='unknown' if exc.side_effect == 'unconfirmed' else exc.side_effect,
+                    next_action=exc.next_action, result_envelope={
+                        'status_code': exc.status_code, 'side_effect': exc.side_effect, **exc.details,
+                    },
+                )
+            return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(report, ensure_ascii=False))
         if action in _USER_ACTIONS:
             return _user_control(self._agent, params)
         if action in GOVERNANCE_TOOL_ACTIONS:

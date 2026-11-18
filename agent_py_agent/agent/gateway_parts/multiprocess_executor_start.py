@@ -3,7 +3,7 @@
 import copy
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..common.executor_registration import ExecutorTextIO
@@ -31,6 +31,15 @@ class ExecutorCommand:
     env: dict | None = None
     io: ExecutorIO = ExecutorIO()
     native_domain: object | None = None
+    egress_namespace: object | None = None
+
+
+def bind_executor_egress_namespace(command: ExecutorCommand, source) -> ExecutorCommand:
+    """由原 C 已认证的执行来源绑定宿主出站命名空间。"""
+    from ..user_space.owner_egress_linux import current_linux_owner_namespace
+
+    namespace = current_linux_owner_namespace(source.root, source.owner)
+    return replace(command, egress_namespace=namespace) if namespace is not None else command
 
 
 # LLM: 组合根注入观察者，生产默认空操作；三个边界不读取环境或改变安全判定。
@@ -100,7 +109,7 @@ def start_executor(ledger, reservation: dict, command: ExecutorCommand, observer
         retain_attempt = getattr(observer, "after_attempt_created", None)
         if retain_attempt is not None:
             retain_attempt(attempt)
-        _validate_command(command)
+        _validate_command(command, reservation)
         attempt.record = ledger.reserve(reservation)
         observer.after_reserved(copy.deepcopy(attempt.record))
         _spawn_and_register(attempt, command, observer)
@@ -190,13 +199,22 @@ def _failed_start(attempt: _StartAttempt, failure: BaseException) -> ExecutorSta
     error = {"ok": False, "error_code": "EXECUTOR_RESERVATION_FAILED", "stage": attempt.stage,
              "cause": type(failure).__name__, "cleanup": cleanup, "abandonment": abandonment,
              "abandonment_error": abandonment_error}
+    if isinstance(failure, MultiprocessRecordError) and failure.reason in {
+        "original_owner_egress_namespace_required", "owner_egress_namespace_owner_mismatch",
+    }:
+        error["reason"] = failure.reason
+    from ..user_space.owner_egress import OwnerEgressPolicyError
+
+    if isinstance(failure, OwnerEgressPolicyError):
+        error.update(error_code=failure.code, message=str(failure), side_effect=failure.side_effect,
+                     next_action=failure.next_action)
     process = None if attempt.waiting is None else attempt.waiting.process
     return ExecutorStartResult(process, copy.deepcopy(attempt.record), error)
 
 
 # LLM: 原native域必须精确C内类型/原来源，不能先调用任意foreign.bind_attempt；坏参数在管道/预留前拒绝，text只原策略；同步source/Count0/exec静态合同。
 # 函数用途: 验证最小启动合同，真实权限仍由原命令入口负责。
-def _validate_command(command: ExecutorCommand) -> None:
+def _validate_command(command: ExecutorCommand, reservation: dict | None = None) -> None:
     valid = (isinstance(command, ExecutorCommand) and type(command.argv) is tuple and bool(command.argv)
              and all(type(item) is str and "\x00" not in item for item in command.argv) and bool(command.argv[0]))
     if not valid or not isinstance(command.io, ExecutorIO) or len(command.io.stdio) != 3:
@@ -206,6 +224,18 @@ def _validate_command(command: ExecutorCommand) -> None:
         if type(command.native_domain) is not NativePidNamespaceDomain:
             raise MultiprocessRecordError('original_native_namespace_required')
         command.native_domain._require_original()
+    if command.egress_namespace is not None:
+        from ..user_space.owner_egress_linux import LinuxOwnerEgressNamespace
+        from ..user_space.owner_resolver import owner_identity_from_owner_id
+        from .multiprocess_route import owner_digest
+
+        namespace = command.egress_namespace
+        if type(namespace) is not LinuxOwnerEgressNamespace or reservation is None:
+            raise MultiprocessRecordError("original_owner_egress_namespace_required")
+        identity = owner_identity_from_owner_id(namespace.owner_id)
+        if reservation.get("owner_sha") != owner_digest(identity):
+            raise MultiprocessRecordError("owner_egress_namespace_owner_mismatch")
+        namespace.require_active()
     descriptors = command.io.pass_fds
     if type(descriptors) is not tuple or any(type(fd) is not int or fd < 3 for fd in descriptors):
         raise MultiprocessRecordError("invalid_executor_fds")

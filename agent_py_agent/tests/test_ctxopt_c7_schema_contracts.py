@@ -34,6 +34,7 @@ from agent_py_agent.tests.ctxopt_c7_contract_snapshot import (
 # WS-F2 显式扩展：request_credentials 支持 access_scope 范围（owner/group/task），按生产 spec 同步 hash。
 # Workstream B 显式补齐嵌套参数中文 description（结构、类型、枚举与必填零删改），按当前生产 spec 同步 hash。
 # remember 的 scope/scope_key 说明写明 global 与 <类型>:<id> 必填形式（结构、枚举、必填与校验零改），同步 hash。
+# FC1 将个人站点凭据发现和复用固化到模型合同；网站密码卡与飞书本人 OAuth 卡的说明各指向对应工具。
 # UWave 明确扩展 audit_records 的请求/消息链/工具遥测与分页字段；冻结扩展后的完整合同。
 _SCHEMA_HASHES = {
     **_SCHEMA_HASHES,
@@ -42,7 +43,7 @@ _SCHEMA_HASHES = {
     'task_progress': 'c86032c3c99ec9d562d658b4b0e9503ee96974f4b6d98eaf309a2218c719b0d1',
     'remember': 'b99a8af92f1cb98b8d845d922decde8f771a32cfbb41663e0508194b7bfb86d9',
     'audit_records': '00f2b3516506b48d863687c57fb92d0e6eb65ad819a7c429ce0542f2ea78fd60',
-    'request_credentials': 'b4c3ac4ba4a2e721d6516b3ce4ace0d07d13fb6b8858d61ce9bae9acf2609337',
+    'request_credentials': '6ff4f8186220cb33fbd9bcfe882ad6e5a6e919cadf3d4fc7fbf0a725b3aa03e2',
     'update_goal': '390f15d94028bcccbf55e1a7532acc3ad803090bcdd2081f3ba5f259150ed680',
     'package_build': '0272c8997985e250c437530980369f6621b3c412b25e99ed688d46e40c7a209a',
     'watch_ordinary': 'f5f02b0fd146c611935d2c72edc96bd1af3863327623acf009b81603718daf86',
@@ -53,7 +54,7 @@ _SCHEMA_HASHES = {
 _DESCRIPTION_HASHES = {
     **_DESCRIPTION_HASHES,
     'create_subagents': 'b653088995df2929e2d41b1e40a9ab6bfd014b46fedd8f86987810da58b29fa9',
-    'request_credentials': '62725dbd5cdb675aec12dc1fd13e524f9920c645b24fbee932d676a78a8b8437',
+    'request_credentials': '17f06574c89aea98d2c02be770d6d1fbab98cc99618f941ad8daeacd6eace208',
     'audit_records': '7840cb38479495190236671b35db4a09bf8e45b1cf7f50521baef2136b58a0c9',
 }
 

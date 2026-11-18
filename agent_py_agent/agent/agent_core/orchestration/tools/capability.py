@@ -100,6 +100,7 @@ def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolHandler
 # queues the same run for continuation; it never grades output or acts as a push tool.
 # 类用途: 当前代理在自身既有权限内裁决直属子代理的能力申请；只有全部派发条件满足时同一 run 才能续跑。
 class ResolveCapabilityRequestsTool(BaseTool):
+    owner_egress_local = True
     model_spec = build_resolve_capability_requests_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),

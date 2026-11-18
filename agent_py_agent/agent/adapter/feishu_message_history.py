@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import time
 from urllib.parse import urlencode
 
@@ -40,7 +41,7 @@ class HistoryLimits:
 # LLM: 只接受固定机器码；异常链不投影平台正文、URL、身份或秘密。
 # 类用途: 向工具边界报告参数、开关、网络或授权失败，失败不返回已读取的群消息。
 class ChannelMessageHistoryError(ValueError):
-    CODES = frozenset({"FEISHU_USER_AUTH_REQUIRED", "TOOL_INVALID_ARGUMENTS", "CHANNEL_MESSAGES_DISABLED", "CHANNEL_MESSAGES_GROUP_REQUIRED",
+    CODES = frozenset({"FEISHU_USER_AUTH_REQUIRED", "FEISHU_USER_OPERATION_SCOPE_REQUIRED", "FEISHU_USER_EXECUTION_INACTIVE", "FEISHU_USER_REFRESH_REJECTED", "FEISHU_USER_REFRESH_UNAVAILABLE", "TOOL_INVALID_ARGUMENTS", "CHANNEL_MESSAGES_DISABLED", "CHANNEL_MESSAGES_GROUP_REQUIRED",
         "CHANNEL_MESSAGES_SCOPE_UNVERIFIED", "NETWORK_DISABLED", "CHANNEL_MESSAGES_UNAVAILABLE",
         "FEISHU_PROVIDER_AUTH_UNAVAILABLE", "FEISHU_PROVIDER_UNAVAILABLE", "FEISHU_PROVIDER_RESPONSE_INVALID",
         "FEISHU_PROVIDER_SCOPE_REQUIRED", "FEISHU_PROVIDER_HTTP_REJECTED", "FEISHU_PROVIDER_READ_REJECTED",
@@ -49,8 +50,15 @@ class ChannelMessageHistoryError(ValueError):
 
     # LLM: code 来自本模块或原 provider 的净化结果，不能把自由异常正文带到输出。
     # 函数用途: 保存安全错误码。
-    def __init__(self, code):
+    def __init__(self, code, *, provider_code=None, http_status=None, provider_error=None):
         self.error_code = code if code in self.CODES else "CHANNEL_MESSAGES_UNAVAILABLE"
+        self.provider_facts = {}
+        if type(provider_error) is str and re.fullmatch(r'[a-z0-9_]{1,64}', provider_error):
+            self.provider_facts['provider_error'] = provider_error
+        if type(provider_code) is int:
+            self.provider_facts["provider_code"] = provider_code
+        if type(http_status) is int and 100 <= http_status <= 599:
+            self.provider_facts["http_status"] = http_status
         super().__init__(self.error_code)
 
 

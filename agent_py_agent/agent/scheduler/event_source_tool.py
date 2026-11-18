@@ -180,7 +180,7 @@ def _personal_source_scope(agent, message_id):
         current = getattr(agent, '_current_run_params', None)
         scope = tool_approval_scope(agent, str(getattr(current, 'run_id', '') or getattr(current, 'task_id', '')))
         actor = oauth_actor(agent, scope)
-        user_token = user_access_token(agent)
+        user_token = user_access_token(agent, scope_groups=(('im:chat:read', 'im:chat:readonly'),))
         _adapter, bot_token = _provider(agent)
         data = _read(bot_token, '/im/v1/messages/' + quote(message_id, safe=''), stage='message')
         rows = data.get('items')

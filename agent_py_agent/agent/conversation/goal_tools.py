@@ -117,6 +117,7 @@ def _goal_response(
 # LLM: 只读当前会话的权威目标；metadata_only 对当前、歧义和历史分支均使用白名单，不放宽 owner 授权。
 # 类用途: 查询真实 Goal 和用量，支持无需查看任务内容的诊断。
 class GetGoalTool(BaseTool):
+    owner_egress_local = True
     model_spec = ToolModelSpec(
         name="get_goal",
         description="Get this agent's current goal and retained history, including status, budgets, token and elapsed-time usage.",
@@ -203,6 +204,7 @@ class GetGoalTool(BaseTool):
 # LLM: 创建只绑定当前代理会话，名字不授权额外执行器；子代理身份来自 scoped runner。
 # 类用途: 把明确要求的持续目标落盘，向用户返回真实目标状态而不是仅写任务清单。
 class CreateGoalTool(BaseTool):
+    owner_egress_local = True
     model_spec = ToolModelSpec(
         name="create_goal",
         description=(
@@ -318,6 +320,7 @@ class CreateGoalTool(BaseTool):
 # preconditions are recoverable failures. Keep post-write persistence protected.
 # 类用途: 由模型标记当前目标完成或阻塞，不创建目标，也不把无目标的普通任务误停成未知副作用。
 class UpdateGoalTool(BaseTool):
+    owner_egress_local = True
     model_spec = ToolModelSpec(
         name="update_goal",
         description=(

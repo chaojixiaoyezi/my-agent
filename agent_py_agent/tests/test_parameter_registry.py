@@ -478,11 +478,16 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
     # 摘要进度心跳归高级，后台日志容量归部署；计数覆盖全部正式目录项。
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 231, "deployment": 151}
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 231, "deployment": 153}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
-    assert len(DEPLOYMENT_ONLY_KEYS) == 128
+    assert len(DEPLOYMENT_ONLY_KEYS) == 130
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 396
+    assert len(registry) == 398
+    official_search = registry["tool_deepseek_search_enabled"]
+    assert official_search.tier == "deployment" and official_search.default is True
+    assert official_search.effect == "immediate" and not official_search.writable
+    feishu_reauthorize = registry["feishu_oauth_reauthorize_hours"]
+    assert feishu_reauthorize.tier == "deployment" and not feishu_reauthorize.writable
     for key in ("gateway_restart_mode", "gateway_restart_fast_timeout_seconds"):
         assert registry[key].tier == "deployment" and not registry[key].user_editable
     for key in ("technical_cutoff_continuation_enabled", "tool_wait_input_reply_enabled", "workflow_auto_dispatch_reviewers"):
