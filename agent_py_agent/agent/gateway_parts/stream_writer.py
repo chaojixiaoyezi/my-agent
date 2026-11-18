@@ -163,6 +163,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     conversation_thread_id: str = field(default="", init=False)
     _conversation_identity: dict[str, object] = field(default_factory=dict, init=False, repr=False)
     _turn_credential_redaction: object | None = field(default=None, init=False, repr=False)
+    _turn_credential_lease_release: Callable[[], None] | None = field(default=None, init=False, repr=False)
     _model_credential_filters: dict[str, object] = field(default_factory=dict, init=False, repr=False)
     _thinking_credential_filter: object | None = field(default=None, init=False, repr=False)
 
@@ -175,9 +176,24 @@ class BufferedChunkStreamWriter(StreamLiveness):
                                           project=self._project_stream_text)
 
     def bind_credential_redaction(self, turn_redaction: object) -> None:
-        """显式绑定当前回合的凭据跨块净化对象，不依赖跨线程未继承的 ContextVar。"""
+        """显式绑定当前回合的凭据跨块净化对象，并在流未关闭期间持有托管回合生命周期租约。"""
+        attach_if_managed = getattr(turn_redaction, "_attach_holder_if_managed", None)
+        new_release = attach_if_managed(self) if callable(attach_if_managed) else None
+        old_release = None
+        discard_new = None
         with self._commit_lock:
+            if getattr(self, "_liveness_closed", False):
+                discard_new = new_release
+                new_release = None
+            if self._turn_credential_redaction is not turn_redaction or new_release is not None:
+                if self._turn_credential_lease_release is not new_release:
+                    old_release = self._turn_credential_lease_release
+                self._turn_credential_lease_release = new_release
             self._turn_credential_redaction = turn_redaction
+        if callable(discard_new):
+            discard_new()
+        if callable(old_release):
+            old_release()
 
     def _credential_filter_for_call(self, model_call_id: str):
         turn_red = self._turn_credential_redaction
@@ -740,6 +756,12 @@ class BufferedChunkStreamWriter(StreamLiveness):
                     self._thinking_credential_filter.discard()
             if not claim_deferred_closeout(self, close_sinks=True):
                 close_writer_sinks_now(self)
+                release = None
+                with self._commit_lock:
+                    release = self._turn_credential_lease_release
+                    self._turn_credential_lease_release = None
+                if callable(release):
+                    release()
 
     # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照；若跨线程活跃发布或延后收口仍在途则延后prepare_final并在锁外返回complete=False。
     # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替，不在在途发布未完时宣称快照complete。

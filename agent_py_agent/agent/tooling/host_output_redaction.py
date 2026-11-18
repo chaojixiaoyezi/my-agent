@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import codecs
 import hashlib
+import itertools
 import json
 import re
 import secrets
@@ -11,6 +12,7 @@ import threading
 import weakref
 from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -551,7 +553,12 @@ class TurnCredentialStreamFilter:
             out += redactor.feed(raw)
         if final:
             out += redactor.finish()
-        return self._decoder.decode(out, final=final)
+        decoded = self._decoder.decode(out, final=final)
+        if final:
+            self._decoder.reset()
+        return decoded
+
+    feed = feed_text
 
     def discard(self) -> None:
         self._pending_tail = b''
@@ -560,10 +567,43 @@ class TurnCredentialStreamFilter:
             self._redactor.reset_discard()
 
 
-# 按 (scope_root, thread_id) 隔离的活动回合表；两级有界 OrderedDict + 显式 close / weakref 自动清理。
+# 按 (scope_root, thread_id) 隔离的活动回合表；两级有界 OrderedDict + 引用计数宿主租约释放。
 _ACTIVE_TURN_SCOPES_LOCK = threading.RLock()
 _ACTIVE_TURN_SCOPES: OrderedDict[tuple[str, str], OrderedDict[str, TurnCredentialRedaction]] = OrderedDict()
 _PARAMS_TURN_REDACTIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_turn_holder_box_attr = '_turn_credential_holder_box'
+_instance_seq = itertools.count(1)
+_lease_seq = itertools.count(1)
+_local_op_state = threading.local()
+_deferred_finalizer_closes: deque[TurnCredentialRedaction] = deque()
+
+
+@contextmanager
+def _redaction_op_guard():
+    depth = getattr(_local_op_state, 'depth', 0)
+    _local_op_state.depth = depth + 1
+    try:
+        yield
+    finally:
+        new_depth = getattr(_local_op_state, 'depth', 1) - 1
+        _local_op_state.depth = new_depth
+        if new_depth <= 0:
+            while _deferred_finalizer_closes:
+                try:
+                    pending = _deferred_finalizer_closes.popleft()
+                except IndexError:
+                    break
+                pending.close()
+
+
+class _TurnHolderBox:
+    """挂接在不可哈希运行参数或宿主生命周期对象上的可弱引用租约盒。"""
+
+    __slots__ = ('holder_id', 'turn_leases', '__weakref__')
+
+    def __init__(self, holder_id: int) -> None:
+        self.holder_id = holder_id
+        self.turn_leases: dict[int, int] = {}
 
 
 def _normalize_scope_path(value: object) -> str:
@@ -576,43 +616,63 @@ def _normalize_scope_path(value: object) -> str:
         return text
 
 
+def _is_indexed_in_any_scope_unlocked(item: TurnCredentialRedaction) -> bool:
+    for scope_key in item._scope_keys():
+        bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
+        if bucket is not None and bucket.get(item.turn_key) is item:
+            return True
+    return False
+
+
 def _register_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item: TurnCredentialRedaction) -> None:
-    evicted_log_keys: list[str] = []
-    with _ACTIVE_TURN_SCOPES_LOCK:
-        for scope_key in keys:
-            if not scope_key[0]:
-                continue
-            bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
-            if bucket is None:
-                bucket = OrderedDict()
-                _ACTIVE_TURN_SCOPES[scope_key] = bucket
-                while len(_ACTIVE_TURN_SCOPES) > _MAX_ACTIVE_SCOPES_COUNT:
-                    _, dropped_bucket = _ACTIVE_TURN_SCOPES.popitem(last=False)
-                    for dropped in dropped_bucket.values():
-                        dropped._clear_secrets_unlocked()
-                        evicted_log_keys.append(f"{dropped.owner_key}::{dropped.turn_key}")
-            else:
-                _ACTIVE_TURN_SCOPES.move_to_end(scope_key)
-            bucket[turn_key] = item
-            bucket.move_to_end(turn_key)
-            while len(bucket) > _MAX_ACTIVE_TURNS_PER_SCOPE_COUNT:
-                _, evicted = bucket.popitem(last=False)
-                evicted._clear_secrets_unlocked()
-                evicted_log_keys.append(f"{evicted.owner_key}::{evicted.turn_key}")
-    for log_key in evicted_log_keys:
-        unregister_active_turn_log_values(log_key)
+    orphan_log_keys: list[str] = []
+    with _redaction_op_guard():
+        with _ACTIVE_TURN_SCOPES_LOCK:
+            evicted_candidates: list[TurnCredentialRedaction] = []
+            for scope_key in keys:
+                if not scope_key[0]:
+                    continue
+                bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
+                if bucket is None:
+                    bucket = OrderedDict()
+                    _ACTIVE_TURN_SCOPES[scope_key] = bucket
+                    while len(_ACTIVE_TURN_SCOPES) > _MAX_ACTIVE_SCOPES_COUNT:
+                        _, dropped_bucket = _ACTIVE_TURN_SCOPES.popitem(last=False)
+                        evicted_candidates.extend(dropped_bucket.values())
+                else:
+                    _ACTIVE_TURN_SCOPES.move_to_end(scope_key)
+                prev = bucket.get(turn_key)
+                if prev is not None and prev is not item:
+                    evicted_candidates.append(prev)
+                bucket[turn_key] = item
+                bucket.move_to_end(turn_key)
+                while len(bucket) > _MAX_ACTIVE_TURNS_PER_SCOPE_COUNT:
+                    _, evicted = bucket.popitem(last=False)
+                    evicted_candidates.append(evicted)
+            seen_evicted: set[int] = set()
+            for candidate in evicted_candidates:
+                if candidate is item or id(candidate) in seen_evicted:
+                    continue
+                seen_evicted.add(id(candidate))
+                if (candidate.owner_key, candidate.turn_key) == (item.owner_key, item.turn_key):
+                    continue
+                if not _is_indexed_in_any_scope_unlocked(candidate):
+                    orphan_log_keys.append(f"{candidate.owner_key}::{candidate.turn_key}")
+        for log_key in orphan_log_keys:
+            unregister_active_turn_log_values(log_key)
 
 
 def _unregister_active_scope(keys: Iterable[tuple[str, str]], turn_key: str, item: TurnCredentialRedaction) -> None:
-    with _ACTIVE_TURN_SCOPES_LOCK:
-        for scope_key in keys:
-            bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
-            if bucket is None:
-                continue
-            if bucket.get(turn_key) is item:
-                bucket.pop(turn_key, None)
-            if not bucket:
-                _ACTIVE_TURN_SCOPES.pop(scope_key, None)
+    with _redaction_op_guard():
+        with _ACTIVE_TURN_SCOPES_LOCK:
+            for scope_key in keys:
+                bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
+                if bucket is None:
+                    continue
+                if bucket.get(turn_key) is item:
+                    bucket.pop(turn_key, None)
+                if not bucket:
+                    _ACTIVE_TURN_SCOPES.pop(scope_key, None)
 
 
 class TurnCredentialRedaction:
@@ -627,10 +687,13 @@ class TurnCredentialRedaction:
         turn_key: str = '',
         base_redaction: HostOutputRedaction | None = None,
     ) -> None:
+        self._instance_id = next(_instance_seq)
         self.owner_key = str(owner_key or 'anonymous')
         self.conversation_root = _normalize_scope_path(conversation_root)
         self.thread_id = str(thread_id or '')
         self.turn_key = str(turn_key or secrets.token_hex(8))
+        self._turn_aliases: set[str] = {self.turn_key} if self.turn_key else set()
+        self._lineage_ids: set[int] = set()
         self._lock = threading.RLock()
         self._base = base_redaction or HostOutputRedaction()
         self._current = self._base
@@ -640,6 +703,9 @@ class TurnCredentialRedaction:
         self._withheld = False
         self._closed = False
         self._version = 0
+        self._live_holders: set[int] = set()
+        self._holder_finalizers: dict[int, weakref.finalize] = {}
+        self._direct_holder_tokens: dict[int, int] = {}
 
     def __repr__(self) -> str:
         return 'TurnCredentialRedaction()'
@@ -663,6 +729,77 @@ class TurnCredentialRedaction:
             keys.append((f'owner:{self.owner_key}', ''))
         return tuple(dict.fromkeys(keys))
 
+    def _attach_lifetime_holder(self, holder: object) -> Callable[[], None] | None:
+        if holder is None:
+            return None
+        with self._lock:
+            if self._closed:
+                return None
+            holder_id = id(holder)
+            box = getattr(holder, _turn_holder_box_attr, None)
+            if isinstance(box, _TurnHolderBox) and box.holder_id == holder_id:
+                existing_token = box.turn_leases.get(self._instance_id)
+                if existing_token is not None and existing_token in self._live_holders:
+                    return self._holder_finalizers.get(existing_token)
+            else:
+                candidate_box = _TurnHolderBox(holder_id)
+                try:
+                    object.__setattr__(holder, _turn_holder_box_attr, candidate_box)
+                    box = candidate_box
+                except (AttributeError, TypeError):
+                    box = None
+            if box is None:
+                existing_token = self._direct_holder_tokens.get(holder_id)
+                if existing_token is not None and existing_token in self._live_holders:
+                    return self._holder_finalizers.get(existing_token)
+                lease_token = next(_lease_seq)
+                try:
+                    fin = weakref.finalize(holder, self._release_lifetime_holder, lease_token)
+                except TypeError:
+                    return None
+                self._live_holders.add(lease_token)
+                self._holder_finalizers[lease_token] = fin
+                self._direct_holder_tokens[holder_id] = lease_token
+                return fin
+            lease_token = next(_lease_seq)
+            fin = weakref.finalize(box, self._release_lifetime_holder, lease_token)
+            box.turn_leases[self._instance_id] = lease_token
+            self._live_holders.add(lease_token)
+            self._holder_finalizers[lease_token] = fin
+            lineage_obj = (
+                getattr(holder, 'runtime_rejected_actions', None)
+                if getattr(holder, 'runtime_rejected_actions', None) is not None
+                else getattr(holder, '_capability_refresh_lock', None)
+            )
+            if lineage_obj is not None:
+                self._lineage_ids.add(id(lineage_obj))
+            return fin
+
+    def _attach_holder_if_managed(self, holder: object) -> Callable[[], None] | None:
+        with self._lock:
+            if not self._live_holders or self._closed:
+                return None
+            return self._attach_lifetime_holder(holder)
+
+    def _release_lifetime_holder(self, lease_token: int) -> None:
+        should_close = False
+        with self._lock:
+            if lease_token not in self._live_holders:
+                return
+            self._live_holders.discard(lease_token)
+            self._holder_finalizers.pop(lease_token, None)
+            if self._direct_holder_tokens:
+                for h_id, tok in list(self._direct_holder_tokens.items()):
+                    if tok == lease_token:
+                        self._direct_holder_tokens.pop(h_id, None)
+            if not self._live_holders and not self._closed:
+                should_close = True
+        if should_close:
+            if getattr(_local_op_state, 'depth', 0) > 0:
+                _deferred_finalizer_closes.append(self)
+            else:
+                self.close()
+
     @property
     def active(self) -> bool:
         with self._lock:
@@ -685,39 +822,80 @@ class TurnCredentialRedaction:
     def new_stream_filter(self) -> TurnCredentialStreamFilter:
         return TurnCredentialStreamFilter(self)
 
+    def _collect_new_values_unlocked(self, values: Iterable[str]) -> tuple[list[str], int]:
+        new_items: list[str] = []
+        new_bytes = 0
+        seen = set(self._raw_values)
+        for raw in values:
+            if not isinstance(raw, str) or not raw or not raw.strip() or raw in seen:
+                continue
+            seen.add(raw)
+            new_items.append(raw)
+            new_bytes += len(raw.encode('utf-8'))
+        return new_items, new_bytes
+
     def register(self, material: object) -> HostOutputRedaction:
         return self.register_values(_material_raw_values(material))
 
+    def try_register(self, material: object) -> HostOutputRedaction | None:
+        return self.try_register_values(_material_raw_values(material))
+
+    def try_register_values(self, values: Iterable[str]) -> HostOutputRedaction | None:
+        with _redaction_op_guard():
+            with self._lock:
+                if self._closed or self._withheld:
+                    return None
+                new_items, new_bytes = self._collect_new_values_unlocked(values)
+                if (
+                    len(self._raw_values) + len(new_items) > _MAX_TURN_RAW_VALUES_COUNT
+                    or self._raw_bytes + new_bytes > _MAX_TURN_RAW_BYTES
+                ):
+                    return None
+                if new_items:
+                    self._raw_values.extend(new_items)
+                    self._raw_bytes += new_bytes
+                if new_items or (not self._variants and self._raw_values):
+                    self._variants = credential_echo_variants(self._raw_values)
+                    self._current = self._base.with_credential_values(self._variants)
+                    self._version += 1
+                variants = self._variants
+                current = self._current
+            if variants:
+                _register_active_scope(self._scope_keys(), self.turn_key, self)
+                bind_active_credential_log_values(variants)
+                register_active_turn_log_values(f"{self.owner_key}::{self.turn_key}", variants)
+            return current
+
     def register_values(self, values: Iterable[str]) -> HostOutputRedaction:
-        with self._lock:
-            if self._closed:
-                raise ValueError('当前回合凭据脱敏作用域已关闭，拒绝注册新凭据')
-            added = False
-            seen = set(self._raw_values)
-            for raw in values:
-                if not isinstance(raw, str) or not raw or not raw.strip() or raw in seen:
-                    continue
-                size = len(raw.encode('utf-8'))
-                if len(self._raw_values) + 1 > _MAX_TURN_RAW_VALUES_COUNT or self._raw_bytes + size > _MAX_TURN_RAW_BYTES:
+        with _redaction_op_guard():
+            with self._lock:
+                if self._closed:
+                    raise ValueError('当前回合凭据脱敏作用域已关闭，拒绝注册新凭据')
+                new_items, new_bytes = self._collect_new_values_unlocked(values)
+                if (
+                    self._withheld
+                    or len(self._raw_values) + len(new_items) > _MAX_TURN_RAW_VALUES_COUNT
+                    or self._raw_bytes + new_bytes > _MAX_TURN_RAW_BYTES
+                ):
                     self._withheld = True
                     self._version += 1
-                    break
-                seen.add(raw)
-                self._raw_values.append(raw)
-                self._raw_bytes += size
-                added = True
-            if added or not self._variants and self._raw_values:
-                self._variants = credential_echo_variants(self._raw_values)
-                self._current = self._base.with_credential_values(self._variants)
-                self._version += 1
-            variants = self._variants
-            current = self._current
-        if variants or self._withheld:
-            _register_active_scope(self._scope_keys(), self.turn_key, self)
-        if variants:
-            bind_active_credential_log_values(variants)
-            register_active_turn_log_values(f"{self.owner_key}::{self.turn_key}", variants)
-        return current
+                else:
+                    if new_items:
+                        self._raw_values.extend(new_items)
+                        self._raw_bytes += new_bytes
+                    if new_items or (not self._variants and self._raw_values):
+                        self._variants = credential_echo_variants(self._raw_values)
+                        self._current = self._base.with_credential_values(self._variants)
+                        self._version += 1
+                variants = self._variants
+                withheld = self._withheld
+                current = self._current
+            if variants or withheld:
+                _register_active_scope(self._scope_keys(), self.turn_key, self)
+            if variants:
+                bind_active_credential_log_values(variants)
+                register_active_turn_log_values(f"{self.owner_key}::{self.turn_key}", variants)
+            return current
 
     def public_text(self, text: str) -> str:
         with self._lock:
@@ -759,12 +937,20 @@ class TurnCredentialRedaction:
         self._version += 1
 
     def close(self) -> None:
-        keys = self._scope_keys()
-        log_key = f"{self.owner_key}::{self.turn_key}"
-        with self._lock:
-            self._clear_secrets_unlocked()
-        _unregister_active_scope(keys, self.turn_key, self)
-        unregister_active_turn_log_values(log_key)
+        with _redaction_op_guard():
+            keys = self._scope_keys()
+            log_key = f"{self.owner_key}::{self.turn_key}"
+            with self._lock:
+                self._clear_secrets_unlocked()
+                self._live_holders.clear()
+                finalizers = tuple(self._holder_finalizers.values())
+                self._holder_finalizers.clear()
+                self._direct_holder_tokens.clear()
+                self._lineage_ids.clear()
+            for fin in finalizers:
+                fin.detach()
+            _unregister_active_scope(keys, self.turn_key, self)
+            unregister_active_turn_log_values(log_key)
 
 
 def _clean_public_structure(value: Any, secret_values: tuple[str, ...], *, depth: int = 0) -> Any:
@@ -791,6 +977,40 @@ def _clean_public_structure(value: Any, secret_values: tuple[str, ...], *, depth
     return value
 
 
+def _candidate_writers(params: object) -> tuple[object, ...]:
+    if params is None:
+        return ()
+    found: list[object] = []
+    seen_ids: set[int] = set()
+    for attr in ('effective_on_chunk', 'on_chunk'):
+        raw = getattr(params, attr, None)
+        if raw is None:
+            continue
+        for candidate in (raw, getattr(raw, '__self__', None)):
+            if candidate is None or id(candidate) in seen_ids:
+                continue
+            seen_ids.add(id(candidate))
+            found.append(candidate)
+    return tuple(found)
+
+
+def _extract_turn_aliases(params: object) -> tuple[str, ...]:
+    if params is None:
+        return ()
+    return tuple(
+        dict.fromkeys(
+            val
+            for val in (
+                str(getattr(params, 'request_id', '') or '').strip(),
+                str(getattr(params, 'run_id', '') or '').strip(),
+                str(getattr(params, 'task_id', '') or '').strip(),
+                str(getattr(params, 'conversation_turn_id', '') or '').strip(),
+            )
+            if val
+        )
+    )
+
+
 def _extract_turn_identity(agent: object, params: object) -> tuple[str, str, str, str]:
     home = getattr(agent, 'home_paths', None)
     owner_dir = _normalize_scope_path(getattr(home, 'owner_home_dir', None))
@@ -800,18 +1020,20 @@ def _extract_turn_identity(agent: object, params: object) -> tuple[str, str, str
     conv_root = _normalize_scope_path(getattr(getattr(store, 'storage', None), 'root', None))
     attrs = getattr(params, 'task_attributes', None)
     attrs = attrs if isinstance(attrs, Mapping) else {}
+    writer_thread_id = ''
+    for writer in _candidate_writers(params):
+        cand_tid = str(getattr(writer, 'conversation_thread_id', '') or '').strip()
+        if cand_tid:
+            writer_thread_id = cand_tid
+            break
     thread_id = str(
         attrs.get('conversation_thread_id')
         or getattr(params, 'thread_id', '')
-        or getattr(getattr(params, 'on_chunk', None), 'conversation_thread_id', '')
+        or writer_thread_id
         or ''
     ).strip()
-    turn_key = str(
-        getattr(params, 'request_id', '')
-        or getattr(params, 'run_id', '')
-        or getattr(params, 'task_id', '')
-        or ''
-    ).strip()
+    aliases = _extract_turn_aliases(params)
+    turn_key = aliases[0] if aliases else ''
     return owner_key, conv_root, thread_id, turn_key
 
 
@@ -824,62 +1046,142 @@ def _base_redaction_for_agent(agent: object) -> HostOutputRedaction:
     return HostOutputRedaction(snapshot=snapshot, force_default=False)
 
 
-def turn_credential_redaction(agent: object, params: object = None) -> TurnCredentialRedaction:
-    """获取或建立与当前 (owner, thread, run/request) 绑定的回合脱敏对象，并显式挂接到流写入器。"""
-    resolved_params = params if params is not None else getattr(agent, '_current_run_params', None)
-    existing: TurnCredentialRedaction | None = None
-    if resolved_params is not None:
-        existing = getattr(resolved_params, _TURN_REDACTION_ATTR, None)
-        if existing is None:
-            try:
-                with _ACTIVE_TURN_SCOPES_LOCK:
-                    existing = _PARAMS_TURN_REDACTIONS.get(resolved_params)
-            except TypeError:
-                existing = None
-    owner_key, conv_root, thread_id, turn_key = _extract_turn_identity(agent, resolved_params)
-    if existing is not None and not existing._closed and existing.owner_key == owner_key:
-        if thread_id and not existing.thread_id:
-            existing.thread_id = thread_id
-        if conv_root and not existing.conversation_root:
-            existing.conversation_root = conv_root
-        _bind_writer_if_present(resolved_params, existing)
-        return existing
-    if turn_key:
+def _lookup_holder_redaction(holder: object) -> TurnCredentialRedaction | None:
+    if holder is None:
+        return None
+    cand = getattr(holder, _TURN_REDACTION_ATTR, None)
+    if isinstance(cand, TurnCredentialRedaction):
+        return cand
+    try:
         with _ACTIVE_TURN_SCOPES_LOCK:
-            bucket = _ACTIVE_TURN_SCOPES.get((f'owner:{owner_key}', thread_id))
-            found = bucket.get(turn_key) if bucket is not None else None
-            if found is not None and not found._closed:
-                existing = found
-    if existing is None:
-        existing = TurnCredentialRedaction(
-            owner_key=owner_key,
-            conversation_root=conv_root,
-            thread_id=thread_id,
-            turn_key=turn_key or f'turn-{secrets.token_hex(8)}',
-            base_redaction=_base_redaction_for_agent(agent),
-        )
-    if resolved_params is not None:
+            cand = _PARAMS_TURN_REDACTIONS.get(holder)
+    except TypeError:
+        cand = None
+    return cand if isinstance(cand, TurnCredentialRedaction) else None
+
+
+def _attach_holder_and_attr(holder: object, turn_redaction: TurnCredentialRedaction) -> None:
+    if holder is None:
+        return
+    turn_redaction._attach_lifetime_holder(holder)
+    try:
+        object.__setattr__(holder, _TURN_REDACTION_ATTR, turn_redaction)
+    except (AttributeError, TypeError):
         try:
             with _ACTIVE_TURN_SCOPES_LOCK:
-                _PARAMS_TURN_REDACTIONS[resolved_params] = existing
-            weakref.finalize(resolved_params, existing.close)
+                _PARAMS_TURN_REDACTIONS[holder] = turn_redaction
         except TypeError:
-            try:
-                object.__setattr__(resolved_params, _TURN_REDACTION_ATTR, existing)
-            except (AttributeError, TypeError):
-                pass
-    _bind_writer_if_present(resolved_params, existing)
-    return existing
+            pass
+
+
+def turn_credential_redaction(agent: object, params: object = None) -> TurnCredentialRedaction:
+    """获取或建立与当前 (owner, thread, run/request) 绑定的回合脱敏对象，并显式挂接到流写入器。"""
+    with _redaction_op_guard():
+        current_run_params = getattr(agent, '_current_run_params', None)
+        resolved_params = params if params is not None else current_run_params
+        owner_key, conv_root, thread_id, turn_key = _extract_turn_identity(agent, resolved_params)
+        aliases = _extract_turn_aliases(resolved_params)
+        existing: TurnCredentialRedaction | None = None
+
+        cand = _lookup_holder_redaction(resolved_params)
+        if cand is not None and not cand._closed and cand.owner_key == owner_key:
+            existing = cand
+
+        if existing is None:
+            for writer in _candidate_writers(resolved_params):
+                lifetime_owner = getattr(writer, '_turn_lifetime_owner', None)
+                owner_cand = _lookup_holder_redaction(lifetime_owner)
+                if owner_cand is not None and not owner_cand._closed and owner_cand.owner_key == owner_key:
+                    existing = owner_cand
+                    break
+
+        if existing is None and current_run_params is not None and current_run_params is not resolved_params:
+            c_owner, _, _, c_turn = _extract_turn_identity(agent, current_run_params)
+            if c_owner == owner_key and turn_key and c_turn == turn_key:
+                run_cand = _lookup_holder_redaction(current_run_params)
+                if run_cand is not None and not run_cand._closed and run_cand.owner_key == owner_key:
+                    existing = run_cand
+
+        if existing is None and turn_key:
+            for writer in _candidate_writers(resolved_params):
+                writer_cand = _lookup_holder_redaction(writer)
+                if (
+                    writer_cand is not None
+                    and not writer_cand._closed
+                    and writer_cand.owner_key == owner_key
+                    and (writer_cand.turn_key == turn_key or turn_key in writer_cand._turn_aliases)
+                ):
+                    existing = writer_cand
+                    break
+
+        if existing is None:
+            lineage_obj = (
+                getattr(resolved_params, 'runtime_rejected_actions', None)
+                if getattr(resolved_params, 'runtime_rejected_actions', None) is not None
+                else getattr(resolved_params, '_capability_refresh_lock', None)
+            )
+            lineage_id = id(lineage_obj) if lineage_obj is not None else None
+            with _ACTIVE_TURN_SCOPES_LOCK:
+                for cand_tid in ((thread_id, '') if thread_id else ('',)):
+                    bucket = _ACTIVE_TURN_SCOPES.get((f'owner:{owner_key}', cand_tid))
+                    if bucket is None:
+                        continue
+                    if turn_key:
+                        found = bucket.get(turn_key)
+                        if found is not None and not found._closed:
+                            existing = found
+                            break
+                    elif lineage_id is not None:
+                        for item in reversed(bucket.values()):
+                            if not item._closed and lineage_id in item._lineage_ids:
+                                existing = item
+                                break
+                        if existing is not None:
+                            break
+
+        if existing is None:
+            existing = TurnCredentialRedaction(
+                owner_key=owner_key,
+                conversation_root=conv_root,
+                thread_id=thread_id,
+                turn_key=turn_key or f'turn-{secrets.token_hex(8)}',
+                base_redaction=_base_redaction_for_agent(agent),
+            )
+
+        scope_upgraded = False
+        with existing._lock:
+            if aliases:
+                existing._turn_aliases.update(aliases)
+            if thread_id and not existing.thread_id:
+                existing.thread_id = thread_id
+                scope_upgraded = True
+            if conv_root and not existing.conversation_root:
+                existing.conversation_root = conv_root
+                scope_upgraded = True
+
+        if resolved_params is not None:
+            _attach_holder_and_attr(resolved_params, existing)
+        if current_run_params is not None and current_run_params is not resolved_params:
+            c_owner, _, _, c_turn = _extract_turn_identity(agent, current_run_params)
+            if c_owner == owner_key and turn_key and c_turn == turn_key:
+                _attach_holder_and_attr(current_run_params, existing)
+        _bind_writer_if_present(resolved_params, existing)
+        if scope_upgraded and existing.active:
+            _register_active_scope(existing._scope_keys(), existing.turn_key, existing)
+        return existing
 
 
 def _bind_writer_if_present(params: object, turn_redaction: TurnCredentialRedaction) -> None:
-    writer = getattr(params, 'on_chunk', None) if params is not None else None
-    binder = getattr(writer, 'bind_credential_redaction', None)
-    if callable(binder):
-        try:
-            binder(turn_redaction)
-        except Exception:  # noqa: BLE001
-            pass
+    for writer in _candidate_writers(params):
+        lifetime_owner = getattr(writer, '_turn_lifetime_owner', None)
+        if lifetime_owner is not None:
+            _attach_holder_and_attr(lifetime_owner, turn_redaction)
+        binder = getattr(writer, 'bind_credential_redaction', None)
+        if callable(binder):
+            try:
+                binder(turn_redaction)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def active_turn_redactions_for_scope(
@@ -890,34 +1192,39 @@ def active_turn_redactions_for_scope(
     turn_keys: Iterable[str] = (),
 ) -> tuple[TurnCredentialRedaction, ...]:
     """按严格 owner/存储根和线程检索活动中的凭据脱敏绑定（O(1) 内存查找，零磁盘扫描，跨 owner 绝对隔离）。"""
-    conv = _normalize_scope_path(conversation_root)
-    candidate_scopes: list[tuple[str, str]] = []
-    if owner_key:
-        if thread_id:
-            candidate_scopes.append((f'owner:{owner_key}', thread_id))
-        candidate_scopes.append((f'owner:{owner_key}', ''))
-    if conv:
-        if thread_id:
-            candidate_scopes.append((f'conv:{conv}', thread_id))
-        candidate_scopes.append((f'conv:{conv}', ''))
-    wanted_turns = {str(k).strip() for k in turn_keys if str(k or '').strip()}
-    matched: list[TurnCredentialRedaction] = []
-    exact_turn_matched: list[TurnCredentialRedaction] = []
-    with _ACTIVE_TURN_SCOPES_LOCK:
-        for scope_key in candidate_scopes:
-            bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
-            if not bucket:
-                continue
-            for t_key, item in list(bucket.items()):
-                if not item.active:
+    with _redaction_op_guard():
+        conv = _normalize_scope_path(conversation_root)
+        candidate_scopes: list[tuple[str, str]] = []
+        if owner_key:
+            if thread_id:
+                candidate_scopes.append((f'owner:{owner_key}', thread_id))
+            candidate_scopes.append((f'owner:{owner_key}', ''))
+        if conv:
+            if thread_id:
+                candidate_scopes.append((f'conv:{conv}', thread_id))
+            candidate_scopes.append((f'conv:{conv}', ''))
+        wanted_turns = {str(k).strip() for k in turn_keys if str(k or '').strip()}
+        matched: list[TurnCredentialRedaction] = []
+        exact_turn_matched: list[TurnCredentialRedaction] = []
+        with _ACTIVE_TURN_SCOPES_LOCK:
+            for scope_key in candidate_scopes:
+                bucket = _ACTIVE_TURN_SCOPES.get(scope_key)
+                if not bucket:
                     continue
-                if thread_id and item.thread_id and item.thread_id != thread_id:
-                    continue
-                if item not in matched:
-                    matched.append(item)
-                if wanted_turns and t_key in wanted_turns and item not in exact_turn_matched:
-                    exact_turn_matched.append(item)
-    return tuple(exact_turn_matched or matched)
+                for t_key, item in list(bucket.items()):
+                    if not item.active:
+                        continue
+                    if thread_id and item.thread_id and item.thread_id != thread_id:
+                        continue
+                    if item not in matched:
+                        matched.append(item)
+                    if (
+                        wanted_turns
+                        and (t_key in wanted_turns or bool(wanted_turns.intersection(item._turn_aliases)))
+                        and item not in exact_turn_matched
+                    ):
+                        exact_turn_matched.append(item)
+        return tuple(exact_turn_matched or matched)
 
 
 __all__ = [
