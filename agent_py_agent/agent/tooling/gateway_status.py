@@ -66,10 +66,10 @@ class GatewayStatusTool(BaseTool):
                 "include_quarantined_wakes": {"type": "boolean", "description": "显式读取本owner结案唤醒元数据页，不读取正文。"},
                 "quarantined_limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "唤醒页条数，默认20，上限100。"},
                 "quarantined_cursor": {"type": "string", "description": "原 quarantined_wake_entries.next_cursor。"},
-                "log_offset_bytes": {"type": "integer", "minimum": 0, "description": "显式前向日志字节起点；每页共用原32768字节预算。"},
+                "log_offset_bytes": {"type": "integer", "minimum": 0, "description": "显式前向日志字节起点；每页共用原32768字节预算；正文位于 log_pages.sources.<source>.lines。"},
                 "log_since": {"type": "number", "description": "可选Unix秒起点，只过滤本次有界窗口；无匹配不代表全文件无匹配。"},
                 "log_until": {"type": "number", "description": "可选Unix秒终点，缺时间戳行计入unknown覆盖。"},
-                "log_cursor": {"type": "string", "description": "原 log_pages.next_cursor；保持来源、范围及时间/关键词过滤器不变。轮转后清空重新开始。"},
+                "log_cursor": {"type": "string", "description": "原 log_pages.next_cursor；保持来源、范围及时间/关键词过滤器不变，轮转后清空重新开始；正文位于 log_pages.sources.<source>.lines。"},
             },
             "additionalProperties": False,
         },
@@ -157,11 +157,13 @@ class GatewayStatusTool(BaseTool):
                     "include_quarantined_wakes", "quarantined_limit", "quarantined_cursor"):
             if key in params:
                 log_options[key] = params[key]
+        paging_keys = ("log_offset_bytes", "log_since", "log_until", "log_cursor")
+        ignored_paging = sorted(key for key in paging_keys if key in params and params[key] is not None) if metadata_only else []
         if not metadata_only:
-            for key in ("log_offset_bytes", "log_since", "log_until", "log_cursor"):
+            for key in paging_keys:
                 if key in params:
                     log_options[key] = params[key]
-            if any(key in params for key in ("log_offset_bytes", "log_since", "log_until", "log_cursor")):
+            if any(key in params for key in paging_keys):
                 for key, default in (("log_source", "gateway"), ("log_scope", "current_lifecycle"), ("log_query", ""), ("log_tail_lines", 80)):
                     log_options[key] = params.get(key, default)
         snapshot = gateway_runtime_snapshot(
@@ -189,7 +191,14 @@ class GatewayStatusTool(BaseTool):
             last = (snapshot["model_selection"] or {}).get("last_request") if isinstance(snapshot["model_selection"], dict) else None
             if isinstance(last, dict):
                 snapshot["request_timeline"] = _request_timeline(self.agent, (last.get("task_id"), last.get("request_id")))
-        return _metadata_projection(snapshot) if metadata_only else snapshot
+        if not metadata_only:
+            return snapshot
+        result = _metadata_projection(snapshot)
+        if ignored_paging:
+            result["ignored_parameters"] = ignored_paging
+            result["ignored_reason"] = "METADATA_ONLY_SUPPRESSES_LOG_PAGES"
+            result["next_step"] = "去掉 metadata_only 后重试；日志正文在 log_pages.sources.<source>.lines"
+        return result
 
 
 # LLM: 纯参数检查，不读日志；整数不接受bool，行数范围由原渲染入口夹取，新增参数不改变旧诊断默认值。

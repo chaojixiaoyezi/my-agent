@@ -321,14 +321,21 @@ def _owner_view(agent, owner_id, *, writable):
 class RuntimeGovernanceTool(BaseTool):
     model_spec = ToolModelSpec(
         TOOL_NAME,
-        '管理员运行治理：只读查看三层看门狗、发行版本和未受管进程；写动作须管理员及admin_authorized=True，不限制日常脚本。',
+        '管理员运行治理：只读查看看门狗/版本/未受管进程、对账预览与隔离唤醒预览；写动作须管理员前台、admin_authorized=true 并经宿主审批。',
         {
             'type': 'object',
             'properties': {
                 'action': {
                     'type': 'string',
                     'enum': ['status', 'reconcile_preview', 'quarantined_wakes_preview', *WRITES],
-                    'description': 'status 只读查看三层看门狗、发行版本和未受管进程；其余写动作须管理员身份且显式传 admin_authorized=true。',
+                    'description': (
+                        '只读动作：status（看门狗、版本与未受管进程）、reconcile_preview（对账预览；传 cursor=next_cursor 续页，'
+                        '传 run_ids 从能力阶段开始）、quarantined_wakes_preview（隔离唤醒预览）；本 owner 无需 admin_authorized，'
+                        '传 owner_id 查其他 owner 须本机管理员前台。'
+                        '写动作须管理员、admin_authorized=true 与宿主审批：set_maintenance_lock、clear_maintenance_lock、'
+                        'terminate_orphan、configure_watchdog_service，以及须本机管理员前台的 reconcile_apply、'
+                        'quarantined_wakes_dismiss、quarantined_wakes_replay。'
+                    ),
                 },
                 'cursor': {'type': 'string', 'maxLength': 8192, 'description': '上一页 next_cursor；首次使用空字符串，绑定当前 owner 与过滤。'},
                 'limit': {'type': 'integer', 'minimum': 1, 'description': '本次最多处理的条目数；不传使用 retention_scan_slice_entries。'},
@@ -383,6 +390,9 @@ class RuntimeGovernanceTool(BaseTool):
             keywords=('runtime_governance', 'watchdog', '看门狗', '维护锁', '孤儿进程', 'supervisor'),
             examples=(
                 '{"action":"status"}',
+                '{"action":"reconcile_preview","cursor":""}',
+                '{"action":"reconcile_preview","run_ids":["subagent-run-1"]}',
+                '{"action":"quarantined_wakes_preview"}',
                 '{"action":"set_maintenance_lock","admin_authorized":true,"reason":"rolling upgrade","ttl_seconds":1800}',
             ),
             default_deferred=True,

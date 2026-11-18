@@ -227,6 +227,22 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
         )
         report["error_code"] = exc.error_code
         return report
+    if type(exc) is sqlite3.DatabaseError:
+        # SQLITE_CORRUPT/SQLITE_NOTADB 抛的是基类：库文件坏了，不是代码异常；带上原生码供运维定位，重试不会好。
+        report = _report(
+            exc,
+            _template(
+                "data_corruption",
+                "本地数据库文件损坏或不是数据库；请先核对对应库文件的完整性，不要原样重试或把它当成没有数据。",
+                "sqlite database file is malformed or not a database",
+                recoverable=False,
+            ),
+            context=context,
+        )
+        report.update({key: value for key, value in (
+            ("sqlite_error_code", getattr(exc, "sqlite_errorcode", None)),
+            ("sqlite_error_name", getattr(exc, "sqlite_errorname", None))) if value is not None})
+        return report
     report = _report(
         exc,
         RuntimeErrorTemplate(
