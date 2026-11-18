@@ -10,8 +10,10 @@ import math
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 
+from ..common.nofollow_fs import open_readonly_file_beneath
 from .schedule import ScheduleValidationError
 
 # 数值边界收拢在私有映射内，避免模块级数值常量被静态目录重复登记。
@@ -427,10 +429,11 @@ def _evaluate_artifact(
 
     code = _evaluate_predicates(
         artifact=artifact,
-        target_path=target_path,
+        resolved_root=resolved_root,
+        rel_parts=tuple(reported_path.split("/")),
         target_stat=target_stat,
         observed=observed,
-        age_seconds=age_seconds,
+        now=now,
         read_bytes=read_bytes,
     )
     return {"path": reported_path, "code": code, "observed": observed}
@@ -531,65 +534,62 @@ def _discover_glob_target(
     return best_path, best_rel, best_stat, {"match_count": match_count}, ""
 
 
+def _stat_matches_snapshot(expected: os.stat_result, actual: os.stat_result) -> bool:
+    if not stat.S_ISREG(actual.st_mode):
+        return False
+    fields = ("st_dev", "st_ino", "st_nlink", "st_size", "st_mtime_ns")
+    if sys.platform != "win32":
+        fields += ("st_ctime_ns",)
+    return all(getattr(expected, name) == getattr(actual, name) for name in fields)
+
+
+def _open_artifact_readonly(resolved_root: Path, rel_parts: tuple[str, ...]) -> int:
+    if sys.platform != "win32":
+        return open_readonly_file_beneath(resolved_root, rel_parts)
+    if not rel_parts or any(not p or p in {".", ".."} or Path(p).name != p for p in rel_parts):
+        raise ValueError("invalid relative artifact path")
+    root_st = os.lstat(resolved_root)
+    if stat.S_ISLNK(root_st.st_mode) or not stat.S_ISDIR(root_st.st_mode):
+        raise OSError(errno.ELOOP, "unsafe postcheck root")
+    current = resolved_root
+    for part in rel_parts[:-1]:
+        current = current / part
+        dir_st = os.lstat(current)
+        if stat.S_ISLNK(dir_st.st_mode):
+            raise OSError(errno.ELOOP, "symlink parent component")
+        if not stat.S_ISDIR(dir_st.st_mode):
+            raise OSError(errno.ENOTDIR, "non-directory parent component")
+    target = current / rel_parts[-1]
+    target.relative_to(resolved_root)
+    leaf_st = os.lstat(target)
+    if stat.S_ISLNK(leaf_st.st_mode):
+        raise OSError(errno.ELOOP, "symlink artifact leaf")
+    if not stat.S_ISREG(leaf_st.st_mode) or int(leaf_st.st_nlink) != 1:
+        raise OSError(errno.EINVAL, "non-regular artifact leaf")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(target, flags)
+
+
 def _evaluate_predicates(
     *,
     artifact: dict[str, object],
-    target_path: Path,
+    resolved_root: Path,
+    rel_parts: tuple[str, ...],
     target_stat: os.stat_result,
     observed: dict[str, int | float],
-    age_seconds: float,
+    now: float,
     read_bytes: int,
 ) -> str:
-    min_bytes = artifact.get("min_bytes")
-    if isinstance(min_bytes, int) and target_stat.st_size < min_bytes:
-        return "ARTIFACT_TOO_SMALL"
-
     needs_lines = "min_lines" in artifact
     needs_json = "json_pointer" in artifact
     read_error_code = ""
 
-    if needs_lines or needs_json:
-        content_code, read_error_code = _evaluate_content_predicates(
-            artifact=artifact,
-            target_path=target_path,
-            observed=observed,
-            read_bytes=read_bytes,
-            needs_lines=needs_lines,
-            needs_json=needs_json,
-        )
-        if content_code:
-            return content_code
-
-    max_age = artifact.get("max_age_seconds")
-    if isinstance(max_age, int) and age_seconds > max_age:
-        return "ARTIFACT_STALE"
-
-    if read_error_code:
-        return read_error_code
-    return ""
-
-
-def _evaluate_content_predicates(
-    *,
-    artifact: dict[str, object],
-    target_path: Path,
-    observed: dict[str, int | float],
-    read_bytes: int,
-    needs_lines: bool,
-    needs_json: bool,
-) -> tuple[str, str]:
-    """执行文件内容类检查；返回 (立即失败业务/越界码, 延后不可读码)。"""
-    if not hasattr(os, "O_NOFOLLOW") and target_path.is_symlink():
-        return "ARTIFACT_OUTSIDE_ROOT", ""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
-        fd = os.open(target_path, flags)
-    except FileNotFoundError:
-        return "ARTIFACT_MISSING", ""
-    except OSError as exc:
+        fd = _open_artifact_readonly(resolved_root, rel_parts)
+    except (OSError, ValueError) as exc:
         if getattr(exc, "errno", None) == errno.ELOOP:
-            return "ARTIFACT_OUTSIDE_ROOT", ""
-        return "", "ARTIFACT_UNREADABLE"
+            return "ARTIFACT_OUTSIDE_ROOT"
+        return "ARTIFACT_UNREADABLE"
 
     try:
         fh = os.fdopen(fd, "rb")
@@ -600,38 +600,79 @@ def _evaluate_content_predicates(
     try:
         with fh:
             fstat_res = os.fstat(fh.fileno())
-            if not stat.S_ISREG(fstat_res.st_mode):
-                return "", "ARTIFACT_UNREADABLE"
+            if not _stat_matches_snapshot(target_stat, fstat_res):
+                return "ARTIFACT_UNREADABLE"
+            verified_age = max(0.0, now - float(fstat_res.st_mtime))
             observed["bytes"] = int(fstat_res.st_size)
+            observed["age_seconds"] = verified_age
 
-            if needs_lines:
-                min_lines = int(artifact["min_lines"])  # type: ignore[arg-type]
-                lines_seen, buffered_chunks = _count_lines_bounded(
-                    fh,
-                    min_lines=min_lines,
+            min_bytes = artifact.get("min_bytes")
+            if isinstance(min_bytes, int) and fstat_res.st_size < min_bytes:
+                return "ARTIFACT_TOO_SMALL"
+
+            if needs_lines or needs_json:
+                content_code, read_error_code = _evaluate_content_predicates(
+                    fh=fh,
+                    fstat_res=fstat_res,
+                    artifact=artifact,
+                    observed=observed,
                     read_bytes=read_bytes,
-                    collect_bytes=needs_json and fstat_res.st_size <= read_bytes,
+                    needs_lines=needs_lines,
+                    needs_json=needs_json,
                 )
-                observed["lines_seen"] = lines_seen
-                if lines_seen < min_lines:
-                    if fstat_res.st_size > read_bytes:
-                        return "", "ARTIFACT_UNREADABLE"
-                    return "ARTIFACT_TOO_FEW_LINES", ""
-            else:
-                buffered_chunks = None
-
-            if needs_json:
-                if fstat_res.st_size > read_bytes:
-                    return "", "ARTIFACT_UNREADABLE"
-                raw_json = _read_remaining_json_bytes(fh, buffered_chunks, read_bytes=read_bytes)
-                if raw_json is None:
-                    return "", "ARTIFACT_UNREADABLE"
-                if not _matches_json_rule(raw_json, artifact):
-                    return "ARTIFACT_JSON_MISMATCH", ""
+                if not _stat_matches_snapshot(target_stat, os.fstat(fh.fileno())):
+                    return "ARTIFACT_UNREADABLE"
+                if content_code:
+                    return content_code
     except OSError as exc:
         if getattr(exc, "errno", None) == errno.ELOOP:
-            return "ARTIFACT_OUTSIDE_ROOT", ""
-        return "", "ARTIFACT_UNREADABLE"
+            return "ARTIFACT_OUTSIDE_ROOT"
+        return "ARTIFACT_UNREADABLE"
+
+    max_age = artifact.get("max_age_seconds")
+    if isinstance(max_age, int) and verified_age > max_age:
+        return "ARTIFACT_STALE"
+
+    if read_error_code:
+        return read_error_code
+    return ""
+
+
+def _evaluate_content_predicates(
+    *,
+    fh: object,
+    fstat_res: os.stat_result,
+    artifact: dict[str, object],
+    observed: dict[str, int | float],
+    read_bytes: int,
+    needs_lines: bool,
+    needs_json: bool,
+) -> tuple[str, str]:
+    """在已验证同一 FD 上执行文件内容类检查；返回 (立即失败业务码, 延后不可读码)。"""
+    if needs_lines:
+        min_lines = int(artifact["min_lines"])  # type: ignore[arg-type]
+        lines_seen, buffered_chunks = _count_lines_bounded(
+            fh,
+            min_lines=min_lines,
+            read_bytes=read_bytes,
+            collect_bytes=needs_json and fstat_res.st_size <= read_bytes,
+        )
+        observed["lines_seen"] = lines_seen
+        if lines_seen < min_lines:
+            if fstat_res.st_size > read_bytes:
+                return "", "ARTIFACT_UNREADABLE"
+            return "ARTIFACT_TOO_FEW_LINES", ""
+    else:
+        buffered_chunks = None
+
+    if needs_json:
+        if fstat_res.st_size > read_bytes:
+            return "", "ARTIFACT_UNREADABLE"
+        raw_json = _read_remaining_json_bytes(fh, buffered_chunks, read_bytes=read_bytes)
+        if raw_json is None:
+            return "", "ARTIFACT_UNREADABLE"
+        if not _matches_json_rule(raw_json, artifact):
+            return "ARTIFACT_JSON_MISMATCH", ""
 
     return "", ""
 

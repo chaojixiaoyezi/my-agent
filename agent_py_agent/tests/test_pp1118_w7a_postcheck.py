@@ -6,10 +6,12 @@ import ast
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.scheduler import postcheck as postcheck_module
 from agent_py_agent.agent.scheduler.postcheck import (
     POSTCHECK_CHECK_CODES,
     POSTCHECK_SCHEMA,
@@ -93,8 +95,16 @@ def test_postcheck_module_uses_stdlib_and_schedule_error_only() -> None:
                 assert top in sys.stdlib_module_names, f"不允许非标准库导入: {alias.name}"
         elif isinstance(node, ast.ImportFrom):
             if node.level > 0:
-                assert node.level == 1 and node.module == "schedule"
-                assert [alias.name for alias in node.names] == ["ScheduleValidationError"]
+                allowed = (
+                    node.level == 1
+                    and node.module == "schedule"
+                    and [alias.name for alias in node.names] == ["ScheduleValidationError"]
+                ) or (
+                    node.level == 2
+                    and node.module == "common.nofollow_fs"
+                    and [alias.name for alias in node.names] == ["open_readonly_file_beneath"]
+                )
+                assert allowed, f"不允许的相对导入: level={node.level} module={node.module}"
             else:
                 top = (node.module or "").split(".")[0]
                 assert top in sys.stdlib_module_names, f"不允许非标准库导入: {node.module}"
@@ -590,3 +600,221 @@ def test_observation_contains_numbers_and_relative_paths_only_zero_file_content(
         assert not str(check["path"]).startswith("/")
         for val in check["observed"].values():
             assert type(val) in (int, float)
+
+
+def _open_fd_count() -> int | None:
+    for candidate in (Path("/dev/fd"), Path("/proc/self/fd")):
+        if candidate.is_dir():
+            return len(os.listdir(candidate))
+    return None
+
+
+def _install_single_post_discovery_hook(monkeypatch: pytest.MonkeyPatch, callback) -> None:
+    real_discover = postcheck_module._discover_exact_target
+    fired = False
+
+    def _wrapped(**kwargs):
+        nonlocal fired
+        result = real_discover(**kwargs)
+        if not fired and result[4] == "":
+            fired = True
+            callback()
+        return result
+
+    monkeypatch.setattr(postcheck_module, "_discover_exact_target", _wrapped)
+
+
+def test_postcheck_rejects_parent_directory_swap_after_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 50_000.0
+    root = tmp_path / "run_root"
+    outside = tmp_path / "outside_dir"
+    moved_parent = tmp_path / "moved_sub"
+    (root / "sub").mkdir(parents=True)
+    outside.mkdir(parents=True)
+    _write(root / "sub" / "report.json", json.dumps({"status": "incomplete"}), mtime=now - 2)
+    _write(outside / "report.json", json.dumps({"status": "complete"}), mtime=now - 2)
+
+    def _swap_parent_to_outside_link() -> None:
+        os.rename(root / "sub", moved_parent)
+        (root / "sub").symlink_to(outside)
+
+    _install_single_post_discovery_hook(monkeypatch, _swap_parent_to_outside_link)
+    fd_before = _open_fd_count()
+    obs = evaluate_postcheck(
+        {"artifacts": [{"path": "sub/report.json", "json_pointer": "/status", "equals": "complete"}]},
+        root=root,
+        now=now,
+        read_bytes=65_536,
+    )
+    fd_after = _open_fd_count()
+    assert obs["status"] == "unknown"
+    assert obs["failure_kind"] == "postcheck_unavailable"
+    assert obs["checks"][0]["code"] in {"ARTIFACT_UNREADABLE", "ARTIFACT_OUTSIDE_ROOT"}
+    if fd_before is not None and fd_after is not None:
+        assert fd_after == fd_before
+
+
+def test_postcheck_rejects_regular_file_swap_and_mid_read_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 60_000.0
+    root = tmp_path / "run_root"
+    root.mkdir()
+    target = root / "report.json"
+    # Discovery sees a 120-byte fresh file with non-matching JSON; swap replaces it with a tiny/stale file
+    # whose JSON would match if old size/mtime certified the replacement inode.
+    _write(target, json.dumps({"status": "pending", "pad": "x" * 90}), mtime=now - 2)
+    staging = root / "replacement.tmp"
+    _write(staging, json.dumps({"status": "complete"}), mtime=now - 500)
+
+    _install_single_post_discovery_hook(monkeypatch, lambda: os.replace(staging, target))
+    obs_swap = evaluate_postcheck(
+        {
+            "artifacts": [
+                {
+                    "path": "report.json",
+                    "min_bytes": 80,
+                    "max_age_seconds": 30,
+                    "json_pointer": "/status",
+                    "equals": "complete",
+                }
+            ]
+        },
+        root=root,
+        now=now,
+        read_bytes=65_536,
+    )
+    assert obs_swap["status"] == "unknown"
+    assert obs_swap["failure_kind"] == "postcheck_unavailable"
+    assert obs_swap["checks"][0]["code"] == "ARTIFACT_UNREADABLE"
+
+    # Same-inode mutation during content read is also rejected by post-read fstat check.
+    monkeypatch.undo()
+    live_file = _write(root / "live.json", json.dumps({"status": "complete", "pad": "y" * 40}), mtime=now - 2)
+    real_read_json = postcheck_module._read_remaining_json_bytes
+
+    def _mutate_during_read(fh, prefix_bytes, *, read_bytes: int):
+        data = real_read_json(fh, prefix_bytes, read_bytes=read_bytes)
+        with live_file.open("ab") as writer:
+            writer.write(b" ")
+        return data
+
+    monkeypatch.setattr(postcheck_module, "_read_remaining_json_bytes", _mutate_during_read)
+    obs_mut = evaluate_postcheck(
+        {"artifacts": [{"path": "live.json", "json_pointer": "/status", "equals": "complete"}]},
+        root=root,
+        now=now,
+        read_bytes=65_536,
+    )
+    assert obs_mut["status"] == "unknown"
+    assert obs_mut["failure_kind"] == "postcheck_unavailable"
+    assert obs_mut["checks"][0]["code"] == "ARTIFACT_UNREADABLE"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo requires POSIX")
+def test_postcheck_rejects_fifo_swap_without_blocking_or_leaking_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 70_000.0
+    root = tmp_path / "run_root"
+    root.mkdir()
+    target = _write(root / "stream_out.json", json.dumps({"status": "complete"}), mtime=now - 1)
+
+    def _swap_to_fifo() -> None:
+        target.unlink()
+        os.mkfifo(target, 0o600)
+
+    _install_single_post_discovery_hook(monkeypatch, _swap_to_fifo)
+    fd_before = _open_fd_count()
+    holder: dict[str, object] = {}
+
+    def _worker() -> None:
+        holder["obs"] = evaluate_postcheck(
+            {"artifacts": [{"path": "stream_out.json", "json_pointer": "/status", "equals": "complete"}]},
+            root=root,
+            now=now,
+            read_bytes=65_536,
+        )
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive(), "evaluate_postcheck blocked on FIFO without writer"
+    obs = holder["obs"]
+    assert isinstance(obs, dict)
+    assert obs["status"] == "unknown"
+    assert obs["failure_kind"] == "postcheck_unavailable"
+    assert obs["checks"][0]["code"] == "ARTIFACT_UNREADABLE"
+    fd_after = _open_fd_count()
+    if fd_before is not None and fd_after is not None:
+        assert fd_after == fd_before
+
+
+def test_postcheck_win32_portable_fallback_passes_valid_and_rejects_swaps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 80_000.0
+    root = tmp_path / "win_root"
+    outside = tmp_path / "win_outside"
+    (root / "nested").mkdir(parents=True)
+    outside.mkdir(parents=True)
+    report = _write(root / "nested" / "out.json", json.dumps({"ok": True, "n": 3}), mtime=now - 2)
+    _write(outside / "out.json", json.dumps({"ok": True, "n": 9}), mtime=now - 2)
+
+    monkeypatch.setattr(postcheck_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        postcheck_module,
+        "open_readonly_file_beneath",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("win32 must use portable fallback")),
+    )
+
+    obs_ok = evaluate_postcheck(
+        {
+            "artifacts": [
+                {
+                    "path": "nested/out.json",
+                    "min_bytes": 5,
+                    "min_lines": 1,
+                    "max_age_seconds": 30,
+                    "json_pointer": "/ok",
+                    "equals": True,
+                }
+            ]
+        },
+        root=root,
+        now=now,
+        read_bytes=65_536,
+    )
+    assert obs_ok["status"] == "passed"
+
+    # File swap after discovery under win32 fallback is rejected via fstat snapshot check.
+    staging = _write(root / "nested" / "staging.tmp", json.dumps({"ok": True, "n": 1}), mtime=now - 100)
+    _install_single_post_discovery_hook(monkeypatch, lambda: os.replace(staging, report))
+    obs_swap = evaluate_postcheck(
+        {"artifacts": [{"path": "nested/out.json", "json_pointer": "/ok", "equals": True}]},
+        root=root,
+        now=now,
+        read_bytes=65_536,
+    )
+    assert obs_swap["status"] == "unknown"
+    assert obs_swap["checks"][0]["code"] == "ARTIFACT_UNREADABLE"
+
+    # Parent symlink swap after discovery under win32 fallback is rejected via per-segment lstat.
+    _install_single_post_discovery_hook(
+        monkeypatch,
+        lambda: (os.rename(root / "nested", tmp_path / "moved_nested"), (root / "nested").symlink_to(outside)),
+    )
+    obs_parent = evaluate_postcheck(
+        {"artifacts": [{"path": "nested/out.json", "json_pointer": "/ok", "equals": True}]},
+        root=root,
+        now=now,
+        read_bytes=65_536,
+    )
+    assert obs_parent["status"] == "unknown"
+    assert obs_parent["checks"][0]["code"] == "ARTIFACT_OUTSIDE_ROOT"

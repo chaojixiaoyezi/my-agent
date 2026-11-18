@@ -17,6 +17,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from ..conversation.learning_source import LEARNING_SOURCE_KEY, schedule_projection
+from ..settings.defaults import default_config_int
 from .active_run_closeout import settle_stale_waiting, waiting_completion_pending
 from .postcheck import evaluate_postcheck
 from .recovery import fail_unstarted, prepare_repository
@@ -152,6 +153,7 @@ class SchedulerService:
         cancellation_handler: Callable[[dict], Any] | None = None,
         monitor_pool: Any | None = None,
         monitor_jitter_window_seconds: int = 30,
+        read_bytes_provider: Callable[[], int] | None = None,
     ) -> None:
         self.repository = repository
         self.conversation_store = conversation_store
@@ -159,6 +161,7 @@ class SchedulerService:
         self.skill_snapshot_provider = skill_snapshot_provider
         self.follow_up = follow_up
         self.cancellation_handler = cancellation_handler
+        self.read_bytes_provider = read_bytes_provider
         from .monitor_pool import MonitorPool
         self.monitor_pool = monitor_pool if monitor_pool is not None else MonitorPool()
         self.monitor_jitter_window_seconds = monitor_jitter_window_seconds
@@ -333,17 +336,27 @@ class SchedulerService:
         return self.repository.store_path.parent
 
     def _postcheck_read_bytes(self) -> int:
-        """读取单次 postcheck 内容检查字节预算，优先复用 retention_scan_slice_bytes 配置。"""
+        """读取单次 postcheck 内容检查字节预算，优先读取组合根 provider，回退现有配置与默认权威。"""
+        if callable(self.read_bytes_provider):
+            try:
+                provided = self.read_bytes_provider()
+                if not isinstance(provided, bool) and int(provided) >= 1024:
+                    return int(provided)
+            except (TypeError, ValueError):
+                pass
         for carrier in (self, self.repository, self.conversation_store):
             cfg = getattr(carrier, "config", None)
             if cfg is not None and hasattr(cfg, "retention_scan_slice_bytes"):
                 try:
-                    value = int(cfg.retention_scan_slice_bytes)
+                    raw = cfg.retention_scan_slice_bytes
+                    if isinstance(raw, bool):
+                        continue
+                    value = int(raw)
                 except (TypeError, ValueError):
                     continue
                 if value >= 1024:
                     return value
-        return 8388608
+        return default_config_int("retention_scan_slice_bytes", minimum=1024)
 
     def finish(
         self,
@@ -359,6 +372,7 @@ class SchedulerService:
         model_call_count: int | None = None,
         failure_kind: str = "",
         postcheck_observation: dict[str, object] | None = None,
+        _writer: Callable[[SchedulerRunFinish], dict[str, object] | None] | None = None,
     ) -> dict[str, object] | None:
         final_status = status
         final_error_code = error_code
@@ -394,10 +408,13 @@ class SchedulerService:
                 final_error_code = final_error_code or "SCHEDULER_POSTCHECK_UNAVAILABLE"
                 final_failure_kind = str(eval_result.get("failure_kind") or "postcheck_unavailable")
                 final_error_message = final_error_message or _format_postcheck_message(eval_result)
+        writer = (
+            _writer
+            if _writer is not None
+            else lambda result: self.repository.finish_run(claim.run_id, claim.claim_id, result)
+        )
         try:
-            return self.repository.finish_run(
-                claim.run_id,
-                claim.claim_id,
+            return writer(
                 SchedulerRunFinish(
                     status=final_status,
                     response=response,
@@ -409,7 +426,7 @@ class SchedulerService:
                     model_call_count=model_call_count,
                     failure_kind=final_failure_kind,
                     postcheck_observation=final_postcheck_observation,
-                ),
+                )
             )
         except (SchedulerConflictError, SchedulerNotFoundError):
             return None
@@ -469,23 +486,17 @@ class SchedulerService:
         if terminal_status == "done" and waiting_completion_pending(self, run, now=now):
             return None
         error_code = "" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}"
-        try:
-            return self.repository.finish_waiting_run(
-                selected,
-                SchedulerRunFinish(
-                    status=terminal_status,
-                    response=str(run.get("response") or ""),
-                    delivery_status=str(run.get("delivery_status") or ""),
-                    delivery_reason=str(run.get("delivery_reason") or ""),
-                    error_code=error_code,
-                    error_message=(
-                        "" if terminal_status == "done" else f"scheduled task ended as {task_status}"
-                    ),
-                    now=now,
-                ),
-            )
-        except (SchedulerConflictError, SchedulerNotFoundError):
-            return None
+        return self.finish(
+            SchedulerRunClaim(selected, "", run),
+            status=terminal_status,
+            response=str(run.get("response") or ""),
+            delivery_status=str(run.get("delivery_status") or ""),
+            delivery_reason=str(run.get("delivery_reason") or ""),
+            error_code=error_code,
+            error_message="" if terminal_status == "done" else f"scheduled task ended as {task_status}",
+            now=now,
+            _writer=lambda result: self.repository.finish_waiting_run(selected, result),
+        )
 
     # LLM: Gateway restart and missed lifecycle notifications converge by scanning only scheduler
     # rows already typed as waiting, then applying the same exact-task reconciliation as live wakes.

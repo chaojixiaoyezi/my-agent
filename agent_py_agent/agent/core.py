@@ -651,6 +651,7 @@ class SimpleAgent(
             ),
             follow_up=_scheduler_follow_up_policy(self),
             cancellation_handler=lambda run: cancel_scheduled_task(self, self.scheduler_repository, run),
+            read_bytes_provider=lambda: self.config.retention_scan_slice_bytes,
         )
         self.subagents = _build_subagent_manager(self, paths)
         configure_canonical_background_contracts()
