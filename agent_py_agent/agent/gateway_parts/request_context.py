@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -55,6 +56,12 @@ logger = logging.getLogger(__name__)
 # 上下文最近任务工作区最多保留 4 个：只给模型最近几个可续做的现场。
 _MAX_RECENT_TASK_WORKSPACES_COUNT = 4
 
+# 只用于表达读取窗口范围的提示码，不算上下文降级，不触发 GATEWAY_CONTEXT_DEGRADED 告警。
+_COVERAGE_ONLY_WARNINGS = frozenset({"task_context_window"})
+
+# 会话上下文准备总耗时达到或超过该毫秒数时记录慢准备警告日志（1 秒）。
+_CONTEXT_PREP_SLOW_LOG_MS = 1000
+
 
 # LLM: 当前请求持有同一个 agent、队列记录与流 sink；字段只传递已解析输入，不创建存储或执行权。
 # 类用途: 将请求路径、身份与计时容器交给编排、绑定和历史组件，保证它们操作同一轮。
@@ -66,7 +73,7 @@ class GatewayAskRunContext:
     response_path: Path
     request_id: str
     on_chunk: object
-    stages: dict[str, float] | None = None
+    stages: dict[str, object] | None = None
 
 
 # LLM: 这里只表示准确请求、目标或活动任务选出的合格工作区，不证明当前回合已执行任务；生命周期仍在首个可升级工具调用时激活。
@@ -120,6 +127,7 @@ class GatewayConversationContext:
     compact_context: AppliedCompactContext | None = field(default=None, repr=False)
     compact_source: ConversationCompactSource | None = field(default=None, repr=False)
     load_warnings: tuple[dict, ...] = ()
+    prep_steps_ms: dict[str, float] = field(default_factory=dict, kw_only=True, repr=False)
 
 
 class _GatewayLoadErrors(list):
@@ -128,6 +136,7 @@ class _GatewayLoadErrors(list):
     def __init__(self):
         super().__init__()
         self.warnings: list[dict] = []
+        self.task_link_reports: dict[tuple[str, tuple[str, ...]], tuple[list, list]] = {}
 
 
 # LLM: 只给带分级通道的请求降级；旧的普通列表调用方仍收到原错误，不修复任何持久索引。
@@ -141,8 +150,27 @@ def _degrade(load_errors: list[dict], error: dict) -> None:
 
 def _gateway_task_links(store, thread_id, load_errors, *, required_task_ids=()):
     """常规请求只读近期窗口、活动集与准确引用，不随终态历史增长而全扫。"""
+    required = tuple(required_task_ids)
+    if isinstance(load_errors, _GatewayLoadErrors):
+        key = (thread_id, required)
+        cached = load_errors.task_link_reports.get(key)
+        if cached is not None:
+            return list(cached[0]), list(cached[1])
+        # 同一轮加载内，若所需任务已包含在已读基础窗口中，直接复用已缓存窗口，避免重复全窗口扫描。
+        base = load_errors.task_link_reports.get((thread_id, ()))
+        if base is not None:
+            base_links, base_errors = base
+            base_ids = {tid for link in base_links if (tid := getattr(link, "task_id", ""))}
+            if required and all(task_id in base_ids for task_id in required):
+                load_errors.task_link_reports[key] = (list(base_links), list(base_errors))
+                return list(base_links), list(base_errors)
+        elif not required:
+            for (cached_thread_id, _), (cached_links, cached_errors) in load_errors.task_link_reports.items():
+                if cached_thread_id == thread_id and not cached_errors:
+                    load_errors.task_link_reports[key] = (list(cached_links), list(cached_errors))
+                    return list(cached_links), list(cached_errors)
     links, errors, warnings, coverage = store.tasks.context_report(
-        thread_id, required_task_ids=required_task_ids,
+        thread_id, required_task_ids=required,
     )
     if isinstance(load_errors, _GatewayLoadErrors):
         for warning in warnings:
@@ -152,6 +180,8 @@ def _gateway_task_links(store, thread_id, load_errors, *, required_task_ids=()):
             warning = {'code': 'task_context_window', 'coverage': coverage}
             if warning not in load_errors.warnings:
                 load_errors.warnings.append(warning)
+        load_errors.task_link_reports[key] = (list(links), list(errors))
+        return list(links), list(errors)
     return links, errors
 
 
@@ -265,6 +295,16 @@ def _repair_gateway_history(inputs, store, thread_id, load_errors, *, budget_sec
             return progress
 
 
+# 函数用途: 用单调时钟成对计量单个会话上下文准备步骤的耗时（毫秒，保留一位小数）。
+@contextmanager
+def _measure_context_prep_step(steps: dict[str, float], name: str):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        steps[name] = round(max(0.0, (time.monotonic() - started) * 1000), 1)
+
+
 # LLM: thread读取后按原repair/索引/来源/作用域顺序准备；同一view供摘要、原文与工具覆盖，defer仅推迟摘要及提交。
 # 函数用途: 组装本轮历史、交付和目录；恢复轮带回已绑定范围的来源，候选不重复调用本入口。
 def gateway_conversation_context(
@@ -288,7 +328,9 @@ def gateway_conversation_context(
             load_errors=(thread_error or {"error_code": "thread_unavailable"},)
         )
     _bind_gateway_stream_identity(inputs, thread, include_model=True)
-    repair_progress = _repair_gateway_history(inputs, store, thread.thread_id, load_errors)
+    steps: dict[str, float] = {}
+    with _measure_context_prep_step(steps, "repair"):
+        repair_progress = _repair_gateway_history(inputs, store, thread.thread_id, load_errors)
     if not request_history.history_repair_ready(repair_progress):
         from .request_errors import (
             ConversationPersistenceError,
@@ -304,50 +346,72 @@ def gateway_conversation_context(
     if inputs.on_thread_loaded is not None and not force_compact:
         inputs.on_thread_loaded(thread)
     scope = conversation_scope(agent, thread, spec)
-    request_history.ensure_gateway_conversation_index(agent, store, thread.thread_id)
-    thread, history_rows, _history_token_budget, recent_operation_evidence, compact_source, compact_context = (
-        _load_gateway_compact_context(
-            inputs,
-            store,
-            thread,
-            force=force_compact,
+    with _measure_context_prep_step(steps, "index"):
+        request_history.ensure_gateway_conversation_index(agent, store, thread.thread_id)
+    with _measure_context_prep_step(steps, "compact_load"):
+        thread, history_rows, _history_token_budget, recent_operation_evidence, compact_source, compact_context = (
+            _load_gateway_compact_context(
+                inputs,
+                store,
+                thread,
+                force=force_compact,
+            )
         )
-    )
     from ..conversation.technical_continuation import active_user_input_yield_parked_task_id
 
-    history_source = _gateway_history_source(
-        history_rows, inputs.request_id, request_binding.gateway_message_work_scope(inputs.request),
-        parked_task_id=active_user_input_yield_parked_task_id(store, thread),
-    )
-    recent_artifacts = request_history.gateway_recent_artifacts(agent, thread.thread_id, inputs.request_id, load_errors)
-    thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
-    named_work = _gateway_named_work(store, thread.thread_id, load_errors)
-    workspace_task = _gateway_workspace_task(
-        store,
-        thread,
-        thread_goal,
-        load_errors,
-        request=inputs.request,
-        request_id=inputs.request_id,
-    )
-    recent_task_workspaces = _gateway_recent_task_workspaces(
-        store,
-        thread,
-        workspace_task,
-        load_errors,
-        request_id=inputs.request_id,
-        owner_run_root=getattr(getattr(agent, "home_paths", None), "owner_runs_dir", ""),
-    )
-    subagent_completions = _gateway_subagent_completion_context(
-        store,
-        thread.thread_id,
-        workspace_task,
-        load_errors,
-    )
+    with _measure_context_prep_step(steps, "history_source"):
+        history_source = _gateway_history_source(
+            history_rows, inputs.request_id, request_binding.gateway_message_work_scope(inputs.request),
+            parked_task_id=active_user_input_yield_parked_task_id(store, thread),
+        )
+    with _measure_context_prep_step(steps, "artifacts"):
+        recent_artifacts = request_history.gateway_recent_artifacts(agent, thread.thread_id, inputs.request_id, load_errors)
+    with _measure_context_prep_step(steps, "goal"):
+        thread_goal = _gateway_thread_goal(store, thread.thread_id, load_errors)
+    with _measure_context_prep_step(steps, "named_work"):
+        named_work = _gateway_named_work(store, thread.thread_id, load_errors)
+    with _measure_context_prep_step(steps, "workspace_task"):
+        workspace_task = _gateway_workspace_task(
+            store,
+            thread,
+            thread_goal,
+            load_errors,
+            request=inputs.request,
+            request_id=inputs.request_id,
+        )
+    with _measure_context_prep_step(steps, "recent_task_workspaces"):
+        recent_task_workspaces = _gateway_recent_task_workspaces(
+            store,
+            thread,
+            workspace_task,
+            load_errors,
+            request_id=inputs.request_id,
+            owner_run_root=getattr(getattr(agent, "home_paths", None), "owner_runs_dir", ""),
+        )
+    with _measure_context_prep_step(steps, "subagent_completions"):
+        subagent_completions = _gateway_subagent_completion_context(
+            store,
+            thread.thread_id,
+            workspace_task,
+            load_errors,
+        )
     if load_errors.warnings:
-        sources = sorted({str(error.get("context") or error.get("code") or "unknown")
-                          for error in load_errors.warnings})
-        logger.warning("GATEWAY_CONTEXT_DEGRADED thread=%s sources=%s", thread.thread_id, ",".join(sources))
+        sources = sorted({
+            source
+            for error in load_errors.warnings
+            if str(error.get("code") or "") not in _COVERAGE_ONLY_WARNINGS
+            and (source := str(error.get("context") or error.get("code") or "unknown")) not in _COVERAGE_ONLY_WARNINGS
+        })
+        if sources:
+            logger.warning("GATEWAY_CONTEXT_DEGRADED thread=%s sources=%s", thread.thread_id, ",".join(sources))
+    total_ms = round(sum(steps.values()), 1)
+    if total_ms >= _CONTEXT_PREP_SLOW_LOG_MS:
+        logger.warning(
+            "GATEWAY_CONTEXT_PREP_SLOW thread=%s total_ms=%d steps=%s",
+            thread.thread_id,
+            int(total_ms),
+            ",".join(f"{k}:{int(v)}" for k, v in steps.items()),
+        )
     return GatewayConversationContext(
         thread_id=thread.thread_id,
         cwd=str(getattr(thread, "cwd", "") or ""),
@@ -379,6 +443,7 @@ def gateway_conversation_context(
         load_warnings=tuple(load_errors.warnings),
         compact_context=compact_context,
         compact_source=compact_source,
+        prep_steps_ms=steps,
     )
 
 

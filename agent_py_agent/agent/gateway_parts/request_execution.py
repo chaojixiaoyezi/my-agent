@@ -416,6 +416,10 @@ def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *
             try:
                 conversation = request_context.gateway_conversation_context(replace(load_request, on_thread_loaded=observer, defer_compact=True, allow_history_defer=True))
                 _record_gateway_stage(context.stages, "conversation_prep_ms", _conversation_prep_started)
+                if isinstance(context.stages, dict):
+                    prep_steps = getattr(conversation, "prep_steps_ms", None)
+                    if isinstance(prep_steps, dict):
+                        context.stages["conversation_prep_steps_ms"] = dict(prep_steps)
                 _require_gateway_conversation_ready(request, conversation)
                 from ..gateway_compact_recovery import prepare_gateway_compact_recovery
 
@@ -516,7 +520,8 @@ def _execute_gateway_conversation_turn(
     notices = _publish_gateway_host_notices(context, conversation)
     from .im_task_routing import prepare_im_task_dispatch
 
-    dispatched = prepare_im_task_dispatch(context, conversation, prompt)
+    with _measure_gateway_stage(context.stages, "im_route_ms"):
+        dispatched = prepare_im_task_dispatch(context, conversation, prompt)
     if dispatched is not None:
         context.request["host_im_task_ack"] = {"task_id": dispatched.task_id, "status": dispatched.status}
         final_only = getattr(context.on_chunk, "set_final_only", None)
