@@ -1026,6 +1026,9 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
         from .model.response_provenance import stamp_response_provenance
 
         stamp_response_provenance(request.params, state.ledger, state.call_id, response)
+        from ._finalization_service import FinalizationService
+
+        FinalizationService(request.agent).checkpoint_model_usage(request.params)
         publish_model_metrics(request.agent, request.params, pending=False, response=response, call_id=state.call_id)
     record_provider_context_observation(
         request.agent,

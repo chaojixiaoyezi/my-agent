@@ -275,6 +275,25 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
     return totals
 
 
+# LLM: 检查点写入当前范围自己的累计增量，_previous_totals 本就排除当前范围；仅在磁盘版本仍等于写入前基线时顺延版本，
+#   若有并发外部写入则 CAS 落空，交由下次读取重算。
+# 函数用途: 本范围自写的检查点不改变排除本范围的基线；版本号CAS相符才顺延，否则留给下次读取重算。
+def refresh_usage_baseline_revision(params: object, *, thread_id: str, before: tuple, after: tuple) -> None:
+    state = getattr(params, "live_archive_state", None)
+    cached = state.get("_model_metrics_baseline") if isinstance(state, dict) else None
+    if (
+        isinstance(cached, tuple)
+        and len(cached) == 2
+        and isinstance(cached[0], tuple)
+        and len(cached[0]) == 2
+        and isinstance(cached[0][0], tuple)
+        and cached[0][0]
+        and cached[0][0][0] == thread_id
+        and cached[0][1] == before
+    ):
+        state["_model_metrics_baseline"] = ((cached[0][0], after), cached[1])
+
+
 # LLM: 读累计摘要或 model_usage 增量行里一个用途分区的失败构成，不改账。新账 estimated 带 unfinished_call_count 键：
 #   失败里有 HTTP 尝试的有本地估算；旧账没有该键，分不清失败的调用是否发出，整体记为 unknown。TUI 统计行与 audit_records 共用。
 # 函数用途: 从一个用途分区摘要取出失败次数、已发出未完成的次数与估算输入、以及分不清是否发出的失败次数。

@@ -2,11 +2,14 @@
 # 模块用途: 保存运行结果、归档与用量；原后台认证义务在任务终结前冻结，不拥有第二份模型或通知账。
 from __future__ import annotations
 
+import logging
+import sqlite3
 import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..common.logical_reference_ids import RUN_REQUEST_ID_PREFIX
+from ..common.request_execution_ports import raise_if_transport_uncertain
 from ..conversation.task_state import conversation_task_completed
 from ..memory_archive import (
     archive_run_turn,
@@ -181,12 +184,13 @@ class FinalizationService:
         *,
         model_calls: dict[str, object] | None = None,
     ) -> str:
-        request_id = str(ctx.request_id or "").strip()
+        request_id = str(getattr(ctx, "request_id", "") or "").strip()
         if model_calls is None:
             model_calls = _current_model_call_summary(self._agent, ctx, request_id)
         if int(model_calls.get("physical_model_attempt_count") or 0) <= 0:
             return ""
-        attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+        raw_attrs = getattr(ctx, "task_attributes", None)
+        attrs = raw_attrs if isinstance(raw_attrs, dict) else {}
         thread_id = str(
             attrs.get("agent_thread_id")
             or attrs.get("conversation_thread_id")
@@ -200,14 +204,42 @@ class FinalizationService:
             {
                 "thread_id": thread_id,
                 "request_id": request_id,
-                "run_id": str(ctx.run_id or "").strip(),
-                "task_id": str(ctx.task_id or "").strip(),
-                "source": str(ctx.source or "").strip(),
+                "run_id": str(getattr(ctx, "run_id", "") or "").strip(),
+                "task_id": str(getattr(ctx, "task_id", "") or "").strip(),
+                "source": str(getattr(ctx, "source", "") or "").strip(),
                 "model_calls": model_calls,
                 "now": time_module.time(),
             }
         )
         return str(getattr(event, "event_id", "") or "")
+
+    # LLM: 长回合跨重启时，结束收口之前完成的调用只在内存里，重启后新进程换了 usage_scope_id，旧调用永久缺账（live 2026-11-17 丢 139 次）。
+    #   每次调用结清后沿同一幂等累计→增量写入口落一次账；同摘要重放是同一事件编号，不重复记费。
+    # 函数用途: 把本范围当前累计用量落账，并让显示基线缓存认下这次自写，不为它整读用量账。
+    def checkpoint_model_usage(self, params: object) -> str:
+        raw_attrs = getattr(params, "task_attributes", None)
+        attrs = raw_attrs if isinstance(raw_attrs, dict) else {}
+        thread_id = str(attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or "").strip()
+        usage = getattr(getattr(self._agent, "conversation_store", None), "model_usage", None)
+        revision = getattr(usage, "revision", None)
+        try:
+            before = revision(thread_id) if thread_id and callable(revision) else None
+            event_id = self.settle_model_usage(params)
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as error:
+            raise_if_transport_uncertain(error)
+            logging.getLogger(__name__).warning("MODEL_USAGE_CHECKPOINT_FAILED error_type=%s", type(error).__name__)
+            return ""
+        if event_id and before is not None:
+            try:
+                after = revision(thread_id)
+            except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as error:
+                raise_if_transport_uncertain(error)
+                logging.getLogger(__name__).warning("MODEL_USAGE_CHECKPOINT_FAILED error_type=%s", type(error).__name__)
+                return event_id
+            from ..conversation.model_metrics import refresh_usage_baseline_revision
+
+            refresh_usage_baseline_revision(params, thread_id=thread_id, before=before, after=after)
+        return event_id
 
     def _update_main_context_bundle_artifacts(
         self, ctx: FinalizeContext, run_request_id: str
@@ -571,15 +603,15 @@ def _reclaim_turn_pty_sessions(agent: object, ctx: FinalizeContext) -> dict:
 
 def _current_model_call_summary(
     agent: object,
-    ctx: FinalizeContext,
+    ctx: object,
     run_request_id: str,
 ) -> dict[str, object]:
     from .model.call_runtime import model_call_summary
 
     return model_call_summary(
         agent,
-        request_id=str(ctx.request_id or run_request_id or ""),
-        run_id=str(ctx.run_id or ctx.task_id or ""),
+        request_id=str(getattr(ctx, "request_id", "") or run_request_id or ""),
+        run_id=str(getattr(ctx, "run_id", "") or getattr(ctx, "task_id", "") or ""),
     )
 
 
