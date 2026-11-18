@@ -291,7 +291,10 @@ class TestChannelManagerRouteMessage:
 
         submit_ask.assert_called_once()
         assert submit_ask.call_args.args[1].content == msg.content
-        send_reply.assert_called_once_with(msg, "req-live", "已补充到当前任务。")
+        # 非管理员私聊：控制回执冻结的路径展示事实为空（只显示文件名），回复出口沿用该路由元数据（S12）。
+        send_reply.assert_called_once_with(
+            replace(msg, metadata={"host_path_display": ""}), "req-live", "已补充到当前任务。"
+        )
         assert manager._reply_delivery.store.pending() == []
 
     def test_active_turn_ordinary_input_uses_durable_input_receipt_watcher(self) -> None:
@@ -414,7 +417,7 @@ class TestChannelManagerRouteMessage:
             assert manager._delivery_worker.run_once() == 1
 
         send_reply.assert_called_once_with(
-            msg,
+            replace(msg, metadata={"host_path_display": ""}),
             "control-m-stop-idle",
             "当前没有运行中的内容，无需停止。",
         )
