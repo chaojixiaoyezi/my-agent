@@ -11431,10 +11431,10 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="单条索引数据超过压缩片预算或来源未完整，候选未发布；检查准确行和来源覆盖，使用显式预算或恢复来源后重新预览。",
     ),
-    "INDEX_ROW_EXCEEDS_SLICE_OR_INCOMPLETE": ErrorContract(
-        code="INDEX_ROW_EXCEEDS_SLICE_OR_INCOMPLETE", category="resource", retryable=False,
-        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
-        recovery_hint="索引来源行超过本页预算或未完整读取，尚未认定该页完成；保留原游标和未读范围，核对该行大小与来源覆盖后有界续扫。",
+    "INDEX_ROW_EXCEEDS_SLICE": ErrorContract(
+        code="INDEX_ROW_EXCEEDS_SLICE", category="storage", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="单条索引行超过整页字节预算，已向下一换行符跳过丢弃但未证明目标已删除；按错误回执中的 phase 与 offset 只读检查对应规范索引行，不要重放写入。",
     ),
     "INDEX_SOURCE_CHANGED": ErrorContract(
         code="INDEX_SOURCE_CHANGED", category="state", retryable=False,
@@ -11450,6 +11450,86 @@ ERROR_CONTRACTS.update({
         code="INDEX_SOURCE_UNREADABLE", category="storage", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="规范索引来源存在但无法读取，未当作空；检查错误类型及权限，修复来源可读性后沿原入口重建。",
+    ),
+    "INDEX_TAIL_INCOMPLETE": ErrorContract(
+        code="INDEX_TAIL_INCOMPLETE", category="storage", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="索引末尾行在冻结边界处缺少换行符（可能仍在写入），本轮已跳过且不构成删除证明；待下一轮完整遍历时从新游标重新读取核对。",
+    ),
+    "INPUT_RECEIPT_CLIENT_DIGEST_MISMATCH": ErrorContract(
+        code="INPUT_RECEIPT_CLIENT_DIGEST_MISMATCH", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 prepared_request.metadata.client_input_digest 校验失败；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_CLIENT_DIGEST_MISSING": ErrorContract(
+        code="INPUT_RECEIPT_CLIENT_DIGEST_MISSING", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 client_input_digest 校验失败；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_EMPTY": ErrorContract(
+        code="INPUT_RECEIPT_EMPTY", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执文件(<file>)为空或损坏；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_LEGACY_SCHEMA": ErrorContract(
+        code="INPUT_RECEIPT_LEGACY_SCHEMA", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 schema_version 校验失败（旧版格式需按原输入迁移）；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_OWNER_BINDING_INVALID": ErrorContract(
+        code="INPUT_RECEIPT_OWNER_BINDING_INVALID", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 prepared_request.host_request_owner.v1 校验失败（格式无效）；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_OWNER_BINDING_MISMATCH": ErrorContract(
+        code="INPUT_RECEIPT_OWNER_BINDING_MISMATCH", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 prepared_request.host_request_owner.v1 校验失败（归属不一致）；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_PAYLOAD_DIGEST_MISMATCH": ErrorContract(
+        code="INPUT_RECEIPT_PAYLOAD_DIGEST_MISMATCH", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 prepared_payload_digest 校验失败；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_PREPARED_ID_MISMATCH": ErrorContract(
+        code="INPUT_RECEIPT_PREPARED_ID_MISMATCH", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 prepared_request.id 校验失败；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_REQUEST_ID_MISSING": ErrorContract(
+        code="INPUT_RECEIPT_REQUEST_ID_MISSING", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 request_id 校验失败；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_SCHEMA_UNSUPPORTED": ErrorContract(
+        code="INPUT_RECEIPT_SCHEMA_UNSUPPORTED", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 schema_version 校验失败（不受支持的格式版本）；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_STATE_INVALID": ErrorContract(
+        code="INPUT_RECEIPT_STATE_INVALID", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 state 校验失败；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_TIMESTAMP_INVALID": ErrorContract(
+        code="INPUT_RECEIPT_TIMESTAMP_INVALID", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 updated_at 校验失败；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_TRANSPORT_REQUIRES_V3": ErrorContract(
+        code="INPUT_RECEIPT_TRANSPORT_REQUIRES_V3", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段 transport 校验失败（仅 v3 回执允许携带）；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_UNCLASSIFIED": ErrorContract(
+        code="INPUT_RECEIPT_UNCLASSIFIED", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段未归类或存在未知损坏；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
+    ),
+    "INPUT_RECEIPT_UNREADABLE": ErrorContract(
+        code="INPUT_RECEIPT_UNREADABLE", category="data_corruption", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="回执字段(<json>)解析或读取失败；已消费的不需要重放，terminal_unknown 先用 audit_records message_lifecycle 核对，禁止原样重放。",
     ),
     "INVALID_COMPACT_CURSOR": ErrorContract(
         code="INVALID_COMPACT_CURSOR", category="validation", retryable=False,
@@ -11480,6 +11560,11 @@ ERROR_CONTRACTS.update({
         code="LOG_SOURCE_CHANGED", category="state", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="日志来源代次已变化，旧偏移未应用到新卷；清空 cursor 重新选择窗口，不合并不同日志代次的覆盖事实。",
+    ),
+    "METADATA_ONLY_SUPPRESSES_LOG_PAGES": ErrorContract(
+        code="METADATA_ONLY_SUPPRESSES_LOG_PAGES", category="input", retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="传入 metadata_only=true 时会抑制日志分页参数（log_offset_bytes/log_since/log_until/log_cursor）且不返回日志页；去掉 metadata_only 后重试，日志正文在 log_pages.sources.<source>.lines。",
     ),
     "OLDER_THAN_FILTER": ErrorContract(
         code="OLDER_THAN_FILTER", category="state", retryable=False,
@@ -11535,6 +11620,21 @@ ERROR_CONTRACTS.update({
         code="SCHEDULER_LEASE_ACTIVE", category="state", retryable=False,
         recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
         recovery_hint="原定时运行租约仍有效，未结算其能力请求；等待准确 lease 终结并复读持久执行事实，不能按时间猜测僵尸。",
+    ),
+    "SCHEDULER_OUTPUT_STALLED": ErrorContract(
+        code="SCHEDULER_OUTPUT_STALLED", category="business", retryable=True,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="定时任务产物已超过 postcheck 允许的新鲜度期限，疑似无产出停滞；用 schedule action=history 核对 postcheck_checks 与上游数据产出，修复停滞原因后再运行，不可伪造完成状态。",
+    ),
+    "SCHEDULER_POSTCHECK_FAILED": ErrorContract(
+        code="SCHEDULER_POSTCHECK_FAILED", category="business", retryable=True,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="定时任务执行结束但产物 postcheck 断言未通过（缺失、字节或行数不足、或 JSON 断言不匹配）；用 schedule action=history 查看 postcheck_status 与 postcheck_checks 并修复产物生成，不可在未核实前盲目重放。",
+    ),
+    "SCHEDULER_POSTCHECK_UNAVAILABLE": ErrorContract(
+        code="SCHEDULER_POSTCHECK_UNAVAILABLE", category="storage", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="定时任务产物 postcheck 因文件不可读、路径越界或扫描超预算而未能核验，本次结果保留为 unknown；用 schedule action=history 检查 postcheck_checks 后修复可读性与路径约束，稍后再核验，不可盲目重放写操作。",
     ),
     "SESSION_TASK_LEARNING_METADATA_INVALID": ErrorContract(
         code="SESSION_TASK_LEARNING_METADATA_INVALID", category="validation", retryable=False,
