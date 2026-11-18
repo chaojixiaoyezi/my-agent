@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import threading
 import time
@@ -239,44 +240,91 @@ class WebFetchTool(BaseTool):
                 resolve_pin=lambda hop_url: self._resolve_pin(hop_url, resolved_by_host=resolved_by_host),
             )
 
+        registered_secrets: list[str] = [s for s in request.secrets_to_redact if isinstance(s, str) and s]
+
+        def _record_http_secrets(values, *, from_turn_redaction: bool = False) -> None:
+            clean = tuple(dict.fromkeys(v for v in values if isinstance(v, str) and v and v.strip()))
+            if not clean:
+                return
+            for item in clean:
+                if item not in registered_secrets:
+                    registered_secrets.append(item)
+            if credential_use is None:
+                return
+            with_vals = getattr(getattr(credential_use, "redaction", None), "with_credential_values", None)
+            if from_turn_redaction and callable(with_vals) and hasattr(credential_use, "_redaction"):
+                credential_use._redaction = with_vals(clean)
+                return
+            register_values = getattr(credential_use, "register_values", None)
+            if callable(register_values):
+                register_values(clean)
+
         try:
             if request.credential_ref and getattr(self, "credential_authenticator", None):
-                response, secrets = self.credential_authenticator(request.credential_ref, raw, send)
-                request = replace(request, secrets_to_redact=secrets)
-                register_values = getattr(credential_use, "register_values", None)
-                if callable(register_values) and secrets:
-                    register_values(secrets)
+                from ..user_space.task_credential_http import bind_http_credential_secret_sink
+
+                with bind_http_credential_secret_sink(
+                    lambda vals: _record_http_secrets(vals, from_turn_redaction=True),
+                ):
+                    response, secrets = self.credential_authenticator(request.credential_ref, raw, send)
+                if secrets:
+                    extra = [s for s in secrets if isinstance(s, str) and s and s not in registered_secrets]
+                    if extra:
+                        _record_http_secrets(extra, from_turn_redaction=False)
             else:
+                if registered_secrets:
+                    _record_http_secrets(registered_secrets, from_turn_redaction=False)
                 response = send(raw)
         except CredentialInputError as exc:
-            return ToolHandlerOutcome(
+            response = ToolHandlerOutcome(
                 'web_fetch',
                 False,
                 str(exc),
                 error_code=exc.code,
                 effect_outcome=exc.effect_outcome,
                 result_envelope={'credential_error': {'stage': exc.stage, 'error_code': exc.code}},
+                next_action=_credential_input_error_next_action(exc),
             )
         except (PermissionError, ValueError) as exc:
-            return _credential_value_error_outcome(exc, sent_requests=sent_requests)
+            response = _credential_value_error_outcome(exc, sent_requests=sent_requests)
         except (KeyError, TypeError):
             effect = "not_started" if sent_requests == 0 else "failed"
-            return ToolHandlerOutcome(
+            response = ToolHandlerOutcome(
                 "web_fetch",
                 False,
                 "私人认证记录字段缺失或类型不匹配，无法完成 HTTP 注入；请用 request_credentials(operation=\"status\") 核对原引用。",
                 error_code="CREDENTIAL_INPUT_UNAVAILABLE",
                 effect_outcome=effect,
+                next_action=(
+                    f"本次 HTTP 请求状态 effect_outcome={effect}；"
+                    "请用 request_credentials(operation=\"status\") 检查原引用后再决定，不要原样盲目重试。"
+                ),
             )
-        if isinstance(response, ToolHandlerOutcome) and request.secrets_to_redact:
+        except (OSError, http.client.HTTPException) as exc:
+            effect = "not_started" if sent_requests == 0 else "failed"
+            code = "TOOL_TIMEOUT" if isinstance(exc, TimeoutError) else "NETWORK_REQUEST_FAILED"
+            label = "请求超时" if code == "TOOL_TIMEOUT" else "请求失败"
+            response = ToolHandlerOutcome(
+                "web_fetch",
+                False,
+                f"{label}: {type(exc).__name__}",
+                error_code=code,
+                effect_outcome=effect,
+                next_action=(
+                    f"HTTP 传输中断（{type(exc).__name__}，effect_outcome={effect}）；"
+                    "若请求为非幂等变更操作请先核实远端状态，禁止盲目重放写操作。"
+                ),
+            )
+        active_secrets = tuple(registered_secrets)
+        if isinstance(response, ToolHandlerOutcome) and active_secrets:
             response = replace(
                 response,
-                output=_redact_secret_echo(response.output, request.secrets_to_redact),
-                result_envelope=_redact_secret_echo(response.result_envelope, request.secrets_to_redact),
-                next_action=_redact_secret_echo(response.next_action, request.secrets_to_redact),
+                output=_redact_secret_echo(response.output, active_secrets),
+                result_envelope=_redact_secret_echo(response.result_envelope, active_secrets),
+                next_action=_redact_secret_echo(response.next_action, active_secrets),
             )
-        elif isinstance(response, RawResponseParts) and request.secrets_to_redact:
-            variants = _secret_echo_variants(request.secrets_to_redact)
+        elif isinstance(response, RawResponseParts) and active_secrets:
+            variants = _secret_echo_variants(active_secrets)
             body = response.body
             for secret in variants:
                 body = body.replace(secret.encode("utf-8"), b"[private]")
@@ -380,6 +428,22 @@ class _WebFetchRequest:
     refresh: bool = False
     secrets_to_redact: tuple[str, ...] = ()
     credential_ref: str = ""
+
+
+def _credential_input_error_next_action(exc: CredentialInputError) -> str:
+    effect = str(exc.effect_outcome or "not_started")
+    code = str(exc.code or "CREDENTIAL_INPUT_UNAVAILABLE")
+    if code == "TOOL_INVALID_ARGUMENTS":
+        return f"本次 HTTP 请求未发送（effect_outcome={effect}）；请修正 credential_ref 或目标 URL 参数后再试。"
+    if code in {"CREDENTIAL_NOT_AUTHORIZED", "CREDENTIAL_BINDING_INVALID", "CREDENTIAL_TASK_NOT_ACTIVE"}:
+        return (
+            f"本次 HTTP 请求状态 effect_outcome={effect}；请在原授权会话由本人发起调用，"
+            "或用 request_credentials(operation=\"find\", url=\"...\") 核实当前可用引用，禁止盲目原样重试。"
+        )
+    return (
+        f"本次 HTTP 请求状态 effect_outcome={effect}；请先用 request_credentials(operation=\"status\") "
+        "核实原引用状态或在新回合继续，勿在聊天发送密码。"
+    )
 
 
 def _credential_value_error_outcome(exc: Exception, *, sent_requests: int) -> ToolHandlerOutcome:
