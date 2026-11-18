@@ -432,12 +432,13 @@ class _RequestDispatcher:
     def _redispatch_if_inbox_changed(self) -> int:
         if getattr(self, "tick_failed", False) or restart_draining():
             return 0
+        scan_gate = getattr(self, "_scan_gate", None)
         try:
             claimed = dispatch_pending_requests(
                 self.paths,
                 self.limits,
                 self._submit,
-                scan_gate=getattr(self, "_scan_gate", None),
+                scan_gate=scan_gate,
                 admission_gate=getattr(self, "_admission_gate", None),
             )
         except Exception as exc:
@@ -445,7 +446,8 @@ class _RequestDispatcher:
             _note_loop_tick_error(_DISPATCH_SEGMENT_SITE, exc, self.backoff)
             return 0
         loop_health.note_dispatch_scan()
-        self._tick_inbox_stamp = self._current_inbox_stamp()
+        if scan_gate is not None:
+            self._tick_inbox_stamp = scan_gate._last_mtime_ns
         self._redispatched = getattr(self, "_redispatched", 0) + claimed
         return claimed
 
@@ -468,16 +470,18 @@ class _RequestDispatcher:
             # mc4-1704：派发前先回收"已有规范终态但仍 occupied"的预留，崩溃/重启遗留名额不堵新请求。
             if self._admission_gate is not None:
                 self._admission_gate.release_settled()
+            hold_reason = RESTART_DRAIN_HOLD_REASON if restart_draining() else ""
             dispatched = dispatch_pending_requests(
                 self.paths,
                 self.limits,
                 self._submit,
                 scan_gate=self._scan_gate,
-                hold_reason=RESTART_DRAIN_HOLD_REASON if restart_draining() else "",
+                hold_reason=hold_reason,
                 admission_gate=self._admission_gate,
             )
             loop_health.note_dispatch_scan()
-            self._tick_inbox_stamp = self._current_inbox_stamp()
+            if not hold_reason:
+                self._tick_inbox_stamp = self._scan_gate._last_mtime_ns
         except Exception as exc:
             # 只有派发段自己失败才让外层守卫退避（没请求可派时）；账本记在 loop "dispatcher" 下，打印按循环退避限流。
             self.tick_failed = True

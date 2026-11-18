@@ -390,3 +390,111 @@ def test_claim_at_tick_start_does_not_cause_spurious_reconcile_yield(
     assert summaries[0]["checked"] == 2
     assert summaries[0]["consumed"] == 2
     assert summaries[0]["yielded"] is False
+
+
+def test_request_published_after_dir_listing_before_dispatch_returns_yields_64_item_reconcile_and_redispatches(
+    tmp_path, monkeypatch, isolated_admission
+) -> None:
+    paths = _paths(tmp_path)
+    paths.inbox.mkdir(parents=True, exist_ok=True)
+    for idx in range(64):
+        _write_consumed_receipt(paths, f"gwreq-msg-w8-r2-{idx:02d}")
+
+    stale = time.time() - 10.0
+    os.utime(paths.inbox, (stale, stale))
+    monkeypatch.setattr(rw.GatewayInboxScanGate, "_COARSE_MTIME_GUARD_SECONDS", 0.0)
+
+    claims: list[str] = []
+    observed_at_cleanup: list[list[str]] = []
+    dispatcher = _stub_dispatcher(paths, claims, threading.Event())
+    dispatcher._closing_deadline_once = lambda: os.utime(paths.inbox, (stale + 1.0, stale + 1.0))
+    dispatcher._next_terminal_projection_at = float("inf")
+    dispatcher._next_input_reconcile_at = 0.0
+    dispatcher._next_lock_cleanup_at = 0.0
+    dispatcher._submit = lambda claim, _u, _c: claims.append(claim.request_id)
+    monkeypatch.setattr(
+        dispatcher,
+        "_cleanup_lock_sidecars_once",
+        lambda: observed_at_cleanup.append(list(claims)),
+    )
+
+    real_iter = rw._iter_pending_requests
+    scan_count = [0]
+
+    def iter_publish_after_pre_reconcile_listing(paths_):
+        entries = real_iter(paths_)
+        scan_count[0] += 1
+        if scan_count[0] == 2:
+            _enqueue(paths_, "req-after-listing", "user-a")
+        return entries
+
+    monkeypatch.setattr(rw, "_iter_pending_requests", iter_publish_after_pre_reconcile_listing)
+
+    summaries: list[dict[str, object]] = []
+    real_reconcile = gateway_loops.reconcile_gateway_input_receipts
+
+    def spy_reconcile(*args, **kwargs):
+        summary = real_reconcile(*args, **kwargs)
+        summaries.append(summary)
+        return summary
+
+    monkeypatch.setattr(gateway_loops, "reconcile_gateway_input_receipts", spy_reconcile)
+
+    assert dispatcher.tick() == 1
+    assert len(summaries) == 1
+    assert summaries[0]["checked"] == 1
+    assert summaries[0]["consumed"] == 1
+    assert summaries[0]["yielded"] is True
+    assert observed_at_cleanup == [["req-after-listing"]]
+    assert claims == ["req-after-listing"]
+
+
+def test_initial_tick_dispatch_post_listing_arrival_preserves_pre_scan_watermark(
+    tmp_path, monkeypatch, isolated_admission
+) -> None:
+    paths = _paths(tmp_path)
+    paths.inbox.mkdir(parents=True, exist_ok=True)
+    for idx in range(64):
+        _write_consumed_receipt(paths, f"gwreq-msg-w8-init-{idx:02d}")
+
+    stale = time.time() - 10.0
+    os.utime(paths.inbox, (stale, stale))
+    monkeypatch.setattr(rw.GatewayInboxScanGate, "_COARSE_MTIME_GUARD_SECONDS", 0.0)
+
+    claims: list[str] = []
+    changed_after_initial_dispatch: list[bool] = []
+    dispatcher = _stub_dispatcher(paths, claims, threading.Event())
+    dispatcher._closing_deadline_once = lambda: changed_after_initial_dispatch.append(
+        dispatcher._inbox_changed_since_tick_start()
+    )
+    dispatcher._next_terminal_projection_at = float("inf")
+    dispatcher._next_input_reconcile_at = float("inf")
+    dispatcher._next_lock_cleanup_at = float("inf")
+    dispatcher._submit = lambda claim, _u, _c: claims.append(claim.request_id)
+
+    real_iter = rw._iter_pending_requests
+    injected = [False]
+
+    def iter_publish_on_initial_dispatch(paths_):
+        entries = real_iter(paths_)
+        if not injected[0]:
+            injected[0] = True
+            _enqueue(paths_, "req-initial-race", "user-a")
+        return entries
+
+    monkeypatch.setattr(rw, "_iter_pending_requests", iter_publish_on_initial_dispatch)
+
+    assert dispatcher.tick() == 0
+    assert claims == []
+    assert changed_after_initial_dispatch == [True]
+
+    summary = gateway_loops.reconcile_gateway_input_receipts(
+        paths,
+        dispatcher.bootstrap_agent,
+        limit=64,
+        should_yield=dispatcher._inbox_changed_since_tick_start,
+    )
+    assert summary["checked"] == 1
+    assert summary["yielded"] is True
+    assert dispatcher._redispatch_if_inbox_changed() == 1
+    assert claims == ["req-initial-race"]
