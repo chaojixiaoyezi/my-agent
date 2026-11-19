@@ -8,6 +8,7 @@ import pytest
 
 from agent_py_agent.agent.common import nofollow_fs as fs
 from agent_py_agent.agent.gateway_parts import multiprocess_takeover_sources as sources
+from agent_py_agent.agent.gateway_parts.gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
 from agent_py_agent.tests.test_gateway_prepared_route_immutability import context as context
 from agent_py_agent.tests.test_gateway_role_heartbeat_stability import (
     publish_heartbeat,
@@ -82,7 +83,7 @@ def test_default_CountNone_keeps_original_read_kwargs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sources, 'read_bytes_beneath', reading)
     assert sources.require_role_coverage(SimpleNamespace(root=tmp_path), 'current') is None
-    assert calls == [{'max_bytes': 16384, 'require_dir_fd': True}]
+    assert calls == [{'max_bytes': GATEWAY_STATE_MAX_BYTES, 'require_dir_fd': True}]
 
 
 @pytest.mark.parametrize('kind', ['symlink', 'hardlink', 'fifo', 'directory'])

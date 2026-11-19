@@ -4,6 +4,7 @@
 agent_py_agent/agent/
 `-- gateway_parts/gateway_state_bounds.py              # gateway_state.json 字节上限与收尾引用紧凑投影（每原因 count+规范化摘要，0 条明细）
 agent_py_agent/tests/
+|-- test_gw_stress_r1_role_state_limits.py              # R2/F02 代次角色读者 C 状态 1 MiB 兼容读、W 保持 16 KiB 与封口超限拒绝回归单测
 |-- test_gw_stress_remediation_cold_owner.py            # C9 冷 owner 有界预热池不阻塞后台同步拍回归单测
 |-- test_gw_stress_remediation_control_lane.py          # GW-02/X4 状态/停止独立执行池、/control 正文不检视与手动 compact 占位上限回归单测
 |-- test_gw_stress_remediation_gateway_state.py         # GW-18 停机保留调用后重启两次、旧超大状态自愈、oversized 原因与交接投影读回回归单测

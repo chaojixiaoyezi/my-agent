@@ -415,6 +415,7 @@ def _generation_digests(values):
 def _generation_final_roles(runtime, roles):
     from ..common.json_io import serialize_private_json_no_newline
     from ..common.strict_json import load_strict_json
+    from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
     from .multiprocess_generation_metadata import generation_metadata_parts
 
     state = load_strict_json(roles['gateway_state.json'])
@@ -423,7 +424,11 @@ def _generation_final_roles(runtime, roles):
         raise ValueError('generation_normal_stop_required')
     value = {**state, 'drain_complete': True,
              'generation_closure_ref': '/'.join(generation_metadata_parts(runtime.scope.c_run_id))}
-    return {**roles, 'gateway_state.json': serialize_private_json_no_newline(value, sort_keys=True).encode('utf-8')}
+    encoded = serialize_private_json_no_newline(value, sort_keys=True).encode('utf-8')
+    # C2：加封口字段后的 C 字节须仍能被角色读者在兼容上限内读回；否则在写 closure 前按既有原因拒绝。
+    if len(encoded) > GATEWAY_STATE_MAX_BYTES:
+        raise ValueError('generation_closure_too_large')
+    return {**roles, 'gateway_state.json': encoded}
 
 
 # LLM: 每个旧目标须同代原captured v2及本次原prepare/P2，范围保旧C/W坐标；完整目标不丢，当前仍交原native collector。

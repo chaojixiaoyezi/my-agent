@@ -50,7 +50,9 @@ def _role_marker_names(root) -> list[str]:
 # LLM: 默认0保原读取kwargs；closed显式2仅复用原strict安全叶snapshot，硬路径/父链变化仍拒，字段/旧代/C PID检查不变。
 # 函数用途: 只读核单个角色标记；避免正常atomic发表与closed重读竞争，不新增写者认证或关闭证明。
 def _check_role_marker(root, parts, current_c_run_id, *, snapshot_retries=0) -> None:
-    content = read_bytes_beneath(root, parts, max_bytes=16384, require_dir_fd=True,
+    # GW-18/C2：与 _role_snapshot 同一判据，仅 Gateway state 用兼容读上限，worker marker 保持原 16 KiB。
+    limit = GATEWAY_STATE_MAX_BYTES if parts == ("gateway_state.json",) else 16384
+    content = read_bytes_beneath(root, parts, max_bytes=limit, require_dir_fd=True,
                                  **({"snapshot_retries": snapshot_retries} if snapshot_retries else {}))
     if content is None:
         return

@@ -196,7 +196,9 @@ def generation_role_files(root, count):
         raise ValueError('generation_role_coverage_missing')
     roles = {}
     for name in ('gateway_state.json', *(f'workers/{name}' for name in expected)):
-        content = read_bytes_beneath(root, tuple(name.split('/')), max_bytes=16384, require_dir_fd=True)
+        # GW-18/C2：仅 Gateway state 用兼容读上限，worker marker 保持原 16 KiB。
+        limit = GATEWAY_STATE_MAX_BYTES if name == 'gateway_state.json' else 16384
+        content = read_bytes_beneath(root, tuple(name.split('/')), max_bytes=limit, require_dir_fd=True)
         if content is None:
             raise ValueError('generation_role_coverage_missing')
         roles[name] = content
