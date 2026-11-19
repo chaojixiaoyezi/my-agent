@@ -214,6 +214,26 @@ class ManagedOwnerPool:
         with self._lock:
             return [entry.agent for entry in self._entries.values()]
 
+    # LLM: 只读当前代次缓存，不构造、不租用、不续期；停用或无法证明当前权威时与 _acquire 一样退役已缓存代次。
+    # 函数用途: 让后台调度判断受管owner冷热，冷owner交预热池构建。
+    def peek(self, owner):
+        from ..common.managed_owner_generation import current_managed_owner_key
+
+        uid = managed_local_user_id(self._root, owner)
+        if uid is None:
+            return None
+        digest = managed_config_digest(managed_owner_config(self._root, owner, self._host_options))
+        try:
+            key = current_managed_owner_key(self._root, uid, config_digest=digest)
+        except HostAPIError:
+            self._retire_user(uid)
+            return None
+        with self._lock:
+            ready = self._retire_other_generations_locked(key)
+            entry = self._entries.get(key)
+        self._close(ready)
+        return None if entry is None else entry.agent
+
     # LLM: 只读计数，不代表持久任务完成。
     # 函数用途: 返回缓存、构造中与租用中的受管实例数。
     def gauges(self) -> dict[str, int]:

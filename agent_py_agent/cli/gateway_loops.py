@@ -1812,7 +1812,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         )
         self._executor = None
         self._curator_executor = None
-        # 冷 owner 预热只是缓存装配：停机撤销排队项，运行中的构建沿原池合流结束，不另记任务状态。
+        # 冷 owner 预热只是缓存装配：停机撤销排队项；运行中的构建已登记为停机执行片（C7），由下方 wait 计入未结证明。
         self._owner_warmup_executor = None
         body_error = None
         try:
@@ -2116,29 +2116,31 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             rotated = [*owners[start:], *owners[:start]]
             builds = 0
             next_cursor = (start + 1) % len(owners)
-            peek = getattr(pool, "peek", None)
             warmups = getattr(self, "_owner_warmups", None)
             if warmups is None:
                 warmups = self._owner_warmups = {}
             for offset, owner in enumerate(rotated):
                 index = (start + offset) % len(owners)
                 try:
-                    if managed is not None and managed.handles(owner):
+                    is_managed = managed is not None and managed.handles(owner)
+                    target = managed if is_managed else pool
+                    target_peek = getattr(target, "peek", None)
+                    if callable(target_peek) and target_peek(owner) is None:
+                        # 冷构建交有界预热池（受管与普通共用两槽、去重与游标）：已在预热的不重复提交，池满留给后续拍按游标轮转。
+                        key = (owner.provider, owner.owner_kind, owner.owner_id)
+                        if key in warmups or builds >= _COLD_OWNER_BUILDS_PER_TICK_COUNT \
+                                or len(warmups) >= _COLD_OWNER_BUILDS_PER_TICK_COUNT:
+                            continue
+                        builds += 1
+                        next_cursor = (index + 1) % len(owners)
+                        warmups[key] = self._get_owner_warmup_executor().submit(
+                            self._warm_owner, target, owner, is_managed)
+                        continue
+                    if is_managed:
                         # 旧直写库派单先按原身份持久交接到规范库，再取独立准入的受管Agent；Count0原提交即直调。
                         managed.reconcile(owner, commit_transition=lambda operation: operation())
                         managed.get(owner)
                     else:
-                        if callable(peek) and peek(owner) is None:
-                            # 冷构建交有界预热池：已在预热的不重复提交，池满留给后续拍按游标轮转。
-                            key = (owner.provider, owner.owner_kind, owner.owner_id)
-                            if key in warmups or builds >= _COLD_OWNER_BUILDS_PER_TICK_COUNT \
-                                    or len(warmups) >= _COLD_OWNER_BUILDS_PER_TICK_COUNT:
-                                continue
-                            builds += 1
-                            next_cursor = (index + 1) % len(owners)
-                            warmups[key] = self._get_owner_warmup_executor().submit(
-                                pool.get, owner, hard=True, touch=False)
-                            continue
                         pool.get(owner, hard=True, touch=False)
                 except Exception as exc:
                     _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
@@ -2388,6 +2390,15 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             )
         return executor
 
+    # LLM: C7：首个副作用前登记现成停机执行片，覆盖受管交接、构建到池发布；停机或重启暂停后 observe 拒绝新片。
+    # 函数用途: 在有界预热池里冷构建一个 owner（受管先交接旧派单），停机证明可见其在途。
+    def _warm_owner(self, target, owner, managed: bool):
+        with self._shutdown_control.observe(None):
+            if managed:
+                target.reconcile(owner, commit_transition=lambda operation: operation())
+                return target.get(owner)
+            return target.get(owner, hard=True, touch=False)
+
     # LLM: 只在有界秒数内等待，超时的构建留在预热池继续，下拍 peek 命中后再接调度器；失败沿原 owner_build 诊断。
     # 函数用途: 收割已完成的冷 owner 预热，记录失败并释放在途名额。
     def _settle_owner_warmups(self, warmups: dict) -> None:
@@ -2401,7 +2412,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 continue
             warmups.pop(key, None)
             error = None if future.cancelled() else future.exception()
-            if error is not None:
+            # 停机/重启暂停门的拒绝不是构建失败：owner 保持冷，下一拍再提交。
+            if error is not None and not isinstance(error, InterruptedError):
                 _print_gateway_loop_error("gateway_background_main.owner_build", str(key[-1]), error)
 
     # LLM: 与业务控制共用同一基础Agent上的受管池；失败只记录诊断，不回落普通池或克隆管理员实例。

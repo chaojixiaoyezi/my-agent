@@ -2,6 +2,8 @@
 
 一次冷构建可能耗时数十秒（首次 schema/目录导入与构造槽位排队）；后台拍只把它交给有界预热池、
 等待有界秒数，热 owner 的调度器同步与本拍其余阶段不再被拖住。构建完成后下一拍 peek 命中即接上调度器。
+R5（F06/F07）：受管 owner 同样以只读 peek 判冷热、冷构建走同一预热池；预热登记为停机执行片，
+停机与重启暂停能看到在途构建，门关之后的预热不交接、不构建、不发布。
 """
 from __future__ import annotations
 
@@ -10,7 +12,18 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
+from agent_py_agent.agent.conversation.background_shutdown import BackgroundShutdown
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import managed_owner_runtime
+from agent_py_agent.agent.gateway_parts.managed_owner_runtime import managed_owner_pool_for_agent
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
+from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
+from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.cli import gateway_loops
+from agent_py_agent.cli.models import GatewayRunContext
 
 _REQUEST_CONTEXT = contextvars.ContextVar("gw_stress_request_context", default=None)
 
@@ -61,6 +74,9 @@ def _supervisor(pool, owners):
     supervisor._owner_build_cursor = 0
     supervisor._inflight = {}
     supervisor._drop_owner_planner_scope = lambda _key: None
+    # C7：预热构建登记为停机执行片，裸调度器同样要有自己的停机控制。
+    supervisor._shutdown_control = BackgroundShutdown()
+    supervisor._shutdown_control.bind(supervisor)
     return supervisor
 
 
@@ -127,3 +143,233 @@ def test_failed_cold_warmup_is_reported_and_retried_on_later_ticks(monkeypatch):
     supervisor._sync_owner_schedulers()
     assert attempts == ["flaky", "flaky"] and len(supervisor._owner_schedulers) == 1
     supervisor._owner_warmup_executor.shutdown(wait=True)
+
+
+# ---- R5：真实受管池 + 真实普通池（共享名额）上的冷构建调度、停机可见与清理 ----
+
+_MANAGED_USERS = ("alice", "bob", "carol", "dave")
+_RUNNING = [{"reason": "background_slice_running", "ref": "submitted_slice"}]
+
+
+class _ManagedBuilds:
+    """包住真实受管构造：记并发峰值；冻结指定 owner 的首次构建（真实构造前或后），可令指定 owner 构造失败。"""
+
+    def __init__(self, monkeypatch, *, freeze=(), after_build=False, fail=()):
+        self.real = managed_owner_runtime.prepare_managed_owner_runtime
+        self.freeze, self.after_build, self.fail = set(freeze), after_build, set(fail)
+        self.entered, self.release, self.lock = threading.Event(), threading.Event(), threading.Lock()
+        self.calls, self.active, self.peak, self.frozen = [], 0, 0, set()
+        monkeypatch.setattr(managed_owner_runtime, "prepare_managed_owner_runtime", self)
+
+    def __call__(self, root, owner, **kwargs):
+        with self.lock:
+            self.calls.append(owner.owner_id)
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            freeze = owner.owner_id in self.freeze and owner.owner_id not in self.frozen
+            if freeze:
+                self.frozen.add(owner.owner_id)
+            everyone_frozen = self.frozen == self.freeze
+        try:
+            if owner.owner_id in self.fail:
+                raise RuntimeError("managed constructor failed")
+            if freeze and not self.after_build:
+                self._hold(everyone_frozen)
+            agent = self.real(root, owner, **kwargs)
+            if freeze and self.after_build:
+                self._hold(everyone_frozen)
+            return agent
+        finally:
+            with self.lock:
+                self.active -= 1
+
+    def _hold(self, everyone_frozen):
+        if everyone_frozen:
+            self.entered.set()
+        assert self.release.wait(15), "测试放行超时"
+
+
+@pytest.fixture
+def managed_host(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_loops, "_build_background_scheduler",
+                        lambda scoped_agent, _channels: SimpleNamespace(agent=scoped_agent))
+    root = (tmp_path / "host").resolve()
+    lifecycle = LocalUserLifecycle(LocalUserStore(root))
+    for name in _MANAGED_USERS:
+        lifecycle.create(name, idempotency_key=f"managed_{name}_0001")
+    config = AgentConfig(enable_tools=False, memory_path="memory.jsonl", my_agent_home=str(root), model_backend="echo",
+                         api_key="deployment-secret", access_mode="full-access", path_access_mode="full",
+                         additional_write_roots=[str(tmp_path)], gateway_per_user_owner_scoping=True,
+                         owner_agent_idle_seconds=3600)
+    base = SimpleAgent(config, tmp_path / "workspace", defer_mcp_connect=True)
+    supervisor = gateway_loops._BackgroundMainSupervisor(
+        GatewayRunContext(agent=base, paths=SimpleNamespace(), config_path=tmp_path / "config.yaml"))
+    host = SimpleNamespace(lifecycle=lifecycle, supervisor=supervisor, managed=managed_owner_pool_for_agent(base),
+                           owners={name: OwnerIdentity.local_user(name) for name in _MANAGED_USERS})
+    try:
+        yield host
+    finally:
+        supervisor.shutdown()
+
+
+def _schedule(host, *names):
+    owners = [host.owners[name] for name in names]
+    host.supervisor._registry = SimpleNamespace(snapshot=lambda: owners, hard_snapshot=lambda: owners)
+    return host.supervisor
+
+
+def _scheduled(host, name) -> bool:
+    agent = host.managed.peek(host.owners[name])
+    return agent is not None and id(agent) in host.supervisor._owner_schedulers
+
+
+def _tick_until(supervisor, predicate, timeout=30.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        supervisor._sync_owner_schedulers()
+    return True
+
+
+def test_managed_cold_builds_leave_the_tick_and_share_two_slots(managed_host, monkeypatch):
+    host = managed_host
+    hot = host.managed.get(host.owners["bob"])  # 热 owner：装冻结钩子之前真实构建
+    builds = _ManagedBuilds(monkeypatch, freeze={"alice"})
+    supervisor = _schedule(host, "alice", "carol", "dave", "bob")
+    try:
+        started = time.monotonic()
+        supervisor._sync_owner_schedulers()
+        # 冻结的受管冷构建不占后台拍：本拍只等有界秒数，热 owner 在放行前已同步出调度器。
+        assert time.monotonic() - started < gateway_loops._COLD_OWNER_WARMUP_WAIT_SECONDS + 5.0
+        assert builds.entered.wait(10)
+        assert id(hot) in supervisor._owner_schedulers and not _scheduled(host, "alice")
+        # 冻结期间其余冷 owner 轮转接上：受管与普通共用两槽，同一 owner 不重复提交。
+        assert _tick_until(supervisor, lambda: _scheduled(host, "carol") and _scheduled(host, "dave"))
+        assert builds.calls.count("alice") == 1 and not _scheduled(host, "alice")
+    finally:
+        builds.release.set()
+    assert _tick_until(supervisor, lambda: _scheduled(host, "alice"))
+    assert sorted(builds.calls) == ["alice", "carol", "dave"] and builds.peak <= 2
+    assert host.managed.gauges() == {"cached": 4, "building": 0, "pinned": 0}
+    control = supervisor._shutdown_control
+    assert control.blockers() == [] and control.active_slice_count() == 0 and not control.slices
+
+
+@pytest.mark.parametrize("change", ["generation", "deactivated"])
+def test_stale_managed_build_never_reaches_a_scheduler(managed_host, monkeypatch, change):
+    host = managed_host
+    builds = _ManagedBuilds(monkeypatch, freeze={"alice"}, after_build=True)
+    supervisor = _schedule(host, "alice")
+    try:
+        supervisor._sync_owner_schedulers()
+        assert builds.entered.wait(15)
+        [future] = supervisor._owner_warmups.values()
+        # 实例已按旧权威构造完毕、尚未发布进池时，账号停用或换代。
+        host.lifecycle.disable("alice", idempotency_key="disable_alice_0001")
+        if change == "generation":
+            host.lifecycle.enable("alice", idempotency_key="enable_alice_00001")
+        supervisor._sync_owner_schedulers()
+        assert not supervisor._owner_schedulers
+    finally:
+        builds.release.set()
+    stale = future.result(timeout=15)
+    for _ in range(3):
+        supervisor._sync_owner_schedulers()
+        assert id(stale) not in supervisor._owner_schedulers
+        assert stale not in host.managed.hard_agents()
+    if change == "generation":
+        assert _tick_until(supervisor, lambda: _scheduled(host, "alice"))
+        fresh = host.managed.peek(host.owners["alice"])
+        assert fresh is not stale
+        assert fresh._managed_owner_generation.key != stale._managed_owner_generation.key
+    else:
+        assert not supervisor._owner_schedulers and host.managed.peek(host.owners["alice"]) is None
+    assert host.managed.gauges()["building"] == 0 and host.managed.gauges()["pinned"] == 0
+
+
+@pytest.mark.parametrize("gate", ["shutdown", "pause"])
+def test_running_managed_warmup_is_visible_to_shutdown_and_restart_pause(managed_host, monkeypatch, gate):
+    host = managed_host
+    builds = _ManagedBuilds(monkeypatch, freeze={"alice"})
+    supervisor = _schedule(host, "alice")
+    control = supervisor._shutdown_control
+    try:
+        supervisor._sync_owner_schedulers()
+        assert builds.entered.wait(15)
+        [future] = supervisor._owner_warmups.values()
+        if gate == "shutdown":
+            supervisor.shutdown()  # 两秒绝对预算内等不到在途构建结束，未结如实保留
+            assert control.blockers() == _RUNNING
+        else:
+            assert control.pause_for_restart() == _RUNNING
+            assert control.restart_paused is False  # 未结即撤销暂停，不留半暂停
+    finally:
+        builds.release.set()
+    assert future.result(timeout=15) is host.managed.peek(host.owners["alice"])
+    assert control.blockers() == [] and control.active_slice_count() == 0 and not control.slices
+    if gate == "pause":
+        assert control.pause_for_restart() == []
+        control.resume_after_restart_cancel()
+    assert host.managed.gauges()["pinned"] == 0
+
+
+@pytest.mark.parametrize("gate", ["shutdown", "pause"])
+def test_warmup_after_gate_closes_reconciles_builds_and_publishes_nothing(managed_host, monkeypatch, gate):
+    host = managed_host
+    builds = _ManagedBuilds(monkeypatch)
+    reconciles, errors = [], []
+    real_reconcile = host.managed.reconcile
+    monkeypatch.setattr(host.managed, "reconcile",
+                        lambda owner, **kwargs: reconciles.append(owner.owner_id) or real_reconcile(owner, **kwargs))
+    monkeypatch.setattr(gateway_loops, "_print_gateway_loop_error",
+                        lambda context, label, exc: errors.append((context, label, type(exc).__name__)))
+    supervisor = _schedule(host, "alice")
+    control = supervisor._shutdown_control
+    if gate == "shutdown":
+        control.stop()
+    else:
+        assert control.pause_for_restart() == []
+    supervisor._sync_owner_schedulers()
+    assert _tick_until(supervisor, lambda: not supervisor._owner_warmups, timeout=10)
+    # 门关之后预热在首个副作用前被拒：不交接、不构建、不发布，也不算构建失败。
+    assert builds.calls == [] and reconciles == [] and errors == []
+    assert host.managed.gauges() == {"cached": 0, "building": 0, "pinned": 0}
+    assert not supervisor._owner_schedulers and not control.slices
+    if gate == "pause":
+        # 重启取消后 owner 仍是冷的，由后续拍重新提交。
+        control.resume_after_restart_cancel()
+        assert _tick_until(supervisor, lambda: _scheduled(host, "alice"))
+        assert builds.calls == ["alice"] and reconciles == ["alice"]
+
+
+def test_constructor_error_and_cancelled_queue_leave_no_pins_or_slices(managed_host, monkeypatch):
+    host = managed_host
+    errors = []
+    monkeypatch.setattr(gateway_loops, "_print_gateway_loop_error",
+                        lambda context, label, exc: errors.append((context, label, type(exc).__name__)))
+    builds = _ManagedBuilds(monkeypatch, freeze={"alice", "bob"}, fail={"carol"})
+    supervisor = _schedule(host, "carol")
+    supervisor._sync_owner_schedulers()
+    assert _tick_until(supervisor, lambda: errors, timeout=10)
+    assert errors[0] == ("gateway_background_main.owner_build", "carol", "HostAPIError")
+    control = supervisor._shutdown_control
+    assert host.managed.gauges() == {"cached": 0, "building": 0, "pinned": 0} and not control.slices
+
+    supervisor = _schedule(host, "alice", "bob")
+    try:
+        supervisor._sync_owner_schedulers()
+        assert builds.entered.wait(15)  # 两个预热线程都被冻结的构建占住
+        running = list(supervisor._owner_warmups.values())
+        queued = supervisor._get_owner_warmup_executor().submit(
+            supervisor._warm_owner, host.managed, host.owners["dave"], True)
+        supervisor.shutdown()  # 撤销排队项；运行中的两片如实记为未结
+        assert queued.cancelled()
+        assert control.blockers() == _RUNNING * 2
+    finally:
+        builds.release.set()
+    for future in running:
+        future.result(timeout=15)
+    assert "dave" not in builds.calls and builds.peak <= 2
+    assert host.managed.gauges()["building"] == 0 and host.managed.gauges()["pinned"] == 0
+    assert control.blockers() == [] and not control.slices

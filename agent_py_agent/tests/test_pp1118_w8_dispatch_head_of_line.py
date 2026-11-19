@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.conversation.background_shutdown import BackgroundShutdown
 from agent_py_agent.agent.gateway_parts import hang_diagnostics, restart_service
 from agent_py_agent.agent.gateway_parts import input_delivery_service as delivery
 from agent_py_agent.agent.gateway_parts import loop_health as health_module
@@ -238,6 +239,8 @@ def test_sync_owner_schedulers_caps_cold_builds_rotates_and_never_skips_loaded(m
     supervisor._inflight = {}
     supervisor._ensure_managed_owner_pool = lambda: fake_managed
     supervisor._drop_owner_planner_scope = lambda _key: None
+    supervisor._shutdown_control = BackgroundShutdown()
+    supervisor._shutdown_control.bind(supervisor)
     monkeypatch.setattr(
         gateway_loops,
         "_build_background_scheduler",
