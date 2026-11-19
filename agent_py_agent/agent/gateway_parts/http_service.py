@@ -575,11 +575,14 @@ class GatewayHTTPServer:
         self.last_error_report = report
 
         def update_state(current: dict) -> dict:
+            from .gateway_state_bounds import fit_or_refuse
+
             updated = dict(current)
             updated["status"] = "http_server_error"
             updated["server_error"] = report
             updated["updated_at"] = time.time()
-            return updated
+            # GW-18/C1：错误报告并入本代 state 后仍按写预算核对；超限抛出由下方 except 记入 state_persist_error。
+            return fit_or_refuse(updated)
 
         try:
             update_json_file_atomic(self.paths.state, update_state)

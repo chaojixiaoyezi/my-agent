@@ -20,6 +20,8 @@ from ..agent.gateway_parts.daemon_control import (
     stop_request_targets_process,
 )
 from ..agent.gateway_parts.gateway_state_bounds import (
+    GatewayStateOversized,
+    fit_or_refuse,
     project_gateway_state_lists,
     project_refs,
     ref_count,
@@ -155,6 +157,21 @@ def _mark_drained_restart(context, request: dict, result: dict) -> dict:
     return {"summary": "safe restart drained", "restart": marker}
 
 
+# LLM: 仅在本模块 state updater 内抛出，令原子更新不落盘；由 _update_owned_state 吞掉，不外泄给调用方。
+# 类用途: 标记磁盘 state 已不属于本次交接的旧代。
+class _StateNotOwned(Exception):
+    pass
+
+
+# LLM: updater 抛出的非本代/超预算拒写只表示本次不落盘（原文件逐字节保留、缺失时不新建）；其它异常照常上抛。
+# 函数用途: 执行一次可被拒绝的 state 原子更新。
+def _update_owned_state(path, updater) -> None:
+    try:
+        update_json_file_atomic(path, updater)
+    except (_StateNotOwned, GatewayStateOversized):
+        pass
+
+
 # LLM: 原服务cleanup之后、spawn之前裁决；只更新同request/旧代标记，所有等待已在调用方锁外完成；关口前停住的前台回合只入continuation_refs，不豁免其它阻塞。
 # 函数用途: 区分正常排空、续跑交接、明确强制与意外未排空，把未确认责任完整交给接班回执，停在关口前的回合交接班续跑。
 def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
@@ -201,12 +218,11 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
                 and state.get("process_identity") == identity
                 and state.get("started_at") == marker.get("old_process_started_at"))
 
-    owned = False
+    owned = refused = False
     def update_state(state):
-        nonlocal owned
+        nonlocal owned, refused
         if not same_state(state):
-            return state
-        owned = True
+            raise _StateNotOwned
         # GW-18：裁决已按完整行做完；state 只存紧凑投影（每原因 count+摘要，无逐条明细），完整证明留在 marker。
         fields = {"restart_request_id": marker.get("request_id"), "cleanup_result": project_gateway_state_lists(result),
                   "forced_after_drain_timeout": forced, "unresolved_operation_refs": project_refs(refs)}
@@ -214,15 +230,23 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
             fields["restart_drain"] = {"phase": "cleanup_failed", "reason": "drain_incomplete",
                                        "service_cleanup_started": True,
                                        "request_id": marker.get("request_id")}
-        return {**state, **fields}
+        # C1：最终合并结果按写预算核对；超限在 updater 内抛出，原文件逐字节保留，交接按未完成处理。
+        try:
+            fitted = fit_or_refuse({**state, **fields})
+        except GatewayStateOversized:
+            refused = True
+            raise
+        owned = True
+        return fitted
 
     marker_path = restart_completed_path(context.paths)
     if not same_marker(read_json_file(marker_path)):
         result.update(status="incomplete", handover_allowed=False, reason="restart_marker_changed")
     # 持原生命周期锁先完成state的同代提交；此时磁盘marker仍pending，异常退出不能产生接班许可。
-    update_json_file_atomic(context.paths.state, update_state)
+    _update_owned_state(context.paths.state, update_state)
     if not owned:
-        result.update(status="incomplete", handover_allowed=False, reason="gateway_generation_changed")
+        result.update(status="incomplete", handover_allowed=False,
+                      reason="gateway_state_oversized" if refused else "gateway_generation_changed")
     published = False
     def publish(current):
         nonlocal published
@@ -242,7 +266,7 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
         home_root = getattr(getattr(context.agent, "home_paths", None), "root", None)
         notifications = append_restart_cancellation(marker, {"reason": "drain_incomplete"}, home_root=home_root)
         result["notification_results"] = notifications["notification_results"]
-        update_json_file_atomic(context.paths.state, update_state)
+        _update_owned_state(context.paths.state, update_state)
         update_json_file_atomic(marker_path, lambda current: {
             **current, "cleanup_result": result, "unresolved_operation_refs": refs} if same_marker(current) else current)
         # marker换代也必须保留旧请求的原审计事件，不覆盖新代文件来补旧回执。
@@ -290,9 +314,9 @@ def _cancel_internal_restart(context, request: dict) -> None:
 
 def _publish_drain_state(paths, facts: dict[str, object]) -> None:
     try:
-        # GW-18：排空阶段的阻塞引用同样只按每原因 count+摘要 落盘。
-        update_json_file_atomic(paths.state, lambda state: {**state, "restart_drain": project_gateway_state_lists(dict(facts))})
-    except OSError:
+        # GW-18/C1：排空阶段的阻塞引用同样只按每原因 count+摘要落盘；合并后超出写预算则在 updater 内拒写、保留原文件。
+        update_json_file_atomic(paths.state, lambda state: fit_or_refuse({**state, "restart_drain": dict(facts)}))
+    except (OSError, GatewayStateOversized):
         pass
 
 

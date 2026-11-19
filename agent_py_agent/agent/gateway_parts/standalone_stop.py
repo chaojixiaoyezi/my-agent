@@ -11,6 +11,7 @@ from ..common.strict_json import load_strict_json
 from ..contracts.model_call_ledger import model_call_drain_snapshot
 from ..user_space.home_layout import home_paths
 from ..user_space.home_root import configured_home_root
+from .gateway_state_bounds import fit_or_refuse
 from .io import update_json_file_atomic
 from .standalone_inventory import prepare_standalone_read_facilities, standalone_inventory
 from .standalone_migration_errors import StandaloneMigrationRejected
@@ -75,6 +76,7 @@ def record_standalone_stop(context, lifecycle, cleanup):
                                require_dir_fd=True) != raw
                 or json.dumps(current, sort_keys=True) != json.dumps(state, sort_keys=True)):
             raise ValueError("standalone_stop_source_changed")
-        return {**current, "standalone_stop": fact}
+        # GW-18/C1：追加固定形状的停止事实后仍按写预算核对；超限抛 ValueError 子类，原文件逐字节保留。
+        return fit_or_refuse({**current, "standalone_stop": fact})
 
     return update_json_file_atomic(context.paths.state, update, require_existing=True)

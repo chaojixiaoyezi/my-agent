@@ -17,6 +17,7 @@ from ..settings import load_config
 from ..user_space.home_layout import home_paths
 from ..user_space.home_root import configured_home_root
 from .daemon_metadata import process_identity_is_live
+from .gateway_state_bounds import fit_or_refuse
 from .io import update_json_file_atomic
 from .multiprocess_coordinator import current_coordinator
 from .standalone_inventory import standalone_inventory
@@ -182,7 +183,8 @@ class StandaloneMigration:
             self.require_unchanged()
             if _canonical(current) != _canonical(load_strict_json(origin.state_raw)):
                 _reject("standalone_state_compare_conflict")
-            return {**payload, "standalone_migration_ref": "/".join(parts)}
+            # GW-18/C1：首次发表的新 C 状态按写预算核对；超限在 updater 内抛出，旧 state 一字不覆盖。
+            return fit_or_refuse({**payload, "standalone_migration_ref": "/".join(parts)})
 
         result = update_json_file_atomic(context.paths.state, update, require_existing=True)
         self._archive_raw, self.reference, self._committed = archive_raw, "/".join(parts), True

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1538,
+  "count": 1539,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5513,7 +5513,15 @@
       "value": 1048576,
       "unit": "字节",
       "category": "上限预算",
-      "description": "gateway_state.json 写者提交前强制的字节上限；原 16 KiB 的 state 读者同步放宽到此值，超限报 retirement_source_oversized。"
+      "description": "gateway_state.json 读者兼容上限：旧版本写下的历史状态（如 22,810 B）仍能完整读回；新写入不以此为预算，超限报 retirement_source_oversized。"
+    },
+    {
+      "name": "GATEWAY_STATE_WRITE_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/gateway_state_bounds.py",
+      "value": 16384,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "gateway_state.json 新写入预算（D-4）：所有写者在最终合并结果上按实际 UTF-8 字节核对，超限拒写并逐字节保留原文件。"
     },
     {
       "name": "_NESTED_DEPTH_COUNT",

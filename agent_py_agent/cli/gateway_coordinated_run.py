@@ -13,6 +13,7 @@ import uuid
 from dataclasses import replace
 
 from ..agent.auth.configuration import AuthConfigurationError
+from ..agent.gateway_parts.gateway_state_bounds import fit_or_refuse
 from ..agent.gateway_parts.http_service import GatewayLocalCredentialRequired
 from ..agent.gateway_parts.io import read_json_file, write_json_file_atomic
 from ..agent.gateway_parts.multiprocess_coordinator import (
@@ -154,7 +155,8 @@ def publish_coordinated_state(context, payload) -> None:
             migration.publish_first(context, {**payload, **fields})
             return
         extra = {"standalone_migration_ref": migration.reference} if migration is not None else {}
-        write_json_file_atomic(target, {**payload, **fields, **extra})
+        # GW-18/C1：C 状态同样按最终合并结果的写预算发表；超限抛 ValueError 子类，原文件逐字节保留。
+        write_json_file_atomic(target, fit_or_refuse({**payload, **fields, **extra}))
 
 
 # LLM: 仅原C/Root在任何设施出生前调用一次；用同一原P3门和startup=True恢复，不从cold/首次tick猜预算。

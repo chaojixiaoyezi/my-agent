@@ -9,12 +9,14 @@ import json
 
 from ..common.json_io import serialize_private_json_no_newline
 
-# gateway_state.json 写者提交前强制的字节上限；原 16 KiB 的 state 读者同步放宽到此值，超限报 retirement_source_oversized。
+# gateway_state.json 读者兼容上限：旧版本写下的历史状态（如 22,810 B）仍能完整读回；新写入不以此为预算，超限报 retirement_source_oversized。
 GATEWAY_STATE_MAX_BYTES = 1024 * 1024
+# gateway_state.json 新写入预算（D-4）：所有写者在最终合并结果上按实际 UTF-8 字节核对，超限拒写并逐字节保留原文件。
+GATEWAY_STATE_WRITE_MAX_BYTES = 16 * 1024
 # 只投影这些收尾列表字段（含 cleanup_result/restart_drain 等嵌套结果里的同名字段），其它字段原样保留。
 _PROJECTED_LIST_KEYS = frozenset({
     "alive_threads", "background_blockers", "unresolved_operation_refs", "continuation_refs",
-    "executing_tools", "drain_blockers",
+    "executing_tools", "drain_blockers", "notification_results",
 })
 # 嵌套收尾结果的最大递归层数（cleanup_result 里还可能再套一层 cleanup_result）。
 _NESTED_DEPTH_COUNT = 4
@@ -51,8 +53,8 @@ def refs_digest(rows: list) -> str:
 
 
 # LLM: 空列表原样（非空/空的裁决语义不变）；全是紧凑行的列表原样（幂等）。其余按 (reason, purpose) 分组只留
-#   count 与摘要；组内只有一条上游汇总行（如 gateway_admission 的 count 行）时原样保留；同组只有一个相同 ref 时
-#   保留该 ref 便于识别，不留逐条样本。字符串列表（如 alive_threads 的循环名）按名字分组。
+#   count 与摘要；组内只有一条上游汇总行（如 gateway_admission 的 count 行）时原样保留；同组多条共享同一 ref
+#   （低基数标签）时保留该 ref 便于识别，单条明细只留 count 与摘要，不留逐条样本。字符串列表（如 alive_threads 的循环名）按名字分组。
 # 函数用途: 把逐条收尾引用投影成每原因一行的 count + 规范化摘要。
 def project_refs(rows: object) -> object:
     if not isinstance(rows, list) or not rows or _is_projected(rows):
@@ -73,7 +75,7 @@ def project_refs(rows: object) -> object:
         if purpose:
             entry["purpose"] = purpose
         refs = {row.get("ref") for row in members if isinstance(row, dict)}
-        if len(refs) == 1 and None not in refs and all(isinstance(row, dict) for row in members):
+        if len(members) > 1 and len(refs) == 1 and None not in refs and all(isinstance(row, dict) for row in members):
             entry["ref"] = next(iter(refs))
         projected.append(entry)
     return projected
@@ -99,16 +101,34 @@ def gateway_state_bytes(state: dict) -> int:
     return len(serialize_private_json_no_newline(state, sort_keys=True).encode("utf-8"))
 
 
-# LLM: 投影后仍超上限返回 None，由写者拒写并保留原（可读）文件；不截断其它业务字段冒充成功。
-# 函数用途: 得到一份保证能被读者在 GATEWAY_STATE_MAX_BYTES 内读回的状态投影。
-def fit_gateway_state(state: dict, *, max_bytes: int = GATEWAY_STATE_MAX_BYTES) -> dict | None:
+# LLM: 投影后仍超写预算返回 None，由写者拒写并保留原（可读）文件；不截断其它业务字段冒充成功。
+# 函数用途: 得到一份不超过新写预算 GATEWAY_STATE_WRITE_MAX_BYTES 的状态投影。
+def fit_gateway_state(state: dict, *, max_bytes: int = GATEWAY_STATE_WRITE_MAX_BYTES) -> dict | None:
     projected = project_gateway_state_lists(state)
     return projected if gateway_state_bytes(projected) <= max_bytes else None
 
 
+# LLM: 在 update_json_file_atomic 的 updater 内抛出时整次更新不落盘：原文件逐字节保留，缺失时不新建。
+# 类用途: 标记新状态投影后仍超出写预算的拒写。
+class GatewayStateOversized(ValueError):
+    pass
+
+
+# LLM: 所有新状态写口在最终合并结果上调用；拒写原因固定为 gateway_state_oversized。
+# 函数用途: 返回可写的紧凑状态，超出写预算时抛 GatewayStateOversized。
+def fit_or_refuse(state: dict) -> dict:
+    fitted = fit_gateway_state(state)
+    if fitted is None:
+        raise GatewayStateOversized("gateway_state_oversized")
+    return fitted
+
+
 __all__ = [
     "GATEWAY_STATE_MAX_BYTES",
+    "GATEWAY_STATE_WRITE_MAX_BYTES",
+    "GatewayStateOversized",
     "fit_gateway_state",
+    "fit_or_refuse",
     "gateway_state_bytes",
     "project_gateway_state_lists",
     "project_refs",

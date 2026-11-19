@@ -447,24 +447,25 @@ def _cmd_gateway_run_setup(agent, paths, *, context=None, restart_marker=_UNSET_
     )
     requeued = recovery["requeued"]
     attempt_recovery = _recover_gateway_stale_attempts(agent)
+    from ..agent.gateway_parts.gateway_state_bounds import fit_or_refuse
+
+    # GW-18/C1：starting 也是新状态，携带的完成标记 cleanup_result 先投影并按写预算核对；拒写时不写 PID 与 state。
+    starting = fit_or_refuse({
+        "status": "starting",
+        "pid": pid,
+        "gateway_workspace": str(paths.root),
+        "subagent_workspace": str(agent.subagents.workspace),
+        "requeued_requests": requeued,
+        "failed_processing_requests": recovery["failed"],
+        "recovered_stale_attempts": attempt_recovery["count"],
+        "stale_attempt_recovery_error": attempt_recovery["error"],
+        "unidentified_stale_attempts": len(attempt_recovery["unidentified"]),
+        "started_at": context.process_started_at if context is not None else time.time(),
+        "process_identity": dict(context.process_identity) if context is not None else build_process_identity(),
+        **_restart_state_fields(restart_marker),
+    })
     write_pid_record(paths.pid)
-    write_json_file_atomic(
-        paths.state,
-        {
-            "status": "starting",
-            "pid": pid,
-            "gateway_workspace": str(paths.root),
-            "subagent_workspace": str(agent.subagents.workspace),
-            "requeued_requests": requeued,
-            "failed_processing_requests": recovery["failed"],
-            "recovered_stale_attempts": attempt_recovery["count"],
-            "stale_attempt_recovery_error": attempt_recovery["error"],
-            "unidentified_stale_attempts": len(attempt_recovery["unidentified"]),
-            "started_at": context.process_started_at if context is not None else time.time(),
-            "process_identity": dict(context.process_identity) if context is not None else build_process_identity(),
-            **_restart_state_fields(restart_marker),
-        },
-    )
+    write_json_file_atomic(paths.state, starting)
     if attempt_recovery["count"] or attempt_recovery["error"] or attempt_recovery["unidentified"]:
         log_gateway_event(
             agent,
@@ -574,36 +575,42 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest, *, restart_marker=N
     return stop_event, heartbeat_thread, request_thread, background_thread, http_server
 
 
+# LLM: 仅在 _commit_gateway_state 的 updater 内抛出，令原子更新不落盘；不外泄给调用方。
+# 类用途: 标记磁盘 state 已属其他代次。
+class _StateOwnedElsewhere(Exception):
+    pass
+
+
 # LLM: 原state文件事务内比较本代身份；迟到终态只被拒绝，不触碰新代状态或发完成事件。
 # 函数用途: 用原代次引用保护生命周期末写，兼容无context的旧调用。
 def _commit_gateway_state(paths, payload: dict, *, context=None, pid=None, replace=False) -> bool:
     from ..agent.gateway_parts.gateway_state_bounds import (
-        GATEWAY_STATE_MAX_BYTES,
-        fit_gateway_state,
+        GATEWAY_STATE_WRITE_MAX_BYTES,
+        GatewayStateOversized,
+        fit_or_refuse,
     )
 
-    committed = False
     def update(current):
-        nonlocal committed
         if pid is not None and current.get("pid") not in (None, pid):
-            return current
+            raise _StateOwnedElsewhere
         if context is not None:
             expected = dict(context.process_identity or {})
             if current.get("process_identity") and current["process_identity"] != expected:
-                return current
+                raise _StateOwnedElsewhere
             started = float(context.process_started_at or 0)
             if started and current.get("started_at") and float(current["started_at"]) != started:
-                return current
-        # GW-18：收尾列表压成每原因 count+规范化摘要（0 条明细），整份状态不超读者共用上限；压缩后仍超限则拒写、保留原可读文件。
-        fitted = fit_gateway_state({**({} if replace else current), **payload})
-        if fitted is None:
-            print(f"[gateway-run] state_write_refused reason=gateway_state_oversized max_bytes={GATEWAY_STATE_MAX_BYTES}",
-                  file=sys.stderr, flush=True)
-            return current
-        committed = True
-        return fitted
-    update_json_file_atomic(paths.state, update)
-    return committed
+                raise _StateOwnedElsewhere
+        # GW-18/C1：最终合并结果按 16 KiB 写预算核对；拒绝或非本代都在 updater 内抛出，原文件逐字节保留、缺失时不新建。
+        return fit_or_refuse({**({} if replace else current), **payload})
+    try:
+        update_json_file_atomic(paths.state, update)
+    except _StateOwnedElsewhere:
+        return False
+    except GatewayStateOversized:
+        print(f"[gateway-run] state_write_refused reason=gateway_state_oversized max_bytes={GATEWAY_STATE_WRITE_MAX_BYTES}",
+              file=sys.stderr, flush=True)
+        return False
+    return True
 
 
 # LLM: G4：绑定失败时注销 _cmd_gateway_run_threads 预登记的端口（否则漏给同进程后续的模型命令沙箱）；
@@ -1006,8 +1013,11 @@ def _publish_gateway_diagnostic_signal(previous: _GatewaySignalHandlers, enabled
         return False
     if state.get("process_identity") != previous.identity or state.get("pid") != previous.identity.get("pid"):
         return not enabled
+    from ..agent.gateway_parts.gateway_state_bounds import fit_or_refuse
+
     try:
-        write_json_file_atomic(state_path, {**state, "diagnostic_sigusr1": enabled})
+        # GW-18/C1：在已读回的本代 state 上加一个布尔标记，最终结果同样按写预算核对（超限抛 ValueError 子类）。
+        write_json_file_atomic(state_path, fit_or_refuse({**state, "diagnostic_sigusr1": enabled}))
     except (OSError, RuntimeError, ValueError):
         return False
     return True

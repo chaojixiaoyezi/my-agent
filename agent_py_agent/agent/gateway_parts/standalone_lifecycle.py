@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ..common.nofollow_fs import read_bytes_beneath
 from ..common.strict_json import load_strict_json
-from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
+from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES, fit_or_refuse
 from .io import (
     _flock_unlock,
     _open_private_lock_descriptor,
@@ -121,7 +121,8 @@ def record_standalone_stop_observation(lifecycle, context, cleanup: dict) -> dic
         if (read_bytes_beneath(context.paths.root, ("gateway_state.json",), max_bytes=GATEWAY_STATE_MAX_BYTES) != raw
                 or json.dumps(current, sort_keys=True, ensure_ascii=False, allow_nan=False) != expected):
             raise ValueError("单进程终止状态已变化。")
-        return {**current, "standalone_shutdown_observation": {
+        # GW-18/C1：合并后的新状态按写预算核对；超限抛 ValueError 子类，原文件逐字节保留。
+        return fit_or_refuse({**current, "standalone_shutdown_observation": {
             "schema": "gateway_standalone_shutdown_observation.v1",
             "process_identity": identity,
             "process_started_at": context.process_started_at,
@@ -132,6 +133,6 @@ def record_standalone_stop_observation(lifecycle, context, cleanup: dict) -> dic
                 "foreground", "compression", "control", "subagent", "background",
                 "executor_tree", "external_producers",
             ],
-        }}
+        }})
 
     return update_json_file_atomic(context.paths.state, update, require_existing=True)

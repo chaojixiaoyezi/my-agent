@@ -1,7 +1,8 @@
 # LLM: GW-18 回归：停机保留大量模型调用后，Gateway 自己写下的 gateway_state.json 必须能被下一次启动的
 #   全部读者读回；裁决仍按完整行，state 只存每原因 count + 规范化摘要（无逐条明细），完整证明留在重启
 #   完成 marker；超读者上限给出 retirement_source_oversized 与实际字节数。
-# 模块用途: 覆盖写者投影/上限、原 16 KiB 读者放宽、旧版超大状态自愈、交接读回核对与 oversized 原因。
+# 模块用途: 覆盖写者投影/上限、原 16 KiB 读者放宽、旧版超大状态自愈、交接读回核对与 oversized 原因；
+#   R1（F01/C1）另覆盖 16 KiB 新写预算、starting/接班/取消通知/完成回执/排空写口的投影，以及拒写时原字节保留、缺失不新建。
 from __future__ import annotations
 
 import json
@@ -16,7 +17,10 @@ from agent_py_agent.agent.gateway_parts import multiprocess_generation_retiremen
 from agent_py_agent.agent.gateway_parts import restart_service as service
 from agent_py_agent.agent.gateway_parts.gateway_state_bounds import (
     GATEWAY_STATE_MAX_BYTES,
+    GATEWAY_STATE_WRITE_MAX_BYTES,
+    GatewayStateOversized,
     fit_gateway_state,
+    fit_or_refuse,
     gateway_state_bytes,
     project_gateway_state_lists,
     project_refs,
@@ -210,3 +214,179 @@ def test_restart_handover_projects_state_and_keeps_full_marker_proof(tmp_path, m
     else:
         assert successor is None
     service.reset_restart_drain_state()
+
+
+# ---- R1（F01/C1）：16 KiB 新写预算覆盖所有新状态写口，拒写不改字节、不新建文件 ----
+
+def _notification_rows(count: int) -> list[dict]:
+    return [{"requester_index": index, "request_id": "original", "event_type": "gateway_restart_cancelled",
+             "thread_id": f"thread-{index:04d}", "status": "written", "reason": ""} for index in range(count)]
+
+
+def _state_of_size(size: int) -> dict:
+    state = {"status": "running", "pid": os.getpid(), "blob": ""}
+    base = gateway_state_bytes(state)
+    wide = gateway_state_bytes({**state, "blob": "汉"}) - base
+    room = size - base
+    state["blob"] = "汉" * (room // wide) + "a" * (room % wide)
+    assert gateway_state_bytes(state) == size
+    return state
+
+
+def _drained_marker(paths, identity, mode, *, turns=1):
+    return service.mark_restart_drained(paths, {"request_id": "original", "restart_mode": mode},
+        old_pid=os.getpid(), old_process_started_at=1.0, active_turns_at_exit=turns,
+        old_process_identity=identity, cleanup_result={"status": "pending"})
+
+
+def test_singleton_detail_ref_is_dropped_but_shared_label_is_kept():
+    single = [{"reason": "model_call_retained", "ref": "model-call:" + "0" * 32}]
+    assert project_refs(single) == [{"reason": "model_call_retained", "count": 1, "digest": refs_digest(single)}]
+    shared = [{"reason": "foreground_turn_unsettled", "ref": "gateway_admission"}] * 2
+    assert project_refs(shared) == [{"reason": "foreground_turn_unsettled", "count": 2,
+                                     "digest": refs_digest(shared), "ref": "gateway_admission"}]
+
+
+def test_write_budget_is_exact_utf8_bytes(tmp_path):
+    paths = _paths(tmp_path)
+    assert GATEWAY_STATE_WRITE_MAX_BYTES == _LEGACY_READER_BYTES < GATEWAY_STATE_MAX_BYTES
+    at_limit = _state_of_size(GATEWAY_STATE_WRITE_MAX_BYTES)
+    assert fit_gateway_state(at_limit) == at_limit
+    assert fit_gateway_state(_state_of_size(GATEWAY_STATE_WRITE_MAX_BYTES + 1)) is None
+    with pytest.raises(GatewayStateOversized):
+        fit_or_refuse(_state_of_size(GATEWAY_STATE_WRITE_MAX_BYTES + 1))
+    assert gateway_process._commit_gateway_state(paths, at_limit, replace=True)
+    assert paths.state.stat().st_size == GATEWAY_STATE_WRITE_MAX_BYTES
+
+
+@pytest.mark.parametrize("existing", ["missing", "compact"])
+def test_refused_commit_never_creates_or_rewrites_state(tmp_path, capsys, existing):
+    paths = _paths(tmp_path)
+    if existing == "compact":
+        # 非规范空白（紧凑 JSON）：旧实现 return current 会按规范格式重写这些字节。
+        paths.state.write_text(json.dumps({"status": "running", "pid": os.getpid()}), encoding="utf-8")
+        os.chmod(paths.state, 0o600)
+    before = paths.state.read_bytes() if paths.state.exists() else None
+    assert not gateway_process._commit_gateway_state(paths, {"blob": "x" * GATEWAY_STATE_WRITE_MAX_BYTES})
+    assert "gateway_state_oversized" in capsys.readouterr().err
+    if existing == "compact":
+        assert not gateway_process._commit_gateway_state(paths, {"status": "stopped"}, pid=os.getpid() + 1)
+    assert (paths.state.read_bytes() if paths.state.exists() else None) == before
+
+
+def test_successor_starting_state_projects_marker_cleanup(tmp_path, monkeypatch):
+    from agent_py_agent.cli import gateway_restart_handover as handover
+
+    service.reset_restart_drain_state()
+    paths = _paths(tmp_path)
+    identity = {"pid": os.getpid(), "instance_id": "original"}
+    context = SimpleNamespace(paths=paths, process_identity=identity, agent=SimpleNamespace())
+    write_json_file_atomic(paths.state, {"pid": os.getpid(), "process_identity": identity, "started_at": 1.0})
+    monkeypatch.setattr(handover, "log_gateway_event", lambda *args: None)
+    result = handover.finalize_restart_cleanup(context, _drained_marker(paths, identity, "fast"), {
+        "drain_complete": False, "alive_threads": [], "background_blockers": _retained(200),
+        "unresolved_operation_refs": []})
+    assert result["handover_allowed"] is True
+    successor = service.consume_restart_marker(paths, old_pid_alive=lambda pid: False)
+    assert len(successor["cleanup_result"]["continuation_refs"]) == 200  # 完成标记保留完整证明
+    # 接班 setup：恢复入口替身，只验证 starting 写口本身。
+    monkeypatch.setattr(gateway_process, "recover_gateway_processing_requests",
+                        lambda *args, **kwargs: {"requeued": 0, "failed": 0})
+    monkeypatch.setattr(gateway_process, "_recover_gateway_stale_attempts",
+                        lambda agent: {"count": 0, "error": None, "unidentified": []})
+    monkeypatch.setattr(gateway_process, "log_gateway_event", lambda *args: None)
+    agent = SimpleNamespace(config=SimpleNamespace(gateway_request_max_attempts=3, gateway_processing_timeout_seconds=60.0),
+                            subagents=SimpleNamespace(workspace=tmp_path / "subagents"))
+    gateway_process._cmd_gateway_run_setup(agent, paths, restart_marker=successor)
+    raw = paths.state.read_bytes()
+    assert len(raw) <= GATEWAY_STATE_WRITE_MAX_BYTES and b"model-call:" not in raw
+    state = json.loads(raw)
+    assert state["status"] == "starting" and state["restart_request_id"] == "original"
+    continuation = state["cleanup_result"]["continuation_refs"]
+    _assert_no_detail_rows(continuation)
+    assert ref_count(continuation) == 200
+    service.reset_restart_drain_state()
+
+
+def test_cancelled_handover_projects_96_notifications_and_keeps_full_marker(tmp_path, monkeypatch):
+    from agent_py_agent.cli import gateway_restart_handover as handover
+
+    service.reset_restart_drain_state()
+    paths = _paths(tmp_path)
+    identity = {"pid": os.getpid(), "instance_id": "original"}
+    context = SimpleNamespace(paths=paths, process_identity=identity, agent=SimpleNamespace())
+    write_json_file_atomic(paths.state, {"pid": os.getpid(), "process_identity": identity, "started_at": 1.0})
+    rows = _notification_rows(96)
+    monkeypatch.setattr(handover, "log_gateway_event", lambda *args: None)
+    monkeypatch.setattr(handover, "append_restart_cancellation", lambda *args, **kwargs: {"notification_results": rows})
+    result = handover.finalize_restart_cleanup(context, _drained_marker(paths, identity, "graceful"), {
+        "drain_complete": False, "alive_threads": [], "background_blockers": _retained(200),
+        "unresolved_operation_refs": []})
+    assert result["handover_allowed"] is False and result["notification_results"] == rows
+    raw = paths.state.read_bytes()
+    assert len(raw) <= GATEWAY_STATE_WRITE_MAX_BYTES and b"thread-0001" not in raw
+    state = json.loads(raw)
+    assert state["cleanup_result"]["notification_results"] == [
+        {"reason": "unlabeled", "count": 96, "digest": refs_digest(rows)}]
+    assert state["restart_drain"]["phase"] == "cleanup_failed"
+    marker = json.loads(service.restart_completed_path(paths).read_text(encoding="utf-8"))
+    assert marker["cleanup_result"]["notification_results"] == rows
+    service.reset_restart_drain_state()
+
+
+def test_completion_receipt_notifications_are_projected(tmp_path):
+    paths = _paths(tmp_path)
+    write_json_file_atomic(paths.state, {"status": "running", "pid": os.getpid()})
+    rows = _notification_rows(96)
+    receipt = {"ready_observation": {"ready": True}, "cleanup_result": _cleanup(200), "notification_results": rows}
+    assert gateway_process._commit_gateway_state(paths, receipt, pid=os.getpid())
+    assert paths.state.stat().st_size <= GATEWAY_STATE_WRITE_MAX_BYTES
+    state = json.loads(paths.state.read_text(encoding="utf-8"))
+    assert state["notification_results"] == [{"reason": "unlabeled", "count": 96, "digest": refs_digest(rows)}]
+    assert ref_count(state["cleanup_result"]["background_blockers"]) == 250
+
+
+def test_handover_refuses_oversized_merge_and_missing_state_without_writing(tmp_path, monkeypatch):
+    from agent_py_agent.cli import gateway_restart_handover as handover
+
+    paths = _paths(tmp_path)
+    identity = {"pid": os.getpid(), "instance_id": "original"}
+    context = SimpleNamespace(paths=paths, process_identity=identity, agent=SimpleNamespace())
+    monkeypatch.setattr(handover, "log_gateway_event", lambda *args: None)
+    monkeypatch.setattr(handover, "append_restart_cancellation", lambda *args, **kwargs: {"notification_results": []})
+
+    def finalize():
+        service.reset_restart_drain_state()
+        return handover.finalize_restart_cleanup(context, _drained_marker(paths, identity, "fast", turns=0), {
+            "drain_complete": True, "alive_threads": [], "background_blockers": [], "unresolved_operation_refs": []})
+
+    # 缺失 state：不属本代，拒写且不新建 {}。
+    result = finalize()
+    assert result["handover_allowed"] is False and result["reason"] == "gateway_generation_changed"
+    assert not paths.state.exists()
+    # 合并后超出写预算：按 gateway_state_oversized 拒绝交接，原（非规范空白）字节保持。
+    paths.state.write_text(json.dumps({"pid": os.getpid(), "process_identity": identity, "started_at": 1.0,
+                                       "padding": "x" * GATEWAY_STATE_WRITE_MAX_BYTES}), encoding="utf-8")
+    os.chmod(paths.state, 0o600)
+    before = paths.state.read_bytes()
+    result = finalize()
+    assert result["handover_allowed"] is False and result["reason"] == "gateway_state_oversized"
+    assert paths.state.read_bytes() == before
+    assert service.consume_restart_marker(paths, old_pid_alive=lambda pid: False) is None
+    service.reset_restart_drain_state()
+
+
+def test_drain_state_is_projected_and_refused_over_budget(tmp_path):
+    from agent_py_agent.cli import gateway_restart_handover as handover
+
+    paths = _paths(tmp_path)
+    write_json_file_atomic(paths.state, {"status": "running", "pid": os.getpid()})
+    handover._publish_drain_state(paths, {"phase": "draining", "unresolved_operation_refs": _retained(500)})
+    drain = json.loads(paths.state.read_text(encoding="utf-8"))["restart_drain"]
+    assert drain["phase"] == "draining" and ref_count(drain["unresolved_operation_refs"]) == 500
+    _assert_no_detail_rows(drain["unresolved_operation_refs"])
+    paths.state.write_text(json.dumps({"status": "running", "padding": "x" * GATEWAY_STATE_WRITE_MAX_BYTES}),
+                           encoding="utf-8")
+    before = paths.state.read_bytes()
+    handover._publish_drain_state(paths, {"phase": "draining"})
+    assert paths.state.read_bytes() == before

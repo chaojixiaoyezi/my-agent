@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from agent_py_agent.agent.concurrency.restart_gate import tool_gate_closed
+from agent_py_agent.agent.gateway_parts.gateway_state_bounds import refs_digest
 from agent_py_agent.agent.gateway_parts.io import read_json_file
 from agent_py_agent.agent.gateway_parts.multiprocess_coordinator import CoordinatorUnavailable
 from agent_py_agent.agent.gateway_parts.multiprocess_drain_runtime import GatewayDrainRuntime
@@ -128,7 +129,7 @@ def test_c_only_incomplete_cleanup_publishes_failure_without_fake_agent(tmp_path
         assert coordinated._serve_coordinated_gateway(request) == 2
         state = read_json_file(context.paths.state)
         assert state["error_code"] == "GATEWAY_DRAIN_INCOMPLETE"
-        assert state["drain_blockers"] == [{"kind": "foreground", "reason": "unknown"}]
+        assert state["drain_blockers"] == [{"reason": "unknown", "count": 1, "digest": refs_digest([{"kind": "foreground", "reason": "unknown"}])}]
         assert state["c_run_id"] == context.control_plane.c_run_id
 
 
