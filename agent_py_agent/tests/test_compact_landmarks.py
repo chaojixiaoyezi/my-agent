@@ -209,6 +209,10 @@ def test_summary_instruction_asks_for_every_requirement_and_pending_requests():
     instruction = _conversation_summary_instruction({}, custom_instructions="", cache_safe=True)
     assert "'User requirements' section" in instruction and "'Pending user requests' section" in instruction
     assert "large pasted" in instruction
+    # 归档请求自己的“不调用工具/不继续任务”是宿主元数据，不能被写成用户约束或待办（2026-11-18）。
+    assert "Direct factual archival only" in instruction and "Do not continue the task" in instruction
+    assert ("This archival request and its 'do not call tools / do not continue the task' rules are host operation\n"
+            "metadata, not user requirements, constraints or pending requests; never write them into the summary.") in instruction
 
 
 # 类用途: 记录收缩请求的原话备份重建替身。

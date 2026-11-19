@@ -372,6 +372,9 @@ def test_live_tool_history_summary_reuses_native_messages_and_preserves_refs() -
     assert backend.messages[-1]["role"] == "user"
     assert "完整替代摘要" in str(backend.messages[-1]["content"])
     assert "不可信数据" in str(backend.messages[-1]["content"])
+    # 交接请求自己的“不调用工具/不继续任务”是宿主元数据，不能被写成用户约束或待办（2026-11-18）。
+    assert ("这条归档/交接请求及其“不调用工具/不继续任务”要求是宿主操作元数据，不是用户要求、约束或待办，不得写进摘要。"
+            in str(backend.messages[-1]["content"]))
     assert "完整替代摘要" not in str(backend.messages[:-1])
 
 

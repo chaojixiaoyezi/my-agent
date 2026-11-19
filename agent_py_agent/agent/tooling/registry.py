@@ -2202,6 +2202,8 @@ def _tool_call_protocol(tool_protocol: str = "native") -> str:
 
 def _native_tool_call_protocol() -> str:
     # native 协议下模型直接用结构化 tool_use 调工具，不需要教它写 [TOOL_CALL] 文本格式。
+    # 末段是原生请求唯一的回合结束说明（文本协议的同义句在 builder 的 transcript 段，原生请求不渲染那段）：只说机械事实，
+    # 条件式措辞不逼模型凑调用；task_progress 单项失败标 blocked 继续其余项。改动须同步 tests/golden/expected 的提供方请求体。
     # 明确禁止退回文本协议：弱模型有训练惯性，偶尔会在正文里写 [TOOL_CALL]{...} 文本而非发起
     # 结构化调用，导致解析失败(TOOL_CALL_JSON_INVALID/UNCLOSED)。这条正向约束是低风险缓解，
     # 治本需历史 messages 完全结构化(对标 长期助手，红线区大工程，单独立项)。
@@ -2210,7 +2212,10 @@ def _native_tool_call_protocol() -> str:
         "当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n"
         "本会话已启用原生工具调用：直接发起结构化工具调用即可，参数按下方 Tool Catalog 中各工具的参数名填写。\n"
         "重要：必须用原生工具调用机制发起调用；不要把工具调用写成正文里的文本 JSON 块，那样不会被执行。\n"
-        "拿到工具结果后再输出最终答案。"
+        "拿到工具结果后再输出最终答案。\n"
+        "一条不含工具调用的回复会立即结束当前回合：仍有可执行的下一步时，在同一轮直接发起对应工具调用，"
+        "不要只写“接下来会继续”就停下；普通问答、待授权或确需用户补充信息时直接回复，不要为凑调用而调用工具。"
+        "有 task_progress 清单时，单项失败把该项标为 blocked 并继续其余可执行项。"
     )
 
 
