@@ -194,6 +194,15 @@ class ManagedOwnerPool:
         with self.acquire_pinned(owner, force_reload=force_reload) as agent:
             return agent
 
+    # LLM: RC3：后台拍热分支专用，与 _acquire 同口径核 W 身份与当前代次（同时退役旧代次）；缓存无当前代即返回 None，
+    #   不腾位、不构造、不等在途构造 Future；命中照旧续 LRU 并立即归还本次临时租用。
+    # 函数用途: 只取已缓存的当前代次受管Agent，冷或在建时返回 None。
+    def get_cached_only(self, owner, *, hard: bool = True, touch: bool = True):
+        agent = self._acquire(owner, build=False)
+        if agent is not None:
+            self._release(agent)
+        return agent
+
     # LLM: 只接受本池仍登记的同一对象；已关闭或外来对象不能借pin复活。
     # 函数用途: 为已取得的受管Agent追加一次租用。
     @contextmanager
@@ -271,8 +280,9 @@ class ManagedOwnerPool:
         return reconcile_managed_dispatches(LocalUserStore(self._root).owner_home(uid), commit_transition=commit_transition)
 
     # LLM: 每次先冷读当前代次键；命中即锁内租用，同owner其它代次退役；同键构造合流等待在锁外，失败对等待者同样失败。
+    #   build=False（RC3 仅缓存取用）在无当前代缓存时直接返回 None，不腾位、不构造、不等在途 Future。
     # 函数用途: 取得并租用当前代次的受管Agent。
-    def _acquire(self, owner):
+    def _acquire(self, owner, *, build: bool = True):
         from ..common.managed_owner_generation import current_managed_owner_key
 
         uid = managed_local_user_id(self._root, owner)
@@ -296,7 +306,7 @@ class ManagedOwnerPool:
                     entry.used_at = time.monotonic()
                     self._entries.move_to_end(key)
                     agent = entry.agent
-                else:
+                elif build:
                     future = self._building.get(key)
                     if future is None:
                         room, evicted = self._make_room_locked()
@@ -312,6 +322,8 @@ class ManagedOwnerPool:
                     self._release(agent)
                     raise
                 return agent
+            if not build:
+                return None
             if future is None:
                 raise HostAPIError("HOST_NOT_READY", 503, message="Managed owner pool capacity exhausted.")
             if creator:

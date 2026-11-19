@@ -2111,6 +2111,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # 它们只在 _run_due_curators 真正拿到有限 worker 时临时进入池。
         managed = self._ensure_managed_owner_pool()
         owners = self._registry.hard_snapshot()
+        missed: dict[int, object] = {}
         if owners:
             start = int(getattr(self, "_owner_build_cursor", 0) or 0) % len(owners)
             rotated = [*owners[start:], *owners[:start]]
@@ -2125,30 +2126,40 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                     is_managed = managed is not None and managed.handles(owner)
                     target = managed if is_managed else pool
                     target_peek = getattr(target, "peek", None)
-                    if callable(target_peek) and target_peek(owner) is None:
-                        # 冷构建交有界预热池（受管与普通共用两槽、去重与游标）：已在预热的不重复提交，池满留给后续拍按游标轮转。
-                        key = (owner.provider, owner.owner_kind, owner.owner_id)
-                        if key in warmups or builds >= _COLD_OWNER_BUILDS_PER_TICK_COUNT \
-                                or len(warmups) >= _COLD_OWNER_BUILDS_PER_TICK_COUNT:
+                    peeked = target_peek(owner) if callable(target_peek) else None
+                    if not callable(target_peek) or peeked is not None:
+                        if is_managed:
+                            # 旧直写库派单先按原身份持久交接到规范库，再取独立准入的受管Agent；Count0原提交即直调。
+                            managed.reconcile(owner, commit_transition=lambda operation: operation())
+                        cached_only = getattr(target, "get_cached_only", None)
+                        if peeked is None or not callable(cached_only):
+                            # 无 peek 或无仅缓存取用口的兼容适配器保持原同步取用合同。
+                            if is_managed:
+                                managed.get(owner)
+                            else:
+                                pool.get(owner, hard=True, touch=False)
                             continue
-                        builds += 1
-                        next_cursor = (index + 1) % len(owners)
-                        warmups[key] = self._get_owner_warmup_executor().submit(
-                            self._warm_owner, target, owner, is_managed)
+                        # RC3：热分支只取现成可用实例；首查后换代、软条目被逐或会话目录缺失即 miss，按冷 owner 交下方
+                        #   预热池重建/自愈，调度线程不构造、不等在途构造；本拍也不为该已知失效实例建调度器。
+                        if cached_only(owner, hard=True, touch=False) is not None:
+                            continue
+                        missed[id(peeked)] = peeked
+                    # 冷构建交有界预热池（受管与普通共用两槽、去重与游标）：已在预热的不重复提交，池满留给后续拍按游标轮转。
+                    key = (owner.provider, owner.owner_kind, owner.owner_id)
+                    if key in warmups or builds >= _COLD_OWNER_BUILDS_PER_TICK_COUNT \
+                            or len(warmups) >= _COLD_OWNER_BUILDS_PER_TICK_COUNT:
                         continue
-                    if is_managed:
-                        # 旧直写库派单先按原身份持久交接到规范库，再取独立准入的受管Agent；Count0原提交即直调。
-                        managed.reconcile(owner, commit_transition=lambda operation: operation())
-                        managed.get(owner)
-                    else:
-                        pool.get(owner, hard=True, touch=False)
+                    builds += 1
+                    next_cursor = (index + 1) % len(owners)
+                    warmups[key] = self._get_owner_warmup_executor().submit(
+                        self._warm_owner, target, owner, is_managed)
                 except Exception as exc:
                     _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
             self._owner_build_cursor = next_cursor
             self._settle_owner_warmups(warmups)
-        active = {id(agent): agent for agent in pool.hard_agents()}
+        active = {id(agent): agent for agent in pool.hard_agents() if id(agent) not in missed}
         if managed is not None:
-            active.update((id(agent), agent) for agent in managed.hard_agents())
+            active.update((id(agent), agent) for agent in managed.hard_agents() if id(agent) not in missed)
         for key in list(self._owner_schedulers):
             if key not in active and not self._active_threads_for_owner(key):
                 self._owner_schedulers.pop(key, None)  # scoped agent 被 LRU 逐出且没在跑 → 丢弃其调度器

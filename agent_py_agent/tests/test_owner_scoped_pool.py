@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +69,25 @@ def test_peek_never_builds_or_touches_lru(tmp_path) -> None:
 
     pool.get(OwnerIdentity.provider_user("feishu", "c"))
     assert pool.peek(owner_a) is None
+
+
+def test_cached_only_get_promotes_hits_and_never_builds_repairs_or_waits(tmp_path) -> None:
+    pool, builds = _counting_pool(tmp_path, max_agents=4)
+    soft_owner, cold_owner, gone_owner = (
+        OwnerIdentity.provider_user("feishu", name) for name in ("soft", "cold", "gone"))
+    soft = pool.get(soft_owner, hard=False)
+    # 后台拍热分支：命中沿 _get_cached 软升硬，不另建实例、不留租用。
+    assert pool.get_cached_only(soft_owner, hard=True, touch=False) is soft
+    assert soft in pool.hard_agents() and pool.pinned_count == 0
+    # 冷 owner 或同 owner 构造在途：立即 miss，不构造、不等待构造 Future。
+    assert pool.get_cached_only(cold_owner) is None and len(builds) == 1
+    pool._building[(cold_owner.provider, cold_owner.owner_kind, cold_owner.owner_id)] = Future()
+    assert pool.get_cached_only(cold_owner) is None
+    # 已缓存但目录缺失：miss；目录修复与重建只留给预热池里的原 get。
+    gone = pool.get(gone_owner)
+    gone.home_paths = SimpleNamespace(owner_home_dir=tmp_path / "missing-home")
+    assert pool.get_cached_only(gone_owner) is None
+    assert not (tmp_path / "missing-home").exists() and len(builds) == 2
 
 
 # ---------- 池逻辑(替身 builder,免建真 agent) ----------

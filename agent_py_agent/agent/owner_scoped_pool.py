@@ -611,6 +611,21 @@ class OwnerScopedAgentPool:
         self._require_worker_owner(owner, agent)
         return agent
 
+    # LLM: RC3：后台拍热分支专用，复用 _get_cached 的硬命中、软升硬与 LRU；缓存缺失或家/会话目录丢失即返回 None，
+    #   不修目录、不构造、不等同 owner 在途构造，自愈与重建留给预热池里的原 get；W 身份前后核验同 _get。
+    # 函数用途: 只取已可用的缓存实例，冷、在建或目录缺失时返回 None。
+    def get_cached_only(self, owner: Any, *, hard: bool = True, touch: bool = True) -> Any | None:
+        self._require_worker_owner(owner)
+        key = (owner.provider, owner.owner_kind, owner.owner_id)
+        hit = self._get_cached(key, hard=hard)
+        if hit is None or _missing_owner_home(hit) is not None:
+            return None
+        if touch:
+            with self._lock:
+                self._last_used[key] = time.monotonic()
+        self._require_worker_owner(owner, hit)
+        return hit
+
     # LLM: Include reservations and retired leases; a pinned soft entry cannot be an eviction candidate.
     # 函数用途: 只读预检软活是否有可用落点，正式构造仍须锁内预留容量。
     def _room_for_soft(self) -> bool:

@@ -4,10 +4,13 @@
 等待有界秒数，热 owner 的调度器同步与本拍其余阶段不再被拖住。构建完成后下一拍 peek 命中即接上调度器。
 R5（F06/F07）：受管 owner 同样以只读 peek 判冷热、冷构建走同一预热池；预热登记为停机执行片，
 停机与重启暂停能看到在途构建，门关之后的预热不交接、不构建、不发布。
+R2（RC3/RC4）：peek 命中后的热分支只取现成可用实例；首查后换代或会话目录缺失即 miss，重建与目录自愈
+走同一预热池，调度线程不构建、不等在途构造，本拍不为已知失效实例建调度器。
 """
 from __future__ import annotations
 
 import contextvars
+import shutil
 import threading
 import time
 from types import SimpleNamespace
@@ -18,6 +21,7 @@ from agent_py_agent.agent.conversation.background_shutdown import BackgroundShut
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import managed_owner_runtime
 from agent_py_agent.agent.gateway_parts.managed_owner_runtime import managed_owner_pool_for_agent
+from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool, _missing_owner_home
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
 from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
@@ -158,12 +162,13 @@ class _ManagedBuilds:
         self.real = managed_owner_runtime.prepare_managed_owner_runtime
         self.freeze, self.after_build, self.fail = set(freeze), after_build, set(fail)
         self.entered, self.release, self.lock = threading.Event(), threading.Event(), threading.Lock()
-        self.calls, self.active, self.peak, self.frozen = [], 0, 0, set()
+        self.calls, self.active, self.peak, self.frozen, self.threads = [], 0, 0, set(), []
         monkeypatch.setattr(managed_owner_runtime, "prepare_managed_owner_runtime", self)
 
     def __call__(self, root, owner, **kwargs):
         with self.lock:
             self.calls.append(owner.owner_id)
+            self.threads.append(threading.current_thread())
             self.active += 1
             self.peak = max(self.peak, self.active)
             freeze = owner.owner_id in self.freeze and owner.owner_id not in self.frozen
@@ -373,3 +378,187 @@ def test_constructor_error_and_cancelled_queue_leave_no_pins_or_slices(managed_h
     assert "dave" not in builds.calls and builds.peak <= 2
     assert host.managed.gauges()["building"] == 0 and host.managed.gauges()["pinned"] == 0
     assert control.blockers() == [] and not control.slices
+
+
+# ---- R2（RC3/RC4）：peek 命中后变冷或目录缺失，重建只在预热池；热 owner 不被拖住 ----
+
+# 函数用途: 在独立线程跑一拍后台同步并有界等待；修复前该拍卡在同步构建里，回归以失败结束而不是挂住。
+def _tick_off_thread(supervisor) -> threading.Thread:
+    tick = threading.Thread(target=supervisor._sync_owner_schedulers, name="supervisor-tick")
+    tick.start()
+    tick.join(gateway_loops._COLD_OWNER_WARMUP_WAIT_SECONDS + 3.0)
+    return tick
+
+
+def test_managed_revision_change_after_peek_builds_on_the_warmup_pool(managed_host, monkeypatch):
+    host = managed_host
+    stale = host.managed.get(host.owners["alice"])
+    hot = host.managed.get(host.owners["bob"])
+    builds = _ManagedBuilds(monkeypatch, freeze={"alice"})
+    real_peek, peeked = host.managed.peek, []
+
+    def peek_then_revise(owner):
+        found = real_peek(owner)
+        if owner.owner_id == "alice" and not peeked:
+            peeked.append(found)  # 首查命中旧代次后、同拍取用前，一次受支持的账号组修订使 Alice 换代
+            host.lifecycle.set_audit_group_membership("alice", in_audit_group=True)
+        return found
+
+    monkeypatch.setattr(host.managed, "peek", peek_then_revise)
+    supervisor = _schedule(host, "alice", "bob")
+    tick = None
+    try:
+        tick = _tick_off_thread(supervisor)
+        assert not tick.is_alive(), "首查后换代的受管构建仍在调度线程上"
+        assert builds.entered.wait(10)
+        # 独立热 owner Bob 在放行前已同步；已退役的旧代次不接调度器；构造只在预热线程。
+        assert peeked == [stale] and id(hot) in supervisor._owner_schedulers
+        assert id(stale) not in supervisor._owner_schedulers
+        assert builds.threads and tick not in builds.threads
+    finally:
+        builds.release.set()
+        if tick is not None:
+            tick.join(15)
+    assert _tick_until(supervisor, lambda: _scheduled(host, "alice"))
+    fresh = host.managed.peek(host.owners["alice"])
+    assert fresh is not stale and fresh._managed_owner_generation.key != stale._managed_owner_generation.key
+    assert host.managed.gauges() == {"cached": 2, "building": 0, "pinned": 0}
+
+
+# 函数用途: 用正式普通池建好两个 provider owner，再移走第一个的会话目录（合同支持的自愈场景）。
+def _two_warm_provider_owners(tmp_path):
+    pool = OwnerScopedAgentPool(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+                                tmp_path, max_agents=4)
+    owners = [OwnerIdentity.provider_user("gw-r2", name) for name in ("alice", "bob")]
+    agents = [pool.get(owner) for owner in owners]
+    sessions = agents[0].conversation_store.storage.root
+    shutil.move(str(sessions), str(tmp_path / "moved-sessions"))
+    return pool, owners, agents, sessions
+
+
+# 函数用途: 包住普通池的真实构造：记录调用与线程，按需冻结到放行。
+def _freeze_pool_builder(pool, *, frozen=True):
+    real = pool._builder
+    state = SimpleNamespace(entered=threading.Event(), release=threading.Event(), calls=[], threads=[])
+    if not frozen:
+        state.release.set()
+
+    def build(config, root, owner, roots):
+        state.calls.append(owner.owner_id)
+        state.threads.append(threading.current_thread())
+        state.entered.set()
+        assert state.release.wait(15), "测试放行超时"
+        return real(config, root, owner, roots)
+
+    pool._builder = build
+    return state
+
+
+def _healed(pool, owner, stale, supervisor) -> bool:
+    agent = pool.peek(owner)
+    return agent is not None and agent is not stale and id(agent) in supervisor._owner_schedulers
+
+
+def _stub_scheduler(monkeypatch):
+    monkeypatch.setattr(gateway_loops, "_build_background_scheduler",
+                        lambda scoped_agent, _channels: SimpleNamespace(agent=scoped_agent))
+
+
+def test_missing_session_dir_on_hot_owner_heals_on_the_warmup_pool(tmp_path, monkeypatch):
+    _stub_scheduler(monkeypatch)
+    pool, owners, (stale, hot), _sessions = _two_warm_provider_owners(tmp_path)
+    builds = _freeze_pool_builder(pool)
+    supervisor = _supervisor(pool, owners)
+    tick = None
+    try:
+        tick = _tick_off_thread(supervisor)
+        assert not tick.is_alive(), "缺目录自愈重建仍在调度线程上"
+        assert builds.entered.wait(10)
+        # 第二个热 owner 在重建放行前已同步；已知缺目录的旧实例本拍不接调度器。
+        assert id(hot) in supervisor._owner_schedulers and id(stale) not in supervisor._owner_schedulers
+        assert builds.threads and tick not in builds.threads
+    finally:
+        builds.release.set()
+        if tick is not None:
+            tick.join(15)
+    assert _tick_until(supervisor, lambda: _healed(pool, owners[0], stale, supervisor))
+    assert _missing_owner_home(pool.peek(owners[0])) is None and builds.calls == ["alice"]
+    assert pool.pinned_count == 0 and not supervisor._owner_warmups
+    supervisor._owner_warmup_executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("gate", ["shutdown", "pause"])
+def test_running_missing_dir_warmup_is_visible_to_shutdown_and_restart_pause(tmp_path, monkeypatch, gate):
+    _stub_scheduler(monkeypatch)
+    pool, owners, (stale, _hot), _sessions = _two_warm_provider_owners(tmp_path)
+    builds = _freeze_pool_builder(pool)
+    supervisor = _supervisor(pool, owners)
+    control = supervisor._shutdown_control
+    tick = None
+    try:
+        tick = _tick_off_thread(supervisor)
+        assert not tick.is_alive() and builds.entered.wait(10)
+        [future] = supervisor._owner_warmups.values()
+        if gate == "shutdown":
+            control.stop()
+            assert control.blockers() == _RUNNING
+        else:
+            assert control.pause_for_restart() == _RUNNING
+            assert control.restart_paused is False
+    finally:
+        builds.release.set()
+        if tick is not None:
+            tick.join(15)
+    healed = future.result(timeout=15)
+    assert healed is not stale and _missing_owner_home(healed) is None
+    assert control.blockers() == [] and control.active_slice_count() == 0 and not control.slices
+    assert pool.pinned_count == 0
+    supervisor._owner_warmup_executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("gate", ["shutdown", "pause"])
+def test_missing_dir_after_gate_closes_repairs_builds_and_publishes_nothing(tmp_path, monkeypatch, gate):
+    _stub_scheduler(monkeypatch)
+    errors = []
+    monkeypatch.setattr(gateway_loops, "_print_gateway_loop_error",
+                        lambda context, label, exc: errors.append((context, label, type(exc).__name__)))
+    pool, owners, (stale, hot), sessions = _two_warm_provider_owners(tmp_path)
+    builds = _freeze_pool_builder(pool, frozen=False)
+    supervisor = _supervisor(pool, owners)
+    control = supervisor._shutdown_control
+    if gate == "shutdown":
+        control.stop()
+    else:
+        assert control.pause_for_restart() == []
+    tick = _tick_off_thread(supervisor)
+    assert not tick.is_alive()
+    assert _tick_until(supervisor, lambda: not supervisor._owner_warmups, timeout=10)
+    # 门关之后准入的预热在首个副作用前被拒：不修目录、不构造、不发布，也不算构建失败；独立热 owner 照常同步。
+    assert builds.calls == [] and errors == [] and not sessions.exists()
+    assert id(hot) in supervisor._owner_schedulers and id(stale) not in supervisor._owner_schedulers
+    assert not control.slices and pool.pinned_count == 0
+    if gate == "pause":
+        control.resume_after_restart_cancel()
+        assert _tick_until(supervisor, lambda: _healed(pool, owners[0], stale, supervisor))
+        assert builds.calls == ["alice"] and _missing_owner_home(pool.peek(owners[0])) is None
+    supervisor._owner_warmup_executor.shutdown(wait=True)
+
+
+def test_managed_cached_only_acquire_never_waits_on_an_in_flight_build(managed_host, monkeypatch):
+    host = managed_host
+    owner = host.owners["carol"]
+    builds = _ManagedBuilds(monkeypatch, freeze={"carol"})
+    builder = threading.Thread(target=lambda: host.managed.get(owner))
+    builder.start()
+    try:
+        assert builds.entered.wait(15)
+        started = time.monotonic()
+        # 同代次构造在途时只取缓存：立即 miss，不腾位、不构造、不等构造 Future。
+        assert host.managed.get_cached_only(owner) is None
+        assert time.monotonic() - started < 2.0 and host.managed.gauges()["building"] == 1
+    finally:
+        builds.release.set()
+        builder.join(15)
+    agent = host.managed.get_cached_only(owner)
+    assert agent is not None and agent is host.managed.peek(owner)
+    assert host.managed.gauges() == {"cached": 1, "building": 0, "pinned": 0}
