@@ -4,14 +4,15 @@
 #   放不下的那条用户原话保留头尾、截掉中间并标明原长度。每条带 message_id，放不下的用户消息编号列在 omitted 行，
 #   回查说明保留message_id编号指引，并在compact_recall_hint_enabled且注册session_search时给出显式mode的规范JSON。
 #   内存合同：第一遍流式读取只保留编号与整行 token 数，挑选后第二遍按下标只读入被选中的行，不让全部原文同时驻留。
-#   格式变化须同步 compact.py 的调用与候选容量收缩、semantic_summary_text 的剥离，以及 test_compact_landmarks.py。
+#   格式变化须同步 compact.py 的调用与候选容量收缩、semantic_summary_text 的剥离、live 交接续带（active_turn_compact.py、
+#   agent_core/_tool_loop_service.py），以及 test_compact_landmarks.py。
 # 模块用途: 生成、继承和剥离压缩摘要里的原话备份段，并给出本段实际占用的 token，供压缩候选超出目标时收缩。
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 
 from ..memory_archive import estimate_tokens
 from ..settings.defaults import default_config_int
@@ -67,6 +68,7 @@ class LandmarkedSummary:
 
 
 # LLM: 新行只记下标、编号与整行 token（正文按下标重读）；继承行保存整行文本，只能整行保留或整行省略。
+#   withheld 的新行（原回合凭据绑定被扣留）不会被选中，用户行只以编号记入省略。
 # 类用途: 一条候选原话（用户原话或助手最终答复）的轻量描述。
 @dataclass(frozen=True)
 class _Landmark:
@@ -75,10 +77,12 @@ class _Landmark:
     tokens: int
     row_index: int = -1
     line: str = ""
+    withheld: bool = False
 
 
 # LLM: 第一遍读取的结果：候选条目（时间正序）、上一代已省略的编号、上一代已省略但没列出编号的数量，
-#   以及供第二遍按下标重读正文的原始行序列。
+#   以及供第二遍按下标重读正文的原始行序列。redact 是本次压缩唯一的出站净化函数：新行计量、整行/裁剪渲染与继承行
+#   共用同一个（新行有 row() 时按原回合净化；None 时只做配置作用域与常见凭据模式净化），保证净化先于计量、裁剪与 JSON 编码。
 # 类用途: 原话备份的可重复渲染来源；按不同预算多次渲染不会再次通读全部原文。
 @dataclass(frozen=True)
 class LandmarkSource:
@@ -86,6 +90,7 @@ class LandmarkSource:
     carried_omitted: tuple[str, ...]
     rows: Sequence[MessageLogEntry]
     carried_unlisted: int = 0
+    redact: Callable[[str], str] | None = None
 
 
 # LLM: 只读 agent 配置、模型窗口和工具注册表，不改状态；窗口未知时沿用窗口解析器的默认值。
@@ -110,53 +115,210 @@ def summary_with_conversation_landmarks(
     rows: Sequence[MessageLogEntry],
     *,
     options: LandmarkOptions,
+    redact: Callable[[str], str] | None = None,
 ) -> LandmarkedSummary:
-    return render_landmarked_summary(semantic_summary_text(summary), landmark_source(previous_summary, rows), options)
+    return render_landmarked_summary(
+        semantic_summary_text(summary), landmark_source(previous_summary, rows, redact=redact), options,
+    )
 
 
-# LLM: 只读；流式遍历原始行，每行正文用完即弃，只留编号和整行 token 数。
+# LLM: 只读；流式遍历原始行，每行正文用完即弃，只留编号和整行 token 数。redact 见 LandmarkSource。
 # 函数用途: 第一遍：收集上一代备份行与本次被压缩行里的候选原话。
-def landmark_source(previous_summary: str, rows: Sequence[MessageLogEntry]) -> LandmarkSource:
-    carried, carried_omitted, unlisted = _carried_landmarks(previous_summary)
-    entries = tuple(_deduplicated([*carried, *_row_landmarks(rows)]))
-    return LandmarkSource(entries, tuple(carried_omitted), rows, unlisted)
+def landmark_source(
+    previous_summary: str,
+    rows: Sequence[MessageLogEntry],
+    *,
+    redact: Callable[[str], str] | None = None,
+) -> LandmarkSource:
+    carried, carried_omitted, unlisted = _carried_landmarks(previous_summary, redact)
+    entries = tuple(_deduplicated([*carried, *_row_landmarks(rows, redact)]))
+    return LandmarkSource(entries, tuple(carried_omitted), rows, unlisted, redact)
+
+
+# LLM: 只读宿主已登记的活动回合凭据绑定（按 owner 目录、会话存储根和线程查找，与外发消息、后台投递同一取法）和当前
+#   上下文的配置密钥；不解密、不回看已关闭回合，也不改写冷归档。新行带精确来源时只用该来源回合自己的绑定，见
+#   _TurnScopedRedactor；相邻回合被扣留不再把整代公开原话换成扣留说明。
+# 函数用途: 生成本次压缩的原话备份出站净化函数：先套适用回合的公开文本，再做配置作用域与常见凭据模式脱敏。
+def landmark_redactor(agent: object, thread_id: str) -> Callable[[str], str]:
+    root = getattr(getattr(getattr(agent, "conversation_store", None), "storage", None), "root", None)
+    owner = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
+    thread = str(thread_id or "").strip()
+    return _TurnScopedRedactor({"owner_key": owner, "conversation_root": root, "thread_id": thread}
+                               if thread and (root or owner) else None)
+
+
+# LLM: 调用本身净化继承行（宿主已净化过的公开表示）与没有来源的新行：套本线程每个活动回合已登记的值，扣留回合只遮
+#   已登记的值、不整段抹掉。row() 按新行的精确来源（conversation_request_id/request_id/run_id，都没有才用 task_id，
+#   同一任务可跨回合）只取该回合的绑定：它被扣留时返回 None（本行只留编号）；没有来源的新行在本线程有扣留回合期间
+#   也只留编号。同一来源的计量与渲染共用一次查找结果；只查内存索引，不扫 transcript 或冷历史。
+# 类用途: 一次压缩的原话备份出站净化：继承行整段净化，新行按原回合净化或降为编号。
+class _TurnScopedRedactor:
+    def __init__(self, scope: dict[str, object] | None) -> None:
+        self._scope = scope
+        self._thread_turns = self._turns()
+        self._exact: dict[tuple[str, ...], tuple[object, ...]] = {}
+
+    # 函数用途: 查本线程的活动回合绑定；给出来源键时只返回精确命中的回合。
+    def _turns(self, keys: tuple[str, ...] = ()) -> tuple[object, ...]:
+        from ..tooling.host_output_redaction import active_turn_redactions_for_scope
+
+        if self._scope is None:
+            return ()
+        return active_turn_redactions_for_scope(**self._scope, turn_keys=keys, exact_only=bool(keys))
+
+    # 函数用途: 净化继承行或没有来源的新行正文。
+    def __call__(self, text: str) -> str:
+        from ..common.log_redaction import redact_sensitive_value
+        from ..tooling.host_output_redaction import redact_host_text
+
+        for turn in self._thread_turns:
+            text = (redact_host_text(text, secret_values=turn.redaction.snapshot.secret_values, code_file=False)
+                    if turn.withheld else turn.public_text(text))
+        return str(redact_sensitive_value(str(text)))
+
+    # 函数用途: 按本行原回合净化新行正文；返回 None 表示本行只留编号。
+    def row(self, row: MessageLogEntry, text: str) -> str | None:
+        from ..common.log_redaction import redact_sensitive_value
+
+        metadata = row.metadata if isinstance(row.metadata, dict) else {}
+        keys = tuple(value for name in ("conversation_request_id", "request_id", "run_id")
+                     if (value := str(metadata.get(name) or "").strip()))
+        keys = keys or tuple(value for value in (str(metadata.get("task_id") or "").strip(),) if value)
+        if not keys:
+            return None if any(turn.withheld for turn in self._thread_turns) else self(text)
+        if keys not in self._exact:
+            self._exact[keys] = self._turns(keys)
+        if any(turn.withheld for turn in self._exact[keys]):
+            return None
+        for turn in self._exact[keys]:
+            text = turn.public_text(text)
+        return str(redact_sensitive_value(str(text)))
+
+
+# LLM: 未给出作用域时仍做配置作用域与常见凭据模式脱敏（与日志同一实现），不会原样放行。
+# 函数用途: 用本次来源的净化函数处理一段原话正文。
+def _public_text(redact: Callable[[str], str] | None, text: str) -> str:
+    if redact is not None:
+        return str(redact(text))
+    from ..common.log_redaction import redact_sensitive_value
+
+    return str(redact_sensitive_value(str(text)))
+
+
+# 函数用途: 用本次来源的净化函数处理一条新行正文（按行净化不可用时退回整段净化）；None 表示本行只留编号。
+def _row_public_text(redact: Callable[[str], str] | None, row: MessageLogEntry, text: str) -> str | None:
+    by_row = getattr(redact, "row", None)
+    return by_row(row, text) if callable(by_row) else _public_text(redact, text)
 
 
 # LLM: 选择只看 token 与角色；第二遍按下标重读被选中的行来渲染，因此任一时刻只驻留被选中的正文。
+#   没有任何可放的原话但上一代留有省略编号或未列出数（含解不出正文而降级的继承行）时，仍写只含省略行的备份段。
 # 函数用途: 按给定预算把原话备份段接到语义摘要后面。
 def render_landmarked_summary(semantic: str, source: LandmarkSource, options: LandmarkOptions) -> LandmarkedSummary:
-    if not source.entries:
+    if not (source.entries or source.carried_omitted or source.carried_unlisted):
         return LandmarkedSummary(semantic, 0)
     section = _landmark_section(source, options)
     text = f"{semantic}\n\n{section}" if semantic else section
     return LandmarkedSummary(text, estimate_tokens(section))
 
 
-# LLM: 按固定标题切掉第一处备份段及其后内容，不改写语义部分；也公开给只需要语义摘要的有界输入（如选模型决策）。
+# LLM: 按固定行首标题切掉第一处备份段及其后内容，不改写语义部分；也公开给只需要语义摘要的有界输入（如选模型决策）。
 # 函数用途: 返回会话摘要里的语义部分，追加新备份段前也用它去掉旧段，防止重复嵌套。
 def semantic_summary_text(value: str) -> str:
     text = str(value or "").strip()
-    marker_at = text.find(LANDMARK_HEADING)
+    marker_at = _heading_at(text)
     return text if marker_at < 0 else text[:marker_at].rstrip()
+
+
+# LLM: 只认行首标题：机械回退把上一代摘要压成一行内联（previous_summary/prior_compaction 字段），行中间的同名文本
+#   不是备份段；宿主写的备份段总是从行首开始。
+# 函数用途: 返回第一处行首备份段标题的位置，没有时返回 -1。
+def _heading_at(text: str) -> int:
+    if text.startswith(LANDMARK_HEADING):
+        return 0
+    found = text.find(f"\n{LANDMARK_HEADING}")
+    return found + 1 if found >= 0 else -1
+
+
+# LLM: live 交接（回合中工具往返摘要）提交后整段替换线程摘要，不带上就丢掉上一代原话备份。调用方只在可计量路径、
+#   本地语义交接被接受时调用（服务端压缩项与机械回退不带）。体积合同：结果不超过 max(T(上一代摘要), T(交接))，
+#   live 一代不会让摘要项比上一代更大。失败事实块先占预算，原话备份用剩下的（同一渲染，用户原话、最新优先）：先按完整
+#   预算渲染（上一代备份通常原样放得下，连续 live 代不会被逐行累加的估算与省略行余量逐代蚕食），超出体积合同再按剩余
+#   空间（先不留、再留足省略行余量）重挑，仍放不下就不带备份；最终全文总按整段计量复核。事实块放在交接之后、备份段
+#   标题之前：semantic_summary_text 从标题切，放在标题之后下一代就丢了。交接自己已含行首标题（模型回显）时原样返回。
+#   继承行与 transcript 路径同一净化。
+# 函数用途: 把失败事实与上一代原话备份按体积合同接到 live 交接后面，返回全文与备份段 token（没带备份为 0）。
+def carry_live_landmarks(
+    agent: object,
+    handoff: str,
+    previous_summary: str,
+    *,
+    thread_id: str,
+    facts: str = "",
+) -> tuple[str, int]:
+    text = str(handoff or "")
+    if not text.strip() or _heading_at(text) >= 0:
+        return handoff, 0
+    cap = max(estimate_tokens(str(previous_summary or "")), estimate_tokens(text))
+    facts = str(facts or "").strip()
+    if facts and estimate_tokens(f"{text}\n\n{facts}") <= cap:
+        text = f"{text}\n\n{facts}"
+    source = landmark_source(previous_summary, (), redact=landmark_redactor(agent, thread_id))
+    options = landmark_options(agent)
+    room = cap - estimate_tokens(f"{text}\n\n")
+    for budget in (options.landmark_budget_tokens, room + _OMITTED_RESERVE_TOKENS, room):
+        limited = replace(options, landmark_budget_tokens=max(0, min(options.landmark_budget_tokens, budget)))
+        rendered = render_landmarked_summary(text, source, limited)
+        if rendered.used_tokens and estimate_tokens(rendered.text) <= cap:
+            return rendered.text, rendered.used_tokens
+    return text, 0
 
 
 # LLM: 只解析上一代备份段本身：标题之后到第一个空行为止（段内各行不含空行；机械回退附在段后的旧摘要与原文不算）。
 #   只继承规范格式的用户原话与最终答复行（新旧两种格式），以及 omitted 行里的消息编号和“更早未列出”的数量；
-#   模型摘要正文里的任意列表不会被提升为备份。
-# 函数用途: 从上一代摘要取回已有的原话备份行、已省略的用户消息编号和没列出编号的省略数量。
-def _carried_landmarks(previous_summary: str) -> tuple[list[_Landmark], list[str], int]:
+#   模型摘要正文里的任意列表不会被提升为备份。继承行先解出 JSON 正文、净化后按原标签重新编码（未变时逐字不变，
+#   不重复编码、不嵌套裁剪标记）；正文解不出来的旧行降为编号级：用户行有编号记入省略、无编号计入未列出数，答复行丢弃。
+# 函数用途: 从上一代摘要取回已净化的原话备份行、已省略的用户消息编号和没列出编号的省略数量。
+def _carried_landmarks(
+    previous_summary: str,
+    redact: Callable[[str], str] | None = None,
+) -> tuple[list[_Landmark], list[str], int]:
     text = str(previous_summary or "")
-    marker_at = text.find(LANDMARK_HEADING)
+    marker_at = _heading_at(text)
     if marker_at < 0:
         return [], [], 0
     section = text[marker_at + len(LANDMARK_HEADING):].split("\n\n", 1)[0]
     lines = [line.strip() for line in section.splitlines()]
-    matches = [(_ENTRY_PATTERN.match(line), line) for line in lines]
-    entries = [_Landmark(match.group(1), match.group(2) or "", estimate_tokens(line), line=line)
-               for match, line in matches if match]
+    entries: list[_Landmark] = []
+    degraded_ids: list[str] = []
+    degraded_unlisted = 0
+    for line in lines:
+        match = _ENTRY_PATTERN.match(line)
+        if not match:
+            continue
+        public = _public_carried_line(line, match.end(), redact)
+        if public is not None:
+            entries.append(_Landmark(match.group(1), match.group(2) or "", estimate_tokens(public), line=public))
+        elif match.group(1) == "user" and match.group(2):
+            degraded_ids.append(match.group(2))
+        elif match.group(1) == "user":
+            degraded_unlisted += 1
     omitted = next((line for line in lines if line.startswith(_OMITTED_PREFIX)), "")
     unlisted = _UNLISTED_PATTERN.search(omitted)
-    return entries, _omitted_ids(omitted), int(unlisted.group(1)) if unlisted else 0
+    base_unlisted = int(unlisted.group(1)) if unlisted else 0
+    return entries, [*_omitted_ids(omitted), *degraded_ids], base_unlisted + degraded_unlisted
+
+
+# LLM: 标签部分（角色、编号、裁剪说明）逐字保留，只替换 JSON 字符串正文；解不出字符串时返回 None 交调用方降级。
+# 函数用途: 净化一条继承来的原话备份行。
+def _public_carried_line(line: str, body_at: int, redact: Callable[[str], str] | None) -> str | None:
+    try:
+        value = json.loads(line[body_at:])
+    except ValueError:
+        return None
+    if not isinstance(value, str):
+        return None
+    return line[:body_at] + json.dumps(_public_text(redact, value), ensure_ascii=False)
 
 
 # LLM: 只解析本模块自己写出的 omitted 行格式（方括号内空格分隔）；格式不符返回空，不猜编号。
@@ -168,13 +330,15 @@ def _omitted_ids(line: str) -> list[str]:
 
 # LLM: 内存合同：每行正文只用于计算整行 token，随即丢弃；返回条目只含下标、编号、角色与 token 数。
 # 函数用途: 第一遍：流式读取本次被压缩的行，记下可作原话备份的条目（不保留正文）。
-def _row_landmarks(rows: Sequence[MessageLogEntry]) -> list[_Landmark]:
+def _row_landmarks(rows: Sequence[MessageLogEntry], redact: Callable[[str], str] | None = None) -> list[_Landmark]:
     entries: list[_Landmark] = []
     for index, row in enumerate(rows):
         role, content = _row_role_and_content(row)
         if content:
-            line = _full_line(role, str(row.message_id or ""), content)
-            entries.append(_Landmark(role, str(row.message_id or ""), estimate_tokens(line), row_index=index))
+            public = _row_public_text(redact, row, content)
+            line = "" if public is None else _full_line(role, str(row.message_id or ""), public)
+            entries.append(_Landmark(role, str(row.message_id or ""), estimate_tokens(line) if line else 0,
+                                     row_index=index, withheld=public is None))
     return entries
 
 
@@ -226,7 +390,7 @@ def _landmark_section(source: LandmarkSource, options: LandmarkOptions) -> str:
 def _select_role(entries: Sequence[_Landmark], role: str, remaining: int, picks: dict[int, int]) -> int:
     for index in range(len(entries) - 1, -1, -1):
         entry = entries[index]
-        if entry.role == role and entry.tokens + 1 <= remaining:
+        if entry.role == role and not entry.withheld and entry.tokens + 1 <= remaining:
             picks[index], remaining = 0, remaining - entry.tokens - 1
     clip = next((index for index in range(len(entries) - 1, -1, -1)
                  if index not in picks and _clippable(entries[index], role)), None)
@@ -238,16 +402,21 @@ def _select_role(entries: Sequence[_Landmark], role: str, remaining: int, picks:
 # LLM: 只裁剪带编号的本次新用户行；继承行和无编号行不可裁剪，避免裁剪标记与编号混淆。
 # 函数用途: 判断一个没被整条选中的条目能否保留头尾（只限带编号的本次新用户行）。
 def _clippable(entry: _Landmark, role: str) -> bool:
-    return role == "user" and entry.role == "user" and bool(entry.message_id) and not entry.line
+    return role == "user" and entry.role == "user" and bool(entry.message_id) and not entry.line and not entry.withheld
 
 
-# LLM: 第二遍：继承行原样返回；新行按下标重读原始行（快照行会校验原文件未被改写）后渲染整条或保留头尾的版本。
+# LLM: 第二遍：继承行已在第一遍净化，原样返回；新行按下标重读原始行（快照行会校验原文件未被改写），
+#   用与计量相同的净化函数处理后渲染整条或保留头尾的版本。
 # 函数用途: 渲染一个被选中的条目；裁剪后仍放不下时返回空串（该条目改记为省略）。
 def _render_pick(source: LandmarkSource, index: int, clip_budget: int) -> str:
     entry = source.entries[index]
     if entry.line:
         return entry.line
-    _role, content = _row_role_and_content(source.rows[entry.row_index])
+    row = source.rows[entry.row_index]
+    _role, raw = _row_role_and_content(row)
+    content = _row_public_text(source.redact, row, raw)
+    if content is None:
+        return ""
     if not clip_budget:
         return _full_line(entry.role, entry.message_id, content)
     return _clipped_line(entry, content, clip_budget)
@@ -297,7 +466,9 @@ __all__ = [
     "LandmarkOptions",
     "LandmarkSource",
     "LandmarkedSummary",
+    "carry_live_landmarks",
     "landmark_options",
+    "landmark_redactor",
     "landmark_source",
     "render_landmarked_summary",
     "semantic_summary_text",

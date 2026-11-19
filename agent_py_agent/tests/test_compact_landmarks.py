@@ -9,7 +9,12 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
+from agent_py_agent.agent.agent_core._tool_loop_service import _carry_native_live_landmarks
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
+from agent_py_agent.agent.common.log_redaction import configured_secret_redaction
 from agent_py_agent.agent.conversation import ConversationStore, compact_request_budget
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
@@ -27,6 +32,7 @@ from agent_py_agent.agent.conversation.compact_checkpoint import committed_compa
 from agent_py_agent.agent.conversation.compact_landmarks import (
     LANDMARK_HEADING,
     LandmarkOptions,
+    carry_live_landmarks,
     landmark_options,
     semantic_summary_text,
     summary_with_conversation_landmarks,
@@ -35,9 +41,21 @@ from agent_py_agent.agent.conversation.compact_projection import ConversationCom
 from agent_py_agent.agent.conversation.compact_provider_surface import (
     ConversationCompactProviderSurface,
 )
+from agent_py_agent.agent.conversation.compact_remote import provider_compaction_marker
 from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
 from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.memory_archive import estimate_tokens
+from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
+    LiveToolHistorySummaryRequest,
+    _accept_live_summary,
+    is_live_semantic_handoff,
+    live_operation_facts_entry,
+)
+from agent_py_agent.agent.tooling.host_output_redaction import (
+    TurnCredentialRedaction,
+    turn_credential_redaction,
+)
+from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
 
 
 # 函数用途: 造一条用户消息行。
@@ -196,6 +214,10 @@ def test_summary_instruction_asks_for_every_requirement_and_pending_requests():
     instruction = _conversation_summary_instruction({}, custom_instructions="", cache_safe=True)
     assert "'User requirements' section" in instruction and "'Pending user requests' section" in instruction
     assert "large pasted" in instruction
+    # 归档请求自己的“不调用工具/不继续任务”是宿主元数据，不能被写成用户约束或待办（2026-11-18）。
+    assert "Direct factual archival only" in instruction and "Do not continue the task" in instruction
+    assert ("This archival request and its 'do not call tools / do not continue the task' rules are host operation\n"
+            "metadata, not user requirements, constraints or pending requests; never write them into the summary.") in instruction
 
 
 # 类用途: 记录收缩请求的原话备份重建替身。
@@ -288,3 +310,325 @@ def test_real_compaction_shrinks_landmarks_to_the_target_with_one_extra_measurem
     committed = committed_compact_checkpoint_chain(agent, result.thread)[0]["summary"]
     assert committed == small_summary and len(_lines(small_summary, "- user [")) < len(_lines(full_summary, "- user ["))
     assert _lines(small_summary, "- omitted_user_messages: ")
+
+
+# --- P1-2（2026-11-18）：原话备份的新行、裁剪行与继承行共用一个出站净化，先净化再计量、裁剪与 JSON 编码 ---
+
+_CONFIGURED_SECRET = "SYNTHETIC_LANDMARK_CFG_SECRET_7319"
+_TURN_SECRET = "SYNTHETIC_LANDMARK_TURN_SECRET_5521"
+
+
+# 函数用途: 造一段带标题的上一代备份段。
+def _previous_with(*entry_lines: str) -> str:
+    return "\n".join(["旧摘要", "", LANDMARK_HEADING, "- authority: x", "- purpose: y", *entry_lines])
+
+
+def test_new_clipped_and_carried_lines_never_echo_a_configured_secret():
+    previous = _previous_with(f'- user [msg-old]: "旧要求：用 {_CONFIGURED_SECRET} 登录。"',
+                              f'- assistant_final [msg-ans]: "已记下 {_CONFIGURED_SECRET}。"')
+    long = f"开头：密钥 {_CONFIGURED_SECRET} 只在本机用。" + "数据行。" * 3000 + f"结尾：再次确认 {_CONFIGURED_SECRET}。"
+    rows = [_user("msg-new", f"新要求：调接口时带 {_CONFIGURED_SECRET}。"), _user("msg-long", long)]
+    options = LandmarkOptions(landmark_budget_tokens=1_500)
+    with configured_secret_redaction((_CONFIGURED_SECRET,)):
+        whole = summary_with_conversation_landmarks("新摘要", previous, rows[:1], options=options).text
+        result = summary_with_conversation_landmarks("新摘要", previous, rows, options=options)
+    assert _CONFIGURED_SECRET not in whole and _CONFIGURED_SECRET not in result.text and result.used_tokens <= 1_500
+    assert '- user [msg-old]: "旧要求：用 <redacted> 登录。"' in whole
+    assert '- assistant_final [msg-ans]: "已记下 <redacted>。"' in whole
+    assert '- user [msg-new]: "新要求：调接口时带 <redacted>。"' in whole
+    # 裁剪行按净化后的正文计量与裁剪：头尾都不含原值，行首长度是净化后正文的长度。
+    clipped = _lines(result.text, "- user [msg-long clipped ")[0]
+    public_long = long.replace(_CONFIGURED_SECRET, "<redacted>")
+    assert clipped.startswith(f"- user [msg-long clipped {len(public_long)} chars]: ")
+    body = json.loads(clipped.split(": ", 1)[1])
+    assert body.startswith("开头：密钥 <redacted> 只在本机用。") and body.endswith("结尾：再次确认 <redacted>。")
+
+
+def test_turn_bound_secret_is_redacted_on_the_compaction_finish_and_rebuild_paths(tmp_path):
+    owner = str(tmp_path / "owner-home")
+    agent = SimpleNamespace(config=SimpleNamespace(model_context_window_tokens=100_000), backend=None,
+                            tools=SimpleNamespace(tools={}), home_paths=SimpleNamespace(owner_home_dir=owner))
+    turn = TurnCredentialRedaction(owner_key=owner, thread_id="t-landmark", turn_key="turn-landmark-1")
+    turn.register_values((_TURN_SECRET,))
+    try:
+        previous = _previous_with(f'- user [msg-old]: "旧要求：令牌是 {_TURN_SECRET}。"')
+        rows = [_user("msg-new", f"新要求：用 {_TURN_SECRET} 拉取报表。")]
+        rebuilds: list = []
+        call = _CompactSummaryCall(thread_id="t-landmark", landmark_outcome=rebuilds)
+        summary = _finish_summary(_SummaryFinish(agent, previous, {}, rows, rows, "", "", call), "新摘要")
+        assert _TURN_SECRET not in summary
+        assert '- user [msg-old]: "旧要求：令牌是 [REDACTED]。"' in summary
+        assert '- user [msg-new]: "新要求：用 [REDACTED] 拉取报表。"' in summary
+        # 超出恢复目标时的收缩重建复用同一来源与同一净化函数。
+        assert rebuilds and _TURN_SECRET not in rebuilds[0].render(200) and _TURN_SECRET not in rebuilds[0].render(2_000)
+    finally:
+        turn.close()
+
+
+def test_carried_lines_stay_byte_stable_for_three_generations_without_nested_clip_markers():
+    long = "开头规则：金额保留两位小数。" + "数据行。" * 3000 + "结尾规则：按城市拼音排序。"
+    rows = [_user("u-a", "要求 A：password=hunter2-abc 只能本地用。"), _user("u-long", long)]
+    options = LandmarkOptions(landmark_budget_tokens=1_500)
+    first = summary_with_conversation_landmarks("第一代", "", rows, options=options).text
+    section = first[first.index(LANDMARK_HEADING):]
+    assert "hunter2" not in section and _lines(section, "- user [u-long clipped ")
+    second = summary_with_conversation_landmarks("第二代", first, [], options=options).text
+    third = summary_with_conversation_landmarks("第三代", second, [], options=options).text
+    fourth = summary_with_conversation_landmarks("第四代", third, [], options=options).text
+    # 已净化、已裁剪的继承行逐代逐字不变：不重复编码、不再嵌套裁剪标记。
+    for text in (second, third, fourth):
+        assert text[text.index(LANDMARK_HEADING):] == section
+    assert fourth.count("chars omitted]") == 1 and fourth.count("clipped ") == 1
+
+
+def test_undecodable_carried_lines_degrade_to_ids_and_keep_the_omitted_count():
+    previous = _previous_with(
+        '- user [msg-ok]: "可解的旧要求。"',
+        '- user [msg-cut]: "被截断的旧要求 token=sk-live-123',
+        "- user: 没有引号的旧格式行",
+        '- assistant_final [msg-ans]: {"not": "a string"}',
+        "- omitted_user_messages: 2 older or oversized [msg-gone-1 msg-gone-2]",
+    )
+    text = summary_with_conversation_landmarks("新摘要", previous, [],
+                                               options=LandmarkOptions(landmark_budget_tokens=2_000)).text
+    assert '- user [msg-ok]: "可解的旧要求。"' in text
+    assert "被截断" not in text and "sk-live" not in text and "没有引号" not in text and "a string" not in text
+    # 有编号的用户行降为省略编号，无编号的计入未列出数；解不出的答复行直接丢弃。
+    assert _lines(text, "- omitted_user_messages: ") == [
+        "- omitted_user_messages: 4 older or oversized [msg-gone-1 msg-gone-2 msg-cut]; earliest 1 not listed"]
+    # 全部继承行都解不出来时，备份段仍只带省略行留下，编号不会随段一起消失。
+    only_bad = summary_with_conversation_landmarks("新摘要", _previous_with('- user [msg-cut]: "未闭合'), [],
+                                                   options=LandmarkOptions(landmark_budget_tokens=2_000)).text
+    assert only_bad.count(LANDMARK_HEADING) == 1
+    assert _lines(only_bad, "- omitted_user_messages: ") == ["- omitted_user_messages: 1 older or oversized [msg-cut]"]
+
+
+# --- P1-2（2026-11-18）：live 交接续带上一代原话备份与失败事实，体积不超过上一代摘要 ---
+
+
+# 函数用途: 生成一份被接受的 live 交接（经真实接受函数加宿主固定开头）。
+def _handoff(step: int, *, body: str = "") -> str:
+    text = (f"[compact-live-handoff.v1]\ncurrent_progress: 第 {step} 段已核对 12 个文件。\n"
+            "user_constraints: 金额保留两位小数，人名只写姓氏加某。\n"
+            f"completed: 读完 evidence-{step}.txt。\nfailures: shot-{step} 被拒。\n"
+            "unresolved: 还剩 3 个文件没有核对，汇总表还没生成。\n"
+            f"next_step: 读 evidence-{step + 1}.txt，再把结果写进汇总表。{body}")
+    return _accept_live_summary(LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None), text)
+
+
+# 函数用途: 造一个只有窗口与工具注册表的 agent（landmark 预算 = 窗口 10%）。
+def _live_agent() -> SimpleNamespace:
+    return SimpleNamespace(config=SimpleNamespace(model_context_window_tokens=100_000), backend=None,
+                           tools=SimpleNamespace(tools={}))
+
+
+def test_transcript_live_live_transcript_chain_keeps_landmark_ids_without_growing_the_summary():
+    agent = _live_agent()
+    ids = [f"u{index}" for index in range(6)]
+    rows = [_user(message_id, f"要求-{message_id}：" + "细节" * 40) for message_id in ids]
+    first = summary_with_conversation_landmarks("第一代语义摘要。" * 120, "", rows, options=landmark_options(agent)).text
+    second, second_tokens = carry_live_landmarks(agent, _handoff(1), first, thread_id="t")
+    third, third_tokens = carry_live_landmarks(agent, _handoff(2), second, thread_id="t")
+    for previous, carried, handoff in ((first, second, _handoff(1)), (second, third, _handoff(2))):
+        assert carried.startswith(handoff) and carried.count(LANDMARK_HEADING) == 1
+        assert estimate_tokens(carried) <= max(estimate_tokens(previous), estimate_tokens(handoff))
+        assert semantic_summary_text(carried) == handoff
+    assert second_tokens > 0 and third_tokens > 0
+    assert all(_lines(third, f"- user [{message_id}]: ") for message_id in ids)
+    # 回到 transcript 压缩：两代 live 之后，最早那一代的原话编号仍被继承。
+    fourth = summary_with_conversation_landmarks("第二代语义摘要。", third, [_user("u-new", "新要求：按城市排序。")],
+                                                 options=landmark_options(agent)).text
+    assert all(_lines(fourth, f"- user [{message_id}]: ") for message_id in [*ids, "u-new"])
+
+
+def test_live_failure_facts_sit_before_the_landmarks_and_survive_the_semantic_cut():
+    agent = _live_agent()
+    previous = summary_with_conversation_landmarks("上一代摘要。" * 400, "", [_user("u1", "要求一：零库存标红。")],
+                                                   options=landmark_options(agent)).text
+    records = [{"tool": "image_generate", "tool_operation_status": "failed", "error_code": "MODERATION_REJECTED",
+                "operation_id": f"op-{chr(97 + index)}"} for index in range(10)]
+    facts = live_operation_facts_entry([*records, {"tool": "read_file", "tool_operation_status": "succeeded"}])
+    # 只留最近 8 条未成功操作，更早的只计数；成功的操作不进事实块。
+    assert facts.count("\n- tool=image_generate") == 8 and "- earlier 2 non-success operations omitted" in facts
+    assert "op-a" not in facts and "op-j" in facts and "read_file" not in facts
+    carried, used = carry_live_landmarks(agent, _handoff(1), previous, thread_id="t", facts=facts)
+    assert used > 0 and carried.index(facts) < carried.index(LANDMARK_HEADING)
+    assert semantic_summary_text(carried) == f"{_handoff(1)}\n\n{facts}" and _lines(carried, "- user [u1]: ")
+
+
+def test_live_carry_adds_nothing_without_room_or_when_the_handoff_echoes_the_heading():
+    agent = _live_agent()
+    small_previous = "\n".join([LANDMARK_HEADING, "- authority: x", "- purpose: y", '- user [u1]: "要求一。"'])
+    handoff = _handoff(1)
+    # 上一代摘要不比交接大：没有余量，事实与备份都不带，交接逐字不变。
+    assert carry_live_landmarks(agent, handoff, small_previous, thread_id="t", facts="[facts] x") == (handoff, 0)
+    big_previous = "上一代摘要。" * 400 + "\n\n" + small_previous
+    echoed = f"{handoff}\n\n{small_previous}"
+    assert carry_live_landmarks(agent, echoed, big_previous, thread_id="t") == (echoed, 0)
+    # 只认行首标题：机械回退把上一代摘要内联成一行时，行中的同名文本不算备份段，也不会被当成继承来源。
+    inline = f"- previous_summary: 旧摘要 {LANDMARK_HEADING} - user [u1]: \"要求一。\""
+    assert semantic_summary_text(inline) == inline
+    assert summary_with_conversation_landmarks("新摘要", inline, [], options=landmark_options(agent)).text == "新摘要"
+
+
+def test_only_an_accepted_semantic_handoff_is_eligible_for_live_carry():
+    request = LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None)
+    assert is_live_semantic_handoff(_handoff(1))
+    # 空/无效正文退回机械兜底；服务端压缩项是不透明标记；两者都不带。
+    assert not is_live_semantic_handoff(_accept_live_summary(request, ""))
+    assert not is_live_semantic_handoff(provider_compaction_marker({"protocol": "responses", "sha256": "ab" * 32}))
+
+
+def test_native_live_carry_needs_a_canonical_binding_and_matches_facts_by_exact_call_identity():
+    agent = _live_agent()
+    previous = summary_with_conversation_landmarks("上一代摘要。" * 400, "", [_user("u1", "要求一：零库存标红。")],
+                                                   options=landmark_options(agent)).text
+    identity = {"run_id": "run-1", "attempt_id": "attempt-1", "turn_id": "turn-1"}
+    call = canonical_history_call("image_generate", {}, call_id="call-1", **identity)
+    failed = {**identity, "call_id": "call-1", "tool": "image_generate", "tool_operation_status": "failed",
+              "operation_id": "op-in-ir"}
+    other_attempt = {**failed, "attempt_id": "attempt-0", "operation_id": "op-other-attempt"}
+    params = SimpleNamespace(tool_ir_history=[AssistantTurn(text="", tool_calls=[call])],
+                             archive_tool_calls=[other_attempt, failed])
+    binding = SimpleNamespace(thread=SimpleNamespace(thread_id="t", summary=previous))
+    handoff = _handoff(1)
+    carried = _carry_native_live_landmarks(agent, params, binding, handoff, previous)
+    assert carried.startswith(handoff) and _lines(carried, "- user [u1]: ")
+    assert "op-in-ir" in semantic_summary_text(carried) and "op-other-attempt" not in carried
+    # 没有 canonical 绑定（临时回合）或不是被接受的语义交接时原样返回。
+    assert _carry_native_live_landmarks(agent, params, None, handoff, previous) == handoff
+    mechanical = _accept_live_summary(LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None), "")
+    assert _carry_native_live_landmarks(agent, params, binding, mechanical, previous) == mechanical
+
+
+# --- F02（2026-11-19）：地标正文只受本行原回合的凭据绑定影响；相邻回合扣留不再抹掉整代公开原话 ---
+
+_WITHHELD_TEXT = "[内容因凭据脱敏额度超限已扣留]"
+
+
+# 函数用途: 在凭据绑定登记之前，往真实消息库落一批带来源字段的用户消息；返回 store、线程与按顺序读回的行。
+def _persisted_rows(tmp_path, specs):
+    store = ConversationStore(tmp_path / "conversation")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "now": 1})
+    for content, metadata in specs:
+        store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": content, "metadata": metadata})
+    return store, thread, store.messages.recent(thread.thread_id, limit=0)
+
+
+# 函数用途: 给出 count 条完全公开、各带自己请求来源的原话。
+def _public_specs(count: int = 20):
+    return [(f"公开要求 {index}：第 {index} 张报表按城市拼音排序。", {"conversation_request_id": f"req-public-{index}"})
+            for index in range(count)]
+
+
+# 函数用途: 造一个按 owner 目录与真实会话存储根查找活动回合绑定的压缩 agent。
+def _scoped_agent(tmp_path, store):
+    return SimpleNamespace(config=SimpleNamespace(model_context_window_tokens=100_000), backend=None,
+                           tools=SimpleNamespace(tools={}), conversation_store=store,
+                           home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "owner-home")))
+
+
+# 函数用途: 让一个回合登记满宿主 256 项上限后再登记一项，进入扣留状态。
+def _exhaust(turn):
+    turn.register_values(tuple(f"SYNTHETIC_ADJACENT_{index:03d}" for index in range(256)))
+    turn.register_values(("SYNTHETIC_ADJACENT_OVERFLOW",))
+    assert turn.withheld
+    return turn
+
+
+# 函数用途: 走生产压缩收尾 _finish_summary，返回摘要全文；rebuilds 收集可按更小预算重建的对象。
+def _finish_rows(agent, previous: str, rows, thread_id: str, *, summary: str = "新摘要", rebuilds=None) -> str:
+    call = _CompactSummaryCall(thread_id=thread_id, landmark_outcome=rebuilds)
+    return _finish_summary(_SummaryFinish(agent, previous, {}, rows, rows, "", "", call), summary)
+
+
+# 函数用途: 数全文里逐字可读（按 JSON 编码正文匹配）的原话条数。
+def _readable(text: str, rows) -> int:
+    return sum(json.dumps(row.content, ensure_ascii=False) in text for row in rows)
+
+
+def test_adjacent_withheld_turn_keeps_twenty_public_landmarks_on_every_path(tmp_path):
+    store, thread, rows = _persisted_rows(tmp_path, _public_specs())
+    agent, tid = _scoped_agent(tmp_path, store), thread.thread_id
+    clean = _finish_rows(agent, "", rows, tid, summary="上一代摘要。" * 400)
+    assert _readable(clean, rows) == 20
+    adjacent = _exhaust(TurnCredentialRedaction(owner_key=agent.home_paths.owner_home_dir,
+                                                conversation_root=str(store.storage.root), thread_id=tid,
+                                                turn_key="req-adjacent"))
+    try:
+        rebuilds: list = []
+        first = _finish_rows(agent, "", rows, tid, rebuilds=rebuilds)
+        shrunk = rebuilds[0].render(800)
+        carried, used = carry_live_landmarks(agent, _handoff(1), clean, thread_id=tid)
+    finally:
+        adjacent.close()
+    following = _finish_rows(agent, first, [], tid)
+    # 首次渲染、live 携带、关闭绑定后的下一代都是 20/20；超额回缩只减少条数，留下的每条都逐字可读。
+    assert (_readable(first, rows), _readable(carried, rows), _readable(following, rows)) == (20, 20, 20)
+    assert used > 0 and _WITHHELD_TEXT not in first + shrunk + carried + following
+    kept = _lines(shrunk, "- user [")
+    assert 0 < len(kept) < 20 and _readable(shrunk, rows) == len(kept)
+    assert following[following.index(LANDMARK_HEADING):] == first[first.index(LANDMARK_HEADING):]
+    # 磁盘原消息不变。
+    assert [row.content for row in store.messages.recent(tid, limit=0)] == [row.content for row in rows]
+
+
+@pytest.mark.parametrize("scope", ["other_owner", "other_thread"])
+def test_withheld_turn_of_another_owner_or_thread_never_touches_these_landmarks(tmp_path, scope):
+    store, thread, rows = _persisted_rows(tmp_path, _public_specs())
+    agent = _scoped_agent(tmp_path, store)
+    if scope == "other_owner":
+        turn = TurnCredentialRedaction(owner_key=str(tmp_path / "other-owner"), thread_id=thread.thread_id)
+    else:
+        turn = TurnCredentialRedaction(owner_key=agent.home_paths.owner_home_dir,
+                                       conversation_root=str(store.storage.root), thread_id="t-other-thread")
+    _exhaust(turn)
+    try:
+        first = _finish_rows(agent, "", rows, thread.thread_id)
+    finally:
+        turn.close()
+    assert _readable(first, rows) == 20
+
+
+def test_another_turns_registered_value_does_not_rewrite_a_row_with_exact_provenance(tmp_path):
+    store, thread, rows = _persisted_rows(tmp_path, [
+        ("公开要求：项目代号 ProjectAlpha-Ledger 按城市排序。", {"conversation_request_id": "req-public-0"}),
+        (f"本回合要求：令牌 {_TURN_SECRET} 配 ProjectAlpha-Ledger 用。", {"conversation_request_id": "req-secret-turn"}),
+    ])
+    agent, tid = _scoped_agent(tmp_path, store), thread.thread_id
+    turn = TurnCredentialRedaction(owner_key=agent.home_paths.owner_home_dir, conversation_root=str(store.storage.root),
+                                   thread_id=tid, turn_key="req-secret-turn")
+    turn.register_values((_TURN_SECRET, "ProjectAlpha-Ledger"))
+    try:
+        text = _finish_rows(agent, "", rows, tid)
+    finally:
+        turn.close()
+    # 别的回合登记的普通项目名不改写带精确来源的公开行；本回合自己的行照常遮蔽本回合登记的值。
+    assert _readable(text, rows[:1]) == 1 and _TURN_SECRET not in text
+    assert f'- user [{rows[1].message_id}]: "本回合要求：令牌 [REDACTED] 配 [REDACTED] 用。"' in text
+
+
+def test_rows_of_the_withheld_turn_and_unprovenanced_rows_degrade_to_their_ids(tmp_path):
+    store, thread, rows = _persisted_rows(tmp_path, [
+        *_public_specs(2),
+        ("扣留回合的要求：SYNTHETIC_ADJACENT_OVERFLOW 已贴进来。", {"request_id": "req-adjacent", "task_id": "task-shared"}),
+        ("同任务另一回合的公开要求：按月汇总。", {"conversation_request_id": "req-public-x", "task_id": "task-shared"}),
+        ("只有任务编号的旧要求：按周汇总。", {"task_id": "task-shared"}),
+        ("没有来源字段的旧要求：按季汇总。", {}),
+    ])
+    agent, tid = _scoped_agent(tmp_path, store), thread.thread_id
+    # 生产工厂按 request/run/task 登记别名：扣留回合也认 task-shared。绑定随 params 存活，测试期间须持有它。
+    params = SimpleNamespace(request_id="req-adjacent", task_id="task-shared", thread_id=tid)
+    held = _exhaust(turn_credential_redaction(agent, params))
+    try:
+        text = _finish_rows(agent, "", rows, tid)
+    finally:
+        held.close()
+    ids = [row.message_id for row in rows]
+    # 显式来源不是扣留回合的行照常逐字保留（共享 task_id 不推翻显式回合身份）。
+    assert _readable(text, [rows[0], rows[1], rows[3]]) == 3
+    # 扣留回合自己的行、只有任务编号的行与无来源旧行只留编号（记入省略），不写扣留占位、不外显正文。
+    assert "SYNTHETIC_ADJACENT" not in text and "按周汇总" not in text and "按季汇总" not in text
+    assert _WITHHELD_TEXT not in text
+    omitted = _lines(text, "- omitted_user_messages: ")
+    assert len(omitted) == 1 and all(ids[index] in omitted[0] for index in (2, 4, 5))

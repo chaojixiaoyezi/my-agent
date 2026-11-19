@@ -686,10 +686,11 @@ def test_gateway_recovery_measures_candidates_with_the_preflight_calibration(tmp
     case = _gateway_case(tmp_path, monkeypatch, ratio=None if scenario == "no_observation" else _RATIO)
     calibration = _first_turn(case, observed=scenario != "no_observation")
     # 第二回合：大段新需求让完整请求越过上限；候选原始计量也越过上限，只有按观测折算后才可能放下。
-    # 默认工具延迟展开和提示精简后，增加合成新需求；具体压缩前/候选大小仍由_expected_sizes实测断言。
+    # 默认工具延迟展开和提示精简后，增加合成新需求；原生工具协议补回合结束契约后固定开销变大，合成新需求相应减小。
+    # 具体压缩前/候选大小仍由_expected_sizes实测断言。
     # 保持80K输入上限、0.7校准率，以及「仅校准后放得下/校准后仍超限/无观测」三个场景。
     sink = _ProgressSink()
-    context = _second_turn(case, "材料核对项。" * (11_500 if scenario == "calibrated_too_large" else 8_000), sink)
+    context = _second_turn(case, "材料核对项。" * (11_500 if scenario == "calibrated_too_large" else 7_800), sink)
     fits = scenario == "calibrated_fit"
     if fits:
         assert request_execution._run_gateway_ask(context).response == "资料整理完成。"

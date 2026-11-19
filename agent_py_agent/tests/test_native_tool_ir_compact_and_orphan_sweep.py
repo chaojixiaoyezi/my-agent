@@ -907,6 +907,9 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
     assert updated is not None and updated.compact_generation == 1
     assert sink.progress_rows[-1]["phase"] == "completed"
     assert sink.progress_rows[-1]["after_tokens"] <= 8_100
+    # P3-1（2026-11-18）：成功的 live 压缩也给出摘要约占多少与保留的工具往返对数（只观测）。
+    assert sink.progress_rows[-1]["summary_tokens"] == estimate_tokens(updated.summary) > 0
+    assert sink.progress_rows[-1]["retained_items"] == sum(isinstance(item, ToolResult) for item in params.tool_ir_history)
     assert (
         preflight_context_pressure_response(
             SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=10)

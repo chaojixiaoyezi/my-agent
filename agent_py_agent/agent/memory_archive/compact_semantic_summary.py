@@ -43,7 +43,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -70,6 +71,8 @@ _LIVE_FALLBACK_MAX_OUTPUT_CHARS = 4_000
 _PER_RECORD_VALUE_CHARS = 1_200
 
 _SUMMARY_PREFIX = "[compact-semantic-summary]"
+# live 交接被接受时宿主写在模型正文前的固定开头；机械回退与服务端压缩项开头不同，live 续带只认它。
+_LIVE_ACCEPTED_HEAD = f"{_SUMMARY_PREFIX} 当前运行 turn 的旧工具往返已被这份摘要替换。"
 _OPERATION_FACTS_PREFIX = "[compact-tool-operation-facts authoritative]"
 _MECHANICAL_FALLBACK_PREFIX = "[compact-mechanical-fallback]"
 _LIVE_HANDOFF_PREFIX = "[compact-live-handoff.v1]"
@@ -289,13 +292,65 @@ def _accept_live_summary(request: LiveToolHistorySummaryRequest, summary: str) -
     fallback_limit = min(limit, _LIVE_FALLBACK_MAX_OUTPUT_CHARS)
     if not summary:
         return _mechanical_live_tool_history_summary(request, limit=fallback_limit, reason="provider_empty_summary")
+    from ..conversation.compact_landmarks import LANDMARK_HEADING
+
+    # 模型复述的宿主地标标题只是普通引文：行首标题（与宿主解析同一边界）加引用前缀，正式地标段只由宿主生成。
+    summary = summary.replace(f"\n{LANDMARK_HEADING}", f"\n> {LANDMARK_HEADING}")
     if not _valid_live_summary(summary):
         return _mechanical_live_tool_history_summary(request, limit=fallback_limit, reason="provider_invalid_summary_shape")
+    # 先按六段拟合再复验：整体头裁会把 failures/unresolved/next_step 整段丢掉；拟合不了就走受控机械兜底，不收半截交接。
+    fitted = _fit_live_sections(summary, limit)
+    if fitted is None or not _valid_live_summary(fitted):
+        return _mechanical_live_tool_history_summary(
+            request, limit=fallback_limit, reason="provider_summary_section_fit_failed",
+        )
     return (
-        f"{_SUMMARY_PREFIX} 当前运行 turn 的旧工具往返已被这份摘要替换。"
+        f"{_LIVE_ACCEPTED_HEAD}"
         "摘要不是执行事实源；精确结果以 archive、operation ledger、artifact 和真实文件为准。\n"
-        f"{_clip(summary, limit)}"
+        f"{fitted}"
     )
+
+
+# LLM: 只在超长时拟合；按行首的 v1 规范标签切段（每个标签恰好一次、顺序不变），先缩 completed、再缩 current_progress，
+#   两者到底仍超才依次缩 unresolved/failures/user_constraints/next_step。每段保留标签和最少正文，裁剪处写明字数；
+#   标签缺失、重复、乱序、某段标签后没有正文或缩到底仍放不下时返回 None，由调用方走机械兜底。不改 v1 顺序，不新增参数。
+# 函数用途: 把超长的 live 交接摘要按段压进字符上限，保证六个字段都还在。
+def _fit_live_sections(text: str, limit: int) -> str | None:
+    if len(text) <= limit:
+        return text
+    starts: list[int] = []
+    for section in _LIVE_HANDOFF_SECTIONS:
+        pattern = re.compile(rf"^[ \t]*{re.escape(section)}", re.IGNORECASE | re.MULTILINE)
+        found = [match.start() for match in pattern.finditer(text)]
+        if len(found) != 1 or (starts and found[0] <= starts[-1]):
+            return None
+        starts.append(found[0])
+    preamble = text[:starts[0]]
+    bodies = {
+        section: text[start:end]
+        for section, start, end in zip(_LIVE_HANDOFF_SECTIONS, starts, [*starts[1:], len(text)])
+    }
+    # 空白、换行或单独的标签不是事实（none 与普通列表照常有效）：有空段就交给调用方走机械兜底。
+    if any(not bodies[section].strip()[len(section):].strip() for section in _LIVE_HANDOFF_SECTIONS):
+        return None
+    excess = len(text) - limit
+    floor = 160
+    for section in ("completed:", "current_progress:", "unresolved:", "failures:", "user_constraints:", "next_step:"):
+        if excess <= 0:
+            break
+        chunk = bodies[section].rstrip("\n")
+        trailing = bodies[section][len(chunk):]
+        marker = f"…[section clipped {len(chunk)} chars]"
+        keep = max(floor, len(chunk) - excess - len(marker))
+        if len(chunk) - keep <= len(marker):
+            continue
+        clipped = chunk[:keep].rstrip()
+        marker = f"…[section clipped {len(chunk) - len(clipped)} chars]"
+        bodies[section] = f"{clipped}{marker}{trailing or chr(10)}"
+        excess -= len(chunk) + len(trailing) - len(bodies[section])
+    fitted = preamble + "".join(bodies[section] for section in _LIVE_HANDOFF_SECTIONS)
+    fitted = fitted.rstrip()
+    return fitted if len(fitted) <= limit else None
 
 
 # LLM: 远端成功时把记录放进调用方的 provider_outcome 并返回占位摘要文本；不可用/失败返回空串，调用方走原文字摘要路径。
@@ -698,6 +753,8 @@ def _record_brief(index: int, record: dict[str, Any]) -> str:
 # 函数用途: 从中段归档生成一条精确阻塞事实块；成功记录仍由摘要与权威账本共同承载。
 def _non_success_operation_facts_entry(
     records: list[dict[str, Any]],
+    *,
+    limit_rows: int = 0,
 ) -> str:
     rows: list[str] = []
     for record in records:
@@ -727,6 +784,9 @@ def _non_success_operation_facts_entry(
         rows.append(f"- {'; '.join(fields)}")
     if not rows:
         return ""
+    if 0 < limit_rows < len(rows):
+        # 只留最近 limit_rows 条，更早的只计数，不静默丢失。
+        rows = [f"- earlier {len(rows) - limit_rows} non-success operations omitted", *rows[-limit_rows:]]
     return "\n".join(
         (
             (
@@ -736,6 +796,18 @@ def _non_success_operation_facts_entry(
             *rows,
         )
     )
+
+
+# LLM: 只读归档记录的结构化状态字段（与中段事实块同一投影）；最多最近 8 条，更早的只计数。
+# 函数用途: 给 live 交接生成被替代工具往返里未成功操作的精确事实块；没有时返回空串。
+def live_operation_facts_entry(records: Sequence[dict[str, Any]]) -> str:
+    return _non_success_operation_facts_entry([record for record in records if isinstance(record, dict)], limit_rows=8)
+
+
+# LLM: 只比宿主自己写下的固定开头，不读模型正文。
+# 函数用途: 判断一段 live 摘要是否是被接受的模型语义交接（不是机械回退或服务端压缩项）。
+def is_live_semantic_handoff(text: str) -> bool:
+    return str(text or "").startswith(_LIVE_ACCEPTED_HEAD)
 
 
 def _record_param_lines(params: Any) -> list[str]:
@@ -948,6 +1020,7 @@ def _live_summary_prompt(previous_summary: str = "") -> str:
         "当前文件、目录、命令、模型或服务位置；精确路径、ID、URL、端口、哈希和测试数字；"
         "尚未解决的问题、正在进行的步骤以及下一步。"
         "不要改写或缩短不透明标识，不要把推测写成事实。"
+        "这条归档/交接请求及其“不调用工具/不继续任务”要求是宿主操作元数据，不是用户要求、约束或待办，不得写进摘要。"
         f"{previous_block}"
     )
 
@@ -970,6 +1043,8 @@ __all__ = [
     "SemanticSummaryConfig",
     "SemanticSummaryRequest",
     "SemanticSummaryStats",
+    "is_live_semantic_handoff",
+    "live_operation_facts_entry",
     "semantic_summary_config",
     "summarize_carried_tool_context",
     "summarize_live_tool_history",

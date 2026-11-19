@@ -27,11 +27,18 @@ from agent_py_agent.agent.conversation import (
 )
 from agent_py_agent.agent.conversation import background_delivery as delivery_module
 from agent_py_agent.agent.conversation import background_history_seed as history_module
+from agent_py_agent.agent.conversation import runtime as runtime_module
 from agent_py_agent.agent.conversation.channels import DeliveryContext, ReplyEnvelope
+from agent_py_agent.agent.conversation.goal_progress_fuse import (
+    FUSE_METADATA_KEY,
+    WITHHELD_REASON_CODE,
+)
+from agent_py_agent.agent.conversation.goal_runtime import raise_goal_continuation_wake
 from agent_py_agent.agent.conversation.history_seed import (
     seed_provider_history_messages,
     seed_text_messages,
 )
+from agent_py_agent.agent.conversation.host_notices import pending_host_notices
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.delivery import DeliveryService, build_default_channel_registry
 from agent_py_agent.agent.settings import AgentConfig
@@ -1181,3 +1188,143 @@ def test_history_scope_rows_keeps_current_task_lineage_only() -> None:
     ids = [row.message_id for row in history_scope_rows(decision, rows)]
     assert ids == ["before", "a-work"], ids
     assert "b-future" not in ids
+
+
+# ---------------------------------------------------------------------------
+# F01（2026-11-19）：冻结重投还原 Goal 片的宿主计数与结束原因，续跑判定与首次送达一致
+# ---------------------------------------------------------------------------
+
+
+class _GoalSliceBackend:
+    """第 list_call 次模型调用返回一次 list_files，其余只回复；记录真实模型轮数。"""
+
+    name = "goal-slice"
+
+    def __init__(self, list_call: int) -> None:
+        self.list_call = list_call
+        self.calls = 0
+
+    def probe_tool_capability(self):
+        return _native_probe(self)
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> object:
+        from agent_py_agent.agent.backends import ModelResponse
+
+        del prompt, on_chunk, kwargs
+        self.calls += 1
+        if self.calls == self.list_call:
+            return ModelResponse(text="", backend=self.name, tool_use_blocks=[
+                {"id": f"call-goal-list-{self.calls}", "name": "list_files", "input": {"path": "."}}])
+        return ModelResponse(text="在等你", backend=self.name)
+
+
+# 函数用途: 建一个飞书线程上的 active Goal（真实 GoalStore、scheduler.tick、原生 list_files 与可拒收的通道）。
+def _goal_delivery_env(tmp_path, monkeypatch, *, list_call: int) -> SimpleNamespace:
+    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl",
+                                    orphan_supervision_interval_seconds=0), tmp_path)
+    agent.backend = backend = _GoalSliceBackend(list_call)
+    tool, tool_runs = agent.tools.tools["list_files"], []
+    original = tool.execute
+
+    # 函数用途: 记录真实工具执行次数后照常执行。
+    def tracked(arguments):
+        tool_runs.append(arguments)
+        return original(arguments)
+
+    monkeypatch.setattr(tool, "execute", tracked)
+    store = agent.conversation_store
+    channels = _ScriptedDelivery(proactive=True, status="sent")
+    scheduler = BackgroundMainAgentScheduler(
+        {"runtime": BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels), "store": store})
+    thread = store.threads.get_or_create({"canonical_user_id": "user-1", "channel": "feishu",
+                                          "channel_conversation_id": "oc_chat1", "channel_user_id": "ou_1", "now": 10.0})
+    goal = store.goals.create({"thread_id": thread.thread_id, "objective": "持续推进同一件工作", "now": 11.0})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": goal.task_id, "goal": goal.objective,
+                      "status": "active", "now": 12.0})
+    raise_goal_continuation_wake(store, goal, channel="feishu", conversation_id="oc_chat1", now=13.0)
+    return SimpleNamespace(backend=backend, tool_runs=tool_runs, store=store, channels=channels,
+                           scheduler=scheduler, thread=thread, goal=goal)
+
+
+# 函数用途: 观测元组 (调用, 成功, Goal 状态, 连续空片数, 待处理 wake 数)。
+def _goal_tuple(env, report) -> tuple:
+    goal = env.store.goals.load(env.thread.thread_id, goal_id=env.goal.goal_id)
+    fuse = goal.metadata.get(FUSE_METADATA_KEY) or {}
+    return (report.tool_call_count, report.tool_success_count, goal.status,
+            int(fuse.get("idle_slices", 0) or 0), len(env.store.wakes.pending()))
+
+
+# 函数用途: 让这一片外发被拒 rejections 次（第 2 次起是冻结重投被拒），再放行一次重投；返回重投报告。
+def _deliver_after_rejections(env, now: float, rejections: int) -> list:
+    env.channels.status = "rejected"
+    assert env.scheduler.tick(now=now) == []
+    (signal,) = env.store.wakes.pending()
+    assert signal.metadata["owner_delivery"]["schema_version"] == "wake-owner-delivery.v2"
+    spent = (env.backend.calls, len(env.tool_runs))
+    for _attempt in range(rejections - 1):
+        now = _wake_retry_at(env.store, signal, now + 31.0)
+        assert env.scheduler.tick(now=now) == []
+    env.channels.status = "sent"
+    reports = env.scheduler.tick(now=_wake_retry_at(env.store, signal, now + 31.0))
+    # 重投只送冻结信封：模型与工具各增加 0 次。
+    assert (env.backend.calls, len(env.tool_runs)) == spent
+    assert [item.delivery_reason for item in reports] == ["cached_owner_delivery_retry"]
+    return reports
+
+
+@pytest.mark.parametrize("rejections", [0, 1, 2])
+def test_goal_slice_counts_survive_a_rejected_delivery_and_its_redelivery(tmp_path, monkeypatch, rejections) -> None:
+    env = _goal_delivery_env(tmp_path, monkeypatch, list_call=3)
+    idle = [env.scheduler.tick(now=now) for now in (14.0, 15.0)]
+    assert [batch[0].tool_call_count for batch in idle] == [0, 0]
+    reports = _deliver_after_rejections(env, 16.0, rejections) if rejections else env.scheduler.tick(now=16.0)
+    # 两空片后一次成功读：首次送达、一次拒收后重投、重投再被拒后重投，结果完全一致。
+    assert _goal_tuple(env, reports[0]) == (1, 1, "active", 0, 1)
+    assert len(env.tool_runs) == 1
+
+
+def test_legacy_frozen_goal_slice_without_counts_keeps_the_idle_count_and_the_next_wake(tmp_path, monkeypatch) -> None:
+    env = _goal_delivery_env(tmp_path, monkeypatch, list_call=3)
+    for now in (14.0, 15.0):
+        env.scheduler.tick(now=now)
+    # 模拟旧版本写下的 v2 回执：冻结时去掉本次新增的私有计数（首次冻结即定稿，之后不覆盖）。
+    cache_delivery = env.store.wakes.cache_delivery
+    monkeypatch.setattr(env.store.wakes, "cache_delivery", lambda wake_id, payload: cache_delivery(
+        wake_id, {key: value for key, value in payload.items() if key != "goal_slice_facts"}))
+    env.channels.status = "rejected"
+    assert env.scheduler.tick(now=16.0) == []
+    (signal,) = env.store.wakes.pending()
+    assert "goal_slice_facts" not in signal.metadata["owner_delivery"]
+    env.channels.status = "sent"
+    reports = env.scheduler.tick(now=_wake_retry_at(env.store, signal, 47.0))
+    # 旧 v2 回执没有可信计数：这一片不改连续空片数（不暂停也不清零），按已有资格接下一片。
+    assert _goal_tuple(env, reports[0]) == (0, 0, "active", 2, 1)
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+@pytest.mark.parametrize(("end", "status", "reason", "notices"), [
+    ("aborted", "cancelled", "", 0),
+    ("interrupted", "interrupted", "USER_INPUT_YIELD", 0),
+    ("blocked", "blocked", "", 1),
+])
+def test_redelivered_goal_slice_keeps_its_end_reason_for_the_withheld_notice(
+    tmp_path, monkeypatch, end, status, reason, notices, rejected,
+) -> None:
+    env = _goal_delivery_env(tmp_path, monkeypatch, list_call=1)
+    original = runtime_module.collect_background_execution_result
+
+    # 函数用途: 只在执行结果边界给出结构化结束回执；工具执行、冻结、重投与提示投递都走原路径。
+    def receipted(agent, result, snapshot, **kwargs):
+        snapshot = {**snapshot, "turn_end_reason": end, "goal_continuation_allowed": False}
+        return replace(original(agent, result, snapshot, **kwargs), runtime_status=status, runtime_reason=reason)
+
+    monkeypatch.setattr(runtime_module, "collect_background_execution_result", receipted)
+    reports = _deliver_after_rejections(env, 14.0, 1) if rejected else env.scheduler.tick(now=14.0)
+    assert reports[0].tool_success_count == 1 and reports[0].turn_end_reason == end
+    # 用户停止与输入让步不提示；blocked 恰好一条，并带原结束原因。
+    texts = [item for item in env.channels.sent if "没有自动续跑" in item]
+    texts += [notice.text for notice in pending_host_notices(env.store, env.thread.thread_id)
+              if notice.code == WITHHELD_REASON_CODE]
+    assert len(texts) == notices
+    if notices:
+        assert f"turn_end_reason={end}" in texts[0] and f"runtime_status={status}" in texts[0]

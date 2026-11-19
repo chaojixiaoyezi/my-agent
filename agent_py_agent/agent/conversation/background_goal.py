@@ -23,7 +23,8 @@ _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
 
 # LLM: 仅注入 Goal/任务/时钟领域及若干精确能力；回调在原分支内查询，不预取子树或注册表。
 #   user_turn_gate 按 thread_id 持有车道闸并给出“用户回合在场”（run_claim.user_input_turn_gate），熔断判定与落账都在闸内；
-#   缺省 None 表示不判断（与 C5 之前相同）。
+#   缺省 None 表示不判断（与 C5 之前相同）。queue_withheld_notice(goal, signal, report) 在续跑资格被结束原因扣下时
+#   排队（并对可外发通道主动推一次）宿主提示；缺省 None 不提示。
 # 类用途: 列明目标续跑需要的依赖，不缓存目标状态、不创建第二份账本或后台工作。
 @dataclass(frozen=True)
 class GoalContinuationDependencies:
@@ -37,6 +38,7 @@ class GoalContinuationDependencies:
     goal_continuation_idle_limit: int = 3
     queue_no_progress_notice: Callable[[object], object] | None = None
     user_turn_gate: Callable[[str], AbstractContextManager[bool]] | None = None
+    queue_withheld_notice: Callable[[object, WakeSignal, BackgroundMainAgentReport], object] | None = None
 
 
 # LLM: 只更新 wake 精确匹配的 active Goal；原事务内先结算时钟、再 CAS 停目标、改任务并登记注册表。
@@ -137,6 +139,7 @@ def continue_goal_after_report(
     now: float,
 ) -> None:
     if not report.goal_continuation_allowed:
+        _notice_withheld_continuation(dependencies, signal, report)
         return
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
     goal_id = str(metadata.get("goal_id") or "").strip()
@@ -172,6 +175,65 @@ def continue_goal_after_report(
             exc,
             exc_info=True,
         )
+
+
+# LLM: 只读判定，不改目标、任务、唤醒或熔断计数。结束原因扣下续跑资格时 Goal 仍是 active 却不会再有下一片，这里用宿主
+#   固定文案告诉用户（不读模型正文或显示快照）。失败只记警告，不影响唤醒收口。
+# 函数用途: 续跑资格被扣下时，按结构化原因给用户排一条（并尽量主动推一次）宿主提示。
+def _notice_withheld_continuation(
+    dependencies: GoalContinuationDependencies,
+    signal: WakeSignal,
+    report: BackgroundMainAgentReport,
+) -> None:
+    notify = dependencies.queue_withheld_notice
+    if notify is None:
+        return
+    try:
+        goal = _withheld_goal(dependencies, signal, report)
+        if goal is not None and notify(goal, signal, report) is False:
+            _LOGGER.warning("thread goal withheld-continuation notice was not queued(goal=%s)", goal.goal_id)
+    except Exception as exc:  # noqa: BLE001 - 提示是附带信息，不能拖垮唤醒收口。
+        _LOGGER.warning(
+            "thread goal withheld-continuation notice failed code=%s effect_outcome=%s next_action=%s error=%s",
+            "GOAL_CONTINUATION_WITHHELD_NOTICE_FAILED",
+            "notice_not_queued",
+            "inspect conversation store health; the goal stays active without a continuation wake",
+            exc,
+        )
+
+
+# LLM: 以下情况不提示：用户输入让步（下一步归用户输入链）、用户自己停止（aborted）、wake 对应目标/任务已不匹配或不再
+#   active、子代理仍在跑或状态读不到（由子代理生命周期事件接续）、本会话车道上有用户回合（与熔断同一把车道闸判定）。
+#   全程只读：不复用 _active_goal_for_signal（它会改任务状态）。
+# 函数用途: 返回应当提示“续跑没接上”的 active 目标；不该提示时返回 None。
+def _withheld_goal(
+    dependencies: GoalContinuationDependencies,
+    signal: WakeSignal,
+    report: BackgroundMainAgentReport,
+) -> object | None:
+    from ..turn_end import TurnEndReason, normalize_turn_end_reason
+    from .technical_continuation import USER_INPUT_YIELD_REASON
+
+    if (str(report.runtime_reason or "").strip().upper() == USER_INPUT_YIELD_REASON
+            or normalize_turn_end_reason(report.turn_end_reason) == TurnEndReason.ABORTED.value):
+        return None
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    goal_id = str(metadata.get("goal_id") or "").strip()
+    goal = dependencies.goals.load(signal.thread_id, goal_id=goal_id)
+    if (
+        goal is None
+        or goal.goal_id != goal_id
+        or goal.status != "active"
+        or goal.task_id != str(signal.root_task_id or "")
+        or dependencies.task_status(signal.thread_id, goal.task_id) != "active"
+    ):
+        return None
+    phase, state_error = dependencies.subagent_phase(goal.task_id)
+    if phase == "subagents_active" or state_error:
+        return None
+    gate = dependencies.user_turn_gate
+    with gate(goal.thread_id) if gate is not None else nullcontext(False) as user_turn_present:
+        return None if user_turn_present else goal
 
 
 # LLM: 本片续跑判定需要的三项事实：wake 精确匹配的 active 目标、它的任务状态、本次结算时刻。
@@ -217,6 +279,9 @@ def _active_goal_for_signal(dependencies: GoalContinuationDependencies, signal: 
 def _record_continuation_slice(
     dependencies: GoalContinuationDependencies, signal: WakeSignal, report: BackgroundMainAgentReport, facts: _GoalSlice,
 ) -> object | None:
+    if not report.goal_slice_facts_known:
+        # 旧冻结回执没有原片计数：不改连续空片数，按已有资格接下一片。
+        return facts.goal
     progressed = slice_has_progress(signal, report, facts.goal, facts.task_status)
     gate = dependencies.user_turn_gate
     with gate(facts.goal.thread_id) if gate is not None else nullcontext(False) as user_turn_present:

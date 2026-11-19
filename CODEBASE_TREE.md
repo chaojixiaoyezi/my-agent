@@ -4062,6 +4062,7 @@ agent_py_agent/
 |   |-- test_goal_fuse_user_turn_first.py # 车道“用户回合在场”登记（排队到退出车道）与空片不计入规则（C5/O4）
 |   |-- test_run_claim_probe_paths.py   # 登记/车道闸/撤销在失败与取消路径下的行为（领取失败、执行抛错、收尾抛错、心跳启动失败、双等待者取消、跨会话与跨 owner 隔离）
 |   |-- test_goal_idle_delivery.py     # Goal 空转片不外发外部通道、熔断提示主动推送一次并去重、纯 TUI 行为不变（C11 修复）
+|   |-- test_goal_withheld_continuation_notice.py # 结束原因扣下 Goal 续跑时只排一条宿主提示、不起 wake；让步/停止/截断接管/子代理/目标或任务不匹配/车道用户回合不提示；Gateway 下一条回复只带出一次，/stop→/new 后新线程问答不带；全失败片计入熔断
 |   |-- test_tui_resource_lifetime.py  # 缓存净化、异常退出、事件和冻结阅读预算回归
 |   |-- test_gateway_owner_retention.py # 空闲回收、配置、在途及新消息竞态回归
 |   |-- test_tui_events.py              # TUI event 信封、sequencer、cursor、重复/冲突/乱序与有界重放

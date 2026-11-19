@@ -31,6 +31,13 @@ from agent_py_agent.agent.conversation.compact_guard import (
     CompactCapacityFacts,
     ConversationCompactError,
 )
+from agent_py_agent.agent.conversation.compact_landmarks import (
+    LANDMARK_HEADING,
+    LandmarkOptions,
+    landmark_source,
+    semantic_summary_text,
+    summary_with_conversation_landmarks,
+)
 from agent_py_agent.agent.conversation.compact_progress import COMPACT_CAPACITY_PROGRESS_FIELDS
 from agent_py_agent.agent.conversation.compact_projection import (
     ConversationCompactProjection,
@@ -45,6 +52,7 @@ from agent_py_agent.agent.conversation.compact_summary_view import (
     resolve_compact_summary_view,
 )
 from agent_py_agent.agent.conversation.compact_tool_summary import compact_tool_summary_text
+from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import compact_semantic_summary, estimate_tokens
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
@@ -768,3 +776,152 @@ def test_active_prefix_inherits_view_without_ir_carrier(encrypted):
     assert _with_previous_applied_summary((expected, *history), plan, request) == (expected, *history)
     fork.provider_history_messages = ({"role": "user", "content": "既有历史载体"},)
     assert _with_previous_applied_summary(history, plan, request) == history
+
+
+# --- P1-2（2026-11-18）：可计量的回合中归档带上上一代原话备份；被容量门拒绝时退回原交接 ---
+
+
+# 函数用途: 把线程上一代摘要换成带原话备份段、且比 live 交接大的版本。
+def _seed_landmarked_previous(case):
+    rows = [MessageLogEntry(message_id="msg-req", thread_id="t", role="user", content="原始要求：金额保留两位小数。")]
+    previous = summary_with_conversation_landmarks("上一代摘要。" * 300, "", rows, options=LandmarkOptions(2_000)).text
+    case.thread = case.store.threads.update_summary(case.thread.thread_id, previous)
+    return previous
+
+
+# 函数用途: 让摘要替身返回一份被接受的 live 交接（经真实接受函数加宿主固定开头）。
+def _accepted_handoff(monkeypatch):
+    text = _SUMMARY + "；再核对汇总表的合计行与城市排序是否一致，然后写最终报告。" * 3
+    handoff = compact_semantic_summary._accept_live_summary(
+        compact_semantic_summary.LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None), text,
+    )
+    monkeypatch.setattr(compact_semantic_summary, "summarize_live_tool_history", lambda _request: handoff)
+    return handoff
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_measured_live_handoff_carries_landmarks_and_falls_back_to_plain_when_rejected(
+    carried_case, monkeypatch, rejected,
+):
+    case = carried_case
+    previous = _seed_landmarked_previous(case)
+    handoff = _accepted_handoff(monkeypatch)
+    projected: list[str] = []
+
+    # 函数用途: 记录每次投影的摘要；rejected 时带备份的版本超出输入上限。
+    def project(summary, retained, generation, **_extra):
+        projected.append(summary)
+        return ConversationCompactProjection(50_000 if rejected and LANDMARK_HEADING in summary else 100, object())
+
+    _compact(case, request_projector=project, progress_callback=case.progress.append)
+    carried = projected[0]
+    assert carried.startswith(handoff) and '- user [msg-req]: "原始要求：金额保留两位小数。"' in carried
+    assert estimate_tokens(carried) <= estimate_tokens(previous)
+    # 带备份的候选被拒只多一次宿主投影，改投原交接并提交；没被拒就提交带备份的版本。
+    assert projected == ([carried, handoff] if rejected else [carried])
+    committed = case.store.threads.require(case.thread.thread_id)
+    assert committed.compact_generation == 1 and committed.summary == (handoff if rejected else carried)
+    # P3-1：成功事件给出提交摘要约占多少与保留条数（只观测）。
+    completed = case.progress[-1]
+    assert completed["phase"] == "completed" and completed["summary_tokens"] == estimate_tokens(committed.summary)
+    assert completed["retained_items"] == len(model_visible_active_turn_tool_calls(case.agent, case.attrs, case.records))
+
+
+def test_live_carry_does_not_hide_a_rejection_that_the_plain_handoff_also_hits(carried_case, monkeypatch):
+    case = carried_case
+    _seed_landmarked_previous(case)
+    handoff = _accepted_handoff(monkeypatch)
+    projected: list[str] = []
+
+    # 函数用途: 两种版本都超出输入上限。
+    def project(summary, retained, generation, **_extra):
+        projected.append(summary)
+        return ConversationCompactProjection(50_000, object())
+
+    with pytest.raises(ConversationCompactError) as raised:
+        _compact(case, request_projector=project)
+    assert raised.value.code == "COMPACT_CANDIDATE_TOO_LARGE" and projected[1:] == [handoff]
+    assert case.store.threads.require(case.thread.thread_id).compact_generation == 0
+
+
+def test_unmeasured_live_handoff_is_committed_without_carry(carried_case, monkeypatch):
+    case = carried_case
+    _seed_landmarked_previous(case)
+    handoff = _accepted_handoff(monkeypatch)
+    # 没有完整请求投影（不可计量）时不带上一代备份，提交的就是原交接。
+    result = _compact(case)
+    assert result.compacted and case.store.threads.require(case.thread.thread_id).summary == handoff
+
+
+# --- F03（2026-11-19）：模型在交接里复述地标标题只是普通引文；正式地标段只由宿主从上一代安全来源生成 ---
+
+_FOUR_IDS = tuple(f"msg-req-{index}" for index in range(4))
+_ECHO_HEAD = ("[compact-live-handoff.v1]\ncurrent_progress: 已核对 evidence-0 到 evidence-3。\n"
+              "user_constraints: 金额保留两位小数，按城市排序。\ncompleted: 已读取四份证据并核对 12 张表。")
+_ECHO_TAIL = "failures: shot-3 被拒\nunresolved: 汇总表还没生成\nnext_step: 读 evidence-4.txt"
+
+
+# 函数用途: 把线程上一代摘要换成带四条原话备份、filler 控制语义部分大小的版本，返回上一代全文。
+def _seed_four_landmarks(case, filler: int = 400) -> str:
+    rows = [MessageLogEntry(message_id=message_id, thread_id="t", role="user",
+                            content=f"原始要求 {index}：第 {index} 张表金额保留两位小数。")
+            for index, message_id in enumerate(_FOUR_IDS)]
+    previous = summary_with_conversation_landmarks("上一代摘要。" * filler, "", rows, options=LandmarkOptions(2_000)).text
+    case.thread = case.store.threads.update_summary(case.thread.thread_id, previous)
+    return previous
+
+
+# 函数用途: 让模型文本经真实接受函数成为 live 交接，并让摘要替身返回它。
+def _model_handoff(monkeypatch, text: str) -> str:
+    handoff = compact_semantic_summary._accept_live_summary(
+        compact_semantic_summary.LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None), text,
+    )
+    monkeypatch.setattr(compact_semantic_summary, "summarize_live_tool_history", lambda _request: handoff)
+    return handoff
+
+
+# 函数用途: 数行首的地标标题（宿主解析只认行首）。
+def _line_start_headings(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.startswith(LANDMARK_HEADING))
+
+
+@pytest.mark.parametrize("shape", ["mid_quote", "tail_altered_echo", "inline_text"])
+def test_model_echoed_heading_stays_model_text_and_the_host_section_is_unique(carried_case, monkeypatch, shape):
+    case = carried_case
+    previous = _seed_four_landmarks(case)
+    section = previous[previous.index(LANDMARK_HEADING):]
+    original_first = next(line for line in section.splitlines() if line.startswith("- user [msg-req-0]"))
+    if shape == "mid_quote":
+        # 段中复述标题与一条真实旧原话，随后照常给出 failures/unresolved/next_step。
+        text = f"{_ECHO_HEAD}\n{LANDMARK_HEADING}\n{original_first}\n{_ECHO_TAIL}"
+    elif shape == "tail_altered_echo":
+        # 末尾复述完整段，但把一条原话改了：下一代不能把模型改写当成宿主原话继承。
+        text = f"{_ECHO_HEAD}\n{_ECHO_TAIL}\n\n" + section.replace("两位小数", "三位小数", 1)
+    else:
+        text = f"{_ECHO_HEAD}（上一代 {LANDMARK_HEADING} 已读）\n{_ECHO_TAIL}"
+    _model_handoff(monkeypatch, text)
+
+    result = _compact(case, request_projector=lambda *_args, **_extra: ConversationCompactProjection(100, object()))
+    committed = case.store.threads.require(case.thread.thread_id)
+    assert result.compacted and committed.compact_generation == 1
+    semantic = semantic_summary_text(committed.summary)
+    for line in _ECHO_TAIL.splitlines():
+        assert line in semantic
+    # 正式段恰好一个；余量充足时四条源 ID 都能被下一代继承，继承到的是宿主原文而不是模型改写。
+    assert _line_start_headings(committed.summary) == 1
+    inherited = landmark_source(committed.summary, ()).entries
+    assert sorted(entry.message_id for entry in inherited) == sorted(_FOUR_IDS)
+    assert next(entry.line for entry in inherited if entry.message_id == "msg-req-0") == original_first
+
+
+def test_model_echoed_heading_without_room_commits_the_quoted_handoff_alone(carried_case, monkeypatch):
+    case = carried_case
+    _seed_four_landmarks(case, filler=1)
+    # 交接比上一代大：没有余量，按原合同不带备份段，提交的就是交接本身；模型的标题行仍只是普通引文。
+    text = f"{_ECHO_HEAD}" + "核对细节。" * 300 + f"\n{LANDMARK_HEADING}\n- user [msg-req-0]: \"x\"\n{_ECHO_TAIL}"
+    handoff = _model_handoff(monkeypatch, text)
+    _compact(case, request_projector=lambda *_args, **_extra: ConversationCompactProjection(100, object()))
+    committed = case.store.threads.require(case.thread.thread_id)
+    assert committed.compact_generation == 1 and committed.summary == handoff
+    assert _line_start_headings(committed.summary) == 0 and landmark_source(committed.summary, ()).entries == ()
+    assert "next_step: 读 evidence-4.txt" in semantic_summary_text(committed.summary)

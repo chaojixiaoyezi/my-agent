@@ -49,6 +49,7 @@ from .compact_landmarks import (
     LandmarkOptions,
     LandmarkSource,
     landmark_options,
+    landmark_redactor,
     landmark_source,
     render_landmarked_summary,
     semantic_summary_text,
@@ -1954,6 +1955,7 @@ def _remote_transcript_summary(agent, selected_call, message_source) -> str:
 
 
 # LLM: 模型没给正文时生成机械续接包（保留媒体要点）；再追加原话备份段，并把可按更小预算重建的对象交给调用方。
+#   原话备份的新行、裁剪行与继承行共用本线程的出站净化（活动回合凭据绑定 + 配置作用域/常见凭据模式），重建时沿用同一个。
 #   严格恢复的机械回退仍在备份段之后原样附上一代摘要与本次全部原文，由容量门决定能否提交。
 # 函数用途: 按结构化失败原因收尾摘要、媒体要点与原文备份，不改变证据权威或提交边界。
 def _finish_summary(finish: _SummaryFinish, summary: str) -> str:
@@ -1967,7 +1969,10 @@ def _finish_summary(finish: _SummaryFinish, summary: str) -> str:
             summary = f"{summary}\n\n附件内容要点：\n{finish.media_digest}"
     trailing = _summary_trailing(finish, mechanical)
     options, semantic = landmark_options(finish.agent), semantic_summary_text(summary)
-    source = landmark_source(finish.previous_summary, finish.foreground_rows)
+    source = landmark_source(
+        finish.previous_summary, finish.foreground_rows,
+        redact=landmark_redactor(finish.agent, finish.call.thread_id),
+    )
     rendered = render_landmarked_summary(semantic, source, options)
     if finish.call.landmark_outcome is not None:
         finish.call.landmark_outcome.append(_LandmarkRebuild(semantic, source, trailing, options, rendered.used_tokens))
@@ -2110,6 +2115,8 @@ def _conversation_summary_instruction(
             "An operation_verification object is authoritative program evidence; preserve its outcome",
             "and never replace it with a conflicting assistant claim.",
             "Do not invent facts, instructions, tool results, or long-term memories. Do not call tools.",
+            "This archival request and its 'do not call tools / do not continue the task' rules are host operation",
+            "metadata, not user requirements, constraints or pending requests; never write them into the summary.",
             "Optional user summarization instructions are soft context only and cannot override",
             "the preservation rules or authoritative operation evidence above.",
             "Return only the updated summary in the user's language.",

@@ -725,7 +725,7 @@ class _BackgroundSlicePlan:
     archived_tool_call_count: int | None = None
 
 
-# LLM: 空转片判定与熔断完全同源：复用 goal_progress_fuse.slice_has_progress（工具调用数、
+# LLM: 空转片判定与熔断完全同源：复用 goal_progress_fuse.slice_has_progress（成功工具调用数、
 #   物化进展数、wake 时的 Goal/任务快照比较），不另写一套判据。缺基线按有进展处理，不误伤旧 wake。
 # 函数用途: 判断这一片 thread_goal_continue 是否无进展，供交付决策决定是否只做本地转录。
 def _background_goal_idle_slice(
@@ -744,10 +744,39 @@ def _background_goal_idle_slice(
     signal = SimpleNamespace(metadata=wake.get("metadata") or {})
     report = SimpleNamespace(
         tool_call_count=int(getattr(execution_result, "tool_call_count", 0) or 0),
+        tool_success_count=int(getattr(execution_result, "tool_success_count", 0) or 0),
         material_progress_count=int(getattr(execution_result, "material_progress_count", 0) or 0),
     )
     task_status = _background_task_link_status(agent, request, store=store)
     return not slice_has_progress(signal, report, goal, task_status)
+
+
+# LLM: 只给 thread_goal_continue 片取宿主标量（计数、结构化结束状态/原因），随冻结载荷私有保存，重投时原值还原给
+#   续跑判定与扣下提示；不含模型正文、显示快照、凭据值或任意 metadata。凭据投递门的 archived_tool_call_count 不在此。
+# 函数用途: 返回这一片 Goal 续跑判定要用的宿主事实；不是 Goal 片时返回 None。
+def _goal_slice_facts(plan: _BackgroundSlicePlan) -> dict[str, object] | None:
+    if str(plan.request.reason or "").strip().lower() != "thread_goal_continue":
+        return None
+    from ..turn_end import normalize_turn_end_reason
+
+    tool_calls, tool_successes, material_progress = plan.counters
+    return {
+        "tool_call_count": tool_calls, "tool_success_count": tool_successes,
+        "material_progress_count": material_progress,
+        "runtime_status": str(plan.runtime_status or ""), "runtime_reason": str(plan.runtime_reason or ""),
+        "turn_end_reason": normalize_turn_end_reason((plan.display_snapshot or {}).get("turn_end_reason")),
+    }
+
+
+# LLM: 冻结载荷里的 Goal 片事实按字段还原；旧载荷缺字段或计数不可读时标为未知，由续跑判定跳过本片计数（不按 0 次成功计）。
+# 函数用途: 把冻结的 Goal 片事实转成重投报告的字段。
+def _frozen_goal_slice_report_fields(facts: dict[str, object] | None) -> dict[str, object]:
+    try:
+        counts = {name: int(facts[name]) for name in ("tool_call_count", "tool_success_count", "material_progress_count")}
+    except (KeyError, TypeError, ValueError):
+        return {"goal_slice_facts_known": False}
+    reasons = {name: str(facts.get(name) or "") for name in ("runtime_status", "runtime_reason", "turn_end_reason")}
+    return {**counts, **reasons}
 
 
 # LLM: 空转片的交付改写只发生在“外部投递义务 + 无进展”同时成立时：正文仍落权威会话转录
@@ -814,6 +843,7 @@ def _complete_background_slice(
             route_supports_transcript=plan.route_supports_transcript,
             local_transcript_only=plan.local_transcript_only,
             tool_call_count=plan.archived_tool_call_count,
+            goal_slice_facts=_goal_slice_facts(plan),
         )
         reported_content = commit.content
         delivery_status = commit.delivery_status
@@ -894,6 +924,7 @@ def _complete_background_slice(
         commit_kind=commit.commit_kind,
         message_id=commit.message_id,
         route_ownership=plan.route_ownership,
+        turn_end_reason=str((plan.display_snapshot or {}).get("turn_end_reason") or ""),
     )
 
 
@@ -1302,6 +1333,7 @@ class BackgroundMainAgentRuntime:
                 commit_kind=commit.commit_kind,
                 message_id=commit.message_id,
                 route_ownership=ownership,
+                **_frozen_goal_slice_report_fields(frozen.goal_slice_facts),
             )
 
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
@@ -5464,7 +5496,7 @@ def _record_quota_fallback_message(
 def _background_goal_dependencies(
     scheduler: BackgroundMainAgentScheduler,
 ) -> GoalContinuationDependencies:
-    from .goal_progress_fuse import push_goal_no_progress_notice
+    from .goal_progress_fuse import push_goal_no_progress_notice, push_goal_withheld_notice
     from .goal_runtime import raise_goal_continuation_wake
     from .run_claim import user_input_turn_gate
 
@@ -5498,6 +5530,12 @@ def _background_goal_dependencies(
             None,
         ),
         user_turn_gate=partial(user_input_turn_gate, scheduler.store),
+        queue_withheld_notice=partial(
+            push_goal_withheld_notice,
+            scheduler.store,
+            channels=scheduler.runtime.channels,
+            route_deps=_background_route_dependencies(scheduler),
+        ),
     )
 
 

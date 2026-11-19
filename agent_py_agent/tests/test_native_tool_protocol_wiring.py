@@ -51,6 +51,17 @@ def test_native_protocol_drops_tool_call_text_instruction():
     assert "原生工具调用" in text
 
 
+def test_native_protocol_states_the_turn_end_fact_without_forcing_dummy_calls():
+    # N3（2026-11-18）：原生请求不渲染文本协议那段回合结束说明，这里是它唯一的原生对应句。
+    text = _tool_call_protocol("native")
+    assert "一条不含工具调用的回复会立即结束当前回合" in text
+    assert "仍有可执行的下一步时，在同一轮直接发起对应工具调用" in text
+    # 条件式：普通问答、待授权、确需用户补充信息时直接回复，不为凑调用而调用工具。
+    assert "普通问答、待授权或确需用户补充信息时直接回复，不要为凑调用而调用工具" in text
+    assert "单项失败把该项标为 blocked 并继续其余可执行项" in text
+    assert text.index("拿到工具结果后再输出最终答案。") < text.index("一条不含工具调用的回复")
+
+
 def test_unknown_catalog_protocol_is_rejected():
     with pytest.raises(ValueError, match="invalid tool protocol"):
         _tool_call_protocol("bogus")

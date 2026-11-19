@@ -128,9 +128,11 @@ def _dependencies(recorded: list, raised: list, *, user_on_lane: bool) -> GoalCo
 
 
 def _report(tool_calls: int) -> BackgroundMainAgentReport:
+    # 有实际工作的片：调用都成功（熔断只认成功的工具调用）。
     return BackgroundMainAgentReport(thread_id="thread-1", task_id="task-1", reason="thread_goal_continue",
                                      response="", route_channel="", route_target="", created_at=1.0,
-                                     goal_continuation_allowed=True, tool_call_count=tool_calls)
+                                     goal_continuation_allowed=True, tool_call_count=tool_calls,
+                                     tool_success_count=tool_calls)
 
 
 def test_idle_slice_is_not_counted_while_a_user_turn_is_on_the_lane():
