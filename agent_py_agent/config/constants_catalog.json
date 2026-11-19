@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1557,
+  "count": 1559,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2618,6 +2618,22 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "人设文件最大字节数，防止损坏文件拖垮加载。"
+    },
+    {
+      "name": "_SAME_KEY_ENTRIES_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/capability/persona_repository.py",
+      "value": 8,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "USER.md 新增同键不同值条目时，回执最多列出的同键旧条目数。"
+    },
+    {
+      "name": "_SAME_KEY_PREVIEW_MAX_CHARS",
+      "file": "agent_py_agent/agent/capability/persona_repository.py",
+      "value": 120,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "同键旧条目在回执里的单行预览最多字符数。"
     },
     {
       "name": "_PERSONA_UPDATE_MAX_WRITE_COUNT",

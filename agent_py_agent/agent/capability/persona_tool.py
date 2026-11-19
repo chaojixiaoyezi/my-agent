@@ -586,8 +586,24 @@ def _execute_persona_mutation(
         )
     except (OSError, PersonaRepositoryError, ValueError) as exc:
         return _err(f"写入失败: {exc}", "TOOL_EXECUTION_FAILED")
-    payload["hint"] = "人格文件已按结构化 entry_id 更新，下一轮起长期生效。"
+    payload["hint"] = _persona_write_hint(payload)
     return ToolHandlerOutcome("update_persona", True, json.dumps(payload, ensure_ascii=False))
+
+
+# LLM: 同键不同值的新增已保存且不自动覆盖旧值；只建议确认后删除旧条目、以后改同一事实用 replace，
+#   不建议把旧条目 replace 成刚新增的同一内容（两行同文会得到同一个内容 ID）。
+# 函数用途: 生成画像写入回执提示；没有同键旧条目时保持原提示。
+def _persona_write_hint(payload: dict[str, object]) -> str:
+    operations = payload.get("operations")
+    rows = operations if isinstance(operations, list) else ()
+    if not payload.get("same_key_entries") and not any(isinstance(row, dict) and row.get("same_key_entries") for row in rows):
+        return "人格文件已按结构化 entry_id 更新，下一轮起长期生效。"
+    return (
+        "新条目已保存，下一轮起长期生效；USER.md 里同一个键下还有不同取值的旧条目（见 same_key_entries，"
+        "批量时在对应 operations 项里），没有自动覆盖。若新值是要取代旧值：先向用户确认，再用 "
+        '{"tool":"update_persona","action":"remove","target":"user","entry_id":"<旧 entry_id>"} 删除旧条目；'
+        "以后修改同一事实请对原条目用 replace（entry_id=原条目，content=新内容），不要再 add。同键多值都成立时无需处理。"
+    )
 
 
 def _user_persona_shape_error(*, action: str, content: str) -> ToolHandlerOutcome | None:

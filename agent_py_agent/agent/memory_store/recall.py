@@ -16,6 +16,7 @@ from .lessons import (
     LessonRepository,
     _parse_canonical_lesson_ref,
     hot_records_within_budget,
+    lesson_heat_rows,
 )
 
 
@@ -212,8 +213,8 @@ def hot_memory_records(
     *,
     scope: MemoryRecallScope,
 ) -> list[MemoryRecord]:
-    # 注入预算硬顶：全量注入但只带最近活跃的规则（活跃度排序，超出截断是正常行为）。
-    selected_rules = hot_records_within_budget(hot.list())
+    # 注入预算硬顶：全量注入但只带最近活跃的规则（有 lesson 热度快照时按最近命中排序，超出截断是正常行为）。
+    selected_rules = hot_records_within_budget(hot.list(), heat_rows=lesson_heat_rows(lessons))
     if not selected_rules:
         return []
     candidate_rules = []

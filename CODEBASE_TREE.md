@@ -8,7 +8,8 @@ agent_py_agent/tests/
 |-- test_mem_wave1_s1_extraction_status.py               # S1 后台记忆提取状态分类、/memory 线协议往返与旧 Gateway 兼容、候选列表状态行、辅助模型热切换与省略提示/本地日期回归单测
 |-- test_mem_wave1_s2_formal_window_supersede.py         # S2 正式窗口按相关性有界读取、冲突目标置顶、conservative_v2 同主题自动替换（含版本 CAS 交错与崩溃恢复）回归单测
 |-- test_mem_wave1_s3_daily_index_recall.py              # S3 Daily 事件检索投影（写入/去重/失败修复/删改隐藏/有界维护）与上一轮用户消息加权融合召回回归单测
-`-- test_mem_wave1_s4_bounded_reads_retention.py         # S4 remember 有界取证/点查/分页、三处压缩提交登记 pre_compact、未整理旧会话保留保护与执行期游标复核、keywords_cn 清理回归单测
+|-- test_mem_wave1_s4_bounded_reads_retention.py         # S4 remember 有界取证/点查/分页、三处压缩提交登记 pre_compact、未整理旧会话保留保护与执行期游标复核、keywords_cn 清理回归单测
+`-- test_mem_wave1_s5_hot_heat_user_same_key.py          # S5 HOT 按 lesson 热度排序/降级与新规则保留名额（热度缺失退回原序）、USER.md 同键不同值回执提示与做梦计划同键清单回归单测
 ```
 
 ## 2026-11-18 Gateway 压测修复（MAX1 gw-stress-fix：GW-18/GW-03/GW-01/GW-02/GW-11/C1/C2/C9/X4/X8）

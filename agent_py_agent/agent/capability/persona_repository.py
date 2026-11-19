@@ -41,6 +41,10 @@ _TARGET_ATTR = {
 _MAX_PERSONA_FILE_BYTES = 2 * 1024 * 1024
 # 人设提示词默认最大字符数，超长截断。
 _DEFAULT_PROMPT_MAX_CHARS = 20_000
+# USER.md 新增同键不同值条目时，回执最多列出的同键旧条目数。
+_SAME_KEY_ENTRIES_MAX_ENTRIES = 8
+# 同键旧条目在回执里的单行预览最多字符数。
+_SAME_KEY_PREVIEW_MAX_CHARS = 120
 _LEGACY_TEMPLATE_PLACEHOLDER_VALUES = {
     "(简短结论 / 详细解释 / 带步骤)",
     "(格式、长度、要不要代码/表格/要点)",
@@ -1118,11 +1122,13 @@ def _note_persona_preimage(error, repository, recovery):
         error.add_note(f'Persona recovery preimage: {recovery.relative_to(repository.owner_home)}')
 
 
+# LLM: 新增与现存条目同键不同值时附 same_key_entries（按已提交正文计算）；没有时回执与旧版逐键相同。
+# 函数用途: 生成单项画像变更回执。
 def _persona_mutation_result(
     request: PersonaMutationRequest,
     prepared: _PreparedPersonaMutation,
 ) -> dict[str, object]:
-    return {
+    result: dict[str, object] = {
         "ok": True,
         "changed": True,
         "action": request.action,
@@ -1134,18 +1140,29 @@ def _persona_mutation_result(
         "version": prepared.version,
         "backup_ref": prepared.record["backup_ref"],
     }
+    same_key = _same_key_entries(prepared.next_text, request.target, request.content) if request.action == "add" else []
+    if same_key:
+        result["same_key_entries"] = same_key
+    return result
 
 
+# LLM: 批量里每个真正写入的 add 各自按整批提交后的正文附 same_key_entries；其余操作项不变。
+# 函数用途: 生成批量画像变更回执。
 def _persona_batch_mutation_result(
     request: PersonaBatchMutationRequest,
     prepared: _PreparedPersonaMutation,
 ) -> dict[str, object]:
+    operations: list[dict[str, object]] = []
+    for operation, row in zip(request.operations, prepared.operation_results, strict=True):
+        same_key = (_same_key_entries(prepared.next_text, request.target, operation.content)
+                    if operation.action == "add" and row.get("changed") else [])
+        operations.append({**row, "same_key_entries": same_key} if same_key else row)
     return {
         "ok": True,
         "changed": True,
         "action": "batch",
         "target": request.target,
-        "operations": list(prepared.operation_results),
+        "operations": operations,
         "sha256": prepared.next_sha,
         "version": prepared.version,
         "backup_ref": prepared.record["backup_ref"],
@@ -1295,6 +1312,29 @@ def _persona_key_value(content: str) -> tuple[str, str] | None:
     if not key:
         return None
     return key, content[position + 1 :].strip()
+
+
+# LLM: 只看 USER.md 的 add：同键（casefold）且值不同的现存非空条目照实列出，不自动覆盖（同键多值可能都成立）。
+#   预览与 list 同一安全扫描，不安全原文只给占位；最多列 _SAME_KEY_ENTRIES_MAX_ENTRIES 条。
+# 函数用途: 返回正文里与新增条目同键但值不同的其它条目（entry_id + 单行预览）。
+def _same_key_entries(text: str, target: str, content: str) -> list[dict[str, str]]:
+    incoming = _persona_key_value(str(content or "").strip()) if target == "user" else None
+    if incoming is None or not incoming[1]:
+        return []
+    from ..memory_store.security import scan_memory_content
+
+    key = incoming[0].casefold()
+    rows: list[dict[str, str]] = []
+    for entry in _persona_entries_from_text(text, target):
+        current = _persona_key_value(entry["content"])
+        if current is None or current[0].casefold() != key or current[1] == incoming[1]:
+            continue
+        safe = scan_memory_content(entry["content"]).safe
+        preview = " ".join(entry["content"].split())[:_SAME_KEY_PREVIEW_MAX_CHARS] if safe else "[BLOCKED unsafe persona entry]"
+        rows.append({"entry_id": entry["entry_id"], "preview": preview})
+        if len(rows) >= _SAME_KEY_ENTRIES_MAX_ENTRIES:
+            break
+    return rows
 
 
 def _sanitize_persona_text(content: str) -> tuple[str, int]:

@@ -168,6 +168,8 @@ class UserProfileConsolidationPlan:
     entry_count_after: int
     tokens_before: int
     tokens_after: int
+    # 保留条目里同一非别名键出现不同取值的分组：(键, 条目 ID...)；只供计划报告审阅，不参与取舍。
+    same_key_conflicts: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def _require_user_dream_target(target: object) -> str:
@@ -216,6 +218,24 @@ def _preference_key(clean_text: str) -> str | None:
                 return f"alias:{_PREFERENCE_KEY_ALIASES[raw_key]}"
             return f"kv:{raw_key}"
     return None
+
+
+# LLM: 别名键（语言、时区等）已按新者为准合并；非别名键同键多值可能都成立（如多个常用工具），做梦不替用户取舍，
+#   只把保留下来的同键不同值条目分组列进计划报告。
+# 函数用途: 返回保留条目中同一非别名键下取值不同的条目分组。
+def _same_key_conflicts(entries: Sequence[ParsedUserProfileEntry]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for entry in entries:
+        pref_key = _preference_key(entry.clean_text)
+        match = _KV_RE.match(entry.clean_text)
+        if pref_key is None or not pref_key.startswith("kv:") or match is None:
+            continue
+        groups.setdefault(pref_key[3:], []).append((entry.entry_id, _normalize_whitespace(match.group(2))))
+    return tuple(
+        (key, tuple(entry_id for entry_id, _value in rows))
+        for key, rows in groups.items()
+        if len({value for _entry_id, value in rows}) > 1
+    )
 
 
 def _classify_user_entry(clean_text: str, *, verbose_char_limit: int = 280) -> int:
@@ -459,6 +479,7 @@ def plan_user_profile_consolidation(
         entry_count_after=len(kept_chronological),
         tokens_before=tokens_before,
         tokens_after=tokens_after,
+        same_key_conflicts=_same_key_conflicts(kept_chronological),
     )
 
 

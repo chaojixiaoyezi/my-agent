@@ -86,6 +86,7 @@ from .lessons import (
     LessonHeatUnavailableError,
     LessonRepository,
     LessonRoutingPendingError,
+    lesson_heat_rows,
 )
 from .operations import memory_content_hash, normalized_memory_content
 from .promotion_supersede import AUTO_SUPERSEDED_REASON, bind_same_subject_supersession
@@ -541,10 +542,12 @@ class _PromotionCommitMixin:
                 lesson = self.lessons.get(candidate.target_entry_id)
                 if getattr(lesson, "status", "active") != "active":
                     raise ValueError("HOT_TARGET_ARCHIVED_OR_MISSING")
+                # 热度快照在进 HOT 写锁前无锁读取一次，HOT 锁内不再取 lesson/routing 锁。
                 hot, changed = self.hot.promote_with_receipt(
                     candidate,
                     lesson=lesson,
                     min_occurrences=self.hot_min_occurrences,
+                    heat_rows=lesson_heat_rows(self.lessons),
                 )
             return _TargetCommit("memory-hot.md#" + hot.hot_id, changed)
         raise ValueError(f"candidate promotion_target {target!r} is not promotable")

@@ -377,6 +377,19 @@ class LessonRepository:
             refs.append(ref)
         return "ok", tuple(refs)
 
+    # LLM: HOT 排序/降级只读一份 lesson_heat.json 快照（同 routed_refs：nofollow、不取 lesson/routing 锁、不记命中），
+    #   可在 HOT 写锁内调用；缺失、符号链接或损坏时返回 None，调用方退回原 (promoted_at, occurrence_count) 排序。
+    # 函数用途: 返回 lesson_id -> 热度行（含 last_hit_at、hits）的只读快照。
+    def heat_rows_snapshot(self) -> dict[str, dict[str, object]] | None:
+        try:
+            kind, state = self._read_heat_state()
+        except OSError:
+            return None
+        if kind != "ok" or not isinstance(state, dict):
+            return None
+        rows = state.get("rows")
+        return rows if isinstance(rows, dict) else None
+
     # LLM: 召回热路径零磁盘 I/O 记录命中，待维护窗口持锁合并进 lesson_heat.json。
     # 函数用途: 记录本轮被读取引用的 lesson_id 命中信号（单次调用内自动去重）。
     def note_hits(self, lesson_ids: Iterable[str], *, at: datetime | None = None) -> None:
@@ -1268,12 +1281,16 @@ class HotRuleRepository:
     # 函数用途: 返回短规则以及本轮是否改写了正式HOT。
     # LLM: C不把原排序/预算包Root；HOT首次正文写与demote第二写分别核源，第二失败保第一次真实事实。
     # 函数用途: 晋升原HOT并执行原超预算降级，不假报整段原子成功。
+    # LLM: heat_rows 是调用方在进 HOT 锁前取好的 lesson 热度快照（None=退回原排序）；本次新晋升的规则在这次写入保留名额，
+    #   超预算时先在其余规则里由冷到热降级，避免零命中的新规则在首次写入时就被降级。
+    # 函数用途: 按热度快照为新规则保留名额后再降级其余冷规则。
     def promote_with_receipt(
         self,
         candidate: MemoryCandidate,
         *,
         lesson: LessonRecord,
         min_occurrences: int = 3,
+        heat_rows: Mapping[str, Mapping[str, object]] | None = None,
     ) -> tuple[HotRuleRecord, bool]:
         _validate_hot_candidate(candidate, lesson, min_occurrences=min_occurrences)
         lessons_sibling = self.path.parent / "lessons"
@@ -1321,7 +1338,8 @@ class HotRuleRepository:
                         "next=promote HOT against the active successor lesson"
                     )
             _write_lesson_text(self.path, _render_hot([*existing, record]), **({} if not self.coordinator_io else {"coordinator_io": True}))
-            demoted = _demote_hot_excess_unlocked(self.path, **({} if not self.coordinator_io else {"coordinator_io": True}))
+            demoted = _demote_hot_excess_unlocked(self.path, heat_rows=heat_rows, reserved_hot_id=record.hot_id,
+                                                  **({} if not self.coordinator_io else {"coordinator_io": True}))
         if demoted:
             logger.warning(
                 "HOT budget exceeded: demoted %d cold rule(s) back to lessons: %s",
@@ -1339,9 +1357,10 @@ class HotRuleRepository:
     # 函数用途: 返回被降级的冷 HOT 记录（超预算时按活跃度从低到高移除）。
     # LLM: C锁等待/读/预算/排序仍Root外，原降级条件不变，仅准确FD与末写入门。
     # 函数用途: 按原预算移出冷HOT记录，lesson本体保持。
-    def demote_cold_rules(self) -> list[HotRuleRecord]:
+    def demote_cold_rules(self, *, heat_rows: Mapping[str, Mapping[str, object]] | None = None) -> list[HotRuleRecord]:
         with locked_json_path(self.path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_lesson_write})):
-            return _demote_hot_excess_unlocked(self.path, **({} if not self.coordinator_io else {"coordinator_io": True}))
+            return _demote_hot_excess_unlocked(self.path, heat_rows=heat_rows,
+                                               **({} if not self.coordinator_io else {"coordinator_io": True}))
 
 
 # LLM: lesson 候选必须是 approved 且落点为 lesson，拒绝将长期事实换个文件名写入。
@@ -1627,20 +1646,38 @@ def _one_line(value: object, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
-# LLM: 活跃度排序只用结构化信号（promoted_at/occurrence_count），不解析 rule 正文。
-# 函数用途: 活跃度键——新提升 + 高出现次数 = 更活跃。
-def _hot_activity_key(record: HotRuleRecord) -> tuple[str, int]:
-    return (record.promoted_at or "", record.occurrence_count)
+# LLM: 活跃度排序只用结构化信号，不解析 rule 正文。有 lesson 热度快照时按 (last_hit_at, hits, promoted_at,
+#   occurrence_count)，快照里没有的 lesson 记零命中；快照缺失/不可读（None）时退回原 (promoted_at, occurrence_count)。
+# 函数用途: 活跃度键——最近命中 + 命中多 + 新提升 + 高出现次数 = 更活跃。
+def _hot_activity_key(
+    record: HotRuleRecord,
+    heat_rows: Mapping[str, Mapping[str, object]] | None = None,
+) -> tuple[str, int] | tuple[float, int, str, int]:
+    if heat_rows is None:
+        return (record.promoted_at or "", record.occurrence_count)
+    row = heat_rows.get(record.lesson_id)
+    row = row if isinstance(row, Mapping) else {}
+    return (float(row.get("last_hit_at") or 0.0), int(row.get("hits") or 0),
+            record.promoted_at or "", record.occurrence_count)
 
 
-# LLM: 截断是注入侧安全网；排序与写侧降级对称（保留活跃、淘汰冷旧）。
+# LLM: 测试替身或旧实现没有热度读取口时按快照缺失处理，不因此让召回或晋升失败。
+# 函数用途: 从 lesson 仓库取 HOT 排序用的热度快照，取不到返回 None。
+def lesson_heat_rows(lessons: object) -> Mapping[str, Mapping[str, object]] | None:
+    reader = getattr(lessons, "heat_rows_snapshot", None)
+    rows = reader() if callable(reader) else None
+    return rows if isinstance(rows, Mapping) else None
+
+
+# LLM: 截断是注入侧安全网；排序与写侧降级对称（保留活跃、淘汰冷旧），热度快照同上。
 # 函数用途: 按活跃度从高到低截断 HOT 到预算内（字符），返回保留的记录。
 def hot_records_within_budget(
     records: list[HotRuleRecord],
     *,
     max_chars: int = HOT_MAX_INJECT_CHARS,
+    heat_rows: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[HotRuleRecord]:
-    ordered = sorted(records, key=_hot_activity_key, reverse=True)
+    ordered = sorted(records, key=lambda record: _hot_activity_key(record, heat_rows), reverse=True)
     kept: list[HotRuleRecord] = []
     total = 0
     for record in ordered:
@@ -1656,12 +1693,23 @@ def hot_records_within_budget(
 # 函数用途: 写入后检查 HOT 总字符，超预算则按活跃度从低到高移除并重写文件；返回被降级记录。
 # LLM: 两原caller都透传C策略，原总量/排序/逐条让位/render保持门外，只有最终raw写进门。
 # 函数用途: 保原HOT超额降级和第二次末写，不漏治理副作用。
-def _demote_hot_excess_unlocked(path: Path, *, coordinator_io: bool = False) -> list[HotRuleRecord]:
+def _demote_hot_excess_unlocked(
+    path: Path,
+    *,
+    coordinator_io: bool = False,
+    heat_rows: Mapping[str, Mapping[str, object]] | None = None,
+    reserved_hot_id: str = "",
+) -> list[HotRuleRecord]:
     existing = _read_hot_records(path)
     total = sum(len(record.rule or "") for record in existing)
     if total <= HOT_MAX_INJECT_CHARS:
         return []
-    cold_first = sorted(existing, key=_hot_activity_key)
+    cold_first = sorted(existing, key=lambda record: _hot_activity_key(record, heat_rows))
+    if reserved_hot_id:
+        # 刚晋升的规则排到最后：其余规则都让位后仍超预算才轮到它。
+        cold_first = [record for record in cold_first if record.hot_id != reserved_hot_id] + [
+            record for record in cold_first if record.hot_id == reserved_hot_id
+        ]
     demoted: list[HotRuleRecord] = []
     for record in cold_first:
         if total <= HOT_MAX_INJECT_CHARS:
