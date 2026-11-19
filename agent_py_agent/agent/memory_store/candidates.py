@@ -605,6 +605,35 @@ class CandidateService:
             _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return rows[index]
 
+    # LLM: 只供 conservative_v2 自动同主题替换：完整快照CAS，仅已批准的 add 可改为带目标与版本的 replace 并清空冲突；
+    #   必须先于正式写入落盘，崩溃后原 recover_committed_update 才能按同一目标/版本幂等补回执。
+    #   同一证据对同一目标已绑定过别的版本时拒绝（返回 None），旧消息不能借此刷新目标版本。
+    # 函数用途: 持久化一次绑定版本的同主题替换，返回新快照；状态或动作已不符时返回 None。
+    def bind_same_subject_replace(self, expected: MemoryCandidate, *, reviewer: str, target_entry_id: str,
+                                  target_entry_version: int, note: str) -> MemoryCandidate | None:
+        actor = str(reviewer or "").strip()
+        if not actor:
+            raise ValueError("candidate reviewer is required")
+        with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
+            rows = self._load_unlocked()
+            index = _candidate_index(rows, expected.candidate_id)
+            current = rows[index]
+            if current != expected:
+                raise CandidateStateChangedError(current.status)
+            if current.status != "approved" or current.proposed_action != "add":
+                return None
+            now = utc_now_iso()
+            bound = replace(current, proposed_action="replace", target_entry_id=str(target_entry_id),
+                target_entry_version=normalize_target_entry_version(target_entry_version), conflicts_with=[],
+                reviewer=actor, review_note=str(note or ""), updated_at=now, commit_obligation=True,
+                status_history=[*current.status_history, _status_event(current.status, actor=actor, note=note, at=now)])
+            bindings = IndexedBindings(rows) if isinstance(rows, CandidateRows) else TargetEvidenceVersionBindings(rows)
+            if bindings.conflicts(bound):
+                return None
+            rows[index] = replace(bound, target_evidence_bindings=binding_history(bound))
+            _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
+            return rows[index]
+
     # LLM: 字符串保持旧审核入口；快照锁内CAS，仅放行已批准用户长期候选补默认目标，其它同状态仍幂等。
     # 函数用途: 推进候选状态并可补充替换目标、冲突和晋升落点。
     # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。

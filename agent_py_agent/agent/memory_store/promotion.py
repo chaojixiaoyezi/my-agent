@@ -88,6 +88,7 @@ from .lessons import (
     LessonRoutingPendingError,
 )
 from .operations import memory_content_hash, normalized_memory_content
+from .promotion_supersede import AUTO_SUPERSEDED_REASON, bind_same_subject_supersession
 from .security import redact_memory_quote
 
 # LLM: working_agreement 第 1 期起与事实/事件/项目同走唯一长期库（JSONL），不再写 AGENTS。
@@ -457,13 +458,17 @@ class MemoryPromotionResult:
     reason_code: str
     promotion_ref: str = ""
     formal_memory_changed: bool = False
+    # 自动同主题替换时被替换的旧条目身份（entry_id/version/content_hash，不含正文）；其它情况为 None。
+    superseded: dict[str, object] | None = None
 
-    # LLM: 结果只序列化决策码和正式ref；未新增提交时省略变更标志，保持旧消费者字段兼容。
+    # LLM: 结果只序列化决策码和正式ref；未新增提交时省略变更标志、没有替换时省略 superseded，保持旧消费者字段兼容。
     # 函数用途: 将晋升结果转换为 CLI/Curator 可消费字典。
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         if not self.formal_memory_changed:
             payload.pop("formal_memory_changed")
+        if self.superseded is None:
+            payload.pop("superseded")
         return payload
 
 
@@ -482,6 +487,8 @@ class _PromotionWriteContext:
 class _TargetCommit:
     reference: str
     changed: bool
+    # 自动同主题替换时记录被替换旧条目的身份；普通提交为 None。
+    superseded: dict[str, object] | None = None
 
 
 # LLM: 四种目标共用唯一仓库，接收已经取得的外层配额准入。
@@ -764,14 +771,34 @@ def _commit_with_exclusion_guard(
     confirmed: bool,
 ) -> tuple[_TargetCommit, MemoryCandidate]:
     try:
-        return _commit_admitted(service, candidate, (reviewer, confirmed))
+        return _commit_admitted_or_supersede(service, candidate, (reviewer, confirmed))
     except _PromotionConflict as exc:
-        blocked = service.candidates.transition(candidate, "blocked_conflict",
+        blocked = service.candidates.transition(exc.candidate or candidate, "blocked_conflict",
             reviewer=reviewer, review_note=exc.reason_code, conflicts_with=list(exc.conflicts_with))
         raise _PromotionBlocked(blocked.status, exc.reason_code) from None
     except MemoryLibraryWriteCapExceeded as exc:
         # 写入硬帽拒绝（设计 §3.5.1）：候选保持原状态、不丢弃；结构化码原样上抛。
         raise _PromotionBlocked(candidate.status, exc.code) from None
+
+
+# LLM: 先按原样提交；只有 conservative_v2 自动批次里的唯一同主题冲突才先落盘版本绑定、再按 replace 重试一次。
+#   重试仍走原 quota→policy→名单→候选快照→正式库链和 expected_version CAS，并发写入照旧报 TARGET_ENTRY_CONCURRENT_WRITE；
+#   重试冲突附带已绑定的新快照，调用方据此转 blocked_conflict，不会拿旧快照做 CAS。
+# 函数用途: 提交候选；符合条件的同主题冲突改为安全的版本绑定替换并在结果中标出被替换的旧条目。
+def _commit_admitted_or_supersede(service, candidate, review, *, complete: bool = True):
+    try:
+        return _commit_admitted(service, candidate, review, complete=complete)
+    except _PromotionConflict as exc:
+        bound = bind_same_subject_supersession(service, candidate, exc, reviewer=review[0])
+        if bound is None:
+            raise
+    candidate, superseded = bound
+    try:
+        outcome, committed = _commit_admitted(service, candidate, review, complete=complete)
+    except _PromotionConflict as exc:
+        exc.candidate = candidate
+        raise
+    return replace(outcome, superseded=superseded), committed
 
 
 # LLM: quota→受管policy→学习名单→候选→formal；自动策略锁内重核并贯穿写入，JSONL复用精确活锁。
@@ -1374,18 +1401,23 @@ class MemoryPromotionService(_PromotionCommitMixin):
 
         with promotion_batch(long_term=self.long_term, candidates=self.candidates, coordinator_io=self.coordinator_io):
             prepared, results = _prepare_promotion_batch(self, rows, reviewer, automatic)
+            prepared = list(prepared)
             outcomes, deferred, conflicts = {}, {}, []
             # 向量先批量发表，随后候选终态才可确认；异常退出仍只保留正式事实与原提交责任。
             with vector_index_batch(self.long_term):
-                for candidate in prepared:
+                for index, candidate in enumerate(prepared):
                     token = _AUTOMATIC_PROMOTION.set((id(self), candidate.candidate_id) if automatic else None)
                     try:
                         if _promotion_target(candidate) == "long_term":
                             _register_condense_debt(self.long_term, self.candidates, self.coordinator_io)
-                        outcome, _ = _commit_admitted(self, candidate, (reviewer, confirmed), complete=False)
+                        outcome, committed = _commit_admitted_or_supersede(
+                            self, candidate, (reviewer, confirmed), complete=False)
                         outcomes[candidate.candidate_id] = outcome
+                        if outcome.superseded is not None:
+                            # 已落盘的替换绑定是新快照；终态确认必须拿它做 CAS。
+                            prepared[index] = committed
                     except _PromotionConflict as exc:
-                        conflicts.append((candidate, "blocked_conflict", {"review_note": exc.reason_code,
+                        conflicts.append((exc.candidate or candidate, "blocked_conflict", {"review_note": exc.reason_code,
                             "conflicts_with": list(exc.conflicts_with)}))
                         results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False,
                             "blocked_conflict", exc.reason_code)
@@ -1540,9 +1572,10 @@ class MemoryPromotionService(_PromotionCommitMixin):
             candidate.candidate_id,
             True,
             candidate.status,
-            "PROMOTED",
+            AUTO_SUPERSEDED_REASON if outcome.superseded is not None else "PROMOTED",
             outcome.reference,
             formal_memory_changed=outcome.changed,
+            superseded=outcome.superseded,
         )
 
     # LLM: user_explicit 逐条回查消息；工具事实及所有声明产物均逐条回查生产调用的宿主成功终态。
@@ -2004,11 +2037,14 @@ def _scoped_persona_content(content: str, scope: MemoryScope) -> str:
 # LLM: 冲突异常只携带稳定 entry IDs 和原因码，不把旧正文回显到 candidate review。
 # 类用途: 触发 blocked_conflict 状态迁移。
 class _PromotionConflict(RuntimeError):
-    # LLM: conflicts_with 只接收精确正式 entry ID，reason_code 保持稳定供状态机消费。
+    # LLM: conflicts_with 只接收精确正式 entry ID，reason_code 保持稳定供状态机消费；
+    #   candidate 仅在冲突发生于已落盘的新快照（如替换绑定后重试）时给出，转 blocked_conflict 须用它做 CAS。
     # 函数用途: 构造一次不含正文的晋升冲突。
-    def __init__(self, reason_code: str, conflicts_with: tuple[str, ...]) -> None:
+    def __init__(self, reason_code: str, conflicts_with: tuple[str, ...],
+                 candidate: MemoryCandidate | None = None) -> None:
         self.reason_code = reason_code
         self.conflicts_with = conflicts_with
+        self.candidate = candidate
         super().__init__(reason_code)
 
 

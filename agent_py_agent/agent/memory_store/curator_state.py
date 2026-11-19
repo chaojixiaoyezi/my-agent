@@ -36,6 +36,7 @@ from .candidate_models import normalize_iso_time, utc_now_iso
 from .curator_models import (
     CURATOR_TRIGGER_REASONS,
     MemoryCuratorState,
+    merge_conflict_pins,
 )
 
 # LLM: 隔离失败退避冷却: 同 error_class 在此窗口内跳过重复隔离尝试(复用上次失败
@@ -171,6 +172,18 @@ class MemoryCuratorStateStore:
                 _require_lease(state, lease_id)
                 if state.candidate_scan_cursor != cursor:
                     self._write_unlocked(replace(state, candidate_scan_cursor=cursor))
+
+    # LLM: 与 advance_candidate_scan 同一短锁和租约核对；只原地改有界置顶清单，不推进游标、不碰其它字段。
+    # 函数用途: 在当前租约下增删冲突置顶目标，返回写后的清单（无变化不落盘）。
+    def update_conflict_pins(self, lease_id, *, add=(), remove=()) -> tuple[str, ...]:
+        with gateway_short_transaction("conflict_pins"):
+            with locked_json_path(self.path):
+                state = self._load_unlocked()
+                _require_lease(state, lease_id)
+                pins = merge_conflict_pins(state.conflict_pin_ids, add=list(add), remove=list(remove))
+                if pins != state.conflict_pin_ids:
+                    self._write_unlocked(replace(state, conflict_pin_ids=pins))
+                return tuple(pins)
 
     # LLM: 只有 daily/candidate/run audit 全部成功后调用；这里是 cursor 唯一推进点。
     # 函数用途: 原子提交成功游标、累计计数并释放 lease。

@@ -234,6 +234,8 @@ class CuratorInputBatch:
     load_errors: tuple[dict[str, object], ...] = ()
     # 可降级读取错误(如 formal 记忆整体失败):与 load_errors 严格语义不同,只记不阻断。
     formal_memory_errors: tuple[dict[str, object], ...] = ()
+    # 正式窗口在完整覆盖下确认已不存在的冲突置顶目标；只供提交后清理置顶，不发送模型。
+    formal_pin_misses: tuple[str, ...] = ()
     decision_annotations: tuple[CuratorDecisionAnnotation, ...] = ()
     relation_annotations: tuple[CuratorRelationAnnotation, ...] = ()
     # 排除名单过滤后整个 audit 窗口被跳过的游标（原始窗口最后一条 event_id）；空串表示无跳过。

@@ -269,6 +269,8 @@ class MemoryCuratorState:
     last_committed_run_id: str = ""
     candidate_scan_cursor: dict = field(default_factory=dict)
     consecutive_failures: int = 0
+    # 冲突置顶：上轮判成冲突的正式目标 ID（去重、最近的在后、最多 16 条），下轮正式窗口按 ID 点查带上它们。
+    conflict_pin_ids: list[str] = field(default_factory=list)
 
     # LLM: 空对象=首次初始化(允许); 非空但无任何已知字段=纯未知字段
     # fail-closed(seq1625 P0 遗留: {"not":"a state"} 不得静默复用默认 state);
@@ -285,6 +287,9 @@ class MemoryCuratorState:
             raise ValueError(
                 f"memory curator state contains only unknown fields: {unknown}"
             )
+        if "conflict_pin_ids" in filtered:
+            # 置顶只是加速线索：坏值按规则清洗，不让它拖垮整份游标权威。
+            filtered["conflict_pin_ids"] = merge_conflict_pins((), add=filtered["conflict_pin_ids"])
         try:
             state = cls(**filtered)
         except (TypeError, ValueError) as exc:
@@ -420,6 +425,37 @@ def validate_curator_state(state: MemoryCuratorState) -> None:
         for reason, generation in state.pending_reason_generations.items()
     ):
         raise ValueError("memory curator pending_reason_generations must be a non-negative reason map")
+    pins = state.conflict_pin_ids
+    if (not isinstance(pins, list) or len(pins) > CONFLICT_PIN_MAX_ENTRIES
+            or any(not isinstance(item, str) or not item or len(item) > _CONFLICT_PIN_ID_MAX_CHARS
+                   or item != item.strip() for item in pins)
+            or len(set(pins)) != len(pins)):
+        raise ValueError("memory curator conflict_pin_ids is invalid")
+
+
+# 冲突置顶最多 16 条：只给模型重看最近的冲突目标，旧的按最近最少用的顺序挤掉，状态文件不会越长越大。
+CONFLICT_PIN_MAX_ENTRIES = 16
+# 单个正式条目 ID 的长度上限；正常 ID 只有几十个字符，超长值视为坏数据丢弃。
+_CONFLICT_PIN_ID_MAX_CHARS = 200
+
+
+# LLM: 纯函数、不读写文件；先删 remove，再把 add 逐个移到队尾（去重即刷新；同轮新冲突优先于已解决），
+#   超出上限从队头丢。非字符串、空串、超长或带首尾空白的值一律丢弃，读坏状态与写新状态共用这一条规则。
+# 函数用途: 计算冲突置顶清单的新值（有界、去重、最近使用在后）。
+def merge_conflict_pins(current, *, add=(), remove=()) -> list[str]:
+    def valid(items) -> list[str]:
+        if not isinstance(items, (list, tuple)):
+            return []
+        return [item for item in items if isinstance(item, str) and item
+                and len(item) <= _CONFLICT_PIN_ID_MAX_CHARS and item == item.strip()]
+
+    dropped = set(valid(remove))
+    result = [item for item in dict.fromkeys(valid(current)) if item not in dropped]
+    for item in valid(add):
+        if item in result:
+            result.remove(item)
+        result.append(item)
+    return result[-CONFLICT_PIN_MAX_ENTRIES:]
 
 
 # LLM: 缺失可空顶层字段的宿主默认值(warnings=[] 等);只用于模型偶发漏字段的确定性补全,不引入新权威。
@@ -623,6 +659,7 @@ def curator_response_schema(*, include_host_defaults: bool = False) -> dict[str,
 
 
 __all__ = [
+    "CONFLICT_PIN_MAX_ENTRIES",
     "CURATOR_MODEL_NOT_CONFIGURED",
     "CURATOR_REPLAY_BREAKER_FAILURE_COUNT",
     "CURATOR_REPLAY_BREAKER_OPEN",
@@ -643,6 +680,7 @@ __all__ = [
     "MemoryCuratorState",
     "curator_failure_retry_seconds",
     "curator_response_schema",
+    "merge_conflict_pins",
     "parse_curator_extraction",
     "validate_curator_state",
 ]

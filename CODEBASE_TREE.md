@@ -1,8 +1,11 @@
 ## 2026-11-19 记忆系统第一波收口（Memory Wave-1：S1–S5）
 
 ```text
+agent_py_agent/agent/memory_store/
+`-- promotion_supersede.py                               # S2 conservative_v2：后台自动晋升时把同主题唯一旧条目的冲突改成先落盘、按版本 CAS 的替换
 agent_py_agent/tests/
-`-- test_mem_wave1_s1_extraction_status.py               # S1 后台记忆提取状态分类、/memory 线协议往返与旧 Gateway 兼容、候选列表状态行、辅助模型热切换与省略提示/本地日期回归单测
+|-- test_mem_wave1_s1_extraction_status.py               # S1 后台记忆提取状态分类、/memory 线协议往返与旧 Gateway 兼容、候选列表状态行、辅助模型热切换与省略提示/本地日期回归单测
+`-- test_mem_wave1_s2_formal_window_supersede.py         # S2 正式窗口按相关性有界读取、冲突目标置顶、conservative_v2 同主题自动替换（含版本 CAS 交错与崩溃恢复）回归单测
 ```
 
 ## 2026-11-18 Gateway 压测修复（MAX1 gw-stress-fix：GW-18/GW-03/GW-01/GW-02/GW-11/C1/C2/C9/X4/X8）
@@ -3343,6 +3346,7 @@ agent_py_agent/
 |   |   |-- migration.py              # Memory v1→v2 只读计划、完整备份、幂等迁移和失败回滚
 |   |   |-- operations.py             # ops.jsonl 无正文正式 Memory 操作审计
 |   |   |-- promotion.py              # Candidate 证据、冲突、Persona、lesson/HOT 的唯一晋升服务
+|   |   |-- promotion_supersede.py    # conservative_v2 同主题唯一旧条目的版本绑定自动替换判定与落盘
 |   |   |-- recall.py                 # active long-term/正式 lesson/HOT 的 owner+scope 安全召回
 |   |   |-- retention.py              # 统一 Retention service facade
 |   |   |-- retention_*.py            # 策略/计划/重验证/可恢复删除和 hard-delete 辅助模块

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1540,
+  "count": 1544,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -7484,12 +7484,28 @@
       "description": "超时收缩最多 3 次、每次至少减半：把超大输入降到千字符量级；写死为护栏，不被配置放大成无界。"
     },
     {
+      "name": "FORMAL_QUERY_MAX_CHARS",
+      "file": "agent_py_agent/agent/memory_store/curator_formal.py",
+      "value": 1000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "本批用户原话拼成的检索查询最多 1000 字符：够检索判断相关性，也不让超长输入拖慢索引查询。"
+    },
+    {
       "name": "_ITEM_PREVIEW_CHARS",
       "file": "agent_py_agent/agent/memory_store/curator_formal.py",
       "value": 1200,
       "unit": "字符",
       "category": "其它",
       "description": "单条记忆项预览最多 1200 字符：给模型看够判断的摘要，避免整条灌入。"
+    },
+    {
+      "name": "_ROUTED_LESSON_READ_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/memory_store/curator_formal.py",
+      "value": 64,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "每次最多直读这么多条进了路由索引的 lesson，按查询排序后再取前几条；与路由索引本身的行数上限同量级。"
     },
     {
       "name": "_AUDIT_PREVIEW_CHARS",
@@ -7522,6 +7538,14 @@
       "unit": "字符",
       "category": "其它",
       "description": "消息预览最多 6000 字符：多轮消息给足上下文又不过载。"
+    },
+    {
+      "name": "CONFLICT_PIN_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/memory_store/curator_models.py",
+      "value": 16,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "冲突置顶最多 16 条：只给模型重看最近的冲突目标，旧的按最近最少用的顺序挤掉，状态文件不会越长越大。"
     },
     {
       "name": "CURATOR_BATCH_MESSAGE_LIMIT_COUNT",
@@ -7562,6 +7586,14 @@
       "unit": "秒",
       "category": "重试",
       "description": "熔断后的退避秒数：同一批最多每小时重放一次；输入变了或成功后自动恢复原节奏。"
+    },
+    {
+      "name": "_CONFLICT_PIN_ID_MAX_CHARS",
+      "file": "agent_py_agent/agent/memory_store/curator_models.py",
+      "value": 200,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "单个正式条目 ID 的长度上限；正常 ID 只有几十个字符，超长值视为坏数据丢弃。"
     },
     {
       "name": "CURATOR_MODEL_GROUP_MAX_COUNT",

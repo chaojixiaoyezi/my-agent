@@ -17,7 +17,7 @@ from ..conversation.decision_outcome_log import (
 from ..conversation.decision_reach_counts import CALLED, counted_material, note_decision_reach
 from ..conversation.decision_service import decide, decision_outcome_is_current
 from .curator_backend import curator_prompt
-from .curator_formal import _long_term_items
+from .curator_formal import _long_term_item
 from .curator_inputs import CuratorInputBatch, CuratorRelationAnnotation
 
 # 关系对最多 32 对：本地延迟保护，未覆盖材料仍完整交原提取。
@@ -164,11 +164,18 @@ def _complete_formal(item) -> bool:
             and item.content_hash == _body_hash(item.content_preview))
 
 
-# LLM: 复读原 owner 正文仓库而非索引；相同 ID 的新版本/删除/正文变化均失效，检查前后仍使用同一绝对期限。
+# LLM: 只按本次题目里的正式 ID 有界点查原 owner 仓库（不整库物化）；相同 ID 的新版本/删除/正文变化均失效，
+#   覆盖不全（MEMORY_AUTHORITY_INCOMPLETE）也按失效处理，检查前后仍使用同一绝对期限。
 # 函数用途: 核对即将发送或采用的正式条目仍属于当前授权仓库的准确快照。
 def _formal_inputs_current(agent, pairs: tuple, deadline: float) -> bool:
     remaining_deadline_seconds(deadline)
-    current = {item.authority_ref: item for item in _long_term_items(agent.memory)}
+    try:
+        records = agent.memory.read_ids([item.authority_id for _source, item in pairs])
+    except ValueError as exc:
+        if str(exc) != "MEMORY_AUTHORITY_INCOMPLETE":
+            raise
+        return False
+    current = {item.authority_ref: item for item in map(_long_term_item, records)}
     remaining_deadline_seconds(deadline)
     return all(current.get(item.authority_ref) == item for _source, item in pairs)
 

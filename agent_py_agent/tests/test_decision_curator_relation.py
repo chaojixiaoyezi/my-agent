@@ -39,7 +39,7 @@ def prepared(tmp_path):
     memory = JsonlMemory(tmp_path / "memory.jsonl")
     record = memory.add("user", "用户喜欢简短答复。", kind="fact",
                         attributes={"subject_key": "reply.length", "scope_type": "personal", "scope_key": "personal"})
-    empty = SimpleNamespace(list=lambda: [])
+    empty = SimpleNamespace(list=lambda: [], routed_refs=lambda **_: ("missing", ()), read_refs=lambda refs: {})
     formal_source = FormalMemorySource(memory, empty, empty)
     text = "请记住，我现在希望答复包含完整解释。"
     message = CuratorMessageInput("message-1", "thread-1", "user", "internal", 1.0, text, text,
@@ -275,7 +275,7 @@ def test_formal_host_facts_do_not_change_original_model_projection(prepared):
 def test_real_long_formal_body_is_incomplete_not_a_short_matching_preview(prepared, monkeypatch):
     agent, batch, record = prepared
     agent.memory.replace(record.entry_id, "完整正式材料" * 300, expected_version=record.version)
-    empty = SimpleNamespace(list=lambda: [])
+    empty = SimpleNamespace(list=lambda: [], routed_refs=lambda **_: ("missing", ()), read_refs=lambda refs: {})
     formal = FormalMemorySource(agent.memory, empty, empty).read()
     assert formal[0].content_chars > len(formal[0].content_preview)
     batch = replace(batch, formal_memories=formal)
@@ -289,12 +289,13 @@ def test_deadline_expiring_during_formal_read_does_not_apply_or_send(prepared, m
     agent, batch, _ = prepared
     clock = [100.0]
     monkeypatch.setattr(gateway_request_limits, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    original = agent.memory.all
-    def slow_read():
-        current = original()
+    # 复核只按题目里的正式 ID 点查（read_ids），慢读点随之落在这里。
+    original = agent.memory.read_ids
+    def slow_read(entry_ids):
+        current = original(entry_ids)
         clock[0] = 200.0
         return current
-    monkeypatch.setattr(agent.memory, "all", slow_read)
+    monkeypatch.setattr(agent.memory, "read_ids", slow_read)
     calls, _ = install(monkeypatch)
     result, _warnings = annotate(agent, batch, caller_deadline=150.0)
     assert result is batch and not calls
@@ -372,9 +373,13 @@ def test_original_extraction_and_commit_remain_authority(prepared, monkeypatch, 
         _valid_output,
     )
     agent, batch, _ = prepared
+    # 正式窗口按本批用户原话挑相关条目：补一条与会话同主题的正式记忆，关系建议才有可比较的一对。
+    agent.memory.add("user", "用户的个人电脑使用 Linux。", kind="fact",
+                     attributes={"subject_key": "device.personal.os", "scope_type": "personal", "scope_key": "personal"})
     store, thread, message = _conversation(tmp_path)
     backend = _FailingBackend() if failure else _StaticStructuredBackend(_valid_output(thread.thread_id, message.message_id, message.content))
-    empty = SimpleNamespace(list=lambda: [])
+    # 替身沿真实 lesson 仓库的有界读口：没有路由投影、没有可读 lesson。
+    empty = SimpleNamespace(list=lambda: [], routed_refs=lambda **_: ("missing", ()), read_refs=lambda refs: {})
     service = _service(tmp_path, backend, store, formal_memory_source=FormalMemorySource(agent.memory, empty, empty))
     install(monkeypatch, value="possible_conflict")
     service.dependencies = replace(service.dependencies, annotate_batch=lambda batch, run, deadline:

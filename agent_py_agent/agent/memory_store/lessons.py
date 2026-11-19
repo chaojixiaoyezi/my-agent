@@ -353,6 +353,30 @@ class LessonRepository:
             result[raw_ref] = record
         return result
 
+    # LLM: 只读 lesson_heat.json 里当前进了路由索引的活跃项（nofollow、不取锁、不记命中、不扫正文目录）；
+    #   状态如实返回 ok/missing/symlink/corrupt，调用方不能把读不出说成没有 lesson。
+    # 函数用途: 给后台整理按查询挑相关 lesson 提供有界的规范引用清单（按路由热度顺序）。
+    def routed_refs(self, *, limit: int = 64) -> tuple[str, tuple[str, ...]]:
+        kind, state = self._read_heat_state()
+        if kind != "ok" or not isinstance(state, dict):
+            return kind, ()
+        rows = state.get("rows")
+        rows = rows if isinstance(rows, dict) else {}
+        refs: list[str] = []
+        for lesson_id in state.get("routed_ids") or ():
+            if len(refs) >= limit:
+                break
+            row = rows.get(lesson_id)
+            if not isinstance(row, dict) or row.get("status") != "active":
+                continue
+            ref = f"{row.get('path') or ''}#{lesson_id}"
+            try:
+                _parse_canonical_lesson_ref(ref)
+            except ValueError:
+                continue
+            refs.append(ref)
+        return "ok", tuple(refs)
+
     # LLM: 召回热路径零磁盘 I/O 记录命中，待维护窗口持锁合并进 lesson_heat.json。
     # 函数用途: 记录本轮被读取引用的 lesson_id 命中信号（单次调用内自动去重）。
     def note_hits(self, lesson_ids: Iterable[str], *, at: datetime | None = None) -> None:

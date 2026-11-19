@@ -107,7 +107,7 @@ def _add_candidate_commands(areas: argparse._SubParsersAction) -> None:
     promote.add_argument(
         "--automatic",
         action="store_true",
-        help="按 conservative_v1 自动策略核验；不放宽证据或冲突规则",
+        help="按自动晋升门核验（conservative_v1 规则，不做 conservative_v2 的同主题自动替换）；不放宽证据或冲突规则",
     )
     promote.add_argument(
         "--confirmed",

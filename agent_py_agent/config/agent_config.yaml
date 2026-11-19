@@ -181,6 +181,8 @@ memory_curator_daily_finalize_hour: 23
 # 可正式写入 long_term、用户画像偏好 user，以及达到各自重复门槛的 lesson / hot；不把模型声明当宿主核验。
 # AGENTS.md 始终禁止自动写入，SOUL.md 始终需要用户显式确认；manual_only 禁用 Curator 自动晋升。
 # 原 owner、冲突、配额和目标版本CAS仍须通过；待确认候选本身不会触发新策展批次。
+# conservative_v2 在 v1 之上再允许一种自动替换：你后来明确说的同主题、同范围、永久有效的新说法，
+# 且库里恰好只有一条同样是你明确说过的旧条目、消息时间晚于旧条目时，按旧版本号原子替换并记录被替换条目；其余冲突照旧待确认。
 memory_curator_auto_promotion_policy: "conservative_v1"
 # 普通教训晋升为长期记忆所需的最少独立观察次数。
 memory_lesson_min_occurrences: 2

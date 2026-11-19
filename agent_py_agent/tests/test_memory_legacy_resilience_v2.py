@@ -280,8 +280,8 @@ def test_lessons_list_fails_closed_after_migration_marker(tmp_path: Path):
 
 
 class _FailingFormalSource:
-    def read(self, *, max_items: int, max_chars: int):
-        del max_items, max_chars
+    def read(self, *, max_items: int, max_chars: int, query: str = "", pinned_ids: tuple[str, ...] = ()):
+        del max_items, max_chars, query, pinned_ids
         raise RuntimeError("probe: formal memory unavailable")
 
 

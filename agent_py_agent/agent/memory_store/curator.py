@@ -75,7 +75,7 @@ from .curator_due import (
 from .curator_due import (
     parse_time as _parse_time,
 )
-from .curator_formal import FormalMemorySource
+from .curator_formal import FORMAL_QUERY_MAX_CHARS, FormalMemorySource, FormalMemoryWindow
 from .curator_inputs import (
     CuratorInputBatch,
     CuratorMessageSource,
@@ -1192,8 +1192,9 @@ class _CuratorExecutionMixin:
                 and precollected.config_revision == live_cfg.revision()
                 and precollected.exclusions == excluded_ids
                 and precollected.exclusions_revision == self._read_exclusions_revision()):
-            formal, errors = self._formal_snapshot(effective_config=live_cfg)
-            return replace(precollected.batch, formal_memories=formal, formal_memory_errors=errors)
+            window = self._formal_snapshot(effective_config=live_cfg, query=_formal_query(precollected.batch.messages),
+                                           pinned_ids=tuple(state.conflict_pin_ids))
+            return _with_formal_window(precollected.batch, window)
         return self._collect(
             state,
             include_formal=True,
@@ -1235,17 +1236,15 @@ class _CuratorExecutionMixin:
         effective_config: MemoryCuratorConfig | None = None,
     ) -> CuratorInputBatch:
         live_cfg = effective_config or self._effective_config()
-        formal, formal_memory_errors = (
-            self._formal_snapshot(effective_config=live_cfg) if include_formal else ((), ())
-        )
-        formal_chars = len(
-            json.dumps([item.to_model() for item in formal], ensure_ascii=False)
-        )
+        # 先按预留的正式窗口上限收好本批消息，再用本批用户原话去挑相关正式记忆，正式窗口只读一次；
+        # 没有接正式记忆来源时不预留。
+        include_formal = include_formal and self.formal_memory_source is not None
+        reserved_formal_chars = _formal_char_budget(live_cfg) if include_formal else len(json.dumps([]))
         input_config = replace(
             live_cfg,
             max_input_chars=max(
                 2_000,
-                live_cfg.max_input_chars - 7_000 - formal_chars,
+                live_cfg.max_input_chars - 7_000 - reserved_formal_chars,
             ),
         )
         from .retention_scan_budget import RetentionScanBudget
@@ -1261,7 +1260,6 @@ class _CuratorExecutionMixin:
                 audit_dir=self.audit_dir,
                 state=state,
                 config=input_config,
-                formal_memories=formal,
                 tool_reference_source=self.tool_reference_source,
                 scan_budget=scan_budget,
             )
@@ -1284,7 +1282,6 @@ class _CuratorExecutionMixin:
             batch = CuratorInputBatch(
                 messages=tuple(messages),
                 audit_events=(),
-                formal_memories=tuple(formal),
                 load_errors=tuple(message_errors),
                 skipped_audit_cursor="",
                 skipped_message_cursors=skipped_message_cursors,
@@ -1292,29 +1289,35 @@ class _CuratorExecutionMixin:
                 message_scan_reasons=tuple(scan_state["reasons"]),
                 isolated_message_errors=isolated_message_errors,
             )
-        if formal_memory_errors:
-            batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
+        if include_formal:
+            window = self._formal_snapshot(effective_config=live_cfg, query=_formal_query(batch.messages),
+                                           pinned_ids=tuple(state.conflict_pin_ids))
+            batch = _with_formal_window(batch, window)
         return batch
 
     # LLM: 正式记忆只作为预算内增强输入，普通读错保持原降级诊断；执行未结不得被降级吞掉。
+    #   查询来自本批用户原话，置顶来自上轮冲突目标；窗口自带的覆盖缺口原样带回，不在这里重新判定。
     # 函数用途: 为实际执行补一次正式记忆快照，不重新读取会话或审计材料。
     def _formal_snapshot(
         self,
         *,
         effective_config: MemoryCuratorConfig | None = None,
-    ) -> tuple[tuple, tuple[dict, ...]]:
+        query: str = "",
+        pinned_ids: tuple[str, ...] = (),
+    ) -> FormalMemoryWindow:
         if self.formal_memory_source is None:
-            return (), ()
+            return FormalMemoryWindow()
         live_cfg = effective_config or self._effective_config()
         try:
             formal = self.formal_memory_source.read(
-                max_items=32, max_chars=min(6_000, max(1_000, live_cfg.max_input_chars // 4)),
+                max_items=32, max_chars=_formal_char_budget(live_cfg), query=query, pinned_ids=pinned_ids,
             )
-            return tuple(formal), ()
         except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
             raise
         except Exception as exc:
-            return (), ({"code": _failure_code(exc), "detail": str(exc)[:200]},)
+            return FormalMemoryWindow(errors=({"code": _failure_code(exc), "detail": str(exc)[:200]},))
+        return FormalMemoryWindow(formal, errors=getattr(formal, "errors", ()),
+                                  missing_pins=getattr(formal, "missing_pins", ()))
 
     # LLM: 候选及版本约束共用事务；成功返回立即冻结已提交游标供报告失败使用，执行未知透传且不释放租约。
     # 函数用途: 提交批次后记住真正推进的位置，再做晋升与报告，避免尾段失败把运行链接回旧游标。
@@ -1388,6 +1391,32 @@ class _CuratorExecutionMixin:
         )
         return self._post_commit_report(context, batch, prepared, committed, extra_warnings)
 
+    # LLM: 置顶只认宿主结构化事实：提交时已是 blocked_conflict 的候选及晋升回执为 blocked_conflict 的候选
+    #   （回执不带目标，按 ID 点查最终候选取 conflicts_with）；成功晋升的 replace/merge/remove 目标和完整覆盖下
+    #   已消失的目标移出。置顶只影响下轮正式窗口，不触发运行、不动游标；单条候选读不出只少加一条，不让本轮失败。
+    # 函数用途: 在仍持租约时按本轮结果增删冲突置顶目标。
+    def _refresh_conflict_pins(self, context, batch, committed, receipts) -> None:
+        add: list[str] = []
+        for item in committed.candidates:
+            if str(getattr(item, "status", "") or "") == "blocked_conflict":
+                add.extend(getattr(item, "conflicts_with", ()) or ())
+        remove = list(batch.formal_pin_misses)
+        pinned = set(context.state_before.conflict_pin_ids)
+        for receipt in receipts:
+            blocked = receipt.get("status") == "blocked_conflict"
+            if not blocked and not (pinned and receipt.get("promoted")):
+                continue
+            try:
+                candidate = self.candidate_service.get(str(receipt.get("candidate_id") or ""))
+            except (KeyError, OSError, ValueError):
+                continue
+            if blocked:
+                add.extend(candidate.conflicts_with)
+            elif candidate.proposed_action in {"replace", "merge", "remove"} and candidate.target_entry_id:
+                remove.append(candidate.target_entry_id)
+        if add or remove:
+            self.state_store.update_conflict_pins(context.lease_id, add=add, remove=remove)
+
     # LLM: 提交后仍持同一租约；新候选与积压去重晋升，回执分开计正式提交、旧清理恢复和待办，不回滚已成功事务。
     # 函数用途: 在租约尾段晋升并把逐条无正文结果交给CLI/Gateway。
     def _post_commit_report(
@@ -1433,6 +1462,7 @@ class _CuratorExecutionMixin:
         )
         if next_cursor:
             self.state_store.advance_candidate_scan(context.lease_id, next_cursor)
+        self._refresh_conflict_pins(context, batch, committed, receipts)
         warnings = (
             *prepared.warnings,
             *extra_warnings,
@@ -1719,6 +1749,7 @@ class _CuratorPromotionMixin:
         effective_config: MemoryCuratorConfig | None = None,
     ) -> tuple[int, tuple[str, ...], tuple[dict, ...]]:
         from .promotion import promotion_batch
+        from .promotion_supersede import automatic_promotion_policy
 
         live_cfg = effective_config or self._effective_config()
         batch_callback = self._promotion_batch_callback
@@ -1728,9 +1759,11 @@ class _CuratorPromotionMixin:
         promoted = 0
         warnings: list[str] = []
         receipts: list[dict] = []
+        # 当前生效的自动晋升策略随这一段调用显式传给晋升服务（conservative_v2 才允许同主题自动替换）。
         with promotion_batch(long_term=getattr(self.formal_memory_source, "long_term", None),
                              candidates=self.candidate_service,
-                             coordinator_io=bool(getattr(self.candidate_service, "coordinator_io", False))):
+                             coordinator_io=bool(getattr(self.candidate_service, "coordinator_io", False))), \
+                automatic_promotion_policy(live_cfg.auto_promotion_policy):
             if batch_callback is not None:
                 promoted = self._promote_eligible_batches(candidate_ids, batch_callback, warnings, receipts)
             else:
@@ -2785,6 +2818,33 @@ def _success_commit(
 # 函数用途: 构造严格两字段的前后游标，小规模完整保留，大规模可按本批线程投影。
 def _cursor_payload(cursors: dict[str, str], audit_event_id: str, relevant_thread_ids: set[str] | None = None) -> dict[str, object]:
     return project_cursor_payload(cursors, audit_event_id, relevant_thread_ids)
+
+
+# 正式窗口字符上限：总输入的四分之一，夹在 1000～6000 之间；收集消息时按这个上限先预留。
+def _formal_char_budget(config: MemoryCuratorConfig) -> int:
+    return min(6_000, max(1_000, config.max_input_chars // 4))
+
+
+# LLM: 只拼结构化 role=user 的消息预览（宿主已截断），不解析正文语义；超出上限截尾，空批返回空串。
+# 函数用途: 用本批用户原话生成正式窗口的相关性检索查询。
+def _formal_query(messages) -> str:
+    parts: list[str] = []
+    size = 0
+    for item in messages:
+        text = " ".join(str(item.content_preview or "").split()) if item.role == "user" else ""
+        if not text:
+            continue
+        parts.append(text)
+        size += len(text) + 1
+        if size >= FORMAL_QUERY_MAX_CHARS:
+            break
+    return " ".join(parts)[:FORMAL_QUERY_MAX_CHARS]
+
+
+# 函数用途: 把一次正式窗口读取（条目、缺口、已确认消失的置顶）合进批次，不改消息与游标。
+def _with_formal_window(batch: CuratorInputBatch, window: FormalMemoryWindow) -> CuratorInputBatch:
+    return replace(batch, formal_memories=tuple(window), formal_memory_errors=tuple(window.errors),
+                   formal_pin_misses=tuple(window.missing_pins))
 
 
 # LLM: 优先按异常类型归类稳定失败码；输入和校验错误仅保留既有 CURATOR_ 前缀宿主码，其余回退固定码，不把任意错误正文持久化为分类。

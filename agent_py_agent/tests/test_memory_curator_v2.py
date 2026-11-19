@@ -142,10 +142,12 @@ class _FormalMemorySourceProbe:
     def __init__(self) -> None:
         self.calls = 0
 
-    def read(self, *, max_items: int, max_chars: int):
+    def read(self, *, max_items: int, max_chars: int, query: str = "", pinned_ids: tuple[str, ...] = ()):
         self.calls += 1
         assert max_items == 32
         assert 1_000 <= max_chars <= 6_000
+        assert isinstance(query, str) and len(query) <= 1_000
+        assert pinned_ids == ()
         return (
             CuratorFormalMemoryInput(
                 authority_type="long_term",

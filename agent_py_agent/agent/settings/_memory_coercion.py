@@ -95,7 +95,7 @@ _FIELDS = (
     _FieldSpec(
         "memory_curator_auto_promotion_policy",
         "choice",
-        choices={"conservative_v1", "manual_only"},
+        choices={"conservative_v1", "conservative_v2", "manual_only"},
     ),
     _FieldSpec("memory_lesson_min_occurrences", "int", 2, 100),
     _FieldSpec("memory_hot_min_occurrences", "int", 3, 100),
