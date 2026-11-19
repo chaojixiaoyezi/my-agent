@@ -839,12 +839,15 @@ class BackgroundMainAgentReport:
     # undeclared(部署没声明过该通道，永不外发)。排障时用它区分“没发”与“不该发”。
     route_ownership: str = ""
     # 这片执行的结构化结束状态与原因（AgentRunResult.runtime_status / runtime_reason），定时执行收口据此选择
-    # 结算码（如工具结果无法确认）；只读结构化值，不解析回复正文。冻结重投等没有新执行的报告保持空。
+    # 结算码（如工具结果无法确认）；只读结构化值，不解析回复正文。冻结重投没有新执行：Goal 续跑片从冻结载荷还原
+    # 原片的值（连同三项计数），其它冻结重投保持空。
     runtime_status: str = ""
     runtime_reason: str = ""
     # 这片执行的结构化回合结束原因（turn_end：completed/blocked/max-tokens/aborted/error/interrupted），取自显示快照；
-    #   冻结重投没有新执行、冻结载荷也不存它，保持空。续跑资格被扣下时只用它给用户写宿主提示，不参与续跑判定。
+    #   Goal 续跑片的冻结重投从冻结载荷还原，其它冻结重投保持空。续跑资格被扣下时只用它给用户写宿主提示，不参与续跑判定。
     turn_end_reason: str = ""
+    # False 只出现在旧冻结载荷的重投报告上：没有可信的原片计数，Goal 续跑判定跳过本片计数（不按 0 次成功记空片）。
+    goal_slice_facts_known: bool = True
 
 
 # LLM: One immutable event preserves the model-call summary produced by one

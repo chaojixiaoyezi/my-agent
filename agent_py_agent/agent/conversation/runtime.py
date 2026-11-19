@@ -751,6 +751,34 @@ def _background_goal_idle_slice(
     return not slice_has_progress(signal, report, goal, task_status)
 
 
+# LLM: 只给 thread_goal_continue 片取宿主标量（计数、结构化结束状态/原因），随冻结载荷私有保存，重投时原值还原给
+#   续跑判定与扣下提示；不含模型正文、显示快照、凭据值或任意 metadata。凭据投递门的 archived_tool_call_count 不在此。
+# 函数用途: 返回这一片 Goal 续跑判定要用的宿主事实；不是 Goal 片时返回 None。
+def _goal_slice_facts(plan: _BackgroundSlicePlan) -> dict[str, object] | None:
+    if str(plan.request.reason or "").strip().lower() != "thread_goal_continue":
+        return None
+    from ..turn_end import normalize_turn_end_reason
+
+    tool_calls, tool_successes, material_progress = plan.counters
+    return {
+        "tool_call_count": tool_calls, "tool_success_count": tool_successes,
+        "material_progress_count": material_progress,
+        "runtime_status": str(plan.runtime_status or ""), "runtime_reason": str(plan.runtime_reason or ""),
+        "turn_end_reason": normalize_turn_end_reason((plan.display_snapshot or {}).get("turn_end_reason")),
+    }
+
+
+# LLM: 冻结载荷里的 Goal 片事实按字段还原；旧载荷缺字段或计数不可读时标为未知，由续跑判定跳过本片计数（不按 0 次成功计）。
+# 函数用途: 把冻结的 Goal 片事实转成重投报告的字段。
+def _frozen_goal_slice_report_fields(facts: dict[str, object] | None) -> dict[str, object]:
+    try:
+        counts = {name: int(facts[name]) for name in ("tool_call_count", "tool_success_count", "material_progress_count")}
+    except (KeyError, TypeError, ValueError):
+        return {"goal_slice_facts_known": False}
+    reasons = {name: str(facts.get(name) or "") for name in ("runtime_status", "runtime_reason", "turn_end_reason")}
+    return {**counts, **reasons}
+
+
 # LLM: 空转片的交付改写只发生在“外部投递义务 + 无进展”同时成立时：正文仍落权威会话转录
 #   （TUI/历史可见），但不主动推给外部通道；纯本地/TUI 线程本来只进转录，保持原行为。
 #   返回值 (deliver, delivery_reason, local_transcript_only) 与 run_once 原内联判定完全一致。
@@ -815,6 +843,7 @@ def _complete_background_slice(
             route_supports_transcript=plan.route_supports_transcript,
             local_transcript_only=plan.local_transcript_only,
             tool_call_count=plan.archived_tool_call_count,
+            goal_slice_facts=_goal_slice_facts(plan),
         )
         reported_content = commit.content
         delivery_status = commit.delivery_status
@@ -1304,6 +1333,7 @@ class BackgroundMainAgentRuntime:
                 commit_kind=commit.commit_kind,
                 message_id=commit.message_id,
                 route_ownership=ownership,
+                **_frozen_goal_slice_report_fields(frozen.goal_slice_facts),
             )
 
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。

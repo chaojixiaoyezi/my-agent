@@ -85,6 +85,7 @@ def record_background_response(
     frozen_retry: FrozenOwnerDelivery | None = None,
     local_transcript_only: bool = False,
     tool_call_count: int | None = None,
+    goal_slice_facts: dict[str, object] | None = None,
 ) -> BackgroundDeliveryCommit:
     # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
     # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
@@ -100,7 +101,8 @@ def record_background_response(
         operation_verification=operation_verification, assistant_commentaries=assistant_commentaries,
         display_snapshot=display_snapshot, deliver=deliver, delivery_reason=delivery_reason,
         route_supports_transcript=route_supports_transcript, frozen_retry=frozen_retry,
-        local_transcript_only=local_transcript_only, tool_call_count=tool_call_count)
+        local_transcript_only=local_transcript_only, tool_call_count=tool_call_count,
+        goal_slice_facts=goal_slice_facts)
     multi = record_alert_delivery(delivery, request, delivery_context, internal_content,
         record_one=_record_background_owner_response, options=options)
     if multi is not None:
@@ -110,7 +112,8 @@ def record_background_response(
         delivery_artifacts=delivery_artifacts, operation_verification=operation_verification,
         assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot,
         deliver=deliver, delivery_reason=delivery_reason, route_supports_transcript=route_supports_transcript,
-        frozen_retry=frozen_retry, local_transcript_only=local_transcript_only, tool_call_count=tool_call_count)
+        frozen_retry=frozen_retry, local_transcript_only=local_transcript_only, tool_call_count=tool_call_count,
+        goal_slice_facts=goal_slice_facts)
 
 
 # LLM: 原owner信封提交保留冻结回执、代次、渠道与canonical的完整顺序；仅由上层排除未外发委派内部结果。
@@ -135,6 +138,7 @@ def _record_background_owner_response(
     delivery_target_key: str = "",
     delivery_event_key: str = "",
     tool_call_count: int | None = None,
+    goal_slice_facts: dict[str, object] | None = None,
 ) -> BackgroundDeliveryCommit:
     local_transcript_only = local_transcript_only or scheduled_local_delivery(delivery.agent, request)
     (
@@ -232,7 +236,8 @@ def _record_background_owner_response(
         evidence_refs=evidence_refs, message_metadata=message_metadata, delivery_status=delivery_status,
         receipt_id=str(getattr(receipt, 'receipt_id', '') or ''), target=delivery_context.target,
         ownership=route.ownership, canonical_record=bool(route.canonical_record and origin_valid or delivery_status == 'sent'),
-        persisted=False, credential_redaction_verified=cred_verified)
+        persisted=False, credential_redaction_verified=cred_verified,
+        goal_slice_facts=frozen_retry.goal_slice_facts if frozen_retry is not None else goal_slice_facts)
     if delivery_observer is not None:
         delivery_observer(freeze)
     if (delivery_status == 'sent' or freeze.canonical_record) and delivery_observer is None:
@@ -332,6 +337,8 @@ class FrozenOwnerDelivery:
     receipt_id: str = ""
     ownership: str = ""
     credential_redaction_verified: bool = True
+    # Goal 续跑片的宿主计数与结束原因（私有冻结数据，不进 canonical metadata）；旧载荷没有时为 None。
+    goal_slice_facts: dict[str, object] | None = None
 
 
 # LLM: 冻结判定所需的全部事实；target 必须用已解析的投递目标，不能回读 request.route_target。
@@ -351,6 +358,7 @@ class _OwnerDeliveryFreeze:
     persisted: bool
     receipt_id: str = ""
     credential_redaction_verified: bool = True
+    goal_slice_facts: dict[str, object] | None = None
 
 
 # LLM: 外发义务未完成、应有 canonical 记录未提交，或容量报告要求保留时，冻结完整载荷。
@@ -401,6 +409,7 @@ def _freeze_pending_owner_delivery(
             "last_delivery_status": status,
             "credential_redaction_verified": bool(freeze.credential_redaction_verified),
             "created_at": time.time(),
+            **({"goal_slice_facts": dict(freeze.goal_slice_facts)} if freeze.goal_slice_facts is not None else {}),
         },
     )
     return cached is not None
@@ -415,6 +424,7 @@ def frozen_owner_delivery(payload: dict[str, object]) -> FrozenOwnerDelivery:
     metadata = payload.get("message_metadata")
     meta_dict = dict(metadata) if isinstance(metadata, dict) else {}
     verified = payload.get("credential_redaction_verified") is True or meta_dict.get("credential_redaction_verified") is True
+    goal_slice_facts = payload.get("goal_slice_facts")
     return FrozenOwnerDelivery(
         content=str(payload.get("content") or ""),
         delivery_artifacts=tuple(
@@ -435,6 +445,7 @@ def frozen_owner_delivery(payload: dict[str, object]) -> FrozenOwnerDelivery:
         receipt_id=str(payload.get("receipt_id") or ""),
         ownership=str(payload.get("ownership") or ""),
         credential_redaction_verified=verified,
+        goal_slice_facts=dict(goal_slice_facts) if isinstance(goal_slice_facts, dict) else None,
     )
 
 

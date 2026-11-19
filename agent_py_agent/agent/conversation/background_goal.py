@@ -279,6 +279,9 @@ def _active_goal_for_signal(dependencies: GoalContinuationDependencies, signal: 
 def _record_continuation_slice(
     dependencies: GoalContinuationDependencies, signal: WakeSignal, report: BackgroundMainAgentReport, facts: _GoalSlice,
 ) -> object | None:
+    if not report.goal_slice_facts_known:
+        # 旧冻结回执没有原片计数：不改连续空片数，按已有资格接下一片。
+        return facts.goal
     progressed = slice_has_progress(signal, report, facts.goal, facts.task_status)
     gate = dependencies.user_turn_gate
     with gate(facts.goal.thread_id) if gate is not None else nullcontext(False) as user_turn_present:
