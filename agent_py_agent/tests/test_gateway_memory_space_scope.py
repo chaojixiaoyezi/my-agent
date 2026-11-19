@@ -112,7 +112,10 @@ def test_isolated_turn_cannot_list_formal_memory_or_probe_target(spaces, context
 
     agent, _, _ = spaces
     agent._current_run_params = RunParams(context_scope=context_scope)
+    # 列表、目标点查与全量读取三个正式读口都不许被碰到。
     agent.memory.all = lambda: pytest.fail('an isolated turn cannot read the formal store')
+    agent.memory.read_ids = lambda *_args: pytest.fail('an isolated turn cannot probe a target')
+    agent.memory.list_page = lambda **_kwargs: pytest.fail('an isolated turn cannot list the formal store')
     tool = RememberTool(agent)
     for call in ({'action': 'list'}, {'action': 'remove', 'entry_id': 'known'},
                  {'action': 'batch', 'operations': [{'action': 'RePlAcE', 'entry_id': 'known'}]}):
@@ -124,9 +127,11 @@ def test_unreadable_formal_store_cannot_trigger_tombstone_recovery(spaces, monke
     from agent_py_agent.agent.capability import memory_tool, memory_tool_recovery
 
     agent, _, _ = spaces
-    def denied_read():
+    def denied_read(*_args, **_kwargs):
         raise PermissionError('private-store-canary')
-    monkeypatch.setattr(agent.memory, 'all', denied_read)
+    # list 走有界分页读口、replace/remove 走 read_ids 点查；同一读错误注入全部正式读口。
+    for reader in ('all', 'read_ids', 'list_page'):
+        monkeypatch.setattr(agent.memory, reader, denied_read)
     monkeypatch.setattr(memory_tool_recovery, 'prepare_committed_remove',
         lambda *_: pytest.fail('unreadable authority is not a proven deletion'))
     for action in ('list', 'remove', 'replace'):

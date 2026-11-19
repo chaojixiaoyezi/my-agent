@@ -177,7 +177,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "c0f2f90444b195765fbfc3b554b54b140240da63f29f66b27f43b5ca74386e75",
+    "body_hash": "5d4e55186e79cb3a8de4b17840ed8eb48717f50b541ccf2114eb8453450b1e7d",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -1627,6 +1627,10 @@
                     "type": "object"
                   },
                   "type": "array"
+                },
+                "cursor": {
+                  "description": "仅 list 续页：原样传上一页回执的 next_cursor；首页省略。",
+                  "type": "string"
                 }
               },
               "type": "object"
@@ -2505,7 +2509,7 @@
     "timestamp": 1,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "415671572f9265e8955c6f34064af2584b026e8165bd776beaf0595377a936b3",
+    "body_hash": "bb5258f7d934d67f2bff621e62baabe5d43adc5a51b6c3207e5e6e2efa5e0038",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -3955,6 +3959,10 @@
                     "type": "object"
                   },
                   "type": "array"
+                },
+                "cursor": {
+                  "description": "仅 list 续页：原样传上一页回执的 next_cursor；首页省略。",
+                  "type": "string"
                 }
               },
               "type": "object"

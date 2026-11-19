@@ -90,6 +90,11 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
             **trigger,
         ),
     )
+    if str(cycle.get("apply_id") or ""):
+        # 只有真正应用了一次压缩（拿到 apply_id）才登记 pre_compact；收尾阶段不持锁，失败不影响本轮结果。
+        from ._finalization_service import _request_memory_curator
+
+        _request_memory_curator(agent, "pre_compact")
     suggestion = cycle["suggestion"]
     trigger_payload = dict(cycle.get("trigger", {}))
     auto_continue = _should_auto_continue_after_cycle(ctx, trigger_payload, cycle)

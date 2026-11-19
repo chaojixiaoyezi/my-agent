@@ -192,6 +192,27 @@ class MemoryReadIndex:
             return None
         return self.resolve(candidates, operation_id=root["operation_id"])
 
+    # LLM: 只在完整水位下按 id 升序取 after_id 之后的有界坐标（不取检索文本或正文）；缺库、未完整或读库失败返回 None，
+    #   交调用方走有界权威降级，不能当作空列表。返回 (坐标, 是否还有更多, 绑定的 operation_id)。
+    # 函数用途: 为正式长期记忆列表分页提供同代坐标。
+    def page_after(self, after_id, *, limit):
+        root = self.store.manifest()
+        if root is None or not 1 <= limit <= 1000:
+            return None
+        try:
+            with closing(self._connect()) as conn:
+                conn.execute("BEGIN")
+                if self.coverage(root, connection=conn)["status"] != "complete":
+                    return None
+                rows = conn.execute(
+                    "SELECT id, version, content_hash, segment, row_no FROM entries WHERE id > ? "
+                    "AND (expires_at IS NULL OR expires_at=0 OR expires_at>?) ORDER BY id LIMIT ?",
+                    (str(after_id or ""), time.time(), limit + 1)).fetchall()
+        except (FileNotFoundError, sqlite3.Error):
+            return None
+        candidates = [{**dict(row), "operation_id": root["operation_id"]} for row in rows[:limit]]
+        return candidates, len(rows) > limit, root["operation_id"]
+
     # LLM: 坐标只解释于绑定根；换代显式冲突而非完整空命中，读取后再次核根及当前墓碑。
     # 函数用途: 将候选恢复为当前真正可见的正式事实。
     def resolve(self, candidates, *, operation_id=None):

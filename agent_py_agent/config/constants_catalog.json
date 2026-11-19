@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1550,
+  "count": 1557,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2346,6 +2346,30 @@
       "unit": "个",
       "category": "上限预算",
       "description": "一次最多返回几条（schema 上限与执行时截断共用）。"
+    },
+    {
+      "name": "_MEMORY_LIST_PAGE_ENTRIES",
+      "file": "agent_py_agent/agent/capability/memory_tool.py",
+      "value": 50,
+      "unit": "条",
+      "category": "其它",
+      "description": "remember(action=list) 每页最多返回的正式长期记忆条数；条目更多时回执带 next_cursor 续页。"
+    },
+    {
+      "name": "_USER_EVIDENCE_MAX_PAGES_COUNT",
+      "file": "agent_py_agent/agent/capability/memory_tool.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "回查本轮用户原话最多倒读的会话页数；超出仍未确认唯一时按缺证据处理，不整段读取会话。"
+    },
+    {
+      "name": "_USER_EVIDENCE_PAGE_ROWS",
+      "file": "agent_py_agent/agent/capability/memory_tool.py",
+      "value": 80,
+      "unit": "行",
+      "category": "其它",
+      "description": "回查本轮用户原话时每页倒读的会话行数（同一请求的行不会被切到两页之外）。"
     },
     {
       "name": "CONVERSATION_METHOD_LIMIT_COUNT",
@@ -7772,6 +7796,22 @@
       "description": "正式记忆权威记录一次有界核验最多扫描的记录条数。"
     },
     {
+      "name": "_LIST_PAGE_RESOLVE_WINDOW_RECORDS",
+      "file": "agent_py_agent/agent/memory_store/jsonl.py",
+      "value": 100,
+      "unit": "条",
+      "category": "其它",
+      "description": "正式记忆列表分页每次回读同代正文的坐标窗口条数；凑满一页即停，不多读后面的窗口。"
+    },
+    {
+      "name": "_LIST_PAGE_SCAN_MAX_RECORDS",
+      "file": "agent_py_agent/agent/memory_store/jsonl.py",
+      "value": 1000,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "正式记忆列表一次分页最多检查的读索引坐标条数（按范围过滤前计数）。"
+    },
+    {
       "name": "_SCOPE_PAIRS_CACHE_MAX_ENTRIES",
       "file": "agent_py_agent/agent/memory_store/jsonl.py",
       "value": 32,
@@ -7906,6 +7946,22 @@
       "unit": "秒",
       "category": "其它",
       "description": "一天按 86400 秒算：保留期换算成秒的统一口径。"
+    },
+    {
+      "name": "_UNCURATED_PROBE_MAX_PAGES_COUNT",
+      "file": "agent_py_agent/agent/memory_store/retention_scan.py",
+      "value": 4,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同一会话最多探查的页数；读不完按“未确认读完”处理。"
+    },
+    {
+      "name": "_UNCURATED_PROBE_PAGE_ROWS",
+      "file": "agent_py_agent/agent/memory_store/retention_scan.py",
+      "value": 16,
+      "unit": "行",
+      "category": "其它",
+      "description": "过期会话回收前按后台整理游标往后探查可学习消息时，每页读取的会话行数。"
     },
     {
       "name": "RETENTION_SCAN_SLICE_BYTES",

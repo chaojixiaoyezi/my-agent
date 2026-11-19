@@ -41,6 +41,12 @@ if TYPE_CHECKING:
 _MEMORY_KINDS = frozenset({"fact", "event", "project"})
 _MEMORY_ORIGINS = frozenset({"user_explicit", "tool_verified", "model_inferred"})
 _MEMORY_ACTIONS = frozenset({"add", "replace", "remove"})
+# remember(action=list) 每页最多返回的正式长期记忆条数；条目更多时回执带 next_cursor 续页。
+_MEMORY_LIST_PAGE_ENTRIES = 50
+# 回查本轮用户原话时每页倒读的会话行数（同一请求的行不会被切到两页之外）。
+_USER_EVIDENCE_PAGE_ROWS = 80
+# 回查本轮用户原话最多倒读的会话页数；超出仍未确认唯一时按缺证据处理，不整段读取会话。
+_USER_EVIDENCE_MAX_PAGES_COUNT = 8
 
 
 # LLM: Memory 提供业务 schema；模型只提供精确 entry_id，目标当前版本由宿主观察并冻结供提交 CAS，说明不得要求未公开的版本输入。
@@ -191,6 +197,7 @@ def _remember_input_schema(
         "enum": ["add", "list", "replace", "remove", "batch"],
     }
     fields["operations"] = {"type": "array", "items": operation_schema}
+    fields["cursor"] = {"type": "string"}
     for name, description in _remember_parameter_descriptions().items():
         fields[name]["description"] = description
     return {
@@ -224,6 +231,7 @@ def _remember_parameter_descriptions() -> dict[str, str]:
             "session scope 禁止填写，其寿命由真实会话决定。"
         ),
         "operations": "batch 的操作数组；整批只原子进入统一候选账本。",
+        "cursor": "仅 list 续页：原样传上一页回执的 next_cursor；首页省略。",
     }
 
 
@@ -290,7 +298,7 @@ class RememberTool(BaseTool):
             if isolated:
                 return _memory_error("本轮的宿主策略禁止读取正式长期记忆。", "TOOL_UNAVAILABLE",
                                      hint="请在有权的普通会话中列出记忆。", not_started=True)
-            return _memory_list_result(memory, scope)
+            return _memory_list_result(memory, scope, cursor=str(params.get("cursor") or ""))
         operations = _memory_operations(params, action)
         if isolated and any(str(op.get("action") or "").strip().lower() in {"replace", "remove"} for op in operations):
             return _memory_error("本轮不能读取已有正式记忆以核对修改或删除目标。", "TOOL_UNAVAILABLE",
@@ -501,7 +509,7 @@ def _resolved_target(
             not_started=True,
         )
     try:
-        target = next((item for item in memory.all() if getattr(item, "entry_id", "") == entry_id), None)
+        target = next(iter(memory.read_ids([entry_id])), None)
     except (OSError, ValueError, RuntimeError) as exc:
         return _formal_read_error(exc)
     if target is None:
@@ -764,6 +772,8 @@ def _remember_scope_repair_hint() -> str:
 
 
 # LLM: user_explicit evidence resolves the exact current Gateway request in ConversationStore, never a text search guess.
+#   从会话末尾按页倒读（每页按请求分组收齐，最多 _USER_EVIDENCE_MAX_PAGES_COUNT 页），不再整段读取会话；
+#   读到比命中行更早的其它行即可确认本请求的用户行已读全。读错、超出页数或命中不唯一都返回空，交原缺证据处理。
 # 函数用途: 生成可由 PromotionService 回查的当前用户消息引用；缺失或不唯一时返回空。
 def _current_user_message_ref(agent: object, candidate_content: str) -> dict[str, object] | None:
     current = getattr(agent, "_current_run_params", None)
@@ -772,21 +782,11 @@ def _current_user_message_ref(agent: object, candidate_content: str) -> dict[str
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     request_id = str(getattr(current, "request_id", "") or "").strip()
     store = getattr(agent, "conversation_store", None)
-    reader = getattr(getattr(store, 'messages', None), 'recent_report', None)
+    reader = getattr(getattr(store, 'messages', None), 'history_page_report', None)
     if not thread_id or not request_id or not callable(reader):
         return None
-    try:
-        messages, errors = reader(thread_id, limit=0)
-    except Exception:
-        return None
-    matches = [
-        item
-        for item in messages
-        if str(getattr(item, "role", "") or "") == "user"
-        and str((getattr(item, "metadata", {}) or {}).get("gateway_request_id") or "")
-        == request_id
-    ]
-    if errors or len(matches) != 1:
+    matches = _request_user_rows(reader, thread_id, request_id)
+    if matches is None or len(matches) != 1:
         return None
     message = matches[0]
     content = str(getattr(message, "content", "") or "")
@@ -806,6 +806,35 @@ def _current_user_message_ref(agent: object, candidate_content: str) -> dict[str
         "content_hash": "sha256:"
         + hashlib.sha256(content.encode("utf-8", "replace")).hexdigest(),
     }
+
+
+# 函数用途: 判断一条会话行是否是当前 Gateway 请求的用户原话。
+def _is_request_user_row(row: object, request_id: str) -> bool:
+    metadata = getattr(row, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return (str(getattr(row, "role", "") or "") == "user"
+            and str(metadata.get("gateway_request_id") or "") == request_id)
+
+
+# LLM: 只按结构化 role 与 gateway_request_id 匹配，不看正文；页读错误、异常或页数用尽仍未确认时返回 None。
+# 函数用途: 从会话末尾有界倒读，收集当前请求的全部用户行。
+def _request_user_rows(reader, thread_id: str, request_id: str) -> list[object] | None:
+    matches: list[object] = []
+    before = None
+    for _page_number in range(_USER_EVIDENCE_MAX_PAGES_COUNT):
+        try:
+            page = reader(thread_id, before=before, limit=_USER_EVIDENCE_PAGE_ROWS)
+        except Exception:
+            return None
+        if getattr(page, "errors", ()):
+            return None
+        rows = tuple(getattr(page, "rows", ()) or ())
+        matches.extend(row for row in rows if _is_request_user_row(row, request_id))
+        older_than_match = bool(matches and rows and not _is_request_user_row(rows[0], request_id))
+        if older_than_match or int(getattr(page, "before", 0) or 0) <= 0:
+            return matches
+        before = int(page.before)
+    return None
 
 
 # LLM: 无法解析的声明只存去内容化标识，不伪造operation；准入门与晋升verifier均不能据此取得成功证据。
@@ -914,6 +943,14 @@ def _canonical_observation_sources(provenance: _ObservationProvenance) -> list[t
 
 def _formal_read_error(exc: Exception) -> ToolHandlerOutcome:
     # 读库出错不能充当条目不存在的证据或启动旧删除收尾，也不暴露异常中的原私密正文。
+    if isinstance(exc, ValueError) and str(exc) == "MEMORY_AUTHORITY_INCOMPLETE":
+        # 有界读取没覆盖全库（读索引还在重建）同样不算条目不存在；稍后重试即可，不改走全量读取。
+        return _memory_error(
+            "正式记忆条目较多且读索引尚未重建完成，本次有界读取未覆盖全库，尚未核实条目或执行变更。",
+            "MEMORY_AUTHORITY_UNREADABLE",
+            hint="稍后重试即可，后台维护会补齐读索引。",
+            not_started=True,
+        )
     return _memory_error(
         f"正式记忆库读取失败（{type(exc).__name__}），尚未核实条目或执行变更。",
         "MEMORY_AUTHORITY_UNREADABLE",
@@ -923,18 +960,26 @@ def _formal_read_error(exc: Exception) -> ToolHandlerOutcome:
 
 
 # LLM: Listing reads only active long_term authority; candidates, ops and daily never appear here.
-# 函数用途: 返回正式长期记忆及其稳定编号、版本和结构化范围。
-def _memory_list_result(memory: object, scope=None) -> ToolHandlerOutcome:
+#   先按当前范围过滤再分页（每页至多 _MEMORY_LIST_PAGE_ENTRIES 条，按 entry_id 排序），不读全库；
+#   一页装得下时回执与旧版相同，只有还有更多时才加 next_cursor 和续页提示。
+# 函数用途: 返回一页正式长期记忆及其稳定编号、版本和结构化范围。
+def _memory_list_result(memory: object, scope=None, *, cursor: str = "") -> ToolHandlerOutcome:
+    def visible(record: object) -> bool:
+        return scope is None or recall.long_term_record_matches_scope(record, scope)
+
     try:
-        entries = [_memory_record_payload(record) for record in memory.all()
-                   if scope is None or recall.long_term_record_matches_scope(record, scope)]
+        records, next_cursor = memory.list_page(after_id=cursor, limit=_MEMORY_LIST_PAGE_ENTRIES, predicate=visible)
     except (OSError, ValueError, RuntimeError) as exc:
         return _formal_read_error(exc)
-    return ToolHandlerOutcome(
-        "remember",
-        True,
-        json.dumps({"ok": True, "action": "list", "entries": entries}, ensure_ascii=False),
-    )
+    payload: dict[str, object] = {"ok": True, "action": "list",
+                                  "entries": [_memory_record_payload(record) for record in records]}
+    if next_cursor:
+        payload["next_cursor"] = next_cursor
+        payload["hint"] = (
+            "本页之后还有正式长期记忆；需要时用 "
+            f'{{"action":"list","cursor":"{next_cursor}"}} 继续翻页，不要据本页判断某条不存在。'
+        )
+    return ToolHandlerOutcome("remember", True, json.dumps(payload, ensure_ascii=False))
 
 
 # LLM: Public list payload exposes formal content but not internal candidate/status history.

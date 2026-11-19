@@ -159,7 +159,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "c0f2f90444b195765fbfc3b554b54b140240da63f29f66b27f43b5ca74386e75",
+    "body_hash": "5d4e55186e79cb3a8de4b17840ed8eb48717f50b541ccf2114eb8453450b1e7d",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -1609,6 +1609,10 @@
                     "type": "object"
                   },
                   "type": "array"
+                },
+                "cursor": {
+                  "description": "仅 list 续页：原样传上一页回执的 next_cursor；首页省略。",
+                  "type": "string"
                 }
               },
               "type": "object"
@@ -2303,7 +2307,7 @@
     "timestamp": 3,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "74558d50192fc671991d508d8c495cfea4f752344eb4d8883d51bbf7c5a2df6a",
+    "body_hash": "16e2b20e79822eabd193a211b0802a1cb4b4d7f8d784676468f37e191a3dc75d",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -3776,6 +3780,10 @@
                     "type": "object"
                   },
                   "type": "array"
+                },
+                "cursor": {
+                  "description": "仅 list 续页：原样传上一页回执的 next_cursor；首页省略。",
+                  "type": "string"
                 }
               },
               "type": "object"
@@ -4569,7 +4577,7 @@
     "timestamp": 4,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "46f95f102bbf3cb8d9f6b0a25148ae545241ecabd1b8b8d645d7894699204da0",
+    "body_hash": "54ceb19b0cc9a3a83e9f209e0d0922e87cb728b0309e3aec906b427950009f80",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -6065,6 +6073,10 @@
                     "type": "object"
                   },
                   "type": "array"
+                },
+                "cursor": {
+                  "description": "仅 list 续页：原样传上一页回执的 next_cursor；首页省略。",
+                  "type": "string"
                 }
               },
               "type": "object"

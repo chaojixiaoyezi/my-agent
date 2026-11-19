@@ -163,6 +163,7 @@ def execute_retention_plan(
         isolated_errors=plan.isolated_errors,
         scan_partial=scan_partial,
         scan_cursor=scan_cursor,
+        uncurated_threads=plan.uncurated_threads,
     )
     _commit_step(lambda: _append_retention_audit(home, report=report, now=now), audit_transition)
     return report
@@ -782,6 +783,13 @@ def _trash_conversation(
             or not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(action.path))
         ):
             return replace(action, status="state_changed")
+        if action.curator_cursor is not None:
+            # 规划时证明“后台整理已读完”所依据的整理游标必须原样未变；变了或读不出就放弃，下一轮重新规划。
+            from .retention_scan import curator_thread_cursors
+
+            cursors = curator_thread_cursors(home)
+            if cursors is None or cursors.get(thread.thread_id, "") != action.curator_cursor:
+                return replace(action, status="state_changed")
         if thread.metadata.get("thread_kind") == "scheduled":
             from ..conversation.thread_read_index import scheduled_thread_terminal_proof
 

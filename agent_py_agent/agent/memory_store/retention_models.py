@@ -145,6 +145,9 @@ class MemoryRetentionAction:
     record_id: str = ""
     cutoff_timestamp: float | None = None
     related_paths: tuple[Path, ...] = ()
+    # 会话回收专用：后台整理已读完该会话时，规划所见的该会话整理游标（不透明消息 ID）；执行时游标变了就放弃。
+    #   None 表示规划时后台提取未开启、没有做这项绑定；不进报告 JSON。
+    curator_cursor: str | None = None
 
     # LLM: 报告不得包含候选/对话正文；related_paths 只暴露管理员本地路径。
     # 函数用途: 将一条计划或结果转成 JSON 友好对象。
@@ -185,6 +188,9 @@ class MemoryRetentionReport:
     isolated_errors: tuple[MemoryRetentionError, ...] = field(default_factory=tuple)
     scan_partial: bool = False
     scan_cursor: dict = field(default_factory=dict)
+    # 本轮超过保留期、但后台整理游标之后仍有可学习消息（或读不完、读不出）的会话数：
+    #   后台提取开启时这些会话被保护不回收；关闭时照常回收，这里只计数。0 时不进报告 JSON。
+    uncurated_threads: int = 0
 
     # LLM: 任一策略/状态/动作错误都使报告不成功；legal hold 是安全停止而非错误。
     # 函数用途: 告诉 CLI 是否可把本轮视为完整成功。
@@ -213,6 +219,7 @@ class MemoryRetentionReport:
             "isolated_errors": [error.to_dict() for error in self.isolated_errors],
             "scan_partial": self.scan_partial,
             "scan_cursor": self.scan_cursor,
+            **({"uncurated_threads": self.uncurated_threads} if self.uncurated_threads else {}),
         }
 
 

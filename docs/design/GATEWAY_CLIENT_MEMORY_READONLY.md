@@ -32,9 +32,10 @@ C recent → read_memory_records_from_path ──┘
 过期、坏行跳过与读取 report 容错全部复用原逻辑。原 scanner 对读取错误 report 不向 all 抛出的
 语义也保持；本片没有声称增加严格坏库诊断。物化真正抛出的错误继续只返回安全类型，不返半份正文。
 
-C 的 search/remember 返回原结构化 `COORDINATOR_BUSINESS_NOT_READY`，不会静默创建
-foreign Agent 或借 C 角色扩大写权。未知 operation 保留 `UNSUPPORTED_OPERATION`。
-这两项仍需后续真实 domain/W 接线；Count0 原 recent/search/remember 及用户确认规则不变。
+（2026-11-19 更新）本片落地时 C 的 search/remember 返回结构化 `COORDINATOR_BUSINESS_NOT_READY`；
+此后 J3 已把两者接到当前 owner 的真实资源上执行（`gateway_parts/coordinator_client_memory.py`，
+见 `COORDINATOR_CLIENT_MEMORY_CLOSURE.md`），仍不静默创建 foreign Agent、不借 C 角色扩大写权。
+未知 operation 保留 `UNSUPPORTED_OPERATION`；Count0 原 recent/search/remember 及用户确认规则不变。
 
 验证采用临时真实 C guard/controller/Root、原凭据 middleware、原 Handler 内存输入输出；
 不启动监听器或服务、不发网络、不建 W、不调用模型。实际 healthy 基础 Agent 仅用原

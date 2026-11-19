@@ -1867,13 +1867,6 @@ def _english_keywords(text: str) -> list[str]:
     return kept[:_EN_KEYWORD_MAX_COUNT]
 
 
-# LLM: 中文关键词来自稳定 subject_key 的机械拆段(与 lessons routing 同法),不读正文。
-# 函数用途: 从 subject_key 生成中文关键词段。
-def _cn_keywords(subject_key: str) -> list[str]:
-    parts = [part for part in re.split(r"[^一-鿿A-Za-z0-9]+", str(subject_key or "")) if len(part) >= 2]
-    return list(dict.fromkeys(parts))[:12]
-
-
 # LLM: 与 store 共用同一 normalized 合同，promotion 不复制第三套规范化。
 # 函数用途: 在既有同 subject/scope 条目中按规范化正文找同文条目。
 def _same_content_in(
@@ -1981,7 +1974,6 @@ def _long_term_attributes(candidate: MemoryCandidate) -> dict[str, object]:
         "valid_from": candidate.valid_from,
         "valid_until": candidate.valid_until,
         "keywords_en": _english_keywords(candidate.content),
-        "keywords_cn": _cn_keywords(candidate.subject_key),
         "evidence_refs": normalize_reference_list(
             [
                 *candidate.source_message_refs,

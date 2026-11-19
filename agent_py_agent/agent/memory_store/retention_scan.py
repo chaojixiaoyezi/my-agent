@@ -51,6 +51,7 @@ from .candidates import (
     _validate_cold_envelope,
     candidate_retention_eligible,
 )
+from .curator_models import MemoryCuratorState
 from .curator_run_log import _CURSOR_CHECKPOINT, _CURSOR_DELTA
 from .reference_pins import target_pin_read, target_pin_read_enabled, watch_pin_source
 from .retention_models import (
@@ -69,6 +70,10 @@ from .retention_scan_budget import (
 
 # 一天按 86400 秒算：保留期换算成秒的统一口径。
 _DAY_SECONDS = 86_400
+# 过期会话回收前按后台整理游标往后探查可学习消息时，每页读取的会话行数。
+_UNCURATED_PROBE_PAGE_ROWS = 16
+# 同一会话最多探查的页数；读不完按“未确认读完”处理。
+_UNCURATED_PROBE_MAX_PAGES_COUNT = 4
 _SUBAGENT_SCRATCH_PATHS = (
     Path("inbox"),
     Path("outbox"),
@@ -163,6 +168,7 @@ def build_retention_plan(
         policy_fingerprint=fingerprint,
         scan_partial=context.scan_partial,
         scan_cursor=context.scan_cursor,
+        uncurated_threads=context.uncurated_threads,
     )
 
 
@@ -185,6 +191,12 @@ class _RetentionScanContext:
     pin_projection: object = None
     requested_roots: tuple[Path, ...] | None = None
     policy_fingerprint: str = ""
+    # 过期会话是否已被后台整理读完的判定材料（提取是否开启、逐会话游标、排除名单），首次用到时读一次，本轮共用。
+    curator_facts: tuple | None = None
+    # 本轮过期但整理游标之后仍有可学习消息（或读不完/读不出）的会话数，进报告 uncurated_threads。
+    uncurated_threads: int = 0
+    # 只读打开的会话库，按会话根缓存，供探查整理游标之后的消息。
+    conversation_stores: dict = field(default_factory=dict)
 
     # LLM: 法律保留任务 ID 从已解析策略转成统一集合，供所有扫描器按精确身份复用。
     # 函数用途: 返回禁止清理的任务编号集合。
@@ -2576,6 +2588,9 @@ def _conversation_actions(
             errors.extend(related_errors)
             if related_errors:
                 continue
+            protect, curator_cursor = (False, None) if context is None else _uncurated_thread_check(context, root, thread)
+            if protect:
+                continue
             actions.append(
                 _action(
                     category="conversation",
@@ -2596,10 +2611,99 @@ def _conversation_actions(
                         record_id=thread.thread_id,
                         cutoff_timestamp=action_cutoff,
                         related_paths=related,
+                        curator_cursor=curator_cursor,
                     ),
                 )
             )
     return actions
+
+
+# LLM: 整理状态是原子替换写入的单个 JSON，这里无锁只读（不取整理状态锁，执行端在消息锁内复核时也安全）；
+#   缺文件是空表（从未整理），坏文件或坏结构返回 None，调用方按“未确认”处理，不能当作已整理。
+# 函数用途: 读出后台整理的逐会话游标表（会话 ID → 不透明消息 ID）。
+def curator_thread_cursors(home: object) -> dict[str, str] | None:
+    path = getattr(home, "owner_memory_curator_state_json", None)
+    if path is None:
+        return None
+    report = read_json_object_report(Path(path), context="memory_retention.curator_state")
+    if report.load_error is not None:
+        return None
+    try:
+        state = MemoryCuratorState.from_dict(report.payload)
+    except (TypeError, ValueError):
+        return None
+    return dict(state.per_thread_cursors)
+
+
+# LLM: 只看结构化开关：owner 记忆总闸、memory_curator_enabled 与生效的后台辅助模型档案（空=关闭）；冷却与档案暂时
+#   不可用仍算开启（整理稍后会继续）。排除名单读不出时不当作排除，交探查结果决定。
+# 函数用途: 读出本轮判断过期会话是否已被后台整理读完所需的材料，同一轮只读一次。
+def _curator_retention_facts(context: _RetentionScanContext) -> tuple:
+    if context.curator_facts is None:
+        from ..settings.curator_profile import effective_auxiliary_model_profile
+        from ..user_space.owner_policy import effective_memory_enabled
+        from .learning_exclusions import curator_learning_exclusions
+
+        home = context.home
+        policy_path = getattr(home, "owner_memory_policy_json", None)
+        memory_policy = ({} if policy_path is None else
+                         read_json_object_report(Path(policy_path), context="memory_retention.memory_policy").payload)
+        config = context.config
+        enabled = bool(effective_memory_enabled(memory_policy)
+                       and bool(getattr(config, "memory_curator_enabled", True))
+                       and effective_auxiliary_model_profile(config))
+        try:
+            excluded, unreadable = curator_learning_exclusions(home)
+        except (AttributeError, OSError, TypeError, ValueError):
+            excluded, unreadable = frozenset(), True
+        context.curator_facts = (enabled, curator_thread_cursors(home), frozenset() if unreadable else excluded)
+    return context.curator_facts
+
+
+# LLM: 后台提取开启时，整理游标之后还有可学习消息、或读不完/读不出的过期会话都保护（本轮不回收）；关闭时照常回收，
+#   只计入 uncurated_threads。宿主标记不学习的会话不需要整理。已读完时把规划所见游标绑进动作，执行端游标变了就放弃。
+# 函数用途: 判断一个已满足其它回收条件的过期会话是否要因后台整理未读完而保护，并返回要绑定的整理游标。
+def _uncurated_thread_check(context: _RetentionScanContext, root: Path, thread: ConversationThread) -> tuple[bool, str | None]:
+    from .curator_inputs import _thread_learning_excluded
+    from .learning_exclusions import thread_is_excluded
+
+    enabled, cursors, excluded = _curator_retention_facts(context)
+    if _thread_learning_excluded(thread) or thread_is_excluded(thread, excluded):
+        return False, None
+    cursor = None if cursors is None else cursors.get(thread.thread_id, "")
+    verdict = "unknown" if cursor is None else _probe_uncurated_messages(context, root, thread.thread_id, cursor)
+    if verdict == "curated":
+        return False, (cursor if enabled else None)
+    context.uncurated_threads += 1
+    return enabled, None
+
+
+# LLM: 用与后台整理同一个有界续读口 after_slice_report，从整理游标（不透明消息 ID，只作续读起点，不比大小）往后读，
+#   共用本轮扫描预算；第一条未标 learning_excluded 的消息即“未整理”，读到真实末尾才算“已整理”，预算用尽、
+#   读错或页数用尽都是“未确认”。
+# 函数用途: 探查一个会话在整理游标之后是否还有可学习消息。
+def _probe_uncurated_messages(context: _RetentionScanContext, root: Path, thread_id: str, cursor: str) -> str:
+    store = context.conversation_stores.get(root)
+    if store is None:
+        from ..conversation.store import ConversationStore
+
+        store = context.conversation_stores[root] = ConversationStore(root, initialize=False)
+    budget = context.scan_budget if context.scan_budget is not None else RetentionScanBudget.default(context.config)
+    after = cursor
+    for _page_number in range(_UNCURATED_PROBE_MAX_PAGES_COUNT):
+        outcome = store.messages.after_slice_report(
+            thread_id, after_message_id=after, limit=_UNCURATED_PROBE_PAGE_ROWS, budget=budget)
+        if outcome.load_errors:
+            return "unknown"
+        rows = tuple(outcome.rows)
+        if any(not (isinstance(row.metadata, dict) and row.metadata.get("learning_excluded") is True) for row in rows):
+            return "uncurated"
+        if not rows:
+            return "unknown" if outcome.partial else "curated"
+        if not outcome.has_more and len(rows) < _UNCURATED_PROBE_PAGE_ROWS:
+            return "curated"
+        after = str(rows[-1].message_id)
+    return "unknown"
 
 
 # LLM: 精确owner内投影用nofollow读取复核原报告器；缺失、坏解析/时间、链接及交付欠账不能授予快路。
@@ -3036,6 +3140,7 @@ class _ActionProof:
     record_id: str = ""
     cutoff_timestamp: float | None = None
     related_paths: tuple[Path, ...] = ()
+    curator_cursor: str | None = None
 
 
 # LLM: 动作构造器统一生成稳定 ID，防止各扫描器自行定义互相冲突的幂等语义。
@@ -3070,6 +3175,7 @@ def _action(
         record_id=evidence.record_id,
         cutoff_timestamp=evidence.cutoff_timestamp,
         related_paths=evidence.related_paths,
+        curator_cursor=evidence.curator_cursor,
     )
 
 

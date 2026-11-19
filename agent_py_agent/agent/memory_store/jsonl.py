@@ -984,6 +984,59 @@ class _JsonlMemorySearchMixin:
 
         return [current_by_id[entry_id] for entry_id in ordered_ids if entry_id in current_by_id]
 
+    # LLM: 只读分页，严禁 all() 或写访问计数：派生读索引完整时按 entry_id 升序逐窗点查同代正文（resolve 复核版本、
+    #   过期与墓碑）；缺索引、未完整或换代时退回与 read_ids 相同的有界权威扫描，超预算抛 MEMORY_AUTHORITY_INCOMPLETE。
+    #   predicate 先于分页过滤；一次最多检查 _LIST_PAGE_SCAN_MAX_RECORDS 条坐标，游标只是最后检查到的 entry_id，
+    #   中间有写入换代也能接着翻页。
+    # 函数用途: 返回 after_id 之后一页当前可见的正式长期记忆，以及下一页游标（没有更多时为空串）。
+    def list_page(
+        self,
+        *,
+        after_id: str = "",
+        limit: int = 50,
+        predicate: Callable[[MemoryRecord], bool] | None = None,
+    ) -> tuple[list[MemoryRecord], str]:
+        from ._jsonl_indexing import bounded_authority_records
+        from .read_index import MemoryReadIndex, MemoryReadIndexGenerationConflict
+
+        after = str(after_id or "").strip()
+        limit = max(1, int(limit))
+        accept = predicate if callable(predicate) else (lambda _record: True)
+        index = MemoryReadIndex(self.path)
+        try:
+            page = index.page_after(after, limit=_LIST_PAGE_SCAN_MAX_RECORDS)
+            if page is not None:
+                rows, more, operation_id = page
+                selected: list[MemoryRecord] = []
+                for start in range(0, len(rows), _LIST_PAGE_RESOLVE_WINDOW_RECORDS):
+                    window = rows[start:start + _LIST_PAGE_RESOLVE_WINDOW_RECORDS]
+                    resolved = {record.entry_id: record for record in index.resolve(window, operation_id=operation_id)}
+                    for position, row in enumerate(window, start):
+                        record = resolved.get(row["id"])
+                        if record is None or not accept(record):
+                            continue
+                        selected.append(record)
+                        if len(selected) == limit:
+                            return selected, (record.entry_id if more or position + 1 < len(rows) else "")
+                return selected, (rows[-1]["id"] if more and rows else "")
+        except MemoryReadIndexGenerationConflict:
+            pass
+        records, coverage = bounded_authority_records(
+            self,
+            max_records=_AUTHORITY_SCAN_MAX_RECORDS,
+            max_bytes=_AUTHORITY_SCAN_MAX_BYTES,
+        )
+        if bool(coverage.get("partial")):
+            raise ValueError("MEMORY_AUTHORITY_INCOMPLETE")
+        now = time.time()
+        visible = sorted(
+            (record for record in records
+             if record.entry_id > after and not (record.expires_at and record.expires_at <= now) and accept(record)),
+            key=lambda record: record.entry_id,
+        )
+        selected = visible[:limit]
+        return selected, (selected[-1].entry_id if len(visible) > limit else "")
+
     # LLM: 仅凭固定 5 个权威控制源与最近过期时间做有界 LRU 投影缓存，热命中禁 stat 分片/deepcopy/all()；
     #   多页库只缓存同代前向续扫中间态并继续抛不可用，直到完整扫完才返回全集，绝不对外返回部分 scope 列表。
     # 函数用途: 返回当前未过期 active+cold 权威下指定 scope_type 的唯一不可变 (scope_type, scope_key) 元组。
@@ -1322,6 +1375,10 @@ class _JsonlMemorySearchMixin:
 _AUTHORITY_SCAN_MAX_RECORDS = 1000
 # 正式记忆权威记录一次有界核验最多读取的字节数。
 _AUTHORITY_SCAN_MAX_BYTES = 2 * 1024 * 1024
+# 正式记忆列表一次分页最多检查的读索引坐标条数（按范围过滤前计数）。
+_LIST_PAGE_SCAN_MAX_RECORDS = 1000
+# 正式记忆列表分页每次回读同代正文的坐标窗口条数；凑满一页即停，不多读后面的窗口。
+_LIST_PAGE_RESOLVE_WINDOW_RECORDS = 100
 # 作用域对有界 LRU 投影缓存最多保留的域类型条目数。
 _SCOPE_PAIRS_CACHE_MAX_ENTRIES = 32
 

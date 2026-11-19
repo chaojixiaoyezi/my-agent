@@ -830,7 +830,7 @@ def _commit_active_turn_compact(
     *,
     provider_compaction: dict[str, object] | None = None,
 ) -> ConversationThread:
-    return commit_live_tool_compact(
+    updated = commit_live_tool_compact(
         agent,
         plan.binding,
         LiveToolCompactCommitRequest(
@@ -861,6 +861,11 @@ def _commit_active_turn_compact(
             ),
         ),
     )
+    # 这条活动回合压缩（请求恢复路径）不经过 live 摘要入口，提交返回后在锁外登记一次 pre_compact；失败不影响已提交结果。
+    from ..agent_core._finalization_service import _request_memory_curator
+
+    _request_memory_curator(agent, "pre_compact")
+    return updated
 
 
 # LLM: The newest whole records are retained up to the shared recent-tail token budget. At least

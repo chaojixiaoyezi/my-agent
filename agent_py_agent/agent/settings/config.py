@@ -452,8 +452,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_remote_enabled: bool = True
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
     memory_curator_enabled: bool = True
-    # 留空时按消息来源会话的主代理模型整理（2026-10-02 用户拍板），会话没选或不可用时用 owner 默认；填编号则固定用它，
-    # 某个 owner 解析不到这个编号时该 owner 改用自己的默认模型（curator_profile_unavailable_fallback）。
+    # 后台辅助模型档案编号，后台记忆整理与技能自动总结共用：留空表示关闭（不发后台模型调用，也不退回会话或主对话模型）；
+    # 填编号则只用这个档案，某个 owner 解析不到时该 owner 本次不整理（运行记录带 curator_profile_unavailable_fallback:<原因>）。
+    # 每批整理现读生效值（含用户 YAML），改动不需要重启。
     memory_curator_model_profile: str = ""
     memory_curator_interval_seconds: int = 10_800
     memory_curator_turn_threshold: int = 10
@@ -462,8 +463,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 记忆策展使用独立后台车道；限制并发可避免历史 owner 积压抢占主会话/子代理唤醒线程。
     memory_curator_workers: int = 2
     memory_curator_daily_finalize_hour: int = 23
-    # LLM: 仅控制已合法触发批次的候选尝试，不签正式发布或候选only派发；与YAML/Curator/原确认末门同步。
-    # 字段用途: conservative_v1保留结构化候选处理回执，conservative_v2另允许同主题唯一旧条目的版本绑定自动替换，manual_only跳过。
+    # LLM: 只作用于已合法触发的策展批次；通过宿主学习来源、证据、重复门槛与安全门的候选由 Curator 自主审核归档，
+    #   原 owner、冲突、配额与目标版本 CAS 照旧；与 agent_config.yaml 说明同步。AGENTS.md 永不自动写，SOUL.md 须用户显式确认。
+    # 字段用途: conservative_v1 对合格候选自动审核归档，conservative_v2 另允许同主题唯一旧条目的版本绑定自动替换，manual_only 关闭 Curator 自动晋升。
     memory_curator_auto_promotion_policy: str = "conservative_v1"
     memory_lesson_min_occurrences: int = 2
     memory_hot_min_occurrences: int = 3

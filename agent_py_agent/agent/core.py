@@ -197,9 +197,8 @@ def _export_model_endpoint_env(config) -> None:
 
 
 # LLM: 档案与整组连接只由原设置解析器给出（按该 owner 自己的模型目录，含管理员共享），再走唯一后端工厂，不创建第二 Agent。
-#   指定档案在本 owner 解析不到时（2026-10-02 3a 定：指定档案只对能解析到它的 owner 生效）改用本 owner 默认模型，
+#   指定档案只对能解析到它的 owner 生效；解析不到时返回未配置后端、本次不整理（不退回 owner 默认模型），
 #   只在建实例时记一条 info 日志；运行记录里的 curator_profile_unavailable_fallback:<原因> 由路由器每次运行写。
-#   默认模型也不可用时保留指定档案自己的诊断，返回未配置后端（运行失败为 CURATOR_MODEL_NOT_CONFIGURED，按原规则退避）。
 # 函数用途: 为无工具后台策展构造独立非流式模型适配器，并返回解析后的 provider/model 标识。
 def _build_memory_curator_backend(
     agent: object,
