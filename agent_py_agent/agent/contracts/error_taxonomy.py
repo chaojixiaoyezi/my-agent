@@ -3288,6 +3288,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
         recovery_hint="同一会话的执行通道正被占用；保留原历史和游标，等已有操作结束后重试。",
     ),
+    "COMPACT_CONTROL_BUSY": ErrorContract(
+        code="COMPACT_CONTROL_BUSY",
+        category="compact",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="网关同时进行的手动 compact 已达控制通道上限，本次未压缩；原历史、游标和代次保持不变，短暂退避后重试。",
+    ),
     "COMPACT_INTERRUPTED": ErrorContract(
         code="COMPACT_INTERRUPTED",
         category="compact",

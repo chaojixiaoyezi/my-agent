@@ -50,6 +50,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path
+from stat import S_ISLNK
 from typing import Any
 
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
@@ -1356,22 +1357,40 @@ def _blocked_subagent_is_quiescent(owner_home: Path, run_id: str, payload: dict[
 _SUBAGENT_SCAN_MAX_DIRS = 5000
 
 
+# LLM: 一次lstat同时给出原(mtime,size,ino)签名与解析缓存门所需stat；普通文件lstat即stat，仅链接才跟随复读保持原签名口径。
+# 函数用途: 取agents页state/locator元数据；不存在返回("missing",)与None，其余读错抛给调用方既有失败回退。
+def _subagent_file_status(path: Path) -> tuple[tuple[Any, ...], os.stat_result | None]:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return ("missing",), None
+    if S_ISLNK(info.st_mode):
+        return _file_signature(path), info
+    return (info.st_mtime_ns, info.st_size, info.st_ino), info
+
+
 # LLM: 签名与wake游标独立；仅本页读取state/locator并按分类同源规则选择目标，签入目标存在性，读错则拒绝缓存。
+#   state/locator 正文经有界解析缓存（仅字段，不含结论）取得，指纹不符即按原 nofollow 入口重读；目标存在性每轮现stat。
 # 函数用途: 为owner事实缓存生成有界agents读集签名，覆盖孤儿过滤实际依赖而不扫描目标目录内容。
 def _subagent_page_signature(owner_home: Path) -> tuple[Any, ...]:
     from .subagents.services.persistence.locator_hygiene import (
         agent_projection_page,
-        projection_workspace_path,
         read_projection_object,
+        select_projection_workspace,
+        wake_projection_fields,
     )
+
+    def read(path: Path) -> dict[str, Any]:
+        return read_projection_object(path, optional=True)
 
     runs, complete, _positive = agent_projection_page(owner_home, _SUBAGENT_SCAN_MAX_DIRS, purpose="signature")
     records = []
     for run in runs:
-        state_fp = _file_signature(run / "state.json")
-        locator_fp = _file_signature(run / "workspace_locator.json")
-        payload = read_projection_object(run / "state.json", optional=True)
-        workspace = projection_workspace_path(run, payload)
+        state_fp, state_info = _subagent_file_status(run / "state.json")
+        locator_fp, locator_info = _subagent_file_status(run / "workspace_locator.json")
+        payload = wake_projection_fields(run / "state.json", state_info, read)
+        locator = wake_projection_fields(run / "workspace_locator.json", locator_info, read)
+        workspace = select_projection_workspace(locator, payload)
         records.append((run.name, state_fp, locator_fp,
                         None if workspace is None else (str(workspace), _subagent_workspace_present(workspace))))
     return _dir_own_signature(owner_home / "agents"), complete, tuple(records)
@@ -1437,16 +1456,27 @@ def _probe_subagent_page(owner_home: Path) -> tuple[bool, bool]:
     return positive, exhausted
 
 
+# 函数用途: 唤醒判定按原口径现读 state.json 并要求 JSON 对象；仅在解析缓存未命中或不可信时调用。
+def _read_wake_state(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("state.json is not a JSON object")
+    return payload
+
+
 # LLM: 保持原单投影closeout优先、孤儿过滤与runtime终态/静止判据；只读，不将读取失败当新活跃事实。
+#   只复用指纹一致的解析字段，结论每轮按字段现判；BLOCKED/RUNNING 的 runtime 库与孤儿目标检查照旧每轮执行。
 # 函数用途: 为分页器观察一个真实运行目录是否存在需驱动的子代理事实。
 def _subagent_run_has_wake_fact(owner_home: Path, run_dir: Path) -> bool:
-    from .subagents.services.persistence.locator_hygiene import projection_runtime_facts
+    from .subagents.services.persistence.locator_hygiene import (
+        projection_runtime_facts,
+        wake_projection_fields,
+    )
 
+    state = run_dir / "state.json"
     try:
-        payload = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+        payload = wake_projection_fields(state, os.lstat(state), _read_wake_state)
     except (OSError, UnicodeError, ValueError):
-        return False
-    if not isinstance(payload, dict):
         return False
     if bool(payload.get("runtime_closeout_pending")):
         return True

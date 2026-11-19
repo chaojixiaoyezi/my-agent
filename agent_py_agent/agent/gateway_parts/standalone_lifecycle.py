@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ..common.nofollow_fs import read_bytes_beneath
 from ..common.strict_json import load_strict_json
+from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
 from .io import (
     _flock_unlock,
     _open_private_lock_descriptor,
@@ -105,7 +106,7 @@ def record_standalone_stop_observation(lifecycle, context, cleanup: dict) -> dic
     identity = dict(context.process_identity)
     if not identity or identity.get("pid") != os.getpid():
         raise ValueError("缺少本次服务的真实启动身份。")
-    raw = read_bytes_beneath(context.paths.root, ("gateway_state.json",), max_bytes=1024 * 1024)
+    raw = read_bytes_beneath(context.paths.root, ("gateway_state.json",), max_bytes=GATEWAY_STATE_MAX_BYTES)
     before = load_strict_json(raw) if raw is not None else None
     if type(before) is not dict:
         raise ValueError("单进程终止状态不可读取。")
@@ -117,7 +118,7 @@ def record_standalone_stop_observation(lifecycle, context, cleanup: dict) -> dic
     # 函数用途: 将有限停机观察与完整前像做一次CAS，不新建业务账。
     def update(current):
         lifecycle.require_held()
-        if (read_bytes_beneath(context.paths.root, ("gateway_state.json",), max_bytes=1024 * 1024) != raw
+        if (read_bytes_beneath(context.paths.root, ("gateway_state.json",), max_bytes=GATEWAY_STATE_MAX_BYTES) != raw
                 or json.dumps(current, sort_keys=True, ensure_ascii=False, allow_nan=False) != expected):
             raise ValueError("单进程终止状态已变化。")
         return {**current, "standalone_shutdown_observation": {

@@ -41,16 +41,18 @@ _IS_WINDOWS = os.name == "nt"
 _DEFAULT_SUBPROCESS_RUN = subprocess.run
 _LOGGER = logging.getLogger(__name__)
 
-# LLM: 只存原生复核成功的精确三元组；锁内合并并发探针，FIFO最多256项，不写磁盘也不代表实例仍存活。
+# LLM: 只存原生复核成功的精确三元组；锁只护查找与发布，ps在锁外执行，FIFO最多256项，不写磁盘也不代表实例仍存活。
 # 缓存用途: 让升级前旧locale指纹与新观察复用已验证的等价关系，未知/不匹配不入缓存。
 _LEGACY_BIRTH_CACHE_MAX_COUNT = 256
 _LEGACY_BIRTH_EQUIVALENTS: dict[tuple[int, str, str], None] = {}
 _LEGACY_BIRTH_CACHE_LOCK = threading.Lock()
 
-# 只缓存内核微秒出生身份到旧host文本的投影，不缓存存活；与旧locale等价证明共用锁合并miss。
+# 只缓存内核微秒出生身份到旧host文本的投影，不缓存存活；与旧locale等价证明共用锁，只护查找与发布（ps在锁外，发布前复核内核出生身份）。
 _PID_BIRTH_TOKEN_CACHE: OrderedDict[tuple[int, str], str] = OrderedDict()
 # 出生身份投影缓存最多保留2048项，不代表实例仍存活。
 _PID_BIRTH_TOKEN_CACHE_MAX_COUNT = 2048
+# 出生身份投影的同键在途采集（键同缓存）；只在全局锁下登记/移除，跟随者锁外等待领头者完成。
+_PID_BIRTH_TOKEN_FLIGHTS: dict[tuple[int, str], threading.Event] = {}
 _PS_RELATION_CACHE: dict[str, tuple[float, dict[int, int], bool]] = {}
 _PS_RELATION_CACHE_LOCK = threading.Lock()
 # 只读ps关系表最多复用0.25秒；终止选取仍强制新鲜观察。
@@ -1175,7 +1177,7 @@ def _darwin_zombie_root_info(pid: int) -> tuple[int, str] | None:
         identity = _darwin_zombie_kernel_identity(pid)
         if identity is not None:
             group, birth = identity
-            token = _cached_host_birth_token(pid, birth)
+            token = _cached_host_birth_token(pid, birth, observe_birth=_observed_zombie_birth)
             return (group, token) if token else None
     try:
         result = subprocess.run(
@@ -1599,38 +1601,76 @@ def capture_process_birth_token(pid: int) -> str:
     except (IndexError, OSError):
         pass
     if _native_posix_probe_enabled():
-        try:
-            from ..gateway_parts.multiprocess_native_host_observation import process_birth
-
-            # store_birth在Darwin只投影到秒；必须保留原pbi_start_tvsec:pbi_start_tvusec作为键。
-            kernel_birth = process_birth(int(pid))
-        except (ImportError, OSError, TypeError, ValueError, AttributeError):
-            kernel_birth = None
-        if kernel_birth is not None and str(kernel_birth):
-            return _cached_host_birth_token(pid, str(kernel_birth))
+        # store_birth在Darwin只投影到秒；必须保留原pbi_start_tvsec:pbi_start_tvusec作为键。
+        kernel_birth = _observed_kernel_birth(pid)
+        if kernel_birth:
+            return _cached_host_birth_token(pid, kernel_birth, observe_birth=_observed_kernel_birth)
         # libproc拒读zombie；同一KERN_PROC_PID完整身份可继续命中原host-token投影，
         # 每次仍实际查内核，不能把旧缓存当作该PID仍存在或仍为同一实例。
         identity = _darwin_zombie_kernel_identity(pid)
         if identity is not None:
-            return _cached_host_birth_token(pid, identity[1])
+            return _cached_host_birth_token(pid, identity[1], observe_birth=_observed_zombie_birth)
     return _read_host_birth_token(pid)
 
 
-# LLM: 锁覆盖命中与ps采集；完整内核birth同时进入键和返回值，只缓存成功身份，不缓存存活判断。
-# 函数用途: 合并相同PID出生实例的并发采集，保留微秒身份供最终信号资格比对。
-def _cached_host_birth_token(pid: int, kernel_birth: str) -> str:
+# LLM: 与取缓存键时同一条libproc读取；未知/读失败返回None。发布前复核时None只表示观察不到（返回ps结果但不入缓存），
+#   只有观察到不同出生身份才视为身份已变。
+# 函数用途: 读取PID当前实例的完整内核微秒出生身份。
+def _observed_kernel_birth(pid: int) -> str | None:
+    try:
+        from ..gateway_parts.multiprocess_native_host_observation import process_birth
+
+        birth = process_birth(int(pid))
+    except (ImportError, OSError, TypeError, ValueError, AttributeError):
+        return None
+    return str(birth) if birth is not None and str(birth) else None
+
+
+# LLM: zombie的出生身份只来自同一KERN_PROC_PID完整观察；拿不到即None，不借缓存。
+# 函数用途: 重新读取僵尸PID当前的内核微秒出生身份。
+def _observed_zombie_birth(pid: int) -> str | None:
+    identity = _darwin_zombie_kernel_identity(pid)
+    return identity[1] if identity is not None else None
+
+
+# LLM: 全局锁只覆盖命中查找、同键在途登记与发布，ps在锁外执行（一次fork+ps不再拖住其它PID的命中）；同键并发
+#   miss只由领头者跑一次ps，跟随者锁外等该键完成后重查，领头失败时依次接手重采（同原锁内串行语义）。发布前用同一
+#   内核观察复核：观察到不同出生身份（ps期间PID被复用）时不发布、返回空串（未知，不得据此发信号）；观察不到
+#   （实例在ps期间刚退出/被回收）不等于身份改变，按原合同返回ps结果但不入缓存——否则前台进程自然退出时拿不到
+#   身份，原进程组清理会以identity_unavailable放过子进程。完整内核birth同时进入键和返回值，只缓存复核成功的身份。
+# 函数用途: 把内核微秒出生身份投影成兼容旧lstart文本的host token，保留微秒身份供最终信号资格比对。
+def _cached_host_birth_token(
+    pid: int, kernel_birth: str, *, observe_birth: Callable[[int], str | None] | None = None,
+) -> str:
     key = (int(pid), kernel_birth)
-    with _LEGACY_BIRTH_CACHE_LOCK:
-        cached = _PID_BIRTH_TOKEN_CACHE.get(key)
-        if cached is not None:
-            return cached
+    while True:
+        with _LEGACY_BIRTH_CACHE_LOCK:
+            cached = _PID_BIRTH_TOKEN_CACHE.get(key)
+            if cached is not None:
+                return cached
+            flight = _PID_BIRTH_TOKEN_FLIGHTS.get(key)
+            if flight is None:
+                flight = _PID_BIRTH_TOKEN_FLIGHTS[key] = threading.Event()
+                break
+        flight.wait()
+    try:
         value = _read_host_birth_token(pid, kernel_birth=kernel_birth)
         if not value:
+            return ""
+        observed = observe_birth(int(pid)) if observe_birth is not None else kernel_birth
+        if observed is None:
             return value
-        _PID_BIRTH_TOKEN_CACHE[key] = value
-        if len(_PID_BIRTH_TOKEN_CACHE) > _PID_BIRTH_TOKEN_CACHE_MAX_COUNT:
-            _PID_BIRTH_TOKEN_CACHE.popitem(last=False)
+        if observed != kernel_birth:
+            return ""
+        with _LEGACY_BIRTH_CACHE_LOCK:
+            _PID_BIRTH_TOKEN_CACHE[key] = value
+            if len(_PID_BIRTH_TOKEN_CACHE) > _PID_BIRTH_TOKEN_CACHE_MAX_COUNT:
+                _PID_BIRTH_TOKEN_CACHE.popitem(last=False)
         return value
+    finally:
+        with _LEGACY_BIRTH_CACHE_LOCK:
+            _PID_BIRTH_TOKEN_FLIGHTS.pop(key, None)
+        flight.set()
 
 
 # LLM: ps抛OSError或超时/空响应/失败退出时一律保守返回空串，不污染缓存，不制造第二种token格式。
@@ -1700,20 +1740,22 @@ def _birth_token_matches(pid: int, expected_birth_token: str, current_token: str
             time.strptime(f"{month} {fields[2]} {fields[3]} {fields[4]}", "%m %d %H:%M:%S %Y")
         except ValueError:
             key = (pid, expected_birth_token, current)
+            # 锁只护等价表的查找与发布；原生locale的ps在锁外执行，不让一次慢ps串行化其它PID的身份核对。
             with _LEGACY_BIRTH_CACHE_LOCK:
                 if key in _LEGACY_BIRTH_EQUIVALENTS:
                     return True
-                native = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], stdin=subprocess.DEVNULL,
-                                        capture_output=True, text=True, timeout=2, check=False)
-                value = " ".join(native.stdout.split())
-                if native.returncode != 0 or not value:
-                    raise OSError("native process birth observation unavailable") from None
-                if value != " ".join(expected_birth_token[5:].split()):
-                    return False
+            native = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=2, check=False)
+            value = " ".join(native.stdout.split())
+            if native.returncode != 0 or not value:
+                raise OSError("native process birth observation unavailable") from None
+            if value != " ".join(expected_birth_token[5:].split()):
+                return False
+            with _LEGACY_BIRTH_CACHE_LOCK:
                 _LEGACY_BIRTH_EQUIVALENTS[key] = None
                 if len(_LEGACY_BIRTH_EQUIVALENTS) > _LEGACY_BIRTH_CACHE_MAX_COUNT:
                     _LEGACY_BIRTH_EQUIVALENTS.pop(next(iter(_LEGACY_BIRTH_EQUIVALENTS)))
-                return True
+            return True
     return False
 
 

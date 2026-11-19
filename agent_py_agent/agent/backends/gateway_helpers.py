@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import http.client
+import io
 import ipaddress
 import json
 import re
@@ -1689,8 +1690,38 @@ def _stream_first_event_timeout(request: GatewayRequest) -> float:
     return _request_initial_read_timeout(request)
 
 
-# LLM: Check the current execution's interrupt flag at every SSE boundary before exposing provider data to higher layers.
-# 函数用途: 逐行读取 SSE 数据，并在每个安全点检查超时与用户停止。
+# SSE 正文单次块读取的上限（字节）；与 read_response_body 的块大小一致，read1 一次至多一次底层读取。
+_SSE_READ_BLOCK_BYTES = 65536
+
+
+# LLM: 只对声明 io.BufferedIOBase 合同的真实二进制流（http.client.HTTPResponse 即是）走已解 chunked 的 read1，
+#   不碰 .fp/socket；按 b"\n" 切行并保留残行——0x0A 不会出现在 UTF-8 多字节序列内，跨块的多字节字符随残行拼回整行
+#   后才由调用方解码；CRLF 的 \r 由调用方 strip 去掉；EOF 交出无换行的尾行。其它对象（MagicMock 等测试替身、
+#   逐行可迭代对象）退回原逐行迭代：替身自动生成的 read1 返回非 bytes 真值，块读会无界循环。块不是 bytes 即报错。
+# 函数用途: 以块读取产出与逐行迭代相同的原始 SSE 行。
+def _iter_sse_raw_lines(response) -> Iterator[bytes]:
+    read1 = getattr(response, "read1", None) if isinstance(response, io.BufferedIOBase) else None
+    if not callable(read1):
+        yield from response
+        return
+    pending: list[bytes] = []
+    while block := read1(_SSE_READ_BLOCK_BYTES):
+        if not isinstance(block, (bytes, bytearray)):
+            raise TypeError(f"SSE read1 返回 {type(block).__name__}，应为 bytes")
+        pending.append(block)
+        if b"\n" not in block:
+            continue
+        lines = b"".join(pending).split(b"\n")
+        tail = lines.pop()
+        pending = [tail] if tail else []
+        yield from lines
+    if pending:
+        yield b"".join(pending)
+
+
+# LLM: Check the current execution's interrupt flag at every SSE line before exposing provider data to higher layers;
+#   block reads change only how bytes arrive, never how often stop/deadline are checked.
+# 函数用途: 按块读取、逐行处理 SSE 数据，并在每个安全点检查超时与用户停止。
 def _iter_sse_data_lines(
     response,
     *,
@@ -1703,7 +1734,7 @@ def _iter_sse_data_lines(
         initial_deadline = time.monotonic() + _stream_deadline_offset(timeout)
     idle_deadline = initial_deadline
     seen_data = False
-    for raw_line in response:
+    for raw_line in _iter_sse_raw_lines(response):
         if _provider_is_interrupted():
             raise InterruptedError("模型接口流式请求已被用户停止")
         if time.monotonic() > idle_deadline:

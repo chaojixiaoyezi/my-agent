@@ -1,3 +1,19 @@
+## 2026-11-18 Gateway 压测修复（MAX1 gw-stress-fix：GW-18/GW-03/GW-01/GW-02/GW-11/C1/C2/C9/X4/X8）
+
+```text
+agent_py_agent/agent/
+`-- gateway_parts/gateway_state_bounds.py              # gateway_state.json 字节上限与收尾引用紧凑投影（每原因 count+规范化摘要，0 条明细）
+agent_py_agent/tests/
+|-- test_gw_stress_remediation_cold_owner.py            # C9 冷 owner 有界预热池不阻塞后台同步拍回归单测
+|-- test_gw_stress_remediation_control_lane.py          # GW-02/X4 状态/停止独立执行池、/control 正文不检视与手动 compact 占位上限回归单测
+|-- test_gw_stress_remediation_gateway_state.py         # GW-18 停机保留调用后重启两次、旧超大状态自愈、oversized 原因与交接投影读回回归单测
+|-- test_gw_stress_remediation_lock_leaf.py             # GW-11 私有锁先开已存在叶子、缺失才排他创建与并发新建复用回归单测
+|-- test_gw_stress_remediation_process_birth.py         # C2 出生身份缓存锁外 ps、同键单飞、PID 复用不发布与旧 locale 等价回归单测
+|-- test_gw_stress_remediation_sqlite.py                # GW-03/C3 SQLite 文件头 FD 提示与投影库作用域复用回归单测
+|-- test_gw_stress_remediation_stream.py                # X8 能力探测按完整身份单飞与 C1 SSE read1 块读取/无锁中断判断回归单测
+`-- test_gw_stress_remediation_wake.py                  # GW-01/C8 唤醒发现解析记录有界缓存与新鲜度失效回归单测
+```
+
 ## 2026-11-15 第二波运行时稳定性与工具契约加固（NW2：W1–W9）
 
 ```text

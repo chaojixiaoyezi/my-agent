@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1527,
+  "count": 1538,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1460,6 +1460,14 @@
       "description": "重试等待上限 30 秒：服务商 Retry-After 超此值按 30 秒封顶，防无限等待。"
     },
     {
+      "name": "_SSE_READ_BLOCK_BYTES",
+      "file": "agent_py_agent/agent/backends/gateway_helpers.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "SSE 正文单次块读取的上限（字节）；与 read_response_body 的块大小一致，read1 一次至多一次底层读取。"
+    },
+    {
       "name": "_UNLABELED_REJECTION_ATTEMPT_COUNT",
       "file": "agent_py_agent/agent/backends/gateway_helpers.py",
       "value": 2,
@@ -1474,6 +1482,22 @@
       "unit": "层",
       "category": "上限预算",
       "description": "严格 JSON 校验嵌套最多 64 层：防畸形深嵌套请求拖垮解析，无物理单位。"
+    },
+    {
+      "name": "_PROBE_FLIGHT_POLL_SECONDS",
+      "file": "agent_py_agent/agent/backends/http.py",
+      "value": 0.05,
+      "unit": "秒",
+      "category": "其它",
+      "description": "跟随者等待在途探测时的轮询间隔（秒）：每轮复核本轮停止信号。"
+    },
+    {
+      "name": "_PROBE_FLIGHT_TTL_SECONDS",
+      "file": "agent_py_agent/agent/backends/http.py",
+      "value": 600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "X8：同一探针键的冷探测在途最长被跟随多久（秒）；超过后跟随者不再等待、自行探测，避免一条挂死的探测拖住所有 owner。"
     },
     {
       "name": "_PROBE_MAX_ATTEMPT_COUNT",
@@ -4796,6 +4820,14 @@
       "description": "热层每 tick 只消费 wake_queue 到期字条(索引查询)。长期助手 分频同款。"
     },
     {
+      "name": "_LIST_PROJECTION_DDL_MEMO_ENTRIES",
+      "file": "agent_py_agent/agent/conversation/session_list_index.py",
+      "value": 4096,
+      "unit": "条",
+      "category": "其它",
+      "description": "列表投影建表结论缓存上限；键为 (路径, dev, ino, kind)，值为建表提交后的 schema_version，超出按 LRU 淘汰。"
+    },
+    {
       "name": "_REBUILD_BATCH",
       "file": "agent_py_agent/agent/conversation/session_list_index.py",
       "value": 128,
@@ -5476,6 +5508,22 @@
       "description": "结束任务候选上限 20 条：列表有界，避免一次列出全部任务。"
     },
     {
+      "name": "GATEWAY_STATE_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/gateway_state_bounds.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "gateway_state.json 写者提交前强制的字节上限；原 16 KiB 的 state 读者同步放宽到此值，超限报 retirement_source_oversized。"
+    },
+    {
+      "name": "_NESTED_DEPTH_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/gateway_state_bounds.py",
+      "value": 4,
+      "unit": "个",
+      "category": "其它",
+      "description": "嵌套收尾结果的最大递归层数（cleanup_result 里还可能再套一层 cleanup_result）。"
+    },
+    {
       "name": "GC_PAUSE_LOG_SECONDS",
       "file": "agent_py_agent/agent/gateway_parts/hang_diagnostics.py",
       "value": 1.0,
@@ -5514,6 +5562,14 @@
       "unit": "字节",
       "category": "其它",
       "description": "就绪分类时最多窥视的请求首行字节数：只用于选择车道，首行更长时按普通车道处理，不影响请求本身。"
+    },
+    {
+      "name": "HTTP_FAST_LANE_WORKERS_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/http_lanes.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "状态与停止两个快速执行池各自的工作线程数：慢 /control（如手动 /compact）占满控制池时它们仍有独立线程。"
     },
     {
       "name": "_EMPTY_PAGE_CAPACITY_COUNT",
@@ -6762,6 +6818,14 @@
       "unit": "",
       "category": "其它",
       "description": "文件锁表容量水位；达到后清理不再使用的锁条目，防长跑进程锁表无界增长（无物理单位）。"
+    },
+    {
+      "name": "_SQLITE_HEADER_FD_HINT_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/io/sqlite_probe.py",
+      "value": 32,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "每线程最多记住的库文件 FD 号提示条数；超出时淘汰最早写入的一条。"
     },
     {
       "name": "_SQLITE_SCOPE_MAX_CONNECTIONS_COUNT",
@@ -9290,6 +9354,22 @@
       "unit": "秒",
       "category": "其它",
       "description": "子代理孤儿定位目录被判定可回收前必须等待的宽限秒数。"
+    },
+    {
+      "name": "_WAKE_PROJECTION_RECORD_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/subagents/services/persistence/locator_hygiene.py",
+      "value": 32768,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "唤醒发现投影解析记录缓存上限（state.json 与 workspace_locator.json 各占一条）；超出按 LRU 淘汰。"
+    },
+    {
+      "name": "_WAKE_PROJECTION_REVERIFY_SECONDS",
+      "file": "agent_py_agent/agent/subagents/services/persistence/locator_hygiene.py",
+      "value": 600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "指纹未变的解析记录至多复用这么多秒，到期按原路重读核验；与 owner 事实缓存兜底 TTL 同为 10 分钟。"
     },
     {
       "name": "MAX_PROJECTION_LEDGER_LINE_COUNT",
@@ -12034,6 +12114,14 @@
       "unit": "个",
       "category": "其它",
       "description": "每拍后台同步调度器最多冷构造的硬 owner Agent 数量，热实例不占此额度。"
+    },
+    {
+      "name": "_COLD_OWNER_WARMUP_WAIT_SECONDS",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 0.5,
+      "unit": "秒",
+      "category": "其它",
+      "description": "后台同步每拍等待冷 owner 预热的上限秒数：快构建本拍即接上调度器，慢构建留在预热池里不拖住整拍。"
     },
     {
       "name": "_DISPATCH_SEGMENT_SLOW_LOG_SECONDS",

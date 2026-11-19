@@ -13,6 +13,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 
 from ..common.nofollow_fs import (
+    ManagedFileReadLimitExceeded,
     list_names_beneath,
     open_directory_beneath,
     read_bytes_beneath,
@@ -431,10 +432,15 @@ def retire_dead_multiprocess_generations(paths, *, target_count: int, current_c_
             _require_lock(paths, target_count, lifecycle)
             _require_snapshot(paths.root, sources, before, generations, current_c_run_id, identities, anchors)
         except (OSError, ValueError, TypeError, KeyError, StandaloneSourceUnproven) as error:
-            reason = str(error) if isinstance(error, StandaloneSourceUnproven) else 'retirement_source_unreadable'
+            # GW-18：超读者上限单独报 oversized 并带实际字节数，不混入泛化的 unreadable。
+            oversized = error if isinstance(error, ManagedFileReadLimitExceeded) else None
+            reason = (str(error) if isinstance(error, StandaloneSourceUnproven)
+                      else 'retirement_source_oversized' if oversized is not None else 'retirement_source_unreadable')
             observed = [{key: row.get(key, 'unknown') for key in ('role', 'pid', 'verdict')} for row in identities]
+            size = ({'size_bytes': oversized.observed_bytes, 'max_bytes': oversized.max_bytes}
+                    if oversized is not None else {})
             print(json.dumps({'event': 'gateway_generation_retirement_refused', 'reason': reason,
-                              'identities': observed}, sort_keys=True), file=sys.stderr)
+                              'identities': observed, **size}, sort_keys=True), file=sys.stderr)
             if target_count > 0:
                 refusal = CoordinatorUnavailable(reason)
                 refusal.reason = reason

@@ -37,6 +37,15 @@ class NoFollowPathError(OSError):
         self.transient_open_race = bool(transient_open_race)
 
 
+# LLM: 仍是 ValueError 且消息不变（既有调用方按类型/原文匹配）；额外携带上限与实际字节数，供调用方报准确原因。
+# 类用途: 表示受管文件超过读者给定的读取上限。
+class ManagedFileReadLimitExceeded(ValueError):
+    def __init__(self, max_bytes: int, observed_bytes: int) -> None:
+        super().__init__("managed file exceeds read limit")
+        self.max_bytes = int(max_bytes)
+        self.observed_bytes = int(observed_bytes)
+
+
 # LLM: Append is anchored at an already trusted root; relative parts are fixed application data,
 # not model input. Parent creation and the final file open both use dir_fd and O_NOFOLLOW.
 # 函数用途: 在可变工作区内安全创建父目录并向宿主管理的文本账本追加一段内容。
@@ -716,10 +725,16 @@ def open_private_lock_beneath(root: str | Path, relative_parts: tuple[str, ...],
         os.close(parent_fd)
 
 
-# LLM: 排他创建永远是第一步（原子先到先得）；只有非排他模式才在 FileExistsError 后打开已存在的锁复用同一 inode。
-#   排他模式不触碰已存在的文件（不打开、不改权限），把"已存在"如实抛给调用方当互斥信号。
+# LLM: 排他模式排他创建永远是第一步（原子先到先得），不触碰已存在的文件（不打开、不改权限），把"已存在"如实抛给
+#   调用方当互斥信号。非排他模式锁多为复用：先按同一 no-follow/单链接/前后身份校验打开已存在的锁，仅 ENOENT 时排他
+#   创建，创建撞上并发新建（EEXIST）再打开一次复用同一 inode；不再为每次复用先失败一次排他创建。
 # 函数用途: 在父目录 fd 下创建（或按模式打开）私有锁叶子，返回描述符。
 def _open_lock_leaf(parent_fd: int, name: str, *, exclusive: bool) -> int:
+    if not exclusive:
+        try:
+            return _openat_file(parent_fd, name, os.O_RDWR, 0o600)
+        except FileNotFoundError:
+            pass
     try:
         return _openat_file(parent_fd, name, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -1100,7 +1115,11 @@ def _read_descriptor(descriptor: int, max_bytes: int | None) -> bytes:
             return b"".join(chunks)
         count += len(chunk)
         if max_bytes is not None and count > max_bytes:
-            raise ValueError("managed file exceeds read limit")
+            try:
+                observed = max(count, int(os.fstat(descriptor).st_size))
+            except OSError:
+                observed = count
+            raise ManagedFileReadLimitExceeded(max_bytes, observed)
         chunks.append(chunk)
 
 
@@ -1141,6 +1160,7 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 __all__ = [
+    "ManagedFileReadLimitExceeded",
     "NoFollowPathError",
     "append_text_beneath",
     "last_append_pre_stamp",

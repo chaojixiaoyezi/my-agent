@@ -23,6 +23,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from ....common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ....common.json_io import write_private_json_file_atomic
 from ....common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
 from ....common.opaque_id import validate_opaque_id
@@ -40,6 +41,17 @@ _SCAN_LOCK = threading.RLock()
 _SCANS: OrderedDict[tuple[str, str], tuple[tuple[int, int], Any, bool]] = OrderedDict()
 _ADMIN_RECONCILE: ContextVar[tuple | None] = ContextVar("projection_admin_reconcile", default=None)
 _MAINTENANCE_BOUNDARY: ContextVar[dict | None] = ContextVar("projection_maintenance_boundary", default=None)
+# 唤醒发现实际读取的投影字段；解析缓存只保留这些字段（不存唤醒/孤儿结论，也不存正文其余字段）。
+_WAKE_PROJECTION_FIELDS = (
+    "runtime_closeout_pending", "run_id", "status", "task_id", "root_id", "root_run_id", "root_task_id",
+    "workspace_root", "task_root", "subagent_root", "task_workspace_dir", "agent_run_workspace_dir",
+)
+# 唤醒发现投影解析记录缓存上限（state.json 与 workspace_locator.json 各占一条）；超出按 LRU 淘汰。
+_WAKE_PROJECTION_RECORD_MAX_ENTRIES = 32768
+# 指纹未变的解析记录至多复用这么多秒，到期按原路重读核验；与 owner 事实缓存兜底 TTL 同为 10 分钟。
+_WAKE_PROJECTION_REVERIFY_SECONDS = 600.0
+_WAKE_PROJECTION_RECORDS: OrderedDict[str, tuple[tuple[int, int, int, int, int], float, dict[str, Any]]] = OrderedDict()
+_WAKE_PROJECTION_RECORDS_LOCK = threading.Lock()
 
 
 class ProjectionInspectionBudgetExceeded(ValueError):
@@ -73,6 +85,12 @@ def read_projection_object(path: Path, *, optional: bool = False) -> dict[str, A
 # 函数用途: 从投影中选出唯一明示绝对工作区路径，未声明时返回None。
 def projection_workspace_path(run_dir: Path, payload: dict[str, Any]) -> Path | None:
     locator = read_projection_object(run_dir / "workspace_locator.json", optional=True)
+    return select_projection_workspace(locator, payload)
+
+
+# LLM: 纯选路，不读文件；唤醒签名用本轮已核验的 locator/state 字段调用，维护删除路径仍经上面的现读入口。
+# 函数用途: 按 locator 优先、固定字段序选出唯一明示绝对工作区路径，非法值抛错。
+def select_projection_workspace(locator: dict[str, Any], payload: dict[str, Any]) -> Path | None:
     for source in (locator, payload):
         for key in ("workspace_root", "task_root", "subagent_root", "task_workspace_dir", "agent_run_workspace_dir"):
             value = source.get(key)
@@ -85,6 +103,39 @@ def projection_workspace_path(run_dir: Path, payload: dict[str, Any]) -> Path | 
                 raise ValueError("工作区必须是绝对非根路径")
             return path
     return None
+
+
+# LLM: 只缓存唤醒字段的解析结果，从不缓存唤醒/孤儿/静止结论；closeout、目标存在性与runtime库仍由调用方每轮现判。
+#   门槛与 common/cache_freshness 同源：普通文件 + (dev,ino,size,mtime_ns,ctime_ns) 一致 + mtime 已离开粗粒度窗口；
+#   读后 lstat 与读前不一致视为不稳定读，只返回本次结果不入缓存；条目超过复核周期必须重读；admin 对账上下文全程绕过。
+# 函数用途: 按调用方本轮 lstat 结果取投影唤醒字段；info 为 None 表示文件不存在，返回空对象；读错照常抛给调用方。
+def wake_projection_fields(path: Path, info: os.stat_result | None,
+                           read: Callable[[Path], dict[str, Any]]) -> dict[str, Any]:
+    if info is None:
+        return {}
+    key, signature = str(path), cache_stat_signature(info)
+    cacheable = (stat.S_ISREG(info.st_mode) and _ADMIN_RECONCILE.get() is None
+                 and cache_entry_trustworthy(info.st_mtime_ns))
+    if cacheable:
+        with _WAKE_PROJECTION_RECORDS_LOCK:
+            cached = _WAKE_PROJECTION_RECORDS.get(key)
+            if cached is not None and cached[0] == signature and time.monotonic() < cached[1]:
+                _WAKE_PROJECTION_RECORDS.move_to_end(key)
+                return dict(cached[2])
+    payload = read(path)
+    fields = {name: payload[name] for name in _WAKE_PROJECTION_FIELDS if name in payload}
+    if cacheable:
+        try:
+            settled = cache_stat_signature(os.lstat(path)) == signature
+        except OSError:
+            settled = False
+        if settled:
+            with _WAKE_PROJECTION_RECORDS_LOCK:
+                _WAKE_PROJECTION_RECORDS[key] = (signature, time.monotonic() + _WAKE_PROJECTION_REVERIFY_SECONDS, fields)
+                _WAKE_PROJECTION_RECORDS.move_to_end(key)
+                while len(_WAKE_PROJECTION_RECORDS) > _WAKE_PROJECTION_RECORD_MAX_ENTRIES:
+                    _WAKE_PROJECTION_RECORDS.popitem(last=False)
+    return dict(fields)
 
 
 # LLM: 共用选路后仅FileNotFound证明目标消失；权限与解析错误继续向调用方传播，不能被exists吞成孤儿。

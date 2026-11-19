@@ -420,10 +420,17 @@ def set_interrupt(active: bool, thread_id: int | None = None) -> None:
     _run_interrupt_callbacks_bounded(callbacks)
 
 
-# LLM: 精确句柄的取消不可由普通清旗撤销；没有句柄时仍按原线程标志判断。
+# LLM: 精确句柄的取消不可由普通清旗撤销；没有句柄时仍按原线程标志判断。常见未中断路径不取全局锁：两张表只在
+#   _lock 下写，dict.get/in 与 Event.is_set 的无锁读是原子的；句柄取消不可撤销，读到即真；本线程 ident 在立旗表里
+#   有任何记录（含 ident 复用留下的旧旗）时回到锁内，按原规则核对立旗线程身份并清除过期旗。
 # 函数用途: 在工具或传输安全点查询当前执行的停止事实。
 def is_interrupted() -> bool:
     tid = threading.current_thread().ident
+    handle = _thread_handles.get(tid)
+    if handle is not None and handle.cancelled:
+        return True
+    if tid not in _interrupted_threads:
+        return False
     with _lock:
         handle = _thread_handles.get(tid)
         return _is_flagged_locked(tid) or (handle is not None and handle.cancelled)

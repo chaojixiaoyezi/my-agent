@@ -2,6 +2,7 @@
 # 模块用途: 为模型协议提供带物理并发限制的统一网络入口和有界工具探测；联合后端、OAuth、关闭与排队回归。
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -12,7 +13,7 @@ import time
 import types
 import weakref
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -205,6 +206,62 @@ def _capability_probe_key(backend: object) -> tuple[object, ...]:
 
 def _logical_probe_identity(key: tuple[object, ...]) -> tuple[object, ...]:
     return (key[0], key[1], key[2], key[3], key[-1])
+
+
+# X8：同一探针键的冷探测在途最长被跟随多久（秒）；超过后跟随者不再等待、自行探测，避免一条挂死的探测拖住所有 owner。
+_PROBE_FLIGHT_TTL_SECONDS = 600.0
+# 跟随者等待在途探测时的轮询间隔（秒）：每轮复核本轮停止信号。
+_PROBE_FLIGHT_POLL_SECONDS = 0.05
+# 进程内在途探测表（键 = memo 完整能力身份 + 失效代次），只存进行中的单飞；结束即移除，不缓存失败。
+_capability_probe_flights: dict[tuple[object, ...], _ProbeFlight] = {}
+
+
+# LLM: 单飞只共享"同一次真实探测"的结果：成功/阴性结果与供应商类失败（配置、额度、网络、超时）发给所有等待者；
+#   领头者被用户停止或本地异常时，跟随者不继承，重新竞选领头。结束后不缓存失败，之后的调用仍会重新探测。
+# 类用途: 记录一条进行中的工具能力探测及其结果。
+class _ProbeFlight:
+    __slots__ = ("done", "result", "error", "started")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: ProviderToolCapability | None = None
+        self.error: BaseException | None = None
+        self.started = time.monotonic()
+
+    def expired(self) -> bool:
+        return time.monotonic() - self.started > _PROBE_FLIGHT_TTL_SECONDS
+
+
+# LLM: 跨 owner/后端实例按同一探针键单飞（X8）：冷启动并发只真实发一次探测；等待可被本轮停止打断，
+#   在途超过 TTL 则不再跟随。领头者异常原样上抛；跟随者对供应商类失败拿到一份同类型副本。
+# 函数用途: 让同一端点/模型/凭据的并发冷探测只执行一次。
+def _single_flight_probe(key: tuple[object, ...], probe: Callable[[], ProviderToolCapability]) -> ProviderToolCapability:
+    while True:
+        with _capability_probe_lock:
+            flight = _capability_probe_flights.get(key)
+            leader = flight is None or flight.expired()
+            if leader:
+                flight = _capability_probe_flights[key] = _ProbeFlight()
+        if leader:
+            try:
+                flight.result = probe()
+                return flight.result
+            except BaseException as exc:
+                flight.error = exc
+                raise
+            finally:
+                with _capability_probe_lock:
+                    if _capability_probe_flights.get(key) is flight:
+                        _capability_probe_flights.pop(key, None)
+                flight.done.set()
+        while not flight.done.wait(_PROBE_FLIGHT_POLL_SECONDS) and not flight.expired():
+            wait_interruptibly(0)
+        wait_interruptibly(0)
+        if flight.done.is_set():
+            if flight.result is not None:
+                return flight.result
+            if isinstance(flight.error, (ProviderRecoverableError, ProviderConfigurationError)):
+                raise copy.copy(flight.error) from flight.error
 
 
 def _lookup_capability_probe_memo(
@@ -679,7 +736,9 @@ class HttpBackend(BaseBackend):
             probe_started = time.monotonic()
             self._active_probe_cache_miss_reason = miss_reason
             try:
-                capability = self._probe_tool_capability_uncached()
+                # X8：同一完整能力身份（后端、端点、模型、流式、传输身份、凭据指纹）且同一失效代次的冷探测单飞；
+                # 不同凭据或失效之后的调用不会并入旧的在途探测。
+                capability = _single_flight_probe((*key, generation), self._probe_tool_capability_uncached)
             except ProviderConfigurationError as exc:
                 invalidate_capability_probe_memo(
                     self,

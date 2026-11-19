@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from ..common.runtime_gate_registry import register_runtime_gate
 from ..runtime_errors import DataCorruptionError
 from . import multiprocess_takeover as p2
+from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
 from .multiprocess_coordinator import bind_coordinator_generation, current_coordinator
 from .multiprocess_route import owner_digest
 from .multiprocess_takeover_recheck import _fresh_verdict, new_quarantine_state, quarantine_recheck
@@ -619,7 +620,7 @@ def _fixed_role_refresh_sources(index):
     from .multiprocess_executor_active_index import _file_stamp
 
     roles = (
-        read_bytes_beneath(index.root, ('gateway_state.json',), max_bytes=16384,
+        read_bytes_beneath(index.root, ('gateway_state.json',), max_bytes=GATEWAY_STATE_MAX_BYTES,
                           require_dir_fd=True, snapshot_retries=2),
         read_bytes_beneath(index.root, ('workers', 'registry.json'),
                           max_bytes=_WORKER_REGISTRY_MAX_BYTES, require_dir_fd=True),

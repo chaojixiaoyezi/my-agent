@@ -577,6 +577,11 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest, *, restart_marker=N
 # LLM: 原state文件事务内比较本代身份；迟到终态只被拒绝，不触碰新代状态或发完成事件。
 # 函数用途: 用原代次引用保护生命周期末写，兼容无context的旧调用。
 def _commit_gateway_state(paths, payload: dict, *, context=None, pid=None, replace=False) -> bool:
+    from ..agent.gateway_parts.gateway_state_bounds import (
+        GATEWAY_STATE_MAX_BYTES,
+        fit_gateway_state,
+    )
+
     committed = False
     def update(current):
         nonlocal committed
@@ -589,8 +594,14 @@ def _commit_gateway_state(paths, payload: dict, *, context=None, pid=None, repla
             started = float(context.process_started_at or 0)
             if started and current.get("started_at") and float(current["started_at"]) != started:
                 return current
+        # GW-18：收尾列表压成每原因 count+规范化摘要（0 条明细），整份状态不超读者共用上限；压缩后仍超限则拒写、保留原可读文件。
+        fitted = fit_gateway_state({**({} if replace else current), **payload})
+        if fitted is None:
+            print(f"[gateway-run] state_write_refused reason=gateway_state_oversized max_bytes={GATEWAY_STATE_MAX_BYTES}",
+                  file=sys.stderr, flush=True)
+            return current
         committed = True
-        return {**({} if replace else current), **payload}
+        return fitted
     update_json_file_atomic(paths.state, update)
     return committed
 

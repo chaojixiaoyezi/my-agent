@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import re
 
-from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath
+from ..common.nofollow_fs import (
+    ManagedFileReadLimitExceeded,
+    list_names_beneath,
+    read_bytes_beneath,
+)
 from ..common.strict_json import load_strict_json
+from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
 from .multiprocess_generation_metadata import generation_metadata_parts
 from .multiprocess_records import _identifier, deserialize_record
 from .standalone_lifecycle import StandaloneLifecycleUnavailable
@@ -33,6 +38,11 @@ def require_standalone_sources(paths, lifecycle) -> None:
             raise StandaloneSourceUnproven("原启动来源在读取期间变化。")
     except StandaloneSourceUnproven:
         raise
+    except ManagedFileReadLimitExceeded as exc:
+        # GW-18：超读取上限单独说明实际字节数，不混入泛化的“不可确认”。
+        raise StandaloneSourceUnproven(
+            f"原启动来源超过读取上限（retirement_source_oversized：{exc.observed_bytes} 字节，"
+            f"上限 {exc.max_bytes} 字节）。") from exc
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise StandaloneSourceUnproven("原启动来源不可确认。") from exc
     lifecycle.require_held()
@@ -115,7 +125,7 @@ def _require_empty_worker_directory(root, parts, name):
 # LLM: 这里只读准确state/worker/P3源，非整home审计；不删marker或读取业务prompt，返回原字节用于首末比较。
 # 函数用途: 捕获单进程启动前的有限原来源快照。
 def _source_snapshot(root):
-    raw = read_bytes_beneath(root, ("gateway_state.json",), max_bytes=1024 * 1024)
+    raw = read_bytes_beneath(root, ("gateway_state.json",), max_bytes=GATEWAY_STATE_MAX_BYTES)
     _state(raw)
     workers = _worker_sources(root)
     admission = _names(root, ("admission", "reservations"))

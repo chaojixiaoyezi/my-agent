@@ -11,7 +11,9 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -22,6 +24,33 @@ from ..user_space.directory_paging import directory_page
 from .observation_index import _close_failed_factory
 
 _REBUILD_BATCH = 128
+# 列表投影建表结论缓存上限；键为 (路径, dev, ino, kind)，值为建表提交后的 schema_version，超出按 LRU 淘汰。
+_LIST_PROJECTION_DDL_MEMO_ENTRIES = 4096
+_LIST_PROJECTION_DDL_MEMO: OrderedDict[tuple[str, int, int, str], int] = OrderedDict()
+_LIST_PROJECTION_DDL_LOCK = threading.Lock()
+
+
+# LLM: 只省去已提交且 schema_version 未变的幂等建表；换 inode、删库重建或他处改表都重新走原 DDL。
+# 函数用途: 判断这条新连接是否可以跳过 CREATE IF NOT EXISTS 建表语句。
+def _projection_ddl_current(key: tuple[str, int, int, str] | None, version: int) -> bool:
+    if key is None or version <= 0:
+        return False
+    with _LIST_PROJECTION_DDL_LOCK:
+        if _LIST_PROJECTION_DDL_MEMO.get(key) != version:
+            return False
+        _LIST_PROJECTION_DDL_MEMO.move_to_end(key)
+        return True
+
+
+# 函数用途: 记住某个投影身份在建表提交后的 schema_version。
+def _remember_projection_ddl(key: tuple[str, int, int, str] | None, version: int) -> None:
+    if key is None or version <= 0:
+        return
+    with _LIST_PROJECTION_DDL_LOCK:
+        _LIST_PROJECTION_DDL_MEMO[key] = version
+        _LIST_PROJECTION_DDL_MEMO.move_to_end(key)
+        while len(_LIST_PROJECTION_DDL_MEMO) > _LIST_PROJECTION_DDL_MEMO_ENTRIES:
+            _LIST_PROJECTION_DDL_MEMO.popitem(last=False)
 
 
 def _stamp(path: Path) -> str:
@@ -68,28 +97,39 @@ class SessionListIndex:
         return _stamp(self.root) if self.root.is_dir() else None
 
     # LLM: 两个排序索引分别服务过滤和无过滤 keyset 查询，按原建库路径幂等升级。
+    #   同一 inode 建表已提交且 schema_version 未变时只跳过全部 CREATE；WAL 设置与 revision 种子写仍每次执行，
+    #   保持“打开即进入写事务、首条语句即发现 meta/表结构损坏”的原合同。
     # 函数用途: 打开私有列表投影并补齐有界分页所需索引。
     def _open_projection(self, *, timeout=5.0):
         conn = connect_projection_sqlite(self.path, timeout=timeout)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+            try:
+                info = self.path.lstat()
+                key = (str(self.path), info.st_dev, info.st_ino, self.kind)
+            except OSError:
+                key = None
+            installed = _projection_ddl_current(key, conn.execute("PRAGMA schema_version").fetchone()[0])
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-1024")
-            conn.execute("CREATE TABLE IF NOT EXISTS entries (path TEXT PRIMARY KEY, sort_at REAL, filter_key TEXT, stamp TEXT, generation INTEGER)")
-            conn.execute("CREATE INDEX IF NOT EXISTS list_order ON entries(filter_key, sort_at DESC, path DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS list_order_all ON entries(sort_at DESC, path DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS list_generation ON entries(generation,path)")
-            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            if not installed:
+                conn.execute("CREATE TABLE IF NOT EXISTS entries (path TEXT PRIMARY KEY, sort_at REAL, filter_key TEXT, stamp TEXT, generation INTEGER)")
+                conn.execute("CREATE INDEX IF NOT EXISTS list_order ON entries(filter_key, sort_at DESC, path DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS list_order_all ON entries(sort_at DESC, path DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS list_generation ON entries(generation,path)")
+                conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+                if self.kind == 'session_task':
+                    conn.execute('CREATE TABLE IF NOT EXISTS artifact_refs (artifact_id TEXT, task_path TEXT, PRIMARY KEY(artifact_id,task_path))')
+                    conn.execute('CREATE INDEX IF NOT EXISTS artifact_refs_task ON artifact_refs(task_path)')
+                    conn.execute('CREATE TABLE IF NOT EXISTS artifact_errors (task_path TEXT PRIMARY KEY)')
+                    conn.execute('CREATE TRIGGER IF NOT EXISTS artifact_entry_deleted AFTER DELETE ON entries BEGIN '
+                                 'DELETE FROM artifact_refs WHERE task_path=OLD.path; '
+                                 'DELETE FROM artifact_errors WHERE task_path=OLD.path; END')
+                # 建表语句在事务外逐条自动提交，此时记录的 schema_version 已是持久事实。
+                _remember_projection_ddl(key, conn.execute("PRAGMA schema_version").fetchone()[0])
             conn.execute("INSERT OR IGNORE INTO meta VALUES ('revision', ?)", (str(time.time_ns()),))
-            if self.kind == 'session_task':
-                conn.execute('CREATE TABLE IF NOT EXISTS artifact_refs (artifact_id TEXT, task_path TEXT, PRIMARY KEY(artifact_id,task_path))')
-                conn.execute('CREATE INDEX IF NOT EXISTS artifact_refs_task ON artifact_refs(task_path)')
-                conn.execute('CREATE TABLE IF NOT EXISTS artifact_errors (task_path TEXT PRIMARY KEY)')
-                conn.execute('CREATE TRIGGER IF NOT EXISTS artifact_entry_deleted AFTER DELETE ON entries BEGIN '
-                             'DELETE FROM artifact_refs WHERE task_path=OLD.path; '
-                             'DELETE FROM artifact_errors WHERE task_path=OLD.path; END')
             return conn
         except BaseException as error:
             _close_failed_factory(conn, error)

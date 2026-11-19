@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import stat
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,6 +12,11 @@ from ..path_access_policy import SQLITE_SIDECAR_SUFFIXES
 
 # SQLite unix VFS 的固定文件格式边界，不是等待或容量参数。
 _SQLITE_SHARED_FIRST, _SQLITE_SHARED_SIZE = 0x40000000 + 2, 510
+# 线程本地、非持有的 FD 号提示：键为库文件 (st_dev, st_ino)，值只是上次借读成功的描述符号整数；
+# 从不 dup/关闭/持有该 FD，也不延长任何 FD 寿命，每次使用前都按 fstat→pread→fstat 重新核验身份。
+_HEADER_FD_HINTS = threading.local()
+# 每线程最多记住的库文件 FD 号提示条数；超出时淘汰最早写入的一条。
+_SQLITE_HEADER_FD_HINT_MAX_ENTRIES = 32
 
 
 def _require_no_local_database_handles(db: Path) -> None:
@@ -18,6 +24,7 @@ def _require_no_local_database_handles(db: Path) -> None:
         return  # Windows replace 自身拒绝仍打开的 SQLite 文件。
     expected = os.lstat(db)
     # 不打开原库：关闭任一同 inode 的新 FD 会破坏本进程已有 SQLite record lock。
+    # “没有本地句柄”是对当前全部 FD 的负证明，恢复/隔离/替换前必须全量扫描，不能用读头的 FD 号提示。
     with os.scandir("/dev/fd") as entries:
         for entry in entries:
             try:
@@ -65,27 +72,52 @@ def sqlite_readonly_probe_uri(db: Path) -> str:
     return Path(db).absolute().as_uri() + "?mode=ro"
 
 
+# 函数用途: 借读一个现有 FD 的库头；读前读后 fstat 都必须仍是同一 inode，FD 被关闭或复用则放弃。
+def _borrowed_sqlite_header(descriptor: int, identity: tuple[int, int]) -> bytes | None:
+    try:
+        before = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != identity:
+            return None
+        header = os.pread(descriptor, 20, 0)
+        after = os.fstat(descriptor)
+    except (OSError, ValueError):
+        return None
+    return header if (after.st_dev, after.st_ino) == identity else None
+
+
 def _opened_sqlite_header(db: Path) -> bytes:
-    """仅在调用方持有 SQLite 连接时借读其 FD；不接管、不复制或关闭库描述符。"""
+    """仅在调用方持有 SQLite 连接时借读其 FD；不接管、不复制或关闭库描述符。
+
+    先试本线程上次命中的 FD 号（只是整数提示，核验同全量扫描）；未命中或身份不符再走原 /dev/fd 全量扫描。
+    """
     expected = os.lstat(db)
     identity = expected.st_dev, expected.st_ino
     if not hasattr(os, "pread"):
         return b""
+    hints = getattr(_HEADER_FD_HINTS, "descriptors", None)
+    if hints is None:
+        hints = _HEADER_FD_HINTS.descriptors = {}
+    hinted = hints.pop(identity, None)
+    if hinted is not None:
+        header = _borrowed_sqlite_header(hinted, identity)
+        if header is not None:
+            hints[identity] = hinted
+            return header
     try:
         # 只查本进程当前活 FD，不扫描历史目录；数据库的打开/关闭仍全由 SQLite 管理。
         with os.scandir("/dev/fd") as entries:
             for entry in entries:
                 try:
                     descriptor = int(entry.name)
-                    before = os.fstat(descriptor)
-                    if (before.st_dev, before.st_ino) != identity:
-                        continue
-                    header = os.pread(descriptor, 20, 0)
-                    after = os.fstat(descriptor)
-                    if (after.st_dev, after.st_ino) == identity:
-                        return header
-                except (OSError, ValueError):
+                except ValueError:
                     continue
+                header = _borrowed_sqlite_header(descriptor, identity)
+                if header is None:
+                    continue
+                while hints and len(hints) >= _SQLITE_HEADER_FD_HINT_MAX_ENTRIES:
+                    hints.pop(next(iter(hints)))
+                hints[identity] = descriptor
+                return header
     except OSError:
         pass
     return b""

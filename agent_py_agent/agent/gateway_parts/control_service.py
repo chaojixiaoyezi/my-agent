@@ -1340,13 +1340,52 @@ def _execute_compact_control(
         scope.conversation_id,
         client_message_id,
     )
-    with register_interruptible(interrupt_name):
-        return _execute_registered_compact_control(
-            base_agent,
-            paths,
-            command,
-            scope,
+    if not _MANUAL_COMPACT_ADMISSION.try_enter(base_agent):
+        return ConversationControlResult(
+            "compact",
+            False,
+            "网关正有多个手动 /compact 同时进行，本次未压缩，会话历史与游标保持原状；请稍后重试。",
+            error_code="COMPACT_CONTROL_BUSY",
         )
+    try:
+        with register_interruptible(interrupt_name):
+            return _execute_registered_compact_control(
+                base_agent,
+                paths,
+                command,
+                scope,
+            )
+    finally:
+        _MANUAL_COMPACT_ADMISSION.leave()
+
+
+# LLM: 手动压缩在控制线程上同步调用摘要模型（实测单次 6–16 秒）；在途数达到控制车道线程数一半即回 typed 忙碌，
+#   不排队、不后台化、不提前回成功，回执始终是真实完成后的结果。控制线程≥2 时 /control 的 /stop 等请求始终留有
+#   另一半控制线程；只有 1 个控制线程时同步 compact 仍会占住它（POST /stop 与 /client/agent-stop 另有停止执行池）。
+#   上限只复用 gateway_http_control_lane_workers；为 0（未启用独立控制车道）时沿原行为不设上限。锁只护计数，不跨 I/O。
+# 类用途: 进程内有界统计手动压缩同步占用的控制线程数。
+class _ManualCompactAdmission:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = 0
+
+    # 函数用途: 非阻塞领取一个手动压缩名额；名额已满返回 False，调用方不得等待。
+    def try_enter(self, agent: object) -> bool:
+        workers = getattr(getattr(agent, "config", None), "gateway_http_control_lane_workers", 0)
+        workers = workers if type(workers) is int else 0
+        with self._lock:
+            if workers > 0 and self._active >= max(1, workers // 2):
+                return False
+            self._active += 1
+            return True
+
+    # 函数用途: 归还 try_enter 领取的名额。
+    def leave(self) -> None:
+        with self._lock:
+            self._active = max(0, self._active - 1)
+
+
+_MANUAL_COMPACT_ADMISSION = _ManualCompactAdmission()
 
 
 # LLM: 手动Compact显式绕过自动熔断冷却，仍沿原失败账及成功清零；只覆盖车道内已完成来源，历史估算不证明未来容量。

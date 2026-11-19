@@ -12,6 +12,7 @@ from ..common.nofollow_fs import (
     read_bytes_beneath,
     write_bytes_atomic_beneath,
 )
+from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
 from .multiprocess_executor_ledger import _durable_namespace
 from .multiprocess_records import _identifier, deserialize_record, serialize_record, validate_record
 
@@ -230,12 +231,12 @@ def seal_generation(runtime, token):
                 raise ValueError('generation_closure_readback_unconfirmed')
             runtime.require_generation_seal(token)
             with locked_json_path(root / 'gateway_state.json', blocking=False):
-                actual = read_bytes_beneath(root, ('gateway_state.json',), max_bytes=16384, require_dir_fd=True)
+                actual = read_bytes_beneath(root, ('gateway_state.json',), max_bytes=GATEWAY_STATE_MAX_BYTES, require_dir_fd=True)
                 if actual != token['roles_before']['gateway_state.json']:
                     raise ValueError('generation_marker_compare_conflict')
                 write_bytes_atomic_beneath(root, ('gateway_state.json',), token['roles']['gateway_state.json'])
                 runtime.require_generation_seal(token)
-                if read_bytes_beneath(root, ('gateway_state.json',), max_bytes=16384, require_dir_fd=True) != token['roles']['gateway_state.json']:
+                if read_bytes_beneath(root, ('gateway_state.json',), max_bytes=GATEWAY_STATE_MAX_BYTES, require_dir_fd=True) != token['roles']['gateway_state.json']:
                     raise ValueError('generation_marker_readback_unconfirmed')
     return '/'.join(parts)
 

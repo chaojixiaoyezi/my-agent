@@ -172,7 +172,10 @@ def test_tool_still_executing_at_cleanup_blocks_unforced_handover(tmp_path, monk
         assert state["restart_drain"]["service_cleanup_started"] is True
         cleanup_result = state["cleanup_result"]
         assert cleanup_result["status"] == "incomplete" and cleanup_result["handover_allowed"] is False
-        assert [row.get("operation_id") for row in cleanup_result["unresolved_operation_refs"]] == ["next-tool"]
+        # GW-18：state 只存紧凑投影（0 条逐条明细）；未结清工具的完整行留在同请求的重启 marker。
+        assert [(row.get("count"), "operation_id" in row) for row in cleanup_result["unresolved_operation_refs"]] == [(1, False)]
+        marker = read_json_file(restart_service.restart_completed_path(context.paths))
+        assert [row.get("operation_id") for row in marker["cleanup_result"]["unresolved_operation_refs"]] == ["next-tool"]
         assert cleanup_result["continuation_refs"] == [_CONTINUATION]
         assert restart_service.consume_restart_marker(context.paths, old_pid_alive=lambda _p: False) is None
     finally:

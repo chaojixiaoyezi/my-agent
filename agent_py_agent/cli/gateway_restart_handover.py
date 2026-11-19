@@ -19,6 +19,11 @@ from ..agent.gateway_parts.daemon_control import (
     get_running_pid,
     stop_request_targets_process,
 )
+from ..agent.gateway_parts.gateway_state_bounds import (
+    project_gateway_state_lists,
+    project_refs,
+    ref_count,
+)
 from ..agent.gateway_parts.io import read_json_file, update_json_file_atomic
 from ..agent.gateway_parts.request_worker import admission
 from ..agent.gateway_parts.restart_service import (
@@ -202,8 +207,9 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
         if not same_state(state):
             return state
         owned = True
-        fields = {"restart_request_id": marker.get("request_id"), "cleanup_result": result,
-                  "forced_after_drain_timeout": forced, "unresolved_operation_refs": refs}
+        # GW-18：裁决已按完整行做完；state 只存紧凑投影（每原因 count+摘要，无逐条明细），完整证明留在 marker。
+        fields = {"restart_request_id": marker.get("request_id"), "cleanup_result": project_gateway_state_lists(result),
+                  "forced_after_drain_timeout": forced, "unresolved_operation_refs": project_refs(refs)}
         if not result["handover_allowed"]:
             fields["restart_drain"] = {"phase": "cleanup_failed", "reason": "drain_incomplete",
                                        "service_cleanup_started": True,
@@ -221,7 +227,9 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
     def publish(current):
         nonlocal published
         state = read_json_file(context.paths.state)
-        if not same_marker(current) or not same_state(state) or state.get("cleanup_result") != result:
+        # 读回核对比较同一投影；marker 仍写完整 result 作为交接证明。
+        if (not same_marker(current) or not same_state(state)
+                or state.get("cleanup_result") != project_gateway_state_lists(result)):
             return current
         published = True
         return {**current, "cleanup_result": result, "unresolved_operation_refs": refs}
@@ -282,7 +290,8 @@ def _cancel_internal_restart(context, request: dict) -> None:
 
 def _publish_drain_state(paths, facts: dict[str, object]) -> None:
     try:
-        update_json_file_atomic(paths.state, lambda state: {**state, "restart_drain": dict(facts)})
+        # GW-18：排空阶段的阻塞引用同样只按每原因 count+摘要 落盘。
+        update_json_file_atomic(paths.state, lambda state: {**state, "restart_drain": project_gateway_state_lists(dict(facts))})
     except OSError:
         pass
 
@@ -484,7 +493,7 @@ def _report_unsuccessful_drain(drain: dict, pid: int) -> None:
         # 取消原因与未结清项数取自已发表的排空状态，让用户知道为何未切换以及何时可以再试。
         reason = str(drain.get('reason') or '')
         refs = drain.get('unresolved_operation_refs')
-        count = len(refs) if isinstance(refs, list) else 0
+        count = ref_count(refs)
         detail = f'（原因 {reason}' + (f'，未结清 {count} 项' if count else '') + '）' if reason else ''
         hint = '后台工作结清后可再试。' if reason == 'background_unsettled' else ''
         print(f'排空已取消{detail}，尚未开始服务收尾；原进程仍存活，未更新。{hint}请用 my-agent gateway status 核验服务就绪。',

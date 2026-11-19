@@ -119,6 +119,8 @@ STARTUP_GRACE_WINDOW_SECONDS = 180.0
 _COLD_CURATOR_BUILDS_PER_TICK_COUNT = 2
 # 每拍后台同步调度器最多冷构造的硬 owner Agent 数量，热实例不占此额度。
 _COLD_OWNER_BUILDS_PER_TICK_COUNT = 2
+# 后台同步每拍等待冷 owner 预热的上限秒数：快构建本拍即接上调度器，慢构建留在预热池里不拖住整拍。
+_COLD_OWNER_WARMUP_WAIT_SECONDS = 0.5
 # 派发段或后台维护单拍超过该阈值时输出慢执行告警日志，只做观测不改行为。
 _DISPATCH_SEGMENT_SLOW_LOG_SECONDS = 1.0
 _BACKGROUND_TICK_PHASES = ("seed", "collect", "retire", "sync", "watch", "curators", "submit")
@@ -1806,9 +1808,12 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         executors = (
             getattr(self, "_executor", None),
             getattr(self, "_curator_executor", None),
+            getattr(self, "_owner_warmup_executor", None),
         )
         self._executor = None
         self._curator_executor = None
+        # 冷 owner 预热只是缓存装配：停机撤销排队项，运行中的构建沿原池合流结束，不另记任务状态。
+        self._owner_warmup_executor = None
         body_error = None
         try:
             for executor in executors:
@@ -1896,6 +1901,9 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._executor: object | None = None
         # 记忆策展走独立低优先级车道；不能占满主会话/child lifecycle wake 的工位。
         self._curator_executor: object | None = None
+        # 冷 owner 构建在独立有界预热池里进行，键为 owner 三元身份，完成即移除，在途数不超过每拍额度。
+        self._owner_warmup_executor: object | None = None
+        self._owner_warmups: dict[tuple, object] = {}
         # 会话运行时 的 active turn 是 thread-scoped；这里也以 durable thread_id 作最小运行车道。
         self._inflight: dict[object, object] = {}
         self._lane_retry = BackgroundLaneRetry()
@@ -2109,6 +2117,9 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             builds = 0
             next_cursor = (start + 1) % len(owners)
             peek = getattr(pool, "peek", None)
+            warmups = getattr(self, "_owner_warmups", None)
+            if warmups is None:
+                warmups = self._owner_warmups = {}
             for offset, owner in enumerate(rotated):
                 index = (start + offset) % len(owners)
                 try:
@@ -2118,14 +2129,21 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                         managed.get(owner)
                     else:
                         if callable(peek) and peek(owner) is None:
-                            if builds >= _COLD_OWNER_BUILDS_PER_TICK_COUNT:
+                            # 冷构建交有界预热池：已在预热的不重复提交，池满留给后续拍按游标轮转。
+                            key = (owner.provider, owner.owner_kind, owner.owner_id)
+                            if key in warmups or builds >= _COLD_OWNER_BUILDS_PER_TICK_COUNT \
+                                    or len(warmups) >= _COLD_OWNER_BUILDS_PER_TICK_COUNT:
                                 continue
                             builds += 1
                             next_cursor = (index + 1) % len(owners)
+                            warmups[key] = self._get_owner_warmup_executor().submit(
+                                pool.get, owner, hard=True, touch=False)
+                            continue
                         pool.get(owner, hard=True, touch=False)
                 except Exception as exc:
                     _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
             self._owner_build_cursor = next_cursor
+            self._settle_owner_warmups(warmups)
         active = {id(agent): agent for agent in pool.hard_agents()}
         if managed is not None:
             active.update((id(agent), agent) for agent in managed.hard_agents())
@@ -2358,6 +2376,33 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 thread_name_prefix="memory-curator",
             )
         return self._curator_executor
+
+    # LLM: 冷 owner 构建只走原池 get（同 owner 合流、容量与构造槽位不变）；独立于会话与策展池，不占它们的工位。
+    # 函数用途: 惰性创建有界冷 owner 预热池，让后台单拍不再同步等待冷构建。
+    def _get_owner_warmup_executor(self) -> object:
+        executor = getattr(self, "_owner_warmup_executor", None)
+        if executor is None:
+            executor = self._owner_warmup_executor = DurableDaemonThreadPoolExecutor(
+                max_workers=_COLD_OWNER_BUILDS_PER_TICK_COUNT,
+                thread_name_prefix="owner-warmup",
+            )
+        return executor
+
+    # LLM: 只在有界秒数内等待，超时的构建留在预热池继续，下拍 peek 命中后再接调度器；失败沿原 owner_build 诊断。
+    # 函数用途: 收割已完成的冷 owner 预热，记录失败并释放在途名额。
+    def _settle_owner_warmups(self, warmups: dict) -> None:
+        if not warmups:
+            return
+        from concurrent.futures import wait
+
+        wait(tuple(warmups.values()), timeout=_COLD_OWNER_WARMUP_WAIT_SECONDS)
+        for key, future in list(warmups.items()):
+            if not future.done():
+                continue
+            warmups.pop(key, None)
+            error = None if future.cancelled() else future.exception()
+            if error is not None:
+                _print_gateway_loop_error("gateway_background_main.owner_build", str(key[-1]), error)
 
     # LLM: 与业务控制共用同一基础Agent上的受管池；失败只记录诊断，不回落普通池或克隆管理员实例。
     # 函数用途: 惰性取得受管普通用户的独立准入池。

@@ -22,6 +22,38 @@ HTTP_CONTROL_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ('POST', '/control'), ('POST', '/client/agent-stop'), ('POST', '/client/agent-guidance'),
     ('POST', '/client/agent-permission'), ('POST', '/stop'),
 })
+# 公开只读状态在控制类内另走独立执行池，不排在慢 /control 处理器之后。
+HTTP_STATUS_LANE_ROUTES: frozenset[tuple[str, str]] = frozenset({('GET', '/status'), ('GET', '/metrics')})
+# 路由本身即停止语义的请求走停止执行池；未认证前绝不读正文，POST /control 一律留在原控制池。
+HTTP_STOP_LANE_ROUTES: frozenset[tuple[str, str]] = frozenset({('POST', '/stop'), ('POST', '/client/agent-stop')})
+# 状态与停止两个快速执行池各自的工作线程数：慢 /control（如手动 /compact）占满控制池时它们仍有独立线程。
+HTTP_FAST_LANE_WORKERS_COUNT = 2
+
+
+# LLM: 只解析已窥视的首行；不认识或不在控制类的路由返回 None，不授予任何身份。
+# 函数用途: 取得控制类请求的 (方法, 路由模板)，供执行池细分。
+def _control_route_key(data) -> tuple[str, str] | None:
+    parts = bytes(data[:HTTP_CONTROL_PEEK_BYTES]).partition(b'\n')[0].rstrip(b'\r').split(b' ')
+    if len(parts) != 3:
+        return None
+    try:
+        method, target = parts[0].decode('ascii'), parts[1].decode('ascii')
+    except UnicodeDecodeError:
+        return None
+    route = match_gateway_http_route(method, target.split('?', 1)[0])
+    return (method, route.template) if route is not None else None
+
+
+# LLM: 只在已归入控制车道后按首行路由细分执行池，classify_peeked_request 的车道语义与路由表保持不变；
+#   选择器线程处于认证之前，只看方法与路径，绝不解析正文或据正文授予更快的池。
+# 函数用途: 为控制类请求选择 status/stop/control 执行池，使状态读与停止路由不被慢控制命令饿死。
+def control_sublane(data) -> str:
+    key = _control_route_key(data)
+    if key in HTTP_STATUS_LANE_ROUTES:
+        return 'status'
+    if key in HTTP_STOP_LANE_ROUTES:
+        return 'stop'
+    return 'control'
 
 
 # LLM: 只窥视而不消费首行；不完整、未知或无法解析的输入保持普通处理路径。
@@ -202,7 +234,7 @@ class HTTPLaneRouter:
             self._ready_executor = DurableDaemonThreadPoolExecutor(
                 max_workers=1, thread_name_prefix='gateway-http-ready')
 
-        self._queued = {'general': deque(), 'control': deque(), 'ready': deque()}
+        self._queued = {'general': deque(), 'control': deque(), 'ready': deque(), 'status': deque(), 'stop': deque()}
         self._selector = selectors.DefaultSelector()
         self._wake_read, self._wake_write = socket.socketpair()
         self._wake_read.setblocking(False)
@@ -210,12 +242,24 @@ class HTTPLaneRouter:
         self._selector.register(self._wake_read, selectors.EVENT_READ, None)
         self._control_executor = DurableDaemonThreadPoolExecutor(
             max_workers=control_workers, thread_name_prefix='gateway-http-control')
+        # 状态读与停止各有独立小池及在途槽位：控制池被慢命令占满时它们既不排队也不被准入拒绝。
+        self._status_executor = DurableDaemonThreadPoolExecutor(
+            max_workers=HTTP_FAST_LANE_WORKERS_COUNT, thread_name_prefix='gateway-http-status')
+        self._stop_executor = DurableDaemonThreadPoolExecutor(
+            max_workers=HTTP_FAST_LANE_WORKERS_COUNT, thread_name_prefix='gateway-http-stop')
         # 构造期尚无worker，队列必须在首次submit前固定，原执行器及类属性不变。
         server._request_executor._work_queue = _CancellableWorkQueue()
         self._control_executor._work_queue = _CancellableWorkQueue()
+        self._status_executor._work_queue = _CancellableWorkQueue()
+        self._stop_executor._work_queue = _CancellableWorkQueue()
         if self._ready_executor is not None:
             self._ready_executor._work_queue = _CancellableWorkQueue()
         self._control_slots = threading.BoundedSemaphore(control_capacity)
+        self._lane_executors = {'control': self._control_executor, 'status': self._status_executor,
+                                'stop': self._stop_executor, 'ready': self._ready_executor}
+        self._lane_slots = {'control': self._control_slots,
+                            'status': threading.BoundedSemaphore(control_capacity),
+                            'stop': threading.BoundedSemaphore(control_capacity)}
         self._thread = threading.Thread(target=self._loop, name='gateway-http-readiness', daemon=True)
         self._thread.start()
 
@@ -286,6 +330,8 @@ class HTTPLaneRouter:
                 return
             lane = classify_peeked_request(data)
             self._drop_pending(sock, close=lane == 'eof')
+            if lane == 'control':
+                lane = control_sublane(data)
             if lane != 'eof':
                 self._submit(lane, sock, addr, accepted_at)
             return
@@ -336,6 +382,8 @@ class HTTPLaneRouter:
 
     def _handoff_pending(self, sock, addr, accepted_at, lane):
         prefix = self._prefixes.get(sock, bytearray())
+        if lane == 'control':
+            lane = control_sublane(prefix)
         self._drop_pending(sock, close=False)
         try:
             replay = PrefetchedSocket(sock, prefix)
@@ -410,7 +458,7 @@ class HTTPLaneRouter:
                 incoming, self._incoming = self._incoming, deque()
                 pending = tuple(self._pending)
                 tickets = [ticket for queue in self._queued.values() for ticket in queue]
-                self._queued = {'general': deque(), 'control': deque(), 'ready': deque()}
+                self._queued = {lane: deque() for lane in self._queued}
             for sock, _addr, _accepted_at in incoming:
                 self.server.shutdown_request(sock)
             for sock in pending:
@@ -429,9 +477,8 @@ class HTTPLaneRouter:
                 lane = 'general'
             if lane == 'general':
                 self._mixed_admitted += 1
-        executor = (self._control_executor if lane == 'control' else
-                    self._ready_executor if lane == 'ready' else self.server._request_executor)
-        slots = self._control_slots if lane == 'control' else self.server._request_slots
+        executor = self._lane_executors.get(lane) or self.server._request_executor
+        slots = self._lane_slots.get(lane, self.server._request_slots)
         if self._closing.is_set() or not slots.acquire(blocking=False):
             if lane == 'general':
                 with self._lock:
@@ -515,5 +562,7 @@ class HTTPLaneRouter:
         self._wake()
         self._thread.join(timeout=self.header_timeout_seconds)
         self._control_executor.shutdown(wait=False, cancel_futures=True)
+        self._status_executor.shutdown(wait=False, cancel_futures=True)
+        self._stop_executor.shutdown(wait=False, cancel_futures=True)
         if self._ready_executor is not None:
             self._ready_executor.shutdown(wait=False, cancel_futures=True)

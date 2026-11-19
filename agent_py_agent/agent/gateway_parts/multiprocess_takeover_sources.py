@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from ..common.nofollow_fs import list_names_beneath, open_directory_beneath, read_bytes_beneath
 from ..user_space.owner_resolver import OwnerIdentity
+from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
 from .multiprocess_bootstrap_publish import _WORKER_REGISTRY_MAX_BYTES
 from .multiprocess_bootstrap_ready import current_worker_identity
 from .multiprocess_executor_ledger import ExecutorLedger
@@ -226,7 +227,9 @@ def _role_snapshot(root):
     names = ['gateway_state.json', *(f'workers/{name}' for name in _role_marker_names(root))]
     values = {}
     for name in names:
-        content = read_bytes_beneath(root, tuple(name.split('/')), max_bytes=16384, require_dir_fd=True,
+        # GW-18：gateway_state.json 与写者共用同一上限；worker marker 仍按原16 KiB。
+        limit = GATEWAY_STATE_MAX_BYTES if name == 'gateway_state.json' else 16384
+        content = read_bytes_beneath(root, tuple(name.split('/')), max_bytes=limit, require_dir_fd=True,
                                      snapshot_retries=2)
         if content is not None:
             values[name] = content
