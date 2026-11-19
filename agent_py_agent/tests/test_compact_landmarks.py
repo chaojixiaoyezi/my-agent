@@ -10,6 +10,7 @@ import json
 from types import SimpleNamespace
 
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.common.log_redaction import configured_secret_redaction
 from agent_py_agent.agent.conversation import ConversationStore, compact_request_budget
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
@@ -38,6 +39,7 @@ from agent_py_agent.agent.conversation.compact_provider_surface import (
 from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
 from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.memory_archive import estimate_tokens
+from agent_py_agent.agent.tooling.host_output_redaction import TurnCredentialRedaction
 
 
 # 函数用途: 造一条用户消息行。
@@ -288,3 +290,94 @@ def test_real_compaction_shrinks_landmarks_to_the_target_with_one_extra_measurem
     committed = committed_compact_checkpoint_chain(agent, result.thread)[0]["summary"]
     assert committed == small_summary and len(_lines(small_summary, "- user [")) < len(_lines(full_summary, "- user ["))
     assert _lines(small_summary, "- omitted_user_messages: ")
+
+
+# --- P1-2（2026-11-18）：原话备份的新行、裁剪行与继承行共用一个出站净化，先净化再计量、裁剪与 JSON 编码 ---
+
+_CONFIGURED_SECRET = "SYNTHETIC_LANDMARK_CFG_SECRET_7319"
+_TURN_SECRET = "SYNTHETIC_LANDMARK_TURN_SECRET_5521"
+
+
+# 函数用途: 造一段带标题的上一代备份段。
+def _previous_with(*entry_lines: str) -> str:
+    return "\n".join(["旧摘要", "", LANDMARK_HEADING, "- authority: x", "- purpose: y", *entry_lines])
+
+
+def test_new_clipped_and_carried_lines_never_echo_a_configured_secret():
+    previous = _previous_with(f'- user [msg-old]: "旧要求：用 {_CONFIGURED_SECRET} 登录。"',
+                              f'- assistant_final [msg-ans]: "已记下 {_CONFIGURED_SECRET}。"')
+    long = f"开头：密钥 {_CONFIGURED_SECRET} 只在本机用。" + "数据行。" * 3000 + f"结尾：再次确认 {_CONFIGURED_SECRET}。"
+    rows = [_user("msg-new", f"新要求：调接口时带 {_CONFIGURED_SECRET}。"), _user("msg-long", long)]
+    options = LandmarkOptions(landmark_budget_tokens=1_500)
+    with configured_secret_redaction((_CONFIGURED_SECRET,)):
+        whole = summary_with_conversation_landmarks("新摘要", previous, rows[:1], options=options).text
+        result = summary_with_conversation_landmarks("新摘要", previous, rows, options=options)
+    assert _CONFIGURED_SECRET not in whole and _CONFIGURED_SECRET not in result.text and result.used_tokens <= 1_500
+    assert '- user [msg-old]: "旧要求：用 <redacted> 登录。"' in whole
+    assert '- assistant_final [msg-ans]: "已记下 <redacted>。"' in whole
+    assert '- user [msg-new]: "新要求：调接口时带 <redacted>。"' in whole
+    # 裁剪行按净化后的正文计量与裁剪：头尾都不含原值，行首长度是净化后正文的长度。
+    clipped = _lines(result.text, "- user [msg-long clipped ")[0]
+    public_long = long.replace(_CONFIGURED_SECRET, "<redacted>")
+    assert clipped.startswith(f"- user [msg-long clipped {len(public_long)} chars]: ")
+    body = json.loads(clipped.split(": ", 1)[1])
+    assert body.startswith("开头：密钥 <redacted> 只在本机用。") and body.endswith("结尾：再次确认 <redacted>。")
+
+
+def test_turn_bound_secret_is_redacted_on_the_compaction_finish_and_rebuild_paths(tmp_path):
+    owner = str(tmp_path / "owner-home")
+    agent = SimpleNamespace(config=SimpleNamespace(model_context_window_tokens=100_000), backend=None,
+                            tools=SimpleNamespace(tools={}), home_paths=SimpleNamespace(owner_home_dir=owner))
+    turn = TurnCredentialRedaction(owner_key=owner, thread_id="t-landmark", turn_key="turn-landmark-1")
+    turn.register_values((_TURN_SECRET,))
+    try:
+        previous = _previous_with(f'- user [msg-old]: "旧要求：令牌是 {_TURN_SECRET}。"')
+        rows = [_user("msg-new", f"新要求：用 {_TURN_SECRET} 拉取报表。")]
+        rebuilds: list = []
+        call = _CompactSummaryCall(thread_id="t-landmark", landmark_outcome=rebuilds)
+        summary = _finish_summary(_SummaryFinish(agent, previous, {}, rows, rows, "", "", call), "新摘要")
+        assert _TURN_SECRET not in summary
+        assert '- user [msg-old]: "旧要求：令牌是 [REDACTED]。"' in summary
+        assert '- user [msg-new]: "新要求：用 [REDACTED] 拉取报表。"' in summary
+        # 超出恢复目标时的收缩重建复用同一来源与同一净化函数。
+        assert rebuilds and _TURN_SECRET not in rebuilds[0].render(200) and _TURN_SECRET not in rebuilds[0].render(2_000)
+    finally:
+        turn.close()
+
+
+def test_carried_lines_stay_byte_stable_for_three_generations_without_nested_clip_markers():
+    long = "开头规则：金额保留两位小数。" + "数据行。" * 3000 + "结尾规则：按城市拼音排序。"
+    rows = [_user("u-a", "要求 A：password=hunter2-abc 只能本地用。"), _user("u-long", long)]
+    options = LandmarkOptions(landmark_budget_tokens=1_500)
+    first = summary_with_conversation_landmarks("第一代", "", rows, options=options).text
+    section = first[first.index(LANDMARK_HEADING):]
+    assert "hunter2" not in section and _lines(section, "- user [u-long clipped ")
+    second = summary_with_conversation_landmarks("第二代", first, [], options=options).text
+    third = summary_with_conversation_landmarks("第三代", second, [], options=options).text
+    fourth = summary_with_conversation_landmarks("第四代", third, [], options=options).text
+    # 已净化、已裁剪的继承行逐代逐字不变：不重复编码、不再嵌套裁剪标记。
+    for text in (second, third, fourth):
+        assert text[text.index(LANDMARK_HEADING):] == section
+    assert fourth.count("chars omitted]") == 1 and fourth.count("clipped ") == 1
+
+
+def test_undecodable_carried_lines_degrade_to_ids_and_keep_the_omitted_count():
+    previous = _previous_with(
+        '- user [msg-ok]: "可解的旧要求。"',
+        '- user [msg-cut]: "被截断的旧要求 token=sk-live-123',
+        "- user: 没有引号的旧格式行",
+        '- assistant_final [msg-ans]: {"not": "a string"}',
+        "- omitted_user_messages: 2 older or oversized [msg-gone-1 msg-gone-2]",
+    )
+    text = summary_with_conversation_landmarks("新摘要", previous, [],
+                                               options=LandmarkOptions(landmark_budget_tokens=2_000)).text
+    assert '- user [msg-ok]: "可解的旧要求。"' in text
+    assert "被截断" not in text and "sk-live" not in text and "没有引号" not in text and "a string" not in text
+    # 有编号的用户行降为省略编号，无编号的计入未列出数；解不出的答复行直接丢弃。
+    assert _lines(text, "- omitted_user_messages: ") == [
+        "- omitted_user_messages: 4 older or oversized [msg-gone-1 msg-gone-2 msg-cut]; earliest 1 not listed"]
+    # 全部继承行都解不出来时，备份段仍只带省略行留下，编号不会随段一起消失。
+    only_bad = summary_with_conversation_landmarks("新摘要", _previous_with('- user [msg-cut]: "未闭合'), [],
+                                                   options=LandmarkOptions(landmark_budget_tokens=2_000)).text
+    assert only_bad.count(LANDMARK_HEADING) == 1
+    assert _lines(only_bad, "- omitted_user_messages: ") == ["- omitted_user_messages: 1 older or oversized [msg-cut]"]
