@@ -43,21 +43,24 @@ def test_empty_slices_trip_at_configured_limit():
     assert count == 3
 
 
-# LLM: 工具调用和 Goal/任务快照差异都是结构化进展；不读取 response 或消息 content。
+# LLM: 成功工具调用和 Goal/任务快照差异都是结构化进展；不读取 response 或消息 content。
 # 函数用途: 验证实际进展清零，并能识别无工具调用时的 Goal revision 变化。
 def test_tool_or_goal_revision_progress_resets_idle_counter():
     goal = SimpleNamespace(goal_id="goal-1", revision=2, status="active", task_id="task-1")
     signal = SimpleNamespace(
         metadata={WAKE_SNAPSHOT_KEY: {**goal_progress_snapshot(goal, "active"), "goal_revision": 1}}
     )
-    empty_report = SimpleNamespace(tool_call_count=0, material_progress_count=0)
+    empty_report = SimpleNamespace(tool_call_count=0, tool_success_count=0, material_progress_count=0)
     assert slice_has_progress(signal, empty_report, goal, "active") is True
     assert next_idle_slice_count(2, progressed=True, limit=3) == (0, False)
 
-    tool_report = SimpleNamespace(tool_call_count=1, material_progress_count=0)
+    tool_report = SimpleNamespace(tool_call_count=1, tool_success_count=1, material_progress_count=0)
     signal.metadata[WAKE_SNAPSHOT_KEY] = goal_progress_snapshot(goal, "active")
     assert slice_has_progress(signal, tool_report, goal, "active") is True
     assert slice_has_progress(signal, empty_report, goal, "completed") is True
+    # G6（2026-11-18）：调用全部失败的片不是进展，否则同一失败能无限续跑且永不熔断。
+    failed_report = SimpleNamespace(tool_call_count=3, tool_success_count=0, material_progress_count=0)
+    assert slice_has_progress(signal, failed_report, goal, "active") is False
 
 
 # LLM: 0 是明确不限，不积攒隐藏次数，之后切回有限值也不会继承陈旧空片数。

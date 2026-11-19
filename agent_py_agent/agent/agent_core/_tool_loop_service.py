@@ -1153,7 +1153,10 @@ def _publish_native_compact_result(
         params, calibration=plan.calibration, raw_estimated_tokens=raw, calibrated_tokens=after_tokens,
     ):
         invalidate_provider_context_observation(params)
+    from ..memory_archive import estimate_tokens
+
     completed_generation = canonical_generation or plan.progress_generation
+    # 成功时也给出摘要约占多少与保留的工具往返对数（只观测；与失败时的容量计量同名同口径）。
     _emit_native_compact_progress(
         params,
         phase="completed",
@@ -1162,6 +1165,8 @@ def _publish_native_compact_result(
         **{
             **_native_compact_progress_values(plan, after_tokens=after_tokens),
             "generation": completed_generation,
+            "summary_tokens": estimate_tokens(plan.semantic_summary),
+            "retained_items": preserved_pairs,
         },
     )
     _publish_native_ir_compaction(
@@ -1178,7 +1183,8 @@ def _publish_native_compact_result(
     return dropped
 
 
-# LLM: Logging receives only numeric counters and summary length; summary content never enters logs.
+# LLM: Logging receives only numeric counters, the structured summary kind and summary length; summary
+# content never enters logs. landmark_tokens 是摘要里原话备份段约占的 token（续带的失败事实块在段前，不计入）。
 # 函数用途: 记录一次已完成工具历史 Compact 的计量结果，便于性能和成本排查。
 def _log_native_compact(
     plan: _NativeCompactPlan,
@@ -1186,11 +1192,20 @@ def _log_native_compact(
     dropped: int,
     preserved_pairs: int,
 ) -> None:
+    from ..conversation.compact_landmarks import semantic_summary_text
+    from ..memory_archive import estimate_tokens
+    from ..memory_archive.compact_semantic_summary import is_live_semantic_handoff
+
+    summary = plan.semantic_summary
+    kind = ("provider" if plan.provider_compaction else "semantic" if is_live_semantic_handoff(summary)
+            else "mechanical" if summary else "none")
+    summary_tokens = estimate_tokens(summary) if summary else 0
+    landmark_tokens = max(0, summary_tokens - estimate_tokens(semantic_summary_text(summary))) if summary else 0
     _LOGGER.info(
         "native tool history compacted: before_tokens=%d after_tokens=%d "
         "trigger_tokens=%d target_tokens=%d recovery_target_tokens=%d "
         "dropped_pairs=%d preserved_pairs=%d "
-        "semantic_summary=%s summary_chars=%d",
+        "semantic_summary=%s summary_chars=%d summary_kind=%s summary_tokens=%d landmark_tokens=%d",
         plan.before_tokens,
         after_tokens,
         plan.trigger_tokens,
@@ -1200,6 +1215,9 @@ def _log_native_compact(
         preserved_pairs,
         bool(plan.semantic_summary),
         len(plan.semantic_summary),
+        kind,
+        summary_tokens,
+        landmark_tokens,
     )
 
 
@@ -1436,6 +1454,8 @@ def _emit_native_compact_progress(
     source_messages: int,
     after_tokens: int = 0,
     error_code: str = "",
+    summary_tokens: int | None = None,
+    retained_items: int | None = None,
 ) -> bool:
     sink = params.effective_on_chunk
     writer = getattr(sink, "write_conversation_compact_progress", None)
@@ -1453,6 +1473,8 @@ def _emit_native_compact_progress(
         "trigger_tokens": max(0, int(trigger_tokens or 0)),
         "source_messages": max(0, int(source_messages or 0)),
         "error_code": str(error_code or "").strip(),
+        **({"summary_tokens": max(0, int(summary_tokens))} if summary_tokens is not None else {}),
+        **({"retained_items": max(0, int(retained_items))} if retained_items is not None else {}),
     }
     from ..conversation.authority import AGENT_THREAD_ID_ATTR
     from ..conversation.compact_progress import CompactProgressTiming

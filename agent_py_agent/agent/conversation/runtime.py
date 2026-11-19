@@ -725,7 +725,7 @@ class _BackgroundSlicePlan:
     archived_tool_call_count: int | None = None
 
 
-# LLM: 空转片判定与熔断完全同源：复用 goal_progress_fuse.slice_has_progress（工具调用数、
+# LLM: 空转片判定与熔断完全同源：复用 goal_progress_fuse.slice_has_progress（成功工具调用数、
 #   物化进展数、wake 时的 Goal/任务快照比较），不另写一套判据。缺基线按有进展处理，不误伤旧 wake。
 # 函数用途: 判断这一片 thread_goal_continue 是否无进展，供交付决策决定是否只做本地转录。
 def _background_goal_idle_slice(
@@ -744,6 +744,7 @@ def _background_goal_idle_slice(
     signal = SimpleNamespace(metadata=wake.get("metadata") or {})
     report = SimpleNamespace(
         tool_call_count=int(getattr(execution_result, "tool_call_count", 0) or 0),
+        tool_success_count=int(getattr(execution_result, "tool_success_count", 0) or 0),
         material_progress_count=int(getattr(execution_result, "material_progress_count", 0) or 0),
     )
     task_status = _background_task_link_status(agent, request, store=store)
@@ -894,6 +895,7 @@ def _complete_background_slice(
         commit_kind=commit.commit_kind,
         message_id=commit.message_id,
         route_ownership=plan.route_ownership,
+        turn_end_reason=str((plan.display_snapshot or {}).get("turn_end_reason") or ""),
     )
 
 
@@ -5464,7 +5466,7 @@ def _record_quota_fallback_message(
 def _background_goal_dependencies(
     scheduler: BackgroundMainAgentScheduler,
 ) -> GoalContinuationDependencies:
-    from .goal_progress_fuse import push_goal_no_progress_notice
+    from .goal_progress_fuse import push_goal_no_progress_notice, push_goal_withheld_notice
     from .goal_runtime import raise_goal_continuation_wake
     from .run_claim import user_input_turn_gate
 
@@ -5498,6 +5500,12 @@ def _background_goal_dependencies(
             None,
         ),
         user_turn_gate=partial(user_input_turn_gate, scheduler.store),
+        queue_withheld_notice=partial(
+            push_goal_withheld_notice,
+            scheduler.store,
+            channels=scheduler.runtime.channels,
+            route_deps=_background_route_dependencies(scheduler),
+        ),
     )
 
 

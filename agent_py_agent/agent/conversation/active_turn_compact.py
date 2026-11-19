@@ -442,9 +442,11 @@ def _execute_active_turn_compact(
             failure=exc,
         )
         raise
+    # 成功时也给出摘要约占多少与保留条数（只观测；与失败时的容量计量同名同口径，不另算整份请求）。
     _emit_progress(
         callback,
-        {**progress, "generation": max(1, int(updated.compact_generation or 1))},
+        {**progress, "generation": max(1, int(updated.compact_generation or 1)),
+         "summary_tokens": estimate_tokens(replacement), "retained_items": len(plan.retained_records)},
         phase="completed",
         stage="completed",
         percent=100,

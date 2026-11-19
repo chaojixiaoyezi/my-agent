@@ -811,7 +811,7 @@ def test_measured_live_handoff_carries_landmarks_and_falls_back_to_plain_when_re
         projected.append(summary)
         return ConversationCompactProjection(50_000 if rejected and LANDMARK_HEADING in summary else 100, object())
 
-    _compact(case, request_projector=project)
+    _compact(case, request_projector=project, progress_callback=case.progress.append)
     carried = projected[0]
     assert carried.startswith(handoff) and '- user [msg-req]: "原始要求：金额保留两位小数。"' in carried
     assert estimate_tokens(carried) <= estimate_tokens(previous)
@@ -819,6 +819,10 @@ def test_measured_live_handoff_carries_landmarks_and_falls_back_to_plain_when_re
     assert projected == ([carried, handoff] if rejected else [carried])
     committed = case.store.threads.require(case.thread.thread_id)
     assert committed.compact_generation == 1 and committed.summary == (handoff if rejected else carried)
+    # P3-1：成功事件给出提交摘要约占多少与保留条数（只观测）。
+    completed = case.progress[-1]
+    assert completed["phase"] == "completed" and completed["summary_tokens"] == estimate_tokens(committed.summary)
+    assert completed["retained_items"] == len(model_visible_active_turn_tool_calls(case.agent, case.attrs, case.records))
 
 
 def test_live_carry_does_not_hide_a_rejection_that_the_plain_handoff_also_hits(carried_case, monkeypatch):

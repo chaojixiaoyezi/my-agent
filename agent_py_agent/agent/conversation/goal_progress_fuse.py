@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -14,6 +15,8 @@ FUSE_METADATA_KEY = "goal_continuation_fuse"
 WAKE_SNAPSHOT_KEY = "goal_progress_snapshot"
 NO_PROGRESS_REASON_CODE = "GOAL_CONTINUATION_NO_PROGRESS"
 NO_PROGRESS_NOTICE_SOURCE = "goal_continuation"
+# 续跑资格被本片结束原因扣下（Goal 仍 active 但不会再有下一片）时的宿主提示代码，与熔断提示同来源、按代码各留一条。
+WITHHELD_REASON_CODE = "GOAL_CONTINUATION_WITHHELD"
 
 _LOGGER = logging.getLogger("agent.conversation.goal_progress_fuse")
 
@@ -191,9 +194,10 @@ def goal_progress_snapshot(goal: object, task_status: str) -> dict[str, object]:
 
 
 # LLM: 缺失/不完整的旧 wake 基线按“有进展”处理，先建立可信下一片边界，不因迁移数据误触发暂停。
-# 函数用途: 只比较工具计数及 Goal/任务结构字段，判断本片是否应清空空转计数。
+#   只认成功的工具调用（ok 为真，含只读成功）：全部失败的片不算进展，否则同一失败可以无限续跑且永不熔断。
+# 函数用途: 只比较成功工具计数及 Goal/任务结构字段，判断本片是否应清空空转计数。
 def slice_has_progress(signal: object, report: object, goal: object, task_status: str) -> bool:
-    if int(getattr(report, "tool_call_count", 0) or 0) > 0:
+    if int(getattr(report, "tool_success_count", 0) or 0) > 0:
         return True
     if int(getattr(report, "material_progress_count", 0) or 0) > 0:
         return True
@@ -265,15 +269,38 @@ def _no_progress_notice(goal: object) -> object | None:
     return host_notice(
         NO_PROGRESS_NOTICE_SOURCE,
         NO_PROGRESS_REASON_CODE,
-        f"持续目标连续 {current_count} 片没有工具调用或目标/任务状态变化，自动续跑已暂停。请检查进度后用 /goal resume 恢复。",
+        f"持续目标连续 {current_count} 片没有成功的工具调用或目标/任务状态变化，自动续跑已暂停。请检查进度后用 /goal resume 恢复。",
         details={"goal_id": goal_id, "reason_code": NO_PROGRESS_REASON_CODE},
     )
 
 
-# LLM: 熔断提示的“主动推送”唯一入口：先按原规则排队，再对可主动外呼的通道立即投递一次并把
-#   同一条 notice 取走（已读，下一条回复不再重复带出）；纯 TUI/无外发通道线程只排队、行为不变。
-#   投递失败不取走，提示留在待送达队列由下一次前台回复补出。副作用：改写 pending_host_notices、
-#   可能调用外部投递服务并在成功时追加一条会话消息。
+# LLM: 文案由宿主固定生成，只列结构化结束原因（turn_end_reason/runtime_reason/runtime_status），不读模型正文或显示快照，
+#   因此不会带出凭据；三项都空（如冻结重投没有新执行）时写“结束原因不可取得”。details 由 host_notice 清洗并截长。
+# 函数用途: 构造“上一片结束原因让自动续跑没接上”的宿主提示，并给出可执行的下一步。
+def goal_withheld_notice(goal: object, signal: object, report: object) -> object:
+    from .host_notices import host_notice
+
+    facts = {
+        "turn_end_reason": str(getattr(report, "turn_end_reason", "") or "").strip(),
+        "runtime_reason": str(getattr(report, "runtime_reason", "") or "").strip(),
+        "runtime_status": str(getattr(report, "runtime_status", "") or "").strip(),
+    }
+    named = "，".join(f"{key}={value}" for key, value in facts.items() if value) or "结束原因不可取得"
+    return host_notice(
+        NO_PROGRESS_NOTICE_SOURCE,
+        WITHHELD_REASON_CODE,
+        f"持续目标上一片结束后没有自动续跑（{named}）。目标仍在进行；用 /goal resume 接着跑，也可以直接回复，"
+        "或用 /goal pause 暂停。",
+        details={
+            "goal_id": str(getattr(goal, "goal_id", "") or ""),
+            "goal_revision": int(getattr(goal, "revision", 0) or 0),
+            "wake_signal_id": str(getattr(signal, "wake_signal_id", "") or ""),
+            **facts,
+        },
+    )
+
+
+# LLM: 熔断提示的“主动推送”入口：沿共享推送规则排队并对可外发通道主动推一次（见 _push_goal_notice）。
 # 函数用途: 熔断时对外发通道线程主动推一次提示，并保证同一提示不会重复送达。
 def push_goal_no_progress_notice(
     store: object,
@@ -282,47 +309,88 @@ def push_goal_no_progress_notice(
     channels: object,
     route_deps: object,
 ) -> bool:
+    notice = _no_progress_notice(goal)
+    if notice is None:
+        return False
+    goal_id = str(getattr(goal, "goal_id", "") or "")
+    return _push_goal_notice(store, goal, notice, _GoalNoticePush(
+        channels, route_deps, f"goal-no-progress:{goal_id}", "thread_goal_no_progress_push",
+    ))
+
+
+# LLM: 续跑被扣下时的推送入口；每个线程同代码只留一条待送达，幂等键按目标与唤醒区分。
+# 函数用途: 把“续跑没接上”的提示排队，并对外发通道线程主动推一次。
+def push_goal_withheld_notice(
+    store: object,
+    goal: object,
+    signal: object,
+    report: object,
+    *,
+    channels: object,
+    route_deps: object,
+) -> bool:
+    goal_id = str(getattr(goal, "goal_id", "") or "")
+    wake_id = str(getattr(signal, "wake_signal_id", "") or "")
+    return _push_goal_notice(store, goal, goal_withheld_notice(goal, signal, report), _GoalNoticePush(
+        channels, route_deps, f"goal-withheld:{goal_id}:{wake_id}", "thread_goal_withheld_push",
+    ))
+
+
+# LLM: 一次主动推送需要的投递面、路由依赖、幂等键与会话记录原因；只为保持共享推送函数参数简短。
+# 类用途: 打包目标提示主动推送的投递参数。
+@dataclass(frozen=True)
+class _GoalNoticePush:
+    channels: object
+    route_deps: object
+    idempotency_key: str
+    record_reason: str
+
+
+# LLM: 目标提示的“主动推送”共享实现：先排队（同来源同代码替换），再对可主动外呼的通道立即投递一次并把同一条 notice
+#   取走（已读，下一条回复不再重复带出）；纯 TUI/无外发通道线程只排队。投递失败不取走，提示留在待送达队列由下一次前台
+#   回复补出。副作用：改写 pending_host_notices、可能调用外部投递服务并在成功时追加一条会话消息。
+# 函数用途: 排队一条目标提示，并对外发通道线程主动推一次、保证同一提示不会重复送达。
+def _push_goal_notice(store: object, goal: object, notice: object, push: _GoalNoticePush) -> bool:
     from .background_routing import resolve_background_route
     from .channels import DeliveryContext, ReplyEnvelope
     from .host_notices import queue_host_notice, take_host_notices
 
-    notice = _no_progress_notice(goal)
-    if notice is None:
-        return False
     thread_id = str(getattr(goal, "thread_id", "") or "")
     goal_id = str(getattr(goal, "goal_id", "") or "")
     if not thread_id or not goal_id:
         return False
     if not queue_host_notice(store, thread_id, notice, replace_same_code=True):
         return False
-    channel, target = resolve_background_route(route_deps, thread_id)
+    channel, target = resolve_background_route(push.route_deps, thread_id)
     try:
-        supports_proactive = bool(target and channels.supports_proactive(channel))
+        supports_proactive = bool(target and push.channels.supports_proactive(channel))
     except Exception:  # noqa: BLE001 - 主动推送失败只保留待送达提示，不影响熔断主链。
         supports_proactive = False
     if not supports_proactive:
         return True
-    receipt = channels.deliver(
+    receipt = push.channels.deliver(
         DeliveryContext(
             channel=channel,
             target=target,
             mode="proactive",
             thread_id=thread_id,
             task_id=str(getattr(goal, "task_id", "") or ""),
-            idempotency_key=f"goal-no-progress:{goal_id}",
+            idempotency_key=push.idempotency_key,
         ),
         ReplyEnvelope(content=notice.text),
     )
     if str(getattr(receipt, "delivery_status", "") or "").strip().lower() == "sent":
         taken = take_host_notices(store, thread_id, [notice.notice_id])
         if taken:
-            _record_no_progress_pushed_message(store, goal, notice, channel)
+            _record_pushed_notice_message(store, goal, notice, (channel, push.record_reason))
     return True
 
 
 # LLM: 与额度通知同一模式：主动推送的提示也留一条会话记录，让同一线程的 TUI 用户能回看已送达内容。
-# 函数用途: 把已主动推送的熔断提示追加为一条后台 assistant 消息。
-def _record_no_progress_pushed_message(store: object, goal: object, notice: object, channel: str) -> None:
+#   delivered 是 (通道, 记录原因)；source/code 取自提示本身。
+# 函数用途: 把已主动推送的目标提示追加为一条后台 assistant 消息。
+def _record_pushed_notice_message(store: object, goal: object, notice: object, delivered: tuple[str, str]) -> None:
+    channel, reason = delivered
     thread_id = str(getattr(goal, "thread_id", "") or "")
     if not thread_id or store is None or getattr(store, "messages", None) is None:
         return
@@ -334,17 +402,17 @@ def _record_no_progress_pushed_message(store: object, goal: object, notice: obje
                 "content": str(getattr(notice, "text", "") or ""),
                 "channel": str(channel or "internal"),
                 "metadata": {
-                    "reason": "thread_goal_no_progress_push",
+                    "reason": reason,
                     "notice_id": str(getattr(notice, "notice_id", "") or ""),
-                    "source": NO_PROGRESS_NOTICE_SOURCE,
-                    "code": NO_PROGRESS_REASON_CODE,
+                    "source": str(getattr(notice, "source", "") or ""),
+                    "code": str(getattr(notice, "code", "") or ""),
                     "goal_id": str(getattr(goal, "goal_id", "") or ""),
                     "task_id": str(getattr(goal, "task_id", "") or ""),
                 },
             }
         )
     except Exception:  # noqa: BLE001 - 落记录失败不反噬已成功的主动推送。
-        _LOGGER.warning("no-progress notice message record failed(thread=%s)", thread_id, exc_info=True)
+        _LOGGER.warning("goal notice message record failed(thread=%s)", thread_id, exc_info=True)
 
 
 __all__ = [
@@ -352,9 +420,12 @@ __all__ = [
     "NO_PROGRESS_NOTICE_SOURCE",
     "NO_PROGRESS_REASON_CODE",
     "WAKE_SNAPSHOT_KEY",
+    "WITHHELD_REASON_CODE",
     "goal_progress_snapshot",
+    "goal_withheld_notice",
     "next_idle_slice_count",
     "push_goal_no_progress_notice",
+    "push_goal_withheld_notice",
     "queue_goal_no_progress_notice",
     "record_goal_continuation_fuse",
     "reset_goal_continuation_fuse",

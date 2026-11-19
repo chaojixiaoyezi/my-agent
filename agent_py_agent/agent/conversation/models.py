@@ -842,6 +842,9 @@ class BackgroundMainAgentReport:
     # 结算码（如工具结果无法确认）；只读结构化值，不解析回复正文。冻结重投等没有新执行的报告保持空。
     runtime_status: str = ""
     runtime_reason: str = ""
+    # 这片执行的结构化回合结束原因（turn_end：completed/blocked/max-tokens/aborted/error/interrupted），取自显示快照；
+    #   冻结重投没有新执行、冻结载荷也不存它，保持空。续跑资格被扣下时只用它给用户写宿主提示，不参与续跑判定。
+    turn_end_reason: str = ""
 
 
 # LLM: One immutable event preserves the model-call summary produced by one
