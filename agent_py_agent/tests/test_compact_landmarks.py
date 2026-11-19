@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core._tool_loop_service import _carry_native_live_landmarks
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
@@ -49,7 +51,10 @@ from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
     is_live_semantic_handoff,
     live_operation_facts_entry,
 )
-from agent_py_agent.agent.tooling.host_output_redaction import TurnCredentialRedaction
+from agent_py_agent.agent.tooling.host_output_redaction import (
+    TurnCredentialRedaction,
+    turn_credential_redaction,
+)
 from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
 
 
@@ -494,3 +499,136 @@ def test_native_live_carry_needs_a_canonical_binding_and_matches_facts_by_exact_
     assert _carry_native_live_landmarks(agent, params, None, handoff, previous) == handoff
     mechanical = _accept_live_summary(LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None), "")
     assert _carry_native_live_landmarks(agent, params, binding, mechanical, previous) == mechanical
+
+
+# --- F02（2026-11-19）：地标正文只受本行原回合的凭据绑定影响；相邻回合扣留不再抹掉整代公开原话 ---
+
+_WITHHELD_TEXT = "[内容因凭据脱敏额度超限已扣留]"
+
+
+# 函数用途: 在凭据绑定登记之前，往真实消息库落一批带来源字段的用户消息；返回 store、线程与按顺序读回的行。
+def _persisted_rows(tmp_path, specs):
+    store = ConversationStore(tmp_path / "conversation")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "now": 1})
+    for content, metadata in specs:
+        store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": content, "metadata": metadata})
+    return store, thread, store.messages.recent(thread.thread_id, limit=0)
+
+
+# 函数用途: 给出 count 条完全公开、各带自己请求来源的原话。
+def _public_specs(count: int = 20):
+    return [(f"公开要求 {index}：第 {index} 张报表按城市拼音排序。", {"conversation_request_id": f"req-public-{index}"})
+            for index in range(count)]
+
+
+# 函数用途: 造一个按 owner 目录与真实会话存储根查找活动回合绑定的压缩 agent。
+def _scoped_agent(tmp_path, store):
+    return SimpleNamespace(config=SimpleNamespace(model_context_window_tokens=100_000), backend=None,
+                           tools=SimpleNamespace(tools={}), conversation_store=store,
+                           home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "owner-home")))
+
+
+# 函数用途: 让一个回合登记满宿主 256 项上限后再登记一项，进入扣留状态。
+def _exhaust(turn):
+    turn.register_values(tuple(f"SYNTHETIC_ADJACENT_{index:03d}" for index in range(256)))
+    turn.register_values(("SYNTHETIC_ADJACENT_OVERFLOW",))
+    assert turn.withheld
+    return turn
+
+
+# 函数用途: 走生产压缩收尾 _finish_summary，返回摘要全文；rebuilds 收集可按更小预算重建的对象。
+def _finish_rows(agent, previous: str, rows, thread_id: str, *, summary: str = "新摘要", rebuilds=None) -> str:
+    call = _CompactSummaryCall(thread_id=thread_id, landmark_outcome=rebuilds)
+    return _finish_summary(_SummaryFinish(agent, previous, {}, rows, rows, "", "", call), summary)
+
+
+# 函数用途: 数全文里逐字可读（按 JSON 编码正文匹配）的原话条数。
+def _readable(text: str, rows) -> int:
+    return sum(json.dumps(row.content, ensure_ascii=False) in text for row in rows)
+
+
+def test_adjacent_withheld_turn_keeps_twenty_public_landmarks_on_every_path(tmp_path):
+    store, thread, rows = _persisted_rows(tmp_path, _public_specs())
+    agent, tid = _scoped_agent(tmp_path, store), thread.thread_id
+    clean = _finish_rows(agent, "", rows, tid, summary="上一代摘要。" * 400)
+    assert _readable(clean, rows) == 20
+    adjacent = _exhaust(TurnCredentialRedaction(owner_key=agent.home_paths.owner_home_dir,
+                                                conversation_root=str(store.storage.root), thread_id=tid,
+                                                turn_key="req-adjacent"))
+    try:
+        rebuilds: list = []
+        first = _finish_rows(agent, "", rows, tid, rebuilds=rebuilds)
+        shrunk = rebuilds[0].render(800)
+        carried, used = carry_live_landmarks(agent, _handoff(1), clean, thread_id=tid)
+    finally:
+        adjacent.close()
+    following = _finish_rows(agent, first, [], tid)
+    # 首次渲染、live 携带、关闭绑定后的下一代都是 20/20；超额回缩只减少条数，留下的每条都逐字可读。
+    assert (_readable(first, rows), _readable(carried, rows), _readable(following, rows)) == (20, 20, 20)
+    assert used > 0 and _WITHHELD_TEXT not in first + shrunk + carried + following
+    kept = _lines(shrunk, "- user [")
+    assert 0 < len(kept) < 20 and _readable(shrunk, rows) == len(kept)
+    assert following[following.index(LANDMARK_HEADING):] == first[first.index(LANDMARK_HEADING):]
+    # 磁盘原消息不变。
+    assert [row.content for row in store.messages.recent(tid, limit=0)] == [row.content for row in rows]
+
+
+@pytest.mark.parametrize("scope", ["other_owner", "other_thread"])
+def test_withheld_turn_of_another_owner_or_thread_never_touches_these_landmarks(tmp_path, scope):
+    store, thread, rows = _persisted_rows(tmp_path, _public_specs())
+    agent = _scoped_agent(tmp_path, store)
+    if scope == "other_owner":
+        turn = TurnCredentialRedaction(owner_key=str(tmp_path / "other-owner"), thread_id=thread.thread_id)
+    else:
+        turn = TurnCredentialRedaction(owner_key=agent.home_paths.owner_home_dir,
+                                       conversation_root=str(store.storage.root), thread_id="t-other-thread")
+    _exhaust(turn)
+    try:
+        first = _finish_rows(agent, "", rows, thread.thread_id)
+    finally:
+        turn.close()
+    assert _readable(first, rows) == 20
+
+
+def test_another_turns_registered_value_does_not_rewrite_a_row_with_exact_provenance(tmp_path):
+    store, thread, rows = _persisted_rows(tmp_path, [
+        ("公开要求：项目代号 ProjectAlpha-Ledger 按城市排序。", {"conversation_request_id": "req-public-0"}),
+        (f"本回合要求：令牌 {_TURN_SECRET} 配 ProjectAlpha-Ledger 用。", {"conversation_request_id": "req-secret-turn"}),
+    ])
+    agent, tid = _scoped_agent(tmp_path, store), thread.thread_id
+    turn = TurnCredentialRedaction(owner_key=agent.home_paths.owner_home_dir, conversation_root=str(store.storage.root),
+                                   thread_id=tid, turn_key="req-secret-turn")
+    turn.register_values((_TURN_SECRET, "ProjectAlpha-Ledger"))
+    try:
+        text = _finish_rows(agent, "", rows, tid)
+    finally:
+        turn.close()
+    # 别的回合登记的普通项目名不改写带精确来源的公开行；本回合自己的行照常遮蔽本回合登记的值。
+    assert _readable(text, rows[:1]) == 1 and _TURN_SECRET not in text
+    assert f'- user [{rows[1].message_id}]: "本回合要求：令牌 [REDACTED] 配 [REDACTED] 用。"' in text
+
+
+def test_rows_of_the_withheld_turn_and_unprovenanced_rows_degrade_to_their_ids(tmp_path):
+    store, thread, rows = _persisted_rows(tmp_path, [
+        *_public_specs(2),
+        ("扣留回合的要求：SYNTHETIC_ADJACENT_OVERFLOW 已贴进来。", {"request_id": "req-adjacent", "task_id": "task-shared"}),
+        ("同任务另一回合的公开要求：按月汇总。", {"conversation_request_id": "req-public-x", "task_id": "task-shared"}),
+        ("只有任务编号的旧要求：按周汇总。", {"task_id": "task-shared"}),
+        ("没有来源字段的旧要求：按季汇总。", {}),
+    ])
+    agent, tid = _scoped_agent(tmp_path, store), thread.thread_id
+    # 生产工厂按 request/run/task 登记别名：扣留回合也认 task-shared。绑定随 params 存活，测试期间须持有它。
+    params = SimpleNamespace(request_id="req-adjacent", task_id="task-shared", thread_id=tid)
+    held = _exhaust(turn_credential_redaction(agent, params))
+    try:
+        text = _finish_rows(agent, "", rows, tid)
+    finally:
+        held.close()
+    ids = [row.message_id for row in rows]
+    # 显式来源不是扣留回合的行照常逐字保留（共享 task_id 不推翻显式回合身份）。
+    assert _readable(text, [rows[0], rows[1], rows[3]]) == 3
+    # 扣留回合自己的行、只有任务编号的行与无来源旧行只留编号（记入省略），不写扣留占位、不外显正文。
+    assert "SYNTHETIC_ADJACENT" not in text and "按周汇总" not in text and "按季汇总" not in text
+    assert _WITHHELD_TEXT not in text
+    omitted = _lines(text, "- omitted_user_messages: ")
+    assert len(omitted) == 1 and all(ids[index] in omitted[0] for index in (2, 4, 5))

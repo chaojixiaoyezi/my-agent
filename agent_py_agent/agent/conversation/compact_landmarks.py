@@ -68,6 +68,7 @@ class LandmarkedSummary:
 
 
 # LLM: 新行只记下标、编号与整行 token（正文按下标重读）；继承行保存整行文本，只能整行保留或整行省略。
+#   withheld 的新行（原回合凭据绑定被扣留）不会被选中，用户行只以编号记入省略。
 # 类用途: 一条候选原话（用户原话或助手最终答复）的轻量描述。
 @dataclass(frozen=True)
 class _Landmark:
@@ -76,11 +77,12 @@ class _Landmark:
     tokens: int
     row_index: int = -1
     line: str = ""
+    withheld: bool = False
 
 
 # LLM: 第一遍读取的结果：候选条目（时间正序）、上一代已省略的编号、上一代已省略但没列出编号的数量，
 #   以及供第二遍按下标重读正文的原始行序列。redact 是本次压缩唯一的出站净化函数：新行计量、整行/裁剪渲染与继承行
-#   共用同一个（None 时只做配置作用域与常见凭据模式净化），保证净化先于计量、裁剪与 JSON 编码。
+#   共用同一个（新行有 row() 时按原回合净化；None 时只做配置作用域与常见凭据模式净化），保证净化先于计量、裁剪与 JSON 编码。
 # 类用途: 原话备份的可重复渲染来源；按不同预算多次渲染不会再次通读全部原文。
 @dataclass(frozen=True)
 class LandmarkSource:
@@ -134,26 +136,63 @@ def landmark_source(
 
 
 # LLM: 只读宿主已登记的活动回合凭据绑定（按 owner 目录、会话存储根和线程查找，与外发消息、后台投递同一取法）和当前
-#   上下文的配置密钥；不解密、不回看已关闭回合，也不改写冷归档。绑定被扣留时整段替换为扣留说明（编号仍保留）。
-# 函数用途: 生成本次压缩的原话备份出站净化函数：先套活动回合的公开文本，再做配置作用域与常见凭据模式脱敏。
+#   上下文的配置密钥；不解密、不回看已关闭回合，也不改写冷归档。新行带精确来源时只用该来源回合自己的绑定，见
+#   _TurnScopedRedactor；相邻回合被扣留不再把整代公开原话换成扣留说明。
+# 函数用途: 生成本次压缩的原话备份出站净化函数：先套适用回合的公开文本，再做配置作用域与常见凭据模式脱敏。
 def landmark_redactor(agent: object, thread_id: str) -> Callable[[str], str]:
-    from ..common.log_redaction import redact_sensitive_value
-    from ..tooling.host_output_redaction import active_turn_redactions_for_scope
-
     root = getattr(getattr(getattr(agent, "conversation_store", None), "storage", None), "root", None)
     owner = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
     thread = str(thread_id or "").strip()
-    turns = active_turn_redactions_for_scope(
-        owner_key=owner, conversation_root=root, thread_id=thread,
-    ) if thread and (root or owner) else ()
+    return _TurnScopedRedactor({"owner_key": owner, "conversation_root": root, "thread_id": thread}
+                               if thread and (root or owner) else None)
 
-    # 函数用途: 按固定顺序净化一段原话正文。
-    def redact(text: str) -> str:
-        for turn in turns:
-            text = turn.public_text(text)
+
+# LLM: 调用本身净化继承行（宿主已净化过的公开表示）与没有来源的新行：套本线程每个活动回合已登记的值，扣留回合只遮
+#   已登记的值、不整段抹掉。row() 按新行的精确来源（conversation_request_id/request_id/run_id，都没有才用 task_id，
+#   同一任务可跨回合）只取该回合的绑定：它被扣留时返回 None（本行只留编号）；没有来源的新行在本线程有扣留回合期间
+#   也只留编号。同一来源的计量与渲染共用一次查找结果；只查内存索引，不扫 transcript 或冷历史。
+# 类用途: 一次压缩的原话备份出站净化：继承行整段净化，新行按原回合净化或降为编号。
+class _TurnScopedRedactor:
+    def __init__(self, scope: dict[str, object] | None) -> None:
+        self._scope = scope
+        self._thread_turns = self._turns()
+        self._exact: dict[tuple[str, ...], tuple[object, ...]] = {}
+
+    # 函数用途: 查本线程的活动回合绑定；给出来源键时只返回精确命中的回合。
+    def _turns(self, keys: tuple[str, ...] = ()) -> tuple[object, ...]:
+        from ..tooling.host_output_redaction import active_turn_redactions_for_scope
+
+        if self._scope is None:
+            return ()
+        return active_turn_redactions_for_scope(**self._scope, turn_keys=keys, exact_only=bool(keys))
+
+    # 函数用途: 净化继承行或没有来源的新行正文。
+    def __call__(self, text: str) -> str:
+        from ..common.log_redaction import redact_sensitive_value
+        from ..tooling.host_output_redaction import redact_host_text
+
+        for turn in self._thread_turns:
+            text = (redact_host_text(text, secret_values=turn.redaction.snapshot.secret_values, code_file=False)
+                    if turn.withheld else turn.public_text(text))
         return str(redact_sensitive_value(str(text)))
 
-    return redact
+    # 函数用途: 按本行原回合净化新行正文；返回 None 表示本行只留编号。
+    def row(self, row: MessageLogEntry, text: str) -> str | None:
+        from ..common.log_redaction import redact_sensitive_value
+
+        metadata = row.metadata if isinstance(row.metadata, dict) else {}
+        keys = tuple(value for name in ("conversation_request_id", "request_id", "run_id")
+                     if (value := str(metadata.get(name) or "").strip()))
+        keys = keys or tuple(value for value in (str(metadata.get("task_id") or "").strip(),) if value)
+        if not keys:
+            return None if any(turn.withheld for turn in self._thread_turns) else self(text)
+        if keys not in self._exact:
+            self._exact[keys] = self._turns(keys)
+        if any(turn.withheld for turn in self._exact[keys]):
+            return None
+        for turn in self._exact[keys]:
+            text = turn.public_text(text)
+        return str(redact_sensitive_value(str(text)))
 
 
 # LLM: 未给出作用域时仍做配置作用域与常见凭据模式脱敏（与日志同一实现），不会原样放行。
@@ -164,6 +203,12 @@ def _public_text(redact: Callable[[str], str] | None, text: str) -> str:
     from ..common.log_redaction import redact_sensitive_value
 
     return str(redact_sensitive_value(str(text)))
+
+
+# 函数用途: 用本次来源的净化函数处理一条新行正文（按行净化不可用时退回整段净化）；None 表示本行只留编号。
+def _row_public_text(redact: Callable[[str], str] | None, row: MessageLogEntry, text: str) -> str | None:
+    by_row = getattr(redact, "row", None)
+    return by_row(row, text) if callable(by_row) else _public_text(redact, text)
 
 
 # LLM: 选择只看 token 与角色；第二遍按下标重读被选中的行来渲染，因此任一时刻只驻留被选中的正文。
@@ -290,8 +335,10 @@ def _row_landmarks(rows: Sequence[MessageLogEntry], redact: Callable[[str], str]
     for index, row in enumerate(rows):
         role, content = _row_role_and_content(row)
         if content:
-            line = _full_line(role, str(row.message_id or ""), _public_text(redact, content))
-            entries.append(_Landmark(role, str(row.message_id or ""), estimate_tokens(line), row_index=index))
+            public = _row_public_text(redact, row, content)
+            line = "" if public is None else _full_line(role, str(row.message_id or ""), public)
+            entries.append(_Landmark(role, str(row.message_id or ""), estimate_tokens(line) if line else 0,
+                                     row_index=index, withheld=public is None))
     return entries
 
 
@@ -343,7 +390,7 @@ def _landmark_section(source: LandmarkSource, options: LandmarkOptions) -> str:
 def _select_role(entries: Sequence[_Landmark], role: str, remaining: int, picks: dict[int, int]) -> int:
     for index in range(len(entries) - 1, -1, -1):
         entry = entries[index]
-        if entry.role == role and entry.tokens + 1 <= remaining:
+        if entry.role == role and not entry.withheld and entry.tokens + 1 <= remaining:
             picks[index], remaining = 0, remaining - entry.tokens - 1
     clip = next((index for index in range(len(entries) - 1, -1, -1)
                  if index not in picks and _clippable(entries[index], role)), None)
@@ -355,7 +402,7 @@ def _select_role(entries: Sequence[_Landmark], role: str, remaining: int, picks:
 # LLM: 只裁剪带编号的本次新用户行；继承行和无编号行不可裁剪，避免裁剪标记与编号混淆。
 # 函数用途: 判断一个没被整条选中的条目能否保留头尾（只限带编号的本次新用户行）。
 def _clippable(entry: _Landmark, role: str) -> bool:
-    return role == "user" and entry.role == "user" and bool(entry.message_id) and not entry.line
+    return role == "user" and entry.role == "user" and bool(entry.message_id) and not entry.line and not entry.withheld
 
 
 # LLM: 第二遍：继承行已在第一遍净化，原样返回；新行按下标重读原始行（快照行会校验原文件未被改写），
@@ -365,8 +412,11 @@ def _render_pick(source: LandmarkSource, index: int, clip_budget: int) -> str:
     entry = source.entries[index]
     if entry.line:
         return entry.line
-    _role, raw = _row_role_and_content(source.rows[entry.row_index])
-    content = _public_text(source.redact, raw)
+    row = source.rows[entry.row_index]
+    _role, raw = _row_role_and_content(row)
+    content = _row_public_text(source.redact, row, raw)
+    if content is None:
+        return ""
     if not clip_budget:
         return _full_line(entry.role, entry.message_id, content)
     return _clipped_line(entry, content, clip_budget)
