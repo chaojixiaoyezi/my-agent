@@ -2,6 +2,7 @@
 # 模块用途: 为模型协议提供带物理并发限制的统一网络入口和有界工具探测；联合后端、OAuth、关闭与排队回归。
 from __future__ import annotations
 
+import contextvars
 import copy
 import hashlib
 import json
@@ -225,6 +226,9 @@ _PROBE_FLIGHT_TTL_SECONDS = 600.0
 _PROBE_FLIGHT_POLL_SECONDS = 0.05
 # 进程内在途探测表（键 = memo 完整能力身份 + 失效代次），只存进行中的单飞；结束即移除，不缓存失败。
 _capability_probe_flights: dict[tuple[object, ...], _ProbeFlight] = {}
+# RC1：请求局部的物理探针标记，只在 _probe_tool_capability_uncached 调用 generate 期间为真；同一后端上其它线程的普通请求不受影响。
+_physical_probe_marker: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "my_agent_physical_capability_probe", default=False)
 
 
 # LLM: 单飞只共享"同一次真实探测"的结果：成功/阴性结果与供应商类失败（配置、额度、网络、超时）发给所有等待者；
@@ -241,6 +245,27 @@ class _ProbeFlight:
 
     def expired(self) -> bool:
         return time.monotonic() - self.started > _PROBE_FLIGHT_TTL_SECONDS
+
+
+# LLM: RC2：同逻辑身份的实例阳性共持一个可撤销标记；弱值表只索引仍被实例缓存引用的标记（每逻辑身份一个），
+#   定向失效、全局清空与当前阴性/配置拒绝撤销并移出，正常 LRU 容量淘汰不撤销。无全量后端清单、无历史失效表。
+# 类用途: 让同身份驻留实例在下一次读取实例缓存时放弃已失效的阳性。
+class _CapabilityValidity:
+    __slots__ = ("revoked_reason", "__weakref__")
+
+    def __init__(self) -> None:
+        self.revoked_reason = ""
+
+
+_capability_validity_tokens: weakref.WeakValueDictionary[tuple[object, ...], _CapabilityValidity] = (
+    weakref.WeakValueDictionary())
+
+
+# 函数用途: 调用方持 _capability_probe_lock；撤销一个逻辑身份上实例阳性的有效标记，持有者下次读取即自清。
+def _revoke_capability_validity_locked(logical_key: tuple[object, ...], reason: str) -> None:
+    validity = _capability_validity_tokens.pop(logical_key, None)
+    if validity is not None:
+        validity.revoked_reason = reason
 
 
 # LLM: 跨 owner/后端实例按同一探针键单飞（X8）：冷启动并发只真实发一次探测；等待可被本轮停止打断，
@@ -339,6 +364,7 @@ def _publish_capability_probe_locked(
     for entry_key in [k for k in _capability_probe_entries if k == key or _logical_probe_identity(k) == logical_key]:
         _capability_probe_entries.pop(entry_key, None)
     _record_capability_probe_miss_reason_locked(logical_key, reason)
+    _revoke_capability_validity_locked(logical_key, reason)
 
 
 def invalidate_capability_probe_memo(
@@ -357,6 +383,9 @@ def invalidate_capability_probe_memo(
             _capability_probe_generation += 1
             _capability_probe_miss_reasons.clear()
             _record_capability_probe_miss_reason_locked(("*",), normalized_reason)
+            for validity in list(_capability_validity_tokens.values()):
+                validity.revoked_reason = normalized_reason
+            _capability_validity_tokens.clear()
         return
     target_key = _capability_probe_key(backend)
     keys = {target_key}
@@ -380,6 +409,7 @@ def invalidate_capability_probe_memo(
             _capability_probe_flights.pop(flight_key, None)
         for logical_key in logical_targets:
             _record_capability_probe_miss_reason_locked(logical_key, normalized_reason)
+            _revoke_capability_validity_locked(logical_key, normalized_reason)
     backend._provider_tool_capability_cache = None
     backend._provider_tool_capability_memo_key = None
     backend._provider_tool_capability_miss_reason = None
@@ -720,9 +750,20 @@ class HttpBackend(BaseBackend):
                 self._provider_tool_capability_memo_key = None
                 self._provider_tool_capability_miss_reason = _describe_key_change(memo_key, current_key)
                 return None
+        validity = getattr(self, "_provider_tool_capability_validity", None)
+        if validity is not None and validity.revoked_reason:
+            # RC2：同逻辑身份已被定向失效、全局清空或当前阴性/配置拒绝撤销，驻留实例不再沿用旧阳性。
+            self._provider_tool_capability_cache = None
+            self._provider_tool_capability_memo_key = None
+            self._provider_tool_capability_miss_reason = validity.revoked_reason
+            return None
         return cached
 
+    # LLM: RC1：物理能力探针内（请求局部标记）的拒绝只上抛，由 _single_flight_probe 的当前 flight 在比较保护下发布或摘除；
+    #   普通 JSON/流式/流迭代业务请求照旧立即定向失效。
     def _invalidate_memo_on_http_rejection(self, exc: BaseException, request_body: object = None) -> None:
+        if _physical_probe_marker.get():
+            return
         reason = _http_rejection_reason(exc, request_body)
         if reason:
             invalidate_capability_probe_memo(self, reason=reason)
@@ -739,18 +780,36 @@ class HttpBackend(BaseBackend):
                 or "cold_process"
             )
 
+    # LLM: RC2：快路径与探测后共用的唯一实例安装口。先经原 memo 查询口取命中，再在同一缓存锁内复核该键仍是同一当前阳性，
+    #   并原子绑定其逻辑身份的有效标记；锁内只改字段，不做 I/O、不等待、不调用供应商。
+    # 函数用途: 把共享 memo 的当前阳性装入本实例，返回 (阳性或 None, 查询时的失效代次)；迟到安装不能复活已撤销结论。
+    def _install_memo_capability(
+        self, key: tuple[object, ...], expected: ProviderToolCapability | None = None,
+    ) -> tuple[ProviderToolCapability | None, int]:
+        memo_hit, generation = _lookup_capability_probe_memo(key)
+        if memo_hit is None or (expected is not None and memo_hit is not expected):
+            return None, generation
+        with _capability_probe_lock:
+            if _capability_probe_entries.get(key) is not memo_hit:
+                return None, generation
+            logical_key = _logical_probe_identity(key)
+            validity = _capability_validity_tokens.get(logical_key)
+            if validity is None:
+                validity = _capability_validity_tokens[logical_key] = _CapabilityValidity()
+            self._provider_tool_capability_validity = validity
+            self._provider_tool_capability_cache = memo_hit
+            self._provider_tool_capability_memo_key = key
+            self._provider_tool_capability_generation = _capability_probe_generation
+            self._provider_tool_capability_miss_reason = None
+        return memo_hit, generation
+
     def probe_tool_capability(self) -> ProviderToolCapability:
         """有界探测原生工具能力；只缓存成功事实，失败允许之后重新探测。"""
         cached = self._cached_instance_capability()
         if cached is not None:
             return cached
-        key = _capability_probe_key(self)
-        memo_hit, generation = _lookup_capability_probe_memo(key)
+        memo_hit, _generation = self._install_memo_capability(_capability_probe_key(self))
         if memo_hit is not None:
-            self._provider_tool_capability_cache = memo_hit
-            self._provider_tool_capability_memo_key = key
-            self._provider_tool_capability_generation = generation
-            self._provider_tool_capability_miss_reason = None
             return memo_hit
         # 同一 Gateway/owner 的 Agent 会被多个请求线程复用。探针必须 single-flight，
         # 否则冷启动并发会重复烧请求，并让一个成功、一个失败的结果互相打架。
@@ -763,12 +822,8 @@ class HttpBackend(BaseBackend):
             if cached is not None:
                 return cached
             key = _capability_probe_key(self)
-            memo_hit, generation = _lookup_capability_probe_memo(key)
+            memo_hit, generation = self._install_memo_capability(key)
             if memo_hit is not None:
-                self._provider_tool_capability_cache = memo_hit
-                self._provider_tool_capability_memo_key = key
-                self._provider_tool_capability_generation = generation
-                self._provider_tool_capability_miss_reason = None
                 return memo_hit
             miss_reason = self._resolve_capability_probe_miss_reason(key)
             probe_started = time.monotonic()
@@ -795,11 +850,7 @@ class HttpBackend(BaseBackend):
                     capability.native_supported,
                 )
                 # 只有本结论已作为当前事实进入 memo 才缓存到实例；旧 flight 的结果只交给本次调用。
-                memo_hit, generation = _lookup_capability_probe_memo(key)
-                if memo_hit is capability:
-                    self._provider_tool_capability_cache = capability
-                    self._provider_tool_capability_memo_key = key
-                    self._provider_tool_capability_generation = generation
+                self._install_memo_capability(key, expected=capability)
                 self._provider_tool_capability_miss_reason = None
             return capability
         finally:
@@ -851,6 +902,8 @@ class HttpBackend(BaseBackend):
                 if scope is None:
                     # 未绑定账本的真实探测仍保留原诊断计数，排队失败不增加它。
                     _count_unaccounted_probe_attempt()
+                # RC1：传输包装见到本标记即只上抛拒绝，共享结论交当前 flight 收尾在比较保护下提交。
+                probe_marker = _physical_probe_marker.set(True)
                 try:
                     response = self.generate(
                         prompt,
@@ -876,6 +929,8 @@ class HttpBackend(BaseBackend):
                     suffix = f":{code}" if code else ""
                     evidence = f"live_probe_failed:{type(exc).__name__}{suffix}"
                     break
+                finally:
+                    _physical_probe_marker.reset(probe_marker)
                 _finish_probe_call(scope, call_id, response)
             blocks = list(getattr(response, "tool_use_blocks", None) or ())
             supported = any(

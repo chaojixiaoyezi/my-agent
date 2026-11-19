@@ -427,6 +427,12 @@ def test_static_route_headers_split_probe_identity_and_in_flight_results(monkeyp
     assert fresh_a.probe_tool_capability().native_supported is False
     assert len(physical) == before + 1
 
+    # RC2：阴性同样按凭据级逻辑身份撤销已驻留的路由变体实例阳性；该实例下次重探后恢复。
+    assert same_b._cached_instance_capability() is None
+    assert same_b._provider_tool_capability_miss_reason == "negative_result"
+    assert same_b.probe_tool_capability().native_supported is True
+    assert len(physical) == before + 2
+
     # 实例路由头变更按字段名记账，原因里不含头值。
     assert same_b._cached_instance_capability() is not None
     same_b.custom_headers = {"X-Route-Variant": "route-secret-c"}

@@ -1,18 +1,26 @@
 # LLM: X8/C1 回归：冷工具能力探测按完整能力身份（含凭据指纹与失效代次）跨后端实例单飞；
 #   SSE 按 HTTPResponse.read1 成块读取仍逐行检查停止与超时，拆行/CRLF/跨块多字节/EOF 尾行与逐行读取一致。
 #   C3：失效后旧在途探测的结论只交给本次参与者，只有收尾时仍为当前在途的物理发起者发布共享与实例缓存。
+#   R2：真实传输包装上的旧探针拒绝不越过当前 flight 摘除新阳性；定向失效与新阴性撤销同身份驻留实例的阳性。
 # 模块用途: 核单飞的结果/失败共享、停止与 TTL 语义、失效后的发布归属，以及块读取与无锁中断判断的等价性。
 from __future__ import annotations
 
+import gc
 import http.client
 import io
+import json
 import threading
 import time
 import weakref
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.agent_core.native_tool_protocol import (
+    ToolProtocolSelectionError,
+    select_tool_protocol,
+)
 from agent_py_agent.agent.backends import gateway_helpers
 from agent_py_agent.agent.backends import http as http_backend
 from agent_py_agent.agent.backends.base import BackendOptions
@@ -25,6 +33,7 @@ from agent_py_agent.agent.concurrency.interrupt import (
     register_interruptible,
     set_interrupt,
 )
+from agent_py_agent.agent.contracts.model_call_ledger import ModelCallLedger
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 
 
@@ -285,6 +294,212 @@ def test_stale_flight_never_publishes_over_fresh_probe(monkeypatch, invalidate, 
         assert http_backend._capability_probe_flights == {}
         assert http_backend._logical_probe_identity(key) not in http_backend._capability_probe_miss_reasons
     assert reader_c._provider_tool_capability_cache is expected
+
+
+# ---- R2-P1-01：真实传输包装上的探针错误归属（RC1）与驻留实例失效（RC2） ----
+
+# 函数用途: 按探针提示里的 nonce 回放 OpenAI 原生工具调用（JSON 或 SSE 行）；native=False 回放无工具调用的正文。
+def _probe_reply(request, *, stream: bool, native: bool = True):
+    prompt = str(request.payload["messages"][-1]["content"])
+    nonce = prompt.split("with nonce ", 1)[1].split(".", 1)[0].strip()
+    call = {"id": "call-probe-1", "type": "function",
+            "function": {"name": "my_agent_capability_probe", "arguments": json.dumps({"nonce": nonce})}}
+    finish = "tool_calls" if native else "stop"
+    if stream:
+        delta = {"tool_calls": [{"index": 0, **call}]} if native else {"content": "no tool call"}
+        return [json.dumps({"choices": [{"delta": delta, "finish_reason": finish}]}), "[DONE]"]
+    message = ({"role": "assistant", "content": "", "tool_calls": [call]} if native
+               else {"role": "assistant", "content": "no tool call"})
+    return {"choices": [{"message": message, "finish_reason": finish}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}}
+
+
+# 函数用途: 建一个只替换最终传输函数的标准 OpenAI 兼容后端；同凭据即同逻辑身份。
+def _wire_backend(*, stream: bool = False, api_key: str = "key-a") -> OpenAICompatibleBackend:
+    return OpenAICompatibleBackend(BackendOptions(api_base="http://model.invalid/v1", api_key=api_key, model_name="m",
+                                                  request_timeout=240, stream_enabled=stream))
+
+
+def _rejection(status_code: int) -> ProviderRequestRejectedError:
+    return ProviderRequestRejectedError(f"HTTP {status_code}: rejected", status_code=status_code)
+
+
+@pytest.mark.parametrize(("stream", "status_code"), [(False, 401), (True, 403)], ids=["json-401", "stream-403"])
+def test_late_probe_rejection_from_real_transport_keeps_fresh_positive(monkeypatch, stream, status_code):
+    calls, guard, a_waiting, a_release = [], threading.Lock(), threading.Event(), threading.Event()
+
+    def wire(request):
+        with guard:
+            calls.append(request.path)
+            index = len(calls)
+        if index == 1:  # A 的物理探测已发出；旧拒绝时段的应答等 B 的新阳性发布后才迟到返回
+            a_waiting.set()
+            assert a_release.wait(5)
+            raise _rejection(status_code)
+        if index == 2:  # 同一实例 A 上另一线程的普通业务请求被拒
+            raise _rejection(status_code)
+        return _probe_reply(request, stream=stream)
+
+    for name in ("post_stream", "post_stream_iter") if stream else ("post_json",):
+        monkeypatch.setattr(http_backend, name, wire)
+    reader_a, reader_b, reader_c = (_wire_backend(stream=stream) for _ in range(3))
+    key = http_backend._capability_probe_key(reader_a)
+    results = {}
+    prober = threading.Thread(target=lambda: results.setdefault("A", _capture(reader_a.probe_tool_capability)))
+    prober.start()
+    try:
+        assert a_waiting.wait(5), "A 的物理探测未发出"
+        with pytest.raises(ProviderRequestRejectedError):
+            if stream:
+                list(reader_a.request_stream_iter("/chat/completions", {"messages": []}, {}))
+            else:
+                reader_a.request_json("/chat/completions", {"messages": []}, {})
+        # 普通业务拒绝照旧立即定向失效：摘除 A 的在途 flight 并记原因。
+        with http_backend._capability_probe_lock:
+            reason = http_backend._capability_probe_miss_reasons[http_backend._logical_probe_identity(key)]
+            assert reason == f"http_{status_code}"
+            assert not [flight for flight in http_backend._capability_probe_flights if flight[:-1] == key]
+        fresh = reader_b.probe_tool_capability()
+        assert fresh.native_supported is True
+    finally:
+        a_release.set()
+        prober.join(5)
+    assert isinstance(results["A"], ProviderRequestRejectedError)  # 迟到拒绝只交给旧探测的参与者
+    assert reader_c.probe_tool_capability() is fresh
+    assert len(calls) == 3
+    with http_backend._capability_probe_lock:
+        assert dict(http_backend._capability_probe_entries) == {key: fresh}
+        assert http_backend._capability_probe_flights == {}
+    assert reader_b._cached_instance_capability() is fresh
+
+
+# 函数用途: 计数真实物理探测（仍走原探测实现与最终传输）。
+def _count_physical_probes(monkeypatch) -> list[int]:
+    original, counted = OpenAICompatibleBackend._probe_tool_capability_uncached, []
+
+    def counting(self):
+        counted.append(id(self))
+        return original(self)
+
+    monkeypatch.setattr(OpenAICompatibleBackend, "_probe_tool_capability_uncached", counting)
+    return counted
+
+
+# 类用途: 只替换 JSON 最终传输；探针按 nonce 回放（native 可翻转），普通业务请求抛出设定的供应商拒绝。
+class _ToolWire:
+    def __init__(self) -> None:
+        self.native, self.business_error = True, None
+
+    def __call__(self, request):
+        if "my_agent_capability_probe" not in json.dumps(request.payload.get("tools") or []):
+            raise self.business_error
+        return _probe_reply(request, stream=False, native=self.native)
+
+
+def _run_host(backend: OpenAICompatibleBackend) -> SimpleNamespace:
+    return SimpleNamespace(config=SimpleNamespace(enable_tools=True), backend=backend,
+                           _model_call_ledger=ModelCallLedger())
+
+
+# 函数用途: 三个新 run_id 各走一次真实 run-start 协议选择，返回结构化结果。
+def _three_run_starts(host: SimpleNamespace) -> list[str]:
+    outcomes = []
+    for run_id in ("run-1", "run-2", "run-3"):
+        try:
+            outcomes.append(select_tool_protocol(host, run_id=run_id).source_protocol)
+        except ToolProtocolSelectionError as exc:
+            outcomes.append(exc.error_code)
+    return outcomes
+
+
+# 函数用途: B 的普通业务请求遭工具类 400 触发生产定向失效，随后 B 的物理探测确认阴性。
+def _reject_tools_and_confirm_negative(wire: _ToolWire, backend: OpenAICompatibleBackend) -> None:
+    wire.business_error = ProviderRequestRejectedError(
+        "HTTP 400: unsupported tool_choice", status_code=400,
+        details={"status_code": 400, "provider_error": {"error": {"code": "unsupported_parameter", "param": "tools"}}})
+    with pytest.raises(ProviderRequestRejectedError):
+        backend.request_json("/chat/completions", {"messages": [], "tools": [{"name": "t"}]}, {})
+    wire.native = False
+    assert backend.probe_tool_capability().native_supported is False
+
+
+def test_resident_sibling_stops_selecting_native_after_targeted_invalidation(monkeypatch):
+    wire, probes = _ToolWire(), _count_physical_probes(monkeypatch)
+    monkeypatch.setattr(http_backend, "post_json", wire)
+    resident_a, resident_b, other = _wire_backend(), _wire_backend(), _wire_backend(api_key="key-b")
+    host_a, host_other = _run_host(resident_a), _run_host(other)
+    assert select_tool_protocol(host_a, run_id="warm").source_protocol == "native"
+    assert resident_b.probe_tool_capability().native_supported is True
+    assert select_tool_protocol(host_other, run_id="warm").source_protocol == "native"
+    assert len(probes) == 2  # 同身份 B 复用 A 的阳性；不同凭据各探一次
+    _reject_tools_and_confirm_negative(wire, resident_b)
+    before = len(probes)
+    assert _three_run_starts(host_a) == ["TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE"] * 3
+    assert len(probes) == before + 3  # 阴性不缓存：每个新 run 都重新物理探测
+    # 对照：不同凭据的驻留实例不受撤销影响，继续复用自己的阳性且不发探测。
+    assert _three_run_starts(host_other) == ["native"] * 3
+    assert len(probes) == before + 3
+    with http_backend._capability_probe_lock:
+        assert http_backend._capability_probe_flights == {}
+
+
+def test_preempted_memo_lookup_cannot_install_a_revoked_positive(monkeypatch):
+    wire, probes = _ToolWire(), _count_physical_probes(monkeypatch)
+    monkeypatch.setattr(http_backend, "post_json", wire)
+    seed, resident_b, resident_a = _wire_backend(), _wire_backend(), _wire_backend()
+    assert seed.probe_tool_capability().native_supported is True
+    original, looked, resume, gate = http_backend._lookup_capability_probe_memo, threading.Event(), threading.Event(), {}
+
+    def preempted_lookup(key):
+        found = original(key)
+        if threading.current_thread() is gate.get("thread") and not looked.is_set():
+            looked.set()  # A 已读到共享阳性、尚未装入实例缓存时被抢占
+            assert resume.wait(5)
+        return found
+
+    monkeypatch.setattr(http_backend, "_lookup_capability_probe_memo", preempted_lookup)
+    host_a, first = _run_host(resident_a), {}
+    gate["thread"] = threading.Thread(
+        target=lambda: first.setdefault("run-0", _capture(lambda: select_tool_protocol(host_a, run_id="run-0"))))
+    gate["thread"].start()
+    try:
+        assert looked.wait(5), "A 未进入 memo 查询"
+        _reject_tools_and_confirm_negative(wire, resident_b)
+    finally:
+        resume.set()
+        gate["thread"].join(5)
+    # 迟到的本地安装不能复活旧阳性：被抢占的 run 与之后三个新 run 均得到能力不可用。
+    assert isinstance(first["run-0"], ToolProtocolSelectionError)
+    assert _three_run_starts(host_a) == ["TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE"] * 3
+    assert resident_a._provider_tool_capability_cache is None and len(probes) == 6
+    with http_backend._capability_probe_lock:
+        assert http_backend._capability_probe_flights == {} and not http_backend._capability_probe_entries
+
+
+def test_resident_positive_survives_capacity_eviction(monkeypatch):
+    wire, probes = _ToolWire(), _count_physical_probes(monkeypatch)
+    monkeypatch.setattr(http_backend, "post_json", wire)
+    resident = _wire_backend()
+    positive = resident.probe_tool_capability()
+    key = http_backend._capability_probe_key(resident)
+    with http_backend._capability_probe_lock:
+        for index in range(256):  # 正常 LRU 容量淘汰不是失效：不撤销驻留实例的阳性
+            http_backend._publish_capability_probe_locked(("capacity-filler", index, *key[2:]), positive, None)
+        assert key not in http_backend._capability_probe_entries
+    assert resident.probe_tool_capability() is positive
+    assert _three_run_starts(_run_host(resident)) == ["native"] * 3
+    assert len(probes) == 1
+
+
+def test_capability_validity_tokens_live_only_while_an_instance_holds_them(monkeypatch):
+    monkeypatch.setattr(http_backend, "post_json", _ToolWire())
+    residents = [_wire_backend(api_key=f"key-{index}") for index in range(3)]
+    assert all(resident.probe_tool_capability().native_supported for resident in residents)
+    assert len(http_backend._capability_validity_tokens) == 3
+    del residents
+    gc.collect()
+    # 弱值表只索引仍被实例缓存引用的标记：无全量后端清单，也不累计历史失效表。
+    assert len(http_backend._capability_validity_tokens) == 0
 
 
 # ---- C1：SSE 块读取 + 无锁中断判断 ----
