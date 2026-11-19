@@ -1050,3 +1050,79 @@ def _seed(carried: list[dict[str, object]]) -> RuntimeToolLoopSeed:
         tool_catalog_section="",
         tool_recommendations_section="",
     )
+
+
+# ---------------------------------------------------------------------------
+# P1-1：超长 live 交接先按 v1 六段拟合、再复验；不再整体头裁把 failures/unresolved/next_step 丢掉
+# ---------------------------------------------------------------------------
+
+_V1_LABELS = ("current_progress:", "user_constraints:", "completed:", "failures:", "unresolved:", "next_step:")
+
+
+# 函数用途: 生成一份合法、各段都在行首的超长 v1 交接；completed_chars/protected_chars 控制各段长度。
+def _long_live_summary(*, completed_chars: int = 15_000, protected_chars: int = 200) -> str:
+    return "\n".join([
+        "[compact-live-handoff.v1]",
+        "current_progress: 正在核对第 9 集分镜，" + "进度细节" * 300,
+        "user_constraints: 全权交给你；不要中途停；心疼积分。" + "约" * protected_chars,
+        "completed: " + "已完成镜头 /srv/drama/ep08/shot.mp4；" * (completed_chars // 30),
+        "failures: 审核拒绝 MODERATION_REJECTED shot-17，已标 blocked。" + "败" * protected_chars,
+        "unresolved: shot-17 需要用户授权替换素材。" + "悬" * protected_chars,
+        "next_step: 继续生成 ep09 shot-18，再回到 shot-17。" + "下" * protected_chars,
+    ])
+
+
+# 函数用途: 用只回固定正文的摘要替身跑一次 live 摘要，返回被接受的摘要全文。
+def _live_summary_for(text: str, *, max_output_chars: int = 12_000) -> str:
+    return summarize_live_tool_history(LiveToolHistorySummaryRequest(
+        history=[UserTurn("继续原任务")], backend=_LiveSummaryBackend(text=text),
+        task_prompt="继续原任务", max_output_chars=max_output_chars))
+
+
+def test_long_valid_live_handoff_keeps_all_six_sections_within_limit() -> None:
+    original = _long_live_summary()
+    assert len(original) > 17_000
+    summary = _live_summary_for(original)
+    assert summary.startswith(_SUMMARY_MARK)
+    body = summary.split("\n", 1)[1]
+    assert len(body) <= 12_000
+    positions = [body.find(label) for label in _V1_LABELS]
+    assert min(positions) >= 0 and positions == sorted(positions)
+    for label in ("user_constraints:", "failures:", "unresolved:", "next_step:"):
+        line = next(row for row in original.splitlines() if row.startswith(label))
+        assert line in body, label  # 受保护的四段逐字保留
+    assert "…[section clipped " in body.split("failures:", 1)[0]  # 只裁了 completed/current_progress
+
+
+def test_oversized_protected_sections_shrink_after_completed_and_keep_next_step_last() -> None:
+    original = _long_live_summary(completed_chars=300, protected_chars=4_000)
+    assert len(original) > 16_000
+    body = _live_summary_for(original).split("\n", 1)[1]
+    assert len(body) <= 12_000
+    positions = [body.find(label) for label in _V1_LABELS]
+    assert min(positions) >= 0 and positions == sorted(positions)
+    for label in ("next_step:", "user_constraints:"):
+        line = next(row for row in original.splitlines() if row.startswith(label))
+        assert line in body, label
+    # 缩减顺序：completed、current_progress 到底后依次 unresolved、failures；user_constraints 与 next_step 最后才动。
+    unresolved = body.split("unresolved:", 1)[1].split("next_step:", 1)[0]
+    failures = body.split("failures:", 1)[1].split("unresolved:", 1)[0]
+    assert "…[section clipped " in unresolved and "…[section clipped " in failures
+    assert "MODERATION_REJECTED shot-17" in failures  # 裁剪保留段首
+
+
+def test_short_valid_live_handoff_is_accepted_byte_identical() -> None:
+    summary = _live_summary_for(_VALID_LIVE_SUMMARY)
+    assert summary.split("\n", 1)[1] == _VALID_LIVE_SUMMARY
+
+
+@pytest.mark.parametrize("shape", ["inline_labels", "duplicate_label"])
+def test_long_handoff_without_unique_line_start_labels_uses_mechanical_fallback(shape) -> None:
+    if shape == "inline_labels":
+        text = ("[compact-live-handoff.v1] current_progress: 进行中 user_constraints: 保留 completed: "
+                + "已完成；" * 5_000 + " failures: none unresolved: 待核对 next_step: 继续")
+    else:
+        text = _long_live_summary() + "\ncompleted: 重复的标签行"
+    summary = _live_summary_for(text)
+    assert summary.startswith("[compact-mechanical-fallback]")
+    assert "provider_summary_section_fit_failed" in summary
