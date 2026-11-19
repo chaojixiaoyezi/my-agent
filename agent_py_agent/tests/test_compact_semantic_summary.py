@@ -1129,3 +1129,43 @@ def test_long_handoff_without_unique_line_start_labels_uses_mechanical_fallback(
     summary = _live_summary_for(text)
     assert summary.startswith("[compact-mechanical-fallback]")
     assert "provider_summary_section_fit_failed" in summary
+
+
+# --- F04（2026-11-19）：需拟合的超长交接里，空白段不能冒充事实；走既有机械兜底，上一代的下一步仍在 ---
+
+_PREVIOUS_NEXT_STEP = "next_step: 打开 reports/q3/summary.xlsx 核对合计行。"
+
+
+# 函数用途: 把超长 v1 交接的一段换成给定行（None 表示连标签整段删掉），经真实 live 摘要入口收尾，带上一代摘要。
+def _oversized_live_summary_with(label: str, replacement: str | None) -> str:
+    lines = _long_live_summary().splitlines()
+    index = next(position for position, row in enumerate(lines) if row.startswith(label))
+    lines[index:index + 1] = [] if replacement is None else [replacement]
+    text = "\n".join(lines)
+    assert len(text) > 16_000
+    return summarize_live_tool_history(LiveToolHistorySummaryRequest(
+        history=[UserTurn("继续原任务")], backend=_LiveSummaryBackend(text=text), task_prompt="继续原任务",
+        previous_summary=f"上一代交接：已核对 ep08。\n{_PREVIOUS_NEXT_STEP}", max_output_chars=12_000))
+
+
+@pytest.mark.parametrize(("label", "replacement", "reason"), [
+    ("next_step:", "next_step:", "provider_summary_section_fit_failed"),
+    ("failures:", "failures:  \t", "provider_summary_section_fit_failed"),
+    ("unresolved:", "unresolved:\n", "provider_summary_section_fit_failed"),
+    ("next_step:", None, "provider_invalid_summary_shape"),
+])
+def test_oversized_handoff_with_a_blank_or_missing_section_keeps_the_previous_next_step(
+    label, replacement, reason,
+) -> None:
+    summary = _oversized_live_summary_with(label, replacement)
+    # 空段与缺整段同样走既有 typed 机械兜底：上一代唯一具体的后续路径仍在当前摘要里。
+    assert summary.startswith("[compact-mechanical-fallback]") and f"- reason: {reason}" in summary
+    assert "reports/q3/summary.xlsx" in summary
+
+
+@pytest.mark.parametrize("replacement", ["next_step: none", "next_step:\n- 打开 reports/q4/draft.md\n- 再核对合计行"])
+def test_oversized_handoff_with_explicit_none_or_a_line_list_is_still_accepted(replacement) -> None:
+    summary = _oversized_live_summary_with("next_step:", replacement)
+    assert summary.startswith(_SUMMARY_MARK)
+    body = summary.split("\n", 1)[1]
+    assert len(body) <= 12_000 and body.endswith(replacement)

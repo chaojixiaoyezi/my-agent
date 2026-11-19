@@ -292,6 +292,10 @@ def _accept_live_summary(request: LiveToolHistorySummaryRequest, summary: str) -
     fallback_limit = min(limit, _LIVE_FALLBACK_MAX_OUTPUT_CHARS)
     if not summary:
         return _mechanical_live_tool_history_summary(request, limit=fallback_limit, reason="provider_empty_summary")
+    from ..conversation.compact_landmarks import LANDMARK_HEADING
+
+    # 模型复述的宿主地标标题只是普通引文：行首标题（与宿主解析同一边界）加引用前缀，正式地标段只由宿主生成。
+    summary = summary.replace(f"\n{LANDMARK_HEADING}", f"\n> {LANDMARK_HEADING}")
     if not _valid_live_summary(summary):
         return _mechanical_live_tool_history_summary(request, limit=fallback_limit, reason="provider_invalid_summary_shape")
     # 先按六段拟合再复验：整体头裁会把 failures/unresolved/next_step 整段丢掉；拟合不了就走受控机械兜底，不收半截交接。
@@ -309,7 +313,7 @@ def _accept_live_summary(request: LiveToolHistorySummaryRequest, summary: str) -
 
 # LLM: 只在超长时拟合；按行首的 v1 规范标签切段（每个标签恰好一次、顺序不变），先缩 completed、再缩 current_progress，
 #   两者到底仍超才依次缩 unresolved/failures/user_constraints/next_step。每段保留标签和最少正文，裁剪处写明字数；
-#   标签缺失、重复、乱序或缩到底仍放不下时返回 None，由调用方走机械兜底。不改 v1 顺序，不新增参数。
+#   标签缺失、重复、乱序、某段标签后没有正文或缩到底仍放不下时返回 None，由调用方走机械兜底。不改 v1 顺序，不新增参数。
 # 函数用途: 把超长的 live 交接摘要按段压进字符上限，保证六个字段都还在。
 def _fit_live_sections(text: str, limit: int) -> str | None:
     if len(text) <= limit:
@@ -326,6 +330,9 @@ def _fit_live_sections(text: str, limit: int) -> str | None:
         section: text[start:end]
         for section, start, end in zip(_LIVE_HANDOFF_SECTIONS, starts, [*starts[1:], len(text)])
     }
+    # 空白、换行或单独的标签不是事实（none 与普通列表照常有效）：有空段就交给调用方走机械兜底。
+    if any(not bodies[section].strip()[len(section):].strip() for section in _LIVE_HANDOFF_SECTIONS):
+        return None
     excess = len(text) - limit
     floor = 160
     for section in ("completed:", "current_progress:", "unresolved:", "failures:", "user_constraints:", "next_step:"):
