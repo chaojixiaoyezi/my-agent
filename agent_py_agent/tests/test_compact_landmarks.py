@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core._tool_loop_service import _carry_native_live_landmarks
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
 from agent_py_agent.agent.common.log_redaction import configured_secret_redaction
 from agent_py_agent.agent.conversation import ConversationStore, compact_request_budget
 from agent_py_agent.agent.conversation.compact import (
@@ -28,6 +30,7 @@ from agent_py_agent.agent.conversation.compact_checkpoint import committed_compa
 from agent_py_agent.agent.conversation.compact_landmarks import (
     LANDMARK_HEADING,
     LandmarkOptions,
+    carry_live_landmarks,
     landmark_options,
     semantic_summary_text,
     summary_with_conversation_landmarks,
@@ -36,10 +39,18 @@ from agent_py_agent.agent.conversation.compact_projection import ConversationCom
 from agent_py_agent.agent.conversation.compact_provider_surface import (
     ConversationCompactProviderSurface,
 )
+from agent_py_agent.agent.conversation.compact_remote import provider_compaction_marker
 from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
 from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.memory_archive import estimate_tokens
+from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
+    LiveToolHistorySummaryRequest,
+    _accept_live_summary,
+    is_live_semantic_handoff,
+    live_operation_facts_entry,
+)
 from agent_py_agent.agent.tooling.host_output_redaction import TurnCredentialRedaction
+from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
 
 
 # 函数用途: 造一条用户消息行。
@@ -381,3 +392,101 @@ def test_undecodable_carried_lines_degrade_to_ids_and_keep_the_omitted_count():
                                                    options=LandmarkOptions(landmark_budget_tokens=2_000)).text
     assert only_bad.count(LANDMARK_HEADING) == 1
     assert _lines(only_bad, "- omitted_user_messages: ") == ["- omitted_user_messages: 1 older or oversized [msg-cut]"]
+
+
+# --- P1-2（2026-11-18）：live 交接续带上一代原话备份与失败事实，体积不超过上一代摘要 ---
+
+
+# 函数用途: 生成一份被接受的 live 交接（经真实接受函数加宿主固定开头）。
+def _handoff(step: int, *, body: str = "") -> str:
+    text = (f"[compact-live-handoff.v1]\ncurrent_progress: 第 {step} 段已核对 12 个文件。\n"
+            "user_constraints: 金额保留两位小数，人名只写姓氏加某。\n"
+            f"completed: 读完 evidence-{step}.txt。\nfailures: shot-{step} 被拒。\n"
+            "unresolved: 还剩 3 个文件没有核对，汇总表还没生成。\n"
+            f"next_step: 读 evidence-{step + 1}.txt，再把结果写进汇总表。{body}")
+    return _accept_live_summary(LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None), text)
+
+
+# 函数用途: 造一个只有窗口与工具注册表的 agent（landmark 预算 = 窗口 10%）。
+def _live_agent() -> SimpleNamespace:
+    return SimpleNamespace(config=SimpleNamespace(model_context_window_tokens=100_000), backend=None,
+                           tools=SimpleNamespace(tools={}))
+
+
+def test_transcript_live_live_transcript_chain_keeps_landmark_ids_without_growing_the_summary():
+    agent = _live_agent()
+    ids = [f"u{index}" for index in range(6)]
+    rows = [_user(message_id, f"要求-{message_id}：" + "细节" * 40) for message_id in ids]
+    first = summary_with_conversation_landmarks("第一代语义摘要。" * 120, "", rows, options=landmark_options(agent)).text
+    second, second_tokens = carry_live_landmarks(agent, _handoff(1), first, thread_id="t")
+    third, third_tokens = carry_live_landmarks(agent, _handoff(2), second, thread_id="t")
+    for previous, carried, handoff in ((first, second, _handoff(1)), (second, third, _handoff(2))):
+        assert carried.startswith(handoff) and carried.count(LANDMARK_HEADING) == 1
+        assert estimate_tokens(carried) <= max(estimate_tokens(previous), estimate_tokens(handoff))
+        assert semantic_summary_text(carried) == handoff
+    assert second_tokens > 0 and third_tokens > 0
+    assert all(_lines(third, f"- user [{message_id}]: ") for message_id in ids)
+    # 回到 transcript 压缩：两代 live 之后，最早那一代的原话编号仍被继承。
+    fourth = summary_with_conversation_landmarks("第二代语义摘要。", third, [_user("u-new", "新要求：按城市排序。")],
+                                                 options=landmark_options(agent)).text
+    assert all(_lines(fourth, f"- user [{message_id}]: ") for message_id in [*ids, "u-new"])
+
+
+def test_live_failure_facts_sit_before_the_landmarks_and_survive_the_semantic_cut():
+    agent = _live_agent()
+    previous = summary_with_conversation_landmarks("上一代摘要。" * 400, "", [_user("u1", "要求一：零库存标红。")],
+                                                   options=landmark_options(agent)).text
+    records = [{"tool": "image_generate", "tool_operation_status": "failed", "error_code": "MODERATION_REJECTED",
+                "operation_id": f"op-{chr(97 + index)}"} for index in range(10)]
+    facts = live_operation_facts_entry([*records, {"tool": "read_file", "tool_operation_status": "succeeded"}])
+    # 只留最近 8 条未成功操作，更早的只计数；成功的操作不进事实块。
+    assert facts.count("\n- tool=image_generate") == 8 and "- earlier 2 non-success operations omitted" in facts
+    assert "op-a" not in facts and "op-j" in facts and "read_file" not in facts
+    carried, used = carry_live_landmarks(agent, _handoff(1), previous, thread_id="t", facts=facts)
+    assert used > 0 and carried.index(facts) < carried.index(LANDMARK_HEADING)
+    assert semantic_summary_text(carried) == f"{_handoff(1)}\n\n{facts}" and _lines(carried, "- user [u1]: ")
+
+
+def test_live_carry_adds_nothing_without_room_or_when_the_handoff_echoes_the_heading():
+    agent = _live_agent()
+    small_previous = "\n".join([LANDMARK_HEADING, "- authority: x", "- purpose: y", '- user [u1]: "要求一。"'])
+    handoff = _handoff(1)
+    # 上一代摘要不比交接大：没有余量，事实与备份都不带，交接逐字不变。
+    assert carry_live_landmarks(agent, handoff, small_previous, thread_id="t", facts="[facts] x") == (handoff, 0)
+    big_previous = "上一代摘要。" * 400 + "\n\n" + small_previous
+    echoed = f"{handoff}\n\n{small_previous}"
+    assert carry_live_landmarks(agent, echoed, big_previous, thread_id="t") == (echoed, 0)
+    # 只认行首标题：机械回退把上一代摘要内联成一行时，行中的同名文本不算备份段，也不会被当成继承来源。
+    inline = f"- previous_summary: 旧摘要 {LANDMARK_HEADING} - user [u1]: \"要求一。\""
+    assert semantic_summary_text(inline) == inline
+    assert summary_with_conversation_landmarks("新摘要", inline, [], options=landmark_options(agent)).text == "新摘要"
+
+
+def test_only_an_accepted_semantic_handoff_is_eligible_for_live_carry():
+    request = LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None)
+    assert is_live_semantic_handoff(_handoff(1))
+    # 空/无效正文退回机械兜底；服务端压缩项是不透明标记；两者都不带。
+    assert not is_live_semantic_handoff(_accept_live_summary(request, ""))
+    assert not is_live_semantic_handoff(provider_compaction_marker({"protocol": "responses", "sha256": "ab" * 32}))
+
+
+def test_native_live_carry_needs_a_canonical_binding_and_matches_facts_by_exact_call_identity():
+    agent = _live_agent()
+    previous = summary_with_conversation_landmarks("上一代摘要。" * 400, "", [_user("u1", "要求一：零库存标红。")],
+                                                   options=landmark_options(agent)).text
+    identity = {"run_id": "run-1", "attempt_id": "attempt-1", "turn_id": "turn-1"}
+    call = canonical_history_call("image_generate", {}, call_id="call-1", **identity)
+    failed = {**identity, "call_id": "call-1", "tool": "image_generate", "tool_operation_status": "failed",
+              "operation_id": "op-in-ir"}
+    other_attempt = {**failed, "attempt_id": "attempt-0", "operation_id": "op-other-attempt"}
+    params = SimpleNamespace(tool_ir_history=[AssistantTurn(text="", tool_calls=[call])],
+                             archive_tool_calls=[other_attempt, failed])
+    binding = SimpleNamespace(thread=SimpleNamespace(thread_id="t", summary=previous))
+    handoff = _handoff(1)
+    carried = _carry_native_live_landmarks(agent, params, binding, handoff, previous)
+    assert carried.startswith(handoff) and _lines(carried, "- user [u1]: ")
+    assert "op-in-ir" in semantic_summary_text(carried) and "op-other-attempt" not in carried
+    # 没有 canonical 绑定（临时回合）或不是被接受的语义交接时原样返回。
+    assert _carry_native_live_landmarks(agent, params, None, handoff, previous) == handoff
+    mechanical = _accept_live_summary(LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None), "")
+    assert _carry_native_live_landmarks(agent, params, binding, mechanical, previous) == mechanical

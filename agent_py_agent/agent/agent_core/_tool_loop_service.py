@@ -906,15 +906,16 @@ def _summarize_live_compact(
         from ._finalization_service import _request_memory_curator
 
         _request_memory_curator(agent, "pre_compact")
+        previous_summary = _live_compact_previous_summary(params, binding)
         summary = _native_tool_history_summary(
             agent,
             params,
-            previous_summary=_live_compact_previous_summary(params, binding),
+            previous_summary=previous_summary,
             provider_prompt=provider_prompt,
             provider_outcome=provider_outcome,
         )
         raise_if_compact_interrupted(interrupt_check)
-        return summary
+        return _carry_native_live_landmarks(agent, params, binding, summary, previous_summary)
     except InterruptedError:
         _emit_native_compact_progress(
             params,
@@ -946,6 +947,41 @@ def _summarize_live_compact(
             **progress,
         )
         raise
+
+
+# LLM: 只在有 canonical 绑定且本次是本地语义交接（非服务端压缩项、非机械回退）时带上；上一代摘要与来源隐藏同一视图。
+#   失败事实取本轮 IR 里各工具调用（按四元身份精确匹配）对应的归档记录，部分可能仍留在尾部，属有界重复。
+#   体积不超过上一代摘要：替换 IR 里的上一代摘要项后，地板计量（含上一代摘要项）与触发线判定不会因此新触发。
+# 函数用途: 把上一代原话备份与失败事实按体积合同接到 live 交接后面；不满足条件时原样返回。
+def _carry_native_live_landmarks(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    binding: object | None,
+    summary: str,
+    previous_summary: str,
+) -> str:
+    from ..backends.tool_ir import AssistantTurn
+    from ..conversation.compact_landmarks import carry_live_landmarks
+    from ..conversation.compact_tool_identity import compact_tool_ref_key
+    from ..memory_archive.compact_semantic_summary import (
+        is_live_semantic_handoff,
+        live_operation_facts_entry,
+    )
+
+    if binding is None or not is_live_semantic_handoff(summary):
+        return summary
+    keys = {
+        compact_tool_ref_key(call)
+        for item in list(params.tool_ir_history or []) if isinstance(item, AssistantTurn)
+        for call in item.tool_calls
+    } - {None}
+    records = [record for record in list(params.archive_tool_calls or [])
+               if isinstance(record, dict) and compact_tool_ref_key(record) in keys]
+    carried, _landmark_tokens = carry_live_landmarks(
+        agent, summary, previous_summary,
+        thread_id=str(binding.thread.thread_id), facts=live_operation_facts_entry(records),
+    )
+    return carried
 
 
 # LLM: 复用原provider字段提取器，不解密、不发送请求或改变计划内容。

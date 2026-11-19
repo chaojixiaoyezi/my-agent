@@ -31,6 +31,11 @@ from agent_py_agent.agent.conversation.compact_guard import (
     CompactCapacityFacts,
     ConversationCompactError,
 )
+from agent_py_agent.agent.conversation.compact_landmarks import (
+    LANDMARK_HEADING,
+    LandmarkOptions,
+    summary_with_conversation_landmarks,
+)
 from agent_py_agent.agent.conversation.compact_progress import COMPACT_CAPACITY_PROGRESS_FIELDS
 from agent_py_agent.agent.conversation.compact_projection import (
     ConversationCompactProjection,
@@ -45,6 +50,7 @@ from agent_py_agent.agent.conversation.compact_summary_view import (
     resolve_compact_summary_view,
 )
 from agent_py_agent.agent.conversation.compact_tool_summary import compact_tool_summary_text
+from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import compact_semantic_summary, estimate_tokens
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
@@ -768,3 +774,74 @@ def test_active_prefix_inherits_view_without_ir_carrier(encrypted):
     assert _with_previous_applied_summary((expected, *history), plan, request) == (expected, *history)
     fork.provider_history_messages = ({"role": "user", "content": "既有历史载体"},)
     assert _with_previous_applied_summary(history, plan, request) == history
+
+
+# --- P1-2（2026-11-18）：可计量的回合中归档带上上一代原话备份；被容量门拒绝时退回原交接 ---
+
+
+# 函数用途: 把线程上一代摘要换成带原话备份段、且比 live 交接大的版本。
+def _seed_landmarked_previous(case):
+    rows = [MessageLogEntry(message_id="msg-req", thread_id="t", role="user", content="原始要求：金额保留两位小数。")]
+    previous = summary_with_conversation_landmarks("上一代摘要。" * 300, "", rows, options=LandmarkOptions(2_000)).text
+    case.thread = case.store.threads.update_summary(case.thread.thread_id, previous)
+    return previous
+
+
+# 函数用途: 让摘要替身返回一份被接受的 live 交接（经真实接受函数加宿主固定开头）。
+def _accepted_handoff(monkeypatch):
+    text = _SUMMARY + "；再核对汇总表的合计行与城市排序是否一致，然后写最终报告。" * 3
+    handoff = compact_semantic_summary._accept_live_summary(
+        compact_semantic_summary.LiveToolHistorySummaryRequest(history=[UserTurn("继续")], backend=None), text,
+    )
+    monkeypatch.setattr(compact_semantic_summary, "summarize_live_tool_history", lambda _request: handoff)
+    return handoff
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_measured_live_handoff_carries_landmarks_and_falls_back_to_plain_when_rejected(
+    carried_case, monkeypatch, rejected,
+):
+    case = carried_case
+    previous = _seed_landmarked_previous(case)
+    handoff = _accepted_handoff(monkeypatch)
+    projected: list[str] = []
+
+    # 函数用途: 记录每次投影的摘要；rejected 时带备份的版本超出输入上限。
+    def project(summary, retained, generation, **_extra):
+        projected.append(summary)
+        return ConversationCompactProjection(50_000 if rejected and LANDMARK_HEADING in summary else 100, object())
+
+    _compact(case, request_projector=project)
+    carried = projected[0]
+    assert carried.startswith(handoff) and '- user [msg-req]: "原始要求：金额保留两位小数。"' in carried
+    assert estimate_tokens(carried) <= estimate_tokens(previous)
+    # 带备份的候选被拒只多一次宿主投影，改投原交接并提交；没被拒就提交带备份的版本。
+    assert projected == ([carried, handoff] if rejected else [carried])
+    committed = case.store.threads.require(case.thread.thread_id)
+    assert committed.compact_generation == 1 and committed.summary == (handoff if rejected else carried)
+
+
+def test_live_carry_does_not_hide_a_rejection_that_the_plain_handoff_also_hits(carried_case, monkeypatch):
+    case = carried_case
+    _seed_landmarked_previous(case)
+    handoff = _accepted_handoff(monkeypatch)
+    projected: list[str] = []
+
+    # 函数用途: 两种版本都超出输入上限。
+    def project(summary, retained, generation, **_extra):
+        projected.append(summary)
+        return ConversationCompactProjection(50_000, object())
+
+    with pytest.raises(ConversationCompactError) as raised:
+        _compact(case, request_projector=project)
+    assert raised.value.code == "COMPACT_CANDIDATE_TOO_LARGE" and projected[1:] == [handoff]
+    assert case.store.threads.require(case.thread.thread_id).compact_generation == 0
+
+
+def test_unmeasured_live_handoff_is_committed_without_carry(carried_case, monkeypatch):
+    case = carried_case
+    _seed_landmarked_previous(case)
+    handoff = _accepted_handoff(monkeypatch)
+    # 没有完整请求投影（不可计量）时不带上一代备份，提交的就是原交接。
+    result = _compact(case)
+    assert result.compacted and case.store.threads.require(case.thread.thread_id).summary == handoff

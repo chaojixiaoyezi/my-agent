@@ -4,14 +4,15 @@
 #   放不下的那条用户原话保留头尾、截掉中间并标明原长度。每条带 message_id，放不下的用户消息编号列在 omitted 行，
 #   回查说明保留message_id编号指引，并在compact_recall_hint_enabled且注册session_search时给出显式mode的规范JSON。
 #   内存合同：第一遍流式读取只保留编号与整行 token 数，挑选后第二遍按下标只读入被选中的行，不让全部原文同时驻留。
-#   格式变化须同步 compact.py 的调用与候选容量收缩、semantic_summary_text 的剥离，以及 test_compact_landmarks.py。
+#   格式变化须同步 compact.py 的调用与候选容量收缩、semantic_summary_text 的剥离、live 交接续带（active_turn_compact.py、
+#   agent_core/_tool_loop_service.py），以及 test_compact_landmarks.py。
 # 模块用途: 生成、继承和剥离压缩摘要里的原话备份段，并给出本段实际占用的 token，供压缩候选超出目标时收缩。
 from __future__ import annotations
 
 import json
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..memory_archive import estimate_tokens
 from ..settings.defaults import default_config_int
@@ -176,12 +177,56 @@ def render_landmarked_summary(semantic: str, source: LandmarkSource, options: La
     return LandmarkedSummary(text, estimate_tokens(section))
 
 
-# LLM: 按固定标题切掉第一处备份段及其后内容，不改写语义部分；也公开给只需要语义摘要的有界输入（如选模型决策）。
+# LLM: 按固定行首标题切掉第一处备份段及其后内容，不改写语义部分；也公开给只需要语义摘要的有界输入（如选模型决策）。
 # 函数用途: 返回会话摘要里的语义部分，追加新备份段前也用它去掉旧段，防止重复嵌套。
 def semantic_summary_text(value: str) -> str:
     text = str(value or "").strip()
-    marker_at = text.find(LANDMARK_HEADING)
+    marker_at = _heading_at(text)
     return text if marker_at < 0 else text[:marker_at].rstrip()
+
+
+# LLM: 只认行首标题：机械回退把上一代摘要压成一行内联（previous_summary/prior_compaction 字段），行中间的同名文本
+#   不是备份段；宿主写的备份段总是从行首开始。
+# 函数用途: 返回第一处行首备份段标题的位置，没有时返回 -1。
+def _heading_at(text: str) -> int:
+    if text.startswith(LANDMARK_HEADING):
+        return 0
+    found = text.find(f"\n{LANDMARK_HEADING}")
+    return found + 1 if found >= 0 else -1
+
+
+# LLM: live 交接（回合中工具往返摘要）提交后整段替换线程摘要，不带上就丢掉上一代原话备份。调用方只在可计量路径、
+#   本地语义交接被接受时调用（服务端压缩项与机械回退不带）。体积合同：结果不超过 max(T(上一代摘要), T(交接))，
+#   live 一代不会让摘要项比上一代更大。失败事实块先占预算，原话备份用剩下的（同一渲染，用户原话、最新优先）：先按完整
+#   预算渲染（上一代备份通常原样放得下，连续 live 代不会被逐行累加的估算与省略行余量逐代蚕食），超出体积合同再按剩余
+#   空间（先不留、再留足省略行余量）重挑，仍放不下就不带备份；最终全文总按整段计量复核。事实块放在交接之后、备份段
+#   标题之前：semantic_summary_text 从标题切，放在标题之后下一代就丢了。交接自己已含行首标题（模型回显）时原样返回。
+#   继承行与 transcript 路径同一净化。
+# 函数用途: 把失败事实与上一代原话备份按体积合同接到 live 交接后面，返回全文与备份段 token（没带备份为 0）。
+def carry_live_landmarks(
+    agent: object,
+    handoff: str,
+    previous_summary: str,
+    *,
+    thread_id: str,
+    facts: str = "",
+) -> tuple[str, int]:
+    text = str(handoff or "")
+    if not text.strip() or _heading_at(text) >= 0:
+        return handoff, 0
+    cap = max(estimate_tokens(str(previous_summary or "")), estimate_tokens(text))
+    facts = str(facts or "").strip()
+    if facts and estimate_tokens(f"{text}\n\n{facts}") <= cap:
+        text = f"{text}\n\n{facts}"
+    source = landmark_source(previous_summary, (), redact=landmark_redactor(agent, thread_id))
+    options = landmark_options(agent)
+    room = cap - estimate_tokens(f"{text}\n\n")
+    for budget in (options.landmark_budget_tokens, room + _OMITTED_RESERVE_TOKENS, room):
+        limited = replace(options, landmark_budget_tokens=max(0, min(options.landmark_budget_tokens, budget)))
+        rendered = render_landmarked_summary(text, source, limited)
+        if rendered.used_tokens and estimate_tokens(rendered.text) <= cap:
+            return rendered.text, rendered.used_tokens
+    return text, 0
 
 
 # LLM: 只解析上一代备份段本身：标题之后到第一个空行为止（段内各行不含空行；机械回退附在段后的旧摘要与原文不算）。
@@ -194,7 +239,7 @@ def _carried_landmarks(
     redact: Callable[[str], str] | None = None,
 ) -> tuple[list[_Landmark], list[str], int]:
     text = str(previous_summary or "")
-    marker_at = text.find(LANDMARK_HEADING)
+    marker_at = _heading_at(text)
     if marker_at < 0:
         return [], [], 0
     section = text[marker_at + len(LANDMARK_HEADING):].split("\n\n", 1)[0]
@@ -371,6 +416,7 @@ __all__ = [
     "LandmarkOptions",
     "LandmarkSource",
     "LandmarkedSummary",
+    "carry_live_landmarks",
     "landmark_options",
     "landmark_redactor",
     "landmark_source",

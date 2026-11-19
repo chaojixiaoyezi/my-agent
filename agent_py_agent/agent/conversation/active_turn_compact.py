@@ -381,7 +381,7 @@ def _execute_active_turn_compact(
         replacement, provider_compaction = _active_turn_replacement_summary(agent, plan, request)
         raise_if_compact_interrupted(request.interrupt_check)
         progress["_timing"].enter_stage("measuring")
-        projection = _project_active_turn_request(agent, plan, request, replacement, provider_compaction)
+        replacement, projection = _project_with_live_carry(agent, plan, request, replacement, provider_compaction)
         # 接受门与提交记的是折算后的值；projection 本身保留原始纯投影，供宿主提交后改写本轮观测基线。
         after_tokens = (
             calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
@@ -535,6 +535,38 @@ def _project_active_turn_request(
     return projection
 
 
+# LLM: 只在可计量路径（有 request_projector）且本次是本地语义交接（无服务端压缩项、非机械回退）时，先投影带上一代原话备份
+#   与被替代工具往返失败事实的版本（compact_landmarks.carry_live_landmarks，体积不超过上一代摘要）；它被容量或进展门拒绝时
+#   改投原交接，判定与不带时完全相同、原错误照常上抛。只多一次宿主纯投影，不多一次模型调用。
+# 函数用途: 计量并选定要提交的回合中归档摘要，返回最终采用的摘要文本与它的完整请求投影。
+def _project_with_live_carry(
+    agent: object,
+    plan: _ActiveTurnArchiveCompactPlan,
+    request: ActiveTurnArchiveCompactRequest,
+    replacement: str,
+    provider_compaction: dict[str, object] | None,
+) -> tuple[str, ConversationCompactProjection | None]:
+    from ..memory_archive.compact_semantic_summary import (
+        is_live_semantic_handoff,
+        live_operation_facts_entry,
+    )
+    from .compact_landmarks import carry_live_landmarks
+
+    carried = replacement
+    if request.request_projector is not None and not provider_compaction and is_live_semantic_handoff(replacement):
+        carried, _landmark_tokens = carry_live_landmarks(
+            agent, replacement, _active_turn_previous_summary(plan, request),
+            thread_id=plan.thread.thread_id, facts=live_operation_facts_entry(plan.source_records),
+        )
+    if carried != replacement:
+        try:
+            return carried, _project_active_turn_request(agent, plan, request, carried, provider_compaction)
+        except ConversationCompactError as exc:
+            if exc.code not in {"COMPACT_CANDIDATE_TOO_LARGE", "COMPACT_NO_PROGRESS"}:
+                raise
+    return replacement, _project_active_turn_request(agent, plan, request, replacement, provider_compaction)
+
+
 # LLM: 固定开销是宿主“只计量、不提交”入口（fixed_request_projector）在“空摘要、无保留”形态下的实测值；只在候选
 #   真被拒时算一次。没有入口或投影异常时返回 None（字段缺失），不写 0、不盖住原失败；用户中断必须继续上抛。
 # 函数用途: 按预计代次实测一次与保留内容无关的固定请求开销，测不出就如实缺失。
@@ -577,8 +609,7 @@ def _active_turn_replacement_summary(
         raise ValueError("active-turn carried compact semantic summary is disabled")
     provider_outcome: list[dict[str, object]] = []
     scope_id = str(getattr(plan.thread, "workspace_task_id", "") or "")
-    context = request.compact_context
-    previous_summary = str(context.view.summary if context is not None else plan.thread.summary or "")
+    previous_summary = _active_turn_previous_summary(plan, request)
     replacement = summarize_live_tool_history(
         LiveToolHistorySummaryRequest(
             preserve_complete_fallback=request.request_projector is not None,
@@ -600,6 +631,16 @@ def _active_turn_replacement_summary(
     if not replacement:
         raise ValueError("active-turn carried compact summary is empty")
     return replacement, (provider_outcome[-1] if provider_outcome else None)
+
+
+# LLM: 与来源隐藏、检查点基础同一个视图：有适用视图取视图摘要，否则取计划线程的摘要。
+# 函数用途: 取回合中归档要续接的上一代摘要文本。
+def _active_turn_previous_summary(
+    plan: _ActiveTurnArchiveCompactPlan,
+    request: ActiveTurnArchiveCompactRequest,
+) -> str:
+    context = request.compact_context
+    return str(context.view.summary if context is not None else plan.thread.summary or "")
 
 
 # LLM: 返回 LiveToolHistorySummaryRequest 的来源字段（history/fallback_history/provider_prompt/provider_history_messages/

@@ -44,7 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -71,6 +71,8 @@ _LIVE_FALLBACK_MAX_OUTPUT_CHARS = 4_000
 _PER_RECORD_VALUE_CHARS = 1_200
 
 _SUMMARY_PREFIX = "[compact-semantic-summary]"
+# live 交接被接受时宿主写在模型正文前的固定开头；机械回退与服务端压缩项开头不同，live 续带只认它。
+_LIVE_ACCEPTED_HEAD = f"{_SUMMARY_PREFIX} 当前运行 turn 的旧工具往返已被这份摘要替换。"
 _OPERATION_FACTS_PREFIX = "[compact-tool-operation-facts authoritative]"
 _MECHANICAL_FALLBACK_PREFIX = "[compact-mechanical-fallback]"
 _LIVE_HANDOFF_PREFIX = "[compact-live-handoff.v1]"
@@ -299,7 +301,7 @@ def _accept_live_summary(request: LiveToolHistorySummaryRequest, summary: str) -
             request, limit=fallback_limit, reason="provider_summary_section_fit_failed",
         )
     return (
-        f"{_SUMMARY_PREFIX} 当前运行 turn 的旧工具往返已被这份摘要替换。"
+        f"{_LIVE_ACCEPTED_HEAD}"
         "摘要不是执行事实源；精确结果以 archive、operation ledger、artifact 和真实文件为准。\n"
         f"{fitted}"
     )
@@ -744,6 +746,8 @@ def _record_brief(index: int, record: dict[str, Any]) -> str:
 # 函数用途: 从中段归档生成一条精确阻塞事实块；成功记录仍由摘要与权威账本共同承载。
 def _non_success_operation_facts_entry(
     records: list[dict[str, Any]],
+    *,
+    limit_rows: int = 0,
 ) -> str:
     rows: list[str] = []
     for record in records:
@@ -773,6 +777,9 @@ def _non_success_operation_facts_entry(
         rows.append(f"- {'; '.join(fields)}")
     if not rows:
         return ""
+    if 0 < limit_rows < len(rows):
+        # 只留最近 limit_rows 条，更早的只计数，不静默丢失。
+        rows = [f"- earlier {len(rows) - limit_rows} non-success operations omitted", *rows[-limit_rows:]]
     return "\n".join(
         (
             (
@@ -782,6 +789,18 @@ def _non_success_operation_facts_entry(
             *rows,
         )
     )
+
+
+# LLM: 只读归档记录的结构化状态字段（与中段事实块同一投影）；最多最近 8 条，更早的只计数。
+# 函数用途: 给 live 交接生成被替代工具往返里未成功操作的精确事实块；没有时返回空串。
+def live_operation_facts_entry(records: Sequence[dict[str, Any]]) -> str:
+    return _non_success_operation_facts_entry([record for record in records if isinstance(record, dict)], limit_rows=8)
+
+
+# LLM: 只比宿主自己写下的固定开头，不读模型正文。
+# 函数用途: 判断一段 live 摘要是否是被接受的模型语义交接（不是机械回退或服务端压缩项）。
+def is_live_semantic_handoff(text: str) -> bool:
+    return str(text or "").startswith(_LIVE_ACCEPTED_HEAD)
 
 
 def _record_param_lines(params: Any) -> list[str]:
@@ -1016,6 +1035,8 @@ __all__ = [
     "SemanticSummaryConfig",
     "SemanticSummaryRequest",
     "SemanticSummaryStats",
+    "is_live_semantic_handoff",
+    "live_operation_facts_entry",
     "semantic_summary_config",
     "summarize_carried_tool_context",
     "summarize_live_tool_history",
