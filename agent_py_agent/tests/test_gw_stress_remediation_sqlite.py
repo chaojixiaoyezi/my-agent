@@ -3,7 +3,8 @@
 不变量：
 - 提示只是整数：fstat→pread→fstat 与全量扫描同一核验，从不 dup/关闭/持有 FD，不缓存头内容；
 - 换 inode、原地损坏、0 字节后写入垃圾仍按 SQLITE_NOTADB 拒绝；提示失配回退原 /dev/fd 全量扫描；
-- 恢复/替换前的“无本地句柄”检查始终全量扫描；建表记忆只按 (路径, dev, ino, kind) + schema_version 生效。
+- 恢复/替换前的“无本地句柄”检查始终全量扫描；建表记忆只按 (路径, dev, ino, kind) + schema_version 生效；
+- C5：冷路径建表与 schema_version 读取同在一个写事务内，提交成功后才记忆，他处改表不能被记成已建好。
 """
 from __future__ import annotations
 
@@ -279,6 +280,74 @@ def test_list_projection_rebuilds_schema_after_replacement_or_external_drop(tmp_
     index.publish(record)
     assert _ddl(projection_sql[-1])
     assert index.page(limit=10)["items"][0]["owner_id"] == "u1"
+
+
+def _drop_meta(path: Path) -> str:
+    try:
+        with closing(sqlite3.connect(path, timeout=0)) as other:
+            other.execute("DROP TABLE meta")
+            other.commit()
+    except sqlite3.OperationalError as exc:
+        return getattr(exc, "sqlite_errorname", str(exc))
+    return "dropped"
+
+
+def test_schema_change_between_ddl_and_cookie_read_is_never_memoized(tmp_path, monkeypatch):
+    root = tmp_path / "threads"
+    root.mkdir()
+    record = root / "t1.json"
+    record.write_text(json.dumps({"owner_id": "u1", "updated_at": 1}), encoding="utf-8")
+    index = _thread_index(root)
+    interloper, opened = [], []
+    real = session_list_index.connect_projection_sqlite
+
+    def connect(path, **kwargs):
+        conn = real(path, **kwargs)
+        current: list[str] = []
+        opened.append(current)
+
+        def trace(sql):
+            current.append(sql)
+            text = sql.lstrip().upper()
+            # 另一条不持应用锁的真实连接恰在最后一条 CREATE 之后、读 schema_version 之前改表。
+            if text.startswith("PRAGMA SCHEMA_VERSION") and _ddl(current) and not interloper:
+                interloper.append(_drop_meta(Path(path)))
+
+        conn.set_trace_callback(trace)
+        return conn
+
+    index.publish(record)
+    # 新进程：库与 meta 已提交，建表记忆为空，下一次打开走冷路径。
+    session_list_index._LIST_PROJECTION_DDL_MEMO.clear()
+    monkeypatch.setattr(session_list_index, "connect_projection_sqlite", connect)
+    index.publish(record)
+    # 写事务持有期间他处改表只能 BUSY（timeout=0 即刻失败），不会落在建表与 cookie 读取之间。
+    assert interloper == ["SQLITE_BUSY"]
+    # 提交之后他处改表成功：schema_version 变化令下一次 page 重跑建表并重建；再下一次打开照常跳过建表。
+    assert _drop_meta(index.path) == "dropped"
+    assert [item["owner_id"] for item in index.page(limit=10)["items"]] == ["u1"]
+    assert _ddl(opened[-1])
+    assert [item["owner_id"] for item in index.page(limit=10)["items"]] == ["u1"]
+    assert not _ddl(opened[-1])
+
+
+def test_cold_open_failure_before_commit_records_no_ddl_memo(tmp_path):
+    root = tmp_path / "threads"
+    root.mkdir()
+    record = root / "t1.json"
+    record.write_text(json.dumps({"owner_id": "u1", "updated_at": 1}), encoding="utf-8")
+    index = _thread_index(root)
+    index.publish(record)
+    session_list_index._LIST_PROJECTION_DDL_MEMO.clear()
+    with closing(sqlite3.connect(index.path, timeout=0)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            index._open_projection(timeout=0)
+        assert getattr(caught.value, "sqlite_errorname", "") == "SQLITE_BUSY"
+        assert not session_list_index._LIST_PROJECTION_DDL_MEMO
+        writer.rollback()
+    assert [item["owner_id"] for item in index.page(limit=10)["items"]] == ["u1"]
+    assert len(session_list_index._LIST_PROJECTION_DDL_MEMO) == 1
 
 
 def test_list_projection_ddl_memo_is_bounded(tmp_path, monkeypatch):

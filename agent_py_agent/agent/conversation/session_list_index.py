@@ -115,6 +115,9 @@ class SessionListIndex:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-1024")
             if not installed:
+                # C5：建表与 schema_version 读取在同一写事务内完成，提交成功后才记 memo；中途失败由
+                #   _close_failed_factory 关连接回滚、不记 memo；WAL 等 PRAGMA 已在事务外执行。
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute("CREATE TABLE IF NOT EXISTS entries (path TEXT PRIMARY KEY, sort_at REAL, filter_key TEXT, stamp TEXT, generation INTEGER)")
                 conn.execute("CREATE INDEX IF NOT EXISTS list_order ON entries(filter_key, sort_at DESC, path DESC)")
                 conn.execute("CREATE INDEX IF NOT EXISTS list_order_all ON entries(sort_at DESC, path DESC)")
@@ -127,8 +130,9 @@ class SessionListIndex:
                     conn.execute('CREATE TRIGGER IF NOT EXISTS artifact_entry_deleted AFTER DELETE ON entries BEGIN '
                                  'DELETE FROM artifact_refs WHERE task_path=OLD.path; '
                                  'DELETE FROM artifact_errors WHERE task_path=OLD.path; END')
-                # 建表语句在事务外逐条自动提交，此时记录的 schema_version 已是持久事实。
-                _remember_projection_ddl(key, conn.execute("PRAGMA schema_version").fetchone()[0])
+                version = conn.execute("PRAGMA schema_version").fetchone()[0]
+                conn.commit()
+                _remember_projection_ddl(key, version)
             conn.execute("INSERT OR IGNORE INTO meta VALUES ('revision', ?)", (str(time.time_ns()),))
             return conn
         except BaseException as error:
