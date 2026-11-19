@@ -1,9 +1,10 @@
-"""订阅登录令牌轮换不使能力探针缓存失效，并记录未命中原因与单次告警日志。"""
+"""订阅登录令牌轮换不使能力探针缓存失效，并记录未命中原因与单次告警日志；静态路由头参与探针身份（C4）。"""
 from __future__ import annotations
 
 import json
 import logging
 import re
+import threading
 
 import pytest
 
@@ -109,6 +110,7 @@ def _make_apikey_backend(
     api_key: str = "sk-probe-secret-value",
     model_name: str = "probe-model",
     stream_enabled: bool = False,
+    custom_headers: dict[str, str] | None = None,
 ) -> OpenAICompatibleBackend:
     return OpenAICompatibleBackend(
         BackendOptions(
@@ -116,6 +118,7 @@ def _make_apikey_backend(
             api_key=api_key,
             model_name=model_name,
             stream_enabled=stream_enabled,
+            custom_headers=dict(custom_headers or {}),
         )
     )
 
@@ -365,3 +368,85 @@ def test_capability_probe_miss_reasons_is_bounded_at_256() -> None:
         invalidate_capability_probe_memo(backend, reason="http_401")
     with http._capability_probe_lock:
         assert len(http._capability_probe_miss_reasons) == 256
+
+
+def _with_probe_answer(backend: OpenAICompatibleBackend, monkeypatch, *, native: bool) -> OpenAICompatibleBackend:
+    monkeypatch.setattr(backend, "generate", lambda prompt, **_kw: _probe_ok_response(prompt, native=native))
+    return backend
+
+
+def test_static_route_headers_split_probe_identity_and_in_flight_results(monkeypatch) -> None:
+    # 同入口/模型/凭据的两个 profile 只差一个静态路由头：并发冷探测各自物理探测，结论互不冒充。
+    native = {"a": False, "b": True}
+    routes = {
+        name: _with_probe_answer(
+            _make_apikey_backend(custom_headers={"X-Route-Variant": f"route-secret-{name}"}), monkeypatch, native=flag)
+        for name, flag in native.items()
+    }
+    original = OpenAICompatibleBackend._probe_tool_capability_uncached
+    physical, guard, overlap = [], threading.Lock(), threading.Event()
+
+    def counting_probe(self):
+        with guard:
+            physical.append(id(self))
+            if len(physical) >= 2:
+                overlap.set()
+        # 两条物理探测互相等到对方在途；回归时第二个调用并入在途 flight，此处有界等待后独自完成。
+        overlap.wait(2.0)
+        return original(self)
+
+    monkeypatch.setattr(OpenAICompatibleBackend, "_probe_tool_capability_uncached", counting_probe)
+    outcomes, barrier = {}, threading.Barrier(len(routes))
+
+    def call(name: str) -> None:
+        barrier.wait(5)
+        outcomes[name] = routes[name].probe_tool_capability().native_supported
+
+    threads = [threading.Thread(target=call, args=(name,)) for name in routes]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert outcomes == native
+    assert len(physical) == 2
+    key_a, key_b = (http._capability_probe_key(routes[name]) for name in ("a", "b"))
+    assert key_a != key_b and "route-secret" not in repr((key_a, key_b))
+
+    # 顺序读（阴性按凭据级逻辑身份摘除，并发阶段的发布先后不定，故只量本段增量）：同路由新实例（头名大小写
+    #   不同）命中阳性 memo；另一路由的新实例不被它冒充，阴性不缓存而重新物理探测。
+    same_b = _with_probe_answer(
+        _make_apikey_backend(custom_headers={"x-route-variant": "route-secret-b"}), monkeypatch, native=True)
+    assert same_b.probe_tool_capability().native_supported is True
+    before = len(physical)
+    again_b = _with_probe_answer(
+        _make_apikey_backend(custom_headers={"X-ROUTE-VARIANT": "route-secret-b"}), monkeypatch, native=True)
+    assert again_b.probe_tool_capability().native_supported is True
+    assert len(physical) == before
+    fresh_a = _with_probe_answer(
+        _make_apikey_backend(custom_headers={"X-Route-Variant": "route-secret-a"}), monkeypatch, native=False)
+    assert fresh_a.probe_tool_capability().native_supported is False
+    assert len(physical) == before + 1
+
+    # 实例路由头变更按字段名记账，原因里不含头值。
+    assert same_b._cached_instance_capability() is not None
+    same_b.custom_headers = {"X-Route-Variant": "route-secret-c"}
+    assert same_b._cached_instance_capability() is None
+    assert same_b._provider_tool_capability_miss_reason == "key_changed:route_headers"
+
+
+def test_route_header_identity_ignores_name_case_and_order(monkeypatch) -> None:
+    first = _make_apikey_backend(custom_headers={"X-Route-Variant": "v1", "X-Tenant": "t1"})
+    second = _make_apikey_backend(custom_headers={"x-tenant": "t1", "X-ROUTE-VARIANT": "v1"})
+    plain = _make_apikey_backend()
+    assert http._route_header_fingerprint(first) == http._route_header_fingerprint(second) != ""
+    assert http._route_header_fingerprint(plain) == ""
+    assert http._capability_probe_key(first) == http._capability_probe_key(second) != http._capability_probe_key(plain)
+    # 凭据指纹仍在键尾，逻辑身份（凭据级失效）覆盖所有路由头变体。
+    assert http._capability_probe_key(first)[-1] == _credential_fingerprint(plain)
+    probes = []
+    for backend in (first, second):
+        monkeypatch.setattr(backend, "generate",
+                            lambda prompt, **_kw: probes.append(prompt) or _probe_ok_response(prompt))
+    assert first.probe_tool_capability().native_supported is True
+    assert second.probe_tool_capability().native_supported is True
+    assert len(probes) == 1

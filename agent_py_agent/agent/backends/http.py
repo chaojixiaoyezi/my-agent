@@ -69,7 +69,7 @@ _capability_probe_entries: OrderedDict[tuple[object, ...], ProviderToolCapabilit
 _capability_probe_miss_reasons: OrderedDict[tuple[object, ...], str] = OrderedDict()
 _capability_probe_lock = threading.Lock()
 _capability_probe_generation = 0
-_probe_key_field_names = ("backend_type", "endpoint", "model", "stream", "transport", "credential")
+_probe_key_field_names = ("backend_type", "endpoint", "model", "stream", "transport", "route_headers", "credential")
 _capability_probe_transport_lock = threading.RLock()
 _capability_probe_transport_tokens: dict[int, tuple[weakref.ref[Any], int]] = {}
 _capability_probe_transport_seq = 0
@@ -183,6 +183,16 @@ def _credential_fingerprint(backend: object) -> str:
     return hashlib.sha256(material).hexdigest()[:16]
 
 
+# LLM: 仅对 profile 已验证的静态请求头做不可逆指纹（名称小写、按序），区分同入口不同路由；会话亲和头属请求层，不入键。
+# 函数用途: 计算能力缓存键中的静态路由头身份，键与日志不含原始头值。
+def _route_header_fingerprint(backend: object) -> str:
+    headers = getattr(backend, "custom_headers", None)
+    if not isinstance(headers, Mapping) or not headers:
+        return ""
+    material = json.dumps(sorted((str(name).lower(), str(value)) for name, value in headers.items()), ensure_ascii=True)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
 def _safe_tool_endpoint(backend: object) -> str:
     endpoint = getattr(backend, "_tool_endpoint", None)
     if callable(endpoint):
@@ -200,6 +210,7 @@ def _capability_probe_key(backend: object) -> tuple[object, ...]:
         str(getattr(backend, "model_name", "") or ""),
         bool(getattr(backend, "stream_enabled", False)),
         _capability_probe_transport_identity(backend),
+        _route_header_fingerprint(backend),
         _credential_fingerprint(backend),
     )
 
@@ -235,7 +246,11 @@ class _ProbeFlight:
 # LLM: 跨 owner/后端实例按同一探针键单飞（X8）：冷启动并发只真实发一次探测；等待可被本轮停止打断，
 #   在途超过 TTL 则不再跟随。领头者异常原样上抛；跟随者对供应商类失败拿到一份同类型副本。
 # 函数用途: 让同一端点/模型/凭据的并发冷探测只执行一次。
-def _single_flight_probe(key: tuple[object, ...], probe: Callable[[], ProviderToolCapability]) -> ProviderToolCapability:
+def _single_flight_probe(
+    key: tuple[object, ...],
+    probe: Callable[[], ProviderToolCapability],
+    publish: Callable[[ProviderToolCapability | None, BaseException | None], None] | None = None,
+) -> ProviderToolCapability:
     while True:
         with _capability_probe_lock:
             flight = _capability_probe_flights.get(key)
@@ -250,10 +265,15 @@ def _single_flight_probe(key: tuple[object, ...], probe: Callable[[], ProviderTo
                 flight.error = exc
                 raise
             finally:
-                with _capability_probe_lock:
-                    if _capability_probe_flights.get(key) is flight:
-                        _capability_probe_flights.pop(key, None)
-                flight.done.set()
+                try:
+                    with _capability_probe_lock:
+                        # C3：只有收尾时仍登记为当前在途的本 flight 才能发布；被失效摘除或 TTL 后被取代的结果只交给本次参与者。
+                        if _capability_probe_flights.get(key) is flight:
+                            _capability_probe_flights.pop(key, None)
+                            if publish is not None:
+                                publish(flight.result, flight.error)
+                finally:
+                    flight.done.set()
         while not flight.done.wait(_PROBE_FLIGHT_POLL_SECONDS) and not flight.expired():
             wait_interruptibly(0)
         wait_interruptibly(0)
@@ -297,17 +317,28 @@ def _describe_key_change(
     return "key_changed:" + ",".join(changed) if changed else "key_changed:unknown"
 
 
-def _store_capability_probe_memo(
-    key: tuple[object, ...], capability: ProviderToolCapability,
-) -> int:
+# LLM: 调用方持 _capability_probe_lock 且已确认本 flight 仍是当前在途；阳性入 memo，阴性或配置拒绝按同一键与逻辑身份摘除并记原因。
+# 函数用途: 把一次物理探测的结论原子发布到进程内能力缓存。
+def _publish_capability_probe_locked(
+    key: tuple[object, ...], capability: ProviderToolCapability | None, error: BaseException | None,
+) -> None:
     logical_key = _logical_probe_identity(key)
-    with _capability_probe_lock:
-        _capability_probe_entries[key] = capability
-        _capability_probe_entries.move_to_end(key)
-        while len(_capability_probe_entries) > 256:
-            _capability_probe_entries.popitem(last=False)
-        _capability_probe_miss_reasons.pop(logical_key, None)
-        return _capability_probe_generation
+    if isinstance(capability, ProviderToolCapability):
+        if capability.native_supported:
+            _capability_probe_entries[key] = capability
+            _capability_probe_entries.move_to_end(key)
+            while len(_capability_probe_entries) > 256:
+                _capability_probe_entries.popitem(last=False)
+            _capability_probe_miss_reasons.pop(logical_key, None)
+            return
+        reason = "negative_result"
+    elif isinstance(error, ProviderConfigurationError):
+        reason = _http_rejection_reason(error) or "provider_configuration"
+    else:
+        return  # 供应商临时失败、中断、本地异常或非能力对象：不缓存、不摘除（与原调用方 isinstance 判断一致）
+    for entry_key in [k for k in _capability_probe_entries if k == key or _logical_probe_identity(k) == logical_key]:
+        _capability_probe_entries.pop(entry_key, None)
+    _record_capability_probe_miss_reason_locked(logical_key, reason)
 
 
 def invalidate_capability_probe_memo(
@@ -321,6 +352,8 @@ def invalidate_capability_probe_memo(
     if backend is None:
         with _capability_probe_lock:
             _capability_probe_entries.clear()
+            # C3：在途旧 flight 失去发布资格，失效后到达的调用另起新 flight。
+            _capability_probe_flights.clear()
             _capability_probe_generation += 1
             _capability_probe_miss_reasons.clear()
             _record_capability_probe_miss_reason_locked(("*",), normalized_reason)
@@ -340,6 +373,11 @@ def invalidate_capability_probe_memo(
         ]
         for key in stale:
             _capability_probe_entries.pop(key, None)
+        # C3：摘除匹配身份的在途 flight，新调用立即另起；旧跟随者仍由原 flight 的 Event 唤醒。
+        for flight_key in [k for k in _capability_probe_flights
+                           if len(k) == len(target_key) + 1
+                           and (k[:-1] in keys or _logical_probe_identity(k[:-1]) in logical_targets)]:
+            _capability_probe_flights.pop(flight_key, None)
         for logical_key in logical_targets:
             _record_capability_probe_miss_reason_locked(logical_key, normalized_reason)
     backend._provider_tool_capability_cache = None
@@ -736,14 +774,14 @@ class HttpBackend(BaseBackend):
             probe_started = time.monotonic()
             self._active_probe_cache_miss_reason = miss_reason
             try:
-                # X8：同一完整能力身份（后端、端点、模型、流式、传输身份、凭据指纹）且同一失效代次的冷探测单飞；
-                # 不同凭据或失效之后的调用不会并入旧的在途探测。
-                capability = _single_flight_probe((*key, generation), self._probe_tool_capability_uncached)
-            except ProviderConfigurationError as exc:
-                invalidate_capability_probe_memo(
-                    self,
-                    reason=_http_rejection_reason(exc) or "provider_configuration",
-                )
+                # X8：同一完整能力身份（后端、端点、模型、流式、传输身份、静态路由头、凭据指纹）且同一失效代次的冷探测单飞；
+                # 不同凭据或失效之后的调用不会并入旧的在途探测。C3：只有收尾时仍是当前在途的物理发起者才原子发布结论。
+                capability = _single_flight_probe(
+                    (*key, generation), self._probe_tool_capability_uncached,
+                    lambda result, error: _publish_capability_probe_locked(key, result, error))
+            except ProviderConfigurationError:
+                # 全局摘除与原因已由当前发起者在 flight 收尾时原子完成；这里只清本实例旧诊断，下一次按全局原因计账。
+                self._provider_tool_capability_miss_reason = None
                 raise
             finally:
                 self._active_probe_cache_miss_reason = None
@@ -756,14 +794,13 @@ class HttpBackend(BaseBackend):
                     duration_ms,
                     capability.native_supported,
                 )
-                if capability.native_supported:
-                    generation = _store_capability_probe_memo(key, capability)
+                # 只有本结论已作为当前事实进入 memo 才缓存到实例；旧 flight 的结果只交给本次调用。
+                memo_hit, generation = _lookup_capability_probe_memo(key)
+                if memo_hit is capability:
                     self._provider_tool_capability_cache = capability
                     self._provider_tool_capability_memo_key = key
                     self._provider_tool_capability_generation = generation
-                    self._provider_tool_capability_miss_reason = None
-                else:
-                    invalidate_capability_probe_memo(self, reason="negative_result")
+                self._provider_tool_capability_miss_reason = None
             return capability
         finally:
             self._provider_tool_capability_lock.release()
@@ -859,7 +896,7 @@ class HttpBackend(BaseBackend):
                     evidence="live_probe_returned_structured_tool_call",
                     observed_at=_utc_now_iso(),
                 )
-                self._provider_tool_capability_cache = capability
+                # C3：实例缓存只由 probe_tool_capability 在结论作为当前事实发布后写入（带代次与键）。
                 return capability
             evidence = "live_probe_returned_no_valid_structured_tool_call"
         # 重试耗尽仍未证明: 不缓存(下次 turn 再探), 如实报不支持。

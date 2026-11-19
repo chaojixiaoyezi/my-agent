@@ -1,6 +1,7 @@
 # LLM: X8/C1 回归：冷工具能力探测按完整能力身份（含凭据指纹与失效代次）跨后端实例单飞；
 #   SSE 按 HTTPResponse.read1 成块读取仍逐行检查停止与超时，拆行/CRLF/跨块多字节/EOF 尾行与逐行读取一致。
-# 模块用途: 核单飞的结果/失败共享、停止与 TTL 语义，以及块读取与无锁中断判断的等价性。
+#   C3：失效后旧在途探测的结论只交给本次参与者，只有收尾时仍为当前在途的物理发起者发布共享与实例缓存。
+# 模块用途: 核单飞的结果/失败共享、停止与 TTL 语义、失效后的发布归属，以及块读取与无锁中断判断的等价性。
 from __future__ import annotations
 
 import http.client
@@ -15,7 +16,7 @@ import pytest
 from agent_py_agent.agent.backends import gateway_helpers
 from agent_py_agent.agent.backends import http as http_backend
 from agent_py_agent.agent.backends.base import BackendOptions
-from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError, ProviderTimeoutError
 from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.concurrency import interrupt as interrupt_module
 from agent_py_agent.agent.concurrency.interrupt import (
@@ -208,6 +209,82 @@ def test_invalidation_generation_splits_in_flight_probes(monkeypatch):
     assert results["second"].evidence == "fresh"
     assert results["first"].evidence == "stale"
     assert len(calls) == 2
+
+
+# ---- C3：失效后的探测发布归属 ----
+
+def _negative(evidence: str) -> ProviderToolCapability:
+    return ProviderToolCapability(provider="openai_chat", endpoint="http://model.invalid/v1", model="m",
+                                  stream=True, native_supported=False, evidence=evidence)
+
+
+# 函数用途: 全局失效；推进代次并清空在途表。
+def _invalidate_global(_backend_of_b):
+    http_backend.invalidate_capability_probe_memo(reason="test")
+
+
+# 函数用途: 生产式指定失效（同身份另一实例收到 401）；其它形状的直接调用者键不受影响。
+def _invalidate_targeted(backend_of_b):
+    adhoc = ("x8", "adhoc")
+    http_backend._capability_probe_flights[adhoc] = object()
+    try:
+        http_backend.invalidate_capability_probe_memo(backend_of_b, reason="http_401")
+        assert adhoc in http_backend._capability_probe_flights
+    finally:
+        http_backend._capability_probe_flights.pop(adhoc, None)
+
+
+@pytest.mark.parametrize("invalidate", [_invalidate_global, _invalidate_targeted], ids=["global", "targeted"])
+@pytest.mark.parametrize("scenario", ["old_positive_after_fresh_negative", "old_error_after_fresh_positive"])
+def test_stale_flight_never_publishes_over_fresh_probe(monkeypatch, invalidate, scenario):
+    # 读者 A 的旧在途探测被失效；B 是失效后的首个新探测；C 是第三个新实例，只能读到 B 及之后的事实。
+    old = _capability("old") if scenario == "old_positive_after_fresh_negative" else \
+        ProviderRequestRejectedError("HTTP 401: rejected", status_code=401)
+    fresh = _negative("fresh") if scenario == "old_positive_after_fresh_negative" else _capability("fresh")
+    third = _capability("third")
+    calls, guard, started, release = [], threading.Lock(), threading.Event(), threading.Event()
+
+    def fake_probe(self):
+        with guard:
+            calls.append(1)
+            index = len(calls)
+        if index == 1:
+            started.set()
+            release.wait(5)
+        outcome = old if index == 1 else fresh if index == 2 else third
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(OpenAICompatibleBackend, "_probe_tool_capability_uncached", fake_probe)
+    reader_a, reader_b, reader_c = _backend("key-a"), _backend("key-a"), _backend("key-a")
+    results = {}
+    leader = threading.Thread(target=lambda: results.setdefault("A", _capture(reader_a.probe_tool_capability)))
+    leader.start()
+    assert started.wait(5), "旧在途探测未开始"
+    invalidate(reader_b)
+    follower = threading.Thread(target=lambda: results.setdefault("B", _capture(reader_b.probe_tool_capability)))
+    follower.start()
+    # 修复后 B 立即另起物理探测并完成；回归时 B 并入旧 flight，有界等待后再放行旧探测，以失败结束而不挂住。
+    _wait_until(lambda: "B" in results, timeout=2.0)
+    release.set()
+    leader.join(5)
+    follower.join(5)
+    results["C"] = _capture(reader_c.probe_tool_capability)
+
+    assert results["A"] is old  # 旧结论（含旧错误）只交给本次调用者
+    assert reader_a._provider_tool_capability_cache is None
+    assert results["B"] is fresh
+    assert reader_b._provider_tool_capability_cache is (fresh if fresh.native_supported else None)
+    expected = third if scenario == "old_positive_after_fresh_negative" else fresh
+    assert results["C"] is expected
+    assert len(calls) == (3 if expected is third else 2)
+    key = http_backend._capability_probe_key(reader_c)
+    with http_backend._capability_probe_lock:
+        assert dict(http_backend._capability_probe_entries) == {key: expected}
+        assert http_backend._capability_probe_flights == {}
+        assert http_backend._logical_probe_identity(key) not in http_backend._capability_probe_miss_reasons
+    assert reader_c._provider_tool_capability_cache is expected
 
 
 # ---- C1：SSE 块读取 + 无锁中断判断 ----
