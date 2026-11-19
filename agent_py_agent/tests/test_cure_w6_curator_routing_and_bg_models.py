@@ -132,6 +132,60 @@ def test_skill_learning_service_wiring(tmp_path: Path, monkeypatch) -> None:
     assert resolved2 is backend_obj
 
 
+def test_skill_learning_off_keeps_the_queue_and_never_falls_back_to_the_startup_backend(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A -> B -> off -> B: only A, B, B are called; while off the request stays queued with no attempt or budget used."""
+    from agent_py_agent.agent.capability import skill_learning as sl_module
+    from agent_py_agent.agent.gateway_parts.multiprocess_background_execution import (
+        _auxiliary_model_unavailable,
+    )
+    from agent_py_agent.cli.gateway_loops import _run_skill_learning
+    from agent_py_agent.tests.test_skill_learning import _ctx, _output
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    backends = {"prof-a": SimpleNamespace(name="model-a"), "prof-b": SimpleNamespace(name="model-b")}
+    fake_agent = SimpleNamespace(
+        home_paths=home,
+        skills_service=SimpleNamespace(snapshot_for=lambda: SimpleNamespace(entries=())),
+        memory_curator=SimpleNamespace(backend=SimpleNamespace(name="startup-a")),
+        config=SimpleNamespace(enable_self_learning=True, memory_curator_model_profile="prof-a"),
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.core._curator_backend",
+        lambda agent, profile: (backends.get(profile, SimpleNamespace(name="unconfigured")), "p", profile, ""),
+    )
+    called: list[str] = []
+
+    def fake_call(backend, prompt, response_schema, timeout_seconds):
+        del prompt, response_schema, timeout_seconds
+        called.append(backend.name)
+        return ModelResponse(text=_output("skip"), backend=backend.name)
+
+    monkeypatch.setattr(sl_module, "call_backend_with_timeout", fake_call)
+    service = _skill_learning_service(fake_agent, fake_agent.config)
+    fake_agent.skill_learning = service
+    assert service.runtime.backend is None
+
+    def queue_and_run(run_id: str, profile: str):
+        fake_agent.config.memory_curator_model_profile = profile
+        assert service.enqueue_from_finalize(_ctx(run_id)) == "queued"
+        return service.run_pending()
+
+    assert queue_and_run("run-a", "prof-a").status == "skipped"
+    assert queue_and_run("run-b", "prof-b").status == "skipped"
+    assert queue_and_run("run-off", "").status == "busy"
+    _run_skill_learning(fake_agent, "owner")
+    assert _auxiliary_model_unavailable(fake_agent.config, service=service) is True
+    [pending] = service.store.pending_requests()
+    assert service.store.read_request(pending)["attempts"] == 0
+    assert called == ["model-a", "model-b"], "off must not reach any model, including the startup one"
+
+    fake_agent.config.memory_curator_model_profile = "prof-b"
+    _run_skill_learning(fake_agent, "owner")
+    assert called == ["model-a", "model-b", "model-b"] and service.store.pending_requests() == []
+
+
 def test_deterministic_thread_model_rejection_detection() -> None:
     """_is_deterministic_thread_model_rejection distinguishes deterministic vs transient errors."""
     assert _is_deterministic_thread_model_rejection(

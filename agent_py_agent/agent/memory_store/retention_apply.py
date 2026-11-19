@@ -114,6 +114,7 @@ def execute_retention_plan(
                 allowed_external_roots=allowed_external_roots,
                 manifest_references=manifest_references,
                 pin_snapshot=pin_snapshot,
+                config=config,
             ), commit_transition)
         except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                 ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError, RetentionPolicyChangedError):
@@ -300,6 +301,7 @@ def _apply_action(
     allowed_external_roots: tuple[Path, ...],
     manifest_references: tuple[frozenset[str], bool] | None = None,
     pin_snapshot: ReferencePinSnapshot | None = None,
+    config: object = None,
 ) -> MemoryRetentionAction:
     allowed_roots = (Path(home.owner_home_dir), *allowed_external_roots)
     _assert_safe_target(action.path, allowed_roots)
@@ -368,7 +370,8 @@ def _apply_action(
         return _delete_tree(action)
     if action.operation == "conversation_trash":
         return _trash_conversation(home=home, action=action, now=now,
-                                   scan_budget=pin_snapshot.scan_budget if pin_snapshot is not None else None)
+                                   scan_budget=pin_snapshot.scan_budget if pin_snapshot is not None else None,
+                                   config=config)
     raise ValueError(f"unsupported retention operation: {action.operation}")
 
 
@@ -760,6 +763,7 @@ def _trash_conversation(
     action: MemoryRetentionAction,
     now: datetime,
     scan_budget=None,
+    config: object = None,
 ) -> MemoryRetentionAction:
     if not action.path.exists():
         return replace(action, status="missing")
@@ -783,6 +787,13 @@ def _trash_conversation(
             or not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(action.path))
         ):
             return replace(action, status="state_changed")
+        if action.curator_enabled is not None:
+            # 规划时的后台提取开关是移动依据之一：由关变开、或现在读不出，都放弃本轮，下一轮按新开关重新规划。
+            from .retention_scan import curator_extraction_enabled
+
+            enabled_now = curator_extraction_enabled(home, config)
+            if enabled_now is None or (enabled_now and not action.curator_enabled):
+                return replace(action, status="state_changed")
         if action.curator_cursor is not None:
             # 规划时证明“后台整理已读完”所依据的整理游标必须原样未变；变了或读不出就放弃，下一轮重新规划。
             from .retention_scan import curator_thread_cursors

@@ -2588,7 +2588,8 @@ def _conversation_actions(
             errors.extend(related_errors)
             if related_errors:
                 continue
-            protect, curator_cursor = (False, None) if context is None else _uncurated_thread_check(context, root, thread)
+            protect, curator_cursor, curator_enabled = ((False, None, None) if context is None
+                                                        else _uncurated_thread_check(context, root, thread))
             if protect:
                 continue
             actions.append(
@@ -2612,6 +2613,7 @@ def _conversation_actions(
                         cutoff_timestamp=action_cutoff,
                         related_paths=related,
                         curator_cursor=curator_cursor,
+                        curator_enabled=curator_enabled,
                     ),
                 )
             )
@@ -2636,22 +2638,32 @@ def curator_thread_cursors(home: object) -> dict[str, str] | None:
 
 
 # LLM: 只看结构化开关：owner 记忆总闸、memory_curator_enabled 与生效的后台辅助模型档案（空=关闭）；冷却与档案暂时
-#   不可用仍算开启（整理稍后会继续）。排除名单读不出时不当作排除，交探查结果决定。
+#   不可用仍算开启（整理稍后会继续）。配置已判定关闭时直接返回 False、不读策略文件（config 为空是不带配置的旧构造，
+#   按没有设置后台辅助模型处理）；配置为开而记忆策略文件在但读不出时返回 None（未知）：规划按开启保护，执行端放弃移动。
+#   规划与执行前复核共用这一判定。
+# 函数用途: 读出当前生效的后台记忆提取开关，读不出时返回 None。
+def curator_extraction_enabled(home: object, config: object) -> bool | None:
+    from ..settings.curator_profile import effective_auxiliary_model_profile
+    from ..user_space.owner_policy import effective_memory_enabled
+
+    if not (bool(getattr(config, "memory_curator_enabled", True)) and effective_auxiliary_model_profile(config)):
+        return False
+    policy_path = getattr(home, "owner_memory_policy_json", None)
+    report = (None if policy_path is None else
+              read_json_object_report(Path(policy_path), context="memory_retention.memory_policy"))
+    if report is not None and report.load_error is not None:
+        return None
+    return effective_memory_enabled({} if report is None else report.payload)
+
+
+# LLM: 排除名单读不出时不当作排除，交探查结果决定。
 # 函数用途: 读出本轮判断过期会话是否已被后台整理读完所需的材料，同一轮只读一次。
 def _curator_retention_facts(context: _RetentionScanContext) -> tuple:
     if context.curator_facts is None:
-        from ..settings.curator_profile import effective_auxiliary_model_profile
-        from ..user_space.owner_policy import effective_memory_enabled
         from .learning_exclusions import curator_learning_exclusions
 
         home = context.home
-        policy_path = getattr(home, "owner_memory_policy_json", None)
-        memory_policy = ({} if policy_path is None else
-                         read_json_object_report(Path(policy_path), context="memory_retention.memory_policy").payload)
-        config = context.config
-        enabled = bool(effective_memory_enabled(memory_policy)
-                       and bool(getattr(config, "memory_curator_enabled", True))
-                       and effective_auxiliary_model_profile(config))
+        enabled = curator_extraction_enabled(home, context.config)
         try:
             excluded, unreadable = curator_learning_exclusions(home)
         except (AttributeError, OSError, TypeError, ValueError):
@@ -2660,22 +2672,25 @@ def _curator_retention_facts(context: _RetentionScanContext) -> tuple:
     return context.curator_facts
 
 
-# LLM: 后台提取开启时，整理游标之后还有可学习消息、或读不完/读不出的过期会话都保护（本轮不回收）；关闭时照常回收，
-#   只计入 uncurated_threads。宿主标记不学习的会话不需要整理。已读完时把规划所见游标绑进动作，执行端游标变了就放弃。
-# 函数用途: 判断一个已满足其它回收条件的过期会话是否要因后台整理未读完而保护，并返回要绑定的整理游标。
-def _uncurated_thread_check(context: _RetentionScanContext, root: Path, thread: ConversationThread) -> tuple[bool, str | None]:
+# LLM: 后台提取开启（或开关读不出）时，整理游标之后还有可学习消息、或读不完/读不出的过期会话都保护（本轮不回收）；
+#   关闭时照常回收，只计入 uncurated_threads。宿主标记不学习的会话不需要整理。已读完时把规划所见游标绑进动作，
+#   执行端游标变了就放弃；规划时的开关也绑进动作，执行端由关变开或读不出同样放弃。
+# 函数用途: 判断一个已满足其它回收条件的过期会话是否要因后台整理未读完而保护，并返回要绑定的整理游标与提取开关。
+def _uncurated_thread_check(context: _RetentionScanContext, root: Path,
+                            thread: ConversationThread) -> tuple[bool, str | None, bool | None]:
     from .curator_inputs import _thread_learning_excluded
     from .learning_exclusions import thread_is_excluded
 
     enabled, cursors, excluded = _curator_retention_facts(context)
     if _thread_learning_excluded(thread) or thread_is_excluded(thread, excluded):
-        return False, None
+        return False, None, None
+    enabled = enabled is not False
     cursor = None if cursors is None else cursors.get(thread.thread_id, "")
     verdict = "unknown" if cursor is None else _probe_uncurated_messages(context, root, thread.thread_id, cursor)
     if verdict == "curated":
-        return False, (cursor if enabled else None)
+        return False, (cursor if enabled else None), enabled
     context.uncurated_threads += 1
-    return enabled, None
+    return enabled, None, enabled
 
 
 # LLM: 用与后台整理同一个有界续读口 after_slice_report，从整理游标（不透明消息 ID，只作续读起点，不比大小）往后读，
@@ -3141,6 +3156,7 @@ class _ActionProof:
     cutoff_timestamp: float | None = None
     related_paths: tuple[Path, ...] = ()
     curator_cursor: str | None = None
+    curator_enabled: bool | None = None
 
 
 # LLM: 动作构造器统一生成稳定 ID，防止各扫描器自行定义互相冲突的幂等语义。
@@ -3176,6 +3192,7 @@ def _action(
         cutoff_timestamp=evidence.cutoff_timestamp,
         related_paths=evidence.related_paths,
         curator_cursor=evidence.curator_cursor,
+        curator_enabled=evidence.curator_enabled,
     )
 
 

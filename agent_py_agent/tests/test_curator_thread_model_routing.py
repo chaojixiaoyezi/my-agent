@@ -741,3 +741,54 @@ def test_resident_curator_follows_live_auxiliary_switch_without_restart(tmp_path
     assert (off.status, off.failure_code) == ("failed", "CURATOR_MODEL_NOT_CONFIGURED"), "清空即停，不退回启动时的 A"
     assert service.state_store.load().per_thread_cursors == cursors and built == ["MiniMax-M2.7", "deepseek-v4-flash"]
     assert [item.content for item in service.candidate_service.list()] == contents, "关闭后不再产生候选"
+
+
+# LLM: 常驻路由器每批先核生效档案与目录代次：selected 改默认项、具名档案的服务商停用/恢复都要在下一批生效，
+#   停用期间不建后端、不发请求；档案与代次都没变时照旧复用同一个后端。
+def test_resident_router_rechecks_the_effective_profile_and_catalog_generation(owner, monkeypatch):
+    from agent_py_agent.agent import core
+    from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig as Config
+    from agent_py_agent.agent.settings.curator_profile import curator_extraction_status
+    from agent_py_agent.agent.settings.model_profiles import (
+        execute_model_profile_operation,
+        model_profiles_path,
+        read_model_profiles,
+    )
+
+    host, profile_a, profile_b, _threads = owner
+    built: list[str] = []
+
+    def fake_backend(provider, config):
+        built.append(config.model_name)
+        return _EchoBackend(config.model_name, {})
+
+    monkeypatch.setattr(core, "get_backend", fake_backend)
+    host.config.memory_curator_model_profile = "selected"
+    router = core._curator_model_router(host, host.config, Config(model_profile="selected"))
+
+    first = router(())
+    assert (first.default.model, router(()).default.backend) == ("MiniMax-M2.7", first.default.backend)
+    assert built == ["MiniMax-M2.7"], "档案与目录代次都没变：复用同一个后端"
+    execute_model_profile_operation(host, "set_default", {"profile_id": profile_b})
+    assert curator_extraction_status(host)["model"] == "deepseek-v4-flash"
+    assert router(()).default.model == "deepseek-v4-flash", "selected 跟随新的默认项，不再用缓存的 A"
+    assert built == ["MiniMax-M2.7", "deepseek-v4-flash"]
+
+    host.config.memory_curator_model_profile = profile_b
+    warm = router(())
+    assert warm.default.model == "deepseek-v4-flash" and built == ["MiniMax-M2.7", "deepseek-v4-flash"]
+    provider_id = read_model_profiles(model_profiles_path(host.home_paths))["profiles"][profile_b]["provider_id"]
+    execute_model_profile_operation(host, "save_provider", {
+        "provider_id": provider_id, "provider": {"enabled": False}, "editing": True})
+    status = curator_extraction_status(host)
+    assert (status["extraction"], status["profile_reason"]) == ("disabled", "provider_disabled")
+    disabled = router(())
+    assert disabled.default.backend.name == "unconfigured" and disabled.default.model == ""
+    assert disabled.warnings == ("curator_profile_unavailable_fallback:provider_disabled",)
+    assert built == ["MiniMax-M2.7", "deepseek-v4-flash"], "停用期间不建后端"
+
+    execute_model_profile_operation(host, "save_provider", {
+        "provider_id": provider_id, "provider": {"enabled": True}, "editing": True})
+    repaired = router(())
+    assert repaired.default.model == "deepseek-v4-flash" and repaired.default.backend is not warm.default.backend
+    assert built == ["MiniMax-M2.7", "deepseek-v4-flash", "deepseek-v4-flash"] and repaired.warnings == ()

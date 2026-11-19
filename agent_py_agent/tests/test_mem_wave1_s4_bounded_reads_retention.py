@@ -19,6 +19,7 @@ from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 from agent_py_agent.agent.memory_store.recall import MemoryRecallScope
 from agent_py_agent.agent.memory_store.retention import MemoryRetentionService
+from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionReport
 from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
@@ -128,16 +129,16 @@ def _seed_list_store(agent):
 
 # 函数用途: 按 next_cursor 把列表翻到底，返回每页条目编号与每页回执。
 def _list_all_pages(memory, scope):
-    pages, payloads, cursor = [], [], ""
+    pages, listings, cursor = [], [], ""
     for _ in range(10):
         outcome = memory_tool._memory_list_result(memory, scope, cursor=cursor)
         assert outcome.ok, outcome.output
-        payload = json.loads(outcome.output)
-        payloads.append(payload)
-        pages.append([entry["entry_id"] for entry in payload["entries"]])
-        cursor = payload.get("next_cursor", "")
+        listing = json.loads(outcome.output)
+        listings.append(listing)
+        pages.append([entry["entry_id"] for entry in listing["entries"]])
+        cursor = listing.get("next_cursor", "")
         if not cursor:
-            return pages, payloads
+            return pages, listings
     pytest.fail("list paging did not terminate")
 
 
@@ -160,20 +161,20 @@ def test_list_pages_only_the_visible_scope_with_a_cursor_and_never_reads_the_who
     monkeypatch.setattr(jsonl_module, "_LIST_PAGE_RESOLVE_WINDOW_RECORDS", 2)
     scope = MemoryRecallScope(keys=(("global", "global"), ("personal", "personal")))
 
-    pages, payloads = _list_all_pages(agent.memory, scope)
+    pages, listings = _list_all_pages(agent.memory, scope)
 
     assert pages == [personal[0:3], personal[3:6], personal[6:7]]
-    assert [payload.get("next_cursor") for payload in payloads] == [personal[2], personal[5], None]
-    assert "继续翻页" in payloads[0]["hint"] and "hint" not in payloads[-1]
+    assert [listing.get("next_cursor") for listing in listings] == [personal[2], personal[5], None]
+    assert "继续翻页" in listings[0]["hint"] and "hint" not in listings[-1]
 
 
 def test_small_list_keeps_the_legacy_single_page_envelope(tmp_path):
     agent, _thread = _agent_and_thread(tmp_path)
     personal = _seed_list_store(agent)
-    payload = json.loads(memory_tool._memory_list_result(agent.memory, None).output)
+    listing = json.loads(memory_tool._memory_list_result(agent.memory, None).output)
 
-    assert set(payload) == {"ok", "action", "entries"}
-    assert len(payload["entries"]) == len(personal) + 1
+    assert set(listing) == {"ok", "action", "entries"}
+    assert len(listing["entries"]) == len(personal) + 1
 
 
 def test_list_without_index_over_the_scan_budget_fails_closed_without_a_full_read(tmp_path, monkeypatch):
@@ -319,8 +320,8 @@ def _old_thread(home, rows):
                for number, (role, content, metadata) in enumerate(rows)]
     for name in ("channel_bindings.json", "user_latest_threads.json"):
         index = store.storage.root / name
-        payload = json.loads(index.read_text(encoding="utf-8"))
-        index.write_text(json.dumps({key: value for key, value in payload.items() if value != thread.thread_id}),
+        bound = json.loads(index.read_text(encoding="utf-8"))
+        index.write_text(json.dumps({key: value for key, value in bound.items() if value != thread.thread_id}),
                          encoding="utf-8")
     return thread, written
 
@@ -367,6 +368,7 @@ def test_extraction_on_trashes_a_fully_curated_thread_and_binds_the_cursor(tmp_p
 
     assert report.ok and uncurated == 0
     assert [(action.record_id, action.curator_cursor) for action in conversations] == [(thread.thread_id, rows[1].message_id)]
+    assert conversations[0].curator_enabled is True
 
 
 @pytest.mark.parametrize("raw", [json.dumps({"per_thread_cursors": {"thread-other": "message-other"}}),
@@ -415,6 +417,77 @@ def test_apply_skips_the_trash_when_the_curator_cursor_changed_after_planning(tm
     trashed = retention_apply._trash_conversation(home=home, action=action, now=_NOW)
 
     assert (changed.status, trashed.status) == ("state_changed", "trashed")
+
+
+_ON = SimpleNamespace(memory_curator_enabled=True, memory_curator_model_profile="aux-profile")
+_OFF = SimpleNamespace(memory_curator_enabled=True, memory_curator_model_profile="")
+
+
+def test_admin_cli_retention_service_plans_with_the_agent_config(tmp_path):
+    from agent_py_agent.cli.memory_admin_commands import _retention_service
+
+    home, _service = _retention_owner(tmp_path, profile="aux-profile")
+    thread, rows = _old_thread(home, _ROWS)
+    _write_curator_state(home, {thread.thread_id: rows[0].message_id})
+    agent = SimpleNamespace(
+        home_paths=home, memory_candidates=CandidateService(home.owner_memory_candidates_jsonl), memory=None,
+        conversation_store=SimpleNamespace(storage=SimpleNamespace(root=Path(home.owner_home_dir) / "conversations")),
+        config=_ON)
+
+    report, conversations, uncurated = _plan_all(_retention_service(agent))
+
+    assert report.ok and conversations == [] and uncurated == 1
+
+
+def test_home_retention_preview_plans_with_the_agent_config(tmp_path, monkeypatch, capsys):
+    from agent_py_agent.cli import home_runtime_commands
+
+    home, _service = _retention_owner(tmp_path, profile="aux-profile")
+    thread, rows = _old_thread(home, _ROWS)
+    _write_curator_state(home, {thread.thread_id: rows[0].message_id})
+    monkeypatch.setattr(home_runtime_commands, "make_agent", lambda _args: SimpleNamespace(home_paths=home, config=_ON))
+
+    assert home_runtime_commands.cmd_home_retention(SimpleNamespace(apply=False, json=True)) == 0
+
+    retention = json.loads(capsys.readouterr().out)["retention"]
+    assert [row for row in retention["actions"] if row["category"] == "conversation"] == []
+    assert retention["uncurated_threads"] == 1
+
+
+# 函数用途: 写 owner 记忆总闸（memory policy 的 enabled 字段）。
+def _set_memory_switch(home, *, enabled: bool) -> None:
+    path = Path(home.owner_memory_policy_json)
+    policy = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({**policy, "enabled": enabled}), encoding="utf-8")
+
+
+# LLM: 规划时提取关闭（动作不带游标），执行前被打开或开关读不出：移动前在消息锁内复核开关，放弃移动且不写回收记录；
+#   仍然关闭时照常回收。unreadable 在配置开着时由 owner 记忆总闸关闭，执行前策略文件变成读不出，结果只能是“未知”；
+#   unreadable_config_off 没有后台辅助模型，策略文件读不出也确定是关闭，照常回收。
+@pytest.mark.parametrize(("change", "status"), [("turned_on", "state_changed"), ("unreadable", "state_changed"),
+                                                ("still_off", "trashed"), ("unreadable_config_off", "trashed")])
+def test_apply_rechecks_the_extraction_switch_planned_with_the_action(tmp_path, change, status):
+    home, service = _retention_owner(tmp_path, profile="aux-profile" if change == "unreadable" else "")
+    if change == "unreadable":
+        _set_memory_switch(home, enabled=False)
+    thread, _rows = _old_thread(home, _ROWS)
+    _report, [action], _uncurated = _plan_all(service)
+    assert (action.curator_cursor, action.curator_enabled) == (None, False)
+    if change in {"unreadable", "unreadable_config_off"}:
+        Path(home.owner_memory_policy_json).write_text("{broken", encoding="utf-8")
+    if change == "unreadable":
+        _report, protected, uncurated = _plan_all(service)
+        assert (protected, uncurated) == ([], 1), "开关读不出时规划按开启保护未整理的会话"
+
+    applied = retention_apply.execute_retention_plan(
+        home=home, candidates=service.candidates, plan=MemoryRetentionReport(applied=False, actions=(action,)),
+        now=_NOW, config=_ON if change in {"turned_on", "unreadable"} else _OFF)
+
+    assert [row.status for row in applied.actions] == [status]
+    assert action.path.exists() is (status == "state_changed")
+    trash = list(Path(home.owner_trash_dir).rglob(f"*{thread.thread_id}*"))
+    assert bool(trash) is (status == "trashed")
 
 
 # ---------------------------------------------------------------- OL-14 死字段

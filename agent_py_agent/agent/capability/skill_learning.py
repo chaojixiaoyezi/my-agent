@@ -685,6 +685,10 @@ class SkillLearningService:
             material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         except (OSError, ValueError, TypeError, SyntaxError, RecursionError) as exc:
             return self._retry_or_drop(path, request, exc, code="SKILL_LEARNING_MATERIAL_FAILED")
+        # 后台辅助模型关闭或不可用（或前台正占用同一端点）：请求原样留在队列里，不扣预算、不记尝试，之后再处理。
+        live_backend = self._live_backend()
+        if live_backend is None or foreground_model_active(live_backend):
+            return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
         from .skill_learning_budget import (
             deployment_learning_available,
             reserve_deployment_learning,
@@ -777,20 +781,24 @@ class SkillLearningService:
                 raise _RetryRunAbort(self._retry_or_drop(run_path, req, exc)) from exc
             raise
 
+    # LLM: 实时解析器优先，显式传入的 backend 只给独立构造兜底；生产组合根不传 backend，后台辅助模型关闭即为 None。
+    # 函数用途: 返回这次自学习实际要用的模型后端，未配置或不可用时返回 None。
+    def _live_backend(self) -> object | None:
+        backend_provider = getattr(self.runtime, "backend_provider", None)
+        explicit_backend = getattr(self.runtime, "backend", None)
+        backend = (backend_provider() if callable(backend_provider) else explicit_backend) or explicit_backend
+        if backend is None or getattr(backend, "name", "") == "unconfigured":
+            return None
+        return backend
+
     # LLM: 后台线程没有前台的会话 ContextVar：按 owner_id + 请求键自绑宿主会话（同一请求的重试共用同一会话值、
     #   不冒用前台线程会话），bounded_call 的 copy_context 会把它带进供应商调用线程；退出即复位。
     # 函数用途: 发起无工具结构化总结；仅自主后台模式附带四载体指导，普通/显式总结保持原提示合同。
     def _call_model(self, material: SkillLearningMaterial) -> object:
         _, active_settings = self._live_state()
         session = "skill-learning:" + str(material.request.get("request_key") or "")
-        backend_provider = getattr(self.runtime, "backend_provider", None)
-        explicit_backend = getattr(self.runtime, "backend", None)
-        backend = (
-            backend_provider()
-            if callable(backend_provider)
-            else explicit_backend
-        ) or explicit_backend
-        if backend is None or getattr(backend, "name", "") == "unconfigured":
+        backend = self._live_backend()
+        if backend is None:
             raise RuntimeError("SKILL_LEARNING_MODEL_NOT_CONFIGURED")
         with provider_session_scope((self.runtime.owner_id,), session):
             return call_backend_with_timeout(

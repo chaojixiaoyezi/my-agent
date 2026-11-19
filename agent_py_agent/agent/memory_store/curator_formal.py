@@ -11,6 +11,8 @@ import json
 import time
 from dataclasses import dataclass, replace
 
+from .scope_contract import canonical_scope_key
+
 # 单条记忆项预览最多 1200 字符：给模型看够判断的摘要，避免整条灌入。
 _ITEM_PREVIEW_CHARS = 1_200
 
@@ -71,15 +73,19 @@ class FormalMemoryWindow(tuple):
 
 # LLM: Store objects remain host-side dependencies; read() returns plain immutable projections
 # and therefore cannot expose remember/persona/file tools to the background model.
+#   owner_kind 由组合根按宿主 home 身份传入，Curator 据此和本批消息/审计算出允许范围；旧构造默认空串。
 # 类用途: 从三个正式正文仓库按相关性有界读取 active 记录并执行统一字符预算。
 @dataclass(frozen=True)
 class FormalMemorySource:
     long_term: object
     lessons: object
     hot: object
+    owner_kind: str = ""
 
     # LLM: 不再整库物化：long-term 走点查（置顶）+ 有界相关性检索，lesson 只看路由投影里的活跃项，HOT 按规范引用直读。
-    #   可见范围与原 all() 相同（本 owner 自己的库、未过期 active），不做前台 personal/project 范围扩展。
+    #   可见范围是本 owner 自己的库、未过期 active；传了 scopes（本批允许的 canonical typed 范围）时，各臂在排序和
+    #   截断之前用同一判定过滤（相关检索、空查询、置顶点查、lesson、HOT 父 lesson），不做前台 personal/project 扩展。
+    #   scopes=None 只给不带批次的旧直接调用，生产 Curator 批次总是传。范围外的置顶目标不入窗、也不算已消失。
     #   query 为空时 long-term 取只读词面检索的确定性有界子集、lesson 按路由热度顺序取前几条；条目数/字符硬帽不变，
     #   放不下的单条跳过，最后按类型+ID 稳定排序，同一批权威事实给模型的输入字节一致。
     # 函数用途: 返回本批相关的正式记忆有界窗口，并带回覆盖缺口与已确认消失的置顶目标。
@@ -90,15 +96,16 @@ class FormalMemorySource:
         max_chars: int = 6_000,
         query: str = "",
         pinned_ids: tuple[str, ...] = (),
+        scopes: frozenset[tuple[str, str]] | None = None,
     ) -> FormalMemoryWindow:
         text = " ".join(str(query or "").split())[:FORMAL_QUERY_MAX_CHARS]
         errors: list[dict[str, object]] = []
-        pinned, missing = _pinned_long_term_items(self.long_term, pinned_ids, errors)
+        pinned, missing = _pinned_long_term_items(self.long_term, pinned_ids, errors, scopes)
         ranked = [
             *pinned,
-            *_relevant_long_term_items(self.long_term, text, max_items, errors),
-            *_lesson_items(self.lessons, text, max_items, errors),
-            *_hot_items(self.hot, self.lessons),
+            *_relevant_long_term_items(self.long_term, text, max_items, errors, scopes),
+            *_lesson_items(self.lessons, text, max_items, errors, scopes),
+            *_hot_items(self.hot, self.lessons, scopes),
         ]
         selected = _within_budget(ranked, max_items=max_items, max_chars=max_chars)
         return FormalMemoryWindow(sorted(selected, key=_formal_sort_key), errors=errors, missing_pins=missing)
@@ -137,12 +144,33 @@ def _curator_visible(record: object, now: float) -> bool:
     return bool(str(getattr(record, "entry_id", "") or "").strip()) and (not expires_at or expires_at > now)
 
 
+# LLM: 与候选锚点同一 canonical 合同做精确比较；缺范围（旧无范围记录）或坏值都不在批次范围内。scopes=None 不限定。
+# 函数用途: 判断一个 typed 范围是否属于本批允许集合。
+def _in_scopes(scopes: frozenset[tuple[str, str]] | None, scope_type: object, scope_key: object) -> bool:
+    if scopes is None:
+        return True
+    kind = str(scope_type or "").strip().lower()
+    try:
+        return (kind, canonical_scope_key(kind, scope_key)) in scopes
+    except ValueError:
+        return False
+
+
+# 函数用途: 判断一条 long-term 记录的结构化范围是否属于本批允许集合。
+def _record_in_scopes(record: object, scopes: frozenset[tuple[str, str]] | None) -> bool:
+    attrs = getattr(record, "attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    return _in_scopes(scopes, attrs.get("scope_type"), attrs.get("scope_key"))
+
+
 # LLM: 置顶目标只走 read_ids 有界点查；覆盖不全（MEMORY_AUTHORITY_INCOMPLETE）只记缺口、不判消失，置顶保留。
+#   目标还在但不在本批范围内：不入窗，也不算消失（置顶留给对应范围的批次）；只有完整覆盖下读不到才算消失。
 # 函数用途: 读出冲突置顶目标的当前版本，并列出完整覆盖下已确认不存在的目标。
 def _pinned_long_term_items(
     repository: object,
     pinned_ids: tuple[str, ...],
     errors: list[dict[str, object]],
+    scopes: frozenset[tuple[str, str]] | None = None,
 ) -> tuple[list[CuratorFormalMemoryInput], tuple[str, ...]]:
     ids = tuple(dict.fromkeys(text for raw in pinned_ids if (text := str(raw or "").strip())))
     if not ids:
@@ -160,22 +188,43 @@ def _pinned_long_term_items(
     now = time.time()
     found = {record.entry_id: record for record in records if _curator_visible(record, now)}
     missing = tuple(entry_id for entry_id in ids if entry_id not in found)
-    return [_long_term_item(found[entry_id]) for entry_id in ids if entry_id in found], missing
+    return [_long_term_item(found[entry_id]) for entry_id in ids
+            if entry_id in found and _record_in_scopes(found[entry_id], scopes)], missing
 
 
 # LLM: 有查询时与前台同一有界检索（latency_safe：不记访问、不等嵌入网络）；没有用户原话时改用只读词面检索
 #   取同一读索引的确定性有界子集（空查询不能触发向量补齐）。覆盖不全时如实记缺口，绝不回退 all()。
+#   带批次范围时两条臂都在排序/截断前按范围过滤：空查询改走读索引按编号顺序的有界分页（list_page 自带扫描上限），
+#   扫描上限内没凑满且还有后续、或权威覆盖不全时记 partial。
 # 函数用途: 选出与本批用户原话最相关的 long-term 记录。
 def _relevant_long_term_items(
     repository: object,
     query: str,
     limit: int,
     errors: list[dict[str, object]],
+    scopes: frozenset[tuple[str, str]] | None = None,
 ) -> list[CuratorFormalMemoryInput]:
     if limit <= 0:
         return []
     now = time.time()
-    if not query:
+
+    def accept(record: object) -> bool:
+        return _curator_visible(record, now) and _record_in_scopes(record, scopes)
+
+    if not query and scopes is not None:
+        pager = getattr(repository, "list_page", None)
+        if not callable(pager):
+            raise TypeError("formal long-term source lacks list_page()")
+        try:
+            records, cursor = pager(limit=limit, predicate=accept)
+        except ValueError as exc:
+            if str(exc) != "MEMORY_AUTHORITY_INCOMPLETE":
+                raise
+            records, cursor = [], "MEMORY_AUTHORITY_INCOMPLETE"
+        if cursor and len(records) < limit:
+            errors.append({"code": "FORMAL_MEMORY_COVERAGE_PARTIAL", "detail": f"scoped_page_records={len(records)}"})
+        coverages = []
+    elif not query:
         reader = getattr(repository, "search_report", None)
         if not callable(reader):
             raise TypeError("formal long-term source lacks search_report()")
@@ -185,7 +234,7 @@ def _relevant_long_term_items(
         search = getattr(repository, "search_scoped_candidates_report", None)
         if not callable(search):
             raise TypeError("formal long-term source lacks search_scoped_candidates_report()")
-        records, facts = search(query, limit, lambda record: _curator_visible(record, now), latency_safe=True)
+        records, facts = search(query, limit, accept, latency_safe=True)
         coverages = [facts.get("coverage") if isinstance(facts, dict) else None]
     partial = next((row for row in coverages if isinstance(row, dict) and row.get("partial")), None)
     if partial is not None:
@@ -194,7 +243,7 @@ def _relevant_long_term_items(
             "detail": "scanned_records={};scanned_bytes={}".format(
                 int(partial.get("scanned_records") or 0), int(partial.get("scanned_bytes") or 0)),
         })
-    return [_long_term_item(record) for record in records if _curator_visible(record, now)]
+    return [_long_term_item(record) for record in records if accept(record)]
 
 
 # LLM: 保留真实版本供关系建议和替换目标复核；索引命中不当正文，正文只来自检索/点查回读的当前记录。
@@ -214,13 +263,14 @@ def _long_term_item(record: object) -> CuratorFormalMemoryInput:
 
 
 # LLM: 只看路由投影里的活跃 lesson（有界直读规范引用），有查询按词面排序、没有查询保留路由热度顺序；路由投影缺失=没有可路由 lesson，
-#   symlink/损坏如实记缺口而不是猜空。正文只来自 marker 校验过的 lesson 文件。
+#   symlink/损坏如实记缺口而不是猜空。正文只来自 marker 校验过的 lesson 文件。范围外的 lesson 在排序前剔除。
 # 函数用途: 选出与本批用户原话相关的正式 lesson。
 def _lesson_items(
     repository: object,
     query: str,
     limit: int,
     errors: list[dict[str, object]],
+    scopes: frozenset[tuple[str, str]] | None = None,
 ) -> list[CuratorFormalMemoryInput]:
     if limit <= 0:
         return []
@@ -234,7 +284,8 @@ def _lesson_items(
         return []
     loaded = read_refs(refs) if refs else {}
     lessons = [lesson for ref in refs
-               if (lesson := loaded.get(ref)) is not None and str(getattr(lesson, "status", "")) == "active"]
+               if (lesson := loaded.get(ref)) is not None and str(getattr(lesson, "status", "")) == "active"
+               and _in_scopes(scopes, lesson.scope.get("scope_type"), lesson.scope.get("scope_key"))]
     if not query:
         return [_lesson_item(lesson) for lesson in lessons[:limit]]
     from ..retrieval.lexical import rank
@@ -259,9 +310,10 @@ def _lesson_item(item: object) -> CuratorFormalMemoryInput:
 
 
 # LLM: HOT scope is inherited from its exact lesson; 规则只按规范 lesson_ref 批量直读核验活跃与精确 ID，
-#   孤儿或非规范引用的 HOT 行排除而不是猜成全局。
+#   孤儿或非规范引用的 HOT 行排除而不是猜成全局；父 lesson 不在本批范围内的 HOT 行同样排除。
 # 函数用途: 投影正式 HOT 短规则并绑定 lesson scope。
-def _hot_items(repository: object, lessons: object) -> list[CuratorFormalMemoryInput]:
+def _hot_items(repository: object, lessons: object,
+               scopes: frozenset[tuple[str, str]] | None = None) -> list[CuratorFormalMemoryInput]:
     hot_reader = getattr(repository, "list", None)
     if not callable(hot_reader):
         raise TypeError("formal HOT source lacks list()")
@@ -287,7 +339,8 @@ def _hot_items(repository: object, lessons: object) -> list[CuratorFormalMemoryI
     for rule, ref in candidates:
         lesson = loaded.get(ref)
         if (lesson is None or str(getattr(lesson, "lesson_id", "")) != str(rule.lesson_id)
-                or str(getattr(lesson, "status", "")) != "active"):
+                or str(getattr(lesson, "status", "")) != "active"
+                or not _in_scopes(scopes, lesson.scope.get("scope_type"), lesson.scope.get("scope_key"))):
             continue
         result.append(
             _formal_item(

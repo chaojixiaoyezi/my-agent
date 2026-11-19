@@ -3,6 +3,7 @@ from __future__ import annotations
 """记忆第一波 S2：后台整理按相关性读正式窗口、冲突目标置顶、conservative_v2 同主题自动替换。"""
 
 import hashlib
+import re
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -76,35 +77,43 @@ def _source(tmp_path, memory) -> FormalMemorySource:
 
 # 函数用途: 生成只推进游标、不产出事件和候选的合法提炼结果，让晋升只来自积压候选。
 def _empty_extraction(thread_id: str, message_id: str) -> dict[str, object]:
-    payload = _valid_output(thread_id, message_id, "")
-    payload.update(candidates=[], daily_events=[])
-    return payload
+    output = _valid_output(thread_id, message_id, "")
+    output.update(candidates=[], daily_events=[])
+    return output
 
 
-# LLM: 与 promotion 夹具同一套宿主核验来源（消息 hash/quote/线程来源），只多一个可控的消息时间，
-#   用来构造“用户后来又明确说了一次”的证据；核验结果仍由宿主核验器给出。
-# 函数用途: 写一条指定时间的用户消息并据此观察一条 user_explicit 长期事实候选。
+# LLM: 与 promotion 夹具同一套宿主核验来源（消息 hash/quote/线程来源），只多可控的消息时间，
+#   用来构造“用户后来又明确说了一次”的证据；extra 追加的每条 (时间, 原话) 也作为同一候选的已核验用户引用。
+#   核验结果仍由宿主核验器给出。
+# 函数用途: 写指定时间的用户消息并据此观察一条 user_explicit 长期事实候选。
 def _explicit_at(service, conversations, thread, *, content: str, now: float,
-                 scope_type: str = "personal", scope_key: str = "personal"):
-    message = conversations.messages.append(
-        {"thread_id": thread.thread_id, "role": "user", "content": content, "now": now})
-    ref = {"message_id": message.message_id, "thread_id": thread.thread_id, "role": "user",
-           "content_hash": "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest(), "quote": content}
+                 scope_type: str = "personal", scope_key: str = "personal",
+                 extra: tuple[tuple[float, str], ...] = (), valid_from: str = ""):
+    refs, facts = [], []
+    for at, text in ((now, content), *extra):
+        message = conversations.messages.append(
+            {"thread_id": thread.thread_id, "role": "user", "content": text, "now": at})
+        refs.append({"message_id": message.message_id, "thread_id": thread.thread_id, "role": "user",
+                     "content_hash": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(), "quote": text})
+        facts.append(ls.facts_for_message(
+            message.metadata, owner="user-1", thread_id=thread.thread_id, thread_source=thread.learning_source))
     return service.candidates.observe(CandidateObservation(
         candidate_type="long_term_fact", content=content, subject_key="device.os",
-        scope=MemoryScope(scope_type, scope_key), origin="user_explicit", source_message_refs=(ref,),
-        learning_source=ls.merge_message_sources([ls.facts_for_message(
-            message.metadata, owner="user-1", thread_id=thread.thread_id, thread_source=thread.learning_source)]),
+        scope=MemoryScope(scope_type, scope_key), origin="user_explicit", source_message_refs=tuple(refs),
+        learning_source=ls.merge_message_sources(facts), valid_from=valid_from,
         proposed_action="add", promotion_target="long_term", promotion_mode="auto_eligible", confidence=0.99))
 
 
 # 函数用途: 直接写入一条同主题旧条目，来源、范围和有效期都可控。
 def _seed_prior(service, *, origin: str = "user_explicit", scope_type: str = "personal",
-                scope_key: str = "personal", expires_at: float = 0.0):
+                scope_key: str = "personal", expires_at: float = 0.0, valid_from: str = ""):
+    attributes = {"subject_key": "device.os", "scope_type": scope_type, "scope_key": scope_key, "origin": origin}
+    if valid_from:
+        attributes["valid_from"] = valid_from
     (record,) = service.long_term.apply_batch([{
         "action": "add", "entry_id": "memory-prior", "role": "user", "content": "个人电脑使用 macOS。",
         "kind": "fact", "tags": ["long_term_fact", origin], "source": "fixture", "expires_at": expires_at,
-        "attributes": {"subject_key": "device.os", "scope_type": scope_type, "scope_key": scope_key, "origin": origin},
+        "attributes": attributes,
     }])
     return record
 
@@ -186,6 +195,95 @@ def test_formal_window_reports_partial_authority_coverage(tmp_path, monkeypatch,
 
     assert [row["code"] for row in window.errors] == ["FORMAL_MEMORY_COVERAGE_PARTIAL"]
     assert window.errors[0]["detail"].startswith("scanned_records=")
+
+
+# ---------- R1/F03：正式窗口只给本批宿主证明的范围 ----------
+
+
+# 函数用途: 写入一条指定 typed 范围的正式事实。
+def _scoped_fact(memory, content: str, subject_key: str, scope_type: str, scope_key: str):
+    return memory.add("user", content, kind="fact", attributes={
+        "subject_key": subject_key, "scope_type": scope_type, "scope_key": scope_key, "origin": "user_explicit"})
+
+
+def test_curator_batch_scopes_come_only_from_host_facts():
+    from agent_py_agent.agent.memory_store.curator_inputs import curator_batch_scopes
+
+    batch = SimpleNamespace(
+        messages=[SimpleNamespace(thread_id="t1", metadata={"task_id": "task:alpha"}),
+                  SimpleNamespace(thread_id="", metadata={"task_id": "company:acme"})],
+        audit_events=[SimpleNamespace(task_id="beta"), SimpleNamespace(task_id="")])
+    proven = {("session", "session:t1"), ("project", "project:alpha"), ("project", "project:beta")}
+    fixed = {("global", "global"), ("personal", "personal")}
+
+    for owner_kind in ("main", "user", "group", ""):
+        assert curator_batch_scopes(batch, owner_kind) == proven | fixed, owner_kind
+    # 认不出的 owner 类型只给本批自己证明的范围；嵌套前缀的坏任务编号直接跳过，不扩大范围。
+    assert curator_batch_scopes(batch, "robot") == proven
+
+
+def test_formal_window_filters_every_arm_by_the_batch_scopes_before_ranking(tmp_path):
+    from agent_py_agent.tests.test_consolidated_c4_g1 import _hot_candidate, _lesson_candidate
+
+    memory = _memory(tmp_path)
+    mine = _scoped_fact(memory, "部署服务统一用 HTTPS。", "ops.deploy", "personal", "personal")
+    current = _scoped_fact(memory, "当前项目部署服务统一用 HTTPS。", "ops.deploy.current", "project", "project:current")
+    others = [_scoped_fact(memory, f"其他项目部署服务统一用 HTTPS 第 {index} 条。", f"ops.deploy.other.{index}",
+                           "project", "project:other") for index in range(40)]
+    source = _source(tmp_path, memory)
+    current_lesson = source.lessons.promote(_lesson_candidate(
+        "c-current", subject_key="deploy.current", content="部署服务前先核对 HTTPS 证书。", scope_key="project:current"))
+    other_lesson = source.lessons.promote(_lesson_candidate(
+        "c-other", subject_key="deploy.other", content="部署服务前先核对 HTTPS 证书链。", scope_key="project:other"))
+    current_rule = source.hot.promote(replace(_hot_candidate(
+        "h-current", target_lesson_id=current_lesson.lesson_id, subject_key="deploy.current", rule="部署先核证书。"),
+        scope=dict(current_lesson.scope)), lesson=current_lesson)
+    other_rule = source.hot.promote(replace(_hot_candidate(
+        "h-other", target_lesson_id=other_lesson.lesson_id, subject_key="deploy.other", rule="部署先核证书链。"),
+        scope=dict(other_lesson.scope)), lesson=other_lesson)
+    scopes = frozenset({("global", "global"), ("personal", "personal"), ("project", "project:current")})
+    allowed = {mine.entry_id, current.entry_id, current_lesson.lesson_id, current_rule.hot_id}
+
+    for query in ("部署 服务 HTTPS", ""):
+        window = source.read(query=query, pinned_ids=(others[0].entry_id, "memory-gone"), scopes=scopes)
+        assert {item.authority_id for item in window} == allowed, query
+        # 范围外的置顶目标仍然存在：不入窗，也不能算已消失；只有完整覆盖下读不到的才算。
+        assert window.missing_pins == ("memory-gone",), query
+    unscoped = {item.authority_id for item in source.read(query="证书", pinned_ids=(others[0].entry_id,))}
+    assert {others[0].entry_id, other_lesson.lesson_id, other_rule.hot_id} <= unscoped, "不带范围的旧直接调用不变"
+
+
+@pytest.mark.parametrize("query", ["", "个人电脑"])
+def test_scoped_formal_window_still_reports_partial_authority_coverage(tmp_path, monkeypatch, query):
+    memory = JsonlMemory(tmp_path / "memory" / "long_term" / "memory.jsonl")
+    for index in range(3):
+        _fact(memory, f"个人电脑使用 Linux {index}。", f"device.os.{index}")
+    monkeypatch.setattr(jsonl_module, "_AUTHORITY_SCAN_MAX_RECORDS", 2)
+
+    window = _source(tmp_path, memory).read(query=query, scopes=frozenset({("personal", "personal")}))
+
+    assert [row["code"] for row in window.errors] == ["FORMAL_MEMORY_COVERAGE_PARTIAL"]
+
+
+def test_curator_prompt_carries_only_formal_memory_of_the_batch_scopes(tmp_path):
+    store, thread, message = _conversation(tmp_path)
+    memory = _memory(tmp_path)
+    mine = _scoped_fact(memory, "我的个人电脑以前使用 Windows。", "device.os", "personal", "personal")
+    task = _scoped_fact(memory, "任务里的个人电脑使用 macOS。", "device.os.task", "project", "project:task-1")
+    session = _scoped_fact(memory, "这次会话的个人电脑使用 macOS。", "device.os.session", "session",
+                           f"session:{thread.thread_id}")
+    other = _scoped_fact(memory, "另一个项目的个人电脑使用 macOS。", "device.os.other", "project", "project:other")
+
+    for owner_kind, expected in (("group", (mine, task, session)), ("robot", (task, session))):
+        backend = _StaticStructuredBackend(_valid_output(thread.thread_id, message.message_id, message.content))
+        source = replace(_source(tmp_path, memory), owner_kind=owner_kind)
+        service = _service(tmp_path / owner_kind, backend, store, formal_memory_source=source)
+
+        assert service.run(reason="admin").status == "succeeded"
+
+        sent = set(re.findall(r'"authority_id": "([^"]+)"', backend.prompts[0]))
+        assert sent == {record.entry_id for record in expected}, owner_kind
+        assert other.entry_id not in backend.prompts[0]
 
 
 def test_formal_window_lessons_follow_routing_and_hot_reads_exact_refs(tmp_path, monkeypatch):
@@ -310,9 +408,9 @@ def test_curator_pins_conflict_targets_into_later_windows_until_they_disappear(t
     memory = _memory(tmp_path)
     target = _fact(memory, "公司服务器统一使用 HTTPS 部署。", "ops.deploy")
     source = _source(tmp_path, memory)
-    payload = _valid_output(thread.thread_id, message.message_id, message.content)
-    payload["candidates"][0]["conflicts_with"] = [target.entry_id]
-    backend = _StaticStructuredBackend(payload)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    output["candidates"][0]["conflicts_with"] = [target.entry_id]
+    backend = _StaticStructuredBackend(output)
     service = _service(tmp_path, backend, store, formal_memory_source=source)
 
     assert service.run(reason="admin").status == "succeeded"
@@ -416,6 +514,45 @@ def test_v2_refuses_unsafe_same_subject_supersede(tmp_path, case):
     (current,) = service.long_term.read_ids([prior.entry_id])
     assert (current.content, current.version) == (prior.content, prior.version)
     assert service.candidates.get(candidate.candidate_id).proposed_action == "add"
+
+
+# LLM: 时间与有效期准入：较旧的相关原话夹带一条无关的新消息、与旧条目同一时刻、候选或旧条目未来才生效，
+#   都必须保留冲突，不写正式库；正文不参与判断。
+@pytest.mark.parametrize("case", ["old_plus_unrelated_new", "same_instant", "candidate_future", "prior_future"])
+def test_v2_keeps_the_conflict_without_strictly_newer_evidence_or_current_validity(tmp_path, case):
+    service, conversations, thread = _runtime(tmp_path)
+    prior = _seed_prior(service, valid_from="2035-01-01T00:00:00Z" if case == "prior_future" else "")
+    later = time.time() + 60
+    now = {"old_plus_unrelated_new": 12.0, "same_instant": float(prior.updated_at)}.get(case, later)
+    candidate = _explicit_at(
+        service, conversations, thread, content=_NEW_FACT, now=now,
+        extra=((later, "每周例会照常开。"),) if case == "old_plus_unrelated_new" else (),
+        valid_from="2035-01-01T00:00:00Z" if case == "candidate_future" else "")
+
+    with automatic_promotion_policy("conservative_v2"):
+        result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert (result.promoted, result.status, result.reason_code) == (
+        False, "blocked_conflict", "SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE"), case
+    (current,) = service.long_term.read_ids([prior.entry_id])
+    assert (current.content, current.version) == (prior.content, prior.version)
+    saved = service.candidates.get(candidate.candidate_id)
+    assert (saved.proposed_action, saved.conflicts_with) == ("add", [prior.entry_id])
+
+
+def test_v2_supersedes_when_every_cited_user_message_is_newer(tmp_path):
+    service, conversations, thread = _runtime(tmp_path)
+    prior = _seed_prior(service, valid_from="2020-01-01T00:00:00Z")
+    candidate = _explicit_at(service, conversations, thread, content=_NEW_FACT, now=time.time() + 60,
+                             extra=((time.time() + 90, "个人电脑确实换成 Linux 了。"),),
+                             valid_from="2026-01-01T00:00:00Z")
+
+    with automatic_promotion_policy("conservative_v2"):
+        result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert (result.promoted, result.reason_code) == (True, AUTO_SUPERSEDED_REASON)
+    (current,) = service.long_term.read_ids([prior.entry_id])
+    assert (current.content, current.version) == (_NEW_FACT, prior.version + 1)
 
 
 # LLM: 确定性交错：绑定已落盘、正式写入前的那一刻，另一写入者按同一旧版本抢先替换成功；

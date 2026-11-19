@@ -11,8 +11,13 @@ from dataclasses import dataclass
 
 from ..backends.errors import ModelNotConfiguredError
 from .config_io import load_simple_yaml
-from .model_profiles import model_profiles_path, read_model_profiles, selected_model_config
-from .model_provider_schema import ModelProfileError
+from .model_profiles import (
+    model_profile_generation,
+    model_profiles_path,
+    read_model_profiles,
+    selected_model_config,
+)
+from .model_provider_schema import ModelProfileError, ModelProfileGeneration
 from .user_config_capability import user_config_path
 
 # 多用户共享辅助模型冷却记录（最多保留256条，先进先出淘汰）:
@@ -93,12 +98,7 @@ def clear_auxiliary_profile_cooldown(profile_id: str) -> None:
 # 函数用途: 返回后台所需的完整配置，失败保留缺配置身份与结构化诊断，绝不切换服务商。
 def curator_model_config(agent: object, profile_id: str):
     try:
-        resolved_id = profile_id
-        if resolved_id == "selected":
-            from .model_profiles import _default_for_owner
-
-            owner_sel = _default_profile_id(agent)
-            resolved_id = _default_for_owner(agent) if owner_sel in {"", "default"} else owner_sel
+        resolved_id = _effective_profile_id(agent, profile_id)
         if not resolved_id or resolved_id == "default":
             raise ModelProfileError("请填写已保存的模型档案编号；部署默认不是模型档案。", reason="profile_not_found")
         return selected_model_config(agent, profile_id=resolved_id)
@@ -106,6 +106,30 @@ def curator_model_config(agent: object, profile_id: str):
         raise ModelNotConfiguredError(profile_id=profile_id, profile_reason=exc.reason) from exc
     except OSError as exc:
         raise ModelNotConfiguredError(profile_id=profile_id, profile_reason="catalog_unreadable") from exc
+
+
+# LLM: "selected" 跟随 owner 目录当前选中项（未选或 default 时取 owner 默认）；其他编号原样返回。
+# 函数用途: 把后台辅助模型选择器解析成本次实际要用的档案编号。
+def _effective_profile_id(agent: object, profile_id: str) -> str:
+    if profile_id != "selected":
+        return profile_id
+    from .model_profiles import _default_for_owner
+
+    owner_sel = _default_profile_id(agent)
+    return _default_for_owner(agent) if owner_sel in {"", "default"} else owner_sel
+
+
+# LLM: 沿 model_profile_generation 合同：目录每次保存都换新代次，改默认、停用档案或服务商、撤销共享都会换代次；
+#   生效档案停用、不存在、目录读不了或代次未知时返回 None，调用方不得复用旧后端。只读目录、不建后端、不含凭据。
+# 函数用途: 返回后台辅助模型当前生效档案的目录代次，作为单槽后端缓存的复用键。
+def curator_profile_generation(agent: object, profile_id: str) -> ModelProfileGeneration | None:
+    try:
+        resolved_id = _effective_profile_id(agent, profile_id)
+        if not resolved_id or resolved_id == "default":
+            return None
+        return model_profile_generation(agent, resolved_id)
+    except (ModelProfileError, OSError):
+        return None
 
 
 # LLM: 严格统一辅助模型契约：空值直接报错，指定档案解析失败直接报错，零回退。

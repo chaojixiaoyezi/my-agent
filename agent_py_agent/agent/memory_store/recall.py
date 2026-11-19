@@ -213,8 +213,14 @@ def hot_memory_records(
     *,
     scope: MemoryRecallScope,
 ) -> list[MemoryRecord]:
+    # HOT 为空直接返回：不读也不 stat lesson_heat.json。
+    rules = hot.list()
+    if not rules:
+        return []
     # 注入预算硬顶：全量注入但只带最近活跃的规则（有 lesson 热度快照时按最近命中排序，超出截断是正常行为）。
-    selected_rules = hot_records_within_budget(hot.list(), heat_rows=lesson_heat_rows(lessons))
+    # 热度只取这些 HOT 规则对应 lesson 的最小快照。
+    selected_rules = hot_records_within_budget(
+        rules, heat_rows=lesson_heat_rows(lessons, [rule.lesson_id for rule in rules]))
     if not selected_rules:
         return []
     candidate_rules = []

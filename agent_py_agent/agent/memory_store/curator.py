@@ -83,6 +83,7 @@ from .curator_inputs import (
     _collect_messages,
     attach_candidate_anchors,
     collect_curator_inputs,
+    curator_batch_scopes,
     split_message_load_errors,
 )
 from .curator_models import (
@@ -1212,7 +1213,7 @@ class _CuratorExecutionMixin:
                 and precollected.exclusions == excluded_ids
                 and precollected.exclusions_revision == self._read_exclusions_revision()):
             window = self._formal_snapshot(effective_config=live_cfg, query=_formal_query(precollected.batch.messages),
-                                           pinned_ids=tuple(state.conflict_pin_ids))
+                                           pinned_ids=tuple(state.conflict_pin_ids), batch=precollected.batch)
             return _with_formal_window(precollected.batch, window)
         return self._collect(
             state,
@@ -1310,12 +1311,13 @@ class _CuratorExecutionMixin:
             )
         if include_formal:
             window = self._formal_snapshot(effective_config=live_cfg, query=_formal_query(batch.messages),
-                                           pinned_ids=tuple(state.conflict_pin_ids))
+                                           pinned_ids=tuple(state.conflict_pin_ids), batch=batch)
             batch = _with_formal_window(batch, window)
         return batch
 
     # LLM: 正式记忆只作为预算内增强输入，普通读错保持原降级诊断；执行未结不得被降级吞掉。
     #   查询来自本批用户原话，置顶来自上轮冲突目标；窗口自带的覆盖缺口原样带回，不在这里重新判定。
+    #   生产正式来源总按本批宿主范围（owner 类型 + 消息会话 + 消息/审计任务）读取；只认 read() 旧签名的替身照旧调用。
     # 函数用途: 为实际执行补一次正式记忆快照，不重新读取会话或审计材料。
     def _formal_snapshot(
         self,
@@ -1323,13 +1325,17 @@ class _CuratorExecutionMixin:
         effective_config: MemoryCuratorConfig | None = None,
         query: str = "",
         pinned_ids: tuple[str, ...] = (),
+        batch: CuratorInputBatch | None = None,
     ) -> FormalMemoryWindow:
-        if self.formal_memory_source is None:
+        source = self.formal_memory_source
+        if source is None:
             return FormalMemoryWindow()
         live_cfg = effective_config or self._effective_config()
+        scoped = ({"scopes": curator_batch_scopes(batch, source.owner_kind)}
+                  if batch is not None and isinstance(source, FormalMemorySource) else {})
         try:
-            formal = self.formal_memory_source.read(
-                max_items=32, max_chars=_formal_char_budget(live_cfg), query=query, pinned_ids=pinned_ids,
+            formal = source.read(
+                max_items=32, max_chars=_formal_char_budget(live_cfg), query=query, pinned_ids=pinned_ids, **scoped,
             )
         except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
             raise

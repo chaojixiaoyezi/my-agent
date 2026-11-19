@@ -148,6 +148,9 @@ class MemoryRetentionAction:
     # 会话回收专用：后台整理已读完该会话时，规划所见的该会话整理游标（不透明消息 ID）；执行时游标变了就放弃。
     #   None 表示规划时后台提取未开启、没有做这项绑定；不进报告 JSON。
     curator_cursor: str | None = None
+    # 会话回收专用：规划时生效的后台提取开关（读不出按开启记）；执行时由关变开或读不出就放弃。
+    #   None 表示这项判断不适用（宿主标记不学习的会话、无扫描上下文的旧构造），执行端不复核；不进报告 JSON。
+    curator_enabled: bool | None = None
 
     # LLM: 报告不得包含候选/对话正文；related_paths 只暴露管理员本地路径。
     # 函数用途: 将一条计划或结果转成 JSON 友好对象。

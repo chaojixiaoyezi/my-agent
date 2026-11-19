@@ -30,7 +30,13 @@ from ..common.json_io import (
     locked_json_path,
     write_private_text_file_atomic_unlocked,
 )
-from ..common.nofollow_fs import NoFollowPathError, ensure_private_dir, read_text_beneath
+from ..common.nofollow_fs import (
+    NoFollowPathError,
+    ensure_private_dir,
+    inspect_file_snapshot_beneath,
+    read_bytes_snapshot_beneath,
+    read_text_beneath,
+)
 from ..common.owner_write_errors import (
     LocalControlCoordinatorUnavailable,
     OwnerManagementIngressUnavailable,
@@ -389,6 +395,31 @@ class LessonRepository:
             return None
         rows = state.get("rows")
         return rows if isinstance(rows, dict) else None
+
+    # LLM: 单槽有界快照：键是 nofollow 打开 lesson_heat.json 得到的文件代次 (dev, ino, size, mtime_ns) 加本次 HOT 的 lesson ID
+    #   集合，只留这些 ID 的 (last_hit_at, hits)；代次与 ID 集合都没变时只核一次文件身份、不读正文。换件按新代次重读；
+    #   符号链接、缺失、损坏或读不出返回 None（调用方退回原无热度排序）并清空槽位。不取 lesson/routing 锁，可在 HOT 写锁内调用。
+    # 函数用途: 返回指定 HOT lesson 的最小热度行（lesson_id -> last_hit_at、hits），供 HOT 按活跃度排序。
+    def hot_heat_rows(self, lesson_ids: Iterable[str]) -> dict[str, dict[str, object]] | None:
+        wanted = frozenset(text for raw in lesson_ids if (text := str(raw or "").strip()))
+        root, parts = self.routing_index_path.parent, (self._heat_path().name,)
+        slot, data = getattr(self, "_hot_heat_slot", None), None
+        try:
+            probe = None if root.is_symlink() else inspect_file_snapshot_beneath(root, parts)
+            if probe is not None and slot is not None and slot[:2] == (_heat_file_generation(probe.stat), wanted):
+                return {key: {"last_hit_at": hit_at, "hits": hits} for key, (hit_at, hits) in slot[2].items()}
+            read = None if probe is None else read_bytes_snapshot_beneath(root, parts, max_bytes=None)
+            data = None if read is None else json.loads(read.content.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            data = None
+        if not _is_valid_heat_doc(data):
+            self._hot_heat_slot = None
+            return None
+        rows = data["rows"]
+        minimal = {key: (row.get("last_hit_at"), row.get("hits")) for key in wanted
+                   if isinstance(row := rows.get(key), dict)}
+        self._hot_heat_slot = (_heat_file_generation(read.stat), wanted, minimal)
+        return {key: {"last_hit_at": hit_at, "hits": hits} for key, (hit_at, hits) in minimal.items()}
 
     # LLM: 召回热路径零磁盘 I/O 记录命中，待维护窗口持锁合并进 lesson_heat.json。
     # 函数用途: 记录本轮被读取引用的 lesson_id 命中信号（单次调用内自动去重）。
@@ -1661,12 +1692,23 @@ def _hot_activity_key(
             record.promoted_at or "", record.occurrence_count)
 
 
-# LLM: 测试替身或旧实现没有热度读取口时按快照缺失处理，不因此让召回或晋升失败。
+# LLM: 测试替身或旧实现没有热度读取口时按快照缺失处理，不因此让召回或晋升失败。给了 lesson_ids 时走单槽最小快照，
+#   只取这些 HOT lesson 的热度；没给时照旧读整份快照。
 # 函数用途: 从 lesson 仓库取 HOT 排序用的热度快照，取不到返回 None。
-def lesson_heat_rows(lessons: object) -> Mapping[str, Mapping[str, object]] | None:
-    reader = getattr(lessons, "heat_rows_snapshot", None)
-    rows = reader() if callable(reader) else None
+def lesson_heat_rows(lessons: object,
+                     lesson_ids: Iterable[str] | None = None) -> Mapping[str, Mapping[str, object]] | None:
+    minimal = getattr(lessons, "hot_heat_rows", None) if lesson_ids is not None else None
+    if callable(minimal):
+        rows = minimal(lesson_ids)
+    else:
+        reader = getattr(lessons, "heat_rows_snapshot", None)
+        rows = reader() if callable(reader) else None
     return rows if isinstance(rows, Mapping) else None
+
+
+# 函数用途: 返回 lesson_heat.json 已打开文件的代次 (dev, ino, size, mtime_ns)。
+def _heat_file_generation(info) -> tuple[int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
 # LLM: 截断是注入侧安全网；排序与写侧降级对称（保留活跃、淘汰冷旧），热度快照同上。

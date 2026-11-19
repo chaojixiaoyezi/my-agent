@@ -205,10 +205,11 @@ def test_cli_completion_producer_passes_agent_config(tmp_path, monkeypatch, cfg)
     assert calls[0][0] is home and calls[0][1].get("config") is cfg
 
 
-# LLM: Apply receives config; the existing dry-run planning call must remain config-free.
-# 函数用途: 验证显式清理命令仅在apply分支传入配置。
+# LLM: Dry-run and apply receive the same config so one owner config yields one extraction-aware plan
+#   (memory Wave-1 R7); the dry-run still plans without a scan budget.
+# 函数用途: 验证显式清理命令在预览与apply分支都传入同一份配置。
 @pytest.mark.parametrize("apply", [False, True])
-def test_home_retention_command_only_configures_apply(tmp_path, monkeypatch, capsys, cfg, apply):
+def test_home_retention_command_configures_preview_and_apply(tmp_path, monkeypatch, capsys, cfg, apply):
     from agent_py_agent.cli import home_runtime_commands as commands
 
     home, _, _ = runtime(tmp_path)
@@ -225,7 +226,7 @@ def test_home_retention_command_only_configures_apply(tmp_path, monkeypatch, cap
     monkeypatch.setattr(commands, "plan_owner_retention", record)
     assert commands.cmd_home_retention(SimpleNamespace(apply=apply, json=True)) == 0
     assert json.loads(capsys.readouterr().out)["ok"]
-    assert calls == [(home, {"config": cfg} if apply else {})]
+    assert calls == [(home, {"config": cfg})]
 
 
 # LLM: Read defaults from the original readers; do not duplicate or edit production constants.

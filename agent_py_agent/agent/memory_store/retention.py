@@ -193,16 +193,19 @@ class MemoryRetentionService:
         )
 
 
-# LLM: 旧函数名只委托唯一 v2 Service，不保留旧 policy key、scanner 或 executor。
+# LLM: 旧函数名只委托唯一 v2 Service，不保留旧 policy key、scanner 或 executor；有 config 时透传，
+#   同一 owner 配置下 dry-run 与 apply 对后台提取开关的判断一致。
 # 函数用途: 兼容现有 home doctor/maintenance 的 dry-run 调用。
 def plan_owner_retention(
     home: object,
     *,
     now: datetime | None = None,
+    config: object = None,
 ) -> MemoryRetentionReport:
     service = MemoryRetentionService(
         home_paths=home,
         candidates=CandidateService(home.owner_memory_candidates_jsonl),
+        config=config,
     )
     return service.plan(now=now)
 

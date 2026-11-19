@@ -163,7 +163,7 @@ def cmd_home_retention(args) -> int:
                 break
         result = replace(result, actions=tuple(actions))
     else:
-        result = plan_owner_retention(agent.home_paths)
+        result = plan_owner_retention(agent.home_paths, config=getattr(agent, "config", None))
     payload = {"ok": True, "home": str(agent.home_paths.owner_home_dir), "retention": result.to_dict()}
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

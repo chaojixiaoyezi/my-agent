@@ -279,10 +279,19 @@ class CuratorInputBatch:
         return sum(1 for item in self.messages if item.role == "user")
 
 
-# LLM: 复用规范scope合同；非法宿主ID只跳过该范围，不扩大权限或阻断其它合法范围，每类每范围三条且总计十二条。
-# 函数用途: 按本批宿主结构化范围提供可精确链接的lesson/HOT锚点，避免同一经验因范围键漂移而反复新建。
-def attach_candidate_anchors(batch, candidates):
-    scopes = {("personal", "personal"), ("global", "global")}
+# 宿主 owner 类型；三类 owner 在各自物理库里都只有 global/personal 两个固定范围（与前台召回同一对）。
+_HOST_OWNER_KINDS = frozenset({"main", "user", "group"})
+
+
+# LLM: 本批允许的 typed 范围只来自宿主：owner 固定范围 + 本批消息会话（session）+ 消息/审计里的 task_id（project），
+#   全部经 canonical_scope_key 归一，坏值只跳过不扩大；不借前台“库里已有项目”的兼容召回范围。物理 owner 库是外层边界。
+#   owner_kind 为空是没绑定宿主身份的旧构造（测试/独立调用），沿用同一对固定范围；认不出的类型只给本批自己证明的范围。
+# 函数用途: 计算本批 Curator 输入可见的 typed 范围集合（正式窗口与候选锚点共用）。
+def curator_batch_scopes(batch, owner_kind: str = "") -> frozenset[tuple[str, str]]:
+    kind = str(owner_kind or "").strip()
+    scopes: set[tuple[str, str]] = set()
+    if not kind or kind in _HOST_OWNER_KINDS:
+        scopes.update({("personal", "personal"), ("global", "global")})
     for message in batch.messages:
         if message.thread_id:
             _add_anchor_scope(scopes, "session", message.thread_id)
@@ -292,6 +301,13 @@ def attach_candidate_anchors(batch, candidates):
     for event in batch.audit_events:
         if event.task_id:
             _add_anchor_scope(scopes, "project", event.task_id)
+    return frozenset(scopes)
+
+
+# LLM: 复用规范scope合同；非法宿主ID只跳过该范围，不扩大权限或阻断其它合法范围，每类每范围三条且总计十二条。
+# 函数用途: 按本批宿主结构化范围提供可精确链接的lesson/HOT锚点，避免同一经验因范围键漂移而反复新建。
+def attach_candidate_anchors(batch, candidates):
+    scopes = curator_batch_scopes(batch)
     anchors, counts = [], {}
     rows = candidates.anchor_rows(scopes)
     for row in sorted(rows, key=lambda item: (item.last_observed_at, item.candidate_id), reverse=True):

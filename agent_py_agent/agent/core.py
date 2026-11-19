@@ -239,15 +239,17 @@ def _curator_backend(agent: object, profile_id: str) -> tuple[object, str, str, 
 
 
 # LLM: 记忆整理统一由 effective_auxiliary_model_profile 指定（留空关闭，指定时独占解析），绝不退回或按会话路由。
-#   每批现读档案：常驻 owner 运行中把 A 换成 B 或清空，下一批就按新值走，不用重启；档案编号没变时复用缓存的
-#   后端（单槽，只缓存建成功的），建不成的每批重解析，用户修好档案后下一批就能用。
+#   每批现读档案：常驻 owner 运行中把 A 换成 B 或清空，下一批就按新值走，不用重启。每批先解析生效档案的目录代次
+#   （selected 跟随当前默认项），生效档案与代次都没变才复用缓存的后端（单槽，只缓存建成功的）；档案停用、不存在、
+#   目录读不了或代次未知时清掉旧后端、按本次解析返回原拒绝原因，用户修好档案后下一批就能用。锁只护单槽交换。
 # 函数用途: 为后台记忆整理构造“会话 → 模型”的路由器，统一指向后台辅助模型。
 def _curator_model_router(agent: object, config: AgentConfig, curator_config: MemoryCuratorConfig):
     import threading
 
     from .memory_store.curator_models import CuratorModelRoute, CuratorModelRouting
+    from .settings.curator_profile import curator_profile_generation
 
-    cache: dict[str, tuple[object, str, str]] = {}
+    cache: dict[object, tuple[object, str, str]] = {}
     lock = threading.Lock()
 
     def route(thread_ids: tuple[str, ...]) -> CuratorModelRouting:
@@ -255,8 +257,11 @@ def _curator_model_router(agent: object, config: AgentConfig, curator_config: Me
         if not auxiliary:
             backend, _provider, _model, _fallback = _curator_backend(agent, "")
             return CuratorModelRouting(CuratorModelRoute("", backend, "", "", is_default=True))
+        generation = curator_profile_generation(agent, auxiliary)
         with lock:
-            cached = cache.get(auxiliary)
+            cached = cache.get(generation) if generation is not None else None
+            if cached is None:
+                cache.clear()
         if cached is None:
             backend, provider, model, fallback = _curator_backend(agent, auxiliary)
             if fallback or getattr(backend, "name", "") == "unconfigured":
@@ -264,9 +269,10 @@ def _curator_model_router(agent: object, config: AgentConfig, curator_config: Me
                 return CuratorModelRouting(CuratorModelRoute(auxiliary, backend, provider, model, is_default=True),
                                            warnings=warnings)
             cached = (backend, provider, model)
-            with lock:
-                cache.clear()
-                cache[auxiliary] = cached
+            if generation is not None:
+                with lock:
+                    cache.clear()
+                    cache[generation] = cached
         backend, provider, model = cached
         return CuratorModelRouting(CuratorModelRoute(auxiliary, backend, provider, model, is_default=True))
 
@@ -381,6 +387,7 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
                 agent.memory,
                 agent.memory_lessons,
                 agent.memory_hot,
+                owner_kind=str(getattr(agent.home_paths, "owner_kind", "") or ""),
             ),
             tool_reference_source=CuratorToolReferenceSource(
                 agent.home_paths.owner_home_dir,
@@ -483,7 +490,7 @@ def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearning
             return None
         return getattr(subagents, "runtime_db", None)
 
-    curator_be = getattr(getattr(agent, "memory_curator", None), "backend", None)
+    # 正常 owner 只用实时解析器：关闭后台辅助模型后不能退回启动时的整理后端；显式传入 backend 的独立构造不受影响。
     return SkillLearningService(
         SkillLearningStore.for_home(
             agent.home_paths,
@@ -491,7 +498,7 @@ def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearning
         ),
         SkillLearningSettings.from_config(config),
         SkillLearningRuntime(
-            backend=curator_be,
+            backend=None,
             snapshot_provider=lambda: agent.skills_service.snapshot_for(),
             guard_config=config,
             owner_id=str(agent.home_paths.owner_id or "local/main"),

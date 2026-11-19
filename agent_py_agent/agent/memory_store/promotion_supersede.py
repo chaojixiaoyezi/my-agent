@@ -7,9 +7,11 @@ from __future__ import annotations
 # 模块用途: 判定并持久化安全的同主题自动替换，正式写入仍走原 replace 的版本 CAS 与崩溃恢复链。
 
 import math
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timezone
 
 from .candidate_models import MemoryScope
 from .operations import memory_content_hash
@@ -34,8 +36,10 @@ def automatic_promotion_policy(policy: str) -> Iterator[None]:
 
 
 # LLM: 全部条件同时成立才替换：v2 自动批次、本候选正在自动晋升、唯一同主题冲突、已批准 user_explicit long_term add、
-#   无其它冲突、双方都是永久有效、主题键与 typed scope 逐字相同、旧条目也是 user_explicit、旧版本是正整数、
-#   宿主核验过的最新用户消息时间严格晚于旧条目更新时间。任一不满足返回 None，调用方照旧转 blocked_conflict。
+#   无其它冲突、双方都是永久有效且此刻都已生效（valid_from 不在未来）、主题键与 typed scope 逐字相同、旧条目也是
+#   user_explicit、旧版本是正整数、候选引用的每条宿主核验用户消息（至少一条）都严格晚于旧条目更新时间。
+#   候选没有结构化的主证据标记，不能挑最新的一条替旧事实续签，也不读正文猜哪条相关。
+#   任一不满足返回 None，调用方照旧转 blocked_conflict。
 #   绑定（replace + 目标 + 版本 + 清空冲突）先落盘再写正式库，崩溃后由 recover_committed_update 幂等补回执。
 # 函数用途: 尝试把一次同主题冲突改成已持久化的版本绑定替换，返回新候选快照和旧条目身份。
 def bind_same_subject_supersession(service, candidate, conflict, *, reviewer: str):
@@ -57,10 +61,10 @@ def bind_same_subject_supersession(service, candidate, conflict, *, reviewer: st
     if len(current) != 1 or not _exact_permanent_subject(current[0], candidate):
         return None
     prior = current[0]
-    if type(prior.version) is not int or prior.version < 1:
+    if type(prior.version) is not int or prior.version < 1 or not _both_effective_now(candidate, prior, time.time()):
         return None
-    evidence_at = _latest_verified_user_message_at(service, candidate)
-    if evidence_at is None or not evidence_at > float(prior.updated_at or prior.created_at or 0.0):
+    evidence_at = _verified_user_message_times(service, candidate)
+    if not evidence_at or not min(evidence_at) > float(prior.updated_at or prior.created_at or 0.0):
         return None
     try:
         bound = service.candidates.bind_same_subject_replace(
@@ -88,16 +92,34 @@ def _exact_permanent_subject(record, candidate) -> bool:
             and not str(attrs.get("valid_until") or "").strip())
 
 
+# LLM: 只认结构化 valid_from：候选与旧条目都须已生效（空或不晚于现在）；任一方是未来才生效的安排、或时间读不出，
+#   都不能和当前事实互相替换。结束边界已由永久性条件排除，这里不再比较 valid_until。
+# 函数用途: 判断候选与旧条目此刻是否都已生效、有效期可以直接衔接。
+def _both_effective_now(candidate, record, now: float) -> bool:
+    attrs = record.attributes if isinstance(record.attributes, dict) else {}
+    for value in (candidate.valid_from, attrs.get("valid_from")):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp() > now:
+            return False
+    return True
+
+
 # LLM: 时间只取宿主消息核验器返回的 created_at（核过 thread/role/hash/quote），不接受候选或模型自报时间。
-# 函数用途: 返回本候选证据里最新一条已核验用户消息的时间，没有则返回 None。
-def _latest_verified_user_message_at(service, candidate) -> float | None:
+# 函数用途: 返回本候选证据里每条已核验用户消息的时间，没有则返回空元组。
+def _verified_user_message_times(service, candidate) -> tuple[float, ...]:
     times: list[float] = []
     for ref in candidate.source_message_refs:
         proof = service.message_verifier.verify(ref)
         created = proof.get("created_at") if isinstance(proof, dict) and proof.get("role") == "user" else None
         if isinstance(created, (int, float)) and not isinstance(created, bool) and math.isfinite(created):
             times.append(float(created))
-    return max(times) if times else None
+    return tuple(times)
 
 
 __all__ = [
