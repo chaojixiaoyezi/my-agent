@@ -2,10 +2,12 @@
 
 ```text
 agent_py_agent/agent/memory_store/
+|-- daily_index.py                                       # S3 已提交 Daily 事件的可丢弃 LocalStore 检索投影：提交后幂等写入、展示前按 Daily 原记录复核、维护时有界清理与回补
 `-- promotion_supersede.py                               # S2 conservative_v2：后台自动晋升时把同主题唯一旧条目的冲突改成先落盘、按版本 CAS 的替换
 agent_py_agent/tests/
 |-- test_mem_wave1_s1_extraction_status.py               # S1 后台记忆提取状态分类、/memory 线协议往返与旧 Gateway 兼容、候选列表状态行、辅助模型热切换与省略提示/本地日期回归单测
-`-- test_mem_wave1_s2_formal_window_supersede.py         # S2 正式窗口按相关性有界读取、冲突目标置顶、conservative_v2 同主题自动替换（含版本 CAS 交错与崩溃恢复）回归单测
+|-- test_mem_wave1_s2_formal_window_supersede.py         # S2 正式窗口按相关性有界读取、冲突目标置顶、conservative_v2 同主题自动替换（含版本 CAS 交错与崩溃恢复）回归单测
+`-- test_mem_wave1_s3_daily_index_recall.py              # S3 Daily 事件检索投影（写入/去重/失败修复/删改隐藏/有界维护）与上一轮用户消息加权融合召回回归单测
 ```
 
 ## 2026-11-18 Gateway 压测修复（MAX1 gw-stress-fix：GW-18/GW-03/GW-01/GW-02/GW-11/C1/C2/C9/X4/X8）
@@ -3340,6 +3342,7 @@ agent_py_agent/
 |   |   |-- curator_routing.py        # 按会话主代理模型分组：挑本次处理的那组、审计事件只跟默认组、按组投影熔断游标、汇总多组结果
 |   |   |-- curator_*.py              # Curator 输入、Schema、正式记忆快照、状态与运行审计辅助模块
 |   |   |-- daily.py                  # v2 DailyMemoryEvent 稳定序列、幂等合并与按天账本
+|   |   |-- daily_index.py            # 已提交 Daily 事件的可丢弃 LocalStore 检索投影、展示前原记录复核与有界维护
 |   |   |-- jsonl.py                  # 正式 long_term 稳定 ID CRUD/batch、冲突、hard delete 与召回
 |   |   |-- lessons.py                # 正式 lesson/HOT 唯一正文、阈值验证与确定性 routing index
 |   |   |-- lifecycle.py              # close/reset/task-complete/pre-compact 等统一策展请求入口

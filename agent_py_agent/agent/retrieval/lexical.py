@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from collections.abc import Sequence
 from typing import NamedTuple
 
 # 任意脚本的字母/数字/下划线连续块(\w 在 Python re 对 str 默认 Unicode):覆盖拉丁含重音、西里尔、
@@ -119,14 +120,25 @@ def rank(query: str, lines: list[str]) -> list[int]:
     return [i for i in order if scores[i] > 0.0]
 
 
-def reciprocal_rank_fusion(rankings: list[list[str]], *, k: int = 60) -> list[tuple[str, float]]:
+def reciprocal_rank_fusion(
+    rankings: list[list[str]],
+    *,
+    k: int = 60,
+    weights: Sequence[float] | None = None,
+) -> list[tuple[str, float]]:
     """RRF 融合多路检索排序(BM25 + 向量等):每路给 id 打 1/(k+名次),求和后降序。
 
     比"归一化分数相加"更稳——不受各路分数量纲差异影响(经典 IR 做法,混合检索的排序融合)。
     输入每路是一个 id 列表(已按相关度降序);返回 [(id, 融合分)] 降序。
+    weights 可选:与 rankings 一一对应的正数权重,第 i 路贡献 weights[i]/(k+名次);不传时各路等权(原行为)。
     """
+    if weights is not None:
+        weights = tuple(float(weight) for weight in weights)
+        if len(weights) != len(rankings) or any(not math.isfinite(weight) or weight <= 0.0 for weight in weights):
+            raise ValueError("reciprocal_rank_fusion weights must be positive and match rankings")
     scores: dict[str, float] = {}
-    for ranking in rankings:
+    for position, ranking in enumerate(rankings):
+        weight = 1.0 if weights is None else weights[position]
         for rank_index, item_id in enumerate(ranking):
-            scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (k + rank_index + 1)
+            scores[item_id] = scores.get(item_id, 0.0) + weight / (k + rank_index + 1)
     return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..conversation.host_actor import HostActorError
 from ..local_storage.search import ThreadSearch, record_thread_id, search_records_in_thread
+from ..memory_store.daily_index import DAILY_EVENT_SOURCE_TYPE, visible_daily_hits
 from ..tooling.models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -254,15 +255,25 @@ def _dispatch(agent: object, store: LocalStore | None, params: dict[str, object]
     query = _clean_str(params.get("query"))
     if mode == "thread_browse":
         return browse_current_thread(agent, params, params.get("limit", _THREAD_BROWSE_DEFAULT_COUNT))
+    daily_dir = _daily_dir_for(agent)
     if mode == "thread_search":
         search = ThreadSearch("", source_type or "conversation_message", params.get("limit", _DEFAULT_DISCOVER_COUNT))
-        return _discover_thread(agent, _required_store(store), query, search)
+        return _discover_thread(agent, _required_store(store), query, search, daily_dir)
     store = _required_store(store)
     if mode == "around":
-        return _scroll(store, params["around_id"].strip(), params.get("window", _DEFAULT_WINDOW_COUNT), source_type)
+        window = params.get("window", _DEFAULT_WINDOW_COUNT)
+        return _scroll(store, params["around_id"].strip(), window, source_type, daily_dir)
     if mode == "search":
-        return _discover(store, query, params.get("limit", _DEFAULT_DISCOVER_COUNT), source_type)
-    return _browse(store, params.get("limit", _DEFAULT_BROWSE_COUNT), source_type)
+        return _discover(store, query, params.get("limit", _DEFAULT_DISCOVER_COUNT), source_type, daily_dir)
+    return _browse(store, params.get("limit", _DEFAULT_BROWSE_COUNT), source_type, daily_dir)
+
+
+# LLM: Daily 分片是 daily_event 检索行的唯一权威；目录只取当前 owner 的宿主路径，取不到时为 None，
+#   读取端据此把 daily_event 行全部隐藏，不猜可见。
+# 函数用途: 取当前 owner 的 Daily 权威目录。
+def _daily_dir_for(agent: object) -> str | None:
+    raw = getattr(getattr(agent, "home_paths", None), "owner_memory_daily_dir", None)
+    return str(raw) if raw else None
 
 
 # LLM: 只有索引检索/翻看/最近浏览需要派生库；原文和thread_browse仍走canonical会话，错误提示不恢复旧语法。
@@ -277,10 +288,12 @@ def _required_store(store: LocalStore | None) -> LocalStore:
 
 # LLM: 会话只取宿主可信上下文并与结构化索引比对；下一跳显式mode沿真实scope，不给旧字段猜测路径。
 # 函数用途: 只在当前会话内全文检索，结果带 message_id 供分段读回原文。
-def _discover_thread(agent: object, store: LocalStore, query: str, search: ThreadSearch) -> dict[str, Any]:
+def _discover_thread(agent: object, store: LocalStore, query: str, search: ThreadSearch,
+                     daily_dir: str | None) -> dict[str, Any]:
     thread_id, source = trusted_thread(agent)
     require_current_thread(thread_id, source)
     hits = search_records_in_thread(store, query, ThreadSearch(thread_id, search.source_type, search.limit))
+    hits = visible_daily_hits(daily_dir, hits)
     results = [_shape_hit(hit, snippet_for=query) for hit in hits]
     return {
         "mode": "thread_discover", "query": query, "thread_id": thread_id, "results": results, "count": len(results),
@@ -301,10 +314,12 @@ def _error(message: str, hint: str, code: str) -> ToolHandlerOutcome:
 
 
 # LLM: 本地过取并稳定优先宿主task_ref，保留FTS组内顺序；提示沿真实记录ID和规范mode，不从文本派生权限。
+#   daily_event 行先按 Daily 分片核对，原件已删或已改的旧行不进结果（过取让隐藏行不挤掉本页名额）。
 # 函数用途: discovery 形态检索历史，并让可续作的精确任务引用优先出现。
-def _discover(store: LocalStore, query: str, limit: int, source_type: str | None) -> dict[str, Any]:
-    fetch_limit = _MAX_LIMIT_COUNT if source_type in {None, "gateway_request"} else limit
-    hits = store.search(query, limit=fetch_limit, source_type=source_type)
+def _discover(store: LocalStore, query: str, limit: int, source_type: str | None,
+              daily_dir: str | None) -> dict[str, Any]:
+    fetch_limit = _MAX_LIMIT_COUNT if source_type in {None, "gateway_request", DAILY_EVENT_SOURCE_TYPE} else limit
+    hits = visible_daily_hits(daily_dir, store.search(query, limit=fetch_limit, source_type=source_type))
     shaped = [_shape_hit(hit, snippet_for=query) for hit in hits]
     results = _prioritize_historical_task_refs(shaped)[:limit]
     task_ref_count = sum(1 for item in results if item.get("task_ref"))
@@ -337,16 +352,31 @@ def _prioritize_historical_task_refs(results: list[dict[str, Any]]) -> list[dict
 
 
 # LLM: around区分同会话记录与无归属时间邻居；前后翻页携带真实锚点及原过滤，不改变输出协议或冒充完整历史。
+#   daily_event 行按 Daily 分片核对：锚点已失效按“未找到”返回并说明原因，窗口里失效的旧行隐藏并计数。
 # 函数用途: 翻看历史窗口，给模型返回实际会话范围和完整性边界。
-def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | None) -> dict[str, Any]:
-    records, before, after = store.records_around(around_id, window=window, source_type=source_type)
+def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | None,
+            daily_dir: str | None) -> dict[str, Any]:
+    raw_records, before, after = store.records_around(around_id, window=window, source_type=source_type)
+    records = visible_daily_hits(daily_dir, raw_records)
+    hidden = len(raw_records) - len(records)
+    position = next((index for index, rec in enumerate(records) if rec.id == around_id), None)
+    stale_anchor = position is None and any(rec.id == around_id for rec in raw_records)
+    if position is None:
+        records = []
+    elif hidden:
+        before, after = position, len(records) - position - 1
     if not records:
         return {
             "mode": "scroll",
             "around_id": around_id,
             "messages": [],
             "count": 0,
-            "hint": f'未找到记录 id={around_id}；它可能不存在或不属于该source_type。可浏览 {{"mode":"recent"}}。',
+            "hint": (
+                f'记录 id={around_id} 对应的 Daily 原记录已删除、已改写或暂时读不出，旧索引行已隐藏；'
+                '换关键词重新检索 {"mode":"search","query":"话题"}，或浏览 {"mode":"recent"}。'
+                if stale_anchor else
+                f'未找到记录 id={around_id}；它可能不存在或不属于该source_type。可浏览 {{"mode":"recent"}}。'
+            ),
         }
     anchor = next(rec for rec in records if rec.id == around_id)
     thread_id = record_thread_id(anchor.metadata)
@@ -360,6 +390,7 @@ def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | N
         "count": len(records),
         "messages_before": before,
         "messages_after": after,
+        **({"hidden_stale_records": hidden} if hidden else {}),
         "hint": (
             ("同一会话的记录窗口，不等于完整逐条消息。" if thread_id else "无会话归属的时间邻近记录，不代表同一会话。")
             +
@@ -367,7 +398,8 @@ def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | N
                 **({"source_type": source_type} if source_type else {})}, ensure_ascii=False)
             + "；向前翻参数：" + json.dumps({"mode": "around", "around_id": records[0].id, "window": window,
                 **({"source_type": source_type} if source_type else {})}, ensure_ascii=False)
-            + " before/after 小于 window 说明已到历史的一端。"
+            + (f" 本窗口隐藏了 {hidden} 条 Daily 原记录已不存在或已改写的旧索引行，before/after 偏少不代表到头，可继续翻页。"
+               if hidden else " before/after 小于 window 说明已到历史的一端。")
             + next((_message_read_hint(_history_scope(rec.metadata)) for rec in records
                 if _history_scope(rec.metadata).get("message_id")), "")
         ),
@@ -375,9 +407,10 @@ def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | N
 
 
 # LLM: recent沿原索引倒序及来源过滤，输出仍为browse协议；只修改下一跳说明，不写状态或扩权限。
+#   daily_event 行按 Daily 分片核对后才列出。
 # 函数用途: 列出最近历史并提供规范查询和上下文参数。
-def _browse(store: LocalStore, limit: int, source_type: str | None) -> dict[str, Any]:
-    recents = store.list_recent(limit=limit, source_type=source_type)
+def _browse(store: LocalStore, limit: int, source_type: str | None, daily_dir: str | None) -> dict[str, Any]:
+    recents = visible_daily_hits(daily_dir, store.list_recent(limit=limit, source_type=source_type))
     results = [_shape_record(rec, preview=True) for rec in recents]
     return {
         "mode": "browse",

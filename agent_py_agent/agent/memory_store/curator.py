@@ -275,6 +275,9 @@ class MemoryCuratorDependencies:
     config_provider: Callable[[], object] | None = None
     # 可选人格仓库：供 USER.md 周期性做梦整合与 thread prefix 失效使用；未注入时由运行期按 owner_home 解析。
     persona: object | None = None
+    # 可选 Daily 经历检索投影（daily_index.DailyEventIndex）：提交放锁后写入本轮 Daily 经历，维护节拍有界对账；
+    # None（旧调用方、测试替身、无本地检索库）时不写投影，Daily 权威照常提交。
+    daily_index: object | None = None
 
 
 # LLM: 运行上下文把已领取的租约与运行前游标快照绑定，避免辅助函数误用后续可变状态。
@@ -502,8 +505,10 @@ class _CuratorLifecycleMixin:
         candidates_compacted = False
         access_flushed = False
         dream_consolidated = False
+        daily_index_maintained = False
         lesson_report: dict[str, object] = {}
         dream_report: dict[str, object] = {}
+        daily_index_report: dict[str, object] = {}
         step_errors: dict[str, str] = {}
         lessons = getattr(self.formal_memory_source, "lessons", None)
         hot = getattr(self.formal_memory_source, "hot", None)
@@ -646,6 +651,18 @@ class _CuratorLifecycleMixin:
                 else:
                     self._terminal_compaction_at = time.monotonic()
                     candidates_compacted = True
+            # Daily 经历检索投影对账：每轮最多核对一页投影行、补建几个日期分片；读不出的分片不删，失败只记本步错误。
+            maintain_daily_index = getattr(getattr(self, "daily_index", None), "maintain", None)
+            if callable(maintain_daily_index):
+                try:
+                    daily_index_report = maintain_daily_index()
+                except uncertain_errors:
+                    raise
+                except (*deterministic_errors, sqlite3.Error) as exc:
+                    partial = True
+                    step_errors["daily_index"] = _maintenance_error_code(exc)
+                else:
+                    daily_index_maintained = True
 
             dream_home = owner_home or getattr(self.persona, "owner_home", None)
             if dream_home is not None:
@@ -689,7 +706,8 @@ class _CuratorLifecycleMixin:
             if now is not None or getattr(self, "_maintenance_now_ts", None) is None:
                 self._maintenance_now_ts = current.timestamp()
 
-        any_progress = lessons_maintained or access_flushed or candidates_compacted or dream_consolidated
+        any_progress = (lessons_maintained or access_flushed or candidates_compacted or dream_consolidated
+                        or daily_index_maintained)
         if step_errors and not any_progress:
             status = "failed"
         elif partial or step_errors:
@@ -706,6 +724,7 @@ class _CuratorLifecycleMixin:
             "archive_days": live_cfg.lesson_archive_days,
             "lesson_report": lesson_report,
             **({"user_profile_dream": dream_report} if dream_report else {}),
+            **({"daily_index": daily_index_report} if daily_index_report else {}),
             **({"errors": step_errors} if step_errors else {}),
         }
 
@@ -1389,7 +1408,27 @@ class _CuratorExecutionMixin:
             prepared.cursor.per_thread_cursors,
             prepared.cursor.last_audit_event_id,
         )
+        extra_warnings = (*extra_warnings, *self._index_committed_daily_events(committed))
         return self._post_commit_report(context, batch, prepared, committed, extra_warnings)
+
+    # LLM: 四账本事务已提交且锁已释放才写检索投影；投影失败只进本次运行警告（带异常类型或失败条数），
+    #   不回滚、不改游标和成功状态，执行未结类异常照常上抛。读取端另按 Daily 分片核对可见性，维护节拍会从原件补建，
+    #   漏写只是暂时搜不到，不会出现过期行。
+    # 函数用途: 把本轮已提交的 Daily 经历写进本地检索投影，返回需要附加的运行警告。
+    def _index_committed_daily_events(self, committed) -> tuple[str, ...]:
+        index = getattr(self, "daily_index", None)
+        events = tuple(getattr(committed, "daily_events", ()) or ())
+        if index is None or not events:
+            return ()
+        try:
+            report = index.index(events)
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
+        except Exception as exc:
+            _LOGGER.warning("DAILY_EVENT_INDEX_SKIPPED type=%s", type(exc).__name__)
+            return (f"daily_event_index_failed:{type(exc).__name__}",)
+        failed = int(report.get("failed", 0) or 0) if isinstance(report, dict) else 0
+        return (f"daily_event_index_failed:{failed}",) if failed else ()
 
     # LLM: 置顶只认宿主结构化事实：提交时已是 blocked_conflict 的候选及晋升回执为 blocked_conflict 的候选
     #   （回执不带目标，按 ID 点查最终候选取 conflicts_with）；成功晋升的 replace/merge/remove 目标和完整覆盖下
@@ -2068,6 +2107,7 @@ class MemoryCuratorService(
         self.learning_exclusions = dependencies.learning_exclusions
         self.learning_exclusions_revision = dependencies.learning_exclusions_revision
         self.persona = dependencies.persona
+        self.daily_index = dependencies.daily_index
         self.config_provider = dependencies.config_provider
         self._init_config = config
         self._init_provider_config: MemoryCuratorConfig | None = None

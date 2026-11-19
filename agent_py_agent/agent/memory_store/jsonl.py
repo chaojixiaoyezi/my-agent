@@ -877,6 +877,17 @@ class _JsonlMemorySearchMixin:
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
         return self._search_scoped(query, top_k, predicate, record_access=False, latency_safe=latency_safe)
 
+    # LLM: 与候选检索同一 allowlist、scope 先过滤再评分与词面优先 rerank，但只走词面臂：不读向量缓存、不嵌入、
+    #   不排队向量补齐、不记访问。供补充查询（如上一轮用户消息）使用，额外成本只有一次有界词面检索。
+    # 函数用途: 在 scope 内做纯词面的候选检索。
+    def search_scoped_lexical_candidates(
+        self,
+        query: str,
+        top_k: int,
+        predicate: Callable[[MemoryRecord], bool],
+    ) -> list[MemoryRecord]:
+        return self._search_scoped(query, top_k, predicate, record_access=False, lexical_only=True)[0]
+
     # LLM: 已入选身份经本代坐标回读并点查永久屏障；索引未追平只走原有界权威，不能经all枚举删除历史。
     #   核对原scope/完整版本及渲染门；保序映射只确认每个ID一次，隔离/撤销/替换项不得touch。
     # 函数用途: 只给有效且可注入的候选登记访问，保序去重后返回确认列表，不重复维护两套ID状态。
@@ -1089,10 +1100,12 @@ class _JsonlMemorySearchMixin:
         *,
         record_access: bool,
         latency_safe: bool = False,
+        lexical_only: bool = False,
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
         if top_k <= 0:
             return [], _scoped_retrieval_facts(None, 0, self._semantic_status)
-        projected, coverage = self._search_tier_index(query, 1000) if self._embedder is None else (None, {"status": "semantic_full_scan"})
+        embedder = None if lexical_only else self._embedder
+        projected, coverage = self._search_tier_index(query, 1000) if embedder is None else (None, {"status": "semantic_full_scan"})
         if projected is None:
             from ._jsonl_indexing import bounded_authority_records
 
@@ -1113,8 +1126,8 @@ class _JsonlMemorySearchMixin:
             # embedding 臂本就跨语言(mean centering 实证),两臂互补。
             # 索引文本必须与缓存键用同一口径（index_text），否则写入键与清理键不一致。
             docs = [(record.entry_id, index_text(record.content, record.attributes)) for record in active]
-            cached = self._cached_vectors_for(docs)
-            retriever = HybridRetriever(self._embedder)
+            cached = {} if lexical_only else self._cached_vectors_for(docs)
+            retriever = HybridRetriever(embedder)
             ranked = retriever.rank(
                 query,
                 docs,
@@ -1123,9 +1136,12 @@ class _JsonlMemorySearchMixin:
                 # 词面臂(BM25)不受限——词面重合本身是相关信号;无 embedder 自动降级纯 BM25。
                 vector_min_score=0.30,
                 cached_vectors=cached,
-                **({"latency_safe": True, "cached_query_vector": _query_vector(self, query)} if latency_safe else {}),
+                **({"latency_safe": True, "cached_query_vector": _query_vector(self, query)}
+                   if latency_safe and not lexical_only else {}),
             )
-            if latency_safe:
+            if lexical_only:
+                pass
+            elif latency_safe:
                 _queue_vector_backfill(self, query, active, cached)
             else:
                 _query_vector(self, query, retriever.last_query_vector)

@@ -334,6 +334,7 @@ def _wire_memory_authorities(
 #   末尾按 enable_self_learning 挂上自动总结 Skill 服务（agent.skill_learning，关闭时为 None），与 Curator 共用 backend。
 # 函数用途: 委托真实lesson/HOT/Promotion构造后，原地接通curator与自动总结Skill。
 def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
+    from .memory_store.daily_index import DailyEventIndex
     from .memory_store.decision_curator import annotate_curator_batch
     from .memory_store.owner_resources import (
         OwnerMemoryResources,
@@ -421,6 +422,12 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
             ),
             persona=agent.persona_repository,
             config_provider=lambda: _live_agent_config(agent, config),
+            # Daily 经历检索投影：与 session_search 同一本地检索库；没有本地库时不写投影。
+            daily_index=(
+                DailyEventIndex(agent.local_store, agent.home_paths.owner_memory_daily_dir)
+                if getattr(agent, "local_store", None) is not None
+                else None
+            ),
         ),
     )
     agent._skill_learning_service = _skill_learning_service(agent, config)

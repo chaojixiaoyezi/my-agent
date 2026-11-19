@@ -284,6 +284,58 @@ def _optional_memory_read(read, routed_context):
         return []
 
 
+# 上一条用户消息那一路在融合排序里的权重占当前这一路的百分比：当前轮命中总排在只被上一轮命中的条目之前。
+_PREVIOUS_TURN_RECALL_WEIGHT_PERCENT = 50
+
+
+# LLM: 只认宿主冻结的 PreviousUserTurn 且身份逐项对上（同 owner、同一请求、同一发起人；群 owner 不用），
+#   预览为空或与本轮原话相同时不查；不读会话历史、不解析正文语义。
+# 函数用途: 返回本轮可用的上一条用户消息预览，不可用时返回空串。
+def _previous_turn_recall_query(agent, request, params) -> str:
+    from ...conversation.models import PreviousUserTurn
+
+    turn = getattr(getattr(params, "conversation_history_seed", None), "previous_user_turn", None)
+    if not isinstance(turn, PreviousUserTurn):
+        return ""
+    home = getattr(agent, "home_paths", None)
+    actor = getattr(params, "host_channel_actor", None)
+    if (getattr(home, "owner_kind", "") == "group"
+            or turn.owner_id != str(getattr(home, "owner_id", "") or "")
+            or not turn.request_id or turn.request_id != str(getattr(request, "request_id", "") or "")
+            or turn.actor_id != str(getattr(actor, "actor_id", "") or "")):
+        return ""
+    preview = turn.preview.strip()
+    if not preview or " ".join(preview.split()) == " ".join(str(getattr(request, "user_prompt", "") or "").split()):
+        return ""
+    return preview
+
+
+# LLM: 第二路只走同一 scope 内的有界纯词面候选（不嵌入、不排队向量补齐、不记访问），用同一 recall_scope 按上一条
+#   用户消息判断兼容项目的词面证据；两路按 entry_id 加权 RRF 融合（当前轮优先），截到 memory_top_k 后再交给原有
+#   rerank、预算与唯一一次最终访问确认。第二路失败或没有可用预览时原样返回当前轮结果。
+# 函数用途: 把上一条用户消息的有界词面召回并入本轮长期记忆候选。
+def _fuse_previous_turn_recall(agent, request, params, recall_scope, current_hits, top_k, routed_context):
+    from ...memory_store.recall import runtime_recall_predicate
+    from ...retrieval.lexical import reciprocal_rank_fusion
+
+    query = _previous_turn_recall_query(agent, request, params)
+    search = getattr(getattr(agent, "memory", None), "search_scoped_lexical_candidates", None)
+    if not query or not callable(search):
+        return current_hits
+    predicate = runtime_recall_predicate(recall_scope, query)
+    previous_hits = _optional_memory_read(lambda: search(query, top_k, predicate), routed_context)
+    if not previous_hits:
+        return current_hits
+    by_id: dict[str, object] = {}
+    for record in [*current_hits, *previous_hits]:
+        by_id.setdefault(str(record.entry_id), record)
+    fused = reciprocal_rank_fusion(
+        [[str(record.entry_id) for record in current_hits], [str(record.entry_id) for record in previous_hits]],
+        weights=(1.0, _PREVIOUS_TURN_RECALL_WEIGHT_PERCENT / 100),
+    )
+    return [by_id[entry_id] for entry_id, _score in fused if entry_id in by_id][:top_k]
+
+
 # LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope;
 # task-local and explicit owner memory-off never read the formal repositories or project index.
 # LLM: 前台保留latency_safe正式前缀与隔离总闸；增量规则仅追加到最终runtime尾部，不进入冻结memories或bundle前缀。
@@ -335,6 +387,10 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         ),
         routed_context,
     )
+    if not recall_suppressed and not task_local:
+        long_term_memories = _fuse_previous_turn_recall(
+            agent, request, current, recall_scope, long_term_memories, memory_top_k, routed_context,
+        )
 
     # 预算预估与最终提示构建用同一份渲染选项（同一工具快照、同一时区），省略提示的长度才对得上。
     render_options = MemoryContextOptions(

@@ -345,6 +345,27 @@ class LocalStoreMaintenanceMixin:
             ).fetchall()
         return {str(row["source_type"]): int(row["count"]) for row in rows}
 
+    # LLM: 只读一页同来源类型的记录身份、标题、元数据和内容哈希，按 source_id 续页并走 (source_type, source_id) 索引；
+    #   不读正文文件、不写库，供派生投影（如 Daily 经历）做有界对账，删除仍走 records.delete_record 原入口。
+    #   单行元数据坏了只给空字典，不让一行坏账卡住整页对账。
+    # 函数用途: 分页列出某一来源类型的记录摘要。
+    def record_page(self, source_type: str, *, after_source_id: str = "", limit: int = 64) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT id, source_id, title, metadata_json, content_hash FROM records "
+                "WHERE source_type = ? AND source_id > ? ORDER BY source_id LIMIT ?",
+                (str(source_type), str(after_source_id or ""), max(1, int(limit))),
+            ).fetchall()
+        page = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            page.append({"id": row["id"], "source_id": row["source_id"], "title": row["title"],
+                         "content_hash": row["content_hash"], "metadata": metadata if isinstance(metadata, dict) else {}})
+        return page
+
     def missing_content_files(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """检查 records 指向的正文文件是否还存在。"""
 

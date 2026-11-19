@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1544,
+  "count": 1550,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -762,6 +762,14 @@
       "unit": "字符",
       "category": "其它",
       "description": "函数用途: 给出归档摘要字符数与按归档等级的预览字符预算。"
+    },
+    {
+      "name": "_PREVIOUS_TURN_RECALL_WEIGHT_PERCENT",
+      "file": "agent_py_agent/agent/agent_core/runtime/loop_support.py",
+      "value": 50,
+      "unit": "%",
+      "category": "比例阈值",
+      "description": "上一条用户消息那一路在融合排序里的权重占当前这一路的百分比：当前轮命中总排在只被上一轮命中的条目之前。"
     },
     {
       "name": "_FINDING_EVIDENCE_INLINE_MAX_CHARS",
@@ -4700,6 +4708,14 @@
       "description": "消息物理位置缓存最多保留的底层会话文件个数上限。"
     },
     {
+      "name": "PREVIOUS_USER_TURN_PREVIEW_MAX_CHARS",
+      "file": "agent_py_agent/agent/conversation/models.py",
+      "value": 300,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "上一条用户消息预览最多保留的字符数：只够做一次补充词面查询，不复制长正文。"
+    },
+    {
       "name": "THREAD_GOAL_OBJECTIVE_MAX_CHARS",
       "file": "agent_py_agent/agent/conversation/models.py",
       "value": 4000,
@@ -7666,6 +7682,38 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "每日汇总摘要最多 1500 字符：一屏可读的总结。"
+    },
+    {
+      "name": "DAILY_INDEX_BACKFILL_SLICE_FILES",
+      "file": "agent_py_agent/agent/memory_store/daily_index.py",
+      "value": 4,
+      "unit": "个文件",
+      "category": "其它",
+      "description": "维护节拍每轮最多补建的 Daily 日期分片数，超出部分下一轮从日期游标续补。"
+    },
+    {
+      "name": "DAILY_INDEX_PRUNE_SLICE_ROWS",
+      "file": "agent_py_agent/agent/memory_store/daily_index.py",
+      "value": 64,
+      "unit": "行",
+      "category": "其它",
+      "description": "维护节拍每轮最多核对的投影行数，超出部分下一轮从游标续查。"
+    },
+    {
+      "name": "DAILY_VISIBILITY_MAX_BYTES",
+      "file": "agent_py_agent/agent/memory_store/daily_index.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "一次读取核对累计最多读取的 Daily 分片字节数；超出预算的命中按“无法核对”隐藏，不猜可见。"
+    },
+    {
+      "name": "DAILY_VISIBILITY_MAX_SHARD_FILES",
+      "file": "agent_py_agent/agent/memory_store/daily_index.py",
+      "value": 64,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "一次读取核对最多打开的日期分片数：检索一页最多 20 条、翻看窗口最多 41 条，日期数不会更多。"
     },
     {
       "name": "_MAX_ANNOTATED_ITEMS_COUNT",

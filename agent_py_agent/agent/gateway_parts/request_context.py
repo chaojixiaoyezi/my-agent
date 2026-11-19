@@ -36,6 +36,7 @@ from ..conversation.learning_source import (
     unknown_projection,
     user_dialogue_projection,
 )
+from ..conversation.models import PREVIOUS_USER_TURN_PREVIEW_MAX_CHARS, PreviousUserTurn
 from ..conversation.verbose import effective_verbose_level, initial_verbose_settings
 from ..memory_store.learning_exclusions import (
     curator_learning_exclusions,
@@ -113,6 +114,9 @@ class GatewayConversationContext:
     # Gateway 上下文不再同时持有具体副本，避免准备阶段两份完整正文。
     # 字段用途: 供会话种子和转录注入按原规则重放本轮历史。
     history_source: ConversationHistorySource | None = field(default=None, repr=False)
+    # LLM: 冻结历史来源的同一遍选择里记下的上一条用户消息预览及身份，只给本轮召回做第二路词面查询，不是历史权威。
+    # 字段用途: 透传给会话种子的 previous_user_turn；群 owner、首轮或没有合格用户行时为 None。
+    previous_user_turn: PreviousUserTurn | None = field(default=None, repr=False, compare=False)
     recent_artifacts: tuple[dict[str, object], ...] = ()
     workspace_task: GatewayWorkspaceSelection | None = None
     # LLM: 这些准确所有者及线程的已完成任务引用仅供模型发现，不选择cwd、不授予写权限，也不绕过准确路径的运行时重绑定。
@@ -360,9 +364,11 @@ def gateway_conversation_context(
     from ..conversation.technical_continuation import active_user_input_yield_parked_task_id
 
     with _measure_context_prep_step(steps, "history_source"):
+        previous_turn = _PreviousUserTurnObserver()
         history_source = _gateway_history_source(
             history_rows, inputs.request_id, request_binding.gateway_message_work_scope(inputs.request),
             parked_task_id=active_user_input_yield_parked_task_id(store, thread),
+            observer=previous_turn,
         )
     with _measure_context_prep_step(steps, "artifacts"):
         recent_artifacts = request_history.gateway_recent_artifacts(agent, thread.thread_id, inputs.request_id, load_errors)
@@ -433,6 +439,7 @@ def gateway_conversation_context(
         verbose_level=effective_verbose_level(thread, inputs.request),
         scope=scope,
         history_source=history_source,
+        previous_user_turn=previous_turn.freeze(agent, thread.thread_id, inputs.request, inputs.request_id, scope),
         recent_artifacts=recent_artifacts,
         workspace_task=workspace_task,
         recent_task_workspaces=recent_task_workspaces,
@@ -1107,10 +1114,54 @@ def _gateway_history_source(
     work_scope: dict[str, object] | None,
     *,
     parked_task_id: str = "",
+    observer: _PreviousUserTurnObserver | None = None,
 ) -> ConversationHistorySource:
+    select = partial(history_projection.history_row_selected, current_request_id=request_id, work_scope=work_scope,
+                     parked_task_id=parked_task_id)
     return freeze_history_source(
         history_rows,
         project_row=history_projection.project_history_row,
-        select=partial(history_projection.history_row_selected, current_request_id=request_id, work_scope=work_scope,
-                       parked_task_id=parked_task_id),
+        select=select if observer is None else observer.wrap(select),
     )
+
+
+# LLM: 只观察宿主原选择规则已放行的行（与主种子同一遍读取），不额外读文件、不改选择结果；只留最后一条用户行的
+#   有界预览与消息 ID，正文不缓存。压缩摘要不是历史行，当前请求自己的用户行已被选择规则排除，所以不会被当成上一轮。
+# 类用途: 在冻结历史来源时顺手记下紧邻的上一条用户消息，供本轮召回做第二路有界词面查询。
+class _PreviousUserTurnObserver:
+    # 函数用途: 初始化为空观察结果。
+    def __init__(self) -> None:
+        self.preview = ""
+        self.message_id = ""
+
+    # 函数用途: 包一层原选择规则，选中的用户行顺手记下有界预览，返回值与原规则完全相同。
+    def wrap(self, select):
+        def observed(row) -> bool:
+            selected = select(row)
+            if selected and str(getattr(row, "role", "") or "").strip().lower() == "user":
+                text = str(getattr(row, "content", "") or "")[:PREVIOUS_USER_TURN_PREVIEW_MAX_CHARS * 4]
+                self.preview = " ".join(text.split())[:PREVIOUS_USER_TURN_PREVIEW_MAX_CHARS]
+                self.message_id = str(getattr(row, "message_id", "") or "")
+            return selected
+
+        return observed
+
+    # LLM: 群 owner 的历史行不带逐条发言人身份，无法证明上一条是同一成员说的，所以不冻结；系统任务、IM 任务回执和
+    #   插件请求不是用户对话轮，也不冻结。发起人沿 actor_from_scope 同一规则（本地通道为空），召回前再按
+    #   owner/request/actor 复核。
+    # 函数用途: 把观察结果冻结成带 owner/thread/request/actor 身份的 PreviousUserTurn，没有合格行时返回 None。
+    def freeze(self, agent, thread_id: str, request: dict, request_id: str, scope) -> PreviousUserTurn | None:
+        from ..conversation.channels import supports_transcript_delivery
+
+        home = getattr(agent, "home_paths", None)
+        metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+        if (not self.preview or not thread_id or not request_id or getattr(home, "owner_kind", "") == "group"
+                or request.get("system_task") or request.get("host_im_task_ack") or request.get("source") == "plugin"
+                or metadata.get("plugin_execution_policy")):
+            return None
+        channel = getattr(scope, "channel", "") if scope is not None else ""
+        actor_id = ("" if scope is None or supports_transcript_delivery(channel)
+                    else str(getattr(scope, "channel_user_id", "") or ""))
+        return PreviousUserTurn(preview=self.preview, owner_id=str(getattr(home, "owner_id", "") or ""),
+                                thread_id=thread_id, request_id=request_id, actor_id=actor_id,
+                                message_id=self.message_id)

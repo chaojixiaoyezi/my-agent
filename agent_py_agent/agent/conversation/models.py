@@ -181,6 +181,23 @@ class MessageLogEntry:
         )
 
 
+# 上一条用户消息预览最多保留的字符数：只够做一次补充词面查询，不复制长正文。
+PREVIOUS_USER_TURN_PREVIEW_MAX_CHARS = 300
+
+
+# LLM: 宿主在冻结历史来源的同一遍选择里记下的紧邻上一条用户消息：只有有界预览和身份，不是历史权威，
+#   不进 provider 消息、不持久化；召回使用前按 owner/request/actor 复核，对不上就不用。
+# 类用途: 把上一轮用户原话的有界预览及其冻结身份交给本轮自动召回做第二路词面查询。
+@dataclass(frozen=True)
+class PreviousUserTurn:
+    preview: str
+    owner_id: str
+    thread_id: str
+    request_id: str
+    actor_id: str = ""
+    message_id: str = ""
+
+
 # LLM: This immutable projection is the only provider-facing seed for completed conversation
 # history. It carries already-bounded raw turns (or one frozen read-only source of them) plus one
 # committed Compact summary; runtime adapters may change role encoding but must not re-window the
@@ -196,6 +213,9 @@ class ConversationHistorySeed:
     # 只在原 native/text 准备边界解析，不能与具体内容同时成为权威。
     # 字段用途: 让宿主延后物化已裁决的完整历史。
     source: Any = None
+    # LLM: 仅供本轮召回的旁路事实，不参与种子相等比较、不进 provider 历史；只有前台 Gateway 宿主会填写。
+    # 字段用途: 携带宿主冻结的上一条用户消息预览（PreviousUserTurn），没有时为 None。
+    previous_user_turn: PreviousUserTurn | None = field(default=None, compare=False, repr=False)
 
     # LLM: 互斥在构造时校验，发现同时携带来源与具体内容即拒绝，避免两份权威。
     # 函数用途: 保证种子要么是具体历史、要么是只读来源。

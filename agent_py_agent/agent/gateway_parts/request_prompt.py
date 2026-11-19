@@ -69,6 +69,7 @@ def gateway_conversation_history_seed(
         compact_generation=(conversation.compact_context.view.generation if conversation.compact_context is not None
                             else max(0, int(conversation.compact_generation or 0))),
         source=conversation.history_source,
+        previous_user_turn=getattr(conversation, "previous_user_turn", None),
     )
 
 
