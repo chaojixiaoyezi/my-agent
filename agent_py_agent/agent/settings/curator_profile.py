@@ -146,3 +146,65 @@ def _default_profile_id(agent: object) -> str:
         return str(read_model_profiles(model_profiles_path(agent.home_paths)).get("selected") or "")
     except (ModelProfileError, OSError):
         return ""
+
+
+# 后台记忆提取停用原因到中文说明；键是结构化原因码，展示层只查表，不解析文本。
+_EXTRACTION_REASON_TEXT = {
+    "owner_memory_disabled": "记忆总开关已关闭",
+    "curator_disabled": "后台记忆整理开关 memory_curator_enabled 已关闭",
+    "profile_not_configured": "还没有设置后台辅助模型",
+    "profile_unavailable": "设置的后台辅助模型现在用不了",
+    "cooldown": "后台辅助模型刚连续出错，正在冷却",
+}
+
+
+# LLM: 状态读取只看开关、档案编号、本 owner 模型目录与本进程冷却表：不建后端、不连网络、不读记忆正文。
+#   顺序与网关准入（_curator_run_allowed）一致：总闸 → 整理开关 → 档案 → 档案可用 → 冷却。
+#   memory_enabled 由调用方按已解析的 owner 策略传入；冷却表是进程内的，别的进程里的冷却这里看不到。
+# 函数用途: 给 /memory、候选列表与自我目录统一给出后台记忆提取是否在跑及停用原因。
+def curator_extraction_status(host: object, *, memory_enabled: bool = True) -> dict[str, object]:
+    config = getattr(host, "config", None)
+    if not memory_enabled:
+        return {"extraction": "disabled", "disabled_reason": "owner_memory_disabled"}
+    if not bool(getattr(config, "memory_curator_enabled", True)):
+        return {"extraction": "disabled", "disabled_reason": "curator_disabled"}
+    profile_id = effective_auxiliary_model_profile(config)
+    if not profile_id:
+        return {"extraction": "disabled", "disabled_reason": "profile_not_configured"}
+    try:
+        model_config = curator_model_config(host, profile_id)
+    except ModelNotConfiguredError as exc:
+        return {"extraction": "disabled", "disabled_reason": "profile_unavailable", "profile_id": profile_id,
+                "profile_reason": str(exc.profile_reason or "")}
+    except (AttributeError, TypeError, ValueError) as exc:
+        # 宿主缺 home/config 等结构时说不清开没开，标 unknown 并带异常类型，不能当成已关闭或已开启。
+        return {"extraction": "unknown", "disabled_reason": "status_unreadable", "profile_id": profile_id,
+                "error_type": type(exc).__name__}
+    remaining = auxiliary_profile_cooldown_remaining(profile_id)
+    if remaining > 0:
+        return {"extraction": "disabled", "disabled_reason": "cooldown", "profile_id": profile_id,
+                "cooldown_remaining_seconds": int(remaining) + 1}
+    return {"extraction": "enabled", "profile_id": profile_id,
+            "model": str(getattr(model_config, "model_name", "") or "")}
+
+
+# LLM: 只按结构化字段拼一行中文；未知原因原样显示原因码，不猜。设置入口写清 TUI 菜单与管理员命令。
+# 函数用途: 把后台记忆提取状态渲染成 /memory 输出里的一行说明。
+def curator_extraction_status_line(status: dict[str, object]) -> str:
+    if status.get("extraction") == "enabled":
+        label = str(status.get("model") or status.get("profile_id") or "")
+        return f"后台记忆提取：已开启（后台辅助模型 {label}），聊天里提到的偏好和事实会在后台自动整理。"
+    if status.get("extraction") == "unknown":
+        return f"后台记忆提取：状态读不出（{status.get('error_type') or '原因未知'}），本次没有改动任何设置。"
+    reason = str(status.get("disabled_reason") or "")
+    text = _EXTRACTION_REASON_TEXT.get(reason, reason or "原因未知")
+    if reason == "cooldown":
+        hint = f"约 {status.get('cooldown_remaining_seconds', 0)} 秒后自动重试。"
+    elif reason in {"profile_not_configured", "profile_unavailable"}:
+        hint = ("可在终端 /model →「默认模型与共享」→「后台辅助模型」选择，"
+                "或由管理员 /settings set memory_curator_model_profile <档案编号>（会额外消耗 token）。")
+    elif reason == "curator_disabled":
+        hint = "管理员可用 /settings set memory_curator_enabled true 打开。"
+    else:
+        hint = ""
+    return f"后台记忆提取：已停用（{text}）；只有你明确让我记住的内容才会保存。{hint}"

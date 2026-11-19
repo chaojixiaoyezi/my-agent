@@ -19,16 +19,21 @@ class GatewayClientMemoryResult:
     ok: bool
     records: tuple[dict[str, object], ...] = ()
     error_code: str = ""
+    # 后台记忆提取状态（curator_extraction_status 的结构化投影）；只在请求显式带 include_status 时才有。
+    status: dict[str, object] | None = None
 
-    # LLM: 序列化字段是 HTTP 与各前端共用合同，新增字段必须保持向后兼容。
+    # LLM: 序列化字段是 HTTP 与各前端共用合同，新增字段必须保持向后兼容：没要状态的老请求回执逐字节不变。
     # 函数用途: 转换成可发送的 JSON 字典。
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "operation": self.operation,
             "ok": self.ok,
             "records": [dict(item) for item in self.records],
             "error_code": self.error_code,
         }
+        if self.status is not None:
+            payload["status"] = dict(self.status)
+        return payload
 
 
 # LLM: History result 分开保存预览、显示、向前分页和实时游标；游标只用于展示，不回灌模型。
@@ -82,12 +87,14 @@ def execute_gateway_client_memory(
     content: str = "",
     kind: str = "fact",
     limit: int = 5,
+    include_status: bool = False,
 ) -> GatewayClientMemoryResult:
     normalized = str(operation or "").strip().lower()
     if normalized not in {"recent", "search", "remember"}:
         return GatewayClientMemoryResult(normalized, False, error_code="UNSUPPORTED_OPERATION")
     try:
         owner_agent = resolve_gateway_scope_agent(base_agent, scope)
+        status = owner_extraction_status(owner_agent) if include_status and normalized == "recent" else None
         bounded_limit = _bounded_limit(limit)
         if normalized == "remember":
             record = owner_agent.remember(str(content or "").strip(), kind=str(kind or "fact"))
@@ -108,12 +115,23 @@ def execute_gateway_client_memory(
             False,
             error_code=type(exc).__name__,
         )
-    return GatewayClientMemoryResult(normalized, True, records=records)
+    return GatewayClientMemoryResult(normalized, True, records=records, status=status)
+
+
+# LLM: 只读：owner 记忆总闸取已解析的 owner 策略，其余同 curator_extraction_status；不建后端、不读记忆正文。
+# 函数用途: 为 /memory 回执给出这个 owner 的后台记忆提取状态。
+def owner_extraction_status(host: object, *, memory_enabled: bool | None = None) -> dict[str, object]:
+    from ..settings.curator_profile import curator_extraction_status
+
+    if memory_enabled is None:
+        memory_enabled = bool(getattr(getattr(host, "owner_policy", None), "memory_enabled", True))
+    return curator_extraction_status(host, memory_enabled=memory_enabled)
 
 
 # LLM: path必须来自已认证owner原runtime resolver；只读唯一JSONL叶子，limit与公开record字段复用原合同，不构造Agent/Memory或执行搜索/学习。
 # 函数用途: 为C recent返回正式长期记忆末尾记录，保原版本物化、容错和安全错误类别。
-def read_gateway_client_memory_from_path(path, *, limit: int = 5) -> GatewayClientMemoryResult:
+def read_gateway_client_memory_from_path(path, *, limit: int = 5,
+                                         status: dict[str, object] | None = None) -> GatewayClientMemoryResult:
     from ..memory_store.jsonl import read_memory_records_from_path
 
     try:
@@ -121,7 +139,7 @@ def read_gateway_client_memory_from_path(path, *, limit: int = 5) -> GatewayClie
                         for record in read_memory_records_from_path(path)[-_bounded_limit(limit):])
     except Exception as exc:  # noqa: BLE001 仅公开原错误类型，不泄露路径或异常正文
         return GatewayClientMemoryResult("recent", False, error_code=type(exc).__name__)
-    return GatewayClientMemoryResult("recent", True, records=records)
+    return GatewayClientMemoryResult("recent", True, records=records, status=status)
 
 
 # LLM: Count0保持原owner Agent解析及失败投影；之后复用同一Store叶子，不能把C或假宿主塞进Agent解析器。

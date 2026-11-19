@@ -181,6 +181,8 @@ def memory_projection(context):
                      for target, name in (("user", "用户画像"), ("agents", "工作约定"), ("soul", "人格语气")))
     if "session_search" in context.snapshot.available_tool_names:
         items.append(map_item("archive", "历史与归档", fields={"count": None, "next_read": next_read("session_search", {"mode": "thread_browse"})}))
+    if context.admin or "remember" in context.snapshot.available_tool_names:
+        items.append(_extraction_item(context))
     items.extend(_source_rule_metadata(context))
     if context.admin:
         tel, heat_status = _memory_telemetry_and_status(context)
@@ -240,6 +242,20 @@ def memory_projection(context):
         count_labels={"formal_entries": "正式条数"},
         summary="",
     )
+
+
+# LLM: 只投影开/停与结构化原因码；档案编号和模型名只给管理员。读取只看开关、档案目录与本进程冷却表，
+#   不建后端、不连网络、不读记忆正文；子代理与隔离范围在调用方已提前返回，这里不会被调用。
+#   非管理员只有本轮能用 remember 时才列（和“正式长期记忆”条目同一可见条件）。
+# 函数用途: 给自我目录一条“后台记忆提取”条目，说明聊天里的偏好会不会被后台自动整理。
+def _extraction_item(context):
+    from ..settings.curator_profile import curator_extraction_status
+
+    policy = getattr(context.agent, "owner_policy", None)
+    status = curator_extraction_status(context.agent, memory_enabled=bool(getattr(policy, "memory_enabled", True)))
+    if not context.admin:
+        status = {key: status[key] for key in ("extraction", "disabled_reason") if key in status}
+    return map_item("extraction", "后台记忆提取", fields=status)
 
 
 # LLM: 先完整管理员判据后取规范位置；不读取正文，也不调用服务构造器或提升文件权限。

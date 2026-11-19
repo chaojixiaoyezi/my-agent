@@ -28,7 +28,7 @@ from ..settings import AgentConfig
 from ..settings.defaults import context_window_or_default
 from ..user_space.approval_mode import is_permission_admin
 from .cache_layout import CacheStructuredPrompt
-from .memory_context import memory_context_text
+from .memory_context import MemoryContextOptions, memory_context_text
 from .runtime_injection import (
     InjectionValue,
     freeze_runtime_injections,
@@ -89,6 +89,8 @@ class ToolSections:
     # （避免文本+原生双份重复）。text 协议默认 False，行为不变。
     native_tool_use: bool = False
     self_map_available: bool = False
+    # 召回信封省略提示指向的查看工具（memory_search / remember / 空串只报条数）；默认保持旧提示。
+    memory_inspect_tool: str = "memory_search"
     selected_skill_ids: tuple[str, ...] | None = None
     required_skill_ids: tuple[str, ...] = ()
     in_use_method_ids: tuple[str, ...] = ()
@@ -318,7 +320,9 @@ class PromptBuilder:
         if not _is_isolated_scope(request.context_scope) and self.config.assistant_progress_updates_enabled:
             system_prompt += "\n\n" + _ASSISTANT_PROGRESS_GUIDANCE
         task_local = _is_task_local_context(request.context_scope)
-        memory_text = _memory_text([] if task_local else request.memories)
+        memory_text = _memory_text([] if task_local else request.memories,
+                                   MemoryContextOptions(_tools.memory_inspect_tool,
+                                                        str(getattr(self.config, "timezone", "") or "")))
         owner_scope = _owner_scope_text(self)
         if not task_local and (home_guide := _home_directory_guide(self)):
             owner_scope += "\n\n" + home_guide
@@ -654,10 +658,10 @@ def _prompt_build_request(
     )
 
 
-# LLM: 委托memory_context_text格式化记忆记录列表，保持记忆渲染契约单一入口。
+# LLM: 委托memory_context_text格式化记忆记录列表，保持记忆渲染契约单一入口；渲染选项与召回预算用同一工具快照。
 # 函数用途: 将召回的记忆记录格式化为注入提示词的文本段落。
-def _memory_text(memories: list[MemoryRecord]) -> str:
-    return memory_context_text(memories)
+def _memory_text(memories: list[MemoryRecord], options: MemoryContextOptions | None = None) -> str:
+    return memory_context_text(memories, options=options)
 
 
 # LLM: 本段文案仅作模型行为引导，真实权限由结构化owner/full-access策略裁决，绝不解析自然语言授权路径。

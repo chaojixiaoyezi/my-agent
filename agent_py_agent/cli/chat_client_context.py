@@ -243,21 +243,22 @@ class GatewayChatClientAgent:
         query: str = "",
         content: str = "",
         limit: int = 5,
+        include_status: bool = False,
     ) -> dict[str, object]:
-        status, body = self.post_gateway_json(
-            "/client/memory",
-            {
-                "operation": operation,
-                "query": query,
-                "content": content,
-                "kind": "fact",
-                "limit": max(1, int(limit or 5)),
-                "user_id": "local-agent",
-                "channel": "chat",
-                "conversation_id": str(session_id or "default"),
-            },
-            timeout=10.0,
-        )
+        payload: dict[str, object] = {
+            "operation": operation,
+            "query": query,
+            "content": content,
+            "kind": "fact",
+            "limit": max(1, int(limit or 5)),
+            "user_id": "local-agent",
+            "channel": "chat",
+            "conversation_id": str(session_id or "default"),
+        }
+        if include_status:
+            # 只有裸 /memory 要后台提取状态；其它请求的正文保持原样。
+            payload["include_status"] = True
+        status, body = self.post_gateway_json("/client/memory", payload, timeout=10.0)
         if body:
             return {**body, "http_status": status}
         if str(operation or "").strip().lower() == "remember":

@@ -721,14 +721,18 @@ class SkillLearningService:
             return self._retry_or_drop(path, request, exc, code="SKILL_LEARNING_PROCESSING_FAILED")
         return self._finish(path, request, event)
 
-    # LLM: 同时读取 live_cfg 与 guard_config 解析辅助模型 profile，缺省 guard_config 时仍能对齐冷却计数。
+    # LLM: 先看 live_cfg，再看 guard_config；第一个带档案字段或配置路径的对象说了算，和记忆整理同用
+    #   effective_auxiliary_model_profile（已保存的用户 YAML 优先）。它给出空串就是关闭，不再去问下一个对象。
     # 函数用途: 获取当前生效的辅助模型 profile 名称。
     def _auxiliary_profile(self) -> str:
+        from ..settings.curator_profile import effective_auxiliary_model_profile
+
         config_provider = getattr(self.runtime, "config_provider", None)
         live_cfg = config_provider() if callable(config_provider) else None
         for cfg in (live_cfg, getattr(self.runtime, "guard_config", None)):
-            if cfg is not None and hasattr(cfg, "memory_curator_model_profile"):
-                return str(getattr(cfg, "memory_curator_model_profile", "") or "").strip()
+            if cfg is not None and (hasattr(cfg, "memory_curator_model_profile")
+                                    or str(getattr(cfg, "config_path", "") or "").strip()):
+                return effective_auxiliary_model_profile(cfg)
         return ""
 
     # LLM: 统一保护首次与合并重试的受限模型调用：不确定执行异常原样上抛，正在运行返回忙等待，其余失败按 attempts 退避落盘。

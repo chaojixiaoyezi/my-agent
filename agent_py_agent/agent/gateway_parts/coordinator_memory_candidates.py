@@ -130,10 +130,24 @@ def _run_candidate_action(source, command, scope, resources, thread_id):
     services = MemoryCandidateServices(resources.authorities.candidates, resources.promotion,
                                        source._management_memory_binding.home.owner_id, resources)
     if command.operation in {'list', 'show', 'preview'}:
-        return run_memory_candidate_control_from_services(services, source.paths, command, scope, thread_id)
+        status = _list_extraction_status(source) if command.operation == 'list' else None
+        return run_memory_candidate_control_from_services(services, source.paths, command, scope, thread_id,
+                                                          extraction_status=status)
     try:
         with memory_preview_transaction(source, services, thread_id) as transaction:
             return run_memory_candidate_control_from_services(services, source.paths, command, scope,
                 thread_id, preview_transaction=transaction)
     except MemoryPreviewTransactionRejected as error:
         return memory_control_failure(error.code)
+
+
+# LLM: 绑定前已核过本人记忆总闸；档案按部署配置 + 本人模型目录只读解析，不建后端、不读候选或记忆正文。
+# 函数用途: 为协调器候选列表给出后台记忆提取状态。
+def _list_extraction_status(source):
+    from types import SimpleNamespace
+
+    from .client_service import owner_extraction_status
+
+    control = source.http_origin[8]
+    host = SimpleNamespace(home_paths=source._management_memory_binding.home, config=control.config)
+    return owner_extraction_status(host, memory_enabled=True)

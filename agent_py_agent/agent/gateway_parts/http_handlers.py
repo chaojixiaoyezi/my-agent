@@ -2358,6 +2358,7 @@ def handle_client_memory(handler, server) -> None:
             result = _read_coordinator_client_memory(
                 server, _gateway_control_scope(handler, body, user_id=user_id, channel=channel),
                 operation=str(body.get("operation") or ""), limit=_request_limit(body, default=5),
+                include_status=body.get("include_status") is True,
             )
     else:
         result = execute_gateway_client_memory(
@@ -2373,13 +2374,14 @@ def handle_client_memory(handler, server) -> None:
             content=str(body.get("content") or ""),
             kind=str(body.get("kind") or "fact"),
             limit=_request_limit(body, default=5),
+            include_status=body.get("include_status") is True,
         )
     handler._send_json(200, result.to_dict())
 
 
 # LLM: 只消费本次原HTTP control/runtime/paths/lease，读前后重核；原scope/owner与memory_path resolver唯一，配置不签权，不建foreign Agent/owner/索引。
 # 函数用途: 为C仅读本owner已有正式记忆，search/remember返回结构化未就绪；错误只公开安全类型。
-def _read_coordinator_client_memory(server, scope, *, operation, limit):
+def _read_coordinator_client_memory(server, scope, *, operation, limit, include_status=False):
     from ..user_space.home_layout import home_paths
     from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
     from ..user_space.runtime_paths import resolve_runtime_paths_for_agent
@@ -2404,13 +2406,28 @@ def _read_coordinator_client_memory(server, scope, *, operation, limit):
             base_home = home_paths(control.home_root)
             scoped_home = home_paths_with_owner(base_home, resolve_owner_home(control.home_root, owner))
             path = resolve_runtime_paths_for_agent(control.config, scoped_home.owner_home_dir, scoped_home).paths["memory_path"]
-            result = read_gateway_client_memory_from_path(path, limit=limit)
+            status = _coordinator_extraction_status(control.config, scoped_home) if include_status else None
+            result = read_gateway_client_memory_from_path(path, limit=limit, status=status)
         if server.control_plane is not control or server.drain_runtime is not runtime or server.paths is not paths:
             raise ValueError("http_original_control_required")
         require_http_transport(runtime, control=control, paths=paths)
         return result
     except Exception as exc:  # noqa: BLE001 不输出记忆、路径或异常正文，Count0原错误策略不变
         return GatewayClientMemoryResult(normalized, False, error_code=type(exc).__name__)
+
+
+# LLM: C 没有 owner Agent：总闸读该 owner 的有效策略，档案按部署配置 + 该 owner 模型目录解析；不建后端、不读记忆正文。
+#   冷却表是本进程的，后台整理若跑在别的进程，这里看不到那边的冷却。
+# 函数用途: 为协调器 recent 回执给出该 owner 的后台记忆提取状态。
+def _coordinator_extraction_status(config, scoped_home):
+    from types import SimpleNamespace
+
+    from ..user_space.owner_policy import resolve_effective_owner_policy
+    from .client_service import owner_extraction_status
+
+    policy = resolve_effective_owner_policy(scoped_home)
+    return owner_extraction_status(SimpleNamespace(home_paths=scoped_home, config=config),
+                                   memory_enabled=bool(policy.memory_enabled))
 
 
 # LLM: 历史先守原认证/scope/游标；C control/runtime任一存在都进原只读leaf，缺失/坏/撤权来源不得回退base或foreign Agent；两者None的Count0原wrapper保持。

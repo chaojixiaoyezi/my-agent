@@ -240,39 +240,51 @@ def _curator_backend(agent: object, profile_id: str) -> tuple[object, str, str, 
 
 
 # LLM: 记忆整理统一由 effective_auxiliary_model_profile 指定（留空关闭，指定时独占解析），绝不退回或按会话路由。
+#   每批现读档案：常驻 owner 运行中把 A 换成 B 或清空，下一批就按新值走，不用重启；档案编号没变时复用缓存的
+#   后端（单槽，只缓存建成功的），建不成的每批重解析，用户修好档案后下一批就能用。
 # 函数用途: 为后台记忆整理构造“会话 → 模型”的路由器，统一指向后台辅助模型。
 def _curator_model_router(agent: object, config: AgentConfig, curator_config: MemoryCuratorConfig):
-    from .memory_store.curator_models import CuratorModelRoute, CuratorModelRouting
-    from .settings.curator_profile import effective_auxiliary_model_profile
+    import threading
 
-    fixed = effective_auxiliary_model_profile(getattr(agent, "config", config)) or curator_config.model_profile
-    if fixed and _fixed_curator_profile_usable(agent, fixed):
-        return None
+    from .memory_store.curator_models import CuratorModelRoute, CuratorModelRouting
+
+    cache: dict[str, tuple[object, str, str]] = {}
+    lock = threading.Lock()
 
     def route(thread_ids: tuple[str, ...]) -> CuratorModelRouting:
-        auxiliary = effective_auxiliary_model_profile(getattr(agent, "config", config)) or curator_config.model_profile
+        auxiliary = _live_curator_profile(agent, config, curator_config)
         if not auxiliary:
-            backend, provider, model, fallback = _curator_backend(agent, "")
+            backend, _provider, _model, _fallback = _curator_backend(agent, "")
             return CuratorModelRouting(CuratorModelRoute("", backend, "", "", is_default=True))
-        backend, provider, model, fallback = _curator_backend(agent, auxiliary)
-        warnings = [f"curator_profile_unavailable_fallback:{fallback}"] if fallback else []
-        return CuratorModelRouting(CuratorModelRoute(auxiliary, backend, provider, model, is_default=True), warnings=tuple(warnings))
+        with lock:
+            cached = cache.get(auxiliary)
+        if cached is None:
+            backend, provider, model, fallback = _curator_backend(agent, auxiliary)
+            if fallback or getattr(backend, "name", "") == "unconfigured":
+                warnings = (f"curator_profile_unavailable_fallback:{fallback}",) if fallback else ()
+                return CuratorModelRouting(CuratorModelRoute(auxiliary, backend, provider, model, is_default=True),
+                                           warnings=warnings)
+            cached = (backend, provider, model)
+            with lock:
+                cache.clear()
+                cache[auxiliary] = cached
+        backend, provider, model = cached
+        return CuratorModelRouting(CuratorModelRoute(auxiliary, backend, provider, model, is_default=True))
 
     return route
 
 
+# LLM: 第一个带档案字段或配置路径的实时配置对象说了算（先 agent.config，再组合根传入的 config），它给出空串就是关闭，
+#   不再退回启动时的整理配置；两者都没有时才用启动时的 curator_config.model_profile。
+# 函数用途: 读出这一批记忆整理要用的后台辅助模型档案编号。
+def _live_curator_profile(agent: object, config: object, curator_config: MemoryCuratorConfig) -> str:
+    from .settings.curator_profile import effective_auxiliary_model_profile
 
-# LLM: 只读校验固定Curator模型档案在当前owner（含管理员共享目录）下是否可解析且含有效凭据，不实例化后端。
-# 函数用途: 判断指定的整理档案在本 owner 的目录（含管理员共享）里能不能解析到；只读，不建后端。
-def _fixed_curator_profile_usable(agent: object, profile_id: str) -> bool:
-    from .backends.errors import ModelNotConfiguredError
-    from .settings.curator_profile import curator_model_config
-
-    try:
-        curator_model_config(agent, profile_id)
-    except ModelNotConfiguredError:
-        return False
-    return True
+    for cfg in (getattr(agent, "config", None), config):
+        if cfg is not None and (hasattr(cfg, "memory_curator_model_profile")
+                                or str(getattr(cfg, "config_path", "") or "").strip()):
+            return effective_auxiliary_model_profile(cfg)
+    return str(getattr(curator_config, "model_profile", "") or "").strip()
 
 
 # LLM: 组合根是唯一允许将Memory Store与归档控制面桥接的适配层，一次调用批量扫描run_id集合的索引元数据。

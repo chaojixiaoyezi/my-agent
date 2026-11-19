@@ -1,3 +1,10 @@
+## 2026-11-19 记忆系统第一波收口（Memory Wave-1：S1–S5）
+
+```text
+agent_py_agent/tests/
+`-- test_mem_wave1_s1_extraction_status.py               # S1 后台记忆提取状态分类、/memory 线协议往返与旧 Gateway 兼容、候选列表状态行、辅助模型热切换与省略提示/本地日期回归单测
+```
+
 ## 2026-11-18 Gateway 压测修复（MAX1 gw-stress-fix：GW-18/GW-03/GW-01/GW-02/GW-11/C1/C2/C9/X4/X8）
 
 ```text

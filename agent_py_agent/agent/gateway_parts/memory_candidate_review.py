@@ -64,7 +64,7 @@ def candidate_display(candidate):
 
 # LLM: 列表仅投影编号和结构化状态，不展示正文或把候选误报正式记忆；原memory搜索仍保持不变。
 # 函数用途: 分页查看本人唯一候选库，并给出可复制的精确预览命令。
-def _list_candidates(services, command):
+def _list_candidates(services, command, extraction_status=None):
     unreadable = []
     try:
         rows = services.candidates.list(limit=0)
@@ -79,6 +79,12 @@ def _list_candidates(services, command):
     if offset + 20 < len(rows):
         details['next_command'] = '/memory candidates list ' + str(offset + 20)
     lines = ['记忆候选（尚未确认的内容不会正式保存）：']
+    if isinstance(extraction_status, dict):
+        # 后台记忆提取状态只多打一行说明，不参与任何审核判断。
+        from ..settings.curator_profile import curator_extraction_status_line
+
+        details['extraction_status'] = dict(extraction_status)
+        lines.insert(0, curator_extraction_status_line(extraction_status))
     lines += [row['candidate_id'] + ' ' + row['status'] + ' ' + row['promotion_target']
               + '\n/memory candidates preview ' + row['candidate_id'] for row in items]
     if unreadable:
@@ -323,15 +329,23 @@ def _services_for_review(services):
 # LLM: 仅认证直接控制组合根调用；所有读写保持同owner，错误不能把候选改成成功或回退到模型。
 # 函数用途: 分派列表、完整预览和单次人工确认。
 def run_memory_candidate_control(host, paths, command, scope, thread_id):
+    status = None
+    if command.operation == 'list':
+        from .client_service import owner_extraction_status
+
+        # 调用方已核过本人记忆总闸开启，这里只补后台提取状态。
+        status = owner_extraction_status(host, memory_enabled=True)
     services = MemoryCandidateServices(host.memory_candidates, host.memory_promotion, host.home_paths.owner_id)
-    return run_memory_candidate_control_from_services(services, paths, command, scope, thread_id)
+    return run_memory_candidate_control_from_services(services, paths, command, scope, thread_id,
+                                                      extraction_status=status)
 
 
 # LLM: 只接真实三引用束；原7动作、分页/显示/TTL/默认writer不变，C只能传本栈固定transaction，不接受writer callback。
 # 函数用途: 让原Agent与C同holder资源执行完全相同的候选审核算法。
-def run_memory_candidate_control_from_services(services, paths, command, scope, thread_id, *, preview_transaction=None):
+def run_memory_candidate_control_from_services(services, paths, command, scope, thread_id, *, preview_transaction=None,
+                                                extraction_status=None):
     if command.operation == 'list':
-        return _list_candidates(services, command)
+        return _list_candidates(services, command, extraction_status)
     if command.operation in {'show', 'preview'}:
         return _preview(services, paths, command, scope, thread_id)
     return _resolve_preview(services, paths, command, scope, thread_id, preview_transaction=preview_transaction)

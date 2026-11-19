@@ -14,6 +14,7 @@ from ..prompting_parts.builder import (
     ToolSections,
     render_prepared_prompt,
 )
+from ..prompting_parts.memory_context import memory_inspect_tool
 from ..prompting_parts.runtime_injection import InjectionValue
 from ..tooling.runtime_contracts import ToolChoice, ToolProtocolSnapshot
 from ..tooling.self_map_availability import self_map_available
@@ -143,6 +144,7 @@ def tool_loop_prompt_request(
             execution_facts_section=execution_facts,
             native_tool_use=native_tool_use_active(params),
             self_map_available=self_map_available(params.tool_runtime_snapshot, params.allowed_tools),
+            memory_inspect_tool=memory_inspect_tool(params.tool_runtime_snapshot, params.allowed_tools),
         ),
         clock_context_override=resolved_clock,
     )

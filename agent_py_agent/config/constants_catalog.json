@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1539,
+  "count": 1540,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8610,6 +8610,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "提示词中归属边界与工作区事实共享的字符预算上限。"
+    },
+    {
+      "name": "_VALIDITY_MAX_CHARS",
+      "file": "agent_py_agent/agent/prompting_parts/memory_context.py",
+      "value": 64,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "有效期字段的最大展示字符数；超长值不是合法时间，直接不展示。"
     },
     {
       "name": "PERSONA_UPDATES_MAX_CHARS",

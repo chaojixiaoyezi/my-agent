@@ -52,8 +52,11 @@ from ...memory_store.generation_manifest import ContextBudget, MemoryPolicyV2
 from ...path_access_policy import effective_owner_scope_root
 from ...prompting_parts.memory_context import (
     BudgetedMemoryRecords,
+    MemoryContextOptions,
     is_memory_context_admissible,
+    memory_context_options,
     memory_context_text,
+    memory_inspect_tool,
 )
 from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
@@ -333,14 +336,20 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         routed_context,
     )
 
-    memories = _formal_memories_for_request(
-        agent,
-        request,
-        routed_context,
-        recall_scope=recall_scope,
-        long_term_memories=long_term_memories,
-        skip_formal_recall=recall_suppressed,
+    # 预算预估与最终提示构建用同一份渲染选项（同一工具快照、同一时区），省略提示的长度才对得上。
+    render_options = MemoryContextOptions(
+        memory_inspect_tool(tool_runtime_snapshot, getattr(request, "allowed_tools", None)),
+        str(getattr(agent.config, "timezone", "") or ""),
     )
+    with memory_context_options(render_options):
+        memories = _formal_memories_for_request(
+            agent,
+            request,
+            routed_context,
+            recall_scope=recall_scope,
+            long_term_memories=long_term_memories,
+            skip_formal_recall=recall_suppressed,
+        )
 
     resume_context_result, resume_context_section = _resume_context_for_request(
         agent,

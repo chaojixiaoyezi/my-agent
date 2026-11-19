@@ -510,24 +510,53 @@ def _handle_memory_command(
         return None
     query = user[len("/memory"):].strip()
     if getattr(ctx.agent, "gateway_client_only", False) is True:
-        result = ctx.agent.request_memory(
-            operation="search" if query else "recent",
-            session_id=ctx.conversation_id,
-            query=query,
-            limit=ctx.memory_limit,
-        )
+        if query:
+            result = ctx.agent.request_memory(
+                operation="search", session_id=ctx.conversation_id, query=query, limit=ctx.memory_limit,
+            )
+        else:
+            result = ctx.agent.request_memory(
+                operation="recent", session_id=ctx.conversation_id, query="", limit=ctx.memory_limit,
+                include_status=True,
+            )
         if not result.get("ok"):
             ctx.print_line(
                 "记忆读取失败："
                 + str(result.get("error_code") or "GATEWAY_UNAVAILABLE")
             )
             return True
+        if not query:
+            _print_extraction_status(ctx, result.get("status"))
         records = result.get("records")
         _print_memory_records(ctx, records if isinstance(records, list) else [])
         return True
+    local_status = None if query else _local_extraction_status(ctx.agent)
+    if local_status is not None:
+        _print_extraction_status(ctx, local_status)
     records = ctx.agent.recall(query, ctx.memory_limit) if query else _recent_memory(ctx)
     _print_memory_records(ctx, records)
     return True
+
+
+# LLM: 状态行由程序按结构化字段打印；老 Gateway 回执没有 status 时明说“没返回”，不猜开没开。
+# 函数用途: 在裸 /memory 输出顶部打印一行后台记忆提取状态。
+def _print_extraction_status(ctx: SlashCommandContext, status: object) -> None:
+    from ...agent.settings.curator_profile import curator_extraction_status_line
+
+    if isinstance(status, dict):
+        ctx.print_line(curator_extraction_status_line(status))
+    else:
+        ctx.print_line("后台记忆提取：Gateway 没有返回状态（可能是旧版本），开没开请用 /model 查看后台辅助模型。")
+
+
+# 函数用途: 无 Gateway 终端直接按本地 Agent 读取后台记忆提取状态（只读，不建后端）。
+def _local_extraction_status(agent: object) -> dict[str, object] | None:
+    from ...agent.settings.curator_profile import curator_extraction_status
+
+    if getattr(agent, "config", None) is None or getattr(agent, "home_paths", None) is None:
+        return None
+    policy = getattr(agent, "owner_policy", None)
+    return curator_extraction_status(agent, memory_enabled=bool(getattr(policy, "memory_enabled", True)))
 
 
 def _recent_memory(ctx: SlashCommandContext):

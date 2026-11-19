@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -567,8 +568,12 @@ def test_a_fixed_curator_profile_disables_routing(owner):
     from agent_py_agent.agent.core import _curator_model_router
     from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig as Config
 
-    host, default_id, _other_id, _threads = owner
-    assert _curator_model_router(host, host.config, Config(model_profile=default_id)) is None
+    host, default_id, _other_id, threads = owner
+    host.config.memory_curator_model_profile = default_id
+    routing = _curator_model_router(host, host.config, Config(model_profile=default_id))(tuple(threads))
+    # 指定档案时整批只走这一组：不按会话分组，也不带退回警告。
+    assert routing.default.group_key == default_id and routing.default.model == "MiniMax-M2.7"
+    assert routing.routes == {} and routing.thread_groups == {} and routing.warnings == ()
 
 
 # 函数用途: 在 owner 夹具的同一配置目录下建管理员，加两个模型：team-model 设为其他用户的初始模型，shared-extra 只共享。
@@ -604,7 +609,10 @@ def test_router_resolves_admin_shared_models_in_the_owners_own_catalog(tmp_path,
 
     assert routing.default.backend.name == "unconfigured" and routing.default.model == ""
     assert routing.routes == {}
-    assert _curator_model_router(host, host.config, Config(model_profile="shared:" + extra_id)) is None
+    host.config.memory_curator_model_profile = "shared:" + extra_id
+    shared = _curator_model_router(host, host.config, Config(model_profile="shared:" + extra_id))(())
+    assert shared.default.group_key == "shared:" + extra_id and shared.default.model == "shared-extra"
+    assert shared.warnings == ()
 
 
 def test_unresolvable_fixed_profile_falls_back_to_each_owners_default(tmp_path, owner):
@@ -613,8 +621,11 @@ def test_unresolvable_fixed_profile_falls_back_to_each_owners_default(tmp_path, 
 
     host, _default_id, _other_id, threads = owner
     admin, _team_id, _extra_id, private_id = _admin_with_shared_models(tmp_path)
-    assert _curator_model_router(admin, admin.config, Config(model_profile=private_id)) is None, "能解析到的 owner 照常用指定档案"
+    admin.config.memory_curator_model_profile = private_id
+    admin_routing = _curator_model_router(admin, admin.config, Config(model_profile=private_id))(())
+    assert admin_routing.default.model == "admin-private" and admin_routing.warnings == (), "能解析到的 owner 照常用指定档案"
 
+    host.config.memory_curator_model_profile = private_id
     config = Config(model_profile=private_id)
     backend, _provider, model = _build_memory_curator_backend(host, host.config, config)
     router = _curator_model_router(host, host.config, config)
@@ -678,3 +689,55 @@ def test_model_less_owner_without_any_default_fails_typed_and_records_the_source
 
     assert (result.status, result.failure_code) == ("failed", "CURATOR_MODEL_NOT_CONFIGURED")
     assert service.state_store.load().per_thread_cursors == {}
+
+
+# 函数用途: 造真实 state/daily/candidate/run-log 上的 Curator 服务，直接用组合根真实路由器（不是固定路由表）。
+def _service_with_router(tmp_path: Path, store: ConversationStore, router) -> MemoryCuratorService:
+    config = MemoryCuratorConfig(interval_seconds=60, turn_threshold=1, batch_message_limit=80, max_input_chars=40000,
+                                 timeout_seconds=1, max_retries=0, daily_finalize_hour=23)
+    return MemoryCuratorService(config=config, dependencies=MemoryCuratorDependencies(
+        backend=None, conversation_store=store, audit_dir=tmp_path / "audit",
+        state_store=MemoryCuratorStateStore(tmp_path / "memory" / "curator" / "state.json"),
+        daily_store=DailyMemoryStore(tmp_path / "memory" / "daily"),
+        candidate_service=CandidateService(tmp_path / "memory" / "candidates.jsonl"),
+        run_log=CuratorRunLog(tmp_path / "memory" / "curator" / "runs"),
+        identity=MemoryCuratorIdentity(provider="", model=""), model_router=router))
+
+
+def test_resident_curator_follows_live_auxiliary_switch_without_restart(tmp_path, owner, monkeypatch):
+    from agent_py_agent.agent import core
+    from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig as Config
+
+    host, profile_a, profile_b, _threads = owner
+    store, thread_a, thread_b, thread_of = _two_threads(tmp_path / "curated")
+    built: list[str] = []
+
+    def fake_backend(provider, config):
+        built.append(config.model_name)
+        return _EchoBackend(config.model_name, thread_of)
+
+    monkeypatch.setattr(core, "get_backend", fake_backend)
+    host.config.memory_curator_model_profile = profile_a
+    service = _service_with_router(tmp_path / "curated", store, core._curator_model_router(
+        host, host.config, Config(model_profile=profile_a)))
+
+    def run_with_new_messages(label: str):
+        for thread_id in (thread_a, thread_b):
+            thread_of[_append(store, thread_id, f"{label} 新的一句。", time.time())] = thread_id
+        return service.run(reason="admin")
+
+    assert service.run(reason="admin").status == "succeeded"
+    assert run_with_new_messages("同一档案").status == "succeeded"
+    assert built == ["MiniMax-M2.7"], "档案没变复用同一个后端，不每批重建"
+    host.config.memory_curator_model_profile = profile_b  # /model 切到 B，不重启
+    switched = run_with_new_messages("切到 B")
+    assert (switched.status, switched.model) == ("succeeded", "deepseek-v4-flash")
+    assert built == ["MiniMax-M2.7", "deepseek-v4-flash"]
+    cursors = service.state_store.load().per_thread_cursors
+    contents = [item.content for item in service.candidate_service.list()]
+    assert any(text.startswith("deepseek-v4-flash 记下") for text in contents)
+    host.config.memory_curator_model_profile = ""  # /model 关闭
+    off = run_with_new_messages("关闭后")
+    assert (off.status, off.failure_code) == ("failed", "CURATOR_MODEL_NOT_CONFIGURED"), "清空即停，不退回启动时的 A"
+    assert service.state_store.load().per_thread_cursors == cursors and built == ["MiniMax-M2.7", "deepseek-v4-flash"]
+    assert [item.content for item in service.candidate_service.list()] == contents, "关闭后不再产生候选"
