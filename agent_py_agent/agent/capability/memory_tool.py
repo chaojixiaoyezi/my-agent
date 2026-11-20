@@ -429,7 +429,8 @@ def _prepare_observation(
         return domain
     from ..memory_store.learning_source_authority import remember_source_projection
 
-    provenance = _observation_provenance(agent, operation, origin=origin, content=content)
+    provenance = _observation_provenance(agent, operation, origin=origin, content=content,
+                                         project=domain.scope.scope_type == "project" and action != "remove")
     observation_id = _observation_id(
         provenance=provenance,
         domain=domain,
@@ -675,6 +676,7 @@ def _observation_provenance(
     *,
     origin: str,
     content: str,
+    project: bool = False,
 ) -> _ObservationProvenance:
     message_refs: tuple[dict[str, object], ...] = ()
     tool_refs: tuple[dict[str, object], ...] = ()
@@ -687,6 +689,13 @@ def _observation_provenance(
     task_id = str(getattr(current, "task_id", "") or "").strip()
     run_id = str(getattr(current, "run_id", "") or "").strip()
     generic_refs = (({"ref_id": request_id, "kind": "request"},) if request_id else ())
+    if project:
+        from ..agent_core.runtime.loop_support import frozen_workspace_ref
+
+        workspace = frozen_workspace_ref(current)
+        if workspace is not None:
+            generic_refs = (*generic_refs, {"kind": "workspace_binding", "ref_id": workspace.workspace_ref,
+                                           "root": str(workspace.root), "root_identity": list(workspace.root_identity)})
     return _ObservationProvenance(
         request_id,
         task_id,

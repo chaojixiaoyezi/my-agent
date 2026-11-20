@@ -311,12 +311,9 @@ def _previous_turn_recall_query(agent, request, params) -> str:
     return preview
 
 
-# LLM: 第二路只走同一 scope 内的有界纯词面候选（不嵌入、不排队向量补齐、不记访问），用同一 recall_scope 按上一条
-#   用户消息判断兼容项目的词面证据；两路按 entry_id 加权 RRF 融合（当前轮优先），截到 memory_top_k 后再交给原有
-#   rerank、预算与唯一一次最终访问确认。第二路失败或没有可用预览时原样返回当前轮结果。
+# LLM: 上一轮预览只参与词面排序，沿用本轮冻结的正式记忆范围及原有预算和访问确认。
 # 函数用途: 把上一条用户消息的有界词面召回并入本轮长期记忆候选。
 def _fuse_previous_turn_recall(agent, request, params, recall_scope, current_hits, top_k, routed_context):
-    from ...memory_store.recall import runtime_recall_predicate
     from ...retrieval.lexical import reciprocal_rank_fusion
 
     query = _previous_turn_recall_query(agent, request, params)
@@ -354,22 +351,19 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     routed_context = _routed_memory_context_for_request(
         agent, request, skip_formal_recall=recall_suppressed,
     )
-    # 真机缺口(2026-08-06):普通对话(无 task)的召回只含 global/personal,project 记忆(如
-    # 用户喂入的小说知识库,scope=project:novel:xxx)不被召回 → 问小说"信息不足"。启用召回时
-    # 把记忆库中实际存在的 project scope 追加进召回范围,与 task 的 project:task 并存。
-    # gateway 的 request_id 会被当 task_id,故不能以 task_id 判"普通对话"。范围规则与只读检索
-    # 工具 memory_search 共用 memory_store.recall.runtime_long_term_scope。
+    workspace = frozen_workspace_ref(request) if not recall_suppressed else None
     recall_scope = (
         MemoryRecallScope.from_runtime(task_id=request.task_id, task_attributes=request.task_attributes)
         if recall_suppressed
         else runtime_long_term_scope(
             agent.memory, task_id=request.task_id, task_attributes=request.task_attributes,
             business_context=getattr(current, "business_context", None),
-            memory_recall_scope=selected_scope,
+            memory_recall_scope=selected_scope, purpose="auto_inject",
+            workspace_root=workspace.root if workspace is not None and workspace.is_current() else None,
+            query=request.user_prompt,
         )
     )
 
-    # 普通对话兼容并入的其它项目范围只在查询有词面证据时入选（与 memory_search 同一判定）。
     recall_predicate = runtime_recall_predicate(recall_scope, request.user_prompt)
     long_term_memories = [] if recall_suppressed else _optional_memory_read(
         lambda: (

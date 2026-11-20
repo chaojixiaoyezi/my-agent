@@ -1,5 +1,5 @@
 # LLM: memory_search 是主模型的只读长期记忆检索工具（P5-A 缺口 2，开关 enable_memory_search_tool，默认关）。
-#   只调记忆模块的 search_scoped_candidates_report：与自动召回同一混合检索、同一 scope 规则（runtime_long_term_scope），
+#   只调记忆模块的 search_scoped_candidates_report：与自动召回同一混合检索，显式检索可额外按项目筛选，
 #   不登记访问信号、不写/删/改正式条目、不进自动召回（不改 memory 注入与 memory_refs）。结果只是线索；
 #   检索方式（语义/关键词）原样取自检索层的结构化事实，不由本模块推断。改动时同步 test_memory_search_tool.py
 #   与 DECISION_MODEL_INTEGRATION.md 的“P5-A 缺口 2”节。
@@ -12,9 +12,11 @@ from typing import TYPE_CHECKING
 
 from ..conversation.host_actor import HostActorError, model_long_term_scope
 from ..memory_store.recall import (
+    MemoryRecallScope,
     formal_recall_suppressed,
     runtime_recall_predicate,
 )
+from ..memory_store.scope_contract import canonical_scope_key, scope_key_aliases
 from ..tooling.models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -37,7 +39,7 @@ MEMORY_SEARCH_MAX_COUNT = 10
 MEMORY_SEARCH_EXCERPT_CHARS = 300
 
 
-# LLM: schema 只开放 query/limit/kind 三个字段且 additionalProperties=false；写类参数由工具运行时在执行前拒绝。
+# LLM: schema 只开放 query/limit/kind/project 且 additionalProperties=false；写类参数由工具运行时在执行前拒绝。
 #   说明里写清“只是线索、不改自动召回、要改记忆用 remember”，但这些只是给模型的软说明，机器边界在实现里。
 # 函数用途: 生成 memory_search 的工具说明书（进工具目录）。
 def build_memory_search_model_spec() -> ToolModelSpec:
@@ -56,6 +58,8 @@ def build_memory_search_model_spec() -> ToolModelSpec:
                 "limit": {"type": "integer", "minimum": 1, "maximum": MEMORY_SEARCH_MAX_COUNT,
                           "description": f"最多返回几条，默认 {MEMORY_SEARCH_DEFAULT_COUNT}。"},
                 "kind": {"type": "string", "description": "可选，只看某类条目，常见 fact、event、project。"},
+                "project": {"type": "string", "minLength": 1,
+                            "description": "可选，只查一个项目。传项目键（如 project:alpha）或项目 ID（如 alpha）。"},
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -114,8 +118,19 @@ class MemorySearchTool(BaseTool):
         query = str(params.get("query") or "").strip()
         if not query:
             return _error("query 不能为空", "TOOL_INVALID_ARGUMENTS")
+        project = ""
+        if "project" in params:
+            try:
+                value = params["project"]
+                if not isinstance(value, str):
+                    raise ValueError("project")
+                project = canonical_scope_key("project", value)
+            except ValueError:
+                return _error("project 必须是非空项目键或项目 ID，例如 project:alpha。请修正后重新检索。",
+                              "TOOL_INVALID_ARGUMENTS")
         try:
-            predicate = _scope_predicate(self.agent, memory, str(params.get("kind") or "").strip(), query)
+            predicate = _scope_predicate(self.agent, memory, str(params.get("kind") or "").strip(), query,
+                                         project=project)
         except HostActorError as exc:
             return _error(f"{exc} 本次未读取记忆。请在原聊天核对绑定后重新发起检索。", exc.error_code)
         try:
@@ -134,10 +149,12 @@ class MemorySearchTool(BaseTool):
         return ToolHandlerOutcome("memory_search", True, json.dumps(payload, ensure_ascii=False))
 
 
-# LLM: 范围与自动召回同一规则（runtime_long_term_scope + runtime_recall_predicate）；kind 非空时只留 kind 完全相同的条目，不认别名。
-# 函数用途: 生成本次检索的过滤条件（当前 owner 记忆 + 本轮适用范围 + 可选类型）。
-def _scope_predicate(agent: object, memory: object, kind: str, query: str = ""):
-    scope = model_long_term_scope(agent, memory)
+def _scope_predicate(agent: object, memory: object, kind: str, query: str = "", *, project: str = ""):
+    scope = model_long_term_scope(agent, memory, purpose="explicit_recall", frozen_only=bool(project))
+    if project:
+        pairs = tuple(("project", key) for key in scope_key_aliases("project", project)
+                      if scope is None or scope.allows("project", key))
+        scope = MemoryRecallScope(pairs)
     return runtime_recall_predicate(scope, query, kind=kind)
 
 
@@ -158,12 +175,13 @@ def _entry_payload(record: object) -> dict[str, object]:
     attributes = attributes if isinstance(attributes, dict) else {}
     content = str(getattr(record, "content", "") or "")
     stamp = float(getattr(record, "updated_at", 0.0) or getattr(record, "created_at", 0.0) or 0.0)
+    scope = {label: str(attributes.get(label) or "") for label in ("scope_type", "scope_key")}
     return {
         "entry_id": str(getattr(record, "entry_id", "") or ""),
         "version": int(getattr(record, "version", 1) or 1),
         "kind": str(getattr(record, "kind", "") or ""),
-        "scope": {"scope_type": str(attributes.get("scope_type") or ""),
-                  "scope_key": str(attributes.get("scope_key") or "")},
+        "scope": scope,
+        **scope,
         "subject_key": str(attributes.get("subject_key") or ""),
         "updated_at": datetime.fromtimestamp(stamp, timezone.utc).isoformat() if stamp > 0 else "",
         "excerpt": content[:MEMORY_SEARCH_EXCERPT_CHARS],

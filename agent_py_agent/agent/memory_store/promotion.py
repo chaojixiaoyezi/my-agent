@@ -58,6 +58,7 @@ from ..user_space.owner_quota import (
     OwnerQuotaExceeded,
     OwnerQuotaLockContention,
 )
+from . import project_bindings
 from .candidate_models import (
     MemoryCandidate,
     MemoryScope,
@@ -1564,6 +1565,9 @@ class MemoryPromotionService(_PromotionCommitMixin):
         reviewer: str,
         outcome: _TargetCommit,
     ) -> MemoryPromotionResult:
+        if (outcome.changed and _promotion_target(candidate) == "long_term"
+                and candidate.proposed_action != "remove"):
+            _record_promoted_project_binding(self.persona.owner_home, candidate)
         if self.rule_notices_enabled:
             from .rule_notices import publish_promoted_rule
 
@@ -1961,6 +1965,29 @@ def _exact_content_entry_ids(
     )
 
 
+def _record_promoted_project_binding(owner_home: Path, candidate: MemoryCandidate) -> None:
+    scope = MemoryScope.from_value(candidate.scope)
+    if scope.scope_type != "project":
+        return
+    from ..tooling.registry_workspace import read_workspace_ref
+
+    for ref in candidate.evidence_refs:
+        if ref.get("kind") != "workspace_binding":
+            continue
+        workspace = read_workspace_ref({**ref, "workspace_ref": ref.get("ref_id")})
+        if workspace is None:
+            continue
+        try:
+            project_bindings.record(owner_home, scope.scope_key, workspace.root,
+                                    expected_identity=workspace.root_identity)
+        except (OSError, UnicodeError, ValueError) as exc:
+            # 正式记忆已提交，绑定失败不能改写其回执或宣布本次正式写入未发生。
+            logging.getLogger(__name__).warning(
+                "PROJECT_BINDING_WRITE_FAILED formal_memory_changed=true error_type=%s "
+                "next_action=check_owner_project_bindings_file", type(exc).__name__,
+            )
+
+
 # LLM: 长期事实 attributes 只保存短结构化 provenance/scope，不复制完整用户原话或工具输出。
 # 函数用途: 构造 long_term 记录元数据。
 def _long_term_attributes(candidate: MemoryCandidate) -> dict[str, object]:
@@ -1982,7 +2009,7 @@ def _long_term_attributes(candidate: MemoryCandidate) -> dict[str, object]:
                 *candidate.source_message_refs,
                 *candidate.source_tool_refs,
                 *candidate.source_artifact_refs,
-                *candidate.evidence_refs,
+                *(ref for ref in candidate.evidence_refs if ref.get("kind") != "workspace_binding"),
             ]
         )[:32],
     }

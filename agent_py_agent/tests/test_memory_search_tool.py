@@ -72,7 +72,7 @@ def test_switch_on_registers_read_only_tool_with_closed_schema(tmp_path):
     assert tool.runtime_policy.effect_resolver.default_effect == "read_only"
     assert tool.runtime_policy.effect_resolver.by_parameter == ()
     schema = tool.model_spec.input_schema
-    assert schema["additionalProperties"] is False and set(schema["properties"]) == {"query", "limit", "kind"}
+    assert schema["additionalProperties"] is False and set(schema["properties"]) == {"query", "limit", "kind", "project"}
     assert "memory_search" in agent.tools.runtime_snapshot(run_id="r").available_tool_names
 
 
@@ -97,7 +97,7 @@ def test_only_current_scope_entries_with_keyword_mode_and_fallback_reason(tmp_pa
 
     payload = _call(agent, {"query": "借阅服务端口"})
 
-    # 与自动召回同一范围：personal 加记忆库里实际存在的 project；别的公司与无范围旧记录查不到。
+    # 默认显式范围：personal 加记忆库里实际存在的 project；别的公司与无范围旧记录查不到。
     assert {entry["entry_id"] for entry in payload["entries"]} == {personal, project}
     assert payload["retrieval"]["mode"] == "keyword"
     assert payload["retrieval"]["fallback_reason"] == "semantic_recall_disabled"
