@@ -8,6 +8,7 @@ import hashlib
 import heapq
 import io
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -44,7 +45,7 @@ from ..local_storage.records import derived_terminal_expired
 from ..settings.config import AgentConfig
 from ..user_space.directory_paging import directory_page
 from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
-from . import reference_pins, retention_scan_budget
+from . import candidate_node_maintenance, reference_pins, retention_scan_budget
 from .candidate_ledger import (
     FORMAT,
     _validate_manifest,
@@ -114,20 +115,38 @@ _CANDIDATE_NODE_MARKS = OrderedDict()
 
 @dataclass(frozen=True, slots=True)
 class _CandidateNodeProof:
+    """一轮完整回收在 observed_at 时刻证明的可达集合；reachable 为 None 表示尚未从检查点读回。"""
     observed_at: float
     file_clock_ns: int
-    reachable: set[str]
+    reachable: frozenset[str] | set[str] | None
+    epoch: str = ""
+    marked: int = 0
+    digest: str = ""
 
 
 @dataclass(slots=True)
 class _CandidateNodeMark:
-    generation: tuple
-    pending: list
+    """一个回收周期：标记集合覆盖周期内并入的每个头，清扫只在当前头已并入且前沿为空时进行。
+
+    merged 表示周期内并入过不止一个头；只见过一个头的周期，其集合正是当前树，完成后可原样续用。
+    """
+    records: tuple
+    epoch: str
+    head: list | None = None
+    merged: bool = False
+    pending: list = field(default_factory=list)
+    queued: set[str] = field(default_factory=set)
     reachable: set[str] = field(default_factory=set)
+    fresh: list = field(default_factory=list)
+    marked: int = 0
+    hasher: Any = field(default_factory=hashlib.sha256)
     previous: _CandidateNodeProof | None = None
     root_page: dict = field(default_factory=dict)
     shard_prefix: str = ""
     shard_page: dict = field(default_factory=dict)
+    committed: tuple | None = None
+    loading: Any = None
+    proof_loading: Any = None
 
 
 def _candidate_page(directory, page, budget):
@@ -226,25 +245,134 @@ def _candidate_authority(home, path, directory):
     return generation, changed_ns
 
 
-def _candidate_mark(path, generation):
+def _remember_candidate_mark(path, mark):
     with _PIN_BUILDS_LOCK:
-        mark = _CANDIDATE_NODE_MARKS.get(path)
-        if mark is not None and mark.generation == generation:
-            _CANDIDATE_NODE_MARKS.move_to_end(path)
-            return mark
-    header = read_manifest(path)
-    if header is None and generation[1] is not None:
-        # 旧 JSONL 可继续读。只有明确的索引清单或确认证明不存在的头可授权扫除节点。
-        return None
-    pending = [header["root"]] if header is not None and header["root"] is not None else []
-    previous = mark.previous if mark is not None and mark.generation[0] == generation[0] else None
-    replacement = _CandidateNodeMark(generation, pending, previous=previous)
-    with _PIN_BUILDS_LOCK:
-        _CANDIDATE_NODE_MARKS[path] = replacement
+        _CANDIDATE_NODE_MARKS[path] = mark
         _CANDIDATE_NODE_MARKS.move_to_end(path)
         while len(_CANDIDATE_NODE_MARKS) > _pin_capacity():
             _CANDIDATE_NODE_MARKS.popitem(last=False)
-    return replacement
+
+
+def _push_candidate_reference(mark, reference):
+    """前沿只收未标记、未排队的节点；引用形状按读取时的同一规则先核对，保证可无损写入游标。"""
+    ref = reference["ref"]
+    name = ref["ref"]
+    if name in mark.reachable or name in mark.queued:
+        return
+    if (not isinstance(name, str) or not candidate_node_name(name) or name != f"{ref['sha256']}.json"
+            or type(ref["byte_length"]) is not int):
+        raise OSError("immutable index reference is invalid")
+    mark.pending.append(reference)
+    mark.queued.add(name)
+
+
+def _pending_reference(text):
+    digest, separator, size = text.partition(":") if isinstance(text, str) else ("", "", "")
+    if (not separator or not candidate_node_name(digest + ".json")
+            or not (size.isascii() and size.isdigit()) or int(size) <= 0):
+        raise ValueError("candidate scan cursor frontier is invalid")
+    return {"ref": {"sha256": digest, "byte_length": int(size), "ref": digest + ".json"}, "maximum": None}
+
+
+def _candidate_mark_cursor(mark):
+    """游标快照只含已追加到日志的标记；前沿与清扫位置和该前缀一一对应。"""
+    state = {
+        "epoch": mark.epoch, "records": list(mark.records), "head": mark.head, "merged": mark.merged,
+        "marked": mark.marked, "digest": mark.hasher.hexdigest(),
+        "pending": [f"{reference['ref']['sha256']}:{reference['ref']['byte_length']}" for reference in mark.pending],
+        "root_page": deepcopy(mark.root_page), "shard_prefix": mark.shard_prefix, "shard_page": deepcopy(mark.shard_page),
+    }
+    proof = mark.previous
+    return state, None if proof is None else {
+        "epoch": proof.epoch, "marked": proof.marked, "digest": proof.digest,
+        "observed_at": proof.observed_at, "file_clock_ns": proof.file_clock_ns,
+    }
+
+
+def _valid_candidate_digest(value):
+    return type(value) is str and len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
+
+
+def _resume_candidate_proof(entry):
+    if not isinstance(entry, dict):
+        return None
+    epoch, marked, digest = entry.get("epoch"), entry.get("marked"), entry.get("digest")
+    observed, clock = entry.get("observed_at"), entry.get("file_clock_ns")
+    if not (candidate_node_maintenance.valid_epoch(epoch) and type(marked) is int and marked >= 0
+            and _valid_candidate_digest(digest) and type(observed) in (int, float) and math.isfinite(observed)
+            and type(clock) is int and clock >= 0):
+        return None
+    return _CandidateNodeProof(float(observed), clock, None, epoch, marked, digest)
+
+
+def _resume_candidate_mark(entry, proof, records):
+    """只采用形状完整、属于当前记录目录的已提交快照；其余从当前头重新标记，旧证明仅在同一目录时保留。"""
+    if not isinstance(entry, dict) or entry.get("records") != list(records):
+        return _CandidateNodeMark(records, secrets.token_hex(16))
+    previous = _resume_candidate_proof(proof)
+    fresh = _CandidateNodeMark(records, secrets.token_hex(16), previous=previous)
+    epoch, marked, digest, head = entry.get("epoch"), entry.get("marked"), entry.get("digest"), entry.get("head")
+    prefix, pending, merged = entry.get("shard_prefix"), entry.get("pending"), entry.get("merged")
+    if not (candidate_node_maintenance.valid_epoch(epoch) and type(marked) is int and marked >= 0
+            and _valid_candidate_digest(digest) and (head is None or (type(head) is list and head
+                                                                     and all(type(value) is int for value in head)))
+            and type(merged) is bool and type(pending) is list and isinstance(entry.get("root_page"), dict)
+            and isinstance(entry.get("shard_page"), dict) and type(prefix) is str
+            and (prefix == "" or (len(prefix) == 2 and all(ch in "0123456789abcdef" for ch in prefix)))):
+        return fresh
+    try:
+        references = [_pending_reference(text) for text in pending]
+    except ValueError:
+        return fresh
+    mark = _CandidateNodeMark(records, epoch, head=head, merged=merged, pending=references, marked=marked,
+                              previous=previous, root_page=deepcopy(entry["root_page"]), shard_prefix=prefix,
+                              shard_page=deepcopy(entry["shard_page"]))
+    mark.queued = {reference["ref"]["ref"] for reference in references}
+    mark.loading = candidate_node_maintenance.MarkLoad(epoch, marked, digest)
+    return mark
+
+
+def _candidate_mark(home, path, generation, progress, budget):
+    """优先续用与已提交游标一致的驻留状态；淘汰或重启后从游标与日志前缀重建，日志不可信时从当前头重来。"""
+    records = generation[0]
+    committed = (progress.get("mark"), progress.get("proof"))
+    with _PIN_BUILDS_LOCK:
+        mark = _CANDIDATE_NODE_MARKS.get(path)
+        if mark is not None and (mark.records != records or mark.committed != committed):
+            mark = None
+    if mark is None:
+        mark = _resume_candidate_mark(committed[0], committed[1], records)
+        mark.committed = deepcopy(committed)
+    _remember_candidate_mark(path, mark)
+    if mark.loading is not None:
+        loaded = mark.loading.advance(home, budget)
+        if loaded is False:
+            return mark
+        if loaded:
+            mark.reachable, mark.hasher, mark.loading = mark.loading.names, mark.loading.hasher, None
+        else:
+            # 日志缺失、截短或前缀不符：只丢弃本周期进度，不能用不完整集合授权删除。
+            replacement = _CandidateNodeMark(records, secrets.token_hex(16), previous=mark.previous)
+            replacement.committed = mark.committed
+            mark = replacement
+            _remember_candidate_mark(path, mark)
+    return mark
+
+
+def _incorporate_candidate_head(path, generation, mark):
+    """新头只并入当前周期的前沿，已标记子树保持有效；返回 False 表示头是旧 JSONL 格式。"""
+    head = list(generation[1]) if generation[1] is not None else None
+    if mark.head == head:
+        return True
+    header = read_manifest(path)
+    if header is None and generation[1] is not None:
+        # 旧 JSONL 可继续读。只有明确的索引清单或确认证明不存在的头可授权扫除节点。
+        return False
+    if header is not None and header["root"] is not None:
+        _push_candidate_reference(mark, header["root"])
+    mark.merged = mark.merged or mark.head is not None
+    mark.head = head
+    return True
 
 
 def _mark_candidate_references(index, mark, budget):
@@ -254,6 +382,7 @@ def _mark_candidate_references(index, mark, budget):
         if name in mark.reachable:
             budget.charge(entries=1)
             mark.pending.pop()
+            mark.queued.discard(name)
             continue
         if type(size) is not int or not 0 < size <= budget.max_bytes:
             raise ValueError("candidate node reference length exceeds the retention scan budget")
@@ -262,8 +391,68 @@ def _mark_candidate_references(index, mark, budget):
         node = index._load(reference)
         budget.charge(entries=1, size=size)
         mark.pending.pop()
+        mark.queued.discard(name)
         mark.reachable.add(name)
-        mark.pending.extend(candidate_node_children(node))
+        mark.fresh.append(name)
+        for child in candidate_node_children(node):
+            _push_candidate_reference(mark, child)
+
+
+def _commit_candidate_mark(home, path, mark, progress, errors):
+    """先把本片新标记追加到日志，再把对应快照放进游标；写入失败时游标保持上次已提交状态。"""
+    if mark.fresh:
+        payload = candidate_node_maintenance.encode_marks(mark.fresh)
+        try:
+            appended = candidate_node_maintenance.append_marks(home, mark.epoch, mark.marked, payload)
+        except OSError as exc:
+            errors.append(_candidate_node_issue("保存检查点", candidate_node_maintenance.workspace(home), exc))
+            _remember_candidate_mark(path, mark)
+            return
+        if appended:
+            mark.hasher.update(payload)
+            mark.marked += len(mark.fresh)
+            mark.fresh.clear()
+        else:
+            # 已提交前缀被移除：内存集合仍正确但无法再续写，改从当前头开始新周期。
+            replacement = _CandidateNodeMark(mark.records, secrets.token_hex(16), previous=mark.previous)
+            mark = replacement
+    mark.committed = _candidate_mark_cursor(mark)
+    progress["mark"], proof = deepcopy(mark.committed)
+    if proof is None:
+        progress.pop("proof", None)
+    else:
+        progress["proof"] = proof
+    _remember_candidate_mark(path, mark)
+
+
+def _candidate_proof_ready(home, mark, now, budget):
+    """只在旧证明已满宽限、可能授权回收时读回其集合；读回失败则放弃该证明，只剩按时间判定。"""
+    proof = mark.previous
+    if proof is None or proof.reachable is not None or proof.observed_at > now - _CANDIDATE_NODE_GRACE_SECONDS:
+        return True
+    load = mark.proof_loading
+    if load is None or load.epoch != proof.epoch:
+        load = mark.proof_loading = candidate_node_maintenance.MarkLoad(proof.epoch, proof.marked, proof.digest)
+    loaded = load.advance(home, budget)
+    if loaded is False:
+        return False
+    mark.proof_loading = None
+    mark.previous = replace(proof, reachable=load.names) if loaded else None
+    return True
+
+
+def _retire_candidate_checkpoints(home, path, progress, budget, errors):
+    """保留已提交游标与驻留状态引用的日志，其余是被取代的周期或未发表的尝试。"""
+    keep = {progress[key]["epoch"] for key in ("mark", "proof")
+            if isinstance(progress.get(key), dict) and isinstance(progress[key].get("epoch"), str)}
+    with _PIN_BUILDS_LOCK:
+        resident = _CANDIDATE_NODE_MARKS.get(path)
+    if resident is not None:
+        keep.update(item.epoch for item in (resident, resident.previous) if item is not None)
+    try:
+        candidate_node_maintenance.retire_marks(home, keep, budget)
+    except OSError as exc:
+        errors.append(_candidate_node_issue("清理检查点", candidate_node_maintenance.workspace(home), exc))
 
 
 def _sweep_candidate_node(directory, name, mark, now, authority_ns):
@@ -281,7 +470,7 @@ def _sweep_candidate_node(directory, name, mark, now, authority_ns):
         proof = mark.previous
         # 较新的无关清单不会重置旧孤儿的宽限。重新采用的节点必经新写或更新时间。
         old_enough = max(file_ns, authority_ns) / 1e9 <= cutoff or (
-            proof is not None and proof.observed_at <= cutoff
+            proof is not None and proof.reachable is not None and proof.observed_at <= cutoff
             and name not in proof.reachable and file_ns < proof.file_clock_ns
         )
         if not old_enough:
@@ -336,6 +525,7 @@ def _advance_candidate_nodes(home, path, directory, now, budget, progress, error
         progress["status"] = "transaction_pending"
         return False
     generation, changed_ns = authority
+    _retire_candidate_checkpoints(home, path, progress, budget, errors)
     migration = progress["migration"]
     while not budget.exhausted() and not _candidate_page_done(migration):
         with closing(_candidate_page(directory, migration, budget)) as names:
@@ -352,22 +542,40 @@ def _advance_candidate_nodes(home, path, directory, now, budget, progress, error
                     progress["migrated"] += moved
     if budget.exhausted():
         return True
-    mark = _candidate_mark(path, generation)
-    if mark is None:
+    mark = _candidate_mark(home, path, generation, progress, budget)
+    if mark.loading is not None:
+        return True
+    if not _incorporate_candidate_head(path, generation, mark):
         progress["status"] = "legacy_head"
         return False
     index = ImmutableJsonIndex(path.parent, (directory.name,))
     _mark_candidate_references(index, mark, budget)
-    if mark.pending or not _sweep_candidate_nodes(directory, mark, budget, now, changed_ns, progress, errors):
+    # 删除前当前头必须已并入且前沿为空；同一提交锁保证本片内头不会再变。
+    if (mark.pending or not _candidate_proof_ready(home, mark, now, budget)
+            or not _sweep_candidate_nodes(directory, mark, budget, now, changed_ns, progress, errors)):
+        _commit_candidate_mark(home, path, mark, progress, errors)
         return True
+    _commit_candidate_mark(home, path, mark, progress, errors)
+    if mark.fresh:
+        return True  # 本周期标记尚未落盘，完成前先在下一片重试追加。
     if mark.previous is None or now - mark.previous.observed_at >= _CANDIDATE_NODE_GRACE_SECONDS:
-        mark.previous = _CandidateNodeProof(now, time.time_ns(), mark.reachable)
-    mark.root_page = {}
+        # 证明的文件时钟取本片权威变更时间（文件系统时钟）：其后的重新采用必然不早于它。
+        # 集合取冻结副本：续用的周期以后并入新头时不能改变证明时刻的集合。
+        mark.previous = _CandidateNodeProof(now, changed_ns, frozenset(mark.reachable), mark.epoch, mark.marked,
+                                            mark.hasher.hexdigest())
+    if mark.merged:
+        # 并集含被取代的旧节点，下一周期须从当前头重新标记，它们才能被回收。
+        following = _CandidateNodeMark(mark.records, secrets.token_hex(16), previous=mark.previous)
+    else:
+        # 只见过一个头：集合正是当前树，续用同一周期与日志，下一轮只需从头清扫。
+        following = mark
+        following.root_page, following.shard_prefix, following.shard_page = {}, "", {}
+    _commit_candidate_mark(home, path, following, progress, errors)
     return False
 
 
 def advance_candidate_node_maintenance(home, *, now, config, scan_cursor):
-    """同一候选提交锁内运行一片迁移、标记及回收，游标走已有保留状态文件。"""
+    """同一候选提交锁内运行一片迁移、标记及回收；游标走已有保留状态文件，标记检查点只是其可丢弃附件。"""
     path = Path(home.owner_memory_candidates_jsonl)
     directory = candidate_records_directory(path)
     cursor = dict(scan_cursor)
@@ -378,6 +586,9 @@ def advance_candidate_node_maintenance(home, *, now, config, scan_cursor):
         progress = deepcopy(previous)
     else:
         progress = {"status": "partial", "migration": {}, "migrated": 0, "removed": 0}
+        # 回收周期与证明跨越迁移轮次、事务暂停和单片错误；只有记录目录身份变化才作废。
+        if isinstance(previous, dict):
+            progress.update({key: deepcopy(previous[key]) for key in ("mark", "proof") if key in previous})
     errors = []
     budget = RetentionScanBudget.default(config)
     try:
@@ -386,7 +597,14 @@ def advance_candidate_node_maintenance(home, *, now, config, scan_cursor):
         with _PIN_BUILDS_LOCK:
             _CANDIDATE_NODE_MARKS.pop(path, None)
         cursor.pop(_CANDIDATE_NODES_CURSOR_KEY, None)
-        return cursor, False, ()
+        try:
+            pending = candidate_node_maintenance.retire_marks(home, (), budget)
+        except OSError as exc:
+            cursor[_CANDIDATE_NODES_CURSOR_KEY] = {"status": "cleanup"}
+            return cursor, False, (_candidate_node_issue("清理检查点", candidate_node_maintenance.workspace(home), exc),)
+        if pending:
+            cursor[_CANDIDATE_NODES_CURSOR_KEY] = {"status": "cleanup"}
+        return cursor, pending, ()
     except OSError as exc:
         return cursor, False, (_candidate_node_issue("检查目录", directory, exc),)
     try:
@@ -585,6 +803,8 @@ def _resume_execution_actions(context):
     """执行未开始的原动作先续办；下一片不能用重新规划抹掉其引用核验进度。"""
     owner = Path(context.home.owner_home_dir)
     cursor = context.scan_cursor.get(_EXECUTION_CURSOR_KEY)
+    # 候选节点维护自行推进其游标项；保存的执行续点只带旧副本，不能把它回退到更早的检查点。
+    candidate_nodes = {key: value for key, value in context.scan_cursor.items() if key == _CANDIDATE_NODES_CURSOR_KEY}
     with _PIN_BUILDS_LOCK:
         pending = _EXECUTION_PLANS.get(owner)
         if pending is not None:
@@ -600,8 +820,11 @@ def _resume_execution_actions(context):
         if cursor is not None:
             # 临时阶段被淘汰/进程重启只允许保守重扫，不能把丢掉的待办宣告完成。
             context.scan_cursor.clear()
+            context.scan_cursor.update(candidate_nodes)
         return None
     context.scan_cursor = deepcopy(plan.scan_cursor)
+    context.scan_cursor.pop(_CANDIDATE_NODES_CURSOR_KEY, None)
+    context.scan_cursor.update(candidate_nodes)
     context.scan_partial = plan.scan_partial
     context.errors.extend(plan.errors)
     return list(plan.actions)

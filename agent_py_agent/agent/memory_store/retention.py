@@ -24,6 +24,7 @@ from .retention_models import (
     MemoryRetentionReport,
 )
 from .retention_scan import (
+    _CANDIDATE_NODES_CURSOR_KEY,
     advance_candidate_node_maintenance,
     build_retention_plan,
     file_fingerprint,
@@ -147,7 +148,9 @@ class MemoryRetentionService:
                 raise RetentionPolicyChangedError("original_retention_source_changed_before_plan")
             report = apply_with_transition(self, plan, current, commit_transition, scan_cursor=plan.scan_cursor)
             directory = candidate_records_directory(Path(self.home.owner_memory_candidates_jsonl))
-            if not report.applied or not directory.exists():
+            # 目录已移除但游标仍有候选维护项时也进入一片，由它清掉游标项及其标记检查点。
+            if not report.applied or (not directory.exists()
+                                      and _CANDIDATE_NODES_CURSOR_KEY not in report.scan_cursor):
                 return report
 
             def advance():
@@ -183,7 +186,10 @@ class MemoryRetentionService:
                 config=self.config,
             )
             applied = replace(applied, scan_partial=plan.scan_partial or applied.scan_partial)
-            applied = self._advance_candidate_nodes(applied, current)
+            # 与过渡分支同一进入条件：没有候选节点目录、游标也无候选维护项时不建维护片预算。
+            directory = candidate_records_directory(Path(self.home.owner_memory_candidates_jsonl))
+            if directory.exists() or _CANDIDATE_NODES_CURSOR_KEY in applied.scan_cursor:
+                applied = self._advance_candidate_nodes(applied, current)
             budgets.save_scan_cursor(self.home, applied.scan_cursor)
             # 执行期错误 + 被隔离保护的扫描错误一起回执：执行过什么、还护着什么，都要看得见。
             if plan.errors and applied.errors != plan.errors:
