@@ -21,11 +21,15 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import ExitStack, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from operator import attrgetter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..agent.common import hot_json
+from ..agent.common.fast_dataclass import fast_frozen, fast_replace
+from ..agent.common.fast_time import utc_now_iso
 from ..agent.concurrency import DurableDaemonThreadPoolExecutor
 from ..agent.conversation import (
     BackgroundMainAgentRuntime,
@@ -286,7 +290,8 @@ def _dispatch_stall_watchdog(seconds: float) -> None:
 # LLM: 一个后台循环的错误落点：loop 是 loop_health 里的计数键，context 是错误报告上下文，worker_id 是打印里的执行者，
 #   interval 是该循环的正常节奏（只在 _run_loop_with_backoff / 守卫里用）。冻结，只当参数包，不含状态。
 # 类用途: 描述"哪个循环、哪一段、以谁的名义打印、正常间隔多久"。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _LoopSite:
     loop: str
     context: str
@@ -648,6 +653,28 @@ class _RequestDispatcher:
     #   活锁、数据文件还在、宽限内的一律不动；单文件失败在 cleanup_orphan_lock_files 内只跳过。
     # 函数用途: 清理请求目录里累积的孤儿锁文件，失败不拖垮其它段。
     def _cleanup_lock_sidecars_once(self) -> None:
+        from ..agent.gateway_parts.control_operation_service import (
+            prune_terminal_control_operations,
+        )
+        from ..agent.io.sqlite_pool import retire_idle_connections
+
+        try:
+            config = getattr(self.bootstrap_agent, "config", None)
+            prune_terminal_control_operations(
+                self.paths,
+                now=time.time(),
+                retention_days=getattr(
+                    config, "gateway_control_operation_retention_days", AgentConfig.gateway_control_operation_retention_days
+                ),
+                max_entries=getattr(config, "retention_scan_slice_entries", AgentConfig.retention_scan_slice_entries),
+                max_ms=getattr(config, "retention_scan_slice_ms", AgentConfig.retention_scan_slice_ms),
+            )
+        except Exception as exc:
+            _print_gateway_loop_error("gateway.control_operation_retention", "dispatcher", exc)
+        try:
+            retire_idle_connections()
+        except Exception as exc:
+            _print_gateway_loop_error("gateway.sqlite_idle_retirement", "dispatcher", exc)
         for directory in gateway_lock_sidecar_dirs(self.paths):
             cleanup_orphan_lock_files(directory)
 
@@ -968,7 +995,7 @@ class _OwnerWakeHints:
         current = time.time()
         def read(path):
             try:
-                value = json.loads(Path(path).read_text(encoding="utf-8"))
+                value = json.loads(Path(path).read_bytes().decode("utf-8"))
             except FileNotFoundError:
                 return {}
             if not isinstance(value, dict):
@@ -1049,7 +1076,7 @@ def _run_hinted_controller(controller, stop_event, site):
             hints._hint_failures += 1
         return result
 
-    _run_loop_with_backoff(_HintedStopWait(stop_event, event, hints.backstop, hints._closed_event), tick, replace(site, interval=hints.backstop))
+    _run_loop_with_backoff(_HintedStopWait(stop_event, event, hints.backstop, hints._closed_event), tick, fast_replace(site, interval=hints.backstop))
 
 
 # LLM: Count0原supervisor/三设施线程保序；C只接真实metadata来源，不物化远端owner Agent或执行旧inline维护，坏源不回退。
@@ -1354,10 +1381,16 @@ class _BackgroundOwnerPlannerMixin:
     def _owner_planner_signature(self, scheduler: object) -> tuple | None:
         store = getattr(scheduler, "store", None)
         agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
-        paths = [getattr(store, name, None) for name in (
-            "wake_queue_dir", "policies_dir", "tasks_dir", "goals_dir", "observations_dir",
-            "guidance_dir", "session_tasks_dir", "background_claims_dir",
-        )]
+        paths = [
+            getattr(store, "wake_queue_dir", None),
+            getattr(store, "policies_dir", None),
+            getattr(store, "tasks_dir", None),
+            getattr(store, "goals_dir", None),
+            getattr(store, "observations_dir", None),
+            getattr(store, "guidance_dir", None),
+            getattr(store, "session_tasks_dir", None),
+            getattr(store, "background_claims_dir", None),
+        ]
         for repo in (getattr(getattr(agent, "subagents", None), "runtime_db", None), getattr(agent, "store", None)):
             db_path = getattr(repo, "db_path", None)
             if db_path is not None:
@@ -1433,10 +1466,11 @@ class _BackgroundOwnerPlannerMixin:
                     continue
                 if (
                     can_defer_check
-                    and all(
-                        hasattr(signal, attr)
-                        for attr in ("wake_signal_id", "reason", "root_task_id", "metadata", "created_at")
-                    )
+                    and hasattr(signal, "wake_signal_id")
+                    and hasattr(signal, "reason")
+                    and hasattr(signal, "root_task_id")
+                    and hasattr(signal, "metadata")
+                    and hasattr(signal, "created_at")
                     and _wake_waits_this_tick(scheduler, signal, planned_at)
                 ):
                     continue
@@ -1507,8 +1541,11 @@ class _BackgroundOwnerPlannerMixin:
                     self._drop_owner_planner_scope(key)
                 except BaseException as exc:
                     first_error = exc if first_error is None else first_error
-        for name in ("_owner_idle_streaks", "_owner_next_check_at", "_owner_plan_signatures"):
-            state = getattr(self, name, {})
+        for state in (
+            getattr(self, "_owner_idle_streaks", {}),
+            getattr(self, "_owner_next_check_at", {}),
+            getattr(self, "_owner_plan_signatures", {}),
+        ):
             for key in tuple(state):
                 if key not in owner_keys:
                     state.pop(key, None)
@@ -1537,7 +1574,7 @@ def _thread_inbound_marker(scheduler, thread_id: str) -> str | None:
         generation = metadata.get("user_activity_generation", 0)
         if type(generation) is not int or generation < 0:
             return None
-        return json.dumps([generation, metadata.get("last_user_activity_request_id", "")])
+        return hot_json.dumps([generation, metadata.get("last_user_activity_request_id", "")])
     except (AttributeError, KeyError, OSError, ValueError, DataCorruptionError):
         return None
 
@@ -1603,6 +1640,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     # 每个owner的prepare/ready短查询始终跨拍复用连接；异常也解除Context，提交和后台执行不继承连接。
     # 函数用途: 复用规划连接后公平提交就绪会话；等待与暂停不占工位，单owner异常不影响其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
+        self._thread_submit_counts = (0, 0)
         global_limit = _background_owner_workers(self._base_agent)
         available = max(0, global_limit - len(self._inflight))
         per_owner_limit = _background_threads_per_owner(self._base_agent)
@@ -1624,64 +1662,111 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         if pool is not None and hasattr(pool, "_pins"):
             with pool._lock:
                 active_agents = {key for key, count in pool._pins.items() if count > 0}
-        for owner_key, scheduler in schedulers:
-            owner_limit = (
-                admin_per_owner_limit
-                if owner_key == _BASE_SCHEDULER_KEY or getattr(owner_key, "owner_kind", None) == "main"
-                else per_owner_limit
-            )
-            active_threads = self._active_threads_for_owner(owner_key)
-            owner_slots = max(0, owner_limit - len(active_threads))
-            if owner_slots <= 0:
-                continue
-            cap, signature = 0.0, None
-            try:
-                agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
-                active = bool(active_threads) or id(agent) in active_agents
-                wait, cap, signature, reset = self._owner_plan_backoff_state(owner_key, scheduler, active=active)
-                if wait:
-                    continue
-                with self._planner_sqlite_scope(owner_key):
-                    try:
-                        scheduler.prepare_tick(now=planned_at, include_orphan_supervision=False)
-                    except ObservationIndexIncomplete:
-                        pass
-                    try:
-                        ready = scheduler.ready_thread_ids(
-                            now=planned_at,
-                            limit=owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
-                        )
-                    except ObservationIndexIncomplete:
-                        # 同一原就绪查询取一个工位即可在读观察前返回已有 wake，所有准入门保持原样。
-                        ready = scheduler.ready_thread_ids(now=planned_at, limit=1)
-                    streak = self._owner_idle_streaks.get(owner_key, 0) + 1
-                    cooling = self._lane_retry.cooling(str(owner_key))
-                    idle = not set(ready) - cooling
-                    delay = min(cap, 0.5 * (2 ** min(streak, 5))) if not reset and idle else 0.0
-                    if delay:
-                        delay = self._owner_plan_idle_delay(scheduler, delay, planned_at, cooling)
-                self._note_owner_plan(owner_key, signature, delay, planned_mono)
-            except ObservationIndexIncomplete:
-                continue  # 分片同步继续下一拍，不进入异常退避或阻塞其它 owner。
-            except Exception as exc:
-                if isinstance(exc, KeyError) and _retire_deleted_thread_sources(scheduler):
-                    continue
-                _print_gateway_loop_error(
-                    "gateway_background_main.plan",
-                    f"background-main:{owner_key}",
-                    exc,
+        active_by_owner: dict[object, set[str]] = {}
+        for key in self._inflight:
+            if isinstance(key, tuple) and len(key) == 2:
+                active_by_owner.setdefault(key[0], set()).add(str(key[1]))
+        owner_count = len(schedulers)
+        owner_cursor = getattr(self, "_thread_plan_cursor", 0) % owner_count
+        segments = candidates_planned = 0
+        try:
+            # 每拍最多按入口空槽数访问 owner，下一拍从未访问的位置继续。
+            for _ in range(min(available, owner_count)):
+                owner_key, scheduler = schedulers[owner_cursor]
+                owner_cursor = (owner_cursor + 1) % owner_count
+                segments += 1
+                owner_limit = (
+                    admin_per_owner_limit
+                    if owner_key == _BASE_SCHEDULER_KEY or getattr(owner_key, "owner_kind", None) == "main"
+                    else per_owner_limit
                 )
-                if cap > 0:
-                    # 规划失败与空闲同样按封顶指数退避（上限沿用 background_idle_owner_max_backoff_seconds），
-                    # 已删除或读不出的 owner 不再每拍重复同一条错误；cap=0 仍每拍规划。
-                    streak = self._owner_idle_streaks.get(owner_key, 0) + 1
-                    self._note_owner_plan(owner_key, signature, min(cap, 0.5 * (2 ** min(streak, 5))), planned_mono)
-                continue
-            pending = [thread_id for thread_id in ready if thread_id not in active_threads
-                       and self._thread_lane_can_retry(scheduler, str(owner_key), thread_id)]
-            if pending:
-                candidates.append((owner_key, scheduler, pending[:owner_slots]))
-        self._submit_thread_candidates(candidates, available=available)
+                pending = self._plan_owner_threads(
+                    owner_key,
+                    scheduler,
+                    owner_limit,
+                    active_threads=active_by_owner.get(owner_key, set()),
+                    active_agents=active_agents,
+                    planned_at=planned_at,
+                    planned_mono=planned_mono,
+                )[:available]
+                candidates_planned += len(pending)
+                if pending and owner_count > 1:
+                    self._submit_thread_candidates([(owner_key, scheduler, pending[:1])], available=available)
+                    del pending[:1]
+                if pending:
+                    candidates.append((owner_key, scheduler, pending))
+                available = max(0, global_limit - len(self._inflight))
+                if not available:
+                    return
+
+            # 本拍已访问的 owner 都有机会取得首槽，按轮询提交其余车道。
+            if candidates or not candidates_planned:
+                self._submit_thread_candidates(candidates, available=available)
+        finally:
+            self._thread_plan_cursor = owner_cursor
+            self._thread_submit_counts = (segments, candidates_planned)
+
+    def _plan_owner_threads(
+        self,
+        owner_key: object,
+        scheduler: BackgroundMainAgentScheduler,
+        owner_limit: int,
+        *,
+        active_threads: set[str],
+        active_agents: set[int],
+        planned_at: float,
+        planned_mono: float,
+    ) -> list[str]:
+        """只在本 owner 的规划阶段激活 SQLite 作用域，返回后才提交车道。"""
+        owner_slots = max(0, owner_limit - len(active_threads))
+        if owner_slots <= 0:
+            return []
+        cap, signature = 0.0, None
+        try:
+            agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+            active = bool(active_threads) or id(agent) in active_agents
+            wait, cap, signature, reset = self._owner_plan_backoff_state(owner_key, scheduler, active=active)
+            if wait:
+                return []
+            with self._planner_sqlite_scope(owner_key):
+                try:
+                    scheduler.prepare_tick(now=planned_at, include_orphan_supervision=False)
+                except ObservationIndexIncomplete:
+                    pass
+                try:
+                    ready = scheduler.ready_thread_ids(
+                        now=planned_at,
+                        limit=owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
+                    )
+                except ObservationIndexIncomplete:
+                    # 同一原就绪查询取一个工位即可在读观察前返回已有 wake，所有准入门保持原样。
+                    ready = scheduler.ready_thread_ids(now=planned_at, limit=1)
+                streak = self._owner_idle_streaks.get(owner_key, 0) + 1
+                cooling = self._lane_retry.cooling(str(owner_key))
+                idle = not set(ready) - cooling
+                delay = min(cap, 0.5 * (2 ** min(streak, 5))) if not reset and idle else 0.0
+                if delay:
+                    delay = self._owner_plan_idle_delay(scheduler, delay, planned_at, cooling)
+            self._note_owner_plan(owner_key, signature, delay, planned_mono)
+        except ObservationIndexIncomplete:
+            return []  # 分片同步继续下一拍，不进入异常退避或阻塞其它 owner。
+        except Exception as exc:
+            if isinstance(exc, KeyError) and _retire_deleted_thread_sources(scheduler):
+                return []
+            _print_gateway_loop_error(
+                "gateway_background_main.plan",
+                f"background-main:{owner_key}",
+                exc,
+            )
+            if cap > 0:
+                # 规划失败与空闲同样按封顶指数退避（上限沿用 background_idle_owner_max_backoff_seconds），
+                # 已删除或读不出的 owner 不再每拍重复同一条错误；cap=0 仍每拍规划。
+                streak = self._owner_idle_streaks.get(owner_key, 0) + 1
+                self._note_owner_plan(owner_key, signature, min(cap, 0.5 * (2 ** min(streak, 5))), planned_mono)
+            return []
+        pending = [thread_id for thread_id in ready if thread_id not in active_threads
+                   and self._thread_lane_can_retry(scheduler, str(owner_key), thread_id)]
+        return pending[:owner_slots]
 
     # LLM: 配置与模型指纹只在失败车道复查（指纹只在环境暂停时读）；读取失败也局限于当前线程，不让一份坏配置阻塞同用户其它会话。
     # 函数用途: 检查一条后台车道是否可以再跑，不构造后端或占用模型执行工位。
@@ -1948,10 +2033,10 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         if self._curator_quota_path is None or not self._curator_quota_path.is_file():
             return
         try:
-            payload = json.loads(self._curator_quota_path.read_text(encoding="utf-8"))
+            payload = json.loads(self._curator_quota_path.read_bytes().decode("utf-8"))
         except (OSError, UnicodeError, ValueError):
             return
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = utc_now_iso()[:10]
         if not isinstance(payload, dict) or str(payload.get("date") or "") != today:
             return
         try:
@@ -1973,9 +2058,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             return
         try:
             self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
-            self._heartbeat_path.write_text(
-                json.dumps({"ts": int(now), "pid": os.getpid()}, sort_keys=True),
-                encoding="utf-8",
+            self._heartbeat_path.write_bytes(
+                hot_json.dumps({"ts": int(now), "pid": os.getpid()}, sort_keys=True).encode("utf-8")
             )
         except OSError:
             pass
@@ -1991,6 +2075,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         phases = dict.fromkeys(_BACKGROUND_TICK_PHASES, 0)
         tick_started = cursor = time.monotonic()
         completed = False
+        submit_started = None
+        self._thread_submit_counts = (0, 0)
         reports: list[object] = []
         try:
             if not draining:
@@ -2022,6 +2108,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 now = time.monotonic()
                 phases["curators"] = round(max(0.0, (now - cursor) * 1000))
                 cursor = now
+                submit_started = cursor
                 self._submit_ready_thread_ticks()
                 now = time.monotonic()
                 phases["submit"] = round(max(0.0, (now - cursor) * 1000))
@@ -2029,12 +2116,16 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             completed = True
         finally:
             end = cursor if completed else time.monotonic()
+            if not completed and submit_started is not None:
+                phases["submit"] = round(max(0.0, (end - submit_started) * 1000))
             total = max(0.0, end - tick_started)
             if total >= _DISPATCH_SEGMENT_SLOW_LOG_SECONDS:
                 logging.getLogger(__name__).warning(
-                    "GATEWAY_BACKGROUND_TICK_SLOW total_ms=%d phases=%s",
+                    "GATEWAY_BACKGROUND_TICK_SLOW total_ms=%d phases=%s segments=%d candidates_planned=%d submit_ms=%d",
                     round(total * 1000),
                     ",".join(f"{name}:{phases[name]}" for name in _BACKGROUND_TICK_PHASES),
+                    *self._thread_submit_counts,
+                    phases["submit"],
                 )
         if not reports:
             return False
@@ -2293,7 +2384,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         quota = self._curator_daily_quota()
         if quota <= 0:
             return True  # 配额关闭 = 不限额
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = utc_now_iso()[:10]
         if self._curator_quota_date != today:
             self._curator_quota_date = today
             self._curator_quota_count = 0
@@ -2307,7 +2398,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         提交前扣的旧语义把「每次 tick 的提交检查」都算消耗——run_if_due 大多返回
         not_due(interval 未到/无新消息),没烧 LLM 也照样扣(真机:当日配额被推到
         3651)。按 run 结果记账后,配额 ≈ 实际 LLM 消耗。按日滚动,落盘重启不丢。"""
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = utc_now_iso()[:10]
         if self._curator_quota_date != today:
             self._curator_quota_date = today
             self._curator_quota_count = 0
@@ -2315,9 +2406,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         if self._curator_quota_path is not None:
             try:
                 self._curator_quota_path.parent.mkdir(parents=True, exist_ok=True)
-                self._curator_quota_path.write_text(
-                    json.dumps({"date": today, "count": self._curator_quota_count}, sort_keys=True),
-                    encoding="utf-8",
+                self._curator_quota_path.write_bytes(
+                    hot_json.dumps({"date": today, "count": self._curator_quota_count}, sort_keys=True).encode("utf-8")
                 )
             except OSError:
                 pass  # 配额账本写失败不阻塞策展(内存计数仍在)
@@ -2331,7 +2421,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             return False
         state_path = Path(str(owner_home)) / "memory" / "curator" / "state.json"
         try:
-            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            payload = json.loads(state_path.read_bytes().decode("utf-8"))
         except (OSError, UnicodeError, ValueError):
             return False
         if not isinstance(payload, dict):
@@ -3109,7 +3199,7 @@ class _GatewayOwnerMaintenanceController:
                 if summary["ran"] or summary["failed"]:
                     print(
                         "[gateway-owner-maintenance] "
-                        + json.dumps(summary, ensure_ascii=False, sort_keys=True),
+                        + hot_json.dumps(summary, ensure_ascii=False, sort_keys=True),
                         flush=True,
                     )
                 return summary
@@ -3306,7 +3396,7 @@ class _GatewaySchedulerDueController:
             if int(repaired.get("scanned") or 0) or int(repaired.get("errors") or 0):
                 print(
                     "[gateway-scheduler-due] legacy repair "
-                    + json.dumps(repaired, ensure_ascii=False, sort_keys=True),
+                    + hot_json.dumps(repaired, ensure_ascii=False, sort_keys=True),
                     flush=True,
                 )
         except Exception as exc:
@@ -3558,11 +3648,14 @@ class _GatewayOrphanReconciler:
     # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
     # 函数用途: 关闭维护执行器并回收其资源，不把未完成工作伪装成完成。
     def _shutdown_executors(self) -> None:
-        for name in ("_base_executor", "_owner_executor"):
-            executor = getattr(self, name, None)
-            setattr(self, name, None)
-            if executor is not None:
-                executor.shutdown(wait=False, cancel_futures=True)
+        executor = getattr(self, "_base_executor", None)
+        self._base_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+        executor = getattr(self, "_owner_executor", None)
+        self._owner_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     # LLM: 同步入口复用后台扫描的租用规则；身份发现和回收各自沿原有结构化账本。
     # 函数用途: 执行一轮同步遗留工作检查，供命令和测试调用。
@@ -3649,7 +3742,7 @@ class _GatewayOrphanReconciler:
         report: dict[str, object] = {"owner": label, **summary}
         if any(int(summary.get(key) or 0) for key in ("running_reclaimed", "watch_respawned", "orphans_revived")):
             print(
-                "[gateway-orphan-reconcile] " + json.dumps(report, ensure_ascii=False, sort_keys=True),
+                "[gateway-orphan-reconcile] " + hot_json.dumps(report, ensure_ascii=False, sort_keys=True),
                 flush=True,
             )
         return report
@@ -3699,11 +3792,25 @@ def _next_owner_discovery_at(
     return float(now) if next_cursor is not None else float(now) + max(0.0, float(interval))
 
 
+# 固定配置字段在导入时绑定，维护拍只选择对应的读取器。
+_LOOP_CONFIG_READERS = {
+    key: attrgetter(key)
+    for key in (
+        "owner_agent_pool_max_agents",
+        "owner_maintenance_scan_interval_seconds",
+        "retention_scan_slice_ms",
+        "orphan_supervision_interval_seconds",
+        "gateway_processing_timeout_seconds",
+    )
+}
+
+
 # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
 # 函数用途: 读取受约束正整数配置，失效输入沿原默认。
 def _positive_int_config(agent: SimpleAgent, key: str, *, default: int) -> int:
     try:
-        parsed = int(getattr(agent.config, key))
+        read = _LOOP_CONFIG_READERS[key]
+        parsed = int(read(agent.config))
     except (AttributeError, TypeError, ValueError):
         # 缺字段/非数字(测试桩 SimpleNamespace 等)一律回退默认,不崩——后台循环永不停机
         return default
@@ -3721,7 +3828,8 @@ def _background_main_poll_interval() -> float:
 # 函数用途: 读取维护循环浮点配置，保留原默认与范围处理。
 def _float_config(agent: SimpleAgent, key: str, *, default: float) -> float:
     try:
-        return float(getattr(agent.config, key))
+        read = _LOOP_CONFIG_READERS[key]
+        return float(read(agent.config))
     except (TypeError, ValueError):
         return default
 
@@ -3828,7 +3936,7 @@ def _write_gateway_heartbeat(
                 process = workers._created_origins[index][1]
                 payload = {"worker": index, "pid": process.pid, "returncode": process.returncode}
                 _WORKER_PARTITION_EXIT_LOGGED.add(key)
-                print(json.dumps({"event": "gateway_worker_partition_exited", **payload}), file=sys.stderr)
+                print(hot_json.dumps({"event": "gateway_worker_partition_exited", **payload}), file=sys.stderr)
                 if agent is not None:
                     log_gateway_event(agent, "gateway_worker_partition_exited", payload)
         except Exception as exc:
@@ -3865,8 +3973,9 @@ def _record_dispatcher_stall(paths, agent, health):
         facts = {"capture_error": type(exc).__name__}
     payload = {**health, **facts, "pid": os.getpid(), "reason": reason}
     try:
-        with paths.log.open("a", encoding="utf-8") as handle:
-            handle.write("[gateway-dispatcher-stalled] " + json.dumps(payload, ensure_ascii=False) + "\n")
+        with paths.log.open("ab") as handle:
+            line = "[gateway-dispatcher-stalled] " + hot_json.dumps(payload, ensure_ascii=False) + os.linesep
+            handle.write(line.encode("utf-8"))
     except Exception as exc:
         _print_gateway_loop_error("gateway.dispatcher.stall_log", "heartbeat", exc)
     try:
@@ -3919,7 +4028,7 @@ def _heartbeat_generation_started_at(paths: GatewayPaths, pid: int) -> float:
 # 函数用途: 尽力读取一份 JSON 对象载荷，失败返回空字典。
 def _read_json_payload(path: Path) -> dict:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_bytes().decode("utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
@@ -3953,6 +4062,6 @@ def _print_gateway_loop_error(context: str, worker_id: str, exc: BaseException) 
     try:
         report = runtime_error_report(exc, context=context)
         report["worker_id"] = worker_id
-        print("[gateway-loop-error] " + json.dumps(report, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        print("[gateway-loop-error] " + hot_json.dumps(report, ensure_ascii=False, sort_keys=True), file=sys.stderr)
     except Exception as print_exc:
         loop_health.note_print_failure(context, print_exc)
