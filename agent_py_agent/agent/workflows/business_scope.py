@@ -701,7 +701,9 @@ class WorkflowScopeService:
         records = tuple(sampled['runs'])
         for record in records:
             check_run(record)
-        window = _HealthReadWindow(records, {k: v for k, v in sampled.items() if k != 'runs'})
+        # 公共业务入口只返回单页；续读游标由采样端口交给支持续页的调用方。
+        coverage = {key: value for key, value in sampled.items() if key not in ('runs', 'next_cursor')}
+        window = _HealthReadWindow(records, coverage)
         result = build_workflow_health_view(window, workflow_id=ref, limit=limit, redact=True)
         # 本次窗口不是永久授权；helper完成后再次查同一原workflow和每个原run。
         check_workflow()

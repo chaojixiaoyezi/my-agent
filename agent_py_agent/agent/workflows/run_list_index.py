@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import stat
-from contextlib import contextmanager
+import time
+from contextlib import closing, contextmanager
 from itertools import islice
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from ..common.nofollow_fs import (
     read_text_beneath,
     write_text_atomic_beneath,
 )
+from ..io.sqlite_probe import require_plain_sqlite_files, sqlite_readonly_probe_uri
 from ..plugin_host.errors import HostAPIError
 from .models import safe_path, safe_path_part
 
@@ -254,6 +257,36 @@ def _artifact_locator_schema(conn, version):
         conn.execute('PRAGMA user_version=4')
 
 
+def _run_keyset_cursor(value):
+    if value is None:
+        return None
+    if (not isinstance(value, (tuple, list)) or len(value) != 2
+            or type(value[0]) not in (float, int) or not isinstance(value[1], str) or not value[1]):
+        raise ValueError('游标须包含有限排序时间和运行 ID')
+    try:
+        finite = math.isfinite(value[0])
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise ValueError('游标须包含有限排序时间和运行 ID')
+    return value[0], value[1]
+
+
+def _consumer_schema(conn, version):
+    if version < 5:
+        conn.execute('CREATE TABLE IF NOT EXISTS reference_source_cursor('
+                     'source_id TEXT PRIMARY KEY, cursor TEXT NOT NULL, '
+                     'coverage_generation TEXT NOT NULL, updated_at REAL NOT NULL)')
+        conn.execute('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        rebuilt_at = time.time()
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES('reference_source_cursor',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json.dumps({'generation': str(rebuilt_at), 'coverage': 'partial', 'rebuilt_at': rebuilt_at}),),
+        )
+        conn.execute('PRAGMA user_version=5')
+
+
 def _advance_artifact_keys(conn):
     """仅在已有runs主键上推进32行，游标与映射同事务；不枚举运行目录或扫描全表。"""
     from .run_artifacts import workflow_artifact_run_key
@@ -302,6 +335,7 @@ class RunListIndex:
                 conn.execute('PRAGMA user_version=2')
             _artifact_locator_schema(conn, version)
             _open_reference_schema(conn)
+            _consumer_schema(conn, version)
             yield conn
 
     # LLM: 待发表队列用主键索引，不把原子写临时文件当作未确认规范提交。
@@ -353,6 +387,99 @@ class RunListIndex:
                                  (workflow_artifact_run_key(run_id), run_id))
             _advance_artifact_keys(conn)
 
+    @property
+    def path(self):
+        return self.owner_home / 'data' / 'workflow_run_index.sqlite3'
+
+    @contextmanager
+    def _readonly(self):
+        require_plain_sqlite_files(self.path, beneath=self.owner_home)
+        with closing(sqlite3.connect(sqlite_readonly_probe_uri(self.path), uri=True, timeout=1.0)) as conn:
+            conn.execute('BEGIN')
+            yield conn
+
+    def health_page(self, workflow_id, *, after, limit):
+        """已有投影就地迁移；稳定版本只读取一个索引页。"""
+        with self._readonly() as conn:
+            version = conn.execute('PRAGMA user_version').fetchone()[0]
+            if version >= 5:
+                return self._health_page(conn, workflow_id, after, limit)
+        with self.connection() as conn:
+            return self._health_page(conn, workflow_id, after, limit)
+
+    def _health_page(self, conn, workflow_id, after, limit):
+        sql, args = self.query(workflow_id, after=after, limit=limit)
+        incomplete = conn.execute('SELECT 1 FROM pending LIMIT 1').fetchone() is not None
+        incomplete |= conn.execute('SELECT 1 FROM legacy LIMIT 1').fetchone() is not None
+        return [tuple(row) for row in conn.execute(sql, args)], incomplete
+
+    def report_candidates(self, *, settled_statuses, referenced_ids, limit):
+        """在现有投影内分配样本窗口；同一事务持久化最后发出的候选键。"""
+        with self.connection() as conn:
+            if not conn.in_transaction:
+                conn.execute('BEGIN IMMEDIATE')
+            active = {row[0] for row in conn.execute('SELECT run_id FROM pending')}
+            incomplete = conn.execute('SELECT 1 FROM legacy LIMIT 1').fetchone() is not None
+            # 每次 seek 跳过整个状态区间，已终结历史只访问固定数量的区间端点。
+            status = conn.execute('SELECT status FROM runs ORDER BY status LIMIT 1').fetchone()
+            while status is not None:
+                current = status[0]
+                if current not in settled_statuses:
+                    active.update(row[0] for row in conn.execute('SELECT run_id FROM runs WHERE status=?', (current,)))
+                status = conn.execute('SELECT status FROM runs WHERE status>? ORDER BY status LIMIT 1',
+                                      (current,)).fetchone()
+
+            direct = set()
+            bind_limit = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+            for start in range(0, len(referenced_ids), bind_limit):
+                ids = referenced_ids[start:start + bind_limit]
+                placeholders = ','.join('?' for _ in ids)
+                direct.update(row[0] for row in conn.execute(
+                    f'SELECT run_id FROM runs WHERE run_id IN ({placeholders})', ids))
+
+            cursor = conn.execute("SELECT value FROM meta WHERE key='settled_cursor'").fetchone()
+            try:
+                after = _run_keyset_cursor(json.loads(cursor[0])) if cursor else None
+            except (ValueError, TypeError):
+                after = None
+
+            def window(bound, size):
+                matches = []
+                for current in settled_statuses:
+                    sql, args = self.query(status=current, after=bound, limit=size)
+                    matches.extend((row[1], row[0]) for row in conn.execute(sql, args))
+                return sorted(matches)[:size]
+
+            page = window(after, limit)
+            if after is not None and len(page) < limit:
+                page.extend(key for key in window(None, limit - len(page)) if key <= after)
+            if page:
+                conn.execute("INSERT INTO meta(key,value) VALUES('settled_cursor',?) "
+                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(page[-1]),))
+            return active, direct, [run_id for _, run_id in page], incomplete
+
+    def reference_cursor(self, source_id):
+        with self.connection() as conn:
+            row = conn.execute('SELECT coverage_generation,cursor FROM reference_source_cursor WHERE source_id=?',
+                               (source_id,)).fetchone()
+            return tuple(row) if row else None
+
+    def advance_reference_cursor(self, source_id, *, previous, generation, cursor, now):
+        with self.connection() as conn:
+            if not conn.in_transaction:
+                conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT coverage_generation,cursor FROM reference_source_cursor WHERE source_id=?',
+                               (source_id,)).fetchone()
+            if (tuple(row) if row else None) != previous:
+                return False
+            conn.execute(
+                'INSERT INTO reference_source_cursor(source_id,cursor,coverage_generation,updated_at) VALUES(?,?,?,?) '
+                'ON CONFLICT(source_id) DO UPDATE SET cursor=excluded.cursor, '
+                'coverage_generation=excluded.coverage_generation, updated_at=excluded.updated_at',
+                (source_id, cursor, generation, now),
+            )
+            return True
+
     def open_reference_probe(self, target_id, *, active_statuses, limit=100):
         """有界读取开放引用候选、待发布标记与未迁移队列，禁止做全历史扫描。"""
         norm_target = _normalize_wf_id(target_id)
@@ -399,6 +526,7 @@ class RunListIndex:
             if version < 2:
                 raise WorkflowArtifactLocatorIncomplete('原定位索引尚未初始化；等待普通维护重建')
             _artifact_locator_schema(conn, version)
+            _consumer_schema(conn, version)
             _advance_artifact_keys(conn)
             found = tuple(row[0] for row in conn.execute(
                 'SELECT run_id FROM artifact_run_keys WHERE run_key=? LIMIT 2', (run_key,)))

@@ -34,16 +34,19 @@ def _merge_coverage(values: tuple[str, ...]) -> str:
     return 'unknown' if 'unknown' in values else 'partial' if 'partial' in values else 'complete'
 
 
-def _health_runs(run_store, workflow_id, limit):
+def _health_runs(run_store, workflow_id, limit, *, after=None):
     """只消费原读取端口；旧 list_runs 的返回条数不证明其实际 I/O 有界。"""
     try:
         sampler = getattr(run_store, 'sample_runs_readonly', None)
         if callable(sampler):
-            sample = sampler(workflow_id=workflow_id, limit=limit)
+            kwargs = {'after': after} if after is not None else {}
+            sample = sampler(workflow_id=workflow_id, limit=limit, **kwargs)
             runs, metadata = sample['runs'], sample
-        else:
+        elif after is None:
             runs = run_store.list_runs(workflow_id=workflow_id, limit=limit)
             metadata = getattr(run_store, 'health_read_coverage', None)
+        else:
+            raise ValueError('运行读取端口未提供游标分页')
         if not isinstance(runs, (list, tuple)):
             raise TypeError('runs 必须是原记录窗口')
         has_metadata = isinstance(metadata, dict)
@@ -59,6 +62,8 @@ def _health_runs(run_store, workflow_id, limit):
         if truncated and coverage == 'complete':
             coverage = 'partial'
         source = {'coverage': coverage, 'truncated': truncated}
+        if 'next_cursor' in metadata:
+            source['next_cursor'] = metadata['next_cursor']
         if not has_metadata:
             source['io_bounded'] = False
         for key in ('scan_limit', 'scan_count', 'read_limit', 'read_count'):
@@ -331,11 +336,11 @@ def summarize_run_step_health(run, *, redact=True):
 
 # LLM: 构造有界工作流及各步骤的健康视图，严禁全量扫描历史文件 (WF-11)。
 # 函数用途: 按 bounded_limit 读取有限运行并聚合耗时、故障分类、重试与规范引用。
-def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=True):
+def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=True, after=None):
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('limit 必须是 1..100 的严格整数')
     bounded_limit = limit
-    runs, source_coverage = _health_runs(run_store, workflow_id, bounded_limit)
+    runs, source_coverage = _health_runs(run_store, workflow_id, bounded_limit, after=after)
     coverage = source_coverage['coverage']
     truncated = source_coverage['truncated']
 

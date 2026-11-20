@@ -529,7 +529,7 @@ def test_corrupt_projection_never_blocks_save_and_next_list_rebuilds(tmp_path):
     assert [run.workflow_run_id for run in store.list_runs(status='running')] == ['corrupt-1']
     assert sorted(run.workflow_run_id for run in store.list_runs(status='queued')) == ['corrupt-0', 'corrupt-2']
     with closing(sqlite3.connect(projection)) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 4
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 5
     assert _fd_count() == before
 
 

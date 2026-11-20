@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -43,14 +42,9 @@ from scripts.live_lab.compact_observations import (
 from scripts.live_lab.session import LabSessionManager
 
 
-def _create_empty_workflow_index(owner_home: Path) -> sqlite3.Connection:
-    index_db = owner_home / "data" / "workflow_run_index.sqlite3"
-    index_db.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(index_db)
-    conn.execute("CREATE TABLE IF NOT EXISTS runs(run_id TEXT PRIMARY KEY, status TEXT)")
-    conn.execute("CREATE TABLE IF NOT EXISTS pending(run_id TEXT PRIMARY KEY)")
-    conn.execute("CREATE TABLE IF NOT EXISTS legacy(run_id TEXT PRIMARY KEY)")
-    return conn
+def _create_empty_workflow_index(owner_home: Path):
+    owner_home.mkdir(parents=True, exist_ok=True)
+    return RunListIndex(owner_home).connection()
 
 
 def _write_workflow_run_json(
@@ -65,6 +59,8 @@ def _write_workflow_run_json(
     doc: dict[str, object] = {
         "schema_version": "workflow_run.v1",
         "workflow_run_id": run_id,
+        "workflow_id": "alpha",
+        "started_at": 0.0,
         "status": status,
     }
     if ended_at is not None:
@@ -139,9 +135,9 @@ def test_f04_indexed_workflow_snapshot_avoids_full_scandir_and_resolves_beyond_c
     with _create_empty_workflow_index(owner_home) as conn:
         for idx in range(400):
             wf_id = f"wf-{idx:03d}"
-            conn.execute("INSERT INTO runs(run_id, status) VALUES(?, 'succeeded')", (wf_id,))
+            conn.execute("INSERT INTO runs(run_id, workflow_id, status, sort_time, revision) VALUES(?, 'alpha', 'succeeded', 0, 0)", (wf_id,))
             _write_workflow_run_json(owner_home, wf_id, status="succeeded", ended_at=base_ts + idx)
-        conn.execute("INSERT INTO runs(run_id, status) VALUES('wf-active-401', 'running')")
+        conn.execute("INSERT INTO runs(run_id, workflow_id, status, sort_time, revision) VALUES('wf-active-401', 'alpha', 'running', 0, 0)")
         _write_workflow_run_json(owner_home, "wf-active-401", status="running", ended_at=None)
         conn.commit()
 
@@ -233,7 +229,7 @@ def test_f04_indexed_workflow_snapshot_avoids_full_scandir_and_resolves_beyond_c
     unknown_by_id = {row["session_id"]: row for row in report_sym["unknown_processes"]}
     assert unknown_by_id["bg-symlink-370"]["reason"] == "workflow_run_dir_symlink"
 
-    # 缺失索引时仍回退到目录扫描。
+    # 缺失索引时沿原回填入口恢复，未取得覆盖的本轮必须保留。
     (owner_home / "data" / "workflow_run_index.sqlite3").unlink()
     wf_370.unlink()
     _write_workflow_run_json(owner_home, "wf-370", status="succeeded", ended_at=base_ts + 370.0)
@@ -244,8 +240,9 @@ def test_f04_indexed_workflow_snapshot_avoids_full_scandir_and_resolves_beyond_c
         now_ts=now_ts,
         store_root=store_root,
     )
-    assert runs_dir.resolve(strict=False) in scandir_targets
-    assert "bg-settled-350" in {row["session_id"] for row in report_fallback["settled_processes"]}
+    assert (owner_home / "data" / "workflow_run_index.sqlite3").is_file()
+    assert "bg-settled-350" in {row["session_id"] for row in report_fallback["unknown_processes"]}
+    assert report_fallback["settled_processes"] == []
 
 
 def test_f05_reference_sources_backfills_legacy_lockfree_and_keeps_pending_fail_closed(

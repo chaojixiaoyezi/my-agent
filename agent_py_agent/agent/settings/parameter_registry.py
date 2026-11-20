@@ -60,6 +60,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "model_http_max_idle_connections", "scale_owner_snapshot_mode", "gateway_edge_identity_required",
     "gateway_event_hub_ring_events", "gateway_event_fallback_poll_seconds", "conversation_actor_workers",
     "owner_epoch_fence_enabled", "background_owner_wake_rescan_seconds",
+    "background_report_settled_sample_entries",
     "max_background_agents",
     "workspace_root", "my_agent_home", "execution_mode", "my_agent_owner_provider", "my_agent_owner_kind",
     "my_agent_owner_id", "workspace_task_path_template", "memory_path", "local_store_path", "local_store_files_dir",

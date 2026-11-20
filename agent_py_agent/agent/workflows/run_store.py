@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import sqlite3
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
@@ -886,18 +887,71 @@ class WorkflowRunStore:
         with self._lock(workflow_run_id, execution=True):
             yield
 
-    def sample_runs_readonly(self, *, workflow_id, limit):
-        """原run.json的有界目录前缀窗口；不称最新N条，不锁写、不碰索引或步骤叶。
-
-        每次独立采样，目录顺序来自文件系统，缺叶/损坏/预算截止显式降覆盖。
-        run.json包含原步骤快照，但不是并发步骤发表的事务性全历史视图。
-        """
-        from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
+    def sample_runs_readonly(self, *, workflow_id, limit, after=None):
+        """按工作流时间和运行 ID 读取有界候选页，事实仍由原快照核验。"""
+        from .run_list_index import RunListIndex, _run_keyset_cursor
 
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('limit必须为1到100的严格整数')
         if not isinstance(workflow_id, str) or not workflow_id or len(workflow_id.encode()) > 128:
             raise ValueError('workflow_id必须为非空有界引用')
+        after = _run_keyset_cursor(after)
+        index = RunListIndex(self.owner_home)
+        if index.path.exists() or index.path.is_symlink() or after is not None:
+            return self._sample_index_page(index, workflow_id, limit, after)
+        # 旧目录仍可做原有有界只读采样，等待正常发布入口建立索引。
+        return self._sample_legacy_prefix(workflow_id, limit)
+
+    def _sample_index_page(self, index, workflow_id, limit, after):
+        result = {'runs': [], 'coverage': 'complete', 'truncated': False, 'next_cursor': None,
+                  'scan_limit': limit + 1, 'scan_count': 0, 'read_limit': limit,
+                  'read_count': 0, 'max_file_bytes': 256 * 1024, 'errors': [],
+                  'sampling_mode': 'workflow_time_keyset_run_snapshots', 'latest_guaranteed': False}
+
+        def incomplete(code, error=None):
+            result['coverage'] = 'partial'
+            result['errors'].append({'code': code, 'error_type': type(error).__name__ if error else ''})
+
+        try:
+            candidates, pending = index.health_page(workflow_id, after=after, limit=limit + 1)
+        except PermissionError:
+            raise
+        except (OSError, sqlite3.Error, ValueError) as error:
+            incomplete('WORKFLOW_HEALTH_READ_FAILED', error)
+            result['coverage'] = 'unknown'
+            return result
+
+        result['scan_count'] = len(candidates)
+        if pending:
+            incomplete('WORKFLOW_RUN_INDEX_RECOVERY_PENDING')
+        if after is not None or len(candidates) > limit:
+            result['coverage'] = 'partial'
+        if len(candidates) > limit:
+            last_id, sort_time = candidates[limit - 1]
+            result.update(truncated=True, next_cursor=(sort_time, last_id))
+        for run_id, sort_time in candidates[:limit]:
+            try:
+                self._folder(run_id)
+                result['read_count'] += 1
+                raw = read_bytes_beneath(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'),
+                                         max_bytes=result['max_file_bytes'], require_dir_fd=True)
+                if raw is None:
+                    incomplete('RUN_SNAPSHOT_MISSING')
+                    continue
+                row = _decode_run(json.loads(raw))
+                if row.workflow_run_id != run_id or row.workflow_id != workflow_id or -row.started_at != sort_time:
+                    incomplete('RUN_IDENTITY_MISMATCH')
+                    continue
+                result['runs'].append(row)
+            except PermissionError:
+                raise
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
+                incomplete('RUN_SNAPSHOT_UNREADABLE', error)
+        return result
+
+    def _sample_legacy_prefix(self, workflow_id, limit):
+        from ..common.nofollow_fs import open_directory_beneath
+
         result = {'runs': [], 'coverage': 'complete', 'truncated': False,
             'scan_limit': max(16, limit * 4), 'scan_count': 0, 'read_limit': limit,
             'read_count': 0, 'max_file_bytes': 256 * 1024, 'errors': [],

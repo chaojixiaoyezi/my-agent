@@ -36,6 +36,7 @@ from ..runtime_db.operations import (
 )
 from ..runtime_db.schema import runtime_db_path
 from ..scheduler.store_snapshot import read_atomic_store_bytes
+from ..settings.config import DEFAULT_BACKGROUND_REPORT_SETTLED_SAMPLE_ENTRIES
 from ..tooling.process_resource_stop import (
     FrozenProcessStop,
     cleanup_process_stop,
@@ -50,6 +51,8 @@ from ..tooling.process_session_records import (
     TASK_PROCESS_SESSION_SCHEMA,
 )
 from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
+from ..workflows.run_list_index import RunListIndex
+from ..workflows.run_store import WorkflowRunStore
 
 # 停止意图落到记录后，原 host 的监控循环按自己的轮询间隔发现；等待回收要留足余量。
 DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS = 10.0
@@ -507,11 +510,8 @@ class _WorkflowSnapshot:
     unsettled_task_ids: frozenset[str] = frozenset()
     settled_run_ids: frozenset[str] = frozenset()
     settled_task_ids: frozenset[str] = frozenset()
-    runs_dir: Path | None = None
     settled_ended_at_by_run_id: dict[str, list[object]] = field(default_factory=dict)
     settled_ended_at_by_task_id: dict[str, list[object]] = field(default_factory=dict)
-    indexed_settled_skipped: frozenset[str] = frozenset()
-    skipped_run_cache: dict[str, tuple[str, object]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -765,83 +765,43 @@ def _read_workflow_dir_refs(run_dir: Path, run_ids: set[str], task_ids: set[str]
         return f"workflow_dir_{type(exc).__name__}", None
 
 
-def _read_skipped_workflow_run(workflow: _WorkflowSnapshot, run_id: str) -> tuple[str, object]:
-    if not run_id or workflow.runs_dir is None:
-        return "", None
-    cached = workflow.skipped_run_cache.get(run_id)
-    if cached is not None:
-        return cached
-    if "/" in run_id or "\\" in run_id or run_id in {".", ".."} or ".." in Path(run_id).parts:
-        result: tuple[str, object] = ("", None)
-        workflow.skipped_run_cache[run_id] = result
-        return result
-    run_dir = workflow.runs_dir / run_id
-    try:
-        dir_st = _optional_lstat(run_dir)
-        if dir_st is None:
-            result = ("", None)
-        elif stat.S_ISLNK(dir_st.st_mode):
-            result = ("workflow_run_dir_symlink", None)
-        elif not stat.S_ISDIR(dir_st.st_mode):
-            result = ("", None)
-        else:
-            result = _read_workflow_dir_refs(run_dir, {run_id}, set())
-    except OSError as exc:
-        result = (f"workflow_dir_{type(exc).__name__}", None)
-    workflow.skipped_run_cache[run_id] = result
-    return result
-
-
 def _is_safe_workflow_dir_name(name: str) -> bool:
     return bool(name) and "/" not in name and "\\" not in name and name not in {".", ".."} and ".." not in Path(name).parts
 
 
-def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256) -> _WorkflowSnapshot:
-    index_db = owner_home / "data" / "workflow_run_index.sqlite3"
+def _load_workflow_snapshot(
+    owner_home: Path, *,
+    max_settled_dir_scan: int = DEFAULT_BACKGROUND_REPORT_SETTLED_SAMPLE_ENTRIES,
+    referenced_ids: tuple[str, ...] = (),
+) -> _WorkflowSnapshot:
+    index = RunListIndex(owner_home)
     runs_dir = owner_home / "data" / "workflow_runs"
-    unsettled_run_ids: set[str] = set()
+    try:
+        runs_dir_st = _optional_lstat(runs_dir)
+    except OSError as exc:
+        return _WorkflowSnapshot(error=f"workflow_runs_stat_{type(exc).__name__}")
+    if runs_dir_st is not None and stat.S_ISLNK(runs_dir_st.st_mode):
+        return _WorkflowSnapshot(error="workflow_runs_dir_symlink")
+    try:
+        if _optional_lstat(index.path) is None:
+            if runs_dir_st is None:
+                return _WorkflowSnapshot()
+            index.backfill(WorkflowRunStore(owner_home))
+            return _WorkflowSnapshot(error="workflow_index_missing")
+        unsettled_run_ids, direct, settled_page, incomplete = index.report_candidates(
+            settled_statuses=_WORKFLOW_SETTLED_STATES, referenced_ids=referenced_ids,
+            limit=max(0, int(max_settled_dir_scan)),
+        )
+        if incomplete:
+            index.backfill(WorkflowRunStore(owner_home))
+    except (OSError, sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+        return _WorkflowSnapshot(error=f"workflow_index_{type(exc).__name__}")
+
     unsettled_task_ids: set[str] = set()
     settled_run_ids: set[str] = set()
     settled_task_ids: set[str] = set()
-    indexed_settled: set[str] = set()
     settled_ended_at_by_run_id: dict[str, list[object]] = {}
     settled_ended_at_by_task_id: dict[str, list[object]] = {}
-    scanned_dir_names: set[str] = set()
-    index_available = False
-
-    try:
-        index_st = _optional_lstat(index_db)
-    except OSError as exc:
-        return _WorkflowSnapshot(error=f"workflow_index_{type(exc).__name__}")
-    if index_st is not None:
-        try:
-            require_plain_sqlite_files(index_db, beneath=owner_home)
-            with closing(sqlite3.connect(sqlite_readonly_probe_uri(index_db), uri=True, timeout=1.0)) as conn:
-                tables = {
-                    str(row[0])
-                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                }
-                if not {"runs", "pending", "legacy"}.issubset(tables):
-                    return _WorkflowSnapshot(error="workflow_index_incomplete")
-                for wf_run_id, raw_status in conn.execute("SELECT run_id, status FROM runs"):
-                    run_id = str(wf_run_id or "").strip()
-                    status = str(raw_status or "").strip().lower()
-                    if not run_id:
-                        continue
-                    if status in _WORKFLOW_SETTLED_STATES:
-                        settled_run_ids.add(run_id)
-                        indexed_settled.add(run_id)
-                    else:
-                        unsettled_run_ids.add(run_id)
-                for (wf_run_id,) in conn.execute("SELECT run_id FROM pending"):
-                    if wf_run_id:
-                        unsettled_run_ids.add(str(wf_run_id).strip())
-                for (wf_run_id,) in conn.execute("SELECT run_id FROM legacy"):
-                    if wf_run_id:
-                        unsettled_run_ids.add(str(wf_run_id).strip())
-            index_available = True
-        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
-            return _WorkflowSnapshot(error=f"workflow_index_{type(exc).__name__}")
 
     def _inspect_workflow_dir(dir_name: str) -> str | None:
         if not _is_safe_workflow_dir_name(dir_name):
@@ -852,15 +812,16 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
         except OSError as exc:
             return f"workflow_runs_scan_{type(exc).__name__}"
         if dir_st is None:
-            return None
+            return "workflow_run_snapshot_missing" if dir_name in direct and dir_name not in unsettled_run_ids else None
         if stat.S_ISLNK(dir_st.st_mode):
             return "workflow_run_dir_symlink"
         if not stat.S_ISDIR(dir_st.st_mode):
             return None
-        scanned_dir_names.add(dir_name)
         r_ids: set[str] = {dir_name}
         t_ids: set[str] = set()
         outcome, wf_ended_at = _read_workflow_dir_refs(run_dir, r_ids, t_ids)
+        if not outcome and dir_name in direct and dir_name not in unsettled_run_ids:
+            return "workflow_run_snapshot_missing"
         if outcome and not outcome.startswith("status:"):
             return outcome
         status = outcome.removeprefix("status:") if outcome else ""
@@ -877,65 +838,25 @@ def _load_workflow_snapshot(owner_home: Path, *, max_settled_dir_scan: int = 256
                 settled_ended_at_by_task_id.setdefault(tid, []).append(wf_ended_at)
         return None
 
-    try:
-        runs_dir_st = _optional_lstat(runs_dir)
-    except OSError as exc:
-        return _WorkflowSnapshot(error=f"workflow_runs_stat_{type(exc).__name__}")
-    if runs_dir_st is not None:
-        if stat.S_ISLNK(runs_dir_st.st_mode):
-            return _WorkflowSnapshot(error="workflow_runs_dir_symlink")
-        if stat.S_ISDIR(runs_dir_st.st_mode):
-            if index_available:
-                # 索引可用时不整目录 scandir，仅按主键直查未决目录与有界已终结样本，防 O(N) 目录遍历。
-                for dir_name in sorted(unsettled_run_ids):
-                    err = _inspect_workflow_dir(dir_name)
-                    if err:
-                        return _WorkflowSnapshot(error=err)
-                settled_budget = max(0, int(max_settled_dir_scan))
-                settled_candidates = sorted(indexed_settled - unsettled_run_ids)
-                for dir_name in settled_candidates[:settled_budget]:
-                    err = _inspect_workflow_dir(dir_name)
-                    if err:
-                        return _WorkflowSnapshot(error=err)
-            else:
-                try:
-                    dir_names: list[str] = []
-                    with os.scandir(runs_dir) as entries:
-                        for entry in entries:
-                            entry_st = os.lstat(runs_dir / entry.name)
-                            if stat.S_ISLNK(entry_st.st_mode):
-                                return _WorkflowSnapshot(error="workflow_run_dir_symlink")
-                            if stat.S_ISDIR(entry_st.st_mode):
-                                dir_names.append(entry.name)
-                    dir_names.sort()
-                except OSError as exc:
-                    return _WorkflowSnapshot(error=f"workflow_runs_scan_{type(exc).__name__}")
-                settled_scanned = 0
-                for dir_name in dir_names:
-                    is_known_settled = dir_name in indexed_settled and dir_name not in unsettled_run_ids
-                    if is_known_settled and settled_scanned >= max_settled_dir_scan:
-                        continue
-                    err = _inspect_workflow_dir(dir_name)
-                    if err:
-                        return _WorkflowSnapshot(error=err)
-                    if dir_name in settled_run_ids and dir_name not in unsettled_run_ids:
-                        settled_scanned += 1
-            settled_run_ids.difference_update(unsettled_run_ids)
-            settled_task_ids.difference_update(unsettled_task_ids)
-            for rid in unsettled_run_ids:
-                settled_ended_at_by_run_id.pop(rid, None)
-            for tid in unsettled_task_ids:
-                settled_ended_at_by_task_id.pop(tid, None)
+    for dir_name in dict.fromkeys([*sorted(unsettled_run_ids | direct), *settled_page]):
+        err = _inspect_workflow_dir(dir_name)
+        if err:
+            return _WorkflowSnapshot(error=err)
+    settled_run_ids.difference_update(unsettled_run_ids)
+    settled_task_ids.difference_update(unsettled_task_ids)
+    for rid in unsettled_run_ids:
+        settled_ended_at_by_run_id.pop(rid, None)
+    for tid in unsettled_task_ids:
+        settled_ended_at_by_task_id.pop(tid, None)
 
     return _WorkflowSnapshot(
+        error="workflow_index_incomplete" if incomplete else "",
         unsettled_run_ids=frozenset(unsettled_run_ids),
         unsettled_task_ids=frozenset(unsettled_task_ids),
         settled_run_ids=frozenset(settled_run_ids),
         settled_task_ids=frozenset(settled_task_ids),
-        runs_dir=runs_dir,
         settled_ended_at_by_run_id=settled_ended_at_by_run_id,
         settled_ended_at_by_task_id=settled_ended_at_by_task_id,
-        indexed_settled_skipped=frozenset((indexed_settled - unsettled_run_ids - scanned_dir_names) & settled_run_ids),
     )
 
 
@@ -1233,7 +1154,6 @@ def _classify_execution_record(
             affirmed_sources.append("scheduler")
 
     wf_raw_ended_ats: list[object] = []
-    wf_missing_ts = False
     if (
         run_id in workflow.unsettled_run_ids
         or root_task_id in workflow.unsettled_task_ids
@@ -1245,26 +1165,10 @@ def _classify_execution_record(
         or root_task_id in workflow.settled_task_ids
         or root_task_id in workflow.settled_run_ids
     ):
-        wf_affirmed = True
-        for skipped_wf_id in dict.fromkeys((run_id, root_task_id)):
-            if skipped_wf_id not in workflow.indexed_settled_skipped:
-                continue
-            skip_outcome, skip_ended_at = _read_skipped_workflow_run(workflow, skipped_wf_id)
-            if skip_outcome and not skip_outcome.startswith("status:"):
-                unknown_reasons.append(skip_outcome)
-                wf_affirmed = False
-            elif skip_outcome and skip_outcome.removeprefix("status:") not in _WORKFLOW_SETTLED_STATES:
-                active_reasons.append("workflow_run_unsettled")
-                wf_affirmed = False
-            elif skip_outcome:
-                wf_raw_ended_ats.append(skip_ended_at)
-            else:
-                wf_missing_ts = True
         wf_raw_ended_ats.extend(workflow.settled_ended_at_by_run_id.get(run_id, ()))
         wf_raw_ended_ats.extend(workflow.settled_ended_at_by_run_id.get(root_task_id, ()))
         wf_raw_ended_ats.extend(workflow.settled_ended_at_by_task_id.get(root_task_id, ()))
-        if wf_affirmed:
-            affirmed_sources.append("workflow")
+        affirmed_sources.append("workflow")
 
     if active_reasons:
         return {**facts, "classification": "active", "reason": active_reasons[0]}
@@ -1299,7 +1203,7 @@ def _classify_execution_record(
             else:
                 settled_timestamps.append(ts)
     if "workflow" in dedup_sources:
-        if wf_missing_ts or not wf_raw_ended_ats:
+        if not wf_raw_ended_ats:
             authority_ts_complete = False
         for raw_ts in wf_raw_ended_ats:
             ts = _valid_settled_timestamp(raw_ts, effective_now=effective_now)
@@ -1456,6 +1360,7 @@ def freeze_settled_leftover_processes(
     now_ts: float | None = None,
     store_root: str | Path | None = None,
     conversation_roots: Sequence[str | Path] | None = None,
+    config: object | None = None,
 ) -> dict[str, Any]:
     effective_now = float(time.time() if now_ts is None else now_ts)
     min_age = max(0, int(min_settled_age_seconds or 0))
@@ -1572,7 +1477,12 @@ def freeze_settled_leftover_processes(
         }
 
     record_conv_roots: list[Path] = []
+    referenced_ids: set[str] = set()
     for rec in non_terminal:
+        scope = rec.get("execution_scope")
+        if isinstance(scope, dict):
+            referenced_ids.update(value for key in ("run_id", "root_task_id")
+                                  if isinstance(value := scope.get(key), str) and value)
         ct = rec.get("completion_target")
         if isinstance(ct, dict) and ct.get("store_root"):
             cand = Path(str(ct["store_root"])).expanduser().resolve(strict=False)
@@ -1581,7 +1491,24 @@ def freeze_settled_leftover_processes(
 
     runtime = _load_runtime_db_snapshot(owner_home_path)
     scheduler = _load_scheduler_snapshot(owner_home_path)
-    workflow = _load_workflow_snapshot(owner_home_path)
+    if config is None:
+        from ..common.config_paths import default_config_path
+        from ..settings.config_io import load_simple_yaml
+        from ..settings.normalize import normalize_agent_config
+
+        key = "background_report_settled_sample_entries"
+        try:
+            raw = load_simple_yaml(default_config_path())
+        except FileNotFoundError:
+            raw = {}
+        normalized, _ = normalize_agent_config({key: raw[key]} if key in raw else {})
+        sample_entries = normalized.get(key, DEFAULT_BACKGROUND_REPORT_SETTLED_SAMPLE_ENTRIES)
+    else:
+        sample_entries = getattr(config, "background_report_settled_sample_entries",
+                                 DEFAULT_BACKGROUND_REPORT_SETTLED_SAMPLE_ENTRIES)
+    workflow = _load_workflow_snapshot(
+        owner_home_path, max_settled_dir_scan=sample_entries, referenced_ids=tuple(sorted(referenced_ids)),
+    )
     conversations = _discover_conversation_snapshot(owner_home_path, conversation_roots, record_conv_roots)
 
     eligible_entries: list[tuple[dict[str, object], dict[str, Any]]] = []
