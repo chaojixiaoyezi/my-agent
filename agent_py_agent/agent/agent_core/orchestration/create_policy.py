@@ -50,6 +50,7 @@ from ...tooling.registry_auth import (
     intersect_tool_grants,
     snapshot_tool_grants,
 )
+from ...tooling.registry_workspace import WorkspaceRef
 from ..parameters import _bool_param, _positive_int
 from ..runner.prompts import SUBAGENT_DEFAULT_PLAN, SUBAGENT_DEFAULT_THOUGHT
 from ..runner.ref_fields import params_input_refs, params_output_refs
@@ -440,6 +441,7 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
     current = getattr(request.agent, "_current_run_params", None)
     scope = getattr(current, "delegable_scope", None)
     scope = scope if isinstance(scope, DelegableScope) else None
+    ref = getattr(current, "workspace_ref", None)
     attrs = create_task_attributes(raw_params, request.agent)
     attrs.pop("delegation_path_refusals", None)
     if _independent_gateway_request(current):
@@ -472,6 +474,7 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         context_packs=create_context_packs(raw_params),
         attributes=attrs,
         parent_delegable_scope=scope,
+        workspace_ref=ref if isinstance(ref, WorkspaceRef) else None,
         initiating_request_id=request_id if isinstance(request_id, str) else "",
         host_channel_actor=current_actor_for_child(request.agent),
         **_host_execution_fields(request.agent, str(lineage["parent_id"] or "")),
@@ -1307,6 +1310,9 @@ def _inherit_current_conversation_workspace_attrs(
     cwd = conversation_execution_cwd(current_attrs) or str(
         getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
     )
+    ref = getattr(getattr(agent, "_current_run_params", None), "workspace_ref", None)
+    if isinstance(ref, WorkspaceRef):
+        cwd = str(ref.root)
     if task_root:
         inherited_workspace = dict(workspace) if isinstance(workspace, dict) else {}
         inherited_workspace.update(
@@ -1323,7 +1329,7 @@ def _inherit_current_conversation_workspace_attrs(
         return
     home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
     declared = inheritable_declared_work_roots(
-        conversation_runtime_workspace_roots(current_attrs),
+        list(ref.roots) if isinstance(ref, WorkspaceRef) else conversation_runtime_workspace_roots(current_attrs),
         owner_home=home,
     )
     scope = getattr(getattr(agent, "_current_run_params", None), "delegable_scope", None)

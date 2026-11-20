@@ -1110,6 +1110,7 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
                     source=params.source,
                     save=params.save,
                     task_attributes=params.task_attributes,
+                    workspace_ref=params.workspace_ref,
                 ),
             )
             _log_run_stage("context_ready", params, started_mono=_run_stage_started)

@@ -342,6 +342,15 @@ def _tool_liveness_context(runtime_request: ToolCallRuntimeRequest) -> dict[str,
 def _archive_runtime_tool_output(runtime_request, call, outcome):
     from .tool_call_archive_record import archive_tool_output_projection
 
+    if call.tool_name == "business_assets_versions_accept" and outcome.ok:
+        from ..common.cancellation import cancellation_requested
+        from .tool_loop.deliverable_closeout import adopted_delivery_receipts
+
+        adoption = call.arguments.get("params")
+        if isinstance(adoption, dict) and not cancellation_requested():
+            landing = adopted_delivery_receipts(runtime_request.agent, runtime_request.request.params, adoption)
+            if landing:
+                outcome = fast_replace(outcome, result_envelope={**outcome.result_envelope, "landing": landing})
     parent = runtime_request.call
     nested = call.call_id != parent.call_id
     if nested:

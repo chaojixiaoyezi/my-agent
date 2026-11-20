@@ -2,18 +2,21 @@
 # 模块用途: 生成子代理真实输出引用及任务锁审计，内部运行目录不是业务交付区。
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
+from hashlib import file_digest
 from pathlib import Path
 from typing import Any
 
 from ...model_visible_refs import has_placeholder_path_segment
+from ...tooling.registry_workspace import open_workspace_delivery_file, read_workspace_ref
 from ...tooling.write_boundary import WRITE_TOOL_NAMES
 from ..context_bundle_refs import execution_cwd
 
 OUTPUT_TARGET_LOCKED_CODE = "OUTPUT_TARGET_LOCKED"
 OUTPUT_TARGET_NOT_WRITABLE_CODE = "OUTPUT_TARGET_NOT_WRITABLE"
-_DECLARED_FIELDS = ("output_files", "output_refs")
+_DECLARED_FIELDS = ("output_files", "output_refs", "required_file_refs")
 # 与 context_bundle_contracts._SAFE_FILE_SUFFIX_RE 保持一致（导入会成环，正则单独镜像）
 _SAFE_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,63}$")
 
@@ -36,11 +39,16 @@ def anchored_output_refs(task: Any) -> OutputAnchoring:
     forbidden_roots = _task_forbidden_roots(task)
     refs: list[str] = []
     warnings: list[dict[str, Any]] = []
+    attrs = getattr(task, "attributes", None)
+    refusals = attrs.get("delegation_path_refusals") if isinstance(attrs, dict) else None
+    refused = {row.get("target_path"): row.get("expected_relative_location", "")
+               for row in (refusals if isinstance(refusals, list) else []) if isinstance(row, dict)}
     for ref, fieldname in _declared_path_refs(task):
         target = anchor_refs_for_execution(task, [ref])[0]
         if target not in refs:
             refs.append(target)
         _append_locked_warning(warnings, fieldname, target, locked_paths)
+        previous = len(warnings)
         _append_not_writable_warning(
             warnings,
             fieldname,
@@ -48,13 +56,19 @@ def anchored_output_refs(task: Any) -> OutputAnchoring:
             writable_roots=writable_roots,
             forbidden_roots=forbidden_roots,
         )
+        if len(warnings) != previous and getattr(task, "output_dir", ""):
+            warning = warnings[-1]
+            target_path = warning["target_path"]
+            warning.update(staging_fields(task, Path(target_path), expected=refused.get(target_path, "")))
+            warning["message_zh"] += " 请将文件写入 staging_ref，再由父任务按精确版本采用并落地。"
     return OutputAnchoring(anchored_refs=refs, warnings=warnings)
 
 
 # LLM: 不从 run/output、权限根列表或宿主进程 cwd 猜目标；父目录引用保留真实目标，由工具判断权限。
 # 函数用途: 相对路径基于可信 cwd，绝对路径不变；缺少 cwd 时保留原引用，不静默写到其它地方。
 def anchor_refs_for_execution(task: Any, refs: list[str]) -> list[str]:
-    cwd = execution_cwd(task)
+    frozen = read_workspace_ref(getattr(task, "workspace_ref_record", None))
+    cwd = str(frozen.root) if frozen is not None else execution_cwd(task)
     results: list[str] = []
     for ref in refs:
         text = str(ref or "").strip()
@@ -117,10 +131,44 @@ def _path_texts(value: object) -> list[str]:
         return []
     texts: list[str] = []
     for item in value:
-        text = item.strip() if isinstance(item, str) else ""
+        raw = item.get("path") if isinstance(item, dict) else item
+        text = raw.strip() if isinstance(raw, str) else ""
         if text and looks_like_output_path(text):
             texts.append(text)
     return texts
+
+
+def staging_fields(task: Any, target: Path, *, expected: str = "") -> dict[str, str | bool]:
+    root = Path(task.output_dir)
+    relative = Path(expected or target.name)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        relative = Path(target.name)
+    return {
+        "staging_ref": str(root / relative),
+        "expected_relative_location": relative.as_posix(),
+        "parent_apply_tool": "assets.versions.accept",
+        "staging_required": True,
+    }
+
+
+def staged_output_manifest(task: Any) -> list[dict[str, object]]:
+    """仅在收尾核验实际已写的普通文件，并返回可由父执行重读的清单。"""
+    rows = []
+    root = Path(task.output_dir)
+    for warning in anchored_output_refs(task).warnings:
+        if "staging_ref" not in warning:
+            continue
+        staged = Path(warning["staging_ref"])
+        row = {key: warning[key] for key in ("staging_ref", "expected_relative_location", "parent_apply_tool")}
+        row.update(destination=warning["target_path"], child_run_id=task.id, files_written=False, sha256="")
+        try:
+            descriptor = open_workspace_delivery_file(root, staged.relative_to(root).parts)
+            with os.fdopen(descriptor, "rb") as stream:
+                row.update(sha256=file_digest(stream, "sha256").hexdigest(), files_written=True)
+        except (OSError, ValueError) as error:
+            row["error_code"] = type(error).__name__
+        rows.append(row)
+    return rows
 
 
 # 函数用途: 判定一条声明是不是文件路径形态（绝对路径 / 含目录分隔 / 带合法文件后缀）。

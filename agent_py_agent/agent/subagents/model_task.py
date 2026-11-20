@@ -376,3 +376,9 @@ class SubAgentTask:
     #   “这个 run 已被谁接替”的同一组权威字段，只能从空写成非空。读取统一走 models.task_replacement_successor。
     # 字段用途: 记下接替这个已结束子代理的新 run_id，供防重复接替和父级视图标出“已被取代”；放在末尾保留位置参数兼容性。
     superseded_by: str = ""
+    workspace_ref_record: dict[str, object] | None = None
+
+    def staged_workspace_outputs(self) -> list[dict[str, object]]:
+        from .services.output_alignment import staged_output_manifest
+
+        return staged_output_manifest(self)

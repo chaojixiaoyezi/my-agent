@@ -65,7 +65,7 @@ from .registry_auth import (
     snapshot_search_can_load,
 )
 from .registry_bootstrap import build_tool_retriever, register_base_tools
-from .registry_workspace import effective_registry_cwd
+from .registry_workspace import effective_registry_cwd, workspace_ref_from_boundary
 from .runtime_contracts import ToolCall, ToolResult
 from .versioned_input_decoder import dead_business_spaces_redirect, retired_tool_aliases
 
@@ -1265,6 +1265,8 @@ class ToolRegistry:
             write_boundary,
         )
         boundary = dict(write_boundary) if isinstance(write_boundary, dict) else {}
+        if "workspace_ref" in boundary and isinstance(call.arguments.get("path"), str):
+            boundary["_workspace_requested_path"] = call.arguments["path"]
         effective_owner_scope = effective_owner_scope_root(write_boundary=boundary, registry_scope=self.owner_scope_root)
         host_output_redaction = boundary.pop("_host_output_redaction", None)
         from .runtime_boundary import exact_read_roots
@@ -1843,6 +1845,9 @@ def _execution_workspace_roots(
     write_boundary: dict[str, object] | None,
 ) -> tuple[Path, ...]:
     boundary = write_boundary if isinstance(write_boundary, dict) else {}
+    frozen = workspace_ref_from_boundary(boundary)
+    if frozen is not None:
+        return tuple(dict.fromkeys((frozen.root, *frozen.roots)))
     raw = boundary.get("execution_workspace_roots")
     requested = raw if isinstance(raw, list) else []
     inherited = requested if requested else registry_roots

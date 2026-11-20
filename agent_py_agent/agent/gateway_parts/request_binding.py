@@ -42,6 +42,7 @@ from .request_errors import (
 
 if TYPE_CHECKING:
     from ..path_access_policy import DelegableScope
+    from ..tooling.registry_workspace import WorkspaceRef
     from . import request_context
 
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
@@ -153,6 +154,7 @@ class GatewayTaskBindingWriter:
     request: dict | None = None
     execution_attempt_id: str = ""
     delegable_scope: DelegableScope | None = field(default=None, kw_only=True, repr=False)
+    workspace_ref: WorkspaceRef | None = field(default=None, kw_only=True, repr=False)
 
     # LLM: Publish the exact request/thread lane before acquiring its recoverable claim. This
     # write-ahead binding lets the sole terminalizer release it even after a crash before execution.
@@ -207,17 +209,22 @@ class GatewayTaskBindingWriter:
         }
         if self.delegable_scope is not None:
             payload["delegable_scope"] = self.delegable_scope.to_record()
+        if self.workspace_ref is not None:
+            payload["workspace_ref"] = self.workspace_ref.to_record()
 
         # LLM: T is held by the caller; the JSON lock preserves concurrent heartbeat fields.
         # 函数用途: 在当前回合锁内只更新执行绑定，不覆盖租约、停止标记或展示任务。
         def persist() -> bool:
             def update(current: dict) -> dict:
                 previous = current.get("runtime_authority")
-                if isinstance(previous, dict) and "delegable_scope" in previous:
-                    retained = previous["delegable_scope"]
-                    if "delegable_scope" in payload and payload["delegable_scope"] != retained:
-                        raise ConversationPersistenceError("恢复请求的可委派目录与原受理快照不一致")
-                    payload["delegable_scope"] = retained
+                if isinstance(previous, dict):
+                    for key in ("delegable_scope", "workspace_ref", "staged_deliverables"):
+                        if key not in previous:
+                            continue
+                        retained = previous[key]
+                        if key in payload and payload[key] != retained:
+                            raise ConversationPersistenceError("恢复请求的目录与原受理快照不一致")
+                        payload[key] = retained
                 return {**current, "runtime_authority": payload}
 
             update_json_file_atomic(self.request_path, update, require_existing=True)
@@ -228,6 +235,37 @@ class GatewayTaskBindingWriter:
         return GatewayActiveTurnTransition(
             self.request_path, self.request_id, self.execution_attempt_id,
         )("bind_runtime_authority", persist)
+
+    def remember_staged_delivery(self, phase: dict[str, str]) -> None:
+        """原工具通过审批后，在采用前把目标和精确版本记入原请求绑定。"""
+        transition = GatewayActiveTurnTransition(self.request_path, self.request_id, self.execution_attempt_id)
+
+        def persist():
+            def update(current):
+                authority = gateway_runtime_authority(current, self.request_id)
+                if not authority or authority["gateway_execution_attempt_id"] != self.execution_attempt_id:
+                    raise ConversationPersistenceError("暂存清单与当前请求执行绑定不一致")
+                previous = authority.get("staged_deliverables", [])
+                for row in previous:
+                    if row["destination"] == phase["destination"]:
+                        if row != phase:
+                            raise ConversationPersistenceError("原请求已为该目标绑定另一份暂存清单")
+                        return current
+                return {**current, "runtime_authority": {**authority, "staged_deliverables": [*previous, phase]}}
+
+            saved = update_json_file_atomic(self.request_path, update, require_existing=True)
+            if isinstance(self.request, dict):
+                self.request["runtime_authority"] = saved["runtime_authority"]
+
+        transition("bind_staged_delivery", persist)
+
+    def staged_delivery_contract(self) -> dict | None:
+        authority = gateway_runtime_authority(self.request, self.request_id) if self.request is not None else {}
+        rows = authority.get("staged_deliverables")
+        if not rows:
+            return None
+        return {"required_file_refs": [{"path": row["destination"], "sha256": row["sha256"]} for row in rows],
+                "staged_deliverables": rows}
 
     # LLM: 只读：audit_records 工具经当前运行参数找到本写入器调用；队列目录来自本写入器的请求路径（原 Gateway 队列），
     #   不接受模型参数，也不信任 agent 自身的 Gateway 配置；实现归 request_audit_records，不写任何文件。

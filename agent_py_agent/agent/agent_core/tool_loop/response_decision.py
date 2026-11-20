@@ -34,7 +34,11 @@ from ..tool_guard.unresolved_runtime_issue import (
     unresolved_runtime_issue_context,
 )
 from ..tool_ir_history import record_unexecuted_response_ir
-from .deliverable_closeout import deliverable_closeout_block
+from .deliverable_closeout import (
+    declared_deliverables,
+    deliverable_closeout_block,
+    deliverable_report,
+)
 
 _PROTECTED_TOOL_MARKERS = (
     "[tool-record",
@@ -323,7 +327,8 @@ def _decided_response(
     if not request.agent.config.enable_tools:
         from .background_public_receipt import explicit_public_receipt_active
 
-        if explicit_public_receipt_active(request.params) and not has_protected_marker:
+        if not has_protected_marker and (explicit_public_receipt_active(request.params)
+                                         or declared_deliverables(request.params)):
             return _no_tool_calls_decision(_NoToolCallsRequest(
                 request.agent, request.params, request.response, request.counters, False, probe_rollback,
             ))
@@ -1173,20 +1178,23 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
                 "continue", None, [], _inc_empty_text(counters)
             )
         final_response = request.response
-        # EXEC-38(owner 拍板 2026-08-16): 程序验证收窄为只做"未知副作用"
-        # ——产物/交付目录验证删除(EXEC-06b/34/37 撤销)。理由: 任务千奇百怪,
-        # 很多任务没有落盘交付概念; 对照 会话运行时/轻量运行时 均无产出门, 模型自决
-        # 何时交付(EXEC-31 edit 回显 + prompt 禁重读已在行为层引导);
-        # 防假完成交由"如实报告"合同与 UNKNOWN 安全闸。
-        # EXEC-39(2026-09-11): 在子代理 run 里恢复它的**严格子集**——只校验宿主自己声明过的
-        # 交付清单(required_file_refs/output_refs…)，主代理用户会话永不生效，且有界放行。
-        # 真机证据: 子代理声明了要写 core_*.go，收工时一个都不存在却报完成。
-        deliverable_block = deliverable_closeout_block(request.params) or _pack_verification_closeout(request)
+        if _pack_closeout_cancelled(request):
+            return _cancelled_closeout_decision(request)
+        deliverable_block = deliverable_closeout_block(request.params, agent=request.agent) or _pack_verification_closeout(request)
         if _pack_closeout_cancelled(request):
             return _cancelled_closeout_decision(request)
         if deliverable_block:
             request.params.tool_context.append(deliverable_block)
             return ToolLoopResponseDecision("continue", None, [], request.counters)
+        delivery = deliverable_report(request.params)
+        if delivery and delivery["missing"] and not length_truncated:
+            preview = "、".join(delivery["missing"][:5])
+            final_response = fast_replace(
+                final_response, text=f"声明的交付文件未通过落盘核验（{len(delivery['missing'])} 项）。\n{preview}",
+                runtime_status="unfinished", runtime_reason="DECLARED_DELIVERABLE_MISSING",
+                runtime_source="tool_loop",
+            )
+            return ToolLoopResponseDecision("break", final_response, [], request.counters)
         if length_truncated:
             # EXEC-05 长任务真机: 最终答复被供应商输出上限截断(max_tokens/length)不能当作完成交付。
             # R248(2026-09-11 真机): 原来只标记 unfinished 就收口，恢复靠**管理器重启整个 runner 轮次**，

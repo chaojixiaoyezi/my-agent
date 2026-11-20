@@ -9,13 +9,19 @@ import json
 from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.cancellation import ToolCancelled, bind_cancellation_token
+from ..common.file_version import StaleFileVersionError
 from ..common.log_redaction import redact_sensitive_text
+from ..common.nofollow_fs import (
+    ManagedFileReadLimitExceeded,
+    read_bytes_beneath,
+)
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     raise_if_transport_uncertain,
@@ -28,10 +34,12 @@ from ..path_access_policy import (
     data_root_from_boundary,
     delegable_path_decision,
     delegation_receipt,
+    effective_owner_scope_root,
     frozen_tool_external_roots,
     in_delegation_owner_root,
     recorded_delegable_scope,
 )
+from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .controlled_exec import ControlledExecToolRequest, execute_controlled_exec_tool
 from .models import (
     BaseTool,
@@ -42,7 +50,11 @@ from .models import (
     ToolRuntimeSnapshot,
     apply_tool_execution_facts,
 )
-from .registry_workspace import effective_registry_cwd
+from .registry_workspace import (
+    effective_registry_cwd,
+    freeze_workspace_ref,
+    workspace_ref_from_boundary,
+)
 from .runtime_boundary import (
     canonicalize_owner_home_arguments,
     exact_read_boundary_error,
@@ -260,6 +272,19 @@ def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutc
             handler_executed=False,
         )
     boundary = request.write_boundary or {}
+    if "workspace_ref" in boundary and request.tool_name in _BOUNDARY_CONTEXT_TOOL_NAMES:
+        workspace = workspace_ref_from_boundary(boundary)
+        raw_path = (request.arguments.get("working_dir") or request.arguments.get("cwd")
+                    or request.arguments.get("path") or request.arguments.get("directory"))
+        path = (workspace.root / Path(raw_path).expanduser()
+                if workspace is not None and isinstance(raw_path, str) else None)
+        if workspace is None or not workspace.is_current() or (
+                path is not None and workspace.includes_replaced_root(path)):
+            return apply_tool_execution_facts(
+                structured_tool_error(request.tool_name, "工作目录已变化",
+                    "请重新确认工作目录并在新请求中执行。", error_code="PATH_OUTSIDE_WORKSPACE"),
+                failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False,
+            )
     if "delegable_scope" in boundary:
         refusal = frozen_tool_path_refusal(request.tool_name, request.arguments, boundary,
                                            request.workspace_root, request.owner_scope_root,
@@ -354,6 +379,7 @@ def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutc
         request=request,
         workspace_roots=workspace_roots,
     )
+    file_receipt = _file_path_receipt(request, execution_tool, tool_params)
     outcome = _execute_with_temporary_tool_context(
         execution_tool,
         workspace_roots=workspace_roots,
@@ -401,7 +427,35 @@ def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutc
             "reason_code": safe.get("reason_code") or ('EXACT_PROCESS_STATE_ONLY' if state_context else "EXACT_HANDLE_READ_SCOPE_UNVERIFIED")}}
         if isinstance(observation, dict):
             outcome.result_envelope["progress_observation"] = observation
+    if outcome.ok and file_receipt:
+        envelope = outcome.result_envelope or {}
+        actual = envelope.get("resolved_path") or envelope.get("path")
+        if isinstance(actual, str) and Path(actual).is_absolute():
+            file_receipt["resolved_path"] = actual
+        outcome.result_envelope = {**envelope, **file_receipt}
     return outcome
+
+
+def _file_path_receipt(request, tool, params) -> dict:
+    if request.tool_name not in _BOUNDARY_FILESYSTEM_TOOL_NAMES or not hasattr(tool, "resolve_path"):
+        return {}
+    paths = declared_write_paths(request.tool_name, params)
+    if not paths:
+        raw = params.get("path") or params.get("source_dir") or params.get("directory") or "."
+        if not isinstance(raw, str):
+            return {}
+        paths = [raw]
+    try:
+        resolver = tool.resolve_write_path if request.tool_name in WRITE_TOOL_NAMES else tool.resolve_path
+        resolved = [str(resolver(path)) for path in paths]
+    except (OSError, RuntimeError, ValueError):
+        return {}
+    boundary = request.write_boundary or {}
+    frozen = workspace_ref_from_boundary(boundary) or freeze_workspace_ref(request.workspace_root)
+    return {
+        "requested_path": boundary.get("_workspace_requested_path", paths[0] if len(paths) == 1 else paths),
+        "resolved_path": resolved[0] if len(resolved) == 1 else resolved,
+        "workspace_ref": frozen.workspace_ref if frozen is not None else ""}
 
 
 # LLM: 读取/写入范围只读当前请求的宿主字段，与业务 arguments 分离；沿原墙外授权派生，不按 workspace 列表猜权限。
@@ -475,6 +529,75 @@ def _with_effective_registry_workspace(
 # or private-network field must be applied to a shallow copy; Terminal also needs its nested
 # ShellTool copied so one request cannot mutate another request's permissions.
 # 函数用途: 为本次工具调用复制带可变权限字段的 handler，避免单 Gateway 并发串目录或私网授权。
+def land_accepted_workspace_file(registry, boundary, destination, payload: bytes, *,
+                                 max_bytes: int) -> tuple[str, str, str]:
+    """经本轮普通写边界发布已核验的字节，遇到其它内容时不覆盖。"""
+    from ._filesystem_write import _atomic_write_bytes, _system_ledger_write_error
+    from ._persona_write_guard import _persona_approval_write_error, _persona_injection_write_error
+
+    workspace = workspace_ref_from_boundary(boundary)
+    prototype = registry.tools.get("write_file")
+    if workspace is None or prototype is None or not workspace.is_current():
+        return "scope_blocked", "", "PATH_OUTSIDE_WORKSPACE"
+    request = RegistryToolInvokeRequest(
+        tool_name="write_file", arguments={"path": str(destination)}, tools=registry.tools,
+        workspace_root=workspace.root, workspace_roots=list(workspace.roots),
+        allowed_tools=None, write_boundary=boundary, path_access_mode=registry.path_access_mode,
+        path_dangerous_roots=registry.path_dangerous_roots,
+        owner_scope_root=effective_owner_scope_root(write_boundary=boundary, registry_scope=registry.owner_scope_root),
+    )
+    refusal = frozen_tool_path_refusal("write_file", request.arguments, boundary, workspace.root, request.owner_scope_root)
+    if refusal:
+        return "scope_blocked", "", str(refusal["code"])
+    request = _delegable_tool_boundary(request)
+    roots = _workspace_roots_for_invocation(request)
+    if error := _write_boundary_denied(request, request.arguments, roots):
+        return "scope_blocked", "", error.error_code
+    tool = _request_local_tool_for_invocation(prototype, request=request, workspace_roots=roots)
+    try:
+        target = tool.resolve_write_path(destination)
+        root = next((item for item in (workspace.root, *workspace.roots)
+                     if target != item and target.is_relative_to(item)), None)
+        if root is None or workspace.identity_for(root) is None or Path(destination) != target:
+            return "scope_blocked", "", "PATH_OUTSIDE_WORKSPACE"
+        relative = target.relative_to(root)
+    except (OSError, ValueError, RuntimeError) as error:
+        return "scope_blocked", "", getattr(error, "access_code", "") or "WRITE_FORBIDDEN"
+    try:
+        present = read_bytes_beneath(root, relative.parts, max_bytes=max_bytes)
+        if present is None:
+            if _system_ledger_write_error(target):
+                return "scope_blocked", "", "WRITE_FORBIDDEN"
+            if _persona_approval_write_error(target, tool.protected_persona_root):
+                return "scope_blocked", "", "PERSONA_WRITE_REQUIRES_TOOL"
+            if _persona_injection_write_error(target, payload.decode("utf-8", errors="replace")):
+                return "scope_blocked", "", "PERSONA_INJECTION_BLOCKED"
+            try:
+                with tool.quota_changes([OwnerQuotaChange(target, len(payload))]):
+                    if workspace.identity_for(root) is None or target.resolve(strict=False) != target:
+                        return "scope_blocked", "", "PATH_OUTSIDE_WORKSPACE"
+                    _atomic_write_bytes(target, payload, create_only=True, expected_version="absent")
+            except (FileExistsError, StaleFileVersionError):
+                return _existing_workspace_file(root, relative.parts, payload, max_bytes=max_bytes)
+            actual = read_bytes_beneath(root, relative.parts, max_bytes=max_bytes)
+            if actual == payload:
+                return "landed", sha256(payload).hexdigest(), ""
+            return "conflict", sha256(actual).hexdigest() if actual is not None else "", ""
+        return ("already_landed" if present == payload else "conflict"), sha256(present).hexdigest(), ""
+    except ManagedFileReadLimitExceeded:
+        return "conflict", "", ""
+    except (OwnerQuotaExceeded, OwnerQuotaUnavailable, OSError, ValueError, RuntimeError) as error:
+        return "landing_unverified", "", type(error).__name__
+
+
+def _existing_workspace_file(root: Path, parts: tuple[str, ...], payload: bytes, *,
+                             max_bytes: int) -> tuple[str, str, str]:
+    content = read_bytes_beneath(root, parts, max_bytes=max_bytes)
+    if content is None:
+        return "landing_unverified", "", "FileNotFoundError"
+    return ("already_landed" if content == payload else "conflict"), sha256(content).hexdigest(), ""
+
+
 def _request_local_tool_for_invocation(
     tool: BaseTool,
     *,
@@ -508,6 +631,8 @@ def _request_local_tool_for_invocation(
             else scoped
         )
         workspace_target.workspace_root = request.workspace_root
+        if hasattr(workspace_target, "workspace_ref"):
+            workspace_target.workspace_ref = workspace_ref_from_boundary(request.write_boundary)
         if workspace_roots is not None and hasattr(workspace_target, "workspace_roots"):
             workspace_target.workspace_roots = list(workspace_roots)
     configured_policy = getattr(

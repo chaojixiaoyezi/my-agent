@@ -276,7 +276,8 @@ def _task_payload(task: object) -> dict[str, object]:
         payload["grant_revision"] = scope.get("permission_version", "")
     if isinstance(refusals, list) and isinstance(scope, dict):
         payload["delegation_path_refusals"] = [
-            {**row, "staging_location": current_model_ref(_task_text(task, "output_dir"))}
+            {**row, "staging_location": current_model_ref(_task_text(task, "output_dir")),
+             "staging_ref": current_model_ref(str(Path(task.output_dir) / row.get("expected_relative_location", "")))}
             for row in refusals if isinstance(row, dict)
         ]
     return payload

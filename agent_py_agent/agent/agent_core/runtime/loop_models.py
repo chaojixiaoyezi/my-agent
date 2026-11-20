@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ...conversation.business_contracts import BusinessExecutionContext
 from ...memory_store.recall import MemoryRecallScope
 from ...path_access_policy import DelegableScope, recorded_delegable_scope
+from ...tooling.registry_workspace import WorkspaceRef, workspace_ref_from_boundary
 
 if TYPE_CHECKING:
     from ...capability.decision_recommendation import CapabilityPresentationSelection
@@ -69,6 +70,7 @@ class RunParams:
     # 前台已受理空间的只读记忆范围；不代表SessionTask，也不授予工具/工作流权限。
     memory_recall_scope: MemoryRecallScope | None = field(default=None, kw_only=True, repr=False, metadata={"host_only": True})
     delegable_scope: DelegableScope | None = field(default=None, kw_only=True, repr=False, metadata={"host_only": True})
+    workspace_ref: WorkspaceRef | None = field(default=None, kw_only=True, repr=False, metadata={"host_only": True})
     # 仅当前认证入站请求的引用绑定；不写模型 attrs、不继承到新请求或子代理，不承担群授权。
     host_message_references: tuple[tuple[str, str], ...] = ()
     # 同一次认证入站的唯一typed输入；消息引用字段仅为其原只读投影，不从模型attrs构造。
@@ -148,6 +150,10 @@ class RunParams:
     )
 
     def __post_init__(self) -> None:
+        if self.workspace_ref is not None and type(self.workspace_ref) is not WorkspaceRef:
+            raise TypeError("workspace_ref 必须是宿主 WorkspaceRef 或 None")
+        if self.workspace_ref is None and self.context_scope == "task_local":
+            self.workspace_ref = workspace_ref_from_boundary(self.write_boundary)
         if self.delegable_scope is not None and type(self.delegable_scope) is not DelegableScope:
             raise TypeError("delegable_scope 必须是宿主 DelegableScope 或 None")
         if self.delegable_scope is None and self.context_scope == "task_local" and isinstance(self.write_boundary, dict):
@@ -172,6 +178,7 @@ class RuntimeContextRequest:
     source: str = "run"
     save: bool | None = None
     task_attributes: dict | None = None
+    workspace_ref: WorkspaceRef | None = field(default=None, kw_only=True, repr=False, metadata={"host_only": True})
 
 
 # LLM: 已解析参数保留原opaque source/宿主回调/拒绝与逻辑turn；source不授权/不序列化，临时carry不替代原工具/权限快照或archive。
