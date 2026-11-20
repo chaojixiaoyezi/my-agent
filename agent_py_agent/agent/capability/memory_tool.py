@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -18,9 +19,10 @@ from ..conversation.authority import (
 )
 from ..conversation.host_actor import HostActorError, model_long_term_scope
 from ..memory_store import recall
-from ..memory_store.candidate_models import CandidateObservation, MemoryScope
+from ..memory_store.candidate_models import _MAX_CONTENT_CHARS, CandidateObservation, MemoryScope
 from ..memory_store.promotion_remove_recovery import CommittedRemoval
 from ..memory_store.security import redact_memory_quote, scan_memory_content
+from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred
 from ..tooling.models import (
     BaseTool,
     EffectResolverPolicy,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
 _MEMORY_KINDS = frozenset({"fact", "event", "project"})
 _MEMORY_ORIGINS = frozenset({"user_explicit", "tool_verified", "model_inferred"})
 _MEMORY_ACTIONS = frozenset({"add", "replace", "remove"})
+_CORRECTION_VERDICTS = ("wrong", "outdated", "incomplete", "confirmed")
 # remember(action=list) 每页最多返回的正式长期记忆条数；条目更多时回执带 next_cursor 续页。
 _MEMORY_LIST_PAGE_ENTRIES = 50
 # 回查本轮用户原话时每页倒读的会话行数（同一请求的行不会被切到两页之外）。
@@ -61,6 +64,7 @@ def build_remember_model_spec() -> ToolModelSpec:
             "替换/删除须entry_id，宿主冻结目标版本并在确认时CAS。用户亲口提供或明确要求保存用user_explicit；"
             "事实仅来自成功工具结果时用tool_verified并附精确evidence_refs。省略scope使用本人personal；"
             "personal/session不自填身份键，session不填有效时间，需时间过期用temporary。画像/称呼/长期偏好用update_persona，教训走lesson候选链。"
+            "纠正已展示的记忆时用correct，原样传entry_id和version并给出verdict。反馈进入待审，正式记忆仍由原晋升流程修改。"
         ),
         input_schema=_remember_input_schema(scope_schema, operation_schema),
         hints=ToolModelHints(
@@ -84,6 +88,7 @@ def build_remember_model_spec() -> ToolModelSpec:
                 '"kind":"project","origin":"user_explicit","subject_key":"project.moneywise.timezone",'
                 '"scope":{"scope_type":"project","scope_key":"project:moneywise"}}',
                 '{"tool":"remember","action":"list"}',
+                '{"tool":"remember","action":"correct","entry_id":"memory-example","version":2,"verdict":"outdated"}',
             ),
         ),
     )
@@ -194,10 +199,15 @@ def _remember_input_schema(
     fields = _remember_business_fields(scope_schema)
     fields["action"] = {
         "type": "string",
-        "enum": ["add", "list", "replace", "remove", "batch"],
+        "enum": ["add", "list", "replace", "remove", "batch", "correct"],
     }
     fields["operations"] = {"type": "array", "items": operation_schema}
     fields["cursor"] = {"type": "string"}
+    fields["version"] = {"type": "integer", "minimum": 1, "description": "仅 correct：条目展示的版本。"}
+    fields["verdict"] = {"type": "string", "enum": list(_CORRECTION_VERDICTS),
+                         "description": "仅 correct：错误、过时、不完整或已核实。"}
+    fields["note"] = {"type": "string", "maxLength": _MAX_CONTENT_CHARS,
+                      "description": "仅 correct 的可选简短说明。"}
     for name, description in _remember_parameter_descriptions().items():
         fields[name]["description"] = description
     return {
@@ -212,8 +222,8 @@ def _remember_input_schema(
 # 函数用途: 返回 remember 参数的中文说明。
 def _remember_parameter_descriptions() -> dict[str, str]:
     return {
-        "action": "add(默认)、list、replace、remove 或 batch。",
-        "entry_id": "replace/remove 的正式长期记忆稳定编号；必须来自 list。",
+        "action": "add(默认)、list、replace、remove、batch 或 correct。",
+        "entry_id": "正式长期记忆编号。replace/remove 来自 list，correct 使用已展示的编号及版本。",
         "content": "add/replace 的简短、自包含正文。",
         "kind": "fact、event 或 project；lesson 不在长期 JSONL 中。",
         "tags": "可选短标签，只辅助检索，不决定事实权威。",
@@ -250,6 +260,7 @@ class RememberTool(BaseTool):
                     ("replace", "mutating"),
                     ("remove", "mutating"),
                     ("batch", "mutating"),
+                    ("correct", "mutating"),
                 ),
             ),),
         ),
@@ -282,8 +293,12 @@ class RememberTool(BaseTool):
     # 函数用途: 列出正式记忆，或原子记录候选并按保守策略尝试晋升新增事实。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "add").strip().lower()
-        if action not in {"add", "list", "replace", "remove", "batch"}:
-            return _memory_error("action 必须是 add/list/replace/remove/batch", "TOOL_INVALID_ARGUMENTS", not_started=True)
+        if action not in {"add", "list", "replace", "remove", "batch", "correct"}:
+            return _memory_error("action 必须是 add/list/replace/remove/batch/correct",
+                                 "TOOL_INVALID_ARGUMENTS", not_started=True)
+        if action != "correct" and {"version", "verdict", "note"} & params.keys():
+            return _memory_error("version、verdict、note 仅用于 correct。请移除这些字段或改用 correct。",
+                                 "TOOL_INVALID_ARGUMENTS", not_started=True)
         memory = getattr(self.agent, "memory", None)
         if memory is None or not hasattr(memory, "all"):
             return _memory_error("正式长期记忆不可用", "TOOL_UNAVAILABLE", not_started=True)
@@ -298,7 +313,13 @@ class RememberTool(BaseTool):
             if isolated:
                 return _memory_error("本轮的宿主策略禁止读取正式长期记忆。", "TOOL_UNAVAILABLE",
                                      hint="请在有权的普通会话中列出记忆。", not_started=True)
-            return _memory_list_result(memory, scope, cursor=str(params.get("cursor") or ""))
+            return _memory_list_result(memory, scope, cursor=str(params.get("cursor") or ""),
+                                       runtime_db=_owner_runtime_db(self.agent))
+        if action == "correct":
+            if isolated or not self.availability().available:
+                return _memory_error("本轮无法读取已有正式记忆进行版本核对。", "TOOL_UNAVAILABLE",
+                                     hint="请在有权的普通会话中核对原条目。", not_started=True)
+            return _remember_correction(self.agent, memory, params, scope)
         operations = _memory_operations(params, action)
         if isolated and any(str(op.get("action") or "").strip().lower() in {"replace", "remove"} for op in operations):
             return _memory_error("本轮不能读取已有正式记忆以核对修改或删除目标。", "TOOL_UNAVAILABLE",
@@ -322,6 +343,90 @@ class RememberTool(BaseTool):
             return _memory_error(f"候选写入失败: {exc}", "MEMORY_CANDIDATE_WRITE_FAILED")
         promotion_results = [promote_prepared(promotion, candidate) for candidate in observed]
         return _remember_write_result(action, promotion_results)
+
+
+def _owner_runtime_db(agent: object):
+    return getattr(getattr(agent, "subagents", None), "runtime_db", None)
+
+
+def _remember_correction(agent, memory, params, scope) -> ToolHandlerOutcome:
+    from ..memory_store.promotion import queue_memory_feedback_review, register_memory_feedback
+
+    entry_id, version = params.get("entry_id"), params.get("version")
+    verdict, note = params.get("verdict"), params.get("note", "")
+    if (params.keys() - {"action", "entry_id", "version", "verdict", "note"}
+            or not isinstance(entry_id, str) or not entry_id.strip() or "\0" in entry_id
+            or type(version) is not int or not 0 < version < 1 << 63
+            or verdict not in _CORRECTION_VERDICTS or not isinstance(note, str)
+            or len(note) > _MAX_CONTENT_CHARS):
+        return _memory_error(
+            "correct 需要有效的 entry_id、正整数 version 和 verdict（wrong/outdated/incomplete/confirmed）。"
+            f"可选 note 最多 {_MAX_CONTENT_CHARS} 字，宿主自动登记任务。",
+            "TOOL_INVALID_ARGUMENTS",
+            hint='请从 remember(action=list) 取得编号和版本，再提交 {"action":"correct",'
+                 '"entry_id":"memory-example","version":2,"verdict":"outdated"}。',
+            not_started=True,
+        )
+    note = " ".join(note.split())
+    if note and not scan_memory_content(note).safe:
+        return _memory_error("note 命中持久记忆的凭据或指令保护。", "MEMORY_INJECTION_BLOCKED",
+                             hint="请移除命中的内容后重试，也可仅提交 verdict。", not_started=True)
+    if note and not classify_memory_retention(note, []).durable:
+        return _memory_error("note 包含临时验证码、解锁码或一次性凭据。", "MEMORY_TRANSIENT_DATA_BLOCKED",
+                             hint="请移除敏感说明后重试，也可仅提交 verdict。", not_started=True)
+
+    current = getattr(agent, "_current_run_params", None)
+    task_identity = getattr(current, "task_id", "")
+    runtime_db = _owner_runtime_db(agent)
+    candidates = getattr(agent, "memory_candidates", None)
+    if not isinstance(task_identity, str) or not task_identity.strip() or "\0" in task_identity:
+        return _memory_error("当前回合缺少宿主任务身份。", "TOOL_UNAVAILABLE",
+                             hint="请在有宿主任务绑定的会话重试，工具参数无需提供任务身份。", not_started=True)
+    if runtime_db is None or candidates is None:
+        return _memory_error("当前 owner 的运行库或候选库不可用。", "MEMORY_SERVICE_UNAVAILABLE",
+                             hint="请检查 owner 的运行库和候选库后重试。", not_started=True)
+
+    resolved = _resolved_target(memory, params, action="correct", index=1)
+    if isinstance(resolved, ToolHandlerOutcome):
+        return resolved
+    entry_id, record = resolved
+    if scope is not None and not recall.long_term_record_matches_scope(record, scope):
+        return _unavailable_target(1)
+    if record.version != version:
+        return _memory_error(f"展示版本 {version} 已过时，条目当前版本为 {record.version}。",
+                             "MEMORY_VERSION_CONFLICT", hint="先用 remember(action=list) 重新核对再提交。",
+                             not_started=True)
+
+    try:
+        receipt, inserted, saved_note = register_memory_feedback(
+            runtime_db, entry_id=entry_id, version=version, verdict=verdict, task_identity=task_identity, note=note,
+        )
+    except RuntimeDatabaseDeferred:
+        return _memory_error("owner 运行库正在恢复，尚未提交纠正回执。", "RUNTIME_DB_RECOVERY_DEFERRED",
+                             hint="恢复后可使用原参数重试。", not_started=True)
+    except (sqlite3.Error, OSError) as exc:
+        return _memory_error(f"无法确认纠正回执的提交结果（{type(exc).__name__}）。", "TOOL_EXECUTION_FAILED",
+                             hint="检查 owner 运行库后按原参数重试，宿主会按原记录去重。")
+
+    payload: dict[str, object] = {
+        "ok": True, "action": "correct", "receipt": receipt, "active_memory_changed": False,
+        "replayed": not inserted and receipt["verdict"] == verdict,
+        "conflicting_repeat": not inserted and receipt["verdict"] != verdict,
+    }
+    try:
+        review_id, review_status = queue_memory_feedback_review(
+            candidates, record=record, receipt=receipt, note=saved_note,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        payload["review_status"] = "pending"
+        payload["review_error_code"] = "MEMORY_CANDIDATE_WRITE_FAILED"
+        payload["hint"] = (f"纠正回执已保存，待审候选写入未确认（{type(exc).__name__}）。"
+                           "可按原参数重试，以原回执补齐候选。")
+    else:
+        payload.update(review_candidate_id=review_id, review_status=review_status)
+        payload["hint"] = ("已保留原回执，采用首次登记的 verdict 待审。"
+                           if payload["conflicting_repeat"] else "回执已进入待审，正式记忆保持原版本。")
+    return ToolHandlerOutcome("remember", True, json.dumps(payload, ensure_ascii=False))
 
 
 # LLM: 纯结果投影；只认显式变更事实，PROMOTED也可能只复用引用，历史清理不计本轮正式变更。
@@ -500,7 +605,7 @@ def _resolved_target(
     index: int,
 ) -> tuple[str, object | None] | ToolHandlerOutcome:
     entry_id = str(operation.get("entry_id") or "").strip()
-    if action not in {"replace", "remove"}:
+    if action not in {"replace", "remove", "correct"}:
         return entry_id, None
     if not entry_id:
         return _memory_error(
@@ -972,7 +1077,8 @@ def _formal_read_error(exc: Exception) -> ToolHandlerOutcome:
 #   先按当前范围过滤再分页（每页至多 _MEMORY_LIST_PAGE_ENTRIES 条，按 entry_id 排序），不读全库；
 #   一页装得下时回执与旧版相同，只有还有更多时才加 next_cursor 和续页提示。
 # 函数用途: 返回一页正式长期记忆及其稳定编号、版本和结构化范围。
-def _memory_list_result(memory: object, scope=None, *, cursor: str = "") -> ToolHandlerOutcome:
+def _memory_list_result(memory: object, scope=None, *, cursor: str = "",
+                        runtime_db=None) -> ToolHandlerOutcome:
     def visible(record: object) -> bool:
         return scope is None or recall.long_term_record_matches_scope(record, scope)
 
@@ -980,8 +1086,12 @@ def _memory_list_result(memory: object, scope=None, *, cursor: str = "") -> Tool
         records, next_cursor = memory.list_page(after_id=cursor, limit=_MEMORY_LIST_PAGE_ENTRIES, predicate=visible)
     except (OSError, ValueError, RuntimeError) as exc:
         return _formal_read_error(exc)
-    payload: dict[str, object] = {"ok": True, "action": "list",
-                                  "entries": [_memory_record_payload(record) for record in records]}
+    from ..memory_store.promotion import project_memory_feedback_hints
+
+    entries = [_memory_record_payload(record) for record in records]
+    payload: dict[str, object] = {"ok": True, "action": "list", "entries": entries}
+    if unavailable := project_memory_feedback_hints(runtime_db, entries):
+        payload["feedback_status"] = unavailable
     if next_cursor:
         payload["next_cursor"] = next_cursor
         payload["hint"] = (

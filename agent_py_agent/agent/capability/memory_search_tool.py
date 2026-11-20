@@ -146,6 +146,11 @@ class MemorySearchTool(BaseTool):
             "count": len(entries),
             "entries": entries,
         }
+        from ..memory_store.promotion import project_memory_feedback_hints
+
+        runtime_db = getattr(getattr(self.agent, "subagents", None), "runtime_db", None)
+        if unavailable := project_memory_feedback_hints(runtime_db, entries):
+            payload["feedback_status"] = unavailable
         return ToolHandlerOutcome("memory_search", True, json.dumps(payload, ensure_ascii=False))
 
 
