@@ -25,7 +25,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+from ..common import hot_json
 from ..common.cancellation import ToolCancelled
+from ..common.fast_dataclass import fast_frozen, fast_replace
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     RequestExecutionOutcomeUncertainError,
@@ -53,6 +55,7 @@ from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
     RuntimeConflictError,
 )
+from .input_schema import clone_json_value
 from .models import (
     ToolFailureStage,
     ToolHandlerOutcome,
@@ -81,7 +84,8 @@ _BUSY_RETRY_DELAYS = (0.5, 1.0, 2.0)
 # LLM: Callers provide one immutable execution request; on_settled is notification-only and may
 # run solely after the durable store has accepted a terminal operation fact.
 # 类用途: 汇总一次副作用工具占位、执行、核对和终态回收所需的全部结构化输入。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolOperationExecutionRequest:
     store: object | None
     store_required: bool
@@ -106,7 +110,8 @@ class ToolOperationExecutionRequest:
     settled_effect_outcome: str = ""
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _ToolOperationClaimAttempt:
     claim: ToolOperationClaim
     holder: ToolOperationHolder
@@ -192,7 +197,7 @@ def _restart_gate_not_started(request: ToolOperationExecutionRequest) -> ToolHan
     # 只补宿主工厂自建的拒绝JSON，不解析或信任工具返回的业务正文。
     payload = json.loads(result.output)
     payload["reported_error_code"] = result.reported_error_code
-    result.output = json.dumps(payload, ensure_ascii=False)
+    result.output = hot_json.dumps(payload, ensure_ascii=False)
     _attach_operation_facts(result, request, status="not_started", action="gateway_restart_drain")
     return apply_tool_execution_facts(
         result,
@@ -240,9 +245,9 @@ def _execute_admitted_tool_operation(request: ToolOperationExecutionRequest) -> 
         }
         _attach_operation_facts(result, request, status="not_started", action="wait")
         return apply_tool_execution_facts(result, failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False)
-    request = replace(request, operation_attempt_id=attempt.claim.record.attempt_id or request.attempt_id)
+    request = fast_replace(request, operation_attempt_id=attempt.claim.record.attempt_id or request.attempt_id)
     if attempt.claim.record.operation_id != request.operation_id:
-        request = replace(request, operation_id=attempt.claim.record.operation_id,
+        request = fast_replace(request, operation_id=attempt.claim.record.operation_id,
             idempotency_key=attempt.claim.record.idempotency_key)
     resolved = _resolve_claim(request, attempt)
     if isinstance(resolved, ToolHandlerOutcome):
@@ -383,7 +388,7 @@ def _resolve_claim(
             )
         _attach_operation_facts(
             result,
-            replace(request, run_id=claim.record.run_id, task_id=claim.record.task_id,
+            fast_replace(request, run_id=claim.record.run_id, task_id=claim.record.task_id,
                     operation_attempt_id=claim.record.attempt_id, operation_id=claim.record.operation_id),
             status=claim.record.status,
             action="replay",
@@ -402,7 +407,7 @@ def _resolve_claim(
         if (request.idempotency_scope == 'business' and claim.record.run_id != request.run_id
                 and request.reconcile is None):
             # 新执行轮没有原unknown的结算权；仅保留原操作引用，禁止借新attempt重开。
-            return _unknown_claim_result(replace(request, run_id=claim.record.run_id,
+            return _unknown_claim_result(fast_replace(request, run_id=claim.record.run_id,
                 task_id=claim.record.task_id, operation_attempt_id=claim.record.attempt_id,
                 operation_id=claim.record.operation_id, reconcile=None), claim,
                 diagnostic='business_item_original_outcome_unknown')
@@ -447,7 +452,7 @@ def _reconcile_unknown_operation(
                 reconciliation = request.reconcile(claim.record)
             finally:
                 claim = replace(claim, record=dispatch.record)
-                attempt = replace(attempt, claim=claim)
+                attempt = fast_replace(attempt, claim=claim)
     except Exception as exc:  # noqa: BLE001 - reconciliation is read-only and must fail closed
         raise_if_transport_uncertain(exc)
         if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
@@ -535,9 +540,9 @@ def _settle_reconciled_operation(
         reconciled_result.effect_source_ref or source_ref
     )
     if not isinstance(getattr(reconciled_result, "result_envelope", None), dict):
-        object.__setattr__(reconciled_result, "result_envelope", {})
+        reconciled_result.result_envelope = {}
     reconciled_result.result_envelope.update(first_dispatch_at=claim.record.first_dispatch_at,
-        component_receipts=deepcopy(claim.record.component_receipts))
+        component_receipts=clone_json_value(claim.record.component_receipts))
     apply_tool_execution_facts(reconciled_result, handler_executed=False)
     if not reconciled_result.ok:
         apply_tool_execution_facts(
@@ -728,7 +733,7 @@ def _reopened_operation_result(
     result = ToolHandlerOutcome(
         request.tool_name,
         False,
-        json.dumps(
+        hot_json.dumps(
             {
                 "ok": False,
                 "error": (
@@ -791,11 +796,11 @@ def _unknown_claim_result(
     if prior.next_action:
         result.next_action = prior.next_action
     if not isinstance(getattr(result, "result_envelope", None), dict):
-        object.__setattr__(result, "result_envelope", {})
+        result.result_envelope = {}
     result.source_effect = source_effect_facts(prior.source_effect)
     result.result_envelope["reported_tool_result"] = _reported_tool_result_facts(prior)
     result.result_envelope.update(first_dispatch_at=claim.record.first_dispatch_at,
-        component_receipts=deepcopy(claim.record.component_receipts))
+        component_receipts=clone_json_value(claim.record.component_receipts))
     result.result_envelope["prior_effect_outcome"] = (
         prior.effect_outcome or claim.record.status
     )
@@ -854,9 +859,9 @@ def _execute_claimed_operation(
         result = _invoke_with_lease_renewal(request, claim)
     try:
         if not isinstance(getattr(result, "result_envelope", None), dict):
-            object.__setattr__(result, "result_envelope", {})
+            result.result_envelope = {}
         result.result_envelope.update(first_dispatch_at=dispatch.record.first_dispatch_at,
-            component_receipts=deepcopy(dispatch.record.component_receipts))
+            component_receipts=clone_json_value(dispatch.record.component_receipts))
         operation_status = _operation_status_for_result(result)
         unknown_reason = ""
         if operation_status == TOOL_OPERATION_UNKNOWN:
@@ -936,7 +941,7 @@ def _execute_claimed_operation(
                         ToolHandlerOutcome(
                             request.tool_name,
                             False,
-                            json.dumps({"error": f"coordinator post-execution failed: {type(exc).__name__}"}, ensure_ascii=False),
+                            hot_json.dumps({"error": f"coordinator post-execution failed: {type(exc).__name__}"}, ensure_ascii=False),
                             error_code="INTERNAL_ERROR",
                             effect_outcome="unknown",
                         ),
@@ -952,7 +957,7 @@ def _execute_claimed_operation(
         fallback = ToolHandlerOutcome(
             request.tool_name,
             False,
-            json.dumps({"ok": False, "error": f"coordinator post-execution failed: {type(exc).__name__}"}, ensure_ascii=False),
+            hot_json.dumps({"ok": False, "error": f"coordinator post-execution failed: {type(exc).__name__}"}, ensure_ascii=False),
             error_code="INTERNAL_ERROR",
             effect_outcome="unknown",
         )
@@ -1015,7 +1020,7 @@ def _completion_persistence_unknown_result(
     return ToolHandlerOutcome(
         tool=request.tool_name,
         ok=False,
-        output=json.dumps(
+        output=hot_json.dumps(
             {
                 "ok": False,
                 "error": (
@@ -1204,7 +1209,7 @@ def _bounded_unknown_output_preview(raw: object) -> str:
         trigger_keys = diagnostic_keys[3:]
         if isinstance(parsed, dict) and any(parsed.get(k) for k in trigger_keys):
             tail_keys = {k: v for k, v in parsed.items() if k not in diagnostic_keys}
-            tail_size = len(json.dumps(tail_keys, ensure_ascii=False)) if tail_keys else 0
+            tail_size = len(hot_json.dumps(tail_keys, ensure_ascii=False)) if tail_keys else 0
             head_dict = {}
             for key in diagnostic_keys:
                 if key not in parsed:
@@ -1213,7 +1218,7 @@ def _bounded_unknown_output_preview(raw: object) -> str:
                 if isinstance(val, str) and len(val) > 700 and tail_size > 1200:
                     val = f"{val[:200]}...[omitted {len(val) - 650} chars]...{val[-450:]}"
                 head_dict[key] = val
-            candidate = json.dumps({**head_dict, **tail_keys}, ensure_ascii=False)
+            candidate = hot_json.dumps({**head_dict, **tail_keys}, ensure_ascii=False)
             if len(candidate) <= 2000:
                 return candidate
     return f"{candidate[:800]}\n...[omitted {len(candidate) - 2000} chars]...\n{candidate[-1200:]}"
@@ -1239,7 +1244,7 @@ def _unknown_outcome_result(
     return ToolHandlerOutcome(
         tool=request.tool_name,
         ok=False,
-        output=json.dumps(
+        output=hot_json.dumps(
             {
                 "ok": False,
                 "error": "工具调用已结束等待，但副作用是否完成仍不确定；系统已阻止自动重做。",
@@ -1300,9 +1305,9 @@ def _result_payload(
 ) -> dict[str, Any]:
     resolved_redacted = {}
     if isinstance(redacted_input, dict):
-        resolved_redacted = deepcopy(redacted_input)
+        resolved_redacted = clone_json_value(redacted_input)
     elif isinstance(result.result_envelope, dict) and isinstance(result.result_envelope.get("redacted_input"), dict):
-        resolved_redacted = deepcopy(result.result_envelope["redacted_input"])
+        resolved_redacted = clone_json_value(result.result_envelope["redacted_input"])
     effect_outcome = (
         settled_effect_outcome
         if (result.ok and not result.effect_outcome)
@@ -1366,7 +1371,7 @@ def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
             output=str(payload.get("output") or ""),
             call_id=str(payload.get("call_id") or ""),
             result_envelope=(
-                deepcopy(payload.get("result_envelope") or {})
+                clone_json_value(payload.get("result_envelope") or {})
                 if isinstance(payload.get("result_envelope"), dict)
                 else {}
             ),
@@ -1503,7 +1508,7 @@ def _operation_error(
     return ToolHandlerOutcome(
         tool_name,
         False,
-        json.dumps(
+        hot_json.dumps(
             {"ok": False, "error": message, "error_code": error_code},
             ensure_ascii=False,
         ),
@@ -1545,7 +1550,7 @@ def _attach_operation_facts(
     if source_ref:
         facts["reconciliation_source_ref"] = str(source_ref)[:240]
     if not isinstance(getattr(result, "result_envelope", None), dict):
-        object.__setattr__(result, "result_envelope", {})
+        result.result_envelope = {}
     if storage_error is not None:
         details = sqlite_error_details(storage_error)
         if details:

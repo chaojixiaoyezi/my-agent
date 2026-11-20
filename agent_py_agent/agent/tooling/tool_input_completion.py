@@ -5,16 +5,18 @@ from __future__ import annotations
 模块用途: 为缺失工具参数提供一个可审计的结构化补全点，并记录不含参数值的 source/source_ref。
 """
 
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
+from .input_schema import clone_json_value
 from .models import ToolRuntime, TrustedParameterBinding
 
 
 # LLM: 来源记录只允许暴露字段路径、来源类别和结构化引用，绝不能复制命令、密钥或参数正文。
 # 类用途: 描述一个最终工具参数由模型、工具安全默认值还是宿主可信上下文提供。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolInputSource:
     path: str
     source: str
@@ -30,7 +32,8 @@ class ToolInputSource:
 
 # LLM: completion context 只能由 Registry 从 typed envelope、write boundary 和 workspace 构造。
 # 类用途: 携带本次调用身份与可信事实树，防止模型在普通参数中伪造参数来源。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolInputCompletionContext:
     call_id: str = ""
     call_source: str = ""
@@ -39,7 +42,8 @@ class ToolInputCompletionContext:
 
 # LLM: 补全结果同时返回有效输入与来源账目，调用方必须在 Schema 校验前使用 value。
 # 类用途: 将补全后的参数和不含原值的来源记录作为一个不可变结果交回 Registry。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolInputCompletion:
     value: dict[str, Any]
     sources: tuple[ToolInputSource, ...] = ()
@@ -57,7 +61,7 @@ def complete_tool_arguments(
     """Complete canonical arguments from ToolRuntimePolicy, never from prose."""
 
     completion_context = context or ToolInputCompletionContext()
-    completed = deepcopy(arguments)
+    completed = clone_json_value(arguments)
     sources = [
         ToolInputSource(
             path=_field_path(name),
@@ -70,7 +74,7 @@ def complete_tool_arguments(
     for name, value in policy.safe_parameter_defaults:
         if name in completed:
             continue
-        completed[name] = deepcopy(value)
+        completed[name] = clone_json_value(value)
         sources.append(
             ToolInputSource(
                 path=_field_path(name),
@@ -111,7 +115,7 @@ def complete_tool_arguments(
                 continue
             if binding.authority == "must_match":
                 sources = [item for item in sources if item.path != _field_path(name)]
-        completed[name] = deepcopy(value)
+        completed[name] = clone_json_value(value)
         if binding.authority == "host_authoritative":
             sources = [item for item in sources if item.path != _field_path(name)]
         sources.append(

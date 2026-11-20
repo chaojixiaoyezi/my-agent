@@ -5,21 +5,22 @@ from __future__ import annotations
 """Defines stable tool metadata, retrieval hits, and base execution contracts."""
 
 import hashlib
-import json
 import re
 from collections.abc import Callable, Mapping
-from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen, slot_setter
 from ..common.log_redaction import redact_sensitive_text
 from ..retrieval.embedding import EmbeddingProvider, cosine
 from ..retrieval.embedding_usage import counted_as, embedding_input_type
 from ..workspace_read_context import WorkspaceReadContext
 from ..workspace_write_context import WorkspaceWriteContext
+from .input_schema import canonicalize_tool_input_schema, clone_json_value
 from .versioned_input_decoder import canonical_error_contract as error_contract
 
 
@@ -44,7 +45,8 @@ _TOOL_FAILURE_STAGE_VALUES = frozenset(item.value for item in ToolFailureStage)
 
 # LLM: 可信补参只引用当前 Registry 提供的结构化运行事实，条件也只能是工具字段的精确值匹配。
 # 类用途: 声明一个缺失参数可从哪些可信路径依次取得，以及在哪个明确动作变体下允许补入。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class TrustedParameterBinding:
     source_refs: tuple[str, ...]
     when: tuple[tuple[str, Any], ...] = ()
@@ -64,16 +66,22 @@ class TrustedParameterBinding:
         authority = str(self.authority or "fill_missing").strip().lower()
         if authority not in {"fill_missing", "must_match", "host_authoritative"}:
             raise ValueError(f"invalid trusted parameter authority: {authority}")
-        object.__setattr__(self, "source_refs", source_refs)
-        object.__setattr__(self, "when", conditions)
-        object.__setattr__(self, "authority", authority)
+        _set_binding_source_refs(self, source_refs)
+        _set_binding_when(self, conditions)
+        _set_binding_authority(self, authority)
+
+
+_set_binding_source_refs = slot_setter(TrustedParameterBinding, "source_refs")
+_set_binding_when = slot_setter(TrustedParameterBinding, "when")
+_set_binding_authority = slot_setter(TrustedParameterBinding, "authority")
 
 
 # LLM: 只影响目录展示与检索，不参与权限、snapshot_hash 或 tool_manifest（那里逐字段列出，不含新增的收起字段）。
 #   default_deferred 是工具自己声明的“默认收起”：开关 tool_default_deferral_enabled 打开时由 ToolRegistry 并入结构性收起，
 #   deferred_summary 是收起后留在目录索引里的一句用途，声明收起时必填。改字段要同步 registry 的收起计算与 test_tool_default_deferral。
 # 类用途: 给每个工具附带目录分类、检索关键词、用法提示，以及“默认收起时目录里显示哪一句用途”。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolModelHints:
     """Soft catalog and retrieval hints; never an authorization input."""
 
@@ -95,10 +103,14 @@ class ToolModelHints:
             raise ValueError("tool hint default_deferred must be a bool")
         if self.default_deferred and not summary:
             raise ValueError("default_deferred tool hint requires deferred_summary")
-        object.__setattr__(self, "deferred_summary", summary)
+        _set_hints_deferred_summary(self, summary)
 
 
-@dataclass(frozen=True)
+_set_hints_deferred_summary = slot_setter(ToolModelHints, "deferred_summary")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolModelSpec:
     """The single model-visible definition of one tool."""
 
@@ -117,17 +129,15 @@ class ToolModelSpec:
             raise ValueError(f"tool model spec description is required: {name}")
         if not isinstance(self.input_schema, dict):
             raise ValueError(f"tool input_schema must be an object: {name}")
-        from .input_schema import canonicalize_tool_input_schema
-
         schema = canonicalize_tool_input_schema(self.input_schema)
         digest = tool_schema_hash(schema)
         supplied = str(self.schema_hash or "").strip()
         if supplied and supplied != digest:
             raise ValueError(f"tool schema_hash mismatch: {name}")
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "description", description)
-        object.__setattr__(self, "input_schema", schema)
-        object.__setattr__(self, "schema_hash", digest)
+        _set_spec_name(self, name)
+        _set_spec_description(self, description)
+        _set_spec_input_schema(self, schema)
+        _set_spec_schema_hash(self, digest)
 
     def assert_schema_hash(self) -> None:
         if tool_schema_hash(self.input_schema) != self.schema_hash:
@@ -235,19 +245,26 @@ class ToolModelSpec:
         )
 
 
+_set_spec_name = slot_setter(ToolModelSpec, "name")
+_set_spec_description = slot_setter(ToolModelSpec, "description")
+_set_spec_input_schema = slot_setter(ToolModelSpec, "input_schema")
+_set_spec_schema_hash = slot_setter(ToolModelSpec, "schema_hash")
+
+
 def tool_schema_hash(schema: dict[str, Any]) -> str:
-    payload = json.dumps(
+    payload = hot_json.dumps(
         schema,
         ensure_ascii=False,
         sort_keys=True,
-        separators=(",", ":"),
+        compact=True,
     )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # LLM: effect resolver 是工具副作用的唯一声明源；command 解析结果和结构化参数下限必须取最高等级。
 # 类用途: 声明工具默认副作用、参数变体副作用，以及是否需要解析 shell 命令。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class EffectResolverPolicy:
     default_effect: str = "read_only"
     by_parameter: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
@@ -317,20 +334,24 @@ class EffectResolverPolicy:
                 raise ValueError(f"invalid combination-resolved effect: {resolved}")
             seen_combinations.add(normalized_conditions)
             normalized_combinations.append((normalized_conditions, resolved))
-        object.__setattr__(self, "default_effect", effect)
-        object.__setattr__(self, "strategy", strategy)
-        object.__setattr__(self, "command_parameter", command_parameter)
-        object.__setattr__(self, "by_parameter", tuple(normalized_mappings))
-        object.__setattr__(
-            self,
-            "by_parameter_combinations",
-            tuple(normalized_combinations),
-        )
+        _set_effect_policy_default_effect(self, effect)
+        _set_effect_policy_strategy(self, strategy)
+        _set_effect_policy_command_parameter(self, command_parameter)
+        _set_effect_policy_by_parameter(self, tuple(normalized_mappings))
+        _set_effect_policy_by_parameter_combinations(self, tuple(normalized_combinations))
+
+
+_set_effect_policy_default_effect = slot_setter(EffectResolverPolicy, "default_effect")
+_set_effect_policy_strategy = slot_setter(EffectResolverPolicy, "strategy")
+_set_effect_policy_command_parameter = slot_setter(EffectResolverPolicy, "command_parameter")
+_set_effect_policy_by_parameter = slot_setter(EffectResolverPolicy, "by_parameter")
+_set_effect_policy_by_parameter_combinations = slot_setter(EffectResolverPolicy, "by_parameter_combinations")
 
 
 # LLM: 强制本人确认可限定到原 effect 类型；空集合保持所有调用 always 的旧合同，不能由模型输入修改。
 # 类用途: 声明工具的审批强度与受确认的副作用范围，供 ActionPolicy 和注册校验同源读取。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ApprovalPolicy:
     mode: str = "dangerous"
     # LLM: 声明哪些公开参数的哪些值代表"可被用户长期允许的一类操作"（如 background_listen_scope=lan）。命中时审批请求
@@ -345,13 +366,13 @@ class ApprovalPolicy:
         mode = str(self.mode or "").strip().lower()
         if mode not in {"never", "dangerous", "mutating", "always"}:
             raise ValueError(f"invalid tool approval mode: {mode}")
-        object.__setattr__(self, "mode", mode)
+        _set_approval_policy_mode(self, mode)
         if type(self.require_human) is not bool or self.require_human and mode != "always":
             raise ValueError("human confirmation requires an always approval policy")
         effects = tuple(self.always_effects)
         if (effects and mode != "always") or any(value not in {"read_only", "mutating", "dangerous"} for value in effects):
             raise ValueError("always effects require an always policy and valid effects")
-        object.__setattr__(self, "always_effects", tuple(dict.fromkeys(effects)))
+        _set_approval_policy_always_effects(self, tuple(dict.fromkeys(effects)))
         declared = []
         for item in self.owner_grant_parameters:
             name, values = item
@@ -359,12 +380,18 @@ class ApprovalPolicy:
             if not str(name).strip() or not allowed or any(not value.strip() for value in allowed):
                 raise ValueError("owner grant parameter requires a name and non-empty values")
             declared.append((str(name), allowed))
-        object.__setattr__(self, "owner_grant_parameters", tuple(declared))
+        _set_approval_policy_owner_grant_parameters(self, tuple(declared))
+
+
+_set_approval_policy_mode = slot_setter(ApprovalPolicy, "mode")
+_set_approval_policy_always_effects = slot_setter(ApprovalPolicy, "always_effects")
+_set_approval_policy_owner_grant_parameters = slot_setter(ApprovalPolicy, "owner_grant_parameters")
 
 
 # LLM: sandbox policy 必须显式声明哪些结构化动作会越过当前隔离边界，授权层不得按工具名猜。
 # 类用途: 声明工具是否需要 sandbox，以及哪些参数变体不能因有 sandbox 而免审批。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class SandboxPolicy:
     mode: str = "inherit"
     contained_by_parameter: tuple[tuple[str, tuple[str, ...]], ...] = ()
@@ -390,8 +417,12 @@ class SandboxPolicy:
             if not values or len(values) != len(set(values)):
                 raise ValueError(f"invalid sandbox contained values: {field_name}")
             normalized_mappings.append((field_name, values))
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "contained_by_parameter", tuple(normalized_mappings))
+        _set_sandbox_policy_mode(self, mode)
+        _set_sandbox_policy_contained_by_parameter(self, tuple(normalized_mappings))
+
+
+_set_sandbox_policy_mode = slot_setter(SandboxPolicy, "mode")
+_set_sandbox_policy_contained_by_parameter = slot_setter(SandboxPolicy, "contained_by_parameter")
 
 
 # LLM: required 只是要求沙箱，不证明网络、输入和派生进程等效果受包含；仅精确匹配全部正向变体才能豁免。
@@ -409,7 +440,8 @@ def sandbox_effect_is_contained(policy: SandboxPolicy, arguments: object) -> boo
     return True
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class IdempotencyPolicy:
     scope: str = ""
 
@@ -417,18 +449,26 @@ class IdempotencyPolicy:
         scope = str(self.scope or "").strip().lower()
         if scope not in {"", "operation", "business"}:
             raise ValueError(f"invalid tool idempotency scope: {scope}")
-        object.__setattr__(self, "scope", scope)
+        _set_idempotency_policy_scope(self, scope)
 
 
-@dataclass(frozen=True)
+_set_idempotency_policy_scope = slot_setter(IdempotencyPolicy, "scope")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class TimeoutPolicy:
     seconds: int = 0
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "seconds", max(0, int(self.seconds or 0)))
+        _set_timeout_policy_seconds(self, max(0, int(self.seconds or 0)))
 
 
-@dataclass(frozen=True)
+_set_timeout_policy_seconds = slot_setter(TimeoutPolicy, "seconds")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ConcurrencyPolicy:
     mode: str = "serial"
     control_lane: bool = False
@@ -440,7 +480,10 @@ class ConcurrencyPolicy:
         if type(self.control_lane) is not bool:
             raise ValueError("tool concurrency control_lane must be a bool")
         actions = tuple(str(item or "").strip() for item in self.control_lane_actions if str(item or "").strip())
-        object.__setattr__(self, "control_lane_actions", actions)
+        _set_concurrency_policy_control_lane_actions(self, actions)
+
+
+_set_concurrency_policy_control_lane_actions = slot_setter(ConcurrencyPolicy, "control_lane_actions")
 
 
 class ResourceScopeResolutionError(RuntimeError):
@@ -452,7 +495,8 @@ class ResourceScopeResolutionError(RuntimeError):
     """
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ResourceScopePolicy:
     mode: str = "from_arguments"
     parameter_names: tuple[str, ...] = ()
@@ -515,18 +559,26 @@ class ResourceScopePolicy:
             raise ValueError("declared resource scopes cannot carry parameter_names")
         if mode == "declared" and not static_scopes:
             raise ValueError("declared resource scope mode requires static_scopes")
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "parameter_names", parameter_names)
-        object.__setattr__(self, "static_scopes", static_scopes)
-        object.__setattr__(self, "parameter_kinds", kinds)
+        _set_scope_policy_mode(self, mode)
+        _set_scope_policy_parameter_names(self, parameter_names)
+        _set_scope_policy_static_scopes(self, static_scopes)
+        _set_scope_policy_parameter_kinds(self, kinds)
         # seq 269 #2：规范化后的 domains 必须写回——校验用的是规范化值，
         # 运行时投影（workspace_scopes / models 回落路径）也必须是同一份；
         # 漏写回会让带空格的参数名键永远查不到映射、静默退化成参数名域
         # （校验过了但运行时没用上）。
-        object.__setattr__(self, "resource_domains", domains)
+        _set_scope_policy_resource_domains(self, domains)
 
 
-@dataclass(frozen=True)
+_set_scope_policy_mode = slot_setter(ResourceScopePolicy, "mode")
+_set_scope_policy_parameter_names = slot_setter(ResourceScopePolicy, "parameter_names")
+_set_scope_policy_static_scopes = slot_setter(ResourceScopePolicy, "static_scopes")
+_set_scope_policy_parameter_kinds = slot_setter(ResourceScopePolicy, "parameter_kinds")
+_set_scope_policy_resource_domains = slot_setter(ResourceScopePolicy, "resource_domains")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class OutputPolicy:
     refs: tuple[str, ...] = ()
     trust: str = "runtime"
@@ -539,11 +591,16 @@ class OutputPolicy:
             raise ValueError(f"invalid tool output trust: {trust}")
         if redaction not in {"default", "source_code"}:
             raise ValueError(f"invalid tool output redaction: {redaction}")
-        object.__setattr__(self, "trust", trust)
-        object.__setattr__(self, "redaction", redaction)
+        _set_output_policy_trust(self, trust)
+        _set_output_policy_redaction(self, redaction)
 
 
-@dataclass(frozen=True)
+_set_output_policy_trust = slot_setter(OutputPolicy, "trust")
+_set_output_policy_redaction = slot_setter(OutputPolicy, "redaction")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class AvailabilityPolicy:
     mode: str = "handler_probe"
 
@@ -551,7 +608,10 @@ class AvailabilityPolicy:
         mode = str(self.mode or "").strip().lower()
         if mode not in {"handler_probe", "always"}:
             raise ValueError(f"invalid availability mode: {mode}")
-        object.__setattr__(self, "mode", mode)
+        _set_availability_policy_mode(self, mode)
+
+
+_set_availability_policy_mode = slot_setter(AvailabilityPolicy, "mode")
 
 
 # LLM: 输入用途只能由宿主工具声明；元数据 URL 不产生网络许可，实际连接仍走原 URL/DNS/重定向守门。
@@ -594,7 +654,8 @@ class ToolParameterCondition:
 
 # LLM: 每次执行沿同一冻结策略；条件晋升只追加到原布尔语义，不能改变授权、效果分类或工作区写权限。
 # 类用途: 汇集工具的执行边界与可按结构化参数触发的持久任务绑定。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolRuntimePolicy:
     effect_resolver: EffectResolverPolicy
     approval_policy: ApprovalPolicy = field(default_factory=ApprovalPolicy)
@@ -783,14 +844,14 @@ class ToolHandlerOutcome:
         raw_next_action = self.next_action.strip() if isinstance(self.next_action, str) else ""
         self.next_action = redact_sensitive_text(raw_next_action[:2048]) if raw_next_action else ""
         if not isinstance(self.result_envelope, dict):
-            object.__setattr__(self, "result_envelope", {})
+            self.result_envelope = {}
         else:
-            object.__setattr__(self, "result_envelope", dict(self.result_envelope))
+            self.result_envelope = dict(self.result_envelope)
 
         if self.output is None:
-            object.__setattr__(self, "output", "")
+            self.output = ""
         elif not isinstance(self.output, str):
-            object.__setattr__(self, "output", str(self.output))
+            self.output = str(self.output)
 
         self.handler_executed = bool(self.handler_executed)
         self.failure_stage = _normalized_tool_failure_stage(self.failure_stage)
@@ -1225,14 +1286,14 @@ def _validate_runtime_default(
     schema = model_spec.input_schema
     probe: dict[str, Any] = {
         "type": "object",
-        "properties": deepcopy(schema.get("properties") or {}),
+        "properties": clone_json_value(schema.get("properties") or {}),
         "required": [name],
         "additionalProperties": False,
     }
     for definitions_key in ("$defs", "definitions"):
         definitions = schema.get(definitions_key)
         if isinstance(definitions, dict):
-            probe[definitions_key] = deepcopy(definitions)
+            probe[definitions_key] = clone_json_value(definitions)
     validation = validate_tool_input({name: value}, probe)
     if not validation.ok:
         issues = ",".join(f"{issue.path}:{issue.keyword}" for issue in validation.issues[:4])
@@ -1257,7 +1318,9 @@ TOOL_DISCOVERY_ENTRY_NAMES = frozenset({"tool_search", "skill_search", "self_map
 
 # LLM: 该快照固定原授权/就绪绑定及创建时展示策略；折叠类别、默认开关与可选展示名都不参与权限或snapshot_hash。
 # 类用途: 保存真实工具集合与不可用原因，附带可忽略的展示投影；收起工具必须仍可经原搜索找回。
-@dataclass(frozen=True)
+# The registry's deferred-search projection cache holds snapshots by weak reference (registry.py).
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ToolRuntimeSnapshot:
     run_id: str
     runtimes: tuple[ToolRuntime, ...]
@@ -1313,8 +1376,8 @@ class ToolRuntimeSnapshot:
         supplied = str(self.snapshot_hash or "").strip()
         if supplied and supplied != digest:
             raise ValueError("tool runtime snapshot hash mismatch")
-        object.__setattr__(self, "snapshot_hash", digest)
-        object.__setattr__(self, "_runtime_by_name", MappingProxyType(index))
+        _set_snapshot_snapshot_hash(self, digest)
+        _set_snapshot__runtime_by_name(self, MappingProxyType(index))
 
     def with_presentation(
         self,
@@ -1359,21 +1422,21 @@ class ToolRuntimeSnapshot:
             if search is None or not search.availability.available or not search.exposure.model_visible:
                 raise ValueError("deferred tool presentation requires the original available tool_search")
         cloned = object.__new__(ToolRuntimeSnapshot)
-        object.__setattr__(cloned, "run_id", self.run_id)
-        object.__setattr__(cloned, "runtimes", self.runtimes)
-        object.__setattr__(cloned, "available_tool_names", self.available_tool_names)
-        object.__setattr__(cloned, "unavailable_tools", self.unavailable_tools)
-        object.__setattr__(cloned, "allowed_tools", self.allowed_tools)
-        object.__setattr__(cloned, "snapshot_hash", self.snapshot_hash)
-        object.__setattr__(cloned, "owner_type", self.owner_type)
-        object.__setattr__(cloned, "loaded_tool_names", next_loaded)
-        object.__setattr__(cloned, "preloaded_tool_names", next_preloaded)
-        object.__setattr__(cloned, "presentation_deferred_names", next_deferred)
-        object.__setattr__(cloned, "presentation_shortlist_names", next_shortlist)
-        object.__setattr__(cloned, "catalog_specs", self.catalog_specs)
-        object.__setattr__(cloned, "deferred_categories", self.deferred_categories)
-        object.__setattr__(cloned, "default_deferral_enabled", self.default_deferral_enabled)
-        object.__setattr__(cloned, "_runtime_by_name", self._runtime_by_name)
+        _set_snapshot_run_id(cloned, self.run_id)
+        _set_snapshot_runtimes(cloned, self.runtimes)
+        _set_snapshot_available_tool_names(cloned, self.available_tool_names)
+        _set_snapshot_unavailable_tools(cloned, self.unavailable_tools)
+        _set_snapshot_allowed_tools(cloned, self.allowed_tools)
+        _set_snapshot_snapshot_hash(cloned, self.snapshot_hash)
+        _set_snapshot_owner_type(cloned, self.owner_type)
+        _set_snapshot_loaded_tool_names(cloned, next_loaded)
+        _set_snapshot_preloaded_tool_names(cloned, next_preloaded)
+        _set_snapshot_presentation_deferred_names(cloned, next_deferred)
+        _set_snapshot_presentation_shortlist_names(cloned, next_shortlist)
+        _set_snapshot_catalog_specs(cloned, self.catalog_specs)
+        _set_snapshot_deferred_categories(cloned, self.deferred_categories)
+        _set_snapshot_default_deferral_enabled(cloned, self.default_deferral_enabled)
+        _set_snapshot__runtime_by_name(cloned, self._runtime_by_name)
         return cloned
 
     @property
@@ -1392,6 +1455,23 @@ class ToolRuntimeSnapshot:
         if runtime is not None:
             runtime.model_spec.assert_schema_hash()
         return runtime
+
+
+_set_snapshot_snapshot_hash = slot_setter(ToolRuntimeSnapshot, "snapshot_hash")
+_set_snapshot__runtime_by_name = slot_setter(ToolRuntimeSnapshot, "_runtime_by_name")
+_set_snapshot_run_id = slot_setter(ToolRuntimeSnapshot, "run_id")
+_set_snapshot_runtimes = slot_setter(ToolRuntimeSnapshot, "runtimes")
+_set_snapshot_available_tool_names = slot_setter(ToolRuntimeSnapshot, "available_tool_names")
+_set_snapshot_unavailable_tools = slot_setter(ToolRuntimeSnapshot, "unavailable_tools")
+_set_snapshot_allowed_tools = slot_setter(ToolRuntimeSnapshot, "allowed_tools")
+_set_snapshot_owner_type = slot_setter(ToolRuntimeSnapshot, "owner_type")
+_set_snapshot_loaded_tool_names = slot_setter(ToolRuntimeSnapshot, "loaded_tool_names")
+_set_snapshot_preloaded_tool_names = slot_setter(ToolRuntimeSnapshot, "preloaded_tool_names")
+_set_snapshot_presentation_deferred_names = slot_setter(ToolRuntimeSnapshot, "presentation_deferred_names")
+_set_snapshot_presentation_shortlist_names = slot_setter(ToolRuntimeSnapshot, "presentation_shortlist_names")
+_set_snapshot_catalog_specs = slot_setter(ToolRuntimeSnapshot, "catalog_specs")
+_set_snapshot_deferred_categories = slot_setter(ToolRuntimeSnapshot, "deferred_categories")
+_set_snapshot_default_deferral_enabled = slot_setter(ToolRuntimeSnapshot, "default_deferral_enabled")
 
 
 def _tool_runtime_snapshot_hash(
@@ -1415,11 +1495,11 @@ def _tool_runtime_snapshot_hash(
     return (
         "sha256:"
         + hashlib.sha256(
-            json.dumps(
+            hot_json.dumps(
                 payload,
                 ensure_ascii=False,
                 sort_keys=True,
-                separators=(",", ":"),
+                compact=True,
             ).encode("utf-8")
         ).hexdigest()
     )
