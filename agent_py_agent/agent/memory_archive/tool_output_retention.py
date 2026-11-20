@@ -282,6 +282,12 @@ def _pin_error_rows(source, errors):
         _error(errors, str(getattr(error, 'code', None) or getattr(error, 'error_code', None) or 'pins_unreadable'))
 
 
+# LLM: 本异常只结束本片清扫，不代表故障或已穷尽；续点保留原locks_due_at。
+# 类用途: 在canonical清扫器的单叶边界中断过期或超量批次。
+class _SweepLocksSweepBudgetStop(Exception):
+    pass
+
+
 # LLM: 只预筛至少一天且已无数据的json锁；实际清扫沿原唯一锁退休器，绝不直接unlink锁。
 # 函数用途: 按日进行一次有真实候选才提交的孤儿锁清扫。
 def _sweep_locks(request, cursor, directory, budget):
@@ -316,23 +322,18 @@ def _sweep_locks(request, cursor, directory, budget):
             except FileNotFoundError:
                 examined.add(name)
         if due:
-            # LLM: 本异常只结束本片清扫，不代表故障或已穷尽；续点保留原locks_due_at。
-            # 类用途: 在canonical清扫器的单叶边界中断过期或超量批次。
-            class SweepBudgetStop(Exception):
-                pass
-
             # LLM: canonical清扫器在外层枚举；每个实际删除只进一次原写门，不在run_write内嵌套coordinator。
             # 函数用途: 限量放行一个原锁退休步骤。
             def commit_one(operation):
                 # canonical operation以唯一默认参数绑定当前lock_path；未知形状保守中断而非猜路径。
                 defaults = getattr(operation, '__defaults__', ()) or ()
                 if len(defaults) != 1 or not isinstance(defaults[0], Path):
-                    raise SweepBudgetStop
+                    raise _SweepLocksSweepBudgetStop
                 name = defaults[0].name
                 if name not in due:
                     return False
                 if budget.remaining_ms() <= 0:
-                    raise SweepBudgetStop
+                    raise _SweepLocksSweepBudgetStop
                 result = request.run_write(operation)
                 # 锁清扫扫描续点不是正文删除游标；原协议拒绝的活锁下一完整轮再检查。
                 examined.add(name)
@@ -341,7 +342,7 @@ def _sweep_locks(request, cursor, directory, budget):
             try:
                 cleanup_orphan_lock_files(directory, now=request.now, data_sidecars_only=True,
                                           directory_fd=descriptor, commit_transition=commit_one)
-            except SweepBudgetStop:
+            except _SweepLocksSweepBudgetStop:
                 pass
         after = cursor.get('locks_after', '')
         for name in window:

@@ -522,6 +522,11 @@ __all__ = [
 ]
 
 
+class _CompactIndexPageSourceIdentity:
+    def __init__(self, generation):
+        self.st_dev, self.st_ino, self.st_size, self.st_mtime_ns = generation
+
+
 def compact_index_page(target: Path, *, cursor: dict, budget, commit_transition=None) -> dict:
     """分拍物理压缩；SQLite 仅保存可丢弃的扫描暂存，原 JSONL 始终是权威。"""
     import sqlite3
@@ -635,11 +640,11 @@ def compact_index_page(target: Path, *, cursor: dict, budget, commit_transition=
                          generation=[current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns])
             return receipt
         # 原函数在索引锁内核 inode、保留扫描窗口之后追加的完整尾部。
-        class SourceIdentity:
-            st_dev, st_ino, st_size, st_mtime_ns = original
+        source_identity = _CompactIndexPageSourceIdentity(original)
+
         def operation():
             return _append_tail_and_replace(
-                target, output, original[2], SourceIdentity(),
+                target, output, original[2], source_identity,
                 validate_sources=lambda: target.stat().st_size - original[2] <= remaining,
             )
         value, reason = commit_transition(operation) if commit_transition else operation()

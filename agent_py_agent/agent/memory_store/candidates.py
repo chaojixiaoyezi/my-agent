@@ -1287,31 +1287,31 @@ class _NullAdmission:
         return None
 
 
+# LLM: 本地上下文只模拟 admission 生命周期，不吞异常或更改候选结果。
+# 类用途: 在未配置 owner quota 时提供统一 with 接口。
+class _QuotaAdmissionContext:
+    # LLM: 进入时返回无状态 admission；不得写任何配额事实。
+    # 函数用途: 开始无 quota 候选写入临界区。
+    def __enter__(self) -> _NullAdmission:
+        return _NullAdmission()
+
+    # LLM: 退出时不拦截调用方异常，保证存储失败原样上抛。
+    # 函数用途: 结束无 quota 候选写入临界区。
+    def __exit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> None:
+        return None
+
+
 # LLM: 上下文管理只包 owner quota admission，不吞掉任何配额异常。
 # 函数用途: 获取候选整文件 mutation 的 quota admission。
 def _quota_admission(enforcer: OwnerQuotaEnforcer | None):
     if enforcer is not None:
         return enforcer.admission()
-
-    # LLM: 本地上下文只模拟 admission 生命周期，不吞异常或更改候选结果。
-    # 类用途: 在未配置 owner quota 时提供统一 with 接口。
-    class _Context:
-        # LLM: 进入时返回无状态 admission；不得写任何配额事实。
-        # 函数用途: 开始无 quota 候选写入临界区。
-        def __enter__(self) -> _NullAdmission:
-            return _NullAdmission()
-
-        # LLM: 退出时不拦截调用方异常，保证存储失败原样上抛。
-        # 函数用途: 结束无 quota 候选写入临界区。
-        def __exit__(
-            self,
-            exc_type: object,
-            exc: object,
-            traceback: object,
-        ) -> None:
-            return None
-
-    return _Context()
+    return _QuotaAdmissionContext()
 
 
 # LLM: 写入用完整当前态原子 replace；不能 append 第二条相同 candidate_id。候选装记忆正文，走私有原子写（0600，目录 0700），

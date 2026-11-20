@@ -28,21 +28,23 @@ def _evolution_field_identities(values):
                              allow_nan=False) for value in values)
 
 
+# LLM: 保留AST结构与常量类型，避免字符串、数值、布尔混淆。
+# 类用途: 将可变化常量替换为固定占位。
+class _EvolutionFamilyFingerprintNormalize(ast.NodeTransformer):
+    # LLM: bool不是参数数值，其语义不随字面量归一而消失。
+    # 函数用途: 归一字符串和数值节点。
+    def visit_Constant(self, node):
+        if type(node.value) is str:
+            return ast.copy_location(ast.Constant('<string>'), node)
+        if type(node.value) in (int, float, complex):
+            return ast.copy_location(ast.Constant(0), node)
+        return node
+
+
 # LLM: 常量值只参与参数化族比较；完整IO声明参与指纹，族相同本身不代表兼容或授权。
 # 函数用途: 生成替换字符串和数值字面量后的AST族指纹。
 def evolution_family_fingerprint(code, io_contract=None):
-    # LLM: 保留AST结构与常量类型，避免字符串、数值、布尔混淆。
-    # 类用途: 将可变化常量替换为固定占位。
-    class Normalize(ast.NodeTransformer):
-        # LLM: bool不是参数数值，其语义不随字面量归一而消失。
-        # 函数用途: 归一字符串和数值节点。
-        def visit_Constant(self, node):
-            if type(node.value) is str:
-                return ast.copy_location(ast.Constant('<string>'), node)
-            if type(node.value) in (int, float, complex):
-                return ast.copy_location(ast.Constant(0), node)
-            return node
-    tree = Normalize().visit(ast.parse(code))
+    tree = _EvolutionFamilyFingerprintNormalize().visit(ast.parse(code))
     contract = io_contract if isinstance(io_contract, dict) else {}
     fields = {key: _evolution_field_identities(contract.get(key, [])) for key in ('inputs', 'outputs', 'nullable_outputs')}
     fields['output_types'] = contract.get('output_types', {})

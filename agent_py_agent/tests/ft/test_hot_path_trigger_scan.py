@@ -63,7 +63,21 @@ HOT_PREFIXES: tuple[str, ...] = (
     "agent/conversation/models.py",
 )
 # 只检查 nested_class 的精确文件路径（M13 追加 W16 的 13 个文件）；其余触发器不适用于这些文件。
-NESTED_CLASS_ONLY_PATHS: tuple[str, ...] = ()
+NESTED_CLASS_ONLY_PATHS: tuple[str, ...] = (
+    "agent/owner_snapshot_files.py",
+    "agent/tooling/audit_requests_topic.py",
+    "agent/capability/asset_evolution_routes.py",
+    "agent/capability/skill_learning.py",
+    "agent/capability/asset_evolution.py",
+    "agent/memory_store/daily.py",
+    "agent/memory_store/candidates.py",
+    "agent/common/nofollow_fs.py",
+    "agent/gateway_parts/native_subscription_source.py",
+    "agent/gateway_parts/business_api.py",
+    "agent/memory_archive/tool_output_retention.py",
+    "agent/user_space/home_index_compact.py",
+    "agent/conversation/runtime_reconciliation.py",
+)
 # R3 §3 原样列出、但基线 d9caa95af 下没有任何文件的调度前缀；前缀保留（日后出现文件即自动纳入扫描），只在前缀自检里豁免。
 _R3_PREFIXES_WITHOUT_BASELINE_FILES = frozenset(("agent/conversation/scheduler", "agent/conversation/thread_scheduler"))
 

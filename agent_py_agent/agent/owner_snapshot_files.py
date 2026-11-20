@@ -10,6 +10,7 @@ import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
+from ctypes import wintypes
 from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -79,24 +80,26 @@ def lexical_path(path):
     return result
 
 
+class _WindowsApiInfo(ctypes.Structure):
+    _fields_ = [
+        ('attributes', wintypes.DWORD), ('created', wintypes.FILETIME),
+        ('accessed', wintypes.FILETIME), ('written', wintypes.FILETIME),
+        ('volume', wintypes.DWORD), ('size_high', wintypes.DWORD), ('size_low', wintypes.DWORD),
+        ('links', wintypes.DWORD), ('index_high', wintypes.DWORD), ('index_low', wintypes.DWORD),
+    ]
+
+
 @lru_cache(maxsize=1)
 def _windows_api():
-    from ctypes import wintypes
-
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    class Info(ctypes.Structure):
-        _fields_ = [('attributes', wintypes.DWORD), ('created', wintypes.FILETIME),
-            ('accessed', wintypes.FILETIME), ('written', wintypes.FILETIME),
-            ('volume', wintypes.DWORD), ('size_high', wintypes.DWORD), ('size_low', wintypes.DWORD),
-            ('links', wintypes.DWORD), ('index_high', wintypes.DWORD), ('index_low', wintypes.DWORD)]
     kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
         wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
     kernel.CreateFileW.restype = wintypes.HANDLE
-    kernel.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.POINTER(Info))
+    kernel.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.POINTER(_WindowsApiInfo))
     kernel.GetFileInformationByHandle.restype = wintypes.BOOL
     kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel.CloseHandle.restype = wintypes.BOOL
-    return kernel, Info
+    return kernel, _WindowsApiInfo
 
 
 class SnapshotParent:
@@ -338,18 +341,19 @@ class SnapshotParent:
                 pass
 
 
+class _WindowsFdModeBasicInfo(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_int64) for name in ('creation', 'access', 'write', 'change')] + [
+        ('attributes', wintypes.DWORD)]
+
+
 def _windows_fd_mode(descriptor, mode):
     import msvcrt
-    from ctypes import wintypes
 
-    class BasicInfo(ctypes.Structure):
-        _fields_ = [(name, ctypes.c_int64) for name in ('creation', 'access', 'write', 'change')] + [
-            ('attributes', wintypes.DWORD)]
     kernel = _windows_api()[0]
     update = kernel.SetFileInformationByHandle
     update.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
     update.restype = wintypes.BOOL
-    info = BasicInfo(attributes=0x80 if mode & 0o222 else 0x1)
+    info = _WindowsFdModeBasicInfo(attributes=0x80 if mode & 0o222 else 0x1)
     if not update(msvcrt.get_osfhandle(descriptor), 0, ctypes.byref(info), ctypes.sizeof(info)):
         raise ctypes.WinError(ctypes.get_last_error())
 

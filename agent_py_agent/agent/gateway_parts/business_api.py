@@ -29,6 +29,17 @@ from ..plugin_host.business_action_specs import (
 )
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.schemas import thaw, validate_object
+from ..tooling.models import (
+    ApprovalPolicy,
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    SandboxPolicy,
+    ToolRuntimePolicy,
+)
 
 _ISSUED = WeakSet()
 
@@ -1281,6 +1292,19 @@ def native_business_context(handler, server):
     return context, cache[key]
 
 
+# 原运输门裁决来源，此适配器收集拒绝响应供业务路由生成标准信封。
+class _RequireBusinessTransportSourceResponse:
+    def __init__(self, handler, denial):
+        self._handler = handler
+        self._denial = denial
+
+    def __getattr__(self, name):
+        return getattr(self._handler, name)
+
+    def _send_json(self, status, body):
+        self._denial.update(status=status, body=body)
+
+
 def _require_business_transport(handler):
     from ..auth.middleware import require_trusted_source
     headers = getattr(handler, 'headers', None)
@@ -1288,15 +1312,7 @@ def _require_business_transport(handler):
         raise HostAPIError('CAPABILITY_DENIED', 403)
     denial = {}
 
-    class SourceResponse:
-        # 原运输门仍是唯一裁决；仅截获其拒绝响应，交业务路由投影正式Envelope。
-        def __getattr__(self, name):
-            return getattr(handler, name)
-
-        def _send_json(self, status, body):
-            denial.update(status=status, body=body)
-
-    if require_trusted_source(SourceResponse()):
+    if require_trusted_source(_RequireBusinessTransportSourceResponse(handler, denial)):
         body = denial.get('body', {})
         code = body.get('error_code', 'CAPABILITY_DENIED') if isinstance(body, dict) else 'CAPABILITY_DENIED'
         if not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
@@ -2733,152 +2749,142 @@ def _business_tool_unchanged(agent, name: str, ready_action_names: tuple) -> boo
     return hasattr(type(tools_obj), '__contains__') and name in tools_obj
 
 
+class _RegisterBusinessToolsBusinessDomainTool(BaseTool):
+    inspect_operation_receipt = _inspect_business_tool_receipt
+
+    def __init__(self, agent, domain_name: str, ready_specs: tuple):
+        if any(
+            s.action == 'assets.versions.accept' or s.metadata.get('content_authorization_required') is True
+            for s in ready_specs
+        ):
+            raise ValueError('正式采用资产版本禁止并入普通业务域工具')
+        self._business_host = agent
+        self._domain_name = domain_name
+        self._ready_specs = tuple(ready_specs)
+        self._ready_action_names = tuple(s.action for s in self._ready_specs)
+        self._specs_by_action = {s.action: s for s in self._ready_specs}
+        self.model_spec = _business_domain_model_spec(domain_name, self._ready_specs)
+        by_action = tuple((s.action, _business_action_effect(s)) for s in self._ready_specs)
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(
+                default_effect='mutating',
+                by_parameter=(('action', by_action),),
+            ),
+            approval_policy=ApprovalPolicy(),
+            sandbox_policy=SandboxPolicy('none'),
+            concurrency_policy=ConcurrencyPolicy('serial'),
+            idempotency_policy=IdempotencyPolicy('operation'),
+            output_policy=OutputPolicy(trust='runtime'),
+            resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)),
+        )
+
+    def operation_identity_for(self, arguments):
+        if isinstance(arguments, dict):
+            action = arguments.get('action')
+            if type(action) is str and action in self._specs_by_action:
+                return 'business_' + action.replace('.', '_')
+        return self.model_spec.name
+
+    def model_spec_for_actions(self, actions):
+        selected = tuple(s for s in self._ready_specs if s.action in actions)
+        if not selected:
+            return self.model_spec
+        return _business_domain_model_spec(self._domain_name, selected)
+
+    def validate_invocation(self, params, context):
+        return _validate_business_invocation_request(
+            self.model_spec.name,
+            self._specs_by_action,
+            self._ready_specs,
+            params,
+        )
+
+    def execute(self, params):
+        return self._execute(params)
+
+    def execute_scoped(self, params, invocation):
+        return self._execute(params, invocation)
+
+    def _execute(self, params, invocation=None):
+        rejected = _validate_business_invocation_request(
+            self.model_spec.name,
+            self._specs_by_action,
+            self._ready_specs,
+            params,
+        )
+        if rejected is not None:
+            return rejected
+        spec = self._specs_by_action[params['action']]
+        return _execute_registered_business_request(
+            self._business_host,
+            self.model_spec.name,
+            spec,
+            params,
+            invocation,
+        )
+
+class _RegisterBusinessToolsBusinessAcceptTool(BaseTool):
+    inspect_operation_receipt = _inspect_business_tool_receipt
+
+    def __init__(self, agent, spec):
+        if spec.action != 'assets.versions.accept' or spec.metadata.get('content_authorization_required') is not True:
+            raise ValueError('独立确认工具仅用于 assets.versions.accept')
+        self._business_host = agent
+        self.action = spec.action
+        self._ready_specs = (spec,)
+        self._ready_action_names = (spec.action,)
+        self._specs_by_action = {spec.action: spec}
+        self.model_spec = _build_business_accept_model_spec(spec)
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(default_effect='dangerous'),
+            approval_policy=ApprovalPolicy('always', require_human=True),
+            sandbox_policy=SandboxPolicy('none'),
+            concurrency_policy=ConcurrencyPolicy('serial'),
+            idempotency_policy=IdempotencyPolicy('operation'),
+            output_policy=OutputPolicy(trust='runtime'),
+            resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)),
+        )
+
+    def operation_identity_for(self, arguments):
+        return 'business_assets_versions_accept'
+
+    def validate_invocation(self, params, context):
+        return _validate_business_invocation_request(
+            self.model_spec.name,
+            self._specs_by_action,
+            self._ready_specs,
+            params,
+        )
+
+    def execute(self, params):
+        return self._execute(params)
+
+    def execute_scoped(self, params, invocation):
+        return self._execute(params, invocation)
+
+    def _execute(self, params, invocation=None):
+        rejected = _validate_business_invocation_request(
+            self.model_spec.name,
+            self._specs_by_action,
+            self._ready_specs,
+            params,
+        )
+        if rejected is not None:
+            return rejected
+        return _execute_registered_business_request(
+            self._business_host,
+            self.model_spec.name,
+            self._ready_specs[0],
+            params,
+            invocation,
+        )
+
+
 def register_business_tools(agent):
     """只向原Registry登记已接通的3个业务域工具与独立资产采用工具；原执行、审批、归档和诊断链保持唯一。"""
     if not bool(getattr(agent.config, 'business_spaces_enabled', False)):
         return
-    from ..tooling.models import (
-        ApprovalPolicy,
-        BaseTool,
-        ConcurrencyPolicy,
-        EffectResolverPolicy,
-        IdempotencyPolicy,
-        OutputPolicy,
-        ResourceScopePolicy,
-        SandboxPolicy,
-        ToolRuntimePolicy,
-    )
     from ..tooling.versioned_input_decoder import business_domain_actions, business_domain_tool
-
-    class BusinessDomainTool(BaseTool):
-        inspect_operation_receipt = _inspect_business_tool_receipt
-
-        def __init__(self, domain_name: str, ready_specs: tuple):
-            if any(
-                s.action == 'assets.versions.accept' or s.metadata.get('content_authorization_required') is True
-                for s in ready_specs
-            ):
-                raise ValueError('正式采用资产版本禁止并入普通业务域工具')
-            self._business_host = agent
-            self._domain_name = domain_name
-            self._ready_specs = tuple(ready_specs)
-            self._ready_action_names = tuple(s.action for s in self._ready_specs)
-            self._specs_by_action = {s.action: s for s in self._ready_specs}
-            self.model_spec = _business_domain_model_spec(domain_name, self._ready_specs)
-            by_action = tuple((s.action, _business_action_effect(s)) for s in self._ready_specs)
-            self.runtime_policy = ToolRuntimePolicy(
-                effect_resolver=EffectResolverPolicy(
-                    default_effect='mutating',
-                    by_parameter=(('action', by_action),),
-                ),
-                approval_policy=ApprovalPolicy(),
-                sandbox_policy=SandboxPolicy('none'),
-                concurrency_policy=ConcurrencyPolicy('serial'),
-                idempotency_policy=IdempotencyPolicy('operation'),
-                output_policy=OutputPolicy(trust='runtime'),
-                resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)),
-            )
-
-        def operation_identity_for(self, arguments):
-            if isinstance(arguments, dict):
-                action = arguments.get('action')
-                if type(action) is str and action in self._specs_by_action:
-                    return 'business_' + action.replace('.', '_')
-            return self.model_spec.name
-
-        def model_spec_for_actions(self, actions):
-            selected = tuple(s for s in self._ready_specs if s.action in actions)
-            if not selected:
-                return self.model_spec
-            return _business_domain_model_spec(self._domain_name, selected)
-
-        def validate_invocation(self, params, context):
-            return _validate_business_invocation_request(
-                self.model_spec.name,
-                self._specs_by_action,
-                self._ready_specs,
-                params,
-            )
-
-        def execute(self, params):
-            return self._execute(params)
-
-        def execute_scoped(self, params, invocation):
-            return self._execute(params, invocation)
-
-        def _execute(self, params, invocation=None):
-            rejected = _validate_business_invocation_request(
-                self.model_spec.name,
-                self._specs_by_action,
-                self._ready_specs,
-                params,
-            )
-            if rejected is not None:
-                return rejected
-            spec = self._specs_by_action[params['action']]
-            return _execute_registered_business_request(
-                agent,
-                self.model_spec.name,
-                spec,
-                params,
-                invocation,
-            )
-
-    class BusinessAcceptTool(BaseTool):
-        inspect_operation_receipt = _inspect_business_tool_receipt
-
-        def __init__(self, spec):
-            if spec.action != 'assets.versions.accept' or spec.metadata.get('content_authorization_required') is not True:
-                raise ValueError('独立确认工具仅用于 assets.versions.accept')
-            self._business_host = agent
-            self.action = spec.action
-            self._ready_specs = (spec,)
-            self._ready_action_names = (spec.action,)
-            self._specs_by_action = {spec.action: spec}
-            self.model_spec = _build_business_accept_model_spec(spec)
-            self.runtime_policy = ToolRuntimePolicy(
-                effect_resolver=EffectResolverPolicy(default_effect='dangerous'),
-                approval_policy=ApprovalPolicy('always', require_human=True),
-                sandbox_policy=SandboxPolicy('none'),
-                concurrency_policy=ConcurrencyPolicy('serial'),
-                idempotency_policy=IdempotencyPolicy('operation'),
-                output_policy=OutputPolicy(trust='runtime'),
-                resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)),
-            )
-
-        def operation_identity_for(self, arguments):
-            return 'business_assets_versions_accept'
-
-        def validate_invocation(self, params, context):
-            return _validate_business_invocation_request(
-                self.model_spec.name,
-                self._specs_by_action,
-                self._ready_specs,
-                params,
-            )
-
-        def execute(self, params):
-            return self._execute(params)
-
-        def execute_scoped(self, params, invocation):
-            return self._execute(params, invocation)
-
-        def _execute(self, params, invocation=None):
-            rejected = _validate_business_invocation_request(
-                self.model_spec.name,
-                self._specs_by_action,
-                self._ready_specs,
-                params,
-            )
-            if rejected is not None:
-                return rejected
-            return _execute_registered_business_request(
-                agent,
-                self.model_spec.name,
-                self._ready_specs[0],
-                params,
-                invocation,
-            )
 
     services = _local_business_services(agent)
     from .business_asset_read import ReadBusinessAssetTool
@@ -2911,10 +2917,10 @@ def register_business_tools(agent):
         )
         # 已登记且就绪动作不变时，下面的登记循环本就丢弃新建工具；这里先跳过构造，免得每轮重建整份领域 Schema（S3）。
         if ready_specs and not _business_tool_unchanged(agent, domain_name, tuple(s.action for s in ready_specs)):
-            candidates.append(BusinessDomainTool(domain_name, ready_specs))
+            candidates.append(_RegisterBusinessToolsBusinessDomainTool(agent, domain_name, ready_specs))
     if services.ready('assets.versions.accept') and not _business_tool_unchanged(
             agent, 'business_assets_versions_accept', ('assets.versions.accept',)):
-        candidates.append(BusinessAcceptTool(spec_by_action['assets.versions.accept']))
+        candidates.append(_RegisterBusinessToolsBusinessAcceptTool(agent, spec_by_action['assets.versions.accept']))
 
     tools_obj = getattr(agent, 'tools', None)
     for tool in candidates:

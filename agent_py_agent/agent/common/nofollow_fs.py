@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import os
 import secrets
 import stat
 from contextvars import ContextVar
+from ctypes import wintypes
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -448,26 +450,24 @@ def _windows_file_identity_snapshot(target):
     return observed, changed_after
 
 
+class _WindowsChangeQueryBasicInfo(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_int64) for name in
+                ("creation", "access", "write", "change")] + [("attributes", wintypes.DWORD)]
+
+
 @lru_cache(maxsize=1)
 def _windows_change_query():
-    import ctypes
-    from ctypes import wintypes
-
-    class BasicInfo(ctypes.Structure):
-        _fields_ = [(name, ctypes.c_int64) for name in
-                    ("creation", "access", "write", "change")] + [("attributes", wintypes.DWORD)]
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     query = kernel.GetFileInformationByHandleEx
     query.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
     query.restype = wintypes.BOOL
-    return query, BasicInfo
+    return query, _WindowsChangeQueryBasicInfo
 
 
 def file_descriptor_change_ns(descriptor, info):
     """Windows的st_ctime可能仍是创建时间，实际变更代次只取同一FD的FILE_BASIC_INFO。"""
     if os.name != "nt":
         return info.st_ctime_ns
-    import ctypes
     import msvcrt
 
     try:
