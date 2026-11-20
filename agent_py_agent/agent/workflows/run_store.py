@@ -7,6 +7,8 @@ import json
 import math
 import os
 import sqlite3
+import stat
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
@@ -18,18 +20,29 @@ from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
     _supports_dir_fd,
+    create_private_file_beneath,
     ensure_private_dir,
+    open_directory_beneath,
     read_bytes_beneath,
     read_text_beneath,
     write_text_atomic_beneath,
 )
 from ..concurrency.interrupt import is_interrupted
+from ..contracts.effect_settlement import (
+    SETTLEMENT_APPLIED,
+    SETTLEMENT_NOT_STARTED,
+    SETTLEMENT_PARTIAL,
+    SETTLEMENT_UNKNOWN,
+    classify_effect_settlement,
+    operation_status_for_settlement,
+)
 from ..plugin_host.errors import HostAPIError
 from .models import (
     WorkflowRunRecord,
     payload,
     redact_bearer_values,
     safe_path,
+    safe_path_part,
 )
 
 _HELD_LOCKS = local()
@@ -130,7 +143,7 @@ def execution_receipt(record, *, phase=None, effect_outcome=None, definition_ref
 # 函数用途: 替换运行字段时保留定义身份与已记录执行阶段，兼容W12正式字段。
 def replace_run_record(record, changes):
     updated = replace(record, **changes)
-    for name in ('phase', 'effect_outcome', 'execution_definition_ref'):
+    for name in ('phase', 'effect_outcome', 'execution_definition_ref', 'outstanding_refs'):
         if name not in changes and hasattr(record, name):
             setattr(updated, name, getattr(record, name))
     execution_receipt(updated)
@@ -140,7 +153,8 @@ def replace_run_record(record, changes):
 # LLM: 原DTO与新增执行字段一起进入原run.json；不从展示文案恢复执行事实。
 # 函数用途: 序列化原运行和阶段回执。
 def _run_payload(record):
-    return {**payload(record), **execution_receipt(record)}
+    return {**payload(record), **execution_receipt(record),
+            **({'outstanding_refs': payload(record.outstanding_refs)} if hasattr(record, 'outstanding_refs') else {})}
 
 
 # LLM: 已开始后的失败携同一个record与cause，工具不得根据ValueError/OSError重新猜是否执行。
@@ -171,6 +185,27 @@ class WorkflowExecutionError(RuntimeError):
                 next_action='retry_same_key_completion_clock_only')
 
 
+def settle_step_effect(step, *, marker, interrupted=False, drain_failed=False):
+    """从当前尝试标记及回执裁决；未核实时不能当作未启动。"""
+    facts = step.escalation_result
+    if drain_failed or marker is None or interrupted and marker:
+        explicit = SETTLEMENT_UNKNOWN
+    elif marker is False:
+        explicit = SETTLEMENT_NOT_STARTED
+    else:
+        explicit = facts.get('effect_outcome') or None
+    success = step.status in ('succeeded', 'escalated_recovered')
+    settlement = classify_effect_settlement(marker, explicit, 'succeeded' if success else step.status)
+    operation = operation_status_for_settlement(settlement, ok=success and not interrupted and not drain_failed)
+    outcome = 'confirmed' if settlement == SETTLEMENT_APPLIED else settlement
+    state = 'admitted'
+    if settlement == SETTLEMENT_NOT_STARTED:
+        state = 'not_started'
+    elif settlement in (SETTLEMENT_UNKNOWN, SETTLEMENT_PARTIAL) or operation == 'unknown' and interrupted:
+        state = 'unknown'
+    facts.update(effect_outcome=outcome, effect_state=state, effect_started=state != 'not_started')
+
+
 def _non_agent_step_settled(step, result):
     """判断非 agent_task 步骤在 effect_started=True 后是否已有终态确定证明。"""
     if step.status in ('succeeded', 'escalated_recovered', 'skipped'):
@@ -197,20 +232,28 @@ def _non_agent_step_settled(step, result):
 
 
 _TERMINAL_RUN_STATUSES = ('succeeded', 'failed', 'skipped', 'cancelled')
+_TERMINAL_OBLIGATION_STATUSES = (*_TERMINAL_RUN_STATUSES, 'completed', 'done', 'aborted', 'retired', 'settled')
 
 
 def _is_blocking_workflow_run(record):
     """非终态运行（含 cancelling/starting/paused）及仍有未结清义务的终态运行均阻止工作流回收。"""
-    return record.status not in _TERMINAL_RUN_STATUSES or not _concurrency_settled(record)
+    from ..conversation.session_tasks import _open_obligation
+
+    return (_open_obligation({"status": record.status, "effect_outcome": getattr(record, "effect_outcome", ""),
+                              "outstanding_refs": getattr(record, "outstanding_refs", ())},
+                             terminal=_TERMINAL_OBLIGATION_STATUSES)
+            or not _concurrency_settled(record, terminal_statuses=_TERMINAL_OBLIGATION_STATUSES))
 
 
-def _concurrency_settled(record):
+def _concurrency_settled(record, *, terminal_statuses=_TERMINAL_RUN_STATUSES):
     """终态标签不等于义务消失；只消费原步骤上的完成、取消或未提交证明。"""
-    if record.status in ('queued', 'running', 'waiting_for_agent', 'cancelling'):
+    if record.status in ('queued', 'running', 'waiting_for_agent', 'cancelling') or getattr(record, 'outstanding_refs', ()):
         return False
     for step in record.steps:
         result = step.escalation_result
-        if result.get('cleanup_error'):
+        if (result.get('cleanup_error') or result.get('outstanding_refs')
+                or result.get('effect_state') in ('reserved', 'unknown')
+                or result.get('effect_outcome') in ('unknown', 'partial')):
             return False
         if step.mode == 'agent_task':
             obligation = (step.status == 'waiting_for_agent' or result.get('task_id')
@@ -224,7 +267,15 @@ def _concurrency_settled(record):
                 return False
         elif result.get('effect_started') and record.status != 'cancelled' and not _non_agent_step_settled(step, result):
             return False
-    return record.status in ('succeeded', 'failed', 'skipped', 'cancelled') or record.effect_outcome == 'not_started'
+    return record.status in terminal_statuses or record.effect_outcome == 'not_started'
+
+
+def has_open_obligation(record: Mapping[str, object]) -> bool:
+    from ..conversation.session_tasks import _open_obligation
+
+    if _open_obligation(record, terminal=_TERMINAL_OBLIGATION_STATUSES):
+        return True
+    return _is_blocking_workflow_run(_decode_run(record))
 
 
 # LLM: RuntimeError是新执行锁合同；同时保留旧引擎调用方捕获ValueError的兼容性。
@@ -269,7 +320,7 @@ def _write_json(root, parts, value):
 def _decode_run(data):
     values = {key: value for key, value in data.items() if key in WorkflowRunRecord.__dataclass_fields__}
     record = WorkflowRunRecord.from_dict(values)
-    for name in ('phase', 'effect_outcome', 'execution_definition_ref'):
+    for name in ('phase', 'effect_outcome', 'execution_definition_ref', 'outstanding_refs'):
         if name in data:
             setattr(record, name, data[name])
     execution_receipt(record)
@@ -310,6 +361,8 @@ def _publish_completed_run(owner_home, record, snapshot):
 # LLM: 运行编号先单段验证，正文IO不能依赖safe_path预检；锁与数据分工，根路径只取宿主构造参数。
 # 类用途: 管理Owner下的冻结工作流定义和可恢复运行账本。
 class WorkflowRunStore:
+    has_open_obligation = staticmethod(has_open_obligation)
+
     # LLM: owner_home 必须是宿主已核验的路径，不由请求中的 owner_id 推导。
     # 函数用途: 绑定工作流运行账本的根位置。
     def __init__(self, owner_home):
@@ -325,6 +378,57 @@ class WorkflowRunStore:
     # 函数用途: 返回已验证的运行目录。
     def run_dir(self, workflow_run_id):
         return self._folder(workflow_run_id)
+
+    def _admission_parts(self, workflow_run_id, step):
+        run_id = safe_path_part(workflow_run_id)
+        step_id = safe_path_part(step.step_id)
+        attempt = safe_path_part(step.escalation_result.get('attempt_id'))
+        return ('data', 'workflow_runs', run_id, 'attempts', f'{step_id}.{attempt}.admitted')
+
+    def admit_step_effect(self, workflow_run_id, step):
+        """只发布本次尝试的排他标记；仍由协调线程写运行账。"""
+        parts = self._admission_parts(workflow_run_id, step)
+        descriptor = create_private_file_beneath(self.owner_home, parts)
+        try:
+            if not _supports_dir_fd():
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        if _supports_dir_fd():
+            for parents in (parts[:-1], parts[:-2]):
+                parent = open_directory_beneath(self.owner_home, parents, require_dir_fd=True)
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
+
+    def step_effect_marker(self, workflow_run_id, step):
+        parts = self._admission_parts(workflow_run_id, step)
+        marker = read_bytes_beneath(self.owner_home, parts, max_bytes=0)
+        return marker is not None
+
+    def _recover_reserved_effects(self, record):
+        # 活动运行可能刚发布预约，未见标记不能被读线程当作未执行证明。
+        if record.status not in ('paused_for_resume', 'failed', 'cancelled'):
+            return record
+        recovered = False
+        for step in record.steps:
+            if step.escalation_result.get('effect_state') != 'reserved':
+                continue
+            try:
+                marker = self.step_effect_marker(record.workflow_run_id, step)
+            except (OSError, ValueError):
+                marker = None
+            settle_step_effect(step, marker=marker, interrupted=True)
+            recovered = True
+        if recovered:
+            if any(step.escalation_result.get('effect_state') == 'unknown' for step in record.steps):
+                execution_receipt(record, effect_outcome='unknown')
+            elif record.effect_outcome == 'unknown' and not any(
+                    step.escalation_result.get('effect_started') or step.escalation_result.get('cleanup_error')
+                    for step in record.steps):
+                execution_receipt(record, effect_outcome='not_started')
+        return record
 
     # LLM: 已持锁集合限定进程和线程，同线程普通IO可重入；执行准入总是非阻塞并拒绝重入。
     # 函数用途: 让整次执行与每次账本读改写共用同一把跨平台JSON锁，纯观察不调用此门。
@@ -861,8 +965,8 @@ class WorkflowRunStore:
             if latest['workflow_run_id'] != workflow_run_id:
                 raise ValueError('运行身份与目录不匹配')
             if latest.get('revision', 0) == data.get('revision', 0):
-                return _decode_run(data)
-        return _decode_run(latest)
+                return self._recover_reserved_effects(_decode_run(data))
+        return self._recover_reserved_effects(_decode_run(latest))
 
     # LLM: 只加载run.json登记的步骤，不消费额外叶子，不把磁盘文件名当新的执行指令。
     # 函数用途: 按运行定义顺序返回恢复后的步骤记录。
@@ -886,6 +990,34 @@ class WorkflowRunStore:
     def execution_lock(self, workflow_run_id):
         with self._lock(workflow_run_id, execution=True):
             yield
+
+    def list_page(self, *, limit=50, cursor=None):
+        """按原规范目录续进，覆盖所有状态和未迁移运行。"""
+        from ..user_space.directory_paging import directory_page
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('limit必须为1到100的严格整数')
+        parts = ('data', 'workflow_runs')
+        names, position, complete = directory_page(
+            self.owner_home, parts, cursor or {}, limit, require_dir_fd=False,
+        )
+        rows = []
+        for name in names:
+            candidate = self.root / name
+            mode = candidate.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                raise ValueError('工作流运行目录包含链接')
+            if not stat.S_ISDIR(mode):
+                continue
+            data = self._read(name, 'run.json', concurrent_publication=True)
+            if data.get('workflow_run_id') != name:
+                raise ValueError('运行身份与目录不匹配')
+            if data.get('status') in ('paused_for_resume', 'failed', 'cancelled') and any(
+                    step.get('escalation_result', {}).get('effect_state') == 'reserved' for step in data.get('steps', ())):
+                data = {**data, **_run_payload(self.load_run(name))}
+            rows.append(data)
+        return {'items': rows, 'next_cursor': None if complete else position, 'coverage': 'complete',
+                'read_count': position.get('last_scanned', 0)}
 
     def sample_runs_readonly(self, *, workflow_id, limit, after=None):
         """按工作流时间和运行 ID 读取有界候选页，事实仍由原快照核验。"""

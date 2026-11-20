@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import replace
+from threading import Lock
 
 from ..gateway_parts.io import locked_file_transition
 from .business_contracts import BackgroundAgentIdentity
-from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
+from .session_tasks import SESSION_TASK_TERMINAL_STATUSES, _open_obligation
+from .session_tasks import has_open_obligation as session_task_has_open_obligation
 
 BACKGROUND_IDENTITY_KEY = "background_agent"
 
@@ -28,6 +32,10 @@ def background_identity(thread):
     if identity.agent_id != thread.thread_id:
         raise ValueError("BACKGROUND_IDENTITY_MISMATCH")
     return identity
+
+
+def has_open_obligation(record: Mapping[str, object]) -> bool:
+    return _open_obligation(record, terminal=("retired",), status_key="identity_state")
 
 
 def background_identity_allows_work(thread, *, existing: bool = False) -> bool:
@@ -76,20 +84,74 @@ def bound_subscription_controller(state, row, owner_id):
     return None
 
 
-def identity_outstanding(host, thread) -> tuple[list[str], list]:
+# 只缓存无义务前缀的原续点，关闭状态由下次读取或原事务重新证明。
+_RETIREMENT_CURSORS = OrderedDict()
+_RETIREMENT_CURSOR_LOCK = Lock()
+
+
+def _retirement_task_scan(task_store, thread_id, config):
+    from ..memory_store.retention_scan_budget import RetentionScanBudget
+
+    version = task_store.obligation_source_version()
+    key = (str(task_store.storage.session_tasks_dir), thread_id)
+    with _RETIREMENT_CURSOR_LOCK:
+        saved = _RETIREMENT_CURSORS.pop(key, None)
+    cursor = saved[1] if saved is not None and saved[0] == version else None
+    budget = RetentionScanBudget.default(config)
+    while not budget.exhausted():
+        page = task_store.list_page(limit=min(100, budget.max_entries - budget.entries),
+                                    cursor=cursor, target_thread_id=thread_id, read_only=True)
+        if page["coverage"] != "complete" or page["load_errors"]:
+            raise SessionTaskCoverageUnknown("SESSION_TASK_COVERAGE_UNKNOWN")
+        for task in page["items"]:
+            if session_task_has_open_obligation(task.to_dict()):
+                return task, False, version
+        budget.charge(entries=max(1, page["read_count"]))
+        following = page["next_cursor"]
+        if following is None:
+            return None, True, version
+        if following == cursor:
+            raise SessionTaskCoverageUnknown("SESSION_TASK_CURSOR_CYCLE")
+        cursor = following
+    with _RETIREMENT_CURSOR_LOCK:
+        _RETIREMENT_CURSORS[key] = version, cursor
+        while len(_RETIREMENT_CURSORS) > 100:
+            _RETIREMENT_CURSORS.popitem(last=False)
+    return None, False, version
+
+
+def identity_outstanding(host, thread, *, session_tasks_verified=False, stop_on_first_task=False) -> tuple[list[str], list]:
     """原存储的当前义务；partial/坏账/未知副作用都阻止retired，不拿PID/TTL猜已结束。"""
     store = host.conversation_store
     refs, tasks = [], []
     try:
-        for items in session_task_pages(store.session_tasks, target_thread_id=thread.thread_id):
+        if stop_on_first_task and not session_tasks_verified:
+            task, complete, _ = _retirement_task_scan(store.session_tasks, thread.thread_id, getattr(host, "config", None))
+            if task is not None:
+                control = task.metadata.get("cancellation_control") or {}
+                owed = control.get("outstanding_refs", [])
+                return owed or [task.task_id], [task] if task.status not in SESSION_TASK_TERMINAL_STATUSES else []
+            if not complete:
+                return ["session_tasks:scan_pending"], []
+            session_tasks_verified = True
+        pages = () if session_tasks_verified else session_task_pages(
+            store.session_tasks, target_thread_id=thread.thread_id,
+        )
+        for items in pages:
             for task in items:
-                refs.extend(task.metadata.get("cancellation_control", {}).get("outstanding_refs", []))
-                if task.metadata.get("task_learning_enqueue", {}).get("status") == "pending":
+                if not session_task_has_open_obligation(task.to_dict()):
+                    continue
+                control = task.metadata.get("cancellation_control", {})
+                owed = control.get("outstanding_refs", []) if isinstance(control, dict) else []
+                refs.extend(owed)
+                learning = task.metadata.get("task_learning_enqueue", {})
+                if learning.get("status") == "pending":
                     refs.append(str(task.metadata.get("trusted_task_completion", {}).get("completion_ref") or task.task_id))
-                if task.status not in SESSION_TASK_TERMINAL_STATUSES:
+                elif not owed:
                     refs.append(task.task_id)
+                if task.status not in SESSION_TASK_TERMINAL_STATUSES:
                     tasks.append(task)
-    except SessionTaskCoverageUnknown:
+    except (OSError, ValueError, TypeError, KeyError, SessionTaskCoverageUnknown):
         refs.append("session_tasks:coverage_unknown")
         tasks.clear()
     links, errors = store.tasks.active_report(thread.thread_id)
@@ -116,9 +178,11 @@ def identity_outstanding(host, thread) -> tuple[list[str], list]:
     repository = getattr(host, "scheduler_repository", None)
     if repository is not None:
         jobs, errors = repository.list_jobs()
+        from .managed_subscriptions import has_open_obligation as subscription_has_open_obligation
+
         refs.extend(str(job["job_id"]) for job in jobs
                     if thread.thread_id in {job.get("thread_id"), job.get("source_thread_id")}
-                    and job.get("status") not in {"paused", "deleted", "disabled"})
+                    and subscription_has_open_obligation({**job, "state": job.get("status")}))
         if errors:
             refs.append("subscriptions:unreadable")
     manager = getattr(host, "subagents", None)
@@ -266,15 +330,18 @@ def _reconcile_background_identity_locked(host, thread_id):
         return thread
     from ..gateway_parts.session_task_stop import reconcile_business_session_task_cancellation
 
+    task_store = store.session_tasks
+    config = getattr(host, "config", None)
     try:
-        # 先固定完整分页链，再更新原索引；不将本次写入造成的游标过期拼成一个假完整快照。
-        pending = [task for items in session_task_pages(store.session_tasks, target_thread_id=thread_id)
-                   for task in items if task.metadata.get("cancellation_control", {}).get("execution_ref")]
-        for task in pending:
+        task, complete, version = _retirement_task_scan(task_store, thread_id, config)
+        if task is not None and task.metadata.get("cancellation_control", {}).get("execution_ref"):
             reconcile_business_session_task_cancellation(host, task)
-    except SessionTaskCoverageUnknown:
+            task, complete, version = _retirement_task_scan(task_store, thread_id, config)
+    except (OSError, ValueError, TypeError, KeyError, SessionTaskCoverageUnknown):
         return thread
-    refs, _ = identity_outstanding(host, thread)
+    if task is None and not complete:
+        return thread
+    refs = [task.task_id] if task is not None else identity_outstanding(host, thread, session_tasks_verified=True)[0]
     if refs:
         if identity.identity_state == "available" and identity.after_task == "retire":
             target = "retiring"
@@ -288,7 +355,7 @@ def _reconcile_background_identity_locked(host, thread_id):
 
     def apply(latest):
         current = background_identity(latest)
-        if current != identity:
+        if current != identity or task_store.obligation_source_version() != version:
             return latest
         updated = replace(current, identity_state=target, identity_revision=current.identity_revision + 1)
         return replace(latest, metadata={**latest.metadata, BACKGROUND_IDENTITY_KEY: updated.to_dict()}, updated_at=time.time())

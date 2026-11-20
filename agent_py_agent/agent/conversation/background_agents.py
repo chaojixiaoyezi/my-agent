@@ -610,12 +610,12 @@ class BackgroundAgentService:
                 elif disposition == "drain":
                     self._republish_pending_work(thread, tasks, actor=actor)
                 thread = reconcile_background_identity(self.host, resolved_id)
-                refs, _ = identity_outstanding(self.host, thread)
+                refs, _ = identity_outstanding(self.host, thread, stop_on_first_task=True)
                 if not refs and background_identity(thread).identity_state == "retiring":
                     # 取消后的首个索引回填可能partial；上面的新完整遍历追平后，再走原锁内CAS，不把新空账配给旧身份。
                     thread = reconcile_background_identity(self.host, resolved_id)
                     if background_identity(thread).identity_state == "retiring":
-                        refs, _ = identity_outstanding(self.host, thread)
+                        refs, _ = identity_outstanding(self.host, thread, stop_on_first_task=True)
                 return {"agent": self._agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "outstanding_refs": refs[:100]}
             if action in {"resume", "restore"}:
                 self._republish_pending_work(thread, tasks, actor=actor)

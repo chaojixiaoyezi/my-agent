@@ -33,7 +33,8 @@ from .business_scope import (
     workflow_state,
 )
 from .run_list_index import RunListIndex
-from .run_store import WorkflowRunStore, _decode_run, _is_blocking_workflow_run
+from .run_store import WorkflowRunStore, _decode_run
+from .run_store import has_open_obligation as workflow_has_open_obligation
 
 _max_blockers_page = 100
 _active_run_statuses = (
@@ -46,7 +47,6 @@ _active_run_statuses = (
     "paused_for_resume",
     "cancelling",
 )
-_open_session_task_statuses = ("queued", "pending", "running", "accepted")
 # 有界分页：达到上限仍未取尽时按覆盖未知处理，不静默当作完整。
 _max_reference_pages = 100
 _max_open_ref_backfill_batches = 32
@@ -589,7 +589,7 @@ class WorkflowReferenceReader:
                             if record.workflow_run_id != r_id:
                                 complete = False
                                 continue
-                            if normalize_workflow_asset_id(record.workflow_id) == target_id and _is_blocking_workflow_run(record):
+                            if normalize_workflow_asset_id(record.workflow_id) == target_id and workflow_has_open_obligation(data):
                                 found_run_ids.add(r_id)
                         index_queried_ok = True
                     except Exception:
@@ -619,7 +619,7 @@ class WorkflowReferenceReader:
                         if record.workflow_run_id != entry.name:
                             complete = False
                             continue
-                        if normalize_workflow_asset_id(record.workflow_id) == target_id and _is_blocking_workflow_run(record):
+                        if normalize_workflow_asset_id(record.workflow_id) == target_id and workflow_has_open_obligation(data):
                             found_run_ids.add(entry.name)
                 if len(found_run_ids) > _max_blockers_page:
                     complete = False
@@ -644,6 +644,8 @@ class WorkflowReferenceReader:
             return False
 
     def _check_session_tasks(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
+        from ..conversation.session_tasks import has_open_obligation
+
         task_store = self.session_task_store or getattr(getattr(self.host, "conversation_store", None), "session_tasks", None)
         if task_store is None and self.owner_home is not None:
             conv_dir = self.owner_home / "conversation"
@@ -684,11 +686,9 @@ class WorkflowReferenceReader:
                     return False
                 load_errors = page.get("load_errors") or []
                 for task in items:
-                    t_status = getattr(task, "status", "")
-                    task_metadata = getattr(task, 'metadata', {}) or {}
-                    control = task_metadata.get('cancellation_control', {}) if isinstance(task_metadata, dict) else {}
-                    unsettled = isinstance(control, dict) and bool(control.get('outstanding_refs'))
-                    if t_status not in _open_session_task_statuses and not unsettled:
+                    if not has_open_obligation({
+                        "status": getattr(task, "status", None), "metadata": getattr(task, "metadata", {}),
+                    }):
                         continue
                     t_id = getattr(task, "task_id", "") or str(task)
                     metadata = getattr(task, "metadata", {}) or {}

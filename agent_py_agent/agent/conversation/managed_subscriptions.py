@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .business_access import (
@@ -43,7 +44,15 @@ class SourceEvent:
             raise BusinessError('SOURCE_EVENT_INVALID')
 
 
+def has_open_obligation(record: Mapping[str, object]) -> bool:
+    from .session_tasks import _open_obligation
+
+    return _open_obligation(record, terminal=("paused", "removed", "disabled", "deleted"), status_key="state")
+
+
 class ManagedSubscriptionService:
+    has_open_obligation = staticmethod(has_open_obligation)
+
     def __init__(self, catalog, *, background_service=None, source_resolver=None,
                  source_authorizer=None, submit_actor_provider=None, policy_check=None):
         self.catalog = catalog

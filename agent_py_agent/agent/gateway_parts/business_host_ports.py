@@ -6,8 +6,10 @@ import inspect
 import json
 import os
 import stat
-from collections.abc import Callable
+from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 
@@ -60,104 +62,63 @@ def _extract_thread_report(rep: Any, *, strict: bool) -> list[Any]:
     return list(rep)
 
 
-def _list_all_threads(threads_store: Any, *, strict: bool = False, scan_cap: int = 1_000_000) -> list[Any]:
-    instance_dict = getattr(threads_store, '__dict__', {})
-    use_threads_override = 'list_threads' in instance_dict
-    if hasattr(threads_store, 'list_report') and not use_threads_override:
-        try:
-            rep = threads_store.list_report(limit=0)
-        except TypeError:
-            rep = threads_store.list_report()
-        return _extract_thread_report(rep, strict=strict)
-    if hasattr(threads_store, 'list_threads'):
-        try:
-            threads = list(threads_store.list_threads(limit=0))
-        except TypeError:
-            threads = list(threads_store.list_threads())
-        if threads:
-            return threads
-        # 兼容只用切片实现 limit 的测试桩：若 limit=0 返回空，探测无参或大窗口调用。
-        if not hasattr(threads_store, 'list_report'):
-            try:
-                probe = list(threads_store.list_threads(limit=scan_cap))
-            except TypeError:
-                probe = list(threads_store.list_threads())
-            if strict and len(probe) >= scan_cap:
-                _fail_host_not_ready('THREAD_WINDOW_TRUNCATED', '线程数量超出单次窗口上限，确认完整索引后重试。')
-            return probe
-        return threads
-    if hasattr(threads_store, 'list_report'):
-        try:
-            rep = threads_store.list_report(limit=0)
-        except TypeError:
-            rep = threads_store.list_report()
-        return _extract_thread_report(rep, strict=strict)
-    if hasattr(threads_store, 'list_recent'):
-        try:
-            threads = list(threads_store.list_recent(scan_cap))
-        except TypeError:
-            threads = list(threads_store.list_recent())
-        if strict and len(threads) >= scan_cap:
-            _fail_host_not_ready('THREAD_WINDOW_TRUNCATED', '线程数量超出单次窗口上限，确认完整索引后重试。')
-        return threads
-    return []
+def _reference_page(store, *, limit, cursor, source):
+    from ..conversation.session_tasks import SessionTaskStore
+
+    options = {} if cursor is None else {'cursor': cursor}
+    if isinstance(store, SessionTaskStore):
+        options['read_only'] = True
+    page = store.list_page(limit=limit, **options)
+    if not isinstance(page, dict) or not isinstance(page.get('items'), list) or len(page['items']) > limit:
+        _fail_host_not_ready(f'{source}_SCAN_INVALID', '分页回执格式无效，修复来源后重试。')
+    if (page.get('coverage', 'complete') != 'complete' or page.get('load_errors') or page.get('errors')
+            or page.get('partial') or page.get('truncated') or page.get('incomplete')):
+        _fail_host_not_ready(f'{source}_SCAN_INCOMPLETE', '来源尚未完整可读，核对索引后重试。')
+    following = page.get('next_cursor')
+    count = page.get('read_count', len(page['items']))
+    if type(count) is not int or not len(page['items']) <= count <= limit:
+        _fail_host_not_ready(f'{source}_SCAN_INVALID', '分页返回了无效计量，修复来源后重试。')
+    if following is not None and (following == cursor or not isinstance(following, (str, dict))):
+        _fail_host_not_ready(f'{source}_CURSOR_STALLED', '分页续点未推进，核对来源后重试。')
+    return page['items'], following, count
 
 
-def _list_all_session_tasks(session_tasks: Any, *, scan_cap: int = 1_000_000) -> list[Any]:
-    list_report = getattr(session_tasks, 'list_report', None)
-    # 若测试或调用方未在实例上覆写 list_page，则优先走直接扫描目录与 load_errors 的 list_report(limit=0)。
-    use_page_override = 'list_page' in getattr(session_tasks, '__dict__', {})
-    if callable(list_report) and not use_page_override:
-        try:
-            items, load_errors = list_report(limit=0)
-        except (OSError, ValueError, TypeError) as error:
-            _fail_host_not_ready('SESSION_TASK_SCAN_FAILED', '会话任务扫描失败，确认宿主存储就绪后重试。', error)
-        if load_errors or not isinstance(items, (list, tuple)):
-            _fail_host_not_ready('SESSION_TASK_SCAN_INCOMPLETE', '会话任务扫描未完整完成，不能按无活跃任务归档。')
-        return list(items)
-    if hasattr(session_tasks, 'list_page'):
-        tasks: list[Any] = []
-        seen_ids: set[str] = set()
-        seen_cursors: set[Any] = set()
-        cursor: Any = None
-        while True:
-            page = session_tasks.list_page(limit=100) if cursor is None else session_tasks.list_page(limit=100, cursor=cursor)
-            if not isinstance(page, dict):
-                _fail_host_not_ready('SESSION_TASK_SCAN_INVALID', '会话任务分页结果格式无效，请修复后重试。')
-            if (
-                page.get('partial')
-                or page.get('incomplete')
-                or page.get('truncated')
-                or page.get('errors')
-                or page.get('load_errors')
-                or page.get('coverage') not in (None, 'complete')
-            ):
-                _fail_host_not_ready('SESSION_TASK_SCAN_INCOMPLETE', '会话任务分页未完整完成，不能按无活跃任务归档。')
-            for task in page.get('items', []):
-                tid = getattr(task, 'task_id', None)
-                if tid is not None:
-                    key = str(tid)
-                    if key in seen_ids:
-                        continue
-                    seen_ids.add(key)
-                tasks.append(task)
-            next_cursor = page.get('next_cursor')
-            if not next_cursor:
-                break
-            if next_cursor == cursor or next_cursor in seen_cursors:
-                _fail_host_not_ready('SESSION_TASK_CURSOR_STALLED', '会话任务分页游标停滞，不能跳过未扫描任务。')
-            seen_cursors.add(next_cursor)
-            cursor = next_cursor
-        return tasks
-    if hasattr(session_tasks, 'list_recent'):
-        try:
-            tasks = list(session_tasks.list_recent(scan_cap))
-        except TypeError:
-            tasks = list(session_tasks.list_recent())
-        if len(tasks) >= scan_cap:
-            _fail_host_not_ready('SESSION_TASK_WINDOW_TRUNCATED', '会话任务数量超出窗口上限，确认完整清单后重试。')
-        return tasks
-    return []
+def _thread_reference_page(store, *, limit, cursor):
+    from ..memory_store.retention_scan_budget import RetentionScanBudget
+
+    if callable(getattr(store, 'page_report', None)):
+        budget = RetentionScanBudget.default()
+        budget.max_entries = min(limit, budget.max_entries)
+        names, errors, following, complete = store.page_report(cursor=cursor, limit=limit, budget=budget)
+        if errors:
+            _fail_host_not_ready('THREAD_SCAN_INCOMPLETE', '线程来源存在读取错误，修复后重试。')
+        rows = [store.load(name) for name in names]
+        if any(row is None for row in rows):
+            _fail_host_not_ready('THREAD_SCAN_INCOMPLETE', '扫描期间线程来源变化，重试以读取当前版本。')
+        return rows, None if complete else following, budget.entries
+    if callable(getattr(store, 'list_page', None)):
+        return _reference_page(store, limit=limit, cursor=cursor, source='THREAD')
+    # 保留只有有界列表端口的旧宿主；达到上限时无法证明完整覆盖。
+    legacy = getattr(store, 'list_report', None) or getattr(store, 'list_threads', None) or getattr(store, 'list_recent', None)
+    if cursor is not None or not callable(legacy):
+        _fail_host_not_ready('THREAD_SCAN_INCOMPLETE', '宿主需要提供可验证的线程分页端口。')
+    response = legacy(limit)
+    rows = _extract_thread_report(response, strict=True) if isinstance(response, (tuple, dict)) else list(response)
+    if len(rows) >= limit:
+        _fail_host_not_ready('THREAD_WINDOW_TRUNCATED', '线程数量超出旧端口窗口，请启用线程分页。')
+    return rows, None, len(rows)
+
+
+def _iter_reference_threads(store):
+    cursor = None
+    while True:
+        rows, following, _ = _thread_reference_page(store, limit=100, cursor=cursor)
+        yield from rows
+        if following is None:
+            return
+        if following == cursor:
+            _fail_host_not_ready('THREAD_CURSOR_STALLED', '线程分页续点未推进，请核对来源后重试。')
+        cursor = following
 
 
 def _optional_stat(path: Path) -> os.stat_result | None:
@@ -166,90 +127,6 @@ def _optional_stat(path: Path) -> os.stat_result | None:
         return path.stat()
     except FileNotFoundError:
         return None
-
-
-def _list_unsettled_workflow_runs(
-    owner_home_path: Path, settled_states: set[str], *, scan_cap: int = 1_000_000
-) -> list[tuple[str, dict[str, Any]]]:
-    import sqlite3
-
-    from ..workflows.run_list_index import RunListIndex
-    from ..workflows.run_store import WorkflowRunStore
-
-    runs_dir = owner_home_path / 'data' / 'workflow_runs'
-    index_db = owner_home_path / 'data' / 'workflow_run_index.sqlite3'
-    rstore = WorkflowRunStore(owner_home_path)
-    list_runs_fn = getattr(rstore, 'list_runs', None)
-    use_custom_list = (
-        callable(list_runs_fn)
-        and (
-            not hasattr(rstore, '_read')
-            or 'list_runs' in getattr(rstore, '__dict__', {})
-            or getattr(WorkflowRunStore, 'list_runs', None).__module__ != WorkflowRunStore.__module__
-        )
-    )
-    if use_custom_list:
-        try:
-            runs = list(rstore.list_runs(limit=scan_cap))
-        except TypeError:
-            runs = list(rstore.list_runs())
-        if len(runs) >= scan_cap:
-            _fail_host_not_ready('WORKFLOW_RUN_WINDOW_TRUNCATED', '工作流运行数量超出扫描上限，请使用索引完整查询。')
-        active: list[tuple[str, dict[str, Any]]] = []
-        for run in runs:
-            bc = getattr(run, 'business_context', None) or {}
-            status = getattr(run, 'status', '')
-            if status not in settled_states:
-                run_id = str(getattr(run, 'workflow_run_id', None) or getattr(run, 'run_id', 'run'))
-                active.append((run_id, bc if isinstance(bc, dict) else {}))
-        return active
-
-    runs_stat = _optional_stat(runs_dir)
-    index_stat = _optional_stat(index_db)
-    if not (runs_stat is not None and stat.S_ISDIR(runs_stat.st_mode)) and not (
-        index_stat is not None and stat.S_ISREG(index_stat.st_mode)
-    ):
-        return []
-
-    # SQL 终态过滤列表与外层 settled_states 保持同源，避免新增终态时 SQL 与二次过滤不一致。
-    settled_tuple = tuple(sorted(str(state) for state in settled_states))
-    index = RunListIndex(owner_home_path)
-    try:
-        with index.connection() as conn:
-            if settled_tuple:
-                placeholders = ', '.join('?' for _ in settled_tuple)
-                rows = conn.execute(
-                    f'SELECT run_id FROM runs WHERE status NOT IN ({placeholders}) '
-                    'UNION SELECT run_id FROM pending '
-                    'UNION SELECT run_id FROM legacy',
-                    settled_tuple,
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    'SELECT run_id FROM runs '
-                    'UNION SELECT run_id FROM pending '
-                    'UNION SELECT run_id FROM legacy'
-                ).fetchall()
-            run_ids = [row[0] for row in rows]
-    except sqlite3.Error as error:
-        _fail_host_not_ready('WORKFLOW_INDEX_UNREADABLE', '工作流运行索引不可读，确认宿主存储就绪后重试。', error)
-
-    active_runs: list[tuple[str, dict[str, Any]]] = []
-    for run_id in run_ids:
-        try:
-            data = rstore._read(run_id, 'run.json', concurrent_publication=True)
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
-            _fail_host_not_ready('WORKFLOW_RUN_UNREADABLE', f'工作流运行 {run_id} 快照不可读，修复来源后重试。', error)
-        if not isinstance(data, dict):
-            _fail_host_not_ready('WORKFLOW_RUN_UNREADABLE', f'工作流运行 {run_id} 快照格式无效，修复来源后重试。')
-        status = data.get('status', '')
-        if status not in settled_states:
-            bc = data.get('business_context') or {}
-            wf_run_id = str(data.get('workflow_run_id') or data.get('run_id') or run_id)
-            active_runs.append((wf_run_id, bc if isinstance(bc, dict) else {}))
-    return active_runs
 
 
 # LLM: 从会话任务元数据中解析业务上下文，提供只读结构化对象。
@@ -399,9 +276,7 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                             'space_id': bg.get('space_id') if isinstance(bg, dict) else None,
                             'kind': 'agent'
                         }
-                    threads = _list_all_threads(store.threads, strict=False)
-
-                    for th in threads:
+                    for th in _iter_reference_threads(store.threads):
                         th_title = getattr(th, 'title', '')
                         th_meta = getattr(th, 'metadata', None) or {}
                         th_bg = th_meta.get('background_agent') if isinstance(th_meta, dict) else {}
@@ -614,133 +489,169 @@ def _read_optional_reference_json(path: Path) -> Any | None:
         return None
 
 
-# LLM: 探测指定业务空间的活跃引用，供空间归档前做阻断校验。
-# 函数用途: 返回指定 space_id 下仍在运行的任务、代理、工作流与订阅。
 def build_default_business_active_references(host: Any) -> Callable[[str, Any], list[dict[str, str]]]:
+    from ..conversation.background_team_lifecycle import has_open_obligation as identity_is_open
+    from ..conversation.business_access import BusinessError
+    from ..conversation.managed_subscriptions import has_open_obligation as subscription_is_open
+    from ..conversation.session_tasks import has_open_obligation as task_is_open
+    from ..memory_store.retention_scan_budget import RetentionScanBudget
+    from ..workflows.run_store import WorkflowRunStore
+    from ..workflows.run_store import has_open_obligation as run_is_open
+
     owner_home = getattr(getattr(host, 'home_paths', None), 'owner_home_dir', None)
-    owner_home_path = Path(owner_home).resolve() if owner_home else None
+    owner = Path(owner_home).resolve() if owner_home else None
+    receipts = OrderedDict()
+    guard = Lock()
 
-    # LLM: 扫描空间下的活跃任务、未注销代理、活跃运行与有效订阅。
-    # 函数用途: 检查空间活跃状态并返回结构化 blockers。
-    def active_references(space_id: str, actor: Any) -> list[dict[str, str]]:
-        if not space_id or not isinstance(space_id, str):
-            return []
-        blockers: list[dict[str, str]] = []
-
-        from ..conversation.business_access import BusinessError
-
-        # 1. non-terminal SessionTasks
+    def source_versions():
         store = getattr(host, 'conversation_store', None)
-        if store is not None and hasattr(store, 'session_tasks'):
-            try:
-                tasks = _list_all_session_tasks(store.session_tasks)
-                terminal = {'done', 'completed', 'failed', 'cancelled', 'terminated'}
-                for task in tasks:
-                    if getattr(task, 'status', '') in terminal:
+        storage = getattr(store, 'storage', None)
+        paths = [getattr(storage, name, None) for name in ('threads_dir', 'session_tasks_dir')]
+        if owner is not None:
+            paths.extend(owner / name for name in (
+                'data/workflow_runs', 'data/workflow_run_index.sqlite3',
+                'data/workflow_run_index.sqlite3-wal', 'data/business/catalog.json', 'data/subscriptions.json',
+            ))
+        versions = []
+        for path in paths:
+            if path is None:
+                continue
+            info = _optional_stat(Path(path))
+            versions.append(None if info is None else (
+                info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+            ))
+        return tuple(versions)
+
+    def read_source_versions():
+        try:
+            return source_versions()
+        except OSError as error:
+            _fail_host_not_ready('REFERENCE_VERSION_UNREADABLE', '来源版本不可读，核对存储后重试。', error)
+
+    def task_blocker(task, space_id):
+        row = task if isinstance(task, Mapping) else {
+            'task_id': getattr(task, 'task_id', 'task'),
+            'status': getattr(task, 'status', None), 'metadata': getattr(task, 'metadata', {}),
+        }
+        metadata = row.get('metadata') or {}
+        context = metadata.get('business_context') or {}
+        if space_id == (metadata.get('space_id') or context.get('space_id')) and task_is_open(row):
+            return {'ref': str(row.get('task_id') or 'task'), 'kind': 'task', 'reason_code': 'ACTIVE_TASK'}
+        return None
+
+    def thread_blocker(thread, space_id):
+        metadata = getattr(thread, 'metadata', None) or {}
+        identity = metadata.get('background_agent')
+        if not isinstance(identity, Mapping) and metadata.get('space_id') == space_id:
+            identity = {**metadata, 'identity_state': 'retired' if metadata.get('retired') else 'available'}
+        if isinstance(identity, Mapping) and identity.get('space_id') == space_id and identity_is_open(identity):
+            return {'ref': str(getattr(thread, 'thread_id', 'thread')), 'kind': 'agent', 'reason_code': 'ACTIVE_AGENT'}
+        return None
+
+    def run_blocker(run, space_id):
+        context = run.get('business_context') or {}
+        if context.get('space_id') == space_id and run_is_open(run):
+            return {'ref': run['workflow_run_id'], 'kind': 'workflow_run', 'reason_code': 'ACTIVE_WORKFLOW_RUN'}
+        return None
+
+    def subscription_blocker(space_id):
+        if owner is None:
+            return None
+        try:
+            catalog = _read_optional_reference_json(owner / 'data/business/catalog.json')
+            if catalog is not None and not isinstance(catalog, dict):
+                raise ValueError('invalid subscription catalog')
+            for old_layout in (False, True):
+                rows = (_read_optional_reference_json(owner / 'data/subscriptions.json') if old_layout
+                        else (catalog or {}).get('subscriptions', {}))
+                if rows is None:
+                    continue
+                if isinstance(rows, Mapping):
+                    rows = rows.values()
+                elif not isinstance(rows, list):
+                    raise ValueError('invalid subscription records')
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise ValueError('invalid subscription record')
+                    if row.get('space_id') != space_id:
                         continue
-                    meta = getattr(task, 'metadata', None) or {}
-                    bc = meta.get('business_context') if isinstance(meta, dict) else {}
-                    t_space = meta.get('space_id') or (bc.get('space_id') if isinstance(bc, dict) else None)
-                    if t_space == space_id:
-                        blockers.append({
-                            'ref': str(getattr(task, 'task_id', 'task')),
-                            'kind': 'task',
-                            'reason_code': 'ACTIVE_TASK'
-                        })
+                    state = row.get('state', 'active')
+                    if old_layout and row.get('enabled') is False and state == 'active':
+                        state = 'disabled'
+                    if subscription_is_open({**row, 'state': state}):
+                        return {'ref': str(row.get('subscription_id') or 'subscription'),
+                                'kind': 'subscription', 'reason_code': 'ACTIVE_SUBSCRIPTION'}
+        except (OSError, ValueError, RuntimeError) as error:
+            _fail_host_not_ready('SUBSCRIPTION_SCAN_FAILED', '无法核对订阅责任，修复来源后重试。', error)
+        return None
+
+    def active_references(space_id: str, actor: Any) -> list[dict[str, str]]:
+        if not isinstance(space_id, str) or not space_id:
+            return []
+        versions = read_source_versions()
+        with guard:
+            previous = receipts.pop(space_id, None)
+        source, cursor, checked = previous[1:] if previous is not None and previous[0] == versions else (0, None, 0)
+        budget = RetentionScanBudget.default(getattr(host, 'config', None))
+        store = getattr(host, 'conversation_store', None)
+        while source < 3 and not budget.exhausted():
+            limit = min(100, budget.max_entries - budget.entries)
+            if source == 0:
+                task_store = getattr(store, 'session_tasks', None)
+                if task_store is None:
+                    source, cursor = source + 1, None
+                    continue
+                reader, blocker, label = task_store, task_blocker, 'SESSION_TASK'
+            elif source == 1:
+                reader, blocker, label = getattr(store, 'threads', None), thread_blocker, 'THREAD'
+                if reader is None:
+                    source, cursor = source + 1, None
+                    continue
+            else:
+                if owner is None:
+                    source, cursor = source + 1, None
+                    continue
+                reader, blocker, label = WorkflowRunStore(owner), run_blocker, 'WORKFLOW_RUN'
+            try:
+                if source == 1:
+                    rows, following, observed = _thread_reference_page(reader, limit=limit, cursor=cursor)
+                else:
+                    rows, following, observed = _reference_page(reader, limit=limit, cursor=cursor, source=label)
+                for row in rows:
+                    opened = blocker(row, space_id)
+                    if opened is not None:
+                        return [opened]
             except BusinessError:
                 raise
-            except (OSError, ValueError, RuntimeError) as error:
-                _fail_host_not_ready('SESSION_TASK_SCAN_FAILED', '无法完整检查活跃会话任务，稍后重试空间归档。', error)
+            except (OSError, ValueError, LookupError, TypeError, AttributeError, RuntimeError) as error:
+                reason = 'WORKFLOW_RUN_UNREADABLE' if source == 2 else f'{label}_SCAN_FAILED'
+                _fail_host_not_ready(reason, '责任来源不可读，修复来源后重试空间归档。', error)
+            budget.charge(entries=observed)
+            checked += observed
+            if following is None:
+                source, cursor = source + 1, None
+            else:
+                cursor = following
+                if observed == 0:
+                    break
+        if source < 3:
+            with guard:
+                receipts[space_id] = (versions, source, cursor, checked)
+                while len(receipts) > 100:
+                    receipts.popitem(last=False)
+            raise BusinessError('HOST_NOT_READY', details={
+                'reason': 'OPEN_OBLIGATION_SCAN_PENDING', 'effect_outcome': 'not_started',
+                'checked_entries': checked, 'source': ('session_tasks', 'threads', 'workflow_runs')[source],
+                'next_action': '使用原空间和幂等键重试归档，以继续检查余下的责任条目。',
+            })
+        opened = subscription_blocker(space_id)
+        if opened is not None:
+            return [opened]
+        if read_source_versions() != versions:
+            _fail_host_not_ready('OPEN_OBLIGATION_SOURCE_CHANGED', '归档来源版本已变化，请使用原空间和幂等键重试。')
+        return []
 
-        # 2. non-retired background agents
-        if store is not None and hasattr(store, 'threads'):
-            try:
-                threads = _list_all_threads(store.threads, strict=True)
-                for thread in threads:
-                    meta = getattr(thread, 'metadata', None) or {}
-                    is_active = False
-                    if isinstance(meta, dict):
-                        bg = meta.get('background_agent')
-                        if (isinstance(bg, dict) and bg.get('space_id') == space_id and bg.get('identity_state') != 'retired') or (meta.get('space_id') == space_id and not meta.get('retired', False)):
-                            is_active = True
-                    if is_active:
-                        blockers.append({
-                            'ref': str(getattr(thread, 'thread_id', 'thread')),
-                            'kind': 'agent',
-                            'reason_code': 'ACTIVE_AGENT'
-                        })
-            except BusinessError:
-                raise
-            except (OSError, ValueError, RuntimeError) as error:
-                _fail_host_not_ready('THREAD_SCAN_FAILED', '无法完整检查后台代理线程，稍后重试空间归档。', error)
-
-        # 3. running/paused/queued/waiting_for_agent WorkflowRunStore runs
-        if owner_home_path is not None:
-            try:
-                settled_states = {
-                    'succeeded',
-                    'completed',
-                    'done',
-                    'failed',
-                    'cancelled',
-                    'aborted',
-                    'retired',
-                    'settled',
-                    'skipped',
-                }
-                for wf_run_id, bc in _list_unsettled_workflow_runs(owner_home_path, settled_states):
-                    if bc.get('space_id') == space_id:
-                        blockers.append({
-                            'ref': wf_run_id,
-                            'kind': 'workflow_run',
-                            'reason_code': 'ACTIVE_WORKFLOW_RUN'
-                        })
-            except BusinessError:
-                raise
-            except (OSError, ValueError, LookupError, RuntimeError) as error:
-                _fail_host_not_ready('WORKFLOW_RUN_SCAN_FAILED', '无法完整检查未完结工作流运行，稍后重试空间归档。', error)
-
-        # 4. active ManagedSubscriptionService items
-        if owner_home_path is not None:
-            try:
-                seen_sub_ids: set[str] = set()
-                # Check data/business/catalog.json subscriptions
-                catalog_path = owner_home_path / 'data' / 'business' / 'catalog.json'
-                catalog_data = _read_optional_reference_json(catalog_path)
-                if catalog_data is not None:
-                    subs_raw = catalog_data.get('subscriptions', {}) if isinstance(catalog_data, dict) else {}
-                    subs_items = subs_raw.values() if isinstance(subs_raw, dict) else (subs_raw if isinstance(subs_raw, list) else [])
-                    for sub in subs_items:
-                        if isinstance(sub, dict) and sub.get('space_id') == space_id and sub.get('state', 'active') == 'active':
-                            sub_id = str(sub.get('subscription_id') or 'subscription')
-                            if sub_id not in seen_sub_ids:
-                                seen_sub_ids.add(sub_id)
-                                blockers.append({
-                                    'ref': sub_id,
-                                    'kind': 'subscription',
-                                    'reason_code': 'ACTIVE_SUBSCRIPTION'
-                                })
-
-                # Fallback: data/subscriptions.json
-                sub_file = owner_home_path / 'data' / 'subscriptions.json'
-                subs = _read_optional_reference_json(sub_file)
-                if subs is not None:
-                    sub_list = subs.values() if isinstance(subs, dict) else (subs if isinstance(subs, list) else [])
-                    for sub in sub_list:
-                        if isinstance(sub, dict) and sub.get('space_id') == space_id and sub.get('enabled', True) and sub.get('state', 'active') == 'active':
-                            sub_id = str(sub.get('subscription_id') or 'subscription')
-                            if sub_id not in seen_sub_ids:
-                                seen_sub_ids.add(sub_id)
-                                blockers.append({
-                                    'ref': sub_id,
-                                    'kind': 'subscription',
-                                    'reason_code': 'ACTIVE_SUBSCRIPTION'
-                                })
-            except (OSError, ValueError, RuntimeError) as error:
-                _fail_host_not_ready('SUBSCRIPTION_SCAN_FAILED', '无法完整检查活跃订阅，稍后重试空间归档。', error)
-
-        return blockers[:100]
-
+    active_references.source_versions = source_versions
     return active_references
 
 

@@ -517,10 +517,32 @@ class BusinessSpaceService:
         return _copy(rows)
 
     def change_state(self, action, params, *, actor, expected_revision, idempotency_key):
+        source_versions = getattr(self.active_references, 'source_versions', None)
+        scanned = None
+
+        def read_versions():
+            try:
+                return source_versions()
+            except OSError as error:
+                raise BusinessError('HOST_NOT_READY', details={
+                    'reason': 'REFERENCE_VERSION_UNREADABLE', 'effect_outcome': 'not_started',
+                    'next_action': '修复责任来源存储后，用原幂等键重试空间归档。',
+                }) from error
+
+        def commit_guard():
+            if scanned is not None and read_versions() != scanned:
+                raise BusinessError('HOST_NOT_READY', details={
+                    'reason': 'OPEN_OBLIGATION_SOURCE_CHANGED', 'effect_outcome': 'not_started',
+                    'next_action': '责任来源版本已变化，用原幂等键重试空间归档。',
+                })
+
         def mutate(state, values):
+            nonlocal scanned
             row = self._space(state, values['space_id'])
             require_revision(expected_revision, row['revision'])
             target = 'archived' if action == 'spaces.archive' else 'active'
+            if target == 'archived' and callable(source_versions):
+                scanned = read_versions()
             blockers = self.blockers(row['space_id'], actor=actor) if target == 'archived' else []
             if blockers:
                 return {'space': self.space_view(row, actor=actor), 'operation_id': None, 'blockers': blockers}, False
@@ -529,7 +551,7 @@ class BusinessSpaceService:
             row.update(state=target, revision=row['revision'] + 1)
             return {'space': self.space_view(row, actor=actor), 'operation_id': None, 'blockers': []}, True
         return self._transaction(action, params, actor=actor, expected_revision=expected_revision,
-                                 idempotency_key=idempotency_key, mutate=mutate)
+                                 idempotency_key=idempotency_key, mutate=mutate, commit_guard=commit_guard)
 
     def packages(self, action, params, *, actor, expected_revision=None, idempotency_key=None):
         if action in ('spaces.packages.list', 'spaces.packages.preview'):
