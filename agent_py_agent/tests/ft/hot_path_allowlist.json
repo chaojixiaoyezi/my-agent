@@ -360,121 +360,17 @@
       "count": 1,
       "reason": "cold-path: the unknown-outcome reconciliation branch replaces a storage-layer claim"
     },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_has_pending_reason::read_write_text": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_quota_available::aware_now": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_quota_record_consumed::aware_now": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_quota_record_consumed::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_quota_record_consumed::read_write_text": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._load_curator_quota::aware_now": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._load_curator_quota::read_write_text": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._maybe_write_heartbeat::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundMainSupervisor._maybe_write_heartbeat::read_write_text": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundOwnerPlannerMixin._owner_plan_idle_delay::dyn_hasattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundOwnerPlannerMixin._owner_planner_signature::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_BackgroundOwnerPlannerMixin._retain_owner_planner_scopes::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_GatewayOrphanReconciler._shutdown_executors::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_GatewayOrphanReconciler._sweep::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_GatewayOwnerMaintenanceController.tick::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_GatewaySchedulerDueController._repair_legacy_once::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_OwnerWakeHints.note_maintenance.<locals>.read::read_write_text": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_float_config::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_positive_int_config::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_print_gateway_loop_error::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_read_json_payload::read_write_text": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_record_dispatcher_stall::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_record_dispatcher_stall::text_open": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_run_hinted_controller::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
     "cli/gateway_loops.py::_start_orphan_reconcile_loop::thread_ctor": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
+      "reason": "cold-path: loop thread created once"
     },
     "cli/gateway_loops.py::_start_owner_maintenance_loop::thread_ctor": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
+      "reason": "cold-path: loop thread created once"
     },
     "cli/gateway_loops.py::_start_scheduler_due_loop::thread_ctor": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_thread_inbound_marker::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
-    },
-    "cli/gateway_loops.py::_write_gateway_heartbeat::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M19"
+      "reason": "cold-path: loop thread created once"
     }
   },
   "version": 1
