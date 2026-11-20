@@ -227,22 +227,8 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
         )
         report["error_code"] = exc.error_code
         return report
-    if type(exc) is sqlite3.DatabaseError:
-        # SQLITE_CORRUPT/SQLITE_NOTADB 抛的是基类：库文件坏了，不是代码异常；带上原生码供运维定位，重试不会好。
-        report = _report(
-            exc,
-            _template(
-                "data_corruption",
-                "本地数据库文件损坏或不是数据库；请先核对对应库文件的完整性，不要原样重试或把它当成没有数据。",
-                "sqlite database file is malformed or not a database",
-                recoverable=False,
-            ),
-            context=context,
-        )
-        report.update({key: value for key, value in (
-            ("sqlite_error_code", getattr(exc, "sqlite_errorcode", None)),
-            ("sqlite_error_name", getattr(exc, "sqlite_errorname", None))) if value is not None})
-        return report
+    if isinstance(exc, sqlite3.OperationalError) or type(exc) is sqlite3.DatabaseError:
+        return _sqlite_operational_report(exc, context=context)
     report = _report(
         exc,
         RuntimeErrorTemplate(
@@ -283,6 +269,39 @@ def _host_stopping_report(
     )
     report["error_code"] = admission.error_code
     report["reason_code"] = admission.closure.error_code
+    return report
+
+
+def _sqlite_operational_report(exc: sqlite3.Error, *, context: str) -> dict[str, Any]:
+    from .runtime_db.recovery_guard import classify_sqlite_operational_error
+
+    classification = classify_sqlite_operational_error(exc)
+    templates = {
+        "integrity_review": _template(
+            "data_corruption", "请先核对数据库完整性，再决定是否恢复原操作。",
+            "SQLite integrity review required", recoverable=False,
+        ),
+        "bounded_backoff": _template(
+            "runtime_busy", "数据库暂忙；请保留现有状态，短暂退避后重试查询或重新读取操作版本。",
+            "SQLite contention; retry after bounded backoff",
+        ),
+        "uncertain": _template(
+            "sqlite_uncertain", "SQLite 结果码不足以确认原因；请核对数据库状态与本次操作的原始回执。",
+            "SQLite operational cause uncertain", recoverable=False,
+        ),
+    }
+    report = _report(exc, templates[classification], context=context)
+    report["sqlite_operational_classification"] = classification
+    recovery = getattr(exc, "runtime_db_recovery", None)
+    native_code, native_name = getattr(exc, "sqlite_errorcode", None), getattr(exc, "sqlite_errorname", None)
+    if isinstance(recovery, dict):
+        report["runtime_db_recovery_status"] = recovery.get("status")
+        if isinstance(diagnostics := recovery.get("error"), dict):
+            native_code, native_name = diagnostics.get("sqlite_errorcode"), diagnostics.get("sqlite_errorname")
+    report.update({key: value for key, value in (
+        ("sqlite_error_code", native_code), ("sqlite_error_name", native_name),
+        ("error_code", getattr(exc, "error_code", None)),
+    ) if value is not None})
     return report
 
 

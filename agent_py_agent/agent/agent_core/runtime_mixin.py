@@ -559,14 +559,17 @@ def _bind_main_agent_authority(agent, params: RunParams, *, _task_guard_held: bo
         row = repo.main_agent_run_for_task(task_id)
     if row is None:
         params = _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params)
+        thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+        source_metadata = _pending_operation_source_metadata(agent, params, owner_id, thread_id)
+        metadata = {**business_metadata, **source_metadata}
         record = repo.record_run_creation(
             owner_id=owner_id,
             goal=str(getattr(params, "root_user_prompt", "") or "")[:200],
             conversation_task_id=task_id,
-            thread_id=str(attrs.get("conversation_thread_id") or "").strip(),
+            thread_id=thread_id,
             run_id=run_id,
             role="main",
-            **({"task_run_metadata": business_metadata} if business_metadata else {}),
+            **({"task_run_metadata": metadata} if metadata else {}),
         )
         attempt_id = str(record.get("attempt_id") or "").strip()
         agent_run_id = str(record.get("agent_run_id") or "")
@@ -623,6 +626,36 @@ def _bind_main_agent_authority(agent, params: RunParams, *, _task_guard_held: bo
     return bound
 
 
+def _pending_operation_source_metadata(agent, params, owner_id, thread_id) -> dict:
+    """仅从当前已领取的定时运行登记来源，随原 TaskRun 同事务落库。"""
+    attrs = params.task_attributes or {}
+    scheduler_run = attrs.get("scheduler_run_id")
+    if (params.source not in {"scheduler_tool", "background_main_agent"}
+            or not isinstance(scheduler_run, str) or not scheduler_run or scheduler_run != params.task_id):
+        return {}
+    repository = getattr(agent, "scheduler_repository", None)
+    if repository is None:
+        return {}
+    try:
+        run = repository.get_active_run(scheduler_run)
+    except (OSError, ValueError) as exc:
+        # 来源投影暂不可读时仍可登记主执行身份，旧关联保持未证实。
+        logging.getLogger(__name__).warning("待核对操作的定时来源暂不可读：%s", type(exc).__name__)
+        return {}
+    if (run is None or run.get("run_id") != scheduler_run or run.get("thread_id") != thread_id
+            or run.get("owner", {}).get("id") != owner_id or not run.get("claim_id")
+            or run.get("status") not in {"claimed", "running"}):
+        return {}
+    source = run.get("origin_thread_id")
+    metadata = {
+        "scheduler_run_id": scheduler_run,
+        "isolated_execution": run.get("execution", {}).get("mode") == "isolated",
+    }
+    if isinstance(source, str) and source:
+        metadata["source_session_id"] = source
+    return metadata
+
+
 def _verified_business_task_metadata(agent, params: RunParams, owner_id: str) -> dict:
     from ..conversation.business_contracts import BusinessExecutionContext
 
@@ -644,7 +677,8 @@ def _verified_business_task_metadata(agent, params: RunParams, owner_id: str) ->
     for tid in (task.sender_thread_id, task.target_thread_id):
         if store.threads.require(tid).owner_id != owner_id:
             raise ValueError("business task owner mismatch")
-    return {"business_context": context.to_dict(), "session_task_ref": task.task_id}
+    return {"business_context": context.to_dict(), "session_task_ref": task.task_id,
+            "source_session_id": task.sender_thread_id}
 
 
 def _restore_business_execution_context(agent, params: RunParams) -> RunParams:

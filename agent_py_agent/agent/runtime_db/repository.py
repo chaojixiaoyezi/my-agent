@@ -125,7 +125,11 @@ from .operations import (
     exec_lock_scope,
     holder_is_alive,
 )
-from .recovery_guard import close_runtime_connection, mark_runtime_connection_idle
+from .recovery_guard import (
+    classify_sqlite_operational_error,
+    close_runtime_connection,
+    mark_runtime_connection_idle,
+)
 from .run_creation import RunCreation, create_run_chain
 from .schema import RuntimeSchemaMixin, RuntimeWriteFence, runtime_db_identity, runtime_db_path
 
@@ -678,7 +682,9 @@ class RuntimeRepository(
                 self._init_runtime_schema()
             except sqlite3.Error as error:
                 # 只重进无外部副作用的构造阶段；请求正文/工具永远不自动重放。
-                if getattr(error, "runtime_db_recovery", {}).get("status") not in {"recovered", "healthy", "already_recovered"}:
+                recovery_status = getattr(error, "runtime_db_recovery", {}).get("status")
+                if (classify_sqlite_operational_error(error) != "integrity_review"
+                        or recovery_status not in {"recovered", "healthy", "already_recovered"}):
                     raise
                 self._init_runtime_schema()
 

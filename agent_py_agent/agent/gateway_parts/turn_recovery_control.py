@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 
 from ..conversation.control_commands import (
@@ -20,6 +21,7 @@ from ..conversation.control_commands import (
     ConversationControlResult,
 )
 from ..conversation.task_run_closeout import settle_terminal_task_run
+from ..io.readonly_sqlite import ProjectionReadUnavailableError
 from ..runtime_db.child_recovery import (
     ChildRecoveryTarget,
     ThreadRecoveryRequest,
@@ -28,14 +30,18 @@ from ..runtime_db.child_recovery import (
     unknown_child_attempts_for_thread,
     unknown_thread_operations,
 )
+from ..runtime_db.managed_operation_store import settle_pending_verification
 from ..runtime_db.operations import ATTEMPT_EFFECT_DISPOSITIONS, ATTEMPT_STATUS_UNKNOWN
 from ..runtime_db.owner_recovery import (
     OwnerRecoveryRequest,
     OwnerRecoveryTarget,
+    list_pending_verification,
+    owner_operation_confirmation,
     owner_recovery_confirmation,
     owner_unknown_attempts,
     recover_owner_unknown_attempts,
 )
+from ..runtime_db.recovery_guard import classify_sqlite_operational_error
 from ..runtime_db.run_takeover import settle_taken_over_run_best_effort
 from ..user_space.owner_access import is_complete_local_admin_owner
 
@@ -172,12 +178,87 @@ def _execute_owner_recovery(
     owner_id = str(getattr(home, "owner_id", "") or "")
     if command.operation == "owner_apply":
         return _apply_owner_recovery(repo, owner_id, command)
+    if command.operation in {"owner_pending", "owner_operation_preview", "owner_operation_apply"}:
+        return _owner_pending_control(repo, owner_id, command)
     targets = owner_unknown_attempts(repo, owner_id)
     if command.operation == "owner_preview":
         return _preview_owner_recovery(owner_id, targets, command.value)
+    return _owner_pending_control(repo, owner_id, command,
+                                  message=_render_owner_targets(targets), target_count=len(targets))
+
+
+def _owner_pending_control(repo, owner_id, command, *, message="", target_count=None) -> ConversationControlResult:
+    if not command.valid:
+        return _pending_verification_refused("invalid_operation_confirmation", command.usage)
+    try:
+        if command.operation in {"owner_operation_preview", "owner_operation_apply"}:
+            return _owner_operation_verification(repo, owner_id, command)
+        limit = command.recover_pending_limit or _UNSETTLED_OPERATION_LIST_MAX_COUNT
+        rows, cursor = list_pending_verification(
+            repo.db_path.parent, owner_id=owner_id, limit=limit, cursor=command.recover_pending_cursor,
+        )
+    except ValueError:
+        return _pending_verification_refused("invalid_pending_verification_cursor",
+                                             "请从 /recover owner --limit 10 重新查询第一页。")
+    except (sqlite3.Error, ProjectionReadUnavailableError) as exc:
+        classification = classify_sqlite_operational_error(exc)
+        action = {
+            "integrity_review": "请核对运行库完整性后重新查看待核操作。",
+            "bounded_backoff": "请短暂等待并重新预览，使用新的确认码。",
+            "uncertain": "请查看运行库诊断并重新读取原操作状态。",
+        }[classification]
+        effect = "unknown" if command.operation == "owner_operation_apply" else "not_started"
+        return ConversationControlResult(
+            "recover", False, action, error_code="RUN_RECOVERY_REJECTED",
+            details={"scope": "owner", "reason": classification, "effect_outcome": effect},
+        )
+
+    details = {"scope": "owner"}
+    if target_count is not None:
+        details["target_count"] = target_count
+    if rows or command.operation == "owner_pending":
+        details["pending_verification"] = rows
+        details["next_pending_verification_cursor"] = cursor
+        lines = [message] if message else []
+        lines.append(f"隔离执行待核对操作，本页 {len(rows)} 条。")
+        lines.extend(f"{_operation_line(row)}｜操作 {row['operation_id']}" for row in rows)
+        if cursor:
+            lines.append(f"下一页：/recover owner --limit {limit} --cursor {cursor}")
+        if rows:
+            lines.append("按操作编号预览处置：/recover owner operation <操作编号> <处置>")
+        message = "\n".join(lines)
+    return ConversationControlResult("recover", True, message, details=details)
+
+
+def _owner_operation_verification(repo, owner_id, command) -> ConversationControlResult:
+    operation_id = command.recover_operation_id
+    disposition = command.recover_operation_disposition
+    rows, _ = list_pending_verification(repo.db_path.parent, owner_id=owner_id, operation_id=operation_id, limit=1)
+    if not rows:
+        return _pending_verification_refused("operation_not_pending", "请重新查询本 owner 的待核对操作。")
+    row = rows[0]
+    code = owner_operation_confirmation(owner_id, disposition, row["revision"])
+    if command.operation == "owner_operation_preview":
+        return ConversationControlResult(
+            "recover", True, f"核对后输入 /recover owner operation {operation_id} {disposition} --confirm {code}",
+            details={"scope": "owner", "operation": row, "confirmation_code": code},
+        )
+    if command.confirmation_code != code:
+        return _pending_verification_refused("operation_revision_changed", "请重新预览该操作并使用新的确认码。")
+    outcome = settle_pending_verification(
+        repo, owner_id=owner_id, operation_id=operation_id,
+        disposition=disposition, expected_revision=row["revision"],
+    )
+    if not outcome["settled"]:
+        return _pending_verification_refused(str(outcome["reason"]), "请重新读取待核对清单和原操作状态。")
+    return ConversationControlResult("recover", True, f"已记录原操作 {operation_id} 的核对结果。",
+                                     details={"scope": "owner", **outcome})
+
+
+def _pending_verification_refused(reason: str, action: str) -> ConversationControlResult:
     return ConversationControlResult(
-        "recover", True, _render_owner_targets(targets),
-        details={"scope": "owner", "target_count": len(targets)},
+        "recover", False, f"待核对操作未更新（{reason}）。{action}", error_code="RUN_RECOVERY_REJECTED",
+        details={"scope": "owner", "reason": reason, "effect_outcome": "not_started"},
     )
 
 

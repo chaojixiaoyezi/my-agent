@@ -2,10 +2,32 @@
 # 模块用途: 在同一owner/root的现有操作账事务内核验恢复者，防止旧attempt结算、跨任务接管或盲重执行。
 from __future__ import annotations
 
+import hashlib
 import json
 
 from ..local_storage.tool_operations import ToolOperationOwnershipError
 from .operations import OP_UNKNOWN, RUN_STATUS_LEGACY_CREATED, RuntimeConflictError
+
+# 历史失败只在存有明确的未知效果时纳入核对，损坏的 JSON 不遮蔽后续行。
+_PENDING_OPERATION_SQL = (
+    "((o.status = 'UNKNOWN' AND o.settled_at = 0) OR "
+    "(o.status = 'FAILED' AND CASE WHEN json_valid(o.outcome_json) "
+    "THEN json_extract(o.outcome_json, '$.result.effect_outcome') END = 'unknown'))"
+)
+_ISOLATED_TASK_SQL = (
+    "(t.thread_id = '' OR CASE WHEN json_valid(tr.metadata_json) "
+    "THEN json_type(tr.metadata_json, '$.isolated_execution') END = 'true')"
+)
+
+
+def pending_operation_revision(row) -> str:
+    """绑定原操作事实和当前执行指针，预览不能覆盖后到的核对或换代。"""
+    keys = ("operation_id", "attempt_id", "attempt_generation", "tool_operation_generation",
+            "status", "settled_at", "updated_at", "current_attempt_id", "current_attempt_generation", "workspace_epoch")
+    outcome = row["outcome_json"]
+    raw = outcome if isinstance(outcome, bytes) else str(outcome).encode()
+    facts = [*(row[key] for key in keys), hashlib.sha256(raw).hexdigest()]
+    return hashlib.sha256(json.dumps(facts, ensure_ascii=True).encode("ascii")).hexdigest()
 
 
 # LLM: 身份从同事务JOIN读取；跨attempt必须显式携带完整原tool/args/task与当前attempt，缺字段不能猜当前调用者。
@@ -105,7 +127,8 @@ def equivalent_managed_unknown(conn, agent_run_id, request):
     if request.idempotency_scope != 'operation':
         return None
     return conn.execute(
-        "SELECT * FROM tool_operations WHERE agent_run_id=? AND operation_type=? AND status='UNKNOWN' "
-        "AND json_extract(outcome_json, '$.args_hash')=? AND json_extract(outcome_json, '$.idempotency_scope')='operation' "
-        "AND json_extract(outcome_json, '$.idempotency_namespace')=? ORDER BY created_at,operation_id LIMIT 1",
+        "SELECT o.* FROM tool_operations o WHERE agent_run_id=? AND operation_type=? "
+        f"AND (o.status='UNKNOWN' OR {_PENDING_OPERATION_SQL}) AND CASE WHEN json_valid(outcome_json) THEN "
+        "json_extract(outcome_json, '$.args_hash')=? AND json_extract(outcome_json, '$.idempotency_scope')='operation' "
+        "AND json_extract(outcome_json, '$.idempotency_namespace')=? END ORDER BY created_at,operation_id LIMIT 1",
         (agent_run_id, request.tool, request.args_hash, request.idempotency_namespace)).fetchone()

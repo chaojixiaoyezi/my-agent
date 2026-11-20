@@ -31,7 +31,7 @@ from pathlib import Path
 from types import EllipsisType
 
 from ..contracts.optimization_contracts import require_schema_generation
-from ..io.sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
+from ..io.sqlite_connection import TrackedSQLiteConnection
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import (
     current_commit_durability,
@@ -42,6 +42,8 @@ from .current_obligations import CURRENT_OBLIGATION_INDEX_SQL
 from .maintenance import execute_runtime_statement
 from .recovery_guard import (
     RuntimeDatabaseDeferred,
+    _runtime_sqlite_error_details,
+    classify_sqlite_operational_error,
     close_runtime_connection,
     guarded_runtime_connect,
     mark_runtime_connection_idle,
@@ -65,12 +67,7 @@ def runtime_db_identity(path: Path) -> tuple[int, int] | None:
 
 
 def runtime_db_corruption_details(error: BaseException) -> dict[str, object]:
-    from ..io.readonly_sqlite import ProjectionReadUnavailableError
-
-    # 安全读适配器的准入异常保留原SQLite cause；诊断读取数值码，不解析展示文案。
-    if isinstance(error, ProjectionReadUnavailableError) and isinstance(error.__cause__, sqlite3.Error):
-        error = error.__cause__
-    details = sqlite_error_details(error)
+    details = _runtime_sqlite_error_details(error)
     if details.get("sqlite_primary_code") in CORRUPTION_RESULT_CODES:
         return details
     cleanup = details.get("cleanup_error", {})
@@ -771,9 +768,15 @@ class RuntimeSchemaMixin:
             raise runtime_db_recovery_error(report)
 
     def _observe_runtime_db_error(self, error: BaseException, identity) -> None:
+        classification = classify_sqlite_operational_error(error)
+        if classification != "integrity_review":
+            if isinstance(error, sqlite3.Error):
+                error.sqlite_operational_classification = classification
+            return
         details = runtime_db_corruption_details(error)
         if not details:
             return
+        error.sqlite_operational_classification = classification
         report = {"status": "requires_recovery", "path": str(self.db_path),
                   "identity": identity, "error": details}
         if not self.read_only and not self.existing_only and not runtime_db_exclusive_owned(self.db_path):
