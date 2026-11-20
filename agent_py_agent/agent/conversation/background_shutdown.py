@@ -21,10 +21,44 @@ from ..runtime_db.repository import RuntimeRepository
 from .run_claim import conversation_claim_interrupt_name
 
 _CURRENT: ContextVar[BackgroundSlice | None] = ContextVar('background_shutdown_slice', default=None)
+_COMMIT_CONTROL: ContextVar[BackgroundShutdown | None] = ContextVar('background_commit_control', default=None)
 # 停止原已提交后台片的有界等待秒数；超时保留未确认责任，不取消长期任务或宣称排空。
 SHUTDOWN_WAIT_SECONDS = 2.0
 # 新提交只公平复核少量旧片；最终 shutdown 仍核全体原责任。
 _FINISHED_RECHECK_LIMIT = 8
+
+
+class BackgroundCommitRefused(RuntimeError):
+    """当前代已停止接纳提交，调用方保留原续作位置。"""
+
+    def __init__(self, owner: str, watermark: object = None):
+        self.owner = owner
+        self.watermark = watermark
+        RuntimeError.__init__(self, "后台提交未执行：本代正在排空，请由接班进程按原续点继续。")
+
+
+def commit_transition_gate(operation: Callable[[], object], *, owner: str, watermark: object = None) -> object:
+    """在原控制器登记同步提交责任，门关闭时在正文执行前拒绝。"""
+    from ..gateway_parts.restart_service import restart_draining
+
+    item = _CURRENT.get()
+    control = item.owner if item is not None else _COMMIT_CONTROL.get()
+    if control is None:
+        # 独立调用无本地后台片。多进程调用仍由外层原 Root 或请求提交门核准。
+        if restart_draining():
+            raise BackgroundCommitRefused(owner, watermark)
+        return operation()
+    token = object()
+    with control.lock:
+        if (control.stopping or control.restart_paused or (item is not None and (item.draining or item.finished))
+                or restart_draining()):
+            raise BackgroundCommitRefused(owner, watermark)
+        control._committing[token] = owner
+    try:
+        return operation()
+    finally:
+        with control.lock:
+            del control._committing[token]
 
 
 # LLM: 只保原宿主已提交job中的确切claim和出生前worker观察，不能从task/latest投影生成中断对象。
@@ -129,7 +163,8 @@ class BackgroundSlice:
                 or run['status'] not in RUN_STATUS_LEGACY_CREATED | AGENT_RUN_TERMINAL_STATUSES
                 or task_run['status'] not in RUN_STATUS_LEGACY_CREATED | AGENT_RUN_TERMINAL_STATUSES):
             return 'background_attempt_unsettled'
-        if repo.unsettled_attempt_operations(binding['attempt_id']):
+        if (repo.unsettled_attempt_operations(binding['attempt_id'])
+                or repo.attempt_has_uncertain_operation_effects(binding['attempt_id'])):
             return 'background_operation_unsettled'
         if repo.get_agent_run_exec_lock(binding['agent_run_id']) is not None:
             return 'background_execution_lock_present'
@@ -149,6 +184,16 @@ class BackgroundShutdown:
         self.supervisor = None
         self.slices = set()
         self._finished_rechecks = OrderedDict()
+        self._committing: dict[object, str] = {}
+
+    @contextmanager
+    def commit_scope(self):
+        """绑定同一 Gateway 代次，方便非执行片的维护提交使用同一准入。"""
+        token = _COMMIT_CONTROL.set(self)
+        try:
+            yield
+        finally:
+            _COMMIT_CONTROL.reset(token)
 
     # LLM: 只读进程内活跃后台执行片计数；不访问数据库或磁盘，供安全重启turn_wait统计在途后台回合。
     # 函数用途: 返回当前正在执行、尚未结束的后台会话/定时任务执行片数量。
@@ -267,10 +312,12 @@ class BackgroundShutdown:
     def blockers(self):
         with self.lock:
             supervisor, slices = self.supervisor, tuple(self.slices)
+            commits = tuple(self._committing.values())
         futures = tuple(getattr(supervisor, '_inflight', {}).values()) + tuple(
             getattr(supervisor, '_curator_inflight', {}).values())
         out = [{'reason':'background_future_unsettled','ref':'original_future'}
                for future in futures if not future.done()]
+        out.extend({'reason': 'background_commit_in_flight', 'ref': owner} for owner in commits)
         for item in slices:
             out.extend(item.blockers())
         return out

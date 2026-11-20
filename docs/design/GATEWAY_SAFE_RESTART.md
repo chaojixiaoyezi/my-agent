@@ -275,3 +275,11 @@
 ### 宿主 park 不推进业务毒丸窗口
 
 仅由原 BackgroundSlice 的宿主 restart_parked 事实标识本次 InterruptedError；原 claim cancelled 回执附结构化 gateway_restart_park admission，仍不伪造成功或撤销取消。wake verdict 使用唯一 host:restart_park neutral 理由，保留原全部失败/neutral状态，只在原attempt账清 in_flight；不推进退避、stall alert或新quarantine裁决，避免升级维护恰好成为24小时neutral窗口的第五次业务尝试。普通用户取消、其它neutral、真实失败与原结案规则保持。
+
+## 2026-11-19 M55 后台提交与排空租约
+
+热池与冷预热的受管派单交接共用提交门，发布到规范库与退休旧唤醒分别在原提交边界复核。计数为零的 Gateway 维护与重派发也登记同代提交责任。内部多进程仍先核原 Root、租约和请求身份，再进入同一提交门。
+
+关门与登记在同一把锁内完成。文件与 SQLite 操作在锁外执行。排空返回成功前要核收先前已准入的提交；拒绝的新提交从原续点留给接班进程，按原派单回执和截止时间恢复。已结束执行片继续复用运行库的原效果分类，部分或未知效果都保留阻塞。
+
+定向验收包含热池和冷预热的原文件、SQLite 行数、接班续作，以及 128 个后台线程与一次排空的交错。

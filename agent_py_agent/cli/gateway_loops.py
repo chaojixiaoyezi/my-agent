@@ -35,7 +35,11 @@ from ..agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
 )
-from ..agent.conversation.background_shutdown import BackgroundShutdown
+from ..agent.conversation.background_shutdown import (
+    BackgroundCommitRefused,
+    BackgroundShutdown,
+    commit_transition_gate,
+)
 from ..agent.conversation.observation_index import ObservationIndexIncomplete
 from ..agent.delivery import DeliveryService
 from ..agent.gateway_parts import (
@@ -362,6 +366,11 @@ def _record_request_loop_exit(context: GatewayRunContext, stage: str, error: Bas
     )
 
 
+def _commit_gateway_background(control, operation, *, owner, watermark=None):
+    with control.commit_scope() if control is not None else nullcontext():
+        return commit_transition_gate(operation, owner=owner, watermark=watermark)
+
+
 # LLM: 复用原执行池/分页恢复/公平扫描；C的实际gate、claim、线程和P6观察只来自本代组合根，Count0不创建MP来源。
 # 类用途: 把原队列交给同一基础Agent执行，并独立修复历史投影；不持文件门等待线程。
 class _RequestDispatcher:
@@ -442,13 +451,14 @@ class _RequestDispatcher:
             return 0
         scan_gate = getattr(self, "_scan_gate", None)
         try:
-            claimed = dispatch_pending_requests(
-                self.paths,
-                self.limits,
-                self._submit,
-                scan_gate=scan_gate,
-                admission_gate=getattr(self, "_admission_gate", None),
+            claimed = self._commit_background_segment(
+                lambda: dispatch_pending_requests(
+                    self.paths, self.limits, self._submit, scan_gate=scan_gate,
+                    admission_gate=getattr(self, "_admission_gate", None),
+                ), watermark="redispatch",
             )
+        except BackgroundCommitRefused:
+            return 0
         except Exception as exc:
             self.tick_failed = True
             _note_loop_tick_error(_DISPATCH_SEGMENT_SITE, exc, self.backoff)
@@ -494,6 +504,18 @@ class _RequestDispatcher:
             # 只有派发段自己失败才让外层守卫退避（没请求可派时）；账本记在 loop "dispatcher" 下，打印按循环退避限流。
             self.tick_failed = True
             _note_loop_tick_error(_DISPATCH_SEGMENT_SITE, exc, self.backoff)
+        try:
+            self._run_maintenance_segments()
+        except BackgroundCommitRefused:
+            # 接班者继续原来源；已拒绝的段不推进本轮到期记录。
+            pass
+        return dispatched + self._redispatched
+
+    def _commit_background_segment(self, operation, *, watermark):
+        control = getattr(getattr(self, "context", None), "background_shutdown", None)
+        return _commit_gateway_background(control, operation, owner="local/main", watermark=watermark)
+
+    def _run_maintenance_segments(self):
         # Recovery and projections are independent durability domains. One
         # damaged receipt must not starve normal jobs or another repair domain.
         # _CLOSING_SITE 紧跟首轮派发且受 50ms 有界控制，段间重派发放在后续各维护段进入前，避免无段间隙时双扫。
@@ -522,8 +544,6 @@ class _RequestDispatcher:
                 _LOCK_SIDECAR_CLEANUP_SITE, self._lock_cleanup_backoff, self._cleanup_lock_sidecars_once
             )
             self._next_lock_cleanup_at = now + max(_LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS, delay)
-        return dispatched + self._redispatched
-
 
     # LLM: 相邻维护段切换时同步刷新loop_health在途单调钟与faulthandler看门狗预算；裸调tick不在途时不武装看门狗。
     # 函数用途: 在进入下一维护段前重置单段卡死超时预算。
@@ -539,7 +559,9 @@ class _RequestDispatcher:
         started = time.monotonic()
         loop_health.note_segment(site.context, None)
         try:
-            operation()
+            self._commit_background_segment(operation, watermark=site.context)
+        except BackgroundCommitRefused:
+            raise
         except Exception as exc:
             _note_loop_tick_error(site, exc, backoff)
             return backoff.delay()
@@ -1451,7 +1473,11 @@ class _BackgroundOwnerPlannerMixin:
         home = getattr(agent, "home_paths", None)
         root = getattr(getattr(store, "storage", None), "root", None)
         if root is not None and getattr(home, "owner_home_dir", None) and getattr(home, "owner_id", None) and not cooling:
-            complete, has_signals, due = owner_wake_schedule(home.owner_home_dir, home.owner_id, root)
+            complete, has_signals, due = _commit_gateway_background(
+                getattr(self, "_shutdown_control", None),
+                lambda: owner_wake_schedule(home.owner_home_dir, home.owner_id, root),
+                owner=home.owner_id, watermark="wake_schedule",
+            )
             if complete and not has_signals:
                 return min(delay, max(0.0, due - planned_at)) if due is not None else delay
         wakes = getattr(store, "wakes", None)
@@ -1756,6 +1782,8 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                 if delay:
                     delay = self._owner_plan_idle_delay(scheduler, delay, planned_at, cooling)
             self._note_owner_plan(owner_key, signature, delay, planned_mono)
+        except BackgroundCommitRefused:
+            return []
         except ObservationIndexIncomplete:
             return []  # 分片同步继续下一拍，不进入异常退避或阻塞其它 owner。
         except Exception as exc:
@@ -2072,6 +2100,11 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         except OSError:
             pass
 
+    def _commit_tick_step(self, operation, *, watermark):
+        return _commit_gateway_background(
+            getattr(self, "_shutdown_control", None), operation, owner="local/main", watermark=watermark,
+        )
+
     # LLM: 先回收完成车道，再限频释放无持久工作的空闲 owner；实例回收不能改变任务/唤醒状态。
     #   安全重启排空期间只回收已完成车道，不发现/提交新的会话或策展工作片，持久唤醒留给接班进程。
     # 函数用途: 推进后台调度、按需释放空闲用户缓存，并记录完成报告。
@@ -2088,7 +2121,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         reports: list[object] = []
         try:
             if not draining:
-                self._maybe_seed_wake_pending_owners()
+                self._commit_tick_step(self._maybe_seed_wake_pending_owners, watermark="wake_discovery")
             now = time.monotonic()
             phases["seed"] = round(max(0.0, (now - cursor) * 1000))
             cursor = now
@@ -2099,7 +2132,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             if not draining:
                 if cursor >= self._next_owner_retire_at:
                     release_idle_owner_agents(self)
-                    self._release_idle_managed_owner_agents()
+                    self._commit_tick_step(self._release_idle_managed_owner_agents, watermark="owner_retire")
                     self._next_owner_retire_at = cursor + 5.0
                 now = time.monotonic()
                 phases["retire"] = round(max(0.0, (now - cursor) * 1000))
@@ -2122,6 +2155,9 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 phases["submit"] = round(max(0.0, (now - cursor) * 1000))
                 cursor = now
             completed = True
+        except BackgroundCommitRefused:
+            if not reports:
+                reports = self._collect_finished_ticks()
         finally:
             end = cursor if completed else time.monotonic()
             if not completed and submit_started is not None:
@@ -2228,8 +2264,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                     peeked = target_peek(owner) if callable(target_peek) else None
                     if not callable(target_peek) or peeked is not None:
                         if is_managed:
-                            # 旧直写库派单先按原身份持久交接到规范库，再取独立准入的受管Agent；Count0原提交即直调。
-                            managed.reconcile(owner, commit_transition=lambda operation: operation())
+                            # 热池命中仍复核本代排空门，旧派单在短提交门内逐阶段发表。
+                            self._reconcile_managed_owner(managed, owner)
                         cached_only = getattr(target, "get_cached_only", None)
                         if peeked is None or not callable(cached_only):
                             # 无 peek 或无仅缓存取用口的兼容适配器保持原同步取用合同。
@@ -2252,6 +2288,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                     next_cursor = (index + 1) % len(owners)
                     warmups[key] = self._get_owner_warmup_executor().submit(
                         self._warm_owner, target, owner, is_managed)
+                except BackgroundCommitRefused:
+                    return
                 except Exception as exc:
                     _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
             self._owner_build_cursor = next_cursor
@@ -2499,12 +2537,22 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             )
         return executor
 
+    def _reconcile_managed_owner(self, target, owner):
+        with self._shutdown_control.commit_scope():
+            def commit(operation):
+                return commit_transition_gate(operation, owner=owner.owner_id)
+
+            return commit_transition_gate(
+                lambda: target.reconcile(owner, commit_transition=commit),
+                owner=owner.owner_id, watermark="managed_dispatch_scan",
+            )
+
     # LLM: C7：首个副作用前登记现成停机执行片，覆盖受管交接、构建到池发布；停机或重启暂停后 observe 拒绝新片。
     # 函数用途: 在有界预热池里冷构建一个 owner（受管先交接旧派单），停机证明可见其在途。
     def _warm_owner(self, target, owner, managed: bool):
         with self._shutdown_control.observe(None):
             if managed:
-                target.reconcile(owner, commit_transition=lambda operation: operation())
+                self._reconcile_managed_owner(target, owner)
                 return target.get(owner)
             return target.get(owner, hard=True, touch=False)
 
@@ -2522,7 +2570,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             warmups.pop(key, None)
             error = None if future.cancelled() else future.exception()
             # 停机/重启暂停门的拒绝不是构建失败：owner 保持冷，下一拍再提交。
-            if error is not None and not isinstance(error, InterruptedError):
+            if error is not None and not isinstance(error, (InterruptedError, BackgroundCommitRefused)):
                 _print_gateway_loop_error("gateway_background_main.owner_build", str(key[-1]), error)
 
     # LLM: 与业务控制共用同一基础Agent上的受管池；失败只记录诊断，不回落普通池或克隆管理员实例。
@@ -3067,6 +3115,7 @@ class _GatewayOwnerMaintenanceController:
         self._startup_started_at = time.monotonic()
         self._base_agent = _gateway_agent_from_context(context)
         self._base_home = getattr(self._base_agent, "home_paths", None)
+        self._shutdown_control = getattr(context, "background_shutdown", None)
         self._cursor: OwnerWakeCursor | None = None
         self._priority: OrderedDict[tuple, object] = OrderedDict()
         self._discovery_debt = False
@@ -3106,14 +3155,14 @@ class _GatewayOwnerMaintenanceController:
             default=AgentConfig.retention_scan_slice_ms,
         )
         try:
-            done = run_cold_start_settled_sweep_step(
-                self._base_agent,
-                state,
-                ttl_seconds=ttl_seconds,
-                max_owners_per_tick=8,
-                slice_ms=slice_ms,
-                stop_event=stop_event,
+            done = self._commit_base_maintenance(
+                lambda: run_cold_start_settled_sweep_step(
+                    self._base_agent, state, ttl_seconds=ttl_seconds, max_owners_per_tick=8,
+                    slice_ms=slice_ms, stop_event=stop_event,
+                ), watermark="cold_settled_sweep",
             )
+        except BackgroundCommitRefused:
+            return False
         except Exception as exc:
             _print_gateway_loop_error("gateway_owner_maintenance.cold_settled_sweep", "owner-maintenance", exc)
             self._cold_settled_done = True
@@ -3157,10 +3206,25 @@ class _GatewayOwnerMaintenanceController:
     # LLM: 正常先base及闲置压缩，优先项限半拍；base耗尽后让出下拍，发现债与旧FIFO轮转、同拍去重。
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘；容量兜底取AgentConfig。
     # 函数用途: 保护期后有界追赶 owner 维护，保留原摘要与安全清理。
+    def _commit_base_maintenance(self, operation, *, watermark):
+        return _commit_gateway_background(
+            getattr(self, "_shutdown_control", None), operation,
+            owner=getattr(getattr(self, "_base_home", None), "owner_id", None) or "local/main",
+            watermark=watermark,
+        )
+
     def tick(self, *, now: float | None = None) -> dict[str, int]:
+        try:
+            return self._tick_maintenance(now=now)
+        except BackgroundCommitRefused:
+            return _maintenance_summary([], 0)
+
+    def _tick_maintenance(self, *, now: float | None = None) -> dict[str, int]:
         if not getattr(self, "_cold_settled_done", True):
             self._advance_cold_settled_sweep()
-        _cleanup_loaded_runtime_safety(self._base_agent)
+        self._commit_base_maintenance(
+            lambda: _cleanup_loaded_runtime_safety(self._base_agent), watermark="runtime_safety",
+        )
         if _startup_grace_active(self):
             return _maintenance_summary([], 0)
         current = float(now if now is not None else time.time())
@@ -3196,9 +3260,8 @@ class _GatewayOwnerMaintenanceController:
                         continue
                     if time.monotonic() >= priority_deadline:
                         break
-                    self._priority.pop(key, None)
-                    visited.add(key)
                     self._run_scoped_owner(identity, current, reports)
+                    visited.add(key)
                 if not discovery_first:
                     scanned = self._discover_maintenance_owners(current, reports, visited, deadline, limit)
                 if yield_base and time.monotonic() < deadline:
@@ -3232,8 +3295,12 @@ class _GatewayOwnerMaintenanceController:
                 if stage == 'retention':
                     from ..agent.user_space.owner_maintenance import invoke_owner_maintenance
 
-                    reports.append(invoke_owner_maintenance(run_owner_retention_if_due, self._base_home,
-                        now=current, config=getattr(self._base_agent, "config", None)))
+                    report = self._commit_base_maintenance(
+                        lambda: invoke_owner_maintenance(run_owner_retention_if_due, self._base_home,
+                            now=current, config=getattr(self._base_agent, "config", None)),
+                        watermark="retention",
+                    )
+                    reports.append(report)
                 else:
                     from ..agent.gateway_parts.compact_operations import (
                         idle_compact_maintenance_tick,
@@ -3242,7 +3309,10 @@ class _GatewayOwnerMaintenanceController:
                     idle_cursor = getattr(self, "_idle_compact_cursor", None)
                     if not isinstance(idle_cursor, dict):
                         idle_cursor = self._idle_compact_cursor = {}
-                    idle_compact_maintenance_tick(self._base_agent, cursor=idle_cursor, now=current)
+                    self._commit_base_maintenance(
+                        lambda: idle_compact_maintenance_tick(self._base_agent, cursor=idle_cursor, now=current),
+                        watermark="idle_compact",
+                    )
         finally:
             try:
                 exhausted = time.monotonic() >= deadline
@@ -3274,9 +3344,9 @@ class _GatewayOwnerMaintenanceController:
                                 return scanned
                             self._priority[key] = target.identity
                     else:
-                        visited.add(key)
-                        self._priority.pop(key, None)
+                        self._cursor = accounted_cursor
                         self._run_scoped_owner(target.identity, current, reports)
+                        visited.add(key)
                 accounted_cursor = key
             self._cursor = page.next_cursor
             self._discovery_debt = False
@@ -3287,6 +3357,7 @@ class _GatewayOwnerMaintenanceController:
     # LLM: 仅解析该 owner 的目录并调用原维护入口；单 owner 异常隔离，成功后只将仍到期者放入有界 FIFO。
     # 函数用途: 维护一个 scoped owner 并登记下拍需要优先续作的对象。
     def _run_scoped_owner(self, identity, current, reports) -> None:
+        key = (identity.provider, identity.owner_kind, identity.owner_id)
         try:
             from ..agent.gateway_parts.request_entry_admission import require_request_execution
 
@@ -3297,18 +3368,29 @@ class _GatewayOwnerMaintenanceController:
             except Exception:
                 due = None  # 优化探测未知时仍走原正式入口，不将源错误当not_due。
             if due is False:
+                self._priority.pop(key, None)
                 reports.append(OwnerMaintenanceResult(False, 'not_due'))
                 owner_home = location.owner_home_dir
             else:
-                owner = resolve_owner_home(self._base_home.root, identity)
-                scoped_home = home_paths_with_owner(self._base_home, owner)
-                from ..agent.user_space.owner_maintenance import invoke_owner_maintenance
+                def maintain():
+                    self._priority.pop(key, None)
+                    owner = resolve_owner_home(self._base_home.root, identity)
+                    scoped_home = home_paths_with_owner(self._base_home, owner)
+                    from ..agent.user_space.owner_maintenance import invoke_owner_maintenance
 
-                reports.append(invoke_owner_maintenance(run_owner_retention_if_due, scoped_home,
-                    now=current, config=getattr(self._base_agent, "config", None)))
-                owner_home = scoped_home.owner_home_dir
+                    report = invoke_owner_maintenance(run_owner_retention_if_due, scoped_home,
+                        now=current, config=getattr(self._base_agent, "config", None))
+                    return report, scoped_home.owner_home_dir
+
+                report, owner_home = _commit_gateway_background(
+                    getattr(self, "_shutdown_control", None), maintain, owner=identity.owner_id, watermark="retention",
+                )
+                reports.append(report)
+        except BackgroundCommitRefused:
+            raise
         except Exception as exc:
-            label = "/".join((identity.provider, identity.owner_kind, identity.owner_id))
+            self._priority.pop(key, None)
+            label = "/".join(key)
             _print_gateway_loop_error("gateway_owner_maintenance.owner", label, exc)
             return
         try:

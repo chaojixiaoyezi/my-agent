@@ -455,6 +455,8 @@ class CoordinatorBackgroundRequests:
     # LLM: 原controller/lease末门仅同步commit，Root关闭与实际副作用同锁；不持任何门做模型、网络、join或完整owner发现。
     # 函数用途: 在原C仍有效且未停止producer时完成一个短原写动作。
     def commit(self, owner, operation):
+        from ..conversation.background_shutdown import commit_transition_gate
+
         self.require_original()
         results = []
         live = [True, os.getpid(), threading.get_ident()]
@@ -466,7 +468,8 @@ class CoordinatorBackgroundRequests:
                 if not live[0] or live[1:] != [os.getpid(), threading.get_ident()]:
                     raise ValueError("background_original_commit_window_required")
                 self.require_original()
-                results.append(operation())
+                results.append(commit_transition_gate(operation, owner=owner.owner_id,
+                                                      watermark=self._lease_origin.c_run_id))
 
         try:
             owner_sha = owner_digest(owner)

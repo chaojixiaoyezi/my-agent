@@ -3812,6 +3812,16 @@ class RuntimeRepository(
             for row in rows
         ]
 
+    def attempt_has_uncertain_operation_effects(self, attempt_id: str) -> bool:
+        """旧终态操作也可能保存未知或部分效果；用原效果解释器核当前 attempt。"""
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT status, handler_started_at, outcome_json FROM tool_operations "
+                "WHERE attempt_id=? AND status IN (?,?)",
+                (attempt_id, OP_SUCCEEDED, OP_FAILED),
+            )
+            return any(_operation_effect(row) in {SETTLEMENT_UNKNOWN, SETTLEMENT_PARTIAL} for row in rows)
+
     # -------------------------------------------------------- wake_queue
     # LLM: 调度唤醒字条(2026-08-17 扫描治理 owner 拍板)——"任务自己留的闹钟"。
     # 每任务一行待醒字条(upsert 幂等); hot tick 只 pop 到期行(索引查询);
