@@ -4,7 +4,9 @@
 #   eq/hash/repr/pickle/copy.replace，以及 fast_replace 与 dataclasses.replace 的结果和异常（类型+文本）一致；
 #   另钉住 slot_setter、check_slots_compat 的报告项，并给 G1 锁等待门禁提供样例 DTO 用例工厂。Layer-2 M00-fix
 #   （F1）：check_slots_compat 必须指出包内对工厂结果用 vars()/__dict__/弱引用的调用方，真实的读取方到消费方路径
-#   在内存转换后仍用 vars(report) 时不得放行；它只在转换时调用，生产代码里不得出现。
+#   在内存转换后仍用 vars(report) 时不得放行；它只在转换时调用，生产代码里不得出现。M10 前置修复：生成的
+#   __replace__ 的回落判断只读本次调用的 changes，不查询类级共享集合（3.14t 关闭 GIL 时那是一把共享临界区锁），
+#   单个类被所有线程同时替换的 G1 用例由本模块提供。
 # 模块用途: 固定 agent/common/fast_dataclass.py 的转换合同（C1.3），不读 git 历史。
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ import random
 import sys
 import threading
 import types
-from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import FrozenInstanceError, InitVar, dataclass, field
 from pathlib import Path
 
 import pytest
@@ -345,6 +347,70 @@ def test_unconverted_subclass_and_plain_objects_fall_back_to_dataclasses_replace
     with pytest.raises(TypeError) as theirs:
         dataclasses.replace(object())
     assert str(ours.value) == str(theirs.value)
+
+
+# 类用途: 没有 init=False 字段、也没有必填 InitVar 的转换类：__replace__ 只剩类型检查一条回落条件。
+@fast_frozen
+@dataclass(frozen=True, slots=True)
+class ReplaceOpenDto:
+    request_id: str
+    attempt: int = 0
+    status: str = "queued"
+
+
+# 类用途: 同时带 init=False 字段、必填 InitVar 与带默认值 InitVar 的转换类：回落条件逐个字段生成。
+@fast_frozen
+@dataclass(frozen=True, slots=True)
+class ReplaceGuardedDto:
+    request_id: str
+    token: InitVar[int]
+    attempt: int = 0
+    salt: InitVar[int] = 1
+    digest: int = field(init=False, default=0)
+
+    def __post_init__(self, token: int, salt: int) -> None:
+        _set_replace_guarded_digest(self, self.attempt * 31 + token + salt)
+
+
+_set_replace_guarded_digest = slot_setter(ReplaceGuardedDto, "digest")
+
+
+# LLM: 3.14t 关闭 GIL 时，frozenset.isdisjoint(changes) 会进入该集合与 changes 的临界区；frozenset <= changes.keys()
+#   反射到 dict_keys 的比较后要迭代该集合，同样进入它的临界区。所有线程替换同一个类时就排在这一把锁上（G1 约 0.2）。
+#   这里在任何解释器上静态钉住：生成的 __replace__ 不调用集合方法，闭包里没有任何容器（随机生成的 160 个类也一样）。
+def test_replace_fallback_checks_read_only_the_per_call_changes(generated):
+    converted = [ReplaceOpenDto, ReplaceGuardedDto, *(fast_cls for _spec, _plain_cls, fast_cls in generated)]
+    for cls in converted:
+        replace_fn = cls.__dict__["__replace__"]
+        assert not {"isdisjoint", "issubset", "issuperset", "keys"} & set(replace_fn.__code__.co_names), cls
+        containers = [cell.cell_contents for cell in replace_fn.__closure__ or ()
+                      if isinstance(cell.cell_contents, (set, frozenset, dict, list, tuple, types.MappingProxyType))]
+        assert containers == [], (cls.__qualname__, containers)
+    # init=False 字段只出现在回落条件里，它以字面量名字出现在常量表中。
+    assert "digest" in ReplaceGuardedDto.__replace__.__code__.co_consts
+
+
+@pytest.mark.parametrize(("cls", "args", "changes"), [
+    (ReplaceOpenDto, ("r", 1), {}),
+    (ReplaceOpenDto, ("r", 1), {"status": "done"}),
+    (ReplaceOpenDto, ("r", 1), {"attempt": 3, "zz_unknown": 1}),
+    (ReplaceGuardedDto, ("r", 2, 1), {"token": 3}),
+    (ReplaceGuardedDto, ("r", 2, 1), {"token": 3, "attempt": 5, "salt": 7}),
+    (ReplaceGuardedDto, ("r", 2, 1), {}),
+    (ReplaceGuardedDto, ("r", 2, 1), {"attempt": 5}),
+    (ReplaceGuardedDto, ("r", 2, 1), {"token": 3, "digest": 9}),
+    (ReplaceGuardedDto, ("r", 2, 1), {"digest": 9}),
+    (ReplaceGuardedDto, ("r", 2, 1), {"token": 3, "zz_unknown": 1}),
+], ids=["open-noop", "open-change", "open-unknown-key", "guarded-initvar", "guarded-all-fields",
+        "guarded-missing-initvar", "guarded-missing-initvar-with-change", "guarded-noinit-field",
+        "guarded-noinit-and-missing-initvar", "guarded-unknown-key"])
+def test_replace_fallback_matches_dataclasses_replace(cls, args, changes):
+    instance = cls(*args)
+    expected = _outcome(dataclasses.replace, instance, **changes)
+    assert _outcome(fast_replace, instance, **changes) == expected
+    assert _outcome(instance.__replace__, **changes) == expected
+    if hasattr(copy, "replace"):
+        assert _outcome(copy.replace, instance, **changes) == expected
 
 
 def test_fast_frozen_is_idempotent_and_registers_the_class():
@@ -711,3 +777,15 @@ def g1_case_fast_frozen_dto():
         return makers[n % count](n)
 
     return operation
+
+
+# 函数用途: G1 用例工厂：所有线程反复替换同一个转换类（回落条件只有类型检查），一次调用即一个操作。
+def g1_case_fast_replace_open_class():
+    instance = ReplaceOpenDto("r", 1)
+    return lambda: fast_replace(instance, status="done")
+
+
+# 函数用途: G1 用例工厂：所有线程反复替换同一个带 init=False 字段与必填 InitVar 的转换类，一次调用即一个操作。
+def g1_case_fast_replace_guarded_class():
+    instance = ReplaceGuardedDto("r", 2, 1)
+    return lambda: fast_replace(instance, token=3)

@@ -12,8 +12,9 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
+from operator import attrgetter
 from typing import ClassVar, Literal
 
 from .tool_wait_input import await_tool_futures, flush_resume_inputs, submit_wait_item
@@ -84,6 +85,8 @@ def _must_propagate_round_exception(exc: BaseException) -> bool:
     return False
 
 from ...backends import ModelResponse
+from ...common import hot_json
+from ...common.fast_dataclass import fast_frozen, fast_replace
 from ...concurrency.interrupt import is_interrupted, register_interrupt_callback
 from ...contracts.model_call_ledger import (
     MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE,
@@ -139,7 +142,6 @@ from ..tool_context.call_reducer import (
 from ..tool_context.decision_action_execute import HostAction, record_auto_execution
 
 # 无动作闸只由执行轮消费和计数；收口层读取原halt事实，不另设阈值副本。
-_NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
 # 无动作闸门停止的次数阈值。
 _NO_ACTION_GATE_HALT_COUNT = 2
 
@@ -169,7 +171,8 @@ _CONTENT_OUTPUT_TOOLS = {
 # LLM: A tool record keeps the executed call and the provider-authored call separate. Host-completed
 # identity/path bindings belong to execution/audit only and must never be replayed as model input.
 # 类用途: 保存一次工具执行的双视图：底座实际执行参数用于账本，模型原始参数用于后续上下文回放。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolCallRecordParams:
     __test__: ClassVar[bool] = False
 
@@ -208,7 +211,8 @@ class ToolCallRecordParams:
 
 # LLM: 本不可变请求将获准调用和宿主 actor 传入唯一执行器；审批与并行在途不得改写，模型参数不能替代 actor。
 # 类用途: 固定一条即将执行的工具调用及其轮次位置，供权限、并发和执行链共用。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolCallExecuteParams:
     __test__: ClassVar[bool] = False
 
@@ -220,7 +224,8 @@ class ToolCallExecuteParams:
     actor: str = "model"
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolRoundExecutionRequest:
     __test__: ClassVar[bool] = False
 
@@ -238,7 +243,8 @@ class ToolRoundExecutionRequest:
     decision_ref: str = ""
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolProgressEvent:
     request: ToolRoundExecutionRequest
     idx: int
@@ -261,7 +267,7 @@ class _ToolRoundProgress:
 # 函数用途: 执行一轮 canonical 工具调用，保留只读并发段和顺序屏障，为执行、拒绝、延后与取消写入配对 ToolResult。
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     from ..runtime.capability_refresh import refresh_subagent_capabilities
-    request = replace(request, params=refresh_subagent_capabilities(request.agent, request.params))
+    request = fast_replace(request, params=refresh_subagent_capabilities(request.agent, request.params))
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
     _append_assistant_tool_round_context(request)
     calls = list(request.calls)
@@ -272,7 +278,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         return _gate_all_calls_for_no_action(request, calls)
     if getattr(request.params, "no_action_gate_halt", False):
         object.__setattr__(request.params, "no_action_gate_halt", False)
-        object.__setattr__(request.params, _NO_ACTION_GATE_STREAK_ATTR, 0)
+        object.__setattr__(request.params, "_no_action_gate_streak", 0)
     progress = _ToolRoundProgress()
     position = 0
     while position < len(calls):
@@ -341,7 +347,7 @@ def _no_action_gate_active(params: ToolLoopExecuteParams) -> bool:
 
 
 def _no_action_gated_result(call: ToolCall) -> ToolResult:
-    payload = json.dumps(
+    payload = hot_json.dumps(
         {
             "error": "本条消息被宿主评估为信息性陈述(requires_action=false),不执行任何操作。",
             "hint": "如需执行操作,请由用户明确指示后重新发起。",
@@ -367,11 +373,11 @@ def _gate_all_calls_for_no_action(
 ) -> bool:
     streak = 0
     try:
-        streak = int(getattr(request.params, _NO_ACTION_GATE_STREAK_ATTR, 0) or 0)
+        streak = int(getattr(request.params, "_no_action_gate_streak", 0) or 0)
     except (TypeError, ValueError):
         streak = 0
     streak += 1
-    object.__setattr__(request.params, _NO_ACTION_GATE_STREAK_ATTR, streak)
+    object.__setattr__(request.params, "_no_action_gate_streak", streak)
     for idx, call in enumerate(calls, start=1):
         result = _no_action_gated_result(call)
         _emit_tool_progress(
@@ -662,7 +668,7 @@ def _build_runtime_approval_request(
         home = getattr(request.agent, "home_paths", None)
         if home is not None:
             timeout = deployment_approval_config(home).tool_approval_timeout_seconds
-            approval_request = replace(approval_request, expires_at=approval_request.requested_at + timeout)
+            approval_request = fast_replace(approval_request, expires_at=approval_request.requested_at + timeout)
     except (OSError, ValueError):
         valid = False
     approval_request = _with_request_actor(approval_request, request)
@@ -776,7 +782,7 @@ def _apply_tool_approval_decision(request, idx, original_call, execution, approv
                 )
         return carry_gate_decisions(execution, resumed)
     if decision.decision == "unavailable" and not decision.reason_code:
-        decision = replace(decision, reason_code="APPROVAL_UNAVAILABLE")
+        decision = fast_replace(decision, reason_code="APPROVAL_UNAVAILABLE")
     rejected_actions = getattr(request.params, "runtime_rejected_actions", None)
     if isinstance(rejected_actions, list):
         rejected_actions.append(approval_request.rejected_binding(decision))
@@ -802,7 +808,7 @@ def _with_applied_approval_fact(
         permission_id=str(getattr(approval_request, "permission_id", "") or ""),
         decision=decision.decision,
     )
-    return replace(execution, result=replace(execution.result, applied_approval=applied))
+    return fast_replace(execution, result=fast_replace(execution.result, applied_approval=applied))
 
 
 # LLM: 重复拒绝只比较当前 run 中宿主记录的 tool_name + args_hash；自然语言反馈、展示说明和 provider call id 都不能改变裁决。
@@ -872,11 +878,11 @@ def _approval_description(
         # 先按原结构键名遮蔽opaque凭据，再逐值净化内部标记；展示副本不改变批准绑定或实际参数。
         safe_arguments = redact_sensitive_value(call.arguments)
         projected = project(safe_arguments, preview=True)
-        details = json.dumps(projected, ensure_ascii=False, sort_keys=True)
+        details = hot_json.dumps(projected, ensure_ascii=False, sort_keys=True)
         if len(details) > 6000:
             details = details[:6000] + "…（参数预览已省略；完整参数见下方）"
         binding_hash = call.args_hash
-        full = json.dumps(project(safe_arguments), ensure_ascii=False, sort_keys=True)
+        full = hot_json.dumps(project(safe_arguments), ensure_ascii=False, sort_keys=True)
         public_detail = ("批准目标：\n" + "\n".join(identities)
             + f"\n完整参数哈希：{binding_hash}\n参数预览：{details}\n完整参数（已净化）：{full}")
     else:
@@ -970,7 +976,8 @@ def _rejected_approval_execution(
     )
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _ParallelThreadContext:
     transient_values: tuple[tuple[str, object], ...]
     subagent_run_id: str
@@ -1001,7 +1008,9 @@ def _describe_round_call_concurrency(
 def _effective_parallel_batch_limit(request: ToolRoundExecutionRequest) -> int:
     parallel_limit = _task_attribute_int(request, "max_parallel_tool_calls")
     if parallel_limit is None:
-        parallel_limit = _agent_config_int(request.agent, "max_parallel_tool_calls")
+        config = getattr(request.agent, "config", None)
+        if config is not None and hasattr(config, "max_parallel_tool_calls"):
+            parallel_limit = parse_optional_batch_limit(config.max_parallel_tool_calls)
     tool_batch_limit = _task_attribute_int(request, "max_tool_calls_per_round")
     return resolve_parallel_batch_limit(parallel_limit, tool_batch_limit)
 
@@ -1110,7 +1119,7 @@ def _started_parallel_call(request, idx, call, context, queued, *, bulkhead: boo
                 getattr(call, "tool_name", getattr(call, "name", "tool")),
                 exc_info=True,
             )
-            output_json = json.dumps(
+            output_json = hot_json.dumps(
                 {
                     "ok": False,
                     "error_code": "INTERNAL_ERROR",
@@ -1247,6 +1256,31 @@ def run_with_parallel_thread_context(agent, context, invoke):
         _restore_parallel_thread_context(agent, restore_values)
 
 
+# 线程桥只读取这组运行时字段，预先绑定读取器供捕获、安装和恢复共用。
+_PARALLEL_THREAD_ATTRIBUTE_READERS = {
+    name: attrgetter(name)
+    for name in (
+        "_current_user_prompt",
+        "_current_run_params",
+        "_current_run_task_workspace",
+        "_current_skill_snapshot",
+        "_subagent_worker_backend_override",
+    )
+}
+_MISSING_PARALLEL_THREAD_ATTRIBUTE = object()
+
+
+def _read_parallel_thread_attribute(
+    read: Callable[[object], object],
+    target: object,
+    default: object = _MISSING_PARALLEL_THREAD_ATTRIBUTE,
+) -> object:
+    try:
+        return read(target)
+    except AttributeError:
+        return default
+
+
 # LLM: 并行工具只继承本线程显式依赖与 runner 身份，不能读取其它会话的模型连接；接收线程必须对称恢复。
 # 函数用途: 冻结派工等工具需要的临时上下文，保留显式替身注入但不共享跨线程可变字段。
 def _capture_parallel_thread_context(agent: object) -> _ParallelThreadContext:
@@ -1258,16 +1292,12 @@ def _capture_parallel_thread_context(agent: object) -> _ParallelThreadContext:
     )
 
     values: list[tuple[str, object]] = []
-    for name in (
-        "_current_user_prompt",
-        "_current_run_params",
-        "_current_run_task_workspace",
-        "_current_skill_snapshot",
-        "_subagent_worker_backend_override",
-    ):
-        descriptor = getattr(type(agent), name, None)
-        if isinstance(descriptor, ThreadLocalAgentAttribute) and hasattr(agent, name):
-            values.append((name, getattr(agent, name)))
+    agent_type = type(agent)
+    for name, read in _PARALLEL_THREAD_ATTRIBUTE_READERS.items():
+        descriptor = _read_parallel_thread_attribute(read, agent_type)
+        if (isinstance(descriptor, ThreadLocalAgentAttribute)
+                and _read_parallel_thread_attribute(read, agent) is not _MISSING_PARALLEL_THREAD_ATTRIBUTE):
+            values.append((name, read(agent)))
     attrs = current_task_attributes(agent)
     return _ParallelThreadContext(
         tuple(values),
@@ -1283,8 +1313,9 @@ def _install_parallel_thread_context(
 ) -> tuple[tuple[str, bool, object], ...]:
     previous: list[tuple[str, bool, object]] = []
     for name, value in context.transient_values:
-        existed = hasattr(agent, name)
-        previous.append((name, existed, getattr(agent, name, None)))
+        read = _PARALLEL_THREAD_ATTRIBUTE_READERS[name]
+        existed = _read_parallel_thread_attribute(read, agent) is not _MISSING_PARALLEL_THREAD_ATTRIBUTE
+        previous.append((name, existed, _read_parallel_thread_attribute(read, agent, None)))
         setattr(agent, name, value)
     return tuple(previous)
 
@@ -1296,7 +1327,9 @@ def _restore_parallel_thread_context(
     for name, existed, value in reversed(previous):
         if existed:
             setattr(agent, name, value)
-        elif hasattr(agent, name):
+        elif _read_parallel_thread_attribute(
+            _PARALLEL_THREAD_ATTRIBUTE_READERS[name], agent,
+        ) is not _MISSING_PARALLEL_THREAD_ATTRIBUTE:
             delattr(agent, name)
 
 
@@ -1315,7 +1348,7 @@ def _ensure_minimal_tool_context_pairing(
         )
         if not already_present:
             tag, suffix = ("tool", "") if request.actor == "model" else ("host-action", f" actor={request.actor}")
-            rendered_payload = json.dumps({"tool": call.tool_name, "arguments": call.arguments}, ensure_ascii=False)
+            rendered_payload = hot_json.dumps({"tool": call.tool_name, "arguments": call.arguments}, ensure_ascii=False)
             rendered_result = str(getattr(result, "output", "") or getattr(result, "content", "") or "")
             context.append(
                 f"[{tag}-record round={request.tool_rounds} index={idx}{suffix}]\n"
@@ -1394,7 +1427,7 @@ def _record_execution(
         result = result.with_execution_facts(
             duration_ms=(time.monotonic() - started_at) * 1000,
         )
-        execution = replace(execution, result=result)
+        execution = fast_replace(execution, result=result)
     try:
         _emit_tool_progress(
             ToolProgressEvent(
@@ -1450,7 +1483,7 @@ def _record_bulkhead_fallback(
     started_emitted: bool = True,
     effect_outcome: str = "unknown",
 ) -> tuple[bool, dict[str, str] | None]:
-    output_json = json.dumps(
+    output_json = hot_json.dumps(
         {
             "ok": False,
             "error_code": "INTERNAL_ERROR",
@@ -1534,7 +1567,7 @@ def _execute_host_action(request: ToolRoundExecutionRequest, idx: int, action: H
     if _round_cancelled(request):
         record_auto_execution(request.agent, action, None)
         return
-    host_request = replace(request, actor=action.actor, decision_ref=action.decision_ref)
+    host_request = fast_replace(request, actor=action.actor, decision_ref=action.decision_ref)
     host_idx = len(request.calls) + idx
     call = action.call
     started_at = time.monotonic()
@@ -1568,7 +1601,7 @@ def _execute_host_action(request: ToolRoundExecutionRequest, idx: int, action: H
 def _with_request_actor(approval_request: ToolApprovalRequest, request: ToolRoundExecutionRequest) -> ToolApprovalRequest:
     if request.actor == "model":
         return approval_request
-    return replace(
+    return fast_replace(
         approval_request,
         binding={**approval_request.binding, "actor": request.actor, "decision_ref": request.decision_ref},
         description=f"[决策自动执行 actor={request.actor}] {approval_request.description}",
@@ -1710,7 +1743,7 @@ def _model_visible_call(
 
 # 函数用途: 中断时给本工具一条结构化"已中断"结果(模型可读懂并收尾)。
 def _interrupted_result(call: ToolCall) -> ToolResult:
-    payload = json.dumps(
+    payload = hot_json.dumps(
         {"error": "任务已被取消,本工具未执行。", "hint": "停止派发新动作,保存已有进展后收尾。"},
         ensure_ascii=False,
     )
@@ -1731,7 +1764,7 @@ def _interrupted_result(call: ToolCall) -> ToolResult:
 # 函数用途: 给停机后没启动的工具调用一条“宿主停机、未执行、无副作用”的结构化结果。
 def _host_shutdown_result(call: ToolCall, *, closure: ModelCallAdmissionClosure, cancelled: bool = False) -> ToolResult:
     hint = "停止派发新动作，保存已有进展后收尾。" if cancelled else "不要再发起新动作；重启后按当前状态重新判断是否还需要。"
-    payload = json.dumps({"error": "宿主正在停机，本工具未执行，没有任何副作用。", "hint": hint}, ensure_ascii=False)
+    payload = hot_json.dumps({"error": "宿主正在停机，本工具未执行，没有任何副作用。", "hint": hint}, ensure_ascii=False)
     shutdown = {"reason_code": closure.error_code, "error_type": closure.error_type,
                 "admission_error_code": MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE}
     if cancelled:
@@ -1870,7 +1903,7 @@ def _input_probe_failed_result(call: ToolCall, *, error: BaseException) -> ToolR
         "cause": sanitize_credentials(str(error))[:500], "effect_outcome": "not_started",
         "error": "输入安全点核验中断，本工具尚未启动；已完成工具的原结果保持不变。",
         "next_action": "先按原输入异常核验执行上下文，再判断是否需要未启动调用；禁止重做已完成前缀。"}
-    return ToolResult.failed(call, json.dumps(payload, ensure_ascii=False),
+    return ToolResult.failed(call, hot_json.dumps(payload, ensure_ascii=False),
         error_code="CANCELLED" if cancelled else "TOOL_ERROR", failure_stage="runtime_gate",
         facts=ToolFailureFacts(status="cancelled" if cancelled else "failed",
             effect_outcome="not_started", handler_executed=False,
@@ -1950,15 +1983,6 @@ def _task_attribute_int(request: ToolRoundExecutionRequest, key: str) -> int | N
     if not isinstance(attrs, dict) or key not in attrs:
         return None
     return parse_optional_batch_limit(attrs.get(key))
-
-
-# LLM: 配置查询仍按原 hasattr/getattr 顺序发生，不能将配置对象传进段判定模块。
-# 函数用途: 读取缺少任务覆盖的批大小配置，并保留原转换异常行为。
-def _agent_config_int(agent: object, key: str) -> int | None:
-    config = getattr(agent, "config", None)
-    if config is None or not hasattr(config, key):
-        return None
-    return parse_optional_batch_limit(getattr(config, key))
 
 
 def _append_deferred_tool_call_notice(

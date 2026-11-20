@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from inspect import Parameter, signature
 
 from ...backends import ModelResponse
+from ...common.fast_dataclass import fast_frozen
 from ...settings.runtime_guard_config import RuntimeGuardPolicy
 from ..provider_transient_auto_resume import (
     ProviderTransientRetryCallbacks,
@@ -17,7 +18,8 @@ from ..provider_transient_auto_resume import (
 
 # LLM: 三者必须来自同一次请求尝试；params 是调用方的完整运行参数引用（首请求选模采用的那份或原对象），只原样传递。
 # 类用途: 把实际发送的 prompt、收到的 response 与产出它的循环参数绑成一个不可变结果，供计量和确认显式使用。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ModelTurnRequest:
     prompt: str
     response: ModelResponse

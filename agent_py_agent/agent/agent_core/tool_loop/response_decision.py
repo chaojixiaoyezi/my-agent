@@ -3,9 +3,8 @@
 # 模块用途: 统一模型轮裁决和修复预算，保存真实响应原因与无工具续跑历史，不从正文推断完成。
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 _LOGGER = logging.getLogger(__name__)
@@ -18,6 +17,8 @@ from ...backends.tool_protocol_adapter import (
     ToolProtocolViolation,
     canonical_tool_calls_from_response,
 )
+from ...common import hot_json
+from ...common.fast_dataclass import fast_frozen, fast_replace
 from ...tooling.content_recovery_mode import (
     LongContentRecoveryRequest,
     long_content_recovery_context,
@@ -67,7 +68,8 @@ _MAX_CUMULATIVE_TURN_REPAIR_COUNT = 10
 # 类用途: 保存互相独立的纠偏次数，让每次裁决保留已用预算而不创建第二份失败账。
 # LLM: 本工具循环各类修复预算分别累计，不能从计数推断同一文件连续失败；修改须同步裁决与原生恢复测试。
 # 类用途: 保存本轮已经使用的纠偏次数，让不同恢复原因各守上限，不增加持久任务状态。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolLoopRepairCounters:
     __test__: ClassVar[bool] = False
 
@@ -104,13 +106,13 @@ def _inc_truncated_output(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
     updates = {"truncated_output_repairs": counters.truncated_output_repairs + 1}
     if hasattr(counters, "cumulative_turn_repairs"):
         updates["cumulative_turn_repairs"] = counters.cumulative_turn_repairs + 1
-    return replace(counters, **updates)
+    return fast_replace(counters, **updates)
 
 
 # LLM: 超时续跑同样是有界的一次性修复，计数与截断续跑、协议修复、空正文 nudge 全部独立。
 # 函数用途: 增加一次"供应商超时重试后模型只承诺不动作"的轮内续跑计数。
 def _inc_provider_timeout_resume(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return replace(counters, provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs + 1)
+    return fast_replace(counters, provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs + 1)
 
 
 # LLM: 输出上限截断后的续跑指令照抄成熟 harness 的做法（终端交互 query.ts 的
@@ -176,20 +178,20 @@ _PROVIDER_TIMEOUT_RESUME = (
 # LLM: repair counters 只记录真实协议修复次数，不再承载任何工作风格或检查点提醒状态。
 # 函数用途: 增加一次内部工具标记修复计数，同时保留其他错误修复计数。
 def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return replace(counters, protected_marker_repairs=counters.protected_marker_repairs + 1)
+    return fast_replace(counters, protected_marker_repairs=counters.protected_marker_repairs + 1)
 
 
 # LLM: unresolved issue 只允许一次结构化重定向，计数必须与 protected marker 相互独立。
 # 函数用途: 增加一次未解决运行错误的修复计数。
 def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return replace(counters, unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1)
+    return fast_replace(counters, unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1)
 
 
 def _inc_protocol(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     updates = {"protocol_repairs": counters.protocol_repairs + 1}
     if hasattr(counters, "cumulative_turn_repairs"):
         updates["cumulative_turn_repairs"] = counters.cumulative_turn_repairs + 1
-    return replace(counters, **updates)
+    return fast_replace(counters, **updates)
 
 
 # LLM: 截断分块纠偏与协议修复分开计数：两者预算不能互相吞掉，也不能共用一个上限解释。
@@ -198,7 +200,7 @@ def _inc_truncated_write(counters: ToolLoopRepairCounters) -> ToolLoopRepairCoun
     updates = {"truncated_write_repairs": counters.truncated_write_repairs + 1}
     if hasattr(counters, "cumulative_turn_repairs"):
         updates["cumulative_turn_repairs"] = counters.cumulative_turn_repairs + 1
-    return replace(counters, **updates)
+    return fast_replace(counters, **updates)
 
 
 # LLM: 空正文 nudge 有界(默认 2 次连续无进展):工具执行后模型必须产出终态正文或继续调工具,
@@ -206,7 +208,7 @@ def _inc_truncated_write(counters: ToolLoopRepairCounters) -> ToolLoopRepairCoun
 # _empty_text_budget_after_progress 恢复预算（连续无进展才守这个上限）。
 # 函数用途: 增加一次"执行过工具但空正文"的修复计数。
 def _inc_empty_text(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return replace(counters, empty_text_repairs=counters.empty_text_repairs + 1)
+    return fast_replace(counters, empty_text_repairs=counters.empty_text_repairs + 1)
 
 
 # LLM: 空正文预算按真实进展恢复（长回合不再"前期偶发空几次、后期一空就死"）：
@@ -221,7 +223,7 @@ def _empty_text_budget_after_progress(
     progressed = len(list(getattr(params, "fresh_successful_tools", None) or []))
     if progressed <= counters.empty_text_progress_marker:
         return counters
-    return replace(counters, empty_text_repairs=0, empty_text_progress_marker=progressed)
+    return fast_replace(counters, empty_text_repairs=0, empty_text_progress_marker=progressed)
 
 
 @dataclass(frozen=True)
@@ -235,7 +237,8 @@ class ToolLoopResponseDecisionRequest:
     turn_id: str = ""
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolLoopResponseDecision:
     __test__: ClassVar[bool] = False
 
@@ -245,7 +248,8 @@ class ToolLoopResponseDecision:
     counters: ToolLoopRepairCounters
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class UnresolvedRuntimeIssueDecision:
     __test__: ClassVar[bool] = False
 
@@ -255,7 +259,8 @@ class UnresolvedRuntimeIssueDecision:
     counters: ToolLoopRepairCounters
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class UnresolvedRuntimeIssueDecisionRequest:
     __test__: ClassVar[bool] = False
 
@@ -265,7 +270,8 @@ class UnresolvedRuntimeIssueDecisionRequest:
     counters: ToolLoopRepairCounters
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _NoToolCallsRequest:
     agent: object
     params: ToolLoopExecuteParams
@@ -461,7 +467,7 @@ def _protocol_violation_decision(
     _persist_protocol_violation_event(request, payload, model_output)
     request.params.tool_context.append(
         "[tool-protocol-violation]\n"
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        + hot_json.dumps(payload, ensure_ascii=False, sort_keys=True)
         + "\n上一轮没有形成可执行工具调用（工具协议格式无效；文本 [TOOL_CALL] 块已随"
         "EXEC-31b 移除，只接受结构化工具调用 tool_use）。请改用结构化工具调用"
         "（tool_use）重新发起，使用 Tool Catalog 里该工具自己的参数名，参数直接平铺；"
@@ -719,7 +725,7 @@ def _invalid_tool_arguments_decision(
         request, [{"code": "MODEL_TOOL_ARGUMENTS_INVALID", "detail": ",".join(names), "source_protocol": "native"}],
         str(getattr(response, "text", "") or ""),
     )
-    counters = replace(request.counters, invalid_arguments_repairs=request.counters.invalid_arguments_repairs + 1)
+    counters = fast_replace(request.counters, invalid_arguments_repairs=request.counters.invalid_arguments_repairs + 1)
     return ToolLoopResponseDecision("continue", None, [], counters)
 
 
@@ -744,7 +750,7 @@ def _tool_calls_decision(
         request.response, native=_native_tool_use_active(request.params)
     )
     # 形成了可执行调用：连续“参数无效”计数清零，下一次坏参数重新获得纠正机会。
-    counters = replace(request.counters, invalid_arguments_repairs=0)
+    counters = fast_replace(request.counters, invalid_arguments_repairs=0)
     return ToolLoopResponseDecision("run_tools", clean_response, calls, counters)
 
 
@@ -929,7 +935,7 @@ def _native_truncated_write_recovery_context(calls: list[ToolCall]) -> str:
 # LLM: guard 只标记宿主恢复预算用尽，必须保留原 provider stop_reason、turn_end_reason、用量和未完成事实。
 # 函数用途: 在原响应上投影循环停止说明，不丢失长度原因、不制造同一目标连续失败或任务完成事实。
 def _native_truncated_write_loop_break_response(response: ModelResponse, attempts: int) -> ModelResponse:
-    return replace(
+    return fast_replace(
         response,
         text=(
             f"系统已停止本次写入循环：本工具循环累计收到 {attempts} 次达到供应商输出长度上限的 "
@@ -1054,7 +1060,7 @@ def _downgrade_next_call_reasoning(request: _NoToolCallsRequest) -> ToolLoopRepa
     if not set_next_call_reasoning_level(request.params, target):
         return request.counters
     _record_thinking_downgrade(request.params, from_level=current, to_level=target, outcome="downgraded")
-    return replace(
+    return fast_replace(
         request.counters,
         truncation_thinking_downgrades=request.counters.truncation_thinking_downgrades + 1,
     )
@@ -1108,7 +1114,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             return truncated_resume
         final_status_response = request.response
         if _is_provider_length_truncated(final_status_response):
-            final_status_response = replace(final_status_response, runtime_source="tool_loop")
+            final_status_response = fast_replace(final_status_response, runtime_source="tool_loop")
         return ToolLoopResponseDecision("break", final_status_response, [], request.counters)
     unresolved_issue_decision = unresolved_runtime_issue_no_tool_call_decision(
         _unresolved_runtime_issue_request(request)
@@ -1188,7 +1194,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             #   碰巧跑完。这里改成轮内续跑：先把断点续写指令回灌，同一个 run 再走一轮；超限才按
             #   unfinished 收口，让上游按既有恢复路径处理。
             if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIR_COUNT:
-                final_response = replace(
+                final_response = fast_replace(
                     final_response,
                     runtime_status="unfinished",
                     runtime_reason="cumulative_turn_repairs_exceeded",
@@ -1203,7 +1209,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
                 return ToolLoopResponseDecision(
                     "continue", None, [], _inc_truncated_output(request.counters)
                 )
-            final_response = replace(
+            final_response = fast_replace(
                 final_response,
                 runtime_status="unfinished",
                 runtime_reason="MODEL_RESPONSE_TRUNCATED",
@@ -1221,12 +1227,15 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # 原样返回 final_response（对象同一，零开销）。
         is_truncated = _is_length_truncated_response(final_response) or _is_provider_length_truncated(final_response)
         if not is_truncated:
-            reset_fields = {
-                k: 0
-                for k in ("protocol_repairs", "truncated_write_repairs", "truncated_output_repairs")
-                if hasattr(request.counters, k)
-            }
-            clean_counters = replace(request.counters, **reset_fields) if reset_fields else request.counters
+            counters = request.counters
+            reset_fields = {}
+            if hasattr(counters, "protocol_repairs"):
+                reset_fields["protocol_repairs"] = 0
+            if hasattr(counters, "truncated_write_repairs"):
+                reset_fields["truncated_write_repairs"] = 0
+            if hasattr(counters, "truncated_output_repairs"):
+                reset_fields["truncated_output_repairs"] = 0
+            clean_counters = fast_replace(counters, **reset_fields) if reset_fields else counters
         else:
             clean_counters = request.counters
         return ToolLoopResponseDecision(
@@ -1363,7 +1372,7 @@ def _provider_timeout_probe_delivery(request: _NoToolCallsRequest, terminal: obj
     delivered = [row for row in rows if row["delivered"]]
     response = terminal
     if delivered and not (len(delivered) == 1 and delivered[0]["origin"] == _TERMINAL_SEGMENT_ORIGIN):
-        response = replace(terminal, text=_DELIVERY_SEGMENT_SEPARATOR.join(str(row["text"]) for row in delivered))
+        response = fast_replace(terminal, text=_DELIVERY_SEGMENT_SEPARATOR.join(str(row["text"]) for row in delivered))
     _finalize_assistant_delivery(request.params)
     request.params.live_archive_state["_pending_assistant_delivery_segments"] = {
         "response": response, "owner_turn_id": str(current.get("turn_id") or ""), "segments": rows,
@@ -1481,10 +1490,10 @@ def _is_runtime_status_response(response: object) -> bool:
     status = str(getattr(response, "runtime_status", "") or "").strip()
     if status and status != "ok":
         return True
-    for field in ("runtime_reason", "runtime_source"):
-        if str(getattr(response, field, "") or "").strip():
-            return True
-    return False
+    return bool(
+        str(getattr(response, "runtime_reason", "") or "").strip()
+        or str(getattr(response, "runtime_source", "") or "").strip()
+    )
 
 
 def unresolved_runtime_issue_no_tool_call_decision(

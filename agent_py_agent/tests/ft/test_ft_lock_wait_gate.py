@@ -146,6 +146,19 @@ CASES: list[tuple[str, str]] = [
     ('agent_py_agent.tests.test_conveyor_m09_cure_a_tool_dtos.g1_tool_approval_decision', 'm09_tool_approval_decision'),
     ('agent_py_agent.tests.test_conveyor_m09_cure_a_tool_dtos.g1_tool_call_derived_identity', 'm09_tool_call_derived_identity'),
     ('agent_py_agent.tests.test_conveyor_m09_cure_a_tool_dtos.g1_tool_result_production_metadata', 'm09_tool_result_production_metadata'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_tool_call_record_params', 'm10_tool_call_record_params'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_tool_call_execute_params', 'm10_tool_call_execute_params'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_tool_round_execution_request', 'm10_tool_round_execution_request'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_tool_progress_event', 'm10_tool_progress_event'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_parallel_thread_context', 'm10_parallel_thread_context'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_tool_loop_repair_counters', 'm10_tool_loop_repair_counters'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_tool_loop_response_decision', 'm10_tool_loop_response_decision'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_unresolved_runtime_issue_decision', 'm10_unresolved_runtime_issue_decision'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_unresolved_runtime_issue_decision_request', 'm10_unresolved_runtime_issue_decision_request'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_no_tool_calls_request', 'm10_no_tool_calls_request'),
+    ('agent_py_agent.tests.test_conveyor_m10_cure_a_tool_loop.g1_case_model_turn_request', 'm10_model_turn_request'),
+    ('agent_py_agent.tests.test_conveyor_m00_fast_dataclass.g1_case_fast_replace_open_class', 'fast_replace_open_class'),
+    ('agent_py_agent.tests.test_conveyor_m00_fast_dataclass.g1_case_fast_replace_guarded_class', 'fast_replace_guarded_class'),
 ]
 
 # C0 规则 9 的 GIL 探针：3.11/3.12 没有 sys._is_gil_enabled，按“GIL 开启”处理，收集阶段不会 AttributeError。

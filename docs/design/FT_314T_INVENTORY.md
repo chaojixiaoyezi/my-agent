@@ -847,3 +847,16 @@ CI 安装 `.[dev,secrets]` 加 `sqlalchemy>=2.0`、`psycopg>=3.1`，不安装完
 - `re` 编译缓存争用（父版已有）：`input_schema._validate_constraint_shapes` 对 schema 里每个 `pattern` 调 `re.compile`（`input_schema.py:375`）。带 pattern 的 schema 构造 ToolModelSpec 为 0.41–0.55；规范化为 0.358，把 `re.compile` 换成空函数后为 1.480。逐调用校验 `contracts/tool_input_schema.py:615` 的 `re.search(pattern, value)` 走同一缓存（M32）。
 - M09 以外仍在工具回合路径上用 `copy.deepcopy` 复制 JSON 值的文件，可改用 `clone_json_value`：`tooling/versioned_input_decoder.py:28,287`、`tooling/executor.py:1428,1445`、`tooling/registry.py:1438`、`agent_core/tool_ir_history.py`、`agent_core/tool_request_projection.py`。
 - `check_slots_compat` 没有报出“参数传入后取弱引用”的调用方（`registry.py:640` 对 `ToolRuntimeSnapshot`），本片靠调用方测试发现。
+
+## 2026-11-19 M10 工具循环热路径
+
+工具执行、进度事件与响应裁决共 11 个冻结数据类通过槽位兼容检查，构造和替换复用 C1.3 的共享实现。线程上下文通过固定字段读取器捕获及恢复，区分字段缺失和已设为 `None`。JSON 替换保留 Unicode、键排序和分隔符，包括表达轮工具摘要的字节内容。
+
+- G2 实测由 69 处降到 4 处，各文件计数均未增加。4 处保留项用于在同一份 `ToolLoopExecuteParams` 上写入停止标志和连续次数。这两个运行时属性不属于该参数类型的声明字段。
+- `display_archive.py` 的实测触发数为 0，本轮没有转换点。
+- 父提交上的 11 项槽位断言以及收紧白名单后的 G2 触发断言均失败。转换后的差分用例检查签名、默认值、相等及哈希行为、repr、pickle 往返、冻结异常和替换错误。线程上下文恢复和 JSON 摘要也有定向回归。
+- G1 的通用工厂首轮有 7 项低于 0.80。改用逐类直接构造和替换后，11 个新增用例在原 `_build_replace` 上的比值为 0.189–0.279，4 个既有吞吐用例通过。以 `ModelTurnRequest` 做同驱动隔离对照，单独构造为 1.294，单独调用 `fast_replace` 为 0.235；仅在探针进程内省去两个共享集合检查后，构造加替换为 1.500。
+- 同一提交修改 C1.3 共享实现 `agent/common/fast_dataclass.py` 的 `_build_replace`。原先生成的 `__replace__` 用两个类级共享 frozenset 判断是否回落到 `dataclasses.replace`，即 `isdisjoint(changes)` 与 `<= changes.keys()`。在关闭 GIL 的 3.14.3t 上，`set.isdisjoint` 同时进入该集合与 `changes` 的临界区；`<= changes.keys()` 反射为 `dict_keys` 的比较，迭代该集合时也进入它的临界区。所有线程替换同一个类时都在这把锁上排队。现在两项回落条件在生成时按字段名展开为对本次调用 `changes` 的字面量成员判断，与 `dataclasses.replace` 自己的 `f.name in changes` 同义；类没有 `init=False` 字段和必填 `InitVar` 时只剩类型检查。回落时仍由 `dataclasses.replace` 抛出与当前解释器一致的异常。`fast_replace` 的 `_REPLACERS.get` 是无锁查找，生成的 `__init__` 与 `slot_setter` 只锁正在写入的新实例。
+- M00 回归：静态用例在任何解释器上要求生成的 `__replace__` 不调用集合方法、闭包里没有容器，覆盖 2 个显式类与 160 个随机生成类，在原实现上失败。回落对照覆盖两种字段形状的 10 组改动，修改前后均通过。新增 2 个单类 G1 用例 `fast_replace_open_class` 与 `fast_replace_guarded_class`，在原实现上为 0.188 与 0.191。
+- G1 在关闭 GIL 的 3.14.3t 上以独占信号量运行：17 个吞吐用例全部不低于 0.80，含 11 个 M10 用例与 2 个新增 M00 用例。直接驱动复测 `fast_replace_open_class` 为 1.386、`fast_replace_guarded_class` 为 1.362、`m10_model_turn_request` 为 1.361，128 线程吞吐分别为每秒 285 万、244 万、152 万次。
+- 3.12.13 与关闭 GIL 的 3.14.3t：目标用例各 51 项通过；影响套件各 99 项通过、4 项 XPASS，与父提交相同；工具循环相邻 9 个调用方测试文件各 182 项通过；G2 各 6 项通过。
