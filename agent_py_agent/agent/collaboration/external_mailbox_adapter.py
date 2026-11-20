@@ -202,11 +202,25 @@ def _inbox_io_error(path, phase, exc):
     }
 
 
+_SEEN_DIR = ".coordinator_seen"
+
+
+def _valid_cursor(cursor):
+    fields = ("offset", "generation", "st_dev", "st_ino")
+    return cursor.get("v") == 2 and all(type(cursor.get(k)) is int and cursor[k] >= 0 for k in fields)
+
+
+def _receipt_namespace(cursor):
+    # 每个收件箱代次一个命名空间：代次失活后可整体退役，而不必在混合桶里辨认归属。
+    key = json.dumps([cursor["st_dev"], cursor["st_ino"], cursor["generation"]])
+    return "g" + hashlib.sha256(key.encode("ascii")).hexdigest()[:32]
+
+
 def _message_receipt(cursor, message_id):
     # 按身份、代次和消息 ID 做精确点查。分桶限制单目录大小，进程重启后仍可识别重复消息。
     key = json.dumps([cursor["st_dev"], cursor["st_ino"], cursor["generation"], message_id])
     digest = hashlib.sha256(key.encode("ascii")).hexdigest()
-    return ".coordinator_seen", digest[:2], digest[2:]
+    return _SEEN_DIR, _receipt_namespace(cursor), digest[:2], digest[2:]
 
 
 def _receipt_exists(root, parts):
@@ -215,6 +229,122 @@ def _receipt_exists(root, parts):
             return True
     except FileNotFoundError:
         return False
+
+
+def _receipt_seen(root, receipt, cursor):
+    if _receipt_exists(root, receipt):
+        return True
+    # 升级前的混合桶回执与新回执同摘要；只在升级时的原代次仍活跃时查询。
+    return "legacy_ns" in cursor and _receipt_exists(root, (receipt[0], *receipt[2:]))
+
+
+def _carry_receipt_state(cursor, previous):
+    """推导回执命名空间状态；返回本次是否发生代次切换（须先持久化游标再退役旧命名空间）。"""
+    cursor["receipts"] = 2
+    active = _receipt_namespace(cursor)
+    prior = _receipt_namespace(previous) if _valid_cursor(previous) else None
+    if previous.get("receipts") == 2:
+        legacy, retire = previous.get("legacy_ns"), previous.get("retire") is True
+    else:
+        # 升级前的 v2 游标：混合桶属于它记录的代次及更早代次。
+        legacy, retire = prior, False
+    switched = prior is not None and prior != active
+    if legacy == active:
+        cursor["legacy_ns"] = legacy
+    if switched or retire or (legacy is not None and legacy != active):
+        cursor["retire"] = True
+    return switched
+
+
+def _retire_inactive_receipts(mailbox_dir, cursor):
+    """在既有留存单片预算内删除非活跃代次的回执。删除即进度：重启后沿剩余文件续做。
+
+    返回 True 表示已无可退役的回执。活跃命名空间和仍活跃的升级前混合桶永不触碰；
+    超出已知布局（命名空间/桶/回执）的目录保持原样，不递归猜测归属。
+    """
+    from ..memory_store.retention_scan_budget import (
+        RETENTION_SCAN_SLICE_ENTRIES,
+        RETENTION_SCAN_SLICE_MS,
+    )
+
+    budget = {"left": RETENTION_SCAN_SLICE_ENTRIES, "deadline": time.monotonic() + RETENTION_SCAN_SLICE_MS / 1000}
+    active = _receipt_namespace(cursor)
+    keep_legacy = "legacy_ns" in cursor
+    with ExitStack() as stack:
+        if _supports_dir_fd():
+            try:
+                fd = open_directory_beneath(mailbox_dir, (_SEEN_DIR,))
+            except FileNotFoundError:
+                return True
+            stack.callback(os.close, fd)
+            top = (str(mailbox_dir / _SEEN_DIR), fd)
+        else:
+            top = (str(mailbox_dir / _SEEN_DIR), None)
+            if not _is_dir((str(mailbox_dir), None), _SEEN_DIR):
+                return True
+        for name in _list_names(top):
+            if name == active or (keep_legacy and len(name) == 2):
+                continue
+            # 升级前混合桶直接存回执；新命名空间多一层桶。
+            if not _prune_receipt_dir(top, name, 1 if len(name) == 2 else 2, budget):
+                return False
+    return True
+
+
+def _entry_path(directory, name):
+    path, fd = directory
+    return name if fd is not None else os.path.join(path, name)
+
+
+def _list_names(directory):
+    path, fd = directory
+    with os.scandir(fd if fd is not None else path) as entries:
+        return [entry.name for entry in entries]
+
+
+def _is_dir(directory, name):
+    try:
+        info = os.stat(_entry_path(directory, name), dir_fd=directory[1], follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return stat.S_ISDIR(info.st_mode)
+
+
+def _prune_receipt_dir(parent, name, depth, budget):
+    """单遍删除一层回执目录；预算用尽返回 False，下一片重新列出剩余条目继续。"""
+    if not _is_dir(parent, name):
+        _remove_entry(parent, name, budget)  # 非目录残留同样属于已失活回执集合
+        return True
+    with ExitStack() as stack:
+        directory = (os.path.join(parent[0], name), None)
+        if parent[1] is not None:
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent[1])
+            stack.callback(os.close, fd)
+            directory = (directory[0], fd)
+        for child in _list_names(directory):
+            if budget["left"] <= 0 or time.monotonic() >= budget["deadline"]:
+                return False
+            if not _is_dir(directory, child):
+                _remove_entry(directory, child, budget)
+            elif depth > 1 and not _prune_receipt_dir(directory, child, depth - 1, budget):
+                return False
+    try:
+        os.rmdir(_entry_path(parent, name), dir_fd=parent[1])
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+            raise
+    budget["left"] -= 1
+    return True
+
+
+def _remove_entry(directory, name, budget):
+    try:
+        os.unlink(_entry_path(directory, name), dir_fd=directory[1])
+    except FileNotFoundError:
+        pass
+    budget["left"] -= 1
 
 
 def _load_cursor(path):
@@ -340,6 +470,18 @@ class ExternalMailboxAdapter:
         with locked_json_path(cursor_path):
             return self._sync_locked(handoff_service, layout, cursor_path, now)
 
+    @staticmethod
+    def _retire_receipts(mailbox_dir, cursor_path, cursor):
+        try:
+            if not _retire_inactive_receipts(mailbox_dir, cursor):
+                return
+            done = {key: value for key, value in cursor.items() if key != "retire"}
+            write_text_atomic_beneath(mailbox_dir, (cursor_path.name,), json.dumps(done) + "\n", durable=False)
+        except OSError as exc:
+            # 退役失败不影响本次同步结果；retire 标记仍在游标里，下次同步沿剩余文件续做。
+            logger.warning("Receipt retirement paused path=%s exception_type=%s errno=%s",
+                           mailbox_dir / _SEEN_DIR, type(exc).__name__, exc.errno)
+
     def _sync_locked(self, handoff_service, layout, cursor_path, now):
         current_time_val = float(now if now is not None else time.time())
         mailbox_dir = cursor_path.parent
@@ -348,8 +490,11 @@ class ExternalMailboxAdapter:
         except OSError as exc:
             previous = None
             messages, quarantined, cursor = [], [_inbox_io_error(cursor_path, "cursor_read_failed", exc)], None
+        switched = False
         if previous is not None:
             messages, quarantined, cursor = self._read_actor_batch(layout, previous)
+            if cursor is not None:
+                switched = _carry_receipt_state(cursor, previous)
 
         delivered_item_ids: list[str] = []
         acked_item_ids: list[str] = []
@@ -368,7 +513,7 @@ class ExternalMailboxAdapter:
             message_id = str(msg.get("message_id") or "").strip()
             receipt = _message_receipt(cursor, message_id) if message_id else None
             try:
-                if receipt is not None and _receipt_exists(mailbox_dir, receipt):
+                if receipt is not None and _receipt_seen(mailbox_dir, receipt, cursor):
                     continue
                 if action in {"ack", "record_ack"}:
                     item = handoff_service.store.load_handoff_item(case_id, item_id)
@@ -475,11 +620,16 @@ class ExternalMailboxAdapter:
             except Exception as exc:  # noqa: BLE001
                 errors.append({"item_id": item_id, "action": action, "error": str(exc)})
 
-        if cursor is not None and cursor != previous and not retryable_apply_error:
+        committed = cursor is not None and not retryable_apply_error
+        if committed and cursor != previous:
             try:
-                write_text_atomic_beneath(mailbox_dir, (cursor_path.name,), json.dumps(cursor) + "\n", durable=False)
+                # 代次切换是旧命名空间退役的前提，须落盘后才允许删除；普通推进仍不逐条 fsync。
+                write_text_atomic_beneath(mailbox_dir, (cursor_path.name,), json.dumps(cursor) + "\n", durable=switched)
             except OSError as exc:
+                committed = False
                 quarantined.append(_inbox_io_error(cursor_path, "cursor_write_failed", exc))
+        if committed and cursor.get("retire"):
+            self._retire_receipts(mailbox_dir, cursor_path, cursor)
 
         # 2. 检查是否有待投递给该 external_assistant 的 published 交接项
         try:
