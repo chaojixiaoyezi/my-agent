@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import secrets
 import stat
 import threading
 import time
@@ -28,6 +29,7 @@ from ..conversation.models import THREAD_TASK_LINK_INACTIVE_STATUSES
 from ..conversation.run_claim import user_input_turn_on_lane
 from ..conversation.store_threads import IdleCompactActivityChanged
 from ..io.bounded_directory import DirectoryCursor
+from ..local_storage.owner_read_index import OwnerReadIndex, pending_projection_changes
 from ..settings.config_layers import compact_idle_parameters
 from ..settings.defaults import default_config_int
 from ..settings.model_scope import selected_model_scope
@@ -316,7 +318,71 @@ def _consume_pending_approval_files(folder, thread_id: str, state: dict[str, obj
 
 # LLM: 按目录分页与LRU续点有界扫描审批与私卡路径；未扫完绝不判空，目录变动、坏记录或超时失败关闭，零句柄泄漏。
 # 函数用途: 保护仍可处理的审批/确认；明确到期只跳过，坏期限/未知归属失败关闭，不消费或清理记录。
+def _idle_approval_root(thread):
+    roots = set(getattr(thread, "active_task_ids", ())) | set(getattr(thread, "task_ids", ()))
+    if len(roots) != 1:
+        return None
+    root = next(iter(roots))
+    return root if root and Path(root).name == root and root not in {".", ".."} else None
+
+
+def _idle_approval_projection(agent, thread, approvals_dir, confirmations_dir):
+    root = _idle_approval_root(thread)
+    owner_id = getattr(agent.home_paths, "owner_id", "")
+    if root is None or not owner_id:
+        return None, None, None, None
+    owner_home = agent.home_paths.owner_home_dir
+    index = OwnerReadIndex(owner_home, owner_id=owner_id)
+    key = "approval_coverage:" + root
+    stamps = {
+        name: list(stamp) if (stamp := _approval_dir_stamp(directory)) is not None else None
+        for name, directory in (("approvals_stamp", approvals_dir), ("confirmations_stamp", confirmations_dir),
+                                ("root_stamp", approvals_dir / root))
+    }
+    receipt, rows = index.pending_approval_page(key, root_id=root)
+    dirty = pending_projection_changes(owner_home, "approvals")
+    if (receipt and receipt["complete"] and receipt["thread_id"] == thread.thread_id
+            and all(receipt[name] == stamp for name, stamp in stamps.items())
+            and time.time() - receipt["rebuilt_at"] <= _IdleApprovalScanPolicy.clean_stamp_ttl_seconds
+            and "" not in dirty and root not in dirty):
+        verdict = "pending_approval" if rows else ""
+    else:
+        verdict = "partial"
+    return (index, key, receipt, stamps), root, verdict, dirty
+
+
 def _idle_pending_approval_state(agent, store, thread):
+    """完整 ORI 只在对应规范目录版本仍相同的情况下缩短空闲核对。"""
+    from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
+
+    approvals_dir = store.storage.root / "subagent_tool_approvals"
+    confirmations_dir = agent.home_paths.owner_home_dir.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS)
+    try:
+        projection, root, verdict, dirty = _idle_approval_projection(agent, thread, approvals_dir, confirmations_dir)
+        if verdict in ("", "pending_approval"):
+            check, _, current_verdict, _ = _idle_approval_projection(agent, thread, approvals_dir, confirmations_dir)
+            if check[3] == projection[3] and current_verdict == verdict:
+                return verdict
+            projection, verdict = check, current_verdict
+        scan_state = {}
+        result = _scan_idle_pending_approvals(agent, store, thread, completed=scan_state if projection else None)
+        if (projection and result == "" and scan_state
+                and set(scan_state["subdir_stamps"]).issubset({root}) and not scan_state["subdir_overflow"]):
+            index, key, receipt, stamps = projection
+            current, _, _, current_dirty = _idle_approval_projection(agent, thread, approvals_dir, confirmations_dir)
+            if current is not None and current[3] == stamps and dirty == current_dirty:
+                updated = dict(stamps, complete=True, coverage="complete", generation=secrets.token_hex(16),
+                               rebuilt_at=time.time(), thread_id=thread.thread_id)
+                index.write_pending_approvals(key, receipt, updated)
+            # 之前的完整投影已失效，当前拍仍保守阻止压缩。
+            if receipt is not None:
+                return "activity_unknown"
+        return result
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return "activity_unknown"
+
+
+def _scan_idle_pending_approvals(agent, store, thread, *, completed=None):
     from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
 
     storage_root = store.storage.root
@@ -347,6 +413,8 @@ def _idle_pending_approval_state(agent, store, thread):
                 and time.monotonic() - completed_at <= _IdleApprovalScanPolicy.clean_stamp_ttl_seconds
             ):
                 _save_idle_scan_state(key, state)
+                if completed is not None:
+                    completed.update(state)
                 return ""
             state = None
 
@@ -522,6 +590,8 @@ def _idle_pending_approval_state(agent, store, thread):
                 state["phase"] = "done"
                 state["completed_at"] = time.monotonic()
                 _save_idle_scan_state(key, state)
+            if completed is not None:
+                completed.update(state)
             return ""
 
         _save_idle_scan_state(key, state)

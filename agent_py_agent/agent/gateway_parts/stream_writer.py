@@ -82,6 +82,10 @@ def write_chunk_event(chunk_path: Path, payload: dict[str, object], *, still_cur
         else:
             append_private_text(chunk_path, line + "\n", still_current=current)
         if committed[0]:
+            if payload.get("kind") in {"permission_requested", "permission_resolved"}:
+                from ..local_storage.owner_read_index import note_pending_projection_dirty
+
+                note_pending_projection_dirty(chunk_path.parent, "processing_approvals")
             from .request_event_hub import hub_for_paths, notify_chunk_written
             if hub_for_paths(chunk_path) is not None:
                 notify_chunk_written(chunk_path, offset=chunk_path.stat().st_size,

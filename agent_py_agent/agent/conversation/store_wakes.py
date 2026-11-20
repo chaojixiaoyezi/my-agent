@@ -351,6 +351,9 @@ class WakeStore:
                     write_private_json_file_atomic_no_newline_unlocked(self.storage.wake_signal_path(signal), signal.to_dict())
             else:
                 write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
+            from ..local_storage.owner_read_index import note_pending_projection_dirty
+
+            note_pending_projection_dirty(self.storage.root, "schedule")
             return signal
 
     # LLM: 稳定键沿原发布锁冻结信号，显式 retain_handled 控制已消费重发；无键仍直接发布。
@@ -495,6 +498,9 @@ class WakeStore:
             unlink_quietly(path)
             _discard_orphan_lock(path)
             remove_task_locator(self.storage, handled)
+        from ..local_storage.owner_read_index import note_pending_projection_dirty
+
+        note_pending_projection_dirty(self.storage.root, "schedule")
         if handled.observation_id:
             self._mark_observations_handled([handled.observation_id], now=handled.handled_at)
         return handled

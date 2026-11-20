@@ -211,6 +211,9 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
     root = Path(owner_home) / "agents" / task.id
     root.mkdir(parents=True, exist_ok=True)
     write_private_json_file_atomic(root / "state.json", projection)
+    from ....local_storage.owner_read_index import note_pending_projection_dirty
+
+    note_pending_projection_dirty(owner_home, "wake", task.id)
     refs = {
         "schema_version": "owner-agent-projection.v1",
         "run_id": task.id,

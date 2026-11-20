@@ -599,6 +599,14 @@ class AgentToolApprovalSinkMixin:
         return decision.to_dict()
 
 
+def _note_owner_approval_change(agent, root_id):
+    from ..local_storage.owner_read_index import note_pending_projection_dirty
+
+    home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+    if home is not None:
+        note_pending_projection_dirty(home, "approvals", root_id)
+
+
 # LLM: 发布验证canonical和绝对截止，并仅绑定本线程等待callback；IM普通失败保原TUI，actual typed未知不吞，不复制RunParams。
 # 函数用途: 原子创建一条有效交互审批记录，可选私人卡引用同一记录与截止。
 def publish_agent_tool_approval(
@@ -626,6 +634,7 @@ def publish_agent_tool_approval(
             raise ValueError("subagent approval identity conflict")
         if not report.payload:
             write_json_file_atomic(path, payload)
+            _note_owner_approval_change(agent, scope.root_task_id)
     handle = AgentToolApprovalHandle(
         scope, path, request, created_at,
         partial(tool_approval_scope_is_current, agent, scope),
@@ -1133,6 +1142,7 @@ def _resolve_agent_tool_approval_locked(agent, path, scope, request, decision, *
         payload['decision_by'] = record_interaction_actor(agent, interaction_actor, decision=decision.decision,
             actor=interaction_actor['actor_id'], **({} if blocking else {'blocking': False}))
     write_json_file_atomic(path, payload, **({} if blocking else {"blocking": False}))
+    _note_owner_approval_change(agent, scope.root_task_id)
     return {"ok": True, "run_id": scope.run_id, "permission_id": request.permission_id, "decision": decision.decision,
             **({'clicked_by': payload['decision_by']} if payload.get('decision_by') else {})}
 

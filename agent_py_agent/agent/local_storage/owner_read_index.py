@@ -71,6 +71,44 @@ _PROCESS_ADVANCE_LOCKS_GUARD = threading.Lock()
 _PROCESS_APPENDS = OrderedDict()
 
 
+_PENDING_DIRTY = OrderedDict()
+_pending_dirty_sequence = 0
+
+
+def note_pending_projection_dirty(home, domain, reference=""):
+    """canonical 写者只登记常驻内存提示；久未消费的提示由分片核对补偿。"""
+    global _pending_dirty_sequence
+    key = (str(Path(home).absolute()), domain)
+    with _PROCESS_MEMO_LOCK:
+        refs = _PENDING_DIRTY.setdefault(key, {})
+        _PENDING_DIRTY.move_to_end(key)
+        if len(refs) >= _MAX_BATCH_IDS:
+            refs.clear()
+            reference = ""
+        _pending_dirty_sequence += 1
+        refs[reference] = (os.getpid(), _pending_dirty_sequence)
+        while len(_PENDING_DIRTY) > _MAX_MEMO_ENTRIES:
+            _PENDING_DIRTY.popitem(last=False)
+
+
+def pending_projection_changes(home, domain):
+    with _PROCESS_MEMO_LOCK:
+        return dict(_PENDING_DIRTY.get((str(Path(home).absolute()), domain), ()))
+
+
+def acknowledge_pending_projection_changes(home, domain, observed):
+    key = (str(Path(home).absolute()), domain)
+    with _PROCESS_MEMO_LOCK:
+        refs = _PENDING_DIRTY.get(key)
+        if refs is None:
+            return
+        for reference, token in observed.items():
+            if refs.get(reference) is token:
+                del refs[reference]
+        if not refs:
+            del _PENDING_DIRTY[key]
+
+
 # 函数用途: 获取或创建指定 owner home 的可重入推进锁；调用方必须在临界区持有返回的强引用。
 def _home_advance_lock(home: object) -> threading.RLock:
     key = str(home)
@@ -365,6 +403,18 @@ def _authorize(action, arg1, arg2, _database, _trigger):
 
 
 _KEYED_TABLE_DDL = {
+    "ori_wake_pending": (
+        "CREATE TABLE IF NOT EXISTS ori_wake_pending ("
+        "owner_id TEXT NOT NULL, thread_id TEXT NOT NULL, kind TEXT NOT NULL, "
+        "next_due_at REAL, source_ref TEXT NOT NULL, generation TEXT NOT NULL, "
+        "PRIMARY KEY (owner_id, thread_id, kind, source_ref))"
+    ),
+    "ori_pending_approvals": (
+        "CREATE TABLE IF NOT EXISTS ori_pending_approvals ("
+        "owner_id TEXT NOT NULL, thread_id TEXT NOT NULL, root_id TEXT NOT NULL, "
+        "approval_id TEXT NOT NULL, revision INTEGER NOT NULL, created_at REAL NOT NULL, "
+        "generation TEXT NOT NULL, PRIMARY KEY (owner_id, approval_id))"
+    ),
     "ori_upload_registry": (
         "CREATE TABLE IF NOT EXISTS ori_upload_registry ("
         "artifact_id TEXT PRIMARY KEY, byte_offset INTEGER NOT NULL, "
@@ -718,7 +768,7 @@ class OwnerReadIndex:
 
     # LLM: schema 只包含固定四域 typed 表及来源检查点，不承载领域写事实。
     # 函数用途: 在同一事务中初始化派生数据库。
-    def _initialize(self, connection, binding):
+    def _initialize(self, connection, binding, *, defer_commit=False):
         connection.execute("BEGIN IMMEDIATE")
         try:
             connection.execute(
@@ -751,7 +801,10 @@ class OwnerReadIndex:
                 "INSERT INTO ori_meta(key,value) VALUES (?,?)",
                 [("schema", _SCHEMA), ("binding", binding)],
             )
-            connection.commit()
+            _ensure_keyed_table(connection, "ori_wake_pending")
+            _ensure_keyed_table(connection, "ori_pending_approvals")
+            if not defer_commit:
+                connection.commit()
         except BaseException:
             connection.rollback()
             raise
@@ -774,6 +827,206 @@ class OwnerReadIndex:
         except (_Issue, sqlite3.Error, OSError) as error:
             status, reason = _failure(error)
             raise OwnerReadUnavailable({"status": status, "reason": reason}) from error
+
+    def _pending_meta(self, connection, key):
+        table = ("ori_wake_pending" if key == "wake_coverage" or key.startswith("wake_schedule:")
+                 else "ori_pending_approvals")
+        table_facts = connection.execute(
+            "SELECT m.value FROM ori_meta m JOIN sqlite_master t ON t.name=? AND t.type='table' WHERE m.key=?",
+            (table, "domain_generation:" + table),
+        ).fetchone()
+        if table_facts is None:
+            return None
+        row = connection.execute("SELECT value FROM ori_meta WHERE key=?", (key,)).fetchone()
+        if row is None:
+            return None
+        try:
+            receipt = json.loads(row[0])
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(receipt, dict) or receipt.pop("table_generation", None) != table_facts[0]:
+            return None
+        return receipt
+
+    def pending_wake_summary(self):
+        """同一读事务返回修复收据以及当前最早待处理时间。"""
+        try:
+            with self._database() as connection:
+                connection.execute("BEGIN")
+                receipt = self._pending_meta(connection, "wake_coverage")
+                if receipt is None:
+                    return None, False, None
+                row = connection.execute(
+                    "SELECT next_due_at FROM ori_wake_pending WHERE owner_id=? AND kind='subagent' "
+                    "ORDER BY next_due_at LIMIT 1", (self._owner_id,),
+                ).fetchone()
+                return receipt, row is not None, row[0] if row is not None else None
+        except (_Issue, sqlite3.Error, OSError, ValueError):
+            return None, False, None
+
+    def pending_subagent_references(self, limit):
+        try:
+            with self._database() as connection:
+                return [row[0] for row in connection.execute(
+                    "SELECT source_ref FROM ori_wake_pending WHERE owner_id=? AND kind='subagent' "
+                    "ORDER BY next_due_at LIMIT ?", (self._owner_id, limit),
+                )]
+        except (_Issue, sqlite3.Error, OSError):
+            return None
+
+    def pending_schedule_summary(self, key):
+        try:
+            with self._database() as connection:
+                connection.execute("BEGIN")
+                receipt = self._pending_meta(connection, key)
+                if not isinstance(receipt, dict) or not receipt["complete"]:
+                    return receipt, False, None
+                initial = (self._owner_id, receipt["generation"])
+                signal = connection.execute(
+                    "SELECT 1 FROM ori_wake_pending WHERE owner_id=? AND generation=? AND kind='signal' LIMIT 1",
+                    initial,
+                ).fetchone()
+                due = connection.execute(
+                    "SELECT next_due_at FROM ori_wake_pending WHERE owner_id=? AND generation=? "
+                    "AND kind='progress' ORDER BY next_due_at LIMIT 1", initial,
+                ).fetchone()
+                return receipt, signal is not None, due[0] if due is not None else None
+        except (_Issue, sqlite3.Error, OSError, ValueError, KeyError):
+            return None, False, None
+
+    def pending_approval_page(self, key, *, after="", limit=1, operation_id="", root_id=None):
+        """用同一读事务绑定原审批页和它的覆盖收据。"""
+        try:
+            with self._database() as connection:
+                connection.execute("BEGIN")
+                receipt = self._pending_meta(connection, key)
+                if not isinstance(receipt, dict) or not receipt.get("complete"):
+                    return receipt, []
+                where = ["a.owner_id=?"]
+                parameters = [self._owner_id]
+                if root_id is not None:
+                    where.append("a.root_id=?")
+                    parameters.append(root_id)
+                else:
+                    where.append("a.generation=?")
+                    parameters.append(receipt["generation"])
+                if operation_id:
+                    where.append("a.approval_id=?")
+                    parameters.append(operation_id)
+                else:
+                    where.append("a.approval_id>?")
+                    parameters.append(after)
+                rows = connection.execute(
+                    "SELECT a.*, m.value AS projection FROM ori_pending_approvals a "
+                    "LEFT JOIN ori_meta m ON m.key='approval_row:'||a.approval_id "
+                    f"WHERE {' AND '.join(where)} ORDER BY a.approval_id LIMIT ?",
+                    (*parameters, limit),
+                ).fetchall()
+                return receipt, rows
+        except (_Issue, sqlite3.Error, OSError, ValueError, KeyError):
+            return None, []
+
+    def write_pending_wakes(self, expected, receipt, references, rows, *, key="wake_coverage"):
+        return self._write_pending_projection(key, expected, receipt, references, rows)
+
+    def write_pending_approvals(self, key, expected, receipt, *, rows=()):
+        return self._write_pending_projection(key, expected, receipt, (), rows)
+
+    def _write_pending_projection(self, key, expected, receipt, references, rows):
+        """推进单份覆盖收据，页数据与游标同提交，冲突时低成本重读原事实。"""
+        try:
+            with _home_advance_lock(self._home), self._database(
+                create=True, write=True, defer_commit=True,
+            ) as connection:
+                if not connection.in_transaction:
+                    connection.execute("BEGIN IMMEDIATE")
+                _ensure_keyed_table(connection, "ori_wake_pending")
+                _ensure_keyed_table(connection, "ori_pending_approvals")
+                if self._pending_meta(connection, key) != expected:
+                    return False
+                if key == "wake_coverage" or key.startswith("wake_schedule:"):
+                    self._write_pending_wakes(connection, key, receipt, references, rows)
+                    table = "ori_wake_pending"
+                else:
+                    self._write_pending_approvals(connection, key, receipt, rows)
+                    table = "ori_pending_approvals"
+                table_generation = connection.execute(
+                    "SELECT value FROM ori_meta WHERE key=?", ("domain_generation:" + table,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO ori_meta(key,value) VALUES (?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, _json({**receipt, "table_generation": table_generation})),
+                )
+                connection.commit()
+                return True
+        except (_Issue, sqlite3.Error, OSError, ValueError):
+            return False
+
+    def _write_pending_wakes(self, connection, key, receipt, references, rows):
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ori_wake_pending_due ON ori_wake_pending(owner_id,kind,next_due_at)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ori_wake_pending_source ON ori_wake_pending(owner_id,source_ref)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ori_wake_pending_schedule "
+            "ON ori_wake_pending(owner_id,generation,kind,next_due_at)"
+        )
+        connection.executemany(
+            "DELETE FROM ori_wake_pending WHERE owner_id=? AND source_ref=?",
+            ((self._owner_id, reference) for reference in references),
+        )
+        connection.executemany(
+            "INSERT INTO ori_wake_pending (owner_id,thread_id,kind,next_due_at,source_ref,generation) "
+            "VALUES (?,?,?,?,?,?)", ((self._owner_id, *row, receipt["generation"]) for row in rows),
+        )
+        if receipt["complete"]:
+            # 同一代补写过的当前事实保留；被移除的旧来源在整轮完成时卸下。
+            if key == "wake_coverage":
+                connection.execute(
+                    "DELETE FROM ori_wake_pending WHERE owner_id=? AND kind='subagent' AND generation<>?",
+                    (self._owner_id, receipt["generation"]),
+                )
+            else:
+                prefix = key + ":"
+                connection.execute(
+                    "DELETE FROM ori_wake_pending WHERE owner_id=? AND source_ref>=? AND source_ref<? AND generation<>?",
+                    (self._owner_id, prefix, key + ";", receipt["generation"]),
+                )
+
+    def _write_pending_approvals(self, connection, key, receipt, rows):
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ori_pending_approvals_root "
+            "ON ori_pending_approvals(owner_id,root_id,approval_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ori_pending_approvals_page "
+            "ON ori_pending_approvals(owner_id,generation,approval_id)"
+        )
+        connection.executemany(
+            "INSERT INTO ori_pending_approvals "
+            "(owner_id,thread_id,root_id,approval_id,revision,created_at,generation) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(owner_id,approval_id) DO UPDATE SET thread_id=excluded.thread_id,"
+            "root_id=excluded.root_id,revision=excluded.revision,created_at=excluded.created_at,"
+            "generation=excluded.generation",
+            ((self._owner_id, *row[:5], receipt["generation"]) for row in rows),
+        )
+        connection.executemany(
+            "INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (("approval_row:" + row[2], _json(row[5])) for row in rows),
+        )
+        if key == "approval_list_coverage" and receipt["complete"]:
+            connection.execute(
+                "DELETE FROM ori_meta WHERE key IN (SELECT 'approval_row:'||approval_id "
+                "FROM ori_pending_approvals WHERE owner_id=? AND generation<>?)",
+                (self._owner_id, receipt["generation"]),
+            )
+            connection.execute(
+                "DELETE FROM ori_pending_approvals WHERE owner_id=? AND generation<>?",
+                (self._owner_id, receipt["generation"]),
+            )
 
     # 同一建表叶同时服务新库与旧缓存的惰性扩展，不另开连接或管理第二套索引。
     def _domain_validation(self, connection, domain, validator):
@@ -827,7 +1080,7 @@ class OwnerReadIndex:
     # LLM: timeout 为零；无 ATTACH、无全库 VACUUM、无磁盘临时表或磁盘 journal。
     # 函数用途: 提供始终关闭的、带身份检查和执行预算的短 SQLite 连接。
     @contextmanager
-    def _database(self, *, create=False, write=False, deadline=None):
+    def _database(self, *, create=False, write=False, deadline=None, defer_commit=False):
         cache_fd = descriptor = -1
         connection = None
         try:
@@ -908,7 +1161,7 @@ class OwnerReadIndex:
             if held.st_size == 0:
                 if not write:
                     raise _Issue("empty_cache")
-                self._initialize(connection, binding)
+                self._initialize(connection, binding, defer_commit=defer_commit)
             else:
                 metadata = dict(
                     connection.execute("SELECT key,value FROM ori_meta WHERE key IN ('schema','binding')").fetchall()

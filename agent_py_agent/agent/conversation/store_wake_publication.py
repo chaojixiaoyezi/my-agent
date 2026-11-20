@@ -461,6 +461,9 @@ def _install(storage: ConversationStorage, path: Path, record: dict[str, Any], *
     if installed is None:
         # 唤醒信号属宿主运行数据：私有原子写（0600/0700），存量宽权限信号下次写入即收紧；内容逐字节不变。
         write_private_json_file_atomic(storage.wake_signal_path(frozen), frozen.to_dict(), **({} if blocking else {"blocking": False}))
+        from ..local_storage.owner_read_index import note_pending_projection_dirty
+
+        note_pending_projection_dirty(storage.root, "schedule")
         installed = frozen
     if observation is not None:
         existing = _find_observation(storage, frozen.thread_id, observation.observation_id)

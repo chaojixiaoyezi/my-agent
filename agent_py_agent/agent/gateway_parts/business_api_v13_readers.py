@@ -12,10 +12,11 @@ import json
 import math
 import os
 import re
+import secrets
 import sqlite3
 import time
 from collections import OrderedDict
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,8 +53,14 @@ from ..conversation.display_archive import (
     read_display_archive_page,
 )
 from ..conversation.usage_sources import UsageSourcePlan
+from ..local_storage.owner_read_index import (
+    OwnerReadIndex,
+    acknowledge_pending_projection_changes,
+    pending_projection_changes,
+)
 from ..plugin_host.errors import HostAPIError
 from ..runtime_db.repository import RuntimeRepository
+from ..user_space.directory_paging import directory_page
 from . import business_upload_registry
 
 
@@ -2136,6 +2143,20 @@ def native_approval_readers(agent, paths, owner_id, store) -> dict:
     return {'approvals': source.list, 'approvals.get': source.detail}
 
 
+def _native_approval_value(interaction, thread_id):
+    return {
+        'approval_id': interaction['interaction_id'],
+        'thread_id': thread_id,
+        'task_id': None,
+        'run_id': interaction['run_id'],
+        'revision': interaction['revision'],
+        'state': 'pending',
+        'summary': redact_sensitive_value(interaction['request']['description'])[:4096],
+        'expires_at': _stamp(interaction['expires_at']),
+        'allowed_decisions': [],
+    }
+
+
 class _NativeApprovals:
     """原生待决审批只读投影，决定仍只走专用人工通道。"""
 
@@ -2152,9 +2173,186 @@ class _NativeApprovals:
     def __init__(self, agent, paths, owner, store):
         self.agent, self.paths, self.owner, self.store = agent, paths, owner, store
 
-    # LLM: 预索引 owner 线程绑定后单遍有界扫描 processing，不重放 N_bindings × N_processing 嵌套目录扫描。
-    # 函数用途: 合并前台及主/子任务原生待决审批，上限触达时如实暴露 partial coverage。
-    def list(self, params):
+    @bounded_observation_reader
+    def list(self, params, *, source_page=None):
+        if (source_page is None or not self._owns_store()
+                or (source_page.position and "offset" in source_page.position)):
+            return self._scan(params)
+        page = self._projected_page(source_page)
+        return self._scan(params) if page is None else page
+
+    def _owns_store(self):
+        return (getattr(getattr(self.agent, 'home_paths', None), 'owner_id', None) == self.owner
+                and getattr(self.agent, 'conversation_store', None) is self.store)
+
+    def _approval_source_stamps(self, roots):
+        from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
+        from .compact_operations import _approval_dir_stamp
+
+        storage = self.store.storage
+        parent = storage.root / 'subagent_tool_approvals'
+        home = self.agent.home_paths.owner_home_dir
+        paths = (self.paths.processing, storage.threads_dir, parent,
+                 home.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS), *(parent / root for root in roots))
+        return [list(stamp) if (stamp := _approval_dir_stamp(path)) is not None else None for path in paths]
+
+    def _processing_approval_version(self):
+        published = pending_projection_changes(self.paths.processing, "processing_approvals").get("")
+        return list(published) if published is not None else None
+
+    def _projected_page(self, request, *, approval_id="", repair=True):
+        home = self.agent.home_paths.owner_home_dir
+        index = OwnerReadIndex(home, owner_id=self.owner)
+        key = "approval_list_coverage"
+        position = request.position or {}
+        generation, after = position.get("generation"), position.get("after", "")
+        if not isinstance(after, str) or (position and not isinstance(generation, str)):
+            raise BusinessError('CURSOR_EXPIRED')
+        receipt, rows = index.pending_approval_page(
+            key, after=after, limit=request.limit + 1, operation_id=approval_id,
+        )
+        changes = pending_projection_changes(home, "approvals")
+        current = time.time()
+        processing_version = self._processing_approval_version()
+        stable = (receipt and receipt["stamps"] == self._approval_source_stamps(receipt["roots"])
+                  and (processing_version is None or receipt["processing_version"] == processing_version))
+        if receipt and receipt["complete"] and stable and not changes and current < receipt["verify_at"]:
+            if generation is not None and generation != receipt["generation"]:
+                raise BusinessError('CURSOR_EXPIRED')
+            records, coverage = self._live_approval_rows(rows[:request.limit], current)
+            next_position = ({"generation": receipt["generation"], "after": rows[request.limit - 1]["approval_id"]}
+                             if len(rows) > request.limit else None)
+            if (receipt["stamps"] != self._approval_source_stamps(receipt["roots"])
+                    or processing_version != self._processing_approval_version()):
+                coverage = 'partial'
+            return ObservationPage(records, coverage, source_paged=True, next_position=next_position)
+        if not repair:
+            return None
+        if generation is not None and (after or not receipt or generation != receipt["generation"] or not stable or changes):
+            raise BusinessError('CURSOR_EXPIRED')
+        if approval_id:
+            return None
+        page = self._repair_approval_page(index, key, receipt, stable, changes, processing_version, current)
+        if page is not None and page.coverage == 'complete':
+            return self._projected_page(request, repair=False)
+        return page
+
+    def _repair_approval_page(self, index, key, receipt, stable, changes, processing_version, now):
+        from .compact_operations import _IdleApprovalScanPolicy
+
+        if receipt and not receipt["complete"] and stable and not changes:
+            updated = dict(receipt)
+        else:
+            base = self._approval_source_stamps(())
+            threads, complete = _load_bounded_owner_threads(self.store.threads, max_threads=self._MAX_THREADS_SCAN)
+            roots = sorted({root for thread in threads if thread.owner_id == self.owner for root in thread.active_task_ids})
+            if (not complete or len(roots) > self._MAX_AGENT_APPROVAL_ROOTS_SCAN
+                    or any(Path(root).name != root or root in {".", ".."} for root in roots)):
+                return None
+            stamps = self._approval_source_stamps(roots)
+            if stamps[:len(base)] != base:
+                return None
+            updated = {"generation": secrets.token_hex(16), "complete": False, "coverage": "partial",
+                       "rebuilt_at": 0.0, "cursor": {}, "processing_done": False, "root_offset": 0,
+                       "stamps": stamps, "roots": roots, "processing_version": processing_version}
+
+        before = dict(updated)
+        if not updated["processing_done"]:
+            names, cursor, done = directory_page(
+                self.paths.processing.parent, (self.paths.processing.name,), updated["cursor"],
+                min(self._MAX_PROCESSING_SCAN, self._MAX_PROCESSING_DIR_ENTRIES), require_dir_fd=False,
+            )
+            entries = (self.paths.processing / name for name in names if not name.startswith(".") and name.endswith(".json"))
+            updated.update(cursor=cursor if not done else {}, processing_done=done)
+            current_rows = self._scan({}, processing_paths=entries, selected_roots=())
+        else:
+            roots = updated["roots"]
+            offset = updated["root_offset"]
+            root_batch = roots[offset:offset + 1]
+            current_rows = self._scan({}, processing_paths=(), selected_roots=root_batch)
+            if current_rows.coverage == 'complete':
+                updated["root_offset"] = offset + len(root_batch)
+
+        if (updated["stamps"] != self._approval_source_stamps(updated["roots"])
+                or processing_version != self._processing_approval_version()):
+            return None
+        if current_rows.coverage != 'complete':
+            updated = before
+            rows = ()
+        else:
+            rows = current_rows.records
+        updated["complete"] = updated["processing_done"] and updated["root_offset"] == len(updated["roots"])
+        if updated["complete"]:
+            updated.update(coverage="complete", rebuilt_at=now, verify_at=now + _IdleApprovalScanPolicy.clean_stamp_ttl_seconds)
+        if updated != receipt and not index.write_pending_approvals(key, receipt, updated, rows=rows):
+            return None
+        acknowledge_pending_projection_changes(self.agent.home_paths.owner_home_dir, "approvals", changes)
+        if updated["complete"]:
+            return ObservationPage()
+        return ObservationPage((), 'partial', source_paged=True,
+                               next_position={"generation": updated["generation"], "after": ""})
+
+    def _live_approval_rows(self, rows, now):
+        from ..conversation.agent_tool_approval import (
+            _approval_root_for_store,
+            _strict_pending_approval,
+        )
+        from ..plugin_host.interactions import approval_interaction
+
+        records, foreground, stored_rows = {}, [], []
+        coverage = 'complete'
+        for row in rows:
+            saved = json.loads(row["projection"])
+            if datetime.fromisoformat(saved["value"]["expires_at"]).timestamp() <= now:
+                continue
+            stored_rows.append((row, saved))
+            source = saved["source"]
+            if Path(source).name != source or not source.endswith(".json"):
+                coverage = 'partial'
+                continue
+            if not row["root_id"]:
+                foreground.append((row, source))
+                continue
+            try:
+                root = row["root_id"]
+                if Path(root).name != root or root in {".", ".."}:
+                    raise ValueError("invalid approval root")
+                pending = _strict_pending_approval(self.agent, root, _approval_root_for_store(self.store, root) / source)
+                if pending is None:
+                    continue
+                interaction = approval_interaction(self.agent, pending, root)
+                thread, error = self.store.threads.load_report(interaction["thread_id"])
+                if error is not None:
+                    coverage = 'partial'
+                if thread is None or thread.owner_id != self.owner or interaction["interaction_id"] != row["approval_id"]:
+                    continue
+                if interaction["revision"] != row["revision"]:
+                    coverage = 'partial'
+                    continue
+                identity = background_identity(thread)
+                records[row["approval_id"]] = ObservationRecord(
+                    _native_approval_value(interaction, thread.thread_id), self.owner,
+                    identity.space_id if identity else None, identity.project_ref if identity else None,
+                    thread_id=thread.thread_id, run_id=interaction["run_id"],
+                )
+            except (FileNotFoundError, KeyError, OSError, RuntimeError, ValueError):
+                coverage = 'partial'
+        if foreground:
+            paths = (self.paths.processing / name for name in dict.fromkeys(name for _, name in foreground))
+            page = self._scan({}, processing_paths=paths, selected_roots=(),
+                              thread_ids=[row["thread_id"] for row, _ in foreground])
+            indexed = {row["approval_id"]: row["revision"] for row, _ in foreground}
+            for thread_id, _, approval_id, revision, _, item in page.records:
+                if indexed.get(approval_id) == revision:
+                    records[approval_id] = ObservationRecord(item["value"], self.owner, item["space_id"], item["project_ref"],
+                                                             thread_id=thread_id, run_id=item["value"]["run_id"])
+            if page.coverage != 'complete':
+                coverage = 'partial'
+        return tuple(records[row["approval_id"]] for row, _ in stored_rows if row["approval_id"] in records), coverage
+
+    # LLM: 分片与旧有界查询共用 owner、线程绑定、原生批准状态和版本验证。
+    # 函数用途: 读取规范审批源，选择全部预算项或修复游标给出的子集。
+    def _scan(self, params, *, processing_paths=None, selected_roots=None, thread_ids=None):
         from dataclasses import fields
 
         from ..contracts.tool_approval import approval_deadline
@@ -2176,10 +2374,18 @@ class _NativeApprovals:
 
         report_body_attr = fields(GatewayJsonReadReport)[0].name
 
-        threads, threads_complete = _load_bounded_owner_threads(
-            self.store.threads,
-            max_threads=self._MAX_THREADS_SCAN,
-        )
+        if thread_ids is None:
+            threads, threads_complete = _load_bounded_owner_threads(
+                self.store.threads, max_threads=self._MAX_THREADS_SCAN,
+            )
+        else:
+            threads, threads_complete = [], True
+            for thread_id in dict.fromkeys(thread_ids):
+                thread, error = self.store.threads.load_report(thread_id)
+                if error is not None:
+                    threads_complete = False
+                elif thread is not None:
+                    threads.append(thread)
         threads_by_id: dict[str, Any] = {}
         exact_bindings: dict[tuple[str, str, str], list[tuple[Any, Any, Any]]] = {}
         wildcard_bindings: dict[str, list[tuple[Any, Any, Any]]] = {}
@@ -2216,7 +2422,8 @@ class _NativeApprovals:
             json_scanned = 0
             dir_scanned = 0
             try:
-                with os.scandir(self.paths.processing) as entries:
+                source = os.scandir(self.paths.processing) if processing_paths is None else nullcontext(processing_paths)
+                with source as entries:
                     for entry in entries:
                         dir_scanned += 1
                         if dir_scanned > self._MAX_PROCESSING_DIR_ENTRIES:
@@ -2230,19 +2437,33 @@ class _NativeApprovals:
                             processing_complete = False
                             break
                         try:
-                            if not entry.is_file(follow_symlinks=False):
+                            if processing_paths is None:
+                                if not entry.is_file(follow_symlinks=False):
+                                    continue
+                            elif entry.is_symlink() or not entry.is_file():
                                 continue
                         except OSError:
                             processing_complete = False
                             continue
-                        path = Path(entry.path)
-                        report = read_json_file_report(
-                            path, context='business.approvals.processing.read', blocking=False
-                        )
-                        if report.load_error is not None:
-                            processing_complete = False
-                            continue
-                        request_doc = getattr(report, report_body_attr)
+                        path = Path(entry.path) if processing_paths is None else entry
+                        if processing_paths is None:
+                            report = read_json_file_report(
+                                path, context='business.approvals.processing.read', blocking=False
+                            )
+                            if report.load_error is not None:
+                                processing_complete = False
+                                continue
+                            request_doc = getattr(report, report_body_attr)
+                        else:
+                            # 原请求整文件原子替换。修复以目录戳封窗，读口不创建锁文件。
+                            try:
+                                raw = read_bytes_beneath(self.paths.processing, (path.name,), max_bytes=8 * 1024 * 1024)
+                                request_doc = json.loads(raw) if raw is not None else None
+                                if not isinstance(request_doc, dict):
+                                    raise ValueError("approval source must be an object")
+                            except (OSError, ValueError):
+                                processing_complete = False
+                                continue
                         if not request_doc:
                             continue
                         record = _GatewayRequestRecord(path, request_doc)
@@ -2296,24 +2517,22 @@ class _NativeApprovals:
                                     'expires_at': _stamp(deadline),
                                     'allowed_decisions': [],
                                 }
-                                rows.append(ObservationRecord(
-                                    value,
-                                    self.owner,
-                                    identity.space_id if identity else None,
+                                row = ObservationRecord(
+                                    value, self.owner, identity.space_id if identity else None,
                                     identity.project_ref if identity else None,
-                                    thread_id=thread.thread_id,
-                                    run_id=value['run_id'],
-                                ))
+                                    thread_id=thread.thread_id, run_id=value['run_id'],
+                                )
+                                rows.append(row if processing_paths is None else
+                                            self._approval_index_row(row, "", request.requested_at, path.name))
             except FileNotFoundError:
                 pass
             except OSError:
                 processing_complete = False
 
         # 跨owner原始base Agent不能读取别人的主/子执行资格，未接真实owner宿主时不冒充完整。
-        full = (
-            getattr(getattr(self.agent, 'home_paths', None), 'owner_id', None) == self.owner
-            and getattr(self.agent, 'conversation_store', None) is self.store
-        )
+        full = self._owns_store()
+        if selected_roots is not None:
+            active_roots = selected_roots
         agent_approvals_complete = True
         if full and active_roots:
             max_roots = self._MAX_AGENT_APPROVAL_ROOTS_SCAN
@@ -2324,15 +2543,17 @@ class _NativeApprovals:
                 if time.monotonic() >= deadline:
                     agent_approvals_complete = False
                     break
+                scan_progress = {} if selected_roots is not None else None
                 pending_rows, root_complete = list_pending_agent_tool_approvals_report(
                     self.agent,
                     root_task_id=root,
                     deadline=deadline,
                     scan_limit=self._AGENT_APPROVAL_SCAN_LIMIT,
+                    **({"scan_progress": scan_progress} if scan_progress is not None else {}),
                 )
                 if not root_complete:
                     agent_approvals_complete = False
-                for pending in pending_rows:
+                for offset, pending in enumerate(pending_rows):
                     try:
                         interaction = approval_interaction(self.agent, pending, root)
                     except (FileNotFoundError, KeyError, ValueError):
@@ -2357,33 +2578,31 @@ class _NativeApprovals:
                         continue
                     seen.add(interaction['interaction_id'])
                     target_identity = background_identity(target)
-                    value = {
-                        'approval_id': interaction['interaction_id'],
-                        'thread_id': target.thread_id,
-                        'task_id': None,
-                        'run_id': interaction['run_id'],
-                        'revision': interaction['revision'],
-                        'state': 'pending',
-                        'summary': redact_sensitive_value(interaction['request']['description'])[:4096],
-                        'expires_at': _stamp(interaction['expires_at']),
-                        'allowed_decisions': [],
-                    }
-                    rows.append(ObservationRecord(
-                        value,
-                        self.owner,
-                        target_identity.space_id if target_identity else None,
+                    value = _native_approval_value(interaction, target.thread_id)
+                    row = ObservationRecord(
+                        value, self.owner, target_identity.space_id if target_identity else None,
                         target_identity.project_ref if target_identity else None,
-                        thread_id=target.thread_id,
-                        run_id=value['run_id'],
-                    ))
+                        thread_id=target.thread_id, run_id=value['run_id'],
+                    )
+                    if scan_progress is None:
+                        rows.append(row)
+                    else:
+                        reference = scan_progress["references"][offset].name
+                        rows.append(self._approval_index_row(row, root, pending["requested_at"], reference))
 
         all_complete = full and threads_complete and processing_complete and agent_approvals_complete
         return ObservationPage(tuple(rows), coverage='complete' if all_complete else 'partial')
 
+    def _approval_index_row(self, row, root, created_at, source):
+        projection = {"value": row.value, "space_id": row.space_id, "project_ref": row.project_ref, "source": source}
+        return (row.thread_id, root, row.value["approval_id"], row.value["revision"], created_at, projection)
+
     # LLM: 详情必须仍为本次pending，不回放旧行，也不披露批准动作。
     # 函数用途: 返回精确审批版本与期限。
     def detail(self, params):
-        page = self.list(params)
+        page = self._projected_page(ObservationSourcePage(limit=1), approval_id=params["approval_id"]) if self._owns_store() else None
+        if page is None:
+            page = self._scan(params)
         rows = []
         for row in page.records:
             if row.value['approval_id'] == params['approval_id']:
