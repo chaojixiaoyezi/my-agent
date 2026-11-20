@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import time
 import uuid
 from typing import Any
 
@@ -26,7 +27,7 @@ from .pinned_definitions import (
     freeze_execution_definition,
     resolve_definition,
 )
-from .run_store import replace_run_record
+from .run_store import _concurrency_settled, replace_run_record
 
 _ACTIVE_SUBWORKFLOW_ANCESTRY: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
     '_ACTIVE_SUBWORKFLOW_ANCESTRY', default=()
@@ -88,6 +89,123 @@ def _collect_ancestry(run: WorkflowRunRecord, engine) -> tuple[tuple[str, ...], 
 
     depth = max(ctx_depth, len(store_ancestry), getattr(run, 'subworkflow_depth', 0))
     return combined_ancestry, depth
+
+
+def _subworkflow_attempt(step: StepExecutionRecord) -> str | int:
+    return step.escalation_result.get('attempt_id') or step.attempt_count or 1
+
+
+def _child_run_id(run_id: str, step_id: str, attempt: str | int) -> str:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f'subworkflow:{run_id}:{step_id}:{attempt}').hex
+
+
+def _binding(run: WorkflowRunRecord, step: StepExecutionRecord, child_id: str) -> dict:
+    return {'kind': 'subworkflow', 'parent_run_id': run.workflow_run_id, 'step_id': step.step_id,
+            'attempt': _subworkflow_attempt(step), 'child_run_id': child_id}
+
+
+def has_subworkflow_obligation(step: StepExecutionRecord) -> bool:
+    if step.mode != 'subworkflow' or step.batches:
+        return False
+    facts = step.escalation_result
+    receipt = facts.get('subworkflow_receipt') or {}
+    if step.status == 'waiting_for_agent' or facts.get('effect_outcome') == 'unknown':
+        return True
+    if ((isinstance(receipt, dict) and receipt.get('status') in ('succeeded', 'failed', 'skipped', 'cancelled'))
+            or facts.get('effect_outcome') == 'not_started'):
+        return False
+    return bool(facts.get('obligation') or step.subworkflow_run_id or receipt
+                or (step.status in ('running', 'paused_for_resume') and facts.get('effect_started')
+                    and facts.get('attempt_id')))
+
+
+def read_obligated_child(engine, run: WorkflowRunRecord, step: StepExecutionRecord, spec: dict):
+    """只查原尝试指向的子运行；旧等待步骤从原回执取得身份。"""
+    facts = step.escalation_result
+    receipt = facts.get('subworkflow_receipt') or {}
+    existing = facts.get('obligation')
+    if not isinstance(receipt, dict) or (existing is not None and not isinstance(existing, dict)):
+        raise PermissionError('SUBWORKFLOW_SCOPE_DENIED')
+    child_id = (existing or {}).get('child_run_id') or receipt.get('child_run_id') or step.subworkflow_run_id
+    if not child_id and step.status in ('running', 'paused_for_resume') and facts.get('attempt_id'):
+        # DAG 协调器先保存尝试号，worker 返回前崩溃时也可按原尝试查同一个子运行。
+        child_id = _child_run_id(run.workflow_run_id, step.step_id, _subworkflow_attempt(step))
+    if not child_id:
+        return '', None
+    binding = _binding(run, step, child_id)
+    if (not isinstance(child_id, str) or child_id == run.workflow_run_id
+            or spec['step_id'] != step.step_id or spec['mode'] != step.mode
+            or (existing is not None and existing != binding)
+            or ((existing is not None or facts.get('attempt_id'))
+                and child_id != _child_run_id(run.workflow_run_id, step.step_id, binding['attempt']))
+            or any(ref and ref != child_id for ref in (receipt.get('child_run_id'), step.subworkflow_run_id))):
+        raise PermissionError('SUBWORKFLOW_SCOPE_DENIED')
+    try:
+        child = engine.store.load_run(child_id)
+    except FileNotFoundError:
+        return child_id, None
+    if (child.parent_workflow_run_id != run.workflow_run_id or child.owner_id != run.owner_id
+            or child.workflow_id != _resolve_target_child_workflow_id(spec)):
+        raise PermissionError('SUBWORKFLOW_SCOPE_DENIED')
+    facts['obligation'] = binding
+    step.subworkflow_run_id = step.effect_id = child_id
+    facts['subworkflow_receipt'] = {**receipt, 'child_workflow_id': child.workflow_id,
+                                   'child_run_id': child_id, 'depth': child.subworkflow_depth}
+    return child_id, child
+
+
+def mark_child_missing(step: StepExecutionRecord, child_id: str) -> None:
+    facts = step.escalation_result
+    facts['effect_outcome'] = 'unknown'
+    receipt = facts.setdefault('subworkflow_receipt', {})
+    receipt.update(status='unknown', effect_outcome='unknown')
+    if child_id:
+        receipt['child_run_id'] = child_id
+    step.status, step.needs_repair = 'failed', True
+    step.error_code = 'WORKFLOW_SUBWORKFLOW_CHILD_MISSING'
+    step.error_message = '原子工作流编号或运行记录缺失，执行结果未知。请核对原步骤收据并恢复原子运行记录，禁止重新派发。'
+    step.ended_at = step.ended_at or time.time()
+
+
+def child_is_settled(child: WorkflowRunRecord) -> bool:
+    return child.status in ('succeeded', 'failed', 'skipped', 'cancelled') and _concurrency_settled(child)
+
+
+def apply_child_result(step: StepExecutionRecord, child: WorkflowRunRecord, spec: dict) -> None:
+    """首次执行与恢复沿同一套输出映射和失败回执。"""
+    step.escalation_result['subworkflow_receipt']['status'] = child.status
+    if child.status == 'succeeded':
+        step.status, step.needs_repair = 'succeeded', False
+        step.error_code = step.error_message = ''
+        outputs: dict[str, Any] = {}
+        for child_step in child.steps:
+            if child_step.status in ('succeeded', 'escalated_recovered') and isinstance(child_step.output_snapshot, dict):
+                outputs.update(child_step.output_snapshot)
+        if isinstance(child.final_output, dict):
+            outputs.update(child.final_output)
+        mapping = spec.get('output_mapping') or (spec.get('config') or {}).get('output_mapping')
+        step.output_snapshot = {
+            key: outputs.get(source) if isinstance(source, str) else source
+            for key, source in mapping.items()
+        } if isinstance(mapping, dict) else outputs
+    elif child.status in ('waiting_for_agent', 'queued', 'running', 'cancelling'):
+        step.status = 'waiting_for_agent'
+    elif child.status in ('paused_for_resume', 'paused') and not child.needs_repair:
+        step.status = 'paused_for_resume'
+    else:
+        step.status, step.needs_repair = 'failed', True
+        failed = next((item for item in child.steps if item.status in ('failed', 'paused_for_resume')
+                       or (item.needs_repair and item.error_code)), None)
+        step.error_code = (failed and failed.error_code) or child.failed_step_id or 'SUBWORKFLOW_RUN_FAILED'
+        step.error_message = (failed and failed.error_message) or (
+            f'Child workflow run {child.workflow_run_id} failed with status {child.status}')
+    if child_is_settled(child):
+        # 子终态只结清等待义务；已运行子流程的失败不授予自动重放许可。
+        step.escalation_result.pop('effect_outcome', None)
+        step.escalation_result['subworkflow_receipt'].pop('effect_outcome', None)
+    elif child.status in ('failed', 'skipped', 'cancelled'):
+        step.escalation_result['effect_outcome'] = 'unknown'
+        step.escalation_result['subworkflow_receipt']['effect_outcome'] = 'unknown'
 
 
 def execute_subworkflow_step(
@@ -283,11 +401,19 @@ def execute_subworkflow_step(
         configured_inputs = {}
     child_inputs = {**configured_inputs, **step.input_snapshot}
 
-    attempt_id = step.escalation_result.get('attempt_id') or (getattr(step, 'attempt_count', None) or 1)
-    idempotency_key = f"subworkflow:{run.workflow_run_id}:{step.step_id}:{attempt_id}"
-    child_run_id = uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key).hex
+    child_run_id = _child_run_id(run.workflow_run_id, step.step_id, _subworkflow_attempt(step))
 
     child_depth = current_depth + 1
+    step.subworkflow_run_id = step.effect_id = child_run_id
+    step.escalation_result.update(
+        obligation=_binding(run, step, child_run_id),
+        subworkflow_receipt={'child_workflow_id': child_workflow_id, 'child_run_id': child_run_id,
+                             'pinned_definition_ref': child_exec_ref, 'status': 'dispatching', 'depth': child_depth},
+    )
+    if not run.ephemeral_debug and not getattr(run, '_batch_worker', False):
+        # 先记录原子运行引用。DAG 及 foreach 的尝试号由自己的协调器持久化，worker 不能回抢父锁。
+        published = engine.store.save_step_result(run.workflow_run_id, step)
+        run.revision, run.effect_outcome = published.revision, published.effect_outcome
     new_ancestry = (*ancestry, child_workflow_id)
     new_run_chain = (*_ACTIVE_SUBWORKFLOW_RUN_CHAIN.get(), run.workflow_run_id)
 
@@ -335,74 +461,22 @@ def execute_subworkflow_step(
             )
             engine.store.save_run(child_run)
 
-        step.subworkflow_run_id = child_run.workflow_run_id
-        step.effect_id = child_run.workflow_run_id
-        step.escalation_result['subworkflow_receipt'] = {
-            'child_workflow_id': child_workflow_id,
-            'child_run_id': child_run.workflow_run_id,
-            'pinned_definition_ref': child_exec_ref,
-            'status': child_run.status,
-            'depth': child_depth,
-        }
-
-        if child_run.status == 'succeeded':
-            step.status = 'succeeded'
-            child_all_outputs: dict[str, Any] = {}
-            for s in child_run.steps:
-                if s.status in ('succeeded', 'escalated_recovered') and isinstance(s.output_snapshot, dict):
-                    child_all_outputs.update(s.output_snapshot)
-            if isinstance(child_run.final_output, dict):
-                child_all_outputs.update(child_run.final_output)
-
-            output_mapping = spec.get('output_mapping') or config.get('output_mapping')
-            if isinstance(output_mapping, dict):
-                mapped: dict[str, Any] = {}
-                for target_k, src_k in output_mapping.items():
-                    if isinstance(src_k, str):
-                        mapped[target_k] = child_all_outputs.get(src_k)
-                    else:
-                        mapped[target_k] = src_k
-                step.output_snapshot = mapped
-            else:
-                step.output_snapshot = dict(child_all_outputs)
-        elif child_run.status == 'waiting_for_agent':
-            step.status = 'waiting_for_agent'
-        elif child_run.status in ('paused_for_resume', 'paused') and not getattr(child_run, 'needs_repair', False):
-            step.status = 'paused_for_resume'
-        else:
-            step.status = 'failed'
-            step.needs_repair = True
-            failed_step = next(
-                (
-                    s for s in child_run.steps
-                    if s.status == 'failed' or (s.needs_repair and s.error_code) or s.status == 'paused_for_resume'
-                ),
-                None,
-            )
-            step.error_code = (
-                (failed_step.error_code if failed_step and failed_step.error_code else None)
-                or getattr(child_run, 'failed_step_id', '')
-                or 'SUBWORKFLOW_RUN_FAILED'
-            )
-            step.error_message = (
-                (failed_step.error_message if failed_step and failed_step.error_message else None)
-                or f'Child workflow run {child_run.workflow_run_id} failed with status {child_run.status}'
-            )
+        apply_child_result(step, child_run, spec)
+    elif isinstance(child_run, dict) and child_run.get('status') == 'queued':
+        step.status = 'waiting_for_agent'
+        step.escalation_result['subworkflow_receipt']['status'] = 'queued'
     else:
-        status = child_run.get('status', 'failed') if isinstance(child_run, dict) else 'failed'
-        err = child_run.get('error_code', 'SUBWORKFLOW_RUN_FAILED') if isinstance(child_run, dict) else 'SUBWORKFLOW_RUN_FAILED'
-        step.status = 'failed'
-        step.error_code = err
+        result = child_run if isinstance(child_run, dict) else {}
+        step.status, step.needs_repair = 'failed', True
+        step.error_code = result.get('error_code') or 'SUBWORKFLOW_RUN_FAILED'
         step.error_message = f'Child workflow run failed: {child_run}'
-        step.needs_repair = True
-        step.subworkflow_run_id = child_run_id
-        step.effect_id = child_run_id
-        step.escalation_result['subworkflow_receipt'] = {
-            'child_workflow_id': child_workflow_id,
-            'child_run_id': child_run_id,
-            'pinned_definition_ref': child_exec_ref,
-            'status': status,
-            'depth': child_depth,
-        }
+        receipt = step.escalation_result['subworkflow_receipt']
+        receipt['status'] = result.get('status', 'failed')
+        if result.get('effect_outcome') == 'not_started':
+            step.escalation_result['effect_outcome'] = 'not_started'
+            receipt['effect_outcome'] = 'not_started'
+        else:
+            step.escalation_result['effect_outcome'] = 'unknown'
+            receipt['effect_outcome'] = 'unknown'
 
     return step
