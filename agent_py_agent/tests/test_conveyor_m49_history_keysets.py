@@ -281,3 +281,58 @@ def test_scheduler_upgrade_bounded_replay_and_positional_writer_rollback(tmp_pat
         assert len(conn.execute("PRAGMA table_info(history_rows)").fetchall()) == 6
         assert conn.execute("SELECT run_id FROM history_rows").fetchone()[0] == last["run_id"]
     assert [row["run_id"] for row in _repository(tmp_path).history(limit=1)[0]] == [last["run_id"]]
+
+
+def _translate_text_appends_like_windows(monkeypatch):
+    # POSIX 文本模式不转换换行；这里按 Windows 默认（newline=None 时写出 CRLF）模拟文本追加。
+    import io
+    from pathlib import Path
+
+    original = Path.open
+
+    def open_translated(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+        if mode not in {"a", "at"}:
+            return original(self, mode, buffering, encoding, errors, newline)
+        return io.TextIOWrapper(original(self, "ab"), encoding=encoding or "utf-8", errors=errors,
+                                newline="\r\n" if newline is None else newline)
+
+    monkeypatch.setattr(Path, "open", open_translated)
+
+
+def test_jsonl_append_leaf_writes_exact_utf8_bytes_under_newline_translation(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common.json_io import append_private_jsonl_records_unlocked
+
+    _translate_text_appends_like_windows(monkeypatch)
+    path = tmp_path / "events.jsonl"
+    records = [{"n": 1, "text": "多行\n正文"}, {"n": 2, "text": "plain"}]
+    append_private_jsonl_records_unlocked(path, records)
+    expected = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in records)
+    assert "\n" in expected
+    assert path.read_bytes() == expected.encode("utf-8")
+    if os.name != "nt":
+        assert os.stat(path).st_mode & 0o777 == 0o600
+
+
+def test_scheduler_history_locators_match_physical_bytes_under_newline_translation(tmp_path, monkeypatch):
+    _translate_text_appends_like_windows(monkeypatch)
+    repo = _repository(tmp_path)
+    failed = _run(repo, 0, status="failed", trigger="manual")
+    repo._history_index.append([failed, _run(repo, 1)])
+    later = _run(repo, 2, status="skipped")
+    repo._history_index.append([later])
+    raw = repo.history_path.read_bytes()
+    assert b"\r\n" not in raw
+    with closing(sqlite3.connect(repo._history_index.path)) as conn:
+        locators = conn.execute("SELECT run_id,line_offset,line_length FROM history_rows").fetchall()
+    assert len(locators) == 3
+    for run_id, start, length in locators:
+        line = raw[start:start + length]
+        assert line.endswith(b"\n")
+        assert json.loads(line)["run_id"] == run_id
+    rows, errors = repo.history(statuses=("failed",), trigger="manual", limit=5)
+    assert errors == []
+    assert [row["run_id"] for row in rows] == [failed["run_id"]]
+    assert [row["run_id"] for row in repo.history(statuses=("skipped",))[0]] == [later["run_id"]]
+    found = existing_terminals(repo, [{**failed, "status": "running"}, {**later, "status": "running"}])
+    assert found[failed["run_id"]]["status"] == "failed"
+    assert found[later["run_id"]]["status"] == "skipped"

@@ -387,7 +387,7 @@ def _has_parent_wake(
                     if not entry.name.endswith(".json"):
                         continue
                     checked += 1
-                    if checked > 5000:
+                    if checked > _UNTIMED_WAKE_SCAN_MAX_ENTRIES:
                         return True
                     wake = read_projection_object(Path(entry.path))
                     if kind == "dedupe" and wake.get("phase") != "prepared":
@@ -435,12 +435,15 @@ def _collect_wake_refs(wake_doc: dict[str, Any], target: set[str]) -> None:
 
 
 # LLM: 同一维护切片内只扫一次未消费 wake 队列；遇软链接、超预算或坏文件返回 None 以保留全部候选保护。
+#   lane 计时调用（time_expired 且非 admin 对账）改走可跨片续扫的持久覆盖；admin 对账与未计时显式调用保持原全量读语义。
 # 函数用途: 预先索引活跃唤醒引用的 run/task ID 集合，避免每个投影目录重复全扫 wake_queue。
 def _collect_active_wake_ids(
     owner_home: Path, *, time_expired: Callable[[], bool] | None = None,
 ) -> set[str] | None:
     roots = (owner_home / "conversations", owner_home / "data/conversations")
     context = _ADMIN_RECONCILE.get()
+    if time_expired is not None and context is None:
+        return _covered_active_wake_ids(owner_home, time_expired)
 
     def conversation_roots():
         yield from roots
@@ -484,7 +487,7 @@ def _collect_active_wake_ids(
                                 context[2]['items'] += 1
                             if context is not None and context[1] is not None and context[1].exhausted(context[2]['items']):
                                 return None
-                            if checked > 5000:
+                            if checked > _UNTIMED_WAKE_SCAN_MAX_ENTRIES:
                                 return None
                             if not entry.name.endswith(".json"):
                                 continue
@@ -497,6 +500,252 @@ def _collect_active_wake_ids(
     except (OSError, ValueError, TypeError, RecursionError):
         return None
     return ref_ids
+
+
+# 活跃唤醒引用覆盖：lane 自有的私有 SQLite 旁路状态，只保存唤醒文件 stat 身份与解析出的结构化引用，不存正文。
+_WAKE_COVER_PARTS = ("data", "subagent_wake_cover.sqlite3")
+_WAKE_QUEUE_KINDS = ("urgent", "normal", "processing", "dedupe")
+_WAKE_WORKSPACE_PARTS = ("workspace", "runtime", "workspaces")
+_WAKE_DONE_STATUSES = frozenset({"consumed", "acked", "acknowledged", "cancelled"})
+# 条目覆盖值：终态无引用；"*" 表示未知/不可读/链接，只要仍在就保护全部候选；工作区目录项记 "dir"。
+_WAKE_COVER_TERMINAL = "[]"
+_WAKE_COVER_UNKNOWN = "*"
+_WAKE_COVER_DIRECTORY = "dir"
+# 未计时显式调用（无 lane 预算）超过这一条数仍按原语义 fail-closed，与 maintain_owner_agent_projections(max_dirs) 默认一致。
+_UNTIMED_WAKE_SCAN_MAX_ENTRIES = 5000
+
+
+# LLM: 与全量读同一判定；dedupe 仅 prepared 为活跃、published 及无 phase 的旧版回执为终态，其余 phase 未知须保护。
+# 函数用途: 把一条唤醒文档折算为覆盖值（终态、活跃引用 JSON 列表或未知）。
+def _wake_cover_value(wake: dict[str, Any], kind: str) -> str:
+    if kind == "dedupe" and "phase" in wake:
+        if wake["phase"] == "published":
+            return _WAKE_COVER_TERMINAL
+        if wake["phase"] != "prepared":
+            return _WAKE_COVER_UNKNOWN
+    elif kind == "dedupe":
+        return _WAKE_COVER_TERMINAL
+    if str(wake.get("status", "pending")) in _WAKE_DONE_STATUSES:
+        return _WAKE_COVER_TERMINAL
+    refs: set[str] = set()
+    _collect_wake_refs(wake, refs)
+    return json.dumps(sorted(refs))
+
+
+# LLM: 覆盖库是可丢弃的派生状态：删除或损坏只会让下一片重新覆盖并在此期间保护全部候选；锁忙立即失败（保护）。
+# 函数用途: 打开（必要时私有创建）owner 的唤醒覆盖库并补齐表结构。
+@contextmanager
+def _wake_cover_connection(owner_home: Path):
+    from ....common.nofollow_fs import ensure_private_dir
+    from ....io.sqlite_scope import ensure_private_sqlite_birth
+
+    path = owner_home.joinpath(*_WAKE_COVER_PARTS)
+    ensure_private_dir(path.parent)
+    created = ensure_private_sqlite_birth(path)
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise OSError("invalid wake cover store")
+    with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=rw", uri=True, timeout=0,
+                                 isolation_level=None)) as conn:
+        if created:
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            conn.execute("PRAGMA journal_mode=WAL")
+        # 派生状态只需防损坏不需每次提交落盘：WAL+NORMAL 断电最多丢最近进度（下一片重扫），不会损坏库。
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA journal_size_limit=1048576")
+        conn.execute("CREATE TABLE IF NOT EXISTS wake_cover_folders(folder TEXT PRIMARY KEY, identity TEXT NOT NULL, "
+                     "cursor TEXT, sweep INTEGER NOT NULL, start_sig TEXT NOT NULL, covered_sig TEXT NOT NULL, "
+                     "covered_at REAL NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS wake_cover_entries(folder TEXT NOT NULL, name TEXT NOT NULL, "
+                     "sig TEXT NOT NULL, sweep INTEGER NOT NULL, refs TEXT, PRIMARY KEY(folder, name)) WITHOUT ROWID")
+        # 终态条目占绝大多数；部分索引让核验只与活跃/未知/待读条目成正比。
+        conn.execute("CREATE INDEX IF NOT EXISTS wake_cover_live ON wake_cover_entries(folder) "
+                     "WHERE refs IS NULL OR refs != '[]'")
+        yield conn
+
+
+def _wake_cover_live_rows(conn, folder: str):
+    return conn.execute("SELECT name, refs, sweep FROM wake_cover_entries WHERE folder=? "
+                        "AND (refs IS NULL OR refs != '[]')", (folder,)).fetchall()
+
+
+def _forget_wake_folder(conn, folder: str) -> None:
+    conn.execute("DELETE FROM wake_cover_entries WHERE folder=?", (folder,))
+    conn.execute("DELETE FROM wake_cover_folders WHERE folder=?", (folder,))
+
+
+# LLM: 只 lstat，不读正文；签名 (st_ino, st_size, st_mtime_ns) 未变的条目沿用原覆盖值，变化或新条目置待读。
+# 函数用途: 把目录分页中的一个名字登记进本轮覆盖。
+def _list_wake_entry(conn, directory: Path, folder: str, name: str, kind: str, sweep: int) -> None:
+    if kind != "workspaces" and not name.endswith(".json"):
+        return
+    try:
+        info = os.lstat(directory / name)
+    except FileNotFoundError:
+        return
+    if kind == "workspaces":
+        sig = str(info.st_ino)
+        value = (_WAKE_COVER_UNKNOWN if stat.S_ISLNK(info.st_mode) else
+                 _WAKE_COVER_DIRECTORY if stat.S_ISDIR(info.st_mode) else _WAKE_COVER_TERMINAL)
+    else:
+        sig = f"{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+        value = None if stat.S_ISREG(info.st_mode) else _WAKE_COVER_UNKNOWN
+    row = conn.execute("SELECT sig FROM wake_cover_entries WHERE folder=? AND name=?", (folder, name)).fetchone()
+    if row is not None and row[0] == sig:
+        conn.execute("UPDATE wake_cover_entries SET sweep=? WHERE folder=? AND name=?", (sweep, folder, name))
+    else:
+        conn.execute("INSERT OR REPLACE INTO wake_cover_entries VALUES (?,?,?,?,?)", (folder, name, sig, sweep, value))
+
+
+# LLM: 读前后签名一致才记录结果；读中被替换则留待读，绝不把半途结果当覆盖；缺失即删条目。
+# 函数用途: 读取一个新增或变化的唤醒文件并写入覆盖值；返回 False 表示仍待读。
+def _read_wake_entry(conn, directory: Path, folder: str, name: str, kind: str) -> bool:
+    path = directory / name
+    try:
+        before = os.lstat(path)
+        value = _WAKE_COVER_UNKNOWN
+        if stat.S_ISREG(before.st_mode):
+            try:
+                value = _wake_cover_value(read_projection_object(path), kind)
+            except FileNotFoundError:
+                raise
+            except (OSError, ValueError, TypeError, RecursionError):
+                # 坏文件只要仍在原签名下就保护全部候选；签名变化后会重读。
+                value = _WAKE_COVER_UNKNOWN
+        after = os.lstat(path)
+    except FileNotFoundError:
+        conn.execute("DELETE FROM wake_cover_entries WHERE folder=? AND name=?", (folder, name))
+        return True
+    signature = f"{before.st_ino}:{before.st_size}:{before.st_mtime_ns}"
+    if signature != f"{after.st_ino}:{after.st_size}:{after.st_mtime_ns}":
+        return False
+    conn.execute("UPDATE wake_cover_entries SET sig=?, refs=? WHERE folder=? AND name=?", (signature, value, folder, name))
+    return True
+
+
+# LLM: 扫完时目录签名与起扫时一致且无待读条目，本次调用即得到完整覆盖（与原全量读同为时点保证）；
+#   只有起扫时目录 mtime 已离开粗粒度窗口的覆盖才持久绑定该签名供后续调用复用——之后任一增删改名都会改目录 mtime
+#   而使其失效；窗口内起扫的覆盖不持久，下次调用重扫。超过复核周期强制重扫（仅 lstat，未变条目不重读）。
+# 函数用途: 在 lane 预算内推进一个文件夹的覆盖；返回 covered / pending / protect。
+def _advance_wake_folder(conn, owner_home: Path, parts: tuple[str, ...], kind: str,
+                         expired: Callable[[], bool], strict: bool) -> str:
+    from ....common.cache_freshness import cache_entry_trustworthy
+    from ....user_space.directory_paging import directory_page
+    from ....user_space.storage_lanes import STORAGE_LANE_SLICE_ENTRIES
+
+    folder, directory = "/".join(parts), owner_home.joinpath(*parts)
+    row = conn.execute("SELECT identity, cursor, sweep, start_sig, covered_sig, covered_at FROM wake_cover_folders "
+                       "WHERE folder=?", (folder,)).fetchone()
+    try:
+        info = os.lstat(directory)
+    except FileNotFoundError:
+        if row is not None:
+            _forget_wake_folder(conn, folder)
+        return "covered"
+    if not stat.S_ISDIR(info.st_mode):
+        return "protect"
+    identity = f"{info.st_dev}:{info.st_ino}"
+    signature = f"{identity}:{info.st_mtime_ns}"
+    if row is not None and row[0] != identity:
+        _forget_wake_folder(conn, folder)
+        row = None
+    cursor, sweep, start_sig, covered_sig, covered_at = (
+        (None, 0, "", "", 0.0) if row is None else (json.loads(row[1]) if row[1] else None, *row[2:]))
+    if cursor is None and covered_sig == signature and 0 <= time.time() - covered_at < _WAKE_PROJECTION_REVERIFY_SECONDS:
+        return "covered"
+    outcome = "pending"
+    while not expired():
+        if cursor is None:
+            # 起扫时目录 mtime 仍在粗粒度窗口内的，同一时间片内的后续修改可能不改 mtime，故不能持久复用。
+            sweep, start_sig, covered_sig = sweep + 1, signature, ""
+            cursor = {"page": {}, "durable": cache_entry_trustworthy(info.st_mtime_ns)}
+        if "page" in cursor:
+            names, resume, complete = directory_page(owner_home, parts, cursor["page"], STORAGE_LANE_SLICE_ENTRIES,
+                                                     require_dir_fd=strict)
+            for name in names:
+                _list_wake_entry(conn, directory, folder, name, kind, sweep)
+            cursor = {"durable": cursor["durable"], **({} if complete else {"page": resume})}
+            continue
+        settled = True
+        for name, value, entry_sweep in _wake_cover_live_rows(conn, folder):
+            if value is None and entry_sweep == sweep:
+                if expired():
+                    settled = None
+                    break
+                settled = _read_wake_entry(conn, directory, folder, name, kind) and settled
+        if settled is None:
+            break
+        if kind == "workspaces":
+            for (name,) in conn.execute("SELECT name FROM wake_cover_entries WHERE folder=? AND sweep!=? AND refs=?",
+                                        (folder, sweep, _WAKE_COVER_DIRECTORY)).fetchall():
+                for queue in _WAKE_QUEUE_KINDS:
+                    _forget_wake_folder(conn, "/".join((*parts, name, "conversations", "wake_queue", queue)))
+        conn.execute("DELETE FROM wake_cover_entries WHERE folder=? AND sweep!=?", (folder, sweep))
+        latest = os.lstat(directory)
+        if f"{latest.st_dev}:{latest.st_ino}" != identity:
+            raise ValueError("wake queue directory replaced during cover sweep")
+        durable, cursor = cursor["durable"], None
+        if settled and f"{identity}:{latest.st_mtime_ns}" == start_sig:
+            outcome = "covered"
+            if durable:
+                covered_sig, covered_at = start_sig, time.time()
+            break
+        # 扫描期间目录有变化或有条目读中被替换（留待读）：按最新签名在剩余预算内重扫（未变条目仅 lstat）。
+        info, signature = latest, f"{identity}:{latest.st_mtime_ns}"
+    conn.execute("INSERT OR REPLACE INTO wake_cover_folders VALUES (?,?,?,?,?,?,?)",
+                 (folder, identity, None if cursor is None else json.dumps(cursor), sweep, start_sig, covered_sig,
+                  covered_at))
+    return outcome
+
+
+# LLM: 跨片续扫的活跃唤醒引用覆盖：每片只重读新增或变化条目，只有全部文件夹对当前身份完成覆盖才返回集合；
+#   链接、非目录、不可读、未知 phase 与未完成覆盖一律返回 None（保护全部候选）；每次调用至少推进一个单元以保证极短片仍有进展。
+# 函数用途: 为 lane 计时调用提供不随唤醒文件总数增长而失效的引用集合。
+def _covered_active_wake_ids(owner_home: Path, time_expired: Callable[[], bool]) -> set[str] | None:
+    from ....user_space.directory_paging import _native_directory_supported
+
+    calls = [0]
+
+    def expired() -> bool:
+        calls[0] += 1
+        return calls[0] > 1 and time_expired()
+
+    strict = _native_directory_supported()
+    refs: set[str] = set()
+    try:
+        with _wake_cover_connection(owner_home) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                outcome = _advance_wake_folder(conn, owner_home, _WAKE_WORKSPACE_PARTS, "workspaces", expired, strict)
+                roots = [("conversations",), ("data", "conversations")]
+                if outcome == "covered":
+                    base = "/".join(_WAKE_WORKSPACE_PARTS)
+                    for name, value, _sweep in sorted(_wake_cover_live_rows(conn, base)):
+                        if value != _WAKE_COVER_DIRECTORY:
+                            outcome = "protect"
+                            break
+                        roots.append((*_WAKE_WORKSPACE_PARTS, name, "conversations"))
+                for root in roots:
+                    for kind in _WAKE_QUEUE_KINDS:
+                        if outcome != "covered":
+                            break
+                        parts = (*root, "wake_queue", kind)
+                        outcome = _advance_wake_folder(conn, owner_home, parts, kind, expired, strict)
+                        if outcome == "covered":
+                            for _name, value, _sweep in _wake_cover_live_rows(conn, "/".join(parts)):
+                                if value is None or value == _WAKE_COVER_UNKNOWN:
+                                    outcome = "protect"
+                                    break
+                                refs.update(json.loads(value))
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            # 有界回收已删条目的空闲页；pragma 逐步执行，必须取尽结果才真正完成。
+            conn.execute("PRAGMA incremental_vacuum(64)").fetchall()
+    except (OSError, ValueError, TypeError, RecursionError, sqlite3.Error):
+        return None
+    return refs if outcome == "covered" else None
 
 
 def _has_active_parent_wake(

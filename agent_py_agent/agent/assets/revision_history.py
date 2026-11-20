@@ -730,6 +730,7 @@ def _auxiliary_skip(receipt, reason):
 
 
 def _auxiliary_window(home, cursor, budget, receipt):
+    from ..user_space.directory_paging import _native_directory_supported
     from ..user_space.storage_lanes import lane_directory_entry
 
     phase = cursor.get("phase", "requests")
@@ -745,8 +746,9 @@ def _auxiliary_window(home, cursor, budget, receipt):
     if asset_id is None:
         if budget.exhausted(receipt["items"], receipt["bytes"]):
             return None, False
+        # 有原生目录流时保持严格枚举；没有（如Windows）时走共享的有界便携重放，不让lane卡在首个阶段。
         asset_id, resume, visited, complete = lane_directory_entry(
-            home, parts, cursor.get("parent_directory", {}),
+            home, parts, cursor.get("parent_directory", {}), require_dir_fd=_native_directory_supported(),
         )
         receipt["items"] += visited
         if complete:
@@ -915,6 +917,7 @@ def _retire_auxiliary_batch(home, phase, kind, due, now, budget, *, min_items: i
 # 函数用途: 分片清理已处理演进请求、过期草稿/候选和到期自动提炼草稿。
 def _maintain_asset_auxiliary_slice(request) -> dict:
     from ..memory_store.retention_scan import current_retention_pins
+    from ..user_space.directory_paging import _native_directory_supported
     from ..user_space.storage_lanes import (
         STORAGE_LANE_SLICE_BYTES,
         STORAGE_LANE_SLICE_ENTRIES,
@@ -969,7 +972,9 @@ def _maintain_asset_auxiliary_slice(request) -> dict:
         if retry_candidate and checked_candidate:
             break
         try:
-            name, position, visited, exhausted = lane_directory_entry(home, parts, position)
+            name, position, visited, exhausted = lane_directory_entry(
+                home, parts, position, require_dir_fd=_native_directory_supported(),
+            )
         except (OSError, ValueError):
             _auxiliary_error(receipt['errors'], 'asset_auxiliary_unreadable', parts)
             receipt['deferred_reason'] = 'asset_auxiliary_unreadable'

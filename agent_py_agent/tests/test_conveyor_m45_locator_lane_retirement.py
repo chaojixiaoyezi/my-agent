@@ -2,16 +2,27 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.memory_store import retention_scan
+from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
 from agent_py_agent.agent.subagents.services.persistence import locator_hygiene as hygiene
 from agent_py_agent.agent.user_space import storage_lanes
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.agent.user_space.storage_lanes import (
+    STORAGE_LANE_SLICE_ENTRIES,
     StorageLaneBudget,
     StorageLaneRequest,
     validate_lane_receipt,
+)
+from agent_py_agent.tests.test_nw2_w8_subagent_supervision_and_hygiene import (
+    _home_fixture,
+    _lane_request,
+    _write_projection,
 )
 
 
@@ -115,3 +126,144 @@ def test_locator_stops_reading_wake_entries_at_slice_deadline(tmp_path, monkeypa
     assert len(seen) == 3
     assert receipt["items"] == receipt["protected"]["projection"] == 1
     assert not receipt["complete"]
+
+
+def _age(path, seconds=3600.0):
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
+
+
+def _dedupe_queue(home, count, *, phase="published"):
+    # 按原发布记录形状留存已处理回执（retain_handled），引用指向其它run，不应保护候选。
+    queue = home.owner_home_dir / "conversations" / "wake_queue" / "dedupe"
+    queue.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        record = {"schema_version": "wake_publication.v2", "phase": phase, "retain_handled": True,
+                  "wake_signal_id": f"wake-{index:05}",
+                  "signal": {"source_agent_id": f"other-run-{index:05}", "status": "pending"}}
+        (queue / f"thread.key-{index:05}.json").write_text(json.dumps(record), encoding="utf-8")
+    _age(queue)
+    return queue
+
+
+def _drain_until_removed(home, now, run_dir, *, slices=100):
+    cursor = {}
+    for count in range(1, slices + 1):
+        receipt = validate_lane_receipt(hygiene.maintain_subagents_lane(
+            _lane_request(home, now, cursor=cursor, max_items=STORAGE_LANE_SLICE_ENTRIES)))
+        cursor = json.loads(json.dumps(receipt["cursor"]))
+        if not run_dir.exists():
+            return count
+    return None
+
+
+def _count_queue_reads(monkeypatch, queue):
+    reads = []
+    original = hygiene.read_projection_object
+
+    def counted(path, *args, **kwargs):
+        if path.parent == queue:
+            reads.append(path.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(hygiene, "read_projection_object", counted)
+    return reads
+
+
+def test_wake_cover_resumes_across_production_slices_and_reclaims(tmp_path, monkeypatch):
+    home, now = _home_fixture(tmp_path)
+    run_dir = _write_projection(home.owner_home_dir, tmp_path, now, run_id="old-run", days=40.0)
+    queue = _dedupe_queue(home, 2000)
+
+    lookups = []
+    for _ in range(100):
+        budget = RetentionScanBudget.default()
+        lookups.append(hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=budget.exhausted))
+        if lookups[-1] is not None:
+            break
+    # 每片只推进有界的一段并留下持久进度，覆盖在有限片数内完成，而不是每片从头读。
+    assert lookups[-1] == set(), lookups[-3:]
+
+    reads = _count_queue_reads(monkeypatch, queue)
+    assert _drain_until_removed(home, now, run_dir) is not None
+    # 已覆盖且未变的回执不再重读；回执本身不被本lane改动。
+    assert reads == []
+    assert len(list(queue.iterdir())) == 2000
+
+
+def test_wake_cover_rereads_only_new_entries_and_new_prepared_wake_protects(tmp_path, monkeypatch):
+    home, now = _home_fixture(tmp_path)
+    run_dir = _write_projection(home.owner_home_dir, tmp_path, now, run_id="late-run", days=40.0)
+    queue = _dedupe_queue(home, 50)
+    lookup = lambda: hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=lambda: False)  # noqa: E731
+    assert lookup() == set()
+
+    (queue / "thread.key-new.json").write_text(json.dumps({
+        "schema_version": "wake_publication.v2", "phase": "prepared", "retain_handled": True,
+        "signal": {"source_agent_id": "late-run", "status": "pending"},
+    }), encoding="utf-8")
+    reads = _count_queue_reads(monkeypatch, queue)
+    assert "late-run" in lookup()
+    _age(queue, 7200.0)
+    assert "late-run" in lookup()
+    assert reads == ["thread.key-new.json"]
+    assert _drain_until_removed(home, now, run_dir, slices=5) is None
+    assert run_dir.exists()
+
+
+@pytest.mark.parametrize("damage", ["symlinked_folder", "unknown_phase", "unreadable_entry", "stat_error"])
+def test_wake_cover_protects_on_unverifiable_evidence(tmp_path, monkeypatch, damage):
+    home, now = _home_fixture(tmp_path)
+    run_dir = _write_projection(home.owner_home_dir, tmp_path, now, run_id="kept-run", days=40.0)
+    queue = _dedupe_queue(home, 3)
+    if damage == "symlinked_folder":
+        normal = home.owner_home_dir / "conversations" / "wake_queue" / "normal"
+        if normal.exists():
+            normal.rmdir()
+        outside = tmp_path / "outside-queue"
+        outside.mkdir()
+        normal.symlink_to(outside, target_is_directory=True)
+    elif damage == "unknown_phase":
+        (queue / "thread.key-odd.json").write_text(json.dumps({"phase": "rewinding"}), encoding="utf-8")
+    elif damage == "stat_error":
+        denied = queue / "thread.key-00001.json"
+        original = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            if os.fspath(path) == os.fspath(denied) and not lstat.listed:
+                lstat.listed = True
+                return original(path, *args, **kwargs)
+            if os.fspath(path) == os.fspath(denied):
+                raise PermissionError("simulated I/O error")
+            return original(path, *args, **kwargs)
+
+        lstat.listed = False
+        monkeypatch.setattr(os, "lstat", lstat)
+    else:
+        (queue / "thread.key-torn.json").write_text('{"phase": "prep', encoding="utf-8")
+    assert hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=lambda: False) is None
+    assert _drain_until_removed(home, now, run_dir, slices=5) is None
+    assert run_dir.exists()
+
+
+def test_wake_cover_rereads_entry_replaced_during_read(tmp_path, monkeypatch):
+    home, _now = _home_fixture(tmp_path)
+    queue = _dedupe_queue(home, 2)
+    target = queue / "thread.key-00000.json"
+    original = hygiene.read_projection_object
+    replaced = []
+
+    def read(path, *args, **kwargs):
+        value = original(path, *args, **kwargs)
+        if path == target and not replaced:
+            # 读后被原子替换为引用目标run的prepared记录（新inode）；旧读结果不能记入覆盖。
+            fresh = queue / ".replacement"
+            fresh.write_text(json.dumps({"phase": "prepared", "signal": {"source_agent_id": "swapped-run"}}),
+                             encoding="utf-8")
+            os.replace(fresh, target)
+            replaced.append(path)
+        return value
+
+    monkeypatch.setattr(hygiene, "read_projection_object", read)
+    refs = hygiene._collect_active_wake_ids(home.owner_home_dir, time_expired=lambda: False)
+    assert replaced and refs is not None and "swapped-run" in refs

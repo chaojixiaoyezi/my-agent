@@ -745,3 +745,33 @@ def test_large_invalid_pending_is_protected_without_reading(setup):
         cursor={'phase': 'drafts', 'kind': 'script', 'after': ''}), budget=StorageLaneBudget(128, size * 2, None)))
     assert path.exists() and pending.stat().st_size == 4096
     assert result['bytes'] == size and result['protected'] == 1 and result['deleted_items'] == 0
+
+
+# 函数用途: 模拟没有原生目录流/dir_fd 的宿主（如 Windows），替换两个谓词在所有已加载模块里的绑定。
+def _without_native_directory_streams(monkeypatch):
+    from agent_py_agent.agent.common import nofollow_fs
+    from agent_py_agent.agent.user_space import directory_paging
+
+    originals = {
+        '_supports_dir_fd': nofollow_fs._supports_dir_fd,
+        '_native_directory_supported': directory_paging._native_directory_supported,
+    }
+    for module in list(sys.modules.values()):
+        if not getattr(module, '__name__', '').startswith('agent_py_agent'):
+            continue
+        for name, original in originals.items():
+            if getattr(module, name, None) is original:
+                monkeypatch.setattr(module, name, lambda: False)
+
+
+def test_auxiliary_lane_completes_without_native_directory_streams(setup, monkeypatch):
+    # 便携枚举必须走完全部阶段；单叶读取/删除仍是严格dir_fd路径，在此类宿主上只能保留（fail-closed）。
+    files = [draft(setup, 'portable-old-draft', age=15), draft(setup, 'portable-new-draft', age=0),
+             candidate(setup, 'portable-candidate')]
+    _without_native_directory_streams(monkeypatch)
+    rows = drain(setup)
+    assert [error for row in rows for error in row['errors']] == []
+    assert rows[-1]['complete'] is True and rows[-1]['cycle_generation'] == 1
+    assert sum(row['skipped'].get('unknown_schema', 0) for row in rows) == len(files)
+    assert sum(row['deleted_items'] for row in rows) == 0
+    assert all(path.exists() for path in files)
