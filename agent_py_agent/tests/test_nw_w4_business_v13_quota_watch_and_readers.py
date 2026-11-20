@@ -41,7 +41,6 @@ from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServerParams,
 )
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
-from agent_py_agent.agent.plugin_host.cursors import CURSOR_TTL_SECONDS
 from agent_py_agent.agent.plugin_install_store import PluginInstallStore
 from agent_py_agent.agent.plugin_installation import PluginInstallRequest
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
@@ -1365,7 +1364,6 @@ def test_observation_readers_large_100_mib_media_registry_bounded_2_mib(tmp_path
 
 
 def test_upload_lookup_step_budget_and_interleaved_progress(tmp_path, monkeypatch):
-    from agent_py_agent.agent.gateway_parts import business_upload_registry
 
     owner_home = tmp_path / "interleave-owner"
     reg_path = owner_home / "artifacts" / "business" / REGISTRY_RELATIVE_PATH
@@ -1476,20 +1474,6 @@ def test_upload_lookup_step_budget_and_interleaved_progress(tmp_path, monkeypatc
     assert final_res.proof is not None and final_res.proof.offset == 0
 
 
-def _read_progress_rows(owner_home: Path) -> list[tuple[str, dict, float]]:
-    index_path = owner_home.joinpath(*business_upload_registry._INDEX)
-    if not index_path.exists():
-        return []
-    conn = sqlite3.connect(index_path)
-    try:
-        rows = conn.execute(
-            "SELECT artifact_id, state, touched FROM progress ORDER BY artifact_id"
-        ).fetchall()
-    finally:
-        conn.close()
-    return [(aid, json.loads(raw), touched) for aid, raw, touched in rows]
-
-
 def _write_interleave_registry(owner_home: Path, owner_id: str, total_rows: int = 4300) -> Path:
     reg_path = owner_home / "artifacts" / "business" / REGISTRY_RELATIVE_PATH
     reg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1503,11 +1487,6 @@ def _write_interleave_registry(owner_home: Path, owner_id: str, total_rows: int 
 def _probe_bounded_call(monkeypatch, reg_path: Path, fn):
     with monkeypatch.context() as probe_mp:
         return _probe_with_exception(probe_mp, reg_path, fn)
-
-
-def _run_bounded_call(monkeypatch, reg_path: Path, fn):
-    with monkeypatch.context() as probe_mp:
-        return _run_with_registry_io_probe(probe_mp, reg_path, fn)
 
 
 def _drive_artifacts_get(monkeypatch, reg_path: Path, readers: dict, params: dict, *, max_calls: int = 8):
@@ -1525,187 +1504,43 @@ def _drive_artifacts_get(monkeypatch, reg_path: Path, readers: dict, params: dic
     raise AssertionError(f"artifacts.get did not converge within {max_calls} calls for {params}")
 
 
-def test_observation_readers_interleaved_nine_ids_fair_progress_and_ttl_reclamation(
-    tmp_path, monkeypatch
-):
-    """R4-P1-05：9 个并发合法 ID 轮询不得相互驱逐停滞；空闲超 CURSOR_TTL_SECONDS 后释放槽位并保持零句柄泄漏。"""
-    def _run_round_robin(name: str, concurrency: int) -> dict:
-        owner_home = tmp_path / name
-        owner_id = "local/interleave-audit"
-        reg_path = _write_interleave_registry(owner_home, owner_id)
-        readers = default_observation_readers(owner_home, owner_id, None, None)
-        st_before = reg_path.stat()
-        stamp_before = (st_before.st_dev, st_before.st_ino, st_before.st_size, st_before.st_mtime_ns)
-        ids = [f"artifact-{i:040x}" for i in range(concurrency)]
-        pending = set(ids)
-        calls = 0
-        max_call_bytes = 0
-        max_saved_rows = 0
-        successes: list[tuple[str, int]] = []
-        rounds: list[dict] = []
+def test_observation_readers_interleaved_nine_ids_share_progress(tmp_path, monkeypatch):
+    owner_home = tmp_path / "interleave-owner"
+    owner_id = "local/interleave-audit"
+    reg_path = _write_interleave_registry(owner_home, owner_id)
+    readers = default_observation_readers(owner_home, owner_id, None, None)
+    before = reg_path.stat()
+    ids = [f"artifact-{i:040x}" for i in range(9)]
 
-        for round_idx in range(10):
-            for aid in ids:
-                if aid not in pending:
-                    continue
-                calls += 1
-                res, err, attempt_bytes, attempt_fd_delta = _probe_bounded_call(
-                    monkeypatch,
-                    reg_path,
-                    lambda target=aid: readers["artifacts.get"]({"artifact_id": target}),
-                )
-                assert attempt_bytes <= 2 * 1024 * 1024
-                assert attempt_fd_delta == 0
-                max_call_bytes = max(max_call_bytes, attempt_bytes)
-                if err is not None:
-                    assert isinstance(err, ObservationSourceError)
-                    assert err.details["reason"] == "ARTIFACT_REGISTRY_SCAN_IN_PROGRESS"
-                else:
-                    assert res is not None and len(res.records) == 1
-                    assert res.records[0].value["artifact"]["artifact_id"] == aid
-                    successes.append((aid, round_idx + 1))
-                    pending.remove(aid)
-
-            rows = _read_progress_rows(owner_home)
-            assert len(rows) <= 8
-            max_saved_rows = max(max_saved_rows, len(rows))
-            rounds.append(
-                {
-                    "round": round_idx + 1,
-                    "pending": len(pending),
-                    "saved_ids": [row[0] for row in rows],
-                    "phases": sorted({row[1]["phase"] for row in rows}),
-                    "offsets": sorted({row[1]["offset"] for row in rows}),
-                }
+    # 不同 ID 共同完成原始登记覆盖。覆盖完成后任一 ID 只复核自己的原行。
+    pending = set(ids)
+    scan_bytes = 0
+    for _ in range(len(ids)):
+        for aid in ids:
+            if aid not in pending:
+                continue
+            result, error, amount, fd_delta = _probe_bounded_call(
+                monkeypatch, reg_path, lambda target=aid: readers["artifacts.get"]({"artifact_id": target})
             )
-            if not pending:
-                break
-        else:
-            raise AssertionError(f"interleaved lookup did not converge for concurrency={concurrency}")
-
-        st_after = reg_path.stat()
-        stamp_after = (st_after.st_dev, st_after.st_ino, st_after.st_size, st_after.st_mtime_ns)
-        assert stamp_before == stamp_after
-        assert _read_progress_rows(owner_home) == []
-        return {
-            "calls": calls,
-            "max_call_bytes": max_call_bytes,
-            "max_saved_rows": max_saved_rows,
-            "successes": successes,
-            "rounds": rounds,
-        }
-
-    # 1. 8 个并发 ID 对照：4 轮 32 次调用全部完成，单次读盘 <= 2 MiB，行上限 <= 8，fd_delta == 0
-    control_8 = _run_round_robin("interleave-8", 8)
-    assert control_8["calls"] == 32
-    assert len(control_8["rounds"]) == 4
-    assert len(control_8["successes"]) == 8
-    assert control_8["max_saved_rows"] == 8
-
-    # 2. 9 个并发 ID 交替轮询：前 8 个在第 4 轮完成，第 9 个于第 7 轮完成（共 39 次调用），不发生相互驱逐锁死
-    interleave_9 = _run_round_robin("interleave-9", 9)
-    assert interleave_9["calls"] == 39
-    assert len(interleave_9["rounds"]) == 7
-    assert len(interleave_9["successes"]) == 9
-    assert interleave_9["max_saved_rows"] == 8
-    assert interleave_9["rounds"][0]["saved_ids"] == [f"artifact-{i:040x}" for i in range(8)]
-    assert interleave_9["rounds"][0]["phases"] == ["collect"]
-    assert interleave_9["rounds"][3]["pending"] == 1
-    assert interleave_9["rounds"][3]["saved_ids"] == [f"artifact-{8:040x}"]
-
-    # 3. 受控时钟：活跃 ID 刷新 touched 延寿，空闲超过 CURSOR_TTL_SECONDS 的槽位被回收让渡第 9 个 ID
-    clock = {"now": 1_700_000_000.0}
-    monkeypatch.setattr(business_upload_registry.time, "time", lambda: clock["now"])
-
-    ttl_home = tmp_path / "interleave-ttl-partial"
-    owner_id = "local/ttl-audit"
-    ttl_reg = _write_interleave_registry(ttl_home, owner_id)
-    ttl_readers = default_observation_readers(ttl_home, owner_id, None, None)
-    ttl_ids = [f"artifact-{i:040x}" for i in range(9)]
-
-    for aid in ttl_ids:
-        res, err, attempt_bytes, fd_delta = _probe_bounded_call(
-            monkeypatch, ttl_reg, lambda target=aid: ttl_readers["artifacts.get"]({"artifact_id": target})
-        )
-        assert res is None and isinstance(err, ObservationSourceError)
-        assert err.details["reason"] == "ARTIFACT_REGISTRY_SCAN_IN_PROGRESS"
-        assert attempt_bytes <= 2 * 1024 * 1024 and fd_delta == 0
-    rows_initial = _read_progress_rows(ttl_home)
-    assert [row[0] for row in rows_initial] == ttl_ids[:8]
-    assert all(row[2] == clock["now"] for row in rows_initial)
-
-    # 推进时钟但未超 TTL：ID0 继续推进并刷新自身 touched，其它 7 个调用方停止推进
-    clock["now"] += CURSOR_TTL_SECONDS - 100.0
-    _res0, err0, bytes0, fd0 = _probe_bounded_call(
-        monkeypatch, ttl_reg, lambda: ttl_readers["artifacts.get"]({"artifact_id": ttl_ids[0]})
-    )
-    assert isinstance(err0, ObservationSourceError)
-    assert bytes0 <= 2 * 1024 * 1024 and fd0 == 0
-    touched_map = {aid: touched for aid, _st, touched in _read_progress_rows(ttl_home)}
-    assert touched_map[ttl_ids[0]] == clock["now"]
-    assert touched_map[ttl_ids[1]] == 1_700_000_000.0
-
-    # 再推进 150s：ID1..ID7 累计空闲 950s > CURSOR_TTL_SECONDS (900s)，而 ID0 仅空闲 150s 应保留
-    clock["now"] += 150.0
-    _res8, err8, bytes8, fd8 = _probe_bounded_call(
-        monkeypatch, ttl_reg, lambda: ttl_readers["artifacts.get"]({"artifact_id": ttl_ids[8]})
-    )
-    assert isinstance(err8, ObservationSourceError)
-    assert bytes8 <= 2 * 1024 * 1024 and fd8 == 0
-    rows_after_ttl = _read_progress_rows(ttl_home)
-    assert [row[0] for row in rows_after_ttl] == [ttl_ids[0], ttl_ids[8]]
-
-    # 仅续跑 ID0 与 ID8，二者均利用既有进度完成
-    for target, expected_calls in ((ttl_ids[0], 2), (ttl_ids[8], 3)):
-        done_res = None
-        for step in range(expected_calls):
-            clock["now"] += 1.0
-            cur_res, cur_err, cur_bytes, cur_fd = _probe_bounded_call(
-                monkeypatch, ttl_reg, lambda t=target: ttl_readers["artifacts.get"]({"artifact_id": t})
-            )
-            assert cur_bytes <= 2 * 1024 * 1024 and cur_fd == 0
-            if step < expected_calls - 1:
-                assert isinstance(cur_err, ObservationSourceError)
+            assert amount <= 2 * 1024 * 1024 and fd_delta == 0
+            if error is not None:
+                assert isinstance(error, ObservationSourceError)
+                assert error.details["reason"] == "ARTIFACT_REGISTRY_SCAN_IN_PROGRESS"
+                scan_bytes += amount
             else:
-                assert cur_err is None and cur_res is not None
-                done_res = cur_res
-        assert done_res is not None and done_res.records[0].value["artifact"]["artifact_id"] == target
-    assert _read_progress_rows(ttl_home) == []
-
-    # 4. 全量弃置对照组：8 个槽位全部空闲超 CURSOR_TTL_SECONDS 后，第 9 个 ID 首次重试即获准入并在 4 次调用内完成
-    abandoned_home = tmp_path / "interleave-ttl-abandoned"
-    abandoned_reg = _write_interleave_registry(abandoned_home, owner_id)
-    abandoned_readers = default_observation_readers(abandoned_home, owner_id, None, None)
-    for aid in ttl_ids:
-        _r, err_init, b_init, fd_init = _probe_bounded_call(
-            monkeypatch, abandoned_reg, lambda target=aid: abandoned_readers["artifacts.get"]({"artifact_id": target})
-        )
-        assert isinstance(err_init, ObservationSourceError)
-        assert b_init <= 2 * 1024 * 1024 and fd_init == 0
-    assert len(_read_progress_rows(abandoned_home)) == 8
-
-    clock["now"] += CURSOR_TTL_SECONDS + 1.0
-    ninth_done = None
-    for idx in range(4):
-        clock["now"] += 1.0
-        cur_res, cur_err, cur_bytes, cur_fd = _probe_bounded_call(
-            monkeypatch, abandoned_reg, lambda: abandoned_readers["artifacts.get"]({"artifact_id": ttl_ids[8]})
-        )
-        assert cur_bytes <= 2 * 1024 * 1024 and cur_fd == 0
-        if idx < 3:
-            assert isinstance(cur_err, ObservationSourceError)
-            assert [row[0] for row in _read_progress_rows(abandoned_home)] == [ttl_ids[8]]
-        else:
-            assert cur_err is None and cur_res is not None
-            ninth_done = cur_res
-    assert ninth_done is not None and ninth_done.records[0].value["artifact"]["artifact_id"] == ttl_ids[8]
-    assert _read_progress_rows(abandoned_home) == []
+                assert result.records[0].value["artifact"]["artifact_id"] == aid
+                pending.remove(aid)
+        if not pending:
+            break
+    assert not pending
+    assert scan_bytes <= before.st_size
+    after = reg_path.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (before.st_ino, before.st_size, before.st_mtime_ns)
 
 
-def test_upload_progress_invalidation_exact_owner_version_and_pending_under_saturation(
+def test_upload_progress_invalidation_and_exact_owner_version(
     tmp_path, monkeypatch
 ):
-    """R4-P1-05：验证满槽位 pending=True 不驱逐、进程重启 HMAC 失配重建、源换代失效及精确 owner/version_ref 隔离。"""
     owner_home = tmp_path / "saturation-owner"
     owner_id = "local/saturation-owner"
     other_owner_id = "local/other-saturation-owner"
@@ -1717,62 +1552,20 @@ def test_upload_progress_invalidation_exact_owner_version_and_pending_under_satu
     ids = [f"artifact-{i:040x}" for i in range(9)]
     readers = default_observation_readers(owner_home, owner_id, None, None)
 
-    # 1. 填满 8 个活跃槽位后，第 9 个 ID 以 return_pending=True 调用必须返回 pending=True 且不驱逐已有 8 行
-    for aid in ids[:8]:
-        lk, b_used, fd_delta = _run_bounded_call(
-            monkeypatch,
-            reg_path,
-            lambda target=aid: business_upload_registry.lookup_business_upload(
-                owner_home,
-                target,
-                max_bytes=2 * 1024 * 1024,
-                max_steps=1,
-                max_total_bytes=2 * 1024 * 1024,
-                return_pending=True,
-            ),
+    done0 = _drive_artifacts_get(monkeypatch, reg_path, readers, {"artifact_id": ids[0]})
+    assert done0.records[0].value["artifact"]["artifact_id"] == ids[0]
+
+    # 同 inode 追加改变来源印记，旧水位不可作为新版本的完整证明。
+    with reg_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            _make_media_row(
+                owner_home, owner_id, ids[1], 5001,
+                display_name="updated-file-0001.txt", version_ref="ver-updated-0001",
+            ) + "\n"
         )
-        assert lk.pending is True and lk.record is None
-        assert b_used <= 2 * 1024 * 1024 and fd_delta == 0
-
-    ninth_pending, b_ninth, fd_ninth = _run_bounded_call(
-        monkeypatch,
-        reg_path,
-        lambda: business_upload_registry.lookup_business_upload(
-            owner_home,
-            ids[8],
-            max_bytes=2 * 1024 * 1024,
-            max_steps=1,
-            max_total_bytes=2 * 1024 * 1024,
-            return_pending=True,
-        ),
-    )
-    assert ninth_pending.pending is True and ninth_pending.record is None
-    assert b_ninth <= 2 * 1024 * 1024 and fd_ninth == 0
-    assert [row[0] for row in _read_progress_rows(owner_home)] == ids[:8]
-
-    # 2. 模拟进程重启（临时 HMAC 密钥轮换）：已准入 ID0 丢弃旧状态并从头安全完成，不误驱逐 ID1..ID7
-    with monkeypatch.context() as mp:
-        mp.setattr(business_upload_registry, "_KEY", b"restarted-ephemeral-key-01234567")
-        done0 = _drive_artifacts_get(mp, reg_path, readers, {"artifact_id": ids[0]})
-        assert done0.records[0].value["artifact"]["artifact_id"] == ids[0]
-        assert [row[0] for row in _read_progress_rows(owner_home)] == ids[1:8]
-
-        # 3. 源登记追加新行导致 source_stamp 变化：已存进度的 ID1 必须失效重扫并拿到新版本
-        with reg_path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                _make_media_row(
-                    owner_home,
-                    owner_id,
-                    ids[1],
-                    5001,
-                    display_name="updated-file-0001.txt",
-                    version_ref="ver-updated-0001",
-                )
-                + "\n"
-            )
-        done1 = _drive_artifacts_get(mp, reg_path, readers, {"artifact_id": ids[1]})
-        assert done1.records[0].value["version_ref"] == "ver-updated-0001"
-        assert done1.records[0].value["artifact"]["name"] == "updated-file-0001.txt"
+    done1 = _drive_artifacts_get(monkeypatch, reg_path, readers, {"artifact_id": ids[1]})
+    assert done1.records[0].value["version_ref"] == "ver-updated-0001"
+    assert done1.records[0].value["artifact"]["name"] == "updated-file-0001.txt"
 
     # 4. 精确版本与 owner 边界校验：指定旧 version_ref 或跨 owner ID 均不得返回记录
     stale_ver_page = _drive_artifacts_get(

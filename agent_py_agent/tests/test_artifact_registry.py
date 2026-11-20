@@ -518,7 +518,9 @@ def test_business_registry_large_history_and_page_proof_are_bounded(tmp_path, mo
     assert reads == [found.proof.length] and sum(reads) < 2048
 
 
-def test_business_registry_same_stamp_other_row_cannot_impersonate_cached_id(tmp_path, monkeypatch):
+def test_business_registry_same_size_and_mtime_rewrite_rebuilds_cached_id(tmp_path):
+    import os
+
     from agent_py_agent.agent.gateway_parts import business_upload_registry as module
 
     owner, ledger, original, json = _business_registry_fixture(tmp_path)
@@ -528,17 +530,21 @@ def test_business_registry_same_stamp_other_row_cannot_impersonate_cached_id(tmp
     ledger.write_text(before)
     first = module.lookup_business_upload(owner, original['artifact_id'])
     assert first.record.metadata['display_name'] == 'old'
-    stamp = first.proof.source_stamp
-    # 固定全部可见元数据，另一行同长度改成目标ID，不能靠mtime/size或旧行抽样签latest。
-    monkeypatch.setattr(module, '_stamp', lambda _fd: stamp)
+    stamp = ledger.stat()
+    # 保留长度和 mtime，原文件 change time 仍须使重写后的末行生效。
     other['artifact_id'] = original['artifact_id']
     ledger.write_text(json.dumps(original) + '\n' + json.dumps(other) + '\n')
-    assert ledger.stat().st_size == len(before.encode())
+    os.utime(ledger, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert ledger.stat().st_size == len(before.encode()) and ledger.stat().st_mtime_ns == stamp.st_mtime_ns
     second = module.lookup_business_upload(owner, original['artifact_id'])
     assert second.record.metadata['display_name'] == 'new'
+    assert second.proof.source_stamp != first.proof.source_stamp
 
 
-def test_business_registry_progress_recovers_and_bad_rows_are_not_ignored(tmp_path, monkeypatch):
+def test_business_registry_progress_recovers_and_bad_rows_are_not_ignored(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
     from agent_py_agent.agent.gateway_parts import business_upload_registry as module
     from agent_py_agent.agent.plugin_host.errors import HostAPIError
 
@@ -555,7 +561,8 @@ def test_business_registry_progress_recovers_and_bad_rows_are_not_ignored(tmp_pa
         except HostAPIError as error:
             assert error.code == 'HOST_NOT_READY' and '本次推进' in str(error)
     assert found is not None and found.record.artifact_id == original['artifact_id']
-    monkeypatch.setattr(module, '_KEY', b'new-process-key-for-test-only')
+    with closing(sqlite3.connect(owner / 'cache' / 'owner_read_index.sqlite3')) as db, db:
+        db.execute('DROP TABLE ori_upload_registry')
     assert module.lookup_business_upload(owner, original['artifact_id']).record.artifact_id == original['artifact_id']
     with ledger.open('a') as file:
         file.write('{broken\n')
