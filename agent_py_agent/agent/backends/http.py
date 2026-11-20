@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..common import hot_json
+from ..common.fast_dataclass import fast_replace
 from ..concurrency.interrupt import wait_interruptibly
-from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
+from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice, ToolProtocolSnapshot
 from . import gateway_helpers
 from .base import BackendOptions, BaseBackend, ProviderRequestOptions, _utc_now_iso
 from .errors import (
@@ -167,15 +168,18 @@ def _capability_probe_transport_identity(backend: object) -> tuple[object, ...]:
     return tuple(tokens)
 
 
+def _oauth_credential_fingerprint(ref: Mapping) -> str:
+    auth_part = json.dumps(dict(ref), sort_keys=True, default=str, ensure_ascii=True)
+    material = f"{auth_part}\n".encode("utf-8", errors="surrogatepass")
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
 def _credential_fingerprint(backend: object) -> str:
     """Return a short non-secret SHA-256 digest representing backend auth identity and key."""
     auth_ref = getattr(backend, "auth_ref", None)
     if isinstance(auth_ref, Mapping):
-        auth_part = json.dumps(dict(auth_ref), sort_keys=True, default=str, ensure_ascii=True)
-        # 登录身份由 auth_ref（含每次登录新发的 generation）唯一确定；访问令牌按到期自动轮换，
-        #   计入指纹会让每次续期都把能力缓存判失效、重发阻塞探针，还让每次查缓存都去取锁读凭据文件。
-        material = f"{auth_part}\n".encode("utf-8", errors="surrogatepass")
-        return hashlib.sha256(material).hexdigest()[:16]
+        # 轮换访问令牌仍属同一登录；代次来自已冻结的登录引用。
+        return _oauth_credential_fingerprint(auth_ref)
     auth_part = str(auth_ref) if auth_ref else ""
     try:
         api_key = str(getattr(backend, "api_key", "") or "")
@@ -269,6 +273,45 @@ def _revoke_capability_validity_locked(logical_key: tuple[object, ...], reason: 
         validity.revoked_reason = reason
 
 
+# 代次对象的身份与路由键分离。仅在有探测或驻留实例引用时保留。
+_credential_generations: weakref.WeakValueDictionary[object, _CapabilityValidity] = weakref.WeakValueDictionary()
+
+
+def _probe_revocation_generation(credential: object) -> tuple[int, _CapabilityValidity]:
+    with _capability_probe_lock:
+        token = _credential_generations.get(credential)
+        if token is None:
+            token = _credential_generations[credential] = _CapabilityValidity()
+        return _capability_probe_generation, token
+
+
+def _probe_generation_current_locked(snapshot: tuple[int, _CapabilityValidity]) -> bool:
+    return snapshot[0] == _capability_probe_generation and not snapshot[1].revoked_reason
+
+
+def _revoke_credential_generation_locked(credential: object, reason: str) -> None:
+    token = _credential_generations.pop(credential, None)
+    if token is not None:
+        token.revoked_reason = reason
+    for key in [key for key in _capability_probe_entries if key[-1] == credential]:
+        _capability_probe_entries.pop(key, None)
+        _record_capability_probe_miss_reason_locked(_logical_probe_identity(key), reason)
+    for key in [key for key in _capability_validity_tokens if key[-1] == credential]:
+        _revoke_capability_validity_locked(key, reason)
+        _record_capability_probe_miss_reason_locked(key, reason)
+    for key in [key for key in _capability_probe_flights
+                if len(key) == len(_probe_key_field_names) + 1 and key[-2] == credential]:
+        _capability_probe_flights.pop(key, None)
+        _record_capability_probe_miss_reason_locked(_logical_probe_identity(key[:-1]), reason)
+
+
+def invalidate_oauth_probe_generation(ref: Mapping, *, reason: str = "oauth_generation_changed") -> None:
+    """使本进程中同一登录的所有路由探测同步失效。"""
+    credential = _oauth_credential_fingerprint(ref)
+    with _capability_probe_lock:
+        _revoke_credential_generation_locked(credential, reason)
+
+
 # LLM: 跨 owner/后端实例按同一探针键单飞（X8）：冷启动并发只真实发一次探测；等待可被本轮停止打断，
 #   在途超过 TTL 则不再跟随。领头者异常原样上抛；跟随者对供应商类失败拿到一份同类型副本。
 # 函数用途: 让同一端点/模型/凭据的并发冷探测只执行一次。
@@ -347,7 +390,10 @@ def _describe_key_change(
 # 函数用途: 把一次物理探测的结论原子发布到进程内能力缓存。
 def _publish_capability_probe_locked(
     key: tuple[object, ...], capability: ProviderToolCapability | None, error: BaseException | None,
+    *, revocation_generation: tuple[int, _CapabilityValidity] | None = None, oauth: bool = False,
 ) -> None:
+    if revocation_generation is not None and not _probe_generation_current_locked(revocation_generation):
+        return
     logical_key = _logical_probe_identity(key)
     if isinstance(capability, ProviderToolCapability):
         if capability.native_supported:
@@ -360,6 +406,8 @@ def _publish_capability_probe_locked(
         reason = "negative_result"
     elif isinstance(error, ProviderConfigurationError):
         reason = _http_rejection_reason(error) or "provider_configuration"
+        if oauth and reason in {"http_401", "http_403"}:
+            _revoke_credential_generation_locked(key[-1], reason)
     else:
         return  # 供应商临时失败、中断、本地异常或非能力对象：不缓存、不摘除（与原调用方 isinstance 判断一致）
     for entry_key in [k for k in _capability_probe_entries if k == key or _logical_probe_identity(k) == logical_key]:
@@ -382,6 +430,7 @@ def invalidate_capability_probe_memo(
             # C3：在途旧 flight 失去发布资格，失效后到达的调用另起新 flight。
             _capability_probe_flights.clear()
             _capability_probe_generation += 1
+            _credential_generations.clear()
             _capability_probe_miss_reasons.clear()
             _record_capability_probe_miss_reason_locked(("*",), normalized_reason)
             for validity in list(_capability_validity_tokens.values()):
@@ -395,7 +444,11 @@ def invalidate_capability_probe_memo(
     if isinstance(previous_key, tuple) and len(previous_key) >= 5:
         keys.add(previous_key)
         logical_targets.add(_logical_probe_identity(previous_key))
+    credential_wide = normalized_reason != "http_400_tool" and isinstance(getattr(backend, "auth_ref", None), Mapping)
     with _capability_probe_lock:
+        if credential_wide:
+            for credential in {key[-1] for key in keys}:
+                _revoke_credential_generation_locked(credential, normalized_reason)
         stale = [
             entry_key
             for entry_key in _capability_probe_entries
@@ -411,9 +464,9 @@ def invalidate_capability_probe_memo(
         for logical_key in logical_targets:
             _record_capability_probe_miss_reason_locked(logical_key, normalized_reason)
             _revoke_capability_validity_locked(logical_key, normalized_reason)
-    backend._provider_tool_capability_cache = None
-    backend._provider_tool_capability_memo_key = None
-    backend._provider_tool_capability_miss_reason = None
+        backend._provider_tool_capability_cache = None
+        backend._provider_tool_capability_memo_key = None
+        backend._provider_tool_capability_miss_reason = None
 
 
 def _http_rejection_reason(exc: BaseException, request_body: object = None) -> str:
@@ -734,31 +787,31 @@ class HttpBackend(BaseBackend):
     # LLM: Serialize provider probes per backend instance and cache only proven-positive facts.
     # 函数用途: 并发冷启动共用一次有界协议探测，失败不缓存，避免暂时失败永久阻断后续任务。
     def _cached_instance_capability(self) -> ProviderToolCapability | None:
-        cached = getattr(self, "_provider_tool_capability_cache", None)
-        if cached is None:
+        if self._provider_tool_capability_cache is None:
             return None
-        generation = getattr(self, "_provider_tool_capability_generation", None)
-        if generation is not None and generation != _capability_probe_generation:
-            self._provider_tool_capability_cache = None
-            self._provider_tool_capability_memo_key = None
-            self._provider_tool_capability_miss_reason = "generation_changed"
-            return None
-        memo_key = getattr(self, "_provider_tool_capability_memo_key", None)
-        if memo_key is not None:
-            current_key = _capability_probe_key(self)
-            if memo_key != current_key:
-                self._provider_tool_capability_cache = None
-                self._provider_tool_capability_memo_key = None
-                self._provider_tool_capability_miss_reason = _describe_key_change(memo_key, current_key)
+        current_key = _capability_probe_key(self)
+        with _capability_probe_lock:
+            cached = self._provider_tool_capability_cache
+            if cached is None:
                 return None
-        validity = getattr(self, "_provider_tool_capability_validity", None)
-        if validity is not None and validity.revoked_reason:
-            # RC2：同逻辑身份已被定向失效、全局清空或当前阴性/配置拒绝撤销，驻留实例不再沿用旧阳性。
+            generation = getattr(self, "_provider_tool_capability_generation", None)
+            memo_key = getattr(self, "_provider_tool_capability_memo_key", None)
+            validity = getattr(self, "_provider_tool_capability_validity", None)
+            revocation = getattr(self, "_provider_tool_capability_revocation", None)
+            if generation is not None and generation != _capability_probe_generation:
+                reason = "generation_changed"
+            elif memo_key is not None and memo_key != current_key:
+                reason = _describe_key_change(memo_key, current_key)
+            elif revocation is not None and revocation.revoked_reason:
+                reason = revocation.revoked_reason
+            elif validity is not None and validity.revoked_reason:
+                reason = validity.revoked_reason
+            else:
+                return cached
             self._provider_tool_capability_cache = None
             self._provider_tool_capability_memo_key = None
-            self._provider_tool_capability_miss_reason = validity.revoked_reason
+            self._provider_tool_capability_miss_reason = reason
             return None
-        return cached
 
     # LLM: RC1：物理能力探针内（请求局部标记）的拒绝只上抛，由 _single_flight_probe 的当前 flight 在比较保护下发布或摘除；
     #   普通 JSON/流式/流迭代业务请求照旧立即定向失效。
@@ -786,18 +839,22 @@ class HttpBackend(BaseBackend):
     # 函数用途: 把共享 memo 的当前阳性装入本实例，返回 (阳性或 None, 查询时的失效代次)；迟到安装不能复活已撤销结论。
     def _install_memo_capability(
         self, key: tuple[object, ...], expected: ProviderToolCapability | None = None,
+        *, revocation_generation: tuple[int, _CapabilityValidity] | None = None,
     ) -> tuple[ProviderToolCapability | None, int]:
+        revocation_generation = revocation_generation or _probe_revocation_generation(key[-1])
         memo_hit, generation = _lookup_capability_probe_memo(key)
         if memo_hit is None or (expected is not None and memo_hit is not expected):
             return None, generation
         with _capability_probe_lock:
-            if _capability_probe_entries.get(key) is not memo_hit:
+            if (not _probe_generation_current_locked(revocation_generation)
+                    or _capability_probe_entries.get(key) is not memo_hit):
                 return None, generation
             logical_key = _logical_probe_identity(key)
             validity = _capability_validity_tokens.get(logical_key)
             if validity is None:
                 validity = _capability_validity_tokens[logical_key] = _CapabilityValidity()
             self._provider_tool_capability_validity = validity
+            self._provider_tool_capability_revocation = revocation_generation[1]
             self._provider_tool_capability_cache = memo_hit
             self._provider_tool_capability_memo_key = key
             self._provider_tool_capability_generation = _capability_probe_generation
@@ -823,7 +880,9 @@ class HttpBackend(BaseBackend):
             if cached is not None:
                 return cached
             key = _capability_probe_key(self)
-            memo_hit, generation = self._install_memo_capability(key)
+            revocation_generation = _probe_revocation_generation(key[-1])
+            oauth = isinstance(getattr(self, "auth_ref", None), Mapping)
+            memo_hit, _generation = self._install_memo_capability(key, revocation_generation=revocation_generation)
             if memo_hit is not None:
                 return memo_hit
             miss_reason = self._resolve_capability_probe_miss_reason(key)
@@ -833,8 +892,9 @@ class HttpBackend(BaseBackend):
                 # X8：同一完整能力身份（后端、端点、模型、流式、传输身份、静态路由头、凭据指纹）且同一失效代次的冷探测单飞；
                 # 不同凭据或失效之后的调用不会并入旧的在途探测。C3：只有收尾时仍是当前在途的物理发起者才原子发布结论。
                 capability = _single_flight_probe(
-                    (*key, generation), self._probe_tool_capability_uncached,
-                    lambda result, error: _publish_capability_probe_locked(key, result, error))
+                    (*key, revocation_generation), self._probe_tool_capability_uncached,
+                    lambda result, error: _publish_capability_probe_locked(
+                        key, result, error, revocation_generation=revocation_generation, oauth=oauth))
             except ProviderConfigurationError:
                 # 全局摘除与原因已由当前发起者在 flight 收尾时原子完成；这里只清本实例旧诊断，下一次按全局原因计账。
                 self._provider_tool_capability_miss_reason = None
@@ -851,11 +911,24 @@ class HttpBackend(BaseBackend):
                     capability.native_supported,
                 )
                 # 只有本结论已作为当前事实进入 memo 才缓存到实例；旧 flight 的结果只交给本次调用。
-                self._install_memo_capability(key, expected=capability)
+                self._install_memo_capability(
+                    key, expected=capability, revocation_generation=revocation_generation,
+                )
                 self._provider_tool_capability_miss_reason = None
             return capability
         finally:
             self._provider_tool_capability_lock.release()
+
+    def probe_tool_protocol_snapshot(self, *, run_id: str) -> ToolProtocolSnapshot | ProviderToolCapability:
+        """在同一代次检查下冻结 HTTP 探测结论。"""
+        generation = _probe_revocation_generation(_credential_fingerprint(self))
+        capability = self.probe_tool_capability()
+        if not isinstance(capability, ProviderToolCapability) or not capability.native_supported:
+            return capability
+        with _capability_probe_lock:
+            if not _probe_generation_current_locked(generation):
+                return fast_replace(capability, native_supported=False, evidence="probe_revocation_generation_changed")
+            return ToolProtocolSnapshot(run_id, "native", capability)
 
     # LLM: Caller holds `_provider_tool_capability_lock`; probe the ordinary auto tool-choice
     # surface, not forced-call or reasoning-disable support. Only a matching nonce proves support.

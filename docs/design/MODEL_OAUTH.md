@@ -260,3 +260,11 @@ Cloudflare 浏览器挑战（`cf-mitigated: challenge`），只能在真实浏�
 
 参考：[设备码标准](https://www.rfc-editor.org/rfc/rfc8628.html)、[PKCE 标准](https://www.rfc-editor.org/rfc/rfc7636.html)、
 [官方账号认证说明](https://learn.chatgpt.com/docs/auth)。
+
+## 2026-11-19 M62 探测代次与飞书换卡提交
+
+OAuth 路由能力键与登录失效代次分别管理。探测发布、实例安装和运行快照在同一进程的缓存锁内复核代次。退出、替换登录或凭据被判无效后，本进程中该登录的在途结果失去所有路由的发布资格。实际模型请求仍由凭据目录校验登录代次，令牌常规续期沿用原登录代次。
+
+飞书先在旧绑定上保存后继 ID 和递增后的显示代次，再释放卡锁，用后继 ID 作为发送 UUID。控制器记录送达回执后按显示代次提交，迟到的后继标记为 `superseded`。收到回执后的发布重试直接续办。回执缺失时仅在飞书的 UUID 去重窗口内复用原请求，窗口外保留未决状态。[飞书发送消息接口](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create?lang=en-US)
+
+验收覆盖跨路由和退出期间的探测失效、回执已保存后的发布中断、同代次并发换卡、CAS 失败、UUID 透传与未决回执的重试窗口。

@@ -1225,8 +1225,10 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
 
     # LLM: 原生卡片不回落文本；目标是宿主解析的个人或原群身份，uuid 幂等；回执仅含真实身份或安全平台错误事实。
     # 函数用途: 发送原生控制卡，返回消息/聊天 ID 或明确拒绝诊断，不返回供应商正文。
-    def send_control_card(self, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, Any]:
-        return _send_feishu_control_card(self, user_id, card, idempotency_key=idempotency_key)
+    def send_control_card(
+        self, user_id: str, card: dict, *, idempotency_key: str, uuid_value: str | None = None,
+    ) -> dict[str, Any]:
+        return _send_feishu_control_card(self, user_id, card, idempotency_key=idempotency_key, uuid_value=uuid_value)
 
     def send_agent_panel_card(
         self,
@@ -1573,13 +1575,17 @@ def _start_feishu_progress(adapter: FeishuAdapter, user_id: str, text: str, *, r
 
 # LLM: 卡片只认供应商成功身份；明确拒绝仅保留数字code和固定宿主码，绝不回传供应商正文或秘密。
 # 函数用途: 沿原认证、准确个人/群编号与稳定 UUID 发控制卡，保留精确回调来源。
-def _send_feishu_control_card(adapter: FeishuAdapter, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, Any]:
+def _send_feishu_control_card(
+    adapter: FeishuAdapter, user_id: str, card: dict, *, idempotency_key: str, uuid_value: str | None = None,
+) -> dict[str, Any]:
     token = adapter._get_tenant_access_token()
     if not token:
         return {"error_code": "CHANNEL_CONTROL_AUTH_UNAVAILABLE", "effect_outcome": "not_started"}
+    if uuid_value is None:
+        uuid_value = _feishu_request_uuid(idempotency_key, component="control", index=0)
     result = _feishu_msg_api_with_retry("POST", _message_send_path(user_id),
         _message_body(receive_id=user_id, msg_type="interactive", content=json.dumps(card, ensure_ascii=False),
-                      uuid_value=_feishu_request_uuid(idempotency_key, component="control", index=0)), token)
+                      uuid_value=uuid_value), token)
     code = result.get("code")
     if isinstance(code, int) and not isinstance(code, bool) and code != 0:
         return {"error_code": "CHANNEL_CONTROL_PROVIDER_REJECTED", "provider_code": code, "effect_outcome": "not_started"}

@@ -140,10 +140,11 @@ def _setup_test_agent_and_server(tmp_path):
     adapter._get_tenant_access_token = lambda: "synthetic_access_token"
 
     sent_cards = []
-    def _mock_send_control_card(user_id, card, *, idempotency_key):
+    def _mock_send_control_card(user_id, card, *, idempotency_key, uuid_value=None):
         msg_id = f"om_{len(sent_cards) + 1}"
         chat_id = "oc_p2p" if user_id.startswith("ou_") else user_id
-        receipt = {"message_id": msg_id, "chat_id": chat_id, "card": card, "idempotency_key": idempotency_key}
+        receipt = {"message_id": msg_id, "chat_id": chat_id, "card": card,
+                   "idempotency_key": idempotency_key, "uuid": uuid_value}
         sent_cards.append((user_id, receipt))
         return receipt
 
@@ -645,6 +646,7 @@ def test_14_day_card_reissue_and_old_card_expired_notice(tmp_path) -> None:
         assert len(sent_cards) == 2
         new_sent = sent_cards[1]
         assert new_sent[0] == "ou_user_1"
+        assert new_sent[1]["uuid"] == _read_panel_state(state_path)["successor_id"]
 
         # 对旧卡再次点击，直接返回只读过期警告
         expired_res = adapter._handle_card_action({
@@ -926,12 +928,13 @@ def test_14_day_reissue_send_failure_preserves_expired_false(tmp_path) -> None:
         assert st_after_fail["expired"] is False
 
         # 恢复正常的 send_control_card
-        def _mock_send_ok(user_id, card, *, idempotency_key):
+        def _mock_send_ok(user_id, card, *, idempotency_key, uuid_value=None):
             rec = {
                 "message_id": f"om_reissued_{len(sent_cards) + 1}",
                 "chat_id": "oc_p2p",
                 "card": card,
                 "idempotency_key": idempotency_key,
+                "uuid": uuid_value,
             }
             sent_cards.append((user_id, rec))
             return rec
