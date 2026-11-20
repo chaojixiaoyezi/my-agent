@@ -1057,7 +1057,7 @@ def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> d
     )
     target_exit_code = _run_target_exit_code(run)
     payload = {
-        "execution": normalize_execution(run.get("execution")),
+        "execution": normalize_execution(run.get("execution"), allow_legacy_cwd=True),
         "origin_thread_id": run.get("origin_thread_id", run.get("thread_id")),
         "thread_id": run.get("thread_id"),
         "precheck_status": (run.get("precheck_observation") or {}).get("status", "pending" if run.get("precheck") else "disabled"),
