@@ -16,7 +16,9 @@ import json
 import logging
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import asdict
 from functools import partial
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -24,12 +26,12 @@ from ...common.request_execution_ports import (
     gateway_short_transaction,
     raise_if_transport_uncertain,
 )
-from ..models import SUBAGENT_FAILURE_STATUSES, TaskStatus
+from ..models import SUBAGENT_FAILURE_STATUSES, SubAgentRunnerResult, TaskStatus
 from .persistence.run_index import SubagentRunIndexUnavailable
 
 if TYPE_CHECKING:
-    from ...runtime_db.repository import RuntimeRepository
-    from ..models import SubAgentRunnerResult, SubAgentTask
+    from ...runtime_db.repository import RuntimeRepository, _RunnerCloseoutReceipt
+    from ..models import SubAgentTask
 
 # LLM: 待重试事实挂在子代理 canonical task 的 attributes 上；它与 runtime.db 是**不同**
 # 存储域，因此 runtime.db 写失败不会连带写不进重试事实。schema 必须版本化，恢复链只认
@@ -50,6 +52,7 @@ CLOSEOUT_ALREADY_CONSISTENT = "already_consistent"
 CLOSEOUT_NOT_APPLICABLE = "not_applicable"
 CLOSEOUT_WRITE_ERROR = "write_error"
 CLOSEOUT_UNKNOWN_STATUS = "unknown_status"
+CLOSEOUT_WAITING_FOR_EVIDENCE = "waiting_for_evidence"
 CLOSEOUT_MISSING_RUN = "missing_run"
 CLOSEOUT_CONFLICT = "conflict"
 CLOSEOUT_STALE_ATTEMPT = "stale_attempt"
@@ -86,11 +89,7 @@ _RUN_STATUS_FOR_TASK_STATUS = {
 _DELIVERY_PENDING = "pending"
 _DELIVERY_DELIVERED = "delivered"
 
-# LLM: 收口重试退避（obsfix12 2026-10-05 生产实证）：unknown run 只有人工 /recover 能变，
-#   60 秒一巡的恢复链却会永远重试同一条 WAL，每次 settle 都写一条 status_conflict——生产
-#   每天 400–1000 条重复就是这么来的。重试超过阈值后按 attempts 拉长间隔（60s×attempts，
-#   封顶 1 小时），让"永远不会成功"的形态退化为每小时最多一次，同时保证 /recover 后最迟
-#   1 小时内重新推进。三处常量与 test_unknown_closeout_retry_backoff 用例同步。
+# 暂时写入故障和没有退出来源的旧状态沿用退避。已登记证据的等待只看修订，不进入退避。
 # 退避起点：重试次数超过这个值后开始拉长间隔。
 CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT = 2
 # 退避基数：单次等待 = 基数 × 重试次数。
@@ -172,11 +171,16 @@ def settle_runtime_run_for_result(
     task: Any,
     params: Any,
     result: Any,
+    *,
+    replay_fact: dict[str, Any] | None = None,
+    file_revision: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     with gateway_short_transaction('child_settle_runtime_run_for_result_commit'):
         if bool(getattr(params, "dry_run", False)):
             return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "dry_run")
         target = closeout_target_run_status(params, result, task)
+        if result is None and replay_fact is not None:
+            target = str(replay_fact.get("target_run_status") or "")
         if not target:
             return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "non_terminal_runner_status")
         if repo is None:
@@ -192,7 +196,12 @@ def settle_runtime_run_for_result(
                 "target_run_status": target, "run_id": run_id, "attempt_id": attempt_id,
                 "detail": _error_text(exc),
             }
+        expected_run = str(replay_fact.get("agent_run_id") or "") if replay_fact is not None else ""
         if authority is None:
+            if expected_run:
+                return {"state": CLOSEOUT_MISSING_RUN, "reason": "no_such_run", "retryable": True,
+                        "target_run_status": target, "run_id": run_id, "attempt_id": attempt_id,
+                        "agent_run_id": expected_run}
             return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_runtime_authority")
         agent_run_id = str(authority["agent_run_id"] or "")
         if not agent_run_id:
@@ -203,6 +212,22 @@ def settle_runtime_run_for_result(
             "attempt_id": attempt_id,
             "agent_run_id": agent_run_id,
         }
+        if expected_run and expected_run != agent_run_id:
+            return {**base, "state": CLOSEOUT_STALE_ATTEMPT, "reason": "runtime_run_replaced", "retryable": False}
+        runner_receipt = None
+        if "status" in authority.keys() and authority["status"] == "unknown" and attempt_id:
+            fact = replay_fact if replay_fact is not None else pending_closeout(task)
+            if fact is not None:
+                if replay_fact is None:
+                    file_revision = _runner_result_file_revision(fact)
+                    persisted = _load_persisted_runner_result(fact)
+                    if persisted != result:
+                        persisted = None
+                else:
+                    persisted = result
+                runner_receipt = _runner_closeout_receipt(fact, persisted, target, file_revision)
+        if result is None and runner_receipt is None:
+            return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "runner_result_missing")
         try:
             settled = repo.settle_agent_run(
                 agent_run_id=agent_run_id,
@@ -216,6 +241,7 @@ def settle_runtime_run_for_result(
                     "runtime_reason": str(getattr(result, "message", "") or "")[:200],
                     "runtime_source": "subagent_runner",
                 },
+                **({"runner_receipt": runner_receipt} if runner_receipt is not None else {}),
             )
         except Exception as exc:  # noqa: BLE001 - 写库异常绝不能再被吞成 None
             raise_if_transport_uncertain(exc)
@@ -235,6 +261,13 @@ def settle_runtime_run_for_result(
                     "retryable": False, "observed_run_status": observed}
         if reason == "stale_attempt":
             return {**base, "state": CLOSEOUT_STALE_ATTEMPT, "reason": "stale_attempt", "retryable": False}
+        if reason == CLOSEOUT_WAITING_FOR_EVIDENCE:
+            return {
+                **base, "state": CLOSEOUT_WAITING_FOR_EVIDENCE,
+                "reason": reason, "retryable": False,
+                "evidence_revision": settled["evidence_revision"],
+                "evidence_kind": settled["evidence_kind"], "evidence_ref": settled["evidence_ref"],
+            }
         if reason == "unknown_status":
             return {**base, "state": CLOSEOUT_UNKNOWN_STATUS, "reason": "unknown_status", "retryable": True}
         if reason == "no_such_run":
@@ -244,6 +277,42 @@ def settle_runtime_run_for_result(
         # 未知拒绝原因 fail-closed：不通知、不冒充完成，留待重试与诊断。
         return {**base, "state": CLOSEOUT_UNKNOWN_STATUS, "reason": reason or "unknown_rejection",
                 "retryable": True}
+
+
+def _runner_result_digest(payload: dict[str, Any]) -> str:
+    # 原结果文件按 run 重用，WAL 用序列化摘要把具体版本绑定到 attempt。
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("ascii")
+    return sha256(encoded).hexdigest()
+
+
+def _runner_result_file_revision(fact: dict[str, Any]) -> tuple[int, ...]:
+    path = str(fact.get("runner_result_json") or "")
+    if not path:
+        return ()
+    try:
+        stamp = Path(path).stat()
+    except OSError:
+        return ()
+    return stamp.st_dev, stamp.st_ino, stamp.st_size, stamp.st_mtime_ns, stamp.st_ctime_ns
+
+
+def _runner_closeout_receipt(
+    fact: dict[str, Any], result: SubAgentRunnerResult | None, target: str, file_revision: tuple[int, ...],
+) -> _RunnerCloseoutReceipt:
+    created_at = getattr(result, "created_at", None)
+    valid = (
+        result is not None and result.run_id == fact.get("run_id")
+        and result.status == fact.get("target_status")
+        and _RUN_STATUS_FOR_TASK_STATUS.get(result.status) == target
+        and result.dry_run is False and result.ok is (target == "done")
+        and type(created_at) in {int, float} and 0 < created_at < float("inf")
+        and (not fact.get("turn_end_reason") or result.turn_end_reason == fact["turn_end_reason"])
+    )
+    return {
+        "run_id": str(fact.get("run_id") or ""), "attempt_id": str(fact.get("attempt_id") or ""),
+        "status": target if valid else "", "created_at": created_at if valid else 0,
+        "file_revision": file_revision, "bound": valid or bool(fact.get("runner_result_digest")),
+    }
 
 
 # LLM: 待重试事实是跨进程、跨重启的唯一恢复依据；只从结构化字段重建，不读模型正文。
@@ -295,11 +364,15 @@ def record_pending_closeout(
     delivery: str = _DELIVERY_PENDING,
 ) -> bool:
     existing = pending_closeout(task) or {}
+    run_id = str(getattr(task, "id", "") or "")
+    attempt_id = str(getattr(params, "attempt_id", "") or "")
+    if existing.get("attempt_id") != attempt_id or existing.get("run_id") != run_id:
+        existing = {}
     attempts = int(existing.get("attempts") or 0) + 1
     fact = {
         "schema_version": RUNTIME_CLOSEOUT_SCHEMA,
-        "run_id": str(getattr(task, "id", "") or ""),
-        "attempt_id": str(getattr(params, "attempt_id", "") or ""),
+        "run_id": run_id,
+        "attempt_id": attempt_id,
         "agent_run_id": str(outcome.get("agent_run_id") or existing.get("agent_run_id") or ""),
         "target_status": str(
             getattr(result, "status", "") or getattr(task, "status", "") or ""
@@ -316,6 +389,14 @@ def record_pending_closeout(
         "created_at": float(existing.get("created_at") or time.time()),
         "updated_at": time.time(),
     }
+    digest = existing.get("runner_result_digest")
+    if not digest and outcome.get("state") == "pending" and isinstance(result, SubAgentRunnerResult):
+        digest = _runner_result_digest(asdict(result))
+    if digest:
+        fact["runner_result_digest"] = digest
+    if outcome.get("state") == CLOSEOUT_WAITING_FOR_EVIDENCE:
+        for field in ("evidence_revision", "evidence_kind", "evidence_ref"):
+            fact[field] = outcome[field]
     return _store_closeout(save_task, task, fact)
 
 
@@ -358,6 +439,9 @@ def record_unpersisted_closeout(repo: RuntimeRepository | None, task: Any, param
         "output_json": str(getattr(task, "output_json", "") or ""),
         "task_status": str(getattr(task, "status", "") or ""),
     }
+    digest = (pending_closeout(task) or {}).get("runner_result_digest")
+    if digest:
+        payload["runner_result_digest"] = digest
     agent_run_id = ""
     lookup = getattr(repo, "agent_run_for_run_id", None)
     if callable(lookup):
@@ -497,6 +581,20 @@ def advance_pending_closeout(
     *, save_task: Callable[[SubAgentTask], object], notify_result: CloseoutNotifier,
 ) -> dict[str, Any]:
     with gateway_short_transaction('child_advance_pending_closeout_commit'):
+        file_revision = None
+        waiting_for_evidence = fact.get("closeout_state") == CLOSEOUT_WAITING_FOR_EVIDENCE
+        if waiting_for_evidence:
+            if repo is None:
+                return {"advanced": False, "state": CLOSEOUT_WAITING_FOR_EVIDENCE}
+            kind = str(fact.get("evidence_kind") or "")
+            if kind == "runner_result":
+                file_revision = _runner_result_file_revision(fact)
+            current_revision = repo.runner_closeout_evidence_revision(
+                agent_run_id=str(fact.get("agent_run_id") or ""), kind=kind,
+                ref=str(fact.get("evidence_ref") or ""), file_revision=file_revision or (),
+            )
+            if current_revision is None or current_revision == fact.get("evidence_revision"):
+                return {"advanced": False, "state": CLOSEOUT_WAITING_FOR_EVIDENCE}
         remaining = _closeout_retry_backoff_remaining(fact, time.time())
         if remaining > 0:
             # LLM: 退避窗口内不读盘、不重试、不刷新事实、不写事件——避免每次巡检重复读取解码
@@ -504,11 +602,17 @@ def advance_pending_closeout(
             return {"advanced": False, "state": "backoff_wait",
                     "retry_after_seconds": round(remaining, 3)}
         params = _CloseoutReplayParams(fact)
+        # 取文件版本在解码之前，读与修复并发时下一轮仍会看到版本变化。
+        if file_revision is None:
+            file_revision = _runner_result_file_revision(fact) if repo is not None else ()
         result = _load_persisted_runner_result(fact)
-        if result is None:
-            # runner_result 落盘缺失说明事实与持久化结果不一致：保持事实并留诊断，绝不伪造结论。
+        if result is None and repo is None:
             return {"advanced": False, "state": "runner_result_missing"}
-        outcome = settle_runtime_run_for_result(repo, params=params, task=task, result=result)
+        outcome = settle_runtime_run_for_result(
+            repo, params=params, task=task, result=result, replay_fact=fact, file_revision=file_revision,
+        )
+        if waiting_for_evidence and outcome.get("state") == CLOSEOUT_MISSING_RUN:
+            return {"advanced": False, "state": CLOSEOUT_WAITING_FOR_EVIDENCE}
         if outcome.get("state") in REJECTED_CLOSEOUT_STATES:
             # LLM: 被拒（与权威终态冲突 / 已换代）不是"以后可能成"——重试永远不会成功。
             # 所以诊断只写一次，然后清账：否则每个 reconcile 周期都会重复写事件，
@@ -519,6 +623,8 @@ def advance_pending_closeout(
                 # 清账失败：事实仍在，下一轮会再次走到这里（仍然只诊断、不交付）；不报 advanced 成功。
                 return {"advanced": False, "state": "cleanup_failed", "rejected": True}
             return {"advanced": False, "state": str(outcome.get("state") or ""), "rejected": True}
+        if result is None and outcome.get("state") != CLOSEOUT_WAITING_FOR_EVIDENCE:
+            return {"advanced": False, "state": "runner_result_missing"}
         if outcome.get("state") not in COMMITTED_CLOSEOUT_STATES | {CLOSEOUT_NOT_APPLICABLE}:
             # 仍未收口（写库失败 / 状态未知等可重试形态）：刷新事实里的诊断字段，等待下一次恢复。
             refreshed = record_pending_closeout(
@@ -637,6 +743,8 @@ def _restore_closeout_event(
                 "created_at": float(event.get("created_at") or time.time()),
                 "updated_at": time.time(),
             }
+            if payload.get("runner_result_digest"):
+                fact["runner_result_digest"] = payload["runner_result_digest"]
             result = _load_persisted_runner_result(fact)
             if result is None or str(result.run_id) != run_id:
                 return 0
@@ -733,9 +841,14 @@ def _load_persisted_runner_result(fact: dict[str, Any]) -> Any | None:
     if not isinstance(payload, dict):
         return None
     try:
-        from ..model_runtime import SubAgentRunnerResult
-
-        allowed = {item.name for item in SubAgentRunnerResult.__dataclass_fields__.values()}
+        if payload.get("run_id") != fact.get("run_id"):
+            return None
+        if fact.get("target_status") and payload.get("status") != fact["target_status"]:
+            return None
+        digest = fact.get("runner_result_digest")
+        if digest and _runner_result_digest(payload) != digest:
+            return None
+        allowed = SubAgentRunnerResult.__dataclass_fields__
         return SubAgentRunnerResult(**{key: value for key, value in payload.items() if key in allowed})
     except Exception as transport_error:  # noqa: BLE001
         raise_if_transport_uncertain(transport_error)
@@ -770,6 +883,7 @@ __all__ = [
     "CLOSEOUT_SETTLED",
     "CLOSEOUT_STALE_ATTEMPT",
     "CLOSEOUT_UNKNOWN_STATUS",
+    "CLOSEOUT_WAITING_FOR_EVIDENCE",
     "CLOSEOUT_WRITE_ERROR",
     "COMMITTED_CLOSEOUT_STATES",
     "REJECTED_CLOSEOUT_STATES",

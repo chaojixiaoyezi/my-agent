@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from ..manager_runner_result_payload import RecordRunnerResultParams
 from ..models import SubAgentRunnerResult, SubAgentTask
 from .runtime_closeout import (
+    CLOSEOUT_WAITING_FOR_EVIDENCE,
     REJECTED_CLOSEOUT_STATES,
     RETRYABLE_CLOSEOUT_STATES,
     clear_closeout,
@@ -82,7 +83,8 @@ def commit_runner_result(
             return
         outcome = settle_runtime_run_for_result(runtime_db, task, params, result)
         state = str(outcome.get("state") or "")
-        if state in RETRYABLE_CLOSEOUT_STATES:
+        # 证据等待与暂时写入错误一样先保留 WAL，下一次仅由证据修订驱动。
+        if state == CLOSEOUT_WAITING_FOR_EVIDENCE or state in RETRYABLE_CLOSEOUT_STATES:
             if wal_state != "not_required":
                 ensure_closeout_fact(save_task, task, params, result, outcome)
             record_closeout_event(

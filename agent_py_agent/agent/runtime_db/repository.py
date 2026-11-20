@@ -35,10 +35,10 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 _REQUEST_STAGE_TIMING: ContextVar[dict | None] = ContextVar("runtime_request_stage_timing", default=None)
 
@@ -79,11 +79,19 @@ from ..common.heartbeat import (
 )
 from ..common.id_generator import new_id
 from ..common.strict_json import load_strict_json
+from ..contracts.effect_settlement import (
+    SETTLEMENT_FAILED,
+    SETTLEMENT_NOT_STARTED,
+    SETTLEMENT_PARTIAL,
+    SETTLEMENT_UNKNOWN,
+    classify_effect_settlement,
+)
 from ..conversation.business_contracts import BusinessExecutionContext, HostParentExecutionRef
 from ..scheduler.repository import (
     _process_state as _proc_state,
 )
 from .delivery_operations import RuntimeDeliveryMixin
+from .executor_liveness import executor_exit_reason
 from .host_commands import (
     HostCommandBinding,
     HostCommandIdentity,
@@ -257,20 +265,145 @@ def _mark_dead_runner_attempt_unknown(conn, row, current: float) -> bool:
         return False
     attempt_id = str(row["current_attempt_id"] or "")
     agent_run_id = str(row["agent_run_id"] or "")
+    # 保留原 runner 的身份和首次退出观测，供重启后回读同一轮证明。
+    meta["runner_exit_observed_at"] = current
     changed = conn.execute(
-        "UPDATE agent_attempts SET status='unknown', ended_at=? WHERE attempt_id=? "
-        "AND status IN ('running','created') AND EXISTS "
-        "(SELECT 1 FROM agent_runs WHERE agent_run_id=? AND current_attempt_id=?)",
-        (current, attempt_id, agent_run_id, attempt_id),
+        "UPDATE agent_attempts SET status='unknown', ended_at=?, metadata_json=? WHERE attempt_id=? "
+        "AND agent_run_id=? AND metadata_json=? AND status IN ('running','created') AND EXISTS "
+        "(SELECT 1 FROM agent_runs WHERE agent_run_id=? AND current_attempt_id=? "
+        "AND current_attempt_generation=agent_attempts.attempt_generation AND status IN ('','created'))",
+        (current, json.dumps(meta, ensure_ascii=False), attempt_id, agent_run_id, row["metadata_json"],
+         agent_run_id, attempt_id),
     ).rowcount
     if changed != 1:
         return False
     conn.execute(
         "UPDATE agent_runs SET status='unknown', updated_at=? "
-        "WHERE agent_run_id=? AND current_attempt_id=?",
+        "WHERE agent_run_id=? AND current_attempt_id=? AND status IN ('','created')",
         (current, agent_run_id, attempt_id),
     )
     return True
+
+
+class _RunnerCloseoutReceipt(TypedDict):
+    run_id: str
+    attempt_id: str
+    status: str
+    created_at: float
+    file_revision: tuple[int, ...]
+    bound: bool
+
+
+def _closeout_evidence_row(conn, agent_run_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT ar.run_id, ar.task_run_id, ar.status AS run_status, ar.current_attempt_id, "
+        "ar.current_attempt_generation, aa.attempt_generation, aa.status AS attempt_status, "
+        "aa.started_at, aa.ended_at, aa.metadata_json "
+        "FROM agent_runs ar LEFT JOIN agent_attempts aa "
+        "ON aa.attempt_id=ar.current_attempt_id AND aa.agent_run_id=ar.agent_run_id "
+        "WHERE ar.agent_run_id=?",
+        (agent_run_id,),
+    ).fetchone()
+
+
+def _recorded_runner_exit(metadata_json: object) -> bool:
+    meta = _json_object(metadata_json)
+    observed_at = meta.get("runner_exit_observed_at")
+    if type(observed_at) in {int, float} and observed_at > 0:
+        return True
+    try:
+        return bool(executor_exit_reason(meta))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _operation_effect(row: sqlite3.Row) -> str:
+    """从原操作行读取显式效果，未启动占位也须遵从已有回执。"""
+    try:
+        payload = load_strict_json(row["outcome_json"])
+    except (TypeError, ValueError, RecursionError):
+        return SETTLEMENT_UNKNOWN
+    if not isinstance(payload, dict) or payload.get("schema", "managed_operation.v1") != "managed_operation.v1":
+        return SETTLEMENT_UNKNOWN
+    receipt = payload.get("result", {})
+    if not isinstance(receipt, dict):
+        return SETTLEMENT_UNKNOWN
+    outcome = receipt.get("effect_outcome")
+    if outcome is not None and not isinstance(outcome, str):
+        return SETTLEMENT_UNKNOWN
+    handler = receipt.get("handler_executed")
+    if handler is not None and type(handler) is not bool:
+        return SETTLEMENT_UNKNOWN
+    status = str(row["status"] or "").upper()
+    if status in {OP_CLAIMED, OP_CANCELLED}:
+        if row["handler_started_at"] != 0:
+            return SETTLEMENT_UNKNOWN
+        outcome = outcome or SETTLEMENT_NOT_STARTED
+    elif status not in {OP_SUCCEEDED, OP_FAILED}:
+        return SETTLEMENT_UNKNOWN
+    reason = payload.get("unknown_reason")
+    effect = classify_effect_settlement(
+        handler, outcome, status, unknown_reason=reason if isinstance(reason, str) else "",
+    )
+    if status in {OP_CLAIMED, OP_CANCELLED} and effect != SETTLEMENT_NOT_STARTED:
+        return SETTLEMENT_UNKNOWN
+    return effect
+
+
+def _dead_runner_effect_blocker(conn, row: sqlite3.Row, agent_run_id: str) -> tuple[str, str] | None:
+    """核对同代次操作和变更记录，保留一个未决证据引用供下次索引读取。"""
+    attempt_id = row["current_attempt_id"]
+    mutation = conn.execute(
+        "SELECT mutation_id FROM resource_mutations WHERE attempt_id=? AND state != 'STABLE' LIMIT 1",
+        (attempt_id,),
+    ).fetchone()
+    if mutation is not None:
+        return "resource_mutation", str(mutation["mutation_id"])
+    operations = conn.execute(
+        "SELECT operation_id, agent_run_id, attempt_generation, status, handler_started_at, "
+        "settled_at, outcome_json FROM tool_operations WHERE attempt_id=?",
+        (attempt_id,),
+    )
+    with closing(operations):
+        for op in operations:
+            if (op["agent_run_id"] != agent_run_id or op["attempt_generation"] != row["attempt_generation"]
+                    or (op["status"] != OP_CLAIMED and op["settled_at"] <= 0)
+                    or _operation_effect(op) in {SETTLEMENT_UNKNOWN, SETTLEMENT_PARTIAL}):
+                return "tool_operation", str(op["operation_id"])
+    return None
+
+
+def _closeout_evidence_revision(
+    conn, row: sqlite3.Row, *, kind: str, ref: str, file_revision: tuple[int, ...],
+    exit_proven: bool = False,
+) -> int:
+    # 每次巡检只看当前指针及一个未决事实。退避时钟和其它 run 的写入不参与修订。
+    attempt_id = row["current_attempt_id"]
+    snapshot: list[Any] = [
+        row["run_status"], attempt_id, row["current_attempt_generation"],
+        row["attempt_status"], row["attempt_generation"],
+    ]
+    if kind == "executor_exit":
+        snapshot.extend((row["metadata_json"], row["ended_at"], exit_proven))
+    elif kind == "runner_result":
+        snapshot.append(file_revision)
+    elif kind == "tool_operation":
+        source = conn.execute(
+            "SELECT agent_run_id, attempt_generation, status, tool_operation_generation, "
+            "handler_started_at, settled_at, updated_at "
+            "FROM tool_operations WHERE operation_id=? AND attempt_id=?",
+            (ref, attempt_id),
+        ).fetchone()
+        snapshot.append(tuple(source) if source is not None else None)
+    elif kind == "resource_mutation":
+        source = conn.execute(
+            "SELECT state, version, updated_at FROM resource_mutations WHERE mutation_id=? AND attempt_id=?",
+            (ref, attempt_id),
+        ).fetchone()
+        snapshot.append(tuple(source) if source is not None else None)
+    encoded = json.dumps(snapshot, ensure_ascii=True).encode("ascii")
+    # 六字节摘要可经 JSON 数字无损传递。
+    return int.from_bytes(hashlib.sha256(encoded).digest()[:6], "big")
 
 
 # LLM: 原收口事务只取消精确作用域内 CLAIMED 且 handler 未启动的行；保留领取身份、输入和资源元数据，联测三个调用方及严格回读。
@@ -2992,6 +3125,7 @@ class RuntimeRepository(
         attempt_id: str = "",
         expected_attempt_status: str = "",
         require_no_tool_operations: bool = False,
+        runner_receipt: _RunnerCloseoutReceipt | None = None,
     ) -> dict[str, Any]:
         """run 级终态收口（单事务 CAS，幂等，以第一次为准）。
 
@@ -3010,8 +3144,8 @@ class RuntimeRepository(
             其余（含 unfinished 等 runtime_status 透传）→ 拒 + status_conflict
             诊断事件——unfinished 是任务级可恢复语义，不是 agent_runs.status
             合法写点，历史遗留异常值不得继续由 settle 制造；
-          - 未知状态 fail-closed：run 当前状态非 ''/created/终态集 →
-            不写 settled，留 status_conflict 事件；
+          - 死 runner 的 unknown 仅凭同轮持久结果、退出及工具效果证明收口；
+            其它未知状态保留原 status_conflict 分支；
           - stale attempt 闸：传入 attempt_id 时校验其仍是 current
             attempt（takeover 换代后旧 worker 自称收口 → 拒 +
             closeout_blocked 事件）；
@@ -3033,6 +3167,15 @@ class RuntimeRepository(
                              "reason": "invalid_settle_status"},
                 )
             return {"settled": False, "reason": "invalid_status"}
+        # 旧库没有持久退出标记。进程身份查询必须在写事务外，提交再核对原元数据。
+        exit_metadata = None
+        if runner_receipt is not None and attempt_id:
+            with self._runtime_connection() as conn:
+                snapshot = _closeout_evidence_row(conn, agent_run_id)
+            if (snapshot is not None and snapshot["run_status"] == ATTEMPT_STATUS_UNKNOWN
+                    and snapshot["current_attempt_id"] == attempt_id
+                    and _recorded_runner_exit(snapshot["metadata_json"])):
+                exit_metadata = snapshot["metadata_json"]
         with self.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -3043,17 +3186,25 @@ class RuntimeRepository(
             if row is None:
                 return {"settled": False, "reason": "no_such_run"}
             cur_status = str(row["run_status"] or "")
+            if str(attempt_id or "").strip() and row["current_attempt_id"] != attempt_id:
+                self._append_event_conn(
+                    conn, event_type="closeout_blocked", attempt_id=attempt_id,
+                    agent_run_id=agent_run_id, task_run_id=str(row["task_run_id"] or ""),
+                    payload={"status": status, "reason": "stale_attempt",
+                             "current_attempt_id": str(row["current_attempt_id"] or "")},
+                )
+                return {"settled": False, "reason": "stale_attempt"}
+            if (cur_status == ATTEMPT_STATUS_UNKNOWN and runner_receipt is not None and attempt_id
+                    and not expected_attempt_status and not require_no_tool_operations
+                    and (exit_metadata is not None or runner_receipt["bound"])):
+                return self._settle_dead_runner_conn(
+                    conn, agent_run_id=agent_run_id, attempt_id=attempt_id, status=status,
+                    runner_receipt=runner_receipt, exit_metadata=exit_metadata,
+                    now=now, event_id=event_id, payload=payload,
+                )
             if cur_status not in RUN_STATUS_LEGACY_CREATED and \
                     cur_status not in AGENT_RUN_TERMINAL_STATUSES:
-                # 未知状态 fail-closed：不写 settled，留诊断事件。
-                # LLM: 诊断必须幂等（obsfix12 2026-10-05 生产实证）：unknown run 的收口 WAL
-                #   每 60 秒重试一次 settle，此前每次重试都追加一条 status_conflict——生产
-                #   每天 400–1000 条重复全来自同一个 run（unknown 只有人工 /recover 能变，
-                #   自动重试永远失败）。照 orphan_reclaim_blocked 的"同身份+原因只写一次"
-                #   模式：同一 agent_run_id + 同一 attempt 已有 reason=unknown_run_status 的
-                #   status_conflict 时跳过写入。去重身份必须带 attempt_id（obsfix12b 初审）：
-                #   /recover 后新执行者再次死亡时，第二次诊断不能被旧 attempt 的记录吞掉。
-                #   状态机与返回值语义不变。
+                # 未标识来源的历史未知状态仍按原身份去重诊断。
                 existing = conn.execute(
                     "SELECT 1 FROM runtime_events WHERE event_type = 'status_conflict' "
                     "AND agent_run_id = ? AND attempt_id = ? AND payload_json LIKE ? LIMIT 1",
@@ -3070,16 +3221,6 @@ class RuntimeRepository(
                                  "reason": "unknown_run_status"},
                     )
                 return {"settled": False, "reason": "unknown_status"}
-            if str(attempt_id or "").strip():
-                if str(row["current_attempt_id"] or "") != attempt_id:
-                    self._append_event_conn(
-                        conn, event_type="closeout_blocked",
-                        attempt_id=attempt_id, agent_run_id=agent_run_id,
-                        task_run_id=str(row["task_run_id"] or ""),
-                        payload={"status": str(status or ""), "reason": "stale_attempt",
-                                 "current_attempt_id": str(row["current_attempt_id"] or "")},
-                    )
-                    return {"settled": False, "reason": "stale_attempt"}
             if str(row["current_attempt_id"] or "").strip():
                 attempt_id = str(row["current_attempt_id"])
             else:
@@ -3135,6 +3276,79 @@ class RuntimeRepository(
                 (event_id, "agent_run.completed", attempt_id, agent_run_id, task_run_id,
                  json.dumps(payload or {}, ensure_ascii=False), now),
             )
+        return {"settled": True, "event_id": event_id, "attempt_id": attempt_id}
+
+    def runner_closeout_evidence_revision(
+        self, *, agent_run_id: str, kind: str, ref: str, file_revision: tuple[int, ...],
+    ) -> int | None:
+        """只读同一 run 的当前指针和阻塞证据。原运行行缺失时保留等待。"""
+        with self._runtime_connection() as conn:
+            row = _closeout_evidence_row(conn, agent_run_id)
+            if row is None:
+                return None
+            exit_proven = (
+                row["run_status"] == ATTEMPT_STATUS_UNKNOWN and kind == "executor_exit"
+                and _recorded_runner_exit(row["metadata_json"])
+            )
+            return _closeout_evidence_revision(
+                conn, row, kind=kind, ref=ref, file_revision=file_revision, exit_proven=exit_proven,
+            )
+
+    def _settle_dead_runner_conn(
+        self, conn, *, agent_run_id: str, attempt_id: str, status: str,
+        runner_receipt: _RunnerCloseoutReceipt, exit_metadata: str | None, now: float,
+        event_id: str, payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """在原事务内核证据与代次，只变更原 run/attempt 的状态。"""
+        row = _closeout_evidence_row(conn, agent_run_id)
+        if row is None or row["current_attempt_id"] != attempt_id or (
+            row["current_attempt_generation"] != row["attempt_generation"]
+        ):
+            return {"settled": False, "reason": "stale_attempt"}
+        exit_proven = exit_metadata is not None and exit_metadata == row["metadata_json"]
+        if (runner_receipt["run_id"] != row["run_id"] or runner_receipt["attempt_id"] != attempt_id
+                or runner_receipt["status"] != status or runner_receipt["created_at"] < row["started_at"]):
+            blocker = ("runner_result", "")
+        elif row["attempt_status"] != ATTEMPT_STATUS_UNKNOWN or row["ended_at"] <= 0 or not exit_proven:
+            blocker = ("executor_exit", "")
+        else:
+            blocker = _dead_runner_effect_blocker(conn, row, agent_run_id)
+        if blocker is not None:
+            kind, ref = blocker
+            revision = _closeout_evidence_revision(
+                conn, row, kind=kind, ref=ref, file_revision=runner_receipt["file_revision"],
+                exit_proven=exit_proven,
+            )
+            return {"settled": False, "reason": "waiting_for_evidence", "evidence_revision": revision,
+                    "evidence_kind": kind, "evidence_ref": ref}
+
+        generation = row["attempt_generation"]
+        changed = conn.execute(
+            "UPDATE agent_runs SET status=? WHERE agent_run_id=? AND status='unknown' "
+            "AND current_attempt_id=? AND current_attempt_generation=?",
+            (status, agent_run_id, attempt_id, generation),
+        ).rowcount
+        if changed != 1:
+            return {"settled": False, "reason": "stale_attempt"}
+        changed = conn.execute(
+            "UPDATE agent_attempts SET status=? WHERE attempt_id=? AND agent_run_id=? "
+            "AND attempt_generation=? AND status='unknown'",
+            (status, attempt_id, agent_run_id, generation),
+        ).rowcount
+        if changed != 1:
+            raise RuntimeConflictError("退出 runner 的 attempt 状态已改变，整笔收口将回滚")
+        _cancel_unstarted_tool_operations(conn, agent_run_id=agent_run_id, attempt_id=attempt_id, now=now)
+        conn.execute(
+            "DELETE FROM resource_locks WHERE canonical_scope=? AND attempt_id=?",
+            (exec_lock_scope(agent_run_id), attempt_id),
+        )
+        conn.execute(
+            "INSERT INTO runtime_events(event_id, event_type, attempt_id, agent_run_id, "
+            "task_run_id, payload_json, created_at) VALUES(?, 'agent_run.completed', ?, ?, ?, ?, ?)",
+            (event_id, attempt_id, agent_run_id, row["task_run_id"],
+             json.dumps({**(payload or {}), "settled_from": "unknown", "settled_status": status},
+                        ensure_ascii=False), now),
+        )
         return {"settled": True, "event_id": event_id, "attempt_id": attempt_id}
 
     # LLM: 此入口只结束一次 TaskRun 的执行生命周期；不得顺带关闭长期 Task，
@@ -3273,8 +3487,8 @@ class RuntimeRepository(
 
           - 无 op 痕迹          → 'cancelled'（纯账本收口，无副作用可证明）
           - 全 SUCCEEDED/CANCELLED → 'done'
-          - 含 FAILED           → 'failed'
-          - 含 EXECUTING/UNKNOWN → None（停手，绝不自动裁决——可能已生效，
+          - 效果均已确定且含 FAILED → 'failed'
+          - 含未决效果           → None（停手，绝不自动裁决——可能已生效，
             结果不可知，无法证明零副作用）
           - CLAIMED 且 handler_started_at=0 → 未启动（not_started，G.5
             CANCELLED 语义：副作用可证明未发生）→ 不阻塞收口
@@ -3299,17 +3513,14 @@ class RuntimeRepository(
             ).fetchall()
         if not rows:
             return "cancelled"
+        terminal = "done"
         for op in rows:
-            op_status = str(op["status"] or "")
-            if op_status == OP_CLAIMED:
-                if float(op["handler_started_at"] or 0) <= 0:
-                    continue  # 未启动 = 可证明零副作用（G.5）
-                return None  # 已启动的 CLAIMED 异常（理论不存在）仍 fail-closed
-            if op_status in {OP_EXECUTING, OP_UNKNOWN}:
-                return None  # 停手——可能已生效
-            if op_status == OP_FAILED:
-                return "failed"
-        return "done"
+            effect = _operation_effect(op)
+            if effect in {SETTLEMENT_UNKNOWN, SETTLEMENT_PARTIAL}:
+                return None
+            if op["status"] == OP_FAILED or effect == SETTLEMENT_FAILED:
+                terminal = "failed"
+        return terminal
 
     # LLM: RuntimeDB 只将 running attempt CAS 为 unknown 并追加事件，不释放执行锁、不改 run/task，也不触发续跑；写入失败返回 False 仍保守停手。
     # 函数用途: 为执行者死亡且结果不明的单轮执行记录未知终态，等待显式恢复。
