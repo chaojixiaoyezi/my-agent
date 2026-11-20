@@ -11,13 +11,55 @@ import sqlite3
 import stat
 import time
 import uuid
+from collections.abc import Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
+from ..common import nofollow_fs
 from ..common.json_io import locked_json_path, write_private_json_file_atomic_unlocked
 from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath, unlink_file_beneath
 from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
 from .observation_index import _identity
+
+
+@dataclass(frozen=True, slots=True)
+class UsageIntent:
+    token: str
+    thread_id: str
+    before_stamp: object
+    store: object
+    epoch: int | None = None
+
+
+class _InstallMeta:
+    """批内先推进原有元数据，待整批完成时写回同一事务。"""
+
+    def __init__(self, conn):
+        rows = conn.execute(
+            "SELECT key,value FROM meta WHERE key IN ('epoch','scan','complete','stamp','generation')"
+        )
+        self.original = dict(rows)
+        self.epoch = int(self.original.get('epoch', '0'))
+        self.scan = json.loads(self.original.get('scan', '{}'))
+        self.complete = self.original.get('complete') == '1'
+        self.stamp = self.original.get('stamp', '')
+        self.generation = int(self.original.get('generation', '0'))
+        self._observed_for = None
+        self._observed_stamp = None
+
+    def observe_stamp(self, index, before_stamp):
+        # 相同写前身份共享一次观察。目录后来变化时，覆盖读取仍以实时身份核验。
+        if self._observed_stamp is None or self._observed_for != before_stamp:
+            self._observed_for = before_stamp
+            self._observed_stamp = index.stamps()
+        return self._observed_stamp
+
+    def flush(self, conn):
+        values = {'scan': _text(self.scan), 'complete': str(int(self.complete)),
+                  'stamp': self.stamp, 'generation': str(self.generation)}
+        updates = [(key, value) for key, value in values.items() if value != self.original.get(key)]
+        conn.executemany('INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', updates)
 
 
 def _stamp(path):
@@ -58,6 +100,7 @@ class UsageSourceIndex:
         self.directory = Path(directory)
         self.path = self.directory.parent / ('.' + self.directory.name + '_sources') / 'sources.sqlite3'
         self.pending_directory = self.path.parent / 'pending'
+        self._needs_prepare = False
 
     def stamps(self):
         pending = _stamp(self.pending_directory)
@@ -95,9 +138,10 @@ class UsageSourceIndex:
             raise
 
     @contextmanager
-    def write_connection(self):
+    def write_connection(self, *, deadline_s=None, committed_tokens=(), pending_fd=None):
         ensure_private_dir(self.path.parent)
-        with locked_json_path(self.path, blocking=False):
+        options = {} if deadline_s is None else {'deadline_s': deadline_s}
+        with locked_json_path(self.path, blocking=False, **options):
             if not self.path.exists():
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
                 os.close(fd)
@@ -111,9 +155,40 @@ class UsageSourceIndex:
                 except BaseException:
                     conn.rollback()
                     raise
+                if committed_tokens:
+                    self._unlink_committed_tokens(committed_tokens, parent=pending_fd)
+
+    @contextmanager
+    def _pending_fd(self):
+        if not nofollow_fs._supports_dir_fd():
+            yield None
+            return
+        try:
+            descriptor = nofollow_fs.open_directory_beneath(self.path.parent, (self.pending_directory.name,))
+        except FileNotFoundError:
+            yield None
+            return
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    def _unlink_committed_tokens(self, tokens, *, parent):
+        for token in tokens:
+            name = token + '.json'
+            try:
+                if parent is None:
+                    unlink_file_beneath(self.pending_directory, (name,))
+                    continue
+                # 同一目录 FD 和来源锁贯穿校验与提交。unlinkat 只移除已登记的目录项。
+                os.unlink(name, dir_fd=parent)
+                os.fsync(parent)
+            except FileNotFoundError:
+                pass
 
     @contextmanager
     def read_connection(self):
+        pending_stamp = _stamp(self.pending_directory)
         before = _identity(self.path)
         if before is None:
             raise ValueError('usage source index unavailable; coverage=unknown')
@@ -137,6 +212,9 @@ class UsageSourceIndex:
                 if current is None or current[:2] != before[:2]:
                     raise ValueError('usage source index changed; coverage=unknown')
                 yield conn
+                # 防止 SQLite 旧快照与提交后已清空的凭据目录拼成假完整视图。
+                if _stamp(self.pending_directory) != pending_stamp:
+                    raise ValueError('usage source intents changed during read; coverage=unknown')
             finally:
                 conn.rollback()
 
@@ -161,10 +239,21 @@ class UsageSourceIndex:
             self.require_complete(conn)
             return UsageSourcePlan(self, since, until, self._get(conn, 'generation', '0'))
 
-    def _pending_record(self, token):
+    def _pending_record(self, token, *, parent=None):
         if type(token) is not str or len(token) != 32 or any(ch not in '0123456789abcdef' for ch in token):
             raise ValueError('usage source intent name invalid')
-        raw = read_bytes_beneath(self.pending_directory, (token + '.json',), max_bytes=4096)
+        name = token + '.json'
+        if parent is None:
+            raw = read_bytes_beneath(self.pending_directory, (name,), max_bytes=4096)
+        else:
+            try:
+                descriptor = nofollow_fs._openat_file(parent, name, os.O_RDONLY, 0o600)
+            except FileNotFoundError:
+                return None
+            try:
+                raw = nofollow_fs._read_descriptor(descriptor, 4096)
+            finally:
+                os.close(descriptor)
         if raw is None:
             return None
         record = json.loads(raw)
@@ -198,41 +287,91 @@ class UsageSourceIndex:
         return token
 
     def update(self, thread_id, snapshot, *, before_stamp=None, epoch=None, token=None, store=None):
-        with self.write_connection() as conn:
-            result = self._install(conn, thread_id, snapshot, before_stamp=before_stamp, epoch=epoch, token=token, store=store)
-        if token is not None:
-            try:
-                unlink_file_beneath(self.pending_directory, (token + '.json',))
-            except FileNotFoundError:
-                pass
+        committed = []
+        with self.write_connection(committed_tokens=committed) as conn:
+            if token is not None:
+                record = self._pending_record(token)
+                if record is None:
+                    return None
+                if record['thread_id'] != thread_id:
+                    raise ValueError('usage source intent thread_id does not match its durable record')
+            result = self._install(conn, thread_id, snapshot, before_stamp=before_stamp, epoch=epoch, store=store,
+                                   registered=token is not None)
+            if token is not None and result is not False:
+                committed.append(token)
         return result
 
-    def _install(self, conn, thread_id, snapshot, *, before_stamp=None, epoch=None, token=None, store=None):
-        current_epoch = int(self._get(conn, 'epoch', '0'))
-        if epoch is not None and current_epoch != epoch:
+    def apply_intents(self, intents: Sequence[UsageIntent], *, deadline: float) -> list[str]:
+        """同一事务按提交顺序安装来源。提交后仍持原文件锁，收走本批已应用的凭据。"""
+        if not intents:
+            return []
+        committed = []
+        seen = set()
+        with self._pending_fd() as parent, self.write_connection(
+            deadline_s=deadline, committed_tokens=committed, pending_fd=parent,
+        ) as conn:
+            meta = _InstallMeta(conn)
+            for intent in intents:
+                if intent.token in seen:
+                    continue
+                seen.add(intent.token)
+                record = self._pending_record(intent.token, parent=parent)
+                if record is None:
+                    continue  # 另一进程或恢复通道已完成该凭据。
+                if record['thread_id'] != intent.thread_id:
+                    raise ValueError('usage source intent thread_id does not match its durable record')
+                snapshot = intent.store._usage_source_snapshot(intent.thread_id)
+                result = self._install(conn, intent.thread_id, snapshot, before_stamp=intent.before_stamp,
+                                       epoch=intent.epoch, store=intent.store, registered=True, meta=meta)
+                if result is not False:
+                    committed.append(intent.token)
+            if parent is not None:
+                current = _stamp(self.pending_directory)
+                opened = os.fstat(parent)
+                if current is None or current[:2] != (opened.st_dev, opened.st_ino):
+                    raise ValueError('usage source intent directory changed before commit')
+            if meta.complete and meta.stamp != self.stamps():
+                meta.complete = False
+            meta.flush(conn)
+            self._needs_prepare = (not meta.complete
+                                   or conn.execute('SELECT 1 FROM sources WHERE complete=0 LIMIT 1').fetchone() is not None)
+        return committed
+
+    def _install(self, conn, thread_id, snapshot, *, before_stamp=None, epoch=None, token=None, store=None,
+                 registered=None, meta=None):
+        state = meta if meta is not None else _InstallMeta(conn)
+        if epoch is not None and state.epoch != epoch:
             return False
-        if snapshot is not None and store is not None and tuple(snapshot[2]) != tuple(store.revision(thread_id)):
-            snapshot = (None, None, tuple(store.revision(thread_id)), False)
+        if snapshot is not None and store is not None:
+            revision = tuple(store.revision(thread_id))
+            if tuple(snapshot[2]) != revision:
+                snapshot = (None, None, revision, False)
         if snapshot is None:
             conn.execute('DELETE FROM sources WHERE thread_id=?', (thread_id,))
         else:
             minimum, maximum, revision, complete = snapshot
             conn.execute('INSERT INTO sources VALUES(?,?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET '
                          'minimum=excluded.minimum,maximum=excluded.maximum,revision=excluded.revision,'
-                         'complete=excluded.complete,epoch=excluded.epoch',
-                         (thread_id, minimum, maximum, _text(revision), int(complete), current_epoch if epoch is None else epoch))
-        intent = self._pending_record(token) if token is not None else None
-        registered = intent is not None and intent['thread_id'] == thread_id
-        scan = json.loads(self._get(conn, 'scan', '{}'))
-        if registered and scan and scan.get('stamp') == before_stamp:
+                         'complete=excluded.complete,epoch=excluded.epoch '
+                         'WHERE (sources.minimum,sources.maximum,sources.revision,sources.complete,sources.epoch) '
+                         'IS NOT (excluded.minimum,excluded.maximum,excluded.revision,excluded.complete,excluded.epoch)',
+                         (thread_id, minimum, maximum, _text(revision), int(complete), state.epoch))
+        if registered is None:
+            intent = self._pending_record(token) if token is not None else None
+            registered = intent is not None and intent['thread_id'] == thread_id
+        scan_matches = registered and state.scan and state.scan.get('stamp') == before_stamp
+        ready_matches = registered and state.complete and state.stamp == before_stamp
+        current_stamp = state.observe_stamp(self, before_stamp) if scan_matches or ready_matches else None
+        if scan_matches:
             # 只承认同一pending写者的已登记变更；新源已带当前epoch，不因忙owner反复回到目录前缀。
-            scan['stamp'] = self.stamps()
-            self._put(conn, 'scan', _text(scan))
-        if self._get(conn, 'complete') == '1' and self._get(conn, 'stamp') == before_stamp and registered:
-            self._put(conn, 'stamp', self.stamps())
+            state.scan['stamp'] = current_stamp
+        if ready_matches:
+            state.stamp = current_stamp
         else:
-            self._put(conn, 'complete', 0)
-        self._put(conn, 'generation', int(self._get(conn, 'generation', '0')) + 1)
+            state.complete = False
+        state.generation += 1
+        if meta is None:
+            state.flush(conn)
 
     def _prune_unpublished_temps(self, limit):
         examined, deleted = 0, 0

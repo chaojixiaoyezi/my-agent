@@ -251,7 +251,7 @@ def _inspect_approval_record(path, thread_id: str) -> str:
     if not stat.S_ISREG(info.st_mode):
         return ""
     report = read_json_object_report(path, context="conversation.idle.approvals")
-    row = next((v for k, v in vars(report).items() if k != "load_error"), None)
+    row = report.payload
     if report.load_error or not isinstance(row, dict) or not row:
         return "activity_unknown"
     if row.get("status") not in {"pending", "active", "waiting_input", "waiting_confirmation"}:

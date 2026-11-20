@@ -9,8 +9,11 @@ import re
 import sqlite3
 import threading
 import time
+import weakref
+from collections import deque
 from collections.abc import Callable, Iterable
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import Context
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -34,6 +37,7 @@ from .thread_ledger_segments import (
     recover_pending,
     seal_if_due,
 )
+from .usage_sources import UsageIntent
 
 _PURPOSE_SCHEMA = "model_call_purpose_breakdown.v1"
 # LLM: 用途桶必须与 model_call_ledger._PURPOSE_BUCKETS 保持同一集合；探测调用独立成桶，持久账校验按同一集合放行。
@@ -118,6 +122,119 @@ def reset_unknown_purpose_key_counts() -> None:
         _UNKNOWN_PURPOSE_KEYS["overflow_count"] = 0
 
 
+class UsageProjectionCombiner:
+    """每条索引路径只有一个排空者，提交凭据由原文件保存。"""
+
+    _paths: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+    _paths_lock = threading.Lock()
+    # 排空窗口 25ms，热批限制为两页，修复继续用原 16 条预算。
+    # 忙库只重试一秒，随后交回原后台维护。
+    _window_seconds = 0.025
+    _batch_limit = 256
+    _repair_limit = 16
+    _retry_seconds = 1.0
+
+    def __init__(self):
+        self._pending: deque[UsageIntent] = deque()
+        self._lock = threading.Lock()
+        self._active = False
+
+    @classmethod
+    def for_path(cls, path: Path) -> UsageProjectionCombiner:
+        key = path.absolute()
+        with cls._paths_lock:
+            current = cls._paths.get(key)
+            if current is not None:
+                return current
+        resolved = key.resolve()
+        with cls._paths_lock:
+            current = cls._paths.get(resolved)
+            if current is None:
+                current = cls()
+                cls._paths[resolved] = current
+            cls._paths[key] = current
+            return current
+
+    def submit(self, intent: UsageIntent) -> None:
+        with self._lock:
+            self._pending.append(intent)
+            if self._active:
+                return
+            self._active = True
+        self._run(background=False)
+
+    def _run(self, *, background, repair=None):
+        retry_until = time.monotonic() + self._retry_seconds
+        try:
+            while True:
+                progressed, repair = self._drain_window(repair)
+                with self._lock:
+                    # 队列复核与退役共用提交锁，迟到的提交会接棒或留给已选排空者。
+                    if not self._pending and repair is None:
+                        self._active = False
+                        return
+                    if not background:
+                        break
+                    if progressed:
+                        retry_until = time.monotonic() + self._retry_seconds
+                    elif time.monotonic() >= retry_until:
+                        self._pending.clear()
+                        self._active = False
+                        return
+                if not progressed:
+                    time.sleep(self._window_seconds)
+            worker = threading.Thread(target=self._run, kwargs={'background': True, 'repair': repair},
+                                      name='usage-source-drain', daemon=True)
+            Context().run(worker.start)
+        except BaseException:
+            with self._lock:
+                self._pending.clear()
+                self._active = False
+            raise
+
+    def _drain_window(self, repair):
+        deadline = time.monotonic() + self._window_seconds
+        progressed = False
+        while time.monotonic() < deadline:
+            with self._lock:
+                batch = [self._pending.popleft() for _ in range(min(len(self._pending), self._batch_limit))]
+            if not batch:
+                if repair is not None:
+                    index, store = repair
+                    index.prepare(store, limit=self._repair_limit, deadline=deadline)
+                    repair = None
+                    progressed = True
+                break
+            store = batch[-1].store
+            index = store._source_index()
+            try:
+                applied = index.apply_intents(batch, deadline=deadline)
+            except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+                if isinstance(error, BlockingIOError) or (
+                    isinstance(error, sqlite3.Error) and getattr(error, 'sqlite_errorcode', 0) & 255
+                    in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                ):
+                    with self._lock:
+                        self._pending.extendleft(reversed(batch))
+                    break
+                # 批次可能已提交但清理未完成。原凭据和幂等来源更新负责恢复。
+                _log_usage_source_error(error)
+                repair = index, store
+            else:
+                if index._needs_prepare or len(applied) != len(batch):
+                    repair = index, store
+            progressed = True
+        return progressed, repair
+
+
+def _log_usage_source_error(error):
+    logging.getLogger(__name__).warning(
+        'USAGE_SOURCE_PROJECTION_PARTIAL error_type=%s errno=%s sqlite_code=%s '
+        'effect=canonical_preserved next=retry_pending_in_maintenance',
+        type(error).__name__, getattr(error, 'errno', None), getattr(error, 'sqlite_errorcode', None),
+    )
+
+
 # LLM: 模型计费事件与 preflight 显示分别保存，各自有唯一口径；共享 store 原子写入，不新增旁路文件。
 # 类用途: 保存模型调用的消耗账及最近上下文显示，后者不能作为费用或任务完成证据。
 class ModelUsageStore:
@@ -135,6 +252,7 @@ class ModelUsageStore:
         self._directory = directory
         self._require_thread = require_thread
         self._update_thread_atomic = update_thread_atomic
+        self._usage_combiner: UsageProjectionCombiner | None = None
 
     # LLM: 文件名仍来自精确 thread_id 的既有映射；路径不从提示词、cwd 或模型回复推导。
     # 函数用途: 定位本领域原有的单会话 JSONL 用量账本。
@@ -197,11 +315,7 @@ class ModelUsageStore:
     def append_once(self, request: dict[str, Any]) -> ThreadModelUsageEvent:
         event = _thread_model_usage_event(request)
         self._require_thread(event.thread_id)
-        before, token = self._begin_usage_source(event.thread_id)
-        try:
-            return self._append_indexed(event)
-        finally:
-            self._refresh_usage_source(event.thread_id, before, token)
+        return self._append_indexed(event)
 
     # LLM: 仍按同范围摘要计算单调delta；点查和投影更新在原追加协议内，不改变迟到事实口径。
     # 函数用途: 保存累计用量的新事实并保留重放冲突检查。
@@ -212,11 +326,7 @@ class ModelUsageStore:
         request = _snapshot_event_request(request)
         snapshot = _thread_model_usage_event(request)
         self._require_thread(snapshot.thread_id)
-        before, token = self._begin_usage_source(snapshot.thread_id)
-        try:
-            return self._append_indexed(snapshot, snapshot_request=request)
-        finally:
-            self._refresh_usage_source(snapshot.thread_id, before, token)
+        return self._append_indexed(snapshot, snapshot_request=request)
 
     # LLM: 局部导入避免数字求和器与投影初始化形成模块循环；不缓存可变事件。
     # 函数用途: 取得当前线程独立的用量定位器。
@@ -268,12 +378,29 @@ class ModelUsageStore:
 
     def _refresh_usage_source(self, thread_id, before, token):
         try:
-            sources = self._source_index()
-            sources.update(thread_id, self._usage_source_snapshot(thread_id), before_stamp=before, token=token, store=self)
-            sources.prepare(self, limit=16, deadline=time.monotonic() + 0.025)
+            combiner = self._usage_combiner
+            if combiner is None:
+                combiner = UsageProjectionCombiner.for_path(self._source_index().path)
+                self._usage_combiner = combiner
+            combiner.submit(UsageIntent(token, thread_id, before, self))
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
             # 原事件已提交；可重建来源投影失败只失去覆盖，不能重复记费或阻断原模型回合。
-            logging.getLogger(__name__).warning('USAGE_SOURCE_PROJECTION_PARTIAL error_type=%s', type(error).__name__)
+            _log_usage_source_error(error)
+
+    @contextmanager
+    def _usage_source_write(self, thread_id):
+        path = self._path(thread_id)
+        transition = path.with_name(f".{path.name}.append-once")
+        intent = None
+        try:
+            with locked_file_transition(transition), locked_json_path(path):
+                # 修复者使用同一原始账本锁，不能在 canonical 追加前消费刚出生的凭据。
+                self._require_thread(thread_id)
+                intent = self._begin_usage_source(thread_id)
+                yield
+        finally:
+            if intent is not None:
+                self._refresh_usage_source(thread_id, *intent)
 
     def prepare_window_sources(self, *, limit=16, deadline=None):
         """仅维护写lane调用；每步最多推进一个目录项或一源128行，query绝不迁移。"""
@@ -291,10 +418,7 @@ class ModelUsageStore:
     # 函数用途: 在原锁内选择完整索引热路或迁移期间单线程精确回退。
     def _append_indexed(self, snapshot, *, snapshot_request=None, max_bytes=STORAGE_LANE_SLICE_BYTES):
         path = self._path(snapshot.thread_id)
-        transition = path.with_name(f".{path.name}.append-once")
-        with locked_file_transition(transition), locked_json_path(path):
-            # 锁外预检后线程可能已退休，须在恢复或追加账本前重新核验。
-            self._require_thread(snapshot.thread_id)
+        with self._usage_source_write(snapshot.thread_id):
             recover_pending(path)
             seal_private_jsonl_tail_unlocked(path)
             index = self._index(snapshot.thread_id)

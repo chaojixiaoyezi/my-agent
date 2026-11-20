@@ -21,6 +21,7 @@ from typing import Any
 
 from . import cache_freshness, text_file_window
 from .cache_freshness import cache_stat_signature
+from .fast_dataclass import fast_frozen
 from .nofollow_fs import (
     ensure_private_dir,
     open_private_lock_beneath_tightened,
@@ -94,7 +95,8 @@ class PrivateDirectoryChainResult:
     warning: dict[str, object] | None = None
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class JsonObjectReadReport:
     payload: dict[str, Any]
     load_error: dict[str, object] | None = None
@@ -700,16 +702,20 @@ _path_lock = path_thread_lock
 # LLM: birth_commit只包原lock FD open/create/chmod，等待/身份核验/close仍门外，默认None原链不变。
 # 函数用途: 取得原双层锁，可将每次准确FD出生交给当前C末门。
 @contextmanager
-def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None, category=None):
+def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None, category=None,
+                     deadline_s: float | None = None):
     """公开的"线程锁 + fcntl.flock(LOCK_EX)"双层临界区(与 io/jsonl.py 同手法)。
 
     供需要把 读-改-写 整段做成原子的调用方使用(如 OptimisticLock 的 CAS):
     进入即对 path 的 per-path 线程锁 + 同名 .lock 文件的 OS 排他锁双重持有,
-    退出释放。临界区内落盘请用 write_json_file_atomic_unlocked(锁已持有)。"""
+    退出释放。临界区内落盘请用 write_json_file_atomic_unlocked(锁已持有)。
+    提供 deadline_s 时，两层锁共用同一个绝对单调时钟截止点，优先于 blocking。"""
 
     options = {} if birth_commit is None else {"birth_commit": birth_commit}
     if category is not None:
         options["category"] = category
+    if deadline_s is not None:
+        options["deadline_s"] = deadline_s
     with _locked_json_path(path, blocking=blocking, **options):
         yield
 
@@ -718,16 +724,42 @@ def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callabl
 # LLM: 可选birth_commit沿原链透传，不缓存callback，也不把线程锁/flock等待搬进Root。
 # 函数用途: 按原顺序取线程/OS锁，全部退出归还，FD出生可固定委托。
 @contextmanager
-def _locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None, category=None):
+def _locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None, category=None,
+                      deadline_s: float | None = None):
     from ..concurrency.lock_order import category_for_path, ordered_lock
 
     handle = path_thread_lock(path)  # 保持包装强引用直到临界区结束。
-    with ordered_lock(category_for_path(path, category), handle.lock, blocking=blocking) as acquired:
+    level = category_for_path(path, category)
+    thread_lock = (ordered_lock(level, handle.lock, blocking=blocking) if deadline_s is None
+                   else _deadline_thread_lock(level, handle.lock, deadline_s))
+    with thread_lock as acquired:
         if not acquired:
             raise BlockingIOError("共享文件线程锁繁忙")
         options = {} if birth_commit is None else {"birth_commit": birth_commit}
+        if deadline_s is not None:
+            options["deadline_s"] = deadline_s
         with _locked_file_path(path, blocking=blocking, **options):
             yield
+
+
+@contextmanager
+def _deadline_thread_lock(level, lock, deadline_s):
+    from ..concurrency.lock_order import check_order, is_strict, note_acquired, note_released
+
+    lock_id = id(lock)
+    if is_strict():
+        check_order(level, lock_id, try_acquire=False)
+    remaining = deadline_s - time.monotonic()
+    if remaining <= 0 or not lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
+        raise BlockingIOError("共享文件线程锁取锁超时")
+    try:
+        note_acquired(level, lock_id, try_acquire=False)
+        try:
+            yield True
+        finally:
+            note_released(lock_id)
+    finally:
+        lock.release()
 
 
 # LLM: 锁文件必须与数据文件同口径私有：文件 0600、不跟随符号链接，缺失目录按 0700 新建、已存在的目录
@@ -744,14 +776,19 @@ _JSON_LOCK_IDENTITY_RETRY_COUNT = 5
 # LLM: birth_commit只供原FD出生叶，所有flock等待与finally回收仍在原调用层。
 # 函数用途: 在原同名锁文件上获取排他权，忙碌或异常时回收同一FD。
 @contextmanager
-def _locked_file_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None):
+def _locked_file_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None,
+                      deadline_s: float | None = None):
     options = {} if birth_commit is None else {"birth_commit": birth_commit}
+    if deadline_s is not None:
+        options["deadline_s"] = deadline_s
     descriptor = _acquire_verified_lock_descriptor(path, blocking=blocking, **options)
     try:
         yield
     finally:
-        _funlock_descriptor(descriptor)
-        os.close(descriptor)
+        try:
+            _funlock_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 @contextmanager
@@ -786,13 +823,21 @@ def terminal_json_path(path: Path, *, blocking: bool = True):
 #   被清理器换掉，关闭后重开重试；取锁本身异常时关闭描述符再冒泡；超上限抛 BlockingIOError。
 # LLM: 每轮重开都重新调用原birth_commit；不扩大原5次身份重试、不在callback内flock或校验。
 # 函数用途: 在原最多五轮中取得同路径真实锁FD，出生来源每次重新核。
-def _acquire_verified_lock_descriptor(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None) -> int:
+def _acquire_verified_lock_descriptor(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None,
+                                      deadline_s: float | None = None) -> int:
     lock_path = path.with_name(path.name + ".lock")
-    for _ in range(_JSON_LOCK_IDENTITY_RETRY_COUNT):
+    attempts = 0
+    while deadline_s is not None or attempts < _JSON_LOCK_IDENTITY_RETRY_COUNT:
+        check_io_deadline(deadline_s)
+        attempts += 1
         descriptor = (_open_private_lock_descriptor(lock_path) if birth_commit is None
                       else birth_commit(lambda: _open_private_lock_descriptor(lock_path)))
         try:
-            _flock_descriptor(descriptor, blocking=blocking)
+            if deadline_s is None:
+                _flock_descriptor(descriptor, blocking=blocking)
+            else:
+                _flock_until(descriptor, deadline_s)
+                check_io_deadline(deadline_s)
         except BaseException:
             os.close(descriptor)
             raise
@@ -800,6 +845,22 @@ def _acquire_verified_lock_descriptor(path: Path, *, blocking: bool = True, birt
             return descriptor
         os.close(descriptor)
     raise BlockingIOError("锁文件身份反复变化，放弃取锁")
+
+
+def _flock_until(descriptor: int, deadline_s: float) -> None:
+    # 两层锁共用同一预算，文件锁从 1ms 退避至 16ms。
+    delay_ms = 1
+    while True:
+        check_io_deadline(deadline_s)
+        try:
+            _flock_descriptor(descriptor, blocking=False)
+            return
+        except BlockingIOError:
+            remaining = deadline_s - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(delay_ms / 1000, remaining))
+            delay_ms = min(delay_ms * 2, 16)
 
 
 # 函数用途: 核对锁文件描述符与锁路径当前指向同一个 inode。
