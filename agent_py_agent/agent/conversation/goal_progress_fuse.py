@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .host_notices import HostNotice
     from .models import ThreadGoal
     from .store_goals import GoalStore
 
@@ -15,8 +16,9 @@ FUSE_METADATA_KEY = "goal_continuation_fuse"
 WAKE_SNAPSHOT_KEY = "goal_progress_snapshot"
 NO_PROGRESS_REASON_CODE = "GOAL_CONTINUATION_NO_PROGRESS"
 NO_PROGRESS_NOTICE_SOURCE = "goal_continuation"
-# 续跑资格被本片结束原因扣下（Goal 仍 active 但不会再有下一片）时的宿主提示代码，与熔断提示同来源、按代码各留一条。
+# 续跑资格被本片结束原因扣下时使用原宿主提示代码。
 WITHHELD_REASON_CODE = "GOAL_CONTINUATION_WITHHELD"
+_REPORT_REASON_FIELDS = ("turn_end_reason", "runtime_reason", "runtime_status")
 
 _LOGGER = logging.getLogger("agent.conversation.goal_progress_fuse")
 
@@ -53,6 +55,8 @@ def record_goal_continuation_fuse(
     store._require_thread(thread_id)
     limit = max(0, int(request.get("idle_limit") or 0))
     progressed = bool(request.get("progressed"))
+    disposition = request.get("disposition")
+    count_progress = request.get("count_progress", True) is True
     current_time = now(request.get("now"))
     path = store.storage.goal_path(thread_id)
     updated_goal: ThreadGoal | None = None
@@ -68,11 +72,21 @@ def record_goal_continuation_fuse(
         current = _select_thread_goal(goals, goal_id=goal_id)
         if current is None or current.status != "active" or current.task_id != task_id:
             return data
-        next_state, tripped = _next_fuse_state(current, wake_id, progressed, limit)
+        if disposition is not None and disposition["goal_revision"] != current.revision:
+            return data
+        next_state, tripped = _next_fuse_state(current, wake_id, progressed, limit, count_progress=count_progress)
         if next_state is None:
             updated_goal = current
             return data
-        updated_goal = _goal_with_fuse(store, current, next_state, current_time)
+        if disposition is not None:
+            next_state["last_disposition"] = {
+                **disposition,
+                "wake_signal_id": wake_id,
+                "action": "paused" if tripped else disposition["action"],
+                "basis": NO_PROGRESS_REASON_CODE if tripped else disposition["basis"],
+                "counted_toward_fuse": count_progress,
+            }
+        updated_goal = _goal_with_fuse(store, current, next_state, current_time, tripped=tripped)
         return _goal_collection_payload(
             [updated_goal if goal.goal_id == current.goal_id else goal for goal in goals]
         )
@@ -87,7 +101,7 @@ def record_goal_continuation_fuse(
 #   （连续空片数、最近 16 个已处理 wake、原因码）与是否熔断。
 # 函数用途: 按上一次计数和本片有无进展，算出新的熔断状态。
 def _next_fuse_state(
-    current: ThreadGoal, wake_id: str, progressed: bool, limit: int
+    current: ThreadGoal, wake_id: str, progressed: bool, limit: int, *, count_progress: bool = True,
 ) -> tuple[dict[str, Any] | None, bool]:
     raw_state = current.metadata.get(FUSE_METADATA_KEY)
     state = dict(raw_state) if isinstance(raw_state, dict) else {}
@@ -99,11 +113,16 @@ def _next_fuse_state(
         previous = int(state.get("idle_slices", 0) or 0)
     except (TypeError, ValueError):
         previous = 0
-    idle_slices, tripped = next_idle_slice_count(previous, progressed, limit)
+    idle_slices, tripped = previous, False
+    reason = state.get("reason_code", "")
+    if count_progress:
+        idle_slices, tripped = next_idle_slice_count(previous, progressed, limit)
+        reason = NO_PROGRESS_REASON_CODE if tripped else ""
     return {
+        **({"last_disposition": state["last_disposition"]} if "last_disposition" in state else {}),
         "idle_slices": idle_slices,
         "processed_wake_ids": [*processed_ids, wake_id][-16:],
-        "reason_code": NO_PROGRESS_REASON_CODE if tripped else "",
+        "reason_code": reason,
     }, tripped
 
 
@@ -111,14 +130,14 @@ def _next_fuse_state(
 #   更新时间并推进内容 revision。副作用：熔断时从共享时钟取走本段已用时长。
 # 函数用途: 生成写回目标集合的新目标记录。
 def _goal_with_fuse(
-    store: GoalStore, current: ThreadGoal, next_state: dict[str, Any], current_time: float
+    store: GoalStore, current: ThreadGoal, next_state: dict[str, Any], current_time: float, *, tripped: bool,
 ) -> ThreadGoal:
     from dataclasses import replace
 
     from .goal_transition import goal_transition_event
 
     metadata = {**current.metadata, FUSE_METADATA_KEY: next_state}
-    if next_state.get("reason_code") != NO_PROGRESS_REASON_CODE:
+    if not tripped:
         return replace(current, metadata=metadata)
     return replace(
         current,
@@ -197,16 +216,48 @@ def goal_progress_snapshot(goal: object, task_status: str) -> dict[str, object]:
 #   只认成功的工具调用（ok 为真，含只读成功）：全部失败的片不算进展，否则同一失败可以无限续跑且永不熔断。
 # 函数用途: 只比较成功工具计数及 Goal/任务结构字段，判断本片是否应清空空转计数。
 def slice_has_progress(signal: object, report: object, goal: object, task_status: str) -> bool:
-    if int(getattr(report, "tool_success_count", 0) or 0) > 0:
-        return True
-    if int(getattr(report, "material_progress_count", 0) or 0) > 0:
-        return True
+    return slice_progress_evidence(signal, report, goal, task_status)["progressed"] is True
+
+
+def slice_progress_evidence(signal: object, report: object, goal: object, task_status: str) -> dict[str, object]:
+    """只保存宿主标量和比较结果，不复制报告正文或唤醒 metadata。"""
+    successes = int(getattr(report, "tool_success_count", 0) or 0)
+    material = int(getattr(report, "material_progress_count", 0) or 0)
+    if successes > 0:
+        basis = "tool_success"
+    elif material > 0:
+        basis = "material_progress"
+    else:
+        basis = _progress_snapshot_basis(signal, goal, task_status)
+    return {
+        "progressed": basis != "idle",
+        "basis": basis,
+        "tool_call_count": int(getattr(report, "tool_call_count", 0) or 0),
+        "tool_success_count": successes,
+        "material_progress_count": material,
+    }
+
+
+def _progress_snapshot_basis(signal: object, goal: object, task_status: str) -> str:
     metadata = getattr(signal, "metadata", {})
     baseline = metadata.get(WAKE_SNAPSHOT_KEY) if isinstance(metadata, Mapping) else None
     current = goal_progress_snapshot(goal, task_status)
     if not isinstance(baseline, Mapping) or any(not baseline.get(key) for key in current):
-        return True
-    return dict(baseline) != current
+        return "legacy_snapshot_missing"
+    return "goal_or_task_changed" if dict(baseline) != current else "idle"
+
+
+def frozen_goal_disposition(goal: object, wake_id: str) -> dict[str, Any] | None:
+    """读取最近一次原唤醒的裁决，已被后续结论取代的唤醒不可重新裁决。"""
+    metadata = getattr(goal, "metadata", {})
+    state = metadata.get(FUSE_METADATA_KEY) if isinstance(metadata, dict) else None
+    last = state.get("last_disposition") if isinstance(state, dict) else None
+    if not wake_id or not isinstance(last, dict):
+        return None
+    if last.get("wake_signal_id") == wake_id:
+        return last
+    processed = state.get("processed_wake_ids")
+    return {"action": "superseded"} if isinstance(processed, list) and wake_id in processed else None
 
 
 # LLM: 输入新用户消息或显式恢复只清内部计数；被熔断暂停时保留暂停原因，恢复动作才清除旧原因。
@@ -274,23 +325,26 @@ def _no_progress_notice(goal: object) -> object | None:
     )
 
 
-# LLM: 文案由宿主固定生成，只列结构化结束原因（turn_end_reason/runtime_reason/runtime_status），不读模型正文或显示快照，
-#   因此不会带出凭据；三项都空（如冻结重投没有新执行）时写“结束原因不可取得”。details 由 host_notice 清洗并截长。
-# 函数用途: 构造“上一片结束原因让自动续跑没接上”的宿主提示，并给出可执行的下一步。
-def goal_withheld_notice(goal: object, signal: object, report: object) -> object:
+def goal_report_reason_fields(report: object) -> dict[str, str]:
+    """从原报告或冻结字段取固定的三项有界宿主原因。"""
+    from .host_notices import _DETAIL_LIMIT_CHARS, _clean
+
+    values = report if isinstance(report, Mapping) else {key: getattr(report, key, "") for key in _REPORT_REASON_FIELDS}
+    return {key: _clean(values.get(key), _DETAIL_LIMIT_CHARS) for key in _REPORT_REASON_FIELDS}
+
+
+def goal_withheld_notice(goal: object, signal: object, report: object, *, dedupe_key: str = "") -> HostNotice:
+    """用宿主原因生成续跑提示并保留原唤醒身份。"""
     from .host_notices import host_notice
 
-    facts = {
-        "turn_end_reason": str(getattr(report, "turn_end_reason", "") or "").strip(),
-        "runtime_reason": str(getattr(report, "runtime_reason", "") or "").strip(),
-        "runtime_status": str(getattr(report, "runtime_status", "") or "").strip(),
-    }
+    facts = goal_report_reason_fields(report)
     named = "，".join(f"{key}={value}" for key, value in facts.items() if value) or "结束原因不可取得"
     return host_notice(
         NO_PROGRESS_NOTICE_SOURCE,
         WITHHELD_REASON_CODE,
         f"持续目标上一片结束后没有自动续跑（{named}）。目标仍在进行；用 /goal resume 接着跑，也可以直接回复，"
         "或用 /goal pause 暂停。",
+        dedupe_key=dedupe_key,
         details={
             "goal_id": str(getattr(goal, "goal_id", "") or ""),
             "goal_revision": int(getattr(goal, "revision", 0) or 0),
@@ -318,7 +372,7 @@ def push_goal_no_progress_notice(
     ))
 
 
-# LLM: 续跑被扣下时的推送入口；每个线程同代码只留一条待送达，幂等键按目标与唤醒区分。
+# LLM: 同一 owner/线程/目标/修订/唤醒共用待送达键与外发幂等键。
 # 函数用途: 把“续跑没接上”的提示排队，并对外发通道线程主动推一次。
 def push_goal_withheld_notice(
     store: object,
@@ -329,10 +383,28 @@ def push_goal_withheld_notice(
     channels: object,
     route_deps: object,
 ) -> bool:
+    from ..contracts.idempotency import idempotency_key
+
     goal_id = str(getattr(goal, "goal_id", "") or "")
+    thread_id = str(getattr(goal, "thread_id", "") or "")
     wake_id = str(getattr(signal, "wake_signal_id", "") or "")
-    return _push_goal_notice(store, goal, goal_withheld_notice(goal, signal, report), _GoalNoticePush(
-        channels, route_deps, f"goal-withheld:{goal_id}:{wake_id}", "thread_goal_withheld_push",
+    if store is None or not thread_id or not goal_id:
+        return False
+    try:
+        thread = store.threads.load(thread_id)
+    except Exception:
+        return False
+    if thread is None:
+        return False
+    key = idempotency_key("goal-withheld", {
+        "owner_id": thread.owner_id or thread.canonical_user_id,
+        "thread_id": thread_id,
+        "goal_id": goal_id,
+        "goal_revision": int(getattr(goal, "revision", 0) or 0),
+        "wake_signal_id": wake_id,
+    })
+    return _push_goal_notice(store, goal, goal_withheld_notice(goal, signal, report, dedupe_key=key), _GoalNoticePush(
+        channels, route_deps, key, "thread_goal_withheld_push",
     ))
 
 
@@ -346,21 +418,22 @@ class _GoalNoticePush:
     record_reason: str
 
 
-# LLM: 目标提示的“主动推送”共享实现：先排队（同来源同代码替换），再对可主动外呼的通道立即投递一次并把同一条 notice
+# LLM: 目标提示的“主动推送”共享实现：先登记队列，再对可主动外发的通道立即投递新登记的提示并把同一条 notice
 #   取走（已读，下一条回复不再重复带出）；纯 TUI/无外发通道线程只排队。投递失败不取走，提示留在待送达队列由下一次前台
 #   回复补出。副作用：改写 pending_host_notices、可能调用外部投递服务并在成功时追加一条会话消息。
 # 函数用途: 排队一条目标提示，并对外发通道线程主动推一次、保证同一提示不会重复送达。
-def _push_goal_notice(store: object, goal: object, notice: object, push: _GoalNoticePush) -> bool:
+def _push_goal_notice(store: object, goal: object, notice: HostNotice, push: _GoalNoticePush) -> bool:
     from .background_routing import resolve_background_route
     from .channels import DeliveryContext, ReplyEnvelope
-    from .host_notices import queue_host_notice, take_host_notices
+    from .host_notices import enqueue_host_notice, take_host_notices
 
     thread_id = str(getattr(goal, "thread_id", "") or "")
     goal_id = str(getattr(goal, "goal_id", "") or "")
     if not thread_id or not goal_id:
         return False
-    if not queue_host_notice(store, thread_id, notice, replace_same_code=True):
-        return False
+    queued = enqueue_host_notice(store, thread_id, notice, replace_same_code=True)
+    if queued != "queued":
+        return queued == "duplicate"
     channel, target = resolve_background_route(push.route_deps, thread_id)
     try:
         supports_proactive = bool(target and push.channels.supports_proactive(channel))

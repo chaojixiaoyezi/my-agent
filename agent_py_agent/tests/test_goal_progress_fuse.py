@@ -221,8 +221,9 @@ def test_slices_while_subagents_are_active_neither_count_nor_continue() -> None:
                                        response="", route_channel="", route_target="", created_at=1.0,
                                        goal_continuation_allowed=True)
     continue_goal_after_report(dependencies, signal, report=report, now=2.0)
-    assert recorded == [] and raised == []
-    # 子代理结束后，同样的空片照常计数并续跑。
+    assert [request["count_progress"] for request in recorded] == [False] and raised == []
+    assert recorded[0]["disposition"]["basis"] == "subagents_active"
+    # 子代理结束后，新唤醒执行的空片照常计数并续跑。
     idle = replace(dependencies, subagent_phase=lambda _task: ("idle", ""))
-    continue_goal_after_report(idle, signal, report=report, now=3.0)
-    assert len(recorded) == 1 and len(raised) == 1
+    continue_goal_after_report(idle, replace(signal, wake_signal_id="wake-2"), report=report, now=3.0)
+    assert [request["count_progress"] for request in recorded] == [False, True] and len(raised) == 1
