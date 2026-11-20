@@ -150,11 +150,14 @@ def test_workspace_databases_round_robin_and_clean_cycle(tmp_path):
     expected = [store.db_path.relative_to(home.owner_home_dir).as_posix() for store in stores]
     first = _lane(_request(home))
     second = _lane(_request(home, cursor=first["cursor"]))
-    third = _lane(_request(home, cursor=second["cursor"]))
-    assert [first["cursor"]["after"], second["cursor"]["after"], third["cursor"]["after"]] == [*expected, expected[0]]
-    assert first["complete"] is False
-    assert second["complete"] is True
-    for report in (first, second, third):
+    finish = _lane(_request(home, cursor=second["cursor"]))
+    next_cycle = _lane(_request(home, cursor=finish["cursor"]))
+    assert {first["cursor"]["after"], second["cursor"]["after"]} == set(expected)
+    assert next_cycle["cursor"]["after"] == first["cursor"]["after"]
+    assert not first["complete"] and not second["complete"]
+    assert finish["complete"] and finish["items"] == 0
+    assert finish["cycle_generation"] == next_cycle["cycle_generation"] == 1
+    for report in (first, second, next_cycle):
         assert len(json.dumps(report["cursor"]).encode()) < 16 * 1024
         assert report["items"] == 1
         assert report["cursor"]["phase"] in {"events", "vacuum"}
@@ -170,10 +173,11 @@ def test_idle_coordinator_zero_commits_including_live_wal(tmp_path, live_wal):
         if live_wal:
             conn.execute("INSERT INTO events(event_id,event_type,created_at) VALUES('retained','note',1)")
             conn.commit()
-        report = _lane(_request(home, coordinator=True,
-                                commit=lambda operation: calls.append(operation) or operation()))
+        request = _request(home, coordinator=True, commit=lambda operation: calls.append(operation) or operation())
+        report = _lane(request)
+        finished = _lane(replace(request, cursor=report["cursor"]))
         assert calls == []
-        assert report["complete"] is True
+        assert finished["complete"] is True
         assert report["deleted_items"] == report["freed_bytes"] == 0
     finally:
         conn.close()
@@ -216,7 +220,7 @@ def test_legacy_prune_step_still_requires_explicit_maintenance(tmp_path):
     assert result["physical_shrink"] == {"performed": False, "reason_code": "explicit_maintenance_required"}
 
 
-def test_expired_deadline_still_performs_one_event_step(tmp_path, monkeypatch):
+def test_expired_deadline_defers_source_discovery(tmp_path, monkeypatch):
     assert callable(getattr(maintenance, "maintain_local_events_lane", None))
     monkeypatch.setattr(maintenance, "STEADY_STATE_EVENTS_KEEP_LAST", 1)
     home = home_paths(tmp_path / "home")
@@ -225,8 +229,11 @@ def test_expired_deadline_still_performs_one_event_step(tmp_path, monkeypatch):
     for index in range(3):
         _append(store, ids, f"budget-{index}")
     report = _lane(replace(_request(home), budget=StorageLaneBudget(None, None, time.monotonic() - 1)))
-    assert report["deleted_items"] == 2
-    assert _db_ids(store) == ids[-1:]
+    assert report["items"] == report["deleted_items"] == 0
+    assert report["deferred_reason"] == "budget_exhausted"
+    assert _db_ids(store) == ids
+    resumed = _lane(_request(home, cursor=report["cursor"]))
+    assert resumed["deleted_items"] == 2 and _db_ids(store) == ids[-1:]
 
 
 def test_precheck_seq_extrema_are_bounded_index_lookups(tmp_path, monkeypatch):
@@ -291,14 +298,16 @@ def test_dirty_cycle_cannot_complete_on_next_idle_database(tmp_path, monkeypatch
     first_store, _second_store = _store(home, "a"), _store(home, "b")
     for _ in range(3):
         first_store.record_event("due")
-    first = _lane(_request(home))
-    second = _lane(_request(home, cursor=first["cursor"]))
-    assert first["deleted_items"] == 2
-    assert first["complete"] is second["complete"] is False
-    third = _lane(_request(home, cursor=second["cursor"]))
-    fourth = _lane(_request(home, cursor=third["cursor"]))
-    assert third["complete"] is False
-    assert fourth["complete"] is True
+    cursor, reports = {}, []
+    for _ in range(12):
+        report = _lane(_request(home, cursor=cursor))
+        reports.append(report)
+        if report["complete"]:
+            break
+        cursor = report["cursor"]
+    assert sum(report["deleted_items"] for report in reports) == 2
+    assert all(not report["complete"] for report in reports[:-1])
+    assert reports[-1]["complete"] and reports[-1]["cycle_generation"] == 2
 
 
 def test_commit_source_oserror_propagates_same_exception(tmp_path, monkeypatch):
@@ -356,8 +365,9 @@ def test_expired_budget_does_not_start_additional_vacuum(tmp_path, monkeypatch):
         raise AssertionError("expired slice must not start another maintenance phase")
     monkeypatch.setattr(LocalStore, "incremental_vacuum_step", forbidden)
     report = _lane(_request(home, budget=StorageLaneBudget(None, None, time.monotonic() - 1)))
-    assert report["deleted_items"] == 2
+    assert report["items"] == report["deleted_items"] == 0
     assert report["deferred_reason"] == "budget_exhausted"
+    assert len(_db_ids(store)) == 3
 
 
 def test_sparse_seq_at_keep_limit_is_idle_without_commits(tmp_path, monkeypatch):
@@ -372,8 +382,10 @@ def test_sparse_seq_at_keep_limit_is_idle_without_commits(tmp_path, monkeypatch)
     calls = []
     report = _lane(_request(home, coordinator=True,
                             commit=lambda operation: calls.append(operation) or operation()))
+    finished = _lane(_request(home, cursor=report["cursor"], coordinator=True,
+                              commit=lambda operation: calls.append(operation) or operation()))
     assert calls == []
-    assert report["complete"] is True
+    assert finished["complete"] is True
     assert report["backlog"] == 0
     assert len(_db_ids(store)) == 3
 

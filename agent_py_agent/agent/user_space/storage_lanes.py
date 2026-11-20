@@ -2,14 +2,13 @@
 # 模块用途: 为后续存储通道提供共用预算、写门和只读发现接口。
 from __future__ import annotations
 
-import heapq
 import importlib
 import json
 import math
 import os
 import stat
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
@@ -269,12 +268,6 @@ def owner_retention_override(home, key: str, default: int) -> int:
     return default
 
 
-# LLM: 只对名称流做一遍有界选择，额外内存随 limit 而非目录大小增长。
-# 函数用途: 返回续点之后字典序最小的一批名称。
-def lane_cursor_window(cursor: dict, names: Iterable[str], limit: int) -> list[str]:
-    return heapq.nsmallest(limit, (name for name in names if name > cursor.get("after", "")))
-
-
 def lane_directory_entry(
     root: Path,
     parts: tuple[str, ...],
@@ -283,6 +276,8 @@ def lane_directory_entry(
     require_dir_fd: bool = True,
 ) -> tuple[str | None, dict, int, bool]:
     """返回单项续点，让预算中断或待复核项停在准确边界。"""
+    if not isinstance(position, dict):
+        raise ValueError("invalid_storage_lane_directory_cursor")
     names, resume, complete = directory_page(root, parts, position, 1, require_dir_fd=require_dir_fd)
     # 便携后端的重放也消耗访问预算，即使本次没有产出名称。
     return (names[0] if names else None), resume, resume.get("last_scanned", 0), complete

@@ -729,48 +729,43 @@ def _auxiliary_skip(receipt, reason):
     receipt['skipped'][reason] = receipt['skipped'].get(reason, 0) + 1
 
 
-# LLM: 缺失集合是空集合，不创建目录；其余no-follow错误必须上抛。
-# 函数用途: 读取一个固定辅助集合的名字。
-def _auxiliary_names(home, parts):
-    try:
-        return list_names_beneath(home, parts)
-    except FileNotFoundError:
-        return []
+def _auxiliary_window(home, cursor, budget, receipt):
+    from ..user_space.storage_lanes import lane_directory_entry
 
+    phase = cursor.get("phase", "requests")
+    kind = cursor.get("kind", "script")
+    if phase not in ("requests", "drafts", "candidates", "extractions") or kind not in _HISTORY_KINDS:
+        raise ValueError("invalid asset auxiliary cursor")
+    parts = (("data", "asset_extractions") if phase == "extractions" else
+             (*_HISTORY_PARTS, phase) if phase == "requests" else (*_HISTORY_PARTS, phase, kind))
+    if phase != "candidates":
+        return parts, False
 
-# LLM: 每片只选一个固定集合或候选子目录，候选续点可含asset_id/leaf而不是全量加载子树。
-# 函数用途: 返回本片实际扫描目录、名字窗口及候选资产目录身份。
-def _auxiliary_window(home, cursor, limit, window_function, receipt):
-    phase = cursor.get('phase', 'requests')
-    kind = cursor.get('kind', 'script')
-    after = cursor.get('after', '')
-    if phase not in ('requests', 'drafts', 'candidates', 'extractions') or kind not in _HISTORY_KINDS:
-        raise ValueError('invalid asset auxiliary cursor')
-    parts = (('data', 'asset_extractions') if phase == 'extractions' else
-             (*_HISTORY_PARTS, phase) if phase == 'requests' else (*_HISTORY_PARTS, phase, kind))
-    asset_id = None
-    if phase == 'candidates':
-        directory_after, separator, leaf_after = after.partition('/')
-        directories = _auxiliary_names(home, parts)
-        directories = window_function({'after': ''},
-            (name for name in directories if name >= directory_after if separator or name > directory_after), 1)
-        if not directories:
-            return parts, [], None
-        asset_id = directories[0]
+    asset_id = cursor.get("asset_id")
+    if asset_id is None:
+        if budget.exhausted(receipt["items"], receipt["bytes"]):
+            return None, False
+        asset_id, resume, visited, complete = lane_directory_entry(
+            home, parts, cursor.get("parent_directory", {}),
+        )
+        receipt["items"] += visited
+        if complete:
+            return None, True
+        cursor["parent_directory"] = resume
+        if asset_id is None:
+            return None, False
         try:
             safe_asset_id(asset_id)
             parent = _verify_directory_beneath(home, parts)
             if not stat.S_ISDIR((parent / asset_id).lstat().st_mode):
-                raise ValueError('candidate member is not a directory')
+                raise ValueError("candidate member is not a directory")
         except (ValueError, FileNotFoundError):
-            _auxiliary_skip(receipt, 'unknown_schema')
-            receipt['items'] += 1
-            return parts, [], asset_id
-        parts = (*parts, asset_id)
-        after = leaf_after if separator and directory_after == asset_id else ''
-    names = _auxiliary_names(home, parts)
-    names = (name for name in names if name.endswith('.json') and (phase != 'extractions' or name.startswith('exp_')))
-    return parts, window_function({'after': after}, names, limit), asset_id
+            _auxiliary_skip(receipt, "unknown_schema")
+            return None, False
+        cursor.update(asset_id=asset_id, after=asset_id + "/")
+
+    safe_asset_id(asset_id)
+    return (*parts, asset_id), False
 
 
 # LLM: 只在集合已穷尽时前进阶段/种类；不更动既有history发布及blob算法。
@@ -924,44 +919,71 @@ def _maintain_asset_auxiliary_slice(request) -> dict:
         STORAGE_LANE_SLICE_BYTES,
         STORAGE_LANE_SLICE_ENTRIES,
         STORAGE_LANE_SLICE_MS,
-        lane_cursor_window,
+        _real_directory,
+        lane_cycle_generation,
+        lane_directory_entry,
         owner_conversation_roots,
         validate_lane_receipt,
     )
 
     cursor = dict(request.cursor)
-    receipt = {'cursor': cursor, 'complete': True, 'items': 0, 'bytes': 0}
+    generation = lane_cycle_generation(cursor)
+    receipt = {'cursor': cursor, 'complete': True, 'items': 0, 'bytes': 0, 'cycle_generation': generation}
     if request.legal_hold:
         receipt['deferred_reason'] = 'legal_hold'
         return receipt
     if cursor.get('next_pass_at', 0) > request.now:
         return receipt
+    if not any(key in cursor for key in ('directory', 'parent_directory', 'asset_id')):
+        cursor.pop('after', None)
+        cursor.pop('retry_name', None)
+    cursor.setdefault('after', '')
+    cursor['cycle_generation'] = generation
     home = Path(request.home.owner_home_dir)
     receipt.update(errors=[], skipped={}, protected=0, deleted_items=0, freed_bytes=0, backlog=0)
+    meter = _AUXILIARY_READ_METER.get()
+    budget = (meter['budget'] if meter is not None else
+              request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS))
+    if budget.exhausted():
+        return {**receipt, 'complete': False}
     try:
-        data_names = _auxiliary_names(home, ('data',))
-        if not {'asset_evolution', 'asset_extractions'}.intersection(data_names):
-            receipt['cursor'] = {'next_pass_at': request.now + _ASSET_AUXILIARY_PASS_INTERVAL_SECONDS}
-            return validate_lane_receipt(receipt)
-        parts, window, asset_id = _auxiliary_window(home, cursor, STORAGE_LANE_SLICE_ENTRIES, lane_cursor_window, receipt)
+        if not any(_real_directory(home, ('data', name)) for name in ('asset_evolution', 'asset_extractions')):
+            next_cursor, complete = _auxiliary_next_cursor({'phase': 'extractions'}, request.now)
+            generation = lane_cycle_generation(cursor, wrapped=True)
+            return {**receipt, 'cursor': {**next_cursor, 'cycle_generation': generation},
+                    'complete': complete, 'cycle_generation': generation}
+        parts, exhausted = _auxiliary_window(home, cursor, budget, receipt)
     except (OSError, ValueError):
         _auxiliary_error(receipt['errors'], 'asset_auxiliary_unreadable')
         receipt.update(complete=False, deferred_reason='asset_auxiliary_unreadable')
         return validate_lane_receipt(receipt)
     phase, kind = cursor.get('phase', 'requests'), cursor.get('kind', 'script')
-    meter = _AUXILIARY_READ_METER.get()
-    budget = (meter['budget'] if meter is not None else
-              request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS))
     now = datetime.fromtimestamp(request.now, timezone.utc)
-    due, decided = [], set()
-    for name in window:
-        if budget.exhausted(receipt['items'], receipt['bytes']):
-            break
+    due, decided, page = [], set(), []
+    position = cursor.get('directory', {})
+    retry_candidate = bool(cursor.get('retry_name'))
+    checked_candidate = False
+    while parts is not None and not budget.exhausted(receipt['items'], receipt['bytes']):
         if due and budget.remaining_ms() <= STORAGE_LANE_SLICE_MS / 2:
             break
-        if cursor.get('retry_name') and receipt['items'] >= 1:
+        if retry_candidate and checked_candidate:
             break
-        receipt['items'] += 1
+        try:
+            name, position, visited, exhausted = lane_directory_entry(home, parts, position)
+        except (OSError, ValueError):
+            _auxiliary_error(receipt['errors'], 'asset_auxiliary_unreadable', parts)
+            receipt['deferred_reason'] = 'asset_auxiliary_unreadable'
+            break
+        receipt['items'] += visited
+        if exhausted:
+            break
+        if name is None or not name.endswith('.json') or (phase == 'extractions' and not name.startswith('exp_')):
+            page.append((None, position))
+            continue
+        page.append((name, position))
+        checked_candidate = True
+        if budget.remaining_ms() <= 0:
+            break
         leaf_parts = (*parts, name)
         try:
             stem = safe_asset_id(name[:-5])
@@ -1031,21 +1053,25 @@ def _maintain_asset_auxiliary_slice(request) -> dict:
         receipt['errors'].extend(result['errors'][:max(0, 16 - len(receipt['errors']))])
         if result.get('budget_exhausted'):
             receipt['deferred_reason'] = 'budget_exhausted'
-    after = cursor.get('after', '')
-    if phase == 'candidates':
-        old_asset, separator, old_leaf = after.partition('/')
-        after = old_leaf if separator and old_asset == asset_id else ''
-    for name in window:
-        if name not in decided:
+    for name, resume in page:
+        if name is not None and name not in decided:
             break
-        after = name
-    exhausted = len(window) < STORAGE_LANE_SLICE_ENTRIES and all(name in decided for name in window)
-    if phase == 'candidates' and asset_id is not None:
-        receipt.update(cursor={'phase': phase, 'kind': kind, 'after': asset_id if exhausted else asset_id + '/' + after}, complete=False)
-    elif exhausted:
-        receipt['cursor'], receipt['complete'] = _auxiliary_next_cursor(cursor, request.now)
-    else:
-        receipt.update(cursor={'phase': phase, 'kind': kind, 'after': after}, complete=False)
+        cursor['directory'] = resume
+        if name is not None:
+            cursor['after'] = (cursor['asset_id'] + '/' if phase == 'candidates' else '') + name
+    exhausted = exhausted and all(name is None or name in decided for name, _ in page)
+    receipt['complete'] = False
+    cursor.pop('retry_name', None)
+    if exhausted:
+        if phase == 'candidates' and 'asset_id' in cursor:
+            cursor['after'] = cursor.pop('asset_id')
+            cursor.pop('directory', None)
+        else:
+            next_cursor, complete = _auxiliary_next_cursor(cursor, request.now)
+            if complete:
+                generation = lane_cycle_generation(cursor, wrapped=True)
+            receipt.update(cursor={**next_cursor, 'cycle_generation': generation}, complete=complete,
+                           cycle_generation=generation)
     receipt['backlog'] = sum(item['name'] not in decided for item in due)
     pending = [item['name'] for item in due if item['name'] not in decided]
     if pending and (budget.remaining_ms() <= 0 or receipt.get('deferred_reason') == 'budget_exhausted'):
@@ -1063,8 +1089,11 @@ def maintain_asset_auxiliary_lane(request) -> dict:
         STORAGE_LANE_SLICE_MS,
     )
 
-    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES,
-                                   ms=STORAGE_LANE_SLICE_MS)
+    budget = request.budget.capped(
+        items=getattr(request.config, "retention_scan_slice_entries", STORAGE_LANE_SLICE_ENTRIES),
+        size=getattr(request.config, "retention_scan_slice_bytes", STORAGE_LANE_SLICE_BYTES),
+        ms=getattr(request.config, "retention_scan_slice_ms", STORAGE_LANE_SLICE_MS),
+    )
     meter = {'remaining': budget.max_bytes, 'bytes': 0, 'budget': budget}
     token = _AUXILIARY_READ_METER.set(meter)
     try:

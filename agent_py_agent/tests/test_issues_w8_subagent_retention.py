@@ -60,7 +60,8 @@ def _projection(home, tmp_path, now, *, run_id="child", days=8, status="DONE", r
 
 def _request(home, now, *, cursor=None, commit=None, legal_hold=False):
     return StorageLaneRequest("subagents", home, now, cursor or {}, StorageLaneBudget(None, None, None), legal_hold,
-                              commit is not None, None, commit)
+                              commit is not None, None, commit,
+                              config=SimpleNamespace(retention_scan_slice_ms=500))
 
 
 def _drain(home, now, **kwargs):
@@ -96,7 +97,7 @@ def test_real_lane_slim_archive_and_active_pending_protection(tmp_path):
     assert not (slim / "events.jsonl").exists() and (slim / "subagent_compact.json").exists()
     assert (slim / "state.json").read_bytes() == state
     assert not archive.exists() and active.exists() and pending.exists()
-    assert any(row["protected"].get("projection", 0) >= 2 for row in reports)
+    assert sum(row["protected"].get("projection", 0) for row in reports) >= 2
     assert sum(row["freed_bytes"] for row in reports) > 0
     assert sum(row["deleted_items"] for row in _drain(home, now)) == 0
 

@@ -127,6 +127,7 @@ def _lane_request(
         coordinator=True,
         pressure=None,
         commit=lambda operation: operation(),
+        config=SimpleNamespace(retention_scan_slice_ms=500),
     )
 
 
@@ -407,7 +408,7 @@ def test_a03_maintain_subagents_lane_persists_cursor_beyond_32_owners(tmp_path: 
             days=40.0,
         )
 
-    cursors_seen: list[str] = []
+    cursors_seen: set[str] = set()
     cursor: dict = {}
     slices = 0
     while True:
@@ -416,15 +417,13 @@ def test_a03_maintain_subagents_lane_persists_cursor_beyond_32_owners(tmp_path: 
         receipt = validate_lane_receipt(
             hygiene.maintain_subagents_lane(_lane_request(single_home, now, cursor=cursor, max_items=5))
         )
+        assert receipt["items"] <= 5
         if receipt["complete"]:
-            assert receipt["cursor"] == {}
+            assert receipt["cursor"] == {"cycle_generation": 1}
             break
-        if receipt["cursor"].get("phase") == "projections":
-            next_after = str(receipt["cursor"].get("after") or "")
-            assert next_after
-            if cursors_seen:
-                assert next_after > cursors_seen[-1]
-            cursors_seen.append(next_after)
+        position = receipt["cursor"].get("directory")
+        if receipt["cursor"].get("phase") == "projections" and position:
+            cursors_seen.add(json.dumps(position, sort_keys=True))
         cursor = receipt["cursor"]
 
     remaining = [p for p in (single_home.owner_home_dir / "agents").iterdir() if p.is_dir()]
@@ -444,33 +443,32 @@ def test_a03_maintain_subagents_lane_persists_cursor_beyond_32_owners(tmp_path: 
                 status="DONE",
                 days=40.0,
             )
-        owners.append([h, owner_now, {}, [], False])
+        owners.append([h, owner_now, {}, set(), False])
 
     for _round_idx in range(25):
         if all(item[4] for item in owners):
             break
         for item in owners:
-            h, owner_now, cur, seen_afters, done = item
+            h, owner_now, cur, seen_positions, done = item
             if done:
                 continue
             receipt = validate_lane_receipt(
                 hygiene.maintain_subagents_lane(_lane_request(h, owner_now, cursor=cur, max_items=2))
             )
             if receipt["complete"]:
+                assert receipt["cursor"] == {"cycle_generation": 1}
                 item[4] = True
-                item[2] = {}
+                item[2] = receipt["cursor"]
             else:
-                if receipt["cursor"].get("phase") == "projections":
-                    na = str(receipt["cursor"].get("after") or "")
-                    assert na
-                    if seen_afters:
-                        assert na > seen_afters[-1]
-                    seen_afters.append(na)
+                assert receipt["items"] <= 2
+                position = receipt["cursor"].get("directory")
+                if receipt["cursor"].get("phase") == "projections" and position:
+                    seen_positions.add(json.dumps(position, sort_keys=True))
                 item[2] = receipt["cursor"]
 
     assert all(item[4] for item in owners)
-    for h, _owner_now, _cur, seen_afters, _done in owners:
-        assert len(seen_afters) >= 2
+    for h, _owner_now, _cur, seen_positions, _done in owners:
+        assert len(seen_positions) >= 2
         assert [p for p in (h.owner_home_dir / "agents").iterdir() if p.is_dir()] == []
 
 
@@ -498,33 +496,33 @@ def test_a03_budget_exhausted_mid_page_and_at_zero_preserves_cursor(tmp_path: Pa
         now=now,
         max_dirs=10,
         dry_run=True,
-        after="",
+        directory_position={},
         budget_exhausted=_stop_after_two,
     )
     assert first["scanned_dirs"] == 2
     assert first["would_archive_dirs"] == 2
     assert first["page_complete"] is False
-    assert first["next_after"] == "r-01"
+    assert first["visited_entries"] == 2 and first["directory"]
 
-    # Immediate budget exhaustion before scanning any entry keeps cursor at existing 'after'.
+    # 零预算须保留原目录续点，不能因本片无候选而完成。
     zero_step = hygiene.maintain_owner_agent_projections(
         home.owner_home_dir,
         now=now,
         max_dirs=10,
         dry_run=True,
-        after=first["next_after"],
+        directory_position=first["directory"],
         budget_exhausted=lambda: True,
     )
     assert zero_step["scanned_dirs"] == 0
     assert zero_step["page_complete"] is False
-    assert zero_step["next_after"] == "r-01"
+    assert zero_step["directory"] == first["directory"]
 
     rest = hygiene.maintain_owner_agent_projections(
         home.owner_home_dir,
         now=now,
         max_dirs=10,
         dry_run=True,
-        after=zero_step["next_after"],
+        directory_position=zero_step["directory"],
         budget_exhausted=lambda: False,
     )
     assert rest["scanned_dirs"] == 4

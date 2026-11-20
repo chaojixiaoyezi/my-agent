@@ -264,20 +264,24 @@ def test_reaping_resumes_past_bad_rows_and_settles_a_host_without_a_child(author
     home, store, request = authority
     sid = "bg-m26-no-child"
     pid, birth = group_leader(finished=True)
-    before = store.write({**launch._reservation(request, sid), "pid": pid, "pid_birth_token": birth})
+    store.write({**launch._reservation(request, sid), "pid": pid, "pid_birth_token": birth})
     (store.root / "bg-bad$.json").write_text("{")
     now = time.time()
-    first = _maintain(home, now, max_items=1)
-    assert first["errors"] == [{"code": "process_session_scan_failed"}]
-    assert first["cursor"]["reap_after"] == "bg-bad$.json" and first["items"] == 1
-    assert store.load(sid).record == before
-    second = _maintain(home, now, cursor=first["cursor"], max_items=1)
-    assert not second["errors"] and second["items"] == 1
+    cursor, errors = {}, []
+    for _ in range(30):
+        receipt = _maintain(home, now, cursor=cursor, max_items=1)
+        assert receipt["items"] <= 1
+        cursor = receipt["cursor"]
+        errors.extend(receipt["errors"])
+        if errors and not store.record_path(sid).exists():
+            break
+    assert errors == [{"code": "process_session_scan_failed"}]
+    assert cursor["reap_directory"]
     lost = store.load(sid).record
     assert (lost["status"], lost["reason"], lost["exit_code"]) == ("not_started", "lost", None)
     assert not store.record_path(sid).exists()
     assert store.prune_finished(0) == []  # 当前终态只剩已归档的 TTL 责任。
-    assert not _maintain(home, now, cursor=second["cursor"])["errors"]
+    assert not _maintain(home, now, cursor=cursor)["errors"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process identity observation")
