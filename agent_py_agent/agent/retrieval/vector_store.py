@@ -1,46 +1,39 @@
 # LLM: C仅存coordinator_io策略；原锁/reload/身份/编码门外，准确FD出生及固定快照raw末写逐次消费原scope。
 # LLM: 向量身份和正式记录删除分别守原合同；损坏库不能被当作空库报告删除成功，保留唯一原子存储。
 # 模块用途: 保存并检索正式向量，为精确删除提供可确认的清理结果。
-"""暴力 cosine 向量库(Phase 2,纯 Python,零外部依赖)。
+"""单文件向量投影，保留跨进程锁、快照代次和崩溃残尾处理。
 
-参考实现 用 Milvus 做向量库;但 my-agent 面向个人/小团队,记忆量级是百~千条——**暴力遍历算
-cosine 完全够用,不必引 Milvus/faiss**(用户原则:能自建就自建)。向量持久化到 JSON,
-进程内加载后线性扫描求 top-k。量级真涨到十万级再考虑换 ANN 后端(接口不变,可平滑替换)。
-
-P14 快照格式(my-agent.memory-vectors.v2):空间身份、实际维度、代次和全部向量放在**同一个文件**里,一次原子替换
-整体生效;写入在正式跨进程锁(locked_json_path)内"读最新快照 → 裁决 → 整份写回",读取发现文件换代就重载,
-所以不会出现"B 的身份认证 A 的向量"。
-
-D-12 追加记录:快照不小于 _VECTOR_APPEND_MIN_BASE_BYTES 时,只新增 id 的写入不再整份重写,而是在同一个文件末尾追加
-一行 "\\n" + {schema_version: my-agent.memory-vectors.v2.append, generation: 快照代次, items: {...}} 并 fsync;
-其它实例发现 inode 未变、长度增长时只读新增字节。覆盖已有 id、删除、身份或维度变化、文件权限不私有,或追加段将超过
-快照字节数的 _VECTOR_APPEND_MAX_TAIL_PERCENT% 时,仍整份原子重写(顺带压实),所以被删或被覆盖的旧正文不会残留。
-末条不完整是崩溃残尾,读者不读入,下一次追加先截掉。旧版本按整份 json.loads 读带追加段的文件会失败,得到
-VECTOR_STORE_UNREADABLE(语义召回退回关键词、写入和删除被拒绝),不会静默丢向量;压实或重建后旧版本又能正常读取。
+v3 先写 UTF-8 JSON 头和逐行 ID/正文/元数据表，再写连续的小端 float32 向量块与同序范数块。
+追加记录仍位于同一文件末尾。普通批量删除用墓碑，隐私清理请求立即压实对应原始数据。
+v1/v2 只读时不迁移，下一次压实才换成 v3。
 """
-
-# LLM: 本模块是记忆向量投影的唯一读写实现；快照格式、身份裁决和锁协议改动要同步 jsonl 的语义召回/重建、
-#   error_taxonomy 里的 VECTOR_* 原因码，以及 test_vector_identity、test_vector_store_robustness。
-# 模块用途: 本地 JSON 向量库：单文件原子快照、跨进程一致、按空间身份与实际维度拒绝混用。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import stat
+import sys
 import threading
 import uuid
+from array import array
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from heapq import heappush, heapreplace
+from io import DEFAULT_BUFFER_SIZE
+from itertools import islice
 from pathlib import Path
 
 from agent_py_agent.agent.common.json_io import (
+    _replace_with_retry,
+    _sync_parent_directory,
+    _unlink_tmp_file,
+    ensure_private_dir,
     locked_json_path,
-    write_private_text_file_atomic_unlocked,
 )
-from agent_py_agent.agent.retrieval.embedding import cosine
 
 from ..common.global_write_commit import execute_global_write
 
@@ -71,29 +64,63 @@ class VectorIdentityError(VectorStoreError):
     pass
 
 
-# LLM: 向量在装载/插入时已经转换并校验为有限float元组；查询阶段只核长度，不反复转换全库。
-# 函数用途: 对已验证向量计算相似度，坏向量或维度不符直接跳过。
-def _safe_cosine(query_vector: list[float], qlen: int, vec: object) -> float | None:
-    """对一条存储向量算 cosine;不可比则返回 None(不是 list / 维度不一致 / 含非数值都跳过)。
-
-    维度守卫是关键:换 embedding 模型后维度会变(如本地 256 → MiniMax embo-01 的 1536),
-    旧维度向量若参与比较会被 cosine 截断成垃圾分,静默错召回——宁可跳过。
-    """
-    if not isinstance(vec, tuple) or len(vec) != qlen:
-        return None
-    return cosine(query_vector, vec)
-
-
-# LLM: 数值转换只在读/写边界发生；非有限值或坏形状不进入打分，坏旧条目原载荷仍保留以免重写丢数据。
-# 函数用途: 把可用向量转换为不可变浮点元组。
-def _validated_vector(vector: object) -> tuple[float, ...] | None:
+def _validated_vector(vector: object) -> array | None:
     if not isinstance(vector, (list, tuple)):
         return None
     try:
-        values = tuple(float(value) for value in vector)
-        return values if values and all(math.isfinite(value) for value in values) else None
+        values = array("f", (float(value) for value in vector))
+        return values if values and all(map(math.isfinite, values)) else None
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+@dataclass(slots=True)
+class _Row:
+    offset: int
+    length: int
+    text: object
+    metadata: object
+    invalid: object = None
+
+
+class _Packed:
+    def __init__(self):
+        self.values = array("f")
+        self.rows: dict[str, _Row] = {}
+        self.tombstones: set[str] = set()
+        self.readers = 0
+
+    def put(self, key, item):
+        vector = item.get("vector") if isinstance(item, dict) else None
+        values = vector if isinstance(vector, array) else _validated_vector(vector)
+        start = len(self.values)
+        if values is None:
+            self.rows[key] = _Row(start, 0, "", None, item)
+        else:
+            self.values.extend(values)
+            self.rows[key] = _Row(start, len(values), item.get("text", ""), item.get("metadata"))
+        self.tombstones.discard(key)
+
+    def copy_row(self, key, row, source):
+        start = len(self.values)
+        self.values.extend(source[row.offset:row.offset + row.length])
+        self.rows[key] = _Row(start, row.length, row.text, row.metadata, row.invalid)
+
+    def apply(self, added, removed):
+        for key in removed:
+            self.rows.pop(key, None)
+        self.tombstones.update(removed)
+        for key, item in added.items():
+            self.put(key, item)
+
+
+@dataclass(slots=True)
+class _Rank:
+    score: float
+    id: str
+
+    def __lt__(self, other):
+        return self.score < other.score or (self.score == other.score and self.id > other.id)
 
 
 @dataclass(frozen=True)
@@ -137,20 +164,90 @@ def _parse_snapshot(raw: bytes | memoryview) -> tuple[dict[str, object] | None, 
     return header, items, True
 
 
-# LLM: 装载边界把合法向量转换成float元组，坏向量留原值供兼容跳过；快照条目与追加记录条目共用这一处。
-# 函数用途: 原地预校验一批已解析条目的向量并返回同一个字典。
-def _validated_items(items: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
-    for item in items.values():
-        if isinstance(item, dict) and (vector := _validated_vector(item.get("vector"))) is not None:
-            item["vector"] = vector
-    return items
+_V3_PREFIX = b'{"v":3,'
+_TOMBSTONE_SCHEMA = "my-agent.memory-vectors.v3.tombstone"
 
 
-# LLM: data[start:] 必须由 "\n" 开头的记录组成；空行跳过。末条解析失败是崩溃或并发写到一半的残尾，不算已提交、
-#   不推进位置；中间坏记录、schema 或 generation 不符都返回 None（调用方整份重读或判读不了，不猜内容）。
-# 函数用途: 解析快照之后的追加记录，返回 (已提交末尾偏移, 按顺序合并的条目)。
-def _tail_records(generation: object, data: bytes, start: int) -> tuple[int, dict[str, dict[str, object]]] | None:
-    rows: dict[str, dict[str, object]] = {}
+def _json_bytes(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _space_id(identity, dim):
+    raw = json.dumps([identity, dim], sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _read_float_block(handle, count):
+    values = array("f", [0.0]) * count
+    with memoryview(values).cast("B") as dest:
+        if handle.readinto(dest) != len(dest):
+            raise ValueError("incomplete vector block")
+    if sys.byteorder != "little":
+        values.byteswap()
+    return values
+
+
+def _float_bytes(values):
+    if sys.byteorder != "little":
+        values = values[:]
+        values.byteswap()
+    return values.tobytes()
+
+
+def _read_v3(handle, size):
+    header = json.loads(handle.readline(size + 1))
+    count = header.get("count")
+    dim = header.get("dim")
+    generation = header.get("generation")
+    if (type(count) is not int or not 0 <= count <= size or header.get("v") != 3
+            or (dim is not None and (type(dim) is not int or dim < 1))
+            or not isinstance(generation, str) or not generation
+            or header.get("space_id") != _space_id(header.get("identity"), dim)):
+        raise ValueError("invalid vector snapshot header")
+    state = _Packed()
+    offset = 0
+    for _ in range(count):
+        row = json.loads(handle.readline(max(0, size - handle.tell()) + 1))
+        if not isinstance(row, list) or len(row) not in (4, 5):
+            raise ValueError("invalid vector row")
+        key, length, text, metadata = row[:4]
+        if (not isinstance(key, str) or key in state.rows
+                or type(length) is not int or length < 0 or (len(row) == 5 and length)):
+            raise ValueError("invalid vector row extent")
+        state.rows[key] = _Row(offset, length, text, metadata, row[4] if len(row) == 5 else None)
+        offset += length
+    if (offset + count) * state.values.itemsize > size - handle.tell():
+        raise ValueError("vector snapshot extent exceeds file")
+    state.values = _read_float_block(handle, offset)
+    norms = _read_float_block(handle, count)
+    if not all(map(math.isfinite, state.values)) or not all(value >= 0 for value in norms):
+        raise ValueError("invalid packed vector values")
+    end = handle.tell()
+    tail = _tail_records(generation, handle.read(size - end), 0)
+    if tail is None:
+        raise ValueError("invalid vector tail")
+    _apply_tail(state, tail[1])
+    return header, state, (end, end + tail[0])
+
+
+def _snapshot_bytes(header, state):
+    # 调用方准备的是压实状态，行表和 float32 块按同一顺序写出。
+    norms = array("f")
+    entries = bytearray()
+    for key, row in state.rows.items():
+        line = [key, row.length, row.text, row.metadata]
+        if not row.length:
+            line.append(row.invalid)
+        entries.extend(_json_bytes(line))
+        entries.extend(b"\n")
+        end = row.offset + row.length
+        norms.append(math.sqrt(sum(state.values[i] ** 2 for i in range(row.offset, end))))
+    return b"".join((_json_bytes(header), b"\n", entries, _float_bytes(state.values), _float_bytes(norms)))
+
+
+# 同一句柄取得的代次是追加记录的范围，一条记录完整验收后才可改活跃行。
+def _tail_records(generation, data, start):
+    records = []
     consumed = position = start
     while position < len(data):
         if data[position] != ord("\n"):
@@ -161,37 +258,70 @@ def _tail_records(generation: object, data: bytes, start: int) -> tuple[int, dic
         body = data[position + 1:stop]
         if body.strip():
             try:
-                record = json.loads(body.decode("utf-8"))
+                record = json.loads(body)
             except (UnicodeDecodeError, json.JSONDecodeError):
                 if last:
                     break
                 return None
-            items = record.get("items") if isinstance(record, dict) else None
-            if (not isinstance(items, dict) or record.get("schema_version") != VECTOR_STORE_APPEND_SCHEMA_VERSION
-                    or not isinstance(generation, str) or record.get("generation") != generation):
+            if (not isinstance(record, dict) or not isinstance(generation, str)
+                    or record.get("generation") != generation):
                 return None
-            rows.update(_validated_items(items))
+            schema = record.get("schema_version")
+            if schema == VECTOR_STORE_APPEND_SCHEMA_VERSION and isinstance(record.get("items"), dict):
+                records.append((record["items"], ()))
+            elif schema == _TOMBSTONE_SCHEMA and isinstance(record.get("removed"), list) and all(
+                isinstance(key, str) for key in record["removed"]
+            ):
+                records.append(({}, record["removed"]))
+            else:
+                return None
         consumed = position = stop
-    return consumed, rows
+    return consumed, records
 
 
-# LLM: 第一行是单行 v2 快照时其后只能是追加记录；旧格式、多行文件和无换行文件仍整份 json.loads，行为与原来一致。
-#   追加位置 (快照字节数, 已提交末尾) 只对单行 v2 快照给出，其它格式为 None（下一次写入整份重写成单行快照）。
-# 函数用途: 把整个文件字节解析成头、条目、可读标记和追加位置。
-def _parse_store(raw: bytes) -> tuple[dict[str, object] | None, dict[str, dict[str, object]], bool, tuple[int, int] | None]:
+def _apply_tail(state, records):
+    for added, removed in records:
+        state.apply(added, removed)
+
+
+def _parse_store(raw):
+    # 旧格式照常解析，提交前只把合法向量放入本实例的连续块。
     newline = raw.find(b"\n")
     if newline >= 0:
-        header, items, _readable = _parse_snapshot(memoryview(raw)[:newline])
+        header, items, _ = _parse_snapshot(memoryview(raw)[:newline])
         if header is not None:
             parsed = _tail_records(header.get("generation"), raw, newline)
             if parsed is None:
-                return None, {}, False, None
-            items = _validated_items(items)
-            items.update(parsed[1])
-            return header, items, True, (newline, parsed[0])
+                return None, _Packed(), False, None
+            state = _Packed()
+            state.apply(items, ())
+            _apply_tail(state, parsed[1])
+            return header, state, True, (newline, parsed[0])
     header, items, readable = _parse_snapshot(raw)
     tail = (len(raw), len(raw)) if header is not None and newline < 0 else None
-    return header, _validated_items(items), readable, tail
+    state = _Packed()
+    state.apply(items, ())
+    return header, state, readable, tail
+
+
+def _write_private_snapshot_unlocked(path, payload, *, replace_once=False):
+    """沿原私有临时文件和原子替换合同写字节，调用方持原路径锁。"""
+    ensure_private_dir(path.parent)
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if replace_once:
+            _replace_with_retry(temporary, path, keep_mode=False, replace_once=True)
+        else:
+            _replace_with_retry(temporary, path, keep_mode=False)
+        _sync_parent_directory(path)
+    finally:
+        _unlink_tmp_file(temporary)
 
 
 # LLM: 调用方持 self._lock 与 locked_json_path；不跟随符号链接，打开后先核对文件仍是刷新时那一代（指纹一致），
@@ -200,8 +330,9 @@ def _parse_store(raw: bytes) -> tuple[dict[str, object] | None, dict[str, dict[s
 def _append_record_unlocked(path: Path, expected: tuple[int, int, int] | None, end: int, payload: bytes) -> tuple[int, int, int]:
     descriptor = os.open(path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
     try:
-        current = _file_stamp(os.fstat(descriptor))
-        if expected is None or current != expected or current[1] < end:
+        info = os.fstat(descriptor)
+        current = _file_stamp(info)
+        if expected is None or current != expected or current[1] < end or info.st_nlink != 1:
             raise OSError("vector snapshot changed before append")
         try:
             if current[1] > end:
@@ -237,7 +368,7 @@ def _rows_dim(rows: list[tuple[str, list[float], str, dict[str, object]]]) -> in
 
 
 # LLM: 条目形状固定为 {vector, text, metadata}，读侧 search 与 jsonl 二次核验都按这三个键取值；改形状要同步两边。
-# LLM: 插入前验证有限数值，内存只存不可变float元组；JSON仍自然编码为数组。
+# 插入前拒绝非有限值，向量按快照精度打包。
 # 函数用途: 校验并复制一行向量数据，拒绝坏向量。
 def _item(vector: list[float], text: str, metadata: dict[str, object] | None) -> dict[str, object]:
     validated = _validated_vector(vector)
@@ -246,26 +377,8 @@ def _item(vector: list[float], text: str, metadata: dict[str, object] | None) ->
     return {"vector": validated, "text": text, "metadata": dict(metadata or {})}
 
 
-# LLM: 向量库只是可重建的派生投影。身份、维度、代次与全部向量同在一个快照文件里；写入一律在 locked_json_path 内
-#   先读最新快照再整份原子替换（大快照只新增 id 时改为同文件追加一条记录，见模块说明），读取按文件指纹发现换代就重载、
-#   只变长就只读新增字节。identity=None 是不管理身份的通用模式（测试与通用检索），
-#   生产记忆语义通道必须带身份（core._memory_semantic_channel 保证）。
-# 类用途: id → (向量, 文本, 元数据) 的暴力 cosine 库，单文件原子快照、跨实例跨进程一致。
-# LLM: C只保存IO策略且沿原RLock/同path文件锁，无source/第二投影；身份、维度和原缓存发布保持。
-# 类用途: 管理唯一原向量快照，C末写仍与原实例算法共用。
 class VectorStore:
-    """id → (向量, 文本, 元数据) 的暴力 cosine 库。JSON 持久化,原子写。
-
-    用法::
-
-        vs = VectorStore(home / "memory_vectors.json", identity=space_identity)
-        vs.upsert("mem-1", embedder.embed(["..."])[0], text="...", metadata={...})
-        hits = vs.search(query_vec, top_k=5)
-
-    带 identity 时(生产记忆):快照头记录生成这批向量的空间身份与实际维度;身份缺失/不一致、维度不符或文件读不了,
-    读写都抛 VectorIdentityError(调用方退回关键词);空库可被当前身份接管。identity 为 None 时不管理身份,
-    允许混维度(检索时跳过长度不符的向量),写入会清掉快照头里的身份担保。
-    """
+    """绑定空间身份的派生向量投影，保留原读取、写入和检索接口。"""
 
     # LLM: 构造只读文件、不写盘；身份在实例生命周期内固定。
     # 函数用途: 绑定快照路径与当前空间身份，并加载一次现有快照。
@@ -277,10 +390,10 @@ class VectorStore:
         self._lock = threading.RLock()  # 同实例的读写在进程内串行；跨实例、跨进程的写由 locked_json_path 串行
         self._identity = _normalized_identity(identity)
         self._header: dict[str, object] | None = None
-        self._items: dict[str, dict[str, object]] = {}
+        self._packed = _Packed()
         self._readable = True
         self._stamp: tuple[int, int, int] | None = None
-        self._tail: tuple[int, int] | None = None  # (快照字节数, 已提交末尾)；只有单行 v2 快照才可追加与增量读
+        self._tail: tuple[int, int] | None = None  # (快照字节数, 已提交末尾)
         self._reload()
 
     # LLM: 默认原locked_json_path调用形状；C只交准确FD出生，锁等待与所有向量裁决仍在Root外。
@@ -290,10 +403,21 @@ class VectorStore:
             return locked_json_path(self._path, birth_commit=_coordinator_vector_write)
         return locked_json_path(self._path)
 
-    # LLM: 同一个文件句柄取指纹和内容，二者必然同代；文件不存在是确定的空库，其它读错误记为读不了。
-    # LLM: 装载边界把合法向量转换成float元组，坏向量留原值供兼容跳过，避免查询重复数值转换。
-    # LLM: 同一 inode 只是变长时先试增量读（只读新增字节）；增量读不成立才回到同一句柄整份重读。
-    # 函数用途: 从同一FD装载向量快照并预校验向量。
+    @property
+    def _items(self):
+        return self._packed.rows
+
+    def _editable_rows(self):
+        # 活跃搜索固定行表，通过原实例锁分块读数组。追加只扩展数组末尾，旧行偏移保持不变。
+        current = self._packed
+        if current.readers:
+            new = _Packed()
+            new.values = current.values
+            new.rows = current.rows.copy()
+            new.tombstones = current.tombstones.copy()
+            self._packed = new
+        return self._packed
+
     def _reload(self) -> None:
         try:
             with self._path.open("rb") as handle:
@@ -301,20 +425,21 @@ class VectorStore:
                 if self._read_appended(handle, stamp):
                     return
                 handle.seek(0)
-                raw = handle.read(stamp[1])  # 只读指纹记录的长度，并发追加的新字节留给下一次增量读
+                prefix = handle.read(len(_V3_PREFIX))
+                handle.seek(0)
+                if prefix == _V3_PREFIX:
+                    header, state, tail = _read_v3(handle, stamp[1])
+                    self._header, self._packed, self._readable, self._tail = header, state, True, tail
+                else:
+                    self._header, self._packed, self._readable, self._tail = _parse_store(handle.read(stamp[1]))
         except FileNotFoundError:
-            self._header, self._items, self._readable, self._stamp, self._tail = None, {}, True, None, None
+            self._header, self._packed, self._readable, self._stamp, self._tail = None, _Packed(), True, None, None
             return
-        except OSError:
-            self._header, self._items, self._readable, self._stamp, self._tail = None, {}, False, None, None
+        except (OSError, ValueError, OverflowError, TypeError):
+            self._header, self._packed, self._readable, self._stamp, self._tail = None, _Packed(), False, None, None
             return
-        self._header, self._items, self._readable, self._tail = _parse_store(raw)
         self._stamp = stamp
 
-    # LLM: 只在本实例已装载可读的单行 v2 快照、文件 inode 不变且比已提交末尾更长时成立；新增字节必须至少含一条
-    #   本代 generation 的完整记录，否则（被换代后 inode 复用、只剩残尾、被截短、只改了 mtime）交给整份重读。
-    #   条目按写时复制换新字典，锁外打分的快照不受影响。
-    # 函数用途: 只读取并应用已提交末尾之后的追加记录，成功返回 True。
     def _read_appended(self, handle, stamp: tuple[int, int, int]) -> bool:
         tail, known = self._tail, self._stamp
         if (tail is None or known is None or not self._readable or self._header is None
@@ -324,7 +449,7 @@ class VectorStore:
         parsed = _tail_records(self._header.get("generation"), handle.read(stamp[1] - tail[1]), 0)
         if parsed is None or not parsed[1]:
             return False
-        self._items = {**self._items, **parsed[1]}
+        _apply_tail(self._editable_rows(), parsed[1])
         self._tail, self._stamp = (tail[0], tail[1] + parsed[0]), stamp
         return True
 
@@ -372,28 +497,39 @@ class VectorStore:
             raise VectorIdentityError("VECTOR_DIMENSION_MISMATCH")
         return dim
 
-    # LLM: 调用方必须已持有 self._lock 与 locked_json_path。代次每次新生成；落盘后在锁内 stat 记下新指纹，
-    #   本实例不必重读整份文件。副作用：原子替换快照文件（目录不存在会创建）。
-    # 函数用途: 把一份完整快照原子写盘，并更新实例缓存。
-    # LLM: C编码/代次在Root外，准确原raw末replace_once进门；真正写成功后才原缓存/指纹发布。
-    # 函数用途: 写同一个完整向量快照并在成功后更新实例事实。
-    def _write_snapshot(self, items: dict[str, dict[str, object]], identity: dict[str, str] | None, dim: int | None) -> None:
-        header: dict[str, object] = {
-            "schema_version": VECTOR_STORE_SCHEMA_VERSION,
-            "identity": identity,
-            "dim": dim if items else None,
-            "generation": uuid.uuid4().hex,
+    def _compact(self, added, removed):
+        packed = _Packed()
+        for key, row in self._items.items():
+            if key in removed:
+                continue
+            if key in added:
+                packed.put(key, added[key])
+            else:
+                packed.copy_row(key, row, self._packed.values)
+        for key, item in added.items():
+            if key not in self._items:
+                packed.put(key, item)
+        return packed
+
+    def _write_snapshot(self, packed, identity, dim) -> None:
+        if identity is None:
+            dimensions = {row.length for row in packed.rows.values() if row.length}
+            dim = dimensions.pop() if len(dimensions) == 1 else None
+        elif not packed.rows:
+            dim = None
+        header = {
+            "v": 3, "dim": dim, "count": len(packed.rows), "space_id": _space_id(identity, dim),
+            "identity": identity, "generation": uuid.uuid4().hex,
             "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
+        raw = _snapshot_bytes(header, packed)
         if self.coordinator_io:
-            raw = json.dumps({**header, "items": items}, ensure_ascii=False)
-            _coordinator_vector_write(lambda: write_private_text_file_atomic_unlocked(
-                self._path, raw, replace_once=True))
+            _coordinator_vector_write(lambda: _write_private_snapshot_unlocked(self._path, raw, replace_once=True))
         else:
-            write_private_text_file_atomic_unlocked(self._path, json.dumps({**header, "items": items}, ensure_ascii=False))
-        self._header, self._items, self._readable = header, items, True
+            _write_private_snapshot_unlocked(self._path, raw)
+        self._header, self._packed, self._readable = header, packed, True
         self._stamp = _file_stamp(self._path.stat())
-        self._tail = (self._stamp[1], self._stamp[1])  # 整份写出的是单行快照，没有追加段
+        self._tail = (self._stamp[1], self._stamp[1])
 
     # LLM: 只读汇总，与身份裁决用同一次刷新；读不了时条目数为 None（未知），不用 0 冒充。
     # 函数用途: 返回条目数和快照头，供状态预览使用。
@@ -444,50 +580,55 @@ class VectorStore:
             added = {id: _item(vector, text, metadata) for id, vector, text, metadata in rows}
             payload = self._append_payload(added, dim)
             if payload is not None:
-                self._append_items(added, payload)
-                return
-            items = dict(self._items)
-            items.update(added)
-            self._write_snapshot(items, self._identity, dim)
+                self._append_items(added, (), payload)
+            else:
+                self._write_snapshot(self._compact(added, ()), self._identity, dim)
 
-    # LLM: 追加与整份写回必须得到同一份逻辑快照：只接受全新 id（覆盖会让旧正文留在盘上，删除另走整份写回），
-    #   快照头的身份和维度与整份写回将写出的完全一致，文件是刷新时那一代、未跟随符号链接且权限已私有（否则整份
-    #   写回顺带收紧到 0600）。编码在 C 门外完成，追加段将超出预算时返回 None 改走整份压实。调用方须持两把锁并已刷新。
-    # 函数用途: 判断本次写入能否只追加一条记录，能则返回编码好的记录字节。
-    def _append_payload(self, added: dict[str, dict[str, object]], dim: int | None) -> bytes | None:
+    def _append_payload(self, added, dim, *, removed=()) -> bytes | None:
         tail, header = self._tail, self._header or {}
         generation = header.get("generation")
         if (tail is None or not self._readable or not isinstance(generation, str) or not generation
-                or tail[0] < _VECTOR_APPEND_MIN_BASE_BYTES
-                or _normalized_identity(header.get("identity")) != self._identity or self._stored_dim() != dim
-                or any(key in self._items for key in added)):
+                or tail[0] < _VECTOR_APPEND_MIN_BASE_BYTES):
             return None
+        if added:
+            if (_normalized_identity(header.get("identity")) != self._identity
+                    or any(key in self._items or key in self._packed.tombstones for key in added)):
+                return None
+            stored_dim = self._stored_dim()
+            if self._identity is not None and stored_dim != dim:
+                return None
+            if self._identity is None and stored_dim is not None and any(
+                len(item["vector"]) != stored_dim for item in added.values()
+            ):
+                return None
         try:
             info = os.lstat(self._path)
         except OSError:
             return None
-        if (not stat.S_ISREG(info.st_mode) or _file_stamp(info) != self._stamp
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or _file_stamp(info) != self._stamp
                 or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077)):
             return None
-        record = {"schema_version": VECTOR_STORE_APPEND_SCHEMA_VERSION, "generation": generation, "items": added}
-        payload = ("\n" + json.dumps(record, ensure_ascii=False)).encode("utf-8")
+        record = {"generation": generation}
+        if removed:
+            record.update(schema_version=_TOMBSTONE_SCHEMA, removed=sorted(removed))
+        else:
+            record.update(schema_version=VECTOR_STORE_APPEND_SCHEMA_VERSION, items={
+                key: {**item, "vector": list(item["vector"])} for key, item in added.items()
+            })
+        payload = b"\n" + _json_bytes(record)
         if (tail[1] - tail[0]) + len(payload) > tail[0] * _VECTOR_APPEND_MAX_TAIL_PERCENT // 100:
             return None
         return payload
 
-    # LLM: 调用方须持 self._lock 与 locked_json_path；C 模式只把准确的追加末写交给原门。写成功后才写时复制发布条目、
-    #   追加位置和新指纹，本实例不重读文件；失败时实例状态原样不动。
-    # 函数用途: 把新向量作为一条追加记录落盘并更新实例缓存。
-    def _append_items(self, added: dict[str, dict[str, object]], payload: bytes) -> None:
+    def _append_items(self, added, removed, payload: bytes) -> None:
         base_size, end = self._tail
         expected = self._stamp
 
-        # 函数用途: 执行一次准确的追加末写。
-        def append() -> tuple[int, int, int]:
+        def append():
             return _append_record_unlocked(self._path, expected, end, payload)
 
         stamp = _coordinator_vector_write(append) if self.coordinator_io else append()
-        self._items = {**self._items, **added}
+        self._editable_rows().apply(added, removed)
         self._tail, self._stamp = (base_size, end + len(payload)), stamp
 
     # LLM: 重建专用：用完整新快照整体替换旧库，身份取本实例、维度取这批向量，不看旧快照——这正是管理员修复失配的
@@ -498,86 +639,96 @@ class VectorStore:
     def replace_all(self, rows: list[tuple[str, list[float], str, dict[str, object]]]) -> int:
         rows = [row for row in rows if row[0]]
         dim = _rows_dim(rows) if self._identity is not None else None
-        items = {id: _item(vector, text, metadata) for id, vector, text, metadata in rows}
+        packed = _Packed()
+        for key, vector, text, metadata in rows:
+            packed.put(key, _item(vector, text, metadata))
+        # 兼容同批重复 ID，快照只序列化活跃行。
+        if sum(row.length for row in packed.rows.values()) != len(packed.values):
+            compacted = _Packed()
+            for key, row in packed.rows.items():
+                compacted.copy_row(key, row, packed.values)
+            packed = compacted
         with self._lock, self._locked_snapshot():
-            self._write_snapshot(items, self._identity, dim)
-        return len(items)
+            self._write_snapshot(packed, self._identity, dim)
+        return len(packed.rows)
 
-    # LLM: 删除只去掉精确 id，保留快照头的身份与维度（删向量不引入不可信数据），也不做身份裁决——硬删除的隐私清理
-    #   不能被身份失配挡住。坏文件必须报告清理未确认，不能当成不存在；精确 id 不存在才返回 False 且不写盘。
-    # 函数用途: 删除一条向量并原子落盘。
-    # LLM: C保持原坏库拒绝/不存在不写；锁等待、刷新和裁决Root外，失败不发布删除成功。
-    # 函数用途: 删除精确向量并确认原快照落盘，保原身份。
     def remove(self, id: str) -> bool:
-        return id in self.remove_many([id])
+        """单条删除保留立即落盘清理的原语义。"""
+        return id in self.remove_many([id], purge=True)
 
-    # LLM: 精确ID集合共用原删除裁决；坏库不能当空库，身份失配不阻挡隐私清理，实际有变化才一次落盘。
-    # 函数用途: 批量删除派生向量并返回真实删除ID，避免每条全快照重写。
-    def remove_many(self, ids: Iterable[str]) -> set[str]:
+    def remove_many(self, ids: Iterable[str], *, purge: bool = False) -> set[str]:
+        """批量移除活跃行。隐私清理传 purge=True，立即压实原行及相关墓碑。"""
         wanted = set(ids)
         with self._lock, self._locked_snapshot():
             self._refresh()
             if not self._readable:
                 raise VectorIdentityError("VECTOR_STORE_UNREADABLE")
-            removed = wanted.intersection(self._items)
-            if not removed:
+            removed = {key for key in wanted if key in self._items}
+            if not removed and (not purge or wanted.isdisjoint(self._packed.tombstones)):
                 return set()
-            items = {key: value for key, value in self._items.items() if key not in removed}
-            identity = _normalized_identity((self._header or {}).get("identity"))
-            self._write_snapshot(items, identity, self._stored_dim())
+            dim = self._stored_dim()
+            payload = None if purge else self._append_payload({}, dim, removed=removed)
+            if payload is not None:
+                self._append_items({}, removed, payload)
+            else:
+                identity = _normalized_identity((self._header or {}).get("identity"))
+                self._write_snapshot(self._compact({}, removed), identity, dim)
             return removed
 
-    # LLM: 带身份时身份与 query 维度在同一份快照上裁决，失配抛 VectorIdentityError（调用方退回关键词）；不带身份时沿用
-    #   跳过长度不符向量的旧行为。锁内只取快照，打分在锁外。只读，不写盘。
-    # 函数用途: 线性扫描当前快照，返回 top_k 个最相似的向量命中。
     def search(self, query_vector: list[float], *, top_k: int = 5, min_score: float = 0.0) -> list[VectorHit]:
-        """线性扫描求 top_k(按 cosine 降序,过滤 < min_score)。
-
-        带身份时:身份与维度在**同一份快照**上裁决——身份不可用或 query 维度与快照维度不同,抛 VectorIdentityError,
-        不在别人的向量空间里打分。
-        维度守卫:跳过长度与 query 不一致的向量(换了 embedding 模型/版本后,旧维度向量留在库里——
-        若不跳,cosine 会截到较短一方做比较 = 静默垃圾分、错召回。宁可跳过等其被同 id 重嵌覆盖)。
-        单条坏向量(非数值)也跳过,不连累整库语义召回。
-        """
+        """按原点积排序，只保留 top_k 个候选，以 ID 处理同分。"""
         qlen = len(query_vector)
         with self._lock:
             self._refresh()
             reason = self._identity_reason()
             if not reason and self._identity is not None and self._items and qlen != self._stored_dim():
                 reason = "VECTOR_DIMENSION_MISMATCH"
-            snapshot = list(self._items.items())  # 锁内取快照,打分在锁外(写入总是换新字典,不会改到这份)
-        if reason:
-            raise VectorIdentityError(reason)
-        scored: list[VectorHit] = []
-        for id, item in snapshot:
-            score = _safe_cosine(query_vector, qlen, item.get("vector"))
-            if score is None or score < min_score:
-                continue
-            scored.append(
-                VectorHit(
-                    id=id,
-                    score=score,
-                    text=str(item.get("text", "")),
-                    metadata=dict(item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}),
-                )
-            )
-        scored.sort(key=lambda h: (-h.score, h.id))
-        return scored[: max(0, top_k)]
+            if reason:
+                raise VectorIdentityError(reason)
+            if not qlen or top_k <= 0:
+                return []
+            packed = self._packed
+            packed.readers += 1
+        try:
+            heap: list[_Rank] = []
+            rows = iter(packed.rows.items())
+            axes = range(qlen)
+            block_size = max(1, DEFAULT_BUFFER_SIZE // (packed.values.itemsize * qlen))
+            while block := list(islice(rows, block_size)):
+                with self._lock:
+                    values = packed.values
+                    for key, row in block:
+                        if row.length != qlen:
+                            continue
+                        score = sum(query_vector[i] * values[row.offset + i] for i in axes)
+                        if score < min_score:
+                            continue
+                        rank = _Rank(score, key)
+                        if len(heap) < top_k:
+                            heappush(heap, rank)
+                        elif heap[0] < rank:
+                            heapreplace(heap, rank)
+            hits = []
+            for rank in sorted(heap, key=lambda rank: (-rank.score, rank.id)):
+                row = packed.rows[rank.id]
+                metadata = dict(row.metadata) if isinstance(row.metadata, dict) else {}
+                hits.append(VectorHit(rank.id, rank.score, str(row.text), metadata))
+            return hits
+        finally:
+            with self._lock:
+                packed.readers -= 1
 
-    # LLM: 召回复用入口（S3，用户 10-02 拍板）：带身份且身份可用（档案、协议、模型、端点摘要都对上）才返回，否则空字典；
-    #   不管理身份的通用模式（identity=None）无从核对是不是同一个向量空间，一律不复用。
-    #   只交出向量和“嵌入时用的文本”，能否复用由调用方按文本完全一致裁决，维度再由检索器按本轮 query 长度核一次。只读。
-    # LLM: 内部元组不外泄可变引用；对外仍给list以保持HybridRetriever及既有调用合同。
-    # 函数用途: 返回已验证向量的列表副本及对应文本。
     def stored_vectors(self, ids: Iterable[str]) -> dict[str, tuple[list[float], str]]:
         wanted = set(ids)
         with self._lock:
             self._refresh()
             if self._identity is None or self._identity_reason():
                 return {}
-            snapshot = {key: self._items[key] for key in wanted if key in self._items}
-        return {key: (list(item["vector"]), str(item.get("text", ""))) for key, item in snapshot.items()
-                if isinstance(item, dict) and isinstance(item.get("vector"), tuple)}
+            values = self._packed.values
+            return {
+                key: (list(values[row.offset:row.offset + row.length]), str(row.text))
+                for key in wanted if (row := self._items.get(key)) is not None and row.length
+            }
 
     # LLM: 先刷新再列 id；保留期与硬删除核对靠它确认向量是否真被清掉，只读。
     # 函数用途: 返回当前快照的全部向量 id。

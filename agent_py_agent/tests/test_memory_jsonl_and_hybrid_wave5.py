@@ -199,14 +199,16 @@ def test_daily_load_and_merge_use_linear_id_lookup(tmp_path):
 
 
 # LLM: Wave5独立回归只使用临时样本与受控替身，保留真实入口及失败断言。
-# 函数用途: 验证向量装载及插入时预转换浮点元组。
-def test_vector_store_keeps_prevalidated_tuples(tmp_path):
+# 函数用途: 验证插入和装载共用连续的浮点块。
+def test_vector_store_keeps_packed_float32(tmp_path):
     path = tmp_path / "vectors.json"
     store = VectorStore(path)
     store.upsert("a", [1, 0], text="a")
-    assert store._items["a"]["vector"] == (1.0, 0.0)
     reloaded = VectorStore(path)
-    assert reloaded._items["a"]["vector"] == (1.0, 0.0)
+    for current in (store, reloaded):
+        row = current._items["a"]
+        assert current._packed.values.typecode == "f"
+        assert list(current._packed.values[row.offset:row.offset + row.length]) == [1.0, 0.0]
     assert reloaded.search([1, 0])[0].id == "a"
 
 
