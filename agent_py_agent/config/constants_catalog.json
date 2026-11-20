@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1567,
+  "count": 1568,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -9586,6 +9586,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "子代理孤儿定位目录被判定可回收前必须等待的宽限秒数。"
+    },
+    {
+      "name": "_UNTIMED_WAKE_SCAN_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/subagents/services/persistence/locator_hygiene.py",
+      "value": 5000,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "未计时显式调用（无 lane 预算）超过这一条数仍按原语义 fail-closed，与 maintain_owner_agent_projections(max_dirs) 默认一致。"
     },
     {
       "name": "_WAKE_PROJECTION_RECORD_MAX_ENTRIES",
