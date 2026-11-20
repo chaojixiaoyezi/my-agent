@@ -76,6 +76,7 @@ class CuratorSuccessCommit:
     last_daily_finalize_date: str = ""
     committed_at: str = ""
     retain_lease: bool = False
+    pending_local_dates: list[dict[str, object]] | None = None
 
 
 # LLM: 只携带领取参数，不携带旧 state；整批恢复方必须持规范 state 锁再调用锁内领取。
@@ -87,6 +88,10 @@ class CuratorLeaseRequest:
     lease_seconds: int
     now: datetime | None = None
     purpose: str = "extract"
+    first_enable_after: float = 0.0
+    finalize_timezone: str = ""
+    finalize_hour: int | None = None
+    finalize_window: int = 0
 
 
 # LLM: StateStore 只管理机器状态，不读取对话、不调用模型、不写候选或 daily。
@@ -128,6 +133,30 @@ class MemoryCuratorStateStore:
                 )
                 self._write_unlocked(updated)
                 return updated
+
+    def record_compact_scan(self, stamp: str, *, expected: str) -> MemoryCuratorState:
+        with gateway_short_transaction("curator_compact_scan"), locked_json_path(self.path):
+            current = self._load_unlocked()
+            if current.compact_scan_stamp != expected or expected == stamp:
+                return current
+            updated = replace(current, compact_scan_stamp=stamp)
+            self._write_unlocked(updated)
+            return updated
+
+    def claim_compact_work(self, thread_id, expected, cursor, *, wake: bool) -> MemoryCuratorState:
+        """同一事务推进检查点观察游标和原 pre_compact 待办代次。"""
+        with gateway_short_transaction("curator_compact_claim"), locked_json_path(self.path):
+            current = self._load_unlocked()
+            if current.compact_consumption_cursors.get(thread_id, {}) != expected:
+                return current
+            fields = {"compact_consumption_cursors": {**current.compact_consumption_cursors, thread_id: cursor}}
+            if wake:
+                pending, generations = _bump_pending_reason(current, "pre_compact")
+                fields.update(pending_reasons=pending, pending_reason_generations=generations,
+                              pending_requested_at=utc_now_iso())
+            updated = replace(current, **fields)
+            self._write_unlocked(updated)
+            return updated
 
     # LLM: 普通调用方自行持 state 锁；恢复方已持全部目标锁时走同一锁内领取实现，不嵌套 flock。
     # 函数用途: 原子获取后台策展租约并固定请求代次，仍保留既有独立领取接口。
@@ -216,6 +245,9 @@ class MemoryCuratorStateStore:
         lease_id: str,
         failure_code: str,
         now: str = "",
+        date_work=None,
+        previous_date_work=None,
+        detach_range: bool = False,
     ) -> MemoryCuratorState:
         with gateway_short_transaction("commit_failure"):
             failed_at = normalize_iso_time(now, default=utc_now_iso(), allow_empty=False)
@@ -223,8 +255,17 @@ class MemoryCuratorStateStore:
                 current = self._load_unlocked()
                 _require_lease(current, lease_id)
                 next_failures = max(0, int(getattr(current, "consecutive_failures", 0) or 0)) + 1
+                fields = {}
+                if date_work is not None:
+                    rows = [item for item in current.pending_local_dates if item != previous_date_work]
+                    fields["pending_local_dates"] = [*rows, date_work]
+                    if detach_range:
+                        source = date_work["source_range"]
+                        fields["per_thread_cursors"] = {**current.per_thread_cursors, **source["messages"]}
+                        fields["last_processed_audit_event_id"] = source["audit"] or current.last_processed_audit_event_id
                 updated = replace(
                     current,
+                    **fields,
                     last_failure_at=failed_at,
                     last_failure_code=str(failure_code or "CURATOR_FAILED").strip(),
                     consecutive_failures=next_failures,
@@ -460,11 +501,29 @@ def _leased_state(state: MemoryCuratorState, request: CuratorLeaseRequest):
         raise ValueError("invalid curator lease purpose")
     pending, generations = (list(state.pending_reasons), dict(state.pending_reason_generations)) if request.purpose == "candidate_scan" else _bump_pending_reason(state, request.reason)
     lease = _new_lease(request, state.active_lease, current)
+    dates = state.pending_local_dates
+    if request.finalize_hour is not None:
+        from .curator_due import daily_finalize_date, localized_now
+
+        day = daily_finalize_date(state, localized_now(current, request.finalize_timezone),
+                                  request.finalize_hour, window_seconds=request.finalize_window)
+        if not day:
+            return None
+        lease["finalize_date"] = day
+        if not any(row["date"] == day and row["source_range"]["kind"] == "finalize" for row in dates):
+            dates = [*dates, new_curator_date_work(day, {"kind": "finalize", "messages": {}, "audit": ""},
+                                                  {"messages": {}, "audit": ""})]
     lease["reason_generation"] = generations.get(request.reason, 0)
     if request.purpose == "candidate_scan":
         lease["purpose"] = request.purpose
+    first_enable_after = state.first_enable_after
+    if not (first_enable_after or state.last_run_at or state.last_success_at
+            or state.per_thread_cursors or state.last_processed_audit_event_id):
+        first_enable_after = request.first_enable_after
     return replace(
         state,
+        first_enable_after=first_enable_after,
+        pending_local_dates=dates,
         last_run_at=current.isoformat(),
         active_lease=lease,
         config_revision=str(request.config_revision or "").strip(),
@@ -472,6 +531,11 @@ def _leased_state(state: MemoryCuratorState, request: CuratorLeaseRequest):
         pending_reason_generations=generations,
         pending_requested_at=(state.pending_requested_at if request.purpose == "candidate_scan" else state.pending_requested_at or current.isoformat()),
     )
+
+
+def new_curator_date_work(day, source, cursor):
+    return {"date": day, "source_range": source, "cursor": cursor,
+            "failure_type": "", "retry_at": "", "failed_at": "", "failure_count": 0}
 
 
 # LLM: 仅在过期或确定死亡已经获准后构造身份；出生身份仍是 B5 的记录而非授权证明。
@@ -628,9 +692,9 @@ def build_success_state(
         daily_event_count=current.daily_event_count + max(0, int(commit.daily_event_count)),
         pending_reasons=remaining_reasons,
         pending_requested_at=(current.pending_requested_at if remaining_reasons else ""),
-        last_daily_finalize_date=(
-            commit.last_daily_finalize_date or current.last_daily_finalize_date
-        ),
+        last_daily_finalize_date=max(commit.last_daily_finalize_date, current.last_daily_finalize_date),
+        pending_local_dates=(current.pending_local_dates if commit.pending_local_dates is None
+                             else commit.pending_local_dates),
         last_committed_run_id=commit.run_id,
     )
 

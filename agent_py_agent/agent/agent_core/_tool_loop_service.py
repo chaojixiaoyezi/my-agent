@@ -984,9 +984,10 @@ def _summarize_live_compact(
     interrupt_check = partial(_native_compact_interrupted, params)
     try:
         raise_if_compact_interrupted(interrupt_check)
-        from ._finalization_service import _request_memory_curator
+        if binding is None:
+            from ._finalization_service import _request_memory_curator
 
-        _request_memory_curator(agent, "pre_compact")
+            _request_memory_curator(agent, "pre_compact")
         previous_summary = _live_compact_previous_summary(params, binding)
         summary = _native_tool_history_summary(
             agent,

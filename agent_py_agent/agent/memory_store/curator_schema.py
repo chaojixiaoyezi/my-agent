@@ -5,6 +5,7 @@ from __future__ import annotations
 """Memory Curator provider 结构化输出 Schema 构造器。"""
 
 from collections.abc import Collection
+from datetime import date, datetime
 from typing import Any
 
 
@@ -421,4 +422,42 @@ def _cursor_schema() -> dict[str, Any]:
     }
 
 
-__all__ = ["build_curator_response_schema", "validate_curator_response_payload"]
+def validate_pending_local_dates(rows):
+    """运行游标与失败信息只由宿主写入，独立于模型提取 schema。"""
+    if not isinstance(rows, list):
+        raise ValueError("curator pending_local_dates must be a list")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "date", "source_range", "cursor", "failure_type", "retry_at", "failed_at", "failure_count",
+        }:
+            raise ValueError("invalid curator date work")
+        if not isinstance(row["date"], str) or date.fromisoformat(row["date"]).isoformat() != row["date"]:
+            raise ValueError("invalid curator local date")
+        source = row["source_range"]
+        cursor = row["cursor"]
+        if (not isinstance(source, dict) or set(source) != {"kind", "messages", "audit"}
+                or source["kind"] not in ("finalize", "input") or not isinstance(cursor, dict)
+                or set(cursor) != {"messages", "audit"}):
+            raise ValueError("invalid curator date source range")
+        for item in (source, cursor):
+            if (not isinstance(item["audit"], str) or not isinstance(item["messages"], dict)
+                    or any(not isinstance(k, str) or not k or not isinstance(v, str)
+                           for k, v in item["messages"].items())):
+                raise ValueError("invalid curator date cursor")
+        if set(cursor["messages"]) != set(source["messages"]):
+            raise ValueError("curator date cursor does not match source range")
+        if (not isinstance(row["failure_type"], str) or type(row["failure_count"]) is not int
+                or row["failure_count"] < 0):
+            raise ValueError("invalid curator date failure")
+        for name in ("retry_at", "failed_at"):
+            value = row[name]
+            if not isinstance(value, str) or value and datetime.fromisoformat(value).tzinfo is None:
+                raise ValueError("invalid curator date retry time")
+        identity = row["date"], source["kind"], tuple(sorted(source["messages"].items())), source["audit"]
+        if identity in seen:
+            raise ValueError("duplicate curator date source range")
+        seen.add(identity)
+
+
+__all__ = ["build_curator_response_schema", "validate_curator_response_payload", "validate_pending_local_dates"]

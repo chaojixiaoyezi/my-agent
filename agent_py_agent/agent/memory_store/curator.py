@@ -16,9 +16,11 @@ import re
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
@@ -729,6 +731,90 @@ class _CuratorLifecycleMixin:
             **({"errors": step_errors} if step_errors else {}),
         }
 
+    def claim_compact_checkpoint(self, thread, *, state=None, max_rows=None, budget=None):
+        """按已发布 head 对账，旧检查点只推进观察代次。"""
+        from ..conversation.compact_checkpoint import (
+            compact_consumption_id,
+            iter_committed_compact_checkpoints,
+        )
+
+        storage = getattr(self.conversation_store, "storage", None)
+        root = getattr(storage, "compact_root", None)
+        current = state if state is not None else self.state_store.load()
+        if root is None or not self._effective_config().enabled:
+            return current
+        entry = current.compact_consumption_cursors.get(thread.thread_id, {})
+        through = entry.get("through", 0)
+        if thread.compact_generation <= through:
+            return current
+        reading = thread
+        head = entry.get("head", thread.compact_generation)
+        if entry.get("next_id"):
+            reading = replace(thread, compact_checkpoint_id=entry["next_id"], compact_generation=entry["next_generation"])
+        agent = SimpleNamespace(home_paths=SimpleNamespace(owner_compact_dir=root))
+        progress = {"through": head}
+        pending_id = entry.get("pending_id", "")
+        last_id = entry.get("last_id", "")
+        limit = max(1, max_rows or self._effective_config().batch_message_limit)
+        with closing(iter_committed_compact_checkpoints(agent, reading, hydrate=False)) as rows:
+            for index, row in enumerate(rows):
+                generation = row["generation"]
+                if generation <= through:
+                    break
+                ids = row.get("pending_consumption_ids", [])
+                if ids and ids != [compact_consumption_id(row)]:
+                    raise OSError("invalid compact consumption IDs")
+                if ids and not pending_id:
+                    pending_id = ids[0]
+                if budget is not None:
+                    budget.charge(entries=1)
+                if (index + 1 >= limit or budget is not None and budget.exhausted()) and generation - 1 > through:
+                    progress = {"through": through, "head": head, "next_generation": generation - 1,
+                                "next_id": row["previous_checkpoint_id"], "pending_id": pending_id, "last_id": last_id}
+                    break
+        complete = "next_id" not in progress
+        if complete:
+            progress["last_id"] = pending_id or last_id
+        return self.state_store.claim_compact_work(
+            thread.thread_id, entry, progress, wake=complete and bool(pending_id) and pending_id != last_id,
+        )
+
+    def _reconcile_compact_work(self, state, config):
+        from .curator_due import compact_thread_stamp
+        from .curator_inputs import compact_thread_scan
+        from .retention_scan_budget import RetentionScanBudget
+
+        storage = getattr(self.conversation_store, "storage", None)
+        root = getattr(storage, "compact_root", None)
+        if root is None or not (root / "archive").is_dir():
+            return state
+        stamp = compact_thread_stamp(storage.threads_dir)
+        if not stamp or stamp == state.compact_scan_stamp:
+            return state
+        budget = RetentionScanBudget.default(config)
+
+        def observe(thread):
+            nonlocal state
+            if not thread.compact_checkpoint_id:
+                return True
+            already = state.compact_consumption_cursors.get(thread.thread_id, {}).get("through", 0)
+            if already >= thread.compact_generation:
+                return True
+            if budget.exhausted():
+                return False
+            try:
+                state = self.claim_compact_checkpoint(thread, state=state, budget=budget)
+            except (OSError, ValueError) as exc:
+                _LOGGER.warning("CURATOR_COMPACT_RECONCILE_DEFERRED error_type=%s", type(exc).__name__)
+                return False
+            cursor = state.compact_consumption_cursors.get(thread.thread_id, {})
+            return cursor.get("through", 0) >= thread.compact_generation
+
+        complete = compact_thread_scan(self.conversation_store, budget, observe)
+        if complete and stamp == compact_thread_stamp(storage.threads_dir):
+            state = self.state_store.record_compact_scan(stamp, expected=state.compact_scan_stamp)
+        return state
+
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
 
         from ..gateway_parts.request_entry_admission import require_request_execution
@@ -742,6 +828,7 @@ class _CuratorLifecycleMixin:
         except CuratorStateCorruptError as exc:
             return self._corrupt_failure("interval", exc)
         current = _localized_now(now, self.timezone_name)
+        state = self._reconcile_compact_work(state, live_cfg)
         pending = _pending_reason(state.pending_reasons)
         from ..backends.request_scope import foreground_model_active
 
@@ -790,7 +877,16 @@ class _CuratorLifecycleMixin:
                 "memory_curator_maintenance_skipped:%s",
                 _maintenance_error_code(exc),
             )
-        daily_due = _daily_finalize_due(state, current, live_cfg.daily_finalize_hour)
+        from .curator_due import daily_finalize_date, unresolved_local_range
+
+        daily_due = bool(daily_finalize_date(
+            state, current, live_cfg.daily_finalize_hour, window_seconds=live_cfg.interval_seconds,
+        ))
+        retry_range = unresolved_local_range(state, current)
+        if (retry_range is not None and getattr(self, "_last_due_work", "") != "date_replay"
+                and not foreground_model_active(self.backend)):
+            self._last_due_work = "date_replay"
+            return finish(self.run(reason="interval", now=current, scheduled=True, date_replay=retry_range))
         # 原两种工作每拍只领一项；日终失败也让下一拍的待办获得机会，不抢当前前台学习。
         # 任何待办都与日终轮流领拍，持续到来的待办不能把当天收尾挤出时间窗；日终同样守失败退避，退避中的那一拍不占轮次。
         if (daily_due and not foreground_model_active(self.backend)
@@ -820,6 +916,7 @@ class _CuratorLifecycleMixin:
             ))
         config_revision = live_cfg.revision()
         exclusions_revision = self._read_exclusions_revision()
+        state = _first_enable_state(state, current, live_cfg.interval_seconds)
         interval_due_elapsed = interval_elapsed(state, current, live_cfg.interval_seconds)
         batch = self._collect(
             state,
@@ -838,13 +935,18 @@ class _CuratorLifecycleMixin:
             )
         precollected = _PrecollectedBatch(batch, state, config_revision, excluded_ids, exclusions_revision)
         if batch.load_errors:
-            return finish(self.run(reason="interval", now=current, precollected_batch=precollected))
+            return finish(self.run(reason="interval", now=current, precollected_batch=precollected, scheduled=True))
         if batch.message_scan_partial and not _has_committable_input(batch):
             return finish(self._result(status="busy", reason="interval", warnings=_message_scan_warnings(batch)))
         if batch.user_turns() >= live_cfg.turn_threshold:
-            return finish(self.run(reason="turn_threshold", now=current, precollected_batch=precollected))
-        if _interval_due(batch, state, current, live_cfg.interval_seconds):
-            return finish(self.run(reason="interval", now=current, precollected_batch=precollected))
+            self._last_due_work = "turn_threshold"
+            return finish(self.run(reason="turn_threshold", now=current, precollected_batch=precollected, scheduled=True))
+        if _interval_due(batch, state, current, live_cfg.interval_seconds) or (
+                state.first_enable_after and not state.last_success_at and _has_committable_input(batch)):
+            self._last_due_work = "interval"
+            return finish(self.run(reason="interval", now=current, precollected_batch=precollected, scheduled=True))
+        if retry_range is not None:
+            return finish(self.run(reason="interval", now=current, scheduled=True, date_replay=retry_range))
         return finish(self._result(status="busy" if batch.message_scan_partial else "not_due", reason="interval",
                             warnings=_message_scan_warnings(batch) if batch.message_scan_partial else ()))
 
@@ -912,13 +1014,16 @@ class _CuratorLifecycleMixin:
             max(30, min(300, live_cfg.interval_seconds)),
             consecutive_failures=max(0, int(getattr(state, "consecutive_failures", 0) or 0)),
         )
+        from .curator_due import range_failure_backoff
+
         if (
             state.last_failure_code
             and last_failure is not None
             and (current - last_failure).total_seconds() < retry_after
+            and not range_failure_backoff(state)
         ):
             return self._result(status="not_due", reason=pending)
-        return self.run(reason=pending, now=current)
+        return self.run(reason=pending, now=current, scheduled=True)
 
     # LLM: 提交后报告失败沿route冻结的已提交游标记账；提交前仍保原游标。执行未知先原样透传，不写失败账。
     # 函数用途: 记录普通失败但不倒退已经成功的游标，保证后续增量审计和恢复不断链。
@@ -967,13 +1072,27 @@ class _CuratorLifecycleMixin:
             except Exception:
                 failure_code = state_code = "CURATOR_RUN_AUDIT_FAILED"
             try:
+                live_cfg = _context_config(self, context)
+                range_work = context.route.get("date_range")
+                previous = context.route.get("date_replay")
+                detach = (range_work is not None and previous is None and committed_cursor is None
+                          and state_code == CURATOR_REPLAY_BREAKER_OPEN
+                          and len(context.state_before.pending_local_dates) < live_cfg.batch_message_limit)
+                work = range_work if detach else previous or context.route.get("finalize_work")
+                date_fields = {}
+                if work is not None and committed_cursor is None:
+                    count = int(work["failure_count"]) + 1
+                    retry_seconds = curator_failure_retry_seconds(
+                        state_code, max(30, min(300, live_cfg.interval_seconds)), consecutive_failures=count,
+                    )
+                    retry_at = (_parse_time(finished_at) + timedelta(seconds=retry_seconds)).isoformat()
+                    date_fields = {"date_work": {**work, "failure_type": state_code, "failed_at": finished_at,
+                                                  "failure_count": count, "retry_at": retry_at},
+                                   "previous_date_work": None if detach else work, "detach_range": detach}
                 self.state_store.commit_failure(
-                    lease_id=context.lease_id,
-                    failure_code=state_code,
-                    now=finished_at,
+                    lease_id=context.lease_id, failure_code=state_code, now=finished_at, **date_fields,
                 )
                 from ..settings.curator_profile import record_auxiliary_profile_failure
-                live_cfg = _context_config(self, context)
                 profile_to_cool = str(context.route.get("group_key") or getattr(live_cfg, "model_profile", "") or "").strip()
                 if profile_to_cool:
                     record_auxiliary_profile_failure(profile_to_cool, failure_code)
@@ -1153,6 +1272,7 @@ class _CuratorExecutionMixin:
         excluded_ids, exclusion_warnings = self._prepare_exclusion_context()
         preflight_warnings = (*preflight_warnings, *exclusion_warnings)
         batch = self._execution_batch(context, precollected_batch, excluded_ids)
+        replay = context.route.get("date_replay")
         if batch.load_errors:
             isolated = _isolate_breaker_load_errors(self.run_log, context, batch)
             if isolated is None:
@@ -1160,8 +1280,20 @@ class _CuratorExecutionMixin:
             batch, isolation_warning = isolated
             preflight_warnings = (*preflight_warnings, isolation_warning)
             context.route["failure_warnings"] = (*context.route.get("failure_warnings", ()), isolation_warning)
+        day = ""
+        if context.route.get("scheduled") and replay is None:
+            from .curator_inputs import dated_curator_prefix
+
+            batch, day = dated_curator_prefix(
+                batch, _localized_now(_parse_time(context.started_at), self.timezone_name),
+                through_date=str(context.route.get("finalize_date") or ""),
+            )
         context.route["failure_warnings"] = (*context.route.get("failure_warnings", ()), *_message_read_warnings(batch))
         if not batch.messages and not batch.audit_events:
+            if replay is not None and not (batch.skipped_message_cursors or batch.skipped_audit_cursor):
+                raise CuratorInputError("CURATOR_INPUT_READ_FAILED", load_errors=(
+                    {"context": "memory_curator.date_range", "error_code": "CURATOR_INPUT_READ_FAILED"},
+                ))
             if batch.message_scan_partial and not _has_committable_input(batch):
                 # 原_run_leased先停心跳再释放本lease；pending原因及全部消费游标保留。
                 return self._result(status="busy", reason=context.reason, warnings=_message_scan_warnings(batch))
@@ -1174,8 +1306,25 @@ class _CuratorExecutionMixin:
         context.route["batch_thread_ids"] = tuple(dict.fromkeys(item.thread_id for item in batch.messages))
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
         live_cfg = _context_config(self, context)
+        source_count = len(batch.messages) + len(batch.audit_events)
         batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=live_cfg.max_input_chars)
-        batch, at_floor, breaker_warnings = _breaker_replay_batch(context, batch)
+        if day and len(batch.messages) + len(batch.audit_events) < source_count:
+            batch = replace(batch, date_backlog=True)
+        if day:
+            context.route["date_range"] = _date_range_work(context.state_before, day, batch)
+        from .curator_due import range_failure_backoff
+
+        if replay is not None:
+            context.route["date_range"] = replay
+            breaker_state = replace(
+                context.state_before, last_failure_code=CURATOR_REPLAY_BREAKER_OPEN,
+                consecutive_failures=replay["failure_count"] + CURATOR_REPLAY_BREAKER_FAILURE_COUNT - 1,
+            )
+            batch, at_floor, breaker_warnings = _breaker_replay_batch(replace(context, state_before=breaker_state), batch)
+        elif context.route.get("scheduled") and range_failure_backoff(context.state_before):
+            at_floor, breaker_warnings = False, ()
+        else:
+            batch, at_floor, breaker_warnings = _breaker_replay_batch(context, batch)
         preflight_warnings = (*preflight_warnings, *fit_warnings, *breaker_warnings)
         context.route["failure_warnings"] = (*context.route.get("failure_warnings", ()), *breaker_warnings)
         annotate = self.dependencies.annotate_batch
@@ -1197,18 +1346,21 @@ class _CuratorExecutionMixin:
                 *preflight_warnings,
                 f"memory_curator_input_shrunk:{attempt.shrink_attempts}",
             )
-        return self._commit_batch(
-            context, attempt.batch, validated, extra_warnings=preflight_warnings
-        )
+        settled = attempt.batch
+        if day and len(settled.messages) + len(settled.audit_events) < source_count:
+            settled = replace(settled, date_backlog=True)
+        return self._commit_batch(context, settled, validated, extra_warnings=preflight_warnings)
 
     # LLM: 仅完整匹配锁内游标、实际配置及排除集合/修订号才复用；任何变化沿原入口重读。
     # 函数用途: 给已领取的运行选择安全输入；正式快照只读一次，最终fit会连正式内容一起重裁预算。
     def _execution_batch(self, context, precollected, excluded_ids) -> CuratorInputBatch:
-        state = context.state_before
+        state = _date_input_state(context)
         live_cfg = _context_config(self, context)
-        if (precollected is not None
+        replay = context.route.get("date_replay")
+        if (replay is None and precollected is not None
                 and precollected.state.per_thread_cursors == state.per_thread_cursors
                 and precollected.state.last_processed_audit_event_id == state.last_processed_audit_event_id
+                and precollected.state.first_enable_after == state.first_enable_after
                 and precollected.config_revision == live_cfg.revision()
                 and precollected.exclusions == excluded_ids
                 and precollected.exclusions_revision == self._read_exclusions_revision()):
@@ -1220,6 +1372,7 @@ class _CuratorExecutionMixin:
             include_formal=True,
             excluded_conversation_ids=excluded_ids,
             effective_config=live_cfg,
+            source_range=None if replay is None else replay["source_range"],
         )
 
     # LLM: 升级自愈:每次持 lease 提炼前幂等应用 Memory v2 迁移,失败只记 warning 不阻断。
@@ -1254,6 +1407,7 @@ class _CuratorExecutionMixin:
         include_audit: bool = True,
         excluded_conversation_ids: frozenset[str] | None = frozenset(),
         effective_config: MemoryCuratorConfig | None = None,
+        source_range=None,
     ) -> CuratorInputBatch:
         live_cfg = effective_config or self._effective_config()
         # 先按预留的正式窗口上限收好本批消息，再用本批用户原话去挑相关正式记忆，正式窗口只读一次；
@@ -1282,6 +1436,7 @@ class _CuratorExecutionMixin:
                 config=input_config,
                 tool_reference_source=self.tool_reference_source,
                 scan_budget=scan_budget,
+                source_range=source_range,
             )
             from .curator_learning_source import attach_audit_sources
 
@@ -1297,6 +1452,7 @@ class _CuratorExecutionMixin:
                 skipped_cursors=skipped_message_cursors,
                 budget=scan_budget,
                 scan_state=scan_state,
+                first_enable_after=state.first_enable_after,
             )
             message_errors, isolated_message_errors = split_message_load_errors(message_errors)
             batch = CuratorInputBatch(
@@ -1356,7 +1512,7 @@ class _CuratorExecutionMixin:
     ) -> CuratorRunResult:
         # LLM: 先统一提取候选的落点输出（含来源/身份事实），再做身份冲突过滤；两步都在租约内完成。
         extra_warnings = (*extra_warnings, *_message_read_warnings(batch))
-        if batch.message_scan_partial:
+        if batch.date_backlog or batch.message_scan_partial:
             # 通过原reason代次保留续办义务；成功只提交本批确已读取的其它线程，不签全部扫描完成。
             self.state_store.request(context.reason)
             extra_warnings = (*extra_warnings, *_message_scan_warnings(batch))
@@ -1384,16 +1540,27 @@ class _CuratorExecutionMixin:
                 dict.fromkeys((*(item.thread_id for item in batch.messages), *batch.skipped_message_cursors))
             ),
         )
-        state_commit = _success_commit(
-            context,
-            prepared,
-            finished_at=finished_at,
-            finalize_date=("" if batch.message_scan_partial else _finalize_date(
-                context.reason,
-                self.timezone_name,
-                started_at=context.started_at,
-            )),
-        )
+        replay = context.route.get("date_replay")
+        finalize_work = context.route.get("finalize_work")
+        target_day = context.route.get("finalize_date")
+        finalize_date = ""
+        pending_dates = None
+        if replay is not None:
+            pending_dates = _settle_date_range(context, prepared.cursor)
+            prepared = replace(prepared, cursor=replace(
+                prepared.cursor, per_thread_cursors=context.state_before.per_thread_cursors,
+                last_audit_event_id=context.state_before.last_processed_audit_event_id,
+            ))
+        elif target_day:
+            if (not batch.message_scan_partial and not batch.date_backlog
+                    and prepared.cursor.processed_messages == len(batch.messages)
+                    and prepared.cursor.processed_audit_events == len(batch.audit_events)):
+                finalize_date = target_day
+                pending_dates = [row for row in context.state_before.pending_local_dates if row != finalize_work]
+        elif not batch.message_scan_partial:
+            finalize_date = _finalize_date(context.reason, self.timezone_name, started_at=context.started_at)
+        state_commit = _success_commit(context, prepared, finished_at=finished_at, finalize_date=finalize_date,
+                                       pending_dates=pending_dates)
         try:
             committed = self.committer.commit(
                 CuratorBatchCommit(
@@ -1927,6 +2094,8 @@ class _CuratorRunMixin:
         force: bool = False,
         now: datetime | None = None,
         precollected_batch: _PrecollectedBatch | None = None,
+        scheduled: bool = False,
+        date_replay=None,
     ) -> CuratorRunResult:
 
         from ..gateway_parts.request_entry_admission import require_request_execution
@@ -1936,7 +2105,11 @@ class _CuratorRunMixin:
         remaining = 1
         while remaining and len(results) < CURATOR_MODEL_GROUP_MAX_COUNT:
             options = {"precollected_batch": precollected_batch} if precollected_batch is not None else {}
-            result, remaining = self._run_once(reason=reason, force=force, now=now, **options)
+            result, remaining = self._run_once(
+                reason=reason, force=force, now=now, scheduled=scheduled, date_replay=date_replay, **options,
+            )
+            if date_replay is not None or scheduled and reason == "daily_finalize":
+                remaining = 0
             precollected_batch = None
             results.append(result)
             if result.status != "succeeded":
@@ -1952,14 +2125,23 @@ class _CuratorRunMixin:
         force: bool = False,
         now: datetime | None = None,
         precollected_batch: _PrecollectedBatch | None = None,
+        scheduled: bool = False,
+        date_replay=None,
     ) -> tuple[CuratorRunResult, int]:
         live_cfg = self._effective_config()
         if not live_cfg.enabled and not force:
             return self._result(status="disabled", reason=reason), 0
         config_revision = live_cfg.revision()
         try:
+            current = _localized_now(now, self.timezone_name) if scheduled else now
+            initial_window = scheduled and reason in {"interval", "turn_threshold", "daily_finalize"}
+            window = max(0.0, current.timestamp() - live_cfg.interval_seconds) if initial_window else 0.0
             acquired = self.committer.recover_and_acquire(CuratorLeaseRequest(
-                reason, config_revision, _lease_seconds(live_cfg), now,
+                reason, config_revision, _lease_seconds(live_cfg), current,
+                first_enable_after=window,
+                finalize_timezone=self.timezone_name,
+                finalize_hour=live_cfg.daily_finalize_hour if scheduled and reason == "daily_finalize" else None,
+                finalize_window=live_cfg.interval_seconds,
             ))
         except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
             raise
@@ -1977,6 +2159,22 @@ class _CuratorRunMixin:
             release_curator_lease(self.state_store, context.lease_id)
             return self._result(status="not_due", reason=reason), 0
         context.route["_effective_config"] = live_cfg
+        if scheduled:
+            context.route["scheduled"] = True
+        if date_replay is not None:
+            if date_replay not in context.state_before.pending_local_dates:
+                from .curator_lease import release_curator_lease
+
+                release_curator_lease(self.state_store, context.lease_id)
+                return self._result(status="not_due", reason=reason), 0
+            context.route["date_replay"] = date_replay
+        finalized = acquired[1].get("finalize_date")
+        if finalized:
+            context.route["finalize_date"] = finalized
+            context.route["finalize_work"] = next(
+                item for item in context.state_before.pending_local_dates
+                if item["date"] == finalized and item["source_range"]["kind"] == "finalize"
+            )
         from .curator_lease import curator_lease_interruption_guard
 
         with curator_lease_interruption_guard(self.state_store, context.lease_id):
@@ -2458,18 +2656,19 @@ def _prepare_outputs(
     *,
     owner: str = "",
 ) -> _PreparedOutputs:
+    state = _date_input_state(context)
     if extraction is None:
         # 空批次也要消费「整段被排除」的消息与 audit 游标，否则同一排除窗口会被反复扫描。
         cursor = CuratorCursorAdvance(
-            {**context.state_before.per_thread_cursors, **batch.skipped_message_cursors},
-            batch.skipped_audit_cursor or context.state_before.last_processed_audit_event_id,
+            {**state.per_thread_cursors, **batch.skipped_message_cursors},
+            batch.skipped_audit_cursor or state.last_processed_audit_event_id,
             0,
             0,
         )
         return _PreparedOutputs((), (), cursor, ("no_new_experience",))
     cursor = next_cursors(
-        context.state_before.per_thread_cursors,
-        context.state_before.last_processed_audit_event_id,
+        state.per_thread_cursors,
+        state.last_processed_audit_event_id,
         batch,
         extraction,
     )
@@ -2843,6 +3042,7 @@ def _success_commit(
     *,
     finished_at: str,
     finalize_date: str,
+    pending_dates=None,
 ) -> CuratorSuccessCommit:
     return CuratorSuccessCommit(
         lease_id=context.lease_id,
@@ -2857,6 +3057,7 @@ def _success_commit(
         last_daily_finalize_date=finalize_date,
         committed_at=finished_at,
         retain_lease=True,
+        pending_local_dates=pending_dates,
     )
 
 
@@ -3013,6 +3214,46 @@ def _interval_due(
 
 # LLM: 收尾日期只由成功的 daily_finalize 事务写入，并取自已领取运行的时钟，不能另读墙钟。
 # 函数用途: 按本次 lease 的结构化开始时间生成每日收尾日期，测试/重放不读取另一时钟。
+def _first_enable_state(state, current, interval_seconds):
+    if (state.first_enable_after or state.last_run_at or state.last_success_at
+            or state.per_thread_cursors or state.last_processed_audit_event_id):
+        return state
+    return replace(state, first_enable_after=max(0.0, current.timestamp() - interval_seconds))
+
+
+def _date_input_state(context):
+    replay = context.route.get("date_replay")
+    if replay is None:
+        return context.state_before
+    cursor = replay["cursor"]
+    return replace(context.state_before, per_thread_cursors=cursor["messages"],
+                   last_processed_audit_event_id=cursor["audit"], first_enable_after=0.0)
+
+
+def _date_range_work(state, day, batch):
+    from .curator_state import new_curator_date_work
+
+    messages = {item.thread_id: item.message_id for item in batch.messages}
+    audit = batch.audit_events[-1].event_id if batch.audit_events else ""
+    return new_curator_date_work(day, {"kind": "input", "messages": messages, "audit": audit}, {
+        "messages": {thread: state.per_thread_cursors.get(thread, "") for thread in messages},
+        "audit": state.last_processed_audit_event_id if audit else "",
+    })
+
+
+def _settle_date_range(context, cursor):
+    replay = context.route["date_replay"]
+    source = replay["source_range"]
+    original = replay["cursor"]
+    advanced = {"messages": {thread: cursor.per_thread_cursors.get(thread, before)
+                             for thread, before in original["messages"].items()},
+                "audit": cursor.last_audit_event_id if source["audit"] else ""}
+    rows = [row for row in context.state_before.pending_local_dates if row != replay]
+    if advanced != {"messages": source["messages"], "audit": source["audit"]}:
+        rows.append({**replay, "cursor": advanced})
+    return rows
+
+
 def _finalize_date(reason: str, timezone_name: str, *, started_at: str) -> str:
     if reason != "daily_finalize":
         return ""

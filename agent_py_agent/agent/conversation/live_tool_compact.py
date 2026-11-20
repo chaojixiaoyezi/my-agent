@@ -172,7 +172,7 @@ def commit_live_tool_compact(
 
     recent_rows = binding.store.messages.recent(binding.thread.thread_id, limit=20)
     selector = compact_tool_selector(binding.thread, recent_rows)
-    return binding.store.threads.update_compact_state(
+    updated = binding.store.threads.update_compact_state(
         binding.thread.thread_id,
         commit=ConversationCompactCommit(
             summary=replacement,
@@ -197,6 +197,10 @@ def commit_live_tool_compact(
         active_tool_selector=selector,
         baseline_loaded_tool_names=tuple(binding.thread.loaded_tool_names),
     )
+    from .compact_checkpoint import wake_compact_curator
+
+    wake_compact_curator(agent, updated)
+    return updated
 
 
 # LLM: 只检查四元来源与保留区交集，不能用call_id展示别名拒绝合法跨轮调用；写候选前必须通过。

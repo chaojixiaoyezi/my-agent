@@ -1293,12 +1293,13 @@ def test_curator_rejects_daily_claim_of_host_owned_review_origin(tmp_path: Path)
 
 
 def test_curator_failure_is_not_retried_on_every_gateway_tick(tmp_path: Path):
-    store, _thread, _message = _conversation(tmp_path)
+    store, _thread, message = _conversation(tmp_path)
     backend = _StaticStructuredBackend({"schema_version": "wrong"})
     service = _service(tmp_path, backend, store)
 
-    first = service.run_if_due()
-    second = service.run_if_due()
+    now = datetime.fromtimestamp(message.created_at + 1, timezone.utc)
+    first = service.run_if_due(now=now)
+    second = service.run_if_due(now=now)
 
     assert first.status == "failed"
     assert second.status == "not_due"
@@ -1400,8 +1401,8 @@ def test_curator_turn_threshold_uses_same_service(tmp_path: Path):
     )
     service = _service(tmp_path, backend, store)
 
-    # 固定本地正午，避免墙钟日终分支抢先于轮次阈值。
-    result = service.run_if_due(now=datetime(2026, 8, 4, 12).astimezone())
+    # 在输入刚落账时核验轮次阈值，避免让测试历史落到首次提取窗口之外。
+    result = service.run_if_due(now=datetime.fromtimestamp(message.created_at + 1, timezone.utc))
 
     assert result.reason == "turn_threshold"
     assert result.status == "succeeded"
@@ -2004,7 +2005,7 @@ def test_curator_qualified_user_fact_still_auto_promotes(tmp_path: Path) -> None
     recorder = _RecordingPromotion()
     service.promotion_callback = recorder
 
-    result = service.run_if_due(now=datetime(2026, 8, 4, 12, tzinfo=timezone.utc))
+    result = service.run_if_due(now=datetime.fromtimestamp(message.created_at + 1, timezone.utc))
 
     assert result.status == "succeeded"
     candidate = service.candidate_service.list()[0]
@@ -2046,7 +2047,7 @@ def test_curator_lesson_extraction_enters_autonomous_threshold_chain(tmp_path: P
     recorder = _RecordingPromotion()
     service.promotion_callback = recorder
 
-    result = service.run_if_due(now=datetime(2026, 8, 4, 12, tzinfo=timezone.utc))
+    result = service.run_if_due(now=datetime.fromtimestamp(message.created_at + 1, timezone.utc))
 
     assert result.status == "succeeded"
     candidate = service.candidate_service.list()[0]
@@ -2088,7 +2089,7 @@ def test_curator_incomplete_auto_conditions_stay_blocked_by_structured_gate(
     recorder = _RecordingPromotion()
     service.promotion_callback = recorder
 
-    result = service.run_if_due(now=datetime(2026, 8, 4, 12, tzinfo=timezone.utc))
+    result = service.run_if_due(now=datetime.fromtimestamp(message.created_at + 1, timezone.utc))
 
     assert result.status == "succeeded"
     candidate = service.candidate_service.list()[0]

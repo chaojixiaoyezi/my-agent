@@ -271,6 +271,10 @@ class MemoryCuratorState:
     consecutive_failures: int = 0
     # 冲突置顶：上轮判成冲突的正式目标 ID（去重、最近的在后、最多 16 条），下轮正式窗口按 ID 点查带上它们。
     conflict_pin_ids: list[str] = field(default_factory=list)
+    pending_local_dates: list[dict[str, object]] = field(default_factory=list)
+    first_enable_after: float = 0.0
+    compact_consumption_cursors: dict[str, dict[str, object]] = field(default_factory=dict)
+    compact_scan_stamp: str = ""
 
     # LLM: 空对象=首次初始化(允许); 非空但无任何已知字段=纯未知字段
     # fail-closed(seq1625 P0 遗留: {"not":"a state"} 不得静默复用默认 state);
@@ -425,6 +429,21 @@ def validate_curator_state(state: MemoryCuratorState) -> None:
         for reason, generation in state.pending_reason_generations.items()
     ):
         raise ValueError("memory curator pending_reason_generations must be a non-negative reason map")
+    from .curator_schema import validate_pending_local_dates
+
+    validate_pending_local_dates(state.pending_local_dates)
+    if (type(state.first_enable_after) not in (int, float) or not 0 <= state.first_enable_after < float("inf")
+            or not isinstance(state.compact_scan_stamp, str)
+            or state.compact_scan_stamp and not state.compact_scan_stamp.isdecimal()
+            or not isinstance(state.compact_consumption_cursors, dict)):
+        raise ValueError("invalid curator catch-up state")
+    for cursor in state.compact_consumption_cursors.values():
+        if (not isinstance(cursor, dict) or type(cursor.get("through")) is not int or cursor["through"] < 0
+                or "next_id" in cursor and (type(cursor.get("head")) is not int
+                    or type(cursor.get("next_generation")) is not int
+                    or not cursor["head"] > cursor["next_generation"] > cursor["through"]
+                    or not isinstance(cursor["next_id"], str) or not cursor["next_id"])):
+            raise ValueError("invalid curator compact consumption cursor")
     pins = state.conflict_pin_ids
     if (not isinstance(pins, list) or len(pins) > CONFLICT_PIN_MAX_ENTRIES
             or any(not isinstance(item, str) or not item or len(item) > _CONFLICT_PIN_ID_MAX_CHARS

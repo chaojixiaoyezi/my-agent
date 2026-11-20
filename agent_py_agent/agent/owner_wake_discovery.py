@@ -1043,6 +1043,7 @@ def _has_pending_memory_curator_work(
         return (
             automatic and candidate_source_present(owner_home / "memory" / "candidates.jsonl")
             or _curator_input_newer_than(owner_home, 0.0)
+            or (owner_home / "compact" / "archive").is_dir()
             or _memory_read_index_pending(owner_home)
         )
     except (OSError, UnicodeError, ValueError, TypeError):
@@ -1056,11 +1057,14 @@ def _has_pending_memory_curator_work(
 # 函数用途: 用consumer同源clock和实际配置判断已读state的时间资格。
 def curator_work_is_due(owner_home, state, *, curator_config=None, timezone_name="", deadline_out=None):
     from .memory_store.curator_due import (
+        compact_thread_stamp,
         daily_finalize_due,
         interval_elapsed,
         localized_now,
         next_local_boundary,
         parse_time,
+        range_failure_backoff,
+        unresolved_local_range,
     )
     from .memory_store.curator_models import MemoryCuratorConfig, curator_failure_retry_seconds
 
@@ -1075,13 +1079,24 @@ def curator_work_is_due(owner_home, state, *, curator_config=None, timezone_name
         max(30, min(300, config.interval_seconds)),
         consecutive_failures=max(0, int(getattr(state, "consecutive_failures", 0) or 0)),
     )
-    if state.last_failure_code and failure is not None and now-failure.timestamp() < backoff:
+    if (state.last_failure_code and failure is not None and now-failure.timestamp() < backoff
+            and not range_failure_backoff(state)):
         _add_deadline(deadline_out,failure.timestamp()+backoff)
         return False
+    if unresolved_local_range(state, current) is not None:
+        return True
+    for work in getattr(state, "pending_local_dates", ()):
+        retry = parse_time(work["retry_at"])
+        if work["source_range"]["kind"] == "input" and retry is not None:
+            _add_deadline(deadline_out, retry.timestamp())
     if _memory_read_index_pending(owner_home):
         return True
     if state.pending_reasons or state.active_lease:
         return True
+    if (owner_home / "compact" / "archive").is_dir():
+        stamp = int(getattr(state, "compact_scan_stamp", "") or 0)
+        if any(int(compact_thread_stamp(root / "threads") or 0) > stamp for root in _store_roots(owner_home)):
+            return True
     from .memory_store.curator_due import candidate_scan_deadline, candidate_source_present
     scan_deadline = candidate_scan_deadline(state, config.interval_seconds,
         source_present=not state.candidate_scan_cursor and candidate_source_present(owner_home / "memory" / "candidates.jsonl")
@@ -1090,7 +1105,7 @@ def curator_work_is_due(owner_home, state, *, curator_config=None, timezone_name
         if now >= scan_deadline:
             return True
         _add_deadline(deadline_out, scan_deadline)
-    if daily_finalize_due(state,current,config.daily_finalize_hour):
+    if daily_finalize_due(state, current, config.daily_finalize_hour, window_seconds=config.interval_seconds):
         _add_deadline(deadline_out,next_local_boundary(current,timezone_name,0,next_day=True))
         return True
     if state.last_daily_finalize_date != current.date().isoformat():

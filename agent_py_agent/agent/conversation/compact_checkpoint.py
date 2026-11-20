@@ -120,6 +120,8 @@ def scoped_compact_checkpoint_id(row: dict[str, object]) -> str:
         values['provider_compaction_info'] = row.get('provider_compaction_info')
     if 'carried_view' in row:
         values['carried_view'] = row['carried_view']
+    if 'pending_consumption_ids' in row:
+        values['pending_consumption_ids'] = row['pending_consumption_ids']
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
     return f"compact-v3-{row['generation']}-{digest}"
@@ -291,6 +293,29 @@ def _seal_torn_ledger_tail(path: Path) -> str:
 
 # LLM: 唯一追加路径先落私有冷载荷并封印；持原锁封闭残尾后追加候选，head仍仅由原CAS发布。
 # 函数用途: 将带冷证据引用的候选写入原owner检查点账本，拒绝不可读超长行且不更新线程。
+def compact_consumption_id(row: dict[str, object]) -> str:
+    """同一作用域与来源游标在重试生成下具有同一消费身份。"""
+    tools = row["source_tool_refs"]
+    cursor = {"message_id": row.get("source_end_message_id") or "", "tool_ref": tools[-1] if tools else None}
+    encoded = json.dumps([row["scope"], row["thread_id"], cursor], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def wake_compact_curator(agent, thread):
+    """发布 CAS 后提示原策展服务，重启时仍可从检查点发现同一工作。"""
+    curator = getattr(agent, "memory_curator", None)
+    claim = getattr(curator, "claim_compact_checkpoint", None)
+    if callable(claim):
+        try:
+            claim(thread, max_rows=1)
+        except Exception as exc:
+            logger.warning("CURATOR_COMPACT_WAKE_DEFERRED error_type=%s", type(exc).__name__)
+    elif callable(getattr(curator, "request", None)):
+        from ..agent_core._finalization_service import _request_memory_curator
+
+        _request_memory_curator(agent, "pre_compact")
+
+
 def _append_checkpoint(agent, row: dict[str, object]) -> str:
     from .compact_checkpoint_scan import _CHECKPOINT_ROW_MAX_BYTES, checkpoint_row_lookup
 
@@ -303,6 +328,7 @@ def _append_checkpoint(agent, row: dict[str, object]) -> str:
             row[f'{name}_ref'] = _write_cold_payload(root, row['thread_id'], payload)
             if name == 'provider_compaction':
                 row['provider_compaction_info'] = {key: payload.get(key) for key in ('protocol', 'endpoint')}
+    row["pending_consumption_ids"] = [compact_consumption_id(row)]
     row["checkpoint_id"] = scoped_compact_checkpoint_id(row)
     if len((json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n').encode('utf-8')) >= min(_CHECKPOINT_ROW_MAX_BYTES, _ACTIVE_CHECKPOINT_BYTE_BUDGET):
         raise ValueError('conversation compact checkpoint record exceeds byte budget')
