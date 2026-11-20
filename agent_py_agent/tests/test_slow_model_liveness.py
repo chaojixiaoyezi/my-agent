@@ -20,6 +20,7 @@ import json
 import queue
 import threading
 import time
+from contextvars import copy_context
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +35,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
 )
 from agent_py_agent.agent.backends import ProviderTimeoutError
 from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+from agent_py_agent.agent.concurrency.work_item_pool import MODEL_CALL_POOL, WorkItemHandle
 from agent_py_agent.agent.gateway_parts import lease_service
 from agent_py_agent.agent.gateway_parts.lease_service import start_lease_heartbeat
 from agent_py_agent.cli.chat_parts.gateway_client import (
@@ -59,19 +61,16 @@ def _request(*, stream: bool):
     )
 
 
-def _results_after(delay: float, result: _BackendGenerateResult) -> tuple[queue.Queue, threading.Thread]:
+def _results_after(delay: float, result: _BackendGenerateResult) -> tuple[queue.Queue, WorkItemHandle]:
     results: queue.Queue = queue.Queue()
 
     def worker() -> None:
-        try:
-            time.sleep(delay)
-            results.put(result)
-        finally:
-            set_interrupt(False)  # 与生产生成线程相同：退出前撤掉可能被立的中断旗，不把脏标志留给复用 ident 的线程
+        time.sleep(delay)
+        results.put(result)
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    return results, thread
+    # Same shape as a production model call: one work item on the model pool, which clears any interrupt flag raised
+    # for the item before its thread runs another item.
+    return results, MODEL_CALL_POOL.submit(worker, context=copy_context())
 
 
 # 函数用途: guard 等待用例只需要带 liveness 的 state 替身（放弃标记落在它上面）。

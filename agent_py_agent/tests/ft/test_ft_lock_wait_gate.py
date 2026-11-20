@@ -47,6 +47,7 @@ CASES: list[tuple[str, str]] = [
     ("agent_py_agent.tests.test_conveyor_m00_fast_time.g1_case_fast_time", "fast_time"),
     ("agent_py_agent.tests.test_conveyor_m00_fast_dataclass.g1_case_fast_frozen_dto", "fast_frozen_dto"),
     ("agent_py_agent.tests.test_conveyor_m00_direct_socket_io.g1_case_direct_socket_io", "direct_socket_io"),
+    ("agent_py_agent.tests.test_conveyor_m14_work_item_pools.g1_case_registered_model_work_item", "registered_model_work_item"),
 ]
 
 # C0 规则 9 的 GIL 探针：3.11/3.12 没有 sys._is_gil_enabled，按“GIL 开启”处理，收集阶段不会 AttributeError。

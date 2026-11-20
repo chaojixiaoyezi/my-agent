@@ -22,6 +22,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Protocol
 
 _lock = threading.Lock()
 # ident → 立旗时仍存活的那个线程对象（弱引用）；只按 ident 记会把旧停止误投给复用该 ident 的新线程。
@@ -76,6 +77,21 @@ class _ThreadExitIdentity:
     started: threading.Event
     native_attribute: str | None
     native_handle: object
+
+
+class WorkObservation(Protocol):
+    """在同一个绝对期限内核实原执行责任。"""
+
+    @property
+    def attempted(self) -> bool: ...
+
+    def start(self) -> None: ...
+
+    def proven_not_started(self) -> bool: ...
+
+    def exited(self) -> bool: ...
+
+    def wait_until(self, deadline: float) -> bool: ...
 
 
 # LLM: 此对象只保存同一原 Thread 的出生/内核引用，不另建登记表；worker 与 cleanup 共用观察算法，通知不是退出证明。
@@ -656,6 +672,7 @@ def _live_thread(tid: int) -> threading.Thread | None:
 
 
 __all__ = [
+    "WorkObservation",
     "InterruptHandle",
     "interrupt_by_name",
     "is_interruptible_registered",

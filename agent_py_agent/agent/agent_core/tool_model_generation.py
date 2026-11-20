@@ -10,12 +10,12 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping
-from contextvars import Context, copy_context
+from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from queue import Empty, Queue
-from threading import Event, Lock, Thread
+from threading import Event, Lock, local
 
 from ..backends import ModelResponse, ProviderRequestOptions
 from ..backends.errors import ProviderTimeoutError
@@ -26,11 +26,13 @@ from ..concurrency.interrupt import (
     is_interrupted,
     register_interrupt_callback,
     register_interrupt_wakeup,
-    set_interrupt,
 )
+from ..concurrency.work_item_pool import MODEL_CALL_POOL, WorkItemHandle, register_item_local_reset
 from ..conversation.context_usage import capture_context_usage_binding
 from ..conversation.model_metrics import publish_model_metrics
 from ..model_guidance import provider_system_instruction
+from ..model_request_selection import _HOST as _MODEL_REQUEST_SELECTION_HOST
+from ..runtime_context import ThreadLocalAgentAttribute
 from ..tooling.content_transport_policy import MAX_INLINE_WRITE_CONTENT_CHARS
 from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
@@ -124,6 +126,26 @@ _OUTPUT_LIMIT_RESUME_SEGMENTS_STATE_KEY = "_output_limit_resume_segments"
 _ASSISTANT_DELIVERY_STATE_KEY = "_assistant_delivery_segments"
 # 仅用于结构化诊断(不参与任何判定): 记下是哪一档超时被重试救回来的。
 _RESUMABLE_PROVIDER_FAILURE_TIMEOUT = "provider_timeout_retried"
+_MODEL_WORKER_LOCAL = local()
+
+
+def _reset_model_worker_scope() -> None:
+    cleanup = getattr(_MODEL_WORKER_LOCAL, "cleanup", None)
+    if cleanup is None:
+        return
+    del _MODEL_WORKER_LOCAL.cleanup
+    descriptor, agent, retention = cleanup
+    try:
+        if descriptor is not None:
+            descriptor.__delete__(agent)
+    except AttributeError:
+        pass  # 被调用路径也可先结束自己的线程局部绑定。
+    finally:
+        # 池已清除当前工作项的中断旗，在归还该线程前释放调用保留权。
+        retention.release()
+
+
+register_item_local_reset(_reset_model_worker_scope)
 
 
 # LLM: 只携同一次请求的单调时钟起点，不以账本可注入时钟计算组装或准备时长。
@@ -1358,58 +1380,90 @@ class _GenerationInterruptWake(Event):
                 self._results.put_nowait(_INTERRUPT_WAKE_SENTINEL)
 
 
-# LLM: Both execution paths use the same frozen ContextVars; snapshot before spawning the guard so config/backend/prompts cannot revert to deployment defaults. Preserve submission hooks and typed cancellation.
-# LLM: 有/无后台片都在出生前保留同一 Thread；只有确定未启动才由准确回调释放，实际 worker 的 finally 独占正常释放。
-#   即时唤醒先于慢取消回调；向等待者显式传递本次已注册事实，两个注册退出时注销，不重复慢close。
-# 函数用途: 按配置直接调用模型或启动保护线程；新线程继承当前工作片的模型与身份，停止仍精确传到实际连接。
 def _generate_through_wall_guard(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
     first_token_timeout_seconds: float = 0.0,
 ):
+    """在原请求上下文中运行模型，关停及中断始终跟随同一个工作项。"""
     # 旧状态没有冻结预算时沿用双参数调用，不强加新字段或可选关键字。
     budget = getattr(state, "token_budget", None)
     timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds,
         **({"token_budget": budget} if budget is not None else {}))
-    if timeout <= 0:
-        return _invoke_backend_generate(request.agent.backend, request.prompt, state)
+    timing = getattr(_MODEL_REQUEST_SELECTION_HOST.get(), "model_request_stage_timing", None)
+    segment = None
 
-    from ..conversation.background_shutdown import start_background_model_worker
+    def _record_first_request() -> None:
+        nonlocal segment
+        if timing is not None:
+            segment = timing.start(request.agent, request.params.request_id)
+
+    if timeout <= 0:
+        _record_first_request()
+        try:
+            return _invoke_backend_generate(request.agent.backend, request.prompt, state)
+        finally:
+            if segment is not None:
+                timing.finish(segment)
+
+    from ..conversation.background_shutdown import start_background_model_work_item
 
     results: _GenerationResultQueue = _GenerationResultQueue()
+    agent = request.agent
+    descriptor = getattr(type(agent), "_current_run_params", None)
+    run_params_descriptor = descriptor if isinstance(descriptor, ThreadLocalAgentAttribute) else None
+    run_params = getattr(agent, "_current_run_params", None) if run_params_descriptor is not None else None
     # 出生前取得准确调用的保留权；缺账、缺 call 或保留失败必须阻止真正发出模型请求。
     worker_retention = state.ledger.retain_call(state.call_id)
 
     def _target() -> None:
+        _MODEL_WORKER_LOCAL.cleanup = (run_params_descriptor, agent, worker_retention)
         try:
-            results.put(
-                _BackendGenerateResult(response=_generate_backend_response(request, state, timeout))
-            )
-        except BaseException as exc:  # pragma: no cover - exercised through queue result.
-            results.put(_BackendGenerateResult(exc=exc))
+            if run_params is not None:
+                run_params_descriptor.__set__(agent, run_params)
+            result = _BackendGenerateResult(response=_generate_backend_response(request, state, timeout))
+        except BaseException as exc:
+            result = _BackendGenerateResult(exc=exc)
         finally:
-            try:
-                set_interrupt(False)
-            finally:
-                # 归 worker 所有，不能被已经超时/取消的 caller 提前释放。
+            if segment is not None:
+                timing.finish(segment)
+        try:
+            results.put(result)
+        finally:
+            # An exception result's traceback references this frame; dropping the local breaks that cycle,
+            # so a result the caller never consumes cannot keep the request alive without the cyclic GC.
+            del result
+
+    try:
+        worker = MODEL_CALL_POOL.prepare(_target, context=copy_context(),
+                                         on_start=_record_first_request if timing is not None else None)
+    except BaseException:
+        worker_retention.release()
+        raise
+
+    def _interrupt_worker() -> None:
+        try:
+            _interrupt_generation_worker(worker)
+        finally:
+            if worker.proven_not_started():
                 worker_retention.release()
 
     try:
-        execution_context = copy_context()
-        # 业务Context只由原execution_context.run传播；3.14隐式再继承会让已退出Thread保留整份请求与后台片循环。
-        thread_kwargs = {"context": Context()} if hasattr(sys.flags, "thread_inherit_context") else {}
-        worker = Thread(target=execution_context.run, args=(_target,), name="my-agent-model-generate-timeout-guard",
-                        daemon=True, **thread_kwargs)
-    except BaseException:
-        # 尚未调用原启动入口，确定没有 worker；启动尝试后的异常则不能这样释放。
-        worker_retention.release()
-        raise
-    try:
-        start_background_model_worker(worker, on_proven_not_started=worker_retention.release)
-        with register_interrupt_wakeup(_GenerationInterruptWake(results)), register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
-            return _wait_for_generation_result(request, state, results, worker, timeout, interrupt_registered=True)
+        with register_interrupt_wakeup(_GenerationInterruptWake(results)), register_interrupt_callback(_interrupt_worker):
+            if is_interrupted():
+                _interrupt_worker()
+            start_background_model_work_item(worker, on_proven_not_started=worker_retention.release)
+            try:
+                return _wait_for_generation_result(request, state, results, worker, timeout, interrupt_registered=True)
+            finally:
+                if worker.proven_not_started():
+                    worker_retention.release()
     finally:
-        results.close_consumer()
+        try:
+            if worker.cancel_if_not_started():
+                worker_retention.release()
+        finally:
+            results.close_consumer()
 
 
 # LLM: 采纳前复核中断；显式注册的取消由外层异步转交，直接等待入口自行转交，不能在等待线程重复慢close。
@@ -1418,7 +1472,7 @@ def _wait_for_generation_result(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
     results: Queue[_BackendGenerateResult | object],
-    worker: Thread,
+    worker: WorkItemHandle,
     timeout: float,
     *,
     interrupt_registered: bool = False,
@@ -1453,12 +1507,11 @@ def _wait_for_generation_result(
 
 # LLM: 先封迟到采纳；外层已有本次精确取消注册时不重复慢close，没有注册才转交；物理退出仍归原shutdown跟踪。
 # 函数用途: 让用户取消经过唯一真实通道后有界等收尾，不等待展示或把逻辑返回当物理退出。
-def _raise_generation_interrupted(state: _ModelGenerationState, worker: Thread, *, interrupt_registered: bool = False) -> None:
+def _raise_generation_interrupted(state: _ModelGenerationState, worker: WorkItemHandle, *, interrupt_registered: bool = False) -> None:
     _abandon_call(state)
     if not interrupt_registered:
         _interrupt_generation_worker(worker)
-    if worker.ident is not None:
-        worker.join(timeout=_MODEL_CANCEL_DRAIN_SECONDS)
+    worker.join(timeout=_MODEL_CANCEL_DRAIN_SECONDS)
     raise InterruptedError("模型接口请求已被用户停止")
 
 
@@ -1478,11 +1531,8 @@ def _abandon_call(state: _ModelGenerationState) -> None:
     state.liveness.abandon()
 
 
-# LLM: Target only the live timeout-guard thread; setting its flag invokes any provider response-close callback already registered there.
-# 函数用途: 将停止精确转发给当前模型线程，触发其 HTTP/SSE 连接关闭回调。
-def _interrupt_generation_worker(worker: Thread) -> None:
-    if worker.is_alive() and worker.ident is not None:
-        set_interrupt(True, worker.ident)
+def _interrupt_generation_worker(worker: WorkItemHandle) -> None:
+    worker.interrupt()
 
 
 # LLM: 每次最多等剩余请求预算或两秒，队列哨兵与正常结果均原样返回，不重置期限。

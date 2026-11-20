@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextvars import copy_context
 from queue import Queue
 from types import SimpleNamespace
 
@@ -110,9 +111,8 @@ def test_abandoned_call_worker_skips_submission_and_send_after_wall_timeout(tmp_
 def test_user_stop_marks_the_call_abandoned_before_the_worker_sends(monkeypatch):
     monkeypatch.setattr(generation, "is_interrupted", lambda: True)
     state = SimpleNamespace(liveness=generation._CallLiveness())
-    worker = threading.Thread(target=lambda: None)
-    worker.start()
-    worker.join()
+    worker = generation.MODEL_CALL_POOL.submit(lambda: None, context=copy_context())
+    assert worker.join(timeout=5)
     with pytest.raises(InterruptedError):
         generation._wait_for_generation_result(
             SimpleNamespace(agent=SimpleNamespace(backend=None)), state, Queue(), worker, 1.0,

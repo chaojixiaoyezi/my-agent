@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
-from threading import Event, Thread, current_thread
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -38,6 +38,7 @@ from agent_py_agent.agent.common.request_execution_ports import (
 )
 from agent_py_agent.agent.common.tool_write_context import ToolWriteContextUnavailable
 from agent_py_agent.agent.concurrency import interrupt
+from agent_py_agent.agent.concurrency.work_item_pool import WorkItemHandle, WorkItemPool
 from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallFailureParams,
     ModelCallLedger,
@@ -133,6 +134,7 @@ from agent_py_agent.tests.test_rework_r3_model_worker_cancellation import (
     _retentions,
     _started_call,
 )
+from agent_py_agent.tests.test_tool_model_generation import _capture_model_work_items
 
 # ==========================================================================
 # Source: agent_py_agent/tests/test_r9_model_result_consumer_lifetime.py
@@ -142,7 +144,7 @@ from agent_py_agent.tests.test_rework_r3_model_worker_cancellation import (
 @pytest.mark.parametrize('publication', ['after_exit', 'before_exit'])
 def test_abandoned_result_releases_exception_request_without_gc(tmp_path, publication):
     code = r'''
-import gc,threading,weakref,sys
+import contextvars,gc,threading,time,weakref,sys
 from types import SimpleNamespace
 from agent_py_agent.agent.agent_core import tool_model_generation as generation
 class Payload:
@@ -182,6 +184,16 @@ release.set();workers[0].join(3)
 assert not workers[0].is_alive() and released.is_set()
 assert queues[0].empty(), 'consumer退出前已入队或之后迟到的异常均不可滞留'
 workers.clear();queues.clear()
+# Free-threaded builds free an object whose last reference another thread dropped only when its owning thread runs
+# again; the per-call thread did that at exit. With the cyclic GC still off, let the parked pool thread run one
+# empty item, so only a real reference cycle can keep the request alive here.
+pool=generation.MODEL_CALL_POOL;deadline=time.monotonic()+3
+while True:
+    with pool._queue.mutex:parked=len(pool._queue.not_empty._waiters)
+    if parked:break
+    assert time.monotonic()<deadline,'the pool thread did not park'
+    time.sleep(.001)
+assert pool.submit(lambda:None,context=contextvars.copy_context()).join(3)
 assert reference() is None, 'worker退出后仍由无人接收的异常环保留请求'
 '''
     home = tmp_path / 'home'
@@ -193,7 +205,7 @@ assert reference() is None, 'worker退出后仍由无人接收的异常环保留
 
 def test_consumed_provider_failure_preserves_original_exception_and_traceback(monkeypatch):
     released = threading.Event()
-    workers = []
+    workers = _capture_model_work_items(monkeypatch)
     error = ValueError('synthetic provider error')
     class Token:
         def release(self):
@@ -202,7 +214,6 @@ def test_consumed_provider_failure_preserves_original_exception_and_traceback(mo
         def retain_call(self, call_id):
             return Token()
     def provider(*args):
-        workers.append(threading.current_thread())
         raise error
     monkeypatch.setattr(generation, '_effective_model_request_timeout_seconds', lambda *args, **kwargs: 2)
     monkeypatch.setattr(generation, '_generate_backend_response', provider)
@@ -216,8 +227,7 @@ def test_consumed_provider_failure_preserves_original_exception_and_traceback(mo
         frames.append(trace.tb_frame.f_code.co_name)
         trace = trace.tb_next
     assert 'provider' in frames and '_target' in frames
-    workers[0].join(3)
-    assert not workers[0].is_alive() and released.is_set()
+    assert workers[0].join(3) and released.is_set()
 
 
 
@@ -2214,6 +2224,29 @@ def _refusing_thread(**kwargs):
     return worker
 
 
+# LLM: Same native refusal as _refusing_thread: CPython's spawn entry rejects the non-callable bootstrap.
+def _refuse_native_spawn(worker):
+    worker._bootstrap = None
+
+
+# LLM: The model pool starts its workers through threading.Thread: a new executor worker first, then a one-shot
+#   overflow worker when that start fails. Install an empty pool so the call must start a worker, and apply the fault
+#   only to that pool's threads; every other thread in the process starts normally.
+def _install_faulty_model_pool(patch, request, fault):
+    pool = WorkItemPool('c10g2-faulty-model-pool', max_threads=1)
+    request.addfinalizer(pool._executor.shutdown)
+
+    class PoolThread(Thread):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if self.name.startswith(pool.name):
+                fault(self)
+
+    patch.setattr(generation, 'MODEL_CALL_POOL', pool)
+    patch.setattr(threading, 'Thread', PoolThread)
+    return pool
+
+
 @pytest.mark.parametrize('missing_native', [False, True])
 def test_native_spawn_site_accepts_cpython_keyword_call_instruction(monkeypatch, missing_native):
     name, native, _offset = interrupt._NATIVE_SPAWN_SITE
@@ -2298,59 +2331,63 @@ def test_replaced_start_without_birth_remains_unknown(monkeypatch, observed, rep
     assert bool(manager.blockers()) is observed
 
 
+# LLM: Every worker the pool starts for the item is born natively but loses its start acknowledgement. The item was
+#   still RELEASED, so the pool's compare-and-set cancels it: that is proof of non-start, the exact retention is
+#   released at once, and a born worker that runs later skips the provider call.
 @pytest.mark.parametrize('observed', [False, True])
-def test_native_birth_with_lost_ack_stays_retained_until_original_worker_exit(monkeypatch, observed):
+def test_native_birth_with_lost_ack_is_cancelled_before_a_born_worker_runs(monkeypatch, request, observed):
     ledger = ModelCallLedger()
     _started_call(ledger, 'guard-call')
-    born, release = Event(), Event()
-    workers = []
+    release = Event()
+    born = []
     error = RuntimeError('original native worker acknowledgement lost')
     manager = shutdown.BackgroundShutdown()
     provider = Mock(return_value='late result')
 
-    def worker_factory(**kwargs):
-        worker = Thread(**kwargs)
+    def lose_ack(worker):
+        worker_born = Event()
         original_bootstrap, original_wait = worker._bootstrap_inner, worker._started.wait
 
         def bootstrap():
-            born.set()
+            born.append(worker)
+            worker_born.set()
             assert release.wait(10)
             original_bootstrap()
 
         def wait(timeout=None):
             if not release.is_set():
-                assert born.wait(5)
+                assert worker_born.wait(5)
                 raise error
             return original_wait(timeout)
 
         worker._bootstrap_inner, worker._started.wait = bootstrap, wait
-        workers.append(worker)
-        return worker
 
-    monkeypatch.setattr(generation, 'Thread', worker_factory)
+    pool = _install_faulty_model_pool(monkeypatch, request, lose_ack)
+    handles = _capture_model_work_items(monkeypatch)
     monkeypatch.setattr(generation, '_generate_backend_response', provider)
     try:
         with manager.observe(None) if observed else nullcontext():
             with pytest.raises(RuntimeError) as caught:
                 generation._generate_through_wall_guard(_guard_request(), _guard_state(ledger))
-        assert caught.value is error and born.is_set()
+        assert caught.value is error and born
         ledger.failed(ModelCallFailureParams(call_id='guard-call', error_type='logical_failure'))
-        assert workers[0].ident is None and not workers[0]._started.is_set()
-        assert _retentions(ledger, 'guard-call')
+        assert not any(worker._started.is_set() for worker in born)
+        assert handles[0].proven_not_started() and not _retentions(ledger, 'guard-call')
         provider.assert_not_called()
-        assert bool(manager.blockers()) is observed
+        assert manager.blockers() == []
     finally:
         release.set()
-        if workers:
-            assert workers[0]._started.wait(5)
-            workers[0].join(timeout=5)
-    provider.assert_called_once()
-    assert not workers[0].is_alive() and not _retentions(ledger, 'guard-call')
+        pool._executor.shutdown()
+        for worker in born:
+            assert worker._started.wait(5)
+            worker.join(timeout=5)
+    provider.assert_not_called()
+    assert not any(worker.is_alive() for worker in born) and not _retentions(ledger, 'guard-call')
     assert manager.blockers() == []
 
 
 @pytest.mark.parametrize('observed', [False, True])
-def test_native_refusal_releases_exact_failed_call_and_allows_a_healthy_call(monkeypatch, observed):
+def test_native_refusal_releases_exact_failed_call_and_allows_a_healthy_call(monkeypatch, request, observed):
     ledger = ModelCallLedger()
     _started_call(ledger, 'guard-call')
     _started_call(ledger, 'other-call')
@@ -2360,26 +2397,20 @@ def test_native_refusal_releases_exact_failed_call_and_allows_a_healthy_call(mon
     monkeypatch.setattr(generation, '_generate_backend_response', provider)
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(generation, 'Thread', _refusing_thread)
+            _install_faulty_model_pool(patch, request, _refuse_native_spawn)
+            refused = _capture_model_work_items(patch)
             with manager.observe(None) if observed else nullcontext():
                 with pytest.raises(TypeError) as caught:
                     generation._generate_through_wall_guard(_guard_request(), _guard_state(ledger))
                 ledger.failed(ModelCallFailureParams(call_id='guard-call', error_type=type(caught.value).__name__))
         provider.assert_not_called()
-        assert not _retentions(ledger, 'guard-call')
+        assert refused[0].proven_not_started() and not _retentions(ledger, 'guard-call')
         assert _retentions(ledger, 'other-call') == [unrelated]
         assert manager.blockers() == [] and manager.slices == set()
-        workers = []
-
-        def healthy(*_args):
-            workers.append(current_thread())
-            return provider()
-
         _started_call(ledger, 'healthy-call')
-        monkeypatch.setattr(generation, '_generate_backend_response', healthy)
+        workers = _capture_model_work_items(monkeypatch)
         assert generation._generate_through_wall_guard(_guard_request(), _guard_state(ledger, 'healthy-call')) == 'healthy result'
-        workers[0].join(timeout=5)
-        assert not workers[0].is_alive() and not _retentions(ledger, 'healthy-call')
+        assert workers[0].join(timeout=5) and not _retentions(ledger, 'healthy-call')
         provider.assert_called_once()
     finally:
         # 故障注入器已知 C spawn 从未接受 bootstrap；只回收红灯版本遗留的该准确 token。
@@ -2393,12 +2424,12 @@ def test_observer_preparation_failure_releases_guard_token_without_attempting_st
     ledger = ModelCallLedger()
     _started_call(ledger, 'guard-call')
     failure = RuntimeError('original observation preparation failure')
-    start = Mock(side_effect=AssertionError('preparation failed before Thread.start'))
+    start = Mock(side_effect=AssertionError('preparation failed before WorkItemHandle.start'))
     provider = Mock()
     manager = shutdown.BackgroundShutdown()
     monkeypatch.setattr(generation, '_generate_backend_response', provider)
-    monkeypatch.setattr(shutdown, '_ThreadExitObservation', Mock(side_effect=failure))
-    monkeypatch.setattr(Thread, 'start', start)
+    monkeypatch.setattr(shutdown, '_RegisteredModelWorkObservation', Mock(side_effect=failure))
+    monkeypatch.setattr(WorkItemHandle, 'start', start)
     try:
         with manager.observe(None) if observed else nullcontext():
             with pytest.raises(RuntimeError) as caught:
@@ -2414,12 +2445,12 @@ def test_observer_preparation_failure_releases_guard_token_without_attempting_st
 
 
 @pytest.mark.parametrize('observed', [False, True])
-def test_original_failed_run_and_attempt_cancel_after_native_nonstart(tmp_path, monkeypatch, observed):
+def test_original_failed_run_and_attempt_cancel_after_native_nonstart(tmp_path, monkeypatch, request, observed):
     agent, backend, scheduler, call, task_id, _view = native_cancellation_case(tmp_path, request_timeout=240)
     store, repo = agent.conversation_store, agent.subagents.runtime_db
     manager = shutdown.BackgroundShutdown()
     with monkeypatch.context() as patch:
-        patch.setattr(generation, 'Thread', _refusing_thread)
+        _install_faulty_model_pool(patch, request, _refuse_native_spawn)
         with manager.observe(repo) if observed else nullcontext():
             with pytest.raises(TypeError):
                 scheduler.tick()
@@ -2461,13 +2492,7 @@ def test_final_append_eio_recovers_once_without_retained_shutdown_slice(
     ), tmp_path / "workspace")
     content = "原模型结果已生成，只需补齐最终会话记录。"
     agent.backend = backend = _ScriptedBackend(content)
-    generate, workers = backend.generate, []
-
-    def controlled_model(*args, **kwargs):
-        workers.append(current_thread())
-        return generate(*args, **kwargs)
-
-    monkeypatch.setattr(backend, "generate", controlled_model)
+    model_items = _capture_model_work_items(monkeypatch)
     store, repo = agent.conversation_store, agent.subagents.runtime_db
     thread = store.threads.get_or_create({
         "canonical_user_id": "owner-r5", "channel": channel,
@@ -2514,10 +2539,8 @@ def test_final_append_eio_recovers_once_without_retained_shutdown_slice(
             scheduler.tick(now=20.0)
     assert caught.value is failure and caught.value.errno == errno.EIO
     # 真实 worker 的退出必须可观察，不能把逻辑结果当作物理退出证明。
-    for worker in workers:
-        if worker is not current_thread():
-            worker.join(timeout=5)
-            assert not worker.is_alive()
+    # A timed call runs as one model work item; an untimed call stays on the scheduler thread.
+    assert len(model_items) == (1 if request_timeout else 0) and all(item.join(timeout=5) for item in model_items)
     original_claim = store.claims.load(thread.thread_id)
     pending = store.wakes.pending_one(signal.wake_signal_id)
     assert pending is not None and pending.wake_signal_id == signal.wake_signal_id
