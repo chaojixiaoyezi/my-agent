@@ -12,27 +12,37 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import deque
 from collections.abc import Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
 from ..common.cancellation import ToolCancelled, raise_if_cancelled, register_cancellation_callback
 from ._filesystem_helpers import (
     _FALLBACK_SCAN_MAX_FILES,
+    _FALLBACK_SCAN_MAX_SECONDS,
     _MAX_SEARCH_LINE_CHARS,
+    _bind_discovery_cursor,
+    _cursor_source_changed,
+    _CursorSourceChanged,
     _discovery_file_batch,
     _discovery_identity,
     _discovery_matches_glob,
     _discovery_nofollow_stat,
     _discovery_process_budget,
+    _DiscoveryCursor,
+    _encode_discovery_cursor,
     _iter_discovery_files,
+    _parse_discovery_cursor,
     _safe_discovery_path,
     _scan_budget_details,
     _scan_budget_expired,
     path_resolution_error_outcome,
 )
+from ._filesystem_list import _LazyListWalk
 from ._filesystem_read import (
     _COMMON_FILE_DISCOVERY_IGNORES,
     FileSystemAccessOptions,
@@ -84,6 +94,7 @@ _SEARCH_TEXT_PARAMETERS = {
     "path": "从哪个目录开始搜，默认是工作区根目录",
     "limit": "本次最多返回多少条匹配，默认使用工具配置上限",
     "offset": "跳过前多少条匹配，用于分页，默认 0",
+    "cursor": "按已处理位置继续搜索",
     "file_glob": "只搜索匹配 glob 的文件，例如 *.py",
     "context": "每条命中前后额外展示多少行上下文，默认 0",
     "literal": "是否按普通文本匹配，默认 false；默认使用 ripgrep 正则语义",
@@ -96,6 +107,7 @@ _SEARCH_TEXT_PARAMETER_DETAILS = {
     "path": "可选，只能是当前工作区内已经存在的文件或目录；源码尚未下载时先获取正确 checkout。",
     "limit": "分页大小；命中很多时先看小批量，再用 next_offset 继续。",
     "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
+    "cursor": "传空字符串开启有序扫描；保留其余查询条件并原样传回上一页的 cursor，续页时省略 offset。",
     "file_glob": "按文件名或工作区相对路径过滤，例如 *.py、docs/*.md。",
     "context": "需要看命中附近内容时传 1 或 2；越大越占 prompt。",
     "literal": "默认 false，使用 ripgrep 正则语义；搜索包含正则符号的普通原文时传 true。",
@@ -196,11 +208,12 @@ def _observe_search_source(tool, path: Path) -> tuple[int, ...]:
             state.mark('credential_source_projection_unavailable')
         raise _SearchReadAbort('credential_source_projection_unavailable')
     try:
-        safe = _safe_discovery_path(tool, path, root=path.parent,
-                                    include_ignored=True, ignored_names=())
+        info = _discovery_nofollow_stat(path)
+        safe = _safe_discovery_path(tool, path, root=path.parent, include_ignored=True,
+                                    ignored_names=(), path_stat=info)
         if safe is None:
             raise _SearchReadAbort('source_access_changed')
-        identity = _discovery_identity(_discovery_nofollow_stat(safe))
+        identity = _discovery_identity(info)
     except (OSError, ValueError):
         if state is not None:
             state.mark('source_unavailable', stale=path in state.sources)
@@ -227,22 +240,24 @@ def _checked_search_file(tool, path: Path):
     state = _SEARCH_STATE.get()
     expected = _observe_search_source(tool, path)
     with path.open('rb', buffering=0) as handle:
-        if _discovery_identity(os.fstat(handle.fileno())) != expected:
+        if not _search_source_is_current(path, handle, expected):
             if state is not None:
                 state.mark('source_replaced_before_read', stale=True)
             raise _SearchReadAbort('source_replaced_before_read')
-        _observe_search_source(tool, path)
         try:
             yield handle
         finally:
-            try:
-                if _discovery_identity(os.fstat(handle.fileno())) != expected:
-                    if state is not None:
-                        state.mark('source_changed_during_read', stale=True)
-                _observe_search_source(tool, path)
-            except (OSError, ValueError):
-                if state is not None:
-                    state.mark('source_changed_after_read', stale=True)
+            if not _search_source_is_current(path, handle, expected) and state is not None:
+                state.mark('source_changed_during_read', stale=True)
+
+
+def _search_source_is_current(path: Path, handle, expected: tuple[int, ...]) -> bool:
+    # 权限随本次调用固定；用描述符与无链接路径的身份复核读前和读后状态。
+    try:
+        return (_discovery_identity(os.fstat(handle.fileno())) == expected
+                and _discovery_identity(_discovery_nofollow_stat(path)) == expected)
+    except (OSError, ValueError):
+        return False
 
 
 # LLM: 只复核本轮实际观察过的有帽来源，不把未观察路径称为已验证。
@@ -369,12 +384,16 @@ class SearchTextTool(FileSystemTool):
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = search_request_from_params(params, self.max_matches)
+            resume = "cursor" in params
+            cursor = _parse_discovery_cursor(params["cursor"], kind="search") if resume else None
+            if cursor is not None and "offset" in params:
+                raise ValueError("cursor 续页时须省略 offset。未开始搜索。")
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
             # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；路径策略拒绝→原权限码+authorization。
             # not-found 走下面 missing_path_result(PATH_NOT_FOUND)。
             return path_resolution_error_outcome("search_text", exc)
-        if not target.exists():
+        if not target.exists() and cursor is None:
             return missing_path_result(MissingPathRequest(
                 tool_name="search_text",
                 raw_path=request.raw_path,
@@ -385,15 +404,35 @@ class SearchTextTool(FileSystemTool):
                 retry_tool="search_text",
             decide_access=self.check_path_access,
             ))
-        return self._search_target(target, request)
+        if not resume:
+            return self._search_target(target, request)
+        try:
+            cursor = _bind_discovery_cursor(
+                self, target, cursor, kind="search", offset=request.offset,
+                query=(request.query, request.literal, request.ignore_case, request.file_glob,
+                       request.include_ignored, request.output_mode, request.context),
+                include_ignored=request.include_ignored, ignored_names=_COMMON_FILE_DISCOVERY_IGNORES,
+            )
+            return self._search_target(target, request, cursor=cursor)
+        except _CursorSourceChanged as exc:
+            return _cursor_source_changed("search_text", exc)
+        except OSError as exc:
+            return ToolHandlerOutcome(
+                "search_text", False,
+                f"搜索未完成（{type(exc).__name__}）。未写入文件，请核对路径或缩小范围后重试。",
+                error_code="TOOL_EXECUTION_FAILED",
+            )
 
     # LLM: ContextVar在finally恢复，不能让并行调用共享预算或来源状态。
     # 函数用途: 为一次搜索绑定独立执行状态。
-    def _search_target(self, target: Path, request: SearchRequest) -> ToolHandlerOutcome:
+    def _search_target(
+        self, target: Path, request: SearchRequest, *, cursor: _DiscoveryCursor | None = None,
+    ) -> ToolHandlerOutcome:
         token = _SEARCH_STATE.set(SearchScanState(started_at=time.monotonic(), tool=self,
                                                  current_path=target if target.is_dir() else target.parent))
         try:
-            outcome = self._search_target_run(target, request)
+            outcome = (self._search_target_run(target, request) if cursor is None
+                       else self._search_cursor_page(target, request, cursor))
             policy = getattr(self, '_host_output_redaction', None)
             if policy is not None:
                 from .host_output_redaction import (
@@ -413,6 +452,110 @@ class SearchTextTool(FileSystemTool):
             return outcome
         finally:
             _SEARCH_STATE.reset(token)
+
+    def _search_cursor_page(
+        self, target: Path, request: SearchRequest, cursor: _DiscoveryCursor,
+    ) -> ToolHandlerOutcome:
+        try:
+            matcher = SearchMatcher.from_request(request)
+        except ValueError as exc:
+            return path_resolution_error_outcome("search_text", exc)
+        state = _SEARCH_STATE.get()
+        state.backend = "ordered_walk"
+        page = _CursorSearchPage(cursor, request, matcher)
+        initial = replace(cursor)
+        deadline = state.started_at + _FALLBACK_SCAN_MAX_SECONDS
+
+        if target.is_dir():
+            match_path = "/" in request.file_glob
+
+            def matches(path: str, name: str) -> bool:
+                display = self.display_path(Path(path)) if match_path else name
+                return not request.file_glob or _discovery_matches_glob(display, name, request.file_glob)
+
+            walk = _LazyListWalk.for_discovery(
+                self, target, include_ignored=request.include_ignored, after_entry=cursor.candidate,
+                file_filter=matches,
+            )
+
+            def ordered_candidates():
+                while found := walk.next_visible(deadline=deadline if cursor != initial else None):
+                    yield found[0]
+                if walk.scan_incomplete:
+                    _scan_budget_expired(state)
+
+            candidates = ordered_candidates()
+        else:
+            candidates = (target,) if not cursor.candidate and self._should_search_item(target, request) else ()
+        if cursor.byte_offset:
+            candidates = chain((target / cursor.candidate,), candidates)
+
+        has_more = False
+        known_match = False
+        for item in candidates:
+            raise_if_cancelled()
+            if not _admit_cursor_candidate(state):
+                break
+            key = item.relative_to(target).as_posix()
+            position = initial if initial.byte_offset and key == initial.candidate else None
+            try:
+                stop, known_match = _scan_cursor_search_file(
+                    self, item, key, page, position=position, require_progress=cursor == initial,
+                )
+            except UnicodeDecodeError:
+                state.mark("source_decode_error")
+                break
+            except _SearchReadAbort:
+                break
+            if state.stale or stop:
+                has_more = stop
+                break
+
+        if state.stale:
+            raise _CursorSourceChanged("file_id", initial.after_entry)
+        if state.limited or has_more:
+            if cursor == initial:
+                return ToolHandlerOutcome(
+                    "search_text", False,
+                    f"搜索在记录下一位置前停止（{state.limit_reason}）。未写入文件，请缩小范围或核对源文件。",
+                    error_code="TOOL_EXECUTION_FAILED",
+                    result_envelope={"after_entry": initial.after_entry, "reason": state.limit_reason},
+                )
+            cursor.phase = "known_matches" if known_match else "discovery"
+            next_cursor = _encode_discovery_cursor(cursor)
+        else:
+            next_cursor = ""
+        has_prior_progress = bool(initial.candidate or request.offset)
+        request = replace(request, offset=0)
+        if request.output_mode == "count":
+            body = render_match_counts(page.counts, request)
+        elif request.output_mode == "files_with_matches":
+            body = render_files_with_matches(page.hits, request)
+        elif request.output_mode == "line_numbers":
+            body = render_line_numbers(page.hits, request)
+        else:
+            hits = _hydrate_search_page(self, page.hits, request, positions=page.origins)
+            if state.stale:
+                raise _CursorSourceChanged("file_id", initial.after_entry)
+            body = self._render_content_hits(hits, request)
+        result = _search_result_envelope(
+            self, target, request, total_items=page.size, scan_state=state, has_more=bool(next_cursor),
+            has_prior_progress=has_prior_progress,
+        )
+        if not page.size:
+            if state.limited:
+                body = f"搜索未完整覆盖（{state.limit_reason}）。"
+            elif has_prior_progress:
+                body = "剩余范围没有匹配项。"
+        if next_cursor:
+            body += f"\ncursor={next_cursor}\n继续时保留查询条件，并原样传入 cursor。"
+        result["page_window"].update(kind="cursor_page", next_offset=0, cursor=next_cursor)
+        result["search_result"].update(read_bytes=state.read_bytes, scanned_files_known=True)
+        if next_cursor or has_prior_progress:
+            result["search_result"].update(total="unknown", total_code="PAGE_WINDOW")
+        result.update(cursor=next_cursor, scan_incomplete=state.limited)
+        outcome = ToolHandlerOutcome("search_text", True, body, result_envelope=result)
+        return _search_result_with_source_projection(outcome, target, (*page.counts, *(hit.rel for hit in page.hits)))
 
     # LLM: 两后端收集不读context；正文只切页一次，补全失败保留原有哨兵事实。
     # 函数用途: 执行搜索、当前页补全和结果投影。
@@ -703,6 +846,108 @@ class SearchTextTool(FileSystemTool):
         return payload
 
 
+@dataclass
+class _CursorSearchPage:
+    cursor: _DiscoveryCursor
+    request: SearchRequest
+    matcher: SearchMatcher
+    hits: list[SearchHit] = field(default_factory=list)
+    counts: dict[str, int] = field(default_factory=dict)
+    origins: dict[Path, tuple[int, int]] = field(default_factory=dict)
+
+    @property
+    def size(self) -> int:
+        return len(self.hits) + len(self.counts)
+
+    def append(self, key: str, identity: tuple[int, ...], hit: SearchHit, *, count: int = 0) -> bool:
+        if self.cursor.skip:
+            self.cursor.skip -= 1
+            return True
+        if not _retain_search_bytes(len(hit.rel.encode("utf-8", "surrogatepass"))
+                                    + len(hit.line.encode("utf-8")) + 64):
+            return False
+        if self.request.output_mode == "count":
+            self.counts[hit.rel] = count
+        else:
+            self.hits.append(hit)
+        self.cursor.after_entry = key
+        self.cursor.after_file_id = identity
+        return True
+
+
+def _admit_cursor_candidate(state: SearchScanState) -> bool:
+    if state.candidates >= _FALLBACK_SCAN_MAX_FILES:
+        state.mark("file_limit")
+        return False
+    state.candidates += 1
+    return True
+
+
+def _scan_cursor_search_file(
+    tool: SearchTextTool,
+    item: Path,
+    key: str,
+    page: _CursorSearchPage,
+    *,
+    position: _DiscoveryCursor | None,
+    require_progress: bool,
+) -> tuple[bool, bool]:
+    state = _SEARCH_STATE.get()
+    request, cursor = page.request, page.cursor
+    mode = request.output_mode
+    rel = tool.display_path(item)
+    resume_line = position.line if position is not None else 0
+    count = position.matches if position is not None else 0
+    if mode == "content" and request.context:
+        # 每条上下文至少占用保留预算中的一条元数据，按同一预算限制位置队列。
+        history = deque(maxlen=min(request.context, _SEARCH_RETAIN_MAX_BYTES // 64))
+    else:
+        history = deque(maxlen=0)
+    start_byte = position.byte_offset if position is not None else 0
+    start_line = resume_line
+    if position is not None and history.maxlen:
+        start_byte, start_line = position.context_offset, position.context_line
+    byte = start_byte
+    with _checked_search_file(tool, item) as handle:
+        identity = _discovery_identity(os.fstat(handle.fileno()))[:4]
+        if position is not None and identity != position.file_id:
+            raise _CursorSourceChanged("file_id", position.after_entry)
+        for number, line, end_byte in _positioned_source_lines(
+            handle, byte_offset=start_byte, line=start_line,
+            progress_through_line=resume_line if require_progress else None,
+        ):
+            line_start = (byte, number - 1)
+            byte = end_byte
+            if number <= resume_line:
+                history.append(line_start)
+                continue
+            if page.matcher.matches(line):
+                if mode == "count":
+                    count += 1
+                else:
+                    if page.size == request.limit:
+                        return True, True
+                    display = _safe_search_line(tool, line) if mode == "content" else ""
+                    if not page.append(key, identity, SearchHit(rel, number, display)):
+                        return True, False
+                    if history.maxlen:
+                        page.origins[item] = (start_byte, start_line)
+                    if mode == "files_with_matches":
+                        break
+            history.append(line_start)
+            cursor.candidate, cursor.file_id = key, identity
+            cursor.byte_offset, cursor.line, cursor.matches = end_byte, number, count
+            cursor.context_offset, cursor.context_line = history[0] if history else (end_byte, number)
+    if state.limited:
+        return True, False
+    if mode == "count" and count and not page.append(key, identity, SearchHit(rel, 0, ""), count=count):
+        return True, False
+    cursor.candidate, cursor.file_id = key, identity
+    cursor.byte_offset = cursor.line = cursor.matches = cursor.context_offset = cursor.context_line = 0
+    # 计数项必须等文件尾确认。在页满后再读下一目标会重复整次计数。
+    return mode == "count" and page.size == request.limit, False
+
+
 # LLM: 两后端的分页、预算和源变化事实统一进入查询证据；坏rg协议仍回原Python实查。
 # No-match and incomplete-search decisions come only from typed execution facts. The
 # envelope does not infer repository absence or auto-route based on natural-language queries.
@@ -714,6 +959,8 @@ def _search_result_envelope(
     *,
     total_items: int,
     scan_state: SearchScanState | None,
+    has_more: bool = False,
+    has_prior_progress: bool = False,
 ) -> dict[str, object]:
     page_window = tool._page_window(
         target,
@@ -721,6 +968,8 @@ def _search_result_envelope(
         total_items=total_items,
         scan_state=scan_state,
     )
+    if has_more:
+        page_window["complete"] = False
     scan_limited = bool(scan_state and scan_state.limited)
     if scan_limited:
         status = "incomplete"
@@ -747,8 +996,10 @@ def _search_result_envelope(
             "include_ignored": request.include_ignored, "offset": request.offset, "limit": request.limit,
             "context": request.context, "output_mode": request.output_mode, "access_filter": "current_tool_path_policy"},
         returned_count=int(page_window["returned"]), observed_count=total_items,
-        coverage="incomplete" if scan_limited else "page_window" if not page_window["complete"] else "complete",
-        parser_version="local_text_search.v1", total_count=total_items if page_window["complete"] else None,
+        coverage=("incomplete" if scan_limited else "page_window"
+                  if has_prior_progress or not page_window["complete"] else "complete"),
+        parser_version="local_text_search.v1",
+        total_count=total_items if page_window["complete"] and not has_prior_progress else None,
         error_code=observation_error,
         count_unit="matching_files" if request.output_mode in {"count", "files_with_matches"} else "matching_lines",
     )
@@ -1252,25 +1503,40 @@ def _rg_event_path(tool: SearchTextTool, path_text: str) -> Path:
 # LLM: 单次真实FD读取至多64KiB，空档和预读计入预算；单行不能无界分配。
 # 函数用途: 在时间、字节及行大小上限内解码来源。
 def _bounded_source_lines(handle):
+    for number, text, _ in _positioned_source_lines(handle):
+        yield number, text
+
+
+def _positioned_source_lines(
+    handle, *, byte_offset: int = 0, line: int = 0, progress_through_line: int | None = None,
+):
     state = _SEARCH_STATE.get()
     pending = b''
-    index = 0
+    start = 0
+    index = line
+    if byte_offset:
+        handle.seek(byte_offset)
     while True:
         raise_if_cancelled()
-        if state is not None and _scan_budget_expired(state, reason='read_time_limit'):
+        if (
+            state is not None and (progress_through_line is None or index > progress_through_line)
+            and _scan_budget_expired(state, reason='read_time_limit')
+        ):
             state.mark('read_time_limit')
             return
-        newline = pending.find(b'\n')
+        newline = pending.find(b'\n', start)
         if newline >= 0:
-            if newline > _SEARCH_LINE_MAX_BYTES:
+            if newline - start > _SEARCH_LINE_MAX_BYTES:
                 if state is not None:
                     state.mark('line_byte_limit')
                 return
-            raw, pending = pending[:newline], pending[newline + 1:]
+            raw = pending[start:newline]
             index += 1
-            yield index, raw.decode('utf-8').rstrip('\r')
+            byte_offset += newline + 1 - start
+            start = newline + 1
+            yield index, raw.decode('utf-8').rstrip('\r'), byte_offset
             continue
-        if len(pending) > _SEARCH_LINE_MAX_BYTES:
+        if len(pending) - start > _SEARCH_LINE_MAX_BYTES:
             if state is not None:
                 state.mark('line_byte_limit')
             return
@@ -1283,10 +1549,11 @@ def _bounded_source_lines(handle):
         if state is not None:
             state.read_bytes += len(chunk)
         if not chunk:
-            if pending:
-                yield index + 1, pending.decode('utf-8').rstrip('\r')
+            if tail := pending[start:]:
+                yield index + 1, tail.decode('utf-8').rstrip('\r'), byte_offset + len(tail)
             return
-        pending += chunk
+        pending = pending[start:] + chunk
+        start = 0
 
 
 # LLM: 合并只改变I/O次数，不改变每条命中的原显示窗口。
@@ -1303,7 +1570,10 @@ def _merged_search_windows(hits: list[SearchHit], context: int) -> list[tuple[in
 
 # LLM: 输入仅是当前content页；每文件补全只打开一次，不为offset之前或哨兵读取context。
 # 函数用途: 按文件合并读取并恢复逐命中上下文展示。
-def _hydrate_search_page(tool, page: list[SearchHit], request: SearchRequest) -> list[SearchHit]:
+def _hydrate_search_page(
+    tool, page: list[SearchHit], request: SearchRequest, *,
+    positions: dict[Path, tuple[int, int]] | None = None,
+) -> list[SearchHit]:
     if request.context <= 0 or not page:
         return page
     state = _SEARCH_STATE.get()
@@ -1329,7 +1599,8 @@ def _hydrate_search_page(tool, page: list[SearchHit], request: SearchRequest) ->
         failed = False
         try:
             with _checked_search_file(tool, path) as handle:
-                for number, line in _bounded_source_lines(handle):
+                byte_offset, line_number = (positions or {}).get(path, (0, 0))
+                for number, line, _ in _positioned_source_lines(handle, byte_offset=byte_offset, line=line_number):
                     while window_index < len(windows) and number > windows[window_index][1]:
                         window_index += 1
                     if window_index == len(windows):

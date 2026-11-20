@@ -124,6 +124,11 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="显式thread_id/task_id与当前宿主canonical绑定不一致，本次未创建协作单。省略这两个可选字段并沿原运行绑定，不要填写其它线程或任务冒充来源；保留原协作需求。",
     ),
+    "CURSOR_SOURCE_CHANGED": ErrorContract(
+        code="CURSOR_SOURCE_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="续读来源或查询已变化，文件未写入。重新发起查询或读取，再按回执的末条位置定位。",
+    ),
     "CURSOR_EXPIRED": ErrorContract(
         code="CURSOR_EXPIRED", category="state", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,

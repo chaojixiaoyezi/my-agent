@@ -8,10 +8,18 @@ from pathlib import Path
 from typing import Any, Protocol, TextIO
 
 from ..common.file_version import StaleFileVersionError, check_file_version, file_version
-from ..common.text_file_window import text_file_index
+from ..common.text_file_window import (
+    TextFileIndex,
+    text_file_fingerprint,
+    text_file_index,
+    text_file_index_from_checkpoint,
+)
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import (
     _canonical_agent_final_report_target,
+    _cursor_identity_is_valid,
+    _cursor_source_changed,
+    _CursorSourceChanged,
     _int_param,
     _internal_agent_status_ref,
     _readable_agent_final_report,
@@ -156,6 +164,10 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
                 )
                 target = canonical
     if not target.exists():
+        if isinstance(checkpoint := request.params.get("checkpoint"), dict):
+            return _cursor_source_changed(
+                "read_file", _CursorSourceChanged("source_unavailable", _checkpoint_last_line(checkpoint)),
+            )
         typo_hint = _missing_tool_artifact_typo_hint(request.tool, request.raw_path)
         if typo_hint:
             return ToolHandlerOutcome(
@@ -175,6 +187,10 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
             decide_access=request.tool.check_path_access,
         ))
     if not target.is_file():
+        if isinstance(checkpoint := request.params.get("checkpoint"), dict):
+            return _cursor_source_changed(
+                "read_file", _CursorSourceChanged("file_id", _checkpoint_last_line(checkpoint)),
+            )
         return _not_file_result(request.tool, target)
     if is_tool_output_artifact_path(target):
         return ToolHandlerOutcome(
@@ -199,6 +215,8 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
             outcome.result_envelope["file_version"] = version
             outcome.output += f"\nfile_version={version}"
     except StaleFileVersionError as exc:
+        if checkpoint := request.params.get("checkpoint"):
+            return _cursor_source_changed("read_file", _CursorSourceChanged("file_id", str(checkpoint["line"] - 1)))
         return ToolHandlerOutcome("read_file", False, str(exc), error_code="STALE_VERSION", retryable=True)
     except OSError as exc:
         return ToolHandlerOutcome("read_file", False, f"读取文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
@@ -216,6 +234,11 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
 def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:
     target = request.target
     if _has_char_window_params(request.params):
+        if "checkpoint" in request.params:
+            return ToolHandlerOutcome(
+                "read_file", False, "checkpoint 仅用于行续读，请省略 offset 和 start_char。未读取正文。",
+                error_code="TOOL_INVALID_ARGUMENTS",
+            )
         return _char_window_file_result(CharWindowFileRequest(
             tool=request.tool,
             target=target,
@@ -224,21 +247,70 @@ def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:
         ))
     try:
         return _stream_numbered_result(request)
+    except _CursorSourceChanged as exc:
+        return _cursor_source_changed("read_file", exc)
     except UnicodeDecodeError:
         return _non_text_file_result()
     except ValueError as exc:
         return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     except OSError as exc:
+        if isinstance(checkpoint := request.params.get("checkpoint"), dict):
+            try:
+                _read_decode_checkpoint(target, checkpoint)
+            except _CursorSourceChanged as changed:
+                return _cursor_source_changed("read_file", changed)
+            except OSError:
+                return _cursor_source_changed(
+                    "read_file", _CursorSourceChanged("source_unavailable", _checkpoint_last_line(checkpoint)),
+                )
         return ToolHandlerOutcome("read_file", False, f"读取文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
+
+
+def _checkpoint_last_line(checkpoint: dict[str, Any]) -> str:
+    line = checkpoint.get("line")
+    return str(line - 1) if type(line) is int and line > 0 else ""
+
+
+def _read_decode_checkpoint(target: Path, checkpoint: object) -> dict[str, Any]:
+    if (
+        not isinstance(checkpoint, dict)
+        or type(checkpoint.get("v")) is not int or checkpoint["v"] != 1
+        or not _cursor_identity_is_valid(checkpoint.get("file_id"), 4)
+        or type(checkpoint.get("line")) is not int or checkpoint["line"] < 1
+        or type(checkpoint.get("byte_offset")) is not int
+        or not 0 <= checkpoint["byte_offset"] <= checkpoint["file_id"][2]
+        or not isinstance(checkpoint.get("encoding"), str) or len(checkpoint["encoding"]) > 100
+    ):
+        raise ValueError("checkpoint 字段或版本无效，请复制上一页完整的 decode_checkpoint。未读取正文。")
+    if tuple(checkpoint["file_id"]) != text_file_fingerprint(target)[:4]:
+        raise _CursorSourceChanged("file_id", str(checkpoint["line"] - 1))
+    return checkpoint
 
 
 # LLM: 每次 readline 自带长度上限；半行续读 offset 使用原正文坐标，不包含展示行号。
 # 函数用途: 只保留请求行的有限文字，遇到超长行切换为字符游标，不跳过剩余部分。
 def _stream_numbered_result(request: ReadFileRequest) -> ToolHandlerOutcome:
-    provider = getattr(request.tool, "snapshot_provider", None)
-    index = provider(request.target) if provider is not None else text_file_index(request.tool, request.target)
     params = request.params
-    start = _int_param(params.get("start_line"), name="start_line", default=1, min_value=1)
+    checkpoint = _read_decode_checkpoint(request.target, params["checkpoint"]) if "checkpoint" in params else None
+    policy = getattr(request.tool, "_host_output_redaction", None)
+    secrets = policy.snapshot.secret_values if policy is not None else ()
+    lookbehind = max((len(value) for value in secrets if value), default=1) - 1
+    provider = getattr(request.tool, "snapshot_provider", None)
+    if provider is not None:
+        index = provider(request.target)
+    else:
+        restored = (text_file_index_from_checkpoint(request.target, checkpoint, lookbehind=lookbehind)
+                    if checkpoint is not None else None)
+        index = restored if restored is not None else text_file_index(request.tool, request.target)
+    start = _int_param(params.get("start_line"), name="start_line",
+                       default=checkpoint["line"] if checkpoint else 1, min_value=1)
+    if checkpoint is not None:
+        if not isinstance(index, TextFileIndex):
+            raise ValueError("当前文本来源无法复核 checkpoint，请传入 start_line。未读取正文。")
+        if index.fingerprint[:4] != tuple(checkpoint["file_id"]) or index.encoding != checkpoint["encoding"]:
+            raise _CursorSourceChanged("file_id_or_encoding", str(checkpoint["line"] - 1))
+        if start != checkpoint["line"]:
+            raise ValueError("start_line 必须等于 checkpoint.line，或省略 start_line。未读取正文。")
     end = _int_param(params.get("end_line"), name="end_line", default=max(index.total_lines, 1), min_value=1)
     if start > max(index.total_lines, 1) and params.get("end_line") is None:
         raise ValueError(_past_eof_line_message(start, index.total_lines))
@@ -251,24 +323,32 @@ def _stream_numbered_result(request: ReadFileRequest) -> ToolHandlerOutcome:
     limit = _line_max_chars(params, request.max_chars)
     rendered, used, number, offset, last = [], 0, 1, 0, start - 1
     with index.open() as handle:
-        while number < start:
-            part = handle.readline(65536)
-            if not part:
-                break
-            offset += len(part)
-            number += int(part.endswith("\n"))
+        if isinstance(index, TextFileIndex):
+            offset, number = index.seek_line(handle, start), start
+            if checkpoint is not None and index.line_byte_offset(start, handle.tell()) != checkpoint["byte_offset"]:
+                raise ValueError("checkpoint.byte_offset 与指定行边界不符，请复制上一页完整检查点。")
+        else:
+            while number < start:
+                part = handle.readline(65536)
+                if not part:
+                    break
+                offset += len(part)
+                number += int(part.endswith("\n"))
         while number <= min(end, index.total_lines):
+            previous_cookie = handle.tell() if isinstance(index, TextFileIndex) else 0
             part = handle.readline(limit + 1)
-            policy = getattr(request.tool, '_host_output_redaction', None)
-            if policy is not None:
+            part_chars = len(part)
+            if secrets:
                 part = redact_source_window(index.read, offset=offset, limit=len(part),
-                    total_chars=index.total_chars, secret_values=policy.snapshot.secret_values)
+                    total_chars=index.total_chars, secret_values=secrets)
             prefix = f"{number}: "
             item = prefix + part.rstrip("\n")
             if used + int(bool(rendered)) + len(item) > limit:
                 if rendered:
                     rendered.append(_truncated_read_footer(TruncatedReadFooterRequest(
                         index.total_lines, number, limit, request.max_chars)))
+                    if isinstance(index, TextFileIndex):
+                        handle.seek(previous_cookie)
                     break
                 visible = max(1, limit - len(prefix))
                 body = part[:visible]
@@ -280,12 +360,18 @@ def _stream_numbered_result(request: ReadFileRequest) -> ToolHandlerOutcome:
                                           result_envelope={"read_window": window})
             rendered.append(item)
             used += len(item) + int(len(rendered) > 1)
-            offset += len(part)
+            offset += part_chars
             last = number
             number += 1
+        cookie = handle.tell() if isinstance(index, TextFileIndex) else 0
+    window = _line_read_window(start, last, index.total_lines)
+    envelope: dict[str, object] = {"read_window": window}
+    if isinstance(index, TextFileIndex) and number <= index.total_lines:
+        decode_checkpoint = index.checkpoint(line=number, chars=offset, cookie=cookie, lookbehind=lookbehind)
+        envelope["decode_checkpoint"] = decode_checkpoint
+        window["decode_checkpoint"] = decode_checkpoint
     index.check_current()
-    return ToolHandlerOutcome("read_file", True, "\n".join(rendered),
-                              result_envelope={"read_window": _line_read_window(start, last, index.total_lines)})
+    return ToolHandlerOutcome("read_file", True, "\n".join(rendered), result_envelope=envelope)
 
 
 def _not_file_result(tool, target: Path) -> ToolHandlerOutcome:
@@ -447,7 +533,7 @@ def _char_read_window(offset: int, chars: int, total_chars: int) -> dict[str, in
     }
 
 
-def _line_read_window(start_line: int, end_line: int, total_lines: int) -> dict[str, int | bool | str]:
+def _line_read_window(start_line: int, end_line: int, total_lines: int) -> dict[str, Any]:
     end_line = max(0, end_line)
     return {
         "kind": "line_window",

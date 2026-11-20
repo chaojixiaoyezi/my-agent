@@ -2,7 +2,10 @@
 # 模块用途: 校验参数、定位可读产物及有界枚举安全文件，不从文档、缓存或忽略参数推导权限。
 from __future__ import annotations
 
+import base64
+import binascii
 import fnmatch
+import hashlib
 import heapq
 import json
 import os
@@ -10,7 +13,7 @@ import stat
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +241,133 @@ def _discovery_identity(info) -> tuple[int, ...]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+@dataclass
+class _DiscoveryCursor:
+    kind: str
+    root_id: tuple[int, ...]
+    query_sig: str
+    after_entry: str = ""
+    candidate: str = ""
+    file_id: tuple[int, ...] = ()
+    byte_offset: int = 0
+    line: int = 0
+    phase: str = "discovery"
+    skip: int = 0
+    matches: int = 0
+    context_offset: int = 0
+    context_line: int = 0
+    after_file_id: tuple[int, ...] = ()
+
+
+class _CursorSourceChanged(Exception):
+    def __init__(self, reason: str, after_entry: str = "") -> None:
+        super().__init__(reason)
+        self.after_entry = after_entry
+
+
+def _cursor_source_changed(tool: str, error: _CursorSourceChanged) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        tool, False,
+        f"续读来源或查询已变化（{error}）。本次未写入文件。请从原路径发起新查询后重新定位最后交付项。",
+        error_code="CURSOR_SOURCE_CHANGED",
+        result_envelope={"after_entry": error.after_entry, "cursor": "", "reason": str(error)},
+    )
+
+
+def _cursor_key_is_valid(key: object) -> bool:
+    if not isinstance(key, str) or len(key) > _MAX_PATH_CHARS or "\0" in key:
+        return False
+    path = Path(key)
+    return not path.anchor and ".." not in path.parts and (not key or path.as_posix() == key)
+
+
+def _cursor_identity_is_valid(value: object, length: int) -> bool:
+    return isinstance(value, list) and len(value) == length and all(type(n) is int for n in value)
+
+
+def _parse_discovery_cursor(token: object, *, kind: str) -> _DiscoveryCursor | None:
+    # JSON 转义和 base64 会放大两个显示路径，仍须在解码前限制输入。
+    if not isinstance(token, str) or len(token) > _MAX_PATH_CHARS * 32:
+        raise ValueError("cursor 须为上一页返回的字符串，首个游标页请传入空字符串。未开始扫描。")
+    if not token:
+        return None
+    try:
+        data = json.loads(base64.b64decode(token, altchars=b"-_", validate=True))
+    except (binascii.Error, UnicodeError, ValueError, RecursionError):
+        raise ValueError("cursor 解码失败，请复制上一页的完整 cursor。未开始扫描。") from None
+    if (
+        not isinstance(data, dict)
+        or type(data.get("v")) is not int or data["v"] != 1
+        or data.get("kind") != kind
+        or not isinstance(data.get("query_sig"), str)
+        or not _cursor_identity_is_valid(data.get("root_id"), 2)
+        or not _cursor_identity_is_valid(data.get("file_id"), 4)
+        or (data.get("after_file_id") and not _cursor_identity_is_valid(data["after_file_id"], 4))
+        or not _cursor_key_is_valid(data.get("after_entry"))
+        or not _cursor_key_is_valid(data.get("candidate", data.get("after_entry")))
+        or data.get("phase") not in ("known_matches", "discovery")
+        or any(type(data.get(field, 0)) is not int or data.get(field, 0) < 0 for field in
+               ("byte_offset", "line", "skip", "matches", "context_offset", "context_line"))
+    ):
+        raise ValueError("cursor 字段或版本无效，请复制同一工具上一页的 cursor。未开始扫描。")
+    file_id = tuple(data["file_id"])
+    candidate = data.get("candidate", data["after_entry"])
+    byte_offset, line = data.get("byte_offset", 0), data.get("line", 0)
+    context_offset, context_line = data.get("context_offset", 0), data.get("context_line", 0)
+    if (
+        not candidate or not 0 <= context_offset <= byte_offset <= file_id[2]
+        or not 0 <= context_line <= line <= byte_offset
+        or bool(byte_offset) != bool(line) or data.get("matches", 0) > line
+        or (kind == "find" and (data["after_entry"] != candidate or byte_offset))
+    ):
+        raise ValueError("cursor 中的文件或行位置无效，请重新发起查询。未开始扫描。")
+    return _DiscoveryCursor(
+        kind, tuple(data["root_id"]), data["query_sig"], data["after_entry"], candidate,
+        file_id, byte_offset, line, data["phase"], data.get("skip", 0), data.get("matches", 0),
+        context_offset, context_line, tuple(data.get('after_file_id') or ()),
+    )
+
+
+def _encode_discovery_cursor(cursor: _DiscoveryCursor) -> str:
+    raw = json.dumps({"v": 1, **asdict(cursor)}, separators=(",", ":")).encode("ascii")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _bind_discovery_cursor(
+    tool, target: Path, cursor: _DiscoveryCursor | None, *, kind: str, query: tuple,
+    include_ignored: bool, ignored_names, offset: int,
+) -> _DiscoveryCursor:
+    signature = hashlib.sha256(json.dumps(
+        (kind, str(tool.workspace_root), str(target), query), separators=(",", ":"),
+    ).encode("ascii")).hexdigest()
+    try:
+        root_id = _discovery_identity(_discovery_nofollow_stat(target))[:2]
+        if cursor is None:
+            return _DiscoveryCursor(kind, root_id, signature, skip=offset)
+        if cursor.query_sig != signature:
+            raise _CursorSourceChanged("query_sig", cursor.after_entry)
+        if cursor.root_id != root_id:
+            raise _CursorSourceChanged("root_id", cursor.after_entry)
+        anchors = [(cursor.candidate, cursor.file_id)]
+        if cursor.after_file_id and cursor.after_entry != cursor.candidate:
+            anchors.append((cursor.after_entry, cursor.after_file_id))
+        for key, expected in anchors:
+            item = target / key
+            info = _discovery_nofollow_stat(item)
+            if (
+                _discovery_identity(info)[:4] != expected
+                or not stat.S_ISREG(info.st_mode)
+                or _safe_discovery_path(tool, item, root=target, include_ignored=include_ignored,
+                                        ignored_names=ignored_names, path_stat=info) is None
+            ):
+                raise _CursorSourceChanged("file_id", cursor.after_entry)
+    except OSError:
+        if cursor is not None:
+            raise _CursorSourceChanged("source_unavailable", cursor.after_entry) from None
+        raise
+    return cursor
+
+
 # LLM: include_ignored只过滤噪声；path_stat只复用本步nofollow观察，不跨出堆保存信任或绕过路径策略。
 # 函数用途: 在目录下降和文件交出前统一执行忽略、nofollow及权限检查。
 def _safe_discovery_path(tool, item: Path, *, root: Path, include_ignored: bool, ignored_names,
@@ -263,7 +393,7 @@ def _safe_discovery_path(tool, item: Path, *, root: Path, include_ignored: bool,
         return None
     if not include_ignored and stat.S_ISDIR(info.st_mode) and relative.parts and item.name in ignored_names:
         return None
-    if tool.path_access_policy.host_managed_store(item) is not None:
+    if tool.path_access_policy.is_host_managed_store_resolved(item):
         return None
     try:
         safe = tool.resolve_path(item)

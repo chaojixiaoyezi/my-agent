@@ -16,7 +16,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,21 +24,28 @@ from ..common.cancellation import ToolCancelled, raise_if_cancelled, register_ca
 from ._filesystem_helpers import (
     _FALLBACK_SCAN_MAX_FILES,
     _FALLBACK_SCAN_MAX_SECONDS,
+    _bind_discovery_cursor,
     _bool_param,
+    _cursor_source_changed,
+    _CursorSourceChanged,
     _discovery_file_batch,
     _discovery_identity,
     _discovery_matches_glob,
     _discovery_nofollow_stat,
     _discovery_process_budget,
+    _DiscoveryCursor,
+    _encode_discovery_cursor,
     _int_param,
     _iter_discovery_files,
     _optional_path,
+    _parse_discovery_cursor,
     _safe_discovery_path,
     _scan_budget_details,
     _scan_budget_expired,
     _text_param,
     path_resolution_error_outcome,
 )
+from ._filesystem_list import _LazyListWalk
 from ._filesystem_read import (
     _COMMON_FILE_DISCOVERY_IGNORES,
     FileSystemAccessOptions,
@@ -233,7 +240,7 @@ def _build_find_files_model_spec() -> ToolModelSpec:
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "冻结分页的不透明凭证，不能与offset并用；失效后显式新建snapshot。",
+                    "description": "传空字符串开始按路径续页，再原样传回每页 cursor。冻结分页仍使用 snapshot.next_cursor；续页省略 offset。",
                 },
             },
             "required": ["pattern"],
@@ -300,10 +307,12 @@ class FindFilesTool(FileSystemTool):
         try:
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
-            if request.cursor:
+            if request.cursor and not request.resumable:
                 return _find_snapshot_stale('path_or_permission_changed')
             # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；路径策略拒绝→原权限码+authorization。
             return path_resolution_error_outcome("find_files", exc)
+        if request.resumable and request.cursor:
+            return self._find_cursor_page(target, request)
         if request.cursor:
             return self._find_snapshot_page(target, request)
         if not target.exists():
@@ -321,9 +330,84 @@ class FindFilesTool(FileSystemTool):
             ))
         if request.snapshot:
             return self._find_snapshot_page(target, request)
+        if request.resumable:
+            return self._find_cursor_page(target, request)
         if target.is_file():
             return self._find_in_single_file(target, request)
         return self._find_in_directory(target, request)
+
+    def _find_cursor_page(self, target: Path, request: _FindFilesRequest) -> ToolHandlerOutcome:
+        try:
+            cursor = _bind_discovery_cursor(
+                self, target, _parse_discovery_cursor(request.cursor, kind="find"),
+                kind="find", query=(request.pattern, request.include_ignored),
+                include_ignored=request.include_ignored, ignored_names=_COMMON_FILE_DISCOVERY_IGNORES,
+                offset=request.offset,
+            )
+            if target.is_file():
+                outcome = self._find_in_single_file(target, request)
+                outcome.result_envelope.update(cursor="", scan_incomplete=False)
+                return outcome
+            return self._find_ordered_directory(target, request, cursor)
+        except _CursorSourceChanged as exc:
+            return _cursor_source_changed("find_files", exc)
+        except ValueError as exc:
+            return path_resolution_error_outcome("find_files", exc)
+        except OSError as exc:
+            return ToolHandlerOutcome(
+                "find_files", False,
+                f"目录扫描未完成（{type(exc).__name__}）。未写入文件，请核对路径或缩小目录后重新查找。",
+                error_code="TOOL_EXECUTION_FAILED",
+            )
+
+    def _find_ordered_directory(
+        self, target: Path, request: _FindFilesRequest, cursor: _DiscoveryCursor,
+    ) -> ToolHandlerOutcome:
+        match_path = "/" in request.pattern
+
+        def matches(path: str, name: str) -> bool:
+            display = self.display_path(Path(path)) if match_path else name
+            return _matches_find_pattern(display, name, request.pattern)
+
+        walk = _LazyListWalk.for_discovery(
+            self, target, include_ignored=request.include_ignored,
+            after_entry=cursor.after_entry, file_filter=matches,
+        )
+        deadline = time.monotonic() + _FALLBACK_SCAN_MAX_SECONDS
+        has_prior_progress = bool(cursor.after_entry or cursor.skip)
+        rows: list[str] = []
+        scanned = 0
+        more = False
+        while (found := walk.next_visible(deadline=deadline if rows else None)) is not None:
+            item, _ = found
+            scanned += 1
+            if cursor.skip:
+                cursor.skip -= 1
+                continue
+            if len(rows) == request.limit:
+                more = True
+                break
+            cursor.file_id = _discovery_identity(_discovery_nofollow_stat(item))[:4]
+            cursor.after_file_id = cursor.file_id
+            cursor.after_entry = cursor.candidate = item.relative_to(target).as_posix()
+            rows.append(self.display_path(item))
+        raise_if_cancelled()
+        cursor.phase = "known_matches" if more else "discovery"
+        partial = more or walk.scan_incomplete
+        next_cursor = _encode_discovery_cursor(cursor) if partial else ""
+        batch = _FindMatchBatch(
+            rows, request.offset + len(rows), partial, not partial, "ordered_walk", scanned, True,
+            "time_limit" if walk.scan_incomplete else "",
+        )
+        envelope = _find_result_envelope(_FindDirectoryResultRequest(self, target, request, batch))
+        envelope["page_window"].update(kind="cursor_page", next_offset=0, cursor=next_cursor)
+        envelope.update(cursor=next_cursor, scan_incomplete=walk.scan_incomplete)
+        if partial or has_prior_progress:
+            envelope["file_search_result"].update(total="unknown", total_code="PAGE_WINDOW")
+        message = "\n".join(rows) or ("剩余范围没有匹配文件" if has_prior_progress else "没有找到匹配文件")
+        if next_cursor:
+            message += f"\ncursor={next_cursor}\n继续时保留查询条件，并原样传入 cursor。"
+        return ToolHandlerOutcome("find_files", True, message, result_envelope=envelope)
 
     # LLM: 单文件遵守offset，不能在offset大于零时重复交出唯一结果。
     # 函数用途: 保留单文件live查找及原输出形状。
@@ -895,6 +979,7 @@ class _FindFilesRequest:
     include_ignored: bool
     snapshot: bool = False
     cursor: str = ''
+    resumable: bool = field(default=False, kw_only=True)
 
 
 # LLM: 新参数明确类型校验，cursor与显式offset冲突即拒绝，不猜续页位置。
@@ -904,8 +989,14 @@ def _find_files_request_from_params(params: dict[str, Any], max_matches: int) ->
     cursor = params.get('cursor', '')
     if not isinstance(snapshot, bool):
         raise ValueError('snapshot必须是boolean')
-    if not isinstance(cursor, str) or len(cursor) > 512:
-        raise ValueError('cursor必须是最多512字符的string')
+    if not isinstance(cursor, str):
+        raise ValueError("cursor 须为字符串。未开始扫描，请复制完整续页值。")
+    # 旧快照凭证是 token_urlsafe(32)。新版 JSON 令牌总是从版本字段开始。
+    resumable = (not cursor and "cursor" in params and not snapshot) or (
+        len(cursor) != 43 and cursor.startswith("eyJ2Ijo")
+    )
+    if not resumable and len(cursor) > 512:
+        raise ValueError("cursor 须为上一页返回的完整续页值。未开始扫描。")
     if cursor and 'offset' in params:
         raise ValueError('cursor不能与offset并用')
     return _FindFilesRequest(
@@ -924,6 +1015,7 @@ def _find_files_request_from_params(params: dict[str, Any], max_matches: int) ->
         include_ignored=_bool_param(params.get("include_ignored", False), default=False),
         snapshot=snapshot,
         cursor=cursor,
+        resumable=resumable,
     )
 
 
