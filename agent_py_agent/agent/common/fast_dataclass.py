@@ -6,7 +6,8 @@ dataclasses 为冻结类生成的 __init__ 逐字段调用 object.__setattr__(se
 只把每个字段的赋值换成类创建时一次性取到的成员描述符 __set__；签名、默认值、default_factory、kw_only、
 InitVar、__post_init__ 调用以及 eq/hash/repr/pickle/FrozenInstanceError 全部不变（差分测试钉住）。
 同时安装 __replace__（copy.replace 协议）与 __fast_replace__；fast_replace 对未转换的类回落到
-dataclasses.replace。check_slots_compat 列出把一个类改成 slots=True 前必须处理的阻碍，空列表才可转换。
+dataclasses.replace。check_slots_compat 列出把一个类改成 slots=True 前必须处理的阻碍（含包内调用方对实例
+__dict__/弱引用的依赖），空列表才可转换；它只在转换时调用，fast_frozen 与请求路径从不调用。
 """
 
 from __future__ import annotations
@@ -14,8 +15,11 @@ from __future__ import annotations
 import ast
 import dataclasses
 import functools
+import importlib.util
 import inspect
+import os
 import pickle
+import re
 import sys
 import textwrap
 import threading
@@ -32,6 +36,21 @@ _LOCK = threading.Lock()
 CONVERTED_CLASSES: tuple[type, ...] = ()
 # 已转换类 -> 其 __fast_replace__；fast_replace 按 type(obj) 精确命中，子类不继承（回落 dataclasses.replace）。
 _REPLACERS: dict[type, Callable[..., object]] = {}
+_SCAN_LOCK = threading.Lock()
+# 包根目录 -> (调用点列表, 模块名 -> (返回注解名表, import 表) 或 None)；转换前检查对同一包根只扫描一次源码。
+_CALLER_INDEX: dict[str, tuple[list, dict]] = {}
+# 可能含调用点的源文件字样（vars(、__dict__、weakref）；一样都不含的文件不解析。
+_CALLER_MARKERS = (b"vars(", b"__dict__", b"weakref")
+# 字符串形式的返回注解里的标识符。
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# 对实例取弱引用的 weakref 函数。
+_WEAKREF_FUNCTIONS = frozenset(("ref", "proxy", "finalize"))
+# 调用点种类 -> 报告文案。
+_CALLER_MESSAGES = {
+    "vars": "caller {site} applies vars() to a {cls} returned by {source}() (slots instances have no __dict__)",
+    "dict": "caller {site} reads __dict__ of a {cls} returned by {source}() (slots instances have no __dict__)",
+    "weakref": "caller {site} takes a weak reference to a {cls} returned by {source}() (convert with weakref_slot=True)",
+}
 
 
 # LLM: 沿 MRO 找第一个定义该名字的类；必须是成员描述符（槽位），否则说明它不是槽位字段。
@@ -246,10 +265,262 @@ def _is_dataclass_decorator(node: ast.AST) -> bool:
         isinstance(target, ast.Attribute) and target.attr == "dataclass")
 
 
+# 函数用途: 类所在顶层包的 (包名, 真实目录)；不是单目录的常规包（顶层模块、命名空间包等）时返回 None。
+def _package_root(cls: type) -> tuple[str, str] | None:
+    top = cls.__module__.partition(".")[0]
+    paths = list(getattr(sys.modules.get(top), "__path__", None) or ())
+    return (top, os.path.realpath(paths[0])) if len(paths) == 1 else None
+
+
+# 函数用途: 读源文件字节；读不到返回 None。
+def _read_source(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+# 函数用途: 解析源码字节；没有源码或语法错误时返回 None。
+def _parse_bytes(source: bytes | None) -> ast.AST | None:
+    if source is None:
+        return None
+    try:
+        return ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+
+
+# 函数用途: 包内点分模块名对应的源文件（module.py 或 module/__init__.py）；不在包内或不存在时返回 None。
+def _module_file(top: str, root: str, module: str) -> str | None:
+    if module != top and not module.startswith(top + "."):
+        return None
+    base = os.path.join(root, *module.split(".")[1:])
+    for path in (base + ".py", os.path.join(base, "__init__.py")):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+# 函数用途: 表达式里出现的名字（Name、属性名与字符串注解里的标识符），用来匹配返回注解。
+def _annotation_names(node: ast.AST) -> frozenset[str]:
+    names: set[str] = set()
+    for part in ast.walk(node):
+        if isinstance(part, ast.Name):
+            names.add(part.id)
+        elif isinstance(part, ast.Attribute):
+            names.add(part.attr)
+        elif isinstance(part, ast.Constant) and isinstance(part.value, str):
+            names.update(_IDENTIFIER.findall(part.value))
+    return frozenset(names)
+
+
+# 函数用途: ImportFrom 的绝对模块名；相对导入越出顶层包时返回 None。
+def _import_base(package: str, node: ast.ImportFrom) -> str | None:
+    if not node.level:
+        return node.module or ""
+    try:
+        return importlib.util.resolve_name("." * node.level + (node.module or ""), package)
+    except (ImportError, ValueError):
+        return None
+
+
+# 函数用途: 把 Name/Attribute 链还原成名字元组（f -> ("f",)，a.b.f -> ("a", "b", "f")）；其它表达式返回 None。
+def _name_chain(node: ast.AST) -> tuple[str, ...] | None:
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return tuple(reversed(parts))
+
+
+# 函数用途: 节点若对某个对象用 vars()、读 __dict__ 或经 weakref 取弱引用，返回 (被用的表达式, 种类)，否则 None。
+def _instance_dict_use(node: ast.AST, imports: dict) -> tuple[ast.AST, str] | None:
+    if isinstance(node, ast.Attribute):
+        return (node.value, "dict") if node.attr == "__dict__" and isinstance(node.ctx, ast.Load) else None
+    chain = _name_chain(node.func)
+    if chain == ("vars",) and len(node.args) == 1:
+        return node.args[0], "vars"
+    if chain == ("getattr",) and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) \
+            and node.args[1].value == "__dict__":
+        return node.args[0], "dict"
+    if chain is not None and imports.get(chain[0], ("", ""))[0] == "weakref":
+        attr = imports[chain[0]][1]
+        function = attr if len(chain) == 1 else chain[1] if len(chain) == 2 and attr is None else None
+        if function in _WEAKREF_FUNCTIONS:
+            return node.args[0], "weakref"
+    return None
+
+
+# LLM: 一次遍历同时收集三样：模块顶层 def/async def 的返回注解名；整个模块（含函数内）的 import 表，名字 ->
+#   (绝对模块, 属性名)，属性名为 None 表示绑定的是模块本身；以及调用点。调用点按过程内名字绑定匹配：同一作用域
+#   （模块、函数或类体）里 name = <调用>（含带注解赋值与海象赋值）记下被调用的名字链，对该 name 或对 <调用> 本身
+#   用 vars()/__dict__/弱引用即一个调用点。同名多次绑定全部保留（保守）；不做跨作用域与数据流分析，参数、属性、
+#   容器元素上的使用不追踪。遍历跳过 ctx 子节点（Load/Store 不含调用）。
+# 函数用途: 分析一个模块，返回 (返回注解名表, import 表, 调用点 [(行号, 种类, 名字链)])。
+def _analyze_module(tree: ast.AST, module: str, is_package: bool):
+    package = module if is_package else module.rpartition(".")[0]
+    returns = {node.name: _annotation_names(node.returns) for node in tree.body
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None}
+    imports: dict[str, tuple[str, str | None]] = {}
+    scopes: list[tuple[dict[str, set[tuple[str, ...]]], list[ast.AST]]] = [({}, [])]
+    stack = [(tree, scopes[0])]
+    while stack:
+        node, scope = stack.pop()
+        kind = type(node)
+        if kind is ast.Import:
+            for alias in node.names:
+                if alias.asname:
+                    imports[alias.asname] = (alias.name, None)
+                else:
+                    head = alias.name.partition(".")[0]
+                    imports[head] = (head, None)
+            continue
+        if kind is ast.ImportFrom:
+            base = _import_base(package, node)
+            for alias in node.names if base is not None else ():
+                if alias.name != "*":
+                    imports[alias.asname or alias.name] = (base, alias.name)
+            continue
+        if kind in (ast.Assign, ast.AnnAssign, ast.NamedExpr):
+            chain = _name_chain(node.value.func) if type(node.value) is ast.Call else None
+            for target in (node.targets if kind is ast.Assign else (node.target,)) if chain is not None else ():
+                if type(target) is ast.Name:
+                    scope[0].setdefault(target.id, set()).add(chain)
+        elif kind is ast.Attribute:
+            if node.attr == "__dict__":
+                scope[1].append(node)
+        elif kind is ast.Call:
+            func = type(node.func)
+            if node.args and (func is ast.Name or (func is ast.Attribute and node.func.attr in _WEAKREF_FUNCTIONS)):
+                scope[1].append(node)
+        elif kind in (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef):
+            scope = ({}, [])
+            scopes.append(scope)
+        for name in node._fields:
+            if name == "ctx":
+                continue
+            value = getattr(node, name, None)
+            if type(value) is list:
+                stack.extend((item, scope) for item in value if isinstance(item, ast.AST))
+            elif isinstance(value, ast.AST):
+                stack.append((value, scope))
+    sites = []
+    for bindings, candidates in scopes:
+        for node in candidates:
+            use = _instance_dict_use(node, imports)
+            if use is None:
+                continue
+            subject, kind = use
+            if isinstance(subject, ast.Call):
+                chains = {_name_chain(subject.func)} - {None}
+            elif isinstance(subject, ast.Name):
+                chains = bindings.get(subject.id, set())
+            else:
+                continue
+            sites.extend((node.lineno, kind, chain) for chain in sorted(chains))
+    return returns, imports, sites
+
+
+# 函数用途: 取模块的 (返回注解名表, import 表)，首次用到时解析并缓存；包外或解析失败为 None。
+def _tables_for(top: str, root: str, tables: dict, module: str):
+    if module not in tables:
+        path = _module_file(top, root, module)
+        tree = None if path is None else _parse_bytes(_read_source(path))
+        tables[module] = None if tree is None else _analyze_module(
+            tree, module, os.path.basename(path) == "__init__.py")[:2]
+    return tables[module]
+
+
+# 函数用途: 扫描包根下全部源文件，返回 (调用点列表, 模块表缓存)；调用点为 (路径:行号, 种类, 模块, import 表, 名字链)。
+def _scan_root(top: str, root: str) -> tuple[list, dict]:
+    sites: list = []
+    tables: dict = {}
+    parent = os.path.dirname(root)
+    for directory, subdirs, files in os.walk(root):
+        subdirs[:] = sorted(name for name in subdirs if name != "__pycache__" and not name.startswith("."))
+        for filename in sorted(files):
+            if not filename.endswith(".py"):
+                continue
+            path = os.path.join(directory, filename)
+            source = _read_source(path)
+            if source is None or not any(marker in source for marker in _CALLER_MARKERS):
+                continue
+            tree = _parse_bytes(source)
+            if tree is None:
+                continue
+            parts = os.path.relpath(path, root)[:-3].split(os.sep)
+            is_package = parts[-1] == "__init__"
+            module = ".".join([top, *(parts[:-1] if is_package else parts)])
+            returns, imports, found = _analyze_module(tree, module, is_package)
+            tables[module] = returns, imports
+            display = os.path.relpath(path, parent).replace(os.sep, "/")
+            sites.extend((f"{display}:{line}", kind, module, imports, chain) for line, kind, chain in found)
+    return sites, tables
+
+
+# LLM: 名字链的首名先按调用方模块的 import 表解析（没有则视为本模块里定义的名字），中间名依次落到存在源文件的
+#   子模块上，最后一名是被调用的对象名；链里还剩属性或方法（无法静态确定）时返回 None。
+# 函数用途: 把调用方的名字链解析成 (定义它的模块, 名字)。
+def _resolve_callee(top: str, root: str, module: str, imports: dict, chain: tuple[str, ...]):
+    base, attr = imports.get(chain[0], (module, chain[0]))
+    parts = list(chain[1:]) if attr is None else [attr, *chain[1:]]
+    while len(parts) > 1 and _module_file(top, root, f"{base}.{parts[0]}") is not None:
+        base = f"{base}.{parts.pop(0)}"
+    return (base, parts[0]) if len(parts) == 1 else None
+
+
+# LLM: (模块, 名字) 就是该类（直接构造），或是返回注解写着类名的顶层函数，即产出该类实例；名字是从别处导入的
+#   （再导出）时沿 import 表追到定义处，visited 防止循环导入绕圈。
+# 函数用途: 判断调用 module.name 是否产出 cls 的实例。
+def _produces(cls: type, top: str, root: str, tables: dict, module: str, name: str) -> bool:
+    visited: set[tuple[str, str]] = set()
+    while name is not None and (module, name) not in visited:
+        visited.add((module, name))
+        if module == cls.__module__ and name == cls.__qualname__:
+            return True
+        table = _tables_for(top, root, tables, module)
+        if table is None:
+            return False
+        returns, imports = table
+        if name in returns:
+            return cls.__name__ in returns[name]
+        module, name = imports.get(name, (module, None))
+    return False
+
+
+# LLM: 转换时检查专用（迁移提交与测试调用；fast_frozen 与请求路径从不调用）：在类所在顶层包里找对“产出该类实例
+#   的调用”的结果用 vars()、读 __dict__ 或取弱引用的调用方；类已有 __weakref__ 槽位时弱引用不算阻碍。同一包根
+#   第一次检查时扫描全部源码并缓存（源文件在进程内视为不变）；函数内定义的类与非常规包跳过。
+# 函数用途: 返回调用方阻碍列表。
+def _caller_blockers(cls: type) -> list[str]:
+    located = None if "<locals>" in cls.__qualname__ else _package_root(cls)
+    if located is None:
+        return []
+    top, root = located
+    weak_ready = "__slots__" in cls.__dict__ and "__weakref__" in _slot_names(cls)
+    blockers = []
+    with _SCAN_LOCK:
+        if root not in _CALLER_INDEX:
+            _CALLER_INDEX[root] = _scan_root(top, root)
+        sites, tables = _CALLER_INDEX[root]
+        for site, kind, module, imports, chain in sites:
+            if kind == "weakref" and weak_ready:
+                continue
+            target = _resolve_callee(top, root, module, imports, chain)
+            if target is not None and _produces(cls, top, root, tables, *target):
+                blockers.append(_CALLER_MESSAGES[kind].format(site=site, cls=cls.__name__, source=".".join(chain)))
+    return blockers
+
+
 # LLM: 只做静态与只读运行时检查，不修改类：报告冻结/init 前提、类体内手写 __init__、无 __slots__ 或变长的基类、
 #   cached_property、__dict__/vars() 使用、零参 super()、对非字段常量名的 object.__setattr__/setattr、
-#   早于 @dataclass 执行的类装饰器、模块用到 weakref 而转换后不保留 __weakref__、以及 pickle 按引用解析
-#   或探针实例往返失败。取不到源码时如实报告“无法核验”，由调用方决定是否保留原类。
+#   早于 @dataclass 执行的类装饰器、模块用到 weakref 而转换后不保留 __weakref__、包内调用方对该类实例用
+#   vars()/__dict__/弱引用（_caller_blockers），以及 pickle 按引用解析或探针实例往返失败。取不到源码时如实报告
+#   “无法核验”，由调用方决定是否保留原类。它会扫描整个包的源码，只在转换时调用，不放在任何请求路径上。
 # 函数用途: 返回把类改成 slots=True + fast_frozen 前必须处理的问题列表；空列表表示可安全转换。
 def check_slots_compat(cls: type) -> list[str]:
     params = getattr(cls, "__dataclass_params__", None) if isinstance(cls, type) else None
@@ -311,6 +582,7 @@ def check_slots_compat(cls: type) -> list[str]:
             report.append("module uses weakref but the class has no __weakref__ slot (use weakref_slot=True)")
         elif "__slots__" not in cls.__dict__:
             report.append("module uses weakref: convert with weakref_slot=True to keep weak references working")
+    report.extend(_caller_blockers(cls))
     if "<locals>" in cls.__qualname__ or _resolve_qualname(cls) is not cls:
         report.append("pickle: class is not importable by module and qualname")
     else:

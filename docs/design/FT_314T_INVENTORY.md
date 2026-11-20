@@ -649,16 +649,25 @@ CI 安装 `.[dev,secrets]` 加 `sqlalchemy>=2.0`、`psycopg>=3.1`，不安装完
   - `interrupt` 只在 `RUNNING` 时立旗；“未开始”只由 `CANCELLED` 证明，队列移除只是槽位卫生。
   - 每项前后清中断旗并运行登记的线程局部复位。
 - `agent/concurrency/lifo_work_queue.py` 是 `http_lanes.py` 中 `_LifoWakeCondition` / `_CancellableWorkQueue` 的原样迁出（`discard` 返回 `None`）。M22 切换导入后只剩这一份实现。
-- `agent/common/process_spawn.SpawnPopen` 在 Darwin/Linux 上以 `posix_spawn` 启动 `/bin/sh` 跳板，不 fork 网关：
-  - 子进程 fd 恰为 `{0,1,2} ∪ pass_fds`，环境与 `Popen` 逐字节一致。
-  - 父进程侧检查不通过时，以及契约外选项（`preexec_fn`、`uid`/`gid`/`gids`、`umask`、`close_fds=False`、`executable` 与 argv[0] 不同、`start_new_session` 与 `process_group` 并用），一律原样走 `subprocess.Popen._execute_child`。
-  - macOS 的 `posix_spawn` 文件动作拒绝 fd ≥ `OPEN_MAX`（10240），这种调用同样回落。
+- `check_slots_compat(cls)` 除类体与所在模块外，还扫描类所在顶层包的源码，列出对“产出该类实例的调用”（直接构造，或返回注解写着该类的顶层函数，经 import 与再导出解析）的结果用 `vars()`、读 `__dict__` 或取弱引用的调用方（Layer-2 F1）：
+  - 匹配是过程内的名字绑定（`report = read_x(...)` 后 `vars(report)`，或直接 `read_x(...).__dict__`），不做数据流分析。
+  - 它只在转换时由迁移提交与测试调用：同一包根首次扫描约 2.5 秒，之后按包根缓存。`fast_frozen` 与任何请求路径都不调用它，`test_check_slots_compat_is_never_called_from_production_code` 守住这一点。
+- `agent/common/process_spawn.SpawnPopen` 在 Darwin 上经 ctypes 直接调用 libc `posix_spawn` 启动目标程序本身。它不 fork 网关，也没有中间进程（Layer-2 F2–F4 以此取代原 `/bin/sh` 跳板）：
+  - `POSIX_SPAWN_CLOEXEC_DEFAULT` 只保留文件动作点名的 fd：管道 dup2 到 0/1/2、未重定向且可继承的 0/1/2、`pass_fds`。子进程 fd 恰为 `{0,1,2} ∪ pass_fds`，其它线程在启动窗口里新开的可继承 fd 也到不了子进程（128 路并发验证）。
+  - 环境按 `Popen` 的规则编码为 envp，与 argv 分开交给内核，任何 argv 里都没有 `NAME=VALUE`。`env=None` 时传 libc 当前的 `environ`，`os.putenv` 的修改照样继承。
+  - exec 失败（`ENOEXEC`、`EACCES`、`ENOENT` 等）由 `posix_spawn` 同步返回，父进程按 `Popen` 的类型、errno 与 filename 抛出，不留需要回收的子进程；真实启动后以 126 退出的程序仍是正常回执。启动期间被删的 cwd 抛 `FileNotFoundError(cwd)`，与 `Popen` 相同。
+  - 本机实测 p50（3.12.13 与 3.14.3t）：libc `posix_spawn` 调用约 0.2 ms；带 cwd 与三条管道的整个构造约 0.4–0.5 ms，原 `Popen` 的 fork 路径约 2 ms。
+  - 以下情形一律原样走 `subprocess.Popen._execute_child`：
+    - Linux：CPython 的 `Popen` 已用 vfork，不复制页表；
+    - 契约外选项：`preexec_fn`、`uid`/`gid`/`gids`、`umask`、`close_fds=False`、`process_group>0`、`start_new_session` 与 `process_group=0` 并用；
+    - cwd 当前不可切换、`pass_fds` 含父进程管道端或未打开的 fd、ctypes 或 libc 符号不可用；
+    - 文件动作里的 fd ≥ libc `OPEN_MAX`（10240）。
 
 **Cure-A 转换规则（C3，M05–M13 及任何改热文件的模块）**
 
 | 规则 | 内容 |
 |---|---|
-| A1 | 仅当 `check_slots_compat(cls) == []` 时，在 `@dataclass(frozen=True, slots=True)` 上方加 `@fast_frozen`。`object.__setattr__(self, "x", v)` 改为模块级 `_set_x = slot_setter(Cls, "x")`，已转换类的 `dataclasses.replace` 改为 `fast_replace`。 |
+| A1 | 仅当 `check_slots_compat(cls) == []` 时，在 `@dataclass(frozen=True, slots=True)` 上方加 `@fast_frozen`。报告里的 `caller ...` 项须在同一转换提交里先改掉（例如 `vars(report)` 改读 `report.payload`），并跑通真实的读取方到消费方路径。`object.__setattr__(self, "x", v)` 改为模块级 `_set_x = slot_setter(Cls, "x")`，已转换类的 `dataclasses.replace` 改为 `fast_replace`。 |
 | A2 | 仅当每个子类 S 都满足 `S.__mro__[S.__mro__.index(C) + 1] is Base` 时，`super().m(...)` 改为 `Base.m(self, ...)`；须有枚举子类的测试。 |
 | A3 | 动态属性名改为模块字典分派，或一次性计算的 `sys.intern` 名；字面属性名不动。 |
 | A4 | 文本读取改为 `open(p, "rb").read().decode("utf-8")`；按行消费者再做 `\r\n`/`\r` → `\n` 归一。 |
@@ -694,3 +703,34 @@ CI 安装 `.[dev,secrets]` 加 `sqlalchemy>=2.0`、`psycopg>=3.1`，不安装完
 - G1（3.14.3t，GIL 关闭，分块中位数）：hot_json 1.21、fast_time 1.29、fast_frozen DTO 1.04、DirectSocketIO 1.24。按元组键查字典的 hot_json 原实现为 0.22（顺序测量为 0.36），被 G1 拦下后改为分支选取。主机负载 72–91 时连续 3 次 G1+G2 均全部通过。
 - G2：355 个键、509 次基线触发，全部归属 M05–M25。在 `agent/gateway_parts/request_execution.py` 追加一个 `json.dumps(x)` 后，`test_no_new_or_increased_hot_path_triggers` 失败（新键计数 1 对 0）；`git checkout HEAD --` 还原后通过。
 - 常数目录由 1559 项增为 1562 项：`WORK_ITEM_POOL_MAX_THREADS_COUNT`、`_DARWIN_OPEN_MAX_FILES`、`_SHEBANG_LINE_LIMIT_BYTES`。
+
+**Layer-2 M00-fix（2026-11-20，Astra F1–F4）**
+
+红到绿：以下用例在 `955e5dc5c` 上失败，修复后在 3.12.13 与 3.14.3t（`-X gil=0`）通过。
+
+- F1：
+  - 临时包里用 `vars()`、`__dict__`、`weakref.ref` 的三个调用方，原检查都不报（返回 `[]`）。
+  - 真实的 `GatewayJsonReadReport`、`JsonObjectReadReport` 在内存里转成 slots 后，消费方 `runtime_reconciliation.py:66` 与 `compact_operations.py:254` 抛 `TypeError`，原检查却放行。
+  - 现在这两处都会被报出。全包扫描只找到这两处，没有别的调用方。
+- F2：
+  - 测试让 128 路并发启动停在审计点，此时另开一个可继承的管道写端（fd ≥ 200）。原实现的子进程全部继承了它。
+  - 现在没有一个子进程持有它，经 `pass_fds` 传入的句柄 128/128 送达。
+  - `close_fds=False` 的普通 `Popen` 对照在同一探针上必须泄漏。
+- F3：
+  - 原实现把 `NAME=VALUE` 放进中间进程的 argv；`env=None` 时丢失 `os.putenv` 的修改。
+  - 现在唯一一次派生的 argv 与调用方给的逐项相同，环境只走 envp，`os.putenv` 的修改照样到达子进程。
+  - 环境探针只回报变量名与值的 SHA-256。
+- F4：
+  - 带可执行权限的 Mach-O `MH_OBJECT`，原实现先返回句柄、随后以 126 退出。现在父进程抛 `OSError(ENOEXEC, filename)`，与 `Popen` 相同。
+  - 真实启动后执行 `exit 126` 的程序仍是正常回执。
+  - 启动期间删除 cwd 时抛 `FileNotFoundError(cwd)`，与 `Popen` 一致。它取代了 R3 §5.10 原先保留的 126 退出码。
+
+用例数与闸门：
+
+- 用例数：fast_dataclass 27、process_spawn 28。
+- 闸门：
+  - (a) 101 passed, 4 skipped；(b) 105 passed；(c) 65 passed, 8 skipped；(d) 73 passed；
+  - G2 与 G1 通过；
+  - 常数目录检查与 11 个目录测试通过。
+- 3.11.15 本地：15 个 M00 文件编译通过。SpawnPopen 冒烟（cwd、env、pass_fds、ENOEXEC、`os.putenv`、128 路并发）通过。
+- 常数目录由 1562 项减为 1561 项：删除 `_SHEBANG_LINE_LIMIT_BYTES`，`_DARWIN_OPEN_MAX_FILES` 的说明随实现更新。

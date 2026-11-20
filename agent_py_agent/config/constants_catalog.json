@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1562,
+  "count": 1561,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3441,15 +3441,7 @@
       "value": 10240,
       "unit": "个文件",
       "category": "上限预算",
-      "description": "macOS <sys/syslimits.h> 的 OPEN_MAX：posix_spawn 文件动作拒绝不小于它的 fd 号（与 RLIMIT_NOFILE 无关），用到时改走原 Popen。"
-    },
-    {
-      "name": "_SHEBANG_LINE_LIMIT_BYTES",
-      "file": "agent_py_agent/agent/common/process_spawn.py",
-      "value": 256,
-      "unit": "字节",
-      "category": "上限预算",
-      "description": "#! 首行最多检查的字节数（Linux BINPRM_BUF_SIZE；macOS 内核上限 512）：首行落在其内时两种内核解析一致，否则改走原 Popen。"
+      "description": "macOS <sys/syslimits.h> 的 OPEN_MAX：libc 的 posix_spawn 文件动作拒绝不小于它的 fd 号（与 RLIMIT_NOFILE 无关），用到时改走原 Popen。"
     },
     {
       "name": "_CHUNK_BYTES",

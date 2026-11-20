@@ -2,22 +2,27 @@
 #   不再走 object.__setattr__ 的类型查找），可观察语义必须与普通 @dataclass(frozen=True, slots=True) 完全一致。
 #   这里对随机生成的同源类做差分：签名/默认值/default_factory/kw_only/InitVar/__post_init__/FrozenInstanceError/
 #   eq/hash/repr/pickle/copy.replace，以及 fast_replace 与 dataclasses.replace 的结果和异常（类型+文本）一致；
-#   另钉住 slot_setter、check_slots_compat 的报告项，并给 G1 锁等待门禁提供样例 DTO 用例工厂。
+#   另钉住 slot_setter、check_slots_compat 的报告项，并给 G1 锁等待门禁提供样例 DTO 用例工厂。Layer-2 M00-fix
+#   （F1）：check_slots_compat 必须指出包内对工厂结果用 vars()/__dict__/弱引用的调用方，真实的读取方到消费方路径
+#   在内存转换后仍用 vars(report) 时不得放行；它只在转换时调用，生产代码里不得出现。
 # 模块用途: 固定 agent/common/fast_dataclass.py 的转换合同（C1.3），不读 git 历史。
 from __future__ import annotations
 
 import copy
 import dataclasses
 import functools
+import importlib
 import importlib.util
 import inspect
 import itertools
+import json
 import pickle
 import random
 import sys
 import threading
 import types
 from dataclasses import FrozenInstanceError, dataclass
+from pathlib import Path
 
 import pytest
 
@@ -542,6 +547,137 @@ def test_check_slots_compat_reports_weakref_use(tmp_path, monkeypatch):
     spec.loader.exec_module(module)
     assert any("weakref" in line for line in check_slots_compat(module.Weak))
     assert check_slots_compat(module.WeakReady) == []
+
+
+# 调用方检查用的临时包：工厂按返回注解产出 Report；三个调用方对结果用 vars()/__dict__/弱引用，clean.py 只读字段。
+_CALLER_PACKAGE_FILES = {
+    "__init__.py": "",
+    "reports.py": (
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n\n\n"
+        "@dataclass(frozen=True)\n"
+        "class Report:\n"
+        "    payload: dict\n"
+        "    load_error: object = None\n\n\n"
+        "@dataclass(frozen=True)\n"
+        "class Quiet:\n"
+        "    payload: dict\n\n\n"
+        "def read_report(path) -> Report:\n"
+        "    return Report({'path': path})\n\n\n"
+        "def read_quiet(path) -> 'Quiet | None':\n"
+        "    return Quiet({'path': path})\n"
+    ),
+    "uses_vars.py": (
+        "from .reports import read_report\n\n\n"
+        "def first_field(path):\n"
+        "    report = read_report(path)\n"
+        "    return next(iter(vars(report).values()))\n"
+    ),
+    "uses_dict.py": (
+        "from . import reports\n\n\n"
+        "def raw(path):\n"
+        "    return reports.read_report(path).__dict__\n"
+    ),
+    "uses_weakref.py": (
+        "import weakref\n"
+        "from .reports import Report\n\n\n"
+        "def track(payload):\n"
+        "    return weakref.ref(Report(payload))\n"
+    ),
+    "clean.py": (
+        "from .reports import read_quiet, read_report\n\n\n"
+        "def payload(path):\n"
+        "    return read_report(path).payload\n\n\n"
+        "def unrelated(obj):\n"
+        "    return vars(obj)\n\n\n"
+        "def quiet(path):\n"
+        "    return read_quiet(path).payload\n"
+    ),
+}
+
+
+def test_check_slots_compat_reports_callers_that_need_an_instance_dict(tmp_path, monkeypatch):
+    package = f"m00fix_callers_{tmp_path.name.replace('-', '_')}"
+    (tmp_path / package).mkdir()
+    for name, text in _CALLER_PACKAGE_FILES.items():
+        (tmp_path / package / name).write_text(text, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in [key for key in sys.modules if key == package or key.startswith(package + ".")]:
+        monkeypatch.delitem(sys.modules, name)
+    reports = importlib.import_module(f"{package}.reports")
+    try:
+        findings = check_slots_compat(reports.Report)
+        quiet = check_slots_compat(reports.Quiet)
+    finally:
+        for name in [key for key in sys.modules if key == package or key.startswith(package + ".")]:
+            del sys.modules[name]
+    for needle, kind in ((f"{package}/uses_vars.py:6", "vars()"), (f"{package}/uses_dict.py:5", "__dict__"),
+                         (f"{package}/uses_weakref.py:6", "weak reference")):
+        assert any(needle in line and kind in line for line in findings), findings
+    assert not any("clean.py" in line for line in findings), findings
+    assert quiet == []
+
+
+# 函数用途: 按原字段（含默认值）重建一份 slots=True 的冻结副本，模拟 Cure-A 转换后的类。
+def _slotted_copy(cls: type) -> type:
+    namespace: dict[str, object] = {"__module__": cls.__module__, "__qualname__": cls.__qualname__,
+                                    "__annotations__": {f.name: f.type for f in dataclasses.fields(cls)}}
+    for f in dataclasses.fields(cls):
+        if f.default is not dataclasses.MISSING:
+            namespace[f.name] = f.default
+        elif f.default_factory is not dataclasses.MISSING:
+            namespace[f.name] = dataclasses.field(default_factory=f.default_factory)
+    return dataclass(frozen=True, slots=True)(type(cls.__name__, (), namespace))
+
+
+def test_check_slots_compat_flags_real_report_readers_while_they_use_vars(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common import json_io
+    from agent_py_agent.agent.conversation import runtime_reconciliation
+    from agent_py_agent.agent.gateway_parts import compact_operations
+    from agent_py_agent.agent.gateway_parts import io as gateway_io
+
+    terminal = tmp_path / "terminal"
+    terminal.mkdir()
+    (terminal / "root-1.json").write_text(json.dumps(
+        {"schema_version": "gateway_terminal_request.v1", "id": "root-1", "status": "done"}), encoding="utf-8")
+    approval = tmp_path / "approvals" / "a.json"
+    approval.parent.mkdir()
+    approval.write_text(json.dumps({"status": "pending", "thread_id": "t-1"}), encoding="utf-8")
+    cases = (
+        (gateway_io, "GatewayJsonReadReport", "agent_py_agent/agent/conversation/runtime_reconciliation.py",
+         lambda: runtime_reconciliation.canonical_gateway_terminal_reason(types.SimpleNamespace(terminal=terminal),
+                                                                          "root-1"), "parent_turn_ended"),
+        (json_io, "JsonObjectReadReport", "agent_py_agent/agent/gateway_parts/compact_operations.py",
+         lambda: compact_operations._inspect_approval_record(approval, "t-1"), "pending_approval"),
+    )
+    for module, name, caller, consume, expected in cases:
+        cls = getattr(module, name)
+        assert consume() == expected
+        # 已转换的类直接用；未转换的按计划在内存里转成 slots=True，跑真实的读取方到消费方路径。
+        slotted = cls if "__slots__" in cls.__dict__ else _slotted_copy(cls)
+        monkeypatch.setattr(module, name, slotted)
+        try:
+            outcome = consume()
+        except TypeError:
+            outcome = TypeError
+        finally:
+            monkeypatch.setattr(module, name, cls)
+        if outcome is TypeError:
+            # 消费方仍对报告用 vars()：转换前检查必须指出它，不能放行。
+            assert any(caller in line and "vars()" in line for line in check_slots_compat(cls)), name
+        else:
+            assert outcome == expected
+
+
+def test_check_slots_compat_is_never_called_from_production_code():
+    package_root = Path(fast_dataclass.__file__).resolve().parents[2]
+    offenders = sorted(
+        str(path.relative_to(package_root))
+        for base in ("agent", "cli")
+        for path in (package_root / base).rglob("*.py")
+        if path.resolve() != Path(fast_dataclass.__file__).resolve() and b"check_slots_compat" in path.read_bytes()
+    )
+    assert offenders == []
 
 
 _G1_LOCK = threading.Lock()
