@@ -18,6 +18,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from contextvars import ContextVar
+from pathlib import Path
 from threading import (
     Event,
     Lock,
@@ -544,13 +545,20 @@ def test_real_dispatch_exit_proof_uses_original_attempt_and_stdout_inode(tmp_pat
             settled.set()
         monkeypatch.setattr(log_retention, 'record_dispatch_log_exit', record)
     assert settled.wait(5)
-    marker = folder / 'actual.exit.json'
+    wait_owner.thread.join(timeout=5)
+    assert not wait_owner.thread.is_alive()
+    actual_log = Path(process._my_agent_background_log_path)
+    assert actual_log.parent.parent == folder
+    marker = actual_log.with_suffix('.exit.json')
     row = json.loads(marker.read_text())
     assert row['run_ids'] == ['run'] and row['attempt_ids'] == {'run': 'attempt'}
     assert tuple(row['identity']) == process._my_agent_background_log_identity
-    retire_dispatch_logs_slice(folder, now=time.time() + 31 * 86400)
-    assert not (folder / 'actual.log').exists() and not marker.exists()
-    assert not (folder / 'actual.capture.json').exists()
+    cutoff_clock = time.time() + 31 * 86400
+    # 退出线程可能已用正常时间留下续扫点。第二片从新一轮读取老化后的全部证据。
+    for _ in range(2):
+        retire_dispatch_logs_slice(folder, now=cutoff_clock, max_ms=500)
+    assert not actual_log.exists() and not marker.exists()
+    assert not actual_log.with_suffix('.capture.json').exists()
 
 
 def test_unrelated_old_replica_does_not_permanently_hold_current_launch(tmp_path):

@@ -14,12 +14,19 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import stat
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
+from ..common.strict_json import load_strict_json
+from ..concurrency.lock_order import LockLevel
 from ..conversation.control_commands import (
     ConversationControlCommand,
     parse_conversation_control,
@@ -35,10 +42,12 @@ from .control_service import (
     reconcile_gateway_steer_delivery,
 )
 from .event_points import command_completed
+from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
 from .io import (
     gateway_turn_transition,
     read_json_file_report,
     try_gateway_turn_transition,
+    try_locked_file_transition,
     write_json_file_atomic,
 )
 from .paths import GatewayPaths
@@ -62,6 +71,11 @@ _CONTROL_OPERATION_STATES = {
     "terminal_unknown",
 }
 _CONTROL_OPERATION_ID = re.compile(r"^gwctl-msg-[0-9a-f]{32}$")
+_CONTROL_GENERATION_FILENAME = re.compile(r"[0-9a-f]{64}\.json")
+# 各根只保留一个续扫句柄，上限防止长期开启的维护进程累计句柄。
+_CONTROL_RETENTION_MAX_CURSORS = 32
+_CONTROL_RETENTION_SCANS = OrderedDict()
+_CONTROL_RETENTION_SCAN_LOCK = threading.Lock()
 _CONTROL_RESULT_PROJECTION_FIELDS = {
     "kind",
     "ok",
@@ -281,6 +295,166 @@ def try_gateway_control_operation_transition(paths: GatewayPaths, operation_id: 
     if not _CONTROL_OPERATION_ID.fullmatch(normalized):
         raise ValueError("gateway control operation id is invalid")
     return try_gateway_turn_transition(paths, f"control-operation:{normalized}")
+
+
+def _control_generation_refs(root, *, deadline, max_entries):
+    from .multiprocess_bootstrap_publish import WorkerRegistryError, read_worker_registry
+    from .multiprocess_generation_metadata import (
+        _GENERATION_METADATA_MAX_BYTES,
+        generation_metadata_parts,
+        read_generation_metadata,
+    )
+    from .multiprocess_records import deserialize_record
+
+    # 当前登记的无路由回执也可能出现在原 drain 快照，整个目录须留给该代。
+    try:
+        registry = read_worker_registry(root)
+    except WorkerRegistryError:
+        return None, False
+    if registry is not None:
+        metadata = read_generation_metadata(root, registry["c_run_id"])
+        closure = metadata[0].get("closure") if metadata is not None else None
+        if closure is None or closure["registry"] != registry:
+            return None, False
+    directory = ('workers', 'generations')
+    try:
+        descriptor = open_directory_beneath(root, directory, require_dir_fd=True)
+    except FileNotFoundError:
+        return set(), False
+    refs = set()
+    try:
+        with os.scandir(descriptor) as entries:
+            for index, entry in enumerate(entries):
+                if index >= max_entries or time.monotonic() >= deadline:
+                    return None, True
+                if not _CONTROL_GENERATION_FILENAME.fullmatch(entry.name):
+                    continue
+                raw = read_bytes_beneath(root, (*directory, entry.name), max_bytes=_GENERATION_METADATA_MAX_BYTES,
+                                         require_dir_fd=True)
+                value = deserialize_record(raw)
+                if (value['schema_version'] not in {'multiprocess_c_generation.v1', 'multiprocess_c_generation.v2'}
+                        or generation_metadata_parts(value['c_run_id'])[-1] != entry.name):
+                    return None, False
+                closure = value.get('closure')
+                if value['schema_version'] == 'multiprocess_c_generation.v2' and closure is None:
+                    return None, False
+                if closure is not None:
+                    refs.update(name.removeprefix('control_operations/') for name in closure['source_files']
+                                if name.startswith('control_operations/'))
+        return refs, False
+    finally:
+        os.close(descriptor)
+
+
+def _control_retention_raw(root, name):
+    return read_bytes_beneath(root, ('control_operations', name), max_bytes=GATEWAY_STATE_MAX_BYTES, require_dir_fd=True)
+
+
+def _retire_control_receipt(paths, directory_fd, entry, *, cutoff, refs, deadline, result):
+    name = entry.name
+    operation_id = name.removesuffix('.json')
+    result["examined"] += 1
+    try:
+        # 游标跨分片保留，元数据必须通过本片重新核验的目录句柄读取。
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return
+        raw = _control_retention_raw(paths.root, name)
+        if raw is None:
+            return
+        receipt = GatewayControlOperationReceipt.from_dict(load_strict_json(raw))
+        if receipt.operation_id != operation_id:
+            return
+        if receipt.state not in {"completed", "terminal_unknown"}:
+            result["kept_nonterminal"] += 1
+            return
+        if receipt.updated_at >= cutoff:
+            return
+        if refs is None or name in refs:
+            result["kept_referenced"] += 1
+            return
+        if time.monotonic() >= deadline:
+            return
+        path = gateway_control_operation_path(paths, operation_id)
+        # 原操作事务在外，回执文件锁在内。锁内重核原内容及目录身份，避免旧快照覆盖状态推进。
+        with try_gateway_control_operation_transition(paths, operation_id) as admitted:
+            if not admitted:
+                return
+            with try_locked_file_transition(path, category=LockLevel.JSON_PATH) as locked:
+                if not locked or _control_retention_raw(paths.root, name) != raw:
+                    return
+                latest = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (not os.path.samestat(info, latest) or latest.st_nlink != 1
+                        or not os.path.samestat(os.fstat(directory_fd), path.parent.lstat())
+                        or time.monotonic() >= deadline):
+                    return
+                os.unlink(name, dir_fd=directory_fd)
+                result["removed"] += 1
+    except (OSError, ValueError, DataCorruptionError, TypeError, KeyError):
+        return
+
+
+def _scan_control_receipts(paths, descriptor, *, cutoff, refs, max_entries, deadline, result):
+    key = paths.root
+    info = os.fstat(descriptor)
+    identity = info.st_dev, info.st_ino
+    with _CONTROL_RETENTION_SCAN_LOCK:
+        cached = _CONTROL_RETENTION_SCANS.pop(key, None)
+    if cached is not None and cached[0] != identity:
+        cached[1].close()
+        cached = None
+    entries = cached[1] if cached is not None else os.scandir(descriptor)
+    try:
+        for _ in range(max_entries):
+            if time.monotonic() >= deadline:
+                break
+            entry = next(entries, None)
+            if entry is None:
+                return
+            if entry.name.endswith(".json") and _CONTROL_OPERATION_ID.fullmatch(entry.name[:-5]):
+                _retire_control_receipt(paths, descriptor, entry, cutoff=cutoff, refs=refs, deadline=deadline, result=result)
+        result["budget_exhausted"] = True
+        with _CONTROL_RETENTION_SCAN_LOCK:
+            _CONTROL_RETENTION_SCANS[key] = (identity, entries)
+            while len(_CONTROL_RETENTION_SCANS) > _CONTROL_RETENTION_MAX_CURSORS:
+                _CONTROL_RETENTION_SCANS.popitem(last=False)[1][1].close()
+        entries = None
+    finally:
+        if entries is not None:
+            entries.close()
+
+
+def prune_terminal_control_operations(
+    paths: GatewayPaths, *, now: float, retention_days: int, max_entries: int = 128, max_ms: int = 25,
+) -> dict:
+    """按原操作事务退役超龄终态回执，伴生锁交给既有孤儿清扫。"""
+    result = dict(examined=0, removed=0, kept_nonterminal=0, kept_referenced=0, budget_exhausted=False)
+    if retention_days <= 0:
+        return result
+    if max_entries <= 0 or max_ms <= 0:
+        result["budget_exhausted"] = True
+        return result
+    deadline = time.monotonic() + max_ms / 1000
+    try:
+        descriptor = open_directory_beneath(paths.root, ("control_operations",), require_dir_fd=True)
+    except OSError:
+        return result
+    try:
+        # 复用原 C 生命周期的 coordinator.lock，避免清理与启动或 drain 取证交错。
+        with try_locked_file_transition(paths.root / "coordinator", category=LockLevel.CG) as stable:
+            if not stable:
+                return result
+            refs, exhausted = _control_generation_refs(paths.root, max_entries=max_entries, deadline=deadline)
+            if exhausted:
+                result["budget_exhausted"] = True
+                return result
+            _scan_control_receipts(paths, descriptor, cutoff=now - retention_days * 86400,
+                                   refs=refs, max_entries=max_entries, deadline=deadline, result=result)
+    except (OSError, ValueError, TypeError, KeyError):
+        pass  # 原代次来源无法核验时结束本片，保留未消费回执。
+    finally:
+        os.close(descriptor)
+    return result
 
 
 # LLM: Identity is based only on authenticated scope plus the opaque provider/client message id;
@@ -1146,6 +1320,7 @@ __all__ = [
     "gateway_control_operation_identity",
     "gateway_control_operation_path",
     "gateway_control_operation_status_payload",
+    "prune_terminal_control_operations",
     "read_gateway_control_operation",
     "reconcile_gateway_control_operation",
 ]

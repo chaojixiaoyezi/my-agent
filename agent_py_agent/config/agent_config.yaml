@@ -1363,6 +1363,8 @@ background_report_settled_sample_entries: 256
 retention_scan_slice_bytes: 8388608
 # 同一维护分片的协作让出时间，单位毫秒，至少 1；已开始的单次文件读取可以超过此时间，重启加载。
 retention_scan_slice_ms: 25
+# 终态控制回执留存天数，0 表示永久保留。被运行中代次引用的回执继续保留。
+gateway_control_operation_retention_days: 7
 # 记忆引用 pin source 的分块读取尺寸，单位字节，至少1024，默认64 KiB；宿主参数，重启加载。
 memory_reference_pin_chunk_bytes: 65536
 # 推理能力探测的输出上限，单位tokens，至少1；仍受模型档案上限约束，模型可调策略，重启加载。
