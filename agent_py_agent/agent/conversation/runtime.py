@@ -4886,7 +4886,9 @@ class _BackgroundSchedulerWakeMixin:
         if not sweep_applies_to_reason(lifecycle_reason):
             return
         try:
-            auto_capability_sweep(self.runtime.agent, signal)
+            report = auto_capability_sweep(self.runtime.agent, signal, tolerate_pending=True)
+            if deferred := report.get("pending_deferred"):
+                _HEARTBEAT_LOGGER.info("pre-wake capability sweep deferred runs: %s", deferred)
         except Exception:
             _HEARTBEAT_LOGGER.warning("pre-wake capability sweep failed", exc_info=True)
 

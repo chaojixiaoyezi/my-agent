@@ -141,6 +141,21 @@ def _raise_on_index_errors(report_errors: list[Any], message: str) -> None:
         raise error
 
 
+def _pending_run_receipt(run_id: str, *, stage: str, coverage: str = "unknown",
+                         generation: str = "unknown") -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "stage": stage,
+        "error_code": SubagentRunIndexUnavailable.error_code,
+        "error_type": SubagentRunIndexUnavailable.__name__,
+        "reason": "pending_canonical_commit",
+        "effect_outcome": "not_started",
+        "next_action": "retry_on_next_supervision_tick",
+        "coverage": coverage,
+        "generation": generation,
+    }
+
+
 # LLM: SQLite 索引不可用仍 fail-closed 外抛，但单条坏 canonical 行只隔离计数并放行其余健康兄弟 run。
 # 函数用途: 为监督巡查读取可恢复候选列表，避免一条坏 task.json 阻塞整个 owner 监督。
 def _select_supervision_recovery_runs(
@@ -185,11 +200,20 @@ def _select_supervision_current_runs(
         thread_id=thread_id,
         include_unbound_thread=include_unbound_thread,
         include_open_capabilities=include_open_capabilities,
+        tolerate_pending=True,
     )
     report_errors = list(getattr(report, "load_errors", ()) or ())
     if report_errors:
         _raise_on_index_errors(report_errors, "subagent current index unavailable")
         _record_supervision_canonical_errors("current", report_errors, errors_out)
+    deferred = [
+        _pending_run_receipt(run_id, stage="current_selection", coverage=report.coverage, generation=report.generation)
+        for run_id in getattr(report, "pending_ids", ())
+    ]
+    if deferred:
+        if errors_out is not None:
+            errors_out.extend(deferred)
+        _LOGGER.info("supervision deferred pending runs: %s", deferred)
     runs = list(getattr(report, "runs", ()) or ())
     return [task for task in runs if predicate is None or predicate(task)]
 
@@ -213,13 +237,16 @@ def sweep_applies_to_reason(reason: object) -> bool:
 #   由出口回收就地复活 + 调度器周期 supervision + 定时提醒 sweep 三条常驻路兜底。
 # LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
 # 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
-def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
+def auto_capability_sweep(agent: Any, signal: Any, *, tolerate_pending: bool = False) -> dict[str, object]:
     summary: dict[str, object] = {"auto_granted": 0, "redispatched": 0}
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return summary
     run_id = _signal_run_id(signal)
-    if run_id:
+    pending = (tolerate_pending and run_id and isinstance(manager, SubAgentManager)
+               and manager.persistence.run_index.pending_record(run_id) is not None)
+    deferred = [_pending_run_receipt(run_id, stage="pre_wake_exact_run")] if pending else []
+    if run_id and not pending:
         try:
             grants = auto_grant_open_requests(manager, run_id)
             summary["auto_granted"] = len(grants)
@@ -232,14 +259,19 @@ def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
             # the same durable background start path as periodic orphan
             # recovery, rather than executing the next model slice inside this
             # wake handler.
-            summary["redispatched"] = int(auto_start_orphan_run(agent, run_id).get("started") or 0)
+            if not pending:
+                summary["redispatched"] = int(auto_start_orphan_run(agent, run_id).get("started") or 0)
         else:
-            summary["redispatched"] = int(auto_start_stalled_orphans(agent).get("started") or 0)
+            revive = auto_start_stalled_orphans(agent)
+            summary["redispatched"] = int(revive.get("started") or 0)
+            deferred.extend(revive.get("pending_deferred") or [])
     except SubagentRunIndexUnavailable:
         raise
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.warning("capability auto sweep redispatch failed", exc_info=True)
+    if deferred:
+        summary["pending_deferred"] = deferred
     return summary
 
 
@@ -271,12 +303,16 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
             statuses=tuple(DISPATCHABLE_STATES),
             errors_out=load_errors,
         )
+        deferred = [error for error in load_errors if error.get("reason") == "pending_canonical_commit"]
+        selection_receipt: dict[str, object] = {"canonical_row_load_errors": len(load_errors) - len(deferred)}
+        if deferred:
+            selection_receipt["pending_deferred"] = deferred
         if not tasks:
             return {
                 "started": 0,
                 "authority_recovery_blocked": 0,
                 "recovery_blocks": [],
-                "canonical_row_load_errors": len(load_errors),
+                **selection_receipt,
             }
         decisions = conversation_lifecycle_decisions(agent, tasks)
         stalled: list[Any] = []
@@ -304,7 +340,7 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
             "started": 0,
             "authority_recovery_blocked": len(recovery_blocks),
             "recovery_blocks": recovery_blocks,
-            "canonical_row_load_errors": len(load_errors),
+            **selection_receipt,
         }
     from ..background.dispatch import auto_start_tasks
 
@@ -318,7 +354,7 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
         "reused_run_ids": reused,
         "authority_recovery_blocked": len(recovery_blocks),
         "recovery_blocks": recovery_blocks,
-        "canonical_row_load_errors": len(load_errors),
+        **selection_receipt,
     }
 
 
@@ -749,9 +785,11 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     all_tasks = _select_supervision_recovery_runs(manager, errors_out=recovery_errors)
     # Any unreadable sibling row could belong to a healthy worker on the same
     # shared host PID; refuse host termination until canonical rows are readable.
+    pending_siblings = (not running_errors and not recovery_errors and isinstance(manager, SubAgentManager)
+                        and manager.persistence.run_index.readiness()["pending"])
     fully_stalled_host_pids = (
         set()
-        if (running_errors or recovery_errors)
+        if (running_errors or recovery_errors or pending_siblings)
         else _fully_stalled_source_host_pids(all_tasks)
     )
     # A suspended host can retain task/watch file locks indefinitely.  Fence

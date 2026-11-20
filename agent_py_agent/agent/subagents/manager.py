@@ -245,10 +245,11 @@ class SubAgentManager(SubagentKernelMixin):
 
     def list_current_runs_report(self, *, statuses: tuple[str, ...] = (), thread_id: str = "",
                                  include_unbound_thread: bool = False,
-                                 include_open_capabilities: bool = False) -> SubAgentListRunsReport:
+                                 include_open_capabilities: bool = False,
+                                 tolerate_pending: bool = False) -> SubAgentListRunsReport:
         return self.persistence.list_current_runs_report(
             statuses=statuses, thread_id=thread_id, include_unbound_thread=include_unbound_thread,
-            include_open_capabilities=include_open_capabilities)
+            include_open_capabilities=include_open_capabilities, tolerate_pending=tolerate_pending)
 
     # LLM: Root-scoped reads delegate to the persistence/index adapter and return canonical task
     # copies. Scheduler callers must not fall back to parsing goal text or display tree rows.

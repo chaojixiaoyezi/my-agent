@@ -25,6 +25,7 @@ from ..runtime_db.recovery_guard import (
     runtime_db_exclusive_owned,
     runtime_db_recovery_pending,
 )
+from . import sqlite_pool
 from .sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from .sqlite_lease import SQLiteConnectionLease
 
@@ -497,5 +498,6 @@ def scoped_guarded_connection(path: Path, read_only: bool, connect: Callable[[],
 
 def retire_scoped_database(path: Path) -> bool:
     """发布恢复意图并退役本线程闲置连接；返回值不能代替跨进程 EX 证明。"""
+    sqlite_pool.invalidate(path)
     request_runtime_db_recovery(path)
     return retire_idle_runtime_connections(path)

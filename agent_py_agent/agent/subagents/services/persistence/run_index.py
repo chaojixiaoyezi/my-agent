@@ -8,7 +8,8 @@ import re
 import secrets
 import sqlite3
 import stat
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 from sqlite3 import OperationalError
@@ -26,6 +27,9 @@ from ....common.nofollow_fs import (
 from ....common.opaque_id import validate_opaque_id
 from ....common.value_parsing import text_value
 from ....conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+from ....io.sqlite_connection import TrackedSQLiteConnection
+from ....io.sqlite_pool import PooledSqlite
+from ....io.sqlite_scope import ensure_private_sqlite_birth
 from ....runtime_errors import RecoverableRuntimeError
 from ...model_capabilities import capability_request_requires_parent_resolution
 from ...models import (
@@ -49,20 +53,71 @@ class SubagentRunIndexUnavailable(RecoverableRuntimeError):
     error_code = "SUBAGENT_RUN_INDEX_UNAVAILABLE"
 
 
+@dataclass(frozen=True, slots=True)
+class CandidatePage:
+    run_ids: tuple[str, ...]
+    after: str
+    pending_ids: tuple[str, ...]
+    complete: bool
+    generation: int
+
+
+class _RunIndexConnection(TrackedSQLiteConnection):
+    def _checkpoint_idle_writes(self) -> None:
+        # 池中的连接保留 SQLite 自身的检查点策略，归还只结束本次借用的游标。
+        pass
+
+
+class _RunIndexPool(PooledSqlite):
+    def __init__(self, index):
+        self.read_only = index.read_only
+        self.workspace = index.workspace
+        super().__init__(index.path, verify_open=index._open_verified, ensure_schema=index._ensure_schema)
+        # 冷读实例之间共用同线程连接，且冷读从不借用可写连接。
+        self._cache_kind = type(self), self.read_only
+
+    @contextmanager
+    def _open_guard(self, state):
+        guard = (nullcontext() if self.read_only else
+                 locked_json_path(self.workspace / ".run-index-access.guard"))
+        with (nullcontext() if self.read_only else state.writer), guard:
+            yield
+
+    def _fingerprint(self, root, db):
+        if _reparse_point(root) or not _private_sqlite_file(db):
+            return None
+        identity = super()._fingerprint(root, db)
+        files = _sqlite_file_infos(self.path, main=db)
+        if self.read_only:
+            # immutable 冷读不会刷新页缓存，必须在租期两端核对完整文件指纹。
+            return (*identity, tuple((path, _read_signature(path, info)) for path, info in files.items()))
+        return identity
+
+    def _cached_schema_current(self, db):
+        return _schema_current(db)
+
+    def _initialize(self, db):
+        # 只有实际安装或迁移会推进整个路径的池代次。
+        return self._ensure_schema(db)
+
+    def _validate_before_return(self, db, identity):
+        if self._identity() != identity:
+            raise SubagentRunIndexUnavailable("subagent run index changed during read or write")
+
+
 # LLM: 新索引只登记规范写者提交的标量；pending 先于文件发表耐久提交，未知覆盖不得当作零占用。
 # 函数用途: 为容量、派工身份和请求定位保存按行索引，不在热查询中枚举历史文件。
 class SubagentRunIndex:
     # LLM: 初始化仅采样八项；旧投影版本必须重核 canonical，库存完成前所有热查询 fail closed。
-    # 函数用途: 初始化私有查找库及迁移状态；每次连接均在词法作用域内关闭。
+    # 函数用途: 初始化私有查找库及迁移状态，后续只在借用期间操作池化连接。
     def __init__(self, workspace: Path, *, read_only: bool = False):
         self.workspace = Path(workspace)
         self.path = self.workspace / ".run-index.sqlite3"
         self.read_only = read_only
-        if read_only:
-            return
-        with locked_json_path(self.workspace / ".run-index-init.guard"):
-            with self.connect() as db:
-                self._install(db)
+        self._pool = _RunIndexPool(self)
+        if not read_only:
+            with self.connect():
+                pass
 
     # LLM: 只复用原DDL和八项旧源采样，原始运行目录保留且partial不得冒充完整覆盖。
     # 函数用途: 在当前连接重装查找表与原覆盖元数据，不同步扫描历史。
@@ -131,143 +186,76 @@ class SubagentRunIndex:
         with self.connect() as db:
             db.execute("BEGIN")
             self._require_complete(db)
-            row = db.execute("SELECT value FROM meta WHERE key='current_membership_revision'").fetchone()
-            if row is None or type(row[0]) is not int or row[0] <= 0:
-                raise SubagentRunIndexUnavailable("current membership generation is unavailable")
-            return row[0]
+            return self._membership_revision(db)
+
+    @staticmethod
+    def _membership_revision(db) -> int:
+        row = db.execute("SELECT value FROM meta WHERE key='current_membership_revision'").fetchone()
+        if row is None or type(row[0]) is not int or row[0] <= 0:
+            raise SubagentRunIndexUnavailable("current membership generation is unavailable")
+        return row[0]
 
     # LLM: 每连接只点查schema键；缺表或未完成种子复用原安装器，异常不能伪装成空库存。
-    # 函数用途: 补未初始化的表及元数据，返回是否实际重装，由调用者复核身份后提交。
+    # 函数用途: 补未初始化的表及元数据，返回是否推进池代次，由调用者复核身份后提交。
     def _ensure_schema(self, db):
-        try:
-            if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == (4,):
-                if db.execute("SELECT 1 FROM meta WHERE key='current_membership_revision'").fetchone() is None:
-                    self._ensure_membership_revision(db)
-                return False
-        except OperationalError as exc:
-            if str(exc) != "no such table: meta":
-                raise
+        current = _schema_current(db)
+        if self.read_only:
+            if not current:
+                raise SubagentRunIndexUnavailable("subagent run index schema unavailable")
+            return False
+        if current:
+            if db.execute("SELECT 1 FROM meta WHERE key='current_membership_revision'").fetchone() is None:
+                self._ensure_membership_revision(db)
+                return True
+            return False
         self._install(db)
+        logger.warning("SQLITE_SCHEMA_REINSTALLED store=subagent_run_index path=%s", self.path)
         return True
 
-    # LLM: no-follow种子和访问锁保持；重装提交先于业务BEGIN，业务回滚不能撤销覆盖种子。
-    # 函数用途: 为一次查询或固定批次提供私有短连接，先关 SQLite 再关预检 FD，异常完整回滚。
-    @contextmanager
-    def connect(self):
+    def connect(self, *, write: bool = False):
+        """兼容旧的延迟事务调用，新写路径显式请求 IMMEDIATE 事务。"""
         if self.read_only:
-            with self._connect_existing() as db:
-                yield db
-            return
-        with locked_json_path(self.workspace / ".run-index-access.guard"):
-            if not nofollow_fs._supports_dir_fd():
-                with self._connect_portable() as db:
-                    yield db
-                return
-            with ExitStack() as resources:
-                root_fd = open_directory_beneath(self.workspace, (), require_dir_fd=True)
-                resources.callback(os.close, root_fd)
-                pinned = []
-                for suffix in ("-journal", "-wal", "-shm", ""):
-                    path = Path(str(self.path) + suffix)
-                    try:
-                        path.lstat()
-                    except FileNotFoundError:
-                        if suffix:
-                            continue
-                    descriptor = open_private_lock_beneath(self.workspace, (path.name,))
-                    resources.callback(os.close, descriptor)
-                    if stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
-                        os.fchmod(descriptor, 0o600)
-                    pinned.append((path, descriptor))
-                _verify_sqlite_files(self.workspace, root_fd, pinned)
-                db = sqlite3.connect(self.path.absolute().as_uri() + "?mode=rw", uri=True, timeout=5)
-                try:
-                    _verify_sqlite_files(self.workspace, root_fd, pinned)
-                    with db:
-                        installed = self._ensure_schema(db)
-                        if installed or db.in_transaction:
-                            # schema-ready补入的代次也须先核原FD并提交，业务回滚不能撤销它。
-                            _verify_sqlite_files(self.workspace, root_fd, pinned)
-                            db.commit()
-                        if installed:
-                            logger.warning("SQLITE_SCHEMA_REINSTALLED store=subagent_run_index path=%s", self.path)
-                        yield db
-                        _verify_sqlite_files(self.workspace, root_fd, pinned)
-                finally:
-                    db.close()
+            if write:
+                raise PermissionError("read-only subagent run index")
+            return self._connect_existing()
+        return self._pool.checkout(write=write)
 
-    @contextmanager
     def _connect_existing(self):
-        """冷读只查原文件，不建 guard、不迁移、不收紧权限；变化或旧代次都保持未知。"""
-        root = nofollow_fs._portable_directory(self.workspace, (), create=False).lstat()
-        pinned = []
-        for suffix in ("-journal", "-wal", "-shm", ""):
-            path = Path(f"{self.path}{suffix}")
-            try:
-                pinned.append((path, path.lstat()))
-            except FileNotFoundError:
-                if not suffix:
-                    raise
-        _verify_portable_sqlite_files(self.workspace, root, pinned)
-        wal, shm = Path(f"{self.path}-wal"), Path(f"{self.path}-shm")
-        if wal.exists() != shm.exists():
-            raise SubagentRunIndexUnavailable("subagent run index WAL coverage unavailable")
-        # 无 sidecar 的冷只读快照不让 SQLite 生成 WAL/SHM；前后指纹核验拒绝并发变化。
-        before = [(path, _read_signature(path, info)) for path, info in pinned]
-        uri = self.path.absolute().as_uri() + "?mode=ro"
-        if not wal.exists() and not shm.exists() and not Path(f"{self.path}-journal").exists():
-            uri += "&immutable=1"
-        db = sqlite3.connect(uri, uri=True, timeout=0)
-        try:
-            _verify_portable_sqlite_files(self.workspace, root, pinned)
-            db.execute("PRAGMA query_only=ON")
-            if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (4,):
-                raise SubagentRunIndexUnavailable("subagent run index schema unavailable")
-            yield db
-            _verify_portable_sqlite_files(self.workspace, root, pinned)
-            after = [(path, _read_signature(path, path.lstat())) for path, _ in before]
-            if before != after or {path.name for path, _ in pinned} != {
-                    Path(f"{self.path}{suffix}").name for suffix in ("", "-wal", "-shm", "-journal")
-                    if Path(f"{self.path}{suffix}").exists()}:
-                raise SubagentRunIndexUnavailable("subagent run index changed during read")
-        finally:
-            db.close()
+        return self._pool.checkout()
 
-    # LLM: 便携分支沿原访问锁和路径预检；仅POSIX收紧权限，种子FD先关再开SQLite，不外推POSIX竞态强度。
-    # 函数用途: 在无dir_fd平台提供真实提交、回滚及确定性关闭的短连接。
-    @contextmanager
-    def _connect_portable(self):
-        root_info = nofollow_fs._portable_directory(self.workspace, (), create=False).lstat()
-        pinned = []
-        for suffix in ("-journal", "-wal", "-shm", ""):
-            path = Path(str(self.path) + suffix)
+    def _open_verified(self) -> sqlite3.Connection:
+        """冷开复核目录和边车文件，不开关可能持有记录锁的数据库 FD。"""
+        with ExitStack() as resources:
+            parent_fd = None
+            if not self.read_only and nofollow_fs._supports_dir_fd():
+                parent_fd = open_directory_beneath(self.workspace, (), require_dir_fd=True)
+                resources.callback(os.close, parent_fd)
+                root = os.fstat(parent_fd)
+            else:
+                root = nofollow_fs._portable_directory(self.workspace, (), create=False).lstat()
+            if not self.read_only:
+                ensure_private_sqlite_birth(self.path, parent_fd=parent_fd)
+            files = _sqlite_file_infos(self.path, tighten=not self.read_only)
+            _verify_sqlite_files(self.workspace, self.path, root, files)
+
+            uri = self.path.absolute().as_uri() + ("?mode=ro" if self.read_only else "?mode=rw")
+            if self.read_only:
+                wal, shm = Path(f"{self.path}-wal"), Path(f"{self.path}-shm")
+                if (wal in files) != (shm in files):
+                    raise SubagentRunIndexUnavailable("subagent run index WAL coverage unavailable")
+                if len(files) == 1:
+                    uri += "&immutable=1"
+            # 3.14t 的 Python 语句缓存可能把已关闭连接的 FD 留到原线程再次运行。
+            db = sqlite3.connect(uri, uri=True, timeout=0 if self.read_only else 5,
+                                 check_same_thread=False, cached_statements=0, factory=_RunIndexConnection)
             try:
-                path.lstat()
-            except FileNotFoundError:
-                if suffix:
-                    continue
-            descriptor = open_private_lock_beneath(self.workspace, (path.name,))
-            try:
-                if os.name != "nt" and hasattr(os, "fchmod") and stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
-                    os.fchmod(descriptor, 0o600)
-                pinned.append((path, os.fstat(descriptor)))
-            finally:
-                os.close(descriptor)
-        _verify_sqlite_files(self.workspace, root_info, pinned)
-        db = sqlite3.connect(self.path.absolute().as_uri() + "?mode=rw", uri=True, timeout=5)
-        try:
-            _verify_sqlite_files(self.workspace, root_info, pinned)
-            with db:
-                installed = self._ensure_schema(db)
-                if installed or db.in_transaction:
-                    _verify_sqlite_files(self.workspace, root_info, pinned)
-                    db.commit()
-                if installed:
-                    logger.warning("SQLITE_SCHEMA_REINSTALLED store=subagent_run_index path=%s", self.path)
-                yield db
-                _verify_sqlite_files(self.workspace, root_info, pinned)
-        finally:
-            db.close()
+                _verify_sqlite_files(self.workspace, self.path, root, files)
+                if self.read_only:
+                    db.execute("PRAGMA query_only=ON").close()
+                return db
+            except BaseException:
+                db.close()
+                raise
 
     # LLM: 每次规范提交先登记 pending；旧 pending 无恢复凭据仍视为可能已发表，不能重试后降格为未发表。
     # 函数用途: 在规范文件写入前留下精确 run 未结记录及首存没有 locator 时的恢复定位字段。
@@ -284,7 +272,7 @@ class SubagentRunIndex:
             if canonical is None:
                 raise ValueError("pending canonical path unavailable")
             published = canonical.exists() or (self.workspace / run_id / "task.json").exists()
-        with self.connect() as db:
+        with self.connect(write=True) as db:
             if recovery is not None:
                 # 旧 committed 或没有恢复凭据的未知 pending 都不可因文件缺失而删除占位。
                 published = published or bool(db.execute(
@@ -301,7 +289,7 @@ class SubagentRunIndex:
     # 函数用途: 规范状态发表后原子更新计数、谱系、系统展示编号及三种精确复用身份。
     def upsert(self, task, *, connection=None) -> None:
         if connection is None:
-            with self.connect() as db:
+            with self.connect(write=True) as db:
                 self.upsert(task, connection=db)
             return
         run_id = validate_opaque_id(task.id, kind="run_id")
@@ -479,6 +467,43 @@ class SubagentRunIndex:
                       include_unbound_thread: bool = False, include_open_capabilities: bool = False,
                       after: str = "", limit: int) -> tuple[list[str], str]:
         """状态/未结请求取并集，再按显式线程取交集；空选择绝不扩大为全历史。"""
+        sql, values = self._candidate_selection(statuses, thread_id, include_unbound_thread,
+                                                include_open_capabilities, after, limit)
+        with self.connect() as db:
+            db.execute("BEGIN")
+            self._require_complete(db)
+            rows = [row[0] for row in db.execute(sql, values)]
+        return rows[:limit], rows[limit - 1] if len(rows) > limit else ""
+
+    def candidate_page(self, *, statuses: tuple[str, ...] = (), thread_id: str = "",
+                       include_unbound_thread: bool = False, include_open_capabilities: bool = False,
+                       after: str = "", limit: int, tolerate_pending: bool = False) -> CandidatePage:
+        """同一页的成员、未结提交与持久代次来自同一个 SQLite 快照。"""
+        sql, values = self._candidate_selection(statuses, thread_id, include_unbound_thread,
+                                                include_open_capabilities, after, limit,
+                                                include_unscoped_pending=tolerate_pending)
+        with self.connect() as db:
+            db.execute("BEGIN")
+            if tolerate_pending:
+                self._require_coverage(db)
+            else:
+                self._require_complete(db)
+            rows = list(db.execute(
+                f"WITH selected AS ({sql}) SELECT s.run_id,r.pending FROM selected s "
+                "LEFT JOIN runs r ON r.run_id=s.run_id ORDER BY s.run_id", values))
+            generation = self._membership_revision(db)
+        window = rows[:limit]
+        return CandidatePage(
+            run_ids=tuple(run_id for run_id, pending in window if pending == 0),
+            after=window[-1][0] if len(rows) > limit else "",
+            pending_ids=tuple(run_id for run_id, pending in window if pending == 1),
+            complete=True,
+            generation=generation,
+        )
+
+    @staticmethod
+    def _candidate_selection(statuses, thread_id, include_unbound_thread, include_open_capabilities, after, limit,
+                             *, include_unscoped_pending=False):
         statuses = tuple(dict.fromkeys(text_value(status) for status in statuses))
         thread_id = text_value(thread_id)
         if (type(limit) is not int or limit <= 0 or any(not status for status in statuses)
@@ -501,15 +526,16 @@ class SubagentRunIndex:
                         "AND m.kind='thread' AND m.scope_id IN (" + ",".join("?" for _ in threads) + "))")
                 values.extend(threads)
             selectors.append(sql)
-        with self.connect() as db:
-            db.execute("BEGIN")
-            self._require_complete(db)
-            rows = [row[0] for row in db.execute(" UNION ".join(selectors) + " ORDER BY run_id LIMIT ?", (*values, limit + 1))]
-        return rows[:limit], rows[limit - 1] if len(rows) > limit else ""
+        if include_unscoped_pending:
+            # 首次提交尚无索引成员关系，只能报告该未决 ID，不能据此按线程或状态执行。
+            selectors.append("SELECT r.run_id FROM runs r WHERE r.pending=1 AND r.run_id>? "
+                             "AND NOT EXISTS (SELECT 1 FROM membership m WHERE m.run_id=r.run_id)")
+            values.append(after)
+        return " UNION ".join(selectors) + " ORDER BY run_id LIMIT ?", (*values, limit + 1)
 
     def acknowledge_source_lifecycles(self, run_ids) -> None:
         """只移除已核验 TaskLink 的查找提示，不改 canonical 或待交付 WAL。"""
-        with self.connect() as db:
+        with self.connect(write=True) as db:
             db.executemany("DELETE FROM membership WHERE scope_id='' AND kind='source_lifecycle' AND run_id=?",
                            ((run_id,) for run_id in run_ids))
 
@@ -580,7 +606,7 @@ class SubagentRunIndex:
     def _inventory(self) -> None:
         if self.coverage()["inventory_ready"]:
             return
-        with self.connect() as db:
+        with self.connect(write=True) as db:
             # 换代后的库存重置留在后台；热读只发布 partial，不同步改写全部历史索引。
             db.execute("UPDATE inventory SET done=0,error_type=''")
             # SQL 游标固定源快照，每次只取一页；只写 inventory，不改游标所读的 runs。
@@ -593,10 +619,10 @@ class SubagentRunIndex:
                 if entry.is_symlink() or (entry.is_dir(follow_symlinks=False) and (Path(entry.path) / "task.json").is_file()):
                     page.append((entry.name,))
                 if len(page) == 64:
-                    with self.connect() as db:
+                    with self.connect(write=True) as db:
                         db.executemany("INSERT OR IGNORE INTO inventory(run_id) VALUES (?)", page)
                     page.clear()
-        with self.connect() as db:
+        with self.connect(write=True) as db:
             db.executemany("INSERT OR IGNORE INTO inventory(run_id) VALUES (?)", page)
             db.execute("UPDATE meta SET value=1 WHERE key='inventory_ready'")
 
@@ -610,6 +636,7 @@ class SubagentRunIndex:
             state = self.coverage()
             if state["complete"]:
                 return {**state, "loaded": 0, "errors": []}
+            self._pool.bump_generation()
             self._inventory()
             with self.connect() as db:
                 batch = list(db.execute("SELECT seq,run_id FROM inventory WHERE done=0 ORDER BY seq LIMIT ?", (size,)))
@@ -634,7 +661,7 @@ class SubagentRunIndex:
                                 raise InventoryCanonicalMismatch("inventory canonical directory changed")
                             if task.id != run_id:
                                 raise InventoryCanonicalMismatch("inventory canonical identity mismatch")
-                            with self.connect() as db:
+                            with self.connect(write=True) as db:
                                 self.upsert(task, connection=db)
                                 db.execute("UPDATE inventory SET done=1,error_type='' WHERE seq=?", (seq,))
                     finally:
@@ -646,10 +673,10 @@ class SubagentRunIndex:
                                or isinstance(exc, NoFollowPathError) and not exc.transient_open_race)
                     if not skipped:
                         errors.append({"run_id": run_id, "error_type": type(exc).__name__})
-                    with self.connect() as db:
+                    with self.connect(write=True) as db:
                         db.execute("UPDATE inventory SET done=?,error_type=? WHERE seq=?",
                                    (int(skipped), type(exc).__name__, seq))
-            with self.connect() as db:
+            with self.connect(write=True) as db:
                 first_pending = db.execute("SELECT min(seq) FROM inventory WHERE done=0").fetchone()[0]
                 offset = (first_pending - 1 if first_pending is not None
                           else db.execute("SELECT coalesce(max(seq),0) FROM inventory").fetchone()[0])
@@ -675,7 +702,7 @@ class SubagentRunIndex:
                 raise InventoryCanonicalMismatch("inventory canonical directory changed")
             if task.id != run_id:
                 raise InventoryCanonicalMismatch("inventory canonical identity mismatch")
-            with self.connect() as db:
+            with self.connect(write=True) as db:
                 self.upsert(task, connection=db)
                 db.execute("UPDATE inventory SET done=1,error_type='' WHERE seq=?", (seq,))
 
@@ -698,7 +725,7 @@ class SubagentRunIndex:
     # LLM: 仅服务在 canonical 锁内确认首存未发表后可调用；已有提交投影绝不因缺文件被删除。
     # 函数用途: 清除一个已证明没有发表过的 pending 首存占位。
     def discard_unpublished(self, run_id: str) -> None:
-        with self.connect() as db:
+        with self.connect(write=True) as db:
             if db.execute("SELECT 1 FROM run_lookup WHERE run_id=?", (run_id,)).fetchone():
                 raise ValueError("published run cannot be discarded")
             changed = db.execute("DELETE FROM membership WHERE run_id=?", (run_id,)).rowcount
@@ -739,60 +766,68 @@ def _read_signature(path, info):
     return identity if path.name.endswith("-shm") else (*identity, info.st_mtime_ns, info.st_ctime_ns)
 
 
-# LLM: SQLite 连接前后复核原 no-follow FD 对应的路径；不存在的 sidecar 也必须在出现时保持普通私有单链接。
-# 函数用途: 拒绝索引文件、目录或 sidecar 被换成链接/其它身份，不放宽已有目录权限。
-def _verify_sqlite_files(workspace, root_fd, pinned):
-    if not nofollow_fs._supports_dir_fd():
-        _verify_portable_sqlite_files(workspace, root_fd, pinned)
+def _schema_current(db) -> bool:
+    try:
+        return db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == (4,)
+    except OperationalError as exc:
+        if str(exc) != "no such table: meta":
+            raise
+        return False
+
+
+def _reparse_point(info) -> bool:
+    return bool(getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _private_sqlite_file(info) -> bool:
+    return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not _reparse_point(info)
+            and (os.name == "nt" or not hasattr(os, "fchmod") or not stat.S_IMODE(info.st_mode) & 0o077))
+
+
+def _tighten_sqlite_file(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600, follow_symlinks=False)
         return
+    except NotImplementedError:
+        pass
+    # 平台缺少 no-follow chmod 时，仅在没有本地 SQLite 句柄时打开旧文件。
+    from ....io.sqlite_probe import _require_no_local_database_handles
+
+    _require_no_local_database_handles(path)
+    descriptor = open_private_lock_beneath(path.parent, (path.name,))
+    try:
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
+def _sqlite_file_infos(path: Path, *, main=None, tighten=False) -> dict:
+    files = {}
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        candidate = Path(f"{path}{suffix}") if suffix else path
+        try:
+            info = main if not suffix and main is not None else candidate.lstat()
+            if (tighten and os.name != "nt" and hasattr(os, "fchmod") and stat.S_ISREG(info.st_mode)
+                    and info.st_nlink == 1 and not _reparse_point(info) and stat.S_IMODE(info.st_mode) & 0o077):
+                _tighten_sqlite_file(candidate)
+                info = candidate.lstat()
+        except FileNotFoundError:
+            if not suffix:
+                raise
+            continue
+        if not _private_sqlite_file(info):
+            raise OSError("SQLite index must be a private regular single-link file")
+        files[candidate] = info
+    return files
+
+
+def _verify_sqlite_files(workspace: Path, path: Path, root, pinned: dict) -> None:
     current = workspace.lstat()
-    opened = os.fstat(root_fd)
-    if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+    if (not stat.S_ISDIR(current.st_mode) or _reparse_point(current)
+            or (current.st_dev, current.st_ino) != (root.st_dev, root.st_ino)):
         raise OSError("private SQLite directory identity changed")
-    main = pinned[-1][0]
-    for suffix in ("", "-journal", "-wal", "-shm"):
-        path = Path(str(main) + suffix)
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            if suffix:
-                continue
-            raise
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077:
-            raise OSError("SQLite index must be a private regular single-link file")
-    for path, descriptor in pinned:
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            if path != main:
-                continue  # SQLite 正常提交可删除已预检 journal；不复用其 FD。
-            raise
-        opened = os.fstat(descriptor)
-        if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
-            raise OSError("private SQLite file identity changed")
-
-
-# LLM: 无FD平台只比较同源路径身份，仍拒绝目录/链接/reparse/多链接；仅POSIX且有fchmod时核权限位。
-# 函数用途: 在SQLite连接和提交前复核便携路径，不持有阻碍Windows删除journal的文件句柄。
-def _verify_portable_sqlite_files(workspace, root_info, pinned):
-    current = nofollow_fs._portable_directory(workspace, (), create=False).lstat()
-    if ((current.st_dev, current.st_ino) != (root_info.st_dev, root_info.st_ino)
-            or getattr(current, "st_file_attributes", 0) & 0x400):
-        raise OSError("private SQLite directory identity changed")
-    main, identities = pinned[-1][0], dict(pinned)
-    for suffix in ("", "-journal", "-wal", "-shm"):
-        path = Path(str(main) + suffix)
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            if suffix:
-                continue
-            raise
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                or getattr(info, "st_file_attributes", 0) & 0x400
-                or os.name != "nt" and hasattr(os, "fchmod") and stat.S_IMODE(info.st_mode) & 0o077):
-            raise OSError("SQLite index must be a private regular single-link file")
-        opened = identities.get(path)
+    for candidate, info in _sqlite_file_infos(path).items():
+        opened = pinned.get(candidate)
         if opened is not None and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
             raise OSError("private SQLite file identity changed")
 
