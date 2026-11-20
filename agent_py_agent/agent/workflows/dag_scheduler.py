@@ -16,6 +16,7 @@ from dataclasses import replace
 from heapq import heapify, heappop, heappush
 from itertools import count
 from threading import Lock
+from types import SimpleNamespace
 from typing import Any
 
 from ..assets.workflow_store import (
@@ -232,8 +233,13 @@ def _run_effect_observed(record):
 
 
 def _settle_worker_effect(engine, run_id, step, *, interrupted=False):
+    # 未启动须证明本次执行无任何尝试被准入：当前或更早已准入尝试留有标记都按已准入裁决。
+    current = step.escalation_result.get('attempt_id')
+    earlier = getattr(engine, '_admitted_attempts', tuple)()
+    probes = [step, *(SimpleNamespace(step_id=step.step_id, escalation_result={'attempt_id': attempt})
+                      for attempt in earlier if attempt != current)]
     try:
-        marker = engine.store.step_effect_marker(run_id, step)
+        marker = any(engine.store.step_effect_marker(run_id, probe) for probe in probes)
     except (OSError, ValueError):
         marker = None
     settle_step_effect(step, marker=marker, interrupted=interrupted)
@@ -244,23 +250,28 @@ def _worker_with_effect_admission(engine, run_id, step):
 
     worker = copy(engine)
     guard = Lock()
-    admitted = False
+    admitted = set()
 
     def authorize(run, phase, *, definition=None):
-        nonlocal admitted
         result = engine._authorize_run(run, phase, definition=definition)
         if not isinstance(phase, WorkflowEffectPhase) or run.workflow_run_id != run_id or phase.step_id != step.step_id:
             return result
-        # foreach 批共享父尝试的一次准入，锁只覆盖本地标记的耐久发表。
+        # 准入身份是尝试编号：就地重试的新尝试重新发表标记，foreach 批共享父尝试的一次准入；锁只覆盖本地标记的耐久发表。
         with guard:
             _check_stop()
-            if not admitted:
+            attempt = step.escalation_result.get('attempt_id')
+            if attempt not in admitted:
                 engine.store.admit_step_effect(run_id, step)
                 step.escalation_result.update(effect_state='admitted', effect_started=True)
-                admitted = True
+                admitted.add(attempt)
         return result
 
+    def admitted_attempts():
+        with guard:
+            return tuple(admitted)
+
     worker._authorize_run = authorize
+    worker._admitted_attempts = admitted_attempts
     return worker
 
 

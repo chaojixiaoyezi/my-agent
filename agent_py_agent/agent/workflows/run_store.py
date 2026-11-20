@@ -185,6 +185,26 @@ class WorkflowExecutionError(RuntimeError):
                 next_action='retry_same_key_completion_clock_only')
 
 
+def _explicit_effect_outcome(step):
+    """DAG与顺序结算共用的确定结果读口：顶层结果，其次结果与状态一致的工具回执，再次已结清的子工作流回执。"""
+    facts = step.escalation_result
+    if facts.get('effect_outcome'):
+        return facts['effect_outcome']
+    receipt = facts.get('tool_receipt')
+    if isinstance(receipt, dict):
+        # 回执里的not_started可能未经当前尝试核验；只有顶层字段承载已核验的未启动证明。
+        if receipt.get('status') == 'succeeded' and receipt.get('effect_outcome') in ('confirmed', 'succeeded'):
+            return 'confirmed'
+        return 'failed' if receipt.get('status') == receipt.get('effect_outcome') == 'failed' else None
+    receipt = facts.get('subworkflow_receipt')
+    if (isinstance(receipt, dict) and receipt.get('effect_outcome') != 'unknown'
+            and receipt.get('status') in ('succeeded', 'failed', 'skipped', 'cancelled')):
+        if receipt.get('effect_outcome') == 'not_started':
+            return 'not_started'
+        return 'confirmed' if receipt['status'] == 'succeeded' else 'failed'
+    return None
+
+
 def settle_step_effect(step, *, marker, interrupted=False, drain_failed=False):
     """从当前尝试标记及回执裁决；未核实时不能当作未启动。"""
     facts = step.escalation_result
@@ -193,7 +213,7 @@ def settle_step_effect(step, *, marker, interrupted=False, drain_failed=False):
     elif marker is False:
         explicit = SETTLEMENT_NOT_STARTED
     else:
-        explicit = facts.get('effect_outcome') or None
+        explicit = _explicit_effect_outcome(step)
     success = step.status in ('succeeded', 'escalated_recovered')
     settlement = classify_effect_settlement(marker, explicit, 'succeeded' if success else step.status)
     operation = operation_status_for_settlement(settlement, ok=success and not interrupted and not drain_failed)
@@ -212,23 +232,10 @@ def _non_agent_step_settled(step, result):
         return True
     if step.status not in ('failed', 'cancelled'):
         return False
-    if result.get('effect_outcome') == 'unknown':
+    if (result.get('tool_operation_binding') is not None and not isinstance(result.get('tool_receipt'), dict)
+            and not isinstance(result.get('subworkflow_receipt'), dict)):
         return False
-    tool_receipt = result.get('tool_receipt')
-    if isinstance(tool_receipt, dict):
-        return (
-            tool_receipt.get('effect_outcome') in ('failed', 'confirmed', 'succeeded')
-            and tool_receipt.get('status') in ('failed', 'succeeded')
-        )
-    subworkflow_receipt = result.get('subworkflow_receipt')
-    if isinstance(subworkflow_receipt, dict):
-        return (
-            subworkflow_receipt.get('effect_outcome') != 'unknown'
-            and subworkflow_receipt.get('status') in ('succeeded', 'failed', 'skipped', 'cancelled')
-        )
-    if result.get('tool_operation_binding') is not None:
-        return False
-    return result.get('effect_outcome') in ('confirmed', 'failed', 'succeeded', 'not_started')
+    return _explicit_effect_outcome(step) in ('confirmed', 'failed', 'succeeded', 'not_started')
 
 
 _TERMINAL_RUN_STATUSES = ('succeeded', 'failed', 'skipped', 'cancelled')
