@@ -7,12 +7,15 @@
 # 模块用途: 原作用域消费有界学习队列并轮转候选，未确认候选不阻断后续总结，正式发布仍需用户准确确认。
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import threading
 import time
+import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +23,7 @@ from typing import TYPE_CHECKING
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.provider_headers import provider_session_scope
 from ..backends.request_scope import foreground_model_active
+from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import read_text_beneath
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
@@ -65,6 +69,8 @@ from .skill_learning_store import (
     SkillLearningRegistry,
     SkillLearningStore,
     SkillLearningStoreError,
+    learning_attempt_token,
+    learning_source_version,
     owner_layout_exempt,
     request_key,
     skill_family_fingerprint,
@@ -217,6 +223,7 @@ class SkillLearningRunResult:
     skill_name: str = ""
     request_key: str = ""
     evolution_notices: tuple[dict, ...] = field(default=(), kw_only=True)
+    effect_outcome: str = field(default="", kw_only=True)
 
 
 # 同时记着的“用户要求总结”标记、以及按会话记着的“最近完成的那次活”各自的上限：超出丢最早的。
@@ -285,6 +292,28 @@ class _UserRequests:
 def _user_request(request: dict[str, object], focus: str) -> dict[str, object]:
     return {**request, "request_key": request_key(f"user:{request['request_key']}"), "created_at": utc_now(), "attempts": 0,
             "requested_by": "user", "user_focus": bounded_text(focus, FOCUS_LIMIT_CHARS)}
+
+
+def _draft_digest(draft):
+    return hashlib.sha256(json.dumps(draft, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def _draft_checkpoint(decision, material):
+    target = next((item for item in material.updatable_skills if item['name'] == decision.update_target), None)
+    binding = [target['revision'], target['sha256']] if target is not None else None
+    draft = json.loads(json.dumps({'decision': asdict(decision), 'binding': binding}, ensure_ascii=False))
+    return draft if redact_sensitive_value(draft, code_file=True) == draft else None
+
+
+def _saved_draft(request, field, digest_field):
+    draft = request.get(field)
+    try:
+        if _draft_digest(draft) != request.get(digest_field):
+            raise ValueError("学习草稿与原检查点摘要不符")
+        decision = SkillLearningDecision(**{**draft['decision'], 'tags': tuple(draft['decision']['tags'])})
+        return decision, draft['binding']
+    except (KeyError, TypeError, ValueError) as error:
+        raise SkillLearningStoreError(CODE_REQUEST_CORRUPT, "学习草稿检查点无法核对") from error
 
 
 # LLM: 有界表：放进去后超过上限就丢最早放进去的。只改内存。
@@ -657,6 +686,10 @@ class SkillLearningService:
             with gateway_short_transaction("skill_learning_drop_corrupt"):
                 self.store.discard_request(path)
                 return self._finish(path, {}, SkillLearningEvent(EVENT_DROPPED, CODE_REQUEST_CORRUPT))
+        if (request['stage'] not in (0, 'draft_pending', 'draft', 'merge_ready', 'merge_inflight', 'merge_done')
+                or not isinstance(request['attempt_id'], str) or not request['attempt_id']
+                or learning_source_version(request) != request['source_version']):
+            return self._finish(path, request, _request_event(EVENT_DROPPED, CODE_REQUEST_CORRUPT, request))
         try:
             self._validate_lesson_source(request)
         except SkillLearningGateError as exc:
@@ -693,45 +726,64 @@ class SkillLearningService:
             material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         except (OSError, ValueError, TypeError, SyntaxError, RecursionError) as exc:
             return self._retry_or_drop(path, request, exc, code="SKILL_LEARNING_MATERIAL_FAILED")
-        # 后台辅助模型关闭或不可用（或前台正占用同一端点）：请求原样留在队列里，不扣预算、不记尝试，之后再处理。
-        live_backend = self._live_backend()
-        if live_backend is None or foreground_model_active(live_backend):
-            return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
-        from .skill_learning_budget import (
-            deployment_learning_available,
-            reserve_deployment_learning,
-        )
-        if not deployment_learning_available(self.runtime.deployment_root, live_settings.global_daily_limit):
-            return SkillLearningRunResult("global_daily_limit", request_key=str(request.get("request_key") or ""))
-        with gateway_short_transaction("skill_learning_reserve_call"):
-            if not self.store.consume_daily_call(live_settings.daily_limit):
-                return SkillLearningRunResult(STATUS_DAILY_LIMIT, request_key=str(request.get("request_key") or ""))
-            if not reserve_deployment_learning(self.runtime.deployment_root, live_settings.global_daily_limit):
-                return SkillLearningRunResult("global_daily_limit", request_key=str(request.get("request_key") or ""))
-        from ..settings.curator_profile import auxiliary_profile_cooldown_remaining
-
-        aux_profile = self._auxiliary_profile()
-        if aux_profile and auxiliary_profile_cooldown_remaining(aux_profile) > 0:
-            return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
-
         try:
-            response = self._call_model_guarded(material, run_path=path, run_request=request)
+            text = ""
+            if request['stage'] in (0, 'draft_pending'):
+                from .skill_learning_budget import admit_learning_attempt
+
+                if not self._learning_model_ready():
+                    return SkillLearningRunResult(STATUS_BUSY, request_key=request['request_key'])
+                with gateway_short_transaction("skill_learning_reserve_call"):
+                    blocked = admit_learning_attempt(self.store, path, request, root=self.runtime.deployment_root,
+                        global_limit=live_settings.global_daily_limit, owner_limit=live_settings.daily_limit)
+                if blocked:
+                    return SkillLearningRunResult(blocked, request_key=request['request_key'])
+                response = self._call_model_guarded(material, run_path=path, run_request=request)
+                text = str(getattr(response, "text", "") or "")
             event = self._decide(
                 material,
-                str(getattr(response, "text", "") or ""),
+                text,
                 live_settings=live_settings,
                 run_path=path,
                 run_request=request,
             )
         except _RetryRunAbort as abort:
             return abort.result
+        except SkillLearningStoreError as exc:
+            if exc.code != CODE_REQUEST_CORRUPT:
+                raise
+            return self._finish(path, request, _request_event(EVENT_DROPPED, exc.code, request))
         except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                 ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError,
                 OwnerQuotaExceeded, OwnerQuotaUnavailable):
             raise
         except (ValueError, TypeError, SyntaxError, RecursionError) as exc:
             return self._retry_or_drop(path, request, exc, code="SKILL_LEARNING_PROCESSING_FAILED")
+        if event.event == STATUS_RETRY:
+            attempts = int(request.get("attempts") or 0) + 1
+            if attempts < MAX_REQUEST_ATTEMPT_COUNT:
+                try:
+                    self._save_continuation(path, request, {"attempts": attempts})
+                except _RetryRunAbort as abort:
+                    return abort.result
+                return SkillLearningRunResult(STATUS_RETRY, event.code, event.skill_name, request['request_key'])
+            event = replace(event, event=EVENT_REJECTED)
         return self._finish(path, request, event)
+
+    def _learning_model_ready(self):
+        from ..settings.curator_profile import auxiliary_profile_cooldown_remaining
+
+        backend = self._live_backend()
+        profile = self._auxiliary_profile()
+        return (backend is not None and not foreground_model_active(backend)
+                and not (profile and auxiliary_profile_cooldown_remaining(profile) > 0))
+
+    def _save_continuation(self, path, request, changes):
+        with gateway_short_transaction("skill_learning_checkpoint"):
+            self._validate_lesson_source(request)
+            if not self.store.rewrite_request(path, {**request, **changes}, expected=request):
+                raise _RetryRunAbort(SkillLearningRunResult(STATUS_BUSY, request_key=request['request_key']))
+            request.update(changes)
 
     # LLM: 先看 live_cfg，再看 guard_config；第一个带档案字段或配置路径的对象说了算，和记忆整理同用
     #   effective_auxiliary_model_profile（已保存的用户 YAML 优先）。它给出空串就是关闭，不再去问下一个对象。
@@ -831,20 +883,37 @@ class SkillLearningService:
     ) -> SkillLearningEvent:
         active_settings = live_settings or self.settings
         request = material.request
+        progress = run_request if run_request is not None else {}
         updatable = frozenset(str(item.get("name") or "") for item in material.updatable_skills)
+        binding = None
         try:
-            decision = parse_skill_learning_decision(text, updatable)
+            if progress.get("draft") is not None:
+                decision, binding = _saved_draft(progress, "draft", "verified_draft_digest")
+            else:
+                decision = parse_skill_learning_decision(text, updatable)
+                draft = _draft_checkpoint(decision, material) if run_path is not None else None
+                if draft is not None:
+                    self._save_continuation(run_path, progress, {"stage": "draft", "draft": draft,
+                                            "verified_draft_digest": _draft_digest(draft)})
+                    binding = draft["binding"]
         except SkillLearningOutputError as exc:
             return replace(_request_event(EVENT_REJECTED, exc.code, request), reason=exc.field)
         if decision.decision == DECISION_SKIP:
             return replace(_request_event(EVENT_SKIPPED, "", request), reason=decision.reason)
-        if (
+        if progress.get("stage") == "merge_done":
+            decision, binding = _saved_draft(progress, "merge_draft", "merge_digest")
+        elif progress.get("stage") == "merge_inflight":
+            return replace(_request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request), skill_name=decision.name,
+                           effect_outcome="unknown",
+                           reason="原合并调用可能已发出且结果未保存，请核对原请求；本次未重发合并调用。")
+        elif (
             decision.decision == DECISION_CREATE
             and request.get("requested_by") != "user"
-            and active_settings.merge_similarity_percent > 0
+            and (active_settings.merge_similarity_percent > 0 or progress.get("stage") == "merge_ready")
             and MAX_MERGE_RETRY_COUNT > 0
         ):
-            similar = _similar_managed_skills(
+            frozen = progress.get("merge_target")
+            similar = frozen["candidates"] if frozen else _similar_managed_skills(
                 self.store,
                 decision,
                 threshold_percent=active_settings.merge_similarity_percent,
@@ -860,8 +929,10 @@ class SkillLearningService:
                 )
                 if retry_event is not None:
                     return retry_event
-                if decision.decision == DECISION_SKIP:
-                    return replace(_request_event(EVENT_SKIPPED, "", request), reason=decision.reason)
+                if progress.get("stage") == "merge_done":
+                    binding = progress["merge_draft"]["binding"]
+        if decision.decision == DECISION_SKIP:
+            return replace(_request_event(EVENT_SKIPPED, "", request), reason=decision.reason)
         enabled_now, revalidated_settings = self._live_state()
         if not enabled_now:
             return replace(
@@ -871,14 +942,22 @@ class SkillLearningService:
             )
         if decision.decision == DECISION_INEFFECTIVE:
             return self._record_ineffective_decision(decision, request)
+        source = 'user' if request.get('requested_by') == 'user' else 'auto'
+        publish_request = {**request, 'requested_by': source} if run_path is not None else request
+        if progress.get('attempt_id'):
+            publish_request = {**publish_request, 'operation_id': learning_attempt_token(progress)}
+            if progress.get('source_attempt_id'):
+                publish_request['attempt_id'] = progress['source_attempt_id']
         publish = PublishRequest(
             decision,
-            request,
+            publish_request,
             material.taken_names,
             revalidated_settings.max_skills,
             self.runtime.guard_config,
-            expected_revision=next((item["revision"] for item in material.updatable_skills if item["name"] == decision.name), None),
-            expected_sha256=next((item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""),
+            expected_revision=binding[0] if binding else next(
+                (item["revision"] for item in material.updatable_skills if item["name"] == decision.name), None),
+            expected_sha256=binding[1] if binding else next(
+                (item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""),
             protection_provider=getattr(self.runtime, "protection_provider", None),
             config_provider=getattr(self.runtime, "config_provider", None),
         )
@@ -931,99 +1010,71 @@ class SkillLearningService:
         run_request: dict[str, object] | None = None,
     ) -> tuple[SkillLearningMaterial, SkillLearningDecision, SkillLearningEvent | None]:
         request = material.request
+        progress = run_request if run_request is not None else {}
         registry = self.store.load_registry()
-        extra_updatables: list[dict[str, object]] = []
-        for match in similar:
-            item = _updatable_by_name(self.store, registry, str(match["name"]))
-            if item is not None:
-                extra_updatables.append(item)
-        if not extra_updatables:
-            return material, initial_decision, None
-        merged_map = {str(item["name"]): item for item in material.updatable_skills}
-        for item in extra_updatables:
-            merged_map[str(item["name"])] = item
-        retry_updatable_items = tuple(merged_map.values())
-        retry_updatable_names = frozenset(merged_map.keys())
-        retry_material = replace(
-            material,
-            updatable_skills=retry_updatable_items,
-            merge_hint={
-                "reason": "similar_skill_exists",
-                "threshold_percent": live_settings.merge_similarity_percent,
-                "proposed_name": initial_decision.name,
-                "candidates": similar,
-            },
-        )
-        enabled_now, latest_settings = self._live_state()
-        if not enabled_now:
+        def deferred(reason):
             return material, initial_decision, replace(
-                _request_event(EVENT_REJECTED, "SKILL_LEARNING_DISABLED", request),
-                skill_name=initial_decision.name,
-                reason="自学习已在合并重试前关闭，本次未写入技能。",
+                _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
+                skill_name=initial_decision.name, reason=reason,
             )
-        from ..settings.curator_profile import auxiliary_profile_cooldown_remaining
-        from .skill_learning_budget import (
-            deployment_learning_available,
-            reserve_deployment_learning,
-        )
 
-        aux_profile = self._auxiliary_profile()
-        if aux_profile and auxiliary_profile_cooldown_remaining(aux_profile) > 0:
+        frozen = progress.get("merge_target")
+        if frozen:
+            updatables = []
+            for name, revision, sha in frozen["bindings"]:
+                item = _updatable_by_name(self.store, registry, name)
+                if item is None or (item["revision"], item["sha256"]) != (revision, sha):
+                    return deferred("原合并目标已有变更，请核对原尝试的目标版本后再提交新请求。")
+                updatables.append(item)
+        else:
+            merged = {str(item["name"]): item for item in material.updatable_skills}
+            extra = [_updatable_by_name(self.store, registry, str(match["name"])) for match in similar]
+            if not any(extra):
+                return material, initial_decision, None
+            merged.update((str(item["name"]), item) for item in extra if item is not None)
+            updatables = list(merged.values())
+
+        enabled, settings = self._live_state()
+        if not enabled:
+            return material, initial_decision, _request_event(EVENT_REJECTED, "SKILL_LEARNING_DISABLED", request)
+        if run_path is not None and not progress.get("draft"):
+            return deferred("原草稿无法保存为安全的合并检查点，请核对草稿后重新发起请求。")
+        if run_path is not None and not frozen:
+            frozen = {"candidates": similar, "threshold_percent": live_settings.merge_similarity_percent,
+                      "bindings": [[item["name"], item["revision"], item["sha256"]] for item in updatables]}
+            self._save_continuation(run_path, progress, {"stage": "merge_ready", "merge_target": frozen})
+        threshold = frozen["threshold_percent"] if frozen else settings.merge_similarity_percent
+        retry_material = replace(material, updatable_skills=tuple(updatables), merge_hint={
+            "reason": "similar_skill_exists", "threshold_percent": threshold,
+            "proposed_name": initial_decision.name, "candidates": similar,
+        })
+        if not self._learning_model_ready():
             if run_path is not None:
-                req = run_request if run_request is not None else request
-                raise _RetryRunAbort(
-                    SkillLearningRunResult(STATUS_BUSY, request_key=str(req.get("request_key") or ""))
-                )
-            return retry_material, initial_decision, replace(
-                _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
-                skill_name=initial_decision.name,
-                reason="辅助模型处于退避冷却期，本次合并优先重试已延迟，未写入重复技能。",
-            )
-        if not deployment_learning_available(self.runtime.deployment_root, latest_settings.global_daily_limit):
-            return retry_material, initial_decision, replace(
-                _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
-                skill_name=initial_decision.name,
-                reason="全局每日自主学习额度已用尽，本次合并优先重试已延迟，未写入重复技能。",
-            )
-        with gateway_short_transaction("skill_learning_reserve_call"):
-            if (
-                not self.store.consume_daily_call(latest_settings.daily_limit)
-                or not reserve_deployment_learning(self.runtime.deployment_root, latest_settings.global_daily_limit)
-            ):
-                return retry_material, initial_decision, replace(
-                    _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
-                    skill_name=initial_decision.name,
-                    reason="每日自主学习额度已用尽，本次合并优先重试已延迟，未写入重复技能。",
-                )
-        response = self._call_model_guarded(retry_material, run_path=run_path, run_request=run_request)
+                raise _RetryRunAbort(SkillLearningRunResult(STATUS_BUSY, request_key=progress['request_key']))
+            return deferred("辅助模型暂不可用，已延迟合并。")
+
+        if run_path is not None:
+            self._save_continuation(run_path, progress, {"stage": "merge_inflight"})
         try:
-            retry_decision = parse_skill_learning_decision(
-                str(getattr(response, "text", "") or ""),
-                retry_updatable_names,
-            )
+            response = self._call_model_guarded(retry_material, run_path=run_path, run_request=run_request)
+        except _RetryRunAbort as abort:
+            if abort.result.status == STATUS_BUSY:
+                # 旧调用仍未退出证明本次调用未准入。
+                self._save_continuation(run_path, progress, {"stage": "merge_ready"})
+            raise
+        try:
+            decision = parse_skill_learning_decision(str(getattr(response, "text", "") or ""),
+                                                    frozenset(item["name"] for item in updatables))
         except SkillLearningOutputError as exc:
-            return retry_material, initial_decision, replace(
-                _request_event(EVENT_REJECTED, exc.code, request),
-                skill_name=initial_decision.name,
-                reason=exc.field,
-            )
-        if retry_decision.decision == DECISION_CREATE:
-            still_similar = _similar_managed_skills(
-                self.store,
-                retry_decision,
-                threshold_percent=latest_settings.merge_similarity_percent,
-            )
-            if still_similar:
-                top = still_similar[0]
-                return retry_material, retry_decision, replace(
-                    _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
-                    skill_name=retry_decision.name,
-                    reason=(
-                        f"候选技能与既有技能 {top['name']} 相似度达 {top['similarity_percent']}%，"
-                        "合并优先重试后仍请求新建，已延迟以避免重复。"
-                    ),
-                )
-        return retry_material, retry_decision, None
+            return material, initial_decision, replace(_request_event(EVENT_REJECTED, exc.code, request), reason=exc.field)
+        if decision.decision == DECISION_CREATE and _similar_managed_skills(
+                self.store, decision, threshold_percent=threshold):
+            return deferred("合并后仍请求新建同类技能，已延迟以避免重复。")
+        draft = _draft_checkpoint(decision, retry_material) if run_path is not None else None
+        if draft is not None:
+            self._save_continuation(run_path, progress, {"stage": "merge_done", "merge_draft": draft,
+                                                        "merge_digest": _draft_digest(draft)})
+        return retry_material, decision, None
 
     # LLM: V2-2 通道 B 自动低效记次：须先核验本轮 used_skill_ids 与本版本 SQLite 正文送达回执，拒绝仅 adopted 归因。
     # 函数用途: 为模型在后台识别为 ineffective 的本轮已使用自学 Skill 登记宿主负向记次。
@@ -1150,7 +1201,13 @@ class SkillLearningService:
             code = code or (CODE_MODEL_TIMEOUT if isinstance(exc, TimeoutError) else CODE_MODEL_FAILED)
             attempts = int(request.get("attempts") or 0) + 1
             if attempts < MAX_REQUEST_ATTEMPT_COUNT:
-                self.store.rewrite_request(path, {**request, "attempts": attempts})
+                updated = {**request, "attempts": attempts}
+                if request.get("stage") == "draft_pending":
+                    # 已明确失败的首稿调用才开始新尝试。中断恢复和合并续跑保持原身份。
+                    if request.get("completion_ref"):
+                        updated.setdefault("source_attempt_id", request['attempt_id'])
+                    updated.update(stage=0, attempt_id=uuid.uuid4().hex)
+                self.store.rewrite_request(path, updated)
                 return SkillLearningRunResult(STATUS_RETRY, code, request_key=str(request.get("request_key") or ""))
             failed = replace(_request_event(EVENT_FAILED, code, request), reason=type(exc).__name__)
             return self._finish(path, request, failed)
@@ -1162,7 +1219,8 @@ class SkillLearningService:
             self.store.append_event(event)
             self.store.discard_request(path)
             return SkillLearningRunResult(event.event, event.code, event.skill_name,
-                                          str(request.get("request_key") or event.request_key))
+                                          str(request.get("request_key") or event.request_key),
+                                          effect_outcome=event.effect_outcome)
 
 
 # LLM: 此类仅标记宿主快照失败，不作为模型输入或可持久化授权；与成功但空目录区分。

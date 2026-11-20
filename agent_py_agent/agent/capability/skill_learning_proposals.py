@@ -81,6 +81,8 @@ def propose_learning(store, publish):
         'request':{key:publish.request.get(key,'') for key in ('request_key','run_id','task_id','thread_id')},
         'taken_names':sorted(publish.taken_names),'max_skills':publish.max_skills,'redacted':redacted,
         'created_at_ns':time.time_ns()}
+    if publish.request.get('requested_by') in ('user', 'auto'):
+        record['request']['requested_by'] = publish.request['requested_by']
     proposal_id = record['proposal_id'] = _identity_id(record)
     with store.state_lock() as admission:
         with locked_json_path(store.directory/'.proposals'):

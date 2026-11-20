@@ -269,7 +269,7 @@ def learning_protection_for_agent(agent, *, scan_limit=1000):
 
 
 def _load_protection_scan(store):
-    return store.load_registry().import_operations.get('protection_scan')
+    return store.load_registry().protection_scan
 
 
 def _scan_has_progress(after):
@@ -280,14 +280,12 @@ def _scan_has_progress(after):
 
 
 def _save_protection_scan(store, previous, current):
-    # 复用旧版登记表能保留的操作元数据槽。仅在原状态锁内对扫描字段做 CAS。
+    # 仅在原状态锁内对保护游标做 CAS。
     with store.state_lock():
         registry = store.load_registry()
-        if registry.import_operations.get('protection_scan') != previous:
+        if registry.protection_scan != previous:
             return False
-        store.save_registry(replace(
-            registry, import_operations={**registry.import_operations, 'protection_scan': current},
-        ))
+        store.save_registry(replace(registry, protection_scan=current))
     return True
 
 
