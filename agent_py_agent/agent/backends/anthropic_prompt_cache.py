@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen
 from ..prompting_parts.cache_layout import prompt_cache_layout
 
 _EPHEMERAL_CACHE_CONTROL = {"type": "ephemeral"}
@@ -70,7 +72,7 @@ def _normalize_anthropic_block(block: dict[str, Any]) -> dict[str, Any]:
         value = block[key]
         if key == "input" and isinstance(value, dict):
             # 与 _openai_function_call 同口径：模型给的参数对象键序无语义，排序往返固定字节。
-            value = json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
+            value = json.loads(hot_json.dumps(value, ensure_ascii=False, sort_keys=True))
         normalized[key] = value
     for key, value in block.items():
         if key not in normalized:
@@ -81,7 +83,8 @@ def _normalize_anthropic_block(block: dict[str, Any]) -> dict[str, Any]:
 # LLM: This projection is the only place that may move a typed stable prefix into Anthropic's
 # system blocks; the volatile prompt and caller-owned system text remain byte-for-byte intact.
 # 类用途: 保存 Anthropic 请求最终使用的 system、动态 prompt 和缓存布局启用状态。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class AnthropicPromptCacheProjection:
     system: str | list[dict[str, Any]]
     prompt: str

@@ -27,6 +27,7 @@ class _OAuthMixin:
         if not all(self.auth_ref.get(field) for field in ("path", "provider_id", "generation", "binding", "mode")):
             raise ValueError("OAuth 运行引用不完整，请重新选择已登录的模型。")
         protocol_options = {} if anthropic_version is None else {"anthropic_version": anthropic_version}
+        # 后续协议基类随子类变化，构造必须继续沿 MRO 调用。
         super().__init__(options, **protocol_options)
         if self.auth_ref["mode"] == "chatgpt":
             self.stream_enabled = True
@@ -103,6 +104,7 @@ class OAuthResponsesBackend(_OAuthMixin, OpenAIResponsesBackend):
         from ..settings.model_oauth_schema import SIWC_BASE
 
         if self.auth_ref["mode"] != "chatgpt" or self.api_base == SIWC_BASE:
+            # OAuth mixin 位于 Responses 基类之前，由 MRO 决定流式方法。
             return super().request_stream_iter(path, payload, headers, options=options)
         from .responses_websocket import iter_responses_websocket
 

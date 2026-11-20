@@ -13,6 +13,8 @@ import threading
 from collections import OrderedDict, deque
 from collections.abc import Sequence
 
+from ..common import hot_json
+
 _CACHE_LOCK = threading.Lock()
 # 缓存诊断单条消息摘要进程内LRU缓存的最大条目数
 _MAX_ROW_CACHE_ENTRIES = 4096
@@ -60,7 +62,7 @@ def change_codes() -> tuple[str, ...]:
 def _digest(value: object) -> str:
     track = bool(getattr(_DIGEST_TLS, "track_key", False))
     pre = _strict_json_cache_key(value) if track else None
-    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    serialized = hot_json.dumps(value, ensure_ascii=False, compact=True)
     if track:
         post = _strict_json_cache_key(value) if pre is not None else None
         try:

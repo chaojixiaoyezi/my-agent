@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from uuid import UUID, uuid4
+
+from ..common import hot_json
 
 _SESSION: ContextVar[str] = ContextVar("provider_session", default="")
 # 仅区分传输链/缓存亲和，不作为owner、线程、账本或授权身份。
@@ -89,7 +90,7 @@ def current_provider_affinity() -> str:
     session, purpose = _SESSION.get(), _TRANSPORT_PURPOSE.get()
     if not session or not purpose:
         return session
-    return hashlib.sha256(json.dumps([session, "transport-purpose.v1", purpose], ensure_ascii=True).encode()).hexdigest()
+    return hashlib.sha256(hot_json.dumps([session, "transport-purpose.v1", purpose], ensure_ascii=True).encode()).hexdigest()
 
 
 @contextmanager
@@ -131,7 +132,7 @@ def validate_session_header(value: object) -> str:
 def provider_session_scope(owner: tuple[str, ...], thread_id: str):
     from .request_scope import provider_owner_scope
 
-    identity = hashlib.sha256(json.dumps([*owner, thread_id], ensure_ascii=True).encode()).hexdigest() if thread_id else ""
+    identity = hashlib.sha256(hot_json.dumps([*owner, thread_id], ensure_ascii=True).encode()).hexdigest() if thread_id else ""
     owner_key = _opaque_owner_key(owner)
     token = _SESSION.set(identity)
     try:
@@ -141,14 +142,22 @@ def provider_session_scope(owner: tuple[str, ...], thread_id: str):
         _SESSION.reset(token)
 
 
+def _provider_owner_parts(agent: object) -> tuple[str, str, str]:
+    home = getattr(agent, "home_paths", None)
+    return (
+        str(getattr(home, "owner_provider", "")),
+        str(getattr(home, "owner_kind", "")),
+        str(getattr(home, "owner_id", "")),
+    )
+
+
 # LLM: 标签只来自已解析 agent 的 home_paths，不能重读原始通道 user_id；线程入口显式绑定，退出复位。
 # 函数用途: 给后台派工和 runner 线程安装同一 owner 公平标签，不改会话、权限或共享后端。
 @contextmanager
 def provider_agent_owner_scope(agent: object):
     from .request_scope import provider_owner_scope
 
-    home = getattr(agent, "home_paths", None)
-    owner = tuple(str(getattr(home, key, "")) for key in ("owner_provider", "owner_kind", "owner_id"))
+    owner = _provider_owner_parts(agent)
     with provider_owner_scope(_opaque_owner_key(owner)):
         yield
 
@@ -157,7 +166,7 @@ def provider_agent_owner_scope(agent: object):
 # LLM: 与会话无关的 owner 哈希只有这一处算法；不透明标签不是鉴权结果，缺身份进未知桶。
 # 函数用途: 将宿主 owner 三元组转为匿名公平标签，不存正文或凭据。
 def _opaque_owner_key(owner: tuple[str, ...]) -> str:
-    return hashlib.sha256(json.dumps(owner, ensure_ascii=True).encode()).hexdigest() if any(owner) else ""
+    return hashlib.sha256(hot_json.dumps(owner, ensure_ascii=True).encode()).hexdigest() if any(owner) else ""
 
 
 # LLM: 受管Agent的原代次先只收窄绑定并复核，再进入会话；普通Agent无代次时不变，绑定不授予任何权限。
@@ -186,8 +195,7 @@ def _provider_session_runtime_scope(agent: object, params: object):
         yield
         return
     thread_id = thread_id or str(getattr(params, "run_id", "") or getattr(params, "task_id", "") or uuid4())
-    home = getattr(agent, "home_paths", None)
-    owner = tuple(str(getattr(home, key, "")) for key in ("owner_provider", "owner_kind", "owner_id"))
+    owner = _provider_owner_parts(agent)
     with provider_session_scope(owner, thread_id):
         yield
 

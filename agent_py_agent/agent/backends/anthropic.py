@@ -3,12 +3,13 @@
 # 模块用途: 调用 Messages 接口并规范化响应；保留历史、用量和局部控制，流结束及时归还物理名额。
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen
 from ..tooling.runtime_contracts import ToolChoice
 from .anthropic_prompt_cache import (
     anthropic_messages_with_optional_cache,
@@ -39,7 +40,8 @@ from .usage_metadata import (
 
 # LLM: Messages 单次请求携带全部局部覆盖；冻结对象不改后端配置，需联合采样、流观察器和结构化摘要回归。
 # 类用途: 汇总一轮 Messages 请求的输入、工具和可选控制，避免长参数列表隐藏调用依赖。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _AnthropicGenerateRequest:
     prompt: str
     system_instruction: str = ""
@@ -63,7 +65,8 @@ class _AnthropicGenerateRequest:
 
 # LLM: 流式回调一起传递，避免 _anthropic_stream_text_once 超过 4 个参数；收集器按非空字段逐个接线。
 # 类用途: 汇总一次流式请求的观察者回调与首事件等待预算，供模块级流收集函数使用。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _StreamCallbacks:
     on_chunk: Callable[[str], None] | None = None
     on_thinking_delta: Callable[[str], None] | None = None
@@ -156,7 +159,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         options: BackendOptions,
         anthropic_version: str = "2023-06-01",
     ):
-        super().__init__(options)
+        HttpBackend.__init__(self, options)
         self.anthropic_version = anthropic_version
 
     # LLM: Anthropic-compatible 声明工具参数 delta 与 thinking block-stop 两项能力；
@@ -269,7 +272,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             ]
             if len(blocks) == 1 and isinstance(blocks[0].get("input"), dict):
                 return ModelResponse(
-                    text=json.dumps(blocks[0]["input"], ensure_ascii=False),
+                    text=hot_json.dumps(blocks[0]["input"], ensure_ascii=False),
                     backend=response.backend,
                     usage=dict(response.usage),
                     stop_reason=response.stop_reason,

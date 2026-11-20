@@ -4,43 +4,47 @@
 from __future__ import annotations
 
 import importlib
+from operator import attrgetter
 from typing import Any
 
-_EXPORTS: dict[str, tuple[str, str]] = {
-    "AnthropicCompatibleBackend": ("anthropic", "AnthropicCompatibleBackend"),
-    "BackendOptions": ("base", "BackendOptions"),
-    "BaseBackend": ("base", "BaseBackend"),
-    "EchoBackend": ("base", "EchoBackend"),
-    "HttpBackend": ("http", "HttpBackend"),
-    "ModelResponse": ("base", "ModelResponse"),
-    "OpenAICompatibleBackend": ("openai_chat", "OpenAICompatibleBackend"),
-    "ProviderRequestOptions": ("base", "ProviderRequestOptions"),
-    "get_backend": ("factory", "get_backend"),
-    "ProviderContextWindowError": ("errors", "ProviderContextWindowError"),
-    "ProviderQuotaExhaustedError": ("errors", "ProviderQuotaExhaustedError"),
-    "ProviderConnectionError": ("errors", "ProviderConnectionError"),
-    "ProviderConfigurationError": ("errors", "ProviderConfigurationError"),
-    "ProviderRecoverableError": ("errors", "ProviderRecoverableError"),
-    "ProviderRequestRejectedError": ("errors", "ProviderRequestRejectedError"),
-    "ProviderResponseError": ("errors", "ProviderResponseError"),
-    "ProviderStreamIncompleteError": ("errors", "ProviderStreamIncompleteError"),
-    "ProviderTimeoutError": ("errors", "ProviderTimeoutError"),
-    "ProviderTransientError": ("errors", "ProviderTransientError"),
-    "ProviderUsageLimitError": ("errors", "ProviderUsageLimitError"),
-    "is_provider_context_window_error": ("errors", "is_provider_context_window_error"),
-    "is_provider_configuration_error": ("errors", "is_provider_configuration_error"),
-    "is_provider_quota_exhausted_error": ("errors", "is_provider_quota_exhausted_error"),
-    "is_provider_recoverable_error": ("errors", "is_provider_recoverable_error"),
-    "is_provider_stream_timeout_error": ("errors", "is_provider_stream_timeout_error"),
-    "is_provider_timeout_error": ("errors", "is_provider_timeout_error"),
-    "is_provider_transient_error": ("errors", "is_provider_transient_error"),
-    "is_provider_usage_limit_error": ("errors", "is_provider_usage_limit_error"),
-    "provider_quota_exhausted_report": ("errors", "provider_quota_exhausted_report"),
-    "provider_configuration_report": ("errors", "provider_configuration_report"),
-    "provider_recoverable_report": ("errors", "provider_recoverable_report"),
-    "provider_response_report": ("errors", "provider_response_report"),
-    "provider_timeout_report": ("errors", "provider_timeout_report"),
-    "provider_transient_report": ("errors", "provider_transient_report"),
+_EXPORTS = {
+    name: (module, attrgetter(name))
+    for name, module in {
+        "AnthropicCompatibleBackend": "anthropic",
+        "BackendOptions": "base",
+        "BaseBackend": "base",
+        "EchoBackend": "base",
+        "HttpBackend": "http",
+        "ModelResponse": "base",
+        "OpenAICompatibleBackend": "openai_chat",
+        "ProviderRequestOptions": "base",
+        "get_backend": "factory",
+        "ProviderContextWindowError": "errors",
+        "ProviderQuotaExhaustedError": "errors",
+        "ProviderConnectionError": "errors",
+        "ProviderConfigurationError": "errors",
+        "ProviderRecoverableError": "errors",
+        "ProviderRequestRejectedError": "errors",
+        "ProviderResponseError": "errors",
+        "ProviderStreamIncompleteError": "errors",
+        "ProviderTimeoutError": "errors",
+        "ProviderTransientError": "errors",
+        "ProviderUsageLimitError": "errors",
+        "is_provider_context_window_error": "errors",
+        "is_provider_configuration_error": "errors",
+        "is_provider_quota_exhausted_error": "errors",
+        "is_provider_recoverable_error": "errors",
+        "is_provider_stream_timeout_error": "errors",
+        "is_provider_timeout_error": "errors",
+        "is_provider_transient_error": "errors",
+        "is_provider_usage_limit_error": "errors",
+        "provider_quota_exhausted_report": "errors",
+        "provider_configuration_report": "errors",
+        "provider_recoverable_report": "errors",
+        "provider_response_report": "errors",
+        "provider_timeout_report": "errors",
+        "provider_transient_report": "errors",
+    }.items()
 }
 
 __all__ = list(_EXPORTS)
@@ -51,9 +55,9 @@ __all__ = list(_EXPORTS)
 def __getattr__(name: str) -> Any:
     target = _EXPORTS.get(name)
     if target is not None:
-        module_name, attribute_name = target
+        module_name, get_export = target
         module = importlib.import_module(f".{module_name}", __name__)
-        value = getattr(module, attribute_name)
+        value = get_export(module)
         globals()[name] = value
         return value
     try:
