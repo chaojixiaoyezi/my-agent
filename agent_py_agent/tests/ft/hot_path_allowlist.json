@@ -144,38 +144,6 @@
       "count": 1,
       "reason": "cold-path: forwards optional extension attributes outside the completion callback"
     },
-    "agent/conversation/wake_attempt_tracking.py::_log::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/conversation/wake_attempt_tracking.py::_log_stopping_failure::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/conversation/wake_attempt_tracking.py::_trackers::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/conversation/wake_domain_closeout.py::_log::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/conversation/wake_poison.py::_after_failure::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/conversation/wake_poison.py::_after_uncounted::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/conversation/wake_poison.py::mark_stall_alerted::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/conversation/wake_poison.py::next_poison_state::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M20"
-    },
     "agent/gateway_parts/bounded_http_server.py::GatewayBoundedHTTPServer.__init__::super0": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M22"
@@ -307,18 +275,6 @@
     "agent/gateway_parts/request_execution.py::_run_gateway_ask_with_model::replace_on_fast_frozen": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M14"
-    },
-    "agent/gateway_parts/request_worker.py::_cache_verified_pending_payload::json_dumps_default": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/gateway_parts/request_worker.py::_config_without_runtime_paths::dyn_hasattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
-    },
-    "agent/gateway_parts/request_worker.py::_config_without_runtime_paths::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M20"
     },
     "agent/gateway_parts/response_renderer.py::_int_value::dyn_getattr": {
       "count": 1,

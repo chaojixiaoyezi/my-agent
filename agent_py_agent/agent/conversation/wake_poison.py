@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields
 
+from ..common.fast_dataclass import fast_frozen, fast_replace
 from ..runtime_errors import is_structured_error_code
+from ..settings.model_provider_schema import ModelProfileError
 
 # 同一原因连续失败到这个次数就结案。比进度策略的 3 次宽，给类型没覆盖到的短暂竞态留余量；
 # 7b83c8730 那类程序错误最多被领取 5 次，而不是每 30 秒一次直到有人发现。
@@ -54,6 +56,7 @@ WAKE_REASON_COMPACT_YIELD = "run:compact_yield"
 WAKE_REASON_WAKE_NOT_SETTLED = "run:wake_not_settled"
 WAKE_REASON_GATEWAY_STOPPED = "attempt:gateway_stopped"
 WAKE_REASON_LEDGER_CORRUPT = "attempt:ledger_corrupt"
+WAKE_REASON_MODEL_PROFILE_DISABLED = "environment_pause:model_profile_disabled"
 
 # 一次尝试走的路径：拿到会话 claim 之后执行；只重投（已有冻结交付，不调模型）；额度分路（只发回退通知）。
 WAKE_ATTEMPT_PATH_CLAIMED = "claimed"
@@ -87,10 +90,12 @@ _SQLITE_LOCK_PRIMARY_CODES = frozenset({5, 6})
 # LLM: kind 取 WAKE_VERDICT_* 之一；reason_code 是结构化原因，计数失败时是比较"是否同因"的唯一依据，
 #   不计数时用于长时间不计数的提醒与超时结案。
 # 类用途: 一次领取尝试的结构化判定结果。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class WakeAttemptVerdict:
     kind: str
     reason_code: str = ""
+    environment_pause_fingerprint: str = field(default="", kw_only=True)
 
 
 WAKE_ATTEMPT_NEUTRAL = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL)
@@ -103,7 +108,8 @@ WAKE_ATTEMPT_GATEWAY_STOPPED = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REA
 #   坏值抛 ValueError 交存储层转数据损坏。batch_failures>0 表示下一次必须逐条单独执行；uncounted_* 描述当前
 #   连续不计数段，stall_* 记录提醒；neutral_* 单独保存结案窗口，None计数表示旧账尚无类型证据。
 # 类用途: 保存一条唤醒的同因连续段、总失败次数、批次隔离、连续不计数段、只重投失败和下次最早可再试的时间。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class WakePoisonState:
     reason_code: str = ""
     same_cause_count: int = 0
@@ -122,11 +128,17 @@ class WakePoisonState:
     next_attempt_at: float = 0.0
     neutral_count: int | None = None
     neutral_since: float = 0.0
+    environment_pause_reason: str = field(default="", kw_only=True)
+    environment_pause_fingerprint: str = field(default="", kw_only=True)
 
     # LLM: 字段与写盘键一一对应，from_dict 是它的严格逆操作；新增字段要同步 from_dict 的一致性检查与测试。
     # 函数用途: 转成可写盘的普通字典。
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        if not self.environment_pause_reason and not self.environment_pause_fingerprint:
+            del payload["environment_pause_reason"]
+            del payload["environment_pause_fingerprint"]
+        return payload
 
     # LLM: 只接受本类字段，未知键按数据损坏处理；计数必须是非负 int（bool 不算），时间必须是有限的非负数，
     #   原因码必须是字符串；再核计数与时间之间的一致性（_check_consistency），矛盾同样抛 ValueError。
@@ -147,7 +159,8 @@ class WakePoisonState:
 
 # LLM: same_cause_count / total_count 描述结案时的计数；只重投结案时 redelivery_failures 为重投失败次数。
 # 类用途: 表示一条唤醒已达上限、应当结案，以及结案的结构化原因。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class QuarantineDecision:
     reason_code: str
     same_cause_count: int
@@ -163,7 +176,8 @@ class QuarantineDecision:
 
 # LLM: 只描述当前连续不计数段：原因码是最近一次不计数的原因，alert_number 从 1 开始；不含错误消息或正文。
 # 类用途: 表示一条唤醒连续不计数已满提醒窗口、需要发运维事件和宿主提示。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class WakeStallAlert:
     reason_code: str
     uncounted_count: int
@@ -193,8 +207,14 @@ def verdict_for_admission(admission: str) -> WakeAttemptVerdict:
 def verdict_for_error(error: BaseException) -> WakeAttemptVerdict:
     if not isinstance(error, Exception):
         return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, f"error:base_exception:{type(error).__name__}")
+    if is_disabled_model_profile(error):
+        return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REASON_MODEL_PROFILE_DISABLED)
     kind = WAKE_VERDICT_NEUTRAL if _is_uncounted(error) else WAKE_VERDICT_FAILURE
     return WakeAttemptVerdict(kind, _error_reason_code(error))
+
+
+def is_disabled_model_profile(error: BaseException) -> bool:
+    return isinstance(error, ModelProfileError) and error.reason in {"profile_disabled", "provider_disabled"}
 
 
 # LLM: report 必须是真实报告对象（None 抛 ValueError）；"确实执行了、却没出报告"走 verdict_for_missing_report，
@@ -222,7 +242,8 @@ def verdict_for_missing_report() -> WakeAttemptVerdict:
 #   delivery_frozen 由调用方重读 pending 信封后算出（cached_owner_delivery 非空）。"唤醒已不在 pending → 删账"和
 #   "根本没开始尝试 → 不记账"由接线层先判掉，不进本判定。
 # 类用途: 描述一次已经结束的唤醒领取尝试，供 verdict_for_attempt 归类。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class WakeAttemptFacts:
     path: str = WAKE_ATTEMPT_PATH_CLAIMED
     claim_status: str = WAKE_CLAIM_FINISHED
@@ -296,20 +317,29 @@ def next_poison_state(state: WakePoisonState, verdict: WakeAttemptVerdict, *, no
         raise ValueError(f"wake attempt verdict {verdict.kind!r} requires a reason_code")
     if verdict.kind == WAKE_VERDICT_SUCCESS:
         return WakePoisonState()
+    if verdict.kind == WAKE_VERDICT_NEUTRAL:
+        if verdict.reason_code == WAKE_REASON_HOST_RESTART_PARK:
+            return state
+        if verdict.reason_code == WAKE_REASON_MODEL_PROFILE_DISABLED:
+            # 配置停用不消耗原失败配额，也不进入普通不计数尝试的结案窗口。
+            return fast_replace(
+                state,
+                environment_pause_reason=verdict.reason_code,
+                environment_pause_fingerprint=verdict.environment_pause_fingerprint or "unknown",
+            )
+    if state.environment_pause_reason:
+        state = fast_replace(state, environment_pause_reason="", environment_pause_fingerprint="")
     if verdict.kind == WAKE_VERDICT_FAILURE:
         return _after_failure(state, verdict.reason_code, now)
     if verdict.kind == WAKE_VERDICT_NEUTRAL:
-        if verdict.reason_code == WAKE_REASON_HOST_RESTART_PARK:
-            # 宿主维护让出没有新增业务尝试，不能推进neutral结案窗或重置旧失败事实。
-            return state
         return _after_uncounted(state, verdict.reason_code, now)
     if verdict.kind == WAKE_VERDICT_BATCH_FAILURE:
-        return replace(_after_uncounted(state, verdict.reason_code, now, is_batch=True), batch_failures=state.batch_failures + 1,
+        return fast_replace(_after_uncounted(state, verdict.reason_code, now, is_batch=True), batch_failures=state.batch_failures + 1,
                        next_attempt_at=now + WAKE_POISON_BACKOFF_BASE_SECONDS)
     if verdict.kind == WAKE_VERDICT_REDELIVERY_FAILURE:
         failures = state.redelivery_failures + 1
         at = max(now, state.last_redelivery_failed_at)
-        return replace(state, redelivery_failures=failures,
+        return fast_replace(state, redelivery_failures=failures,
                        first_redelivery_failed_at=at if state.redelivery_failures == 0 else state.first_redelivery_failed_at,
                        last_redelivery_failed_at=at, next_attempt_at=at + redelivery_backoff_seconds(failures))
     raise ValueError(f"unknown wake attempt verdict kind: {verdict.kind!r}")
@@ -323,7 +353,7 @@ def _after_failure(state: WakePoisonState, reason_code: str, now: float) -> Wake
     same = state.same_cause_count + 1 if reason_code == state.reason_code else 1
     total = state.total_count + 1
     at = max(now, state.last_failed_at)
-    return replace(state, reason_code=reason_code, same_cause_count=same, total_count=total,
+    return fast_replace(state, reason_code=reason_code, same_cause_count=same, total_count=total,
                    first_failed_at=at if state.total_count == 0 else state.first_failed_at, last_failed_at=at,
                    uncounted_reason_code="", uncounted_count=0, uncounted_since=0.0, stall_alerts=0,
                    last_stall_alert_at=0.0, next_attempt_at=at + poison_backoff_seconds(total),
@@ -340,7 +370,7 @@ def _after_uncounted(state: WakePoisonState, reason_code: str, now: float, *, is
     if not is_batch:
         neutral_since = neutral_since if neutral_count else at
         neutral_count += 1
-    return replace(state, uncounted_reason_code=reason_code or state.uncounted_reason_code,
+    return fast_replace(state, uncounted_reason_code=reason_code or state.uncounted_reason_code,
                    uncounted_count=count, uncounted_since=since,
                    next_attempt_at=at + poison_backoff_seconds(count),
                    neutral_count=neutral_count, neutral_since=neutral_since)
@@ -359,6 +389,8 @@ def _neutral_window(state: WakePoisonState) -> tuple[int, float]:
 # LLM: 同因/总数/重投先判；至少五次可信neutral且其窗口满24小时才结案。原重投期限辨识不变。
 # 函数用途: 不扣历史批次，不借用批次窗口，保护纯batch与短时间neutral重试。
 def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
+    if state.environment_pause_reason:
+        return None
     if state.same_cause_count >= WAKE_POISON_SAME_CAUSE_LIMIT_COUNT:
         return _decision(state, state.reason_code, mixed_causes=False)
     if state.total_count >= WAKE_POISON_TOTAL_LIMIT_COUNT:
@@ -388,7 +420,7 @@ def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
 #   只判定不写状态，调用方发出提醒后必须用 mark_stall_alerted 记账，否则会重复提醒。
 # 函数用途: 判断一条唤醒是否该发"长时间不计数"的运维提醒。
 def stall_alert(state: WakePoisonState, *, now: float) -> WakeStallAlert | None:
-    if state.uncounted_count == 0 or now - state.uncounted_since < WAKE_UNCOUNTED_STALL_SECONDS:
+    if state.environment_pause_reason or state.uncounted_count == 0 or now - state.uncounted_since < WAKE_UNCOUNTED_STALL_SECONDS:
         return None
     if state.stall_alerts and now - state.last_stall_alert_at < WAKE_UNCOUNTED_STALL_SECONDS:
         return None
@@ -400,7 +432,7 @@ def stall_alert(state: WakePoisonState, *, now: float) -> WakeStallAlert | None:
 #   max(now, 上次提醒, 段起点)，保证"提醒不早于段起点"的一致性。
 # 函数用途: 记下已经为当前不计数段发过一次提醒。
 def mark_stall_alerted(state: WakePoisonState, *, now: float) -> WakePoisonState:
-    return replace(state, stall_alerts=state.stall_alerts + 1,
+    return fast_replace(state, stall_alerts=state.stall_alerts + 1,
                    last_stall_alert_at=max(now, state.last_stall_alert_at, state.uncounted_since))
 
 
@@ -554,6 +586,8 @@ def _check_consistency(state: WakePoisonState) -> None:
         _window_broken(state.redelivery_failures, state.first_redelivery_failed_at, state.last_redelivery_failed_at),
         _uncounted_broken(state),
         _neutral_window_broken(state),
+        state.environment_pause_reason not in {"", WAKE_REASON_MODEL_PROFILE_DISABLED},
+        bool(state.environment_pause_reason) != bool(state.environment_pause_fingerprint),
     ]
     if any(problems):
         raise ValueError("wake poison state counts and timestamps contradict each other")

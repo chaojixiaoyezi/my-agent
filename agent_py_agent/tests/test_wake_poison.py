@@ -195,8 +195,8 @@ class TestError:
         (ModelProfileError("profile missing"), "error:data_parse:ModelProfileError"),
         (RuntimeError("boom"), "error:programmer_bug:RuntimeError"),
         (KeyError("x"), "error:programmer_bug:KeyError"),
-        (_sqlite_error(None), "error:programmer_bug:OperationalError"),
-        (_sqlite_error(1), "error:programmer_bug:OperationalError"),
+        (_sqlite_error(None), "error:sqlite_uncertain:OperationalError"),
+        (_sqlite_error(1), "error:sqlite_uncertain:OperationalError"),
     ], ids=lambda value: value if isinstance(value, str) else type(value).__name__)
     def test_other_errors_count_with_a_structured_code(self, error, code):
         assert verdict_for_error(error) == _failure(code)

@@ -13,9 +13,9 @@
 # 模块用途: 唤醒结案时收回派活或准确认证通知工作片并保留原提示；原claim CAS防抢占，不停计划或改凭据。
 from __future__ import annotations
 
-import json
 from typing import Any
 
+from ..common import hot_json
 from .background_claim import SESSION_TASK_BODY_ABANDONED_ADMISSION
 from .host_notices import HostNotice, host_notice, queue_host_notice
 from .models import SESSION_MESSAGE_WAKE_REASON, SESSION_TASK_WAKE_REASON, WakeSignal
@@ -170,7 +170,7 @@ def _metadata(signal: WakeSignal) -> dict:
 
 # 函数用途: 输出一行结构化日志（与 wake_attempt_tracking 同一前缀），只含结构化字段。
 def _log(event: str, signal: WakeSignal, fields: dict) -> None:
-    print(f"{_LOG_PREFIX} " + json.dumps(
+    print(f"{_LOG_PREFIX} " + hot_json.dumps(
         {"event": event, "wake_signal_id": signal.wake_signal_id, "thread_id": signal.thread_id, **fields},
         ensure_ascii=False, sort_keys=True), flush=True)
 
