@@ -11,7 +11,9 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import closing
-from dataclasses import dataclass, replace
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
+from uuid import uuid4
 
 from ..agent_core.model.call_runtime import (
     compact_summary_output_reserve_tokens,
@@ -21,7 +23,9 @@ from ..agent_core.model.call_runtime import (
 )
 from ..agent_core.model.context_window import resolve_model_context_window_tokens
 from ..backends.base import ModelResponse
-from ..backends.errors import ProviderContextWindowError
+from ..backends.errors import ProviderContextWindowError, is_empty_provider_response_error
+from ..backends.gateway_helpers import provider_attempt_admission
+from ..backends.reply_diagnostics import reported_token_counts
 from ..backends.request_budget import (
     REQUEST_INPUT_SAFETY_TOKENS,
     RequestBudgetExceeded,
@@ -32,6 +36,7 @@ from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_l
 from ..tooling.runtime_contracts import ToolChoice
 from .auxiliary_model_call import (
     AuxiliaryModelCallRequest,
+    _diagnostic_label,
     auxiliary_response_shape,
     generate_auxiliary_model_response,
 )
@@ -177,6 +182,7 @@ def generate_bounded_compact_response(
     vision_summary: bool = False,
     media_reserve_tokens: int = 0,
     calibration: CompactRequestCalibration | None = None,
+    attempt_budget: CompactAttemptBudget | None = None,
 ) -> object:
     config = getattr(request.agent, 'config', None)
     interval = float(getattr(config, 'memory_compact_progress_heartbeat_seconds', 5.0))
@@ -187,26 +193,31 @@ def generate_bounded_compact_response(
             # 后端对 None 本就发送 auto；只补等价的显式默认，不覆盖前台已选策略。
             request = replace(request, tool_choice=ToolChoice.auto('compact_cache_surface'))
         raise_if_compact_interrupted(interrupt_check)
+        if attempt_budget is None:
+            attempt_budget = _new_compact_attempt_budget(request.agent)
         if vision_summary:
             return _generate_vision_summary_response(request, message_source, compact_summary_budget(request.agent), interrupt_check, media_reserve_tokens,
-                                                    calibration=calibration)
+                                                    calibration=calibration, attempt_budget=attempt_budget)
         shared_prefix = message_source is not None and message_source.preserve_prefix
         # 完整前缀只需能容纳完整窗口；尚未使用的80%分段几何不能提前否决它。
         single_budget = (compact_cache_surface_budget(request.agent) if request.tools or shared_prefix
                          else compact_summary_budget(request.agent))
         attempt = _CompactAttemptContext(single_budget, interrupt_check, preserve_complete_fallback, message_source,
-                                         calibration=calibration)
+                                         calibration=calibration, attempt_budget=attempt_budget)
         cached_source = _single_request_source(request, message_source, _SurfaceBudget(single_budget, calibration))
         result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source, budget=single_budget))
                   if cached_source is not None else None)
         if result is not None:
             if result.response is not None:
                 return result.response
+            if attempt_budget.remaining <= 0:
+                raise _compact_attempt_exhausted(attempt_budget, "cached_fallback")
         if message_source is not None and message_source.preserve_prefix:
             return _prefix_failure_or_tool_reply(attempt)
         budget = compact_summary_budget(request.agent)
         attempt = replace(attempt, budget=min(budget, result.budget) if result is not None else budget,
-                          tool_call_reply=result.tool_call_reply if result is not None else None)
+                          tool_call_reply=result.tool_call_reply if result is not None else None,
+                          cached_empty=bool(result is not None and result.cached_empty))
         return _summarize_or_return_tool_call(request, attempt, source_progress)
 
 
@@ -268,7 +279,50 @@ def _single_request_source(
     return _SingleRequestSource(shrunk.source)
 
 
-# LLM: Context holds per-generation controls so the cached request and its one repair share exact policy and calibration.
+@dataclass
+class CompactAttemptBudget:
+    """同一次候选的物理调用配额，缓存、分段及底层重试共同扣减。"""
+
+    remaining: int
+    consumed_by_stage: dict[str, int]
+    empty_count: int = 0
+    exhausted_cause: str = ""
+    attempt_id: str = field(default_factory=lambda: uuid4().hex, repr=False, compare=False, kw_only=True)
+
+    def consume(self, stage: str) -> bool:
+        if self.remaining <= 0:
+            self.exhausted_cause = stage
+            return False
+        self.remaining -= 1
+        self.consumed_by_stage[stage] = self.consumed_by_stage.get(stage, 0) + 1
+        return True
+
+
+def _new_compact_attempt_budget(agent: object) -> CompactAttemptBudget:
+    from ..agent_core.provider_transient_auto_resume import provider_transient_retry_delays
+
+    policy = getattr(agent, "runtime_guard_policy", None)
+    # 一次缓存发送、一次缓存纠正、一次初始分段，以及原分段纠正和退避阶梯各一份。
+    return CompactAttemptBudget(3 + _SEGMENT_REPAIR_LIMIT_COUNT + len(provider_transient_retry_delays(policy)), {})
+
+
+def _compact_attempt_exhausted(budget: CompactAttemptBudget, cause: str) -> ConversationCompactError:
+    budget.exhausted_cause = cause
+    logging.getLogger(__name__).warning(
+        "Compact 摘要尝试结束",
+        extra={"compact_attempt_budget": {
+            "compact_attempt_id": budget.attempt_id, "remaining": budget.remaining, "consumed_by_stage": dict(budget.consumed_by_stage),
+            "empty_count": budget.empty_count, "exhausted_cause": cause,
+        }},
+    )
+    return ConversationCompactError(
+        "摘要尝试预算已用完或没有可用的空回复纠正方案，旧检查点与其覆盖游标已保留。"
+        "请缩小待摘要的来源或检查模型服务后，从原检查点继续。",
+        code="COMPACT_EMPTY_BUDGET_EXHAUSTED",
+    )
+
+
+# LLM: 缓存面和分段共用候选的发送预算、取消边界与计量口径。
 # 类用途: 传递当前预算、取消边界、来源投影与完整回退约束。
 @dataclass(frozen=True)
 class _CompactAttemptContext:
@@ -279,6 +333,8 @@ class _CompactAttemptContext:
     retry: bool = False
     tool_call_reply: object | None = None
     calibration: CompactRequestCalibration | None = None
+    attempt_budget: CompactAttemptBudget | None = None
+    cached_empty: bool = False
 
 
 # LLM: Result separates usable text response from a rejected structured tool response retained only for old fallback behavior.
@@ -288,6 +344,7 @@ class _CompactAttemptResult:
     response: object | None
     tool_call_reply: object | None
     budget: int
+    cached_empty: bool = False
 
 
 # LLM: 窗口错误才缩减预算；空正文及工具响应共用一次修复，不能叠加第三次完整请求。
@@ -302,6 +359,11 @@ def _try_cached_compact_requests(
         response = _generate_cached_summary_response(request, attempt)
         raise_if_compact_interrupted(attempt.interrupt_check)
         _raise_if_preserved_compact_truncation(response, request, attempt)
+        if getattr(response, "text", None) is not None and _compact_summary_response_facts(
+                response, reject_truncated=True)[1] == "EMPTY" and attempt.attempt_budget is not None:
+            if attempt.message_source is not None and attempt.message_source.preserve_prefix:
+                raise _compact_attempt_exhausted(attempt.attempt_budget, "cached_empty_no_variant")
+            return _CompactAttemptResult(None, None, attempt.budget, cached_empty=True)
         if not _response_has_tool_calls(response):
             return _CompactAttemptResult(response, None, attempt.budget)
         compact_summary_response_outcome(response, request=request)
@@ -316,11 +378,12 @@ def _try_cached_compact_requests(
         return _CompactAttemptResult(None, rejected_response, attempt.budget)
 
 
-# EMPTY、TOOL_CALL 与严格摘要 TRUNCATED 共用一次修复，不提高配置输出上限；完整前缀与工具保持原样。
-# 首次已截断的正文不回灌，追加精简要求后重新计量，仍不完整就交原严格错误。
-# 函数用途: 不改工具、system 和历史前缀，给不可用摘要一次有界恢复机会。
+# EMPTY、TOOL_CALL 与严格摘要 TRUNCATED 共用一次缓存面纠正，重新计量动态尾部。
 def _generate_cached_summary_response(request, attempt):
-    response = _generate_materialized_response(request, attempt.message_source, calibration=attempt.calibration)
+    source_range = (("prompt_characters", 0, len(str(request.prompt or "")))
+                    if attempt.message_source is None and request.messages is None else None)
+    response = _generate_materialized_response(request, attempt.message_source, attempt=attempt,
+                                               stage="cached", source_range=source_range)
     raise_if_compact_interrupted(attempt.interrupt_check)
     if getattr(response, "text", None) is None:
         return response
@@ -328,11 +391,12 @@ def _generate_cached_summary_response(request, attempt):
     if reason in {"EMPTY", "TOOL_CALL"} or (reason == "TRUNCATED" and attempt.preserve_complete_fallback):
         compact_summary_response_outcome(response, request=request)
         raise_if_compact_interrupted(attempt.interrupt_check)
-        retry = _cached_compact_repair_request(request, reason) if reason != 'EMPTY' else request
+        retry = _cached_compact_repair_request(request, reason)
         budget = _SurfaceBudget(attempt.budget, attempt.calibration)
         if budget.measure(_request_tokens(retry, attempt.message_source)) > budget.tokens:
             return response
-        response = _generate_materialized_response(retry, attempt.message_source, calibration=attempt.calibration)
+        response = _generate_materialized_response(retry, attempt.message_source, attempt=attempt,
+                                                   stage="auxiliary", source_range=source_range)
         raise_if_compact_interrupted(attempt.interrupt_check)
     return response
 
@@ -370,8 +434,12 @@ def _summarize_or_return_tool_call(
             attempt.preserve_complete_fallback,
             attempt.message_source,
             calibration=attempt.calibration,
+            attempt_budget=attempt.attempt_budget,
         )
     except ConversationCompactError as exc:
+        if (attempt.cached_empty and attempt.attempt_budget is not None
+                and exc.code in {"COMPACT_SOURCE_NON_TEXT", "COMPACT_FIXED_PREFIX_TOO_LARGE", "COMPACT_SOURCE_EMPTY"}):
+            raise _compact_attempt_exhausted(attempt.attempt_budget, "cached_empty_no_variant") from exc
         if attempt.tool_call_reply is not None and exc.code in _TOOL_CALL_FALLBACK_CODES:
             return attempt.tool_call_reply
         raise
@@ -386,43 +454,55 @@ def _response_has_tool_calls(response: object) -> bool:
     )
 
 
-# 保留原工具、tool_choice、system 和消息；只向动态末尾追加已分类的纠正要求，不破坏缓存前缀。
+# 保留工具定义、system 和历史，工具响应纠正时显式禁止调用。
 def _cached_compact_repair_request(request: AuxiliaryModelCallRequest, reason: str) -> AuxiliaryModelCallRequest:
     instruction = _SEGMENT_REPAIR_INSTRUCTION[reason]
     layout = prompt_cache_layout(request.prompt)
     prompt = (CacheStructuredPrompt(layout.stable_prefix, f'{layout.volatile_suffix}\n\n{instruction}')
               if layout is not None else f'{request.prompt}\n\n{instruction}')
-    return replace(request, prompt=prompt, token_budget=None)
+    choice = ToolChoice.none('compact_summary_only') if reason == 'TOOL_CALL' else request.tool_choice
+    return replace(request, prompt=prompt, tool_choice=choice, token_budget=None)
 
 
-# LLM: B 路径只有一次请求：预算不够、ProviderContextWindowError、InputMediaError、截断都变成 typed
-#   COMPACT_VISION_SUMMARY_FAILED，由上层写线程 compact_vision_failed_generation，同代次下一次压缩选 A；不减半预算、不分段。
-#   截断只补无正文的结构化形状日志，不改变原错误码或触发额外请求。
+# LLM: 随图默认只发一次；空答复或工具回应共用一次动态尾部纠正，不能把图片切进文字分段。
+# 供应商窗口、媒体拒绝和截断继续交给原随图失败合同。
 # 函数用途: 发出保留图块的单次摘要请求，把所有随图失败归到同一个结构化码。
-def _generate_vision_summary_response(request, source, budget, interrupt_check, media_reserve_tokens, *, calibration=None):
+def _generate_vision_summary_response(
+    request, source, budget, interrupt_check, media_reserve_tokens, *, calibration=None, attempt_budget=None,
+):
+    attempt = _CompactAttemptContext(budget, interrupt_check, True, source, calibration=calibration,
+                                     attempt_budget=attempt_budget)
     if calibrated_compact_request_tokens(_request_tokens(request, source), calibration) + max(0, int(media_reserve_tokens)) > budget:
         raise ConversationCompactError("随图摘要超出摘要预算", code=COMPACT_VISION_SUMMARY_FAILED)
     try:
         raise_if_compact_interrupted(interrupt_check)
-        response = _generate_materialized_response(request, source, calibration=calibration, media_reserve_tokens=media_reserve_tokens)
+        response = _generate_materialized_response(request, source, attempt=attempt, stage='cached',
+                                                   media_reserve_tokens=media_reserve_tokens)
     except (ProviderContextWindowError, InputMediaError, RequestBudgetExceeded) as exc:
         raise ConversationCompactError(f"随图摘要请求失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED) from exc
     raise_if_compact_interrupted(interrupt_check)
-    if _response_has_tool_calls(response):
+    reason = _compact_summary_response_facts(response, reject_truncated=True)[1]
+    if getattr(response, "text", None) is not None and reason in {'TOOL_CALL', 'EMPTY'}:
         compact_summary_response_outcome(response, request=request)
-        no_tools = _cached_compact_repair_request(request, 'TOOL_CALL')
-        if calibrated_compact_request_tokens(_request_tokens(no_tools, source), calibration) + max(0, int(media_reserve_tokens)) > budget:
+        repair = _cached_compact_repair_request(request, reason)
+        if calibrated_compact_request_tokens(_request_tokens(repair, source), calibration) + max(0, int(media_reserve_tokens)) > budget:
+            if reason == 'EMPTY' and attempt_budget is not None:
+                raise _compact_attempt_exhausted(attempt_budget, 'vision_empty_no_variant')
             raise ConversationCompactError("随图无工具重试超出摘要预算", code=COMPACT_VISION_SUMMARY_FAILED)
         try:
-            response = _generate_materialized_response(no_tools, source, calibration=calibration, media_reserve_tokens=media_reserve_tokens)
+            response = _generate_materialized_response(repair, source, attempt=attempt, stage='auxiliary',
+                                                       media_reserve_tokens=media_reserve_tokens)
         except (ProviderContextWindowError, InputMediaError, RequestBudgetExceeded) as exc:
             raise ConversationCompactError(
                 f"随图无工具重试失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED
             ) from exc
         raise_if_compact_interrupted(interrupt_check)
         if _response_has_tool_calls(response):
-            compact_summary_response_outcome(response, request=no_tools)
+            compact_summary_response_outcome(response, request=repair)
             raise ConversationCompactError("随图无工具重试仍返回工具调用", code=COMPACT_VISION_SUMMARY_FAILED)
+    if (attempt_budget is not None and getattr(response, "text", None) is not None
+            and _compact_summary_response_facts(response, reject_truncated=True)[1] == "EMPTY"):
+        raise _compact_attempt_exhausted(attempt_budget, 'vision_empty_no_variant')
     if getattr(response, "truncated", False):
         compact_summary_response_outcome(response, request=request)
         raise ConversationCompactError("随图摘要回复被截断", code=COMPACT_VISION_SUMMARY_FAILED)
@@ -431,13 +511,38 @@ def _generate_vision_summary_response(request, source, budget, interrupt_check, 
 
 # LLM: 具体HTTP请求携带已校准准入预算；旧接口保留原运输形状，预算在实际辅助分派内冻结，媒体余量不能丢失。
 # 函数用途: 保持AuxiliaryModelCallRequest及供应商接口不接磁盘视图，普通列表请求原对象直传。
-def _generate_materialized_response(request, source, *, calibration=None, media_reserve_tokens=0):
+def _generate_materialized_response(
+    request, source, *, calibration=None, media_reserve_tokens=0,
+    attempt: _CompactAttemptContext | None = None, stage='cached', source_range=None,
+):
+    if attempt is not None:
+        calibration = attempt.calibration
     materialized = replace(request, messages=list(source) if source is not None else request.messages,
                            token_budget=None, input_calibration=calibration)
     tokens = calibrated_compact_request_tokens(_request_tokens(materialized), calibration) + max(0, int(media_reserve_tokens))
     admitted = (freeze_compact_request_budget(materialized, input_tokens=tokens)
                 if request_budget_supported_backend(request.agent) or media_reserve_tokens else materialized)
-    return _generate_auxiliary_with_retry(admitted)
+    if attempt is None or attempt.attempt_budget is None:
+        return _generate_auxiliary_with_retry(admitted)
+    if source_range is None:
+        source_range = (("messages", 0, len(materialized.messages)) if materialized.messages is not None
+                        else ("prompt_characters", 0, len(str(request.prompt or ""))))
+    binding = _COMPACT_DISPATCH.set(_CompactDispatch(attempt, stage, source_range, tokens))
+    try:
+        return _generate_auxiliary_with_retry(admitted)
+    finally:
+        _COMPACT_DISPATCH.reset(binding)
+
+
+@dataclass(frozen=True)
+class _CompactDispatch:
+    attempt: _CompactAttemptContext
+    stage: str
+    source_range: tuple[str, int, int]
+    input_tokens: int
+
+
+_COMPACT_DISPATCH: ContextVar[_CompactDispatch | None] = ContextVar("compact_dispatch", default=None)
 
 
 # LLM: 与主回合模型采样同一退避口径（provider_transient_auto_resume，间隔读运行护栏配置
@@ -446,9 +551,105 @@ def _generate_materialized_response(request, source, *, calibration=None, media_
 #   重发不会重复显示内容。09-30：订阅 WebSocket 偶发中途断开，一段摘要断一次不应让整次压缩失败。
 # 函数用途: 发一次摘要辅助请求，遇到可恢复的网络故障时按配置间隔自动重发。
 def _generate_auxiliary_with_retry(request: AuxiliaryModelCallRequest) -> object:
-    from ..agent_core.provider_transient_auto_resume import run_with_provider_transient_auto_resume
+    from ..agent_core.provider_transient_auto_resume import (
+        ProviderTransientRetryCallbacks,
+        run_with_provider_transient_auto_resume,
+    )
 
-    return run_with_provider_transient_auto_resume(lambda: generate_auxiliary_model_response(request))
+    dispatch = _COMPACT_DISPATCH.get()
+    if dispatch is None or dispatch.attempt.attempt_budget is None:
+        return run_with_provider_transient_auto_resume(lambda: generate_auxiliary_model_response(request))
+    budget = dispatch.attempt.attempt_budget
+    stage = dispatch.stage
+
+    def sample():
+        nonlocal stage
+        current_stage, stage = stage, "transient"
+        return _send_compact_attempt(request, dispatch, budget, current_stage)
+
+    def admit_retry():
+        raise_if_compact_interrupted(dispatch.attempt.interrupt_check)
+        if budget.remaining <= 0:
+            raise _compact_attempt_exhausted(budget, "transient")
+        return True
+
+    return run_with_provider_transient_auto_resume(
+        sample, policy=getattr(request.agent, "runtime_guard_policy", None),
+        callbacks=ProviderTransientRetryCallbacks(retry_guard=admit_retry),
+    )
+
+
+def _send_compact_attempt(request, dispatch, budget, stage):
+    raise_if_compact_interrupted(dispatch.attempt.interrupt_check)
+    # 兼容无内置传输的后端：执行前预留首次发送，内置传输逐次扣减后续发送。
+    if not budget.consume(stage):
+        raise _compact_attempt_exhausted(budget, stage)
+    attempt_id = None
+
+    def admit(event):
+        nonlocal attempt_id, stage
+        raise_if_compact_interrupted(dispatch.attempt.interrupt_check)
+        if attempt_id is not None:
+            _record_compact_attempt(request, dispatch, stage, attempt_id)
+            attempt_id = None
+            if not budget.consume("transient"):
+                raise _compact_attempt_exhausted(budget, "transient")
+            stage = "transient"
+        attempt_id = event["attempt_id"]
+
+    try:
+        with provider_attempt_admission(admit):
+            response = generate_auxiliary_model_response(request)
+    except Exception as exc:
+        if not isinstance(exc, ConversationCompactError) or exc.code != "COMPACT_EMPTY_BUDGET_EXHAUSTED":
+            _record_compact_attempt(request, dispatch, stage, attempt_id, failure=exc)
+        if not is_empty_provider_response_error(exc):
+            raise
+        budget.empty_count += 1
+        return ModelResponse(text="", backend=str(getattr(getattr(request.agent, "backend", None), "name", "")))
+    _record_compact_attempt(request, dispatch, stage, attempt_id, response=response)
+    if getattr(response, "text", None) is not None and _compact_summary_response_facts(
+            response, reject_truncated=True)[1] == "EMPTY":
+        budget.empty_count += 1
+    return response
+
+
+def _record_compact_attempt(request, dispatch, stage, attempt_id, *, response=None, failure=None):
+    shape = getattr(response, "model_call_diagnostic", None)
+    if failure is not None and is_empty_provider_response_error(failure):
+        shape = getattr(failure, "details", None)
+    shape = shape if isinstance(shape, dict) else {}
+    reported = reported_token_counts(getattr(response, "usage", None))
+    if failure is not None:
+        reported = reported_token_counts(shape)
+    token_budget = getattr(response, "request_token_budget", None) or request.token_budget
+    response_shape = auxiliary_response_shape(response) if response is not None else {}
+    text_chars = shape.get("text_chars")
+    tool_count = shape.get("tool_use_count")
+    end_frame = shape.get("stream_end_frame")
+    stop_reason = response_shape.get("stop_reason")
+    if failure is not None and isinstance(label := shape.get("stop_reason"), str):
+        stop_reason = _diagnostic_label(label)
+    logging.getLogger(__name__).info(
+        "Compact 摘要请求事实",
+        extra={"compact_request_attempt": {
+            **_diagnostic_identity(request),
+            "compact_attempt_id": dispatch.attempt.attempt_budget.attempt_id,
+            "attempt_id": attempt_id,
+            "stage": stage,
+            "source_range": dispatch.source_range,
+            "provider": getattr(getattr(request.agent, "backend", None), "name", None),
+            "input_tokens": token_budget.input_tokens if token_budget is not None else dispatch.input_tokens,
+            "input_budget": dispatch.attempt.budget,
+            "output_budget": token_budget.output_tokens if token_budget is not None else None,
+            "output_budget_server_managed": token_budget.server_managed_output if token_budget is not None else None,
+            **reported,
+            "text_chars": text_chars if type(text_chars) is int and text_chars >= 0 else response_shape.get("text_chars"),
+            "tool_use_count": tool_count if type(tool_count) is int and tool_count >= 0 else response_shape.get("tool_use_count"),
+            "stream_end_frame": end_frame if type(end_frame) is bool else None,
+            "stop_reason": stop_reason,
+        }},
+    )
 
 
 # LLM: Count the same complete surface sent by AuxiliaryModelCallRequest, including schemas and
@@ -504,6 +705,7 @@ def _summarize_segments(
     preserve_complete_fallback: bool = False,
     message_source: CompactMessageSource | None = None,
     *, calibration: CompactRequestCalibration | None = None,
+    attempt_budget: CompactAttemptBudget | None = None,
 ) -> object:
     native = message_source is not None or request.messages is not None
     if message_source is not None:
@@ -532,19 +734,24 @@ def _summarize_segments(
                (lambda: iter((str(request.prompt),))))
     with CompactTextSource(factory, interrupt_check) as source:
         return _summarize_source(base, source, budget, interrupt_check, source_progress, preserve_complete_fallback,
-                                 calibration=calibration)
+                                 calibration=calibration, attempt_budget=attempt_budget)
 
 
 # LLM: 复用唯一分段/修复循环，成功才释放当前窗口；全部字符一致且未取消后才交回最终摘要，不推进canonical游标。
 # 函数用途: 逐段消费临时来源，保持原摘要累积、失败策略和进度，结束时验证两遍来源一致。
-def _summarize_source(base, source, budget, interrupt_check, source_progress, preserve_complete_fallback, *, calibration=None):
+def _summarize_source(
+    base, source, budget, interrupt_check, source_progress, preserve_complete_fallback,
+    *, calibration=None, attempt_budget=None,
+):
     offset = 0
     summary = ""
     digests: list[str] = []
     response: object | None = None
     while offset < len(source):
         raise_if_compact_interrupted(interrupt_check)
-        outcome = _summarize_segment(base, source, offset, summary, budget, interrupt_check, calibration=calibration)
+        attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, None,
+                                         calibration=calibration, attempt_budget=attempt_budget)
+        outcome = _summarize_segment(base, source, offset, summary, attempt)
         summary = outcome.text
         if outcome.degraded_text and preserve_complete_fallback:
             raise ConversationCompactError("分段摘要失败，不能用截短摘录覆盖原始来源", code="COMPACT_SEGMENT_SUMMARY_UNAVAILABLE")
@@ -569,9 +776,7 @@ def _assembled_summary(summary: str, digests: list[str]) -> str:
     return "\n".join(part for part in [summary, *digests] if part)
 
 
-# LLM: One segment is retried in place with a reason-keyed correction, so already summarized
-# segments are never re-summarized and no source byte is skipped. Exhausting the repair budget
-# returns a labelled mechanical digest instead of failing the whole conversation compact.
+# 分段纠正只重发当前未覆盖区间。空摘要停止候选，截断或工具响应仍沿原严格/机械回退策略。
 # 类用途: 单个分段的最终结果：模型可见摘要、覆盖终点、收缩后的预算、末次响应与降级摘录。
 @dataclass(frozen=True)
 class _SegmentOutcome:
@@ -590,10 +795,9 @@ def _summarize_segment(
     source: str | CompactTextSource,
     offset: int,
     summary: str,
-    budget: int,
-    interrupt_check: CompactInterruptCheck | None,
-    *, calibration: CompactRequestCalibration | None = None,
+    attempt: _CompactAttemptContext,
 ) -> _SegmentOutcome:
+    budget, interrupt_check, calibration = attempt.budget, attempt.interrupt_check, attempt.calibration
     end = _segment_end(base, source, offset, summary, budget, calibration=calibration)
     measure = _SurfaceBudget(budget, calibration).measure
     # 截断重试只允许缩到原片段的一半：再往下缩会把源切成大量碎片，反而放大模型调用次数。
@@ -604,10 +808,18 @@ def _summarize_segment(
         raise_if_compact_interrupted(interrupt_check)
         candidate = _segment_request(base, source, offset, end, summary, repair_reason=reason)
         if measure(_request_tokens(candidate)) > budget:
+            if reason == "EMPTY" and attempt.attempt_budget is not None:
+                if end > shrink_floor:
+                    end = shrink_floor
+                    continue
+                raise _compact_attempt_exhausted(attempt.attempt_budget, "segment_empty_no_variant")
             raise ConversationCompactError("分段摘要请求超出当前预算，保留原始来源", code="COMPACT_SEGMENT_REQUEST_TOO_LARGE")
         raise_if_compact_interrupted(interrupt_check)
         try:
-            response = _generate_materialized_response(candidate, None, calibration=calibration)
+            response = _generate_materialized_response(
+                candidate, None, attempt=replace(attempt, budget=budget),
+                stage="segment_repair" if repairs else "segment", source_range=("characters", offset, end),
+            )
         except ProviderContextWindowError:
             # 同一源片段按更小窗口重试，不跳过字节；小到无法容纳固定前缀时明确失败。
             budget = max(1, min(budget - 1, measure(_request_tokens(candidate)) // 2))
@@ -629,9 +841,15 @@ def _summarize_segment(
             reason = ""
             continue
         raise_if_compact_interrupted(interrupt_check)
+        previous_reason = reason
         text, reason = compact_summary_response_outcome(response, request=base)
         if not reason:
             return _SegmentOutcome(text, end, budget, response)
+        if reason == "EMPTY" and attempt.attempt_budget is not None:
+            if repairs >= _SEGMENT_REPAIR_LIMIT_COUNT or (previous_reason == "EMPTY" and end <= shrink_floor):
+                raise _compact_attempt_exhausted(attempt.attempt_budget, "segment_empty_no_variant")
+            if previous_reason == "EMPTY":
+                end = shrink_floor
         if repairs >= _SEGMENT_REPAIR_LIMIT_COUNT:
             return _SegmentOutcome(
                 summary, end, budget, response, _mechanical_segment_text(source, offset, end, reason)

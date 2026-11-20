@@ -18,7 +18,7 @@ from .base import ModelResponse
 from .errors import ProviderRequestRejectedError, ProviderResponseError, ProviderTimeoutError
 from .http import bounded_output_tokens, request_stream_lines
 from .openai_chat import OpenAICompatibleBackend
-from .reply_diagnostics import responses_call_diagnostic
+from .reply_diagnostics import provider_completion_facts, responses_call_diagnostic
 from .request_budget import RequestBudgetExceeded, RequestTokenBudget, resolve_request_token_budget
 from .responses_wire import collect_response, input_items, insert_reasoning_update, response_fields
 from .tool_protocol_adapter import tools_for_choice
@@ -184,11 +184,18 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         usage = obj.get("usage") or {}
         obj["usage"] = cache_usage(usage, reused=subscription and usage.get("ws_connection_reused") is True,
                                    incremental=subscription and usage.get("incremental_chain_hit") is True)
+        fields = response_fields(obj, self.model_name)
+        facts = provider_completion_facts(
+            fields["text"], fields["tool_use_blocks"], fields["assistant_content_blocks"],
+            usage=fields["usage"], stop_reason=fields["stop_reason"],
+            stream_end_frame=getattr(obj, "stream_end_frame", None), incomplete=bool(fields.get("runtime_reason")),
+        )
+        _reject_empty_response(fields, tools, request.is_probe, facts)
         return ModelResponse(
             backend=self.name,
-            model_call_diagnostic=responses_call_diagnostic(obj, payload, request),
+            model_call_diagnostic={**responses_call_diagnostic(obj, payload, request), **facts},
             request_token_budget=effective_budget,
-            **_checked_response_fields(obj, self.model_name, tools, request.is_probe),
+            **fields,
         )
 
     def _align_preserved_effort_budget(self, wire_body: dict, request, *, subscription: bool) -> tuple[object, RequestTokenBudget | None]:
@@ -345,14 +352,20 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
 
 # LLM: 只检查完整业务工具请求；宿主 is_probe 留给原探测判未证明/不确定，不能按提示/模型/工具名字猜用途。
 # 函数用途: 将业务的真正空工具响应标为错误；探测和原生续跑块保持原合同，供应商失败不豁免。
-def _checked_response_fields(obj: dict, model: str, tools: list, is_probe: bool) -> dict:
-    fields = response_fields(obj, model)
-    if is_probe or not tools or fields.get("runtime_reason") or fields["text"].strip() or fields["tool_use_blocks"]:
-        return fields
+def _reject_empty_response(fields: dict, tools: list, is_probe: bool, facts: dict) -> None:
+    if fields.get("runtime_reason") or fields["text"].strip() or fields["tool_use_blocks"]:
+        return
     if any(block.get("type") in {"responses_reasoning", "responses_compaction"}
            for block in fields["assistant_content_blocks"]):
-        return fields
-    raise ProviderResponseError("Responses 完整响应没有文本或工具调用", error_code="MODEL_EMPTY_RESPONSE")
+        # 保留原生续跑条目，主回合不能把它当成可重复采样的空输出。
+        if facts["response_shape"] == "empty_final":
+            facts["response_shape"] = "reasoning_only"
+        return
+    if tools and not is_probe:
+        facts["response_shape"] = "empty_final"
+        raise ProviderResponseError(
+            "Responses 完整响应没有文本或工具调用", error_code="MODEL_EMPTY_RESPONSE", details=facts,
+        )
 
 
 # LLM: 严格读取归一化 HTTP 事实和最终线索引；不看异常文案，也不触碰历史控制项。

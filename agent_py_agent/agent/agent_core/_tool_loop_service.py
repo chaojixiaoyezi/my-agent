@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..backends import ModelResponse
 from ..backends.errors import (
+    ProviderResponseError,
     is_empty_provider_response_error,
 )
 from ..concurrency.interrupt import is_interrupted
@@ -276,18 +277,28 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     return effective
 
 
-# LLM: 只依据已执行工具、明确空响应及本轮重试次数判断，不发送请求或修改参数。
-# 函数用途: 允许工具已有结果后对一次空模型响应做有界重试。
+def _empty_model_response_shape(exc: Exception) -> str:
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        shape = details.get("response_shape")
+        if shape in ("visible_text", "complete_tool_block", "reasoning_only", "empty_final", "stream_incomplete"):
+            return shape
+    if is_empty_provider_response_error(exc):
+        return "empty_final"
+    return ""
+
+
+# 只消费供应商终态和本轮展示事实；已完成工具沿原一次纠正，绝不重放。
 def _should_retry_empty_model_response(
     params: ToolLoopExecuteParams,
     exc: Exception,
     provider_response_repairs: int,
 ) -> bool:
-    return (
-        is_empty_provider_response_error(exc)
-        and bool(params.executed_tools)
-        and provider_response_repairs < 1
-    )
+    if (provider_response_repairs >= 1 or not is_empty_provider_response_error(exc)
+            or _empty_model_response_shape(exc) != "empty_final" or _native_compact_interrupted(params)):
+        return False
+    state = getattr(params, "live_archive_state", None)
+    return bool(params.executed_tools) or not (isinstance(state, dict) and state.get("_model_output_displayed"))
 
 
 # LLM: 空响应且有待处理输入时，先丢旧自然回复再沿原邮箱注入本轮，不另开模型调用。
@@ -298,7 +309,7 @@ def _pending_turn_input_supersedes_unusable_response(
     exc: Exception,
 ) -> bool:
     """Keep a 会话运行时 steer in the same turn when the stale call has no usable result."""
-    unusable = is_empty_provider_response_error(exc)
+    unusable = is_empty_provider_response_error(exc) and _empty_model_response_shape(exc) == 'empty_final'
     if not unusable or not has_pending_turn_input(agent, params):
         return False
     discard_pending_natural_user_reply(params)
@@ -308,10 +319,38 @@ def _pending_turn_input_supersedes_unusable_response(
     return inject_pending_turn_input(agent, params)
 
 
+_FIRST_TURN_EMPTY_CONTEXT = (
+    "[tool-system]\n上一轮模型接口返回了空文本。请根据本轮原始用户消息继续，先给出可见答复，"
+    "如确实需要工具，请提交完整的工具调用。\n[/tool-system]"
+)
+
+
+def _empty_attempt_facts(exc: ProviderResponseError) -> dict[str, object]:
+    details = exc.details if isinstance(exc.details, dict) else {}
+    return {
+        "error_code": exc.error_code,
+        "response_shape": _empty_model_response_shape(exc),
+        "text_chars": details.get("text_chars") if type(details.get("text_chars")) is int else None,
+        "tool_use_count": details.get("tool_use_count") if type(details.get("tool_use_count")) is int else None,
+        "stream_end_frame": details.get("stream_end_frame") if type(details.get("stream_end_frame")) is bool else None,
+    }
+
+
+def _clear_first_turn_empty_repair(params):
+    state = getattr(params, "live_archive_state", None)
+    repair = state.pop("_first_turn_empty_repair", None) if isinstance(state, dict) else None
+    if repair is not None and _FIRST_TURN_EMPTY_CONTEXT in params.tool_context:
+        # 纠正提示仅对原输入有意义，输入替换或收口后移除。
+        params.tool_context.remove(_FIRST_TURN_EMPTY_CONTEXT)
+    return repair
+
+
 # LLM: 仅生成提示文本，引用最近已执行工具，不重跑工具或把调用尝试当成成功。
 # 函数用途: 提醒模型复用已完成结果后继续处理空响应。
 def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
-    tools = ", ".join(str(item) for item in params.executed_tools[-6:]) or "(none)"
+    if not params.executed_tools:
+        return _FIRST_TURN_EMPTY_CONTEXT
+    tools = ", ".join(str(item) for item in params.executed_tools[-6:])
     return "\n".join(
         [
             "[tool-system]",
@@ -2240,6 +2279,7 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
         from ..subagents.capability_updates import release_capability_updates
         release_capability_updates(params._capability_update_source)
         params.live_archive_state.pop("_defer_assistant_delivery_confirmation", None)
+        _clear_first_turn_empty_repair(params)
 
 
 # LLM: 兼容原服务模块的取消入口；真实构造只在response_decision，不新增正文、状态或模型调用。
@@ -2324,6 +2364,16 @@ def _model_turn_or_retry(
     from .runtime.capability_refresh import refresh_subagent_capabilities
 
     loop_params = refresh_subagent_capabilities(agent, loop_params)
+    state = getattr(loop_params, "live_archive_state", None)
+    if isinstance(state, dict) and state.get("_first_turn_empty_repair"):
+        if _native_compact_interrupted(loop_params):
+            _clear_first_turn_empty_repair(loop_params)
+            return _ModelTurnOutcome("", _interrupted_conversation_response(agent), True, False, 0, loop_params)
+        if has_pending_turn_input(agent, loop_params):
+            _clear_first_turn_empty_repair(loop_params)
+            provider_response_repairs = 0
+    elif isinstance(state, dict):
+        state.pop("_model_output_displayed", None)
 
     def retry_allowed():
         from ..model_request_selection import _HOST
@@ -2349,6 +2399,11 @@ def _model_turn_or_retry(
             on_chunk=loop_params.effective_on_chunk,
             policy=getattr(agent, "runtime_guard_policy", None),
         )
+        details = getattr(turn.response, "model_call_diagnostic", None)
+        if isinstance(details, dict) and details.get("response_shape") == "empty_final":
+            loop_params = turn.params
+            raise ProviderResponseError("模型接口返回了空输出", error_code="MODEL_EMPTY_RESPONSE", details=details)
+        _clear_first_turn_empty_repair(turn.params)
         # 会话运行时/长期助手 scope stream retries to one sampling request.  A later
         # successful model turn proves the provider recovered, so an isolated
         # empty response many tool rounds later gets its own bounded repair
@@ -2364,17 +2419,40 @@ def _model_turn_or_retry(
         # that was already in flight then ends without a usable response, that
         # stale empty output is not the turn's terminal result: consume the
         # typed mailbox item at this safe point and run the same turn again.
+        if is_empty_provider_response_error(exc) and _native_compact_interrupted(loop_params):
+            _clear_first_turn_empty_repair(loop_params)
+            return _ModelTurnOutcome("", _interrupted_conversation_response(agent), True, False, 0, loop_params)
         if _pending_turn_input_supersedes_unusable_response(agent, loop_params, exc):
+            if _clear_first_turn_empty_repair(loop_params) is not None:
+                provider_response_repairs = 0
             return _ModelTurnOutcome("", None, False, True, provider_response_repairs, loop_params)
         from ..conversation.input_tool_boundary import input_wait_expression_failure
 
         if (waiting_response := input_wait_expression_failure(agent, loop_params, exc)) is not None:
             return _ModelTurnOutcome('', waiting_response, True, False, provider_response_repairs, loop_params)
-        if _should_retry_empty_model_response(loop_params, exc, provider_response_repairs):
-            context = _empty_model_response_retry_context(loop_params)
-        else:
+        if not is_empty_provider_response_error(exc):
             raise
-        loop_params.tool_context.append(context)
+        first_turn = tool_rounds == 0 and not loop_params.executed_tools
+        state = getattr(loop_params, "live_archive_state", None)
+        if first_turn and _empty_model_response_shape(exc) == "empty_final":
+            original = _clear_first_turn_empty_repair(loop_params)
+            if original is not None:
+                raise ProviderResponseError(
+                    "MODEL_EMPTY_RESPONSE：首次调用与纠正调用均返回空输出。本轮未执行工具，没有工具副作用。"
+                    "请稍后重试，或切换模型后从原消息继续。",
+                    error_code="MODEL_EMPTY_RESPONSE",
+                    details={"attempts": [original["result"], _empty_attempt_facts(exc)], "side_effect_state": "not_started"},
+                ) from exc
+            if has_pending_turn_input(agent, loop_params):
+                raise
+        if not (first_turn or loop_params.executed_tools) or not _should_retry_empty_model_response(
+                loop_params, exc, provider_response_repairs):
+            raise
+        loop_params.tool_context.append(_empty_model_response_retry_context(loop_params))
+        if first_turn and isinstance(state, dict):
+            state["_first_turn_empty_repair"] = {
+                "turn_id": state.get("_current_model_turn_id"), "result": _empty_attempt_facts(exc),
+            }
         return _ModelTurnOutcome(
             build_tool_loop_prompt(agent, loop_params), None, False, True,
             provider_response_repairs + 1, loop_params,

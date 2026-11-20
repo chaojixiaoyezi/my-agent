@@ -6,6 +6,7 @@ import math
 import re
 
 from ..conversation.channels import project_user_reply
+from .response_completion import has_reasoning_content
 from .tool_protocol_adapter import tools_for_choice
 
 
@@ -19,6 +20,43 @@ def _code(value: object) -> str | None:
 # 函数用途: 为诊断保留真实非负整数。
 def _count(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
+
+
+def reported_token_counts(usage: object) -> dict[str, int | None]:
+    usage = usage if isinstance(usage, dict) else {}
+    reasoning = _count(usage.get("reasoning_tokens"))
+    if reasoning is None:
+        for name in ("output_tokens_details", "completion_tokens_details"):
+            details = usage.get(name)
+            if isinstance(details, dict) and (reasoning := _count(details.get("reasoning_tokens"))) is not None:
+                break
+    return {
+        "prompt_tokens": _count(usage.get("prompt_tokens", usage.get("input_tokens"))),
+        "output_tokens": _count(usage.get("output_tokens", usage.get("completion_tokens"))),
+        "reasoning_tokens": reasoning,
+    }
+
+
+def provider_completion_facts(
+    text: str, blocks: list[dict], assistant_blocks: list[dict], *,
+    usage: object, stop_reason: str, stream_end_frame: bool | None = None, incomplete: bool = False,
+) -> dict[str, object]:
+    """从协议解析结果提取可记录的终态事实。"""
+    if incomplete:
+        shape = "stream_incomplete"
+    elif text:
+        shape = "visible_text"
+    elif blocks:
+        shape = "complete_tool_block"
+    elif has_reasoning_content(assistant_blocks):
+        shape = "reasoning_only"
+    else:
+        shape = "empty_final"
+    return {
+        "response_shape": shape, "text_chars": len(text), "tool_use_count": len(blocks),
+        "stream_end_frame": stream_end_frame, "stop_reason": _code(stop_reason),
+        **reported_token_counts(usage),
+    }
 
 
 # LLM: 仅message的output_text/refusal有可交付正文；思考、工具参数和压缩密文始终为零。

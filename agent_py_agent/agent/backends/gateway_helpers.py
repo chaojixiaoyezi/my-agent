@@ -15,8 +15,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -192,6 +193,31 @@ class GatewayRequest:
     def url(self) -> str:
         """Return the final endpoint after joining provider base URL and API path."""
         return self.api_base + self.path
+
+
+_PROVIDER_ATTEMPT_ADMISSION: ContextVar[Callable[[dict[str, object]], None] | None] = ContextVar(
+    "provider_attempt_admission", default=None,
+)
+
+
+@contextmanager
+def provider_attempt_admission(callback: Callable[[dict[str, object]], None]) -> Iterator[None]:
+    """为本次辅助调用绑定物理发送准入；拒绝直接传播给请求所有者。"""
+    binding = _PROVIDER_ATTEMPT_ADMISSION.set(callback)
+    try:
+        yield
+    finally:
+        _PROVIDER_ATTEMPT_ADMISSION.reset(binding)
+
+
+def has_provider_attempt_admission() -> bool:
+    return _PROVIDER_ATTEMPT_ADMISSION.get() is not None
+
+
+def _admit_provider_attempt(event: dict[str, object]) -> None:
+    admit = _PROVIDER_ATTEMPT_ADMISSION.get()
+    if admit is not None:
+        admit(event)
 
 
 # LLM: 观测开关仅作用当前 provider 线程；退出恢复嵌套作用域，不修改共享模型配置。
@@ -796,6 +822,7 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
             request.url,
             extra_checkpoint_positions=(prev_count,) if type(prev_count) is int and prev_count > 0 else (),
         )
+    _admit_provider_attempt(base_event)
     timing = _attempt_timing(base_event, req)
     _emit_provider_attempt({**base_event, "status": "started"}, timing)
     try:

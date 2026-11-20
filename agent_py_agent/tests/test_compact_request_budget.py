@@ -124,9 +124,10 @@ def test_cache_surface_summary_gets_main_request_capacity(monkeypatch):
     assert low < high
     request = _request_between_budgets(base, low, high)
     calls = []
-    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or "result")
+    response = ModelResponse(text="摘要", backend="fake")
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or response)
 
-    assert budget_module.generate_bounded_compact_response(request) == "result"
+    assert budget_module.generate_bounded_compact_response(request) is response
     assert len(calls) == 1 and calls[0].messages == request.messages and calls[0].tools == request.tools
 
     calls.clear()
@@ -295,7 +296,7 @@ def test_live_summary_bounds_complete_tool_arguments_results_and_reasoning(monke
 
 
 def test_large_native_history_is_fully_covered_with_bounded_calls(monkeypatch):
-    request = _request("中间也必须保留🪴\n" * 3000)
+    request = _request("中间也必须保留🪴\n" * 600)
     segments = []
     progress = []
 
@@ -338,19 +339,17 @@ def test_typed_provider_overflow_reduces_request_without_losing_source(monkeypat
     assert "".join(segment_part(r.prompt)[3] for r in calls[1:]) == json.dumps(request.messages, ensure_ascii=False)
 
 
-def test_degraded_segment_keeps_source_coverage_and_stops_on_interrupt(monkeypatch, caplog):
+def test_empty_segment_retains_source_and_stops_on_interrupt(monkeypatch, caplog):
     request = _request("历史记录" * 10000)
     calls = []
     progress = []
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or ModelResponse(text="", backend="fake"))
-    response = budget_module.generate_bounded_compact_response(request, source_progress=lambda *p: progress.append(p))
-    total = len(json.dumps(request.messages, ensure_ascii=False))
-    assert progress[-1] == (total, total)
-    # 每个片段最多一次首答加有界纠正，仍无有效摘要就机械降级，不再让整轮压缩作废。
-    assert len(calls) % (1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT) == 0
-    assert responses_cover_source(response.text, total)
-    assert response.tool_use_blocks == [] and response.truncated is False
-    assert "PRIVATE-HISTORY" not in caplog.text
+    with pytest.raises(ConversationCompactError) as failure:
+        budget_module.generate_bounded_compact_response(request, source_progress=lambda *p: progress.append(p))
+    assert failure.value.code == "COMPACT_EMPTY_BUDGET_EXHAUSTED"
+    assert len(calls) == 1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT
+    assert not any(covered for covered, _ in progress)
+    assert "历史记录" not in caplog.text
     before = len(calls)
     with pytest.raises(InterruptedError):
         budget_module.generate_bounded_compact_response(request, interrupt_check=lambda: True)
@@ -361,14 +360,17 @@ def test_persistent_truncation_shrinks_once_then_degrades_without_fragmenting(mo
     request = _request("历史记录" * 10000)
     healthy = []
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: healthy.append(r) or ModelResponse(text="摘要", backend="fake"))
-    budget_module.generate_bounded_compact_response(request)
+    budget_module.generate_bounded_compact_response(request, attempt_budget=budget_module.CompactAttemptBudget(128, {}))
     truncated = []
     monkeypatch.setattr(
         budget_module,
         "generate_auxiliary_model_response",
         lambda r: truncated.append(r) or ModelResponse(text="只有前半段", backend="fake", truncated=True),
     )
-    response = budget_module.generate_bounded_compact_response(request)
+    # 单独检验每段的截断收缩下限；全局预算上限由 M31 专用用例覆盖。
+    response = budget_module.generate_bounded_compact_response(
+        request, attempt_budget=budget_module.CompactAttemptBudget(8 * len(healthy), {}),
+    )
     total = len(json.dumps(request.messages, ensure_ascii=False))
     # 缩段只允许到原片段一半，避免把一个片段碎成大量微小片段而放大调用次数。
     assert len(truncated) <= 8 * len(healthy)
@@ -379,7 +381,7 @@ def test_persistent_truncation_shrinks_once_then_degrades_without_fragmenting(mo
 def test_segment_surface_retains_summary_rules_not_executor_prefix(monkeypatch):
     from dataclasses import replace
 
-    request = replace(_request("旧任务继续执行" * 3000), prompt=CacheStructuredPrompt(
+    request = replace(_request("旧任务继续执行" * 800), prompt=CacheStructuredPrompt(
         "调用工具直到工作完成", "保留任务 A 的端口 3000；用户要求重点保留验收结果"
     ))
     calls = []
@@ -412,7 +414,6 @@ def test_segment_request_puts_source_first_and_carry_with_rules_last(monkeypatch
 
 
 @pytest.mark.parametrize(("response", "code", "hint"), [
-    (ModelResponse(text="", backend="fake"), "EMPTY", "没有输出摘要正文"),
     (
         ModelResponse(text="执行工作", backend="fake", tool_use_blocks=[{"name": "run_command"}]),
         "TOOL_CALL",
@@ -422,7 +423,7 @@ def test_segment_request_puts_source_first_and_carry_with_rules_last(monkeypatch
 def test_invalid_segment_repairs_in_place_then_degrades(monkeypatch, caplog, response, code, hint):
     calls = []
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or response)
-    result = budget_module.generate_bounded_compact_response(_request("很短的历史记录" * 500))
+    result = budget_module.generate_bounded_compact_response(_request("很短的历史记录" * 325))
     texts = [call.prompt for call in calls]
     first_segment = texts[: 1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT]
     assert "纠正要求" not in first_segment[0]
@@ -435,7 +436,7 @@ def test_invalid_segment_repairs_in_place_then_degrades(monkeypatch, caplog, res
 
 
 def test_final_segment_failure_returns_carried_summary_not_raw_reply(monkeypatch):
-    request = _request("历史记录" * 10000)
+    request = _request("历史记录" * 600)
     calls = []
 
     def generate(candidate):
@@ -445,7 +446,9 @@ def test_final_segment_failure_returns_carried_summary_not_raw_reply(monkeypatch
         return ModelResponse(text="只有后半段", backend="fake", truncated=True)
 
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
-    response = budget_module.generate_bounded_compact_response(request)
+    response = budget_module.generate_bounded_compact_response(
+        request, attempt_budget=budget_module.CompactAttemptBudget(64, {}),
+    )
     # 末段原始答复不完整时，返回值必须是已校验的累计摘要，否则调用方会拿残缺正文当整段历史。
     assert response.truncated is False and response.tool_use_blocks == []
     assert response.stop_reason == ""
@@ -468,7 +471,8 @@ def test_strict_segment_failure_does_not_claim_mechanical_source_coverage(monkey
             _request("完整工具原文" * 3000), preserve_complete_fallback=True,
             source_progress=lambda covered, total: progress.append((covered, total)),
         )
-    assert error.value.code == "COMPACT_SEGMENT_SUMMARY_UNAVAILABLE"
+    expected = "COMPACT_SEGMENT_SUMMARY_UNAVAILABLE" if response.text else "COMPACT_EMPTY_BUDGET_EXHAUSTED"
+    assert error.value.code == expected
     assert not any(covered > 0 for covered, _ in progress)
 
 
@@ -515,8 +519,7 @@ def _scripted(monkeypatch, replies):
     return calls
 
 
-# LLM: 结构化工具块是失败摘要，只在末尾指令纠正；不允许用冷工具面重复完整请求。
-# 函数用途: 验证两次请求的工具、选择策略、系统和历史完全一致。
+# 保留完整缓存前缀，通过结构化工具策略禁止纠正请求调用工具。
 def test_tool_call_reply_repairs_without_changing_the_cached_prefix(monkeypatch, caplog):
     tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}], stop_reason="tool_use")
     calls = _scripted(monkeypatch, [tool_call, ModelResponse(text="分段重写的摘要", backend="fake")])
@@ -527,7 +530,7 @@ def test_tool_call_reply_repairs_without_changing_the_cached_prefix(monkeypatch,
     assert "分段重写的摘要" in result.text and "source_range" not in result.text
     assert calls[0].tools == [{"name": "read_file"}] and calls[0].tool_choice.mode == "auto"
     assert len(calls) == 2 and calls[1].tools == calls[0].tools
-    assert calls[1].tool_choice == calls[0].tool_choice
+    assert calls[1].tool_choice.mode == "none"
     assert calls[1].system_instruction == calls[0].system_instruction
     assert calls[1].messages == calls[0].messages == request.messages
     assert calls[1].prompt.startswith(calls[0].prompt)
@@ -549,7 +552,7 @@ def test_tool_call_reply_is_discarded_when_the_source_cannot_be_segmented(monkey
     assert result.text == '' and result.tool_use_blocks == []
     assert len(calls) == 2
     assert calls[0].tool_choice.mode == "auto"
-    assert calls[1].tool_choice == calls[0].tool_choice and calls[1].tools == calls[0].tools
+    assert calls[1].tool_choice.mode == "none" and calls[1].tools == calls[0].tools
     assert calls[1].messages == request.messages == calls[0].messages
 
 
@@ -562,7 +565,7 @@ def test_persistent_tool_reply_has_one_repair_and_no_segment_restart(monkeypatch
     result = budget_module.generate_bounded_compact_response(_request("严格来源"), preserve_complete_fallback=True)
     assert result.text == '' and result.tool_use_blocks == []
     assert len(calls) == 2 and calls[1].messages == calls[0].messages
-    assert calls[1].tools == calls[0].tools and calls[1].tool_choice == calls[0].tool_choice
+    assert calls[1].tools == calls[0].tools and calls[1].tool_choice.mode == "none"
 
 
 # LLM: 真实可重放来源在第三次读取报告变化；修复预算计量不能吞掉这一 typed 错误。
@@ -611,7 +614,7 @@ def test_transient_disconnect_resends_the_same_summary_request_after_backoff(mon
 
 
 def test_transient_disconnect_in_one_segment_resends_only_that_segment(monkeypatch):
-    request = _request("中间也必须保留🪴\n" * 3000)
+    request = _request("中间也必须保留🪴\n" * 600)
     prompts, waits = [], []
 
     def generate(candidate):

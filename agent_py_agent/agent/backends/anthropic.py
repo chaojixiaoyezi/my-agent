@@ -19,9 +19,11 @@ from .base import BackendOptions, ModelResponse, ProviderRequestOptions
 from .errors import (
     ProviderResponseError,
 )
+from .gateway_helpers import has_provider_attempt_admission
 from .http import HttpBackend, bounded_output_tokens, provider_stream_scope, request_stream_lines
 from .provider_headers import endpoint_parts
 from .reasoning_control import ReasoningPayloadLimits, reasoning_payload_fields
+from .reply_diagnostics import provider_completion_facts
 from .request_budget import RequestBudgetExceeded, RequestTokenBudget
 from .response_completion import (
     has_reasoning_content,
@@ -429,15 +431,17 @@ class AnthropicCompatibleBackend(HttpBackend):
                 raise ProviderResponseError(
                     f"无法解析 Anthropic-compatible 响应: {response_preview(obj)}"
                 ) from exc
-            incomplete = incomplete_response_fields(
-                str(obj.get("stop_reason") or ""),
-                incomplete_reason="invalid_tool_arguments" if malformed else "",
-            )
+            stop = str(obj.get("stop_reason") or "")
+            usage = usage_dict(obj.get("usage"))
+            incomplete = incomplete_response_fields(stop, incomplete_reason="invalid_tool_arguments" if malformed else "")
+            facts = provider_completion_facts(text, blocks, assistant_blocks, usage=usage, stop_reason=stop,
+                                              incomplete=bool(incomplete))
             if incomplete:
                 return ModelResponse(
                     text=text,
                     backend=self.name,
-                    usage=usage_dict(obj.get("usage")),
+                    usage=usage,
+                    model_call_diagnostic=facts,
                     tool_use_blocks=[],
                     assistant_content_blocks=without_tool_blocks(assistant_blocks),
                     truncated_tool_names=truncated_tool_names(dropped_names),
@@ -448,22 +452,24 @@ class AnthropicCompatibleBackend(HttpBackend):
                 or blocks
                 or has_reasoning_content(assistant_blocks)
                 or attempt > 0
+                or has_provider_attempt_admission()
                 or not _anthropic_has_thinking_without_text(obj)
             ):
                 break
         # 原生 tool_use 下模型可能只回 tool_use 块、没有文本，这种是合法的，不报空响应。
         if not text and not blocks and not has_reasoning_content(assistant_blocks):
             raise ProviderResponseError(
-                f"Anthropic-compatible 响应没有文本内容: {response_preview(obj)}",
-                error_code="MODEL_EMPTY_RESPONSE",
+                "Anthropic-compatible 响应没有文本内容",
+                error_code="MODEL_EMPTY_RESPONSE", details=facts,
             )
         return ModelResponse(
             text=text,
             backend=self.name,
-            usage=usage_dict(obj.get("usage")),
+            usage=usage,
             tool_use_blocks=blocks,
             assistant_content_blocks=assistant_blocks,
-            stop_reason=str(obj.get("stop_reason") or ""),
+            model_call_diagnostic=facts,
+            stop_reason=stop,
         )
 
     # LLM: 流式 Anthropic 响应由 StreamCompletion 带回完整有序 assistant 块；thinking delta/block-stop 与
@@ -485,8 +491,13 @@ class AnthropicCompatibleBackend(HttpBackend):
                 headers,
                 callbacks,
             )
+            assistant_blocks = list(completion.assistant_content_blocks)
             incomplete = incomplete_response_fields(
                 completion.stop_reason, incomplete_reason=completion.incomplete_reason
+            )
+            facts = provider_completion_facts(
+                text, blocks, assistant_blocks, usage=usage, stop_reason=completion.stop_reason,
+                stream_end_frame=completion.saw_message_stop, incomplete=bool(incomplete),
             )
             if incomplete:
                 return ModelResponse(
@@ -494,16 +505,16 @@ class AnthropicCompatibleBackend(HttpBackend):
                     backend=self.name,
                     usage=usage,
                     tool_use_blocks=[],
-                    assistant_content_blocks=without_tool_blocks(
-                        list(completion.assistant_content_blocks)
-                    ),
+                    assistant_content_blocks=without_tool_blocks(assistant_blocks),
+                    model_call_diagnostic=facts,
                     truncated_tool_names=truncated_tool_names(completion.tool_names),
                     **incomplete,
                 )
             if (
                 text
                 or blocks
-                or has_reasoning_content(list(completion.assistant_content_blocks))
+                or has_reasoning_content(assistant_blocks)
+                or has_provider_attempt_admission()
                 or attempt > 0
             ):
                 break
@@ -511,18 +522,19 @@ class AnthropicCompatibleBackend(HttpBackend):
         if (
             not text
             and not blocks
-            and not has_reasoning_content(list(completion.assistant_content_blocks))
+            and not has_reasoning_content(assistant_blocks)
         ):
             raise ProviderResponseError(
                 "Anthropic-compatible 流式响应没有文本内容",
-                error_code="MODEL_EMPTY_RESPONSE",
+                error_code="MODEL_EMPTY_RESPONSE", details=facts,
             )
         return ModelResponse(
             text=text,
             backend=self.name,
             usage=usage,
             tool_use_blocks=blocks,
-            assistant_content_blocks=list(completion.assistant_content_blocks),
+            assistant_content_blocks=assistant_blocks,
+            model_call_diagnostic=facts,
             truncated=completion.truncated,
             stop_reason=completion.stop_reason,
         )

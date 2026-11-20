@@ -814,6 +814,10 @@ def _begin_model_turn_identity(params: object, tool_rounds: int) -> str:
         return ""
     sequence = max(0, int(state.get("_model_turn_sequence") or 0)) + 1
     state["_model_turn_sequence"] = sequence
+    repair = state.get("_first_turn_empty_repair")
+    current = state.get("_current_model_turn_id")
+    if isinstance(repair, dict) and current and repair.get("turn_id") == current:
+        return current
     turn_id = f"{getattr(params, 'run_id', '')}:model:{sequence}:after-tools:{tool_rounds}:{uuid.uuid4().hex}"
     state["_current_model_turn_id"] = turn_id
     return turn_id
@@ -1092,16 +1096,18 @@ def _thinking_stream_observer(backend: object, state: object):
     sink_owner = getattr(params, "effective_on_chunk", None)
     delta_sink = getattr(sink_owner, "write_thinking_delta", None)
     complete_sink = getattr(sink_owner, "write_thinking", None)
-    activity_sink = partial(
-        _publish_runner_model_stream_activity,
-        ModelGenerateParams(
-            agent=getattr(state, "agent", None),
-            params=params,
-            prompt="",
-            tool_rounds=int(getattr(state, "tool_rounds", 0) or 0),
-        ),
-        stream_kind="thinking",
+    activity_request = ModelGenerateParams(
+        agent=getattr(state, "agent", None), params=params, prompt="",
+        tool_rounds=int(getattr(state, "tool_rounds", 0) or 0),
     )
+    call_id = getattr(state, "call_id", "")
+    archive = getattr(params, "live_archive_state", None)
+
+    def activity_sink(chunk):
+        if chunk and callable(delta_sink):
+            _mark_model_output_displayed(archive, call_id)
+        _publish_runner_model_stream_activity(activity_request, chunk, stream_kind="thinking")
+
     if callable(complete_sink):
         complete = partial(_publish_streamed_thinking_completion, state, complete_sink)
         return _ThinkingStreamObserver(delta_sink, complete, activity_sink)
@@ -1119,6 +1125,8 @@ def _publish_streamed_thinking_completion(state: object, sink: object, text: str
     events = getattr(state, "stream_observer_events", None)
     if isinstance(events, set):
         events.add("thinking_completed")
+    params = getattr(state, "params", None)
+    _mark_model_output_displayed(getattr(params, "live_archive_state", None), getattr(state, "call_id", ""))
     sink(
         content,
         duration_seconds=max(
@@ -1196,10 +1204,32 @@ def _build_tool_boundary_chunk_filter(
     # 仅完整伪调用成对才拦），防止正文【提及】marker 被流式中途误杀
     # （真机 2026-08-06 MiniMax 形态）。
     return ToolBoundaryChunkFilter(
-        _model_chunk_callback(request.params.effective_on_chunk, model_call_id=model_call_id),
+        _model_visible_chunk_callback(request.params, model_call_id),
         max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS,
         bypass=native_tool_use_active(request.params),
     )
+
+
+def _model_visible_chunk_callback(params, model_call_id):
+    writer = _model_chunk_callback(params.effective_on_chunk, model_call_id=model_call_id)
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return writer
+    state["_model_display_call_id"] = model_call_id
+    if not callable(writer):
+        return writer
+
+    def write(chunk):
+        if chunk:
+            _mark_model_output_displayed(state, model_call_id)
+        return writer(chunk)
+
+    return write
+
+
+def _mark_model_output_displayed(state, model_call_id):
+    if model_call_id and isinstance(state, dict) and state.get("_model_display_call_id") == model_call_id:
+        state["_model_output_displayed"] = True
 
 
 # LLM: 支持绑定的出口拿到冻结物理编号的闭包，迟到回调不会借用新身份；无编号或旧出口仍沿原 write_model/plain 回调。
