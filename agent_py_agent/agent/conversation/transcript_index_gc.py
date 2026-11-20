@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import stat
 from pathlib import Path
 
@@ -11,7 +12,8 @@ from ..common.json_io import locked_json_path
 from ..user_space.storage_lanes import (
     STORAGE_LANE_CURSOR_MAX_BYTES,
     StorageLaneRequest,
-    lane_cursor_window,
+    lane_cycle_generation,
+    lane_directory_entry,
     owner_conversation_roots,
 )
 from .hamt_reachability import (
@@ -31,23 +33,19 @@ from .message_scan import transcript_manifest
 TRANSCRIPT_INDEX_PENDING_MAX_COUNT = 48
 
 
-# LLM: 只按真实目录流选有界窗口；目录名本身不构成清扫许可。
-# 函数用途: 列出一个规范消息根中拥有索引目录的线程名字。
-def _thread_names(home, messages):
-    archive = _owner_path(home, messages / "archive")
-    with _Directory(archive) as directory:
-        for name in directory.names():
-            if not stat.S_ISDIR(directory.stamp(name).st_mode):
-                continue
-            try:
-                _owner_path(home, archive / name / "index")
-            except FileNotFoundError:
-                continue
-            except OSError:
-                # 交给线程边界报告坏目录，不能让它终止整个名称流。
-                yield name
-                continue
-            yield name
+def _has_thread_index(home, messages, tid):
+    archive = messages / "archive"
+    try:
+        with _Directory(archive) as directory:
+            if not stat.S_ISDIR(directory.stamp(tid).st_mode):
+                return False
+        _owner_path(home, archive / tid / "index")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # 交给线程边界报告异常目录，其他线程仍可继续。
+        return True
+    return True
 
 
 # LLM: 必须持有与消息写者完全相同的 <tid>.jsonl 锁；只增加计量，不更改 manifest 解析规则。
@@ -98,11 +96,11 @@ def _thread_slice(work, messages, tid, pending):
 
 # LLM: 首线程额度耗尽只保护并跳过本线程；后续线程普通片用尽则保留续点，下片获得首线程额度。
 # 函数用途: 隔离一个线程的失败，保留其他健康线程继续维护的机会。
-def _try_thread(work, messages, tid, pending):
+def _try_thread(work, messages, tid, pending, *, discovered=False):
     before = work.items
     first = False
     try:
-        with work.thread_allowance() as first:
+        with work.thread_allowance(max_items=work.budget.max_items) as first:
             return "ok", _thread_slice(work, messages, tid, pending)
     except BlockingIOError:
         work.skip("lock_busy")
@@ -125,7 +123,7 @@ def _try_thread(work, messages, tid, pending):
         work.error("transcript_index_incomplete", "messages/archive/" + tid)
         return "error", None
     finally:
-        if work.items == before:
+        if not discovered and work.items == before:
             work.items += 1
 
 
@@ -190,7 +188,10 @@ def _append_pending(work, cursor, pending, row):
         return False
     candidate = {**cursor, "pending": [*pending, row]}
     encoded = json.dumps(work.receipt(candidate, False)["cursor"], separators=(",", ":"), allow_nan=False)
-    if len(encoded) > STORAGE_LANE_CURSOR_MAX_BYTES - 1024:
+    # 同一回执可能同时保存发现和清扫两个原生续点，宽限证明为它们留出余量。
+    proof_bytes = len(json.dumps(pending + [row], separators=(",", ":"), allow_nan=False))
+    if (len(encoded) > STORAGE_LANE_CURSOR_MAX_BYTES - 1024
+            or proof_bytes > STORAGE_LANE_CURSOR_MAX_BYTES // 4):
         return False
     pending.append(row)
     return True
@@ -202,8 +203,15 @@ def maintain_transcript_index_lane(request: StorageLaneRequest) -> dict:
     work = _LaneWork(request)
     cursor = {
         "root_index": max(0, int(request.cursor.get("root_index", 0))),
-        "after": str(request.cursor.get("after", "")),
+        "after": "",
+        "directory": request.cursor.get("directory", {}),
+        "cycle_generation": lane_cycle_generation(request.cursor),
     }
+    if request.cursor.get("scan_incomplete") is True:
+        cursor["scan_incomplete"] = True
+    tid = request.cursor.get("thread")
+    if isinstance(tid, str) and tid and Path(tid).name == tid and tid not in {".", ".."}:
+        cursor["thread"] = tid
     if request.legal_hold:
         return work.receipt(request.cursor, True, "legal_hold")
     # 原字典也在零预算时保留，不能因一次只读空片遗失已等待的宽限证明。
@@ -215,6 +223,8 @@ def maintain_transcript_index_lane(request: StorageLaneRequest) -> dict:
         roots = owner_conversation_roots(request.home)
         pending = _pending_rows(work, cursor, roots)
         cursor["pending"] = pending
+        if "after" in request.cursor and "directory" not in request.cursor:
+            cursor["root_index"] = 0
         messages_by_root = {
             str(root.relative_to(request.home.owner_home_dir)): root / "messages"
             for root in roots
@@ -248,34 +258,42 @@ def maintain_transcript_index_lane(request: StorageLaneRequest) -> dict:
             try:
                 messages = _owner_path(request.home, conversation / "messages")
             except FileNotFoundError:
-                cursor.update(root_index=cursor["root_index"] + 1, after="")
+                cursor.pop("thread", None)
+                cursor.update(root_index=cursor["root_index"] + 1, after="", directory={})
                 continue
             except OSError:
                 work.error("transcript_index_incomplete", "messages")
+                cursor["scan_incomplete"] = True
                 work.sweep_state = None
-                cursor.update(root_index=cursor["root_index"] + 1, after="")
+                cursor.pop("thread", None)
+                cursor.update(root_index=cursor["root_index"] + 1, after="", directory={})
                 continue
             root_key = str(conversation.relative_to(request.home.owner_home_dir))
             known = processed | {(row["root"], row["tid"]) for row in pending}
-            try:
-                names = lane_cursor_window(
-                    cursor,
-                    (tid for tid in _thread_names(request.home, messages) if (root_key, tid) not in known),
-                    work.budget.max_items,
-                )
-            except FileNotFoundError:
-                names = []
-            for tid in names:
-                if work._allowance_used and work.exhausted():
+            archive = messages / "archive"
+            parts = archive.relative_to(request.home.owner_home_dir).parts
+            while True:
+                if (work.items or work._allowance_used) and work.exhausted():
                     return work.receipt(cursor, False, "budget_exhausted")
-                if len(pending) >= TRANSCRIPT_INDEX_PENDING_MAX_COUNT:
-                    if work.exhausted():
-                        return work.receipt(cursor, False, "budget_exhausted")
-                    work.skip("pending_full")
-                    work.items += 1
+                tid = cursor.get("thread")
+                if tid is None:
+                    tid, resume, visited, complete = lane_directory_entry(
+                        Path(request.home.owner_home_dir), parts, cursor["directory"], require_dir_fd=os.name != "nt",
+                    )
+                    if complete:
+                        break
+                    work.items += visited
+                    cursor["directory"] = resume
+                    if tid is None or (root_key, tid) in known or not _has_thread_index(request.home, messages, tid):
+                        continue
+                    if len(pending) >= TRANSCRIPT_INDEX_PENDING_MAX_COUNT:
+                        work.skip("pending_full")
+                        continue
+                    cursor["thread"] = tid
                     cursor["after"] = tid
-                    continue
-                status, replacement = _try_thread(work, messages, tid, None)
+                    if work.budget.max_items <= work.items:
+                        return work.receipt(cursor, False, "budget_exhausted")
+                status, replacement = _try_thread(work, messages, tid, None, discovered=True)
                 if status in {"lock_busy", "budget_exhausted"}:
                     return work.receipt(cursor, False, status)
                 if replacement is not None:
@@ -283,16 +301,14 @@ def maintain_transcript_index_lane(request: StorageLaneRequest) -> dict:
                         work.skip("pending_full")
                 if work.sweep_state is not None:
                     return work.receipt(cursor, False, "budget_exhausted")
-                cursor["after"] = tid
-            # 满窗口只能证明这一页已处理，不能清空 after 并宣称整个根已经追平。
-            if len(names) >= work.budget.max_items:
-                return work.receipt(cursor, False, "budget_exhausted")
-            cursor.update(root_index=cursor["root_index"] + 1, after="")
-        cursor.update(root_index=0, after="")
+                cursor.pop("thread", None)
+            cursor.update(root_index=cursor["root_index"] + 1, after="", directory={})
+        covered = not cursor.pop("scan_incomplete", False)
+        cursor.update(root_index=0, after="", directory={}, cycle_generation=lane_cycle_generation(cursor, wrapped=covered))
         if not pending:
             cursor.pop("pending", None)
         return work.receipt(
-            cursor, True, "reachability_incomplete" if work.errors else ""
+            cursor, True, "reachability_incomplete" if work.errors or not covered else ""
         )
     except BlockingIOError:
         work.skip("lock_busy")

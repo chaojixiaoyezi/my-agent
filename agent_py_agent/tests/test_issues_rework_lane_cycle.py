@@ -137,11 +137,16 @@ def test_bad_thread_finishes_pass_but_never_authorizes_deletion(compact_case, mo
         path.with_suffix(".manifest.json").write_text("{")
         lane = transcript.maintain_transcript_index_lane
     writes = []
-    result = lane(request_for(home_for(case), kind=kind,
-                              commit=lambda operation: (writes.append(True), operation())[1]))
-    validate_lane_receipt(result)
-    assert result["complete"] and result["deferred_reason"] == "reachability_incomplete"
-    assert result["errors"] and result["deleted_items"] == 0 and not writes
+    request = request_for(home_for(case), kind=kind, commit=lambda operation: (writes.append(True), operation())[1])
+    errors = []
+    for _ in range(20):
+        result = validate_lane_receipt(lane(request))
+        errors.extend(result["errors"])
+        assert result["deleted_items"] == 0 and not writes
+        if result["complete"]:
+            break
+        request = replace(request, cursor=result["cursor"])
+    assert result["complete"] and errors
 
 
 def test_first_thread_marks_150_committed_checkpoints_before_sweeping(compact_case, monkeypatch):
@@ -236,12 +241,14 @@ def test_legacy_pending_dict_keeps_original_grace_timestamp(compact_case, monkey
 
 
 def test_pending_capacity_is_bounded_and_does_not_reset_grace(compact_case, monkeypatch):
+    monkeypatch.setattr(storage_lanes.time, "monotonic", lambda: 0)
     cases = _rotations(compact_case, monkeypatch, count=3)
     monkeypatch.setattr(transcript, "TRANSCRIPT_INDEX_PENDING_MAX_COUNT", 2, raising=False)
     request = request_for(home_for(compact_case), kind="conversation_messages")
     first = _finish_first_pass(request)
     assert len(first["cursor"]["pending"]) == 2
     assert first["skipped"]["pending_full"] == 1
+    remaining = {case.thread_id for case in cases} - {row["tid"] for row in first["cursor"]["pending"]}
     second = first
     deleted = 0
     for _ in range(2):
@@ -249,7 +256,7 @@ def test_pending_capacity_is_bounded_and_does_not_reset_grace(compact_case, monk
                                            now=request.now + hamt.HAMT_SWEEP_GRACE_SECONDS))
         deleted += second["deleted_items"]
     assert deleted > 0 and len(second["cursor"]["pending"]) == 1
-    assert second["cursor"]["pending"][0]["tid"] == cases[-1].thread_id
+    assert {second["cursor"]["pending"][0]["tid"]} == remaining
     assert second["cursor"]["pending"][0]["marked_at"] == request.now + hamt.HAMT_SWEEP_GRACE_SECONDS
 
 
@@ -326,17 +333,15 @@ def test_pending_identity_includes_conversation_root(compact_case, monkeypatch):
 
 
 def test_pending_cursor_reserves_space_for_long_unicode_roots(compact_case, monkeypatch):
+    monkeypatch.setattr(storage_lanes.time, "monotonic", lambda: 0)
     root = compact_case.root / "workspace/runtime/workspaces" / ("汉" * 80) / "conversations"
-    (root / "messages").mkdir(parents=True)
+    for number in range(48):
+        (root / "messages" / "archive" / f"thread-{number:02d}" / "index").mkdir(parents=True)
 
-    def names(home, messages):
-        return iter(f"thread-{number:02d}" for number in range(48)) if messages == root / "messages" else iter(())
-
-    def prepare(work, messages, tid, pending):
-        work.items += 1
+    def prepare(work, messages, tid, pending, *, discovered=False):
+        work.items += int(not discovered)
         return "ok", {"tid": tid, "root_sha": "a" * 64, "marked_at": work.request.now, "candidates": 1}
 
-    monkeypatch.setattr(transcript, "_thread_names", names)
     monkeypatch.setattr(transcript, "_try_thread", prepare)
     result = transcript.maintain_transcript_index_lane(
         request_for(home_for(compact_case), kind="conversation_messages"))
@@ -615,7 +620,11 @@ def test_first_thread_allowance_collects_orphan_with_tiny_slices(compact_case, m
     target = aged(index.root.joinpath(*index.parts, reference["ref"]["ref"]))
     monkeypatch.setattr(hamt, "STORAGE_LANE_SLICE_MS", 0.001)
     cursor = {}
-    for _ in range(3):
+    compact_root = compact_case.root / "compact"
+    max_slices = 2 + sum(len(list(directory.iterdir())) for directory in (
+        compact_root / "conversations", compact_root / "evidence", compact_root / "archive",
+    ) if directory.is_dir())
+    for _ in range(max_slices):
         result = compact.maintain_compact_reachability_lane(
             request_for(home_for(compact_case), cursor=cursor))
         cursor = result["cursor"]
@@ -684,6 +693,7 @@ def test_transcript_pending_list_runs_grace_in_parallel(compact_case, monkeypatc
 
 
 def test_pending_list_keeps_cursor_bounded(compact_case, monkeypatch):
+    monkeypatch.setattr(storage_lanes.time, "monotonic", lambda: 0)
     root = compact_case.root / "conversations"
     names = [f"thread-{number:02d}-" + "x" * 190 for number in range(49)]
     assert all(len(tid) == 200 for tid in names)
@@ -694,9 +704,9 @@ def test_pending_list_keeps_cursor_bounded(compact_case, monkeypatch):
         rows.append({"root": "conversations", "tid": tid, "root_sha": "a" * 64,
                      "marked_at": now, "candidates": 1})
 
-    def prepare(work, messages, tid, pending):
+    def prepare(work, messages, tid, pending, *, discovered=False):
         # 此单测只隔离游标入队容量；真实标记、消息读取和清扫另由三线程回归覆盖。
-        work.items += 1
+        work.items += int(not discovered)
         return "ok", {key: value for key, value in rows[names.index(tid)].items() if key != "root"}
 
     monkeypatch.setattr(transcript, "_try_thread", prepare)

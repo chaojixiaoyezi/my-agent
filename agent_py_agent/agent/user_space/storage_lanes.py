@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
+from .directory_paging import directory_page
+
 if TYPE_CHECKING:
     from .home_layout import MyAgentHomePaths
 
@@ -69,7 +71,7 @@ LANE_EVICTION_ORDER = (
 # 回执必须提供的计量和续点字段。
 _RECEIPT_REQUIRED = ("cursor", "complete", "items", "bytes")
 # 可选的非负整数计量字段，不将检查量冒充物理释放量。
-_RECEIPT_OPTIONAL_INT = ("deleted_items", "freed_bytes", "backlog", "slimmed", "deleted_events", "deleted_llm_records")
+_RECEIPT_OPTIONAL_INT = ("deleted_items", "freed_bytes", "backlog", "slimmed", "deleted_events", "deleted_llm_records", "cycle_generation")
 
 
 # LLM: 预算不可变；单调时钟仅描述本片剩余额度，不改变领域策略。
@@ -271,3 +273,21 @@ def owner_retention_override(home, key: str, default: int) -> int:
 # 函数用途: 返回续点之后字典序最小的一批名称。
 def lane_cursor_window(cursor: dict, names: Iterable[str], limit: int) -> list[str]:
     return heapq.nsmallest(limit, (name for name in names if name > cursor.get("after", "")))
+
+
+def lane_directory_entry(
+    root: Path,
+    parts: tuple[str, ...],
+    position: dict,
+    *,
+    require_dir_fd: bool = True,
+) -> tuple[str | None, dict, int, bool]:
+    """返回单项续点，让预算中断或待复核项停在准确边界。"""
+    names, resume, complete = directory_page(root, parts, position, 1, require_dir_fd=require_dir_fd)
+    # 便携后端的重放也消耗访问预算，即使本次没有产出名称。
+    return (names[0] if names else None), resume, resume.get("last_scanned", 0), complete
+
+
+def lane_cycle_generation(cursor: dict, *, wrapped: bool = False) -> int:
+    generation = cursor.get("cycle_generation", 0)
+    return (generation if _nonnegative_int(generation) else 0) + int(wrapped)

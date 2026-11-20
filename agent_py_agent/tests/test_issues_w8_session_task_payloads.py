@@ -121,7 +121,12 @@ def test_unsettled_young_pinned_or_held_task_is_kept(tmp_path, monkeypatch, kind
     if kind in {"pinned", "pins_incomplete"}:
         pins = retention_scan._RetentionPins(home.owner_home_dir, ids={task.task_id} if kind == "pinned" else set(),
                                              complete=kind != "pins_incomplete")
-        monkeypatch.setattr(retention_scan, "current_retention_pins", lambda *a, **kw: (pins, pins.complete))
+        def read_pins(_home, _roots, errors, **_kwargs):
+            if not pins.complete:
+                errors.append("simulated incomplete pin source")
+            return pins, pins.complete
+
+        monkeypatch.setattr(retention_scan, "current_retention_pins", read_pins)
     before = conversation.session_tasks._path(task.task_id).read_bytes()
     reports = _drain(home, now, legal_hold=kind == "legal_hold")
     assert conversation.session_tasks._path(task.task_id).read_bytes() == before
@@ -278,3 +283,29 @@ def test_unknown_schema_time_or_metadata_never_grants_retirement(tmp_path, field
     receipts = _drain(home, now)
     assert all(receipt["deleted_items"] == 0 for receipt in receipts)
     assert path.read_bytes() == before
+
+
+def test_pending_pin_projection_revisits_the_same_payload(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan
+    from agent_py_agent.agent.user_space import storage_lanes
+
+    home, conversation, task, _, now = _fixture(tmp_path, sender="")
+    calls = []
+
+    def read_pins(*args, **kwargs):
+        calls.append(True)
+        pins = retention_scan._RetentionPins(home.owner_home_dir, complete=len(calls) > 1)
+        return pins, pins.complete
+
+    monkeypatch.setattr(retention_scan, "current_retention_pins", read_pins)
+    monkeypatch.setattr(storage_lanes.time, "monotonic", lambda: 0)
+    request = _request(home, now)
+    first = validate_lane_receipt(maintain_session_task_payloads_lane(request))
+    assert not first["complete"] and first["deferred_reason"] == "pins_incomplete"
+    assert conversation.session_tasks.require(task.task_id).goal == task.goal
+
+    second = validate_lane_receipt(maintain_session_task_payloads_lane(
+        replace(request, cursor=first["cursor"]),
+    ))
+    assert second["complete"] and second["deleted_items"] == 1 and len(calls) == 2
+    assert conversation.session_tasks.require(task.task_id).goal == ""

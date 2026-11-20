@@ -16,7 +16,6 @@ from pathlib import Path
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
     ensure_private_dir,
-    list_names_beneath,
     open_readonly_file_beneath,
 )
 from ..common.tool_output_paths import tool_output_root
@@ -282,78 +281,51 @@ def _pin_error_rows(source, errors):
         _error(errors, str(getattr(error, 'code', None) or getattr(error, 'error_code', None) or 'pins_unreadable'))
 
 
-# LLM: 本异常只结束本片清扫，不代表故障或已穷尽；续点保留原locks_due_at。
-# 类用途: 在canonical清扫器的单叶边界中断过期或超量批次。
-class _SweepLocksSweepBudgetStop(Exception):
-    pass
-
-
-# LLM: 只预筛至少一天且已无数据的json锁；实际清扫沿原唯一锁退休器，绝不直接unlink锁。
-# 函数用途: 按日进行一次有真实候选才提交的孤儿锁清扫。
-def _sweep_locks(request, cursor, directory, budget):
+def _sweep_locks(request, cursor, budget, receipt, *, other_items):
+    """以已验证的单叶退休器复核每个扫描到的孤儿锁。"""
     from ..common.nofollow_fs import open_directory_beneath
-    from ..gateway_parts.io import cleanup_orphan_lock_files
-    from ..user_space.storage_lanes import STORAGE_LANE_SLICE_ENTRIES, lane_cursor_window
+    from ..gateway_parts.io import _cleanup_orphan_lock_at
+    from ..user_space.storage_lanes import lane_directory_entry
 
-    if cursor.get('locks_due_at', 0) > request.now or budget.remaining_ms() <= 0:
+    def exhausted():
+        return budget.exhausted(receipt["items"] + other_items, receipt["bytes"])
+
+    if cursor.get("locks_due_at", 0) > request.now or exhausted():
         return
-    descriptor = open_directory_beneath(request.home.owner_home_dir, _PARTS, require_dir_fd=True)
+    owner = Path(request.home.owner_home_dir)
+    position = cursor.get("locks_scan", {})
+    cursor.pop("locks_after", None)
     try:
-        with os.scandir(descriptor) as entries:
-            window = lane_cursor_window({'after': cursor.get('locks_after', '')},
-                                        (entry.name for entry in entries if entry.name.endswith('.json.lock')),
-                                        STORAGE_LANE_SLICE_ENTRIES)
-        due, examined = set(), set()
-        for name in window:
-            if budget.remaining_ms() <= 0:
+        descriptor = open_directory_beneath(owner, _PARTS, require_dir_fd=True)
+    except FileNotFoundError:
+        cursor.pop("locks_scan", None)
+        return
+    try:
+        initial = os.fstat(descriptor)
+        while not exhausted():
+            name, resume, visited, complete = lane_directory_entry(owner, _PARTS, position)
+            if resume and resume["directory_identity"] != [initial.st_dev, initial.st_ino]:
+                raise OSError("tool output lock directory identity changed")
+            if complete:
+                cursor.pop("locks_scan", None)
+                cursor["locks_due_at"] = request.now + _TOOL_OUTPUT_LOCK_SWEEP_INTERVAL_SECONDS
                 break
-            try:
-                info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                        or info.st_mtime > request.now - _TOOL_OUTPUT_LOCK_SWEEP_INTERVAL_SECONDS):
-                    examined.add(name)
-                    continue
+            receipt["items"] += visited
+            if name is not None and name.endswith(".json.lock"):
                 try:
-                    os.stat(name[:-5], dir_fd=descriptor, follow_symlinks=False)
+                    info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                            and info.st_mtime <= request.now - _TOOL_OUTPUT_LOCK_SWEEP_INTERVAL_SECONDS):
+                        try:
+                            os.stat(name[:-5], dir_fd=descriptor, follow_symlinks=False)
+                        except FileNotFoundError:
+                            request.run_write(lambda: _cleanup_orphan_lock_at(
+                                descriptor, name, current=request.now,
+                            ))
                 except FileNotFoundError:
-                    due.add(name)
-                    continue
-                examined.add(name)
-            except FileNotFoundError:
-                examined.add(name)
-        if due:
-            # LLM: canonical清扫器在外层枚举；每个实际删除只进一次原写门，不在run_write内嵌套coordinator。
-            # 函数用途: 限量放行一个原锁退休步骤。
-            def commit_one(operation):
-                # canonical operation以唯一默认参数绑定当前lock_path；未知形状保守中断而非猜路径。
-                defaults = getattr(operation, '__defaults__', ()) or ()
-                if len(defaults) != 1 or not isinstance(defaults[0], Path):
-                    raise _SweepLocksSweepBudgetStop
-                name = defaults[0].name
-                if name not in due:
-                    return False
-                if budget.remaining_ms() <= 0:
-                    raise _SweepLocksSweepBudgetStop
-                result = request.run_write(operation)
-                # 锁清扫扫描续点不是正文删除游标；原协议拒绝的活锁下一完整轮再检查。
-                examined.add(name)
-                return result
-
-            try:
-                cleanup_orphan_lock_files(directory, now=request.now, data_sidecars_only=True,
-                                          directory_fd=descriptor, commit_transition=commit_one)
-            except _SweepLocksSweepBudgetStop:
-                pass
-        after = cursor.get('locks_after', '')
-        for name in window:
-            if name not in examined:
-                break
-            after = name
-        if len(window) < STORAGE_LANE_SLICE_ENTRIES and all(name in examined for name in window):
-            cursor.pop('locks_after', None)
-            cursor['locks_due_at'] = request.now + _TOOL_OUTPUT_LOCK_SWEEP_INTERVAL_SECONDS
-        else:
-            cursor['locks_after'] = after
+                    pass
+            position = resume
+            cursor["locks_scan"] = position
     finally:
         os.close(descriptor)
 
@@ -522,7 +494,8 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
         STORAGE_LANE_SLICE_BYTES,
         STORAGE_LANE_SLICE_ENTRIES,
         STORAGE_LANE_SLICE_MS,
-        lane_cursor_window,
+        lane_cycle_generation,
+        lane_directory_entry,
         owner_conversation_roots,
         owner_retention_override,
         validate_lane_receipt,
@@ -536,30 +509,42 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
     days = owner_retention_override(request.home, 'tool_output_days', OWNER_TOOL_OUTPUT_RETENTION_DAYS)
     facts = _retire_runtime_facts(request, days, cursor)
     cursor.update(facts['cursor'])
+    home = Path(request.home.owner_home_dir)
+    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
+    if 'cycle_generation' in cursor:
+        receipt['cycle_generation'] = lane_cycle_generation(cursor)
+    if "locks_scan" in cursor:
+        try:
+            _sweep_locks(request, cursor, budget, receipt, other_items=facts['items'])
+        except (OSError, ValueError):
+            receipt['errors'] = [{'code': 'orphan_locks_unreadable'}]
     if cursor.get('next_pass_at', 0) > request.now:
         receipt['complete'] = facts['complete']
-        return _with_runtime_facts(receipt, facts)
-    home = Path(request.home.owner_home_dir)
-    errors, skipped, decided, due = [], {}, set(), []
+        return validate_lane_receipt(_with_runtime_facts(receipt, facts))
+    errors, skipped, decided, due = receipt.pop('errors', []), {}, set(), []
     receipt.update(errors=errors, skipped=skipped, protected=0, deleted_items=0, freed_bytes=0, backlog=0)
-    try:
-        names = list_names_beneath(home, _PARTS)
-    except FileNotFoundError:
-        names = []
-    except (OSError, ValueError):
-        _error(errors, 'tool_outputs_unreadable')
-        return validate_lane_receipt(receipt)
     cutoff = request.now - days * 86400
-    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
-    window = lane_cursor_window(cursor, (name for name in names if name.endswith('.json')), STORAGE_LANE_SLICE_ENTRIES)
-    for name in window:
-        if budget.exhausted(receipt['items'], receipt['bytes']):
+    position = cursor.get("directory", {})
+    cursor.pop("after", None)
+    checkpoints = {}
+    complete = False
+    while not budget.exhausted(receipt["items"] + facts["items"], receipt["bytes"]):
+        if due and (cursor.get("retry_name") or budget.remaining_ms() <= STORAGE_LANE_SLICE_MS / 2):
             break
-        if due and budget.remaining_ms() <= STORAGE_LANE_SLICE_MS / 2:
+        try:
+            name, resume, visited, complete = lane_directory_entry(home, _PARTS, position)
+        except (OSError, ValueError):
+            _error(errors, 'tool_outputs_unreadable')
+            receipt['complete'] = False
+            cursor['directory'] = position
             break
-        if cursor.get('retry_name') and receipt['items'] >= 1:
+        if complete:
             break
-        receipt['items'] += 1
+        receipt['items'] += visited
+        previous, position = position, resume
+        if name is None or not name.endswith('.json'):
+            continue
+        checkpoints[name] = previous
         try:
             value, info, size = _wrapper(home, name, cutoff=cutoff, max_bytes=budget.max_bytes - receipt['bytes'])
             receipt['bytes'] += size
@@ -639,11 +624,7 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
         for reason, count in result['skipped'].items():
             skipped[reason] = skipped.get(reason, 0) + count
         errors.extend(result['errors'][:max(0, 16 - len(errors))])
-    after = cursor.get('after', '')
-    for name in window:
-        if name not in decided:
-            break
-        after = name
+    unresolved = next((checkpoint for name, checkpoint in checkpoints.items() if name not in decided), None)
     receipt['backlog'] = sum(item['name'] not in decided for item in due)
     cursor.pop('retry_name', None)
     pending = [item['name'] for item in due if item['name'] not in decided]
@@ -652,17 +633,20 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
         receipt.setdefault('deferred_reason', 'budget_exhausted')
     if due:
         receipt['oldest_due_age_seconds'] = max(0, request.now - min(_instant(item['value']['created_at']).timestamp() for item in due))
-    complete = len(window) < STORAGE_LANE_SLICE_ENTRIES and all(name in decided for name in window)
+    complete = complete and unresolved is None
     if complete:
-        cursor = {'after': '', 'next_pass_at': request.now + _TOOL_OUTPUT_PASS_INTERVAL_SECONDS,
-                  'locks_due_at': cursor.get('locks_due_at', 0), 'locks_after': cursor.get('locks_after', '')}
-        if names:
-            try:
-                _sweep_locks(request, cursor, tool_output_root(home), budget)
-            except (OSError, ValueError):
-                _error(errors, 'orphan_locks_unreadable')
+        generation = lane_cycle_generation(cursor, wrapped=True)
+        cursor.pop('directory', None)
+        cursor.update(cycle_generation=generation, next_pass_at=request.now + _TOOL_OUTPUT_PASS_INTERVAL_SECONDS)
+        receipt['cycle_generation'] = generation
+        if cursor.get('locks_due_at', 0) <= request.now:
+            cursor.setdefault('locks_scan', {})
+        try:
+            _sweep_locks(request, cursor, budget, receipt, other_items=facts['items'])
+        except (OSError, ValueError):
+            _error(errors, 'orphan_locks_unreadable')
     else:
-        cursor['after'] = after
+        cursor['directory'] = position if unresolved is None else unresolved
     cursor.update(facts['cursor'])
     receipt['items'] += facts['items']
     receipt['deleted_items'] += facts['deleted']
