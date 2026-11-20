@@ -559,6 +559,10 @@ def scheduled_target_outcome(agent, request):
 def target_outcome_for_run(run):
     facts = run.get('target_outcome')
     run_id = run.get('run_id')
+    if run.get('trigger') == 'failure_retry' and run.get('retry_source_run_id'):
+        receipt = (run.get('effect_receipts') or {}).get('target:execution')
+        if receipt == {'run_id': run['retry_source_run_id'], 'status': 'succeeded'}:
+            run_id = run['retry_source_run_id']
     if (not isinstance(facts, dict) or facts.get('schema') != 'scheduler.target-outcome.v1'
             or facts.get('run_id') != run_id or facts.get('status') not in {'failed', 'succeeded'}
             or not isinstance(facts.get('response'), str) or not isinstance(facts.get('error_code'), str)):

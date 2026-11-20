@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
 import time
@@ -92,10 +93,11 @@ class SchedulerEventEffectOperations:
 
     # LLM: begin成功是副作用已经准入的线性化点；控制先提交则拒绝，begin先提交则原取消只报告在途待清理。
     # 函数用途: 原子登记一个有限在途操作，释放原锁后才调用原模型或运输；归档运行仅允许既有冻结交付重投。
-    def begin_event_effect(self, candidate, operation_key, *, kind, allow_terminal=False):
+    def begin_event_effect(self, candidate, operation_key, *, kind, allow_terminal=False, capture_receipt=False):
         from .repository import SchedulerConflictError, _claim_matches, _runner_liveness
 
-        if candidate.get('event_source') is None:
+        is_event = candidate.get('event_source') is not None
+        if not is_event and not capture_receipt:
             return None
         if kind not in {'model', 'delivery'} or not isinstance(operation_key, str) or not operation_key or len(operation_key) > 1024:
             raise SchedulerConflictError('事件副作用身份无效')
@@ -109,37 +111,100 @@ class SchedulerEventEffectOperations:
                     or active is not None and not _claim_matches(run, str(candidate.get('claim_id') or ''))):
                 raise SchedulerConflictError('事件副作用运行已过期')
             job = self._require_job(store, run['job_id'])
-            if not event_run_current(job, run):
+            if is_event and not event_run_current(job, run):
                 raise SchedulerConflictError('事件来源已退休')
             key = str(run.get('rule_id') or '')
-            state = job['event_source_state'][key]
-            effects = {name: row for name, row in (state.get('active_effects') or {}).items()
-                if _runner_liveness(row) != 'dead'}
+            rule = next((item for item in job.get('rules') or () if item.get('id') == key), job)
+            retry_policy = (rule.get('policy') or {}).get('on_failure') or {}
+            track = capture_receipt and active is not None and (
+                retry_policy.get('retry_once') or run.get('trigger') == 'failure_retry')
             identity = kind + ':' + operation_key
-            if identity in effects or len(effects) >= MAX_ACTIVE_EVENT_EFFECTS:
-                raise SchedulerConflictError('事件副作用仍在途或达到容量')
-            lease = {'lease_id': uuid.uuid4().hex, 'run_id': run['run_id'], 'kind': kind,
-                'generation': run['event_source']['generation'], 'claim_epoch': int(run.get('claim_epoch') or 0),
-                'runner_pid': os.getpid(), 'runner_start_time': process_start_time(os.getpid()), 'started_at': time.time()}
-            effects[identity] = lease
-            state['active_effects'] = effects
+            receipts = run.get('effect_receipts') or {}
+            if capture_receipt and identity in receipts:
+                return {'replayed_receipt': deepcopy(receipts[identity])}
+            if not is_event and not track:
+                return None
+            effect_id = uuid.uuid4().hex
+            pending = dict(run.get('pending_effects') or {})
+            keys = list(run.get('idempotency_keys') or ())
+            if track and identity in pending:
+                raise SchedulerConflictError('定时操作已准入且结果未确认，请先核对原回执')
+            if track and identity not in keys and len(keys) >= MAX_ACTIVE_EVENT_EFFECTS:
+                # 原执行仍可继续，证据不完整的执行不能承诺安全重试。
+                active['reexecutable'] = False
+                track = False
+            if track:
+                if identity not in keys:
+                    keys.append(identity)
+                pending[identity] = effect_id
+                active.update(pending_effects=pending, idempotency_keys=keys, effect_receipts=receipts)
+                active.setdefault('reexecutable', True)
+            lease_identity = identity
+            if capture_receipt:
+                suffix = hashlib.sha256(f"{run['run_id']}:{operation_key}".encode()).hexdigest()
+                lease_identity = f"{kind}:{suffix}"
+            if is_event:
+                state = job['event_source_state'][key]
+                effects = {name: row for name, row in (state.get('active_effects') or {}).items()
+                    if _runner_liveness(row) != 'dead'}
+                if lease_identity in effects or len(effects) >= MAX_ACTIVE_EVENT_EFFECTS:
+                    raise SchedulerConflictError('事件副作用仍在途或达到容量')
+                effects[lease_identity] = {'lease_id': effect_id, 'run_id': run['run_id'], 'kind': kind,
+                    'generation': run['event_source']['generation'], 'claim_epoch': int(run.get('claim_epoch') or 0),
+                    'runner_pid': os.getpid(), 'runner_start_time': process_start_time(os.getpid()), 'started_at': time.time()}
+                state['active_effects'] = effects
+            if active is not None:
+                store['runs'][run['run_id']] = active
             self._write_store_unlocked(store, admission)
-        return {'job_id': run['job_id'], 'rule_id': key, 'operation_key': identity, 'lease_id': lease['lease_id']}
+        return {'job_id': run['job_id'], 'rule_id': key, 'operation_key': lease_identity, 'lease_id': effect_id,
+                **({'run_id': run['run_id'], 'receipt_key': identity} if track else {}),
+                **({'non_event': True} if not is_event else {})}
 
     # LLM: 只释放同一nonce，不要求旧generation仍生效，不能让老finally删除替代调用；不改run/history终态。
     # 函数用途: 在原副作用返回或异常后清理其在途lease，供取消待清理事实对账。
-    def finish_event_effect(self, lease):
-        if lease is None:
+    def finish_event_effect(self, lease, *, receipt=None, reexecutable=None):
+        if lease is None or 'replayed_receipt' in lease:
             return
         with self._mutation_scope() as (store, admission):
-            job = self._require_job(store, lease['job_id'])
-            state = (job.get('event_source_state') or {}).get(lease['rule_id'])
-            if state is None:
+            if not lease.get('non_event'):
+                job = self._require_job(store, lease['job_id'])
+                state = (job.get('event_source_state') or {}).get(lease['rule_id'])
+                effects = dict(state.get('active_effects') or {}) if state is not None else {}
+                current = effects.get(lease['operation_key'])
+                if current is None or current.get('lease_id') != lease['lease_id']:
+                    return
+                effects.pop(lease['operation_key'])
+                state['active_effects'] = effects
+            saved = self._settle_effect_receipt(store, lease, receipt, reexecutable)
+            if lease.get('non_event') and not saved:
                 return
-            effects = dict(state.get('active_effects') or {})
-            current = effects.get(lease['operation_key'])
-            if current is None or current.get('lease_id') != lease['lease_id']:
-                return
-            effects.pop(lease['operation_key'])
-            state['active_effects'] = effects
             self._write_store_unlocked(store, admission)
+
+    def _settle_effect_receipt(self, store, lease, receipt, reexecutable):
+        from .repository import _STORE_PROJECTION_MAX_BYTES_COUNT
+
+        run, _error = self._parse_run(store['runs'].get(lease.get('run_id')))
+        if run is None:
+            return False
+        identity = lease.get('receipt_key')
+        pending = dict(run.get('pending_effects') or {})
+        if pending.get(identity) != lease['lease_id']:
+            return False
+        pending.pop(identity)
+        receipts = dict(run.get('effect_receipts') or {})
+        if isinstance(receipt, dict):
+            prospective = {**receipts, identity: receipt}
+            try:
+                encoded = json.dumps(prospective, ensure_ascii=False, allow_nan=False)
+                if len(encoded.encode('utf-8')) <= _STORE_PROJECTION_MAX_BYTES_COUNT:
+                    receipts = json.loads(encoded)
+                else:
+                    reexecutable = False
+            except (TypeError, ValueError, UnicodeError):
+                reexecutable = False
+        elif reexecutable is not True:
+            reexecutable = False
+        run.update(effect_receipts=receipts, pending_effects=pending,
+                   reexecutable=run.get('reexecutable') is not False and reexecutable is not False)
+        store['runs'][run['run_id']] = run
+        return True

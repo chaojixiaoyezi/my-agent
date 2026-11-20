@@ -288,6 +288,8 @@ class SchedulerRunFinish:
     model_call_count: int | None = field(default=None, kw_only=True)
     postcheck_observation: dict[str, object] | None = field(default=None, kw_only=True)
     failure_kind: str = field(default="", kw_only=True)
+    failure_stage: str = field(default="", kw_only=True)
+    reexecutable: bool | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", str(self.status or "").strip().lower())
@@ -3088,7 +3090,7 @@ def _terminal_run_payload(
     *,
     now: float,
 ) -> dict[str, object]:
-    return {
+    terminal = {
         **run,
         "status": result.status,
         "ended_at": now,
@@ -3106,6 +3108,31 @@ def _terminal_run_payload(
            if (bounded_obs := _bounded_postcheck_observation(result.postcheck_observation)) is not None
            else {}),
     }
+    effects = dict(run.get("effect_receipts") or {})
+    keys = list(run.get("idempotency_keys") or ())
+    target = None
+    if isinstance(run.get("target_outcome"), dict):
+        from .execution import target_outcome_for_run
+
+        target = target_outcome_for_run(run)
+    if target is not None and target["status"] == "succeeded":
+        # 目标结果已经在原 claim 下持久化。重试只引用它，保留原执行目录和结果账。
+        effects["target:execution"] = {"run_id": target["run_id"], "status": "succeeded"}
+        if "target:execution" not in keys:
+            keys.append("target:execution")
+    if (result.failure_stage or result.reexecutable is not None or 'effect_receipts' in run
+            or 'reexecutable' in run or effects):
+        can_retry = (run.get('reexecutable') is not False and not _is_effect_unknown(terminal)
+                     and result.reexecutable is not False)
+        terminal.update({
+            "effect_receipts": effects,
+            "idempotency_keys": keys,
+            "failure_stage": result.failure_stage or (
+                "postcheck" if result.postcheck_observation is not None else "execution"
+            ) if result.status in {"failed", "unknown"} else "",
+            "reexecutable": can_retry,
+        })
+    return terminal
 
 
 def _bounded_postcheck_observation(observation: object) -> dict[str, object] | None:
@@ -3127,7 +3154,7 @@ def _is_effect_unknown(terminal: dict[str, object]) -> bool:
         SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN,
     )
 
-    if str(terminal.get("status") or "") == "unknown":
+    if str(terminal.get("status") or "") == "unknown" or terminal.get("pending_effects"):
         return True
     error_code = str(terminal.get("error_code") or "")
     if error_code in {
@@ -3270,6 +3297,7 @@ def _apply_failure_streak_and_followups(
             and not streak["retry_run_id"]
             and status == "failed"
             and not effect_unknown
+            and terminal.get("reexecutable") is not False
             and str(updated.get("status") or "") == "active"
             and bool(updated.get("enabled", True))
         ):
@@ -3282,6 +3310,18 @@ def _apply_failure_streak_and_followups(
                 dispatch_after=retry_at,
                 now=float(now),
             )
+            if terminal.get("reexecutable") is True:
+                retry_run.update({
+                    "effect_receipts": deepcopy(terminal.get("effect_receipts", {})),
+                    "idempotency_keys": list(terminal.get("idempotency_keys") or ()),
+                    "failure_stage": terminal.get("failure_stage", ""),
+                    "reexecutable": True,
+                    "retry_source_run_id": run_id,
+                })
+                if "target:execution" in retry_run["effect_receipts"]:
+                    for field_name in ("target_outcome", "structured_result", "execution_root_ref"):
+                        if field_name in terminal:
+                            retry_run[field_name] = deepcopy(terminal[field_name])
             if isinstance(terminal.get("event_source"), dict):
                 frozen_source = deepcopy(terminal["event_source"])
                 batch = deepcopy(list(terminal.get("event_batch") or []))

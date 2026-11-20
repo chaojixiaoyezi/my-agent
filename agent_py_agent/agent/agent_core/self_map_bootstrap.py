@@ -222,7 +222,7 @@ def _script_delivery_handler(agent, params):
         receipt = deliver_host_script_intent(agent, DeliveryContext(
             channel=channel, target=target, mode='proactive', request_id=frozen['request_id'],
             thread_id=thread_id, task_id=frozen['task_id'], idempotency_key=key),
-            ReplyEnvelope(content=message, attachments=tuple(attachments)))
+            ReplyEnvelope(content=message, attachments=tuple(attachments)), request_key=request_key)
         if not receipt.get('operation_ref'):
             raise ValueError(f"{receipt.get('error_code') or 'CHANNEL_SEND_FAILED'}: 脚本投递未获宿主原持久受理")
         return receipt

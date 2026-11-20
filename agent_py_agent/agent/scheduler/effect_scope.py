@@ -2,8 +2,11 @@
 # 模块用途: 在原模型与后台投递调用边界复用事件副作用lease，不改变原执行器和回执权威。
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from contextlib import contextmanager
+from dataclasses import asdict
 
 
 # LLM: 只有开始CAS明确未获准才抛此类型；运输已开始后的中断不能冒充not_started。
@@ -46,7 +49,7 @@ def _scheduled_root(agent, task_id):
 # LLM: lease只围住原调用生命周期而不持store锁；拒绝必须发生在backend/transport调用之前，finally不覆盖原异常。
 # 函数用途: 为准确事件根取得开始资格，调用结束后同nonce释放；普通定时任务保持零写。
 @contextmanager
-def scheduler_effect_scope(agent, task_id, operation_key, *, kind, allow_terminal=False):
+def scheduler_effect_scope(agent, task_id, operation_key, *, kind, allow_terminal=False, replay_key=None):
     root = _scheduled_root(agent, task_id)
     repository = getattr(agent, 'scheduler_repository', None)
     if not root:
@@ -60,17 +63,68 @@ def scheduler_effect_scope(agent, task_id, operation_key, *, kind, allow_termina
         raise SchedulerEffectRejected('SCHEDULER_EFFECT_SOURCE_UNAVAILABLE') from exc
     if candidate is None:
         raise SchedulerEffectRejected('SCHEDULER_EFFECT_SOURCE_UNAVAILABLE')
-    if candidate.get('event_source') is None:
+    if candidate.get('event_source') is None and replay_key is None:
         yield
         return
     try:
-        lease = repository.begin_event_effect(candidate, operation_key, kind=kind, allow_terminal=allow_terminal)
+        if replay_key is not None and candidate.get('claim_id'):
+            lease = repository.begin_event_effect(
+                candidate, replay_key, kind=kind, allow_terminal=allow_terminal, capture_receipt=True,
+            )
+        else:
+            lease = repository.begin_event_effect(candidate, operation_key, kind=kind, allow_terminal=allow_terminal)
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         raise SchedulerEffectRejected('SCHEDULER_EVENT_EFFECT_RETIRED') from exc
     try:
-        yield
+        yield lease if replay_key is not None else None
     finally:
         try:
-            repository.finish_event_effect(lease)
+            if replay_key is not None and lease is not None:
+                repository.finish_event_effect(lease, receipt=lease.get('receipt'),
+                                               reexecutable=lease.get('reexecutable'))
+            else:
+                repository.finish_event_effect(lease)
         except (OSError, RuntimeError, TypeError, ValueError, KeyError):
             logging.getLogger(__name__).warning('scheduler_event_effect_cleanup_pending')
+
+
+def run_scheduler_delivery(agent, context, envelope, send, *, allow_terminal=False, request_key=None):
+    """同一定时运行链按冻结投递键复用已发回执。"""
+    from ..conversation.channels import ComponentDeliveryReceipt, DeliveryReceipt
+    from ..delivery.service import ComponentDeliveryReceipt as HostDeliveryReceipt
+
+    # 网关请求和 wake ID 会换代。操作键仍绑定实际收件方、回复范围和附件字节。
+    actor_task = "" if str(context.task_id or "").startswith("srun_") else context.task_id
+    payload = (actor_task, context.channel, context.target, context.mode, context.conversation_id, context.reply_to,
+               context.reply_policy, context.provider_thread_id, context.root_id, context.parent_id,
+               envelope.content, envelope.format,
+               [(item.name, item.sha256 or item.artifact_id) for item in envelope.attachments], envelope.evidence_refs)
+    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+    key = f"delivery-payload:{digest}"
+    if request_key is not None:
+        request_digest = hashlib.sha256(json.dumps([actor_task, request_key]).encode()).hexdigest()
+        key = f"script-delivery:{request_digest}"
+    with scheduler_effect_scope(agent, context.task_id, context.idempotency_key, kind='delivery',
+                                allow_terminal=allow_terminal, replay_key=key) as lease:
+        if lease is not None and 'replayed_receipt' in lease:
+            fields = dict(lease['replayed_receipt'])
+            if fields.pop('payload_digest', None) != digest:
+                raise SchedulerEffectRejected('SCRIPT_DELIVERY_REQUEST_INVALID')
+            receipt_type = HostDeliveryReceipt if fields.pop('host_delivery', False) else DeliveryReceipt
+            components = fields.get('component_receipts', ())
+            fields['component_receipts'] = (tuple(components) if receipt_type is HostDeliveryReceipt
+                                           else tuple(ComponentDeliveryReceipt(**row) for row in components))
+            for name in ('attachment_ids', 'evidence_refs'):
+                fields[name] = tuple(fields.get(name, ()))
+            return receipt_type(content=envelope.content, **fields)
+        receipt = send()
+        if lease is not None:
+            if isinstance(receipt, DeliveryReceipt) and receipt.delivery_status == 'sent':
+                lease['receipt'] = asdict(receipt)
+                lease['receipt'].pop('content')
+                lease['receipt']['payload_digest'] = digest
+                if isinstance(receipt, HostDeliveryReceipt):
+                    lease['receipt']['host_delivery'] = True
+            else:
+                lease['reexecutable'] = getattr(receipt, 'effect_outcome', '') == 'not_started'
+        return receipt

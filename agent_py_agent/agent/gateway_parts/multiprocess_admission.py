@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import errno
 import json
+import logging
 import os
 import time
 import uuid
@@ -13,7 +14,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from ..common.json_io import serialize_private_json_no_newline
-from ..common.nofollow_fs import ensure_private_dir
+from ..common.nofollow_fs import create_private_file_beneath, ensure_private_dir
 from ..runtime_errors import DataCorruptionError
 from ..user_space.owner_resolver import OwnerIdentity
 from .io import (
@@ -52,6 +53,28 @@ _SCAN_SKIPPED = object()
 # 函数用途: 返回准入预留目录。
 def reservations_dir(paths) -> Path:
     return paths.root / ADMISSION_DIR_NAME / RESERVATIONS_DIR_NAME
+
+
+def admitted_user_input_locators(paths) -> Path:
+    return paths.root / ADMISSION_DIR_NAME / "active-user-input"
+
+
+def _locate_admitted_user_input(paths, request_id, *, request=None):
+    """发布可丢弃的活跃请求定位。读者必须再核原预约和队列记录。"""
+    directory = admitted_user_input_locators(paths)
+    marker = directory / (request_id + ".json")
+    try:
+        if request is None:
+            marker.unlink(missing_ok=True)
+        elif request.get("kind", "ask") == "ask" and isinstance(request.get("conversation"), dict):
+            ensure_private_dir(directory, canonical_root=paths.root)
+            try:
+                os.close(create_private_file_beneath(paths.root, marker.relative_to(paths.root).parts))
+            except FileExistsError:
+                pass
+    except (OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning("S11_ADMISSION_LOCATOR_IO request=%s error_type=%s",
+                                            request_id, type(exc).__name__)
 
 
 # LLM: 文件名即请求身份（claim、锁、终态归档共用同一 id），不允许请求正文改写目标路径。
@@ -893,6 +916,7 @@ def _persist_created_record(gate, path, owner, stamped, record):
     rejection = _runtime_owner_rejection(gate, owner)
     if rejection:
         return rejection
+    _locate_admitted_user_input(gate.paths, path.stem, request=stamped)
     gate._publish_stamped(path, stamped)
     return {"status": "admitted", "request": stamped, "reservation": record}
 
@@ -929,6 +953,7 @@ def _persist_reused_record(gate, path, owner, current, stamped, updated):
     rejection = _runtime_owner_rejection(gate, owner)
     if rejection:
         return rejection
+    _locate_admitted_user_input(gate.paths, path.stem, request=stamped if stamped is not None else current)
     if stamped is not None:
         gate._publish_stamped(path, stamped)
     return {"status": "admitted", "request": stamped if stamped is not None else current, "reservation": updated}
@@ -1232,6 +1257,7 @@ def _release_reservation_locked(gate, record_path: Path, request_id: str) -> dic
         updated = release_admission(record, terminal)
     except MultiprocessRecordError as exc:
         return {"released": False, "reason": exc.reason}
+    _locate_admitted_user_input(gate.paths, request_id)
     if record.get("state") == "released":
         return _finish_runtime_released(gate, record_path, record, terminal)
     with _runtime_commit_scope(gate) as rejection:

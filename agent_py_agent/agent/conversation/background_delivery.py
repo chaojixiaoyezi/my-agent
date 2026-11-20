@@ -588,12 +588,14 @@ def _background_external_delivery(
     request = external_options.request
     if request is not None and required_notice(delivery.agent, request) is not None and not notice_is_current(delivery.agent, request):
         return SimpleNamespace(content=''), 'suppressed'
-    from ..scheduler.effect_scope import SchedulerEffectRejected, scheduler_effect_scope
+    from ..scheduler.effect_scope import SchedulerEffectRejected, run_scheduler_delivery
 
     try:
-        with scheduler_effect_scope(delivery.agent, delivery_context.task_id, delivery_context.idempotency_key,
-                kind='delivery', allow_terminal=frozen_retry is not None):
-            receipt = delivery.channels.deliver(delivery_context, envelope)
+        receipt = run_scheduler_delivery(
+            delivery.agent, delivery_context, envelope,
+            lambda: delivery.channels.deliver(delivery_context, envelope),
+            allow_terminal=frozen_retry is not None,
+        )
     except SchedulerEffectRejected as exc:
         return SimpleNamespace(content=envelope.content, error_code=exc.error_code), 'failed'
     return receipt, str(getattr(receipt, "delivery_status", "") or "sent")
