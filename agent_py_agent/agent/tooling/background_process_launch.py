@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import write_private_json_file_atomic_unlocked
+from ..common.process_spawn import SpawnPopen
 from .listen_scope import DEFAULT_LISTEN_SCOPE, normalize_listen_scope
 from .process_registry import (
     _process_instance_terminated,
@@ -215,7 +216,10 @@ def start_background_process(
             current = transaction.load(session_id)
             if current is None or current["stop_requested"] or current["status"] != "starting":
                 raise RuntimeError("managed background reservation revoked")
-            process = subprocess.Popen(
+            popen = subprocess.Popen
+            if os.name == "posix" and popen is SpawnPopen.__base__:
+                popen = SpawnPopen
+            process = popen(
                 [
                     sys.executable,
                     "-u",

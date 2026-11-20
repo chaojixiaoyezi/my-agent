@@ -53,6 +53,7 @@ from ..common.cancellation import (
     register_cancellation_callback,
 )
 from ..common.nofollow_fs import ensure_private_dir
+from ..common.process_spawn import SpawnPopen
 from .background_process_launch import (
     BACKGROUND_START_SETTLE_SECONDS,
     BackgroundLaunchError,
@@ -2640,8 +2641,12 @@ def _start_attempt_shell_process(
             "TEMP": scratch_str,
         }
         pass_fds = tuple(dict.fromkeys((*pass_fds, int(cred_runtime.cred_file.read_fd))))
+    # 调用方若已替换标准库构造器，保留该绑定；原生构造器复用统一的 POSIX 派生。
+    popen = subprocess.Popen
+    if os.name == "posix" and popen is SpawnPopen.__base__:
+        popen = SpawnPopen
     try:
-        return subprocess.Popen(
+        return popen(
             exec_arg,
             shell=use_shell,
             cwd=str(target),

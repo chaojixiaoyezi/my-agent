@@ -11,7 +11,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from ..common.nofollow_fs import open_directory_beneath
+from ..common.nofollow_fs import (
+    ManagedFileReadLimitExceeded,
+    open_directory_beneath,
+    read_bytes_beneath,
+)
 from ..gateway_parts.io import cleanup_orphan_lock_files
 from ..user_space.storage_lanes import (
     STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT,
@@ -20,13 +24,23 @@ from ..user_space.storage_lanes import (
     STORAGE_LANE_SLICE_MS,
     StorageLaneBudget,
     StorageLaneRequest,
+    lane_cursor_window,
     owner_retention_override,
 )
-from .process_session_records import PROCESS_TERMINAL_STATUSES, validate_session_id
+from .process_registry import _process_instance_terminated
+from .process_session_cleanup import _extract_prior_obligations
+from .process_session_records import (
+    MANAGED_PROCESS_SESSION_SCHEMAS,
+    PROCESS_TERMINAL_STATUSES,
+    validate_process_record,
+    validate_session_id,
+)
 from .process_session_store import (
+    PROCESS_LOST_REASON,
     ProcessSessionStore,
     ProcessSessionTransaction,
     _activation_exit_confirmed,
+    _archive_session_if_unchanged,
     _completion_obligation_finished,
     _record_ttl_expired,
     process_session_store_root,
@@ -152,18 +166,23 @@ class _Pass:
             except (ValueError, TypeError):
                 phase = "invalid"
         self.phase = phase
+        reap_after = request.cursor.get("reap_after", "")
         self.invalid_cursor = (type(next_prune) not in (int, float) or not math.isfinite(next_prune) or next_prune < 0
                                or type(offset) is not int or offset < 0
-                               or type(phase) is not str or phase not in {"prune", "launch_locks", "root_locks", "logs", "compact"})
+                               or type(phase) is not str
+                               or phase not in {"prune", "reap_hosts", "launch_locks", "root_locks", "logs", "compact"}
+                               or (phase == "reap_hosts" and not _valid_reap_after(reap_after)))
         if self.invalid_cursor:
             self.result["cursor"] = {"next_prune_at": 0.0, "log_offset": 0, "phase": "prune"}
-        elif self.ledger_generation is None and offset:
+        elif phase == "reap_hosts" and reap_after:
+            self.result["cursor"]["reap_after"] = reap_after
+        if not self.invalid_cursor and phase != "reap_hosts" and self.ledger_generation is None and offset:
             # 无代际的旧续点只能重放，不能把当前台账前缀直接认作已消费。
             self.result["cursor"].update(log_offset=0, phase="logs")
             self.phase = "logs"
             self.skip("ledger_generation_unknown")
 
-    # 原 cursor 仍只有三个字段；phase 的结构化后缀绑定台账 inode，防恢复后误用旧 offset。
+    # phase 的后缀绑定台账 inode，避免把旧的日志续点用到换代后的文件。
     def set_phase(self, phase):
         self.phase = phase
         suffix = "" if self.ledger_generation is None else f"@{self.ledger_generation[0]}:{self.ledger_generation[1]}"
@@ -183,6 +202,147 @@ class _Pass:
     def transaction(self):
         deadline = time.monotonic() + _PROCESS_SESSION_LANE_LOCK_WAIT_MS / 1000
         return ProcessSessionStore(self.root).transaction(wait_check=_bounded_wait(deadline))
+
+
+def _valid_reap_after(value):
+    # 续点只参与排序，坏文件名也必须能越过，实际读取另行校验 session_id。
+    return type(value) is str and (not value or (
+        value.startswith("bg-") and value.endswith(".json") and Path(value).name == value
+    ))
+
+
+def _recorded_instance_terminated(pid, birth):
+    """缺失 PID 只能结清已经登记了宿主出生标识的实例。"""
+    kind, _, value = birth.partition(":")
+    if kind == "proc":
+        observed = value.isascii() and value.isdecimal()
+    else:
+        # host: 同时承接本地化的旧 POSIX 标识和 Windows 的进程时间。
+        observed = kind == "host" and bool(value.strip())
+    return observed and _process_instance_terminated(pid, birth)
+
+
+def _pid_slot_absent(pid):
+    if os.name == "nt":
+        return _process_instance_terminated(pid, "")
+    try:
+        os.getpgid(pid)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _group_absent(pid):
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _lost_host_changes(record, now):
+    """在原锁外只读核对实例及进程组，只有确证结束才写终态。"""
+    pid, birth = record["pid"], record["pid_birth_token"]
+    if not pid or not _pid_slot_absent(pid) or not _recorded_instance_terminated(pid, birth):
+        return None  # 复用原 PID 的活实例也可能属于原进程组。
+    child_pid = record["child_pid"]
+    child_admitted = record["child_launch_started"]
+    unknown = {"status": "unknown"} if record["status"] != "unknown" else None
+    if child_admitted and not child_pid:
+        return unknown
+    if os.name == "posix":
+        if not _group_absent(pid) or (child_pid and not _group_absent(child_pid)):
+            return unknown
+    elif child_admitted:
+        return unknown  # 该平台没有可靠的原进程组存活观察。
+    if child_pid and not _recorded_instance_terminated(child_pid, record["child_pid_birth_token"]):
+        return unknown
+    prior = _extract_prior_obligations(record, include_top_level_bare=True)
+    if prior.tree_incomplete or prior.bare_unresolved_pids or any(
+        not _recorded_instance_terminated(instance["pid"], instance["birth_token"])
+        for instance in prior.unresolved_instances
+    ):
+        return unknown
+    return {"status": "exited" if child_admitted else "not_started",
+            "reason": PROCESS_LOST_REASON, "finished_at": now, "exit_code": None}
+
+
+def _lost_record_can_archive(record):
+    return (record.get("reason") == PROCESS_LOST_REASON
+            and record["status"] in PROCESS_TERMINAL_STATUSES
+            and not record.get("retain_until_consumed")
+            and record.get("activation_scope") is None
+            and _completion_obligation_finished(record, None))
+
+
+def _commit_lost_host(p, record):
+    changes = None
+    if record["status"] not in PROCESS_TERMINAL_STATUSES:
+        try:
+            changes = _lost_host_changes(record, p.request.now)
+        except (OSError, OverflowError, ValueError):
+            p.skip("process_state_unknown")
+            p.error("process_session_scan_failed")
+            return
+    if changes is None and not _lost_record_can_archive(record):
+        return
+
+    def operation():
+        with p.transaction() as transaction:
+            current = transaction.load(record["session_id"])
+            if current != record:
+                return
+            if changes is not None:
+                current = transaction.write({**current, **changes})
+            if _lost_record_can_archive(current) and (p.root / (current["session_id"] + ".json")).is_file():
+                _archive_session_if_unchanged(p.root, current)
+
+    p.request.run_write(operation)
+
+
+def _reap_hosts(p):
+    """分片检查活跃目录，未知实例留在原处，随下次到期维护重新核对。"""
+    cursor = p.result["cursor"]
+    limit = p.budget.max_items - p.result["items"]
+    with os.scandir(p.root) as entries:
+        names = lane_cursor_window(
+            {"after": cursor.get("reap_after", "")},
+            (entry.name for entry in entries if entry.name.startswith("bg-") and entry.name.endswith(".json")),
+            limit + 1,
+        )
+    for name in names:
+        if not p.available():
+            return False
+        p.result["items"] += 1
+        # 读取失败只遗留该行，不阻止其余候选按续点前进。
+        try:
+            session_id = validate_session_id(name.removesuffix(".json"))
+            remaining = p.budget.max_bytes - p.result["bytes"]
+            raw = read_bytes_beneath(p.root, (name,), max_bytes=remaining)
+            record = None
+            if raw is not None:
+                p.result["bytes"] += len(raw)
+                record = validate_process_record(json.loads(raw))
+                if record["session_id"] != session_id:
+                    raise ValueError("managed process filename and record identity differ")
+        except ManagedFileReadLimitExceeded as exc:
+            if p.result["bytes"] and exc.observed_bytes <= p.budget.max_bytes:
+                return False  # 下一片有完整字节额度时再读这条。
+            p.skip("process_state_unknown")
+            p.error("process_session_scan_failed")
+        except (OSError, TypeError, ValueError, RecursionError):
+            p.skip("process_state_unknown")
+            p.error("process_session_scan_failed")
+        else:
+            if record is not None and record["schema"] in MANAGED_PROCESS_SESSION_SCHEMAS:
+                _commit_lost_host(p, record)
+        cursor["reap_after"] = name
+    cursor.pop("reap_after", None)
+    return True
 
 
 # 初读只枚举已完成的历史，归档位置证明通知义务此前已结清；实际删除仍在原根目录事务中重读。
@@ -536,7 +696,13 @@ def maintain_process_sessions_lane(request: StorageLaneRequest) -> dict:
             return p.result
         phase = p.phase
         if phase == "prune":
+            due = request.now >= p.result["cursor"]["next_prune_at"]
             if not p.available() or not _prune(p):
+                return p.result
+            p.set_phase("reap_hosts" if due else "launch_locks")
+            phase = p.phase
+        if phase == "reap_hosts":
+            if not p.available() or not _reap_hosts(p):
                 return p.result
             p.set_phase("launch_locks")
             phase = p.phase
