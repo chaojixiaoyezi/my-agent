@@ -7,7 +7,7 @@ import json
 import os
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -24,6 +24,7 @@ from ._filesystem_helpers import (
     _internal_agent_status_ref,
     _internal_agent_status_run_id,
     _optional_path,
+    _safe_discovery_path,
     _text_param,
     path_resolution_error_outcome,
 )
@@ -329,14 +330,33 @@ class _LazyListWalk:
     # 无序枚举和堆出队每 256 项检查一次取消。
     _CANCELLATION_CHECK_ENTRIES = 256
 
-    def __init__(self, tool: ListFilesTool, target: Path, request: _ListFilesRequest):
+    def __init__(
+        self,
+        tool: FileSystemTool,
+        target: Path,
+        request: _ListFilesRequest,
+        *,
+        file_filter: Callable[[str, str], bool] | None = None,
+    ):
         self._tool = tool
+        self._target = target
         self._request = request
+        self._file_filter = file_filter
         self._after_key = _path_sort_key((target / request.after_entry).as_posix()) if request.after_entry else None
         self._pending: list[_ListWalkNode] = []
         self._visited = 0
         self.scan_incomplete = False
         self._schedule_descent(target.as_posix(), depth=0)
+
+    @classmethod
+    def for_discovery(
+        cls, tool: FileSystemTool, target: Path, *, include_ignored: bool,
+        after_entry: str, file_filter: Callable[[str, str], bool],
+    ) -> _LazyListWalk:
+        request = _ListFilesRequest(
+            ".", True, 0, 0, 0, "", False, True, include_ignored, True, after_entry,
+        )
+        return cls(tool, target, request, file_filter=file_filter)
 
     def _schedule_descent(self, directory: str, *, depth: int, resolved_directory: Path | None = None) -> None:
         # "/" 中断 Unicode 大小写上下文。每个后代的排序键都大于这个前缀，
@@ -367,6 +387,17 @@ class _LazyListWalk:
             item = Path(node.key[1])
             run_id = _internal_agent_status_run_id(item, include_agent_directory=True)
             if run_id:
+                continue
+            if self._file_filter is not None:
+                safe = _safe_discovery_path(
+                    self._tool, item, root=self._target, include_ignored=self._request.include_ignored,
+                    ignored_names=_COMMON_FILE_DISCOVERY_IGNORES,
+                )
+                if safe is not None:
+                    if node.is_dir:
+                        self._schedule_descent(node.key[1], depth=node.depth)
+                    elif node.is_file and (self._after_key is None or node.key > self._after_key):
+                        return item, False
                 continue
             resolved = item if node.resolved_directory is None else node.resolved_directory / item.name
             if node.is_reparse_point:
@@ -428,15 +459,20 @@ class _LazyListWalk:
                     if not self._request.recursive or is_dir or entry.is_dir():
                         continue
                 is_symlink = entry.is_symlink()
+                if self._file_filter is not None:
+                    if is_symlink or (not is_dir and not self._file_filter(key[1], name)):
+                        continue
                 is_file = (
-                    not self._request.include_files and not is_symlink and not is_dir
-                    and entry.is_file(follow_symlinks=False)
+                    (self._file_filter is not None or not self._request.include_files)
+                    and not is_symlink and not is_dir and entry.is_file(follow_symlinks=False)
                 )
                 # Windows 的目录联接点不一定是符号链接。读取 DirEntry 的重解析属性，
                 # 只为这类条目解析真实路径，避免对子树按联接点的显示路径误判托管区。
                 is_reparse_point = os.name == "nt" and not is_symlink and bool(
                     entry.stat(follow_symlinks=False).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
                 )
+                if self._file_filter is not None and (is_reparse_point or not (is_dir or is_file)):
+                    continue
                 accepted += 1
                 yield _ListWalkNode(
                     key, "", depth, is_dir, is_symlink, is_file,
@@ -447,7 +483,7 @@ class _LazyListWalk:
             with os.scandir(directory) as entries:
                 batch = heapq.nsmallest(self._MAX_BATCH_ENTRIES, candidates(entries))
         except OSError:
-            if not self._request.recursive:
+            if not self._request.recursive or self._file_filter is not None:
                 raise
             return  # 保留递归枚举跳过不可读或消失目录的行为。
         raise_if_cancelled()
