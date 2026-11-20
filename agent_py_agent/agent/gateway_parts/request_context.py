@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -75,6 +76,97 @@ class GatewayAskRunContext:
     request_id: str
     on_chunk: object
     stages: dict[str, object] | None = None
+
+
+def admitted_user_input_on_lane(agent: object, thread_id: str) -> bool:
+    """只读取当前准入请求，按宿主冻结的 owner 和会话归属确认用户回合。"""
+    from ..runtime_errors import DataCorruptionError
+    from .io import read_json_file_report
+    from .multiprocess_admission import (
+        _read_reservation,
+        admitted_user_input_locators,
+        reservation_file,
+        verify_claimable_reservation,
+    )
+    from .multiprocess_executor_active_index import current_index
+    from .paths import gateway_paths
+    from .request_owner_binding import frozen_request_owner
+
+    identity = getattr(getattr(agent, "home_paths", None), "identity", None)
+    if identity is None or not getattr(getattr(agent, "config", None), "gateway_workspace", None):
+        return False
+    paths = gateway_paths(agent)
+
+    def matches(path, *, reservation=None):
+        report = read_json_file_report(path, context="gateway.s11.admitted_request")
+        row = report.payload
+        if (report.load_error or not row or row.get("id") != path.stem or row.get("kind", "ask") != "ask"
+                or row.get("cancel_requested") or row.get("request_identity_error")):
+            return False
+        if reservation is None:
+            if row.get("status") != "processing" or row.get("turn_phase") != "open":
+                return False
+        elif not verify_claimable_reservation(row, reservation).get("ok"):
+            return False
+        try:
+            if frozen_request_owner(row) != identity:
+                return False
+        except DataCorruptionError:
+            return False
+        claim = row.get("conversation_claim")
+        if claim is not None:
+            return (isinstance(claim, dict) and claim.get("schema_version") == "gateway_conversation_claim.v1"
+                    and claim.get("request_id") == path.stem and claim.get("task_id") == f"gateway:{path.stem}"
+                    and claim.get("thread_id") == thread_id)
+        conversation = row.get("conversation")
+        if not isinstance(conversation, dict):
+            return False
+        if conversation.get("thread_id"):
+            return conversation["thread_id"] == thread_id
+        return bool(conversation.get("channel_conversation_id")) and channel_thread(conversation) == thread_id
+
+    def channel_thread(conversation):
+        store = getattr(agent, "conversation_store", None)
+        if store is None:
+            return ""
+        selected, error = store.threads.resolve_report(
+            channel=str(conversation.get("channel") or "chat"),
+            channel_conversation_id=str(conversation["channel_conversation_id"]),
+            channel_user_id=str(conversation.get("channel_user_id") or "local-cli"),
+        )
+        return selected.thread_id if selected is not None and not error else ""
+
+    # processing 只包含活跃请求。已结算的历史和待准入队列不参与轮询。
+    try:
+        with os.scandir(paths.processing) as entries:
+            if any(entry.name.endswith(".json") and entry.is_file(follow_symlinks=False)
+                   and matches(Path(entry.path)) for entry in entries):
+                return True
+    except OSError:
+        pass
+    try:
+        with os.scandir(admitted_user_input_locators(paths)) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+                    continue
+                request_id = Path(entry.name).stem
+                reservation = _read_reservation(reservation_file(paths, request_id))
+                if isinstance(reservation, dict) and (
+                    matches(paths.inbox / entry.name, reservation=reservation)
+                    or matches(paths.processing / entry.name)
+                ):
+                    return True
+    except OSError:
+        pass
+    # 协调进程还可从现有活跃预约索引发现已盖章、尚未移动到 processing 的请求。
+    index = current_index(paths)
+    if index is None:
+        return False
+    try:
+        return any(matches(paths.inbox / (row["request_id"] + ".json"), reservation=row)
+                   for row in index.active_p3())
+    except (OSError, ValueError):
+        return False
 
 
 # LLM: 这里只表示准确请求、目标或活动任务选出的合格工作区，不证明当前回合已执行任务；生命周期仍在首个可升级工具调用时激活。

@@ -257,7 +257,7 @@ def suppress_intermediate(store, *, task_id, run_id, attempt_id) -> bool:
 
 # LLM: 只对定时执行的主代理工作片生效（任务号就是定时执行号）；前台、子代理、技术续跑链和 Goal 片照旧跑完：
 #   技术续跑链的回执会被新用户消息作废（_valid 比对 last_user_message_id），让出后没有可续的权威。
-#   技术续跑开关是总开关；车道登记是进程内 O(1) 读取，不碰租约文件。
+#   技术续跑开关是总开关；本地车道计数缺席时核对网关当前准入记录。
 # 函数用途: 判断当前后台工作片是否应在本工具轮边界把会话车道让给排队的用户消息。
 def yields_to_user_input(agent, params) -> bool:
     if (not _enabled(agent) or str(getattr(params, "source", "") or "") != "background_main_agent"
@@ -272,7 +272,7 @@ def yields_to_user_input(agent, params) -> bool:
         return False
     from .run_claim import user_input_turn_on_lane
 
-    return user_input_turn_on_lane(store, thread_id)
+    return user_input_turn_on_lane(store, thread_id, agent=agent)
 
 
 # LLM: 让出片的正文为空、不交付；只在本片唤醒已确认、任务仍 active 时发表一次同任务续跑唤醒，去重键带被让出的唤醒号，
@@ -284,21 +284,50 @@ def publish_user_input_yield(store, signal, report) -> bool:
             or getattr(report, "wake_handled", False) is not True
             or str(getattr(report, "task_status", "") or "").strip().lower() != "active"):
         return False
+    return _publish_yield_successor(store, signal)
+
+
+def _publish_yield_successor(store, signal, *, retain_handled: bool = False) -> bool:
     task_id = str(getattr(signal, "root_task_id", "") or "").strip()
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
     if not task_id or str(metadata.get("scheduler_run_id") or "").strip() != task_id:
         return False
     from .authority import CONVERSATION_REQUEST_ID_ATTR
+    from .store_wake_publication import published_signal
 
+    key = f"user-input-yield:{task_id}:{signal.wake_signal_id}"
+    if published_signal(store.storage, signal.thread_id, key) is not None:
+        return True
     carried = {key: metadata[key] for key in _YIELD_CARRIED_METADATA if key in metadata}
     store.wakes.raise_signal({
         "thread_id": signal.thread_id, "root_task_id": task_id, "urgency": "normal",
         "reason": USER_INPUT_YIELD_WAKE_REASON, "summary": "用户消息处理完后，继续让出车道前的同一定时任务。",
-        "dedupe_key": f"user-input-yield:{task_id}:{signal.wake_signal_id}",
+        "dedupe_key": key, "retain_handled": retain_handled or bool(_parked_predecessor(store, signal)),
         "metadata": {**carried, CONVERSATION_REQUEST_ID_ATTR: task_id,
                      "yielded_wake_signal_id": signal.wake_signal_id},
     })
     return True
+
+
+def _parked_predecessor(store, signal) -> bool:
+    from ..runtime_errors import DataCorruptionError
+
+    thread, error = store.threads.load_report(signal.thread_id)
+    if error:
+        code = str(error.get("error_code") or "CONVERSATION_THREAD_UNREADABLE")
+        raise DataCorruptionError(f"{code}: 无法读取停放记录，保留原唤醒供重试")
+    metadata = thread.metadata if thread is not None else {}
+    parked = (metadata or {}).get(USER_INPUT_YIELD_PARKED_KEY)
+    return (isinstance(parked, dict) and parked.get("task_id") == signal.root_task_id
+            and parked.get("predecessor_wake_id") == signal.wake_signal_id)
+
+
+def recover_user_input_yield(store, signal) -> bool:
+    """重放已停放的原唤醒，复用原任务和同一个后继唤醒键。"""
+    return (signal.reason in {"scheduled_job_due", USER_INPUT_YIELD_WAKE_REASON}
+            and _parked_predecessor(store, signal)
+            and user_input_yield_wake_valid(store, signal)
+            and _publish_yield_successor(store, signal, retain_handled=True))
 
 
 # LLM: 续跑唤醒只认宿主写下的同一定时执行身份；原任务已结束、换代或换线程时作废，不复活。
@@ -320,12 +349,16 @@ USER_INPUT_YIELD_PARKED_KEY = "user_input_yield.v1"
 # LLM: 让出片仍持车道时写入，排队的用户回合拿到车道后才构造会话上下文，必然看到这条标记；停放中的定时任务
 #   仍是 active，前台用户回合不能把它当成本轮任务接管（否则用户回合会替定时任务干活、收口它）。续跑开始时清除。
 # 函数用途: 在会话线程上标记一个为用户回合让出车道、等待续跑的定时执行。
-def mark_user_input_yield_parked(store, thread_id: str, task_id: str) -> bool:
+def mark_user_input_yield_parked(store, thread_id: str, task_id: str, *, wake_signal_id: str = "") -> bool:
     def update(current):
-        if user_input_yield_parked_task_id(current) == task_id:
-            return current
+        marker = {"task_id": task_id}
+        if wake_signal_id:
+            marker["predecessor_wake_id"] = wake_signal_id
         metadata = dict(current.metadata or {})
-        metadata[USER_INPUT_YIELD_PARKED_KEY] = {"task_id": task_id}
+        previous = metadata.get(USER_INPUT_YIELD_PARKED_KEY)
+        if previous == marker or not wake_signal_id and user_input_yield_parked_task_id(current) == task_id:
+            return current
+        metadata[USER_INPUT_YIELD_PARKED_KEY] = marker
         return replace(current, metadata=metadata)
 
     return _update_thread(store, thread_id, update)
@@ -364,7 +397,9 @@ def park_for_user_input(agent, params) -> bool:
     attrs = attrs if isinstance(attrs, dict) else {}
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     task_id = str(attrs.get("conversation_task_id") or "").strip()
-    if mark_user_input_yield_parked(getattr(agent, "conversation_store", None), thread_id, task_id):
+    wake_signal_id = str(attrs.get("background_wake_signal_id") or "").strip()
+    if mark_user_input_yield_parked(getattr(agent, "conversation_store", None), thread_id, task_id,
+                                   wake_signal_id=wake_signal_id):
         return True
     logging.getLogger(__name__).warning("USER_INPUT_YIELD_PARK_FAILED thread=%s task=%s", thread_id, task_id)
     return False

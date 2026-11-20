@@ -245,13 +245,19 @@ def conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator[dict]
         yield claim
 
 
-# LLM: 只读进程内登记，不读写租约文件；键与登记时同一个租约文件路径，所以只认同一 owner 存储里的同一会话。
+# LLM: 本进程优先读车道计数；S11 调用方可显式提供宿主以核对其他进程已准入的网关请求。
 #   只是一次性快照：要依据它落账（Goal 熔断）必须用 user_input_turn_gate，否则查完到落账之间仍可能有用户回合登记进来。
 # 函数用途: 回答这个会话的执行车道上此刻有没有携带用户消息的回合（排队中或执行中）。
-def user_input_turn_on_lane(store: object, thread_id: str) -> bool:
+def user_input_turn_on_lane(store: object, thread_id: str, *, agent: object | None = None) -> bool:
     key = _user_input_lane_key(store, thread_id)
     with _USER_INPUT_TURNS_LOCK:
-        return bool(key) and key in _USER_INPUT_TURNS
+        if key and key in _USER_INPUT_TURNS:
+            return True
+    if not key or agent is None:
+        return False
+    from ..gateway_parts.request_context import admitted_user_input_on_lane
+
+    return admitted_user_input_on_lane(agent, thread_id)
 
 
 # LLM: C5 判定时点：后台 Goal 熔断在这把车道闸里读“用户回合在场”并完成落账，用户回合登记（+1）也要过同一把闸，

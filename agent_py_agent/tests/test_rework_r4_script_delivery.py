@@ -265,9 +265,10 @@ def test_cancelled_or_interrupted_run_admits_nothing(case, monkeypatch, stop):
 
     # LLM: 只记录是否进入原 scheduler 事件资格作用域，再委托原实现。
     # 函数用途: 证明入口检查发生在取得任何 scheduler/持久受理资格之前。
-    def scope(agent, task_id, operation_key, *, kind, allow_terminal=False):
+    def scope(agent, task_id, operation_key, *, kind, allow_terminal=False, replay_key=None):
         entered.append((task_id, operation_key, kind))
-        return original_scope(agent, task_id, operation_key, kind=kind, allow_terminal=allow_terminal)
+        return original_scope(agent, task_id, operation_key, kind=kind, allow_terminal=allow_terminal,
+                              replay_key=replay_key)
 
     monkeypatch.setattr(effect_scope, 'scheduler_effect_scope', scope)
 

@@ -3382,7 +3382,9 @@ def _skip_pending_wake_signal(
     from .input_dependencies import task_has_waiting_input
     if signal.reason not in {'task_input_resolved', 'incoming_channel_message', 'session_message'} and task_has_waiting_input(scheduler.runtime.agent, signal.root_task_id):
         return True
-    if signal.reason == USER_INPUT_YIELD_WAKE_REASON and user_input_turn_on_lane(scheduler.store, signal.thread_id):
+    if signal.reason == USER_INPUT_YIELD_WAKE_REASON and user_input_turn_on_lane(
+        scheduler.store, signal.thread_id, agent=scheduler.runtime.agent,
+    ):
         # 让出续跑排在用户回合之后（S11）：本拍不跑、不消费，用户回合离开车道后的下一拍再领。
         return True
     if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
@@ -4832,15 +4834,27 @@ class _BackgroundSchedulerWakeMixin:
         claim_state = _claim_scheduler_wake(self, signal, now=now)
         if claim_state.stop:
             return None
+        checking_park = claim_state.claim is not None
         try:
-            execution = _execute_wake_signal(
-                self,
-                signal,
-                lifecycle_reason=lifecycle_reason,
-                reason=reason,
-                claim=claim_state.claim,
-                now=now,
-            )
+            from .technical_continuation import USER_INPUT_YIELD_REASON, recover_user_input_yield
+
+            recovered_park = checking_park and recover_user_input_yield(self.store, signal)
+            checking_park = False
+            if recovered_park:
+                execution = _WakeExecution(report=BackgroundMainAgentReport(
+                    signal.thread_id, signal.root_task_id, reason, "", "", "", now,
+                    delivery_status="suppressed", task_status="active",
+                    runtime_status="unfinished", runtime_reason=USER_INPUT_YIELD_REASON,
+                ))
+            else:
+                execution = _execute_wake_signal(
+                    self,
+                    signal,
+                    lifecycle_reason=lifecycle_reason,
+                    reason=reason,
+                    claim=claim_state.claim,
+                    now=now,
+                )
             _note_wake_execution(self, signal, execution)
             if execution.terminal:
                 return None
@@ -4850,6 +4864,10 @@ class _BackgroundSchedulerWakeMixin:
             raise
         except Exception as exc:
             _note_wake_error(self, signal, exc)
+            if checking_park:
+                # 读取或发表停放续跑失败，交回原领取，保留前驱供下次重放。
+                self.scheduler_service.release(claim_state.claim, now=now)
+                raise
             if is_provider_quota_failure(exc):
                 report = _quota_wake_report_after_error(
                     self,
@@ -4873,7 +4891,12 @@ class _BackgroundSchedulerWakeMixin:
             from .technical_continuation import publish_user_input_yield
 
             # 让出片的续跑唤醒须先于定时收口的后续工作判定发表，执行才停在 waiting（S11）。
-            yielded = publish_user_input_yield(self.store, signal, report)
+            try:
+                yielded = publish_user_input_yield(self.store, signal, report)
+            except Exception:
+                if claim_state.claim is not None:
+                    self.scheduler_service.release(claim_state.claim, now=now)
+                raise
             if yielded:
                 _HEARTBEAT_LOGGER.info("USER_INPUT_YIELD thread=%s task=%s yielded_wake=%s",
                                        signal.thread_id, signal.root_task_id, signal.wake_signal_id)

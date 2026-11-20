@@ -455,17 +455,19 @@ def _delegated_origin_send_blocked(agent, provider, target):
 # LLM: 原tool-call/idempotency键只引用既有操作，事件根由宿主task树取得；原job CAS准入先于实际运输，只有明确未准入才报告not_started。
 # 函数用途: 在原显式发送入口取得事件资格，不持store锁跨运输；普通任务零scheduler写，原Delivery回执仍是结果权威。
 def _deliver_with_scheduler_scope(agent, delivery, context, envelope):
-    from ..scheduler.effect_scope import SchedulerEffectRejected, scheduler_effect_scope
+    from ..scheduler.effect_scope import SchedulerEffectRejected, run_scheduler_delivery
+
+    def send():
+        if delivery.registry.capabilities_for(context.channel).component_receipts:
+            from ..adapter.delivery import GatewayReplyDeliveryStore, deliver_host_envelope
+
+            root = Path(agent.home_paths.owner_home_dir)
+            return deliver_host_envelope(delivery, GatewayReplyDeliveryStore(root / 'data' / 'channel-delivery'),
+                context, envelope)
+        return delivery.deliver(context, envelope)
 
     try:
-        with scheduler_effect_scope(agent, context.task_id, context.idempotency_key, kind='delivery'):
-            if delivery.registry.capabilities_for(context.channel).component_receipts:
-                from ..adapter.delivery import GatewayReplyDeliveryStore, deliver_host_envelope
-
-                root = Path(agent.home_paths.owner_home_dir)
-                return deliver_host_envelope(delivery, GatewayReplyDeliveryStore(root / 'data' / 'channel-delivery'),
-                    context, envelope)
-            return delivery.deliver(context, envelope)
+        return run_scheduler_delivery(agent, context, envelope, send)
     except SchedulerEffectRejected as exc:
         return _error('原监控已停止或来源不可核验，消息未发送', exc.error_code,
             effect_outcome='not_started', effect_source_ref='scheduler:event_effect_admission')
@@ -483,10 +485,16 @@ def deliver_host_script_intent(
     agent,
     context: DeliveryContext,
     envelope: ReplyEnvelope,
+    *,
+    request_key: str | None = None,
 ) -> dict[str, object]:
     from ..adapter.delivery import GatewayReplyDeliveryStore, deliver_host_envelope
     from ..gateway_parts.request_entry_admission import require_request_execution
-    from ..scheduler.effect_scope import SchedulerEffectRejected, scheduler_effect_scope
+    from ..scheduler.effect_scope import (
+        SchedulerEffectRejected,
+        run_scheduler_delivery,
+        scheduler_effect_scope,
+    )
     from .channel_message_target import resolve_message_target
 
     # 合法本地未托管执行返回 None，不是拒绝；拒绝只以异常表达。
@@ -526,12 +534,20 @@ def deliver_host_script_intent(
     stored = _stored_host_delivery(store, operation_ref)
     if stored is not None and stored[0] != identity:
         return _script_delivery_conflict(operation_ref)
+    def send():
+        _raise_if_script_delivery_stopped()
+        return deliver_host_envelope(delivery, store, context, envelope)
+
     try:
-        with scheduler_effect_scope(agent, context.task_id, context.idempotency_key, kind="delivery"):
-            _raise_if_script_delivery_stopped()
-            receipt = deliver_host_envelope(delivery, store, context, envelope)
+        if request_key is None:
+            with scheduler_effect_scope(agent, context.task_id, context.idempotency_key, kind="delivery"):
+                receipt = send()
+        else:
+            receipt = run_scheduler_delivery(agent, context, envelope, send, request_key=request_key)
     except SchedulerEffectRejected as exc:
         return _script_delivery_refused(exc.error_code)
+    if receipt.delivery_status == "sent" and receipt.receipt_id.startswith("host-delivery:"):
+        operation_ref = receipt.receipt_id
     stored = _stored_host_delivery(store, operation_ref)
     if stored is None:
         return _script_delivery_refused(receipt.error_code or "CHANNEL_SEND_FAILED")
