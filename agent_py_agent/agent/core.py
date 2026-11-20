@@ -578,6 +578,11 @@ class SimpleAgent(
         创建主代理时会准备本地账本、记忆、prompt 构造器、模型后端、子代理管理器和工具注册表。
         最后只注册创建、查看、发消息/纠偏、中断取消和能力裁决等用户级子代理操作。
         """
+        from .gateway_parts.restart_service import (
+            mark_restart_startup_phase,
+            measure_restart_startup,
+        )
+
         self._skill_learning_service: SkillLearningService | None = None
         self._injected_skill_learning: object = _MISSING_SKILL_LEARNING
         config = _initialize_agent_construction(self, config, root, worker_bootstrap, workspace_roots)
@@ -612,7 +617,8 @@ class SimpleAgent(
         )
         paths = self.runtime_path_resolution.paths
         apply_runtime_paths_to_config(config, self.runtime_path_resolution)
-        _wire_memory_authorities(self, config, paths)
+        with measure_restart_startup("db_open"):
+            _wire_memory_authorities(self, config, paths)
         self.prompts = PromptBuilder(
             config,
             self.root,
@@ -645,18 +651,20 @@ class SimpleAgent(
         )
         _wire_memory_curator(self, config)
         self.collaboration_store = CollaborationStore(paths["collaboration_workspace"])
-        self.scheduler_repository = SchedulerRepository(
-            self.home_paths.owner_scheduler_dir,
-            owner_provider=self.home_paths.owner_provider or "local",
-            owner_kind=self.home_paths.owner_kind or "main",
-            owner_id=self.home_paths.owner_id or "local/main",
-            due_owner_id=str(getattr(config, "my_agent_owner_id", "") or "main"),
-            default_timezone=str(getattr(config, "timezone", "") or ""),
-            quota_enforcer=self.owner_quota,
-            due_index=_build_scheduler_due_index(self.home_paths, worker_bootstrap),
-        )
+        with measure_restart_startup("index_warm"):
+            self.scheduler_repository = SchedulerRepository(
+                self.home_paths.owner_scheduler_dir,
+                owner_provider=self.home_paths.owner_provider or "local",
+                owner_kind=self.home_paths.owner_kind or "main",
+                owner_id=self.home_paths.owner_id or "local/main",
+                due_owner_id=str(getattr(config, "my_agent_owner_id", "") or "main"),
+                default_timezone=str(getattr(config, "timezone", "") or ""),
+                quota_enforcer=self.owner_quota,
+                due_index=_build_scheduler_due_index(self.home_paths, worker_bootstrap),
+            )
         try:
-            self.scheduler_repository.migrate_monitor_aliases()
+            with measure_restart_startup("index_warm"):
+                self.scheduler_repository.migrate_monitor_aliases()
         except (SchedulerStateError, OwnerQuotaUnavailable) as exc:
             logging.getLogger(__name__).warning(
                 "SCHEDULER_STARTUP_MIGRATION_DEFERRED phase=aliases error=%s code=%s",
@@ -678,7 +686,8 @@ class SimpleAgent(
             cancellation_handler=lambda run: cancel_scheduled_task(self, self.scheduler_repository, run),
             read_bytes_provider=lambda: self.config.retention_scan_slice_bytes,
         )
-        self.subagents = _build_subagent_manager(self, paths)
+        with measure_restart_startup("db_open"):
+            self.subagents = _build_subagent_manager(self, paths)
         configure_canonical_background_contracts()
         from .agent_core.orchestration.dispatch.orphan_request import execute_orphan_source
 
@@ -695,7 +704,12 @@ class SimpleAgent(
             runtime_health_provider=self._channel_runtime_health_provider,
         )
         self.delivery_service = DeliveryService(self.channel_registry)
-        self.tools = _build_tool_registry(self, config, defer_mcp_connect=defer_mcp_connect)
+        if defer_mcp_connect:
+            self.tools = _build_tool_registry(self, config, defer_mcp_connect=True)
+            mark_restart_startup_phase("mcp_spawn", "deferred")
+        else:
+            with measure_restart_startup("mcp_spawn"):
+                self.tools = _build_tool_registry(self, config, defer_mcp_connect=False)
         self.extensions = load_extension_registry(config.extension_plugins)
         self.extensions.activate_agent(self)
         _register_orchestration_tools(self)

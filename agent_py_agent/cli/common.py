@@ -77,7 +77,10 @@ def make_agent(args) -> SimpleAgent:
     config, roots = agent_configuration(args)
     constructor = globals().get("SimpleAgent")
     if constructor is None:
-        from ..agent.core import SimpleAgent as constructor
+        from ..agent.gateway_parts.restart_service import measure_restart_startup
+
+        with measure_restart_startup("import"):
+            from ..agent.core import SimpleAgent as constructor
     if getattr(args, '_defer_mcp_connect', None) is True:
         return constructor(config, roots[0], workspace_roots=roots, defer_mcp_connect=True)
     return constructor(config, roots[0], workspace_roots=roots)

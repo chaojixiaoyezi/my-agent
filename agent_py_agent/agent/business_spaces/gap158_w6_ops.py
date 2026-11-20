@@ -182,7 +182,7 @@ def _restart(call):
             'subject_id': call.subject_id, 'request_id': call.request_id},
         reason='管理员运维更新完成',
         cooldown_seconds=float(getattr(call.context.host.config, 'gateway_restart_cooldown_seconds', 30)),
-        now=float(call.clock()))
+        now=float(call.clock()), config=call.context.host.config)
 
 
 def _run_update(call, store, job, lease):

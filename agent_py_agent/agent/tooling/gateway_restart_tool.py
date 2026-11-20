@@ -11,7 +11,11 @@ from typing import Any
 
 from ..conversation.authority import current_conversation_task_attributes
 from ..gateway_parts.paths import gateway_paths
-from ..gateway_parts.restart_service import hosting_gateway_pid, submit_restart_request
+from ..gateway_parts.restart_service import (
+    hosting_gateway_pid,
+    render_restart_receipt,
+    submit_restart_request,
+)
 from ..runtime_context import current_subagent_run_id
 from .models import (
     ApprovalPolicy,
@@ -29,7 +33,7 @@ from .models import (
 TOOL_NAME = "restart_gateway"
 _REFUSAL_CODES = {"cooldown": "GATEWAY_RESTART_COOLDOWN", "loop_guard": "GATEWAY_RESTART_LOOP_GUARD"}
 _HINT = (
-    "已安排安全重启。本轮结束后 Gateway 会先排空再换新进程，TUI 和 IM 会自动重连，停在半路的回合会自动续跑。"
+    "已安排安全重启。Gateway 会按回执中的模式排空再换新进程，TUI 和 IM 会自动重连，停在半路的回合会自动续跑。"
     "请现在用一句话告诉用户正在重启并结束本轮；重启完成后你会收到观测通知，届时不要再次调用 restart_gateway。"
 )
 
@@ -40,8 +44,8 @@ class RestartGatewayTool(BaseTool):
     model_spec = ToolModelSpec(
         name=TOOL_NAME,
         description=(
-            "安排当前 Gateway 安全重启：Gateway 先停领新请求、等在跑的回合结束，再让新的副作用工具停在开跑前、"
-            "等执行中的工具跑完，然后换一个新进程接班；停在半路的回合会自动续跑，TUI 和 IM 自动重连。"
+            "安排当前 Gateway 按生效模式安全重启。回执会显示排空预算。Gateway 停领新请求并关闭新副作用工具的准入，"
+            "具备接班条件后换进程。可续跑的回合会恢复，TUI 和 IM 自动重连。"
             "只在确实需要时调用，例如用户要求重启、改了只在启动时读取的配置、部署了新版本。"
             "用 /model 或 manage_models 改的模型配置下一次请求直接生效，不需要重启。"
             "调用后立刻返回 scheduled；不要再用 shell 执行 my-agent gateway restart/stop 或 kill 进程。"
@@ -120,18 +124,21 @@ class RestartGatewayTool(BaseTool):
             requester=_requester(self.agent),
             reason=reason,
             cooldown_seconds=float(getattr(config, "gateway_restart_cooldown_seconds", 30) or 0),
+            config=config,
         )
         status = str(result.get("status") or "")
         if status in _REFUSAL_CODES:
             body = {key: value for key, value in result.items() if key != "request"}
             return _refuse(json.dumps(body, ensure_ascii=False), _REFUSAL_CODES[status], raw=True)
         request = result.get("request") or {}
+        receipt = result["restart_receipt"]
         body = {
             "status": status,
             "request_id": request.get("request_id"),
             "target_pid": target_pid,
-            "turn_wait_seconds": getattr(config, "gateway_restart_turn_wait_seconds", 300),
-            "hint": _HINT,
+            "turn_wait_seconds": receipt["budgets"]["turn_wait_seconds"],
+            "restart_receipt": receipt,
+            "hint": render_restart_receipt(receipt) + _HINT,
         }
         return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(body, ensure_ascii=False))
 

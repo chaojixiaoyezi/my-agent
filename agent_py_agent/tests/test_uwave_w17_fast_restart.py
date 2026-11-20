@@ -34,8 +34,11 @@ def test_fast_parked_model_or_readonly_turn_does_not_wait_for_whole_turn():
     started = time.monotonic()
     result = drain()
     assert time.monotonic() - started < 1
+    receipt = result.pop("restart_receipt")
     assert result == {"ok": True, "request_id": "original", "active_turns_at_exit": 1,
                       "restart_mode": "fast"}
+    assert receipt["mode"] == "fast"
+    assert receipt["budgets"] == {"drain_seconds": .03, "turn_wait_seconds": 0}
     assert restart_gate.tool_gate_closed()
 
 

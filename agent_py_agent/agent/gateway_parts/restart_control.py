@@ -9,7 +9,7 @@ import os
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
 from ..user_space.approval_mode import is_permission_admin
 from .paths import GatewayPaths
-from .restart_service import submit_restart_request
+from .restart_service import render_restart_receipt, submit_restart_request
 
 _REFUSALS = {
     "cooldown": ("GATEWAY_RESTART_COOLDOWN", "刚完成过一次安全重启，请 {retry_after_seconds} 秒后再试。"),
@@ -50,18 +50,21 @@ def execute_restart_control(
         },
         reason=reason,
         cooldown_seconds=float(getattr(config, "gateway_restart_cooldown_seconds", 30) or 0),
+        config=config,
     )
     status = str(result.get("status") or "")
     if status in _REFUSALS:
         code, template = _REFUSALS[status]
         return ConversationControlResult("restart", False, template.format(**result), error_code=code)
-    wait = int(getattr(config, "gateway_restart_turn_wait_seconds", 300) or 0)
+    receipt = result["restart_receipt"]
     prefix = "已合并到正在排队的安全重启" if status == "coalesced" else "已安排安全重启"
     return ConversationControlResult(
         "restart",
         True,
-        f"{prefix}：Gateway 会先停领新请求、等在跑的回合结束（最多约 {wait} 秒），再等执行中的工具跑完后换新进程。"
+        f"{prefix}。{render_restart_receipt(receipt)}"
         "期间发出的消息会排队，重启后自动处理；TUI 和 IM 会自动重连。",
+        request_id=str((result.get("request") or {}).get("request_id") or ""),
+        details={"restart_receipt": receipt},
     )
 
 
