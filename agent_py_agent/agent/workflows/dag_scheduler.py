@@ -11,7 +11,9 @@ import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextvars import copy_context
+from copy import copy
 from dataclasses import replace
+from threading import Lock
 from typing import Any
 
 from ..assets.workflow_store import (
@@ -21,7 +23,7 @@ from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from .conditions import ConditionIndeterminate, evaluate_condition, mark_condition_indeterminate
 from .models import StepExecutionRecord, payload
-from .run_store import execution_receipt, replace_run_record
+from .run_store import execution_receipt, replace_run_record, settle_step_effect
 
 _LOG = logging.getLogger(__name__)
 
@@ -205,12 +207,48 @@ def _clear_unadmitted_worker_effect(step, spec):
         step.escalation_result.setdefault('effect_outcome', 'not_started')
 
 
-# LLM: 纯计算工作线程函数；不写Store、不继承协调线程锁凭据，避免跨线程锁状态泄漏与死锁。
-# 函数用途: 在线程池内执行单步实际业务逻辑并返回结果。
+def _settle_worker_effect(engine, run_id, step, *, interrupted=False):
+    try:
+        marker = engine.store.step_effect_marker(run_id, step)
+    except (OSError, ValueError):
+        marker = None
+    settle_step_effect(step, marker=marker, interrupted=interrupted)
+
+
+def _worker_with_effect_admission(engine, run_id, step):
+    from .governance import WorkflowEffectPhase
+
+    worker = copy(engine)
+    guard = Lock()
+    admitted = False
+
+    def authorize(run, phase, *, definition=None):
+        nonlocal admitted
+        result = engine._authorize_run(run, phase, definition=definition)
+        if not isinstance(phase, WorkflowEffectPhase) or run.workflow_run_id != run_id or phase.step_id != step.step_id:
+            return result
+        # foreach 批共享父尝试的一次准入，锁只覆盖本地标记的耐久发表。
+        with guard:
+            _check_stop()
+            if not admitted:
+                engine.store.admit_step_effect(run_id, step)
+                step.escalation_result.update(effect_state='admitted', effect_started=True)
+                admitted = True
+        return result
+
+    worker._authorize_run = authorize
+    return worker
+
+
 def _run_step_worker(engine, step, spec, local_outputs, definition, local_record):
+    """工作线程只发表准入标记，步骤和运行快照由协调线程提交。"""
     clock = time.monotonic()
     step._worker_effect_admitted = False
+    reserved = step.escalation_result.get('effect_state') == 'reserved'
+    run_id = local_record.workflow_run_id
     try:
+        if reserved:
+            engine = _worker_with_effect_admission(engine, run_id, step)
         _check_stop()
         engine._execute_step_with_retry_and_watermarks(
             step, spec, local_outputs, definition, local_record
@@ -218,11 +256,16 @@ def _run_step_worker(engine, step, spec, local_outputs, definition, local_record
         _check_stop()
         step.ended_at = time.time()
         step.duration_ms = (time.monotonic() - clock) * 1000
-        _clear_unadmitted_worker_effect(step, spec)
+        if reserved:
+            _settle_worker_effect(engine, run_id, step)
+        else:
+            _clear_unadmitted_worker_effect(step, spec)
         return (step, None)
     except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as exc:
         step.ended_at = time.time()
         step.duration_ms = (time.monotonic() - clock) * 1000
+        if reserved:
+            _settle_worker_effect(engine, run_id, step, interrupted=True)
         return (step, exc)
     except Exception as exc:
         step.status = 'failed'
@@ -233,7 +276,10 @@ def _run_step_worker(engine, step, spec, local_outputs, definition, local_record
         step.needs_repair = True
         step.ended_at = time.time()
         step.duration_ms = (time.monotonic() - clock) * 1000
-        _clear_unadmitted_worker_effect(step, spec)
+        if reserved:
+            _settle_worker_effect(engine, run_id, step)
+        else:
+            _clear_unadmitted_worker_effect(step, spec)
         return (step, None)
 
 
@@ -337,6 +383,9 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
             ),
         )
         if exc is not None:
+            # 中断回执先沿原步骤提交；外层暂停以同一 durable step 快照聚合。
+            state.update(record=record, phase='step_publish')
+            record = engine.store.save_step_result(record.workflow_run_id, completed_step)
             state['record'] = record
             if halt_reason['type'] != 'cancel':
                 halt_reason['type'] = 'cancel'
@@ -446,8 +495,8 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 if not pending_review:
                     step.escalation_result['attempt_id'] = uuid.uuid4().hex
                 step.next_step_ids = tuple(sorted(reverse_deps.get(sid, ())))
-                # Coordinator thread marks effect_started before dispatching worker
-                step.escalation_result['effect_started'] = True
+                step.escalation_result.update(effect_state='reserved', effect_started=False)
+                step.escalation_result.pop('effect_outcome', None)
 
                 state.update(record=record, phase='step_publish')
                 record = engine.store.save_step_result(record.workflow_run_id, step)
@@ -517,10 +566,28 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                     c_step, c_exc = fut.result()
                     _process_completed_step(done_sid, c_step, c_exc)
                 except Exception as exc:
-                    pass
+                    # 排空错误可能晚于外部效果，保留现有步骤与实际已发表的同伴回执。
+                    current = engine.store.load_run(record.workflow_run_id)
+                    step = next(item for item in current.steps if item.step_id == done_sid)
+                    code = 'WORKFLOW_EXECUTION_FAILED'
+                    _LOG.error("workflow drain completion failed", extra={
+                        'error_code': code, 'workflow_run_id': record.workflow_run_id, 'step_id': done_sid,
+                        'phase': 'drain', 'error_type': type(exc).__name__, 'effect_outcome': 'unknown',
+                    })
+                    step.status, step.needs_repair, step.ended_at = 'failed', True, time.time()
+                    step.error_code = code
+                    step.escalation_result['drain_diagnostic'] = {
+                        'code': code, 'phase': 'drain', 'error_type': type(exc).__name__,
+                    }
+                    settle_step_effect(step, marker=None, drain_failed=True)
+                    _process_completed_step(done_sid, step, None)
             active_futures.clear()
 
     if halt_reason['type'] == 'cancel':
+        state['started'] = any(
+            item.escalation_result.get('effect_started') or item.escalation_result.get('cleanup_error')
+            for item in record.steps
+        )
         raise halt_reason['exc']
 
     if halt_reason['type'] == 'waiting_for_agent':
@@ -595,7 +662,10 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
     execution_receipt(
         record,
         phase='finalize' if record.breakpoint else 'terminal',
-        effect_outcome='confirmed' if record.status == 'succeeded' else 'failed',
+        effect_outcome=(
+            'unknown' if any(item.escalation_result.get('effect_state') == 'unknown' for item in record.steps)
+            else 'confirmed' if record.status == 'succeeded' else 'failed'
+        ),
         definition_ref=workflow_definition_ref(definition, kind='workflow'),
     )
     state.update(record=record, phase='terminal')

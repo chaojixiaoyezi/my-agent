@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -45,6 +45,30 @@ SESSION_TASK_STATUSES = frozenset(
 )
 # 终态：写入后不再被普通生命周期改写（取消只能从非终态发起）。
 SESSION_TASK_TERMINAL_STATUSES = frozenset({SESSION_TASK_DONE, SESSION_TASK_FAILED, SESSION_TASK_CANCELLED})
+
+
+def _open_obligation(record: Mapping[str, object], *, terminal, status_key="status") -> bool:
+    """未知状态或未结引用始终保留责任，终态展示值不能清掉证据。"""
+    state = record.get(status_key)
+    control = record.get("cancellation_control")
+    return (
+        not isinstance(state, str) or state not in terminal
+        or bool(record.get("outstanding_refs"))
+        or isinstance(control, Mapping) and (bool(control.get("outstanding_refs")) or control.get("state") == "unknown")
+        or record.get("effect_state") == "unknown"
+        or record.get("effect_outcome") in ("unknown", "partial")
+    )
+
+
+def has_open_obligation(record: Mapping[str, object]) -> bool:
+    if _open_obligation(record, terminal=SESSION_TASK_TERMINAL_STATUSES):
+        return True
+    metadata = record.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        return True
+    learning = metadata.get("task_learning_enqueue")
+    return (_open_obligation({**metadata, "status": record["status"]}, terminal=SESSION_TASK_TERMINAL_STATUSES)
+            or isinstance(learning, Mapping) and learning.get("status") == "pending")
 
 
 # LLM: 只读 canonical 使用原子替换快照；不创建 sidecar，不改变被监听目录，保持1MiB上限及坏账显式报告。
@@ -639,6 +663,8 @@ def _validated_resource_cleanup_proof(resource_ref: object, proof: object) -> tu
 #   避免两个写入方互相覆盖。读取坏文件必须显式报错，不能当成"不存在"。
 # 类用途: 保存、读取与推进会话间派活任务的状态。
 class SessionTaskStore:
+    has_open_obligation = staticmethod(has_open_obligation)
+
     # LLM: 只接收 storage；不注册调度、不发模型请求、不持有目标执行对象。
     # 函数用途: 绑定 canonical 存储目录。
     def __init__(self, storage: Any) -> None:
@@ -662,9 +688,40 @@ class SessionTaskStore:
                 return {}, {"code": "SESSION_TASK_INVALID", "path": str(path)}
         return SessionListIndex(self._dir(), kind="session_task", reader=read)
 
-    def list_page(self, *, limit: int = 50, cursor: str | None = None, target_thread_id: str | None = None) -> dict:
-        page = self._list_index().page(limit=limit, cursor=cursor, filter_key=target_thread_id)
-        return {**page, "items": [SessionTask.from_dict(item) for item in page["items"]]}
+    def obligation_source_version(self):
+        """原任务原子替换会改变目录版本，供一次分页链与最终决策复核。"""
+        try:
+            info = self._dir().stat()
+        except FileNotFoundError:
+            return None
+        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+
+    def list_page(self, *, limit: int = 50, cursor: str | dict | None = None,
+                  target_thread_id: str | None = None, read_only: bool = False) -> dict:
+        if not read_only:
+            page = self._list_index().page(limit=limit, cursor=cursor, filter_key=target_thread_id)
+            return {**page, "items": [SessionTask.from_dict(item) for item in page["items"]]}
+        # 归档/退休检查可处在原短锁内；直接分页规范目录，不触发SQLite投影写入。
+        from ..user_space.directory_paging import directory_page
+
+        if type(limit) is not int or not 1 <= limit <= 100 or (cursor is not None and not isinstance(cursor, dict)):
+            raise ValueError("invalid read-only session task page")
+        names, position, complete = directory_page(
+            self.storage.root, ("session_tasks",), cursor or {}, limit, require_dir_fd=False,
+        )
+        reader = self._list_index().reader
+        items, errors = [], []
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            row, error = reader(self._dir() / name)
+            if error is not None:
+                errors.append(error)
+            elif target_thread_id is None or row.get("target_thread_id") == target_thread_id:
+                items.append(SessionTask.from_dict(row))
+        return {"items": items, "next_cursor": None if complete else position,
+                "coverage": "partial" if errors else "complete", "load_errors": errors,
+                "read_count": position.get("last_scanned", 0)}
 
     # LLM: 共享原 canonical 读取器与校验，独立投影只筛责任，不认证完成事实。
     # 函数用途: 取得可重建的学习待办索引。
@@ -1392,6 +1449,7 @@ __all__ = [
     "SESSION_TASK_QUEUED",
     "SESSION_TASK_STATUSES",
     "SESSION_TASK_TERMINAL_STATUSES",
+    "has_open_obligation",
     "SessionTask",
     "SessionTaskStore",
     "bind_session_task_turns",

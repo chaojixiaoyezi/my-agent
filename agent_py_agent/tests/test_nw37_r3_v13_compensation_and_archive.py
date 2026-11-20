@@ -546,6 +546,9 @@ def test_spaces_archive_session_tasks_coverage_and_load_errors(r3_native):
     server, agent = r3_native
     space_id, revision = _create_space(server, "会话任务完整性验证空间")
 
+    def session_page(store):
+        return host_ports._reference_page(store, limit=100, cursor=None, source="SESSION_TASK")[0]
+
     # 1. 真实 SessionTaskStore 目录写入损坏 JSON 文件 bad.json -> 阻塞归档（HOST_NOT_READY）
     task_dir = agent.conversation_store.session_tasks._dir()
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -553,7 +556,7 @@ def test_spaces_archive_session_tasks_coverage_and_load_errors(r3_native):
     bad_file.write_text("{corrupt json", encoding="utf-8")
 
     with pytest.raises(BusinessError) as exc_info:
-        host_ports._list_all_session_tasks(agent.conversation_store.session_tasks)
+        session_page(agent.conversation_store.session_tasks)
     assert exc_info.value.code == "HOST_NOT_READY"
     assert exc_info.value.details["reason"] == "SESSION_TASK_SCAN_INCOMPLETE"
 
@@ -589,7 +592,7 @@ def test_spaces_archive_session_tasks_coverage_and_load_errors(r3_native):
         }
     )
     with pytest.raises(BusinessError) as exc_partial:
-        host_ports._list_all_session_tasks(partial_double)
+        session_page(partial_double)
     assert exc_partial.value.code == "HOST_NOT_READY"
 
     expired_double = SimpleNamespace(
@@ -601,7 +604,7 @@ def test_spaces_archive_session_tasks_coverage_and_load_errors(r3_native):
         }
     )
     with pytest.raises(BusinessError) as exc_expired:
-        host_ports._list_all_session_tasks(expired_double)
+        session_page(expired_double)
     assert exc_expired.value.code == "HOST_NOT_READY"
 
     real_store = agent.conversation_store.session_tasks
@@ -613,7 +616,7 @@ def test_spaces_archive_session_tasks_coverage_and_load_errors(r3_native):
             "load_errors": ["bad.json"],
         }
         with pytest.raises(BusinessError) as exc_override:
-            host_ports._list_all_session_tasks(real_store)
+            session_page(real_store)
         assert exc_override.value.code == "HOST_NOT_READY"
 
         real_store.list_page = lambda **_kw: {
@@ -622,13 +625,13 @@ def test_spaces_archive_session_tasks_coverage_and_load_errors(r3_native):
             "coverage": "complete",
             "load_errors": [],
         }
-        assert host_ports._list_all_session_tasks(real_store) == []
+        assert session_page(real_store) == []
     finally:
         real_store.__dict__.pop("list_page", None)
 
 
 def test_spaces_archive_skipped_workflow_run_allowed_while_active_blocked(r3_native):
-    """U-06：终态 skipped 工作流运行不得阻塞 spaces.archive；running/paused 仍阻塞；SQL 参数化严格跟随 settled_states。"""
+    """U-06：归档和运行存储对 skipped、running、paused 的未结义务判定一致。"""
     server, agent = r3_native
     owner_home = agent.home_paths.owner_home_dir
     run_store = WorkflowRunStore(owner_home)
@@ -725,33 +728,14 @@ def test_spaces_archive_skipped_workflow_run_allowed_while_active_blocked(r3_nat
         }
     ]
 
-    # 3. 直接核查 _list_unsettled_workflow_runs 参数化 SQL 对自定义 settled_states 的过滤
-    default_settled = {
-        "succeeded",
-        "completed",
-        "done",
-        "failed",
-        "cancelled",
-        "aborted",
-        "retired",
-        "settled",
-        "skipped",
+    page = run_store.list_page()
+    assert page["coverage"] == "complete" and page["next_cursor"] is None
+    assert {row["workflow_run_id"] for row in page["items"]} == {
+        "wfrun_skipped_01", "wfrun_running_01", "wfrun_paused_01",
     }
-    unsettled_default = {
-        run_id
-        for run_id, _ in host_ports._list_unsettled_workflow_runs(
-            owner_home, default_settled
-        )
-    }
-    assert unsettled_default == {"wfrun_running_01", "wfrun_paused_01"}
-
-    unsettled_custom = {
-        run_id
-        for run_id, _ in host_ports._list_unsettled_workflow_runs(
-            owner_home, {"running"}
-        )
-    }
-    assert unsettled_custom == {"wfrun_skipped_01", "wfrun_paused_01"}
+    assert {
+        row["workflow_run_id"] for row in page["items"] if run_store.has_open_obligation(row)
+    } == {"wfrun_running_01", "wfrun_paused_01"}
 
 
 def _count_open_fds() -> int:
@@ -1223,9 +1207,9 @@ def test_spaces_archive_subscription_and_workflow_read_boundaries_preserve_cause
         assert isinstance(exc_catalog_open.value.__cause__, OSError)
         assert exc_catalog_open.value.__cause__.errno == errno.EIO
 
-        # 3. 针对 catalog.json 的 os.stat 故障点：因移除 is_file() 预检，stat 触发次数为 0，空间与订阅仍保持 active
+        # 3. 新增版本核验必须把 stat I/O 故障明确回执给原归档调用。
         with ExitStack() as stack, monkeypatch.context() as mp:
-            stat_state = _patch_stat_error(stack, mp, catalog_path, {"active_references"})
+            stat_state = _patch_stat_error(stack, mp, catalog_path, {"source_versions"})
             st_stat_arc, stat_arc_res = _http_business(
                 server,
                 "spaces.archive",
@@ -1233,12 +1217,9 @@ def test_spaces_archive_subscription_and_workflow_read_boundaries_preserve_cause
                 idempotency_key="r3-arc-stat-trap-" + uuid4().hex,
                 expected_revision=rev,
             )
-        assert stat_state["faults"] == 0
-        assert st_stat_arc == 200, stat_arc_res
-        assert stat_arc_res["data"]["space"]["state"] == "active"
-        assert stat_arc_res["data"]["blockers"] == [
-            {"ref": sub_id, "kind": "subscription", "reason_code": "ACTIVE_SUBSCRIPTION"}
-        ]
+        assert stat_state["faults"] == 1
+        assert st_stat_arc == 503 and stat_arc_res["error"]["code"] == "HOST_NOT_READY"
+        assert _error_detail_value(stat_arc_res, "reason") == "REFERENCE_VERSION_UNREADABLE"
         st_sub_after, sub_after_res = _http_business(server, "subscriptions.get", {"subscription_id": sub_id})
         assert st_sub_after == 200, sub_after_res
         assert sub_after_res["data"]["subscription"]["state"] == "active"
@@ -1273,7 +1254,7 @@ def test_spaces_archive_subscription_and_workflow_read_boundaries_preserve_cause
             ]
 
             with ExitStack() as stack, monkeypatch.context() as mp:
-                leg_stat = _patch_stat_error(stack, mp, legacy_sub_path, {"active_references"})
+                leg_stat = _patch_stat_error(stack, mp, legacy_sub_path, {"source_versions"})
                 st_leg_stat, leg_stat_res = _http_business(
                     server,
                     "spaces.archive",
@@ -1281,8 +1262,9 @@ def test_spaces_archive_subscription_and_workflow_read_boundaries_preserve_cause
                     idempotency_key="r3-leg-stat-" + uuid4().hex,
                     expected_revision=legacy_rev,
                 )
-            assert leg_stat["faults"] == 0
-            assert st_leg_stat == 200 and leg_stat_res["data"]["space"]["state"] == "active"
+            assert leg_stat["faults"] == 1
+            assert st_leg_stat == 503 and leg_stat_res["error"]["code"] == "HOST_NOT_READY"
+            assert _error_detail_value(leg_stat_res, "reason") == "REFERENCE_VERSION_UNREADABLE"
 
             leg_open_state = {"faults": 0}
 
@@ -1331,14 +1313,14 @@ def test_spaces_archive_subscription_and_workflow_read_boundaries_preserve_cause
         )
         assert st_leg_done == 200 and leg_done["data"]["space"]["state"] == "archived"
 
-        # 5. 同类横扫：_list_unsettled_workflow_runs 对 workflow_runs / workflow_run_index.sqlite3 的 stat EIO 必须阻断归档并保留 __cause__
+        # 5. 同类横扫：source_versions 对 workflow_runs / workflow_run_index.sqlite3 的 stat EIO 必须阻断归档并保留 __cause__
         wf_sid, wf_rev = _create_space(server, "workflow-stat-boundary-space")
         runs_dir = owner_home / "data" / "workflow_runs"
         index_db = owner_home / "data" / "workflow_run_index.sqlite3"
         for target_path in (runs_dir, index_db):
             with ExitStack() as stack, monkeypatch.context() as mp:
                 wf_stat = _patch_stat_error(
-                    stack, mp, target_path, {"_list_unsettled_workflow_runs", "_optional_stat"}
+                    stack, mp, target_path, {"source_versions"}
                 )
                 st_wf_err, wf_err = _http_business(
                     server,
@@ -1349,18 +1331,18 @@ def test_spaces_archive_subscription_and_workflow_read_boundaries_preserve_cause
                 )
             assert wf_stat["faults"] == 1
             assert st_wf_err == 503 and wf_err["error"]["code"] == "HOST_NOT_READY"
-            assert _error_detail_value(wf_err, "reason") == "WORKFLOW_RUN_SCAN_FAILED"
+            assert _error_detail_value(wf_err, "reason") == "REFERENCE_VERSION_UNREADABLE"
             assert _error_detail_value(wf_err, "effect_outcome") == "not_started"
 
             with ExitStack() as stack, monkeypatch.context() as mp:
                 wf_stat_direct = _patch_stat_error(
-                    stack, mp, target_path, {"_list_unsettled_workflow_runs", "_optional_stat"}
+                    stack, mp, target_path, {"source_versions"}
                 )
                 with pytest.raises(BusinessError) as exc_wf:
                     agent.business_active_references(wf_sid, None)
             assert wf_stat_direct["faults"] == 1
             assert exc_wf.value.code == "HOST_NOT_READY"
-            assert exc_wf.value.details["reason"] == "WORKFLOW_RUN_SCAN_FAILED"
+            assert exc_wf.value.details["reason"] == "REFERENCE_VERSION_UNREADABLE"
             assert isinstance(exc_wf.value.__cause__, OSError)
             assert exc_wf.value.__cause__.errno == errno.EIO
 
