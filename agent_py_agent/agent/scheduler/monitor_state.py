@@ -75,8 +75,10 @@ def monitor_definition_projection(definition: Mapping[str, object]) -> dict:
 
 
 # LLM: 原事件同步负责退休/取消语义，本函数仅为未覆盖的定义字段推进同一个事件代次；普通规则各自维护唯一代次。
+#   installation=True 表示调用方已提交一次新的安装替换（如资产覆盖投递）：存活身份即使定义字段与状态都相同也恰好前进一代，
+#   因为脚本等被引用资产的已安装内容可能已变而引用编号不变；回执重放、自然 tick 与无变化编辑不传此标志，代次保持。
 # 函数用途: 在原仓库写事务内同步新旧定义身份，名称和运行统计不影响定义。
-def sync_definition_generations(job, previous=None, *, retire=False):
+def sync_definition_generations(job, previous=None, *, retire=False, installation=False):
     from .event_sources import sync_event_sources
 
     result = sync_event_sources(job, previous, retire=retire)
@@ -96,7 +98,8 @@ def sync_definition_generations(job, previous=None, *, retire=False):
         # 单规则迁入 rule1 时沿用原定义身份，不重置为 1。
         if old is None and key == 'rule1' and previous and not previous.get('rules'):
             old = previous
-        changed = bool(old and (any(not same_definition_value(view.get(k), old.get(k)) for k in _DEFINITION_FIELDS)
+        changed = bool(old and (installation
+                                or any(not same_definition_value(view.get(k), old.get(k)) for k in _DEFINITION_FIELDS)
                                 or result['status'] != previous['status']))
         seed = max(retired.pop(key, 1), int((result.get('event_source_state', {}).get(key) or {}).get('generation', 1)))
         generation = max(seed, definition_generation(old) + int(changed)) if old else seed

@@ -584,6 +584,7 @@ def _delivery_monitor_thread(home, owner_id):
 
 # LLM: 新建载荷沿原校验器；只接收静态定义，强制目标ID/Owner/新线程/启停/代次，不复制源运行状态或通知目标。
 #   定义代次与原create/update同用调度器唯一写入器：覆盖既有任务时承接并推进其代次、退休原事件身份，旧运行晚到不能写回替换定义；
+#   覆盖本身即安装边界（installation=True），被引用脚本代码改变而编号、计划、启停都不变时同样前进；回执重放不经本函数；
 #   既有行解析失败时不能承接身份，按新建处理。
 # 函数用途: 构造真实可解析的接收方Scheduler任务。
 def new_delivery_monitor_job(repo, descriptor, meta, store):
@@ -608,7 +609,7 @@ def new_delivery_monitor_job(repo, descriptor, meta, store):
         paused_at=0.0 if descriptor.enabled else now,
         alias=previous.get('alias') or next_alias(store), version=int(previous.get('version', 0)) + 1)
     replaced = repo._parse_job(previous)[0] if previous else None
-    job = sync_definition_generations(job, replaced, retire=replaced is not None)
+    job = sync_definition_generations(job, replaced, retire=replaced is not None, installation=True)
     validate_event_job(job)
     return job
 
