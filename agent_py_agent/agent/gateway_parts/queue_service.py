@@ -245,6 +245,33 @@ def ensure_gateway_folders(paths: GatewayPaths) -> None:
     paths.responses.mkdir(parents=True, exist_ok=True)
 
 
+def settle_pending_stop_locked(paths: GatewayPaths, path: Path, payload: dict) -> bool:
+    """在原 T 内结算从未领取的停止回合，保留原请求身份及唯一终态。"""
+    if (path.parent != paths.inbox or payload.get("id") != path.stem
+            or payload.get("status", "pending") != "pending" or payload.get("cancel_requested") is not True
+            or payload.get("turn_phase") != "closing" or payload.get("execution_attempt_id")):
+        return False
+    from .recovery import (
+        _commit_gateway_terminal_request,
+        _terminal_gateway_request_payload,
+        gateway_terminal_projection_folder,
+    )
+    from .request_event_hub import notify_committed
+    from .request_history import silent_user_stop_delivery
+
+    stopped_at = payload.get("cancel_requested_at")
+    response = {
+        "id": path.stem, "ok": False, "status": "cancelled", "response": "",
+        "error_code": "CANCELLED", "error": "回合在开始执行前已取消。",
+        "ended_at": stopped_at, "updated_at": stopped_at,
+        "channel_delivery": silent_user_stop_delivery(),
+    }
+    terminal = _terminal_gateway_request_payload(path.stem, payload, response)
+    _commit_gateway_terminal_request(paths, path, gateway_terminal_projection_folder(paths, response), path.stem, terminal)
+    notify_committed(paths, path.stem, "terminal")
+    return True
+
+
 # LLM: 原T内先比真实P3/P5全量快照再rename/fence，C末门覆盖实际写入；缺scope不回落原Count0入口，不变更原损坏/回滚/计数语义。
 # 函数用途: 领取原队列请求并返回同一执行围栏；默认queue_worker跳过同步Plugin Host执行请求，inline_direct仅跳过worker分区快照要求。
 def claim_request(
@@ -329,6 +356,8 @@ def claim_request(
                     gateway_terminal_projection_folder(paths, row['terminal_response']), request_path.stem, row)
                 return None
             if observation['status'] == 'protected':
+                return None
+            if settle_pending_stop_locked(paths, request_path, transport_payload):
                 return None
             try:
                 transport_payload = _gateway_claim_transport_payload(

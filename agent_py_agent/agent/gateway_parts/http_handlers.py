@@ -40,6 +40,7 @@ from ..auth.middleware import (
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.http import unaccounted_probe_attempt_count
 from ..common.build_identity import get_build_identity
+from ..common.fast_dataclass import fast_replace
 from ..common.log_redaction import redact_sensitive_value
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
@@ -1365,6 +1366,41 @@ def _route_ask_to_active_turn(
 
 # LLM: /control保main认证、global-write-v1缺服务拒绝及command优先prompt；合法控制与/ask共用分派，所有写仍须原HTTP/work/owner/lease来源。
 # 函数用途: 一次读取明确控制并解析原语法，把冷C模型元数据、规则/记忆管理与远端控制交给各自原领域，重送只读同一回执。
+def handle_client_turn_stop(handler, server) -> None:
+    if require_trusted_source(handler):
+        return
+    from .control_service import TurnStopTargetUnavailable, execute_client_turn_stop
+
+    if server is None:
+        handler._send_json(500, {"ok": False, "error_code": "CONTROL_SERVICE_UNAVAILABLE",
+                                 "message": "停止服务未初始化，本次未执行。"})
+        return
+    try:
+        result = execute_client_turn_stop((handler, server), handler._read_json())
+    except GatewayControlOperationIdentityRequired as error:
+        handler._send_json(400, {"error": str(error), "error_code": "CONTROL_OPERATION_ID_REQUIRED"})
+        return
+    except TurnStopTargetUnavailable as error:
+        handler._send_json(403, {"error": str(error), "error_code": "EXECUTION_TARGET_CHANGED"})
+        return
+    except GatewayControlOperationConflict as error:
+        handler._send_json(409, {"error": str(error), "error_code": "IDEMPOTENCY_CONFLICT"})
+        return
+    except (GlobalWriteError, RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
+            BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable, DataCorruptionError, OSError) as error:
+        handler._send_json(500, {"ok": False, "error_code": getattr(error, "error_code", type(error).__name__),
+                                 **({"reason": error.reason, "field": error.field} if isinstance(error, GlobalWriteError) else {}),
+                                 "message": "停止回执暂时无法确认，请使用同一 message_id 对账。"})
+        return
+    except ValueError as error:
+        handler._send_json(400, {"error": str(error), "error_code": "INVALID_ARGUMENTS"})
+        return
+    payload = result.to_dict()
+    payload.update({"status": "control", "disposition": "system_command", "receipt_id": result.operation_id})
+    payload.update(result.details or {})
+    handler._send_json(200 if result.control_state == "completed" else 202, payload)
+
+
 def handle_control(handler, server) -> None:
     if require_trusted_source(handler):
         return
@@ -1520,7 +1556,7 @@ def _handle_persistent_control_operation(
         from contextlib import nullcontext
 
         from .agents_control_service import agents_http_ingress
-        prepared = replace(scope, event_hub=getattr(server, "plugin_event_hub", None))
+        prepared = fast_replace(scope, event_hub=getattr(server, "plugin_event_hub", None))
         from .memory_candidate_control import memory_control_failure, memory_http_ingress
         permission = _request_identity(handler)[1] if command.kind in {"agents", "memory"} else None
         if command.kind in {"agents", "memory"} and permission is None:
@@ -2549,6 +2585,7 @@ def _gateway_control_scope(
     *,
     user_id: str,
     channel: str,
+    turn_stop: bool = False,
 ) -> GatewayControlScope:
     permission_user_id, permission = _request_identity(handler)
     if getattr(handler, "_auth_middleware", None) is None:
@@ -2556,6 +2593,10 @@ def _gateway_control_scope(
         channel = str(body.get("channel") or channel).strip()
     metadata = body.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
+    reserved_stop = {"stop_scope", "target_thread_id", "target_thread_ids", "selected_stop_thread_id",
+                     "include_unbound_stop_turns", "unbound_stop_thread_id", "pending_stop_exact_requeue"}
+    allowed_stop = {"stop_scope", "target_thread_id"} if turn_stop else set()
+    metadata = {key: value for key, value in metadata.items() if key not in reserved_stop - allowed_stop}
     # 展示权限来自本次认证事实，覆盖外部同名字段；后续投影不再访问认证服务。
     metadata = {**metadata, "host_path_display": "full" if host_paths_visible_to_viewer(
         channel, can_access_all_users=permission is None or permission.can_access_all_users,

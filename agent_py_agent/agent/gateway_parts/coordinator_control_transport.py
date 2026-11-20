@@ -42,7 +42,8 @@ def _request_input(handler, server, body):
     text = str(body.get('command', body.get('prompt', '')) or '')
     command = parse_conversation_control(text, reject_unknown_slash=True)
     user, channel = _request_channel(handler)
-    scope = _gateway_control_scope(handler, body, user_id=user, channel=channel)
+    scope = _gateway_control_scope(handler, body, user_id=user, channel=channel,
+                                   turn_stop=getattr(handler, "path", "") == "/client/turn-stop")
     owner = _resolve_request_owner_from_config(server.control_plane.config,
         _scope_request_payload(scope), server.control_plane.home_root)
     return command, persisted_control_command_text(command, text), replace(scope, resolved_owner=owner)
@@ -130,6 +131,18 @@ class _CoordinatorControlTransport:
         from .multiprocess_control_forward import prepare_coordinator_remote_control
         self.require_current()
         return prepare_coordinator_remote_control(self, receipt, expected_raw)
+
+    def prepare_receipt(self):
+        from . import control_operation_service as ops
+        from .multiprocess_control_target import authenticated_control_store
+
+        self.require_current()
+        scope, digest = self.scope, self.input_digest
+        if "stop_scope" in scope.metadata:
+            store = authenticated_control_store(self.control.config, self.control.home_root, self.owner)
+            scope = ops.freeze_turn_stop_scope(store, scope)
+            _, digest = ops.gateway_control_operation_identity(scope, self.command_text)
+        return ops._new_control_operation_receipt(scope, self.command.kind, self.command_text, self.operation_id, digest)
 
     # LLM: 先关闭原共享lifetime，再精确退pin；不清回执/P3、不回滚已存事实，不让清理错误盖掉首个typed异常。
     # 函数用途: 结束本次HTTP运输责任。

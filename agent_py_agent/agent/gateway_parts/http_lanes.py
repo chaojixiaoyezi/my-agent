@@ -20,12 +20,14 @@ HTTP_CONTROL_PEEK_BYTES = 8192
 HTTP_CONTROL_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ('GET', '/status'), ('GET', '/metrics'), ('GET', '/control-status/*'),
     ('POST', '/control'), ('POST', '/client/agent-stop'), ('POST', '/client/agent-guidance'),
-    ('POST', '/client/agent-permission'), ('POST', '/stop'),
+    ('POST', '/client/agent-permission'), ('POST', '/stop'), ('POST', '/client/turn-stop'),
 })
 # 公开只读状态在控制类内另走独立执行池，不排在慢 /control 处理器之后。
 HTTP_STATUS_LANE_ROUTES: frozenset[tuple[str, str]] = frozenset({('GET', '/status'), ('GET', '/metrics')})
 # 路由本身即停止语义的请求走停止执行池；未认证前绝不读正文，POST /control 一律留在原控制池。
-HTTP_STOP_LANE_ROUTES: frozenset[tuple[str, str]] = frozenset({('POST', '/stop'), ('POST', '/client/agent-stop')})
+HTTP_STOP_LANE_ROUTES: frozenset[tuple[str, str]] = frozenset({
+    ('POST', '/stop'), ('POST', '/client/agent-stop'), ('POST', '/client/turn-stop'),
+})
 # 状态与停止两个快速执行池各自的工作线程数：慢 /control（如手动 /compact）占满控制池时它们仍有独立线程。
 HTTP_FAST_LANE_WORKERS_COUNT = 2
 

@@ -270,7 +270,7 @@ def test_zero_workers_preserves_legacy_path(monkeypatch):
 def test_classification_matches_runtime_route_table():
     expected = frozenset({('GET', '/status'), ('GET', '/metrics'), ('GET', '/control-status/*'),
         ('POST', '/control'), ('POST', '/client/agent-stop'), ('POST', '/client/agent-guidance'),
-        ('POST', '/client/agent-permission'), ('POST', '/stop')})
+        ('POST', '/client/agent-permission'), ('POST', '/stop'), ('POST', '/client/turn-stop')})
     assert expected == HTTP_CONTROL_ROUTES
     for method, routes in GATEWAY_HTTP_ROUTES.items():
         for route in routes:

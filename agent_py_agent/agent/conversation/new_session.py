@@ -7,9 +7,17 @@ from .control_commands import ConversationControlResult
 
 # LLM: 调用者先核当前owner及前台空闲；只有原store事务成功才回新线程，后台运行归属保持旧线程不变。
 # 函数用途: 创建空白后继并清楚说明历史、目录和后台继续运行，失败返回稳定错误码。
-def new_session_result(store, thread_id, *, title="", binding=None, validate=None):
+def new_session_result(store, thread_id, *, title="", binding=None, validate=None, background_root_count=0):
     try:
         new = store.threads.succeed(thread_id, title=title, binding=binding, **({"validate": validate} if validate is not None else {}))
+        if background_root_count:
+            from .host_notices import host_notice, queue_host_notice
+
+            queue_host_notice(store, new.thread_id, host_notice(
+                "new_session", "BACKGROUND_ROOTS_CONTINUE",
+                f"旧会话仍有 {background_root_count} 个后台根在运行，可用 /status 查看。",
+                details={"count": background_root_count}, dedupe_key=f"new-session-roots:{new.thread_id}",
+            ))
         return ConversationControlResult("new", True,
             f"旧会话 {thread_id} 已归档到历史；新会话 {new.thread_id} 已在当前目录启用。"
             "后台任务、托管进程和监控继续运行，同通道通知将跟随新会话。",

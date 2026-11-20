@@ -156,6 +156,7 @@ class ConversationTaskStatus:
     monitors: dict[str, object] = field(default_factory=dict)
     model_timing: dict[str, int] = field(default_factory=dict)
     model_usage: dict[str, object] = field(default_factory=dict)
+    background_roots: list[dict[str, object]] = field(default_factory=list)
 
 
 # LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。

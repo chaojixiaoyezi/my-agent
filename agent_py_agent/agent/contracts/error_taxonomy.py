@@ -68,6 +68,11 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "BACKGROUND_ROOTS_CONTINUE": ErrorContract(
+        code="BACKGROUND_ROOTS_CONTINUE", category="notice", retryable=False,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="旧会话仍有后台工作。可查看 /status，或用会话级停止选择同一会话的后台工作。",
+    ),
     "WORKFLOW_RUN_BUSY": ErrorContract(
         code="WORKFLOW_RUN_BUSY", category="resource", retryable=False,
         recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
