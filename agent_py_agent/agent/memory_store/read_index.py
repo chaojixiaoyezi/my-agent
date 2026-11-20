@@ -13,6 +13,10 @@ from ..common.global_write_commit import execute_global_write
 from ..common.nofollow_fs import NoFollowPathError
 from ..common.text_norm import fold_key
 from .generation_manifest import MemoryGenerationStore
+from .scope_contract import canonical_scope_key
+
+# 水位版本 4 表示本代所有行已填充结构化范围和主题。
+_READ_INDEX_FORMAT_VERSION = 4
 
 
 # LLM: 只表达派生坐标/水位已换代，不吞真正分片完整性错误或native拒绝。
@@ -69,7 +73,8 @@ class MemoryReadIndex:
         except (sqlite3.Error, ValueError, TypeError):
             return {"status": "unavailable", "indexed_records": None, "total_records": root["total_records"]}
         current = (state.get("index_signature") == root.get("index_signature", root["operation_id"])
-                   and state.get("format_version") == 3 and state.get("owner") == self.store.tombstones.owner)
+                   and state.get("format_version") == _READ_INDEX_FORMAT_VERSION
+                   and state.get("owner") == self.store.tombstones.owner)
         return {"status": ("complete" if state.get("complete") else "partial") if current else "missing",
                 "operation_id": root["operation_id"], "generation": root["generation"],
                 "indexed_records": state.get("indexed_records", 0) if current else 0,
@@ -100,13 +105,17 @@ class MemoryReadIndex:
                 record = _read_index_record(rows[row_no])
                 if record is None:
                     raise ValueError("MEMORY_AUTHORITY_UNREADABLE")
+                scope_type, scope_key = record_index_scope(record) or ("", "")
+                attrs = record.attributes if isinstance(record.attributes, dict) else {}
+                subject_key = str(attrs.get("subject_key") or "")
                 prepared.append((record.entry_id, record.version, memory_content_hash(record.content),
-                    segment_no, row_no, record.expires_at, _lexical_projection(record)))
+                    segment_no, row_no, record.expires_at, scope_type, scope_key, subject_key, _lexical_projection(record)))
                 row_no += 1
             if row_no == len(rows):
                 segment_no, row_no = segment_no + 1, 0
         state = {"owner": self.store.tombstones.owner, "operation_id": root["operation_id"],
-                 "index_signature": root.get("index_signature", root["operation_id"]), "format_version": 3,
+                 "index_signature": root.get("index_signature", root["operation_id"]),
+                 "format_version": _READ_INDEX_FORMAT_VERSION,
                  "generation": root["generation"], "indexed_records": before["indexed_records"] + len(prepared),
                  "cursor": [segment_no, row_no], "complete": segment_no == len(root["segments"])}
         if admission is not None:
@@ -114,29 +123,38 @@ class MemoryReadIndex:
                 size = self.path.stat().st_size
             except FileNotFoundError:
                 size = 0
-            admission.check([OwnerQuotaChange(self.path, size + 65536 + sum(len(r[-1].encode()) * 4 + 512 for r in prepared))])
+            payload_bytes = sum(len(value.encode()) for row in prepared for value in row[-4:])
+            admission.check([OwnerQuotaChange(self.path, size + 65536 + payload_bytes * 4 + len(prepared) * 512)])
 
         # LLM: 本叶只有已准备的有界SQL和连接生命周期，不读取正文或等待领域锁；忙库零等待失败保原水位。
         # 函数用途: 在同一SQLite事务内写候选与耐久游标。
         def publish():
             with closing(self._connect(write=True)) as conn, conn:
                 conn.execute("PRAGMA secure_delete=ON")
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute("CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY,version INTEGER,content_hash TEXT,segment INTEGER,row_no INTEGER,expires_at REAL,search_text TEXT)")
-                if "expires_at" not in {row[1] for row in conn.execute("PRAGMA table_info(entries)")}:
-                    conn.execute("ALTER TABLE entries ADD COLUMN expires_at REAL")
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+                for name, kind in (("expires_at", "REAL"), ("scope_type", "TEXT"),
+                                   ("scope_key", "TEXT"), ("subject_key", "TEXT")):
+                    if name not in columns:
+                        conn.execute(f"ALTER TABLE entries ADD COLUMN {name} {kind}")
                 conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(id UNINDEXED,search_text,tokenize='trigram')")
-                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute("SELECT value FROM metadata WHERE key='watermark'").fetchone()
                 actual = json.loads(row[0]) if row else {}
                 if actual.get("owner") not in (None, state["owner"]):
                     raise ValueError("MEMORY_INDEX_OWNER_MISMATCH")
-                if (actual.get("index_signature") != state["index_signature"] or actual.get("format_version") != 3):
+                if (actual.get("index_signature") != state["index_signature"]
+                        or actual.get("format_version") != _READ_INDEX_FORMAT_VERSION):
                     conn.execute("DELETE FROM entries")
                     conn.execute("DELETE FROM entries_fts")
                 elif actual.get("indexed_records", 0) != before["indexed_records"]:
                     raise ValueError("MEMORY_INDEX_CURSOR_CONFLICT")
-                conn.executemany("INSERT OR REPLACE INTO entries(id,version,content_hash,segment,row_no,expires_at,search_text) VALUES (?,?,?,?,?,?,?)", prepared)
+                conn.execute("CREATE INDEX IF NOT EXISTS entries_scope_subject ON entries(scope_type,scope_key,subject_key)")
+                conn.execute("CREATE INDEX IF NOT EXISTS entries_content_hash ON entries(content_hash)")
+                conn.executemany(
+                    "INSERT OR REPLACE INTO entries(id,version,content_hash,segment,row_no,expires_at,"
+                    "scope_type,scope_key,subject_key,search_text) VALUES (?,?,?,?,?,?,?,?,?,?)", prepared)
                 conn.executemany("INSERT INTO entries_fts(id,search_text) VALUES (?,?)", [(row[0], row[-1]) for row in prepared])
                 conn.execute("INSERT OR REPLACE INTO metadata VALUES ('watermark',?)", (json.dumps(state),))
         if self.coordinator_io:
@@ -147,7 +165,7 @@ class MemoryReadIndex:
 
     # LLM: 同一只读事务取水位及OR候选；短词/bigram编码成trigram可检索token，不丢英文关键词。
     # 函数用途: 从冷热读索引选取有界候选并附实际coverage。
-    def query(self, query, *, limit=64):
+    def query(self, query, *, limit=64, scopes=None):
         root = self.store.manifest()
         if root is None or not 1 <= limit <= 1000:
             return [], self.coverage(root)
@@ -165,11 +183,21 @@ class MemoryReadIndex:
             coverage = self.coverage(root, connection=conn)
             if coverage["status"] != "complete":
                 return [], coverage
+            scope_sql, scope_args = _scope_filter(scopes)
+            expiry = " AND (e.expires_at IS NULL OR e.expires_at=0 OR e.expires_at>?)"
             if terms:
                 expression = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
-                rows = conn.execute("SELECT e.* FROM entries_fts f JOIN entries e ON e.id=f.id WHERE entries_fts MATCH ? AND (e.expires_at IS NULL OR e.expires_at=0 OR e.expires_at>?) ORDER BY rank LIMIT ?", (expression, time.time(), limit + 1)).fetchall()
+                # 有范围时让外层 SQL 排序，避免 FTS 在连接过滤之前对全部命中计算排名。
+                order = " ORDER BY +f.rank LIMIT ?" if scopes is not None else " ORDER BY rank LIMIT ?"
+                rows = conn.execute(
+                    "SELECT e.* FROM entries_fts f JOIN entries e ON e.id=f.id WHERE entries_fts MATCH ?"
+                    + expiry + scope_sql + order,
+                    (expression, time.time(), *scope_args, limit + 1)).fetchall()
             else:
-                rows = conn.execute("SELECT * FROM entries WHERE instr(search_text,?) > 0 AND (expires_at IS NULL OR expires_at=0 OR expires_at>?) ORDER BY id LIMIT ?", (folded, time.time(), limit + 1)).fetchall()
+                rows = conn.execute(
+                    "SELECT e.* FROM entries e WHERE instr(e.search_text,?) > 0"
+                    + expiry + scope_sql + " ORDER BY e.id LIMIT ?",
+                    (folded, time.time(), *scope_args, limit + 1)).fetchall()
         coverage = {**coverage, "result_truncated": len(rows) > limit}
         return [{**dict(row), "operation_id": root["operation_id"]} for row in rows[:limit]], coverage
 
@@ -192,10 +220,47 @@ class MemoryReadIndex:
             return None
         return self.resolve(candidates, operation_id=root["operation_id"])
 
+    def locate_for_write(self, *, entry_id="", subject_key="", scope=None, content_hash=""):
+        """调用方持正式库锁，以同代坐标回读原始记录。"""
+        root = self.store.manifest()
+        if root is None:
+            return None
+        conditions, args = [], []
+        if scope is not None:
+            scope_type, scope_key = scope
+            try:
+                scope_key = canonical_scope_key(scope_type, scope_key)
+            except ValueError:
+                return None
+            conditions.append("(scope_type=? AND scope_key=? AND subject_key=?)")
+            args.extend((scope_type, scope_key, subject_key))
+        if entry_id:
+            conditions.append("id=?")
+            args.append(entry_id)
+        if content_hash:
+            conditions.append("content_hash=?")
+            args.append(content_hash)
+        if not conditions:
+            return []
+        try:
+            with closing(self._connect()) as conn:
+                conn.execute("BEGIN")
+                if self.coverage(root, connection=conn)["status"] != "complete":
+                    return None
+                rows = conn.execute(
+                    "SELECT id,version,content_hash,segment,row_no FROM entries WHERE "
+                    + " OR ".join(conditions), args).fetchall()
+        except (OSError, sqlite3.Error):
+            return None
+        operation_id = root["operation_id"]
+        records = self.resolve(
+            [{**dict(row), "operation_id": operation_id} for row in rows], operation_id=operation_id, for_write=True)
+        return sorted(records, key=lambda record: (record.created_at, record.entry_id))
+
     # LLM: 只在完整水位下按 id 升序取 after_id 之后的有界坐标（不取检索文本或正文）；缺库、未完整或读库失败返回 None，
     #   交调用方走有界权威降级，不能当作空列表。返回 (坐标, 是否还有更多, 绑定的 operation_id)。
     # 函数用途: 为正式长期记忆列表分页提供同代坐标。
-    def page_after(self, after_id, *, limit):
+    def page_after(self, after_id, *, limit, scopes=None):
         root = self.store.manifest()
         if root is None or not 1 <= limit <= 1000:
             return None
@@ -204,10 +269,11 @@ class MemoryReadIndex:
                 conn.execute("BEGIN")
                 if self.coverage(root, connection=conn)["status"] != "complete":
                     return None
+                scope_sql, scope_args = _scope_filter(scopes)
                 rows = conn.execute(
-                    "SELECT id, version, content_hash, segment, row_no FROM entries WHERE id > ? "
-                    "AND (expires_at IS NULL OR expires_at=0 OR expires_at>?) ORDER BY id LIMIT ?",
-                    (str(after_id or ""), time.time(), limit + 1)).fetchall()
+                    "SELECT id, version, content_hash, segment, row_no FROM entries e WHERE id > ? "
+                    "AND (expires_at IS NULL OR expires_at=0 OR expires_at>?)" + scope_sql + " ORDER BY id LIMIT ?",
+                    (str(after_id or ""), time.time(), *scope_args, limit + 1)).fetchall()
         except (FileNotFoundError, sqlite3.Error):
             return None
         candidates = [{**dict(row), "operation_id": root["operation_id"]} for row in rows[:limit]]
@@ -215,7 +281,7 @@ class MemoryReadIndex:
 
     # LLM: 坐标只解释于绑定根；换代显式冲突而非完整空命中，读取后再次核根及当前墓碑。
     # 函数用途: 将候选恢复为当前真正可见的正式事实。
-    def resolve(self, candidates, *, operation_id=None):
+    def resolve(self, candidates, *, operation_id=None, for_write=False):
         from .jsonl import memory_content_hash
 
         root = self.store.manifest()
@@ -225,19 +291,21 @@ class MemoryReadIndex:
         if root is None or bound != {root["operation_id"]}:
             raise MemoryReadIndexGenerationConflict("MEMORY_READ_INDEX_GENERATION_CONFLICT")
         loaded, records = {}, []
+        now = time.time()
         for item in candidates:
             index, offset = item["segment"], item["row_no"]
-            if not 0 <= index < len(root["segments"]):
-                continue
-            if index not in loaded:
-                loaded[index] = self.store.segment_rows(root["segments"][index])
-            rows = loaded[index]
-            if not 0 <= offset < len(rows):
-                continue
-            record = _read_index_record(rows[offset])
-            if (record is not None and record.entry_id == item["id"]
-                    and (not record.expires_at or record.expires_at > time.time())
-                    and record.version == item["version"] and memory_content_hash(record.content) == item["content_hash"]):
+            record = None
+            if type(index) is int and type(offset) is int and 0 <= index < len(root["segments"]):
+                if index not in loaded:
+                    loaded[index] = self.store.segment_rows(root["segments"][index])
+                rows = loaded[index]
+                if 0 <= offset < len(rows):
+                    record = _read_index_record(rows[offset], normalize_dream=not for_write)
+            if (record is None or record.entry_id != item["id"] or record.version != item["version"]
+                    or memory_content_hash(record.content) != item["content_hash"]):
+                if for_write:
+                    raise MemoryReadIndexGenerationConflict("MEMORY_READ_INDEX_GENERATION_CONFLICT")
+            elif not record.expires_at or record.expires_at > now:
                 records.append(record)
         current = self.store.manifest()
         if current is None or current["operation_id"] != root["operation_id"]:
@@ -274,12 +342,32 @@ class MemoryReadIndex:
 
 # LLM: 原词法分词与index_text为唯一语义；额外hex token只用于FTS候选，不作为正式正文。
 # 函数用途: 将完整可检索属性及中文短词投影进现有trigram索引。
-def _read_index_record(payload):
+def _read_index_record(payload, *, normalize_dream=True):
     from .jsonl import _memory_record_from_obj
     from .recall import normalize_dream_relocation
 
     record = _memory_record_from_obj(payload)
-    return normalize_dream_relocation(record) if record is not None else None
+    return normalize_dream_relocation(record) if normalize_dream and record is not None else record
+
+
+def record_index_scope(record):
+    from .recall import dream_relocation_attributes
+
+    attrs = dream_relocation_attributes(record)
+    kind = str(attrs.get("scope_type") or "").strip().lower()
+    try:
+        return kind, canonical_scope_key(kind, attrs.get("scope_key"))
+    except ValueError:
+        return None
+
+
+def _scope_filter(scopes):
+    if scopes is None:
+        return "", ()
+    # 单个参数保留范围集合的类型边界，不受 SQLite 绑定参数数量上限影响。
+    return (" AND (e.scope_type,e.scope_key) IN ("
+            "SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?))",
+            (json.dumps(sorted(scopes)),))
 
 
 def _lexical_projection(record):

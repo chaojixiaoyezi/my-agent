@@ -113,7 +113,8 @@ def publish_promoted_rule(service, candidate, reference: str, *, max_chars: int 
     if not memory_id.startswith("memory/long_term/memory.jsonl#"):
         return None
     entry_id = memory_id.split("#", 1)[1]
-    record = next((row for row in service.long_term.all() if row.entry_id == entry_id), None)
+    records = service.long_term.locate_for_promotion(entry_id=entry_id)
+    record = next((row for row in records if row.entry_id == entry_id), None)
     if candidate.proposed_action == "remove":
         if record is not None:
             return None

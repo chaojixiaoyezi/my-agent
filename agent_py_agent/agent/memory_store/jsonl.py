@@ -873,9 +873,9 @@ class _JsonlMemorySearchMixin:
         query: str,
         top_k: int,
         predicate: Callable[[MemoryRecord], bool],
-        *, latency_safe: bool = False,
+        *, latency_safe: bool = False, scopes: frozenset[tuple[str, str]] | None = None,
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
-        return self._search_scoped(query, top_k, predicate, record_access=False, latency_safe=latency_safe)
+        return self._search_scoped(query, top_k, predicate, record_access=False, latency_safe=latency_safe, scopes=scopes)
 
     # LLM: 与候选检索同一 allowlist、scope 先过滤再评分与词面优先 rerank，但只走词面臂：不读向量缓存、不嵌入、
     #   不排队向量补齐、不记访问。供补充查询（如上一轮用户消息）使用，额外成本只有一次有界词面检索。
@@ -995,16 +995,25 @@ class _JsonlMemorySearchMixin:
         after_id: str = "",
         limit: int = 50,
         predicate: Callable[[MemoryRecord], bool] | None = None,
+        scopes: frozenset[tuple[str, str]] | None = None,
     ) -> tuple[list[MemoryRecord], str]:
         from ._jsonl_indexing import bounded_authority_records
-        from .read_index import MemoryReadIndex, MemoryReadIndexGenerationConflict
+        from .read_index import (
+            MemoryReadIndex,
+            MemoryReadIndexGenerationConflict,
+            record_index_scope,
+        )
 
         after = str(after_id or "").strip()
         limit = max(1, int(limit))
-        accept = predicate if callable(predicate) else (lambda _record: True)
+
+        def accept(record):
+            return ((scopes is None or record_index_scope(record) in scopes)
+                    and (not callable(predicate) or predicate(record)))
+
         index = MemoryReadIndex(self.path)
         try:
-            page = index.page_after(after, limit=_LIST_PAGE_SCAN_MAX_RECORDS)
+            page = index.page_after(after, limit=_LIST_PAGE_SCAN_MAX_RECORDS, scopes=scopes)
             if page is not None:
                 rows, more, operation_id = page
                 selected: list[MemoryRecord] = []
@@ -1154,18 +1163,28 @@ class _JsonlMemorySearchMixin:
         record_access: bool,
         latency_safe: bool = False,
         lexical_only: bool = False,
+        scopes: frozenset[tuple[str, str]] | None = None,
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
         if top_k <= 0:
             return [], _scoped_retrieval_facts(None, 0, self._semantic_status)
         embedder = None if lexical_only else self._embedder
-        projected, coverage = self._search_tier_index(query, 1000) if embedder is None else (None, {"status": "semantic_full_scan"})
+        if scopes is not None:
+            # 并行语义臂也只读该范围，保留没有词面交集的语义候选。
+            projected, coverage = self._search_tier_index(query if embedder is None else "", 1000, scopes=scopes)
+        elif embedder is None:
+            projected, coverage = self._search_tier_index(query, 1000)
+        else:
+            projected, coverage = None, {"status": "semantic_full_scan"}
         if projected is None:
             from ._jsonl_indexing import bounded_authority_records
 
             projected, scanned = bounded_authority_records(self, max_records=_AUTHORITY_SCAN_MAX_RECORDS,
                 max_bytes=_AUTHORITY_SCAN_MAX_BYTES)
             coverage = {**coverage, **scanned}
-        active = [record for record in projected if predicate(record)]
+        from .read_index import record_index_scope
+
+        active = [record for record in projected if (scopes is None or record_index_scope(record) in scopes)
+                  and predicate(record)]
         retriever = None
         candidate_limit = max(top_k * 4, top_k + 8)
         # 混合检索:BM25 词面 + 向量语义 RRF 融合(治"换词就召不回"),替代原纯子串+自管 RRF;
@@ -1409,6 +1428,20 @@ def _search_authority_revision(path):
 # LLM: C共用当前转层/访问算法；generation屏障先行的partial保留，不新建恢复表或改变user_explicit不遗忘语义。
 # 类用途: 管理原长期记忆访问元数据与配额治理。
 class _JsonlMemoryLifecycleMixin:
+    def locate_for_promotion(
+        self, *, entry_id="", subject_key="", scope=None, content_hash="",
+    ) -> list[MemoryRecord]:
+        """在正式库锁内点查并核对版本，索引覆盖不足时读取同一权威。"""
+        from .read_index import MemoryReadIndex, MemoryReadIndexGenerationConflict
+
+        with self._locked_memory():
+            try:
+                records = MemoryReadIndex(self.path).locate_for_write(
+                    entry_id=entry_id, subject_key=subject_key, scope=scope, content_hash=content_hash)
+            except MemoryReadIndexGenerationConflict:
+                records = None
+            return self.all() if records is None else records
+
     # LLM: all是同代active+cold减去永久墓碑的逻辑全集，绝不合并Daily/Candidate/ops。
     # 函数用途: 读取当前owner全部已承诺且未过期的长期事实。
     def all(self) -> list[MemoryRecord]:

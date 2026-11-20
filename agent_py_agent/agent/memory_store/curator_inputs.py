@@ -286,7 +286,7 @@ _HOST_OWNER_KINDS = frozenset({"main", "user", "group"})
 # LLM: 本批允许的 typed 范围只来自宿主：owner 固定范围 + 本批消息会话（session）+ 消息/审计里的 task_id（project），
 #   全部经 canonical_scope_key 归一，坏值只跳过不扩大；不借前台“库里已有项目”的兼容召回范围。物理 owner 库是外层边界。
 #   owner_kind 为空是没绑定宿主身份的旧构造（测试/独立调用），沿用同一对固定范围；认不出的类型只给本批自己证明的范围。
-# 函数用途: 计算本批 Curator 输入可见的 typed 范围集合（正式窗口与候选锚点共用）。
+# 函数用途: 为正式窗口的索引截取和候选锚点提供同一份规范范围。
 def curator_batch_scopes(batch, owner_kind: str = "") -> frozenset[tuple[str, str]]:
     kind = str(owner_kind or "").strip()
     scopes: set[tuple[str, str]] = set()

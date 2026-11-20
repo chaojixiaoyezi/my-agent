@@ -68,7 +68,7 @@ def remember_explicit(services: ExplicitRememberServices, content: str, *, kind:
     if not result.promoted:
         raise RuntimeError(f"remember promotion failed: {result.reason_code}")
     entry_id = result.promotion_ref.rsplit("#", 1)[-1]
-    for record in services.long_term.all():
+    for record in services.long_term.locate_for_promotion(entry_id=entry_id):
         if record.entry_id == entry_id:
             return record
     raise RuntimeError("remember promotion succeeded without a formal memory record")

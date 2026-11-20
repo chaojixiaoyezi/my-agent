@@ -11,6 +11,7 @@ import json
 import time
 from dataclasses import dataclass, replace
 
+from .read_index import record_index_scope
 from .scope_contract import canonical_scope_key
 
 # 单条记忆项预览最多 1200 字符：给模型看够判断的摘要，避免整条灌入。
@@ -158,9 +159,7 @@ def _in_scopes(scopes: frozenset[tuple[str, str]] | None, scope_type: object, sc
 
 # 函数用途: 判断一条 long-term 记录的结构化范围是否属于本批允许集合。
 def _record_in_scopes(record: object, scopes: frozenset[tuple[str, str]] | None) -> bool:
-    attrs = getattr(record, "attributes", None)
-    attrs = attrs if isinstance(attrs, dict) else {}
-    return _in_scopes(scopes, attrs.get("scope_type"), attrs.get("scope_key"))
+    return scopes is None or record_index_scope(record) in scopes
 
 
 # LLM: 置顶目标只走 read_ids 有界点查；覆盖不全（MEMORY_AUTHORITY_INCOMPLETE）只记缺口、不判消失，置顶保留。
@@ -208,15 +207,15 @@ def _relevant_long_term_items(
         return []
     now = time.time()
 
-    def accept(record: object) -> bool:
-        return _curator_visible(record, now) and _record_in_scopes(record, scopes)
+    def visible(record: object) -> bool:
+        return _curator_visible(record, now)
 
     if not query and scopes is not None:
         pager = getattr(repository, "list_page", None)
         if not callable(pager):
             raise TypeError("formal long-term source lacks list_page()")
         try:
-            records, cursor = pager(limit=limit, predicate=accept)
+            records, cursor = pager(limit=limit, predicate=visible, scopes=scopes)
         except ValueError as exc:
             if str(exc) != "MEMORY_AUTHORITY_INCOMPLETE":
                 raise
@@ -234,7 +233,8 @@ def _relevant_long_term_items(
         search = getattr(repository, "search_scoped_candidates_report", None)
         if not callable(search):
             raise TypeError("formal long-term source lacks search_scoped_candidates_report()")
-        records, facts = search(query, limit, accept, latency_safe=True)
+        scope_filter = {"scopes": scopes} if scopes is not None else {}
+        records, facts = search(query, limit, visible, latency_safe=True, **scope_filter)
         coverages = [facts.get("coverage") if isinstance(facts, dict) else None]
     partial = next((row for row in coverages if isinstance(row, dict) and row.get("partial")), None)
     if partial is not None:
@@ -243,7 +243,7 @@ def _relevant_long_term_items(
             "detail": "scanned_records={};scanned_bytes={}".format(
                 int(partial.get("scanned_records") or 0), int(partial.get("scanned_bytes") or 0)),
         })
-    return [_long_term_item(record) for record in records if accept(record)]
+    return [_long_term_item(record) for record in records if visible(record) and _record_in_scopes(record, scopes)]
 
 
 # LLM: 保留真实版本供关系建议和替换目标复核；索引命中不当正文，正文只来自检索/点查回读的当前记录。
