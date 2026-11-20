@@ -31,7 +31,7 @@ class ProviderModelCapabilityError(ProviderConfigurationError):
             'adaptive_budget_not_supported': 'adaptive思考不能使用固定budget控制，请使用effort或服务商默认。',
             'forced_tool_choice_not_supported': '当前模型接口不支持本次强制工具选择；请求未发送，不能冒称已强制。',
         }
-        super().__init__(messages.get(reason, '模型能力与本次请求不兼容。'))
+        ProviderConfigurationError.__init__(self, messages.get(reason, '模型能力与本次请求不兼容。'))
         self.reason = reason
 
 
@@ -43,7 +43,7 @@ class ModelNotConfiguredError(ProviderConfigurationError):
     # LLM: CLI、Gateway 和后台共用同一异常身份；可选档案诊断只含编号与结构化原因，不带端点、密钥或输入正文。
     # 函数用途: 给未配置模型的调用返回明确、可操作的错误。
     def __init__(self, *, profile_id: str = "", profile_reason: str = "") -> None:
-        super().__init__("尚未配置模型，请先通过 /model 新增并选择模型；系统不会自动使用其它模型。")
+        ProviderConfigurationError.__init__(self, "尚未配置模型，请先通过 /model 新增并选择模型；系统不会自动使用其它模型。")
         self.profile_id = profile_id
         self.profile_reason = profile_reason
 
@@ -70,7 +70,7 @@ class ProviderRequestRejectedError(ProviderConfigurationError):
         status_code: int = 0,
         details: object | None = None,
     ) -> None:
-        super().__init__(message)
+        ProviderConfigurationError.__init__(self, message)
         self.status_code = max(0, int(status_code or 0))
         self.details = details
 
@@ -85,7 +85,8 @@ class ProviderRequestShapeInvalidError(ProviderRequestRejectedError):
     # LLM: 文案只供展示，分类与诊断读 error_code 和 details。
     # 函数用途: 记录违规的协议、规则名和消息位置。
     def __init__(self, *, protocol: str, rule: str, index: int) -> None:
-        super().__init__(
+        ProviderRequestRejectedError.__init__(
+            self,
             f"请求发出前的协议检查未通过：{protocol} 第 {index} 项违反 {rule}，请求没有发出。",
             details={"protocol": protocol, "rule": rule, "index": index},
         )
@@ -150,7 +151,7 @@ class ProviderTimeoutError(ProviderRecoverableError):
                 f"未知 ProviderTimeoutError wait_phase: {wait_phase!r} "
                 f"(合法: '' / handshake)"
             )
-        super().__init__(message)
+        ProviderRecoverableError.__init__(self, message)
         self.stage = stage
         # 只读诊断字段：默认空串表示“这次超时没有更细的连接位置可标注”，
         # 与“确实是已连接后等待”区分开，读取端不要用空串回推。
@@ -163,7 +164,7 @@ class ProviderTransientError(ProviderRecoverableError):
     # LLM: details 只承载结构化诊断（如 rejection_diagnostic）；不参与分类与恢复判定，分类只看异常类型与状态码。
     # 函数用途: 让瞬时族（含限流子类）能携带拒绝诊断，供回执投影展示。
     def __init__(self, message: str, *, details: object | None = None) -> None:
-        super().__init__(message)
+        ProviderRecoverableError.__init__(self, message)
         self.details = details
 
 
@@ -190,7 +191,7 @@ class ProviderQuotaExhaustedError(ProviderRecoverableError):
     """The configured provider account has no usable quota for immediate retry."""
 
     def __init__(self, message: str, *, details: object | None = None):
-        super().__init__(message)
+        ProviderRecoverableError.__init__(self, message)
         self.error_code = "PROVIDER_QUOTA_EXHAUSTED"
         self.details = details
 
@@ -199,7 +200,7 @@ class ProviderResponseError(ProviderRecoverableError):
     """The provider responded, but the payload did not match the expected schema."""
 
     def __init__(self, message: str, *, error_code: str = "", details: object | None = None):
-        super().__init__(message)
+        ProviderRecoverableError.__init__(self, message)
         self.error_code = str(error_code or "").strip()
         self.details = details
 
@@ -208,7 +209,7 @@ class ProviderContextWindowError(ProviderResponseError):
     """The provider rejected the request because the input exceeded its context window."""
 
     def __init__(self, message: str, *, details: object | None = None):
-        super().__init__(message, error_code="MODEL_CONTEXT_WINDOW_EXCEEDED", details=details)
+        ProviderResponseError.__init__(self, message, error_code="MODEL_CONTEXT_WINDOW_EXCEEDED", details=details)
 
 
 def is_provider_recoverable_error(exc: BaseException) -> bool:

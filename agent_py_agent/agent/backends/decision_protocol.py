@@ -7,6 +7,8 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 
+from ..common.fast_dataclass import fast_frozen
+
 # 决策请求输入上限 256 KiB：防超大请求体撑爆内存。
 MAX_DECISION_INPUT_BYTES = 262_144
 # 决策响应上限 1 MiB：防超大响应撑爆解析。
@@ -39,7 +41,7 @@ class DecisionPrivacySkip(DecisionInputError):
     # LLM: message 只供日志阅读，判定只看 reason 字段。
     # 函数用途: 记录错误说明与结构化跳过原因码（默认 privacy_url）。
     def __init__(self, message: str, reason: str = "privacy_url") -> None:
-        super().__init__(message)
+        DecisionInputError.__init__(self, message)
         self.reason = reason
 
 
@@ -168,7 +170,8 @@ class DecisionRequest:
 
 # LLM: value 与 probability 保留协议原义，confidence 不是授权；单题错误不改称 abstain/not_needed。
 # 类用途: 保存一个题目的选择、评分或概率，以及该题独立的校验失败。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class DecisionAnswer:
     question_id: str
     kind: str
@@ -181,7 +184,8 @@ class DecisionAnswer:
 
 # LLM: 不含正文/工具执行权；usage 属性沿原账本的 dict 接口，缺用量保持缺失，不能推导供应商零计费。
 # 类用途: 统一决策响应的绑定、实际模型版本、逐题结果和用量，供原调用账和业务消费点读取。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class DecisionResponse:
     binding: DecisionBinding
     input_digest: str

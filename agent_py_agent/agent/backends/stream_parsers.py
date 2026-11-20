@@ -7,12 +7,14 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
 from ..conversation.tool_input_progress import TOOL_INPUT_PROGRESS_SCHEMA
 
 
 # LLM: 流事件同时承载用户可见文本、规范化工具调用和仅供下一轮回放的厂商原生 assistant 块；三类消费者必须彼此隔离。
 # 类用途: 表示一条解析后的模型流事件，供文本展示、工具执行和内部历史分别读取。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class StreamEvent:
     """One normalized stream event with optional visible text and usage metadata.
 
@@ -35,7 +37,8 @@ class StreamEvent:
 
 # LLM: 这是流结束的结构化事实；assistant_content_blocks 不直接作为可见 chunk，显式 rich transcript 只能由上层收尾筛出 type=thinking 正文。
 # 类用途: 汇总一条流是否完整、停止原因，以及下一轮请求需要原样续接的有序 assistant 块。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class StreamCompletion:
     """流结束事实；参数错误与缺失终态分开，长度/过滤继续保留供应商 stop_reason。"""
 

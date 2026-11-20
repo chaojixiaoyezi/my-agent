@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...common.fast_dataclass import fast_frozen
 from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import TaskStatus, task_has_status
@@ -24,7 +25,8 @@ from ...tooling.runtime_contracts import ToolCall, ToolResult
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class RunnerModelStageTraceRequest:
     agent: Any
     params: Any
@@ -37,7 +39,8 @@ class RunnerModelStageTraceRequest:
 # LLM: Streaming activity carries counts and transport phase only; model text/reasoning and tool
 # JSON are forbidden so the canonical child state stays a safe status projection.
 # 类用途: 表示慢模型仍在持续输出哪类数据，让 TUI/Web 能区分“慢”与“卡死”。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class RunnerModelStreamActivityTraceRequest:
     agent: Any
     params: Any
@@ -49,7 +52,8 @@ class RunnerModelStreamActivityTraceRequest:
 # LLM: Retry activity is derived only from the provider attempt observer's typed fields. Error
 # bodies and credentials must never enter the child-state projection.
 # 类用途: 表示一次模型连接即将按退避策略重试，供子代理状态栏显示尝试次数和等待时间。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class RunnerProviderRetryTraceRequest:
     agent: Any
     params: Any
@@ -60,7 +64,8 @@ class RunnerProviderRetryTraceRequest:
     error_type: str = ""
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class RunnerToolStageTraceRequest:
     agent: Any
     params: Any
