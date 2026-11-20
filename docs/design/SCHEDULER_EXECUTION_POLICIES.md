@@ -519,3 +519,24 @@ A 平台有 3 个独立监控、B 平台有 3 个独立监控时，用户看到�
 `/status`累计模型输入、输出和缓存命中率直接投影原线程`public_model_metrics`，与TUI同口径；估算输入标“约”，未知总数/缓存显示未知，不取平均百分比、不另建用量账或发模型请求。当前上下文占用继续单独显示。Gateway/local控制及HTTP状态恢复均保留同一指标。
 
 隔离回归涵盖原Repository、真实HostChannelActor/ThreadStore、前台/后台、私有10/A群10/B群5与同群他人、当前/离群/未知/操作者离群、同名不同ID、重新入群、跨群和缺creator、完整/损坏/循环/超预算成员分页、管理员IM控制本人TUI以及同源模型指标。未调用真实飞书、不部署；运输/组织权限可用性仍待专用租户验收。具体测试与集成边界见[交接](../tasks/SCHEDULE_OWNER_SCOPE_HANDOFF.md)。
+
+## 2026-11-19 M03：监控定义投影与安装回执恢复（Conveyor）
+
+本节记录 Conveyor M03（Astra-R3 L10、L18；CI 行 1、2、11、14、15、20–22）建立的不变量与验收证据。基线 `d9caa95af`，父提交 `3c310fbb9`（M02）。不改存储格式，投影只在读取时计算，`~/.my-agent` 原账本无需迁移。
+
+**不变量**
+
+- 唯一投影：`agent/scheduler/monitor_state.py` 的 `monitor_definition_projection(definition)` 只返回用户可改定义与定义代次。
+  - 顶层取 `name` 与 `_DEFINITION_FIELDS` 中实际存在的字段。
+  - 复合监控逐条规则按 `_RUNTIME_FIELDS` 剔除运行字段（含 `failure_streak`）；`update_monitor` 的运行回退、`validate_monitor` 与 `rule_enable_patch` 用的也是这一张表。
+  - 定义代次只经 `definition_generation()` 读取：旧记录缺字段适配为初始代 1，事件规则取原 `event_source_state` 代次。身份、版本、时间与统计不进入投影。
+- 单一权威：资产安装回执辨认（`agent/assets/script_store_support.py` 的 `scheduler_job_fact` / `_scheduler_job_matches`）比较两侧投影，再加资产层自有的身份与启停意图键（`job_id`、`enabled`、`status`、`owner`、`source`、`metadata`、`thread_id`），静态子树逐字保留。原资产侧自维护的第二份运行字段名单已删除：2026-11-17（`e122315b7`）规则开始写入 `failure_streak` 后，该名单未同步，自然 tick 因此被误判为用户改定义。
+- 自然 tick（原 reserve/claim/running/finish）只改运行字段，投影不变：安装已提交而回执未结算时，重试接收补发原安装回执；重试拒绝不写 rejected，同一守门把回执结算为 accepted 并返回 `DELIVERY_STATE_CONFLICT`。结算只发生一次，重复调用不改信封、两端回执、账本与历史的字节。单次 at 自然耗尽的原归一规则不变。
+- 用户改 `schedule`、`enabled`、规则主体，或改后复原（定义字段相同但定义代次已前进），投影都不同：接收返回 `DELIVERY_INSTALLATION_STATE_CHANGED`，拒绝返回 `DELIVERY_STATE_CONFLICT`，均不写任何文件。
+- L18 夹具从投影构造规则补丁（只去掉只读的定义代次），不再手抄运行字段名单。原有“旧运行不能回写新定义”的断言全部保留，并新增断言：自然开工计数沿定义更新保留，同代运行收口推进终态。
+
+**验收证据**
+
+- 红到绿：CI 行 1、2、14、15（`test_round5_installed_monitor_own_tick_recovers_receipt` 的 composite 变体）在父提交因安装目标“已变动”而失败，行 11、20–22（`monitor=True`）因 `ScheduleValidationError` 而失败，本模块后全部通过。
+- 新增 `tests/test_conveyor_m03_monitor_projection.py`：(a) 自然 tick 后接收补发一次，(b) 自然 tick 后拒绝结算 accepted，两者在父提交失败；(c) 四种用户修改保持阻止，在父提交与本模块均通过。
+- 目标与影响测试在 Python 3.12 与 3.14t（`-X gil=0`）通过，静态门（ruff、导入边界、`git diff --check`、clean package）通过。

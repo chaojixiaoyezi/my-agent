@@ -2,6 +2,7 @@
 # 模块用途: 将同一监控的独立规则展开为原运行快照并合回唯一账本，避免长规则阻塞其它规则。
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 
@@ -40,6 +41,21 @@ def adapt_definition_generations(job):
         if (view.get('schedule') or {}).get('kind') != 'event_source':
             view['definition_generation'] = definition_generation(view)
     return result
+
+
+# LLM: 只读投影不写盘；规则内运行字段与 update_monitor 运行回退同用 _RUNTIME_FIELDS 一张表剔除，定义代次只经
+#   definition_generation 读取（旧记录缺字段适配为初始代，事件规则取原 event_source_state），身份、版本与统计不进入投影。
+# 函数用途: 给出单任务或复合监控的用户可改定义及定义代次；自然 tick 只推进运行字段不改投影，用户改定义必改投影。
+def monitor_definition_projection(definition: Mapping[str, object]) -> dict:
+    projection = {key: deepcopy(definition[key]) for key in ('name', *_DEFINITION_FIELDS) if key in definition}
+    if definition.get('rules') is None:
+        projection['definition_generation'] = definition_generation(definition)
+        return projection
+    states = definition.get('event_source_state')
+    projection['rules'] = [{**{key: deepcopy(value) for key, value in rule.items() if key not in _RUNTIME_FIELDS},
+        'definition_generation': definition_generation({**rule, 'event_source_state': states})}
+        for rule in definition['rules']]
+    return projection
 
 
 # LLM: 原事件同步负责退休/取消语义，本函数仅为未覆盖的定义字段推进同一个事件代次；普通规则各自维护唯一代次。

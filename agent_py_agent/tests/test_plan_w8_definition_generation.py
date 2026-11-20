@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agent_py_agent.agent.scheduler.monitor_state import condition_matches, due_rule_views
+from agent_py_agent.agent.scheduler.monitor_state import (
+    condition_matches,
+    due_rule_views,
+    monitor_definition_projection,
+)
 from agent_py_agent.agent.scheduler.repository import (
     SchedulerJobCreateRequest,
     SchedulerRepository,
@@ -47,10 +51,10 @@ def start(repo, job, clock):
     return claimed
 
 
+# 规则补丁只取调度器唯一定义投影，不手抄运行字段名单；定义代次是只读身份，不写入补丁。
 def patch_rules(job, **patch):
-    runtime = {"next_run_at", "last_run_at", "last_run_status", "last_error_code", "run_count",
-               "consecutive_failures", "backoff_until", "precheck_checkpoint", "result", "definition_generation"}
-    return [{**{key: deepcopy(value) for key, value in rule.items() if key not in runtime}, **patch} for rule in job["rules"]]
+    return [{**{key: value for key, value in rule.items() if key != "definition_generation"}, **patch}
+            for rule in monitor_definition_projection(job)["rules"]]
 
 
 @pytest.mark.parametrize("monitor", [False, True])
@@ -65,6 +69,8 @@ def test_old_run_cannot_consume_replacement_future_at(tmp_path, monitor, old_sch
     repo.finish_run(run["run_id"], run["claim_id"], SchedulerRunFinish(status="done", now=clock.advance(1020)))
     current = repo.get_job(job["job_id"])
     assert current["status"] == "active"
+    # 自然开工计数沿定义更新保留；旧运行晚到收口不回写新定义。
+    assert (current["rules"][0] if monitor else current)["run_count"] == 1
     assert current["next_run_at"] == changed["next_run_at"] == 2000
     assert repo.reserve_due_runs(now=1999) == []
     fresh = repo.reserve_due_runs(now=clock.advance(2000))
@@ -127,8 +133,13 @@ def test_only_display_name_and_claim_versions_keep_generation(tmp_path, monitor)
     changed = repo.update_job(job["job_id"], patch=patch, expected_version=before["version"], now=1010)
     assert changed["version"] > job["version"]
     assert (changed["rules"][0] if monitor else changed)["definition_generation"] == run["definition_generation"] == 1
+    assert (changed["rules"][0] if monitor else changed)["run_count"] == 1
     repo.finish_run(run["run_id"], run["claim_id"], SchedulerRunFinish(status="done", now=1020))
-    assert (repo.get_job(job["job_id"])["rules"][0] if monitor else repo.get_job(job["job_id"]))["definition_generation"] == 1
+    final = repo.get_job(job["job_id"])
+    target = final["rules"][0] if monitor else final
+    assert target["definition_generation"] == 1
+    # 同代运行自然收口：开工计数沿用，终态推进。
+    assert target["run_count"] == 1 and target["last_run_status"] == "done"
 
 
 @pytest.mark.parametrize("operation", ["pause_job", "delete_job"])
@@ -203,6 +214,7 @@ def test_old_failure_does_not_overwrite_new_definition_backoff_or_checkpoint(tmp
     repo.finish_run(run["run_id"], run["claim_id"], SchedulerRunFinish(status="failed", now=1020))
     current = repo.get_job(job["job_id"])
     target = current["rules"][0] if monitor else current
+    assert target["run_count"] == 1
     assert target["consecutive_failures"] == 3
     assert target["backoff_until"] == 1700
     assert target["precheck_checkpoint"] == {"fingerprint": "B"}

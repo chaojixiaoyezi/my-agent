@@ -792,27 +792,16 @@ def apply_scheduler_batch(root, jobs, runs, *, previous=False, admission=None, h
             logging.getLogger(__name__).warning('SCHEDULER_SOURCE_PROJECTION_RETIRE_DEFERRED')
 
 
-# LLM: 沿job→rules递归剔除运行投影；工具参数/metadata等静态子树逐字保留，不能按同名键删除用户输入。
-# 函数用途: 清除单任务安装事实中的时间、计数、领取、退避、检查点与已确认结果。
-def _scheduler_static_value(value):
-    runtime = {'next_run_at', 'last_run_at', 'last_run_status', 'last_error_code', 'run_count',
-        'failure_count', 'consecutive_failures', 'backoff_until', 'last_status', 'last_error',
-        'updated_at', 'claimed_by', 'active_run_id', 'precheck_checkpoint', 'result', 'definition_generation'}
-    if isinstance(value, dict):
-        return {key: _scheduler_static_value(item) if key == 'rules' else deepcopy(item)
-            for key, item in value.items() if key not in runtime}
-    if isinstance(value, list):
-        return [_scheduler_static_value(item) for item in value]
-    return value
-
-
-# LLM: 比较静态安装定义及启用意图，递归排除运行字段；覆盖原有定义及执行/通知配置，不比较整store时间。
+# LLM: 定义与定义代次只取scheduler唯一投影，规则运行字段沿同一_RUNTIME_FIELDS表剔除，不再自维护第二份运行字段名单；
+#   身份、来源、metadata与启停意图逐键比较，工具参数/metadata等静态子树逐字保留，不比较整store时间、版本或统计。
 # 函数用途: 投影可用于投递提交辨认的稳定单任务事实。
 def scheduler_job_fact(job):
+    from ..scheduler.monitor_state import monitor_definition_projection
+
     if job is None:
         return None
-    return _scheduler_static_value({key: job.get(key) for key in ('job_id', 'enabled', 'status', 'schedule', 'prompt', 'name',
-        'owner', 'source', 'metadata', 'thread_id', 'precheck', 'policy', 'skill_refs', 'rules', 'execution', 'delivery')})
+    return {**{key: deepcopy(job.get(key)) for key in ('job_id', 'enabled', 'status', 'owner', 'source', 'metadata', 'thread_id')},
+        **monitor_definition_projection(job)}
 
 
 # LLM: 比较原生运行数值与安装快照，不以旧last_run_status授权新的状态归一化；不读写store。
