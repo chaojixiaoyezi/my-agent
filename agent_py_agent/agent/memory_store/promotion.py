@@ -561,7 +561,10 @@ class _PromotionCommitMixin:
         if candidate.origin == "model_inferred" and candidate.candidate_type != "working_agreement":
             raise ValueError("model_inferred candidate cannot become a formal fact")
         _ensure_recallable_scope_for_add(candidate)
-        existing = _same_subject_scope(self.long_term.all(), candidate)
+        scope = MemoryScope.from_value(candidate.scope)
+        existing = _same_subject_scope(self.long_term.locate_for_promotion(
+            entry_id=candidate.target_entry_id or _long_term_entry_id(candidate.candidate_id),
+            subject_key=candidate.subject_key, scope=(scope.scope_type, scope.scope_key)), candidate)
         same_content = _same_content_in(existing, candidate)
         if same_content is not None and candidate.proposed_action == "add":
             return _TargetCommit("memory/long_term/memory.jsonl#" + same_content.entry_id, False)
@@ -720,9 +723,10 @@ def _commit_long_term_add(
         ], _admission=admission,
     )
     if not record:
+        matches = service.long_term.locate_for_promotion(entry_id=entry_id, content_hash=memory_content_hash(candidate.content))
         raise _PromotionConflict(
             "LONG_TERM_ADD_IDEMPOTENCY_IDENTITY_MISMATCH",
-            _exact_content_entry_ids(service.long_term.all(), candidate),
+            _exact_content_entry_ids(matches, candidate),
         )
     committed = record[0]
     return "memory/long_term/memory.jsonl#" + committed.entry_id
