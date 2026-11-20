@@ -11,8 +11,9 @@ import stat
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import replace
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_replace
 from ..plugin_host.business_action_specs import BUSINESS_LIST_DEFAULT_ROWS, BUSINESS_LIST_MAX_ROWS
 
 _COUNT_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], int]] = OrderedDict()
@@ -49,7 +50,7 @@ def _owner_store(server, scope):
         config = control.config
         if owner != owner_identity_from_config(config):
             fields = resolve_runtime_paths_for_agent(config, base_home.owner_home_dir, base_home).paths
-            config = replace(config, **{name: "" for name in fields if hasattr(config, name)})
+            config = fast_replace(config, **{name: "" for name in fields if hasattr(config, name)})
         store = owner_conversation_store_from_config(config, scoped_home, initialize=False)
 
         # LLM: 复核捕获的同一来源，不允许读到一半切换、关闭或替换 C 后继续返回正文。
@@ -84,7 +85,7 @@ def _viewer_digest(channel, user_id, all_user_access):
 # LLM: 排序键只含目录快照时间与绑定身份，游标不携带正文、路径或 owner 选择权。
 # 函数用途: 把分页位置编码为不带填充的 base64url JSON。
 def _encode_cursor(owner_id, viewer_digest, key):
-    raw = json.dumps(["s1", owner_id, viewer_digest, *key], separators=(",", ":")).encode()
+    raw = hot_json.dumps(["s1", owner_id, viewer_digest, *key], compact=True).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
@@ -391,8 +392,8 @@ def gateway_client_session_list(
             # 函数用途: 把一页会话绑定转换为原 Gateway scope 后批量读取在途状态。
             def inflight(entries):
                 return client_inflight_index(server, scope, {
-                    key: (replace(scope, channel=c, conversation_id=conv, user_id=u,
-                                  resolved_owner=scope.resolved_owner), tid)
+                    key: (fast_replace(scope, channel=c, conversation_id=conv, user_id=u,
+                                       resolved_owner=scope.resolved_owner), tid)
                     for key, (c, conv, u, tid) in entries.items()})
 
         body = list_owner_sessions(store, owner_id=owner_id, viewer_user_id=scope.user_id,
@@ -470,11 +471,11 @@ def _history_from_target(store, server, scope, target_thread_id, *, max_turns, b
         return GatewayClientHistoryResult(False, load_errors=(_safe_load_error(error),))
     if resolved is None or resolved.thread_id != target_thread_id:
         return GatewayClientHistoryResult(True)
-    bound = replace(scope, channel=binding.channel, user_id=binding.channel_user_id)
+    bound = fast_replace(scope, channel=binding.channel, user_id=binding.channel_user_id)
     result = read_gateway_client_history_from_store(store, scope=bound, max_turns=max_turns,
                                                     before_message_cursor=before)
     if result.ok and result.thread_id:
-        result = replace(result, **client_inflight_projection(server, bound, result.thread_id))
+        result = fast_replace(result, **client_inflight_projection(server, bound, result.thread_id))
     return result
 
 

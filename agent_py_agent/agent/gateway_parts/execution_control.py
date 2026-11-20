@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import replace
 
+from ..common.fast_dataclass import fast_replace
 from .execution_target import (
     GatewayExecutionTarget,
     execution_target_guard,
@@ -37,7 +37,7 @@ def resolve_execution_control(base_agent, paths, scope):
     if target.kind == "task":
         active = _active_conversation_task(base_agent, scope, task_id=target.task_id, ordinary_only=True)
         if active is not None:
-            active = replace(active, payload={**active.payload, "execution_turn_id": target.turn_id})
+            active = fast_replace(active, payload={**active.payload, "execution_turn_id": target.turn_id})
         return target, active
     path = paths.processing / f"{target.turn_id}.json"
     report = read_json_file_report(path, context="gateway.execution_control.request")
@@ -59,7 +59,7 @@ def bind_execution_scope(scope, target):
         expected = GatewayExecutionTarget.from_dict(scope.metadata["expected_execution"])
         if expected is None or not execution_target_matches(expected, target):
             return None
-    return replace(scope, metadata={
+    return fast_replace(scope, metadata={
         **scope.metadata, "expected_turn_id": target.turn_id,
         "expected_execution": target.to_dict(),
     })

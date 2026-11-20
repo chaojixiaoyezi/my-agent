@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
 from ..runtime_errors import DataCorruptionError
 from .daemon_metadata import process_identity_is_live
 from .io import locked_file_transition, read_json_file_report
@@ -19,7 +20,8 @@ _TARGET_SCHEMA = "gateway_execution_target.v1"
 
 # LLM: 不可变投影不是新执行权；claim_id 固定工作片，transport attempt 和 runtime authority 固定请求实际代次。
 # 类用途: 保存一次用户操作所看到的实际执行绑定，供原控制入口拒绝过期操作。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayExecutionTarget:
     thread_id: str
     kind: str
@@ -88,11 +90,16 @@ def read_gateway_execution_target(
 
 
 # LLM: 不从消息或客户端 thread 取得 owner 权限；调用方给出的 store 必须已由认证 scope 解析。
+#   身份字段按固定顺序逐个直接比较（C3 A3：不按变量名 getattr），短路顺序与原 all(...) 相同。
 # 函数用途: 按客户端原快照核对执行代次；运行绑定尚未发布时，车道与运输代次仍能固定同一次执行。
 def execution_target_matches(expected: GatewayExecutionTarget, current: GatewayExecutionTarget | None) -> bool:
-    return current is not None and all(
-        getattr(expected, key) == getattr(current, key)
-        for key in ("thread_id", "kind", "turn_id", "claim_id", "execution_attempt_id", "task_id")
+    return current is not None and (
+        expected.thread_id == current.thread_id
+        and expected.kind == current.kind
+        and expected.turn_id == current.turn_id
+        and expected.claim_id == current.claim_id
+        and expected.execution_attempt_id == current.execution_attempt_id
+        and expected.task_id == current.task_id
     ) and (not expected.runtime_authority or expected.runtime_authority == current.runtime_authority)
 
 

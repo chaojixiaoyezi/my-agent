@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlsplit
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen
 from .http_handlers import (
     _can_read_finished_request,
     _denial_body,
@@ -24,7 +26,8 @@ from .paths import gateway_chunk_path, gateway_chunk_path_candidates
 from .request_event_hub import hub_for_paths
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class DurableCursor:
     request_id: str
     attempt_id: str
@@ -285,7 +288,7 @@ def handle_request_events(handler, server):
                 owner_key = (_request_identity(handler)[0], "standalone")
             ticket = pool.reserve(owner_key)
             if ticket is None:
-                body = json.dumps({"error": {"code": "GATEWAY_STREAM_BUSY"}}).encode()
+                body = hot_json.dumps({"error": {"code": "GATEWAY_STREAM_BUSY"}}).encode()
                 handler.send_response(503)
                 handler.send_header("Content-Type", "application/json; charset=utf-8")
                 handler.send_header("Content-Length", str(len(body)))

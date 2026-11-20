@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen
 from ..common.log_redaction import redact_sensitive_text
 from ..runtime_errors import runtime_error_report
 from .daemon_control import (
@@ -48,20 +50,23 @@ if TYPE_CHECKING:
 GATEWAY_STALE_SECONDS = 120
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayRunningReport:
     pid: int | None
     alive: bool
     load_error: dict | None = None
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayHeartbeatFacts:
     updated_at: float
     age_seconds: float
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayStatusRenderContext:
     paths: GatewayPaths
     running_report: GatewayRunningReport
@@ -107,7 +112,8 @@ _GATEWAY_READY_POLL_SECONDS = 0.2
 
 # LLM: 一次就绪观测的结构化结果，是 CLI/TUI 唯一可以据此分支的事实；ready 只可能来自本模块判据。
 # 类用途: 描述某个 PID 在当前代次下的存活、阶段、就绪与否以及代际记录来源，供启动等待分型。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayReadiness:
     state: str
     reason: str
@@ -126,7 +132,8 @@ class GatewayReadiness:
 # LLM: 有界等待的结构化结局；last 保留最后一次观测，timeout 时用 last.state 区分"仍在启动"与
 #   "从未启动"，失败时用 reason 区分"进程消退"与"服务自身失败"。
 # 类用途: 描述一次启动等待的结局、耗时、最后观察到的 PID 和最后一次真实观测。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayReadinessWait:
     state: str
     reason: str
@@ -140,7 +147,8 @@ class GatewayReadinessWait:
 
 # LLM: 记录层事实是本模块内部唯一允许解读 state/heartbeat 的地方；ready 的唯一定义就是
 #   status == "running"，其他函数只能读它，不能另写比较。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _GatewayRecordFacts:
     status: str = ""
     source: str = ""
@@ -363,7 +371,7 @@ def _gateway_log_tails(paths: GatewayPaths, state: dict, *, log_source: str, log
 
 
 def _log_cursor_encode(payload: dict) -> str:
-    return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+    return base64.urlsafe_b64encode(hot_json.dumps(payload, compact=True).encode()).decode()
 
 
 def gateway_log_page(paths: GatewayPaths, state: dict[str, object], *, log_source: str = "gateway",
@@ -378,7 +386,7 @@ def gateway_log_page(paths: GatewayPaths, state: dict[str, object], *, log_sourc
     budget = max(1, min(_GATEWAY_LOG_TAIL_MAX_BYTES, int(byte_limit)))
     if budget < len(sources):
         raise ValueError("log_byte_budget_requires_at_least_one_byte_per_source")
-    binding = hashlib.sha256(json.dumps([log_source, log_scope, log_query, log_since, log_until,
+    binding = hashlib.sha256(hot_json.dumps([log_source, log_scope, log_query, log_since, log_until,
         state.get("started_at") if log_scope == "current_lifecycle" else None,
         state.get("log_start_offset_bytes") if log_scope == "current_lifecycle" else None]).encode()).hexdigest()
     previous = {}
@@ -1096,7 +1104,7 @@ def _base_status_lines(context: GatewayStatusRenderContext) -> list[str]:
         f"pid={context.running_report.pid if context.running_report.pid else '-'} "
         f"alive={context.running_report.alive}",
         "gateway requests="
-        + json.dumps(gateway_request_counts(context.paths, include_archives=True), ensure_ascii=False, sort_keys=True),
+        + hot_json.dumps(gateway_request_counts(context.paths, include_archives=True), ensure_ascii=False, sort_keys=True),
     ]
     if context.heartbeat_at:
         lines.append(f"gateway heartbeat_age_seconds={context.heartbeat_age_seconds:.1f}")
@@ -1193,8 +1201,8 @@ def _append_unidentified_stale_attempts(lines: list[str], state: object) -> None
 
 
 def _json(payload: dict) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hot_json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def _json_list(payload: list[dict]) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hot_json.dumps(payload, ensure_ascii=False, sort_keys=True)

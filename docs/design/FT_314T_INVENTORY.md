@@ -734,3 +734,49 @@ CI 安装 `.[dev,secrets]` 加 `sqlalchemy>=2.0`、`psycopg>=3.1`，不安装完
   - 常数目录检查与 11 个目录测试通过。
 - 3.11.15 本地：15 个 M00 文件编译通过。SpawnPopen 冒烟（cwd、env、pass_fds、ENOEXEC、`os.putenv`、128 路并发）通过。
 - 常数目录由 1562 项减为 1561 项：删除 `_SHEBANG_LINE_LIMIT_BYTES`，`_DARWIN_OPEN_MAX_FILES` 的说明随实现更新。
+
+## 2026-11-19 M05：HTTP poll 路径的 Cure-A（Conveyor）
+
+本节记录 Conveyor M05（R3-W1 Cure-A；S50-02、S50-03）建立的不变量与验收证据。父提交 `d26f2d5d4`；合同见 Conveyor `INTERFACE_CONTRACTS.MD` C1–C3。
+
+**不变量**
+
+- HTTP poll 路径上 18 个冻结 DTO 改为 `@fast_frozen` + `@dataclass(frozen=True, slots=True)`。构造经成员描述符直接写槽位，不再逐字段 `object.__setattr__`。18 个类的 `check_slots_compat` 均为 `[]`：
+  - `conversation/control_commands.py`：`ConversationControlCommand`、`ConversationTaskStatus`、`NamedConversationWorkStatus`、`ConversationControlResult`；
+  - `client_credentials.py`：`GatewayClientCredentials`；`client_service.py`：`GatewayClientMemoryResult`、`GatewayClientHistoryResult`；`http_input_receipt.py`：`CoordinatorInputRequest`；
+  - `request_event_hub.py`：`RequestEvent`、`Gap`。两者基线已是 slots，另加 `weakref_slot=True`；`RequestEvent.__post_init__` 改用模块级 `_set_ref = slot_setter(RequestEvent, "ref")`；
+  - `request_event_routes.py`：`DurableCursor`；`execution_target.py`：`GatewayExecutionTarget`；
+  - `status_rendering.py`：`GatewayRunningReport`、`GatewayHeartbeatFacts`、`GatewayStatusRenderContext`、`GatewayReadiness`、`GatewayReadinessWait`、`_GatewayRecordFacts`。
+- 请求事件元数据清洗（`request_event_hub._safe_string` / `_safe_ref`）与原实现逐项同值：
+  - 两个校验式在模块级预编译。模块级 `re.fullmatch(str, ...)` 每次按元组键查 `re` 的共享缓存，G1 只有 0.11。
+  - 精确 `dict` 与 `mappingproxy` 按 `type(...) is` 直接放行；其它输入（含 `Mapping.register` 注册的类）仍走原 `isinstance(ref, Mapping)`。ABC `isinstance` 每次对类型取弱引用查缓存，G1 只有 0.41。
+- 其余命中：
+  - A1：`client_session_list.py`、`execution_control.py` 的 `dataclasses.replace` 改为 `fast_replace`。目标不是已转换类时，`fast_replace` 回落 `dataclasses.replace`。
+  - A3：`execution_target_matches` 按固定顺序直接比较六个身份字段，短路顺序同原 `all(...)`；`status_display_facts` 用字面名读取三个 owner 字段。
+  - A7：`client_session_list._encode_cursor`、`request_event_routes` 的忙碌应答、`status_rendering` 的五处 `json.dumps` 改为同参逐字节一致的 `hot_json.dumps`。`encode_sse`（`allow_nan=False`）不动。
+  - 冷路径保留，G2 原因改为 `cold-path: ...`，计数不变：`_CountPath.__getattr__`、`_CountReader.__getattr__`、`_owner_store` 的 `hasattr`、`require_request_execution`、`_ResultView.__getattr__`、`response_renderer._int_value`。
+  - `client_inflight_projection.py`、`status_model_summary.py`、`response_renderer.py`、`request_entry_admission.py` 不改。
+
+**已知限制：单类 `fast_replace` 的共享 frozenset 守卫（归 `fast_dataclass` 所有者）**
+
+- M00 `_build_replace` 生成的 `__replace__` 每次调用都对全线程共享的 frozenset 做 `isdisjoint(changes)` 与 `<= changes.keys()`。3.14t GIL 关闭时，这两步都要取该 frozenset 的对象临界区。
+- G1（单个转换类，分块中位数）：
+  - `fast_replace` 0.13–0.21；同类 `dataclasses.replace` 1.29；去掉两个守卫后 1.22。
+  - 最小复现：共享 frozenset 的 `isdisjoint` 0.07、`<=` 0.05；线程私有 frozenset 1.36；字面 `"name" in changes` 1.29。
+- M00 自带的 G1 用例把操作分散到 2000 个类上，单个 frozenset 的争用被稀释，测不出这一点。
+- 改法：按字段名生成字面成员检查（`'x' in changes`；必需 InitVar 用 `'y' not in changes`），没有这类字段时只保留类型检查。行为不变。
+- 修复前，M05 的 G1 用例只测构造，这 18 个类在 poll 路径上每次请求做的就是构造。生产代码里落到已转换类上的 `fast_replace` 只有 `client_session_list.py` 历史页上的一处（`GatewayClientHistoryResult`）。
+
+**验收证据（M05，隔离 HOME）**
+
+- 红：在父提交 `d26f2d5d4` 的 `git archive` 导出上覆盖 M05 测试文件后：
+  - 18 个 `test_hot_http_poll_class_is_fast_frozen_with_slots` 失败：类不在 `CONVERTED_CLASSES`。
+  - `test_request_event_sanitizer_never_consults_the_shared_regex_cache` 与 `test_request_event_sanitizer_skips_the_abc_check_for_plain_mappings` 失败：清洗路径仍调用模块级 `re` 与 ABC `isinstance`。
+  - G2 `test_no_new_or_increased_hot_path_triggers` 失败：15 个键的观测数高于收紧后的白名单。
+  - G1 `m05_request_event` 为 0.301（3.14t，GIL 关闭）；其余 17 个构造用例通过。
+- 绿：
+  - (a) 3.12 定向 79 passed；(b) 3.14t 定向 79 passed；G2（3.12）6 passed；G1（3.14t）23 passed，主机负载 29–129。
+  - (c) 3.12 影响面 237 passed，与父提交相同。
+  - (d) 3.14t 影响面 231 passed、6 failed。6 个都是 3.14t venv 缺 `markdown_it`，父提交上逐项相同。父提交整轮另有 2 个 `test_readiness_uses_real_status_and_original_outcome` 参数在主机负载 200–320 时读不到就绪状态，单独重跑时换成另 1 个参数失败；提交树两轮都通过。
+- G2 白名单由 355 键、509 次触发降为 340 键、492 次触发：删除 15 键（17 次），6 键改为 `cold-path` 原因，不新增键。
+- 常数目录不变（1561 项）。

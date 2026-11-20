@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..common.fast_dataclass import fast_frozen
 from ..user_space.home_layout import home_paths
 from ..user_space.home_root import configured_home_root
 from .local_client_token import LocalClientCredentialError, load_local_client_credential
@@ -12,7 +13,8 @@ from .local_client_token import LocalClientCredentialError, load_local_client_cr
 
 # LLM: 仅保存宿主路径及可选部署 token，repr 不显示它们；构造不读秘密，发送入口才加载。
 # 类用途: 在既有请求头构造时取得 G1 凭据，缺失或不可读时零网络请求。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayClientCredentials:
     data_root: Path = field(repr=False)
     configured_token: str = field(default="", repr=False)

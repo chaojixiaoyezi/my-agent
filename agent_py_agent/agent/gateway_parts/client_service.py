@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
 from ..conversation.history_display import conversation_history_display_events
 from ..conversation.models import is_audit_background_transcript_entry
 from .control_service import GatewayControlScope, resolve_gateway_scope_agent
@@ -13,7 +14,8 @@ from .control_service import GatewayControlScope, resolve_gateway_scope_agent
 
 # LLM: Memory result 只投影用户可见记录字段和稳定错误码；底层路径、异常正文、候选审核内部状态不得出 Gateway。
 # 类用途: 表示一次记忆查询或显式保存的结构化结果。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayClientMemoryResult:
     operation: str
     ok: bool
@@ -38,7 +40,8 @@ class GatewayClientMemoryResult:
 
 # LLM: History result 分开保存预览、显示、向前分页和实时游标；游标只用于展示，不回灌模型。
 # 类用途: 表示同 owner/channel/conversation 的预览、正文恢复和读取错误。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayClientHistoryResult:
     ok: bool
     thread_id: str = ""

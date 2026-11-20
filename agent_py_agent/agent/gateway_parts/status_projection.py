@@ -19,7 +19,9 @@ def status_display_facts(agent: object, thread: object = None, *, scope: object 
         except (AttributeError, OSError, TypeError, ValueError):
             thread = None
     home = getattr(agent, "home_paths", None)
-    key = tuple(str(getattr(home, name, "") or "") for name in ("owner_provider", "owner_kind", "owner_id"))
+    # 三个身份字段用字面名读取（C3 A3：/status 每次轮询都走这里，不按变量名 getattr）。
+    key = (str(getattr(home, "owner_provider", "") or ""), str(getattr(home, "owner_kind", "") or ""),
+           str(getattr(home, "owner_id", "") or ""))
     role = "管理员" if key == ("local", "main", "local/main") else "普通用户" if all(key) else "未知"
     config = getattr(agent, "config", None)
     permissions = permission_self_context(agent)

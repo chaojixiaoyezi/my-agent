@@ -834,31 +834,15 @@
     },
     "agent/gateway_parts/client_session_list.py::_CountPath.__getattr__::dyn_getattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
+      "reason": "cold-path: on-demand session listing, reached only on message-count cache misses; the delegated name is the compiler-interned attribute name used by the canonical message marker"
     },
     "agent/gateway_parts/client_session_list.py::_CountReader.__getattr__::dyn_getattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/client_session_list.py::_encode_cursor::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/client_session_list.py::_history_from_target::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M05"
+      "reason": "cold-path: on-demand session listing, reached only on message-count cache misses; delegates the marker's compiler-interned file attribute names (fileno, seek, tell, close)"
     },
     "agent/gateway_parts/client_session_list.py::_owner_store::dyn_hasattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/client_session_list.py::_owner_store::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/client_session_list.py::gateway_client_session_list.<locals>.inflight::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
+      "reason": "cold-path: foreign-owner branch of on-demand session-list and history-by-thread reads in multiprocess mode, once per request; names are the literal runtime-path field keys"
     },
     "agent/gateway_parts/control_service.py::_cancel_request_execution::thread_ctor": {
       "count": 1,
@@ -895,18 +879,6 @@
     "agent/gateway_parts/control_service.py::execute_gateway_conversation_control::replace_on_fast_frozen": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M21"
-    },
-    "agent/gateway_parts/execution_control.py::bind_execution_scope::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/execution_control.py::resolve_execution_control::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/execution_target.py::execution_target_matches::dyn_getattr": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M05"
     },
     "agent/gateway_parts/http_body_readiness.py::PrefetchedSocket.__getattr__::dyn_getattr": {
       "count": 1,
@@ -974,19 +946,11 @@
     },
     "agent/gateway_parts/request_entry_admission.py::require_request_execution::dyn_getattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/request_event_hub.py::RequestEvent.__post_init__::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
+      "reason": "cold-path: reached only by memory_curator and skill_learning component entries, once per background maintenance operation; the attribute name is the caller's literal"
     },
     "agent/gateway_parts/request_event_routes.py::_ResultView.__getattr__::dyn_getattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/request_event_routes.py::handle_request_events::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
+      "reason": "cold-path: one terminal check per drained SSE page (per stream wake, never per progress row or poll); getattr receives compiler-interned handler attribute names, so A3 already holds (C2.2 has no delegation reason form)"
     },
     "agent/gateway_parts/request_execution.py::_finalize_gateway_response::json_dumps_default": {
       "count": 1,
@@ -1022,31 +986,7 @@
     },
     "agent/gateway_parts/response_renderer.py::_int_value::dyn_getattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/status_projection.py::status_display_facts::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/status_rendering.py::_base_status_lines::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/status_rendering.py::_json::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/status_rendering.py::_json_list::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/status_rendering.py::_log_cursor_encode::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
-    },
-    "agent/gateway_parts/status_rendering.py::gateway_log_page::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M05"
+      "reason": "cold-path: client-side response rendering, once per completed response; keys are the four literal context-estimate field names"
     },
     "agent/tooling/models.py::ApprovalPolicy.__post_init__::object_setattr": {
       "count": 3,

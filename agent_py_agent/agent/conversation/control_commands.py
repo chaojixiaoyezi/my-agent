@@ -21,6 +21,7 @@ from ..command_catalog import (
     system_slash_command_name,
     unavailable_command_message,
 )
+from ..common.fast_dataclass import fast_frozen
 from ..common.opaque_id import is_opaque_id
 from ..plugin_commands import plugin_namespace
 from ..runtime_db.operations import ATTEMPT_EFFECT_DISPOSITIONS
@@ -82,7 +83,8 @@ _WORK_NAME_MAX_CHARS = 64
 # LLM: 控制命令只承载入口已解析的结构化参数；recover 的 target_id 和 confirmation_code 不从正文或回执反推，
 #   并保持末尾默认字段，避免破坏既有位置构造。
 # 类用途: 表示一条已识别的即时会话控制命令及其安全解析结果。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ConversationControlCommand:
     kind: ControlKind
     value: str = ""
@@ -125,7 +127,8 @@ ConversationCommand = ConversationControlCommand | ConversationTaskCommand
 
 # LLM: /status 是显式控制面；上下文、匿名请求计时及子代理只取原数字事实，角色来自 owner，未知不补零。
 # 类用途: 汇总当前任务、模型、上下文、压缩和权限，供 TUI 与 IM 共用展示，未知事实不能填成当前零值。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ConversationTaskStatus:
     state: Literal["idle", "queued", "running", "stopping"] = "idle"
     task: str = ""
@@ -155,7 +158,8 @@ class ConversationTaskStatus:
 
 # LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
 # 类用途: 保存一个具名持续工作的结构化状态，供控制回执展示。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class NamedConversationWorkStatus:
     kind: Literal["audit", "goal"]
     name: str
@@ -165,7 +169,8 @@ class NamedConversationWorkStatus:
 
 # LLM: 控制回复分别保留任务状态、运输投递及类型化错误身份；ok 表示命令语义，error_code 区分中断、繁忙与失败，不解析本地化文案。
 # 类用途: 表示一条会话控制命令的结构化结果，并在跨进程边界保留投递三态和错误码。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ConversationControlResult:
     kind: ControlKind
     ok: bool

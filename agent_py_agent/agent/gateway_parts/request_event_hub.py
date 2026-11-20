@@ -16,6 +16,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
+from ..common.fast_dataclass import fast_frozen, slot_setter
+
+# 事件元数据里安全标识符、以及游标字段额外允许的版本化游标的完整匹配式。模块级预编译：模块级 re.fullmatch(str, ...)
+#   每次都按 (type, pattern, flags) 元组键查 re 的共享缓存，3.14t 关闭 GIL 时 128 线程吞吐只剩 16 线程时的约 0.11 倍。
+_SAFE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+_SAFE_CURSOR_PATTERN = re.compile(r"[A-Za-z0-9_-]+|v1(?:[.:][A-Za-z0-9_-]+)+")
+
 
 # LLM: Normalize numeric configuration without propagating conversion errors.
 # 函数用途: 将配置转换为整数，转换失败时使用默认值。
@@ -37,21 +44,22 @@ def _seconds(value: object) -> float:
 
 
 # LLM: Accept exact strings containing tokens or explicitly versioned cursors.
+#   The patterns are compiled once at import; fullmatch semantics equal re.fullmatch(pattern, value).
 # 函数用途: 只允许安全标识符，以及游标字段使用的版本化游标格式。
 def _safe_string(value: object, *, cursor: bool = False) -> bool:
     if type(value) is not str:
         return False
-    pattern = r"[A-Za-z0-9_-]+"
-    if cursor:
-        pattern += r"|v1(?:[.:][A-Za-z0-9_-]+)+"
-    return re.fullmatch(pattern, value) is not None
+    return (_SAFE_CURSOR_PATTERN if cursor else _SAFE_TOKEN_PATTERN).fullmatch(value) is not None
 
 
 # LLM: Copy only allowlisted scalar metadata; invoke input mapping code here.
+#   Exact dict/mappingproxy inputs (every hub caller and RequestEvent replace) are Mappings by definition, so they
+#   skip the ABC isinstance, which takes a weak reference to the type per call and convoys under GIL=0.
 # 函数用途: 丢弃正文、路径和未知字段，只保留允许的标量元数据。
 def _safe_ref(ref: object) -> dict[str, object]:
     result: dict[str, object] = {}
-    if not isinstance(ref, Mapping):
+    ref_type = type(ref)
+    if ref_type is not dict and ref_type is not MappingProxyType and not isinstance(ref, Mapping):
         return result
     for key in ("cursor", "offset", "version", "attempt_id", "kind"):
         try:
@@ -90,7 +98,9 @@ def _wait_quantum(fallback: float) -> float:
     return fallback if fallback > 0 else sys.getswitchinterval()
 
 
-@dataclass(frozen=True, slots=True)
+# LLM: weakref_slot keeps the slot layout check_slots_compat requires for this weakref-using module (C3 A1).
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class RequestEvent:
     seq: int
     kind: str
@@ -100,10 +110,15 @@ class RequestEvent:
     # LLM: Freeze a sanitized copy; retain no reference to caller-owned mappings.
     # 函数用途: 为通知创建只读元数据副本，避免外部修改通知内容。
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ref", MappingProxyType(_safe_ref(self.ref)))
+        _set_ref(self, MappingProxyType(_safe_ref(self.ref)))
 
 
-@dataclass(frozen=True, slots=True)
+# RequestEvent.ref 的槽位写入函数（C3 A1）：__post_init__ 直接写槽位，不经 object.__setattr__ 做类型查找。
+_set_ref = slot_setter(RequestEvent, "ref")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class Gap:
     seq: int = 0
     reset_required: bool = True

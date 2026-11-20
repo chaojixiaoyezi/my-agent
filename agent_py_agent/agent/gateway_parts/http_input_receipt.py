@@ -2,6 +2,7 @@
 # 模块用途: 冷/健康C受理原输入，内层typed仅在HTTP边界固定503等待；Count0原入口和权限不变。
 from dataclasses import dataclass
 
+from ..common.fast_dataclass import fast_frozen
 from . import input_delivery_service as inputs
 from .control_plane import server_wait_projection
 from .im_dispatch_policy import IM_DISPATCH_KEY
@@ -10,7 +11,8 @@ from .multiprocess_input_receipt import CoordinatorInputReceiptSource
 
 # LLM: 仅汇集原HTTP已鉴权/摘要/actor/media输入；不是授权对象，所有写仍经过原actual-work source与最后门。
 # 类用途: 将原handler这次完整受理参数一起交给C叶子，避免多份位置参数相互错配。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class CoordinatorInputRequest:
     prepared_request: dict
     scope: object
