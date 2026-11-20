@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.fast_dataclass import fast_frozen
 from ..common.json_io import (
     JsonObjectReadReport,
     locked_json_path,
@@ -25,7 +26,8 @@ from .temporary_grants import list_temporary_grants
 _NETWORK_TOOL_NAMES = frozenset({"web_search", "web_fetch", "http_request"})
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class OwnerPolicyBundle:
     permissions: dict[str, Any]
     quota: dict[str, Any]
@@ -35,19 +37,22 @@ class OwnerPolicyBundle:
     tool_policy: dict[str, Any]
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class OwnerPolicyBundleReport:
     bundle: OwnerPolicyBundle
     load_errors: tuple[dict[str, object], ...] = field(default_factory=tuple)
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class OwnerDiskUsage:
     total_bytes: int
     by_root: dict[str, int]
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class EffectiveOwnerPolicy:
     owner_id: str
     owner_home: str
@@ -312,7 +317,8 @@ def owner_disk_usage(home: MyAgentHomePaths) -> OwnerDiskUsage:
 #   跳过名单会话；迁移工具只追加、不覆盖。文件缺失=没有排除；文件存在但读不动时返回读取错误，
 #   由调用方决定 fail 行为（curator 侧 fail-closed：本轮不学任何会话）。
 # 类用途: 保存一条学习排除会话的 channel_conversation_id 与出处。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class LearningExclusionEntry:
     channel_conversation_id: str
     reason: str = ""

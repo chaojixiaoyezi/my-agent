@@ -52,6 +52,15 @@ HOT_PREFIXES: tuple[str, ...] = (
     "agent/agent_core/orchestration/background/",
     "agent/gateway_parts/request_worker.py",
     "agent/gateway_parts/request_execution.py",
+    # M12：实际剖析中命中的请求路径文件。
+    "agent/settings/deployment_policy.py",
+    "agent/agent_core/model/context_pressure.py",
+    "agent/capability/_agents_contract_fields.py",
+    "agent/memory_store/security.py",
+    "agent/assets/descriptor.py",
+    "agent/settings/config_layers.py",
+    "agent/user_space/owner_policy.py",
+    "agent/conversation/models.py",
 )
 # 只检查 nested_class 的精确文件路径（M13 追加 W16 的 13 个文件）；其余触发器不适用于这些文件。
 NESTED_CLASS_ONLY_PATHS: tuple[str, ...] = ()
