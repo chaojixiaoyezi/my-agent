@@ -12,8 +12,10 @@ WorkflowManagementService for full recycle / restore / orphan maintenance lifecy
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+import time
 from collections.abc import Callable, Mapping
 from itertools import islice
 from pathlib import Path
@@ -30,6 +32,7 @@ from .business_scope import (
     WorkflowScopeService,
     workflow_state,
 )
+from .run_list_index import RunListIndex
 from .run_store import WorkflowRunStore, _decode_run, _is_blocking_workflow_run
 
 _max_blockers_page = 100
@@ -47,6 +50,12 @@ _open_session_task_statuses = ("queued", "pending", "running", "accepted")
 # 有界分页：达到上限仍未取尽时按覆盖未知处理，不静默当作完整。
 _max_reference_pages = 100
 _max_open_ref_backfill_batches = 32
+
+
+def _space_record(value):
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    return vars(value)
 
 
 def _workflow_reference(value, target, *, typed=False):
@@ -194,9 +203,10 @@ class WorkflowReferenceReader:
 
         blockers: list[dict[str, str]] = []
         coverage = "complete"
+        generations: dict[str, str] = {}
 
         # 1. Scheduler rules / jobs
-        ok_sched = self._check_scheduler(target_id, blockers)
+        ok_sched = self._check_scheduler(target_id, blockers, generations)
         if not ok_sched:
             coverage = "unknown"
             _coverage_blocker(blockers, target_id, "SCHEDULER_REFERENCE_SOURCE_INCOMPLETE")
@@ -207,7 +217,7 @@ class WorkflowReferenceReader:
             coverage = "unknown"
 
         # 3. Business space bindings / governance policies
-        ok_space = self._check_spaces(target_id, blockers)
+        ok_space = self._check_spaces(target_id, blockers, generations)
         if not ok_space:
             coverage = "unknown"
             _coverage_blocker(blockers, target_id, "BUSINESS_REFERENCE_SOURCE_INCOMPLETE")
@@ -237,9 +247,56 @@ class WorkflowReferenceReader:
             coverage = 'unknown'
             unique_blockers.insert(0, {'ref': target_id, 'kind': 'coverage',
                 'reason_code': 'WORKFLOW_REFERENCE_BLOCKERS_TRUNCATED'})
-        return {"coverage": coverage, "blockers": unique_blockers[:_max_blockers_page]}
+        result = {"coverage": coverage, "blockers": unique_blockers[:_max_blockers_page]}
+        if generations:
+            result["coverage_generation"] = generations
+        return result
 
-    def _check_scheduler(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
+    def _source_page(self, source, target_id, snapshot, size, blockers, generations, scan):
+        """跨调用续扫同一份结构快照；源变化立即使旧覆盖与阻断项失效。"""
+        if size <= _max_blockers_page:
+            return scan(0, _max_blockers_page, blockers)
+        if self.owner_home is None:
+            scan(0, _max_blockers_page, blockers)
+            return False
+
+        generation = hashlib.sha256(json.dumps(snapshot, ensure_ascii=True, default=_space_record).encode()).hexdigest()
+        generations[source] = generation
+        index = RunListIndex(self.owner_home)
+        source_id = f"{source}:{target_id}"
+        previous = index.reference_cursor(source_id)
+        try:
+            state = json.loads(previous[1]) if previous and previous[0] == generation else {}
+        except (TypeError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        start = state.get('offset', 0)
+        prior = state.get('blockers', [])
+        valid = state.get('valid', True)
+        if (type(start) is not int or not 0 <= start <= size or type(valid) is not bool
+                or not isinstance(prior, list) or len(prior) > _max_blockers_page + 1
+                or any(not isinstance(row, dict) or any(not isinstance(row.get(key), str)
+                       for key in ('kind', 'ref', 'reason_code')) for row in prior)):
+            start, prior, valid = 0, [], True
+        if start == size:
+            blockers.extend(prior)
+            return valid
+
+        found = []
+        end = min(start + _max_blockers_page, size)
+        valid = scan(start, end, found) and valid
+        # 保留多一项供原输出截断逻辑识别覆盖不全，避免分页回执无界累加。
+        combined = list({(row['kind'], row['ref'], row['reason_code']): row
+                         for row in [*prior, *found]}.values())[:_max_blockers_page + 1]
+        blockers.extend(combined)
+        cursor = json.dumps({'offset': end, 'blockers': combined, 'valid': valid}, ensure_ascii=True)
+        committed = index.advance_reference_cursor(
+            source_id, previous=previous, generation=generation, cursor=cursor, now=time.time(),
+        )
+        return committed and end == size and valid
+
+    def _check_scheduler(self, target_id: str, blockers: list[dict[str, str]], generations) -> bool:
         # 宿主先于首个调度装配时不能把当时的空目录永久缓存为空引用。
         if self.scheduler_repo is None and self.owner_home is not None:
             try:
@@ -262,37 +319,49 @@ class WorkflowReferenceReader:
             if not isinstance(listed, tuple) or len(listed) != 2:
                 return False
             jobs, errors = listed
-            for job in islice(jobs or [], _max_blockers_page):
-                if not isinstance(job, dict) or job.get("status") == "deleted":
-                    continue
-                job_id = str(job.get("job_id") or job.get("id") or "")
-                targets = [job.get("execution_target")]
-                for rule in job.get("rules", []):
-                    if isinstance(rule, dict) and rule.get("execution_target") is not None:
-                        targets.append(rule.get("execution_target"))
-                referenced = False
-                for t in targets:
-                    if not t:
-                        continue
-                    if isinstance(t, dict):
-                        asset_id = normalize_workflow_asset_id(
-                            str(t.get("asset_id") or t.get("workflow_id") or t.get("workflow_ref") or "")
-                        )
-                        kind = str(t.get("kind") or "")
-                        if asset_id == target_id and kind == "workflow":
-                            referenced = True
-                            break
-                    elif isinstance(t, str):
-                        if _workflow_reference(t, target_id):
-                            referenced = True
-                            break
-                if referenced and job_id:
-                    blockers.append({"ref": job_id, "kind": "schedule", "reason_code": "REFERENCED_BY_SCHEDULE"})
-            return not errors and len(jobs or []) <= _max_blockers_page
+            jobs = jobs or []
+
+            def scan(start, end, found):
+                return self._scheduler_page(jobs, target_id, found, start, end)
+
+            if errors:
+                scan(0, _max_blockers_page, blockers)
+                return False
+            return self._source_page('scheduler', target_id, jobs, len(jobs), blockers, generations, scan)
         except (OSError, ValueError, sqlite3.Error, KeyError):
             return False
         except Exception:
             return False
+
+    @staticmethod
+    def _scheduler_page(jobs, target_id, blockers, start, end):
+        for job in jobs[start:end]:
+            if not isinstance(job, dict) or job.get("status") == "deleted":
+                continue
+            job_id = str(job.get("job_id") or job.get("id") or "")
+            targets = [job.get("execution_target")]
+            for rule in job.get("rules", []):
+                if isinstance(rule, dict) and rule.get("execution_target") is not None:
+                    targets.append(rule.get("execution_target"))
+            referenced = False
+            for t in targets:
+                if not t:
+                    continue
+                if isinstance(t, dict):
+                    asset_id = normalize_workflow_asset_id(
+                        str(t.get("asset_id") or t.get("workflow_id") or t.get("workflow_ref") or "")
+                    )
+                    kind = str(t.get("kind") or "")
+                    if asset_id == target_id and kind == "workflow":
+                        referenced = True
+                        break
+                elif isinstance(t, str):
+                    if _workflow_reference(t, target_id):
+                        referenced = True
+                        break
+            if referenced and job_id:
+                blockers.append({"ref": job_id, "kind": "schedule", "reason_code": "REFERENCED_BY_SCHEDULE"})
+        return True
 
     def _check_subworkflows(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
         try:
@@ -333,7 +402,7 @@ class WorkflowReferenceReader:
         except Exception:
             return False
 
-    def _check_spaces(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
+    def _check_spaces(self, target_id: str, blockers: list[dict[str, str]], generations) -> bool:
         catalog = None
         try:
             if self.space_store is not None:
@@ -364,91 +433,103 @@ class WorkflowReferenceReader:
             if not isinstance(spaces, dict):
                 return False
 
-            complete = len(spaces) <= _max_blockers_page
-            for space_id, space in islice(spaces.items(), _max_blockers_page):
-                if not isinstance(space, dict):
-                    space = getattr(space, "to_dict", lambda: dict(space))() if hasattr(space, "to_dict") else vars(space)
-                if not isinstance(space, dict):
-                    continue
-                state = space.get("state") or space.get("status") or "active"
-                if state in ("archived", "deleted"):
-                    continue
-                is_ref = False
-                # mounts
-                for mount in space.get("mounts", []):
-                    if isinstance(mount, dict):
-                        if any(
-                            normalize_workflow_asset_id(mount.get(k, "")) == target_id
-                            for k in ("workflow_id", "workflow_ref")
-                        ) or any(_workflow_reference(mount.get(k), target_id) for k in ("package_ref", "ref", "asset_id")):
-                            is_ref = True
-                            break
-                    elif _workflow_reference(mount, target_id):
-                        is_ref = True
-                        break
-                # bound workflows
-                if not is_ref:
-                    bound_flows = (
-                        space.get("workflows", [])
-                        or space.get("bound_workflows", [])
-                        or space.get("workflow_ids", [])
-                        or []
-                    )
-                    for w in bound_flows:
-                        if normalize_workflow_asset_id(str(w)) == target_id:
-                            is_ref = True
-                            break
-                # governance policies
-                if not is_ref:
-                    gov = space.get("governance_policies") or space.get("governance") or space.get("policies")
-                    if gov:
-                        if (_explicit_workflow_reference(gov, target_id)
-                                or _workflow_reference(gov, target_id)):
-                            is_ref = True
-                if is_ref:
-                    blockers.append({"ref": str(space_id), "kind": "space", "reason_code": "REFERENCED_BY_SPACE"})
-
-            # bindings
             bindings = catalog.get("bindings", {})
-            if isinstance(bindings, dict):
-                complete = complete and len(bindings) <= _max_blockers_page
-                for binding_id, binding in islice(bindings.items(), _max_blockers_page):
-                    if not isinstance(binding, dict):
-                        continue
-                    if binding.get("state") == "unbound":
-                        continue
-                    b_asset = normalize_workflow_asset_id(binding.get("asset_id", ""))
-                    b_ref = normalize_workflow_asset_id(binding.get("ref", ""))
-                    if target_id in (b_asset, b_ref):
-                        for sid in binding.get("space_ids", []):
-                            sp = spaces.get(sid, {})
-                            sp_state = (
-                                sp.get("state")
-                                if isinstance(sp, dict)
-                                else getattr(sp, "state", "active")
-                            )
-                            if sp_state not in ("archived", "deleted"):
-                                blockers.append(
-                                    {"ref": str(sid), "kind": "space", "reason_code": "REFERENCED_BY_SPACE"}
-                                )
             subscriptions = catalog.get('subscriptions', {})
             if not isinstance(subscriptions, dict):
                 return False
-            complete = complete and len(subscriptions) <= _max_blockers_page
-            for identifier, row in islice(subscriptions.items(), _max_blockers_page):
-                if not isinstance(row, dict):
-                    complete = False
-                    continue
-                if row.get('state') not in ('active', 'paused', 'removed'):
-                    complete = False
-                if row.get('state') in ('active', 'paused') and _workflow_reference(row.get('policy_ref'), target_id):
-                    blockers.append({'ref': str(identifier), 'kind': 'space',
-                                     'reason_code': 'REFERENCED_BY_SPACE'})
-            return complete
+            space_rows = list(spaces.items())
+            binding_rows = list(bindings.values()) if isinstance(bindings, dict) else []
+            subscription_rows = list(subscriptions.items())
+            snapshot = (space_rows, binding_rows, subscription_rows)
+
+            def scan(start, end, found):
+                return self._space_page(spaces, bindings, snapshot, target_id, found, start, end)
+
+            return self._source_page('business', target_id, snapshot, max(map(len, snapshot)),
+                                     blockers, generations, scan)
         except (OSError, ValueError, KeyError):
             return False
         except Exception:
             return False
+
+    @staticmethod
+    def _space_page(spaces, bindings, snapshot, target_id, blockers, start, end):
+        space_rows, binding_rows, subscription_rows = snapshot
+        complete = True
+        for space_id, space in space_rows[start:end]:
+            if not isinstance(space, dict):
+                space = _space_record(space)
+            if not isinstance(space, dict):
+                continue
+            state = space.get("state") or space.get("status") or "active"
+            if state in ("archived", "deleted"):
+                continue
+            is_ref = False
+            # mounts
+            for mount in space.get("mounts", []):
+                if isinstance(mount, dict):
+                    if any(
+                        normalize_workflow_asset_id(mount.get(k, "")) == target_id
+                        for k in ("workflow_id", "workflow_ref")
+                    ) or any(_workflow_reference(mount.get(k), target_id) for k in ("package_ref", "ref", "asset_id")):
+                        is_ref = True
+                        break
+                elif _workflow_reference(mount, target_id):
+                    is_ref = True
+                    break
+            # bound workflows
+            if not is_ref:
+                bound_flows = (
+                    space.get("workflows", [])
+                    or space.get("bound_workflows", [])
+                    or space.get("workflow_ids", [])
+                    or []
+                )
+                for w in bound_flows:
+                    if normalize_workflow_asset_id(str(w)) == target_id:
+                        is_ref = True
+                        break
+            # governance policies
+            if not is_ref:
+                gov = space.get("governance_policies") or space.get("governance") or space.get("policies")
+                if gov:
+                    if (_explicit_workflow_reference(gov, target_id)
+                            or _workflow_reference(gov, target_id)):
+                        is_ref = True
+            if is_ref:
+                blockers.append({"ref": str(space_id), "kind": "space", "reason_code": "REFERENCED_BY_SPACE"})
+
+        # bindings
+        if isinstance(bindings, dict):
+            for binding in binding_rows[start:end]:
+                if not isinstance(binding, dict):
+                    continue
+                if binding.get("state") == "unbound":
+                    continue
+                b_asset = normalize_workflow_asset_id(binding.get("asset_id", ""))
+                b_ref = normalize_workflow_asset_id(binding.get("ref", ""))
+                if target_id in (b_asset, b_ref):
+                    for sid in binding.get("space_ids", []):
+                        sp = spaces.get(sid, {})
+                        sp_state = (
+                            sp.get("state")
+                            if isinstance(sp, dict)
+                            else getattr(sp, "state", "active")
+                        )
+                        if sp_state not in ("archived", "deleted"):
+                            blockers.append(
+                                {"ref": str(sid), "kind": "space", "reason_code": "REFERENCED_BY_SPACE"}
+                            )
+        for identifier, row in subscription_rows[start:end]:
+            if not isinstance(row, dict):
+                complete = False
+                continue
+            if row.get('state') not in ('active', 'paused', 'removed'):
+                complete = False
+            if row.get('state') in ('active', 'paused') and _workflow_reference(row.get('policy_ref'), target_id):
+                blockers.append({'ref': str(identifier), 'kind': 'space',
+                                 'reason_code': 'REFERENCED_BY_SPACE'})
+        return complete
 
     def _check_runs(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
         complete = True

@@ -253,6 +253,16 @@ def _insert_runtime_run(
         conn.commit()
 
 
+def _index_workflow_rows(owner_home: Path, rows) -> None:
+    from agent_py_agent.agent.workflows.run_list_index import RunListIndex
+
+    with RunListIndex(owner_home).connection() as conn:
+        conn.executemany(
+            "INSERT INTO runs(run_id, workflow_id, status, sort_time, revision) VALUES(?, 'fixture', ?, 0, 0)",
+            rows,
+        )
+
+
 def test_freeze_settled_leftover_processes_enforces_three_state_active_unknown_settled(tmp_path: Path) -> None:
     owner_home = (tmp_path / "owners" / "local" / "main").resolve()
     conv_root = owner_home / "conversations"
@@ -377,6 +387,7 @@ def test_freeze_settled_leftover_processes_enforces_three_state_active_unknown_s
 
         # 5. Unsettled workflow run referencing task -> active, preserved
         t_wf = _bind_task_link(conv_store, task_id="task-wf", status="completed")
+        _index_workflow_rows(owner_home, [("wf-active", "running")])
         wf_steps = owner_home / "data" / "workflow_runs" / "wf-active" / "steps"
         wf_steps.mkdir(parents=True, exist_ok=True)
         (wf_steps.parent / "run.json").write_text(
@@ -897,6 +908,7 @@ def test_stat_eio_and_scheduler_blocking_io_fail_closed_to_unknown(tmp_path: Pat
     t_settled = _bind_task_link(conv_store, task_id="task-eio-settled", status="completed")
 
     RuntimeRepository(runtime_db_path(owner_home))
+    _index_workflow_rows(owner_home, [("wf-settled-1", "completed")])
     wf_dir = owner_home / "data" / "workflow_runs" / "wf-settled-1"
     wf_dir.mkdir(parents=True, exist_ok=True)
     (wf_dir / "run.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
@@ -1015,26 +1027,18 @@ def test_settled_age_uses_terminal_timestamp_over_process_birth_age(tmp_path: Pa
     store = ProcessSessionStore(Path(store_root))
     now = 2_000_000.0
 
-    # Prepare workflow index exceeding max_settled_dir_scan=256 so wf-259 is skipped during directory scan
-    index_db = owner_home / "data" / "workflow_run_index.sqlite3"
-    index_db.parent.mkdir(parents=True, exist_ok=True)
+    # wf-259 在首个已终结样本页之外，由本轮引用主键命中。
+    workflow_ids = [f"wf-{idx:03d}" for idx in range(260)]
+    _index_workflow_rows(owner_home, [(run_id, "completed") for run_id in workflow_ids])
     wf_runs_dir = owner_home / "data" / "workflow_runs"
-    wf_runs_dir.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(index_db)) as conn:
-        conn.execute("CREATE TABLE runs(run_id TEXT, status TEXT)")
-        conn.execute("CREATE TABLE pending(run_id TEXT)")
-        conn.execute("CREATE TABLE legacy(run_id TEXT)")
-        for idx in range(260):
-            wf_id = f"wf-{idx:03d}"
-            conn.execute("INSERT INTO runs(run_id, status) VALUES(?, ?)", (wf_id, "completed"))
-            run_dir = wf_runs_dir / wf_id
-            run_dir.mkdir(parents=True, exist_ok=True)
-            ended_at = (now - 15.0) if idx == 259 else (now - 1000.0)
-            (run_dir / "run.json").write_text(
-                json.dumps({"workflow_run_id": wf_id, "status": "completed", "ended_at": ended_at}),
-                encoding="utf-8",
-            )
-        conn.commit()
+    for idx, wf_id in enumerate(workflow_ids):
+        run_dir = wf_runs_dir / wf_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        ended_at = (now - 15.0) if idx == 259 else (now - 1000.0)
+        (run_dir / "run.json").write_text(
+            json.dumps({"workflow_run_id": wf_id, "status": "completed", "ended_at": ended_at}),
+            encoding="utf-8",
+        )
 
     procs: list[subprocess.Popen[str]] = []
     try:
@@ -1252,6 +1256,7 @@ def test_missing_or_invalid_settled_timestamps_defer_when_min_age_positive_and_s
             encoding="utf-8",
         )
         # 5. workflow missing ended_at
+        _index_workflow_rows(owner_home, [("run-wf-nots", "completed")])
         wf_dir = owner_home / "data" / "workflow_runs" / "run-wf-nots"
         wf_dir.mkdir(parents=True, exist_ok=True)
         (wf_dir / "run.json").write_text(

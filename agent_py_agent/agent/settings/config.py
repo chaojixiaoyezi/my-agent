@@ -50,6 +50,10 @@ from .normalize import (
     normalize_agent_config,
 )
 
+# 后台资源报告每轮最多读入的已终结工作流运行条数。
+DEFAULT_BACKGROUND_REPORT_SETTLED_SAMPLE_ENTRIES = 256
+
+
 __all__ = [
     "AgentConfig",
     "DEFAULT_DECISION_AUTONOMY",
@@ -342,6 +346,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     curator_daily_quota: int = field(default=5000, metadata={"bounds": (0, None), "unit": "次/日", "model_read_only": True})
     runner_role_limits: dict[str, int] = field(default_factory=dict, metadata={"range": "dict[str,int]，值≥0，拒绝bool", "unit": "个/批次"})
     gateway_submission_timeout_cap_seconds: float = field(default=30.0, metadata={"bounds": (0.1, 300.0)})
+    background_report_settled_sample_entries: int = field(
+        default=DEFAULT_BACKGROUND_REPORT_SETTLED_SAMPLE_ENTRIES, metadata={"bounds": (1, None), "unit": "条"},
+    )
     retention_scan_slice_entries: int = field(default=128, metadata={"bounds": (1, None), "unit": "条", "model_read_only": True})
     retention_scan_slice_bytes: int = field(default=8388608, metadata={"bounds": (1024, None), "model_read_only": True})
     retention_scan_slice_ms: int = field(default=25, metadata={"bounds": (1, None), "model_read_only": True})
