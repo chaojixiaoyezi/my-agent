@@ -565,6 +565,10 @@ def _execute_single_request(
     )
     if response.credential_selection is not None:
         result = replace(result, result_envelope={**result.result_envelope, 'credential_selection': response.credential_selection})
+    if response.protected_resource_check is not None:
+        result = replace(result, result_envelope={
+            **result.result_envelope, 'protected_resource_check': response.protected_resource_check,
+        })
     attach_http_advisory(result, HttpRequestParts(
         url=request.url,
         method=request.method,

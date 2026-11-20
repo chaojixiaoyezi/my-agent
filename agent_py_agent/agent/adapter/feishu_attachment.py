@@ -18,6 +18,7 @@ def _send_frozen_feishu_attachment(adapter, target, item, idempotency_key, as_im
 
     if (not isinstance(item, VerifiedAttachmentContent) or type(item.content) is not bytes
         or len(item.content) != item.attachment.size_bytes
+        or len(item.content) > (MAX_IMAGE_BYTES if as_image else MAX_FILE_BYTES)
         or hashlib.sha256(item.content).hexdigest() != item.attachment.sha256):
         return False
     name = item.attachment.name

@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.error
 import zlib
-from dataclasses import InitVar, dataclass, replace
+from dataclasses import InitVar, dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,7 @@ class RawResponseParts:
     body: bytes
     url: str
     credential_selection: dict | None = None
+    protected_resource_check: dict | None = field(default=None, kw_only=True)
 
 
 # LLM: 可选配置只在构造时取响应字节预算；显式 max_bytes 优先，重定向 replace 保留已冻结上限。
