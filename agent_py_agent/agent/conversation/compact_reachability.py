@@ -21,7 +21,8 @@ from ..memory_store.retired_thread_journal import (
 )
 from ..user_space.storage_lanes import (
     StorageLaneRequest,
-    lane_cursor_window,
+    lane_cycle_generation,
+    lane_directory_entry,
     owner_conversation_roots,
 )
 from .compact_checkpoint import _read_cold_payload, iter_committed_compact_checkpoints
@@ -362,37 +363,29 @@ def _latest_retirement(work, row, next_offset, cursor):
     return "current", stamp
 
 
-# LLM: 名称流的窗口内存有界；合法线程名仍须通过原线程记录和锁复核。
-# 函数用途: 只流式发现本所有者的常规 compact 热账本名字。
-def _live_names(home, directory):
-    _owner_path(home, directory)
-    with _Directory(directory) as opened:
-        for name in opened.names():
-            if name.endswith(".jsonl") and _regular(opened.stamp(name)):
-                yield name
+_LIVE_SOURCES = ("conversations", "evidence", "archive")
 
 
-# LLM: 最多合并三个有界名称窗口，旧 evidence/archive 没有 ledger 也不会漏记为无人维护。
-# 函数用途: 合并热账本线程和无账本旧树的候选线程窗口。
-def _live_window(home, root, cursor, limit):
-    names = set()
+def _live_candidate(root, source, name):
+    """各来源按原优先级归并，已在前置来源发现的线程只做一次维护。"""
     try:
-        names.update(lane_cursor_window(cursor, _live_names(home, root / "conversations"), limit))
+        with _Directory(root / _LIVE_SOURCES[source]) as directory:
+            info = directory.stamp(name)
+            if source == 0:
+                return name if name.endswith(".jsonl") and _regular(info) else None
+            if not stat.S_ISDIR(info.st_mode):
+                return None
     except FileNotFoundError:
-        pass  # best-effort: 缺失热目录仍须发现旧旁树，不授予删除权。
-    for name in ("evidence", "archive"):
+        return None
+    for earlier in range(source):
         try:
-            path = _owner_path(home, root / name)
-            with _Directory(path) as directory:
-                candidates = (
-                    name + ".jsonl"
-                    for name in directory.names()
-                    if stat.S_ISDIR(directory.stamp(name).st_mode)
-                )
-                names.update(lane_cursor_window(cursor, candidates, limit))
+            with _Directory(root / _LIVE_SOURCES[earlier]) as directory:
+                info = directory.stamp(name + ".jsonl" if earlier == 0 else name)
+                if (_regular(info) if earlier == 0 else stat.S_ISDIR(info.st_mode)):
+                    return None
         except FileNotFoundError:
             continue
-    return sorted(names)[:limit]
+    return name + ".jsonl"
 
 
 # LLM: 仅在正面退休证明下使用；逐层流式展开，拒绝所有链接和异常叶，扫描不在写门内。
@@ -626,28 +619,59 @@ def _retired_slice(work, root, cursor):
 def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
     work = _LaneWork(request)
     cursor = {
-        "after": str(request.cursor.get("after", "")),
+        "after": "",
+        "source": request.cursor.get("source", 0),
+        "directory": request.cursor.get("directory", {}),
+        "cycle_generation": lane_cycle_generation(request.cursor),
         "journal_offset": max(0, int(request.cursor.get("journal_offset", 0))),
         "phase": "retired" if request.cursor.get("phase") == "retired" else "live",
     }
+    name = request.cursor.get("thread_file")
+    if isinstance(name, str) and name.endswith(".jsonl") and Path(name).name == name:
+        cursor["thread_file"] = name
     if request.legal_hold:
         return work.receipt(request.cursor, True, "legal_hold")
     if request.budget.exhausted():
         return work.receipt(cursor, False, "budget_exhausted")
     root = Path(request.home.owner_compact_dir)
     try:
-        _owner_path(request.home, root)
+        try:
+            _owner_path(request.home, root)
+        except FileNotFoundError:
+            cursor.update(phase="live", source=0, directory={}, cycle_generation=lane_cycle_generation(cursor, wrapped=True))
+            return work.receipt(cursor, True)
         incomplete = False
         if cursor["phase"] == "live":
-            names = _live_window(request.home, root, cursor, work.budget.max_items)
-            for name in names:
-                if work._allowance_used and work.exhausted():
+            owner = Path(request.home.owner_home_dir)
+            source = cursor["source"]
+            if type(source) is not int or not 0 <= source <= len(_LIVE_SOURCES):
+                source = 0
+                cursor.update(source=0, directory={})
+            while source < len(_LIVE_SOURCES):
+                if (work.items or work._allowance_used) and work.exhausted():
                     return work.receipt(cursor, False, "budget_exhausted")
+                name = cursor.get("thread_file")
+                if name is None:
+                    parts = (root / _LIVE_SOURCES[source]).relative_to(owner).parts
+                    name, resume, visited, complete = lane_directory_entry(
+                        owner, parts, cursor["directory"], require_dir_fd=os.name != "nt",
+                    )
+                    if complete:
+                        source += 1
+                        cursor.update(source=source, directory={})
+                        continue
+                    work.items += visited
+                    cursor["directory"] = resume
+                    name = _live_candidate(root, source, name) if name is not None else None
+                    if name is None:
+                        continue
+                    cursor.update(after=name, thread_file=name)
+                    if work.budget.max_items <= work.items:
+                        return work.receipt(cursor, False, "budget_exhausted")
                 tid = name[:-6]
-                before = work.items
                 first = False
                 try:
-                    with work.thread_allowance() as first:
+                    with work.thread_allowance(max_items=work.budget.max_items) as first:
                         try:
                             thread = _thread_record(work, tid)
                         except _BudgetExceeded:
@@ -673,15 +697,11 @@ def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
                 except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
                     work.error("compact_reachability_incomplete", "conversations/" + name)
                     incomplete = True
-                if work.items == before:
-                    work.items += 1
-                cursor["after"] = name
-            if len(names) >= work.budget.max_items:
-                return work.receipt(cursor, False, "budget_exhausted")
-            cursor.update(phase="retired", after="")
+                cursor.pop("thread_file", None)
+            cursor.update(phase="retired", after="", source=0, directory={})
         done, deferred = _retired_slice(work, root, cursor)
         if done:
-            cursor.update(phase="live", after="")
+            cursor.update(phase="live", after="", cycle_generation=lane_cycle_generation(cursor, wrapped=True))
         return work.receipt(
             cursor, done, "reachability_incomplete" if incomplete else deferred
         )

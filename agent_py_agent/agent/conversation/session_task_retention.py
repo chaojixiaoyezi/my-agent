@@ -16,7 +16,8 @@ from ..user_space.storage_lanes import (
     STORAGE_LANE_SLICE_ENTRIES,
     STORAGE_LANE_SLICE_MS,
     _real_directory,
-    lane_cursor_window,
+    lane_cycle_generation,
+    lane_directory_entry,
     owner_conversation_roots,
     owner_retention_override,
 )
@@ -105,17 +106,6 @@ def _task_keep_reason(storage, task) -> str:
     return ""
 
 
-# LLM: 仅枚举本根顶层名称；拒绝链接目录，scandir由上下文关闭，不做递归或正文全量加载。
-# 函数用途: 给有界名称窗口提供候选流。
-def _task_names(root):
-    if not _real_directory(root, ("session_tasks",)):
-        return
-    with os.scandir(root / "session_tasks") as entries:
-        for entry in entries:
-            if entry.name.endswith(".json"):
-                yield entry.name
-
-
 # LLM: 不建第二份任务账；首次到期候选才取一次pin快照，未知责任保留；所有变更走原写门。
 # 函数用途: 分片退役已结清会话任务正文，并返回真实文件差额与可续游标。
 def maintain_session_task_payloads_lane(request) -> dict:
@@ -132,20 +122,35 @@ def maintain_session_task_payloads_lane(request) -> dict:
     days = owner_retention_override(request.home, "session_task_payload_days", SESSION_TASK_PAYLOAD_RETENTION_DAYS)
     root_index = request.cursor.get("root", 0)
     root_index = root_index if type(root_index) is int and 0 <= root_index <= len(roots) else 0
-    after = request.cursor.get("after", "")
-    after = after if isinstance(after, str) else ""
+    generation = lane_cycle_generation(request.cursor)
+    receipt["cycle_generation"] = generation
+    position = request.cursor.get("directory", {})
+    if "after" in request.cursor and "directory" not in request.cursor:
+        root_index = 0
+    owner = Path(request.home.owner_home_dir)
     pins = None
+    pin_errors = []
     for index in range(root_index, len(roots)):
         root = roots[index]
         storage = ConversationStorage(root, initialize=False)
         store = SessionTaskStore(storage)
-        names = lane_cursor_window({"after": after}, _task_names(root), STORAGE_LANE_SLICE_ENTRIES)
-        for name in names:
-            if budget.exhausted(receipt["items"], receipt["bytes"]):
+        parts = (root / "session_tasks").relative_to(owner).parts
+        while not budget.exhausted(receipt["items"], receipt["bytes"]):
+            try:
+                previous = position
+                name, position, visited, complete = lane_directory_entry(
+                    owner, parts, position, require_dir_fd=os.name != "nt",
+                )
+            except (OSError, ValueError) as exc:
+                receipt["errors"].append({"code": type(exc).__name__, "path": "/".join(parts)})
                 return receipt
+            receipt["items"] += visited
+            receipt["cursor"] = {"root": index, "directory": position, "cycle_generation": generation}
+            if complete:
+                break
+            if name is None or not name.endswith(".json"):
+                continue
             path = root / "session_tasks" / name
-            receipt["items"] += 1
-            receipt["cursor"] = {"root": index, "after": name}
             try:
                 info = os.lstat(path)
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -180,12 +185,14 @@ def maintain_session_task_payloads_lane(request) -> dict:
                         reason = _task_keep_reason(storage, task)
                         if not reason:
                             if pins is None:
-                                errors = []
-                                pins, _ = current_retention_pins(request.home, roots, errors,
+                                pins, _ = current_retention_pins(request.home, roots, pin_errors,
                                     now=datetime.fromtimestamp(request.now, timezone.utc))
-                            if not pins.complete or not pins.complete_for(path, []):
-                                return {**receipt, "deferred_reason": "pins_incomplete",
-                                        "skipped": {**receipt["skipped"], "pins_incomplete": 1}, "complete": True}
+                            if not pins.complete or not pins.complete_for(path, pin_errors):
+                                receipt["skipped"]["pins_incomplete"] = 1
+                                if not pin_errors:
+                                    # 引用投影片尚未追平，保留候选之前的续点供下一拍复核。
+                                    receipt["cursor"]["directory"] = previous
+                                return {**receipt, "deferred_reason": "pins_incomplete", "complete": bool(pin_errors)}
                             if task.task_id in pins.ids or pins.protects(path, []):
                                 reason = "pinned"
                             else:
@@ -204,8 +211,9 @@ def maintain_session_task_payloads_lane(request) -> dict:
                 receipt["protected"]["read_or_write_error"] = receipt["protected"].get("read_or_write_error", 0) + 1
                 if len(receipt["errors"]) < STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT:
                     receipt["errors"].append({"code": type(exc).__name__, "path": str(path.relative_to(request.home.owner_home_dir))})
-        if len(names) == STORAGE_LANE_SLICE_ENTRIES:
+        else:
             return receipt
-        after = ""
-        receipt["cursor"] = {"root": index + 1, "after": ""}
-    return {**receipt, "cursor": {}, "complete": True}
+        position = {}
+        receipt["cursor"] = {"root": index + 1, "directory": position, "cycle_generation": generation}
+    generation += 1
+    return {**receipt, "cursor": {"cycle_generation": generation}, "cycle_generation": generation, "complete": True}

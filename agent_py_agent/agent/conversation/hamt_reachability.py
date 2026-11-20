@@ -18,7 +18,8 @@ from ..user_space.storage_lanes import (
     STORAGE_LANE_SLICE_ENTRIES,
     STORAGE_LANE_SLICE_MS,
     StorageLaneBudget,
-    lane_cursor_window,
+    lane_cycle_generation,
+    lane_directory_entry,
 )
 from .store_io import ImmutableJsonIndex
 
@@ -227,7 +228,7 @@ def sweep_unreachable_nodes(
         now=now,
         max_items=max_items,
         run_write=run_write,
-        after="",
+        position={},
         allowed=lambda: True,
     )
     return {name: result[name] for name in ("deleted", "freed_bytes", "restored", "items")}
@@ -243,42 +244,55 @@ def _sweep_window(
     now,
     max_items,
     run_write,
-    after,
+    position,
     allowed,
+    owner=None,
     suffix=".json",
     dry_run=False,
+    candidate=None,
+    candidate_allowed=None,
 ):
-    """目录名称窗口只存最后一个名字；新节点不重置未追平的续点。"""
+    """固定待复核的续点和目录边界，避免跳过尚未判定的候选。"""
     result = {
         "deleted": 0,
         "freed_bytes": 0,
         "restored": 0,
         "items": 0,
-        "after": after,
+        "scan": position,
         "complete": False,
         "eligible": False,
     }
-    if max_items <= 0:
+    if max_items <= 0 and candidate is None:
         return result
     cutoff = min(mark_started_at, now) - HAMT_SWEEP_GRACE_SECONDS
     try:
         with _Directory(namespace_dir) as directory:
-            names = lane_cursor_window(
-                {"after": after},
-                (
-                    name
-                    for name in directory.names()
-                    if name.endswith(suffix) and name not in reachable
-                ),
-                max_items + 1,
-            )
-            result["complete"] = len(names) <= max_items
-            for name in names[:max_items]:
-                if not allowed():
-                    result["complete"] = False
+            root = Path(owner) if owner is not None else directory.path
+            parts = directory.path.relative_to(root).parts
+            info = os.fstat(directory.fd) if directory.fd is not None else None
+            while True:
+                if candidate is not None:
+                    if not candidate_allowed():
+                        break
+                    name, resume = candidate
+                    visited, complete = 0, False
+                    candidate = None
+                elif result["items"] < max_items and allowed():
+                    name, resume, visited, complete = lane_directory_entry(
+                        root, parts, result["scan"], require_dir_fd=directory.fd is not None,
+                    )
+                else:
                     break
-                result["items"] += 1
-                result["after"] = name
+                if info is not None and resume and resume["directory_identity"] != [info.st_dev, info.st_ino]:
+                    raise OSError("reachability directory identity changed")
+                if complete:
+                    result["complete"] = True
+                    break
+                result["items"] += visited
+                previous = result["scan"]
+                result["scan"] = resume
+                if name is None or not name.endswith(suffix) or name in reachable:
+                    continue
                 try:
                     initial = directory.stamp(name)
                 except FileNotFoundError:
@@ -287,6 +301,9 @@ def _sweep_window(
                     continue
                 if dry_run:
                     result["eligible"] = True
+                    # 锁内再次读取叶身份；复用已计量的名称，直到实际处理后才发布续点。
+                    result["scan"] = previous
+                    result["candidate"] = (name, resume)
                     return result
                 deleted, freed, restored = run_write(
                     lambda: _quarantine_one(directory, name, initial, cutoff)
@@ -320,21 +337,20 @@ class _LaneWork:
         self.errors, self.skipped = [], {}
         self._allowance_used = False
         self._allowance = None
+        self._preview_candidate = None
         state = request.cursor.get("sweep")
-        self.sweep_state = (
-            dict(state)
-            if (
-                isinstance(state, dict)
-                and set(state) == {"namespace", "after"}
-                and all(isinstance(value, str) and len(value) <= 1024 for value in state.values())
-            )
-            else None
-        )
+        self.sweep_state = None
+        if isinstance(state, dict) and isinstance(state.get("namespace"), str):
+            if set(state) == {"namespace", "after"} and isinstance(state["after"], str):
+                # 旧续点仍用于等待项排序，第一次清扫从原生目录起点开始。
+                self.sweep_state = dict(state)
+            elif set(state) == {"namespace", "scan"} and isinstance(state["scan"], dict):
+                self.sweep_state = dict(state)
         self.retired_probe = request.cursor.get("retired_probe")
 
     # LLM: 只有首个实际处理的线程可借用独立额度，显式零条目或零字节预算仍拒绝；不改名称窗口预算。
     # 函数用途: 为完整标记和锁内复核开启本片唯一一次五秒读取额度。
-    def begin_thread_allowance(self) -> bool:
+    def begin_thread_allowance(self, *, max_items=None) -> bool:
         if (
             self._allowance_used
             or self.request.budget.max_items == 0
@@ -343,7 +359,7 @@ class _LaneWork:
             return False
         self._allowance_used = True
         self._allowance = StorageLaneBudget(
-            self.items + self.budget.max_items,
+            self.items + self.budget.max_items if max_items is None else max_items,
             self.size + HAMT_MARK_THREAD_BYTES,
             time.monotonic() + HAMT_MARK_THREAD_MS / 1000,
         )
@@ -362,8 +378,8 @@ class _LaneWork:
     # LLM: 异常与早退均归还临时额度，嵌套或后续调用不会关闭别人的额度。
     # 函数用途: 用上下文确保首线程额度配对关闭。
     @contextmanager
-    def thread_allowance(self):
-        first = self.begin_thread_allowance()
+    def thread_allowance(self, *, max_items=None):
+        first = self.begin_thread_allowance(max_items=max_items)
         try:
             yield first
         finally:
@@ -428,6 +444,7 @@ class _LaneWork:
         result = {
             "cursor": cursor,
             "complete": complete,
+            "cycle_generation": lane_cycle_generation(cursor),
             "items": self.items,
             "bytes": self.size,
             "deleted_items": self.deleted,
@@ -443,10 +460,10 @@ class _LaneWork:
     # 函数用途: 无到期候选时只推进名称游标，不调用协调器写门。
     def preview(self, path, reachable, started, *, suffix=".json"):
         namespace = str(path.relative_to(self.request.home.owner_home_dir))
-        after = (
-            self.sweep_state["after"]
+        position = (
+            self.sweep_state.get("scan", {})
             if self.sweep_state and self.sweep_state["namespace"] == namespace
-            else ""
+            else {}
         )
         result = _sweep_window(
             path,
@@ -455,17 +472,19 @@ class _LaneWork:
             now=self.request.now,
             max_items=max(0, self._active_budget().max_items - self.items),
             run_write=self.request.run_write,
-            after=after,
+            position=position,
+            owner=self.request.home.owner_home_dir,
             allowed=lambda: not self.exhausted(),
             suffix=suffix,
             dry_run=True,
         )
-        if result["eligible"]:
-            self.sweep_state = {"namespace": namespace, "after": after}
-            return True
         self.items += result["items"]
+        if result["eligible"]:
+            self._preview_candidate = (namespace, result["candidate"])
+            self.sweep_state = {"namespace": namespace, "scan": result["scan"]}
+            return True
         self.sweep_state = (
-            None if result["complete"] else {"namespace": namespace, "after": result["after"]}
+            None if result["complete"] else {"namespace": namespace, "scan": result["scan"]}
         )
         return False
 
@@ -473,12 +492,16 @@ class _LaneWork:
     # 函数用途: 清扫一个命名空间并累计真实删除量。
     def sweep(self, path, reachable, started, *, suffix=".json"):
         namespace = str(path.relative_to(self.request.home.owner_home_dir))
-        after = (
-            self.sweep_state["after"]
+        position = (
+            self.sweep_state.get("scan", {})
             if self.sweep_state and self.sweep_state["namespace"] == namespace
-            else ""
+            else {}
         )
         remaining = max(0, self._active_budget().max_items - self.items)
+        candidate = None
+        if self._preview_candidate and self._preview_candidate[0] == namespace:
+            _, candidate = self._preview_candidate
+            self._preview_candidate = None
         result = _sweep_window(
             path,
             reachable=frozenset(reachable),
@@ -486,15 +509,18 @@ class _LaneWork:
             now=self.request.now,
             max_items=remaining,
             run_write=self.request.run_write,
-            after=after,
+            position=position,
+            owner=self.request.home.owner_home_dir,
             allowed=lambda: not self.exhausted(),
             suffix=suffix,
+            candidate=candidate,
+            candidate_allowed=lambda: self._active_budget().remaining_ms() > 0,
         )
         self.items += result["items"]
         self.deleted += result["deleted"]
         self.freed += result["freed_bytes"]
         self.sweep_state = (
-            None if result["complete"] else {"namespace": namespace, "after": result["after"]}
+            None if result["complete"] else {"namespace": namespace, "scan": result["scan"]}
         )
         return result["complete"]
 

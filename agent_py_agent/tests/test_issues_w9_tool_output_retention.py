@@ -108,6 +108,19 @@ def drain(setup, *, items=128, cursor=None, now=None):
     pytest.fail('tool output lane failed to finish in bounded slices: ' + repr(rows[-1]))
 
 
+def _until_observed(setup, observed, *, initial=None):
+    """保持同一注入条件并续扫，直到目标操作实际发生。"""
+    initial = request(setup) if initial is None else initial
+    cursor = initial.cursor
+    for _ in range(50):
+        row = validate_lane_receipt(retention.maintain_owner_tool_outputs_lane(replace(initial, cursor=cursor)))
+        if observed(row):
+            return row
+        assert not row["complete"], row
+        cursor = row["cursor"]
+    pytest.fail("expected retirement operation was not reached in bounded slices")
+
+
 # LLM: 使用另一个真实线程持原锁，不以猴补锁返回值伪造竞争。
 # 函数用途: 在测试断言期间保持指定包装锁繁忙。
 @contextmanager
@@ -159,8 +172,9 @@ def test_real_inline_blob_retire_and_index_unchanged(setup):
 @pytest.mark.parametrize('state,reason', [('running', 'attempt_active'), ('unknown', 'attempt_unknown'), ('missing', 'run_state_unknown')])
 def test_unsettled_or_missing_attempt_kept(setup, state, reason):
     path, _ = artifact(setup, status=state)
-    result = drain(setup)[-1]
-    assert path.exists() and result['skipped'][reason] == 1 and result['protected'] == 1
+    rows = drain(setup)
+    assert path.exists() and sum(row['skipped'].get(reason, 0) for row in rows) == 1
+    assert sum(row['protected'] for row in rows) == 1
     assert read_tool_output_artifact(ReadToolOutputArtifactRequest(setup[0].owner_home_dir, str(path)))['ok']
 
 
@@ -220,7 +234,7 @@ def test_interruption_after_blob_unlink(setup, monkeypatch):
         if parts[-1].endswith('.blob'):
             raise OSError('injected after blob unlink')
     monkeypatch.setattr(retention, '_unlink_retired_file', interrupted)
-    result = retention.maintain_owner_tool_outputs_lane(request(setup))
+    result = _until_observed(setup, lambda _row: not path.with_suffix('.blob').exists())
     assert path.exists() and not path.with_suffix('.blob').exists()
     assert read_tool_output_artifact(ReadToolOutputArtifactRequest(setup[0].owner_home_dir, str(path)))['error_code'] == 'artifact_expired'
     monkeypatch.setattr(retention, '_unlink_retired_file', original)
@@ -261,7 +275,7 @@ def test_cold_owner_and_hold_zero_commits(tmp_path, setup):
 def test_lock_busy_keeps_cursor(setup):
     path, _ = artifact(setup)
     with held_lock(path):
-        result = retention.maintain_owner_tool_outputs_lane(request(setup))
+        result = _until_observed(setup, lambda row: row['skipped'].get('lock_busy'))
         assert result['skipped']['lock_busy'] == 1 and not result['complete']
         assert result['cursor'].get('after', '') == '' and path.exists()
     assert sum(row['deleted_items'] for row in drain(setup, cursor=result['cursor'])) == 1
@@ -308,7 +322,7 @@ def test_retired_shard_fsync_failure_keeps_body(setup, monkeypatch):
     def fail_fsync(descriptor):
         raise OSError('injected retired shard fsync failure')
     monkeypatch.setattr(retention.os, 'fsync', fail_fsync)
-    result = retention.maintain_owner_tool_outputs_lane(request(setup))
+    result = _until_observed(setup, lambda row: any(error['code'] == 'retired_shard_unwritable' for error in row['errors']))
     assert path.exists() and path.with_suffix('.blob').exists()
     assert not result['complete'] and result['deleted_items'] == 0
     assert any(error['code'] == 'retired_shard_unwritable' for error in result['errors'])
@@ -327,7 +341,8 @@ def test_identity_change_at_commit_keeps_new_wrapper(setup):
         write_private_text_file_atomic(path, json.dumps(value, ensure_ascii=False))
         assert path.stat().st_ino != initial
         return operation()
-    result = retention.maintain_owner_tool_outputs_lane(replace(request(setup), coordinator=True, commit=commit))
+    result = _until_observed(setup, lambda row: row['skipped'].get('identity_changed'),
+                             initial=replace(request(setup), coordinator=True, commit=commit))
     assert path.exists() and result['deleted_items'] == 0 and result['skipped']['identity_changed'] == 1
     assert not (path.parent / 'retired').exists()
     assert read_tool_output_artifact(ReadToolOutputArtifactRequest(setup[0].owner_home_dir, str(path)))['ok']
@@ -341,7 +356,7 @@ def test_retired_shard_lock_busy_is_undecided(setup):
     retired.mkdir(mode=0o700)
     shard = path.parent.joinpath(*retention.retired_shard_parts(value['created_at']))
     with held_lock(shard):
-        result = retention.maintain_owner_tool_outputs_lane(request(setup))
+        result = _until_observed(setup, lambda row: row['skipped'].get('lock_busy'))
         assert path.exists() and not result['complete'] and result['skipped']['lock_busy'] == 1
         assert result['cursor'].get('after', '') == ''
     assert sum(row['deleted_items'] for row in drain(setup, cursor=result['cursor'])) == 1
@@ -439,7 +454,7 @@ def test_freed_bytes_include_unlink_before_directory_fsync_error(setup, monkeypa
             raise OSError('directory fsync failed after unlink')
         return original(descriptor)
     monkeypatch.setattr(retention.os, 'fsync', fail_directory_fsync)
-    first = retention.maintain_owner_tool_outputs_lane(request(setup))
+    first = _until_observed(setup, lambda _row: not path.with_suffix('.blob').exists())
     assert not path.with_suffix('.blob').exists()
     monkeypatch.setattr(retention.os, 'fsync', original)
     rest = drain(setup, cursor=first['cursor'])
@@ -478,18 +493,19 @@ def test_slow_pin_snapshot_still_retires_due_outputs(setup, monkeypatch, record_
     monkeypatch.setattr(retention_scan, 'current_retention_pins', slow_pins)
     before = _fd_count()
     cursor, rows = {}, []
-    for _ in range(8):
+    for _ in range(50):
         pins_before, commits_before = len(pin_calls), len(commits)
         row = retention.maintain_owner_tool_outputs_lane(request(setup, cursor=cursor, commits=commits))
         validate_lane_receipt(row)
         rows.append(row)
-        assert len(pin_calls) - pins_before == 1
-        assert len(commits) - commits_before == 1
-        assert row['deleted_items'] == 1
+        assert len(pin_calls) - pins_before <= 1
+        assert 0 <= len(commits) - commits_before == row['deleted_items'] <= 1
+        if row['deleted_items']:
+            assert len(pin_calls) - pins_before == 1
+        elif not row['complete']:
+            assert row.get('deferred_reason') or row['cursor'] != cursor
         if row['complete']:
             break
-        assert any(path.exists() for path in paths)
-        assert row['cursor'] != cursor
         cursor = json.loads(json.dumps(row['cursor']))
     assert rows[-1]['complete'] is True and sum(row['deleted_items'] for row in rows) == len(paths)
     assert all(not path.exists() for path in paths + blobs)
@@ -500,7 +516,8 @@ def test_slow_pin_snapshot_still_retires_due_outputs(setup, monkeypatch, record_
     for path in paths:
         assert read_tool_output_artifact(ReadToolOutputArtifactRequest(setup[0].owner_home_dir, str(path)))['error_code'] == 'artifact_expired'
     idle = retention.maintain_owner_tool_outputs_lane(request(setup, cursor=rows[-1]['cursor']))
-    assert idle['complete'] and idle['items'] == idle['bytes'] == 0
+    assert idle['complete'] and idle['bytes'] == 0
+    assert idle.get('deleted_items', 0) == 0
     assert all(not path.exists() for path in paths + blobs)
     delta = _fd_count() - before
     record_property('fd_delta', delta)
@@ -529,7 +546,9 @@ def test_retirement_failure_paths_close_descriptors(setup, monkeypatch, record_p
         monkeypatch.setattr(os, 'supports_dir_fd', os.supports_dir_fd | {fail_unlink})
     with held_lock(path) if condition == 'lock_busy' else nullcontext():
         before = _fd_count()
-        row = retention.maintain_owner_tool_outputs_lane(request(setup))
+        row = _until_observed(
+            setup, lambda row: row['skipped'].get('lock_busy') if condition == 'lock_busy' else bool(failed),
+        )
         delta = _fd_count() - before
         record_property('fd_delta', delta)
         assert delta == 0 and path.exists() and row['deleted_items'] == 0
@@ -546,7 +565,10 @@ def test_retirement_failure_paths_close_descriptors(setup, monkeypatch, record_p
 
 # LLM: 一个完整窗口的有数据伴生锁不能让排序后部的旧孤儿永久饥饿；清扫续点跨完整pass保存。
 # 函数用途: 验证有界canonical锁清扫最终能抵达并删除后部孤儿。
-def test_lock_sweep_cursor_advances_past_retained_prefix(setup):
+def test_lock_sweep_cursor_advances_past_retained_prefix(setup, monkeypatch):
+    from agent_py_agent.agent.user_space import storage_lanes
+
+    monkeypatch.setattr(storage_lanes.time, "monotonic", lambda: 0)
     home, _, now = setup
     root = home.owner_home_dir / 'blobs' / 'tool_outputs'
     root.mkdir(parents=True, exist_ok=True)

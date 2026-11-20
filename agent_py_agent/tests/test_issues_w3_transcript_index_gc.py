@@ -44,9 +44,15 @@ def test_two_phase_sweep_collects_superseded_nodes_and_every_message_remains_rea
     assert marked.complete and files - marked.reachable
     now = time.time()
     request = request_for(home_for(case), kind="conversation_messages", now=now)
-    first = maintain_transcript_index_lane(request)
-    validate_lane_receipt(first)
-    assert first["complete"] and first["deleted_items"] == 0
+    cursor = {}
+    for _ in range(30):
+        first = maintain_transcript_index_lane(replace(request, cursor=cursor))
+        validate_lane_receipt(first)
+        assert first["deleted_items"] == 0
+        if first["complete"]:
+            break
+        cursor = first["cursor"]
+    assert first["complete"]
     assert {node.name for node in namespace.glob("*.json")} == files
     early = maintain_transcript_index_lane(
         replace(request, cursor=first["cursor"], now=now + 86400)
@@ -153,7 +159,7 @@ def test_broken_thread_does_not_block_later_healthy_thread(compact_case, monkeyp
     for _ in range(64):
         result = maintain_transcript_index_lane(request)
         errors.extend(result["errors"])
-        if any(entry["tid"] == case.thread_id for entry in result["cursor"].get("pending", [])):
+        if result["complete"] and any(entry["tid"] == case.thread_id for entry in result["cursor"].get("pending", [])):
             break
         request = replace(request, cursor=result["cursor"])
     else:
@@ -194,8 +200,14 @@ def test_transcript_zero_candidates_and_hold_make_zero_commits(compact_case, mon
         kind="conversation_messages",
         commit=lambda operation: (commits.append(True), operation())[1],
     )
-    result = maintain_transcript_index_lane(request)
-    assert result["complete"] and "pending" not in result["cursor"] and not commits
+    cursor = {}
+    for _ in range(30):
+        result = maintain_transcript_index_lane(replace(request, cursor=cursor))
+        assert not result["cursor"].get("pending") and not commits
+        if result["complete"]:
+            break
+        cursor = result["cursor"]
+    assert result["complete"]
     held = maintain_transcript_index_lane(
         replace(request, legal_hold=True, cursor={"after": "kept"})
     )
@@ -213,13 +225,21 @@ def test_one_item_budget_prepares_and_finishes_transcript_gc(compact_case, monke
         if node.name not in reachable:
             node.unlink()
     orphan = index._save({"entries": {"one-item-budget": True}})
-    target = aged(path.parent.joinpath(*index.parts, orphan["ref"]["ref"]))
+    namespace = path.parent.joinpath(*index.parts)
+    target = aged(namespace / orphan["ref"]["ref"])
+    max_slices = sum(1 for _ in namespace.iterdir()) + 4
     request = request_for(home_for(case), kind="conversation_messages", items=1)
     first = maintain_transcript_index_lane(request)
+    assert first["items"] == 1 and first["cursor"]["thread"] == case.thread_id
+    for _ in range(max_slices):
+        assert first["items"] <= 1 and first["deleted_items"] == 0
+        if first["cursor"].get("pending"):
+            break
+        first = maintain_transcript_index_lane(replace(request, cursor=first["cursor"]))
     assert [entry["tid"] for entry in first["cursor"]["pending"]] == [case.thread_id]
     assert first["deleted_items"] == 0
     cursor = first["cursor"]
-    for _ in range(20):
+    for _ in range(max_slices):
         result = maintain_transcript_index_lane(
             replace(request, cursor=cursor, now=request.now + 7 * 86400)
         )
@@ -227,7 +247,9 @@ def test_one_item_budget_prepares_and_finishes_transcript_gc(compact_case, monke
         cursor = result["cursor"]
         if result["complete"]:
             break
-    assert result["complete"] and not target.exists()
+    assert result["complete"] and not target.exists(), (
+        result.get("deferred_reason"), result["items"], result["skipped"], result["errors"], target.exists(),
+    )
 
 
 @pytest.mark.parametrize("first_broken", [False, True])
@@ -242,11 +264,14 @@ def test_full_name_window_preserves_root_and_reaches_later_thread(
         {"canonical_user_id": "other", "channel_conversation_id": "other-thread", "now": 1.0}
     )
     second_case = SimpleNamespace(**{**vars(case), "thread_id": other.thread_id})
-    first_case, later_case = sorted((case, second_case), key=lambda item: item.thread_id)
-    _thread, _messages, _original, first_path, first_index, first_manifest = rotation(
-        first_case, monkeypatch
-    )
-    rotation(later_case, monkeypatch)
+    from agent_py_agent.agent.user_space.directory_paging import directory_page
+
+    rotations = {item.thread_id: rotation(item, monkeypatch) for item in (case, second_case)}
+    archive = case.root / "conversations/messages/archive"
+    names, _, _ = directory_page(archive, (), {}, 1)
+    first_tid = names[0]
+    later_tid = next(tid for tid in rotations if tid != first_tid)
+    _, _, _, first_path, first_index, first_manifest = rotations[first_tid]
     if first_broken:
         first_path.with_suffix(".manifest.json").write_text("{")
     else:
@@ -258,7 +283,12 @@ def test_full_name_window_preserves_root_and_reaches_later_thread(
                 node.unlink()
     request = request_for(home_for(case), kind="conversation_messages", items=1)
     first = maintain_transcript_index_lane(request)
-    assert not first["complete"] and first["cursor"]["after"] == first_case.thread_id
+    assert not first["complete"] and first["cursor"]["thread"] == first_tid
     assert first["items"] == 1 and first["cursor"]["root_index"] == 0
-    later = maintain_transcript_index_lane(replace(request, cursor=first["cursor"]))
-    assert [entry["tid"] for entry in later["cursor"]["pending"]] == [later_case.thread_id]
+    later = first
+    for _ in range(30):
+        later = maintain_transcript_index_lane(replace(request, cursor=later["cursor"]))
+        assert later["items"] <= 1
+        if later["cursor"].get("pending"):
+            break
+    assert [entry["tid"] for entry in later["cursor"]["pending"]] == [later_tid]

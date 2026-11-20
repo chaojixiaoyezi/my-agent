@@ -123,6 +123,7 @@ def test_mark_walks_children_not_leaf_data_and_refuses_incomplete(tmp_path):
 
 
 def test_sweep_restores_reused_candidate_and_preserves_link_metadata(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common import nofollow_fs
     from agent_py_agent.agent.conversation.hamt_reachability import sweep_unreachable_nodes
 
     namespace = tmp_path / "index"
@@ -156,6 +157,8 @@ def test_sweep_restores_reused_candidate_and_preserves_link_metadata(tmp_path, m
 
         return inspect
 
+    supports_dir_fd = nofollow_fs._supports_dir_fd()
+    monkeypatch.setattr(nofollow_fs, "_supports_dir_fd", lambda: supports_dir_fd)
     monkeypatch.setattr(os, "stat", with_links(real_stat))
     monkeypatch.setattr(os, "lstat", with_links(real_lstat))
     commits = []
@@ -245,11 +248,17 @@ def test_incomplete_compact_refuses_every_deletion(compact_case, damage):
     else:
         (root / "conversations" / f"{case.thread_id}.jsonl").write_bytes(b"{\n")
     commits = []
-    result = maintain_compact_reachability_lane(
-        request_for(home_for(case), commit=lambda operation: (commits.append(True), operation())[1])
-    )
-    assert target.exists() and result["deleted_items"] == 0 and not commits
-    assert any(error["code"] == "compact_reachability_incomplete" for error in result["errors"])
+    request = request_for(home_for(case), commit=lambda operation: (commits.append(True), operation())[1])
+    errors = []
+    for _ in range(20):
+        result = maintain_compact_reachability_lane(request)
+        errors.extend(result["errors"])
+        assert target.exists() and result["deleted_items"] == 0 and not commits
+        if result["complete"]:
+            break
+        request = replace(request, cursor=result["cursor"])
+    assert result["complete"]
+    assert any(error["code"] == "compact_reachability_incomplete" for error in errors)
 
 
 def test_hold_empty_and_missing_thread_never_mutate(compact_case):
@@ -410,7 +419,12 @@ def test_positive_retirement_cleans_side_tree_even_when_ledger_directory_is_miss
         trash_container=case.root / "trash/purged",
         retired_at=time.time(),
     )
-    result = maintain_compact_reachability_lane(request_for(home))
+    cursor = {}
+    for _ in range(20):
+        result = maintain_compact_reachability_lane(request_for(home, cursor=cursor))
+        if result["complete"]:
+            break
+        cursor = result["cursor"]
     assert result["complete"] and not target.exists()
     assert (root / "conversations/retired-legacy.jsonl.lock").exists()
 
@@ -493,6 +507,7 @@ def test_touch_recreates_missing_leaf_and_rejects_symlink_parent(tmp_path, monke
 
 def test_portable_sweep_keeps_reachable_and_deletes_only_aged_regular_leaf(tmp_path, monkeypatch):
     from agent_py_agent.agent.common import nofollow_fs as fs
+    from agent_py_agent.agent.user_space import directory_paging
     from agent_py_agent.agent.conversation.hamt_reachability import sweep_unreachable_nodes
 
     namespace = tmp_path / "index"
@@ -503,6 +518,7 @@ def test_portable_sweep_keeps_reachable_and_deletes_only_aged_regular_leaf(tmp_p
     aged(old)
     aged(keep)
     monkeypatch.setattr(fs, "_supports_dir_fd", lambda: False)
+    monkeypatch.setattr(directory_paging, "_native_directory_supported", lambda: False)
     result = sweep_unreachable_nodes(
         namespace,
         reachable=frozenset({"keep.json"}),
@@ -605,8 +621,14 @@ def test_live_zero_due_candidates_and_hold_make_zero_commits(compact_case):
     request = request_for(
         home_for(case), commit=lambda operation: (commits.append(True), operation())[1]
     )
-    result = maintain_compact_reachability_lane(request)
-    assert result["complete"] and not commits
+    cursor = {}
+    for _ in range(20):
+        result = maintain_compact_reachability_lane(replace(request, cursor=cursor))
+        assert not commits
+        if result["complete"]:
+            break
+        cursor = result["cursor"]
+    assert result["complete"]
     held = maintain_compact_reachability_lane(
         replace(request, legal_hold=True, cursor={"after": "kept"})
     )
@@ -726,8 +748,14 @@ def test_retirement_generation_is_rechecked_inside_commit(compact_case):
             )
         return operation()
 
-    result = maintain_compact_reachability_lane(request_for(home, commit=commit))
-    assert invoked and result["deleted_items"] == 0
+    request = request_for(home, commit=commit)
+    for _ in range(20):
+        result = maintain_compact_reachability_lane(request)
+        assert result["deleted_items"] == 0
+        if invoked or result["complete"]:
+            break
+        request = replace(request, cursor=result["cursor"])
+    assert invoked
     assert (case.root / "compact/evidence" / case.thread_id).exists()
 
 
