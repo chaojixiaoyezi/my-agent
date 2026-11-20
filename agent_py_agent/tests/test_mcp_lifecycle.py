@@ -432,30 +432,66 @@ def test_close_shared_permission_view_preserves_parent_until_owner_close(tmp_pat
     assert all(not name.startswith("mcp__") for name in registry.runtime_snapshot().available_tool_names)
 
 
-# LLM: 真实临时MCP连接经原owner/借用者关闭顺序；最后借用触发owner清池仍须撤销门面代理，关闭可重复而不重扣计数。
-# 函数用途: 锁住父先关闭、最后子视图再释放时的工具撤销，保留基础工具并确认临时进程结束。
+# LLM: M25 的两种借用寿命都走真实入口：owner 关闭立即撤销派生权限视图并归还其借用；同用户独立领养的 worker 租约
+#   不随 owner 关闭撤销，各自在 worker 退出时归还，最后一份归还才清空 owner 池、停止并回收临时进程，且仍按冻结的
+#   客户端快照撤销该门面代理。重复关闭不重扣计数，也不再次停止客户端。
+# 函数用途: 锁住视图随 owner 关闭撤销、独立 worker 最后释放时只回收一次临时进程，并保留基础工具。
 @pytest.mark.parametrize("borrowers", [1, 2])
-def test_r7_last_borrower_revokes_proxy_after_owner_pool_is_cleared(tmp_path, borrowers):
+def test_r7_last_borrower_revokes_proxy_after_owner_pool_is_cleared(tmp_path, monkeypatch, borrowers):
+    from agent_py_agent.agent.agent_core.runner import worker
     from agent_py_agent.agent.tooling.mcp_registration import MCPProxyTool
 
     owner = _registry(tmp_path)
     client = owner._mcp_clients[0]
+    process = client.connection().binding.process
+    stops = []
+
+    def record_stop(stop=client.stop):
+        stops.append(owner._mcp_borrow_count[0])
+        return stop()
+
+    def agent(_config, root, *, defer_mcp_connect=False):
+        return SimpleNamespace(tools=_registry(root, defer_mcp_connect=defer_mcp_connect))
+
+    def has_proxy(facade):
+        return any(isinstance(tool, MCPProxyTool) and tool.client is client for tool in facade.tools.values())
+
+    monkeypatch.setattr(client, "stop", record_stop)
+    params = SimpleNamespace(root=tmp_path, request_transport=None)
     views = [owner.with_access_policy(access_mode="full-access", path_access_mode="full-access", owner_scope_root="")
              for _ in range(borrowers)]
+    workers = [worker._construct_transported_worker(agent, params, None) for _ in range(borrowers)]
     try:
-        assert owner._mcp_borrow_count == [borrowers]
+        for item in workers:
+            assert not item.tools._mcp_clients
+            assert item.tools.share_same_owner_mcp_state_from(owner)
+            assert item.tools._mcp_clients is owner._mcp_clients
+        assert owner._mcp_borrow_count == [2 * borrowers]
+        assert all(has_proxy(facade) for facade in (*views, *(item.tools for item in workers)))
         owner.close_mcp_clients()
-        assert owner._mcp_clients == [client] and client.is_running()
-        for index, view in enumerate(views):
-            view.close_mcp_clients()
-            assert view._mcp_clients == [] and view._mcp_borrow_released
-            assert not any(isinstance(tool, MCPProxyTool) and tool.client is client for tool in view.tools.values())
+        for view in views:
+            assert view._mcp_borrow_released and view._mcp_clients == [] and not has_proxy(view)
             assert "read_file" in view.tools
-            assert owner._mcp_borrow_count == [borrowers - index - 1]
-            view.close_mcp_clients()
-            assert owner._mcp_borrow_count == [borrowers - index - 1]
-        assert owner._mcp_clients == [] and client.is_closed()
+        assert not owner._mcp_view_leases and owner._mcp_borrow_count == [borrowers]
+        assert owner._mcp_clients == [client] and client.is_running() and stops == []
+        for index, item in enumerate(workers):
+            result = item.tools.tools["mcp__echo__echo"].execute({"text": f"lease-{index}"})
+            assert result.ok and f"lease-{index}" in result.output
+            remaining = borrowers - index - 1
+            for _ in range(2):
+                worker._close_worker_mcp_clients(item, params)
+                assert owner._mcp_borrow_count == [remaining]
+            assert item.tools._mcp_borrow_released and item.tools._mcp_clients == [] and not has_proxy(item.tools)
+            assert "read_file" in item.tools.tools
+            assert bool(client.is_running()) == bool(remaining) and stops == ([] if remaining else [0])
+        assert owner._mcp_clients == [] and client.is_closed() and not has_proxy(owner)
+        assert process.poll() is not None
+        for facade in (*views, owner):
+            facade.close_mcp_clients()
+        assert owner._mcp_borrow_count == [0] and stops == [0]
     finally:
+        for item in workers:
+            worker._close_worker_mcp_clients(item, params)
         for view in views:
             view.close_mcp_clients()
         owner.close_mcp_clients()

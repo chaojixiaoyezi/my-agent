@@ -264,7 +264,7 @@ def _plain_dataclass(cls):
     namespace = {}
     if hasattr(cls, "__post_init__"):
         namespace["__post_init__"] = cls.__post_init__
-    plain_cls = dataclasses.make_dataclass(cls.__name__, fields, namespace=namespace, frozen=True, slots=True)
+    plain_cls = dataclasses.make_dataclass(cls.__name__, fields, namespace=namespace, frozen=True)
     plain_cls.__module__ = cls.__module__
     return plain_cls
 

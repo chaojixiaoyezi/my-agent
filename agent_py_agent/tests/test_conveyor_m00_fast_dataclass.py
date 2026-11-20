@@ -6,16 +6,19 @@
 #   （F1）：check_slots_compat 必须指出包内对工厂结果用 vars()/__dict__/弱引用的调用方，真实的读取方到消费方路径
 #   在内存转换后仍用 vars(report) 时不得放行；它只在转换时调用，生产代码里不得出现。M10 前置修复：生成的
 #   __replace__ 的回落判断只读本次调用的 changes，不查询类级共享集合（3.14t 关闭 GIL 时那是一把共享临界区锁），
-#   单个类被所有线程同时替换的 G1 用例由本模块提供。
+#   单个类被所有线程同时替换的 G1 用例由本模块提供。S2-P1-01：转换类写出 {字段名: 值} 状态，并能读回命名、
+#   位置与槽位二元组三种历史布局（真实 DTO 的跨版本样本在 test_conveyor_s2_legacy_dto_state.py）。
 # 模块用途: 固定 agent/common/fast_dataclass.py 的转换合同（C1.3），不读 git 历史。
 from __future__ import annotations
 
 import copy
+import copyreg
 import dataclasses
 import functools
 import importlib
 import importlib.util
 import inspect
+import io
 import itertools
 import json
 import pickle
@@ -310,6 +313,56 @@ def test_generated_init_assigns_through_captured_descriptors_not_object_setattr(
         assert "__setattr__" not in fast_cls.__init__.__code__.co_names
         assert "__setattr__" not in fast_cls.__replace__.__code__.co_names
     assert controls > GENERATED_CLASS_COUNT // 2
+
+
+# LLM: 按旧写入方的流形状（类按引用，再 BUILD(state)）写出任意历史状态：转换前字典实例的 {字段名: 值}、Wave-1
+#   合并版标准库的值列表，以及 object.__getstate__ 的 (实例字典或 None, 槽位字典)。协议 0/1 经
+#   copyreg._reconstructor，协议 2 起经 NEWOBJ；pickler 只接受该类实例的 NEWOBJ，所以目标是未初始化的实例。
+# 类用途: 只改写目标实例的 reduce 结果，其余对象照常序列化。
+class _HistoricalWriter(pickle.Pickler):
+    def __init__(self, file, protocol: int, target: object, state: object) -> None:
+        super().__init__(file, protocol)
+        self._protocol = protocol
+        self._target = target
+        self._state = state
+
+    def reducer_override(self, obj):
+        if obj is not self._target:
+            return NotImplemented
+        if self._protocol < 2:
+            return copyreg._reconstructor, (type(obj), object, None), self._state
+        return copyreg.__newobj__, (type(obj),), self._state
+
+
+# 函数用途: 经真实 pickle 流，用一份历史状态恢复某个类的实例。
+def _restore_historical(cls: type, state: object, protocol: int) -> object:
+    target = object.__new__(cls)
+    buffer = io.BytesIO()
+    _HistoricalWriter(buffer, protocol, target, state).dump(target)
+    return pickle.loads(buffer.getvalue())
+
+
+def test_generated_classes_restore_every_historical_state_layout(generated):
+    rng = random.Random(GENERATOR_SEED + 11)
+    restored_classes = 0
+    for spec, plain_cls, fast_cls in generated:
+        for _ in range(ARGUMENT_SETS_PER_CLASS):
+            args, kwargs = _call_arguments(spec, rng)
+            if _outcome(plain_cls, *args, **kwargs)[0] == "ok":
+                break
+        else:
+            continue
+        plain = plain_cls(*args, **kwargs)
+        names = [f.name for f in dataclasses.fields(plain)]
+        named = {name: getattr(plain, name) for name in names}
+        state = fast_cls(*args, **kwargs).__getstate__()
+        assert state == named and list(state) == names, spec
+        for layout in (named, [named[name] for name in names], (None, named)):
+            for protocol in (0, 2, pickle.HIGHEST_PROTOCOL):
+                restored = _restore_historical(fast_cls, layout, protocol)
+                assert type(restored) is fast_cls and _state(restored) == _state(plain), (spec, layout)
+        restored_classes += 1
+    assert restored_classes > GENERATED_CLASS_COUNT // 2
 
 
 def test_frozen_instance_error_type_is_unchanged(generated):
