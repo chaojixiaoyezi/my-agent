@@ -2,6 +2,7 @@
 # 模块用途: 执行显式工具或已有事实的有界自然表达，各自在原attempt内结算，不重执业务。
 from __future__ import annotations
 
+from ..common.fast_dataclass import fast_replace
 from .host_turn_scope import HostTurn, host_turn_scope
 from .runtime.loop_models import RunParams
 
@@ -65,12 +66,10 @@ def _tool_only_params(bound, snapshot, cancellation, tool_name):
 # LLM: 原通知阶段传入同一个HostTurn则不二次绑定/结算；独立旧入口仍自行创建原core轮，工具始终为空。
 # 函数用途: 对尚无公开回复的宿主事实调用有界自然表达，保持身份开放直到外层末次投递完成。
 def express_required_user_action(agent, params: RunParams, facts: dict, *, execution: HostTurn | None = None):
-    from dataclasses import replace
-
     if execution is not None:
         execution.require(agent, params)
         return _express_required_user_action(agent, execution, facts)
-    with host_turn_scope(agent, '', replace(params, source='background_user_action_notice', allowed_tools=[]),
+    with host_turn_scope(agent, '', fast_replace(params, source='background_user_action_notice', allowed_tools=[]),
             reason='required_user_action_notice', tool_rounds=0) as turn:
         return _express_required_user_action(agent, turn, facts)
 
@@ -78,8 +77,6 @@ def express_required_user_action(agent, params: RunParams, facts: dict, *, execu
 # LLM: 输入已由外层core绑定；这里只采样原natural-user-reply，实际unknown/中断交外层，不提前结束宿主attempt。
 # 函数用途: 在当前真实宿主轮生成一次合法零工具表达并保留原有拒绝/修复预算。
 def _express_required_user_action(agent, turn: HostTurn, facts: dict):
-    from dataclasses import replace
-
     from ..common.cancellation import CancellationToken
     from ..concurrency.interrupt import is_interrupted
     from ..contracts.background_public_receipt import BackgroundPublicReceiptError
@@ -100,7 +97,7 @@ def _express_required_user_action(agent, turn: HostTurn, facts: dict):
     turn.runtime_status = 'failed'
     loop = _tool_only_params(bound, agent.tools.runtime_snapshot(allowed_tools=[], run_id=bound.run_id),
         CancellationToken(_external_check=is_interrupted), '')
-    loop = replace(loop, tool_protocol_snapshot=select_tool_protocol(agent, run_id=bound.run_id, request_id=bound.request_id))
+    loop = fast_replace(loop, tool_protocol_snapshot=select_tool_protocol(agent, run_id=bound.run_id, request_id=bound.request_id))
     queue_natural_user_reply(loop, kind='background_user_action_required', facts=facts)
     while True:
         if is_interrupted():

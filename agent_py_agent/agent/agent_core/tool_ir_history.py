@@ -50,6 +50,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import fields, is_dataclass
+from operator import attrgetter
 from types import SimpleNamespace
 from typing import Any
 
@@ -61,12 +62,20 @@ from ..backends.tool_ir import (
     RuntimeFactsTurn,
     UserTurn,
 )
+from ..common.fast_dataclass import slot_setter
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..prompting_parts.runtime_injection import (
     is_runtime_injection_source,
     runtime_injection_clear_text,
 )
-from ..tooling.runtime_contracts import ToolCall, ToolResult
+from ..tooling.runtime_contracts import (
+    AppliedToolApproval,
+    ToolCall,
+    ToolContentBlock,
+    ToolOperation,
+    ToolResult,
+    ToolResultRef,
+)
 from .runtime.conversation_state import conversation_runtime_state_section
 
 _PROJECTION_LOCK = threading.Lock()
@@ -102,11 +111,16 @@ def _freeze_projection_value(value: object, *, _depth: int = 0, _budget: list[in
     if budget[0] < 0:
         return None
     if is_dataclass(value) and not isinstance(value, type):
-        values = [(item.name, getattr(value, item.name)) for item in fields(value)]
+        cls = type(value)
+        readers = _PROJECTION_FIELD_READERS.get(id(cls))
+        if readers is None:
+            values = [(item.name, getattr(value, item.name)) for item in fields(value)]
+        else:
+            values = [(name, read(value)) for name, read in readers]
         if isinstance(value, AssistantTurn):
             values.append(("round_index", getattr(value, "round_index", getattr(value, "_tool_round", None))))
         frozen = _freeze_projection_value(dict(values), _depth=_depth + 1, _budget=budget)
-        return None if frozen is None else (type(value).__module__, type(value).__qualname__, frozen)
+        return None if frozen is None else (cls.__module__, cls.__qualname__, frozen)
     if isinstance(value, Mapping):
         pairs = []
         for key, item in value.items():
@@ -763,10 +777,36 @@ class _MarkedAssistantTurn(AssistantTurn):
         content_blocks: list[dict[str, Any]] | None = None,
         _tool_round: int = 0,
     ) -> None:
-        object.__setattr__(self, "text", str(text or ""))
-        object.__setattr__(self, "tool_calls", list(tool_calls or []))
-        object.__setattr__(self, "content_blocks", list(content_blocks or []))
-        object.__setattr__(self, "_tool_round", int(_tool_round))
+        AssistantTurn.__init__(
+            self,
+            text=str(text or ""),
+            tool_calls=list(tool_calls or []),
+            content_blocks=list(content_blocks or []),
+        )
+        _set_tool_round(self, int(_tool_round))
+
+    if "__slots__" in AssistantTurn.__dict__:
+        # 基类采用数据类槽位后，默认复制只保存基类字段。沿用原字典/槽位状态，保留子类轮号。
+        __getstate__ = object.__getstate__
+
+        def __setstate__(self, state: tuple[dict[str, Any] | None, dict[str, Any]]) -> None:
+            instance_fields, slot_fields = state
+            turn_fields = {**(instance_fields or {}), **slot_fields}
+            tool_round = turn_fields.pop("_tool_round")
+            AssistantTurn.__init__(self, **turn_fields)
+            _set_tool_round(self, tool_round)
+
+
+_set_tool_round = slot_setter(_MarkedAssistantTurn, "_tool_round")
+
+# 原生 IR 类由模块持有，按身份绑定字段读取器；扩展类可不支持哈希。
+_PROJECTION_FIELD_READERS = {
+    id(cls): tuple((item.name, attrgetter(item.name)) for item in fields(cls))
+    for cls in (
+        AssistantTurn, _MarkedAssistantTurn, CompactionSummary, RuntimeFactsTurn, UserTurn,
+        ToolCall, ToolResult, ToolContentBlock, ToolResultRef, ToolOperation, AppliedToolApproval,
+    )
+}
 
 
 __all__ = [

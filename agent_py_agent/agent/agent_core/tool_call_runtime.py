@@ -10,11 +10,13 @@ import json
 import logging
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen, fast_replace
 from ..tooling.models import (
     ToolFailureStage,
     ToolHandlerOutcome,
@@ -40,7 +42,8 @@ from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
 # LLM: 本请求冻结工具参数和宿主运行上下文；output_observer 仅接收已归档的原始正文，不改权限或模型投影，不持久化回调。
 # 类用途: 统一模型与宿主工具执行请求；只读宿主可在同一归档入口取得完整输出用于结构化比较。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolCallRuntimeRequest:
     agent: object
     request: ToolCallExecuteParams
@@ -160,7 +163,7 @@ def _business_scope_preflight(runtime_request):
         next_action = '核对原执行来源与已认证会话；取得原宿主授权后再调用，不替换owner或目标来绕过。'
         status = error.status if isinstance(error, HostAPIError) else 403
         return {}, ToolHandlerOutcome(runtime_request.call.tool_name, False,
-            json.dumps({'error_code': code, 'reason': message, 'next_action': next_action,
+            hot_json.dumps({'error_code': code, 'reason': message, 'next_action': next_action,
                 'effect_outcome': 'not_started', 'stage': 'authorization'}, ensure_ascii=False),
             error_code=code, reported_error_code=code, effect_outcome='not_started',
             handler_executed=False, failure_stage=ToolFailureStage.AUTHORIZATION.value,
@@ -190,7 +193,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         # runtime_db/managed_operation_store.require_authority）。任务晋升已在 boundary
         # 冻结前完成；预算、重复调用和 runner 身份 guard 仍只在 canonical executor
         # 完成规范化/授权后运行一次，避免审批重入时重复扣减预算。
-        prepared_request = replace(runtime_request, call=call)
+        prepared_request = fast_replace(runtime_request, call=call)
         outcome = guarded_tool_call_result(prepared_request) or prepared_promotion_outcome
         if outcome is None:
             # 能力包 v2 块 3：本 run 第一次改工作区之前记基线（开关关着时零开销）。
@@ -264,7 +267,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     except Exception as exc:
         _LOGGER.warning("attach post write verification failed: %s", exc, exc_info=True)
 
-    execution = replace(execution, result=result)
+    execution = fast_replace(execution, result=result)
 
     try:
         audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
@@ -342,7 +345,7 @@ def _archive_runtime_tool_output(runtime_request, call, outcome):
     parent = runtime_request.call
     nested = call.call_id != parent.call_id
     if nested:
-        outcome = replace(outcome, result_envelope={**outcome.result_envelope,
+        outcome = fast_replace(outcome, result_envelope={**outcome.result_envelope,
             'tool_program_lineage':{'parent_call_id':parent.call_id,
                 'step_key':call.call_id.removeprefix(parent.call_id + '/')}})
     projection = archive_tool_output_projection(runtime_request.agent, runtime_request.request.params,

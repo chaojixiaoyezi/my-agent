@@ -25,7 +25,6 @@ from .call_guardrail_config import (
     terminal_block_enabled as configured_terminal_block_enabled,
 )
 
-_RECORDS_ATTR = "_tool_call_guardrail_records"
 # 调用护栏最多保留的记录条数，防内存膨胀。
 _MAX_RECORD_COUNT = 256
 
@@ -38,7 +37,7 @@ class ToolObservationPolicy(Protocol):
 
 
 def tool_guardrail_records(agent: object) -> tuple[dict[str, object], ...]:
-    records = getattr(agent, _RECORDS_ATTR, None)
+    records = getattr(agent, "_tool_call_guardrail_records", None)
     if not isinstance(records, tuple):
         records = ()
     return tuple(dict(item) for item in records if isinstance(item, dict))
@@ -205,7 +204,7 @@ def _set_tool_guardrail_records(
     agent: object,
     records: tuple[dict[str, object], ...],
 ) -> None:
-    setattr(agent, _RECORDS_ATTR, records[-_MAX_RECORD_COUNT:])
+    agent._tool_call_guardrail_records = records[-_MAX_RECORD_COUNT:]
 
 
 def _failure_class(result: ToolResult) -> str:

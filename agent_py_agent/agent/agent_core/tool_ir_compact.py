@@ -38,13 +38,14 @@ tool_use id）。直接对这串 ToolResult 套用「保最近 / 预算」策略
 """
 
 import hashlib
-import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from ..backends.tool_ir import AssistantTurn
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen, fast_replace
 from ..conversation.tool_context_window import record_native_ir_window
 from ..tooling.runtime_contracts import ToolContentBlock, ToolResult
 from .tool_ir_history import (
@@ -70,7 +71,8 @@ class NativeCompactWindow:
 
 # LLM: 数字只描述尚未提交的内存候选；不能据此宣称 canonical generation 已更新。
 # 类用途: 返回成对回收数量和完整请求重估结果，由原调用方决定提交或恢复。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class NativeCompactCandidate:
     dropped_pairs: int
     after_tokens: int
@@ -108,7 +110,7 @@ def stub_old_native_tool_results(params: object, *, target_tokens: int, estimate
             archive_ref = archive_ref or next((ref.ref for ref in result.refs), "")
             raw_bytes = result.output.encode("utf-8")
             digest = hashlib.sha256(raw_bytes).hexdigest()
-            content = json.dumps({
+            content = hot_json.dumps({
                 "compact_authority": COMPACT_AUTHORITY_TURN_LOCAL,
                 "commit_authority": COMPACT_AUTHORITY_TURN_LOCAL,
                 "tool_name": result.tool_name, "call_id": result.call_id,
@@ -116,10 +118,10 @@ def stub_old_native_tool_results(params: object, *, target_tokens: int, estimate
                 "archive_ref": archive_ref or None,
                 "bytes": len(raw_bytes), "sha256": digest,
                 "marker": f"[TOOL_OUTPUT_COMPACTED: tool_call_id={result.call_id} bytes={len(raw_bytes)} sha256={digest}]",
-            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            }, ensure_ascii=False, sort_keys=True, compact=True)
             if len(content.encode("utf-8")) >= len(raw_bytes):
                 continue
-            stub = replace(result, content_blocks=(ToolContentBlock("text", text=content),))
+            stub = fast_replace(result, content_blocks=(ToolContentBlock("text", text=content),))
             # 真实结果已有宿主模型投影；只换正文会继续发送旧投影，使折叠计量永远没有进展。
             stubs[source] = stub.with_live_prompt_projection(stub.render_for_prompt())
             if estimate_tokens() >= before_tokens:

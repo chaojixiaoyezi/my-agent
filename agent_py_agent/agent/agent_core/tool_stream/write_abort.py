@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from ...common.fast_dataclass import fast_frozen
 from ...tooling.content_transport_policy import streaming_inline_write_abort_limit
 
 _WRITE_TOOL_NAMES = {"write_file"}
@@ -13,7 +14,8 @@ _JSON_PATH_RE = re.compile(r'"(?:path|target_path)"\s*:\s*"(?P<path>(?:\\.|[^"\\
 _JSON_CONTENT_RE = re.compile(r'"content"\s*:\s*"')
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class LongToolContentAbortPayload:
     tool: str
     path: str
@@ -23,7 +25,8 @@ class LongToolContentAbortPayload:
 
 class LongToolContentStreamAbort(RuntimeError):
     def __init__(self, payload: LongToolContentAbortPayload) -> None:
-        super().__init__(
+        RuntimeError.__init__(
+            self,
             f"{payload.tool}.content inline content streaming exceeded {payload.limit} chars for {payload.path or '<unknown>'}"
         )
         self.tool = payload.tool

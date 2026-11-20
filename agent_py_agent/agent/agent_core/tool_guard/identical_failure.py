@@ -9,15 +9,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
+from ...common.fast_dataclass import fast_frozen, fast_replace
 from ...subagents.tool_failure_ledger import REPEATED_IDENTICAL_TOOL_FAILURE
 from ...tooling.runtime_contracts import tool_arguments_hash
 
 
 # LLM: 三个身份字段全部来自宿主 ToolCall/ToolResult；count 是当前回合内的连续次数，不跨回合持久化。
 # 类用途: 表示当前回合里“同一个调用拿到同一个失败”的连续段，供硬上限判定和收口说明使用。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class IdenticalFailureStreak:
     tool_name: str
     args_hash: str
@@ -39,7 +41,11 @@ def next_identical_failure_streak(
 ) -> IdenticalFailureStreak:
     if (isinstance(previous, IdenticalFailureStreak)
             and (previous.tool_name, previous.args_hash, previous.error_code) == (tool_name, args_hash, error_code)):
-        return replace(previous, count=previous.count + 1)
+        count = previous.count + 1
+        if type(previous) is IdenticalFailureStreak:
+            # 计数更新的字段已知，直接使用快速构造，避免通用替换的字段分派。
+            return IdenticalFailureStreak(previous.tool_name, previous.args_hash, previous.error_code, count)
+        return fast_replace(previous, count=count)
     return IdenticalFailureStreak(tool_name, args_hash, error_code)
 
 
