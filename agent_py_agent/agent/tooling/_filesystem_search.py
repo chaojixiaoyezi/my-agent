@@ -36,6 +36,7 @@ from ._filesystem_helpers import (
     _DiscoveryCursor,
     _encode_discovery_cursor,
     _iter_discovery_files,
+    _mark_scan_timeout,
     _parse_discovery_cursor,
     _safe_discovery_path,
     _scan_budget_details,
@@ -465,6 +466,7 @@ class SearchTextTool(FileSystemTool):
         page = _CursorSearchPage(cursor, request, matcher)
         initial = replace(cursor)
         deadline = state.started_at + _FALLBACK_SCAN_MAX_SECONDS
+        walk = None
 
         if target.is_dir():
             match_path = "/" in request.file_glob
@@ -475,14 +477,18 @@ class SearchTextTool(FileSystemTool):
 
             walk = _LazyListWalk.for_discovery(
                 self, target, include_ignored=request.include_ignored, after_entry=cursor.candidate,
-                file_filter=matches,
+                file_filter=matches, scan_after=cursor.scan_after,
             )
 
             def ordered_candidates():
-                while found := walk.next_visible(deadline=deadline if cursor != initial else None):
+                # 走查器越过续扫起点后才按时限和文件工作量停下，零命中页也记录严格前进的已处理位置。
+                while found := walk.next_visible(deadline=deadline):
                     yield found[0]
                 if walk.scan_incomplete:
-                    _scan_budget_expired(state)
+                    if walk.limit_reason == "file_limit":
+                        state.mark("file_limit")
+                    else:
+                        _mark_scan_timeout(state)
 
             candidates = ordered_candidates()
         else:
@@ -513,6 +519,8 @@ class SearchTextTool(FileSystemTool):
 
         if state.stale:
             raise _CursorSourceChanged("file_id", initial.after_entry)
+        if walk is not None:
+            cursor.scan_after = walk.processed_entry() or cursor.scan_after
         if state.limited or has_more:
             if cursor == initial:
                 return ToolHandlerOutcome(
@@ -525,7 +533,7 @@ class SearchTextTool(FileSystemTool):
             next_cursor = _encode_discovery_cursor(cursor)
         else:
             next_cursor = ""
-        has_prior_progress = bool(initial.candidate or request.offset)
+        has_prior_progress = bool(initial.candidate or initial.scan_after or request.offset)
         request = replace(request, offset=0)
         if request.output_mode == "count":
             body = render_match_counts(page.counts, request)

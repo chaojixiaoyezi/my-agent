@@ -374,3 +374,113 @@ def test_registry_exposes_and_accepts_the_cursor(tmp_path, name, query, rows):
     second = execute_registry_test_call(registry, name, params, allowed_tools=[name], call_id="m46-page-2")
     assert second.ok, second.output
     assert [first.output.splitlines()[0], second.output.splitlines()[0]] == rows
+
+
+@pytest.fixture(scope="module")
+def sparse_discovery_tree():
+    # 120 directories x 200 files = 24,000 files; a single notebook sits in the last directory.
+    with tempfile.TemporaryDirectory(prefix="m46-sparse-") as directory:
+        root = Path(directory).resolve()
+        for group in range(120):
+            folder = root / f"d{group:03}"
+            folder.mkdir()
+            for index in range(200):
+                with (folder / f"{index:03}.py").open("xb"):
+                    pass
+        (root / "d119" / "zz.ipynb").write_bytes(b"needle\n")
+        yield root
+
+
+def _discovery_page(name, root, cursor, *, query):
+    tool = FindFilesTool(root, max_matches=10) if name == "find_files" else SearchTextTool(root, max_matches=10)
+    page = tool.execute({**query, "cursor": cursor})
+    assert page.ok, page.output
+    return page
+
+
+_SPARSE_QUERIES = {
+    "find_files": ({"pattern": "*.ipynb"}, ["d119/zz.ipynb"]),
+    "search_text": ({"query": "needle", "literal": True, "file_glob": "*.ipynb"}, ["d119/zz.ipynb:1: needle"]),
+}
+
+
+@pytest.mark.timeout(120, func_only=True)
+@pytest.mark.parametrize("name", sorted(_SPARSE_QUERIES))
+def test_sparse_discovery_yields_strictly_advancing_pages_after_deadline(sparse_discovery_tree, monkeypatch, name):
+    root = sparse_discovery_tree
+    query, expected = _SPARSE_QUERIES[name]
+    original_scandir = _filesystem_list.os.scandir
+    elapsed = 0.0
+    passes = 0
+
+    def scandir(path):
+        # Every completed directory selection pass exhausts the eight-second budget.
+        nonlocal elapsed, passes
+        passes += 1
+        elapsed += 61
+        return original_scandir(path)
+
+    monkeypatch.setattr(_filesystem_list.os, "scandir", scandir)
+    fake_clock = SimpleNamespace(monotonic=lambda: elapsed)
+    for module in (find, search, _filesystem_list, _filesystem_helpers):
+        monkeypatch.setattr(module, "time", fake_clock)
+    monkeypatch.setattr(search.shutil, "which", lambda _name: None)
+    cursor, rows, positions, pages = "", [], [], 0
+    while True:
+        passes = 0
+        page = _discovery_page(name, root, cursor, query=query)
+        pages += 1
+        # Re-entering the root and the current directory is allowed; the rest of the tree is not walked.
+        assert passes <= 3
+        rows.extend(row for row in page.output.splitlines() if "zz.ipynb" in row)
+        cursor = page.result_envelope["cursor"]
+        if not cursor:
+            assert not page.result_envelope["scan_incomplete"]
+            break
+        assert page.result_envelope["scan_incomplete"]
+        state = json.loads(base64.urlsafe_b64decode(cursor))
+        # Progress is the later of the processed position and the open candidate, then the byte offset.
+        key = max(_filesystem_list._path_sort_key(state.get("scan_after", "")),
+                  _filesystem_list._path_sort_key(state["candidate"]))
+        positions.append((key, state.get("byte_offset", 0)))
+        if not rows:
+            assert state["after_entry"] == "" and state["phase"] == "discovery"
+            assert "cursor=" in page.output
+        assert pages <= 400
+    assert rows == expected
+    assert pages > 120
+    assert positions == sorted(set(positions))
+
+
+@pytest.mark.timeout(120, func_only=True)
+@pytest.mark.parametrize("name", sorted(_SPARSE_QUERIES))
+def test_negative_discovery_charges_filtered_entries_to_the_file_budget(sparse_discovery_tree, monkeypatch, name):
+    root = sparse_discovery_tree
+    query, _ = _SPARSE_QUERIES[name]
+    query = {**query, "pattern": "*.none"} if name == "find_files" else {**query, "file_glob": "*.none"}
+    fake_clock = SimpleNamespace(monotonic=lambda: 0.0)
+    for module in (find, search, _filesystem_list, _filesystem_helpers):
+        monkeypatch.setattr(module, "time", fake_clock)
+    monkeypatch.setattr(search.shutil, "which", lambda _name: None)
+    first = _discovery_page(name, root, "", query=query)
+    assert first.result_envelope["scan_incomplete"]
+    state = json.loads(base64.urlsafe_b64decode(first.result_envelope["cursor"]))
+    # 20,000 examined entries stop the walk after about a hundred of the 120 directories.
+    assert "d090/" <= state["scan_after"] < "d119/"
+    second = _discovery_page(name, root, first.result_envelope["cursor"], query=query)
+    assert not second.result_envelope["cursor"]
+    assert not second.result_envelope["scan_incomplete"]
+
+
+def test_zero_match_cursor_rejects_file_positions_without_a_candidate(tmp_path):
+    (tmp_path / "a.txt").write_text("sample\n")
+    (tmp_path / "b.txt").write_text("sample\n")
+    tool = FindFilesTool(tmp_path, max_matches=1)
+    first = tool.execute({"pattern": "*.txt", "cursor": ""})
+    root_id = json.loads(base64.urlsafe_b64decode(first.result_envelope["cursor"]))["root_id"]
+    token_state = {"v": 1, "kind": "find", "root_id": root_id, "query_sig": "x", "after_entry": "",
+                   "candidate": "", "file_id": [], "phase": "discovery", "scan_after": "a/"}
+    for broken in ({"byte_offset": 3}, {"scan_after": ""}, {"scan_after": "../a"}, {"file_id": [1, 2, 3, 4]}):
+        token = base64.urlsafe_b64encode(json.dumps({**token_state, **broken}).encode()).decode()
+        page = tool.execute({"pattern": "*.txt", "cursor": token})
+        assert not page.ok and page.error_code == "TOOL_INVALID_ARGUMENTS", (broken, page.output)

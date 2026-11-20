@@ -16,6 +16,7 @@ from ..common.cancellation import raise_if_cancelled
 from ..common.nofollow_fs import NoFollowPathError
 from ..path_access_policy import PATH_SCOPE_FULL, PATH_SCOPE_NORMAL, PATH_SCOPE_OWNER_WALL
 from ._filesystem_helpers import (
+    _FALLBACK_SCAN_MAX_FILES,
     _FALLBACK_SCAN_MAX_SECONDS,
     _MAX_PATH_CHARS,
     _bool_param,
@@ -357,12 +358,24 @@ class _LazyListWalk:
         request: _ListFilesRequest,
         *,
         file_filter: Callable[[str, str], bool] | None = None,
+        scan_after: str = "",
     ):
         self._tool = tool
         self._target = target
         self._request = request
         self._file_filter = file_filter
         self._after_key = _path_sort_key((target / request.after_entry).as_posix()) if request.after_entry else None
+        # 发现模式的已处理位置可以越过最后交付项（含空目录或全被筛掉的目录），续扫取两者中较后的位置。
+        self._root_prefix = target.as_posix().rstrip("/") + "/"
+        if scan_after:
+            scan_key = _path_sort_key(self._root_prefix + scan_after)
+            self._after_key = scan_key if self._after_key is None else max(self._after_key, scan_key)
+        self._resume_key = self._after_key or _path_sort_key(self._root_prefix)
+        # position 只记录调用方已消费的有序位置；刚交出、尚未被消费的条目不计入。
+        self.position: _ListKey | None = None
+        self._yielded: _ListKey | None = None
+        self.examined = 0
+        self.limit_reason = ""
         self._pending: list[_ListWalkNode] = []
         self._visited = 0
         self.scan_incomplete = False
@@ -371,12 +384,33 @@ class _LazyListWalk:
     @classmethod
     def for_discovery(
         cls, tool: FileSystemTool, target: Path, *, include_ignored: bool,
-        after_entry: str, file_filter: Callable[[str, str], bool],
+        after_entry: str, file_filter: Callable[[str, str], bool], scan_after: str = "",
     ) -> _LazyListWalk:
         request = _ListFilesRequest(
             ".", True, 0, 0, 0, "", False, True, include_ignored, True, after_entry,
         )
-        return cls(tool, target, request, file_filter=file_filter)
+        return cls(tool, target, request, file_filter=file_filter, scan_after=scan_after)
+
+    def processed_entry(self) -> str:
+        """返回已越过续扫起点的已处理位置（根相对，目录选取位置以 / 结尾）；尚无进展时为空。"""
+        return "" if self.position is None else self.position[1][len(self._root_prefix):]
+
+    def _consume(self, key: _ListKey) -> None:
+        if key > self._resume_key:
+            self.position = key
+
+    def _discovery_stop(self, node: _ListWalkNode, deadline: float | None) -> bool:
+        # 只有越过续扫起点后才停：零命中页也必须严格前进，不会每次重做同一前缀后原地返回。
+        # 文件工作量预算只在开始新的目录选取前检查，已开始的单目录选取作为原子步骤完成。
+        if self.position is None:
+            return False
+        if deadline is not None and time.monotonic() >= deadline:
+            self.limit_reason = "time_limit"
+            return True
+        if node.scan_directory and self.examined >= _FALLBACK_SCAN_MAX_FILES:
+            self.limit_reason = "file_limit"
+            return True
+        return False
 
     def _schedule_descent(
         self, directory: str, *, depth: int, resolved_directory: Path | None = None,
@@ -413,13 +447,25 @@ class _LazyListWalk:
 
     def next_visible(self, *, deadline: float | None) -> tuple[Path, bool] | None:
         policy = self._tool.path_access_policy
+        discovery = self._file_filter is not None
+        if self._yielded is not None:
+            # 再次取下一项说明上一项已被调用方消费。
+            self._consume(self._yielded)
+            self._yielded = None
         while self._pending:
-            if deadline is not None and time.monotonic() >= deadline:
+            if discovery:
+                if self._discovery_stop(self._pending[0], deadline):
+                    self.scan_incomplete = True
+                    return None
+            elif deadline is not None and time.monotonic() >= deadline:
                 self.scan_incomplete = True
+                self.limit_reason = "time_limit"
                 return None
             node = heapq.heappop(self._pending)
             if node.scan_directory:
                 self._children(node)
+                if discovery:
+                    self._consume(node.key)
                 continue
             self._visited += 1
             if self._visited % self._CANCELLATION_CHECK_ENTRIES == 0:
@@ -427,10 +473,8 @@ class _LazyListWalk:
 
             item = Path(node.key[1])
             run_id = _internal_agent_status_run_id(item, include_agent_directory=True)
-            if run_id:
-                continue
-            if self._file_filter is not None:
-                safe = _safe_discovery_path(
+            if discovery:
+                safe = None if run_id else _safe_discovery_path(
                     self._tool, item, root=self._target, include_ignored=self._request.include_ignored,
                     ignored_names=_COMMON_FILE_DISCOVERY_IGNORES,
                 )
@@ -438,7 +482,11 @@ class _LazyListWalk:
                     if node.is_dir:
                         self._schedule_descent(node.key[1], depth=node.depth, identity=node.identity)
                     elif node.is_file and (self._after_key is None or node.key > self._after_key):
+                        self._yielded = node.key
                         return item, False
+                self._consume(node.key)
+                continue
+            if run_id:
                 continue
             resolved = item if node.resolved_directory is None else node.resolved_directory / item.name
             if node.is_reparse_point:
@@ -492,6 +540,8 @@ class _LazyListWalk:
             for index, entry in enumerate(entries):
                 if index % self._CANCELLATION_CHECK_ENTRIES == 0:
                     raise_if_cancelled()
+                # 跳过、筛掉的条目同样计入文件工作量，稀疏或零命中遍历不能绕过预算。
+                self.examined += 1
                 name = entry.name
                 key = (folded_prefix + name.lower(), prefix + name)
                 if batch_after is not None and key <= batch_after:

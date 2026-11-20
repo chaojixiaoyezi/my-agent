@@ -257,6 +257,8 @@ class _DiscoveryCursor:
     context_offset: int = 0
     context_line: int = 0
     after_file_id: tuple[int, ...] = ()
+    # 有序发现已处理到的位置，独立于最后交付项 after_entry；目录选取位置以 / 结尾。零命中页靠它严格前进。
+    scan_after: str = ""
 
 
 class _CursorSourceChanged(Exception):
@@ -281,6 +283,13 @@ def _cursor_key_is_valid(key: object) -> bool:
     return not path.anchor and ".." not in path.parts and (not key or path.as_posix() == key)
 
 
+def _cursor_scan_position_is_valid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value[:-1] if value.endswith("/") else value
+    return not value or (bool(text) and _cursor_key_is_valid(text))
+
+
 def _cursor_identity_is_valid(value: object, length: int) -> bool:
     return isinstance(value, list) and len(value) == length and all(type(n) is int for n in value)
 
@@ -301,7 +310,9 @@ def _parse_discovery_cursor(token: object, *, kind: str) -> _DiscoveryCursor | N
         or data.get("kind") != kind
         or not isinstance(data.get("query_sig"), str)
         or not _cursor_identity_is_valid(data.get("root_id"), 2)
-        or not _cursor_identity_is_valid(data.get("file_id"), 4)
+        or not _cursor_scan_position_is_valid(data.get("scan_after", ""))
+        or not (_cursor_identity_is_valid(data.get("file_id"), 4)
+                or (data.get("file_id") == [] and data.get("scan_after")))
         or (data.get("after_file_id") and not _cursor_identity_is_valid(data["after_file_id"], 4))
         or not _cursor_key_is_valid(data.get("after_entry"))
         or not _cursor_key_is_valid(data.get("candidate", data.get("after_entry")))
@@ -314,22 +325,32 @@ def _parse_discovery_cursor(token: object, *, kind: str) -> _DiscoveryCursor | N
     candidate = data.get("candidate", data["after_entry"])
     byte_offset, line = data.get("byte_offset", 0), data.get("line", 0)
     context_offset, context_line = data.get("context_offset", 0), data.get("context_line", 0)
-    if (
-        not candidate or not 0 <= context_offset <= byte_offset <= file_id[2]
-        or not 0 <= context_line <= line <= byte_offset
-        or bool(byte_offset) != bool(line) or data.get("matches", 0) > line
-        or (kind == "find" and (data["after_entry"] != candidate or byte_offset))
-    ):
+    if not candidate:
+        # 尚未交付或打开任何文件的游标只靠已处理位置前进，不能带文件身份或行位置。
+        invalid = (not data.get("scan_after") or file_id or data["after_entry"] or data.get("after_file_id")
+                   or byte_offset or line or context_offset or context_line or data.get("matches", 0))
+    else:
+        invalid = (
+            len(file_id) != 4 or not 0 <= context_offset <= byte_offset <= file_id[2]
+            or not 0 <= context_line <= line <= byte_offset
+            or bool(byte_offset) != bool(line) or data.get("matches", 0) > line
+            or (kind == "find" and (data["after_entry"] != candidate or byte_offset))
+        )
+    if invalid:
         raise ValueError("cursor 中的文件或行位置无效，请重新发起查询。未开始扫描。")
     return _DiscoveryCursor(
         kind, tuple(data["root_id"]), data["query_sig"], data["after_entry"], candidate,
         file_id, byte_offset, line, data["phase"], data.get("skip", 0), data.get("matches", 0),
-        context_offset, context_line, tuple(data.get('after_file_id') or ()),
+        context_offset, context_line, tuple(data.get('after_file_id') or ()), data.get("scan_after", ""),
     )
 
 
 def _encode_discovery_cursor(cursor: _DiscoveryCursor) -> str:
-    raw = json.dumps({"v": 1, **asdict(cursor)}, separators=(",", ":")).encode("ascii")
+    payload = asdict(cursor)
+    if not payload["scan_after"]:
+        # 没有越过最后交付项的已处理位置时保持原有游标形状。
+        del payload["scan_after"]
+    raw = json.dumps({"v": 1, **payload}, separators=(",", ":")).encode("ascii")
     return base64.urlsafe_b64encode(raw).decode("ascii")
 
 
@@ -348,7 +369,7 @@ def _bind_discovery_cursor(
             raise _CursorSourceChanged("query_sig", cursor.after_entry)
         if cursor.root_id != root_id:
             raise _CursorSourceChanged("root_id", cursor.after_entry)
-        anchors = [(cursor.candidate, cursor.file_id)]
+        anchors = [(cursor.candidate, cursor.file_id)] if cursor.candidate else []
         if cursor.after_file_id and cursor.after_entry != cursor.candidate:
             anchors.append((cursor.after_entry, cursor.after_file_id))
         for key, expected in anchors:

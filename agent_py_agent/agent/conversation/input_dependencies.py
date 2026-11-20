@@ -773,12 +773,17 @@ def _credential_delivery_id(inputs, owner_id, wake, proof, delivery_store):
     from .host_actor import background_host_actor
 
     request = SimpleNamespace(wake_signal=wake.to_dict())
-    stable_id = 'host-delivery:' + background_delivery_idempotency_key(request)
-    receipt = delivery_store.terminal_receipt(stable_id)
-    sent_at = receipt.get('sent_at') if isinstance(receipt, dict) else None
-    if (not isinstance(receipt, dict) or receipt.get('disposition') != 'sent'
-            or type(sent_at) not in (float, int) or not math.isfinite(sent_at) or sent_at < proof['checked_at']):
-        return ''
+    delivery_key = background_delivery_idempotency_key(request)
+    stable_id = 'host-delivery:' + delivery_key
+
+    def sent_receipt(identity):
+        receipt = delivery_store.terminal_receipt(identity)
+        sent_at = receipt.get('sent_at') if isinstance(receipt, dict) else None
+        if (not isinstance(receipt, dict) or receipt.get('disposition') != 'sent'
+                or type(sent_at) not in (float, int) or not math.isfinite(sent_at) or sent_at < proof['checked_at']):
+            return None
+        return receipt
+
     view = SimpleNamespace(conversation_store=inputs.store,
         home_paths=SimpleNamespace(owner_id=owner_id, owner_kind=inputs.owner.owner_kind))
     try:
@@ -793,19 +798,58 @@ def _credential_delivery_id(inputs, owner_id, wake, proof, delivery_store):
     except (ValueError, OSError, KeyError):
         return ''
     policy = getattr(context, 'reply_policy', '')
-    if (not target or (topic and (not context.reply_to or policy != 'thread'))
-            or (receipt.get('channel'), receipt.get('target'), receipt.get('conversation_id'),
-                receipt.get('reply_to'), receipt.get('reply_policy')) !=
-                (actor.channel, target, context.conversation_id, context.reply_to, policy)):
+    if not target or (topic and (not context.reply_to or policy != 'thread')):
         return ''
+    receipt = sent_receipt(stable_id)
+    if receipt is not None:
+        route = (actor.channel, target, context.conversation_id, context.reply_to, policy)
+        return stable_id if _confirmed_route_receipt(receipt, route) else ''
+    # 宿主未自动外发时，答复可能由本次 Wake 的显式 send_message 完成；只认原 Wake 规范落账里共核过的完整
+    # spool 回执键，按确切键读取，并要求同一来源会话、无话题的原私聊路线，绝不为补证据再次发送。
+    if topic:
+        return ''
+    for delivery_ref in _mirrored_tool_delivery_refs(inputs, context.thread_id or wake.thread_id, delivery_key,
+                                                     wake=wake, actor=actor, target=target):
+        receipt = sent_receipt(delivery_ref)
+        if receipt is not None and _confirmed_route_receipt(receipt, (actor.channel, target, '', '', '')):
+            return delivery_ref
+    return ''
+
+
+def _confirmed_route_receipt(receipt, route):
+    if (receipt.get('channel'), receipt.get('target'), receipt.get('conversation_id'),
+            receipt.get('reply_to'), receipt.get('reply_policy')) != route:
+        return False
     components = receipt.get('component_receipts')
-    if not isinstance(components, list) or not any(
+    return isinstance(components, list) and any(
         isinstance(item, dict) and item.get('phase') == 'send_confirmed'
         and item.get('effect_outcome') == 'confirmed' and item.get('provider_message_id')
         for item in components
-    ):
-        return ''
-    return stable_id
+    )
+
+
+def _mirrored_tool_delivery_refs(inputs, thread_id, delivery_key, *, wake, actor, target):
+    """按 Wake 规范落账的确切去重键读取镜像回复，只返回绑定到同一任务、来源会话与目标的显式发送回执键。"""
+    from .message_scan import find_message_dedupe
+
+    if not thread_id or not delivery_key:
+        return ()
+    try:
+        entry = find_message_dedupe(inputs.store.storage.message_path(thread_id), f'owner_delivery:{delivery_key}')
+    except (OSError, ValueError):
+        return ()
+    metadata = getattr(entry, 'metadata', None)
+    mirrored = metadata.get('message_tool_delivery') if isinstance(metadata, dict) else None
+    if not isinstance(mirrored, dict) or mirrored.get('delivery_status') != 'sent':
+        return ()
+    binding = mirrored.get('reply_binding')
+    refs = mirrored.get('delivery_refs')
+    if (not isinstance(binding, dict) or not isinstance(refs, list)
+            or (binding.get('task_id'), binding.get('thread_id'), binding.get('conversation_id'),
+                binding.get('actor_id'), binding.get('channel'), binding.get('target')) !=
+                (wake.root_task_id, wake.thread_id, actor.conversation_id, actor.actor_id, actor.channel, target)):
+        return ()
+    return tuple(ref for ref in refs if isinstance(ref, str) and ref.startswith('host-delivery:send_message:'))
 
 
 # LLM: 旧入口仅取原Agent依赖，不物化新对象；Count0原callback/初始化/缺repo语义保持。

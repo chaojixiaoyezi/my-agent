@@ -209,3 +209,82 @@ def test_total_read_budget_includes_hit_verification(tmp_path, monkeypatch):
     lengths.clear()
     assert lookup_business_upload(owner, ids[-1], max_total_bytes=limit).record.artifact_id == ids[-1]
     assert lengths == [limit]
+
+
+def _publish(owner, artifact_id, version="v1"):
+    # The production upload route publishes through the same writer lock and atomic option.
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_observed_artifact,
+    )
+    from agent_py_agent.agent.common.directory_lock import locked_private_directory
+
+    root = owner / "artifacts" / "business"
+    request = ArtifactRegistration(
+        root, root / f"{artifact_id}.blob", artifact_id=artifact_id, status="ready", source="business_upload",
+        metadata={"owner_id": "local/test", "version_ref": version, "space_id": "space-1"},
+    )
+    with locked_private_directory(owner, relative_parts=("artifacts", "business"), lock_name=".business-artifacts.lock"):
+        return register_observed_artifact(request, observed_sha256="0" * 64, observed_size_bytes=1, atomic_publish=True)
+
+
+def test_atomic_uploads_between_bounded_lookups_keep_verified_progress(tmp_path):
+    owner, path, ids = _registry(tmp_path, 400)
+    block = 40 * len(_line(ids[0]))
+    watermarks, inodes = [], set()
+    result = None
+    for step in range(200):
+        result = lookup_business_upload(owner, ids[0], max_bytes=block, max_steps=1, return_pending=True)
+        if not result.pending:
+            break
+        watermarks.append(result.watermark)
+        # An ordinary upload replaces the registry inode between every pair of bounded reads.
+        _publish(owner, f"artifact-new-{step:035x}")
+        inodes.add(path.stat().st_ino)
+    assert result is not None and not result.pending
+    assert result.record.artifact_id == ids[0]
+    assert len(inodes) == len(watermarks) > 1
+    assert watermarks == sorted(watermarks) and len(set(watermarks)) == len(watermarks)
+    assert verify_record_proof(owner, result.proof).artifact_id == ids[0]
+    # The appended rows are indexed from the carried frontier with latest-record semantics.
+    assert lookup_business_upload(owner, "artifact-new-" + "0" * 35).record is not None
+    _publish(owner, ids[1], "v2")
+    assert lookup_business_upload(owner, ids[1]).record.metadata["version_ref"] == "v2"
+
+
+@pytest.mark.parametrize("change", ["same_size_rewrite", "unterminated_tail"])
+def test_unproven_extension_still_rebuilds(tmp_path, change):
+    owner, path, ids = _registry(tmp_path, 6)
+    block = len(_line(ids[0]))
+    assert lookup_business_upload(owner, ids[0], max_bytes=block, max_steps=2, return_pending=True).watermark == 2 * block
+    if change == "same_size_rewrite":
+        # An unrelated replacement of the same length, not written by the atomic publisher.
+        target = path.with_name("next.jsonl")
+        target.write_bytes(b"".join(_line(f"artifact-{index:040x}", "v9") for index in range(6, 12)))
+        target.replace(path)
+    else:
+        path.write_bytes(path.read_bytes().rstrip(b"\n"))
+        _publish(owner, "artifact-" + "f" * 40)
+    progress = lookup_business_upload(owner, ids[0], max_bytes=block, max_steps=1, return_pending=True)
+    assert progress.pending and progress.watermark == block
+
+
+def test_projection_rebind_failure_keeps_canonical_publication(tmp_path, monkeypatch):
+    from agent_py_agent.agent.local_storage import owner_read_index
+
+    owner, path, ids = _registry(tmp_path, 6)
+    block = len(_line(ids[0]))
+    assert lookup_business_upload(owner, ids[0], max_bytes=block, max_steps=2, return_pending=True).watermark == 2 * block
+
+    def unavailable(self):
+        raise owner_read_index.OwnerReadUnavailable({"status": "unavailable", "reason": "io_error"})
+
+    with monkeypatch.context() as patch:
+        patch.setattr(OwnerReadIndex, "upload_registry_transaction", unavailable)
+        record = _publish(owner, "artifact-" + "e" * 40)
+    assert record.artifact_id == "artifact-" + "e" * 40
+    assert path.read_bytes().endswith(_line(ids[-1]) + path.read_bytes().splitlines(keepends=True)[-1])
+    # The checkpoint was never rebound, so the next lookup rebuilds instead of trusting stale coverage.
+    progress = lookup_business_upload(owner, ids[0], max_bytes=block, max_steps=1, return_pending=True)
+    assert progress.pending and progress.watermark == block
+    assert lookup_business_upload(owner, record.artifact_id).record.artifact_id == record.artifact_id

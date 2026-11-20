@@ -1077,6 +1077,15 @@ def mirror_message_tool_deliveries(delivery, request, context, deliveries, *, de
         evidence_refs=refs, operation_verification=None, frozen_retry=None)
     metadata['message_tool_delivery'] = {'receipt_id': first['receipt_id'], 'delivery_status': 'sent',
         'deduplicated': first.get('deduplicated') is True}
+    # 共核过的工具回复带上完整 spool 回执键与原路线绑定，供凭据证据链按确切键复核，不靠展示编号或正文。
+    spool_refs = list(dict.fromkeys(str(item['delivery_ref']) for item in deliveries
+                                    if isinstance(item.get('delivery_ref'), str) and item['delivery_ref']))
+    if spool_refs:
+        binding = first.get('reply_binding') if isinstance(first.get('reply_binding'), dict) else {}
+        metadata['message_tool_delivery'].update(delivery_refs=spool_refs, reply_binding={
+            key: str(binding.get(key) or '') for key in (
+                'request_id', 'run_id', 'task_id', 'attempt_id', 'thread_id', 'source_thread_id',
+                'conversation_id', 'actor_id', 'channel', 'target')})
     metadata['channel_message_ids'] = list(dict.fromkeys(identity for item in deliveries
         for identity in outbound_message_ids(SimpleNamespace(**item))))
     metadata['receipt_id'] = first['receipt_id']
