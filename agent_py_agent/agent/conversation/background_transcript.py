@@ -671,11 +671,14 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             self.publication_gate.resolve("withheld")
 
     def resolve_publication(self, decision, *, redactions=()) -> None:
-        if self.publication_gate.decision == "pending":
+        gate = self.publication_gate
+        if gate.decision == "pending":
             self._publication_redactions = redactions
-            try:
-                self.publication_gate.resolve(decision)
-            finally:
+        # 重试沿首次决定选中的同一投影续写未应用条目；投影只在队列全部应用后释放。
+        try:
+            gate.resolve(decision)
+        finally:
+            if gate.settled:
                 self._publication_redactions = ()
         if self.publication_gate.decision != "withheld" or self._published_withhold:
             return

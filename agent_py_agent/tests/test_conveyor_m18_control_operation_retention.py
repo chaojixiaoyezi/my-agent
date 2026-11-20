@@ -196,6 +196,98 @@ def test_mixed_flat_and_day_shards_retire_in_bounded_slices(tmp_path, monkeypatc
     assert not list(folder.iterdir())
 
 
+
+def _settled_owner(root):
+    owner = root / "owner"
+    owner.mkdir()
+    repo = RuntimeRepository(owner / "runtime.db")
+    with closing(sqlite3.connect(repo.db_path)) as conn:
+        conn.execute("INSERT INTO task_runs(task_run_id,task_id,status,created_at,updated_at) VALUES ('t','task','done',1,1)")
+        conn.execute("INSERT INTO agent_runs(agent_run_id,task_run_id,run_id,status,created_at,updated_at) VALUES ('a','t','run','done',1,1)")
+        conn.execute("INSERT INTO agent_attempts(attempt_id,agent_run_id,attempt_generation,status,started_at,ended_at) VALUES ('attempt','a',1,'done',1,2)")
+        conn.commit()
+    return owner
+
+
+def _rotating_roots(tmp_path, count=33, days=129):
+    owner = _settled_owner(tmp_path)
+    roots, subjects = [], []
+    for index in range(count):
+        folder = tmp_path / f"workspace-{index}" / "background_dispatch"
+        names = [time.strftime("%Y-%m-%d", time.gmtime((20000 + day) * DAY)) for day in range(days)]
+        for name in names:
+            (folder / name).mkdir(parents=True)
+        log = folder / names[-1] / "launch.log"
+        log.write_bytes(b"stdout")
+        info = log.stat()
+        log_retention.record_dispatch_log_exit(log, returncode=0, run_ids=["run"], owner_home=owner,
+                                               attempt_ids={"run": "attempt"}, expected_identity=(info.st_dev, info.st_ino))
+        roots.append(folder)
+        subjects.append(log)
+    return roots, subjects
+
+
+@pytest.mark.skipif(fcntl is None, reason="需要原日志句柄租约")
+@pytest.mark.parametrize("restart_each_slice", [False, True])
+def test_rotating_workspaces_resume_scan_position_beyond_cache(tmp_path, monkeypatch, restart_each_slice):
+    roots, subjects = _rotating_roots(tmp_path)
+    monkeypatch.setattr(log_retention, "_SCANS", type(log_retention._SCANS)())
+    later = time.time() + 31 * DAY
+    deleted = completed = 0
+    for _round in range(3):
+        for folder in roots:
+            if restart_each_slice:
+                log_retention._SCANS.clear()  # 进程重启：仅剩目录内轻量进度
+            result = log_retention.retire_dispatch_logs_slice(folder, now=later)
+            assert result["scanned"] <= 128
+            deleted += result["deleted"]
+            completed += result["complete"]
+        assert len(log_retention._SCANS) <= 32
+    assert deleted == len(roots) and completed >= len(roots)
+    assert not any(log.exists() for log in subjects)
+    for folder in roots:
+        # 完整一轮后旧空日目录与进度文件都已退役，下一轮从头开始。
+        assert not list(folder.iterdir())
+
+
+@pytest.mark.skipif(fcntl is None, reason="需要原日志句柄租约")
+def test_resumed_cursor_skips_processed_markers_and_resets_on_identity_change(tmp_path, monkeypatch):
+    owner = _settled_owner(tmp_path)
+    folder = tmp_path / "background_dispatch"
+    shard = folder / "2026-10-01"
+    shard.mkdir(parents=True)
+    for name in ("a", "b", "c", "d"):
+        log = shard / f"{name}.log"
+        log.write_bytes(b"stdout")
+        info = log.stat()
+        log_retention.record_dispatch_log_exit(log, returncode=0, run_ids=["run"], owner_home=owner,
+                                               attempt_ids={"run": "attempt"}, expected_identity=(info.st_dev, info.st_ino))
+    seen = []
+    original = log_retention._retire_exit_marker
+
+    def observe(path, descriptor, marker, *args):
+        seen.append(marker)
+        return original(path, descriptor, marker, *args)
+
+    monkeypatch.setattr(log_retention, "_retire_exit_marker", observe)
+    monkeypatch.setattr(log_retention, "_SCANS", type(log_retention._SCANS)())
+    # 回执未过 30 天窗口：游标推进但不退役，便于观察续扫位置。
+    log_retention.retire_dispatch_logs_slice(folder, max_entries=2)
+    progress = json.loads((folder / log_retention._PROGRESS_NAME).read_text())
+    assert (progress["day"], progress["after"]) == ("2026-10-01", "a.exit.json")
+    log_retention._SCANS.clear()
+    log_retention.retire_dispatch_logs_slice(folder, max_entries=2)
+    assert seen == ["a.exit.json", "b.exit.json", "c.exit.json"]
+    log_retention._SCANS.clear()
+    # 进度与目录身份不符时（如目录被替换）从头扫，而不是沿旧游标跳过回执。
+    progress = json.loads((folder / log_retention._PROGRESS_NAME).read_text())
+    progress["identity"] = [0, 0]
+    (folder / log_retention._PROGRESS_NAME).write_text(json.dumps(progress))
+    result = log_retention.retire_dispatch_logs_slice(folder, now=time.time() + 31 * DAY, max_entries=8)
+    assert result["complete"] and result["deleted"] == 4
+    assert seen[3:] == ["a.exit.json", "b.exit.json", "c.exit.json", "d.exit.json"]
+    assert not folder.joinpath(log_retention._PROGRESS_NAME).exists() and not shard.exists()
+
 def test_deployment_retention_key(tmp_path):
     key = "gateway_control_operation_retention_days"
     config_path = tmp_path / "agent.yaml"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
@@ -31,13 +32,20 @@ def _raw_publication_window() -> int:
 
 
 class PublicationGate:
-    """只在运行存活时持有待发布数据，终态决定只能签发一次。"""
+    """只在运行存活时持有待发布数据，终态决定只能签发一次。
+
+    决定与排空进度分开记录：终态后队列头只在其写入成功后才出队，失败条目与其后的未应用条目
+    留在本运行私有队列里，重试 resolve 沿原顺序续写（各端口依赖原有幂等键避免重复）。
+    排空由独立锁串行，门锁不跨 I/O 持有；排空线程内的重入写入直接执行。
+    """
 
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
         self._decision: Decision = "pending"
         self._lock = threading.Lock()
-        self._held: list[tuple[Port, PublicationWrite]] = []
+        self._drain_lock = threading.Lock()
+        self._drainer: int | None = None
+        self._held: deque[tuple[Port, PublicationWrite]] = deque()
         self._held_bytes = 0
         self._overflow = False
 
@@ -45,6 +53,12 @@ class PublicationGate:
     def decision(self) -> Decision:
         with self._lock:
             return self._decision
+
+    @property
+    def settled(self) -> bool:
+        """终态已签发且所有排队条目都已应用。"""
+        with self._lock:
+            return self._decision != "pending" and not self._held
 
     def write(self, port: Port, payload: object) -> None:
         self.publish(port, payload)
@@ -58,6 +72,17 @@ class PublicationGate:
             if decision == "pending":
                 self._hold(port, payload)
                 return None
+            # 仍有未应用的早先条目时，后来者排在其后，不能越过失败条目先落盘。
+            queued = bool(self._held) and self._drainer != threading.get_ident()
+            if queued:
+                self._held.append((port, payload))
+        if queued:
+            self._drain()
+            return None
+        return self._emit(decision, payload)
+
+    @staticmethod
+    def _emit(decision: Decision, payload: PublicationWrite) -> object:
         if decision == "verified" or payload.withhold_record:
             return payload.emit(payload.value)
         return None
@@ -107,16 +132,35 @@ class PublicationGate:
                 self._held_bytes = 0
 
     def resolve(self, decision: Literal["verified", "withheld"]) -> None:
+        """签发终态（仅首次生效）并排空队列；排空中途失败时原样抛出，可再次调用续写。"""
         if decision not in ("verified", "withheld"):
             raise ValueError("display publication requires a terminal decision")
         with self._lock:
-            if self._decision != "pending":
+            if self._decision == "pending":
+                self._decision = "withheld" if self._overflow else decision
+                self._held_bytes = 0
+            if not self._held or self._drainer == threading.get_ident():
                 return
-            self._decision = "withheld" if self._overflow else decision
-            held, self._held = self._held, []
-            self._held_bytes = 0
-        for port, payload in held:
-            self.publish(port, payload)
+        self._drain()
+
+    def _drain(self) -> None:
+        with self._drain_lock:
+            with self._lock:
+                self._drainer = threading.get_ident()
+            try:
+                while True:
+                    with self._lock:
+                        if not self._held:
+                            return
+                        decision = self._decision
+                        head = self._held[0]
+                    self._emit(decision, head[1])
+                    with self._lock:
+                        if self._held and self._held[0] is head:
+                            self._held.popleft()
+            finally:
+                with self._lock:
+                    self._drainer = None
 
 
 _gates: WeakValueDictionary[str, PublicationGate] = WeakValueDictionary()

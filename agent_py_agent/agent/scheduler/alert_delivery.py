@@ -169,6 +169,29 @@ def _business_result(content, options, receipts):
         **{key: deepcopy(options.get(key)) for key in ("operation_verification", "public_receipt", "display_snapshot")}}
 
 
+# LLM: 发布决定属于本次精确运行，须在wake种子、目标回执与汇总结果的任何写入之前作出；已存的旧业务结果
+#   也重新经过同一决定，旧原文不能顶替本次投影。未涉凭据的普通结果原样保留。
+# 函数用途: 把业务结果换成凭据安全投影，并返回需随结果元数据保存的发布事实。
+def _credential_safe_business(delivery, request, source, options):
+    from ..conversation.background_delivery import _prepare_credential_safe_background_inputs
+
+    content, receipt, artifacts, commentaries, snapshot, verified, diagnostics = _prepare_credential_safe_background_inputs(
+        delivery, request, source["content"], public_receipt=source.get("public_receipt"),
+        delivery_artifacts=tuple(source.get("delivery_artifacts", ())),
+        assistant_commentaries=tuple(source.get("assistant_commentaries", ())),
+        display_snapshot=source.get("display_snapshot"), frozen_retry=options.get("frozen_retry"),
+        operation_verification=source.get("operation_verification"), tool_call_count=options.get("tool_call_count"))
+    withheld = "credential_delivery_withheld" in diagnostics
+    business = {**source, "content": content, "delivery_artifacts": list(artifacts),
+        "assistant_commentaries": list(commentaries), "public_receipt": receipt, "display_snapshot": snapshot,
+        "operation_verification": None if withheld else source.get("operation_verification")}
+    if withheld:
+        # 扣留时元数据与证据引用按扣留结果重建，不沿用旧结果里可能携带原文的字段。
+        business.pop("message_metadata", None)
+        business.pop("evidence_refs", None)
+    return business, withheld, verified, diagnostics
+
+
 # LLM: 所有冻结都保存到原wake；失败必须显式上抛全局账本错误，不能继续其它运输。
 # 函数用途: 在网络或canonical之前保留同一任务的完整重投载荷。
 def _cache_alert_delivery(delivery, request, frozen):
@@ -211,15 +234,23 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
     targets = _alert_delivery_plans(delivery.agent, request, context, run, receipts)
     mode = normalize_delivery(run.get('delivery'))['mode']
     planned_specs = [spec for plan in targets.values() for spec in plan['specs']]
-    business = _business_result(content, options, receipts)
+    business, withheld, cred_verified, cred_diagnostics = _credential_safe_business(
+        delivery, request, _business_result(content, options, receipts), options)
     if "message_metadata" not in business:
         projection = project_user_reply(business["content"])
         business["content"] = projection.content
-        business["evidence_refs"] = list(_background_evidence_refs_for(delivery, request, None))
+        business["evidence_refs"] = [] if withheld else list(_background_evidence_refs_for(delivery, request, None))
         business["message_metadata"] = _background_owner_message_metadata(request,
             delivery_reason=options["delivery_reason"], projection_status=projection.projection_status,
             delivery_artifacts=tuple(business["delivery_artifacts"]), evidence_refs=tuple(business["evidence_refs"]),
             operation_verification=business["operation_verification"], public_receipt=business["public_receipt"], frozen_retry=None)
+    if cred_diagnostics:
+        # 与单路线信封相同的发布事实：冷重投据此识别已扣留或已核验的冻结结果。
+        business["message_metadata"].update(deepcopy(cred_diagnostics))
+        if withheld:
+            business["message_metadata"]["publication_decision"] = "withheld"
+        if cred_verified:
+            business["message_metadata"]["credential_redaction_verified"] = True
     business["message_metadata"]["scheduler_delivery_event_key"] = event_key
     seed = {"schema_version": "wake-owner-delivery.v2", "task_id": request.task_id, "reason": request.reason,
         "created_at": time.time(), **deepcopy(business), "external_sent": False, "receipt_id": "", "ownership": ""}

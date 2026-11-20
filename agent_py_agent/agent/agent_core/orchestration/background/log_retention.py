@@ -1,6 +1,7 @@
 """派工日志随实际进程退出留存；未知执行体和未收口业务证据永不按年龄删除。"""
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import re
@@ -18,6 +19,8 @@ from ....common.nofollow_fs import open_directory_beneath, read_bytes_beneath
 _SCANS = OrderedDict()
 _LOCK = threading.RLock()
 _DAY_SHARD = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
+_PROGRESS_NAME = '.retention_progress.json'
+_PROGRESS_SCHEMA = 'background_dispatch_log_retention_progress.v1'
 
 
 def pin_dispatch_log(handle):
@@ -145,58 +148,96 @@ def _directory_identity(descriptor):
     return info.st_dev, info.st_ino
 
 
-class _DispatchScan:
-    def __init__(self, descriptor):
-        self.identity = _directory_identity(descriptor)
-        self.entries = os.scandir(descriptor)
-        self.days = []
-        self.day_scan = None
+class _ScanProgress:
+    """单根续扫位置：按名有序游标（day, after），不持有任何目录句柄。
 
-    def close(self):
-        if self.entries is not None:
-            self.entries.close()
-        if self.day_scan is not None:
-            self.day_scan.close()
+    day 为空串表示旧平铺层；after 是该层最后处理过的回执名。名单只是可重建的读取侧缓存，
+    缓存淘汰或进程重启后从同目录的轻量进度文件恢复游标，重新列目录并沿原位置向前推进。
+    """
+
+    __slots__ = ('identity', 'day', 'after', 'days', 'names', 'names_identity')
+
+    def __init__(self, identity, day='', after=''):
+        self.identity = identity
+        self.day = day
+        self.after = after
+        self.days = None
+        self.names = None
+        self.names_identity = None
 
 
-def _retire_directory(folder, descriptor, scan, result, *, owner_home, cutoff, max_entries, deadline, collect_days=False):
-    while result['scanned'] < max_entries and time.monotonic() < deadline:
-        entry = next(scan.entries, None)
-        if entry is None:
-            scan.entries.close()
-            scan.entries = None
-            return True
+def _load_progress(folder, identity):
+    try:
+        raw = read_bytes_beneath(folder, (_PROGRESS_NAME,), max_bytes=65536, require_dir_fd=True)
+        row = json.loads(raw) if raw is not None else None
+    except (OSError, ValueError):
+        row = None
+    if (isinstance(row, dict) and row.get('schema') == _PROGRESS_SCHEMA and row.get('identity') == list(identity)
+            and type(row.get('day')) is str and type(row.get('after')) is str
+            and (row['day'] == '' or _DAY_SHARD.fullmatch(row['day']))):
+        return _ScanProgress(identity, row['day'], row['after'])
+    return _ScanProgress(identity)
+
+
+def _store_progress(folder, progress, complete):
+    path = folder / _PROGRESS_NAME
+    try:
+        if complete:
+            path.unlink(missing_ok=True)
+        else:
+            # 进度只是加速事实：丢失只会让下一轮从头复扫，不影响任何退役判定，故不 fsync。
+            json_io.write_private_json_file_atomic_unlocked(path, {
+                'schema': _PROGRESS_SCHEMA, 'identity': list(progress.identity),
+                'day': progress.day, 'after': progress.after,
+            }, durable=False)
+    except OSError:
+        pass
+
+
+def _list_top_level(descriptor):
+    flat, days = [], []
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            if _DAY_SHARD.fullmatch(entry.name):
+                days.append(entry.name)
+            elif entry.name.endswith('.exit.json'):
+                flat.append(entry.name)
+    flat.sort(reverse=True)
+    days.sort()
+    return flat, days
+
+
+def _list_markers(descriptor):
+    with os.scandir(descriptor) as entries:
+        return sorted((entry.name for entry in entries if entry.name.endswith('.exit.json')), reverse=True)
+
+
+def _drain(folder, descriptor, progress, result, *, owner_home, cutoff, max_entries, deadline):
+    """按名升序处理游标之后的回执；names 逆序存放以便 pop() 取最小名。"""
+    while progress.names:
+        if result['scanned'] >= max_entries or time.monotonic() >= deadline:
+            return False
+        name = progress.names.pop()
         result['scanned'] += 1
-        if collect_days and _DAY_SHARD.fullmatch(entry.name):
-            try:
-                info = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
-            except OSError:
-                continue
-            if stat.S_ISDIR(info.st_mode):
-                scan.days.append(entry.name)
-        elif entry.name.endswith('.exit.json'):
-            result['deleted'] += _retire_exit_marker(folder, descriptor, entry.name, owner_home, cutoff)
-    return False
+        result['deleted'] += _retire_exit_marker(folder, descriptor, name, owner_home, cutoff)
+        progress.after = name
+    return True
 
 
-def _retire_day(folder, descriptor, scan, result, *, owner_home, cutoff, cutoff_day, max_entries, deadline):
-    day = scan.days[-1]
+def _retire_day(folder, descriptor, progress, result, *, owner_home, cutoff, cutoff_day, max_entries, deadline):
+    day = progress.day
     try:
         child = os.open(day, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
     except OSError:
-        if scan.day_scan is not None:
-            scan.day_scan.close()
-            scan.day_scan = None
         return True
     try:
-        if scan.day_scan is None or scan.day_scan.identity != _directory_identity(child):
-            if scan.day_scan is not None:
-                scan.day_scan.close()
-            scan.day_scan = _DispatchScan(child)
-        if not _retire_directory(folder / day, child, scan.day_scan, result, owner_home=owner_home,
-                                 cutoff=cutoff, max_entries=max_entries, deadline=deadline):
+        identity = _directory_identity(child)
+        if progress.names is None or progress.names_identity != identity:
+            progress.names = [name for name in _list_markers(child) if name > progress.after]
+            progress.names_identity = identity
+        if not _drain(folder / day, child, progress, result, owner_home=owner_home, cutoff=cutoff,
+                      max_entries=max_entries, deadline=deadline):
             return False
-        scan.day_scan = None
         # 保留仍可能接收新启动日志的近期目录。旧目录仅在原 inode 且为空时退役。
         if day < cutoff_day:
             try:
@@ -211,7 +252,7 @@ def _retire_day(folder, descriptor, scan, result, *, owner_home, cutoff, cutoff_
 
 
 def retire_dispatch_logs_slice(folder, *, owner_home=None, now=None, max_entries=128, max_ms=25):
-    """先扫旧平铺日志，再按 UTC 日由旧到新。每片沿原目录身份续扫。"""
+    """先扫旧平铺日志，再按 UTC 日由旧到新。每片沿持久名游标续扫，与句柄缓存无关。"""
     folder = Path(folder).absolute()
     if owner_home is not None:
         owner_home = Path(owner_home)
@@ -231,35 +272,40 @@ def retire_dispatch_logs_slice(folder, *, owner_home=None, now=None, max_entries
         except FileNotFoundError:
             return {**result, 'complete': True}
         try:
+            identity = _directory_identity(descriptor)
             with _LOCK:
-                scan = _SCANS.pop(key, None)
-            if scan is not None and scan.identity != _directory_identity(descriptor):
-                scan.close()
-                scan = None
-            if scan is None:
-                scan = _DispatchScan(descriptor)
-            try:
-                if scan.entries is not None:
-                    if not _retire_directory(folder, descriptor, scan, result, owner_home=owner_home,
-                                             cutoff=cutoff, max_entries=max_entries, deadline=deadline,
-                                             collect_days=True):
-                        return result
-                    scan.days.sort(reverse=True)
-                while scan.days and result['scanned'] < max_entries and time.monotonic() < deadline:
-                    if not _retire_day(folder, descriptor, scan, result, owner_home=owner_home, cutoff=cutoff,
-                                       cutoff_day=cutoff_day, max_entries=max_entries, deadline=deadline):
-                        return result
-                    scan.days.pop()
-                result['complete'] = not scan.days
-                return result
-            finally:
-                if result['complete']:
-                    scan.close()
-                else:
-                    with _LOCK:
-                        _SCANS[key] = scan
-                        while len(_SCANS) > 32:
-                            _SCANS.popitem(last=False)[1].close()
+                progress = _SCANS.pop(key, None)
+            if progress is None or progress.identity != identity:
+                progress = _load_progress(folder, identity)
+            position = (progress.day, progress.after)
+            options = {'owner_home': owner_home, 'cutoff': cutoff, 'max_entries': max_entries, 'deadline': deadline}
+            while result['scanned'] < max_entries and time.monotonic() < deadline:
+                if progress.day == '':
+                    if progress.names is None or progress.names_identity != identity:
+                        flat, progress.days = _list_top_level(descriptor)
+                        progress.names = [name for name in flat if name > progress.after]
+                        progress.names_identity = identity
+                    if not _drain(folder, descriptor, progress, result, **options):
+                        break
+                elif not _retire_day(folder, descriptor, progress, result, cutoff_day=cutoff_day, **options):
+                    break
+                if progress.days is None:
+                    progress.days = _list_top_level(descriptor)[1]
+                following = progress.days[bisect.bisect_right(progress.days, progress.day):]
+                if not following:
+                    result['complete'] = True
+                    break
+                # 换日计入预算：大量空旧目录也按片推进，且每片至少前进一个回执或一个日目录。
+                result['scanned'] += 1
+                progress.day, progress.after, progress.names = following[0], '', None
+            if result['complete'] or (progress.day, progress.after) != position:
+                _store_progress(folder, progress, result['complete'])
+            if not result['complete']:
+                with _LOCK:
+                    _SCANS[key] = progress
+                    while len(_SCANS) > 32:
+                        _SCANS.popitem(last=False)
+            return result
         finally:
             os.close(descriptor)
     finally:

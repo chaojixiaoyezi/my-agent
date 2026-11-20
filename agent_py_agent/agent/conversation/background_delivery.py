@@ -128,7 +128,9 @@ def record_background_response(
     finally:
         if sink is not None:
             sink.abandon_publication()
-            object.__delattr__(request, "_background_publication_sink")
+            # 排空中途失败的条目只在本运行私有队列里；保持挂接让同一请求重试续写，全部应用后才解除。
+            if sink.publication_gate.settled:
+                object.__delattr__(request, "_background_publication_sink")
 
 
 # LLM: 原owner信封提交保留冻结回执、代次、渠道与canonical的完整顺序；仅由上层排除未外发委派内部结果。
