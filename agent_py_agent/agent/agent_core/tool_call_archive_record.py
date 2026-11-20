@@ -6,7 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from dataclasses import replace
+from operator import attrgetter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +21,8 @@ from ..artifacts.registry import (
     register_artifact,
 )
 from ..capability.package_output_projection import preserve_package_page_view
+from ..common import hot_json
+from ..common.fast_dataclass import fast_replace
 from ..conversation.input_media import (
     import_input_media_bytes,
     input_media_root,
@@ -170,7 +172,7 @@ def extract_observation_screenshot(agent: object, outcome: ToolHandlerOutcome) -
     if not images:
         return outcome, None
     kept = [block for block in blocks if block not in images]
-    stripped = replace(outcome, output=json.dumps({**payload, "content": kept}, ensure_ascii=False))
+    stripped = fast_replace(outcome, output=hot_json.dumps({**payload, "content": kept}, ensure_ascii=False))
     if not isinstance(envelope.get("observation"), dict) or not model_accepts_images(agent):
         return stripped, None
     return stripped, _store_observation_screenshot(agent, images[0])
@@ -383,20 +385,24 @@ def _cap_output_preview(agent: object, record: dict[str, object]) -> None:
     record["output_preview"] = (preview[:limit - len(marker)] + marker) if limit >= len(marker) else preview[:limit]
 
 
+_ARCHIVE_INT_GETTERS = {
+    key: attrgetter(key)
+    for key in ("tool_output_externalize_min_chars", "tool_output_preview_chars")
+}
+
+
 # LLM: 原用户配置与默认值保持原样，余量短正文判断仍使用实际配置而非展示上限；预览出口另行套硬门。
 # 函数用途: 读取整数配置，缺失/错误时沿原默认值，不更改其它策略的配置语义。
 def _config_int(agent: object, key: str) -> int:
     try:
-        return int(getattr(agent.config, key))
+        return int(_ARCHIVE_INT_GETTERS[key](agent.config))
     except (AttributeError, TypeError, ValueError):
         return default_config_int(key)
 
 
-# LLM: 布尔配置读取；agent/config 缺字段时用调用方给的默认值，不抛错（归档层不能因配置形状中断工具结果）。
-# 函数用途: 读一个开关类配置，缺失时用默认值。
-def _config_bool(agent: object, key: str, default: bool) -> bool:
-    value = getattr(getattr(agent, "config", None), key, None)
-    return default if value is None else bool(value)
+def _externalize_on_low_headroom(agent: object) -> bool:
+    value = getattr(getattr(agent, "config", None), "tool_output_externalize_on_low_headroom", None)
+    return True if value is None else bool(value)
 
 
 _HEADROOM_OVERFLOW_REASON = "tool_result_headroom"
@@ -408,7 +414,7 @@ _HEADROOM_OVERFLOW_REASON = "tool_result_headroom"
 def _headroom_forces_externalize(agent: object, params: object, output: object, *, call: ToolCall | None = None) -> bool:
     configured = _config_int(agent, "tool_output_externalize_min_chars")
     text = str(output or "")
-    if not text or configured == 0 or not _config_bool(agent, "tool_output_externalize_on_low_headroom", True):
+    if not text or configured == 0 or not _externalize_on_low_headroom(agent):
         return False
     size = max(len(text), len(text.encode("utf-8")))
     if (configured > 0 and size >= configured) or len(text) <= max(0, _config_int(agent, "tool_output_preview_chars")):
@@ -445,7 +451,11 @@ def _inline_headroom_remaining(params, call, current, ceiling, tokens):
     state = getattr(params, "live_archive_state", None)
     state = state if isinstance(state, dict) else {}
     turn = getattr(call, "turn_id", "") or state.get("_current_model_turn_id") or ("round", getattr(params, "tool_rounds", 0))
-    scope = tuple(str(getattr(params, name, "") or "") for name in ("run_id", "request_id", "attempt_id"))
+    scope = (
+        str(getattr(params, "run_id", "") or ""),
+        str(getattr(params, "request_id", "") or ""),
+        str(getattr(params, "attempt_id", "") or ""),
+    )
     committed = _committed_inline_call_ids(getattr(params, "tool_ir_history", None) or [], turn, call)
     return memo.reserve_inline_headroom(current, ceiling, tokens, batch_key=(scope, turn),
                                        call_id=getattr(call, "call_id", None), committed_ids=committed)
@@ -696,8 +706,11 @@ def _runtime_gate_from_result(result: object) -> dict[str, object]:
 
 def _error_facts_from_result(result: object) -> dict[str, object]:
     facts: dict[str, object] = {}
-    for key in ("error_code", "reported_error_code", "error_category", "recommended_action", "recovery_hint"):
-        _copy_text_fact(facts, key, getattr(result, key, ""))
+    _copy_text_fact(facts, "error_code", getattr(result, "error_code", ""))
+    _copy_text_fact(facts, "reported_error_code", getattr(result, "reported_error_code", ""))
+    _copy_text_fact(facts, "error_category", getattr(result, "error_category", ""))
+    _copy_text_fact(facts, "recommended_action", getattr(result, "recommended_action", ""))
+    _copy_text_fact(facts, "recovery_hint", getattr(result, "recovery_hint", ""))
     retryable = getattr(result, "retryable", None)
     if retryable is not None:
         facts["retryable"] = bool(retryable)

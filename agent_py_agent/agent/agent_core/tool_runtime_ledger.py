@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ..common.fast_dataclass import fast_replace
 from ..common.value_parsing import text_value as _text
 from ..contracts.protocol_status import TOOL_STATUS_DONE, TOOL_STATUS_FAILED
 from ..conversation.authority import (
@@ -183,8 +184,6 @@ def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_att
         "required_identity": "当前owner的已授权用户",
         "next_step": "请由当前owner的已授权用户在原会话批准本次操作；未执行，勿原样盲目重试。",
     }
-    from dataclasses import replace as _dc_replace
-
     from ..path_access_policy import configured_host_source_paths
     config = getattr(agent, "config", None)
     from ..settings.secret_ref import HostCredentialSnapshot, configured_credential_snapshot
@@ -207,7 +206,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_att
         redaction=base_redaction,
         armed=False,
     )
-    merged["_host_output_redaction"] = _dc_replace(base_redaction, _credential_use=cred_use)
+    merged["_host_output_redaction"] = fast_replace(base_redaction, _credential_use=cred_use)
     gateway_root = getattr(config, "gateway_workspace", "")
     merged.pop("host_active_service_root", None)
     if isinstance(gateway_root, (str, Path)) and str(gateway_root) and getattr(agent, "root", None):
@@ -750,14 +749,13 @@ def _attach_owner_control_write_guards(
     if not owner_scope:
         return
     home = getattr(agent, "home_paths", None)
-    protected: list[str] = []
-    names = ["owner_runs_dir"]
-    if _text(getattr(params, "context_scope", "")).lower() in {"task_local", "control_plane"}:
-        names.append("owner_tasks_dir")
-    for name in names:
-        path = _resolved_path(getattr(home, name, None))
-        if path is not None and str(path) not in protected:
-            protected.append(str(path))
+    protect_tasks = _text(getattr(params, "context_scope", "")).lower() in {"task_local", "control_plane"}
+    runs_path = _resolved_path(getattr(home, "owner_runs_dir", None))
+    protected = [str(runs_path)] if runs_path is not None else []
+    if protect_tasks:
+        tasks_path = _resolved_path(getattr(home, "owner_tasks_dir", None))
+        if tasks_path is not None and str(tasks_path) not in protected:
+            protected.append(str(tasks_path))
     if protected:
         existing = _string_list(boundary.get("forbidden_write_roots"))
         boundary["forbidden_write_roots"] = list(dict.fromkeys([*existing, *protected]))

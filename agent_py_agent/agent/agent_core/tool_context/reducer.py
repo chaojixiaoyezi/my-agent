@@ -10,9 +10,8 @@ projection while status, verification facts, hashes and archive refs remain
 structured framework facts outside an untrusted external-data body.
 """
 
-import json
-from dataclasses import replace
-
+from ...common import hot_json
+from ...common.fast_dataclass import fast_replace
 from ...tooling.output_projection import (
     project_tool_output_body,
     redact_tool_output_text,
@@ -42,7 +41,7 @@ def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[
         if isinstance(stored_live, str) and stored_live:
             live_output = stored_live
     if live_output is not None:
-        projected = replace(
+        projected = fast_replace(
                 result,
                 content_blocks=(
                     ToolContentBlock("text", text=_project_output_body(result, live_output)),
@@ -85,7 +84,7 @@ def _without_own_archive_refs(result: ToolResult, archive_record: dict[str, obje
                 if ref.kind == "tool_output" and ref.ref in archive_paths}
     if not own_refs:
         return result
-    return replace(
+    return fast_replace(
         result,
         refs=tuple(ref for ref in result.refs
                    if not (ref.kind == "tool_output" and ref.ref in own_refs)),
@@ -210,4 +209,4 @@ def _read_artifact_hint(ref: str, archive_record: dict[str, object]) -> str:
         "offset": 0,
         "max_chars": 4000,
     }
-    return json.dumps(payload, ensure_ascii=False)
+    return hot_json.dumps(payload, ensure_ascii=False)

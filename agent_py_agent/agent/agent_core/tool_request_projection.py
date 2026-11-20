@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..backends.tool_protocol_adapter import tools_for_choice
+from ..common.fast_dataclass import fast_frozen, slot_setter
 from ..prompting_parts.builder import (
     PromptBuildRequest,
     PromptRenderInput,
@@ -30,7 +31,8 @@ if TYPE_CHECKING:
 
 # LLM: None 表示未知，空元组/空字符串表示宿主明确知道为空；快照内容从原运行事实复制，不生成新身份或能力。
 # 类用途: 保存完整冻结输入和独立的临时结果覆盖；原IR保持原件，未知历史或schema不冒充可容纳。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolLoopRequestInput:
     prompt_input: PromptRenderInput | None = field(default=None, repr=False)
     system_instruction: str | None = field(default=None, repr=False)
@@ -47,17 +49,39 @@ class ToolLoopRequestInput:
     # LLM: 原IR与降级覆盖分别复制；冻结后不能因活动params的字典变化而复活旧正文或污染canonical材料。
     # 函数用途: 固定本次输入容器及临时覆盖，不建立持久快照或第二注册表。
     def __post_init__(self) -> None:
-        for name in ("native_tools", "tool_ir_history", "provider_history_messages", "tool_context", "compact_degradation_stubs"):
-            value = getattr(self, name)
-            if value is not None:
-                object.__setattr__(self, name, tuple(deepcopy(value)))
+        if self.native_tools is not None:
+            _set_native_tools(self, _snapshot_tuple(self.native_tools))
+        if self.tool_ir_history is not None:
+            _set_tool_ir_history(self, _snapshot_tuple(self.tool_ir_history))
+        if self.provider_history_messages is not None:
+            _set_provider_history_messages(self, _snapshot_tuple(self.provider_history_messages))
+        if self.tool_context is not None:
+            _set_tool_context(self, _snapshot_tuple(self.tool_context))
+        if self.compact_degradation_stubs is not None:
+            _set_compact_degradation_stubs(self, _snapshot_tuple(self.compact_degradation_stubs))
         if self.forwarded_guidance is not None:
-            object.__setattr__(self, "forwarded_guidance", frozenset(self.forwarded_guidance))
+            _set_forwarded_guidance(self, frozenset(self.forwarded_guidance))
+
+
+def _snapshot_tuple(values: Any) -> tuple[Any, ...]:
+    # 空元组和纯内建字符串元组在 deepcopy 后仍是原值，可直接借用。
+    if type(values) is tuple and (not values or all(type(item) is str for item in values)):
+        return values
+    return tuple(deepcopy(values))
+
+
+_set_native_tools = slot_setter(ToolLoopRequestInput, "native_tools")
+_set_tool_ir_history = slot_setter(ToolLoopRequestInput, "tool_ir_history")
+_set_provider_history_messages = slot_setter(ToolLoopRequestInput, "provider_history_messages")
+_set_tool_context = slot_setter(ToolLoopRequestInput, "tool_context")
+_set_compact_degradation_stubs = slot_setter(ToolLoopRequestInput, "compact_degradation_stubs")
+_set_forwarded_guidance = slot_setter(ToolLoopRequestInput, "forwarded_guidance")
 
 
 # LLM: ready 仅证明冻结输入完整且按原格式渲染成功，不代表窗口足够、协议已探测或请求已被发送。
 # 类用途: 返回精确请求材料或结构化缺口；调用方继续使用原计数、容量和授权合同。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolLoopRequestProjection:
     status: Literal["ready", "unknown"]
     missing_fields: tuple[str, ...] = ()
@@ -71,7 +95,8 @@ class ToolLoopRequestProjection:
 
 # LLM: 结论只来自冻结历史与档案声明；unknown 和未声明不能冒充支持，详情只含模态名和固定原因码。
 # 类用途: 表示一个模型候选对本次结构化输入模态是否适用，供主会话和子代理共用。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class InputModalityDecision:
     status: Literal["applicable", "inapplicable", "unknown"]
     reason_code: str
@@ -92,7 +117,8 @@ class InputModalityDecision:
 
 # LLM: 过滤结果保留逐候选不适用原因；没有适用候选只是一条保留提示，绝不授权宿主另挑模型。
 # 类用途: 返回一次候选模态过滤的白名单和结构化说明。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class InputModalityFilter:
     status: Literal["ready", "unknown"]
     reason_code: str
@@ -184,16 +210,25 @@ def project_tool_loop_request(prepared: ToolLoopRequestInput) -> ToolLoopRequest
 # LLM: 不从正文、模型名或默认空集合推断缺失事实；显式空历史与未提供历史必须保持不同结果。
 # 函数用途: 返回缺失或互相冲突的冻结字段名，方便宿主保留原模型并记录精确容量缺口。
 def _missing_request_fields(prepared: ToolLoopRequestInput) -> tuple[str, ...]:
-    fields = ["prompt_input", "system_instruction", "tool_protocol_snapshot"]
     prompt_input = prepared.prompt_input
     native = prompt_input is not None and prompt_input.native_tool_use
+    protocol = prepared.tool_protocol_snapshot
+    fields = [
+        ("prompt_input", prompt_input),
+        ("system_instruction", prepared.system_instruction),
+        ("tool_protocol_snapshot", protocol),
+    ]
     if native:
         fields.extend((
-            "native_tools", "tool_choice", "tool_ir_history", "provider_history_messages",
-            "tool_context", "forwarded_guidance", "conversation_state",
+            ("native_tools", prepared.native_tools),
+            ("tool_choice", prepared.tool_choice),
+            ("tool_ir_history", prepared.tool_ir_history),
+            ("provider_history_messages", prepared.provider_history_messages),
+            ("tool_context", prepared.tool_context),
+            ("forwarded_guidance", prepared.forwarded_guidance),
+            ("conversation_state", prepared.conversation_state),
         ))
-    missing = [name for name in fields if getattr(prepared, name) is None]
-    protocol = prepared.tool_protocol_snapshot
+    missing = [name for name, value in fields if value is None]
     if protocol is not None and (
         not isinstance(protocol, ToolProtocolSnapshot)
         or (protocol.source_protocol == "native") != native

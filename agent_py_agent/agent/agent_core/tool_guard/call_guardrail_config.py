@@ -2,6 +2,8 @@
 # 模块用途: 为真实工具门解析冻结部署快照及原合法任务提示属性。
 from __future__ import annotations
 
+from operator import attrgetter
+
 from ...settings.runtime_guard_config import RuntimeGuardPolicy, _effective_policy
 
 # 旧公开符号只作代码默认的投影，不能再维护另一份数字。
@@ -10,6 +12,15 @@ DEFAULT_READONLY_NO_PROGRESS_THRESHOLD_COUNT = RuntimeGuardPolicy().readonly_no_
 DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT = RuntimeGuardPolicy().repeated_success_hint_threshold
 DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD_COUNT = RuntimeGuardPolicy().repeated_failure_halt_threshold
 DEFAULT_HARD_FAILURE_HALT_THRESHOLD_COUNT = RuntimeGuardPolicy().hard_failure_halt_threshold
+
+_POLICY_GETTERS = {
+    key: attrgetter(key)
+    for key in (
+        "repeated_success_hint_threshold", "repeat_fail_threshold", "readonly_no_progress_threshold",
+        "terminal_block_enabled", "hard_failure_halt_enabled",
+        "repeated_failure_halt_threshold", "hard_failure_halt_threshold",
+    )
+}
 
 
 # LLM: 只有真实 typed 冻结快照或正式宿主加载器能提供策略，错误不吞成默认。
@@ -30,7 +41,7 @@ def _task_int(params: object, key: str) -> int | None:
 # 函数用途: 读取可以按任务覆盖的软提示阈值。
 def _soft_threshold(params: object, key: str) -> int:
     candidate = _task_int(params, key)
-    return getattr(_policy(params), key) if candidate is None else candidate
+    return _POLICY_GETTERS[key](_policy(params)) if candidate is None else candidate
 
 
 # LLM: 成功重复只是软提醒，与只读或失败硬门无关。
@@ -56,13 +67,13 @@ def readonly_no_progress_threshold(params: object) -> int:
 def _hard_enabled(params: object, key: str) -> bool:
     attrs = getattr(params, "task_attributes", None)
     requested = isinstance(attrs, dict) and attrs.get(key) is True
-    return getattr(_policy(params), key) or requested
+    return _POLICY_GETTERS[key](_policy(params)) or requested
 
 
 # LLM: 宿主正阈值下任务0或更大值不能放宽；宿主0未设此独立保护时任务可主动收紧为正数。
 # 函数用途: 取硬失败限制和合法任务收紧值的交集。
 def _hard_threshold(params: object, key: str) -> int:
-    limit, requested = getattr(_policy(params), key), _task_int(params, key)
+    limit, requested = _POLICY_GETTERS[key](_policy(params)), _task_int(params, key)
     if requested is None or requested == 0:
         return limit
     return min(limit, requested) if limit > 0 else requested

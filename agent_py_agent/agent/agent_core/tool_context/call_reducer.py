@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
 
+from ...common import hot_json
+from ...common.fast_dataclass import fast_frozen
 
-@dataclass(frozen=True)
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class AssistantToolRoundContextRequest:
     response_text: str
     tool_calls: list[dict[str, Any]]
@@ -74,7 +77,7 @@ def _value_summary(value: Any, max_preview_chars: int) -> str:
             return value
         return _large_text_summary(value, max_preview_chars)
     if isinstance(value, (dict, list)):
-        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        text = hot_json.dumps(value, ensure_ascii=False, sort_keys=True)
         if len(text) <= max_preview_chars:
             return text
         return _large_text_summary(text, max_preview_chars)
@@ -100,6 +103,6 @@ def _value_size(value: Any) -> int:
     if isinstance(value, str):
         return len(value)
     try:
-        return len(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        return len(hot_json.dumps(value, ensure_ascii=False, sort_keys=True))
     except TypeError:
         return len(repr(value))

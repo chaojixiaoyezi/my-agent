@@ -47,6 +47,42 @@ CASES: list[tuple[str, str]] = [
     ("agent_py_agent.tests.test_conveyor_m00_fast_time.g1_case_fast_time", "fast_time"),
     ("agent_py_agent.tests.test_conveyor_m00_fast_dataclass.g1_case_fast_frozen_dto", "fast_frozen_dto"),
     ("agent_py_agent.tests.test_conveyor_m00_direct_socket_io.g1_case_direct_socket_io", "direct_socket_io"),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_tool_call_runtime_request",
+        "m11_tool_call_runtime_request",
+    ),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_native_compact_candidate",
+        "m11_native_compact_candidate",
+    ),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_tool_loop_request_input",
+        "m11_tool_loop_request_input",
+    ),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_tool_loop_request_projection",
+        "m11_tool_loop_request_projection",
+    ),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_input_modality_decision",
+        "m11_input_modality_decision",
+    ),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_input_modality_filter",
+        "m11_input_modality_filter",
+    ),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_assistant_tool_round_context_request",
+        "m11_assistant_tool_round_context_request",
+    ),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_identical_failure_streak",
+        "m11_identical_failure_streak",
+    ),
+    (
+        "agent_py_agent.tests.test_conveyor_m11_cure_a_tool_modules.g1_case_long_tool_content_abort_payload",
+        "m11_long_tool_content_abort_payload",
+    ),
 ]
 
 # C0 规则 9 的 GIL 探针：3.11/3.12 没有 sys._is_gil_enabled，按“GIL 开启”处理，收集阶段不会 AttributeError。

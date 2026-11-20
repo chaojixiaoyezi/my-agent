@@ -6,6 +6,7 @@ import json
 import re
 from types import SimpleNamespace
 
+from ...common import hot_json
 from ...tooling.output_projection import project_tool_output_body
 from ..agent_tree.model_view import agent_tree_model_preview
 from ..orchestration.context.live_summary import orchestration_live_summary as _original_summary
@@ -32,7 +33,7 @@ def archive_output_ref(record: dict[str, object]) -> str:
 def compact_archive_pointer(record: dict[str, object]) -> str:
     ref = archive_output_ref(record)
     digest = str(record.get("output_hash") or record.get("sha256") or "")
-    hint = json.dumps({"tool": "read_artifact", "artifact_ref": ref, "offset": 0,
+    hint = hot_json.dumps({"tool": "read_artifact", "artifact_ref": ref, "offset": 0,
                        "max_chars": 4000}, ensure_ascii=False) if ref else "unavailable"
     text = f"[Archive Ref: artifact_ref={ref} path=<host-only> sha256={digest} read_artifact_hint={hint}]"
     return text.replace("\r", "\\r").replace("\n", "\\n")
@@ -102,7 +103,7 @@ def _head_tail(value: object) -> str:
 # LLM: Count the same compact JSON characters emitted by the domain renderer, not Python repr sizes.
 # 函数用途: 按实际摘要编码计算剩余字符预算。
 def _json_size(value: object) -> int:
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    return len(hot_json.dumps(value, ensure_ascii=False, compact=True))
 
 
 # LLM: Keep scalar conclusions before collections, then dictionary facts before lists. Retained values/rows stay exact.
@@ -180,7 +181,7 @@ def _process_summary(result: object, record: dict[str, object]) -> str:
     if omissions:
         summary["detail_omissions"] = omissions
     summary["output_artifact_ref"] = archive_output_ref(record)
-    return json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+    return hot_json.dumps(summary, ensure_ascii=False, compact=True)
 
 
 # LLM: Keep status/timeout distinctions verbatim; preserve output_head_tail from a prior projection as external data.
@@ -226,9 +227,9 @@ def _agents_summary(result: object, record: dict[str, object]) -> str:
         if row.get("read_order"):
             agent["read_order"] = row["read_order"]
         candidate = {**summary, "agents": [*summary["agents"], agent]}
-        if len(json.dumps(candidate, ensure_ascii=False)) > _AGENT_SUMMARY_CHARS:
+        if len(hot_json.dumps(candidate, ensure_ascii=False)) > _AGENT_SUMMARY_CHARS:
             break
         summary = candidate
     if len(summary["agents"]) < len(rows):
         summary["omitted_agents"] = len(rows) - len(summary["agents"])
-    return json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+    return hot_json.dumps(summary, ensure_ascii=False, compact=True)

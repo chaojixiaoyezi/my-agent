@@ -209,8 +209,11 @@ def _write_miss_reason(record: object, archive: dict, focuses: list[dict]) -> st
 def _run_state_miss_reason(agent: object, params: object) -> str:
     if current_subagent_run_id(agent):
         return "subagent"
-    if any(getattr(params, key, None) is not None for key in (
-            "repeated_failure_halt", "identical_failure_halt", "unknown_outcome_halt")):
+    if (
+        getattr(params, "repeated_failure_halt", None) is not None
+        or getattr(params, "identical_failure_halt", None) is not None
+        or getattr(params, "unknown_outcome_halt", None) is not None
+    ):
         return "halted"
     return "" if _has_request(params) else "no_request"
 

@@ -1,8 +1,9 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
+
+from ...common import hot_json
 
 
 def unresolved_runtime_issues(params: object) -> list[dict[str, object]]:
@@ -30,7 +31,7 @@ def unresolved_runtime_issue_context(params: object, redirects: int) -> str:
     return "\n".join(
         [
             "[tool-system unresolved-runtime-issues]",
-            json.dumps(envelope, ensure_ascii=False, sort_keys=True),
+            hot_json.dumps(envelope, ensure_ascii=False, sort_keys=True),
             "已有结构化工具失败尚未被后续成功记录清除；下一轮请修复、复验或换策略，无法推进时说明真实阻塞原因。",
         ]
     )

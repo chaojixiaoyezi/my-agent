@@ -21,7 +21,6 @@ UI 转发与流式中止使用，不参与执行决策）。
 """
 
 import hashlib
-import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -32,6 +31,7 @@ from ...backends.text_protocol_parser import (
     IncrementalTextToolParser,
     scan_text_blocks,
 )
+from ...common import hot_json
 from ...tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
 )
@@ -48,7 +48,7 @@ _MAX_UNCLOSED_TOOL_START_MARKER_COUNT = 1
 
 class MalformedToolProtocolStreamAbort(RuntimeError):
     def __init__(self, *, start_marker: str, marker_count: int, limit: int) -> None:
-        super().__init__(f"tool protocol emitted {marker_count} unclosed {start_marker} markers")
+        RuntimeError.__init__(self, f"tool protocol emitted {marker_count} unclosed {start_marker} markers")
         self.start_marker = start_marker
         self.marker_count = marker_count
         self.limit = limit
@@ -272,11 +272,11 @@ def _protocol_violation_response(
             {
                 "code": code,
                 "detail": detail,
-                "evidence_preview": json.dumps(
+                "evidence_preview": hot_json.dumps(
                     evidence,
                     ensure_ascii=False,
                     sort_keys=True,
-                    separators=(",", ":"),
+                    compact=True,
                 ),
             }
         ],
