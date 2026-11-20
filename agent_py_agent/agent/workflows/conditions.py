@@ -1,14 +1,15 @@
 # 模块用途: WF-04 工作流步骤条件的唯一求值与校验位置。旧 {step_id,key?,equals,fallback?} 原样走
 #   output_value(...) == equals（结果、异常与惰性 fallback 都不变）；带 op 的类型化表达式在保存时严格校验、
 #   求值时缺值/类型不符稳定返回 False。正则只借用 re 的解析器校验语法，匹配由本模块的 Thompson NFA 子集模拟完成，
-#   工作量上界为 被匹配文本长度(≤4096) × 程序状态数(≤256)，不使用回溯引擎，因此与模式结构无关。
+#   工作量上界为配置的文本长度预算 × 程序状态数(≤256)，不使用回溯引擎，因此与模式结构无关。
 from __future__ import annotations
 
 import functools
 import math
 import re
 
-from .models import output_value
+from ..settings.config import DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS
+from .models import StepExecutionRecord, output_value
 
 try:  # Python 3.11+ 的解析器/编译器位置；只读语法树，并把单个字符原子编译成逐字符判定（与 re 语义一致）。
     import re._compiler as _sre_compile
@@ -24,7 +25,8 @@ _PRESENCE = frozenset({"exists", "not_exists"})
 _GROUPS = frozenset({"and", "or"})
 # 有界上限：嵌套深度、节点总数、组成员数、列表成员数、正则长度/重复次数/程序状态数、被匹配文本长度、整数位数。
 _MAX_DEPTH, _MAX_NODES, _MAX_GROUP, _MAX_LIST = 8, 64, 32, 100
-_MAX_PATTERN_CHARS, _MAX_REPEAT_COUNT, _MAX_PROGRAM_STATES, _MAX_SUBJECT_CHARS = 256, 1000, 256, 4096
+_MAX_PATTERN_CHARS, _MAX_REPEAT_COUNT, _MAX_PROGRAM_STATES = 256, 1000, 256
+_MAX_SUBJECT_CHARS = DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS
 # 类型化整数的支持范围：绝对值 < 10**1000。超出者在保存时拒绝；运行时读到的超范围整数按类型不符处理。
 _MAX_INT_DIGIT_COUNT = 1000
 _INT_LIMIT = 10 ** _MAX_INT_DIGIT_COUNT
@@ -42,6 +44,35 @@ class WorkflowConditionError(ValueError):
         super().__init__(f"WORKFLOW_CONDITION_INVALID: {reason}")
         self.code = self.error_code
         self.details = {"reason": reason}
+
+
+class ConditionIndeterminate(Exception):
+    """条件依赖超出预算的文本，当前只掌握部分证据。"""
+
+    def __init__(self, code: str, *, detail: str = "") -> None:
+        super().__init__(f"{code}: {detail}" if detail else code)
+        self.code = code
+        self.detail = detail
+
+
+def configure_from_config(config: object) -> None:
+    """接收宿主部署配置，缺少字段时沿用随包默认值。"""
+    global _MAX_SUBJECT_CHARS
+    limit = getattr(config, "workflow_condition_max_subject_chars", DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS)
+    if type(limit) is not int or limit < 1:
+        raise ValueError("workflow_condition_max_subject_chars 必须是正整数")
+    _MAX_SUBJECT_CHARS = limit
+
+
+def mark_condition_indeterminate(step: StepExecutionRecord, error: ConditionIndeterminate) -> None:
+    """通过原失败路径报告条件未决，记录当前步骤尚未准入副作用。"""
+    step.status = "failed"
+    step.error_code = error.code
+    step.error_message = error.detail or error.code
+    step.needs_repair = True
+    step.escalation_result.update(
+        condition_outcome="unknown", effect_state="not_started", effect_started=False,
+    )
 
 
 # 函数用途: 只有带 op 的对象才是类型化表达式；其余（含旧 equals 形状与非对象值）一律走原判据。
@@ -162,6 +193,7 @@ class _Program:
         self.matchers: list = []
         self.start = 0
         self.match_bit = 0
+        self.end_sensitive = False
         self._closures: dict[tuple[int, int], int] = {}
 
     def add(self, kind: str, *, atom: int = -1, anchor: int = 0) -> int:
@@ -208,6 +240,8 @@ class _Program:
             index = self.add("char", atom=self.atom_keys[key])
             return index, [(index, 1)]
         if name == "AT" and str(argument) in _ANCHORS:
+            if str(argument) not in {"AT_BEGINNING", "AT_BEGINNING_STRING"}:
+                self.end_sensitive = True
             index = self.add("assert", anchor=_ANCHORS[str(argument)])
             return index, [(index, 1)]
         if name == "SUBPATTERN":
@@ -338,15 +372,23 @@ def evaluate_condition(condition: object, outputs: dict, inputs: dict | None = N
     if _is_legacy(condition):
         return output_value(condition, outputs, inputs) == condition["equals"]
     validate_condition(condition)
-    return _evaluate(condition, outputs, inputs)
+    return _evaluate(condition, outputs, inputs, _MAX_SUBJECT_CHARS)
 
 
-def _evaluate(node: dict, outputs: dict, inputs: dict | None) -> bool:
+def _evaluate(node: dict, outputs: dict, inputs: dict | None, max_subject_chars: int) -> bool:
     op = node["op"]
-    if op == "and":
-        return all(_evaluate(member, outputs, inputs) for member in node["conditions"])
-    if op == "or":
-        return any(_evaluate(member, outputs, inputs) for member in node["conditions"])
+    if op in _GROUPS:
+        decisive = op == "or"
+        indeterminate = None
+        for member in node["conditions"]:
+            try:
+                if _evaluate(member, outputs, inputs, max_subject_chars) is decisive:
+                    return decisive
+            except ConditionIndeterminate as error:
+                indeterminate = error
+        if indeterminate is not None:
+            raise indeterminate
+        return not decisive
     present, value = _resolve(node["ref"], outputs, inputs)
     if op in _PRESENCE:
         return present if op == "exists" else not present
@@ -363,7 +405,18 @@ def _evaluate(node: dict, outputs: dict, inputs: dict | None) -> bool:
     if op == "not_in":
         return not any(_same(value, item) for item in expected)
     if op == "regex":
-        return type(value) is str and _program(expected).search(value[:_MAX_SUBJECT_CHARS])
+        if type(value) is not str:
+            return False
+        program = _program(expected)
+        if len(value) <= max_subject_chars:
+            return program.search(value)
+        if not program.end_sensitive and program.search(value[:max_subject_chars]):
+            return True
+        raise ConditionIndeterminate(
+            "WORKFLOW_CONDITION_SUBJECT_TRUNCATED",
+            detail=f"正则输入有 {len(value)} 个字符，超过 {max_subject_chars} 字符预算，步骤尚未执行。"
+                   "请缩短输入或由部署方调整 workflow_condition_max_subject_chars 后再运行。",
+        )
     return _ordered(op, value, expected)
 
 
@@ -398,4 +451,5 @@ def _ordered(op: str, left: object, right: object) -> bool:
     return {"gt": left > right, "gte": left >= right, "lt": left < right, "lte": left <= right}[op]
 
 
-__all__ = ["WorkflowConditionError", "evaluate_condition", "validate_condition"]
+__all__ = ["ConditionIndeterminate", "WorkflowConditionError", "configure_from_config",
+           "evaluate_condition", "validate_condition"]

@@ -45,7 +45,7 @@ from .batching import (
     validate_foreach,
 )
 from .concurrency_policy import _reconcile_workflow_claim, dispatch
-from .conditions import evaluate_condition
+from .conditions import ConditionIndeterminate, evaluate_condition, mark_condition_indeterminate
 from .datasource_runtime import (
     _preflight_failure,
     bind_script_execution_record,
@@ -932,13 +932,18 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.error_message = '调试步骤执行失败'
         status = ('skipped' if record.status == 'skipped' else 'succeeded'
                   if record.status in ('succeeded', 'escalated_recovered', 'paused_for_resume') else 'failed')
+        error_detail = None
+        if status == 'failed':
+            error_detail = {'code': record.error_code, 'message': record.error_message}
+            if record.escalation_result.get('condition_outcome') == 'unknown':
+                error_detail.update(condition_outcome='unknown', effect_state=record.escalation_result['effect_state'])
         return StepDebugResult(workflow_id=descriptor['id'], step_id=step_id, step_type=record.mode, status=status,
             duration_ms=(time.monotonic() - timer) * 1000, output_data=record.output_snapshot,
             rendered_input=record.input_snapshot, condition_branch=record.escalation_result.get('condition_branch'),
             logs=record.escalation_result.get('debug_logs', []),
             dry_run=record.escalation_result.get('dry_run', False),
             side_effects_blocked=record.escalation_result.get('side_effects_blocked', False),
-            error_detail={'code': record.error_code, 'message': record.error_message} if status == 'failed' else None).to_dict()
+            error_detail=error_detail).to_dict()
 
     # LLM: 补丁仅替代输出；脚本合同来自当前授权作用域，故障默认agent/确认默认user，清理门保持。
     # 函数用途: 校验恢复输出并合成来源明确且输入不变的步骤。
@@ -1144,11 +1149,17 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             try:
                 _check_stop()
                 condition = spec.get('condition')
-                if condition and not evaluate_condition(condition, outputs, record.inputs):
-                    step.status = 'skipped'
+                try:
+                    matched = not condition or evaluate_condition(condition, outputs, record.inputs)
+                except ConditionIndeterminate as error:
+                    mark_condition_indeterminate(step, error)
                 else:
-                    state.update(record=record, phase='started', started=True)
-                    self._execute_step_with_retry_and_watermarks(step, spec, outputs, definition, record)
+                    if matched:
+                        state.update(record=record, phase='started', started=True)
+                        self._execute_step_with_retry_and_watermarks(step, spec, outputs, definition, record)
+                    else:
+                        step.status = 'skipped'
+                        step.escalation_result['skip_reason'] = 'condition_false'
                 _check_stop()
             except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError):
                 step.ended_at, step.duration_ms = time.time(), (time.monotonic() - clock) * 1000
@@ -1390,7 +1401,11 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             condition = spec['condition']
             if not isinstance(condition, dict) or ('equals' not in condition and 'op' not in condition):
                 raise ValueError('条件必须是结构化比较')
-            matched = evaluate_condition(condition, outputs, run.inputs)
+            try:
+                matched = evaluate_condition(condition, outputs, run.inputs)
+            except ConditionIndeterminate as error:
+                mark_condition_indeterminate(record, error)
+                return
             record.escalation_result['condition_branch'] = matched
             if not matched:
                 record.status = 'skipped'

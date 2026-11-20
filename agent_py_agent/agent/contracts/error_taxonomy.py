@@ -1067,6 +1067,11 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="当前用户的执行策略无法验证，未执行；请部署者修复配置。",
     ),
+    "FEISHU_PANEL_LOCK_UNAVAILABLE": ErrorContract(
+        code="FEISHU_PANEL_LOCK_UNAVAILABLE", category="state", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="私聊会话锁暂不可用，面板操作未执行。请待状态恢复后在原卡片重试。",
+    ),
     "FEISHU_CLI_UNAVAILABLE": ErrorContract(
         code="FEISHU_CLI_UNAVAILABLE", category="configuration", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
@@ -5325,6 +5330,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPAIR_AGAINST_ACCEPTANCE_FINDINGS.value,
         recovery_hint="审核要求修改。请处理该候选的评审意见，再对修订版本提交独立审核。",
     ),
+    "WORKFLOW_CONDITION_SUBJECT_TRUNCATED": ErrorContract(
+        code="WORKFLOW_CONDITION_SUBJECT_TRUNCATED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="正则输入超出字符预算，条件未知且步骤尚未执行。请缩短输入或由部署方调整字符预算后重跑。",
+    ),
     "WORKFLOW_CONDITION_INVALID": ErrorContract(
         code="WORKFLOW_CONDITION_INVALID", category="contract", retryable=False,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
@@ -5339,6 +5349,11 @@ ERROR_CONTRACTS.update({
         code="WORKFLOW_NOTIFICATION_DELIVERY_FAILED", category="network", retryable=True,
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="工作流通知投递未成功；请先核对通道适配器回执与目标会话状态，避免重复发送通知。",
+    ),
+    "WORKFLOW_NOTIFICATION_RESULT_UNRECOGNIZED": ErrorContract(
+        code="WORKFLOW_NOTIFICATION_RESULT_UNRECOGNIZED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="已调用通知发送端，但返回值无法确认投递。请按原去重键核对投递收据和目标渠道，核对前禁止重发。",
     ),
     "WORKFLOW_NOTIFICATION_SPEC_INVALID": ErrorContract(
         code="WORKFLOW_NOTIFICATION_SPEC_INVALID", category="contract", retryable=False,

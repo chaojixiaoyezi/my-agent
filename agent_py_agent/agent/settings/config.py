@@ -55,6 +55,8 @@ DEFAULT_BACKGROUND_REPORT_SETTLED_SAMPLE_ENTRIES = 256
 
 # 控制回执默认留存七天，实际部署值由同名配置项决定。
 _GATEWAY_CONTROL_RECEIPT_RETENTION_DAYS = 7
+# 工作流正则在求值时读取的默认字符预算，与随包 YAML 一致。
+DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS = 4096
 
 __all__ = [
     "AgentConfig",
@@ -358,6 +360,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
         default=_GATEWAY_CONTROL_RECEIPT_RETENTION_DAYS, metadata={"bounds": (0, None), "unit": "天"},
     )
     memory_reference_pin_chunk_bytes: int = field(default=65536, metadata={"bounds": (1024, None), "model_read_only": True})
+    workflow_condition_max_subject_chars: int = field(
+        default=DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS, kw_only=True,
+        metadata={"bounds": (1, None), "unit": "字符"},
+    )
     reasoning_probe_max_output_tokens: int = field(default=40000, metadata={"bounds": (1, None)})
     reasoning_probe_timeout_seconds: float = field(default=180.0, metadata={"bounds": (0.0, None), "exclusive_minimum": True, "range": ">0"})
 

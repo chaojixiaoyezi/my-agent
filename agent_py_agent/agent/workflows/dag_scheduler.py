@@ -19,7 +19,7 @@ from ..assets.workflow_store import (
 )
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
-from .conditions import evaluate_condition
+from .conditions import ConditionIndeterminate, evaluate_condition, mark_condition_indeterminate
 from .models import StepExecutionRecord, payload
 from .run_store import execution_receipt, replace_run_record
 
@@ -308,6 +308,7 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
             else _pending_step(spec)
         )
         step.status = 'skipped'
+        step.escalation_result['skip_reason'] = reason
         step.ended_at = time.time()
         step.duration_ms = 0.0
         step.next_step_ids = tuple(sorted(reverse_deps.get(sid, ())))
@@ -394,7 +395,17 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                     continue
 
                 if spec.get('condition'):
-                    if not evaluate_condition(spec['condition'], dict(outputs), record.inputs):
+                    try:
+                        matched = evaluate_condition(spec['condition'], dict(outputs), record.inputs)
+                    except ConditionIndeterminate as error:
+                        unstarted_step_ids.remove(sid)
+                        step = _pending_step(spec)
+                        mark_condition_indeterminate(step, error)
+                        step.ended_at = time.time()
+                        step.next_step_ids = tuple(sorted(reverse_deps.get(sid, ())))
+                        _process_completed_step(sid, step, None)
+                        break
+                    if not matched:
                         unstarted_step_ids.remove(sid)
                         _mark_step_skipped(spec, reason='condition_false')
                         continue
