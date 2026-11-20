@@ -258,9 +258,20 @@ def _proposal_by_ref(service: SkillProposalService, ref: str) -> SkillProposal:
 # LLM: 同owner原候选为唯一状态源；可选溢出沿公开读口一次读取，不回填；all仅改变状态过滤，不授确认权。
 # 函数用途: 取得当前owner完整待确认或全部自动学习候选，兼容原列表接口。
 def _automatic_proposals(host, *, include_all=False):
-    options = {'include_overflow': True} if 'include_overflow' in signature(list_learning_proposals).parameters else {}
+    parameters = signature(list_learning_proposals).parameters
+    options = {'include_overflow': True} if 'include_overflow' in parameters else {}
+    diagnostics = []
+    if 'diagnostics' in parameters:
+        options['diagnostics'] = diagnostics
     rows = list_learning_proposals(_store(host), **options)
-    return [row for row in rows if include_all or row['status'] == 'pending']
+    return [row for row in rows if include_all or row['status'] == 'pending'], diagnostics
+
+
+def _proposal_diagnostic_lines(diagnostics):
+    return [
+        f"候选 {row['folder']}/{row['file']} 读取失败（{row['code']}，{row['error']}）。请核对该条记录。"
+        for row in diagnostics
+    ]
 
 
 # LLM: 只投影名称/修订/摘要及原控制命令，不展示或发布正文；历史候选仅给查看，不给无效确认命令。
@@ -306,9 +317,9 @@ def _overview(host: SkillControlHost, tokens: list[str]) -> str:
 # 函数用途: /skills proposals [all]展示两类待确认或全部提案及有效操作命令。
 def _proposals(host: SkillControlHost, tokens: list[str]) -> str:
     include_all = tokens[1:] == ['all']
-    drafts = _automatic_proposals(host, include_all=include_all)
+    drafts, diagnostics = _automatic_proposals(host, include_all=include_all)
     lines = _proposal_list_lines(host, status=None if include_all else PROPOSAL_PENDING, include_empty_notice=not drafts)
-    return '\n'.join(lines + _automatic_proposal_lines(drafts))
+    return '\n'.join(lines + _automatic_proposal_lines(drafts) + _proposal_diagnostic_lines(diagnostics))
 
 
 # LLM: 仅在另有自动候选时省略空提示，由结构化候选存在性决定，绝不解析文案。
@@ -462,14 +473,14 @@ def _learned_action(host: SkillControlHost, tokens: list[str]) -> str:
 def _learning_proposal(host, tokens):
     from ..capability.skill_learning_proposals import (
         learning_proposal,
-        list_learning_proposals,
         resolve_learning_proposal,
     )
     store = _store(host)
     action = tokens[1]
     if action == 'proposals':
-        rows = [row for row in list_learning_proposals(store,include_overflow=True) if row['status']=='pending']
-        return '\n'.join(f"{row['proposal_id']} 修订{row['revision']}：{row['decision']['name']}；查看 /skills learned proposal-show {row['proposal_id']}" for row in rows) or '没有待确认学习候选。'
+        rows, diagnostics = _automatic_proposals(host)
+        lines = [f"{row['proposal_id']} 修订{row['revision']}：{row['decision']['name']}；查看 /skills learned proposal-show {row['proposal_id']}" for row in rows]
+        return '\n'.join(lines + _proposal_diagnostic_lines(diagnostics)) or '没有待确认学习候选。'
     row = learning_proposal(store,tokens[2])
     if action == 'proposal-show':
         return f"{row['decision']['name']} 修订{row['revision']}\n来源任务：{row['request'].get('task_id','')}；运行：{row['request'].get('run_id','')}\n原因：{row['decision']['reason']}\n适用场景：{row['decision']['when_to_use']}\n{row['decision']['description']}\n{row['decision']['body'][:3000]}\n确认：/skills learned confirm {row['proposal_id']} {row['revision']}\n拒绝：/skills learned reject {row['proposal_id']} {row['revision']}"

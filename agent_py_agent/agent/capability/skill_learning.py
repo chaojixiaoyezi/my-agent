@@ -599,6 +599,14 @@ class SkillLearningService:
                         if callable(protection_provider)
                         else {"protection_complete": False}
                     )
+                    recheck_protection = getattr(protection, "recheck", None)
+                    if protection.get("protection_complete") and callable(recheck_protection):
+                        try:
+                            current = recheck_protection()
+                        except (OSError, ValueError, TypeError, KeyError):
+                            current = False
+                        if not current:
+                            protection = {**protection, "protection_complete": False}
                     with gateway_short_transaction("skill_learning_maintenance"):
                         maintain_learning(
                             self.store,
