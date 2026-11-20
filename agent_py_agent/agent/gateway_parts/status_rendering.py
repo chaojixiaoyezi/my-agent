@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 from ..common import hot_json
 from ..common.fast_dataclass import fast_frozen
 from ..common.log_redaction import redact_sensitive_text
+from ..conversation.channels import redact_host_absolute_paths
 from ..runtime_errors import runtime_error_report
 from .daemon_control import (
     get_running_pid_report,
@@ -1080,6 +1081,32 @@ def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:
     )
     _append_status_load_errors(lines, running_report, state_report.load_error, heartbeat_report.load_error)
     _append_unidentified_stale_attempts(lines, state_report.payload)
+    return lines
+
+
+def render_background_roots(rows: list[dict[str, object]], *, preserve_host_paths: bool = False) -> list[str]:
+    """把已授权的后台根投影为单行条目，供会话状态文本和终端共用。"""
+    lines = []
+    for row in rows:
+        thread_id, kind = row.get("thread_id"), row.get("kind")
+        if not isinstance(thread_id, str) or not thread_id or not thread_id.isprintable() or kind not in (
+            "main", "wake", "dispatch", "process",
+        ):
+            continue
+        title = str(row.get("title") or "未命名")
+        title = redact_sensitive_text("".join(c if c.isprintable() else " " for c in title))
+        if not preserve_host_paths:
+            title = redact_host_absolute_paths(title)
+        started = row.get("started_at")
+        timestamp = "未知"
+        if type(started) in (int, float) and started > 0:
+            try:
+                timestamp = datetime.fromtimestamp(started, tz=timezone.utc).isoformat(timespec="seconds")
+            except (ValueError, OverflowError, OSError):
+                pass
+        lines.append(f"后台任务：{thread_id} · {title} · {kind} · 开始 {timestamp}")
+    if lines:
+        lines.append("使用 /stop all 停止本会话所有线程，或 /stop thread <线程编号> 停止指定线程。")
     return lines
 
 

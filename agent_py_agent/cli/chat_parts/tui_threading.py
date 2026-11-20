@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from weakref import WeakKeyDictionary, WeakSet
 
+from .gateway_client import GATEWAY_BUSY_RETRY_DELAYS
 from .tui_identity_window import TuiIdentityWindow
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
@@ -61,6 +62,7 @@ class _BackgroundPollReport:
     binding_state: str = "unavailable"
     failure_kind: str = "corrupt_or_unknown"
     thread_id: str | None = None
+    http_status: int = 0
 
 
 # LLM: 只取宿主home_paths、显示会话与原reset代次；不从命令、记录、日志或cwd推owner。
@@ -256,16 +258,21 @@ class _NoticeWarnDebounce:
     # 函数用途: 建立失败计数与成功时刻基准。
     def __init__(self) -> None:
         self.consecutive_failures = 0
+        self.consecutive_busy = 0
         self.last_success_at = time.monotonic()
 
     # LLM: 每轮都必须调用（即使没有发布者），否则失败计数与时间基准会漂移。成功恒返回 True，
     #   失败只在两个门槛都满足时返回 True。
     # 函数用途: 记录本轮结果，返回是否应发布本轮同步状态。
-    def should_publish(self, snapshot_ok: bool, now: float) -> bool:
+    def should_publish(self, snapshot_ok: bool, now: float, *, http_status: int = 0) -> bool:
+        self.consecutive_busy = self.consecutive_busy + 1 if not snapshot_ok and http_status == 503 else 0
         if snapshot_ok:
             self.consecutive_failures = 0
             self.last_success_at = now
             return True
+        if self.consecutive_busy:
+            self.consecutive_failures = 0
+            return self.consecutive_busy == len(GATEWAY_BUSY_RETRY_DELAYS)
         self.consecutive_failures += 1
         return (
             self.consecutive_failures >= TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT
@@ -433,7 +440,9 @@ def _run_background_notice_loop(
     failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
     debounce = _NoticeWarnDebounce()
     idle_backoff = 0.0
+    reads_gateway = callable(getattr(agent, "request_background_notices", None))
     while not stop_event.is_set():
+        observed: list[_BackgroundPollReport] = []
         before = _capture_background_poll_state(tui_runtime, event_cursor)
         if wake is not None:
             wake.polling = True
@@ -446,6 +455,7 @@ def _run_background_notice_loop(
                 seen,
                 event_cursor,
                 agent_navigation,
+                **({"on_report": observed.append} if reads_gateway else {}),
             )
         except Exception:
             # 监视失败不改业务状态；显示旧快照警告后沿原退避合同等待下一轮。
@@ -453,7 +463,8 @@ def _run_background_notice_loop(
         finally:
             if wake is not None:
                 wake.polling = False
-        should_publish = debounce.should_publish(snapshot_ok, time.monotonic())
+        http_status = observed[0].http_status if observed else 0
+        should_publish = debounce.should_publish(snapshot_ok, time.monotonic(), http_status=http_status)
         health_publisher = getattr(tui_runtime, "publish_background_sync_status", None)
         if should_publish and callable(health_publisher) and health_publisher(ok=snapshot_ok):
             if app_ref and app_ref[0] is not None:
@@ -491,9 +502,11 @@ def _run_background_notice_loop(
             failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
         else:
             delay, idle_backoff = failure_delay, 0.0
+            if 0 < debounce.consecutive_busy <= len(GATEWAY_BUSY_RETRY_DELAYS):
+                delay = GATEWAY_BUSY_RETRY_DELAYS[debounce.consecutive_busy - 1]
             failure_delay = min(
                 TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS,
-                failure_delay * 2.0,
+                delay * 2.0,
             )
         if (wake.wait(stop_event, delay) if wake is not None else stop_event.wait(delay)):
             break
@@ -511,6 +524,8 @@ def _consume_background_notices(
     seen: set[tuple[str, str]],
     event_cursor_ref: list[int] | None = None,
     agent_navigation: object | None = None,
+    *,
+    on_report: Callable[[_BackgroundPollReport], object] | None = None,
 ) -> bool:
     if tui_runtime is None or not session_id:
         return True
@@ -535,6 +550,8 @@ def _consume_background_notices(
         raise
     finally:
         report.snapshot_ok = snapshot_ok
+        if on_report is not None:
+            on_report(report)
         if _sync_background_watch(agent, agent_navigation, session_id=session_id, runtime=tui_runtime,
                                   snapshot_ok=snapshot_ok, poll_report=report) and app_ref and app_ref[0] is not None:
             app_ref[0].invalidate()
@@ -593,6 +610,8 @@ def _consume_gateway_background_snapshot(
         )
     except Exception as exc:
         report.failure_kind = _background_poll_failure(exc)
+        if isinstance(exc, HTTPError) and exc.code == 503:
+            report.http_status = 503
         report.binding_state = "invalid" if report.failure_kind in {"permission_denied", "owner_mismatch"} else "unavailable"
         return False
     # LLM: 原HTTP调用已结束，只在原代次和完整上下文内发表，避免/new后迟到响应重建旧历史。
@@ -645,6 +664,8 @@ def _classify_gateway_background_poll(runtime, session_id, payload, report):
         runtime._background_watch_gateway_context = report.context
     report.failure_kind = (kind if kind in {"transport_transient", "projection_transient", "child_view_only"}
                            else "corrupt_or_unknown")
+    if report.failure_kind == "transport_transient" and payload.get("http_status") == 503:
+        report.http_status = 503
 
 
 # LLM: 确认新线程先重基且整页零发表；同线程仍校验字节单调性，硬拒绝不能借重基恢复。

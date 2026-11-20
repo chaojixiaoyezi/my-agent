@@ -116,7 +116,7 @@ Goal 区只显示 `ThreadGoal` 的真实记录。任务清单、模型口头说�
 主代理和子代理视角各自展示本代理 Goal 与 Todo，不借用父级目标。每个代理最多一个未结束 Goal；
 Todo 可选，沿用原有进度组件，条目未勾选不会阻止目标完成。
 方向键选中 Goal 后 Enter 打开全文编辑。Ctrl+S 或“保存”才提交，Ctrl+G 或“放弃/退出”丢弃未保存内容。
-Esc 中断当前代理，不承担关闭或保存职责；主代理 active Goal 可安全自动续接，明确暂停另用 `/goal pause`。
+聊天视图的 Gateway Esc 走当前线程停止；只中断本轮并保留 Goal 自动续接时，可显式使用 `/interrupt`。
 子代理保留停止语义。读取与保存异步执行，不冻结模型流或 TUI 绘制。
 保存保留身份、用量与暂停状态。后台修改引起版本冲突时保留草稿；“读取最新”提供全文比较，仍需再次明确保存。
 编辑器打开时禁用背后聊天快捷键，换行和光标移动留在文本框内；显示明确的版本冲突原因，窗口不随反馈文案缩窄。
@@ -132,6 +132,12 @@ Esc 中断当前代理，不承担关闭或保存职责；主代理 active Goal 
 - 同一守护线程顺带读状态文件里的 `restart_drain.phase`：Gateway 安全重启排空（turn_wait/tool_drain）时每次轮询在页脚续显
   “Gateway 正在安全重启……新消息会排队”（提示来源 `gateway_restart`），不影响升级判断；cancelled 或缺失时不提示。
 - 回归：`test_tui_upgrade_follow.py`、`test_cli_chat.py::...test_in_place_handoff_keeps_session_and_loads_history_before_first_frame`。
+
+## 2026-11-19 M23 Gateway 停止与繁忙重试
+
+- 在 Gateway 主界面，停止键与 `/stop` 默认停止当前线程。`/stop all` 覆盖同一会话内的线程，`/stop thread <线程编号>` 针对指定线程。请求走 `/client/turn-stop`，同一操作在 503 或无状态时重用消息编号和范围，在十秒预算内重试。旧版 Gateway 仅使用已授权的 `/control` 停止当前线程。手动压缩的精确取消仍绑定原控制消息。
+- 状态和后台通知遇到短暂 503 时先静默重试。后台通知连续三次 503 才显示未同步提示，成功后清除。通知重试沿原会话和游标读回。
+- `/status` 显示仍在运行的后台根及可用的停止命令。`/new` 用一行说明旧线程继续运行的后台根数量。隔离 Gateway 往返验证了回执重放、改目标冲突、排队取消和指定范围的停止。
 
 ## 验收
 

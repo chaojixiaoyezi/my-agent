@@ -1126,9 +1126,9 @@ def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None
     if callable(background_active) and background_active():
         # 会话运行时 的中断动作绑定当前 active turn，而不是只看 composer worker 是否
         # 正在流式输出。后台等待子代理时本地 worker 已空闲，但 canonical task 仍
-        # 活动，所以 Ctrl-C 仍需走同一个 typed 本轮中断。
+        # 活动，所以 Gateway 的 Ctrl-C 仍走当前线程停止。本地直连保留精确中断。
         if bool(getattr(params, "use_gateway", False)):
-            _tui_submit_control_operation(params, "/interrupt")
+            _tui_submit_control_operation(params, "/stop")
         else:
             _tui_handle_command(params=_handle_command_params(params, "/interrupt"))
         event.app.invalidate()
@@ -1378,10 +1378,9 @@ def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None
     runtime = _required_tui_runtime(params)
     background_active = getattr(runtime, "has_active_background_task", None)
     if callable(background_active) and background_active():
-        # 会话运行时 的 Esc 始终中断当前 active turn；后台等待子代理时本地 worker 已
-        # 空闲，但 canonical task 仍活动，因此不能让 Esc 静默退化成空操作。
+        # 后台等待子代理时本地 worker 已空闲，Gateway 的 Esc 仍走当前线程停止。
         if bool(getattr(params, "use_gateway", False)):
-            _tui_submit_control_operation(params, "/interrupt")
+            _tui_submit_control_operation(params, "/stop")
         else:
             _tui_handle_command(params=_handle_command_params(params, "/interrupt"))
         event.app.invalidate()

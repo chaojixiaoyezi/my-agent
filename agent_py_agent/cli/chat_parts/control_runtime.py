@@ -19,8 +19,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass, field
 
+from ...agent.common import hot_json
+from ...agent.common.fast_dataclass import fast_replace
 from ...agent.concurrency.interrupt import interrupt_by_name
 from ...agent.conversation.control_commands import (
     ConversationControlCommand,
@@ -64,6 +68,7 @@ class ChatControlExecution:
     use_gateway: bool
     state: ChatControlState
     tui_streaming: bool = False
+    on_status_sync: Callable[[bool], object] | None = field(default=None, kw_only=True)
 
 
 # /status 里“异常”子代理标签细分最多收几条（Gateway 端按计数排好序）。
@@ -158,7 +163,7 @@ def _execute_gateway_control(
         if command.kind in {"steer", "stop"}
         else ""
     )
-    client_message_id = str(message_id or new_id("control")).strip()
+    client_message_id = str(message_id or "").strip() or new_id("control")
     payload = {
         "command": _command_text(command),
         "user_id": "local-agent",
@@ -171,8 +176,9 @@ def _execute_gateway_control(
         },
     }
     selected_control_target = str(target_control_message_id or "").strip()
-    if execution.state.expected_execution is not None:
-        payload["metadata"]["expected_execution"] = execution.state.expected_execution
+    expected_execution = deepcopy(execution.state.expected_execution)
+    if expected_execution is not None:
+        payload["metadata"]["expected_execution"] = expected_execution
     if execution.state.model_payload is not None:
         payload["metadata"]["model_payload"] = execution.state.model_payload
     from .gateway_client import _gateway_submit_workspace
@@ -185,47 +191,120 @@ def _execute_gateway_control(
     if selected_control_target:
         payload["metadata"]["target_control_message_id"] = selected_control_target
     timeout = _gateway_control_timeout(execution, command)
-    body: dict[str, object] = {}
-    last_error: BaseException | None = None
+    from .gateway_client import request_gateway_with_retry
+
+    last_error = None
+
+    def send(path, data, remaining):
+        nonlocal last_error
+        try:
+            status, body = _post_chat_control(execution, port, path, data, remaining)
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            last_error = exc
+            return 0, {}
+        if not status:
+            last_error = OSError("gateway client transport returned no status")
+        return status, body
+
+    scoped_stop = command.operation in {"session", "thread"}
+    turn_stop = command.kind == "stop" and command.operation != "interrupt" and not selected_control_target
+    if turn_stop:
+        if command.operation == "thread" and not command.target_id:
+            return ConversationControlResult(
+                "stop", False, "请使用 /stop thread <线程编号> 明确停止目标。", control_state="rejected",
+            )
+        stop_payload = {
+            "user_id": payload["user_id"],
+            "channel": payload["channel"],
+            "conversation_id": payload["conversation_id"],
+            "message_id": client_message_id,
+            "scope": "session" if command.operation == "session" else "thread",
+        }
+        if command.operation == "thread":
+            stop_payload["thread_id"] = command.target_id
+        if not scoped_stop and expected_turn_id:
+            stop_payload["expected_turn_id"] = expected_turn_id
+        if not scoped_stop and expected_execution is not None:
+            stop_payload["expected_execution"] = expected_execution
+        deadline = time.monotonic() + 10.0
+        status, body = request_gateway_with_retry(
+            lambda remaining: send("/client/turn-stop", stop_payload, remaining),
+            deadline=deadline, turn_stop=True,
+        )
+        if status == 404 and not body.get("error_code") and not body.get("reason_code"):
+            if scoped_stop:
+                return ConversationControlResult(
+                    "stop", False, "当前 Gateway 仅支持 /stop 停止当前线程。请升级 Gateway 后再使用指定范围的停止。",
+                    control_state="rejected",
+                )
+            remaining = deadline - time.monotonic()
+            if remaining >= 0.1:
+                status, body = send("/control", payload, remaining)
+                if 0 < status < 500:
+                    result = _gateway_control_result_from_body("stop", {**body, "_http_status": status})
+                    return fast_replace(result, message=f"{result.message}\n当前 Gateway 仅支持停止当前线程。")
+        elif status not in {0, 503}:
+            result = _gateway_control_result_from_body("stop", {**body, "_http_status": status})
+            if status == 404:
+                return fast_replace(result, control_state="rejected")
+            if status < 429 or result.operation_id:
+                return result
+        return ConversationControlResult(
+            "stop", False, "停止结果尚未确认。请先用 /status 核实当前状态，再决定是否发送新的 /stop。",
+            delivery_status="unknown", control_state="terminal_unknown",
+        )
+
+    for _attempt in range(2):
+        deadline = time.monotonic() + timeout
+        status, body = send("/control", payload, timeout)
+        if command.kind == "status":
+            if status == 503:
+                notify = execution.on_status_sync
+                status, body = request_gateway_with_retry(
+                    lambda remaining: send("/control", payload, remaining),
+                    deadline=deadline, initial=(status, body),
+                    on_busy_exhausted=(lambda: notify(False)) if notify is not None else None,
+                )
+                if status == 503:
+                    return ConversationControlResult(
+                        "status", False, "Gateway 暂未返回状态。请稍后重新运行 /status。",
+                        control_state="terminal_unknown",
+                    )
+            if status == 200 and execution.on_status_sync is not None:
+                execution.on_status_sync(True)
+        if status:
+            return _gateway_control_result_from_body(command.kind, {**body, "_http_status": status})
+    return ConversationControlResult(
+        command.kind, False,
+        f"Gateway 控制入口暂时不可用：{type(last_error).__name__ if last_error else 'UnknownError'}。",
+        control_state="transport_unknown",
+    )
+
+
+def _post_chat_control(
+    execution: ChatControlExecution, port: int, path: str, payload: dict, timeout: float,
+) -> tuple[int, dict]:
     post_json = getattr(execution.agent, "post_gateway_json", None)
     if callable(post_json):
-        for _attempt in range(2):
-            status, decoded = post_json("/control", payload, timeout=timeout)
-            if int(status or 0) > 0:
-                body = dict(decoded) if isinstance(decoded, dict) else {}
-                body["_http_status"] = int(status)
-                break
-            last_error = OSError("gateway client transport returned no status")
-    else:
-        for _attempt in range(2):
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{port}/control",
-                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "X-User-Id": "local-agent",
-                    "X-Channel": "chat",
-                    **gateway_client_credentials(execution.agent).headers(),
-                },
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=timeout) as response:
-                    decoded = json.loads(response.read().decode("utf-8", "replace"))
-                    body = decoded if isinstance(decoded, dict) else {}
-                    break
-            except urllib.error.HTTPError as exc:
-                body = _http_error_body(exc)
-                return _gateway_control_result_from_body(command.kind, body)
-            except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-                last_error = exc
-    if not body:
-        return ConversationControlResult(
-            command.kind,
-            False,
-            f"Gateway 控制入口暂时不可用：{type(last_error).__name__ if last_error else 'UnknownError'}。",
-            control_state="transport_unknown",
-        )
-    return _gateway_control_result_from_body(command.kind, body)
+        status, decoded = post_json(path, payload, timeout=timeout)
+        return int(status or 0), dict(decoded) if isinstance(decoded, dict) else {}
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=hot_json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-User-Id": "local-agent",
+            "X-Channel": "chat",
+            **gateway_client_credentials(execution.agent).headers(),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            decoded = json.loads(response.read().decode("utf-8", "replace"))
+            code = getattr(response, "status", 200)
+            return (code if type(code) is int else 200), decoded if isinstance(decoded, dict) else {}
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), _http_error_body(exc)
 
 
 # LLM: 轮询稳定控制操作只读且必须核验所有者与准确会话；操作身份只定位回执，不能替代任一作用域事实。
@@ -377,6 +456,8 @@ def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus
         verbose_level=str(value.get("verbose_level") or ""),
         durable_work=tuple(durable_work),
         quarantined_wakes=_nonnegative_int(value.get("quarantined_wakes")),
+        background_roots=[row for row in value["background_roots"] if isinstance(row, dict)]
+        if isinstance(value.get("background_roots"), list) else [],
     )
 
 
@@ -434,7 +515,8 @@ def _nonnegative_float(value: object) -> float:
 # 函数用途: 从 urllib HTTPError 中读取控制接口的结构化错误对象。
 def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
     try:
-        payload = json.loads(exc.read().decode("utf-8", "replace"))
+        with exc:
+            payload = json.loads(exc.read().decode("utf-8", "replace"))
     except (OSError, json.JSONDecodeError, ValueError):
         return {}
     result = payload if isinstance(payload, dict) else {}
@@ -452,6 +534,11 @@ def _execute_local_control(
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
+    if command.kind == "stop" and command.operation in {"session", "thread"}:
+        return ConversationControlResult(
+            "stop", False, "按范围停止需要连接 Gateway。本地直连请使用 /stop 停止当前回合。",
+            control_state="rejected",
+        )
     if command.kind == 'route':
         try:
             from ...agent.conversation.route_mode import execute_route_control
@@ -461,7 +548,9 @@ def _execute_local_control(
                                            actor_id=str(getattr(thread, 'canonical_user_id', '') or ''), channel='chat')
             if result.ok:
                 # 本地直连模式不经 Gateway 受理，设置照常保存，但只有经 Gateway 的新请求才会按它委派。
-                result = replace(result, message=result.message + '本地直连模式不经 Gateway 受理：设置已保存，经 Gateway 的新请求才按它委派。')
+                result = fast_replace(
+                    result, message=result.message + '本地直连模式不经 Gateway 受理：设置已保存，经 Gateway 的新请求才按它委派。',
+                )
             return result
         except (ImportError, OSError, ValueError, TypeError, AttributeError, RuntimeError):
             return ConversationControlResult('route', False, '当前会话路由控制不可用，设置结果未确认。',
