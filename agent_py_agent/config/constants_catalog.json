@@ -1017,7 +1017,7 @@
       "value": 2,
       "unit": "个",
       "category": "上限预算",
-      "description": "交付物修复最大次数，超过放弃修复。"
+      "description": ""
     },
     {
       "name": "_MISSING_PREVIEW_COUNT",
@@ -1025,7 +1025,7 @@
       "value": 5,
       "unit": "个",
       "category": "其它",
-      "description": "缺失预览最多列出的条数。"
+      "description": ""
     },
     {
       "name": "_MAX_GENERATION_ATTEMPT_COUNT",
