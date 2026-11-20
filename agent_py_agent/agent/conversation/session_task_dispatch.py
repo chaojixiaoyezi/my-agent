@@ -214,7 +214,7 @@ def dispatch_session_task(
     target_thread: object,
     config: object,
     *, count_pair: bool = True, host_message_context=None, host_channel_actor=None,
-    business_context_intent=None, business_context_factory=None,
+    business_context_intent=None, business_context_factory=None, execution_profile=None,
 ) -> ToolHandlerOutcome:
     store = agent.conversation_store
     if host_channel_actor is not None:
@@ -277,6 +277,7 @@ def dispatch_session_task(
             **({"business_context_intent": business_context_intent,
                 "business_context_factory": business_context_factory}
                if business_context_intent is not None or business_context_factory is not None else {}),
+            **({"execution_profile": execution_profile} if execution_profile is not None else {}),
         )
         from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
 

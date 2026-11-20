@@ -697,6 +697,11 @@ def model_request_token_budget(agent: object, *, input_tokens: int) -> RequestTo
     shared = request_budget_shared_window(agent)
     window = _request_budget_configured_window(agent)
     ceiling = configured_output_ceiling(agent) if shared else max_output_tokens(agent)
+    params = getattr(agent, "_current_run_params", None)
+    boundary = getattr(params, "write_boundary", None) or {}
+    limit = boundary.get("token_budget")
+    if boundary.get("effect_policy") == "read_only" and type(limit) is int and limit > 0:
+        ceiling = min(ceiling, limit) if ceiling > 0 else limit
     return resolve_request_token_budget(input_tokens=input_tokens, context_window_tokens=window,
         output_ceiling=ceiling, shared_window=shared,
         server_managed_output=request_output_server_managed(agent))

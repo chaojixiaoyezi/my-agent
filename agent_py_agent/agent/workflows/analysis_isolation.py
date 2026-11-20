@@ -1,11 +1,40 @@
-"""研判隔离的真实能力边界；当前仅支持无状态、无工具的模型研判。
-
-需要取数时使用前置 tool_call 步骤，经原 native dispatch 和权限门读取，再把输出传入
-stateless_skill。受限轻量执行器尚未实现，任意 callable 不构成隔离或限时能力证明。
-"""
+"""沿原 Agent 节点能力解析工作流的只读执行档。"""
 from __future__ import annotations
 
+import math
+import time
+from dataclasses import asdict, dataclass
 from typing import Any
+
+READ_ONLY_AGENT_TASK_PROFILE = 'read_only'
+AGENT_TASK_PROFILE_KEY = 'workflow_execution_profile'
+
+
+@dataclass(frozen=True)
+class ReadOnlyAgentTaskProfile:
+    owner_id: str
+    space_id: str
+    workflow_run_id: str
+    step_id: str
+    attempt_id: str
+    deadline_at: float
+    token_budget: int | None = None
+    effect_policy: str = READ_ONLY_AGENT_TASK_PROFILE
+
+    def __post_init__(self):
+        if (self.effect_policy != READ_ONLY_AGENT_TASK_PROFILE
+                or not all(isinstance(value, str) and value for value in
+                           (self.owner_id, self.space_id, self.workflow_run_id, self.step_id, self.attempt_id))
+                or type(self.deadline_at) not in (float, int) or not math.isfinite(self.deadline_at)
+                or self.deadline_at <= 0
+                or (self.token_budget is not None and (type(self.token_budget) is not int or self.token_budget <= 0))):
+            raise ValueError('WORKFLOW_AGENT_CONFIG_INVALID')
+
+    def to_record(self):
+        return asdict(self)
+
+    def remaining_seconds(self):
+        return max(0.0, self.deadline_at - time.time())
 
 
 class WorkflowIsolationUnavailable(RuntimeError):
@@ -31,6 +60,12 @@ def resolve_analysis_isolation(run_params: Any, *, step_config: dict[str, Any] |
              else getattr(run_params, 'analysis_isolation', None))
     value = value if value is not None else config.get('analysis_isolation')
     if value == 'lightweight_subagent':
-        # 不因对象可调用或名字恰好不在黑名单就授予执行、记忆隔离或deadline保证。
+        from .agent_steps import WorkflowAgentSteps
+
+        ephemeral = (run_params.get('ephemeral_debug') if isinstance(run_params, dict)
+                     else getattr(run_params, 'ephemeral_debug', False))
+        if (not ephemeral and isinstance(isolation_executor, WorkflowAgentSteps)
+                and isolation_executor.supports_read_only_profile()):
+            return {'requested': value, 'mode': 'agent_task', 'profile': READ_ONLY_AGENT_TASK_PROFILE, 'note': ''}
         raise WorkflowIsolationUnavailable()
     return {'requested': 'stateless_skill', 'mode': 'stateless_skill', 'note': ''}

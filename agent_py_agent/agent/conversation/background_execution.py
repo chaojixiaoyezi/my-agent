@@ -155,10 +155,14 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
     from ..agent_core.runtime.run_params import run_params_with_request_id
     from ..gateway_parts.multiprocess_background_execution import bind_background_run_params
 
+    params, profile = _apply_session_task_profile(agent, params)
     resolved = bind_background_run_params(agent, run_params_with_request_id(params))
     control = _BackgroundRunControl(resolved.request_id, resolved.conversation_task_binding_callback)
     try:
-        result = agent.run(prompt, params=replace(resolved, conversation_task_binding_callback=control))
+        from ..backends.request_scope import provider_request_budget
+
+        with provider_request_budget(profile.remaining_seconds()) if profile is not None else nullcontext():
+            result = agent.run(prompt, params=replace(resolved, conversation_task_binding_callback=control))
     except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
             RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
         raise
@@ -174,6 +178,57 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
     return result, replace(params, request_id=resolved.request_id,
         run_id=binding.get("run_id", ""), task_id=binding.get("task_id", ""),
         attempt_id=binding.get("attempt_id", ""))
+
+
+def _apply_session_task_profile(agent, params):
+    """以本片 SessionTask 的规范记录为准，唤醒信封只负责定位。"""
+    from ..common.cancellation import ToolCancelled
+    from ..workflows.analysis_isolation import (
+        AGENT_TASK_PROFILE_KEY,
+        ReadOnlyAgentTaskProfile,
+        WorkflowIsolationUnavailable,
+    )
+    from .authority import CONVERSATION_SESSION_TASK_ID_ATTR
+    from .business_contracts import BusinessExecutionContext
+    from .session_tasks import (
+        SESSION_TASK_FAILED,
+        SESSION_TASK_TERMINAL_STATUSES,
+        SessionTaskUpdate,
+    )
+
+    attributes = params.task_attributes or {}
+    task_id = attributes.get(CONVERSATION_SESSION_TASK_ID_ATTR)
+    if not task_id and isinstance(params.task_id, str) and params.task_id.startswith("stask-"):
+        task_id = params.task_id
+    if not isinstance(task_id, str) or not task_id:
+        return params, None
+    tasks = getattr(getattr(agent, "conversation_store", None), "session_tasks", None)
+    if tasks is None:
+        raise WorkflowIsolationUnavailable()
+    task = tasks.load(task_id)
+    if task is None:
+        raise WorkflowIsolationUnavailable()
+    raw = task.metadata.get(AGENT_TASK_PROFILE_KEY)
+    if raw is None:
+        return params, None
+    profile = ReadOnlyAgentTaskProfile(**raw)
+    context = task.metadata.get("business_context") or {}
+    if (task_id not in (params.task_id, params.run_id)
+            or task.task_id != task_id or task.target_thread_id != attributes.get("conversation_thread_id")
+            or context.get("task_id") != task_id or context.get("owner_id") != profile.owner_id
+            or context.get("space_id") != profile.space_id
+            or getattr(getattr(agent, "home_paths", None), "owner_id", None) != profile.owner_id):
+        raise PermissionError("WORKFLOW_AGENT_DISPATCH_CONTEXT_MISMATCH")
+    if task.status in SESSION_TASK_TERMINAL_STATUSES:
+        raise ToolCancelled("原工作流派活已终结，跳过本次执行")
+    if profile.remaining_seconds() <= 0:
+        tasks.advance(task_id, SessionTaskUpdate(status=SESSION_TASK_FAILED, failure_code="TOOL_TIMEOUT"))
+        raise TimeoutError("工作流派活期限已到，模型和工具未执行")
+    boundary = {**(params.write_boundary or {}), "effect_policy": profile.effect_policy,
+                "read_only_approval": False, "deadline_at": profile.deadline_at,
+                "token_budget": profile.token_budget}
+    return replace(params, save=False, write_boundary=boundary,
+                   business_context=BusinessExecutionContext.from_dict(context)), profile
 
 
 # LLM: agent.run 已退出，只有 core 正式发布的精确 attempt 能证明其预留可释放；原提交批次先修复，不释放 submitted。

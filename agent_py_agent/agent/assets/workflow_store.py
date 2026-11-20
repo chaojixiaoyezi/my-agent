@@ -150,10 +150,16 @@ class WorkflowStepSpec(_Record):
     tool_spec: dict[str, object] | None = field(default=None, kw_only=True)
     subworkflow_ref: str = field(default="", kw_only=True)
     notification_spec: dict[str, object] | None = field(default=None, kw_only=True)
+    profile: str | None = field(default=None, kw_only=True)
 
     # LLM: 资产层唯一校验步骤；Skill引用允许来源前缀，脚本目录ID仍严格，模式/策略/超时不静默修正。
     # 函数用途: 在构造或JSON恢复时拒绝非法工作流步骤。
     def __post_init__(self):
+        if self.profile is not None:
+            from ..workflows.analysis_isolation import READ_ONLY_AGENT_TASK_PROFILE
+
+            if self.mode != 'agent_task' or self.profile != READ_ONLY_AGENT_TASK_PROFILE:
+                raise ValueError("profile 仅支持 agent_task 的 read_only 取值")
         if self.foreach is not None:
             from ..workflows.batching import validate_foreach
             validate_foreach(self.foreach)
@@ -216,7 +222,7 @@ class WorkflowStepSpec(_Record):
         for key in ('description', 'next_step_ids', 'ui_position', 'depends_on'):
             if not value.get(key):
                 value.pop(key, None)
-        for key in ('foreach', 'retry_policy', 'tool_spec', 'notification_spec'):
+        for key in ('foreach', 'retry_policy', 'tool_spec', 'notification_spec', 'profile'):
             if value.get(key) is None:
                 value.pop(key, None)
         if not value.get('subworkflow_ref'):
