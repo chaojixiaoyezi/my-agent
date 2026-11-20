@@ -98,7 +98,7 @@ def _wait_quantum(fallback: float) -> float:
     return fallback if fallback > 0 else sys.getswitchinterval()
 
 
-# LLM: weakref_slot keeps the slot layout check_slots_compat requires for this weakref-using module (C3 A1).
+# 本模块用到 weakref，转换前的 slots 兼容检查要求类保留 __weakref__ 槽位，所以加 weakref_slot=True（C3 A1）。
 @fast_frozen
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class RequestEvent:
