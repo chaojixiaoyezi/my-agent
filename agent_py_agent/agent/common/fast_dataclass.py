@@ -4,7 +4,8 @@ dataclasses 为冻结类生成的 __init__ 逐字段调用 object.__setattr__(se
 类型上查找属性；python3.14t 关闭 GIL、上千个冻结类在 128 线程里同时构造时，类型缓存的哈希带冲突让
 这些查找落到全局类型锁上（R3 §2.1、§4.1）。fast_frozen 按 dataclasses 的同一规则重新生成 __init__，
 只把每个字段的赋值换成类创建时一次性取到的成员描述符 __set__；签名、默认值、default_factory、kw_only、
-InitVar、__post_init__ 调用以及 eq/hash/repr/pickle/FrozenInstanceError 全部不变（差分测试钉住）。
+InitVar、__post_init__ 调用以及 eq/hash/repr/FrozenInstanceError 全部不变（差分测试钉住）；pickle/copy 状态
+按转换前的布局输出，并能读回转换前后各版本写出的状态（见 _restore_state）。
 同时安装 __replace__（copy.replace 协议）与 __fast_replace__；fast_replace 对未转换的类回落到
 dataclasses.replace。check_slots_compat 列出把一个类改成 slots=True 前必须处理的阻碍（含包内调用方对实例
 __dict__/弱引用的依赖），空列表才可转换；它只在转换时调用，fast_frozen 与请求路径从不调用。
@@ -51,6 +52,14 @@ _CALLER_MESSAGES = {
     "dict": "caller {site} reads __dict__ of a {cls} returned by {source}() (slots instances have no __dict__)",
     "weakref": "caller {site} takes a weak reference to a {cls} returned by {source}() (convert with weakref_slot=True)",
 }
+# 标准库给冻结槽位数据类装的状态函数（按 fields() 顺序的值列表）；类体自己定义了其中任一个时 fast_frozen 两个都不换。
+_STDLIB_STATE_FUNCTIONS = (dataclasses._dataclass_getstate, dataclasses._dataclass_setstate)
+# 转换前就已是 @dataclass(frozen=True, slots=True) 的类（模块.限定名）。它们的历史读取方是标准库按位置配对的
+# _dataclass_setstate，所以继续输出位置列表；新增这类转换时把类加进来。其余转换类转换前由实例 __dict__ 保存字段。
+_POSITIONAL_STATE_CLASSES = frozenset((
+    "agent_py_agent.agent.gateway_parts.request_event_hub.Gap",
+    "agent_py_agent.agent.gateway_parts.request_event_hub.RequestEvent",
+))
 
 
 # LLM: 沿 MRO 找第一个定义该名字的类；必须是成员描述符（槽位），否则说明它不是槽位字段。
@@ -187,6 +196,51 @@ def _build_replace(cls: type, init_fn: Callable) -> Callable:
     return _create_fn(cls, "__replace__", lines, namespace)
 
 
+# LLM: 与转换前（无 slots）实例 __dict__ 同形：旧版本没有 __setstate__，读取方按 __dict__.update 原样恢复；本模块的
+#   _restore_state 按名恢复。只含 dataclasses.fields() 的字段（与标准库一致），字段未赋值时同样抛 AttributeError。
+# 函数用途: 转换类的 __getstate__（pickle 与 copy 共用）：返回 {字段名: 值}。
+def _named_state(self) -> dict[str, object]:
+    return {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+
+
+# LLM: 标准库的 _dataclass_setstate 把状态当序列与 fields() 逐个配对：读到转换前的实例字典时，迭代出的是键，
+#   槽位里会写进字段名字符串。这里按类型区分三种布局，互不歧义：dict 为转换前的实例字典，按字段名；list 为
+#   标准库 _dataclass_getstate 输出的值列表，按 fields() 位置；(实例字典或 None, 槽位字典) 二元组为
+#   object.__getstate__ 的槽位布局，合并后按字段名。缺少的字段用声明的 default/default_factory 补齐；未知字段名、
+#   无默认值的缺失字段、值比字段多的列表和其它类型都抛 TypeError，且在写入任何槽位之前，不留下部分恢复的对象。
+#   冻结类不经 __setattr__，与标准库一样用 object.__setattr__ 写槽位。
+# 函数用途: 转换类的 __setstate__（pickle 与 copy 共用）：从命名、位置或槽位布局的状态恢复字段。
+def _restore_state(self, state: object) -> None:
+    fields = dataclasses.fields(self)
+    owner = type(self).__qualname__
+    if isinstance(state, dict):
+        named = state
+    elif type(state) is list:
+        if len(state) > len(fields):
+            raise TypeError(f"{owner}: pickle state has {len(state)} values for {len(fields)} fields")
+        named = dict(zip([f.name for f in fields], state))
+    elif type(state) is tuple and len(state) == 2 and all(part is None or isinstance(part, dict) for part in state):
+        named = {**(state[0] or {}), **(state[1] or {})}
+    else:
+        raise TypeError(f"{owner}: unsupported pickle state {type(state).__name__} "
+                        "(expected a field dict, a field list or an (instance dict, slot dict) pair)")
+    unknown = named.keys() - {f.name for f in fields}
+    if unknown:
+        raise TypeError(f"{owner}: pickle state has unknown fields {sorted(unknown, key=repr)}")
+    values = []
+    for f in fields:
+        if f.name in named:
+            values.append(named[f.name])
+        elif f.default is not _MISSING:
+            values.append(f.default)
+        elif f.default_factory is not _MISSING:
+            values.append(f.default_factory())
+        else:
+            raise TypeError(f"{owner}: pickle state has no value for field {f.name!r}")
+    for f, value in zip(fields, values):
+        object.__setattr__(self, f.name, value)
+
+
 # 函数用途: 校验 fast_frozen 的前提：冻结、slots=True、init=True 且 __init__ 由 dataclasses 生成。
 def _require_convertible(cls: object) -> None:
     params = getattr(cls, "__dataclass_params__", None) if isinstance(cls, type) else None
@@ -201,6 +255,8 @@ def _require_convertible(cls: object) -> None:
 
 
 # LLM: 类在导入时转换一次：就地替换 __init__ 并装上 __replace__/__fast_replace__，类对象身份不变；重复装饰直接返回。
+#   状态函数仍是标准库那一对时换成 _restore_state（读任一布局）与按转换前布局的输出：_POSITIONAL_STATE_CLASSES
+#   保留标准库的位置列表，其余为 _named_state。类体自定义的状态函数（含子类自己的）不动。
 # 函数用途: 类装饰器，放在 @dataclass(frozen=True, slots=True) 之上。
 def fast_frozen(cls: type) -> type:
     global CONVERTED_CLASSES
@@ -213,6 +269,10 @@ def fast_frozen(cls: type) -> type:
         cls.__init__ = init_fn
         cls.__replace__ = replace_fn
         cls.__fast_replace__ = replace_fn
+        if (cls.__dict__.get("__getstate__"), cls.__dict__.get("__setstate__")) == _STDLIB_STATE_FUNCTIONS:
+            if f"{cls.__module__}.{cls.__qualname__}" not in _POSITIONAL_STATE_CLASSES:
+                cls.__getstate__ = _named_state
+            cls.__setstate__ = _restore_state
         _REPLACERS[cls] = replace_fn
         CONVERTED_CLASSES = (*CONVERTED_CLASSES, cls)
     return cls

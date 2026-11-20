@@ -17,6 +17,8 @@ import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.capacity import available_creation_slots
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.io import sqlite_pool
+from agent_py_agent.agent.io.sqlite_scope import retire_scoped_database
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import SubAgentTask
@@ -256,6 +258,21 @@ def _unexpected_scan(*args, **kwargs):
 # 函数用途: 返回当前 FD 数供每轮 I/O 和恢复校验使用。
 def _fd_count():
     return len(os.listdir("/dev/fd" if Path("/dev/fd").exists() else "/proc/self/fd"))
+
+
+# LLM: M15（C6.1）起 SQLite 连接按线程复用，进程 FD 总数随本库的闲置连接增减；与 test_conveyor_m15_sqlite_pool 同一做法，
+#   按 (st_dev, st_ino) 只数指向该库文件的描述符，其余描述符仍按进程总数比较。
+# 函数用途: 返回当前进程中指向该数据库文件的描述符数。
+def _database_fd_count(path):
+    expected = path.stat()
+    count = 0
+    for name in os.listdir("/dev/fd" if Path("/dev/fd").exists() else "/proc/self/fd"):
+        try:
+            info = os.fstat(int(name))
+        except (OSError, ValueError):
+            continue
+        count += (info.st_dev, info.st_ino) == (expected.st_dev, expected.st_ino)
+    return count
 
 
 # LLM: 描述符诊断不关闭句柄或回收对象；只在 FD 断言失败时提供实际观察点便于归因。
@@ -635,17 +652,37 @@ def test_prepare_run_index_is_bounded_and_repairs_pending(tmp_path, monkeypatch)
         assert _fd_count() - before == 0
 
 
-# LLM: 索引包含 owner 私有的谱系及合约身份，新建权限不得由进程 umask 放宽。
-# 函数用途: 验证 SQLite 文件私有权限及显式关闭连接不留下 FD。
+# LLM: 索引包含 owner 私有的谱系及合约身份，新建权限不得由进程 umask 放宽。M15（C6.1）起首次读取后本线程保留一条
+#   已核验连接供 60 秒闲置窗口内复用，所以不再要求每次读后进程 FD 立即回到构造前：稳态重复读不得新增任何描述符，
+#   借租期内的闲置回收不得关闭它，租期结束后的过期回收与显式退役都必须物理关闭、回到构造前的进程基线。
+#   开头先回收其它用例留下的闲置连接，基线与后续回收都只涉及本用例的连接。
+# 函数用途: 验证 SQLite 文件私有权限、稳态复用不泄漏 FD、活跃租期跨回收存活，以及两种回收边界的物理关闭。
 def test_run_index_file_is_private_and_descriptors_are_closed(tmp_path):
+    window = sqlite_pool.SQLITE_POOL_IDLE_TIMEOUT_SECONDS
+    sqlite_pool.retire_idle_connections(now=sqlite_pool._now() + window)
     workspace = tmp_path / "runs"
     workspace.mkdir(mode=0o700)
     before = _fd_count()
     index = SubagentRunIndex(workspace)
     assert index.path.stat().st_mode & 0o077 == 0
+    assert index.coverage()["complete"]
+    assert _database_fd_count(index.path) == 1
+    warm = _fd_count()
     for _ in range(20):
         assert index.coverage()["complete"]
-        assert _fd_count() == before
+        assert _fd_count() == warm
+    with index.connect() as db:
+        sqlite_pool.retire_idle_connections(now=sqlite_pool._now() + window)
+        assert db.execute("SELECT 1").fetchone() == (1,)
+        assert _database_fd_count(index.path) == 1
+    sqlite_pool.retire_idle_connections(now=sqlite_pool._now() + window)
+    assert _database_fd_count(index.path) == 0
+    assert _fd_count() == before
+    assert index.coverage()["complete"]
+    assert _fd_count() == warm
+    assert retire_scoped_database(index.path)
+    assert _database_fd_count(index.path) == 0
+    assert _fd_count() == before
 
 
 # LLM: 所有危险文件都在隔离测试目录；拒绝应先于 SQLite 打开，外部样本字节不得被改动。
@@ -757,8 +794,10 @@ def test_reuse_candidates_keep_earliest_canonical_order(tmp_path, monkeypatch):
     assert [task.id for task in selected] == [older.id, newer.id]
 
 
-# LLM: 调用方一轮 prepare 只允许一个固定 pending 页，剩余未知继续阻止容量；下一轮再精确续修。
-# 函数用途: 验证首存未发表库存超过一页时同步恢复上界为 64，且不用目录发现。
+# LLM: 调用方一轮 prepare 只允许一个固定 pending 页，剩余未知继续阻止容量；下一轮再精确续修。M15（C6.1）起本库连接
+#   按线程复用，失败的读取也可能结束该连接，所以描述符分两部分核对：除本库外的进程描述符保持 prepare 前的基线，本库至多
+#   保留本线程一条闲置连接；过期回收后整体回到基线。开头先回收闲置连接，基线不含任何本库连接。
+# 函数用途: 验证首存未发表库存超过一页时同步恢复上界为 64，不用目录发现，且不泄漏描述符。
 def test_prepare_pending_recovery_has_fixed_batch_and_zero_fd_delta(tmp_path, monkeypatch):
     _disable_maintenance(monkeypatch)
     manager = SubAgentManager(tmp_path / "runs", workspace_root=tmp_path)
@@ -770,6 +809,8 @@ def test_prepare_pending_recovery_has_fixed_batch_and_zero_fd_delta(tmp_path, mo
                             task_workspace_dir=str(tmp_path / "task"),
                             agent_run_workspace_dir=str(tmp_path / "task" / "work" / "agents" / run_id))
         index.mark_pending(run_id, task=task)
+    window = sqlite_pool.SQLITE_POOL_IDLE_TIMEOUT_SECONDS
+    sqlite_pool.retire_idle_connections(now=sqlite_pool._now() + window)
     with monkeypatch.context() as hot:
         hot.setattr(os, "scandir", _unexpected_scan)
         before = _fd_count()
@@ -780,11 +821,16 @@ def test_prepare_pending_recovery_has_fixed_batch_and_zero_fd_delta(tmp_path, mo
         assert index.active_counts() == (1, 0)
         with pytest.raises(RuntimeError, match="pending"):
             index.request_ids(("any-root",), "", None)
-        assert _fd_count() == before
+        assert _database_fd_count(index.path) <= 1
+        assert _fd_count() - _database_fd_count(index.path) == before
         report = manager.persistence.prepare_run_index()
         assert report["discarded"] == 1 and report["pending"] == 0
         assert index.active_counts() == (0, 0)
-        assert _fd_count() == before
+        assert _database_fd_count(index.path) <= 1
+        assert _fd_count() - _database_fd_count(index.path) == before
+    sqlite_pool.retire_idle_connections(now=sqlite_pool._now() + window)
+    assert _database_fd_count(index.path) == 0
+    assert _fd_count() == before
 
 
 # LLM: 已发表状态丢失或换成别的 ID 都是未知，不可清 pending 释放容量；只修正同一精确样本后才恢复。
