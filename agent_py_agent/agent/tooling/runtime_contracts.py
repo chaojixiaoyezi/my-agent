@@ -12,11 +12,13 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen, fast_replace, slot_setter
 from ..contracts.idempotency import operation_idempotency_key
+from .input_schema import clone_json_value
 from .versioned_input_decoder import canonical_error_contract as error_contract
 
 SourceProtocol = Literal["native", "text"]
@@ -45,7 +47,8 @@ _TOOL_CHOICE_MODES = frozenset({"auto", "required", "specific", "none"})
 _LIVE_PROMPT_PROJECTION_KEY = "live_prompt_projection"
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolChoice:
     """Provider-independent tool selection for one model turn."""
 
@@ -62,9 +65,9 @@ class ToolChoice:
             raise ValueError("specific tool choice requires tool_name")
         if mode != "specific" and name:
             raise ValueError(f"{mode} tool choice cannot carry tool_name")
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "tool_name", name)
-        object.__setattr__(self, "reason", str(self.reason or "").strip())
+        _set_choice_mode(self, mode)
+        _set_choice_tool_name(self, name)
+        _set_choice_reason(self, str(self.reason or "").strip())
 
     @classmethod
     def auto(cls, reason: str = "") -> ToolChoice:
@@ -83,7 +86,13 @@ class ToolChoice:
         return cls("none", reason=reason)
 
 
-@dataclass(frozen=True)
+_set_choice_mode = slot_setter(ToolChoice, "mode")
+_set_choice_tool_name = slot_setter(ToolChoice, "tool_name")
+_set_choice_reason = slot_setter(ToolChoice, "reason")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ProviderToolCapability:
     """Observed provider/model/endpoint capability, not a model-name guess."""
 
@@ -102,14 +111,22 @@ class ProviderToolCapability:
         evidence = str(self.evidence or "").strip()
         if not provider or not endpoint or not evidence:
             raise ValueError("provider tool capability requires provider, endpoint and evidence")
-        object.__setattr__(self, "provider", provider)
-        object.__setattr__(self, "endpoint", endpoint)
-        object.__setattr__(self, "model", model)
-        object.__setattr__(self, "evidence", evidence)
-        object.__setattr__(self, "observed_at", str(self.observed_at or "").strip())
+        _set_capability_provider(self, provider)
+        _set_capability_endpoint(self, endpoint)
+        _set_capability_model(self, model)
+        _set_capability_evidence(self, evidence)
+        _set_capability_observed_at(self, str(self.observed_at or "").strip())
 
 
-@dataclass(frozen=True)
+_set_capability_provider = slot_setter(ProviderToolCapability, "provider")
+_set_capability_endpoint = slot_setter(ProviderToolCapability, "endpoint")
+_set_capability_model = slot_setter(ProviderToolCapability, "model")
+_set_capability_evidence = slot_setter(ProviderToolCapability, "evidence")
+_set_capability_observed_at = slot_setter(ProviderToolCapability, "observed_at")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolProtocolSnapshot:
     """Run-fixed protocol selection; it cannot change after the first request."""
 
@@ -123,13 +140,18 @@ class ToolProtocolSnapshot:
             raise ValueError(f"invalid tool source protocol: {protocol}")
         if protocol == "native" and not self.capability.native_supported:
             raise ValueError("native protocol selected without observed native capability")
-        object.__setattr__(self, "run_id", str(self.run_id or "").strip())
-        object.__setattr__(self, "source_protocol", protocol)
+        _set_protocol_snapshot_run_id(self, str(self.run_id or "").strip())
+        _set_protocol_snapshot_source_protocol(self, protocol)
+
+
+_set_protocol_snapshot_run_id = slot_setter(ToolProtocolSnapshot, "run_id")
+_set_protocol_snapshot_source_protocol = slot_setter(ToolProtocolSnapshot, "source_protocol")
 
 
 # LLM: 迁移事实来自未执行请求的宿主协议，不进入模型arguments，也不替代权限与幂等身份。
 # 类用途: 运输规范调用及执行前已核的原始输入来源。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolCall:
     """The sole internal authority for one proposed tool invocation."""
 
@@ -177,18 +199,18 @@ class ToolCall:
             run_id,
             operation_id,
         )
-        object.__setattr__(self, "call_id", call_id)
-        object.__setattr__(self, "tool_name", tool_name)
-        object.__setattr__(self, "arguments", deepcopy(self.arguments))
-        object.__setattr__(self, "source_protocol", protocol)
-        object.__setattr__(self, "schema_hash", schema_hash)
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "turn_id", turn_id)
-        object.__setattr__(self, "attempt_id", attempt_id)
-        object.__setattr__(self, "required_action_id", str(self.required_action_id or "").strip())
-        object.__setattr__(self, "operation_id", operation_id)
-        object.__setattr__(self, "idempotency_key", idempotency_key)
-        object.__setattr__(self, "input_migration", deepcopy(self.input_migration))
+        _set_call_call_id(self, call_id)
+        _set_call_tool_name(self, tool_name)
+        _set_call_arguments(self, clone_json_value(self.arguments))
+        _set_call_source_protocol(self, protocol)
+        _set_call_schema_hash(self, schema_hash)
+        _set_call_run_id(self, run_id)
+        _set_call_turn_id(self, turn_id)
+        _set_call_attempt_id(self, attempt_id)
+        _set_call_required_action_id(self, str(self.required_action_id or "").strip())
+        _set_call_operation_id(self, operation_id)
+        _set_call_idempotency_key(self, idempotency_key)
+        _set_call_input_migration(self, clone_json_value(self.input_migration))
 
     @property
     def args_hash(self) -> str:
@@ -200,7 +222,7 @@ class ToolCall:
         return {
             "call_id": self.call_id,
             "tool_name": self.tool_name,
-            "arguments": deepcopy(self.arguments),
+            "arguments": clone_json_value(self.arguments),
             "source_protocol": self.source_protocol,
             "schema_hash": self.schema_hash,
             "run_id": self.run_id,
@@ -210,11 +232,26 @@ class ToolCall:
             "operation_id": self.operation_id,
             "idempotency_key": self.idempotency_key,
             "args_hash": self.args_hash,
-            **({"input_migration": deepcopy(self.input_migration)} if self.input_migration else {}),
+            **({"input_migration": clone_json_value(self.input_migration)} if self.input_migration else {}),
         }
 
 
-@dataclass(frozen=True)
+_set_call_call_id = slot_setter(ToolCall, "call_id")
+_set_call_tool_name = slot_setter(ToolCall, "tool_name")
+_set_call_arguments = slot_setter(ToolCall, "arguments")
+_set_call_source_protocol = slot_setter(ToolCall, "source_protocol")
+_set_call_schema_hash = slot_setter(ToolCall, "schema_hash")
+_set_call_run_id = slot_setter(ToolCall, "run_id")
+_set_call_turn_id = slot_setter(ToolCall, "turn_id")
+_set_call_attempt_id = slot_setter(ToolCall, "attempt_id")
+_set_call_required_action_id = slot_setter(ToolCall, "required_action_id")
+_set_call_operation_id = slot_setter(ToolCall, "operation_id")
+_set_call_idempotency_key = slot_setter(ToolCall, "idempotency_key")
+_set_call_input_migration = slot_setter(ToolCall, "input_migration")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolContentBlock:
     """One bounded model-facing result block or durable reference."""
 
@@ -230,18 +267,18 @@ class ToolContentBlock:
             raise ValueError(f"invalid tool content block type: {block_type}")
         if block_type == "ref" and not str(self.ref or "").strip():
             raise ValueError("ref content block requires ref")
-        object.__setattr__(self, "type", block_type)
-        object.__setattr__(self, "text", str(self.text or ""))
-        object.__setattr__(self, "data", deepcopy(self.data))
-        object.__setattr__(self, "ref", str(self.ref or "").strip())
-        object.__setattr__(self, "mime_type", str(self.mime_type or "").strip())
+        _set_block_type(self, block_type)
+        _set_block_text(self, str(self.text or ""))
+        _set_block_data(self, clone_json_value(self.data))
+        _set_block_ref(self, str(self.ref or "").strip())
+        _set_block_mime_type(self, str(self.mime_type or "").strip())
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"type": self.type}
         if self.text:
             payload["text"] = self.text
         if self.data is not None:
-            payload["data"] = deepcopy(self.data)
+            payload["data"] = clone_json_value(self.data)
         if self.ref:
             payload["ref"] = self.ref
         if self.mime_type:
@@ -249,7 +286,15 @@ class ToolContentBlock:
         return payload
 
 
-@dataclass(frozen=True)
+_set_block_type = slot_setter(ToolContentBlock, "type")
+_set_block_text = slot_setter(ToolContentBlock, "text")
+_set_block_data = slot_setter(ToolContentBlock, "data")
+_set_block_ref = slot_setter(ToolContentBlock, "ref")
+_set_block_mime_type = slot_setter(ToolContentBlock, "mime_type")
+
+
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolResultRef:
     kind: str
     ref: str
@@ -261,12 +306,12 @@ class ToolResultRef:
     def __post_init__(self) -> None:
         if not str(self.kind or "").strip() or not str(self.ref or "").strip():
             raise ValueError("tool result ref requires kind and ref")
-        object.__setattr__(self, "kind", str(self.kind).strip())
-        object.__setattr__(self, "ref", str(self.ref).strip())
-        object.__setattr__(self, "sha256", str(self.sha256 or "").strip())
-        object.__setattr__(self, "size_bytes", max(0, int(self.size_bytes or 0)))
-        object.__setattr__(self, "summary", str(self.summary or "").strip())
-        object.__setattr__(self, "mime_type", str(self.mime_type or "").strip())
+        _set_ref_kind(self, str(self.kind).strip())
+        _set_ref_ref(self, str(self.ref).strip())
+        _set_ref_sha256(self, str(self.sha256 or "").strip())
+        _set_ref_size_bytes(self, max(0, int(self.size_bytes or 0)))
+        _set_ref_summary(self, str(self.summary or "").strip())
+        _set_ref_mime_type(self, str(self.mime_type or "").strip())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -277,6 +322,14 @@ class ToolResultRef:
             "summary": self.summary,
             "mime_type": self.mime_type,
         }
+
+
+_set_ref_kind = slot_setter(ToolResultRef, "kind")
+_set_ref_ref = slot_setter(ToolResultRef, "ref")
+_set_ref_sha256 = slot_setter(ToolResultRef, "sha256")
+_set_ref_size_bytes = slot_setter(ToolResultRef, "size_bytes")
+_set_ref_summary = slot_setter(ToolResultRef, "summary")
+_set_ref_mime_type = slot_setter(ToolResultRef, "mime_type")
 
 
 @dataclass(frozen=True)
@@ -314,7 +367,8 @@ class ToolOperation:
 # LLM: This host-owned result is attached only after an exact ToolCall approval binding resumes.
 # Handlers and provider prose must not synthesize it through generic metadata or output text.
 # 类用途: 表示用户批准已经精确应用到同一次工具调用，供模型续轮和耐久审计读取。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class AppliedToolApproval:
     permission_id: str
     decision: str
@@ -326,8 +380,8 @@ class AppliedToolApproval:
             raise ValueError("applied tool approval requires permission_id")
         if decision not in {"approved", "approved_session"}:
             raise ValueError(f"invalid applied tool approval decision: {decision}")
-        object.__setattr__(self, "permission_id", permission_id)
-        object.__setattr__(self, "decision", decision)
+        _set_applied_approval_permission_id(self, permission_id)
+        _set_applied_approval_decision(self, decision)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -337,6 +391,10 @@ class AppliedToolApproval:
             "decision": self.decision,
             "applied": True,
         }
+
+
+_set_applied_approval_permission_id = slot_setter(AppliedToolApproval, "permission_id")
+_set_applied_approval_decision = slot_setter(AppliedToolApproval, "decision")
 
 
 @dataclass(frozen=True)
@@ -355,7 +413,8 @@ class ToolSuccessFacts:
     duration_ms: int = 0
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolFailureFacts:
     """Optional host-owned facts attached to one non-success canonical result."""
 
@@ -373,7 +432,8 @@ class ToolFailureFacts:
 
 # LLM: 结果是历史、结算和归档的唯一运输合同；可信输入迁移事实须与原调用同时进入结果，不复用为授权。
 # 类用途: 保存工具执行的结构化结果、正文及来源，让归档和现场展示共用真实状态。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolResult:
     """The sole call result carried to history, settlement and finalization."""
 
@@ -460,23 +520,23 @@ class ToolResult:
             AppliedToolApproval,
         ):
             raise ValueError("tool result applied_approval must be typed")
-        object.__setattr__(self, "call_id", str(self.call_id).strip())
-        object.__setattr__(self, "tool_name", str(self.tool_name).strip())
-        object.__setattr__(self, "status", status)
-        object.__setattr__(self, "content_blocks", tuple(self.content_blocks))
-        object.__setattr__(self, "error_code", code)
-        object.__setattr__(self, "error_category", category)
-        object.__setattr__(self, "retryable", retryable)
-        object.__setattr__(self, "recommended_action", recommended)
-        object.__setattr__(self, "recovery_hint", recovery)
-        object.__setattr__(self, "failure_stage", failure_stage)
-        object.__setattr__(self, "duration_ms", duration)
-        object.__setattr__(self, "effect_outcome", effect_outcome)
-        object.__setattr__(self, "effect_source_ref", str(self.effect_source_ref or "").strip())
-        object.__setattr__(self, "refs", tuple(self.refs))
-        object.__setattr__(self, "output_trust", trust)
-        object.__setattr__(self, "output_redaction", redaction)
-        object.__setattr__(self, "metadata", deepcopy(self.metadata))
+        _set_result_call_id(self, str(self.call_id).strip())
+        _set_result_tool_name(self, str(self.tool_name).strip())
+        _set_result_status(self, status)
+        _set_result_content_blocks(self, tuple(self.content_blocks))
+        _set_result_error_code(self, code)
+        _set_result_error_category(self, category)
+        _set_result_retryable(self, retryable)
+        _set_result_recommended_action(self, recommended)
+        _set_result_recovery_hint(self, recovery)
+        _set_result_failure_stage(self, failure_stage)
+        _set_result_duration_ms(self, duration)
+        _set_result_effect_outcome(self, effect_outcome)
+        _set_result_effect_source_ref(self, str(self.effect_source_ref or "").strip())
+        _set_result_refs(self, tuple(self.refs))
+        _set_result_output_trust(self, trust)
+        _set_result_output_redaction(self, redaction)
+        _set_result_metadata(self, clone_json_value(self.metadata))
 
     @property
     def ok(self) -> bool:
@@ -493,7 +553,7 @@ class ToolResult:
             if block.type == "text":
                 parts.append(block.text)
             elif block.type == "json":
-                parts.append(json.dumps(block.data, ensure_ascii=False, sort_keys=True))
+                parts.append(hot_json.dumps(block.data, ensure_ascii=False, sort_keys=True))
             elif block.type == "ref":
                 parts.append(block.ref)
         return "\n".join(part for part in parts if part)
@@ -577,7 +637,7 @@ class ToolResult:
             updates["failure_stage"] = str(failure_stage or "").strip().lower()
         if duration_ms is not None:
             updates["duration_ms"] = max(0, int(float(duration_ms or 0)))
-        return replace(self, **updates)
+        return fast_replace(self, **updates)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -602,7 +662,7 @@ class ToolResult:
             "refs": [ref.to_dict() for ref in self.refs],
             "output_trust": self.output_trust,
             "output_redaction": self.output_redaction,
-            "metadata": deepcopy(self.metadata),
+            "metadata": clone_json_value(self.metadata),
         }
 
     def render_for_prompt(self, *, project_text: Callable[[str], str] | None = None) -> str:
@@ -650,7 +710,7 @@ class ToolResult:
             action = host_error["next_action"]
             if isinstance(action, str) and action.strip():
                 has_host_next_action = True
-                parts.insert(1, "[host-business-recovery] " + project(json.dumps({
+                parts.insert(1, "[host-business-recovery] " + project(hot_json.dumps({
                     "next_action": redact_sensitive_text(action[:2048])}, ensure_ascii=False)))
         raw_next_action = self.metadata.get("next_action") if isinstance(self.metadata, dict) else None
         if not has_host_next_action and isinstance(raw_next_action, str) and raw_next_action.strip():
@@ -660,7 +720,7 @@ class ToolResult:
             if bounded_next:
                 parts.append(
                     "[tool-next-action] "
-                    + project(json.dumps({"next_action": bounded_next}, ensure_ascii=False))
+                    + project(hot_json.dumps({"next_action": bounded_next}, ensure_ascii=False))
                 )
         if self.applied_approval is not None:
             parts.append(
@@ -680,7 +740,7 @@ class ToolResult:
         if self.refs:
             parts.append(
                 "[tool-result-refs] "
-                + project(json.dumps([ref.to_dict() for ref in self.refs], ensure_ascii=False))
+                + project(hot_json.dumps([ref.to_dict() for ref in self.refs], ensure_ascii=False))
             )
         return "\n".join(part for part in parts if part)
 
@@ -697,9 +757,9 @@ class ToolResult:
     # facts, refs, status or the durable raw-output archive record.
     # 函数用途: 为当前原生工具历史绑定与文本链路完全一致的安全展示内容。
     def with_live_prompt_projection(self, projected: str) -> ToolResult:
-        metadata = deepcopy(self.metadata)
+        metadata = clone_json_value(self.metadata)
         metadata[_LIVE_PROMPT_PROJECTION_KEY] = str(projected or "")
-        return replace(self, metadata=metadata)
+        return fast_replace(self, metadata=metadata)
 
     def render_status_header(self) -> str:
         fields = [f"tool={self.tool_name}", f"status={self.status}"]
@@ -729,6 +789,25 @@ class ToolResult:
         if self.failure_stage:
             fields.insert(1, f"failure_stage={self.failure_stage}")
         return f"[tool-execution; {'; '.join(fields)}]"
+
+
+_set_result_call_id = slot_setter(ToolResult, "call_id")
+_set_result_tool_name = slot_setter(ToolResult, "tool_name")
+_set_result_status = slot_setter(ToolResult, "status")
+_set_result_content_blocks = slot_setter(ToolResult, "content_blocks")
+_set_result_error_code = slot_setter(ToolResult, "error_code")
+_set_result_error_category = slot_setter(ToolResult, "error_category")
+_set_result_retryable = slot_setter(ToolResult, "retryable")
+_set_result_recommended_action = slot_setter(ToolResult, "recommended_action")
+_set_result_recovery_hint = slot_setter(ToolResult, "recovery_hint")
+_set_result_failure_stage = slot_setter(ToolResult, "failure_stage")
+_set_result_duration_ms = slot_setter(ToolResult, "duration_ms")
+_set_result_effect_outcome = slot_setter(ToolResult, "effect_outcome")
+_set_result_effect_source_ref = slot_setter(ToolResult, "effect_source_ref")
+_set_result_refs = slot_setter(ToolResult, "refs")
+_set_result_output_trust = slot_setter(ToolResult, "output_trust")
+_set_result_output_redaction = slot_setter(ToolResult, "output_redaction")
+_set_result_metadata = slot_setter(ToolResult, "metadata")
 
 
 def canonical_tool_call_from_persisted_payload(

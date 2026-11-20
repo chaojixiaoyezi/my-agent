@@ -734,3 +734,42 @@ CI 安装 `.[dev,secrets]` 加 `sqlalchemy>=2.0`、`psycopg>=3.1`，不安装完
   - 常数目录检查与 11 个目录测试通过。
 - 3.11.15 本地：15 个 M00 文件编译通过。SpawnPopen 冒烟（cwd、env、pass_fds、ENOEXEC、`os.putenv`、128 路并发）通过。
 - 常数目录由 1562 项减为 1561 项：删除 `_SHEBANG_LINE_LIMIT_BYTES`，`_DARWIN_OPEN_MAX_FILES` 的说明随实现更新。
+
+## 2026-11-19 M09：工具回合 DTO 槽位转换与无共享锁的 JSON 复制
+
+本节记录 Conveyor M09（R3-W3 DTO 核心、S50-02）建立的不变量与验收证据。父提交 `d26f2d5d4`；合同见 Conveyor `INTERFACE_CONTRACTS.MD` C1–C3。Layer-2 收口（`reviews/OPUS2M09FIX.MD`）另授权修改 `agent/tooling/input_schema.py`。
+
+**不变量**
+
+- 30 个工具回合冻结 DTO 经 `@fast_frozen` + `slots=True` 构造：`tooling/models.py` 14 个、`runtime_contracts.py` 9 个、`tool_input_completion.py` 3 个、`tool_operation_coordinator.py` 2 个、`contracts/tool_approval.py` 2 个。`__post_init__` 规范化改用模块级 `slot_setter`，已转换类的 `replace` 改用 `fast_replace`。签名、默认值、相等、哈希、repr、pickle、`FrozenInstanceError` 与 replace 错误由差分测试对照原 dataclass 钉住。
+- 工具回合路径上的 JSON 值复制不再调用 `copy.deepcopy`。3.14t 的 `copy.deepcopy` 在每次调用（含逐元素递归）时先测 `type(x) in copy._atomic_types`；该名字是模块级可变集合，关闭 GIL 时对可变集合的成员测试持有集合的对象锁，所有线程排在同一把锁上。
+- `tooling/input_schema.clone_json_value` 只处理精确类型的 dict、list、tuple 与 str、int、float、bool、None，结果形状与 `copy.deepcopy` 相同：dict 与 list 按 id 备忘，共享子对象与环保持原形；元素未变的元组原样返回，否则重建并备忘；标量原样复用。其它类型（含这些类型的子类与非标量键）整体交给 `copy.deepcopy`，结果仍与它一致。
+  - 经它复制的有：schema 规范化，ToolCall 参数与输入迁移事实，内容块数据，结果 metadata 及其 `to_dict`/现场投影副本，补参，运行时默认值探针，协调器的组件回执与结果载荷。
+  - 协调器复制存储记录 dataclass 的一处（`deepcopy(cell.record)`）保留 `copy.deepcopy`。
+  - 每层容器在这里占一个 Python 帧，在 `copy.deepcopy` 里占两个。默认递归上限下，嵌套约 500–1000 层容器的值现在能复制，原先在复制处抛 `RecursionError`；工具输入校验仍在 `_MAX_SCHEMA_DEPTH`（`contracts/tool_input_schema.py`）处记 `maxDepth` 问题。仓库里没有依赖这处 `RecursionError` 的调用方。
+- `ToolRuntimeSnapshot` 带 `__weakref__` 槽位（`weakref_slot=True`）：`registry._deferred_tool_projection` 以 `weakref.ref(snapshot)` 缓存投影。
+- 默认形 JSON 编码走 `hot_json`；带 `default=str` 的 `_json_hash` 保留标准库编码。工具 effect 解析与 `_operation_status_for_result` 与父提交逐字节相同。`tool_spec.py` 无触发项，保持父版内容。
+- C1.3 兼容结论：
+  - 声明字段的写入仍抛 `FrozenInstanceError`。未声明名字的写入由 CPython 槽位冻结 dataclass 抛 `TypeError`（父版为 `FrozenInstanceError`）；仓库内没有对这 30 个类写未声明属性的调用方，`host_output_redaction.py` 的封记只写可变的 `ToolHandlerOutcome`。
+  - 父版布局的 pickle 携带 dict 状态，槽位类的 dataclass `__setstate__` 按字段顺序消费列表状态，会恢复出错位字段。仓库从不 pickle 这些 DTO（唯一的 pickle 是 `memory_store/candidates.py` 的进程内指纹，不落盘、不反序列化），持久化只走 `to_dict` 与映射读取，因此不加 dict 状态的 `__setstate__`。
+
+**验收证据（M09，隔离 HOME）**
+
+- 根因探针（G1 驱动，3.14.3t，GIL 关闭，独占主机信号量）：
+  - `copy.deepcopy(None)` 0.069；模块级可变集合的成员测试 0.054，同内容 frozenset 1.092。
+  - 复制 ToolCall 参数：`copy.deepcopy` 0.168，`clone_json_value` 1.233。复制执行器形 metadata：0.128 对 1.378。
+- 红到绿（新测试文件 92 项）：
+  - 父提交导出上，3.12.13 与 3.14.3t 各 59 项失败、33 项通过：30 个转换断言、28 个复制器用例、1 个复制路径计数。
+  - Wave-1 暂存树上各 30 项失败、62 项通过：28 个复制器用例（没有 `clone_json_value`）、复制路径计数（`copy.deepcopy` 调用 337 次，应为 0）、快照弱引用（`TypeError`）。
+  - 修复后两种解释器各 92 项通过。
+- G1（3.14.3t，GIL 关闭，独占信号量，主机负载 55–180）：M09 的 32 个 case 中位比 1.265–1.550。原先失败的 ToolModelSpec、ToolCall、ToolContentBlock、ToolResult 依次为 1.489、1.412、1.265、1.463（暂存树上为 0.101、0.098、0.119、0.107）；新增的生产形 case 中，派生身份的 ToolCall 为 1.457，带元组 metadata 的 ToolResult 为 1.495。完整 G1 + G2：43 项通过（287.62 秒，主机负载 139–150）。
+- G2：本片文件触发数 157 → 2（白名单删 48 键、改 2 键、无新增），3.12.13 与 3.14.3t 均 6 项通过。
+- 调用方套件：slice 5.3(c)/(d) 的 6 个文件在 3.12.13 与 3.14.3t 各 83 项通过，与父版相同。扩展到 45 个调用方文件后，3.12.13 为 1236 项通过；3.14.3t 为 1233 项通过加 1 个收集错误（`test_tool_slimming_w5_computer_use.py` 需要 venv 里没有的 `mcp`）。两者的计数与错误都与父提交相同。
+- 常数目录不变（1561 项）。
+
+**未决项（M09 范围外）**
+
+- `fast_replace` 护航：M00 `_build_replace` 每次替换都对所有线程共享的 frozenset 调 `isdisjoint` 与 `<=`（`common/fast_dataclass.py:170-171`），3.14t 下两者进入共享对象的临界区。受影响的 M09 替换点：`runtime_contracts.py:640/762`、`tool_operation_coordinator.py:248/250/391/410/455`。`with_execution_facts` 的 128/16 比为 0.239（16 线程约 44.7 万次/秒，128 线程约 11.0 万次/秒）；父版非槽位类为 1.562（约 9.5 万与 14.5 万次/秒）。M10 已在 `sol/wave1-m10` 的 `f69075f6f` 修复 `_build_replace`（`reviews/OPUS3M10FIX.MD`，未合并），集成时这些替换点依赖该提交。
+- `re` 编译缓存争用（父版已有）：`input_schema._validate_constraint_shapes` 对 schema 里每个 `pattern` 调 `re.compile`（`input_schema.py:375`）。带 pattern 的 schema 构造 ToolModelSpec 为 0.41–0.55；规范化为 0.358，把 `re.compile` 换成空函数后为 1.480。逐调用校验 `contracts/tool_input_schema.py:615` 的 `re.search(pattern, value)` 走同一缓存（M32）。
+- M09 以外仍在工具回合路径上用 `copy.deepcopy` 复制 JSON 值的文件，可改用 `clone_json_value`：`tooling/versioned_input_decoder.py:28,287`、`tooling/executor.py:1428,1445`、`tooling/registry.py:1438`、`agent_core/tool_ir_history.py`、`agent_core/tool_request_projection.py`。
+- `check_slots_compat` 没有报出“参数传入后取弱引用”的调用方（`registry.py:640` 对 `ToolRuntimeSnapshot`），本片靠调用方测试发现。

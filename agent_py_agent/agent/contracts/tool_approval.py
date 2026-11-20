@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
+
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen, slot_setter
 
 ToolApprovalDecisionValue = Literal[
     "approved",
@@ -38,7 +40,8 @@ class ToolApprovalCallIdentity(Protocol):
 
 # LLM: ToolApprovalRequest 的 binding 是唯一授权身份；options 可扩展但每个 decision 必须来自封闭安全枚举。
 # 类用途: 描述一次暂停中的工具调用、用户可见内容和允许选择。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolApprovalRequest:
     permission_id: str
     request_id: str
@@ -69,21 +72,21 @@ class ToolApprovalRequest:
             raise ValueError("tool approval requires an approved option")
         if not any(item["decision"] in {"denied", "cancelled"} for item in options):
             raise ValueError("tool approval requires a rejection option")
-        object.__setattr__(self, "permission_id", permission_id)
-        object.__setattr__(self, "request_id", request_id)
-        object.__setattr__(self, "tool_name", tool_name)
-        object.__setattr__(self, "round", max(0, int(self.round or 0)))
-        object.__setattr__(self, "call_index", max(0, int(self.call_index or 0)))
-        object.__setattr__(self, "title", str(self.title or "Tool use"))
-        object.__setattr__(self, "description", str(self.description or ""))
-        object.__setattr__(self, "binding", binding)
-        object.__setattr__(self, "options", options)
+        _set_request_permission_id(self, permission_id)
+        _set_request_request_id(self, request_id)
+        _set_request_tool_name(self, tool_name)
+        _set_request_round(self, max(0, int(self.round or 0)))
+        _set_request_call_index(self, max(0, int(self.call_index or 0)))
+        _set_request_title(self, str(self.title or "Tool use"))
+        _set_request_description(self, str(self.description or ""))
+        _set_request_binding(self, binding)
+        _set_request_options(self, options)
         requested_at = max(0.0, float(self.requested_at or 0.0))
         expires_at = float(self.expires_at or 0.0)
         if not math.isfinite(requested_at) or not math.isfinite(expires_at) or expires_at < 0:
             raise ValueError("tool approval times must be finite and nonnegative")
-        object.__setattr__(self, "requested_at", requested_at)
-        object.__setattr__(self, "expires_at", expires_at)
+        _set_request_requested_at(self, requested_at)
+        _set_request_expires_at(self, expires_at)
 
     # LLM: payload 只包含已校验公开字段与精确 binding；调用方不得补入原始完整 arguments 或 secret。
     # 函数用途: 生成 Gateway/TUI 可安全传递的审批请求对象。
@@ -163,9 +166,23 @@ class ToolApprovalRequest:
         )
 
 
+_set_request_permission_id = slot_setter(ToolApprovalRequest, "permission_id")
+_set_request_request_id = slot_setter(ToolApprovalRequest, "request_id")
+_set_request_tool_name = slot_setter(ToolApprovalRequest, "tool_name")
+_set_request_round = slot_setter(ToolApprovalRequest, "round")
+_set_request_call_index = slot_setter(ToolApprovalRequest, "call_index")
+_set_request_title = slot_setter(ToolApprovalRequest, "title")
+_set_request_description = slot_setter(ToolApprovalRequest, "description")
+_set_request_binding = slot_setter(ToolApprovalRequest, "binding")
+_set_request_options = slot_setter(ToolApprovalRequest, "options")
+_set_request_requested_at = slot_setter(ToolApprovalRequest, "requested_at")
+_set_request_expires_at = slot_setter(ToolApprovalRequest, "expires_at")
+
+
 # LLM: ToolApprovalDecision 的枚举是授权控制量；feedback 只是后续模型上下文，不参与 approve/deny 判断。
 # 类用途: 表示用户、控制面或取消令牌对一条审批请求的结构化答复。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ToolApprovalDecision:
     permission_id: str
     decision: ToolApprovalDecisionValue
@@ -188,12 +205,12 @@ class ToolApprovalDecision:
             raise ValueError("invalid tool approval reason")
         if reason and decision in {"approved", "approved_session", "approved_owner"}:
             raise ValueError("a failed approval cannot approve execution")
-        object.__setattr__(self, "reason_code", reason)
-        object.__setattr__(self, "diagnostic", str(self.diagnostic or '')[:512])
-        object.__setattr__(self, "permission_id", permission_id)
-        object.__setattr__(self, "decision", decision)
-        object.__setattr__(self, "feedback", str(self.feedback or "").strip())
-        object.__setattr__(self, "decided_at", max(0.0, float(self.decided_at or 0.0)))
+        _set_decision_reason_code(self, reason)
+        _set_decision_diagnostic(self, str(self.diagnostic or '')[:512])
+        _set_decision_permission_id(self, permission_id)
+        _set_decision_decision(self, decision)
+        _set_decision_feedback(self, str(self.feedback or "").strip())
+        _set_decision_decided_at(self, max(0.0, float(self.decided_at or 0.0)))
 
     # LLM: approved 只认显式 approved 枚举；label、option id 和反馈文本不得产生授权。
     # approved_session 是会话级批准（#5 引入），同样放行——否则选"会话级批准"会走
@@ -229,6 +246,14 @@ class ToolApprovalDecision:
             reason_code=str(value.get("reason_code") or ""),
             diagnostic=str(value.get("diagnostic") or ""),
         )
+
+
+_set_decision_reason_code = slot_setter(ToolApprovalDecision, "reason_code")
+_set_decision_diagnostic = slot_setter(ToolApprovalDecision, "diagnostic")
+_set_decision_permission_id = slot_setter(ToolApprovalDecision, "permission_id")
+_set_decision_decision = slot_setter(ToolApprovalDecision, "decision")
+_set_decision_feedback = slot_setter(ToolApprovalDecision, "feedback")
+_set_decision_decided_at = slot_setter(ToolApprovalDecision, "decided_at")
 
 
 # LLM: 等待选项是宿主结构化输入，不来自工具参数；默认 None 由各等待入口采用原常量，不增加第二配置源。
@@ -291,11 +316,11 @@ def build_tool_approval_request(
     if str(grant_key or "").strip() and not require_human:
         # 操作授权键来自工具 runtime policy 的结构化声明，进入 binding 后与决定一起被消费方核对。
         binding["grant_key"] = str(grant_key).strip()
-    identity = json.dumps(
+    identity = hot_json.dumps(
         {"call_id": call.call_id, **binding},
         ensure_ascii=False,
         sort_keys=True,
-        separators=(",", ":"),
+        compact=True,
     )
     permission_id = f"approval:{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}"
     options = [

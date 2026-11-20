@@ -776,18 +776,6 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M07"
     },
-    "agent/contracts/tool_approval.py::ToolApprovalDecision.__post_init__::object_setattr": {
-      "count": 6,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/contracts/tool_approval.py::ToolApprovalRequest.__post_init__::object_setattr": {
-      "count": 11,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/contracts/tool_approval.py::build_tool_approval_request::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
     "agent/conversation/wake_attempt_tracking.py::_log::json_dumps_default": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M20"
@@ -1048,74 +1036,6 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M05"
     },
-    "agent/tooling/models.py::ApprovalPolicy.__post_init__::object_setattr": {
-      "count": 3,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::AvailabilityPolicy.__post_init__::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::ConcurrencyPolicy.__post_init__::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::EffectResolverPolicy.__post_init__::object_setattr": {
-      "count": 5,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::IdempotencyPolicy.__post_init__::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::OutputPolicy.__post_init__::object_setattr": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::ResourceScopePolicy.__post_init__::object_setattr": {
-      "count": 5,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::SandboxPolicy.__post_init__::object_setattr": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::TimeoutPolicy.__post_init__::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::ToolHandlerOutcome.__post_init__::object_setattr": {
-      "count": 4,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::ToolModelHints.__post_init__::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::ToolModelSpec.__post_init__::object_setattr": {
-      "count": 4,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::ToolRuntimeSnapshot.__post_init__::object_setattr": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::ToolRuntimeSnapshot.with_presentation::object_setattr": {
-      "count": 15,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::TrustedParameterBinding.__post_init__::object_setattr": {
-      "count": 3,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::_tool_runtime_snapshot_hash::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/models.py::tool_schema_hash::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
     "agent/tooling/registry.py::ToolRegistry.__init__::replace_on_fast_frozen": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M25"
@@ -1184,125 +1104,13 @@
       "count": 2,
       "reason": "baseline-d9caa95af pending M25"
     },
-    "agent/tooling/runtime_contracts.py::AppliedToolApproval.__post_init__::object_setattr": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ProviderToolCapability.__post_init__::object_setattr": {
-      "count": 5,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolCall.__post_init__::object_setattr": {
-      "count": 12,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolChoice.__post_init__::object_setattr": {
-      "count": 3,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolContentBlock.__post_init__::object_setattr": {
-      "count": 5,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolProtocolSnapshot.__post_init__::object_setattr": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolResult.__post_init__::object_setattr": {
-      "count": 17,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolResult.output::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolResult.render_for_prompt::json_dumps_default": {
-      "count": 3,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolResult.with_execution_facts::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolResult.with_live_prompt_projection::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/runtime_contracts.py::ToolResultRef.__post_init__::object_setattr": {
-      "count": 6,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_attach_operation_facts::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_bounded_unknown_output_preview::json_dumps_default": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_completion_persistence_unknown_result::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_execute_admitted_tool_operation::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_execute_claimed_operation::json_dumps_default": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_execute_claimed_operation::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
     "agent/tooling/tool_operation_coordinator.py::_invoke_with_lease_renewal::thread_ctor": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_operation_error::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
+      "reason": "cold-path: a renewable operation lease owns its existing worker through handler exit"
     },
     "agent/tooling/tool_operation_coordinator.py::_reconcile_unknown_operation::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_reopened_operation_result::json_dumps_default": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_resolve_claim::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_restart_gate_not_started::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_settle_reconciled_operation::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_unknown_claim_result::object_setattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_operation_coordinator.py::_unknown_outcome_result::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_program.py::ToolProgramTool._live_payload::json_dumps_default": {
-      "count": 3,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_program.py::ToolProgramTool._step::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M09"
-    },
-    "agent/tooling/tool_program.py::ToolProgramTool.execute_scoped::json_dumps_default": {
-      "count": 5,
-      "reason": "baseline-d9caa95af pending M09"
+      "reason": "cold-path: the unknown-outcome reconciliation branch replaces a storage-layer claim"
     },
     "cli/gateway_loops.py::_BackgroundMainSupervisor._curator_has_pending_reason::read_write_text": {
       "count": 1,

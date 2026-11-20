@@ -69,12 +69,79 @@ _JSON_SCHEMA_TYPES = frozenset(
 )
 
 
+class _NeedsDeepcopy(Exception):
+    """Internal signal: the value holds a type that only copy.deepcopy reproduces."""
+
+
+# LLM: On python3.14t, copy.deepcopy tests ``type(x) in copy._atomic_types`` on every call and on every
+#   recursive call per element. That name is a module-level mutable set, and with the GIL disabled a membership
+#   test on a mutable set holds the set's per-object lock, so concurrent tool calls serialize on one lock (128-thread
+#   throughput drops to about 0.1 of 16-thread throughput). This copier touches no shared mutable object. It handles
+#   exact builtin JSON-shaped types and returns what copy.deepcopy returns: dict and list are rebuilt and memoized by
+#   id, so shared sub-objects and cycles keep their shape; a tuple is returned as is when no element changed and is
+#   rebuilt and memoized otherwise; str, int, float, bool and None are reused. Any other type anywhere in the value,
+#   including subclasses of these types and non-scalar dict keys, sends the whole value to copy.deepcopy. The input
+#   is only read, and no user code runs before that fallback. Each nested container costs one Python frame here and
+#   two in copy.deepcopy, so at the default recursion limit a value nested about 500 to 1000 containers deep now copies
+#   where copy.deepcopy raised RecursionError; tool input validation still stops it at _MAX_SCHEMA_DEPTH
+#   (contracts/tool_input_schema.py) with a maxDepth issue.
+def clone_json_value(value: Any) -> Any:
+    """Deep-copy a JSON-shaped value with copy.deepcopy semantics and no shared lock."""
+
+    kind = type(value)
+    if kind is str or kind is int or kind is float or kind is bool or value is None:
+        return value
+    if kind is dict or kind is list or kind is tuple:
+        try:
+            return _clone_json(value, {})
+        except _NeedsDeepcopy:
+            pass
+    return deepcopy(value)
+
+
+def _clone_json(value: Any, memo: dict[int, Any]) -> Any:
+    kind = type(value)
+    if kind is str or kind is int or kind is float or kind is bool or value is None:
+        return value
+    copied = memo.get(id(value))
+    if copied is not None:
+        return copied
+    if kind is dict:
+        copied = {}
+        memo[id(value)] = copied
+        for key, item in value.items():
+            key_kind = type(key)
+            if not (key_kind is str or key_kind is int or key_kind is float or key_kind is bool or key is None):
+                raise _NeedsDeepcopy
+            copied[key] = _clone_json(item, memo)
+        return copied
+    if kind is list:
+        copied = []
+        memo[id(value)] = copied
+        for item in value:
+            copied.append(_clone_json(item, memo))
+        return copied
+    if kind is tuple:
+        items = [_clone_json(item, memo) for item in value]
+        # As in copy.deepcopy: an element may have reached this tuple again through a mutable container.
+        copied = memo.get(id(value))
+        if copied is not None:
+            return copied
+        for original, item in zip(value, items):
+            if original is not item:
+                copied = tuple(items)
+                memo[id(value)] = copied
+                return copied
+        return value
+    raise _NeedsDeepcopy
+
+
 def canonicalize_tool_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return an isolated, validated object schema for provider and runtime use."""
 
     if not isinstance(schema, dict):
         raise ValueError("tool input_schema must be an object")
-    canonical = deepcopy(schema)
+    canonical = clone_json_value(schema)
     _validate_schema_node(canonical, path="$", depth=0)
     _validate_local_references(canonical)
     raw_type = canonical.get("type")

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 
+from ..common import hot_json
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -84,21 +84,21 @@ class ToolProgramTool(BaseTool):
         try:
             if not self.enabled() or dispatch is None:
                 raise ValueError('受限编排不可用')
-            if len(json.dumps(params, ensure_ascii=False).encode()) > 65536:
+            if len(hot_json.dumps(params, ensure_ascii=False).encode()) > 65536:
                 raise ValueError('程序输入超过预算')
             steps = params['steps']
             if not isinstance(steps, list) or not 1 <= len(steps) <= 16:
                 raise ValueError('步骤数量无效')
             for index, step in enumerate(steps):
                 self._step(step, index, values, trace, skipped, dispatch)
-                if len(json.dumps(values, ensure_ascii=False).encode()) > 2_000_000:
+                if len(hot_json.dumps(values, ensure_ascii=False).encode()) > 2_000_000:
                     raise ValueError('中间数据超过预算')
             result = values[params.get('return_step', steps[-1]['id'])]
         except ProgramOutputContractError as exc:
             result, error, output_error = None, type(exc).__name__, exc.args[0]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             result, error = None, type(exc).__name__
-        encoded = json.dumps(result, ensure_ascii=False)
+        encoded = hot_json.dumps(result, ensure_ascii=False)
         truncated = len(encoded.encode()) > 16000
         payload = {'result': result, 'result_truncated':truncated,
             'result_chars':len(encoded),'calls':trace,'skipped_steps':skipped,
@@ -108,10 +108,10 @@ class ToolProgramTool(BaseTool):
             payload['program_output_error'] = output_error
         live = self._live_payload(payload)
         failed = bool(error) or any(row['status'] != 'succeeded' for row in trace)
-        return ToolHandlerOutcome('tool_program', not failed, json.dumps(payload,ensure_ascii=False),
+        return ToolHandlerOutcome('tool_program', not failed, hot_json.dumps(payload,ensure_ascii=False),
             error_code='TOOL_PROGRAM_INCOMPLETE' if failed else '',effect_outcome='not_started' if failed else '',
             result_envelope={'program':live,'tool_output_policy':{'preserve_prompt_output':True,
-                'live_prompt_output':json.dumps(live, ensure_ascii=False)}})
+                'live_prompt_output':hot_json.dumps(live, ensure_ascii=False)}})
 
     # LLM: step仅认准确结构，引用只指向已有数据；保留完整批次轨迹后优先传播协议错误，不因兄弟预算溢出掩盖。
     # 函数用途: 执行一个调用/批次或纯转换，并将原调用事实记入输出。
@@ -156,7 +156,12 @@ class ToolProgramTool(BaseTool):
                 for item_index,item in enumerate(items)]
         results = dispatch.batch(calls, budget=budget)
         for result in results:
-            trace.append({**{key:getattr(result,key) for key in ('call_id','tool_name','status','error_code','duration_ms')},
+            trace.append({
+                'call_id': result.call_id,
+                'tool_name': result.tool_name,
+                'status': result.status,
+                'error_code': result.error_code,
+                'duration_ms': result.duration_ms,
                 'refs':[ref.to_dict() for ref in result.refs],
                 'reported_error_code':result.reported_error_code, 'parent_call_id':dispatch.parent.call_id})
         for result in results:
@@ -187,12 +192,12 @@ class ToolProgramTool(BaseTool):
     @staticmethod
     def _live_payload(payload):
         live = dict(payload)
-        if len(json.dumps(live, ensure_ascii=False).encode()) > 16000:
+        if len(hot_json.dumps(live, ensure_ascii=False).encode()) > 16000:
             live.update(result=None, result_truncated=True)
-        if len(json.dumps(live, ensure_ascii=False).encode()) > 16000:
+        if len(hot_json.dumps(live, ensure_ascii=False).encode()) > 16000:
             live['calls'] = [{**row, 'refs':[], 'refs_omitted':len(row['refs'])} for row in payload['calls']]
             live['details_in_output_archive'] = True
-        if len(json.dumps(live, ensure_ascii=False).encode()) > 16000:
+        if len(hot_json.dumps(live, ensure_ascii=False).encode()) > 16000:
             live['calls'] = [{'call_id_sha256':hashlib.sha256(row['call_id'].encode()).hexdigest(),
                 'status':row['status'], 'error_code':row['error_code'],
                 'refs_omitted':len(row['refs'])} for row in payload['calls']]
