@@ -87,6 +87,17 @@ def test_real_provider_complete_json_fence_retains_internal_success_and_provenan
 @pytest.mark.parametrize('text', [
     '说明\n```json\n' + _body('internal_only', '') + '\n```',
     '```json\n' + _body('internal_only', '') + '\n```\n后记',
+])
+def test_mixed_fenced_envelope_requires_repair_before_publication(text):
+    params = _params()
+    response, _ = _response(params, text)
+    action, final = receipt.prepare_background_public_receipt(params, response)
+    assert action == 'repair' and final.runtime_reason == 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
+    assert final.text == '' and final.public_receipt is None
+    assert pending_natural_user_reply(params)['facts']['envelope_repair'] is True
+
+
+@pytest.mark.parametrize('text', [
     '```json\n' + _body('internal_only', '') + '\n```\n```json\n' + _body() + '\n```',
     '```python\n' + _body('internal_only', '') + '\n```',
     '```json\n' + _body('internal_only', '不得靠围栏隐藏矛盾正文') + '\n```',

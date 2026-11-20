@@ -139,6 +139,28 @@ def validate_tool_input(value: Any, schema: dict[str, Any]) -> ToolInputValidati
     return ToolInputValidation(tuple(issues[:_MAX_ISSUE_COUNT]))
 
 
+def tool_input_correction(validation: ToolInputValidation, schema: dict[str, Any], *,
+                          code: str, example_text: str) -> dict[str, Any]:
+    """从已校验的形状生成首次纠错，回执不复制任何原始实参值。"""
+    issue = validation.issues[0]
+    expected = (issue.details or {}).get("expected_type")
+    if issue.keyword == "additionalProperties" and not expected:
+        expected = "declared_field"
+    if issue.keyword == "type" and isinstance(issue.expected, list):
+        expected = " | ".join(issue.expected)
+    actual_type = "list" if issue.actual_type == "array" else issue.actual_type or "unknown"
+    example = json.loads(example_text)
+    if not isinstance(example, dict) or not validate_tool_input(example, schema).ok:
+        raise ValueError("工具纠错示例必须通过相同输入校验")
+    return {
+        "code": code, "json_path": issue.path, "actual_type": actual_type,
+        "actual_summary": f"收到 {actual_type}，值已省略",
+        "expected_type": expected or actual_type,
+        "effect_outcome": "not_started", "recorded": False, "example": example,
+        "issues": [item.to_dict() for item in validation.issues[:8]],
+    }
+
+
 # LLM: normalization 先解析本地 $ref/组合分支，再按明确类型递归；达到深度上限就保持原值。
 # 函数用途: 实现 normalize_tool_input 的递归工作，同时收集不含原值的纠正记录。
 def _normalize_node(
@@ -350,7 +372,8 @@ def _validate_node(
         )
         return
     if "enum" in resolved and not any(_json_equal(value, item) for item in resolved.get("enum") or []):
-        issues.append(ToolInputIssue("enum", path, resolved.get("enum"), _json_type(value)))
+        issues.append(ToolInputIssue("enum", path, resolved.get("enum"), _json_type(value),
+                                     _field_type_details(resolved)))
     if "const" in resolved and not _json_equal(value, resolved.get("const")):
         issues.append(ToolInputIssue("const", path, resolved.get("const"), _json_type(value)))
     if isinstance(value, dict):
@@ -443,6 +466,9 @@ def _field_type_details(schema):
     if len(types) != 1:
         return None
     details = {'expected_type': types[0]}
+    additional = schema.get('additionalProperties')
+    if types[0] == 'object' and isinstance(additional, dict) and additional.get('type') == 'string':
+        details['expected_type'] = 'object<string,string>'
     if types[0] == 'array' and schema.get('maxItems') == 0:
         details['requires_empty_array'] = True
     return details

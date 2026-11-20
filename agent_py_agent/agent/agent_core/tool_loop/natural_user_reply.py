@@ -383,6 +383,19 @@ def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
 # LLM: 仅按原structured kind为background_dispatch补角色软指导，queued/accepted不等于worker已启动/成功；input_wait/input_resume_pending只补发卡与提交软指导，其余kind输出保持原字节，不改变事实、采样、工具权或状态门。
 # 函数用途: 引导模型如实说任务进展，避免把接单表达片限制误说成后台无法执行；输入和已结算事实继续沿原合同。
 def _reply_guidance(phase: dict[str, object]) -> str:
+    facts = phase.get("facts")
+    if (phase.get("kind") == "background_final_receipt" and isinstance(facts, dict)
+            and facts.get("envelope_repair") is True):
+        return (
+            "[background-result-envelope-repair]\n"
+            + hot_json.dumps(facts, ensure_ascii=False, sort_keys=True)
+            + "\n只输出一个完整 JSON 对象，包含 expected_fields 中的全部字段。"
+            "schema 固定为 background-result.v1。用已核实的 tool_result_facts 写非空 internal_result。"
+            "notification_intent 使用 publish 或 internal_only。前者在 public_reply 写公开内容，"
+            "后者的 public_reply 必须为空。存在待交付附件或回复义务时使用 publish，"
+            "有回复义务时 public_reply 须包含正文。"
+            "只修复回执形态，不调用工具、不重复发布、不猜测执行结果。"
+        )
     payload = {
         "reply_kind": str(phase.get("kind") or "background_update"),
         "facts": phase.get("facts") if isinstance(phase.get("facts"), dict) else {},

@@ -1087,7 +1087,7 @@ def test_capability_request_submission_notifies_parent_thread():
                     "run_id": task.id,
                     "problem": "目标目录不可写",
                     "needed_capability": "unlock_output_directory",
-                    "capability_type": "filesystem",
+                    "capability_type": "generic",
                     "path_scope": [str(Path(task.task_workspace_dir) / "output")],
                 }
             )

@@ -623,6 +623,7 @@ class ToolInputPolicy:
     trusted_parameter_bindings: tuple[tuple[str, TrustedParameterBinding], ...] = ()
     local_file_url_parameters: tuple[str, ...] = ()
     metadata_url_parameters: tuple[str, ...] = ()
+    schema_error_code: str = ""
 
 
 # LLM: 条件只读模型 schema 已声明的字符串参数；比较器是宿主代码枚举，不执行表达式、不解释用户自然语言。

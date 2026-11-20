@@ -218,8 +218,9 @@ def test_capability_request_tool_rejects_ignored_alias_without_structured_target
     )
 
     assert result.ok is False
-    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
-    assert "结构化授权目标" in result.output
+    assert result.error_code == "CAPABILITY_REQUEST_INVALID"
+    assert json.loads(result.output)["json_path"] == "$.capability"
+    assert result.effect_outcome == "not_started"
     assert manager.load(task.id).capability_requests == []
 
 
@@ -254,10 +255,12 @@ def test_capability_request_tool_does_not_parse_stringified_object_fields(tmp_pa
         }
     )
 
-    assert result.ok is True
-    request = manager.load(task.id).capability_requests[0]
-    assert request.output_budget == {}
-    assert request.constraints == {}
+    assert result.ok is False
+    assert result.error_code == "CAPABILITY_REQUEST_INVALID"
+    details = json.loads(result.output)
+    assert [issue["path"] for issue in details["issues"]] == ["$.output_budget", "$.constraints"]
+    assert details["recorded"] is False
+    assert manager.load(task.id).capability_requests == []
 
 
 def test_capability_request_tool_blocks_root_run_requests(tmp_path):
@@ -290,8 +293,11 @@ def test_capability_request_tool_reports_typed_required_parameter_errors(tmp_pat
     missing_problem = CapabilityRequestTool(agent).execute({})
 
     assert missing_problem.ok is False
-    assert missing_problem.error_code == "TOOL_PARAMETER_REQUIRED"
-    assert missing_problem.error_code != "UNKNOWN_ERROR"
+    assert missing_problem.error_code == "CAPABILITY_REQUEST_INVALID"
+    details = json.loads(missing_problem.output)
+    assert details["json_path"] == "$.problem"
+    assert details["actual_type"] == "missing"
+    assert details["expected_type"] == "string"
 
 
 def test_top_level_worker_can_request_capability(tmp_path):

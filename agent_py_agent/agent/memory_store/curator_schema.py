@@ -220,6 +220,8 @@ def normalize_curator_response_defaults(payload, schema):
             normalized = dict(value)
             for name, child in node.get("properties", {}).items():
                 if "default" in child:
+                    if name == "conflicts_with":
+                        raise RuntimeError("conflicts_with requires explicit candidate evidence")
                     if child.get("type") != "array" or child["default"] != []:
                         raise RuntimeError("curator host defaults must be explicitly empty arrays")
                     if name not in normalized:
@@ -251,6 +253,19 @@ class CuratorOutputViolation(ValueError):
         super().__init__(message)
         self.violation_code = code
         self.violation_path = path
+
+
+def missing_conflict_fields(payload, violation):
+    """同一批只修补确实缺失的冲突数组，用 schema 路径标识原候选。"""
+    if (not isinstance(violation, CuratorOutputViolation)
+            or violation.violation_code != "missing_property"
+            or not violation.violation_path.endswith(".conflicts_with")):
+        return {}
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list):
+        return {}
+    return {f"$.candidates[{index}].conflicts_with": index for index, candidate in enumerate(candidates)
+            if isinstance(candidate, dict) and "conflicts_with" not in candidate}
 
 
 # LLM: Anthropic兼容供应商可能只通过提示词收到Schema；宿主先执行显式默认归一化，再执行同一严格递归规则。
