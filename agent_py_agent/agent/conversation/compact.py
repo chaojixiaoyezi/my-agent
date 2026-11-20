@@ -1561,11 +1561,9 @@ def _commit_compact_candidate(
                 "idle_compact": True}
                if request.idle_compact else {}),
         )
-    # 压缩已提交、用户输入闸已释放：在锁外登记一次 pre_compact，让后台整理尽快读到刚被摘要折叠的那段对话。
-    #   live 工具压缩走 live_tool_compact 的提交，已在摘要前登记过，不经过这里；登记失败不影响已提交的压缩。
-    from ..agent_core._finalization_service import _request_memory_curator
+    from .compact_checkpoint import wake_compact_curator
 
-    _request_memory_curator(request.agent, "pre_compact")
+    wake_compact_curator(request.agent, updated)
     return ConversationCompactResult(
         thread=updated,
         messages=retained_tail,

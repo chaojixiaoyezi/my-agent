@@ -2,7 +2,7 @@
 # 模块用途: 统一策展的本地日期、间隔与下次时间边界，避免UTC发现和实际运行时区分叉。
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -40,8 +40,46 @@ def interval_elapsed(state, now: datetime, interval_seconds: int) -> bool:
 
 # LLM: 原consumer日终判据唯一实现，日期和小时必须来自同一本地clock，不能另读UTC日期。
 # 函数用途: 判断本地今天是否已到收尾时间且尚未完成。
-def daily_finalize_due(state, now: datetime, finalize_hour: int) -> bool:
-    return now.hour >= finalize_hour and state.last_daily_finalize_date != now.date().isoformat()
+def daily_finalize_date(state, now: datetime, finalize_hour: int, *, window_seconds=0) -> str:
+    """每次领取一个已到期本地日期，午夜后继续处理未完成的日终。"""
+    today = now.date()
+    eligible = today if now.hour >= finalize_hour else today - timedelta(days=1)
+    active = next((item["date"] for item in getattr(state, "pending_local_dates", ())
+                   if item["source_range"]["kind"] == "finalize" and item["date"] <= eligible.isoformat()), "")
+    if active and active > state.last_daily_finalize_date:
+        return active
+    last = state.last_daily_finalize_date
+    if last:
+        try:
+            oldest = date.fromisoformat(last) + timedelta(days=1)
+        except (TypeError, ValueError, OverflowError):
+            return ""
+    else:
+        boundary = datetime.combine(eligible, time(hour=finalize_hour), tzinfo=now.tzinfo)
+        if eligible != today:
+            latest = parse_time(getattr(state, "last_success_at", ""))
+            if latest is not None:
+                if latest.astimezone(now.tzinfo).date() > eligible:
+                    return ""
+            elif now.timestamp() - boundary.timestamp() > window_seconds:
+                return ""
+        oldest = eligible
+    return oldest.isoformat() if oldest <= eligible else ""
+
+
+def daily_finalize_due(state, now: datetime, finalize_hour: int, *, window_seconds=0) -> bool:
+    return bool(daily_finalize_date(state, now, finalize_hour, window_seconds=window_seconds))
+
+
+def unresolved_local_range(state, now):
+    """只选择已经过了自身退避的精确来源范围。"""
+    return next((item for item in getattr(state, "pending_local_dates", ()) if item["source_range"]["kind"] == "input"
+                 and (not item["retry_at"] or parse_time(item["retry_at"]) <= now)), None)
+
+
+def range_failure_backoff(state):
+    return any(item["source_range"]["kind"] == "input" and item["failure_type"] == state.last_failure_code
+               and item["failed_at"] == state.last_failure_at for item in getattr(state, "pending_local_dates", ()))
 
 
 # LLM: 只提供缓存失效时间而非timer/执行许可；空时区由naive目标日期timestamp重算系统规则，不能沿用当前fixed-offset跨DST。
@@ -77,6 +115,14 @@ def candidate_scan_deadline(state, interval_seconds, *, source_present=False):
             ),
         )
     return deadline
+
+
+def compact_thread_stamp(path):
+    """线程 CAS 的原目录更改标记只用于唤醒，消费身份仍以检查点核验为准。"""
+    try:
+        return str(path.stat().st_mtime_ns)
+    except OSError:
+        return ""
 
 
 def candidate_source_present(path):

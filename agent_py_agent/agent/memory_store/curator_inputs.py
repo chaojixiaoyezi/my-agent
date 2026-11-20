@@ -247,6 +247,7 @@ class CuratorInputBatch:
     message_scan_reasons: tuple[str, ...] = ()
     # 只有原消息读取调用已绑定的线程可独立隔离；正文和游标不发送模型，诊断随原运行账保存。
     isolated_message_errors: tuple[dict[str, object], ...] = ()
+    date_backlog: bool = False
 
     # LLM: 原始消息/游标完整保留，仅模型视图聚合跨线程广播；标签和关系仍核原来源hash与正式版本。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
@@ -411,6 +412,7 @@ def collect_curator_inputs(
     formal_memories: tuple[CuratorFormalMemoryInput, ...] = (),
     tool_reference_source: CuratorToolReferenceSource | None = None,
     scan_budget=None,
+    source_range=None,
 ) -> CuratorInputBatch:
     skipped_message_cursors: dict[str, str] = {}
     scan_state = {"partial": False, "reasons": ()}
@@ -420,7 +422,8 @@ def collect_curator_inputs(
         limit=config.batch_message_limit,
         max_chars=config.max_input_chars,
         skipped_cursors=skipped_message_cursors,
-        budget=scan_budget, scan_state=scan_state,
+        budget=scan_budget, scan_state=scan_state, first_enable_after=state.first_enable_after,
+        thread_bounds=None if source_range is None else source_range["messages"],
     )
     message_errors, isolated_message_errors = split_message_load_errors(message_errors)
     remaining_chars = max(
@@ -428,7 +431,9 @@ def collect_curator_inputs(
         config.max_input_chars
         - len(json.dumps([item.to_model() for item in messages], ensure_ascii=False)),
     )
-    if message_source.excluded_conversation_ids is None:
+    if (message_source.excluded_conversation_ids is None
+            or source_range is not None and (not source_range["audit"]
+                or source_range["audit"] == state.last_processed_audit_event_id)):
         # fail-closed：名单不可读时本轮不消费任何 audit，也不推进游标，修复后整段重放。
         audit_events, audit_errors, skipped_audit_cursor = [], [], ""
     else:
@@ -438,6 +443,8 @@ def collect_curator_inputs(
             limit=config.batch_message_limit,
             max_chars=remaining_chars,
         )
+        if source_range is not None:
+            audit_events = _through_audit(audit_events, source_range["audit"], state.last_processed_audit_event_id)
         audit_thread_ids, scope_errors = _audit_window_excluded_thread_ids(message_source, audit_events)
         audit_errors.extend(scope_errors)
         if audit_thread_ids is None:
@@ -445,6 +452,20 @@ def collect_curator_inputs(
             audit_events, skipped_audit_cursor = [], ""
         else:
             audit_events, skipped_audit_cursor = _filter_excluded_audit(audit_events, audit_thread_ids)
+            if state.first_enable_after:
+                from .curator_due import parse_time
+
+                index = 0
+                for event in audit_events:
+                    created = parse_time(event.created_at)
+                    if created is None or created.timestamp() >= state.first_enable_after:
+                        break
+                    skipped_audit_cursor = event.event_id
+                    index += 1
+                audit_events = audit_events[index:]
+                # 如果有待处理事件，原审计游标由完整前缀提交函数推进。
+                if audit_events:
+                    skipped_audit_cursor = ""
     tool_reference_errors: list[dict[str, object]] = []
     if tool_reference_source is not None and audit_events:
         refs, tool_reference_errors = tool_reference_source.read(
@@ -476,6 +497,55 @@ def collect_curator_inputs(
 
 # LLM: 新增广播来源/证据也计入同一预算；只裁尾部保持每线程和审计原始连续前缀，原文/hash不变。
 # 函数用途: 在返回完整JSON前收紧输入，单条消息只缩预览，不让扩展字段突破预算。
+def _through_audit(events, end, start):
+    if end == start:
+        return []
+    for pos, event in enumerate(events):
+        if event.event_id == end:
+            return events[: pos + 1]
+    # 已冻结范围最终游标不在可核实页时，不把页中后来出现的事件算成原范围。
+    return []
+
+
+def dated_curator_prefix(batch, now, *, through_date=""):
+    """每个源只取同一本地日的连续前缀，禁止跨过未确认的日期边界写游标。"""
+    from .curator_due import parse_time
+
+    fallback = now.date().isoformat()
+    def local_day(item):
+        if isinstance(item, CuratorMessageInput):
+            return datetime.fromtimestamp(item.created_at, now.tzinfo).date().isoformat()
+        instant = parse_time(item.created_at)
+        return instant.astimezone(now.tzinfo).date().isoformat() if instant else fallback
+
+    message_days = [local_day(item) for item in batch.messages]
+    event_days = [local_day(item) for item in batch.audit_events]
+    heads = {}
+    for item, day in zip(batch.messages, message_days):
+        heads.setdefault(item.thread_id, day)
+    days = [*heads.values(), *event_days[:1]]
+    if not days:
+        return batch, ""
+    chosen = min(days)
+    if through_date and chosen > through_date:
+        return replace(batch, messages=(), audit_events=()), ""
+    messages, events, stopped = [], [], set()
+    backlog = False
+    for item, day in zip(batch.messages, message_days):
+        if day != chosen:
+            stopped.add(item.thread_id)
+        if item.thread_id in stopped:
+            backlog |= not through_date or day <= through_date
+        else:
+            messages.append(item)
+    for index, (event, day) in enumerate(zip(batch.audit_events, event_days)):
+        if day != chosen:
+            backlog |= not through_date or any(rest <= through_date for rest in event_days[index:])
+            break
+        events.append(event)
+    return replace(batch, messages=tuple(messages), audit_events=tuple(events), date_backlog=backlog), chosen
+
+
 def _fit_input_payload(batch, *, max_chars):
     while (excess := len(json.dumps(batch.to_model_payload(), ensure_ascii=False)) - max_chars) > 0:
         if batch.audit_events:
@@ -548,7 +618,7 @@ def _collect_messages(
     limit: int,
     max_chars: int,
     skipped_cursors: dict[str, str] | None = None,
-    budget=None, scan_state=None,
+    budget=None, scan_state=None, first_enable_after=0.0, thread_bounds=None,
 ) -> tuple[list[CuratorMessageInput], list[dict[str, object]]]:
     conversation_store = source.conversation_store
     list_report = getattr(getattr(conversation_store, 'threads', None), 'list_report', None)
@@ -561,7 +631,27 @@ def _collect_messages(
             getattr(conversation_store.messages, 'after_slice_report', None))):
         raise TypeError("ConversationStore lacks bounded Memory Curator read contract")
     window = None
-    if budget is not None:
+    if thread_bounds is not None:
+        threads, thread_errors = [], []
+        for thread_id, end in thread_bounds.items():
+            if end == cursors.get(thread_id, ""):
+                continue
+            if budget is None:
+                thread, error = conversation_store.threads.load_report(thread_id)
+            else:
+                if budget.exhausted():
+                    thread_errors.append({"partial_reason": "curator_date_range_read_budget"})
+                    break
+                frame, error = conversation_store.threads.record_snapshot_report(
+                    thread_id, max_bytes=budget.max_bytes - budget.size,
+                )
+                thread = frame.record if frame is not None else None
+                budget.charge(entries=1, size=frame.observation.stat.st_size if frame is not None else 0)
+            if error:
+                thread_errors.append(error)
+            if thread:
+                threads.append(thread)
+    elif budget is not None:
         threads, thread_errors, window = _message_thread_window(conversation_store, budget)
     else:
         threads, thread_errors = list_report(limit=0)
@@ -574,6 +664,8 @@ def _collect_messages(
     state = {
         "store": conversation_store,
         "after_report": after_report,
+        "first_enable_after": first_enable_after,
+        "thread_bounds": thread_bounds or {},
         "limit": limit,
         "max_chars": max_chars,
         "used_chars": 0,
@@ -645,7 +737,7 @@ def _collect_messages(
     return selected, errors
 
 
-def _thread_packet(frame):
+def _thread_packet(frame, *, compact=False):
     thread = frame.record
     metadata = getattr(thread, "metadata", {}) or {}
     projected = {"learning_excluded": metadata.get("learning_excluded") is True,
@@ -656,6 +748,8 @@ def _thread_packet(frame):
     payload = {"thread_id": thread.thread_id, "updated_at": thread.updated_at,
         "canonical_user_id": thread.canonical_user_id, "channel_bindings": [row.to_dict() for row in thread.channel_bindings],
         "learning_source": thread.learning_source, "metadata": projected, "_pending_predecessor": frame.predecessor}
+    if compact:
+        payload.update(compact_checkpoint_id=thread.compact_checkpoint_id, compact_generation=thread.compact_generation)
     raw = json.dumps(payload, ensure_ascii=False)
     if len(raw.encode('utf-8')) > _CURATOR_THREAD_OBSERVATION_MAX_BYTES:
         return None
@@ -713,8 +807,24 @@ def _thread_from_packet(store, packet, budget):
     return ConversationThread.from_dict(payload), packet, None
 
 
-def _message_thread_window(store, budget):
-    key = ("curator-thread-discovery", str(store.storage.root))
+def compact_thread_scan(store, budget, observe):
+    """从原线程记录分页读已发布 head，不遍历孤立候选账本。"""
+    threads, errors, (key, checkpoint) = _message_thread_window(store, budget, lane="compact")
+    waiting = checkpoint.pop("unloaded", [])
+    checkpoint["waiting"] = waiting
+    checkpoint["memo"] = checkpoint.pop("memo_candidate", None) if waiting else None
+    complete = checkpoint["complete"] and not waiting
+    # 同一轮内任何 earlier 页未核清都要再扫，不能凭最后一页发布完成。
+    observed = [observe(thread) for thread in threads]
+    checkpoint["round_partial"] = checkpoint["round_partial"] or bool(errors) or not all(observed)
+    _THREAD_DISCOVERY.put(key, checkpoint if not complete else {
+        "cursor": {}, "waiting": [], "complete": False, "round_partial": False,
+    })
+    return complete and not checkpoint["round_partial"]
+
+
+def _message_thread_window(store, budget, *, lane="messages"):
+    key = ("curator-thread-discovery", lane, str(store.storage.root))
     checkpoint = dict(_THREAD_DISCOVERY.get(key) or {"cursor": {}, "waiting": [], "complete": False, "round_partial": False})
     try:
         current = file_stamp(store.storage.threads_dir.lstat())
@@ -771,7 +881,7 @@ def _message_thread_window(store, budget):
                 continue
             if frame is None:
                 continue
-            packet = _thread_packet(frame)
+            packet = _thread_packet(frame, compact=lane == "compact")
             if packet is None:
                 errors.append({"thread_id": tid, "partial_reason": "thread_observation_exceeds_supported_limit"})
                 continue
@@ -798,6 +908,15 @@ def _message_thread_window(store, budget):
 # 函数用途: 从单个会话增量收集预算内待提取消息。
 def _collect_thread_messages(state: dict[str, object], thread: object, cursor: str) -> None:
     thread_id = str(thread.thread_id)
+    end = state["thread_bounds"].get(thread_id)
+    if end:
+        boundary, load_errors = state["store"].messages.by_id_report(
+            thread_id, end, read_budget=state.get("read_slice"),
+        )
+        if load_errors or boundary is None:
+            state["errors"].extend(load_errors)
+            state["scan_partial"] = True
+            return
     eof_key = _cold_thread_key(state["store"], thread_id, cursor)
     if eof_key is not None and _COLD_THREAD_EOF.get(eof_key):
         return
@@ -878,10 +997,14 @@ def _consume_thread_page(
     for entry in entries:
         entry_id = str(entry.message_id)
         metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
-        if metadata.get("learning_excluded") is True:
+        end = state["thread_bounds"].get(thread_id)
+        reached_end = entry_id == end
+        if metadata.get("learning_excluded") is True or float(entry.created_at) < state["first_enable_after"]:
             scan_cursor = entry_id
             if skipped_cursors is not None and not thread_selected:
                 skipped_cursors[thread_id] = entry_id
+            if reached_end:
+                return scan_cursor, thread_selected, True
             continue
         used_chars = int(state["used_chars"])
         remaining = max_chars - used_chars
@@ -908,7 +1031,7 @@ def _consume_thread_page(
         state["used_chars"] = used_chars + item_chars
         thread_selected = True
         scan_cursor = entry_id
-        if len(selected) >= limit:
+        if len(selected) >= limit or reached_end:
             return scan_cursor, thread_selected, True
     return scan_cursor, thread_selected, False
 

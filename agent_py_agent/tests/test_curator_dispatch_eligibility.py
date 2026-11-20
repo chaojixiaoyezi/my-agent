@@ -144,7 +144,7 @@ def test_new_input_still_uses_original_collection_and_model(tmp_path):
     store, thread, message = _conversation(tmp_path)
     backend = _StaticStructuredBackend(_valid_output(thread.thread_id, message.message_id, message.content))
     service = _service(tmp_path, backend, store, timezone_name='UTC')
-    result = service.run_if_due()
+    result = service.run_if_due(now=datetime.fromtimestamp(message.created_at + 1, timezone.utc))
     assert result.status == 'succeeded' and result.processed_messages == 1
     assert backend.calls == 1
 
@@ -318,7 +318,7 @@ def test_curator_due_time_final_commit_rechecks_inside_original_c_gate(tmp_path,
                 if change=='time':
                     from agent_py_agent.agent import owner_wake_discovery
                     with monkeypatch.context() as shift:
-                        shift.setattr(owner_wake_discovery.time,'time',lambda:(instant+timedelta(seconds=2)).timestamp())
+                        shift.setattr(owner_wake_discovery.time,'time',lambda:(instant-timedelta(hours=1)).timestamp())
                         return operation()
                 elif change=='config':
                     context.control_plane.config.memory_curator_interval_seconds += 1
