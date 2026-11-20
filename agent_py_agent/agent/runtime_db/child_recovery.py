@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..common.opaque_id import is_opaque_id
-from .operations import ATTEMPT_EFFECT_DISPOSITIONS, ATTEMPT_STATUS_UNKNOWN, OP_UNKNOWN
+from .operations import ATTEMPT_EFFECT_DISPOSITIONS, ATTEMPT_STATUS_UNKNOWN, OP_FAILED, OP_UNKNOWN
 from .repository import _recover_unknown_attempt_conn
 
 # 事件里标明这次恢复的目标是子代理（结构化来源，不从正文推断）。
@@ -89,29 +89,35 @@ def unknown_child_attempts_for_thread(repository: Any, thread_id: str) -> list[C
     ]
 
 
-# LLM: 只读投影：本线程任务下已落为 UNKNOWN 且未结清（settled_at=0）的工具操作；只取编号、工具名、状态和开始时间，
-#   不读 outcome 正文、不改任何行。它们不阻塞会话，供 /recover 在“无需恢复”时如实列出仍待人工核对的操作。
-# 函数用途: 返回本线程未结清 UNKNOWN 工具操作的总数与最近 limit 条结构化身份。
-def unknown_thread_operations(repository: Any, thread_id: str, limit: int) -> tuple[int, list[dict[str, Any]]]:
+# 历史 FAILED 可能携带明确的未知效果，两条查询先按同一条件纳入再分页。
+def unknown_thread_operations(
+    repository: Any, thread_id: str, limit: int, *, offset: int = 0,
+) -> tuple[int, list[dict[str, Any]]]:
     normalized = str(thread_id or "").strip()
-    if not normalized or limit <= 0:
+    if not normalized or limit <= 0 or offset < 0:
         return 0, []
-    scope = ("FROM tool_operations o JOIN agent_runs ar ON ar.agent_run_id = o.agent_run_id "
-             "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id JOIN tasks t ON t.task_id = tr.task_id "
-             "WHERE t.thread_id = ? AND o.status = ? AND o.settled_at = 0")
+    scope = (
+        "FROM tool_operations o JOIN agent_runs ar ON ar.agent_run_id = o.agent_run_id "
+        "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id JOIN tasks t ON t.task_id = tr.task_id "
+        "WHERE t.thread_id = ? AND ((o.status = ? AND o.settled_at = 0) OR "
+        "(o.status = ? AND CASE WHEN json_valid(o.outcome_json) "
+        "THEN json_extract(o.outcome_json, '$.result.effect_outcome') END = 'unknown'))"
+    )
+    scope_args = (normalized, OP_UNKNOWN, OP_FAILED)
     with repository._runtime_connection() as conn:
-        total = int(conn.execute("SELECT COUNT(*) " + scope, (normalized, OP_UNKNOWN)).fetchone()[0])
+        total = int(conn.execute("SELECT COUNT(*) " + scope, scope_args).fetchone()[0])
         rows = conn.execute(
             "SELECT o.operation_id, o.operation_type, o.status, o.handler_started_at " + scope
-            + " ORDER BY o.created_at DESC, o.operation_id LIMIT ?",
-            (normalized, OP_UNKNOWN, int(limit)),
+            + " ORDER BY o.created_at DESC, o.operation_id LIMIT ? OFFSET ?",
+            (*scope_args, int(limit), int(offset)),
         ).fetchall() if total else []
     return total, [
         {
             "operation_id": str(row["operation_id"] or ""),
             "operation_type": str(row["operation_type"] or ""),
-            "status": str(row["status"] or ""),
+            "status": OP_UNKNOWN,
             "handler_started_at": float(row["handler_started_at"] or 0),
+            **({"legacy_normalized": True} if row["status"] == OP_FAILED else {}),
         }
         for row in rows
     ]

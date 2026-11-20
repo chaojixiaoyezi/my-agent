@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import shlex
+import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Literal
@@ -99,6 +100,7 @@ class ConversationControlCommand:
     message_id_explicit: bool = False
     # /fork --at N：第 N 条用户消息（从 1 计）连同其回复为分叉截止点；0 表示未给出。
     fork_at: int = 0
+    recover_operations_page: tuple[int, int] | None = field(default=None, kw_only=True)
 
 
 # LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
@@ -724,7 +726,8 @@ _RECOVER_EFFECT_ALIASES = {
     "3": "abandoned", "继续": "abandoned", "跳过": "abandoned", "不再核对": "abandoned", "auto": "abandoned",
 }
 _RECOVER_USAGE = (
-    "用法：/recover 查看；/recover <处置> [编号]；/recover owner；"
+    "用法：/recover 查看；/recover --limit <1-50> [--offset <条数>] 分页查看工具操作；"
+    "/recover <处置> [编号]；/recover owner；"
     "/recover owner <处置> [--confirm <确认码>]。处置为 "
     + "|".join(ATTEMPT_EFFECT_DISPOSITIONS)
     + "。"
@@ -741,6 +744,14 @@ def _recover_command(trailing: object) -> ConversationControlCommand:
         return ConversationControlCommand("recover", operation="view", usage=_RECOVER_USAGE)
     if parts[0].lower() == "owner":
         return _owner_recover_command(parts[1:])
+    if parts[0] == "--limit":
+        page = _recover_operations_page(parts)
+        return ConversationControlCommand(
+            "recover", operation="view", valid=page is not None, usage=_RECOVER_USAGE,
+            # 原 CLI 序列化消费 value，宿主执行只读下面的结构化分页字段。
+            value=" ".join(parts) if page is not None else "",
+            recover_operations_page=page,
+        )
     disposition = _RECOVER_EFFECT_ALIASES.get(parts[0].lower(), parts[0].lower())
     target_id = parts[1] if len(parts) == 2 else ""
     valid_target = not target_id or is_opaque_id(target_id, kind="run_id")
@@ -752,6 +763,17 @@ def _recover_command(trailing: object) -> ConversationControlCommand:
         usage=_RECOVER_USAGE,
         target_id=target_id,
     )
+
+
+def _recover_operations_page(parts: list[str]) -> tuple[int, int] | None:
+    if len(parts) not in {2, 4} or (len(parts) == 4 and parts[2] != "--offset"):
+        return None
+    try:
+        limit = int(parts[1])
+        offset = int(parts[3]) if len(parts) == 4 else 0
+    except ValueError:
+        return None
+    return (limit, offset) if 1 <= limit <= 50 and 0 <= offset <= sys.maxsize else None
 
 
 # LLM: owner 语法固定为查看、预览、确认三态；确认码只接受宿主生成的 12 位十六进制摘要，不接受位置变体或自由文字。
