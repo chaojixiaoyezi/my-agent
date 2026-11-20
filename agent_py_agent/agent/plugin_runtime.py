@@ -15,6 +15,8 @@ import time
 import zipfile
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
+from concurrent.futures import Future, wait
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,8 @@ from .capability.agents_source_processes import (
     register_source_registry,
     source_process_boundary,
 )
+from .common.cancellation import register_cancellation_callback
+from .common.fast_dataclass import fast_replace
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
 from .gateway_parts.process_control import is_pid_alive
@@ -66,12 +70,18 @@ from .tooling.mcp_client import (
     MCPToolInfo,
     sanitize_credentials,
 )
+from .tooling.mcp_declarations import MCPPublication, resolve_server_declarations
+from .tooling.mcp_protocol import require_mcp_execution_authority, require_mcp_wait
 from .tooling.mcp_registration import (
+    _ERROR_CODE_MAP,
     MCPProxyTool,
+    _BindingSource,
+    _declared_proxy,
     build_proxy_tool,
     disconnect_failed_mcp_transport,
     sanitize_name_component,
 )
+from .tooling.mcp_transport import MCPTransport
 from .tooling.models import (
     ResourceScopePolicy,
     ToolAvailability,
@@ -733,7 +743,7 @@ class PluginProxyTool(MCPProxyTool):
     #   写入上下文只给协商了写入扩展、且本工具声明 mutating/dangerous 的调用；只读工具永远拿不到写权限。
     # 函数用途: 为支持当前扩展版本的插件生成本次工作区读取/写入元数据。
     def _request_meta(self, context: ToolInvocationContext | None) -> dict[str, object] | None:
-        if getattr(self.client, "lazy", False):
+        if getattr(self.client, "lazy", False) and not getattr(self.client, "eager_in_main", False):
             return None
         meta: dict[str, object] = {}
         if self._negotiated(WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION):
@@ -770,6 +780,8 @@ class PackMCPProxyTool(PluginProxyTool):
     """稳定的无连接门面；首次调用才启动，所有业务请求仍委托固定 transport 的已验代理。"""
 
     def availability(self) -> ToolAvailability:
+        if self.client.is_closed():
+            return ToolAvailability.unavailable("MCP 服务已关闭", error_code="MCP_CONNECTION_CLOSED")
         if not self.client.activation_ref.available():
             return ToolAvailability.unavailable("原能力包已停用或激活不可用", error_code="PLUGIN_ACTIVATION_UNAVAILABLE")
         if self.client.drift:
@@ -791,12 +803,15 @@ class PackMCPProxyTool(PluginProxyTool):
         with self.client._lazy_lock:
             self.client._in_flight += 1
         try:
+            require_mcp_execution_authority(context.execution_authority_check if context else None)
             transport = self.client.ensure_started()
             with self.client._lazy_lock:
                 bound = next((tool for tool in self.client.validated_tools
                               if tool.remote_tool == self.remote_tool and tool.transport is transport), None)
             if bound is None:
                 return self._not_started("MCP_PACK_SERVER_UNAVAILABLE")
+            if self.client.eager_in_main:
+                return bound._execute(params, context)
             return bound._execute_with_meta(params, context, None)
         except MCPError as exc:
             return self._not_started(exc.code)
@@ -874,9 +889,190 @@ class PluginResourceUnsettledError(RuntimeError, ValueError):
     """Raised when plugin runtime previous generation resources remain unsettled."""
 
 
+class DeclaredMCPProxyTool(MCPProxyTool):
+    """目录门面只携带宿主声明，执行始终交给通过同一连接验收的代理。"""
+
+    def availability(self) -> ToolAvailability:
+        if self.client.is_closed():
+            return ToolAvailability.unavailable("MCP 服务配置已关闭。请从下一轮工具目录重新选择。")
+        return ToolAvailability.ready()
+
+    def _execute(self, params, context):
+        with self.client.reserve_call():
+            try:
+                require_mcp_execution_authority(context.execution_authority_check if context else None)
+                _, tools = self.client.ensure_started()
+            except MCPError as exc:
+                return self._error_result(
+                    str(exc), _ERROR_CODE_MAP.get(exc.code, "TOOL_UNAVAILABLE"),
+                    reported_error_code=exc.code, effect_outcome="not_started",
+                    error_details={"stage": "pre_call", "reported_cause": exc.code, "side_effect_state": "not_started"},
+                    next_action=self._mcp_exception_next_action(exc.code, "not_started", self._resolved_effect()),
+                )
+            return tools[self.remote_tool]._execute(params, context)
+
+
+class DeclaredMCPClient(MCPStdioClient):
+    """一份服务配置持有一份连接租约。并发首用等待同一个启动结果。"""
+
+    lazy = True
+
+    def __init__(self, config: MCPServerConfig, tools: tuple[MCPToolInfo, ...], *, runtime_repo: object | None):
+        MCPStdioClient.__init__(self, config)
+        self._ready = threading.Condition()
+        self._startup: Future[tuple[MCPTransport, dict[str, MCPProxyTool]]] | None = None
+        self._active: tuple[MCPTransport, dict[str, MCPProxyTool]] | None = None
+        self._attempts, self._retry_at = 0, 0.0
+        self._failure: tuple[str, str] | None = None
+        self._in_flight = 0
+        self.last_used = time.monotonic()
+        self._declarations = resolve_server_declarations(config, tools)
+        self._source = _BindingSource(config.name, f"mcp:{config.name}", "", runtime_repo)
+        self._schemas = {tool.name: tool.input_schema for tool in tools}
+        self.tools = tuple(self._proxy(tool) for tool in tools)
+        if len({tool.model_spec.name for tool in self.tools}) != len(self.tools):
+            raise MCPError("MCP 宿主工具目录名称冲突。请核对工具的注册名称。", code="MCP_CONFIG_INVALID")
+
+    def _proxy(self, info: MCPToolInfo) -> DeclaredMCPProxyTool:
+        proxy = build_proxy_tool(
+            self, self.config.name, info, effect=self.config.effect_for_tool(info.name),
+            catalog_category=self.config.catalog_category,
+        )
+        proxy = _declared_proxy(proxy, self._declarations, self._source)
+        facade = DeclaredMCPProxyTool(self, proxy.remote_tool, proxy.model_spec, proxy.runtime_policy)
+        # 目录只向决策层提供候选参数声明，真实观察绑定要等连接代次确定。
+        facade.observation_binding = proxy.observation_binding
+        return facade
+
+    def _bind_tools(self, transport: MCPTransport) -> dict[str, MCPProxyTool]:
+        actual = {
+            info.name: canonicalize_tool_input_schema(info.input_schema)
+            for info in self.list_tools(transport=transport)
+        }
+        if actual != self._schemas:
+            mismatch = sorted(name for name in actual.keys() | self._schemas.keys()
+                              if actual.get(name) != self._schemas.get(name))
+            self.publication = MCPPublication("rejected", code="MCP_PROTOCOL_ERROR",
+                                              reasons=tuple({"tool": name, "code": "schema_mismatch"} for name in mismatch))
+            raise MCPError("MCP 实际工具目录与宿主声明不匹配。请核对已部署服务版本和宿主声明。",
+                           code="MCP_PROTOCOL_ERROR")
+        activation_id = f"{self._source.provider_id}:{transport.connection_id[:16]}"
+        bound = {}
+        for facade in self.tools:
+            proxy = MCPProxyTool(self, facade.remote_tool, facade.model_spec, facade.runtime_policy, transport=transport)
+            binding = facade.observation_binding
+            if binding is not None:
+                proxy.observation_binding = fast_replace(binding, activation_id=activation_id)
+            bound[proxy.remote_tool] = proxy
+        return self.publish_tools(transport, lambda: bound)
+
+    def _start_and_publish(self, future: Future) -> None:
+        transport = None
+        try:
+            transport = self.reconnect()
+            tools = self._bind_tools(transport)
+        except BaseException as exc:
+            if transport is not None:
+                disconnect_failed_mcp_transport(self, transport)
+            with self._ready:
+                code = exc.code if isinstance(exc, MCPError) else "MCP_SERVER_START_FAILED"
+                if not self.is_closed() and code != "MCP_CANCELLED":
+                    self._attempts += 1
+                    self._retry_at = time.monotonic() + min(60.0, float(2 ** min(self._attempts - 1, 6)))
+                    self._failure = (code, str(exc))
+                    if self.publication is None or self.publication.status != "rejected":
+                        self.publication = MCPPublication("unavailable", code=code)
+                self._active = self._startup = None
+                future.set_exception(exc)
+                self._ready.notify_all()
+            if not isinstance(exc, Exception):
+                raise
+        else:
+            with self._ready:
+                self._attempts, self._retry_at = 0, 0.0
+                self._failure = None
+                self._active = (transport, tools)
+                self.publication = MCPPublication("published", tool_count=len(tools), notices=self._declarations.notices)
+                self._startup = None
+                future.set_result(self._active)
+                self._ready.notify_all()
+
+    def _wake_waiters(self) -> None:
+        with self._ready:
+            self._ready.notify_all()
+
+    def ensure_started(self) -> tuple[MCPTransport, dict[str, MCPProxyTool]]:
+        deadline = time.monotonic() + self.config.connect_timeout
+        with register_cancellation_callback(self._wake_waiters):
+            while True:
+                with self._ready:
+                    require_mcp_wait(deadline, self._closed)
+                    if (self._startup is None and self._active is not None
+                            and self.is_running() and not self.tools_changed):
+                        return self._active
+                    if self._failure is not None and time.monotonic() < self._retry_at:
+                        code, detail = self._failure
+                        raise MCPError(f"MCP 服务正在退避：{detail}", code=code, effect_outcome="not_started")
+                    future = self._startup
+                    leader = future is None
+                    if leader:
+                        future = self._startup = Future()
+                    else:
+                        while not future.done():
+                            require_mcp_wait(deadline, self._closed)
+                            self._ready.wait(max(0, deadline - time.monotonic()))
+                if leader:
+                    self._start_and_publish(future)
+                require_mcp_wait(deadline, self._closed)
+                error = future.exception()
+                if error is None:
+                    return future.result()
+                if isinstance(error, MCPError):
+                    if error.code == "MCP_CANCELLED" and not leader:
+                        continue
+                    raise MCPError(str(error), code=error.code, effect_outcome="not_started") from error
+                raise MCPError(f"MCP 服务启动或目录核对失败：{type(error).__name__}: {error}",
+                               code="MCP_SERVER_START_FAILED", effect_outcome="not_started") from error
+
+    @contextmanager
+    def reserve_call(self):
+        with self._ready:
+            self._in_flight += 1
+        try:
+            yield
+        finally:
+            with self._ready:
+                self._in_flight -= 1
+                self.last_used = time.monotonic()
+
+    def idle_stop_if_due(self, now, idle_stop_seconds):
+        with self._ready:
+            if (self._active is None or self._startup is not None or self._in_flight or not self.is_running()
+                    or idle_stop_seconds <= 0 or now - self.last_used < idle_stop_seconds):
+                return None
+            receipt = self.disconnect(transport=self._active[0])
+            self._active = None
+            return receipt
+
+    def stop(self):
+        receipt = MCPStdioClient.stop(self)
+        with self._ready:
+            pending = self._startup
+            self._ready.notify_all()
+        if pending is not None:
+            # Popen 尚未返回时原 stop 只能撤销准入，须等启动线程回收同一候选。
+            wait((pending,))
+            receipt = MCPStdioClient.stop(self)
+        with self._ready:
+            self._active = None
+        return receipt
+
+
 # LLM: 一个客户端只属于安装表中的固定代次；沿原 MCP 重连/关闭与资源登记，不接收包提供的 owner、argv 或宿主地址。
 # 类用途: 保存插件连接和同连接已验工具，供共享权限视图分别生成目录。
 class PluginMCPClient(MCPStdioClient):
+    eager_in_main = False
+
     # LLM: 构造冻结宿主继承擦洗来源；明确插件设置/host API 原 native env 保持授权语义，包 effect 不降低危险工具门。
 #   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程；
 #   声明旧read或显式v9的包获得对应宿主API地址与固定激活令牌（有副作用：登记令牌）。
@@ -963,6 +1159,23 @@ class PluginMCPClient(MCPStdioClient):
         ) if self.lazy else ()
         register_source_registry(self)
 
+    def use_declared_registry_catalog(self) -> bool:
+        """接入有已验证目录的常规插件，已运行的连接继续交给原代理。"""
+        if self.lazy:
+            return self.eager_in_main
+        declarations = installation_tool_declarations(self.installation)
+        if not declarations:
+            return False
+        if self.is_running() and self.validated_tools:
+            return True
+        self.eager_in_main = True
+        self.pack_tools = tuple(
+            self._proxy_for_info(MCPToolInfo(tool.name, tool.description, tool.input_schema), None, facade=True)
+            for tool in declarations
+        )
+        self.lazy = True
+        return True
+
     def ensure_started(self) -> object:
         """一把客户端锁串行完成启动/发现/发布；只尝试一次，撤销门和原资源清理不得被缓存绕过。"""
         with self._lazy_lock:
@@ -979,7 +1192,7 @@ class PluginMCPClient(MCPStdioClient):
                 if all(tool.transport is transport for tool in self.validated_tools):
                     return transport
             # 已验连接在调用间崩溃：先记录一次退避，不让其它工具或 prepare 承担重启成本。
-            if not self.is_running() and self.validated_tools and not self.attempts:
+            if not self.eager_in_main and not self.is_running() and self.validated_tools and not self.attempts:
                 self.validated_tools = ()
                 self._advance_lazy_retry()
                 raise MCPError("能力包服务已退出", code="MCP_PACK_SERVER_UNAVAILABLE", effect_outcome="not_started")
@@ -997,6 +1210,8 @@ class PluginMCPClient(MCPStdioClient):
                 if isinstance(exc, MCPError) and exc.code == "MCP_PACK_CATALOG_DRIFT":
                     self.drift = True
                     self.stop()
+                    raise
+                if self.eager_in_main and isinstance(exc, MCPError) and exc.code == "MCP_CANCELLED":
                     raise
                 self._advance_lazy_retry()
                 code = "PLUGIN_ACTIVATION_UNAVAILABLE" if not self.activation_ref.available() else "MCP_PACK_SERVER_UNAVAILABLE"
@@ -1102,7 +1317,7 @@ class PluginMCPClient(MCPStdioClient):
     def discover_tools(self, transport) -> tuple[PluginProxyTool, ...]:
         actual = self.list_tools(transport=transport)
         declared = {tool.name: tool for tool in installation_tool_declarations(self.installation)}
-        code = "MCP_PACK_CATALOG_DRIFT" if self.lazy else "MCP_PROTOCOL_ERROR"
+        code = "MCP_PACK_CATALOG_DRIFT" if self.lazy and not self.eager_in_main else "MCP_PROTOCOL_ERROR"
         pin = getattr(self.installation.activation, "pinned_catalog_json", None)
         if pin is not None:
             try:
@@ -1148,7 +1363,7 @@ class PluginMCPClient(MCPStdioClient):
         keywords = tuple(dict.fromkeys((*spec.hints.keywords, plugin_id, plugin_id.replace("-", "_"),
                                         *plugin_id.replace("_", "-").split("-"), info.name)))
         hints = replace(spec.hints, keywords=keywords, provider_id="plugin:" + plugin_id)
-        if getattr(self, "lazy", False):
+        if getattr(self, "lazy", False) and not self.eager_in_main:
             hints = replace(hints, provider_id="package:" + plugin_id, default_deferred=True,
                             deferred_summary=manifest.summary)
         return replace(spec, name=name, description=sanitize_credentials(description), hints=hints)
@@ -1167,7 +1382,13 @@ class PluginMCPClient(MCPStdioClient):
     def stop(self):
         with self._credential_session_lock:
             self._credential_session_bindings.clear()
-        return super().stop()
+        stop_transport = super().stop
+        receipt = stop_transport()
+        if self.lazy and getattr(receipt, "method", "") == "launch_pending":
+            # 当前启动线程会按原托管回执回收候选，关闭者等待同一次启动收口。
+            with self._lazy_lock:
+                return stop_transport()
+        return receipt
 
     def disconnect(self, *, transport):
         with self._state_lock:

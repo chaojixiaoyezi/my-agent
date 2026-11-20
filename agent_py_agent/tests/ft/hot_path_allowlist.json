@@ -1116,73 +1116,9 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M09"
     },
-    "agent/tooling/registry.py::ToolRegistry.__init__::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::ToolRegistry._live_bool::dyn_getattr": {
-      "count": 3,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::ToolRegistry._mcp_config_fingerprint::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::ToolRegistry.execute_tool::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::ToolRegistry.render_catalog_section::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_catalog_only_model_spec::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
     "agent/tooling/registry.py::_ensure_registry_borrow_worker::thread_ctor": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_ensure_registry_lifecycle_fields::dyn_hasattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_narrow_model_spec_for_actions::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_registry_runtime_snapshot::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_registry_with_access_policy::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_safe_tool_availability::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_search_deferred_tool_result::json_dumps_default": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_share_registry_mcp_state::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_tool_search_index_spec::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::_tool_search_invalid_arguments::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M25"
-    },
-    "agent/tooling/registry.py::tool_catalog_result::json_dumps_default": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M25"
+      "reason": "cold-path: one process-wide borrowed lease release worker"
     },
     "agent/tooling/runtime_contracts.py::AppliedToolApproval.__post_init__::object_setattr": {
       "count": 2,

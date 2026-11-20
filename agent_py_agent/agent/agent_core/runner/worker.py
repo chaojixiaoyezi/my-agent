@@ -95,7 +95,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
             _close_worker_mcp_clients(worker, params)
 
 
-# LLM: 父原tools身份仍跳过；独立门面一律调用close，由其所有权/借用计数决定关闭或释放，异常只告警。
+# LLM: 独立门面一律调用 close，包含尚未启动的声明租约和派生权限视图；父原 tools 身份仍跳过。
 # 函数用途: 在worker被替换或退出时释放其MCP客户端，不掩盖业务返回或异常。
 def _close_worker_mcp_clients(worker, params: RunSubagentWorkerParams) -> None:
     tools = getattr(worker, "tools", None)
@@ -424,7 +424,10 @@ def _untransported_worker_configuration_context(config, params):
 # LLM: Inspect optional keyword support before calling; never retry after a constructor raises an internal TypeError.
 # 函数用途: 给真实Agent延迟MCP，旧构造器不接收新选项时保持兼容且不重复执行失败的构造。
 def _construct_transported_worker(simple_agent_cls, params, config, *, defer_mcp_connect: bool = True):
+    from ...tooling.registry import ToolRegistry
+
     options = {}
+    original = None
     try:
         parameters = inspect.signature(simple_agent_cls).parameters
     except (TypeError, ValueError):
@@ -439,7 +442,11 @@ def _construct_transported_worker(simple_agent_cls, params, config, *, defer_mcp
         frozen = getattr(original, "_worker_bootstrap", None)
         if frozen is not None:
             options["worker_bootstrap"] = frozen
-    return simple_agent_cls(config, params.root, **options)
+    worker = simple_agent_cls(config, params.root, **options)
+    tools = getattr(worker, "tools", None)
+    if defer_mcp_connect and isinstance(tools, ToolRegistry) and tools is not getattr(original, "tools", None):
+        tools.defer_declared_mcp_start()
+    return worker
 
 
 # LLM: 每个建好的 worker（含按有效配置重建的那个）都经这里。它的模型调用账本在构造时已登记进进程准入表

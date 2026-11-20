@@ -8,8 +8,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from ..common.fast_dataclass import fast_frozen
 from ..plugin_observation import (
     ObservationDeclarationError,
     PluginToolObservation,
@@ -19,6 +20,9 @@ from ..plugin_observation import (
 from .input_schema import canonicalize_tool_input_schema
 from .mcp_protocol import MCPError
 
+if TYPE_CHECKING:
+    from .mcp_client import MCPToolInfo
+
 # 允许的逐工具审批模式：等于或严于默认 dangerous；never 会免去 dangerous 工具的审批，属于放宽安全边界，不接受
 VALID_TOOL_APPROVALS = frozenset({"dangerous", "mutating", "always"})
 # 声明与发现到的工具对不上时整服务拒绝的状态码；notice 里"声明了但没发现"的原因码；工具输入 schema 本身不可规范化的原因码
@@ -26,6 +30,14 @@ DECLARATION_INVALID_CODE = "MCP_DECLARATION_INVALID"
 DECLARED_TOOL_NOT_DISCOVERED = "declared_tool_not_discovered"
 INPUT_SCHEMA_INVALID = "input_schema_invalid"
 _OBSERVATION_KINDS = ("observation", "observation_ref")
+
+
+class MCPServerWithCatalog(dict[str, Any]):
+    """宿主装配的服务配置和目录快照，用户配置仍沿原映射读取。"""
+
+    def __init__(self, settings: dict[str, Any], catalog: list[dict[str, Any]]):
+        self.update(settings)
+        self.catalog = catalog
 
 
 # LLM: reasons 是结构化列表 [{"tool", "code"}]，code 来自 ObservationDeclarationError.code、observation_ref_unpaired 或
@@ -55,7 +67,8 @@ class MCPPublication:
 
 
 # 类用途: 核对通过后，一个发现到的工具的宿主声明：effect、审批模式与可选的观察/观察引用。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ResolvedToolDeclaration:
     effect: str
     approval: str
@@ -64,7 +77,8 @@ class ResolvedToolDeclaration:
 
 
 # 类用途: 整个服务核对后的声明结果：逐工具声明加"声明了但没发现"的提醒。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ResolvedServerDeclarations:
     tools: dict[str, ResolvedToolDeclaration]
     notices: tuple[dict[str, str], ...] = ()
@@ -73,6 +87,27 @@ class ResolvedServerDeclarations:
     def action_tools(self, target_kind: str, host_name) -> dict[str, str]:
         return {name: host_name(name) for name, item in self.tools.items()
                 if item.observation_ref is not None and item.observation_ref.target_kind == target_kind}
+
+
+def parse_declared_mcp_tools(value: object, *, server_name: str) -> tuple[MCPToolInfo, ...]:
+    """解析宿主提供的完整 tools/list 快照，显式空目录也是有效声明。"""
+    from .mcp_client import _parse_tool_info
+
+    if not isinstance(value, list):
+        raise MCPError(f"MCP server '{server_name}' 的宿主目录必须是 tools/list 数组", code="MCP_CONFIG_INVALID")
+    tools = {}
+    for entry in value:
+        try:
+            info = _parse_tool_info(entry)
+            info.input_schema = canonicalize_tool_input_schema(info.input_schema)
+        except (MCPError, TypeError, ValueError) as exc:
+            raise MCPError(f"MCP server '{server_name}' 的宿主工具目录第 {len(tools) + 1} 项无效：{exc}",
+                           code="MCP_CONFIG_INVALID") from exc
+        if info.name in tools:
+            raise MCPError(f"MCP server '{server_name}' 的宿主工具目录名称重复：{info.name}",
+                           code="MCP_CONFIG_INVALID")
+        tools[info.name] = info
+    return tuple(tools.values())
 
 
 # 函数用途: 解析 tool_approvals 映射；模式不在允许集合（含 never）就报配置非法。
