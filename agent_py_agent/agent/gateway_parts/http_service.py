@@ -20,14 +20,20 @@ import inspect
 import itertools
 import json
 import os
+import socket
 import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
+from operator import attrgetter
 from pathlib import Path
+from socketserver import _SocketWriter
 from typing import TYPE_CHECKING, Any
 
 from ..auth.configuration import build_gateway_auth_middleware, validate_gateway_auth_configuration
+from ..common import hot_json
+from ..common.direct_socket_io import makefile_rb
+from ..common.fast_dataclass import fast_frozen
 from ..runtime_errors import runtime_error_report
 from .bounded_http_server import GatewayBoundedHTTPServer
 from .http_handlers import (
@@ -67,11 +73,17 @@ if TYPE_CHECKING:
 
 # Global server instance for signal handler access
 _server_instance: GatewayHTTPServer | None = None
+_ROUTE_HANDLER_ACCESSORS = {
+    route.handler_name: attrgetter(route.handler_name)
+    for routes in GATEWAY_HTTP_ROUTES.values()
+    for route in routes
+}
 
 
 # LLM: 原C只运输同次control/runtime，不签handler权限；认证沿main唯一factory和G1，无弱化开关，None保Count0。
 # 类用途: 绑定宿主 Agent、原认证服务和监听地址，标准启动必须准备 G1 凭据。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayHTTPServerParams:
     cross_channel: CrossChannelSession | None = None
     admin_query: AdminCrossChannelQuery | None = None
@@ -129,6 +141,20 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     # 原JSON/文件/流响应均明确Connection:close；运输预读可据此只接一条完整请求。
     single_request_connection = True
 
+    def setup(self) -> None:
+        self.connection = self.request
+        if self.timeout is not None:
+            self.connection.settimeout(self.timeout)
+        if self.disable_nagle_algorithm:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
+        self.rfile = makefile_rb(self.connection, self.rbufsize)
+        try:
+            self.wfile = (_SocketWriter(self.connection) if self.wbufsize == 0
+                          else self.connection.makefile("wb", self.wbufsize))
+        except BaseException:
+            self.rfile.close()
+            raise
+
     def log_message(self, format: str, *args: Any) -> None:
         pass
 
@@ -160,7 +186,7 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     # bugs cannot be mislabeled as a client departure.
     # 函数用途: 编码并发送 JSON，统一复用短连接写回和断连收口语义。
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        payload = hot_json.dumps(body, ensure_ascii=False).encode("utf-8")
         self._send_payload(status, "application/json; charset=utf-8", payload)
 
     def _read_json(self) -> dict[str, Any]:
@@ -220,17 +246,19 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
                     return
         if (route.access_tier == "credential"
                 and (route.template.startswith("/client/") or route.template in {"/control", "/control-status/*"})
-                and route.template not in {"/client/history", "/client/memory", "/client/private-interaction", "/client/models", "/control", "/control-status/*"}
+                and route.template not in {"/client/history", "/client/memory", "/client/private-interaction",
+                                           "/client/models", "/client/turn-stop", "/control", "/control-status/*"}
                 and not (route.template == "/control" and self.headers.get("X-My-Agent-Control") == "global-write-v1")):
             waiting = _coordinator_business_wait(_server_instance)
             if waiting:
                 self._send_json(503, waiting)
                 return
+        handler_accessor = _ROUTE_HANDLER_ACCESSORS[route.handler_name]
         if route.handler_module:
             module = importlib.import_module(route.handler_module, __package__)
-            getattr(module, route.handler_name)(self, _server_instance)
+            handler_accessor(module)(self, _server_instance)
             return
-        getattr(self, route.handler_name)()
+        handler_accessor(self)()
 
     def _handle_status(self) -> None:
         handle_status(self, _server_instance)
@@ -474,7 +502,7 @@ class GatewayHTTPServer:
                  if self.drain_runtime is not None else None)
         config = getattr(self.agent if self.agent is not None else self.control_plane, "config", None)
         with original_http_birth(self.drain_runtime, control=self.control_plane, paths=self.paths):
-            # 独立车道只用于count=0，不向同一排空组绑定第二个执行器。
+            # 协调器只启用就绪分片，保留已登记的原请求执行器与工作来源。
             options = {
                 "control_lane_workers": int(getattr(config, "gateway_http_control_lane_workers", 0) or 0),
                 "pending_connection_limit": int(getattr(config, "gateway_global_inflight_limit", 0) or 0),
@@ -482,6 +510,8 @@ class GatewayHTTPServer:
                 "request_worker_initializer": group.remember_current_thread,
                 "request_worker_failure": group.retain_fault,
                 "drain_runtime": self.drain_runtime, "drain_resource": group,
+                "readiness_enabled": True,
+                "pending_connection_limit": int(getattr(config, "gateway_global_inflight_limit", 0) or 0),
             }
             if group is None:
                 options = _count0_listener_options(options)

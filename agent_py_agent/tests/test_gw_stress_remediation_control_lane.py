@@ -76,7 +76,7 @@ def lane_server():
         server.server_close()
         thread.join(2)
         assert not thread.is_alive()
-        assert not server._lanes._thread.is_alive()
+        assert all(not shard.thread.is_alive() for shard in server._lanes.shards)
 
 
 def _eventually(predicate, timeout=3.0):

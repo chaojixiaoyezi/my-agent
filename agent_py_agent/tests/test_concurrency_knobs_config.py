@@ -418,9 +418,9 @@ def test_gw12_default_pools_start_and_explicit_zero_disables_after_restart(tmp_p
         lane = server._lanes
         pool = service.business_stream_pool
         assert lane is not None and lane._control_executor._max_workers == 10
-        # 完整普通请求的保留线程属于同一份 32 线程配额，控制池仍独立。
-        assert lane._ready_executor._max_workers == 1
-        assert server._request_executor._max_workers + lane._ready_executor._max_workers == server.max_request_workers == 32
+        # 流式请求至多占 31 席，完整请求与流式请求共享 32 线程的原池。
+        assert lane._body_limit == 31
+        assert server._request_executor._max_workers == server.max_request_workers == 32
         assert pool is not None and pool.max_streams == pool._executor._max_workers == 128
         for disabled in (False, True):
             connection = HTTPConnection("127.0.0.1", service.server.server_port, timeout=2)

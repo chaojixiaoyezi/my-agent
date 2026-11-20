@@ -77,7 +77,7 @@ def server():
         result.server_close()
         thread.join(1)
         assert not thread.is_alive()
-        assert not result._lanes._thread.is_alive()
+        assert not result._lanes.shards[0].thread.is_alive()
 
 
 def connect(server, data=None):
@@ -128,7 +128,7 @@ def test_status_has_independent_workers_and_outstanding_slots(server):
 def test_idle_connections_use_no_workers_and_expire_silently(server):
     clients = [connect(server) for _ in range(server.max_request_workers + 5)]
     try:
-        eventually(lambda: len(server._lanes._pending) == len(clients))
+        eventually(lambda: len(server._lanes.shards[0].pending) == len(clients))
         assert not server._request_executor._threads
         assert server._request_slots._value == server.max_outstanding_requests
         with request(server) as status:
@@ -138,7 +138,7 @@ def test_idle_connections_use_no_workers_and_expire_silently(server):
             assert b'200 OK' in response(ask)
         for client in clients:
             assert client.recv(1) == b''
-        eventually(lambda: not server._lanes._pending)
+        eventually(lambda: not server._lanes.shards[0].pending)
         assert server._request_slots._value == server.max_outstanding_requests
     finally:
         for client in clients:
@@ -156,7 +156,7 @@ def test_eof_does_not_submit_or_take_a_slot(server):
 
 def test_partial_first_line_waits_without_worker_and_preserves_bytes(server):
     with connect(server, b'GET /sta') as client:
-        eventually(lambda: bool(server._lanes._prefixes))
+        eventually(lambda: any(item.prefix for item in server._lanes.shards[0].pending.copy().values()))
         assert server._request_slots._value == server.max_outstanding_requests
         assert not server._request_executor._threads
         assert not server._lanes._control_executor._threads
@@ -202,8 +202,6 @@ def test_expiry_worker_cas_has_one_owner_close_and_slot_release(server, monkeypa
         return running(ticket)
 
     def claim_expired(ticket):
-        if reserved and ticket.lane != 'ready':
-            return expired(ticket)
         expiry_entered.set()
         assert expiry_go.wait(2)
         return expired(ticket)
@@ -232,15 +230,16 @@ def test_expiry_worker_cas_has_one_owner_close_and_slot_release(server, monkeypa
             blocker.close()
     eventually(lambda: server._request_slots._value == server.max_outstanding_requests)
     assert len(tickets) == 1
-    assert (tickets[0].lane == 'ready') is reserved
+    assert tickets[0].executor is server._request_executor
     assert closes[tickets[0].request] == 1
     assert tickets[0].state == 'DONE'
 
 
 def test_pending_limit_rejects_without_consuming_a_worker(server):
     server._lanes.pending_limit = 1
+    server._lanes._pending_slots = threading.BoundedSemaphore(1)
     with connect(server) as idle:
-        eventually(lambda: len(server._lanes._pending) == 1)
+        eventually(lambda: len(server._lanes.shards[0].pending) == 1)
         start = time.monotonic()
         with connect(server) as excess:
             assert b'GATEWAY_HTTP_BUSY' in response(excess)
@@ -312,7 +311,8 @@ def test_worker_checks_expiry_when_selector_has_not_swept(server, monkeypatch, b
     tickets = []
     worker_entered, selector_paused = threading.Event(), threading.Event()
     worker_go, selector_go = threading.Event(), threading.Event()
-    run, sweep = server._lanes._run_ticket, server._lanes._sweep
+    shard = server._lanes.shards[0]
+    run, expire = server._lanes._run_ticket, shard._expire_due
 
     def delay_worker(ticket):
         tickets.append(ticket)
@@ -320,20 +320,20 @@ def test_worker_checks_expiry_when_selector_has_not_swept(server, monkeypatch, b
         assert worker_go.wait(2)
         run(ticket)
 
-    def delay_sweep():
+    def delay_expiry(now):
         if worker_entered.is_set():
             selector_paused.set()
             assert selector_go.wait(2)
-        return sweep()
+        return expire(now)
 
     monkeypatch.setattr(server._lanes, '_run_ticket', delay_worker)
-    monkeypatch.setattr(server._lanes, '_sweep', delay_sweep)
+    monkeypatch.setattr(shard, '_expire_due', delay_expiry)
     try:
         with request(server, 'GET', '/ordinary') as client:
             assert worker_entered.wait(1)
             assert selector_paused.wait(1)
             assert len(tickets) == 1
-            deadline = tickets[0].accepted_at + server._lanes.queue_timeout_seconds
+            deadline = tickets[0].enqueued_at + server._lanes.queue_timeout_seconds
             clock[0] = (math.nextafter(deadline, -math.inf) if boundary == 'before' else
                         math.nextafter(deadline, math.inf) if boundary == 'after' else deadline)
             worker_go.set()
@@ -381,47 +381,40 @@ def test_dead_selector_closes_admission_even_if_failure_observer_raises(server, 
     server._request_worker_failure = observer_failure
     with request(server, 'GET', '/ordinary') as client:
         assert b'GATEWAY_HTTP_BUSY' in response(client)
-    eventually(lambda: not server._lanes._thread.is_alive())
+    eventually(lambda: not server._lanes.shards[0].thread.is_alive())
     with connect(server) as later:
         assert b'GATEWAY_HTTP_BUSY' in response(later)
     assert len(failures) == 1
     assert server._lanes._closing.is_set()
-    assert not server._lanes._incoming
+    assert not server._lanes.shards[0].incoming
 
 
 def test_enqueue_then_thread_creation_failure_never_enters_handler(server, monkeypatch):
     executor = server._request_executor
     handled = []
     monkeypatch.setattr(server, 'finish_request', lambda _sock, _addr: handled.append(True))
-    client, accepted = socket.socketpair()
-
     def fail_start():
         raise RuntimeError('thread_start_unavailable')
 
-    try:
-        with monkeypatch.context() as patch:
-            patch.setattr(executor, '_adjust_thread_count', fail_start)
-            server._lanes._submit('general', accepted, ('127.0.0.1', 1), time.monotonic())
-        client.settimeout(1)
-        assert b'GATEWAY_HTTP_BUSY' in response(client)
-        executor.submit(lambda: None).result(1)
-        assert handled == []
-        assert executor._work_queue.qsize() == 0
-        assert server._request_slots._value == server.max_outstanding_requests
-    finally:
-        client.close()
-        accepted.close()
+    with monkeypatch.context() as patch:
+        patch.setattr(executor, '_adjust_thread_count', fail_start)
+        with request(server, 'GET', '/ordinary') as client:
+            assert b'GATEWAY_HTTP_BUSY' in response(client)
+    executor.submit(lambda: None).result(1)
+    assert handled == []
+    assert executor._work_queue.qsize() == 0
+    assert server._request_slots._value == server.max_outstanding_requests
 
 
 def test_close_closes_registered_and_unregistered_idle_connections(server):
     with connect(server) as idle:
-        eventually(lambda: len(server._lanes._pending) == 1)
+        eventually(lambda: len(server._lanes.shards[0].pending) == 1)
         server._lanes.close()
         assert idle.recv(1) == b''
-        assert not server._lanes._pending and not server._lanes._incoming
-        assert not server._lanes._thread.is_alive()
-        assert server._lanes._wake_read.fileno() == -1
-        assert server._lanes._wake_write.fileno() == -1
+        assert not server._lanes.shards[0].pending and not server._lanes.shards[0].incoming
+        assert not server._lanes.shards[0].thread.is_alive()
+        assert server._lanes.shards[0].wake_read.fileno() == -1
+        assert server._lanes.shards[0].wake_write.fileno() == -1
         with connect(server) as later:
             assert b'GATEWAY_HTTP_BUSY' in response(later)
 
@@ -491,7 +484,7 @@ def test_partial_bodies_leave_original_general_capacity_for_complete_request(ser
             assert b'200 OK' in response(complete)
         assert calls == [b'{}']
         assert not server._lanes._control_executor._threads
-        assert len(server._request_executor._threads) + len(server._lanes._ready_executor._threads) <= server.max_request_workers
+        assert len(server._request_executor._threads) <= server.max_request_workers
     finally:
         Handler.do_POST = original
         for client in clients:
@@ -515,16 +508,15 @@ def test_segmented_body_under_saturation_waits_for_exact_completion(server, monk
     try:
         assert blocker_entered.wait(1)
         with connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nab') as client:
-            eventually(lambda: any(p.endswith(b'ab') for p in server._lanes._prefixes.copy().values()))
+            eventually(lambda: any(p.endswith(b'ab') for p in (item.prefix for item in server._lanes.shards[0].pending.copy().values())))
             assert len(server._request_executor._threads) == 1
-            assert not server._lanes._ready_executor._threads
             client.sendall(b'cd')
-            eventually(lambda: any(p.endswith(b'abcd') for p in server._lanes._prefixes.copy().values()))
-            assert not server._lanes._ready_executor._threads
+            eventually(lambda: any(p.endswith(b'abcd') for p in (item.prefix for item in server._lanes.shards[0].pending.copy().values())))
+            assert len(server._request_executor._threads) == 1
             client.sendall(b'ef')
             assert b'200 OK' in response(client)
         assert seen == [b'abcdef']
-        eventually(lambda: not server._lanes._prefixes and not server._lanes._frame_lengths)
+        eventually(lambda: not server._lanes.shards[0].pending)
     finally:
         blocker.close()
 
@@ -544,7 +536,7 @@ def test_large_body_keeps_original_payload_and_general_worker(server, monkeypatc
     monkeypatch.setattr(Handler, 'do_POST', read_body)
     with connect(server, f'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(body)}\r\n\r\n'.encode() + body[:1]) as client:
         assert entered.wait(1)
-        assert not server._lanes._ready_executor._threads
+        assert len(server._request_executor._threads) == 1
         client.sendall(body[1:])
         assert b'200 OK' in response(client)
     assert seen == [body]
@@ -590,7 +582,7 @@ def test_keepalive_second_partial_request_cannot_take_reserved_worker(monkeypatc
         first = http.client.HTTPResponse(client)
         first.begin()
         assert first.status == 200 and first.read() == b'{}'
-        assert not server._lanes._ready_executor._threads
+        assert len(server._request_executor._threads) == 1
         client.sendall(b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\na')
         with connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}') as complete:
             assert b'200 OK' in response(complete)
@@ -603,34 +595,35 @@ def test_keepalive_second_partial_request_cannot_take_reserved_worker(monkeypatc
         server.shutdown()
         server.server_close()
         thread.join(1)
-        assert not thread.is_alive() and not server._lanes._thread.is_alive()
+        assert not thread.is_alive() and not server._lanes.shards[0].thread.is_alive()
 
 
 def test_pending_prefixes_are_bounded_do_not_spin_and_release_on_eof(server, monkeypatch):
     from agent_py_agent.agent.gateway_parts.http_body_readiness import HTTP_READY_PREFIX_BYTES
 
     observed = []
-    original = server._lanes._read_ready
+    shard = server._lanes.shards[0]
+    original = shard._read_ready
 
     def observe(*args):
         observed.append(1)
         return original(*args)
 
-    monkeypatch.setattr(server._lanes, '_read_ready', observe)
+    monkeypatch.setattr(shard, '_read_ready', observe)
     clients = [connect(server, b'POST /ordinary HTTP/1.1\r\nContent-Length: 4000\r\nX-Fixture: x') for _ in range(5)]
     try:
-        eventually(lambda: len(server._lanes._prefixes) == len(clients))
+        eventually(lambda: sum(bool(item.prefix) for item in shard.pending.copy().values()) == len(clients))
         count = len(observed)
         threading.Event().wait(0.03)
         assert len(observed) == count  # 已消费的前缀不再让level-trigger selector反复就绪。
-        assert all(len(p) <= HTTP_READY_PREFIX_BYTES for p in server._lanes._prefixes.values())
-        assert sum(map(len, server._lanes._prefixes.values())) <= server._lanes.pending_limit * HTTP_READY_PREFIX_BYTES
-        assert len(server._request_executor._threads) <= server._lanes._mixed_workers
-        assert not server._lanes._ready_executor._threads
+        sizes = [len(item.prefix) for item in shard.pending.copy().values()]
+        assert all(size <= HTTP_READY_PREFIX_BYTES for size in sizes)
+        assert sum(sizes) <= server._lanes.pending_limit * HTTP_READY_PREFIX_BYTES
+        assert not server._request_executor._threads
     finally:
         for client in clients:
             client.close()
-    eventually(lambda: not server._lanes._pending and not server._lanes._prefixes)
+    eventually(lambda: not shard.pending)
     eventually(lambda: server._request_slots._value == server.max_outstanding_requests)
 
 
@@ -717,7 +710,7 @@ def test_replay_setup_failure_closes_original_socket_without_gc(server, monkeypa
             assert b'GATEWAY_HTTP_BUSY' in response(client)
         # 收到 TCP FIN 只证明 shutdown(SHUT_WR)；再等原句柄自己的 close 完成，仍保留强引用。
         assert failed.wait(1) and closed.wait(1) and retained[0].fileno() == -1
-    assert server._lanes._thread.is_alive()
+    assert server._lanes.shards[0].thread.is_alive()
     assert server._request_slots._value == server.max_outstanding_requests
     with request(server, 'GET', '/ordinary') as client:
         assert b'200 OK' in response(client)
@@ -807,7 +800,7 @@ def patient_body_server():
         result.shutdown()
         result.server_close()
         thread.join(1)
-        assert not thread.is_alive() and not result._lanes._thread.is_alive()
+        assert not thread.is_alive() and not result._lanes.shards[0].thread.is_alive()
 
 
 def test_early_headers_with_original_mixed_capacity_keep_slow_small_body_success(patient_body_server):
@@ -822,7 +815,7 @@ def test_early_headers_with_original_mixed_capacity_keep_slow_small_body_success
 
 
 @pytest.mark.parametrize('late_headers', [False, True])
-def test_original_queue_deadline_is_not_refreshed_for_overload_or_late_headers(patient_body_server, monkeypatch, late_headers):
+def test_unsubmitted_body_or_late_headers_do_not_consume_queue_budget(patient_body_server, monkeypatch, late_headers):
     from types import SimpleNamespace
 
     from agent_py_agent.agent.gateway_parts import http_lanes
@@ -839,16 +832,13 @@ def test_original_queue_deadline_is_not_refreshed_for_overload_or_late_headers(p
         if not late_headers:
             prefix += b'\r\n{'
         with connect(server, prefix) as client:
-            eventually(lambda: bool(server._lanes._prefixes))
+            eventually(lambda: any(item.prefix for item in server._lanes.shards[0].pending.copy().values()))
             if not late_headers:
-                eventually(lambda: bool(server._lanes._headers_ready_at))
+                eventually(lambda: bool(server._lanes.shards[0].waiting))
             clock[0] += 2.1
-            if late_headers:
-                client.sendall(b'\r\n{}')
-            server._lanes._wake()
-            assert b'GATEWAY_HTTP_BUSY' in response(client)
-        assert server.received == []
-        assert not server._lanes._ready_executor._threads or late_headers
+            client.sendall(b'\r\n{}' if late_headers else b'}')
+            assert b'200 OK' in response(client)
+        assert server.received == [b'{}']
     finally:
         if blocker is not None:
             blocker.close()
@@ -861,7 +851,7 @@ def test_body_waiting_before_original_deadline_uses_newly_freed_mixed_capacity(p
         assert server.body_entered.wait(1)
         server.body_entered.clear()
         with connect(server, b'POST /ordinary HTTP/1.1\r\nContent-Length: 2\r\n\r\n{') as client:
-            eventually(lambda: bool(server._lanes._headers_ready_at))
+            eventually(lambda: bool(server._lanes.shards[0].waiting))
             blocker.close()
             assert server.body_entered.wait(1), '原截止前释放席位须唤醒并推进已完整header的责任'
             client.sendall(b'}')

@@ -55,6 +55,7 @@ class StatusPayloadContext:
     gateway_heartbeat_load_error: dict | None = None
     unidentified_stale_attempts: int = 0
     surviving_background_sessions: int = 0
+    http_capacity: dict | None = None
 
 
 # LLM: Build the CLI status snapshot; read this interpreter's live GIL state on every call.
@@ -91,6 +92,8 @@ def _gateway_payload(ctx: StatusPayloadContext) -> dict:
         payload["state_load_error"] = ctx.gateway_state_load_error
     if ctx.gateway_heartbeat_load_error:
         payload["heartbeat_load_error"] = ctx.gateway_heartbeat_load_error
+    if isinstance(ctx.http_capacity, dict):
+        payload["http_capacity"] = ctx.http_capacity
     return payload
 
 

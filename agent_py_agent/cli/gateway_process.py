@@ -27,7 +27,7 @@ import sysconfig
 import threading
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..agent.auth.configuration import (
@@ -212,6 +212,13 @@ def _gateway_log_size(path: Path) -> int:
 # config/model identity and log boundary here so CLI, HTTP and model tools read the same facts.
 # LLM: 正count只投影同代实际control配置/lease，None Agent不授ready；Count0数量只从本次context投影，不能用配置目标冒认live事实。
 # 函数用途: 生成当前运行状态投影；权限与就绪仍由原控制器验证。
+def _http_capacity(request: GatewayThreadsRequest) -> dict:
+    server = request.http_server
+    if request.http_port and server is not None and server.server is not None:
+        return server.server.effective_capacity()
+    return {}
+
+
 def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "running") -> dict:
     context = request.context
     paths = context.paths
@@ -239,6 +246,7 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
             getattr(config, "gateway_bind_host", "127.0.0.1") or "127.0.0.1"
         ),
         "http_port": request.http_port,
+        "http_capacity": _http_capacity(request),
         "log_start_offset_bytes": max(0, int(context.log_start_offset_bytes or 0)),
         "process_identity": dict(context.process_identity or {}),
         "started_at": float(context.process_started_at or time.time()),
@@ -273,6 +281,7 @@ def _build_run_payload(request: GatewayThreadsRequest, pid: int, extra: dict | N
             getattr(config, "gateway_bind_host", "127.0.0.1") or "127.0.0.1"
         ),
         "http_port": request.http_port,
+        "http_capacity": _http_capacity(request),
         "log_start_offset_bytes": max(0, int(context.log_start_offset_bytes or 0)),
         "process_identity": dict(context.process_identity or {}),
         "started_at": float(context.process_started_at or time.time()),
@@ -547,6 +556,7 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest, *, restart_marker=N
         request_thread.start()
         background_thread.start()
         http_server = _start_gateway_http(agent, paths, http_port)
+        request = replace(request, http_server=http_server)
         heartbeat_thread.start()
         state = {**_build_run_state(request, pid), **_restart_state_fields(restart_marker)}
         if not _commit_gateway_state(paths, state, context=context, pid=pid, replace=True):
