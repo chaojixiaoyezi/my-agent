@@ -302,9 +302,12 @@ def attachment_reply_case(tmp_path, monkeypatch, *, notice, name):
     return case, artifact, refs
 
 
-@pytest.mark.parametrize('notice', [True, False], ids=['required', 'normal'])
-def test_attachment_only_source_reply_preserves_complete_committed_envelope(tmp_path, monkeypatch, notice):
-    case, artifact, refs = attachment_reply_case(tmp_path, monkeypatch, notice=notice, name='result.txt')
+# LLM: 普通回合未用凭据，附件闸门不介入，二进制 result.bin 照常外发；闸门一旦误作用于普通回合，[normal] 即失败。
+#   必要通知回合已携卡，闸门只放行净化后的纯文本附件，故用 result.txt；result.bin 被拦的情形见下一用例。
+@pytest.mark.parametrize(('notice', 'name'), [(True, 'result.txt'), (False, 'result.bin')],
+                         ids=['required', 'normal'])
+def test_attachment_only_source_reply_preserves_complete_committed_envelope(tmp_path, monkeypatch, notice, name):
+    case, artifact, refs = attachment_reply_case(tmp_path, monkeypatch, notice=notice, name=name)
     reports = case.scheduler.tick(now=case.now)
     assert reports[0].delivery_status == 'sent'
     assert not case.channels.attempts and not case.sends and len(case.files) == 1
