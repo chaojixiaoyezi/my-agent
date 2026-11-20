@@ -33,10 +33,12 @@ def validate_request_limits(request: GatewayRequest) -> None:
             valid = False
         if not valid:
             raise ValueError("deadline 必须是有限单调时钟数值")
-    for name, minimum in (("max_retries", 0), ("max_response_bytes", 1)):
-        value = getattr(request, name)
-        if value is not None and (type(value) is not int or value < minimum):
-            raise ValueError(f"{name} 必须是大于等于 {minimum} 的整数")
+    retries = request.max_retries
+    if retries is not None and (type(retries) is not int or retries < 0):
+        raise ValueError("max_retries 必须是大于等于 0 的整数")
+    response_bytes = request.max_response_bytes
+    if response_bytes is not None and (type(response_bytes) is not int or response_bytes < 1):
+        raise ValueError("max_response_bytes 必须是大于等于 1 的整数")
     permit = getattr(request, "send_permit", None)
     if permit is not None and (not callable(getattr(permit, "admit", None)) or request.max_retries != 0
                                or request.allow_redirects is not False or deadline is None):

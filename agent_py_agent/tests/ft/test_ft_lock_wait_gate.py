@@ -105,6 +105,15 @@ CASES: list[tuple[str, str]] = [
     ('agent_py_agent.tests.test_conveyor_m07_cure_a_model_dtos.g1_case_runner_provider_retry_trace_request', 'm07_runner_provider_retry_trace_request'),
     ('agent_py_agent.tests.test_conveyor_m07_cure_a_model_dtos.g1_case_runner_tool_stage_trace_request', 'm07_runner_tool_stage_trace_request'),
     ('agent_py_agent.tests.test_conveyor_m07_cure_a_model_dtos.g1_case_model_call_usage_summary', 'm07_model_call_usage_summary'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_anthropic_generate_request', 'anthropic_generate_request'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_anthropic_stream_callbacks', 'anthropic_stream_callbacks'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_anthropic_cache_projection', 'anthropic_cache_projection'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_openai_generate_request', 'openai_generate_request'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_openai_stream_observers', 'openai_stream_observers'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_provider_model_metadata', 'provider_model_metadata'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_provider_metadata_options', 'provider_metadata_options'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_request_token_budget', 'request_token_budget'),
+    ('agent_py_agent.tests.test_conveyor_m08_cure_a_providers.g1_case_provider_send_attempt', 'provider_send_attempt'),
 ]
 
 # C0 规则 9 的 GIL 探针：3.11/3.12 没有 sys._is_gil_enabled，按“GIL 开启”处理，收集阶段不会 AttributeError。

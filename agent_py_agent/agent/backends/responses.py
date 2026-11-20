@@ -8,9 +8,9 @@ import threading
 import time
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import replace
 
 from ..common.cancellation import raise_if_cancelled
+from ..common.fast_dataclass import fast_replace
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.input_media import project_input_media
 from ..prompting_parts.cache_layout import prompt_cache_layout
@@ -60,7 +60,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     # LLM: Only Responses consumes pool options; freeze per-backend config without changing Chat/Messages transport behavior.
     # 函数用途: 初始化Responses会话连接池选项。
     def __init__(self, options):
-        super().__init__(options)
+        OpenAICompatibleBackend.__init__(self, options)
         self.responses_ws_idle_ttl_seconds = max(0, int(options.responses_ws_idle_ttl_seconds))
         self.responses_ws_max_idle_connections = max(0, min(256, int(options.responses_ws_max_idle_connections)))
         self._reasoning_update_lock = threading.Lock()
@@ -69,7 +69,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     # LLM: Normal Responses HTTP envelopes use this hook; OAuth constructs its own envelope and invokes the same preparation explicitly.
     # 函数用途: 在最终HTTP信封上绑定Responses会话亲和，不改变其它协议请求。
     def _gateway_request(self, call, payload=None, headers=None, *, options=None):
-        request = super()._gateway_request(call, payload, headers, options=options)
+        request = OpenAICompatibleBackend._gateway_request(self, call, payload, headers, options=options)
         return self._prepare_http_responses_request(request)
 
     # LLM: Options are frozen, but credentials and owner/session always come from this request, not shared backend fields.
@@ -236,7 +236,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             if request.max_output_tokens is not None or updated_budget is not None
             else None
         )
-        aligned_request = replace(
+        aligned_request = fast_replace(
             request,
             reasoning_update_effort="",
             max_output_tokens=updated_max_output,
@@ -271,8 +271,11 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         deadline = (time.monotonic() + request.total_deadline_seconds
                     if request.total_deadline_seconds is not None else None)
         seen = [False]
-        observed = replace(request, on_chunk=_GenerationObserver(request.on_chunk, seen),
-                           on_thinking_delta=_GenerationObserver(request.on_thinking_delta, seen))
+        observed = fast_replace(
+            request,
+            on_chunk=_GenerationObserver(request.on_chunk, seen),
+            on_thinking_delta=_GenerationObserver(request.on_thinking_delta, seen),
+        )
         try:
             return self._send_responses_request(payload, headers, observed)
         except ProviderRequestRejectedError as first:
@@ -298,7 +301,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
                 )
             except RequestBudgetExceeded as overflow:
                 raise overflow from first
-            retried = replace(aligned, total_deadline_seconds=remaining)
+            retried = fast_replace(aligned, total_deadline_seconds=remaining)
             _record_fallback_budget(updated_budget)
             try:
                 return self._send_responses_request(fallback, headers, retried)
@@ -409,6 +412,8 @@ class _GenerationObserver:
     # LLM: 仅代理原complete等观察能力，不创建新的生成或提交入口。
     # 函数用途: 保留原回调对象的附加方法。
     def __getattr__(self, name):
+        if name == "complete":
+            return self.callback.complete
         return getattr(self.callback, name)
 
 

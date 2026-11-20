@@ -1,13 +1,16 @@
 """请求局部的纯预算合同；不读取宿主、配置或供应商元数据。"""
 from dataclasses import dataclass
 
+from ..common.fast_dataclass import fast_frozen
+
 # 工程余量，不是供应商计数误差或未来工具输出的上界。
 REQUEST_INPUT_SAFETY_TOKENS = 2048
 # 压缩请求固定尾缀与协议包装的默认预留 token 余量。
 COMPACT_SUFFIX_ALLOWANCE_TOKENS = 4096
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class RequestTokenBudget:
     input_tokens: int
     output_tokens: int
@@ -27,7 +30,7 @@ class RequestBudgetExceeded(ValueError):
         self.input_tokens = input_tokens
         self.output_ceiling = output_ceiling
         self.context_window_tokens = context_window_tokens
-        super().__init__(f"{self.error_code}: {reason} (input={input_tokens}, output={output_ceiling}, window={context_window_tokens})")
+        ValueError.__init__(self, f"{self.error_code}: {reason} (input={input_tokens}, output={output_ceiling}, window={context_window_tokens})")
 
 
 # LLM: 纯请求规划；只校验冻结的标量输入，不推断供应商计数或触发 I/O。

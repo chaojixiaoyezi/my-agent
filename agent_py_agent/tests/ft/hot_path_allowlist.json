@@ -448,22 +448,6 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M11"
     },
-    "agent/backends/__init__.py::__getattr__::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/anthropic.py::AnthropicCompatibleBackend.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/anthropic.py::AnthropicCompatibleBackend.generate_structured::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/anthropic_prompt_cache.py::_normalize_anthropic_block::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
     "agent/backends/bounded_call.py::_Call.__setattr__::object_setattr": {
       "count": 1,
       "reason": "cold-path: auxiliary call bookkeeping protects the original execution references"
@@ -471,10 +455,6 @@
     "agent/backends/bounded_call.py::call_with_deadline::thread_ctor": {
       "count": 1,
       "reason": "cold-path: auxiliary deadline calls retain a dedicated thread for physical exit observation"
-    },
-    "agent/backends/cache_diagnostics.py::_digest::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
     },
     "agent/backends/decision_protocol.py::DecisionRequest.__init__::object_setattr": {
       "count": 3,
@@ -484,117 +464,21 @@
       "count": 1,
       "reason": "cold-path: opt-in diagnostic file append on provider rejection"
     },
-    "agent/backends/gateway_request_limits.py::validate_request_limits::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
     "agent/backends/oauth.py::OAuthResponsesBackend.request_stream_iter::super0": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
+      "reason": "cooperative-mro: the OAuth mixin precedes the Responses base in the method resolution order"
     },
     "agent/backends/oauth.py::_OAuthMixin.__init__::super0": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/openai_chat.py::_openai_function_call::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/openai_chat.py::dump_provider_payload::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
+      "reason": "cooperative-mro: OAuth mixin delegates to the concrete protocol backend selected by subclass order"
     },
     "agent/backends/openai_chat.py::dump_provider_payload::text_open": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/provider_headers.py::_opaque_owner_key::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/provider_headers.py::_provider_session_runtime_scope::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/provider_headers.py::current_provider_affinity::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/provider_headers.py::provider_agent_owner_scope::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/provider_headers.py::provider_session_scope::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/provider_send_gate.py::ProviderSendRefused.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/request_budget.py::RequestBudgetExceeded.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses.py::OpenAIResponsesBackend.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses.py::OpenAIResponsesBackend._align_preserved_effort_budget::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses.py::OpenAIResponsesBackend._gateway_request::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses.py::OpenAIResponsesBackend._send_with_reasoning_update_fallback::replace_on_fast_frozen": {
-      "count": 2,
-      "reason": "baseline-d9caa95af pending M08"
+      "reason": "cold-path: optional diagnostic append uses the platform text newline convention"
     },
     "agent/backends/responses.py::_GenerationObserver.__getattr__::dyn_getattr": {
       "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_failure.py::failed_event_error::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_websocket.py::_sticky_request::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_websocket.py::iter_responses_websocket::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_websocket.py::iter_responses_websocket::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_websocket.py::prepare_http_responses_request::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_wire.py::_CollectedResponse.__init__::super0": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_wire.py::message_items::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_ws_pool.py::remember_completed::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/responses_ws_pool.py::session_pool_key::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
-    },
-    "agent/backends/structured_output_mode.py::json_object_prompt::json_dumps_default": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M08"
+      "reason": "cold-path: forwards optional extension attributes outside the completion callback"
     },
     "agent/contracts/tool_approval.py::ToolApprovalDecision.__post_init__::object_setattr": {
       "count": 6,

@@ -7,8 +7,9 @@
 # 模块用途: 定义结构化输出方式、解析模型实际采用的方式，并生成 json_object 方式所需的提示前缀。
 from __future__ import annotations
 
-import json
 from urllib.parse import urlsplit
+
+from ..common import hot_json
 
 STRUCTURED_OUTPUT_MODES = ("auto", "native", "json_object")
 # 只有 OpenAI Chat 兼容接口有 json_object 这条退路；其它协议始终用自己的原生机制。
@@ -41,7 +42,7 @@ def resolved_structured_output(declared: object, api_base: object, model_backend
 #   也满足部分供应商对 json_object 的要求。这是给模型的输出说明，是否合规仍由调用方严格解析决定。
 # 函数用途: 为 json_object 方式的结构化请求生成带 schema 的提示。
 def json_object_prompt(prompt: str, response_schema: dict) -> str:
-    schema = json.dumps(response_schema, ensure_ascii=False, sort_keys=True)
+    schema = hot_json.dumps(response_schema, ensure_ascii=False, sort_keys=True)
     return (
         "只输出一个 JSON 对象，必须符合下面的 JSON Schema；不要输出代码块、解释或任何其它文字。\n"
         f"JSON Schema：{schema}\n\n{prompt}"

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_frozen
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
 from .base import ModelResponse, ProviderRequestOptions
@@ -40,7 +42,8 @@ from .usage_metadata import (
 # LLM: cabfix：流式观察回调与两个超时事实合成一个数据类，避免 _generate_stream 参数表
 #   随每个新观察点增长（code-size 参数门禁也会拦）。
 # 类用途: 携带一次 OpenAI 流式调用要用的观察回调和超时选项。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _StreamObservers:
     on_chunk: Callable[[str], None] | None = None
     on_thinking_delta: Callable[[str], None] | None = None
@@ -52,7 +55,8 @@ class _StreamObservers:
 # LLM: OpenAI 请求对象按 typed 字段保留 system 和请求级思考控制；子适配器只发送其协议支持的字段。
 #   宿主 is_probe 仅供响应分类，不发到服务商；每次新建请求避免探测用途泄漏到业务轮。
 # 类用途: 汇总一次 OpenAI-compatible 调用的规则、用户输入、工具、思考开关和输出格式选项。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class _OpenAIGenerateRequest:
     prompt: str
     system_instruction: str = ""
@@ -98,7 +102,7 @@ def dump_provider_payload(payload: dict[str, Any], *, path: str) -> None:
             "payload": payload,
         }
         with open(target, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(hot_json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         # 诊断绝不反噬主链路：任何写入失败都只放弃本次 dump。
         return
@@ -723,7 +727,7 @@ def _openai_function_call(block: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": str(block.get("name") or ""),
-            "arguments": json.dumps(
+            "arguments": hot_json.dumps(
                 block.get("input") or {}, ensure_ascii=False, sort_keys=True,
             ),
         },

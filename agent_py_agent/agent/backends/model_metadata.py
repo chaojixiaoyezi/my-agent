@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
+from ..common.fast_dataclass import fast_frozen
 from .gateway_helpers import GatewayRequest, get_json
 
 _CONTEXT_WINDOW_FIELDS = (
@@ -22,7 +23,8 @@ _CONTEXT_WINDOW_FIELDS = (
 _NESTED_METADATA_FIELDS = ("capabilities", "limits", "metadata", "model_info")
 
 
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ProviderModelMetadata:
     """Provider facts discovered for one configured model."""
 
@@ -32,7 +34,8 @@ class ProviderModelMetadata:
 
 # LLM: metadata 请求继承模型配置快照，头部不进入公开模型记录。
 # 类用途: 描述目录请求的连接及兼容信息。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class ProviderMetadataOptions:
     """Connection identity and bounded timeouts for metadata discovery."""
 

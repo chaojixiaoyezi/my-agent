@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from ..common import hot_json
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from .assistant_messages import KNOWN_PHASES, message_metadata, response_text_block
 from .errors import ProviderResponseError
@@ -17,7 +18,7 @@ class _CollectedResponse(dict):
     # LLM: 只由本模块完整/EOF归一化构造；索引与输出一一对应，冲突沿原malformed门拒绝工具。
     # 函数用途: 保存本次收集到的来源索引和结构化身份冲突事实，不发请求或写历史。
     def __init__(self, response: dict, indices: tuple[int | None, ...], *, conflict: bool = False):
-        super().__init__(response)
+        dict.__init__(self, response)
         self.output_indices = indices
         self.output_identity_conflict = conflict
 
@@ -125,7 +126,7 @@ def message_items(message: dict, model: str) -> list[dict]:
             # LLM: arguments 用稳定键序；理由同 openai_chat._openai_function_call——
             # transcript 落盘按字母序重排键，重载后插入序不同，不排序会让重载前后出站字节不同。
             result.append({"type": "function_call", "call_id": block["id"], "name": block["name"],
-                           "arguments": json.dumps(block["input"], ensure_ascii=False, sort_keys=True)})
+                           "arguments": hot_json.dumps(block["input"], ensure_ascii=False, sort_keys=True)})
             continue
         if role == "user" and kind == "tool_result":
             result.append({"type": "function_call_output", "call_id": block["tool_use_id"],

@@ -22,9 +22,10 @@ import json
 import time
 import urllib.error
 from collections.abc import Iterator
-from dataclasses import replace
 from threading import Event, Timer
 
+from ..common import hot_json
+from ..common.fast_dataclass import fast_replace
 from .errors import ProviderResponseError, ProviderTransientError
 from .gateway_helpers import (
     _PROVIDER_ATTEMPT_OBSERVER,
@@ -113,7 +114,7 @@ def iter_responses_websocket(request: GatewayRequest, *, provider_id: str = "", 
                 entry = None
             reused = entry is not None
             payload = incremental_payload(entry, request.payload) if entry is not None else request.payload
-            sending = _sticky_request(replace(request, payload=payload), state)
+            sending = _sticky_request(fast_replace(request, payload=payload), state)
             if entry is None:
                 connection = _open_connection(sending)
                 entry = ConnectionEntry(connection, state or SessionState(0))
@@ -142,7 +143,7 @@ def iter_responses_websocket(request: GatewayRequest, *, provider_id: str = "", 
                 raise ProviderResponseError("Responses 流终态格式无效。")
             if terminal is not None and "response" in terminal and terminal.get("type") in {"response.completed", "response.incomplete"}:
                 response["usage"] = cache_usage(response.get("usage"), reused=reused, incremental="previous_response_id" in payload)
-                terminal_text = json.dumps(terminal, ensure_ascii=False)
+                terminal_text = hot_json.dumps(terminal, ensure_ascii=False)
             _raise_if_stopped()
             completed = (terminal or {}).get("type") == "response.completed" and response.get("status") == "completed"
             if completed and state is not None and isinstance(response.get("id"), str) and response["id"] and _socket_clean(connection):
@@ -217,7 +218,7 @@ def _sticky_request(request: GatewayRequest, state: SessionState | None) -> Gate
     headers = {name: value for name, value in request.headers.items() if name.lower() != "x-codex-turn-state"}
     if state is not None and state.turn_state_header:
         headers["x-codex-turn-state"] = state.turn_state_header
-    return replace(request, headers=headers)
+    return fast_replace(request, headers=headers)
 
 
 # LLM: Reused physical sends must be visible in the same attempt ledger, with full request-local diagnostic input and no socket headers.
@@ -268,7 +269,7 @@ def prepare_http_responses_request(request: GatewayRequest, *, provider_id: str 
     def capture(headers) -> None:
         _POOL.capture(key, state, headers)
 
-    return replace(_sticky_request(request, state), response_headers_observer=capture if state is not None else None)
+    return fast_replace(_sticky_request(request, state), response_headers_observer=capture if state is not None else None)
 
 
 # LLM: Legacy explicit-close helper releases the request lease before closing; pooled transport uses its own pre-terminal return path.

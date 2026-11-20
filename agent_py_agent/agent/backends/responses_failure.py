@@ -7,8 +7,7 @@
 # 模块用途: 把服务商的“失败事件”变成带原因、能走对恢复路线的结构化异常，不再一律报“返回失败事件”。
 from __future__ import annotations
 
-import json
-
+from ..common import hot_json
 from ..contracts.diagnostics import redact_diagnostic_text
 from .errors import (
     ProviderContextWindowError,
@@ -82,7 +81,7 @@ def _provider_error_projection(event: dict) -> tuple[dict[str, str], bool]:
 def failed_event_error(event: dict) -> Exception:
     provider_error, truncated = _provider_error_projection(event)
     code = (provider_error.get("code") or provider_error.get("type") or "").strip().lower()
-    detail = json.dumps(provider_error, ensure_ascii=False, sort_keys=True)
+    detail = hot_json.dumps(provider_error, ensure_ascii=False, sort_keys=True)
     message = f"Responses 服务返回失败事件（错误码 {code}）。" if code else "Responses 服务返回失败事件（服务商没有给出错误码）。"
     if provider_error:
         message += f' 诊断：{detail}'

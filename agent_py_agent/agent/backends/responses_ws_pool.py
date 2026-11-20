@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from threading import Lock, Timer
 from urllib.parse import urlsplit, urlunsplit
 
+from ..common import hot_json
 from .gateway_helpers import gateway_request_body
 from .provider_headers import current_provider_affinity, current_provider_session
 
@@ -29,7 +30,7 @@ def session_pool_key(request, provider_id: str = "") -> tuple | None:
     authority = host if not port or port == {"https": 443, "http": 80}.get(url.scheme) else f"{host}:{port}"
     endpoint = urlunsplit((url.scheme.lower(), authority, url.path.rstrip("/"), url.query, ""))
     headers = sorted((name.lower(), value) for name, value in request.headers.items() if name.lower() != "x-codex-turn-state")
-    fingerprint = hashlib.sha256(json.dumps([request.api_key, headers], ensure_ascii=True).encode()).hexdigest()
+    fingerprint = hashlib.sha256(hot_json.dumps([request.api_key, headers], ensure_ascii=True).encode()).hexdigest()
     model = str((request.payload or {}).get("model") or "").strip()
     # 空用途维持原键形状；派生用途独立socket/锚点，但原session末项保证reset连带撤销所有用途。
     affinity = current_provider_affinity()
@@ -214,7 +215,7 @@ def remember_completed(entry: ConnectionEntry, payload: dict, response: dict, do
     entry._ws_last_response_id, entry._ws_last_items, entry.options = "", b"", b""
     if not response.get("output") and done:
         events = [*done, {"type": "response.completed", "response": response}]
-        response = collect_response((json.dumps(event, ensure_ascii=False) for event in events), None, None)
+        response = collect_response((hot_json.dumps(event, ensure_ascii=False) for event in events), None, None)
     output = response.get("output") or []
     if any(item.get("type") in {"compaction", "compaction_trigger"} for item in [*payload.get("input", []), *output]):
         return
