@@ -1,7 +1,7 @@
 # LLM: 宿主提示（host notice）的唯一存取点。待送达的提示只存在会话线程记录的 pending_host_notices 上（通用字段，
 #   不为某个来源专设），由同一会话下一次前台回复提交规范最终消息时按编号取走，放进最终消息元数据 host_notices 与
 #   Gateway 结果 channel_delivery.host_notices；提交即算已读（集成者 2026-09-27 定的 B 口径）。模型上下文不含它
-#   （models.MODEL_HIDDEN_THREAD_FIELDS）。正文由宿主生成，source / code 是结构化事实，同一来源的新提示替换旧的。
+#   （models.MODEL_HIDDEN_THREAD_FIELDS）。正文由宿主生成。通用提示按来源合并，带幂等键的提示按键登记。
 #   本轮工具用 queue_turn_host_notice 排的提示在 details 里带本轮 Gateway 请求编号（turn_request_id），由 request_execution
 #   收尾时随当轮回复一起发布（turn_host_notices）；别的来源在回合中途到的提示仍留给下一轮。
 #   改动须同步 test_host_notices.py、gateway_parts/request_history、stream_writer、adapter/manager 与各显示出口。
@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from typing import Literal
 from uuid import uuid4
 
 from .authority import current_conversation_task_attributes
 
-# 每个会话最多暂存的提示条数（同一来源只留最新一条，超出时丢最旧的）；正文与名字的长度上限。
+# 每个会话的待送达提示和近期幂等键均使用此上限，超出时丢最旧的。
 HOST_NOTICE_LIMIT_COUNT = 5
 # 宿主提示正文最多 500 字符：超长截断。
 _HOST_NOTICE_TEXT_LIMIT_CHARS = 500
@@ -25,6 +26,7 @@ _DETAIL_LIMIT_CHARS = 200
 _LINE_PREFIX = "【提示】"
 # 本轮工具排的提示在 details 里记本轮 Gateway 请求编号的键名；收尾按它挑出要随当轮回复发布的提示。
 TURN_REQUEST_DETAIL = "turn_request_id"
+_RECENT_DEDUPE_KEYS = "host_notice_recent_dedupe_keys"
 
 
 # LLM: 四个字段都是宿主写入的纯文本；notice_id 是取走与去重的唯一依据，source / code 供测试和同来源替换，不参与模型输入。
@@ -38,20 +40,25 @@ class HostNotice:
     code: str
     text: str
     details: tuple[tuple[str, str], ...] = ()
+    dedupe_key: str = field(default="", kw_only=True)
 
     # 函数用途: 转成可持久化、可放进结果载荷的字典。
     def to_dict(self) -> dict[str, object]:
         row: dict[str, object] = {"notice_id": self.notice_id, "source": self.source, "code": self.code, "text": self.text}
         if self.details:
             row["details"] = dict(self.details)
+        if self.dedupe_key:
+            row["dedupe_key"] = self.dedupe_key
         return row
 
 
 # LLM: 正文去掉控制字符、合并空白并限长；来源与代码只保留有限长度；details 的键与值同样清洗限长，空键丢弃。生成新的随机编号。
 # 函数用途: 由宿主代码创建一条新提示。
-def host_notice(source: str, code: str, text: str, *, details: Mapping[str, object] | None = None) -> HostNotice:
+def host_notice(
+    source: str, code: str, text: str, *, details: Mapping[str, object] | None = None, dedupe_key: str = "",
+) -> HostNotice:
     return HostNotice(uuid4().hex[:12], _clean(source, _NAME_LIMIT_CHARS), _clean(code, _NAME_LIMIT_CHARS), _clean(text, _HOST_NOTICE_TEXT_LIMIT_CHARS),
-                      _details(details))
+                      _details(details), dedupe_key=_clean(dedupe_key, _DETAIL_LIMIT_CHARS))
 
 
 # 函数用途: 把结构化事实清洗成排好序的 (键, 值) 元组；不是映射时为空。
@@ -80,15 +87,21 @@ def host_notices_from(values: object) -> tuple[HostNotice, ...]:
 # 函数用途: 解析一条提示字典，缺关键字段时返回 None。
 def _notice_from(row: Mapping) -> HostNotice | None:
     notice = HostNotice(*(_clean(row.get(key), _HOST_NOTICE_TEXT_LIMIT_CHARS if key == "text" else _NAME_LIMIT_CHARS)
-                          for key in ("notice_id", "source", "code", "text")), _details(row.get("details")))
+                          for key in ("notice_id", "source", "code", "text")), _details(row.get("details")),
+                        dedupe_key=_clean(row.get("dedupe_key"), _DETAIL_LIMIT_CHARS))
     return notice if notice.notice_id and notice.source and notice.text else None
 
 
-# LLM: 线程锁内读改写；默认同一来源的旧提示被替换，replace_same_code=True 时只替换同来源且同 code 的旧提示
+# LLM: 线程锁内读改写；无幂等键时默认替换同来源旧提示，replace_same_code=True 时只替换同来源且同 code 的旧提示
 #   （同一来源会发几类提示、每类只留最新一条时用，例如唤醒毒丸按原因码合并），超过上限丢最旧的。线程不存在或不可写时
 #   返回 False，不抛异常（调用方多在后台线程里，提示是附带信息，不能拖垮主流程）。副作用：改写会话线程记录。
 # 函数用途: 给一个会话追加一条待送达的宿主提示。
-def queue_host_notice(store: object, thread_id: str, notice: HostNotice, *, replace_same_code: bool = False) -> bool:
+def enqueue_host_notice(
+    store: object, thread_id: str, notice: HostNotice, *, replace_same_code: bool = False,
+) -> Literal["queued", "duplicate", "unavailable"]:
+    """同一次线程事务完成去重和排队，取走提示后仍记住最近的键。"""
+    duplicate = False
+
     # 函数用途: 判断一条旧提示是否被这条新提示替换。
     def replaced(row: HostNotice) -> bool:
         return row.source == notice.source and (not replace_same_code or row.code == notice.code)
@@ -96,11 +109,32 @@ def queue_host_notice(store: object, thread_id: str, notice: HostNotice, *, repl
     # LLM: 在线程锁内执行；只动 pending_host_notices。
     # 函数用途: 替换同来源（或同来源同 code）旧提示并追加新提示。
     def update(thread):
-        kept = [row for row in host_notices_from(thread.pending_host_notices) if not replaced(row)]
+        nonlocal duplicate
+        kept = host_notices_from(thread.pending_host_notices)
+        changes = {}
+        if notice.dedupe_key:
+            metadata = thread.metadata
+            stored = metadata.get(_RECENT_DEDUPE_KEYS)
+            recent = [key for key in stored[-HOST_NOTICE_LIMIT_COUNT:] if isinstance(key, str)] if isinstance(stored, list) else []
+            duplicate = notice.dedupe_key in recent or any(row.dedupe_key == notice.dedupe_key for row in kept)
+            if duplicate:
+                return thread
+            changes["metadata"] = {
+                **metadata,
+                _RECENT_DEDUPE_KEYS: [*recent, notice.dedupe_key][-HOST_NOTICE_LIMIT_COUNT:],
+            }
+        else:
+            kept = tuple(row for row in kept if not replaced(row))
         rows = (*kept, notice)[-HOST_NOTICE_LIMIT_COUNT:]
-        return replace(thread, pending_host_notices=tuple(row.to_dict() for row in rows))
+        return replace(thread, pending_host_notices=tuple(row.to_dict() for row in rows), **changes)
 
-    return _update(store, thread_id, update)
+    if not _update(store, thread_id, update):
+        return "unavailable"
+    return "duplicate" if duplicate else "queued"
+
+
+def queue_host_notice(store: object, thread_id: str, notice: HostNotice, *, replace_same_code: bool = False) -> bool:
+    return enqueue_host_notice(store, thread_id, notice, replace_same_code=replace_same_code) != "unavailable"
 
 
 # LLM: 给工具用：会话编号只读本轮 task_attributes 的结构化 conversation_thread_id，请求编号只读本轮运行参数 request_id（Gateway
@@ -187,6 +221,7 @@ __all__ = [
     "TURN_REQUEST_DETAIL",
     "HostNotice",
     "clear_host_notices",
+    "enqueue_host_notice",
     "host_notice",
     "host_notices_from",
     "pending_host_notices",

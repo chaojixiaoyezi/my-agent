@@ -143,16 +143,17 @@ def test_idle_slice_is_not_counted_while_a_user_turn_is_on_the_lane():
                         metadata={"goal_id": "goal-1", WAKE_SNAPSHOT_KEY: goal_progress_snapshot(goal, "active")})
 
     continue_goal_after_report(dependencies, signal, report=_report(0), now=2.0)
-    # 用户消息先处理：空片不记账（计数保持原值），续跑链照常接下一片。
-    assert recorded == [] and len(raised) == 1
+    # 用户消息先处理：冻结裁决，空片计数保持原值，续跑链照常接下一片。
+    assert [request["count_progress"] for request in recorded] == [False] and len(raised) == 1
 
-    continue_goal_after_report(dependencies, signal, report=_report(1), now=3.0)
+    continue_goal_after_report(dependencies, replace(signal, wake_signal_id="wake-4"), report=_report(1), now=3.0)
     # 有进展的片照常记账清零，不因用户回合在场而丢掉。
-    assert [request["progressed"] for request in recorded] == [True]
+    counted = [request for request in recorded if request["count_progress"]]
+    assert [request["progressed"] for request in counted] == [True]
 
     idle = replace(dependencies, user_turn_gate=lambda _thread_id: nullcontext(False))
-    continue_goal_after_report(idle, signal, report=_report(0), now=4.0)
-    assert [request["progressed"] for request in recorded] == [True, False]
+    continue_goal_after_report(idle, replace(signal, wake_signal_id="wake-5"), report=_report(0), now=4.0)
+    assert [request["progressed"] for request in recorded if request["count_progress"]] == [True, False]
 
 
 # ---------------------------------------------------------------- 判定时点：真实车道闸
@@ -224,8 +225,8 @@ def test_user_turn_registered_before_the_decision_skips_the_idle_slice(lane_stor
     assert inside.wait(10)
     dependencies, signal = _gated_dependencies(store, thread_id, lambda request: recorded.append(request) or (None, False))
     continue_goal_after_report(dependencies, signal, report=_report(0), now=2.0)
-    assert recorded == []  # 用户回合先登记：真实车道闸给出“在场”，空片不计入
+    assert [request["count_progress"] for request in recorded] == [False]  # 用户回合先登记
     leave.set()
     user.join(10)
-    continue_goal_after_report(dependencies, signal, report=_report(0), now=3.0)
-    assert [request["progressed"] for request in recorded] == [False]  # 用户回合离开后照常记账
+    continue_goal_after_report(dependencies, replace(signal, wake_signal_id="wake-4"), report=_report(0), now=3.0)
+    assert [request["progressed"] for request in recorded if request["count_progress"]] == [False]
