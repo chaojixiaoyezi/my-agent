@@ -338,7 +338,8 @@ class GatewayChatClientAgent:
         kind = body.get("failure_kind")
         kind = kind if isinstance(kind, str) else None
         if status in {408, 429, 502, 503, 504} and kind not in {"permission_denied", "owner_mismatch", "binding_invalid"}:
-            return {**body, "ok": False, "binding_state": "unavailable", "failure_kind": "transport_transient"}
+            return {**body, "ok": False, "binding_state": "unavailable", "failure_kind": "transport_transient",
+                    **({"http_status": status} if status == 503 else {})}
         if body:
             return body if 200 <= status < 300 else {**body, "ok": False}
         return {
@@ -667,7 +668,8 @@ def _active_turn_input_result(
 # 函数用途: 从 HTTP 异常读取 Gateway 的结构化 JSON 响应，解析失败时保留状态和空对象。
 def _http_error_json(exc: urllib.error.HTTPError) -> tuple[int, dict[str, object]]:
     try:
-        payload = json.loads(exc.read().decode("utf-8", "replace"))
+        with exc:
+            payload = json.loads(exc.read().decode("utf-8", "replace"))
     except (OSError, json.JSONDecodeError, ValueError):
         payload = {}
     return int(exc.code), payload if isinstance(payload, dict) else {}

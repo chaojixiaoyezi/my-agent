@@ -232,8 +232,11 @@ def parse_conversation_control(
     text: object,
     *,
     reject_unknown_slash: bool = False,
+    allow_scoped_stop: bool = False,
 ) -> ConversationControlCommand | None:
-    command = parse_conversation_command(text, reject_unknown_slash=reject_unknown_slash)
+    command = parse_conversation_command(
+        text, reject_unknown_slash=reject_unknown_slash, allow_scoped_stop=allow_scoped_stop,
+    )
     return command if isinstance(command, ConversationControlCommand) else None
 
 
@@ -257,6 +260,7 @@ def parse_conversation_command(
     text: object,
     *,
     reject_unknown_slash: bool = False,
+    allow_scoped_stop: bool = False,
 ) -> ConversationCommand | None:
     raw = str(text or "").strip()
     # 旧写法都只返回迁移提示，不能作为普通模型任务。
@@ -313,6 +317,14 @@ def parse_conversation_command(
     if name == "effort":
         return _effort_command(trailing)
     if name == "stop":
+        if allow_scoped_stop and trailing:
+            words = trailing.split()
+            usage = "用法：/stop | /stop all | /stop thread <线程编号>"
+            if words == ["all"]:
+                return ConversationControlCommand("stop", operation="session", usage=usage)
+            if len(words) == 2 and words[0] == "thread":
+                return ConversationControlCommand("stop", operation="thread", target_id=words[1], usage=usage)
+            return _argumentless_command("stop", trailing, usage.removeprefix("用法："))
         return _argumentless_command("stop", trailing, "/stop")
     if name == "interrupt":
         return ConversationControlCommand(
@@ -1010,6 +1022,10 @@ def render_conversation_task_status(status: ConversationTaskStatus, *, preserve_
     )
     if status.queued_count:
         lines.append(f"等待中的消息：{status.queued_count}")
+    if status.background_roots:
+        from ..gateway_parts.status_rendering import render_background_roots
+
+        lines.extend(render_background_roots(status.background_roots, preserve_host_paths=keep))
     if status.monitors:
         facts = status.monitors
         lines.append(_monitor_status_text(facts))

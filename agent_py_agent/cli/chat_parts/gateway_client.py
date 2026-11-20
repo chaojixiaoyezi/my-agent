@@ -25,6 +25,39 @@ from ...agent.gateway_parts.response_renderer import (
     read_gateway_terminal_response_file_when_ready,
 )
 
+# Gateway 繁忙时的协议重试间隔，停止请求在最后再试一次。
+GATEWAY_BUSY_RETRY_DELAYS = (0.2, 0.4, 0.8)
+
+
+def request_gateway_with_retry(
+    send: Callable[[float], tuple[int, dict]], *, deadline: float,
+    turn_stop: bool = False, initial: tuple[int, dict] | None = None,
+    on_busy_exhausted: Callable[[], object] | None = None,
+) -> tuple[int, dict]:
+    """在同一个单调时钟预算内重试一次已确定身份和载荷的请求。"""
+    delays = GATEWAY_BUSY_RETRY_DELAYS
+    if turn_stop:
+        delays += (1.6,)
+    status, body = initial or (0, {})
+    busy_count = int(status == 503)
+    for delay in delays if initial is not None else (0.0, *delays):
+        if time.monotonic() + delay >= deadline:
+            break
+        if delay:
+            time.sleep(delay)
+        remaining = deadline - time.monotonic()
+        # 原运输的单次超时下限，预算不足就不再发请求。
+        if remaining < 0.1:
+            break
+        status, body = send(remaining)
+        if status == 503:
+            busy_count += 1
+            if on_busy_exhausted is not None and busy_count == len(GATEWAY_BUSY_RETRY_DELAYS):
+                on_busy_exhausted()
+        if status != 503 and not (turn_stop and not status):
+            break
+    return status, body
+
 
 # LLM: ChatRequestContent 声明当前 CLI 表面真实可消费的交互能力；只有 TUI 主链开启审批和富 transcript，plain/其它调用保持最小输出。
 # 类用途: 汇总正文、附件、执行快照及原始命令运输事实；显示摘要不替代用户原输入。
@@ -556,10 +589,14 @@ class NetworkGatewayObserver:
         deadline = started + max(0.0, float(timeout))
         polls = 0
         observed_alive = False
+        def read_status(remaining):
+            return self.request_json("GET", "/status", total_deadline_seconds=remaining)
+
         while polls == 0 or time.monotonic() < deadline:
             # 运输已有0.1秒单次下限；预算耗尽后不再追加探测或睡眠。
-            code, body = self.request_json("GET", "/status",
-                total_deadline_seconds=max(0.1, deadline - time.monotonic()))
+            code, body = read_status(max(0.1, deadline - time.monotonic()))
+            if code == 503:
+                code, body = request_gateway_with_retry(read_status, deadline=deadline, initial=(code, body))
             polls += 1
             status = body.get("status", "") if code == 200 else ""
             ready = status == "running"

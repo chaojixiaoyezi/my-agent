@@ -240,8 +240,13 @@ def _tui_submit_control_operation(
     if not bool(getattr(params, "use_gateway", False)):
         return False
     command, handled = _tui_control_or_im_only_refusal(params, text)
-    if handled or command is None or not command.valid:
+    if handled or command is None:
         return handled
+    if not command.valid:
+        if command.kind == "stop":
+            _required_tui_runtime(params).write_console(command.usage)
+            return True
+        return False
     if (command.kind, command.operation) == ("model", "view") or str(text or "").strip() == "/effort":
         return False  # 单独 /model、/effort 由 TUI 本地菜单处理（菜单选中后再发带参数的形式）；带参数的文字形式发给 Gateway。
     if command.kind in {"space", "team"}:
@@ -272,7 +277,7 @@ def _tui_submit_control_operation(
             )
             return True
     target_control_message_id = ""
-    if command.kind == "stop":
+    if command.kind == "stop" and command.operation not in {"session", "thread"}:
         target_control_message_id = runtime.active_manual_compact_control_message_id()
     binding = _tui_control_target(params, command, target_control_message_id)
     if binding is None:
@@ -349,7 +354,7 @@ def _tui_control_or_im_only_refusal(params: TuiCreateKeybindingsParams, text: st
     )
     from .control_runtime import im_only_control_result, retired_delegate_result
 
-    command = parse_conversation_control(text, reject_unknown_slash=True)
+    command = parse_conversation_control(text, reject_unknown_slash=True, allow_scoped_stop=True)
     migration = retired_delegate_result(command, text=text)
     if migration is not None:
         _required_tui_runtime(params).write_console(migration.message)
@@ -369,12 +374,12 @@ def _tui_control_or_im_only_refusal(params: TuiCreateKeybindingsParams, text: st
 def _tui_control_target(params, command, compact_id):
     if command.kind not in {"steer", "stop"}:
         return "", None
+    if command.operation in {"session", "thread"}:
+        return "", None
     runtime = _required_tui_runtime(params)
     expected = runtime.execution_target()
     turn_id = str((expected or {}).get("turn_id") or "")
-    with params.state_lock:
-        observing_request = bool(params.is_running_ref[0])
-    requires_binding = command.kind == "steer" or command.operation == "interrupt" or observing_request
+    requires_binding = command.kind == "steer" or command.operation == "interrupt"
     if requires_binding and not turn_id and not compact_id:
         runtime.set_notice("当前没有可精确绑定的运行回合，命令未发送", duration_seconds=2.5)
         return None
@@ -401,6 +406,13 @@ def _ensure_control_operation_reconciler(
         tui_control_operation_outbox_path,
     )
 
+    def publish_status_sync(ok: bool) -> None:
+        notice_kind = "gateway_status_busy"
+        if ok:
+            runtime.clear_notice(expected_kind=notice_kind)
+        elif not runtime.notice() or runtime.notice_kind() == notice_kind:
+            runtime.set_notice("Gateway 状态暂未同步。", duration_seconds=3.0, notice_kind=notice_kind)
+
     # LLM: Every POST rebuilds only from the persisted row and reuses its exact client message id.
     # 函数用途: 用持久控制行向 Gateway 提交或安全重放同一命令。
     def submit(entry):
@@ -411,7 +423,7 @@ def _ensure_control_operation_reconciler(
             data = _request_data_sync(params.agent, params.current_session_id, "select", entry.model_payload)
             return ConversationControlResult("model", bool(data.get("ok")), str(data.get("message") or "模型选择已保存。"),
                                              control_state="completed", details=data)
-        command = parse_conversation_control(entry.command_text, reject_unknown_slash=True)
+        command = parse_conversation_control(entry.command_text, reject_unknown_slash=True, allow_scoped_stop=True)
         if command is None or not command.valid or command.kind != entry.command_kind:
             from ...agent.conversation.control_commands import ConversationControlResult
 
@@ -425,6 +437,7 @@ def _ensure_control_operation_reconciler(
             agent=params.agent,
             use_gateway=True,
             tui_streaming=True,
+            on_status_sync=publish_status_sync if command.kind == "status" else None,
             state=ChatControlState(
                 running=bool(entry.expected_turn_id),
                 queued_count=0,
@@ -545,6 +558,8 @@ def _ensure_control_operation_reconciler(
     # LLM: Terminal uncertainty is never rendered as success or retried with a fresh id.
     # 函数用途: 告知用户控制副作用无法确认且系统不会自动重复执行。
     def on_terminal_unknown(entry, result) -> None:
+        if entry.command_kind == "status" and runtime.notice_kind() == "gateway_status_busy":
+            return
         if entry.command_kind == "compact":
             runtime.publish_manual_compact_terminal(
                 entry.message_id,
@@ -1031,23 +1046,14 @@ def _safe_http_status(value: object) -> int:
         return 0
 
 
-# LLM: Esc 只中断服务器投影的当前执行；观察队列 request ID 不得用作控制目标，迟到快照由服务器拒绝。
-# 函数用途: 立即显示中断反馈并派发 /interrupt；显式 /stop 仍可暂停目标。
+# LLM: Gateway 停止键沿原控制回执，已绑定的执行身份交服务端核对。
+# 函数用途: 显示停止反馈并派发当前线程停止，本地直连仍使用原中断入口。
 def _dispatch_active_interrupt(event, params: TuiCreateKeybindingsParams) -> None:
     if not params.use_gateway:
         _required_tui_runtime(params).request_interrupt()
         event.app.invalidate()
         _tui_handle_command(params=_handle_command_params(params, "/interrupt"))
         return
-    target = _required_tui_runtime(params).execution_target()
-    exact_turn_id = str((target or {}).get("turn_id") or "")
-    if not exact_turn_id:
-        _required_tui_runtime(params).set_notice(
-            "Turn is still binding · stop was not sent",
-            duration_seconds=2.5,
-        )
-        event.app.invalidate()
-        return
     _required_tui_runtime(params).request_interrupt()
-    _tui_submit_control_operation(params, "/interrupt")
+    _tui_submit_control_operation(params, "/stop")
     event.app.invalidate()

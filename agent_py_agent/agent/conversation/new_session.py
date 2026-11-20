@@ -10,17 +10,20 @@ from .control_commands import ConversationControlResult
 def new_session_result(store, thread_id, *, title="", binding=None, validate=None, background_root_count=0):
     try:
         new = store.threads.succeed(thread_id, title=title, binding=binding, **({"validate": validate} if validate is not None else {}))
+        background_notice = ""
         if background_root_count:
             from .host_notices import host_notice, queue_host_notice
 
+            background_notice = f"旧会话仍有 {background_root_count} 个后台根在运行，可用 /status 查看。"
             queue_host_notice(store, new.thread_id, host_notice(
                 "new_session", "BACKGROUND_ROOTS_CONTINUE",
-                f"旧会话仍有 {background_root_count} 个后台根在运行，可用 /status 查看。",
+                background_notice,
                 details={"count": background_root_count}, dedupe_key=f"new-session-roots:{new.thread_id}",
             ))
         return ConversationControlResult("new", True,
             f"旧会话 {thread_id} 已归档到历史；新会话 {new.thread_id} 已在当前目录启用。"
-            "后台任务、托管进程和监控继续运行，同通道通知将跟随新会话。",
+            "后台任务、托管进程和监控继续运行，同通道通知将跟随新会话。"
+            + (f"\n{background_notice}" if background_notice else ""),
             details={"thread_id": new.thread_id, "predecessor_thread_id": thread_id,
                      "workspace_root": new.workspace_root, "cwd": new.cwd,
                      "background_tasks_continued": True, "view_reset": True})

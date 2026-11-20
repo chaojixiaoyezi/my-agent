@@ -270,7 +270,7 @@ def startup_gateway(tmp_path, monkeypatch, request):
                               server_home=server_home, token=token)
     finally:
         server.stop()
-        _assert_fd_restored(before_fd)
+        _assert_fd_restored(before_fd, retire_idle_sqlite=True)
 
 
 def _startup_args(gateway, *, plain=False):
@@ -399,7 +399,15 @@ def _wait_until(predicate, *, timeout=10):
         threading.Event().wait(0.01)
 
 
-def _assert_fd_restored(before):
+def _assert_fd_restored(before, *, retire_idle_sqlite=False):
+    if retire_idle_sqlite:
+        from agent_py_agent.agent.io.sqlite_pool import (
+            SQLITE_POOL_IDLE_TIMEOUT_SECONDS,
+            retire_idle_connections,
+        )
+
+        # 测试只启动 HTTP 服务，按实际空闲期限执行正常维护后再核全部描述符。
+        retire_idle_connections(now=time.monotonic() + SQLITE_POOL_IDLE_TIMEOUT_SECONDS)
     try:
         _wait_until(lambda: _fd_count() <= before, timeout=5)
     except AssertionError:
@@ -670,7 +678,7 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
 
     def request(observer, method, path, payload=None, **kwargs):
         result = original_json(observer, method, path, payload, **kwargs)
-        if method == "POST" and path == "/control":
+        if method == "POST" and path in {"/control", "/client/turn-stop"}:
             controls.append((payload, result))
         if method == "POST" and path == "/client/agent-permission":
             permission_posts.append((payload, result))
@@ -838,6 +846,8 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
     assert not failures, repr(failures)
     assert results == [0] and active == [0, 1]
     assert [body["kind"] for _payload, (_status, body) in controls] == ["steer", "stop", "new", "verbose"]
+    stop_payload = controls[1][0]
+    assert stop_payload["scope"] == "thread" and stop_payload["expected_turn_id"] == terminal_ids[0]
     terminals = list(state.paths.terminal.glob("*.json"))
     assert len(terminals) == 3
     first = state.paths.terminal / f"{terminal_ids[0]}.json"
@@ -852,7 +862,7 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
     for thread in set(threading.enumerate()) - before_threads:
         if thread.name.startswith(("my-agent-tui", "Thread-")) and thread.daemon:
             thread.join(6)
-    _assert_fd_restored(before_fd)
+    _assert_fd_restored(before_fd, retire_idle_sqlite=True)
 
 
 def test_pending_sse_polls_only_for_terminal_result(live_gateway, monkeypatch):
