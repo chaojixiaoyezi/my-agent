@@ -104,7 +104,7 @@ def checked_foreground_memory_scope(agent, params):
     return scope
 
 
-def model_long_term_scope(agent, memory, *, frozen_only=False):
+def model_long_term_scope(agent, memory, *, frozen_only=False, purpose="explicit_recall"):
     """模型读取正式记忆前复核原发送者。未选空间时，管理列表仍可列出本人的旧记录。"""
     from ..memory_store.recall import runtime_long_term_scope
     from .business_contracts import BusinessExecutionContext
@@ -117,7 +117,7 @@ def model_long_term_scope(agent, memory, *, frozen_only=False):
     attrs = getattr(current, "task_attributes", None)
     return runtime_long_term_scope(memory, task_id=str(getattr(current, "task_id", "") or ""),
                                    task_attributes=attrs if isinstance(attrs, dict) else {},
-                                   business_context=business, memory_recall_scope=foreground)
+                                   business_context=business, memory_recall_scope=foreground, purpose=purpose)
 
 
 # LLM: 原 ThreadStore 的 owner 和不可变来源是验证锚；读取错误统一拒绝，不打印原错误正文。

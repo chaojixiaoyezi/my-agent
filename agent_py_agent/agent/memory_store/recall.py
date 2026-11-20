@@ -5,9 +5,11 @@ from __future__ import annotations
 # LLM: Recall 只能消费 active long-term、正式 lesson 和正式 HOT；Candidate/Daily/Ops 不得从这里进入 Prompt。
 # 模块用途: 从运行时结构化字段解析适用范围，并把三个正式来源投影成同一种 MemoryRecord。
 
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .jsonl import MemoryRecord
 from .lessons import (
@@ -18,9 +20,10 @@ from .lessons import (
     hot_records_within_budget,
     lesson_heat_rows,
 )
+from .project_bindings import resolve as resolve_project_bindings
 
 
-# LLM: 活跃范围只来自 host 的 typed IDs，不解析用户自然语言或 applies_when 文本。
+# LLM: 活跃范围来自宿主范围和精确项目身份，词面相似度只用于范围内的排序。
 # 类用途: 保存本轮允许召回的 scope_type/scope_key 精确集合。
 @dataclass(frozen=True)
 class MemoryRecallScope:
@@ -86,10 +89,7 @@ def formal_recall_suppressed(context_scope: object, owner_policy: object | None)
     return owner_policy is not None and not bool(getattr(owner_policy, "memory_enabled", True))
 
 
-# LLM: 与自动召回同一范围规则：task_id/task_attributes 推出的精确范围，再加记忆库里实际存在的 project 范围
-#   （普通对话也能召回用户要求记住的项目知识；有 task 时 task 的 project 并存）。只扫 long_term 的结构化
-#   attributes.scope_type/scope_key。读记录失败时保持原范围，与原 loop_support 内联实现一致。
-# 函数用途: 计算本轮长期事实的召回范围，供自动召回与只读检索工具共用。
+# LLM: 自动召回冻结精确范围，显式检索保留项目兼容行为。
 def runtime_long_term_scope(
     memory: object,
     *,
@@ -97,6 +97,9 @@ def runtime_long_term_scope(
     task_attributes: Mapping[str, object] | None = None,
     business_context: object | None = None,
     memory_recall_scope: MemoryRecallScope | None = None,
+    purpose: str = "explicit_recall",
+    workspace_root: Path | None = None,
+    query: str = "",
 ) -> MemoryRecallScope:
     from ..conversation.business_contracts import BusinessExecutionContext
 
@@ -109,8 +112,21 @@ def runtime_long_term_scope(
     if memory_recall_scope is not None:
         if type(memory_recall_scope) is not MemoryRecallScope:
             raise TypeError('memory_recall_scope 必须是宿主 MemoryRecallScope')
-        return memory_recall_scope
+        if purpose != "auto_inject":
+            return memory_recall_scope
+        compat = set(memory_recall_scope.compat_keys)
+        pairs = list(MemoryRecallScope.from_runtime(task_id=task_id).keys)
+        pairs.extend(pair for pair in memory_recall_scope.keys if pair not in compat)
+        return MemoryRecallScope(tuple(dict.fromkeys(pairs)))
     scope = MemoryRecallScope.from_runtime(task_id=task_id, task_attributes=task_attributes)
+    if purpose == "auto_inject":
+        if isinstance(task_attributes, Mapping):
+            thread_project: list[tuple[str, str]] = []
+            _append_runtime_identity(thread_project, "project", task_attributes.get("project_id"))
+            if thread_project:
+                return scope
+        pairs = (*scope.keys, *_automatic_project_pairs(memory, workspace_root, query))
+        return MemoryRecallScope(tuple(dict.fromkeys(pairs)))
     try:
         project_pairs = _existing_project_pairs(memory)
     except Exception:
@@ -121,18 +137,39 @@ def runtime_long_term_scope(
     return MemoryRecallScope(tuple(dict.fromkeys([*scope.keys, *project_pairs])), compat_keys=compat)
 
 
+def _automatic_project_pairs(
+    memory: object, workspace_root: Path | None, query: str,
+) -> tuple[tuple[str, str], ...]:
+    # 保留 typed key 与别名的连接符，避免项目键前缀被当成完整词元。
+    tokens = set(re.findall(r"\w+(?:[./:-]+\w+)*", query))
+    path = getattr(memory, "path", None)
+    bound, aliases = "", ()
+    if isinstance(path, Path) and path.parts[-3:] == ("memory", "long_term", "memory.jsonl"):
+        bound, aliases = resolve_project_bindings(path.parents[2], workspace_root, aliases=tokens)
+    pairs: list[tuple[str, str]] = []
+    for key in (bound,) if bound else aliases:
+        _append_runtime_identity(pairs, "project", key)
+    if not bound and any(token.startswith("project:") for token in tokens):
+        try:
+            for _, key in _existing_project_pairs(memory):
+                if key in tokens:
+                    _append_runtime_identity(pairs, "project", key)
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            pass
+    return tuple(pairs)
+
+
 # LLM: 只收窄、不扩大范围：本轮自身范围照常按 typed key 匹配；普通对话兼容并入的其它项目范围，
 #   只在查询与条目正文/英文关键词至少共享一个非停用词元（与 BM25 同一分词，停用词沿工具检索既有词表）时入选，
-#   免得与查询无关的项目记忆挤进结果。自动召回与只读检索工具共用此判定；kind 非空时只留 kind 完全相同的条目。
+#   免得与查询无关的项目记忆挤进结果。这条兼容规则只用于显式检索；kind 非空时只留 kind 完全相同的条目。
 # 函数用途: 生成本轮长期记忆检索的范围判定，兼容并入的项目范围需要查询词面证据。
 def runtime_recall_predicate(scope: MemoryRecallScope, query: str, *,
                              kind: str = "") -> Callable[[MemoryRecord], bool]:
-    from ..retrieval.lexical import tokenize
-    from ..retrieval.text_vector_cache import index_text
-
     compat = set(scope.compat_keys)
     query_tokens: set[str] = set()
     if compat:
+        from ..retrieval.lexical import tokenize
+        from ..retrieval.text_vector_cache import index_text
         from ..tooling.models import CHINESE_LOW_SIGNAL_TOKENS, _english_stopwords
 
         query_tokens = {token for token in tokenize(str(query or ""))
