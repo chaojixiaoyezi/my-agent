@@ -764,13 +764,14 @@ class BackgroundAgentService:
         return {"selection_revision": thread.model_selection_revision,
                 "adoption_status": "unchanged" if unchanged else adoption_status}
 
-    def _dispatch(self, request, target, *, actor, idempotency_key, origin_task_id=""):
+    def _dispatch(self, request, target, *, actor, idempotency_key, origin_task_id="", execution_profile=None):
         with background_identity_transition(self.store, target.thread_id):
             target = self.store.threads.require(target.thread_id)
             if target.owner_id != actor.owner_id:
                 raise PermissionError("OWNER_MISMATCH")
             return self._dispatch_locked(request, target, actor=actor, idempotency_key=idempotency_key,
-                                         origin_task_id=origin_task_id)
+                                         origin_task_id=origin_task_id,
+                                         **({"execution_profile": execution_profile} if execution_profile is not None else {}))
 
     def _validate_dispatch_project(self, request, actor):
         """仅只读核显式项目；执行工厂仍须重核，不能以预检代替提交时权限。"""
@@ -803,7 +804,7 @@ class BackgroundAgentService:
 
     # LLM: 调用方_dispatch已持目标身份锁；复核Actor/空间及新任务接单和配对额度，沿原SessionTask派发写入冻结上下文、正文与唤醒，失败保留原outcome而不重派。
     # 函数用途: 将派活或后续请求幂等送入原任务通道，无归属任务不借用默认空间。
-    def _dispatch_locked(self, request, target, *, actor, idempotency_key, origin_task_id):
+    def _dispatch_locked(self, request, target, *, actor, idempotency_key, origin_task_id, execution_profile=None):
         from ..capability.config import CapabilityConfig
         from ..capability.runtime_config_reload import capability_config_for_agent
         from .business_context import resolve_business_context
@@ -859,7 +860,8 @@ class BackgroundAgentService:
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
             host_channel_actor=(actor if isinstance(target.metadata.get(EXECUTION_ORIGIN_KEY), dict)
                                 and target.metadata[EXECUTION_ORIGIN_KEY].get('kind') == 'delegated' else None),
-            business_context_intent=intent, business_context_factory=factory)
+            business_context_intent=intent, business_context_factory=factory,
+            **({"execution_profile": execution_profile} if execution_profile is not None else {}))
         if not outcome.ok:
             raise SessionTaskDispatchError(outcome)
         return json.loads(outcome.output)
@@ -893,8 +895,15 @@ class BackgroundAgentService:
 
     # LLM: 提交业务空间后台任务；核验所引用的业务资产必须属于目标空间且具备正式 accepted_version，候选版本拒绝，冻结选定版本。
     # 函数用途: 向总控提交空间任务，并冻结经核验的资产接受版本。
-    def submit(self, request: dict, *, actor: object, idempotency_key: str) -> dict:
+    def submit(self, request: dict, *, actor: object, idempotency_key: str, execution_profile=None) -> dict:
         request = _params("tasks.submit", request)
+        if execution_profile is not None:
+            from ..workflows.analysis_isolation import ReadOnlyAgentTaskProfile
+
+            if (type(execution_profile) is not ReadOnlyAgentTaskProfile
+                    or execution_profile.owner_id != actor.owner_id
+                    or execution_profile.space_id != request["space_id"]):
+                raise PermissionError("WORKFLOW_AGENT_DISPATCH_CONTEXT_MISMATCH")
         try:
             self._actor(actor)
             self._space(request["space_id"], actor)
@@ -956,7 +965,9 @@ class BackgroundAgentService:
         if frozen_version_refs:
             dispatch_req["asset_version_refs"] = tuple(frozen_version_refs)
         try:
-            result = self._dispatch(dispatch_req, self.store.threads.require(identifier), actor=actor, idempotency_key=idempotency_key)
+            result = self._dispatch(dispatch_req, self.store.threads.require(identifier), actor=actor,
+                idempotency_key=idempotency_key,
+                **({"execution_profile": execution_profile} if execution_profile is not None else {}))
         except BusinessError as error:
             if not prepared["created"]:
                 raise

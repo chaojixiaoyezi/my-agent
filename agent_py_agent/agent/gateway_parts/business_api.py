@@ -221,7 +221,7 @@ class _BusinessBackgroundService(BackgroundAgentService):
 
     # LLM: 单次原派发失败仍携原outcome/身份；不解析异常文字，也不重派可能已发表的任务。
     # 函数用途: 把准确业务上下文接入原SessionTask派发，并保留未知回执。
-    def _dispatch_locked(self, request, target, *, actor, idempotency_key, origin_task_id):
+    def _dispatch_locked(self, request, target, *, actor, idempotency_key, origin_task_id, execution_profile=None):
         from ..capability.config import CapabilityConfig
         from ..capability.runtime_config_reload import capability_config_for_agent
         from ..conversation.background_team_lifecycle import background_identity_allows_work
@@ -273,7 +273,8 @@ class _BusinessBackgroundService(BackgroundAgentService):
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
             host_channel_actor=(actor if isinstance(target.metadata.get(EXECUTION_ORIGIN_KEY), dict)
                                 and target.metadata[EXECUTION_ORIGIN_KEY].get('kind') == 'delegated' else None),
-            business_context_intent=intent, business_context_factory=factory)
+            business_context_intent=intent, business_context_factory=factory,
+            **({'execution_profile': execution_profile} if execution_profile is not None else {}))
         if not outcome.ok:
             raise SessionTaskDispatchError(outcome)
         return json.loads(outcome.output)

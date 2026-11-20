@@ -139,6 +139,7 @@ def _write_completion_metadata(host, task, updater):
 def stage_background_learning_candidate(host, *, params, candidate):
     """W5真实finalize返回后保存候选；不宣告completed、不入队、不调用学习模型。"""
     from ..capability.skill_learning_request import _learning_request_material
+    from ..workflows.analysis_isolation import AGENT_TASK_PROFILE_KEY
 
     if not isinstance(getattr(params, "business_context", None), BusinessExecutionContext) or params.source != "background_main_agent":
         return
@@ -148,6 +149,8 @@ def stage_background_learning_candidate(host, *, params, candidate):
     _repo, ref, context, task = execution
     if context != params.business_context or candidate.source != "background_main_agent":
         raise PermissionError("COMPLETION_CONTEXT_MISMATCH")
+    if AGENT_TASK_PROFILE_KEY in task.metadata:
+        return
     proof = _live_completion_claim(host, ref, task)
     if type(candidate.tool_rounds) is not int or candidate.tool_rounds < 0:
         raise ValueError("COMPLETION_TOOL_ROUNDS_INVALID")
@@ -1014,7 +1017,9 @@ class SessionTaskStore:
     # 函数用途: 新建原派活记录及可选不可变输入快照；同键重放严格核对输入，不新增账本。
     def create(self, draft: SessionTaskDraft, *, now: float | None = None, host_message_context=None,
                business_context_intent: BusinessContextIntent | None = None,
-               business_context_factory: Callable[[str], BusinessExecutionContext] | None = None) -> SessionTask:
+               business_context_factory: Callable[[str], BusinessExecutionContext] | None = None,
+               execution_profile=None) -> SessionTask:
+        from ..workflows.analysis_isolation import AGENT_TASK_PROFILE_KEY, ReadOnlyAgentTaskProfile
         from .host_message_context import CONTEXT_KEY, HostMessageContext
 
         if (business_context_intent is None) != (business_context_factory is None):
@@ -1030,9 +1035,19 @@ class SessionTaskStore:
         current = now if now is not None else time.time()
         key = str(draft.dedupe_key or "").strip()
         intent = business_context_intent.to_dict() if business_context_intent else None
+        profile = None
+        if execution_profile is not None:
+            if (type(execution_profile) is not ReadOnlyAgentTaskProfile or business_context_intent is None
+                    or execution_profile.owner_id != business_context_intent.owner_id
+                    or execution_profile.space_id != business_context_intent.requested_space_id):
+                raise ValueError("WORKFLOW_AGENT_DISPATCH_CONTEXT_MISMATCH")
+            profile = execution_profile.to_record()
+        fingerprint_input = [draft.sender_thread_id, draft.target_thread_id, draft.goal, draft.origin_task_id,
+                             draft.body_dedupe_key, snapshot, intent]
+        if profile is not None:
+            fingerprint_input.append(profile)
         fingerprint = hashlib.sha256(json.dumps(
-            [draft.sender_thread_id, draft.target_thread_id, draft.goal, draft.origin_task_id,
-             draft.body_dedupe_key, snapshot, intent], sort_keys=True, ensure_ascii=False,
+            fingerprint_input, sort_keys=True, ensure_ascii=False,
             separators=(",", ":")).encode()).hexdigest()
         # 独立的创建门覆盖预留、factory、canonical提交及原索引修复；不持有模型或网络调用。
         gate = locked_json_path(self._dedupe_path(key).with_suffix(".create")) if key else nullcontext()
@@ -1041,12 +1056,15 @@ class SessionTaskStore:
             if replayed is not None:
                 if (replayed.metadata.get(CONTEXT_KEY) != snapshot
                         or replayed.metadata.get("business_context_intent") != intent
+                        or replayed.metadata.get(AGENT_TASK_PROFILE_KEY) != profile
                         or replayed.origin_task_id != draft.origin_task_id):
                     raise ValueError("IDEMPOTENCY_CONFLICT: task input or business intent changed")
                 self._write_lookup_indexes(key, draft.body_dedupe_key, replayed.task_id)
                 return replayed
             task_id = self._reserve_creation_id(key, fingerprint)
             metadata = {CONTEXT_KEY: snapshot} if snapshot is not None else {}
+            if profile is not None:
+                metadata[AGENT_TASK_PROFILE_KEY] = profile
             if business_context_intent is not None:
                 context = business_context_factory(task_id)
                 if not isinstance(context, BusinessExecutionContext) or context.task_id != task_id:

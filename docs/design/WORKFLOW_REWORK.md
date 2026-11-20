@@ -112,3 +112,11 @@ DAG 调度先在原运行账本保存当前尝试的 `reserved`。工作线程�
 工作流 DAG 用未就绪依赖数和就绪堆推进，每条依赖边只在初始化和其上游完成时处理。foreach 两种声明和 DAG 并发共用部署参数 `workflow_foreach_max_parallel`。默认上限为 8，省略并发时 foreach 仍为 1、DAG 仍为 4。部署降低上限后，超出范围的已存储 foreach 定义会报告原范围错误。
 
 定向验证覆盖同一尝试竞争、退避让出唯一工作线程、中断后保留预算、检查点发表前后的 I/O 错误、千节点依赖扫描以及配置 12 个并发时的两种 foreach 声明和 DAG 执行。
+
+## 2026-11-19 M67 工作流 Agent 节点的只读执行档
+
+需要在工作流中读取资料的节点可声明 `mode: "agent_task"`、`profile: "read_only"`，在 `config.instruction` 中给出任务。宿主具备提交、完成和取消端口时，`agent_task` 配置中的 `analysis_isolation: "lightweight_subagent"` 也解析为同一个执行档。普通 Agent 节点和无状态技能研判沿各自原入口，缺少完整端口时返回 `WORKFLOW_ISOLATION_UNAVAILABLE`。
+
+后台任务创建时冻结原运行、步骤、尝试、空间、截止时间和 token 预算。每次后台调用从原 SessionTask 读取执行档。模型请求沿宿主期限和输出预算，工具按原效果分类逐次审批，写操作直接返回 `INVESTIGATION_READ_ONLY_REJECTED` 和 `not_started`。只读节点跳过学习候选写入。完成与取消沿原派活账本。
+
+定向验证使用原工作流入口、派活账本和工具执行器，覆盖两种声明、读取成功、写入拒绝、到期前拦截、取消后拒绝迟到执行和完成回读。部署后的宿主进程组合验收归 CP15。

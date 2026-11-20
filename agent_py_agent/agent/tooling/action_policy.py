@@ -152,6 +152,12 @@ class ActionPolicy:
             return _investigation_denial("unknown", classification_error=type(exc).__name__)
         if investigation and effect not in {"read_only", "mutating", "dangerous"}:
             return _investigation_denial("unknown")
+        if investigation and boundary.get("read_only_approval") is False:
+            if effect != "read_only":
+                return _investigation_denial(effect)
+            deadline_at = boundary.get("deadline_at")
+            if type(deadline_at) in (int, float) and time.time() >= deadline_at:
+                return _deny("TOOL_TIMEOUT", effect=effect, evidence={"effect_outcome": "not_started"})
         required_decision = _required_action_decision(request, runtime, effect)
         if required_decision is not None:
             return required_decision

@@ -5,6 +5,8 @@ submit 沿 W2 BackgroundAgentService 的耐久幂等入口；completion_reader �
 """
 from __future__ import annotations
 
+import inspect
+import time
 from typing import Any
 
 from ..conversation.session_task_dispatch import (
@@ -13,21 +15,70 @@ from ..conversation.session_task_dispatch import (
     _task_dedupe_key,
     reconcile_session_task_dispatch,
 )
+from .analysis_isolation import (
+    AGENT_TASK_PROFILE_KEY,
+    READ_ONLY_AGENT_TASK_PROFILE,
+    ReadOnlyAgentTaskProfile,
+    WorkflowIsolationUnavailable,
+    resolve_analysis_isolation,
+)
 from .models import payload
 
 
 class WorkflowAgentSteps:
-    def __init__(self, background_service, *, actor_provider, completion_reader, cancel_handler=None):
+    def __init__(self, background_service, *, actor_provider, completion_reader, cancel_handler=None,
+                 inherited_token_budget=None):
         self.background_service = background_service
         self.actor_provider = actor_provider
         self.completion_reader = completion_reader
         self.cancel_handler = cancel_handler
+        self.inherited_token_budget = inherited_token_budget
 
     def _actor(self, run):
         actor = self.actor_provider(run)
         if getattr(actor, 'owner_id', None) != run.owner_id:
             raise PermissionError('WORKFLOW_AGENT_OWNER_MISMATCH')
         return actor
+
+    def supports_read_only_profile(self):
+        submit = getattr(self.background_service, 'submit', None)
+        if not all(callable(item) for item in (submit, self.actor_provider, self.completion_reader, self.cancel_handler)):
+            return False
+        try:
+            parameter = inspect.signature(submit).parameters.get('execution_profile')
+        except (TypeError, ValueError):
+            return False
+        return parameter is not None and parameter.kind == inspect.Parameter.KEYWORD_ONLY
+
+    def _read_only_profile(self, run, spec, step):
+        from ..assets.workflow_store import WorkflowStepSpec
+        from ..backends.request_scope import provider_request_timeout
+
+        if run.ephemeral_debug or not self.supports_read_only_profile():
+            raise WorkflowIsolationUnavailable()
+        facts = step.escalation_result
+        original = facts.get(AGENT_TASK_PROFILE_KEY)
+        if original is not None:
+            profile = ReadOnlyAgentTaskProfile(**original)
+            if (profile.owner_id, profile.space_id, profile.workflow_run_id, profile.step_id, profile.attempt_id) != (
+                    run.owner_id, run.business_context['space_id'], run.workflow_run_id, step.step_id, facts['attempt_id']):
+                raise PermissionError('WORKFLOW_AGENT_DISPATCH_CONTEXT_MISMATCH')
+            return profile
+        try:
+            duration = provider_request_timeout(float('inf'))
+        except TimeoutError:
+            duration = 0
+        duration = min(duration, spec.get('timeout_seconds', WorkflowStepSpec.__dataclass_fields__['timeout_seconds'].default))
+        host = getattr(self.background_service, 'host', None)
+        params = getattr(host, '_current_run_params', None)
+        attributes = getattr(params, 'task_attributes', None) or {}
+        token_budget = self.inherited_token_budget or attributes.get('token_budget')
+        if token_budget in (None, 0):
+            token_budget = getattr(getattr(host, 'config', None), 'max_tokens', None) or None
+        profile = ReadOnlyAgentTaskProfile(run.owner_id, run.business_context['space_id'],
+            run.workflow_run_id, step.step_id, facts['attempt_id'], time.time() + duration, token_budget)
+        facts[AGENT_TASK_PROFILE_KEY] = profile.to_record()
+        return profile
 
     # LLM: 未知只对账；已有耐久absence须重验原binding与canonical，才允许沿原键/预留ID继续；不清除派发槽。
     # 函数用途: 提交或继续同一次未开始的原任务，缺证据时保留未知责任。
@@ -49,8 +100,19 @@ class WorkflowAgentSteps:
         if not context.get('space_id') or context.get('owner_id') != run.owner_id:
             raise PermissionError('WORKFLOW_AGENT_CONTEXT_REQUIRED')
         config = spec.get('config', {})
-        if set(config) - {'instruction', 'controller_agent_id'} or not isinstance(config.get('instruction'), str) or not config['instruction'].strip():
+        if (not isinstance(config, dict)
+                or set(config) - {'instruction', 'controller_agent_id', 'profile', 'analysis_isolation'}
+                or not isinstance(config.get('instruction'), str) or not config['instruction'].strip()):
             raise ValueError('WORKFLOW_AGENT_CONFIG_INVALID')
+        option = spec.get('profile', config.get('profile'))
+        if ('profile' in spec and 'profile' in config and spec['profile'] != config['profile']
+                or 'analysis_isolation' in config and config['analysis_isolation'] != 'lightweight_subagent'):
+            raise ValueError('WORKFLOW_AGENT_CONFIG_INVALID')
+        if option is None and 'analysis_isolation' in config:
+            option = resolve_analysis_isolation(run, step_config=config, isolation_executor=self).get('profile')
+        if option is not None and option != READ_ONLY_AGENT_TASK_PROFILE:
+            raise ValueError('WORKFLOW_AGENT_CONFIG_INVALID')
+        profile = self._read_only_profile(run, spec, step) if option else None
         request = {'space_id': context['space_id'], 'instruction': config['instruction']}
         if context.get('project_ref'):
             request['project_ref'] = context['project_ref']
@@ -74,7 +136,8 @@ class WorkflowAgentSteps:
             result['reconciliation_state'] = 'unknown'
         step.escalation_result['submission_state'] = 'unknown'
         try:
-            receipt = self.background_service.submit(request, actor=actor, idempotency_key=key)
+            receipt = self.background_service.submit(request, actor=actor, idempotency_key=key,
+                **({'execution_profile': profile} if profile is not None else {}))
         except SessionTaskDispatchError as error:
             step.escalation_result['submission_outcome'] = {
                 'error_code': error.error_code, 'effect_outcome': error.effect_outcome}
@@ -139,6 +202,8 @@ class WorkflowAgentSteps:
         context = task.metadata.get('business_context', {})
         if (context.get('owner_id') != run.owner_id or context.get('task_id') != task.task_id
                 or any(context.get(name) != run.business_context.get(name) for name in ('space_id', 'project_ref'))):
+            raise PermissionError('WORKFLOW_AGENT_DISPATCH_CONTEXT_MISMATCH')
+        if task.metadata.get(AGENT_TASK_PROFILE_KEY) != result.get(AGENT_TASK_PROFILE_KEY):
             raise PermissionError('WORKFLOW_AGENT_DISPATCH_CONTEXT_MISMATCH')
         result.update(task_id=task.task_id, session_task_dispatch={**identity, 'task_id': task.task_id},
             submission_state='accepted', reconciliation_state='confirmed')
@@ -239,6 +304,11 @@ def read_session_task_completion(
 
     if task_owner and owner_id and task_owner != owner_id:
         raise PermissionError("WORKFLOW_AGENT_OWNER_MISMATCH")
+    if AGENT_TASK_PROFILE_KEY in task.metadata:
+        profile = ReadOnlyAgentTaskProfile(**task.metadata[AGENT_TASK_PROFILE_KEY])
+        if (profile.owner_id, profile.workflow_run_id, profile.step_id, profile.attempt_id, profile.space_id) != (
+                owner_id, workflow_run_id, step_id, attempt_id, context.get("space_id")):
+            raise PermissionError("WORKFLOW_AGENT_COMPLETION_IDENTITY_MISMATCH")
 
     # 校验 dispatch identity
     if isinstance(session_task_dispatch, dict):
@@ -459,6 +529,8 @@ def build_default_workflow_agent_steps(host, *, background_service=None, actor_p
         actor_provider=actor_provider,
         completion_reader=completion_reader,
         cancel_handler=cancel_handler,
+        inherited_token_budget=(getattr(getattr(host, '_current_run_params', None), 'task_attributes', None)
+                                or {}).get('token_budget'),
     )
     # 仅原默认builder发行这个绑定口；组合根按请求重建副本，显式自定义端口没有此口就保持原样。
     port.bind_host_call = lambda **options: build_default_workflow_agent_steps(host, **options)
