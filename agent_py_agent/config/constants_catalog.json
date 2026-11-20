@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1563,
+  "count": 1564,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -9234,6 +9234,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "连续失败超过 5 次进入退避（个数）：手误通常不会连续 5 次，超过就该怀疑是暴破。"
+    },
+    {
+      "name": "DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS",
+      "file": "agent_py_agent/agent/settings/config.py",
+      "value": 4096,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "工作流正则在求值时读取的默认字符预算，与随包 YAML 一致。"
     },
     {
       "name": "_CONFIG_PARSE_DIAGNOSTIC_LIMIT",

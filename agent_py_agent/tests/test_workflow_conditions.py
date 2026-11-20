@@ -10,6 +10,7 @@ import time
 import pytest
 
 from agent_py_agent.agent.workflows.conditions import (
+    ConditionIndeterminate,
     WorkflowConditionError,
     evaluate_condition,
     validate_condition,
@@ -103,7 +104,8 @@ def test_depth_and_node_limits():
 def test_accepted_regex_is_fast_on_adversarial_subject():
     node = leaf('regex', r'^a*b$')
     started = time.monotonic()
-    assert evaluate_condition(node, {'s': {'v': 'a' * 100000}}, {}) is False
+    with pytest.raises(ConditionIndeterminate, match='WORKFLOW_CONDITION_SUBJECT_TRUNCATED'):
+        evaluate_condition(node, {'s': {'v': 'a' * 100000}}, {})
     assert time.monotonic() - started < 1.0
 
 

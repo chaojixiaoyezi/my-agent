@@ -50,6 +50,9 @@ from .normalize import (
     normalize_agent_config,
 )
 
+# 工作流正则在求值时读取的默认字符预算，与随包 YAML 一致。
+DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS = 4096
+
 __all__ = [
     "AgentConfig",
     "DEFAULT_DECISION_AUTONOMY",
@@ -346,6 +349,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     retention_scan_slice_bytes: int = field(default=8388608, metadata={"bounds": (1024, None), "model_read_only": True})
     retention_scan_slice_ms: int = field(default=25, metadata={"bounds": (1, None), "model_read_only": True})
     memory_reference_pin_chunk_bytes: int = field(default=65536, metadata={"bounds": (1024, None), "model_read_only": True})
+    workflow_condition_max_subject_chars: int = field(
+        default=DEFAULT_WORKFLOW_CONDITION_MAX_SUBJECT_CHARS, kw_only=True,
+        metadata={"bounds": (1, None), "unit": "字符"},
+    )
     reasoning_probe_max_output_tokens: int = field(default=40000, metadata={"bounds": (1, None)})
     reasoning_probe_timeout_seconds: float = field(default=180.0, metadata={"bounds": (0.0, None), "exclusive_minimum": True, "range": ">0"})
 

@@ -1098,17 +1098,12 @@ def _fetch_panel_data(
 
 def _check_session_lock(adapter: Any, actor: str) -> dict[str, Any] | None:
     """检查私聊会话锁状态；锁定则发送密码卡并阻断面板操作。"""
-    if not getattr(adapter, "_session_lock_enabled", True):
-        return None
-    unlock = getattr(adapter, "_unlock", None)
-    if unlock is None:
-        return None
-    from ..session_lock import admission
-
     try:
-        status = admission.check_session_admission(unlock, actor)
-        if not status.allowed and not (status.locked or status.requires_password_setup):
-            return {"toast": {"type": "warning", "content": "会话锁检查未通过。"}}
+        if not getattr(adapter, "_session_lock_enabled", True):
+            return None
+        from ..session_lock import admission
+
+        status = admission.check_session_admission(getattr(adapter, "_unlock", None), actor)
         if status.locked or status.requires_password_setup:
             mode = "set" if status.requires_password_setup else "unlock"
             send_pwd = getattr(adapter, "_send_password_card", None)
@@ -1118,6 +1113,13 @@ def _check_session_lock(adapter: Any, actor: str) -> dict[str, Any] | None:
                 from .feishu import _send_session_password_card
                 _send_session_password_card(adapter, actor, mode)
             return {"toast": {"type": "warning", "content": "当前私聊已锁定，请先在密码卡完成解锁后再操作面板。"}}
+        if status.allowed:
+            return None
     except Exception as exc:
         logger.warning("面板会话锁检查异常: %s", type(exc).__name__)
-    return None
+    return {
+        "toast": {"type": "warning", "content": "私聊会话锁暂不可用，面板操作未执行。请稍后在原卡片重试。"},
+        "status": "unavailable",
+        "error_code": "FEISHU_PANEL_LOCK_UNAVAILABLE",
+        "retryable": True,
+    }
