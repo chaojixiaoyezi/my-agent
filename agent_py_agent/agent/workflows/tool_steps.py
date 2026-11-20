@@ -9,6 +9,8 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from ..tooling.versioned_input_decoder import decode_retired_tool_call
+from .governance import tool_operation_receipt_matches
 from .models import output_value, payload, redact_bearer_values
 
 WORKFLOW_TOOL_RECEIPT_SCHEMA = "workflow-tool-receipt.v1"
@@ -154,6 +156,15 @@ def resolve_tool_arguments(engine, step, run, spec, outputs):
     inherited_schema = None
     snapshot = getattr(dispatcher, 'snapshot', None)
     if snapshot is not None and callable(getattr(snapshot, 'runtime', None)):
+        # 版本解码只在实际调用前处理退役叶工具，保留冻结定义及既有回执。
+        facts = step.escalation_result
+        available = getattr(snapshot, 'available_tool_names', None)
+        if (isinstance(available, (set, frozenset))
+                and not facts.get('tool_operation_binding') and not facts.get('tool_receipt')
+                and facts.get('effect_outcome') in (None, 'not_started')):
+            decoded = decode_retired_tool_call(tool_name, resolved_arguments, available=available)
+            if decoded is not None:
+                tool_name, resolved_arguments, _ = decoded
         runtime = snapshot.runtime(tool_name)
         if runtime is not None:
             inherited_schema = runtime.model_spec.input_schema
@@ -210,7 +221,7 @@ def execute_tool_step(
         if proof is not None:
             if not isinstance(proof, dict):
                 proof = {key: getattr(proof, key, None) for key in (
-                    'handler_executed', 'effect_outcome', 'call_id', 'tool_name', 'operation', 'operation_id')}
+                    'handler_executed', 'effect_outcome', 'call_id', 'tool_name', 'operation', 'operation_id', 'metadata')}
             expected_call = f'workflow-step:{run.workflow_run_id}:{step.step_id}'
             if (not isinstance(proof, dict) or proof.get('handler_executed') is not False
                     or proof.get('effect_outcome') != 'not_started'
@@ -220,16 +231,16 @@ def execute_tool_step(
             operation_id = proof.get('operation_id') or ''
             binding = step.escalation_result.get('tool_operation_binding')
             if operation_id:
+                receipt = _operation_receipt_identity(proof)
                 if (not isinstance(operation, dict) or not isinstance(binding, dict)
                         or binding.get('workflow_run_id') != run.workflow_run_id
                         or binding.get('step_id') != step.step_id
                         or binding.get('effect_attempt_id') != effect_attempt
                         or binding.get('call_id') != expected_call
-                        or binding.get('tool_name') != tool_name
                         or binding.get('owner_id') != run.owner_id
                         or any(not isinstance(binding.get(key), str) or not binding[key]
                                for key in ('args_hash', 'run_id', 'task_id', 'attempt_id', 'idempotency_key'))
-                        or binding.get('operation_id') != operation_id
+                        or not tool_operation_receipt_matches(binding, receipt)
                         or operation.get('operation_id') != operation_id
                         or operation.get('args_hash') != binding.get('args_hash')
                         or operation.get('idempotency_key') != binding.get('idempotency_key')
@@ -313,7 +324,7 @@ def execute_tool_step(
         denied_tools.update(run.business_context.get("denied_tools") or ())
     if getattr(engine, "tool_denylist", None):
         denied_tools.update(engine.tool_denylist)
-    if tool_name in denied_tools:
+    if tool_name in denied_tools or raw_tool_name.strip() in denied_tools:
         step.status = "failed"
         step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
         step.error_message = f"Tool '{tool_name}' is in the forbidden tool denylist"
@@ -330,7 +341,7 @@ def execute_tool_step(
     elif getattr(engine, "tool_allowlist", None) is not None:
         allowed_tools = set(engine.tool_allowlist)
 
-    if allowed_tools is not None and tool_name not in allowed_tools:
+    if allowed_tools is not None and tool_name not in allowed_tools and raw_tool_name.strip() not in allowed_tools:
         step.status = "failed"
         step.error_code = "WORKFLOW_TOOL_PERMISSION_DENIED"
         step.error_message = f"Tool '{tool_name}' is not in the authorized tool allowlist"
@@ -567,6 +578,13 @@ def execute_tool_step(
 
     # 9. 状态与回执落地
     step.effect_id = effect_id
+    identity = _operation_receipt_identity(raw_result) if isinstance(raw_result, dict) else {}
+    binding = step.escalation_result.get('tool_operation_binding')
+    reference_facts = (
+        {'operation_reference': identity['operation_reference']}
+        if isinstance(binding, dict) and 'operation_reference' in identity
+        and tool_operation_receipt_matches(binding, identity) else {}
+    )
     if is_success:
         output_payload = payload(parsed_result if isinstance(parsed_result, dict) else {"result": parsed_result})
         step.status = "succeeded"
@@ -577,6 +595,7 @@ def execute_tool_step(
             "tool_name": tool_name,
             "effect_id": effect_id,
             "operation_id": operation_id,
+            **reference_facts,
             "effect_outcome": effect_outcome,
             "status": "succeeded",
             "error_code": "",
@@ -593,9 +612,18 @@ def execute_tool_step(
             "tool_name": tool_name,
             "effect_id": effect_id,
             "operation_id": operation_id,
+            **reference_facts,
             "effect_outcome": effect_outcome or "failed",
             "handler_executed": raw_result.get("handler_executed") if isinstance(raw_result, dict) else getattr(raw_result, "handler_executed", None),
             "status": "failed",
             "error_code": step.error_code,
             "output_summary": summary,
         }
+
+
+def _operation_receipt_identity(result):
+    identity = {key: result.get(key) for key in ('tool_name', 'operation_id')}
+    metadata = result.get('metadata')
+    if isinstance(metadata, dict) and 'operation_reference' in metadata:
+        identity['operation_reference'] = metadata['operation_reference']
+    return identity

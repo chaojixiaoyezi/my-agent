@@ -27,6 +27,7 @@ from ..contracts.diagnostics import DiagnosticEnvelope
 from ..contracts.effect_settlement import SETTLEMENT_APPLIED, classify_effect_settlement
 from ..contracts.error_taxonomy import error_contract
 from ..contracts.idempotency import BusinessEffectIdentity
+from ..contracts.tool_operation_reference import ToolOperationReference
 from ..io.sqlite_connection import sqlite_error_details
 from ..local_storage import ToolOperationRecord
 from ..plugin_events.decision_ledger import PLUGIN_GATE_DECISION_EVIDENCE_KEY
@@ -471,7 +472,10 @@ def _execute_authorized(
                 pass
     observed_request = replace(request, on_handler_started=handler_started)
     try:
-        outcome = _invoke_with_operation_policy(observed_request, call, runtime, decision, started_at)
+        storage_namespace = _operation_identity(call, runtime)
+        outcome = _invoke_with_operation_policy(
+            observed_request, call, runtime, decision, started_at, storage_namespace=storage_namespace,
+        )
     finally:
         liveness.close()
     states.append("succeeded" if outcome.ok else _outcome_state(outcome))
@@ -489,6 +493,7 @@ def _execute_authorized(
         projection,
         duration_ms=_elapsed_ms(started_at),
         input_sources=sources,
+        storage_namespace=storage_namespace,
     )
     if result.failure_stage == ToolFailureStage.PERSISTENCE.value:
         states.append("persistence_failed")
@@ -1018,11 +1023,13 @@ def _invoke_with_operation_policy(
     runtime: ToolRuntime,
     decision: ActionDecision,
     started_at: float | None = None,
+    *,
+    storage_namespace: str | None = None,
 ) -> ToolHandlerOutcome:
     if started_at is None:
         started_at = time.monotonic()
     redacted_input = _bound_redacted_input(call.arguments)
-    op_identity = _operation_identity(call, runtime)
+    op_identity = storage_namespace if storage_namespace is not None else _operation_identity(call, runtime)
 
     # LLM: 只调用本次冻结的原handler；停止先拒绝，可信迁移信息不进入模型参数。
     # 函数用途: 执行或拒绝当前调用，在原操作账写结果前附上迁移来源。
@@ -1559,6 +1566,7 @@ def _canonical_result(
     *,
     duration_ms: int,
     input_sources: tuple[ToolInputSource, ...],
+    storage_namespace: str = "",
 ) -> ToolResult:
     operation = _operation_from_outcome(call, outcome)
     effect_outcome = _effect_outcome(decision, outcome, operation)
@@ -1573,6 +1581,18 @@ def _canonical_result(
         "handler_details": dict(outcome.result_envelope or {}),
         "plugin_gate_decisions": decision.evidence.get(PLUGIN_GATE_DECISION_EVIDENCE_KEY) or [],
     }
+    metadata.pop("operation_reference", None)
+    if storage_namespace:
+        action = call.arguments.get("action")
+        reference = ToolOperationReference(
+            display_name=call.tool_name,
+            domain=call.tool_name,
+            action=action if isinstance(action, str) else "",
+            storage_namespace=storage_namespace,
+            operation_id=operation.operation_id if operation is not None else call.operation_id,
+            args_hash=operation.args_hash if operation is not None else call.args_hash,
+        )
+        metadata["operation_reference"] = reference.to_dict()
     err_details = _sanitized_error_details((outcome.result_envelope or {}).get("error_details"))
     if err_details is None:
         err_details = _sanitized_error_details(decision.evidence.get("error_details"))

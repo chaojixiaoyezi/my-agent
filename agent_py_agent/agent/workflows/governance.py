@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from ..assets.descriptor import execution_definition_ref
+from ..contracts.tool_operation_reference import ToolOperationReference
 from .business_scope import WorkflowPolicyRefusal
 from .release_gate import WorkflowEffectAdmission, WorkflowReleaseGate
 
@@ -176,6 +177,16 @@ def bind_workflow_tool_operation(store, run, step, call, operation, *, task_id, 
         return
     from ..local_storage.tool_operations import ToolOperationStateError
     source_run, source_attempt, expected_key = call.run_id, call.attempt_id, call.idempotency_key
+    storage_tool_name = call.tool_name
+    reference = None
+    if isinstance(source_operation, dict) and 'operation_reference' in source_operation:
+        reference = ToolOperationReference.from_dict(source_operation['operation_reference'])
+        action = call.arguments.get('action')
+        if (reference is None or reference.display_name != call.tool_name or reference.domain != call.tool_name
+                or reference.action != (action if isinstance(action, str) else '')
+                or reference.operation_id != operation.operation_id or reference.args_hash != operation.args_hash):
+            raise WorkflowReconciliationRequired('operation_reference_mismatch')
+        storage_tool_name = reference.storage_tool_name
     if business_effect is not None:
         from ..contracts.idempotency import BusinessEffectIdentity
         if (not isinstance(business_effect, BusinessEffectIdentity)
@@ -192,7 +203,7 @@ def bind_workflow_tool_operation(store, run, step, call, operation, *, task_id, 
     try:
         original = store.get_tool_operation(owner_id=run.owner_id, run_id=source_run,
             task_id=task_id, attempt_id=source_attempt, operation_id=operation.operation_id,
-            tool_name=call.tool_name, args_hash=operation.args_hash)
+            tool_name=storage_tool_name, args_hash=operation.args_hash)
     except (ToolOperationStateError, OSError) as error:
         # 业务体可能已经完成；绑定读取失败不能改签成可重试业务失败。旧结果保留且不授恢复权。
         step.escalation_result['tool_operation_binding_error'] = type(error).__name__
@@ -200,7 +211,8 @@ def bind_workflow_tool_operation(store, run, step, call, operation, *, task_id, 
     if original is None:
         return
     if (original.idempotency_key != expected_key
-            or original.operation_id != operation.operation_id):
+            or original.operation_id != operation.operation_id
+            or reference is not None and original.idempotency_namespace != reference.storage_namespace):
         raise WorkflowReconciliationRequired('operation_binding_mismatch')
     step.escalation_result['tool_operation_binding'] = {
         'schema': 'workflow.tool-operation-binding.v1',
@@ -211,7 +223,23 @@ def bind_workflow_tool_operation(store, run, step, call, operation, *, task_id, 
         'task_id': original.task_id, 'attempt_id': original.attempt_id,
         'operation_id': original.operation_id, 'tool_name': original.tool, 'call_id': call.call_id,
         'args_hash': original.args_hash, 'idempotency_key': original.idempotency_key,
+        **({'operation_reference': reference.to_dict()} if reference is not None else {}),
     }
+
+
+def tool_operation_receipt_matches(binding, receipt):
+    """核对展示回执和存储绑定，旧记录沿用原来同名身份校验。"""
+    if not isinstance(receipt, dict) or receipt.get('operation_id') != binding.get('operation_id'):
+        return False
+    if 'operation_reference' not in binding:
+        return 'operation_reference' not in receipt and receipt.get('tool_name') == binding.get('tool_name')
+    reference = ToolOperationReference.from_dict(binding['operation_reference'])
+    return (reference is not None
+        and reference == ToolOperationReference.from_dict(receipt.get('operation_reference'))
+        and reference.display_name == receipt.get('tool_name') == reference.domain
+        and reference.storage_tool_name == binding.get('tool_name')
+        and reference.args_hash == binding.get('args_hash')
+        and reference.operation_id == binding.get('operation_id'))
 
 
 class WorkflowOperationRecovery:
@@ -266,8 +294,7 @@ class WorkflowOperationRecovery:
                 or not record.execution_definition_ref
                 or any(not isinstance(binding.get(key), str) or not binding[key]
                        for key in ('run_id', 'task_id', 'attempt_id', 'operation_id', 'tool_name', 'args_hash', 'idempotency_key'))
-                or receipt.get('operation_id') != binding['operation_id']
-                or receipt.get('tool_name') != binding['tool_name']):
+                or not tool_operation_receipt_matches(binding, receipt)):
             raise self._required(record, 'operation_binding_unavailable_or_mismatched')
         from ..local_storage.tool_operations import ToolOperationStateError
         from ..runtime_errors import compact_error_message
@@ -280,7 +307,9 @@ class WorkflowOperationRecovery:
         except (ToolOperationStateError, OSError) as error:
             raise self._required(record, 'original_operation_read_rejected',
                 diagnostic=compact_error_message(error)) from error
-        if original is None or original.idempotency_key != binding['idempotency_key']:
+        reference = ToolOperationReference.from_dict(binding.get('operation_reference'))
+        if (original is None or original.idempotency_key != binding['idempotency_key']
+                or reference is not None and original.idempotency_namespace != reference.storage_namespace):
             raise self._required(record, 'operation_unavailable_or_mismatched')
         result = replay_completed_tool_operation(original)
         if result.ok and original.result.get('effect_outcome') in {'committed', 'none'}:
@@ -289,9 +318,11 @@ class WorkflowOperationRecovery:
             from ..tooling.runtime_contracts import ToolContentBlock, ToolResult
             output = model_tool_output_body(tool=original.tool, output=result.output,
                 result_envelope=result.result_envelope)
-            public = ToolResult(call_id=binding['call_id'], tool_name=original.tool,
+            public = ToolResult(call_id=binding['call_id'],
+                tool_name=reference.display_name if reference is not None else original.tool,
                 status='succeeded', content_blocks=(ToolContentBlock('text', text=output),),
-                handler_executed=True, effect_outcome=original.result['effect_outcome']).to_dict()
+                handler_executed=True, effect_outcome=original.result['effect_outcome'],
+                metadata={'operation_reference': reference.to_dict()} if reference is not None else {}).to_dict()
             public.update(ok=True, operation_id=original.operation_id)
             return WorkflowEffectAdmission(reconciled_step_id=step.step_id, reconciled_output=public)
         if (not result.ok and original.result.get('effect_outcome') == 'not_started'
