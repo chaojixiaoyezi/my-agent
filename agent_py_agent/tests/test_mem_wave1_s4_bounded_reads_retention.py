@@ -412,9 +412,9 @@ def test_apply_skips_the_trash_when_the_curator_cursor_changed_after_planning(tm
     _report, [action], _uncurated = _plan_all(service)
 
     _write_curator_state(home, {thread.thread_id: rows[0].message_id})
-    changed = retention_apply._trash_conversation(home=home, action=action, now=_NOW)
+    changed = retention_apply._trash_conversation(home=home, action=action, now=_NOW, config=service.config)
     _write_curator_state(home, {thread.thread_id: rows[1].message_id})
-    trashed = retention_apply._trash_conversation(home=home, action=action, now=_NOW)
+    trashed = retention_apply._trash_conversation(home=home, action=action, now=_NOW, config=service.config)
 
     assert (changed.status, trashed.status) == ("state_changed", "trashed")
 

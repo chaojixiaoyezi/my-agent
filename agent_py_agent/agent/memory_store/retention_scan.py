@@ -24,10 +24,11 @@ from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 from ..audit.paths import audit_segment_day, audit_segment_paths
 from ..common import cache_capacity
+from ..common.cache_freshness import cache_stat_signature
 from ..common.json_io import locked_json_path, read_json_object_report, read_jsonl_objects_report
 from ..common.log_redaction import redact_sensitive_text
 from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
@@ -700,6 +701,7 @@ def build_retention_plan(
         scan_partial=context.scan_partial,
         scan_cursor=context.scan_cursor,
         uncurated_threads=context.uncurated_threads,
+        curator_switch=context.curator_facts[0] if context.curator_facts is not None else None,
     )
 
 
@@ -3130,7 +3132,7 @@ def _conversation_actions(
             errors.extend(related_errors)
             if related_errors:
                 continue
-            protect, curator_cursor, curator_enabled = ((False, None, None) if context is None
+            protect, curator_cursor, curator_switch = ((False, None, None) if context is None
                                                         else _uncurated_thread_check(context, root, thread))
             if protect:
                 continue
@@ -3155,7 +3157,8 @@ def _conversation_actions(
                         cutoff_timestamp=action_cutoff,
                         related_paths=related,
                         curator_cursor=curator_cursor,
-                        curator_enabled=curator_enabled,
+                        curator_enabled=(curator_switch.state == "enabled") if curator_switch is not None else None,
+                        curator_switch=curator_switch,
                     ),
                 )
             )
@@ -3179,60 +3182,113 @@ def curator_thread_cursors(home: object) -> dict[str, str] | None:
     return dict(state.per_thread_cursors)
 
 
-# LLM: 只看结构化开关：owner 记忆总闸、memory_curator_enabled 与生效的后台辅助模型档案（空=关闭）；冷却与档案暂时
-#   不可用仍算开启（整理稍后会继续）。配置已判定关闭时直接返回 False、不读策略文件（config 为空是不带配置的旧构造，
-#   按没有设置后台辅助模型处理）；配置为开而记忆策略文件在但读不出时返回 None（未知）：规划按开启保护，执行端放弃移动。
-#   规划与执行前复核共用这一判定。
-# 函数用途: 读出当前生效的后台记忆提取开关，读不出时返回 None。
-def curator_extraction_enabled(home: object, config: object) -> bool | None:
-    from ..settings.curator_profile import effective_auxiliary_model_profile
+@dataclass(frozen=True, slots=True)
+class ExtractionSwitchRead:
+    state: Literal["enabled", "disabled", "unknown"]
+    source_generation: str
+
+
+def read_live_extraction_switch(home: object, config: object | None) -> ExtractionSwitchRead:
+    """读取活配置和 owner 记忆总闸，报告实际观测代次。"""
+    from ..settings.live_switches import read_live_curator_config
     from ..user_space.owner_policy import effective_memory_enabled
 
-    if not (bool(getattr(config, "memory_curator_enabled", True)) and effective_auxiliary_model_profile(config)):
-        return False
-    policy_path = getattr(home, "owner_memory_policy_json", None)
-    report = (None if policy_path is None else
-              read_json_object_report(Path(policy_path), context="memory_retention.memory_policy"))
-    if report is not None and report.load_error is not None:
+    try:
+        enabled, profile, signature = read_live_curator_config(config)
+        generation = (signature, enabled, profile)
+        policy_path = getattr(home, "owner_memory_policy_json", None)
+        if enabled and profile and policy_path is not None:
+            path = Path(policy_path)
+            before = _optional_switch_stamp(path)
+            report = read_json_object_report(path, context="memory_retention.memory_policy")
+            generation = (*generation, before)
+            if (report.load_error is not None or type(report.payload.get("enabled", True)) is not bool
+                    or _optional_switch_stamp(path) != before):
+                return ExtractionSwitchRead("unknown", _extraction_generation(generation))
+            enabled = effective_memory_enabled(report.payload)
+        return ExtractionSwitchRead("enabled" if enabled and profile else "disabled",
+                                    _extraction_generation(generation))
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return ExtractionSwitchRead("unknown", "unknown")
+
+
+def _optional_switch_stamp(path: Path) -> tuple | None:
+    try:
+        return cache_stat_signature(path.stat())
+    except FileNotFoundError:
         return None
-    return effective_memory_enabled({} if report is None else report.payload)
+
+
+def _extraction_generation(material: tuple) -> str:
+    return hashlib.sha256(repr(material).encode("utf-8")).hexdigest()
+
+
+def curator_extraction_enabled(home: object, config: object) -> bool | None:
+    state = read_live_extraction_switch(home, config).state
+    return None if state == "unknown" else state == "enabled"
 
 
 # LLM: 排除名单读不出时不当作排除，交探查结果决定。
 # 函数用途: 读出本轮判断过期会话是否已被后台整理读完所需的材料，同一轮只读一次。
 def _curator_retention_facts(context: _RetentionScanContext) -> tuple:
     if context.curator_facts is None:
-        from .learning_exclusions import curator_learning_exclusions
-
         home = context.home
-        enabled = curator_extraction_enabled(home, context.config)
-        try:
-            excluded, unreadable = curator_learning_exclusions(home)
-        except (AttributeError, OSError, TypeError, ValueError):
-            excluded, unreadable = frozenset(), True
-        context.curator_facts = (enabled, curator_thread_cursors(home), frozenset() if unreadable else excluded)
+        context.curator_facts = (
+            read_live_extraction_switch(home, context.config), curator_thread_cursors(home), _curator_exclusions(home),
+        )
     return context.curator_facts
 
 
-# LLM: 后台提取开启（或开关读不出）时，整理游标之后还有可学习消息、或读不完/读不出的过期会话都保护（本轮不回收）；
-#   关闭时照常回收，只计入 uncurated_threads。宿主标记不学习的会话不需要整理。已读完时把规划所见游标绑进动作，
-#   执行端游标变了就放弃；规划时的开关也绑进动作，执行端由关变开或读不出同样放弃。
-# 函数用途: 判断一个已满足其它回收条件的过期会话是否要因后台整理未读完而保护，并返回要绑定的整理游标与提取开关。
-def _uncurated_thread_check(context: _RetentionScanContext, root: Path,
-                            thread: ConversationThread) -> tuple[bool, str | None, bool | None]:
+def _curator_exclusions(home: object) -> frozenset[str]:
+    from .learning_exclusions import curator_learning_exclusions
+
+    try:
+        excluded, unreadable = curator_learning_exclusions(home)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return frozenset()
+    return frozenset() if unreadable else excluded
+
+
+def _curator_thread_excluded(thread: ConversationThread, excluded: frozenset[str]) -> bool:
     from .curator_inputs import _thread_learning_excluded
     from .learning_exclusions import thread_is_excluded
 
-    enabled, cursors, excluded = _curator_retention_facts(context)
-    if _thread_learning_excluded(thread) or thread_is_excluded(thread, excluded):
-        return False, None, None
-    enabled = enabled is not False
+    return _thread_learning_excluded(thread) or thread_is_excluded(thread, excluded)
+
+
+def _uncurated_thread_check(context: _RetentionScanContext, root: Path,
+                            thread: ConversationThread) -> tuple[bool, str | None, ExtractionSwitchRead]:
+    switch, cursors, excluded = _curator_retention_facts(context)
+    if _curator_thread_excluded(thread, excluded):
+        return switch.state == "unknown", None, switch
     cursor = None if cursors is None else cursors.get(thread.thread_id, "")
     verdict = "unknown" if cursor is None else _probe_uncurated_messages(context, root, thread.thread_id, cursor)
-    if verdict == "curated":
-        return False, (cursor if enabled else None), enabled
-    context.uncurated_threads += 1
-    return enabled, None, enabled
+    if verdict != "curated":
+        context.uncurated_threads += 1
+    protect = switch.state == "unknown" or (switch.state == "enabled" and verdict != "curated")
+    proof_cursor = cursor if verdict == "curated" and switch.state == "enabled" else None
+    return protect, proof_cursor, switch
+
+
+def conversation_extraction_proof_current(home, config, action, root, thread, *, budget=None) -> bool:
+    """在原消息锁内重新确认计划代次、整理游标及可学习消息尾部。"""
+    from ..conversation.store import ConversationStore
+
+    current = read_live_extraction_switch(home, config)
+    previous = action.curator_switch
+    if current.state == "unknown" or (previous is not None and current != previous):
+        return False
+    if previous is None and action.curator_enabled is False and current.state == "enabled":
+        return False
+    cursor = action.curator_cursor
+    if cursor is None:
+        return current.state == "disabled" or _curator_thread_excluded(thread, _curator_exclusions(home))
+    cursors = curator_thread_cursors(home)
+    if cursors is None or cursors.get(thread.thread_id, "") != cursor:
+        return False
+    store = ConversationStore(root, initialize=False)
+    tail = _learnable_tail(store, thread.thread_id, cursor, budget or RetentionScanBudget.default(config))
+    return tail == "curated" and read_live_extraction_switch(home, config) == current
 
 
 # LLM: 用与后台整理同一个有界续读口 after_slice_report，从整理游标（不透明消息 ID，只作续读起点，不比大小）往后读，
@@ -3246,6 +3302,10 @@ def _probe_uncurated_messages(context: _RetentionScanContext, root: Path, thread
 
         store = context.conversation_stores[root] = ConversationStore(root, initialize=False)
     budget = context.scan_budget if context.scan_budget is not None else RetentionScanBudget.default(context.config)
+    return _learnable_tail(store, thread_id, cursor, budget)
+
+
+def _learnable_tail(store, thread_id: str, cursor: str, budget) -> str:
     after = cursor
     for _page_number in range(_UNCURATED_PROBE_MAX_PAGES_COUNT):
         outcome = store.messages.after_slice_report(
@@ -3255,8 +3315,10 @@ def _probe_uncurated_messages(context: _RetentionScanContext, root: Path, thread
         rows = tuple(outcome.rows)
         if any(not (isinstance(row.metadata, dict) and row.metadata.get("learning_excluded") is True) for row in rows):
             return "uncurated"
+        if outcome.partial:
+            return "unknown"
         if not rows:
-            return "unknown" if outcome.partial else "curated"
+            return "curated"
         if not outcome.has_more and len(rows) < _UNCURATED_PROBE_PAGE_ROWS:
             return "curated"
         after = str(rows[-1].message_id)
@@ -3699,6 +3761,7 @@ class _ActionProof:
     related_paths: tuple[Path, ...] = ()
     curator_cursor: str | None = None
     curator_enabled: bool | None = None
+    curator_switch: ExtractionSwitchRead | None = None
 
 
 # LLM: 动作构造器统一生成稳定 ID，防止各扫描器自行定义互相冲突的幂等语义。
@@ -3735,6 +3798,7 @@ def _action(
         related_paths=evidence.related_paths,
         curator_cursor=evidence.curator_cursor,
         curator_enabled=evidence.curator_enabled,
+        curator_switch=evidence.curator_switch,
     )
 
 

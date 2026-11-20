@@ -20,16 +20,16 @@ from .owner_policy import read_owner_policy_bundle_report
 from .temporary_grants import list_temporary_grants
 
 
-def build_home_doctor_report(home: MyAgentHomePaths) -> dict[str, Any]:
-    sections = _collect_doctor_sections(home)
+def build_home_doctor_report(home: MyAgentHomePaths, *, config: object | None = None) -> dict[str, Any]:
+    sections = _collect_doctor_sections(home, config=config)
     findings = build_doctor_findings(sections)
     return _doctor_report(home, sections, findings)
 
 
-def _collect_doctor_sections(home: MyAgentHomePaths) -> dict[str, Any]:
+def _collect_doctor_sections(home: MyAgentHomePaths, *, config: object | None = None) -> dict[str, Any]:
     home_status = home_runtime_status(home)
     dangling = dangling_index_refs(home)
-    retention = plan_owner_retention(home)
+    retention = plan_owner_retention(home, config=config)
     schema = _schema_payload(home.system_schema_version_json)
     backup = _backup_payload(home)
     owner_policy = _owner_policy_payload(home)
@@ -48,6 +48,7 @@ def _collect_doctor_sections(home: MyAgentHomePaths) -> dict[str, Any]:
 
 
 def _doctor_report(home: MyAgentHomePaths, sections: dict[str, Any], findings: list[dict[str, Any]]) -> dict[str, Any]:
+    retention = sections["retention"]
     return {
         "ok": True,
         "home": sections["home"],
@@ -61,8 +62,9 @@ def _doctor_report(home: MyAgentHomePaths, sections: dict[str, Any], findings: l
             "dangling_refs": sections["dangling"],
         },
         "retention": {
-            "planned_count": len(sections["retention"].actions),
-            "actions": [action.to_dict() for action in sections["retention"].actions],
+            "planned_count": len(retention.actions),
+            "actions": [action.to_dict() for action in retention.actions],
+            **({"curator_switch": asdict(retention.curator_switch)} if retention.curator_switch is not None else {}),
         },
         "repair_plan": repair_plan(findings),
         "findings": findings,
@@ -567,7 +569,7 @@ class DoctorService:
     # 函数用途: 生成原平铺doctor的只读运行范围报告。
     def _runtime(self, args):
         common = self._common(args, runtime=True)
-        home = build_home_doctor_report(self.agent.home_paths)
+        home = build_home_doctor_report(self.agent.home_paths, config=self.agent.config)
         return {"ok": not common["routing"]["load_error"], "workspace_root": str(self.agent.root),
                 **common, "home": home["home"], "home_doctor": home}
 

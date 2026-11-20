@@ -41,7 +41,7 @@ def read_maintenance_objects(path, *, require_source=False):
 
 
 # LLM: 正式add/replace拒绝空白正文；legacy v1 add兼容缺ID及完整重算一致的派生ID，不能仅按前缀放行。
-# 函数用途: 阻止语义坏行覆盖旧投影；旧行省略元数据仍沿MemoryRecord默认值读取。
+# 函数用途: 校验刚解析的正式事件，并为已识别的旧 Dream 记录补齐范围，随下一次原子发布持久化。
 def require_maintenance_event(record):
     strings = ('role', 'content', 'kind', 'entry_id', 'action', 'source')
     if record is None or any(not isinstance(getattr(record, key), str) for key in strings):
@@ -76,6 +76,16 @@ def require_maintenance_event(record):
             not record.entry_id or record.entry_id == _legacy_entry_id(record))
         if not legacy:
             raise ValueError('MEMORY_AUTHORITY_UNREADABLE')
+    if record.source == "user-profile-dream" and action in {"add", "replace"}:
+        from .recall import normalize_dream_relocation
+
+        normalized = normalize_dream_relocation(record)
+        if normalized is not record:
+            if not record.entry_id:
+                from .jsonl import _legacy_entry_id
+
+                record.entry_id = _legacy_entry_id(record)
+            record.attributes = normalized.attributes
 
 
 # LLM: 仅标记破坏性操作前的权威读取失败；不把reset/SQLite写入故障混为零副作用失败。
