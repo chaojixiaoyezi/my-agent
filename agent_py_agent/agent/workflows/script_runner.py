@@ -756,6 +756,14 @@ def _stamp_attribute(exc: BaseException, name: str, value: object) -> None:
         pass
 
 
+# LLM: 取消已在途时拆除步骤的异常不能替换取消；只按阶段/路径角色/类型/errno 记一条脱敏前诊断（调用方统一脱敏），
+#   由 run_script 附到同一 launch_id 的取消回执，回收事实仍由各步骤自己核实后写入 capture。
+# 函数用途: 记录一次取消拆除期间的清理错误，供回执单独检查。
+def _record_teardown_error(capture, stage, path_role, exc):
+    capture.setdefault('teardown_errors', []).append({'stage': stage, 'path_role': path_role,
+        'exception_type': type(exc).__name__, 'errno': getattr(exc, 'errno', None), 'message': str(exc)})
+
+
 # LLM: 摘要失败不能覆盖执行事实；按签名兼容旧Store，正式Store走spool且不重试已进入的写操作。
 # 函数用途: 尽力将成功、失败及超时累计到脚本摘要。
 def _record_summary(owner_home, result):
@@ -1287,6 +1295,7 @@ class ScriptRunner:
         ds_runtime = None
         cred_stack = ExitStack()
         cred_file = None
+        cancelling: ToolCancelled | None = None
         try:
             history = script_history_record(self.owner_home, script_id, self.workspace_root)
             if history is not None:
@@ -1432,21 +1441,35 @@ class ScriptRunner:
                 command = sandbox.build_argv(command)
             timings['directory_discovery_ms'] += (time.monotonic() - clock) * 1000
             yield metadata, sources, (command, str(folder), env, input_json, timeout)
+        except ToolCancelled as exc:
+            # 取消是本次尝试的首要终态：下方各拆除步骤照常执行，其异常只记诊断，不能替换取消而改判为配置/清理失败。
+            cancelling = exc
+            raise
         finally:
             try:
-                cred_stack.close()
-                if cred_file is not None:
-                    capture['cred_fd_closed'] = cred_file.fd_closed
+                try:
+                    cred_stack.close()
+                except Exception as exc:
+                    if cancelling is None:
+                        raise
+                    _record_teardown_error(capture, 'credential_close', 'credential_file', exc)
+                finally:
+                    # 回收回执只写已核实事实：关闭失败时也读凭据文件自身状态，不留默认值冒充已关闭。
+                    if cred_file is not None:
+                        capture['cred_fd_closed'] = cred_file.fd_closed
             finally:
                 try:
                     if ds_runtime is not None:
                         try:
                             ds_runtime.close()
                         except Exception as exc:
-                            if capture.get('run_out_target') is not None:
+                            if cancelling is not None:
+                                _record_teardown_error(capture, 'data_source_close', 'datasource_manifest', exc)
+                            elif capture.get('run_out_target') is not None:
                                 raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='data_source_close',
                                                   path_role='datasource_manifest') from exc
-                            raise
+                            else:
+                                raise
                 finally:
                     if capture.get('run_out_target') is None:
                         shutil.rmtree(staging_root, ignore_errors=True)
@@ -1457,8 +1480,11 @@ class ScriptRunner:
                             capture['cred_scratch_cleaned'] = True
                         except OSError as exc:
                             capture['cred_scratch_cleaned'] = False
-                            raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='scratch_cleanup',
-                                              path_role='staging_root') from exc
+                            if cancelling is not None:
+                                _record_teardown_error(capture, 'scratch_cleanup', 'staging_root', exc)
+                            else:
+                                raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED', archive_phase='scratch_cleanup',
+                                                  path_role='staging_root') from exc
 
     # LLM: 原摘要/超时/沙箱链不变；run-out清理前暂存、清理后发表；归档异常硬失败并透传有界脱敏首因。
     # 函数用途: 执行脚本并返回结构化结果，单步调试可显式禁止资产摘要写入。
@@ -1478,6 +1504,7 @@ class ScriptRunner:
         delivery_receipts = []
         batch, envelope_parsed, output_dir, output_artifacts = None, False, '', ()
         cancelled: ToolCancelled | None = None
+        teardown: list[dict] = []
         try:
             inputs = payload({} if inputs is None else inputs)
             with self._prepare(script_id, inputs, timeout_seconds, override_data_sources, network_access, capture=capture) as prepared:
@@ -1526,6 +1553,7 @@ class ScriptRunner:
             exit_code = capture.get('exit_code', exit_code)
             error = 'CANCELLED'
             execution_error = {'exception_type': type(exc).__name__, 'message': str(exc)}
+            teardown = list(capture.get('teardown_errors', ()))
         except (SandboxUnavailableError, SandboxUnavailable, CredentialInputError) as exc:
             _stamp_launch_id(exc, launch_id)
             raise
@@ -1559,12 +1587,17 @@ class ScriptRunner:
                 try:
                     batch.discard()
                 except RunOutError as exc:
-                    error = exc.error_code
+                    # 取消在途时归档清理失败只记拆除诊断，终态仍是 CANCELLED。
+                    if cancelled is not None:
+                        teardown.append({'stage': 'run_out_discard', 'path_role': 'run_out_batch',
+                            'exception_type': type(exc).__name__, 'errno': getattr(exc, 'errno', None), 'message': str(exc)})
+                    else:
+                        error = exc.error_code
                     stderr += '\n归档清理失败: ' + str(exc)
         if cleanup:
             stderr += '\n进程组清理失败: ' + cleanup['message']
-        output, stdout, stderr, cleanup, execution_error, inputs, sources = redact_datasource_values(
-            [output, stdout, stderr, cleanup, execution_error, inputs, sources], capture.get('datasource_secrets', ()))
+        output, stdout, stderr, cleanup, execution_error, inputs, sources, teardown = redact_datasource_values(
+            [output, stdout, stderr, cleanup, execution_error, inputs, sources, teardown], capture.get('datasource_secrets', ()))
         if cred_lease is not None:
             turn_red = getattr(cred_lease.credential_use, 'turn_redaction', None)
             if turn_red is not None:
@@ -1573,6 +1606,7 @@ class ScriptRunner:
                 stderr = turn_red.public_text(stderr)
                 cleanup = turn_red.redact_value(cleanup)
                 execution_error = turn_red.redact_value(execution_error)
+                teardown = turn_red.redact_value(teardown)
                 inputs = turn_red.redact_value(inputs)
                 sources = turn_red.redact_value(sources)
                 delivery_receipts = list(turn_red.redact_value(delivery_receipts))
@@ -1585,6 +1619,8 @@ class ScriptRunner:
             context['cleanup_error'] = cleanup
         if execution_error:
             context['execution_error'] = execution_error
+        if teardown:
+            context['teardown_errors'] = teardown
         result = ScriptExecutionResult(script_id, not error, exit_code, elapsed, started_at, ended_at,
                                        output, stdout[:PREVIEW_CHARS], stderr[:PREVIEW_CHARS], error,
                                        bool(error), redact_sensitive_value(context) if error else {})

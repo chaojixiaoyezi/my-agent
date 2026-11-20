@@ -220,7 +220,10 @@ def settle_runtime_run_for_result(
             if fact is not None:
                 if replay_fact is None:
                     file_revision = _runner_result_file_revision(fact)
-                    persisted = _load_persisted_runner_result(fact)
+                    try:
+                        persisted = _load_persisted_runner_result(fact)
+                    except _RunnerResultReadFailed as exc:
+                        return {**_runner_result_read_failed_outcome(fact, exc), **base}
                     if persisted != result:
                         persisted = None
                 else:
@@ -605,7 +608,20 @@ def advance_pending_closeout(
         # 取文件版本在解码之前，读与修复并发时下一轮仍会看到版本变化。
         if file_revision is None:
             file_revision = _runner_result_file_revision(fact) if repo is not None else ()
-        result = _load_persisted_runner_result(fact)
+        try:
+            result = _load_persisted_runner_result(fact)
+        except _RunnerResultReadFailed as exc:
+            # 本次未观测成功：只刷新可重试诊断与尝试计数（下次由原退避放行重读），不进入证据等待、不 settle、不通知。
+            outcome = _runner_result_read_failed_outcome(fact, exc)
+            refreshed = {key: value for key, value in fact.items()
+                         if key not in ("evidence_revision", "evidence_kind", "evidence_ref")}
+            refreshed.update(closeout_state=outcome["state"], closeout_reason=outcome["reason"],
+                             closeout_detail=outcome["detail"], attempts=int(fact.get("attempts") or 0) + 1,
+                             updated_at=time.time())
+            persisted = _store_closeout(save_task, task, refreshed)
+            if refreshed["attempts"] <= 1 or refreshed["attempts"] % 10 == 0:
+                record_closeout_event(repo, task, event_type="closeout_pending", params=params, outcome=outcome)
+            return {"advanced": False, "state": outcome["state"], "fact_persisted": persisted}
         if result is None and repo is None:
             return {"advanced": False, "state": "runner_result_missing"}
         outcome = settle_runtime_run_for_result(
@@ -745,7 +761,11 @@ def _restore_closeout_event(
             }
             if payload.get("runner_result_digest"):
                 fact["runner_result_digest"] = payload["runner_result_digest"]
-            result = _load_persisted_runner_result(fact)
+            try:
+                result = _load_persisted_runner_result(fact)
+            except _RunnerResultReadFailed:
+                # 本次没读成：事件保持未消费，由分页绕回再试，不写消费回执。
+                return 0
             if result is None or str(result.run_id) != run_id:
                 return 0
             if str(result.status) != target_status:
@@ -825,6 +845,27 @@ class _CloseoutReplayParams:
         self.dry_run = False
 
 
+# LLM: 只表示“结果文件存在但本次读取失败”的观测失败，与已核实的缺失、损坏、身份/摘要不符严格区分；
+#   调用方据此走原可重试状态与退避重读，绝不当作证据不足，也不据此改写或重跑任何业务。
+# 类用途: 携带本次读取失败的原异常诊断，供收口给出可重试结果。
+class _RunnerResultReadFailed(Exception):
+    def __init__(self, cause: OSError) -> None:
+        super().__init__(_error_text(cause))
+        self.errno = cause.errno
+
+
+# LLM: 读取失败沿用原 write_error 可重试状态（与 authority_read_failed 同口径），因而受原尝试计数退避约束；
+#   保留原 run/attempt/agent_run 与目标终态，不调用 settle、不通知父级。
+# 函数用途: 生成一次结果文件读取失败的可重试收口结果。
+def _runner_result_read_failed_outcome(fact: dict[str, Any], exc: _RunnerResultReadFailed) -> dict[str, Any]:
+    return {
+        "state": CLOSEOUT_WRITE_ERROR, "reason": "runner_result_read_failed", "retryable": True,
+        "target_run_status": str(fact.get("target_run_status") or ""), "run_id": str(fact.get("run_id") or ""),
+        "attempt_id": str(fact.get("attempt_id") or ""), "agent_run_id": str(fact.get("agent_run_id") or ""),
+        "detail": str(exc), "errno": exc.errno,
+    }
+
+
 # LLM: 恢复只读已持久化的 runner 结果文件；读不到就保持事实并留诊断，绝不重跑 runner。
 # 函数用途: 从 runner_result.json 还原结构化 runner 结论。
 # LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
@@ -834,8 +875,19 @@ def _load_persisted_runner_result(fact: dict[str, Any]) -> Any | None:
     if not path:
         return None
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception as transport_error:  # noqa: BLE001 - 缺失/损坏都不伪造结论
+        raw = Path(path).read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        # 文件在而本次没读成（如 EIO）不是“已核实缺失/损坏”：不能按未变的 stat 修订进入证据等待，交给有界重试再读。
+        raise_if_transport_uncertain(exc)
+        raise _RunnerResultReadFailed(exc) from exc
+    except Exception as transport_error:  # noqa: BLE001 - 解码失败即损坏，不伪造结论
+        raise_if_transport_uncertain(transport_error)
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception as transport_error:  # noqa: BLE001 - 损坏不伪造结论
         raise_if_transport_uncertain(transport_error)
         return None
     if not isinstance(payload, dict):

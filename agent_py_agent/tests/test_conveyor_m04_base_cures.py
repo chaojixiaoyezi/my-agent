@@ -2,6 +2,7 @@
 # 模块用途: 钉住 Conveyor M04 的四个底层不变量：L21 目标续跑扣下码已登记为待核状态并带继续条件；L24 终帧与 finished 同一临界区提交，
 #   心跳在终帧取得写权后到期也不会再产出帧；L26/D10.19 整页预取后同 inode 截短仍走 INDEX_SOURCE_CHANGED 并正确续跑；
 #   L22/D08.7 嵌套脚本启动前拒绝保留外码并附内因，启动、效果与回收回执共用同一次尝试的 launch_id，重试换新 id。
+import errno
 import io
 import json
 import re
@@ -37,7 +38,7 @@ from agent_py_agent.agent.user_space.home_indexes import (
 )
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.agent.user_space.storage_lanes import StorageLaneBudget
-from agent_py_agent.agent.workflows import script_runner
+from agent_py_agent.agent.workflows import datasource_runtime, script_runner
 from agent_py_agent.agent.workflows.models import ScriptExecutionResult
 from agent_py_agent.agent.workflows.script_runner import ScriptRunner
 from agent_py_agent.tests.test_f155_w8_index_convergence import setup_workspace
@@ -388,6 +389,62 @@ def test_cancelled_run_keeps_phase_cleanup_receipt_and_launch_identity(tmp_path,
     assert _LAUNCH_ID.fullmatch(envelope['launch_id'])
     reclaim = envelope['credential_execution']
     assert reclaim['launch_id'] == envelope['launch_id'] and reclaim['effect_outcome'] == expected_effect
+    assert (reclaim['process_tree_reaped'], reclaim['scratch_cleaned'], reclaim['fd_closed']) == (True, True, True)
+
+
+# LLM: S1-P1-02 取消已在途时，拆除阶段删除本次 manifest 遇一次模拟 I/O 错误（EIO）也不能把取消改判为配置失败：
+#   终态仍是 CANCELLED、phase=started、effect_outcome=unknown，清理错误按阶段与 errno 单独可查，其余拆除照常完成，
+#   回收回执与本次 launch_id 一致且如实反映已核实的回收事实；取消不计入脚本失败摘要。未取消时同一清理错误保持原分类。
+# 函数用途: 钉住取消终态跨越拆除清理错误保留，且独立清理错误的原有分类不变。
+@pytest.mark.parametrize('cancel', [True, False])
+def test_cancellation_survives_manifest_unlink_error_during_teardown(tmp_path, monkeypatch, cancel):
+    token, captures, faults, summaries = CancellationToken(), [], [], []
+    original_execute, original_check = script_runner._execute, script_runner.raise_if_cancelled
+    original_unlink, original_summary = datasource_runtime.unlink_file_beneath, script_runner._record_summary
+
+    def observed_execute(command, folder, environment, input_json, timeout, capture, **kwargs):
+        captures.append(capture)
+        return original_execute(command, folder, environment, input_json, timeout, capture, **kwargs)
+
+    def check():
+        if cancel and captures and captures[0].get('started') and not token.cancelled:
+            token.cancel('m04 user stop')
+        original_check()
+
+    def unlink(root, parts, *args, **kwargs):
+        if not faults and str(parts[-1]).startswith('datasources-'):
+            faults.append(parts[-1])
+            raise OSError(errno.EIO, 'simulated I/O error')
+        return original_unlink(root, parts, *args, **kwargs)
+
+    def summary(owner_home, result):
+        summaries.append(result.error_code)
+        return original_summary(owner_home, result)
+
+    monkeypatch.setattr(script_runner, '_execute', observed_execute)
+    monkeypatch.setattr(script_runner, 'raise_if_cancelled', check)
+    monkeypatch.setattr(datasource_runtime, 'unlink_file_beneath', unlink)
+    monkeypatch.setattr(script_runner, '_record_summary', summary)
+    with _credential_scripts(tmp_path) as (tool, context, ref), bind_cancellation_token(token):
+        outcome = tool.execute_scoped({'action': 'run', 'script_id': 'launch_probe', 'credential_ref': ref}, context)
+    assert len(captures) == 1 and captures[0].get('started') is True and len(faults) == 1
+    envelope = outcome.result_envelope
+    if not cancel:
+        assert not token.cancelled and not outcome.ok, outcome.output
+        assert envelope['error_code'] == 'SCRIPT_CONFIGURATION_ERROR', outcome.output
+        assert summaries == ['SCRIPT_CONFIGURATION_ERROR']
+        return
+    assert token.cancelled and summaries == []
+    assert not outcome.ok and outcome.error_code == envelope['error_code'] == 'CANCELLED', outcome.output
+    assert envelope['effect_outcome'] == outcome.effect_outcome == 'unknown' and envelope['phase'] == 'started'
+    assert outcome.failure_stage == 'execution' and outcome.next_action
+    assert _LAUNCH_ID.fullmatch(envelope['launch_id'])
+    teardown, = envelope['escalation_context']['teardown_errors']
+    assert (teardown['stage'], teardown['path_role'], teardown['errno']) == ('data_source_close', 'datasource_manifest', errno.EIO)
+    assert teardown['exception_type'] == 'OSError' and 'simulated I/O error' in teardown['message']
+    assert 'cleanup_error' not in envelope['escalation_context']
+    reclaim = envelope['credential_execution']
+    assert reclaim['launch_id'] == envelope['launch_id'] and reclaim['effect_outcome'] == 'unknown'
     assert (reclaim['process_tree_reaped'], reclaim['scratch_cleaned'], reclaim['fd_closed']) == (True, True, True)
 
 

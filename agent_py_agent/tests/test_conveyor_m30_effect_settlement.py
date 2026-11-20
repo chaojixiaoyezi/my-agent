@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -419,3 +420,85 @@ def test_wait_keeps_exact_run_unsettled_when_authority_disappears(tmp_path, dead
     assert run.sweep()["runtime_closeouts_pending"] == 1
     assert closeout.pending_closeout(run.manager.load(run.task.id)) == fact
     assert _wakes_for_attempt(tmp_path, run.task.id, run.params.attempt_id) == []
+
+
+# LLM: P1-M30-01 结果文件 stat 成功而读取字节遇模拟 I/O 错误（EIO）只是一次未成功的观测，不是已核实的证据不足；
+#   只按路径拦截本次 runner_result 读取，文件字节与 stat 修订全程不变。
+# 函数用途: 让 runner_result 读取按给定次数失败（None 表示一直失败，直到测试改写 state），并记录读取次数。
+def _fail_result_reads(monkeypatch, run, failures):
+    target, original, state = Path(run.task.runner_result_json), Path.read_text, {"failures": failures, "reads": 0}
+
+    def read_text(self, *args, **kwargs):
+        if self == target:
+            state["reads"] += 1
+            if state["failures"] is None or state["failures"] > 0:
+                if state["failures"] is not None:
+                    state["failures"] -= 1
+                raise OSError(errno.EIO, "simulated I/O error")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return state
+
+
+# LLM: 恢复巡检与首次提交两条入口都用同一加载器；一次读取失败须留在可重试状态（不按未变 stat 进入证据等待），
+#   下一轮重读同一字节后核对摘要、run/attempt CAS 与已落定效果再收口：恰好一次父级唤醒、零工具重放。
+# 函数用途: 钉住暂时读取失败后有界重读并只收口一次。
+@pytest.mark.parametrize("entry", ["sweep", "initial_commit"])
+def test_transient_result_read_error_rereads_and_settles_once(tmp_path, dead_run, monkeypatch, entry):
+    run = dead_run()
+    monkeypatch.setattr(
+        ManagedOperationStore, "claim_tool_operation", lambda *a, **kw: pytest.fail("replayed operation"),
+    )
+    before = closeout.pending_closeout(run.manager.load(run.task.id))
+    revision = closeout._runner_result_file_revision(before)
+    state = _fail_result_reads(monkeypatch, run, failures=1)
+    if entry == "sweep":
+        assert run.sweep()["runtime_closeouts_pending"] == 1
+    else:
+        commit_runner_result(
+            run.repo, run.task, run.params, run.result,
+            prepared="persisted", save_task=run.manager.save,
+            deliver_result=lambda: pytest.fail("notified before settlement"),
+        )
+    fact = closeout.pending_closeout(run.manager.load(run.task.id))
+    assert (fact["closeout_state"], fact["closeout_reason"]) == ("write_error", "runner_result_read_failed")
+    assert "Errno 5" in fact["closeout_detail"] and "evidence_revision" not in fact
+    assert fact["runner_result_digest"] == before["runner_result_digest"]
+    assert (fact["run_id"], fact["attempt_id"]) == (before["run_id"], before["attempt_id"])
+    assert closeout._runner_result_file_revision(fact) == revision
+    assert state == {"failures": 0, "reads": 1}
+    assert run.repo.agent_run_for_run_id(run.task.id)["status"] == "unknown"
+    assert _wakes_for_attempt(tmp_path, run.task.id, run.params.attempt_id) == []
+
+    assert run.sweep()["runtime_closeouts_recovered"] == 1
+    authority, attempt = run.repo.agent_run_for_run_id(run.task.id), run.repo.get_attempt(run.params.attempt_id)
+    assert authority["status"] == attempt["status"] == "done"
+    assert closeout.pending_closeout(run.manager.load(run.task.id)) is None
+    run.sweep()
+    assert len(_wakes_for_attempt(tmp_path, run.task.id, run.params.attempt_id)) == 1
+    events = run.repo.events_for_attempt(run.params.attempt_id)
+    assert sum(event["event_type"] == "agent_run.completed" for event in events) == 1
+
+
+# LLM: 持续读取失败只按原尝试计数退避重读：同一时刻反复巡检不会每轮读盘，窗口到期才再读一次；恢复可读后正常收口。
+# 函数用途: 钉住读取失败重试有界，不形成每轮读盘的空转。
+def test_persistent_result_read_error_rereads_only_on_backoff_schedule(tmp_path, dead_run, monkeypatch):
+    run = dead_run()
+    now = [closeout.time.time()]
+    monkeypatch.setattr(closeout.time, "time", lambda: now[0])
+    state = _fail_result_reads(monkeypatch, run, failures=None)
+    for _ in range(10):
+        assert run.sweep()["runtime_closeouts_pending"] == 1
+    bounded = state["reads"]
+    fact = closeout.pending_closeout(run.manager.load(run.task.id))
+    assert 1 <= bounded <= closeout.CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT + 1
+    assert fact["closeout_state"] == "write_error" and fact["attempts"] > closeout.CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT
+    now[0] += closeout.CLOSEOUT_RETRY_BACKOFF_MAX_SECONDS + 1
+    assert run.sweep()["runtime_closeouts_pending"] == 1
+    assert state["reads"] == bounded + 1
+    state["failures"] = 0
+    now[0] += closeout.CLOSEOUT_RETRY_BACKOFF_MAX_SECONDS + 1
+    assert run.sweep()["runtime_closeouts_recovered"] == 1
+    run.sweep()
+    assert len(_wakes_for_attempt(tmp_path, run.task.id, run.params.attempt_id)) == 1

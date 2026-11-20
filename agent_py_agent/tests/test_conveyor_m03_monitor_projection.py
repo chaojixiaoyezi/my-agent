@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.script_store_support import _scheduler_job_matches
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.scheduler.monitor_state import _RUNTIME_FIELDS
@@ -238,6 +240,50 @@ def test_overwrite_keeps_replacement_one_shot_from_running_predecessor(kit, comp
     fresh = repo.reserve_due_runs(now=replacement['next_run_at'] + 1)
     assert len(fresh) == 1 and fresh[0]['scheduled_for'] == replacement['next_run_at']
     assert fresh[0]['definition_generation'] == _unit(replacement)['definition_generation'] == run['definition_generation'] + 1
+
+
+# LLM: S1-P1-01 覆盖安装本身是代次边界：脚本引用仍为 collect、计划与启停状态都不变，仅已安装脚本代码变化时，
+#   替换单任务或存活具名规则仍须严格前进代次；旧运行晚到失败只进历史一次，不按已配置失败暂停策略停掉替换，
+#   也不改替换的失败计数、checkpoint 或下次到期；重复接收同一投递只补回执，不再推进已安装代次。
+# 函数用途: 钉住同定义覆盖安装退休前任代次，替换按自己的到期时间恰好预留一次。
+@pytest.mark.parametrize('composite', [False, True])
+def test_same_definition_overwrite_retires_predecessor_generation(kit, composite):
+    source = round2_seed_monitor(kit, composite)
+    source = _sender_edit(kit, source, {'policy': {**_unit(source)['policy'], 'failure_pause_after': 1}})
+    first = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    assert kit.service.accept_delivery('local/alice', first['delivery_id'], initial_enabled=True)['status'] == 'accepted'
+    repo = round2_repo(kit.alice, 'local/alice')
+    installed = repo.get_job(source['job_id'])
+    run, claim, now = _start_due_run(repo, installed)
+    script = kit.alice / 'scripts/collect/main.py'
+    old_code = script.read_bytes()
+    ScriptStore(kit.main).save_script(AssetDescriptor('collect', 'script', '采集'), 'print("changed")\n')
+    second = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    assert kit.service.accept_delivery('local/alice', second['delivery_id'], conflict_strategy='overwrite',
+        initial_enabled=True)['status'] == 'accepted'
+    assert script.read_bytes() != old_code
+    replacement = repo.get_job(source['job_id'])
+    unit = _unit(replacement)
+    action = unit['precheck']
+    assert action['arguments']['script_id'] == 'collect' and unit['schedule'] == _unit(installed)['schedule']
+    assert replacement['status'] == 'active' and unit['policy']['failure_pause_after'] == 1
+    assert unit['definition_generation'] == run['definition_generation'] + 1
+    if composite:
+        assert [rule['id'] for rule in replacement['rules']] == [run['rule_id']] == ['first']
+    repo.finish_run(run['run_id'], claim['claim_id'], SchedulerRunFinish('failed', error_code='TASK_FAILED', now=now + 2))
+    final = repo.get_job(source['job_id'])
+    assert final['status'] == 'active' and final['enabled'] is True and _unit(final)['enabled'] is True
+    for key in ('consecutive_failures', 'precheck_checkpoint', 'next_run_at', 'definition_generation'):
+        assert _unit(final).get(key) == unit.get(key), key
+    history = repo.history(job_id=source['job_id'])[0]
+    assert [(row['run_id'], row['status']) for row in history] == [(run['run_id'], 'failed')]
+    stored = repo.store_path.read_bytes()
+    assert kit.service.accept_delivery('local/alice', second['delivery_id'], conflict_strategy='overwrite',
+        initial_enabled=True)['status'] == 'accepted'
+    assert repo.store_path.read_bytes() == stored
+    fresh = repo.reserve_due_runs(now=final['next_run_at'] + 1)
+    assert len(fresh) == 1 and fresh[0]['scheduled_for'] == final['next_run_at']
+    assert fresh[0]['definition_generation'] == unit['definition_generation']
 
 
 # LLM: P1-01 资产停用/启用与调度器 pause/resume 同用唯一代次写入器：每次启停推进定义代次，启停前已开工的旧运行晚到失败只进历史。
