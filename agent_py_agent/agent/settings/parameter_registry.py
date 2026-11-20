@@ -56,6 +56,7 @@ _HOST_CAPACITY_KEYS = frozenset({
 })
 DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     # 持久记录容量与可执行命令目录仅由部署者配置，不向模型开放资源或进程边界。
+    "gateway_control_operation_retention_days",
     "llm_call_records_max_rows", "acp_bridge_agents", "background_dispatch_log_max_bytes",
     "model_http_max_idle_connections", "scale_owner_snapshot_mode", "gateway_edge_identity_required",
     "gateway_event_hub_ring_events", "gateway_event_fallback_poll_seconds", "conversation_actor_workers",

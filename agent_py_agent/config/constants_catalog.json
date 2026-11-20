@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1563,
+  "count": 1565,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5556,6 +5556,14 @@
       "description": "单条命令帧最大 4 MiB：足够承载大工具输出，又防止无界消息撑爆内存。"
     },
     {
+      "name": "_CONTROL_RETENTION_MAX_CURSORS",
+      "file": "agent_py_agent/agent/gateway_parts/control_operation_service.py",
+      "value": 32,
+      "unit": "个游标",
+      "category": "上限预算",
+      "description": "各根只保留一个续扫句柄，上限防止长期开启的维护进程累计句柄。"
+    },
+    {
       "name": "_HOST_UUID_WAIT_SECONDS",
       "file": "agent_py_agent/agent/gateway_parts/daemon_metadata.py",
       "value": 5,
@@ -9234,6 +9242,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "连续失败超过 5 次进入退避（个数）：手误通常不会连续 5 次，超过就该怀疑是暴破。"
+    },
+    {
+      "name": "_GATEWAY_CONTROL_RECEIPT_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/settings/config.py",
+      "value": 7,
+      "unit": "天",
+      "category": "其它",
+      "description": "控制回执默认留存七天，实际部署值由同名配置项决定。"
     },
     {
       "name": "_CONFIG_PARSE_DIAGNOSTIC_LIMIT",

@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ....backends.provider_headers import provider_agent_owner_scope
+from ....common.fast_time import utc_iso_from_ns, utc_now_iso
 from ....concurrency.interrupt import register_interruptible
 from ....runtime_context import current_subagent_run_id
 from ....runtime_errors import runtime_error_report
@@ -22,6 +23,8 @@ from ..create_constraints import dispatchable_tasks
 from ..dispatch.conversation_lifecycle_gate import conversation_lifecycle_decisions
 from ..dispatch.params import DispatchExecutionPlan, DispatchParams
 from ..dispatch.tool_helpers import _dispatch_capability_config
+
+_BACKGROUND_LAUNCH_PREFIX = "subagent-start-"
 
 
 @dataclass(frozen=True)
@@ -139,7 +142,7 @@ def _start_background_dispatch(
 
     if expected_attempt_ids is not None and set(expected_attempt_ids) != set(run_ids):
         raise ValueError("启动身份必须与本批运行范围逐项对应")
-    launch_id = f"subagent-start-{time.time_ns()}"
+    launch_id = f"{_BACKGROUND_LAUNCH_PREFIX}{time.time_ns()}"
     router, cfg, dispatch_params = _auto_start_dispatch_args(
         agent,
         run_ids,
@@ -225,7 +228,7 @@ def _background_process_startup_failure(request: _ProcessStartupFailureRequest) 
         "launch_id": dispatch.launch_id,
         "pid": request.process.pid,
         "returncode": request.returncode,
-        "log_path": _background_log_path(request.agent, dispatch.launch_id),
+        "log_path": _process_background_log_path(request.agent, dispatch.launch_id, request.process),
         "summary": "subagent dispatch process exited before runner startup; affected tasks were marked channel failed",
     }
     attach_mark_errors(payload, request.mark_errors)
@@ -247,7 +250,7 @@ def _background_process_started_payload(
         "run_ids": request.run_ids,
         "launch_id": request.launch_id,
         "pid": process.pid,
-        "log_path": _background_log_path(agent, request.launch_id),
+        "log_path": _process_background_log_path(agent, request.launch_id, process),
         "acceptance_status": "accepted",
         "summary": "subagent dispatch accepted by a durable process; lifecycle changes will notify the direct parent",
     }
@@ -368,11 +371,11 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
             or not wait_owner.thread.is_alive() or wait_owner._setup_done.is_set()
             or wait_owner._process is not None):
         raise ValueError('background_wait_owner_scope_changed')
-    log_path = Path(_background_log_path(agent, request.launch_id))
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     from .log_retention import pin_dispatch_log, retire_dispatch_logs_slice
 
-    retire_dispatch_logs_slice(log_path.parent)
+    log_path = Path(_background_log_path(agent, request.launch_id))
+    retire_dispatch_logs_slice(log_path.parent.parent)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     command = _background_dispatch_command(agent, request)
     # 标记后台派工子进程:子进程里记录的 runner 会话据此标 in_process=False,宿主已死回收对它
     # 保留原 pid-liveness(不被网关重启的 epoch 换代判据误杀——它是独立进程,不随网关死)。
@@ -400,6 +403,7 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
         wait_owner.bind(process)
         info = os.fstat(log_handle.fileno())
         process._my_agent_background_log_identity = (info.st_dev, info.st_ino)
+        process._my_agent_background_log_path = str(log_path)
         process._my_agent_bounded_capture_expected = limit > 0
         log_handle.close()
         return process
@@ -437,13 +441,14 @@ def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchReques
         from .log_retention import record_dispatch_log_exit, retire_dispatch_logs_slice
 
         try:
-            record_dispatch_log_exit(_background_log_path(agent, request.launch_id), returncode=returncode,
+            log_path = Path(_process_background_log_path(agent, request.launch_id, process))
+            record_dispatch_log_exit(log_path, returncode=returncode,
                 run_ids=[run_id for run_id, _attempt in run_attempts] if run_attempts else [],
                 attempt_ids=dict(run_attempts) if run_attempts else None,
                 expected_identity=identity,
                 capture_expected=bool(getattr(process, '_my_agent_bounded_capture_expected', False)),
                 owner_home=runtime_owner_root(agent))
-            retire_dispatch_logs_slice(Path(_background_log_path(agent, request.launch_id)).parent)
+            retire_dispatch_logs_slice(log_path.parent.parent)
         except (OSError, ValueError, TypeError):
             pass  # 留存失败保持未知日志；不影响原进程回收及任务收口。
     getter = getattr(getattr(getattr(agent, "subagents", None), "runtime_db", None), "get_attempt", None)
@@ -606,7 +611,14 @@ def _project_root() -> Path:
 
 def _background_log_path(agent, launch_id: str) -> str:
     workspace = Path(getattr(getattr(agent, "subagents", None), "workspace", _project_root() / "data" / "subagents"))
-    return str(workspace / "background_dispatch" / f"{launch_id}.log")
+    stamp = launch_id.removeprefix(_BACKGROUND_LAUNCH_PREFIX)
+    # 规范启动 ID 携带出生纳秒，跨 UTC 日界重读也指向同一份日志。
+    utc = utc_iso_from_ns(int(stamp)) if launch_id.startswith(_BACKGROUND_LAUNCH_PREFIX) and stamp.isascii() and stamp.isdecimal() else utc_now_iso()
+    return str(workspace.absolute() / "background_dispatch" / utc[:10] / f"{launch_id}.log")
+
+
+def _process_background_log_path(agent, launch_id: str, process: subprocess.Popen) -> str:
+    return getattr(process, "_my_agent_background_log_path", None) or _background_log_path(agent, launch_id)
 
 
 # LLM: 显式空 Context 隔离含 3.14t 在内的线程继承策略；已解析的 agent.home_paths 是唯一 owner 来源，退出复位且不影响权限。

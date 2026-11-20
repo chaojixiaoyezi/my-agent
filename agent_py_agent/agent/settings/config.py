@@ -50,6 +50,9 @@ from .normalize import (
     normalize_agent_config,
 )
 
+# 控制回执默认留存七天，实际部署值由同名配置项决定。
+_GATEWAY_CONTROL_RECEIPT_RETENTION_DAYS = 7
+
 __all__ = [
     "AgentConfig",
     "DEFAULT_DECISION_AUTONOMY",
@@ -345,6 +348,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     retention_scan_slice_entries: int = field(default=128, metadata={"bounds": (1, None), "unit": "条", "model_read_only": True})
     retention_scan_slice_bytes: int = field(default=8388608, metadata={"bounds": (1024, None), "model_read_only": True})
     retention_scan_slice_ms: int = field(default=25, metadata={"bounds": (1, None), "model_read_only": True})
+    gateway_control_operation_retention_days: int = field(
+        default=_GATEWAY_CONTROL_RECEIPT_RETENTION_DAYS, metadata={"bounds": (0, None), "unit": "天"},
+    )
     memory_reference_pin_chunk_bytes: int = field(default=65536, metadata={"bounds": (1024, None), "model_read_only": True})
     reasoning_probe_max_output_tokens: int = field(default=40000, metadata={"bounds": (1, None)})
     reasoning_probe_timeout_seconds: float = field(default=180.0, metadata={"bounds": (0.0, None), "exclusive_minimum": True, "range": ">0"})

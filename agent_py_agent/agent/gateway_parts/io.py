@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.fast_dataclass import fast_frozen
 from ..common.json_io import (
     check_io_deadline,
     path_thread_lock,
@@ -79,7 +80,8 @@ _GATEWAY_REQUEST_FINGERPRINT_KEYS = (
 
 # LLM: Gateway JSON 读口用独立字段区分正文、读取错误与暂时锁忙；调用方不得把竞争误判为缺失或损坏。
 # 类用途: 返回一次 JSON 读取的正文和错误分类，供状态读取与队列调用方决定是否重试。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayJsonReadReport:
     payload: dict
     load_error: dict | None = None

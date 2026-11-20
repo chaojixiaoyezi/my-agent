@@ -63,7 +63,7 @@ def canonical_gateway_terminal_reason(paths, root_id):
         if not stat.S_ISREG(info.st_mode):
             return None
         report = read_json_file_report(path, context='runtime_reconciliation.terminal')
-        row = next((v for k, v in vars(report).items() if k not in {'load_error', 'lock_busy'}), None) if report.load_error is None else None
+        row = report.payload if report.load_error is None else None
         if (not isinstance(row, dict) or row.get('schema_version') != 'gateway_terminal_request.v1'
                 or row.get('id') != root_id or row.get('status') not in {'done', 'completed', 'interrupted', 'stopped', 'cancelled', 'failed'}):
             return None
