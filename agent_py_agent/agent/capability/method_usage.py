@@ -122,7 +122,7 @@ def record_read(agent, entry, *, chars):
             kind = 'capability_package' if hasattr(entry, 'package_sha256') else 'skill'
             row = {'event': 'manual_get', 'kind': kind, 'skill_id': entry.stable_id,
                    'source': 'package' if kind == 'capability_package' else entry.source, 'chars': chars, 'body_chars': chars, **binding}
-        record_skill_usage_events(_usage_store(agent), [row])
+        record_skill_usage_events(_usage_store(agent), [row], restore_agent=agent)
 
 
 def record_template_selection(tool, definition, source_ref, *, chars=0):

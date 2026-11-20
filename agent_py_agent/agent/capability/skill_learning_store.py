@@ -92,7 +92,7 @@ _VALID_MAINT_STATES = frozenset({"trial", "active", "cooled", "archived", "disab
 _VALID_MAINT_QUALITIES = frozenset({"trial", "established", "unreliable"})
 _VALID_USAGE_COVERAGES = frozenset({"exact", "lower_bound", "unknown"})
 _VALID_OWNERSHIPS = frozenset({"machine", "user_modified", "owner_layout", "unknown"})
-_VALID_OP_KINDS = frozenset({"archive", "restore", "displace_publish", "evict", "remove", "rollback"})
+_VALID_OP_KINDS = frozenset({"archive", "restore", "displace_publish", "displace_restore", "evict", "remove", "rollback"})
 _VALID_OP_PHASES = frozenset({"prepared", "moved", "committed", "cleanup"})
 _VALID_CURSOR_PHASES = frozenset({"recover", "usage", "ownership", "lifecycle", "versions", "receipts", "done"})
 _STABLE_VERSION_KEYS = frozenset({"version", "revision", "sha256", "established_at"})
@@ -909,6 +909,8 @@ class SkillLearningStore:
             return self._recover_restore_locked(registry, op, ts=ts)
         if kind == "displace_publish":
             return self._recover_displace_publish_locked(registry, op, ts=ts)
+        if kind == "displace_restore":
+            return self._recover_displace_restore_locked(registry, op)
         if kind == "evict":
             return self._recover_evict_locked(
                 registry, op, batch_count=batch_count, batch_bytes=batch_bytes, batch_ms=batch_ms
@@ -1041,13 +1043,7 @@ class SkillLearningStore:
         now: float | None = None,
     ) -> tuple[SkillLearningRegistry, LearnedSkill]:
         registry = self._prepare_clean_registry_locked(registry, now=now)
-        current = registry.skills.get(name)
-        if current is None or owner_layout_exempt(current) or current.maintenance.get("state") != "archived":
-            raise SkillLearningStoreError(
-                CODE_EVIDENCE_INCOMPLETE,
-                f"skill {name} is not an archived learned skill",
-                detail={"skill_name": name},
-            )
+        current, (src_root, src_parts), (dst_root, dst_parts) = self._checked_restore_target_locked(registry, name)
         ts = time.time() if now is None else float(now)
         op_id = uuid.uuid4().hex
         src_rel = self._encode_rel("store", ("archived", name))
@@ -1066,29 +1062,6 @@ class SkillLearningStore:
             "created_at": ts,
             "reason_code": "restore",
         }
-        src_root, src_parts = self._resolve_op_rel(src_rel)
-        dst_root, dst_parts = self._resolve_op_rel(dst_rel)
-        status, observed_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
-        if status != "ok" or observed_sha != current.sha256:
-            if status == "ok":
-                handoff_rec = replace(current, maintenance={**current.maintenance, "ownership": "user_modified"})
-                self.save_registry(replace(registry, skills={**registry.skills, name: handoff_rec}))
-                raise SkillLearningStoreError(
-                    "SKILL_LEARNING_USER_MODIFIED",
-                    f"archived skill {name} hash mismatch",
-                    detail={"skill_name": name, "state": "user_modified"},
-                )
-            raise SkillLearningStoreError(
-                CODE_EVIDENCE_INCOMPLETE,
-                f"archived skill {name} missing or unreadable",
-                detail={"skill_name": name},
-            )
-        if self._dir_exists_nofollow(dst_root, dst_parts):
-            raise SkillLearningStoreError(
-                CODE_EVIDENCE_INCOMPLETE,
-                f"restore destination already exists for {name}",
-                detail={"skill_name": name},
-            )
         with ExitStack() as rollback:
             undo_actions: list[Callable[[], None]] = []
             rollback.push(self._make_op_rollback(registry, op, undo_actions=undo_actions))
@@ -1104,6 +1077,74 @@ class SkillLearningStore:
             self.save_registry(committed)
             rollback.pop_all()
         return committed, next_record
+
+    def _checked_restore_target_locked(self, registry, name):
+        """核对归档正文、目录内容、所有权及目标路径，供普通和容量恢复共用。"""
+        current = registry.skills.get(name)
+        if current is None or owner_layout_exempt(current) or current.maintenance.get("state") != "archived":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"skill {name} is not an archived learned skill",
+                detail={"skill_name": name},
+            )
+        src = self._resolve_op_rel(self._encode_rel("store", ("archived", name)))
+        dst = (self.skills_root, (LEARNED_DIR_NAME, name))
+        status, sha = self._dir_skill_sha256_nofollow(*src)
+        extra = self._dir_extra_entries_status_nofollow(*src)
+        if current.maintenance.get("ownership") == "user_modified" or (
+            status == "ok" and (sha != current.sha256 or extra == "extra")
+        ):
+            handoff = replace(current, maintenance={**current.maintenance, "ownership": "user_modified"})
+            if handoff != current:
+                self.save_registry(replace(registry, skills={**registry.skills, name: handoff}))
+            raise SkillLearningStoreError(
+                "SKILL_LEARNING_USER_MODIFIED",
+                detail={"skill_name": name, "state": "user_modified",
+                        "reason": "extra_files_in_archive" if extra == "extra" else "archived_content_changed"},
+            )
+        if (status != "ok" or extra != "clean" or current.maintenance.get("ownership") == "unknown"
+                or self._entry_exists_nofollow(*dst)):
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE, "archived skill or restore destination unavailable",
+                detail={"skill_name": name},
+            )
+        return current, src, dst
+
+    def _transition_displace_restore_locked(
+        self, registry: SkillLearningRegistry, *, target: str, victim: str, now: float,
+    ) -> None:
+        """持久化唯一意图，再由同一个恢复驱动完成两次目录移动和一次登记提交。"""
+        registry = self._prepare_clean_registry_locked(registry, now=now)
+        restored, _, _ = self._checked_restore_target_locked(registry, target)
+        current = registry.skills.get(victim)
+        if (current is None or owner_layout_exempt(current) or current.maintenance.get("pinned") is True
+                or current.maintenance.get("ownership") in {"unknown", "user_modified"}
+                or current.maintenance.get("state") in {"archived", "disabled"}):
+            raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, detail={"skill_name": victim})
+        source = self.skill_path(victim, record=current).parent.relative_to(self.skills_root).parts
+        archived = ("archived", victim)
+        op = {
+            "operation_id": uuid.uuid4().hex,
+            "kind": "displace_restore",
+            "phase": "prepared",
+            "skill_name": victim,
+            "expected_revision": current.revision,
+            "expected_sha256": current.sha256,
+            "source_rel": self._encode_rel("skills", source),
+            "target_rel": self._encode_rel("store", archived),
+            "versions_rel": self._encode_rel("store", ("versions", target)),
+            "candidate_rel": self._encode_rel("store", ("archived", target)),
+            "candidate_name": target,
+            "candidate_revision": restored.revision,
+            "candidate_sha256": restored.sha256,
+            "created_at": now,
+            "reason_code": "cap_displace_for_restore",
+        }
+        pending = replace(registry, pending_operation=op)
+        self.save_registry(pending)
+        _, outcome = self._recover_displace_restore_locked(pending, op)
+        if outcome.get("code"):
+            raise SkillLearningStoreError(str(outcome["code"]), detail=outcome)
 
     # LLM: 单事务容量置换发布：同一配额/状态锁内把淘汰者在役目录归档并移入暂存候选，再提交双条目更新；
     #   受害者若在最后关头被用户改写，标记 user_modified 并安全终止而不碰用户正文。
@@ -1773,6 +1814,67 @@ class SkillLearningStore:
         if src_status == "ok" and src_sha != expected_sha:
             return self._handoff_corrupt_op_locked(registry, op, ownership="user_modified", reason="user_modified_in_archive")
         return self._handoff_corrupt_op_locked(registry, op, ownership="unknown", reason="restore_state_uncertain")
+
+    def _recover_displace_restore_locked(self, registry, op):
+        victim, target = str(op["skill_name"]), str(op["candidate_name"])
+        original, archived = (self._resolve_op_rel(str(op[key])) for key in ("source_rel", "target_rel"))
+        candidate = self._resolve_op_rel(str(op["candidate_rel"]))
+        restored = (self.skills_root, (LEARNED_DIR_NAME, target))
+        victims_sha = op["expected_sha256"]
+        target_sha = op["candidate_sha256"]
+        victim_record, target_record = registry.skills.get(victim), registry.skills.get(target)
+        if (victim_record is None or target_record is None
+                or (victim_record.revision, victim_record.sha256) != (op["expected_revision"], victims_sha)
+                or (target_record.revision, target_record.sha256) != (op["candidate_revision"], target_sha)):
+            raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, detail={"operation_id": op["operation_id"]})
+
+        def evidence(src, dst, sha, *, check_extra=False):
+            src_status = self._dir_skill_sha256_nofollow(*src)
+            dst_status = self._dir_skill_sha256_nofollow(*dst)
+            if (src_status == ("ok", sha) and dst_status[0] == "missing"
+                    and (not check_extra or self._dir_extra_entries_status_nofollow(*src) == "clean")):
+                return "original"
+            if (src_status[0] == "missing" and dst_status == ("ok", sha)
+                    and (not check_extra or self._dir_extra_entries_status_nofollow(*dst) == "clean")):
+                return "moved"
+            return "unknown"
+
+        victim_state = evidence(original, archived, victims_sha)
+        target_state = evidence(candidate, restored, target_sha, check_extra=True)
+        if victim_state == "original" and target_state == "original":
+            self._move_dir_nofollow(*original, *archived)
+            victim_state = evidence(original, archived, victims_sha)
+            target_state = evidence(candidate, restored, target_sha, check_extra=True)
+        if victim_state == "moved" and target_state == "original":
+            self._move_dir_nofollow(*candidate, *restored)
+            victim_state = evidence(original, archived, victims_sha)
+            target_state = evidence(candidate, restored, target_sha, check_extra=True)
+        if victim_state == target_state == "moved":
+            at, op_id = float(op["created_at"]), str(op["operation_id"])
+            skills = {**registry.skills,
+                      victim: self._archived_record(victim_record, op_id=op_id, ts=at),
+                      target: self._restored_record(target_record, op_id=op_id, ts=at)}
+            result = replace(registry, pending_operation=None, skills=skills)
+            self.save_registry(result)
+            return result, {"status": "recovered", "resumed": True, "completed": True,
+                            "kind": "displace_restore", "skill_name": target, "operation_id": op_id,
+                            "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False}
+
+        # 只有受害者原路径为空且归档内容可确认时才回退，保留任何外部修改。
+        if victim_state == "moved":
+            self._move_dir_nofollow(*archived, *original)
+            victim_state = "original"
+        skills = dict(registry.skills)
+        if victim_state == "unknown":
+            skills[victim] = replace(victim_record, maintenance={**victim_record.maintenance, "ownership": "unknown"})
+        if target_state != "original":
+            skills[target] = replace(target_record, maintenance={**target_record.maintenance, "ownership": "unknown"})
+        result = replace(registry, skills=skills, pending_operation=None)
+        self.save_registry(result)
+        return result, {"status": "handoff", "resumed": True, "completed": True, "kind": "displace_restore",
+                        "code": CODE_EVIDENCE_INCOMPLETE, "skill_name": target, "operation_id": op["operation_id"],
+                        "reason": "displace_restore_state_uncertain", "phase": "done",
+                        "actions": 1, "bytes_freed": 0, "remaining": False}
 
     def _recover_displace_publish_locked(
         self,
@@ -2647,6 +2749,10 @@ def _validate_lifecycle_operation(raw: object) -> dict[str, object] | None:
     for key in ("cleanup_cursor", "event_id", "reason_code"):
         if key in raw and not isinstance(raw[key], str):
             raise ValueError(f"pending_operation.{key} must be a string")
+    if raw["kind"] == "displace_restore" and not all(
+        raw.get(key) for key in ("candidate_name", "candidate_revision", "candidate_sha256", "candidate_rel")
+    ):
+        raise ValueError("pending_operation displace_restore target evidence missing")
     return dict(raw)
 
 

@@ -158,6 +158,7 @@ def _arm_materialization_error(
     *,
     mode: str = "post_journal",
     fail_journal_read: bool = False,
+    skill_key: str | None = None,
 ) -> dict:
     """按写入阶段确定性触发一次 OSError(EIO)，模拟物化失败或日志前失败。"""
     orig_write = v13_store_mod.write_bytes_atomic_beneath
@@ -175,6 +176,16 @@ def _arm_materialization_error(
         if state["armed"] and leaf == ".transaction.json":
             parsed = json.loads(raw) if raw else {}
             if parsed:
+                if target_filename == "skill_operations.json":
+                    skills = parsed.get("states", {}).get("skill_operations")
+                    if skills is None or not any("skill" in receipt["result"] for receipt in skills["receipts"].values()):
+                        return orig_write(root, parts, raw, *args, **kwargs)
+                    if skill_key is not None and not any(
+                        fact.get("state") == "committed" and fact.get("idempotency_key") == skill_key
+                        for receipt in skills["receipts"].values()
+                        if (fact := receipt["result"].get("_skill_operation")) is not None
+                    ):
+                        return orig_write(root, parts, raw, *args, **kwargs)
                 if mode == "pre_journal":
                     state["armed"] = False
                     state["pre_journal_failed"] = True
@@ -221,7 +232,7 @@ def test_skills_lifecycle_post_journal_materialization_error_preserves_asset_and
     # 1. skills.create：先持久化 .transaction.json 回执，再在 skill_operations.json 物化时报错
     create_key = "r3-skill-create-" + uuid4().hex
     v1_body = _skill_markdown(skill_id, "version one workflow")
-    state = _arm_materialization_error(monkeypatch, "skill_operations.json", mode="post_journal")
+    state = _arm_materialization_error(monkeypatch, "skill_operations.json", mode="post_journal", skill_key=create_key)
     status, err_body = _http_business(
         server,
         "skills.create",
@@ -248,7 +259,7 @@ def test_skills_lifecycle_post_journal_materialization_error_preserves_asset_and
     # 2. skills.update：日志落盘后物化报错，更新后的 v2 正文必须保留而非回退到 v1
     update_key = "r3-skill-update-" + uuid4().hex
     v2_body = _skill_markdown(skill_id, "version two workflow")
-    _arm_materialization_error(monkeypatch, "skill_operations.json", mode="post_journal")
+    _arm_materialization_error(monkeypatch, "skill_operations.json", mode="post_journal", skill_key=update_key)
     status, err_body = _http_business(
         server,
         "skills.update",
@@ -280,11 +291,12 @@ def test_skills_lifecycle_post_journal_materialization_error_preserves_asset_and
 
     # 3. skills.retire：日志落盘后物化报错，enabled=False 必须保留
     retire_key = "r3-skill-retire-" + uuid4().hex
-    _arm_materialization_error(monkeypatch, "skill_operations.json", mode="post_journal")
+    state = _arm_materialization_error(monkeypatch, "skill_operations.json", mode="post_journal", skill_key=retire_key)
     status, err_body = _http_business(
         server, "skills.retire", {"skill_id": skill_id}, idempotency_key=retire_key
     )
     assert status == 503 and err_body["error"]["code"] == "OUTCOME_UNKNOWN"
+    assert state["materialize_failed"], (state, err_body["error"])
     meta = json.loads((skill_dir / "skill_meta.json").read_text(encoding="utf-8"))
     assert meta["enabled"] is False
 
@@ -295,11 +307,12 @@ def test_skills_lifecycle_post_journal_materialization_error_preserves_asset_and
 
     # 4. skills.activate：日志落盘后物化报错，enabled=True 必须保留
     activate_key = "r3-skill-activate-" + uuid4().hex
-    _arm_materialization_error(monkeypatch, "skill_operations.json", mode="post_journal")
+    state = _arm_materialization_error(monkeypatch, "skill_operations.json", mode="post_journal", skill_key=activate_key)
     status, err_body = _http_business(
         server, "skills.activate", {"skill_id": skill_id}, idempotency_key=activate_key
     )
     assert status == 503 and err_body["error"]["code"] == "OUTCOME_UNKNOWN"
+    assert state["materialize_failed"], (state, err_body["error"])
     meta = json.loads((skill_dir / "skill_meta.json").read_text(encoding="utf-8"))
     assert meta["enabled"] is True
 

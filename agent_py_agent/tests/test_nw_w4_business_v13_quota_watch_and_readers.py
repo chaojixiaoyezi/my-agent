@@ -243,9 +243,13 @@ def test_w11_skills_with_quota_no_nested_admission_and_rollback(w4_http, monkeyp
 
     # 提交阶段模拟配额超限时，已写入磁盘的技能与空目录须干净回滚并归零账本预留。
     orig_tx = V13Store.transaction
+    create_failure_key = "skill-fail-" + uuid4().hex
+    retire_failure_key = "skill-retire-fail-" + uuid4().hex
 
     def failing_commit(self, collection, mutate, **kwargs):
-        if collection == "skill_operations":
+        if collection == "skill_operations" and kwargs["idempotency_key"] in {
+            create_failure_key, retire_failure_key,
+        }:
             raise owner_quota.OwnerQuotaExceeded("quota_exceeded", projection=None)
         return orig_tx(self, collection, mutate, **kwargs)
 
@@ -257,7 +261,7 @@ def test_w11_skills_with_quota_no_nested_admission_and_rollback(w4_http, monkeyp
             "skill_id": "rollback-skill",
             "body_markdown": "---\nname: rollback-skill\ndescription: 回滚技能\n---\n\nbody\n",
         },
-        idempotency_key="skill-fail-" + uuid4().hex,
+        idempotency_key=create_failure_key,
     )
     assert status_fail != 200 and body_fail["state"] == "failed"
     assert not (owner_home / "skills" / "rollback-skill" / "SKILL.md").exists()
@@ -269,7 +273,7 @@ def test_w11_skills_with_quota_no_nested_admission_and_rollback(w4_http, monkeyp
         server,
         "skills.retire",
         {"skill_id": "quota-skill"},
-        idempotency_key="skill-retire-fail-" + uuid4().hex,
+        idempotency_key=retire_failure_key,
     )
     assert status_retire_fail != 200
     listed = _ok_http(server, "skills.list", {})
@@ -555,8 +559,10 @@ def test_w9_w11_prelock_replay_reads_unmaterialized_journal(w4_http, monkeypatch
 
     def freeze_after_journal(root, parts, raw_bytes):
         if freeze["active"]:
-            if tuple(parts) == ("data", "business_v13", ".transaction.json") and json.loads(raw_bytes):
-                freeze["journal_written"] = True
+            if tuple(parts) == ("data", "business_v13", ".transaction.json") and (pending := json.loads(raw_bytes)):
+                skills = pending.get("states", {}).get("skill_operations")
+                if skills is None or any("skill" in receipt["result"] for receipt in skills["receipts"].values()):
+                    freeze["journal_written"] = True
                 return orig_write(root, parts, raw_bytes)
             if freeze["journal_written"]:
                 return None

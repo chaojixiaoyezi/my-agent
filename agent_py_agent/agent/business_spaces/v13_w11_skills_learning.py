@@ -17,6 +17,7 @@ import tempfile
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from ..capability.skills import skill_catalog_roots
 from ..common.directory_lock import locked_private_directory
@@ -348,9 +349,34 @@ def validate(call):
     return _parse_body(call, call.params['body_markdown'], call.params.get('skill_id'))
 
 
+def _body_sha(text):
+    return None if text is None else hashlib.sha256(text.encode()).hexdigest()
+
+
+def _body_mutation_plan(call, skill_id, body):
+    original = _existing_text(call, skill_id)
+    descriptor = _descriptor(call, skill_id) if original is not None or call.action == 'skills.update' else None
+    if call.action == 'skills.update' and _layer(descriptor, _learned_names(call)) != 'user':
+        raise BusinessError('STATE_CONFLICT')
+    return {
+        'original_revision': _version_ref(descriptor) if descriptor is not None else None,
+        'original_sha': _body_sha(original),
+        'planned_sha': _body_sha(body),
+        'staged_ref': ['skills', skill_id, 'SKILL.md'],
+    }
+
+
+def _mutation_conflict():
+    return BusinessError('REVISION_CONFLICT', details={
+        'attribution': 'unknown',
+        'reason': 'skill_mutation_state_changed',
+        'next_action': '重新读取技能和版本，核对这次操作回执再提交修改。',
+    }, effect_outcome='unknown')
+
+
 # LLM: 准入后在同一个原生资产锁内重读目标、比较CAS并做live末核；原子nofollow写不越owner。
 # 函数用途: 原子写入一个用户层 Skill 正文。
-def _write_skill_staged(call, skill_id, body, *, creating=False):
+def _write_skill_staged(call, skill_id, body, *, creating=False, plan=None):
     from ..assets import asset_root_lock
     from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 
@@ -364,6 +390,8 @@ def _write_skill_staged(call, skill_id, body, *, creating=False):
     with owner_quota_enforcer_from_policy(home).admission() as admission:
         with asset_root_lock(home):
             existing = _existing_text(call, skill_id)
+            if plan is not None and _body_sha(existing) != plan['original_sha']:
+                raise _mutation_conflict()
             if creating:
                 if existing is not None and existing != body:
                     raise BusinessError('STATE_CONFLICT')
@@ -378,16 +406,15 @@ def _write_skill_staged(call, skill_id, body, *, creating=False):
             if existing != body:
                 write_text_atomic_beneath(home, parts, body)
                 wrote = True
-            result = {'skill': _view(_descriptor(call, skill_id), learned=_learned_names(call),
-                                   index=_directory_index(call))}
+            result = _skill_mutation_result(call, skill_id)
 
     def rollback():
         if not wrote:
-            return
+            return True
         with owner_quota_enforcer_from_policy(home).admission() as rollback_admission:
             with asset_root_lock(home):
                 if _existing_text(call, skill_id) != body:
-                    return
+                    return False
                 if existing is None:
                     rollback_admission.check([OwnerQuotaChange(target, 0)])
                     if not target.is_symlink():
@@ -401,6 +428,7 @@ def _write_skill_staged(call, skill_id, body, *, creating=False):
                 else:
                     rollback_admission.check([OwnerQuotaChange(target, len(existing.encode('utf-8')))])
                     write_text_atomic_beneath(home, parts, existing)
+        return True
 
     return result, rollback
 
@@ -428,19 +456,16 @@ def _has_durable_skill_receipt(store, receipt_key, fingerprint):
 
 # LLM: 这里只留原生资产变更的耐久结果回执，不复制技能权威状态；原Store绑定owner/subject/key。
 # 函数用途: 按 owner 与已校验技能串行执行技能操作，覆盖回执预检、原生暂存、提交与补偿。
-def _skill_receipted(call, mutate, *, staged=None):
+def _skill_receipted(call, *, staged, observe):
     _require(call)
-    raw_skill_id = call.params.get('skill_id') if isinstance(call.params, Mapping) else None
-    skill_id = _safe_skill_id(raw_skill_id)
-    # 同一 owner 的同一技能写操作（create/update/activate/retire）共用外层操作锁，
-    # 锁序恒为 操作锁 -> 配额 -> 资产锁 / .store.lock，严禁跨锁倒置。
+    skill_id = _safe_skill_id(call.params.get('skill_id'))
+    # 锁序保持为技能操作锁 → 配额 → 资产锁或登记锁。
     with locked_private_directory(Path(call.owner_home), relative_parts=('data', 'business_v13'),
                                   lock_name=f'.skill-operation-{skill_id}.lock'):
-        return _skill_receipted_locked(call, mutate, staged=staged)
+        return _skill_receipted_locked(call, skill_id, staged=staged, observe=observe)
 
 
-# 函数用途: 在技能操作锁内执行回执预检、原生写入及失败后按耐久回执核查的补偿。
-def _skill_receipted_locked(call, mutate, *, staged=None):
+def _skill_receipted_locked(call, skill_id, *, staged, observe):
     from .v13_history_rows import copy_value, encode
 
     _require(call)
@@ -453,34 +478,111 @@ def _skill_receipted_locked(call, mutate, *, staged=None):
     store._authorize()
     receipt_key = hashlib.sha256(encode([store.subject_id, store.action, key])).hexdigest()
     fingerprint = hashlib.sha256(encode(['skill_operations', store.action, digest, None])).hexdigest()
-    receipt = (store._read('skill_operations').get('receipts') or {}).get(receipt_key)
+    state = store._read('skill_operations')
+    receipt = (state.get('receipts') or {}).get(receipt_key)
     if receipt is None:
         receipt = store._rows('skill_operations').get('receipts', receipt_key)
     if receipt is not None:
         if receipt.get('fingerprint') != fingerprint:
             raise BusinessError('IDEMPOTENCY_CONFLICT')
-        return copy_value(receipt['result'])
+        result = copy_value(receipt['result'])
+        result.pop('_skill_operation', None)
+        return result
 
-    # 资产写入/启停及其外部配额和资产锁必须在 .store.lock 与外层配额事务外完成。
-    if staged is not None:
-        result, rollback = staged()
-    else:
-        result, rollback = mutate(), None
-
-    # LLM: 回执不保存正文或第二份技能数据，只保存经过原生读回的公开结果。
-    # 函数用途: 在原Store事务持锁期间仅提交幂等回执。
-    def apply(records):
-        _require(call)
-        return copy_value(result)
+    active_key = 'skill-mutation:' + skill_id
+    prepared = state.get('metadata', {}).get(active_key)
+    if prepared is not None:
+        if (not isinstance(prepared, dict) or prepared.get('state') != 'prepared'
+                or prepared.get('skill_id') != skill_id
+                or not {'receipt_key', 'request_fingerprint', 'original_sha', 'planned_sha', 'staged_ref'} <= prepared.keys()):
+            raise BusinessError('STORE_UNAVAILABLE')
+        if prepared.get('receipt_key') != receipt_key:
+            raise BusinessError('OUTCOME_UNKNOWN', details={
+                'reason': 'skill_mutation_pending',
+                'next_action': '使用上次操作的幂等键重试并核对回执。',
+            }, effect_outcome='unknown')
+        if prepared.get('request_fingerprint') != fingerprint or prepared.get('action') != call.action:
+            raise BusinessError('IDEMPOTENCY_CONFLICT')
 
     try:
-        return store.transaction('skill_operations', apply,
-            idempotency_key=key, params_digest=digest)
-    except Exception:
-        # 先查耐久日志/回执；仅当确认未落盘(False)时才允许补偿回滚原生技能写入。
-        if rollback is not None and _has_durable_skill_receipt(store, receipt_key, fingerprint) is False:
-            rollback()
+        observed = observe()
+    except (BusinessError, OSError, ValueError) as exc:
+        if prepared is not None:
+            raise _mutation_conflict() from exc
         raise
+    if prepared is None:
+        if call.action == 'skills.create' and observed['original_sha'] is not None:
+            raise BusinessError('STATE_CONFLICT')
+        if (call.action == 'skills.update'
+                and observed['original_revision'] != call.params['expected_version_ref']):
+            raise BusinessError('REVISION_CONFLICT')
+        prepared = {**observed, 'state': 'prepared', 'idempotency_key': key,
+                    'receipt_key': receipt_key, 'request_fingerprint': fingerprint,
+                    'skill_id': skill_id, 'action': call.action}
+
+        def prepare(metadata, result):
+            if active_key in metadata:
+                raise BusinessError('STORE_UNAVAILABLE')
+            metadata[active_key] = prepared
+
+        # 沿原事务日志持久化准备行。外层按技能互斥，配额和资产写锁尚未获取。
+        store.transaction('skill_operations', lambda _rows: {},
+                          idempotency_key=uuid4().hex, params_digest=digest, metadata_update=prepare, record_receipt=False)
+
+    def finish(metadata, _result):
+        if metadata.get(active_key) != prepared:
+            raise BusinessError('STORE_UNAVAILABLE')
+        metadata.pop(active_key)
+
+    def abort(metadata, _result):
+        if metadata.get(active_key) != prepared:
+            raise BusinessError('STORE_UNAVAILABLE')
+        metadata.pop(active_key)
+
+    if observed['staged_ref'] != prepared['staged_ref']:
+        raise _mutation_conflict()
+    rollback = None
+    if observed['original_sha'] == prepared['planned_sha']:
+        result = _skill_mutation_result(call, skill_id)
+    elif observed['original_sha'] == prepared['original_sha']:
+        try:
+            result, rollback = staged(prepared)
+        except BusinessError as exc:
+            if exc.effect_outcome == 'not_started':
+                try:
+                    after_failure = observe()
+                    if (after_failure['staged_ref'] == prepared['staged_ref']
+                            and after_failure['original_sha'] == prepared['original_sha']):
+                        store.transaction('skill_operations', lambda _rows: {}, idempotency_key=uuid4().hex,
+                                          params_digest=digest, metadata_update=abort, record_receipt=False)
+                except (BusinessError, OSError, ValueError) as verification_error:
+                    exc.add_note('skill_mutation_abort_check:' + type(verification_error).__name__)
+            raise
+    else:
+        raise _mutation_conflict()
+
+    def result_with_provenance(public_result):
+        # 完成行随原公开回执物化，避免为每个阶段另留历史副本。
+        return {**public_result, '_skill_operation': {**prepared, 'state': 'committed'}}
+
+    try:
+        return store.transaction('skill_operations', lambda _records: copy_value(result),
+                                 idempotency_key=key, params_digest=digest, metadata_update=finish,
+                                 receipt_view=result_with_provenance)
+    except Exception as exc:
+        # 正常错误只在确认回执未提交、原生补偿成功时释放准备行，崩溃留给同键恢复。
+        if rollback is not None and _has_durable_skill_receipt(store, receipt_key, fingerprint) is False:
+            try:
+                if rollback():
+                    store.transaction('skill_operations', lambda _rows: {}, idempotency_key=uuid4().hex,
+                                      params_digest=digest, metadata_update=abort, record_receipt=False)
+            except Exception as compensation_error:
+                exc.add_note('skill_mutation_compensation:' + type(compensation_error).__name__)
+        raise
+
+
+def _skill_mutation_result(call, skill_id):
+    return {'skill': _view(_descriptor(call, skill_id), learned=_learned_names(call), index=_directory_index(call))}
 
 
 # LLM: 读取只沿 no-follow 链，缺失返回 None 供创建路径区分新增与同键重放。
@@ -500,7 +602,10 @@ def create_skill(call):
     parsed = _parse_body(call, body, skill_id)
     if not parsed['valid']:
         raise BusinessError('INVALID_SCHEMA')
-    return _skill_receipted(call, None, staged=lambda: _write_skill_staged(call, skill_id, body, creating=True))
+    return _skill_receipted(
+        call, observe=lambda: _body_mutation_plan(call, skill_id, body),
+        staged=lambda plan: _write_skill_staged(call, skill_id, body, creating=True, plan=plan),
+    )
 
 
 # LLM: 只有用户层可改；同键先重放，CAS由原生资产锁内的当前正文决定，不在锁外比较。
@@ -512,11 +617,24 @@ def update_skill(call):
     parsed = _parse_body(call, body, skill_id)
     if not parsed['valid']:
         raise BusinessError('INVALID_SCHEMA')
-    return _skill_receipted(call, None, staged=lambda: _write_skill_staged(call, skill_id, body))
+    return _skill_receipted(
+        call, observe=lambda: _body_mutation_plan(call, skill_id, body),
+        staged=lambda plan: _write_skill_staged(call, skill_id, body, plan=plan),
+    )
 
 
-def _toggle_staged(call, enabled):
+def _toggle_plan(call, enabled):
     from ..assets.skill_adapter import SkillAdapter
+
+    skill_id = _safe_skill_id(call.params['skill_id'])
+    descriptor = _descriptor(call, skill_id)
+    if _layer(descriptor, _learned_names(call)) not in {'user', 'learned'}:
+        raise BusinessError('STATE_CONFLICT')
+    return SkillAdapter(call.owner_home).plan_enabled(descriptor['id'], enabled)
+
+
+def _toggle_staged(call, enabled, *, plan=None):
+    from ..assets.skill_adapter import SkillAdapter, SkillSnapshotError
 
     _require(call)
     skill_id = _safe_skill_id(call.params['skill_id'])
@@ -529,21 +647,28 @@ def _toggle_staged(call, enabled):
     if changed:
         try:
             _require(call)
-            SkillAdapter(call.owner_home).set_enabled(descriptor['id'], enabled)
+            SkillAdapter(call.owner_home).set_enabled(
+                descriptor['id'], enabled, expected_sha=None if plan is None else plan['original_sha'],
+            )
+        except SkillSnapshotError as error:
+            raise _mutation_conflict() from error
         except (ValueError, FileNotFoundError) as error:
             raise BusinessError('STATE_CONFLICT') from error
-    learned = _learned_names(call)
-    result = {'skill': _view(_descriptor(call, skill_id), learned=learned, index=_directory_index(call))}
+    result = _skill_mutation_result(call, skill_id)
 
     def rollback():
         if not changed:
-            return
+            return True
         try:
             current = _descriptor(call, skill_id)
             if bool(current.get('enabled', True)) == enabled:
-                SkillAdapter(call.owner_home).set_enabled(current['id'], prior_enabled)
-        except (BusinessError, ValueError, FileNotFoundError):
-            pass
+                SkillAdapter(call.owner_home).set_enabled(
+                    current['id'], prior_enabled, expected_sha=None if plan is None else plan['planned_sha'],
+                )
+                return True
+        except (BusinessError, SkillSnapshotError, ValueError, FileNotFoundError):
+            return False
+        return False
 
     return result, rollback
 
@@ -558,13 +683,17 @@ def _toggle(call, enabled):
 # LLM: 启用沿原生技能侧文件，重放返回旧回执而不覆写后来停用的当前状态。
 # 函数用途: 启用一个用户层或自学 Skill。
 def activate(call):
-    return _skill_receipted(call, None, staged=lambda: _toggle_staged(call, True))
+    return _skill_receipted(
+        call, observe=lambda: _toggle_plan(call, True), staged=lambda plan: _toggle_staged(call, True, plan=plan),
+    )
 
 
 # LLM: 停用不删除正文与版本，真实变更与耐久结果回执使用同一幂等边界。
 # 函数用途: 停用一个用户层或自学 Skill。
 def retire(call):
-    return _skill_receipted(call, None, staged=lambda: _toggle_staged(call, False))
+    return _skill_receipted(
+        call, observe=lambda: _toggle_plan(call, False), staged=lambda plan: _toggle_staged(call, False, plan=plan),
+    )
 
 
 # LLM: 回测只派发原生后台任务，HTTP 线程不执行模型；空间必须是真实记录。

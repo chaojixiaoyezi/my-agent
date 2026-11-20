@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import MISSING, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -72,27 +73,30 @@ def record_skill_usage_event(
         values.update({key: value for key, value in overrides.items() if value is not MISSING})
         row = _usage_row(agent_or_store, values)
         store = _usage_store(agent_or_store)
-        _record_usage_rows(store, [row])
+        _record_usage_rows(store, [row], agent=None if isinstance(agent_or_store, SkillLearningStore) else agent_or_store)
     except Exception:  # noqa: BLE001 - 附带统计不能改变原工具/宿主的成功或失败。
         logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
 
 
 # LLM: 单条与整批复用同一事件字典校验，再拿owner配额→state锁；空批不创建目录，故障只warning且不写半批。
 # 函数用途: 为一次搜索的全部命中只追加并保存一次使用台账。
-def record_skill_usage_events(store: SkillLearningStore, events: Sequence[dict[str, object]]) -> None:
+def record_skill_usage_events(
+    store: SkillLearningStore, events: Sequence[dict[str, object]], *, restore_agent=None,
+) -> None:
     try:
         rows = [_usage_row(store, event) for event in events]
         if rows:
-            _record_usage_rows(_usage_store(store), rows)
+            _record_usage_rows(_usage_store(store), rows, agent=restore_agent)
     except Exception:  # noqa: BLE001 - 附带批量统计不能改变原工具结果。
         logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
 
 
 # LLM: 仅接收本地已校验事件；同一锁内按 quota->state->runtime 顺序持久化 JSONL、SQL 精确回执与同步再激活。
 # 函数用途: 让单条与批量记账共用同一个持久事务。
-def _record_usage_rows(store, events: list[dict]) -> None:
+def _record_usage_rows(store, events: list[dict], *, agent=None) -> None:
     _check_usage_directory(store)
-    with store.state_lock() as admission:
+    real_events = [row for row in events if _is_real_body_delivery_row(row)]
+    with _usage_state_lock(store, real_events, agent) as (admission, registry, policy, archive_candidate):
         rows = _ledger_rows(store)
         summary = _read_summary(store, rows)
         # 去重只覆盖原有界明细窗口，不另建终身增长索引；重复投递连文件也不重写。
@@ -110,11 +114,14 @@ def _record_usage_rows(store, events: list[dict]) -> None:
             rows.append(row)
             if len(rows) > MAX_USAGE_LEDGER_EVENTS:
                 rows = rows[-KEEP_USAGE_LEDGER_EVENTS:]
-        if added:
+        if added and not archive_candidate:
             _save_usage(store, admission, rows, summary)
-
-        # 阶段去重不吞真实正文投递；原精确回执按任务/版本幂等。
-        _record_exact_and_reheat_locked(store, events)
+        try:
+            # 阶段去重不吞精确回执。归档准入结论随同一条使用事件保存。
+            _record_exact_and_reheat_locked(store, registry, real_events, restore_policy=policy)
+        finally:
+            if added and archive_candidate:
+                _save_usage(store, admission, rows, summary)
 
 # LLM: 生命周期权威仍是原summary；未知不能转成空计数，原writer不依赖此读取口。
 # 函数用途: 保持完整成功时的原字典，失败时抛带coverage的异常。
@@ -340,37 +347,82 @@ def learning_usage_binding(agent: object, entry: object) -> dict[str, object]:
     return result
 
 
-def _record_exact_and_reheat_locked(store: SkillLearningStore, events: list[dict]) -> None:
-    real_events = [row for row in events if _is_real_body_delivery_row(row)]
-    if not real_events:
-        return
+def _version_matches_receipt(record, row: dict) -> bool:
+    identity = (
+        record.maintenance.get("incarnation_id"),
+        record.maintenance.get("activation_id"),
+        str(record.sha256 or "").lower(),
+    )
+    return all(identity) and identity == (
+        row.get("incarnation_id"), row.get("activation_id"), str(row.get("content_sha256") or "").lower(),
+    )
 
+
+@contextmanager
+def _usage_state_lock(store, real_events, agent):
+    def read_registry():
+        try:
+            return store.load_registry() if real_events and store.registry_path.exists() else None
+        except SkillLearningStoreError:
+            # 版本事实不明时仍保留生命周期无关的使用计数。
+            return None
+
+    def has_archive_candidate(registry):
+        return registry is not None and any(
+            current.maintenance.get("state") == "archived" and _version_matches_receipt(current, row)
+            for row in real_events
+            if (current := registry.skills.get(_learned_skill_name(str(row["kind"]), str(row["skill_id"])))) is not None
+        )
+
+    with store.state_lock() as admission:
+        registry = read_registry()
+        archive_candidate = has_archive_candidate(registry)
+        if agent is None or not archive_candidate:
+            yield admission, registry, None, archive_candidate
+            return
+    # 只有确切的归档候选需要在锁外收集实时保护证据，重进锁后再核版本。
+    policy = None
+    if getattr(agent, "skill_learning_store", None) is store:
+        policy = _receipt_restore_policy(registry, agent)
+    else:
+        owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+        if owner_home is not None and Path(owner_home).resolve() == store.skills_root.parent.resolve():
+            policy = _receipt_restore_policy(registry, agent)
+    with store.state_lock() as admission:
+        registry = read_registry()
+        yield admission, registry, policy, has_archive_candidate(registry)
+
+
+def _receipt_restore_policy(registry, agent):
+    from ..settings.config import AgentConfig
+    from ..settings.live_switches import refresh_live_switches
+    from .skill_learning_maintenance import _resolve_control_policy
+    from .skill_learning_protection import learning_protection_for_agent
+    from .skill_learning_publish import _registered_capacity_available
+
+    config = getattr(agent, "config", None)
+    defaults = AgentConfig.__dataclass_fields__
+    try:
+        if config is not None:
+            refresh_live_switches(config)
+        max_skills, evict_seconds = _resolve_control_policy(lambda: config, 0, 0)
+        if getattr(config, "self_learning_max_skills", None) is None:
+            max_skills = defaults["self_learning_max_skills"].default
+        if getattr(config, "self_learning_evict_seconds", None) is None:
+            evict_seconds = defaults["self_learning_evict_seconds"].default
+        protection = ({} if _registered_capacity_available(registry, max_skills)
+                      else learning_protection_for_agent(agent))
+    except (SkillLearningStoreError, OSError, ValueError):
+        return None
+    return {"max_skills": max_skills, "evict_seconds": evict_seconds, **protection}
+
+
+def _record_exact_and_reheat_locked(
+    store: SkillLearningStore, registry, real_events: list[dict], *, restore_policy,
+) -> None:
+    if registry is None:
+        return
     runtime_repo = store._runtime_repository()
-    exact_aggregates: dict[tuple[str, str, str], dict] = {}
-    if runtime_repo is not None:
-        for row in real_events:
-            if (
-                isinstance(row.get("body_chars"), int)
-                and row["body_chars"] > 0
-                and row.get("incarnation_id")
-                and row.get("activation_id")
-                and _SHA256_RE.fullmatch(str(row.get("content_sha256") or ""))
-                and row.get("task_key")
-            ):
-                receipt_event = {**row, "at": _iso_to_timestamp(row["at"])}
-                result = record_exact_use(store, receipt_event, runtime=runtime_repo)
-                agg = result.get("aggregate")
-                if isinstance(agg, dict):
-                    key = (
-                        str(agg.get("incarnation_id") or ""),
-                        str(agg.get("activation_id") or ""),
-                        str(agg.get("content_sha256") or ""),
-                    )
-                    exact_aggregates[key] = agg
-
-    if not store.registry_path.exists():
-        return
-    registry = store.load_registry()
     dirty = False
     for row in real_events:
         name = _learned_skill_name(str(row.get("kind") or "skill"), str(row.get("skill_id") or ""))
@@ -381,13 +433,32 @@ def _record_exact_and_reheat_locked(store: SkillLearningStore, events: list[dict
             continue
         if current.maintenance.get("ownership") == "user_modified":
             continue
+        if not _version_matches_receipt(current, row):
+            continue
         ts = _iso_to_timestamp(row["at"]) or datetime.now(timezone.utc).timestamp()
-        state = str(current.maintenance.get("state") or "trial")
-        if state == "archived":
+        if current.maintenance.get("state") == "archived":
+            from .skill_learning_maintenance import admit_restore_locked
+
+            if dirty:
+                store.save_registry(registry)
+                dirty = False
             try:
-                registry, current = store._transition_restore_locked(registry, name, now=ts)
+                registry = store._prepare_clean_registry_locked(registry, now=ts)
             except (SkillLearningStoreError, OSError, ValueError):
+                row["restore_refusal"] = "SKILL_LEARNING_EVIDENCE_INCOMPLETE"
                 continue
+            current = registry.skills.get(name)
+            if current is None or not _version_matches_receipt(current, row):
+                continue
+            if current.maintenance.get("state") == "archived":
+                restored, code = (False, "SKILL_LEARNING_EVIDENCE_INCOMPLETE") if restore_policy is None else admit_restore_locked(
+                    store, registry, name, now=datetime.now(timezone.utc).timestamp(), source="usage_receipt", **restore_policy,
+                )
+                registry = store.load_registry()
+                if not restored:
+                    row["restore_refusal"] = code
+                    continue
+                current = registry.skills[name]
         maint = dict(current.maintenance)
         updated_here = False
         if maint.get("state") == "cooled":
@@ -395,44 +466,38 @@ def _record_exact_and_reheat_locked(store: SkillLearningStore, events: list[dict
             maint["restored_at"] = ts
             maint.pop("cooled_at", None)
             updated_here = True
-
-        inc = str(maint.get("incarnation_id") or "")
-        act = str(maint.get("activation_id") or "")
-        sha = str(current.sha256 or "").lower()
-        row_inc = str(row.get("incarnation_id") or "")
-        row_act = str(row.get("activation_id") or "")
-        row_sha = str(row.get("content_sha256") or "").lower()
-        version_matches = (not row_inc and not row_act) or (row_inc == inc and row_act == act and (not row_sha or row_sha == sha))
-        if version_matches:
-            prev_last = float(maint.get("last_used_at") or 0.0)
-            if ts > prev_last:
-                maint["last_used_at"] = ts
-                updated_here = True
-            agg = exact_aggregates.get((inc, act, sha))
-            if agg is not None:
-                ind_uses = int(agg["independent_uses"])
-                uses_hurt = int(agg["uses_since_hurt"])
-                hurt_cnt = int(agg["hurt_count"])
-                maint["independent_uses"] = max(int(maint.get("independent_uses") or 0), ind_uses)
-                maint["uses_since_hurt"] = uses_hurt
-                maint["hurt_count"] = hurt_cnt
-                maint["strike_epoch"] = int(agg["strike_epoch"])
-                maint["epoch_started_at"] = float(agg["epoch_started_at"])
-                maint["usage_receipt_sequence"] = max(int(maint.get("usage_receipt_sequence") or 0), int(agg["sequence"]))
-                if ind_uses > 0:
-                    maint["ever_used"] = True
-                maint["independent_uses_coverage"] = str(agg["coverage"])
-                if hurt_cnt < 3 and uses_hurt >= 3 + hurt_cnt and maint.get("state") in {"trial", "active"} and maint.get("quality") != "established":
-                    maint["quality"] = "established"
-                    maint["quality_basis"] = "uses_threshold"
-                    maint["established_at"] = float(maint.get("established_at") or ts)
-                    if maint.get("state") == "trial":
-                        maint["promotion_history"] = [*maint.get("promotion_history", []), "active"][-100:]
-                    maint["state"] = "active"
-                updated_here = True
-            elif row.get("body_chars") is not None and int(row.get("body_chars") or 0) > 0:
+        prev_last = float(maint.get("last_used_at") or 0.0)
+        if ts > prev_last:
+            maint["last_used_at"] = ts
+            updated_here = True
+        agg = None
+        if runtime_repo is not None and row.get("body_chars") and row.get("task_key"):
+            result = record_exact_use(store, {**row, "at": ts}, runtime=runtime_repo)
+            agg = result.get("aggregate")
+        if agg is not None:
+            ind_uses = int(agg["independent_uses"])
+            uses_hurt = int(agg["uses_since_hurt"])
+            hurt_cnt = int(agg["hurt_count"])
+            maint["independent_uses"] = max(int(maint.get("independent_uses") or 0), ind_uses)
+            maint["uses_since_hurt"] = uses_hurt
+            maint["hurt_count"] = hurt_cnt
+            maint["strike_epoch"] = int(agg["strike_epoch"])
+            maint["epoch_started_at"] = float(agg["epoch_started_at"])
+            maint["usage_receipt_sequence"] = max(int(maint.get("usage_receipt_sequence") or 0), int(agg["sequence"]))
+            if ind_uses > 0:
                 maint["ever_used"] = True
-                updated_here = True
+            maint["independent_uses_coverage"] = str(agg["coverage"])
+            if hurt_cnt < 3 and uses_hurt >= 3 + hurt_cnt and maint.get("state") in {"trial", "active"} and maint.get("quality") != "established":
+                maint["quality"] = "established"
+                maint["quality_basis"] = "uses_threshold"
+                maint["established_at"] = float(maint.get("established_at") or ts)
+                if maint.get("state") == "trial":
+                    maint["promotion_history"] = [*maint.get("promotion_history", []), "active"][-100:]
+                maint["state"] = "active"
+            updated_here = True
+        elif row.get("body_chars") is not None and int(row.get("body_chars") or 0) > 0:
+            maint["ever_used"] = True
+            updated_here = True
         if updated_here:
             registry = replace(
                 registry,
