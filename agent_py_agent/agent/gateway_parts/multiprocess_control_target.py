@@ -11,6 +11,11 @@ from .owner_conversation_store import owner_conversation_store
 TARGETED_CONTROL_KINDS = frozenset({'stop', 'steer'})
 
 
+def requires_control_execution_snapshot(receipt):
+    # v6 已签入停止范围与线程。worker 会核验可选的原执行快照，排队或整会话停止无需单一活动回合。
+    return receipt.command_kind in TARGETED_CONTROL_KINDS and not receipt.stop_scope
+
+
 # LLM: 客户端原目标只做结构核验，W执行前仍验证当前claim；无客户端目标则按认证通道读取原owner。
 #   不改input_digest绑定的原输入：服务端目标存入dispatch，重试永远复用第一次冻结事实。
 #   冷C显式配置/根复用下方只读叶子，blocking/deadline只限制资源，不改变目标资格；默认调用不增加读取。
@@ -32,21 +37,10 @@ def freeze_control_execution(agent, paths, receipt, *, config=None, home_root=No
 # 函数用途: 无Agent时从已有绑定读legacy真实目标，忙或到期原样交给运输层，不改选latest或未来任务。
 def _read_authenticated_execution_from_config(config, home_root, paths, receipt, *, blocking, deadline):
     from ..common.json_io import check_io_deadline
-    from ..user_space.home_layout import home_paths
-    from ..user_space.owner_resolver import owner_identity_from_config
-    from ..user_space.runtime_paths import resolve_runtime_paths_for_agent
     from .control_operation_service import _receipt_owner_identity
-    from .owner_conversation_store import owner_conversation_store_from_config
 
     check_io_deadline(deadline)
-    base = home_paths(home_root)
-    owner = _receipt_owner_identity(receipt)
-    home = home_paths_with_owner(base, resolve_owner_home(home_root, owner))
-    selected = config
-    if owner != owner_identity_from_config(config):
-        fields = resolve_runtime_paths_for_agent(config, base.owner_home_dir, base).paths
-        selected = replace(config, **{key: '' for key in fields if hasattr(config, key)})
-    store = owner_conversation_store_from_config(selected, home, initialize=False)
+    store = authenticated_control_store(config, home_root, _receipt_owner_identity(receipt))
     check_io_deadline(deadline)
     thread, error = store.threads.resolve_report(channel=receipt.channel,
         channel_conversation_id=receipt.conversation_id, channel_user_id=receipt.user_id)
@@ -54,6 +48,21 @@ def _read_authenticated_execution_from_config(config, home_root, paths, receipt,
     if error is not None or thread is None:
         return None
     return read_gateway_execution_target(paths, store, thread.thread_id, blocking=blocking, deadline=deadline)
+
+
+def authenticated_control_store(config, home_root, owner):
+    from ..user_space.home_layout import home_paths
+    from ..user_space.owner_resolver import owner_identity_from_config
+    from ..user_space.runtime_paths import resolve_runtime_paths_for_agent
+    from .owner_conversation_store import owner_conversation_store_from_config
+
+    base = home_paths(home_root)
+    home = home_paths_with_owner(base, resolve_owner_home(home_root, owner))
+    selected = config
+    if owner != owner_identity_from_config(config):
+        fields = resolve_runtime_paths_for_agent(config, base.owner_home_dir, base).paths
+        selected = replace(config, **{key: '' for key in fields if hasattr(config, key)})
+    return owner_conversation_store_from_config(selected, home, initialize=False)
 
 
 # LLM: 认证身份已在原回执冻结；home解析及initialize=False只打开原位置，任何解析失败均无资格。

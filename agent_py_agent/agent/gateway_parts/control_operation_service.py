@@ -40,6 +40,7 @@ from .control_service import (
     bind_gateway_control_scope_owner,
     execute_gateway_conversation_control,
     reconcile_gateway_steer_delivery,
+    resolve_turn_stop_targets,
 )
 from .event_points import command_completed
 from .gateway_state_bounds import GATEWAY_STATE_MAX_BYTES
@@ -57,6 +58,7 @@ _CONTROL_INPUT_DIGEST_LEGACY_VERSION = 1
 _CONTROL_INPUT_DIGEST_TARGET_VERSION = 2
 _CONTROL_INPUT_DIGEST_CURRENT_VERSION = 4
 _CONTROL_INPUT_DIGEST_VERSIONS = {
+    6,
     5,  # 仅原签名私卡决定action；正常slash仍选择原v1-v4。
     _CONTROL_INPUT_DIGEST_LEGACY_VERSION,
     _CONTROL_INPUT_DIGEST_TARGET_VERSION,
@@ -150,6 +152,9 @@ class GatewayControlOperationReceipt:
     model_payload: object = None
     secret_command_sha256: str = ""
     client_tui_streaming: bool = False
+    stop_scope: str = ""
+    target_thread_id: str = ""
+    target_thread_ids: tuple[str, ...] = ()
 
     # LLM: 只持久化脱敏正文及可选原命令哈希，绝不保存密码明文；旧无密码回执字节不变。
     # 函数用途: 保存规范控制回执及可选私卡action/分派事实，不序列化AGENTS、Memory封印、RunParams或writer。
@@ -180,6 +185,9 @@ class GatewayControlOperationReceipt:
         }
         if self.client_tui_streaming:
             payload["client_tui_streaming"] = True
+        if self.stop_scope:
+            payload.update(stop_scope=self.stop_scope, target_thread_id=self.target_thread_id,
+                           target_thread_ids=list(self.target_thread_ids))
         if self.result:
             payload["result"] = dict(self.result)
         if self.error:
@@ -226,6 +234,12 @@ class GatewayControlOperationReceipt:
             raise DataCorruptionError("gateway control operation digest version is unsupported")
         else:
             digest_version = raw_digest_version
+        stop_scope = data.get("stop_scope", "")
+        target_thread_id = data.get("target_thread_id", "")
+        target_thread_ids = data.get("target_thread_ids", [])
+        if (type(stop_scope) is not str or type(target_thread_id) is not str or type(target_thread_ids) is not list
+                or any(type(thread_id) is not str or not thread_id for thread_id in target_thread_ids)):
+            raise DataCorruptionError("gateway turn stop receipt targets are invalid")
         receipt = cls(
             operation_id=str(data.get("operation_id") or "").strip(),
             input_digest=str(data.get("input_digest") or "").strip(),
@@ -259,6 +273,9 @@ class GatewayControlOperationReceipt:
             model_payload=data.get("model_payload"),
             secret_command_sha256=data.get("secret_command_sha256", ""),
             client_tui_streaming=data.get("client_tui_streaming", False),
+            stop_scope=stop_scope,
+            target_thread_id=target_thread_id,
+            target_thread_ids=tuple(target_thread_ids),
         )
         matched_digest_version = _validate_control_operation_receipt(receipt)
         return (
@@ -866,6 +883,8 @@ def gateway_control_operation_status_payload(
     payload["kind"] = receipt.command_kind
     payload["status"] = "control"
     payload["disposition"] = "system_command"
+    if receipt.command_kind == "status" and isinstance(payload.get("task_status"), dict):
+        payload["task_status"] = {"background_roots": [], **payload["task_status"]}
     return payload
 
 
@@ -909,6 +928,14 @@ def _reconcile_control_operation_locked(
 
 def control_input_matches_receipt(receipt, scope, command_text, input_digest):
     """旧回执缺展示位时仅允许同输入重放；不升级旧语义，不丢目标/目录/授权事实。"""
+    if receipt.input_digest_version == 6:
+        if _control_input_version(scope) != 6:
+            return False
+        # 只替换服务器上次确定的目标集合。此次客户端给出的范围及显式选择仍参与比较。
+        bound = replace(scope, metadata={**scope.metadata, "target_thread_ids": receipt.target_thread_ids})
+        return receipt.input_digest == _control_operation_input_digest(bound, command_text, version=6)
+    if _control_input_version(scope) == 6:
+        return False
     if receipt.input_digest == input_digest:
         return True
     if receipt.client_tui_streaming or not tui_streaming_client(scope.metadata):
@@ -944,8 +971,18 @@ def _load_or_prepare_control_operation_locked(
                 "gateway control message id was reused with different input"
             )
         return existing
+    digest = operation_input.input_digest
+    if _control_input_version(scope) == 6:
+        from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+        from .owner_conversation_store import owner_conversation_store
+
+        base = agent.home_paths
+        home = home_paths_with_owner(base, resolve_owner_home(base.root, scope.resolved_owner))
+        store = owner_conversation_store(agent, home, initialize=False)
+        scope = freeze_turn_stop_scope(store, scope)
+        digest = _control_operation_input_digest(scope, operation_input.command_text, version=6)
     receipt = _new_control_operation_receipt(scope, command.kind, operation_input.command_text,
-        operation_id, operation_input.input_digest, secret_command_sha256=operation_input.secret_command_sha256)
+        operation_id, digest, secret_command_sha256=operation_input.secret_command_sha256)
     _validate_control_operation_receipt(receipt)
     if model_transaction is not None:
         _write_control_operation_json(gateway_control_operation_path(paths, operation_id), receipt.to_dict(), model_transaction=model_transaction)
@@ -998,9 +1035,16 @@ def _new_control_operation_receipt(scope, command_kind, command_text, operation_
         private_approval=private_approval,
         secret_command_sha256=secret_command_sha256,
         client_tui_streaming=tui_streaming_client(scope.metadata),
+        stop_scope=scope.metadata.get("stop_scope", ""),
+        target_thread_id=scope.metadata.get("target_thread_id", ""),
+        target_thread_ids=tuple(scope.metadata.get("target_thread_ids", ())),
         state="prepared",
         updated_at=time.time(),
     )
+
+
+def freeze_turn_stop_scope(store, scope):
+    return replace(scope, metadata={**scope.metadata, "target_thread_ids": resolve_turn_stop_targets(store, scope)})
 
 
 # LLM: 只有本次真实cold/ready HTTP固定producer可调用；op T在Root外只try，既存同ID全状态只读，不进本地reconcile/effect或重新挑目标。
@@ -1020,8 +1064,7 @@ def prepare_coordinator_control_operation(source):
             return existing
         if not acquired:
             raise GlobalWriteError('control_operation_busy', 'control_transport')
-        receipt = _new_control_operation_receipt(source.scope, source.command.kind, source.command_text,
-            source.operation_id, source.input_digest)
+        receipt = source.prepare_receipt()
         _validate_control_operation_receipt(receipt)
         return source.publish(receipt, raw)
 
@@ -1064,8 +1107,10 @@ def _receipt_scope(
             "target_control_message_id": receipt.target_control_message_id,
             "channel_chat_type": receipt.channel_chat_type,
             "channel_chat_id": receipt.channel_chat_id,
-            **({"expected_execution": execution} if receipt.input_digest_version >= 4 or execution is not None else {}),
+            **({"expected_execution": execution} if 4 <= receipt.input_digest_version < 6 or execution is not None else {}),
             **({"model_payload": receipt.model_payload} if receipt.model_payload is not None else {}),
+            **({"stop_scope": receipt.stop_scope, "target_thread_id": receipt.target_thread_id,
+                "target_thread_ids": receipt.target_thread_ids} if receipt.input_digest_version == 6 else {}),
         },
         all_user_access=receipt.all_user_access,
         resolved_owner=_receipt_owner_identity(receipt),
@@ -1104,6 +1149,16 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
             raise DataCorruptionError("private approval action identity is invalid")
     elif receipt.input_digest_version == 5 or receipt.command_kind == 'private_tool_approval':
         raise DataCorruptionError("private approval action is missing")
+    if receipt.input_digest_version == 6:
+        if (receipt.command_kind != "stop" or receipt.command_text != "/stop"
+                or receipt.stop_scope not in {"thread", "session"}
+                or receipt.target_thread_ids != tuple(sorted(set(receipt.target_thread_ids)))
+                or (receipt.stop_scope == "thread" and len(receipt.target_thread_ids) > 1)
+                or (receipt.target_thread_id and (receipt.stop_scope != "thread"
+                    or receipt.target_thread_ids != (receipt.target_thread_id,)))):
+            raise DataCorruptionError("gateway turn stop receipt scope is invalid")
+    elif receipt.stop_scope or receipt.target_thread_id or receipt.target_thread_ids:
+        raise DataCorruptionError("gateway turn stop receipt requires digest version 6")
     scope = _receipt_scope(receipt)
     digest_text = _secret_bound_digest_text(receipt.command_text, receipt.secret_command_sha256)
     identity = _control_operation_identity_payload(scope, receipt.client_message_id)
@@ -1117,6 +1172,8 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
     )
     matched_digest_version = 0
     for version in candidate_versions:
+        if version == 6 and receipt.input_digest_version != 6:
+            continue
         if version < 4 and receipt.expected_execution is not None:
             continue
         if version < 3 and receipt.workspace is not None:
@@ -1244,6 +1301,10 @@ def _control_operation_input_digest(
         operation_input["expected_execution"] = scope.metadata.get("expected_execution")
     if version >= 5:
         operation_input['private_approval'] = private_approval
+    if version == 6:
+        operation_input.update(stop_scope=scope.metadata["stop_scope"],
+            target_thread_id=scope.metadata.get("target_thread_id", ""),
+            target_thread_ids=sorted(scope.metadata.get("target_thread_ids", ())))
     if "model_payload" in scope.metadata:
         operation_input["model_payload"] = scope.metadata["model_payload"]
     # 仅显式TUI展示事实进入新摘要；旧缺省false保持原摘要字节，不授予owner/执行权限。
@@ -1255,6 +1316,8 @@ def _control_operation_input_digest(
 # LLM: 原无目录/有目录输入分别保留 v2/v3 可重试；带执行绑定必须用 v4，重试不能切换目标。
 # 函数用途: 按结构化输入选择摘要合同版本，避免新字段绕过回执完整性检查。
 def _control_input_version(scope: GatewayControlScope) -> int:
+    if "stop_scope" in scope.metadata:
+        return 6
     if "expected_execution" in scope.metadata:
         return _CONTROL_INPUT_DIGEST_CURRENT_VERSION
     return 3 if scope.workspace is not None else _CONTROL_INPUT_DIGEST_TARGET_VERSION

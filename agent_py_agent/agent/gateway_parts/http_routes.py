@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..common.fast_dataclass import fast_frozen
+
 
 # LLM: template保留旧exact/prefix/suffix语义；handler_module为空调用handler方法，否则惰性导入原服务。
 # 类用途: 保存一条实际分发路由及其观察档位。
-@dataclass(frozen=True)
+@fast_frozen
+@dataclass(frozen=True, slots=True)
 class GatewayHTTPRoute:
     template: str
     handler_name: str
@@ -67,6 +70,7 @@ GATEWAY_HTTP_ROUTES = {
         GatewayHTTPRoute("/client/agent-guidance", "_handle_client_agent_guidance", "credential"),
         GatewayHTTPRoute("/client/agent-permission", "_handle_client_agent_permission", "credential"),
         GatewayHTTPRoute("/client/agent-stop", "_handle_client_agent_stop", "credential"),
+        GatewayHTTPRoute("/client/turn-stop", "handle_client_turn_stop", "credential", ".http_handlers"),
         GatewayHTTPRoute("/stop", "_handle_stop", "admin"),
         GatewayHTTPRoute("/sessions/*/bind", "_handle_session_bind", "admin"),
     ),

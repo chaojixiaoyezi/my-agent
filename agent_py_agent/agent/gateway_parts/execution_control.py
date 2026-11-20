@@ -19,6 +19,7 @@ from .io import read_json_file_report
 def resolve_execution_control(base_agent, paths, scope):
     from .control_service import (
         _active_conversation_task,
+        _control_stop_thread,
         _GatewayRequestRecord,
         _linked_active_task_record,
         _linked_conversation_task_id,
@@ -28,9 +29,7 @@ def resolve_execution_control(base_agent, paths, scope):
 
     owner_agent = _request_agent_for_scope(base_agent, scope)
     store = owner_agent.conversation_store
-    thread = store.threads.resolve(
-        channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id,
-    )
+    thread = _control_stop_thread(store, scope)
     target = read_gateway_execution_target(paths, store, thread.thread_id) if thread else None
     if target is None:
         return None, None

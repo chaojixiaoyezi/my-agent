@@ -20,11 +20,12 @@ import threading
 import time
 from collections import Counter
 from contextlib import ExitStack
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
+from ..common.fast_dataclass import fast_replace
 from ..concurrency.interrupt import (
     interrupt_by_name,
     is_interrupted,
@@ -76,7 +77,7 @@ from .execution_control import (
     execution_scope_guard,
     resolve_execution_control,
 )
-from .execution_target import GatewayExecutionTarget
+from .execution_target import GatewayExecutionTarget, _claim_is_current
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
 from .owner_retention import gateway_terminal_exists
@@ -503,7 +504,7 @@ def execute_gateway_conversation_control(
     keep = _control_reply_keeps_host_paths(agent, scope)
     result = _dispatch_gateway_conversation_control(agent, paths, command, scope, preserve_host_paths=keep)
     if keep and result.kind not in {"admin", "approve", "deny"}:
-        return replace(result, host_path_display="full")
+        return fast_replace(result, host_path_display="full")
     return result
 
 
@@ -647,43 +648,7 @@ def _dispatch_gateway_conversation_control(
         ):
             return _control_result_from_steer_receipt(steer_receipt)
     if command.kind == "stop":
-        compact_stop = _stop_targeted_manual_compact(scope)
-        if compact_stop is not None:
-            return compact_stop
-        running_stop = execute_running_stop(agent, paths, scope, command)
-        if running_stop is not None:
-            return running_stop
-        live_requests = _live_window_requests(paths, scope)
-        expected_turn_id = _steer_expected_turn_id(scope)
-        if expected_turn_id:
-            live_requests = [
-                record
-                for record in live_requests
-                if _active_turn_request_id(record) == expected_turn_id
-            ]
-            if len(live_requests) != 1:
-                return _stop_bound_background_turn(agent, paths, scope, command)
-        if len(live_requests) > 1:
-            return ConversationControlResult(
-                "stop",
-                False,
-                "检测到多个冲突的活动回合，未猜测停止其中一个；请先让 Gateway 恢复器收口。",
-            )
-        if live_requests:
-            return _stop_live_window_request(
-                agent, paths, live_requests[0], scope,
-                interrupt_only=command.operation == "interrupt",
-            )
-        # 会话运行时 interrupts the session's authoritative active turn.  Our
-        # foreground request may already have yielded while its durable root
-        # waits for children, so the ConversationThread active-task index—not
-        # an ephemeral process/claim probe—owns this fallback.
-        live_task = _active_conversation_task(agent, scope, ordinary_only=True)
-        if live_task is not None:
-            return _stop_active_task(
-                agent, live_task, scope, interrupt_only=command.operation == "interrupt",
-            )
-        return _stop_session_leftovers(agent, scope, command)
+        return _execute_stop(agent, paths, scope, command)
     active = _active_control_target(agent, paths, scope)
     if command.kind == "steer":
         target, executing = resolve_execution_control(agent, paths, scope)
@@ -751,6 +716,357 @@ def _dispatch_gateway_conversation_control(
     return ConversationControlResult(command.kind, False, "不支持的会话控制命令。", error_code="UNKNOWN_CONVERSATION_CONTROL")
 
 
+class TurnStopTargetUnavailable(ValueError):
+    """停止目标不属于本次认证会话，或原会话绑定不可读。"""
+
+
+def execute_client_turn_stop(handler_context: object, body: dict) -> ConversationControlResult:
+    from .control_operation_service import (
+        execute_gateway_control_operation,
+        gateway_control_operation_status_payload,
+    )
+    from .http_handlers import _gateway_control_scope, _http_conversation_id, _request_channel
+    from .model_metadata_transaction import coordinator_model_server
+
+    handler, server = handler_context
+    if not isinstance(body, dict):
+        raise ValueError("请求正文必须是 JSON 对象。")
+    message_id = body.get("message_id")
+    target = body.get("thread_id", "")
+    turn = body.get("expected_turn_id", "")
+    stop_scope = body.get("scope", "thread")
+    execution = body.get("expected_execution")
+    if type(message_id) is not str or not message_id.strip():
+        from .control_operation_service import GatewayControlOperationIdentityRequired
+
+        raise GatewayControlOperationIdentityRequired("message_id 必须是非空字符串。")
+    if type(stop_scope) is not str or stop_scope not in {"thread", "session"}:
+        raise ValueError("scope 必须是 thread 或 session。")
+    if type(target) is not str or type(turn) is not str or (target.strip() and stop_scope == "session"):
+        raise ValueError("thread_id 与 expected_turn_id 必须是字符串，且 thread_id 仅用于 thread 范围。")
+    if execution is not None:
+        expected = GatewayExecutionTarget.from_dict(execution)
+        if expected is None or (turn.strip() and turn.strip() != expected.turn_id):
+            raise ValueError("expected_execution 必须是与 expected_turn_id 一致的执行快照。")
+    # thread_id 在本路由仅表示停止目标，不能被旧通用正文适配器当作会话编号。
+    normalized = {
+        "command": "/stop", "conversation_id": _http_conversation_id({key: value for key, value in body.items()
+                                                                       if key not in {"thread_id", "metadata"}}),
+        "metadata": {"message_id": message_id.strip(), "stop_scope": stop_scope,
+                     "target_thread_id": target.strip(), "expected_turn_id": turn.strip(),
+                     **({"expected_execution": execution} if execution is not None else {})},
+    }
+    receipt = None
+    if coordinator_model_server(server):
+        from .coordinator_control_transport import execute_coordinator_control
+
+        receipt = execute_coordinator_control(handler, server, normalized)
+    if receipt is None:
+        if server.agent is None:
+            from .multiprocess_global_write import GlobalWriteError
+
+            raise GlobalWriteError("control_business_not_ready", "control_transport")
+        user_id, channel = _request_channel(handler)
+        scope = _gateway_control_scope(handler, normalized, user_id=user_id, channel=channel, turn_stop=True)
+        receipt = execute_gateway_control_operation(
+            server.agent, server.paths, ConversationControlCommand("stop"), scope, command_text="/stop",
+        )
+    payload = gateway_control_operation_status_payload(receipt)
+    return ConversationControlResult(
+        "stop", payload["ok"], payload["message"], request_id=payload.get("request_id", ""),
+        delivery_status=payload.get("delivery_status", ""), operation_id=receipt.operation_id,
+        control_state=receipt.state, error_code=payload.get("error_code", ""),
+        details={"stop_scope": receipt.stop_scope, "target_thread_ids": list(receipt.target_thread_ids),
+                 "queued_cancelled": 0, "active_stopped": 0, "roots_stopped": 0, "processes_stopped": 0,
+                 "pending_identity_checks": 0, "partial": receipt.state != "completed",
+                 **(payload.get("details") or {})},
+        host_path_display=payload.get("host_path_display", ""),
+    )
+
+
+def _session_stop_threads(store, scope):
+    """只沿原线程继任事务确认的通道链回读，拒绝跨 owner 或中断的链。"""
+    from ..conversation.store_threads import thread_publication_matches
+
+    current, error = store.threads.resolve_report(
+        channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id,
+    )
+    if error:
+        raise TurnStopTargetUnavailable("会话绑定不可读。")
+    if current is None:
+        return ()
+    binding = [scope.channel, scope.user_id, scope.conversation_id]
+    lineage = {current.thread_id: current}
+    while current.metadata.get("predecessor_binding") == binding:
+        prior_id = current.metadata.get("predecessor_thread_id")
+        if not isinstance(prior_id, str) or prior_id in lineage:
+            raise TurnStopTargetUnavailable("会话继任记录存在冲突。")
+        prior, error = store.threads.load_report(prior_id)
+        if (error or prior is None or (prior.owner_id, prior.owner_home) != (current.owner_id, current.owner_home)
+                or not thread_publication_matches(current.thread_id, prior, binding)):
+            raise TurnStopTargetUnavailable("会话前任或归属无法确认。")
+        lineage[prior.thread_id] = current = prior
+    return tuple(lineage.values())
+
+
+def resolve_turn_stop_targets(store, scope: GatewayControlScope) -> tuple[str, ...]:
+    requested = scope.metadata.get("target_thread_id")
+    execution = GatewayExecutionTarget.from_dict(scope.metadata.get("expected_execution"))
+    if requested or scope.metadata["stop_scope"] == "session":
+        threads = _session_stop_threads(store, scope)
+    else:
+        current = _conversation_thread_for_scope(store, scope)
+        threads = (current,) if current is not None else ()
+    if requested:
+        if requested not in {thread.thread_id for thread in threads}:
+            raise TurnStopTargetUnavailable("目标线程不在本次认证会话中。")
+        threads = tuple(thread for thread in threads if thread.thread_id == requested)
+    if execution is not None and execution.thread_id not in {thread.thread_id for thread in threads}:
+        raise TurnStopTargetUnavailable("预期执行不在停止范围内。")
+    return tuple(sorted(thread.thread_id for thread in threads))
+
+
+def _control_stop_thread(store, scope):
+    thread_id = scope.metadata.get("selected_stop_thread_id")
+    if not thread_id:
+        return _conversation_thread_for_scope(store, scope)
+    if thread_id not in scope.metadata.get("target_thread_ids", ()):
+        return None
+    thread = store.threads.load(thread_id)
+    if thread is None:
+        return None
+    if any((binding.channel, binding.channel_user_id, binding.channel_conversation_id)
+           == (scope.channel, scope.user_id, scope.conversation_id) for binding in thread.channel_bindings):
+        return thread
+    return None
+
+
+def _stop_request_thread_id(payload):
+    conversation = payload.get("conversation")
+    claim = payload.get("conversation_claim")
+    bound = claim.get("thread_id") if isinstance(claim, dict) else None
+    requested = conversation.get("thread_id") if isinstance(conversation, dict) else None
+    return str(bound or payload.get("conversation_thread_id") or requested or "")
+
+
+def _stop_request_owner_matches(payload, scope):
+    from .request_owner_binding import frozen_request_owner
+
+    try:
+        owner = frozen_request_owner(payload)
+    except DataCorruptionError:
+        return False
+    return (owner is None or owner == scope.resolved_owner) and _request_matches_scope(payload, scope)
+
+
+def _stop_queued_turns(paths: GatewayPaths, scope: GatewayControlScope, thread_ids: tuple[str, ...]) -> int:
+    """在原 T 下重读 inbox 或同一请求的待启动 claim，再提交原取消事实。"""
+    if scope.metadata.get("target_control_message_id"):
+        return 0
+
+    expected = GatewayExecutionTarget.from_dict(scope.metadata.get("expected_execution"))
+    turn_id = _steer_expected_turn_id(scope) or (expected.turn_id if expected else "")
+    include_detached = scope.metadata.get("stop_scope") == "session" or bool(scope.metadata.get("target_thread_id"))
+    if expected is not None and expected.kind != "request":
+        return 0
+    pending = ([_GatewayRequestRecord(paths.inbox / f"{turn_id}.json", {"id": turn_id})]
+               if turn_id else _matching_requests(paths.inbox, scope))
+    cancelled = 0
+    for row in pending:
+        request_id = _record_id(row)
+        if row.path is None or not request_id or row.path.stem != request_id:
+            continue
+        with gateway_turn_transition(paths, request_id):
+            if gateway_terminal_exists(paths, row.path.name):
+                continue
+            path = row.path
+            claimed = not path.exists()
+            if claimed and scope.metadata.get("pending_stop_exact_requeue"):
+                continue
+            if claimed:
+                path = paths.processing / path.name
+            report = read_json_file_report(path, context="gateway.control.pending_stop.read")
+            payload = report.payload
+            fresh = _GatewayRequestRecord(path, payload)
+            bound_thread = _stop_request_thread_id(payload)
+            if (report.load_error or not payload or payload.get("id") != request_id
+                    or not _stop_request_owner_matches(payload, scope)
+                    or (bound_thread and bound_thread not in thread_ids)
+                    or (not bound_thread and not scope.metadata.get("include_unbound_stop_turns"))
+                    or payload.get("source") == "plugin"
+                    or (not include_detached and _request_is_detached(fresh))
+                    or (expected is not None and not isinstance(payload.get("active_turn_recovery"), dict))
+                    or (claimed and payload.get("conversation_runtime"))
+                    or (not claimed and payload.get("status", "pending") != "pending")):
+                continue
+            marked, _, _ = _mark_request_stopping_locked(
+                fresh, scope, queued_paths=paths if not claimed and payload.get("route") else None,
+            )
+            if not marked:
+                continue
+            cancelled += 1
+        if expected is not None and expected.claim_id:
+            interrupt_by_name(conversation_claim_interrupt_name(expected.claim_id))
+        elif claimed:
+            interrupt_by_name(conversation_request_interrupt_name(request_id))
+    return cancelled
+
+
+def _execute_stop(agent, paths, scope, command):
+    if command.operation == "interrupt":
+        return _stop_targeted_manual_compact(scope) or _execute_current_stop(agent, paths, scope, command)
+    new_route = "stop_scope" in scope.metadata
+    owner = _request_agent_for_scope(agent, scope)
+    store = getattr(owner, "conversation_store", None)
+    if store is None and not new_route:
+        return _stop_targeted_manual_compact(scope) or _execute_current_stop(agent, paths, scope, command)
+    current = _conversation_thread_for_scope(store, scope)
+    current_id = current.thread_id if current is not None else ""
+    thread_ids = tuple(scope.metadata.get("target_thread_ids", ())) if new_route else (
+        (current_id,) if current_id else ()
+    )
+    scoped = fast_replace(scope, metadata={**scope.metadata,
+        "target_thread_ids": thread_ids,
+        "include_unbound_stop_turns": current_id in thread_ids or (not current_id and not thread_ids),
+        "unbound_stop_thread_id": current_id,
+    })
+    queued = _stop_queued_turns(paths, scoped, thread_ids)
+    compact_stop = _stop_targeted_manual_compact(scope)
+    if compact_stop is not None:
+        return compact_stop
+    if new_route and (scope.metadata["stop_scope"] == "session" or scope.metadata.get("target_thread_id")):
+        result, active, roots, processes, pending, schedules = _stop_selected_threads(
+            agent, paths, scoped, command, owner, thread_ids,
+        )
+    else:
+        selected = thread_ids[0] if thread_ids else ""
+        scoped = fast_replace(scoped, metadata={**scoped.metadata, "selected_stop_thread_id": selected})
+        if new_route and current_id != selected and not selected:
+            result = ConversationControlResult("stop", False, "首次受理时没有绑定线程。")
+        else:
+            result = _execute_current_stop(agent, paths, scoped, command)
+        active = int(result.ok and bool(result.request_id))
+        roots = 0
+        processes = 0
+        pending = int(result.delivery_status == "unknown")
+        schedules = []
+    if queued and not result.ok and result.delivery_status != "unknown":
+        result = ConversationControlResult("stop", True, f"已取消 {queued} 个排队回合。",
+                                           request_id=_steer_expected_turn_id(scope), delivery_status="accepted")
+    if new_route:
+        result = fast_replace(result, details={**(result.details or {}),
+            "stop_scope": scope.metadata["stop_scope"], "target_thread_ids": list(thread_ids),
+            "queued_cancelled": queued, "active_stopped": active, "roots_stopped": roots,
+            "processes_stopped": processes, "pending_identity_checks": pending,
+            "partial": bool(pending), "durable_schedules": schedules,
+        })
+    return result
+
+
+def _execute_current_stop(agent, paths, scope, command):
+    running_stop = execute_running_stop(agent, paths, scope, command)
+    if running_stop is not None:
+        return running_stop
+    live_requests = _live_window_requests(paths, scope)
+    expected_turn_id = _steer_expected_turn_id(scope)
+    if expected_turn_id:
+        live_requests = [
+            record
+            for record in live_requests
+            if _active_turn_request_id(record) == expected_turn_id
+        ]
+        if len(live_requests) != 1:
+            return _stop_bound_background_turn(agent, paths, scope, command)
+    if len(live_requests) > 1:
+        return ConversationControlResult(
+            "stop",
+            False,
+            "检测到多个冲突的活动回合，未猜测停止其中一个；请先让 Gateway 恢复器收口。",
+        )
+    if live_requests:
+        return _stop_live_window_request(
+            agent, paths, live_requests[0], scope,
+            interrupt_only=command.operation == "interrupt",
+        )
+    # 会话运行时 interrupts the session's authoritative active turn.  Our
+    # foreground request may already have yielded while its durable root
+    # waits for children, so the ConversationThread active-task index—not
+    # an ephemeral process/claim probe—owns this fallback.
+    live_task = _active_conversation_task(agent, scope, ordinary_only=True)
+    if live_task is not None:
+        return _stop_active_task(
+            agent, live_task, scope, interrupt_only=command.operation == "interrupt",
+        )
+    return _stop_session_leftovers(agent, scope, command)
+
+
+def _stop_selected_threads(agent, paths, scope, command, owner, thread_ids):
+    store = owner.conversation_store
+    active = roots = processes = pending = 0
+    expected = GatewayExecutionTarget.from_dict(scope.metadata.get("expected_execution"))
+    expected_turn_id = _steer_expected_turn_id(scope)
+    live_by_thread = {}
+    if expected is None and not expected_turn_id:
+        for record in _live_window_requests(paths, scope):
+            thread_id = _stop_request_thread_id(record.payload) or scope.metadata["unbound_stop_thread_id"]
+            live_by_thread.setdefault(thread_id, []).append(record)
+    for thread_id in thread_ids:
+        if expected is not None and expected.thread_id != thread_id:
+            continue
+        scoped = fast_replace(scope, metadata={**scope.metadata, "selected_stop_thread_id": thread_id})
+        if expected is not None or expected_turn_id:
+            result = _execute_current_stop(agent, paths, scoped, command)
+            active += int(result.ok)
+            pending += int(result.delivery_status == "unknown")
+            continue
+        for record in live_by_thread.get(thread_id, ()):
+            result = _stop_live_window_request(agent, paths, record, scoped)
+            active += int(result.ok)
+            pending += int(result.delivery_status == "unknown")
+        claim, claim_error = store.claims.load_report(thread_id)
+        if claim_error:
+            pending += 1
+        if _claim_is_current(claim, thread_id):
+            authority = claim.get("runtime_authority")
+            turn_id = authority.get("invocation_run_id") if isinstance(authority, dict) else None
+            if turn_id and _bound_background_turn_is_running(agent, scoped, turn_id):
+                exact = fast_replace(scoped, metadata={**scoped.metadata, "expected_turn_id": turn_id})
+                result = _stop_bound_background_turn(agent, paths, exact, command)
+                roots += int(result.ok)
+        links, errors, execution = _control_conversation_links_snapshot(store, thread_id)
+        pending += bool(errors)
+        if not errors:
+            links = _root_control_links(owner, _control_active_conversation_links(
+                store, thread_id, links, execution=execution, include_detached=True,
+            ))
+            for link in links:
+                record = _conversation_task_control_record(scoped, store.threads.require(thread_id), link)
+                result = _stop_active_task(agent, record, scoped)
+                roots += int(result.ok)
+                pending += int(result.delivery_status == "unknown")
+        result = _stop_session_leftovers(agent, scoped, command, wait_for_cleanup=True)
+        processes += (result.details or {}).get("processes_stopped", 0)
+        pending += (result.details or {}).get("pending_identity_checks", int(result.delivery_status == "unknown"))
+    schedules = _durable_stop_schedules(owner, thread_ids)
+    ok = bool(active or roots or processes)
+    message = f"已停止 {active} 个活动回合、{roots} 个后台根和 {processes} 个托管进程。" if ok else "当前范围内没有已确认的停止目标。"
+    if schedules:
+        message += f"已保留 {len(schedules)} 个耐久计划。"
+    if pending:
+        message += f"仍有 {pending} 项身份或退出状态待确认。"
+    return ConversationControlResult("stop", ok, message, delivery_status="accepted" if ok or pending else ""), active, roots, processes, pending, schedules
+
+
+def _durable_stop_schedules(owner, thread_ids):
+    repository = getattr(owner, "scheduler_repository", None)
+    if repository is None:
+        return []
+    jobs, _errors = repository.list_jobs()
+    selected = set(thread_ids)
+    return [{"job_id": job["job_id"], "thread_id": thread_id, "status": job["status"]}
+            for job in jobs if (thread_id := job.get("source_thread_id") or job.get("thread_id")) in selected]
+
+
 # LLM: 调用方已完成目录鉴权；/new只检查准确前台请求，不经stop/资源取消；新绑定仍由原ThreadStore事务提交。
 # 函数用途: 为Feishu、HTTP和TUI的同一控制入口创建空白后继，前台运行时明确拒绝。
 def _execute_gateway_new_session(base_agent, paths, command, scope):
@@ -775,7 +1091,9 @@ def _execute_gateway_new_session(base_agent, paths, command, scope):
         return ConversationControlResult("new", False, "会话不属于当前用户。", error_code="THREAD_SUCCESSOR_OWNER_MISMATCH")
     binding = next((row for row in current.channel_bindings if row.channel == scope.channel
         and row.channel_user_id == scope.user_id and row.channel_conversation_id == scope.conversation_id), None)
-    return new_session_result(store, current.thread_id, title=command.value, binding=binding)
+    roots = _session_background_roots(agent, scope, include_current=True)
+    return new_session_result(store, current.thread_id, title=command.value, binding=binding,
+                              background_root_count=len(roots))
 
 
 # LLM: 调用方已完成命令鉴权；首次绑定同时记录认证Home的owner；缺HomePaths时保留canonical storage.root，不猜基础Agent或最新线程。
@@ -965,7 +1283,7 @@ def steer_active_conversation_if_running(
 #   改口径同步 test_gateway_stop_session_leftovers.py 与 cli/chat_parts/control_runtime 的本地同名出口。
 # 函数用途: 无运行中回合时 /stop 停止本会话遗留的后台资源（什么都没有时照旧回"没有运行中的内容"），/interrupt 如实回无可中断。
 def _stop_session_leftovers(
-    agent: object, scope: GatewayControlScope, command: ConversationControlCommand,
+    agent: object, scope: GatewayControlScope, command: ConversationControlCommand, *, wait_for_cleanup: bool = False,
 ) -> ConversationControlResult:
     from .background_resource_report import (
         background_resource_lines,
@@ -979,9 +1297,7 @@ def _stop_session_leftovers(
     try:
         owner_agent = _request_agent_for_scope(agent, scope)
         store = owner_agent.conversation_store
-        thread = store.threads.resolve(
-            channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id,
-        )
+        thread = _control_stop_thread(store, scope)
         if thread is None:
             return nothing
         owner_home = str(Path(str(owner_agent.home_paths.owner_home_dir)).expanduser().resolve(strict=False))
@@ -994,8 +1310,16 @@ def _stop_session_leftovers(
             "stop", False, "本会话资源状态暂时不可读，未执行停止。", delivery_status="unknown",
             error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
         )
-    if not frozen.processes:
+    if not frozen.processes and not frozen.unconfirmed:
         return nothing
+    if wait_for_cleanup:
+        reports = cleanup_session_leftover_processes(frozen)
+        confirmed = {row["session_id"] for report in reports for row in report.get("sessions", ())
+                     if row["confirmed"] is True}
+        pending = max(len(frozen.processes) - len(confirmed), int(frozen.unconfirmed))
+        return ConversationControlResult("stop", bool(confirmed), "后台进程的停止结果已核对。",
+            delivery_status="unknown" if pending else "accepted",
+            details={"processes_stopped": len(confirmed), "pending_identity_checks": pending})
     threading.Thread(
         target=cleanup_session_leftover_processes, args=(frozen,),
         name=f"stop-leftovers-{thread.thread_id}", daemon=True,
@@ -1078,15 +1402,12 @@ def _bound_background_turn_is_running(
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
-        thread = store.threads.resolve(channel=scope.channel,
-            channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+        thread = _control_stop_thread(store, scope)
         owner_id = str(owner_agent.home_paths.owner_id)
         if thread is None or not thread.thread_id or thread.owner_id != owner_id:
             return False
         claim, error = store.claims.load_report(thread.thread_id)
-        if (error or not isinstance(claim, dict) or claim.get('schema_version') != 'background_run_claim.v1'
-                or claim.get('status') != 'running' or not claim.get('claim_id')
-                or claim.get('thread_id') != thread.thread_id or claim.get('claim_scope_id') != thread.thread_id):
+        if error or not _claim_is_current(claim, thread.thread_id):
             return False
         authority = claim.get('runtime_authority')
         if (not isinstance(authority, dict) or authority.get('schema_version') != 'conversation_claim_execution.v1'
@@ -1608,7 +1929,7 @@ def _execute_effort_control(
             owner_agent = _request_agent_for_scope(base_agent, scope)
             thread_id = str((result.details or {}).get("thread_id") or "")
             extra = effort_probe_lines(owner_agent, thread_id, command) if thread_id else []
-            return replace(result, message="\n".join([result.message, *extra])) if extra else result
+            return fast_replace(result, message="\n".join([result.message, *extra])) if extra else result
         owner_agent = _request_agent_for_scope(base_agent, scope)
         thread = _settings_thread(owner_agent, scope)
         if command.operation == "set":
@@ -1707,7 +2028,7 @@ def _linked_active_task_record(
             return None
         owner = _request_agent_for_scope(base_agent, scope)
         store = owner.conversation_store
-        thread = store.threads.resolve(channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+        thread = _control_stop_thread(store, scope)
         link = store.tasks.load(task_id)
         if thread is None or link is None or link.thread_id != thread.thread_id or link.status != "cancelled":
             return None
@@ -1770,10 +2091,15 @@ def _live_window_requests(
     paths: GatewayPaths,
     scope: GatewayControlScope,
 ) -> list[_GatewayRequestRecord]:
+    selected = scope.metadata.get("selected_stop_thread_id")
     return [
         record
         for record in _matching_requests(paths.processing, scope)
         if _request_accepts_active_input(record)
+        and (not selected or _stop_request_thread_id(record.payload) == selected
+             or (not _stop_request_thread_id(record.payload)
+                 and scope.metadata.get("unbound_stop_thread_id") == selected))
+        and ("target_thread_ids" not in scope.metadata or _stop_request_owner_matches(record.payload, scope))
     ]
 
 
@@ -1804,15 +2130,10 @@ def _active_conversation_task(
     ordinary_only: bool = False,
 ) -> _GatewayRequestRecord | None:
     """Resolve the latest user-selectable active root task in this exact owner conversation."""
-    scope_payload = _scope_request_payload(scope)
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
-        thread = store.threads.resolve(
-            channel=scope.channel,
-            channel_conversation_id=scope.conversation_id,
-            channel_user_id=scope.user_id,
-        )
+        thread = _control_stop_thread(store, scope)
         if thread is None:
             return None
         links, load_errors, execution = _control_conversation_links_snapshot(
@@ -1842,6 +2163,11 @@ def _active_conversation_task(
     )
     if selected is None:
         return None
+    return _conversation_task_control_record(scope, thread, selected)
+
+
+def _conversation_task_control_record(scope, thread, selected):
+    scope_payload = _scope_request_payload(scope)
     task_id = str(getattr(selected, "task_id", "") or "").strip()
     created_at = float(getattr(selected, "created_at", 0.0) or 0.0)
     payload = {
@@ -1898,6 +2224,7 @@ def _control_active_conversation_links(
     links: list[object],
     *,
     execution: dict[str, object] | None = None,
+    include_detached: bool = False,
 ) -> list[object]:
     """Resolve control-active roots from task projection plus durable execution state.
 
@@ -1924,7 +2251,7 @@ def _control_active_conversation_links(
     for link in links:
         if not is_reusable_conversation_workspace(link):
             continue
-        if str(getattr(link, "cancellation_scope", "") or "foreground") == "detached":
+        if not include_detached and str(getattr(link, "cancellation_scope", "") or "foreground") == "detached":
             continue
         status = str(getattr(link, "status", "") or "").strip().lower()
         if status == "active":
@@ -2191,18 +2518,9 @@ def _stop_requeued_exact_turn(paths: GatewayPaths, scope: GatewayControlScope) -
     turn_id = _steer_expected_turn_id(scope) or (expected.turn_id if expected is not None else "")
     if expected is None or expected.kind != "request" or not turn_id or expected.turn_id != turn_id:
         return None
-    path = paths.inbox / f"{turn_id}.json"
-    with gateway_turn_transition(paths, turn_id):
-        report = read_json_file_report(path, context="gateway.control.requeued_stop.read")
-        record = _GatewayRequestRecord(path, dict(report.payload))
-        if (report.load_error is not None or _record_id(record) != turn_id
-                or not isinstance(record.payload.get("active_turn_recovery"), dict)
-                or not _request_matches_scope(record.payload, scope)):
-            return None
-        marked, _message, _committed = _mark_request_stopping_locked(record, scope)
-    if expected.claim_id:
-        interrupt_by_name(conversation_claim_interrupt_name(expected.claim_id))
-    if not marked:
+    exact = fast_replace(scope, metadata={**scope.metadata, "include_unbound_stop_turns": True,
+                                     "pending_stop_exact_requeue": True})
+    if not _stop_queued_turns(paths, exact, (expected.thread_id,)):
         return None
     return ConversationControlResult("stop", True, "已停止当前会话正在执行的内容。", request_id=turn_id)
 
@@ -2617,7 +2935,7 @@ def _stop_live_window_request(
                 from .request_binding import gateway_runtime_authority
 
                 # 原T内复用原子写返回的独立快照；绑定写者也持同T，不再重开刚提交的文件。
-                live_request = replace(live_request, payload=committed)
+                live_request = fast_replace(live_request, payload=committed)
                 binding = gateway_runtime_authority(committed, request_id)
                 if store is not None:
                     store.guidance.recovery.reject_pending(request_id, target=("request", request_id))
@@ -2758,6 +3076,7 @@ def _mark_request_stopping(
 def _mark_request_stopping_locked(
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
+    *, queued_paths: GatewayPaths | None = None,
 ) -> tuple[bool, str, dict]:
     request_id = _record_id(active)
     updated_ref = [False]
@@ -2790,7 +3109,15 @@ def _mark_request_stopping_locked(
     try:
         if active.path is None:
             raise FileNotFoundError(request_id)
-        committed = update_json_file_atomic(active.path, mark_cancel, require_existing=True)
+        if queued_paths is not None:
+            from .queue_service import settle_pending_stop_locked
+
+            # 有分区路由的 worker 跳过已取消候选，直接发表原终态可避免重启留下只有取消标记的 P3。
+            committed = mark_cancel(dict(active.payload))
+            if updated_ref[0] and not settle_pending_stop_locked(queued_paths, active.path, committed):
+                return False, "排队回合的终态无法确认。", {}
+        else:
+            committed = update_json_file_atomic(active.path, mark_cancel, require_existing=True)
     except FileNotFoundError:
         return False, "当前任务刚刚结束，无需停止。", {}
     except OSError:
@@ -3165,7 +3492,66 @@ def _gateway_task_status(
         monitors=monitor_counts(base_agent, scope),
         model_timing=facts['model_timing'],
         model_usage=facts['model_usage'],
+        background_roots=_session_background_roots(owner_agent, scope),
     )
+
+
+def _session_background_roots(owner, scope, *, include_current=False):
+    """只投影认证会话的后台活动记录，线程与进程事实沿原只读口。"""
+    from ..conversation.background_process_view import list_background_processes
+
+    try:
+        store = owner.conversation_store
+        threads = _session_stop_threads(store, scope)
+        threads = threads if include_current else threads[1:]
+        if not threads:
+            return []
+        by_id = {thread.thread_id: thread for thread in threads}
+        roots = []
+
+        def add(thread, kind, started_at, *run_ids):
+            roots.append({"thread_id": thread.thread_id, "title": thread.title,
+                          "kind": kind, "started_at": _background_started_at(started_at),
+                          "run_ids": list(dict.fromkeys(identifier for identifier in run_ids if identifier))})
+
+        for thread in threads:
+            links, errors, execution = _control_conversation_links_snapshot(store, thread.thread_id)
+            if not errors:
+                active = _root_control_links(owner, _control_active_conversation_links(
+                    store, thread.thread_id, links, execution=execution, include_detached=True,
+                ))
+                for link in active:
+                    add(thread, "main", thread_task_run_started_at(link, fallback=link.created_at), link.task_id)
+            claim, claim_error = store.claims.load_report(thread.thread_id)
+            authority = claim.get("runtime_authority") if not claim_error and _claim_is_current(claim, thread.thread_id) else None
+            if isinstance(authority, dict) and claim.get("claim_id") == authority.get("claim_id"):
+                turn_id = authority.get("invocation_run_id")
+                dispatch = store.session_tasks.load(authority["task_id"]) if authority.get("task_id") else None
+                kind = ("dispatch" if dispatch and dispatch.status == "accepted" and dispatch.target_thread_id == thread.thread_id
+                        and dispatch.conversation_request_id == turn_id else "wake")
+                add(thread, kind, claim.get("started_at"), authority.get("run_id") or turn_id)
+        home = owner.home_paths
+        projected = list_background_processes(home.owner_home_dir, active_only=True, expected_owner_id=home.owner_id)
+        for row in projected["items"]:
+            thread = by_id.get(row["thread_id"])
+            if thread is not None and row["alive"]:
+                add(thread, "process", row["started_at"], row["run_id"] or row["session_id"])
+        return roots
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return []
+
+
+def _background_started_at(value):
+    if isinstance(value, (float, int)):
+        return float(value)
+    if isinstance(value, str):
+        from datetime import datetime
+
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            pass
+    return 0.0
 
 
 # LLM: 只数本 owner 结案目录里的文件（store.wakes.attempts.quarantined_count，不读内容、不含归档）；读不到会话存储时按 0，
@@ -3395,7 +3781,7 @@ def bind_gateway_control_scope_owner(
     from .request_worker import _resolve_request_owner_identity
 
     owner = _resolve_request_owner_identity(base_agent, _scope_request_payload(scope))
-    return replace(scope, resolved_owner=owner)
+    return fast_replace(scope, resolved_owner=owner)
 
 
 # LLM: 基于作用域的控制优先用持久所有者身份；原始通道事实只在持久控制回执创建前查询一次。

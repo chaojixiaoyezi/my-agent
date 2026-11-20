@@ -35,22 +35,21 @@ def prepare_coordinator_remote_control(source, receipt, expected_raw):
     from . import control_operation_service as ops
     from .coordinator_control_transport import _CoordinatorControlTransport
     from .multiprocess_control_target import (
-        TARGETED_CONTROL_KINDS,
         freeze_control_execution,
         refuse_unfreezable_control,
+        requires_control_execution_snapshot,
     )
     from .multiprocess_global_write import GlobalWriteError
 
     if type(source) is not _CoordinatorControlTransport:
         raise GlobalWriteError('control_http_source_required', 'control_transport')
     source.require_current()
-    original = ops._new_control_operation_receipt(source.scope, source.command.kind, source.command_text,
-        source.operation_id, source.input_digest)
+    original = source.prepare_receipt()
     if replace(original, updated_at=0) != replace(receipt, updated_at=0) or expected_raw is not None:
         raise GlobalWriteError('control_receipt_source_changed', 'control_transport')
     target_options = {'config': source.control.config, 'home_root': source.control.home_root,
                       'blocking': False, 'deadline': source.deadline}
-    targeted = receipt.command_kind in TARGETED_CONTROL_KINDS
+    targeted = requires_control_execution_snapshot(receipt)
     execution = freeze_control_execution(None, source.paths, receipt, **target_options) if targeted else None
     route = _control_dispatch_for_receipt(receipt, source.lease, source.lease.c_run_id, execution)
     forwarded = (refuse_unfreezable_control(receipt, time.time()) if targeted and execution is None
@@ -131,9 +130,9 @@ def validate_control_dispatch(receipt):
             or route.get("binding") != control_dispatch_binding(receipt, route)):
         raise DataCorruptionError("control dispatch binding is invalid")
     from .execution_target import GatewayExecutionTarget
-    from .multiprocess_control_target import TARGETED_CONTROL_KINDS
+    from .multiprocess_control_target import requires_control_execution_snapshot
 
-    if receipt.command_kind in TARGETED_CONTROL_KINDS:
+    if requires_control_execution_snapshot(receipt):
         target = GatewayExecutionTarget.from_dict(route.get('execution'))
         if (target is None
                 or (receipt.input_digest_version >= 4 and target.to_dict() != receipt.expected_execution)
@@ -179,9 +178,9 @@ def prepare_remote_control(agent, paths, receipt, *, fresh=False, control_contex
     if receipt.state != "prepared":
         return receipt
     from .multiprocess_control_target import (
-        TARGETED_CONTROL_KINDS,
         freeze_control_execution,
         refuse_unfreezable_control,
+        requires_control_execution_snapshot,
     )
 
     generation = lease.c_run_id
@@ -189,12 +188,12 @@ def prepare_remote_control(agent, paths, receipt, *, fresh=False, control_contex
         raise DataCorruptionError('control coordinator generation is unavailable')
     # 原操作锁冻结本次输入；目标随后改变由W原严格比较拒绝，不在这里重新选目标。
     execution = (freeze_control_execution(agent, paths, receipt)
-                 if fresh and receipt.command_kind in TARGETED_CONTROL_KINDS else None)
+                 if fresh and requires_control_execution_snapshot(receipt) else None)
     with lease._lifecycle_gate:
         if coordinator_for_root(paths.root, context=context) is not lease or lease.c_run_id != generation:
             raise DataCorruptionError('control coordinator generation is unavailable')
         route = _control_dispatch_for_receipt(receipt, lease, generation, execution)
-        if receipt.command_kind in TARGETED_CONTROL_KINDS:
+        if requires_control_execution_snapshot(receipt):
             if execution is None:
                 refused = refuse_unfreezable_control(receipt, time.time())
                 write_json_file_atomic(gateway_control_operation_path(paths, receipt.operation_id), refused.to_dict(), **({} if blocking else {"blocking": False}))

@@ -204,19 +204,11 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M21"
     },
-    "agent/gateway_parts/control_service.py::_execute_effort_control::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M21"
-    },
     "agent/gateway_parts/control_service.py::_legacy_active_turn_guidance_dedupe_key::json_dumps_default": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M21"
     },
     "agent/gateway_parts/control_service.py::_render_effort::dyn_getattr": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M21"
-    },
-    "agent/gateway_parts/control_service.py::_stop_live_window_request::replace_on_fast_frozen": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M21"
     },
@@ -228,21 +220,9 @@
       "count": 1,
       "reason": "baseline-d9caa95af pending M21"
     },
-    "agent/gateway_parts/control_service.py::bind_gateway_control_scope_owner::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M21"
-    },
-    "agent/gateway_parts/control_service.py::execute_gateway_conversation_control::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M21"
-    },
     "agent/gateway_parts/http_body_readiness.py::PrefetchedSocket.__getattr__::dyn_getattr": {
       "count": 1,
       "reason": "baseline-d9caa95af pending M22"
-    },
-    "agent/gateway_parts/http_handlers.py::_handle_persistent_control_operation::replace_on_fast_frozen": {
-      "count": 1,
-      "reason": "baseline-d9caa95af pending M21"
     },
     "agent/gateway_parts/http_handlers.py::_http_idempotent_request_identity::json_dumps_default": {
       "count": 1,
