@@ -56,15 +56,11 @@ def recovery_candidates(store: dict, current: float) -> bool:
     return False
 
 
-# LLM: 仅采纳同 owner/run/job/thread/claim epoch 的合法终态，防止 history 已提交而 store rename 失败后改写真实结果。
-#   单遍前向流式扫描并仅在精确匹配时覆盖，保持 O(K) 内存且选中最新一条精确匹配终态而非最新原始行。
-# 函数用途: 流式读取一次历史文件，批量提取待结算运行已落盘的最新精确匹配终态回执。
+# 保留最新一条匹配 owner/run/job/thread/claim epoch 的合法回执。
 def existing_terminals(
     repository,
     runs: Mapping[str, dict] | Iterable[dict],
 ) -> dict[str, dict]:
-    from .repository import _history_membership_fallback
-
     run_items = runs.values() if isinstance(runs, Mapping) else runs
     by_id: dict[str, dict] = {}
     for run in run_items:
@@ -73,36 +69,16 @@ def existing_terminals(
             by_id[run_id] = run
     if not by_id:
         return {}
-    terminals: dict[str, dict] = {}
+    def matches(terminal: dict) -> bool:
+        run = by_id[str(terminal["run_id"])]
+        return terminal.get("claim_epoch", 0) == run.get("claim_epoch", 0) and all(
+            terminal.get(key) == run.get(key) for key in ("owner", "run_id", "job_id", "thread_id")
+        )
 
-    def accept(raw: dict) -> bool:
-        run_id = str(raw.get("run_id") or "")
-        run = by_id.get(run_id)
-        if run is None:
-            return False
-        terminal, _error = repository._parse_run(raw, terminal=True)
-        if (
-            terminal is not None
-            and terminal.get("claim_epoch", 0) == run.get("claim_epoch", 0)
-            and all(
-                terminal.get(key) == run.get(key)
-                for key in ("owner", "run_id", "job_id", "thread_id")
-            )
-        ):
-            terminals[run_id] = terminal
-            return True
-        return False
-
-    _history_membership_fallback(
-        repository.history_path,
-        frozenset(by_id),
-        allow_missing=True,
-        accept=accept,
-    )
-    return terminals
+    return repository._locate_history_terminals_unlocked(by_id, matches, allow_missing=True)
 
 
-# LLM: 保留单条查询兼容入口，直接复用批量流式扫描以保持同等身份核验与有界内存语义。
+# LLM: 保留单条查询兼容入口，复用批量定位与身份核验。
 # 函数用途: 读取本次恢复候选已落下的历史回执，保留已确认的 done/failed 等终态。
 def existing_terminal(repository, run: dict) -> dict | None:
     run_id = run.get("run_id")

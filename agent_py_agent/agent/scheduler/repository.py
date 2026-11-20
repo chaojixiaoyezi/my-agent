@@ -113,6 +113,15 @@ def _history_fd_stamp(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return info.st_mtime_ns, info.st_size, info.st_ino, info.st_dev, info.st_ctime_ns
 
 
+def _history_read_error(exc):
+    report = runtime_error_report(exc, context="scheduler.history.dedupe")
+    details = {key: report[key] for key in ("error_type", "line_no", "column") if key in report}
+    if getattr(exc, "errno", None) is not None:
+        details["errno"] = exc.errno
+    return SchedulerStateError("owner scheduler history is unreadable",
+        error_code="SCHEDULER_HISTORY_READ_FAILED", details=details)
+
+
 # LLM: 完整扫描后才能给负结果；可选谓词仅收紧本批匹配，不保存lifetime行或ID。
 # 函数用途: 流式查询历史身份或合法终态，保留坏行诊断与读取失败关闭。
 def _history_membership_fallback(
@@ -161,12 +170,7 @@ def _history_membership_fallback(
             os.close(check)
         return frozenset(found)
     except (OSError, UnicodeError) as exc:
-        report = runtime_error_report(exc, context="scheduler.history.dedupe")
-        details = {key: report[key] for key in ("error_type", "line_no", "column") if key in report}
-        if getattr(exc, "errno", None) is not None:
-            details["errno"] = exc.errno
-        raise SchedulerStateError("owner scheduler history is unreadable",
-            error_code="SCHEDULER_HISTORY_READ_FAILED", details=details) from exc
+        raise _history_read_error(exc) from exc
 
 # LLM: ``waiting_runs`` is called once per conversation tick (runtime.prepare_tick ->
 # SchedulerService.reconcile_waiting_runs) and used to re-parse the whole owner ledger every time
@@ -943,7 +947,7 @@ class _SchedulerRunOperations:
 
     @property
     def last_history_coverage(self) -> str:
-        """返回最近一次 history() 查询的窗口覆盖说明（如 'window_200' 或 ''）。"""
+        """保留历史查询覆盖说明属性。"""
         return str(getattr(self._history_index, "last_read_coverage", ""))
 
     # LLM: 只解码索引B+1行并沿原owner/schema校验；覆盖不足披露errors，不在读路径回填或全扫。
@@ -1665,8 +1669,7 @@ class _SchedulerStoreSupport:
             store["runs"].pop(run_id, None)
         return cancelled
 
-    # LLM: 原事实事务内，推进和查询均完整覆盖当前规范边界才能使用负membership。
-    # 函数用途: 查询本批持久身份，索引不可用或落后时只读流式扫描原历史。
+    # 同一来源代次内只读本批命中行；落后或不可用时沿用规范去重的后备校验。
     def _history_membership_unlocked(self, requested: frozenset[str]) -> frozenset[str]:
         if not requested:
             return frozenset()
@@ -1677,6 +1680,9 @@ class _SchedulerStoreSupport:
                 self.owner["id"], self.history_path)
         elif before is not None:
             self._history_source_seen = True
+            found, complete = self._history_index.membership(requested)
+            if complete and found <= requested and _history_file_stamp(self.history_path) == before:
+                return found
         index = self._history_read_index
         if index is not None and len(requested) <= 4096:
             try:
@@ -1706,10 +1712,6 @@ class _SchedulerStoreSupport:
             except (OSError, ValueError, TypeError, KeyError):
                 # 派生索引失败只影响性能，不能当成规范身份不存在。
                 pass
-        if before is not None:
-            found, complete = self._history_index.membership(requested)
-            if complete and found <= requested and _history_file_stamp(self.history_path) == before:
-                return found
         if source_missing:
             self._history_source_seen = False
         found = _history_membership_fallback(self.history_path, requested,
@@ -1718,35 +1720,46 @@ class _SchedulerStoreSupport:
             self._history_source_seen = True
         return found
 
-    # LLM: 无锁命中只允许进入原事务，写前须重读；只留候选合法终态，兼容已验证的来源线程兜底链。
-    # 函数用途: 流式找出旧活动副本对应的真实完成回执，不把普通run_id命中当终态。
+    def _locate_history_terminals_unlocked(self, run_ids, matches, *, allow_missing, check_membership=False):
+        try:
+            terminals = self._history_index.locate_terminals(run_ids, matches, parser=self._parse_run)
+        except BlockingIOError as exc:
+            raise _history_read_error(exc) from exc
+        if terminals is not None:
+            return terminals
+        requested = frozenset(run_ids)
+        if check_membership:
+            requested = self._history_membership_unlocked(requested)
+        if not requested:
+            return {}
+        terminals = {}
+
+        def accept(raw):
+            terminal, _error = self._parse_run(raw, terminal=True)
+            if terminal is None or not matches(terminal):
+                return False
+            terminals[str(terminal["run_id"])] = terminal
+            return True
+
+        _history_membership_fallback(self.history_path, requested, allow_missing=allow_missing, accept=accept)
+        return terminals
+
+    # 只采纳同一运行、任务及已验证来源线程的终态回执。
     def _history_terminal_runs(self, store, *, job_id: str = '', run_id: str = '') -> dict[str, dict]:
         runs = {str(run['run_id']): run for run in self._valid_runs(store)[0]
             if (not job_id or run['job_id'] == job_id) and (not run_id or run['run_id'] == run_id)}
         if not runs:
             return {}
-        seen = self._history_membership_unlocked(frozenset(runs))
-        if not seen:
-            return {}
-        terminals = {}
-
-        # LLM: 同owner/job及原线程或合法fallback链才收集；扫描/来源复核成功前不改store。
-        # 函数用途: 验证一条候选终态并保留本批命中。
-        def accept(raw):
-            terminal, _error = self._parse_run(raw, terminal=True)
-            original = runs.get(str(raw.get('run_id') or ''))
-            if terminal is None or original is None or terminal['job_id'] != original['job_id']:
+        def matches(terminal):
+            original = runs[str(terminal['run_id'])]
+            if terminal['job_id'] != original['job_id']:
                 return False
-            if terminal.get('thread_id') != original.get('thread_id') and terminal.get('thread_fallback') != {
+            return terminal.get('thread_id') == original.get('thread_id') or terminal.get('thread_fallback') == {
                 'reason': 'source_thread_unavailable', 'original_thread_id': original.get('origin_thread_id'),
                 'fallback_thread_id': terminal.get('thread_id'),
-            }:
-                return False
-            terminals[str(terminal['run_id'])] = terminal
-            return True
+            }
 
-        _history_membership_fallback(self.history_path, seen, allow_missing=False, accept=accept)
-        return terminals
+        return self._locate_history_terminals_unlocked(runs, matches, allow_missing=False, check_membership=True)
 
     # LLM: 调用方持原写锁且已验证控制前提；不追加历史，复用原终态策略但不覆盖更晚的job结果。
     # 函数用途: 结算旧活动副本并返回准确运行编号，落盘仍由调用方原事务负责。

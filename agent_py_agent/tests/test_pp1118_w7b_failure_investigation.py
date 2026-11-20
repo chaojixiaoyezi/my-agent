@@ -706,16 +706,16 @@ def test_history_index_filters_explain_plan_and_window_200_coverage(tmp_path) ->
     assert len(tool_range["runs"]) == 5
     assert "coverage" not in tool_range
 
-    # Status filter over 205 runs where all failed runs sit beyond newest 200 -> coverage="window_200".
+    # 三条失败运行都排在最新 200 条之外，索引应直接定位全部匹配。
     failed_resp = _payload(
         tool.execute({"action": "history", "job_id": job["job_id"], "status": "failed", "limit": 20})
     )
     assert failed_resp["ok"] is True
-    assert failed_resp["runs"] == []
+    assert [row["run_id"] for row in failed_resp["runs"]] == [row["run_id"] for row in tool_range["runs"][-3:]]
     assert failed_resp["load_error_codes"] == []
-    assert failed_resp["coverage"] == "window_200"
+    assert "coverage" not in failed_resp
 
-    # Trigger filter finds matching runs within window cleanly.
+    # 触发类型筛选同样使用原历史索引。
     job_inv, _ = repository.create_job(
         SchedulerJobCreateRequest(
             name="inv-history-job",

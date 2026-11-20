@@ -46,6 +46,7 @@ class GatewayHistoryIndex:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=FULL")
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute("CREATE TABLE IF NOT EXISTS history (request_id TEXT PRIMARY KEY, body TEXT NOT NULL, digest TEXT NOT NULL, origin TEXT NOT NULL, conflict INTEGER NOT NULL DEFAULT 0, export_pending INTEGER NOT NULL DEFAULT 0, export_path TEXT NOT NULL DEFAULT '', export_offset INTEGER NOT NULL DEFAULT 0, export_mode TEXT NOT NULL DEFAULT '')")
                 conn.execute("CREATE INDEX IF NOT EXISTS history_export_pending ON history(export_pending,request_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS history_export_path ON history(export_path)")
@@ -57,8 +58,12 @@ class GatewayHistoryIndex:
                 conn.execute("CREATE INDEX IF NOT EXISTS audit_time_seek ON audit_keys(recorded_at DESC,request_id DESC)")
                 conn.execute("CREATE INDEX IF NOT EXISTS audit_error_seek ON audit_keys(error_code,recorded_at DESC,request_id DESC)")
                 conn.execute("CREATE INDEX IF NOT EXISTS audit_channel_seek ON audit_keys(channel,recorded_at DESC,request_id DESC)")
+                conn.execute("CREATE TABLE IF NOT EXISTS history_publish (request_id TEXT PRIMARY KEY, publish_seq INTEGER NOT NULL)")
+                conn.execute("CREATE INDEX IF NOT EXISTS history_publish_seq ON history_publish(publish_seq,request_id)")
                 if self._meta(conn, "initialized") != "1":
                     self._initialize(conn)
+                if not self._meta(conn, "append_seq"):
+                    self._initialize_publish(conn)
                 yield conn
                 conn.commit()
             except BaseException:
@@ -79,18 +84,64 @@ class GatewayHistoryIndex:
     # LLM: 首次只stat旧来源，不等待全文回填；新根的小热段上限固定而非历史快照。
     # 函数用途: 固定旧来源身份并初始化字节游标和小段导出状态。
     def _initialize(self, conn):
-        try:
-            info = self.paths.history.lstat()
-        except FileNotFoundError:
-            identity, size = "", 0
-        else:
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise ValueError("legacy history must be a regular file")
-            identity, size = f"{info.st_dev}:{info.st_ino}", info.st_size
+        identity, size, stamp = self._legacy_source()
         for key, value in {"initialized": 1, "legacy_identity": identity, "legacy_limit": size,
                            "cursor": 0, "line": 0, "discard": 0,
-                           "compat": int(size == 0), "compat_count": 0, "audit_complete": int(size == 0)}.items():
+                           "compat": int(size == 0), "compat_count": 0, "audit_complete": int(size == 0),
+                           "legacy_observed_stamp": f"{size}:{stamp}"}.items():
             self._set_meta(conn, key, value)
+
+    def _initialize_publish(self, conn):
+        # 为升级前行预留序号。新追加可立即入库，旧行由既有有界维护补齐。
+        upper = conn.execute("SELECT COALESCE(MAX(rowid),0) FROM history").fetchone()[0]
+        for key, value in (("append_seq", upper), ("source_generation", 0), ("publish_legacy_upper", upper),
+                           ("publish_backfill_complete", int(upper == 0)), ("publish_cursor", 0),
+                           ("publish_rebuilt_at", time.time())):
+            self._set_meta(conn, key, value)
+        # 旧版位置写入仍有效；有缺项时唤醒原回填，包括 SQLite 复用尾部 rowid 的情况。
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS history_publish_legacy_insert AFTER INSERT ON history
+            WHEN NOT EXISTS (SELECT 1 FROM history_publish WHERE request_id=NEW.request_id)
+            BEGIN
+                UPDATE meta SET value=CASE
+                    WHEN key='publish_cursor' AND
+                        (SELECT value FROM meta WHERE key='publish_backfill_complete')='1' THEN NEW.rowid-1
+                    ELSE MIN(CAST(value AS INTEGER),NEW.rowid-1) END
+                WHERE key IN ('audit_cursor','publish_cursor');
+                UPDATE meta SET value='0' WHERE key IN ('publish_backfill_complete','audit_complete');
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS history_publish_remove AFTER DELETE ON history
+            BEGIN
+                DELETE FROM history_publish WHERE request_id=OLD.request_id;
+                UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='source_generation';
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS history_publish_key_repair BEFORE INSERT ON audit_keys
+            WHEN EXISTS (
+                SELECT 1 FROM audit_keys WHERE request_id=NEW.request_id
+                AND (owner_id,thread_id,recorded_at,status,error_code,channel)
+                    != (NEW.owner_id,NEW.thread_id,NEW.recorded_at,NEW.status,NEW.error_code,NEW.channel)
+            )
+            BEGIN
+                UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='source_generation';
+            END
+        """)
+
+    def _publish(self, conn, request_id, *, existing_rowid=None, upgrade_upper=0):
+        if conn.execute("SELECT 1 FROM history_publish WHERE request_id=?", (request_id,)).fetchone():
+            return
+        if existing_rowid is not None and 0 < existing_rowid <= upgrade_upper:
+            sequence = existing_rowid
+        else:
+            sequence = int(self._meta(conn, "append_seq")) + 1
+            self._set_meta(conn, "append_seq", sequence)
+        conn.execute("INSERT INTO history_publish(request_id,publish_seq) VALUES (?,?)", (request_id, sequence))
+
+    def _upgrade_upper(self, conn):
+        return int(self._meta(conn, "publish_legacy_upper")) if self._meta(conn, "publish_upgrade_done") != "1" else 0
 
     # LLM: 每次append在同一历史锁内查一键；旧回填最多128行/256KiB，新写优先于旧行。
     # 函数用途: 持久更新一个请求并重放它的有界导出，完全相同重放不写。
@@ -102,14 +153,16 @@ class GatewayHistoryIndex:
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
         with self.connection() as conn:
             self._flush_pending(conn)
-            row = conn.execute("SELECT * FROM history WHERE request_id=?", (request_id,)).fetchone()
+            row = conn.execute("SELECT rowid,* FROM history WHERE request_id=?", (request_id,)).fetchone()
             if row is not None and row["origin"] == "live" and row["digest"] == digest and not row["conflict"]:
                 return False
             self._migrate_batch(conn)
-            row = conn.execute("SELECT * FROM history WHERE request_id=?", (request_id,)).fetchone()
+            row = conn.execute("SELECT rowid,* FROM history WHERE request_id=?", (request_id,)).fetchone()
             if row is not None and row["digest"] == digest and not row["conflict"]:
                 return False
             export_path, offset, mode = self._export_location(conn, row, body)
+            self._publish(conn, request_id, existing_rowid=row["rowid"] if row is not None else None,
+                          upgrade_upper=self._upgrade_upper(conn))
             conn.execute("INSERT INTO history VALUES (?,?,?,'live',0,1,?,?,?) ON CONFLICT(request_id) DO UPDATE SET body=excluded.body,digest=excluded.digest,origin='live',conflict=0,export_pending=1,export_path=excluded.export_path,export_offset=excluded.export_offset,export_mode=excluded.export_mode",
                          (request_id, body, digest, export_path, offset, mode))
             self._audit_key(conn, request_id, payload)
@@ -232,11 +285,12 @@ class GatewayHistoryIndex:
             retained.append(row["body"])
             write_private_text_file_atomic(self.paths.history, "\n".join(retained) + "\n")
         if row["export_path"] == "@history":
-            info = self.paths.history.stat()
+            identity, size, stamp = self._legacy_source()
             # 自己完整发表的小段已在唯一键表中；别让下一次no-op重放再迁自己。
-            self._set_meta(conn, "legacy_identity", f"{info.st_dev}:{info.st_ino}")
-            self._set_meta(conn, "legacy_limit", info.st_size)
-            self._set_meta(conn, "cursor", info.st_size)
+            self._set_meta(conn, "legacy_identity", identity)
+            self._set_meta(conn, "legacy_limit", size)
+            self._set_meta(conn, "legacy_observed_stamp", f"{size}:{stamp}")
+            self._set_meta(conn, "cursor", size)
         conn.execute("UPDATE history SET export_pending=0 WHERE request_id=? AND digest=?", (row["request_id"], row["digest"]))
         conn.commit()
 
@@ -249,30 +303,38 @@ class GatewayHistoryIndex:
 
     # LLM: 每次来源读取最多128行/256KiB；跨拍大行片段与游标同事务保存，到完整行才解析，不凭预算判坏。
     # 函数用途: 推进旧文件字节游标并处理源换代，不覆盖新写者正文。
+    def _legacy_source(self):
+        try:
+            info = self.paths.history.lstat()
+        except FileNotFoundError:
+            return "", 0, 0
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("legacy history must be a regular file")
+        return f"{info.st_dev}:{info.st_ino}", info.st_size, info.st_mtime_ns
+
+    def _legacy_source_changed(self, conn, *, identity, size, stamp, offset, previous):
+        observed = self._meta(conn, "legacy_observed_stamp")
+        return (identity != previous or size < offset
+                or observed.startswith(f"{size}:") and observed != f"{size}:{stamp}")
+
     def _migrate_batch(self, conn):
         offset = int(self._meta(conn, "cursor", "0"))
         limit = int(self._meta(conn, "legacy_limit", "0"))
         line_number = int(self._meta(conn, "line", "0"))
         used, lines = 0, 0
-        try:
-            info = self.paths.history.lstat()
-        except FileNotFoundError:
-            info = None
-        if info is not None:
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise ValueError("legacy history must be a regular file")
-            identity = f"{info.st_dev}:{info.st_ino}"
-            if identity != self._meta(conn, "legacy_identity") or info.st_size < offset:
-                # 换代是新的迁移责任，不是所有live写者的永久故障；旧live行继续优先。
-                offset, line_number = 0, 0
-                conn.execute("DELETE FROM migration_fragment")
-                self._set_meta(conn, "legacy_identity", identity)
-            if info.st_size != limit:
-                self._set_meta(conn, "compat", 0)
-            limit = info.st_size
-            self._set_meta(conn, "legacy_limit", limit)
-        else:
-            limit = offset
+        identity, size, stamp = self._legacy_source()
+        previous = self._meta(conn, "legacy_identity")
+        if self._legacy_source_changed(conn, identity=identity, size=size, stamp=stamp, offset=offset, previous=previous):
+            # 自己的正常导出会一并发表身份。外部轮替及截断撤销旧查询窗口。
+            offset, line_number = 0, 0
+            conn.execute("DELETE FROM migration_fragment")
+            self._set_meta(conn, "legacy_identity", identity)
+            self._set_meta(conn, "source_generation", int(self._meta(conn, "source_generation")) + 1)
+        if size != limit:
+            self._set_meta(conn, "compat", 0)
+        limit = size
+        self._set_meta(conn, "legacy_limit", limit)
+        self._set_meta(conn, "legacy_observed_stamp", f"{size}:{stamp}")
         if offset < limit:
             with self.paths.history.open("rb") as handle:
                 handle.seek(offset)
@@ -316,7 +378,13 @@ class GatewayHistoryIndex:
             return
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        row = conn.execute("SELECT rowid,origin FROM history WHERE request_id=?", (request_id,)).fetchone()
+        if row is not None and row["origin"] == "live":
+            return
+        self._publish(conn, request_id, existing_rowid=row["rowid"] if row is not None else None,
+                      upgrade_upper=self._upgrade_upper(conn))
         conn.execute("INSERT INTO history(request_id,body,digest,origin) VALUES (?,?,?,'legacy') ON CONFLICT(request_id) DO UPDATE SET body=excluded.body,digest=excluded.digest,conflict=1 WHERE history.origin='legacy'", (request_id, body, digest))
+        self._audit_key(conn, request_id, payload)
 
     def _audit_key(self, conn, request_id, payload):
         """白名单键与原历史同事务更新；不形成第二终态权威。"""
@@ -332,7 +400,6 @@ class GatewayHistoryIndex:
         conn.execute("INSERT OR REPLACE INTO audit_keys VALUES (?,?,?,?,?,?,?)",
                      (request_id, _record_owner(payload, {}), str(claim.get("thread_id") or payload.get("thread_id") or ""),
                       stamp, entry["status"], entry["error_code"], entry["channel"]))
-        self._set_meta(conn, "audit_revision", int(self._meta(conn, "audit_revision", "0")) + 1)
 
     def backfill_audit_step(self, *, limit=1):
         """原维护写门按持久 rowid 前进；前台只读绝不补索引。"""
@@ -340,7 +407,9 @@ class GatewayHistoryIndex:
             return self._backfill_audit_step(conn, limit=limit)
 
     def _backfill_audit_step(self, conn, *, limit):
-        after = int(self._meta(conn, "audit_cursor", "0"))
+        # 旧版可自行推进 audit_cursor，发布序号覆盖需要独立记账。
+        after = min(int(self._meta(conn, key, "0")) for key in ("audit_cursor", "publish_cursor"))
+        upgrade_upper = self._upgrade_upper(conn)
         used, visited, complete = 0, 0, False
         deadline = time.monotonic() + .05
         while visited < min(128, max(1, limit)) and used < 1024 * 1024 and time.monotonic() < deadline:
@@ -351,6 +420,7 @@ class GatewayHistoryIndex:
                 break
             visited += 1
             used += len(row["body"].encode())
+            self._publish(conn, row["request_id"], existing_rowid=row["rowid"], upgrade_upper=upgrade_upper)
             try:
                 if len(row["body"]) >= 262145:
                     raise ValueError("audit_projection_source_exceeds_slice")
@@ -361,23 +431,27 @@ class GatewayHistoryIndex:
                 self._set_meta(conn, "audit_invalid", 1)
             after = row["rowid"]
         self._set_meta(conn, "audit_cursor", after)
+        self._set_meta(conn, "publish_cursor", after)
         self._set_meta(conn, "audit_complete", int(complete))
+        self._set_meta(conn, "publish_backfill_complete", int(complete))
+        if complete:
+            self._set_meta(conn, "publish_upgrade_done", 1)
         return {"items": visited, "bytes": used, "complete": complete, "cursor": after}
 
     def maintenance_step(self, *, cutoff):
         """原lane的一次写门：先补缺失键，再沿原retention游标执行。"""
         with self.connection() as conn:
-            if self._meta(conn, "audit_complete") != "1":
+            if self._meta(conn, "audit_complete") != "1" or self._meta(conn, "publish_backfill_complete") != "1":
                 report = self._backfill_audit_step(conn, limit=1)
                 return {**report, "complete": False}
             if cutoff is None:
                 return {"items": 0, "bytes": 0, "complete": True, "cursor": 0}
             return self._prune_history_step(conn, cutoff=cutoff, max_rows=1)
 
-    def audit_page(self, query):
+    def audit_page(self, query, *, window_only=False):
         """有界 keyset 只读；游标绑定来源身份、过滤和投影代次。"""
         from .request_audit_records import _index_audit_page
-        return _index_audit_page(self, query)
+        return _index_audit_page(self, query, window_only=window_only)
 
     # LLM: 错误保留位置和类别，不保留可能敏感的坏正文。
     # 函数用途: 为一条坏旧行登记可诊断迁移错误。
@@ -423,8 +497,6 @@ class GatewayHistoryIndex:
             paths.add(row["export_path"])
         for rowid, in removed:
             conn.execute("DELETE FROM audit_keys WHERE request_id=(SELECT request_id FROM history WHERE rowid=?)", (rowid,))
-        if removed:
-            self._set_meta(conn, "audit_revision", int(self._meta(conn, "audit_revision", "0")) + 1)
         conn.executemany("DELETE FROM history WHERE rowid=?", removed)
         today = _day_key(time.time())
         for export_path in paths:

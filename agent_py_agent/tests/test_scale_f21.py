@@ -129,10 +129,10 @@ def test_append_interleaving_and_replay_after_index_error(tmp_path, monkeypatch)
     original = index._put_record
     failures, observed = [], []
 
-    def put(conn, state, raw, position):
+    def put(conn, state, raw, position, length):
         entered.set()
         assert release.wait(5)
-        return original(conn, state, raw, position)
+        return original(conn, state, raw, position, length)
 
     monkeypatch.setattr(index, "_put_record", put)
 

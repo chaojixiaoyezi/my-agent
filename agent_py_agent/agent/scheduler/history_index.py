@@ -1,7 +1,9 @@
 """Owner-local、可按字节游标重放的调度历史投影；JSONL仍是原始账本。"""
 from __future__ import annotations
 
+import errno
 import hashlib
+import heapq
 import json
 import logging
 import os
@@ -10,6 +12,7 @@ import stat
 import time
 from collections.abc import Iterable
 from contextlib import closing
+from itertools import islice
 from pathlib import Path
 
 from ..common.json_io import (
@@ -80,6 +83,17 @@ def _snapshot(path, *, prefix=None, read_budget=None):
     return {"stamp": stamp, "head": hashlib.sha256(head).hexdigest(), "tail": hashlib.sha256(tail).hexdigest()}
 
 
+def _verify_exact_source(path, handle, snapshot):
+    expected = snapshot["stamp"]
+    try:
+        observed = os.fstat(handle.fileno()), path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise BlockingIOError(errno.EAGAIN, "scheduler history could not be verified after exact read") from exc
+    for info in observed:
+        if (info.st_nlink != 1 or [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns] != expected):
+            raise BlockingIOError(errno.EAGAIN, "scheduler history changed during exact read")
+
+
 # LLM: 索引只有查询和重放进度；原owner/schema解析器仍是行可信度裁决，所有连接均短借用并关闭。
 # 类用途: 按run_id点查及job/时间顺序分页，按有界批次重建旧JSONL。
 class SchedulerHistoryIndex:
@@ -98,13 +112,29 @@ class SchedulerHistoryIndex:
         ensure_private_sqlite_birth(self.path)
         with closing(self._connect()) as conn, conn:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("CREATE TABLE IF NOT EXISTS history_state (key TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS history_rows (generation INTEGER, run_id TEXT, job_id TEXT, "
                          "ended_at REAL, payload TEXT, position INTEGER, PRIMARY KEY(generation,run_id))")
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(history_rows)")}
+            for name, kind in (("line_offset", "INTEGER"), ("line_length", "INTEGER"),
+                               ("status", "TEXT"), ("trigger", "TEXT")):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE history_rows ADD COLUMN {name} {kind}")
             conn.execute("CREATE TABLE IF NOT EXISTS history_effects (generation INTEGER, run_id TEXT, payload TEXT, "
                          "position INTEGER, PRIMARY KEY(generation,run_id))")
+            # 同一运行可能留下多条回执；精确匹配线程或领取代次时保留原行顺序。
+            conn.execute("CREATE TABLE IF NOT EXISTS history_line_versions (generation INTEGER, run_id TEXT, "
+                         "position INTEGER, line_length INTEGER NOT NULL, PRIMARY KEY(generation,run_id,position)) "
+                         "WITHOUT ROWID")
             conn.execute("CREATE INDEX IF NOT EXISTS history_job_time ON history_rows(generation,job_id,ended_at DESC,run_id DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS history_time ON history_rows(generation,ended_at DESC,run_id DESC)")
+            for name, fields in (
+                ("status", "status"), ("trigger", "trigger"), ("status_trigger", "status,trigger"),
+            ):
+                for prefix, job in (("", ""), ("job_", "job_id,")):
+                    conn.execute(f"CREATE INDEX IF NOT EXISTS history_{prefix}{name}_time ON history_rows"
+                                 f"(generation,{job}{fields},ended_at DESC,run_id DESC)")
 
     # LLM: 只读查询不能建缺库、迁移或修改源；写者由同一history文件锁串行。
     # 函数用途: 打开并由调用者关闭一个原生SQLite连接。
@@ -133,18 +163,29 @@ class SchedulerHistoryIndex:
     # LLM: 回放前验证来源；退代只增加generation，不在热维护中删除整代历史索引。
     # 函数用途: 识别追加、替换或截断，避免旧投影覆盖新账本。
     def _prepare(self, state, snapshot):
-        old, current = state["stamp"], snapshot["stamp"]
-        same = state.get("owner") == self.owner and state.get("stamp") == current and all(state.get(k) == snapshot[k] for k in ("head", "tail"))
-        if same:
+        if state.get("line_index") and self._matches(state, snapshot):
             return state
-        append = False
-        if old and current and old[:2] == current[:2] and old[2] < current[2] and state.get("owner") == self.owner:
-            prefix = _snapshot(self.source, prefix=old[2])
-            append = all(prefix[k] == state.get(k) for k in ("head", "tail"))
-        if not append:
-            state = {"generation": state["generation"] + 1, "cursor": 0, "owner": self.owner, "errors": []}
-        state.update(snapshot)
-        return state
+        # 本写者的追加在同一事务更新快照。外部变化与旧格式需要有界重放，以免保留中部改写后的旧定位。
+        return {**snapshot, "generation": state["generation"] + 1, "cursor": 0,
+                "owner": self.owner, "errors": [], "line_index": True, "rebuilt_at": time.time()}
+
+    def _matches(self, state, snapshot):
+        return state.get("owner") == self.owner and all(state.get(key) == value for key, value in snapshot.items())
+
+    def _complete(self, state, snapshot):
+        size = snapshot["stamp"][2] if snapshot["stamp"] else 0
+        return (state.get("line_index") and self._matches(state, snapshot) and state["cursor"] == size
+                and not state.get("pending") and not state.get("skipping"))
+
+    @staticmethod
+    def _read_line(handle, position, length, size, *, meter=None, require_newline=False):
+        if type(position) is not int or type(length) is not int or not 0 < length <= position <= size:
+            raise ValueError("invalid history line location")
+        handle.seek(position - length)
+        raw = handle.read(length) if meter is None else meter.read(handle, length)
+        if len(raw) != length or (not raw.endswith(b"\n") and (require_newline or position != size)):
+            raise ValueError("invalid history line boundary")
+        return json.loads(raw)
 
     # LLM: 进度与本批行在同一个SQLite事务提交；失败不能提前消费旧游标。
     # 函数用途: 发布新的已回放位置及来源指纹。
@@ -154,20 +195,26 @@ class SchedulerHistoryIndex:
 
     # LLM: effect保留最后原行，列表保留最后有效行；position让旧批次回填不能倒盖新追加。
     # 函数用途: 按原schema和owner规则写入一个历史行的两种查找投影。
-    def _put_record(self, conn, state, raw, position):
-        if isinstance(raw, dict) and isinstance(raw.get("run_id"), str):
+    def _put_record(self, conn, state, raw, position, length):
+        run_id = str(raw.get("run_id") or "")
+        if run_id:
             conn.execute("INSERT INTO history_effects VALUES(?,?,?,?) ON CONFLICT(generation,run_id) DO UPDATE "
                          "SET payload=excluded.payload,position=excluded.position WHERE excluded.position>=history_effects.position",
-                         (state["generation"], raw["run_id"], json.dumps(raw, ensure_ascii=False), position))
+                         (state["generation"], run_id, json.dumps(raw, ensure_ascii=False), position))
+            conn.execute("INSERT OR IGNORE INTO history_line_versions(generation,run_id,position,line_length) "
+                         "VALUES (?,?,?,?)", (state["generation"], run_id, position, length))
         run, error = self.parser(raw, terminal=True)
         if error:
             state["errors"] = sorted(set(state["errors"]) | {error})
         elif run is not None:
             ended = float(run.get("ended_at") or run.get("created_at") or 0.0)
-            conn.execute("INSERT INTO history_rows VALUES(?,?,?,?,?,?) ON CONFLICT(generation,run_id) DO UPDATE "
-                         "SET job_id=excluded.job_id,ended_at=excluded.ended_at,payload=excluded.payload,position=excluded.position "
+            conn.execute("INSERT INTO history_rows(generation,run_id,job_id,ended_at,payload,position,line_offset,"
+                         "line_length,status,trigger) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(generation,run_id) DO UPDATE "
+                         "SET job_id=excluded.job_id,ended_at=excluded.ended_at,payload=excluded.payload,position=excluded.position,"
+                         "line_offset=excluded.line_offset,line_length=excluded.line_length,status=excluded.status,trigger=excluded.trigger "
                          "WHERE excluded.position>=history_rows.position", (state["generation"], str(run["run_id"]),
-                         run["job_id"], ended, json.dumps(run, ensure_ascii=False), position))
+                         run["job_id"], ended, json.dumps(run, ensure_ascii=False), position,
+                         position - length, length, str(run.get("status") or ""), str(run.get("trigger") or "")))
 
     # LLM: 正常追加持同一个源锁，原私有JSONL先发布，索引和进度后提交；间隙中止可由backfill补齐。
     # 函数用途: 把终态追加与可重放进度关联，不让旧数据未回填阻止新run直接点查。
@@ -183,8 +230,9 @@ class SchedulerHistoryIndex:
             append_private_jsonl_records_unlocked(self.source, records)
             position = start
             for raw in records:
-                position += len((json.dumps(raw, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
-                self._put_record(conn, state, raw, position)
+                length = len((json.dumps(raw, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+                position += length
+                self._put_record(conn, state, raw, position, length)
             if state["cursor"] == start and not state.get("pending"):
                 state["cursor"] = position
             state.update(_snapshot(self.source))
@@ -225,7 +273,7 @@ class SchedulerHistoryIndex:
                                     state["errors"] = sorted(set(state["errors"]) | {type(exc).__name__})
                                 else:
                                     if isinstance(raw, dict):
-                                        self._put_record(conn, state, raw, state["cursor"])
+                                        self._put_record(conn, state, raw, state["cursor"], len(pending))
                                     else:
                                         state["errors"] = sorted(set(state["errors"]) | {"ValueError"})
                             pending, skipping = b"", False
@@ -238,83 +286,94 @@ class SchedulerHistoryIndex:
 
     # LLM: 双排序索引覆盖有/无job两种页；B+1只在本页解码，不做SQL临时排序。
     # 函数用途: 构造可被EXPLAIN核验的索引分页语句。
-    def page_queries(self, *, job_id, limit, generation=1, since=None, until=None):
-        sql = "SELECT payload FROM history_rows WHERE generation=?"
-        args = [generation]
-        if job_id:
-            sql += " AND job_id=?"
-            args.append(job_id)
-        if since is not None:
-            sql += " AND ended_at>=?"
-            args.append(float(since))
-        if until is not None:
-            sql += " AND ended_at<=?"
-            args.append(float(until))
-        sql += " ORDER BY ended_at DESC,run_id DESC LIMIT ?"
-        args.append(limit + 1)
-        return [(sql, tuple(args))]
+    def page_queries(self, *, job_id, limit, generation=1, since=None, until=None, statuses=(), trigger=""):
+        queries = []
+        filtering = bool(job_id or statuses or trigger) or since is not None or until is not None
+        for status in dict.fromkeys(statuses or ("",)):
+            sql = ("SELECT ended_at,run_id,line_offset,line_length FROM history_rows WHERE generation=?" if filtering
+                   else "SELECT payload FROM history_rows WHERE generation=?")
+            args = [generation]
+            for name, value in (("job_id", job_id), ("status", status), ("trigger", trigger)):
+                if value:
+                    sql += f" AND {name}=?"
+                    args.append(value)
+            if since is not None:
+                sql += " AND ended_at>=?"
+                args.append(float(since))
+            if until is not None:
+                sql += " AND ended_at<=?"
+                args.append(float(until))
+            sql += " ORDER BY ended_at DESC,run_id DESC LIMIT ?"
+            queries.append((sql, (*args, limit + 1)))
+        return queries
 
     @property
     def last_read_coverage(self) -> str:
-        """返回当前线程最近一次 read() 调用的窗口覆盖说明（如 'window_200' 或 ''）。"""
-        local_state = getattr(self, "_last_coverage_local", None)
-        return str(getattr(local_state, "value", "")) if local_state is not None else ""
-
-    def _set_last_read_coverage(self, value: str) -> None:
-        local_state = getattr(self, "_last_coverage_local", None)
-        if local_state is None:
-            import threading
-
-            local_state = threading.local()
-            self._last_coverage_local = local_state
-        local_state.value = value
+        """保留既有查询属性；筛选覆盖由当前查询的结构化错误报告。"""
+        return ""
 
     # LLM: 仅校验有界锚点，不同步回填；不完整索引只返回已覆盖结果并披露原因，版本不符不返回旧投影。
     # 函数用途: 在同一SQLite读快照中取当前页或准确run。
     def read(self, *, job_id="", limit=50, run_id=None, statuses=(), since=None, until=None, trigger=""):
-        self._set_last_read_coverage("")
         try:
             with locked_json_path(self.source), closing(self._connect(read_only=True)) as conn:
                 conn.execute("BEGIN")
                 state = self._state(conn)
                 snapshot = _snapshot(self.source)
-                if (state.get("owner") != self.owner or any(state.get(key) != snapshot[key] for key in ("stamp", "head", "tail"))):
+                if not state.get("line_index") or not self._matches(state, snapshot):
                     return [], ["SCHEDULER_HISTORY_INDEX_INCOMPLETE"]
                 errors = list(state["errors"])
                 size = snapshot["stamp"][2] if snapshot["stamp"] else 0
                 if state["cursor"] < size or state.get("pending") or state.get("skipping"):
                     errors.append("SCHEDULER_HISTORY_INDEX_INCOMPLETE")
                 if run_id is not None:
-                    rows = conn.execute("SELECT payload FROM history_effects WHERE generation=? AND run_id=?",
-                                        (state["generation"], run_id)).fetchall()
-                    return [json.loads(row[0]) for row in rows], sorted(set(errors))
-                filtering = bool(statuses) or bool(trigger)
-                query_limit = 200 if filtering else limit
-                sql, args = self.page_queries(
+                    row = conn.execute("SELECT e.position,v.line_length FROM history_effects AS e "
+                                       "LEFT JOIN history_line_versions AS v USING(generation,run_id,position) "
+                                       "WHERE e.generation=? AND e.run_id=?", (state["generation"], run_id)).fetchone()
+                    if row is None:
+                        return [], sorted(set(errors))
+                    descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                    with os.fdopen(descriptor, "rb") as handle:
+                        raw = self._read_line(handle, row["position"], row["line_length"], size)
+                        _verify_exact_source(self.source, handle, snapshot)
+                    if not isinstance(raw, dict) or str(raw.get("run_id") or "") != run_id:
+                        raise BlockingIOError("history changed during exact query")
+                    return [raw], sorted(set(errors))
+                statuses = tuple(str(item) for item in (statuses or ()) if item)
+                filtering = bool(job_id or statuses or trigger) or since is not None or until is not None
+                queries = self.page_queries(
                     job_id=job_id,
-                    limit=query_limit,
+                    limit=limit,
                     generation=state["generation"],
                     since=since,
                     until=until,
-                )[0]
-                rows = conn.execute(sql, args).fetchall()
-                decoded = [json.loads(row[0]) for row in rows]
+                    statuses=statuses,
+                    trigger=str(trigger or ""),
+                )
                 if not filtering:
-                    return decoded, sorted(set(errors))
-                window_exhausted = len(decoded) > 200
-                candidates = decoded[:200]
-                allowed_statuses = {str(item) for item in statuses if item}
-                trigger_value = str(trigger or "")
-                filtered = [
-                    item
-                    for item in candidates
-                    if (not allowed_statuses or item.get("status") in allowed_statuses)
-                    and (not trigger_value or str(item.get("trigger") or "") == trigger_value)
-                ]
-                if window_exhausted:
-                    self._set_last_read_coverage("window_200")
-                return filtered[: limit + 1], sorted(set(errors))
-        except (OSError, sqlite3.Error, ValueError) as exc:
+                    sql, args = queries[0]
+                    return [json.loads(row[0]) for row in conn.execute(sql, args)], sorted(set(errors))
+                candidates = heapq.merge(*(conn.execute(sql, args) for sql, args in queries),
+                                          key=lambda row: (row["ended_at"] is not None, row["ended_at"], row["run_id"]),
+                                          reverse=True)
+                candidates = list(islice(candidates, limit + 1))
+                if not candidates:
+                    return [], sorted(set(errors))
+                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                with os.fdopen(descriptor, "rb") as handle:
+                    filtered = []
+                    for row in candidates:
+                        offset, length = row["line_offset"], row["line_length"]
+                        raw = self._read_line(handle, offset + length, length, size)
+                        if not isinstance(raw, dict) or str(raw.get("run_id") or "") != row["run_id"]:
+                            raise ValueError("history line identity changed")
+                        run, error = self.parser(raw, terminal=True)
+                        if error or run is None:
+                            raise ValueError(error or "history terminal line invalid")
+                        filtered.append(run)
+                    _verify_exact_source(self.source, handle, snapshot)
+                return filtered, sorted(set(errors))
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
             return [], ["SCHEDULER_HISTORY_READ_FAILED", type(exc).__name__]
 
     def membership(self, run_ids: Iterable[str]) -> tuple[frozenset[str], bool]:
@@ -324,38 +383,74 @@ class SchedulerHistoryIndex:
             with locked_json_path(self.source), closing(self._connect(read_only=True)) as conn:
                 conn.execute("BEGIN")
                 snapshot = _snapshot(self.source)
-                if not snapshot["stamp"]:
-                    return frozenset(), False
                 state = self._state(conn)
-                size = snapshot["stamp"][2]
-                if (
-                    state.get("owner") != self.owner
-                    or any(state.get(key) != snapshot[key] for key in ("stamp", "head", "tail"))
-                    or state.get("cursor") != size
-                    or state.get("pending")
-                    or state.get("skipping")
-                    or "SCHEDULER_HISTORY_ROW_TOO_LARGE" in (state.get("errors") or ())
+                if (not snapshot["stamp"] or not self._complete(state, snapshot)
+                    or {"SCHEDULER_HISTORY_ROW_TOO_LARGE", "UnicodeDecodeError"}.intersection(state["errors"])
                 ):
                     return frozenset(), False
                 if not targets:
                     return frozenset(), True
                 found: set[str] = set()
                 generation = state["generation"]
+                size = snapshot["stamp"][2]
                 chunk_size = 500
-                for offset in range(0, len(targets), chunk_size):
-                    batch = targets[offset : offset + chunk_size]
-                    placeholders = ",".join("?" for _ in batch)
-                    rows = conn.execute(
-                        f"SELECT run_id FROM history_effects WHERE generation=? AND run_id IN ({placeholders})",
-                        (generation, *batch),
-                    ).fetchall()
-                    found.update(str(row[0]) for row in rows)
-                if _snapshot(self.source) != snapshot:
-                    return frozenset(), False
+                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                with os.fdopen(descriptor, "rb") as handle:
+                    for offset in range(0, len(targets), chunk_size):
+                        batch = targets[offset : offset + chunk_size]
+                        placeholders = ",".join("?" for _ in batch)
+                        rows = conn.execute(
+                            "SELECT run_id,position,(SELECT line_length FROM history_line_versions AS v "
+                            "WHERE (v.generation,v.run_id,v.position)=(history_effects.generation,"
+                            "history_effects.run_id,history_effects.position)) AS line_length "
+                            f"FROM history_effects WHERE generation=? AND run_id IN ({placeholders})",
+                            (generation, *batch),
+                        )
+                        for row in rows:
+                            raw = self._read_line(handle, row["position"], row["line_length"], size)
+                            if not isinstance(raw, dict) or str(raw.get("run_id") or "") != row["run_id"]:
+                                return frozenset(), False
+                            found.add(row["run_id"])
+                    _verify_exact_source(self.source, handle, snapshot)
                 return frozenset(found), True
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
             return frozenset(), False
 
+    def locate_terminals(self, run_ids, matches, *, parser):
+        """定位每个运行最新的匹配终态，保留同一运行的历史回执顺序。"""
+        try:
+            with locked_json_path(self.source), closing(self._connect(read_only=True)) as conn:
+                conn.execute("BEGIN")
+                state, snapshot = self._state(conn), _snapshot(self.source)
+                if (not self._complete(state, snapshot)
+                        or {"SCHEDULER_HISTORY_ROW_TOO_LARGE", "UnicodeDecodeError"}.intersection(state["errors"])):
+                    return None
+                if not snapshot["stamp"]:
+                    return {}
+                size = snapshot["stamp"][2]
+                terminals = {}
+                descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
+                with os.fdopen(descriptor, "rb") as handle:
+                    for run_id in run_ids:
+                        rows = conn.execute(
+                            "SELECT position,line_length FROM history_line_versions "
+                            "WHERE generation=? AND run_id=? ORDER BY position DESC",
+                            (state["generation"], run_id),
+                        )
+                        for row in rows:
+                            raw = self._read_line(handle, row["position"], row["line_length"], size)
+                            if not isinstance(raw, dict) or str(raw.get("run_id") or "") != run_id:
+                                return None
+                            terminal, _error = parser(raw, terminal=True)
+                            if terminal is not None and matches(terminal):
+                                terminals[run_id] = terminal
+                                break
+                    _verify_exact_source(self.source, handle, snapshot)
+                return terminals
+        except BlockingIOError:
+            raise
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+            return None
 
     def terminal_run_proof(self, run_id, *, thread_id, cutoff, max_bytes=1048576, deadline=None, scan_budget=None):
         """点查仅作定位，按末字节位置重读原行；不创建索引、不回填、不用投影签发删除权。"""
@@ -383,33 +478,25 @@ class SchedulerHistoryIndex:
                 conn.execute("BEGIN")
                 state, snapshot = self._state(conn), _snapshot(self.source, read_budget=meter)
                 size = snapshot["stamp"][2] if snapshot["stamp"] else 0
-                if (state.get("owner") != self.owner or not size
-                        or any(state.get(key) != snapshot[key] for key in ("stamp", "head", "tail"))
-                        or state.get("cursor") != size or state.get("pending") or state.get("skipping")):
+                if not size or not self._complete(state, snapshot):
                     return {**unknown, "reason": "SCHEDULER_HISTORY_INDEX_INCOMPLETE"}
-                row = conn.execute("SELECT payload,position FROM history_effects WHERE generation=? AND run_id=?",
-                                   (state["generation"], run_id)).fetchone()
+                row = conn.execute("SELECT e.payload,e.position,v.line_length FROM history_effects AS e "
+                                   "LEFT JOIN history_line_versions AS v USING(generation,run_id,position) "
+                                   "WHERE e.generation=? AND e.run_id=?", (state["generation"], run_id)).fetchone()
                 if row is None:
                     return {**unknown, "reason": "SCHEDULER_PROOF_RUN_MISSING"}
-                position = row["position"]
-                if type(position) is not int or not 0 < position <= size:
+                position, length = row["position"], row["line_length"]
+                if type(position) is not int or type(length) is not int or not 0 < length <= position <= size:
                     return {**unknown, "reason": "SCHEDULER_PROOF_POSITION_INVALID"}
                 # 留出第二次源快照的准确head/tail额度；不得读完行后才发现本片已超支。
-                count = min(position, 1048577, meter.remaining() - 2 * min(4096, size))
-                if count <= 0:
+                if length > meter.remaining() - 2 * min(4096, size):
                     raise _ProofBudgetExceeded("剩余额度不足以同时重读原行及复核源快照；保留候选。")
                 descriptor = open_readonly_file_beneath(self.source.parent, (self.source.name,))
                 with os.fdopen(descriptor, "rb") as handle:
-                    handle.seek(position - count)
-                    raw = meter.read(handle, count)
-                if not raw.endswith(b"\n"):
-                    return {**unknown, "reason": "SCHEDULER_PROOF_ROW_BOUNDARY_INVALID"}
-                content = raw[:-1]
-                boundary = content.rfind(b"\n")
-                if boundary < 0 and position > count:
-                    return {**unknown, "reason": ("SCHEDULER_PROOF_ROW_TOO_LARGE" if count == 1048577
-                                                 else "SCHEDULER_PROOF_BUDGET_EXHAUSTED")}
-                payload = json.loads(content[boundary + 1:])
+                    try:
+                        payload = self._read_line(handle, position, length, size, meter=meter, require_newline=True)
+                    except ValueError:
+                        return {**unknown, "reason": "SCHEDULER_PROOF_ROW_BOUNDARY_INVALID"}
                 if payload != json.loads(row["payload"]) or _snapshot(self.source, read_budget=meter) != snapshot:
                     return {**unknown, "reason": "SCHEDULER_PROOF_SOURCE_CHANGED"}
                 parsed, error = self.parser(payload, terminal=True)

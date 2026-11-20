@@ -332,7 +332,7 @@ class AuditRecordsTool(BaseTool):
                     "request_id": "仅requests/message_lifecycle：精确请求编号。",
                     "error_code": "仅requests/tool_calls：精确错误码，如TOOL_TIMEOUT；独立于status。",
                     "channel": "仅requests：精确渠道标识。",
-                    "cursor": "仅requests/tool_calls：原样使用上一页next_cursor并保持筛选；改scope/筛选后清空。",
+                    "cursor": "仅requests/tool_calls 使用。保留上一页 next_cursor、scope 和筛选。requests 游标固定首查历史窗口，来源换代时清空游标重新查询。",
                     "message_ref": "仅message_lifecycle：消息短引用；与request_id/request_ref只能提供一个。",
                     "request_ref": "仅message_lifecycle：请求短引用；与request_id/message_ref只能提供一个。",
                     "tool_name": "仅tool_calls且scope=owner：精确工具名。",

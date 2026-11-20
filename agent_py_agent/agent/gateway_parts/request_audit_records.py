@@ -168,33 +168,59 @@ def request_outcome_records(paths: object, query: OutcomeQuery) -> dict:
     _validate_query(query)
     binding = hashlib.sha256(json.dumps([str(paths.root), sorted(query.allowed_owners) if query.allowed_owners is not None else None,
         query.thread_id, query.since, query.until, query.limit, query.error_code, query.channel, query.status]).encode()).hexdigest()
+    index = GatewayHistoryIndex(paths)
+    transition = {}
+    history_cursor = ""
     if query.cursor.startswith("h0:"):
         try:
-            state = json.loads(base64.urlsafe_b64decode(query.cursor[3:]))
-            if state.get("binding") != binding:
+            transition = json.loads(base64.urlsafe_b64decode(query.cursor[3:]))
+            if transition.get("binding") != binding:
                 raise ValueError("audit.cursor history transition scope/filter/window mismatch; restart without cursor; not_started")
+            history_cursor = transition.get("history_window", "")
+            if not isinstance(history_cursor, str):
+                raise ValueError("audit.cursor invalid history window; restart without cursor; not_started")
         except (ValueError, TypeError, AttributeError) as error:
             raise ValueError("audit.cursor history transition invalid or mismatched; restart without cursor; not_started") from error
-    if query.request_id or query.cursor.startswith(("h:", "h0:")):
-        page = GatewayHistoryIndex(paths).audit_page(replace(query, cursor=(query.cursor[2:] if query.cursor.startswith("h:") else "")))
+    elif query.cursor.startswith("h:"):
+        history_cursor = query.cursor[2:]
+
+    def history_page(cursor, *, transition_state=None):
+        if transition_state and "history_window" in transition_state and not cursor:
+            return _audit_result(reason=transition_state.get("history_reason") or "projection_window_unavailable")
+        page = index.audit_page(replace(query, cursor=cursor))
         if page.get("next_cursor"):
             page["next_cursor"] = "h:" + page["next_cursor"]
         return page
-    history_start = "h0:" + base64.urlsafe_b64encode(json.dumps({"since": query.since, "until": query.until, "binding": binding}).encode()).decode()
+
+    if query.request_id or query.cursor.startswith(("h:", "h0:")):
+        return history_page(history_cursor, transition_state=transition)
     active = replace(query, cursor=query.cursor[2:] if query.cursor.startswith("q:") else query.cursor)
+    if active.cursor:
+        try:
+            transition = json.loads(base64.urlsafe_b64decode(active.cursor))
+            history_cursor = transition.get("history_window", "")
+            if not isinstance(history_cursor, str):
+                raise ValueError("audit.cursor invalid history window; restart without cursor; not_started")
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ValueError("audit.cursor invalid active history transition; restart without cursor; not_started") from error
+    dormant_window = {key: transition[key] for key in ("history_window", "history_reason") if key in transition}
     for _ in range(2):
         page = request_queue_records(paths, active)
         if page["entries"] or page["scanned"]:
-            page["next_cursor"] = "q:" + page["next_cursor"] if page["next_cursor"] else history_start
-            page["truncated"] = True
-            return page
+            break
         if not page["next_cursor"]:
-            result = GatewayHistoryIndex(paths).audit_page(replace(query, cursor=""))
-            if result.get("next_cursor"):
-                result["next_cursor"] = "h:" + result["next_cursor"]
-            return result
+            return history_page(history_cursor, transition_state=dormant_window)
         active = replace(active, cursor=page["next_cursor"])
-    return {**page, "next_cursor": "q:" + page["next_cursor"]}
+    if not dormant_window:
+        frozen = index.audit_page(replace(query, cursor=""), window_only=True)
+        dormant_window = {"history_window": frozen["next_cursor"], "history_reason": frozen["coverage"]["reason"]}
+    if page["next_cursor"]:
+        prefix, state = "q:", json.loads(base64.urlsafe_b64decode(page["next_cursor"]))
+    else:
+        prefix, state = "h0:", {"since": query.since, "until": query.until, "binding": binding}
+    state.update(dormant_window)
+    cursor = prefix + base64.urlsafe_b64encode(json.dumps(state).encode()).decode()
+    return {**page, "next_cursor": cursor, "truncated": True}
 
 
 
@@ -300,13 +326,14 @@ def _numeric_map(value):
             and finite_number(item)} if isinstance(value, dict) else {}
 
 
-def _index_audit_page(index, query):
+def _index_audit_page(index, query, *, window_only=False):
     import base64
     import hashlib
     import json
     import sqlite3
     import time
 
+    from ..tooling.audit_lifecycle_topic import finite_number
     from .recovery_pending_index import private_projection_connection
 
     _validate_query(query)
@@ -337,37 +364,84 @@ def _index_audit_page(index, query):
         with private_projection_connection(index.path, read_only=True, blocking=False, deadline=deadline) as conn:
             conn.row_factory = sqlite3.Row
             conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 500)
-            generation = f"{info.st_dev}:{info.st_ino}:audit-v2:" + index._meta(conn, "audit_revision", "0")
-            if state.get("generation") and state.get("generation") != generation:
+            conn.execute("BEGIN")
+            identity = f"{info.st_dev}:{info.st_ino}"
+            legacy_generation = f"{identity}:audit-v2:" + index._meta(conn, "audit_revision", "0")
+            append_seq = index._meta(conn, "append_seq")
+            source_generation = index._meta(conn, "source_generation", "0")
+            generation = f"{identity}:audit-v3:{source_generation}" if append_seq else legacy_generation
+            legacy_cursor = state and "publish_seq_upper" not in state
+            expected = legacy_generation if legacy_cursor and source_generation == "0" else generation
+            current_identity, size, stamp = index._legacy_source()
+            previous_identity = index._meta(conn, "legacy_identity")
+            source_offset = int(index._meta(conn, "cursor", "0"))
+            source_changed = bool(previous_identity) and index._legacy_source_changed(
+                conn, identity=current_identity, size=size, stamp=stamp, offset=source_offset, previous=previous_identity,
+            )
+            if state and (state.get("generation") != expected or source_changed):
+                raise ValueError("audit.cursor source generation changed; restart without cursor; not_started")
+            if source_changed:
+                return _audit_result(reason="projection_source_changed")
+            upper = state.get("publish_seq_upper")
+            if append_seq:
+                if upper is None:
+                    upper = int(index._meta(conn, "publish_legacy_upper")) if legacy_cursor else int(append_seq)
+                if type(upper) is not int or not 0 <= upper <= int(append_seq):
+                    raise ValueError("audit.cursor invalid publish window; restart without cursor; not_started")
+                if index._meta(conn, "publish_backfill_complete") != "1":
+                    return _audit_result(next_cursor=query.cursor, reason="projection_publish_backfill_incomplete")
+            elif "publish_seq_upper" in state:
                 raise ValueError("audit.cursor source generation changed; restart without cursor; not_started")
             after = state.get("after", "")
             after_stamp = state.get("after_stamp")
-            clauses, args = ["recorded_at>=?"], [query.since]
+            if not isinstance(after, str) or after and not finite_number(after_stamp):
+                raise ValueError("audit.cursor invalid seek key; restart without cursor; not_started")
+            window = {"filter": fingerprint, "generation": generation, "after": after, "after_stamp": after_stamp,
+                      "since": query.since, "until": query.until}
+            if append_seq:
+                window["publish_seq_upper"] = upper
+            if window_only:
+                return _audit_result(next_cursor=base64.urlsafe_b64encode(json.dumps(window).encode()).decode())
+            clauses, args = ["a.recorded_at>=?"], [query.since]
             if after:
-                if not isinstance(after, str) or type(after_stamp) not in (int, float):
-                    raise ValueError("audit.cursor invalid seek key; restart without cursor; not_started")
-                clauses.append("(recorded_at,request_id)<(?,?)")
+                clauses.append("(a.recorded_at,a.request_id)<(?,?)")
                 args.extend((after_stamp, after))
             if query.until is not None:
-                clauses.append("recorded_at<=?")
+                clauses.append("a.recorded_at<=?")
                 args.append(query.until)
             # 选一个等值前缀的有序索引；其它过滤在固定候选页内核canonical，避免稀疏过滤拖出全表扫描。
             source_field = "error_code" if query.error_code else "channel" if query.channel else ""
             if source_field:
-                clauses.append(source_field + "=?")
+                clauses.append("a." + source_field + "=?")
                 args.append(getattr(query, source_field))
-            rows = conn.execute("SELECT request_id,recorded_at FROM audit_keys WHERE " + " AND ".join(clauses)
-                                + " ORDER BY recorded_at DESC,request_id DESC LIMIT ?",
-                                (*args, min(_SCAN_LIMIT_COUNT, query.limit))).fetchall()
+            join = " LEFT JOIN history_publish AS p ON p.request_id=a.request_id" if append_seq else ""
+            sequence = "p.publish_seq" if append_seq else "0 AS publish_seq"
+            # 有新追加时，允许同一批元数据越过窗口外的键。规范正文读取仍按用户页大小计。
+            page_size = _SCAN_LIMIT_COUNT if append_seq and upper < int(append_seq) else query.limit
+            rows = conn.execute("SELECT a.request_id,a.recorded_at," + sequence + " FROM audit_keys AS a" + join
+                                + " WHERE " + " AND ".join(clauses)
+                                + " ORDER BY a.recorded_at DESC,a.request_id DESC LIMIT ?",
+                                (*args, page_size)).fetchall()
             invalid_projection = index._meta(conn, "audit_invalid") == "1"
-            complete = index._meta(conn, "audit_complete") == "1" and not invalid_projection
+            complete = index._meta(conn, "audit_complete") == "1" and not invalid_projection and size <= source_offset
             if query.since > 0 and conn.execute("SELECT 1 FROM audit_keys WHERE recorded_at=0 LIMIT 1").fetchone():
                 complete = False
+            visited, stopped = 0, False
             for row in rows:
                 if time.monotonic() >= deadline or budget["bytes"] <= 0:
+                    stopped = True
                     break
+                seq = row["publish_seq"]
+                in_window = not append_seq or seq is not None and seq <= upper
+                if in_window and scanned >= query.limit:
+                    break
+                visited += 1
                 after = row["request_id"]
                 after_stamp = row["recorded_at"]
+                if not in_window:
+                    if seq is None:
+                        complete = False
+                    continue
                 scanned += 1
                 try:
                     entry = _filtered_entry(index.paths, after, query, budget)
@@ -376,10 +450,9 @@ def _index_audit_page(index, query):
                     continue
                 if entry:
                     entries.append(entry)
-            more = len(rows) == min(_SCAN_LIMIT_COUNT, query.limit) or scanned < len(rows)
-            next_cursor = base64.urlsafe_b64encode(json.dumps({"filter": fingerprint, "generation": generation,
-                "after": after, "after_stamp": after_stamp, "since": query.since, "until": query.until}).encode()).decode() if more else ""
-            stopped = scanned < len(rows)
+            more = len(rows) == page_size or visited < len(rows)
+            window.update(after=after, after_stamp=after_stamp)
+            next_cursor = base64.urlsafe_b64encode(json.dumps(window).encode()).decode() if more else ""
             return _audit_result(entries, scanned=scanned, unreadable=unreadable, next_cursor=next_cursor,
                 complete=complete and not unreadable and not stopped,
                 reason="source_budget_exhausted" if stopped else "projection_backfill_invalid_or_oversized" if invalid_projection else "" if complete else "projection_backfill_incomplete")
