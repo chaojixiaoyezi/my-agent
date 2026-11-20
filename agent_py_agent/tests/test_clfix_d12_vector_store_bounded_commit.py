@@ -5,7 +5,7 @@
 - 追加后的检索结果、ids 顺序与可复用向量，与同样内容的整份快照逐项相同；写入实例、常驻实例、新实例三方一致。
 - 崩溃留下的半条记录不算已提交、不让库变成读不了；下一次追加先截掉它。写入失败时文件与实例状态都不变。
 - 已有格式照常读：P14 前的整份 id→条目、旧代码写出的单行 v2 快照（新增 id 接在原字节后）、缩进多行的 v2 快照。
-- 旧版本按整份 json.loads 读带追加段的文件会失败（VECTOR_STORE_UNREADABLE，响亮降级），压实后旧读法又能读全。
+- 压实写完整 v3，保留全部活跃行；旧 v1/v2 仍可读取。
 - 删除与覆盖仍整份写回，盘上不残留旧正文；追加段不超过预算，超了就整份压实；别代快照的记录不会被套到旧快照上。
 - 非私有权限或符号链接的快照不追加，仍整份替换（收紧到 0600、不顺着链接写别处）；C 模式追加只过一次末写门。
 全部用确定性向量和临时目录，不调真实嵌入、不碰真实 home。
@@ -30,9 +30,10 @@ from agent_py_agent.agent.retrieval.vector_store import VECTOR_STORE_SCHEMA_VERS
 from agent_py_agent.agent.settings.embedding_profile import embedding_identity
 from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
 
-_DIM = 128
+_DIM = 512
 _ID = embedding_identity("prof-d12", LocalHashingEmbedder(dim=_DIM))
-_BASE_COUNT = 500
+# v3 基座要跨过追加门槛，且单条 JSON 记录仍小于基座的 1%。
+_BASE_COUNT = 640
 _POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX 权限位与符号链接语义")
 # 新常量用 getattr 取：同一文件放到修复前的代码上跑时，各用例按缺陷本身失败，而不是统一死在属性缺失上。
 _APPEND_SCHEMA = getattr(vector_store, "VECTOR_STORE_APPEND_SCHEMA_VERSION", "my-agent.memory-vectors.v2.append")
@@ -94,7 +95,7 @@ def test_single_new_record_commit_appends_without_rewrite_or_reparse(tmp_path, m
     rewritten: list[int] = []
     parsed: list[int] = []
     tail_read: list[int] = []
-    real_write, real_parse = vector_store.write_private_text_file_atomic_unlocked, vector_store._parse_snapshot
+    real_write, real_parse = vector_store._write_private_snapshot_unlocked, vector_store._parse_snapshot
     real_tail = getattr(vector_store, "_tail_records", None)
 
     def counting_write(target, content, **kwargs):
@@ -109,7 +110,7 @@ def test_single_new_record_commit_appends_without_rewrite_or_reparse(tmp_path, m
         tail_read.append(len(data) - start)
         return real_tail(generation, data, start)
 
-    monkeypatch.setattr(vector_store, "write_private_text_file_atomic_unlocked", counting_write)
+    monkeypatch.setattr(vector_store, "_write_private_snapshot_unlocked", counting_write)
     monkeypatch.setattr(vector_store, "_parse_snapshot", counting_parse)
     monkeypatch.setattr(vector_store, "_tail_records", counting_tail, raising=False)
     before = path.stat()
@@ -129,12 +130,12 @@ def test_appended_store_searches_exactly_like_a_full_snapshot(tmp_path) -> None:
     path, plain = tmp_path / "memory_vectors.json", tmp_path / "plain" / "memory_vectors.json"
     _large_store(path)
     resident, writer = VectorStore(path, identity=_ID), VectorStore(path, identity=_ID)
+    base = path.read_bytes()
     extra = _rows(10_000, 5)
     writer.upsert_many(extra[:1])
     writer.upsert_many(extra[1:2])
     writer.upsert_many(extra[2:])  # 一批多条也是一条追加记录
-    with pytest.raises(json.JSONDecodeError):
-        json.loads(path.read_bytes())  # 确实走了追加路径
+    assert path.read_bytes().startswith(base)  # 三批新增仍附在原快照之后
     reference = VectorStore(plain, identity=_ID)
     reference.replace_all(_rows(0, _BASE_COUNT) + extra)  # 同样内容的整份快照
     queries = [_vector(seed) for seed in (3, 250, 10_001, 10_004)]
@@ -224,24 +225,20 @@ def test_existing_snapshot_formats_keep_loading(tmp_path) -> None:
     store = VectorStore(pretty, identity=_ID)
     assert store.identity_status() == (True, "") and len(store) == _BASE_COUNT
     store.upsert("mem-new", _vector(9_999), text="新")  # 多行快照不追加：整份重写成单行快照
-    text = pretty.read_text(encoding="utf-8")
-    assert "\n" not in text and len(json.loads(text)["items"]) == _BASE_COUNT + 1
+    loaded = VectorStore(pretty, identity=_ID)
+    assert loaded.summary()["meta"]["v"] == 3 and len(loaded) == _BASE_COUNT + 1
 
 
-def test_old_whole_file_readers_refuse_appended_file_until_compaction(tmp_path) -> None:
-    """旧版本 _parse_snapshot 对整个文件做 json.loads：带追加段时解析失败 → VECTOR_STORE_UNREADABLE（退回关键词、
-    拒绝写入与删除），不会只读到快照部分而静默漏掉新向量；整份写回压实后，旧读法又能读到全部条目。"""
+def test_physical_removal_compacts_existing_tail(tmp_path) -> None:
     path = tmp_path / "memory_vectors.json"
-    _large_store(path)
-    store = VectorStore(path, identity=_ID)
-    store.upsert("mem-new", _vector(9_999), text="新")
-    with pytest.raises(json.JSONDecodeError):
-        json.loads(path.read_bytes().decode("utf-8"))
-
-    assert store.remove("mem-3") is True  # 删除整份写回，顺带压实追加段
-    data = json.loads(path.read_bytes().decode("utf-8"))
-    assert data["schema_version"] == VECTOR_STORE_SCHEMA_VERSION and data["identity"] == _ID and data["dim"] == _DIM
-    assert "mem-new" in data["items"] and "mem-3" not in data["items"] and len(data["items"]) == _BASE_COUNT
+    store = _large_store(path)
+    store.upsert("mem-new", _vector(23), text="新行")
+    assert store.remove("mem-3")
+    loaded = VectorStore(path, identity=_ID)
+    header = loaded.summary()["meta"]
+    assert header["v"] == 3 and header["identity"] == _ID and header["dim"] == _DIM
+    assert "mem-new" in loaded.ids() and "mem-3" not in loaded.ids() and len(loaded) == _BASE_COUNT
+    assert loaded._tail[0] == loaded._tail[1] == path.stat().st_size
 
 
 def test_removal_and_overwrite_leave_no_stale_text_on_disk(tmp_path) -> None:
@@ -252,7 +249,7 @@ def test_removal_and_overwrite_leave_no_stale_text_on_disk(tmp_path) -> None:
     assert store.remove("mem-removed") is True
     raw = path.read_bytes()
     assert "旧会议室门牌号是四个八".encode() not in raw  # 删除立即从盘上清掉明文
-    json.loads(raw)
+    assert VectorStore(path, identity=_ID).summary()["meta"]["v"] == 3
 
     store.upsert("mem-new", _vector(9_999), text="第一版正文")
     store.upsert("mem-new", _vector(9_998), text="第二版正文")  # 覆盖已有 id：整份写回
@@ -278,8 +275,8 @@ def test_append_tail_stays_within_budget_then_compacts(tmp_path) -> None:
         assert current.st_size - base <= budget  # 追加段始终在预算内
 
     assert compacted_at is not None and compacted_at > 10  # 先追加多条，快超预算时才整份压实一次
-    data = json.loads(path.read_bytes())  # 压实后又是单个 JSON 文档
-    assert len(data["items"]) == _BASE_COUNT + compacted_at + 1
+    loaded = VectorStore(path, identity=_ID)
+    assert loaded.summary()["meta"]["count"] == _BASE_COUNT + compacted_at + 1
     assert len(resident) == _BASE_COUNT + compacted_at + 1
 
 
@@ -334,7 +331,7 @@ def test_non_private_or_linked_snapshot_is_replaced_not_appended(tmp_path) -> No
     inode = path.stat().st_ino
     VectorStore(path, identity=_ID).upsert("mem-a", _vector(51), text="甲")
     assert path.stat().st_ino != inode and stat.S_IMODE(path.stat().st_mode) == 0o600  # 整份写回并收紧
-    json.loads(path.read_bytes())
+    assert VectorStore(path, identity=_ID).summary()["meta"]["v"] == 3
 
     target = tmp_path / "elsewhere.json"
     path.rename(target)
@@ -349,13 +346,13 @@ def test_memory_commit_through_jsonl_memory_appends(tmp_path, monkeypatch) -> No
     _large_store(vectors)
     memory = JsonlMemory(tmp_path / "mem.jsonl", embedder=LocalHashingEmbedder(dim=_DIM), vector_identity=_ID)
     rewritten: list[int] = []
-    real_write = vector_store.write_private_text_file_atomic_unlocked
+    real_write = vector_store._write_private_snapshot_unlocked
 
     def counting_write(target, content, **kwargs):
         rewritten.append(len(content))
         return real_write(target, content, **kwargs)
 
-    monkeypatch.setattr(vector_store, "write_private_text_file_atomic_unlocked", counting_write)
+    monkeypatch.setattr(vector_store, "_write_private_snapshot_unlocked", counting_write)
     inode = vectors.stat().st_ino
     record = memory.add("user", "客户要求本季度内完成支付系统的迁移")
     assert rewritten == [] and vectors.stat().st_ino == inode  # 正式提交后的向量投影只追加

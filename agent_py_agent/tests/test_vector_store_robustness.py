@@ -21,10 +21,13 @@ def test_dimension_switch_skips_mismatched_vectors(tmp_path) -> None:
 
 
 def test_corrupt_vector_entry_does_not_kill_search(tmp_path) -> None:
-    vs = VectorStore(tmp_path / "v.json")
-    vs.upsert("good", [1.0, 0.0])
-    vs._items["bad_nonnum"] = {"vector": ["x", "y"], "text": "", "metadata": {}}  # 非数值向量
-    vs._items["bad_type"] = {"vector": "not-a-list", "text": "", "metadata": {}}  # 非 list
+    path = tmp_path / "v.json"
+    path.write_text(json.dumps({
+        "good": {"vector": [1.0, 0.0]},
+        "bad_nonnum": {"vector": ["x", "y"]},
+        "bad_type": {"vector": "not-a-list"},
+    }))
+    vs = VectorStore(path)
     hits = vs.search([1.0, 0.0], top_k=5)
     assert [h.id for h in hits] == ["good"]  # ⭐ 单条坏向量被跳过,不连累整库语义召回
 
@@ -117,4 +120,4 @@ def test_concurrent_upsert_and_search_no_corruption(tmp_path) -> None:
     assert not errors, f"并发 upsert/search 不应出错(快照+唯一tmp):{errors[:3]}"
     assert len(vs) == 200  # 20×10 全部成功,无丢(共享 dict 在 GIL 下安全)
     assert len(VectorStore(path)) == 200  # ⭐ 文件未被并发 flush 损坏:新实例完整加载
-    json.loads(path.read_text(encoding="utf-8"))  # 文件是合法 JSON(未被截断/交织)
+    assert VectorStore(path).summary()["meta"]["v"] == 3  # 二进制快照完整可读

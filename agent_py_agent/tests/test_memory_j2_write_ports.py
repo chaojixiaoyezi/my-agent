@@ -109,7 +109,10 @@ def test_vector_raw_and_algorithms_keep_original_bytes_outside_root(tmp_path, mo
         store.upsert("new", [0.0, 1.0], text="正式数据", metadata={"owner": "same"})
     default = VectorStore(tmp_path / "default.json", IDENTITY)
     default.upsert_many([("old", [1.0, 0.0], "旧事实", {}), ("new", [0.0, 1.0], "正式数据", {"owner": "same"})])
-    actual, expected = json.loads(store._path.read_bytes()), json.loads(default._path.read_bytes())
+    actual_head, actual_payload = store._path.read_bytes().split(b"\n", 1)
+    expected_head, expected_payload = default._path.read_bytes().split(b"\n", 1)
+    assert actual_payload == expected_payload
+    actual, expected = json.loads(actual_head), json.loads(expected_head)
     for payload in [actual, expected]:
         payload.pop("generation")
         payload.pop("written_at")

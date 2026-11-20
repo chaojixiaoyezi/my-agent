@@ -210,7 +210,7 @@ def _purge_removed_indexes(memory, entry_id: str | set[str], *, admission=None) 
             if len(removed_ids) == 1:
                 store.remove(next(iter(removed_ids)))
             else:
-                store.remove_many(removed_ids)
+                store.remove_many(removed_ids, purge=True)
             if memory.local_store is not None:
                 for removed_id in removed_ids:
                     memory.local_store.delete_record(memory.local_store.make_record_id("memory", removed_id))

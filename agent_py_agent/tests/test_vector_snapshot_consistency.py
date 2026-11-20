@@ -83,7 +83,7 @@ def test_stale_writer_after_rebuild_is_refused_and_new_generation_survives(tmp_p
     assert caught.value.reason == "VECTOR_IDENTITY_MISMATCH"
     final = VectorStore(path, identity=_ID_128)
     assert final.identity_status() == (True, "") and sorted(final.ids()) == ["b-1", "b-2"]
-    assert json.loads(path.read_text(encoding="utf-8"))["identity"] == _ID_128
+    assert final.summary()["meta"]["identity"] == _ID_128
 
 
 def test_rebuild_waits_for_inflight_write_and_lands_last(tmp_path, monkeypatch) -> None:
@@ -93,15 +93,15 @@ def test_rebuild_waits_for_inflight_write_and_lands_last(tmp_path, monkeypatch) 
     writer_a.upsert("a-1", _unit(64, 0), text="甲")
     rebuilder_b = VectorStore(path, identity=_ID_128)
     paused, release = threading.Event(), threading.Event()
-    real_write = vector_store.write_private_text_file_atomic_unlocked
+    real_write = vector_store._write_private_snapshot_unlocked
 
-    def gated_write(target: Path, content: str) -> None:
+    def gated_write(target: Path, content: bytes) -> None:
         if threading.current_thread().name == "writer-a":
             paused.set()
             assert release.wait(10)
         real_write(target, content)
 
-    monkeypatch.setattr(vector_store, "write_private_text_file_atomic_unlocked", gated_write)
+    monkeypatch.setattr(vector_store, "_write_private_snapshot_unlocked", gated_write)
     thread_a = threading.Thread(target=writer_a.upsert, args=("a-2", _unit(64, 1)), name="writer-a")
     thread_a.start()
     assert paused.wait(10)
@@ -188,10 +188,10 @@ def test_rebuild_write_failure_keeps_old_store(tmp_path, monkeypatch) -> None:
     vectors = tmp_path / "memory_vectors.json"
     before = vectors.read_bytes()
 
-    def broken_write(target: Path, content: str) -> None:
+    def broken_write(target: Path, content: bytes) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(vector_store, "write_private_text_file_atomic_unlocked", broken_write)
+    monkeypatch.setattr(vector_store, "_write_private_snapshot_unlocked", broken_write)
     result = mem.rebuild_vectors()
     assert result["ok"] is False and result["failed_stage"] == "write" and result["failure"] == "OSError"
     assert result["embedded"] == 2 and result["failed"] == 0 and result["rebuilt"] == 0 and result["vector_count"] == 2

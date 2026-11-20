@@ -22,7 +22,6 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 from agent_py_agent.agent.retrieval.embedding import MiniMaxEmbedder, OpenAICompatibleEmbedder
 from agent_py_agent.agent.retrieval.vector_store import (
-    VECTOR_STORE_SCHEMA_VERSION,
     VectorIdentityError,
     VectorStore,
 )
@@ -52,7 +51,8 @@ def _mem(tmp_path: Path, identity: dict[str, str] | None = None, embedder: objec
 
 def _snapshot(tmp_path: Path) -> dict:
     # 向量库固定叫 memory_vectors.json（与记忆 JSONL 同目录），身份、维度和向量在同一个文件里。
-    return json.loads((tmp_path / "memory_vectors.json").read_text(encoding="utf-8"))
+    with (tmp_path / "memory_vectors.json").open("rb") as handle:
+        return json.loads(handle.readline())
 
 
 def _errors(mem: JsonlMemory) -> dict[str, str]:
@@ -146,9 +146,9 @@ def test_matching_identity_writes_snapshot_header_and_recalls(tmp_path) -> None:
     mem = _mem(tmp_path, _IDENTITY_A)
     mem.add("user", _FACT)
     snapshot = _snapshot(tmp_path)
-    assert snapshot["schema_version"] == VECTOR_STORE_SCHEMA_VERSION
+    assert snapshot["v"] == 3 and snapshot["space_id"]
     assert snapshot["identity"] == _IDENTITY_A and snapshot["dim"] == 64  # 维度来自实际向量
-    assert snapshot["generation"] and snapshot["written_at"] and len(snapshot["items"]) == 1
+    assert snapshot["generation"] and snapshot["written_at"] and snapshot["count"] == 1
     assert not (tmp_path / "memory_vectors.json.meta.json").exists()  # 不再有分开写的旁路元数据
     status = mem.vector_index_status()
     assert status["ok"] is True and status["vector_count"] == 1 and status["reason"] == ""
