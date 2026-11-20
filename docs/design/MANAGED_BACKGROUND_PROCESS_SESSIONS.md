@@ -431,3 +431,13 @@ submitted/consumed/rejected/reserved 不触发网络重试预留，响应使用�
 `run_command(run_in_background=true)` 在实际沙箱命令已构建后，可把本次宿主的读取上下文与实际沙箱读根冻结到原 v4 session 的可选 `exact_read_scope`。它是原私有 Store 中的不可变启动事实，不是模型声明或无密钥签名；旧记录不补建、不借 Gateway 重启升级权限。
 
 精确范围下的 `process_session(status/wait)` 必须同时匹配原 owner、thread、root task、run、attempt 和读取上下文。通过后走独立的状态读取路径，只返回 session ID、规范状态、已存在的退出码及有界等待事实，不打开输出日志，不返回 command、PID、路径或输出。冷启动仍从原 session Store 验证同一事实；记录缺失、损坏或身份不匹配不能转为成功。旧句柄、父级、其它运行或下一 attempt 不能借此读取；`list/network_status`、PTY 与原停止权限不扩大。
+
+### 2026-11-19 M26 进程派生、失联回收与 redo 读口
+
+前台 POSIX 命令和后台宿主复用 `SpawnPopen`。Darwin 在参数符合 C1.5 时直接派生目标程序，描述符、会话组、环境和启动错误沿用原调用约定。Windows 使用标准库的 `Popen`，宿主显式替换的构造器继续生效。
+
+存储维护按活跃记录续点分片复查。原宿主 PID 及出生身份已消失，并且业务子进程、已知进程组和未决进程证据均已结清时，按原记录版本提交终态。已启动的记录为 `exited`，有证据证明未准入子进程的记录为 `not_started`，两者都带 `reason=lost` 和空退出码。复用的宿主 PID 不改变记录。出生标识必须来自宿主登记的格式。子进程仍活跃或证据不足时保留待查，供后续维护重查或显式停止。归档、通知、显式保留与过期删除沿用原义务判定。
+
+完成候选读口在扫描前后检查提交日志，缓存命中也复查。待安装时返回可恢复的 `ProcessSessionRedoPending` 诊断。已校验的日志提供事务 ID、会话 ID 和已发表事实。调度器经 `ProcessSessionStore.transaction` 在原目录锁内恢复提交。
+
+回归覆盖两个 Darwin 派生入口、描述符与错误一致性、死亡与 PID 复用、子进程组留存、并发版本变化、分片续点，以及 redo 在扫描前、扫描中和缓存命中时的只读行为。隔离源码测试通过 Python 3.12 和关闭 GIL 的 3.14t。

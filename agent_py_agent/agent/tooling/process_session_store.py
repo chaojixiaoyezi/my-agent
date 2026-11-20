@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import stat
@@ -24,13 +25,15 @@ from ..common.json_io import (
     write_json_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath, unlink_file_beneath
-from ..runtime_errors import runtime_error_report
+from ..runtime_errors import RecoverableRuntimeError, runtime_error_report
 from ..settings.defaults import resident_owner_capacity
 from .process_cleanup_evidence import confirm_cleanup_reference, validate_cleanup_reference
 from .process_scope import ProcessActivationScope, ProcessExecutionScope
 from .process_session_commit import (
+    _REDO_FILE,
     ProcessSessionCommitPendingError,
     ProcessSessionCommitReceipt,
+    _validate_redo,
     commit_process_records,
     read_process_record,
     recover_process_commit,
@@ -113,6 +116,10 @@ class _ProcessRecordsScanBatch:
 
 
 _PROCESS_RECORDS_SCAN_BATCHES: dict[tuple[str, bool], _ProcessRecordsScanBatch] = {}
+
+# 宿主缺失且可证明进程已结清，保留失联原因及未知退出码。
+PROCESS_LOST_REASON = "lost"
+
 
 # 进程记录默认扫描的基础毫秒额度。
 _PROCESS_SESSION_SCAN_BASE_MS = 1000
@@ -284,6 +291,46 @@ class ProcessSessionListReport:
 # 类用途: 表示调用者拿着旧记录版本更新，磁盘事实没有被本次请求改动。
 class ProcessSessionRevisionConflict(ValueError):
     pass
+
+
+class ProcessSessionRedoPending(RecoverableRuntimeError):
+    """被动读口观察到待恢复的原提交，保留复核所需的提交身份。"""
+
+    stage = "redo_pending"
+    error_code = "PROCESS_SESSION_AUTHORITY_UNREADABLE"
+    repair_entry_point = "ProcessSessionStore.transaction"
+
+    def __init__(
+        self, *, transaction_id: str | None = None, session_ids: tuple[str, ...] = (),
+        observation_error_type: str = "",
+    ) -> None:
+        super().__init__("受管后台进程的提交日志仍待恢复，当前读取未写入任何记录。")
+        self.transaction_id = transaction_id
+        self.session_ids = session_ids
+        self.session_id = session_ids[0] if len(session_ids) == 1 else None
+        self.committed = True if transaction_id is not None else "unknown"
+        self.committed_effects = ("redo_published",) if self.committed is True else "unknown"
+        self.observation_error_type = observation_error_type
+
+
+def _raise_if_process_redo_pending(root: Path) -> None:
+    """仅观察原 redo 日志，用原校验器提取标识，记录安装由写事务处理。"""
+    try:
+        marker = (root / _REDO_FILE).lstat()
+    except FileNotFoundError:
+        return
+    try:
+        content = read_bytes_beneath(root, (_REDO_FILE,), max_bytes=marker.st_size)
+        if content is None:
+            # 扫描可能与安装交错，即使日志刚被恢复也不能返回本次快照。
+            raise FileNotFoundError
+        redo = _validate_redo(json.loads(content))
+    except (OSError, ValueError, TypeError, RecursionError) as exc:
+        raise ProcessSessionRedoPending(observation_error_type=type(exc).__name__) from exc
+    raise ProcessSessionRedoPending(
+        transaction_id=redo["transaction_id"],
+        session_ids=tuple(entry["record"]["session_id"] for entry in redo["entries"]),
+    )
 
 
 # LLM: Owner-scoped records remain outside the exact owner sandbox; this address must not change with permissions.
@@ -552,11 +599,14 @@ def _completion_obligation_finished(record: dict[str, object], consumed: Callabl
     return consumed(notice) is True
 
 
-# LLM: TTL仅清理exited/killed，不能用started_at兜底；小合成时间、缺失、非有限数均不按年龄删。
+# LLM: TTL按可信结束时间清理退出、终止及维护确认从未启动的失联记录。
 # 函数用途: 对可信完成时间执行保守的历史过期判断。
 def _record_ttl_expired(record: dict[str, object], max_age_seconds: float | None, now: float) -> bool:
     finished = record.get("finished_at")
-    if record.get("status") not in {"exited", "killed"} or type(finished) not in (int, float) or max_age_seconds is None:
+    status = record.get("status")
+    if status not in {"exited", "killed"} and not (status == "not_started" and record.get("reason") == PROCESS_LOST_REASON):
+        return False
+    if type(finished) not in (int, float) or max_age_seconds is None:
         return False
     age = float(max_age_seconds)
     return (math.isfinite(finished) and math.isfinite(age) and math.isfinite(now)
@@ -566,6 +616,8 @@ def _record_ttl_expired(record: dict[str, object], max_age_seconds: float | None
 # LLM: 与 host 已结清的终态形状一致，但不导入 launcher，避免领域循环；停止中的记录没有独立退出证明。
 # 函数用途: 判断激活记录是否具备参加 TTL 的退出事实。
 def _activation_exit_confirmed(record: dict[str, object]) -> bool:
+    if record.get("status") == "not_started":
+        return record.get("reason") == PROCESS_LOST_REASON
     return record.get("status") == "exited" or (
         record.get("status") == "killed" and not record.get("stop_requested")
         and bool(record.get("reason")) and record.get("finished_at") is not None
@@ -744,9 +796,14 @@ class ProcessSessionStore:
                                         pending_only: bool = False):
         hit = _lookup_process_records_projection(self.root)
         if hit is not None:
+            if pending_only:
+                try:
+                    _raise_if_process_redo_pending(self.root)
+                except (OSError, ProcessSessionRedoPending) as exc:
+                    return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
             return hit.records, hit.errors
         if scan_budget:
-            return self._scan_records_projection(scan_budget=scan_budget)
+            return self._scan_records_projection(scan_budget=scan_budget, pending_only=pending_only)
         # 只读批次不加入会等待写锁的全量批次，避免被另一读口间接串行化。
         key = (str(self.root), pending_only)
         with _PROCESS_RECORDS_PROJECTION_LOCK:
@@ -782,8 +839,8 @@ class ProcessSessionStore:
             if not self.root.exists():
                 return [], []
             pending_only = batch.pending_only if batch is not None else pending_only
-            if pending_only and (self.root / ".process-sessions.redo.json").exists():
-                raise RuntimeError("managed process commit requires recovery")
+            if pending_only:
+                _raise_if_process_redo_pending(self.root)
             # 通知候选只读原子替换的根目录文件；认领/写回仍由原事务逐条重读并执行 CAS。
             context = nullcontext(ProcessSessionTransaction(self.root)) if pending_only else self.transaction()
             with context as transaction:
@@ -791,8 +848,8 @@ class ProcessSessionStore:
                 transaction.skip_settled_records = batch.seal() if batch is not None else pending_only
                 records, errors = transaction.list_records(**(scan_budget or {}))
                 complete = not transaction.listed_unverified
-            if pending_only and (self.root / ".process-sessions.redo.json").exists():
-                raise RuntimeError("managed process commit requires recovery")
+            if pending_only:
+                _raise_if_process_redo_pending(self.root)
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
         if read_trusted and complete:
@@ -835,7 +892,27 @@ def process_session_error_report(
     report = runtime_error_report(exc, context=context)
     if path is not None:
         report["path"] = str(path)
-    if isinstance(exc, ProcessSessionCommitPendingError):
+    if isinstance(exc, ProcessSessionRedoPending):
+        report.update(
+            error_code=exc.error_code,
+            stage=exc.stage,
+            committed=exc.committed,
+            committed_effects=list(exc.committed_effects) if exc.committed is True else "unknown",
+            record_installation="unknown",
+            read_side_effects="none",
+            recovery_required=True,
+            session_ids=list(exc.session_ids),
+            repair_entry_point=exc.repair_entry_point,
+            model_message="等待调度器通过 ProcessSessionStore.transaction 恢复原提交，再刷新会话状态。",
+            operator_message="请通过原写事务核对并安装已发布的 redo，再重试只读查询。",
+        )
+        if exc.transaction_id is not None:
+            report["transaction_id"] = exc.transaction_id
+        if exc.session_id is not None:
+            report["session_id"] = exc.session_id
+        if exc.observation_error_type:
+            report["observation_error_type"] = exc.observation_error_type
+    elif isinstance(exc, ProcessSessionCommitPendingError):
         report.update(
             committed=True,
             recovery_required=True,
