@@ -573,10 +573,15 @@ def append_private_text(path: Path, content: str, *, still_current: Callable[[],
 # LLM: 调用方须已持原JSON双层锁；仅承接原append锁内权限与末写，不取锁、不增加目录或source，C由原活window消费。
 # 函数用途: 在已有锁内按原0600收紧规则追加文本，保留原deadline与失败字节边界。
 def append_private_text_unlocked(path: Path, content: str, *, deadline: float | None = None) -> None:
+    _append_private_unlocked(path, content, deadline=deadline, newline=None)
+
+
+# 函数用途: 锁内私有追加的共用叶；newline="" 时按 content 的 UTF-8 字节原样落盘（不做平台换行转换）。
+def _append_private_unlocked(path: Path, content: str, *, deadline: float | None, newline: str | None) -> None:
     _ensure_private_file(path)
     _tighten_private_file(path)
     check_io_deadline(deadline)
-    with path.open("a", encoding="utf-8") as handle:
+    with path.open("a", encoding="utf-8", newline=newline) as handle:
         check_io_deadline(deadline)
         handle.write(content)
 
@@ -588,11 +593,11 @@ def append_private_jsonl_records_unlocked(path: Path, records: list[dict[str, ob
         return
     check_io_deadline(deadline)
     blob = "".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records)
-    options = {} if deadline is None else {"deadline": deadline}
     # 编码可能耗尽预算；封口也会改源文件，必须在它之前重新检查。
     check_io_deadline(deadline)
     seal_private_jsonl_tail_unlocked(path)
-    append_private_text_unlocked(path, blob, **options)
+    # 按大小/长度记行定位的调用方（如调度历史索引）要求物理字节与 UTF-8 长度一致；Windows 文本模式会把 LF 写成 CRLF。
+    _append_private_unlocked(path, blob, deadline=deadline, newline="")
 
 
 # LLM: 调用方持原锁；缺失/链接不动，其余打开错误原样上抛；完整对象补LF，半行先0600留档再截回末个LF刷盘。
