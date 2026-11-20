@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ....path_access_policy import (
+    DelegableScope,
+    delegable_path_decision,
+    in_delegation_owner_root,
+    recorded_delegable_scope,
+)
+
 if TYPE_CHECKING:
     from ...models import SubAgentTask
 
@@ -35,6 +42,14 @@ class ChildWriteRootRequest:
 # 函数用途: 去重并返回调度子代理显式写根。
 def scheduled_child_extra_write_roots(request: ScheduledWriteRootRequest) -> list[str]:
     return list(dict.fromkeys(request.requested_roots))
+
+
+def permitted_child_write_roots(scope: DelegableScope, roots: list[str]) -> list[str]:
+    return list(dict.fromkeys(
+        item for item in roots
+        if in_delegation_owner_root(scope, Path(item))
+        or delegable_path_decision(scope, Path(item), purpose="create").allowed
+    ))
 
 
 # LLM: 判定请求是否包含精确文件写集合；若是则必须隔离父级宽目录。
@@ -75,14 +90,13 @@ def requested_child_write_roots(request: ChildWriteRootRequest) -> list[str]:
                 roots.append(text)
         return roots
 
-    for item in [
-        *request.explicit_roots,
-        *inherited_extra_write_roots(request.parent),
-    ]:
+    scope = recorded_delegable_scope(getattr(request.parent, "delegable_scope_record", None))
+    inherited = [] if scope is not None and request.explicit_roots else inherited_extra_write_roots(request.parent)
+    for item in [*request.explicit_roots, *inherited]:
         text = str(item or "").rstrip("/")
         if text and text not in roots:
             roots.append(text)
-    return roots
+    return permitted_child_write_roots(scope, roots) if scope is not None else roots
 
 
 # LLM: 计算父代理允许传承给后代的产品写根，排除任务内部目录。

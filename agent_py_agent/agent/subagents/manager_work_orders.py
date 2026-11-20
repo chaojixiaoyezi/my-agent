@@ -13,8 +13,10 @@ from typing import Any
 from ..common.json_io import write_private_text_file_atomic
 from ..common.nofollow_fs import ensure_private_dir
 from ..common.opaque_id import validate_opaque_id
+from ..path_access_policy import DelegableScope
 from .models import SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .policies import _default_forbidden_write_roots
+from .services.hierarchy.write_policy import permitted_child_write_roots
 from .utils import _apply_missing_paths, _write_if_missing, _write_json_if_missing
 
 
@@ -23,6 +25,8 @@ def build_work_order_paths(
     run_id: str,
     task_dir: str | Path | None = None,
     extra_write_roots: list[str] | None = None,
+    *,
+    parent_delegable_scope: DelegableScope | None = None,
 ) -> dict[str, object]:
     # 3.txt B.2/B.3：run_id 拼进路径前先过拒绝式校验；task_dir 未显式给出时
     # 由框架按已验证 ID 计算（这些路径会进 allowed_write_roots，注入 = 写逃逸）。
@@ -31,7 +35,10 @@ def build_work_order_paths(
     paths = _work_order_base_paths(task_dir)
     paths.update(_work_order_report_paths(task_dir))
     paths.update(_work_order_runner_paths(task_dir))
-    paths["allowed_write_roots"] = [str(task_dir)] + list(extra_write_roots or [])
+    roots = list(extra_write_roots or [])
+    if parent_delegable_scope is not None:
+        roots = permitted_child_write_roots(parent_delegable_scope, roots)
+    paths["allowed_write_roots"] = [str(task_dir), *roots]
     paths["forbidden_write_roots"] = _default_forbidden_write_roots()
     return paths
 

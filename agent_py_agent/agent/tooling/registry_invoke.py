@@ -26,7 +26,11 @@ from ..path_access_policy import (
     PathAccessPolicy,
     business_aggregate_paths_from_boundary,
     data_root_from_boundary,
-    granted_external_work_roots,
+    delegable_path_decision,
+    delegation_receipt,
+    frozen_tool_external_roots,
+    in_delegation_owner_root,
+    recorded_delegable_scope,
 )
 from .controlled_exec import ControlledExecToolRequest, execute_controlled_exec_tool
 from .models import (
@@ -49,6 +53,7 @@ from .workspace_write_scope import build_workspace_write_context
 from .write_boundary import (
     RUNTIME_INSTALL_ROOTS_KEY,
     WRITE_TOOL_NAMES,
+    declared_write_paths,
     validate_write_boundary,
     write_boundary_error_code,
 )
@@ -94,6 +99,8 @@ class RegistryToolInvokeRequest:
     on_handler_started: Callable[[], None] | None = None
     owner_id: str = ""
     registry_owner_id: str = ""
+    run_id: str = field(default="", kw_only=True)
+    attempt_id: str = field(default="", kw_only=True)
     pending_input_probe: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
 
@@ -142,6 +149,56 @@ def _write_boundary_denied(
     if not boundary_error:
         return None
     return ToolHandlerOutcome(request.tool_name, False, boundary_error, error_code=write_boundary_error_code(boundary_error))
+
+
+def frozen_tool_path_refusal(tool_name, arguments, boundary, workspace_root, owner_scope, *,
+                            run_id: str = "", attempt_id: str = ""):
+    """启动前复核已记录身份；确认等待期间替换的根也不能进入 handler。"""
+    scope = recorded_delegable_scope(boundary.get("delegable_scope"), owner_scope=owner_scope)
+    if scope is None:
+        return None
+    if tool_name == "terminal_session" and arguments.get("action") != "start":
+        return None
+    shell = tool_name in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
+    cwd = effective_registry_cwd(workspace_root, boundary)
+    paths = ([arguments.get("working_dir") or arguments.get("cwd") or str(cwd)] if shell
+             else declared_write_paths(tool_name, arguments))
+    for value in paths:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        target = cwd / Path(value).expanduser()
+        if in_delegation_owner_root(scope, target):
+            continue
+        decision = delegable_path_decision(scope, target, purpose="shell" if shell else "write")
+        if decision.allowed or (scope.declared_roots is None and not owner_scope and decision.root is None):
+            continue
+        task_dir = boundary.get("task_dir")
+        details = decision.refusal(target, task_dir=Path(task_dir) if isinstance(task_dir, str) and task_dir else None)
+        details.update(delegation_receipt(scope, boundary, run_id=run_id, attempt_id=attempt_id))
+        return details
+    return None
+
+
+def _delegable_tool_boundary(request):
+    boundary = request.write_boundary or {}
+    scope = recorded_delegable_scope(boundary.get("delegable_scope"), owner_scope=request.owner_scope_root)
+    if scope is None or request.tool_name not in _BOUNDARY_CONTEXT_TOOL_NAMES:
+        return request
+    if request.tool_name == "terminal_session" and request.arguments.get("action") in {"close", "resize"}:
+        return request
+    if scope.declared_roots is None and not request.owner_scope_root:
+        return request
+    purpose = "shell" if request.tool_name in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES else "write"
+    narrowed = dict(boundary)
+    for key in ("allowed_write_roots", "product_write_roots", "capability_write_roots",
+                "execution_workspace_roots"):
+        if isinstance(boundary.get(key), (list, tuple)):
+            narrowed[key] = [
+                value for value in boundary[key] if isinstance(value, (str, Path))
+                and (in_delegation_owner_root(scope, Path(value))
+                     or delegable_path_decision(scope, Path(value), purpose=purpose).allowed)
+            ]
+    return replace(request, write_boundary=narrowed)
 
 
 # LLM: Exact read scope is enforced before any filesystem handler runs.  The
@@ -202,7 +259,19 @@ def _invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutc
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,
         )
-    request = _with_effective_registry_workspace(request)
+    boundary = request.write_boundary or {}
+    if "delegable_scope" in boundary:
+        refusal = frozen_tool_path_refusal(request.tool_name, request.arguments, boundary,
+                                           request.workspace_root, request.owner_scope_root,
+                                           run_id=request.run_id, attempt_id=request.attempt_id)
+        if refusal is not None:
+            message = "已冻结的写根不可用。请在任务输出目录准备文件，由父级核验后应用到原目标。"
+            return apply_tool_execution_facts(
+                ToolHandlerOutcome(request.tool_name, False, message, error_code=str(refusal["code"]),
+                                   effect_outcome="not_started", result_envelope=refusal),
+                failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False,
+            )
+    request = _with_effective_registry_workspace(_delegable_tool_boundary(request))
     runtime = request.runtime
     if runtime is None and request.runtime_snapshot is not None:
         runtime = request.runtime_snapshot.runtime(request.tool_name)
@@ -354,7 +423,7 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
         execution_permission_context=_execution_permission_context(request),
         workspace_read_context=build_workspace_read_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
-            granted_external_roots=granted_external_work_roots(request.write_boundary, request.owner_scope_root),
+            granted_external_roots=frozen_tool_external_roots(request.write_boundary, request.owner_scope_root, purpose="write"),
         ),
         workspace_write_context=build_workspace_write_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
@@ -371,7 +440,7 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
 def _execution_permission_context(request: RegistryToolInvokeRequest):
     boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
     read_roots = exact_read_roots(boundary, request.workspace_root)
-    external = granted_external_work_roots(boundary, request.owner_scope_root)
+    external = frozen_tool_external_roots(boundary, request.owner_scope_root, purpose="write")
     workspace = _normalized_roots(request.workspace_root, request.workspace_roots)
     external = tuple(dict.fromkeys(first if first.is_relative_to(second) else second
         for first in external for second in workspace
@@ -503,13 +572,16 @@ def _request_local_tool_for_invocation(
     #   墙外工作根"单独交给 handler，让它和中央路径门用同一份授权事实。
     # 人类: 只能由 registry 逐次下发，模型参数与 workspace_roots 都不能产生这个白名单。
     if hasattr(scoped, "granted_external_roots"):
-        scoped.granted_external_roots = granted_external_work_roots(request.write_boundary, effective_owner_scope)
+        scoped.granted_external_roots = frozen_tool_external_roots(
+            request.write_boundary, effective_owner_scope,
+            purpose="shell" if request.tool_name in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES else "write",
+        )
     if (
         request.tool_name == "terminal_session"
         and hasattr(scoped.shell_tool, "granted_external_roots")
     ):
-        scoped.shell_tool.granted_external_roots = granted_external_work_roots(
-            request.write_boundary, effective_owner_scope
+        scoped.shell_tool.granted_external_roots = frozen_tool_external_roots(
+            request.write_boundary, effective_owner_scope, purpose="shell",
         )
     return scoped
 
@@ -667,7 +739,7 @@ def _sandbox_read_roots_for_invocation(
             agent_home_root=getattr(registered_policy, "agent_home_root", None) or data_root_from_boundary(request.write_boundary),
             business_aggregate_roots=business_aggregate_paths_from_boundary(request.write_boundary),
                                          foreground_admin_full_access=(request.write_boundary or {}).get("foreground_admin_full_access") is True)
-        external = granted_external_work_roots(request.write_boundary, owner)
+        external = frozen_tool_external_roots(request.write_boundary, owner, purpose="shell")
         # exact只能收窄owner墙；目录授权也不能包含其它owner或宿主数据根。
         return tuple(root for root in exact if policy.check_with_external_roots(root, external).allowed)
     roots = _normalized_roots(request.workspace_root, request.workspace_roots)

@@ -18,7 +18,7 @@ from ...path_access_policy import (
     PathAccessDecision,
     PathAccessPolicy,
     effective_owner_scope_root,
-    granted_external_work_roots,
+    frozen_tool_external_roots,
 )
 from ...subagents.context_bundle_refs import runtime_task_attributes
 from ...tooling.registry_workspace import effective_registry_cwd
@@ -128,7 +128,7 @@ def child_read_scope(agent: object, run_params: object) -> ChildReadScope | None
     return ChildReadScope(
         owner_root=owner_root,
         cwd=effective_registry_cwd(owner_root, boundary),
-        granted_roots=granted_external_work_roots(boundary, scope_root),
+        granted_roots=frozen_tool_external_roots(boundary, scope_root, purpose="create"),
         policy=policy,
         allowed_read_inputs=resolved_allowed,
     )

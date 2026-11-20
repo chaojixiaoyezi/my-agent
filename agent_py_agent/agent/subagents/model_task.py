@@ -366,6 +366,8 @@ class SubAgentTask:
     attributes: dict[str, object] = field(default_factory=dict)
     # 宿主原字段单独持久化，模型 attributes 无权写入；旧记录缺省 None，不升级旧伪造字段。
     host_channel_actor: dict[str, str] | None = None
+    delegable_scope_record: dict[str, object] | None = None
+    initiating_request_id: str = ""
     # LLM: Monotonic canonical revision for exact read-modify-write transactions. It is host-owned
     # and must never be inferred from model text, timestamps, projection versions, or file mtimes.
     # 字段用途: 标记子代理权威状态版本，供并发裁决检测旧快照和记录提交先后；放在末尾保留旧位置参数兼容性。

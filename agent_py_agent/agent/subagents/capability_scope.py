@@ -415,7 +415,24 @@ def partition_capability_paths_by_owner(
     cleaned = tuple(
         dict.fromkeys(str(item or "").strip() for item in paths if str(item or "").strip())
     )
+    from ..path_access_policy import (
+        delegable_path_decision,
+        in_delegation_owner_root,
+        recorded_delegable_scope,
+    )
+
     owner_text = str(getattr(manager, "owner_scope_root", "") or "").strip()
+    scope = recorded_delegable_scope(getattr(task, "delegable_scope_record", None), owner_scope=owner_text)
+    if scope is not None:
+        allowed, rejected = [], []
+        for raw in cleaned:
+            target = resolve_capability_scope_path(manager, task, raw)
+            bucket = allowed if target is not None and (
+                in_delegation_owner_root(scope, target)
+                or delegable_path_decision(scope, target, purpose="grant").allowed
+            ) else rejected
+            bucket.append(raw)
+        return CapabilityPathScopeDecision(tuple(allowed), tuple(rejected), str(scope.owner_root or owner_text))
     if not owner_text:
         return CapabilityPathScopeDecision(cleaned, (), "")
     try:

@@ -49,6 +49,7 @@ from .utils import _new_id
 
 if TYPE_CHECKING:
     from ..local_storage import LocalStore
+    from ..path_access_policy import DelegableScope
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,7 @@ class SubAgentManager(SubagentKernelMixin):
         extra_write_roots: list[str] | None = None,
         attributes: dict[str, object] | None = None,
         parent_access_mode: str = "",
+        parent_delegable_scope: DelegableScope | None = None,
     ) -> SubAgentTask:
         params = params or _create_run_params_from_kwargs(locals())
         return self.base_service.create_run(params=params, prepared=prepared)
@@ -319,8 +321,12 @@ class SubAgentManager(SubagentKernelMixin):
         run_id: str,
         task_dir: str | Path | None = None,
         extra_write_roots: list[str] | None = None,
+        *,
+        parent_delegable_scope: DelegableScope | None = None,
     ) -> dict[str, object]:
-        return build_work_order_paths(self, run_id, task_dir, extra_write_roots)
+        return build_work_order_paths(
+            self, run_id, task_dir, extra_write_roots, parent_delegable_scope=parent_delegable_scope,
+        )
 
     def _ensure_work_order_files(self, task: SubAgentTask) -> None:
         ensure_work_order_files(task)
@@ -497,6 +503,7 @@ def _create_run_params_from_kwargs(values: dict[str, object]) -> CreateRunParams
         extra_write_roots=values.get("extra_write_roots"),
         attributes=values.get("attributes"),
         parent_access_mode=values.get("parent_access_mode"),
+        parent_delegable_scope=values.get("parent_delegable_scope"),
     )
 
 

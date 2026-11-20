@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, fields, is_dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
-from typing import ClassVar
+from typing import ClassVar, Literal
 from urllib.parse import urlsplit
 
 PATH_ACCESS_MODE_NORMAL = "normal"
@@ -1275,6 +1275,206 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+
+@dataclass(frozen=True, slots=True)
+class DelegableScope:
+    owner_id: str
+    task_id: str
+    run_id: str
+    approved_roots: tuple[Path, ...]
+    permission_version: str
+    approved_root_ids: tuple[tuple[int, int], ...] = ()
+    owner_root: Path | None = field(default=None, kw_only=True)
+    declared_roots: tuple[Path, ...] | None = field(default=None, kw_only=True)
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "owner_id": self.owner_id, "task_id": self.task_id, "run_id": self.run_id,
+            "approved_roots": [str(root) for root in self.approved_roots],
+            "permission_version": self.permission_version,
+            "approved_root_ids": [list(identity) for identity in self.approved_root_ids],
+            "owner_root": str(self.owner_root) if self.owner_root else "",
+            "declared_roots": None if self.declared_roots is None else [str(root) for root in self.declared_roots],
+        }
+
+    @classmethod
+    def from_record(cls, raw: object) -> DelegableScope | None:
+        if not isinstance(raw, dict):
+            return None
+        roots = raw.get("approved_roots")
+        ids = raw.get("approved_root_ids")
+        declared = raw.get("declared_roots")
+        owner = raw.get("owner_root")
+        keys = ("owner_id", "task_id", "run_id", "permission_version")
+        if (not all(isinstance(raw.get(key), str) for key in keys)
+                or not isinstance(roots, (list, tuple)) or not isinstance(ids, (list, tuple))
+                or len(roots) != len(ids)
+                or not all(isinstance(path, str) and Path(path).is_absolute() for path in roots)
+                or not all(isinstance(row, (list, tuple)) and len(row) == 2
+                           and all(type(item) is int and item >= 0 for item in row) for row in ids)
+                or not isinstance(owner, str) or (owner and not Path(owner).is_absolute())
+                or (declared is not None and (not isinstance(declared, (list, tuple))
+                    or not all(isinstance(path, str) and Path(path).is_absolute() for path in declared)))):
+            return None
+        # 保留原路径与身份，恢复时不能重新 resolve 后把替换的目录签成新根。
+        return cls(raw["owner_id"], raw["task_id"], raw["run_id"], tuple(map(Path, roots)),
+                   raw["permission_version"], tuple(map(tuple, ids)),
+                   owner_root=Path(owner) if owner else None,
+                   declared_roots=None if declared is None else tuple(map(Path, declared)))
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationDecision:
+    allowed: bool
+    code: str
+    root: Path | None
+    staging_required: bool
+
+    def refusal(self, target: Path, *, task_dir: Path | None = None) -> dict[str, object]:
+        relative = None
+        if self.root is not None:
+            try:
+                relative = (target.relative_to(self.root)).as_posix()
+            except ValueError:
+                pass
+        return {
+            "code": self.code, "staging_required": self.staging_required,
+            "staging_location": str(task_dir / "output") if task_dir is not None else "",
+            "expected_relative_location": relative or target.name,
+            "parent_apply_tool": "assets.versions.accept",
+            "side_effect": "not_started",
+        }
+
+
+def _path_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.stat()
+    except (OSError, ValueError):
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _admitted_directory_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.stat()
+    except (OSError, ValueError):
+        return None
+    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+
+
+def freeze_delegable_scope(write_boundary: object, owner_scope: object, *, owner_id: str, task_id: str,
+                           run_id: str, permission_version: str = "") -> DelegableScope:
+    roots = granted_external_work_roots(write_boundary, owner_scope)
+    identities = {_path_identity(Path(root)) for root in UNINHERITABLE_ROOT_DIRS}
+    home = _normalized_root(owner_scope)
+    data_root = agent_home_root_for_owner(home) if home is not None else None
+    admitted = [(root, identity) for root in roots
+                if (data_root is None or not _is_relative_to(data_root, root))
+                and (identity := _admitted_directory_identity(root)) is not None and identity not in identities]
+    if not permission_version:
+        permission_version = sha256(repr((owner_id, admitted)).encode("utf-8")).hexdigest()
+    return DelegableScope(owner_id, task_id, run_id, tuple(root for root, _ in admitted), permission_version,
+                          tuple(identity for _, identity in admitted), owner_root=home)
+
+
+def _delegable_relative(path: Path, root: Path, identity: tuple[int, int] | None) -> Path | None:
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        pass
+    # macOS 大小写、firmlink 和其它同目录别名仅靠 Path 字符串无法证明。
+    if identity is not None:
+        for ancestor in (path, *path.parents):
+            if _path_identity(ancestor) == identity:
+                return path.relative_to(ancestor)
+    return None
+
+
+def delegable_path_decision(scope: DelegableScope, target: Path, *,
+                            purpose: Literal["create", "grant", "write", "shell"]) -> DelegationDecision:
+    resolved = _normalized_root(target)
+    if resolved is None or len(scope.approved_roots) != len(scope.approved_root_ids):
+        return DelegationDecision(False, "PATH_OUTSIDE_WORKSPACE", None, True)
+
+    # 嵌套已授权根使用最具体的一条；根替换后的拒绝不能被较宽的祖先覆盖。
+    candidates = sorted(zip(scope.approved_roots, scope.approved_root_ids), key=lambda item: -len(item[0].parts))
+    for root, admitted_id in candidates:
+        relative = _delegable_relative(resolved, root, admitted_id)
+        if relative is None:
+            continue
+        if _path_identity(root) != admitted_id:
+            return DelegationDecision(False, "PATH_OWNER_SCOPE_BLOCKED", root, True)
+        if scope.declared_roots is not None and not any(_within_declared_root(resolved, allowed)
+                                                       for allowed in scope.declared_roots):
+            return DelegationDecision(False, "PATH_OUTSIDE_WORKSPACE", root, True)
+        return DelegationDecision(True, "", root, False)
+    original = Path(target).expanduser()
+    root = next((root for root, identity in candidates if _delegable_relative(original, root, identity) is not None), None)
+    return DelegationDecision(False, "PATH_OWNER_SCOPE_BLOCKED" if root else "PATH_OUTSIDE_WORKSPACE", root, True)
+
+
+def _within_declared_root(target: Path, root: Path) -> bool:
+    # 子集根由宿主按实路径记录；后来指向其它项目的链接不承接原子集。
+    return (_normalized_root(root) == root
+            and _delegable_relative(target, root, _path_identity(root)) is not None)
+
+
+def child_delegable_scope(scope: DelegableScope, declared_roots: list[str]) -> DelegableScope:
+    """沿父级的原目录身份收窄工作根，禁止在子代理启动时重新签发。"""
+    roots = tuple(dict.fromkeys(root for value in declared_roots if (root := _normalized_root(value)) is not None))
+    selected = tuple(root for root in roots if delegable_path_decision(scope, root, purpose="create").allowed)
+    return DelegableScope(scope.owner_id, scope.task_id, scope.run_id, scope.approved_roots,
+                          scope.permission_version, scope.approved_root_ids, owner_root=scope.owner_root,
+                          declared_roots=selected)
+
+
+def active_delegable_roots(scope: DelegableScope, *,
+                           purpose: Literal["create", "grant", "write", "shell"]) -> tuple[Path, ...]:
+    roots = scope.approved_roots if scope.declared_roots is None else scope.declared_roots
+    return tuple(root for root in roots if delegable_path_decision(scope, root, purpose=purpose).allowed)
+
+
+def recorded_delegable_scope(raw: object, *, owner_scope: object = "") -> DelegableScope | None:
+    if raw is None:
+        return None
+    return DelegableScope.from_record(raw) or DelegableScope("", "", "", (), "", owner_root=_normalized_root(owner_scope))
+
+
+def in_delegation_owner_root(scope: DelegableScope, target: Path) -> bool:
+    resolved = _normalized_root(target)
+    if (scope.owner_root is None or resolved is None
+            or _delegable_relative(resolved, scope.owner_root, _path_identity(scope.owner_root)) is None):
+        return False
+    return resolved == target or not any(
+        _delegable_relative(target, root, identity) is not None
+        for root, identity in zip(scope.approved_roots, scope.approved_root_ids)
+    )
+
+
+def delegation_receipt(scope: DelegableScope, boundary: dict[str, object], *,
+                       run_id: str = "", attempt_id: str = "") -> dict[str, object]:
+    lineage = boundary.get("delegation_lineage")
+    lineage = lineage if isinstance(lineage, dict) else {}
+    return {
+        "owner_id": scope.owner_id,
+        "run_id": run_id or scope.run_id,
+        "root_run_id": lineage.get("root_run_id") or scope.run_id,
+        "parent_run_id": lineage.get("parent_run_id") or "",
+        "attempt_id": attempt_id,
+        "initiating_request_id": lineage.get("initiating_request_id") or "",
+        "grant_revision": scope.permission_version,
+    }
+
+
+def frozen_tool_external_roots(boundary: dict[str, object] | None, owner_scope: object, *,
+                               purpose: Literal["create", "grant", "write", "shell"]) -> tuple[Path, ...]:
+    roots = granted_external_work_roots(boundary, owner_scope)
+    scope = recorded_delegable_scope((boundary or {}).get("delegable_scope"), owner_scope=owner_scope)
+    if scope is None:
+        return roots
+    return tuple(root for root in roots if delegable_path_decision(scope, root, purpose=purpose).allowed)
 
 
 __all__ = [

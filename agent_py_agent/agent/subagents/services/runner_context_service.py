@@ -233,6 +233,14 @@ class SubAgentRunnerContextService:
         }
         if prohibited_actions:
             boundary["prohibited_actions"] = prohibited_actions
+        if task.delegable_scope_record is not None:
+            boundary["delegable_scope"] = task.delegable_scope_record
+        if task.initiating_request_id:
+            boundary["delegation_lineage"] = {
+                "initiating_request_id": task.initiating_request_id,
+                "root_run_id": task.root_id or task.id,
+                "parent_run_id": task.parent_id,
+            }
         return boundary
 
     # LLM: 只读加载 canonical task 后共用 prepare/project，不改变原 ID、权限或持久状态；完整落盘仍由 write_execution_context 负责。

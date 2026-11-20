@@ -29,6 +29,12 @@ from ...capability.subagent_entry_authority import SubagentEntryInitialization
 from ...common.id_generator import new_id as _framework_new_id
 from ...conversation.business_contracts import BusinessExecutionContext, HostParentExecutionRef
 from ...conversation.host_actor import HostActorError, HostChannelActor, validate_actor_ancestor
+from ...path_access_policy import (
+    DelegableScope,
+    active_delegable_roots,
+    child_delegable_scope,
+    recorded_delegable_scope,
+)
 from ...settings.thread_model_selection import PendingSubagentModelAdvice
 from ..authorization_gate import (
     OperationRequest,
@@ -81,6 +87,8 @@ class CreateRunParams:
     parent_access_mode: str = ""
     host_parent_execution: HostParentExecutionRef | None = field(default=None, kw_only=True)
     business_context: BusinessExecutionContext | None = field(default=None, kw_only=True)
+    parent_delegable_scope: DelegableScope | None = field(default=None, kw_only=True, repr=False)
+    initiating_request_id: str = field(default="", kw_only=True)
 
 
 # LLM: task 是同一待提交对象；模型建议和包入口初始化均为宿主 typed 材料，只供新 thread 使用，不进 attrs，不赋予权限。
@@ -582,13 +590,27 @@ class SubAgentBaseService:
     def _prepare_run(self, params: CreateRunParams, *, run_id: str | None = None, created_at: float | None = None) -> dict[str, object]:
         """Prepare run paths and the caller-provided acceptance contract."""
         run_id = _framework_new_id("run_id") if run_id is None else run_id
-        paths = self.manager._build_work_order_paths(run_id, extra_write_roots=params.extra_write_roots)
+        parent_task = _load_parent_task(self.manager, params.parent_id)
+        scope = params.parent_delegable_scope
+        if parent_task is not None and parent_task.delegable_scope_record is not None:
+            scope = recorded_delegable_scope(parent_task.delegable_scope_record)
+        owner = str(params.owner or getattr(self.manager, "owner_id", "") or "").strip()
+        if scope is not None and scope.owner_id != owner:
+            scope = DelegableScope(owner, "", "", (), "", owner_root=scope.owner_root)
+        roots = params.extra_write_roots
+        if scope is not None and roots is None:
+            roots = [str(root) for root in active_delegable_roots(scope, purpose="create")]
+        paths = (self.manager._build_work_order_paths(run_id, extra_write_roots=params.extra_write_roots)
+                 if scope is None else self.manager._build_work_order_paths(
+                     run_id, extra_write_roots=roots, parent_delegable_scope=scope))
         return {
             "run_id": run_id,
             "paths": paths,
             "acceptance_checks": list(params.acceptance_checks or []),
             "now": time.time() if created_at is None else created_at,
-            "parent_task": _load_parent_task(self.manager, params.parent_id),
+            "parent_task": parent_task,
+            "delegable_scope": (child_delegable_scope(scope, paths["allowed_write_roots"][1:]).to_record()
+                                if scope is not None else None),
         }
 
     # LLM: canonical 对象仅使用原准备材料中的身份、父状态和路径；复核投影不得写入，展示短标题仍不改变目标与权限。
@@ -627,6 +649,9 @@ class SubAgentBaseService:
             heartbeat_at=now,
             attributes=_task_attrs_for_create(self.manager, params),
             host_channel_actor=_creation_actor_record(self.manager, params, parent_task),
+            delegable_scope_record=prepared["delegable_scope"],
+            initiating_request_id=(params.initiating_request_id
+                                   or (parent_task.initiating_request_id if parent_task is not None else "")),
             **prepared["paths"],
         )
         task.forbidden_write_roots = _reconciled_forbidden_write_roots(task)

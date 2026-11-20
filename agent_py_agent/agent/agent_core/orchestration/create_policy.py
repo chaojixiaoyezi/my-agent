@@ -17,11 +17,13 @@ from ...conversation.authority import (
     CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
+    CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     conversation_execution_cwd,
     conversation_runtime_workspace_roots,
     current_conversation_task_attributes,
 )
 from ...conversation.learning_source import LEARNING_SOURCE_KEY, spawn_source_projection
+from ...path_access_policy import DelegableScope, active_delegable_roots, delegable_path_decision
 from ...runtime_context import current_task_root
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
@@ -41,6 +43,7 @@ from ...subagents.role_templates import (
     template_for_role,
 )
 from ...subagents.services.base import CreateRunParams
+from ...subagents.services.hierarchy.write_policy import permitted_child_write_roots
 from ...tooling.registry_auth import (
     CATALOG_ONLY_TOOL_GRANT,
     creation_snapshot_tool_grants,
@@ -434,6 +437,23 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
     raw_params = request.raw_params
     role_policy = request.role_policy
     lineage = _lineage_fields(raw_params, request.agent)
+    current = getattr(request.agent, "_current_run_params", None)
+    scope = getattr(current, "delegable_scope", None)
+    scope = scope if isinstance(scope, DelegableScope) else None
+    attrs = create_task_attributes(raw_params, request.agent)
+    attrs.pop("delegation_path_refusals", None)
+    if _independent_gateway_request(current):
+        attrs.pop("conversation_task_id", None)
+        attrs.pop("run_workspace", None)
+        if isinstance(current.request_id, str) and current.request_id:
+            attrs[CONVERSATION_REQUEST_ID_ATTR] = current.request_id
+    elif getattr(current, "source", "") == "gateway" and _current_conversation_task_id(request.agent):
+        attrs["conversation_task_id"] = _current_conversation_task_id(request.agent)
+    extra_roots = _creation_write_roots(request.agent, raw_params, request.goal, scope, attrs)
+    boundary = getattr(current, "write_boundary", None)
+    source_lineage = boundary.get("delegation_lineage") if isinstance(boundary, dict) else None
+    source_request = source_lineage.get("initiating_request_id") if isinstance(source_lineage, dict) else None
+    request_id = source_request or getattr(current, "request_id", "")
     return CreateRunParams(
         goal=request.goal,
         thought=str(raw_params.get("thought") or SUBAGENT_DEFAULT_THOUGHT).strip(),
@@ -447,15 +467,50 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         supervisor=str(raw_params.get("supervisor") or "parent").strip(),
         final_owner=str(raw_params.get("final_owner") or "").strip(),
         acceptance_checks=[],
-        extra_write_roots=resolved_extra_write_roots(request.agent, raw_params, request.goal),
+        extra_write_roots=extra_roots,
         context_manifest=create_context_manifest(raw_params),
         context_packs=create_context_packs(raw_params),
-        attributes=create_task_attributes(raw_params, request.agent),
+        attributes=attrs,
+        parent_delegable_scope=scope,
+        initiating_request_id=request_id if isinstance(request_id, str) else "",
         host_channel_actor=current_actor_for_child(request.agent),
         **_host_execution_fields(request.agent, str(lineage["parent_id"] or "")),
         **lineage,
         parent_access_mode=_config_access_mode(request.agent),
     )
+
+
+def _creation_write_roots(agent, raw, goal, scope, attrs):
+    from ...path_access_policy import in_delegation_owner_root
+    from .create_constraints import merged_extra_write_roots
+
+    roots = resolved_extra_write_roots(agent, raw, goal)
+    if scope is None:
+        return roots
+    explicit = merged_extra_write_roots(raw, goal)
+    constraints = attrs.get("delegation_constraints")
+    exact = (isinstance(constraints, dict) and constraints.get("actor_runtime", "native") == "native"
+             and bool(constraints.get("exact_write_set") or constraints.get("allowed_output_dirs")))
+    refusals = []
+    for item in roots if exact else explicit:
+        target = Path(item)
+        if not in_delegation_owner_root(scope, target):
+            decision = delegable_path_decision(scope, target, purpose="create")
+            if not decision.allowed:
+                refusals.append(decision.refusal(target))
+    if refusals:
+        attrs["delegation_path_refusals"] = refusals
+    if exact or raw.get("_exact_allowed_tools") is True:
+        return permitted_child_write_roots(scope, roots)
+    inherited = [root for root in roots if in_delegation_owner_root(scope, Path(root))]
+    selected = explicit or [str(root) for root in active_delegable_roots(scope, purpose="create")]
+    return permitted_child_write_roots(scope, [*inherited, *selected])
+
+
+def _independent_gateway_request(current) -> bool:
+    attrs = getattr(current, "task_attributes", None)
+    return (getattr(current, "source", "") == "gateway" and isinstance(attrs, dict)
+            and bool(attrs.get("conversation_task_id")) and attrs.get(CONVERSATION_TASK_TURN_ACTIVE_ATTR) is not True)
 
 
 def _host_execution_fields(agent, lineage_parent_id: str) -> dict[str, object]:
@@ -485,6 +540,14 @@ def _lineage_fields(raw_params: dict[str, object], agent) -> dict[str, object]:
     explicit_root = str(raw_params.get("root_id") or "").strip()
     explicit_depth = raw_params.get("depth")
     conversation_root = _current_conversation_task_id(agent)
+    current = getattr(agent, "_current_run_params", None)
+    if _independent_gateway_request(current):
+        parent_id = _current_run_id(agent)
+        request_id = getattr(current, "request_id", "")
+        if parent_id == conversation_root and isinstance(request_id, str):
+            parent_id = request_id or parent_id
+        return {"parent_id": explicit_parent or parent_id, "root_id": explicit_root or explicit_parent or parent_id,
+                "depth": _lineage_depth(explicit_depth, default=1 if parent_id else 0)}
     parent_id = explicit_parent or conversation_root or _current_run_id(agent)
     root_id = explicit_root or parent_id
     depth = _lineage_depth(explicit_depth, default=1 if parent_id else 0)
@@ -1263,6 +1326,7 @@ def _inherit_current_conversation_workspace_attrs(
         conversation_runtime_workspace_roots(current_attrs),
         owner_home=home,
     )
+    scope = getattr(getattr(agent, "_current_run_params", None), "delegable_scope", None)
     if home:
         owner = Path(home).expanduser().resolve(strict=False)
         cwd_path = Path(cwd).expanduser().resolve(strict=False)
@@ -1270,9 +1334,12 @@ def _inherit_current_conversation_workspace_attrs(
         # 只有"不可继承"的声明（系统根目录、宿主控制面）才退回 owner home——既不因为一条
         # 历史属性重新授予系统目录，也不把用户声明过的项目目录误降级成家目录。
         # cwd 只参与这一步判定，不塞进 roots：roots 描述的是"声明过的工作根集合"本身。
-        if not cwd_path.is_relative_to(owner) and not inheritable_declared_work_roots(
-            [cwd], owner_home=home
-        ):
+        if isinstance(scope, DelegableScope):
+            declared = permitted_child_write_roots(scope, declared)
+            outside_cwd_allowed = delegable_path_decision(scope, cwd_path, purpose="create").allowed
+        else:
+            outside_cwd_allowed = bool(inheritable_declared_work_roots([cwd], owner_home=home))
+        if not cwd_path.is_relative_to(owner) and not outside_cwd_allowed:
             cwd = str(owner)
         roots = list(dict.fromkeys([str(owner), *declared]))
     else:

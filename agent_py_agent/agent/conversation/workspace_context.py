@@ -73,6 +73,38 @@ def validate_workspace_directory(
     return path
 
 
+def validated_main_workspace_roots(
+    agent: object, roots: list[str], *, allow_home_ancestor: bool = False,
+) -> list[str]:
+    """在同一 owner 策略下复核持久或当轮声明的现存工作根。"""
+    from ..path_access_policy import inheritable_declared_work_roots
+    from ..user_space.owner_access import is_local_admin_owner
+
+    home = getattr(agent, "home_paths", None)
+    if home is None:
+        tools = getattr(agent, "tools", None)
+        return [] if getattr(tools, "owner_scope_root", "") else inheritable_declared_work_roots(roots)
+    owner = getattr(home, "owner_home_dir", None)
+    if not isinstance(owner, (str, Path)) or not owner:
+        return []
+    startup = getattr(agent, "root", None)
+    admin = is_local_admin_owner(home)
+    validated = []
+    for raw in roots:
+        try:
+            root = Path(raw).expanduser()
+            allowed = validate_workspace_directory(
+                root, owner_home=Path(owner), is_admin=admin, home_root=getattr(home, "root", None),
+                allow_home_ancestor=bool(allow_home_ancestor and startup
+                    and Path(startup).resolve(strict=False) == root),
+            )
+            if root == allowed:
+                validated.append(str(allowed))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return validated
+
+
 # LLM: 只消费认证owner/is_admin；分叉显式空ID在领域层独立拒绝，原锁/CAS和已知错误映射保持。
 # 函数用途: 执行目录查看/切换或主会话分叉，返回原控制结果结构；Gateway路由须显式调用它。
 def execute_workspace_control(store, command, *, thread_id: str, owner_home: Path,
